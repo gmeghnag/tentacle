@@ -1276,6 +1276,10 @@ export class HostedSession {
     if (body !== null) {
       this.log.subagentBackground(body);
       this.verifyLog();
+      // Durable NOW (a `schedule`: captured synchronously, never awaited — the
+      // steering window, as `agentEnded`): a crash before the tool result
+      // commits must not lose the fact the child exists (review M2, FM 1).
+      this.persist();
     }
     return agentId;
   }

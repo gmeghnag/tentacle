@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { appendFile, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type AgentConfig, HookRunner, Session, subagentRequester } from "@tentacle/agent";
@@ -3776,5 +3776,96 @@ describe("parallel tools: groups on the real daemon (T-F3, T-D1)", () => {
     gate.resolve();
     await until(() => c2.ended("T1"));
     expect(order).toEqual(['run:{"n":1}', 'run:{"n":2}']);
+  });
+});
+
+describe("L1: the real `serve` write → reload → write → reload cycle with sub-agent notes", () => {
+  test("markers reach disk, the reload appends the notes as `message` entries, and a second reload notes nothing", async () => {
+    // docs/feat/subagent-ledger-log.md review L1: the serve-reload tests fed
+    // hand-made files to `rebuild`, and the segment they wrote was re-minted from
+    // messages (dropping every marker). This one drives the REAL `LogSessionStore`
+    // + `SessionPersister` + `SessionHost`. Mutation: derive the notes over the
+    // wrong segment, or skip the append in `reconcileOnReload` → red.
+    const dir = await mkdtemp(join(tmpdir(), "subagent-serve-cycle-"));
+    try {
+      /** A `serve`-shaped host over the REAL store (its own persister, as `SessionHost` gets one). */
+      const serveRig = () => {
+        const store = new LogSessionStore(dir);
+        const persister = new SessionPersister({ store, cwd: CWD, model: "m", onError: () => {} });
+        const host = new SessionHost({
+          defaultCwd: CWD,
+          persister,
+          createAgent: () => ({
+            agent: new Agent({ model: new Scripted([]), tools: new ToolRegistry(), env }),
+            permissions: new PermissionBroker(),
+          }),
+        });
+        return { host, persister };
+      };
+      const crash = serveRig();
+      const { hosted } = crash.host.open(
+        { create: true, messages: [{ role: "user", content: "x" }] },
+        client().attachment,
+      );
+      const first = hosted.backgroundAgent({
+        callId: "c1",
+        agentType: "explore",
+        description: "map the repo",
+      });
+      const second = hosted.backgroundAgent({
+        callId: "c2",
+        agentType: "explore",
+        description: "other",
+      });
+      hosted.agentEnded(first, "end_turn", "REPORT-1");
+      await hosted.persisted();
+      await crash.persister.stop(); // the "crash": nothing else lands
+      const id = hosted.id;
+      const file = join(dir, `${id}.jsonl`);
+      const types = async (): Promise<string[]> =>
+        (await readFile(file, "utf8"))
+          .split("\n")
+          .filter((line) => line !== "")
+          .map((line) => (JSON.parse(line) as { type?: string }).type ?? "header");
+      // The markers ARE on disk (M2: the `bg` is durable at launch).
+      const before = await types();
+      expect(before.filter((t) => t === "subagent_background")).toHaveLength(2);
+      expect(before).toContain("subagent_end");
+
+      // Reload #1: the notes are derived and appended, and the next write puts
+      // them on disk as ordinary `message` entries.
+      const r1 = serveRig();
+      const loaded = await r1.persister.load(id);
+      if (!loaded.ok) throw new Error(loaded.reason);
+      expect(loaded.record.loadNotes.map((m) => `${m.note?.kind}:${m.note?.id}`)).toEqual([
+        `subagent_report:${first}`,
+        `subagent_lost:${second}`,
+      ]);
+      const restored = r1.host.restore(loaded.record);
+      const history = restored.snapshotPage().messages;
+      expect(history.slice(-2).map((m) => `${m.note?.kind}:${m.note?.id}`)).toEqual([
+        `subagent_report:${first}`,
+        `subagent_lost:${second}`,
+      ]);
+      expect(history.at(-2)?.content).toContain("REPORT-1");
+      await restored.persisted();
+      await r1.persister.stop();
+      const afterReload = await types();
+      expect(afterReload).not.toContain("subagent_background");
+      expect(afterReload).not.toContain("subagent_end");
+      expect(afterReload.filter((t) => t === "message")).toHaveLength(
+        before.filter((t) => t === "message").length + 2,
+      );
+
+      // Reload #2: the same history, and NOTHING to note (idempotent end to end).
+      const r2 = serveRig();
+      const again = await r2.persister.load(id);
+      if (!again.ok) throw new Error(again.reason);
+      expect(again.record.loadNotes).toEqual([]);
+      expect(r2.host.restore(again.record).snapshotPage().messages).toEqual(history);
+      await r2.persister.stop();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -64,6 +64,15 @@ export const SUBAGENT_DESCRIPTION_MAX_CHARS = 512;
  * reader must refuse.
  */
 export const SUBAGENT_REPORT_MAX_CHARS = 64 * 1024;
+/**
+ * A background sub-agent's `agentType` (the tool's own type name), `callId` (the
+ * `agent_task` call's id) and `stopReason` (6a's free text): capped by the EMITTER
+ * (the ledger), so a reader never refuses a value a task legitimately writes
+ * (review M4).
+ */
+export const SUBAGENT_AGENT_TYPE_MAX_CHARS = 128;
+export const SUBAGENT_CALL_ID_MAX_CHARS = 256;
+export const SUBAGENT_STOP_REASON_MAX_CHARS = 64;
 
 /** A position in a log: the last entry a reader holds. Both must match (a seq alone is ambiguous across lineages). */
 export const LogCursorSchema = z.object({
@@ -192,8 +201,8 @@ export const LogSubagentBackgroundEntrySchema = z.object({
   ...skippable(),
   type: z.literal("subagent_background"),
   agentId: z.string().min(1).max(64),
-  callId: z.string().min(1).max(256),
-  agentType: z.string().min(1).max(128),
+  callId: z.string().min(1).max(SUBAGENT_CALL_ID_MAX_CHARS),
+  agentType: z.string().min(1).max(SUBAGENT_AGENT_TYPE_MAX_CHARS),
   description: z.string().max(SUBAGENT_DESCRIPTION_MAX_CHARS),
 });
 
@@ -204,7 +213,7 @@ export const LogSubagentEndEntrySchema = z.object({
   type: z.literal("subagent_end"),
   agentId: z.string().min(1).max(64),
   /** A bounded free string, not `StopReasonSchema`: 6a may add `killed`. */
-  stopReason: z.string().min(1).max(64),
+  stopReason: z.string().min(1).max(SUBAGENT_STOP_REASON_MAX_CHARS),
   report: z.string().max(SUBAGENT_REPORT_MAX_CHARS).optional(),
 });
 

@@ -15,6 +15,8 @@ import {
   type SessionPersistence,
 } from "../src/hosted-session.ts";
 import type { SessionPersister } from "../src/session-persister.ts";
+import { SessionPersister as RealPersister } from "../src/session-persister.ts";
+import { SpyDaemonStore } from "./support/daemon-store-spy.ts";
 
 // docs/feat/subagent-ledger-log.md §4 — the seam 6a calls on `HostedSession`:
 // `backgroundAgent` / `agentEnded` / `agentJobsRunning`, the ledger's
@@ -164,6 +166,63 @@ describe("HostedSession: the background sub-agent seam", () => {
     expect(ends[0]?.stopReason).toBe("end_turn");
     expect(ends[0]?.report).toBe("THE REPORT");
     expect(hosted.agentJobsRunning()).toEqual([]);
+  });
+
+  test("M2: `backgroundAgent` PERSISTS at launch — the `bg` marker is durable with no turn run", async () => {
+    // docs/feat/subagent-ledger-log.md review M2, FM 1. Mutation: drop the
+    // `persist()` in `backgroundAgent` → the marker only reaches disk with the
+    // NEXT write, so a crash before the tool result commits loses the child (and
+    // its id is handed out again).
+    const store = new SpyDaemonStore();
+    const model = new QuietModel();
+    const agent = new Agent({ model, systemPrompt: "SYS", tools: new ToolRegistry(), env });
+    const session = new Session(agent, "m2");
+    const persister = new RealPersister({
+      store,
+      cwd: "/tmp/m2-work",
+      model: "m",
+      onError: () => {},
+    });
+    const hosted = new HostedSession(
+      "m2",
+      session,
+      new PermissionBroker(),
+      undefined,
+      {},
+      undefined,
+      Date.now,
+      { persister } satisfies SessionPersistence,
+      {},
+      {},
+      {},
+    );
+    expect(hosted.backgroundAgent({ callId: "c1", agentType: "explore", description: "d" })).toBe(
+      "sa-1",
+    );
+    await hosted.persisted();
+    await persister.stop();
+    // The turn never ran: only the marker (and the session's own frame) is on disk.
+    const files = store.files.get("m2");
+    if (files?.log === undefined) throw new Error("nothing durable");
+    const types = files.log
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => (JSON.parse(line) as { type?: string }).type ?? "header");
+    expect(types).toContain("subagent_background");
+    // No turn ran: no call/turn marker, and nothing after the marker.
+    expect(types).not.toContain("call_started");
+    expect(types.at(-1)).toBe("subagent_background");
+  });
+
+  test("M1: `agentEnded` for an id never started logs no `subagent_end` and schedules no persist", () => {
+    // Review M1: an orphan a live path invents is logged at every later segment
+    // start. Mutation: drop the `{orphan:true}` default → the marker is logged → red.
+    const { hosted, persister } = harness();
+    const before = persister.scheduled;
+    hosted.agentEnded("sa-77", "end_turn", "ORPHAN REPORT");
+    expect(persister.scheduled).toBe(before);
+    expect(of(readAll(hosted), "subagent_end")).toEqual([]);
+    expect(afterLastBase(hosted).filter(isMarker)).toEqual([]);
   });
 
   test("the counter is seeded from the history: no id the model has already seen is reused", () => {

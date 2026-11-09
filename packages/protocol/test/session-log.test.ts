@@ -8,8 +8,11 @@ import {
   Method,
   OpenParamsSchema,
   RequestSchemas,
+  SUBAGENT_AGENT_TYPE_MAX_CHARS,
+  SUBAGENT_CALL_ID_MAX_CHARS,
   SUBAGENT_DESCRIPTION_MAX_CHARS,
   SUBAGENT_REPORT_MAX_CHARS,
+  SUBAGENT_STOP_REASON_MAX_CHARS,
   canonicalMessage,
   projectionDigest,
 } from "../src/index.ts";
@@ -219,5 +222,22 @@ describe("subagent markers (docs/feat/subagent-ledger-log.md, Q8: non-critical)"
         description: "x".repeat(SUBAGENT_DESCRIPTION_MAX_CHARS + 1),
       }).success,
     ).toBe(false);
+  });
+
+  test("M4: every cap is an exported constant and BOTH schemas really use it", () => {
+    // docs/feat/subagent-ledger-log.md review M4: the emitter imported the cap
+    // while the schema kept a literal, so an over-long field was written and every
+    // reader refused the file. Mutation: a literal in the schema that disagrees
+    // with its constant (e.g. `max(128)` → `max(256)`) → the +1 case parses → red.
+    const at = (n: number): string => "x".repeat(n);
+    const cases: Array<[string, number, Record<string, unknown>]> = [
+      ["agentType", SUBAGENT_AGENT_TYPE_MAX_CHARS, bg],
+      ["callId", SUBAGENT_CALL_ID_MAX_CHARS, bg],
+      ["stopReason", SUBAGENT_STOP_REASON_MAX_CHARS, end],
+    ];
+    for (const [field, max, base] of cases) {
+      expect(KnownLogEntrySchema.safeParse({ ...base, [field]: at(max) }).success).toBe(true);
+      expect(KnownLogEntrySchema.safeParse({ ...base, [field]: at(max + 1) }).success).toBe(false);
+    }
   });
 });

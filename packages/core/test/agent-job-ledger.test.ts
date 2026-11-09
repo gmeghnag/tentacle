@@ -4,7 +4,7 @@ import {
   type AgentJob,
   AgentJobLedger,
   NOTE_KIND,
-  capText,
+  capSubagentText,
   subagentLoadNotes,
   subagentLostNote,
   subagentReportNote,
@@ -12,8 +12,13 @@ import {
 import type { ChatMessage } from "@tentacle/core";
 import {
   type KnownLogEntry,
+  LogSubagentBackgroundEntrySchema,
+  LogSubagentEndEntrySchema,
+  SUBAGENT_AGENT_TYPE_MAX_CHARS,
+  SUBAGENT_CALL_ID_MAX_CHARS,
   SUBAGENT_DESCRIPTION_MAX_CHARS,
   SUBAGENT_REPORT_MAX_CHARS,
+  SUBAGENT_STOP_REASON_MAX_CHARS,
 } from "@tentacle/protocol";
 
 // docs/feat/subagent-ledger-log.md §2 — the pure `AgentJobLedger`: the ONE set
@@ -55,6 +60,20 @@ const endEntry = (agentId: string, over: Record<string, unknown> = {}): KnownLog
     stopReason: "end_turn",
     ...over,
   }) as unknown as KnownLogEntry;
+
+/** A body spread into an entry envelope, parsed by the REAL schema a reader uses. */
+const envelope = (
+  body: Record<string, unknown>,
+  type: "subagent_background" | "subagent_end",
+  seq: number,
+): { ok: boolean } => {
+  const entry = { ...body, type, seq, id: `inc/${seq}`, ts: 1, critical: false };
+  const parsed =
+    type === "subagent_background"
+      ? LogSubagentBackgroundEntrySchema.safeParse(entry)
+      : LogSubagentEndEntrySchema.safeParse(entry);
+  return { ok: parsed.success };
+};
 
 const note = (content: string, kind: string, id?: string): ChatMessage => ({
   role: "user",
@@ -141,7 +160,8 @@ describe("AgentJobLedger — the transitions (live path and replay alike)", () =
     // Mutation: re-emit `segmentFacts()` without the `callId !== ""` guard → the
     // re-emitted `bg` fails `KnownLogEntrySchema` → red.
     const ledger = new AgentJobLedger();
-    ledger.end("sa-9", "end_turn", "ORPHAN");
+    // The REPLAY path (`subagentLoadNotes`) is the one that keeps an orphan (FM 5).
+    ledger.end("sa-9", "end_turn", "ORPHAN", { orphan: true });
     const facts = ledger.segmentFacts();
     expect(facts).toEqual([{ agentId: "sa-9", stopReason: "end_turn", report: "ORPHAN" }]);
     // And the orphan's own note survives a load from those re-emitted facts.
@@ -153,6 +173,59 @@ describe("AgentJobLedger — the transitions (live path and replay alike)", () =
       ts: 1,
     })) as KnownLogEntry[];
     expect(subagentLoadNotes(reemitted, [])[0]?.content).toContain("ORPHAN");
+  });
+
+  test("M1: a late `end` AFTER delivery is `null`, and re-emits nothing at a segment start", () => {
+    // docs/feat/subagent-ledger-log.md review M1, FM 7 ("first wins"). Mutation:
+    // drop the `closed` check in `end` → a delivered child is re-noted (a second,
+    // contradictory report) at the next load (a compaction drops the note's segment).
+    const ledger = new AgentJobLedger();
+    ledger.background({ agentId: "sa-1", callId: "c1", agentType: "t", description: "d" });
+    expect(ledger.end("sa-1", "end_turn", "R1")?.report).toBe("R1");
+    ledger.noteSeen({ kind: NOTE_KIND.subagentReport, id: "sa-1" });
+    expect(ledger.end("sa-1", "killed", "R2")).toBeNull();
+    expect(ledger.segmentFacts()).toEqual([]);
+    expect(ledger.loadNotes()).toEqual([]);
+  });
+
+  test("M1: a live `end` for an id never started is `null`; a replay (`{orphan:true}`) still notes it (FM 5)", () => {
+    // Mutation: drop `opts.orphan` → either a live end logs an orphan marker for
+    // an id nobody started, or FM 5 loses a work product. Both are red here.
+    const ledger = new AgentJobLedger();
+    expect(ledger.end("sa-77", "end_turn")).toBeNull();
+    expect(ledger.segmentFacts()).toEqual([]);
+    expect(ledger.end("sa-77", "end_turn", "ORPHAN", { orphan: true })).toEqual({
+      agentId: "sa-77",
+      stopReason: "end_turn",
+      report: "ORPHAN",
+    });
+  });
+
+  test("M1: fromHistory remembers what was DELIVERED, so a later `end` for that id is `null`", () => {
+    // Mutation: `fromHistory` not marking a sub-agent note's id closed → a reload
+    // forgets the delivery and a replayed/late `end` re-notes it → red.
+    const ledger = AgentJobLedger.fromHistory([
+      note("[background] sub-agent sa-1 finished", NOTE_KIND.subagentReport, "sa-1"),
+      note("[background] sub-agent sa-2 was lost", NOTE_KIND.subagentLost, "sa-2"),
+      // A shell job's exit note does NOT close a sub-agent id.
+      note("[background] job sa-3 exited", NOTE_KIND.backgroundExit, "sa-3"),
+    ]);
+    expect(ledger.end("sa-1", "killed", "R2")).toBeNull();
+    expect(ledger.end("sa-2", "killed", "R2")).toBeNull();
+    // Not even the REPLAY's orphan allowance re-notes a delivered id (M1's
+    // second report: the note outlived the segment its markers were in).
+    expect(ledger.end("sa-1", "killed", "R2", { orphan: true })).toBeNull();
+    // A closed id is never STARTED again either (its note already told the model).
+    expect(
+      ledger.background({ agentId: "sa-1", callId: "c9", agentType: "t", description: "d" }),
+    ).toBeNull();
+    // The background exit is not a sub-agent note: the id is still startable.
+    expect(
+      ledger.background({ agentId: "sa-3", callId: "c3", agentType: "t", description: "d" }),
+    ).not.toBeNull();
+    expect(ledger.segmentFacts()).toEqual([
+      { agentId: "sa-3", callId: "c3", agentType: "t", description: "d" },
+    ]);
   });
 
   test("fromHistory seeds the counter from note ids AND from `sa-N` in a message's text", () => {
@@ -192,7 +265,7 @@ describe("the caps: enforced by the EMITTER, so a reader never refuses a value",
   test("a long description and an over-cap report are capped head+tail with a cut line", () => {
     // Mutation: log the report uncapped → `subagent_end` fails its 64 KiB schema
     // and the whole log is refused (FM 16/21) → red.
-    expect(capText("short", 10)).toBe("short");
+    expect(capSubagentText("short", 10)).toBe("short");
     const long = "a".repeat(SUBAGENT_DESCRIPTION_MAX_CHARS + 100);
     const ledger = new AgentJobLedger();
     const body = ledger.background({
@@ -211,6 +284,39 @@ describe("the caps: enforced by the EMITTER, so a reader never refuses a value",
     expect(capped).toContain("chars cut");
     expect(capped.startsWith("head ")).toBe(true);
     expect(capped.endsWith("TAIL")).toBe(true);
+  });
+
+  test("M4: an over-long `agentType`/`callId`/`stopReason` and an empty one never write a body a reader refuses", () => {
+    // docs/feat/subagent-ledger-log.md review M4 / P3: a KNOWN entry that fails
+    // its schema makes every reader refuse the WHOLE log. Mutation: drop a
+    // `bounded` → the emitted body fails its schema → red.
+    const ledger = new AgentJobLedger();
+    const started = ledger.background({
+      agentId: "sa-1",
+      callId: "c".repeat(SUBAGENT_CALL_ID_MAX_CHARS + 40),
+      agentType: "t".repeat(SUBAGENT_AGENT_TYPE_MAX_CHARS + 40),
+      description: "d",
+    });
+    if (started === null) throw new Error("background returned null");
+    expect(started.callId.length).toBe(SUBAGENT_CALL_ID_MAX_CHARS);
+    expect(started.agentType.length).toBe(SUBAGENT_AGENT_TYPE_MAX_CHARS);
+    expect(envelope(started, "subagent_background", 1).ok).toBe(true);
+
+    const ended = ledger.end("sa-1", "s".repeat(SUBAGENT_STOP_REASON_MAX_CHARS + 40), "R");
+    if (ended === null) throw new Error("end returned null");
+    expect(ended.stopReason.length).toBe(SUBAGENT_STOP_REASON_MAX_CHARS);
+    expect(envelope(ended, "subagent_end", 2).ok).toBe(true);
+
+    // An EMPTY agentType is `min(1)`: emitted as "unknown", so the entry still reads.
+    const empty = new AgentJobLedger().background({
+      agentId: "sa-2",
+      callId: "c2",
+      agentType: "",
+      description: "d",
+    });
+    if (empty === null) throw new Error("background returned null");
+    expect(empty.agentType).toBe("unknown");
+    expect(envelope(empty, "subagent_background", 1).ok).toBe(true);
   });
 });
 

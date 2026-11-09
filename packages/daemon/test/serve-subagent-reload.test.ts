@@ -121,4 +121,23 @@ describe("serve reload: the sub-agent load derivation (docs/feat/subagent-ledger
     expect(rebuilt.value.messages.at(-1)).toEqual(delivered);
     expect(rebuilt.value.loadNotes).toEqual([]);
   });
+
+  test("an UNPROVABLE pair (`logHead` names no complete segment): the notes come from the last segment, as the history does", () => {
+    // FM 4 + review nit-1: when `foldThrough` cannot prove the pair, the history
+    // is the log's own last segment, so the derivation must read THAT segment —
+    // not `[]` (nothing derived) and not a second, different source.
+    // Mutation: `entriesThrough(...) ?? []` → no note for a child the last
+    // segment says is open → red.
+    const log = new FakeLog("D1");
+    const messages = [user("go"), asst("ok")];
+    const entries = [...log.base(messages), log.subagentBackground("sa-1")];
+    const record = reload(entries, {
+      messages,
+      // A head from another incarnation: no segment holds it.
+      logHead: { seq: 9, id: "OTHER/9" },
+    });
+    expect(record.paired).toBe(false);
+    expect(record.messages).toEqual(messages);
+    expect(record.loadNotes.map((m) => m.note)).toEqual([{ kind: "subagent_lost", id: "sa-1" }]);
+  });
 });

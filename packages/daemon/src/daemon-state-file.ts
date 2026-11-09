@@ -372,11 +372,11 @@ export function rebuild(
   // The entries the sub-agent notes are derived from: the segment THROUGH
   // `logHead` when paired (a marker after it belongs to a write whose sidecar
   // did not land — ignored, as the whole tail is, FM 17), else the last
-  // segment's.
-  const derivedFrom =
-    through !== null
-      ? (entriesThrough(parsed, sidecar.logHead) ?? currentSegment(parsed).entries)
-      : currentSegment(parsed).entries;
+  // segment's. `foldThrough` returns non-null exactly when `entriesThrough`
+  // does (its first line), so there is no "paired but unprovable" case to
+  // fall back from: one `entriesThrough` call, folded (`through !== null`) —
+  // never a second, possibly different, segment source (review nit-1).
+  const derivedFrom = entriesThrough(parsed, sidecar.logHead) ?? currentSegment(parsed).entries;
   if (through !== null) {
     if (sidecar.k > through.length) {
       return {

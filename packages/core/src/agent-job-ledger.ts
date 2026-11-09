@@ -1,7 +1,10 @@
 import {
   type KnownLogEntry,
+  SUBAGENT_AGENT_TYPE_MAX_CHARS,
+  SUBAGENT_CALL_ID_MAX_CHARS,
   SUBAGENT_DESCRIPTION_MAX_CHARS,
   SUBAGENT_REPORT_MAX_CHARS,
+  SUBAGENT_STOP_REASON_MAX_CHARS,
 } from "@tentacle/protocol";
 /**
  * The persistence contract of a background sub-agent
@@ -64,7 +67,7 @@ const AGENT_ID_IN_TEXT = /\bsa-(\d+)\b/g;
  * was cut: a truncated report stays useful (its conclusion is usually at the
  * end) and is never silently shortened.
  */
-export function capText(text: string, max: number): string {
+export function capSubagentText(text: string, max: number): string {
   if (text.length <= max) {
     return text;
   }
@@ -77,12 +80,29 @@ export function capText(text: string, max: number): string {
 }
 
 /**
+ * Cap a short identifying string (never `capText`: a cut line inside an
+ * `agentType`/`callId`/`stopReason` is noise, not a report). `""` → `"unknown"`,
+ * because those fields are `min(1)` in the schema (review M4).
+ */
+function bounded(text: string, max: number): string {
+  return text === "" ? "unknown" : text.slice(0, max);
+}
+
+/**
  * The state machine of the background sub-agents this session knows: the
  * `sa-N` counter, the live jobs, and the set re-emitted at a segment start.
  */
 export class AgentJobLedger {
   /** Insertion order is the emission order (bg order; an `end` without its `bg` joins at its own end). */
   private readonly jobs = new Map<string, AgentJob>();
+  /**
+   * The ids a note already DELIVERED (or that `fromHistory` saw delivered): a
+   * later `background`/`end` for one of them is a duplicate or a late arrival and
+   * returns `null`. Without it, a delivered child that leaves the current segment
+   * (a compaction) is re-noted at the next load, with a contradictory report
+   * (review M1, FM 7 "first wins").
+   */
+  private readonly closed = new Set<string>();
   private counter = 0;
 
   /**
@@ -102,11 +122,17 @@ export class AgentJobLedger {
       }
     };
     for (const message of messages) {
-      const id = message.note?.id;
-      if (id !== undefined) {
+      const note = message.note;
+      const id = note?.id;
+      if (note !== undefined && id !== undefined) {
         const exact = /^sa-(\d+)$/.exec(id);
         if (exact?.[1] !== undefined) {
           ledger.reserve(exact[1]);
+        }
+        // What a note of a sub-agent kind names is DELIVERED: a reload remembers
+        // it, so a replayed or late `end` never notes the child a second time.
+        if (note.kind === NOTE_KIND.subagentReport || note.kind === NOTE_KIND.subagentLost) {
+          ledger.closed.add(id);
         }
       }
       consider(message.content);
@@ -130,14 +156,14 @@ export class AgentJobLedger {
     readonly agentType: string;
     readonly description: string;
   }): SubagentBackgroundBody | null {
-    if (this.jobs.has(job.agentId)) {
+    if (this.closed.has(job.agentId) || this.jobs.has(job.agentId)) {
       return null;
     }
     const running: AgentJob = {
       agentId: job.agentId,
-      callId: job.callId,
-      agentType: job.agentType,
-      description: capText(job.description, SUBAGENT_DESCRIPTION_MAX_CHARS),
+      callId: bounded(job.callId, SUBAGENT_CALL_ID_MAX_CHARS),
+      agentType: bounded(job.agentType, SUBAGENT_AGENT_TYPE_MAX_CHARS),
+      description: capSubagentText(job.description, SUBAGENT_DESCRIPTION_MAX_CHARS),
       state: "running",
     };
     this.jobs.set(running.agentId, running);
@@ -156,39 +182,57 @@ export class AgentJobLedger {
    * end: the FIRST one wins, and a running→ended transition happens once).
    * `report` is capped here, by the emitter, so a reader never refuses it.
    */
-  end(agentId: string, stopReason: string, report?: string): SubagentEndBody | null {
+  end(
+    agentId: string,
+    stopReason: string,
+    report?: string,
+    opts: { readonly orphan?: boolean } = {},
+  ): SubagentEndBody | null {
+    if (this.closed.has(agentId)) {
+      return null;
+    }
     const job = this.jobs.get(agentId);
     if (job === undefined) {
+      // A LIVE `end` for an id this session never started is nothing to keep: a
+      // marker for it would be re-emitted forever and carry no work product.
+      if (opts.orphan !== true) {
+        return null;
+      }
       // An `end` whose `bg` is gone (a superseded segment): keep the fact, with
       // no description — a work product is never dropped for a missing pair.
+      const reason = bounded(stopReason, SUBAGENT_STOP_REASON_MAX_CHARS);
       const orphan: AgentJob = {
         agentId,
         callId: "",
         agentType: "",
         description: "",
         state: "ended",
-        stopReason,
-        ...(report !== undefined ? { report: capText(report, SUBAGENT_REPORT_MAX_CHARS) } : {}),
+        stopReason: reason,
+        ...(report !== undefined
+          ? { report: capSubagentText(report, SUBAGENT_REPORT_MAX_CHARS) }
+          : {}),
       };
       this.jobs.set(agentId, orphan);
       this.reserveNumeric(agentId);
       return {
         agentId,
-        stopReason,
+        stopReason: reason,
         ...(orphan.report !== undefined ? { report: orphan.report } : {}),
       };
     }
     if (job.state === "ended") {
       return null;
     }
-    const capped = report !== undefined ? capText(report, SUBAGENT_REPORT_MAX_CHARS) : undefined;
+    const reason = bounded(stopReason, SUBAGENT_STOP_REASON_MAX_CHARS);
+    const capped =
+      report !== undefined ? capSubagentText(report, SUBAGENT_REPORT_MAX_CHARS) : undefined;
     this.jobs.set(agentId, {
       ...job,
       state: "ended",
-      stopReason,
+      stopReason: reason,
       ...(capped !== undefined ? { report: capped } : {}),
     });
-    return { agentId, stopReason, ...(capped !== undefined ? { report: capped } : {}) };
+    return { agentId, stopReason: reason, ...(capped !== undefined ? { report: capped } : {}) };
   }
 
   /**
@@ -204,6 +248,7 @@ export class AgentJobLedger {
       return;
     }
     this.jobs.delete(note.id);
+    this.closed.add(note.id);
   }
 
   /**
@@ -342,7 +387,9 @@ export function subagentLoadNotes(
         description: entry.description,
       });
     } else if (entry.type === "subagent_end") {
-      ledger.end(entry.agentId, entry.stopReason, entry.report);
+      // A replay is the ONE place an `end` without its `bg` is kept (FM 5): the
+      // work product survives a segment boundary, the live path never invents one.
+      ledger.end(entry.agentId, entry.stopReason, entry.report, { orphan: true });
     }
   }
   for (const message of messages) {
