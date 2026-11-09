@@ -492,6 +492,8 @@ the log's typed facts about them (turn/call markers, title, checkpoints)"). OK t
 **Recommend (a):** §7 is the list a reviewer checks "is this rendering-only?" against. The report
 is model-visible content, not rendering, so it belongs there.
 
+**Owner answers (2026-11-09):** Q1 **(a)** — close the resumable turn honestly and append the notes. Q2 **(a)** — add the sub-agent lifecycle markers (with a finished sub-agent's report) to AGENTS §7's persistence bullet, in this branch.
+
 ## Execution
 
 *— (executor), (date)*
