@@ -1144,3 +1144,32 @@ keep=true  … identical …
 snapshot load#2 notes: {"kind":"subagent_lost","id":"sa-1"} len 2
 ```
 </details>
+
+### Review round 2
+
+*— claude-opus-5-5, 2026-11-09* (scope: only `git diff 46b9121..HEAD`, i.e. fix rounds `7cdc9b2` and `b240cb3`)
+
+**Verdict: PASS**
+
+| Finding | Status |
+|---|---|
+| **M1** late/unknown `end` | **Holds.** The ledger now has a `closed` set, filled by `noteSeen` and by `fromHistory` (sub-agent kinds only). `background` and `end` return `null` for a closed id. A live `end` for an unknown id returns `null`; only `subagentLoadNotes` passes `{orphan:true}`. Mutation (drop the `closed` check in `end`) → **KILLED** by "fromHistory remembers what was DELIVERED". Note: the in-session late-end case is also blocked by the orphan gate, so the reload test is the one that pins `closed`. |
+| **M2** `backgroundAgent` persist | **Holds.** `this.persist()` is called after `verifyLog()` (`hosted-session.ts:1279-1282`). Mutation (remove it) → **KILLED** by "M2: `backgroundAgent` PERSISTS at launch". I re-ran `review/e2e-serve.ts`: after reload #1 the file now holds sa-3's `subagent_background`. Reload #2 gives `subagent_lost:sa-3`, and the next id is sa-4, so no id is reused. |
+| **M3** fail-soft `note` | **Holds** (owner Q4 (a)). The field is now `MessageNoteSchema.optional().catch(undefined)`. Mutation (remove `.catch`) → **KILLED** by 2 tests (`session.test.ts`, `session-log-file.test.ts`). |
+| **M4** emitter caps | **Holds.** Three exported constants are used by both schemas. `bounded()` (`""` → `"unknown"`, then slice) is applied to `callId`/`agentType` in `background`, and to `stopReason` in both `end` branches. Mutation (unbounded `callId`) → **KILLED** by the M4 ledger test. |
+| **L1** real serve cycle test | **Holds.** The new `persistence.test.ts` describe "L1: the real `serve` write → reload → write → reload cycle" uses the real store, as specified. |
+| **L2** `awaitsAnswer` | **Holds** (owner Q3 (a)). It is documented in Design §3 (`:343-350`); `awaitsAnswer` is untouched. |
+| **L3** reset-wiped note | **Holds as debt.** It is recorded in the fix-round-1 Execution table (row 7). See nit-5. |
+| **nit-1** `rebuild` fallback | **Holds.** One call now: `entriesThrough(...) ?? currentSegment(parsed).entries`. `foldThrough` is null exactly when `entriesThrough` is, except when a projection fails inside a segment that `parseLogFile` already projected, which cannot happen. |
+| **nit-2** `capText` | **Holds.** Renamed to `capSubagentText`. |
+| **nit-3** | **Holds** (left on purpose, as recommended). |
+| **nit-4** status header | **Holds** (`Status: review`). |
+
+**New findings:**
+- **nit-5 (not blocking):** the L3 debt for 6a lives only in an Execution table row, where 6a's planner may miss it. **Fix:** add one bullet under Design §4: "6a must close a delivered job explicitly (`agentJobs.noteSeen` at its push site) or deliver only at a round start after a commit (review L3)."
+- Nothing else was introduced. `MessageNote` is now exported by both `protocol` and `core`, and typecheck is clean, so the two names do not clash.
+
+**Gate (clean tree, re-run after the mutations were reverted):** `bunx tsc --noEmit` clean ·
+`bunx biome check .` 771 files, no fixes · `bun test packages` **5942 pass · 3 skip (opt-in) ·
+0 fail** (5945 tests / 400 files, 181.12s). The tree was byte-identical after every mutation
+(`git status --porcelain` empty).
