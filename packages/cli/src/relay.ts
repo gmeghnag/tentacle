@@ -425,6 +425,11 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   const offExit = config.autoWake
     ? runtime.jobs.onExit(() => emit({ type: "job_exit" }))
     : () => {};
+  // A running background sub-agent needs the laptop for its MODEL (the reverse
+  // tunnel), so the relay must not sleep (or exit idle) while one runs: its
+  // count rides the same `subagents` frame the TUI's status line reads.
+  const offAgents =
+    session.onSubagents?.((rows) => emit({ type: "agents", n: rows.length })) ?? (() => {});
   maybeWake = () => {
     if (!relayWakeDue(model, exiting)) {
       return;
@@ -586,6 +591,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     ));
   offLink();
   offExit();
+  offAgents();
   await runtime.release();
   const unsaved = await saver.drain();
   for (const line of unsaved) {

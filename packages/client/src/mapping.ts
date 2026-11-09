@@ -276,9 +276,11 @@ export function updateToEvent(
     // permission events are consumed by `RemoteClient`'s `PermissionRouter`;
     // `session_title` by its title listeners (it is not turn-scoped), and
     // `queued` by its queue listeners (`RemoteClient`, not turn-scoped either),
-    // `session_settings` by its settings-change listeners (likewise).
+    // `subagents` by its own (likewise), `session_settings` by its
+    // settings-change listeners (likewise).
     case "session_title":
     case "queued":
+    case "subagents":
     case "session_settings":
     case "plan":
     case "turn_start":

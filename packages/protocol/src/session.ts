@@ -398,6 +398,32 @@ export const QueueStateSchema = z.object({
 });
 export type QueueState = z.infer<typeof QueueStateSchema>;
 
+// --- the session's background sub-agents (docs/feat/subagent-background-ui.md) ---
+// The live list of the children the agent launched with `agent_task{background}`:
+// one full-state update (`subagents`), never a delta, so a client converges from
+// any loss. Not turn-scoped (a child outlives its turn, so does its row).
+// Lenient by design, like `tool_progress`: a pod's daemon is not trusted (§7), so
+// no member is bounded here — the client cuts the row count and the labels.
+
+/** One running (or just-started) background sub-agent, as the daemon reports it. */
+export const SubagentRowSchema = z.object({
+  /** Its `sa-N` id: what `agent_kill` takes and a note names. */
+  id: z.string().min(1),
+  /** The `agent_task` call that launched it. */
+  callId: z.string(),
+  agentType: z.string(),
+  description: z.string(),
+  /** A free string, like `tool_call_phase.phase`: a newer daemon's state is shown as is. */
+  state: z.string(),
+  toolUses: z.number().int().nonnegative(),
+  /** The child's own tokens so far (never added to the parent's totals). */
+  tokens: z.number().int().nonnegative(),
+  startedAt: z.number().int().nonnegative(),
+  /** Its recent tool labels, oldest first (the daemon keeps the last 8). */
+  tail: z.array(z.string()),
+});
+export type SubagentRow = z.infer<typeof SubagentRowSchema>;
+
 export const SnapshotResultSchema = z.object({
   /** Chronological slice of the history, ending at the cut (or at the cursor). */
   messages: z.array(ChatMessageSchema),
@@ -411,6 +437,8 @@ export const SnapshotResultSchema = z.object({
   title: SessionTitleSchema.optional(),
   /** The queue at the cut (first page only; an older daemon sends none: it does not report the queue). */
   queued: QueueStateSchema.optional(),
+  /** The background sub-agents running at the cut (first page only; an older daemon sends none). */
+  subagents: z.array(SubagentRowSchema).optional(),
 });
 export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
 

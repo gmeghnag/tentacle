@@ -130,8 +130,11 @@ describe("background sub-agents wiring (docs/feat/subagent-background.md, T38)",
   test("`background` is offered when sub-agents are on, and not otherwise", () => {
     const on = buildAgent({ ...config, subagentsEnabled: true });
     expect(taskSchema(on.tools)).toContain("background");
+    // 6a-2: `agent_kill` rides the same switch: it names a child's id.
+    expect(on.tools.get("agent_kill")).toBeDefined();
     const off = buildAgent({ ...config, subagentsEnabled: false });
     expect(off.tools.definitions().some((d) => d.name === "agent_task")).toBe(false);
+    expect(off.tools.get("agent_kill")).toBeUndefined();
   });
 
   test("a reused AgentJobs is the one the agent gets, and the cap is set from the config", () => {
@@ -954,6 +957,9 @@ describe("start-up output pinned (docs/feat/context-reset-refresh.md)", () => {
       "shell_kill",
       "skill",
       "agent_task",
+      // 6a-2 (docs/feat/subagent-background-ui.md): the model's way to stop a
+      // child it launched, offered exactly where `background` is.
+      "agent_kill",
       // Slice 3 (docs/feat/context-reset.md): the one intended change, on by default.
       "context_reset",
     ]);

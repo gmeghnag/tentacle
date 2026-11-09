@@ -20,6 +20,7 @@ import {
   type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionUpdate,
+  type SubagentRow,
   type TurnEnd,
   type UpdateSettingsResult,
 } from "@tentacle/protocol";
@@ -423,6 +424,14 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
+   * The session's background sub-agents as the daemon last reported them (bounded
+   * here). Undefined: no report yet, or an older daemon does not report them.
+   */
+  get subagents(): readonly SubagentRow[] | undefined {
+    return this.id ? this.client.subagentsOf(this.id) : undefined;
+  }
+
+  /**
    * Subscribe to this session's queue as the daemon reports it (every
    * writer's rows, live or a resync's); the current state, if any, is given
    * at once. Returns an unsubscribe (docs/feat/tui-foreign-turns.md C7).
@@ -441,9 +450,27 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
+   * Subscribe to this session's background sub-agents as the daemon reports
+   * them (bounded and sanitized by the client); the current list, if any, is
+   * given at once. A child runs between turns, so this fires while idle.
+   * Returns an unsubscribe (docs/feat/subagent-background-ui.md).
+   */
+  onSubagents(listener: (rows: readonly SubagentRow[]) => void): () => void {
+    const unsubscribe = this.client.onSessionSubagents((notice) => {
+      if (notice.sessionId === this.id) {
+        listener(notice.rows);
+      }
+    });
+    const now = this.subagents;
+    if (now) {
+      listener(now);
+    }
+    return unsubscribe;
+  }
+
+  /**
    * Subscribe to MY rows coming back (docs/feat/queued-broadcast.md): a row I
-   * queued that its turn left undrained, which no send-now carried on. Each
-   * row is given once, with the text I typed (never the daemon's), then
+   * queued that its turn left undrained, which no send-now carried on. Each   * row is given once, with the text I typed (never the daemon's), then
    * reclaimed daemon-side. The listener puts them back in front of the user;
    * nothing is ever re-sent by itself. A send-now cancelled before it started
    * gives back only its own texts (they reject with its events); a row the
@@ -1289,12 +1316,13 @@ export class RemoteSession implements SessionStreamListener {
         this.replaced = { reason: update.reason, turnId };
         return;
       // Owned elsewhere: the permission router (the dialog), the job-exit, the
-      // title and the queue listeners (they fire even while idle).
+      // title, the queue and the sub-agent list listeners (they fire even while idle).
       case "permission_request":
       case "permission_resolved":
       case "background_exit":
       case "session_title":
       case "queued":
+      case "subagents":
         return;
       default: {
         // Turn-scoped: always inside its turn's brackets (T-B0), so a null or
@@ -1381,13 +1409,14 @@ export class RemoteSession implements SessionStreamListener {
       return;
     }
     // Owned elsewhere: the permission router (the dialog), the job-exit, the
-    // title and the queue listeners (they fire even while idle).
+    // title, the queue and the sub-agent list listeners (they fire even while idle).
     if (
       update.type === "permission_request" ||
       update.type === "permission_resolved" ||
       update.type === "background_exit" ||
       update.type === "session_title" ||
-      update.type === "queued"
+      update.type === "queued" ||
+      update.type === "subagents"
     ) {
       return;
     }

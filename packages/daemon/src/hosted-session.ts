@@ -91,6 +91,7 @@ import {
   type SessionUpdate,
   type Sha256,
   type SnapshotResult,
+  type SubagentRow,
   type TurnEnd,
   type TurnError,
   clientSupportsUpdate,
@@ -136,6 +137,13 @@ import {
   titleText,
 } from "./session-title.ts";
 import { SettledAnswers } from "./settled-answers.ts";
+import { sameRows, subagentRows } from "./subagents-view.ts";
+
+/**
+ * How long a burst of a child's progress waits for one frame: at most four
+ * frames a second for the list, while a start and an end publish at once.
+ */
+export const SUBAGENTS_COALESCE_MS = 250;
 
 const nodeSha256: Sha256 = (text) => createHash("sha256").update(text).digest("hex");
 
@@ -220,6 +228,8 @@ interface Cut {
   readonly turnId: string | null;
   /** The queue as of the cut: the last `queued` state emitted (seq <= `seq`). */
   readonly queued: QueueState;
+  /** The background sub-agents as of the cut: the last `subagents` list emitted. */
+  readonly subagents: readonly SubagentRow[];
 }
 
 /**
@@ -383,6 +393,10 @@ export class HostedSession {
   private returned: ReturnedEntry[] = [];
   /** The last `queued` state emitted (or the initial one): what the cut records. */
   private lastQueued: QueueState = EMPTY_QUEUE;
+  /** The last `subagents` list emitted (or the initial empty one): what the cut records. */
+  private lastSubagents: readonly SubagentRow[] = [];
+  /** A coalescing frame is due (`kickSubagents`): one timer at a time. */
+  private subagentsKick: ReturnType<typeof setTimeout> | null = null;
   /** Enqueue ids injected into the history (drained) in this incarnation. */
   private readonly drained = new Set<string>();
   /** Enqueue ids a previous incarnation accepted: their text is in the history already. */
@@ -436,6 +450,8 @@ export class HostedSession {
    */
   private readonly agentRuntime: AgentJobs | undefined;
   private readonly unsubscribeAgentExit: (() => void) | undefined;
+  /** The `AgentJobs.onChange` subscription (the live list); removed in `close`. */
+  private readonly unsubscribeAgentRows: (() => void) | undefined;
   /** Background child id → the turn that spawned it (its ask names it on the wire). */
   private readonly spawnTurns = new Map<string, string>();
   private readonly now: () => number;
@@ -553,6 +569,7 @@ export class HostedSession {
       length: session.messages.length,
       turnId: resume?.turnId ?? null,
       queued: EMPTY_QUEUE,
+      subagents: [],
     };
     // The log's first segment: this incarnation's history at the cut (a
     // reload's after its repair; a resumed turn is open at it).
@@ -619,6 +636,8 @@ export class HostedSession {
       },
     });
     this.unsubscribeAgentExit = agentRuntime?.onExit((exit) => {
+      // The list first (its row is gone), then the exit notice, then the wake.
+      this.kickSubagents();
       this.emit({
         type: "background_exit",
         jobId: exit.agentId,
@@ -629,6 +648,9 @@ export class HostedSession {
       });
       this.kickWake();
     });
+    // A child's visible state changed: a start and an end publish at once, a
+    // progress event coalesces (docs/feat/subagent-background-ui.md Design 3).
+    this.unsubscribeAgentRows = agentRuntime?.onChange(() => this.kickSubagents()) ?? undefined;
     // A turn suspended at the restart is running again (it holds the slot)
     // BEFORE the first write below, with its steers queued and its old pending
     // entry kept: that write must still read "suspended on this call" — never
@@ -1135,6 +1157,60 @@ export class HostedSession {
   }
 
   /**
+   * Note that a child's visible state changed. A START or an END (the set of ids
+   * differs from what clients have) publishes at once: the list's truth must
+   * never lag a spawn or a death. A progress event coalesces within one window
+   * (a burst of labels is not 100 frames). One timer at a time; cleared by `close`.
+   */
+  private kickSubagents(): void {
+    if (this.closed) {
+      return;
+    }
+    const rows = subagentRows(this.agentRuntime?.rows() ?? []);
+    const structural =
+      rows.length !== this.lastSubagents.length ||
+      rows.some((row, i) => row.id !== this.lastSubagents[i]?.id);
+    if (structural) {
+      if (this.subagentsKick !== null) {
+        clearTimeout(this.subagentsKick);
+        this.subagentsKick = null;
+      }
+      this.publishSubagents(rows);
+      return;
+    }
+    if (this.subagentsKick !== null) {
+      return;
+    }
+    this.subagentsKick = setTimeout(() => {
+      this.subagentsKick = null;
+      this.publishSubagents();
+    }, SUBAGENTS_COALESCE_MS);
+  }
+
+  /**
+   * Stream the live list if it changed since the last `subagents` (full state;
+   * an unchanged list sends nothing). Never throws (a sink error is reported,
+   * as `emit`'s). Idle: the cut then moves to "now", so the ring's pin follows
+   * the frame instead of holding a whole burst until the next commit.
+   */
+  private publishSubagents(rows = subagentRows(this.agentRuntime?.rows() ?? [])): void {
+    if (sameRows(rows, this.lastSubagents)) {
+      return;
+    }
+    this.lastSubagents = rows;
+    try {
+      this.emit({ type: "subagents", agents: [...rows] });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    // Idle: nothing is being committed, so the frame is safe to pin AND to let
+    // go of. Mid-turn the pin stays at the last commit (the turn's own rule).
+    if (this.controller === null) {
+      this.recordCut(null);
+    }
+  }
+
+  /**
    * `session/reclaim`: the writer took these returned rows back (they are in
    * its input now). Unknown or already gone → ignored (a retry is a no-op).
    * Synchronous, like `enqueue`; on disk (a capture), then streamed.
@@ -1321,6 +1397,7 @@ export class HostedSession {
       ...(cursor === undefined ? { title: this.wireTitle() } : {}),
       // As of the cut, like the history: later changes are in the replay.
       ...(cursor === undefined ? { queued: cut.queued } : {}),
+      ...(cursor === undefined ? { subagents: [...cut.subagents] } : {}),
     };
   }
 
@@ -1360,6 +1437,7 @@ export class HostedSession {
       length: this.session.messages.length,
       turnId,
       queued: this.lastQueued,
+      subagents: this.lastSubagents,
     };
     this.ring.evict(this.seq);
     // The committed prefix moved: its changes join the log (pointer compares only).
@@ -2319,6 +2397,9 @@ export class HostedSession {
       // As of the last `queued` emitted (a compaction's: no turn, no queue;
       // the returned rows stay).
       queued: this.lastQueued,
+      // Children outlive a compaction and survive a reset of the history
+      // except `/clear`'s new session: the list is the live state.
+      subagents: this.lastSubagents,
     };
     // A new log segment: the SAME array was replaced in place, so it is never
     // diffed — the reference copy is reset (F3). Before the emit, like the cut.
@@ -2401,12 +2482,19 @@ export class HostedSession {
     } catch (error) {
       this.reportTurnError(error);
     }
+    // A child's visible state (the live list) is a frame the ring never needs
+    // to pin past the next cut.
+    if (this.subagentsKick !== null) {
+      clearTimeout(this.subagentsKick);
+      this.subagentsKick = null;
+    }
     this.attachments.clear();
     this.unsubscribeExit?.();
     this.jobs?.dispose();
     // Children abort (their signal settles a pending ask); no `end`, no exit
     // frame: at a reopen the `bg` without an `end` gives the lost note.
     this.unsubscribeAgentExit?.();
+    this.unsubscribeAgentRows?.();
     this.agentRuntime?.dispose();
   }
 

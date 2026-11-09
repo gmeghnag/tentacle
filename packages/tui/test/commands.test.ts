@@ -148,6 +148,8 @@ describe("D1 quitCommandStep (docs/fix/detach-live.md A1)", () => {
     detaches: false,
     endsSession: false,
     others: 0,
+    // 6a-2: no background sub-agents running, so nothing is lost by quitting.
+    agents: 0,
     confirmed: false,
   };
   test("every row, first match wins", () => {

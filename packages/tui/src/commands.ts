@@ -233,22 +233,31 @@ export interface QuitCommandInput {
   readonly endsSession: boolean;
   /** Other TUIs on this same session (laptop presence). */
   readonly others: number;
+  /** Background sub-agents running now: quitting would lose them. */
+  readonly agents: number;
   /** The user said `y` to `quitConfirmText`. */
   readonly confirmed: boolean;
 }
 
 /**
- * What `/quit` (`/exit`) does (docs/fix/detach-live.md A1), first match wins:
- * a second request leaves at once (a turn that will not stop never traps the
- * user); with other terminals on the session it asks first; a run TUI's quit
- * ends the session, so a running turn — a foreign one too — stops first;
- * anything else is `quitAction`.
+ * What `/quit` (`/exit`) does (docs/fix/detach-live.md A1, docs/feat/subagent-background-ui.md),
+ * first match wins: a second request leaves at once (a turn that will not
+ * stop never traps the user); with other terminals on the session, or with
+ * background sub-agents running that a quit would lose, it asks first; a run
+ * TUI's quit ends the session, so a running turn — a foreign one too — stops
+ * first; anything else is `quitAction`.
  */
 export function quitCommandStep(input: QuitCommandInput): "exit" | "stop-then-exit" | "confirm" {
   if (input.exitPending) {
     return "exit";
   }
   if (input.others > 0 && !input.confirmed) {
+    return "confirm";
+  }
+  // A child does not survive its session: quitting kills it. `connect` only
+  // DETACHES, so both the session and its children live on, and asking there
+  // would be a lie (a foreign turn's own state is not mine to take a child for).
+  if (input.agents > 0 && !input.detaches && !input.confirmed) {
     return "confirm";
   }
   if (input.endsSession) {
@@ -259,10 +268,31 @@ export function quitCommandStep(input: QuitCommandInput): "exit" | "stop-then-ex
     : "stop-then-exit";
 }
 
-/** The confirmation `/quit` asks with others on the session. */
-export function quitConfirmText(others: number): string {
+/** What the confirmation is about: who else, and which children would be lost. */
+export interface QuitConfirmFacts {
+  readonly others: number;
+  readonly agents: number;
+  /** The children's ids, in launch order (`sa-1`, `sa-2`). */
+  readonly names: readonly string[];
+}
+
+/** The confirmation `/quit` asks with others on the session, or children to lose. */
+export function quitConfirmText(facts: number | QuitConfirmFacts): string {
+  const { others, agents, names } =
+    typeof facts === "number" ? { others: facts, agents: 0, names: [] } : facts;
   const who = others === 1 ? "1 other terminal" : `${others} other terminals`;
-  return `${who} attached — close the session for all? (y/N)`;
+  if (agents <= 0) {
+    return `${who} attached — close the session for all? (y/N)`;
+  }
+  const what =
+    agents === 1
+      ? `1 background sub-agent (${names.join(", ")})`
+      : `${agents} background sub-agents (${names.join(", ")})`;
+  if (others > 0) {
+    const running = agents === 1 ? "1 sub-agent running" : `${agents} sub-agents running`;
+    return `${who} attached · ${running} — close the session for all? (y/N)`;
+  }
+  return `${what} will be lost — quit? (y/N)`;
 }
 
 /** A key on that confirmation: only a plain `y`/`Y` closes; anything else (Enter, Ctrl+Y) is No. */
@@ -270,6 +300,32 @@ export function quitConfirmKey(char: string, modified = false): "yes" | "no" {
   return !modified && (char === "y" || char === "Y") ? "yes" : "no";
 }
 
+/** What a Ctrl+C does (docs/feat/subagent-background-ui.md): `quitAction`, plus the child dialog. */
+export interface CtrlCQuitInput {
+  readonly running: boolean;
+  readonly exitPending: boolean;
+  /** `connect`: a quit only detaches (the session and its children live on). */
+  readonly detaches: boolean;
+  /** Background sub-agents running now: quitting would lose them. */
+  readonly agents: number;
+  /** The user said `y` to `quitConfirmText`. */
+  readonly confirmed?: boolean;
+}
+
+/**
+ * Ctrl+C, decided in one place. Mid-turn it stops the turn (it never quits on
+ * the first press — whoever started it). Idle it exits, EXCEPT with background
+ * sub-agents running that the quit would lose: that asks first (a Ctrl+C is as
+ * easy to press by accident as `/quit`). A second press, a `connect` runtime
+ * and an already-confirmed quit leave at once.
+ */
+export function ctrlCQuitStep(input: CtrlCQuitInput): "exit" | "stop" | "confirm" {
+  if (input.agents > 0 && !input.detaches && input.confirmed !== true && !input.exitPending) {
+    // Mid-turn the stop wins: the turn's save happens first, as today.
+    return input.running ? "stop" : "confirm";
+  }
+  return quitAction("ctrl-c", input.running, input.exitPending) === "exit" ? "exit" : "stop";
+}
 /**
  * Commands matching what the user is typing, for the autocomplete palette.
  * Active only while typing the command name itself: the input must start with

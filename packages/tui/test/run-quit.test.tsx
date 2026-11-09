@@ -384,3 +384,111 @@ describe("D15 a host notice survives the attach's history (App)", () => {
     app.unmount();
   });
 });
+
+describe("T49/T48: background sub-agents in the TUI (docs/feat/subagent-background-ui.md)", () => {
+  /** A session controller that reports a live background list the test drives. */
+  function withAgents() {
+    const listeners = new Set<(rows: readonly { id: string }[]) => void>();
+    let rows: readonly { id: string }[] = [];
+    const make = (): SessionController => ({
+      async *send() {
+        yield { type: "turn_end", reason: "end_turn" };
+      },
+      enqueue: () => Promise.resolve(),
+      onSubagents(listener) {
+        listeners.add(listener);
+        listener(rows);
+        return () => listeners.delete(listener);
+      },
+      ownsTurn: () => true,
+    });
+    return {
+      make,
+      set: (next: readonly { id: string }[]) => {
+        rows = next;
+        for (const listener of listeners) listener(rows);
+      },
+      watching: () => listeners.size,
+    };
+  }
+
+  test("the status line shows the live count, and it clears when the children end", async () => {
+    // Mutations: no `onSubagents` subscription → no count; no `background` prop → none.
+    const s = withAgents();
+    const app = render(<App createSession={s.make} model="m" cwd="/tmp/work" />);
+    await delay(30);
+    expect(app.lastFrame() ?? "").not.toContain("sub-agent");
+    s.set([{ id: "sa-1" }]);
+    await delay(30);
+    expect(app.lastFrame() ?? "").toContain("· 1 sub-agent");
+    s.set([{ id: "sa-1" }, { id: "sa-2" }]);
+    await delay(30);
+    expect(app.lastFrame() ?? "").toContain("· 2 sub-agents");
+    s.set([]);
+    await delay(30);
+    expect(app.lastFrame() ?? "").not.toContain("sub-agent");
+    app.unmount();
+  });
+
+  test("/quit with children running asks first and names them; `n` leaves the session open", async () => {
+    // Mutation: drop the `agents` row from `quitCommandStep` → it exits silently.
+    const s = withAgents();
+    const probe = exitProbe();
+    const spy = runQuitSpy(0);
+    const app = render(
+      <App
+        createSession={s.make}
+        model="m"
+        cwd="/tmp/work"
+        notices={probe.notices}
+        runQuit={spy.runQuit}
+      />,
+    );
+    await delay(30);
+    s.set([{ id: "sa-1" }, { id: "sa-2" }]);
+    await delay(30);
+    await type(app.stdin, "/quit");
+    const frame = app.lastFrame() ?? "";
+    expect(frame).toContain("2 background sub-agents (sa-1, sa-2) will be lost — quit? (y/N)");
+    expect(spy.calls).toEqual([]);
+    expect(probe.exited()).toBe(false);
+    // `n` changes nothing: the session is still open.
+    app.stdin.write("n");
+    await delay(40);
+    expect(app.lastFrame() ?? "").not.toContain("will be lost");
+    expect(spy.calls).toEqual([]);
+    expect(probe.exited()).toBe(false);
+    app.unmount();
+  });
+
+  test("an idle Ctrl+C with children asks; a second Ctrl+C (confirmed) does not trap the user", async () => {
+    const s = withAgents();
+    const probe = exitProbe();
+    const spy = runQuitSpy(0);
+    const app = render(
+      <App
+        createSession={s.make}
+        model="m"
+        cwd="/tmp/work"
+        notices={probe.notices}
+        runQuit={spy.runQuit}
+      />,
+    );
+    await delay(30);
+    s.set([{ id: "sa-7" }]);
+    await delay(30);
+    app.stdin.write("\u0003");
+    await delay(40);
+    expect(app.lastFrame() ?? "").toContain("1 background sub-agent (sa-7) will be lost");
+    expect(probe.exited()).toBe(false);
+    // A second Ctrl+C, while the dialog is up, is a QUIT REQUEST (not a "no"):
+    // it leaves at once. Otherwise the key that asked could only ever dismiss,
+    // and the user would be trapped in a dialog they cannot get past.
+    const started = Date.now();
+    app.stdin.write("\u0003");
+    await delay(60);
+    expect(probe.exited()).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    app.unmount();
+  });
+});
