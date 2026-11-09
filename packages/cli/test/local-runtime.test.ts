@@ -782,6 +782,21 @@ describe("createLocalRuntime (local over RPC)", () => {
     return { inner, log, held };
   }
 
+  test("T16 (clear-keeps-jobs): clear saves the new segment — a read-back starts right after it", async () => {
+    // Mutation: drop `flush()` after `inner.clear()` → no snapshot is read.
+    const { inner, held } = heldInner();
+    const saved: string[][] = [];
+    const ctl = persistingController(
+      { ...inner, clear: async () => ({ before: 2, after: 0 }) } as unknown as RemoteSession,
+      (m) => saved.push(m.map((x) => String(x.content))),
+    );
+    expect(await ctl.clear?.()).toEqual({ before: 2, after: 0 });
+    expect(held).toHaveLength(1);
+    held[0]?.resolve([{ role: "user", content: "note" }]);
+    await ctl.flushed();
+    expect(saved).toEqual([["note"]]);
+  });
+
   test("detached save: send ends while the post-turn snapshot is still pending", async () => {
     const { inner, held } = heldInner();
     const saved: string[][] = [];

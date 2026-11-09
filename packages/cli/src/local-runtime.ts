@@ -435,6 +435,13 @@ export function persistingController(
       flush();
       return result;
     },
+    // `/clear` (docs/feat/clear-keeps-jobs.md): the daemon reset the history in
+    // place; save the new segment the way a compaction's is.
+    async clear() {
+      const result = await inner.clear();
+      flush();
+      return result;
+    },
     // Propagate the inner Promise (don't swallow it) so the TUI can reconcile
     // its optimistic entry on a delivery failure.
     enqueue(text, id) {

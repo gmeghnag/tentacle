@@ -22,7 +22,7 @@ const turn: SessionActivity = {
   },
   cancel: () => {},
 };
-const history = (reason: "compact" | "context_reset" | null): SessionActivity => ({
+const history = (reason: "compact" | "context_reset" | "clear" | null): SessionActivity => ({
   kind: "history",
   messages: [],
   reason,
@@ -50,6 +50,12 @@ describe("historyAction (C6, owner QR1)", () => {
     expect(historyAction({ reason: "compact", ownCompaction: true })).toBe("none");
     expect(historyAction({ reason: null, ownCompaction: false })).toBe("replace");
     expect(historyAction({ reason: null, ownCompaction: true })).toBe("replace");
+  });
+
+  test("a clear (clear-keeps-jobs) REPLACES the transcript, own or foreign", () => {
+    // Mutation: return `none` for an own clear → the cleared chat never shows.
+    expect(historyAction({ reason: "clear", ownCompaction: false })).toBe("replace");
+    expect(historyAction({ reason: "clear", ownCompaction: true })).toBe("replace");
   });
 
   test("a context reset keeps the transcript and APPENDS the new history (context-reset decision 9)", () => {

@@ -2383,12 +2383,45 @@ export class HostedSession {
   }
 
   /**
+   * `session/clear` (docs/feat/clear-keeps-jobs.md): reset the conversation IN
+   * PLACE through the same barrier a compaction uses, so background jobs,
+   * sub-agents, their asks and their pending exits stay wired to this session.
+   * SYNCHRONOUS and atomic: it throws at `assertIdle` before touching anything,
+   * or it completes (the barrier must not throw). Holds no lock (AGENTS §7).
+   */
+  clear(): { before: number; after: number } {
+    this.assertIdle();
+    this.abortTitle();
+    if (this.titleKick !== null) {
+      clearTimeout(this.titleKick);
+      this.titleKick = null;
+    }
+    // BEFORE the barrier: its segment's `title` entry must reflect the reset. A
+    // `user` rename stays (it names the session, which goes on).
+    if (this.title.source === "model") {
+      this.title = { source: "auto" };
+    }
+    const result = this.session.clearConversation(() => this.historyReplaced("clear"));
+    // The session approvals go for everyone, running children included (QB).
+    this.grants?.clear();
+    // A fresh chat: an earlier stop or failure no longer blocks the wake.
+    this.lastEndBad = false;
+    this.lastChangeAt = this.now();
+    this.lastActiveAt = this.now();
+    this.persist();
+    this.log.checkpoint();
+    this.publishQueue();
+    this.kickWake();
+    return result;
+  }
+
+  /**
    * The barrier, run synchronously right after the history was replaced —
    * inside `Session.compact` (between turns), or on the agent's
    * `context_reset` (INSIDE a turn): a new epoch, `history_replaced`, the cut.
    * Must not throw (the replacement already happened): a sink error is reported.
    */
-  private historyReplaced(reason: "compact" | "context_reset"): void {
+  private historyReplaced(reason: "compact" | "context_reset" | "clear"): void {
     // The cut is final BEFORE the emit — it names the barrier's own seq (the
     // next one) — so even a sink that reads the snapshot re-entrantly sees a
     // consistent new epoch, never the new epoch with the old history length.
@@ -2408,13 +2441,20 @@ export class HostedSession {
       // As of the last `queued` emitted (a compaction's: no turn, no queue;
       // the returned rows stay).
       queued: this.lastQueued,
-      // Children outlive a compaction and survive a reset of the history
-      // except `/clear`'s new session: the list is the live state.
+      // Children outlive a compaction, a reset of the history and `/clear`
+      // (an in-place reset): the list is the live state.
       subagents: this.lastSubagents,
     };
     // A new log segment: the SAME array was replaced in place, so it is never
     // diffed — the reference copy is reset (F3). Before the emit, like the cut.
-    this.log.replaced(this.session.messages, reason, this.cut.turnId);
+    // A `/clear` segment is logged as `compact`: `base.reason` is a critical
+    // entry's enum, so a new value would make an older build refuse the file
+    // (docs/feat/clear-keeps-jobs.md); `compact` already means "superseding".
+    this.log.replaced(
+      this.session.messages,
+      reason === "clear" ? "compact" : reason,
+      this.cut.turnId,
+    );
     this.logSegmentFacts();
     this.verifyLog();
     try {

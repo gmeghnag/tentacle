@@ -1,8 +1,8 @@
 # feat/clear-keeps-jobs — `/clear` resets the conversation inside the session; background work stays
 
-> **Status:** implementation (plan rewritten for the owner's in-session reset, 2026-11-09; awaiting the answers to QA–QC and approval)
+> **Status:** executed (owner answered QA–QC 2026-11-09; Execution below); awaiting the fresh-context Review
 > **Branch:** `feat/clear-keeps-jobs` (this worktree, off `main` `ac2da32`) — ONE branch
-> **Type:** feat · **Size:** M (~16 files, mostly small edits; the reset reuses an existing, proven barrier) · **Blast:** load-bearing (a `PROTOCOL_VERSION` bump, the daemon's busy slot, a log segment) · **Suited:** `deepseek-v4.1-flash` may execute (no new state machine: one new daemon method that calls the compaction barrier; every step below is spelled out); **mandatory fresh-context Opus review** red-teaming §7 "Protocol", "Persistence" and "Don't serialize the RPC peer"
+> **Type:** feat · **Size:** M (~16 files, mostly small edits; the reset reuses an existing, proven barrier) · **Blast:** load-bearing (a `PROTOCOL_VERSION` bump, the daemon's busy slot, a log segment) · **Suited:** Sonnet (`claude-sonnet-5-5`) executes (owner, 2026-11-09; no new state machine: one new daemon method that calls the compaction barrier); **mandatory fresh-context Opus review** red-teaming §7 "Protocol", "Persistence" and "Don't serialize the RPC peer"
 
 Vocabulary: **job** = a background shell job (`bg-N`); **child** = a background sub-agent (`sa-N`); **background work** = both, plus their exits not yet delivered and a child's unanswered ask.
 
@@ -106,7 +106,7 @@ Every point of the assumption holds:
 **2. Core** (`packages/core/src/model.ts:83-90`): `NOTE_KIND.stillRunning = "still_running"` ("what was still running when the chat was cleared").
 
 **3. Agent** (`packages/agent/src/`).
-- `session.ts`, beside `compact`: `clear(onReplaced?: () => void): { before: number; after: number }` — SYNCHRONOUS:
+- `session.ts`, after `compact`: `clearConversation(onReplaced?: () => void): { before: number; after: number }` — SYNCHRONOUS. (Plan fix, found at execution: it was `clear`, which collided structurally with the TUI's async `SessionController.clear?()`: the in-process `Session` would have been taken for a clear-capable controller. Renamed; see Execution.)
   ```
   const before = this.messages.length;
   const running = this.agent.runningBackground();
@@ -129,7 +129,7 @@ Every point of the assumption holds:
   - New public method `clear(): { before: number; after: number }`, placed after `compact()` (`:2339-2383`). SYNCHRONOUS, in this order:
     1. `this.assertIdle();` — a turn or a compaction holds the slot → throws, nothing changed (atomic, Q6).
     2. `this.abortTitle();` and clear `titleKick` (as `close` does, `:2469-2472`).
-    3. `const result = this.session.clear(() => this.historyReplaced("clear"));`
+    3. `const result = this.session.clearConversation(() => this.historyReplaced("clear"));`
     4. `this.grants?.clear();` (QB).
     5. Title: `if (this.title.source === "model") { this.title = { source: "auto" }; }`. A `user` rename stays: it names the session, which goes on. The segment's `title` entry is written by `logSegmentFacts` inside the barrier. It reflects the new state only if the title is reset BEFORE step 3, so **do step 5 before step 3**.
     6. `this.lastEndBad = false;` — a fresh chat: an earlier stop or failure no longer blocks the wake (Q8).
@@ -158,7 +158,7 @@ Every point of the assumption holds:
   Order: `!canClear` → `"legacy"` (a session without `clear`: the in-process fallback keeps today's close + new session); `clearing` → `"busy"`; `compacting` → `"compacting"`; `running && ownTurn` → `"stop_then_clear"`; `running` (another device's turn) → `"clear"`, and the daemon answers `TurnInProgress`, shown as the failure notice; else `"clear"`.
   Plus `clearFailedNotice(message: string): string` → `` `_/clear failed: ${message} — still in this session_` `` and `CLEARED_ELSEWHERE_NOTICE = "_the conversation was cleared on another device_"`.
 - `turn-feed.ts:73-84` `historyAction`: `reason` gains `"clear"`, and `"clear"` → `"replace"` (own or foreign).
-- `App.tsx` `/clear` (`:1857-1862`): run the step.
+- `App.tsx` `/clear` (`:1857-1862`): run the step. (Plan fix: `/clear` is in `SESSION_MUTATING` (`commands.ts`), so the App refused it mid-turn before any step ran. The guard now exempts `/clear` only when the session can `clear`; the legacy path stays refused mid-turn.)
   - `"legacy"` → today's two lines.
   - `"busy"` / `"compacting"` → a notice.
   - `"stop_then_clear"` → stop the own turn the way Esc does. Set `clearAfterTurnRef = true`; the post-turn path (where `wakeIfPending` runs) sees it, clears it, and runs `"clear"`.
@@ -262,6 +262,80 @@ Narrow test files while iterating (§4). Before "done": `bun test` (baseline: al
 
 **QA — Protocol bump.** (a) Add `clear` to `history_replaced.reason` and bump `PROTOCOL_VERSION` to 21. Every device then REPLACES its screen on a clear. (b) No bump: reuse `reason: "compact"` on the wire. Only the clearing TUI resets its screen; other devices keep the old chat on screen with "_compacted on another device_" until they re-attach, which contradicts Q1's "the other device sees the cleared chat". **Recommend (a)**: pre-public, a bump that makes the design honest is allowed; the method alone would be additive, but the barrier's new meaning is a `mandatory` change.
 
+**Owner (2026-11-09): (a) — add `clear` to `history_replaced.reason` and bump `PROTOCOL_VERSION` to 21.**
+
 **QB — Approvals vs running children (your Q4 (a) does not fit the code).** The "always for this session" approvals live in ONE `SessionGrants` object, shared by the main agent's gate and the sub-agent runner, with ONE ask lane (`cli/src/wiring.ts:485,526`, `agent/src/subagent.ts:233`). (a) `/clear` clears it for everyone: a running child asks again for anything not yet approved (more prompts, never fewer). (b) Keep the child's approvals: split the store per generation (a new object for the main agent and future children, the old one kept by running children), which also splits the ask lane, so two dialogs could race. **Recommend (a)**: the safe direction, one line of code, and the lane stays single.
 
+**Owner (2026-11-09): (a) — `/clear` clears the session approvals for everyone (running children ask again).**
+
 **QC — The old chat is no longer a separate session.** Today `/clear` leaves the old chat in `--resume` / `/sessions`. With the reset it is a superseded segment: dropped from the file when `keepSuperseded` is off (default), kept but unviewable when on (no viewer exists, `config/src/key-docs.ts:743-750`). (a) Accept the loss, like compaction today; the CHANGELOG says so. (b) `/clear` forks the old history into its own read-only session (a new id, the old messages), listed in `--resume` / `/sessions`: the laptop store writes it from its own copy (the `saveAside` machinery, `daemon/src/session-log-store.ts:367-388`, under a normal name), and `serve` writes it as an archived record. The live session keeps its id and its jobs. About +M, both stores. (c) Always keep the superseded segment for a clear, and build a viewer later. **Recommend (b) as its own follow-up task (`feat/clear-fork-history`), right after this one**, shipping this task with (a) meanwhile. The fork does not touch the background work, so it does not belong in this load-bearing branch, and (c) keeps bytes nobody can see.
+
+**Owner (2026-11-09): (b), as a follow-up task `feat/clear-fork-history` right after this one; THIS task ships with (a) (the loss is stated in the CHANGELOG).**
+
+## Execution
+
+*— claude-sonnet-5-5, 2026-11-09*
+
+**Status: PARTIAL** — everything in the plan is built and gated, but the items under "Not done / not verified" below are open, and the mandatory fresh-context Review has not run.
+
+### Re-proof of the load-bearing assumption (first step)
+
+`bun run .tentacle/tmp/clear-keeps-jobs/probe-reset.ts` re-run on this tree before any edit, and again after the last edit: identical output (ask by the same session, both exits streamed, `subagent_background(sa-1)` re-emitted at the segment start then `subagent_end(sa-1)`, `pendingExits 2`, `subagents` 1 → 0 only when the child ended). The daemon tests T5–T8 then pin it on the real `clear()` path.
+
+### Done, in the plan's Files order
+
+1. **Protocol** — `methods.ts` (`Method.Clear`, `RequestSchemas`), `session.ts` (`ClearParams/Result`), `updates.ts` (`reason` gains `clear`, doc), `version.ts` (`PROTOCOL_VERSION = 21` + comment), `schema:export` (`protocol.json`). T1 = `protocol/test/clear.test.ts`; `json-schema.test.ts` got the two `session/clear` fixtures.
+2. **Core** — `NOTE_KIND.stillRunning = "still_running"` (`core/src/model.ts`).
+3. **Agent** — `Session.clearConversation` (`session.ts:266`), `SessionGrants.clear` (`session-grants.ts`), `sessionTitle` skips noted user messages (`session-store.ts`).
+4. **Daemon** — `titleInput` skips noted user messages (`session-title.ts`); `HostedSession.clear()` (`hosted-session.ts:2392`) in the plan's order with the title reset BEFORE the barrier; `historyReplaced` accepts `"clear"` and logs `base.reason: "compact"` for it; `Connection` case + `clear()` (`connection.ts:248,367`), synchronous, no lock.
+5. **Client** — `RemoteClient.clear` (`"once"`, `remote-client.ts:1411`), `RemoteSession.clear` (`remote-session.ts:664`), the activity `reason` now carries `clear`, and `history` takes `replaced.reason` instead of the hard-coded `"compact"`.
+6. **CLI** — `PersistingController.clear` = `inner.clear()` then `flush()` (`local-runtime.ts:440`).
+7. **TUI** — new pure `clear-command.ts` (`clearCommandStep`, `clearFailedNotice`, `clearErrorNotice`, `CLEARED_ELSEWHERE_NOTICE`); `turn-feed.ts` (`historyAction`: `clear` → `replace`); `App.tsx`: `SessionController.clear?`, refs `clearingRef/ownClearsRef/clearAfterTurnRef/runClearRef`, `runClear` (`:1857`, both settle paths wrapped in try/catch, nothing escapes a void promise), the `/clear` case (`:1948`), the stop-then-clear latch consumed in the turn's settle block (`:1338,1353`), the `history{clear}` branch (resets `expandAll`/`expandedIds`; pushes the "cleared on another device" notice AFTER the replace, only when not own), and `swapSession` resets the three refs.
+8. **Docs** — CHANGELOG `[Unreleased]` / Changed entry (says the old chat is no longer kept as a separate session); owner answers recorded under QA–QC; metadata `Suited:` set to Sonnet; this section. `TODO.md` untouched (as instructed).
+
+### Drift from the Implementation (and why)
+
+- **`Session.clear` → `Session.clearConversation`.** The plan's name made the in-process agent `Session` structurally satisfy the TUI's `SessionController.clear?(): Promise<…>` with a *synchronous* method; `tsc` caught it (`App.tsx:695`). Worse, the TUI would have taken the in-process fallback for clear-capable and called a sync reset with no daemon barrier. Renamed (agent, daemon call, agent test, doc).
+- **Mid-turn `/clear` was refused before any step ran.** `/clear` is in `SESSION_MUTATING` (`commands.ts`), so the App's guard (`App.tsx:1934`) printed "Can't run /clear while a turn is running". The guard now exempts `/clear` only when the session can `clear`; the legacy close-and-replace stays refused mid-turn (test T19f). Found by T19e failing, not by reading.
+- **Four exact-version pins moved with the bump**, not in the plan: `protocol/test/subagent-background.test.ts` and `subagents-update.test.ts` (`toBe(20)` → `>= 20`), `daemon/test/version-mismatch.test.ts` (`toBe(20)`, the worded message `daemon 20` and `protocol: 20` → 21; test title extended).
+- **Extra `clearErrorNotice`** (plan FM 4 asked for the "no answer — the screen follows the daemon when the link is back" wording on a link error): pure, matches `/not retried/i` (the client's `DROPPED_NOT_RETRIED` text; the TUI cannot import the client). Not in the plan's file list.
+- **Tests added beyond the table:** `T19f` (legacy refused mid-turn), the `clearErrorNotice` row in T17, a second T2 case (nothing running → just the system prompt), and `clear-connection.test.ts` for T14 (a new file, not an edit of `connection-*.test.ts`).
+- The stale barrier comment ("except `/clear`'s new session") was corrected.
+
+### Evidence per test (RED, then GREEN, then mutation → RED → restored)
+
+RED = the failing run on the tree before that slice's implementation. Honest limit: for T1, T17 and T14 the RED was an import / missing-symbol error (the symbol did not exist yet); their *assertion* red is the mutation run.
+
+| T | RED (before the slice) | GREEN | Mutation → result |
+|---|---|---|---|
+| T1 `protocol/test/clear.test.ts` | import error: `ClearParamsSchema` not exported | 3 pass | drop `"clear"` from the enum → "history_replaced accepts reason clear" fails (`Expected: true / Received: false`) |
+| T2 `agent/test/session.test.ts` | 2 fail (`clearConversation` missing) | 2 pass | `if (true)` (always append the note) → the "nothing running" case fails |
+| T3 `agent/test/session-grants.test.ts` | fail | pass | `waiters.length = 0` in `clear` → timed out 5000 ms (waiter lost) |
+| T4 `agent/test/session-store.test.ts`, `daemon/test/session-title.test.ts` | 2 fail | pass | drop the `note === undefined` filters → both fail |
+| T5–T13 `daemon/test/clear.test.ts` | 9 of 9 fail (`hosted.clear` missing) | 9 pass | T5: skip `logSegmentFacts` → T5 + T11 red · T6: `jobs.dispose()` in clear → T6 red · T7: `subagents: []` for clear → T7 red · T8: log `"clear"` as `base.reason` → T5 + T8 red · T9: grants+title reset before `assertIdle` → T9 red · T10: skip `grants.clear()` → T10 red · T11: title reset after the barrier → T11 red · T12: skip `lastEndBad = false` → T12 red · T13: `compactionSummary = undefined` → T13 red |
+| T14 `daemon/test/clear-connection.test.ts` | the first run failed on my own test (a prompt answers at the turn's *start*): fixed by retrying until idle | pass | `await` a never-resolving promise before `clear()` → timed out 5000 ms |
+| T15 `client/test/foreign-turns.test.ts`, `reattach.test.ts` | 2 fail (`session.clear` missing) | 85 pass | hard-code `"compact"` → foreign-turns T15 red · `"keyed"` instead of `"once"` → reattach T15 red |
+| T16 `cli/test/local-runtime.test.ts` | fail (`ctl.clear` undefined) | 70 pass | drop `flush()` → T16 red |
+| T17 `tui/test/clear-command.test.ts` | import error (module absent) | pass | swap the `running`/`ownTurn` branch → "own running turn" row red |
+| T18 `tui/test/turn-feed.test.ts` | fail (`notice`/`none` returned) | pass | `none` for an own clear → red |
+| T19a–f `tui/test/clear.test.tsx` | a, b, c, e fail (d is the unchanged legacy path: green on both, by design; f added after e's root cause) | 6 pass | legacy path always → a, b, e red · no stop-then-clear → e red · exempt `/clear` from the guard for every session → f red |
+
+Every mutation was a `cp` backup → edit → run → `cp` restore; the `shasum` after restoring matched the pre-mutation hash for `hosted-session.ts` (`4b364a2b…`) and `App.tsx` (`199bcb9f…`); the other files were restored from backup and checked with `git diff` showing only the intended hunks.
+
+### Gate (this tree, final)
+
+- `bunx tsc --noEmit`: clean. `bunx tsc -p apps/mobile`: clean.
+- `bunx biome check .`: clean (0 errors, 0 warnings; one `--write` pass fixed formatting/import order in 7 files).
+- `bun test packages` (final run): **6114 pass, 3 skip (the opt-in ones), 1 fail** — `packages/exec/test/confinement.test.ts` "F2: a hard link to a file outside every root…". It is unrelated to this change (no file under `packages/exec` is touched) and it is **not stable**: across my three full runs the `exec` failures were 2, 0, then 1; `bun test packages/exec` alone is 92 pass / 0 fail. I did not run it on a pristine `main` (no git state changes allowed), so "pre-existing" is an inference, not a measurement. The one other failure I hit (`version-mismatch.test.ts`) was mine and is fixed.
+- `bun test scripts` (reads `CHANGELOG.md`): 39 pass.
+
+### Not done / not verified
+
+1. **The `packages/exec` flake above** is not proven pre-existing on `main`.
+2. **T20** (`client/test/clear.e2e.test.ts`, real `SessionHost` + `Connection` + `RemoteClient`, "a job survives `/clear` and a second client sees the cleared chat") **was not written.** The pieces are covered separately (daemon T5–T8 on the real `HostedSession`; client T15 over a real daemon with two devices for the `history{clear}` activity; connection T14), but no single test runs a job exit through the whole stack after a clear.
+3. **T19 "keeps the sub-agent count"** (frames) is not asserted: the App does not touch the sub-agent list on a clear and no test raises one. By construction only.
+4. **Failure modes 7 (session closed elsewhere during the clear), 8 (`serve` restart after a clear), 9 (laptop save fails after the clear), 10/11 (pod link drop, real version skew)** have no dedicated test. 9 is the existing `onFlushError` path; 11 is the existing `VersionMismatch` test (updated to 21); 8 follows the unchanged reload rules; 7 and 10 follow the `UnknownSession` / link-drop paths. None was exercised for `/clear` specifically.
+5. **Not run in a real terminal / real pod / real `serve`.** Everything above is unit/integration with fakes (`FakeJobs`, in-memory channels, ink-testing-library). The in-place `/clear` has not been seen end to end by a person.
+6. **Title (FM 15):** clients keep showing the old model title until the next one arrives (`session_title` cannot say `auto`) — as planned, unchanged.
+7. **The fresh-context Opus Review (mandatory for this blast radius) has not been done.** This section is the implementer's own account.
+8. `TODO.md` was not touched, per instruction; nothing was committed.

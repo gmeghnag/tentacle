@@ -22,6 +22,8 @@ import { ResolvePermissionParamsSchema, ResolvePermissionResultSchema } from "./
 import { LogParamsSchema, LogResultSchema } from "./session-log.ts";
 import {
   CancelParamsSchema,
+  ClearParamsSchema,
+  ClearResultSchema,
   CloseParamsSchema,
   CloseResultSchema,
   CompactParamsSchema,
@@ -64,6 +66,8 @@ export const Method = {
   SessionDelete: "session/delete",
   Prompt: "session/prompt",
   Compact: "session/compact",
+  /** Reset the conversation in place; background work stays (docs/feat/clear-keeps-jobs.md). */
+  Clear: "session/clear",
   /** Apply a laptop's settings to a live session, between turns (docs/feat/session-settings-apply.md). */
   UpdateSettings: "session/update_settings",
   Snapshot: "session/snapshot",
@@ -113,6 +117,7 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.SessionDelete]: { params: DeleteParamsSchema, result: DeleteResultSchema },
   [Method.Prompt]: { params: PromptParamsSchema, result: PromptResultSchema },
   [Method.Compact]: { params: CompactParamsSchema, result: CompactResultSchema },
+  [Method.Clear]: { params: ClearParamsSchema, result: ClearResultSchema },
   [Method.UpdateSettings]: {
     params: UpdateSettingsParamsSchema,
     result: UpdateSettingsResultSchema,

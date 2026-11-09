@@ -25,8 +25,8 @@ const row = {
 };
 
 describe("the subagents update (6a-2)", () => {
-  test("the protocol version did not move: the update is display-only", () => {
-    expect(PROTOCOL_VERSION).toBe(20);
+  test("the update is display-only (no bump of its own; 20 when it landed)", () => {
+    expect(PROTOCOL_VERSION as number).toBeGreaterThanOrEqual(20);
     expect(UPDATE_CLASS.subagents).toBe("display");
   });
 

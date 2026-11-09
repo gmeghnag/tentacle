@@ -99,7 +99,7 @@ export type SessionActivity =
   | {
       readonly kind: "history";
       readonly messages: readonly ChatMessage[];
-      readonly reason: "compact" | "context_reset" | null;
+      readonly reason: "compact" | "context_reset" | "clear" | null;
     }
   /** The session ended daemon-side (another device's close / delete, the reaper). */
   | { readonly kind: "closed"; readonly reason: EndReason };
@@ -208,7 +208,7 @@ export class RemoteSession implements SessionStreamListener {
    * stamped the barrier with.
    */
   private replaced: {
-    readonly reason: "compact" | "context_reset";
+    readonly reason: "compact" | "context_reset" | "clear";
     readonly turnId: string | null;
   } | null = null;
   /** The session ended daemon-side (`session_closed`): a later send is refused clearly. */
@@ -658,6 +658,14 @@ export class RemoteSession implements SessionStreamListener {
     }
     // A resumed session not opened yet: its seed is what the first prompt sends.
     return this.client.sessionContext(undefined, this.seedMessages);
+  }
+
+  /** Reset the remote conversation in place (no-op if no session was opened yet). */
+  async clear(): Promise<{ before: number; after: number }> {
+    if (!this.id) {
+      return { before: 0, after: 0 };
+    }
+    return this.client.clear(this.id);
   }
 
   /** Compact the remote conversation (no-op if no session was opened yet). */
@@ -1189,7 +1197,12 @@ export class RemoteSession implements SessionStreamListener {
       turn = this.active; // an own prompt not started at the cut (today's reset)
     }
     if (!turn || turn.ended) {
-      this.raise({ kind: "history", messages: out.messages, reason: compacted ? "compact" : null });
+      // `replaced.reason` is `compact` or `clear` here: `context_reset` returned above.
+      this.raise({
+        kind: "history",
+        messages: out.messages,
+        reason: replaced !== null ? replaced.reason : null,
+      });
       return;
     }
     // Everything shown is replaced by the snapshot; tool calls it already

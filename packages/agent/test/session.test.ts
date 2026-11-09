@@ -171,6 +171,77 @@ describe("Session", () => {
   });
 });
 
+describe("Session.clearConversation (docs/feat/clear-keeps-jobs.md, T2)", () => {
+  const idle: ModelProvider = {
+    id: "m",
+    async *stream(): AsyncIterable<StreamEvent> {
+      yield { type: "done" };
+    },
+  };
+  const running: BackgroundJob = {
+    id: "bg-1",
+    command: "sleep 60",
+    startedAt: 0,
+    status: "running",
+    exitCode: null,
+  };
+  class RunningJobs extends FakeJobs {
+    override list(): readonly BackgroundJob[] {
+      return [running];
+    }
+  }
+  const env = {} as ExecutionEnvironment;
+
+  test("with work running: [system, still-running note]; onReplaced once, synchronously", () => {
+    // Mutation: always append the note / call onReplaced after a microtask.
+    const agent = new Agent({
+      model: idle,
+      tools: new ToolRegistry(),
+      env,
+      systemPrompt: "sys",
+      jobs: new RunningJobs(),
+      agentJobs: {
+        list: () => [{ agentId: "sa-1", description: "audit" }],
+        onExit: () => () => {},
+      } as never,
+    });
+    const session = new Session(agent, undefined, {
+      messages: [
+        { role: "system", content: "sys" },
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "yo" },
+      ],
+    });
+    let calls = 0;
+    let seenAtCall: number | undefined;
+    const result = session.clearConversation(() => {
+      calls++;
+      seenAtCall = session.messages.length;
+    });
+    expect(calls).toBe(1);
+    expect(seenAtCall).toBe(2);
+    expect(result).toEqual({ before: 3, after: 2 });
+    expect(session.messages[0]?.role).toBe("system");
+    const note = session.messages[1];
+    expect(note?.role).toBe("user");
+    expect(note?.note?.kind).toBe("still_running");
+    expect(note?.content).toContain("bg-1");
+    expect(note?.content).toContain("sa-1");
+  });
+
+  test("with nothing running: just the system prompt (no note)", () => {
+    const agent = new Agent({ model: idle, tools: new ToolRegistry(), env, systemPrompt: "sys" });
+    const session = new Session(agent, undefined, {
+      messages: [
+        { role: "system", content: "sys" },
+        { role: "user", content: "hi" },
+      ],
+    });
+    expect(session.clearConversation()).toEqual({ before: 2, after: 1 });
+    expect(session.messages.map((m) => m.role)).toEqual(["system"]);
+  });
+});
+
 describe("Session.pendingSteering", () => {
   test("the queued messages, in order, as a copy (a persister must not alias the live queue)", () => {
     // Mutation: return the live array → the caller's mutation empties the queue.

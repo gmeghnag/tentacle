@@ -223,3 +223,32 @@ describe("SessionGrants — one store for the tree", () => {
     expect(ran).toBe(false);
   });
 });
+
+describe("SessionGrants.clear (docs/feat/clear-keeps-jobs.md, T3)", () => {
+  test("empties tools and shell prefixes; a waiter in the ask lane is still admitted", async () => {
+    // Mutation: reset the lane too → the waiter is dropped / never admitted.
+    const grants = new SessionGrants();
+    grants.remember(edit, { suggestion: undefined } as never);
+    grants.remember(shell, { suggestion: { prefix: "bun test" } } as never);
+    expect(grants.covers(edit, { path: "x" })).toBe(true);
+    expect(grants.covers(shell, { command: "bun test a" })).toBe(true);
+
+    const holder = deferred<void>();
+    const order: string[] = [];
+    const first = grants.serial(new AbortController().signal, async () => {
+      order.push("first");
+      await holder.promise;
+    });
+    const second = grants.serial(new AbortController().signal, async () => {
+      order.push("second");
+    });
+    grants.clear();
+    expect(grants.covers(edit, { path: "x" })).toBe(false);
+    expect(grants.covers(shell, { command: "bun test a" })).toBe(false);
+    expect(order).toEqual(["first"]);
+    holder.resolve();
+    await first;
+    await second;
+    expect(order).toEqual(["first", "second"]);
+  });
+});

@@ -27,6 +27,7 @@ import {
   countTokensBounded,
 } from "@tentacle/core";
 import {
+  type ClearResult,
   type ClientInfo,
   type CompactResult,
   DomainErrorCode,
@@ -1399,6 +1400,18 @@ export class RemoteClient {
       "keyed",
       onSent,
     ).then((result) => result as PromptResult);
+  }
+
+  /**
+   * Reset the conversation in place (`/clear`, docs/feat/clear-keeps-jobs.md).
+   * Not re-sent after a drop: a lost answer converges through the resync (the
+   * replay or snapshot shows the cleared chat if it landed); a repeat would
+   * clear a chat the user has since typed into.
+   */
+  clear(sessionId: string): Promise<{ before: number; after: number }> {
+    return this.sessionCall(sessionId, Method.Clear, { sessionId }, "once").then(
+      (result) => result as ClearResult,
+    );
   }
 
   /** Not re-sent after a drop (no idempotency key: a second compaction would summarise a summary). */
