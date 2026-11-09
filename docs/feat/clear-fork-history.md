@@ -876,3 +876,56 @@ Restored (`git diff --stat` unchanged from the five intended files) → `2 pass,
 
 - None from the Review's fixes. One implementation detail worth naming: `advance` moved after the lock/skip inside `writeFork`, so a skipped fork does not touch the source's writer state (it only deletes its own when it has no sidecar). The `landed` check is under the fork's lock, as the Review asked.
 - M2 needed no code change, as the Review said (the ordering was already right). Its test is red only under the mutation, shown above.
+
+## Review — round 2
+
+*— claude-opus-5-5, 2026-11-09* (the same reviewer and context as round 1, on the fix commit `6f8cc09` by DeepSeek.)
+
+**Verdict: REQUEST-CHANGES (tests only).** The three production fixes are correct and the round 1 repros now pass. Two guards the fixes rely on have no test: both survive a mutation, and each one, if broken, is a silent loss of the old chat. No production code needs to change.
+
+### Round 1 findings
+
+| Finding | Status | Evidence |
+|---|---|---|
+| H1 | Fixed as specified | `review-retry-regress.ts` now keeps the fork's log and sidecar, the second prompt continues it, there is no `.aside`, and the reload gives the continued chat. Red shown in Execution. |
+| M1 | Code fixed; test incomplete (R2-M1) | `review-stale-copy.ts`: `keepFork 5 messages`, `fork holds latest turn: true`. Red shown in Execution for the stale copy. |
+| M2 | Fixed | Mutation (sidecar before log): the `M2` test fails. |
+
+### Findings
+
+**R2-M1. "A read started after the clear is never the copy" is not pinned.** `packages/cli/test/clear-fork-controller.test.ts:149-150`, guarding `packages/cli/src/local-runtime.ts:338`.
+
+Round 1 asked for this assertion. Mutation `const pre = true`: all tests pass. The test's own comment says the `AFTER` history makes such a read detectable, but `held` only becomes `AFTER` once `answered` has resolved, so the read started after `clearSent` still returns `NEWEST`. Failure scenario if the guard regresses: a post-clear read becomes `lastRead`, `forkableMessages` returns null, no fork is written, and the save that follows drops the old chat with no notice.
+
+Fix: swap the two lines of the fake's `clear`, so `held = readOf(AFTER, "h-cleared")` comes before `await answered.promise` (the daemon reset the history; its reply is still on the way). The `again` read then returns `AFTER` before the clear settles, and `expect(forks[0]?.messages).toEqual(NEWEST)` goes red under the mutation.
+
+**R2-M2. "A log without its sidecar still goes through" is not pinned.** `packages/daemon/src/session-log-store.ts:567`; the gap is in `packages/daemon/test/session-log-store.test.ts`.
+
+Mutation: `landed` returns `true` as soon as the log exists: all tests pass. This is the case where the skip would hide a fork that really needs its write. If the guard regresses: the log lands, the sidecar write fails, the retry is skipped, and the source's next write drops the old chat, while `serve` indexes from `.state.json` (`session-log-store.ts`, the listing filter), so the fork is never listed after a restart.
+
+Fix: a store test with an `io` whose `writeDurable` rejects while a flag is set for paths containing `f1.state.json`. With a sidecar on the update: `fork` rejects with `ForkWriteError` and `f1.jsonl` exists; clear the flag; the source's next `write` resolves and `f1.state.json` exists.
+
+### Attacks on the fixes
+
+| Attack | Result |
+|---|---|
+| `landed` hiding a fork that needs a rewrite | Holds in the code. The log is written by temp + rename, so an existing log is complete, and a failing `stat` counts as absent, so the write is attempted and fails loudly. The sidecar branch is correct but unpinned (R2-M2). |
+| `landed` racing the sweep's `writeRecord` | Holds. The check and `advance` both run under the fork's lock. |
+| `clearSent` leaking on an error path | Holds. It is set immediately before the `try` and reset in `finally`. The `flush()` in the `catch` starts its read while the flag is still set, so that one read is not a copy candidate; the next pre-clear flush replaces it. |
+| Lock order and deadlock | Holds, argued from the code. The only nested order is source then fork (the `write` branch); the `fork` op takes only the fork's lock. A fork of a reopened fork nests onto a newly minted id, so no cycle can form, and every wait is bounded by `lockWaitMs`. |
+| First fork attempt failing at the lock (`advance` now runs after it) | Below MEDIUM, a small regression from round 1. `review-lock-fail.ts`: the sweep's unit fails with `no complete log segment to save yet`, and the source's next write lands the fork. It stays unhealed only if the source is deleted before writing again; a restart then loses the resident row. |
+| A paged pre-clear read that spans the clear | Below MEDIUM, argued from the code. `run` has not assigned `lastRead` by the time the clear is answered, so the fork holds the previous read, as before the fix. It needs a read slower than 3 s and a delta larger than one page. |
+
+### Mutations (round 2)
+
+| Mutation | Result |
+|---|---|
+| `writeFork`: sidecar before log | `M2` fails: non-vacuous |
+| `landed` ignores the sidecar | Survives: R2-M2 |
+| `const pre = true` | Survives: R2-M1 |
+
+The three were applied together; the one failing test is named for its own mutation. All were reverted by inverse edits, and `git status` was clean before this section was written.
+
+### Gate
+
+`bun run check` on the fix commit: typecheck and Biome passed (the script stops before the tests otherwise), **6202 pass, 3 skip (the opt-in ones), 0 fail**, 6205 tests across 433 files.
