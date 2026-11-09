@@ -1,6 +1,6 @@
 # fix/key-commands-only-for-model-commands — a key command runs only where a model is used
 
-> **Status:** review
+> **Status:** done — Review PASS with nits (Sonnet); LOW-1 and nit-2 applied by the orchestrator; merged 2026-11-09
 > **Branch:** `fix/key-commands-only-for-model-commands`
 > **Type: fix · Size: S · Blast: cross-module · Suited: deepseek-v4.1-flash (tentacle) executes; standard in-context Review (no §7 invariant touched — see Design)**
 
@@ -94,7 +94,7 @@ key command at all, and the commands that need no key do not read one.
 
 ### The classification (every CLI subcommand)
 
-`CliMode` (`packages/cli/src/flags.ts:634`) has 13 members; `SUBCOMMANDS`
+`CliMode` (`packages/cli/src/flags.ts:634`) has 15 members; `SUBCOMMANDS`
 (`:524`) adds the `install` alias (→ `package install`). Evidence is the code
 each mode reaches after `main`'s dispatch.
 
@@ -390,3 +390,33 @@ None left open — the two decisions taken without asking, and why:
    case lenient, since both are `mode === "empty"`, so it would need a
    `terminal.stdin` argument in `modeUsesModel`. Not recommended.
 
+
+### Fresh-context review
+
+**Verdict: PASS with nits.**
+
+Gate (re-run): `bunx tsc --noEmit` exit 0; `bun run lint` 768 files, clean; `bun test packages` 5894 pass / 3 skip / 0 fail (5897 tests, 398 files).
+
+**Findings**
+
+- LOW-1 `packages/config/src/load.ts:113-120` — the doc comment of `podDaemon` still says "A pod daemon's load (`serve --model-proxy`, …)". The meaning is now wider (`main.ts:740` passes it for ps/rm/hooks/package). Exact fix, comment only (no rename, no behaviour change): replace the first sentence with "A load that needs no key: a pod daemon's (`serve --model-proxy`, `--resident-status`, `--resident-stop`) and a command that never calls a model (`ps`, `rm`, `hooks`, `package`: `modeUsesModel`, docs/fix/key-commands-only-for-model-commands.md)." Keep the rest. A rename (`skipKeys`) is NOT worth it: 6 call sites + tests for no behaviour gain.
+- nit-2 Implementation says `CliMode` has 15 members; it has 15 (the executor's Review has it right). Doc only.
+- nit-3 `main.ts:733-738` comment names "(`ps`, `rm`, `hooks`, `package`)" only; `connect/update/explain/config` return earlier (OK, stated in flags.ts).
+
+No HIGH/MEDIUM.
+
+**(1) Classification — attacked per mode.** `false` modes: `ps`/`rm` use `config.configDir` only (`main.ts:789`); `hostFor` builds from the kept entry (`engine-select.ts:290`), `residentStop`/relay probing dial by run dir, not by config; the relay holds its own model key (it is launched with its own `loadConfig`, not this one). `hooks` → trust store at `configDir`; `package` → `configDir` + `packagesEnabled` (`podDaemon` does not change `packagesEnabled`). None reaches a provider. `connect/update/explain/config` return before `loadConfig`, so the flag is moot. `true` modes: `serve/run/attach/plain/tui/prompt/empty` all build or proxy a model; `empty` is strict (see 4). No `true` mode is wrongly strict.
+
+**(2) `podDaemon` side effects** — grepped every use (`load.ts:534/551/557/754/800/818`): it only (a) skips the main `apiKeyCommand`, (b) skips `resolveModelKeys`' commands, (c) skips `agentTaskDescription`/`File` (and swallows an invalid inline one). `scaffold`, defaults, warnings, masking, `packagesEnabled`, skills/hooks diagnostics are NOT touched. For ps/rm/hooks/package (c) is irrelevant: none builds a system prompt (diagnostics at `main.ts:~820` are after their `return`). Side effect to know, not a bug: with `podDaemon` the resolved `config.apiKey` stays the unresolved/undefined one — nothing reads it on these paths.
+
+**(3) Non-vacuity — re-run.** (a) deleted the `usesModel ? {} : {podDaemon:true}` spread: 4 fail / 5 pass (ps, rm, hooks+package, MAIN-key). (b) my own: `hooks: false → true` in `USES_MODEL`: 2 fail (the hooks/package test and the table test), 7 pass. (The executor's `ps` flip was not re-run; (b) covers the same property for `hooks`.) Restored both; `git status` clean afterwards.
+
+**(4) Decisions.** hooks/package included: sound — same bug, same proof, one line each to undo. `empty` strict: sound; `empty`+terminal is the TUI so it cannot be lenient, and no-terminal `empty` is a usage error nobody scripts. Attacks that found nothing: `rm` deleting a workload (no key needed — engine from the index); `ps` probing a relay (dials socket by run dir); `--profile`/`--model` with these commands (still validated by the load, key-independent).
+
+**Executor honesty.** The Execution matches what I re-ran: counts, the red/green split and the mutation outcomes are true; the two drifts (`Record` instead of `Set`, test paths) are recorded, not hidden, and the doc's own "debt" bullet anticipates LOW-1. The only slip is the 13-vs-15 count in the plan. Reviewed by the same family as no one in the Anthropic sense, but a different model than the executor (DeepSeek); a fresh context.
+
+### Owner questions
+
+None blocking. Optional: apply LOW-1 now (comment only) or leave it as debt.
+
+*— claude-sonnet-5-5, 2026-11-09*
