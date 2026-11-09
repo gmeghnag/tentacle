@@ -86,6 +86,6 @@ describe("session/open.settings (docs/feat/config-carry.md)", () => {
   });
 
   test("protocol 16: without the bump a v15 daemon would strip `settings` silently", () => {
-    expect(PROTOCOL_VERSION).toBe(19);
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(16);
   });
 });

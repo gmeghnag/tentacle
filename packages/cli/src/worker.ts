@@ -128,6 +128,7 @@ port.addEventListener("message", (event: { data: unknown }) => {
         agent: wired.agent,
         permissions: wired.permissions,
         jobs: wired.jobs,
+        agentJobs: wired.agentJobs,
         // The main thread's config (the laptop's): absent with `autoTitle` off.
         ...(wired.titleModel ? { titleModel: wired.titleModel } : {}),
       };

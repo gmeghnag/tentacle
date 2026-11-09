@@ -94,5 +94,5 @@ describe("settings.publishedModels", () => {
 });
 
 test("protocol 19: an older laptop would serve a named call with its main model, silently", () => {
-  expect(P.PROTOCOL_VERSION as number).toBe(19);
+  expect(P.PROTOCOL_VERSION as number).toBeGreaterThanOrEqual(19);
 });

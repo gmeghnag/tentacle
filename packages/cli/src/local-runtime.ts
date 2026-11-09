@@ -186,6 +186,7 @@ function remoteJobsView(client: RemoteClient): JobController {
           status: n.status as JobStatus,
           exitCode: n.exitCode,
           startedAt: Date.now(),
+          ...(n.agent ? { agent: n.agent } : {}),
         }),
       ),
   };
@@ -371,6 +372,10 @@ export function persistingController(
     await bounded(flushed(), FLUSH_ON_EXIT_TIMEOUT_MS);
   };
   const unsubscribeTitle = inner.onTitle(() => flush());
+  // A background sub-agent's report can land while nobody streams (the session
+  // is idle): only this save puts its `end` on the laptop's log (M5,
+  // docs/feat/subagent-background.md). `?.`: unit-test fakes of a session.
+  const unsubscribeAgentExit = inner.onAgentExit?.(() => flush());
   // A turn that ends while nobody iterates it (an attach mid-turn, R9) still
   // gets its end saved: only that save makes the session confirmed again.
   // (A turn somebody iterates saves itself when its stream ends: `saved`.)
@@ -479,6 +484,7 @@ export function persistingController(
     close() {
       closed = true;
       unsubscribeTitle();
+      unsubscribeAgentExit?.();
       unsubscribeIdle?.();
       void flushed().then(() => inner.close());
     },

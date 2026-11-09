@@ -51,9 +51,11 @@ import type {
 import {
   type AgentJob,
   AgentJobLedger,
+  type AgentJobs,
   type ChatMessage,
   type JobController,
   type ModelProvider,
+  NOTE_KIND,
   type PermissionBroker,
   type PermissionRequest,
   type PermissionRequestOptions,
@@ -74,6 +76,7 @@ import {
   type LogResult,
   MAX_SESSION_TITLE,
   type PermissionOutcome,
+  type PermissionRequestUpdate,
   type PromptResult,
   type QueueState,
   type QueuedEntry,
@@ -176,8 +179,17 @@ interface PendingAsk {
    * offered `reply`; empty otherwise (docs/feat/permission-reply.md).
    */
   readonly replyable: ReadonlySet<string>;
-  /** What the record says of it while it is unanswered (`turn.pending`). */
-  readonly record: PendingPermission;
+  /**
+   * What the record says of it while it is unanswered (`turn.pending`). `null`:
+   * a BACKGROUND child's ask — never on disk (the child is lost on a reload).
+   */
+  readonly record: PendingPermission | null;
+  /**
+   * A background child's ask: the request, offered again at every attach and
+   * right after every `history_replaced`, because the parent keeps committing
+   * (the cut moves past it) and a barrier withdraws what nothing re-offers.
+   */
+  readonly reoffer?: PermissionRequestUpdate;
   /** Streamed to the clients yet (only once its record is durable). */
   shown: boolean;
   /**
@@ -418,6 +430,14 @@ export class HostedSession {
   private closed = false;
   private readonly jobs: JobController | undefined;
   private readonly unsubscribeExit: (() => void) | undefined;
+  /**
+   * The background sub-agent runtime (controllers + the cap), carried across a
+   * settings sync. The DURABLE half is `agentJobs` (the ledger), below.
+   */
+  private readonly agentRuntime: AgentJobs | undefined;
+  private readonly unsubscribeAgentExit: (() => void) | undefined;
+  /** Background child id → the turn that spawned it (its ask names it on the wire). */
+  private readonly spawnTurns = new Map<string, string>();
   private readonly now: () => number;
   /** Liveness stamps for the reaper (meaning: `SessionLiveness`). */
   private lastActiveAt: number;
@@ -482,6 +502,7 @@ export class HostedSession {
     titling: SessionTitling = {},
     wake?: SessionWake,
     logOptions: SessionLogOptions = {},
+    agentRuntime?: AgentJobs,
   ) {
     this.id = id;
     this.now = now;
@@ -581,6 +602,33 @@ export class HostedSession {
       // The daemon may wake (re-checked on the macrotask).
       this.kickWake();
     });
+    // A background sub-agent: the id and the markers go through this session's
+    // ledger; its exit rides `background_exit` like a shell job's, and wakes.
+    this.agentRuntime = agentRuntime;
+    agentRuntime?.bind({
+      launched: (spec) => {
+        const agentId = this.backgroundAgent(spec);
+        if (this.activeTurnId !== null) {
+          this.spawnTurns.set(agentId, this.activeTurnId);
+        }
+        return agentId;
+      },
+      ended: (agentId, stopReason, report) => {
+        this.spawnTurns.delete(agentId);
+        this.agentEnded(agentId, stopReason, report);
+      },
+    });
+    this.unsubscribeAgentExit = agentRuntime?.onExit((exit) => {
+      this.emit({
+        type: "background_exit",
+        jobId: exit.agentId,
+        command: wireLine(exit.description, 512),
+        status: exit.stopReason === "cancelled" ? "killed" : "exited",
+        exitCode: null,
+        agent: { stopReason: exit.stopReason, toolUses: exit.toolUses },
+      });
+      this.kickWake();
+    });
     // A turn suspended at the restart is running again (it holds the slot)
     // BEFORE the first write below, with its steers queued and its old pending
     // entry kept: that write must still read "suspended on this call" — never
@@ -639,6 +687,10 @@ export class HostedSession {
     req: PermissionRequest,
     options?: PermissionRequestOptions,
   ): Promise<PermissionResponse> {
+    // A BACKGROUND child's ask outlives any turn: it has its own path.
+    if (options?.agent?.id !== undefined) {
+      return this.awaitBackgroundDecision(req, options, options.agent.id);
+    }
     const signal = this.compacting ? undefined : this.controller?.signal;
     if (!signal || signal.aborted) {
       // No live turn to ask for: a cancel landed between `tool_start` and the
@@ -678,30 +730,7 @@ export class HostedSession {
       requestedAt: this.now(),
       ...(groupStart !== undefined ? { groupStart } : {}),
     };
-    const decided = new Promise<{ outcome: PermissionOutcome; reason?: string; message?: string }>(
-      (resolve) => {
-        const onAbort = (): void => this.settle(requestId, { outcome: "cancelled" });
-        this.asks.set(requestId, {
-          offered: new Set(update.options.map((o) => o.optionId)),
-          replyable: new Set(
-            update.reply
-              ? update.options.filter((o) => o.kind.startsWith("reject_")).map((o) => o.optionId)
-              : [],
-          ),
-          record,
-          shown: false,
-          settle: (outcome, reason, message) => {
-            signal.removeEventListener("abort", onAbort);
-            resolve({
-              outcome,
-              ...(reason !== undefined ? { reason } : {}),
-              ...(message !== undefined ? { message } : {}),
-            });
-          },
-        });
-        signal.addEventListener("abort", onAbort, { once: true });
-      },
-    );
+    const decided = this.registerAsk(requestId, update, record, signal);
     // The resumed call asked again: its live ask replaces the record's entry.
     if (toolCallId !== undefined) {
       this.carried = this.carried.filter((p) => p.toolCallId !== toolCallId);
@@ -742,6 +771,109 @@ export class HostedSession {
       const response = outcomeToResponse(outcome);
       return message !== undefined ? { ...response, message } : response;
     });
+  }
+
+  /**
+   * Register one unanswered ask under `requestId` and return the promise its
+   * first settle resolves; `signal`'s abort settles it `cancelled`. Shared by a
+   * turn's ask (`awaitDecision`, with a record) and a background child's
+   * (`awaitBackgroundDecision`, with none and a `reoffer`).
+   */
+  private registerAsk(
+    requestId: string,
+    update: PermissionRequestUpdate,
+    record: PendingPermission | null,
+    signal: AbortSignal,
+    reoffer?: PermissionRequestUpdate,
+  ): Promise<{ outcome: PermissionOutcome; reason?: string; message?: string }> {
+    return new Promise((resolve) => {
+      const onAbort = (): void => this.settle(requestId, { outcome: "cancelled" });
+      this.asks.set(requestId, {
+        offered: new Set(update.options.map((o) => o.optionId)),
+        replyable: new Set(
+          update.reply
+            ? update.options.filter((o) => o.kind.startsWith("reject_")).map((o) => o.optionId)
+            : [],
+        ),
+        record,
+        ...(reoffer ? { reoffer } : {}),
+        shown: false,
+        settle: (outcome, reason, message) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve({
+            outcome,
+            ...(reason !== undefined ? { reason } : {}),
+            ...(message !== undefined ? { message } : {}),
+          });
+        },
+      });
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  /**
+   * A background child's ask (docs/feat/subagent-background.md, H3). It is held
+   * APART from every turn: it settles with the CHILD's signal (never a turn's
+   * Esc), is shown whether or not a turn runs, names the spawning turn on the
+   * wire, and writes nothing — no `turn.pending`, never `carried`, `inFlight`
+   * or `compacting` (the child is lost on a reload, so a record would only
+   * make a reload run a call twice). Offered again at every attach and after
+   * every barrier (`reofferBackgroundAsks`).
+   */
+  private awaitBackgroundDecision(
+    req: PermissionRequest,
+    options: PermissionRequestOptions,
+    agentId: string,
+  ): Promise<PermissionResponse> {
+    const signal = options.signal;
+    if (this.closed || !signal || signal.aborted) {
+      return Promise.resolve(outcomeToResponse({ outcome: "cancelled" }));
+    }
+    const unsupported = this.blockingUnsupported("permission_request");
+    if (unsupported !== undefined) {
+      return Promise.resolve({ allowed: false, reason: unsupported });
+    }
+    const requestId = crypto.randomUUID();
+    const spawnTurn = this.spawnTurns.get(agentId);
+    const update: PermissionRequestUpdate = {
+      ...toPermissionRequestUpdate(requestId, options.toolCallId || "pending", req, options.agent),
+      ...(spawnTurn !== undefined ? { turnId: spawnTurn } : {}),
+    };
+    const decided = this.registerAsk(requestId, update, null, signal, update);
+    const ask = this.asks.get(requestId);
+    if (ask) {
+      ask.shown = true;
+    }
+    try {
+      this.emit(update);
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    return decided.then(({ outcome, reason, message }) => {
+      if (reason !== undefined) {
+        return { allowed: false, reason };
+      }
+      const response = outcomeToResponse(outcome);
+      return message !== undefined ? { ...response, message } : response;
+    });
+  }
+
+  /**
+   * Emit each pending background ask again (same `requestId`, a new `seq`): the
+   * parent keeps committing, so a fresh attach's replay from the cut would no
+   * longer reach the first one, and a barrier's snapshot keeps only the
+   * requests the replay re-offers. The router dedupes by id.
+   */
+  private reofferBackgroundAsks(): void {
+    for (const ask of [...this.asks.values()]) {
+      if (ask.reoffer !== undefined && ask.shown) {
+        try {
+          this.emit(ask.reoffer);
+        } catch (error) {
+          this.reportTurnError(error);
+        }
+      }
+    }
   }
 
   /**
@@ -854,7 +986,7 @@ export class HostedSession {
 
   /** What is pending now, in request order: the resumed turn's carried entries, then each live ask. */
   private pendingList(): PendingPermission[] {
-    const live = [...this.asks.values()].map((ask) => ask.record);
+    const live = [...this.asks.values()].flatMap((ask) => (ask.record ? [ask.record] : []));
     return [...this.carried, ...live];
   }
 
@@ -1056,7 +1188,10 @@ export class HostedSession {
       title: titleText(this.title, this.session.messages),
       cwd,
       archived: false,
-      jobs: this.jobs?.list().filter((job) => job.status === "running").length ?? 0,
+      // Shell jobs and background sub-agents (docs/feat/subagent-background.md).
+      jobs:
+        (this.jobs?.list().filter((job) => job.status === "running").length ?? 0) +
+        (this.agentRuntime?.list().length ?? 0),
     };
   }
 
@@ -1065,7 +1200,9 @@ export class HostedSession {
     return {
       id: this.id,
       attached: this.attachments.size,
-      busy: this.running,
+      // A running background sub-agent keeps the session busy (shell jobs do not:
+      // a forgotten dev server is what the TTL frees). docs/feat/subagent-background.md H2.
+      busy: this.running || (this.agentRuntime?.list().length ?? 0) > 0,
       lastActiveAt: this.lastActiveAt,
       lastDetachAt: this.lastDetachAt,
     };
@@ -1095,6 +1232,9 @@ export class HostedSession {
     if (this.closed) {
       throw new Error(`session ${this.id} is closed`);
     }
+    // A pending background ask goes out again BEFORE the replay is computed, so
+    // its frame is in it (the cut may have moved past the first one).
+    this.reofferBackgroundAsks();
     const covered = since !== undefined ? this.replayFrom(since) : undefined;
     let replay: readonly KnownSessionUpdateParams[];
     if (covered !== undefined && "replay" in covered) {
@@ -1297,6 +1437,9 @@ export class HostedSession {
     }
     this.log.subagentEnd(body);
     this.verifyLog();
+    // A child's end is the moment the session may become idle (`SessionLiveness`'s
+    // rule: the stamp is taken when something that keeps it in use ENDS).
+    this.lastActiveAt = this.now();
     this.persist();
   }
 
@@ -1641,11 +1784,13 @@ export class HostedSession {
   reusable(): {
     readonly permissions: PermissionBroker;
     readonly jobs?: JobController;
+    readonly agentJobs?: AgentJobs;
     readonly grants?: SessionGrants;
   } {
     return {
       permissions: this.permissions,
       ...(this.jobs ? { jobs: this.jobs } : {}),
+      ...(this.agentRuntime ? { agentJobs: this.agentRuntime } : {}),
       ...(this.grants ? { grants: this.grants } : {}),
     };
   }
@@ -1745,6 +1890,12 @@ export class HostedSession {
         // The wake turn's start flushed the exits: the agent's count is the truth again.
         if (event.type === "background_exit" && this.wakeUnflushed === turnId) {
           this.wakeUnflushed = null;
+        }
+        // A sub-agent's report note is pushed by this flush: delivery is closed
+        // HERE, not only at the next commit, so a context reset in the same
+        // uncommitted window never re-notes it (task 5 review L3).
+        if (event.type === "background_exit" && event.agent !== undefined) {
+          this.agentJobs.noteSeen({ kind: NOTE_KIND.subagentReport, id: event.jobId });
         }
         let named: AgentEvent = event;
         if (event.type === "steer") {
@@ -2179,6 +2330,9 @@ export class HostedSession {
     } catch (error) {
       this.reportTurnError(error);
     }
+    // The barrier withdraws every request nothing re-offers (the client keeps
+    // only what the replay re-offers): a background ask is offered again.
+    this.reofferBackgroundAsks();
   }
 
   /**
@@ -2250,6 +2404,10 @@ export class HostedSession {
     this.attachments.clear();
     this.unsubscribeExit?.();
     this.jobs?.dispose();
+    // Children abort (their signal settles a pending ask); no `end`, no exit
+    // frame: at a reopen the `bg` without an `end` gives the lost note.
+    this.unsubscribeAgentExit?.();
+    this.agentRuntime?.dispose();
   }
 
   /**

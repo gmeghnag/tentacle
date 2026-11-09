@@ -467,6 +467,7 @@ export function tunnelledAgent(
       ? {
           permissions: options.reuse.permissions,
           ...(options.reuse.jobs ? { jobs: options.reuse.jobs } : {}),
+          ...(options.reuse.agentJobs ? { agentJobs: options.reuse.agentJobs } : {}),
           ...(options.reuse.grants ? { grants: options.reuse.grants } : {}),
         }
       : {}),

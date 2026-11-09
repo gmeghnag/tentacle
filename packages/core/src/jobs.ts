@@ -23,6 +23,8 @@ export interface BackgroundJob {
   readonly status: JobStatus;
   /** Exit code once finished; null while running, or if killed by signal. */
   readonly exitCode: number | null;
+  /** Set on a sub-agent's exit event (`id` is its `sa-N`), never on a shell job. */
+  readonly agent?: { readonly stopReason: string; readonly toolUses: number };
 }
 
 export interface JobOutput {

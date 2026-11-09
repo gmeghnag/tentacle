@@ -109,6 +109,11 @@ export interface SubagentRunControls {
    * child's throwaway id.
    */
   readonly sessionId?: string;
+  /**
+   * Set on a BACKGROUND child (`sa-N`): its asks carry the id and its own
+   * `signal`, so they outlive the launching turn and settle with the child.
+   */
+  readonly agentId?: string;
 }
 
 /**
@@ -117,11 +122,15 @@ export interface SubagentRunControls {
  * These fields WIN over the child gate's own: the child's call ids are unknown
  * to the parent history, so one must never escape — without a parent id the
  * ask carries no `toolCallId` at all.
+ *
+ * `background`: a background child's ask carries the child's id and its own
+ * signal, which the daemon uses to hold the ask apart from any turn.
  */
 export function subagentRequester(
   requester: PermissionRequester,
   parentCallId: string | undefined,
   agent: { readonly type: string; readonly description: string },
+  background?: { readonly id: string; readonly signal: AbortSignal },
 ): PermissionRequester {
   return (req, options) => {
     // A child's call ids are unknown to the parent history: never forwarded.
@@ -130,7 +139,8 @@ export function subagentRequester(
       ...rest,
       ...(parentCallId !== undefined ? { toolCallId: parentCallId } : {}),
       origin: "subagent",
-      agent,
+      agent: background ? { ...agent, id: background.id } : agent,
+      ...(background ? { signal: background.signal } : {}),
     });
   };
 }
@@ -260,10 +270,14 @@ export function createSubagentRunner(deps: SubagentDeps): {
       ...(deps.maxIterations !== undefined ? { maxIterations: deps.maxIterations } : {}),
       ...(deps.requestPermission
         ? {
-            requestPermission: subagentRequester(deps.requestPermission, controls?.toolCallId, {
-              type: type.name,
-              description: opts.description,
-            }),
+            requestPermission: subagentRequester(
+              deps.requestPermission,
+              controls?.toolCallId,
+              { type: type.name, description: opts.description },
+              controls?.agentId !== undefined && controls.signal
+                ? { id: controls.agentId, signal: controls.signal }
+                : undefined,
+            ),
           }
         : {}),
       grants,

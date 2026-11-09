@@ -36,6 +36,9 @@ import type {
 } from "./remote-client.ts";
 import type { StreamOutput } from "./session-reducer.ts";
 
+/** Own turns remembered by `ownsTurn` after they end (the oldest fall off). */
+const MINTED_TURNS_MAX = 256;
+
 /** The turn this session is streaming. */
 interface ActiveTurn {
   readonly turnId: string;
@@ -256,8 +259,27 @@ export class RemoteSession implements SessionStreamListener {
   ownsTurn(turnId: string): boolean {
     return (
       turnId === this.turnId ||
+      this.mintedTurns.has(turnId) ||
       [this.active, this.next, this.settling].some((turn) => turn?.turnId === turnId)
     );
+  }
+
+  /**
+   * The turns this session minted, bounded (the oldest fall off): a background
+   * child's ask names the turn that SPAWNED it, which may have ended long ago —
+   * `ownsTurn` must still say "mine" so auto-accept keeps working.
+   */
+  private readonly mintedTurns = new Set<string>();
+
+  private mint(turnId: string): void {
+    this.mintedTurns.delete(turnId);
+    this.mintedTurns.add(turnId);
+    if (this.mintedTurns.size > MINTED_TURNS_MAX) {
+      const oldest = this.mintedTurns.values().next();
+      if (!oldest.done) {
+        this.mintedTurns.delete(oldest.value);
+      }
+    }
   }
 
   /**
@@ -364,6 +386,19 @@ export class RemoteSession implements SessionStreamListener {
       throw new Error("nothing to rename yet — send a first message");
     }
     return (await this.client.rename(id, title)).text;
+  }
+
+  /**
+   * A background sub-agent of THIS session exited (its report may now be in the
+   * history): the laptop's copy saves on it (M5). Not `onBackgroundExit`: that
+   * one owns the exit backlog.
+   */
+  onAgentExit(listener: () => void): () => void {
+    return this.client.onAgentExit((sessionId) => {
+      if (sessionId === this.id) {
+        listener();
+      }
+    });
   }
 
   /**
@@ -676,6 +711,7 @@ export class RemoteSession implements SessionStreamListener {
     // still opening is already bound to this turn.
     const turnId = opts.turnId ?? crypto.randomUUID();
     this.turnId = turnId;
+    this.mint(turnId);
     yield* this.runTurn(turnId, prompt, signal, opts.skill);
   }
 
@@ -814,6 +850,11 @@ export class RemoteSession implements SessionStreamListener {
   private install(turn: ActiveTurn): void {
     this.active = turn;
     this.turnId = turn.turnId;
+    // Defensive: `install` only gets own turns today (foreign ones go through
+    // `startForeign`).
+    if (turn.foreign !== true) {
+      this.mint(turn.turnId);
+    }
     for (const notice of this.idleNotices.splice(0)) {
       turn.queue.push(notice);
     }

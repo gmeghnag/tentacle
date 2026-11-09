@@ -33,6 +33,8 @@ import { MENU, type OrphanCause, type ReplyMode, draftOf } from "./permission-re
 export interface PermissionAgent {
   readonly type: string;
   readonly description: string;
+  /** A BACKGROUND child's `sa-N` (absent: a foreground sub-agent). */
+  readonly id?: string;
 }
 
 export interface PermissionChoice {
@@ -94,7 +96,10 @@ export function permissionCwdLine(cwd: string, columns: number): string {
  * truncated to the width. Display only: nothing decides on it.
  */
 export function permissionAgentLine(agent: PermissionAgent, columns: number): string {
-  const line = `${agent.type} · "${agent.description}"`;
+  const line =
+    agent.id !== undefined
+      ? `${agent.id} · ${agent.type} · "${agent.description}" · background`
+      : `${agent.type} · "${agent.description}"`;
   return truncateCells(line, Math.max(10, columns - 3));
 }
 

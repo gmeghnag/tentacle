@@ -13,7 +13,12 @@ import {
   type BeforeRun,
   UnknownSkillError,
 } from "./agent.ts";
-import { type CompactResult, carryOverSkills, compactedHistory } from "./compact.ts";
+import {
+  type CompactResult,
+  carryOverSkills,
+  compactedHistory,
+  stillRunningNote,
+} from "./compact.ts";
 import type { AskHooksTrust } from "./hooks.ts";
 import type { SkillListing } from "./session-skills.ts";
 
@@ -235,7 +240,13 @@ export class Session {
     signal?.throwIfAborted();
     const summary = await this.agent.summarize(this.messages, signal, skills.kept);
     signal?.throwIfAborted();
-    const next = compactedHistory(this.messages, summary, skills);
+    const running = this.agent.runningBackground();
+    const next = compactedHistory(
+      this.messages,
+      summary,
+      skills,
+      stillRunningNote(running.jobs, running.agents),
+    );
     this.messages.length = 0;
     this.messages.push(...next);
     this.agent.forgetModelRequestBaseline(this.id);

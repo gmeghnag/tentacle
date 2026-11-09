@@ -225,6 +225,34 @@ export function skillsNote(
 }
 
 /**
+ * Background work still running when the history is replaced (a compaction or a
+ * context reset), told to the model so it does not forget or relaunch it: shell
+ * jobs (read/kill with their tools) and sub-agents (each report arrives later
+ * as a [background] note). `""` when nothing runs.
+ */
+export function stillRunningNote(
+  jobs: readonly { readonly id: string; readonly command: string }[],
+  agents: readonly { readonly agentId: string; readonly description: string }[],
+): string {
+  const parts: string[] = [];
+  if (jobs.length > 0) {
+    parts.push(
+      `Background jobs still running (shell_output / shell_kill):\n${jobs
+        .map((j) => `- ${j.id}: \`${j.command}\``)
+        .join("\n")}`,
+    );
+  }
+  if (agents.length > 0) {
+    parts.push(
+      `Background sub-agents still running (each report arrives later as a [background] note):\n${agents
+        .map((a) => `- ${a.agentId}: ${a.description}`)
+        .join("\n")}`,
+    );
+  }
+  return parts.join("\n\n");
+}
+
+/**
  * Build the post-compaction history: keep the leading system message (if any),
  * then a single user message carrying the summary, then one `skill` round per
  * carried-over skill — the shape the `skill` tool's own activation leaves, so
@@ -235,6 +263,8 @@ export function compactedHistory(
   messages: readonly ChatMessage[],
   summary: string,
   skills: SkillCarryOver = NO_SKILLS,
+  /** `stillRunningNote(...)`: the background work running at the compaction. */
+  running = "",
 ): ChatMessage[] {
   const next: ChatMessage[] = [];
   const system = messages.find((m) => m.role === "system");
@@ -244,7 +274,7 @@ export function compactedHistory(
   const note = skillsNote(skills);
   next.push({
     role: "user",
-    content: `Summary of the earlier conversation (compacted to save context):\n\n${summary}${note === "" ? "" : `\n\n${note}`}`,
+    content: `Summary of the earlier conversation (compacted to save context):\n\n${summary}${running === "" ? "" : `\n\n${running}`}${note === "" ? "" : `\n\n${note}`}`,
   });
   for (const skill of skills.kept) {
     next.push({ role: "assistant", content: "", toolCalls: [skill.call] });

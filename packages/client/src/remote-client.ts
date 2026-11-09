@@ -162,6 +162,8 @@ export interface BackgroundExitNotice {
   readonly command: string;
   readonly status: string;
   readonly exitCode: number | null;
+  /** Set when a sub-agent exited (`jobId` is its `sa-N`); absent for a shell job. */
+  readonly agent?: { readonly stopReason: string; readonly toolUses: number };
 }
 
 /**
@@ -501,6 +503,12 @@ export class RemoteClient {
   private readonly exitListeners = new Set<(notice: BackgroundExitNotice) => void>();
   /** Exits that arrived while `exitListeners` was empty: the first subscriber gets them. */
   private readonly exitBacklog: BackgroundExitNotice[] = [];
+  /**
+   * A SUB-AGENT's exit, by session: kept apart from `exitListeners` on purpose
+   * (a saver subscribing there would drain the backlog the TUI that mounts
+   * later is owed — docs/feat/subagent-background.md, Context 5).
+   */
+  private readonly agentExitListeners = new Set<(sessionId: string) => void>();
   /** Session-independent listeners for title changes (idle or mid-turn). */
   private readonly titleListeners = new Set<(notice: SessionTitleNotice) => void>();
   /** Session-independent listeners for queue changes (idle or mid-turn). */
@@ -1407,6 +1415,15 @@ export class RemoteClient {
     }
   }
 
+  /**
+   * A background sub-agent exited in a session (`RemoteSession.onAgentExit`).
+   * It does NOT touch the exit backlog: never a stand-in for `onBackgroundExit`.
+   */
+  onAgentExit(listener: (sessionId: string) => void): () => void {
+    this.agentExitListeners.add(listener);
+    return () => this.agentExitListeners.delete(listener);
+  }
+
   /** Subscribe to background-job exits across all sessions; returns an unsubscribe. */
   onBackgroundExit(listener: (notice: BackgroundExitNotice) => void): () => void {
     // Exits nobody was listening to (a replay on open, a live one before the
@@ -2180,15 +2197,22 @@ export class RemoteClient {
       // Permission events are session state, not turn-scoped (a re-attach
       // replays a pending one): the router decides, never the turn handler.
       if (update.type === "permission_request") {
-        // Attributed to the turn the stream raised it in (the wire names none).
+        // Attributed to the turn the stream raised it in; the update's own
+        // `turnId` (a background child's spawning turn) wins in the router.
         this.runPermissionActions(this.router.request(entry.id, update, out.turn));
       } else if (update.type === "permission_resolved") {
         this.runPermissionActions(this.router.resolved(entry.id, update.requestId));
       } else if (update.type === "background_exit") {
         // Not turn-scoped: the dedicated listeners fire even when no turn is
         // streaming (`RemoteSession` leaves it to them).
-        const { jobId, command, status, exitCode } = update;
-        const notice = { jobId, command, status, exitCode };
+        const { jobId, command, status, exitCode, agent } = update;
+        const notice: BackgroundExitNotice = {
+          jobId,
+          command,
+          status,
+          exitCode,
+          ...(agent ? { agent } : {}),
+        };
         if (this.exitListeners.size === 0) {
           // Kept for the first subscriber: one per job, the newest 64.
           if (!this.exitBacklog.some((n) => n.jobId === jobId)) {
@@ -2200,6 +2224,12 @@ export class RemoteClient {
         }
         for (const listener of this.exitListeners) {
           listener(notice);
+        }
+        // A sub-agent's exit also tells whoever keeps the session's copy (M5).
+        if (agent) {
+          for (const listener of [...this.agentExitListeners]) {
+            listener(entry.id);
+          }
         }
       } else if (update.type === "session_title") {
         // Not turn-scoped either: the title listeners fire while idle too.

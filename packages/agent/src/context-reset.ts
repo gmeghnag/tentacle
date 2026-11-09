@@ -11,7 +11,7 @@
 
 import type { ChatMessage, ToolDefinition } from "@tentacle/core";
 import { SKILL_TOOL_NAME } from "@tentacle/tools";
-import { type SkillCarryOver, skillsNote } from "./compact.ts";
+import { type SkillCarryOver, skillsNote, stillRunningNote } from "./compact.ts";
 
 export const CONTEXT_RESET_HEADER =
   "[context reset] You renewed your own context with context_reset.\nEverything before it was discarded. Your restart prompt:";
@@ -55,15 +55,14 @@ export function contextResetHistory(input: {
   readonly systemPrompt: string;
   readonly prompt: string;
   readonly jobs: readonly RunningJob[];
+  /** Background sub-agents still running (absent: none). */
+  readonly agents?: readonly { readonly agentId: string; readonly description: string }[];
   readonly skills: SkillCarryOver;
 }): ChatMessage[] {
   const parts = [restartMessage(input.prompt)];
-  if (input.jobs.length > 0) {
-    parts.push(
-      `Background jobs still running (shell_output / shell_kill):\n${input.jobs
-        .map((j) => `- ${j.id}: \`${j.command}\``)
-        .join("\n")}`,
-    );
+  const running = stillRunningNote(input.jobs, input.agents ?? []);
+  if (running !== "") {
+    parts.push(running);
   }
   const note = skillsNote(input.skills, "the context reset");
   if (note !== "") {

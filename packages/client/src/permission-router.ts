@@ -33,7 +33,12 @@ export type RouterAction =
        * itself. Display only, from a daemon that may be a pod: nothing here
        * decides on it.
        */
-      readonly agent?: { readonly type: string; readonly description: string };
+      readonly agent?: {
+        readonly type: string;
+        readonly description: string;
+        /** A BACKGROUND child's `sa-N`. */
+        readonly id?: string;
+      };
     }
   | { readonly kind: "abort"; readonly sessionId: string; readonly requestId: string }
   | {
@@ -94,7 +99,8 @@ export class PermissionRouter {
 
   /**
    * A `permission_request` arrived (live or replayed). `turnId`: the turn the
-   * stream raised it in (the wire request names none), kept until it is asked.
+   * stream raised it in; a background child's ask names its own `turnId`, which
+   * wins. Kept until it is asked.
    */
   request(
     sessionId: string,
@@ -110,7 +116,9 @@ export class PermissionRouter {
     ) {
       return [];
     }
-    this.queue.push({ sessionId, update, turnId });
+    // A background child's ask names its SPAWNING turn: it may arrive outside
+    // any turn, or inside an unrelated one (the stream's would be wrong).
+    this.queue.push({ sessionId, update, turnId: update.turnId ?? turnId });
     return this.next();
   }
 
@@ -258,6 +266,9 @@ export class PermissionRouter {
               agent: {
                 type: progressText(entry.update.agent.type),
                 description: progressText(entry.update.agent.description),
+                ...(entry.update.agent.id !== undefined
+                  ? { id: progressText(entry.update.agent.id) }
+                  : {}),
               },
             }
           : {}),
