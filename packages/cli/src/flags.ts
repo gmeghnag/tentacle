@@ -649,6 +649,45 @@ export type CliMode =
   | "empty";
 
 /**
+ * Does this mode ever call a model? If not, its `loadConfig` runs no
+ * `apiKeyCommand` (main and `models.<n>` alike: `LoadConfigOptions.podDaemon`),
+ * so a command that fails — `exit 7`, or one that needs a terminal — cannot
+ * stop a command that has no model to call (docs/fix/key-commands-only-for-model-commands.md).
+ *
+ * A `Record` over `CliMode`, not a `Set`: a new mode does not compile until it
+ * is classified, and the safe answer is the strict one (`true`).
+ */
+const USES_MODEL: Readonly<Record<CliMode, boolean>> = {
+  // These never call a model. `ps`/`rm` read the laptop's kept index and an
+  // engine; `hooks trust` a trust store; `package` git and package dirs.
+  ps: false,
+  rm: false,
+  hooks: false,
+  package: false,
+  // These already return BEFORE `loadConfig`; listed so the record is total and
+  // the answer is documented (`connect` uses the remote daemon's model).
+  connect: false,
+  update: false,
+  explain: false,
+  config: false,
+  // Everything that builds an agent or proxies to a model.
+  serve: true,
+  run: true,
+  attach: true,
+  plain: true,
+  tui: true,
+  prompt: true,
+  // No argv and a terminal: the TUI. No argv and no terminal: a usage error —
+  // it needs no key, but it also does nothing, so it stays on the strict path.
+  empty: true,
+};
+
+/** Whether a mode's config load must run the user's key commands (see `USES_MODEL`). */
+export function modeUsesModel(mode: CliMode): boolean {
+  return USES_MODEL[mode];
+}
+
+/**
  * A subcommand → its own arguments; `--plain` → the REPL; any other leading
  * `-…` → the TUI's options (`-i`, `--resume`, `--in-process`…); `--` or a word
  * → a one-shot prompt whose words are kept verbatim.
