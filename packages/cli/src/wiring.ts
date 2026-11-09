@@ -36,6 +36,7 @@ import {
   userRescanListing,
 } from "@tentacle/agent";
 import {
+  type PublishedModels,
   type SkillInfo,
   type TentacleConfig,
   offeredSkills,
@@ -43,6 +44,7 @@ import {
   refreshSessionContext,
   slashSkills,
   splitFrontmatter,
+  unknownTypeModelWarnings,
 } from "@tentacle/config";
 import { type JobController, type ModelProvider, PermissionBroker } from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
@@ -65,6 +67,7 @@ import {
   configuredModelProvider,
   createModelProviders,
   subagentModelResolver,
+  tunnelSubagentResolver,
 } from "./model-provider.ts";
 
 /**
@@ -291,10 +294,15 @@ export interface BuildAgentOptions {
   readonly toolOutput?: ToolOutputStore;
   /** Replace the configured provider — e.g. a proxy that tunnels model calls
    *  to a remote client (the pod reverse-tunnel, F4.d). Used for the main model
-   *  and for every sub-agent: `models`, `subagents.types` and
-   *  `selectableModels` are ignored over the tunnel (task 4,
-   *  docs/feat/models-map.md), so no laptop key is used for a pod. */
+   *  and for every sub-agent the laptop published no model for. The config's
+   *  own `models`, `subagents.types` and `selectableModels` are ignored over
+   *  the tunnel, so no provider is built in a pod. */
   readonly modelOverride?: ModelProvider;
+  /**
+   * Over the tunnel: the provider for a name in `config.publishedModels`
+   * (docs/feat/models-map-pod.md). The laptop decides whether it serves it.
+   */
+  readonly namedModelOverride?: (name: string) => ModelProvider;
   /** The title's own override: the pod's tunnel that marks a call as a title one (`purpose: "title"`). */
   readonly titleModelOverride?: ModelProvider;
   /**
@@ -336,6 +344,16 @@ export interface BuildAgentOptions {
    * inject a spy; default `createModelProvider`. Unused over a `modelOverride`.
    */
   readonly createProvider?: ProviderFactory;
+}
+
+/** `agent_task`'s model list over the tunnel: the laptop's selectable names, with their text. */
+function publishedOptions(
+  published: PublishedModels | undefined,
+): { readonly name: string; readonly description?: string }[] {
+  return (published?.selectable ?? []).map((name) => {
+    const description = published?.models.find((m) => m.name === name)?.description;
+    return description !== undefined ? { name, description } : { name };
+  });
 }
 
 export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = {}): WiredAgent {
@@ -462,27 +480,27 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     );
     // A sub-agent's model (docs/feat/models-map.md): the call's selectable
     // `model` › `subagents.types.<t>.model` › the `agents/*.md` `model` › the
-    // main model. Over the model tunnel (a pod, task 4 not built) NOTHING of
-    // `models` is used: every child is the tunnel, no laptop key is touched.
+    // main model. Over the model tunnel (a pod) the same pick runs on what the
+    // laptop published (docs/feat/models-map-pod.md): this pod's own `models`
+    // are ignored, no provider is built here, and no key is touched.
     const tunnelled = options.modelOverride !== undefined;
+    const published = tunnelled ? config.publishedModels : undefined;
     if (
       tunnelled &&
       (Object.keys(config.subagentModels).length > 0 || config.selectableModels.length > 0)
     ) {
       options.notice?.(
-        "models: per-type and selectable sub-agent models are ignored over the model tunnel; sub-agents use the laptop's main model",
+        "models: this pod's own models, subagents.types and selectableModels are ignored; the laptop's published models apply",
       );
     }
+    const modelFor = !tunnelled
+      ? subagentModelResolver(config, createModelProviders(config, options.createProvider))
+      : published && options.namedModelOverride
+        ? tunnelSubagentResolver(published, options.namedModelOverride)
+        : undefined;
     const { run, types, readOnlyType } = createSubagentRunner({
       model,
-      ...(tunnelled
-        ? {}
-        : {
-            modelFor: subagentModelResolver(
-              config,
-              createModelProviders(config, options.createProvider),
-            ),
-          }),
+      ...(modelFor ? { modelFor } : {}),
       env,
       tools,
       requestPermission: (req, options) => permissions.request(req, options),
@@ -496,13 +514,22 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       toolExecution: config.toolExecution,
       toolOutput,
     });
+    if (published) {
+      // Said here because only the pod knows its own types (the laptop cannot).
+      for (const line of unknownTypeModelWarnings(
+        Object.fromEntries(published.types.map((t) => [t.type, t.model])),
+        types.map((t) => t.name),
+      )) {
+        options.notice?.(line);
+      }
+    }
     tools.register(
       createTaskTool((opts, controls) => run(opts, controls), types, {
         description: config.agentTaskDescription,
         mode: config.subagentExecution,
         readOnlyType,
         models: tunnelled
-          ? []
+          ? publishedOptions(published)
           : config.selectableModels.map((name) => {
               const description = config.models[name]?.description;
               return description !== undefined ? { name, description } : { name };

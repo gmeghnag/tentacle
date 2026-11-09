@@ -15,6 +15,6 @@ describe("no model/slots (protocol 18)", () => {
   });
 
   test("the removal bumped the protocol", () => {
-    expect(PROTOCOL_VERSION).toBe(18);
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(18);
   });
 });

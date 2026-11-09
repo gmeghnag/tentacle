@@ -175,13 +175,40 @@ describe("Connection refuses initialize with the worded message and its data", (
     expect(error.code).toBe(DomainErrorCode.VersionMismatch);
     expect(error.data).toMatchObject({
       client: { protocol: 17, tentacle: "0.5.0" },
-      daemon: { protocol: 18, tentacle: "0.6.0" },
+      daemon: { protocol: PROTOCOL_VERSION, tentacle: "0.6.0" },
     });
   });
 
-  test("10 ↔ current (session-archive's bump, context-reset's, skills-hot-reload's, detached-runs', parallel-tools', config-carry's, session-log's, then models-map's): a 0.1.0 client is told to update, worded by THIS daemon", async () => {
+  test("18 ↔ 19 (models-map-pod's bump): a pod daemon or a laptop on 18 is refused at initialize, worded", async () => {
+    // A laptop on 18 would strip the name and serve a named call with its MAIN
+    // model, silently (docs/feat/models-map-pod.md): the pair must fail here.
+    const older = await refuse(
+      {
+        protocolVersion: 18,
+        clientCapabilities: { streaming: true },
+        clientInfo: { name: "tentacle", version: "0.6.0" },
+      },
+      { tentacle: "0.7.0", kind: "container" },
+    );
+    expect(older.code).toBe(DomainErrorCode.VersionMismatch);
+    expect(older.message).toContain("client 18 (tentacle 0.6.0), daemon 19 (tentacle 0.7.0)");
+    expect(older.data).toMatchObject({ update: "client" });
+    // The daemon compares for inequality, so a client AHEAD of it is refused too.
+    const newer = await refuse(
+      {
+        protocolVersion: 20,
+        clientCapabilities: { streaming: true },
+        clientInfo: { name: "tentacle", version: "0.8.0" },
+      },
+      { tentacle: "0.7.0", kind: "container" },
+    );
+    expect(newer.code).toBe(DomainErrorCode.VersionMismatch);
+    expect(newer.message).toContain("client 20 (tentacle 0.8.0), daemon 19 (tentacle 0.7.0)");
+  });
+
+  test("10 ↔ current (session-archive's bump, context-reset's, skills-hot-reload's, detached-runs', parallel-tools', config-carry's, session-log's, then models-map's, models-map-pod's): a 0.1.0 client is told to update, worded by THIS daemon", async () => {
     // What a tentacle 0.1.0 sends (protocol 10, clientInfo since version-mismatch-notice).
-    expect(PROTOCOL_VERSION as number).toBe(18);
+    expect(PROTOCOL_VERSION as number).toBe(19);
     const error = await refuse(
       {
         protocolVersion: 10,
@@ -192,11 +219,11 @@ describe("Connection refuses initialize with the worded message and its data", (
     );
     expect(error.code).toBe(DomainErrorCode.VersionMismatch);
     expect(error.message).toBe(
-      'protocol version mismatch: client 10 (tentacle 0.1.0), daemon 18 (tentacle 0.2.0) — update this client: "tentacle update"',
+      'protocol version mismatch: client 10 (tentacle 0.1.0), daemon 19 (tentacle 0.2.0) — update this client: "tentacle update"',
     );
     expect(error.data).toEqual({
       client: { protocol: 10, tentacle: "0.1.0" },
-      daemon: { protocol: 18, tentacle: "0.2.0" },
+      daemon: { protocol: 19, tentacle: "0.2.0" },
       update: "client",
     });
   });

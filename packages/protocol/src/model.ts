@@ -54,16 +54,27 @@ export type WireStreamEvent = z.infer<typeof WireStreamEventSchema>;
  * What a tunnelled model call is for. Absent: an agent turn (the main model).
  * `"title"`: the session's title (docs/feat/session-titles.md) — the LAPTOP
  * picks the model that serves it (`model.titleModel`, else the main one) and
- * refuses it when its `model.autoTitle` is off. The pod never names a model.
+ * refuses it when its `model.autoTitle` is off. A title call names no model.
  * A new value is breaking for an older laptop (refused at parse, loudly).
  */
 export const ModelPurposeSchema = z.enum(["title"]);
 export type ModelPurpose = z.infer<typeof ModelPurposeSchema>;
 
+/**
+ * A `models` name on the tunnel (docs/feat/models-map-pod.md): never a model
+ * id, an endpoint or a key. The shape the config gives a name (`MODEL_NAME`).
+ */
+export const ModelNameSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
+
 /** `model/stream` request: the daemon asks the client to run a model turn. */
 export const ModelStreamParamsSchema = z.object({
   request: WireChatRequestSchema,
   purpose: ModelPurposeSchema.optional(),
+  /**
+   * Absent → the laptop's main model (no name means it). A name the laptop did
+   * not publish itself is refused there. Exclusive with `purpose`.
+   */
+  model: ModelNameSchema.optional(),
 });
 export type ModelStreamParams = z.infer<typeof ModelStreamParamsSchema>;
 
@@ -93,6 +104,8 @@ export type ModelStreamProgressValue = z.infer<typeof ModelStreamProgressValueSc
 export const ModelStreamChunkedParamsSchema = z.object({
   request: WireChatRequestSchema,
   purpose: ModelPurposeSchema.optional(),
+  /** As on `model/stream`. */
+  model: ModelNameSchema.optional(),
 });
 export type ModelStreamChunkedParams = z.infer<typeof ModelStreamChunkedParamsSchema>;
 

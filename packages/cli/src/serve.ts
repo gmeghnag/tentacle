@@ -401,8 +401,9 @@ function listen(
  * laptop. `settings` (`session/open.settings`, docs/feat/config-carry.md) lay
  * the laptop's values over the pod's config, per session (`applyCarried`). With
  * `autoTitle` on, the title call rides a second tunnel that marks it `purpose:
- * "title"`, so the laptop serves it with ITS `model.titleModel`; the pod never
- * names a model (docs/feat/session-titles.md).
+ * "title"`, so the laptop serves it with ITS `model.titleModel`
+ * (docs/feat/session-titles.md). A sub-agent on a published model rides a tunnel
+ * that carries the name (docs/feat/models-map-pod.md).
  */
 export function tunnelledAgent(
   podConfig: TentacleConfig,
@@ -427,25 +428,40 @@ export function tunnelledAgent(
     }
     return connection;
   };
-  const tunnelFor = (purpose?: ModelPurpose): ProxyModelProvider =>
+  const tunnelFor = (purpose?: ModelPurpose, name?: string): ProxyModelProvider =>
     new ProxyModelProvider(
-      (request) => ready().requestModelStream(request, purpose),
-      (request, handlers) => ready().requestModelStreamChunked(request, handlers, purpose),
+      (request) => ready().requestModelStream(request, purpose, name),
+      (request, handlers) => ready().requestModelStreamChunked(request, handlers, purpose, name),
       // The exact context count at open is the LAPTOP's (the model and its key
-      // stay there); an older link without it → the estimate.
-      (request, signal) => {
-        const connection = ready();
-        if (!connection.requestModelCountTokens) {
-          return Promise.resolve({});
-        }
-        return connection.requestModelCountTokens(request, signal);
-      },
+      // stay there); an older link without it → the estimate. A named tunnel
+      // never counts: only a session's own agent does, on the main model.
+      name !== undefined
+        ? undefined
+        : (request, signal) => {
+            const connection = ready();
+            if (!connection.requestModelCountTokens) {
+              return Promise.resolve({});
+            }
+            return connection.requestModelCountTokens(request, signal);
+          },
     );
+  // One tunnel per published name; the laptop decides whether to serve it.
+  const namedTunnels = new Map<string, ProxyModelProvider>();
+  const namedTunnel = (name: string): ProxyModelProvider => {
+    const existing = namedTunnels.get(name);
+    if (existing) {
+      return existing;
+    }
+    const made = tunnelFor(undefined, name);
+    namedTunnels.set(name, made);
+    return made;
+  };
   const wired = buildAgent(config, {
     ...(options.log ? { log: options.log, notice: options.log } : {}),
     // With skills off, no scan: `rescanSkills` then reads nothing (`rediscoverSkills`).
     ...(options.skillScan && config.skillsEnabled ? { skillScan: options.skillScan } : {}),
     modelOverride: tunnelFor(),
+    namedModelOverride: namedTunnel,
     ...(config.autoTitle ? { titleModelOverride: tunnelFor("title") } : {}),
     ...(options.reuse
       ? {

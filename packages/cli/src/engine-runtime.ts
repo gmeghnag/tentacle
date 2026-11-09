@@ -25,8 +25,10 @@
  */
 import { existsSync } from "node:fs";
 import type { SessionRecord } from "@tentacle/agent";
-import type { TentacleConfig } from "@tentacle/config";
+import { ModelNameRefusedError, type NamedModels } from "@tentacle/client";
+import { type TentacleConfig, publishedModelNames } from "@tentacle/config";
 import type { ModelProvider, PermissionBroker } from "@tentacle/core";
+import { createModelProvider } from "@tentacle/providers";
 import type { DuplexChannel } from "@tentacle/transport";
 import type { TargetBadge } from "@tentacle/tui";
 import { carriedSettings } from "./carried-settings.ts";
@@ -52,7 +54,11 @@ import {
 } from "./engine-host.ts";
 import { engineTarget } from "./engine-target.ts";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
-import { configuredModelProvider } from "./model-provider.ts";
+import {
+  type ProviderFactory,
+  configuredModelProvider,
+  createModelProviders,
+} from "./model-provider.ts";
 import {
   POD_BINARY_TARGETS,
   PodBinaryError,
@@ -94,21 +100,46 @@ export function podDaemonCommand(bin: string): string[] {
  * endpoint and API key never leave the laptop: the main one for turns and,
  * with `model.autoTitle`, the one for the pod's title calls
  * (`model.titleModel`, else the main one). Off → no title provider: the
- * laptop refuses a title call (the gate is here, not in the pod).
+ * laptop refuses a title call (the gate is here, not in the pod). `namedModels`:
+ * the entries this laptop published and nothing else (docs/feat/models-map-pod.md).
  */
-export function laptopModels(config: TentacleConfig): {
+export function laptopModels(
+  config: TentacleConfig,
+  create: ProviderFactory = createModelProvider,
+): {
   readonly modelProvider: ModelProvider;
   readonly titleModelProvider?: ModelProvider;
+  readonly namedModels?: NamedModels;
 } {
-  const modelProvider = configuredModelProvider(config);
+  const modelProvider = configuredModelProvider(config, config.model, create);
+  const names = new Set(publishedModelNames(config));
+  const providers = createModelProviders(config, create);
+  const named: { readonly namedModels?: NamedModels } =
+    names.size === 0
+      ? {}
+      : {
+          namedModels: {
+            resolve(name) {
+              if (!names.has(name)) {
+                return undefined;
+              }
+              const entry = config.models[name];
+              // A relay whose key command failed: never a request with no key.
+              if (entry?.apiKeySource === "command" && entry.apiKey === undefined) {
+                return "unavailable";
+              }
+              return providers.forEntry(name);
+            },
+          },
+        };
   if (!config.autoTitle) {
-    return { modelProvider };
+    return { modelProvider, ...named };
   }
   const titleModelProvider =
     config.titleModel !== undefined
-      ? configuredModelProvider(config, config.titleModel)
+      ? configuredModelProvider(config, config.titleModel, create)
       : modelProvider;
-  return { modelProvider, titleModelProvider };
+  return { modelProvider, titleModelProvider, ...named };
 }
 
 /** A started runtime; `markFault` reports a failure only the caller sees (the TUI throwing). */
@@ -1033,7 +1064,16 @@ export async function attachEngineRuntime(
       // Laptop-side RPC errors join the log file; a model/turn error is not a
       // failure of the attach. The TUI shows its cause as a status-only text;
       // the full error is only here.
-      onPeerError: (error) => stderr.onStderr(`[laptop rpc] ${error.message}\n`),
+      // No log file and no terminal (the detached relay): its own log is the
+      // only place a refused name of a hostile pod can leave a trace. ONLY that
+      // refusal goes there (bounded, name-only text): any other error can carry an
+      // endpoint's body or a pod's junk, which must not reach an unattended log.
+      onPeerError: (error) =>
+        stderr.path === undefined && deps.interactive === false
+          ? error instanceof ModelNameRefusedError
+            ? deps.log(`[laptop rpc] ${error.message}`)
+            : undefined
+          : stderr.onStderr(`[laptop rpc] ${error.message}\n`),
       ...(deps.notify ? { notify: deps.notify } : {}),
       ...(deps.interactive !== undefined ? { interactive: deps.interactive } : {}),
       ...(deps.sessionId !== undefined ? { sessionId: deps.sessionId } : {}),

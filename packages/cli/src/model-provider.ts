@@ -6,7 +6,7 @@
  * blip shows nothing on screen, and this line is its only trace.
  */
 import type { AgentType, SubagentModel } from "@tentacle/agent";
-import { type TentacleConfig, pickSubagentModel } from "@tentacle/config";
+import { type PublishedModels, type TentacleConfig, pickSubagentModel } from "@tentacle/config";
 import type { ModelProvider } from "@tentacle/core";
 import { type CreateModelProviderOptions, createModelProvider } from "@tentacle/providers";
 import { logModelRetry } from "./daemon-log.ts";
@@ -104,6 +104,33 @@ export function subagentModelResolver(
           modelId: config.models[choice.name]?.model ?? choice.name,
         };
     }
+  };
+}
+
+/**
+ * `SubagentDeps.modelFor` over the pod tunnel (docs/feat/models-map-pod.md): the
+ * same pick, on what the laptop published, without the pod's frontmatter
+ * `model` (unlike a local run). Only an entry gets a name on the wire: a
+ * frontmatter model is never sent, the child stays on the main tunnel.
+ * `modelId` is the NAME, so hooks in a pod do not learn the laptop's id.
+ */
+export function tunnelSubagentResolver(
+  published: PublishedModels,
+  tunnel: (name: string) => ModelProvider,
+): (type: AgentType, requested: string | undefined) => SubagentModel | undefined {
+  const models = Object.fromEntries(published.models.map((m) => [m.name, m]));
+  const subagentModels = Object.fromEntries(published.types.map((t) => [t.type, t.model]));
+  return (type, requested) => {
+    const choice = pickSubagentModel(
+      // No `frontmatterModel`: a pod's own agents/*.md never picks a laptop
+      // entry; only the laptop's `subagents.types` and the agent's selectable
+      // call do (owner Q3 (b)). With no entry the type's own window applies.
+      { requested, typeName: type.name, frontmatterWindow: type.contextWindow },
+      { models, subagentModels, selectableModels: published.selectable },
+    );
+    return choice.kind === "entry"
+      ? { provider: tunnel(choice.name), contextWindow: choice.contextWindow, modelId: choice.name }
+      : undefined;
   };
 }
 

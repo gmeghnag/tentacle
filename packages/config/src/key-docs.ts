@@ -55,10 +55,12 @@ export type KeyScope = "user" | "profile" | "both";
 /**
  * Whether the laptop carries the key into a pod (`CARRIED`'s classes,
  * packages/cli/src/carried-settings.ts): `pinned` (P) the laptop decides,
- * `workspace` (W) the laptop's value is the lowest layer, `no` not carried —
+ * `workspace` (W) the laptop's value is the lowest layer, `published` the laptop's value
+ * is not carried itself but decides what a pod may ask for (the pod's own is ignored;
+ * outside T6's comparison), `no` not carried —
  * the pod uses its own.
  */
-export type KeyCarried = "pinned" | "workspace" | "no";
+export type KeyCarried = "pinned" | "workspace" | "published" | "no";
 
 /** One key's documentation. */
 export interface KeyDoc {
@@ -283,9 +285,9 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     kind: "section",
     type: "map",
     scope: "both",
-    carried: "no",
+    carried: "pinned",
     details:
-      "An unset key takes the main model's EFFECTIVE value (after the profile, env and `--model`). The connection group moves as a unit, as in a profile: an entry that sets any of provider/baseURL/apiKey/apiKeyCommand inherits none of them, so the main key is never sent to another endpoint — repeat the key (or its command) if that endpoint needs one, even when it is the same URL. Key commands run at startup, before the TUI; an identical command runs once (a detached run's background relay has no terminal and runs none of them). `autoTitle` and `titleModel` are accepted in an entry and have no effect there (titles are a `model` setting). In a profile, entries merge by name and a profile's entry replaces the base one whole. On `run`/`attach` they are not applied yet (sub-agents use the laptop's main model) and never carried: the keys stay on the laptop.",
+      "An unset key takes the main model's EFFECTIVE value (after the profile, env and `--model`). The connection group moves as a unit, as in a profile: an entry that sets any of provider/baseURL/apiKey/apiKeyCommand inherits none of them, so the main key is never sent to another endpoint — repeat the key (or its command) if that endpoint needs one, even when it is the same URL. Key commands run at startup, before the TUI; an identical command runs once. A `run --detach`'s background relay has no terminal: it runs only the commands of the published entries, 10 s each, and a failure makes just that entry unavailable to the detached run (see relay.log). `autoTitle` and `titleModel` are accepted in an entry and have no effect there (titles are a `model` setting). In a profile, entries merge by name and a profile's entry replaces the base one whole. On `run`/`attach` a pod can ask only for the entries `subagents.types` and `subagents.selectableModels` use. Their names, context windows and selectable descriptions travel to the pod; keys, URLs and model ids never do: the calls run on the laptop. An entry nothing uses is not available to a pod. A pod's named calls have the same exposure as its main-model calls: no extra limit on the laptop. A pod's own `agents/*.md` `model` never picks an entry (unlike a local run): only this laptop's `subagents.types` and the agent's selectable `model` argument do.",
   },
   "models.*": {
     summary: "One named model, referenced by its name.",
@@ -389,7 +391,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     scope: "both",
     carried: "no",
     details:
-      "Listed in the `agent_task` description when the entry is in `subagents.selectableModels`. Sent to the model: never put a secret here. At most 300 characters.",
+      "Listed in the `agent_task` description when the entry is in `subagents.selectableModels`. Sent to the model, and to a pod on `run`/`attach`: never put a secret here. At most 300 characters.",
     example: '"Small and quick: file searches, summaries."',
   },
   hooks: {
@@ -575,9 +577,9 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     kind: "leaf",
     type: "string",
     scope: "both",
-    carried: "no",
+    carried: "published",
     details:
-      "Must name a `models` entry, or the config is refused. Precedence for a sub-agent's model: the `agent_task` call's `model` (when selectable), this key, the type's `agents/*.md` `model`, then `model`. On `run`/`attach` not applied yet: sub-agents use the laptop's main model.",
+      "Must name a `models` entry, or the config is refused. Precedence for a sub-agent's model: the `agent_task` call's `model` (when selectable), this key, the type's `agents/*.md` `model`, then `model`. On `run`/`attach` it applies too: the sub-agent's calls go to this entry, on the laptop. An entry named here is one a pod may ask for. In a pod the pod's own `agents/*.md` `model` is ignored (a local run uses it): there only this key and the call's selectable `model` pick an entry.",
     example: '"fast"',
   },
   "subagents.selectableModels": {
@@ -585,9 +587,9 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     kind: "leaf",
     type: "array",
     scope: "both",
-    carried: "no",
+    carried: "published",
     details:
-      "Each name must be a `models` entry. When set, `agent_task` takes an optional `model` argument limited to these names, and its description lists them with their `description`; any other name is an error and no sub-agent starts. On `run`/`attach` not applied yet.",
+      "Each name must be a `models` entry. When set, `agent_task` takes an optional `model` argument limited to these names, and its description lists them with their `description`; any other name is an error and no sub-agent starts. On `run`/`attach` it applies too, and an entry listed here is one a pod may ask for.",
     example: '["fast", "claude"]',
   },
   contextAwareness: {
@@ -1107,10 +1109,10 @@ export function leafPaths(): readonly string[] {
     .sort();
 }
 
-/** The keys the laptop carries into a pod (T6's total set). */
+/** The keys the laptop carries into a pod (T6's total set; `published` keys are not carried themselves). */
 export function carriedDocPaths(): readonly string[] {
   return Object.keys(KEY_DOCS)
-    .filter((path) => KEY_DOCS[path]?.carried !== "no")
+    .filter((path) => KEY_DOCS[path]?.carried !== "no" && KEY_DOCS[path]?.carried !== "published")
     .sort();
 }
 

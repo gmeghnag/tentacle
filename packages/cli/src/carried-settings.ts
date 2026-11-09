@@ -18,7 +18,7 @@ import {
   type SessionSettings,
   type SessionSettingsReport,
 } from "@tentacle/protocol";
-import { type TentacleConfig, composeSystemPrompt } from "./config.ts";
+import { type TentacleConfig, composeSystemPrompt, publishedModels } from "./config.ts";
 
 type Key = keyof SessionSettings;
 type Value<K extends Key> = NonNullable<SessionSettings[K]>;
@@ -28,7 +28,8 @@ interface Row<K extends Key> {
   readonly class: "P" | "W";
   /** The user's name for it: the only thing a notice prints. */
   readonly configKey: string;
-  readonly source: SourceKey;
+  /** Where its provenance lands. Absent: a key with no env form (`publishedModels`). */
+  readonly source?: SourceKey;
   readonly read: (config: TentacleConfig) => SessionSettings[K];
   readonly write: (config: TentacleConfig, value: Value<K>) => TentacleConfig;
   /** A P key the laptop left out of `settings` on purpose. Absent → the pod's value stands. */
@@ -92,6 +93,16 @@ export const CARRIED: { readonly [K in Key]: Row<K> } = {
     write: (c, v) => ({ ...c, agentTaskDescription: v }),
     // The laptop has no custom text: the neutral default, never the pod's.
     absent: ({ agentTaskDescription: _dropped, ...c }) => c,
+  },
+  // docs/feat/models-map-pod.md: names and windows only. A hint for what to ask:
+  // the laptop's gate never reads it back (`NamedModels`).
+  publishedModels: {
+    class: "P",
+    configKey: "models",
+    read: (c) => publishedModels(c),
+    write: (c, v) => ({ ...c, publishedModels: v }),
+    // The laptop published nothing: every child is the main tunnel, never the pod's own.
+    absent: ({ publishedModels: _dropped, ...c }) => c,
   },
   loadAgentsMd: {
     class: "W",
@@ -195,6 +206,27 @@ export const CARRIED: { readonly [K in Key]: Row<K> } = {
 
 const KEYS = Object.keys(CARRIED) as Key[];
 
+/** Keys a notice never prints the value of: it says only whether they differ. */
+export const OPAQUE: ReadonlySet<Key> = new Set<Key>(["agentTaskDescription", "publishedModels"]);
+
+/**
+ * Whether two settings are the same value: a structured one arrives as another
+ * object each time. `publishedModels` is built sorted, so its JSON is canonical;
+ * a hostile reorder earns a false notice at worst, the accepted case above.
+ */
+export function sameSetting(a: unknown, b: unknown): boolean {
+  if (a === b) {
+    return true;
+  }
+  return (
+    typeof a === "object" &&
+    typeof b === "object" &&
+    a !== null &&
+    b !== null &&
+    JSON.stringify(a) === JSON.stringify(b)
+  );
+}
+
 /** The laptop's resolved values (env > active profile > global), defaults included. */
 export function carriedSettings(config: TentacleConfig): SessionSettings {
   const settings: Record<string, unknown> = {};
@@ -236,7 +268,7 @@ export function applyCarried(
   const overlay = <K extends Key>(key: K): void => {
     const row: Row<K> = CARRIED[key];
     const carried = settings[key] as Value<K> | undefined;
-    const set = config.sources[row.source] !== "default";
+    const set = row.source !== undefined && config.sources[row.source] !== "default";
     if (row.class === "W") {
       if (carried === undefined) {
         return;
@@ -258,7 +290,9 @@ export function applyCarried(
       pinnedOver.push(key);
     }
     next = row.write(next, carried);
-    stamped[row.source] = "carried";
+    if (row.source !== undefined) {
+      stamped[row.source] = "carried";
+    }
   };
   for (const key of KEYS) {
     overlay(key);
@@ -346,7 +380,8 @@ export function settingsNotices(
   const lines: SettingsNotice[] = [];
   // Only what differs from THIS laptop: a pod value equal to mine is not news.
   const overridden = KEYS.filter(
-    (key) => report.overridden[key] !== undefined && report.overridden[key] !== mine[key],
+    (key) =>
+      report.overridden[key] !== undefined && !sameSetting(report.overridden[key], mine[key]),
   );
   if (overridden.length > 0) {
     lines.push({ text: `Container config: ${valuesLine(overridden, report.overridden)}` });
@@ -355,9 +390,9 @@ export function settingsNotices(
   // Absent on the session's side: nothing to show, but for the description.
   const differing = KEYS.filter(
     (key) =>
-      report.carried[key] !== mine[key] &&
+      !sameSetting(report.carried[key], mine[key]) &&
       report.overridden[key] === undefined &&
-      (report.carried[key] !== undefined || key === "agentTaskDescription"),
+      (report.carried[key] !== undefined || OPAQUE.has(key)),
   );
   if (differing.length > 0) {
     lines.push({

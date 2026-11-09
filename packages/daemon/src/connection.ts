@@ -156,10 +156,20 @@ export class Connection {
    * reverse-tunnel), batch cut: the client returns the whole turn's events in
    * one response. Outbound daemon→client request (the only kind, with the chunked cut).
    * `purpose` marks a non-turn call (a title): the CLIENT picks its model.
+   * `model`: a name the laptop published (docs/feat/models-map-pod.md); the
+   * laptop decides whether to serve it, this side only asks.
    */
-  requestModelStream(request: WireChatRequest, purpose?: ModelPurpose): Promise<ModelStreamResult> {
+  requestModelStream(
+    request: WireChatRequest,
+    purpose?: ModelPurpose,
+    model?: string,
+  ): Promise<ModelStreamResult> {
     return this.peer
-      .request(Method.ModelStream, { request, ...(purpose ? { purpose } : {}) })
+      .request(Method.ModelStream, {
+        request,
+        ...(purpose ? { purpose } : {}),
+        ...(model !== undefined ? { model } : {}),
+      })
       .then((result) => result as ModelStreamResult);
   }
 
@@ -167,7 +177,8 @@ export class Connection {
    * Ask the connected client to run a model turn on our behalf (the pod
    * reverse-tunnel), streaming the events as `$/progress` as they are produced
    * (the chunked cut). `signal` cancels it; `onProgress` receives each event
-   * in `seq` order. Outbound daemon→client request. `purpose`: as `requestModelStream`.
+   * in `seq` order. Outbound daemon→client request. `purpose`, `model`: as
+   * `requestModelStream`.
    */
   requestModelStreamChunked(
     request: WireChatRequest,
@@ -176,9 +187,18 @@ export class Connection {
       readonly onProgress: (value: unknown, seq: number) => void;
     },
     purpose?: ModelPurpose,
+    model?: string,
   ): Promise<ModelStreamChunkedResult> {
     return this.peer
-      .request(Method.ModelStreamChunked, { request, ...(purpose ? { purpose } : {}) }, handlers)
+      .request(
+        Method.ModelStreamChunked,
+        {
+          request,
+          ...(purpose ? { purpose } : {}),
+          ...(model !== undefined ? { model } : {}),
+        },
+        handlers,
+      )
       .then((result) => result as ModelStreamChunkedResult);
   }
 

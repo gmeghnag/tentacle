@@ -22,6 +22,7 @@ import {
   type Clock,
   type DaemonKind,
   type LinkStatus,
+  type NamedModels,
   type ReadBack,
   RemoteClient,
   type RemoteSession,
@@ -558,6 +559,8 @@ export interface LocalRuntimeDeps {
   readonly modelProvider?: ModelProvider;
   /** Serves the pod's TITLE calls; absent → refused (the laptop's `model.autoTitle` is off). */
   readonly titleModelProvider?: ModelProvider;
+  /** The entries this laptop published to a pod; absent → every name is refused. */
+  readonly namedModels?: NamedModels;
   /**
    * What this laptop carries into a pod (`run`/`attach`, docs/feat/config-carry.md).
    * Absent → nothing is sent: the local worker gets the config at bootstrap.
@@ -612,6 +615,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     clientInfo: CLIENT_INFO,
     ...(deps.daemonKind ? { daemonKind: deps.daemonKind } : {}),
     ...(deps.titleModelProvider ? { titleModelProvider: deps.titleModelProvider } : {}),
+    ...(deps.namedModels ? { namedModels: deps.namedModels } : {}),
     ...(deps.sessionSettings ? { sessionSettings: deps.sessionSettings } : {}),
     // `session/log` checkpoints (docs/feat/session-log.md): the daemon hashes the same way.
     sha256: (text) => createHash("sha256").update(text).digest("hex"),

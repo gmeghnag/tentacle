@@ -367,6 +367,8 @@ export function appliesToText(doc: KeyDoc): string {
   const carried =
     doc.carried === "no"
       ? "not carried to a pod: one there uses its own"
-      : "carried to a pod for a session opened after this (a pod session already open keeps its own)";
+      : doc.carried === "published"
+        ? "published by the laptop to a pod for a session opened after this (a pod's own value is ignored)"
+        : "carried to a pod for a session opened after this (a pod session already open keeps its own)";
   return `applies to sessions started after this — a running \`serve\` keeps its value until restarted; ${carried}`;
 }

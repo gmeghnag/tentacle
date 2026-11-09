@@ -67,7 +67,7 @@ describe("T6: CARRIED and the registry's carried set agree", () => {
   test("the registry's carried keys equal CARRIED's, both directions", () => {
     const registry = new Map(
       baseEntries()
-        .filter(([, doc]) => doc.carried !== "no")
+        .filter(([, doc]) => doc.carried !== "no" && doc.carried !== "published")
         .map(([path, doc]) => [path, doc.carried] as const),
     );
     const rows = new Map(carriedRows());
@@ -82,6 +82,18 @@ describe("T6: CARRIED and the registry's carried set agree", () => {
       .filter(([key, cls]) => keyDoc(key)?.carried !== cls)
       .map(([key, cls]) => `${key}: registry ${String(keyDoc(key)?.carried)}, CARRIED ${cls}`);
     expect(mismatched).toEqual([]);
+  });
+
+  test("F4: the two keys that drive the allowlist are `published`, not carried and not `no`", () => {
+    // Mutation: back to `no` → explain says "a pod uses its own value" (false: F18).
+    const published = baseEntries()
+      .filter(([, doc]) => doc.carried === "published")
+      .map(([path]) => path)
+      .sort();
+    expect(published).toEqual(["subagents.selectableModels", "subagents.types.*.model"]);
+    for (const path of published) {
+      expect(Object.values(CARRIED).some((row) => row.configKey === path)).toBe(false);
+    }
   });
 
   test("a not-carried key is one CARRIED does not list — the laptop's own", () => {
@@ -99,7 +111,7 @@ describe("T6: CARRIED and the registry's carried set agree", () => {
   });
 
   test("CARRIED is not empty, so the comparison above is not vacuous", () => {
-    expect(Object.keys(CARRIED).length).toBe(21);
+    expect(Object.keys(CARRIED).length).toBe(22);
     expect(carriedRows().filter(([, cls]) => cls === "pinned").length).toBeGreaterThan(0);
     expect(carriedRows().filter(([, cls]) => cls === "workspace").length).toBeGreaterThan(0);
   });

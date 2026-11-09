@@ -9,10 +9,10 @@ import {
   type MainModel,
   type ResolvedModel,
   modelRefIssues,
-  modelsPodNotice,
   pickSubagentModel,
   resolveModelEntry,
   unknownTypeModelWarnings,
+  withRunModel,
 } from "../src/models.ts";
 import { applyProfile } from "../src/profile.ts";
 import { resolveConfig } from "../src/resolve.ts";
@@ -204,17 +204,59 @@ describe("profile merge", () => {
   });
 });
 
+describe("withRunModel (the run's --model reaches inheriting entries)", () => {
+  const entries = {
+    inherit: resolveModelEntry(main, { contextWindow: 1000 }),
+    own: resolveModelEntry(main, { model: "own-id" }),
+    otherEndpoint: resolveModelEntry(main, { baseURL: "http://x/v1", apiKey: "k" }),
+  };
+  const config = { model: "main-model", models: entries, other: 1 };
+
+  test("sets config.model and every inheriting entry, and only those", () => {
+    const out = withRunModel(config, "flag-X");
+    expect(out.model).toBe("flag-X");
+    expect(out.models.inherit?.model).toBe("flag-X");
+    expect(out.models.otherEndpoint?.model).toBe("flag-X");
+    expect(out.models.own?.model).toBe("own-id");
+    expect(out.other).toBe(1);
+    // the input is not mutated
+    expect(config.models.inherit.model).toBe("main-model");
+  });
+
+  test("an entry stays inheriting after the move (a second move follows too)", () => {
+    const twice = withRunModel(withRunModel(config, "a"), "b");
+    expect(twice.models.inherit?.model).toBe("b");
+  });
+
+  test("the same object when nothing changes", () => {
+    expect(withRunModel(config, "main-model")).toBe(config);
+  });
+
+  test("a config.model already equal still re-points a stale entry", () => {
+    const stale = { model: "flag-X", models: entries };
+    expect(withRunModel(stale, "flag-X").models.inherit?.model).toBe("flag-X");
+  });
+});
+
 describe("resolveModelEntry", () => {
   test("an empty entry is the main model, key inherited", () => {
     expect(resolveModelEntry(main, {})).toEqual({
       provider: "openai",
       baseURL: "http://main:8080/v1",
       model: "main-model",
+      modelInherited: true,
       contextWindow: 131072,
       maxTokens: 4096,
       apiKeySource: "inherited",
       apiKey: "main-key",
     });
+  });
+
+  test("an entry with its own model id is not marked inherited", () => {
+    expect(resolveModelEntry(main, { model: "small" }).modelInherited).toBeUndefined();
+    expect(resolveModelEntry(main, { baseURL: "http://x/v1", apiKey: "k" }).modelInherited).toBe(
+      true,
+    );
   });
 
   test("a model id only: same endpoint and key", () => {
@@ -391,14 +433,6 @@ describe("pickSubagentModel", () => {
 });
 
 describe("notices", () => {
-  test("pod notice only when something is configured", () => {
-    expect(modelsPodNotice({ subagentModels: {}, selectableModels: [] })).toBeNull();
-    expect(modelsPodNotice({ subagentModels: { explore: "fast" }, selectableModels: [] })).toBe(
-      "subagents.types / subagents.selectableModels are not applied on run/attach yet (feat/models-map-pod): every sub-agent uses the laptop's main model",
-    );
-    expect(modelsPodNotice({ subagentModels: {}, selectableModels: ["a"] })).not.toBeNull();
-  });
-
   test("an unknown type is warned about, a known one is not", () => {
     expect(
       unknownTypeModelWarnings({ explore: "fast", reviewr: "big" }, ["general", "explore"]),

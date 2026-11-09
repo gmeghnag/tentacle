@@ -37,10 +37,10 @@ import {
   configDirFromEnv,
   loadConfig,
   longToolNameWarnings,
-  modelsPodNotice,
   titleConfigNotice,
   topLevelKeys,
   unknownTypeModelWarnings,
+  withRunModel,
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import { type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
@@ -835,11 +835,6 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         `[packages] ${config.packages.length} installed package(s) are not loaded in a pod session (the pod uses its own config)\n`,
       );
     }
-    // Task 3 is local/serve only: this laptop's per-type models are not used in a pod.
-    const podModels = modelsPodNotice(config);
-    if (podModels) {
-      err(`[models] ${podModels}\n`);
-    }
   }
 
   // Host the remote-control daemon and run until interrupted.
@@ -1481,7 +1476,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
                 scaffold: false,
                 ...(plan.profile !== undefined ? { profile: plan.profile } : {}),
               });
-        config = loaded.model === plan.model ? loaded : { ...loaded, model: plan.model };
+        config = withRunModel(loaded, plan.model);
         return true;
       } catch (error) {
         err(

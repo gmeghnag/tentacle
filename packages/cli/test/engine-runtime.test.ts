@@ -278,10 +278,13 @@ class SpyFakeCluster extends FakeCluster {
 }
 
 function baseConfig(cwd: string): TentacleConfig {
-  // Only the fields the pod runtime reads (cwd, model) matter here.
+  // Only the fields the pod runtime reads (cwd, model, what it publishes) matter here.
   return {
     cwd,
     model: "qwen3",
+    models: {},
+    subagentModels: {},
+    selectableModels: [],
     contextWindow: 128000,
     contextAwareness: { enabled: true, stepPercent: 1 },
     contextReset: { enabled: true, maxPerMessage: -1 },
@@ -3073,5 +3076,179 @@ describe("pod reconnect (docs/feat/client-reattach-frontends.md §2)", () => {
     await typed;
     expect(kube.execs()).toHaveLength(2);
     await runtime.dispose();
+  });
+});
+
+// docs/feat/models-map-pod.md, review F1/F3: the named models at the two PRODUCTION
+// sites (`run` and `attach`/relay), through the real `laptopModels` spread and real
+// providers over HTTP. A lost `...laptopModels(config)` spread turns the feature off.
+describe("named models at the production sites (run, attach/relay)", () => {
+  type Hit = { path: string; auth: string | null };
+  const sse = `data: ${JSON.stringify({ choices: [{ delta: { content: "ok" } }] })}\n\ndata: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`;
+  const hits = { main: [] as Hit[], fast: [] as Hit[] };
+  const serve = (into: Hit[]) =>
+    Bun.serve({
+      port: 0,
+      fetch: (req) => {
+        into.push({ path: new URL(req.url).pathname, auth: req.headers.get("authorization") });
+        return new Response(sse, { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+  let mainServer: ReturnType<typeof Bun.serve>;
+  let fastServer: ReturnType<typeof Bun.serve>;
+  beforeAll(() => {
+    mainServer = serve(hits.main);
+    fastServer = serve(hits.fast);
+  });
+  afterAll(() => {
+    mainServer.stop(true);
+    fastServer.stop(true);
+  });
+
+  const withModels = (): TentacleConfig =>
+    ({
+      ...baseConfig("/pod/work"),
+      provider: "openai",
+      baseURL: `http://localhost:${mainServer.port}/v1`,
+      apiKey: "main-key",
+      configDir: dir,
+      models: {
+        fast: {
+          provider: "openai",
+          baseURL: `http://localhost:${fastServer.port}/v1`,
+          model: "fast-id",
+          contextWindow: 1000,
+          apiKeySource: "file",
+          apiKey: "fast-key",
+        },
+      },
+      subagentModels: { explore: "fast" },
+      selectableModels: [],
+    }) as unknown as TentacleConfig;
+  const ask = { messages: [{ role: "user" as const, content: "hi" }] };
+  type Named = {
+    requestModelStream: (r: unknown, purpose?: string, model?: string) => Promise<unknown>;
+  };
+  const deps = (kube: PodCluster, name: string, log: (line: string) => void = () => {}) => ({
+    kube,
+    namespace: "dev",
+    podName: "mypod",
+    permissions: new PermissionBroker(),
+    saver: new SessionSaver(new LogSessionStore(join(dir, name)), () => {}),
+    resume: null,
+    log,
+  });
+  const served = async (cluster: TunnelCluster) => {
+    hits.main.length = 0;
+    hits.fast.length = 0;
+    await (cluster.link() as unknown as Named).requestModelStream(ask, undefined, "fast");
+    return { fast: [...hits.fast], main: [...hits.main] };
+  };
+
+  test("run site: a named model/stream is served by the entry with the entry's key, not main", async () => {
+    // Mutation: drop `namedModels` from the `run` site's spread → "not published".
+    const c = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const r = await startPodRuntime(withModels(), { ...deps(c, "ns-run"), image: "repo/img:tag" });
+    const { fast, main } = await served(c);
+    expect(fast).toEqual([{ path: "/v1/chat/completions", auth: "Bearer fast-key" }]);
+    expect(main).toEqual([]);
+    r.dispose();
+  });
+
+  test("attach/relay site: a named model/stream is served by the entry with the entry's key, not main", async () => {
+    // Mutation: drop `namedModels` from the `attach` site's spread → "not published".
+    const c = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const a = await startAttachRuntime(withModels(), deps(c, "ns-attach"));
+    const { fast, main } = await served(c);
+    expect(fast).toEqual([{ path: "/v1/chat/completions", auth: "Bearer fast-key" }]);
+    expect(main).toEqual([]);
+    a.dispose();
+  });
+
+  test("F1: a relay (no terminal, no log file) keeps a hostile pod's refused name in its own log", async () => {
+    // Mutation: `onPeerError` back to `stderr.onStderr` only → the relay's log stays empty.
+    const lines: string[] = [];
+    const c = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const a = await startAttachRuntime(withModels(), {
+      ...deps(c, "ns-relay", (line) => lines.push(line)),
+      interactive: false,
+    });
+    const refused = await (c.link() as unknown as Named)
+      .requestModelStream(ask, undefined, "hidden")
+      .catch((e: unknown) => e);
+    expect(String((refused as Error).message)).toContain("not published");
+    expect(
+      lines.filter((l) =>
+        l.includes(
+          '[laptop rpc] refused a model call from the pod: model "hidden" is not published',
+        ),
+      ),
+    ).toHaveLength(1);
+    a.dispose();
+  });
+
+  test("R2-1: a relay logs ONLY the refusal: an endpoint's body and a junk notification never reach its log", async () => {
+    // Mutation: drop the `instanceof ModelNameRefusedError` check → the 401 body and
+    // the junk method land in the relay's log.
+    const bad = Bun.serve({
+      port: 0,
+      fetch: () =>
+        new Response(
+          '{"error":"bad key sk-ECHOED-fast-key for model fast-id at https://only-laptop.example/v1"}',
+          {
+            status: 401,
+          },
+        ),
+    });
+    try {
+      const config = withModels();
+      (config.models as Record<string, unknown>).bad = {
+        provider: "openai",
+        baseURL: `http://localhost:${bad.port}/v1`,
+        model: "fast-id",
+        contextWindow: 1000,
+        apiKeySource: "file",
+        apiKey: "k",
+      };
+      (config.subagentModels as Record<string, string>).review = "bad";
+      const lines: string[] = [];
+      const c = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
+      const a = await startAttachRuntime(config, {
+        ...deps(c, "ns-r2-1", (line) => lines.push(line)),
+        interactive: false,
+      });
+      const link = c.link() as unknown as Named & {
+        peer: { notify: (method: string, params: unknown) => void };
+      };
+      const failed = await link.requestModelStream(ask, undefined, "bad").catch((e: unknown) => e);
+      expect(failed).toBeInstanceOf(Error);
+      for (let i = 0; i < 20; i++) {
+        link.peer.notify(`junk/${i}`, {});
+      }
+      await link.requestModelStream(ask, undefined, "hidden").catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
+      const rpc = lines.filter((l) => l.includes("[laptop rpc]"));
+      expect(rpc).toEqual([
+        '[laptop rpc] refused a model call from the pod: model "hidden" is not published by this laptop',
+      ]);
+      expect(lines.join("\n")).not.toContain("sk-ECHOED");
+      a.dispose();
+    } finally {
+      bad.stop(true);
+    }
+  });
+
+  test("F1: an interactive attach with no log file writes nothing to its terminal log", async () => {
+    const lines: string[] = [];
+    const c = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const a = await startAttachRuntime(withModels(), {
+      ...deps(c, "ns-tty", (line) => lines.push(line)),
+      interactive: true,
+    });
+    await (c.link() as unknown as Named)
+      .requestModelStream(ask, undefined, "hidden")
+      .catch(() => {});
+    expect(lines.some((l) => l.includes("[laptop rpc]"))).toBe(false);
+    a.dispose();
   });
 });

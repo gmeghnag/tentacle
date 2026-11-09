@@ -378,6 +378,28 @@ describe("runRelay (docs/feat/detached-relay.md R11)", () => {
     expect(readFileSync(relayLogPath(dir), "utf8")).toContain("relay exit");
   });
 
+  test("F1: attach gets the relay's own log, no daemon log file and no terminal (a refused name lands in relay.log)", async () => {
+    // Pairs with engine-runtime.test.ts "F1": there `attachEngineRuntime` sends a
+    // laptop-rpc line to `deps.log` exactly under these deps.
+    // Mutation: the relay passes a `daemonLogPath`, or `interactive: true`, or no `log`.
+    const pod = resident(new Scripted([[{ type: "text", delta: "done" }, { type: "done" }]]));
+    const seen: { daemonLogPath?: unknown; interactive?: unknown } = {};
+    const attach: typeof attachEngineRuntime = (config, deps) => {
+      seen.daemonLogPath = deps.daemonLogPath;
+      seen.interactive = deps.interactive;
+      deps.log('[laptop rpc] refused a model call from the pod: model "hidden" is not published');
+      return pod.attach(config, deps);
+    };
+    const { dir, start } = rig();
+    const exit = start(attach);
+    await waitFor(() => owner(dir)?.state === "idle", "idle");
+    expect(await afterGrace(exit)).toBe(0);
+    expect(seen).toEqual({ daemonLogPath: undefined, interactive: false });
+    expect(readFileSync(relayLogPath(dir), "utf8")).toContain(
+      '[laptop rpc] refused a model call from the pod: model "hidden" is not published',
+    );
+  });
+
   test("a held ask keeps it alive past the grace, the tool unrun; a stop cancels, saves, exits", async () => {
     // Mutation: a second broker given to the runtime → the ask never reaches the
     // policy and is approved: the state never shows `waiting-permission`.
@@ -455,15 +477,35 @@ describe("runRelay (docs/feat/detached-relay.md R11)", () => {
     // `--model` reaches the relay only through the entry (main.ts records
     // `config.model`); the relay process re-loads its config without the flag.
     // Mutation: hand `deps.config` through untouched → `laptop-x`.
-    const seen: string[] = [];
-    const { start } = rig({}, {}, { model: "laptop-x" });
+    // R2-2 (F2): an entry with no `model` of its own follows the run's id, one with
+    // its own keeps it. Mutation: the old `{ ...deps.config, model: entry.model }` patch.
+    const entryOf = (model: string, modelInherited?: true) => ({
+      provider: "openai",
+      baseURL: "http://x/v1",
+      model,
+      ...(modelInherited ? { modelInherited } : {}),
+      contextWindow: 1000,
+      apiKeySource: "inherited",
+    });
+    const seen: { model: string; inherit?: string; own?: string }[] = [];
+    const { start } = rig({}, {}, {
+      model: "laptop-x",
+      models: {
+        inherit: entryOf("laptop-x", true),
+        own: entryOf("own-id"),
+      },
+    } as unknown as Partial<TentacleConfig>);
     expect(
       await start(async (config) => {
-        seen.push(config.model);
+        seen.push({
+          model: config.model,
+          inherit: config.models.inherit?.model,
+          own: config.models.own?.model,
+        });
         throw new Error("enough");
       }),
     ).toBe(1);
-    expect(seen).toEqual([entry.model]);
+    expect(seen).toEqual([{ model: entry.model, inherit: entry.model, own: "own-id" }]);
   });
 
   test("a failed attach is `failed`, its text sanitised, and the lock is free", async () => {
@@ -2077,7 +2119,7 @@ describe("relayMain", () => {
     return err.join("");
   };
 
-  test("a models entry's key command neither runs nor stops a relay: it has no terminal", async () => {
+  test("a published entry's key command runs in a relay; its failure is said and does not stop it", async () => {
     const marker = join(tmpdir(), `relay-entry-ran-${crypto.randomUUID()}`);
     const err = await relayOn({
       model: { baseURL: "http://127.0.0.1:9/v1", model: "m" },
@@ -2087,6 +2129,23 @@ describe("relayMain", () => {
           model: "c",
           apiKeyCommand: `touch ${marker}; echo 'pinentry: no tty' >&2; exit 7`,
         },
+      },
+      subagents: { selectableModels: ["claude"] },
+    });
+    expect(err).toContain("kept entry ffffffffffffffff not found");
+    expect(err).toContain(
+      '[relay] models.claude.apiKeyCommand exited with code 7 — "claude" is unavailable to this detached run until a terminal attaches\n',
+    );
+    expect(err).not.toContain("pinentry");
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  test("an entry nothing publishes: its key command never runs in a relay", async () => {
+    const marker = join(tmpdir(), `relay-entry-ran-${crypto.randomUUID()}`);
+    const err = await relayOn({
+      model: { baseURL: "http://127.0.0.1:9/v1", model: "m" },
+      models: {
+        claude: { provider: "anthropic", model: "c", apiKeyCommand: `touch ${marker}; exit 7` },
       },
     });
     expect(err).toContain("kept entry ffffffffffffffff not found");

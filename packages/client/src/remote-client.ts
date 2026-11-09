@@ -228,6 +228,18 @@ const systemClock: Clock = {
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
+/**
+ * The named models a laptop serves to a pod (docs/feat/models-map-pod.md).
+ * Built from the laptop's OWN config: this is the allowlist (AGENTS §7).
+ */
+export interface NamedModels {
+  /** A provider; `"unavailable"`: published, but no key here; `undefined`: not published. */
+  resolve(name: string): ModelProvider | "unavailable" | undefined;
+}
+
+/** Refused names reported to the laptop's log, so a hostile pod cannot flood it. */
+const MAX_REFUSED_NAMES_LOGGED = 16;
+
 export interface RemoteClientOptions {
   readonly onError?: (error: Error) => void;
   /**
@@ -259,6 +271,8 @@ export interface RemoteClientOptions {
    * on the laptop; the pod never names a model (docs/feat/session-titles.md).
    */
   readonly titleModelProvider?: ModelProvider;
+  /** The named models this laptop serves to a pod; absent → every name is refused. */
+  readonly namedModels?: NamedModels;
   /**
    * The laptop's settings for a pod (docs/feat/config-carry.md), sent wherever a
    * session may be created or described as new; never on an attach. Absent →
@@ -419,6 +433,18 @@ export interface SessionDeletedNotice {
   readonly sessionId: string;
 }
 
+/**
+ * A pod asked for a model name this laptop does not serve (`refusedName`). Its
+ * message holds only the schema-shaped name, so it alone is safe for an unattended
+ * log (the detached relay's): `onError` also carries endpoint bodies and junk.
+ */
+export class ModelNameRefusedError extends Error {
+  constructor(text: string) {
+    super(`refused a model call from the pod: ${text}`);
+    this.name = "ModelNameRefusedError";
+  }
+}
+
 /** A shared session the daemon no longer has after a drop: it ended while this client was away (R7). */
 class VanishedError extends RpcError {
   constructor() {
@@ -498,6 +524,9 @@ export class RemoteClient {
   /** pod-safe model-error text → its full laptop-side message (display only). */
   private readonly laptopTexts = new Map<string, string>();
   private readonly titleModelProvider?: ModelProvider;
+  private readonly namedModels?: NamedModels;
+  /** The refused names already told to `onError` (bounded). */
+  private readonly refusalsLogged = new Set<string>();
   /** `{ settings }`, or nothing: spread into each frame that may create a session. */
   private readonly carried: { readonly settings?: SessionSettings };
   private readonly settingsListeners = new Set<(notice: SessionSettingsNotice) => void>();
@@ -547,6 +576,9 @@ export class RemoteClient {
     this.daemonKind = options.daemonKind ?? "serve";
     if (options.titleModelProvider) {
       this.titleModelProvider = options.titleModelProvider;
+    }
+    if (options.namedModels) {
+      this.namedModels = options.namedModels;
     }
     this.carried = options.sessionSettings ? { settings: options.sessionSettings } : {};
     this.sha256 = options.sha256 ?? bunSha256();
@@ -2358,7 +2390,9 @@ export class RemoteClient {
    * against a new laptop.
    */
   private async onModelStream(params: ModelStreamParams): Promise<ModelStreamResult> {
-    const model = this.servingModel(Method.ModelStream, params.purpose);
+    // A named call has the main model's exposure: no laptop-side limit and the
+    // request as sent (owner Q1 (c), docs/feat/models-map-pod.md F7).
+    const model = this.servingModel(Method.ModelStream, params.purpose, params.model);
     const events: WireStreamEvent[] = [];
     try {
       for await (const event of model.stream(params.request as unknown as ChatRequest)) {
@@ -2368,6 +2402,19 @@ export class RemoteClient {
       throw this.connectionLost(error) ?? error;
     }
     return { events };
+  }
+
+  /**
+   * A refusal of a name the pod asked for. The first one per name reaches
+   * `onError` (the laptop's log): a hostile pod's attempts leave a trace here,
+   * where it cannot erase them. The name is safe to echo: the schema shaped it.
+   */
+  private refusedName(name: string, text: string): RpcError {
+    if (!this.refusalsLogged.has(name) && this.refusalsLogged.size < MAX_REFUSED_NAMES_LOGGED) {
+      this.refusalsLogged.add(name);
+      this.onError?.(new ModelNameRefusedError(text));
+    }
+    return new RpcError(JsonRpcErrorCode.InvalidRequest, text);
   }
 
   /**
@@ -2449,11 +2496,34 @@ export class RemoteClient {
   /**
    * The LOCAL model that serves a tunnelled call. A turn → the main one; a
    * title (`purpose: "title"`) → `titleModelProvider`, refused when this
-   * laptop's `model.autoTitle` is off. The laptop decides, never the pod.
+   * laptop's `model.autoTitle` is off. A name → that entry, ONLY if this laptop
+   * published it (`namedModels`, from its own config): this is the gate on what
+   * a pod can reach; whatever the pod daemon checks first is UX (AGENTS §7).
+   * The laptop decides, never the pod.
    */
-  private servingModel(method: string, purpose: ModelPurpose | undefined): ModelProvider {
+  private servingModel(
+    method: string,
+    purpose: ModelPurpose | undefined,
+    name?: string,
+  ): ModelProvider {
     if (!this.modelProvider) {
       throw new RpcError(JsonRpcErrorCode.MethodNotFound, `no local model to serve ${method}`);
+    }
+    if (name !== undefined) {
+      if (purpose !== undefined) {
+        throw new RpcError(JsonRpcErrorCode.InvalidRequest, "a title call names no model");
+      }
+      const served = this.namedModels?.resolve(name);
+      if (served === "unavailable") {
+        throw this.refusedName(
+          name,
+          `model "${name}" is unavailable on this laptop: its key command did not succeed here`,
+        );
+      }
+      if (served === undefined) {
+        throw this.refusedName(name, `model "${name}" is not published by this laptop`);
+      }
+      return served;
     }
     if (purpose !== "title") {
       return this.modelProvider;
@@ -2485,7 +2555,7 @@ export class RemoteClient {
     params: ModelStreamChunkedParams,
     context: RequestContext,
   ): Promise<ModelStreamChunkedResult> {
-    const model = this.servingModel(Method.ModelStreamChunked, params.purpose);
+    const model = this.servingModel(Method.ModelStreamChunked, params.purpose, params.model);
     const signal = context.signal;
     const id = String(context.id);
     // Coalesce into batches (see MODEL_STREAM_COALESCE_MS): one frame per

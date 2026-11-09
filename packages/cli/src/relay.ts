@@ -24,7 +24,7 @@ import { spawn } from "node:child_process";
 import { closeSync, openSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "@tentacle/config";
+import { loadConfig, withRunModel } from "@tentacle/config";
 import { PermissionBroker } from "@tentacle/core";
 import { DomainErrorCode } from "@tentacle/protocol";
 import {
@@ -158,8 +158,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   // The run's model is the one its launcher recorded (`ps` shows it): a
   // `--model` reaches this process only through the entry, never its env
   // (docs/fix/detach-live-followups.md F5). Endpoint and key: this config's.
-  const config =
-    deps.config.model === entry.model ? deps.config : { ...deps.config, model: entry.model };
+  const config = withRunModel(deps.config, entry.model);
   const now = deps.now ?? Date.now;
   const tickMs = deps.tickMs ?? RELAY_TICK_MS;
   const jobsPollMs = deps.jobsPollMs ?? RELAY_JOBS_POLL_MS;
@@ -669,8 +668,15 @@ export async function relayMain(
     const config = await loadConfig({
       cwd: spec.cwd,
       scaffold: false,
-      // No terminal here, and a pod session uses only the main key.
-      skipModelsKeyCommands: true,
+      // It serves the pod's named calls, with no terminal to prompt on: only
+      // the published entries' commands, bounded; one that fails costs only
+      // that entry (docs/feat/models-map-pod.md D6). stderr is `relay.log`.
+      modelKeysNoTerminal: {
+        report: (name, line) =>
+          writeErr(
+            `[relay] ${line} — ${JSON.stringify(name)} is unavailable to this detached run until a terminal attaches\n`,
+          ),
+      },
       ...(spec.profile !== undefined ? { profile: spec.profile } : {}),
     });
     const kept = readKept(keptDir(config.configDir));

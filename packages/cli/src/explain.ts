@@ -298,6 +298,9 @@ function carriedText(carried: KeyDoc["carried"]): string {
   if (carried === "workspace") {
     return "carried to a pod (workspace: the laptop's value is the lowest layer)";
   }
+  if (carried === "published") {
+    return "published by the laptop: a pod's own value is ignored";
+  }
   return "not carried: a pod uses its own value";
 }
 
