@@ -86,6 +86,8 @@ those.
 
 ### Fixed
 
+- **`tentacle ps` and `tentacle rm` no longer run your `apiKeyCommand`s.** Those commands never call a model, yet the key commands (main and every `models.<n>`) ran while the config was loaded — so one that fails (`exit 7`, or one that wants a terminal) made `ps`, `rm`, `hooks trust` and `package …` die with `[config error] models.<n>.apiKeyCommand exited with code 7`. They now load the config without running any key command. `run`/`attach`/`connect`/`serve`, the TUI and a one-shot prompt still run it, exactly as before.
+
 - File writes (`fs_write`, `fs_edit`, `fs_multi_edit`) are harder to steer
   outside the workspace with links, in the project as in the temp dirs:
   - a write through a **dangling** symlink is refused ("refused: dangling

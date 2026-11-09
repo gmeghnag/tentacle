@@ -79,6 +79,7 @@ import {
   extractSessionFlags,
   infoRequest,
   isPodDaemonLoad,
+  modeUsesModel,
   parseArgs,
   parseServeLimits,
   resolveRunPrompt,
@@ -724,12 +725,19 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // "connection closed". So the stdio daemon never scaffolds; missing config
   // files fall back to defaults.
   const isStdioDaemon = mode === "serve" && POD_DAEMON_MODES.some((flag) => parsed.bools.has(flag));
+  // A command that never calls a model (`ps`, `rm`, `hooks`, `package`) must not
+  // run the user's `apiKeyCommand`s: one that fails (`exit 7`, a pinentry that
+  // wants a terminal) would stop the very commands a user reaches for when
+  // things are broken (docs/fix/key-commands-only-for-model-commands.md). The
+  // same seam a pod daemon uses — nothing those commands read is resolved then.
+  const usesModel = modeUsesModel(mode);
   let config: TentacleConfig;
   try {
     config = await loadConfig({
       cwd: process.cwd(),
       scaffold: !isStdioDaemon,
       ...(mode === "serve" && isPodDaemonLoad(parsed.bools) ? { podDaemon: true } : {}),
+      ...(usesModel ? {} : { podDaemon: true }),
       ...(profileFlag !== undefined ? { profile: profileFlag } : {}),
       ...(modelFlag !== undefined ? { model: modelFlag } : {}),
     });

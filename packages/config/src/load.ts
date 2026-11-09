@@ -111,8 +111,10 @@ export interface LoadConfigOptions {
   /** The model id (`--model`), on the active profile's endpoint; beats `TENTACLE_MODEL`. */
   readonly model?: string;
   /**
-   * A pod daemon's load (`serve --model-proxy`, `--resident-status`,
-   * `--resident-stop`): it neither runs `apiKeyCommand` nor reads
+   * A load that needs no key: a pod daemon's (`serve --model-proxy`,
+   * `--resident-status`, `--resident-stop`) and a command that never calls a
+   * model (`ps`, `rm`, `hooks`, `package`: `modeUsesModel`,
+   * docs/fix/key-commands-only-for-model-commands.md). It neither runs `apiKeyCommand` nor reads
    * `agentTaskDescriptionFile`, the values the laptop decides that could fail a
    * load, so neither runs code in a pod nor stops the daemon for something it
    * never uses (docs/feat/config-carry.md).
