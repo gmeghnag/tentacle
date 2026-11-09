@@ -675,4 +675,274 @@ run were formatting/import-order and were fixed with `biome check --write`.
 
 ## Review
 
-*— (reviewer), (date)*
+*— claude-opus-5-5, 2026-11-09* (fresh context; a different model from the executor, but the
+SAME model as the plan's author: plan-level blind spots may survive. Finding M3 is one the plan
+itself prescribed.)
+
+### Verdict: **REQUEST-CHANGES**
+
+The seam is sound and the main contract holds, proven end to end: older builds skip the types,
+there is one shared derivation, it is idempotent across loads and saves, it reads only the current
+segment, and Q1 (a) is honest. But four MEDIUM defects break promises the plan makes ("first wins",
+FM 1, "the emitter enforces the caps", "never an enum lock-out"). Each fix is a few lines.
+Nothing calls the seam before 6a, so none of them can fire on `main` today. They must be fixed
+before 6a builds on this seam.
+
+Counts: **0 HIGH · 4 MEDIUM · 3 LOW · 4 nit**.
+
+### Gate (re-run by the reviewer)
+
+```
+bunx tsc --noEmit   → clean
+bun run lint        → Checked 771 files. No fixes applied.  (baseline clean held)
+bun test packages   → 5932 pass · 3 skip · 0 fail · 5935 tests / 400 files (182.44s)
+```
+The counts match Execution's exactly. The 3 skips are the documented opt-ins.
+
+### Findings
+
+**M1. A late or duplicate `end` AFTER delivery, or a live `end` for an id never started, is logged,
+persisted and re-emitted forever (it breaks FM 7 "first wins").**
+`packages/core/src/agent-job-ledger.ts:159-180` (orphan branch) and `:199-207` (`noteSeen`
+deletes, so the id is forgotten).
+Repro (`review/late-end.ts`): `background(sa-1)` → `end(sa-1,"end_turn","R1")` → `noteSeen(report sa-1)`
+→ `end(sa-1,"killed","R2")` returns a body, not `null`. `segmentFacts()` then holds
+`[{sa-1, killed, R2}]` at every later segment start. Once the delivered note leaves the current
+segment (a compaction), a load appends a SECOND, contradictory report for a child the model
+already got. Also, `end("sa-77")` for an id never started returns a body, so `agentEnded` logs
+and persists an orphan.
+**Fix:**
+1. In `AgentJobLedger`, add `private readonly closed = new Set<string>();`.
+2. In `noteSeen`, after `this.jobs.delete(note.id)`, add `this.closed.add(note.id);`.
+3. In `fromHistory`, inside the `note?.id` branch, when `message.note.kind` is
+   `NOTE_KIND.subagentReport` or `NOTE_KIND.subagentLost`, add
+   `ledger.closed.add(id)`. A reload then remembers what was delivered.
+4. At the top of both `background()` and `end()`, add
+   `if (this.closed.has(agentId)) return null;` (in `background`, use `job.agentId`).
+5. Change the signature to `end(agentId, stopReason, report?, opts: { readonly orphan?: boolean } = {})`.
+   In the `job === undefined` branch, `return null` unless `opts.orphan === true`.
+   `subagentLoadNotes` calls `ledger.end(entry.agentId, entry.stopReason, entry.report, { orphan: true })`.
+   `HostedSession.agentEnded` keeps the default, so a live end for an unknown id logs nothing.
+6. Tests in `core/test/agent-job-ledger.test.ts`:
+   - "a late end after noteSeen → null, and segmentFacts is []";
+   - "a live end for an unknown id → null; a replay with {orphan:true} still yields the note (FM 5)";
+   - "fromHistory with a delivered note → a later end for that id → null".
+   One test in `daemon/test/subagent-seam.test.ts`: "agentEnded for an unknown id logs no
+   `subagent_end` and schedules no persist".
+   Mutation: drop the `closed` check → red.
+
+**M2. `backgroundAgent` does not schedule a persist, so on `serve` the `bg` marker reaches disk
+only with the NEXT write. FM 1 ("bg logged, tool result not committed → lost note") is therefore
+mostly unreachable.** `packages/daemon/src/hosted-session.ts:1264-1283`.
+Repro (`review/e2e-serve.ts`, real `HostedSession` + `SessionPersister` + `LogSessionStore`):
+after a reload, `backgroundAgent` → `persisted()` → `stop()`. The file then holds no
+`subagent_background`. The next reload derives no lost note and hands out the SAME `sa-3`
+again. In 6a, a child that starts mid-round and does side effects is invisible to a crash until
+the round commits. `agentEnded` already persists for the same reason, so the two seams are
+inconsistent.
+**Fix:** in `backgroundAgent`, after `this.verifyLog();` inside the `if (body !== null)` block, add
+`this.persist();`. It is `SessionPersister.schedule` (synchronous capture, never awaited), the
+write already allowed in the steering window, as in `agentEnded`. Test in `subagent-seam.test.ts`
+with the `SpyDaemonStore`: after `backgroundAgent`, `await hosted.persisted()`, and the durable
+log contains a `subagent_background` line with no turn run. Mutation: remove the line → red.
+Update FM 1's text to say the marker is durable at launch.
+
+**M3. `note`'s bounds recreate the enum lock-out the plan meant to avoid: THIS build refuses a
+WHOLE log whose `note` comes from a newer build and falls outside `/^[a-z][a-z0-9_]*$/` or
+`id ≤ 64`.** `packages/protocol/src/session.ts:58-67`.
+Repro (`review/old-build.ts`): `kind:"User-To-Subagent"` → `line 9 is a malformed message
+entry`. A 65-char `note.id` gives the same refusal. `main`'s build loads the same file (it strips
+the field). `note` rides the CRITICAL `message` entry, so any tightening a later task needs (an id
+that is a 100-char call id, a dotted kind) locks out every build from this task on. This is the
+plan's prescription; the executor implemented it faithfully.
+**Fix (recommended, see owner Q4):** make the display-only field fail-soft. Define
+`const MessageNoteSchema = z.object({ kind: …as now…, id: …as now… });`, then on
+`ChatMessageSchema` use `note: MessageNoteSchema.optional().catch(undefined),`. An unreadable note
+is dropped like an unknown field, and the message still loads. Run `bun run schema:export`. Tests
+in `protocol/test/session.test.ts`: a message with `note:{kind:"User-X"}`, and one with a 65-char
+`id`, both parse with `note` absent. One `session-log-file.test.ts` case: such a line inside a log
+→ `ok: true`. Mutation: remove `.catch` → red. Update Design §1 and FM 11.
+
+**M4. The emitter caps are incomplete: only `description` and `report` are capped. `agentType`
+(max 128), `callId` (max 256) and `stopReason` (max 64) are logged unchecked. One over-long value
+writes a KNOWN entry that every reader refuses (P3), and the whole session log becomes unloadable
+(laptop: `unreadable`; `serve`: "skipped … left as is").**
+`packages/core/src/agent-job-ledger.ts:127-151,159-192`; `packages/protocol/src/session-log.ts`
+(the two schemas). `ToolCall.id` is an unbounded `z.string()` (`protocol/src/session.ts:29`),
+and `stopReason` is free text supplied by 6a.
+**Fix:**
+1. In `protocol/src/session-log.ts`, export `SUBAGENT_AGENT_TYPE_MAX_CHARS = 128`,
+   `SUBAGENT_CALL_ID_MAX_CHARS = 256` and `SUBAGENT_STOP_REASON_MAX_CHARS = 64`, and use them in
+   the two schemas instead of the literals.
+2. In the ledger, add `const bounded = (s: string, max: number) => (s === "" ? "unknown" : s.slice(0, max));`.
+3. In `background()`, store and return `callId: bounded(job.callId, SUBAGENT_CALL_ID_MAX_CHARS)`
+   and `agentType: bounded(job.agentType, SUBAGENT_AGENT_TYPE_MAX_CHARS)`.
+4. In `end()`, use `stopReason: bounded(stopReason, SUBAGENT_STOP_REASON_MAX_CHARS)` in both
+   branches. Leave the orphan's `callId:""` as is (it is never emitted).
+5. Test: over-long `agentType`/`callId`/`stopReason`, and an empty `agentType`. Each returned
+   body, spread into an envelope, passes `LogSubagentBackgroundEntrySchema` /
+   `LogSubagentEndEntrySchema`. Mutation: drop a `bounded` → red.
+
+**L1. No test exercises the real `serve` write → reload → write → reload.** The plan's Tests ask
+for "the reload segment's log has it as a `message` entry". The `serve-subagent-reload` tests feed
+hand-made files to `rebuild`/`reconcileOnReload`, and `filesOf` (`support/daemon-store-spy.ts:82`)
+re-mints a cold segment from messages, which drops every marker.
+**Fix:** add one test to `daemon/test/persistence.test.ts`, modelled on `A24b` (real
+`LogSessionStore`) and `review/e2e-serve.ts` below. Steps: `backgroundAgent` ×2 → `agentEnded`
+on one → `stop()` → a new host `persister.load` + `restore`. Assert `loadNotes` = [report sa-1,
+lost sa-2], and the history ends with them. Assert the file after the reload write holds them as
+`message` lines and no `subagent_*` line. A second reload gives `loadNotes: []` and the same
+history.
+
+**L2. A load note at the tail makes `awaitsAnswer()` true** (`hosted-session.ts:1513-1516`).
+After a reload, a send-now whose texts were all delivered starts a continuation turn: the model
+answers the note, where it got `NoTurnRunning` before. The user starts it, so it is not a wake
+(Q10 holds), but it is a behaviour change. Decision: owner Q3. Nothing to fix if (a).
+
+**L3. A note pushed and then wiped by a `context_reset` in the SAME uncommitted window is never
+seen by `noteSeen`.** `recordCut` sees only `[oldCut, newCut)`, and `historyReplaced`
+(`hosted-session.ts:2147-2171`) replaces the array in place. The job stays in the ledger, is
+re-emitted, and is re-delivered at the next load. This is harmless (the reset dropped the report
+anyway) but not "structural delivery". **Fix (6a's, record it now):** add to Notes/debt: "6a
+closes a delivered job explicitly (`agentJobs.noteSeen` at its push site) or delivers only at a
+round start after a commit".
+
+**nit-1.** `rebuild`'s `?? currentSegment(parsed).entries` (`daemon-state-file.ts:376-379`) can
+never be reached when `through !== null` (it runs the same find loop). If it were reached, it
+would silently derive from a different segment than the history. Replace it with
+`const derivedFrom = (through !== null ? entriesThrough(parsed, sidecar.logHead) : null) ?? currentSegment(parsed).entries;`
+and a comment, or call `entriesThrough` once and fold `through` from it.
+**nit-2.** `capText` is exported from `core`'s barrel under a generic name. Rename it
+`capSubagentText`, or stop exporting it if only the tests need it.
+**nit-3.** `fromHistory` bumps the counter on ANY `sa-N` in ANY text (a user typing `sa-90000`).
+That is harmless, and Design §2 documents it. Leave it.
+**nit-4.** The doc header still says `Status: implementation (awaiting approval)`. Set it to `review`.
+
+### Premise table (spot-checked)
+
+| Premise | Result |
+|---|---|
+| Context: the payload cannot be `id` (envelope `id`) | TRUE. Both schemas use `agentId` (`session-log.ts` diff). |
+| Attack 1: `note{kind, id?}` vs `agentId` | NOT the probe's bug. The plan's correction is about the LOG ENTRY payload. `note.id` lives inside `message.note`, not in the envelope; the plan's own Design §1 specifies `note{kind, id?}`. `review/old-build.ts`: ONE note for one child. |
+| `PROTOCOL_VERSION` 19, unchanged | TRUE (`version.ts:10`) |
+| P1 critical table is a total `Record` | TRUE |
+| P3 unknown non-crit skipped / crit refused / known-malformed refused | TRUE (main's `parseLogFile`, re-run below) |
+| P8 a resumed turn's history stays untouched | TRUE (`persisted-session.ts:404-405`) |
+| P9 providers copy field by field | TRUE (no `...message` spread in `providers/src`) |
+| P11 two segment starts | TRUE (`:556`, `:2171`) |
+| `canonicalMessage` excludes `note` | TRUE (`session-log.ts:329-343`); `isPrefix` uses it (`session-log-store.ts:234-241`), so a note-only difference never sets aside |
+| Pods never persist | TRUE (`persist()` needs a persister, `hosted-session.ts:840-844`) |
+
+### Mutations (reviewer-run; every file restored, `git status --porcelain` empty afterwards)
+
+| # | Mutation | Result |
+|---|---|---|
+| E1 (executor's) | `subagentLoadNotes` skips `noteSeen` | KILLED: 4 fail (ledger idempotence + re-emitted pair, serve tail, laptop "note closes") |
+| E2 (executor's) | `historyReplaced` logs the title only | KILLED: 3 fail (bg re-emit, bg+end re-emit, D1 drift) |
+| E3 (executor's) | `resumableTurn` ignores `loadNotes` | KILLED: Q1 (a) test |
+| R1 (mine) | `rebuild` derives from the last segment, ignoring `logHead` | KILLED: FM 17 test |
+| R2 (mine) | `recordCut` skips `noteSeen` | KILLED: "a committed note CLOSES its child" |
+
+No mutation SURVIVED. The gaps are untested PATHS (M1, M2, M4, L1), not vacuous tests.
+
+### Attacks tried
+
+1. **Older build** (`review/old-build.ts`; main's `session-log.ts` / `session.ts` /
+   `session-log-file.ts` from `git show main:`, everything else shimmed). The log is written by
+   this branch: markers, a 5000-char report, a `background_exit` note, a future-kind note, and an
+   open turn. Main's build: `ok`, `skipped 2`, `lastId` equal, `closeAtLoad` byte-equal to the new
+   build's with `note` stripped, no `note` field. Its `critical:true` variant is refused. **Holds.**
+   Reverse direction: **M3**.
+2. **Laptop round trip** (`review/e2e-laptop.ts`, real `LogSessionStore`): load → 2 notes. A seed
+   write (worker shape) → load again → the same 3 messages, 2 notes, no duplicate, 0 asides,
+   with `keepSuperseded` on and off. `saveSnapshot` (in-process) keeps `note`. **Holds.**
+3. **`serve` restart ×3** (`review/e2e-serve.ts`): reload #1 → report sa-1 + lost sa-2, written
+   as `message` lines and no markers restated. Reloads #2 and #3 → `loadNotes: []`, history
+   identical, counter continues at sa-3. **Holds**, except **M2** (sa-3's bg never landed).
+4. **Late / unknown `end`** (`review/late-end.ts`): **M1**.
+5. **Emitter caps vs reader schemas**: **M4**.
+6. **Q1 (a)**: closed with `NOT_RUN` + `RESTART_TURN_END`, then the notes. Without notes the turn
+   still resumes (B-series green, E3 killed). The repair ends on tool messages followed by the
+   user note, the same shape as a next prompt after a closed turn. **Holds.**
+7. **Hostile pod**: a forged `note` can close a real child's lost note at the laptop load, or
+   render a forged message as a notice. Both are the accepted "pod is not trusted / forged
+   message" class (FM 15). Live `context_note` notices are already pod-drivable. **No new
+   surface.**
+8. **Cost**: `fromHistory` is one regex pass over the history per `HostedSession` construction.
+   The derivation is O(entries + messages) per load. Ledger memory is O(children of the session).
+   **Acceptable.**
+
+### How the executor behaved
+
+The executor was honest and careful. Every factual claim I checked held: gate counts identical,
+the mutation outcomes reproduce, the RED log is plausible and labelled as "missing symbol" where
+that is what it was, and the "Not done / not verified" list is accurate (no live `serve` crash
+e2e; pod path reasoned only). Drift 1 (orphan `end`) is a good catch of a contradiction inside
+the plan. The executor handled the orphan's empty `callId` re-emission correctly. But it did not
+notice that keeping orphans in the live path also defeats "first wins" after delivery (M1). The
+executor followed the plan literally where the plan was weak (M2's missing persist, M3's regex,
+M4's partial caps) instead of red-teaming it. That is expected from an executor and is why this
+review exists. No inflated claims.
+
+### Owner questions
+
+**Q3. A load note at the tail of an idle history makes a send-now of already-delivered texts start
+a continuation turn (L2).** (a) Keep it: the note is something the model should see, and the user
+asked to send. Document it. (b) Exclude noted messages from `awaitsAnswer()`. A send-now then
+says `NoTurnRunning`, and the note waits for the next real prompt. This also changes shell
+`background_exit` notes. **Recommend (a).** It is user-initiated, it needs no code, and (b)
+special-cases display metadata in a scheduling decision.
+
+**Q4. `note` on the wire: fail-soft or tight (M3)?** (a) `MessageNoteSchema.optional().catch(undefined)`:
+a newer build's unreadable note is dropped (rendered as a user row), and the log always loads.
+(b) Keep the bounds but loosen them (`kind` ≤ 256, any chars; `id` ≤ 256). That lowers the
+lock-out risk but does not remove it. (c) Keep as built: every future kind/id must fit today's
+regex/64 forever. **Recommend (a).** It is the strip-schema philosophy applied to a display-only
+field, and it costs one line.
+
+<details><summary>Reviewer scratch scripts (gitignored; pasted per AGENTS §6)</summary>
+
+`review/e2e-serve.ts` (output above, attack 3). It uses the real `SessionHost` +
+`SessionPersister` + `LogSessionStore`: it opens a session, calls `backgroundAgent` ×2 and
+`agentEnded(sa-1, "end_turn", "REPORT-1")`, then `persisted()` and `stop()`. Then, 3 times: a new
+host → `persister.load` → print `loadNotes` → `restore` → print the history → `backgroundAgent`
+→ `persisted()` / `stop()` → print the file's line types. Output:
+```
+ids: sa-1 sa-2 | disk #1 types: header,base,message,message,title,subagent_background,subagent_background,subagent_end
+reload #1 loadNotes: subagent_report:sa-1,subagent_lost:sa-2
+reload #1 history: user,assistant,note(subagent_report:sa-1),note(subagent_lost:sa-2)
+reload #1 next id would be: sa-3
+disk after reload #1: header,base,message,message,message,message,title
+reload #2 loadNotes:
+reload #2 history: user,assistant,note(subagent_report:sa-1),note(subagent_lost:sa-2)
+reload #2 next id would be: sa-3
+disk after reload #2: header,base,message,message,message,message,title
+```
+`review/old-build.ts` output:
+```
+old build knows subagent types? false false
+old: ok true skipped 2 unknown 2 lastId D1/10 == new lastId D1/10
+old closeAtLoad == new closeAtLoad (note stripped): true
+old has any note field: false | old len 7 new closed len 7
+new load appends: subagent_report:sa-1 5093ch
+old on a critical variant: line 8 is a critical entry of a type this build does not know (subagent_end): update tentacle
+new build on a future kind outside the regex: line 9 is a malformed message entry
+new build on a future note.id of 65 chars: line 9 is a malformed message entry
+old build on same (strips note): ok
+```
+`review/late-end.ts` output:
+```
+after delivery, ledger facts: []
+late end after delivery returns: {"agentId":"sa-1","stopReason":"killed","report":"R2"} (plan FM 7: null)
+ledger facts now (re-emitted at every segment start): [{"agentId":"sa-1","stopReason":"killed","report":"R2"}]
+end for an id never started (live): {"agentId":"sa-77","stopReason":"end_turn"} → next id: sa-78
+```
+`review/e2e-laptop.ts` output:
+```
+keep=false load#1: user,subagent_report,subagent_lost
+keep=false load#2 len 3 (seed 3) notes: 2
+keep=false segments: seed asides: 0 []
+keep=true  … identical …
+snapshot load#2 notes: {"kind":"subagent_lost","id":"sa-1"} len 2
+```
+</details>
