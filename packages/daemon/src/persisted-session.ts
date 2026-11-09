@@ -94,6 +94,17 @@ export interface DaemonSessionState {
   readonly log?: DaemonLogCapture;
 }
 
+/** The chat `/clear` is about to drop, captured synchronously before the barrier (docs/feat/clear-fork-history.md). */
+export interface ClearForkCapture {
+  /** From `forkableMessages`. */
+  readonly messages: readonly ChatMessage[];
+  /** Before the clear's reset. */
+  readonly title: TitleState;
+  readonly createdAt: number;
+  /** The old chat's last change. */
+  readonly updatedAt: number;
+}
+
 /** A session as the `serve` daemon keeps it (in memory, and on disk as a log + a state file). */
 export interface DaemonSessionRecord extends SessionRecord {
   readonly lastActiveAt: number;

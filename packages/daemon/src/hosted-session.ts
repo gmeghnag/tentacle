@@ -110,6 +110,7 @@ import {
 } from "./mapping.ts";
 import { outcomeToResponse, toPermissionRequestUpdate } from "./permission-map.ts";
 import {
+  type ClearForkCapture,
   type DaemonLogCapture,
   type DaemonSessionState,
   type PendingPermission,
@@ -120,6 +121,7 @@ import {
 } from "./persisted-session.ts";
 import { EMPTY_QUEUE, leftovers, queueView, returnCause, sameState } from "./queue-view.ts";
 import { SessionRing } from "./ring.ts";
+import { forkableMessages } from "./session-fork.ts";
 import type { SessionSummary } from "./session-list.ts";
 import { type LogBase, SessionLog, replayFromBase } from "./session-log.ts";
 import type { SessionPersister } from "./session-persister.ts";
@@ -297,6 +299,8 @@ export interface SessionTitling {
 export interface SessionPersistence {
   readonly persister: SessionPersister;
   readonly restored?: RestoredSessionState;
+  /** `/clear` hands the chat it drops here, to be kept as its own archived session (docs/feat/clear-fork-history.md). */
+  readonly keepFork?: (sourceId: string, capture: ClearForkCapture) => void;
 }
 
 /**
@@ -433,6 +437,7 @@ export class HostedSession {
   /** The answers that settled recent asks: an identical re-send is a success. */
   private readonly answered = new SettledAnswers();
   private readonly persister: SessionPersister | null;
+  private readonly keepFork: ((sourceId: string, capture: ClearForkCapture) => void) | null;
   private readonly createdAt: number;
   private seq = 0;
   private readonly ring: SessionRing<KnownSessionUpdateParams>;
@@ -525,6 +530,7 @@ export class HostedSession {
     this.wake = wake;
     const restored = persistence?.restored;
     this.persister = persistence?.persister ?? null;
+    this.keepFork = persistence?.keepFork ?? null;
     this.title = restored?.title ?? titling.seed ?? { source: "auto" };
     this.titleModel = titling.model;
     this.titleTimeoutMs = titling.timeoutMs ?? TITLE_TIMEOUT_MS;
@@ -2391,6 +2397,17 @@ export class HostedSession {
    */
   clear(): { before: number; after: number } {
     this.assertIdle();
+    // BEFORE the title reset and the barrier: the old chat, as it stands
+    // (`filter` returns a new array, the in-place replacement cannot touch it).
+    const kept = this.keepFork ? forkableMessages(this.session.messages) : null;
+    const fork: ClearForkCapture | null = kept
+      ? {
+          messages: kept,
+          title: this.title,
+          createdAt: this.createdAt,
+          updatedAt: this.lastChangeAt,
+        }
+      : null;
     this.abortTitle();
     if (this.titleKick !== null) {
       clearTimeout(this.titleKick);
@@ -2414,6 +2431,16 @@ export class HostedSession {
     }
     // A fresh chat: an earlier stop or failure no longer blocks the wake.
     this.lastEndBad = false;
+    // Handed to the store BEFORE the `persist()` below: the fork precedes the
+    // save that drops the old chat from the source's file.
+    if (fork) {
+      try {
+        this.keepFork?.(this.id, fork);
+      } catch (error) {
+        // The clear already happened: never fail it now.
+        this.reportTurnError(error);
+      }
+    }
     this.lastChangeAt = this.now();
     this.lastActiveAt = this.now();
     this.persist();

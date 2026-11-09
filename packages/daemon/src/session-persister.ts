@@ -26,6 +26,7 @@
  * serving from memory and the next unit heals the files (the store's writer
  * follows every unit, written or not).
  */
+import { randomUUID } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { encodeTitle, isValidSessionId } from "@tentacle/agent";
@@ -38,10 +39,12 @@ import {
   sidecarOf,
 } from "./daemon-state-file.ts";
 import type {
+  ClearForkCapture,
   DaemonLogCapture,
   DaemonSessionRecord,
   DaemonSessionState,
 } from "./persisted-session.ts";
+import { forkWrite } from "./session-fork.ts";
 import { type LogFileHeader, parseHeaderLine, parseLogFile } from "./session-log-file.ts";
 import type { LogWrite, RawSessionFiles, RawSessionState } from "./session-log-store.ts";
 import type { TombstoneStore } from "./session-tombstones.ts";
@@ -50,6 +53,8 @@ import type { TombstoneStore } from "./session-tombstones.ts";
 export interface DaemonStore {
   /** One unit: the log op, then the state file (`LogWrite.sidecar`), in the session's queue. */
   write(unit: LogWrite): Promise<void>;
+  /** A NEW session (`unit.id`) holding the chat `sourceId` is dropping, in `sourceId`'s queue (`LogSessionStore.fork`). */
+  fork(sourceId: string, unit: LogWrite): Promise<void>;
   /** The state file only (an archived rename / reclaim). */
   writeState(id: string, data: string): Promise<void>;
   remove(id: string): Promise<void>;
@@ -185,6 +190,58 @@ export class SessionPersister {
         ? Promise.resolve(false)
         : this.unit(captured.record, captured.log, captured.from),
     };
+  }
+
+  /**
+   * Write `capture` (the chat `/clear` is dropping) as a NEW ARCHIVED session,
+   * handed to the store NOW (synchronously), so it precedes the source's next
+   * unit, which reaches the store on a microtask. Returns the record and
+   * whether the write landed (a failure is reported, never thrown).
+   */
+  fork(
+    sourceId: string,
+    capture: ClearForkCapture,
+    archivedAt: number,
+  ): { readonly record: DaemonSessionRecord; readonly written: Promise<boolean> } {
+    const id = randomUUID();
+    const write = forkWrite({
+      id,
+      meta: { cwd: this.opts.cwd, model: this.opts.model, createdAt: capture.createdAt },
+      messages: capture.messages,
+      title: capture.title,
+      ts: archivedAt,
+    });
+    const record: DaemonSessionRecord = {
+      id,
+      cwd: this.opts.cwd,
+      model: this.opts.model,
+      createdAt: capture.createdAt,
+      updatedAt: capture.updatedAt,
+      title: encodeTitle(capture.title, capture.messages),
+      messages: capture.messages,
+      lastActiveAt: archivedAt,
+      turns: [],
+      enqueueIds: [],
+      returned: [],
+      archivedAt,
+      logged: capture.messages,
+      logHead: write.read.head,
+      paired: true,
+      loadNotes: [],
+    };
+    if (this.stopped) return { record, written: Promise.resolve(false) };
+    let saving: Promise<void>;
+    try {
+      saving = this.opts.store.fork(sourceId, {
+        ...write,
+        sidecar: encodeSidecar(sidecarOf(record)),
+        keepEmpty: true,
+      });
+    } catch (error) {
+      this.report(error);
+      return { record, written: Promise.resolve(false) };
+    }
+    return { record, written: this.track(id, saving, true) };
   }
 
   /**

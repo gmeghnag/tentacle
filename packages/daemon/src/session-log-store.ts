@@ -178,10 +178,13 @@ interface WriterState {
   snapshotInc?: string;
   /** The copy `saveAside` last set aside (a fork's held copy): a replace need not set it aside again. */
   asided?: readonly ChatMessage[] | undefined;
+  /** Forks of this session not durable yet: retried before its next write (`fork`). */
+  forks?: LogWrite[] | undefined;
 }
 
 type Op =
   | { readonly kind: "write"; readonly update: LogWrite }
+  | { readonly kind: "fork"; readonly update: LogWrite }
   | { readonly kind: "snapshot"; readonly record: SessionRecord }
   | { readonly kind: "state"; readonly data: string }
   | { readonly kind: "aside"; readonly reason: string }
@@ -390,6 +393,17 @@ export class LogSessionStore {
     return file;
   }
 
+  /**
+   * Write a NEW session (`update.id`) holding a chat `sourceId` is about to
+   * drop (`/clear`), in `sourceId`'s queue: it precedes every later write of
+   * the source. On failure it stays pending, and the source's next write
+   * retries it first and fails if it still fails (the old chat is never
+   * dropped before this is durable).
+   */
+  fork(sourceId: string, update: LogWrite): Promise<void> {
+    return this.enqueue(sourceId, { kind: "fork", update });
+  }
+
   /** Resolve once every in-flight and queued operation has settled. */
   async drain(): Promise<void> {
     for (;;) {
@@ -437,6 +451,14 @@ export class LogSessionStore {
     if (op.kind === "write") {
       this.advance(id, op.update);
     }
+    if (op.kind === "fork") {
+      const state = this.writers.get(id) ?? { segment: [] };
+      state.forks = [...(state.forks ?? []), op.update];
+      this.writers.set(id, state);
+      await mkdir(this.dir, { recursive: true });
+      await this.writeForks(state);
+      return;
+    }
     const target = this.file(id);
     try {
       await mkdir(this.dir, { recursive: true });
@@ -447,6 +469,9 @@ export class LogSessionStore {
       const release = await this.lock(id);
       try {
         if (op.kind === "write") {
+          // A fork still pending (it failed before) goes first: it fails this save too.
+          const pending = this.writers.get(id);
+          if (pending?.forks) await this.writeForks(pending);
           await this.writeLocked(id, op.update);
           if (op.update.sidecar !== undefined) {
             await this.writeStateLocked(id, op.update.sidecar);
@@ -461,9 +486,56 @@ export class LogSessionStore {
         await release();
       }
     } catch (error) {
-      if (error instanceof LockBusyError || error instanceof StateWriteError) throw error;
+      if (
+        error instanceof LockBusyError ||
+        error instanceof StateWriteError ||
+        error instanceof ForkWriteError
+      ) {
+        throw error;
+      }
       const verb = op.kind === "remove" ? "remove" : "write";
       throw new Error(`couldn't ${verb} ${target}: ${describeFsError(error)}`, { cause: error });
+    }
+  }
+
+  /** Every pending fork of a source, oldest first; one that fails stays (and so do the ones after it). */
+  private async writeForks(state: WriterState): Promise<void> {
+    while (state.forks !== undefined) {
+      const next = state.forks[0];
+      if (next === undefined) {
+        state.forks = undefined;
+        return;
+      }
+      await this.writeFork(next);
+      state.forks.shift();
+    }
+  }
+
+  /**
+   * Under the NEW session's own lock (AGENTS §7). Its writer state goes when
+   * it lands, except `serve`'s (`sidecar`): `SessionPersister.forget` releases
+   * that one, and a sweep's `writeRecord` needs it until then.
+   */
+  private async writeFork(update: LogWrite): Promise<void> {
+    const id = update.id;
+    if (!isValidSessionId(id)) {
+      throw new ForkWriteError(`invalid session id ${JSON.stringify(id)}`);
+    }
+    try {
+      this.advance(id, update);
+      const release = await this.lock(id);
+      try {
+        await this.writeLocked(id, update);
+        if (update.sidecar !== undefined) await this.writeStateLocked(id, update.sidecar);
+      } finally {
+        await release();
+      }
+      if (update.sidecar === undefined) this.writers.delete(id);
+    } catch (error) {
+      throw new ForkWriteError(
+        `the chat before /clear could not be kept in ${this.file(id)}: ${describeFsError(error)}`,
+        { cause: error },
+      );
     }
   }
 
@@ -1165,6 +1237,9 @@ export class LogSessionStore {
 
 /** A live holder kept the session's lock past the wait: this save failed (retried at the next). */
 export class LockBusyError extends Error {}
+
+/** A fork (the chat `/clear` drops, kept as its own session) could not be written: the old chat stays where it is. */
+export class ForkWriteError extends Error {}
 
 /** The log op landed but the state file did not (`serve`: the unit failed; the next one heals). */
 export class StateWriteError extends Error {}

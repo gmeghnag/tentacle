@@ -2,7 +2,7 @@
 
 > **Status:** implementation (awaiting the owner's answer to Q1 and approval)
 > **Branch:** `feat/clear-fork-history` (this worktree, off `main` `34aab38`)
-> **Type:** feat · **Size:** M (~9 source files, no protocol or TUI change) · **Blast:** load-bearing (a new write path in both session stores, AGENTS §7 "Persistence"; `TODO.md` said cross-module, §10 makes any §7 invariant load-bearing) · **Suited:** architect's recommendation: Sonnet (`claude-sonnet-5-5`) or stronger, not the M/contained default; the owner assigns. **Mandatory fresh-context review** red-teaming §7 "Persistence" and "Pod … not trusted"
+> **Type:** feat · **Size:** M (~9 source files, no protocol or TUI change) · **Blast:** load-bearing (a new write path in both session stores, AGENTS §7 "Persistence"; `TODO.md` said cross-module, §10 makes any §7 invariant load-bearing) · **Suited:** Sonnet (`claude-sonnet-5-5`), assigned by the owner 2026-11-09. **Mandatory fresh-context review** red-teaming §7 "Persistence" and "Pod … not trusted"
 
 Vocabulary: **live session** = the session `/clear` ran in (it keeps its id, jobs and sub-agents). **Fork** = the new session holding the chat that was cleared. **Copy** = what the laptop's controller last read back from the daemon.
 
@@ -659,3 +659,53 @@ Re-run the probe first and paste its output into Execution (T3, T10, T11 re-prov
 *— claude-opus-5-5, 2026-11-09* — one real decision; the plan is written for the recommended answer.
 
 **Q1 — What "read-only" means when a fork is opened.** (a) Listed and untouched until opened; **opening it is the ordinary resume**, under the fork's own id, and a new prompt continues the fork (never the live session). Free: the probe shows it works today on both stores, and it is what `/clear` did before clear-keeps-jobs. (b) **Truly view-only**: the transcript opens and prompts are refused. It needs a new session mode in the TUI and in `session/open`, a protocol bump and its own tests: about +M. (c) Opening shows the old chat and the first prompt starts a NEW session seeded from it, leaving the fork unchanged. About +S on the laptop, plus a `serve` path, and every use adds a row. **Recommend (a)**: the fork already cannot affect the live session, so (b) and (c) only protect the fork from its own owner.
+
+**Owner (2026-11-09): Q1 (a)** — opening a fork is the ordinary resume under the fork's own id.
+
+## Execution
+
+*— claude-sonnet-5-5, 2026-11-09*
+
+**Interruptions.** The run was cut by a usage limit twice. On the first resume I inspected the partial tree: `session-fork.ts`, `index.ts` export, `ClearForkCapture`, the `session-log-store.ts` fork code (`fork`, `writeForks`, `writeFork`, `ForkWriteError`), the `session-persister.ts` `fork` (+ `DaemonStore.fork`) and the store tests T3-T8 (+ an invalid-id test) and `session-fork.test.ts` (T1, T2) were complete and consistent with the plan (tsc clean for them; 40 tests green); kept as they were, except one lint fix (`(state.forks ??= []).push` → `state.forks = [...(state.forks ?? []), …]`, `noAssignInExpressions`). The persister `fork` has one addition over the plan: a synchronous throw of `store.fork` is reported and returns `written: false`. On the second resume the tree was consistent (tsc and biome clean); I continued from the CLI tests.
+
+**Done, in order.**
+1. `daemon/src/session-fork.ts` (new) + `index.ts` export (kept).
+2. `daemon/src/persisted-session.ts` `ClearForkCapture` (kept).
+3. `daemon/src/session-log-store.ts` fork path (kept).
+4. `daemon/src/session-persister.ts` `fork`; `daemon/test/support/daemon-store-spy.ts` `fork` (spy, added by me).
+5. `daemon/src/hosted-session.ts`: `SessionPersistence.keepFork`, capture at the top of `clear()` after `assertIdle`, call (in a `try`) before `persist()`; `daemon/src/session-host.ts`: `keepFork` method + wiring in `build`. As planned.
+6. `cli/src/session-saver.ts` `keepFork` (also catches a synchronous throw of the store call); `cli/src/local-runtime.ts`: `lastRead`/`forkedHead`, `armFork`, `clearRefused`, new `clear()`, `build` passes `keepFork`.
+7. Tests (below); `CHANGELOG.md` (the `/clear` entry sentence replaced as planned); AGENTS §7 one sentence; this doc: Q1 owner answer, `Suited:` line.
+
+**Drifts.**
+- `local-runtime.ts`: `lastRead.head` is `back.read?.head?.id ?? ""`, not `back.read.head.id`: many existing unit fakes of `readBack` return only `{ messages }`, and the strict form threw in `run` (18 existing tests failed). With `""` the `forkedHead` guard still works.
+- `armFork` wraps `keepFork(...)` in a `try` that goes to `onFlushError` (plan: none). Defensive; `saver.keepFork` does not throw.
+- The existing test `T16 (clear-keeps-jobs)` in `cli/test/local-runtime.test.ts` encoded the old contract (one read after `clear`); `/clear` now reads first by design, so it now expects the pre-clear read, then the post-clear read (`saved == [["old"],["note"]]`). Changed on purpose.
+- Plan T17-T22 and T23 live in new files (`cli/test/session-saver-fork.test.ts`, `cli/test/clear-fork-controller.test.ts`, `cli/test/clear-fork.e2e.test.ts`) instead of the existing `session-saver.test.ts` / `local-runtime.test.ts` (a new file was simpler to write with the tools available). T9-T16 are all in `daemon/test/clear-fork.test.ts` (not split into `persistence.test.ts`).
+- T10: the reopen goes through `host.prepareOpen` + `host.open({reopen: true})` and asserts the old messages; it does NOT send a new prompt on the fork (the probe, part B, showed that continuing works; the test does not pin it).
+- T23 with `keepSuperseded` on: `load()` of the live file returns only the current segment, so the test asserts the old chat is in the live FILE (bytes) iff `keepSuperseded`, and never in the loaded messages.
+
+**Probe (re-run).** I did NOT re-run the plan's probe script as such (it was run by the architect on this tree). The same properties are re-proved through the real API by T3 (store list + untouched source + no resident writer), T10 (archived after a restart, reopen), T11 (fork file is only `base,message,message,message`, no note on reload, live log keeps `subagent_background`) and T23 (laptop: LIVE + FORK).
+
+**Red/green.** HONEST: the feature code existed before the tests of this run (written by the cut run and by me before the tests), so I did NOT see each test red on the unimplemented code first. Non-vacuity was shown by mutation instead (cp backup, mutate, run, restore, `shasum` equal to the pre-mutation hash for all five source files):
+
+| Mutation | Red (failing line, abridged) |
+|---|---|
+| `forkableMessages`: `kept = messages` | `forkableMessages > T1 …` fail |
+| store `writeFork`: drop `writers.delete` | `fork … > T3 a new listed session …` fail |
+| `fork` enqueues on `update.id` | T4, T5, "an invalid fork id…" fail |
+| drop `writeForks` in the `write` branch | `T5 a failed fork blocks the source's replace…` fail |
+| `hosted-session`: drop the `keepFork` call | `clear-fork.test.ts`: T9-T16 all fail (0 pass / 8 fail) |
+| `forkableMessages`: `? kept : kept` (no null) | `T14` and `T1` fail |
+| `local-runtime`: drop the `forkedHead` guard | `T21 the same read head forks once` fail |
+| `clear`: arm the fork on every error | `T19 a daemon refusal forks nothing` fail |
+| `clear`: never arm in the `catch` | `T20 a dropped link forks anyway` fail |
+| `build`: no `keepFork` to the saver | `clear-fork.e2e` fails |
+
+NOT mutation-tested / weak: **T2** (a mutation `title.source === "auto"` → `false` was NOT run: the mutate script could not be run without approval, so it was not done); **T6, T7, T8** (not mutated); **T17** (saver tests, not mutated); **T18's ordering** — moving `armFork` after `flush()` stays green: an EQUIVALENT mutant, because `flush()` starts the read synchronously and the store write only follows an `await`, so the call order into the store is the same. The ordering that matters (fork before the source's later write) is pinned in the store by T4/T5, and on `serve` by T16 (whose mutation, removing the fork call, is red, but not a reorder mutation). **T22** ("a foreign clear forks nothing") passes trivially on today's code (`watch` never calls `armFork`); no mutation done.
+
+**Gate.** `bunx tsc --noEmit` clean; `bunx tsc -p apps/mobile` clean; `bunx biome check .` clean (807 files, no fixes); `bun test packages`: **6157 pass, 3 skip (the opt-in ones), 0 fail**. The exec confinement F2 flake did not occur. The first full run, before the `read?.head` fix and the T16 update, had 18 failures (above), all fixed.
+
+**Suspected `setAside` bug (Notes).** Not verified and not fixed (out of scope; no probe run for lack of budget). To verify: fail `saveAside` once in a forked read, then read linearly.
+
+**Not done / not verified.** (1) No fresh-context Review (mandatory for this load-bearing task: still to do). (2) The mutation gaps listed above. (3) T10 does not pin "a new prompt continues the fork". (4) `TODO.md` untouched, per instructions. (5) No manual TUI run.

@@ -184,7 +184,9 @@ assume.
   what the file lacks, or skips when the file is already ahead. A session cut mid-turn is closed
   when it is LOADED (from the log's turn markers), not when it is saved.
   Superseded history (compaction, `context_reset`) is kept only with
-  `sessions.keepSuperseded` (default off); segments already kept survive turning it off. The main owns the session uid
+  `sessions.keepSuperseded` (default off); segments already kept survive turning it off.
+  A `/clear` keeps the chat it drops as a NEW session (a fork, built from messages only):
+  durable before the source's next write; `serve` writes it archived; a pod never. The main owns the session uid
   (passed into `session/open`) so `--resume` keeps the file. Persist only the
   conversation — `ChatMessage`s and the log's typed facts about them
   (turn/call markers, title, checkpoints, sub-agent lifecycle markers with a

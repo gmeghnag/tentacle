@@ -15,8 +15,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionRecord } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
+import { forkWrite } from "../src/session-fork.ts";
 import { currentSegment, headerLine, parseLogFile } from "../src/session-log-file.ts";
 import {
+  ForkWriteError,
   type LogAsideInfo,
   LogSessionStore,
   type LogStoreIo,
@@ -792,5 +794,148 @@ describe("the sub-agent load derivation on the laptop's load (docs/feat/subagent
     expect(repair[1]?.toolCalls?.[0]?.id).toBe("c1");
     expect(repair.map((m) => m.content).join(" ")).toMatch(/interrupted/i);
     expect(repair.every((m) => m.note === undefined)).toBe(true);
+  });
+});
+
+describe("fork (docs/feat/clear-fork-history.md): a NEW session holding the chat a source is about to drop", () => {
+  const OLD = [user("the OLD chat"), asst("old reply")];
+  const forkOf = (id: string, messages: readonly ChatMessage[] = OLD): LogWrite =>
+    forkWrite({ id, meta: META, messages, title: { source: "model", text: "old title" }, ts: 5 });
+
+  /** An io whose `writeDurable` fails, or waits, for the fork's temp only. */
+  function forkIo(forkId: string) {
+    const control = {
+      fail: false,
+      gate: null as Promise<void> | null,
+      forkTemps: 0,
+    };
+    const io: LogStoreIo = {
+      append: async (path, data) => {
+        await appendFile(path, data, { mode: 0o600 });
+      },
+      writeDurable: async (path, data) => {
+        if (path.includes(forkId)) {
+          control.forkTemps++;
+          if (control.gate) await control.gate;
+          if (control.fail) throw Object.assign(new Error("full"), { code: "ENOSPC" });
+        }
+        await writeFile(path, data, { mode: 0o600 });
+      },
+    };
+    return { io, control };
+  }
+
+  /** The source "s" holds the old chat; the reader then restarts at a new base (the clear). */
+  async function sourceWithOldChat(store: LogSessionStore) {
+    const log = new FakeLog("D1");
+    const reader = new FakeReader("s");
+    await store.write(reader.read(log.base(OLD), "cold"));
+    const cleared = new FakeLog("D2");
+    return { cleared, reader };
+  }
+
+  test("T3 a new listed session; the source's bytes are untouched; no writer is left for the fork", async () => {
+    const where = fresh();
+    const store = new LogSessionStore(where);
+    await sourceWithOldChat(store);
+    const before = await readFile(store.file("s"), "utf8");
+    const writers = store.residentWriters();
+    await store.fork("s", forkOf("f1"));
+    expect(await readFile(store.file("s"), "utf8")).toBe(before);
+    expect(store.residentWriters()).toBe(writers);
+    const listed = (await store.list()).records.map((r) => r.id).sort();
+    expect(listed).toEqual(["f1", "s"]);
+    expect(await load(store, "f1")).toEqual(OLD);
+    expect(await readdir(where)).not.toContain(".f1.lock");
+  });
+
+  test("T4 the fork precedes the source's next write: the source file is not touched until the fork lands", async () => {
+    const where = fresh();
+    const { io, control } = forkIo("f1");
+    const store = new LogSessionStore(where, { io });
+    const { cleared, reader } = await sourceWithOldChat(store);
+    const before = await readFile(store.file("s"), "utf8");
+    const gate = Promise.withResolvers<void>();
+    control.gate = gate.promise;
+    const forking = store.fork("s", forkOf("f1"));
+    const saving = store.write(reader.read(cleared.base([user("fresh")]), "cold"));
+    await Bun.sleep(60);
+    expect(control.forkTemps).toBe(1);
+    expect(await readFile(store.file("s"), "utf8")).toBe(before);
+    gate.resolve();
+    await forking;
+    await saving;
+    expect(await load(store, "f1")).toEqual(OLD);
+    expect(await load(store, "s")).toEqual([user("fresh")]);
+  });
+
+  test("T5 a failed fork blocks the source's replace, then heals: the old chat is never dropped before it is durable", async () => {
+    const where = fresh();
+    const { io, control } = forkIo("f1");
+    const store = new LogSessionStore(where, { io });
+    const { cleared, reader } = await sourceWithOldChat(store);
+    const before = await readFile(store.file("s"), "utf8");
+    control.fail = true;
+    await expect(store.fork("s", forkOf("f1"))).rejects.toThrow(/could not be kept/);
+    const replace = reader.read(cleared.base([user("fresh")]), "cold");
+    await expect(store.write(replace)).rejects.toBeInstanceOf(ForkWriteError);
+    expect(await readFile(store.file("s"), "utf8")).toBe(before);
+    expect(await readdir(where)).not.toContain("f1.jsonl");
+    control.fail = false;
+    await store.write(replace);
+    expect(await load(store, "f1")).toEqual(OLD);
+    expect(await load(store, "s")).toEqual([user("fresh")]);
+    // Healed: the next write does not re-write the fork.
+    const temps = control.forkTemps;
+    await store.write(reader.read([cleared.msg(asst("again"))]));
+    expect(control.forkTemps).toBe(temps);
+  });
+
+  test("T6 a retry of the same fork update is idempotent: one file, identical bytes", async () => {
+    const where = fresh();
+    const store = new LogSessionStore(where);
+    await sourceWithOldChat(store);
+    const update = forkOf("f1");
+    await store.fork("s", update);
+    const first = await readFile(store.file("f1"), "utf8");
+    await store.fork("s", update);
+    expect(await readFile(store.file("f1"), "utf8")).toBe(first);
+    expect((await readdir(where)).filter((f) => f.startsWith("f1"))).toEqual(["f1.jsonl"]);
+  });
+
+  test("T7 the fork holds its own lock: a live holder fails it, no file", async () => {
+    const where = fresh();
+    await mkdir(where, { recursive: true });
+    const store = new LogSessionStore(where, { lockWaitMs: 40, lockStaleMs: 30_000 });
+    const holder = Bun.spawn(["sleep", "5"]);
+    try {
+      await writeFile(join(where, ".f1.lock"), `${holder.pid} other ${Date.now()}`);
+      await expect(store.fork("s", forkOf("f1"))).rejects.toBeInstanceOf(ForkWriteError);
+      expect(await readdir(where)).not.toContain("f1.jsonl");
+    } finally {
+      holder.kill();
+    }
+  });
+
+  test("T8 ForkWriteError names the fork's file", async () => {
+    const where = fresh();
+    const { io, control } = forkIo("f1");
+    const store = new LogSessionStore(where, { io });
+    control.fail = true;
+    const error = await store.fork("s", forkOf("f1")).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ForkWriteError);
+    expect((error as Error).message).toContain("could not be kept");
+    expect((error as Error).message).toContain(store.file("f1"));
+    expect((error as Error).message).toContain("no space left");
+  });
+
+  test("an invalid fork id is refused, nothing is written", async () => {
+    const where = fresh();
+    const store = new LogSessionStore(where);
+    await expect(store.fork("s", forkOf("../evil"))).rejects.toBeInstanceOf(ForkWriteError);
+    expect(await readdir(where).catch(() => [])).toEqual([]);
   });
 });
