@@ -470,7 +470,8 @@ export class RemoteSession implements SessionStreamListener {
 
   /**
    * Subscribe to MY rows coming back (docs/feat/queued-broadcast.md): a row I
-   * queued that its turn left undrained, which no send-now carried on. Each   * row is given once, with the text I typed (never the daemon's), then
+   * queued that its turn left undrained, which no send-now carried on. Each
+   * row is given once, with the text I typed (never the daemon's), then
    * reclaimed daemon-side. The listener puts them back in front of the user;
    * nothing is ever re-sent by itself. A send-now cancelled before it started
    * gives back only its own texts (they reject with its events); a row the

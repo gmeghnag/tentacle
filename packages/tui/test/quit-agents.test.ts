@@ -79,36 +79,72 @@ describe("T48: the confirmation text", () => {
       "2 other terminals attached — close the session for all? (y/N)",
     );
   });
+
+  test("one row at 80 columns: at most 3 ids, each short, then a count", () => {
+    // LOW-2: a hostile pod can send 32 ids of 200 chars (they pass the client's
+    // bound), and joining them all rendered 98 rows in a 3-row box. The bound
+    // here keeps the text small; `wrap="truncate-end"` keeps it ONE row.
+    const many = Array.from({ length: 32 }, (_, i) => `${i}`.repeat(200));
+    const text = quitConfirmText({ others: 0, agents: 32, names: many });
+    expect(text).toBe(
+      `32 background sub-agents (${many
+        .slice(0, 3)
+        .map((n) => n.slice(0, 12))
+        .join(", ")} +29) will be lost — quit? (y/N)`,
+    );
+    // Unbounded it was 10 820 chars; bounded it is one short line.
+    expect(text.length).toBeLessThan(100);
+    // Three or fewer: all of them, no count.
+    expect(quitConfirmText({ others: 0, agents: 2, names: ["sa-1", "sa-2"] })).toBe(
+      "2 background sub-agents (sa-1, sa-2) will be lost — quit? (y/N)",
+    );
+    // A long id is cut, and the count still says how many are there.
+    expect(quitConfirmText({ others: 0, agents: 4, names: ["x".repeat(200), "b", "c", "d"] })).toBe(
+      "4 background sub-agents (xxxxxxxxxxxx, b, c +1) will be lost — quit? (y/N)",
+    );
+  });
 });
 
 describe("T48: Ctrl+C idle asks too", () => {
   test("idle Ctrl+C with children asks; with none it exits, as today", () => {
-    expect(ctrlCQuitStep({ running: false, exitPending: false, detaches: false, agents: 2 })).toBe(
-      "confirm",
-    );
-    expect(ctrlCQuitStep({ running: false, exitPending: false, detaches: false, agents: 0 })).toBe(
-      "exit",
-    );
+    expect(
+      ctrlCQuitStep({ running: false, exitPending: false, detaches: false, others: 0, agents: 2 }),
+    ).toBe("confirm");
+    expect(
+      ctrlCQuitStep({ running: false, exitPending: false, detaches: false, others: 0, agents: 0 }),
+    ).toBe("exit");
+  });
+
+  test("with another terminal attached it never asks: a Ctrl+C only detaches (HIGH-2)", () => {
+    // Nothing is lost, so "will be lost — quit?" would be a lie, and its `y`
+    // would have to close a session that is not this TUI's to close.
+    expect(
+      ctrlCQuitStep({ running: false, exitPending: false, detaches: false, others: 1, agents: 2 }),
+    ).toBe("exit");
+    expect(
+      ctrlCQuitStep({ running: true, exitPending: false, detaches: false, others: 1, agents: 2 }),
+    ).toBe("stop");
   });
 
   test("mid-turn Ctrl+C still only stops the turn: no dialog over a running turn", () => {
-    expect(ctrlCQuitStep({ running: true, exitPending: false, detaches: false, agents: 2 })).toBe(
-      "stop",
-    );
+    expect(
+      ctrlCQuitStep({ running: true, exitPending: false, detaches: false, others: 0, agents: 2 }),
+    ).toBe("stop");
   });
 
   test("connect detaches, a second press exits, a confirmed one exits", () => {
-    expect(ctrlCQuitStep({ running: false, exitPending: false, detaches: true, agents: 2 })).toBe(
-      "exit",
-    );
-    expect(ctrlCQuitStep({ running: false, exitPending: true, detaches: false, agents: 2 })).toBe(
-      "exit",
-    );
+    expect(
+      ctrlCQuitStep({ running: false, exitPending: false, detaches: true, others: 0, agents: 2 }),
+    ).toBe("exit");
+    expect(
+      ctrlCQuitStep({ running: false, exitPending: true, detaches: false, others: 0, agents: 2 }),
+    ).toBe("exit");
     expect(
       ctrlCQuitStep({
         running: false,
         exitPending: false,
         detaches: false,
+        others: 0,
         agents: 2,
         confirmed: true,
       }),

@@ -33,3 +33,22 @@ export function backgroundSuffix(count: number): string {
 export function backgroundNames(rows: readonly BackgroundAgentRow[] | undefined): string[] {
   return (rows ?? []).map((row) => row.id);
 }
+
+/**
+ * Whether two reports name the same children, in the same order. The daemon
+ * sends a full state up to 4×/s and the TUI reads only the count and the ids,
+ * so an unchanged set must not re-render the whole `App` (LOW-4). A row's other
+ * fields are not read here, so they cannot make this false.
+ */
+export function sameIds(
+  a: readonly BackgroundAgentRow[] | undefined,
+  b: readonly BackgroundAgentRow[] | undefined,
+): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (a === undefined || b === undefined || a.length !== b.length) {
+    return false;
+  }
+  return a.every((row, i) => row.id === b[i]?.id);
+}

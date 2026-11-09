@@ -10,7 +10,12 @@ import {
 } from "@tentacle/core";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
-import { type BackgroundAgentRow, backgroundCount, backgroundNames } from "./background-view.ts";
+import {
+  type BackgroundAgentRow,
+  backgroundCount,
+  backgroundNames,
+  sameIds,
+} from "./background-view.ts";
 import {
   BLINK_HALF_MS,
   BLINK_IDLE,
@@ -625,8 +630,15 @@ export function App({
   // frame (`requestQuit`, the key handler): a ref, updated where it is set.
   const subagentsRef = useRef<readonly BackgroundAgentRow[] | undefined>(undefined);
   const setAgents = useCallback((rows: readonly BackgroundAgentRow[] | undefined) => {
+    // The ref always tracks the daemon's report (the key handler and
+    // `requestQuit` read it); the STATE only changes when the count or the ids
+    // do — the frame carries up to 4 full states a second, and re-rendering the
+    // whole App for an unchanged list is pure waste (LOW-4).
+    const previous = subagentsRef.current;
     subagentsRef.current = rows;
-    setSubagents(rows);
+    if (!sameIds(previous, rows)) {
+      setSubagents(rows);
+    }
   }, []);
   const layoutOptsRef = useRef<RenderOptions>({
     expandAll: false,
@@ -2323,36 +2335,27 @@ export function App({
     }
     // `/quit`'s confirmation: every other key answers it, before the chord and
     // the permission dialog, so its `y` never approves an ask opened meanwhile.
+    // Only a plain `y` closes (`quitConfirmKey`); Ctrl+C is "No" — it dismisses,
+    // as before 6a-2 (owner 2026-11-09, a), so the `(y/N)` text stays true and
+    // a user must press `y` to lose children.
     if (quitConfirmRef.current !== null) {
+      // Read the facts BEFORE clearing: who the dialog spoke for decides whether
+      // `y` closes others' session, and Ctrl+C's dismiss drops the dialog.
+      const facts = quitConfirmRef.current;
       setQuitConfirm(null);
       if (quitConfirmKey(char, key.ctrl || key.meta) === "yes") {
-        runQuit?.closeForAll();
+        // `closeForAll` is only for a dialog that SAID "close the session for
+        // all": it skips attach-run's "someone registered meanwhile" re-check.
+        if (facts.others > 0) {
+          runQuit?.closeForAll();
+        }
         requestQuit(true);
         return;
       }
-      // Ctrl+C is a QUIT REQUEST, not a "no" (docs/feat/subagent-background-ui.md):
-      // answering it with another Ctrl+C would leave the user tapping a key that
-      // only ever dismisses, so the press that follows a dismissal asks again and
-      // the one after it leaves (`exitPending`). Never a dialog trap.
-      if (key.ctrl && char === "c") {
-        const step = ctrlCQuitStep({
-          running: stateRef.current.running,
-          exitPending: exitPendingRef.current,
-          detaches: detachOnQuit,
-          agents: backgroundCount(subagentsRef.current),
-          confirmed: true,
-        });
-        if (step === "exit") {
-          // A quit is pending from here on: the NEXT request leaves at once,
-          // whatever the dialog did (`ctrlCQuitStep`'s `exitPending` row).
-          exitPendingRef.current = true;
-          exit();
-        } else {
-          exitPendingRef.current = true;
-          stoppedHereRef.current = true;
-          abortRef.current?.abort();
-        }
-      }
+      // Ctrl+C here is "No" (owner 2026-11-09, a): it dismisses, as before
+      // 6a-2. The loss is irreversible and the dialog exists to catch exactly
+      // that reflex, so only `y` loses children; the dialog said `(y/N)`, and
+      // this keeps it true. Never a trap: the next Ctrl+C asks again.
       return;
     }
     // The `Ctrl+X Ctrl+S` chord (send the queued messages now): before the
@@ -2440,10 +2443,12 @@ export function App({
       // One decision in `ctrlCQuitStep` (docs/feat/subagent-background-ui.md): an
       // idle Ctrl+C with background sub-agents running asks before losing them.
       const agents = backgroundCount(subagentsRef.current);
+      const others = runQuit?.othersOnSession() ?? 0;
       const step = ctrlCQuitStep({
         running: stateRef.current.running,
         exitPending: exitPendingRef.current,
         detaches: detachOnQuit,
+        others,
         agents,
       });
       if (step === "confirm") {

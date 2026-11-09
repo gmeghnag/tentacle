@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
+import { AgentJobs } from "@tentacle/core";
 import {
+  AGENT_KILL_TOOL_NAME,
   CONTEXT_RESET_TOOL_NAME,
   ToolRegistry,
+  createAgentKillTool,
   createContextResetTool,
   createTaskTool,
   fsReadTool,
@@ -295,6 +298,38 @@ describe("createSubagentRunner", () => {
     await run({ description: "d", prompt: "go", type: "general" });
     expect(offered[0]?.length).toBeGreaterThan(0);
     expect(offered[0]).not.toContain(CONTEXT_RESET_TOOL_NAME);
+  });
+
+  test("a child is never offered agent_kill, even in a registry that holds it (owner Q1)", async () => {
+    const { env } = recordingEnv();
+    const offered: string[][] = [];
+    const model: ModelProvider = {
+      id: "rec",
+      async *stream(request) {
+        offered.push((request.tools ?? []).map((t) => t.name));
+        yield { type: "text", delta: "report" };
+        yield { type: "done" };
+      },
+    };
+    // The shape `wiring.ts` gives the shared registry with background on: the
+    // parent holds both the spawn tool and `agent_kill`, so a `tools: "all"`
+    // child would inherit the kill unless the runner drops it.
+    const jobs = new AgentJobs(2);
+    const { run } = createSubagentRunner({
+      model,
+      env,
+      tools: fullRegistry()
+        .register(
+          createTaskTool(
+            async () => ({ report: "", toolUses: 0, stopReason: "end_turn" }),
+            BUILTIN_AGENT_TYPES,
+          ),
+        )
+        .register(createAgentKillTool(jobs)),
+    });
+    await run({ description: "d", prompt: "go", type: "general" });
+    expect(offered[0]?.length).toBeGreaterThan(0);
+    expect(offered[0]).not.toContain(AGENT_KILL_TOOL_NAME);
   });
 
   test("the call's requested model reaches modelFor with the type (models-map)", async () => {

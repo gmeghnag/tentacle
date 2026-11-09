@@ -18,7 +18,7 @@ import {
   type ToolProgressEvent,
   toolLabel,
 } from "@tentacle/core";
-import { CONTEXT_RESET_TOOL_NAME, ToolRegistry } from "@tentacle/tools";
+import { AGENT_KILL_TOOL_NAME, CONTEXT_RESET_TOOL_NAME, ToolRegistry } from "@tentacle/tools";
 import { Agent, type AgentConfig, type AgentStopReason } from "./agent.ts";
 import type { HookRunner } from "./hooks.ts";
 import type { ResultTransform } from "./result-pipeline.ts";
@@ -244,8 +244,15 @@ export function createSubagentRunner(deps: SubagentDeps): {
     // spawn tool so a sub-agent cannot spawn its own sub-agents.
     const childTools = new ToolRegistry();
     for (const tool of deps.tools.list()) {
-      // Nor its context reset: a child's context is its own, and short-lived.
-      if (tool.name === spawnToolName || tool.name === CONTEXT_RESET_TOOL_NAME) {
+      // Nor its context reset (a child's context is its own, and short-lived),
+      // nor `agent_kill`: only where `background` is, the PARENT may stop a
+      // child it launched (owner Q1 a); a child given it could kill its
+      // siblings silently (`permission: "none"`, sequential ids).
+      if (
+        tool.name === spawnToolName ||
+        tool.name === CONTEXT_RESET_TOOL_NAME ||
+        tool.name === AGENT_KILL_TOOL_NAME
+      ) {
         continue;
       }
       if (type.tools === "all" || type.tools.includes(tool.name)) {
@@ -354,7 +361,11 @@ export function createSubagentRunner(deps: SubagentDeps): {
     }
     return type.tools.every((toolName) => {
       // Never given to a child, so they make it no less read-only.
-      if (toolName === spawnToolName || toolName === CONTEXT_RESET_TOOL_NAME) {
+      if (
+        toolName === spawnToolName ||
+        toolName === CONTEXT_RESET_TOOL_NAME ||
+        toolName === AGENT_KILL_TOOL_NAME
+      ) {
         return true;
       }
       const tool = deps.tools.get(toolName);

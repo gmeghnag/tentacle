@@ -92,6 +92,18 @@ describe("QuitConfirm", () => {
       }
     }
   });
+
+  test("one row however long the text: a hostile pod cannot grow the box (LOW-2)", async () => {
+    // `QUIT_CONFIRM_ROWS = 3` is what App reserves (top border, line, bottom):
+    // a wrapped 10 000-char line rendered 98 rows into those 3.
+    const text = `32 background sub-agents (${"x".repeat(10_000)}) will be lost — quit? (y/N)`;
+    const frame = render(h(QuitConfirm, { text, columns: 80 })).lastFrame() ?? "";
+    const rows = frame.split("\n");
+    expect(rows.length).toBe(3);
+    expect(strip(frame)).toContain("32 background sub-agents (xxxxxxxx");
+    // Truncated, so the tail of the line is gone: it never wrapped to reach it.
+    expect(strip(frame)).not.toContain("(y/N)");
+  });
 });
 
 describe("LineInput and CommandPalette", () => {

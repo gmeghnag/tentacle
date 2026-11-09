@@ -276,18 +276,29 @@ export interface QuitConfirmFacts {
   readonly names: readonly string[];
 }
 
+/** Ids the dialog names, and how much of each: one row at 80 columns (LOW-2). */
+const QUIT_NAMES_SHOWN = 3;
+const QUIT_NAME_MAX = 12;
+
 /** The confirmation `/quit` asks with others on the session, or children to lose. */
-export function quitConfirmText(facts: number | QuitConfirmFacts): string {
-  const { others, agents, names } =
-    typeof facts === "number" ? { others: facts, agents: 0, names: [] } : facts;
+export function quitConfirmText(facts: QuitConfirmFacts): string {
+  const { others, agents, names } = facts;
   const who = others === 1 ? "1 other terminal" : `${others} other terminals`;
   if (agents <= 0) {
     return `${who} attached — close the session for all? (y/N)`;
   }
+  // A hostile pod's ids pass the client's bound (32 rows, 200 chars), so the
+  // dialog must bound its own line: it is one row (`QUIT_CONFIRM_ROWS`), and
+  // joining them all rendered 98 rows in it. Three short ids, then a count.
+  const shown = names
+    .slice(0, QUIT_NAMES_SHOWN)
+    .map((n) => n.slice(0, QUIT_NAME_MAX))
+    .join(", ");
+  const more = names.length > QUIT_NAMES_SHOWN ? ` +${names.length - QUIT_NAMES_SHOWN}` : "";
   const what =
     agents === 1
-      ? `1 background sub-agent (${names.join(", ")})`
-      : `${agents} background sub-agents (${names.join(", ")})`;
+      ? `1 background sub-agent (${shown}${more})`
+      : `${agents} background sub-agents (${shown}${more})`;
   if (others > 0) {
     const running = agents === 1 ? "1 sub-agent running" : `${agents} sub-agents running`;
     return `${who} attached · ${running} — close the session for all? (y/N)`;
@@ -306,6 +317,11 @@ export interface CtrlCQuitInput {
   readonly exitPending: boolean;
   /** `connect`: a quit only detaches (the session and its children live on). */
   readonly detaches: boolean;
+  /**
+   * Other terminals on this same session. With one, a Ctrl+C only DETACHES (the
+   * session and its children live on for them), so there is nothing to ask.
+   */
+  readonly others: number;
   /** Background sub-agents running now: quitting would lose them. */
   readonly agents: number;
   /** The user said `y` to `quitConfirmText`. */
@@ -315,17 +331,25 @@ export interface CtrlCQuitInput {
 /**
  * Ctrl+C, decided in one place. Mid-turn it stops the turn (it never quits on
  * the first press — whoever started it). Idle it exits, EXCEPT with background
- * sub-agents running that the quit would lose: that asks first (a Ctrl+C is as
- * easy to press by accident as `/quit`). A second press, a `connect` runtime
- * and an already-confirmed quit leave at once.
+ * sub-agents running that the quit would lose AND nobody else on the session:
+ * that asks first (a Ctrl+C is as easy to press by accident as `/quit`). A
+ * second press, a `connect` runtime, another terminal, and an already-confirmed
+ * quit leave at once.
  */
 export function ctrlCQuitStep(input: CtrlCQuitInput): "exit" | "stop" | "confirm" {
-  if (input.agents > 0 && !input.detaches && input.confirmed !== true && !input.exitPending) {
+  if (
+    input.agents > 0 &&
+    input.others === 0 &&
+    !input.detaches &&
+    input.confirmed !== true &&
+    !input.exitPending
+  ) {
     // Mid-turn the stop wins: the turn's save happens first, as today.
     return input.running ? "stop" : "confirm";
   }
   return quitAction("ctrl-c", input.running, input.exitPending) === "exit" ? "exit" : "stop";
 }
+
 /**
  * Commands matching what the user is typing, for the autocomplete palette.
  * Active only while typing the command name itself: the input must start with

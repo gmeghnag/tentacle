@@ -229,6 +229,8 @@ Secondary effect: `y` on an agents-only `/quit` (`others: 0`) now also sets `clo
 
 **Recommendation: (a).** The loss is irreversible, the dialog exists to catch an accidental Ctrl+C, and it is the smallest change (delete `App.tsx:2333-2355`; update the `run-quit.test.tsx:464` test).
 
+**Owner (2026-11-09): (a).** Ctrl+C at the quit dialog is **No** — dismiss only, as before 6a-2. Applied in Fix round 1: the exit-on-second-Ctrl+C path is gone and the test it named now pins dismissal (then re-ask, then `y` to leave).
+
 ### Premise table (citations opened on the base `f1ddfc5`)
 
 | Premise | Result |
@@ -274,3 +276,66 @@ A long foreground tool with a chatty child pins `subagents` frames until the nex
 ### How the executor behaved
 
 Solid and honest on the mechanical parts: it corrected the plan's stale citations, reported T44's first survival and rewrote the test rather than hiding it, listed what it did not verify, and left a green gate. Its blind spots are the ones a pure-function level of testing leaves: it never traced what the registry hands a child, or what `runQuit`'s `closeForAll` means on the Ctrl+C path, and it shipped the `now` seam for `startedAt` without wiring it or having one test observe the value. It tested the mutations it thought of, not the guards the design hangs on (R1), and it took a behaviour decision on the dialog itself, though it did declare it.
+
+## Execution — Fix round 1
+
+*— deepseek-v4.1-flash (tentacle), 2026-11-09*
+
+All 14 findings (2 HIGH · 2 MEDIUM · 4 LOW · 6 nit) fixed, plus the owner answer. Every finding got a test **red for the stated reason first**, then the fix, green; every HIGH/MEDIUM got one mutation (cp-style backup → mutate a literal → run → restore → sha1 check, `.tentacle/tmp/subagent-background-ui/mutate.ts`) and is **KILLED**. The review's two SURVIVED mutations (R1, R2, R3) each have their missing test and are now KILLED too. No git state change, `TODO.md` untouched.
+
+### Findings
+
+**HIGH-1 — a child can no longer kill its siblings.** Root cause: the shared registry (`wiring.ts:557`) holds `agent_kill`, and `createSubagentRunner` only dropped the spawn tool and `context_reset`, so a `tools: "all"` child inherited a `permission: "none"` kill over sequential ids.
+- `packages/tools/src/background.ts:73` — `AGENT_KILL_TOOL_NAME` exported beside `CONTEXT_RESET_TOOL_NAME`; `:90` the tool uses it.
+- `packages/agent/src/subagent.ts:21` (import), `:246-258` (the child's filter drops it too; the comment now says why), `:360-370` (`readOnlyType`: never given to a child, so it makes one no less read-only).
+- Redevelop no `permission-gate` case needed: `permission: "none"` never asks.
+- **RED** (`packages/agent/test/subagent.test.ts:296-328`, registry shaped as `wiring.ts` shapes it — spawn tool + `agent_kill` + `tools: "all"` child):
+  `error: expect(received).not.toContain(expected) / Expected to not contain: "agent_kill" / Received: [ "fs_read", "shell", "agent_kill" ]`
+- **Mutation** (drop `|| tool.name === AGENT_KILL_TOOL_NAME`): `(fail) … a child is never offered agent_kill` → **KILLED**, `sha OK (efd61bb14157)`.
+
+**HIGH-2 — an idle Ctrl+C with another terminal on the session asked a false question.** Root cause: `ctrlCQuitStep` had no `others`, so it raised the child dialog while Ctrl+C only detaches; and `y` on it unconditionally called `closeForAll`, skipping `attach-run`'s "someone registered meanwhile" re-check.
+- `packages/tui/src/commands.ts:317-355` — `CtrlCQuitInput.others` (`:324`), guard `:342` `agents > 0 && others === 0 && !detaches && confirmed !== true && !exitPending`.
+- `packages/tui/src/App.tsx:2446-2451` — the live Ctrl+C raises it with `others: runQuit?.othersOnSession() ?? 0`; the `stop` branch keeps the turn's save first.
+- `App.tsx:2344-2352` — `const facts = quitConfirmRef.current` read **before** `setQuitConfirm(null)`; `closeForAll()` only `if (facts.others > 0)`. `/quit`'s own dialog (`:1792`) already passes the real count.
+- **RED** (`packages/tui/test/quit-agents.test.ts`): `Expected: "exit" / Received: "confirm"`. `run-quit.test.tsx`: `expect(received).not.toContain(…)` received the real frame `1 background sub-agent (sa-1) will be lost — quit? (y/N)`, and the agents-only-`/quit` case `expect(received).toEqual(expected)` on `spy.calls` (it contained `closeForAll`).
+- **Mutations**: drop `input.others === 0 &&` → **KILLED** (`sha OK e983d8d05d5c`); drop the `facts.others > 0` gate → **KILLED** (`sha OK 6ba04f6726ea`).
+
+**MEDIUM-1 — `startedAt` reaches the wire.** `packages/daemon/src/hosted-session.ts:626-628` — `now: () => this.now()` added to `agentRuntime?.bind({…})` (Design 2's "passed in by the host").
+- **RED** (`daemon/test/subagent-progress.test.ts`, `rig({ now: () => 1234 })`): `Expected: 1234 / Received: 0`. **GREEN.**
+- **Mutation** (drop the `now` line) → **KILLED**, `sha OK (5f5519527063)`.
+
+**MEDIUM-2 — the guard the load-bearing assumption rests on is now tested** (review mutation R1).
+- Test `daemon/test/subagent-progress.test.ts`: the parent turn is parked at a model gate, a child start/progress frame arrives mid-turn, and `historyCut.seq` must equal the pre-frame value **and** be `<` the frame's `seq`.
+- **Mutation R1** (`recordCut(null)` unconditional — the review's exact mutation that SURVIVED): `Expected: 5 / Received: 6` → **KILLED**, `sha OK (5f5519527063)`.
+
+**LOW-1 — a throw can no longer escape the coalescing timer.** `hosted-session.ts:1187-1196` — the timer body wraps `publishSubagents()` in `try { … } catch (error) { this.reportTurnError(error); }`; the false "Never throws" claim on `publishSubagents` is now true for that path too.
+- **RED**: the repro's exact stack, `error: commit exploded … at recordCut … at publishSubagents … hosted-session.ts:1212` (uncaught). **GREEN**: the injected `onTurnError` policy receives it.
+- **Mutation** (remove the try/catch): the same uncaught error → **KILLED**, `sha OK (3955c386a684)`.
+
+**LOW-2 — the dialog is one row.** `commands.ts:273-311` — `quitConfirmText` takes `QuitConfirmFacts` and bounds its own line (`QUIT_NAMES_SHOWN = 3`, `QUIT_NAME_MAX = 12`, then ` +N`); `components/QuitConfirm.tsx:25` — `wrap="truncate-end"`. `QUIT_CONFIRM_ROWS = 3` is now true whatever a hostile pod sends.
+- **RED** (`theme-components.test.tsx`, a 10 000-char id at 80 columns): `Expected: 3 / Received: 128` rows with the wrap removed; the pure test was red on the unbounded string (`10 820` chars). **GREEN**: 3 rows, truncated.
+
+**LOW-3 — the two survived counting/timer mutations now have tests** (`daemon/test/subagent-progress.test.ts`).
+- R2 (structural check by **ids**, not length): `an end and a start that collapse into ONE kick publish at once` — same length, different ids ⇒ published at once. **RED/R1-mutated** (`Expected: 2 / Received: 1`) → **KILLED** (`sha OK 3955c386a684`).
+- R3 (`clearTimeout` in `close`): `close clears a pending kick` asserts `priv.subagentsKick === null` after `close()`. **Mutated** (drop the block) → `Received: Timeout (#10)` → **KILLED** (`sha OK 3955c386a684`).
+
+**LOW-4 — an unchanged report no longer re-renders the App.** `background-view.ts:37-58` — pure `sameIds(a, b)`; `App.tsx:633-643` — `setAgents` always updates the ref (the key handler and `requestQuit` read it) and calls `setSubagents` only when the ids differ.
+- **Test** (`run-quit.test.tsx`, a real `React.Profiler` commit count, not a predicate): two further identical reports add **no** commit; a real change does.
+- **Mutation** (`setSubagents(rows)` unconditionally) → `Expected: 3 / Received: 5` commits → **KILLED** (`sha OK 6ba04f6726ea`).
+
+**Nits.** 1 `client/src/remote-session.ts:473-474` — the lost line break restored. 2 `hosted-session.ts:641-644` — `this.kickSubagents()` removed from the exit handler (`drive` already published the end via `changed()`); comment says so. 3 `commands.ts:282` — the `number |` shim gone; `commands.test.ts` passes `{ others, agents: 0, names: [] }`. 4 `commands.ts` — blank line restored before the palette's doc comment. 5 `CHANGELOG.md:32` — "(Seeing them running, and stopping one, come next.)" deleted. 6 `App.tsx:2338-2341` + `QuitConfirm.tsx:9-16` — both comments now say what the code does: Ctrl+C is No, only `y` leaves.
+
+**Owner answer applied.** `App.tsx:2336-2373`: the exit-on-second-Ctrl+C branch and its `exitPending`/`abort` path are deleted; any non-`y` key (Ctrl+C included) just dismisses. `run-quit.test.tsx`'s test now walks dismiss → re-ask → `y` → exit and asserts nothing exits on the Ctrl+C presses.
+
+### Gate (after the last change)
+
+- `bunx tsc --noEmit` → clean. `bunx tsc -p apps/mobile` → clean.
+- `bunx biome check .` → `Checked 791 files … No fixes applied.` (0 errors, 0 warnings: the baseline is kept).
+- `bun test packages` → **6080 pass, 3 skip (the opt-ins: live-k8s, live-docker, slow keepalive), 0 fail**, 6083 tests in 416 files, 185 s.
+- Mutations: every one restored; `sha OK` on each line above; `git status --short` shows only the 15 intended files.
+
+### Not fixed / not verified (explicit)
+
+- **No live check**: nothing ran against a real provider, pod or terminal. HIGH-1 is pinned at the runner's tool filter (the same seam the `context_reset` rule uses), not by observing a real child's model request; HIGH-2 at the pure step + the real `App`'s key handler, not at a real multi-terminal attach.
+- **LOW-2's "one row" is proven at Ink's component level and at 80 columns only**; a narrower terminal truncates further (same one row), a wider one shows the same bounded text.
+- The review's "Accepted, not findings" item (a pinned `subagents` frame during a long foreground tool) was left accepted, as the review recommended (6b).

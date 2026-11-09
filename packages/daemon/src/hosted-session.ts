@@ -623,6 +623,9 @@ export class HostedSession {
     // ledger; its exit rides `background_exit` like a shell job's, and wakes.
     this.agentRuntime = agentRuntime;
     agentRuntime?.bind({
+      // The host's clock, for a row's `startedAt` (Design 2: "passed in by the
+      // host"): the daemon's own `now`, so a test's clock reaches the wire.
+      now: () => this.now(),
       launched: (spec) => {
         const agentId = this.backgroundAgent(spec);
         if (this.activeTurnId !== null) {
@@ -637,7 +640,8 @@ export class HostedSession {
     });
     this.unsubscribeAgentExit = agentRuntime?.onExit((exit) => {
       // The list first (its row is gone), then the exit notice, then the wake.
-      this.kickSubagents();
+      // `drive` already published the end through `changed()`, so no kick here:
+      // a kick would only arm a timer that sends nothing.
       this.emit({
         type: "background_exit",
         jobId: exit.agentId,
@@ -1183,7 +1187,14 @@ export class HostedSession {
     }
     this.subagentsKick = setTimeout(() => {
       this.subagentsKick = null;
-      this.publishSubagents();
+      // `publishSubagents` reports its OWN failures (the sink); the idle
+      // `recordCut` behind it does not, and a throw in a timer escapes as an
+      // uncaught error (Bun exits on one). Report it like any turn error.
+      try {
+        this.publishSubagents();
+      } catch (error) {
+        this.reportTurnError(error);
+      }
     }, SUBAGENTS_COALESCE_MS);
   }
 

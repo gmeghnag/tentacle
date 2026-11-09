@@ -70,6 +70,8 @@ export const shellKillTool: Tool<z.infer<typeof shellKillInput>> = {
   },
 };
 
+export const AGENT_KILL_TOOL_NAME = "agent_kill";
+
 const agentKillInput = z.object({
   agent_id: z
     .string()
@@ -85,7 +87,7 @@ const agentKillInput = z.object({
  */
 export function createAgentKillTool(jobs: AgentJobs): Tool<z.infer<typeof agentKillInput>> {
   return {
-    name: "agent_kill",
+    name: AGENT_KILL_TOOL_NAME,
     description:
       "Stop a background sub-agent started with agent_task{background: true}. Its report-so-far still arrives later as a [background] note, marked cancelled.",
     inputSchema: agentKillInput,

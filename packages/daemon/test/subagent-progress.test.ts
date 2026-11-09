@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { Agent, Session, createSubagentRunner } from "@tentacle/agent";
 import {
+  type AgentJobRow,
   AgentJobs,
   type ChatRequest,
   type ExecutionEnvironment,
@@ -76,7 +77,14 @@ const free: Tool = {
   execute: async () => ({ content: "read" }),
 };
 
-function rig(opts: { cap?: number; ringBytes?: number; now?: () => number } = {}) {
+function rig(
+  opts: {
+    cap?: number;
+    ringBytes?: number;
+    now?: () => number;
+    onTurnError?: (error: Error) => void;
+  } = {},
+) {
   const parent = new Model();
   const child = new Model();
   const permissions = new PermissionBroker();
@@ -106,7 +114,7 @@ function rig(opts: { cap?: number; ringBytes?: number; now?: () => number } = {}
     session,
     permissions,
     undefined,
-    {},
+    opts.onTurnError !== undefined ? { onTurnError: opts.onTurnError } : {},
     opts.ringBytes,
     opts.now ?? Date.now,
     undefined,
@@ -332,6 +340,146 @@ describe("T45: a fresh attach gets the list from the snapshot", () => {
   });
 });
 
+describe("MEDIUM-1: the row's `startedAt` comes from the host's clock", () => {
+  test("the daemon wires `now`, so the row carries the host's time, not 0", async () => {
+    // Design 2: "passed in by the host". `AgentJobHost.now?` existed but the
+    // daemon never provided it, so every row went out with `startedAt: 0`.
+    const r = rig({ now: () => 1234 });
+    const gate = idleChild(r);
+    prompt(r, "T1");
+    await settle();
+    expect(subagentFrames(r.frames).at(-1)?.[0]?.startedAt).toBe(1234);
+    gate.finish.resolve();
+    await settle(10);
+  });
+});
+
+describe("MEDIUM-2: the cut never moves mid-turn on a subagents frame", () => {
+  test("a mid-turn frame leaves `historyCut` exactly where the turn put it", async () => {
+    // The cut invariant: `history` must reflect every emit, and mid-turn the
+    // history is not yet committed — so a `subagents` frame that arrives while
+    // the turn runs must NOT move the cut (mutation R1: `recordCut` also
+    // mid-turn — SURVIVED before this test).
+    const r = rig();
+    const childGo = Promise.withResolvers<void>();
+    const childStop = Promise.withResolvers<void>();
+    const turnEnds = Promise.withResolvers<void>();
+    // The PARENT turn is held open, so the frame below arrives mid-turn.
+    r.parent.steps.push([launch("c1", "map repo")], { gate: turnEnds.promise, events: [done] });
+    r.child.steps.push({ gate: childGo.promise, events: [call("k1", "free_read"), done] });
+    void prompt(r, "T1");
+    // Park the turn at the model gate: its own commits are done, and nothing
+    // else will move the cut until the gate opens.
+    await until(() => r.parent.steps.length === 0);
+    expect(r.hosted.running).toBe(true);
+    const cutBefore = r.hosted.historyCut;
+    childGo.resolve();
+    await Bun.sleep(SUBAGENTS_COALESCE_MS + 60);
+    const frames = r.frames.filter((p) => p.update.type === "subagents");
+    const frameSeq = frames.at(-1)?.seq ?? 0;
+    // The child's progress DID reach the client, mid-turn...
+    expect(frames.length).toBeGreaterThan(0);
+    expect(frameSeq).toBeGreaterThan(cutBefore.seq);
+    // ...while the committed prefix stayed exactly where the turn left it.
+    expect(r.hosted.historyCut.seq).toBe(cutBefore.seq);
+    expect(r.hosted.historyCut.seq).toBeLessThan(frameSeq);
+    childStop.resolve();
+    turnEnds.resolve();
+    await settle(20);
+  });
+});
+
+describe("LOW-3: the coalescing timer's other two properties", () => {
+  test("an end and a start that collapse into ONE kick publish at once (ids, not length)", async () => {
+    // Mutation R2 (structural check by LENGTH only — SURVIVED before this test):
+    // sa-1 ends and sa-2 starts, so the length is unchanged and only the ids
+    // differ. Real code: one row in, one row out, published at once.
+    const r = rig();
+    const runtime = (
+      r.hosted as unknown as {
+        agentRuntime: { rows(): readonly AgentJobRow[] };
+      }
+    ).agentRuntime;
+    const row = (id: string): AgentJobRow => ({
+      id,
+      callId: "c1",
+      agentType: "general",
+      description: "d",
+      state: "running",
+      toolUses: 0,
+      tokens: 0,
+      startedAt: 1,
+      tail: [],
+    });
+    const realRows = runtime.rows.bind(runtime);
+    let scripted: readonly AgentJobRow[] = [row("sa-1")];
+    runtime.rows = () => scripted;
+    const kick = (): void => (r.hosted as unknown as { kickSubagents(): void }).kickSubagents();
+    try {
+      kick(); // last published: [sa-1]
+      const before = subagentFrames(r.frames).length;
+      scripted = [row("sa-2")]; // one ended, one started: same length, other id
+      kick();
+      // Same length, different ids: still structural, still at once.
+      expect(subagentFrames(r.frames).length).toBe(before + 1);
+      expect(
+        subagentFrames(r.frames)
+          .at(-1)
+          ?.map((x) => x.id),
+      ).toEqual(["sa-2"]);
+    } finally {
+      runtime.rows = realRows;
+    }
+  });
+
+  test("close clears a pending kick (no timer outlives the session)", async () => {
+    // Mutation R3 (no `clearTimeout` in `close` — SURVIVED before this test):
+    // the callback would then run after the sink is gone.
+    const r = rig();
+    const gate = idleChild(r);
+    prompt(r, "T1");
+    await settle();
+    gate.start.resolve();
+    await settle(1);
+    // A progress event is a NON-structural change: it arms the timer.
+    const timer = () =>
+      (r.hosted as unknown as { subagentsKick: ReturnType<typeof setTimeout> | null })
+        .subagentsKick;
+    expect(timer()).not.toBeNull();
+    r.hosted.close();
+    expect(timer()).toBeNull();
+    gate.finish.resolve();
+    await settle(16);
+  });
+});
+
+describe("LOW-1: a throw in the coalescing timer is reported, never uncaught", () => {
+  test("a throwing `log.commit` behind the timer reaches the error policy, not the process", async () => {
+    // `publishSubagents`' doc says "Never throws": `recordCut` (the idle cut)
+    // sat OUTSIDE its try, so a commit failure escaped the timer as an uncaught
+    // error. The policy is the seam that records it instead.
+    const errors: Error[] = [];
+    const r = rig({ onTurnError: (e) => errors.push(e) });
+    const gate = idleChild(r);
+    prompt(r, "T1");
+    await settle();
+    const log = (r.hosted as unknown as { log: { commit(...a: unknown[]): void } }).log;
+    const realCommit = log.commit.bind(log);
+    log.commit = () => {
+      throw new Error("commit exploded");
+    };
+    try {
+      // A progress change coalesces into the timer — the throwing path.
+      gate.start.resolve();
+      await Bun.sleep(SUBAGENTS_COALESCE_MS + 80);
+      expect(errors.map((e) => e.message)).toContain("commit exploded");
+    } finally {
+      log.commit = realCommit;
+    }
+    gate.finish.resolve();
+    await settle(16);
+  });
+});
 describe("the view: untrusted labels are sanitized, and rows compare cheaply", () => {
   test("a label is one line, cut to 200 cells; a long description too", () => {
     const rows = subagentRows([

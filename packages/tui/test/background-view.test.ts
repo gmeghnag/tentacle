@@ -9,6 +9,7 @@ import {
   backgroundCount,
   backgroundNames,
   backgroundSuffix,
+  sameIds,
 } from "../src/background-view.ts";
 
 const row = (i: number): BackgroundAgentRow => ({ id: `sa-${i}` });
@@ -33,5 +34,22 @@ describe("T49: the status line's count", () => {
     // sub-agents` would be a claim, and showing nothing is honest.
     expect(backgroundCount(undefined)).toBe(0);
     expect(backgroundSuffix(backgroundCount(undefined))).toBe("");
+  });
+});
+
+describe("LOW-4: an unchanged report does not re-render the App", () => {
+  test("sameIds: the same ids in the same order, whatever the rows' other fields", () => {
+    expect(sameIds(undefined, undefined)).toBe(true);
+    expect(sameIds([], [])).toBe(true);
+    expect(sameIds(undefined, [])).toBe(false);
+    expect(sameIds([row(1)], undefined)).toBe(false);
+    expect(sameIds([row(1), row(2)], [row(1), row(2)])).toBe(true);
+    // A NEW array with the same ids is still "nothing to redraw" (the frame
+    // sends a fresh array every time); only the ids matter to this TUI.
+    expect(sameIds([{ id: "sa-1" }], [{ id: "sa-1" }])).toBe(true);
+    // A different id, order or count is a change.
+    expect(sameIds([row(1), row(2)], [row(2), row(1)])).toBe(false);
+    expect(sameIds([row(1)], [row(2)])).toBe(false);
+    expect(sameIds([row(1)], [row(1), row(2)])).toBe(false);
   });
 });
