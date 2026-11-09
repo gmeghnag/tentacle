@@ -734,4 +734,116 @@ Not run as one command: `bun run check` itself (I ran its three parts separately
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-09*
+
+Fresh-context adversarial review of 6a-1 (`20f8712` against `main` `3ceed8b`). The executor was claude-sonnet-5-5 and I am claude-opus-5-5: a different model, but the **same family**, so blind spots the two models share may survive both passes. Part 2 (6a-2) and D10 were not reviewed.
+
+**Verdict: PASS with nits.** No HIGH or MEDIUM findings. There are 2 LOW and 5 nits. The two LOWs should be fixed before merge, but they do not block it.
+
+### Gate (re-run by me)
+
+- `bunx tsc --noEmit`: clean. `bunx tsc -p apps/mobile`: clean.
+- `bun run lint`: `Checked 781 files … No fixes applied.` (0/0, the baseline is kept).
+- `bun test packages`: **6007 pass, 3 skip (the opt-in ones), 0 fail**, 6010 tests in 409 files. This is exactly what Execution claims.
+
+### Findings
+
+**LOW-1 — `AgentJobs.drive` has no guard after `run`, so a throw in `host.ended` loses the exit and leaves the promise rejected with no handler.** Where: `packages/core/src/agent-jobs.ts:180-188`, and `start`'s `void this.drive(...)` at `:116`.
+- **Failure:** `host.ended` is `HostedSession.agentEnded`, which runs `log.subagentEnd`, `verifyLog` (a throwing verifier in tests) and `persist`. If it throws, the slot is already freed, but no listener runs: the Agent never gets the pending exit (no note), there is no `background_exit` and no wake. The promise that `drive` returns then rejects, and nothing handles it.
+- **Not checked:** I did not verify whether Bun treats that rejection as fatal. If it does, it would take down every session on the daemon. The trigger needs a log/ledger bug, which is why this is LOW.
+- **Fix:**
+  1. Wrap the call: `try { this.host?.ended(agentId, result.stopReason, report); } catch { /* durability lost; the live note and the wake still go out */ }`. The listener loop then runs unconditionally.
+  2. In `start`, write `void this.drive(agentId, spec, controller, run).catch(() => {});` as a last net.
+  3. Add a test to `core/test/agent-jobs.test.ts`: a host whose `ended` throws still gets the exit to the listeners, and `start` works again afterwards.
+
+**LOW-2 — the refusal text is wrong in two cases.** Where: `packages/core/src/agent-jobs.ts:148-155` (`refusal()`) and `:126` (`acquire` after `dispose`).
+1. **Foreground siblings fill the cap.** This happens when a round runs parallel foreground `agent_task`s and a background launch or another foreground call hits the cap. The text still says "Either end your turn (you are woken by a [background] note when a background sub-agent finishes)", but no background child is running, so ending the turn wakes nobody and the user's task stalls. "Prove the exact property": the claim is only true when `this.running.size > 0`.
+2. **After `dispose`.** `acquire` returns "at the sub-agent limit … running: none", which is false.
+- **Fix:** in `refusal()`, emit the "end your turn (you are woken …)" clause only when `this.running.size > 0`. Otherwise say `"… Nothing was started. Retry when the running foreground sub-agents return, or do this work yourself."`. In `acquire`, when `this.disposed`, return `{ ok: false, reason: "sub-agents are not available: the session is closing" }`.
+- **Tests (core):** a refusal with only foreground holders does not contain "end your turn". `acquire` after `dispose` does not contain "limit".
+- The approved wording (Plan change, Q2 b) stays as it is for the case with background children running.
+
+**nit-1 — stale or false comments.**
+- `client/src/remote-client.ts:2200` says "(the wire names none)". Replace with "the update's own `turnId` (a background child's spawning turn) wins in the router".
+- `client/src/permission-router.ts:101-102` says "(the wire request names none)". Replace with "a background child's ask names its own `turnId`, which wins".
+- `client/src/remote-session.ts:853` says "install is also reached by a foreign one". That is false: foreign turns go through `startForeign` (`:1091-1106`), and `install` is only called with own turns (`:799, :874, :996`). My mutation R1 (mint foreign turns too) is therefore an **equivalent mutant**: it survived the whole `packages/client` suite (476 pass). Keep the guard as a defensive check and reword the comment to "defensive: `install` only gets own turns today (foreign ones go through `startForeign`)".
+
+**nit-2 — `protocol/src/version.ts:10-11` gives an imprecise reason for the bump.** Clients at version 19 already route an idle `permission_request` (`remote-client.ts:2197-2201`, "session state, not turn-scoped"). The bump is **justified**, but for a different reason: an older client strips `turnId` and attributes a background ask to whichever turn is streaming, so a stream-borne own turn could auto-accept an ask that a foreign or wake turn spawned. That is a changed meaning, so the bump is required (§7). Reword the comment to: `20: a permission_request may belong to a turn other than the one streaming it (a background sub-agent's names its spawning turn in \`turnId\`; an older client would mis-attribute it, auto-accept included); a sub-agent exit rides background_exit`.
+
+**nit-3 — PostToolUse hooks now see two results for one `agent_task` call id.** The first is the "started in background as sa-N" result, in the loop. The second is the report, through `shapeResult` at `tools/src/task.ts:212-215` → `agent.ts:1358-1359,1463-1464`. This is intended (D2: "the same transforms"), but undocumented. Add one sentence to the `ToolContext.shapeResult` doc (`core/src/tool.ts:114-120`) and a Notes/debt bullet: "a background `agent_task` runs the result transforms (and PostToolUse hooks) twice for its call id: the launch line, then the report".
+
+**nit-4 — `tools/src/task.ts:195` uses `callId: ctx.toolCallId ?? ""`.** An empty `callId` produces a `subagent_background` body that breaks the schema's `callId` min 1. `segmentFacts` would treat it as an orphan, but the first `log.subagentBackground` would already have written it. This cannot happen inside the agent loop, where the id is always set. Fix: `if (ctx.toolCallId === undefined) return { content: "background sub-agents need a tool call id: run it in the foreground", isError: true };` before `bg.start`.
+
+**nit-5 — the version tests loosened to "≥ 19" are acceptable; they hide no regression.** The exact value is pinned twice: `protocol/test/subagent-background.test.ts:18-19` (`toBe(20)`) and `daemon/test/version-mismatch.test.ts` (`toBe(20)` plus the worded messages). Each loosened test states a property of an older bump ("at least the version that brought X"), and `>=` is the honest form of that. Optional: `protocol/test/session-settings.test.ts:88` is titled "protocol 16", so `toBeGreaterThanOrEqual(16)` would state its own property exactly.
+
+### Premise table (sampled against this tree)
+
+| # | Verdict | Evidence |
+|---|---|---|
+| Context symptom | TRUE | On `main` there is no `background` argument and no `AgentJobs`. The executor showed the slice tests RED (`Export named 'AgentJobs' not found`, schema without `background`). Probe not re-run (declared in Execution). |
+| P4 | TRUE | `agent/src/permission-gate.ts:167-177` passes no signal to the requester and holds one lane (`session-grants.ts:56-90`). A lane waiter aborts on its own signal (`:66-75`), so a background ask holding the lane never blocks a turn's Esc. |
+| P8 | TRUE | `core/src/agent-job-ledger.ts:354-364`: an empty report gets the "before the session restarted" wording, so the placeholder at `agent-jobs.ts:57,178` is needed. |
+| P12 | TRUE (stronger) | `client/src/permission-router.ts:110-116` dedupes by id across `current`, the queue, `resolvedIds` **and `answeredIds`**, so a re-offer that races an in-flight answer is not shown again. |
+| P13 | TRUE | `tui/src/permission-ui.ts:69,329`; `cli/src/relay-policy.ts:57`. |
+| P14 | TRUE | `tui/src/App.tsx:686-720`: the TUI's own wake fires on any exit, an agent exit included (the worker has no daemon wake). |
+| P17 | TRUE | `daemon/src/session-host.ts:972-1011`: synchronous from `assertIdle` to `swapAgent`, so no exit can land between the new agent's subscription and the old one's `retire`. |
+| P19 | TRUE | 19 on `main`, 20 here. |
+
+### Mutations (§9), re-run with the executor's `mutate.ts`, sha-checked after each
+
+| Mutation | Result |
+|---|---|
+| T21c `lastActiveAt` not moved at the end (first survived for the executor) | **KILLED** (T21) |
+| T23 the controller's signal for the background ask (first survived) | **KILLED** (T23) |
+| T31 drop D5.9 `noteSeen` at the flush (first survived) | **KILLED** (T31) |
+| T36c `onAgentExit` not filtered by session (first survived) | **KILLED** (T36) |
+| T6b non-idempotent release (first survived) | **KILLED** |
+| R1 (mine) mint foreign turns in `install` | **SURVIVED, equivalent** (nit-1: unreachable) |
+| R2 (mine) release the foreground slot right after `acquire` (the cap is not held during the run) | **KILLED** (task-background) |
+| R3 (mine) background ask never marked `shown` (no re-offer, no `permission_resolved`) | **KILLED** (T24, T25) |
+
+Every mutation was restored with "sha OK", and `git status` was clean afterwards.
+
+### Attacks tried
+
+1. **A background ask holds the permission lane, then the user presses Esc on a later turn.** No hang: the turn's waiter leaves the lane on its own signal (`session-grants.ts:66-75`). The background ask settles only on the child's signal (T23, and my rerun of the T23 mutation).
+2. **An ask attributed to an ended turn is mis-routed.** The router stores `update.turnId ?? stream` (`permission-router.ts:120`). The reducer does not switch turns on a `permission_request` (`session-reducer.ts:293-304`). The TUI dialog is withdrawn by the router's signal, not by any turn's end (`permission-ui.ts:324-345`). Wake and foreign turns are never minted, so their children's asks prompt even under auto-accept, which is the safe direction. The 256 bound fails safe: an id that falls off prompts instead of auto-accepting. **Holds.**
+3. **Asks lost.** Barrier: re-offered after `history_replaced` (`hosted-session.ts:2333-2335`), and T25 drives the real `reduceStream`. Re-attach and second attacher: re-offered before the replay is computed (`:1235-1237`), which also covers the ring eviction at `recordCut` (`:1364`). No client: held, with no timer (T27). Non-declaring client: denied at raise and at attach/detach (`recheckAsks`, T28). **Holds.**
+4. **Exit delivered twice, or not at all.** Live: `ended` persists first, then the Agent queues the exit and the daemon emits and wakes (T19). Note closed at the flush: the turn's end always records the cut (`:1990-1997`), and a crash before that leaves `end` without a note, which the load derives once (task 5). A settings sync is synchronous (P17). `/clear` and the worker: `createAgent` builds a fresh `AgentJobs` per session (`worker.ts:116-135`, `serve.ts:186-196`), so a disposed runtime is never reused. **Holds.**
+5. **End-to-end trace** (`.tentacle/tmp/subagent-background/review/trace.ts`, real `Agent`/`Session`/`HostedSession`/`AgentJobs`/`createTaskTool`/runner, cap 1):
+   ```
+   after t1: summary.jobs = 1 busy = true
+   t2 tool result (refusal): "at the sub-agent limit (subagents.maxParallel = 1); running: sa-1 (scan). Nothing was started. Either end your turn (…) or do this work yourself."
+   requests: 5 | last message of wake request: "[background] sub-agent sa-1 (scan) finished (end_turn):\nREPORT-BODY"
+   frames: turn_start t1 · turn_end t1 · turn_start t2 · turn_end t2 · background_exit sa-1 {"stopReason":"end_turn","toolUses":0} · turn_start wake-… · turn_end wake-…
+   after: summary.jobs = 0 busy = false
+   ```
+   Q2 (b), H2, the idle exit, exactly one wake, and the report as the wake request's last message all hold on the real path.
+6. **§7 invariants.**
+   - **Single broker:** the background child uses the same runner, and therefore the same `requestPermission`, as a foreground one. T29 shows a second spy broker is never called.
+   - **Peer not serialized:** the only `await`s added are inside the tool and `drive`, none in a `Connection` handler (grep of the added lines).
+   - **Pod not trusted:** a pod can forge `turnId`, but that only reaches auto-accept, which is scope "once" and never a lasting grant. The window grows from "the own turn now streaming" to "the last 256 own turns". This was accepted in failure mode 9, and I agree.
+   - **Persistence:** pods and the worker add no persister. The ask is never on disk (T26).
+   - **Protocol:** fields only, with no `UPDATE_CLASS` change. Both ends are wired, `mapping.ts:254` is included, and `schema/protocol.json` was re-exported (the drift gate is green).
+   - **No raw terminal writes** were added.
+7. **Liveness.** A running child makes `busy` true, so the idle TTL spares it, and the stamp moves at its end (T21). A child stuck on an unanswered ask does not block `close` or the admin cap: `dispose` aborts it, and its signal settles the ask (T30). It does keep a pod relay up through `jobs`, as failure mode 7 accepts.
+
+### Plan conformance
+
+The declared drift was checked as follows:
+- **T7 dropped:** follows from Q2 (b).
+- **T29 split and the wiring E2E not tested:** acceptable. The single-broker property is construction-evident (one runner), and the daemon half is tested.
+- **T39 absent:** acceptable, because the relay reads a number that T21 pins.
+- **Optional `agents` argument:** fine.
+- **Compaction now names running shell jobs:** a behaviour change beyond scope, but benign. With nothing running the text is byte-identical (pinned).
+- **Version tests:** see nit-5.
+
+**Undeclared drift:** none of substance, only the comments in nit-1.
+
+**Seams:** there is no parallel agent loop and no second session path. Exits ride `pendingExits` and `kickWake`, asks ride the shared broker plus `registerAsk`, and markers ride task 5's `backgroundAgent`/`agentEnded`.
+
+### How the executor behaved
+
+Honest and careful. Every number I re-ran matches Execution exactly: test counts, lint file count, and a clean typecheck. Each mutation it says first survived does so for the stated reason, and all of them are now KILLED. Each drift is declared with a reason, including the uncomfortable ones (the probe not re-run, `bun run check` not run as one command, the end-to-end wiring test not written). It overstated nothing I could find. The only inaccuracy is a code comment (nit-1, `install` "reached by a foreign one"). One thing it missed: it took the plan-note refusal text as written without checking it was true when only foreground holders fill the cap (LOW-2), and it left `drive` without a guard after `run` (LOW-1).
+
+**Owner questions:** none. Both LOWs have one clear fix.
