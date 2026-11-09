@@ -2403,7 +2403,15 @@ export class HostedSession {
     }
     const result = this.session.clearConversation(() => this.historyReplaced("clear"));
     // The session approvals go for everyone, running children included (QB).
-    this.grants?.clear();
+    if (this.grants) {
+      this.grants.clear();
+    } else {
+      // A factory that forgot the store (review H1): the approvals survive, and
+      // the embedder's log says so — never a silent skip.
+      this.reportTurnError(
+        new Error("/clear: this session has no approvals store; its session approvals were kept"),
+      );
+    }
     // A fresh chat: an earlier stop or failure no longer blocks the wake.
     this.lastEndBad = false;
     this.lastChangeAt = this.now();

@@ -109,7 +109,14 @@ const shellTool: Tool = {
   },
 };
 
-function rig(opts: { wake?: boolean; title?: boolean } = {}) {
+function rig(
+  opts: {
+    wake?: boolean;
+    title?: boolean;
+    noGrants?: boolean;
+    titleModel?: ModelProvider;
+  } = {},
+) {
   const jobs = new FakeJobs();
   const agentJobs = new AgentJobs(2);
   const broker = new PermissionBroker();
@@ -132,8 +139,12 @@ function rig(opts: { wake?: boolean; title?: boolean } = {}) {
       permissions: broker,
       jobs,
       agentJobs,
-      grants,
-      ...(opts.title ? { titleModel: new TitleModel() } : {}),
+      ...(opts.noGrants ? {} : { grants }),
+      ...(opts.titleModel
+        ? { titleModel: opts.titleModel }
+        : opts.title
+          ? { titleModel: new TitleModel() }
+          : {}),
     }),
   });
   const updates: SessionUpdate[] = [];
@@ -309,6 +320,15 @@ describe("session.clear — the daemon's own steps (T9–T13)", () => {
     expect(r.grants.covers(shellTool, { command: "bun test a" })).toBe(false);
   });
 
+  test("H1 a session built WITHOUT an approvals store reports it on clear (never a silent skip), and still clears", () => {
+    // Mutation: back to `this.grants?.clear()` → no report.
+    const r = rig({ noGrants: true });
+    const hosted = r.open(OLD);
+    expect(hosted.clear()).toEqual({ before: 3, after: 2 });
+    expect(r.errors.map((e) => e.message)).toEqual([expect.stringContaining("no approvals store")]);
+    expect(r.of("history_replaced").map((u) => u.reason)).toEqual(["clear"]);
+  });
+
   test("T11 a model title becomes auto, a user title stays; the new segment's title entry says so", async () => {
     // Mutation: reset the title AFTER the barrier (the segment's entry keeps `model`).
     const model = rig({ title: true });
@@ -334,6 +354,36 @@ describe("session.clear — the daemon's own steps (T9–T13)", () => {
     b.clear();
     const t = (b.snapshotPage() as unknown as { title?: { text: string; source: string } }).title;
     expect(t).toEqual({ text: "My name", source: "user" });
+  });
+
+  test("L5 a title being generated from the OLD chat does not land after the clear", async () => {
+    // Mutation: drop `abortTitle()` + the `titleKick` clear in `clear()` → the
+    // old chat's title lands after the clear (review M5 survived before this test).
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    class GatedTitle implements ModelProvider {
+      readonly id = "gated-title";
+      // Ignores the abort signal on purpose: the strongest form of a late answer.
+      async *stream(): AsyncIterable<StreamEvent> {
+        started.resolve();
+        await release.promise;
+        yield { type: "text", delta: "Title of the old chat" };
+        yield { type: "done" };
+      }
+    }
+    const r = rig({ titleModel: new GatedTitle() });
+    const hosted = r.open();
+    hosted.prompt("t1", [{ type: "text", text: "please fix the login bug" }]);
+    await until(() => !hosted.running);
+    await started.promise; // the title request is in flight
+    const titlesBefore = r.of("session_title").length;
+    hosted.clear();
+    release.resolve();
+    await new Promise((x) => setTimeout(x, 60));
+    expect(r.of("session_title").length).toBe(titlesBefore);
+    expect((hosted.snapshotPage() as unknown as { title?: { source: string } }).title?.source).toBe(
+      "auto",
+    );
   });
 
   test("T12 after a stopped turn, clear re-enables the wake: a pending exit wakes (autoWake)", async () => {

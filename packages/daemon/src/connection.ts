@@ -362,12 +362,13 @@ export class Connection {
     return {};
   }
 
-  // `signal` is the request's own: a `$/cancelRequest` for it stops the
-  // compaction, like `session/cancel` does — the client was told "cancelled".
+  // Synchronous and lock-free (AGENTS §7): `HostedSession.clear` never awaits.
   private clear(params: ClearParams): ClearResult {
     return this.lookup(params.sessionId).clear();
   }
 
+  // `signal` is the request's own: a `$/cancelRequest` for it stops the
+  // compaction, like `session/cancel` does — the client was told "cancelled".
   private compact(params: CompactParams, signal?: AbortSignal): Promise<CompactResult> {
     const hosted = this.lookup(params.sessionId);
     return hosted.compact(signal);

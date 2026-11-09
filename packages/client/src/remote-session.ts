@@ -1182,7 +1182,13 @@ export class RemoteSession implements SessionStreamListener {
       this.onContextReset(out, replaced.turnId);
       return;
     }
-    const compacted = replaced !== null;
+    // A compaction holds the slot, so no own prompt can be in flight at its
+    // barrier. A `/clear` does not: an own turn (a wake, a prompt) may start
+    // between the barrier and this snapshot (docs/feat/clear-keeps-jobs.md,
+    // review H2). That turn's updates are AFTER the barrier's seq, so it takes
+    // the snapshot IN-TURN (below): never a separate replace that would later
+    // wipe it from the screen.
+    const compacted = replaced !== null && replaced.reason !== "clear";
     const shown = this.foreign;
     if (shown && !shown.ended && shown.turnId !== out.turn) {
       this.closeWithoutOutcome(shown);

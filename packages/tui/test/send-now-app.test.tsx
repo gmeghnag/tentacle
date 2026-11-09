@@ -156,6 +156,32 @@ describe("Ctrl+X Ctrl+S — send the queued messages now", () => {
     unmount();
   });
 
+  test("T19h (clear-keeps-jobs M3): a `/clear` that stopped the turn is not dropped silently when a send-now takes over", async () => {
+    // Mutation: drop the notice in the settle block's send-now branch → silent.
+    const { ctrl, log } = fakeSession({
+      sendNow: async (call, release) => {
+        await delay(120); // the daemon is slow to accept: still pending at the `/clear`
+        release(); // ... then it cancels the old turn and starts the successor
+        return successor(call.messages.map((m) => m.text).join("\n\n"));
+      },
+    });
+    let clears = 0;
+    ctrl.clear = () => {
+      clears += 1;
+      return Promise.resolve({ before: 2, after: 1 });
+    };
+    const { stdin, lastFrame, unmount } = await startWithRows(ctrl, ["alpha"]);
+    await chord(stdin);
+    expect(log.sendNows).toHaveLength(1);
+    stdin.write("/clear");
+    await delay(20);
+    stdin.write("\r");
+    await delay(400);
+    expect(clears).toBe(0);
+    expect(lastFrame() ?? "").toContain("/clear not run");
+    unmount();
+  });
+
   test("T-C3: with no queued row the chord does nothing (D2)", async () => {
     const { ctrl, log } = fakeSession({
       sendNow: async () => {

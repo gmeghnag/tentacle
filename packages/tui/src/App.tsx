@@ -757,7 +757,9 @@ export function App({
       const gate = {
         enabled: autoWakeOnJobExit,
         idle: !stateRef.current.running,
-        blocked: false,
+        // A `/clear` in flight: its history has not been applied yet, a turn
+        // now would be wiped by it (review H2). `wakeIfPending` runs again then.
+        blocked: clearingRef.current,
       };
       if (wakeDue(wakeRef.current, gate)) {
         wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" });
@@ -1098,7 +1100,9 @@ export function App({
       const gate = {
         enabled: autoWakeOnJobExit,
         idle: !stateRef.current.running,
-        blocked: false,
+        // A `/clear` in flight (review H2): its history is applied first, and
+        // `wakeIfPending` is asked again from there (or from a refused clear).
+        blocked: clearingRef.current,
       };
       if (wakeDue(wakeRef.current, gate)) {
         wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" });
@@ -1279,6 +1283,12 @@ export function App({
           if (event.type === "history_reset" && pending) {
             pending.resetSeen = true;
           }
+          // The cleared history of a `/clear` in flight reached this turn as its
+          // snapshot (the client hands a turn started after the barrier the
+          // snapshot in-turn, review H2): nothing else will release the latch.
+          if (event.type === "history_reset" && clearingRef.current) {
+            clearingRef.current = false;
+          }
           if (event.type === "text") {
             scheduleFlush();
           } else {
@@ -1356,6 +1366,11 @@ export function App({
           wakeIfPending();
         } else {
           flushNow();
+          // A send-now took over and started a new turn: the `/clear` that
+          // stopped this one is not run — said, never dropped silently (M3).
+          if (clearNow) {
+            pushNotice("_/clear not run: a send-now started a new turn — run /clear again_");
+          }
         }
       }
     },
@@ -1366,6 +1381,7 @@ export function App({
       restoreInput,
       setRows,
       settleSendNow,
+      pushNotice,
       wakeIfPending,
       commitHistory,
       drainHeld,
@@ -1487,6 +1503,16 @@ export function App({
           setExpandAll(false);
           setExpandedIds([]);
         }
+        // The history a `/clear` waits for (or a snapshot, which also stands in
+        // for one a dropped link lost): the latch lets go, so the stack cannot
+        // be left "clearing" (review H2c). A snapshot also settles the count of
+        // my clears whose history never came (L6a).
+        if (clearingRef.current && (cleared || activity.reason === null)) {
+          clearingRef.current = false;
+        }
+        if (activity.reason === null) {
+          ownClearsRef.current = 0;
+        }
         if (action === "notice") {
           pushNotice(FOREIGN_COMPACTED_NOTICE);
         } else if (action === "replace" || action === "append") {
@@ -1499,6 +1525,8 @@ export function App({
             }
             flushNow();
             drainHeld();
+            // A wake the latch held back: the cleared chat is on screen now.
+            wakeIfPending();
           });
         }
         return;
@@ -1524,6 +1552,7 @@ export function App({
       sessions,
       setQuitConfirm,
       streamTurn,
+      wakeIfPending,
     ],
   );
   onActivityRef.current = onActivity;
@@ -1868,11 +1897,23 @@ export function App({
       call = Promise.reject(error);
     }
     void call.then(
-      () => {
+      (result) => {
         try {
-          if (sessionRef.current === session) {
+          if (sessionRef.current !== session) {
+            return;
+          }
+          // The answer comes BEFORE the cleared history (the barrier makes the
+          // client read a snapshot): the latch stays up until the `history`
+          // activity applies it (review H2) — it wakes from there. Only a clear
+          // that did nothing (no session open yet: `{0, 0}`, no history coming)
+          // lets go here (review L6b).
+          const r = result as { before?: number; after?: number } | undefined;
+          if (r?.before === 0 && r.after === 0) {
             clearingRef.current = false;
-            wakeIfPending(); // an exit that arrived behind the stopped turn
+            if (ownClearsRef.current > 0) {
+              ownClearsRef.current -= 1;
+            }
+            wakeIfPending();
           }
         } catch {
           // Nothing to do: the cleared chat arrives through the history activity.
@@ -1881,11 +1922,17 @@ export function App({
       (error: unknown) => {
         try {
           if (sessionRef.current === session) {
+            const message = error instanceof Error ? error.message : String(error);
             clearingRef.current = false;
-            if (ownClearsRef.current > 0) {
-              ownClearsRef.current -= 1; // it replaced nothing: no history of mine to come
+            // A dropped link ("not retried") may have landed: its history (a
+            // replay or a snapshot) is then still MINE — keep the count (L6a);
+            // a snapshot (`reason: null`) zeroes it. Any other error replaced nothing.
+            if (!/not retried/i.test(message) && ownClearsRef.current > 0) {
+              ownClearsRef.current -= 1;
             }
-            pushNotice(clearErrorNotice(error instanceof Error ? error.message : String(error)));
+            pushNotice(clearErrorNotice(message));
+            // The gate held a wake back: nothing else would start it (review H2d).
+            wakeIfPending();
           }
         } catch {
           // Nothing to do: the notice is a courtesy.

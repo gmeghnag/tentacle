@@ -275,6 +275,8 @@ export class Session {
     this.messages.push(...next);
     this.agent.forgetModelRequestBaseline(this.id);
     onReplaced?.();
+    // The daemon's `HostedSession.clear` persists again after its own changes
+    // (title, approvals): this one serves every other caller (nit9).
     this.persist();
     return { before, after: this.messages.length };
   }
