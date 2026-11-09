@@ -1,6 +1,6 @@
 # feat/clear-keeps-jobs — `/clear` resets the conversation inside the session; background work stays
 
-> **Status:** executed (owner answered QA–QC 2026-11-09; Execution below); awaiting the fresh-context Review
+> **Status:** reviewed 2026-11-09 — **REQUEST-CHANGES** (2 HIGH, 2 MEDIUM; see Review)
 > **Branch:** `feat/clear-keeps-jobs` (this worktree, off `main` `ac2da32`) — ONE branch
 > **Type:** feat · **Size:** M (~16 files, mostly small edits; the reset reuses an existing, proven barrier) · **Blast:** load-bearing (a `PROTOCOL_VERSION` bump, the daemon's busy slot, a log segment) · **Suited:** Sonnet (`claude-sonnet-5-5`) executes (owner, 2026-11-09; no new state machine: one new daemon method that calls the compaction barrier); **mandatory fresh-context Opus review** red-teaming §7 "Protocol", "Persistence" and "Don't serialize the RPC peer"
 
@@ -339,3 +339,99 @@ Every mutation was a `cp` backup → edit → run → `cp` restore; the `shasum`
 6. **Title (FM 15):** clients keep showing the old model title until the next one arrives (`session_title` cannot say `auto`) — as planned, unchanged.
 7. **The fresh-context Opus Review (mandatory for this blast radius) has not been done.** This section is the implementer's own account.
 8. `TODO.md` was not touched, per instruction; nothing was committed.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-09* (fresh context; adversarial). **Model note:** the executor was Sonnet (a different model), but the **plan** was written by Opus, the same model as this reviewer, so the plan's blind spots may survive this pass. Both HIGH findings below are gaps the plan itself left.
+
+### Verdict: **REQUEST-CHANGES**
+
+The daemon core holds. `HostedSession.clear` is synchronous, it checks `assertIdle` first, and it reuses the proven barrier: the background work stays wired and the reset is atomic. Two defects block the merge. (1) The owner's QB decision ("approvals cleared for everyone") is silently a no-op on the **default local runtime**. (2) On stop-then-clear with a pending wake, the TUI runs a wake turn while the clear is in flight, and the late `history{clear}` then **wipes that turn from the screen** (confirmed by a probe).
+
+### Gate (this review, this tree)
+
+- `bunx tsc --noEmit`: clean · `bunx tsc -p apps/mobile`: clean · `bun run lint`: clean (797 files, 0 issues).
+- `bun test packages`, run 1: **6115 pass · 3 skip · 0 fail** (6118 tests, 421 files, 184.9 s). Run 2: **6115 pass · 3 skip · 0 fail** (190.1 s). The 3 skips are the opt-in ones.
+
+### Findings (ranked)
+
+**H1 — QB is a no-op on the in-process worker (the default local runtime): approvals survive `/clear`.** `HostedSession.clear` calls `this.grants?.clear()` (`packages/daemon/src/hosted-session.ts:2406`). `hosted.grants` is set only from the factory's result (`packages/daemon/src/session-host.ts:922,958`). `buildAgent` returns `grants` (`packages/cli/src/wiring.ts:620-628`), and `serve` passes that object through whole (`cli/src/serve.ts:186,526,528`). The **worker** factory, however, rebuilds the object field by field and **drops `grants`** (`packages/cli/src/worker.ts:127-134`: `agent, permissions, jobs, agentJobs, titleModel`). So on plain `tentacle` (the worker path), `this.grants` is `undefined`, the `?.` hides it, and the "always allow" approvals of the main agent and of running children stay after `/clear`. That contradicts QB and the CHANGELOG line. T10 passes only because its rig injects `grants`.
+- *Fix:* in `packages/cli/src/worker.ts:127-134`, add `grants: wired.grants,` to the returned object. Then make the field non-optional, so the compiler catches the next factory that forgets it: in `packages/daemon/src/session-host.ts:94`, change `readonly grants?: SessionGrants;` to `readonly grants: SessionGrants;`, and update the test factories that tsc then flags (give them `grants: new SessionGrants()`). If making it required is too wide, keep it optional, but in `HostedSession.clear` replace `this.grants?.clear()` with an explicit branch that reports a missing store (`this.onError?.(…)` / a log), never a silent `?.`.
+- *Test (red first):* the tsc error from the required field is the red. In addition, add `packages/cli/test/worker-grants.test.ts`. Extract the worker's `createAgent` closure into an exported `workerAgentFactory(config, deps)` in `worker.ts`, then assert `factory(cwd).grants === <the SessionGrants the agent's gate uses>` (e.g. `remember` a tool on it, then check that `agent`'s gate `covers` it).
+
+**H2 — stop-then-clear with a pending wake: a wake turn races the clear and its rows are wiped (CONFIRMED).** In the settle block (`packages/tui/src/App.tsx:1353-1356`), `runClearRef.current?.()` is followed at once by `wakeIfPending()`. `wakeIfPending` (`App.tsx:1092-1108`) gates on `idle` only (`blocked: false`), so its `setTimeout(0)` starts a continuation turn while `session/clear` is still in flight. The `history{clear}` activity then arrives during that turn. It is held (`nextStep` → `hold`, `App.tsx:1449-1454`) and replayed after the turn ends: `resetHistory` replaces the screen with `[note]`, and the wake turn's exchange disappears from screen, though the daemon still has it.
+- *Probe:* `.tentacle/tmp/clear-keeps-jobs/review/wake-race.test.ts` (the real `App`, a fake controller, a fake `jobs` with `onExit`, `autoWakeOnJobExit: true`). Output on this tree: `send#1("first") · clear sent · send#2("") clearInFlight=true · clear answered`; the final frame shows only `Background jobs still running: none`, and `WAKE-REPLY-2` is gone. With `blocked: clearingRef.current` temporarily in the gate, the order was `clear sent · clear answered · send#2`, and the frame kept `WAKE-REPLY-2` (reverted; App.tsx hash restored `4d8bb4e0…`).
+- *The real stack is worse than the probe.* The clear's RPC answer arrives **before** the history: the barrier makes the client send a separate `session/snapshot` (`client/src/session-reducer.ts:314-317`). So releasing `clearingRef` in `runClear`'s `onOk` (`App.tsx:1872`) and waking there is still early.
+- *Fix (all four):* (a) `App.tsx:1101`: `blocked: clearingRef.current`. (b) `runClear` `onOk`: do NOT clear `clearingRef` and do not wake. (c) In the `history` branch (`App.tsx:1472+`): `if (clearingRef.current && (cleared || activity.reason === null)) clearingRef.current = false;`, and in its `commitHistory(...).then(...)` call `wakeIfPending()` after `drainHeld()`. A `null` reason covers a reconnect snapshot, so the latch cannot stick. (d) `runClear` `onErr`: after releasing, also call `wakeIfPending()`, otherwise the gate from (a) strands a pending wake until the next turn.
+- *Test:* move the probe into `packages/tui/test/clear.test.tsx` as **T19g** with the REAL order: the fake `clear()` resolves first, then raises `history{clear}` ~15 ms later. Assert (1) no `send` starts while the clear is unresolved or before the history, and (2) the final frame contains the wake reply.
+
+**M3 — the stop-then-clear latch is silently dropped when a send-now is pending.** `App.tsx:1338-1359`: `clearNow` is taken (and the latch reset) BEFORE the branch, but `runClear` runs only in the middle branch. If `pending && settleSendNow(pending)` holds, a new turn starts and the user's `/clear` vanishes with no notice: a silent drop.
+- *Fix:* in the `else` branch (`App.tsx:1357-1359`), add `if (clearNow) { pushNotice("_/clear not run: a send-now started a new turn — run /clear again_"); }`.
+- *Test:* T19h. Hold a turn, arm a send-now (as in the existing send-now App tests), type `/clear`, release. Assert `clears === 0` and that the notice is shown.
+
+**M4 — required missing tests (load-bearing → before merge).**
+- **T20 e2e** (the owner's core requirement, through the real `SessionHost` + `Connection` + `RemoteClient`, with `FakeJobs` from `daemon/test/unflushed-exits.test.ts:42`). Open a session, start `bg-1`, send `session/clear` from client A, then fire the job's exit. Assert (1) client B gets a `history` activity with `reason: "clear"`; (2) the exit streams to both on the SAME session id; (3) the next prompt delivers the `[background]` note. Mutation: `jobs.dispose()` in `clear()` → red.
+- **FM 8 (`serve` reload after a clear)** — §7 Persistence. In the daemon persistence suite (the persister + reload rig of `daemon-side-persistence`), clear a session with a running child, let the persister land, reload a new host from the same store. Assert that the history is `[system, still_running note]`, that the log's last segment starts with `base.reason:"compact"` followed by `subagent_background`, that the sidecar's entry is in that segment, and that the child becomes the "lost" note. Mutation: skip `this.persist()` in `clear()` → the reload shows the old chat.
+- Optional (existing paths, by construction): FM 7, FM 9, FM 10.
+
+**L5 — mutation M5 SURVIVED: nothing pins the in-flight title abort.** Removing `abortTitle()` + the `titleKick` clear (`hosted-session.ts:2394-2398`) leaves all 16 tests of `clear.test.ts` + `session-title.test.ts` green. In that case a model title generated from the OLD chat lands after the clear.
+- *Test:* in `daemon/test/clear.test.ts`, give a gated `titleModel`, end a first exchange (title generation starts), `clear()`, then release the gate. Assert `title.source === "auto"` and that no `session_title` was emitted after the clear.
+
+**L6 — `ownClearsRef` bookkeeping drifts in two edge cases → wrong "on another device" notice.**
+- (a) On a link drop (`/not retried/`), `onErr` decrements (`App.tsx:1883-1885`). If the clear did land and the resync is a replay of `history_replaced{clear}`, the TUI says "cleared on another device".
+- (b) `RemoteSession.clear()` with no id yet returns `{0,0}` and raises no history (`client/src/remote-session.ts:664-669`), so `ownClearsRef` stays +1 forever and a later foreign clear shows no notice.
+- *Fix:* (a) do not decrement when `/not retried/` matches; instead, reset `ownClearsRef` to 0 on any `history` activity with `reason: null` (a snapshot). (b) in `onOk`, `if (result.before === 0 && result.after === 0) ownClearsRef.current = Math.max(0, ownClearsRef.current - 1)`; or make `RemoteSession.clear` with no id reject "nothing to clear yet", like `rename`.
+
+**L7 — CHANGELOG accuracy.** "The approvals … are cleared" is false on the worker until H1 is fixed. "It is gone, as after a compaction" ignores `sessions.keepSuperseded` (the segment is then kept, though nothing can show it). *Fix:* after H1, keep the approvals sentence; change the second to "it is no longer shown (with `sessions.keepSuperseded` on it is kept on disk, like a compacted history)".
+
+**nit8 — misplaced comment.** `packages/daemon/src/connection.ts:365-370`: `private clear` was inserted between `compact`'s doc comment ("`signal` is the request's own…") and `compact`. Move `clear` above that comment.
+
+**nit9 — double persist.** `Session.clearConversation` calls `this.persist()` and `HostedSession.clear` calls `this.persist()` again. Harmless (the second is the one after the title/grants changes); leave it, or drop the inner call with a comment.
+
+### Mutation non-vacuity (each reverted; `shasum` restored: `hosted-session.ts ead5c496…`, `remote-session.ts 40c4c34d…`, `App.tsx 4d8bb4e0…`; `git status` clean)
+
+| # | Mutation | Origin | Result |
+|---|---|---|---|
+| M1 | `this.jobs?.dispose()` in `clear()` | executor T6 | **KILLED** (T6) |
+| M2 | log `reason` as-is (`"clear"` as `base.reason`) | executor T8 | **KILLED** (T5, T8) |
+| M3 | drop `this.lastEndBad = false` | executor T12 | **KILLED** (T12) |
+| M4 | drop `this.kickWake()` from `clear()` | reviewer | **KILLED** (T12) |
+| M5 | drop `abortTitle()` + `titleKick` clear | reviewer | **SURVIVED** → L5 |
+| M6 | `blocked: clearingRef.current` in `wakeIfPending` (fix probe, not a mutation of a test) | reviewer | flips the H2 probe red → green |
+
+### Gate flake (`packages/exec` confinement F2): **not caused by this branch**
+
+Two full runs on this branch gave 0 fails. `git diff main...HEAD -- packages/exec packages/tools` is empty. The branch's new tests touch no shared filesystem state: `daemon/test/clear.test.ts` uses `/tmp/clear-keeps-jobs` only as a string `cwd` with a no-op `writeFile` env, `clear-connection.test.ts` the same, and T16 is in-memory. F2 does real `link`/`writeFile` in its own arenas under the default 5 s timeout. The executor's 2/0/1 pattern fits a load-dependent timeout (parallel worktree suites), not a leak from this diff. I did not run `main`'s tree, since the exec code and test are byte-identical on both.
+
+### Premise table (Implementation → code)
+
+| Premise | Verdict |
+|---|---|
+| Today `/clear` = `close` + new session (`App.tsx` on `main`) | TRUE (diff hunk removed it) |
+| The barrier keeps `subagents`, starts a new segment, re-emits ledger facts, re-offers asks | TRUE (`hosted-session.ts:2424-2470`; T5/T7, M2) |
+| `assertIdle` is the only slot gate and is taken synchronously before `controller` is set | TRUE (`:1923-1929`; `:1637-1641`, `:2346-2348`) |
+| `session-log-store` treats `compact` as superseding | TRUE (`session-log-store.ts:700`) |
+| The client's onReset hands a clear to an own in-flight prompt only if not compacted | TRUE (`remote-session.ts:1196`, `compacted` is true for `clear`) |
+| Other devices' laptops save the cleared segment | TRUE (`local-runtime.ts:471-473`: `history` → `flush()`) |
+| ONE `SessionGrants` shared by the gate and children **reaches `HostedSession`** | **FALSE on the worker** → H1 |
+| "The client keeps the screen until the daemon's history arrives; no wake interferes" (Q6/Q8) | **FALSE** for stop-then-clear → H2 |
+
+### Attacks tried
+
+1. **Atomicity, daemon:** `clear()` has no `await`. `assertIdle` comes first. A concurrent `session/prompt` cannot interleave (single-threaded sync handler). T9 + M1–M4 → holds.
+2. **Atomicity, TUI stop→clear:** found H2 (wake race) and M3 (send-now drop). The plain idle path is fine; twice-quickly gets `busy` (`clearingRef`).
+3. **During a compaction / another device's turn:** `CompactInProgress` / `TurnInProgress` before any change → failure notice. Holds.
+4. **Link drop:** a "once" call, never re-sent (`remote-client.ts:1411`). The screen converges through the replay/snapshot. Only the notice attribution drifts (L6).
+5. **§7 Persistence:** `base.reason:"compact"` is honest for an older reader (a known critical enum value), for `keepSuperseded` (superseding, same path as a compaction) and for the serve sidecar (`persist()` + `log.checkpoint()` after the barrier). Pods are unchanged (no persister). The reload has no test → M4.
+6. **§7 Protocol:** `session/clear` is wired both ends (`methods.ts`, `RequestSchemas`, `connection.ts:248`, `remote-client.ts:1411`). `history_replaced` stays `mandatory` (`updates.ts:322`), so a new enum value needs a bump → 21 is justified. The schema is exported, with `json-schema.test.ts` fixtures. `client/mapping.ts` needs no change (reason passes through `remote-session.ts:1328`). `apps/mobile` uses only `PROTOCOL_VERSION`.
+7. **Single broker:** no new broker or requester. `grants.clear()` leaves the ask lane intact (T3). The store reaches the session only where the factory passes it → H1.
+8. **Peer not serialized:** `Connection.clear` is synchronous, no lock. T14 shows a `TurnInProgress` answer while a prompt is in flight. Holds.
+9. **Structural-type trap:** grepped every `createSession` site (`connect.ts:216`, `session-jobs.ts:116`, `local-runtime.ts:742`). Only `RemoteSession`/`PersistingController` expose `clear()`, and the in-process `Session` has `clearConversation`. No accidental match.
+
+### What holds
+
+The load-bearing assumption (the barrier keeps the background work wired), protocol versioning, persistence through the existing compaction path, the peer rule, the pure `clear-command.ts` split (AGENTS §7 "logic in pure modules"), and an honest Execution that lists its own gaps.
+
+### How the executor behaved
+
+Disciplined and honest. It followed the plan's order, re-ran the probe before editing, caught the `Session.clear` structural collision via tsc and renamed it, found the `SESSION_MUTATING` guard through a red test rather than by reading, recorded every drift and every not-done item (T20, FM 7–11, the unproven flake), and restored mutated files with hash checks. Its three mutations I re-ran all reproduce. Its blind spots were integration seams outside the files the plan listed: the worker factory (H1) and the wake path next to the latch it added (H2/M3). Its T19 fakes raise the history before the RPC answer, which is the opposite of the real order. That is why H2 went unseen.
