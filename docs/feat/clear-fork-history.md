@@ -709,3 +709,99 @@ NOT mutation-tested / weak: **T2** (a mutation `title.source === "auto"` → `fa
 **Suspected `setAside` bug (Notes).** Not verified and not fixed (out of scope; no probe run for lack of budget). To verify: fail `saveAside` once in a forked read, then read linearly.
 
 **Not done / not verified.** (1) No fresh-context Review (mandatory for this load-bearing task: still to do). (2) The mutation gaps listed above. (3) T10 does not pin "a new prompt continues the fork". (4) `TODO.md` untouched, per instructions. (5) No manual TUI run.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-09* (fresh context; a different model from the executor, Sonnet, but the same model as the plan's author: blind spots shared with the plan can survive this pass.)
+
+**Verdict: REQUEST-CHANGES.** The happy path holds on both stores. One failure path corrupts a fork on `serve`, and a slow read silently loses the last turn on the laptop. Both fixes are small and neither needs an owner decision.
+
+### Findings
+
+**H1. A pending fork is retried blindly, and rewrites a fork that has already landed and moved on (`serve`).** `packages/daemon/src/session-log-store.ts:502-540` (`writeForks`, `writeFork`).
+
+Failure scenario, reproduced on the real `SessionHost` + `LogSessionStore` + `RemoteClient` (`.tentacle/tmp/clear-fork-history/review-retry-regress.ts`):
+1. `/clear`, and the fork write fails (ENOSPC). It stays on the source's `state.forks`, and it stays resident and listed.
+2. The disk recovers and a sweep heals the fork through `writeRecord`. `state.forks` still holds it.
+3. The user reopens the fork and continues it (the ordinary resume of Q1 (a)).
+4. The live session's next write runs `writeForks`, which re-applies the original cold update: `advance` resets the fork's writer, `writeLocked` replaces the file, and `writeStateLocked` rewinds the sidecar.
+
+```
+after continuing:          base,message,message,message,title,turn_start,message,message,turn_end,checkpoint  archivedAt: undefined  head seq 14
+after source's next write: base,message,message,message  archivedAt: <stamped again>  head seq 4
+files: … <fork>.stale-….aside      (holds the continued turn, unlisted)
+after next fork prompt:    base,message,message,message,turn_start,message,message,turn_end,checkpoint  log has the continued text: false
+reload:                    "k" (7) is past the log's history (5)
+```
+
+The running session's history leaves the log, it is stamped archived while live, and after the next prompt the session can no longer be reloaded after a restart. Skipping the pending fork only when a queue says so would not be enough: the fork's own queue and the source's queue are different, so the retry also races the sweep's `writeRecord`. The trigger needs a failed write first, so it is rare; the outcome breaks the §7 persistence contract (a sidecar paired with the wrong log).
+
+Fix: in `writeForks`, before each write, drop a fork that has already landed: if `<fork>.jsonl` exists and (`update.sidecar === undefined` or `<fork>.state.json` exists), `shift()` and continue, without `advance`, `writeLocked` or `writeStateLocked`. A log without its sidecar (the sidecar write failed) still goes through the retry. The check belongs under the fork's lock, in a `writeFork` early return. Regression test in `packages/daemon/test/clear-fork.test.ts`: the four steps above, asserting the fork's log, sidecar and a reload after the source's next write. This also pins "a new prompt continues the fork".
+
+**M1. A pre-clear read slower than the bound silently forks a stale copy, and the newest turn is lost.** `packages/cli/src/local-runtime.ts:474-475`.
+
+`const copy = lastRead` is taken when the 3 s bound expires, not when the clear is answered. Reproduced with a fake session (`.tentacle/tmp/clear-fork-history/review-stale-copy.ts`), read taking 3.2 s, clear answered after it:
+
+```
+3203ms read answered: 5 messages
+3203ms persist 5 messages
+3402ms clear answered
+3403ms keepFork 3 messages        fork holds latest turn: false
+```
+
+The late read did arrive before the clear's reply, and the file held all 5 messages; the post-clear save then replaces them, and the fork holds 3. There is no notice. FM 13 ("`lastRead` is the newest read held") does not cover this: the newer read was held by the time the fork was armed.
+
+Fix: take the copy after `inner.clear()` settles (success and `catch`), from reads STARTED before the clear was sent. A `let clearSent = false`, set just before `inner.clear()` and reset in a `finally`; in `run`, `const pre = !clearSent` before `await inner.readBack()` and assign `lastRead` only when `pre`. The channel is ordered (`local-runtime.ts:347-348`), so every such reply precedes the clear's. Test: the repro above in `clear-fork-controller.test.ts`, asserting the fork holds the latest turn, and that a read started after the clear is never the copy.
+
+**M2. The fork's "sidecar after the log" order is not pinned.** `packages/daemon/src/session-log-store.ts:528-529`; the gap is in `packages/daemon/test/session-log-store.test.ts`.
+
+Mutation: `writeStateLocked` before `writeLocked` → 46 pass, 0 fail across both fork test files. The code is right today, but a §7 ordering rule (focus point 2) has no guard, and a swap would let a crash leave a sidecar naming a log entry that does not exist.
+
+Fix: a store test with an `io` whose `writeDurable` rejects for paths containing `<forkId>.jsonl`: `fork` rejects with `ForkWriteError`, and `<forkId>.state.json` does not exist. Red under the mutation above.
+
+### Exec's declared drifts
+
+| Drift | Judgment |
+|---|---|
+| `back.read?.head?.id ?? ""` | Harmless. `read` is required on a real `ReadBack`; `""` only comes from unit fakes. The fork's content comes from `messages`, so it cannot make a fork wrong or empty; the worst case is the guard suppressing a second fork on a fake. |
+| Rewritten clear-keeps-jobs T16 | Correct. The pre-clear read is the design, and the new `[["old"],["note"]]` states it. |
+| `armFork` catches a throwing `keepFork` | Fine. Reported through `onFlushError`; the clear has already happened. |
+| T10 does not pin continuation | Not a finding by itself. Continuation works on this branch (first line of the H1 trace), and the H1 regression test will pin it. |
+| No red-before-green (§4, §9) | A real deviation from a mandatory rule, disclosed honestly. The ten mutations are stronger evidence than a red caused by a missing feature; two further mutations were run here. |
+
+### Attacks tried
+
+| Attack | Result |
+|---|---|
+| Live session's lineage, lock, uid after a healthy or failed fork | Holds. The fork runs under its own lock in the source's queue; a failed fork fails the source's write and keeps the old chat (T5, T12). |
+| Fresh writer `{segment: []}` from the fork op on a source with no writer | Holds. `advance` and `writeLocked` treat it exactly like an absent writer (`:571`, `:598`). |
+| Markers in the fork | Holds. Messages only; `still_running` stripped (T11). |
+| Pod daemon, in-process worker | Hold. `keepFork` is wired only with a persister (`session-host.ts`), T14; the laptop forks from its validated reads. |
+| Foreign `/clear`, two TUIs on one `serve` session | Hold. One synchronous daemon-side fork; `watch` never arms. |
+| Second `/clear` before the first fork lands | Holds. The new read has nothing to keep; if the read fails, the same head is guarded. |
+| `history{clear}` read racing `armFork` | Holds by frame order. That read is issued after the clear's reply is on the wire. Argued from the code, not run. |
+| Crash between the fork's log and sidecar | Holds. The index comes from `.state.json` (`session-log-store.ts:1135`), so the log is an invisible orphan; the source had not moved. A leftover file, nothing lost. |
+| Quit right after `/clear` | Holds. `saver.pending` holds the fork; sealed, no save replaces the file. |
+| `connect --continue` picking the fork | Holds. `session/list` sorts on `lastChangeAt`; the fork carries the old chat's value, older than the live session's. Reopen is `entry.archived` (`connect-resume.ts:106`). |
+| `session/delete` of a failed fork, then the retry | The file can return until the next start, when the tombstone removes it. Covered by the H1 fix when the file exists; otherwise harmless. |
+
+Premises checked against the code: the store's `advance` / `writeLocked` (`:570-658`), `settleWrite` and `retryUnwritten`, `track`, `flush` / `flushed`, the `DomainErrorCode` split (`InternalError` is not a domain code, so a dropped link arms the fork). The rest of the premise table was not re-verified, and the Context's Repro was not re-run on `main` (the owner's token budget).
+
+### Mutations (this review)
+
+| Mutation | Result |
+|---|---|
+| `writeFork`: no lock | T7 fails: non-vacuous |
+| `writeFork`: sidecar before log | Survives: M2 |
+
+The backup step was denied, so `session-log-store.ts` was restored by reversing the edits instead of the planned `shasum` comparison. `git status` is clean afterwards, so the file matches `HEAD`.
+
+### Owner questions
+
+None.
+
+### Gate
+
+`bun run check`: typecheck clean, Biome clean (807 files), **6199 pass, 3 skip (the opt-in ones), 0 fail**, on the tree as committed, before this section was added.
+
+**How the executor behaved.** Plan followed, drifts and mutation gaps disclosed accurately, nothing overstated. The gaps it declared are real and it named them itself; H1 and M1 are plan-level misses (FM 2 and FM 13) that it implemented as specified.
