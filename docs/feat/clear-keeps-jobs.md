@@ -1,6 +1,6 @@
 # feat/clear-keeps-jobs — `/clear` resets the conversation inside the session; background work stays
 
-> **Status:** reviewed 2026-11-09 — **REQUEST-CHANGES** (2 HIGH, 2 MEDIUM; see Review)
+> **Status:** review round 2 2026-11-09 — **PASS** (round-1 findings fixed; one new LOW, L8; see Review)
 > **Branch:** `feat/clear-keeps-jobs` (this worktree, off `main` `ac2da32`) — ONE branch
 > **Type:** feat · **Size:** M (~16 files, mostly small edits; the reset reuses an existing, proven barrier) · **Blast:** load-bearing (a `PROTOCOL_VERSION` bump, the daemon's busy slot, a log segment) · **Suited:** Sonnet (`claude-sonnet-5-5`) executes (owner, 2026-11-09; no new state machine: one new daemon method that calls the compaction barrier); **mandatory fresh-context Opus review** red-teaming §7 "Protocol", "Persistence" and "Don't serialize the RPC peer"
 
@@ -471,3 +471,32 @@ The load-bearing assumption (the barrier keeps the background work wired), proto
 ### How the executor behaved
 
 Disciplined and honest. It followed the plan's order, re-ran the probe before editing, caught the `Session.clear` structural collision via tsc and renamed it, found the `SESSION_MUTATING` guard through a red test rather than by reading, recorded every drift and every not-done item (T20, FM 7–11, the unproven flake), and restored mutated files with hash checks. Its three mutations I re-ran all reproduce. Its blind spots were integration seams outside the files the plan listed: the worker factory (H1) and the wake path next to the latch it added (H2/M3). Its T19 fakes raise the history before the RPC answer, which is the opposite of the real order. That is why H2 went unseen.
+
+### Review round 2
+
+*— claude-opus-5-5, 2026-11-09* (scope: `git diff ef5703d..HEAD`, fix round 1 by Sonnet). **Verdict: PASS** (one new LOW, not blocking).
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean · `bunx biome check .` clean (801 files) · `bun test packages` **6129 pass · 3 skip (opt-in) · 0 fail** (6132 tests, 425 files, 197.0 s).
+
+**Round-1 findings:**
+- **H1 — holds.** `workerSessionBuild` (`cli/src/wiring.ts:265-282`) is the one mapping and carries `grants`; `worker.ts` returns it. `HostedSession.clear` reports a missing store instead of a silent `?.` (`hosted-session.ts:2406-2414`). Mutation (drop `grants` from `workerSessionBuild`) → `worker-grants.test.ts` **KILLED**.
+- **H2 — holds.** Fix as specified: the wake gate is blocked by `clearingRef` (both sites); the latch is released by the `history` activity (or a `reason:null` snapshot, or an in-turn `history_reset`); `onErr` wakes. My round-1 probe now gives `clear sent · clear answered · send#2` with `WAKE-REPLY-2` on screen. A REAL-order variant (answer first, history 20 ms later; `.tentacle/tmp/clear-keeps-jobs/review/wake-race-real-order.test.ts`) gives `clear answered · history applied · send#2`, reply kept. Mutation (`blocked: false` in `wakeIfPending`) → T19g **KILLED**. The added client change (`remote-session.ts:1185-1191`: a clear's snapshot goes in-turn to an own prompt started after the barrier) is sound: the `compact` case's reason ("the slot is held") does not hold for a clear. It reuses the existing null-reason reset path and is pinned by `client/test/clear-race.test.ts`.
+- **M3 — holds.** Notice in the send-now branch (`App.tsx:1369-1373`). Mutation (notice disabled) → T19h **KILLED**.
+- **M4 — holds.** T20a/b (`client/test/clear.e2e.test.ts`, real `SessionHost` + `Connection` + `RemoteClient`) and FM 8 (`daemon/test/clear-reload.test.ts`, real `LogSessionStore`). Mutation (drop `this.persist()` in `clear()`) → FM 8 **KILLED**.
+- **L5 — holds.** Test "L5 a title being generated from the OLD chat…" (`daemon/test/clear.test.ts`); declared mutation = my round-1 M5.
+- **L6 — holds**, with the declared residue (below). a: no decrement on "not retried"; a snapshot zeroes the count (T19j). b: the `{0,0}` branch (T19k).
+- **L7 — holds.** The CHANGELOG states `keepSuperseded`. The approvals sentence is now true.
+- **nit8 / nit9 — hold.** Comment moved (`connection.ts:365-372`); the double persist is commented (`agent/src/session.ts:278`).
+
+**Declared leftovers — judged:**
+- **`grants` still optional in `AgentFactory`:** acceptable. Every production factory goes through `WiredAgent` (serve passes it whole; the worker goes through `workerSessionBuild`, pinned by a test). A future omission is reported, not silent.
+- **No real worker-thread / real App+RemoteSession test:** acceptable. T20 runs the real daemon + client stack; the worker mapping is pinned; the App ordering is pinned by T19g with the real answer-before-history order.
+- **A link-drop clear leaves `ownClearsRef` +1 until the next snapshot:** acceptable. The only effect is a missing "cleared on another device" notice, and it self-heals at the next `reason:null` history.
+- **FM 7 / 9 / 10 untested:** acceptable, as in round 1 (existing `UnknownSession`, `onFlushError` and link-drop paths).
+
+**New finding:**
+- **L8 — a clear taken in-turn leaves `ownClearsRef` +1.** When the cleared snapshot reaches an own turn as `history_reset` (the new client path), the stream loop releases `clearingRef` (`App.tsx:1286-1291`), but the `history` activity that decrements `ownClearsRef` never comes. The next FOREIGN clear is then taken as own, so its "cleared on another device" notice is swallowed, until a snapshot zeroes the count. Also, `expandAll`/`expandedIds` are not reset on that path. Same class and same self-heal as the accepted L6 residue → LOW.
+  - *Fix:* in that branch, `if (event.type === "history_reset" && clearingRef.current) { clearingRef.current = false; if (ownClearsRef.current > 0) { ownClearsRef.current -= 1; } setExpandAll(false); setExpandedIds([]); }`.
+  - *Test:* extend T19l to raise a foreign `history{clear}` afterwards and assert the notice shows.
+
+**Executor behaviour (round 2):** each fix was applied as specified, mostly with the exact tests I asked for, and each declared mutation I spot-checked reproduces. It went one step further on H2, correctly: the client-side in-turn routing covers a user prompt typed during the clear, which my gate-only fix did not. Its leftovers were declared honestly.
