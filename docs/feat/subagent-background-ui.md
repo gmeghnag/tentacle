@@ -168,3 +168,109 @@ From the worktree root, after the last change:
 - `bun test packages` → **6066 pass, 3 skip (the opt-in live-k8s / live-docker / slow keepalive), 1 fail** on the first run; the failure was `daemon/test/mapping.test.ts`'s "covers every known type", which requires a sample of every `UPDATE_CLASS` member — the new `subagents` type was missing from its list. Added (17 lines, the sample) → re-run: **6067 pass, 3 skip, 0 fail**, 6070 tests in 416 files, 177 s (exit 0).
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-09* (fresh context; a different model family from the executor, deepseek-v4.1-flash)
+
+**Verdict: REQUEST-CHANGES.** 2 HIGH · 2 MEDIUM · 4 LOW · 6 nit. One owner question. The display pipeline itself holds (load-bearing assumption, protocol, client bounding, relay convergence). What fails is who gets `agent_kill` and what the quit dialog does when another terminal is on the session.
+
+### Gate (re-run by me, on HEAD `a6f1126`)
+
+`bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean · `bun run lint`: 791 files, no fixes · `bun test packages`: **6067 pass, 3 skip (the opt-ins), 0 fail**, 6070 tests in 416 files. Tree byte-identical after every mutation (`git status --short` empty).
+
+### Findings
+
+**HIGH-1. `agent_kill` is given to every child, so a sub-agent can kill its siblings with no prompt. Breaks owner Q1 ("wired only where `background` is").**
+`packages/cli/src/wiring.ts:557` registers it in the shared registry that `createSubagentRunner` reads, and `packages/agent/src/subagent.ts:248` drops only the spawn tool and `context_reset` (a `tools: "all"` type inherits the rest). `permission: "none"`, and ids are sequential (`sa-1`).
+Repro (registry shaped as in `wiring.ts`; `sa-2`'s model calls `agent_kill{agent_id:"sa-1"}`): `{"jobId":"sa-1","status":"killed","agent":{"stopReason":"cancelled"}}`.
+*Fix:* in `packages/tools/src/background.ts` add `export const AGENT_KILL_TOOL_NAME = "agent_kill";`, use it for the tool's `name`, and export it the way `CONTEXT_RESET_TOOL_NAME` is. In `subagent.ts:21` import it, and at `:248` add `|| tool.name === AGENT_KILL_TOOL_NAME` (update the comment). *Test* (`packages/agent/test`, or the daemon rig with the shared-registry shape): a `tools: "all"` child's request has no `agent_kill`, even in a registry that holds it. Show it red first.
+
+**HIGH-2. An idle Ctrl+C with another terminal on the session raises a false dialog whose `y` closes the session for that other terminal, unannounced.**
+`packages/tui/src/commands.ts:322` (`ctrlCQuitStep` has no `others`), `packages/tui/src/App.tsx:2452` region (`setQuitConfirm({ others: 0, … })`), `App.tsx:2329` (`y` always calls `closeForAll`). A Ctrl+C with others attached only detaches (`ifLast`; `packages/cli/src/attach-run.ts:593-594`: "a Ctrl+C closes nobody else's session"), so nothing is lost and the text is untrue.
+Repro through the real `App` (`othersOnSession: () => 1`, one child, Ctrl+C, then `y`): dialog `1 background sub-agent (sa-1) will be lost — quit? (y/N)`, then `runQuit` calls `["closeForAll"]`.
+Secondary effect: `y` on an agents-only `/quit` (`others: 0`) now also sets `closeForAll`, which skips the "someone registered meanwhile" re-check at `attach-run.ts:611`.
+*Fix:*
+1. `CtrlCQuitInput` gains `readonly others: number;`; the guard in `ctrlCQuitStep` becomes `input.agents > 0 && input.others === 0 && !input.detaches && input.confirmed !== true && !input.exitPending`.
+2. Both `ctrlCQuitStep` calls in `App.tsx` pass `others: runQuit?.othersOnSession() ?? 0`.
+3. `App.tsx:2326-2330`: read `const facts = quitConfirmRef.current;` before `setQuitConfirm(null)`, and on "yes" call `runQuit?.closeForAll()` only `if (facts.others > 0)`.
+
+*Tests:* `quit-agents.test.ts`: `others: 1, agents: 2`, idle → `"exit"`. `run-quit.test.tsx`: `runQuitSpy(1)` + Ctrl+C → exits, no dialog, `spy.calls` empty; `runQuitSpy(0)` + `/quit` + `y` → no `closeForAll`. Red first.
+
+**MEDIUM-1. `startedAt` is always 0 on the wire. Design 2 ("passed in by the host") is not implemented, and Execution does not say so.**
+`AgentJobHost.now?` exists, but `agentRuntime?.bind({...})` at `packages/daemon/src/hosted-session.ts:625-637` never provides it. Repro with the host clock returning 1234: first row `startedAt: 0`.
+*Fix:* add `now: () => this.now(),` to that object. *Test* in `daemon/subagent-progress`: `rig({ now: () => 1234 })`, the row's `startedAt` is 1234.
+
+**MEDIUM-2. The guard the plan's load-bearing assumption depends on is untested.** Mutation R1 below (`recordCut` also mid-turn) SURVIVED, yet moving the cut mid-turn breaks the cut invariant (`history` must reflect every emit).
+*Test to add:* a turn held on a model gate with a child progressing; after a `subagents` frame arrives, `hosted.historyCut.seq` is unchanged and lower than that frame's seq. Must fail under R1.
+
+**LOW-1. A throw escapes the coalescing timer; `publishSubagents`' "Never throws" is false.** `hosted-session.ts:1185-1188` calls it bare, and `recordCut` at `:1209` is outside the `try`. Repro: `log.commit` throwing gives an uncaught error with `at publishSubagents … hosted-session.ts:1209` on stderr. (The process did continue in that script on Bun 1.4.3.)
+*Fix:* in the timer body, `try { this.publishSubagents(); } catch (error) { this.reportTurnError(error); }`. *Test:* inject the throw, wait one window; `bun test` fails on an uncaught error.
+
+**LOW-2. The quit dialog is not one row, though the layout reserves one.** `QUIT_CONFIRM_ROWS = 3` (`packages/tui/src/components/QuitConfirm.tsx:6`), and `commands.ts` joins all names unbounded. At 80 columns, 8 normal ids render 4 rows; 32 hostile 200-char ids (they pass the client's bound) render 98 rows.
+*Fix:* in `quitConfirmText`, `const shown = names.slice(0, 3).map((n) => n.slice(0, 12));` and append ` +${names.length - 3}` when more; `QuitConfirm.tsx:23`: `<Text color={t.quit} wrap="truncate-end">`. *Test:* 32 long names → the frame has 3 rows.
+
+**LOW-3. Two more survived mutations.** R2 (structural check by length only): add "an end and a start in the same window publish at once" (`cap: 1`; the new id's frame arrives before a window elapses). R3 (no `clearTimeout` in `close`): add "close clears a pending kick" (a progress event, `close()`, `priv.subagentsKick === null`).
+
+**LOW-4. The whole `App` re-renders on every frame (up to 4/s, idle too), though it only reads the count and ids.** `App.tsx:627-630`. *Fix:* add a pure `sameIds(a, b)` to `background-view.ts` (+ a test); `setAgents` always updates the ref but calls `setSubagents` only when the ids differ.
+
+**Nits** (each a one-line edit):
+1. `packages/client/src/remote-session.ts:473`: a line break was lost inside the comment (`Each   * row`). Restore the two lines.
+2. `hosted-session.ts:639-640`: remove `this.kickSubagents()` and its comment. `drive` has already published the end through `changed()`, so this only arms a timer that sends nothing.
+3. `commands.ts:280`: drop the `number |` shim; `commands.test.ts:180-181` pass `{ others, agents: 0, names: [] }`.
+4. `commands.ts`: blank line missing before the doc comment after `ctrlCQuitStep`.
+5. `CHANGELOG.md:32`: delete "(Seeing them running, and stopping one, come next.)", now shipped in the same `[Unreleased]`.
+6. `App.tsx:2333-2336`: the comment says a press "asks again and the one after it leaves"; the code leaves on that press. `QuitConfirm.tsx:9`: the doc still says "with other terminals" only. Update both once the owner question is settled.
+
+### Owner question
+
+**Q. What should Ctrl+C do at the quit dialog?** As built (declared drift) it no longer means "no". Idle, it exits, so Ctrl+C Ctrl+C loses the children with no `y`. Mid-turn, it stops the turn AND schedules the exit, silently (no notice, unlike `requestQuit`). It also applies to the pre-existing others dialog. `quitConfirmKey`'s contract says only `y` closes, and the permission dialog's Ctrl+C means "stop", never "quit". The "trap" the executor cites is not one: any key dismisses and `y` leaves.
+- **(a) Ctrl+C = No** (dismiss only, as before 6a-2). The double-tap asks again. Safe, and the text `(y/N)` stays true; a user must press `y` to lose children.
+- **(b) Keep as built.** Double Ctrl+C always leaves, the shell convention, at the cost of the protection against exactly that reflex. Should at least push the `requestQuit` notice mid-turn.
+- **(c) Hybrid.** A dialog raised by Ctrl+C: a second Ctrl+C leaves. A dialog raised by `/quit`: Ctrl+C = No. Needs one more field in the dialog state.
+
+**Recommendation: (a).** The loss is irreversible, the dialog exists to catch an accidental Ctrl+C, and it is the smallest change (delete `App.tsx:2333-2355`; update the `run-quit.test.tsx:464` test).
+
+### Premise table (citations opened on the base `f1ddfc5`)
+
+| Premise | Result |
+|---|---|
+| Capability gap: no `"subagents"` / `agent_kill` / `backgroundSuffix` on the base | TRUE (re-run, no matches) |
+| `updates.ts:220-231,312`; `session.ts:412-413` | TRUE (`:228`, `:312`, `:413`) |
+| `hosted-session.ts:385`, `:1124`, `:1323`, `:1355`, `:2057` | TRUE |
+| `remote-client.ts:401,810,1847,2069,2237` | TRUE |
+| `remote-session.ts:430,1297,1390`; `mapping.ts:281` | TRUE |
+| `connection.ts:460` (`unflushedExits` read beside the replay) | TRUE |
+| `commands.ts:247,263` | TRUE |
+| Design 2: `startedAt` passed in by the host | FALSE as built (MEDIUM-1) |
+
+### Mutations (`mutate.ts`, sha OK every time)
+
+| Mutation | Result |
+|---|---|
+| m44: drop the idle `recordCut` (T44, first survived) | KILLED (ring 867581 > 2048) |
+| m50a: drop `abort` in `kill` | KILLED (2) |
+| m46a: no row slice | KILLED (2) |
+| m47a: keep awake on `turn` only | KILLED (1) |
+| R1 (mine): `recordCut` also mid-turn | **SURVIVED** (MEDIUM-2) |
+| R2 (mine): structural check by length only | **SURVIVED** (LOW-3) |
+| R3 (mine): no `clearTimeout` in `close` | **SURVIVED** (LOW-3) |
+| R4 (mine): snapshot path unbounded | KILLED (1) |
+
+### Attacks tried
+
+1. **Idle cut vs a concurrent turn.** Holds. `prompt` sets `controller` synchronously (`hosted-session.ts:1626-1630`), compaction holds it too (`:2337`), and `finishTurn` clears it and records in one stretch, so a 250 ms timer cannot land in a gap.
+2. **Idle cut vs replay.** Holds. A pending background ask is re-offered at every attach before the replay is computed (`:1313`); unflushed exits ride `OpenResult`. `recordCut` idle is O(n) pointer compares; `verifyLog` runs only in tests.
+3. **`tool_progress` leak into a later turn.** None. The background branch hands the child only `bg.progress`; T42 pins it.
+4. **Coalescing.** One timer, cleared in `close`; an end + a new start in one window is correct by inspection (ids compared by index; ids never repeat), though untested (LOW-3). Throw path: LOW-1.
+5. **Hostile pod.** Bounded on the client on both paths (`deliver`, snapshot): 32 rows, 8 labels, `progressText` strips C0/C1 including ESC. Relay and second attacher read the same bounded entry. Only leftover: dialog height (LOW-2).
+6. **Relay keep-awake convergence.** A stale count ends with the link: `stopped` sets `exitNow`; a restarted daemon's snapshot gives `[]`; `handover: "done"` and `stopping` release it. A session closed under a live link leaves no `[]` frame, but I found no non-hostile path to that, and a hostile pod can already pin the relay with a `turn_start` that never ends: no new class. `record` dedupes by view, so frames do not write `owner.json`.
+7. **`agent_kill`.** Exit `cancelled` exactly once with `status: killed` (repro), a `subagent_end` through `agentEnded` (`:1511-1516`), slot released in `drive`; unknown or finished id → "was not running". Own-children scope fails: HIGH-1.
+8. **Quit paths.** `connect` never asks (`detaches`); a detached run's `/quit` asks with the count. Ctrl+C with others: HIGH-2.
+9. **Protocol.** `display` is the right class (full state, also in the snapshot, nothing waits on it), so no bump. Both ends and `mapping.ts` are wired, `protocol.json` regenerated, and an older client gets `unsupported` once per kind (`session-reducer.ts:102`).
+
+### Accepted, not findings
+
+A long foreground tool with a chatty child pins `subagents` frames until the next commit: at the worst case (≤ 4 frames/s, ~2 KB per row) a pinned ring can pass its 4 MiB budget in minutes, while realistic child activity is far below that. The plan accepted this ("bounded by activity"); worth watching in 6b. Undeclared minor drift: T43 uses real timers, not the planned injected ones.
+
+### How the executor behaved
+
+Solid and honest on the mechanical parts: it corrected the plan's stale citations, reported T44's first survival and rewrote the test rather than hiding it, listed what it did not verify, and left a green gate. Its blind spots are the ones a pure-function level of testing leaves: it never traced what the registry hands a child, or what `runQuit`'s `closeForAll` means on the Ctrl+C path, and it shipped the `now` seam for `startedAt` without wiring it or having one test observe the value. It tested the mutations it thought of, not the guards the design hangs on (R1), and it took a behaviour decision on the dialog itself, though it did declare it.
