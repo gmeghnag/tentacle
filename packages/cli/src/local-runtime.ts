@@ -237,6 +237,8 @@ export interface PersistingController extends SessionController {
   openSeeded: RemoteSession["openSeeded"];
   ownsTurn: RemoteSession["ownsTurn"];
   onQueued: RemoteSession["onQueued"];
+  /** `RemoteSession.onSubagents`: the live list of this session's background sub-agents. */
+  onSubagents?: RemoteSession["onSubagents"];
   /** `/settings` (present only where this laptop carries settings: `run`/`attach`). */
   settings?(): readonly SettingsLine[];
   /** `/settings sync`: the outcome as lines, never a rejection; a success is saved at once. */
@@ -480,6 +482,9 @@ export function persistingController(
     },
     onQueued(listener) {
       return inner.onQueued(listener);
+    },
+    onSubagents(listener) {
+      return inner.onSubagents(listener);
     },
     close() {
       closed = true;

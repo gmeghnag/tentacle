@@ -82,6 +82,44 @@ describe("StatusBar", () => {
     expect(on).toContain("auto-accept on");
     expect(on).not.toContain("shift+tab");
   });
+
+  test("T49: the background sub-agent count shows, and is dropped whole on a short line", () => {
+    // Mutation: drop `backgroundSuffix` from the bar's suffix → no count; splice
+    // the count in the text instead of the suffix → it gets CUT mid-word.
+    const base = {
+      cwd: "/tmp/work",
+      tokens: { prompt: 0, completion: 0 },
+      contextTokens: 0,
+      contextWindow: 128000,
+    } as const;
+    const wide = render(<StatusBar {...base} columns={100} background={2} />).lastFrame() ?? "";
+    expect(wide).toContain("· 2 sub-agents");
+    const one = render(<StatusBar {...base} columns={100} background={1} />).lastFrame() ?? "";
+    expect(one).toContain("· 1 sub-agent");
+    expect(one).not.toContain("1 sub-agents");
+    const none = render(<StatusBar {...base} columns={100} background={0} />).lastFrame() ?? "";
+    expect(none).not.toContain("sub-agent");
+    // Narrow: the whole suffix goes, never a cut ` · 2 sub-ag…`. The property,
+    // across every width: either the whole thing or no fragment of it.
+    let dropped = 0;
+    for (const columns of [12, 20, 28, 30, 36, 46, 60]) {
+      const row =
+        render(<StatusBar {...base} columns={columns} background={2} />).lastFrame() ?? "";
+      if (row.includes("sub-ag")) {
+        expect(row).toContain("· 2 sub-agents");
+      } else {
+        dropped += 1;
+      }
+    }
+    // It really is dropped somewhere (not vacuously always shown).
+    expect(dropped).toBeGreaterThan(0);
+    // The count comes before the scroll hint (work in flight is news).
+    const both =
+      render(
+        <StatusBar {...base} columns={110} background={2} scrolledUp hiddenAbove={3} />,
+      ).lastFrame() ?? "";
+    expect(both.indexOf("sub-agents")).toBeLessThan(both.indexOf("more ("));
+  });
 });
 
 describe("Thinking", () => {

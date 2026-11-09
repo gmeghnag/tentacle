@@ -4,7 +4,7 @@
  * `JobController`); when it is not wired they report the capability as
  * unavailable rather than throwing.
  */
-import type { JobStatus, Tool } from "@tentacle/core";
+import type { AgentJobs, JobStatus, Tool } from "@tentacle/core";
 import { z } from "zod";
 import { jobCursorConcurrency } from "./concurrency.ts";
 
@@ -69,3 +69,37 @@ export const shellKillTool: Tool<z.infer<typeof shellKillInput>> = {
     };
   },
 };
+
+export const AGENT_KILL_TOOL_NAME = "agent_kill";
+
+const agentKillInput = z.object({
+  agent_id: z
+    .string()
+    .min(1)
+    .describe("Id of the background sub-agent to stop (the sa-N `agent_task` returned)."),
+});
+
+/**
+ * Stop a background sub-agent (docs/feat/subagent-background-ui.md, owner Q1 a):
+ * the mirror of `shell_kill`, built only where the background runtime is wired
+ * (without it no child has an id to name). Its exit reports `cancelled`, so the
+ * agent learns how it ended from the usual `[background]` note.
+ */
+export function createAgentKillTool(jobs: AgentJobs): Tool<z.infer<typeof agentKillInput>> {
+  return {
+    name: AGENT_KILL_TOOL_NAME,
+    description:
+      "Stop a background sub-agent started with agent_task{background: true}. Its report-so-far still arrives later as a [background] note, marked cancelled.",
+    inputSchema: agentKillInput,
+    permission: "none",
+    async execute(input) {
+      const killed = jobs.kill(input.agent_id);
+      return {
+        content: killed
+          ? `killed background sub-agent ${input.agent_id}`
+          : `background sub-agent ${input.agent_id} was not running`,
+        isError: false,
+      };
+    },
+  };
+}

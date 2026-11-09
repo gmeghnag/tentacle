@@ -610,48 +610,7 @@ Gate before done: `bun run check` (typecheck → lint, baseline clean → full `
 
 *— claude-opus-5-5, 2026-11-09*
 
-Opens after 6a-1 merges. Move this Part to `docs/feat/subagent-background-ui.md` then.
-
-**Load-bearing assumption.** A full-state update with coalescing can carry the live list without growing the ring while idle: an idle `recordCut(null)` after each frame brings the ring back under budget (probe F: 8092 → 568), and a child's activity reaches an idle client and a second attacher through the same two channels as `queued` (live frame + snapshot at the cut). Re-prove it with T42 before anything else.
-
-**Preconditions.** `queued` is the pattern: `updates.ts:225-229,310`; `hosted-session.ts:992-1003,1183,1222`; `session.ts:402`; `remote-client.ts:1830,2051,2207,2361`; `remote-session.ts:395-406,1254,1347`; `mapping.ts:279-281`. `maybeWake` already moves the cut while idle (`hosted-session.ts:1906`). The attach path for unflushed exits does not depend on the replay (`connection.ts:460`), so moving the cut idle is safe. Quit: `commands.ts:247-266`, `App.tsx:589-592,1740-1753,2295-2301,2384-2391,2777-2778`. Status: `status-line.ts` (`suffix` is whole or dropped), `StatusBar.tsx:92-109`, `App.tsx:2851`.
-
-**Design.**
-1. Protocol (`updates.ts`, `session.ts`). `SubagentRowSchema = {id, callId, agentType, description, state: z.string(), toolUses, tokens, startedAt, tail: z.array(z.string())}`, strip, no `.max()` (a client bounds what a pod sends). `SubagentsUpdateSchema = {type:"subagents", agents: z.array(row)}`, class `display`. `SnapshotResultSchema.subagents` optional. No version bump.
-2. `AgentJobs`: `progress(agentId, event: ToolProgressEvent)` folds `subagent_tool` (tail, last 8, `toolUses`) and `subagent_usage` (tokens); `onChange(listener)`, fired on start, progress, end; `rows()`; `startedAt` passed in by the host (the class stays clock-free). The tool's closure passes `onEvent: (e) => bg.progress(agentId, e)`. **If owner Q1 is (a):** `kill(id): boolean` aborts one child (the exit is `cancelled`), and `tools/src/background.ts` gains `agent_kill` beside `shell_kill`, wired only where `background` is.
-3. Daemon. New pure `daemon/src/subagents-view.ts`: `subagentRows(jobs)`, labels through `wireLine(label, 200)`, and `sameRows(a, b)`. `HostedSession`: `lastSubagents` (`Cut.subagents`, set like `queued`), and `kickSubagents()`: a `setTimeout(250)`, one at a time, cleared in `close`. On fire: compare, `emit({type:"subagents", agents})`, then **`if (this.controller === null) this.recordCut(null)`**. A start and an end publish immediately, a burst of progress coalesces to ≤ 4/s. `snapshotPage` adds `subagents` beside `queued`.
-4. Client. `SessionEntry.subagents`, `subagentsChanged`, `onSessionSubagents`, `RemoteSession.onSubagents` (mirror `onQueued`, the state at once). Add `subagents` to the two "owned elsewhere" lists (`remote-session.ts:1252-1256,1344-1350`) and to `mapping.ts:279`. Router-style bounding at the client: at most 32 rows, 8 labels, through `progressText`. `local-runtime.ts` passes `onSubagents` through.
-5. Relay. `RelayEvent {type:"agents", n}`, `RelayModel.agents`; `relay.ts` subscribes `session.onSubagents`. `wantsAwake`: `(turn running || agents > 0) && asks === 0 && !stopping && handover !== "done"`: a child in a pod needs the laptop for its model.
-6. TUI. Pure `tui/src/background-view.ts`: `backgroundCount(rows)` and `backgroundSuffix(count)` → ` · 2 sub-agents`. `StatusBar` gets `background` and puts it in front of `suffix`. `quitCommandStep` gains `agents`: `agents > 0 && !detaches && !confirmed` → `"confirm"`. `quitConfirmText({others, agents, names})`: `2 background sub-agents (sa-1, sa-2) will be lost — quit? (y/N)`; with others, `1 other terminal attached · 2 sub-agents running — close the session for all? (y/N)`. New pure `ctrlCQuitStep(input)`: idle Ctrl+C with `agents > 0 && !detaches && !confirmed` → `"confirm"`. `App`: `quitConfirm` holds `{others, agents, names}`. SIGHUP cannot ask: the lost note covers it.
-
-**Files (order).** `protocol/src/{updates,session}.ts`, schema · `core/src/agent-jobs.ts` · `tools/src/{task,background}.ts` · `daemon/src/{subagents-view (new),hosted-session}.ts` · `client/src/{remote-client,remote-session,mapping}.ts` · `cli/src/{local-runtime,relay,relay-state}.ts` · `tui/src/{background-view (new),commands,App,components/StatusBar}.tsx|ts` · `CHANGELOG.md` · `docs/feat/session-log.md` untouched.
-
-**CHANGELOG (planned line, `### Added`):** "**See your background sub-agents.** The status line shows how many are running, and quitting a session that would lose them asks first."
-
-**Failure modes.**
-| Case | Converges to |
-|---|---|
-| A second TUI attaches mid-run | The snapshot carries the list at the cut; the replay and the next frame fix it |
-| Older client, same protocol version | `display`: shows `unsupported` once, then nothing |
-| A frame burst during a long foreground tool | Coalesced; the ring is pinned only since the last commit (bounded by activity) |
-| Hostile pod sends a huge list | No schema bound by design; the client cuts to 32 rows and 8 labels |
-| Session closes with a timer pending | Cleared in `close` |
-| A row without a `tail` (malformed) | A known type failing its member is a stream error; the schema is lenient so only a type mismatch can do it, the same class as `tool_progress` |
-| `connect` | Quitting only detaches: no confirm |
-| Detached run's `/quit` | `endsSession`: asks with the count, then closes |
-
-**Tests.**
-| # | File · name | Property | Mutation |
-|---|---|---|---|
-| T42 | `daemon/subagent-progress` · "an idle child's tool events reach an idle client, and a later turn's stream carries none" (H1) | frames between turns; no `tool_progress` | stamp progress into the turn |
-| T43 | · "bursts coalesce to ≤ 1 frame per 250 ms; start and end publish at once" | injected timers | no timer |
-| T44 | · "the ring stays under budget while idle" | small `ringBytes`, 1000 progress events | drop the idle `recordCut` |
-| T45 | · "a fresh attach gets the list from the snapshot" | | drop it from `snapshotPage` |
-| T46 | `client` · "rows are bounded and sanitized" | | |
-| T47 | `cli/relay-state` · "keeps awake while a child runs" | | |
-| T48 | `tui/commands` · confirm for `/quit` and Ctrl+C; not on `connect`; the combined text | | drop the `detaches` check |
-| T49 | `tui/background-view` + `app.test.tsx` frame · the count shows, and at 46 columns it is dropped whole | | |
-| T50 | `tools` · `agent_kill` (only if Q1 is (a)) | kills, a second time says not running | |
+Moved verbatim to `docs/feat/subagent-background-ui.md` (its own branch and doc, AGENTS §10).
 
 ## Notes / debt
 

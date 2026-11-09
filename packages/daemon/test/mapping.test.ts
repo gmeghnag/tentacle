@@ -273,6 +273,23 @@ describe("toUpdateParams (the session/update frame)", () => {
       entries: [{ id: "a", text: "A" }],
       returned: [{ id: "b", text: "B", cause: "cancelled" }],
     },
+    // 6a-2 (docs/feat/subagent-background-ui.md): the live background list.
+    {
+      type: "subagents",
+      agents: [
+        {
+          id: "sa-1",
+          callId: "c1",
+          agentType: "general",
+          description: "map repo",
+          state: "running",
+          toolUses: 2,
+          tokens: 100,
+          startedAt: 1,
+          tail: ["Read a.ts"],
+        },
+      ],
+    },
   ];
 
   test("covers every known type (keeps the samples honest)", () => {

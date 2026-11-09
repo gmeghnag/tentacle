@@ -23,6 +23,8 @@ export type RelayEvent =
   | { readonly type: "ask_raised"; readonly tool: string }
   | { readonly type: "ask_gone" }
   | { readonly type: "jobs"; readonly n: number }
+  /** The session's running background sub-agents (they need the laptop's model). */
+  | { readonly type: "agents"; readonly n: number }
   | { readonly type: "link"; readonly status: LinkStatus }
   | { readonly type: "stop" }
   /** A due exit was held back (`exitPlan`): the grace starts over. */
@@ -49,6 +51,8 @@ export interface RelayModel {
   /** The tool of the last ask raised. */
   readonly tool?: string;
   readonly jobs: number;
+  /** The background sub-agents running now: they need the laptop for their model. */
+  readonly agents: number;
   readonly stopping: boolean;
   /** The link gave up: the name may no longer be ours. */
   readonly linkStopped: boolean;
@@ -75,6 +79,7 @@ export const initialRelay: RelayModel = {
   turn: "none",
   asks: 0,
   jobs: 0,
+  agents: 0,
   stopping: false,
   linkStopped: false,
   rest: "idle",
@@ -144,6 +149,8 @@ export function relayStep(model: RelayModel, event: RelayEvent): RelayModel {
     }
     case "jobs":
       return { ...model, jobs: event.n };
+    case "agents":
+      return { ...model, agents: event.n };
     case "link":
       return event.status.state === "stopped"
         ? {
@@ -180,7 +187,8 @@ export function relayStep(model: RelayModel, event: RelayEvent): RelayModel {
         // Prepared: the attacher decides; done: only the drain ends it.
         return without(model, "exitAt");
       }
-      const idle = model.turn === "over" && model.asks === 0 && model.jobs === 0;
+      const idle =
+        model.turn === "over" && model.asks === 0 && model.jobs === 0 && model.agents === 0;
       return idle
         ? { ...model, exitAt: model.exitAt ?? event.now + RELAY_IDLE_GRACE_MS }
         : without(model, "exitAt");
@@ -229,14 +237,23 @@ export function relayView(model: RelayModel): RelayView {
   if (model.jobs > 0) {
     return { state: "running", detail: `${model.jobs} background job(s) running` };
   }
+  if (model.agents > 0) {
+    return { state: "running", detail: `${model.agents} background sub-agent(s) running` };
+  }
   return { state: model.rest, ...detail };
 }
 
-/** Caffeinate (DR-9): a held ask, a background job or a stop lets the Mac sleep. */
+/** Caffeinate (DR-9): a held ask, or a stop, lets the Mac sleep. */
 export function wantsAwake(model: RelayModel): boolean {
   // Handed over: keep-awake is the relay's only (DR-9), and it is leaving.
+  // A child in a pod needs the laptop for its MODEL (the reverse tunnel,
+  // docs/feat/subagent-background-ui.md): with the Mac asleep its next call has
+  // nowhere to go, so a running child keeps it awake even with the turn over.
   return (
-    model.turn === "running" && model.asks === 0 && !model.stopping && model.handover !== "done"
+    (model.turn === "running" || model.agents > 0) &&
+    model.asks === 0 &&
+    !model.stopping &&
+    model.handover !== "done"
   );
 }
 

@@ -148,6 +148,8 @@ describe("D1 quitCommandStep (docs/fix/detach-live.md A1)", () => {
     detaches: false,
     endsSession: false,
     others: 0,
+    // 6a-2: no background sub-agents running, so nothing is lost by quitting.
+    agents: 0,
     confirmed: false,
   };
   test("every row, first match wins", () => {
@@ -175,8 +177,10 @@ describe("D1 quitCommandStep (docs/fix/detach-live.md A1)", () => {
   });
 
   test("the text, singular and plural; only y/Y confirms, Enter is No", () => {
-    expect(quitConfirmText(1)).toBe("1 other terminal attached — close the session for all? (y/N)");
-    expect(quitConfirmText(3)).toBe(
+    expect(quitConfirmText({ others: 1, agents: 0, names: [] })).toBe(
+      "1 other terminal attached — close the session for all? (y/N)",
+    );
+    expect(quitConfirmText({ others: 3, agents: 0, names: [] })).toBe(
       "3 other terminals attached — close the session for all? (y/N)",
     );
     expect(quitConfirmKey("y")).toBe("yes");

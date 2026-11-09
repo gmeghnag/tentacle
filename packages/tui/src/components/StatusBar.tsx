@@ -1,5 +1,6 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
+import { backgroundSuffix } from "../background-view.ts";
 import type { LinkIndicator } from "../link-status.ts";
 import type { TokenTotals } from "../state.ts";
 import { METER_WIDTH, contextMeterView, statusLayout } from "../status-line.ts";
@@ -67,6 +68,7 @@ export function StatusBar({
   hiddenAbove = 0,
   expandAll = false,
   autoApprove = false,
+  background = 0,
   link = null,
 }: {
   cwd: string;
@@ -84,6 +86,8 @@ export function StatusBar({
   hiddenAbove?: number;
   expandAll?: boolean;
   autoApprove?: boolean;
+  /** Background sub-agents running now: ` · 2 sub-agents`, whole or dropped (docs/feat/subagent-background-ui.md). */
+  background?: number;
   /** The link's state when it is not up ("reconnecting…", "disconnected: …"). */
   link?: LinkIndicator | null;
 }): ReactElement {
@@ -94,6 +98,9 @@ export function StatusBar({
     : expandAll
       ? " · expanded"
       : "";
+  // The running children come FIRST (they are news about work in flight); the
+  // scroll hint follows. Both are whole or dropped by `statusLayout`.
+  const withAgents = `${backgroundSuffix(background)}${suffix}`;
   const meter = contextMeterView(contextTokens, contextApprox, contextWindow);
   // What is shown, and what gives way on a short line, is decided in the pure
   // `statusLayout` (the bar stays ONE row); this component only paints it.
@@ -106,7 +113,7 @@ export function StatusBar({
     tokens,
     meter,
     hint: hintText,
-    suffix,
+    suffix: withAgents,
   });
   const lead = [layout.path, layout.tokens].filter((p): p is string => p !== null && p !== "");
   return (

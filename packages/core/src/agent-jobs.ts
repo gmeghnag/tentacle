@@ -12,6 +12,7 @@
  */
 import { SUBAGENT_REPORT_MAX_CHARS } from "@tentacle/protocol";
 import { capSubagentText } from "./agent-job-ledger.ts";
+import type { ToolProgressEvent } from "./tool.ts";
 
 export interface AgentJobSpec {
   readonly callId: string;
@@ -25,6 +26,11 @@ export interface AgentJobHost {
   launched(spec: AgentJobSpec): string;
   /** Logs + persists the end. */
   ended(agentId: string, stopReason: string, report: string): void;
+  /**
+   * Now, for a row's `startedAt`. Optional: the class keeps no clock of its own
+   * (a test's rows then read 0, which is honest).
+   */
+  now?(): number;
 }
 
 export interface AgentJobResult {
@@ -54,6 +60,24 @@ export type AgentSlot =
   | { readonly ok: true; readonly release: () => void }
   | { readonly ok: false; readonly reason: string };
 
+/** One child as a client shows it (docs/feat/subagent-background-ui.md Design 2). */
+export interface AgentJobRow {
+  readonly id: string;
+  readonly callId: string;
+  readonly agentType: string;
+  readonly description: string;
+  readonly state: string;
+  readonly toolUses: number;
+  /** The child's own tokens so far (never the parent's). */
+  readonly tokens: number;
+  readonly startedAt: number;
+  /** Its recent tool labels, oldest first, at most `TAIL_MAX`. */
+  readonly tail: readonly string[];
+}
+
+/** How many labels a row keeps: enough for a panel, never a log. */
+export const AGENT_ROW_TAIL_MAX = 8;
+
 const NO_OUTPUT = "(the sub-agent produced no output)";
 
 export class AgentJobs {
@@ -62,11 +86,20 @@ export class AgentJobs {
   private disposed = false;
   private readonly running = new Map<
     string,
-    { readonly job: RunningAgentJob; readonly controller: AbortController }
+    {
+      readonly job: RunningAgentJob & { readonly startedAt: number };
+      readonly controller: AbortController;
+      /** `kill` was called: its exit is `cancelled`, whatever the run reports. */
+      killed: boolean;
+    }
   >();
   /** Foreground children holding a slot: a token each, with its description for the refusal. */
   private readonly foreground = new Map<symbol, string>();
   private readonly listeners = new Set<(exit: AgentJobExit) => void>();
+  /** Told after every visible change to `rows()` (a start, a progress, an end). */
+  private readonly changeListeners = new Set<() => void>();
+  /** Per child, the visible state folded from its progress events. */
+  private readonly live = new Map<string, { toolUses: number; tokens: number; tail: string[] }>();
 
   constructor(maxParallel: number) {
     this.cap = maxParallel;
@@ -90,6 +123,75 @@ export class AgentJobs {
     return () => this.listeners.delete(listener);
   }
 
+  /** Subscribe to a change of `rows()`; the caller re-reads it. Never awaited. */
+  onChange(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => this.changeListeners.delete(listener);
+  }
+
+  /**
+   * The children running now, in launch order, with what they have done so far.
+   * A child that ended has no row: this is the live state, not a history.
+   */
+  rows(): readonly AgentJobRow[] {
+    return [...this.running.values()].map(({ job }) => {
+      const live = this.live.get(job.agentId);
+      return {
+        id: job.agentId,
+        callId: job.callId,
+        agentType: job.agentType,
+        description: job.description,
+        state: "running",
+        toolUses: live?.toolUses ?? 0,
+        tokens: live?.tokens ?? 0,
+        startedAt: job.startedAt,
+        tail: live?.tail ?? [],
+      };
+    });
+  }
+
+  /**
+   * Fold one progress event of `agentId` into its row (`agent_task`'s closure
+   * passes them on from the child's run). An unknown or ended id is a no-op;
+   * a throwing listener never escapes to the child's run (Bun exits on an
+   * unhandled rejection).
+   */
+  progress(agentId: string, event: ToolProgressEvent): void {
+    const live = this.live.get(agentId);
+    if (live === undefined || !this.running.has(agentId)) {
+      return;
+    }
+    if (event.kind === "subagent_tool") {
+      live.toolUses += 1;
+      live.tail.push(event.label);
+      if (live.tail.length > AGENT_ROW_TAIL_MAX) {
+        live.tail.splice(0, live.tail.length - AGENT_ROW_TAIL_MAX);
+      }
+    } else if (event.kind === "subagent_usage") {
+      live.tokens += event.promptTokens + event.completionTokens;
+    } else {
+      // `subagent_start` (already known) and `subagent_end` (the exit follows).
+      return;
+    }
+    this.changed();
+  }
+
+  /**
+   * Stop one child (owner Q1 a). True if it was running. Its run is aborted with
+   * the child's own signal; its exit reports `cancelled`, whichever end the run
+   * names (`kill` is a decision, not a report).
+   */
+  kill(agentId: string): boolean {
+    const entry = this.running.get(agentId);
+    // Already killed (its run has not settled yet): it is not running any more.
+    if (entry === undefined || entry.killed) {
+      return false;
+    }
+    entry.killed = true;
+    entry.controller.abort();
+    return true;
+  }
+
   /**
    * Launch a child in the background. Synchronous end to end: it either
    * starts (and returns its id) or is refused with a reason for the model.
@@ -110,7 +212,17 @@ export class AgentJobs {
     }
     const agentId = host.launched(spec);
     const controller = new AbortController();
-    this.running.set(agentId, { job: { ...spec, agentId }, controller });
+    this.running.set(agentId, {
+      job: {
+        ...spec,
+        agentId,
+        ...(host.now ? { startedAt: host.now() } : { startedAt: 0 }),
+      },
+      controller,
+      killed: false,
+    });
+    this.live.set(agentId, { toolUses: 0, tokens: 0, tail: [] });
+    this.changed();
     // Last net: nothing `drive` can throw may escape as an unhandled rejection
     // (Bun exits the process on one). `drive` handles its own failures.
     void this.drive(agentId, spec, controller, run).catch(() => {});
@@ -138,11 +250,24 @@ export class AgentJobs {
   dispose(): void {
     this.disposed = true;
     this.listeners.clear();
+    this.changeListeners.clear();
     for (const { controller } of this.running.values()) {
       controller.abort();
     }
     this.running.clear();
+    this.live.clear();
     this.foreground.clear();
+  }
+
+  /** Tell every change listener, each in its own `try`: one bad sink loses no other. */
+  private changed(): void {
+    for (const listener of [...this.changeListeners]) {
+      try {
+        listener();
+      } catch {
+        // A client's render sink: a failure there is not the child's problem.
+      }
+    }
   }
 
   private used(): number {
@@ -156,9 +281,11 @@ export class AgentJobs {
     ];
     // "End your turn and be woken" is only true when a background child runs:
     // foreground holders alone wake nobody, so ending the turn would stall the task.
+    // `agent_kill` is offered for the same reason (it stops a CHILD, never a
+    // foreground call the model made itself): only when one is running.
     const next =
       this.running.size > 0
-        ? "Either end your turn (you are woken by a [background] note when a background sub-agent finishes) or do this work yourself."
+        ? "Either end your turn (you are woken by a [background] note when a background sub-agent finishes), or stop one with agent_kill, or do this work yourself."
         : "Retry when the running foreground sub-agents return, or do this work yourself.";
     return `at the sub-agent limit (subagents.maxParallel = ${this.cap}); running: ${
       named.length > 0 ? named.join(", ") : "none"
@@ -181,21 +308,28 @@ export class AgentJobs {
         stopReason: "error",
       };
     }
+    const killed = this.running.get(agentId)?.killed === true;
     this.running.delete(agentId);
+    this.live.delete(agentId);
+    // The row is gone before anything can throw: the list is never stale.
+    this.changed();
     if (this.disposed) {
       return;
     }
+    // `kill` is a decision, not a report: a killed child ended `cancelled`
+    // whatever its run said (a child that noticed its signal may say `end_turn`).
+    const stopReason = killed ? "cancelled" : result.stopReason;
     const report = capSubagentText(
       result.report.trim() === "" ? NO_OUTPUT : result.report,
       SUBAGENT_REPORT_MAX_CHARS,
     );
     try {
-      this.host?.ended(agentId, result.stopReason, report);
+      this.host?.ended(agentId, stopReason, report);
     } catch {
       // Durability is lost, but the live note and the wake still go out: the
       // listeners below run unconditionally, and nothing is left rejected.
     }
-    const exit: AgentJobExit = { ...spec, agentId, ...result, report };
+    const exit: AgentJobExit = { ...spec, agentId, ...result, stopReason, report };
     for (const listener of [...this.listeners]) {
       try {
         listener(exit);

@@ -413,6 +413,36 @@ describe("wantsAwake (DR-9, L24)", () => {
   });
 });
 
+describe("WantsAwake with a background sub-agent (docs/feat/subagent-background-ui.md, T47)", () => {
+  test("keeps awake while a child runs, with a turn running or over", () => {
+    // A child in a pod needs the laptop for its model (the reverse tunnel): if
+    // the Mac sleeps, its next call has nowhere to go.
+    const agents = (n: number): RelayEvent => ({ type: "agents", n });
+    expect(wantsAwake(run([agents(1)], over))).toBe(true);
+    expect(wantsAwake(run([agents(1)], run([{ type: "turn_started" }])))).toBe(true);
+    // No child, no turn: the Mac may sleep, as before.
+    expect(wantsAwake(run([agents(0)], over))).toBe(false);
+    // A held ask lets it sleep (the relay is doomed to exit at once).
+    expect(wantsAwake(run([{ type: "ask_raised", tool: "x" }], run([agents(2)], over)))).toBe(
+      false,
+    );
+    // A stop, or a finished hand-over: the relay is leaving.
+    expect(wantsAwake(run([{ type: "stop" }], run([agents(1)], over)))).toBe(false);
+    expect(wantsAwake(run([{ type: "handed_over" }], run([agents(1)], over)))).toBe(false);
+  });
+
+  test("a running child holds the idle exit, like a background job", () => {
+    // The other half of the same fact: `tick` must not arm the 60 s exit while a
+    // child is still using the laptop's model.
+    const withChild = run([{ type: "agents", n: 1 }], over);
+    const model = relayStep(withChild, { type: "tick", now: 0 });
+    expect(model.exitAt).toBeUndefined();
+    expect(relayView(withChild).detail).toBe("1 background sub-agent(s) running");
+    const quiet = relayStep(run([{ type: "agents", n: 0 }], over), { type: "tick", now: 0 });
+    expect(quiet.exitAt).toBe(60_000);
+  });
+});
+
 describe("H23 the hand-over (docs/feat/detached-handover.md)", () => {
   const free: ResidentUse = { jobs: 0, running: false, others: 0 };
   const prepared: RelayEvent = { type: "handover_prepared" };

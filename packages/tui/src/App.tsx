@@ -11,6 +11,12 @@ import {
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import {
+  type BackgroundAgentRow,
+  backgroundCount,
+  backgroundNames,
+  sameIds,
+} from "./background-view.ts";
+import {
   BLINK_HALF_MS,
   BLINK_IDLE,
   type BlinkClock,
@@ -22,6 +28,8 @@ import {
 import { idleChord, stepChord } from "./chord.ts";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
 import {
+  type QuitConfirmFacts,
+  ctrlCQuitStep,
   helpText,
   isSessionMutating,
   lastAssistantText,
@@ -278,6 +286,11 @@ export interface SessionController {
   ownsTurn?(turnId: string): boolean;
   /** Subscribe to the daemon's queue (every writer's waiting rows); returns an unsubscribe. */
   onQueued?(listener: (state: DaemonQueue) => void): () => void;
+  /**
+   * Subscribe to this session's background sub-agents (the live list, bounded);
+   * returns an unsubscribe (docs/feat/subagent-background-ui.md).
+   */
+  onSubagents?(listener: (rows: readonly BackgroundAgentRow[]) => void): () => void;
   /**
    * Stop following the session WITHOUT ending it — it runs on for any device
    * (`/sessions` switches away with it). Rejects when the daemon cannot (an
@@ -584,22 +597,25 @@ export function App({
   const restoredRef = useRef(new Set<string>());
   // A quit asked for mid-turn: exit as soon as the turn settles (it is saved then).
   const exitPendingRef = useRef(false);
-  // `/quit`'s confirmation on a run TUI with others attached: their count, or
-  // null. The ref is the truth for the key handler; the state renders.
-  const [quitConfirm, setQuitConfirmState] = useState<number | null>(null);
-  const quitConfirmRef = useRef<number | null>(null);
-  const setQuitConfirm = useCallback((others: number | null) => {
-    quitConfirmRef.current = others;
-    setQuitConfirmState(others);
+  // `/quit`'s confirmation: who else is attached and which background
+  // sub-agents the quit would lose, or null. The ref is the truth for the key
+  // handler; the state renders (docs/feat/subagent-background-ui.md).
+  const [quitConfirm, setQuitConfirmState] = useState<QuitConfirmFacts | null>(null);
+  const quitConfirmRef = useRef<QuitConfirmFacts | null>(null);
+  const setQuitConfirm = useCallback((facts: QuitConfirmFacts | null) => {
+    quitConfirmRef.current = facts;
+    setQuitConfirmState(facts);
   }, []);
   // The controller of the FOREIGN turn being streamed (another device's), or
   // null: `/exit` leaves it running (docs/feat/tui-foreign-turns.md C4).
   const foreignRef = useRef<AbortController | null>(null);
   // Session activities that wait for one of my runs to settle (C2), in order.
   const heldRef = useRef<SessionActivity[]>([]);
-  // The current session's `watch` / `onQueued` subscriptions (replaced with it).
+  // The current session's `watch` / `onQueued` / `onSubagents` subscriptions
+  // (replaced with it).
   const activitySubRef = useRef<(() => void) | null>(null);
   const queueSubRef = useRef<(() => void) | null>(null);
+  const agentsSubRef = useRef<(() => void) | null>(null);
   // My `/compact`s whose history has not arrived yet: that compaction's notice
   // is mine ("Context compacted"), not "on another device" (C6).
   const ownCompactionsRef = useRef(0);
@@ -608,6 +624,22 @@ export function App({
   const [loading, setLoading] = useState<{ done: number; total: number } | null>(null);
   // The daemon's queue (every writer's waiting rows), as last reported (C7).
   const [daemonQueue, setDaemonQueue] = useState<DaemonQueue | undefined>(undefined);
+  // The session's background sub-agents, as last reported (undefined: not reported).
+  const [subagents, setSubagents] = useState<readonly BackgroundAgentRow[] | undefined>(undefined);
+  // The same list for the callbacks that must not re-create themselves on every
+  // frame (`requestQuit`, the key handler): a ref, updated where it is set.
+  const subagentsRef = useRef<readonly BackgroundAgentRow[] | undefined>(undefined);
+  const setAgents = useCallback((rows: readonly BackgroundAgentRow[] | undefined) => {
+    // The ref always tracks the daemon's report (the key handler and
+    // `requestQuit` read it); the STATE only changes when the count or the ids
+    // do — the frame carries up to 4 full states a second, and re-rendering the
+    // whole App for an unchanged list is pure waste (LOW-4).
+    const previous = subagentsRef.current;
+    subagentsRef.current = rows;
+    if (!sameIds(previous, rows)) {
+      setSubagents(rows);
+    }
+  }, []);
   const layoutOptsRef = useRef<RenderOptions>({
     expandAll: false,
     width: 80,
@@ -1484,8 +1516,10 @@ export function App({
     (session: SessionController | null, onOpened?: (ok: boolean) => void) => {
       activitySubRef.current?.();
       queueSubRef.current?.();
+      agentsSubRef.current?.();
       heldRef.current = [];
       setDaemonQueue(undefined);
+      setAgents(undefined);
       // Its own skills (a remote session waits for its eager open first).
       skillsSync.use(session);
       // The context at open (never awaited by render): an answer for a session
@@ -1494,6 +1528,7 @@ export function App({
       askContext(session);
       activitySubRef.current = session?.watch?.((a) => onActivityRef.current?.(a)) ?? null;
       queueSubRef.current = session?.onQueued?.((q) => setDaemonQueue(q)) ?? null;
+      agentsSubRef.current = session?.onSubagents?.((rows) => setAgents(rows)) ?? null;
       const opening = session?.open?.();
       if (!opening) {
         onOpened?.(true); // nothing to open (a local session)
@@ -1509,7 +1544,7 @@ export function App({
         },
       );
     },
-    [pushNotice, skillsSync, askContext],
+    [pushNotice, skillsSync, askContext, setAgents],
   );
   useEffect(() => {
     watchSession(sessionRef.current);
@@ -1519,6 +1554,8 @@ export function App({
       activitySubRef.current = null;
       queueSubRef.current?.();
       queueSubRef.current = null;
+      agentsSubRef.current?.();
+      agentsSubRef.current = null;
     };
   }, [watchSession]);
 
@@ -1739,6 +1776,7 @@ export function App({
    */
   const requestQuit = useCallback(
     (confirmed: boolean): void => {
+      const agents = backgroundCount(subagentsRef.current);
       const step = quitCommandStep({
         running: stateRef.current.running,
         exitPending: exitPendingRef.current,
@@ -1746,10 +1784,15 @@ export function App({
         detaches: detachOnQuit,
         endsSession: runQuit !== undefined,
         others: confirmed ? 0 : (runQuit?.othersOnSession() ?? 0),
+        agents: confirmed ? 0 : agents,
         confirmed,
       });
       if (step === "confirm") {
-        setQuitConfirm(runQuit?.othersOnSession() ?? 0);
+        setQuitConfirm({
+          others: runQuit?.othersOnSession() ?? 0,
+          agents,
+          names: backgroundNames(subagentsRef.current),
+        });
         return;
       }
       if (step === "exit") {
@@ -2292,12 +2335,27 @@ export function App({
     }
     // `/quit`'s confirmation: every other key answers it, before the chord and
     // the permission dialog, so its `y` never approves an ask opened meanwhile.
+    // Only a plain `y` closes (`quitConfirmKey`); Ctrl+C is "No" — it dismisses,
+    // as before 6a-2 (owner 2026-11-09, a), so the `(y/N)` text stays true and
+    // a user must press `y` to lose children.
     if (quitConfirmRef.current !== null) {
+      // Read the facts BEFORE clearing: who the dialog spoke for decides whether
+      // `y` closes others' session, and Ctrl+C's dismiss drops the dialog.
+      const facts = quitConfirmRef.current;
       setQuitConfirm(null);
       if (quitConfirmKey(char, key.ctrl || key.meta) === "yes") {
-        runQuit?.closeForAll();
+        // `closeForAll` is only for a dialog that SAID "close the session for
+        // all": it skips attach-run's "someone registered meanwhile" re-check.
+        if (facts.others > 0) {
+          runQuit?.closeForAll();
+        }
         requestQuit(true);
+        return;
       }
+      // Ctrl+C here is "No" (owner 2026-11-09, a): it dismisses, as before
+      // 6a-2. The loss is irreversible and the dialog exists to catch exactly
+      // that reflex, so only `y` loses children; the dialog said `(y/N)`, and
+      // this keeps it true. Never a trap: the next Ctrl+C asks again.
       return;
     }
     // The `Ctrl+X Ctrl+S` chord (send the queued messages now): before the
@@ -2382,11 +2440,23 @@ export function App({
       return;
     }
     if (key.ctrl && char === "c") {
+      // One decision in `ctrlCQuitStep` (docs/feat/subagent-background-ui.md): an
+      // idle Ctrl+C with background sub-agents running asks before losing them.
+      const agents = backgroundCount(subagentsRef.current);
+      const others = runQuit?.othersOnSession() ?? 0;
+      const step = ctrlCQuitStep({
+        running: stateRef.current.running,
+        exitPending: exitPendingRef.current,
+        detaches: detachOnQuit,
+        others,
+        agents,
+      });
+      if (step === "confirm") {
+        setQuitConfirm({ others: 0, agents, names: backgroundNames(subagentsRef.current) });
+        return;
+      }
       // No abort handle (the turn is already settling) → nothing to stop: quit.
-      if (
-        quitAction("ctrl-c", stateRef.current.running, exitPendingRef.current) === "exit" ||
-        !abortRef.current
-      ) {
+      if (step === "exit" || !abortRef.current) {
         exit();
       } else {
         stoppedHereRef.current = true;
@@ -2860,6 +2930,7 @@ export function App({
         hiddenAbove={hiddenAbove}
         expandAll={expandAll}
         autoApprove={permission.autoApprove}
+        background={backgroundCount(subagents)}
         link={linkView}
       />
     </Box>

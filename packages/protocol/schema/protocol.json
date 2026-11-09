@@ -2531,6 +2531,7 @@
           "session_settings": "#/$defs/SessionSettingsUpdate",
           "session_title": "#/$defs/SessionTitleUpdate",
           "steer": "#/$defs/Steer",
+          "subagents": "#/$defs/SubagentsUpdate",
           "tool_call": "#/$defs/ToolCall",
           "tool_call_phase": "#/$defs/ToolCallPhase",
           "tool_call_update": "#/$defs/ToolCallUpdate",
@@ -2597,6 +2598,9 @@
         },
         {
           "$ref": "#/$defs/QueuedUpdate"
+        },
+        {
+          "$ref": "#/$defs/SubagentsUpdate"
         },
         {
           "$ref": "#/$defs/SessionSettingsUpdate"
@@ -2732,6 +2736,12 @@
         "since": {
           "$ref": "#/$defs/HistoryCut"
         },
+        "subagents": {
+          "items": {
+            "$ref": "#/$defs/SubagentRow"
+          },
+          "type": "array"
+        },
         "title": {
           "$ref": "#/$defs/SessionTitle"
         },
@@ -2774,6 +2784,75 @@
     "StopReason": {
       "enum": ["end_turn", "max_tokens", "max_iterations", "cancelled", "error"],
       "type": "string"
+    },
+    "SubagentRow": {
+      "additionalProperties": true,
+      "properties": {
+        "agentType": {
+          "type": "string"
+        },
+        "callId": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "startedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "tail": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tokens": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "toolUses": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "agentType",
+        "callId",
+        "description",
+        "id",
+        "startedAt",
+        "state",
+        "tail",
+        "tokens",
+        "toolUses"
+      ],
+      "type": "object"
+    },
+    "SubagentsUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/$defs/SubagentRow"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "subagents",
+          "type": "string"
+        }
+      },
+      "required": ["agents", "type"],
+      "type": "object",
+      "x-event-class": "display"
     },
     "TextContent": {
       "additionalProperties": true,

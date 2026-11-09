@@ -69,6 +69,7 @@ import {
   type SessionUpdateParams,
   type Sha256,
   type SnapshotResult,
+  type SubagentRow,
   type UpdateSettingsResult,
   type WireStreamEvent,
   text,
@@ -102,6 +103,7 @@ import {
   reduceStream,
   sinceOf,
 } from "./session-reducer.ts";
+import { boundSubagents, subagentsFromSnapshot } from "./subagents.ts";
 import { type DaemonKind, explainVersionMismatch } from "./version-mismatch.ts";
 
 /** A `once` session command whose link dropped before the daemon answered (its outcome is unknown). */
@@ -185,6 +187,16 @@ export interface SessionTitleNotice {
 export interface SessionQueueNotice {
   readonly sessionId: string;
   readonly state: QueueState;
+}
+
+/**
+ * The session's background sub-agents as the daemon reports them (a `subagents`
+ * update, or the snapshot of a resync): the full list, already bounded and
+ * sanitized here. Not turn-scoped. Display only.
+ */
+export interface SessionSubagentsNotice {
+  readonly sessionId: string;
+  readonly rows: readonly SubagentRow[];
 }
 
 /**
@@ -350,6 +362,8 @@ interface Snap {
   readonly title?: SessionTitle;
   /** The queue at the cut (absent: an older daemon does not report it). */
   readonly queued?: QueueState;
+  /** The background sub-agents at the cut (absent: an older daemon does not report them). */
+  readonly subagents?: readonly SubagentRow[];
 }
 
 /** The error of a session the reducer gave up on, WITH its cause (docs/fix/detach-live.md KO 3). */
@@ -399,6 +413,8 @@ interface SessionEntry {
   title: SeedTitle | undefined;
   /** The daemon's last reported queue; undefined until it reports one (an older daemon never does). */
   queued: QueueState | undefined;
+  /** The daemon's last reported background sub-agents; undefined until it reports one. */
+  subagents: readonly SubagentRow[] | undefined;
   /** The session's newest settings report (an open's, an own sync's, a `session_settings`). */
   settings: SessionSettingsReport | undefined;
   /** The exits no turn had flushed when the newest open answered (an older daemon: 0). */
@@ -513,6 +529,7 @@ export class RemoteClient {
   private readonly titleListeners = new Set<(notice: SessionTitleNotice) => void>();
   /** Session-independent listeners for queue changes (idle or mid-turn). */
   private readonly queueListeners = new Set<(notice: SessionQueueNotice) => void>();
+  private readonly subagentListeners = new Set<(notice: SessionSubagentsNotice) => void>();
   private readonly statusListeners = new Set<(status: LinkStatus) => void>();
   private readonly historyLostListeners = new Set<(notice: HistoryLostNotice) => void>();
   private readonly sessionDeletedListeners = new Set<(notice: SessionDeletedNotice) => void>();
@@ -815,6 +832,17 @@ export class RemoteClient {
   /** The session's queue as last reported; undefined if the daemon has not reported one. */
   queuedOf(sessionId: string): QueueState | undefined {
     return this.sessions.get(sessionId)?.queued;
+  }
+
+  /** Subscribe to background sub-agent changes across all sessions (see the notice type). */
+  onSessionSubagents(listener: (notice: SessionSubagentsNotice) => void): () => void {
+    this.subagentListeners.add(listener);
+    return () => this.subagentListeners.delete(listener);
+  }
+
+  /** The session's background sub-agents as last reported; undefined if never reported. */
+  subagentsOf(sessionId: string): readonly SubagentRow[] | undefined {
+    return this.sessions.get(sessionId)?.subagents;
   }
 
   /**
@@ -1810,6 +1838,7 @@ export class RemoteClient {
       turnEndsInHistory: 0,
       title,
       queued: undefined,
+      subagents: undefined,
       settings: undefined,
       unflushedExits: 0,
       attachMark: 0,
@@ -1848,6 +1877,14 @@ export class RemoteClient {
     entry.queued = state;
     for (const listener of this.queueListeners) {
       listener({ sessionId: entry.id, state });
+    }
+  }
+
+  /** The live list now (a `subagents` update in seq order, or a resync's snapshot): bounded here. */
+  private subagentsChanged(entry: SessionEntry, rows: readonly SubagentRow[]): void {
+    entry.subagents = rows;
+    for (const listener of this.subagentListeners) {
+      listener({ sessionId: entry.id, rows });
     }
   }
 
@@ -2068,6 +2105,12 @@ export class RemoteClient {
     if (snap.queued) {
       this.queuedChanged(entry, snap.queued);
     }
+    // So is the live list of background sub-agents: the state at the cut, then
+    // the buffered frames past it (docs/feat/subagent-background-ui.md).
+    const snapshotRows = subagentsFromSnapshot(snap.subagents);
+    if (snapshotRows) {
+      this.subagentsChanged(entry, snapshotRows);
+    }
     this.step(entry, {
       kind: "snapshot",
       messages: snap.messages,
@@ -2237,6 +2280,9 @@ export class RemoteClient {
       } else if (update.type === "queued") {
         // Not turn-scoped: the queue listeners fire while idle too.
         this.queuedChanged(entry, { entries: update.entries, returned: update.returned });
+      } else if (update.type === "subagents") {
+        // Not turn-scoped either: a child runs between turns, and so does its row.
+        this.subagentsChanged(entry, boundSubagents(update.agents));
       } else if (update.type === "session_settings") {
         // Not turn-scoped: another client's sync is told while idle too.
         this.settingsChanged(entry, update.settings, update.id);
@@ -2389,6 +2435,7 @@ export class RemoteClient {
       ...(first?.turn ? { turn: first.turn.turnId } : {}),
       ...(first?.title ? { title: first.title } : {}),
       ...(first?.queued ? { queued: first.queued } : {}),
+      ...(first?.subagents ? { subagents: first.subagents } : {}),
     };
   }
 

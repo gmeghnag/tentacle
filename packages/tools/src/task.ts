@@ -206,6 +206,9 @@ export function createTaskTool(
               outcome = await run(runOpts, {
                 signal,
                 agentId,
+                // The child's activity, folded into its row (the status line's
+                // count and the panel read `bg.rows()`); it reaches no turn.
+                onEvent: (event) => bg.progress(agentId, event),
                 ...(ctx.toolCallId !== undefined ? { toolCallId: ctx.toolCallId } : {}),
                 sessionId: ctx.sessionId,
               });

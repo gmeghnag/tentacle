@@ -17,6 +17,7 @@ import {
   SessionIdSchema,
   SessionSettingsReportSchema,
   StopReasonSchema,
+  SubagentRowSchema,
   TurnErrorSchema,
   TurnIdSchema,
 } from "./session.ts";
@@ -244,6 +245,19 @@ export const SessionSettingsUpdateSchema = z.object({
   id: z.string().min(1).max(128).optional(),
 });
 
+/**
+ * The session's background sub-agents changed (started, made progress, ended):
+ * the FULL list, replacing any earlier one (docs/feat/subagent-background-ui.md).
+ * Every attached client gets it, while idle too: a child runs between turns, so
+ * its row is never turn-scoped. Display only: a client that skips it loses
+ * nothing daemon-side (the snapshot's first page carries the list) and the
+ * daemon waits on nobody.
+ */
+export const SubagentsUpdateSchema = z.object({
+  type: z.literal("subagents"),
+  agents: z.array(SubagentRowSchema),
+});
+
 export const SessionUpdateSchema = z.discriminatedUnion("type", [
   AgentMessageChunkSchema,
   AgentThoughtChunkSchema,
@@ -264,6 +278,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   PermissionResolvedUpdateSchema,
   SessionTitleUpdateSchema,
   QueuedUpdateSchema,
+  SubagentsUpdateSchema,
   SessionSettingsUpdateSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
@@ -310,6 +325,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   session_title: "display",
   // Full state, also in the snapshot; returned rows wait for a reclaim (nothing hangs).
   queued: "display",
+  // Full state, also in the snapshot's first page; nothing waits on a row.
+  subagents: "display",
   // A notice; the report also rides every OpenResult (nothing hangs).
   session_settings: "display",
 };

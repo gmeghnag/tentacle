@@ -60,6 +60,7 @@ import {
   type SkillBodyReader,
   ToolRegistry,
   builtinTools,
+  createAgentKillTool,
   createContextResetTool,
   createSkillActivator,
   createSkillTool,
@@ -550,6 +551,10 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
             }),
       }),
     );
+    // The model's way to stop a child it launched (docs/feat/subagent-background-ui.md,
+    // owner Q1 a). Registered only here, where `background` is offered: without
+    // the runtime no child has an id to name.
+    tools.register(createAgentKillTool(agentJobs));
   }
 
   // Context reset (docs/feat/context-reset.md): the model renews its own
