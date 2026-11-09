@@ -49,6 +49,22 @@ export const ChatMessageSchema = z.object({
   contextUsage: z
     .object({ used: z.number().int().nonnegative(), window: z.number().int().positive() })
     .optional(),
+  /**
+   * On a tentacle-written user message: what kind of note it is (display only,
+   * docs/feat/subagent-ledger-log.md). `kind` is a bounded FREE string, never an
+   * enum: the message entry is CRITICAL, so an unknown enum value would make it
+   * malformed and refuse the whole log. `id` names the job/sub-agent it is about.
+   */
+  note: z
+    .object({
+      kind: z
+        .string()
+        .min(1)
+        .max(64)
+        .regex(/^[a-z][a-z0-9_]*$/),
+      id: z.string().min(1).max(64).optional(),
+    })
+    .optional(),
 });
 export type WireChatMessage = z.infer<typeof ChatMessageSchema>;
 

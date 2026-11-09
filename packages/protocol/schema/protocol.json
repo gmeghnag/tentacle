@@ -149,6 +149,24 @@
           "minimum": 0,
           "type": "integer"
         },
+        "note": {
+          "additionalProperties": true,
+          "properties": {
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            "kind": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[a-z][a-z0-9_]*$",
+              "type": "string"
+            }
+          },
+          "required": ["kind"],
+          "type": "object"
+        },
         "role": {
           "enum": ["system", "user", "assistant", "tool"],
           "type": "string"
@@ -656,6 +674,8 @@
           "checkpoint": "#/$defs/LogCheckpointEntry",
           "message": "#/$defs/LogMessageEntry",
           "replace": "#/$defs/LogReplaceEntry",
+          "subagent_background": "#/$defs/LogSubagentBackgroundEntry",
+          "subagent_end": "#/$defs/LogSubagentEndEntry",
           "title": "#/$defs/LogTitleEntry",
           "truncate": "#/$defs/LogTruncateEntry",
           "turn_end": "#/$defs/LogTurnEndEntry",
@@ -690,6 +710,12 @@
         },
         {
           "$ref": "#/$defs/LogCallStartedEntry"
+        },
+        {
+          "$ref": "#/$defs/LogSubagentBackgroundEntry"
+        },
+        {
+          "$ref": "#/$defs/LogSubagentEndEntry"
         }
       ]
     },
@@ -981,6 +1007,101 @@
         }
       },
       "required": ["entries", "more", "tip"],
+      "type": "object"
+    },
+    "LogSubagentBackgroundEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "agentId": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "agentType": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "callId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "description": {
+          "maxLength": 512,
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "subagent_background",
+          "type": "string"
+        }
+      },
+      "required": ["agentId", "agentType", "callId", "description", "id", "seq", "ts", "type"],
+      "type": "object"
+    },
+    "LogSubagentEndEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "agentId": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "report": {
+          "maxLength": 65536,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "stopReason": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "subagent_end",
+          "type": "string"
+        }
+      },
+      "required": ["agentId", "id", "seq", "stopReason", "ts", "type"],
       "type": "object"
     },
     "LogTitleEntry": {

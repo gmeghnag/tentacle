@@ -68,10 +68,12 @@ const lastId = (text: string): string | undefined => {
  * JSON record (`kind`, `schemaVersion`) are tolerated and ignored, so the
  * existing fixtures read as they are.
  */
-export type Fixture = Omit<DaemonSessionRecord, "logged" | "logHead" | "paired"> & {
+export type Fixture = Omit<DaemonSessionRecord, "logged" | "logHead" | "paired" | "loadNotes"> & {
   readonly logged?: unknown;
   readonly logHead?: unknown;
   readonly paired?: unknown;
+  /** Derived from the seeded log (which holds messages only): absent = none, which is what it derives. */
+  readonly loadNotes?: readonly ChatMessage[];
   readonly kind?: string;
   readonly schemaVersion?: number;
 };
@@ -356,6 +358,7 @@ export class SpyDaemonStore implements DaemonStore {
       logged,
       logHead: s.logHead,
       paired: true,
+      loadNotes: [],
     };
   }
 }

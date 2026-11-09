@@ -2145,6 +2145,47 @@ describe("a spilled tool result in the App (the --resume path)", () => {
   });
 });
 
+// docs/feat/subagent-ledger-log.md: a resumed tentacle note is a NOTICE, not a row the person typed.
+describe("a noted message in the App (the --resume path)", () => {
+  const history: ChatMessage[] = [
+    { role: "user", content: "go" },
+    {
+      role: "user",
+      content: "[background] sa-1 finished:\nTHE REPORT BODY",
+      note: { kind: "subagent_report", id: "sa-1" },
+    },
+  ];
+  const mount = () =>
+    render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(history)}
+      />,
+    );
+
+  test("collapsed: the notice + the expand hint, never the report; ctrl+o shows the body", async () => {
+    // Mutation: draw `body` unconditionally, or leave `note` unhandled in
+    // `messagesToItems` (a user row without the hint) → red.
+    const { stdin, lastFrame, unmount } = mount();
+    await delay(30);
+    const collapsed = lastFrame() ?? "";
+    expect(collapsed).toContain("sa-1 finished:");
+    expect(collapsed).toContain("ctrl+o");
+    expect(collapsed).toContain("to expand");
+    expect(collapsed).not.toContain("THE REPORT BODY");
+    stdin.write("\u000F"); // Ctrl+O
+    await delay(50);
+    const expanded = lastFrame() ?? "";
+    expect(expanded).toContain("THE REPORT BODY");
+    expect(expanded).not.toContain("to expand");
+    unmount();
+  });
+});
+
 // docs/fix/tui-expand-latency.md: once the transcript is quiet the other Ctrl+O view is warmed.
 describe("idle warm of the other Ctrl+O view", () => {
   const history: ChatMessage[] = [{ role: "user", content: "list it" }];

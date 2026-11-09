@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import type { ChatMessage } from "@tentacle/core";
+import { projectEntry } from "@tentacle/protocol";
 import {
   ENDED_INTERRUPTED_NOTE,
   ENDED_NOT_RUN_NOTE,
@@ -9,7 +11,9 @@ import {
   closeAtLoad,
   currentSegment,
   cutHistory,
+  entriesThrough,
   entryLines,
+  foldThrough,
   headerLine,
   parseLogFile,
   segmentFromMessages,
@@ -218,5 +222,53 @@ describe("W12 closeAtLoad: a cut turn is closed when the file is LOADED (Q11)", 
       parsed(header + entryLines(log.base([user("go"), asst("", ["c1", "c2"])]))),
     );
     expect(closeAtLoad(seg)).toEqual(cutHistory(seg.messages, null));
+  });
+});
+
+describe("entriesThrough (docs/feat/subagent-ledger-log.md §3)", () => {
+  test("the segment's entries from its base THROUGH `head`, on the same terms as foldThrough", () => {
+    // RED on main: the function does not exist (the serve reload has no way to
+    // cut the entries it derives its notes from at the sidecar's head).
+    // Mutation: return the whole segment regardless of `head` → a marker after
+    // `logHead` (a write whose sidecar did not land) would be derived from, FM 17 → red.
+    const log = new FakeLog("D1");
+    const entries = [
+      ...log.base([user("a"), asst("b")]),
+      log.turnStart("t1"),
+      log.subagentBackground("sa-1"),
+      log.subagentEnd("sa-1", "R"),
+      log.turnEnd("t1"),
+    ];
+    const p = parsed(header + entryLines(entries));
+    const head = entries[3];
+    if (head === undefined) throw new Error("no entry");
+    const cut = entriesThrough(p, { seq: head.seq, id: head.id });
+    expect(cut?.map((e) => e.type)).toEqual(["base", "message", "message", "turn_start"]);
+    // The whole segment, at its last entry.
+    const last = entries.at(-1);
+    if (last === undefined) throw new Error("no entry");
+    expect(entriesThrough(p, { seq: last.seq, id: last.id })?.length).toBe(entries.length);
+  });
+
+  test("null on the same terms as foldThrough: an unknown id, a stale seq, a head inside a base's owed messages", () => {
+    const log = new FakeLog("D1");
+    const entries = [...log.base([user("a"), asst("b")]), log.subagentBackground("sa-1")];
+    const p = parsed(header + entryLines(entries));
+    expect(entriesThrough(p, { seq: 9, id: "D1/9" })).toBeNull();
+    const known = entries[1];
+    if (known === undefined) throw new Error("no entry");
+    expect(entriesThrough(p, { seq: known.seq + 1, id: known.id })).toBeNull();
+    // `base` owes 2 messages: index 0..count are no capture point.
+    expect(entriesThrough(p, { seq: known.seq, id: known.id })).toBeNull();
+    // And foldThrough agrees, entry for entry.
+    const ok = entries[2];
+    if (ok === undefined) throw new Error("no entry");
+    const head = { seq: ok.seq, id: ok.id };
+    expect(foldThrough(p, head)).toEqual(
+      (entriesThrough(p, head) ?? []).reduce<ChatMessage[]>((list, e) => {
+        projectEntry(list, e, (m) => m as ChatMessage);
+        return list;
+      }, []),
+    );
   });
 });

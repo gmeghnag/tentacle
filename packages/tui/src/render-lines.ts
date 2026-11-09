@@ -682,7 +682,7 @@ function separatorLines(text: string, width: number): string[] {
   return [theme.subtle(`${head}${"─".repeat(rest)}`)];
 }
 
-function noticeLines(text: string, hint?: string): string[] {
+function noticeLines(text: string, expanded: boolean, hint?: string, body?: string): string[] {
   const [first = "", ...rest] = text.split("\n");
   const lines = [
     `${theme.notice("⏺")} ${theme.notice(first)}`,
@@ -691,6 +691,15 @@ function noticeLines(text: string, hint?: string): string[] {
   if (hint) {
     // The hint ends the last line, grey: a separate field, never cut out of the text.
     lines[lines.length - 1] += ` ${theme.subtle(hint)}`;
+  }
+  if (body) {
+    // A note's body (a finished sub-agent's report): shown when expanded (Ctrl+O),
+    // else only hinted at, so a resume stays compact.
+    if (expanded) {
+      lines.push(...body.split("\n").map((l) => `  ${theme.notice(l)}`));
+    } else {
+      lines[lines.length - 1] += ` ${theme.subtle(EXPAND_HINT)}`;
+    }
   }
   return lines;
 }
@@ -709,7 +718,7 @@ export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
     case "notice":
       return item.separator
         ? separatorLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH))
-        : noticeLines(item.text, item.hint);
+        : noticeLines(item.text, opts.expandAll === true, item.hint, item.body);
   }
 }
 
@@ -867,10 +876,10 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
   const preview = opts.previewLines ?? DEFAULT_PREVIEW;
   // Only `tool` items collapse, so only their layout depends on
   // expand/threshold/preview/expandedIds; every other kind is a function of
-  // width alone (always the `collapsed` slot). Keying those options for
-  // non-tool items too made a Ctrl+O (expandAll) flip needlessly invalidate the
-  // whole transcript.
-  const expandMatters = item.kind === "tool";
+  // width alone (always the `collapsed` slot) — except a notice with a BODY
+  // (a sub-agent's report), whose body shows only when expanded.
+  // (docs/feat/subagent-ledger-log.md)
+  const expandMatters = item.kind === "tool" || (item.kind === "notice" && item.body !== undefined);
   const slot: "collapsed" | "expanded" | "command" = !expandMatters
     ? "collapsed"
     : expand

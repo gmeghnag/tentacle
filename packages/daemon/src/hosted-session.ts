@@ -49,6 +49,8 @@ import type {
   SessionGrants,
 } from "@tentacle/agent";
 import {
+  type AgentJob,
+  AgentJobLedger,
   type ChatMessage,
   type JobController,
   type ModelProvider,
@@ -56,6 +58,8 @@ import {
   type PermissionRequest,
   type PermissionRequestOptions,
   type PermissionResponse,
+  type SubagentBackgroundBody,
+  type SubagentEndBody,
   daemonWakeGate,
   wakeDue,
 } from "@tentacle/core";
@@ -459,6 +463,12 @@ export class HostedSession {
   private readonly log: SessionLog;
   private readonly logSha256: Sha256;
   private readonly logVerify: SessionLogOptions["verify"];
+  /**
+   * The background sub-agents' durable facts (docs/feat/subagent-ledger-log.md).
+   * SESSION-level, like `jobs`: it survives a `swapAgent` (the model is not the
+   * children). It is the one ledger the live path (6a) and a replay share.
+   */
+  private readonly agentJobs: AgentJobLedger;
 
   constructor(
     id: string,
@@ -505,6 +515,9 @@ export class HostedSession {
     this.session = session;
     this.permissions = permissions;
     this.jobs = jobs;
+    // Seeded from the reloaded history: an id the model has already seen (a
+    // `started in background as sa-N` result, a note) is never handed out again.
+    this.agentJobs = AgentJobLedger.fromHistory(session.messages);
     this.errorPolicy = errorPolicy;
     this.ring = new SessionRing(ringBytes);
     const resume = restored?.resume;
@@ -540,7 +553,7 @@ export class HostedSession {
         resume?.turnId,
       );
     }
-    this.log.title(this.wireTitle());
+    this.logSegmentFacts();
     this.verifyLog();
     this.returned = (restored?.returned ?? []).map((r) => ({ ...r }));
     // A returned row's text is with its writer, not in the history: never
@@ -1200,6 +1213,7 @@ export class HostedSession {
 
   /** Move the cut to "now" (the caller guarantees the history reflects every emit). */
   private recordCut(turnId: string | null): void {
+    const oldLength = this.cut.length;
     this.cut = {
       epoch: this.cut.epoch,
       seq: this.seq,
@@ -1210,8 +1224,81 @@ export class HostedSession {
     this.ring.evict(this.seq);
     // The committed prefix moved: its changes join the log (pointer compares only).
     this.log.commit(this.session.messages, this.cut.length);
+    // A committed note CLOSES its sub-agent (docs/feat/subagent-ledger-log.md):
+    // delivery is structural, whoever pushed it. Synchronous and O(new ones).
+    for (let i = oldLength; i < this.cut.length; i++) {
+      const note = this.session.messages[i]?.note;
+      if (note !== undefined) {
+        this.agentJobs.noteSeen(note);
+      }
+    }
     this.log.title(this.wireTitle());
     this.verifyLog();
+  }
+
+  /**
+   * The markers a segment start carries (L1, docs/feat/subagent-ledger-log.md):
+   * the title, then one entry per open sub-agent (`running` → its `bg`;
+   * ended-undelivered → `bg` + `end{report}`), so a compaction or a context
+   * reset never loses the fact that a child exists — the summary may drop the
+   * `started in background as sa-N` tool result. An EMPTY ledger is exactly the
+   * old behaviour (the title alone).
+   */
+  private logSegmentFacts(): void {
+    this.log.title(this.wireTitle());
+    for (const fact of this.agentJobs.segmentFacts()) {
+      if ("stopReason" in fact) {
+        this.log.subagentEnd(fact);
+      } else {
+        this.log.subagentBackground(fact);
+      }
+    }
+  }
+
+  /**
+   * 6a's seam: a child started in the background. Returns its id (`sa-N`) for
+   * the tool result; the marker is logged at once (synchronously, no `await`),
+   * and the next persist makes it durable. The counter is seeded from the
+   * history, so an id the model has seen is never handed out again.
+   */
+  backgroundAgent(job: {
+    readonly callId: string;
+    readonly agentType: string;
+    readonly description: string;
+  }): string {
+    const agentId = this.agentJobs.nextId();
+    const body: SubagentBackgroundBody | null = this.agentJobs.background({
+      agentId,
+      callId: job.callId,
+      agentType: job.agentType,
+      description: job.description,
+    });
+    if (body !== null) {
+      this.log.subagentBackground(body);
+      this.verifyLog();
+    }
+    return agentId;
+  }
+
+  /**
+   * 6a's seam: a background child ended. The `end` (with its capped report) is
+   * logged and PERSISTED NOW — a child may end while the session is idle, and
+   * the work product must reach disk without a turn (as `setTitle` does). A
+   * `null` from the ledger (a duplicate or late end) logs nothing: first wins.
+   */
+  agentEnded(agentId: string, stopReason: string, report?: string): void {
+    const body: SubagentEndBody | null = this.agentJobs.end(agentId, stopReason, report);
+    if (body === null) {
+      return;
+    }
+    this.log.subagentEnd(body);
+    this.verifyLog();
+    this.persist();
+  }
+
+  /** The background sub-agents still running (6a's liveness, the quit count, `/clear`'s hand-over). */
+  agentJobsRunning(): readonly AgentJob[] {
+    return this.agentJobs.running();
   }
 
   /**
@@ -2081,7 +2168,7 @@ export class HostedSession {
     // A new log segment: the SAME array was replaced in place, so it is never
     // diffed — the reference copy is reset (F3). Before the emit, like the cut.
     this.log.replaced(this.session.messages, reason, this.cut.turnId);
-    this.log.title(this.wireTitle());
+    this.logSegmentFacts();
     this.verifyLog();
     try {
       this.emit({ type: "history_replaced", reason });

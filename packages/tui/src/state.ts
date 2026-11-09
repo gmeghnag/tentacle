@@ -54,6 +54,13 @@ export interface NoticeItem {
    * the history (docs/fix/detach-live.md A6).
    */
   readonly host?: true;
+  /**
+   * A tentacle note's body (a finished sub-agent's report): shown under `text`
+   * only when expanded (Ctrl+O), else hinted at (docs/feat/subagent-ledger-log.md).
+   */
+  readonly body?: string;
+  /** Which `ChatMessage.note.kind` this notice came from (display only). */
+  readonly noteKind?: string;
 }
 
 /** Live progress of a sub-agent spawned by an `agent_task` tool call. */

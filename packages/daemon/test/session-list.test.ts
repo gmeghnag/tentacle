@@ -426,6 +426,7 @@ describe("SessionHost.list over the wire", () => {
       logged: [{ role: "user", content: "an old question" }],
       logHead: { seq: 2, id: "old/2" },
       paired: true,
+      loadNotes: [],
     };
     d.host.restore(record);
     const c = await d.connect();

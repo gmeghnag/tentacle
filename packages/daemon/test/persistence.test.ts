@@ -1299,6 +1299,7 @@ describe("persisted-session (pure)", () => {
     logged: [],
     logHead: { seq: 1, id: "x/1" },
     paired: true,
+    loadNotes: [],
     ...over,
   });
 
@@ -1438,6 +1439,52 @@ describe("persisted-session (pure)", () => {
       }),
     );
     expect(shape(r.messages).at(-1)).toBe(`tool(c1):${INTERRUPTED_NOTE}`);
+  });
+
+  test("Q1 (a): a resumable turn with a sub-agent note to append is CLOSED, and the notes are appended", () => {
+    // docs/feat/subagent-ledger-log.md, owner Q1 (a). Mutation: drop the
+    // `loadNotes.length > 0` guard in `resumableTurn` → the turn resumes and the
+    // note is appended after its unanswered calls (an INVALID history, P8).
+    const pending = { toolCallId: "c2", tool: "run", resumable: true, requestedAt: 1 };
+    const messages: ChatMessage[] = [
+      { role: "user", content: "go" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "c1", name: "look", arguments: "{}" },
+          { id: "c2", name: "run", arguments: "{}" },
+        ],
+      },
+      { role: "tool", content: "ok", toolCallId: "c1" },
+    ];
+    const lostNote: ChatMessage = {
+      role: "user",
+      content: "[background] sub-agent sa-1 (map the repo) was lost",
+      note: { kind: "subagent_lost", id: "sa-1" },
+    };
+    const record = base({
+      messages,
+      turns: [{ turnId: "T" }],
+      turn: { turnId: "T", steering: [], steeringIds: [], pending: [pending] },
+      loadNotes: [lostNote],
+    });
+    const r = reconcileOnReload(record);
+    expect(r.resume).toBeUndefined();
+    // The turn is closed honestly (its own notes), then the sub-agent's.
+    const last = r.messages.at(-1);
+    expect(last?.note).toEqual({ kind: "subagent_lost", id: "sa-1" });
+    expect(shape(r.messages).join(" ")).toContain(NOT_RUN_NOTE);
+    expect(r.turns).toEqual([{ turnId: "T", end: RESTART_TURN_END }]);
+    // WITHOUT a note, the same record still resumes (no regression of suspended-turn-resume).
+    expect(reconcileOnReload({ ...record, loadNotes: [] }).resume).toMatchObject({
+      turnId: "T",
+      from: "c2",
+    });
+    // And with no turn open at all, the note is simply appended.
+    const idle = reconcileOnReload({ ...record, turn: undefined });
+    expect(idle.messages.at(-1)?.note).toEqual({ kind: "subagent_lost", id: "sa-1" });
+    expect(idle.messages.length).toBe(messages.length + 1);
   });
 
   test("B6 reconcile resumes only its own call's suspension with an open turn key; else closes it", () => {
@@ -2973,6 +3020,7 @@ describe("round groups on disk: groupStart, pending[] and inFlight (v8)", () => 
     logged: [],
     logHead: { seq: 1, id: "x/1" },
     paired: true,
+    loadNotes: [],
     ...over,
   });
   const round: ChatMessage[] = [

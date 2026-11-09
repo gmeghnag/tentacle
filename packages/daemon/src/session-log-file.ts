@@ -356,6 +356,29 @@ export function foldThrough(
   parsed: ParsedLogFile,
   head: { readonly seq: number; readonly id: string },
 ): ChatMessage[] | null {
+  const through = entriesThrough(parsed, head);
+  if (through === null) {
+    return null;
+  }
+  const list: ChatMessage[] = [];
+  for (const entry of through) {
+    if (projectEntry(list, entry, (m) => m as ChatMessage) !== null) {
+      return null;
+    }
+  }
+  return list;
+}
+
+/**
+ * The ENTRIES of the segment holding `head`, from its `base` up to and
+ * including it (`foldThrough`'s find loop, shared: the `serve` reload derives
+ * its sub-agent notes from the same cut projection it loads). `null` on the
+ * same terms as `foldThrough`.
+ */
+export function entriesThrough(
+  parsed: ParsedLogFile,
+  head: { readonly seq: number; readonly id: string },
+): KnownLogEntry[] | null {
   for (let s = parsed.segments.length - 1; s >= 0; s--) {
     const segment = parsed.segments[s];
     if (segment === undefined) continue;
@@ -363,14 +386,7 @@ export function foldThrough(
     if (at < 0) continue;
     // Entries 1..count are the base's owed messages: a head among them is no capture point.
     if (segment.entries[at]?.seq !== head.seq || at < segment.base.count) return null;
-    const list: ChatMessage[] = [];
-    for (let i = 0; i <= at; i++) {
-      const entry = segment.entries[i];
-      if (entry === undefined || projectEntry(list, entry, (m) => m as ChatMessage) !== null) {
-        return null;
-      }
-    }
-    return list;
+    return segment.entries.slice(0, at + 1);
   }
   return null;
 }

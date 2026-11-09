@@ -36,7 +36,7 @@ import {
   isValidSessionId,
   recordTitleState,
 } from "@tentacle/agent";
-import type { ChatMessage } from "@tentacle/core";
+import { type ChatMessage, subagentLoadNotes } from "@tentacle/core";
 import {
   type KnownLogEntry,
   type LogCursor,
@@ -965,7 +965,12 @@ export class LogSessionStore {
       return { status: "unreadable", file, reason: parsed.reason };
     }
     const segment = currentSegment(parsed);
-    const messages = closeAtLoad(segment);
+    const closed = closeAtLoad(segment);
+    // The sub-agent notes: the current segment's markers minus the ids its
+    // history already notes (docs/feat/subagent-ledger-log.md). The LOAD writes
+    // nothing — the note rides the next save's segment. (The listing,
+    // `summarize`, stays without them: its count is short until the resume.)
+    const messages = [...closed, ...subagentLoadNotes(segment.entries, closed)];
     return {
       status: "ok",
       record: {

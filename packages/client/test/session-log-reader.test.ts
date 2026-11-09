@@ -187,6 +187,70 @@ describe("C5–C7 — a pod is not trusted (F4)", () => {
     expect(JSON.stringify(applied.entries)).not.toContain("smuggled");
   });
 
+  test("C5c the sub-agent markers are KEPT (validated, re-serialized): a `note` closes one at load", () => {
+    // RED on main: the types are unknown there, so a reader drops them (FM 9)
+    // and the laptop never holds what a load derives from.
+    // Mutation: mark either type critical → an older/newer build refuses the
+    // whole log instead of skipping it → red (protocol test C8 pins the table).
+    const { held, page } = base();
+    const planted = rechain(page, (es) => [
+      ...es,
+      {
+        type: "subagent_background",
+        seq: 0,
+        id: "",
+        ts: 1,
+        critical: false,
+        agentId: "sa-1",
+        callId: "c1",
+        agentType: "explore",
+        description: "map",
+        smuggled: "x",
+      } as LogEntryEnvelope,
+      {
+        type: "subagent_end",
+        seq: 0,
+        id: "",
+        ts: 1,
+        critical: false,
+        agentId: "sa-1",
+        stopReason: "killed",
+        report: "R",
+      } as LogEntryEnvelope,
+    ]);
+    const applied = ok(applyLogRead(held, [planted], sha256));
+    expect(applied.entries.map((e) => e.type)).toEqual([
+      "message",
+      "subagent_background",
+      "subagent_end",
+    ]);
+    // Only known fields, re-serialized; the future `stopReason` parses.
+    expect(JSON.stringify(applied.entries)).not.toContain("smuggled");
+    const end = applied.entries.at(-1);
+    expect(end?.type === "subagent_end" && end.stopReason).toBe("killed");
+    // The markers never touch the projection.
+    expect(applied.state.messages).toHaveLength(4);
+  });
+
+  test("C5d an over-cap report refuses the read (the emitter's cap is what keeps it readable)", () => {
+    const { held, page } = base();
+    const planted = rechain(page, (es) => [
+      ...es,
+      {
+        type: "subagent_end",
+        seq: 0,
+        id: "",
+        ts: 1,
+        critical: false,
+        agentId: "sa-1",
+        stopReason: "end_turn",
+        report: "x".repeat(64 * 1024 + 1),
+      } as LogEntryEnvelope,
+    ]);
+    const result = applyLogRead(held, [planted], sha256);
+    expect("error" in result && result.error).toContain("malformed subagent_end");
+  });
+
   test("C6 an unknown CRITICAL entry refuses the read; the held state is untouched", () => {
     const { held, page } = base();
     const before = JSON.stringify(held);

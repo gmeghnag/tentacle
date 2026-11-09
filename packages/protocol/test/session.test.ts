@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ChatMessageSchema,
   InitializeParamsSchema,
   InitializeResultSchema,
   MAX_SKILL_CATALOG,
@@ -11,6 +12,7 @@ import {
   SessionSkillsResultSchema,
   StopReasonSchema,
   VersionMismatchDataSchema,
+  canonicalMessage,
   isMethodName,
 } from "../src/index.ts";
 
@@ -194,5 +196,57 @@ describe("skills on the wire (docs/feat/skills-slash.md, skills-hot-reload.md)",
     expect(PromptParamsSchema.safeParse({ ...base, skill: "deploy-app" }).success).toBe(true);
     expect(PromptParamsSchema.safeParse({ ...base, skill: "/deploy-app" }).success).toBe(false);
     expect(PromptParamsSchema.safeParse({ ...base, skill: "" }).success).toBe(false);
+  });
+});
+
+describe("ChatMessage.note (docs/feat/subagent-ledger-log.md)", () => {
+  test("a note parses with an UNKNOWN kind and an id — forward compatible, never an enum", () => {
+    // RED on main: `note` is stripped (a build without the field cannot carry it).
+    // Mutation: make `kind` a z.enum of today's kinds → a task-8 kind (e.g.
+    // `user_to_subagent`) fails the parse, and since `message` entries are
+    // CRITICAL the whole log is refused → red.
+    const parsed = ChatMessageSchema.parse({
+      role: "user",
+      content: "[background] something",
+      note: { kind: "user_to_subagent", id: "sa-3" },
+    });
+    expect(parsed.note).toEqual({ kind: "user_to_subagent", id: "sa-3" });
+    // `id` is optional (a note about no particular job).
+    expect(
+      ChatMessageSchema.parse({ role: "user", content: "x", note: { kind: "a" } }).note,
+    ).toEqual({
+      kind: "a",
+    });
+  });
+
+  test("a malformed note is refused: a bad kind, an over-long id, an unknown extra field dropped", () => {
+    const parse = (note: unknown) =>
+      ChatMessageSchema.safeParse({ role: "user", content: "x", note }).success;
+    expect(parse({ kind: "Bad-Kind" })).toBe(false);
+    expect(parse({ kind: "a", id: "x".repeat(65) })).toBe(false);
+    expect(parse({ kind: "" })).toBe(false);
+    expect(parse("subagent_lost")).toBe(false);
+    // Strip, never strict: an unknown field is dropped (forward compatibility).
+    const parsed = ChatMessageSchema.parse({
+      role: "user",
+      content: "x",
+      note: { kind: "a", fromTheFuture: 1 },
+    });
+    expect(parsed.note).toEqual({ kind: "a" });
+  });
+
+  test("the digest ignores `note`: a checkpoint never trips on it (its fixed field list)", () => {
+    // Mutation: add `note` to `canonicalMessage` → the pinned vector changes and
+    // every existing checkpoint of a session that gained a note goes stale → red.
+    const withNote = {
+      role: "user",
+      content: "ok",
+      note: { kind: "background_exit", id: "sh-1" },
+    } as const;
+    expect(canonicalMessage(withNote)).toBe(canonicalMessage({ role: "user", content: "ok" }));
+    // The fixed vector is unchanged by the field's existence.
+    expect(canonicalMessage({ role: "tool", content: "ok", toolCallId: "c1" })).toBe(
+      '["tool","ok",null,"c1",null,null,null,null]',
+    );
   });
 });

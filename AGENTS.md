@@ -187,7 +187,8 @@ assume.
   `sessions.keepSuperseded` (default off); segments already kept survive turning it off. The main owns the session uid
   (passed into `session/open`) so `--resume` keeps the file. Persist only the
   conversation — `ChatMessage`s and the log's typed facts about them
-  (turn/call markers, title, checkpoints) — never rendering-only events (e.g.
+  (turn/call markers, title, checkpoints, sub-agent lifecycle markers with a
+  finished sub-agent's report) — never rendering-only events (e.g.
   `steer`). A
   `serve` daemon additionally writes each live session to
   `<configDir>/daemon/<projectKey(cwd)>/` in the same log format (`<uid>.jsonl`,
