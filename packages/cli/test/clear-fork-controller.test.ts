@@ -114,6 +114,75 @@ describe("clear keeps the old chat (persistingController)", () => {
     expect(r.forks).toHaveLength(0);
   });
 
+  test("M1 a pre-clear read slower than the 3 s bound forks the NEWEST chat, not the stale copy", async () => {
+    // The daemon's history moved on after the last saved read; the read issued
+    // just before the clear takes 3.2 s (longer than FLUSH_ON_EXIT_TIMEOUT_MS),
+    // and the clear's reply follows it (the channel is ordered). The copy must
+    // come from that pre-clear read, not from the stale one held at the bound.
+    const NEWEST = [
+      ...OLD,
+      { role: "user" as const, content: "the newest turn" },
+      { role: "assistant" as const, content: "newest reply" },
+    ];
+    // What the daemon holds AFTER the clear: tellable apart from NEWEST, so a
+    // read started after the clear can never pass for the copy.
+    const AFTER = [
+      ...NEW,
+      { role: "user" as const, content: "asked after the clear" },
+      { role: "assistant" as const, content: "answered after the clear" },
+    ];
+    const answered = Promise.withResolvers<void>();
+    let held: unknown = readOf(OLD, "h-old", { source: "model", text: "Old title" });
+    let reads = 0;
+    const inner = {
+      readBack: async () => {
+        reads++;
+        const back = held;
+        if (reads === 2) {
+          await Bun.sleep(3200);
+          // The read's reply reaches its owner first, the clear's reply after it.
+          setTimeout(() => answered.resolve(), 0);
+        }
+        return back;
+      },
+      clear: async () => {
+        await answered.promise; // ordered after the slow read's reply
+        held = readOf(AFTER, "h-cleared"); // the daemon reset the history
+        return { before: NEWEST.length, after: NEW.length };
+      },
+      watch: () => () => {},
+      runningCalls: () => new Set<string>(),
+      onTitle: () => () => {},
+      enqueue: async () => {},
+      close: () => {},
+    } as unknown as RemoteSession;
+    const forks: { messages: unknown }[] = [];
+    const ctl = persistingController(
+      inner,
+      () => {},
+      () => {},
+      { source: "auto" },
+      undefined,
+      undefined,
+      undefined,
+      (messages) => {
+        forks.push({ messages });
+      },
+    );
+    // Read #1 (fast): the held copy is the OLD chat. Then the daemon's history
+    // moves on to NEWEST, and the pre-clear read is the slow one.
+    await ctl.saveNow();
+    held = readOf(NEWEST, "h-newest");
+    void ctl.saveNow(); // read #2: in flight when the clear is sent
+    while (reads < 2) {
+      await Bun.sleep(5);
+    }
+    await ctl.clear?.();
+    await ctl.flushed?.();
+    expect(forks).toHaveLength(1);
+    expect(forks[0]?.messages).toEqual(NEWEST);
+  }, 20_000);
+
   test("a chat of only the system prompt forks nothing", async () => {
     const r = rig(NEW, async () => ({ before: 1, after: 1 }));
     await r.ctl.clear?.();

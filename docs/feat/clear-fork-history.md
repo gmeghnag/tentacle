@@ -805,3 +805,74 @@ None.
 `bun run check`: typecheck clean, Biome clean (807 files), **6199 pass, 3 skip (the opt-in ones), 0 fail**, on the tree as committed, before this section was added.
 
 **How the executor behaved.** Plan followed, drifts and mutation gaps disclosed accurately, nothing overstated. The gaps it declared are real and it named them itself; H1 and M1 are plan-level misses (FM 2 and FM 13) that it implemented as specified.
+
+## Execution — fix round 1
+
+*— deepseek (tentacle --profile deepseek), 2026-11-09*
+
+Exactly the Review's three findings; nothing else changed. Files touched: `packages/daemon/src/session-log-store.ts`, `packages/cli/src/local-runtime.ts` (fixes) and their three test files. `TODO.md` untouched, no commit.
+
+### H1 — a landed fork is not retried (`serve`)
+
+**As built.** `writeFork` (`packages/daemon/src/session-log-store.ts:535`) now takes the fork's lock FIRST, then early-returns when the fork already landed: new `landed(update)` (`:563`) = `<fork>.jsonl` exists **and** (`update.sidecar === undefined` **or** `<fork>.state.json` exists); `exists` is the new helper at `:237`. On that path there is no `advance`, no `writeLocked`, no `writeStateLocked` — so neither the log nor the sidecar is touched. A log with no sidecar where one is expected (the sidecar write failed) still goes through the retry, as the Review specifies. `advance` moved inside the `try` (after the skip), which is the only change of relative order: the fork no longer folds its segment before the lock; `writeLocked` reads `this.writers` under the lock either way (`:624`), so a skipped fork leaves the source's writer state alone — and for `sidecar === undefined` it still deletes it, exactly as the landed path did before.
+
+**Regression test.** `packages/daemon/test/clear-fork.test.ts:287` — the Review's four steps on the real `SessionHost` + `LogSessionStore`: (1) `/clear` with the fork write failing (ENOSPC) → listed; (2) disk healthy, `reapExpired` heals it; (3) the fork is reopened (`prepareOpen` + `open{reopen}`) and CONTINUED with a prompt until `!running`; (4) the live session runs a turn. Asserts the fork's log and sidecar are byte-identical across (4), no `.aside` appears, and a reload keeps `"continuing the fork"`.
+
+**Red (current code).** the same trace as the Review, now as an assertion:
+
+```
+(fail) serve: /clear keeps the old chat as an archived fork > H1 a fork that already landed is not retried …
+  expect(await readFile(forkLog, "utf8")).toBe(continued);
+  - {"type":"base","critical":true,"inc":"a9feb067…","reason":"reload","count":3,"seq":5 …}
+  - … turn_start/message("continuing the fork")/turn_end/checkpoint (seq 14)
+  + {"type":"base","critical":true,"inc":"fork-64962c69…","reason":"create","count":3,"seq":1 …}
+  + the four cold entries only
+  0 pass, 1 fail
+```
+
+**Green.** `bun test packages/daemon/test/clear-fork.test.ts` → `9 pass, 0 fail`.
+
+**Mutation (fix reverted).** Deleting the `if (await this.landed(update)) { … return; }` block → `H1 … [87.78ms] (fail)`, `0 pass, 1 fail`. Restored: `1 pass, 0 fail`. The review's own repro was re-run against the fixed tree (`.tentacle/tmp/clear-fork-history/review-retry-regress.ts`): `after source's next write: base,message,message,message,title,turn_start,message,message,turn_end,checkpoint` (unchanged), `files: [<live>.state.json, <live>.jsonl, <fork>.jsonl, <fork>.state.json]` (no aside), `log has continued text: true`, `reload messages: [system:sys, user:the OLD chat, assistant:old reply, user:continuing the fork, …]` — previously `"k" (7) is past the log's history (5)`.
+
+### M1 — the copy is taken after `/clear` settles
+
+**As built.** `packages/cli/src/local-runtime.ts:483` (`clear`): the copy is no longer a `const copy = lastRead` taken at the bound. A `let clearSent = false` (`:332`) is set just before `inner.clear()` (`:492`) and reset in the `finally`; in `run`, `const pre = !clearSent` (`:338`) is read BEFORE `await inner.readBack()` and gates the `lastRead` assignment (`:354`). So only a read STARTED before the clear was sent can become the copy (the channel is ordered, so its reply precedes the clear's), and a pre-clear read that resolves after the 3 s bound still lands. `armFork(lastRead)` (`:507`) and the catch's `const copy = lastRead` both read after the clear settled.
+
+**Regression test.** `packages/cli/test/clear-fork-controller.test.ts:117` — the review's repro: read #1 fast (the held copy is the OLD chat), then read #2 in flight when `clear()` is sent, taking 3.2 s (`> FLUSH_ON_EXIT_TIMEOUT_MS`), with the clear's reply after it and a distinguishable post-clear history behind it. Asserts one fork holding ALL messages of the newest pre-clear chat.
+
+**Red (current code).**
+
+```
+(fail) M1 a pre-clear read slower than the 3 s bound forks the NEWEST chat, not the stale copy [3203.23ms]
+  expect(forks[0]?.messages).toEqual(NEWEST)
+  - {"content":"the newest turn","role":"user"}   - {"content":"newest reply","role":"assistant"}
+  0 pass, 1 fail
+```
+
+**Green.** `bun test packages/cli/test/clear-fork-controller.test.ts` → `7 pass, 0 fail`.
+
+**Mutation (fix reverted):** the copy taken at the bound again (`const copy = lastRead` before the clear, `armFork(copy)`, no catch copy) while `clearSent`/`pre` stayed → `M1 … [3203.18ms] (fail)`, `0 pass, 1 fail`; restored → `7 pass, 0 fail`.
+
+### M2 — the sidecar-after-log order is pinned
+
+**Test only, no code change.** `packages/daemon/test/session-log-store.test.ts:894`: an `io` whose `writeDurable` rejects for paths containing `f1.jsonl`; `store.fork` with a `sidecar` rejects with `ForkWriteError`, and `f1.state.json` does not exist in the directory.
+
+**Red.** Green on today's code (the code is right), so non-vacuity was shown by the Review's mutation — `writeStateLocked` before `writeLocked` in `writeFork`:
+
+```
+(fail) fork (…): … > M2 the fork's sidecar is written AFTER its log: a failed log write leaves no state file [1.96ms]
+  expect(await readdir(where)).not.toContain("f1.state.json")
+  Expected to not contain: "f1.state.json"  /  Received: [ "s.jsonl", "f1.state.json" ]
+  1 pass, 1 fail
+```
+
+Restored (`git diff --stat` unchanged from the five intended files) → `2 pass, 0 fail`.
+
+### Gate
+
+`bun run typecheck` clean (`tsc --noEmit` + `tsc -p apps/mobile`); `bun run lint` clean (Biome, 807 files, no fixes); `bun test` → **6202 pass, 3 skip (the opt-in ones), 0 fail**, 6205 tests / 433 files. `git status` shows only the five intended files (two sources, three test files); scratch runs stayed in `.tentacle/tmp/clear-fork-history/`.
+
+### Drift
+
+- None from the Review's fixes. One implementation detail worth naming: `advance` moved after the lock/skip inside `writeFork`, so a skipped fork does not touch the source's writer state (it only deletes its own when it has no sidecar). The `landed` check is under the fork's lock, as the Review asked.
+- M2 needed no code change, as the Review said (the ordering was already right). Its test is red only under the mutation, shown above.

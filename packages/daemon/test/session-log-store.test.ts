@@ -891,6 +891,30 @@ describe("fork (docs/feat/clear-fork-history.md): a NEW session holding the chat
     expect(control.forkTemps).toBe(temps);
   });
 
+  test("M2 the fork's sidecar is written AFTER its log: a failed log write leaves no state file", async () => {
+    // AGENTS §7: a sidecar names a log entry, so writing it first would let a
+    // crash leave a state file naming an entry the log does not have. Red under
+    // the mutation `writeStateLocked` before `writeLocked` in `writeFork`.
+    const where = fresh();
+    const failing = "f1.jsonl";
+    const io: LogStoreIo = {
+      append: async (path, data) => {
+        await appendFile(path, data, { mode: 0o600 });
+      },
+      writeDurable: async (path, data) => {
+        if (path.includes(failing)) {
+          throw Object.assign(new Error("full"), { code: "ENOSPC" });
+        }
+        await writeFile(path, data, { mode: 0o600 });
+      },
+    };
+    const store = new LogSessionStore(where, { io });
+    await sourceWithOldChat(store);
+    const update = { ...forkOf("f1"), sidecar: '{"any":"state"}' };
+    await expect(store.fork("s", update)).rejects.toBeInstanceOf(ForkWriteError);
+    expect(await readdir(where)).not.toContain("f1.state.json");
+  });
+
   test("T6 a retry of the same fork update is idempotent: one file, identical bytes", async () => {
     const where = fresh();
     const store = new LogSessionStore(where);

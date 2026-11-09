@@ -108,6 +108,16 @@ const types = async (path: string) =>
     .slice(1)
     .map((l) => (JSON.parse(l) as { type: string }).type);
 
+async function until(pred: () => boolean, rounds = 400): Promise<void> {
+  for (let i = 0; i < rounds && !pred(); i++) {
+    await new Promise((r) => setTimeout(r, 1));
+  }
+  expect(pred()).toBe(true);
+}
+
+const asidesIn = async (where: string): Promise<string[]> =>
+  (await readdir(where)).filter((f) => f.endsWith(".aside"));
+
 describe("serve: /clear keeps the old chat as an archived fork", () => {
   test("T10 the fork is archived, survives a restart, reopens with the old chat and continues its own log; the live session keeps its id and child", async () => {
     await withDir(async (dir) => {
@@ -271,6 +281,69 @@ describe("serve: /clear keeps the old chat as an archived fork", () => {
       const b = bare.open({ create: true, messages: [...OLD] }, { send: () => {} }).hosted;
       b.clear();
       expect(bare.archivedCount).toBe(0);
+    });
+  });
+
+  test("H1 a fork that already landed is not retried: a failed fork healed by the sweep survives being reopened and continued", async () => {
+    await withDir(async (dir) => {
+      const control = { fail: false, liveId: "" };
+      const rig = rigOn(dir, failingForkIo(control));
+      const hosted = open(rig.host);
+      control.liveId = hosted.id;
+      await hosted.persisted();
+      await rig.persister.flush(hosted.id);
+      await rig.store.drain();
+      // 1. The fork write fails (ENOSPC): it stays pending on the source.
+      control.fail = true;
+      hosted.clear();
+      await rig.store.drain();
+      await Bun.sleep(20);
+      const forkId =
+        rig.host.list({}).sessions.find((s) => s.sessionId !== hosted.id)?.sessionId ?? "";
+      expect(forkId).not.toBe("");
+      // 2. The disk recovers and a sweep heals the fork through `writeRecord`.
+      control.fail = false;
+      rig.host.reapExpired({ idleTtlMs: 1e12, detachedCap: 100 } as never);
+      await Bun.sleep(50);
+      await rig.store.drain();
+      const forkLog = join(dir, `${forkId}.jsonl`);
+      const forkState = join(dir, `${forkId}.state.json`);
+      const landed = await readFile(forkLog, "utf8");
+      const sidecarBefore = await readFile(forkState, "utf8");
+      // 3. The user reopens the fork and continues it.
+      const params = { sessionId: forkId, reopen: true };
+      const reopened = rig.host.open(
+        params,
+        { send: () => {} },
+        await rig.host.prepareOpen(params),
+      ).hosted;
+      reopened.prompt("t-fork-1", [{ type: "text", text: "continuing the fork" }]);
+      await until(() => !reopened.running);
+      await reopened.persisted();
+      await rig.store.drain();
+      const continued = await readFile(forkLog, "utf8");
+      expect(continued).toContain("continuing the fork");
+      const sidecarContinued = await readFile(forkState, "utf8");
+      expect(sidecarContinued).not.toBe(sidecarBefore);
+
+      // 4. The live session writes again: the pending fork must NOT be re-applied.
+      hosted.prompt("t-live-2", [{ type: "text", text: "a new turn after the clear" }]);
+      await until(() => !hosted.running);
+      await hosted.persisted();
+      await rig.persister.flush(hosted.id);
+      await rig.store.drain();
+      expect(await readFile(forkLog, "utf8")).toBe(continued);
+      expect(await readFile(forkState, "utf8")).toBe(sidecarContinued);
+      expect(await asidesIn(dir)).toEqual([]);
+      expect(landed).not.toBe("");
+
+      // The continuation is still the fork's own turn: a reload keeps it.
+      await rig.persister.stop();
+      const second = rigOn(dir);
+      const loaded = await second.persister.load(forkId);
+      if (!loaded.ok) throw new Error(loaded.reason);
+      expect(loaded.record.messages.map((m) => m.content)).toContain("continuing the fork");
+      await second.persister.stop();
     });
   });
 

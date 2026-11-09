@@ -233,6 +233,16 @@ const ASIDE_TAIL = /^\d+-[0-9a-f]{8}\.aside$/;
 const STALE_TEMP_MS = 60 * 60 * 1000;
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** Whether `path` exists: any failure counts as absent, so a fork is retried (and errors loudly) rather than skipped. */
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** `held` is a prefix of `next` (each message by its canonical form). */
 function isPrefix(held: readonly ChatMessage[], next: readonly ChatMessage[]): boolean {
   if (held.length > next.length) return false;
@@ -515,6 +525,12 @@ export class LogSessionStore {
    * Under the NEW session's own lock (AGENTS §7). Its writer state goes when
    * it lands, except `serve`'s (`sidecar`): `SessionPersister.forget` releases
    * that one, and a sweep's `writeRecord` needs it until then.
+   *
+   * A fork that already LANDED is skipped (H1): it stays pending on its source
+   * after a failed write even when the disk recovers and a sweep heals it, and
+   * re-applying this cold update then would replace the fork's log — which may
+   * have been reopened and moved on — and rewind its sidecar. A log with no
+   * sidecar where one is expected (the sidecar write failed) still goes through.
    */
   private async writeFork(update: LogWrite): Promise<void> {
     const id = update.id;
@@ -522,9 +538,13 @@ export class LogSessionStore {
       throw new ForkWriteError(`invalid session id ${JSON.stringify(id)}`);
     }
     try {
-      this.advance(id, update);
       const release = await this.lock(id);
       try {
+        if (await this.landed(update)) {
+          if (update.sidecar === undefined) this.writers.delete(id);
+          return;
+        }
+        this.advance(id, update);
         await this.writeLocked(id, update);
         if (update.sidecar !== undefined) await this.writeStateLocked(id, update.sidecar);
       } finally {
@@ -537,6 +557,14 @@ export class LogSessionStore {
         { cause: error },
       );
     }
+  }
+
+  /** The fork's files are the ones this update would write: log, and the sidecar when one is expected. */
+  private async landed(update: LogWrite): Promise<boolean> {
+    if (!(await exists(this.file(update.id)))) {
+      return false;
+    }
+    return update.sidecar === undefined || (await exists(this.stateFile(update.id)));
   }
 
   /** The state file, atomically (temp + fsync + rename): the old one or the new one. */
