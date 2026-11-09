@@ -277,6 +277,36 @@ A long foreground tool with a chatty child pins `subagents` frames until the nex
 
 Solid and honest on the mechanical parts: it corrected the plan's stale citations, reported T44's first survival and rewrote the test rather than hiding it, listed what it did not verify, and left a green gate. Its blind spots are the ones a pure-function level of testing leaves: it never traced what the registry hands a child, or what `runQuit`'s `closeForAll` means on the Ctrl+C path, and it shipped the `now` seam for `startedAt` without wiring it or having one test observe the value. It tested the mutations it thought of, not the guards the design hangs on (R1), and it took a behaviour decision on the dialog itself, though it did declare it.
 
+### Review round 2
+
+*— claude-opus-5-5, 2026-11-09* (scope: `git diff 536612e..HEAD` only; written here, in the Review section, so it sits before the fix round it judges)
+
+**Verdict: PASS.** Every round-1 finding holds, and owner answer (a) is applied. The fix round introduced no defect: 3 new nits only, none blocking.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean · `bunx biome check .` 791 files, no fixes · `bun test packages` **6080 pass, 3 skip (the opt-ins), 0 fail**, 6083 tests in 416 files.
+
+| Finding | Result |
+|---|---|
+| HIGH-1 child gets `agent_kill` | **Holds.** Dropped in the child filter (and in `readOnlyType`), by the shared constant. Mutation (filter removed): KILLED, the child is offered `agent_kill`. |
+| HIGH-2 Ctrl+C with others | **Holds.** `others === 0` in the guard, so Ctrl+C with another terminal leaves with no dialog; `closeForAll` only when `facts.others > 0`, read before the dialog is cleared. Mutation (`y` always closes for all): KILLED. |
+| MEDIUM-1 `startedAt` | **Holds.** `now` is bound to the host. Mutation (line removed): KILLED (`Received: 0`). |
+| MEDIUM-2 guard untested (R1) | **Holds.** Mid-turn test on `historyCut`. R1 re-run: KILLED (`Expected: 5, Received: 6`). |
+| LOW-1 throw from the timer | **Holds.** The timer body is guarded and reaches `onTurnError`; the doc comment was left false (new nit 2). |
+| LOW-2 dialog height | **Holds.** 3 names, 12 chars each, ` +N`, `truncate-end`; pinned at 3 rows. Below ~60 columns `(y/N)` is cut, as specified. |
+| LOW-3 survived mutations | **Holds.** R2 re-run: KILLED. R3 re-run: KILLED. |
+| LOW-4 re-render per frame | **Holds.** `sameIds` gates the state, the ref is always updated; a Profiler count pins it. |
+| Nits 1-6 | **Hold**, all applied. |
+| Owner question: Ctrl+C = No | **Holds.** The exit branch is deleted; the test walks dismiss → re-ask → `y`. Mid-turn it no longer stops the turn. |
+
+All six mutations were run with the executor's rewritten `mutate.ts` (read first: it restores and sha-checks), `sha OK` on each; `git status --short` was empty before this edit.
+
+**New findings (nits, may ride the merge or the next task):**
+1. `packages/tui/src/commands.ts:328,344`: `CtrlCQuitInput.confirmed` is dead since the dialog branch was deleted (`App.tsx` never passes it). Delete the field, the `input.confirmed !== true &&` line, the words "and an already-confirmed quit" in the doc comment at `:336`, and the `confirmed: true` case in `quit-agents.test.ts`.
+2. `packages/daemon/src/hosted-session.ts:1203-1204`: `publishSubagents` still says "Never throws". Replace with "A sink error is reported, as `emit`'s; a failure of the idle `recordCut` reaches the caller (both callers guard it)."
+3. `packages/daemon/test/subagent-progress.test.ts`: blank line missing before `describe("the view: …`; `childStop` in the MEDIUM-2 test is unused (delete it and its `resolve`).
+
+**Note for 6b, not a finding:** with `sameIds` gating the state, `subagents` holds stale non-id fields by design (only the count and ids are read today). A panel that renders `tail` or `tokens` must read fresher state and revisit that gate.
+
 ## Execution — Fix round 1
 
 *— deepseek-v4.1-flash (tentacle), 2026-11-09*
