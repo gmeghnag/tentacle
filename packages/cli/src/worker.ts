@@ -23,7 +23,13 @@ import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import type { ToolRegistry } from "@tentacle/tools";
 import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
-import { buildAgent, createSkillScan, sweepToolOutput, toolOutputStore } from "./wiring.ts";
+import {
+  buildAgent,
+  createSkillScan,
+  sweepToolOutput,
+  toolOutputStore,
+  workerSessionBuild,
+} from "./wiring.ts";
 import type { WorkerBootstrap } from "./worker-bootstrap.ts";
 
 // `globalThis` in a worker exposes postMessage/addEventListener at runtime; the
@@ -124,14 +130,8 @@ port.addEventListener("message", (event: { data: unknown }) => {
       if (!mcpReady) {
         pending.add(wired.tools);
       }
-      return {
-        agent: wired.agent,
-        permissions: wired.permissions,
-        jobs: wired.jobs,
-        agentJobs: wired.agentJobs,
-        // The main thread's config (the laptop's): absent with `autoTitle` off.
-        ...(wired.titleModel ? { titleModel: wired.titleModel } : {}),
-      };
+      // One mapping, so `grants` (emptied by `/clear`) cannot be dropped again.
+      return workerSessionBuild(wired);
     },
   });
   // Bind one Connection to this worker's port; the main thread is the client.

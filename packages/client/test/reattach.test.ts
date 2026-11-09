@@ -462,6 +462,31 @@ describe("re-attach: commands across a drop", () => {
     client.close();
   });
 
+  test("T15 (clear-keeps-jobs): clear is not re-sent after a drop: it rejects; the session stays usable", async () => {
+    // Mutation: ask `sessionCall` for a re-send ("retry") instead of "once".
+    const runs = { n: 0 };
+    const model = new GatedModel([
+      [t("a"), done],
+      [t("z"), done],
+    ]);
+    const target = new Target(makeHost(model, runs));
+    const link = cutLink(1);
+    new Connection(link.daemon, target.host);
+    const client = new RemoteClient(link.client, new PermissionBroker(), undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    await drain(session.send("first"));
+    link.arm();
+    await expect(session.clear()).rejects.toThrow(/not retried/);
+    await until(() => target.host.get("S")?.running === false);
+    const events = await drain(session.send("second"));
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    client.close();
+  });
+
   test("compact is not re-sent after a drop (no key): it rejects; the session stays usable", async () => {
     const runs = { n: 0 };
     const model = new GatedModel([

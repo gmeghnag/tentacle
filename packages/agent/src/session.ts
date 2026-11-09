@@ -5,7 +5,7 @@
  * the model sees prior turns (and their tool results). This is what turns the
  * one-shot loop into an interactive assistant.
  */
-import type { ChatMessage } from "@tentacle/core";
+import { type ChatMessage, NOTE_KIND } from "@tentacle/core";
 import {
   type Agent,
   type AgentEvent,
@@ -253,5 +253,31 @@ export class Session {
     onReplaced?.();
     this.persist();
     return { summary, before, after: this.messages.length };
+  }
+
+  /**
+   * Reset the conversation in place (`/clear`, docs/feat/clear-keeps-jobs.md):
+   * the system prompt, plus ONE note naming the background work still running
+   * (none when nothing runs). SYNCHRONOUS, like the replacement in `compact`:
+   * `onReplaced` runs right after it (the daemon's barrier) and must not throw.
+   * Skills active in the old chat are not carried over: a cleared chat starts
+   * like a new session.
+   */
+  clearConversation(onReplaced?: () => void): { before: number; after: number } {
+    const before = this.messages.length;
+    const running = this.agent.runningBackground();
+    const text = stillRunningNote(running.jobs, running.agents);
+    const next: ChatMessage[] = this.agent.startConversation();
+    if (text !== "") {
+      next.push({ role: "user", content: text, note: { kind: NOTE_KIND.stillRunning } });
+    }
+    this.messages.length = 0;
+    this.messages.push(...next);
+    this.agent.forgetModelRequestBaseline(this.id);
+    onReplaced?.();
+    // The daemon's `HostedSession.clear` persists again after its own changes
+    // (title, approvals): this one serves every other caller (nit9).
+    this.persist();
+    return { before, after: this.messages.length };
   }
 }

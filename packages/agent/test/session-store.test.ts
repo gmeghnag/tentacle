@@ -26,6 +26,18 @@ describe("sessionTitle", () => {
   });
 });
 
+describe("sessionTitle skips tentacle-written notes (docs/feat/clear-keeps-jobs.md, T4)", () => {
+  test("a still-running note at the head is not the title", () => {
+    const note: ChatMessage = {
+      role: "user",
+      content: "Background jobs still running: bg-1",
+      note: { kind: "still_running" },
+    };
+    expect(sessionTitle([note, { role: "user", content: "real question" }])).toBe("real question");
+    expect(sessionTitle([note])).toBe("(empty)");
+  });
+});
+
 describe("recordFromSnapshot", () => {
   test("carries metadata and derives the title; preserves createdAt", () => {
     const rec = recordFromSnapshot(

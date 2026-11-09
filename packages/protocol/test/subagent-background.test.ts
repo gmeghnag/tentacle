@@ -15,8 +15,8 @@ const request = {
 };
 
 describe("6a-1 protocol (docs/feat/subagent-background.md)", () => {
-  test("the protocol version is 20", () => {
-    expect(PROTOCOL_VERSION).toBe(20);
+  test("the protocol version is at least 20", () => {
+    expect(PROTOCOL_VERSION as number).toBeGreaterThanOrEqual(20);
   });
 
   test("background_exit parses with and without the sub-agent member", () => {

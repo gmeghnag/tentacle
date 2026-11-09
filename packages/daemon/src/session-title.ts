@@ -50,7 +50,7 @@ export function titleText(state: TitleState, messages: readonly ChatMessage[]): 
  * first turn cancelled before any reply text, a tool-call-only round).
  */
 export function titleInput(messages: readonly ChatMessage[]): TitleInput | null {
-  const at = messages.findIndex((m) => m.role === "user");
+  const at = messages.findIndex((m) => m.role === "user" && m.note === undefined);
   if (at < 0) {
     return null;
   }

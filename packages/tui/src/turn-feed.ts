@@ -24,12 +24,13 @@ export type SessionActivity =
   /**
    * The daemon's history replaced what is shown while no turn runs. `reason`:
    * a compaction's or a context reset's barrier (both keep the transcript),
-   * null for any other history (it replaces the transcript).
+   * a `/clear` (a new, empty chat: it replaces the transcript), null for any
+   * other history (it replaces the transcript).
    */
   | {
       readonly kind: "history";
       readonly messages: readonly ChatMessage[];
-      readonly reason: "compact" | "context_reset" | null;
+      readonly reason: "compact" | "context_reset" | "clear" | null;
     }
   /** The session ended daemon-side (another device's close / delete, the reaper). */
   | { readonly kind: "closed"; readonly reason: "closed" | "deleted" | "gone" };
@@ -71,10 +72,12 @@ export function nextStep(input: {
  * the truth, and this TUI may have missed turns.
  */
 export function historyAction(input: {
-  readonly reason: "compact" | "context_reset" | null;
+  readonly reason: "compact" | "context_reset" | "clear" | null;
   readonly ownCompaction: boolean;
 }): "replace" | "append" | "notice" | "none" {
-  if (input.reason === null) {
+  // A `/clear` (own or another device's) is a new, empty chat: the daemon's
+  // history replaces the transcript.
+  if (input.reason === null || input.reason === "clear") {
     return "replace";
   }
   if (input.reason === "context_reset") {

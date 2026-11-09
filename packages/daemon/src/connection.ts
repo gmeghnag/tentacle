@@ -11,6 +11,8 @@
 import type { AskHooksTrust } from "@tentacle/agent";
 import {
   type CancelParams,
+  type ClearParams,
+  type ClearResult,
   type CloseParams,
   type CloseResult,
   type CompactParams,
@@ -242,6 +244,9 @@ export class Connection {
         return this.prompt(params as PromptParams);
       case Method.Compact:
         return this.compact(params as CompactParams, context?.signal);
+      // Synchronous, holds no lock (AGENTS §7): `HostedSession.clear` never awaits.
+      case Method.Clear:
+        return this.clear(params as ClearParams);
       // Synchronous from the idle check to the agent swap; holds no lock (AGENTS §7).
       case Method.UpdateSettings: {
         const { sessionId, id, settings } = params as UpdateSettingsParams;
@@ -355,6 +360,11 @@ export class Connection {
     hosted.reclaim(params.ids);
     await hosted.persisted();
     return {};
+  }
+
+  // Synchronous and lock-free (AGENTS §7): `HostedSession.clear` never awaits.
+  private clear(params: ClearParams): ClearResult {
+    return this.lookup(params.sessionId).clear();
   }
 
   // `signal` is the request's own: a `$/cancelRequest` for it stops the

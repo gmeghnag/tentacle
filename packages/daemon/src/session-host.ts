@@ -115,7 +115,13 @@ export type AgentFactory = (
   titleModel?: ModelProvider;
   /** What it did with `context.settings`: `session/open`'s result reports it. */
   settingsReport?: SessionSettingsReport;
-  /** The session's approvals store, handed to the next agent on a settings sync (`AgentReuse.grants`). */
+  /**
+   * The session's approvals store (the one its gate and its sub-agents use),
+   * handed to the next agent on a settings sync (`AgentReuse.grants`) and
+   * emptied by `/clear`. Every PRODUCTION factory must pass it (making it
+   * required touched ~90 test factories): a missing one is reported by
+   * `HostedSession.clear`, never silently skipped (docs/feat/clear-keeps-jobs.md, H1).
+   */
   grants?: SessionGrants;
 };
 

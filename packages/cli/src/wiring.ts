@@ -262,6 +262,25 @@ export interface WiredAgent {
   readonly titleModel?: ModelProvider;
 }
 
+/**
+ * What the in-process worker hands `SessionHost` for one session. ONE function,
+ * so a field cannot be forgotten at the call site: dropping `grants` made
+ * `/clear` keep the session's approvals on the default local runtime
+ * (docs/feat/clear-keeps-jobs.md, review H1). `tools` stays with the caller
+ * (MCP tools are registered into it).
+ */
+export function workerSessionBuild(wired: WiredAgent) {
+  return {
+    agent: wired.agent,
+    permissions: wired.permissions,
+    jobs: wired.jobs,
+    agentJobs: wired.agentJobs,
+    grants: wired.grants,
+    // The main thread's config (the laptop's): absent with `autoTitle` off.
+    ...(wired.titleModel ? { titleModel: wired.titleModel } : {}),
+  };
+}
+
 let sharedToolOutput: ToolOutputStore | undefined;
 
 /**

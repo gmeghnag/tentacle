@@ -12,6 +12,23 @@ const fn = <T extends (...args: never[]) => unknown>(name: string): T => {
 };
 
 const user = (content: string): ChatMessage => ({ role: "user", content });
+
+describe("titleInput skips tentacle-written notes (docs/feat/clear-keeps-jobs.md, T4)", () => {
+  test("the still-running note at the head is not the first user message", () => {
+    const titleInput =
+      fn<(m: readonly ChatMessage[]) => { firstUser: string } | null>("titleInput");
+    const note: ChatMessage = {
+      role: "user",
+      content: "Background jobs still running: bg-1",
+      note: { kind: "still_running" },
+    };
+    expect(
+      titleInput([note, user("real question"), { role: "assistant", content: "an answer" }])
+        ?.firstUser,
+    ).toBe("real question");
+    expect(titleInput([note, { role: "assistant", content: "an answer" }])).toBeNull();
+  });
+});
 const assistant = (content: string, toolCalls?: ChatMessage["toolCalls"]): ChatMessage => ({
   role: "assistant",
   content,

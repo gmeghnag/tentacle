@@ -87,6 +87,8 @@ export const NOTE_KIND = {
   subagentReport: "subagent_report",
   /** A background sub-agent a restart found unfinished: its work product is gone. */
   subagentLost: "subagent_lost",
+  /** What was still running when the chat was cleared (`/clear`'s head note). */
+  stillRunning: "still_running",
 } as const;
 
 /** How full the model's context was: `used` tokens of a `window` (both tokens). */

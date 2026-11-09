@@ -282,6 +282,25 @@ export const CompactResultSchema = z.object({
 });
 export type CompactResult = z.infer<typeof CompactResultSchema>;
 
+// --- session/clear ------------------------------------------------------
+
+/**
+ * Reset the conversation in place (docs/feat/clear-keeps-jobs.md). Idle only:
+ * a running turn → `TurnInProgress`, a compaction → `CompactInProgress`,
+ * nothing changed. Background jobs, sub-agents, their asks and exits stay.
+ */
+export const ClearParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+});
+export type ClearParams = z.infer<typeof ClearParamsSchema>;
+
+export const ClearResultSchema = z.object({
+  /** Message count before and after the reset. */
+  before: z.number().int().nonnegative(),
+  after: z.number().int().nonnegative(),
+});
+export type ClearResult = z.infer<typeof ClearResultSchema>;
+
 // --- session/snapshot ---------------------------------------------------
 // Read the session's current history back (the main thread persists it; the
 // daemon/worker owns the live conversation but not the on-disk store).

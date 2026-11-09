@@ -562,6 +562,20 @@ describe("foreign turns over the real daemon", () => {
     r.b.client.close();
   });
 
+  test("T15 (clear-keeps-jobs): an idle `/clear` → history{reason: clear} on the OTHER device too", async () => {
+    // Mutation: hard-code `"compact"` where the activity's reason is built.
+    const r = await twoDevices();
+    const w = watched(r.sb);
+    const own = watched(r.sa);
+    await r.sa.clear();
+    await until(() => w.activities.some((a) => a.kind === "history"));
+    expect(w.activities[0]).toMatchObject({ kind: "history", reason: "clear" });
+    await until(() => own.activities.some((a) => a.kind === "history"));
+    expect(own.activities[0]).toMatchObject({ kind: "history", reason: "clear" });
+    r.a.client.close();
+    r.b.client.close();
+  });
+
   test("T-B14: an idle compaction → history{reason: compact}", async () => {
     const r = await twoDevices();
     const w = watched(r.sb);

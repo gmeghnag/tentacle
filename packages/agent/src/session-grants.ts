@@ -37,6 +37,15 @@ export class SessionGrants {
     return this.grantedTools.has(tool.name);
   }
 
+  /**
+   * Forget every approval (`/clear`, docs/feat/clear-keeps-jobs.md). The ask
+   * lane (`busy`, `waiters`) is untouched: an ask in flight is not disturbed.
+   */
+  clear(): void {
+    this.grantedTools.clear();
+    this.shellPrefixes.length = 0;
+  }
+
   /** Persist a session-scoped approval as the narrowest applicable rule. */
   remember(tool: Tool, request: PermissionRequest): void {
     if (tool.name === "shell" && request.suggestion) {

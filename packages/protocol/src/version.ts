@@ -11,4 +11,7 @@
 // it (a background sub-agent's names its spawning turn in `turnId`; an older
 // client would mis-attribute it, auto-accept included); a sub-agent exit rides
 // `background_exit` (docs/feat/subagent-background.md).
-export const PROTOCOL_VERSION = 20 as const;
+// 21: `history_replaced.reason` may be `clear` (`/clear` resets the conversation
+// inside the session, docs/feat/clear-keeps-jobs.md): a `mandatory` update, so
+// an older client would fail the turn on it.
+export const PROTOCOL_VERSION = 21 as const;

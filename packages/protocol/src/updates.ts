@@ -186,11 +186,13 @@ export const TurnEndUpdateSchema = z.object({
  * on top of it. Starts a new epoch. `compact`: a compaction, between turns
  * (the snapshot names no turn). `context_reset` (protocol 12): the model
  * renewed its own context INSIDE a turn — the snapshot's `turn` names that
- * turn, and its remaining updates follow the cut.
+ * turn, and its remaining updates follow the cut. `clear` (protocol 21):
+ * `/clear` reset the conversation between turns, in the same session —
+ * clients show a new, empty chat (docs/feat/clear-keeps-jobs.md).
  */
 export const HistoryReplacedSchema = z.object({
   type: z.literal("history_replaced"),
-  reason: z.enum(["compact", "context_reset"]),
+  reason: z.enum(["compact", "context_reset", "clear"]),
 });
 
 /**

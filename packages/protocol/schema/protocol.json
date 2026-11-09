@@ -186,6 +186,31 @@
       "required": ["content", "role"],
       "type": "object"
     },
+    "ClearParams": {
+      "additionalProperties": true,
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["sessionId"],
+      "type": "object"
+    },
+    "ClearResult": {
+      "additionalProperties": true,
+      "properties": {
+        "after": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "before": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["after", "before"],
+      "type": "object"
+    },
     "ClientCapabilities": {
       "additionalProperties": true,
       "properties": {
@@ -389,7 +414,7 @@
       "additionalProperties": true,
       "properties": {
         "reason": {
-          "enum": ["compact", "context_reset"],
+          "enum": ["compact", "context_reset", "clear"],
           "type": "string"
         },
         "type": {
@@ -3436,6 +3461,14 @@
         "$ref": "#/$defs/ModelStreamChunkedResult"
       }
     },
+    "session/clear": {
+      "params": {
+        "$ref": "#/$defs/ClearParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ClearResult"
+      }
+    },
     "session/close": {
       "params": {
         "$ref": "#/$defs/CloseParams"
@@ -3596,5 +3629,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 20
+  "x-protocol-version": 21
 }

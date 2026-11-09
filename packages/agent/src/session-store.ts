@@ -72,7 +72,7 @@ const TITLE_MAX = 80;
 
 /** A short, single-line label for a session (its first user message). */
 export function sessionTitle(messages: readonly ChatMessage[]): string {
-  const firstUser = messages.find((m) => m.role === "user");
+  const firstUser = messages.find((m) => m.role === "user" && m.note === undefined);
   const text = (firstUser?.content ?? "").replace(/\s+/g, " ").trim();
   if (text === "") {
     return "(empty)";
