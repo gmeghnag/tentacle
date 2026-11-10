@@ -86,7 +86,12 @@ import {
 } from "./permission-ui.ts";
 
 export type { AutoAcceptFeed };
-import { CLEARED_ELSEWHERE_NOTICE, clearCommandStep, clearErrorNotice } from "./clear-command.ts";
+import {
+  CLEARED_ELSEWHERE_NOTICE,
+  clearCommandStep,
+  clearErrorNotice,
+  clearNoopNotice,
+} from "./clear-command.ts";
 import {
   type DaemonQueue,
   type QueuedMessage,
@@ -219,6 +224,16 @@ export interface SessionController {
    * the in-process fallback, where `/clear` closes the session and starts a new one.
    */
   clear?(): Promise<{ before: number; after: number }>;
+  /**
+   * The open a RESET needs (`/clear`, `/compact`) on a session whose
+   * conversation lives only daemon-side under an id nothing has opened yet
+   * (a resumed one, or an attach whose dial is in flight). Awaited by the
+   * caller BEFORE it arms its own bookkeeping: the open can attach a live
+   * session, and the attach snapshot would read that bookkeeping as another
+   * device's (review M1/M2, docs/fix/clear-silent-noop.md). Optional: the
+   * reset methods open themselves where this is absent.
+   */
+  openForReset?(): Promise<void>;
   /**
    * `/settings` (docs/feat/session-settings-apply.md): the session's settings
    * vs this terminal's, as lines the host built. Optional: absent where this
@@ -1927,50 +1942,95 @@ export function App({
     if (!session?.clear) {
       return;
     }
+    const { clear } = session;
     clearingRef.current = true;
-    ownClearsRef.current += 1;
-    let call: Promise<unknown>;
-    try {
-      call = session.clear();
-    } catch (error) {
-      call = Promise.reject(error);
-    }
-    void call.then(
-      (result) => {
-        try {
-          if (sessionRef.current !== session) {
-            return;
-          }
-          // The answer comes BEFORE the cleared history (the barrier makes the
-          // client read a snapshot): the latch stays up until the `history`
-          // activity applies it (review H2) — it wakes from there. Only a clear
-          // that did nothing (no session open yet: `{0, 0}`, no history coming)
-          // lets go here (review L6b).
-          const r = result as { before?: number; after?: number } | undefined;
-          if (r?.before === 0 && r.after === 0) {
-            clearingRef.current = false;
-            if (ownClearsRef.current > 0) {
-              ownClearsRef.current -= 1;
+    // The open a reset needs comes FIRST (review M1): it can ATTACH a session
+    // another device keeps live, and that attach's snapshot is a
+    // `history{reason: null}` — which releases the latch and zeroes the
+    // own-clear count. Arming the count before it made my own `/clear` look like
+    // another device's ("cleared on another device"). The latch still goes up
+    // first: it also gates the wake a clear must delay.
+    const send = (): void => {
+      clearingRef.current = true;
+      ownClearsRef.current += 1;
+      let call: Promise<unknown>;
+      try {
+        call = clear();
+      } catch (error) {
+        call = Promise.reject(error);
+      }
+      void call.then(
+        (result) => {
+          try {
+            if (sessionRef.current !== session) {
+              return;
             }
-            wakeIfPending();
+            // The answer comes BEFORE the cleared history (the barrier makes the
+            // client read a snapshot): the latch stays up until the `history`
+            // activity applies it (review H2) — it wakes from there. Only a clear
+            // that did nothing (no session open yet: `{0, 0}`, no history coming)
+            // lets go here (review L6b) — and, with a chat on screen, says so
+            // (docs/fix/clear-silent-noop.md: a silent no-op is a §7 drop).
+            const r = result as { before?: number; after?: number } | undefined;
+            if (r?.before === 0 && r.after === 0) {
+              clearingRef.current = false;
+              if (ownClearsRef.current > 0) {
+                ownClearsRef.current -= 1;
+              }
+              const noop = clearNoopNotice({
+                before: 0,
+                after: 0,
+                // A conversation on screen: any prompt or tool row. A fresh
+                // session's welcome line is neither, so it stays quiet.
+                chatShown: stateRef.current.items.some(
+                  (i) => i.kind === "user" || i.kind === "tool",
+                ),
+              });
+              if (noop !== null) {
+                pushNotice(noop);
+              }
+              wakeIfPending();
+            }
+          } catch {
+            // Nothing to do: the cleared chat arrives through the history activity.
           }
-        } catch {
-          // Nothing to do: the cleared chat arrives through the history activity.
+        },
+        (error: unknown) => {
+          try {
+            if (sessionRef.current === session) {
+              const message = error instanceof Error ? error.message : String(error);
+              clearingRef.current = false;
+              // A dropped link ("not retried") may have landed: its history (a
+              // replay or a snapshot) is then still MINE — keep the count (L6a);
+              // a snapshot (`reason: null`) zeroes it. Any other error replaced nothing.
+              if (!/not retried/i.test(message) && ownClearsRef.current > 0) {
+                ownClearsRef.current -= 1;
+              }
+              pushNotice(clearErrorNotice(message));
+              // The gate held a wake back: nothing else would start it (review H2d).
+              wakeIfPending();
+            }
+          } catch {
+            // Nothing to do: the notice is a courtesy.
+          }
+        },
+      );
+    };
+    // Settles only once the attach snapshot (if any) has been applied: the
+    // bookkeeping above is armed after it, never before (review M1).
+    void Promise.resolve(session.openForReset?.()).then(
+      () => {
+        if (sessionRef.current === session) {
+          send();
         }
       },
       (error: unknown) => {
         try {
           if (sessionRef.current === session) {
-            const message = error instanceof Error ? error.message : String(error);
+            // Nothing was armed: the count was never raised here.
             clearingRef.current = false;
-            // A dropped link ("not retried") may have landed: its history (a
-            // replay or a snapshot) is then still MINE — keep the count (L6a);
-            // a snapshot (`reason: null`) zeroes it. Any other error replaced nothing.
-            if (!/not retried/i.test(message) && ownClearsRef.current > 0) {
-              ownClearsRef.current -= 1;
-            }
-            pushNotice(clearErrorNotice(message));
-            // The gate held a wake back: nothing else would start it (review H2d).
+            pushNotice(clearErrorNotice(error instanceof Error ? error.message : String(error)));
+            // The gate held a wake back: nothing else would start it (H2d).
             wakeIfPending();
           }
         } catch {
@@ -2096,8 +2156,10 @@ export function App({
           pushNotice("_Compacting the conversation…_");
           setCompacting(true);
           compactionOwnedRef.current = false;
-          // Its history (if it compacts) is mine: no "on another device" (C6).
-          ownCompactionsRef.current += 1;
+          // Whether THIS handler raised its own-compaction count: only then may
+          // its settle lower it again (an open that failed raised none).
+          let armed = false;
+          armed = true;
           // Its one settle (success or failure) ends the compaction-time queue
           // (D3c): sent as one prompt unless a send-now took it. A `/clear`
           // meanwhile already took the rows (a new session: ignore it).
@@ -2105,7 +2167,7 @@ export function App({
             if (sessionRef.current !== session) {
               return;
             }
-            if (!result.ok && ownCompactionsRef.current > 0) {
+            if (!result.ok && armed && ownCompactionsRef.current > 0) {
               ownCompactionsRef.current -= 1; // it replaced nothing: no history of mine to come
             }
             setCompacting(false);
@@ -2129,11 +2191,27 @@ export function App({
             }
             wakeIfPending(); // a wake deferred during the compaction
           };
-          void session.compact().then(
-            (r) => {
-              settled({ ok: true, before: r.before, after: r.after });
-              // The history shrank: the open figure is stale until a turn measures.
-              askContext(session);
+          // The open a reset needs comes FIRST, as `/clear`'s does (review
+          // M2): a resumed session nothing has opened yet holds its chat only
+          // as this client's seed, and counting the compaction before the open
+          // left the count armed for a compaction that never happened. The
+          // latch (`compacting`) is up meanwhile, so nothing starts a turn.
+          void Promise.resolve(session.openForReset?.()).then(
+            () => {
+              if (sessionRef.current !== session) {
+                return;
+              }
+              // Its history (if it compacts) is mine: no "on another device" (C6).
+              ownCompactionsRef.current += 1;
+              armed = true;
+              void session.compact?.().then(
+                (r) => {
+                  settled({ ok: true, before: r.before, after: r.after });
+                  // The history shrank: the open figure is stale until a turn measures.
+                  askContext(session);
+                },
+                (error: unknown) => settled({ ok: false, error }),
+              );
             },
             (error: unknown) => settled({ ok: false, error }),
           );

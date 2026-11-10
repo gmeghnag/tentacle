@@ -236,6 +236,8 @@ export interface PersistingController extends SessionController {
   open: RemoteSession["open"];
   /** `RemoteSession.openSeeded` (the eager create-or-attach of a seeded session). */
   openSeeded: RemoteSession["openSeeded"];
+  /** `RemoteSession.openForReset`: the open a reset needs (else a no-op). */
+  openForReset: RemoteSession["openForReset"];
   ownsTurn: RemoteSession["ownsTurn"];
   onQueued: RemoteSession["onQueued"];
   /** `RemoteSession.onSubagents`: the live list of this session's background sub-agents. */
@@ -485,6 +487,15 @@ export function persistingController(
     // place; save the new segment the way a compaction's is.
     // The old chat is kept as its own session first (clear-fork-history).
     async clear() {
+      // A resumed session nothing has opened yet holds its chat only as this
+      // client's seed, with nothing daemon-side under its id
+      // (docs/fix/clear-silent-noop.md): the first prompt's own open is done
+      // FIRST (a no-op for every other session), so the read below finds the
+      // pre-clear history to fork and the daemon has a conversation to reset.
+      // `?.`: unit-test fakes of a session, and a caller that opened already
+      // (`App.runClear` awaits the same open before it counts the clear as its
+      // own — review M1).
+      await inner.openForReset?.();
       // Read the pre-clear history back first (bounded: a slow link must not hold /clear).
       flush();
       await bounded(flushed(), FLUSH_ON_EXIT_TIMEOUT_MS);
@@ -551,6 +562,13 @@ export function persistingController(
       confirmed = false; // it may attach a live one: the daemon's history, not yet on the laptop
       await inner.openSeeded();
       await saveOnOpen();
+    },
+    // The open `/clear` and `/compact` need, exposed so the TUI can await it
+    // BEFORE it arms its own bookkeeping (review M1/M2). The controller's own
+    // `clear` awaits it too (memoized: the same open, so the pre-clear read
+    // below still finds the history that open applies).
+    openForReset() {
+      return inner.openForReset();
     },
     ownsTurn(turnId) {
       return turnId === adoptedTurn || inner.ownsTurn(turnId);

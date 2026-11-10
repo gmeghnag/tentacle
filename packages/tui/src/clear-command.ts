@@ -38,6 +38,26 @@ export function clearCommandStep(input: {
   return "clear";
 }
 
+/**
+ * A `/clear` the daemon answered `{0, 0}` to — it reset NOTHING — while a
+ * conversation is on screen: said, never swallowed (a silent drop is a bug,
+ * docs/fix/clear-silent-noop.md). An empty transcript says nothing: there was
+ * nothing to clear (a fresh session, or one already cleared).
+ * Mutation: answer unconditionally → an ordinary fresh `/clear` nags.
+ */
+export const CLEAR_DID_NOTHING_NOTICE =
+  "_/clear did nothing: the daemon held no chat for this session to reset — your messages are unchanged_";
+
+export function clearNoopNotice(input: {
+  readonly before: number;
+  readonly after: number;
+  readonly chatShown: boolean;
+}): string | null {
+  return input.before === 0 && input.after === 0 && input.chatShown
+    ? CLEAR_DID_NOTHING_NOTICE
+    : null;
+}
+
 /** A refused or failed `/clear`: nothing changed, the chat is still this session's. */
 export function clearFailedNotice(message: string): string {
   return `_/clear failed: ${message} — still in this session_`;
