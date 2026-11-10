@@ -68,12 +68,14 @@ const notify = (id: string, body: string): StreamEvent => ({
   type: "tool_call",
   toolCall: { id, name: "agent_notify", arguments: JSON.stringify({ text: body }) },
 });
+// docs/feat/agent-status.md ("Merge into agent_control"): the parent answers a
+// child's `agent_notify` with `agent_control{action:"message"}`.
 const message = (id: string, agentId: string, body: string): StreamEvent => ({
   type: "tool_call",
   toolCall: {
     id,
-    name: "agent_message",
-    arguments: JSON.stringify({ agent_id: agentId, text: body }),
+    name: "agent_control",
+    arguments: JSON.stringify({ action: "message", agent_id: agentId, text: body }),
   },
 });
 
@@ -201,7 +203,7 @@ test("T19: a child's notify reaches the parent over RPC; a reply completes the r
       [message("m1", "sa-1", "go on"), done],
     );
     const childGate = Promise.withResolvers<void>();
-    // Round 1 notifies; round 2 waits for the parent's `agent_message`.
+    // Round 1 notifies; round 2 waits for the parent's `agent_control{message}`.
     s.model.child.push([notify("n1", "found X"), done], {
       gate: childGate.promise,
       events: [text("THE REPORT"), done],

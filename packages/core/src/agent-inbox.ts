@@ -1,6 +1,6 @@
 /**
  * A running sub-agent's inbox (docs/feat/agent-message.md): the ONE channel every
- * sender writes into — the parent agent's `agent_message` tool today, the user's
+ * sender writes into — the parent agent's `agent_control` tool today, the user's
  * panel in task 7 — delivered at the child's next boundary exactly like a steer.
  *
  * One-way, and bounded: a child never answers here (task 9 is the other

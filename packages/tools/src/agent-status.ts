@@ -1,21 +1,27 @@
 /**
- * `agent_status` (docs/feat/agent-status.md): the MAIN agent's read-only view of
- * its background sub-agents — state, tool uses, tokens, elapsed, the actions it
- * took last, and how many of the parent's messages it has not read yet.
+ * The status answer of `agent_control` (`action: "status"`,
+ * docs/feat/agent-status.md): the MAIN agent's read-only view of its background
+ * sub-agents — state, tool uses, tokens, elapsed, the actions it took last, and
+ * how many of the parent's messages it has not read yet.
  *
  * The data is already there: `AgentJobs.rows()` folds each child's own progress
  * events (`packages/core/src/agent-jobs.ts`), the same rows the `subagents`
  * display update projects for the TUI. This module adds nothing to them — it is
- * a pure formatter plus a tool that calls it.
+ * a pure formatter, called by `agent-control.ts`.
  *
  * Bounded and untrusted by construction (AGENTS §7): a pod's child chose its own
  * description and every tool label, so each string is made ONE line and cut
  * before it enters the text, the row count and the total length are capped, and
  * nothing is phrased as an instruction from the child. A label reads as data.
  */
-import type { AgentJobRow, AgentJobs, ResourceKey, Tool } from "@tentacle/core";
-import { z } from "zod";
+import type { AgentJobRow } from "@tentacle/core";
 
+/**
+ * The name the model USED to be offered for this answer. No longer a tool — the
+ * merge into `agent_control` (docs/feat/agent-status.md) replaced it. The
+ * constant stays for the child filter / `readOnlyType` (an old `agents/*.md` may
+ * name it) and for old sessions' logs, which still contain its calls.
+ */
 export const AGENT_STATUS_TOOL_NAME = "agent_status";
 
 /** How many of a child's last actions the tool shows when the call names none. */
@@ -34,7 +40,7 @@ export const AGENT_STATUS_TEXT_MAX = 60;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]+/g;
 
 /** One bounded single-line string: control chars → space, whitespace collapsed, cut. */
-function oneLine(text: string, max = AGENT_STATUS_TEXT_MAX): string {
+export function oneLine(text: string, max = AGENT_STATUS_TEXT_MAX): string {
   return text.replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim().slice(0, max).trimEnd();
 }
 
@@ -70,7 +76,7 @@ export function formatElapsed(totalSeconds: number): string {
 export interface AgentStatusInput {
   /** The live rows (`AgentJobs.rows()`), in launch order. */
   readonly rows: readonly AgentJobRow[];
-  /** How many unread `agent_message` texts a child holds (`AgentJobs.pending`). */
+  /** How many unread parent texts a child holds (`AgentJobs.pending`). */
   readonly pending: (agentId: string) => number;
   /** Now, for the elapsed column: the tool passes `Date.now()`. */
   readonly now: number;
@@ -145,66 +151,4 @@ function actionsLine(row: AgentJobRow, actions: number): string {
   const shown = row.tail.slice(-actions).map((label) => oneLine(label));
   const earlier = Math.max(0, row.toolUses - shown.length);
   return `last ${shown.length}: ${shown.join(" · ")}${earlier > 0 ? ` (+${earlier} earlier)` : ""}`;
-}
-
-const agentStatusInput = z.object({
-  agent_id: z
-    .string()
-    .min(1)
-    .optional()
-    .describe("One sub-agent to look at (the sa-N agent_task returned). Omit for all of them."),
-  actions: z
-    .number()
-    .int()
-    .min(1)
-    .max(AGENT_STATUS_ACTIONS_MAX)
-    .optional()
-    .describe(`How many of its last actions to show (1-${AGENT_STATUS_ACTIONS_MAX}, default 3).`),
-});
-
-/** One read key: the call conflicts with nothing and never serializes a round. */
-const subagentsRead = (): readonly ResourceKey[] | "exclusive" => [
-  { mode: "read", resource: "subagents" },
-];
-
-/**
- * Build the tool (docs/feat/agent-status.md). Registered only where the
- * background runtime is (`wiring.ts`), exactly like `agent_kill`: without it no
- * child has an `sa-N` to name. NEVER given to a child — a child could then read
- * its siblings (`packages/agent/src/subagent.ts`).
- *
- * `now` is injectable for tests; the real call uses `Date.now`, which is what a
- * row's `startedAt` was taken with. The cap comes from the runtime
- * (`AgentJobs.limit`), so a settings sync that changed it is reflected at once.
- */
-export function createAgentStatusTool(
-  jobs: AgentJobs,
-  options: { readonly now?: () => number } = {},
-): Tool<z.infer<typeof agentStatusInput>> {
-  const now = options.now ?? Date.now;
-  return {
-    name: AGENT_STATUS_TOOL_NAME,
-    description:
-      "Read-only: what your background sub-agents (sa-N) are doing — state, tool uses, tokens, elapsed, their last actions, unread messages. Use it when you need to know how one is doing, e.g. before deciding to stop or steer it. Do not call it in a loop to wait: its report arrives as a [background] note that wakes you.",
-    inputSchema: agentStatusInput,
-    permission: "none",
-    concurrency: subagentsRead,
-    async execute(input) {
-      const text = formatAgentStatus({
-        rows: jobs.rows(),
-        pending: (id) => jobs.pending(id),
-        now: now(),
-        maxParallel: jobs.limit,
-        ...(input.agent_id !== undefined ? { agentId: input.agent_id } : {}),
-        ...(input.actions !== undefined ? { actions: input.actions } : {}),
-      });
-      if (text === undefined) {
-        return {
-          content: `no such background sub-agent: ${oneLine(input.agent_id ?? "", 64)} — it finished, was stopped, or never existed. If it just finished, its report arrives as a [background] note.`,
-          isError: true,
-        };
-      }
-      return { content: text, isError: false };
-    },
-  };
 }

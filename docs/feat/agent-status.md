@@ -1,6 +1,6 @@
-# feat/agent-status — a read-only `agent_status` tool for the main agent
+# feat/agent-status — the parent's view of its sub-agents, merged into ONE `agent_control` tool
 
-> **Status:** implementation → execution
+> **Status:** execution (merge into `agent_control` complete; Review pending)
 > **Branch:** `feat/agent-status`
 > **Type:** feat · **Size:** S–M · **Blast:** cross-module · **Suited:** DeepSeek exec
 
@@ -226,6 +226,164 @@ one-line/cut step → the bounding test must fail; (c) return the text before th
 `AGENT_STATUS_MAX_CHARS` branch → the length-cap test must fail. All three were
 run and reverted (Execution).
 
+### Merge into agent_control
+
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+**Owner decision (2026-11-10).** To cut the per-request cost of tool
+definitions, the three PARENT-side sub-agent tools — `agent_kill`,
+`agent_message`, `agent_status` — become ONE tool, `agent_control`. `agent_task`
+(spawn) and the child's `agent_notify` stay as they are.
+
+*Load-bearing assumption.* The model-facing cost of a tool is its
+`description` + its compiled JSON Schema (`ToolRegistry.definitions()`,
+`packages/tools/src/registry.ts:56-67`), and three tools cost three of those
+plus three `properties` blocks of context at every request. **Measured before
+any edit** (`.tentacle/tmp/agent-status/defs-chars.ts` on `feat/agent-status`,
+`buildAgent({subagentsEnabled: true})`, chars = description + JSON.stringify of
+the schema):
+
+| tool | description | schema | total |
+|---|---|---|---|
+| `agent_kill` | 150 | 217 | 367 |
+| `agent_message` (twoWay off / on) | 242 / 293 | 407 | 649 / 700 |
+| `agent_status` | 314 | 323 | 637 |
+| **three** | | | **1653** (off) / **1704** (on) |
+
+*Design.*
+
+- **Name** `agent_control`; ONE flat object, never a discriminated union
+  (`oneOf` is handled poorly by local OpenAI-compatible models and is longer):
+  `action: "status" | "message" | "kill"` (required, `z.enum`),
+  `agent_id?: string(min 1)`, `text?: string(min 1)`. Which field an action
+  needs is **validated in `execute`** with a tool error naming it — a zod
+  refinement would answer "invalid arguments for agent_control: …" and the
+  repair is clearer with our own sentence.
+- **ONE description**, two variants by `subagents.twoWay` (as today's
+  `agent_message`, `background.ts:170-176`): status is read-only and never a way
+  to wait (the report is a `[background]` note that wakes you); the child reads
+  a message before its next model step; kill stops it. Off = one-way ("no reply
+  comes back"); on = "may answer with `agent_notify` (a `[sub-agent sa-N → you]`
+  note that may wake you)". Target ≲ 400 chars for BOTH variants.
+- **Status loses its `actions` param** (always the last 3):
+  `formatAgentStatus` keeps its `actions?` input and clamp
+  (`agent-status.ts:105-118`); the tool simply does not pass it.
+- **Behaviour and result texts unchanged**: status text and unknown-id error
+  are `formatAgentStatus` + the same sentence; message refusals/limits and
+  "queued for sa-N …" are `AgentJobs.message`'s (unchanged) plus today's two
+  result sentences; kill's two sentences are today's.
+- **Class per action.** `permission` is a STATIC field on `Tool`
+  (`packages/core/src/tool.ts:166`), so it cannot follow the input — **but all
+  three were `permission: "none"`**, so `agent_control` is `"none"` and nothing
+  changes. `concurrency` DOES take the (unvalidated) input
+  (`tool.ts:201-204`), exactly like `spawnKind`: a TOTAL function returning the
+  one read key `{mode:"read", resource:"subagents"}` for `action === "status"`
+  and `"exclusive"` otherwise — byte-for-byte today's per-tool classes (status
+  had the read key, message/kill had no `concurrency` ⇒ exclusive). Garbage
+  input ⇒ `"exclusive"` (§7 safety pin).
+- **The per-action factories go away** (`createAgentKillTool`,
+  `createAgentMessageTool`, `createAgentStatusTool`): one parent-side tool, one
+  implementation, so no second registration path can re-split the cost. Their
+  `AGENT_*_TOOL_NAME` constants stay as **legacy names** — the child filter and
+  `readOnlyType` keep listing them, so an old `agents/*.md` naming
+  `agent_status` in `tools:` is still filtered/read-only, and `rg agent_kill`
+  still explains each site.
+- **Children.** `subagent.ts` drops `agent_control` (added to both name lists)
+  — a child must never read or control its siblings.
+- **Old sessions.** Nothing on the wire or in a log changes: a tool call is a
+  name + args, so an old `agent_kill`/`agent_message`/`agent_status` call still
+  replays and renders as its own name (`toolLabel` falls through to the name,
+  `packages/core/src/tool-labels.ts:20-22`; `toolSubtitle` falls through to the
+  raw args, `render-lines.ts:592-593`). Pinned by a test, not assumed. The TUI
+  additionally gets a subtitle for the NEW name (`agent_control` → `status` /
+  `message sa-1` / `kill sa-1`) so the merged call reads better than raw JSON.
+- **Texts that named a tool the model no longer has** are re-pointed at
+  `agent_control`: `agent_task`'s neutral description ("then `agent_message` to
+  steer it"), the parent's `[sub-agent sa-N → you]` note ("to answer, use
+  `agent_message({…})`", `packages/agent/src/agent.ts:297`), `AgentJobs`'
+  at-the-cap refusal ("stop one with `agent_kill`", `agent-jobs.ts:630`), and
+  `subagents.twoWay`'s key docs.
+- A hook matcher on the OLD names must be updated by the user — recorded in the
+  CHANGELOG (a matcher is the tool name; §7 hooks match names, no alias table).
+
+*Files.* (dependency order)
+
+| # | File | Change |
+|---|------|--------|
+| 1 | `packages/tools/src/agent-control.ts` | **new**: `AGENT_CONTROL_TOOL_NAME`, the two descriptions, `agentControlInput`, `createAgentControlTool(jobs, {twoWay?, now?})`. |
+| 2 | `packages/tools/src/background.ts` | drop `createAgentKillTool` / `createAgentMessageTool`; keep the name constants as legacy; `agent_notify` untouched. |
+| 3 | `packages/tools/src/agent-status.ts` | drop `createAgentStatusTool`; keep `formatAgentStatus` + helpers + `AGENT_STATUS_TOOL_NAME` (legacy). |
+| 4 | `packages/tools/src/index.ts` | export `agent-control.ts`. |
+| 5 | `packages/agent/src/subagent.ts` | `AGENT_CONTROL_TOOL_NAME` added to the child filter and to `readOnlyType`'s list; the three old names stay. |
+| 6 | `packages/cli/src/wiring.ts` | ONE `tools.register(createAgentControlTool(agentJobs, {twoWay: config.subagentsTwoWay}))` where the three were. |
+| 7 | `packages/tools/src/task.ts` | neutral description: `agent_message` → `agent_control`. |
+| 8 | `packages/agent/src/agent.ts` | the notify note's "to answer, use …" names `agent_control{action:\"message\"}`. |
+| 9 | `packages/core/src/agent-jobs.ts` | the refusal's "stop one with agent_kill" → `agent_control`. |
+| 10 | `packages/tui/src/render-lines.ts` | `agent_control` subtitle: action + id. |
+| 11 | `packages/config/src/key-docs.ts` | `subagents.twoWay` details name `agent_control`. |
+| 12 | tests | see below. |
+| 13 | `CHANGELOG.md` | `[Unreleased]`: Added (status, now an action) + Changed (merge; old hook matcher). |
+| 14 | `docs/feat/agent-status.md` | this doc. |
+
+No `packages/protocol` change, no `PROTOCOL_VERSION` bump: the tool is
+daemon-side and a tool call's name is not a schema.
+
+*Failure modes.*
+
+| Case | Behaviour |
+|---|---|
+| `action: "message"` without `agent_id` or `text` | `isError: true`, `action "message" needs agent_id and text.` — nothing is queued. |
+| `action: "kill"` without `agent_id` | `isError: true`, `action "kill" needs agent_id.` |
+| `action: "status"` with `agent_id` of a finished/unknown child | today's unknown-id error text, unchanged. |
+| `action` missing / not one of the three | zod enum → the registry's own "invalid arguments for agent_control: …" (the model sees the allowed values). |
+| A call with an unknown `action` reaching `execute` directly | a defensive `unknown action:` error, never a throw (the executor must not see a crash). |
+| Old `agent_kill` call replayed from a log | renders as `agent_kill` + raw args (as today); no mapping needed, nothing dropped. |
+| A child naming `agent_control` in an agent-def `tools:` list | dropped by the filter; `readOnlyType` still calls the type read-only. |
+| Garbage input to `concurrency` | `"exclusive"` (total, §7). |
+| `subagents.twoWay` flipped mid-session | the description is built at registration from the config, exactly as `agent_message`'s was. |
+| Old `agent_message`/`agent_kill` in a saved log's transcript | display-only; no re-mapping, no data loss. |
+
+*Tests* (§9 — red on the assertion, first).
+
+1. `packages/tools/test/agent-control.test.ts` (**new**, migrating
+   `agent-kill.test.ts` + `agent-message.test.ts` and the tool half of
+   `agent-status.test.ts`, which are deleted/trimmed):
+   - the three result texts are today's, byte for byte (kill killed/not-running;
+     message "queued for sa-1 …" off and on, and its four refusals; status text
+     through the real `AgentJobs` state);
+   - per-action validation: `message` without `agent_id`/`text`, `kill` without
+     `agent_id` → the two sentences, `isError`;
+   - `inputSchema`: `{}` refused (action required), `action: "nope"` refused,
+     `action: "status"` alone accepted, `agent_id: ""` refused;
+   - class: `concurrency({action:"status"})` is the read key,
+     `{action:"message"}`/`{action:"kill"}`/`{}`/`null` → `"exclusive"`;
+     `permission: "none"`; no `spawnKind`;
+   - the description follows `twoWay` (off is today's one-way facts; on has
+     `agent_notify` + `[sub-agent sa-N → you]` + "may wake you");
+   - status no longer takes `actions` (extra key is stripped by zod, not an
+     error, and the answer is the last 3).
+2. `packages/tools/test/agent-status.test.ts`: the pure formatter only.
+3. `packages/agent/test/subagent.test.ts`: a `tools: "all"` child is never
+   offered `agent_control` even when the parent's registry holds it.
+4. `packages/cli/test/wiring.test.ts` (the REAL wiring): with sub-agents on the
+   main agent gets `agent_control` and NONE of the three old names; with them
+   off it gets none of the four; the pinned definition list; `agent_control`
+   answers from the SAME `AgentJobs` the session runs (`action: "status"`).
+5. `packages/cli/test/agent-task-description.test.ts` (REAL wiring, through
+   `ChatRequest.tools`): the `agent_control` description off/on, and
+   `agent_task`'s neutral text naming `agent_control`.
+6. `packages/core/test/agent-jobs*.test.ts`, `packages/agent/test/agent.test.ts`,
+   `packages/tui/test/render-lines.test.ts`: the re-pointed texts, and the old
+   names still rendering.
+7. e2e (`agent-message.e2e.test.ts`, `agent-message-two-way.e2e.test.ts`): the
+   scripted parent calls `agent_control{action:"message"}` — the identical
+   delivery path.
+
+Mutations (non-vacuity, run and reverted in Execution): **A** drop the
+per-action validation (`kill` with no `agent_id` reaches `jobs.kill("")`);
+**B** drop `AGENT_CONTROL_TOOL_NAME` from the child filter; **C** make the
+description ignore `twoWay`.
+
 ## Execution
 
 *— deepseek (tentacle --profile deepseek), 2026-11-10*
@@ -410,3 +568,207 @@ to 0 errors after one `biome check --write` on the four files I touched.
    is its own repo root, and the tool refuses writes outside it); the scripts and
    their output are pasted above and in Context.
 
+
+## Execution — merge into agent_control
+
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+### Measured first, then merged
+
+Before any edit, `.tentacle/tmp/agent-status/defs-chars.ts` on this branch
+(`buildAgent({subagentsEnabled: true})`, chars = `description.length` +
+`JSON.stringify(parameters).length`):
+
+```
+twoWay: false
+  agent_kill      150 + 217 = 367
+  agent_message   242 + 407 = 649
+  agent_status    314 + 323 = 637
+  TOTAL                     1653
+twoWay: true
+  agent_kill      150 + 217 = 367
+  agent_message   293 + 407 = 700
+  agent_status    314 + 323 = 637
+  TOTAL                     1704
+```
+
+After (same script, `agent_control` as actually registered):
+
+```
+twoWay: false   agent_control  347 + 438 = 785   (all definitions 9961 → 8991)
+twoWay: true    agent_control  400 + 438 = 838   (all definitions 9961 → 9162)
+```
+
+**1653 → 785 (−868, −52.5%)** with `subagents.twoWay` off; **1704 → 838
+(−866, −50.8%)** with it on. The schema half is 438 chars against the three
+tools' 947 (−509): one `properties` block, one `required: ["action"]`, and an
+`enum` instead of three separate objects.
+
+### What changed, in the Implementation's order
+
+1. **`packages/tools/src/agent-control.ts` (new)** — `AGENT_CONTROL_TOOL_NAME`,
+   the two descriptions (`agentControlDescription(twoWay)`), one flat
+   `agentControlInput` (`action` required `z.enum`, `agent_id`/`text` optional
+   `min(1)`), `createAgentControlTool(jobs, {twoWay, now})`. `execute` switches on
+   the action and hands each to its own small private function, each keeping its
+   old tool's `AgentJobs` call and texts **verbatim**.
+2. **`packages/tools/src/background.ts`** — `createAgentKillTool` and
+   `createAgentMessageTool` deleted (99 → ~40 changed lines); `agent_notify` and
+   both shell tools untouched. `AGENT_KILL_TOOL_NAME` / `AGENT_MESSAGE_TOOL_NAME`
+   stay, now documented as legacy names with three jobs (child filter,
+   `readOnlyType`, old logs/transcripts).
+3. **`packages/tools/src/agent-status.ts`** — `createAgentStatusTool` and its
+   schema deleted; the pure formatter and `formatAgentStatus` stay untouched.
+   `oneLine` is now exported, so the status error text reuses the SAME bounding
+   helper instead of a second copy. `AGENT_STATUS_TOOL_NAME` stays as legacy.
+4. **`packages/tools/src/index.ts`** — exports `agent-control.ts`.
+5. **`packages/agent/src/subagent.ts`** — `AGENT_CONTROL_TOOL_NAME` added to the
+   child filter and to `readOnlyType`'s list; the three old names kept in both
+   (a child is not given a name that no longer exists either), with the comment
+   rewritten. The two old child-filter tests became one, now also registering the
+   old names as stubs, so the "old names are still dropped" property is pinned.
+6. **`packages/cli/src/wiring.ts`** — one registration
+   (`createAgentControlTool(agentJobs, { twoWay: config.subagentsTwoWay })`)
+   replaces three, inside the same `if (config.subagentsEnabled)` block.
+7. **Re-pointed texts** (all of them named a tool the model no longer has):
+   `agent_task`'s neutral description (`task.ts`), the parent's
+   `[sub-agent sa-N → you]` note (`agent.ts`, now
+   `agent_control({ action: "message", … })`), `AgentJobs`' at-the-cap refusal
+   (`agent-jobs.ts`, now `agent_control (action "kill")`), `subagents.twoWay`'s
+   key docs, plus doc comments in `agent-inbox.ts`, `agent-jobs.ts`,
+   `hosted-session.ts`, `protocol/session.ts`, `protocol/methods.ts`.
+8. **`packages/tui/src/render-lines.ts`** — `toolSubtitle` gains
+   `agent_control` (action, then the id: `status` / `message sa-2` / `kill
+   sa-3`), plus the three OLD names → their `agent_id`, so an old session's
+   transcript reads better than raw JSON. `toolLabel` needed nothing (it falls
+   through to the name).
+9. **Tests** — `agent-kill.test.ts` and `agent-message.test.ts` deleted;
+   `agent-control.test.ts` (new, 18 tests) holds their assertions plus the new
+   ones (per-action validation, class per action, the two descriptions, the
+   twoWay message result). `agent-status.test.ts` keeps the formatter only (8).
+   `subagent.test.ts` (child filter), `wiring.test.ts` (the REAL main-agent tool
+   set: `agent_control` present, all three old names absent; the status answer
+   from the session's own `AgentJobs`), `agent-task-description.test.ts` (the
+   description through `ChatRequest.tools` for both flags),
+   `render-lines.test.ts` (both new and old subtitles), the two e2e rigs
+   (`agent_control{action:"message"}` over the real runtime) and the re-pointed
+   `agent-jobs*` / `agent.test.ts` / `task*` texts.
+10. **`CHANGELOG.md`** — `[Unreleased]`: the `agent_status` bullet now says it is
+    `agent_control`'s `status` action; a new `Changed` bullet states the merge,
+    the measured saving and the hook-matcher migration. The `[Unreleased]`
+    bullets that described `agent_message`/`agent_kill` as tools were updated in
+    place (they describe `[Unreleased]` behaviour, not shipped behaviour).
+
+### The description, verbatim
+
+`subagents.twoWay` **off** (347 chars):
+
+```
+Control a background sub-agent (agent_task{background:true}). "status": read-only, what it is doing and its last actions; never a way to wait — its report arrives as a [background] note that wakes you. "message" (agent_id, text): read before its next model step; one-way, no reply comes back. "kill" (agent_id): stops it; its report still arrives.
+```
+
+`subagents.twoWay` **on** (400 chars) — one clause differs:
+
+```
+Control a background sub-agent (agent_task{background:true}). "status": read-only, what it is doing and its last actions; never a way to wait — its report arrives as a [background] note that wakes you. "message" (agent_id, text): read before its next model step; it may answer with agent_notify (a [sub-agent sa-N → you] note that may wake you). "kill" (agent_id): stops it; its report still arrives.
+```
+
+The schema as sent (`ToolRegistry.definitions()[0].parameters`, verbatim):
+
+```json
+{"type":"object","properties":{"action":{"type":"string","enum":["status","message","kill"],"description":"status: read-only view. message: write to one. kill: stop one."},"agent_id":{"type":"string","minLength":1,"description":"The sa-N agent_task returned. Required for message and kill."},"text":{"type":"string","minLength":1,"description":"What to tell it. Required for message."}},"required":["action"],"additionalProperties":false}
+```
+
+No `oneOf`, no two-level nesting: `enum` + `required: ["action"]`.
+
+### Red before green, and the three mutations (§9)
+
+The new file `agent-control.test.ts` could not import `../src/agent-control.ts`
+before it existed, which is not a red on an assertion. So the red evidence is
+the three mutations, each run on the finished code and reverted (backups in
+`.tentacle/tmp/agent-status/*.bak*.ts`):
+
+**A — per-action validation.** `message`: `agent_id`/`text` guards replaced by
+`?? ""` + `if (false)`; `kill`: the same. → two tests red:
+
+```
+(fail) … message without agent_id or text is an error naming both
+(fail) … kill without agent_id is an error, and nothing is stopped
+16 pass · 2 fail
+```
+
+(The display texts were red too on the way in: the first run showed
+`running 1m 25s` against my `1m 24s` — my rig recorded the real `startedAt` and
+my `now` was a constant — and the first description draft at 419 chars against
+the plan's ≤400 target. Both were fixed in the test/description, not by
+loosening the assertion.)
+
+**B — the child filter.** Deleted `tool.name === AGENT_CONTROL_TOOL_NAME ||`
+from `subagent.ts` → two tests red:
+
+```
+(fail) a child is never offered agent_control, even in a registry that holds it
+(fail) … a child is never offered agent_message (nor its old names), and readOnlyType ignores it
+32 pass · 2 fail
+```
+
+**C — the twoWay text.** `agentControlDescription` made to ignore its argument
+(`return DESCRIPTION_ONE_WAY`) → red in both the unit and the REAL-wiring test:
+
+```
+(fail) agent_control: the one description > twoWay on: … may answer with agent_notify
+(fail) the sub-agent texts the agent is really given > twoWay on: both texts say …
+19 pass · 2 fail
+```
+
+All three reverted; the files restored byte for byte (`git diff` shows only the
+intended edits).
+
+### Gate
+
+`bun run check` (typecheck → lint → test) on the finished tree:
+
+```
+$ tsc --noEmit && tsc -p apps/mobile --noEmit      (clean)
+$ biome check .   Checked 840 files in 266ms. No fixes applied.
+ 6523 pass
+ 3 skip
+ 0 fail
+ 68275 expect() calls
+Ran 6526 tests across 456 files. [246.88s]
+```
+
+The 3 skips are the documented opt-ins (`TENTACLE_K8S_SERVER`,
+`TENTACLE_DOCKER_TESTS=1`, `TENTACLE_SLOW_TESTS=1`), not failures. Lint needed
+one `biome check --write` on the five touched files (import order + formatting);
+it is back to 0 errors, 0 warnings.
+
+### Drifts from the Implementation
+
+1. **`permission` cannot follow the input — and did not need to.** The plan said
+   "find how the interface lets a call's class depend on its input; if it cannot,
+   pick the safe class". `permission` is a static `Tool` field
+   (`packages/core/src/tool.ts:166`), but all three old tools were
+   `permission: "none"`, so `"none"` is exactly right — no drift in behaviour.
+   `concurrency` DOES take the input (`tool.ts:201-204`, the `spawnKind`
+   arrangement), so the class is per action and identical to before; no safe-class
+   fallback was needed.
+2. **`agentTaskDescription`'s key docs were left as they are** (the plan named
+   "docs of the key `agentTaskDescription`"): the description that key replaces
+   no longer names a tool at all, so the docs text (`subagents.agentTaskDescription`,
+   `summary: "Replaces the `agent_task` description …"`) is still true. The
+   `subagents.twoWay` docs DID need re-pointing, and were.
+3. **One extra doc-comment sweep** the plan did not enumerate (`agent-inbox.ts`,
+   `agent-jobs.ts`, `hosted-session.ts`, `protocol/session.ts`,
+   `protocol/methods.ts`): each said "the model's `agent_kill`/`agent_message`
+   tool", which the merge makes false. Comments only, no behaviour.
+4. **The old-name TUI subtitle is new behaviour** the plan listed only as "keep
+   display support": `agent_kill`/`agent_message`/`agent_status` previously fell
+   through to raw JSON args in the subtitle, and now show their `agent_id`. That
+   is strictly better rendering for an old transcript, and it is pinned by a test.
+5. **`agent-jobs-progress`/`agent-jobs` refusal text** now reads
+   `agent_control (action "kill")` rather than the plan's bare `agent_control`:
+   naming the tool alone would not tell the model which action stops a child.
+6. **`.tentacle/tmp/agent-status/` in this worktree** is
+   `.tentacle/worktrees/agent-status/.tentacle/tmp/agent-status/` (the worktree is
+   its own repo root); scripts and output are pasted above.

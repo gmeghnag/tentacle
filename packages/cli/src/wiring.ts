@@ -60,9 +60,7 @@ import {
   type SkillBodyReader,
   ToolRegistry,
   builtinTools,
-  createAgentKillTool,
-  createAgentMessageTool,
-  createAgentStatusTool,
+  createAgentControlTool,
   createContextResetTool,
   createSkillActivator,
   createSkillTool,
@@ -579,16 +577,12 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
             }),
       }),
     );
-    // The model's way to stop a child it launched (docs/feat/subagent-background-ui.md,
-    // owner Q1 a). Registered only here, where `background` is offered: without
-    // the runtime no child has an id to name.
-    tools.register(createAgentKillTool(agentJobs));
-    // ... and to WRITE to one (docs/feat/agent-message.md): it names a running
-    // child's id, so it rides the same switch.
-    tools.register(createAgentMessageTool(agentJobs, { twoWay: config.subagentsTwoWay }));
-    // ... and to SEE what one is doing (`docs/feat/agent-status.md`): read-only,
-    // it names the same ids, so it rides the same switch.
-    tools.register(createAgentStatusTool(agentJobs));
+    // The model's ONE handle on a child it launched (docs/feat/agent-status.md,
+    // "Merge into agent_control"): see it (`status`, read-only), write to it
+    // (`message`) or stop it (`kill`). Registered only here, where `background`
+    // is offered: without the runtime no child has an id to name. One tool, not
+    // three, keeps each request's tool definitions ~1000 chars shorter.
+    tools.register(createAgentControlTool(agentJobs, { twoWay: config.subagentsTwoWay }));
   }
 
   // Context reset (docs/feat/context-reset.md): the model renews its own

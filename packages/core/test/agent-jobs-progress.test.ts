@@ -218,8 +218,8 @@ describe("AgentJobs.kill (6a-2, owner Q1 a)", () => {
   });
 });
 
-describe("the refusal offers agent_kill only when it can help (owner Q1 a + LOW-2)", () => {
-  test("a background child running: the text offers stopping one with agent_kill", async () => {
+describe("the refusal offers agent_control only when it can help (owner Q1 a + LOW-2)", () => {
+  test("a background child running: the text offers stopping one with agent_control", async () => {
     const { jobs } = rig(1);
     const g = gated();
     jobs.start(spec("bg one"), g.run);
@@ -228,7 +228,7 @@ describe("the refusal offers agent_kill only when it can help (owner Q1 a + LOW-
     if (!refused.ok) {
       expect(refused.reason).toContain("sa-1 (bg one)");
       // The model can now end the run by stopping the child.
-      expect(refused.reason).toContain("agent_kill");
+      expect(refused.reason).toContain("agent_control");
       expect(refused.reason).toContain("end your turn");
     }
     g.done();
@@ -241,10 +241,10 @@ describe("the refusal offers agent_kill only when it can help (owner Q1 a + LOW-
     const refused = jobs.acquire("fg two");
     expect(refused.ok).toBe(false);
     if (!refused.ok) {
-      // Ending the turn wakes nobody, and agent_kill cannot stop a foreground
+      // Ending the turn wakes nobody, and agent_control cannot stop a foreground
       // call: both would be lies.
       expect(refused.reason).not.toContain("end your turn");
-      expect(refused.reason).not.toContain("agent_kill");
+      expect(refused.reason).not.toContain("agent_control");
       expect(refused.reason).toContain("Retry when the running foreground sub-agents return");
     }
   });

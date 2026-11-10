@@ -126,7 +126,7 @@ describe("the neutral description tells the parent how to use it", () => {
 
   test("(2) it names the two patterns: turn-based, and long-lived", () => {
     expect(text).toContain("Turn-based: one foreground sub-agent at a time");
-    expect(text).toContain("Long-lived: `background: true`, then `agent_message`");
+    expect(text).toContain("Long-lived: `background: true`, then `agent_control`");
   });
 
   test("a custom text replaces the neutral one whole (no scope, no patterns)", () => {

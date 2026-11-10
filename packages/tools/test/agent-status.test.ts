@@ -1,26 +1,23 @@
 /**
- * `agent_status` (docs/feat/agent-status.md): the pure formatter, then the tool
- * on a REAL `AgentJobs` — the same rows the `subagents` display update projects.
+ * `agent_status`'s formatter (docs/feat/agent-status.md): now the `status`
+ * answer of `agent_control`, over the rows the `subagents` display update
+ * projects. Pure, so it is tested without a runtime; the tool half lives in
+ * `agent-control.test.ts`.
  *
  * The bounded/untrusted half is what a pod can attack (AGENTS §7): every label
  * and description is one line, cut, and the whole answer has a char budget.
  */
 import { describe, expect, test } from "bun:test";
-import { type AgentJobRow, AgentJobs, type ToolContext } from "@tentacle/core";
+import type { AgentJobRow } from "@tentacle/core";
 import {
   AGENT_STATUS_ACTIONS_DEFAULT,
   AGENT_STATUS_MAX_CHARS,
   AGENT_STATUS_MAX_CHILDREN,
   AGENT_STATUS_TEXT_MAX,
-  AGENT_STATUS_TOOL_NAME,
-  createAgentStatusTool,
   formatAgentStatus,
   formatCount,
   formatElapsed,
 } from "../src/agent-status.ts";
-
-const tick = () => new Promise((r) => setTimeout(r, 1));
-const ctx = { sessionId: "s", signal: new AbortController().signal } as unknown as ToolContext;
 
 function row(over: Partial<AgentJobRow> = {}): AgentJobRow {
   return {
@@ -165,99 +162,5 @@ describe("agent_status: the formatter (pure)", () => {
     expect(out.endsWith("… (cut: name one child with agent_id)")).toBe(true);
     // It is a cut, not a silent rewrite: one line was started and not finished.
     expect(out.slice(0, -"\n… (cut: name one child with agent_id)".length)).not.toEndWith("\n");
-  });
-});
-
-/** A real runtime: one child, a gate to finish it, and the progress a run emits. */
-function rig(cap = 2) {
-  let n = 0;
-  const jobs = new AgentJobs(cap);
-  jobs.bind({
-    launched: () => `sa-${++n}`,
-    ended: () => {},
-    now: () => 1_000,
-  });
-  const gate = Promise.withResolvers<{ report: string; toolUses: number; stopReason: string }>();
-  const started = jobs.start(
-    { callId: "c1", agentType: "general", description: "Fix the parser" },
-    async () => gate.promise,
-  );
-  if (!started.ok) throw new Error(started.reason);
-  const id = started.agentId;
-  return { jobs, gate, id };
-}
-
-describe("agent_status: the tool on real AgentJobs state", () => {
-  test("T7: a running child — its own tool uses, tokens, labels and unread messages", async () => {
-    const r = rig(4);
-    for (const label of ["Read src/a.ts", "Edit src/a.ts", "$ bun test"]) {
-      r.jobs.progress(r.id, { kind: "subagent_tool", label });
-    }
-    r.jobs.progress(r.id, {
-      kind: "subagent_usage",
-      promptTokens: 70_000,
-      completionTokens: 4_000,
-    });
-    expect(r.jobs.message(r.id, "try the other file", "agent").ok).toBe(true);
-
-    const out = await createAgentStatusTool(r.jobs, { now: () => NOW }).execute({}, ctx);
-    expect(out.isError).toBe(false);
-    expect(out.content).toBe(
-      [
-        "1 background sub-agent (of 4 allowed)",
-        "sa-1 · general · Fix the parser · running 1m 24s · 3 tools · 74k tokens · 1 unread",
-        "  last 3: Read src/a.ts · Edit src/a.ts · $ bun test",
-      ].join("\n"),
-    );
-    // The unread count is the inbox's own, not a copy: draining it clears the field.
-    r.jobs.progress(r.id, { kind: "subagent_tool", label: "Read src/b.ts" });
-    r.gate.resolve({ report: "done", toolUses: 4, stopReason: "end_turn" });
-    await tick();
-    expect(r.jobs.pending(r.id)).toBe(0);
-  });
-
-  test("T8: a finished child, and an id that never existed, are a tool ERROR naming the id", async () => {
-    const r = rig();
-    const tool = createAgentStatusTool(r.jobs);
-    r.gate.resolve({ report: "r", toolUses: 0, stopReason: "end_turn" });
-    await tick();
-    const miss = (id: string) =>
-      `no such background sub-agent: ${id} — it finished, was stopped, or never existed. If it just finished, its report arrives as a [background] note.`;
-    const ended = await tool.execute({ agent_id: r.id }, ctx);
-    expect(ended).toEqual({ content: miss(r.id), isError: true });
-    expect(await tool.execute({ agent_id: "sa-9" }, ctx)).toEqual({
-      content: miss("sa-9"),
-      isError: true,
-    });
-  });
-
-  test("T9: with nothing running it is not an error — it says so and how the report arrives", async () => {
-    const jobs = new AgentJobs(1);
-    jobs.bind({ launched: () => "sa-1", ended: () => {} });
-    const out = await createAgentStatusTool(jobs).execute({}, ctx);
-    expect(out).toEqual({
-      content:
-        "no background sub-agents are running (subagents.maxParallel = 1). A [background] note arrives when one finishes.",
-      isError: false,
-    });
-  });
-
-  test("T10: read-only, and cheap — a read key, no permission, and bounded arguments", () => {
-    const r = rig();
-    const tool = createAgentStatusTool(r.jobs);
-    expect(tool.name).toBe(AGENT_STATUS_TOOL_NAME);
-    expect(tool.name).toBe("agent_status");
-    expect(tool.permission).toBe("none");
-    expect(tool.concurrency).toBeFunction();
-    expect(tool.concurrency === "exclusive" ? "exclusive" : tool.concurrency?.({})).toEqual([
-      { mode: "read", resource: "subagents" },
-    ]);
-    expect(tool.inputSchema.safeParse({}).success).toBe(true);
-    expect(tool.inputSchema.safeParse({ agent_id: "sa-1", actions: 5 }).success).toBe(true);
-    expect(tool.inputSchema.safeParse({ agent_id: "" }).success).toBe(false);
-    expect(tool.inputSchema.safeParse({ actions: 0 }).success).toBe(false);
-    expect(tool.inputSchema.safeParse({ actions: 9 }).success).toBe(false);
-    expect(tool.inputSchema.safeParse({ actions: 1.5 }).success).toBe(false);
-    r.gate.resolve({ report: "r", toolUses: 0, stopReason: "end_turn" });
   });
 });

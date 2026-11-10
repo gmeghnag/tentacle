@@ -584,6 +584,19 @@ function toolSubtitle(
       return str("job_id") ?? "";
     case "agent_task":
       return str("description") ?? str("subagent_type") ?? "";
+    case "agent_control": {
+      // One tool, three actions (docs/feat/agent-status.md): the action is the
+      // label's target, and the child's id follows when the call names one.
+      const action = str("action") ?? "";
+      const agentId = str("agent_id");
+      return agentId === undefined ? action : `${action} ${agentId}`;
+    }
+    // The three tools `agent_control` replaced: an OLD session's log/transcript
+    // still contains their calls, and they must read as well as they did.
+    case "agent_kill":
+    case "agent_message":
+    case "agent_status":
+      return str("agent_id") ?? "";
     case "skill":
       return str("name") ?? "";
     default:
