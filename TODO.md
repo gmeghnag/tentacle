@@ -586,7 +586,7 @@ Daily-driver work (done 2026-10-14):
       (process groups, dispose on close, exit net) + `feat/session-registry` and
       `feat/session-ttl-limits` (daemon-owned sessions: a live id re-attaches,
       jobs disposed on close). Type: eval · Size: M · Blast: load-bearing.
-- [ ] 🟡 **No history-validity invariant** (dangling tool_calls / invalid-JSON args
+- [x] 🟡 **No history-validity invariant** (dangling tool_calls / invalid-JSON args Done by feat/history-validity-invariant (merged 118fb8f, 2026-11-11).
       persisted and re-sent; resume repairs nothing). CONFIRMED (mostly).
       Subsumes the Block-3 requester-throw + consecutive-user items.
       **Eval:** `docs/eval/history-validity-invariant.md`. Type: eval · Size: M ·
