@@ -1580,7 +1580,9 @@ export function App({
       return;
     }
     const session = sessionRef.current;
-    const read = session?.jobOutput;
+    // Bound to the session (`connect` hands the TUI a CLASS instance, whose
+    // `jobOutput` reads `this`): a method taken off the object would throw.
+    const read = session?.jobOutput === undefined ? undefined : session.jobOutput.bind(session);
     if (read === undefined) {
       // An older daemon: one notice, the drawer stays open and its frame intact.
       pushNotice("_this session cannot show a job's output (older daemon)_");
@@ -1640,7 +1642,8 @@ export function App({
     if (jobTargetId === null || jobEndedWhileOpen === null) {
       return;
     }
-    const read = sessionRef.current?.jobOutput;
+    const session = sessionRef.current;
+    const read = session?.jobOutput === undefined ? undefined : session.jobOutput.bind(session);
     if (read === undefined) {
       return;
     }
@@ -2608,7 +2611,11 @@ export function App({
     if (!session?.clear) {
       return;
     }
-    const { clear } = session;
+    // Called ON the session: under `connect` this is the `RemoteSession` CLASS
+    // instance, whose `clear` reads `this` (`this.openForReset()`) — a method
+    // taken off the object and called alone loses `this`
+    // (docs/fix/clear-connect-unbound.md).
+    const clear = session.clear.bind(session);
     clearingRef.current = true;
     // The open a reset needs comes FIRST (review M1): it can ATTACH a session
     // another device keeps live, and that attach's snapshot is a
