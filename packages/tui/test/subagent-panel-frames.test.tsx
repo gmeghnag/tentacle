@@ -51,6 +51,8 @@ function fake(steps: {
   readonly running?: boolean;
   /** Answer `messageSubagent` this way (a refusal: the draft must survive). */
   readonly refuse?: string;
+  /** Answer the refusal only after this long (a late refusal racing a close, F11). */
+  readonly refuseAfterMs?: number;
 }): { session: SessionController; api: FakeSteps; jobs: unknown } {
   const listeners = new Set<(rows: readonly DockTestRow[]) => void>();
   const messageListeners = new Set<(m: { agentId: string; text: string }) => void>();
@@ -85,7 +87,10 @@ function fake(steps: {
     messageSubagent(agentId: string, text: string) {
       messages.push({ agentId, text });
       if (steps.refuse !== undefined) {
-        return Promise.resolve({ ok: false, reason: steps.refuse });
+        const refusal = { ok: false, reason: steps.refuse };
+        return steps.refuseAfterMs === undefined
+          ? Promise.resolve(refusal)
+          : delay(steps.refuseAfterMs).then(() => refusal);
       }
       return Promise.resolve({ ok: true });
     },
@@ -358,6 +363,138 @@ describe("F9: a permission prompt while `open` owns the keys, and the focus come
     await delay(60);
     expect(api.messages).toEqual([{ agentId: "sa-1", text: "still there" }]);
     expect(api.prompts).toHaveLength(0);
+    app.unmount();
+  });
+});
+
+describe("F10: the drafts survive the open/close round trip (Review H1)", () => {
+  test("main text → open → child text → Esc → main text back; reopen → child text back", async () => {
+    const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1] });
+    app.stdin.write("MAINDRAFT");
+    await delay(30);
+    app.stdin.write(DOWN);
+    await delay(30);
+    app.stdin.write(ENTER);
+    await delay(40);
+    // Opening swaps in the child's (empty) draft — and the main one is KEPT.
+    const opened = frame();
+    expect(opened).toContain("→ sa-1");
+    expect(opened).toContain("Type a task or /command");
+    app.stdin.write("CHILDDRAFT");
+    await delay(30);
+    app.stdin.write(ESC);
+    await delay(50);
+    const closed = frame();
+    // Back on the main target, with the main draft the user typed restored.
+    expect(closed).not.toContain("→ sa-1");
+    expect(closed).toContain("MAINDRAFT");
+    expect(closed).not.toContain("CHILDDRAFT");
+    // Reopening restores the CHILD's draft, not the stale main one.
+    app.stdin.write(DOWN);
+    await delay(30);
+    app.stdin.write(ENTER);
+    await delay(50);
+    const reopened = frame();
+    expect(reopened).toContain("→ sa-1");
+    expect(reopened).toContain("CHILDDRAFT");
+    app.unmount();
+  });
+});
+
+describe("F11: a late refusal never lands in the main input (Review H2)", () => {
+  test("send to sa-1, Esc before the answer: the main field stays empty and prompts nothing", async () => {
+    const { app, api, frame } = await mount({
+      rows: [BACKGROUND_ROW.sa1],
+      refuse: "inbox full",
+      refuseAfterMs: 120,
+    });
+    app.stdin.write(DOWN);
+    await delay(30);
+    app.stdin.write(ENTER);
+    await delay(40);
+    app.stdin.write("for-sa1-only");
+    await delay(30);
+    app.stdin.write(ENTER); // the RPC is still in flight…
+    await delay(20);
+    app.stdin.write(ESC); // …and the user closes the child
+    await delay(250);
+    const f = frame();
+    // The refusal is REPORTED (never a silent drop), quoting the text…
+    expect(f).toContain("not sent to sa-1");
+    expect(f).toContain("inbox full");
+    expect(f).toContain("kept as a draft: for-sa1-only");
+    // …but the child's text is NOT in the main input: that row is the placeholder.
+    const inputRow = f.split("\n").find((l) => l.includes("❯")) ?? "";
+    expect(inputRow).not.toContain("for-sa1-only");
+    expect(inputRow).toContain("Type a task or /command");
+    // The reviewer's exact check: the next Enter sends the text to NOBODY.
+    app.stdin.write(ENTER);
+    await delay(60);
+    expect(api.prompts).toHaveLength(0);
+    expect(api.messages).toHaveLength(1);
+    app.unmount();
+  });
+});
+
+describe("F12: the dock's rows are reserved in the viewport (Review H3)", () => {
+  // `ink-testing-library` reports no `rows`, so the App uses its 24-row default
+  // (`stdout.rows ?? 24`) — the reviewer's case, and a real 24-row terminal's.
+  const ROWS = 24;
+  const lines = (frame: string): number => frame.split("\n").length;
+
+  test("one child in the list: the whole frame fits in 24 rows", async () => {
+    const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1] });
+    const f = frame();
+    expect(f).toContain("─ background · 1 ─");
+    expect(lines(f)).toBeLessThanOrEqual(ROWS);
+    app.unmount();
+  });
+
+  test("the drawer open: the whole frame fits in 24 rows", async () => {
+    const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1] });
+    app.stdin.write(DOWN);
+    await delay(30);
+    app.stdin.write(ENTER);
+    await delay(40);
+    const f = frame();
+    expect(f).toContain("→ sa-1");
+    expect(lines(f)).toBeLessThanOrEqual(ROWS);
+    app.unmount();
+  });
+});
+
+describe("F13: a child waiting on the user shows `⚠ needs your permission` (Review M1)", () => {
+  test("the list stays visible under the permission prompt, and marks the asking row", async () => {
+    const broker = new PermissionBroker();
+    const { session } = fake({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] });
+    const app = render(
+      <App
+        createSession={() => session}
+        model="qwen3-27b"
+        cwd="/tmp/work"
+        permissions={broker}
+        columns={100}
+      />,
+    );
+    await delay(40);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("─ background · 2 ─");
+    // The broker asks ON BEHALF OF a background child: the prompt owns the keys,
+    // and the list must keep painting (its asking row is the whole point of ⚠).
+    const asked = broker.request(
+      { tool: "shell", level: "ask", title: "run bun test", input: {} } as never,
+      { agent: { type: "explore", description: "find callers", id: "sa-1" } } as never,
+    );
+    await delay(60);
+    const f = stripAnsi(app.lastFrame() ?? "");
+    expect(f).toContain("run bun test"); // the prompt
+    expect(f).toContain("─ background · 2 ─"); // the list, still there
+    expect(f).toContain("⚠ needs your permission"); // …on the ASKING row
+    const asking = f.split("\n").find((l) => l.includes("⚠ needs your permission")) ?? "";
+    expect(asking).toContain("sa-1");
+    expect(asking).not.toContain("sa-2");
+    app.stdin.write("n");
+    await delay(50);
+    await asked;
     app.unmount();
   });
 });

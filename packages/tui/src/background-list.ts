@@ -466,6 +466,28 @@ export function drawerView(opts: {
   };
 }
 
+/**
+ * How many rows the dock occupies under the footbar — the list (its rule + its
+ * windowed rows) or the drawer (head + `… +k earlier` + tail + sent). The
+ * viewport must reserve them (`App.tsx`'s `activeRows`): without it the frame is
+ * taller than the terminal and Ink re-clears it on every repaint (Review H3).
+ * Counted from the VIEW-MODELS, so it is exactly what the components paint.
+ */
+export function dockRows(list: BackgroundListView | null, drawer: DrawerView | null): number {
+  if (list !== null) {
+    return 1 + list.rows.length;
+  }
+  if (drawer === null) {
+    return 0;
+  }
+  return (
+    1 + // the head rule
+    (drawer.hidden === "" ? 0 : 1) +
+    drawer.tail.length +
+    drawer.sent.length
+  );
+}
+
 /** The input's rule title while a child is open (owner P2 (a): the rule says who Enter reaches). */
 export function inputTitle(
   focus: DockFocus,

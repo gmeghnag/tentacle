@@ -18,12 +18,19 @@ import {
   downEntersList,
   noteSent,
   reconcile,
+  refusalPlacement,
   resetDock,
   restoreRefused,
   sendTarget,
   toggleList,
 } from "./background-focus.ts";
-import { backgroundListView, drawerView, inputTitle, listVisible } from "./background-list.ts";
+import {
+  backgroundListView,
+  dockRows,
+  drawerView,
+  inputTitle,
+  listVisible,
+} from "./background-list.ts";
 import {
   type BackgroundAgentRow,
   backgroundCount,
@@ -558,6 +565,11 @@ export function App({
   // passes the resulting phase to the layout (AGENTS §7).
   const [blinkClock, setBlinkClock] = useState<BlinkClock>(BLINK_IDLE);
   const field = useLineEditor();
+  // The LIVE field value for an async handler: `field` is this render's object,
+  // so a promise that lands frames later would read a stale `field.value`
+  // (Review H2's placement asks whether the field is empty NOW).
+  const fieldValueRef = useRef("");
+  fieldValueRef.current = field.value;
   const [commandIndex, setCommandIndex] = useState(0);
   // Messages the user queued while a turn is running (steering), shown above
   // the input until the agent injects them (a `steer` event clears them FIFO).
@@ -994,6 +1006,39 @@ export function App({
   // Rows the bottom area occupies: the permission dialog; or the running rows,
   // then the list panel or the input box (plus any open palette rows, which
   // only open while idle).
+  //
+  // The dock's view-models (pure; the components only paint them) are computed
+  // HERE, before the layout, because their height feeds `activeRows` (Review H3:
+  // they used to be built after it, so the frame was taller than the terminal).
+  const dockNow = useDockClock(dock.focus.kind !== "input" || dockVisible());
+  // The list is shown when it has rows and nothing is open (the drawer takes its
+  // place). A quit confirm owns the screen. A PERMISSION PROMPT does not: that
+  // prompt may be a background child's ask, and its row says `⚠ needs your
+  // permission` — hiding the list there made that row unreachable (Review M1).
+  const dockListVisible =
+    dock.focus.kind !== "open" && listVisible(subagents) && quitConfirm === null;
+  const dockView = dockListVisible
+    ? backgroundListView({
+        rows: subagentsRef.current,
+        jobs: [],
+        askingId: permission.pendingAgent?.id ?? null,
+        focus: dock.focus,
+        width: columns,
+        now: dockNow,
+      })
+    : null;
+  const drawer =
+    dock.focus.kind === "open" && drawerRow !== null && quitConfirm === null && !permission.pending
+      ? drawerView({
+          row: drawerRow,
+          sent: dock.sent[dock.focus.id] ?? [],
+          outcome: dock.focus.ended,
+          width: columns,
+          now: dockNow,
+        })
+      : null;
+  /** The rows the dock paints under the footbar: the list's, or the drawer's. */
+  const dockHeight = dockRows(dockView, drawer);
   // The reply field's view while it is open (its rows feed the viewport maths).
   const replyMax = permission.pending?.reply?.maxChars ?? 0;
   const replyShown =
@@ -1025,8 +1070,10 @@ export function App({
             permissionShowsCwd(permission.pending),
             replyShown?.rows.length,
             permission.pendingAgent !== null,
-          )
-        : runningRows + (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length);
+          ) + dockHeight
+        : runningRows +
+          (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length) +
+          dockHeight;
   const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
   // Terminal row (1-based) of the panel's first body row: the transcript
   // viewport, the bottom area's marginTop row, the running rows, the title rule.
@@ -1186,20 +1233,28 @@ export function App({
         return true;
       }
       field.reset();
+      // A LATE refusal must never land in the main input (Review H2): by the time
+      // it arrives the user may have closed the child, so the placement decision
+      // is `refusalPlacement`'s — the field only if they are still on that child
+      // and have typed nothing since; otherwise the notice quotes the text.
+      const refused = (reason: string): void => {
+        const placement = refusalPlacement(dockRef.current, id, fieldValueRef.current);
+        if (placement === "field") {
+          field.set(value);
+          pushNotice(`_not sent to ${id}: ${reason}_`);
+          return;
+        }
+        setDock((prev) => restoreRefused(prev, id, value));
+        pushNotice(`_not sent to ${id}: ${reason} — kept as a draft: ${value}_`);
+      };
       void session.messageSubagent(id, text).then(
         (result) => {
           if (!result.ok) {
-            setDock((prev) => restoreRefused(prev, id, value));
-            field.set(value);
-            pushNotice(`_not sent to ${id}: ${result.reason ?? "refused"}_`);
+            refused(result.reason ?? "refused");
           }
         },
         (error: unknown) => {
-          setDock((prev) => restoreRefused(prev, id, value));
-          field.set(value);
-          pushNotice(
-            `_not sent to ${id}: ${error instanceof Error ? error.message : String(error)}_`,
-          );
+          refused(error instanceof Error ? error.message : String(error));
         },
       );
       return true;
@@ -3009,6 +3064,9 @@ export function App({
       const step = dockKey(dockRef.current, char, key, {
         ids: dockIds(),
         openable: (id: string) => id.startsWith("sa-"),
+        // The LIVE field, never a stashed `drafts` copy: typing goes straight to
+        // `field`, so `drafts` is empty on the first open/close (Review H1).
+        draft: field.value,
       });
       if (step.effect.kind !== "pass") {
         if (step.state !== dockRef.current) {
@@ -3290,37 +3348,9 @@ export function App({
     }
   });
 
-  // --- the dock's view-models (pure; the components only paint them) --------
-  const dockNow = useDockClock(dock.focus.kind !== "input" || dockVisible());
+  // --- the dock's other view-models (pure; the components only paint them) --
   // `openTitle`: the input's rule says `→ sa-N` while a child is open (P2 (a)).
   const openTitle = dock.focus.kind === "open" ? inputTitle(dock.focus) : null;
-  // The list is shown when it has rows and nothing is open (the drawer takes its
-  // place); a quit confirm or a permission prompt owns the screen, so neither shows.
-  const dockListVisible =
-    dock.focus.kind !== "open" &&
-    listVisible(subagents) &&
-    quitConfirm === null &&
-    !permission.pending;
-  const dockView = dockListVisible
-    ? backgroundListView({
-        rows: subagentsRef.current,
-        jobs: [],
-        askingId: permission.pendingAgent?.id ?? null,
-        focus: dock.focus,
-        width: columns,
-        now: dockNow,
-      })
-    : null;
-  const drawer =
-    dock.focus.kind === "open" && drawerRow !== null && quitConfirm === null && !permission.pending
-      ? drawerView({
-          row: drawerRow,
-          sent: dock.sent[dock.focus.id] ?? [],
-          outcome: dock.focus.ended,
-          width: columns,
-          now: dockNow,
-        })
-      : null;
   // The status bar's right slot while a child is open: what Enter does there.
   const statusHint =
     dock.focus.kind === "open"

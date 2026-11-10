@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 import {
   LIST_MAX_ROWS,
   backgroundListView,
+  dockRows,
   drawerView,
   inputTitle,
   listVisible,
@@ -278,6 +279,51 @@ describe("T-L4: the drawer", () => {
       now: 72_000,
     });
     expect(d.hidden).toBe("");
+  });
+});
+
+describe("T-L5: the dock's height, counted into the viewport (Review H3)", () => {
+  test("nothing shown → 0 rows", () => {
+    expect(dockRows(null, null)).toBe(0);
+  });
+
+  test("the list: its rule plus its windowed rows (never the full item count)", () => {
+    const one = view({ rows: [row(1)] });
+    expect(dockRows(one, null)).toBe(1 + 1);
+    // Nine items still paint five rows: the height follows the WINDOW, not the list.
+    const nine = view({ rows: Array.from({ length: 9 }, (_, i) => row(i + 1)) });
+    expect(nine.rows).toHaveLength(LIST_MAX_ROWS);
+    expect(dockRows(nine, null)).toBe(1 + LIST_MAX_ROWS);
+  });
+
+  test("the drawer: head + `… +k earlier` + its tail + the messages sent", () => {
+    const full = row(1, {
+      tail: ["a", "b", "c", "d", "e", "f", "g", "h"],
+    });
+    const d = drawerView({
+      row: full,
+      sent: ["one", "two"],
+      outcome: null,
+      width: 100,
+      now: 72_000,
+    });
+    expect(d.hidden).not.toBe("");
+    expect(d.tail).toHaveLength(8);
+    expect(d.sent).toHaveLength(2);
+    expect(dockRows(null, d)).toBe(1 + 1 + 8 + 2);
+  });
+
+  test("a drawer with no hidden steps and nothing sent is just its head and tail", () => {
+    const d = drawerView({
+      row: row(2, { toolUses: 1 }),
+      sent: [],
+      outcome: null,
+      width: 100,
+      now: 72_000,
+    });
+    expect(d.hidden).toBe("");
+    expect(d.tail).toHaveLength(1);
+    expect(dockRows(null, d)).toBe(1 + 1);
   });
 });
 

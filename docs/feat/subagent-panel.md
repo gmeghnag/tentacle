@@ -470,6 +470,26 @@ proceeded.
    `dimColor` prop: `theme-no-stray.test.ts` forbids a bare one outside the
    token table (light mode needs a measurable grey, and SGR 2 is
    terminal-defined).
+10. **A stray `git checkout` of `App.tsx`, scripted back in one pass.** While
+    working `App.tsx` I ran a `git checkout -- packages/tui/src/App.tsx`
+    (intending to inspect the base version) and reverted this task's App edits
+    with it — my own uncommitted work, not `main`'s. I re-applied them from my
+    edit record in a single script pass instead of re-deriving them file
+    re-reads at a time, then re-ran the frame suite. The reviewer audited
+    `git diff main...HEAD -- packages/tui/src/App.tsx` hunk by hunk afterwards
+    and found every hunk additive apart from the `modelBorder` line, which now
+    chooses `targetBorder` while a child is open; input history (UP/DOWN through
+    `resolveLineInput`/`historyStep`), Esc-aborts-turn (now after the dock
+    dispatch, reached when `dockKey` passes in `input`), the send-now chord,
+    permission-key routing and the quit confirm are all intact, with nothing
+    half-applied. So the re-apply cost nothing — but it happened, and Execution
+    must say so. My own re-check of the same diff agrees: the only removed lines
+    (committed range `main...HEAD`) are three imports, the `columns` initialiser
+    (re-wrapped for the `??` fallback), two dependency arrays, the `modelBorder`
+    comment and its JSX line — all of them replaced deliberately (Drift 7's
+    `columns` prop and the `targetBorder` title). Diffing the WORKING TREE also
+    shows the two former `activeRows` lines, removed by this fix round's H3
+    restructure (documented below), which is deliberate too.
 
 ### Tests: red before green
 
@@ -672,3 +692,224 @@ where the App never writes it (H1), and the frame tests cover single happy paths
 a race or a height. Drift 10 was left out of the doc.
 
 **REQUEST-CHANGES** — H1, H2, H3, M1, M2.
+
+## Execution — fix round 1
+
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+Fixing exactly the Review's five findings, nothing else. The reviewer's repro
+(`.tentacle/tmp/subagent-panel/review/repro.ts`, through the real `App` with
+`ink-testing-library`) was re-used before and after each fix.
+
+### Repro, before → after
+
+```
+$ bun .tentacle/tmp/subagent-panel/review/repro.ts    # BEFORE (branch as reviewed)
+H idle lines: 25
+H open lines: 33
+A after open, field still shows MAINDRAFT: false
+A after close, MAINDRAFT restored: false | CHILDDRAFT still in field: false
+A reopen, CHILDDRAFT restored: false
+B main field holds the child's text: true (closed)
+B prompts to the MAIN agent: ["for-sa1-only"]
+C wheel report leaked into frame: false
+
+$ bun .tentacle/tmp/subagent-panel/review/repro.ts    # AFTER
+H idle lines: 23
+H open lines: 23
+A after open, field still shows MAINDRAFT: false
+A after close, MAINDRAFT restored: true | CHILDDRAFT still in field: false
+A reopen, CHILDDRAFT restored: true
+B main field holds the child's text: true (closed)
+B prompts to the MAIN agent: []
+C wheel report leaked into frame: false
+```
+
+`A after open, field still shows MAINDRAFT: false` stays `false` and is correct:
+opening a child re-targets the input, so the child's (empty) draft is what it
+shows. What must survive is the round trip — and `A after close` /
+`A reopen` both flipped. `B main field holds the child's text: true` is the
+repro's own loose check (it matches the frame, and the notice now quotes the
+text by design); the property that matters is its second line, `prompts to the
+MAIN agent`, which went from `["for-sa1-only"]` to `[]`. The frame test below
+asserts the strict one: the input ROW is the placeholder.
+
+### H1 — opening/closing a child lost both drafts
+
+**Changed:** `background-focus.ts:53-59` (`DockKeyContext.draft`, the LIVE field
+value), `:115` `openChild(state, id, live)` and `:129` `closeOpen(state, live)`
+now stash `live` instead of a `drafts` copy; `dockKey` passes `ctx.draft` at both
+close sites and the open site (`:187`, `:192`, `:244`). `App.tsx:3069` hands
+`draft: field.value` into the context. The dead `currentDraft` reader is gone
+(typing never wrote `drafts`, so nothing else could use it).
+
+**Root cause:** the App never writes the field into `drafts` (typing goes
+straight to `field`), so `drafts[id]`/`drafts.main` held only what a previous
+swap had stashed — empty on the first open, and empty on the first close.
+
+**Tests (red → green):**
+- `background-focus.test.ts` T-F2 *"Enter stashes the LIVE field, not a state
+  copy (Review H1)"* and T-F3 *"Esc stashes the CHILD's live text and gives the
+  main one back (Review H1)"*;
+- `subagent-panel-frames.test.tsx` **F10** — the full round trip through the real
+  `App`: "MAINDRAFT" → DOWN → Enter → "CHILDDRAFT" → Esc → main shows
+  "MAINDRAFT" → reopen → "CHILDDRAFT" back.
+
+Red (before the fix, the new tests against the code as reviewed):
+
+```
+(fail) T-F2 … Enter stashes the LIVE field, not a state copy (Review H1)
+(fail) F10: the drafts survive the open/close round trip (Review H1) > main text → open → child text → Esc → main text back; reopen → child text back
+error: expect(received).toContain(expected)
+Expected to contain: "MAINDRAFT"
+```
+
+**Mutation** (revert: `draftOut = live` → `draftOut = state.drafts.main ?? ""`):
+`T-F2` + `F10` RED (`2 fail`), restored → `65 pass · 0 fail`.
+
+### H2 — a late refusal landed in the main input
+
+**Changed:** both async refusal handlers in `submitToTarget` are now one
+`refused(reason)` closure (`App.tsx:1236-1255`) that asks the new pure
+`refusalPlacement(state, id, live)` (`background-focus.ts:341`) where the text
+goes: `field` only if the focus is still `open` on that same id AND the field is
+empty; otherwise `notice`, which quotes the text (`… — kept as a draft: <text>`)
+and also calls `restoreRefused` so the child's draft keeps it. The unconditional
+`field.set(value)` is gone from both handlers. `App.tsx:571-572` adds
+`fieldValueRef` because the promise resolves frames later and the closure's
+`field` object is that render's — its `.value` would be stale.
+
+**Why two outcomes, not the Review's three:** the Review suggested storing the
+text via `restoreRefused` "or quote it in the notice". A `draft` outcome is
+lossy — a later Esc in that child stashes the live field over `drafts[id]`,
+silently dropping the refused text (`closeOpen`'s whole job). So the placement is
+binary: the field (safe: same target) or the notice (which quotes it). T-F5 pins
+that `drafts[id]` never influences the decision.
+
+**Tests (red → green):**
+- `background-focus.test.ts` **T-F5** (5 cases: still-open-and-empty → field;
+  typed-since → notice; closed → notice; another child / the list → notice;
+  a pre-existing stash never hides it);
+- `subagent-panel-frames.test.tsx` **F11** — the reviewer's exact case: send to
+  sa-1, Esc before a delayed (`refuseAfterMs: 120`) refusal, then Enter → the
+  input row is the placeholder, `api.prompts` is empty, `api.messages` has the
+  one refusal, and the notice names the reason and quotes the text.
+
+Red (new tests against the code as reviewed):
+
+```
+(fail) F11 … send to sa-1, Esc before the answer: the main field stays empty and prompts nothing
+error: expect(received).not.toContain(expected)
+Expected to not contain: "for-sa1-only"
+Received: "⏺ not sent to sa-1: inbox full …❯ for-sa1-only…"
+```
+
+(the field held the child's text — the reviewer's repro B, in the frame).
+
+**Mutation** (revert: `mine && live === ""` → `mine || true`): all 5 T-F5 cases
++ F11 RED (`5 fail`), restored → green.
+
+### H3 — the dock's rows were not reserved in the viewport
+
+**Changed:** a new pure `dockRows(list, drawer)`
+(`background-list.ts:474-490`) — the list's `1 + rows.length` (the WINDOW's
+rows, not the item count) or the drawer's `1 + (hidden ? 1 : 0) + tail.length +
+sent.length` — summed into `activeRows` in `App.tsx` (`:1063-1076`, `+ dockHeight`
+on both the prompt and the normal branch). To use it, the dock's view-models
+(`dockNow`, `dockListVisible`, `dockView`, `drawer`) moved ABOVE the layout block
+(`App.tsx:1013-1041`); before they were built after it, so their height could not
+feed it. `openTitle`/`statusHint` stay where they were.
+
+**Tests (red → green):**
+- `background-list.test.ts` **T-L5** (4 cases: nothing → 0; the list's rule +
+  windowed rows at 1 item and at 9 items → 2 / 6; the drawer's head + hidden +
+  tail + sent; a drawer with no hidden and nothing sent);
+- `subagent-panel-frames.test.tsx` **F12** — at the App's 24-row default
+  (`ink-testing-library` reports no `rows`), the frame is ≤ 24 lines with one
+  child in the list AND with the drawer open.
+
+Red:
+
+```
+(fail) F12 … one child in the list: the whole frame fits in 24 rows
+Expected: <= 24 / Received: 25
+(fail) F12 … the drawer open: the whole frame fits in 24 rows
+Expected: <= 24 / Received: 33
+```
+
+**Mutation** (revert: both `+ dockHeight` → `+ 0`): both F12 cases RED, restored
+→ green.
+
+### M1 — the ⚠ row could never show
+
+**Changed:** `dockListVisible` (`App.tsx:1018-1019`) no longer requires`!permission.pending`. The permission prompt owns every key regardless (its
+branch in the key handler runs before the dock), so keeping the list painted
+under it is display-only, and its rows are now reserved (H3) so it cannot
+overflow. The drawer keeps its own `!permission.pending` gate — `permission.
+pendingAgent` is non-null only while a prompt is pending and always names the
+OPEN child in F9's flow, where the prompt replaces the drawer.
+
+**Tests:** `subagent-panel-frames.test.tsx` **F13** — a real `PermissionBroker`
+asks on behalf of `sa-1`; the frame shows the prompt, the list rule, and
+`⚠ needs your permission` on the `sa-1` row and not on `sa-2`'s.
+
+Red:
+
+```
+(fail) F13 … the list stays visible under the permission prompt, and marks the asking row
+error: expect(received).toContain(expected)
+Expected to contain: "─ background · 2 ─"
+Received: "…╭─ run bun test ─…❯ Yes…"
+```
+
+**Mutation** (revert: restore the gate as `&& !!permission.pending`, i.e. show
+the list only under a prompt): F13 RED — and F1/F2/F5/F7/F12/theme with it, as
+expected from a gate on the idle list. Restored → `65 pass · 0 fail`.
+
+### M2 — Drift 10 was missing
+
+Added as **Drift 10** in the Execution's Drifts list above, with the reviewer's
+hunk-by-hunk result of `git diff main...HEAD -- packages/tui/src/App.tsx` and my
+own re-check of the removed lines. No code change.
+
+### Gate
+
+```
+$ bun run check
+$ tsc --noEmit && tsc -p apps/mobile --noEmit     (clean)
+$ biome check .
+  Checked 833 files in 275ms. No fixes applied.   (0 errors, 0 warnings — §6 baseline)
+$ bun test
+ 6439 pass · 3 skip · 0 fail · 452 files · 248.54 s
+```
+
+6439 = the Review's 6423 + the 16 new tests (2 H1 pure + 1 H1 frame, 5 H2 pure
++ 1 H2 frame, 4 H3 pure + 2 H3 frame, 1 M1 frame). The 3 skips are the
+documented opt-in ones (live-k8s, live-docker, the real-socket keepalive) —
+§6's baseline, not new skips. (The delta against the Review's count is
+arithmetic, not a second run of `main`: I ran the gate on this branch only.)
+
+`git diff --stat` (only the intended files):
+
+```
+ packages/tui/src/App.tsx                         | 110 +++++++++++-------
+ packages/tui/src/background-focus.ts             |  48 +++++---
+ packages/tui/src/background-list.ts              |  22 ++++
+ packages/tui/test/background-focus.test.ts       | 102 ++++++++++++++---
+ packages/tui/test/background-list.test.ts        |  46 ++++++++
+ packages/tui/test/subagent-panel-frames.test.tsx | 139 ++++++++++++++++++++++-
+ 6 files changed, 398 insertions(+), 69 deletions(-)
+```
+
+### Drift from the Review's suggested fixes
+
+- **H2** takes two placements (`field` / `notice`) rather than the three the
+  Review sketched (`field` / `restoreRefused` / quote): see the lossy-Esc reason
+  above. The Review's own words allow either.
+- **H3**'s helper lives in `background-list.ts` as the Review named, but takes
+  the two VIEW-MODELS (not the `dockView` `state`) so it counts exactly what the
+  components paint, drawer included.
+- **M1** keeps the drawer hidden under a prompt (the Review only asked for the
+  list); with the list under the prompt, the drawer's own `!permission.pending`
+  gate is unchanged behaviour and not part of the finding.
+

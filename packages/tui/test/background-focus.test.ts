@@ -16,6 +16,7 @@ import {
   downEntersList,
   openChild,
   reconcile,
+  refusalPlacement,
   sendTarget,
   toggleList,
 } from "../src/background-focus.ts";
@@ -65,7 +66,7 @@ describe("T-F1: the DOWN table", () => {
 
 describe("T-F2: the list's own keys", () => {
   const three = ["sa-1", "sa-2", "sa-3"];
-  const ctx = { ids: three, openable: (id: string) => id.startsWith("sa-") };
+  const ctx = { ids: three, openable: (id: string) => id.startsWith("sa-"), draft: "" };
   const step = (state: DockState, char = "", k: Record<string, boolean> = {}) =>
     dockKey(state, char, k, ctx);
 
@@ -124,7 +125,8 @@ describe("T-F2: the list's own keys", () => {
   test("Enter opens the selected child and swaps the drafts", () => {
     const withDrafts: DockState = { ...INPUT_DOCK, drafts: { main: "half typed" } };
     const at = toggleList(withDrafts, three);
-    const opened = step(at, "", { return: true });
+    // The live field is the source of the draft that goes out (Review H1).
+    const opened = dockKey(at, "", { return: true }, { ...ctx, draft: "half typed" });
     expect(opened.effect).toEqual({
       kind: "open",
       id: "sa-1",
@@ -133,30 +135,52 @@ describe("T-F2: the list's own keys", () => {
     });
     expect(opened.state.focus).toMatchObject({ kind: "open", id: "sa-1" });
   });
+
+  test("Enter stashes the LIVE field, not a state copy (Review H1)", () => {
+    // The App never writes `field.value` into `drafts`; it hands it to the module
+    // in the key context. Reading `drafts.main` instead loses the user's text.
+    const live: DockState = { ...INPUT_DOCK, drafts: {} };
+    const opened = dockKey(
+      toggleList(live, three),
+      "",
+      { return: true },
+      {
+        ...ctx,
+        draft: "MAINDRAFT",
+      },
+    );
+    expect(opened.effect).toEqual({
+      kind: "open",
+      id: "sa-1",
+      draftOut: "MAINDRAFT",
+      draftIn: "",
+    });
+    expect(opened.state.drafts.main).toBe("MAINDRAFT");
+  });
 });
 
 describe("T-F3: open / close swap drafts per target; sendTarget's rules", () => {
   const three = ["sa-1", "sa-2", "sa-3"];
-  const ctx = { ids: three, openable: (id: string) => id.startsWith("sa-") };
+  const ctx = { ids: three, openable: (id: string) => id.startsWith("sa-"), draft: "" };
 
   test("each target keeps its own draft, and the main one comes back", () => {
     let state: DockState = { ...INPUT_DOCK, drafts: { main: "main text" } };
-    state = openChild(state, "sa-1").state;
+    state = openChild(state, "sa-1", "main text").state;
     expect(state.focus).toMatchObject({ kind: "open", id: "sa-1" });
     // Type into sa-1's draft.
     state = { ...state, drafts: { ...state.drafts, "sa-1": "to sa-1" } };
-    const closed = closeOpen(state);
+    const closed = closeOpen(state, "to sa-1");
     expect(closed.state.focus).toEqual({ kind: "input" });
     expect(closed.effect).toEqual({ kind: "close", draftOut: "to sa-1", draftIn: "main text" });
     expect(closed.state.drafts).toMatchObject({ main: "main text", "sa-1": "to sa-1" });
     // Re-opening restores sa-1's own draft.
-    const reopened = openChild(closed.state, "sa-1");
+    const reopened = openChild(closed.state, "sa-1", "main text");
     expect(reopened.effect).toMatchObject({ draftIn: "to sa-1" });
   });
 
   test("sendTarget: the input sends to the agent; an open target to it; an ended one is refused", () => {
     expect(sendTarget(INPUT_DOCK, "hello")).toEqual({ kind: "main" });
-    const open = openChild(INPUT_DOCK, "sa-1").state;
+    const open = openChild(INPUT_DOCK, "sa-1", "").state;
     expect(sendTarget(open, "hello")).toEqual({ kind: "agent", id: "sa-1" });
     const ended: DockState = {
       focus: { kind: "open", id: "sa-1", ended: { kind: "finished" }, frozen: null },
@@ -172,14 +196,28 @@ describe("T-F3: open / close swap drafts per target; sendTarget's rules", () => 
   });
 
   test("a `/…` command goes to the main agent, never to the child", () => {
-    const open = openChild(INPUT_DOCK, "sa-1").state;
+    const open = openChild(INPUT_DOCK, "sa-1", "").state;
     expect(sendTarget(open, "/clear")).toEqual({ kind: "main" });
     // …and a draft of whitespace is not a message at all.
     expect(sendTarget(open, "   ")).toEqual({ kind: "main" });
   });
 
+  test("Esc stashes the CHILD's live text and gives the main one back (Review H1)", () => {
+    // Same flaw on the way out: `drafts[id]` is whatever was stashed at open
+    // (empty), so the child's text typed since must come from the live field.
+    const open: DockState = {
+      focus: { kind: "open", id: "sa-1", ended: null, frozen: null },
+      drafts: { main: "MAINDRAFT", "sa-1": "" },
+      sent: {},
+    };
+    const ctxWithDraft = { ids: ["sa-1"], openable: () => true, draft: "CHILDDRAFT" };
+    const closed = dockKey(open, "", { escape: true }, ctxWithDraft);
+    expect(closed.effect).toEqual({ kind: "close", draftOut: "CHILDDRAFT", draftIn: "MAINDRAFT" });
+    expect(closed.state.drafts).toMatchObject({ main: "MAINDRAFT", "sa-1": "CHILDDRAFT" });
+  });
+
   test("Esc in `open` closes (never stops the turn) and the ended drawer closes too", () => {
-    const open = openChild(INPUT_DOCK, "sa-1").state;
+    const open = openChild(INPUT_DOCK, "sa-1", "").state;
     const esc = dockKey(open, "", { escape: true }, ctx);
     expect(esc.effect.kind).toBe("close");
     const ended: DockState = {
@@ -193,7 +231,7 @@ describe("T-F3: open / close swap drafts per target; sendTarget's rules", () => 
   });
 
   test("every other key in `open` is `pass`: the input keeps editing, as today", () => {
-    const open = openChild(INPUT_DOCK, "sa-1").state;
+    const open = openChild(INPUT_DOCK, "sa-1", "").state;
     for (const [char, k] of [
       ["a", {}],
       ["", { backspace: true }],
@@ -207,9 +245,47 @@ describe("T-F3: open / close swap drafts per target; sendTarget's rules", () => 
   });
 });
 
+describe("T-F5: where a late refusal's text goes (Review H2)", () => {
+  const openOn = (id: string): DockState => ({
+    focus: { kind: "open", id, ended: null, frozen: null },
+    drafts: {},
+    sent: {},
+  });
+
+  test("still open on that child, field empty → the field takes it", () => {
+    expect(refusalPlacement(openOn("sa-1"), "sa-1", "")).toBe("field");
+  });
+
+  test("still open but the user typed since → never an overwrite", () => {
+    expect(refusalPlacement(openOn("sa-1"), "sa-1", "typed since")).toBe("notice");
+  });
+
+  test("closed (the reviewer's case) → NEVER the main field, the notice quotes it", () => {
+    expect(refusalPlacement(INPUT_DOCK, "sa-1", "")).toBe("notice");
+  });
+
+  test("back on the list, or another child open → never the field", () => {
+    expect(refusalPlacement(openOn("sa-2"), "sa-1", "")).toBe("notice");
+    expect(
+      refusalPlacement(
+        { ...INPUT_DOCK, focus: { kind: "list", selected: "sa-1", armed: false } },
+        "sa-1",
+        "",
+      ),
+    ).toBe("notice");
+  });
+
+  test("Esc's own stash is never treated as a place to hide text", () => {
+    // `drafts[id]` may already hold what the user left there: the placement must
+    // not depend on it, or a later Esc would overwrite it (a silent drop).
+    const stashed: DockState = { ...openOn("sa-1"), drafts: { main: "M", "sa-1": "earlier" } };
+    expect(refusalPlacement(stashed, "sa-1", "typed")).toBe("notice");
+  });
+});
+
 describe("T-F4: reconcile", () => {
   const three = ["sa-1", "sa-2", "sa-3"];
-  const ctx = { ids: three, openable: () => true };
+  const ctx = { ids: three, openable: () => true, draft: "" };
 
   test("the selected child leaves → the row that took its place, else the one above", () => {
     const at = dockKey(toggleList(INPUT_DOCK, three), "", { downArrow: true }, ctx).state;
@@ -233,7 +309,7 @@ describe("T-F4: reconcile", () => {
   });
 
   test("an open child ends → its drawer freezes and its target is marked, never re-routed", () => {
-    const open = openChild(INPUT_DOCK, "sa-1").state;
+    const open = openChild(INPUT_DOCK, "sa-1", "").state;
     const after = reconcile(open, [], [{ id: "sa-1", outcome: { kind: "finished" } }]);
     expect(after.focus).toMatchObject({ kind: "open", id: "sa-1", ended: { kind: "finished" } });
     // A later report without it does not unfreeze it.
@@ -241,7 +317,7 @@ describe("T-F4: reconcile", () => {
   });
 
   test("an open child still running is untouched by an unrelated end", () => {
-    const open = openChild(INPUT_DOCK, "sa-1").state;
+    const open = openChild(INPUT_DOCK, "sa-1", "").state;
     const after = reconcile(open, ["sa-1", "sa-2"], [{ id: "sa-2", outcome: { kind: "stopped" } }]);
     expect(after.focus).toMatchObject({ kind: "open", id: "sa-1", ended: null });
   });

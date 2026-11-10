@@ -50,6 +50,13 @@ export interface DockKeyContext {
   readonly ids: readonly string[];
   /** Whether Enter can open it (a sub-agent yes, a shell row: P6's follow-up). */
   readonly openable: (id: string) => boolean;
+  /**
+   * The LIVE input field's text, as it is this keypress — not `drafts`, which
+   * only holds what a previous swap stashed. The App never writes the field into
+   * `drafts` (typing goes straight to `field`), so `drafts` alone is stale: it is
+   * empty on the first open and on the first close (Review H1).
+   */
+  readonly draft: string;
 }
 
 export interface DockKeyResult {
@@ -104,9 +111,9 @@ export function toggleList(state: DockState, ids: readonly string[]): DockState 
   return { ...state, focus: { kind: "list", selected: ids[0] ?? "", armed: false } };
 }
 
-/** Open a child: the main draft is stashed, the target's comes back. */
-export function openChild(state: DockState, id: string): DockKeyResult {
-  const draftOut = currentDraft(state);
+/** Open a child: the main draft (the LIVE field) is stashed, the target's comes back. */
+export function openChild(state: DockState, id: string, live: string): DockKeyResult {
+  const draftOut = live;
   const draftIn = state.drafts[id] ?? "";
   return {
     state: {
@@ -118,21 +125,15 @@ export function openChild(state: DockState, id: string): DockKeyResult {
   };
 }
 
-/** Close the open child: its draft is stashed, the main one comes back. */
-export function closeOpen(state: DockState): DockKeyResult {
+/** Close the open child: its draft (the LIVE field) is stashed, the main one comes back. */
+export function closeOpen(state: DockState, live: string): DockKeyResult {
   const id = state.focus.kind === "open" ? state.focus.id : "main";
-  const draftOut = state.drafts[id] ?? "";
+  const draftOut = live;
   const draftIn = state.drafts.main ?? "";
   return {
     state: { ...state, focus: { kind: "input" }, drafts: { ...state.drafts, [id]: draftOut } },
     effect: { kind: "close", draftOut, draftIn },
   };
-}
-
-/** The draft the current focus edits (the open child's, or the main one). */
-export function currentDraft(state: DockState): string {
-  const key = state.focus.kind === "open" ? state.focus.id : "main";
-  return state.drafts[key] ?? "";
 }
 
 /** Where a submitted text goes: the agent, one child, or a refusal (never a silent re-route). */
@@ -183,12 +184,12 @@ export function dockKey(
   if (state.focus.kind === "open") {
     // Esc closes and NEVER stops the turn: the App's Esc-abort branch is never reached.
     if (key.escape || ctrlT) {
-      return closeOpen(state);
+      return closeOpen(state, ctx.draft);
     }
     // Ctrl+T toggles into the list (the drawer hides, the list shows the target
     // selected) — a direct way from one surface to the other.
     if (ctrlT) {
-      return closeOpen(state);
+      return closeOpen(state, ctx.draft);
     }
     // Everything else is the input's (typing, Enter → sendTarget, history, …).
     return { state, effect: { kind: "pass" } };
@@ -240,7 +241,7 @@ export function dockKey(
       // A shell row: its output tail is P6's follow-up (not a silent no-op).
       return none;
     }
-    return openChild(state, selected);
+    return openChild(state, selected, ctx.draft);
   }
   if (char === "x" && !key.ctrl && !key.meta) {
     return {
@@ -323,6 +324,23 @@ export function restoreRefused(state: DockState, id: string, text: string): Dock
     return state;
   }
   return { ...state, drafts: { ...state.drafts, [id]: text } };
+}
+
+/**
+ * Where a LATE refusal's text goes (Review H2: it used to be `field.set(value)`,
+ * unconditionally, so a child's text the user had since left landed in the MAIN
+ * input and the next Enter sent it to the wrong agent).
+ *
+ * `field` — ONLY when the user is still on that child, in its input, and has
+ * typed nothing since: putting the text back in front of them is what they
+ * expect, and Enter would resend it to the same child.
+ * `notice` — everywhere else: the notice quotes the text (never a silent drop,
+ * and never a re-route). The child's stashed draft is NOT a safe home here: a
+ * later Esc stashes the live field over it, which would drop the text silently.
+ */
+export function refusalPlacement(state: DockState, id: string, live: string): "field" | "notice" {
+  const mine = state.focus.kind === "open" && state.focus.id === id;
+  return mine && live === "" ? "field" : "notice";
 }
 
 /** `/sessions`, resume, a switch: the dock belongs to a session, so it starts over. */
