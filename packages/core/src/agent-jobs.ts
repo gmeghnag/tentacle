@@ -227,6 +227,13 @@ export class AgentJobs {
       readonly inbox: AgentInbox;
       /** How many notifies this child sent since the user last wrote. */
       notified: number;
+      /**
+       * Its runner was given an `agentId`, so it registered `agent_notify`
+       * (`agent/src/subagent.ts`). A child MOVED to the background by `adopt`
+       * was started without one: a tool it never got is never offered to it
+       * (docs/fix/autoaccept-wake-turns.md Review 1).
+       */
+      readonly notifiable: boolean;
     }
   >();
   /**
@@ -409,6 +416,8 @@ export class AgentJobs {
       killed: false,
       inbox,
       notified: 0,
+      // `start` hands the runner its `agentId`: it registers `agent_notify`.
+      notifiable: true,
     });
     this.live.set(agentId, { toolUses: 0, tokens: 0, tail: [] });
     this.changed();
@@ -467,6 +476,9 @@ export class AgentJobs {
           killed: false,
           inbox: entry.inbox,
           notified: 0,
+          // It began as a foreground child (`agent_task`'s movable path), whose
+          // runner got no `agentId`: the move does not rebuild its tools.
+          notifiable: false,
         });
         this.live.set(agentId, seed);
         this.changed();
@@ -505,7 +517,8 @@ export class AgentJobs {
         reason: `the message is ${text.length} characters, over the ${AGENT_MESSAGE_MAX_CHARS}-character limit: nothing was sent. Send a shorter one.`,
       };
     }
-    const pushed = entry.inbox.push(inboxText(from, text, this.twoWay), from);
+    // The hint names `agent_notify`: only a child that HAS it is told to use it.
+    const pushed = entry.inbox.push(inboxText(from, text, this.twoWay && entry.notifiable), from);
     if (pushed.ok) {
       return { ok: true, index: pushed.index };
     }
@@ -527,6 +540,16 @@ export class AgentJobs {
    */
   pending(agentId: string): number {
     return this.running.get(agentId)?.inbox.pending ?? 0;
+  }
+
+  /**
+   * Whether `agentId`'s runner got an `agentId` (so it has `agent_notify`):
+   * `agent_control{action:"message"}` reads it, so it never tells the parent a
+   * moved child may answer when it cannot (docs/fix/autoaccept-wake-turns.md
+   * Review 1). `false` for an id that is not running.
+   */
+  notifiable(agentId: string): boolean {
+    return this.running.get(agentId)?.notifiable ?? false;
   }
 
   /**

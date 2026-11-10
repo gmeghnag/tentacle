@@ -683,6 +683,47 @@ describe("AgentJobs.acquire: the slot's inbox and adopt (T6)", () => {
     await tick();
   });
 
+  // docs/fix/autoaccept-wake-turns.md Review finding 1: a child MOVED to the
+  // background by `adopt` was started with no `agentId` in its controls
+  // (`tools/src/task.ts`), so its runner never registered `agent_notify`
+  // (`agent/src/subagent.ts`). With `subagents.twoWay` on, the reply hint would
+  // name a tool the child does not have: the moved child's texts carry NO hint,
+  // while a `start`ed child's still do. MUTATION: drop `&& entry.notifiable` in
+  // `message` → the first case goes red.
+  test("setTwoWay: an ADOPTED child gets no reply hint (it has no agent_notify)", async () => {
+    const { jobs } = rig();
+    jobs.setTwoWay(true);
+    const slot = jobs.acquire("map repo");
+    if (!slot.ok) {
+      throw new Error("expected a slot");
+    }
+    const gate = Promise.withResolvers<AgentJobResult>();
+    const id = slot.adopt(
+      spec(),
+      new AbortController(),
+      { toolUses: 0, tokens: 0, tail: [] },
+      async () => gate.promise,
+    );
+    expect(id).toBe("sa-1");
+    // The parent's message text, not a hint about a tool this child lacks.
+    expect(jobs.message("sa-1", "after the move", "agent")).toEqual({ ok: true, index: 1 });
+    expect(slot.inbox.drain()).toEqual(["[message from the parent agent] after the move"]);
+    // `agent_control{action:"message"}` must not claim it either.
+    expect(jobs.notifiable("sa-1")).toBe(false);
+    gate.resolve(result());
+    await tick();
+    // A `start`ed child (given an `agentId`) still gets the hint.
+    const g = inboxRun();
+    jobs.start(spec(), g.run);
+    expect(jobs.notifiable("sa-2")).toBe(true);
+    jobs.message("sa-2", "after the start", "agent");
+    expect(g.inbox.drain()).toEqual([
+      `[message from the parent agent] after the start${TWO_WAY_REPLY_HINT}`,
+    ]);
+    g.done();
+    await tick();
+  });
+
   test("adopt refuses a CLOSED slot inbox: nothing moved, the slot stays foreground", async () => {
     const { jobs, log } = rig(1);
     const slot = jobs.acquire("map repo");

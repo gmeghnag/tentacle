@@ -703,3 +703,39 @@ The executor followed the plan's order and implemented the owner's answers (bump
 Q3 b). It found and fixed a second dropped-frame site (`sameReads`) through its own frame
 test, and reported every other drift. Its mutation claims for T3 and T8 reproduced here.
 It missed the moved-child path when it wired the Q3 hint, which is the one finding.
+
+## Execution — fix round 1
+
+*— deepseek (tentacle --profile deepseek), 2026-11-11*
+
+Review finding 1 (MEDIUM), the Q3 two-way hint on a MOVED child; plus its OPTIONAL
+point, applied the same way (one line, one flag).
+
+**Change.** `AgentJobs`'s running entry gained `readonly notifiable: boolean`:
+`true` in `start` (`core/src/agent-jobs.ts:411-414`, the path that hands the runner
+its `agentId`, so `agent/src/subagent.ts` registers `agent_notify`), `false` in
+`adopt` (`:469-473`, a foreground child whose runner got no `agentId` — the move
+rebuilds no tool registry). `message` now pushes
+`inboxText(from, text, this.twoWay && entry.notifiable)` (`:521`).
+
+The OPTIONAL point, same flag through one small public read: `notifiable(agentId)`
+(`:546-553`, `false` for an id not running), read by
+`agent_control{action:"message"}` (`tools/src/agent-control.ts:160-171`) — so the
+parent is not told a moved child may answer with `agent_notify` either. The tool
+DESCRIPTION still follows `subagents.twoWay` alone (it is per-session, not
+per-child); that asymmetry is deliberate and unchanged.
+
+**Tests (red first).**
+- `core/test/agent-jobs.test.ts` — `acquire` → `adopt` → `message`: the drained text
+  is `[message from the parent agent] after the move`, no hint; a `start`ed child's
+  carries `TWO_WAY_REPLY_HINT`; `notifiable` is `false` for `sa-1`, `true` for
+  `sa-2`. RED before the fix (received the 2-line hint), green after.
+- `tools/test/agent-control.test.ts` — an adopted child with `twoWay` on gets
+  "No reply comes back…", never `agent_notify`. Also red before.
+- Non-vacuity by mutation, both reverted: `this.twoWay && entry.notifiable` →
+  `this.twoWay` → 1 fail in the core test; `twoWay && jobs.notifiable(agentId)` →
+  `twoWay` → 1 fail in the tools test.
+
+**Gate.** `bun run check`: `tsc --noEmit` both projects clean · `biome check .` 852
+files, no fixes (one formatting fix applied to the new test during the round) ·
+`bun test` **6674 pass, 3 skip (the three opt-in), 0 fail** — 6672 + the 2 new tests.
