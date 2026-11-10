@@ -41,6 +41,13 @@ export interface SubAgentOutcome {
    * (review M3 / owner Q2).
    */
   readonly closing?: string;
+  /**
+   * Set when the child MOVED to the background while it ran
+   * (docs/feat/subagent-detach.md): the `sa-N` it became. Its report arrives
+   * later as a `[background]` note, so the block shows a subtle row instead of
+   * a failure, and no report body of its own.
+   */
+  readonly movedTo?: string;
 }
 
 export interface SubAgentView {
@@ -89,7 +96,10 @@ export function subAgentView(sub: SubAgentProgress, opts: SubAgentViewOptions = 
     done: sub.done
       ? {
           ...(sub.stopReason !== undefined ? { stopReason: sub.stopReason } : {}),
-          ...closingRow(sub.stopReason),
+          ...closingRow(sub.stopReason, sub.movedTo),
+          ...(sub.stopReason === "background" && sub.movedTo !== undefined
+            ? { movedTo: sub.movedTo }
+            : {}),
         }
       : null,
   };
@@ -118,10 +128,24 @@ const OUTCOME_NOTES: Readonly<Record<string, string>> = {
   max_iterations: "_(sub-agent hit its iteration cap)_",
 };
 
+/**
+ * Why a child stopped that a person did not ask for: `background` is NOT one of
+ * them — the child moved, because someone wrote while it ran, and the plan says
+ * to keep it (docs/feat/subagent-detach.md, owner Q1).
+ */
+const BACKGROUND = "background";
 /** The closing row a stop reason earns: one for anything but a clean `end_turn`. */
-function closingRow(stopReason: string | undefined): { closing?: string } {
+function closingRow(
+  stopReason: string | undefined,
+  movedTo?: string,
+): { closing?: string; movedTo?: string } {
   if (stopReason === undefined || stopReason === "end_turn") {
     return {};
+  }
+  // A move is the work going ON, not a failure: a subtle row, never `✗`.
+  if (stopReason === BACKGROUND) {
+    const where = movedTo !== undefined ? ` as ${movedTo}` : "";
+    return { closing: `→ background${where} · its report will arrive later` };
   }
   return { closing: `✗ ${CLOSING_LABELS[stopReason] ?? stopReason}` };
 }

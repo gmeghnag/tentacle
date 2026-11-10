@@ -310,3 +310,38 @@ describe("subAgentReport: the outcome is said once", () => {
     expect(subAgentReport("", "end_turn")).toBe("");
   });
 });
+
+// docs/feat/subagent-detach.md T28: a child that MOVED to the background is not
+// a failure. Its tool call ends with `stopReason: "background"` and its `sa-N`,
+// and the block closes with a subtle row that says where the work went — never
+// `✗`.
+describe("T28: a child that moved to the background", () => {
+  test("closes with `→ background as sa-1 …`, and carries `movedTo`", () => {
+    const view = subAgentView(sub({ done: true, stopReason: "background", movedTo: "sa-1" }));
+    expect(view.done).toEqual({
+      stopReason: "background",
+      closing: "→ background as sa-1 · its report will arrive later",
+      movedTo: "sa-1",
+    });
+    // Never the failure row (a move is the work going on, not ending).
+    expect(view.done?.closing).not.toContain("✗");
+  });
+
+  test("with no id (an older daemon's frame): `→ background`", () => {
+    const view = subAgentView(sub({ done: true, stopReason: "background" }));
+    expect(view.done?.closing).toBe("→ background · its report will arrive later");
+    expect(view.done?.movedTo).toBeUndefined();
+  });
+
+  test("a plain `end_turn` has no `movedTo` and no closing row, as before", () => {
+    const view = subAgentView(sub({ done: true, stopReason: "end_turn" }));
+    expect(view.done).toEqual({ stopReason: "end_turn" });
+    expect(view.done?.movedTo).toBeUndefined();
+  });
+
+  test("a cancelled child keeps `✗ cancelled` (a move is the only subtle closing row)", () => {
+    const view = subAgentView(sub({ done: true, stopReason: "cancelled" }));
+    expect(view.done).toEqual({ stopReason: "cancelled", closing: "✗ cancelled" });
+    expect(view.done?.movedTo).toBeUndefined();
+  });
+});

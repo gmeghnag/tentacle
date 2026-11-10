@@ -132,6 +132,7 @@ function progressToEvent(
             id,
             toolUses: update.toolUses,
             stopReason: progressText(update.stopReason),
+            ...(update.agentId !== undefined ? { agentId: progressText(update.agentId) } : {}),
           }
         : null;
     default:

@@ -55,10 +55,42 @@ export type AgentJobStart =
   | { readonly ok: true; readonly agentId: string }
   | { readonly ok: false; readonly reason: string };
 
-/** A foreground child's slot. `release` is idempotent. */
+/**
+ * A foreground child's slot (`docs/feat/subagent-detach.md`). `release` is
+ * idempotent, and a no-op once the slot was adopted.
+ */
 export type AgentSlot =
-  | { readonly ok: true; readonly release: () => void }
+  | {
+      readonly ok: true;
+      readonly release: () => void;
+      /**
+       * Register what turns this child into a background one, when a person
+       * writes while it runs (`HostedSession.enqueue` / `send_now`). Called by
+       * `detachForeground`, in its own `try`; a no-op once the slot is gone.
+       */
+      readonly movable: (move: () => void) => void;
+      /**
+       * Exchange this slot for a running entry, in ONE synchronous stretch:
+       * `launched` first (a throw leaves the child foreground, nothing
+       * half-moved), then the maps. `undefined` when there is nothing to
+       * exchange (disposed, no host, the slot already released or adopted).
+       * NO cap check (F8): one slot becomes one entry, `used()` is unchanged.
+       */
+      readonly adopt: (
+        spec: AgentJobSpec,
+        controller: AbortController,
+        seed: AgentJobLive,
+        run: (controls: AgentJobControls) => Promise<AgentJobResult>,
+      ) => string | undefined;
+    }
   | { readonly ok: false; readonly reason: string };
+
+/** A child's visible state so far (a row's counts, and what a move carries over). */
+export interface AgentJobLive {
+  toolUses: number;
+  tokens: number;
+  tail: string[];
+}
 
 /** One child as a client shows it (docs/feat/subagent-background-ui.md Design 2). */
 export interface AgentJobRow {
@@ -78,6 +110,29 @@ export interface AgentJobRow {
 /** How many labels a row keeps: enough for a panel, never a log. */
 export const AGENT_ROW_TAIL_MAX = 8;
 
+/**
+ * Fold one progress event of a child into its visible state. Returns whether
+ * anything visible changed, so the caller decides to publish.
+ *
+ * Exported because a FOREGROUND child folds the same way (`agent_task`'s
+ * movable path): a detach hands that state over as the new row's seed, so the
+ * row is honest at the moment of the move (docs/feat/subagent-detach.md).
+ */
+export function foldAgentProgress(live: AgentJobLive, event: ToolProgressEvent): boolean {
+  if (event.kind === "subagent_tool") {
+    live.toolUses += 1;
+    live.tail.push(event.label);
+    if (live.tail.length > AGENT_ROW_TAIL_MAX) {
+      live.tail.splice(0, live.tail.length - AGENT_ROW_TAIL_MAX);
+    }
+  } else if (event.kind === "subagent_usage") {
+    live.tokens += event.promptTokens + event.completionTokens;
+  } else {
+    return false;
+  }
+  return true;
+}
+
 const NO_OUTPUT = "(the sub-agent produced no output)";
 
 export class AgentJobs {
@@ -93,13 +148,19 @@ export class AgentJobs {
       killed: boolean;
     }
   >();
-  /** Foreground children holding a slot: a token each, with its description for the refusal. */
-  private readonly foreground = new Map<symbol, string>();
+  /**
+   * Foreground children holding a slot: a token each, with its description for
+   * the refusal, when it started, and what would move it to the background.
+   */
+  private readonly foreground = new Map<
+    symbol,
+    { readonly description: string; readonly startedAt: number; move?: () => void }
+  >();
   private readonly listeners = new Set<(exit: AgentJobExit) => void>();
   /** Told after every visible change to `rows()` (a start, a progress, an end). */
   private readonly changeListeners = new Set<() => void>();
   /** Per child, the visible state folded from its progress events. */
-  private readonly live = new Map<string, { toolUses: number; tokens: number; tail: string[] }>();
+  private readonly live = new Map<string, AgentJobLive>();
 
   constructor(maxParallel: number) {
     this.cap = maxParallel;
@@ -161,19 +222,27 @@ export class AgentJobs {
     if (live === undefined || !this.running.has(agentId)) {
       return;
     }
-    if (event.kind === "subagent_tool") {
-      live.toolUses += 1;
-      live.tail.push(event.label);
-      if (live.tail.length > AGENT_ROW_TAIL_MAX) {
-        live.tail.splice(0, live.tail.length - AGENT_ROW_TAIL_MAX);
-      }
-    } else if (event.kind === "subagent_usage") {
-      live.tokens += event.promptTokens + event.completionTokens;
-    } else {
+    if (!foldAgentProgress(live, event)) {
       // `subagent_start` (already known) and `subagent_end` (the exit follows).
       return;
     }
     this.changed();
+  }
+
+  /**
+   * Turn every FOREGROUND child into a background one, in one synchronous
+   * stretch (docs/feat/subagent-detach.md: a person wrote while they run).
+   * Idempotent — a moved child has left `foreground` — and each `move` runs in
+   * its own `try`: a child that cannot move never takes the others down.
+   */
+  detachForeground(): void {
+    for (const entry of [...this.foreground.values()]) {
+      try {
+        entry.move?.();
+      } catch {
+        // The child stays foreground and the steer is queued: nothing half-moved.
+      }
+    }
   }
 
   /**
@@ -242,8 +311,40 @@ export class AgentJobs {
       return { ok: false, reason: this.refusal() };
     }
     const token = Symbol("foreground");
-    this.foreground.set(token, description);
-    return { ok: true, release: () => void this.foreground.delete(token) };
+    this.foreground.set(token, {
+      description,
+      startedAt: this.host?.now?.() ?? 0,
+    });
+    return {
+      ok: true,
+      release: () => void this.foreground.delete(token),
+      movable: (move) => {
+        const entry = this.foreground.get(token);
+        if (entry !== undefined) {
+          entry.move = move;
+        }
+      },
+      adopt: (spec, controller, seed, run) => {
+        const entry = this.foreground.get(token);
+        const host = this.host;
+        if (this.disposed || host === undefined || entry === undefined) {
+          return undefined;
+        }
+        // FIRST: a throw here (the log refused) leaves the child foreground.
+        const agentId = host.launched(spec);
+        this.foreground.delete(token);
+        this.running.set(agentId, {
+          job: { ...spec, agentId, startedAt: entry.startedAt },
+          controller,
+          killed: false,
+        });
+        this.live.set(agentId, seed);
+        this.changed();
+        // Same last net as `start`: nothing `drive` throws escapes as unhandled.
+        void this.drive(agentId, spec, controller, run).catch(() => {});
+        return agentId;
+      },
+    };
   }
 
   /** Aborts every child. No `ended`, no exit: the session is going away. */
@@ -274,10 +375,14 @@ export class AgentJobs {
     return this.running.size + this.foreground.size;
   }
 
+  private descriptions(): readonly string[] {
+    return [...this.foreground.values()].map((entry) => entry.description);
+  }
+
   private refusal(): string {
     const named = [
       ...this.list().map((job) => `${job.agentId} (${job.description})`),
-      ...[...this.foreground.values()].map((description) => `(foreground) ${description}`),
+      ...this.descriptions().map((description) => `(foreground) ${description}`),
     ];
     // "End your turn and be woken" is only true when a background child runs:
     // foreground holders alone wake nobody, so ending the turn would stall the task.

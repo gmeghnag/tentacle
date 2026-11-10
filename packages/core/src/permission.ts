@@ -105,6 +105,15 @@ export interface PermissionRequestOptions {
   /** Aborted when the request is withdrawn (answered elsewhere, its turn cancelled). */
   readonly signal?: AbortSignal;
   /**
+   * Aborted when the ASKER withdraws the prompt itself, to ask it again
+   * (docs/feat/subagent-detach.md: a foreground child's open ask is withdrawn
+   * and re-asked as `sa-N` when the child moves to the background). It settles
+   * the request like `signal` does, but the difference matters to the asker:
+   * a `cancelled` outcome caused by THIS one is `dismissed`, never a decision.
+   * Process-internal, like `signal`: never on the wire.
+   */
+  readonly withdraw?: AbortSignal;
+  /**
    * The remote turn the request was raised in, by the stream's brackets
    * (laptop-internal, never on the wire, like `signal`). A frontend tells its
    * own turns from another device's with it (auto-accept answers only its
@@ -142,6 +151,13 @@ export const denyAll: PermissionRequester = async () => ({ allowed: false });
 
 /** What a withdrawn prompt resolves to. */
 export const DISMISSED: PermissionResponse = { allowed: false, dismissed: true };
+
+/**
+ * `AbortSignal.any` (Bun has it; the repo's TS lib does not declare it):
+ * one signal that aborts when ANY of them does.
+ */
+export const anySignal = (signals: AbortSignal[]): AbortSignal =>
+  (AbortSignal as unknown as { any(signals: AbortSignal[]): AbortSignal }).any(signals);
 
 export interface PermissionBrokerOptions {
   /**

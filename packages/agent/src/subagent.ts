@@ -14,7 +14,10 @@
 import {
   type ExecutionEnvironment,
   type ModelProvider,
+  type PermissionRequest,
+  type PermissionRequestOptions,
   type PermissionRequester,
+  type PermissionResponse,
   type ToolProgressEvent,
   toolLabel,
 } from "@tentacle/core";
@@ -97,6 +100,19 @@ export interface SubagentResult {
   readonly stopReason: AgentStopReason;
 }
 
+/**
+ * Set on a child that may MOVE to the background while it runs
+ * (docs/feat/subagent-detach.md). A foreground child's ask holds the turn,
+ * which a move must leave: its ask is withdrawn (`withdrawn`) and asked again
+ * on the background path, with the `sa-N` `background()` reports.
+ */
+export interface SubagentMoveControls {
+  /** Aborted when the child moved: its open foreground ask is withdrawn. */
+  readonly withdrawn: AbortSignal;
+  /** `undefined` while the child is still foreground. */
+  background(): { readonly id: string; readonly signal: AbortSignal } | undefined;
+}
+
 export interface SubagentRunControls {
   readonly signal?: AbortSignal;
   /** Live progress sink (start, each child tool call, end). */
@@ -114,6 +130,11 @@ export interface SubagentRunControls {
    * `signal`, so they outlive the launching turn and settle with the child.
    */
   readonly agentId?: string;
+  /**
+   * Set on a FOREGROUND child that may become a background one: its asks are
+   * then withdrawable and, once it moved, re-asked as `sa-N`.
+   */
+  readonly move?: SubagentMoveControls;
 }
 
 /**
@@ -125,23 +146,52 @@ export interface SubagentRunControls {
  *
  * `background`: a background child's ask carries the child's id and its own
  * signal, which the daemon uses to hold the ask apart from any turn.
+ *
+ * `move`: a FOREGROUND child that may move (docs/feat/subagent-detach.md). Its
+ * ask carries `withdraw` while it is foreground; a `dismissed` answer reached
+ * because of that withdrawal is re-asked ONCE on the background path, with the
+ * `sa-N` id. A human's refusal is never `dismissed`, so it is never re-asked.
  */
 export function subagentRequester(
   requester: PermissionRequester,
   parentCallId: string | undefined,
   agent: { readonly type: string; readonly description: string },
-  background?: { readonly id: string; readonly signal: AbortSignal },
+  background?:
+    | { readonly id: string; readonly signal: AbortSignal }
+    | { readonly move: SubagentMoveControls },
 ): PermissionRequester {
-  return (req, options) => {
+  const fixed = background !== undefined && "id" in background ? background : undefined;
+  const move = background !== undefined && "move" in background ? background.move : undefined;
+  const ask = (
+    req: PermissionRequest,
+    options: PermissionRequestOptions | undefined,
+    owner: { readonly id: string; readonly signal: AbortSignal } | undefined,
+    withdraw: AbortSignal | undefined,
+  ): Promise<PermissionResponse> => {
     // A child's call ids are unknown to the parent history: never forwarded.
     const { toolCallId: _childCallId, groupStart: _childGroup, ...rest } = options ?? {};
     return requester(req, {
       ...rest,
       ...(parentCallId !== undefined ? { toolCallId: parentCallId } : {}),
       origin: "subagent",
-      agent: background ? { ...agent, id: background.id } : agent,
-      ...(background ? { signal: background.signal } : {}),
+      agent: owner ? { ...agent, id: owner.id } : agent,
+      ...(owner ? { signal: owner.signal } : {}),
+      ...(withdraw !== undefined ? { withdraw } : {}),
     });
+  };
+  return async (req, options) => {
+    // A background child, or one that has already moved: the 6a path, at once.
+    const owner = fixed ?? move?.background();
+    const first = await ask(req, options, owner, owner ? undefined : move?.withdrawn);
+    if (first.dismissed !== true || owner !== undefined) {
+      return first;
+    }
+    // Withdrawn by the MOVE (not by a TUI unmounting): ask it again as `sa-N`.
+    const moved = move?.background();
+    if (moved === undefined) {
+      return first;
+    }
+    return ask(req, options, moved, undefined);
   };
 }
 
@@ -283,7 +333,9 @@ export function createSubagentRunner(deps: SubagentDeps): {
               { type: type.name, description: opts.description },
               controls?.agentId !== undefined && controls.signal
                 ? { id: controls.agentId, signal: controls.signal }
-                : undefined,
+                : controls?.move !== undefined
+                  ? { move: controls.move }
+                  : undefined,
             ),
           }
         : {}),

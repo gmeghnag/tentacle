@@ -2982,6 +2982,9 @@
     "ToolProgress": {
       "additionalProperties": true,
       "properties": {
+        "agentId": {
+          "type": "string"
+        },
         "agentType": {
           "type": "string"
         },

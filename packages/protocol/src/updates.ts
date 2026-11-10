@@ -131,8 +131,9 @@ export const ContextNoteSchema = z.object({
  * mapping (a label never fails a turn). Known kinds: `subagent_start`
  * (agentType, description), `subagent_tool` (label), `subagent_usage`
  * (promptTokens, completionTokens: one child model call, the child's own),
- * `subagent_end` (toolUses, stopReason). Text is sanitized client-side: a
- * pod's daemon is not trusted (AGENTS §7).
+ * `subagent_end` (toolUses, stopReason, and — when the child MOVED to the
+ * background because someone wrote while it ran — its `agentId`). Text is
+ * sanitized client-side: a pod's daemon is not trusted (AGENTS §7).
  */
 export const ToolProgressSchema = z.object({
   type: z.literal("tool_progress"),
@@ -143,6 +144,13 @@ export const ToolProgressSchema = z.object({
   label: z.string().optional(),
   toolUses: z.number().int().nonnegative().optional(),
   stopReason: z.string().optional(),
+  /**
+   * Set on a `subagent_end{stopReason: "background"}` once: the `sa-N` the
+   * child moved to (docs/feat/subagent-detach.md). A free ADDITIONAL field of
+   * a display update, so it needs no `PROTOCOL_VERSION` bump: an older client
+   * strips it and shows `✗ background` with the tool's own text.
+   */
+  agentId: z.string().optional(),
   promptTokens: z.number().int().nonnegative().optional(),
   completionTokens: z.number().int().nonnegative().optional(),
 });

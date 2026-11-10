@@ -1,6 +1,6 @@
 # feat/subagent-detach — writing while a foreground sub-agent runs moves it to background
 
-> **Status:** implementation (plan awaiting approval and the owner's answers)
+> **Status:** executed (awaiting review)
 > **Branch:** `feat/subagent-detach` (off `main` `f9342d3`)
 > **Type:** feat · **Size:** M · **Blast:** load-bearing · **Suited:** DeepSeek exec, one Opus review
 
@@ -274,3 +274,81 @@ Owner delegated the night of 2026-11-09→10 ("Decidi e fai merge"); each answer
 - **Q-C: (a)** an open permission prompt of the child is withdrawn and re-asked at once as `sa-N`; the child moves now.
 
 *— orchestrator (claude-opus-5-5), 2026-11-10*
+
+## Execution
+
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+**Repro (before any edit).** `.tentacle/tmp/subagent-detach/probe.ts` on this branch, unmodified, output verbatim:
+
+```
+A after steer, child still running: model requests = 1
+A after child end: model requests = 2
+A 2nd request tail: [ "tool:child report", "user:steer text" ]
+B before steer: model requests = 1
+B next model request reached on microtasks alone: true (20 hops)
+B 2nd request tail: [ "tool:moved to background as sa-1", "user:steer text" ]
+```
+
+Part A is the missing capability (the steer waits for the child); part B is the load-bearing assumption. Neither was satisfied before the change.
+
+**Done, in the Implementation's file order.**
+
+1. `packages/protocol/src/updates.ts` — `agentId: z.string().optional()` on `ToolProgressSchema`, plus the doc comment. `bun run schema:export` regenerated `protocol.json` (+3 lines, one `agentId` property). **No `PROTOCOL_VERSION` bump** (P12: a free field of a display update).
+2. `packages/core/src/agent-jobs.ts` — `AgentSlot`'s ok arm gains `movable(move)` and `adopt(spec, controller, seed, run)`; `AgentJobLive` extracted; `foreground` is now `Map<symbol, { description, startedAt, move? }>`; `detachForeground()`; `foldAgentProgress(live, event)` extracted from `progress` and exported. `adopt` has **no cap check** (F8), calls `host.launched` FIRST, and `void drive(...).catch(() => {})` exactly as `start`. `used()`/`refusal()` unchanged (a small `descriptions()` helper for the new shape).
+3. `packages/core/src/tool.ts` — `agentId?: string` on the `subagent_end` progress event (one arm with the optional field, not a second union member: `agent.ts`'s mapper reads it off the one arm).
+4. `packages/core/src/permission.ts` — `withdraw?: AbortSignal` on `PermissionRequestOptions`; `anySignal` moved here from `providers`, which now imports it.
+5. `packages/core/src/index.ts` — no change needed (`export *` already re-exports both).
+6. `packages/agent/src/subagent.ts` — `SubagentMoveControls`, `SubagentRunControls.move`, and `subagentRequester` takes either `{ id, signal }` (6a's background form) or `{ move }`; a `dismissed` answer reached with `move.background()` now set is re-asked ONCE on the background path.
+7. `packages/agent/src/agent.ts` — `:262-271` and `progressToEvent` carry the optional field.
+8. `packages/tools/src/task.ts` — `TaskMoveControls`, `runMovable`, the extracted `shape` closure, `foregroundResult`, `movedText`, `linkAbort`. `agentId` alone decides the path; `move` returns early on `finished || own.signal.aborted`.
+9. `packages/daemon/src/hosted-session.ts` — `settleOn = anySignal([signal, withdraw])` in `awaitDecision`, `DISMISSED` on `outcome.outcome === "cancelled" && options.withdraw?.aborted`; `detachForeground()` after `queue.push` in `enqueue` (before `persist`), and between `reserve()` and `controller.abort()` in `sendNow`.
+10. `packages/daemon/src/mapping.ts`, 11. `packages/client/src/mapping.ts` — the field, `progressText`-sanitized on the client.
+12. `packages/tui/src/state.ts` (`movedTo` on `SubAgentProgress`, set from `event.agentId`), `subagent-view.ts` (`closingRow(reason, movedTo)`, the `background` branch, `movedTo` on the outcome), `render-lines.ts` (subtle closing row when moved; no report body when `stopReason === "background"`).
+
+**Drifts from the Implementation (and why).**
+
+- **D1 — the not-moved path does not shape.** The plan's snippet ends `return foregroundResult(await running)`; I first wrote `foregroundResult(await shape(result, own.signal))` and the full suite stayed green, which is exactly the trap. The agent loop applies the call's transforms itself (`agent.ts` `finishCall` → `transformResult`), so shaping there would redact, hook and spill a normal foreground child twice. Reverted to the plan's line and pinned it with **T12b** (`shapeResult` is called 0 times when the child ends normally; mutation → red).
+- **D2 — one `subagent_end` arm, not two.** The plan says `core/tool.ts:87` gains an optional `agentId`. I first added a second union arm for the moved case, which broke `agent.ts`'s narrow-to-one-arm mapper (typecheck TS2339). Collapsed back to the single arm with `agentId?: string`.
+- **D3 — `anySignal` is exported from `core/permission.ts`** (the plan says "move that helper to core"), so `providers/src/connect-timeout.ts` now imports it instead of defining it. No behaviour change there; its own suite passes.
+- **D4 — `subagentRequester`'s 4th parameter is a union** (`{ id, signal } | { move }`) instead of a new 5th parameter: it keeps 6a's call sites (`packages/daemon/test/persistence.test.ts`, `agent/test/subagent-background.test.ts`) and `createSubagentRunner` untouched in shape.
+- **D5 — `packages/cli/test/wiring.test.ts` (one assertion widened).** Its existing "forwards the ask's call attribution" test pinned the exact options object, and a movable foreground child now also carries `withdraw`. Attribution is unchanged; the assertion now says so explicitly (`withdraw: expect.any(AbortSignal)`) instead of failing on the new key. No production change in `packages/cli`.
+- **D6 — the mutable `live` seed is a plain `AgentJobLive` literal, not an `emptyLive()` helper.** One call site; a helper would have been ceremony.
+- **D7 — T21 needed a held second child step.** As first written the child had already ended when the steer landed, so the test passed for the wrong reason (nothing to move). It now holds the child after its refusal, so it pins the real property: the child MOVED and the settled ask was still not re-asked.
+
+**Tests — red before green (T1–T32).** Every new test file was written and run before the code that satisfies it. Representative lines:
+
+- T1–T5, before `AgentJobs.adopt` existed: `TypeError: slot.adopt is not a function` (11/11 red) → after: `11 pass, 0 fail`.
+- T6–T13, before `runMovable`: `Expected: "moved to background as sa-1: map repo. …"  Received: "THE REPORT"` (6 red of 11) → after: `11 pass`.
+- T14, before `subagentRequester`'s `move`: `{ allowed: false, dismissed: true }` instead of the re-asked `{ allowed: true }` → after: `6 pass`.
+- T15, before both triggers: `expect(r.parent.seen).toHaveLength(1)` failed (no second request at all) → after: green on microtasks alone.
+- T20, before `withdraw` reached `awaitDecision`: the re-asked `permission_request` was still the old one (`expect(second?.requestId).not.toBe(firstId)` → red).
+- T27, before the client mapping: `- "agentId": "sa-1 [31m x"` (missing) → after: `3 pass`.
+- T28, before the view-model: `Expected: "→ background · its report will arrive later"  Received: "✗ background"` → after: `36 pass`.
+- T29, before `render-lines`: the report body was rendered (`Received: "…  └─ → background as sa-1 …\n\n  moved to background as sa-1: find callers …"`) → after: `132 pass` across both TUI files.
+- T30: `schema:export` twice, `shasum -c` → `protocol.json: OK`.
+- T31/T32 (the real `createLocalRuntime` ↔ `Connection` stack): before the triggers, no second model request / the child died with the turn; after: `2 pass`.
+
+**Mutations on the load-bearing parts (§9), each run and reverted.**
+
+| # | Mutation | Red |
+|---|----------|-----|
+| M1 | `detachForeground()` in `enqueue` wrapped in `queueMicrotask` | T17 |
+| M2 | the same as `setTimeout(…, 0)` | **T15** (the microtask-only assertion) + T17 |
+| M3 | `sendNow`: `controller.abort()` BEFORE `detachForeground()` | **T19**, T32 (the child dies) |
+| M4 | `settleOn = signal` (drop `withdraw` in `awaitDecision`) | **T20** (the old ask stays open) |
+| M5 | a `used() >= cap` check inside `adopt` | **T1**, T18, T17 (a full cap refuses the detach) |
+| M6 | `agentId` branch → never true | T6, T7, T8, T9×2, T12 (six red) |
+| M7 | `move`'s `finished \|\| own.signal.aborted` early return disabled | **T10** |
+| M8 | shape the not-moved result too | **T12b** |
+
+M1/M2 also confirm the plan's own T15 mutation note (a macrotask trigger fails the microtask assertion). One mutation I tried was an **equivalent mutant** and is reported as such: replacing `await Promise.race([settled, moved.promise])` with a branch on *which promise won* stayed green on all 11 tools tests, because in this test set the two never race observably other than through `agentId`. The property the plan actually asks for (`agentId` alone decides, never the race) is pinned instead by M6 and by T9's two same-tick cases.
+
+**Gate.** `bun run check` → typecheck clean, `biome check .` clean (**0 errors, 0 warnings**, the §6 baseline), `bun test` **6258 pass · 3 skip · 0 fail** (the three opt-in skips: live-k8s, live-docker, the real-socket keepalive). The gate was run once, after every slice's narrow run.
+
+**Not done / left as the plan says.**
+
+- The TUI's fallback send-now (`tui/src/send-now.ts`, `App.tsx:1717-1724`) still cancels-then-sends, so it would stop a child: unreachable with this build's daemon (Notes/debt).
+- The child's tool trail stays unpersisted (6a), and a detached child's open ask still holds the session's single permission lane (accepted in the plan).
+- No `PROTOCOL_VERSION` bump; `protocol.json` regenerated through `bun run schema:export`, nothing else in the wire changed.
+- Nothing committed; `TODO.md` untouched; all scratch in `.tentacle/tmp/subagent-detach/`.

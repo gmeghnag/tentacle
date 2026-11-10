@@ -307,7 +307,10 @@ function subAgentLines(tool: ToolItem, width: number, expanded: boolean): string
     out.push(...subAgentStepRow(prefix, label, width, expanded));
   });
   if (closing !== undefined) {
-    out.push(`${theme.subtle("└─")} ${theme.error(closing)}`);
+    // A MOVE is not a failure: its row is subtle, like the rest of the tree
+    // (docs/feat/subagent-detach.md), and says where the work went.
+    const moved = view.done?.movedTo !== undefined || view.done?.stopReason === "background";
+    out.push(`${theme.subtle("└─")} ${moved ? theme.subtle(closing) : theme.error(closing)}`);
   } else if (view.done === null) {
     out.push(theme.subtle("└─ …"));
   }
@@ -468,6 +471,13 @@ function plainToolBody(tool: ToolItem, width: number, inPod: boolean, fit: BodyF
   if (tool.sub) {
     const tree = subAgentLines(tool, width, expanded);
     if (tool.status === "running") {
+      return tree;
+    }
+    // A child that MOVED to the background has no report yet, and never will
+    // here: its report arrives later as its own `[background]` notice
+    // (docs/feat/subagent-detach.md). The tool's result text is the moved note,
+    // which the closing row already says.
+    if (tool.sub.stopReason === "background") {
       return tree;
     }
     const report = tool.spill
