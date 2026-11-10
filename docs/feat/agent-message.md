@@ -508,3 +508,76 @@ Owner delegated the night of 2026-11-09→10 ("Decidi e fai merge"); each answer
 - **Q2: (a)** at most 8 unread texts per child and 8 000 characters per text; beyond that a tool error and nothing is sent.
 
 *— orchestrator (claude-opus-5-5), 2026-11-10*
+
+### Adversarial review (round 1)
+
+**Verdict: REQUEST-CHANGES**: one HIGH finding. It breaks the load-bearing claim on two paths in the agent loop. Scope: HIGH and MEDIUM findings only (owner token rule).
+
+**Gate** (`bun run check`, run by the reviewer): typecheck clean · `biome check .` clean (817 files) ·
+`bun test` **6286 pass, 3 skip (the documented opt-ins), 0 fail**, 6289 tests across 442 files.
+
+**H1 — an accepted message is silently consumed when the child stops at `max_iterations`, or when a
+`turn_start` hook stops a continuation pass.** This breaks the load-bearing assumption: the message is neither read nor reported.
+- *Where:* `packages/agent/src/subagent.ts:399-466` (the runner reports only
+  `carry` plus `inbox.close()`). The texts are lost at two drains inside `Agent.runMessages`, where they are pushed into the history and
+  no model round follows:
+  - `packages/agent/src/agent.ts:1155-1158`: after the final no-tools report at `max_iterations`.
+    For a top-level turn the next turn sees the text. A child has no next turn: the runner breaks on
+    `stopReason !== "end_turn"`, `close()` returns `[]` because the inbox was already drained, and the history is
+    discarded.
+  - `packages/agent/src/agent.ts:890-894`: a `turn_start` hook stops the turn. Children do get
+    hooks (`subagent.ts:373`), and a continuation pass re-runs `turn_start`. The carry is drained
+    into the history, the pass ends `end_turn` with no model round, `closeIfEmpty` closes the empty inbox, and no
+    unread line is written.
+- *Failure scenario (reproduced in `.tentacle/tmp/agent-message/maxiter.ts`):* a child with
+  `maxIterations: 1` whose first round calls a tool. A parent message is pushed while the forced final report
+  streams:
+  ```
+  push during final report: { ok: true }
+  { stopReason: "max_iterations", report: "final report", closed: true, requests: 2 }
+  text in any request: false
+  ```
+  The agent was told "queued for sa-1: it reads it before its next model step", but the child never read it and the report has no
+  "were not read" line. Realistic case: a parent nudging a child that is wrapping up at its step limit.
+- *Fix (runner only; `Agent` unchanged):* in the runner's event loop, count the `steer` events no model
+  round has answered yet. Add `unanswered += 1` on `steer`. Set `unanswered = 0` on `text`, `tool_start` or
+  `usage`, which mean a model round consumed a request carrying them. After the pass loop,
+  `unread.length + unanswered` is the count in the "were not read" line. Do not skip those drains in `Agent`
+  for children: on the `turn_start`-stop path, leaving the text in the inbox makes `closeIfEmpty` re-carry it
+  forever. Tests (red first): **T9c**: `maxIterations: 1` plus a push during the final report → the report has
+  "(1 message(s) … were not read.)". **T9d**: a `turn_start` hook that stops only on its second call,
+  plus a text in the close window → counted. Mutation for both: drop `unanswered` from the count → red.
+
+No MEDIUM findings.
+
+**Attacks tried (nothing found unless noted):**
+1. *Close window / LBA core:* `message` (check plus push) and `closeIfEmpty` (check plus close) are
+   synchronous, and no `await` is needed between the last drain and `closeIfEmpty`: it catches anything
+   pushed since. The design holds wherever the loop really ends in a model round. **Holds.**
+2. *Cancel at the continuation's first boundary* (`agent.ts:904`, before the drain): covered by
+   drift 1's `carry` in `unread`. Mutation: drop `carry` from `unread` → T9b red. Restored.
+3. *`max_iterations` / `turn_start` stop:* **H1.**
+4. *`agent_kill`:* `message` refuses `killed`. Texts queued before the kill come back from `close()`.
+   `drive` keeps the run's report (only `stopReason` is forced, `agent-jobs.ts:507-509`), and
+   `capSubagentText` keeps the tail, where the unread line sits. Mutation: drop the `killed` check
+   → T4 and T11 red. Restored.
+5. *Error path:* the texts are dropped without a count. This is accepted debt in the plan's Notes, so it is not re-raised.
+6. *Ordering and duplicates:* `carry` is spliced first, then `inbox.drain()`. The carry is emptied before the next pass,
+   so nothing is injected twice. **Holds.**
+7. *6b `adopt`:* the same inbox object moves (`agent-jobs.ts:373`), and a closed inbox is refused before an id is minted.
+   `runMovable` passes `slot.inbox`. **Holds.**
+8. *Refusals and limits:* unknown, ended, killed, closed, `full` and over-length each give an `isError` result with nothing queued.
+   The tool is excluded from children in both the filter and `readOnlyType`. **Holds.**
+9. *Throw safety and the peer:* `message`, `push` and `close` are synchronous and never throw. No new void promise, timer or
+   listener. No lock on the `Connection`. **Holds.**
+10. *`/clear`, quit, `serve` reload:* no new state outlives the session. The inbox dies with the entry (`dispose`), as the plan's table says. **Holds.**
+11. *Task-7 seam:* `AgentJobs.message(id, text, "user")` already formats `[message from the user]`
+    and applies the same limits and close. Task 7 only adds the RPC method and the parent note. **Fit.**
+
+Tree restored: both mutations were reverted and `git status` is clean.
+
+*Reviewer note:* same model family as the plan's author (Opus); the executor was a different model (DeepSeek).
+The executor behaved well. It found and tested a real hole the plan missed (drift 1 / T9b), reported its
+mutation-only red for T11 honestly, and the gate numbers it claimed match the reviewer's run exactly.
+
+*— claude-opus-5-5, 2026-11-10*
