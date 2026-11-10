@@ -1,6 +1,6 @@
 # feat/subagent-panel — Background list under the footbar, open a sub-agent, write to it
 
-> **Status:** implementation (plan + mockups written; owner questions P1–P8 open)
+> **Status:** implementation (plan + mockups written; owner answered P1–P8 = (a))
 > **Branch:** `feat/subagent-panel`
 > **Type:** feat · **Size:** M · **Blast:** cross-module · **Suited:** DeepSeek exec · standard in-context Review + one ink frame test per mockup state
 
@@ -366,6 +366,10 @@ small local model otherwise tends to act on the text itself (re-send it to sa-1 
 
 **P8. Where DOWN lands in the list.** (a) **always the first row**; (b) the row selected last time,
 if still there. **Recommend (a):** predictable after the list changed under you; Ctrl+T matches it.
+
+**Answers (owner, 2026-11-10):** P1–P8 = **(a)** — titled rule; drawer under the footbar; printable keys ignored while the list has focus; `x` then `y` to stop; a finished item leaves at once; shell jobs are a follow-up (`jobs: []` here); the two-line note; DOWN lands on the first row.
+
+**Note (orchestrator, 2026-11-10):** `feat/agent-message-two-way` (task 9) merged into main AFTER this plan was written (6a2621d): it touched `packages/tui/src/App.tsx`, `run.tsx`, `packages/client/src/subagents.ts`, `remote-session.ts`, `mapping.ts` and added `packages/tui/src/subagent-notify.ts` + the `subagent_notify` display update. Cited line numbers in those files may have moved: re-locate by symbol; a real contradiction goes to Execution as a drift.
 
 ## Execution
 
