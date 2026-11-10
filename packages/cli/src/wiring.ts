@@ -61,6 +61,7 @@ import {
   ToolRegistry,
   builtinTools,
   createAgentKillTool,
+  createAgentMessageTool,
   createContextResetTool,
   createSkillActivator,
   createSkillTool,
@@ -574,6 +575,9 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     // owner Q1 a). Registered only here, where `background` is offered: without
     // the runtime no child has an id to name.
     tools.register(createAgentKillTool(agentJobs));
+    // ... and to WRITE to one (docs/feat/agent-message.md): it names a running
+    // child's id, so it rides the same switch.
+    tools.register(createAgentMessageTool(agentJobs));
   }
 
   // Context reset (docs/feat/context-reset.md): the model renews its own

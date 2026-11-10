@@ -11,6 +11,13 @@
  * once with the running children named, so the model decides (owner Q2 b).
  */
 import { SUBAGENT_REPORT_MAX_CHARS } from "@tentacle/protocol";
+import {
+  AGENT_INBOX_MAX,
+  AGENT_MESSAGE_MAX_CHARS,
+  AgentInbox,
+  type AgentMessageSender,
+  inboxText,
+} from "./agent-inbox.ts";
 import { capSubagentText } from "./agent-job-ledger.ts";
 import type { ToolProgressEvent } from "./tool.ts";
 
@@ -43,11 +50,18 @@ export interface AgentJobControls {
   /** The child's own signal: NEVER the launching turn's. */
   readonly signal: AbortSignal;
   readonly agentId: string;
+  /** What every sender writes into this child (`AgentJobs.message`). */
+  readonly inbox: AgentInbox;
 }
 
 export interface RunningAgentJob extends AgentJobSpec {
   readonly agentId: string;
 }
+
+/** What `AgentJobs.message` answers: nothing throws, the sender reports. */
+export type AgentMessageResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: string };
 
 export interface AgentJobExit extends RunningAgentJob, AgentJobResult {}
 
@@ -63,6 +77,8 @@ export type AgentSlot =
   | {
       readonly ok: true;
       readonly release: () => void;
+      /** The inbox this child drains; `adopt` moves IT into the running entry. */
+      readonly inbox: AgentInbox;
       /**
        * Register what turns this child into a background one, when a person
        * writes while it runs (`HostedSession.enqueue` / `send_now`). Called by
@@ -146,6 +162,8 @@ export class AgentJobs {
       readonly controller: AbortController;
       /** `kill` was called: its exit is `cancelled`, whatever the run reports. */
       killed: boolean;
+      /** Every sender's way in (`message`); it dies with the entry. */
+      readonly inbox: AgentInbox;
     }
   >();
   /**
@@ -154,7 +172,12 @@ export class AgentJobs {
    */
   private readonly foreground = new Map<
     symbol,
-    { readonly description: string; readonly startedAt: number; move?: () => void }
+    {
+      readonly description: string;
+      readonly startedAt: number;
+      move?: () => void;
+      readonly inbox: AgentInbox;
+    }
   >();
   private readonly listeners = new Set<(exit: AgentJobExit) => void>();
   /** Told after every visible change to `rows()` (a start, a progress, an end). */
@@ -281,6 +304,7 @@ export class AgentJobs {
     }
     const agentId = host.launched(spec);
     const controller = new AbortController();
+    const inbox = new AgentInbox();
     this.running.set(agentId, {
       job: {
         ...spec,
@@ -289,6 +313,7 @@ export class AgentJobs {
       },
       controller,
       killed: false,
+      inbox,
     });
     this.live.set(agentId, { toolUses: 0, tokens: 0, tail: [] });
     this.changed();
@@ -311,13 +336,16 @@ export class AgentJobs {
       return { ok: false, reason: this.refusal() };
     }
     const token = Symbol("foreground");
+    const inbox = new AgentInbox();
     this.foreground.set(token, {
       description,
       startedAt: this.host?.now?.() ?? 0,
+      inbox,
     });
     return {
       ok: true,
       release: () => void this.foreground.delete(token),
+      inbox,
       movable: (move) => {
         const entry = this.foreground.get(token);
         if (entry !== undefined) {
@@ -330,6 +358,11 @@ export class AgentJobs {
         if (this.disposed || host === undefined || entry === undefined) {
           return undefined;
         }
+        // A child that already stopped reading is not worth moving: the entry
+        // would accept texts nobody reads (docs/feat/agent-message.md Design 2).
+        if (entry.inbox.closed) {
+          return undefined;
+        }
         // FIRST: a throw here (the log refused) leaves the child foreground.
         const agentId = host.launched(spec);
         this.foreground.delete(token);
@@ -337,6 +370,7 @@ export class AgentJobs {
           job: { ...spec, agentId, startedAt: entry.startedAt },
           controller,
           killed: false,
+          inbox: entry.inbox,
         });
         this.live.set(agentId, seed);
         this.changed();
@@ -345,6 +379,47 @@ export class AgentJobs {
         return agentId;
       },
     };
+  }
+
+  /**
+   * Write one text into a RUNNING background child's context (docs/feat/agent-message.md):
+   * THE seam every sender uses (the `agent_message` tool, task 7's panel).
+   * Synchronous end to end and never throwing: the check and the push happen in
+   * one stretch, so a text it accepts is drained by the child at its next
+   * boundary or reported by it — never accepted and then lost.
+   *
+   * No `changed()`: a message changes no row.
+   */
+  message(agentId: string, text: string, from: AgentMessageSender): AgentMessageResult {
+    const entry = this.running.get(agentId);
+    if (entry === undefined) {
+      return {
+        ok: false,
+        reason: `${agentId} is not a running background sub-agent (it finished, was stopped, or never existed): nothing was sent.`,
+      };
+    }
+    if (entry.killed) {
+      return { ok: false, reason: `${agentId} is being stopped: nothing was sent.` };
+    }
+    if (text.length > AGENT_MESSAGE_MAX_CHARS) {
+      return {
+        ok: false,
+        reason: `the message is ${text.length} characters, over the ${AGENT_MESSAGE_MAX_CHARS}-character limit: nothing was sent. Send a shorter one.`,
+      };
+    }
+    const pushed = entry.inbox.push(inboxText(from, text));
+    if (pushed.ok) {
+      return { ok: true };
+    }
+    return pushed.reason === "closed"
+      ? {
+          ok: false,
+          reason: `${agentId} is finishing and can no longer read messages: nothing was sent. Its report arrives as a [background] note.`,
+        }
+      : {
+          ok: false,
+          reason: `${agentId} already has ${AGENT_INBOX_MAX} unread messages: nothing was sent. Wait for it to read them or for its report.`,
+        };
   }
 
   /** Aborts every child. No `ended`, no exit: the session is going away. */
@@ -403,9 +478,17 @@ export class AgentJobs {
     controller: AbortController,
     run: (controls: AgentJobControls) => Promise<AgentJobResult>,
   ): Promise<void> {
+    const inbox = this.running.get(agentId)?.inbox;
     let result: AgentJobResult;
     try {
-      result = await run({ signal: controller.signal, agentId });
+      result = await run({
+        signal: controller.signal,
+        agentId,
+        // The entry always exists here (both paths set it before `drive`), so the
+        // inbox the child drains is the one `message` finds. A disposed runtime
+        // never runs anything; the fallback is unreachable, kept for the type.
+        inbox: inbox ?? new AgentInbox(),
+      });
     } catch (error) {
       result = {
         report: `the sub-agent failed: ${error instanceof Error ? error.message : String(error)}`,

@@ -103,3 +103,50 @@ export function createAgentKillTool(jobs: AgentJobs): Tool<z.infer<typeof agentK
     },
   };
 }
+
+export const AGENT_MESSAGE_TOOL_NAME = "agent_message";
+
+const agentMessageInput = z.object({
+  agent_id: z
+    .string()
+    .min(1)
+    .describe(
+      "Id of the background sub-agent to write to (the sa-N agent_task returned, or the id it moved to).",
+    ),
+  text: z
+    .string()
+    .min(1)
+    .describe(
+      "What to tell it. It reads this before its next model step, as a user message naming you as the sender.",
+    ),
+});
+
+/**
+ * Write into a RUNNING background sub-agent's context (docs/feat/agent-message.md,
+ * owner decision B1): one-way, and it never wakes anything (B3). Built only
+ * where the background runtime is wired — without it no child has an id.
+ *
+ * Its result says "queued", never "delivered": a child waiting on a long tool
+ * call or a permission ask reads the text after that call, and no reply comes
+ * back (the report still arrives as a `[background]` note).
+ */
+export function createAgentMessageTool(jobs: AgentJobs): Tool<z.infer<typeof agentMessageInput>> {
+  return {
+    name: AGENT_MESSAGE_TOOL_NAME,
+    description:
+      "Send a message to a running background sub-agent started with agent_task{background: true}. It reads it before its next model step. One-way: no reply comes back, and its report still arrives later as a [background] note. It does not wake you.",
+    inputSchema: agentMessageInput,
+    permission: "none",
+    async execute(input) {
+      // `AgentJobs.message` decides and pushes synchronously: a text it refuses
+      // was never sent, so the agent can retry or go on.
+      const sent = jobs.message(input.agent_id, input.text, "agent");
+      return sent.ok
+        ? {
+            content: `queued for ${input.agent_id}: it reads it before its next model step. No reply comes back; its report still arrives as a [background] note.`,
+            isError: false,
+          }
+        : { content: sent.reason, isError: true };
+    },
+  };
+}

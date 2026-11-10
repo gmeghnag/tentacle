@@ -313,3 +313,47 @@ describe("T12b: a NOT-moved call is not shaped by the tool", () => {
     expect(shapedCalls).toBe(0);
   });
 });
+
+// docs/feat/agent-message.md T12: a movable foreground child's inbox comes over
+// with the move (`adopt` moves the SLOT's inbox), so `message(sa-1)` after the
+// move is drained by the SAME running child.
+describe("T12: the moved child's inbox is the same object", () => {
+  test("before the move there is no id; after it, a message is read by that child", async () => {
+    const { jobs } = jobsRig();
+    const g = gatedRunner();
+    const tool = createTaskTool(g.run, TYPES, { background: jobs });
+    const { ctx } = ctxWith();
+    const running = tool.execute({ description: "map repo", prompt: "p" }, ctx);
+    await tick();
+    // Foreground: no id, so nothing to message.
+    expect(jobs.message("sa-1", "too early", "agent").ok).toBe(false);
+    // The inbox the child was launched with: `task.ts` passes the SLOT's.
+    const inbox = g.seen[0]?.inbox;
+    expect(inbox).toBeDefined();
+    jobs.detachForeground();
+    expect((await running).content).toBe(movedText("sa-1", "map repo"));
+    // The move hands that very inbox to the running entry.
+    expect(jobs.message("sa-1", "after the move", "agent")).toEqual({ ok: true });
+    expect(inbox?.drain()).toEqual(["[message from the parent agent] after the move"]);
+    g.finish();
+    await tick();
+  });
+
+  test("a background child is given ITS entry's inbox at launch", async () => {
+    const { jobs } = jobsRig();
+    const g = gatedRunner();
+    const tool = createTaskTool(g.run, TYPES, { background: jobs });
+    const { ctx } = ctxWith();
+    const started = await tool.execute(
+      { description: "map repo", prompt: "p", background: true },
+      ctx,
+    );
+    expect(started.content).toContain("started in background as sa-1");
+    const inbox = g.seen[0]?.inbox;
+    expect(inbox).toBeDefined();
+    expect(jobs.message("sa-1", "hi", "agent")).toEqual({ ok: true });
+    expect(inbox?.drain()).toEqual(["[message from the parent agent] hi"]);
+    g.finish();
+    await tick();
+  });
+});
