@@ -76,7 +76,25 @@ export interface ToolResult {
  * of an `agent` dependency; the agent loop maps these onto its event stream.
  */
 export type ToolProgressEvent =
-  | { readonly kind: "subagent_start"; readonly agentType: string; readonly description: string }
+  | {
+      readonly kind: "subagent_start";
+      readonly agentType: string;
+      readonly description: string;
+      /**
+       * The `models` NAME the child runs on, when its pick named an entry (never
+       * an id, a URL or a key: AGENTS §7). Whether the panel SHOWS it is the
+       * daemon's decision, against the main agent's CURRENT model (docs/feat/
+       * subagent-panel.md, Review round 3 M2).
+       */
+      readonly model?: string;
+      /**
+       * The model id the child really runs on — daemon-side only, like the
+       * runtime's other local facts: it never reaches the wire (the row carries a
+       * NAME or nothing). It exists so the daemon can re-decide `model` whenever
+       * the session's main model changes (Review round 3 M2).
+       */
+      readonly modelId?: string;
+    }
   | { readonly kind: "subagent_tool"; readonly label: string }
   // One model call's tokens of the child (its own; never added to the parent's totals).
   | {

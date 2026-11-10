@@ -238,7 +238,7 @@ function lastUserText(messages: readonly ChatMessage[]): string {
 }
 
 /** A finished background job awaiting its note: a shell job, or a sub-agent (`agentId` in it). */
-export type PendingExit = BackgroundJob | AgentJobExit | PendingAgentMessage;
+export type PendingExit = BackgroundJob | AgentJobExit | PendingAgentMessage | PendingUserNote;
 
 /**
  * A running background child's `agent_notify` text, queued for the parent agent
@@ -251,6 +251,39 @@ export type PendingAgentMessage = { readonly kind: "agent_message" } & AgentNoti
 
 const isAgentMessage = (job: PendingExit): job is PendingAgentMessage =>
   "kind" in job && job.kind === "agent_message";
+
+/**
+ * The USER wrote directly to a running background child
+ * (`session/subagent_message`, docs/feat/subagent-panel.md). It rides the SAME
+ * queue as an exit — so it inherits the carry-over on agent replacement and the
+ * flush point — but it wakes NOBODY (`pendingExitCount` skips it) and emits no
+ * event (the user was already told, by the update).
+ */
+export type PendingUserNote = {
+  readonly kind: "user_note";
+  readonly agentId: string;
+  readonly text: string;
+};
+
+/** Checked AFTER `isAgentMessage`: both are notes, with an `agentId` too. */
+const isUserNote = (job: PendingExit): job is PendingUserNote =>
+  "kind" in job && job.kind === "user_note";
+
+/**
+ * The note a user's direct message to a background child leaves in the parent's
+ * conversation: a `user` message (the model reads it as a fact it may act on),
+ * tagged so a resume renders it as a notice and never as a row the person typed.
+ *
+ * The second line is owner question P7 (a): a small local model otherwise tends
+ * to act on the text itself — re-send it to the child, or do the work.
+ */
+export function userToSubagentNote(note: PendingUserNote): ChatMessage {
+  return {
+    role: "user",
+    content: `[user → ${note.agentId}] ${note.text}\n(the user wrote this directly to background sub-agent ${note.agentId}; it was delivered to it. For your information: no reply is expected.)`,
+    note: { kind: NOTE_KIND.userToSubagent, id: note.agentId },
+  };
+}
 
 /**
  * The note a running background child's `agent_notify` leaves in the parent's
@@ -295,6 +328,13 @@ export type AgentEvent =
       readonly id: string;
       readonly agentType: string;
       readonly description: string;
+      /**
+       * The model id the child runs on — a DAEMON-side fact, never on the wire
+       * (AGENTS §7: `tool_progress` carries the `models` NAME or nothing). It is
+       * what a row's `model` label is decided against on every publish, so a
+       * mid-session `/model` re-decides it (docs/feat/subagent-panel.md, M2).
+       */
+      readonly modelId?: string;
     }
   | { readonly type: "subagent_tool"; readonly id: string; readonly label: string }
   | {
@@ -356,6 +396,7 @@ function progressToEvent(id: string, event: ToolProgressEvent): AgentEvent {
         id,
         agentType: event.agentType,
         description: event.description,
+        ...(event.modelId !== undefined ? { modelId: event.modelId } : {}),
       };
     case "subagent_tool":
       return { type: "subagent_tool", id, label: event.label };
@@ -379,6 +420,13 @@ function progressToEvent(id: string, event: ToolProgressEvent): AgentEvent {
 
 export interface AgentConfig {
   readonly model: ModelProvider;
+  /**
+   * The model ID `model` was built for (the wiring's `config.model`). DAEMON-side
+   * only, and `undefined` when this process cannot know it — a pod's main model
+   * is a tunnel to the laptop's (AGENTS §7). It is what a sub-agent row's `model`
+   * label is decided against on every publish (docs/feat/subagent-panel.md, M2).
+   */
+  readonly modelId?: string;
   readonly tools: ToolRegistry;
   readonly env: ExecutionEnvironment;
   readonly systemPrompt?: string;
@@ -652,15 +700,40 @@ export class Agent {
   /**
    * Job exits no turn has surfaced yet: what the next turn's start will flush.
    * A child's note counts only when it ASKS for a wake: a note over the wake
-   * budget is still delivered at the next start, it just wakes nobody.
+   * budget is still delivered at the next start, it just wakes nobody. Neither
+   * does the USER's own note (`user_note`): they were told at send time, and it
+   * is not a child's report to react to now (docs/feat/subagent-panel.md).
    */
   get pendingExitCount(): number {
-    return this.pendingExits.filter((job) => !isAgentMessage(job) || job.wakes).length;
+    return this.pendingExits.filter(
+      (job) => !isUserNote(job) && (!isAgentMessage(job) || job.wakes),
+    ).length;
   }
 
   /** Job exits a retired agent had not surfaced: told at this agent's next turn. */
   adoptExits(exits: readonly PendingExit[]): void {
     this.pendingExits.unshift(...exits);
+  }
+
+  /**
+   * The model ID this agent's provider was built for (daemon-side; `undefined`
+   * when this process cannot know it). What a child row's `model` label is
+   * decided against, live (docs/feat/subagent-panel.md, Review round 3 M2).
+   */
+  get mainModelId(): string | undefined {
+    return this.config.modelId;
+  }
+
+  /**
+   * The user wrote to a background child (`session/subagent_message`,
+   * docs/feat/subagent-panel.md): queue the parent's note. Synchronous and
+   * never throwing — the daemon has already put the text in the child's inbox
+   * by the time it calls this, and it must not undo that.
+   *
+   * Wakes nobody: it is not a child's report, and the user is watching.
+   */
+  noteUserToSubagent(agentId: string, text: string): void {
+    this.pendingExits.push({ kind: "user_note", agentId, text });
   }
 
   /** Whether the user may activate `name` (`/name`) in this agent. */
@@ -2053,6 +2126,12 @@ export class Agent {
         messages.push(message);
         deliveredNote = true;
         events.push({ type: "context_note", text: message.content, reason: "background_exit" });
+        continue;
+      }
+      // The user's own note (docs/feat/subagent-panel.md): the message, and NO
+      // event — the live notice came from `session/subagent_message`.
+      if (isUserNote(job)) {
+        messages.push(userToSubagentNote(job));
         continue;
       }
       if ("agentId" in job) {

@@ -608,6 +608,10 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
 
   const agent = new Agent({
     model,
+    // The id this provider was built for, when THIS process knows it: a pod's
+    // main model is a tunnel to the laptop's (AGENTS §7), so a tunnelled agent
+    // leaves it out and nobody invents one (docs/feat/subagent-panel.md, M2).
+    ...(options.modelOverride === undefined ? { modelId: config.model } : {}),
     tools,
     env,
     jobs,

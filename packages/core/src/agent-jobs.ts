@@ -128,6 +128,17 @@ export interface AgentJobLive {
   toolUses: number;
   tokens: number;
   tail: string[];
+  /**
+   * The `models` NAME the child's pick named, from its `subagent_start` (never an
+   * id: AGENTS §7). Whether a row SHOWS it is decided on every publish, against
+   * the main agent's model of that moment (docs/feat/subagent-panel.md, M2).
+   */
+  model?: string;
+  /**
+   * The model ID the child really runs on — DAEMON-side only (it never reaches
+   * the wire), which is what "differs from the main model" is decided against.
+   */
+  modelId?: string;
 }
 
 /** One child as a client shows it (docs/feat/subagent-background-ui.md Design 2). */
@@ -143,6 +154,13 @@ export interface AgentJobRow {
   readonly startedAt: number;
   /** Its recent tool labels, oldest first, at most `TAIL_MAX`. */
   readonly tail: readonly string[];
+  /** The `models` NAME its pick named; shown only when it differs (M2). */
+  readonly model?: string;
+  /**
+   * The model ID it really runs on: DAEMON-side only (never on the wire).
+   * `subagentRows` compares it with the main model's current id.
+   */
+  readonly modelId?: string;
 }
 
 /** How many labels a row keeps: enough for a panel, never a log. */
@@ -165,6 +183,17 @@ export function foldAgentProgress(live: AgentJobLive, event: ToolProgressEvent):
     }
   } else if (event.kind === "subagent_usage") {
     live.tokens += event.promptTokens + event.completionTokens;
+  } else if (event.kind === "subagent_start") {
+    // The child's model, both halves: the NAME is what a row may show, the ID is
+    // what "same as the main model" is decided against (daemon-side). The ID
+    // alone is never a visible change (it cannot change again), so only the NAME
+    // decides whether this publishes (docs/feat/subagent-panel.md, M2).
+    live.modelId = event.modelId;
+    if (event.model === undefined || event.model === live.model) {
+      return false;
+    }
+    live.model = event.model;
+    return true;
   } else {
     return false;
   }
@@ -258,6 +287,8 @@ export class AgentJobs {
         tokens: live?.tokens ?? 0,
         startedAt: job.startedAt,
         tail: live?.tail ?? [],
+        ...(live?.model !== undefined ? { model: live.model } : {}),
+        ...(live?.modelId !== undefined ? { modelId: live.modelId } : {}),
       };
     });
   }

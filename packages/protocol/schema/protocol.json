@@ -15,6 +15,29 @@
       },
       "type": "object"
     },
+    "AgentKillParams": {
+      "additionalProperties": true,
+      "properties": {
+        "agentId": {
+          "$ref": "#/$defs/SubagentAgentId"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["agentId", "sessionId"],
+      "type": "object"
+    },
+    "AgentKillResult": {
+      "additionalProperties": true,
+      "properties": {
+        "killed": {
+          "type": "boolean"
+        }
+      },
+      "required": ["killed"],
+      "type": "object"
+    },
     "AgentMessageChunk": {
       "additionalProperties": true,
       "properties": {
@@ -2559,6 +2582,7 @@
           "session_settings": "#/$defs/SessionSettingsUpdate",
           "session_title": "#/$defs/SessionTitleUpdate",
           "steer": "#/$defs/Steer",
+          "subagent_message": "#/$defs/SubagentMessageUpdate",
           "subagent_notify": "#/$defs/SubagentNotify",
           "subagents": "#/$defs/SubagentsUpdate",
           "tool_call": "#/$defs/ToolCall",
@@ -2633,6 +2657,9 @@
         },
         {
           "$ref": "#/$defs/SubagentNotify"
+        },
+        {
+          "$ref": "#/$defs/SubagentMessageUpdate"
         },
         {
           "$ref": "#/$defs/SessionSettingsUpdate"
@@ -2817,6 +2844,61 @@
       "enum": ["end_turn", "max_tokens", "max_iterations", "cancelled", "error"],
       "type": "string"
     },
+    "SubagentAgentId": {
+      "maxLength": 64,
+      "minLength": 1,
+      "type": "string"
+    },
+    "SubagentMessageParams": {
+      "additionalProperties": true,
+      "properties": {
+        "agentId": {
+          "$ref": "#/$defs/SubagentAgentId"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "text": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["agentId", "sessionId", "text"],
+      "type": "object"
+    },
+    "SubagentMessageResult": {
+      "additionalProperties": true,
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": ["ok"],
+      "type": "object"
+    },
+    "SubagentMessageUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "agentId": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "type": {
+          "const": "subagent_message",
+          "type": "string"
+        }
+      },
+      "required": ["agentId", "text", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
     "SubagentNotify": {
       "additionalProperties": true,
       "properties": {
@@ -2854,6 +2936,9 @@
         "id": {
           "minLength": 1,
           "type": "string"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelName"
         },
         "startedAt": {
           "minimum": 0,
@@ -3493,6 +3578,14 @@
         "$ref": "#/$defs/ModelStreamChunkedResult"
       }
     },
+    "session/agent_kill": {
+      "params": {
+        "$ref": "#/$defs/AgentKillParams"
+      },
+      "result": {
+        "$ref": "#/$defs/AgentKillResult"
+      }
+    },
     "session/clear": {
       "params": {
         "$ref": "#/$defs/ClearParams"
@@ -3627,6 +3720,14 @@
       },
       "result": {
         "$ref": "#/$defs/SnapshotResult"
+      }
+    },
+    "session/subagent_message": {
+      "params": {
+        "$ref": "#/$defs/SubagentMessageParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SubagentMessageResult"
       }
     },
     "session/update_settings": {

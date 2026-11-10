@@ -292,6 +292,7 @@ describe("toUpdateParams (the session/update frame)", () => {
     },
     // docs/feat/agent-message-two-way.md: a running child's message.
     { type: "subagent_notify", agentId: "sa-1", text: "found X", wake: true },
+    { type: "subagent_message", agentId: "sa-1", text: "skip the tests folder" },
   ];
 
   test("covers every known type (keeps the samples honest)", () => {

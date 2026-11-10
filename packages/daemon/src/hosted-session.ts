@@ -1189,6 +1189,17 @@ export class HostedSession {
    * stretch that changes it — synchronous, never awaited: it runs inside the
    * steering window. Never throws (a sink error is reported, as `emit`'s).
    */
+  /**
+   * The model id the session's MAIN agent runs on right now, when this daemon can
+   * know it: a child's row shows its own model only when it differs, so the
+   * comparison must read the CURRENT agent, not the one the child started under
+   * (docs/feat/subagent-panel.md, Review round 3 M2). `undefined` over the pod
+   * model tunnel — the laptop's model id stays there (AGENTS §7).
+   */
+  private mainModelId(): string | undefined {
+    return this.session.currentAgent().mainModelId;
+  }
+
   private publishQueue(): void {
     const state = this.queueState();
     if (sameState(state, this.lastQueued)) {
@@ -1212,7 +1223,7 @@ export class HostedSession {
     if (this.closed) {
       return;
     }
-    const rows = subagentRows(this.agentRuntime?.rows() ?? []);
+    const rows = subagentRows(this.agentRuntime?.rows() ?? [], this.mainModelId());
     const structural =
       rows.length !== this.lastSubagents.length ||
       rows.some((row, i) => row.id !== this.lastSubagents[i]?.id);
@@ -1246,7 +1257,9 @@ export class HostedSession {
    * as `emit`'s). Idle: the cut then moves to "now", so the ring's pin follows
    * the frame instead of holding a whole burst until the next commit.
    */
-  private publishSubagents(rows = subagentRows(this.agentRuntime?.rows() ?? [])): void {
+  private publishSubagents(
+    rows = subagentRows(this.agentRuntime?.rows() ?? [], this.mainModelId()),
+  ): void {
     if (sameRows(rows, this.lastSubagents)) {
       return;
     }
@@ -1577,6 +1590,55 @@ export class HostedSession {
   /** The background sub-agents still running (6a's liveness, the quit count, `/clear`'s hand-over). */
   agentJobsRunning(): readonly AgentJob[] {
     return this.agentJobs.running();
+  }
+
+  /**
+   * `session/subagent_message` (docs/feat/subagent-panel.md): the USER's text
+   * into a running background child — the same seam the model's `agent_message`
+   * tool uses (`AgentJobs.message`), so the child drains it at its next
+   * boundary. Synchronous end to end and never throwing, so it holds no lock
+   * and runs concurrently with a `session/prompt` (AGENTS §7).
+   *
+   * On acceptance: the parent's `[user → sa-N]` note is queued (the next turn
+   * reads it; it wakes nobody) and ONE `subagent_message` update goes to every
+   * attached client, the sender's included — one render path, no local echo, so
+   * two TUIs on the session stay consistent. A refusal notes and emits nothing.
+   */
+  messageSubagent(agentId: string, text: string): { ok: boolean; reason?: string } {
+    const runtime = this.agentRuntime;
+    if (runtime === undefined) {
+      return {
+        ok: false,
+        reason: "background sub-agents are not available in this mode: nothing was sent.",
+      };
+    }
+    const result = runtime.message(agentId, text, "user");
+    if (!result.ok) {
+      return { ok: false, reason: result.reason };
+    }
+    // The note the parent's agent reads at its next turn (never a wake).
+    this.session.noteUserToSubagent(agentId, text);
+    try {
+      this.emit({ type: "subagent_message", agentId, text });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    // Idle: nothing is being committed, so the frame is safe to pin AND to let
+    // go of (the same rule as `publishSubagents`).
+    if (this.controller === null) {
+      this.recordCut(null);
+    }
+    return { ok: true };
+  }
+
+  /**
+   * `session/agent_kill` (docs/feat/subagent-panel.md): the user stops one
+   * background child — the same decision the model's `agent_kill` tool makes
+   * (`AgentJobs.kill`). Synchronous; the exit, its note and the list's next
+   * update all follow the EXISTING path.
+   */
+  killSubagent(agentId: string): { killed: boolean } {
+    return { killed: this.agentRuntime?.kill(agentId) ?? false };
   }
 
   /**
@@ -1959,6 +2021,10 @@ export class HostedSession {
     this.settingsReport = state.settingsReport;
     this.persist();
     this.emit({ type: "session_settings", settings: state.settingsReport, id: state.id });
+    // The main model may just have changed, and a running child's `model` label
+    // is decided AGAINST it (`subagentRows`, Review round 3 M2): the list is
+    // republished now, not at the child's next progress event.
+    this.publishSubagents();
   }
 
   /**

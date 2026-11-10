@@ -10,6 +10,7 @@
  */
 import type { AskHooksTrust } from "@tentacle/agent";
 import {
+  type AgentKillParams,
   type CancelParams,
   type ClearParams,
   type ClearResult,
@@ -54,6 +55,8 @@ import {
   type SessionTtlParams,
   type SnapshotParams,
   type SnapshotResult,
+  type SubagentMessageParams,
+  type SubagentMessageResult,
   type UpdateSettingsParams,
   type WireChatRequest,
 } from "@tentacle/protocol";
@@ -267,6 +270,15 @@ export class Connection {
         return this.reclaim(params as ReclaimParams);
       case Method.ResolvePermission:
         return this.resolvePermission(params as ResolvePermissionParams);
+      // Both synchronous, holding no lock (AGENTS §7): they never await a turn.
+      case Method.SubagentMessage: {
+        const { sessionId, agentId, text } = params as SubagentMessageParams;
+        return this.messageSubagent(this.lookup(sessionId), agentId, text);
+      }
+      case Method.AgentKill: {
+        const { sessionId, agentId } = params as AgentKillParams;
+        return this.lookup(sessionId).killSubagent(agentId);
+      }
       case Method.McpStatus:
         return this.mcpStatus();
       case Method.SessionSkills:
@@ -381,6 +393,15 @@ export class Connection {
     const hosted = this.lookup(params.sessionId);
     hosted.resolvePermission(params.requestId, params.optionId, params.message);
     return {};
+  }
+
+  /** `session/subagent_message`, in the shape `ResolvePermission` takes (a typed refusal, not a throw). */
+  private messageSubagent(
+    hosted: HostedSession,
+    agentId: string,
+    text: string,
+  ): SubagentMessageResult {
+    return hosted.messageSubagent(agentId, text);
   }
 
   private initialize(params: InitializeParams): InitializeResult {

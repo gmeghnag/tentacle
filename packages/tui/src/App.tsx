@@ -11,6 +11,28 @@ import {
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import {
+  type DockOutcome,
+  type DockState,
+  INPUT_DOCK,
+  clickDock,
+  dockKey,
+  downEntersList,
+  noteSent,
+  reconcile,
+  refusalPlacement,
+  resetDock,
+  restoreRefused,
+  sendTarget,
+  toggleList,
+} from "./background-focus.ts";
+import {
+  backgroundListView,
+  dockRows,
+  drawerView,
+  inputTitle,
+  listVisible,
+} from "./background-list.ts";
+import {
   type BackgroundAgentRow,
   backgroundCount,
   backgroundNames,
@@ -49,6 +71,7 @@ import {
   skillsListError,
   transcriptToMarkdown,
 } from "./commands.ts";
+import { BackgroundList, SubagentDrawer } from "./components/BackgroundList.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
 import { LineInput } from "./components/LineInput.tsx";
 import { ListPanel } from "./components/ListPanel.tsx";
@@ -58,7 +81,7 @@ import { QUIT_CONFIRM_ROWS, QuitConfirm } from "./components/QuitConfirm.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
 import { pushHistory, recall } from "./history.ts";
-import { useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
+import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
 import { startIdleWarm } from "./idle-warm.ts";
 import { resolveLineInput } from "./input-actions.ts";
 import { inputRowCount } from "./input-view.ts";
@@ -173,9 +196,13 @@ import {
   startTurn,
   withdrawUserTurn,
 } from "./state.ts";
-import { modelBorder } from "./status-line.ts";
-import { type ContextOpen, contextShown, statusTokens } from "./status-view.ts";
-import { type SubagentNotifyView, subagentNotifyNotice } from "./subagent-notify.ts";
+import { inputRuleText } from "./status-line.ts";
+import { type ContextOpen, contextShown, pillView, statusTokens } from "./status-view.ts";
+import {
+  type SubagentNotifyView,
+  subagentNotifyNotice,
+  userToSubagentNotice,
+} from "./subagent-notify.ts";
 import type { TargetBadge } from "./target-view.ts";
 import { dimProps, palette } from "./theme.ts";
 import { CLICK_IDLE, type ClickState, nextClick, toggleExpanded } from "./tool-expand.ts";
@@ -321,6 +348,23 @@ export interface SessionController {
    */
   onSubagentNotify?(listener: (notify: SubagentNotifyView) => void): () => void;
   /**
+   * Write the user's text into a RUNNING background child
+   * (`session/subagent_message`, docs/feat/subagent-panel.md). A refusal is a
+   * typed result, never a throw. Optional: absent where the mode has no
+   * background sub-agents, and the dock refuses instead of guessing.
+   */
+  messageSubagent?(agentId: string, text: string): Promise<{ ok: boolean; reason?: string }>;
+  /** Stop one background child (`session/agent_kill`); `{killed: false}` if it was not running. */
+  killSubagent?(agentId: string): Promise<{ killed: boolean }>;
+  /**
+   * Subscribe to the USER's own messages to this session's background children
+   * (bounded by the client), never given a backlog: a notice is a moment.
+   * Returns an unsubscribe (docs/feat/subagent-panel.md).
+   */
+  onSubagentMessage?(
+    listener: (notice: { readonly agentId: string; readonly text: string }) => void,
+  ): () => void;
+  /**
    * Stop following the session WITHOUT ending it — it runs on for any device
    * (`/sessions` switches away with it). Rejects when the daemon cannot (an
    * older one): nothing changed. Optional: absent where nobody else can reach it.
@@ -431,6 +475,12 @@ export interface AppProps {
   readonly runQuit?: RunQuit;
   /** A detached run's TUI: auto-accept is its session's, shared by its TUIs (B3). */
   readonly autoAccept?: AutoAcceptFeed;
+  /**
+   * The width to render at, overriding the terminal's (`ink-testing-library`
+   * reports 100). Never set by a runtime: it exists so a frame test can pin a
+   * tier (the dock's 100/80/56, docs/feat/subagent-panel.md).
+   */
+  readonly columns?: number;
 }
 
 // Rows reserved below the transcript viewport: a blank spacer, the input/thinking
@@ -508,12 +558,13 @@ export function App({
   sessions,
   runQuit,
   autoAccept,
+  columns: fixedColumns,
 }: AppProps): ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
 
   const [size, setSize] = useState(() => ({
-    columns: stdout?.columns ?? 80,
+    columns: fixedColumns ?? stdout?.columns ?? 80,
     rows: stdout?.rows ?? 24,
   }));
   const [scrollOffset, setScrollOffset] = useState(0);
@@ -530,6 +581,11 @@ export function App({
   // passes the resulting phase to the layout (AGENTS §7).
   const [blinkClock, setBlinkClock] = useState<BlinkClock>(BLINK_IDLE);
   const field = useLineEditor();
+  // The LIVE field value for an async handler: `field` is this render's object,
+  // so a promise that lands frames later would read a stale `field.value`
+  // (Review H2's placement asks whether the field is empty NOW).
+  const fieldValueRef = useRef("");
+  fieldValueRef.current = field.value;
   const [commandIndex, setCommandIndex] = useState(0);
   // Messages the user queued while a turn is running (steering), shown above
   // the input until the agent injects them (a `steer` event clears them FIFO).
@@ -654,6 +710,8 @@ export function App({
   const agentsSubRef = useRef<(() => void) | null>(null);
   /** The current session's `onSubagentNotify` subscription (replaced with it). */
   const notifySubRef = useRef<(() => void) | null>(null);
+  /** The current session's `onSubagentMessage` subscription (replaced with it). */
+  const dockMsgSubRef = useRef<(() => void) | null>(null);
   // My `/compact`s whose history has not arrived yet: that compaction's notice
   // is mine ("Context compacted"), not "on another device" (C6).
   const ownCompactionsRef = useRef(0);
@@ -680,11 +738,57 @@ export function App({
     // do — the frame carries up to 4 full states a second, and re-rendering the
     // whole App for an unchanged list is pure waste (LOW-4).
     const previous = subagentsRef.current;
+    // Keep the last rows the dock could paint BEFORE they are replaced: an open
+    // child that this report drops freezes its drawer on them (`reconcile`).
+    if (previous !== undefined && previous.length > 0) {
+      dockLastRowsRef.current = previous;
+    }
     subagentsRef.current = rows;
     if (!sameIds(previous, rows)) {
       setSubagents(rows);
     }
   }, []);
+  /** The last non-empty rows the dock could paint: what an ended drawer freezes on. */
+  const dockLastRowsRef = useRef<readonly BackgroundAgentRow[]>([]);
+  /**
+   * A child's exit as the transcript's notice already learns it, by id: the
+   * `end_turn` that means "finished" (what a frozen drawer says).
+   */
+  const dockOutcomeRef = useRef<Record<string, DockOutcome>>({});
+  /**
+   * The child that just ENDED and when, for the pill's `✓ sa-1 done` (~5 s; the
+   * window and the wording are `status-view.ts`'s `PILL_DONE_MS`). Written by the
+   * same `jobs.onExit` feed that records the outcome, so the pill and the
+   * transcript's notice can never disagree about who ended.
+   */
+  const dockFinishedRef = useRef<{ readonly id: string; readonly at: number } | null>(null);
+  // The dock (docs/feat/subagent-panel.md): its focus, the drafts per target and
+  // the messages sent to each child. `dockRef` is the truth for the key handler
+  // (a keypress must read what the last one wrote); the state renders.
+  const [dock, setDockState] = useState<DockState>(INPUT_DOCK);
+  const dockRef = useRef<DockState>(INPUT_DOCK);
+  const setDock = useCallback((next: DockState | ((prev: DockState) => DockState)) => {
+    // The ref is written EAGERLY, from itself: a keypress handled later in the
+    // same tick (or before React commits) must read what the last one decided.
+    // (A ref written inside the state updater lands at render time — too late,
+    // which would let an ended child's Enter send.)
+    const value = typeof next === "function" ? next(dockRef.current) : next;
+    dockRef.current = value;
+    setDockState(value);
+  }, []);
+  /** The dock's item ids in paint order (the children; shell jobs are P6's follow-up). */
+  const dockIds = useCallback(
+    (): readonly string[] => (subagentsRef.current ?? []).map((r) => r.id),
+    [],
+  );
+  /** Whether the list has anything to show (the dock's `listVisible`). */
+  const dockVisible = useCallback((): boolean => listVisible(subagentsRef.current), []);
+  /** The child the drawer paints: its live row, or the last one it had (frozen). */
+  const drawerRow =
+    dock.focus.kind === "open"
+      ? (subagentsRef.current?.find((r) => r.id === (dock.focus as { id: string }).id) ??
+        dock.focus.frozen)
+      : null;
   const layoutOptsRef = useRef<RenderOptions>({
     expandAll: false,
     width: 80,
@@ -796,6 +900,15 @@ export function App({
       return;
     }
     return jobs.onExit((job) => {
+      // A sub-agent's exit carries its own stop reason (`end_turn` = a clean
+      // finish): the dock's frozen drawer says which (docs/feat/subagent-panel.md).
+      if (job.agent !== undefined) {
+        dockOutcomeRef.current[job.id] =
+          job.agent.stopReason === "end_turn" ? { kind: "finished" } : { kind: "stopped" };
+        // The pill celebrates it for ~5 s (status-view.ts owns the window), then
+        // shows the new counts; the LAST one to end leaves no pill at all.
+        dockFinishedRef.current = { id: job.id, at: Date.now() };
+      }
       stateRef.current = appendBackgroundExit(
         stateRef.current,
         backgroundExitNotice(job.id, job.command, job.status, job.exitCode, job.agent),
@@ -919,6 +1032,63 @@ export function App({
   // Rows the bottom area occupies: the permission dialog; or the running rows,
   // then the list panel or the input box (plus any open palette rows, which
   // only open while idle).
+  //
+  // The dock's view-models (pure; the components only paint them) are computed
+  // HERE, before the layout, because their height feeds `activeRows` (Review H3:
+  // they used to be built after it, so the frame was taller than the terminal).
+  const dockNow = useDockClock(dock.focus.kind !== "input" || dockVisible());
+  // The DROPDOWN is shown only when the focus reached it: DOWN focuses the pill,
+  // Enter opens the dropdown — at rest nothing is listed at all (the owner: "no
+  // permanent list anywhere"). A quit confirm owns the screen. A PERMISSION PROMPT
+  // does not take the dropdown away: the prompt may be a background child's ask,
+  // and its row says `⚠ needs your permission` — hiding the list there made that
+  // row unreachable (Review M1).
+  const dockListVisible =
+    dock.focus.kind === "list" && listVisible(subagents) && quitConfirm === null;
+  const dockView = dockListVisible
+    ? backgroundListView({
+        rows: subagentsRef.current,
+        jobs: [],
+        askingId: permission.pendingAgent?.id ?? null,
+        focus: dock.focus,
+        width: columns,
+        now: dockNow,
+      })
+    : null;
+  const drawer =
+    dock.focus.kind === "open" && drawerRow !== null && quitConfirm === null && !permission.pending
+      ? drawerView({
+          row: drawerRow,
+          sent: dock.sent[dock.focus.id] ?? [],
+          outcome: dock.focus.ended,
+          width: columns,
+          now: dockNow,
+        })
+      : null;
+  /** The rows the dock takes ABOVE the input: the dropdown's, or the drawer's. */
+  // A permission prompt REPLACES the whole bottom area (it is the input, as
+  // today), so nothing of the dock paints under it and it reserves no rows. The
+  // "who is asking" the dropdown's ⚠ row used to carry is now the PILL's job —
+  // the pill paints under the prompt (`▲ sa-1 asks`), which is strictly better:
+  // it is visible with the dock closed too (docs/feat/subagent-panel.md).
+  const dockHeight = permission.pending ? 0 : dockRows(dockView, drawer);
+  // The status bar's pill (docs/feat/subagent-panel.md, UI revision): ONE control
+  // for the background work, its words and state decided by the pure view-model.
+  const pill = pillView({
+    agents: subagents?.length ?? 0,
+    askingId: permission.pendingAgent?.id ?? null,
+    finished: dockFinishedRef.current,
+    now: dockNow,
+    focus:
+      dock.focus.kind === "pill"
+        ? "pill"
+        : dock.focus.kind === "list"
+          ? "dropdown"
+          : dock.focus.kind === "open"
+            ? "open"
+            : "input",
+    width: columns,
+  });
   // The reply field's view while it is open (its rows feed the viewport maths).
   const replyMax = permission.pending?.reply?.maxChars ?? 0;
   const replyShown =
@@ -950,12 +1120,37 @@ export function App({
             permissionShowsCwd(permission.pending),
             replyShown?.rows.length,
             permission.pendingAgent !== null,
-          )
-        : runningRows + (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length);
+          ) + dockHeight
+        : runningRows +
+          (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length) +
+          dockHeight;
   const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
   // Terminal row (1-based) of the panel's first body row: the transcript
   // viewport, the bottom area's marginTop row, the running rows, the title rule.
   const panelBodyTop = viewport + 1 + runningRows + 2;
+  /**
+   * Where the DOCK's first row sits on screen (1-based), or `null` when it paints
+   * nothing. Derived from the same parts `activeRows` sums, in the order the
+   * tree paints them: the transcript viewport, the `marginTop` spacer, the running
+   * rows, then the dock (the dropdown's rule + rows, or the drawer's block) — the
+   * input rule, the input and the status bar come after it.
+   *
+   * A panel, the palette, a quit confirm and a permission prompt each own that
+   * slot instead, and none of them paints the dock.
+   */
+  const dockTop =
+    dockHeight === 0 || listView || paletteOpen || quitConfirm !== null || permission.pending
+      ? null
+      : viewport + 1 + runningRows + 1;
+  // Where the STATUS BAR's row is on screen, and the pill's cells on it, as the
+  // last render reported them (docs/feat/subagent-panel.md: "a click on the
+  // pill's cells opens the dropdown"). `StatusBar` computes the row's layout and
+  // reports the range; the App must not re-derive either (AGENTS §7: one source
+  // of truth — the component paints and reports, it decides nothing).
+  const statusRowRef = useRef<{
+    readonly y: number;
+    readonly pill: { readonly start: number; readonly end: number } | null;
+  } | null>(null);
   // Positional layout only (O(items) cache lookups, no full array): take the
   // row `total` for scroll maths and materialise just the visible window. The
   // whole transcript is assembled on demand (sliceLaid 0..total) only where a
@@ -1036,6 +1231,135 @@ export function App({
     },
     [flushNow],
   );
+
+  /**
+   * Stop one child (`session/agent_kill`) — the `x` then `y` arm's second step
+   * (docs/feat/subagent-panel.md, owner P4 (a)). A refusal is a notice, never a
+   * throw; the row leaves on the daemon's next list update, and the transcript
+   * gets the existing exit notice (`backgroundExitNotice`, unchanged).
+   */
+  const killChild = useCallback(
+    (id: string): void => {
+      const session = sessionRef.current;
+      if (!session?.killSubagent) {
+        pushNotice("_this session cannot stop background sub-agents: no agent kill here_");
+        return;
+      }
+      void session.killSubagent(id).then(
+        (result) => {
+          if (!result.killed) {
+            pushNotice(`_${id} was not running any more: nothing was stopped_`);
+          }
+        },
+        (error: unknown) =>
+          pushNotice(
+            `_${id} was not stopped: ${error instanceof Error ? error.message : String(error)}_`,
+          ),
+      );
+    },
+    [pushNotice],
+  );
+
+  /**
+   * `/agents` and Ctrl+T (docs/feat/subagent-panel.md, owner Q16 (b)): move the
+   * focus into the list from anywhere (a multi-line draft, mid-history), or
+   * back. An empty list says so instead of opening an empty box.
+   */
+  const toggleAgents = useCallback((): void => {
+    if (dockRef.current.focus.kind === "list") {
+      setDock((prev) => toggleList(prev, dockIds()));
+      return;
+    }
+    if (!dockVisible()) {
+      pushNotice("_Nothing is running in the background._");
+      return;
+    }
+    setDock((prev) => toggleList(prev, dockIds()));
+  }, [dockIds, dockVisible, pushNotice, setDock]);
+
+  /**
+   * Send the dock's draft to whoever owns it (docs/feat/subagent-panel.md): the
+   * main agent (as today), one child (`session/subagent_message`), or a refusal
+   * with the reason as a notice and the text put back. The decision is pure
+   * (`sendTarget`), so an ended child is never silently re-routed to the agent.
+   * `true` means the dock handled the text; the caller's own path must not run.
+   */
+  const submitToTarget = useCallback(
+    (value: string): boolean => {
+      const target = sendTarget(dockRef.current, value);
+      if (target.kind === "main") {
+        return false; // the caller's normal path (a task, a command, a blank draft)
+      }
+      if (target.kind === "refused") {
+        field.set(value);
+        pushNotice(`_${target.text}_`);
+        return true;
+      }
+      const id = target.id;
+      const text = value.trim();
+      const session = sessionRef.current;
+      if (!session?.messageSubagent) {
+        field.set(value);
+        pushNotice(
+          "_this session cannot message background sub-agents (older daemon or local mode)_",
+        );
+        return true;
+      }
+      field.reset();
+      // A LATE refusal must never land in the main input (Review H2): by the time
+      // it arrives the user may have closed the child, so the placement decision
+      // is `refusalPlacement`'s — the field only if they are still on that child
+      // and have typed nothing since; otherwise the notice quotes the text.
+      const refused = (reason: string): void => {
+        const placement = refusalPlacement(dockRef.current, id, fieldValueRef.current);
+        if (placement === "field") {
+          field.set(value);
+          pushNotice(`_not sent to ${id}: ${reason}_`);
+          return;
+        }
+        setDock((prev) => restoreRefused(prev, id, value));
+        pushNotice(`_not sent to ${id}: ${reason} — kept as a draft: ${value}_`);
+      };
+      void session.messageSubagent(id, text).then(
+        (result) => {
+          if (!result.ok) {
+            refused(result.reason ?? "refused");
+          }
+        },
+        (error: unknown) => {
+          refused(error instanceof Error ? error.message : String(error));
+        },
+      );
+      return true;
+    },
+    [field, pushNotice, setDock],
+  );
+
+  /**
+   * Rows changed: the dock keeps its selection BY ID, follows it when the row
+   * leaves, and returns to the input when the list empties — `reconcile`'s
+   * decision, pure (P5 (a): a finished item leaves at once). A departure freezes
+   * an open drawer and KEEPS the input's target, so a draft is never silently
+   * re-routed to the main agent behind the user.
+   */
+  const dockSeenRef = useRef<readonly string[]>([]);
+  // The trigger, as a VALUE (not read from a ref): a fresh identity only when a
+  // report actually changed the ids (`sameIds` gates `setSubagents`), so this
+  // effect runs on a real change and never on a frame (LOW-4).
+  const dockIdKey = (subagents ?? []).map((r) => r.id).join(" ");
+  useEffect(() => {
+    const ids = dockIdKey === "" ? [] : dockIdKey.split(" ");
+    const previous = dockSeenRef.current;
+    dockSeenRef.current = ids;
+    // The outcome comes from the exit the transcript already got (`jobs.onExit`);
+    // a departure nobody named still freezes the drawer, honestly.
+    const ended = previous
+      .filter((id) => !ids.includes(id))
+      .map((id) => ({ id, outcome: dockOutcomeRef.current[id] ?? { kind: "stopped" as const } }));
+    // Freeze on the rows as they were BEFORE this report dropped the departed
+    // ones (`setAgents` keeps them, in `dockLastRowsRef`).
+    setDock((prev) => reconcile(prev, ids, ended, dockLastRowsRef.current));
+  }, [dockIdKey, setDock]);
   warmErrorRef.current = (error: unknown) => pushNotice(warmFailureNotice(error));
 
   const closePanel = useCallback(() => {
@@ -1623,9 +1947,13 @@ export function App({
       queueSubRef.current?.();
       agentsSubRef.current?.();
       notifySubRef.current?.();
+      dockMsgSubRef.current?.();
       heldRef.current = [];
       setDaemonQueue(undefined);
       setAgents(undefined);
+      // The dock belongs to a session: a switch starts it over (its drafts and
+      // its `sent` are per session, docs/feat/subagent-panel.md).
+      setDock(resetDock());
       // Its own skills (a remote session waits for its eager open first).
       skillsSync.use(session);
       // The context at open (never awaited by render): an answer for a session
@@ -1647,6 +1975,16 @@ export function App({
             armWake();
           }
         }) ?? null;
+      // The USER's own message to a child (`session/subagent_message`): ONE live
+      // notice — the daemon broadcasts it, so the sender's own TUI and every
+      // other one agree — and the drawer keeps its last three as `you → sa-N`.
+      dockMsgSubRef.current =
+        session?.onSubagentMessage?.((m) => {
+          stateRef.current = appendNotice(stateRef.current, userToSubagentNotice(m));
+          setScrollOffset(0);
+          flushNow();
+          setDock((prev) => noteSent(prev, m.agentId, m.text));
+        }) ?? null;
       const opening = session?.open?.();
       if (!opening) {
         onOpened?.(true); // nothing to open (a local session)
@@ -1662,7 +2000,7 @@ export function App({
         },
       );
     },
-    [pushNotice, skillsSync, askContext, setAgents, flushNow, armWake, subagentsTwoWay],
+    [pushNotice, skillsSync, askContext, setAgents, flushNow, armWake, subagentsTwoWay, setDock],
   );
   useEffect(() => {
     watchSession(sessionRef.current);
@@ -2311,6 +2649,11 @@ export function App({
           );
           return;
         }
+        case "/agents":
+          // The dock's list (owner Q16 (b)): the same toggle Ctrl+T runs, so the
+          // key and the command can never disagree.
+          toggleAgents();
+          return;
         case "/tokens": {
           const t = stateRef.current.sessionTokens;
           pushNotice(
@@ -2390,6 +2733,7 @@ export function App({
       setCompacting,
       setRows,
       skills,
+      toggleAgents,
       wakeIfPending,
     ],
   );
@@ -2451,6 +2795,10 @@ export function App({
 
   const submit = useCallback(
     (value: string) => {
+      // The dock may own this text (a child open): it decides, we execute.
+      if (submitToTarget(value)) {
+        return;
+      }
       const text = value.trim();
       field.reset();
       if (text === "") {
@@ -2512,7 +2860,7 @@ export function App({
       }
       void run(text);
     },
-    [handleCommand, pushNotice, restoreInput, run, field.reset, setRows],
+    [handleCommand, pushNotice, restoreInput, run, field.reset, setRows, submitToTarget],
   );
 
   // All line editing lives in `useLineEditor` (pure `editor.ts` ops), so no
@@ -2845,6 +3193,39 @@ export function App({
         return;
       }
     }
+    // The dock (docs/feat/subagent-panel.md) BEFORE anything that could read a
+    // key as something else: Esc in `list`/`open` closes the dock and must never
+    // reach "Esc stops a running turn" below. `dockKey` decides; we execute.
+    if (panel === null) {
+      const step = dockKey(dockRef.current, char, key, {
+        ids: dockIds(),
+        openable: (id: string) => id.startsWith("sa-"),
+        // The LIVE field, never a stashed `drafts` copy: typing goes straight to
+        // `field`, so `drafts` is empty on the first open/close (Review H1).
+        draft: field.value,
+      });
+      // The STATE is applied for every verdict, `pass` included: a printable key
+      // on the pill both types into the input AND returns the focus to it (owner
+      // P3 (a)). Applying it only for a non-`pass` verdict left the pill focused,
+      // so the next Enter opened the dropdown and the message never went out
+      // (Review round 3, H1).
+      if (step.state !== dockRef.current) {
+        setDock(step.state);
+      }
+      if (step.effect.kind !== "pass") {
+        if (step.effect.kind === "stop") {
+          killChild(step.effect.id);
+        } else if (step.effect.kind === "open" || step.effect.kind === "close") {
+          field.set(step.effect.draftIn);
+        }
+        return;
+      }
+      // Ctrl+T from the INPUT (owner Q16 (b)): the same toggle `/agents` runs.
+      if (key.ctrl && char === "t") {
+        toggleAgents();
+        return;
+      }
+    }
     if (key.escape && stateRef.current.running && abortRef.current) {
       stoppedHereRef.current = true;
       abortRef.current.abort();
@@ -2909,6 +3290,45 @@ export function App({
           setPanel((p) => (p ? panelClick(p, listView, bodyIndex, columns) : p));
         }
         return;
+      }
+      // The DOCK's two controls (docs/feat/subagent-panel.md, UI revision): a
+      // click on the PILL opens the dropdown; a click on a dropdown ROW opens
+      // that child. Both hit tests are the view-models' (the pill's cell range is
+      // `statusLayout`'s, the rows' are their screen rows), so nothing here
+      // re-derives a layout.
+      if (r.press && r.btn === 0) {
+        const range = statusRowRef.current;
+        // The bar is the row the component just painted, and `r.y` is 1-based on
+        // the same frame; the range is in cells, also 1-based per column.
+        const clickedPill =
+          range !== null &&
+          range.pill !== null &&
+          r.y === range.y &&
+          r.x > range.pill.start &&
+          r.x <= range.pill.end;
+        if (clickedPill) {
+          const step = clickDock(dockRef.current, { kind: "pill" }, dockIds());
+          if (step.state !== dockRef.current) {
+            setDock(step.state);
+          }
+          return;
+        }
+        // `dockTop` is the dropdown's own RULE row; row 0 is the one under it.
+        const rowIndex =
+          dockTop !== null && r.y > dockTop && r.y <= dockTop + (dockView?.rows.length ?? 0)
+            ? r.y - dockTop - 1
+            : -1;
+        const rowId = rowIndex < 0 ? undefined : dockView?.rows[rowIndex]?.id;
+        if (rowId !== undefined && rowId !== "") {
+          const step = clickDock(dockRef.current, { kind: "row", id: rowId }, dockIds());
+          if (step.state !== dockRef.current) {
+            setDock(step.state);
+          }
+          if (step.effect.kind === "open") {
+            field.set(step.effect.draftIn);
+          }
+          return;
+        }
       }
       // Left button, part 1: classify the report as click / drag / neither.
       // The whole rule is `tool-expand.ts`'s (`nextClick`); here we only feed it
@@ -3035,6 +3455,24 @@ export function App({
     };
 
     const action = resolveLineInput(char, key, { value: field.value, cursor: field.cursor });
+    // DOWN's fourth meaning (mockup 02's table): on the draft slot, with nothing
+    // below to move to and no history walk left, it walks into the list. The
+    // decision is pure (`downEntersList`); this only executes it.
+    if (
+      key.downArrow &&
+      !key.shift &&
+      (action.kind === "history" || action.kind === "moveVertical") &&
+      downEntersList({
+        action: action.kind,
+        onDraftSlot: histIndexRef.current >= historyRef.current.length,
+        paletteOpen,
+        visible: dockVisible(),
+        focus: dockRef.current.focus,
+      })
+    ) {
+      setDock((prev) => toggleList(prev, dockIds()));
+      return;
+    }
     switch (action.kind) {
       case "moveVertical":
         field.moveVertical(action.dir, action.extend);
@@ -3089,6 +3527,13 @@ export function App({
         return;
     }
   });
+
+  // --- the dock's other view-models (pure; the components only paint them) --
+  // `openTitle`: the input's rule says `→ sa-N` while a child is open (P2 (a)).
+  const openTitle = dock.focus.kind === "open" ? inputTitle(dock.focus) : null;
+  // What Enter does while a child is open lives on the INPUT RULE
+  // (`→ sa-1 · enter sends · esc back`), never in the status bar: the bar's
+  // right slot is `auto-accept`'s, and a hint there replaced it (round 3 M1).
 
   return (
     <Box flexDirection="column">
@@ -3169,9 +3614,38 @@ export function App({
                     columns={columns}
                   />
                 ) : null}
-                {/* The top border carries the model name, right-aligned
-                    (`modelBorder`, pure): Ink's own border has no title. */}
-                <Text color={palette().border}>{modelBorder(model, columns)}</Text>
+                {/* The dock ABOVE the input (docs/feat/subagent-panel.md, UI
+                    revision): the dropdown, or the one child opened. Everything
+                    it shows is a precomputed view-model — these components only
+                    paint segments (AGENTS §7). Its rows are reserved in
+                    `activeRows`, so the input and the status bar never move. */}
+                {dockView !== null ? <BackgroundList view={dockView} columns={columns} /> : null}
+                {drawer !== null ? (
+                  <SubagentDrawer
+                    head={drawer.head}
+                    hidden={drawer.hidden}
+                    tail={drawer.tail}
+                    sent={drawer.sent}
+                    columns={columns}
+                  />
+                ) : null}
+                {/* The input's top edge, which says ONE thing depending on the
+                    dock: `── <model> ─` at rest, a PLAIN line under the
+                    dropdown (its bottom edge), or `─ → sa-N · enter sends ·
+                    esc back ───` while a child is open. Never two labelled
+                    rules stacked, and never the model while the dock shows
+                    anything (owner). */}
+                <Text color={palette().border}>
+                  {inputRuleText(
+                    dock.focus.kind === "open"
+                      ? { kind: "target", id: dock.focus.id, ended: dock.focus.ended !== null }
+                      : dock.focus.kind === "list"
+                        ? { kind: "plain" }
+                        : { kind: "model" },
+                    model,
+                    columns,
+                  )}
+                </Text>
                 <Box
                   width={columns}
                   borderStyle="round"
@@ -3207,7 +3681,16 @@ export function App({
         hiddenAbove={hiddenAbove}
         expandAll={expandAll}
         autoApprove={permission.autoApprove}
-        background={backgroundCount(subagents)}
+        pill={pill}
+        onPillRange={(range) => {
+          // The row the bar paints on: the frame's own rows, derived exactly as
+          // the tree lays them out (the transcript viewport, the spacer, the
+          // running rows, the dock, the input box), plus the bar's own one.
+          statusRowRef.current = {
+            y: viewport + 1 + runningRows + dockHeight + inputBoxRows + 1,
+            pill: range,
+          };
+        }}
         link={linkView}
       />
     </Box>

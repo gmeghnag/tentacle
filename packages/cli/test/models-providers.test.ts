@@ -237,4 +237,54 @@ describe("subagentModelResolver", () => {
     expect([raw?.contextWindow, raw?.modelId]).toEqual([7, "raw-id"]);
     expect(s.made.map((m) => m.model)).toEqual(["small", "sonnet", "raw-id"]);
   });
+
+  test("an entry's NAME and its resolved ID are reported as facts (the daemon decides the label)", () => {
+    // The owner's rule (docs/feat/subagent-panel.md, UI revision): the panel shows
+    // a sub-agent's model only when it differs from the main agent's. That
+    // comparison moved to the DAEMON, on every publish (Review round 3 M2): a
+    // `/model` under a running child must re-decide it, and this resolver runs
+    // only when a child starts. So here both facts are reported as they are —
+    // the NAME (a `models` name, never an id: AGENTS §7) and the ID (daemon-side).
+    const resolve = subagentModelResolver(
+      config,
+      createModelProviders(config, spyFactory().create),
+    );
+    // `explore` is `same`, whose entry runs `small`.
+    expect(resolve(type({ name: "explore" }), undefined)?.name).toBe("same");
+    expect(resolve(type({ name: "explore" }), undefined)?.modelId).toBe("small");
+    expect(resolve(type({ name: "explore" }), "claude")?.name).toBe("claude");
+    // An entry that resolves to the MAIN model's own id is still NAMED here: the
+    // name is the fact, and the daemon drops it while the two ids agree.
+    const sameConfig = {
+      ...config,
+      models: { ...config.models, same: entry({ model: "main-model", apiKey: MAIN_KEY }) },
+    };
+    const sameResolve = subagentModelResolver(
+      sameConfig,
+      createModelProviders(sameConfig, spyFactory().create),
+    );
+    const same = sameResolve(type({ name: "explore" }), undefined);
+    expect(same?.name).toBe("same");
+    expect(same?.modelId).toBe("main-model");
+    // A frontmatter model id is not a `models` name (AGENTS §7): never carried.
+    expect(resolve(type({ model: "raw-id" }), undefined)?.name).toBeUndefined();
+    // No pick at all is the main model: nothing to name.
+    expect(resolve(type({}), undefined)).toBeUndefined();
+  });
+
+  test("the resolver's verdict does not depend on the main model: one pick, one answer", () => {
+    // The verdict is frozen at the pick BY DESIGN — it is the child's model, and a
+    // child does not change model mid-run. What follows the main model is the
+    // LABEL, decided by the daemon per publish (`daemon/src/subagents-view.ts`,
+    // Review round 3 M2): the same resolver answer is named or not, live.
+    const before = subagentModelResolver(config, createModelProviders(config, spyFactory().create));
+    const switched = { ...config, model: "small" };
+    const switchedResolve = subagentModelResolver(
+      switched,
+      createModelProviders(switched, spyFactory().create),
+    );
+    expect(before(type({ name: "explore" }), undefined)?.name).toBe("same");
+    expect(switchedResolve(type({ name: "explore" }), undefined)?.name).toBe("same");
+    expect(switchedResolve(type({ name: "explore" }), undefined)?.modelId).toBe("small");
+  });
 });

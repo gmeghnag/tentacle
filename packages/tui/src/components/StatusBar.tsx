@@ -1,9 +1,9 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
-import { backgroundSuffix } from "../background-view.ts";
 import type { LinkIndicator } from "../link-status.ts";
 import type { TokenTotals } from "../state.ts";
 import { METER_WIDTH, contextMeterView, statusLayout } from "../status-line.ts";
+import { type PillView, pillText } from "../status-view.ts";
 import type { TargetBadge } from "../target-view.ts";
 import { dimProps, palette } from "../theme.ts";
 
@@ -68,7 +68,8 @@ export function StatusBar({
   hiddenAbove = 0,
   expandAll = false,
   autoApprove = false,
-  background = 0,
+  pill = { kind: "none" },
+  onPillRange,
   link = null,
 }: {
   cwd: string;
@@ -86,21 +87,35 @@ export function StatusBar({
   hiddenAbove?: number;
   expandAll?: boolean;
   autoApprove?: boolean;
-  /** Background sub-agents running now: ` · 2 sub-agents`, whole or dropped (docs/feat/subagent-background-ui.md). */
-  background?: number;
-  /** The link's state when it is not up ("reconnecting…", "disconnected: …"). */
+  /**
+   * The background work, as ONE pill after `auto-accept on`
+   * (`status-view.ts`'s `pillView`; the owner's UI revision). `kind: "none"` =
+   * nothing in the background, and the bar is exactly as before this task.
+   * `targetBorder`/`statusHint` never replace the auto-accept indicator any more.
+   */
+  pill?: PillView;
+  /**
+   * Called with the pill's cell range on the row it just painted (`null` when it
+   * painted none). The App's mouse handler is the one reader: a click inside it
+   * opens the dropdown. This component reports; it decides nothing (§7).
+   */
+  onPillRange?: (range: { readonly start: number; readonly end: number } | null) => void;
+  /**
+   * The link's state when it is not up ("reconnecting…", "disconnected: …").
+   */
   link?: LinkIndicator | null;
 }): ReactElement {
   const width = Math.max(10, columns);
-  const hintText = autoApprove ? " ⏵⏵ auto-accept on " : " ⏵⏵ auto-accept off (shift+tab) ";
+  // The right slot is `auto-accept`'s, always: nothing displaces it (owner's rule).
+  const rightHint = autoApprove ? " ⏵⏵ auto-accept on " : " ⏵⏵ auto-accept off (shift+tab) ";
   const suffix = scrolledUp
     ? ` · ↑${hiddenAbove} more (↓ to follow)`
     : expandAll
       ? " · expanded"
       : "";
-  // The running children come FIRST (they are news about work in flight); the
-  // scroll hint follows. Both are whole or dropped by `statusLayout`.
-  const withAgents = `${backgroundSuffix(background)}${suffix}`;
+  // The pill rides the right-hand box, AFTER the auto-accept indicator: it is one
+  // more fact about the session, never a replacement for it (the owner's rule).
+  const pillValue = pillText(pill);
   const meter = contextMeterView(contextTokens, contextApprox, contextWindow);
   // What is shown, and what gives way on a short line, is decided in the pure
   // `statusLayout` (the bar stays ONE row); this component only paints it.
@@ -112,9 +127,14 @@ export function StatusBar({
     home: process.env.HOME,
     tokens,
     meter,
-    hint: hintText,
-    suffix: withAgents,
+    hint: rightHint,
+    suffix,
+    pill: pillValue,
+    pillHint: pill.kind === "pill" ? pill.hint : "",
   });
+  // Report the range the layout placed the pill at (`null` when there is none):
+  // the App's click handler needs exactly what was painted, never a re-derivation.
+  onPillRange?.(layout.pill === null ? null : { start: layout.pill.start, end: layout.pill.end });
   const lead = [layout.path, layout.tokens].filter((p): p is string => p !== null && p !== "");
   return (
     <Box width={width}>
@@ -158,13 +178,59 @@ export function StatusBar({
       </Box>
       {layout.hint !== null ? (
         <Box flexShrink={0}>
+          {/* A focused pill's hint sits just LEFT of it, in the mockups' order:
+              `⏵⏵ auto-accept on   enter open · esc back   2 agents ⏎`. It is the
+              pill model's own `hint` (empty under the width tier), and it never
+              replaces the auto-accept indicator. */}
+          <Text {...dimProps()}>{layout.pillHint}</Text>
           {autoApprove ? (
             <Text color={palette().autoAccept}>{layout.hint}</Text>
           ) : (
             <Text {...dimProps()}>{layout.hint}</Text>
           )}
+          {/* The pill, painted from its STATE — the component picks the paint,
+              never the words (`status-view.ts` decided those). Focused: inverse
+              so it reads as a control; warning: it carries an ask; done: success;
+              open/idle: the accent counts. Its `·` separator is the same one
+              every other part of the bar uses. */}
+          {layout.pill === null || pill.kind === "none" ? null : (
+            <>
+              <Text {...dimProps()}>{" · "}</Text>
+              <Pill view={pill} text={layout.pill.text} />
+            </>
+          )}
         </Box>
       ) : null}
     </Box>
   );
+}
+
+/**
+ * The status bar's one control. Its words and its state are `status-view.ts`'s;
+ * this only maps the state to the palette (focused = inverse, ask = warning,
+ * done = success, otherwise the accent).
+ */
+export function Pill({ view, text }: { view: PillView; text: string }): ReactElement | null {
+  if (view.kind === "none") {
+    return null;
+  }
+  const p = palette();
+  if (view.state === "focus") {
+    // INVERSE (the repo's idiom for a highlighted run: `input-view.ts`'s cursor,
+    // `App`'s selection): SGR 7 swaps the terminal's own fg/bg, so the pill reads
+    // as a control in both schemes WITHOUT a new colour token (the mockup paints
+    // it accent-on-background, which is the same thing on a dark terminal).
+    return (
+      <Text inverse bold>
+        {text}
+      </Text>
+    );
+  }
+  if (view.state === "ask") {
+    return <Text color={p.warn}>{text}</Text>;
+  }
+  if (view.state === "done") {
+    return <Text color={p.success}>{text}</Text>;
+  }
+  return <Text color={p.accent}>{text}</Text>;
 }

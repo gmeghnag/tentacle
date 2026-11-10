@@ -75,7 +75,7 @@ export function createModelProviders(
 
 /** `SubagentDeps.modelFor` for this config: `pickSubagentModel`, mapped to providers. */
 export function subagentModelResolver(
-  config: Pick<TentacleConfig, "models" | "subagentModels" | "selectableModels">,
+  config: Pick<TentacleConfig, "model" | "models" | "subagentModels" | "selectableModels">,
   providers: ModelProviders,
 ): (type: AgentType, requested: string | undefined) => SubagentModel | undefined {
   return (type, requested) => {
@@ -92,17 +92,27 @@ export function subagentModelResolver(
       case "default":
         return undefined;
       case "id":
+        // A bare id is not a `models` NAME (AGENTS §7): it never reaches a row.
         return {
           provider: providers.forId(choice.id),
           modelId: choice.id,
           ...(choice.contextWindow !== undefined ? { contextWindow: choice.contextWindow } : {}),
         };
-      case "entry":
+      case "entry": {
+        // The NAME is what the panel may show, and the ID is what "differs from
+        // the main agent" is decided against — by the DAEMON, on every publish
+        // (docs/feat/subagent-panel.md, Review round 3 M2: a `/model` under a
+        // running child re-decides it). Here both facts are reported as they
+        // are; nothing is frozen. The wire carries a `models` NAME, never an id
+        // (AGENTS §7).
+        const entry = config.models[choice.name];
         return {
           provider: providers.forEntry(choice.name),
           contextWindow: choice.contextWindow,
-          modelId: config.models[choice.name]?.model ?? choice.name,
+          modelId: entry?.model ?? choice.name,
+          name: choice.name,
         };
+      }
     }
   };
 }
@@ -129,7 +139,14 @@ export function tunnelSubagentResolver(
       { models, subagentModels, selectableModels: published.selectable },
     );
     return choice.kind === "entry"
-      ? { provider: tunnel(choice.name), contextWindow: choice.contextWindow, modelId: choice.name }
+      ? {
+          provider: tunnel(choice.name),
+          contextWindow: choice.contextWindow,
+          modelId: choice.name,
+          // Over the tunnel the main model IS the tunnel: any named entry is a
+          // different model, so it is named (and it is a name, never an id).
+          name: choice.name,
+        }
       : undefined;
   };
 }

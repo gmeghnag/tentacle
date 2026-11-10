@@ -14,6 +14,23 @@
  */
 export interface BackgroundAgentRow {
   readonly id: string;
+  /**
+   * The rendered fields (docs/feat/subagent-panel.md): absent on a bare id-only
+   * report (a test's fake, a listener that only counts), so the dock treats a
+   * row without them as "nothing to say yet" rather than inventing figures.
+   */
+  readonly agentType?: string;
+  readonly description?: string;
+  readonly state?: string;
+  readonly toolUses?: number;
+  readonly tokens?: number;
+  readonly startedAt?: number;
+  readonly tail?: readonly string[];
+  /**
+   * The child's `models` NAME when it runs a different model than the main agent
+   * (`SubagentRow.model`, docs/feat/subagent-panel.md). Absent = the main one.
+   */
+  readonly model?: string;
 }
 
 /** How many are running now; 0 when there is nothing to report. */

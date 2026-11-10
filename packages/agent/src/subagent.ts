@@ -101,6 +101,15 @@ export interface SubagentModel {
   readonly contextWindow?: number;
   /** The model id the child's hooks report (`model` in a hook payload). */
   readonly modelId?: string;
+  /**
+   * The `models` NAME the child runs on (never an id, a URL or a key: AGENTS §7).
+   * Set only by a pick that named an entry — absent for the parent's own model
+   * (the `default` choice, where there is nothing to tell apart) and for a bare
+   * frontmatter id. Whether the panel SHOWS it is the daemon's decision, taken
+   * on every publish against the main agent's model of that moment
+   * (docs/feat/subagent-panel.md, Review round 3 M2).
+   */
+  readonly name?: string;
 }
 
 export interface SubagentResult {
@@ -308,8 +317,19 @@ export function createSubagentRunner(deps: SubagentDeps): {
     if (!type) {
       return { report: "no sub-agent type available", toolUses: 0, stopReason: "end_turn" };
     }
+    // The child's model, picked BEFORE its start event so the row carries it: a
+    // `models` name for the wire (never an id, AGENTS §7) and the resolved ID
+    // daemon-side only, which is what a `model` label is decided against on
+    // every publish (docs/feat/subagent-panel.md, Review round 3 M2).
+    const chosen = deps.modelFor?.(type, opts.model);
     const onEvent = controls?.onEvent;
-    onEvent?.({ kind: "subagent_start", agentType: type.name, description: opts.description });
+    onEvent?.({
+      kind: "subagent_start",
+      agentType: type.name,
+      description: opts.description,
+      ...(chosen?.name !== undefined ? { model: chosen.name } : {}),
+      ...(chosen?.modelId !== undefined ? { modelId: chosen.modelId } : {}),
+    });
 
     // Restrict the child's tools to the type's allow-list, always dropping the
     // spawn tool so a sub-agent cannot spawn its own sub-agents.
@@ -344,7 +364,6 @@ export function createSubagentRunner(deps: SubagentDeps): {
       childTools.register(createAgentNotifyTool(controls.agentId, deps.notify));
     }
 
-    const chosen = deps.modelFor?.(type, opts.model);
     const model = chosen?.provider ?? deps.model;
     // The child counts against its own model's window: the chosen one's, else
     // (no choice) the type's own, else the parent's.

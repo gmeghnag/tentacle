@@ -91,6 +91,11 @@ export const NOTE_KIND = {
   subagentLost: "subagent_lost",
   /** What was still running when the chat was cleared (`/clear`'s head note). */
   stillRunning: "still_running",
+  /**
+   * The USER wrote directly to a background child (`session/subagent_message`,
+   * docs/feat/subagent-panel.md): the parent agent is told, and asked for nothing.
+   */
+  userToSubagent: "user_to_subagent",
 } as const;
 
 /** How full the model's context was: `used` tokens of a `window` (both tokens). */

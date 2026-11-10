@@ -285,6 +285,20 @@ export const SubagentNotifySchema = z.object({
   wake: z.boolean(),
 });
 
+/**
+ * The USER wrote to a background child (`session/subagent_message`,
+ * docs/feat/subagent-panel.md): one notice per attached client, the sender's own
+ * included (one render path, no local echo — two TUIs stay consistent with each
+ * other). Session-level, like `subagents`: a child runs between turns. Display
+ * only: a client that skips it loses the live notice, and the parent's note
+ * arrives in the conversation at its next turn regardless.
+ */
+export const SubagentMessageUpdateSchema = z.object({
+  type: z.literal("subagent_message"),
+  agentId: z.string().min(1),
+  text: z.string(),
+});
+
 export const SessionUpdateSchema = z.discriminatedUnion("type", [
   AgentMessageChunkSchema,
   AgentThoughtChunkSchema,
@@ -307,6 +321,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   QueuedUpdateSchema,
   SubagentsUpdateSchema,
   SubagentNotifySchema,
+  SubagentMessageUpdateSchema,
   SessionSettingsUpdateSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
@@ -357,6 +372,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   subagents: "display",
   // A notice; the note itself rides the conversation (nothing hangs).
   subagent_notify: "display",
+  // The user's own notice (every client shows it); the parent's note lands at its turn.
+  subagent_message: "display",
   // A notice; the report also rides every OpenResult (nothing hangs).
   session_settings: "display",
 };
