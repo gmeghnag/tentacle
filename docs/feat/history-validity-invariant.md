@@ -1,7 +1,7 @@
 # eval/history-validity-invariant — should the message history have an enforced well-formedness invariant?
 
-> **Status:** eval (Context + Review; direct-to-`main`, no branch; Implementation empty until promoted)
-> **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10)
+> **Status:** feat — promoted by the owner 2026-11-10 after a live session poison (llama.cpp 500 "Failed to parse tool call arguments as JSON" on every request after one invalid `fs_write` call)
+> **Branch:** `feat/history-validity-invariant`
 > **Prospective work (if promoted):** Type: `feat` · Size: M · Blast: load-bearing (agent-loop history writes, the persist boundary, and the resume path — the `fs_edit`/session-poison class) · Suited: strong model executes + mandatory fresh-context Review per §10.
 
 ## Context
