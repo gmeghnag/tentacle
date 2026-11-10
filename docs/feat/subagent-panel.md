@@ -913,3 +913,63 @@ arithmetic, not a second run of `main`: I ran the gate on this branch only.)
   list); with the list under the prompt, the drawer's own `!permission.pending`
   gate is unchanged behaviour and not part of the finding.
 
+## Review — round 2
+
+*— claude-opus-5-5, 2026-11-10* (same reviewer and context as round 1; a different model family from
+the executor)
+
+**Verdict: PASS.** All five round-1 findings are fixed. The fix introduces no new HIGH or MEDIUM
+issue.
+
+**Gate** (`bun run check`, run once on `36c6367`): typecheck clean · Biome 0 errors / 0 warnings ·
+`bun test` **6439 pass · 3 skip (the opt-in three) · 0 fail** (+16 tests since round 1).
+
+**Round-1 repro rerun** (`.tentacle/tmp/subagent-panel/review/repro.ts`):
+
+```
+H idle lines: 23                     (was 25)
+H open lines: 23                     (was 33)
+A after close, MAINDRAFT restored: true | CHILDDRAFT still in field: false
+A reopen, CHILDDRAFT restored: true
+B prompts to the MAIN agent: []      (was ["for-sa1-only"])
+```
+
+The repro's line "A after open … MAINDRAFT: false" is expected: opening swaps in the child's empty
+draft. Its line "B … holds the child's text: true" matches the notice that quotes the text, not the
+input row. F11 checks the input row itself.
+
+### Each finding
+
+| # | Fix (`36c6367`) | Holds | Non-vacuity |
+|---|---|---|---|
+| H1 | `DockKeyContext.draft` = the live `field.value`; `openChild`/`closeOpen` stash it (`background-focus.ts`) | yes: repro A; F10 round trip | F10 fails on the round-1 code: repro A, the same steps, failed there |
+| H2 | `refusalPlacement(state, id, live)`: put the text in the field only if focus is still `open` on that id and the field is empty; otherwise a notice quoting the text plus `restoreRefused` | yes: repro B; F11 | F11's `prompts` length 0 fails on the round-1 code (repro B, same steps) |
+| H3 | `dockRows(listView, drawer)` added to both `activeRows` branches; the view-models are now computed before the layout | yes: 23 ≤ 24 lines, list and drawer | **Mutation:** with `dockHeight` dropped from the non-prompt branch, F12 goes RED (2 fail). Reverted; `git status` clean |
+| M1 | The list stays visible under the permission prompt; the drawer stays hidden there | yes: F13 shows `⚠` on sa-1 only | F13 asserts `⚠` on the asking row, which round 1 could never paint |
+| M2 | Drift 10 recorded in Execution | yes | — |
+
+### Attacks on the fix (nothing at HIGH or MEDIUM)
+
+- **Prompt and list both visible:**
+  - 9 children (5-row window) plus a shell permission ask from sa-1 give 23 lines at 100 and at 56
+    columns, and `⚠` is shown (`review/height2.ts`).
+  - The permission branch adds `dockHeight` too.
+  - `dockRows` counts exactly what `BackgroundList` and `SubagentDrawer` paint (rule + rows; head +
+    optional `hidden` + tail + sent).
+  - `columns` feeds both the view-models and the count in the same render, so a resize cannot make
+    them disagree.
+- **`fieldValueRef`:** it is written every render, and a refusal arrives at least one RPC round trip
+  later. A stale read only shifts the outcome from `field` to `notice` (or the reverse) when a
+  keypress and the refusal land in the same tick. Either outcome is safe: the text is quoted or
+  restored to the same child, and is never sent to the main agent.
+- **The notice path:** the text is quoted in the notice, so it is never silently dropped.
+  `restoreRefused` also stashes it as that child's draft when that slot is empty. If the user is still
+  open on the child with other text typed, a later Esc overwrites that stash, but the notice still
+  holds the text. Below the bar.
+- **The child ends while open:** `closeOpen` stashes the LIVE field under the child's id, and the main
+  draft comes back. Correct.
+- **DOWN/history and Esc:** the fix commit does not touch `downEntersList`, `resolveLineInput`, the
+  `historyStep` path or the Esc-abort branch. F8 (Esc in `open` does not abort) is still green.
+
+**PASS**
+
