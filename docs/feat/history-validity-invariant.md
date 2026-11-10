@@ -557,6 +557,9 @@ Decisions only the owner can make. Each lists the recommendation first.
 - Unverified: llama.cpp rejecting `""` arguments (P6). This is from reading the
   code only. T2 makes it moot, because `""` is never sent.
 
+
+**Answers (owner, 2026-11-10):** **Q1 (b)** the invalid arguments become a MARKER OBJECT in the sent copy (e.g. `{"_invalid_arguments":true,"bytes":N}`), not `"{}"` · Q2 (a) valid-but-huge arguments are not handled here · **Q3 (b)** a ONE-TIME per-session notice in the TUI when the sent history was repaired (a new display-class update) · **Q4 (b)** the exception-safe tool loop (`try/finally` in `runToolCalls`) is IN this task → Size L. Executor: DeepSeek, then a fresh Opus review (owner).
+
 ## Execution
 
 *— (empty until promoted)*
