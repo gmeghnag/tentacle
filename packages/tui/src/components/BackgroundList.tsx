@@ -1,9 +1,13 @@
 /**
- * The background list under the footbar (mockups 01/02/05/06/07;
- * docs/feat/subagent-panel.md Design 5). AGENTS §7: every decision (the window,
- * the cells-cut, the hint, the glyph, the selection grammar) is
- * `background-list.ts`'s; this component maps a segment's semantic tone to a
- * theme token and nothing else.
+ * The background dropdown above the input, and one child opened
+ * (docs/feat/subagent-panel.md, UI revision; AGENTS §7: every decision — the
+ * columns, the window, the cells-cut, the hint, the glyph, the pill's words and
+ * its column range — is `background-list.ts`'s and `status-view.ts`'s; this
+ * component maps a segment's semantic tone to a theme token and nothing else).
+ *
+ * The dropdown's own rule carries its title AND every key; the input rule under
+ * it is a plain line (App's `inputRuleText`), so the dock reads as ONE framed
+ * block and never as two labelled rules stacked.
  */
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
@@ -25,9 +29,10 @@ export function DockSegments({ segments }: { segments: readonly DockSegment[] })
 }
 
 /**
- * The list: its titled rule (`── background · 3 ──── ↓ select · ctrl+t ─`), then
- * at most `LIST_MAX_ROWS` rows. Blank rows are never rendered (the height is
- * `1 + rows.length`), so the dock never holds a collapsed empty `<Text>`.
+ * The dropdown: its titled rule (`── background · 3 ──── ↑↓ move · enter open ·
+ * x stop · esc back ─`), then at most `LIST_MAX_ROWS` compact rows. Blank rows
+ * are never rendered (the height is `1 + rows.length`), so it never holds a
+ * collapsed empty `<Text>`.
  */
 export function BackgroundList({
   view,

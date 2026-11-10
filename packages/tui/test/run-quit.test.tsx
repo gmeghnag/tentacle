@@ -432,10 +432,10 @@ describe("T49/T48: background sub-agents in the TUI (docs/feat/subagent-backgrou
     s.set([{ id: "sa-1" }]);
     await delay(40);
     const afterFirst = commits.length;
-    // feat/subagent-panel: the DOCK's rule says the count now, and the status
-    // bar's `· N sub-agents` suffix is suppressed while it shows (the list says
-    // it — one statement, not two).
-    expect(app.lastFrame() ?? "").toContain("─ background · 1 ─");
+    // docs/feat/subagent-panel.md, UI revision (design B): the count lives in
+    // the status bar's PILL now, and nothing permanent sits above the input.
+    expect(app.lastFrame() ?? "").toContain("1 agent ↓");
+    expect(app.lastFrame() ?? "").not.toContain("─ background ·");
     // The same ids again in a FRESH array (what the daemon sends every time):
     // no state change, so no commit.
     s.set([{ id: "sa-1" }]);
@@ -446,27 +446,28 @@ describe("T49/T48: background sub-agents in the TUI (docs/feat/subagent-backgrou
     s.set([{ id: "sa-1" }, { id: "sa-2" }]);
     await delay(60);
     expect(commits.length).toBeGreaterThan(afterFirst);
-    expect(app.lastFrame() ?? "").toContain("─ background · 2 ─");
+    expect(app.lastFrame() ?? "").toContain("2 agents ↓");
     app.unmount();
   });
 
-  test("the live count shows (the dock's rule) and it clears when the children end", async () => {
+  test("the live count shows (the pill) and it disappears when the children end", async () => {
     // Mutations: no `onSubagents` subscription → no count at all.
-    // feat/subagent-panel: the count moved from the status bar's suffix to the
-    // dock's titled rule (owner P1 (a)); the number is the same fact, said once.
+    // docs/feat/subagent-panel.md, UI revision (design B): the count is the
+    // status bar's PILL, and with nothing in the background there is NO pill at
+    // all — the screen is exactly what it was before this task.
     const s = withAgents();
     const app = render(<App createSession={s.make} model="m" cwd="/tmp/work" />);
     await delay(30);
-    expect(app.lastFrame() ?? "").not.toContain("background");
+    expect(app.lastFrame() ?? "").not.toContain("agent");
     s.set([{ id: "sa-1" }]);
     await delay(30);
-    expect(app.lastFrame() ?? "").toContain("─ background · 1 ─");
+    expect(app.lastFrame() ?? "").toContain("1 agent ↓");
     s.set([{ id: "sa-1" }, { id: "sa-2" }]);
     await delay(30);
-    expect(app.lastFrame() ?? "").toContain("─ background · 2 ─");
+    expect(app.lastFrame() ?? "").toContain("2 agents ↓");
     s.set([]);
     await delay(30);
-    expect(app.lastFrame() ?? "").not.toContain("background");
+    expect(app.lastFrame() ?? "").not.toContain("agent");
     app.unmount();
   });
 

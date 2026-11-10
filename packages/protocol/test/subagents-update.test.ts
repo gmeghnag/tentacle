@@ -67,6 +67,36 @@ describe("the subagents update (6a-2)", () => {
     }
   });
 
+  test("`model` is an optional display field: a `models` NAME, absent when it is the main one", () => {
+    // Absent = the same model as the main agent (the common case: nothing on the
+    // wire). Present = the child's `models` name (docs/feat/subagent-panel.md).
+    const withModel = SessionUpdateSchema.safeParse({
+      type: "subagents",
+      agents: [{ ...row, model: "qwen3-8" }],
+    });
+    expect(withModel.success).toBe(true);
+    if (withModel.success && withModel.data.type === "subagents") {
+      expect(withModel.data.agents[0]?.model).toBe("qwen3-8");
+    }
+    const without = SessionUpdateSchema.safeParse({ type: "subagents", agents: [row] });
+    expect(without.success).toBe(true);
+    if (without.success && without.data.type === "subagents") {
+      expect(without.data.agents[0]).not.toHaveProperty("model");
+    }
+    // A whole update and the snapshot's page carry it the same way.
+    expect(
+      SnapshotResultSchema.safeParse({ messages: [], subagents: [{ ...row, model: "m2" }] })
+        .success,
+    ).toBe(true);
+    // It is a `models` NAME: an id/URL with a slash is not one (the schema's rule).
+    expect(
+      SessionUpdateSchema.safeParse({
+        type: "subagents",
+        agents: [{ ...row, model: "rits/deepseek-ai/DeepSeek-V4.1" }],
+      }).success,
+    ).toBe(false);
+  });
+
   test("an unknown member is dropped, not refused (strip schema)", () => {
     const parsed = SessionUpdateSchema.safeParse({
       type: "subagents",

@@ -7,12 +7,14 @@
 import { describe, expect, test } from "bun:test";
 import {
   LIST_MAX_ROWS,
+  TITLE_MAX_COLS,
   backgroundListView,
   dockRows,
   drawerView,
   inputTitle,
   listVisible,
   rowText,
+  ruleText,
 } from "../src/background-list.ts";
 import type { BackgroundAgentRow } from "../src/background-view.ts";
 import { cellWidth } from "../src/cells.ts";
@@ -40,18 +42,21 @@ const view = (opts: Partial<Parameters<typeof backgroundListView>[0]> = {}) =>
   });
 
 describe("T-L1: the width tiers, cells-cut, one line per row", () => {
-  test("100 columns: id, type, description and `tools · tokens · time`", () => {
+  test("100 columns: id, type, title and `tools · tokens · time`", () => {
     const v = view({ rows: [row(1)], focus: { kind: "list", selected: "sa-1", armed: false } });
     const [first] = v.rows;
     expect(first).toBeDefined();
     const line = rowText(first ?? { segments: [] });
     expect(line).toContain("●");
-    expect(line).toContain("sa-1 ");
-    expect(line).toContain("explore ");
+    expect(line).toContain("sa-1");
+    expect(line).toContain("explore");
     expect(line).toContain("19 tools · 12k · 1m 12s");
     // The selection grammar: a `›` marker, the rest of the dock's rows unmarked.
     expect(line.startsWith("› ")).toBe(true);
-    expect(cellWidth(line)).toBe(100);
+    // NEVER padded to the far edge (the owner's rejection of the old dock): the
+    // row ends 3 cells after its title — the meta starts there, and that is it.
+    expect(line.endsWith("19 tools · 12k · 1m 12s")).toBe(true);
+    expect(cellWidth(line)).toBeLessThan(100);
   });
 
   test("80 columns: the token figure and the type column are dropped only below their tiers", () => {
@@ -59,12 +64,12 @@ describe("T-L1: the width tiers, cells-cut, one line per row", () => {
     expect(at80).toContain("19 tools · 1m 12s");
     expect(at80).not.toContain("12.4k");
     expect(at80).toContain("explore");
-    expect(cellWidth(at80)).toBe(80);
+    expect(cellWidth(at80)).toBeLessThanOrEqual(80);
     const at56 = rowText(view({ width: 56, rows: [row(1)] }).rows[0] ?? { segments: [] });
     expect(at56).toContain("19 tools · 1m 12s");
     // Under 60 the type column goes too.
     expect(at56).not.toContain("explore");
-    expect(cellWidth(at56)).toBe(56);
+    expect(cellWidth(at56)).toBeLessThanOrEqual(56);
   });
 
   test("a double-width description is cut by CELLS, never mid-glyph", () => {
@@ -79,7 +84,7 @@ describe("T-L1: the width tiers, cells-cut, one line per row", () => {
     const [first] = v.rows;
     expect(first).toBeDefined();
     const line = rowText(first ?? { segments: [] });
-    expect(cellWidth(line)).toBe(80);
+    expect(cellWidth(line)).toBeLessThanOrEqual(80);
     expect(line).toContain("…");
     // Never a stray half of a wide character: every cell of the row adds up.
     expect(line).not.toContain("\uFFFD");
@@ -101,6 +106,122 @@ describe("T-L1: the width tiers, cells-cut, one line per row", () => {
         expect(v.rule.map((s) => s.text).join("")).not.toContain("\n");
       }
     }
+  });
+});
+
+describe("T-L1b: the compact column grammar (owner's UI revision)", () => {
+  /** The cell where a row's meta begins: the owner's "meta starts 3 cells after the widest title". */
+  const metaAt = (line: string): number => line.indexOf(" tools ·") - 5;
+
+  test("the meta starts at the SAME cell on every row: aligned on the widest title, never at the far edge", () => {
+    const v = view({
+      width: 190,
+      rows: [row(1, { description: "short" }), row(2, { description: "a much longer title here" })],
+    });
+    const a = rowText(v.rows[0] ?? { segments: [] });
+    const b = rowText(v.rows[1] ?? { segments: [] });
+    // The long title decides the column; the short one is padded to it (3 cells
+    // before its meta), so both figures start in the same cell.
+    expect(a.indexOf("19 tools")).toBe(b.indexOf("19 tools"));
+    // …and that cell is nowhere near 190 (the old dock put it at ~150-186).
+    expect(a.indexOf("19 tools")).toBeLessThan(60);
+  });
+  test("the type column exists only when SOME row is not `general`", () => {
+    const allGeneral = view({
+      rows: [
+        row(1, { agentType: "general", description: "Ada: turni dispari" }),
+        row(2, { agentType: "general", description: "Bruno: turni pari" }),
+      ],
+    });
+    for (const r of allGeneral.rows) {
+      expect(rowText(r)).not.toContain("general");
+    }
+    const mixed = view({
+      rows: [row(1, { agentType: "general" }), row(2, { agentType: "explore" })],
+    });
+    // Mixed: the column appears, and `general` itself stays BLANK (it is the norm,
+    // so repeating it on every row is exactly what the owner rejected).
+    expect(rowText(mixed.rows[1] ?? { segments: [] })).toContain("explore");
+    const generalLine = rowText(mixed.rows[0] ?? { segments: [] });
+    expect(generalLine).not.toContain("general");
+    // Both rows align on the type column's cells.
+    expect(generalLine.indexOf("find callers")).toBe(
+      rowText(mixed.rows[1] ?? { segments: [] }).indexOf("find callers"),
+    );
+  });
+
+  test("the model column exists only when some row runs another model, and the pill never shows it", () => {
+    const noModel = view({ rows: [row(1), row(2, { description: "other" })] });
+    for (const r of noModel.rows) {
+      expect(r.segments.some((s) => s.text.includes("qwen3"))).toBe(false);
+    }
+    const mixed = view({
+      rows: [row(1), row(2, { description: "other", model: "qwen3-8" })],
+    });
+    expect(rowText(mixed.rows[1] ?? { segments: [] })).toContain("qwen3-8");
+    // The row WITHOUT one leaves the column blank, so the metas still align.
+    expect(rowText(mixed.rows[0] ?? { segments: [] }).indexOf("19 tools")).toBe(
+      rowText(mixed.rows[1] ?? { segments: [] }).indexOf("19 tools"),
+    );
+  });
+
+  test("the title column is capped at 56 cells, and the meta keeps its 3-cell gap", () => {
+    const long = "x".repeat(120);
+    const v = view({ width: 190, rows: [row(1, { description: long })] });
+    const line = rowText(v.rows[0] ?? { segments: [] });
+    // From the title's first character (after the columns) to its `…`.
+    const at = line.indexOf("xxx");
+    const elided = line.slice(at);
+    const shown = elided.slice(0, elided.indexOf("…") + 1);
+    expect(cellWidth(shown)).toBe(TITLE_MAX_COLS);
+    // 3 cells, then the meta (the mockups' grammar: never padded to the edge).
+    expect(line).toContain(`${shown}   19 tools`);
+  });
+});
+
+/**
+ * Step 0 of the UI revision (docs/feat/subagent-panel.md): the owner's broken
+ * dock rule. Measured before any other change — `ruleText` was already `width`
+ * cells at every wide width, so the fill was never the fault; the fault was that
+ * a line too narrow for the HINT lost the fill AND the closing dash with it, and
+ * collapsed to `─ background · 2 ` (17 cells, no end). Kept as the regression.
+ */
+describe("T-L0: the rule is ALWAYS one whole line of `width` cells", () => {
+  test("at every width, focused or not — never a label with no fill and no end", () => {
+    for (let width = 20; width <= 200; width += 1) {
+      for (const focus of [
+        { kind: "input" as const },
+        { kind: "list" as const, selected: "sa-1", armed: false },
+        { kind: "list" as const, selected: "sa-1", armed: true },
+      ]) {
+        const rule = ruleText(view({ width, rows: [row(1)], focus }));
+        expect(cellWidth(rule)).toBe(width);
+        // It ENDS in the rule, never in a floating label.
+        expect(rule.endsWith("─")).toBe(true);
+        // The fill is CONTIGUOUS: one run of dashes, so there is never a blank
+        // hole between the title and the hint (the owner's gap) — the only
+        // spaces are the single cell the grammar puts either side of a label.
+        expect(rule).not.toMatch(/─ +─/);
+      }
+    }
+  });
+
+  test("the hint is what gives way, never the fill (the owner's gap)", () => {
+    // 45 columns cannot hold `enter open · x stop · esc back`: the rule keeps its
+    // title and its fill and drops only the keys.
+    const narrow = ruleText(
+      view({ width: 45, rows: [row(1)], focus: { kind: "list", selected: "sa-1", armed: false } }),
+    );
+    expect(cellWidth(narrow)).toBe(45);
+    expect(narrow).toContain("background · 1");
+    expect(narrow).not.toContain("enter open");
+    expect(narrow.endsWith("─")).toBe(true);
+    // Wide enough, the keys are back and the fill still closes the line.
+    const wide = ruleText(
+      view({ width: 90, rows: [row(1)], focus: { kind: "list", selected: "sa-1", armed: false } }),
+    );
+    expect(wide).toContain("enter open · x stop · esc back");
+    expect(cellWidth(wide)).toBe(90);
   });
 });
 
@@ -268,6 +389,43 @@ describe("T-L4: the drawer", () => {
       now: 72_000,
     });
     expect(killed.meta).toContain("stopped");
+  });
+
+  test("the head carries the child's MODEL only when it differs (the mockup's grammar)", () => {
+    // `─ sa-2 · Bruno: … · qwen3-8 ─── running · … ─`; a child on the main model
+    // shows no model at all (the owner: "only when it differs"), and the generic
+    // `general` type is left out of the head too (the old `· general ·` is gone).
+    const differs = drawerView({
+      row: row(2, { agentType: "general", description: "Bruno: turni pari", model: "qwen3-8" }),
+      sent: [],
+      outcome: null,
+      width: 100,
+      now: 72_000,
+    });
+    const head = differs.head.map((s) => s.text).join("");
+    expect(head).toContain("sa-2 · Bruno: turni pari · qwen3-8 ");
+    expect(head).not.toContain("general");
+    const same = drawerView({
+      row: row(1, { agentType: "general", description: "Ada: turni dispari" }),
+      sent: [],
+      outcome: null,
+      width: 100,
+      now: 72_000,
+    });
+    expect(same.head.map((s) => s.text).join("")).toContain("sa-1 · Ada: turni dispari ");
+    // A real type still tells the children apart.
+    const explore = drawerView({
+      row: row(1, { agentType: "explore", description: "find callers" }),
+      sent: [],
+      outcome: null,
+      width: 100,
+      now: 72_000,
+    });
+    expect(explore.head.map((s) => s.text).join("")).toContain("sa-1 · explore · find callers");
+    // Still exactly one row of `width` cells, the model included.
+    for (const d of [differs, same, explore]) {
+      expect(cellWidth(d.head.map((s) => s.text).join(""))).toBe(100);
+    }
   });
 
   test("no earlier steps to hide: no `… earlier` row at all", () => {

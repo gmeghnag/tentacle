@@ -75,7 +75,7 @@ export function createModelProviders(
 
 /** `SubagentDeps.modelFor` for this config: `pickSubagentModel`, mapped to providers. */
 export function subagentModelResolver(
-  config: Pick<TentacleConfig, "models" | "subagentModels" | "selectableModels">,
+  config: Pick<TentacleConfig, "model" | "models" | "subagentModels" | "selectableModels">,
   providers: ModelProviders,
 ): (type: AgentType, requested: string | undefined) => SubagentModel | undefined {
   return (type, requested) => {
@@ -92,17 +92,28 @@ export function subagentModelResolver(
       case "default":
         return undefined;
       case "id":
+        // A bare id is not a `models` NAME (AGENTS §7): it never reaches a row.
         return {
           provider: providers.forId(choice.id),
           modelId: choice.id,
           ...(choice.contextWindow !== undefined ? { contextWindow: choice.contextWindow } : {}),
         };
-      case "entry":
+      case "entry": {
+        // The NAME is what the panel may show, and only when the child really
+        // runs a DIFFERENT model than the main agent (docs/feat/subagent-panel.md:
+        // the owner's "show it only when it differs"): an entry that resolves to
+        // the main model's id is the same model, so it is not named at all. The
+        // wire carries a `models` NAME, never an id (AGENTS §7) — so the compare
+        // happens here, where both are in hand, and the daemon projects the row.
+        const entry = config.models[choice.name];
+        const differs = entry !== undefined && entry.model !== config.model;
         return {
           provider: providers.forEntry(choice.name),
           contextWindow: choice.contextWindow,
-          modelId: config.models[choice.name]?.model ?? choice.name,
+          modelId: entry?.model ?? choice.name,
+          ...(differs ? { name: choice.name } : {}),
         };
+      }
     }
   };
 }
@@ -129,7 +140,14 @@ export function tunnelSubagentResolver(
       { models, subagentModels, selectableModels: published.selectable },
     );
     return choice.kind === "entry"
-      ? { provider: tunnel(choice.name), contextWindow: choice.contextWindow, modelId: choice.name }
+      ? {
+          provider: tunnel(choice.name),
+          contextWindow: choice.contextWindow,
+          modelId: choice.name,
+          // Over the tunnel the main model IS the tunnel: any named entry is a
+          // different model, so it is named (and it is a name, never an id).
+          name: choice.name,
+        }
       : undefined;
   };
 }

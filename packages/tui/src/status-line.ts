@@ -16,7 +16,63 @@ const RULE = "─";
 const MIN_LEAD = 4;
 
 /**
- * The input field's top border carrying the model name, right-aligned:
+ * The input's top border, decided by the DOCK'S FOCUS (docs/feat/subagent-panel.md,
+ * UI revision — "one rule, three meanings, never two labelled rules stacked"):
+ *
+ * - `input` (the dock closed): `──── <model> ─`, exactly as before this task.
+ * - the dropdown open: a PLAIN line — it is only the dropdown's bottom edge, and
+ *   the dropdown's own top rule already carries the title AND every key.
+ * - a child open: `─ → sa-N · enter sends · esc back ─────` — who Enter reaches,
+ *   then what the keys do. NO model name here (the owner's refinement).
+ *
+ * The owner's rule behind all three: while the dock shows anything, the input
+ * rule says nothing about the model. Where the dropdown has its own keys, this
+ * rule says nothing at all.
+ */
+export type InputRule =
+  | { readonly kind: "model" }
+  | { readonly kind: "plain" }
+  | { readonly kind: "target"; readonly id: string; readonly ended: boolean };
+
+/** Below this width the target rule says `esc` for `esc back` (the mockups). */
+const TARGET_RULE_TIER = 90;
+
+/**
+ * The rule's text for a focus: the model border, a plain line, or the target's.
+ * Pure, so the three meanings are tested in one place (AGENTS §7).
+ *
+ * The target's own grammar is the mockup's `b.html`
+ * (`─ → sa-1 · enter sends · esc back ─────────`): the words go LEFT, the rest is
+ * the rule's fill. It is not `targetBorder`'s right-aligned shape — that put the
+ * hint 150 cells away from the name it belongs to, which is part of what the owner
+ * rejected. Exactly `width` cells; too narrow for the words → the target alone.
+ */
+export function inputRuleText(rule: InputRule, model: string, width: number): string {
+  const w = Math.max(0, width);
+  switch (rule.kind) {
+    case "model":
+      return modelBorder(model, w);
+    case "plain":
+      return RULE.repeat(w);
+    case "target": {
+      const keys = rule.ended
+        ? " · esc back"
+        : w >= TARGET_RULE_TIER
+          ? " · enter sends · esc back"
+          : " · enter sends · esc";
+      const label = `─ → ${rule.id}${keys} `;
+      if (cellWidth(label) > w) {
+        // Too narrow for the keys: the target alone, then the fill.
+        const bare = `─ → ${rule.id} `;
+        return cellWidth(bare) > w ? RULE.repeat(w) : `${bare}${RULE.repeat(w - cellWidth(bare))}`;
+      }
+      return `${label}${RULE.repeat(w - cellWidth(label))}`;
+    }
+  }
+}
+
+/**
+ * The input's top border carrying the model name, right-aligned:
  * `──── rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 ─`. Exactly `width` cells.
  * Too long → cut on the LEFT with `…` (the tail of a model id is the part that
  * tells versions apart); no room for even a short name → a plain rule.
@@ -145,6 +201,20 @@ export interface StatusLayoutInput {
   readonly meter: ContextMeterView;
   /** The auto-accept indicator's text (it differs on/off). */
   readonly hint: string;
+  /**
+   * What sits LEFT of `hint` on the right-hand side: the pill's text, already
+   * composed (`status-view.ts`'s `pillText`), or `""` for no pill. It is painted
+   * inside the same right-hand box as the auto-accept hint, and its COLUMN RANGE
+   * is reported back (the owner: a mouse click on the pill opens the dropdown).
+   */
+  readonly pill?: string;
+  /**
+   * A focused pill's key hint (`enter open · esc back`), painted just LEFT of
+   * the pill. It is part of the same right-hand box, so it is budgeted here —
+   * otherwise it can be glued to the ctx figure on a line that is exactly wide
+   * enough (`…/128kenter open · …`), which is a real frame defect.
+   */
+  readonly pillHint?: string;
   /** ` · ↑3 more (↓ to follow)` / ` · expanded` / `` — whole or dropped, never cut. */
   readonly suffix: string;
 }
@@ -164,6 +234,16 @@ export interface StatusLayout {
   /** The scroll/expand hint when it fits whole; `""` when dropped. */
   readonly suffix: string;
   readonly hint: string | null;
+  /**
+   * The pill as painted, and its CELL range on the row `[start, end)` (0-based,
+   * end exclusive) — `null` when there is no pill or it did not fit. A mouse
+   * report's column is 1-based, so a click at `x` hits it when `start < x <= end`
+   * (see `pillHit`). The range is what the drop-down's click needs: nothing else
+   * on the last row is a control.
+   */
+  readonly pill: { readonly text: string; readonly start: number; readonly end: number } | null;
+  /** The pill's hint as painted (just left of it), or `""`. */
+  readonly pillHint: string;
   /** The whole row as plain text — exactly what the components paint, uncoloured. */
   readonly plain: string;
 }
@@ -251,6 +331,16 @@ function layoutRow(input: StatusLayoutInput): StatusLayout {
   const tokenText = input.tokens
     ? `↑${formatTokens(input.tokens.prompt)} ↓${formatTokens(input.tokens.completion)}`
     : null;
+  // The pill rides the auto-accept side, right of it: `⏵⏵ auto-accept on · 2 agents ↓`.
+  // Whole or dropped, like the suffix: a status line never wraps and never cuts
+  // its last control in half. Its CELL RANGE is measured from the RIGHT edge,
+  // because that box is flush right (`flexShrink 0` on the row's end).
+  const pillTextRaw = input.pill ?? "";
+  // The separator before the pill is the component's paint (`· `), so `auto-accept
+  // on · 2 agents` reads as one sentence. The pill's own text here is the pill.
+  const pillPart = pillTextRaw;
+  const pillCells = cellWidth(pillTextRaw);
+  const pillHintRaw = input.pillHint ?? "";
   const variants = [
     { tokens: true, compact: false, hint: true },
     { tokens: true, compact: false, hint: false },
@@ -264,7 +354,12 @@ function layoutRow(input: StatusLayoutInput): StatusLayout {
       cellWidth(badgePart) +
       cellWidth(meterText(input.meter, v.compact)) +
       cellWidth(suffix) +
-      (v.hint ? cellWidth(input.hint) : 0) +
+      (v.hint
+        ? cellWidth(input.hint) +
+          cellWidth(" · ") +
+          cellWidth(pillPart) +
+          (pillHintRaw === "" ? 0 : cellWidth(pillHintRaw) + 4)
+        : 0) +
       (v.tokens && tokenText ? cellWidth(tokenText) + SEP.length : 0);
     // The path also needs its separator before the next part.
     const room = width - others - SEP.length;
@@ -278,8 +373,16 @@ function layoutRow(input: StatusLayoutInput): StatusLayout {
   const path = chosen ? shortPath(input.cwd, input.home, Math.min(MAX_PATH, chosen.room)) : null;
   const tokens = v.tokens ? tokenText : null;
   const hint = v.hint ? input.hint : null;
+  // The pill needs the hint's slot (they are one box): without it, no pill.
+  const pillFits = pillTextRaw !== "" && hint !== null;
+  const pillHint = pillFits ? ` ${pillHintRaw}   ` : "";
+  const pill = pillFits ? { text: pillTextRaw, start: width - pillCells, end: width } : null;
   const lead = [path, tokens].filter((p): p is string => p !== null && p !== "").join(SEP);
-  const plain = `${link}${badgePart}${lead}${lead ? SEP : ""}${meterText(input.meter, v.compact)}${suffix}${hint ?? ""}`;
+  const plain = `${link}${badgePart}${lead}${lead ? SEP : ""}${meterText(input.meter, v.compact)}${suffix}${
+    // A focused pill's hint, then auto-accept, then ` · <pill>`: one box, and
+    // `plain` says exactly what the component paints (the tests pin both).
+    pillHint === "" ? "" : pillHint
+  }${hint ?? ""}${pill === null ? "" : ` · ${pillPart}`}`;
   return {
     link,
     linkCells: linkWidth,
@@ -290,8 +393,19 @@ function layoutRow(input: StatusLayoutInput): StatusLayout {
     compact: v.compact,
     suffix,
     hint,
+    pill,
+    pillHint,
     plain,
   };
+}
+
+/**
+ * Is the SGR click at `x` (1-based column) on the pill? The one rule the App
+ * asks, so the hit test cannot drift from the layout that placed it.
+ */
+export function pillHit(layout: Pick<StatusLayout, "pill">, x: number): boolean {
+  const pill = layout.pill;
+  return pill !== null && x > pill.start && x <= pill.end;
 }
 
 export function statusLayout(input: StatusLayoutInput): StatusLayout {

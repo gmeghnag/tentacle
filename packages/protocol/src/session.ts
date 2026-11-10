@@ -440,6 +440,16 @@ export const SubagentRowSchema = z.object({
   startedAt: z.number().int().nonnegative(),
   /** Its recent tool labels, oldest first (the daemon keeps the last 8). */
   tail: z.array(z.string()),
+  /**
+   * The child's model — its `models` NAME only (never an id, a URL or a key:
+   * AGENTS §7 `Model stays on the laptop`), and only when it differs from the
+   * main agent's CURRENT model (docs/feat/subagent-panel.md, UI revision).
+   * Absent = the same model as the main agent, which is the common case and so
+   * costs nothing on the wire or in the panel. Display-only, so an older client
+   * drops it (protocol v10 forward compat); the daemon recomputes it on every
+   * `subagents` update, so a `/model` mid-session stays right.
+   */
+  model: ModelNameSchema.optional(),
 });
 export type SubagentRow = z.infer<typeof SubagentRowSchema>;
 

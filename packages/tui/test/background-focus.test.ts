@@ -2,19 +2,24 @@
  * feat/subagent-panel (task 7): the dock's focus machine and key routing
  * (AGENTS §7 — App only executes what this returns; it decides nothing).
  *
- * The DOWN table (mockup 02) is the whole subtlety: DOWN keeps today's three
- * meanings in order (the palette, a line below the cursor, a history walk) and
- * only then walks into the list — so a multi-line draft still edits, and a
- * history walk still walks, exactly as before.
+ * The DOWN table is the whole subtlety: DOWN keeps today's three meanings in
+ * order (the palette, a line below the cursor, a history walk) and only then
+ * walks into the dock — so a multi-line draft still edits, and a history walk
+ * still walks, exactly as before. Since the UI revision DOWN lands on the PILL
+ * (docs/feat/subagent-panel.md), and the Esc chain is drawer → dropdown → pill →
+ * input.
  */
 import { describe, expect, test } from "bun:test";
 import {
   type DockState,
   INPUT_DOCK,
+  clickDock,
   closeOpen,
+  closeToDropdown,
   dockKey,
   downEntersList,
   openChild,
+  openDropdown,
   reconcile,
   refusalPlacement,
   sendTarget,
@@ -32,7 +37,7 @@ describe("T-F1: the DOWN table", () => {
     focus: INPUT_DOCK.focus,
   };
 
-  test("on the draft slot, last line, nothing else owning DOWN → enter the list", () => {
+  test("on the draft slot, last line, nothing else owning DOWN → focus the pill", () => {
     expect(downEntersList(base)).toBe(true);
   });
 
@@ -64,34 +69,72 @@ describe("T-F1: the DOWN table", () => {
   });
 });
 
-describe("T-F2: the list's own keys", () => {
+describe("T-F2: the pill's and the dropdown's own keys", () => {
   const three = ["sa-1", "sa-2", "sa-3"];
   const ctx = { ids: three, openable: (id: string) => id.startsWith("sa-"), draft: "" };
   const step = (state: DockState, char = "", k: Record<string, boolean> = {}) =>
     dockKey(state, char, k, ctx);
+  /** DOWN from the input → the pill → Enter → the dropdown (the whole chain). */
+  const atList = () => openDropdown(toggleList(INPUT_DOCK, three), three);
 
-  test("↑ from the first row returns to the input with no effect on the turn", () => {
-    const at = toggleList(INPUT_DOCK, three);
-    expect(at.focus).toEqual({ kind: "list", selected: "sa-1", armed: false });
-    const up = step(at, "", { upArrow: true });
-    expect(up.state.focus).toEqual({ kind: "input" });
-    expect(up.effect.kind).toBe("none");
+  test("DOWN focuses the pill; Enter opens the dropdown on its FIRST row", () => {
+    // The owner's DOWN table: DOWN now points at the pill (it is the bottom-most
+    // control), and the dropdown is one Enter further.
+    const pill = toggleList(INPUT_DOCK, three);
+    expect(pill.focus).toEqual({ kind: "pill" });
+    const drop = dockKey(pill, "", { return: true }, ctx).state;
+    expect(drop.focus).toEqual({ kind: "list", selected: "sa-1", armed: false });
+    // ↓ on the pill points the same way as Enter (a dropdown opens downward).
+    expect(dockKey(pill, "", { downArrow: true }, ctx).state.focus).toMatchObject({
+      kind: "list",
+      selected: "sa-1",
+    });
   });
 
-  test("Esc returns to the input and NEVER stops the turn (its effect is `none`)", () => {
-    // The mutation the plan names: let the App's Esc-stops-turn branch see it →
-    // an Esc meant to leave the list aborts a running turn.
-    const at = toggleList(INPUT_DOCK, three);
-    const esc = step(at, "", { escape: true });
+  test("Esc on the pill is back on the input, effect `none` (never the turn's abort)", () => {
+    const pill = toggleList(INPUT_DOCK, three);
+    const esc = step(pill, "", { escape: true });
     expect(esc.state.focus).toEqual({ kind: "input" });
     expect(esc.effect).toEqual({ kind: "none" });
-    // Ctrl+T is the same toggle back.
-    const ctrlT = step(at, "t", { ctrl: true });
-    expect(ctrlT.state.focus).toEqual({ kind: "input" });
+    // ↑ walks back the same way.
+    expect(step(pill, "", { upArrow: true }).state.focus).toEqual({ kind: "input" });
+    // Ctrl+T is still the direct toggle.
+    expect(step(pill, "t", { ctrl: true }).state.focus).toEqual({ kind: "input" });
+  });
+
+  test("a printable key on the pill goes BACK to the input and is typed there (owner P3 a)", () => {
+    const pill = toggleList(INPUT_DOCK, three);
+    const typed = step(pill, "a");
+    expect(typed.state.focus).toEqual({ kind: "input" });
+    expect(typed.effect).toEqual({ kind: "pass" });
+  });
+
+  test("the ESC CHAIN: the dropdown's Esc lands on the pill, not the input", () => {
+    // The plan's mutation: make this return `input` → the chain skips a step and
+    // a second Esc is needed where the design says one.
+    const esc = step(atList(), "", { escape: true });
+    expect(esc.state.focus).toEqual({ kind: "pill" });
+    expect(esc.effect).toEqual({ kind: "none" });
+    // ↑ from the first row is the same step (there is nothing above it).
+    expect(step(atList(), "", { upArrow: true }).state.focus).toEqual({ kind: "pill" });
+  });
+
+  test("the ESC CHAIN, the whole way: drawer → dropdown → pill → input", () => {
+    // One key per step, in the design's order, and the input ends up with its
+    // main draft back (the drawer's close effect swaps them).
+    const drawer = openChild(atList(), "sa-1", "MAIN").state;
+    expect(drawer.focus).toMatchObject({ kind: "open", id: "sa-1" });
+    const toDrop = dockKey(drawer, "", { escape: true }, { ...ctx, draft: "CHILD" });
+    expect(toDrop.state.focus).toMatchObject({ kind: "list", selected: "sa-1" });
+    expect(toDrop.effect).toEqual({ kind: "close", draftOut: "CHILD", draftIn: "MAIN" });
+    const toPill = dockKey(toDrop.state, "", { escape: true }, ctx);
+    expect(toPill.state.focus).toEqual({ kind: "pill" });
+    const toInput = dockKey(toPill.state, "", { escape: true }, ctx);
+    expect(toInput.state.focus).toEqual({ kind: "input" });
   });
 
   test("↓ on the last row stays (no wrap); ↑ on the second row moves up", () => {
-    const second = dockKey(toggleList(INPUT_DOCK, three), "", { downArrow: true }, ctx).state;
+    const second = dockKey(atList(), "", { downArrow: true }, ctx).state;
     expect(second.focus).toMatchObject({ selected: "sa-2" });
     const third = step(second, "", { downArrow: true }).state;
     expect(third.focus).toMatchObject({ selected: "sa-3" });
@@ -100,7 +143,7 @@ describe("T-F2: the list's own keys", () => {
   });
 
   test("`x` then `y` stops; `x` then anything else disarms AND is swallowed", () => {
-    const at = toggleList(INPUT_DOCK, three);
+    const at = atList();
     const armed = step(at, "x");
     expect(armed.state.focus).toMatchObject({ armed: true });
     expect(armed.effect.kind).toBe("none");
@@ -113,8 +156,8 @@ describe("T-F2: the list's own keys", () => {
     expect(cancelled.effect).toEqual({ kind: "none" });
   });
 
-  test("a printable key with the list focused is IGNORED (owner P3 (a))", () => {
-    const at = toggleList(INPUT_DOCK, three);
+  test("a printable key with the dropdown focused is IGNORED (owner P3 (a))", () => {
+    const at = atList();
     for (const char of ["a", "z", "1", " "]) {
       const r = step(at, char);
       expect(r.state).toBe(at);
@@ -124,7 +167,7 @@ describe("T-F2: the list's own keys", () => {
 
   test("Enter opens the selected child and swaps the drafts", () => {
     const withDrafts: DockState = { ...INPUT_DOCK, drafts: { main: "half typed" } };
-    const at = toggleList(withDrafts, three);
+    const at = openDropdown(toggleList(withDrafts, three), three);
     // The live field is the source of the draft that goes out (Review H1).
     const opened = dockKey(at, "", { return: true }, { ...ctx, draft: "half typed" });
     expect(opened.effect).toEqual({
@@ -141,7 +184,7 @@ describe("T-F2: the list's own keys", () => {
     // in the key context. Reading `drafts.main` instead loses the user's text.
     const live: DockState = { ...INPUT_DOCK, drafts: {} };
     const opened = dockKey(
-      toggleList(live, three),
+      openDropdown(toggleList(live, three), three),
       "",
       { return: true },
       {
@@ -218,14 +261,19 @@ describe("T-F3: open / close swap drafts per target; sendTarget's rules", () => 
 
   test("Esc in `open` closes (never stops the turn) and the ended drawer closes too", () => {
     const open = openChild(INPUT_DOCK, "sa-1", "").state;
+    // Esc's first step is the DROPDOWN when there is still a list to show (the
+    // Esc chain), and the input when there is not.
     const esc = dockKey(open, "", { escape: true }, ctx);
     expect(esc.effect.kind).toBe("close");
+    expect(esc.state.focus).toMatchObject({ kind: "list", selected: "sa-1" });
+    const alone = dockKey(open, "", { escape: true }, { ...ctx, ids: [] });
+    expect(alone.state.focus).toEqual({ kind: "input" });
     const ended: DockState = {
       focus: { kind: "open", id: "sa-1", ended: { kind: "stopped" }, frozen: null },
       drafts: {},
       sent: {},
     };
-    const closedEnded = dockKey(ended, "", { escape: true }, ctx);
+    const closedEnded = dockKey(ended, "", { escape: true }, { ...ctx, ids: [] });
     expect(closedEnded.effect.kind).toBe("close");
     expect(closedEnded.state.focus).toEqual({ kind: "input" });
   });
@@ -275,6 +323,18 @@ describe("T-F5: where a late refusal's text goes (Review H2)", () => {
     ).toBe("notice");
   });
 
+  test("a CLICK: on the pill the dropdown opens at once; on a row that child opens", () => {
+    // The mockups' mouse rule, decided here so the App only routes the report.
+    const three = ["sa-1", "sa-2", "sa-3"];
+    const clickedPill = clickDock(INPUT_DOCK, { kind: "pill" }, three);
+    expect(clickedPill.state.focus).toEqual({ kind: "list", selected: "sa-1", armed: false });
+    const clickedRow = clickDock(clickedPill.state, { kind: "row", id: "sa-2" }, three);
+    expect(clickedRow.state.focus).toMatchObject({ kind: "open", id: "sa-2" });
+    expect(clickedRow.effect).toEqual({ kind: "open", id: "sa-2", draftOut: "", draftIn: "" });
+    // With nothing in the background the pill is not there to click.
+    expect(clickDock(INPUT_DOCK, { kind: "pill" }, []).state).toBe(INPUT_DOCK);
+  });
+
   test("Esc's own stash is never treated as a place to hide text", () => {
     // `drafts[id]` may already hold what the user left there: the placement must
     // not depend on it, or a later Esc would overwrite it (a silent drop).
@@ -288,7 +348,12 @@ describe("T-F4: reconcile", () => {
   const ctx = { ids: three, openable: () => true, draft: "" };
 
   test("the selected child leaves → the row that took its place, else the one above", () => {
-    const at = dockKey(toggleList(INPUT_DOCK, three), "", { downArrow: true }, ctx).state;
+    const at = dockKey(
+      openDropdown(toggleList(INPUT_DOCK, three), three),
+      "",
+      { downArrow: true },
+      ctx,
+    ).state;
     expect(at.focus).toMatchObject({ selected: "sa-2" });
     // sa-2 leaves: the row that took its place is sa-3.
     expect(reconcile(at, ["sa-1", "sa-3"], []).focus).toMatchObject({ selected: "sa-3" });
@@ -297,7 +362,7 @@ describe("T-F4: reconcile", () => {
     expect(reconcile(atLast, ["sa-1", "sa-2"], []).focus).toMatchObject({ selected: "sa-2" });
   });
 
-  test("the last row leaves → back to the input, the draft untouched", () => {
+  test("the last row leaves → back to the input, the draft untouched; a focused pill follows it too", () => {
     const at: DockState = {
       focus: { kind: "list", selected: "sa-1", armed: false },
       drafts: { main: "keep me" },
@@ -306,6 +371,11 @@ describe("T-F4: reconcile", () => {
     const after = reconcile(at, [], []);
     expect(after.focus).toEqual({ kind: "input" });
     expect(after.drafts.main).toBe("keep me");
+    // The pill is only a control for the list: with nothing left it has no job,
+    // so it gives the input back rather than lingering over an empty panel.
+    const pill: DockState = { focus: { kind: "pill" }, drafts: { main: "keep me" }, sent: {} };
+    expect(reconcile(pill, [], []).focus).toEqual({ kind: "input" });
+    expect(reconcile(pill, ["sa-1"], []).focus).toEqual({ kind: "pill" });
   });
 
   test("an open child ends → its drawer freezes and its target is marked, never re-routed", () => {

@@ -1012,3 +1012,255 @@ input row. F11 checks the input row itself.
 6. `StatusBar.tsx`, `BackgroundList.tsx` (components): paint the pill (inverse / accent / warning), the dropdown and drawer from the view-models. S.
 7. `App.tsx` (component): render the dropdown/drawer ABOVE the input rule and the status bar last; route the pill/dropdown keys; SGR clicks on the pill and on dropdown rows; viewport height. M.
 8. Tests: unit tests for the focus machine, the pill model (incl. column range and the 5 s `done`), the row grammar (conditional columns, no far-edge padding), the model field (daemon: same → absent, different → name, `/model` switch → appears); frame tests for each mockup state at 190 and 80 columns, including a click on the pill. Existing frame tests F1–F13 updated to the new placement, each change justified in Execution.
+
+## Execution — UI revision
+
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+Design B, in the section's numbered order. Nothing in `mockups/` was touched; every script lives in `.tentacle/tmp/subagent-panel/ui-rev/`.
+
+### Step 0 — the owner's broken dock rule: measured, not assumed
+
+The plan said the gap "comes from rendering" because `ruleSegments` already fills
+to `width`. **That premise is false, and the real defect is in `ruleSegments`.**
+Three independent measurements, before any edit:
+
+1. **Pure, every width and focus** (`rule-sweep2.ts`): `ruleText` was `width` cells
+   at 190/120/80/60/50/45/40/30 — *except* from 20 to 50 columns, where it
+   collapsed to 17 cells:
+   ```
+   w= 50 cells= 17 hintAt=  -1 |─ background · 2 |
+   w= 45 cells= 17 hintAt=  -1 |─ background · 2 |
+   w= 40 cells= 17 hintAt=  -1 |─ background · 2 |
+   ```
+2. **At ~190 columns through the real `App`** (`probe2.ts`, `frames-190.ts`,
+   `matrix.ts`): the rule was 190 cells, one contiguous run, hint at cell 158 —
+   `cells=190 holes=9` (the 9 blanks are the label's own spaces). No gap.
+3. **On a real 190-column pty** (`pty-repro.ts` under `script -q`): identical —
+   `190 '─ background · 2 ─────…──── ↓ select · ctrl+t ─'`.
+
+`ruleSegments`' bug: when the hint did not fit it returned `left` **and dropped
+the fill and the closing ` ─` with it** — a rule that stops mid-row with its
+labels floating on nothing. That is exactly the owner's "gap" shape, and it is
+reachable at 80 columns in the *focused* state.
+
+**Fixed** (`background-list.ts:290-320`): the rule is always `width` cells; when
+the keys do not fit, the KEYS give way and the fill runs to the edge.
+
+**The tests, kept** (red on the old logic — shown by reverting it):
+- `background-list.test.ts` **T-L0** — "the rule is ALWAYS one whole line of
+  `width` cells", every width 20…200 × three focuses;
+- `subagent-panel-frames.test.tsx` **F16** — the same property at 190 columns
+  through the real `App`, i.e. it holds for the dropdown's rule too.
+
+Red (mutation: `return left;` where the fill belongs):
+
+```
+(fail) T-L0 … at every width, focused or not — never a label with no fill and no end
+(fail) T-L0 … the hint is what gives way, never the fill (the owner's gap)
+ 27 pass  2 fail        → restored: 29 pass, 0 fail
+```
+
+### Step 1 — the `model` field (protocol → daemon → client)
+
+- `protocol/src/session.ts:443-453`: `model: ModelNameSchema.optional()` — the
+  child's `models` NAME only (§7: never an id, a URL or a key), `display` class
+  (`UPDATE_CLASS.subagents` unchanged), so **no `PROTOCOL_VERSION` bump**;
+  `protocol/schema/protocol.json` regenerated.
+- `agent/src/subagent.ts`: `SubagentModel.name` (what a pick may name) and the
+  child's `subagent_start` event now carries it; `core/src/tool.ts:80-90` the
+  event member, `core/src/agent-jobs.ts` folds it into `AgentJobLive`/`AgentJobRow`.
+- **The daemon decides "same → absent" at the resolver**, where both models are in
+  hand: `cli/src/model-provider.ts` compares the entry's resolved model id with
+  `config.model` and sets `name` only when they differ (a bare frontmatter id and
+  the `default` choice never get one). `daemon/src/subagents-view.ts` projects it
+  (one line, bounded) and `sameRows` compares it.
+- `client/src/subagents.ts`: bounded like every other label (control chars → space, 64).
+
+Tests: `protocol/test/subagents-update.test.ts` (optional, a NAME not an id,
+absent stays absent), `daemon/test/subagent-progress.test.ts` (projection passes
+it through, sanitized), `cli/test/models-providers.test.ts` (**same → absent,
+different → name, and a `/model` switch flips it** — the daemon recomputes on
+every update because the resolver reads the config it is given now).
+
+Red (mutation: drop `...(differs ? { name } : {})` → always name):
+
+```
+Expected: undefined   Received: "same"
+(fail) subagentModelResolver > the child's NAME is carried only when it really runs a DIFFERENT model…
+```
+
+### Step 2 — `background-focus.ts`: the pill and the dropdown
+
+`DockFocus` gained `{ kind: "pill" }`. DOWN → **pill** (not the list);
+pill + Enter/↓ → dropdown (first row); pill + Esc/↑/Ctrl+T → input; a printable
+key goes back to the input and is typed (`effect: "pass"`); **the Esc chain**
+drawer → dropdown → pill → input (`closeToDropdown`, `openDropdown`, `clickDock`);
+`reconcile` returns a focused pill to the input when the last item ends.
+
+**A defect the click tests found**: an SGR report reaches `useInput` as ordinary
+`char`, so at `list` focus it was swallowed as a printable key — no click worked.
+`dockKey` now recognises a report and returns `pass` in every focus (the rule
+belongs in this module, §7).
+
+Tests: `background-focus.test.ts` T-F2 rewritten to the new chain (the old one
+encoded the old machine — each change is the design's). Mutations:
+
+```
+Esc chain: dropdown's Esc → input      → 2 fail (T-F2 the ESC CHAIN, both)
+DOWN → the list (skips the pill)       → 3 fail (DOWN focuses the pill, Esc on the pill, printable)
+```
+
+### Step 3 — `background-list.ts`: the row grammar, the drawer head
+
+The columns are computed **once across the whole item list** (`rowColumns`) — id
+width, a type column only when some row is not `general` (and `general` itself
+painted blank), a model column only when some row has one, title capped at
+`TITLE_MAX_COLS = 56` — and `paintRow` ends at the meta: **no padding to the far
+edge**. Drawer head: `─ sa-2 · Bruno: … · qwen3-8 ─── running · … ─`, the type
+only when it is not `general`, the model only when present.
+
+Tests: T-L1b (aligned meta on the widest title, no far edge, conditional type and
+model columns, the 56-cell cap). Every assertion that pinned a row's *width* was
+changed to `<= width` + `ends with the meta` — that IS the change (Test T-L1).
+Mutations:
+
+```
+title cap 56 → 200                       → 1 fail (the 56-cell cap)
+type column always on, `general` shown   → 1 fail (the type column exists only when…)
+```
+
+### Step 4 — `status-view.ts`: the pill model
+
+`pillView`/`pillText`: `none` with nothing in the background; counts by kind
+(`2 agents`, `2 agents · 1 shell`); `idle` (`2 agents ↓`), `focus`
+(` 2 agents ⏎ ` + hint ≥ 70 cols), `open` (`▴`), `ask` (`▲ sa-2 asks`, which
+OUTRANKS `done`), `done` (`✓ sa-1 done` for `PILL_DONE_MS = 5_000`, then the
+counts; the last one to end → `none`). `status-line.ts`'s `statusLayout` paints it
+in the right-hand box and reports its **cell range** (`pillHit`), which is what
+the click uses.
+
+### Step 5 — `status-line.ts`: one input rule, three meanings
+
+`inputRuleText`: `model` (as before) / `plain` (the dropdown's bottom edge) /
+`target` (`─ → sa-1 · enter sends · esc back ───`, words LEFT, no model; `esc`
+under 90 columns; `esc back` only once ended). `auto-accept` is never replaced.
+
+### Step 6-7 — the components and `App.tsx`
+
+`StatusBar` paints the pill (`inverse` when focused — the repo's one highlight
+idiom, so no new colour token; `warn` for an ask, `success` for done, `accent`
+otherwise) after `auto-accept on`, and reports the range. `BackgroundList` is the
+dropdown. `App` paints **transcript → thinking → dropdown/drawer → input rule →
+input → bottom rule → status bar LAST**, feeds `dockRows` into `activeRows`
+(idle costs 0 rows), routes the keys, and handles SGR clicks on the pill and on
+dropdown rows.
+
+### Tests: red before green (representative)
+
+Every new/changed test was run before its step landed. The failures quoted in
+steps 0-3 above are the red lines; the rest:
+
+```
+pillView: nothing in the background → NO pill      Expected: {kind:"none"}  (new module)
+T49 rewritten: the pill after auto-accept           Expected "· 2 agents ↓"  Received "2 agents ↓"
+F1 design B: nothing permanent above the input      Expected no "background ·"  Received "─ background · 2 ─…"
+F2 design B: DOWN focuses the pill                  Expected "2 agents ⏎"  Received "› ● sa-1"
+F14: a click on the pill opens the dropdown         Expected "background · 2"  Received … 2 agents ↓ only
+```
+
+`status-line.test.ts`'s pill-range test was corrected twice against the code
+(`plain` is not padded to `width`; the tier says `esc` at 60 columns), and its
+`slice` assertion was replaced by the property that matters (`end === width`,
+`plain` ends with the pill).
+
+### Mutations (revert → red → restore by the exact inverse)
+
+| Mutation | Result |
+|---|---|
+| Esc chain: dropdown's Esc → `input` | 2 fail (T-F2, both chain tests) |
+| DOWN → the list, skipping the pill | 3 fail (T-F2) |
+| `pillHit` ignores the range (`pill !== null`) | 1 fail (the click inside/outside test) |
+| the input rule keeps the model while open | 1 fail (the `target` test) |
+| the daemon's `model` "same → absent" (always name) | 1 fail (resolver) |
+| `model` dropped from the schema | 1 fail (protocol), `Expected "qwen3-8" Received undefined` |
+| step 0's rule: `return left` when the hint does not fit | 2 fail (T-L0) |
+| title cap 200 / `general` painted / type column always | 1 fail each |
+
+### Gate
+
+```
+$ bun run check
+tsc --noEmit && tsc -p apps/mobile --noEmit     → clean
+biome check .                                   → Checked 833 files. No fixes applied. (0 errors, 0 warnings)
+bun test                                        → 6477 pass, 3 skip, 0 fail (6480 tests, 452 files)
+```
+
+The 3 skips are the opt-in ones (live-k8s, live-docker, the real-socket keepalive
+— AGENTS §6). `bun run schema:export` was run; the only change to `protocol.json`
+is the new optional `model`.
+
+### Drifts (and why)
+
+1. **Step 0's premise was wrong** (above): the gap was in `ruleSegments`, not in
+   the rendering. The step's *intent* — a rule that never stops mid-row — is what
+   the fix and T-L0/F16 keep. Measured before editing, not argued.
+2. **The focused hint's width.** The plan said "below 90 columns only a `⏎`"; the
+   mockup's `b.html` shows `enter open · esc back` at 80 (`frame 2`:
+   `88 cells |… enter open · esc back  [P: 2 agents ⏎ ]|`), so the section's own
+   visual truth won: `FOCUS_HINT_MIN_COLS = 70` (`status-view.ts`). On top of that
+   the hint is now **budgeted by the status layout** (`statusLine.pillHint`), so
+   on a REAL line it is painted whole or dropped whole — with this build's
+   `/tmp/w` + `⏵⏵ auto-accept off (shift+tab)` it needs ~92 cells, while the
+   mockup's shorter line keeps it at 80. A frame test at exactly 90 columns is
+   why: the hint was previously painted outside the budget and landed as
+   `…/128kenter open · esc back`, glued to the ctx figure. That is a real defect
+   the plan did not anticipate; it is fixed and covered by a width sweep
+   (`status-line.test.ts`: "a focused pill's HINT is budgeted").
+3. **The permission prompt no longer reserves the dock's rows** (`App.tsx`,
+   `dockHeight = permission.pending ? 0 : …`). The prompt replaces the whole
+   bottom area, so nothing of the dock painted there, while `activeRows` still
+   counted it — H3's reservation was reserving rows for a component that was not
+   rendered. M1's intent (you must see WHO asks) is now carried by the pill
+   (`▲ sa-1 asks`), which paints under the prompt and with the dock closed — so
+   F13 was rewritten to that fact. **This is a real behaviour change from the
+   previous review round and wants the reviewer's eye.**
+4. **`StatusBar` lost `background`/`backgroundShown`, gained `pill`/`onPillRange`.**
+   The suffix is gone because the pill is the count now (the plan's step 4 says
+   "replaces today's `· N sub-agents` suffix"). `backgroundSuffix` is still
+   exported by `background-view.ts` (nothing calls it) — left in place rather than
+   deleted in the same diff; see "not done".
+5. **The pill's inverse is `inverse` + `bold`, not an accent background.** The
+   theme has no background token and `input-view.ts`/`App` already use inverse for
+   "this run is highlighted"; adding a colour pair to the token table for one pill
+   would need contrast work in both modes. The *look* is the mockup's (inverse =
+   accent-on-background on a dark terminal).
+6. **`targetBorder` is no longer used by `App`** (the input rule's target form is
+   `inputRuleText`'s left-aligned one, the mockup's). `targetBorder` still exists
+   and is still tested; removing it is a follow-up, not this task's diff.
+7. **The drawer's head drops the type for `general`** as well as adding the model.
+   The plan only mandated the model; the `· general ·` was one of the owner's
+   complaints ("`general` repeated on every row") and it read badly in a head, so
+   `explore` still shows and `general` does not. Flagged as a small judgement call.
+8. **A mouse report is `pass` in `dockKey`.** Not in the plan's file list, but it
+   is a routing rule, and without it no click worked at `list` focus at all.
+9. **`components.test.tsx`'s T49 and `run-quit.test.tsx`'s T49/T48** asserted the
+   removed suffix / permanent rule; they now assert the pill (same facts, the
+   surface the design chose). The plan's step 8 anticipated exactly this.
+10. **The F7 time assertion is a regex** (`19 tools · \d+m? ?\d*s`): the fixture's
+    `startedAt` is relative to import time, so a suite that crosses a second
+    boundary flaked on `1m 12s` vs `1m 13s`. The shape is pinned, the second is not.
+
+### What is NOT done (honest limits)
+
+- **`backgroundSuffix` (and the `background-count` tests around it) are dead code**
+  after this change: nothing in `src/` calls it. Deleting it touches
+  `background-view.ts` and its test; it belongs in the follow-up that also retires
+  `targetBorder`, and doing it here would have widened a `contained` diff.
+- **The pill's ask/done paint is asserted only as TEXT**, never as colour:
+  `ink-testing-library`'s `lastFrame()` strips SGR, so the mode-parity test proves
+  the text and `theme.ts`'s own tests prove the tokens. The `inverse` attribute
+  itself is unverified by a test (one line in `Pill`).
+- **P6** (a daemon feed of running shell jobs) is untouched: `jobs: []`, so the
+  pill counts sub-agents only and its `· N shell` slot is written but unreachable.
+- **Not committed** (the brief forbids it) and **`TODO.md` untouched**.

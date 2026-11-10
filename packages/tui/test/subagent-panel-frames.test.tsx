@@ -20,6 +20,8 @@ const UP = "\u001B[A";
 const DOWN = "\u001B[B";
 const ESC = "\u001B";
 const ENTER = "\r";
+// SGR mouse: a left press at (col=x, row=y), 1-based, and its release.
+const press = (x: number, y: number): string => `\u001B[<0;${x};${y}M`;
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -160,39 +162,43 @@ async function mount(steps: Parameters<typeof fake>[0], columns = 100) {
   await delay(40);
   return { app, api, frame: () => stripAnsi(app.lastFrame() ?? "") };
 }
-describe("F1: the idle list under the status bar (mockup 01)", () => {
+describe("F1 (design B): at rest there is NO list — only the pill (mockup b · 1)", () => {
   test("a titled rule, then one row per child with its glyph, id, type and counters", async () => {
     const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] });
     const f = frame();
-    // The rule: `── background · 2 ───── ↓ select · ctrl+t ─`.
-    expect(f).toContain("─ background · 2 ─");
-    expect(f).toContain("↓ select · ctrl+t");
-    // Rows: the running glyph, the waiting one and the shell one.
-    expect(f).toContain("● sa-1");
-    expect(f).toContain("explore");
-    expect(f).toContain("find callers of parseConfig");
-    expect(f).toContain("19 tools");
-    expect(f).toContain("● sa-2");
-    expect(f).toContain("general");
-    // Both children run: the `▲`/`⚠` row needs a child WAITING on the user, which
-    // is `permission.pendingAgent` — F9 mounts one (mockup 01's second row).
-    // The old status-bar suffix is gone while the list says the count (the plan).
-    expect(f).not.toContain("· 2 sub-agents");
+    // The owner's revision: background work is ONE pill in the status bar, always
+    // the LAST line; nothing permanent sits above the input.
+    expect(f).toContain("2 agents ↓");
+    expect(f).not.toContain("background ·");
+    // The pill is the bar's right-hand end and comes AFTER auto-accept.
+    expect(f.indexOf("auto-accept")).toBeLessThan(f.indexOf("2 agents"));
+    // The status bar is the frame's last row.
+    const last =
+      f
+        .split("\n")
+        .filter((l) => l.trim() !== "")
+        .at(-1) ?? "";
+    expect(last).toContain("2 agents ↓");
+    // The input rule still carries the model: the dock is CLOSED.
+    expect(f).toContain("qwen3-27b");
     app.unmount();
   });
 });
 
-describe("F2: DOWN on an empty draft selects the first row (mockup 02)", () => {
-  test("`› ● sa-1`, the rule turns to the list's keys, and any typed text is untouched", async () => {
+describe("F2 (design B): DOWN focuses the PILL, not the list (mockup b · 2)", () => {
+  test("the pill highlights with the hint beside it; the list stays closed; the draft is kept", async () => {
     const { app, api, frame } = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] });
-    // Type a task FIRST: entering the list must not lose it.
+    // Type a task FIRST: entering the dock must not lose it.
     app.stdin.write("now also update the README");
     await delay(30);
     app.stdin.write(DOWN);
     await delay(40);
     const f = frame();
-    expect(f).toContain("› ● sa-1");
-    expect(f).toContain("enter open · x stop · esc back");
+    // Focused pill: `⏎` inside it, the hint just left of it, and STILL no list.
+    expect(f).toContain("2 agents ⏎");
+    expect(f).toContain("enter open · esc back");
+    expect(f).not.toContain("background ·");
+    expect(f).not.toContain("↑↓ move");
     // The draft is still there (the input keeps its text, only loses the cursor).
     expect(f).toContain("now also update the README");
     // Nothing was sent anywhere by merely moving the focus.
@@ -202,11 +208,19 @@ describe("F2: DOWN on an empty draft selects the first row (mockup 02)", () => {
   });
 });
 
-describe("F3: Enter opens — the rule says `→ sa-1`, typing + Enter messages IT (mockup 03)", () => {
+/** DOWN (focus the pill) then Enter (open the dropdown): the design B path. */
+async function openDropdown(app: { stdin: { write(s: string): void } }): Promise<void> {
+  app.stdin.write(DOWN);
+  await delay(30);
+  app.stdin.write(ENTER);
+  await delay(40);
+}
+
+describe("F3 (design B): Enter on a dropdown row opens it — typing + Enter messages IT", () => {
   test("messageSubagent('sa-1', text), and NOT the main agent's prompt", async () => {
     const { app, api, frame } = await mount({ rows: [BACKGROUND_ROW.sa1] });
-    app.stdin.write(DOWN);
-    await delay(30);
+    await openDropdown(app);
+    expect(frame()).toContain("background · 1");
     app.stdin.write(ENTER);
     await delay(40);
     expect(frame()).toContain("→ sa-1");
@@ -240,23 +254,26 @@ describe("F4: a `subagent_message` shows ONE notice in the transcript (mockup 04
   });
 });
 
-describe("F5: nine rows → five shown (mockup 05)", () => {
+describe("F5 (design B): nine rows → five shown, in the dropdown (mockup b · 3)", () => {
   test("the rule carries the overflow, and only five rows paint", async () => {
     const { app, frame } = await mount({ rows: BACKGROUND_ROW.many(9) });
+    await openDropdown(app);
     const f = frame();
-    expect(f).toContain("─ background · 9 ─");
-    expect(f).toContain("↓4 more");
-    for (const i of [1, 2, 3, 4, 5]) expect(f).toContain(`sa-${i} `);
-    for (const i of [6, 7, 8, 9]) expect(f).not.toContain(`sa-${i} `);
+    expect(f).toContain("background · 9");
+    // The dropdown's rule says how many are out of view with the mockup's own
+    // `↑k ↓m` grammar (the `more` variant is the unfocused pill's hint, which
+    // this surface replaced).
+    expect(f).toContain("↓4 · enter open · x stop · esc back");
+    for (const i of [1, 2, 3, 4, 5]) expect(f).toContain(`sa-${i}`);
+    for (const i of [6, 7, 8, 9]) expect(f).not.toContain(`sa-${i}`);
     app.unmount();
   });
 });
 
-describe("F6: the open child ends — Enter is refused, no call (mockup 06)", () => {
+describe("F6 (design B): the open child ends — Enter is refused, no call", () => {
   test("the drawer freezes at `✓ finished`, the target stays `→ sa-1`, and nothing is sent", async () => {
     const { app, api, frame } = await mount({ rows: [BACKGROUND_ROW.sa1] });
-    app.stdin.write(DOWN);
-    await delay(30);
+    await openDropdown(app);
     app.stdin.write(ENTER);
     await delay(40);
     app.stdin.write("a draft written before it ended");
@@ -284,45 +301,57 @@ describe("F6: the open child ends — Enter is refused, no call (mockup 06)", ()
   });
 });
 
-describe("F7: 80 columns — no row wraps (mockup 07)", () => {
+describe("F7 (design B): 80 columns — no row wraps, in the dropdown too", () => {
   test("every dock line is at most 80 cells, and the token figure drops", async () => {
     const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] }, 80);
+    await openDropdown(app);
     const f = frame();
-    const dock = f.split("\n").filter((l) => l.includes("─") || l.includes("sa-"));
+    const dock = f.split("\n").filter((l) => l.includes("background ·") || l.includes("sa-"));
     for (const line of dock) {
       expect([...line].length).toBeLessThanOrEqual(80);
     }
-    // The narrow tier drops the tokens but keeps the tools and the time.
-    expect(f).toContain("19 tools · 1m 12s");
-    expect(f).not.toContain("12.4k");
+    // The narrow tier drops the tokens but keeps the tools and the time (the
+    // exact seconds depend on the clock, so only their shape is pinned).
+    expect(f).toMatch(/19 tools · \d+m? ?\d*s/);
+    expect(f).not.toContain("12k");
+    // The status bar's pill fits too, and the dropdown's hint is the short one.
+    expect(f).toContain("2 agents");
+    expect(f).toContain("enter open · x stop · esc");
 
     app.unmount();
   });
 });
 
-describe("F8: Esc in `open` during a running turn does NOT abort it", () => {
+describe("F8 (design B): Esc in `open` does NOT abort the turn — and it walks the chain", () => {
   test("the dock closes and the turn's abort is never called", async () => {
     const { app, api, frame } = await mount({ rows: [BACKGROUND_ROW.sa1], running: true });
     app.stdin.write("a long task");
     await delay(30);
     app.stdin.write(ENTER); // starts the turn (which the fake holds)
     await delay(60);
-    app.stdin.write(DOWN);
-    await delay(30);
+    await openDropdown(app);
     app.stdin.write(ENTER);
     await delay(40);
     expect(frame()).toContain("→ sa-1");
     const before = api.aborts();
+    // The chain, one step per Esc: drawer → dropdown → pill → input.
     app.stdin.write(ESC);
     await delay(50);
-    // Closed the dock, and did NOT stop the turn.
+    expect(frame()).toContain("background · 1");
     expect(frame()).not.toContain("→ sa-1");
+    app.stdin.write(ESC);
+    await delay(50);
+    expect(frame()).toContain("1 agent ⏎");
+    app.stdin.write(ESC);
+    await delay(50);
+    expect(frame()).toContain("1 agent ↓");
+    // Three Escapes, and the turn was never aborted.
     expect(api.aborts()).toBe(before);
     app.unmount();
   });
 });
 
-describe("F9: a permission prompt while `open` owns the keys, and the focus comes back", () => {
+describe("F9 (design B): a permission prompt while `open` owns the keys, and the focus comes back", () => {
   test("the prompt replaces the input; after the answer `→ sa-1` is still the target", async () => {
     const broker = new PermissionBroker();
     const { session, api } = fake({ rows: [BACKGROUND_ROW.sa1] });
@@ -336,8 +365,7 @@ describe("F9: a permission prompt while `open` owns the keys, and the focus come
       />,
     );
     await delay(40);
-    app.stdin.write(DOWN);
-    await delay(30);
+    await openDropdown(app);
     app.stdin.write(ENTER);
     await delay(40);
     const f0 = stripAnsi(app.lastFrame() ?? "");
@@ -372,8 +400,7 @@ describe("F10: the drafts survive the open/close round trip (Review H1)", () => 
     const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1] });
     app.stdin.write("MAINDRAFT");
     await delay(30);
-    app.stdin.write(DOWN);
-    await delay(30);
+    await openDropdown(app);
     app.stdin.write(ENTER);
     await delay(40);
     // Opening swaps in the child's (empty) draft — and the main one is KEPT.
@@ -382,6 +409,12 @@ describe("F10: the drafts survive the open/close round trip (Review H1)", () => 
     expect(opened).toContain("Type a task or /command");
     app.stdin.write("CHILDDRAFT");
     await delay(30);
+    // The chain leaves the drawer for the DROPDOWN, then the pill, then the input:
+    // the main target (and its draft) is what the input holds once it is back.
+    app.stdin.write(ESC);
+    await delay(40);
+    app.stdin.write(ESC);
+    await delay(40);
     app.stdin.write(ESC);
     await delay(50);
     const closed = frame();
@@ -390,8 +423,7 @@ describe("F10: the drafts survive the open/close round trip (Review H1)", () => 
     expect(closed).toContain("MAINDRAFT");
     expect(closed).not.toContain("CHILDDRAFT");
     // Reopening restores the CHILD's draft, not the stale main one.
-    app.stdin.write(DOWN);
-    await delay(30);
+    await openDropdown(app);
     app.stdin.write(ENTER);
     await delay(50);
     const reopened = frame();
@@ -408,15 +440,21 @@ describe("F11: a late refusal never lands in the main input (Review H2)", () => 
       refuse: "inbox full",
       refuseAfterMs: 120,
     });
-    app.stdin.write(DOWN);
-    await delay(30);
+    // The chain: DOWN → the pill, Enter → the dropdown, Enter → open the child.
+    await openDropdown(app);
     app.stdin.write(ENTER);
     await delay(40);
+    expect(frame()).toContain("→ sa-1");
     app.stdin.write("for-sa1-only");
-    await delay(30);
+    await delay(20);
     app.stdin.write(ENTER); // the RPC is still in flight…
     await delay(20);
-    app.stdin.write(ESC); // …and the user closes the child
+    // …and the user leaves the child (drawer → dropdown → pill → input).
+    app.stdin.write(ESC);
+    await delay(30);
+    app.stdin.write(ESC);
+    await delay(30);
+    app.stdin.write(ESC);
     await delay(250);
     const f = frame();
     // The refusal is REPORTED (never a silent drop), quoting the text…
@@ -442,18 +480,18 @@ describe("F12: the dock's rows are reserved in the viewport (Review H3)", () => 
   const ROWS = 24;
   const lines = (frame: string): number => frame.split("\n").length;
 
-  test("one child in the list: the whole frame fits in 24 rows", async () => {
+  test("one child in the dropdown: the whole frame fits in 24 rows", async () => {
     const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1] });
+    await openDropdown(app);
     const f = frame();
-    expect(f).toContain("─ background · 1 ─");
+    expect(f).toContain("background · 1");
     expect(lines(f)).toBeLessThanOrEqual(ROWS);
     app.unmount();
   });
 
   test("the drawer open: the whole frame fits in 24 rows", async () => {
     const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1] });
-    app.stdin.write(DOWN);
-    await delay(30);
+    await openDropdown(app);
     app.stdin.write(ENTER);
     await delay(40);
     const f = frame();
@@ -461,10 +499,22 @@ describe("F12: the dock's rows are reserved in the viewport (Review H3)", () => 
     expect(lines(f)).toBeLessThanOrEqual(ROWS);
     app.unmount();
   });
+
+  test("at rest the pill costs NO rows: the frame is what it was before this task", async () => {
+    const idle = await mount({ rows: [BACKGROUND_ROW.sa1] });
+    const idleLines = lines(idle.frame());
+    idle.app.unmount();
+    const none = await mount({ rows: [] });
+    const noneLines = lines(none.frame());
+    none.app.unmount();
+    // The owner's rule (design B): idle = no extra rows at all.
+    expect(idleLines).toBe(noneLines);
+    expect(idleLines).toBeLessThanOrEqual(ROWS);
+  });
 });
 
-describe("F13: a child waiting on the user shows `⚠ needs your permission` (Review M1)", () => {
-  test("the list stays visible under the permission prompt, and marks the asking row", async () => {
+describe("F13 (design B): a child waiting on the user turns the PILL warning (Review M1)", () => {
+  test("the pill names the asking child, under the prompt, with the dock closed", async () => {
     const broker = new PermissionBroker();
     const { session } = fake({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] });
     const app = render(
@@ -477,9 +527,11 @@ describe("F13: a child waiting on the user shows `⚠ needs your permission` (Re
       />,
     );
     await delay(40);
-    expect(stripAnsi(app.lastFrame() ?? "")).toContain("─ background · 2 ─");
-    // The broker asks ON BEHALF OF a background child: the prompt owns the keys,
-    // and the list must keep painting (its asking row is the whole point of ⚠).
+    // Closed dock: the pill already says how many run.
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("2 agents ↓");
+    // The broker asks ON BEHALF OF a background child: the prompt owns the keys
+    // and REPLACES the bottom area, so the pill is what must say who asks
+    // (`▲ sa-1 asks`) — visible whether the dropdown is open or not.
     const asked = broker.request(
       { tool: "shell", level: "ask", title: "run bun test", input: {} } as never,
       { agent: { type: "explore", description: "find callers", id: "sa-1" } } as never,
@@ -487,11 +539,10 @@ describe("F13: a child waiting on the user shows `⚠ needs your permission` (Re
     await delay(60);
     const f = stripAnsi(app.lastFrame() ?? "");
     expect(f).toContain("run bun test"); // the prompt
-    expect(f).toContain("─ background · 2 ─"); // the list, still there
-    expect(f).toContain("⚠ needs your permission"); // …on the ASKING row
-    const asking = f.split("\n").find((l) => l.includes("⚠ needs your permission")) ?? "";
-    expect(asking).toContain("sa-1");
-    expect(asking).not.toContain("sa-2");
+    expect(f).toContain("▲ sa-1 asks"); // the pill, naming the asker
+    expect(f).not.toContain("sa-2 asks");
+    // The frame still fits: the prompt's rows are the only thing reserved.
+    expect(f.split("\n").length).toBeLessThanOrEqual(24);
     app.stdin.write("n");
     await delay(50);
     await asked;
@@ -511,12 +562,168 @@ describe("the dock paints the same text in light and dark (theme tokens only)", 
       light.app.unmount();
       // The plain text is identical: the mode changes colour, never layout.
       expect(stripAnsi(lightFrame)).toBe(stripAnsi(darkFrame));
-      expect(stripAnsi(lightFrame)).toContain("─ background · 2 ─");
+      expect(stripAnsi(lightFrame)).toContain("2 agents ↓");
       // (The colour itself is pinned by `theme-contrast`/`theme-components`: this
       // harness renders with colour off, so the parity of the TEXT is what it can
       // prove — and that is what a theme token must never change.)
     } finally {
       resetThemeForTest();
     }
+  });
+});
+
+/**
+ * Design B's MOUSE rule (owner requirement): a click on the pill's cells opens
+ * the dropdown, and a click on a dropdown row opens that child. The hit test is
+ * `statusLayout`'s cell range and the rows' screen rows — the App re-derives
+ * neither, so these two tests are what pins that the wiring uses them.
+ */
+describe("F14 (design B): SGR clicks on the pill and on a dropdown row", () => {
+  /** The status bar's row: the frame's LAST line, 1-based (blank lines count). */
+  const barRow = (frame: string): number => frame.split("\n").length;
+  /** A 1-based column inside the pill, from the frame itself. */
+  const pillColumn = (frame: string): number => {
+    const last =
+      stripAnsi(frame)
+        .split("\n")
+        .find((l) => l.includes("agents")) ?? "";
+    const at = last.indexOf("agents ↓");
+    return at < 0 ? -1 : at + 1;
+  };
+
+  test("a click on the pill opens the dropdown on its first row", async () => {
+    const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] });
+    const before = frame();
+    expect(before).toContain("2 agents ↓");
+    expect(before).not.toContain("background ·");
+    const row = barRow(before);
+    const col = pillColumn(before);
+    expect(col).toBeGreaterThan(0);
+    app.stdin.write(press(col, row));
+    await delay(60);
+    const f = frame();
+    expect(f).toContain("background · 2");
+    // First row selected (owner: "first row selected").
+    expect(f).toContain("› ● sa-1");
+    app.unmount();
+  });
+
+  test("a click on a dropdown row opens that child", async () => {
+    const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] });
+    await openDropdown(app);
+    const dock = frame();
+    // The dropdown sits ABOVE the input: its rule, then one row per child.
+    const lines = dock.split("\n");
+    const ruleAt = lines.findIndex((l) => l.includes("background · 2"));
+    expect(ruleAt).toBeGreaterThan(0);
+    const secondRow = lines[ruleAt + 2] ?? "";
+    expect(secondRow).toContain("sa-2");
+    // A click on that row's cells (the frame's lines are the screen's rows, 1-based).
+    app.stdin.write(press(8, ruleAt + 3));
+    await delay(60);
+    const f = frame();
+    // It opened sa-2 (not the row that happened to be first).
+    expect(f).toContain("→ sa-2");
+    expect(f).toContain("sa-2 · migrate config tests to bun:test");
+    expect(f).not.toContain("→ sa-1");
+    app.unmount();
+  });
+
+  test("a click elsewhere on the bar does nothing (the range is the pill's own cells)", async () => {
+    const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1] });
+    const before = frame();
+    const row = barRow(before);
+    // Column 2: the far left of the bar, nowhere near the pill.
+    app.stdin.write(press(2, row));
+    await delay(60);
+    expect(frame()).not.toContain("background ·");
+    app.unmount();
+  });
+});
+
+/**
+ * The frame at the two widths the visual truth is drawn at (`mockups/v3/b.html`:
+ * every state at 190 and at 80 columns). A row that is wider than the terminal
+ * wraps and shifts everything above it — the one failure this suite must catch.
+ */
+describe("F15 (design B): every state fits 190 and 80 columns", () => {
+  const at = async (
+    columns: number,
+    act: (app: Awaited<ReturnType<typeof mount>>) => Promise<void>,
+  ) => {
+    const mounted = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] }, columns);
+    await act(mounted);
+    const lines = mounted.frame().split("\n");
+    for (const line of lines) {
+      expect([...line].length).toBeLessThanOrEqual(columns);
+    }
+    mounted.app.unmount();
+    return lines;
+  };
+
+  for (const columns of [190, 80]) {
+    test(`${columns} columns: at rest, the pill only`, async () => {
+      const lines = await at(columns, async () => {});
+      const last = lines.filter((l) => l.trim() !== "").at(-1) ?? "";
+      expect(last).toContain("2 agents ↓");
+      // The input's rule still carries the model: the dock is closed.
+      expect(lines.some((l) => l.includes("qwen3-27b"))).toBe(true);
+    });
+
+    test(`${columns} columns: the dropdown — a plain input rule, no model name`, async () => {
+      const lines = await at(columns, async (m) => {
+        await openDropdown(m.app);
+      });
+      const ruleAt = lines.findIndex((l) => l.includes("background · 2"));
+      expect(ruleAt).toBeGreaterThan(0);
+      // The input's own top rule (the dropdown's bottom edge) is PLAIN: no model.
+      const inputRule = lines[ruleAt + 3] ?? "";
+      expect(inputRule).toMatch(/^─+$/);
+      // …and nothing in the frame says the model while the dock is open.
+      expect(lines.some((l) => l.includes("qwen3-27b"))).toBe(false);
+      // The dropdown's rule carries the title AND every key.
+      expect(lines[ruleAt]).toContain("background · 2");
+      expect(lines[ruleAt]).toContain("enter open · x stop · esc");
+    });
+
+    test(`${columns} columns: a child open — the target rule, no model`, async () => {
+      const lines = await at(columns, async (m) => {
+        await openDropdown(m.app);
+        m.app.stdin.write(ENTER);
+        await delay(50);
+      });
+      const target = lines.find((l) => l.includes("→ sa-1")) ?? "";
+      expect(target).toContain("enter sends");
+      expect(lines.some((l) => l.includes("qwen3-27b"))).toBe(false);
+      // The drawer's head names the child and its figures.
+      expect(lines.some((l) => l.includes("sa-1 · explore · find callers of parseConfig"))).toBe(
+        true,
+      );
+    });
+  }
+});
+
+/**
+ * Step 0 of the UI revision, at FRAME level: the dock's rule is one whole line
+ * of exactly `columns` cells at 190 columns — it does not stop part-way and
+ * leave its labels floating (the owner's "gap between `background · 2` and the
+ * hints"). The pure-side counterpart is `background-list.test.ts`'s T-L0.
+ */
+describe("F16 (step 0): the dropdown's rule is one whole line at ~190 columns", () => {
+  test("it starts and ends in the rule, and holds nothing but single spaces", async () => {
+    const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] }, 190);
+    await openDropdown(app);
+    const rule =
+      frame()
+        .split("\n")
+        .find((l) => l.includes("background · 2")) ?? "";
+    expect([...rule].length).toBe(190);
+    expect(rule.startsWith("─ background · 2 ─")).toBe(true);
+    expect(rule.endsWith("esc back ─")).toBe(true);
+    // The fill is contiguous: no run of blanks between two dashes.
+    expect(rule).not.toMatch(/─ +─/);
+    // The hint is where the fill ends — not a second label row under the bar.
+    expect(rule.indexOf("enter open")).toBeGreaterThan(rule.indexOf("background"));
+    app.unmount();
   });
 });

@@ -101,6 +101,14 @@ export interface SubagentModel {
   readonly contextWindow?: number;
   /** The model id the child's hooks report (`model` in a hook payload). */
   readonly modelId?: string;
+  /**
+   * The `models` NAME the child runs on (never an id, a URL or a key: AGENTS §7).
+   * Set only by a pick that named an entry — absent for the parent's own model
+   * (the `default` choice, where there is nothing to tell apart) and for a bare
+   * frontmatter id. The panel shows it only when it differs from the main one
+   * (docs/feat/subagent-panel.md, UI revision).
+   */
+  readonly name?: string;
 }
 
 export interface SubagentResult {
@@ -308,8 +316,18 @@ export function createSubagentRunner(deps: SubagentDeps): {
     if (!type) {
       return { report: "no sub-agent type available", toolUses: 0, stopReason: "end_turn" };
     }
+    // The child's model, picked BEFORE its start event so the row carries it: a
+    // `models` name only (never an id, AGENTS §7), and only for a pick that named
+    // one — `undefined` means "the parent's own model", which is what the panel
+    // shows as nothing at all (owner: show it only when it differs).
+    const chosen = deps.modelFor?.(type, opts.model);
     const onEvent = controls?.onEvent;
-    onEvent?.({ kind: "subagent_start", agentType: type.name, description: opts.description });
+    onEvent?.({
+      kind: "subagent_start",
+      agentType: type.name,
+      description: opts.description,
+      ...(chosen?.name !== undefined ? { model: chosen.name } : {}),
+    });
 
     // Restrict the child's tools to the type's allow-list, always dropping the
     // spawn tool so a sub-agent cannot spawn its own sub-agents.
@@ -344,7 +362,6 @@ export function createSubagentRunner(deps: SubagentDeps): {
       childTools.register(createAgentNotifyTool(controls.agentId, deps.notify));
     }
 
-    const chosen = deps.modelFor?.(type, opts.model);
     const model = chosen?.provider ?? deps.model;
     // The child counts against its own model's window: the chosen one's, else
     // (no choice) the type's own, else the parent's.

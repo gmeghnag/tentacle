@@ -10,6 +10,12 @@ import type { DockFocus, DockOutcome } from "./background-list.ts";
  * drawer shown, the input re-targeted to it). Esc's meaning is the trap this
  * module exists to remove: in `open` and in `list` it closes, and it NEVER
  * reaches the App's "Esc stops a running turn" branch (`effect: "none"`).
+ *
+ * THE ESC CHAIN (docs/feat/subagent-panel.md, UI revision): drawer → dropdown →
+ * pill → input. The pill is the status bar's one control (the counts); DOWN from
+ * the input focuses it, Enter (or a click on it) opens the dropdown, Enter there
+ * opens a child. So the states, in that order: `input`, `pill`, `list` (the
+ * dropdown), `open` (the drawer).
  */
 import type { BackgroundAgentRow } from "./background-view.ts";
 
@@ -76,11 +82,14 @@ export interface DockKey {
 }
 
 /**
- * Does DOWN, resolved by `resolveLineInput` to `history`, walk into the list
- * instead? The order is the whole table (mockup 02): (1) the palette owns it;
- * (2) a line below the cursor is still a move; (3) a history walk is still a
- * walk; (4) the draft slot with a non-empty list and the INPUT focus → enter;
- * (5) else the App does what it does today.
+ * Does DOWN, resolved by `resolveLineInput` to `history`, walk into the PILL
+ * instead? The order is the whole table (docs/feat/subagent-panel.md, UI
+ * revision): (1) the palette owns it; (2) a line below the cursor is still a
+ * move; (3) a history walk is still a walk; (4) the draft slot with a non-empty
+ * pill and the INPUT focus → enter; (5) else the App does what it does today.
+ *
+ * DOWN focuses the pill, never the list: the dropdown is one Enter further (the
+ * pill is what DOWN points at — it is the bottom-most thing on the screen).
  */
 export function downEntersList(ctx: {
   readonly action: "history" | "moveVertical" | string;
@@ -100,15 +109,49 @@ export function downEntersList(ctx: {
   return true;
 }
 
-/** Enter the list on its first row (owner P8 (a)), or stay put when it is empty. */
+/** DOWN (or a click on the pill): focus the pill. Nothing when there is no pill. */
 export function toggleList(state: DockState, ids: readonly string[]): DockState {
-  if (state.focus.kind === "list") {
+  if (ids.length === 0) {
+    return state;
+  }
+  if (state.focus.kind === "pill") {
+    // The App reaches this only for the Ctrl+T / `/agents` toggle: DOWN never
+    // lands on a pill that is already focused, so treat it as "go back".
     return { ...state, focus: { kind: "input" } };
   }
+  return { ...state, focus: { kind: "pill" } };
+}
+
+/**
+ * The pill's Enter (or a click on it): open the DROPDOWN above the input with its
+ * first row selected (owner: "first row selected"). Nothing to show → stay put.
+ */
+export function openDropdown(state: DockState, ids: readonly string[]): DockState {
   if (ids.length === 0) {
     return state;
   }
   return { ...state, focus: { kind: "list", selected: ids[0] ?? "", armed: false } };
+}
+
+/**
+ * A click (SGR) landed on the panel: `pill` focuses it, `dropdown` opens the
+ * dropdown directly (the mockups: "a click on the pill opens the dropdown"), a
+ * row opens that item. One place decides what a click means.
+ */
+export function clickDock(
+  state: DockState,
+  hit: { readonly kind: "pill" } | { readonly kind: "row"; readonly id: string },
+  ids: readonly string[],
+): DockKeyResult {
+  if (ids.length === 0) {
+    return { state, effect: { kind: "none" } };
+  }
+  if (hit.kind === "pill") {
+    return { state: openDropdown(state, ids), effect: { kind: "none" } };
+  }
+  // A row click selects AND opens it in one gesture (the mockups' keys table).
+  const selected = ids.includes(hit.id) ? hit.id : (ids[0] ?? "");
+  return openChild({ ...state, focus: { kind: "list", selected, armed: false } }, selected, "");
 }
 
 /** Open a child: the main draft (the LIVE field) is stashed, the target's comes back. */
@@ -134,6 +177,27 @@ export function closeOpen(state: DockState, live: string): DockKeyResult {
     state: { ...state, focus: { kind: "input" }, drafts: { ...state.drafts, [id]: draftOut } },
     effect: { kind: "close", draftOut, draftIn },
   };
+}
+
+/**
+ * Esc in the drawer, step one of the chain (drawer → dropdown → pill → input):
+ * the child's draft is stashed and the MAIN one comes back — the drawer's target
+ * is gone, so the input is no longer addressing it. The dropdown opens with that
+ * row selected (the mockups' keys table); with nothing left to list, the chain
+ * skips it and lands on the pill, and with no pill either, on the input.
+ */
+export function closeToDropdown(
+  state: DockState,
+  live: string,
+  ids: readonly string[],
+): DockKeyResult {
+  const closed = closeOpen(state, live);
+  const id = state.focus.kind === "open" ? state.focus.id : "";
+  const focus: DockFocus =
+    ids.length === 0
+      ? { kind: "input" }
+      : { kind: "list", selected: ids.includes(id) ? id : (ids[0] ?? ""), armed: false };
+  return { state: { ...closed.state, focus }, effect: closed.effect };
 }
 
 /** Where a submitted text goes: the agent, one child, or a refusal (never a silent re-route). */
@@ -168,6 +232,20 @@ function isPrintable(char: string, key: DockKey): boolean {
 }
 
 /**
+ * An SGR mouse report reaches `useInput` as ordinary `char` data, and it must
+ * NEVER be read as a key: at `list` focus a printable key is deliberately
+ * swallowed (owner P3 (a)), so an unguarded report would vanish there — no
+ * click on a row, no wheel, no selection (docs/feat/subagent-panel.md: "Mouse is
+ * part of the design"). Recognised here, in the one module that decides what a
+ * key means; the App's own mouse handling then acts on it.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: an SGR report starts with ESC
+const MOUSE_REPORT = /^\x1b?\[<\d+;\d+;\d+[Mm]/;
+function isMouseReport(char: string): boolean {
+  return char.startsWith("[") && MOUSE_REPORT.test(char);
+}
+
+/**
  * Route ONE key in the dock. `pass` means "not mine": the App's own dispatch
  * continues unchanged (that is how the input keeps working while a child is
  * open — Design 4's "the input stays live").
@@ -180,18 +258,44 @@ export function dockKey(
 ): DockKeyResult {
   const none: DockKeyResult = { state, effect: { kind: "none" } };
   const ctrlT = key.ctrl === true && char === "t";
+  // A mouse report is never the dock's key: it goes on to the App's mouse path,
+  // in EVERY focus (a printable key would otherwise be swallowed at `list`).
+  if (isMouseReport(char)) {
+    return { state, effect: { kind: "pass" } };
+  }
 
   if (state.focus.kind === "open") {
-    // Esc closes and NEVER stops the turn: the App's Esc-abort branch is never reached.
-    if (key.escape || ctrlT) {
-      return closeOpen(state, ctx.draft);
+    // Esc closes ONE step and NEVER stops the turn (the App's Esc-abort branch is
+    // never reached): to the dropdown (the chain's next step), or — with nothing
+    // left to list — straight back to the input.
+    if (key.escape) {
+      return ctx.ids.length === 0
+        ? closeOpen(state, ctx.draft)
+        : closeToDropdown(state, ctx.draft, ctx.ids);
     }
-    // Ctrl+T toggles into the list (the drawer hides, the list shows the target
-    // selected) — a direct way from one surface to the other.
     if (ctrlT) {
-      return closeOpen(state, ctx.draft);
+      // The direct toggle between the two surfaces: the drawer hides, the
+      // dropdown shows the target selected. Same draft rule as Esc.
+      return closeToDropdown(state, ctx.draft, ctx.ids);
     }
     // Everything else is the input's (typing, Enter → sendTarget, history, …).
+    return { state, effect: { kind: "pass" } };
+  }
+
+  if (state.focus.kind === "pill") {
+    // The pill has focus: Enter (or ↓, which points the same way) opens the
+    // dropdown on its first row; Esc and ↑ go back to the input, the draft and
+    // its cursor untouched. A printable key goes back to the input AND is typed
+    // there (owner P3 (a): never swallowed, never acted on).
+    if (key.return || key.downArrow) {
+      return { state: openDropdown(state, ctx.ids), effect: { kind: "none" } };
+    }
+    if (key.escape || key.upArrow || ctrlT) {
+      return { state: { ...state, focus: { kind: "input" } }, effect: { kind: "none" } };
+    }
+    if (isPrintable(char, key)) {
+      return { state: { ...state, focus: { kind: "input" } }, effect: { kind: "pass" } };
+    }
     return { state, effect: { kind: "pass" } };
   }
 
@@ -216,12 +320,14 @@ export function dockKey(
     };
   }
   if (key.escape || ctrlT) {
-    return { state: { ...state, focus: { kind: "input" } }, effect: { kind: "none" } };
+    // The chain's next step: the dropdown → the pill (not the input) — DOWN and
+    // Enter walked in through it, so Esc walks back out through it.
+    return { state: { ...state, focus: { kind: "pill" } }, effect: { kind: "none" } };
   }
   if (key.upArrow) {
     if (index <= 0) {
-      // ↑ on the first row: back to the input, the cursor and draft untouched.
-      return { state: { ...state, focus: { kind: "input" } }, effect: { kind: "none" } };
+      // ↑ on the first row: back to the pill (the surface Esc lands on too).
+      return { state: { ...state, focus: { kind: "pill" } }, effect: { kind: "none" } };
     }
     return {
       state: { ...state, focus: { ...state.focus, selected: ctx.ids[index - 1] ?? selected } },
@@ -290,6 +396,12 @@ export function reconcile(
     return { ...state, focus: { ...focus, ended: mine.outcome, frozen } };
   }
   if (state.focus.kind !== "list") {
+    // The pill (and the input) have no selection to reconcile: only the LIST can
+    // lose a row under the user. An empty list has already returned to the input
+    // through the list branch below, so the pill never outlives its items.
+    if (state.focus.kind === "pill" && ids.length === 0) {
+      return { ...state, focus: { kind: "input" } };
+    }
     return state;
   }
   const selected = state.focus.selected;

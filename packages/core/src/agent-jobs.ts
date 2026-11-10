@@ -128,6 +128,11 @@ export interface AgentJobLive {
   toolUses: number;
   tokens: number;
   tail: string[];
+  /**
+   * The `models` NAME the child runs on, from its `subagent_start` (never an id:
+   * AGENTS §7). Absent = it runs on the parent's own model.
+   */
+  model?: string;
 }
 
 /** One child as a client shows it (docs/feat/subagent-background-ui.md Design 2). */
@@ -143,6 +148,8 @@ export interface AgentJobRow {
   readonly startedAt: number;
   /** Its recent tool labels, oldest first, at most `TAIL_MAX`. */
   readonly tail: readonly string[];
+  /** The `models` NAME it runs on; absent = the parent's own model (docs/feat/subagent-panel.md). */
+  readonly model?: string;
 }
 
 /** How many labels a row keeps: enough for a panel, never a log. */
@@ -165,6 +172,14 @@ export function foldAgentProgress(live: AgentJobLive, event: ToolProgressEvent):
     }
   } else if (event.kind === "subagent_usage") {
     live.tokens += event.promptTokens + event.completionTokens;
+  } else if (event.kind === "subagent_start") {
+    // The start event carries the child's model when its pick named one: that is
+    // a visible change (the row gains its model), so it must be published.
+    if (event.model === undefined || event.model === live.model) {
+      return false;
+    }
+    live.model = event.model;
+    return true;
   } else {
     return false;
   }
@@ -258,6 +273,7 @@ export class AgentJobs {
         tokens: live?.tokens ?? 0,
         startedAt: job.startedAt,
         tail: live?.tail ?? [],
+        ...(live?.model !== undefined ? { model: live.model } : {}),
       };
     });
   }

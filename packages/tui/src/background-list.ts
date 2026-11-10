@@ -17,8 +17,15 @@ import type { BackgroundAgentRow } from "./background-view.ts";
 import { cellWidth, truncateCells } from "./cells.ts";
 import { formatDuration, formatTokens } from "./format.ts";
 
-/** The most rows the dock shows before it windows (mockup 05). */
+/** The most rows the dropdown shows before it windows (mockup 05). */
 export const LIST_MAX_ROWS = 5;
+
+/**
+ * The title column's cap (owner, docs/feat/subagent-panel.md UI revision: "the
+ * title column is capped at 56 cells"). Past it a title is cut with `…` — a row
+ * is a compact list item, not a sentence.
+ */
+export const TITLE_MAX_COLS = 56;
 
 /** How many of the user's messages the drawer keeps (the most recent). */
 export const DRAWER_SENT_MAX = 3;
@@ -34,7 +41,6 @@ const MIN_DESC = 6;
 /** The id column: `sa-12` is two digits of headroom on `sa-9`. */
 const ID_COLS = 5;
 const TYPE_COLS = 8;
-
 /** A run of cells with a semantic tone; the component maps it to a theme token. */
 export interface DockSegment {
   readonly text: string;
@@ -78,6 +84,13 @@ export interface DockJobRow {
 
 export type DockFocus =
   | { readonly kind: "input" }
+  /**
+   * The status bar's pill has focus (DOWN from the input, or a click on it): the
+   * dock is still CLOSED — Enter opens the dropdown, Esc goes back to the input.
+   * It carries no selection of its own: the dropdown's first row is chosen when
+   * it opens (owner: "first row selected").
+   */
+  | { readonly kind: "pill" }
   | { readonly kind: "list"; readonly selected: string; readonly armed: boolean }
   | {
       readonly kind: "open";
@@ -147,56 +160,125 @@ function agentMeta(
   return [tools, time].filter((p): p is string => p !== null).join(" · ");
 }
 
-/** The segments of one row, cut so the whole line is exactly `width` cells. */
-function rowSegments(opts: {
+/** One row's content, before any column is decided. */
+interface RowItem {
   readonly selected: boolean;
-  readonly focused: boolean;
+  readonly armed: boolean;
   readonly glyph: BackgroundDockRow["glyph"];
   readonly id: string;
   readonly typeCol: string;
-  readonly description: string;
+  readonly title: string;
+  readonly model: string;
   readonly meta: string;
-  readonly width: number;
   readonly metaTone: DockTone;
-}): { segments: DockSegment[]; description: string; meta: string } {
-  const { selected, focused, metaTone, width } = opts;
-  const typeCols = width >= TIER_TYPE ? TYPE_COLS : 0;
-  // marker(2) + glyph(1) + space(1) + id(ID_COLS+1) + [type(TYPE_COLS+1)] + "  " + meta + " ".
-  const fixed = 2 + 1 + 1 + ID_COLS + 1 + (typeCols === 0 ? 0 : typeCols + 1) + 2 + 1;
-  let meta = opts.meta;
-  if (width - fixed - cellWidth(meta) < MIN_DESC) {
-    meta = truncateCells(meta, Math.max(0, width - fixed - MIN_DESC));
-  }
-  const descCols = Math.max(0, width - fixed - cellWidth(meta));
-  const description = truncateCells(opts.description, descCols);
+}
+
+/**
+ * The columns of the whole list, computed ONCE across every row so they align:
+ * the id column is the widest id, the type column exists only when some row is
+ * not `general`, the model column only when some row runs another model, and the
+ * title column is capped at `TITLE_MAX_COLS`.
+ *
+ * The owner's rejection of the old dock is the rule here (docs/feat/subagent-panel.md,
+ * UI revision): "meta starts 3 cells after the widest title, never padded to the
+ * far edge" — so a row's line ENDS at its meta, it is not stretched to `width`.
+ */
+interface RowColumns {
+  readonly idW: number;
+  readonly typeW: number;
+  readonly modelW: number;
+  readonly titleW: number;
+  readonly metaW: number;
+  /** False when the line cannot hold the meta too: the row shows the title only. */
+  readonly showMeta: boolean;
+}
+
+function rowColumns(items: readonly RowItem[], width: number): RowColumns {
+  const widest = (pick: (i: RowItem) => string): number =>
+    items.reduce((n, i) => Math.max(n, cellWidth(pick(i))), 0);
+  const idW = Math.max(
+    widest((i) => i.id),
+    2,
+  );
+  const typeW = Math.max(
+    0,
+    items.reduce(
+      (n, i) =>
+        i.typeCol === "" || i.typeCol === "general" ? n : Math.max(n, cellWidth(i.typeCol)),
+      0,
+    ),
+  );
+  const modelW = widest((i) => i.model);
+  const metaW = widest((i) => i.meta);
+  const titleWanted = Math.min(
+    widest((i) => i.title),
+    TITLE_MAX_COLS,
+  );
+  // marker(2) + glyph(1) + space(1) + id + "  " + [type + "  "] + title + "   " + [model + "   "] + meta
+  const fixed =
+    2 + 1 + 1 + idW + 2 + (typeW > 0 ? typeW + 2 : 0) + 3 + (modelW > 0 ? modelW + 3 : 0);
+  const typeCols = width >= TIER_TYPE ? typeW : 0;
+  const fixedWithTypes =
+    2 + 1 + 1 + idW + 2 + (typeCols > 0 ? typeCols + 2 : 0) + 3 + (modelW > 0 ? modelW + 3 : 0);
+  // The meta is kept only while a readable title fits beside it.
+  const showMeta = width - fixedWithTypes - metaW >= MIN_DESC;
+  const room = width - fixedWithTypes - (showMeta ? metaW : 0);
+  const titleW = Math.max(0, Math.min(titleWanted, room));
+  void fixed;
+  return { idW, typeW: typeCols, modelW, titleW, metaW, showMeta };
+}
+
+/** One row's segments, from the list's shared columns (no far-edge padding). */
+function paintRow(
+  item: RowItem,
+  cols: RowColumns,
+  focused: boolean,
+): { segments: DockSegment[]; description: string; meta: string } {
+  const { selected } = item;
   const glyphTone: DockTone =
-    opts.glyph === "asking" ? "warn" : opts.glyph === "job" ? "subtle" : "accent";
-  const glyphChar = opts.glyph === "asking" ? "▲" : opts.glyph === "job" ? "◆" : "●";
+    item.glyph === "asking" ? "warn" : item.glyph === "job" ? "subtle" : "accent";
+  const glyphChar = item.glyph === "asking" ? "▲" : item.glyph === "job" ? "◆" : "●";
   // The selection grammar (the palette's, the `/mcp` panel's): accent + bold on
   // the selected row, the rest dimmed; unfocused rows are calm.
   const idTone: DockTone = selected ? "accentBold" : "subtle";
   const typeTone: DockTone = selected ? "accent" : "dim";
-  const descTone: DockTone = selected ? "accentBold" : focused ? "subtle" : "normal";
+  const titleTone: DockTone = selected ? "accentBold" : focused ? "subtle" : "normal";
+  const description = truncateCells(item.title, cols.titleW);
   const segments: DockSegment[] = [
     { text: selected ? "› " : "  ", tone: "accent" },
     { text: glyphChar, tone: glyphTone },
     { text: " ", tone: "normal" },
-    { text: `${opts.id.padEnd(ID_COLS).slice(0, ID_COLS)} `, tone: idTone },
-    ...(typeCols === 0
+    { text: `${item.id.padEnd(cols.idW)}  `, tone: idTone },
+    ...(cols.typeW === 0
       ? []
-      : [{ text: `${opts.typeCol.padEnd(typeCols).slice(0, typeCols)} `, tone: typeTone }]),
-    { text: description, tone: descTone },
-    { text: "  ", tone: "normal" },
+      : [
+          {
+            text: `${(item.typeCol === "general" ? "" : item.typeCol).padEnd(cols.typeW)}  `,
+            tone: typeTone,
+          },
+        ]),
+    { text: description, tone: titleTone },
   ];
-  // The meta fills the rest of the line (the mockups right-align it by padding
-  // it to the column it was given, then the row ends).
-  const pad = Math.max(0, width - fixed - cellWidth(meta) - cellWidth(description));
-  if (pad > 0) {
-    segments.push({ text: " ".repeat(pad), tone: "normal" });
+  // The title column is padded to its own width, so the meta starts at the SAME
+  // cell on every row (3 cells after the widest title) — never at the far edge.
+  const titlePad = Math.max(0, cols.titleW - cellWidth(description));
+  if (titlePad > 0) {
+    segments.push({ text: " ".repeat(titlePad), tone: "normal" });
   }
-  segments.push({ text: meta, tone: selected && metaTone === "dim" ? "accent" : metaTone });
-  segments.push({ text: " ", tone: "normal" });
-  return { segments, description, meta };
+  segments.push({ text: "   ", tone: "normal" });
+  if (cols.modelW > 0) {
+    segments.push({
+      text: `${item.model.padEnd(cols.modelW)}   `,
+      tone: selected ? "accent" : "dim",
+    });
+  }
+  if (cols.showMeta) {
+    segments.push({
+      text: item.meta,
+      tone: selected && item.metaTone === "dim" ? "accent" : item.metaTone,
+    });
+  }
+  return { segments, description, meta: cols.showMeta ? item.meta : "" };
 }
 
 /** The whole line a row paints (the tests pin its cells; the component splits it by tone). */
@@ -218,17 +300,27 @@ function ruleSegments(
     { text: ` · ${count}`, tone: "dim" },
     { text: " ", tone: "border" },
   ];
+  const leftCells = left.reduce((n, s) => n + cellWidth(s.text), 0);
   const right: DockSegment[] = [
     { text: " ", tone: "border" },
     { text: hint, tone: "dim" },
     { text: " ─", tone: "border" },
   ];
-  const used = [...left, ...right].reduce((n, s) => n + cellWidth(s.text), 0);
-  return [
-    ...left,
-    ...(used < width ? [{ text: "─".repeat(width - used), tone: "border" as const }] : []),
-    ...right,
-  ].slice(0, used < width ? undefined : left.length);
+  const rightCells = right.reduce((n, s) => n + cellWidth(s.text), 0);
+  // The rule is ALWAYS `width` cells: the hint is dropped when it does not fit,
+  // never the FILL and the closing dash with it. (A short line used to collapse
+  // to just `─ background · 2 `, which is the "gap" the owner saw: the rule
+  // stopped mid-row and the labels sat on nothing. Step 0 of the UI revision.)
+  if (leftCells + rightCells <= width) {
+    return [
+      ...left,
+      { text: "─".repeat(width - leftCells - rightCells), tone: "border" },
+      ...right,
+    ];
+  }
+  // No room for the keys: the title, then the fill to the edge.
+  const fill = "─".repeat(Math.max(0, width - leftCells));
+  return fill === "" ? left.slice(0, 3) : [...left, { text: fill, tone: "border" }];
 }
 
 /** The hint the rule carries, by focus (and width, for the unfocused one). */
@@ -280,57 +372,53 @@ export function backgroundListView(opts: {
 
   // Every item in its paint order: the children first (launch order), the jobs
   // after — a job's row never jumps above a child that started later (mockup 05).
-  const all: BackgroundDockRow[] = [];
+  // The row's CONTENT is gathered first; the columns are decided across ALL of
+  // them (so every row aligns on the same cells), then the window is cut.
+  const items: RowItem[] = [];
   for (const row of agents) {
     const asking = row.id === askingId;
     const isArmed = armed && row.id === selectedId;
     const meta = agentMeta(row, width, asking, isArmed, opts.now);
-    const built = rowSegments({
-      selected: row.id === selectedId,
-      focused,
-      glyph: glyphOf(row.id, askingId, false),
-      id: row.id,
-      typeCol: row.agentType ?? "",
-      description: row.description ?? "",
-      meta,
-      width,
-      metaTone: isArmed ? "warn" : asking ? "warn" : "dim",
-    });
-    all.push({
-      id: row.id,
-      glyph: glyphOf(row.id, askingId, false),
-      typeCol: row.agentType ?? "",
-      description: built.description,
-      meta: built.meta,
+    items.push({
       selected: row.id === selectedId,
       armed: isArmed,
-      segments: built.segments,
+      glyph: glyphOf(row.id, askingId, false),
+      id: row.id,
+      typeCol: row.agentType ?? "",
+      title: row.description ?? "",
+      model: row.model ?? "",
+      meta,
+      metaTone: isArmed ? "warn" : asking ? "warn" : "dim",
     });
   }
   for (const job of jobs) {
     const seconds = Math.max(0, Math.floor((opts.now - job.startedAt) / 1000));
-    const built = rowSegments({
-      selected: job.id === selectedId,
-      focused,
-      glyph: "job",
-      id: job.id,
-      typeCol: "shell",
-      description: job.command,
-      meta: `running · ${formatDuration(seconds)}`,
-      width,
-      metaTone: "dim",
-    });
-    all.push({
-      id: job.id,
-      glyph: "job",
-      typeCol: "shell",
-      description: built.description,
-      meta: built.meta,
+    items.push({
       selected: job.id === selectedId,
       armed: false,
-      segments: built.segments,
+      glyph: "job",
+      id: job.id,
+      typeCol: "shell",
+      title: job.command,
+      model: "",
+      meta: `running · ${formatDuration(seconds)}`,
+      metaTone: "dim",
     });
   }
+  const cols = rowColumns(items, width);
+  const all: BackgroundDockRow[] = items.map((item) => {
+    const built = paintRow(item, cols, focused);
+    return {
+      id: item.id,
+      glyph: item.glyph,
+      typeCol: item.typeCol,
+      description: built.description,
+      meta: built.meta,
+      selected: item.selected,
+      armed: item.armed,
+      segments: built.segments,
+    };
+  });
 
   // The window follows the selection and keeps it at the BOTTOM once it passes
   // the fifth row (mockup 05's `↑2 ↓2` frame), so the rows above never jump.
@@ -418,17 +506,25 @@ export function drawerView(opts: {
   const tail = (row.tail ?? []).slice(-8);
   const hiddenCount = Math.max(0, (row.toolUses ?? 0) - tail.length);
   const typeCol = row.agentType ?? "";
-  // The head: `─ sa-1 · explore · find callers of parseConfig ─── running · 19 tools ─`
-  // (the description gives way, never a figure: it is the one free-text field).
-  const lead = cellWidth(row.id) + cellWidth(typeCol) + 6; // "─ " + id + " · " + type + " · "
+  const model = row.model ?? "";
+  // The head: `─ sa-2 · Bruno: turni pari del dibattito · qwen3.8 ─── running · … ─`
+  // (the mockup's grammar: id, title, the model ONLY when it differs, then the
+  // figures). The old `· explore ·` did not survive the owner's review; the type
+  // is the row's business in the dropdown, not the drawer's, unless it is the one
+  // thing that tells this child from another (`explore` vs the default).
+  const typePart = typeCol === "" || typeCol === "general" ? "" : ` · ${typeCol}`;
+  const modelPart = model === "" ? "" : ` · ${model}`;
+  const lead = cellWidth(row.id) + cellWidth(typePart) + cellWidth(modelPart) + 4; // "─ " + id + parts + " · "
   const descCols = Math.max(0, width - lead - cellWidth(meta) - 5); // " ─ " + meta + " ─"
   const description = truncateCells(row.description ?? "", descCols);
   const fill = Math.max(0, width - lead - cellWidth(description) - cellWidth(meta) - 5);
   const head: DockSegment[] = [
     { text: "─ ", tone: "border" },
     { text: row.id, tone: "accentBold" },
-    { text: ` · ${typeCol} · `, tone: "dim" },
+    ...(typePart === "" ? [] : [{ text: typePart, tone: "dim" as const }]),
+    { text: " · ", tone: "dim" },
     { text: description, tone: "normal" },
+    ...(modelPart === "" ? [] : [{ text: modelPart, tone: "dim" as const }]),
     { text: " ", tone: "border" },
     ...(fill > 0 ? [{ text: "─".repeat(fill), tone: "border" as const }] : []),
     { text: " ", tone: "border" },

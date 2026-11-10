@@ -76,7 +76,16 @@ export interface ToolResult {
  * of an `agent` dependency; the agent loop maps these onto its event stream.
  */
 export type ToolProgressEvent =
-  | { readonly kind: "subagent_start"; readonly agentType: string; readonly description: string }
+  | {
+      readonly kind: "subagent_start";
+      readonly agentType: string;
+      readonly description: string;
+      /**
+       * The `models` NAME the child runs on, when its pick named one (never an
+       * id, a URL or a key: AGENTS §7). Absent = the parent's own model.
+       */
+      readonly model?: string;
+    }
   | { readonly kind: "subagent_tool"; readonly label: string }
   // One model call's tokens of the child (its own; never added to the parent's totals).
   | {

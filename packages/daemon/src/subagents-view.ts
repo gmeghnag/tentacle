@@ -27,6 +27,9 @@ export function subagentRows(rows: readonly AgentJobRow[]): SubagentRow[] {
     tokens: row.tokens,
     startedAt: row.startedAt,
     tail: row.tail.map((label) => wireLine(label, SUBAGENT_TAIL_MAX_CHARS)),
+    // Only when the child really runs another model (the resolver left it out
+    // otherwise): absent = the main agent's own model, the common case.
+    ...(row.model !== undefined ? { model: wireLine(row.model, 64) } : {}),
   }));
 }
 
@@ -48,7 +51,8 @@ export function sameRows(a: readonly SubagentRow[], b: readonly SubagentRow[]): 
       row.tokens === other.tokens &&
       row.startedAt === other.startedAt &&
       row.tail.length === other.tail.length &&
-      row.tail.every((label, j) => label === other.tail[j])
+      row.tail.every((label, j) => label === other.tail[j]) &&
+      row.model === other.model
     );
   });
 }

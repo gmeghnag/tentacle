@@ -501,6 +501,29 @@ describe("the view: untrusted labels are sanitized, and rows compare cheaply", (
     expect(rows[0]?.toolUses).toBe(2);
   });
 
+  test("the child's MODEL rides the row only when it has one (absent = the main model)", () => {
+    // docs/feat/subagent-panel.md, UI revision: the resolver sets `name` only
+    // when the child really runs a different model, so the projection must pass
+    // it through (and never invent one).
+    const base = {
+      id: "sa-1",
+      callId: "c1",
+      agentType: "general",
+      description: "d",
+      state: "running",
+      toolUses: 1,
+      tokens: 2,
+      startedAt: 3,
+      tail: [],
+    };
+    expect(subagentRows([base])[0]).not.toHaveProperty("model");
+    const withModel = subagentRows([{ ...base, model: "qwen3-8" }])[0];
+    expect(withModel?.model).toBe("qwen3-8");
+    // A `models` name is one line and bounded, like every other label.
+    const hostile = subagentRows([{ ...base, model: "a\nb\u0000c" }])[0];
+    expect(hostile?.model).toBe("a b c");
+  });
+
   test("sameRows is true for equal rows and false for any difference", () => {
     const row = {
       id: "sa-1",

@@ -13,6 +13,8 @@ import { progressText } from "./mapping.ts";
 export const MAX_SUBAGENT_ROWS = 32;
 /** How many tool labels a row keeps (the daemon sends 8; a hostile one may send more). */
 export const MAX_SUBAGENT_TAIL = 8;
+/** How long a row's model label may be (a `models` name is ≤ 64 by config). */
+export const MODEL_LABEL_MAX = 64;
 
 /** One row, safe to render: every string one line and bounded, the numbers as sent. */
 function boundRow(row: SubagentRow): SubagentRow {
@@ -29,6 +31,9 @@ function boundRow(row: SubagentRow): SubagentRow {
     tokens: row.tokens,
     startedAt: row.startedAt,
     tail: row.tail.slice(-MAX_SUBAGENT_TAIL).map(clean),
+    // A `models` name, bounded like every other label (a pod's daemon is not
+    // trusted: AGENTS §7). Absent stays absent (the main agent's own model).
+    ...(row.model === undefined ? {} : { model: clean(row.model).slice(0, MODEL_LABEL_MAX) }),
   };
 }
 

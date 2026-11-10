@@ -237,4 +237,49 @@ describe("subagentModelResolver", () => {
     expect([raw?.contextWindow, raw?.modelId]).toEqual([7, "raw-id"]);
     expect(s.made.map((m) => m.model)).toEqual(["small", "sonnet", "raw-id"]);
   });
+
+  test("the child's NAME is carried only when it really runs a DIFFERENT model than the main agent", () => {
+    // The owner's rule (docs/feat/subagent-panel.md, UI revision): the panel shows
+    // a sub-agent's model only when it differs from the main agent's, so the wire
+    // gets a name only then — and a name is a `models` NAME, never a model id.
+    const resolve = subagentModelResolver(
+      config,
+      createModelProviders(config, spyFactory().create),
+    );
+    // `explore` is `same`, whose entry runs `small`; the main model is not it.
+    expect(resolve(type({ name: "explore" }), undefined)?.name).toBe("same");
+    expect(resolve(type({ name: "explore" }), "claude")?.name).toBe("claude");
+    // An entry that resolves to the MAIN model's own id is the same model: no name.
+    const sameConfig = {
+      ...config,
+      models: { ...config.models, same: entry({ model: "main-model", apiKey: MAIN_KEY }) },
+    };
+    const sameResolve = subagentModelResolver(
+      sameConfig,
+      createModelProviders(sameConfig, spyFactory().create),
+    );
+    const same = sameResolve(type({ name: "explore" }), undefined);
+    expect(same).toBeDefined();
+    expect(same?.name).toBeUndefined();
+    // A frontmatter model id is not a `models` name (AGENTS §7): never carried.
+    expect(resolve(type({ model: "raw-id" }), undefined)?.name).toBeUndefined();
+    // No pick at all is the main model: nothing to name.
+    expect(resolve(type({}), undefined)).toBeUndefined();
+  });
+
+  test("a `/model` switch re-decides it: the same child gains/loses its name", () => {
+    // The daemon recomputes every `subagents` update, so "differs from the main
+    // agent's CURRENT model" must be a function of the config it is given NOW —
+    // not of something cached at launch. The `models` entry is `small`; the main
+    // model is `main-model`, so the child differs…
+    const before = subagentModelResolver(config, createModelProviders(config, spyFactory().create));
+    expect(before(type({ name: "explore" }), undefined)?.name).toBe("same");
+    // …and after the run's model BECOMES that entry's model, they are the same:
+    const switched = { ...config, model: "small" };
+    const after = subagentModelResolver(
+      switched,
+      createModelProviders(switched, spyFactory().create),
+    );
+    expect(after(type({ name: "explore" }), undefined)?.name).toBeUndefined();
+  });
 });

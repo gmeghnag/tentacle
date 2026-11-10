@@ -26,6 +26,11 @@ export interface BackgroundAgentRow {
   readonly tokens?: number;
   readonly startedAt?: number;
   readonly tail?: readonly string[];
+  /**
+   * The child's `models` NAME when it runs a different model than the main agent
+   * (`SubagentRow.model`, docs/feat/subagent-panel.md). Absent = the main one.
+   */
+  readonly model?: string;
 }
 
 /** How many are running now; 0 when there is nothing to report. */

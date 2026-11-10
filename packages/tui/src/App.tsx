@@ -14,6 +14,7 @@ import {
   type DockOutcome,
   type DockState,
   INPUT_DOCK,
+  clickDock,
   dockKey,
   downEntersList,
   noteSent,
@@ -190,8 +191,8 @@ import {
   startTurn,
   withdrawUserTurn,
 } from "./state.ts";
-import { modelBorder, targetBorder } from "./status-line.ts";
-import { type ContextOpen, contextShown, statusTokens } from "./status-view.ts";
+import { inputRuleText } from "./status-line.ts";
+import { type ContextOpen, contextShown, pillView, statusTokens } from "./status-view.ts";
 import {
   type SubagentNotifyView,
   subagentNotifyNotice,
@@ -739,6 +740,13 @@ export function App({
    * `end_turn` that means "finished" (what a frozen drawer says).
    */
   const dockOutcomeRef = useRef<Record<string, DockOutcome>>({});
+  /**
+   * The child that just ENDED and when, for the pill's `✓ sa-1 done` (~5 s; the
+   * window and the wording are `status-view.ts`'s `PILL_DONE_MS`). Written by the
+   * same `jobs.onExit` feed that records the outcome, so the pill and the
+   * transcript's notice can never disagree about who ended.
+   */
+  const dockFinishedRef = useRef<{ readonly id: string; readonly at: number } | null>(null);
   // The dock (docs/feat/subagent-panel.md): its focus, the drafts per target and
   // the messages sent to each child. `dockRef` is the truth for the key handler
   // (a keypress must read what the last one wrote); the state renders.
@@ -882,6 +890,9 @@ export function App({
       if (job.agent !== undefined) {
         dockOutcomeRef.current[job.id] =
           job.agent.stopReason === "end_turn" ? { kind: "finished" } : { kind: "stopped" };
+        // The pill celebrates it for ~5 s (status-view.ts owns the window), then
+        // shows the new counts; the LAST one to end leaves no pill at all.
+        dockFinishedRef.current = { id: job.id, at: Date.now() };
       }
       stateRef.current = appendBackgroundExit(
         stateRef.current,
@@ -1011,12 +1022,14 @@ export function App({
   // HERE, before the layout, because their height feeds `activeRows` (Review H3:
   // they used to be built after it, so the frame was taller than the terminal).
   const dockNow = useDockClock(dock.focus.kind !== "input" || dockVisible());
-  // The list is shown when it has rows and nothing is open (the drawer takes its
-  // place). A quit confirm owns the screen. A PERMISSION PROMPT does not: that
-  // prompt may be a background child's ask, and its row says `⚠ needs your
-  // permission` — hiding the list there made that row unreachable (Review M1).
+  // The DROPDOWN is shown only when the focus reached it: DOWN focuses the pill,
+  // Enter opens the dropdown — at rest nothing is listed at all (the owner: "no
+  // permanent list anywhere"). A quit confirm owns the screen. A PERMISSION PROMPT
+  // does not take the dropdown away: the prompt may be a background child's ask,
+  // and its row says `⚠ needs your permission` — hiding the list there made that
+  // row unreachable (Review M1).
   const dockListVisible =
-    dock.focus.kind !== "open" && listVisible(subagents) && quitConfirm === null;
+    dock.focus.kind === "list" && listVisible(subagents) && quitConfirm === null;
   const dockView = dockListVisible
     ? backgroundListView({
         rows: subagentsRef.current,
@@ -1037,8 +1050,30 @@ export function App({
           now: dockNow,
         })
       : null;
-  /** The rows the dock paints under the footbar: the list's, or the drawer's. */
-  const dockHeight = dockRows(dockView, drawer);
+  /** The rows the dock takes ABOVE the input: the dropdown's, or the drawer's. */
+  // A permission prompt REPLACES the whole bottom area (it is the input, as
+  // today), so nothing of the dock paints under it and it reserves no rows. The
+  // "who is asking" the dropdown's ⚠ row used to carry is now the PILL's job —
+  // the pill paints under the prompt (`▲ sa-1 asks`), which is strictly better:
+  // it is visible with the dock closed too (docs/feat/subagent-panel.md).
+  const dockHeight = permission.pending ? 0 : dockRows(dockView, drawer);
+  // The status bar's pill (docs/feat/subagent-panel.md, UI revision): ONE control
+  // for the background work, its words and state decided by the pure view-model.
+  const pill = pillView({
+    agents: subagents?.length ?? 0,
+    askingId: permission.pendingAgent?.id ?? null,
+    finished: dockFinishedRef.current,
+    now: dockNow,
+    focus:
+      dock.focus.kind === "pill"
+        ? "pill"
+        : dock.focus.kind === "list"
+          ? "dropdown"
+          : dock.focus.kind === "open"
+            ? "open"
+            : "input",
+    width: columns,
+  });
   // The reply field's view while it is open (its rows feed the viewport maths).
   const replyMax = permission.pending?.reply?.maxChars ?? 0;
   const replyShown =
@@ -1078,6 +1113,29 @@ export function App({
   // Terminal row (1-based) of the panel's first body row: the transcript
   // viewport, the bottom area's marginTop row, the running rows, the title rule.
   const panelBodyTop = viewport + 1 + runningRows + 2;
+  /**
+   * Where the DOCK's first row sits on screen (1-based), or `null` when it paints
+   * nothing. Derived from the same parts `activeRows` sums, in the order the
+   * tree paints them: the transcript viewport, the `marginTop` spacer, the running
+   * rows, then the dock (the dropdown's rule + rows, or the drawer's block) — the
+   * input rule, the input and the status bar come after it.
+   *
+   * A panel, the palette, a quit confirm and a permission prompt each own that
+   * slot instead, and none of them paints the dock.
+   */
+  const dockTop =
+    dockHeight === 0 || listView || paletteOpen || quitConfirm !== null || permission.pending
+      ? null
+      : viewport + 1 + runningRows + 1;
+  // Where the STATUS BAR's row is on screen, and the pill's cells on it, as the
+  // last render reported them (docs/feat/subagent-panel.md: "a click on the
+  // pill's cells opens the dropdown"). `StatusBar` computes the row's layout and
+  // reports the range; the App must not re-derive either (AGENTS §7: one source
+  // of truth — the component paints and reports, it decides nothing).
+  const statusRowRef = useRef<{
+    readonly y: number;
+    readonly pill: { readonly start: number; readonly end: number } | null;
+  } | null>(null);
   // Positional layout only (O(items) cache lookups, no full array): take the
   // row `total` for scroll maths and materialise just the visible window. The
   // whole transcript is assembled on demand (sliceLaid 0..total) only where a
@@ -3150,6 +3208,45 @@ export function App({
         }
         return;
       }
+      // The DOCK's two controls (docs/feat/subagent-panel.md, UI revision): a
+      // click on the PILL opens the dropdown; a click on a dropdown ROW opens
+      // that child. Both hit tests are the view-models' (the pill's cell range is
+      // `statusLayout`'s, the rows' are their screen rows), so nothing here
+      // re-derives a layout.
+      if (r.press && r.btn === 0) {
+        const range = statusRowRef.current;
+        // The bar is the row the component just painted, and `r.y` is 1-based on
+        // the same frame; the range is in cells, also 1-based per column.
+        const clickedPill =
+          range !== null &&
+          range.pill !== null &&
+          r.y === range.y &&
+          r.x > range.pill.start &&
+          r.x <= range.pill.end;
+        if (clickedPill) {
+          const step = clickDock(dockRef.current, { kind: "pill" }, dockIds());
+          if (step.state !== dockRef.current) {
+            setDock(step.state);
+          }
+          return;
+        }
+        // `dockTop` is the dropdown's own RULE row; row 0 is the one under it.
+        const rowIndex =
+          dockTop !== null && r.y > dockTop && r.y <= dockTop + (dockView?.rows.length ?? 0)
+            ? r.y - dockTop - 1
+            : -1;
+        const rowId = rowIndex < 0 ? undefined : dockView?.rows[rowIndex]?.id;
+        if (rowId !== undefined && rowId !== "") {
+          const step = clickDock(dockRef.current, { kind: "row", id: rowId }, dockIds());
+          if (step.state !== dockRef.current) {
+            setDock(step.state);
+          }
+          if (step.effect.kind === "open") {
+            field.set(step.effect.draftIn);
+          }
+          return;
+        }
+      }
       // Left button, part 1: classify the report as click / drag / neither.
       // The whole rule is `tool-expand.ts`'s (`nextClick`); here we only feed it
       // and act on a completed click. A click is a press and a release on the
@@ -3438,14 +3535,37 @@ export function App({
                     columns={columns}
                   />
                 ) : null}
-                {/* The top border carries the model name, right-aligned
-                    (`modelBorder`, pure): Ink's own border has no title. While a
-                    background child is OPEN it carries `→ sa-N` on the LEFT
-                    instead (`targetBorder`), so nobody sends to the wrong agent. */}
+                {/* The dock ABOVE the input (docs/feat/subagent-panel.md, UI
+                    revision): the dropdown, or the one child opened. Everything
+                    it shows is a precomputed view-model — these components only
+                    paint segments (AGENTS §7). Its rows are reserved in
+                    `activeRows`, so the input and the status bar never move. */}
+                {dockView !== null ? <BackgroundList view={dockView} columns={columns} /> : null}
+                {drawer !== null ? (
+                  <SubagentDrawer
+                    head={drawer.head}
+                    hidden={drawer.hidden}
+                    tail={drawer.tail}
+                    sent={drawer.sent}
+                    columns={columns}
+                  />
+                ) : null}
+                {/* The input's top edge, which says ONE thing depending on the
+                    dock: `── <model> ─` at rest, a PLAIN line under the
+                    dropdown (its bottom edge), or `─ → sa-N · enter sends ·
+                    esc back ───` while a child is open. Never two labelled
+                    rules stacked, and never the model while the dock shows
+                    anything (owner). */}
                 <Text color={palette().border}>
-                  {openTitle === null
-                    ? modelBorder(model, columns)
-                    : targetBorder(openTitle, " esc back", columns)}
+                  {inputRuleText(
+                    dock.focus.kind === "open"
+                      ? { kind: "target", id: dock.focus.id, ended: dock.focus.ended !== null }
+                      : dock.focus.kind === "list"
+                        ? { kind: "plain" }
+                        : { kind: "model" },
+                    model,
+                    columns,
+                  )}
                 </Text>
                 <Box
                   width={columns}
@@ -3482,24 +3602,19 @@ export function App({
         hiddenAbove={hiddenAbove}
         expandAll={expandAll}
         autoApprove={permission.autoApprove}
-        background={backgroundCount(subagents)}
-        backgroundShown={dockView !== null}
+        pill={pill}
+        onPillRange={(range) => {
+          // The row the bar paints on: the frame's own rows, derived exactly as
+          // the tree lays them out (the transcript viewport, the spacer, the
+          // running rows, the dock, the input box), plus the bar's own one.
+          statusRowRef.current = {
+            y: viewport + 1 + runningRows + dockHeight + inputBoxRows + 1,
+            pill: range,
+          };
+        }}
         hint={statusHint}
         link={linkView}
       />
-      {/* The dock UNDER the footbar (owner UX ask; docs/feat/subagent-panel.md):
-          the list, or the one child open. Everything it shows is a precomputed
-          view-model — these components only paint segments (AGENTS §7). */}
-      {dockView !== null ? <BackgroundList view={dockView} columns={columns} /> : null}
-      {drawer !== null ? (
-        <SubagentDrawer
-          head={drawer.head}
-          hidden={drawer.hidden}
-          tail={drawer.tail}
-          sent={drawer.sent}
-          columns={columns}
-        />
-      ) : null}
     </Box>
   );
 }

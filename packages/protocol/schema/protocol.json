@@ -2937,6 +2937,9 @@
           "minLength": 1,
           "type": "string"
         },
+        "model": {
+          "$ref": "#/$defs/ModelName"
+        },
         "startedAt": {
           "minimum": 0,
           "type": "integer"

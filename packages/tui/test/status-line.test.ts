@@ -4,7 +4,9 @@ import { headCells } from "../src/cells.ts";
 import { cellWidth } from "../src/cells.ts";
 import {
   contextMeterView,
+  inputRuleText,
   modelBorder,
+  pillHit,
   shortPath,
   statusLayout,
   targetBorder,
@@ -508,5 +510,102 @@ describe("targetBorder: the input's top rule names the CHILD while one is open (
 
   test("no sub: just the target (a drawer whose child reports no type)", () => {
     expect(targetBorder({ target: "→ sa-1", sub: "" }, "", 40)).toContain("→ sa-1 ");
+  });
+});
+
+// docs/feat/subagent-panel.md, UI revision (owner): ONE input rule, three
+// meanings — and never a model name while the dock shows anything.
+describe("inputRuleText: the three meanings of the input's top rule", () => {
+  test("the dock closed: the model, as before this task", () => {
+    expect(inputRuleText({ kind: "model" }, "qwen3", 40)).toContain("qwen3");
+  });
+
+  test("the dropdown open: a PLAIN line — it is only the dropdown's bottom edge", () => {
+    const plain = inputRuleText({ kind: "plain" }, "qwen3", 190);
+    expect(plain).toBe("─".repeat(190));
+    // The owner's rule, as a property: no model name while the dock is open.
+    expect(plain).not.toContain("qwen3");
+  });
+
+  test("a child open: `─ → sa-N · enter sends · esc back ─────`, words LEFT, no model", () => {
+    const wide = inputRuleText({ kind: "target", id: "sa-2", ended: false }, "qwen3", 190);
+    expect(wide.startsWith("─ → sa-2 · enter sends · esc back ─")).toBe(true);
+    expect(wide).not.toContain("qwen3");
+    expect(cellWidth(wide)).toBe(190);
+    // Under the tier the mockup's shorter `esc` (b.html, the 80-column frame).
+    const narrow = inputRuleText({ kind: "target", id: "sa-2", ended: false }, "qwen3", 60);
+    expect(narrow.startsWith("─ → sa-2 · enter sends · esc ─")).toBe(true);
+    expect(cellWidth(narrow)).toBe(60);
+    // An ended child: Enter does nothing, so the rule says only `esc back`.
+    const ended = inputRuleText({ kind: "target", id: "sa-1", ended: true }, "m", 100);
+    expect(ended).toContain("→ sa-1 · esc back");
+    expect(ended).not.toContain("enter sends");
+    // A narrow line keeps the target even when it must drop the keys.
+    const tiny = inputRuleText({ kind: "target", id: "sa-12", ended: false }, "m", 19);
+    expect(tiny.startsWith("─ → sa-12 ")).toBe(true);
+    expect(cellWidth(tiny)).toBe(19);
+  });
+});
+
+describe("the pill's column range on the last line (the click's hit test)", () => {
+  const rowBase = {
+    linkText: null,
+    target: null,
+    cwd: "/tmp/w",
+    home: undefined,
+    tokens: null,
+    meter: contextMeterView(null, false, 128_000),
+    suffix: "",
+  };
+  const withPill = (pill: string, columns = 190) =>
+    statusLayout({ ...rowBase, columns, hint: " ⏵⏵ auto-accept on ", pill });
+
+  test("the range is the pill's own cells, flush with the row's right edge", () => {
+    const l = withPill("2 agents ↓");
+    expect(l.pill).not.toBeNull();
+    const pill = l.pill ?? { text: "", start: 0, end: 0 };
+    expect(pill.text).toBe("2 agents ↓");
+    expect(pill.end).toBe(190);
+    expect(pill.end - pill.start).toBe(cellWidth("2 agents ↓"));
+    // The pill ends the row (the component paints that right-hand box flush
+    // right, so `end` is the row's width), and `plain` ends with it.
+    expect(l.plain.endsWith("· 2 agents ↓")).toBe(true);
+    expect(pill.start).toBe(190 - cellWidth("2 agents ↓"));
+  });
+
+  test("a click inside the range hits; one cell either side does not (the plan's mutation)", () => {
+    const l = withPill("2 agents ↓");
+    const pill = l.pill ?? { text: "", start: 0, end: 0 };
+    expect(pillHit(l, pill.end)).toBe(true); // the last cell (1-based columns)
+    expect(pillHit(l, pill.start + 1)).toBe(true); // the first cell
+    expect(pillHit(l, pill.start)).toBe(false); // the space before it
+    expect(pillHit(l, pill.end + 1)).toBe(false); // past the end of the row
+  });
+
+  test("a focused pill's HINT is budgeted: it never glues onto the ctx figure", () => {
+    // The defect a frame at exactly 90 columns showed: the hint was painted
+    // outside the layout's budget, so it landed on `…/128kenter open · esc back`.
+    for (let columns = 40; columns <= 200; columns += 1) {
+      const l = statusLayout({
+        ...rowBase,
+        columns,
+        hint: " ⏵⏵ auto-accept off (shift+tab) ",
+        pill: " 2 agents ⏎ ",
+        pillHint: "enter open · esc back",
+      });
+      const plain = l.plain;
+      expect(cellWidth(plain)).toBeLessThanOrEqual(columns);
+      if (l.pillHint !== "") {
+        // Whole or dropped, and when shown it is separated from what precedes it.
+        expect(plain).toContain("enter open · esc back");
+        expect(plain).not.toMatch(/[^ ]enter open · esc back/);
+      }
+    }
+  });
+
+  test("no pill → no range, and nothing to hit", () => {
+    const l = statusLayout({ ...rowBase, columns: 190, hint: " ⏵⏵ auto-accept on " });
+    expect(l.pill).toBeNull();
+    expect(pillHit(l, 189)).toBe(false);
   });
 });
