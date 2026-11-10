@@ -99,3 +99,46 @@ describe("T11: agent_message", () => {
     await tick();
   });
 });
+
+// fix/agent-task-scope (3): with `subagents.twoWay` ON the child may answer
+// through `agent_notify`, so the parent must not be told there is no way back.
+// With it OFF both texts are byte-identical to what they were — pinned in full,
+// on the DEFAULT construction too (the flag absent, not just `false`).
+describe("the two texts follow subagents.twoWay", () => {
+  const TODAY_DESCRIPTION =
+    "Send a message to a running background sub-agent started with agent_task{background: true}. It reads it before its next model step. One-way: no reply comes back, and its report still arrives later as a [background] note. It does not wake you.";
+
+  const queued = async (tool: ReturnType<typeof createAgentMessageTool>): Promise<string> => {
+    const r = rig();
+    const out = await tool.execute({ agent_id: "sa-1", text: "hi" }, ctx);
+    r.gate.resolve({ report: "r", toolUses: 0, stopReason: "end_turn" });
+    await tick();
+    return out.content;
+  };
+
+  test("off (absent or false): description and result are exactly today's", async () => {
+    for (const options of [undefined, { twoWay: false }]) {
+      const tool = createAgentMessageTool(rig().jobs, options);
+      expect(tool.description).toBe(TODAY_DESCRIPTION);
+      expect(await queued(tool)).toBe(
+        "queued for sa-1: it reads it before its next model step. No reply comes back; its report still arrives as a [background] note.",
+      );
+    }
+  });
+
+  test("on: both say it may answer with agent_notify, arriving as a [sub-agent sa-N → you] note", async () => {
+    const tool = createAgentMessageTool(rig().jobs, { twoWay: true });
+    expect(tool.description).not.toBe(TODAY_DESCRIPTION);
+    expect(tool.description).toContain("agent_notify");
+    expect(tool.description).toContain("[sub-agent sa-N → you]");
+    expect(tool.description).toContain("may wake you");
+    expect(tool.description).toContain("its report still arrives later as a [background] note");
+    expect(tool.description).not.toContain("Does not wake you");
+    const result = await queued(tool);
+    expect(result).toContain("queued for sa-1");
+    expect(result).toContain("agent_notify");
+    expect(result).toContain("[sub-agent sa-1 → you]");
+    expect(result).toContain("may wake you");
+    expect(result).not.toContain("No reply comes back");
+  });
+});
