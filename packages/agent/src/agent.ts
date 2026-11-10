@@ -925,7 +925,7 @@ export class Agent {
     // (After a resumed round, never inside it: a note between an assistant's
     // tool calls and their results is an invalid history.)
     const flushedAtStart = this.flushBackgroundExits(messages);
-    for (const event of flushedAtStart) {
+    for (const event of flushedAtStart.events) {
       yield event;
     }
 
@@ -941,7 +941,7 @@ export class Agent {
       opts.userMessage !== true &&
       opts.resumeFrom === undefined &&
       opts.skill === undefined &&
-      flushedAtStart.length === 0 &&
+      flushedAtStart.events.length === 0 &&
       endsWithFinalAnswer(messages)
     ) {
       this.notesFlushedMidTurn = false;
@@ -956,6 +956,14 @@ export class Agent {
       }
     }
     this.notesFlushedMidTurn = false;
+    // Q4 (a) holds at the START too: a client arms on a note's NOTICE, so two
+    // notices in one stretch (a child's parallel calls, or two children) arm TWO
+    // continuations; the first turn's start flush takes BOTH notes, and the
+    // second continuation would then run a model round over nothing new. So a
+    // start flush that delivered a note counts as the note having been consumed.
+    if (flushedAtStart.deliveredNote) {
+      this.notesFlushedMidTurn = true;
+    }
 
     // `turn_start` hooks: not on a resumed turn, which already started (R4).
     // A cancel during them is handled by the loop's first check.
@@ -2023,19 +2031,27 @@ export class Agent {
   /**
    * Drain finished background jobs into the conversation. Returns the events to
    * emit; appends a user-visible note per job so the model learns it ended and
-   * can read its output. A no-op when nothing has exited.
+   * can read its output. A no-op when nothing has exited. `deliveredNote` says a
+   * child's `agent_notify` was among them: that note is the ONE thing a notice
+   * asked a client to wake for, so the turn it wakes must not be cut short as a
+   * stale wake (Q4 a, docs/feat/agent-message-two-way.md).
    */
-  private flushBackgroundExits(messages: ChatMessage[]): AgentEvent[] {
+  private flushBackgroundExits(messages: ChatMessage[]): {
+    readonly events: AgentEvent[];
+    readonly deliveredNote: boolean;
+  } {
     if (this.pendingExits.length === 0) {
-      return [];
+      return { events: [], deliveredNote: false };
     }
     const exits = this.pendingExits.splice(0);
     const events: AgentEvent[] = [];
+    let deliveredNote = false;
     for (const job of exits) {
       // BEFORE the `agentId` branch: a note has an id too, and its own note shape.
       if (isAgentMessage(job)) {
         const message = agentMessageNote(job);
         messages.push(message);
+        deliveredNote = true;
         events.push({ type: "context_note", text: message.content, reason: "background_exit" });
         continue;
       }
@@ -2076,7 +2092,7 @@ export class Agent {
       });
       events.push({ type: "context_note", text: note, reason: "background_exit" });
     }
-    return events;
+    return { events, deliveredNote };
   }
 
   /**

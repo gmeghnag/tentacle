@@ -788,3 +788,114 @@ worktree at .tentacle/worktrees/agent-message-two-way`, branch `feat/agent-messa
 **Not findings (noted):**
 - The wake budget also counts notes that were delivered mid-turn (3 progress notes during a user turn leave no wake for a later one). This is the plan's accepted debt.
 - The end-to-end relay wake (drift 1) is still not driven. The wiring reads as correct.
+
+## Execution — fix round 1
+
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+Exactly the Review's two MEDIUM findings; nothing else. No commit, no `TODO.md` edit.
+
+### M1 — the Q4 guard missed the start-flush race → **FIXED**
+
+**What changed.** `packages/agent/src/agent.ts`:
+- `flushBackgroundExits` (`:2039-2097`) now returns `{ events, deliveredNote }` instead of a bare
+  event list; `deliveredNote` is set in the `isAgentMessage` branch (`:2054`), i.e. it reports
+  whether an `agent_notify` note was delivered — no re-reading of event texts.
+- The call site (`:927-929`) reads `.events`, and the guard's condition (`:944`) keeps
+  `flushedAtStart.events.length === 0`.
+- Right after the flag reset (`:958`) and its comment, `:964-966` sets the flag again when
+  `flushedAtStart.deliveredNote` — so the deferred continuation is recognised as stale.
+- The guard's other conditions (`userMessage !== true`, no `resumeFrom`, no `skill`, nothing new
+  at the start, `endsWithFinalAnswer`) are untouched, so a wake with unread notes is never
+  skipped. No rename of the flag (the review offered it as optional; renaming would have widened
+  the diff).
+
+**Regression test.** `packages/agent/test/agent.test.ts` **T8d** (`:999`), real
+`Agent`/`Session`/`AgentJobs` with the existing `notifyRig`/`startedChild` fakes: `send("hi")`,
+two `jobs.notify` (both `wakes: true`), `send("")` (2 requests, both notes in request 2), then the
+deferred `send("")` → must stay at 2 requests and emit one `turn_end end_turn`. It is the
+reviewer's `.tentacle/tmp` repro, narrowed to the assertion.
+
+**Red (before the fix, current code):**
+```
+(fail) … > T8d: two waking notes, both flushed at ONE turn start, arm no second continuation (M1)
+error: expect(received).toHaveLength(expected)
+Expected length: 2
+Received length: 3
+ at packages/agent/test/agent.test.ts:977:28
+ 0 pass / 30 filtered out / 1 fail
+```
+**Green (after):** `bun test packages/agent/test/agent.test.ts` → `32 pass / 0 fail`.
+
+**Mutation (§9 non-vacuity)** — removed the `if (flushedAtStart.deliveredNote) …` block:
+```
+(fail) … > T8d: two waking notes, both flushed at ONE turn start, arm no second continuation (M1)
+Expected length: 2
+Received length: 3
+ 0 pass / 30 filtered out / 1 fail
+```
+Restored from a saved copy; `bun test packages/agent/test/agent.test.ts` → `32 pass / 0 fail`.
+The reviewer's own repro, run unchanged against the fix, now prints
+`model requests after the 2nd armed wake: 2` (it printed 3 before).
+
+### M2 — T5b was vacuous (the late drain unpinned) → **FIXED**
+
+**What changed.** Only the test: `packages/agent/test/agent.test.ts` gains
+`NotifyOnFinalRoundProvider` (`:952`) and **T5c** (`:980`). No production change was needed — the
+end-of-turn delivery at `agent.ts:1143` already exists; the finding is that nothing pinned it.
+
+The provider calls `jobs.notify(...)` inside round 2's `stream()` — the FINAL, text-only round,
+after the iteration boundary and before `done` — which is the window only the end-of-turn drain
+covers (mid-round, so not the round-boundary flush; and it arrives too late for round 2's
+request). T5c asserts: `model.requests` length 3 (round 1 = tool call, round 2 = the round the
+note landed in, round 3 = the extra round the late drain asked for), request 3 contains
+`[sub-agent sa-1 → you] late`, exactly one `turn_end` (ONE turn), and
+`agent.pendingExitCount === 0` at the end. The existing T5b is left as is (it still pins the
+round-boundary delivery; it was never wrong, just not the late drain).
+
+**Red (with the end-of-turn delivery disabled at `agent.ts:1143`, as the review's mutation):**
+```
+const lateNotes: AgentEvent[] = []; // MUTATION: the end-of-turn delivery disabled
+(fail) … > T5c: a notify during the FINAL text-only round is delivered by the late drain, in the same turn (M2)
+error: expect(received).toHaveLength(expected)
+Expected length: 3
+Received length: 2
+ at packages/agent/test/agent.test.ts:988:28
+ 0 pass / 31 filtered out / 1 fail
+```
+**Green:** restored `const lateNotes = this.flushAgentMessages(messages);` →
+`32 pass / 0 fail` for the file.
+
+### Gate
+
+```
+$ bun run check      # typecheck → lint → test, in the worktree, branch feat/agent-message-two-way
+$ tsc --noEmit && tsc -p apps/mobile --noEmit
+$ biome check .
+Checked 821 files in 259ms. No fixes applied.
+$ bun test
+ 6345 pass
+ 3 skip
+ 0 fail
+Ran 6348 tests across 445 files. [245.31s]
+```
+6345 = the previous 6343 + the two new tests. The 3 skips are the documented opt-in ones
+(live-k8s, live-docker, real-socket keepalive). Lint clean, 0 errors / 0 warnings — matches the
+baseline.
+
+`git diff --stat` (only intended files; no stray file, no `TODO.md`):
+```
+ packages/agent/src/agent.ts       | 28 +++++++++++---
+ packages/agent/test/agent.test.ts | 81 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 103 insertions(+), 6 deletions(-)
+```
+
+### Drift
+
+- None from the Review's fixes. Two cosmetic notes: (1) the fix keeps the flag name
+  `notesFlushedMidTurn` (the review's rename was optional and would have widened the diff) —
+  its semantics are now "a note has been consumed in this turn / at its start"; (2) the new test
+  IDs are **T8d** (M1) and **T5c** (M2) rather than reusing T5b/T8, so the pre-existing pins keep
+  their names and the plan's Tests list stays traceable.
+- Unverified: nothing from the two findings. The Review's "not findings" (the wake budget's
+  mid-turn consumption; the relay's end-to-end wake) are untouched and stay as stated there.

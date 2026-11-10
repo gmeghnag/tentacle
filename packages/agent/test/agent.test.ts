@@ -948,6 +948,87 @@ describe("a child's agent_notify in the parent agent (T1, T5, T7, T8, T9)", () =
     child.done();
   });
 
+  /** A model that fires a side effect during its final, text-only round. */
+  class NotifyOnFinalRoundProvider implements ModelProvider {
+    readonly id = "notify-on-final-round";
+    readonly requests: ChatRequest[] = [];
+    private turn = 0;
+
+    constructor(private readonly duringFinalRound: () => void) {}
+
+    async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+      this.requests.push(request);
+      this.turn += 1;
+      if (this.turn === 1) {
+        yield {
+          type: "tool_call",
+          toolCall: { id: "c1", name: "echo", arguments: '{"text":"r"}' },
+        };
+        yield { type: "done" };
+        return;
+      }
+      if (this.turn === 2) {
+        // DURING the final, text-only round (after the boundary, before `done`):
+        // only the end-of-turn drain can deliver this note in the same turn.
+        this.duringFinalRound();
+      }
+      yield { type: "text", delta: `answer-${this.turn}` };
+      yield { type: "done" };
+    }
+  }
+
+  test("T5c: a notify during the FINAL text-only round is delivered by the late drain, in the same turn (M2)", async () => {
+    const jobs = notifyRig();
+    const child = startedChild(jobs);
+    const model = new NotifyOnFinalRoundProvider(() => {
+      jobs.notify(child.agentId, "late");
+    });
+    const agent = new Agent({ model, tools: registryWithEcho(), env: noopEnv, agentJobs: jobs });
+    const session = new Session(agent, "s1");
+    const events = await collect(session.send("hi"));
+    // Three rounds in ONE turn: round 1 tool call, round 2 (the notify landed
+    // during it), then the extra round the late drain asked for.
+    expect(model.requests).toHaveLength(3);
+    const third = model.requests[2]?.messages.map((m) => m.content).join("\n") ?? "";
+    expect(third).toContain("[sub-agent sa-1 → you] late");
+    expect(events.filter((e) => e.type === "turn_end")).toHaveLength(1);
+    expect(agent.pendingExitCount).toBe(0);
+    child.done();
+  });
+
+  test("T8d: two waking notes, both flushed at ONE turn start, arm no second continuation (M1)", async () => {
+    const jobs = notifyRig();
+    const text = (delta: string) => [{ type: "text" as const, delta }, { type: "done" as const }];
+    const model = new ScriptedProvider([text("a"), text("b"), text("spurious")]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv, agentJobs: jobs });
+    const session = new Session(agent, "s1");
+    await collect(session.send("hi"));
+    expect(model.requests).toHaveLength(1);
+
+    // A child sends two agent_notify calls in one round (parallel tool calls), or
+    // two children notify close together: BOTH wake. The TUI arms on notice A
+    // while idle and starts the continuation; notice B lands while it runs, so
+    // the TUI defers a second continuation to after `turn_end`.
+    const child = startedChild(jobs);
+    expect(jobs.notify(child.agentId, "A")).toEqual({ ok: true, wakes: true });
+    expect(jobs.notify(child.agentId, "B")).toEqual({ ok: true, wakes: true });
+
+    // Wake 1's turn START flushes both notes: real work, one model round.
+    await collect(session.send(""));
+    expect(model.requests).toHaveLength(2);
+    const second = model.requests[1]?.messages.map((m) => m.content).join("\n") ?? "";
+    expect(second).toContain("[sub-agent sa-1 → you] A");
+    expect(second).toContain("[sub-agent sa-1 → you] B");
+
+    // Wake 2 (the deferred continuation): nothing new is left — no model round.
+    const events = await collect(session.send(""));
+    expect(model.requests).toHaveLength(2);
+    expect(events.filter((e) => e.type === "turn_end")).toEqual([
+      { type: "turn_end", reason: "end_turn" },
+    ]);
+    child.done();
+  });
+
   test("T9: a user message resets the budgets; a continuation does not", async () => {
     const jobs = notifyRig();
     let calls = 0;
