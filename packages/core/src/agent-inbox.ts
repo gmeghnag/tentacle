@@ -1,6 +1,6 @@
 /**
  * A running sub-agent's inbox (docs/feat/agent-message.md): the ONE channel every
- * sender writes into — the parent agent's `agent_message` tool today, the user's
+ * sender writes into — the parent agent's `agent_control` tool today, the user's
  * panel in task 7 — delivered at the child's next boundary exactly like a steer.
  *
  * One-way, and bounded: a child never answers here (task 9 is the other
@@ -49,6 +49,15 @@ export class AgentInbox {
   /** Whether the child has stopped reading. A push onto a closed inbox is refused. */
   get closed(): boolean {
     return this.isClosed;
+  }
+
+  /**
+   * How many texts the child has not drained yet (docs/feat/agent-status.md):
+   * read by `AgentJobs.pending`, so a parent deciding to write again knows
+   * whether the last ones were read. The one reader of `items.length`.
+   */
+  get pending(): number {
+    return this.items.length;
   }
 
   /**

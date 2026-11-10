@@ -426,7 +426,7 @@ export type QueueState = z.infer<typeof QueueStateSchema>;
 
 /** One running (or just-started) background sub-agent, as the daemon reports it. */
 export const SubagentRowSchema = z.object({
-  /** Its `sa-N` id: what `agent_kill` takes and a note names. */
+  /** Its `sa-N` id: what `agent_control` takes and a note names. */
   id: z.string().min(1),
   /** The `agent_task` call that launched it. */
   callId: z.string(),
@@ -455,9 +455,9 @@ export type SubagentRow = z.infer<typeof SubagentRowSchema>;
 
 // --- the user writes to / stops one background child (docs/feat/subagent-panel.md) ---
 // `session/subagent_message`: the user's own text into a RUNNING child's inbox
-// (the same inbox the model's `agent_message` tool uses). The daemon also
+// (the same inbox the model's `agent_control{action:"message"}` uses). The daemon also
 // queues a `[user → sa-N]` note for the parent agent, flushed at its next turn.
-// `session/agent_kill`: the same decision the model's `agent_kill` tool makes.
+// `session/agent_kill`: the same decision the model's `agent_control{action:"kill"}` makes.
 // Both are short and synchronous daemon-side (nothing awaits a turn), so they
 // run concurrently with a `session/prompt` (AGENTS §7). Additive: an older
 // daemon answers `MethodNotFound` and the client reports a typed refusal.

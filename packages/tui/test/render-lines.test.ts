@@ -1299,6 +1299,51 @@ describe("toolTitle labels", () => {
       subtitle: '{"q":1}',
     });
   });
+
+  // docs/feat/agent-status.md ("Merge into agent_control"): one parent-side tool
+  // whose ACTION is the thing being done, and whose target is the child.
+  test("agent_control shows its action, then the child it names", () => {
+    expect(toolTitle(tool("agent_control", '{"action":"status"}'))).toEqual({
+      label: "agent_control",
+      subtitle: "status",
+    });
+    expect(toolTitle(tool("agent_control", '{"action":"status","agent_id":"sa-1"}'))).toEqual({
+      label: "agent_control",
+      subtitle: "status sa-1",
+    });
+    expect(
+      toolTitle(tool("agent_control", '{"action":"message","agent_id":"sa-2","text":"go on"}')),
+    ).toEqual({ label: "agent_control", subtitle: "message sa-2" });
+    expect(toolTitle(tool("agent_control", '{"action":"kill","agent_id":"sa-3"}'))).toEqual({
+      label: "agent_control",
+      subtitle: "kill sa-3",
+    });
+    expect(toolTitle(tool("agent_control", "not json"))).toEqual({
+      label: "agent_control",
+      subtitle: "",
+    });
+  });
+
+  // An OLD session's log/transcript still contains the three tools' calls: they
+  // must render as well as they did (their label is the name, their target the
+  // id) — a merge must never make history unreadable.
+  test("the three replaced names still render in an old session", () => {
+    expect(toolTitle(tool("agent_kill", '{"agent_id":"sa-1"}'))).toEqual({
+      label: "agent_kill",
+      subtitle: "sa-1",
+    });
+    expect(toolTitle(tool("agent_message", '{"agent_id":"sa-2","text":"hi"}'))).toEqual({
+      label: "agent_message",
+      subtitle: "sa-2",
+    });
+    expect(toolTitle(tool("agent_status", '{"agent_id":"sa-3","actions":5}'))).toEqual({
+      label: "agent_status",
+      subtitle: "sa-3",
+    });
+    // Without an id (`agent_status` for all of them) it degrades to no subtitle,
+    // never to raw JSON.
+    expect(toolTitle(tool("agent_status", "{}"))).toEqual({ label: "agent_status", subtitle: "" });
+  });
 });
 
 describe("hook annotation (H1)", () => {

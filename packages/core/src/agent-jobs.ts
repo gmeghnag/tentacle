@@ -251,6 +251,15 @@ export class AgentJobs {
     this.cap = maxParallel;
   }
 
+  /**
+   * The cap in force right now (`subagents.maxParallel`): what a refusal names
+   * and what `agent_control` reports (`action: "status"`), so a settings sync is
+   * reflected at once.
+   */
+  get limit(): number {
+    return this.cap;
+  }
+
   bind(host: AgentJobHost): void {
     this.host = host;
   }
@@ -444,7 +453,7 @@ export class AgentJobs {
 
   /**
    * Write one text into a RUNNING background child's context (docs/feat/agent-message.md):
-   * THE seam every sender uses (the `agent_message` tool, task 7's panel).
+   * THE seam every sender uses (`agent_control{action:"message"}`, the panel).
    * Synchronous end to end and never throwing: the check and the push happen in
    * one stretch, so a text it accepts is drained by the child at its next
    * boundary or reported by it — never accepted and then lost.
@@ -481,6 +490,15 @@ export class AgentJobs {
           ok: false,
           reason: `${agentId} already has ${AGENT_INBOX_MAX} unread messages: nothing was sent. Wait for it to read them or for its report.`,
         };
+  }
+
+  /**
+   * How many parent texts (`agent_control{action:"message"}`) `agentId` has
+   * queued and not yet drained (docs/feat/agent-status.md). `0` for an id that
+   * is not running: the count is the inbox's own, never a second counter.
+   */
+  pending(agentId: string): number {
+    return this.running.get(agentId)?.inbox.pending ?? 0;
   }
 
   /**
@@ -555,7 +573,7 @@ export class AgentJobs {
 
   /**
    * A user message reached the parent agent: both budgets start over
-   * (docs/feat/agent-message-two-way.md). A parent's own `agent_message` never
+   * (docs/feat/agent-message-two-way.md). A parent's own message call never
    * resets them, so ping-pong stays bounded until the person writes.
    */
   userMessage(): void {
@@ -606,11 +624,11 @@ export class AgentJobs {
     ];
     // "End your turn and be woken" is only true when a background child runs:
     // foreground holders alone wake nobody, so ending the turn would stall the task.
-    // `agent_kill` is offered for the same reason (it stops a CHILD, never a
+    // `agent_control` is offered for the same reason (it stops a CHILD, never a
     // foreground call the model made itself): only when one is running.
     const next =
       this.running.size > 0
-        ? "Either end your turn (you are woken by a [background] note when a background sub-agent finishes), or stop one with agent_kill, or do this work yourself."
+        ? `Either end your turn (you are woken by a [background] note when a background sub-agent finishes), or stop one with agent_control (action "kill"), or do this work yourself.`
         : "Retry when the running foreground sub-agents return, or do this work yourself.";
     return `at the sub-agent limit (subagents.maxParallel = ${this.cap}); running: ${
       named.length > 0 ? named.join(", ") : "none"

@@ -1594,7 +1594,7 @@ export class HostedSession {
 
   /**
    * `session/subagent_message` (docs/feat/subagent-panel.md): the USER's text
-   * into a running background child — the same seam the model's `agent_message`
+   * into a running background child — the same seam the model's `agent_control`
    * tool uses (`AgentJobs.message`), so the child drains it at its next
    * boundary. Synchronous end to end and never throwing, so it holds no lock
    * and runs concurrently with a `session/prompt` (AGENTS §7).
@@ -1633,7 +1633,7 @@ export class HostedSession {
 
   /**
    * `session/agent_kill` (docs/feat/subagent-panel.md): the user stops one
-   * background child — the same decision the model's `agent_kill` tool makes
+   * background child — the same decision the model's `agent_control{action:"kill"}` makes
    * (`AgentJobs.kill`). Synchronous; the exit, its note and the list's next
    * update all follow the EXISTING path.
    */

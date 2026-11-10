@@ -12,7 +12,7 @@ import {
   type StreamEvent,
 } from "@tentacle/core";
 import { Connection, LogSessionStore, SessionHost } from "@tentacle/daemon";
-import { ToolRegistry, createAgentMessageTool, createTaskTool } from "@tentacle/tools";
+import { ToolRegistry, createAgentControlTool, createTaskTool } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime } from "../src/local-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
@@ -40,12 +40,14 @@ const bgTask = (id: string): StreamEvent => ({
     arguments: JSON.stringify({ description: "map repo", prompt: "go", background: true }),
   },
 });
+// docs/feat/agent-status.md ("Merge into agent_control"): the parent writes into
+// the child with `agent_control{action:"message"}` — the same delivery path.
 const message = (id: string, agentId: string, body: string): StreamEvent => ({
   type: "tool_call",
   toolCall: {
     id,
-    name: "agent_message",
-    arguments: JSON.stringify({ agent_id: agentId, text: body }),
+    name: "agent_control",
+    arguments: JSON.stringify({ action: "message", agent_id: agentId, text: body }),
   },
 });
 type Step = readonly StreamEvent[] | { gate: Promise<void>; events: readonly StreamEvent[] };
@@ -95,7 +97,7 @@ function rig(freshJobsForTool = false) {
       });
       const tools = new ToolRegistry()
         .register(createTaskTool(run, types, { background: agentJobs }))
-        .register(createAgentMessageTool(freshJobsForTool ? new AgentJobs(2) : agentJobs));
+        .register(createAgentControlTool(freshJobsForTool ? new AgentJobs(2) : agentJobs));
       return {
         agent: new Agent({
           model: parent,

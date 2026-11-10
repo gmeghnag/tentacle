@@ -134,19 +134,55 @@ describe("background sub-agents wiring (docs/feat/subagent-background.md, T38)",
   test("`background` is offered when sub-agents are on, and not otherwise", () => {
     const on = buildAgent({ ...config, subagentsEnabled: true });
     expect(taskSchema(on.tools)).toContain("background");
-    // 6a-2: `agent_kill` rides the same switch: it names a child's id.
-    expect(on.tools.get("agent_kill")).toBeDefined();
-    // feat/agent-message: `agent_message` rides it too, for the same reason —
-    // it names a RUNNING background child's id. Registered exactly where
-    // `agent_kill` is: both need the background runtime.
-    expect(on.tools.get("agent_message")).toBeDefined();
-    expect(on.tools.get("agent_message") !== undefined).toBe(
-      on.tools.get("agent_kill") !== undefined,
-    );
+    // docs/feat/agent-status.md ("Merge into agent_control"): ONE tool carries
+    // what `agent_kill`, `agent_message` and `agent_status` used to, and it
+    // rides the same switch they all did — it names a running child's id.
+    expect(on.tools.get("agent_control")).toBeDefined();
+    const control = on.tools.definitions().find((d) => d.name === "agent_control");
+    expect(JSON.stringify(control)).toContain('"status"');
+    expect(JSON.stringify(control)).toContain('"message"');
+    expect(JSON.stringify(control)).toContain('"kill"');
+    // The three old names are GONE from what the model is offered: that is the
+    // whole point (three definitions at every request), and a leftover
+    // registration would silently restore the cost.
+    for (const old of ["agent_kill", "agent_message", "agent_status"]) {
+      expect(on.tools.get(old)).toBeUndefined();
+    }
     const off = buildAgent({ ...config, subagentsEnabled: false });
     expect(off.tools.definitions().some((d) => d.name === "agent_task")).toBe(false);
-    expect(off.tools.get("agent_kill")).toBeUndefined();
-    expect(off.tools.get("agent_message")).toBeUndefined();
+    expect(off.tools.get("agent_control")).toBeUndefined();
+  });
+
+  test("agent_control{status} answers from the SAME AgentJobs the session runs", async () => {
+    // Mutation: register it with a fresh `new AgentJobs(n)`, or outside the
+    // switch → the running child is not the one it reads, or it is missing.
+    const reused = new AgentJobs(2);
+    const wired = buildAgent({ ...config, subagentsEnabled: true }, { agentJobs: reused });
+    // The daemon binds the host in a real session (`HostedSession`); here we do
+    // it, so `start` mints an `sa-N` as usual.
+    let n = 0;
+    reused.bind({ launched: () => `sa-${++n}`, ended: () => {}, now: () => Date.now() });
+    const tool = wired.tools.get("agent_control");
+    if (tool === undefined) throw new Error("agent_control is not wired");
+    const gate = Promise.withResolvers<{ report: string; toolUses: number; stopReason: string }>();
+    const started = reused.start(
+      { callId: "c1", agentType: "explore", description: "Map the repo" },
+      async () => gate.promise,
+    );
+    if (!started.ok) throw new Error(started.reason);
+    reused.progress(started.agentId, { kind: "subagent_tool", label: "Read src/index.ts" });
+    const out = await tool.execute({ action: "status" }, {
+      sessionId: "s",
+      signal: new AbortController().signal,
+    } as never);
+    expect(out.isError).toBe(false);
+    // Its cap came from the config through `setCap`, not from the constructor.
+    expect(out.content).toContain(
+      `1 background sub-agent (of ${config.subagentMaxParallel} allowed)`,
+    );
+    expect(out.content).toContain(`${started.agentId} · explore · Map the repo`);
+    expect(out.content).toContain("last 1: Read src/index.ts");
+    gate.resolve({ report: "r", toolUses: 1, stopReason: "end_turn" });
   });
 
   test("a reused AgentJobs is the one the agent gets, and the cap is set from the config", () => {
@@ -969,12 +1005,11 @@ describe("start-up output pinned (docs/feat/context-reset-refresh.md)", () => {
       "shell_kill",
       "skill",
       "agent_task",
-      // 6a-2 (docs/feat/subagent-background-ui.md): the model's way to stop a
-      // child it launched, offered exactly where `background` is.
-      "agent_kill",
-      // feat/agent-message (docs/feat/agent-message.md): the model's way to
-      // write into a child it launched, offered exactly where `background` is.
-      "agent_message",
+      // docs/feat/agent-status.md ("Merge into agent_control"): ONE parent-side
+      // tool for the children it launched — `status` (read-only), `message`,
+      // `kill`. It replaced `agent_kill`, `agent_message` and `agent_status`,
+      // whose three definitions cost ~1650 chars at every request.
+      "agent_control",
       // Slice 3 (docs/feat/context-reset.md): the one intended change, on by default.
       "context_reset",
     ]);

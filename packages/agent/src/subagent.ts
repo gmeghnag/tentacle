@@ -24,9 +24,11 @@ import {
   toolLabel,
 } from "@tentacle/core";
 import {
+  AGENT_CONTROL_TOOL_NAME,
   AGENT_KILL_TOOL_NAME,
   AGENT_MESSAGE_TOOL_NAME,
   AGENT_NOTIFY_TOOL_NAME,
+  AGENT_STATUS_TOOL_NAME,
   CONTEXT_RESET_TOOL_NAME,
   ToolRegistry,
   createAgentNotifyTool,
@@ -336,16 +338,19 @@ export function createSubagentRunner(deps: SubagentDeps): {
     const childTools = new ToolRegistry();
     for (const tool of deps.tools.list()) {
       // Nor its context reset (a child's context is its own, and short-lived),
-      // nor `agent_kill`: only where `background` is, the PARENT may stop a
-      // child it launched (owner Q1 a); a child given it could kill its
-      // siblings silently (`permission: "none"`, sequential ids). Nor
-      // `agent_message`: it names a CHILD's id, and a child has none to write to
-      // (`docs/feat/agent-message.md` Design 4).
+      // nor `agent_control`: only where `background` is, the PARENT may see,
+      // write to or stop a child it launched (owner Q1 a); a child given it could
+      // read and kill its siblings silently (`permission: "none"`, sequential
+      // ids) — `docs/feat/agent-status.md`. Its three old names stay listed: an
+      // old `agents/*.md` may name one, and an old session's replay must not
+      // hand it to a child either.
       if (
         tool.name === spawnToolName ||
         tool.name === CONTEXT_RESET_TOOL_NAME ||
+        tool.name === AGENT_CONTROL_TOOL_NAME ||
         tool.name === AGENT_KILL_TOOL_NAME ||
         tool.name === AGENT_MESSAGE_TOOL_NAME ||
+        tool.name === AGENT_STATUS_TOOL_NAME ||
         // A child's own `agent_notify` is built below, from the id it was given:
         // a parent registry must never hand one over.
         tool.name === AGENT_NOTIFY_TOOL_NAME
@@ -539,8 +544,10 @@ export function createSubagentRunner(deps: SubagentDeps): {
       if (
         toolName === spawnToolName ||
         toolName === CONTEXT_RESET_TOOL_NAME ||
+        toolName === AGENT_CONTROL_TOOL_NAME ||
         toolName === AGENT_KILL_TOOL_NAME ||
         toolName === AGENT_MESSAGE_TOOL_NAME ||
+        toolName === AGENT_STATUS_TOOL_NAME ||
         toolName === AGENT_NOTIFY_TOOL_NAME
       ) {
         return true;
