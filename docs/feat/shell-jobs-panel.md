@@ -652,3 +652,52 @@ The 3 skips are the opt-in ones (`TENTACLE_K8S_SERVER`, `TENTACLE_DOCKER_TESTS`,
 7. **Not fixed (out of scope):** the CHILD drawer is also uncapped by terminal
    height (the reviewer called filing it optional). Known limit recorded for
    owner A: block-buffered stdout on a pipe.
+
+## Review — round 2
+
+*— claude-opus-5-5, 2026-11-10*
+
+Fresh-context review of `a6a222f` (`git diff HEAD~1`). The reviewer model (Opus) is a different family from the executor (DeepSeek). HIGH and MEDIUM findings only.
+
+**Verdict: REQUEST-CHANGES.** One MEDIUM was introduced by owner decision B. Everything else holds.
+
+### Gate (re-run)
+
+`bun run check`: `tsc` is clean. `biome check .` checked 849 files with 0 errors and 0 warnings. `bun test`: **6636 pass, 3 skip (opt-in), 0 fail**, 6639 tests in 462 files.
+
+### Finding
+
+1. **MEDIUM: a frozen drawer's duration keeps counting after the exit** (`packages/tui/src/background-list.ts` `jobDrawerView`: `seconds = now − row.startedAt`, and the `jobEndView` call that uses it). `JobEnd` records no end time, and `now` is the live `dockNow`. So `✗ exited (2) · 6s` reads `· 9s` 3.2 s later, and keeps growing for as long as the drawer stays open. Owner B asks for the job's TOTAL run time; this shows "time since start, now". Repro (`.tentacle/tmp/shell-jobs-panel/review-frames.ts` (C), real `App` at 100×24): `"─ bg-3 · make build ─ ✗ exited (2) · 6s ─"` then `"… ✗ exited (2) · 9s ─"`. The F9 tests and the pure tests pass a fixed `seconds`, so none of them notices.
+   **Fix:** stamp the end once, in the App's `onExit` handler (`endedAt: Date.now()` on the `JobEnd` built by `jobOutcome`, or as a `seconds` value frozen there). `jobDrawerView` then uses `end.endedAt − row.startedAt` when an outcome is present, and `now` only while running. Mixing the pod's `startedAt` with the laptop clock is the same skew already accepted for the running clock. Two tests:
+   - a pure test: a `JobEnd` with `endedAt` and two different `now` values ⇒ the same text;
+   - a frame test: exit, wait more than 1 s, and the head's duration is unchanged.
+
+### Round-1 findings, re-checked
+
+| # | Status | Evidence |
+|---|---|---|
+| 1 CRLF | **Fixed** | `review-tail.ts`: `printf 'alpha\r\nbeta\r\ngamma\r\n'` ⇒ `["alpha","beta","gamma"]`; `"long text\rab\n"` ⇒ `["ab"]` (overwrite kept) |
+| 2 stderr hides stdout | **Superseded by A, resolved** | 20 stderr + 5 stdout lines, `lines: 12` ⇒ `err14…err20, OUT1…OUT5` (both streams visible, in arrival order) |
+| 3 split delivery ⇒ `✗ stopped` | **Fixed twice over** | The daemon emits `background_exit` before `publishJobs()`. `applyLateOutcome` also corrects a drawer that froze early. `review-frames.ts` (A): frame, then the exit 30 ms later ⇒ `✓ exited (0) · 5s`. **Mutation:** disabling `applyLateOutcome` turns the new F6 split-delivery test red (1 fail); restored byte-identically, `git status` clean |
+| 4 drawer height | **Fixed** | `review-frames.ts` (B), 30-line truncated tail: 80×24 ⇒ 23 lines, 80×22 ⇒ 21, 80×20 ⇒ 19, 80×16 ⇒ 15 (every frame fits). F10 covers 80×20 and 80×16 |
+| 5 raw exit notice | **Fixed** | One function, `gateExitText` (`client/mapping.ts`), is used by BOTH doors: `remote-client.ts` `deliver` and `updateToEvent`. It applies `progressText` (C0/DEL/C1, 200 cap), strips the format class, and bounds to 200. `exit-notice-gate.test.ts` drives the real `RemoteClient` over an RPC pair. (`review-pill.ts` still shows raw bytes, but it injects straight into the App's `jobs` prop, bypassing the client; it is not a path a pod can reach.) No other carrier of a pod job's text to Ink was found: `jobs` rows go through `boundJobs`, `job_output` through `boundJobOutput`, and the dock's notices use the gated row id |
+
+### Owner A: arrival order (`review-arrival.ts`, real `HostExecution`)
+
+- **Cursor:** each read returns only new output, in arrival order: `read1 = out1,err1,out2,err2`, `read2 = out3,err3,out4,out5,err4,err5`, `read3 = ""`. That is 10 lines with 10 unique, so nothing is lost or duplicated.
+- **Drawer and model agree:** `tail()` equals the concatenated reads exactly. `shell_output` after those reads says `(no new output)`, so the drawer's tail took nothing from the model's cursor.
+- **Bounded memory:** a 1.2 M-char flood gives one read of 524 288 chars (= `MAX_BUFFER`) that ends with `END`, and the next read is `""`.
+- **Chunk boundary (accepted, not a finding):** a stdout line split across two chunks, with stderr written in between, gives `["helERR","lo"]`. That is byte-for-byte what a terminal shows when both fds point at one tty, so arrival order is faithful. Each pump keeps its own `TextDecoder`, so a multi-byte character split across one stream's chunks is still reassembled. The block-buffering limit is documented (exec module comment, protocol schema).
+
+### Owner B: per case
+
+`jobOutcome` maps:
+- a dock stop ⇒ `stopped`;
+- `killed`, or a `null` code ⇒ `killed`;
+- otherwise ⇒ `exited(code)`.
+
+`jobEndView` paints `✓` only for `exited` with code 0 (and for the legacy `finished`, with no code). Non-zero, killed and stopped are all `✗` with the error tone. The real App confirms `✗ exited (2)` (repro (C)). `dockStoppedRef` is filled when the `job_kill` response arrives. The process dies asynchronously after that response, so the record is there before the exit frame. **The only defect in B is the frozen duration (finding 1).**
+
+### Behaviour
+
+The executor fixed each round-1 finding as specified, adding a second guard for finding 3, and wrote tests that fail on the bug (the mutation confirmed this for finding 3). Owner A and owner B are implemented cleanly, and the stated limits are honest. What was missed: B's "duration" assumed a live clock, and no test advances time after the exit.
