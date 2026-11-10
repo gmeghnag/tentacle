@@ -86,7 +86,12 @@ import {
 } from "./permission-ui.ts";
 
 export type { AutoAcceptFeed };
-import { CLEARED_ELSEWHERE_NOTICE, clearCommandStep, clearErrorNotice } from "./clear-command.ts";
+import {
+  CLEARED_ELSEWHERE_NOTICE,
+  clearCommandStep,
+  clearErrorNotice,
+  clearNoopNotice,
+} from "./clear-command.ts";
 import {
   type DaemonQueue,
   type QueuedMessage,
@@ -1945,12 +1950,23 @@ export function App({
           // client read a snapshot): the latch stays up until the `history`
           // activity applies it (review H2) — it wakes from there. Only a clear
           // that did nothing (no session open yet: `{0, 0}`, no history coming)
-          // lets go here (review L6b).
+          // lets go here (review L6b) — and, with a chat on screen, says so
+          // (docs/fix/clear-silent-noop.md: a silent no-op is a §7 drop).
           const r = result as { before?: number; after?: number } | undefined;
           if (r?.before === 0 && r.after === 0) {
             clearingRef.current = false;
             if (ownClearsRef.current > 0) {
               ownClearsRef.current -= 1;
+            }
+            const noop = clearNoopNotice({
+              before: 0,
+              after: 0,
+              // A conversation on screen: any prompt or tool row. A fresh
+              // session's welcome line is neither, so it stays quiet.
+              chatShown: stateRef.current.items.some((i) => i.kind === "user" || i.kind === "tool"),
+            });
+            if (noop !== null) {
+              pushNotice(noop);
             }
             wakeIfPending();
           }

@@ -8,6 +8,10 @@ those.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/clear` on a session you just resumed now clears it.** `tentacle --resume <id>` and `/clear` before sending anything did nothing at all: the chat stayed, the model's context stayed, and no message explained it — the daemon had no conversation under that id yet (it was still only your laptop's saved copy), so it answered "nothing to clear". `/clear` now opens that saved conversation first (exactly as your next message would) and then clears it, keeping the dropped chat as its own session, as `/clear` always does. If a `/clear` ever resets nothing while a chat is on screen, it now says so instead of staying silent.
+
 ### Changed
 
 - **Writing while a sub-agent runs no longer waits for it.** Type a message while the agent's `agent_task` is running, and that sub-agent moves to the background as `sa-N`: your message reaches the model at the next round instead of after the child ends, and the child keeps working. Its report arrives later as a `[background]` note, like any background sub-agent's. With something for two of them, both move. Send-now (Ctrl+X Ctrl+S) no longer throws the work away: the sub-agent moves first, then the turn is cancelled, so its report still arrives. The `agent_task` block closes with `→ background as sa-1 · its report will arrive later` instead of a failure, and shows no report body (it comes as its own notice). If the sub-agent was waiting on a permission prompt, that prompt is withdrawn and asked again at once, marked `sa-1` — so a click landing in that instant has to be repeated.

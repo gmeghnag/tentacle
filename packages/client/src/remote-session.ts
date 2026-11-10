@@ -674,12 +674,47 @@ export class RemoteSession implements SessionStreamListener {
     return this.client.sessionContext(undefined, this.seedMessages);
   }
 
-  /** Reset the remote conversation in place (no-op if no session was opened yet). */
+  /**
+   * Reset the remote conversation in place. A RESUMED session nothing has
+   * opened yet (`/clear` typed before any turn, docs/fix/clear-silent-noop.md)
+   * holds its conversation only as this client's SEED, with nothing daemon-side
+   * under its id: `openForClear` opens it exactly as the first prompt would,
+   * and THAT is cleared — never a hollow `{0, 0}` with the chat and its context
+   * untouched. A session with nothing to open (a fresh one) stays the plain
+   * no-op: a clear never CREATES one.
+   */
   async clear(): Promise<{ before: number; after: number }> {
-    if (!this.id) {
+    await this.openForClear();
+    const id = this.id;
+    if (!id) {
       return { before: 0, after: 0 };
     }
-    return this.client.clear(this.id);
+    return this.client.clear(id);
+  }
+
+  /**
+   * The open `/clear` needs and no other path does: a session whose conversation
+   * lives ONLY on the daemon side under an id this client has not opened yet —
+   * a resumed one (its chat is this client's SEED) or an attach whose eager
+   * dial is still in flight (`connect`, `attach`) — is opened FIRST, exactly as
+   * the first prompt would, so `/clear` reaches the real conversation and keeps
+   * a copy of what it drops. A separate step so the caller can read the
+   * pre-clear history back FIRST (that read is what the fork is made of).
+   * A fresh session with nothing to clear is never opened: a clear never
+   * CREATES a session.
+   */
+  async openForClear(): Promise<void> {
+    if (this.id !== null) {
+      return; // already open: the ordinary path
+    }
+    if (this.attach) {
+      await this.open(); // the eager attach (in flight, or now): that session, never created
+      return;
+    }
+    if ((this.seedMessages?.length ?? 0) === 0) {
+      return; // a fresh session: nothing daemon-side to reset
+    }
+    await this.openSeeded();
   }
 
   /** Compact the remote conversation (no-op if no session was opened yet). */

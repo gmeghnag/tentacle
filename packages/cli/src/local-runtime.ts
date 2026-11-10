@@ -485,6 +485,13 @@ export function persistingController(
     // place; save the new segment the way a compaction's is.
     // The old chat is kept as its own session first (clear-fork-history).
     async clear() {
+      // A resumed session nothing has opened yet holds its chat only as this
+      // client's seed, with nothing daemon-side under its id
+      // (docs/fix/clear-silent-noop.md): the first prompt's own open is done
+      // FIRST (a no-op for every other session), so the read below finds the
+      // pre-clear history to fork and the daemon has a conversation to reset.
+      // `?.`: unit-test fakes of a session.
+      await inner.openForClear?.();
       // Read the pre-clear history back first (bounded: a slow link must not hold /clear).
       flush();
       await bounded(flushed(), FLUSH_ON_EXIT_TIMEOUT_MS);
