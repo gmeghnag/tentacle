@@ -360,7 +360,57 @@ The 3 skips are the repo's opt-in ones (live-k8s, live-docker, the real-socket k
 
 ## Review
 
-*— (empty until Execution is complete)*
+*— claude-opus-5-5, 2026-11-10*
+
+Fresh-context adversarial review of the branch at `77cd0e9`. The diff reviewed is `8837779..HEAD`, limited to this task's files. The reviewer model (Opus) is a different family from the executor (DeepSeek). HIGH and MEDIUM findings only.
+
+**Verdict: REQUEST-CHANGES.** The core design holds: H1, M2's gate for output and rows, `job_kill`'s trust argument, and the protocol additivity. Four defects were reproduced in the real code, and one pre-existing side door was found on the same data.
+
+### Gate (re-run by the reviewer)
+
+`bun run check`: `tsc` is clean. `biome check .` checked 848 files with 0 errors and 0 warnings. `bun test`: **6609 pass, 3 skip (the opt-in ones), 0 fail**, 6612 tests in 461 files.
+
+### Findings
+
+1. **MEDIUM: CRLF output paints every line blank.** `packages/exec/src/background.ts` `StreamBuffer.tail` (the `lastIndexOf("\r")` map) keeps only the text after a line's last `\r`. For `"alpha\r\nbeta\r\n"` the split gives `"alpha\r"`, so the kept text is `""`. Repro (`.tentacle/tmp/shell-jobs-panel/review-tail.ts`, real `HostExecution`): `printf 'alpha\r\nbeta\r\ngamma\r\n'` ⇒ `stdout: ["","",""]`. The drawer shows three blank rows for any CRLF producer (`curl -i`, CRLF files, some CLIs), so a line that exists is never shown. A terminal's `\r` only moves the cursor; it does not erase. **Fix:** drop one trailing `\r` before applying the last-`\r` rule (`const l = line.endsWith("\r") ? line.slice(0, -1) : line`). Add an exec test: `"a\r\nb\r\n"` ⇒ `["a","b"]`, and `"10%\r50%\r90%\r\n"` ⇒ `["90%"]`.
+
+2. **MEDIUM: the merged tail can hide stdout forever.** `packages/daemon/src/hosted-session.ts` `jobOutput` returns `output: [...tail.stdout, ...tail.stderr]`, where `lines` applies to each stream separately. The App asks for 12 lines and `jobTailWindow` keeps the last 12 of the merged array. So whenever stderr holds ≥ 12 lines, no stdout line is ever painted, however much stdout the job writes later. Repro (`review-tail.ts`): 20 lines to stderr, then 5 to stdout ⇒ the drawer window is `err9…err20` and `OUT1…OUT5` are absent. Q4 (b) asked for "merged as `shell_output` shows them", and `shell_output` shows both streams; this window shows only one. **Fix (daemon, keeps Q4's stdout-then-stderr order):** cap the MERGED array at `lines`. Give each stream ⌈lines/2⌉, and hand any share one stream does not use to the other: `const e = Math.min(err.length, Math.max(lines - out.length, Math.floor(lines / 2)))`, then `output = [...out.slice(-(lines - e)), ...err.slice(-e)]`. Add a daemon test (20 stderr + 5 stdout, `lines: 12` ⇒ all 5 stdout lines present) and a frame test asserting a stdout line is visible.
+
+3. **MEDIUM: a clean exit can freeze as `✗ stopped`.** The daemon emits the `jobs` frame BEFORE `background_exit` (`hosted-session.ts` `onExit` handler: `publishJobs()` first). The App's `reconcile` effect resolves the outcome when the row leaves, using `dockOutcomeRef.current[id] ?? { kind: "stopped" }` (`App.tsx` `dockIdKey` effect). The outcome is recorded only when `background_exit` reaches the `jobs` prop's `onExit`. If the two frames arrive in different macrotasks, which happens when a transport read splits them (a pod's exec WebSocket), the effect has already frozen the drawer as `stopped`, and nothing re-reads the outcome later. Repro (`review-frames.ts` (A)): the frame drops the row, then 30 ms later `exited/0` arrives ⇒ the head reads `─ bg-3 · make build ──… ✗ stopped ─`. F6 misses this because it fires both in the same tick. Children do not hit it, because their list frame is coalesced and lands after the exit. **Fix:** in the `onExit` handler, emit `background_exit` (and `kickWake`) first, then call `publishJobs()`. Frames are ordered, so the outcome is always recorded before the row leaves. Add an F6 variant that delivers the exit ≥ 1 macrotask after the frame and expects `✓ exited (0)`. Also add a daemon test that pins the order: `background_exit` before `jobs`.
+
+4. **MEDIUM: the job drawer is not capped to the terminal's rows.** The drawer is a fixed 14 rows (head, `… earlier`, 12 tail lines). The viewport floor is 3 (`App.tsx` `const viewport = Math.max(3, …)`). Below about 22 rows the frame is taller than the terminal, which is the Review-H3 flicker class. Repro (`review-frames.ts` (B), 30 lines with `truncated`): 80×24 ⇒ 23 lines (fits); 80×22 ⇒ 22 (fits); **80×20 ⇒ 22 lines; 80×16 ⇒ 22 lines**. F3 only covers 24 rows with a 3-line tail. **Fix:** pass `maxRows` into `jobDrawerView` / `jobDrawerTail`, set to `Math.max(1, termRows − (RESERVED_ROWS − 1) − inputBoxRows − runningRows − 3 − 2)` computed at the call site. Slice the tail to it in the pure module, and add a frame test at 80×20 and 80×16 with a full tail asserting `frame lines ≤ rows`. The child drawer has the same uncapped design but is smaller; filing it is optional.
+
+5. **HIGH, pre-existing (not introduced by this diff, but it is the same job's bytes): the exit notice is a raw side door.** `background_exit.jobId` / `.command` are unbounded strip-schema strings (`protocol/src/updates.ts:94`). `client/src/mapping.ts:248-256` and the `background_exit` branch of `remote-client.ts` (`deliver`) pass them through unsanitized, and `appendBackgroundExit` puts them into the transcript. Repro (`review-pill.ts`): a pod-sent id `bg-9\x1b]0;PWNED\x07\x1b[2J` appears **raw in Ink's output frame** (`⏺ background job bg-9␛]0;PWNED␇␛[2J exited…`), and a 400-char id wraps over 6 rows. This breaks §7 ("a pod is not trusted" / "never write raw") and makes the Execution's claim that "nothing untrusted reaches the terminal by a side door" false for a job's exit. **Fix (3 lines, in a file this task already touches):** in `remote-client.ts`'s `background_exit` branch, build the notice with `jobId: progressText(jobId).trim()` and `command: sanitizeJobText(command, JOB_COMMAND_MAX)`. Add a client test sending a hostile `background_exit` that asserts neither a control char nor a format char survives. Fold it into this branch or file it as a `fix/`; it is not optional.
+
+### Premises checked
+
+| Claim | Result |
+|---|---|
+| `jobs` is `display`; `UPDATE_CLASS` is exhaustive; payloads are strip schemas | TRUE (`updates.ts`, `session.ts`; `mapping.test.ts` covers every type) |
+| Both methods: `MethodNotFound` ⇒ typed refusal, no throw | TRUE (`remote-client.ts` `jobOutput`/`killJob`); no version bump is needed |
+| `exitCode` omitted, `int.optional()` | TRUE. An older peer never calls the method; the newer client treats absence as "no code" (`✓ exited`) |
+| Frame `count` taken before the 32-row cap | TRUE (`remote-client.ts` `update.jobs.length`; snapshot `snap.jobs.length`; the daemon's `jobRows` never caps) |
+| Relay: one writer once a frame is seen; children counted apart | TRUE (`relay.ts` `shellCounted` gates both the poll and the `readUse` writer; `relay-state.ts:151-153` gives `agents` its own field, `:237-241`) |
+| `job_kill` is laptop-originated; one wake | TRUE. It is a client→daemon request, so a pod cannot invoke a laptop method with it. `finish` is guarded by `status !== "running"`, so one `onExit`, one `background_exit`, one `kickWake` |
+| `tail` does not move the model's cursor | TRUE (slice of `buf`; exec test; the executor's mutation) |
+| Arrays capped before mapping; C0/DEL/C1/bidi/zero-width handled | TRUE for `job_output` and `jobs` rows (`client/src/jobs.ts`). FALSE for `background_exit` (finding 5) |
+
+### Attacks tried
+
+- **M4 runtime loop:** the effect's dependencies are `[jobTargetId, refreshMs, pushNotice]`, and `pushNotice` is `useCallback([flushNow])`, which is stable. A read writes a ref plus a render-only counter that the effect does not depend on. A close or switch sets `cancelled`, so a late result is dropped. A continuously printing job changes only the bytes read, not the cadence. Two TUIs read independently. **No runtime path to the re-read loop was found.**
+- **Duplicate or missing lines from the live partial:** each read REPLACES the drawer's lines (`jobOutputRef[id] = …`), so a growing partial line is never painted twice. The only "never shown" cases are findings 1 and 2.
+- **Routing:** Enter opens the job's drawer and the input rule stays plain (Q1). `x`/`y` route by `dockKindOf` to `killJob`. A session switch resets the dock and `jobOutputRef`. Nothing found.
+- **Hostile `jobs` frame / `job_output`:** a 300-entry array, ESC, C1 and RLO are all handled by `boundJobs` / `boundJobOutput`. Residual low issue: `U+FEFF`, `U+2060` and `U+061C` pass through (not reorder-capable except ALM; noted only).
+- **Pill `✓ bg-N done` with a hostile id:** in the repro, the pill did not paint the shell-job finish text, so no raw bytes reached it there. The raw path is the transcript notice (finding 5).
+
+### Mutation non-vacuity (reviewer's own; restored byte-identically, `git status` clean)
+
+- `exec`: drop the head partial whenever it is cut (`if (headCut)`) ⇒ **2 red** ("one huge line … non-empty", "keeps the line still being written …").
+- `client`: bidi/zero-width stripping disabled ⇒ **1 red** ("a hostile daemon's bytes never reach the terminal").
+
+### How the executor behaved
+
+The executor followed the revised plan, and the drifts are recorded honestly: the merged `output` (Q4), `bg-N` (Q5), `exitCode` omitted, and the live partial kept. The red/green evidence and the explanation of M4's two guards were accurate. The gaps are in what the tests did not try: CRLF, a stderr-heavy merge, split frame delivery, and small terminals. The executor also did not notice the pre-existing raw exit notice while describing the client as the single gate.
 
 ## Plan review
 
