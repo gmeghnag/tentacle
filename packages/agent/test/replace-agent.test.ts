@@ -48,6 +48,7 @@ function controllableJobs(): JobController & {
     kill: () => false,
     list: () => [],
     dispose: () => {},
+    onStart: () => () => {},
     onExit(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);

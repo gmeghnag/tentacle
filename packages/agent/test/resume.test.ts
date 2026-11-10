@@ -237,6 +237,7 @@ describe("resume a suspended turn (agent seam)", () => {
       kill: () => false,
       list: () => [],
       dispose: () => {},
+      onStart: () => () => {},
       onExit(listener) {
         listeners.add(listener);
         return () => listeners.delete(listener);

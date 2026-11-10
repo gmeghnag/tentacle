@@ -71,6 +71,8 @@ import {
 import {
   BLOCKING_UPDATE_TYPES,
   type HistoryCut,
+  type JobOutputResult,
+  type JobRow,
   JsonRpcErrorCode,
   type KnownLogEntry,
   type KnownSessionUpdateParams,
@@ -101,6 +103,7 @@ import {
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import type { ModelLink } from "./connection.ts";
+import { jobRows, sameJobs } from "./jobs-view.ts";
 import {
   assertTextOnly,
   contentToText,
@@ -235,6 +238,8 @@ interface Cut {
   readonly queued: QueueState;
   /** The background sub-agents as of the cut: the last `subagents` list emitted. */
   readonly subagents: readonly SubagentRow[];
+  /** The running background SHELL jobs as of the cut: the last `jobs` list emitted. */
+  readonly jobs: readonly JobRow[];
 }
 
 /**
@@ -402,6 +407,8 @@ export class HostedSession {
   private lastQueued: QueueState = EMPTY_QUEUE;
   /** The last `subagents` list emitted (or the initial empty one): what the cut records. */
   private lastSubagents: readonly SubagentRow[] = [];
+  /** The last `jobs` list emitted (or the initial empty one): what the cut records. */
+  private lastJobs: readonly JobRow[] = [];
   /** A coalescing frame is due (`kickSubagents`): one timer at a time. */
   private subagentsKick: ReturnType<typeof setTimeout> | null = null;
   /** Enqueue ids injected into the history (drained) in this incarnation. */
@@ -452,6 +459,7 @@ export class HostedSession {
   private closed = false;
   private readonly jobs: JobController | undefined;
   private readonly unsubscribeExit: (() => void) | undefined;
+  private readonly unsubscribeStart: (() => void) | undefined;
   /**
    * The background sub-agent runtime (controllers + the cap), carried across a
    * settings sync. The DURABLE half is `agentJobs` (the ledger), below.
@@ -581,6 +589,9 @@ export class HostedSession {
       turnId: resume?.turnId ?? null,
       queued: EMPTY_QUEUE,
       subagents: [],
+      // A session is built with an EMPTY registry (a `serve` reload starts with
+      // no jobs), and every later job announces itself through `onStart`.
+      jobs: [],
     };
     // The log's first segment: this incarnation's history at the cut (a
     // reload's after its repair; a resumed turn is open at it).
@@ -620,6 +631,15 @@ export class HostedSession {
     // the agent injects a note for the model. The client renders it like a local
     // job-exit notice; the TUI dedupes by job id against that next-turn event.
     this.unsubscribeExit = jobs?.onExit((job) => {
+      // THE EXIT FIRST, THEN the list (fix round 1, review 3). It used to be the
+      // other way round ("a row must never outlive the death it shows"), but a
+      // client freezes an open drawer the moment its row leaves and takes the
+      // outcome from its exit listener — so with the list first, a transport that
+      // delivered the two frames in separate macrotasks (a pod's exec WebSocket
+      // does) froze a CLEAN exit as `✗ stopped`, and nothing re-read it. Frames
+      // are ordered, so the outcome is recorded before the row goes; a panel row
+      // still cannot outlive its death, because the list that drops it is the
+      // very next frame.
       this.emit({
         type: "background_exit",
         jobId: job.id,
@@ -627,9 +647,13 @@ export class HostedSession {
         status: job.status,
         exitCode: job.exitCode,
       });
+      this.publishJobs();
       // The daemon may wake (re-checked on the macrotask).
       this.kickWake();
     });
+    // A job's START is the only other moment the running set changes, so the
+    // list is published there and nowhere else — never a stream, never a poll.
+    this.unsubscribeStart = jobs?.onStart(() => this.publishJobs());
     // A background sub-agent: the id and the markers go through this session's
     // ledger; its exit rides `background_exit` like a shell job's, and wakes.
     this.agentRuntime = agentRuntime;
@@ -1277,6 +1301,34 @@ export class HostedSession {
   }
 
   /**
+   * Stream the running-jobs list if it changed since the last `jobs` frame
+   * (full state; an unchanged list sends nothing). Called ONLY on a start and
+   * on an exit, so no coalescing timer is needed or wanted. Never throws (a
+   * sink error is reported, as `emit`'s). Idle: the cut then moves to "now",
+   * like `publishSubagents`.
+   */
+  private publishJobs(): void {
+    // A closing session disposes the registry, whose kills fire `onExit`:
+    // those must not frame a session that is going away.
+    if (this.closed) {
+      return;
+    }
+    const rows = jobRows(this.jobs?.list() ?? []);
+    if (sameJobs(rows, this.lastJobs)) {
+      return;
+    }
+    this.lastJobs = rows;
+    try {
+      this.emit({ type: "jobs", jobs: [...rows] });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    if (this.controller === null) {
+      this.recordCut(null);
+    }
+  }
+
+  /**
    * `session/reclaim`: the writer took these returned rows back (they are in
    * its input now). Unknown or already gone → ignored (a retry is a no-op).
    * Synchronous, like `enqueue`; on disk (a capture), then streamed.
@@ -1464,6 +1516,7 @@ export class HostedSession {
       // As of the cut, like the history: later changes are in the replay.
       ...(cursor === undefined ? { queued: cut.queued } : {}),
       ...(cursor === undefined ? { subagents: [...cut.subagents] } : {}),
+      ...(cursor === undefined ? { jobs: [...cut.jobs] } : {}),
     };
   }
 
@@ -1504,6 +1557,7 @@ export class HostedSession {
       turnId,
       queued: this.lastQueued,
       subagents: this.lastSubagents,
+      jobs: this.lastJobs,
     };
     this.ring.evict(this.seq);
     // The committed prefix moved: its changes join the log (pointer compares only).
@@ -1639,6 +1693,59 @@ export class HostedSession {
    */
   killSubagent(agentId: string): { killed: boolean } {
     return { killed: this.agentRuntime?.kill(agentId) ?? false };
+  }
+
+  /**
+   * `session/job_output` (docs/feat/shell-jobs-panel.md): the tail of one
+   * background shell job — a UI's read, never the model's: `JobController.tail`
+   * is cursor-free by construction, so a chatty job's panel read cannot starve
+   * the model's next `shell_output`. Synchronous, lock-free, never throws: a
+   * registry without `tail` answers a typed `found: false` (never a guess).
+   * Sizes are bounded here (capacity); trust is the CLIENT's (`boundJobOutput`):
+   * a pod's bytes are untrusted (§7).
+   */
+  jobOutput(
+    jobId: string,
+    opts?: { readonly lines?: number; readonly maxChars?: number },
+  ): JobOutputResult {
+    const tail = this.jobs?.tail?.(jobId, opts);
+    if (!tail) {
+      return {
+        found: false,
+        jobId,
+        reason: "this session cannot show a job's output here",
+      };
+    }
+    return {
+      found: true,
+      jobId,
+      status: tail.job.status,
+      // Omitted, never null: while running there is no code, and a signal kill
+      // has none either (`status` says `killed`).
+      ...(tail.job.exitCode === null ? {} : { exitCode: tail.job.exitCode }),
+      startedAt: tail.job.startedAt,
+      command: wireLine(tail.job.command, 512),
+      // Owner A (fix round 1): ONE array in ARRIVAL order — stdout and stderr as
+      // the process interleaved them, exactly the stream the model's
+      // `shell_output` reads. `tail` applies ONE `lines` budget to it, so a
+      // stderr-heavy job can no longer push its stdout out of the window (which
+      // is what two per-stream reads then concatenated did). Raw: the client
+      // sanitises.
+      output: [...tail.output],
+      truncated: tail.truncated,
+    };
+  }
+
+  /**
+   * `session/job_kill` (docs/feat/shell-jobs-panel.md): the user stops one
+   * background SHELL job — the same decision the model's `shell_kill` tool
+   * makes (`JobController.kill`). Laptop-originated (the user's `x` then `y`),
+   * and it acts only on THIS daemon's own registry: no laptop effect, no
+   * lasting approval (§7). Synchronous; the exit, its `background_exit` and the
+   * list's next frame all follow the existing path.
+   */
+  jobKill(jobId: string): { killed: boolean } {
+    return { killed: this.jobs?.kill(jobId) ?? false };
   }
 
   /**
@@ -2592,6 +2699,8 @@ export class HostedSession {
       // Children outlive a compaction, a reset of the history and `/clear`
       // (an in-place reset): the list is the live state.
       subagents: this.lastSubagents,
+      // Likewise the shell jobs (`/clear` keeps them).
+      jobs: this.lastJobs,
     };
     // A new log segment: the SAME array was replaced in place, so it is never
     // diffed — the reference copy is reset (F3). Before the emit, like the cut.
@@ -2689,6 +2798,7 @@ export class HostedSession {
     }
     this.attachments.clear();
     this.unsubscribeExit?.();
+    this.unsubscribeStart?.();
     this.jobs?.dispose();
     // Children abort (their signal settles a pending ask); no `end`, no exit
     // frame: at a reopen the `bg` without an `end` gives the lost note.

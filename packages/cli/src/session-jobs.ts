@@ -27,14 +27,22 @@ import type { SessionController } from "@tentacle/tui";
 export class SessionJobsView implements JobController {
   private current: JobController | null = null;
   private unsubscribe: (() => void) | null = null;
+  private unsubscribeStart: (() => void) | null = null;
   private readonly listeners = new Set<(job: BackgroundJob) => void>();
+  private readonly startListeners = new Set<(job: BackgroundJob) => void>();
 
-  /** Make `jobs` the current session's: exits are forwarded from it alone. */
+  /** Make `jobs` the current session's: exits/starts are forwarded from it alone. */
   use(jobs: JobController): void {
     this.unsubscribe?.();
+    this.unsubscribeStart?.();
     this.current = jobs;
     this.unsubscribe = jobs.onExit((job) => {
       for (const listener of [...this.listeners]) {
+        listener(job);
+      }
+    });
+    this.unsubscribeStart = jobs.onStart((job) => {
+      for (const listener of [...this.startListeners]) {
         listener(job);
       }
     });
@@ -46,7 +54,9 @@ export class SessionJobsView implements JobController {
       return;
     }
     this.unsubscribe?.();
+    this.unsubscribeStart?.();
     this.unsubscribe = null;
+    this.unsubscribeStart = null;
     this.current = null;
   }
 
@@ -73,6 +83,13 @@ export class SessionJobsView implements JobController {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
+    };
+  }
+
+  onStart(listener: (job: BackgroundJob) => void): () => void {
+    this.startListeners.add(listener);
+    return () => {
+      this.startListeners.delete(listener);
     };
   }
 

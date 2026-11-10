@@ -11,11 +11,13 @@ import type { BackgroundAgentRow } from "./background-view.ts";
  * the component picks the token, so light/dark stay `theme.ts`'s business.
  * Every string here is measured in CELLS (`cells.ts`), never code points.
  *
- * Shell jobs are painted from the same grammar (owner P6 (a): the daemon feed
- * of running jobs is a follow-up, so `jobs` is empty today).
+ * Shell jobs are painted from the same grammar (docs/feat/shell-jobs-panel.md):
+ * they ride the daemon's `jobs` frame, and their drawer is `jobDrawerView` below.
+ * The id paints as the wire's own `bg-N` (owner Q5 (b): no `sh-N` alias).
  */
 import { cellWidth, truncateCells } from "./cells.ts";
 import { formatDuration, formatTokens } from "./format.ts";
+import { type JobEnd, jobDrawerTail, jobElapsedSeconds, jobEndView } from "./job-drawer.ts";
 
 /** The most rows the dropdown shows before it windows (mockup 05). */
 export const LIST_MAX_ROWS = 5;
@@ -75,11 +77,31 @@ export interface BackgroundDockRow {
   readonly segments: readonly DockSegment[];
 }
 
-/** A shell job as the dock paints it (the daemon's feed is P6's follow-up). */
+/** A shell job as the dock paints it (its feed is the daemon's `jobs` frame). */
 export interface DockJobRow {
   readonly id: string;
   readonly command: string;
   readonly startedAt: number;
+  /** The wire's `status` as sent: `running` for every row the frame carries. */
+  readonly status?: string;
+}
+
+/**
+ * What an OPEN drawer keeps painting after its item leaves the live list: a
+ * child's last row, or a job's. The outcome still comes from the exit record, so
+ * a frozen drawer says `✓ exited (0)` / `✗ stopped` and keeps its command and
+ * clock instead of blanking out the moment the row is gone.
+ */
+export type DockFrozen = BackgroundAgentRow | { readonly kind: "job"; readonly row: DockJobRow };
+
+/** Is a frozen drawer's subject a job? */
+export function frozenJob(frozen: DockFrozen | null): DockJobRow | null {
+  return frozen !== null && "kind" in frozen && frozen.kind === "job" ? frozen.row : null;
+}
+
+/** Is a frozen drawer's subject a child? */
+export function frozenAgent(frozen: DockFrozen | null): BackgroundAgentRow | null {
+  return frozen !== null && !("kind" in frozen) ? frozen : null;
 }
 
 export type DockFocus =
@@ -96,11 +118,18 @@ export type DockFocus =
       readonly kind: "open";
       readonly id: string;
       readonly ended: DockOutcome | null;
-      readonly frozen: BackgroundAgentRow | null;
+      readonly frozen: DockFrozen | null;
     };
 
-/** How a child ended, as its drawer's rule says it. */
-export type DockOutcome = { readonly kind: "finished" } | { readonly kind: "stopped" };
+/**
+ * How a background item ended, as its drawer's rule says it.
+ *
+ * A CHILD has two outcomes (`end_turn` = finished, anything else = stopped). A
+ * SHELL JOB carries the exit record itself (`JobEnd`, owner B, fix round 1): the
+ * `killed`/`stopped` split needs the dock's own memory, and the CODE needs the
+ * daemon's exit, so the record — not the frozen row or the last read — decides.
+ */
+export type DockOutcome = { readonly kind: "finished" } | { readonly kind: "stopped" } | JobEnd;
 
 /** The list as the dock paints it: its rule, its window, its hint. */
 export interface BackgroundListView {
@@ -479,7 +508,9 @@ function drawerMeta(
   if (outcome?.kind === "finished") {
     return "✓ finished · report sent to the agent";
   }
-  if (outcome?.kind === "stopped") {
+  if (outcome !== null) {
+    // `stopped` (a cancel) and a job-only `killed` read the same for a child:
+    // it did not finish.
     return "✗ stopped";
   }
   const seconds = row.startedAt === undefined ? null : Math.floor((now - row.startedAt) / 1000);
@@ -563,6 +594,78 @@ export function drawerView(opts: {
 }
 
 /**
+ * One SHELL JOB opened: its head rule, the `… earlier output` line, and the tail
+ * of its MERGED output (owner Q4 (b)).
+ *
+ * The head's figure is the outcome once it ended (`jobEndView`, owner B), else
+ * the live clock from the daemon's `startedAt`. The body never outgrows
+ * `maxRows` (review 4): the tail is cut to what the terminal can spare.
+ */
+export function jobDrawerView(opts: {
+  readonly row: DockJobRow;
+  /** The MERGED output, already bounded and sanitized by the client. */
+  readonly output: readonly string[] | undefined;
+  /** `true` when the read dropped older output (the daemon's `truncated`). */
+  readonly truncated?: boolean;
+  readonly exitCode?: number | null;
+  readonly outcome: DockOutcome | null;
+  readonly width: number;
+  readonly now: number;
+  /**
+   * The body rows the terminal can spare (review 4, fix round 1). Absent = the
+   * drawer's own default; the caller passes `terminalRows − everything else`, so
+   * the frame never grows past the screen.
+   */
+  readonly maxRows?: number;
+}): DrawerView {
+  const width = Math.max(10, opts.width);
+  const row = opts.row;
+  // Fix round 2: an ENDED job's duration is its total run (`jobElapsedSeconds`
+  // reads the one `endedAt` the App stamped), so a frozen drawer's figure stops
+  // moving; only a RUNNING job measures to `now`.
+  const seconds = jobElapsedSeconds(row.startedAt, opts.outcome, opts.now);
+  // Owner B (fix round 1): the outcome is its own pure rule (`jobEndView`), built
+  // from the EXIT RECORD — never the frozen row's `status` (still `running`) and
+  // never the last read's (issued before the exit, it answers `running` too).
+  const end = opts.outcome === null ? null : jobEndView({ end: opts.outcome, seconds });
+  const meta = end === null ? `running · ${formatDuration(seconds)}` : end.text;
+  const maxRows = opts.maxRows ?? Number.POSITIVE_INFINITY;
+  // The head owns row one; `… earlier output not shown` takes the next, and the
+  // tail takes the rest. Each is dropped, never truncated into a lie, when the
+  // room is not there.
+  const hidden = opts.truncated === true && maxRows >= 2;
+  const tailRoom = Math.max(0, maxRows - 1 - (hidden ? 1 : 0));
+  const lead = cellWidth(row.id) + cellWidth(" · ") + 2; // "─ " + id + " · "
+  const descCols = Math.max(0, width - lead - cellWidth(meta) - 5); // " ─ " + meta + " ─"
+  const description = truncateCells(row.command, descCols);
+  // The head is exactly `width` cells: "─ " + id + " · " + desc + " " + fill +
+  // " " + meta + " ─" — one rule, never a wrap.
+  const fill = Math.max(0, width - lead - cellWidth(description) - cellWidth(meta) - 4);
+  const head: DockSegment[] = [
+    { text: "─ ", tone: "border" },
+    // The wire's own id (owner Q5 (b): `bg-3` wherever the dock paints a job).
+    { text: row.id, tone: "accentBold" },
+    { text: " · ", tone: "dim" },
+    { text: description, tone: "normal" },
+    { text: " ", tone: "border" },
+    ...(fill > 0 ? [{ text: "─".repeat(fill), tone: "border" as const }] : []),
+    { text: " ", tone: "border" },
+    {
+      text: meta,
+      tone: end === null ? "dim" : end.ok ? "success" : "error",
+    },
+    { text: " ─", tone: "border" },
+  ];
+  return {
+    head,
+    meta,
+    hidden: hidden ? "… earlier output not shown" : "",
+    tail: jobDrawerTail(opts.output, { width, maxLines: tailRoom }),
+    sent: [],
+  };
+}
+
+/**
  * How many rows the dock occupies under the footbar — the list (its rule + its
  * windowed rows) or the drawer (head + `… +k earlier` + tail + sent). The
  * viewport must reserve them (`App.tsx`'s `activeRows`): without it the frame is
@@ -584,12 +687,20 @@ export function dockRows(list: BackgroundListView | null, drawer: DrawerView | n
   );
 }
 
-/** The input's rule title while a child is open (owner P2 (a): the rule says who Enter reaches). */
+/**
+ * The input's rule title while a CHILD is open (owner P2 (a): the rule says who
+ * Enter reaches). A JOB's drawer is read-only and the input stays on the MAIN
+ * agent, so it paints a PLAIN rule — no `→ bg-3` (owner Q1 (a)).
+ */
 export function inputTitle(
   focus: DockFocus,
   row?: { readonly sub?: string },
 ): { readonly target: string; readonly sub: string } | null {
   if (focus.kind !== "open") {
+    return null;
+  }
+  // A job's drawer (frozen or live) names no target: nothing to send it.
+  if (frozenJob(focus.frozen) !== null) {
     return null;
   }
   return {

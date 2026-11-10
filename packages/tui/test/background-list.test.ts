@@ -11,7 +11,10 @@ import {
   backgroundListView,
   dockRows,
   drawerView,
+  frozenAgent,
+  frozenJob,
   inputTitle,
+  jobDrawerView,
   listVisible,
   rowText,
   ruleText,
@@ -288,11 +291,11 @@ describe("T-L3: the asking row, and the header hints per focus", () => {
   test("a shell row: its own glyph and meta, and it always comes after the sub-agents", () => {
     const v = view({
       rows: [row(1)],
-      jobs: [{ id: "sh-3", command: "npm run watch", startedAt: 0 }],
+      jobs: [{ id: "bg-3", command: "npm run watch", startedAt: 0 }],
       now: 300_000,
       width: 100,
     });
-    expect(v.rows.map((r) => r.id)).toEqual(["sa-1", "sh-3"]);
+    expect(v.rows.map((r) => r.id)).toEqual(["sa-1", "bg-3"]);
     expect(v.rows[1]?.glyph).toBe("job");
     expect(v.rows[1]?.meta).toBe("running · 5m 0s");
     expect(rowText(v.rows[1] ?? { segments: [] })).toContain("npm run watch");
@@ -500,14 +503,199 @@ describe("the input title and the list's visibility", () => {
   test("`listVisible`: one row is enough; no rows and no jobs is nothing", () => {
     expect(listVisible([], [])).toBe(false);
     expect(listVisible([row(1)], [])).toBe(true);
-    expect(listVisible([], [{ id: "sh-1", command: "x", startedAt: 0 }])).toBe(true);
+    expect(listVisible([], [{ id: "bg-1", command: "x", startedAt: 0 }])).toBe(true);
   });
 
   test("the count includes the shell jobs (the list says the total)", () => {
     const v = view({
       rows: [row(1), row(2)],
-      jobs: [{ id: "sh-3", command: "watch", startedAt: 0 }],
+      jobs: [{ id: "bg-3", command: "watch", startedAt: 0 }],
     });
     expect(v.count).toBe(3);
+  });
+});
+
+describe("a shell job's drawer (docs/feat/shell-jobs-panel.md)", () => {
+  const job = { id: "bg-3", command: "watch: grep -c '### Turno' conversazione.md", startedAt: 0 };
+
+  test("the head: the wire's id, the cut command, the live clock", () => {
+    const v = jobDrawerView({
+      row: job,
+      output: ["one"],
+      outcome: null,
+      width: 100,
+      now: 250_000,
+    });
+    const head = rowText({ segments: v.head });
+    // Owner Q5 (b): `bg-3`, never an `sh-3` alias.
+    expect(head.startsWith("─ bg-3 · ")).toBe(true);
+    expect(head).toContain("watch: grep -c");
+    expect(head).toContain("running · 4m 10s");
+    expect(v.meta).toBe("running · 4m 10s");
+    // Exactly the width: the head is a rule, never a wrap.
+    expect(cellWidth(head)).toBe(100);
+  });
+
+  test("at 80 columns it still fits the terminal", () => {
+    const v = jobDrawerView({ row: job, output: [], outcome: null, width: 80, now: 0 });
+    expect(cellWidth(rowText({ segments: v.head }))).toBe(80);
+    expect(rowText({ segments: v.head })).toContain("bg-3");
+  });
+
+  test("the outcome replaces the clock, with the total run time (owner B)", () => {
+    const done = jobDrawerView({
+      row: job,
+      output: ["x"],
+      outcome: { kind: "exited", exitCode: 0 },
+      width: 100,
+      now: 250_000,
+    });
+    expect(done.meta).toBe("✓ exited (0) · 4m 10s");
+    expect(rowText({ segments: done.head })).toContain("✓ exited (0) · 4m 10s");
+    // The tone: ok for a clean exit, error for anything else.
+    expect(done.head.find((s) => s.text.startsWith("✓"))?.tone).toBe("success");
+    const stopped = jobDrawerView({
+      row: job,
+      output: ["x"],
+      outcome: { kind: "stopped" },
+      width: 100,
+      now: 250_000,
+    });
+    expect(stopped.meta).toBe("✗ stopped · 4m 10s");
+    expect(stopped.head.find((s) => s.text.startsWith("✗"))?.tone).toBe("error");
+  });
+
+  test("owner B: a failed exit never paints ✓, and the tone says error", () => {
+    const failed = jobDrawerView({
+      row: job,
+      output: ["x"],
+      outcome: { kind: "exited", exitCode: 3 },
+      width: 100,
+      now: 250_000,
+    });
+    expect(failed.meta).toBe("✗ exited (3) · 4m 10s");
+    expect(failed.head.find((s) => s.text.startsWith("✗"))?.tone).toBe("error");
+    const killed = jobDrawerView({
+      row: job,
+      output: ["x"],
+      outcome: { kind: "killed" },
+      width: 100,
+      now: 250_000,
+    });
+    expect(killed.meta).toBe("✗ killed · 4m 10s");
+    expect(killed.head.some((s) => s.text.includes("✓"))).toBe(false);
+  });
+
+  test("fix round 2: an ENDED drawer's duration is the job's total run, not a live clock", () => {
+    // The exit record carries the ONE instant the run ended (`endedAt`, stamped in
+    // the App's exit handler). Two frames minutes apart therefore say the same
+    // thing: `now` is not the clock of a finished job.
+    const ended = { kind: "exited", exitCode: 2, endedAt: 65_000 } as const;
+    const at = (now: number): string =>
+      jobDrawerView({ row: job, output: ["x"], outcome: ended, width: 100, now }).meta;
+    expect(at(70_000)).toBe("✗ exited (2) · 1m 5s");
+    // 3.2 s later — the review's own repro — and then a whole minute later.
+    expect(at(73_200)).toBe("✗ exited (2) · 1m 5s");
+    expect(at(125_000)).toBe("✗ exited (2) · 1m 5s");
+    // While it RUNS there is no end to measure to: the clock still ticks.
+    const running = (now: number): string =>
+      jobDrawerView({ row: job, output: ["x"], outcome: null, width: 100, now }).meta;
+    expect(running(70_000)).toBe("running · 1m 10s");
+    expect(running(73_200)).toBe("running · 1m 13s");
+  });
+
+  test("review 4: `maxRows` bounds the drawer's total height", () => {
+    const output = Array.from({ length: 30 }, (_, i) => `line ${i}`);
+    for (const maxRows of [8, 5, 2, 1]) {
+      const v = jobDrawerView({ row: job, output, outcome: null, width: 80, now: 0, maxRows });
+      // The reservation `dockRows` makes never exceeds the room the terminal gave.
+      expect(dockRows(null, v)).toBeLessThanOrEqual(maxRows);
+    }
+    // `truncated`'s `… earlier` row is dropped too when only one row is left.
+    const tight = jobDrawerView({
+      row: job,
+      output,
+      truncated: true,
+      outcome: null,
+      width: 80,
+      now: 0,
+      maxRows: 1,
+    });
+    expect(dockRows(null, tight)).toBe(1);
+    expect(tight.hidden).toBe("");
+  });
+
+  test("a cut read says so, above the tail", () => {
+    const v = jobDrawerView({
+      row: job,
+      output: ["a"],
+      truncated: true,
+      outcome: null,
+      width: 100,
+      now: 0,
+    });
+    expect(v.hidden).toBe("… earlier output not shown");
+  });
+
+  test("M3: a blank line in the tail is ONE space and the body keeps its height", () => {
+    const v = jobDrawerView({
+      row: job,
+      output: ["a", "", "b"],
+      outcome: null,
+      width: 100,
+      now: 0,
+    });
+    expect(v.tail).toEqual(["a", " ", "b"]);
+    // Three painted rows, so `dockRows`' reservation matches them exactly.
+    expect(dockRows(null, v)).toBe(1 + 3);
+  });
+
+  test("M3: no output yet is the one `(no output yet)` row, never a zero-height body", () => {
+    const v = jobDrawerView({ row: job, output: undefined, outcome: null, width: 100, now: 0 });
+    expect(v.tail).toEqual(["(no output yet)"]);
+    expect(dockRows(null, v)).toBe(2);
+  });
+
+  test("a job paints no `you → …` messages (it has no inbox)", () => {
+    const v = jobDrawerView({ row: job, output: ["a"], outcome: null, width: 100, now: 0 });
+    expect(v.sent).toEqual([]);
+  });
+
+  test("`inputTitle` is null for a job: the input stays on the main agent (Q1 (a))", () => {
+    // The frozen shape carries the row; the live one is frozen by `reconcile`
+    // when its row leaves, so the drawer keeps its subject either way.
+    expect(
+      inputTitle({ kind: "open", id: "bg-3", ended: null, frozen: { kind: "job", row: job } }),
+    ).toBeNull();
+    expect(
+      inputTitle({
+        kind: "open",
+        id: "bg-3",
+        ended: { kind: "finished" },
+        frozen: { kind: "job", row: job },
+      }),
+    ).toBeNull();
+    // A child's is unchanged.
+    expect(inputTitle({ kind: "open", id: "sa-1", ended: null, frozen: null })?.target).toBe(
+      "→ sa-1",
+    );
+  });
+
+  test("`dockRows` counts the dropdown's job rows too", () => {
+    const v = view({
+      rows: [row(1)],
+      jobs: [{ id: "bg-3", command: "watch", startedAt: 0 }],
+      now: 0,
+    });
+    expect(dockRows(v, null)).toBe(1 + v.rows.length);
+    expect(v.rows).toHaveLength(2);
+  });
+
+  test("`frozenJob` / `frozenAgent` tell the two shapes apart", () => {
+    expect(frozenJob({ kind: "job", row: job })?.id).toBe("bg-3");
+    expect(frozenAgent({ kind: "job", row: job })).toBeNull();
+    expect(frozenJob(null)).toBeNull();
+    expect(frozenAgent(row(1))?.id).toBe("sa-1");
+    expect(frozenJob(row(1))).toBeNull();
   });
 });

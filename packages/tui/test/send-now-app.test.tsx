@@ -1050,6 +1050,9 @@ class FakeJobs implements JobController {
     return [];
   }
   dispose(): void {}
+  onStart(): () => void {
+    return () => {};
+  }
   onExit(listener: (job: BackgroundJob) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

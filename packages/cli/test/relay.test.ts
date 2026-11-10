@@ -2343,6 +2343,9 @@ describe("the wake on a job exit, no TUI (docs/fix/detached-autowake.md)", () =>
       return [];
     }
     dispose(): void {}
+    onStart(): () => void {
+      return () => {};
+    }
     onExit(listener: (job: BackgroundJob) => void): () => void {
       this.listeners.add(listener);
       return () => this.listeners.delete(listener);
@@ -2773,5 +2776,213 @@ describe("the wake on a job exit, no TUI (docs/fix/detached-autowake.md)", () =>
     expect(owner(dir)?.state).toBe("idle");
     expect(logOf(dir).split("wake refused").length - 1).toBe(1);
     expect(await contents(store)).toContain("woke");
+  });
+});
+
+describe("9d + H1: one writer for the run's job count (docs/feat/shell-jobs-panel.md)", () => {
+  /**
+   * A registry the test drives: `add` fires `onStart` (the daemon's `jobs`
+   * frame), `remove` fires `onExit`. `tail` answers nothing here.
+   */
+  class ShellJobs implements JobController {
+    running: BackgroundJob[] = [];
+    private readonly starts = new Set<(job: BackgroundJob) => void>();
+    private readonly exits = new Set<(job: BackgroundJob) => void>();
+    add(id: string): void {
+      const job: BackgroundJob = {
+        id,
+        command: "watch",
+        startedAt: 0,
+        status: "running",
+        exitCode: null,
+      };
+      this.running = [...this.running, job];
+      for (const l of this.starts) l(job);
+    }
+    remove(id: string): void {
+      const job = this.running.find((j) => j.id === id);
+      this.running = this.running.filter((j) => j.id !== id);
+      if (job) {
+        const dead = { ...job, status: "exited" as const, exitCode: 0 };
+        for (const l of this.exits) l(dead);
+      }
+    }
+    onStart(listener: (job: BackgroundJob) => void): () => void {
+      this.starts.add(listener);
+      return () => this.starts.delete(listener);
+    }
+    onExit(listener: (job: BackgroundJob) => void): () => void {
+      this.exits.add(listener);
+      return () => this.exits.delete(listener);
+    }
+    start(): BackgroundJob {
+      throw new Error("unused");
+    }
+    read(): undefined {
+      return undefined;
+    }
+    kill(id: string): boolean {
+      return this.running.some((j) => j.id === id);
+    }
+    list(): readonly BackgroundJob[] {
+      return this.running;
+    }
+    dispose(): void {}
+  }
+
+  const QUIET = { autoWake: false };
+
+  test("a `jobs` frame drives the run's count, and its end clears it without a poll (9d)", async () => {
+    // RED today: only the 30 s poll can turn the number back to 0 (and with
+    // `jobsPollMs` large here, it never gets the chance).
+    const shellJobs = new ShellJobs();
+    const model = new Scripted([[{ type: "text", delta: "done" }, { type: "done" }]]);
+    const pod = resident(model, { jobs: shellJobs });
+    const { dir, start } = rig({}, { jobsPollMs: 3_600_000 }, QUIET);
+    const exit = start(pod.attach);
+    await waitFor(() => owner(dir)?.state === "idle", "the turn");
+
+    shellJobs.add("bg-1");
+    await waitFor(() => owner(dir)?.detail === "1 background job(s) running", "the job's row");
+    // The job stays listed and the run stays up (no idle exit while it runs).
+    clock.t += 120_000;
+    await tick(10);
+    expect(owner(dir)?.state).toBe("running");
+
+    // The exit frame alone turns it back — no poll, no clock advance to one.
+    shellJobs.remove("bg-1");
+    await waitFor(() => owner(dir)?.state === "idle", "the exit");
+    expect(owner(dir)?.detail).toBeUndefined();
+    expect(await afterGrace(exit)).toBe(0);
+  });
+
+  test("H1: one shell + one child — the poll says 2, the frame says 1, and `ps` never flaps", async () => {
+    const shellJobs = new ShellJobs();
+    const model = new Scripted([[{ type: "text", delta: "done" }, { type: "done" }]]);
+    const pod = resident(model, { jobs: shellJobs });
+    const { dir, start } = rig();
+    // The poll's number is shells + children (the daemon's `session/list`), so
+    // with one child too it reads 2 while the jobs frame reads 1.
+    let polls = 0;
+    // The poll's first answer is 0 (nothing yet), so the run reaches idle; the
+    // shell+child sum (2) is what it reports ONCE the frame is in play.
+    let polled: number | null = 0;
+    const exit = start(
+      reading(
+        pod,
+        async () => null,
+        async () => {
+          polls += 1;
+          return polled;
+        },
+      ),
+    );
+    await waitFor(() => owner(dir)?.state === "idle", "the turn");
+
+    // The frame lands: from now on it OWNS the number.
+    polled = 2;
+    shellJobs.add("bg-1");
+    await waitFor(() => owner(dir)?.detail === "1 background job(s) running", "the frame's count");
+    const pollsAtFrame = polls;
+
+    // Every later tick: the poll would write 2, but it must not land.
+    for (let i = 0; i < 4; i++) {
+      clock.t += 120_000;
+      await tick(10);
+    }
+    expect(polls).toBeGreaterThan(pollsAtFrame);
+    // Never "2 background job(s)" and never the sub-agent line: one writer.
+    expect(owner(dir)?.detail).toBe("1 background job(s) running");
+    expect(owner(dir)?.state).toBe("running");
+
+    // And the frame's own end still clears it (the idle test keeps its meaning).
+    shellJobs.remove("bg-1");
+    await waitFor(() => owner(dir)?.state === "idle", "the frame's end");
+    expect(await afterGrace(exit)).toBe(0);
+  });
+
+  test("H1: an injected poll that returns 5 changes nothing once a frame has been seen", async () => {
+    const shellJobs = new ShellJobs();
+    const model = new Scripted([[{ type: "text", delta: "done" }, { type: "done" }]]);
+    const pod = resident(model, { jobs: shellJobs });
+    const { dir, start } = rig();
+    let answer: number | null = 0;
+    const exit = start(
+      reading(
+        pod,
+        async () => null,
+        async () => answer,
+      ),
+    );
+    await waitFor(() => owner(dir)?.state === "idle", "the turn");
+
+    shellJobs.add("bg-1");
+    await waitFor(() => owner(dir)?.detail === "1 background job(s) running", "the frame");
+    // A hostile/newer poll answer: ignored, the frame's 1 stands.
+    answer = 5;
+    for (let i = 0; i < 3; i++) {
+      clock.t += 120_000;
+      await tick(10);
+    }
+    expect(owner(dir)?.detail).toBe("1 background job(s) running");
+
+    shellJobs.remove("bg-1");
+    await waitFor(() => owner(dir)?.state === "idle", "the frame's end");
+    await afterGrace(exit);
+  });
+
+  test("H1: the `readUse` writer is silenced too once a frame owns the count", async () => {
+    // The SECOND writer (relay.ts's hold path): a fresh read that still claims a
+    // job would put a count back AFTER the frame said zero.
+    const shellJobs = new ShellJobs();
+    const model = new Scripted([[{ type: "text", delta: "done" }, { type: "done" }]]);
+    const pod = resident(model, { jobs: shellJobs });
+    const r = removing();
+    // The POLL says 0 (the frame owns the number); the exit path's fresh read
+    // says 1 (a stale pod view) — the frame's answer must survive both.
+    const exit = r.start(
+      reading(
+        pod,
+        async () => ({ jobs: 1, running: false, others: 0 }),
+        async () => 0,
+      ),
+    );
+    await waitFor(() => owner(r.dir)?.state === "idle", "the turn");
+
+    shellJobs.add("bg-1");
+    await waitFor(() => owner(r.dir)?.detail === "1 background job(s) running", "the frame");
+    shellJobs.remove("bg-1");
+    await waitFor(() => owner(r.dir)?.state === "idle", "the frame's end");
+
+    // The exit path took the hold branch and read `use` = {jobs: 1}: with the
+    // frame owning the number, that write must not land.
+    clock.t += 120_000;
+    await tick(40);
+    expect(owner(r.dir)?.detail ?? "").not.toContain("background job(s) running");
+    r.stopRef.stop?.();
+    await exit;
+  });
+
+  test("an older daemon (no frames): the poll still drives it, exactly as today", async () => {
+    const model = new Scripted([[{ type: "text", delta: "done" }, { type: "done" }]]);
+    const pod = resident(model);
+    const { dir, start } = rig();
+    let jobs = 0;
+    let reads = 0;
+    const exit = start(async (config, deps) => ({
+      ...(await pod.attach(config, deps)),
+      sessionJobs: async () => {
+        reads += 1;
+        return jobs;
+      },
+    }));
+    await waitFor(() => owner(dir)?.state === "idle" && reads > 0, "the first poll");
+    jobs = 1;
+    clock.t += 1000;
+    await waitFor(() => owner(dir)?.detail === "1 background job(s) running", "the poll's count");
+    jobs = 0;
+    clock.t += 1000;
+    await waitFor(() => owner(dir)?.state === "idle", "the poll's end");
+    expect(await afterGrace(exit)).toBe(0);
   });
 });

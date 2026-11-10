@@ -82,6 +82,9 @@ class FakeJobs implements JobController {
     const job: BackgroundJob = { id, command: "x", startedAt: 0, status: "exited", exitCode: 0 };
     for (const l of this.listeners) l(job);
   }
+  onStart(): () => void {
+    return () => {};
+  }
   onExit(listener: (job: BackgroundJob) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

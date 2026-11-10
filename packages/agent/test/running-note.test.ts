@@ -70,6 +70,7 @@ describe("stillRunningNote (T18)", () => {
       kill: () => false,
       list: () => [running],
       dispose: () => {},
+      onStart: () => () => {},
       onExit: () => () => {},
     };
     const agentJobs = new AgentJobs(2);

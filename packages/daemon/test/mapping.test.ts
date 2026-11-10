@@ -293,6 +293,13 @@ describe("toUpdateParams (the session/update frame)", () => {
     // docs/feat/agent-message-two-way.md: a running child's message.
     { type: "subagent_notify", agentId: "sa-1", text: "found X", wake: true },
     { type: "subagent_message", agentId: "sa-1", text: "skip the tests folder" },
+    // docs/feat/shell-jobs-panel.md: the running shell jobs (start/exit only).
+    {
+      type: "jobs",
+      jobs: [
+        { id: "bg-1", command: "watch: grep -c Turno conv.md", startedAt: 1, status: "running" },
+      ],
+    },
   ];
 
   test("covers every known type (keeps the samples honest)", () => {

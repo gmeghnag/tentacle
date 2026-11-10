@@ -27,6 +27,8 @@ import {
   type HooksTrustResult,
   type InitializeParams,
   type InitializeResult,
+  type JobKillParams,
+  type JobOutputParams,
   type LogParams,
   type McpStatusResult,
   Method,
@@ -278,6 +280,16 @@ export class Connection {
       case Method.AgentKill: {
         const { sessionId, agentId } = params as AgentKillParams;
         return this.lookup(sessionId).killSubagent(agentId);
+      }
+      // Likewise synchronous from the registry (AGENTS §7): a UI's read of one
+      // job's tail, and the user's stop of one shell job.
+      case Method.JobOutput: {
+        const { sessionId, jobId, lines, maxChars } = params as JobOutputParams;
+        return this.lookup(sessionId).jobOutput(jobId, { lines, maxChars });
+      }
+      case Method.JobKill: {
+        const { sessionId, jobId } = params as JobKillParams;
+        return this.lookup(sessionId).jobKill(jobId);
       }
       case Method.McpStatus:
         return this.mcpStatus();

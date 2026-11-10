@@ -1,4 +1,4 @@
-import type { DockFocus, DockOutcome } from "./background-list.ts";
+import type { DockFocus, DockFrozen, DockJobRow, DockOutcome } from "./background-list.ts";
 /**
  * The dock's focus state machine and key routing (docs/feat/subagent-panel.md,
  * Design 3). AGENTS §7: EVERY decision lives here — whether DOWN walks into the
@@ -51,10 +51,20 @@ export type DockEffect =
   /** Close the open child: stash its draft, restore the main one. */
   | { readonly kind: "close"; readonly draftOut: string; readonly draftIn: string };
 
+/**
+ * What an id names. The two kinds' ids never collide (`sa-N` vs `bg-N`), and a
+ * job's drawer is read-only, so the KIND — not the row's presence — decides where
+ * a submitted text goes. Pure, and derived from the id alone, so the App keeps
+ * ONE key space and every state key stays the wire id (owner Q5 (b)).
+ */
+export function dockKindOf(id: string): "agent" | "job" {
+  return id.startsWith("bg-") ? "job" : "agent";
+}
+
 export interface DockKeyContext {
   /** Every item's id, in the list's paint order (sub-agents, then jobs). */
   readonly ids: readonly string[];
-  /** Whether Enter can open it (a sub-agent yes, a shell row: P6's follow-up). */
+  /** Whether Enter can open it (a sub-agent yes; a shell job yes too). */
   readonly openable: (id: string) => boolean;
   /**
    * The LIVE input field's text, as it is this keypress — not `drafts`, which
@@ -216,6 +226,11 @@ export function sendTarget(
   if (state.focus.kind !== "open") {
     return { kind: "main" };
   }
+  // A JOB's drawer is read-only and has no inbox: the text goes to the main
+  // agent, exactly where it would go with no drawer open (owner Q1 (a)).
+  if (dockKindOf(state.focus.id) === "job") {
+    return { kind: "main" };
+  }
   if (state.focus.ended !== null) {
     const how = state.focus.ended.kind === "finished" ? "finished" : "was stopped";
     return {
@@ -344,7 +359,7 @@ export function dockKey(
   }
   if (key.return) {
     if (!ctx.openable(selected)) {
-      // A shell row: its output tail is P6's follow-up (not a silent no-op).
+      // Neither a child nor a job: nothing to open (never a silent no-op).
       return none;
     }
     return openChild(state, selected, ctx.draft);
@@ -372,23 +387,27 @@ export function dockKey(
  * to the input, the draft untouched (owner P5 (a): a finished item leaves at
  * once, and the transcript's exit notice is the record).
  *
- * `rows` is this report's list: an OPEN child that left it is frozen on its LAST
- * row (`frozen`), so its drawer keeps painting its tail and counters while Enter
+ * `rows` is this report's list — children AND jobs (each as the shape its drawer
+ * needs): an OPEN item that left it is frozen on its LAST row (`frozen`), so its
+ * drawer keeps painting its tail/command and counters while a child's Enter
  * refuses — the input keeps its target, never re-routed to the main agent.
  */
 export function reconcile(
   state: DockState,
   ids: readonly string[],
   ended: readonly { readonly id: string; readonly outcome: DockOutcome }[],
-  rows: readonly BackgroundAgentRow[] = [],
+  rows: readonly DockFrozen[] = [],
 ): DockState {
-  // An open child first: its drawer freezes with its outcome, and the input KEEPS
+  // An open item first: its drawer freezes with its outcome, and the input KEEPS
   // its target — the draft is never re-routed to the main agent behind the user.
   if (state.focus.kind === "open") {
     const focus = state.focus;
     const mine = ended.find((e) => e.id === focus.id);
-    const live = rows.find((r) => r.id === focus.id);
-    const frozen = focus.frozen ?? live ?? null;
+    const id = focus.id;
+    const live = rows.find((r) =>
+      "kind" in r ? r.kind === "job" && r.row.id === id : r.id === id,
+    );
+    const frozen: DockFrozen | null = focus.frozen ?? live ?? null;
     if (mine === undefined || focus.ended !== null) {
       // No named end: keep the row it had (a report can drop it for a moment).
       return frozen === focus.frozen ? state : { ...state, focus: { ...focus, frozen } };
@@ -458,4 +477,29 @@ export function refusalPlacement(state: DockState, id: string, live: string): "f
 /** `/sessions`, resume, a switch: the dock belongs to a session, so it starts over. */
 export function resetDock(): DockState {
   return INPUT_DOCK;
+}
+
+/**
+ * A LATE exit record for a drawer that already froze (fix round 1, review 3).
+ *
+ * A drawer freezes when its row leaves the list, taking its outcome from the
+ * exit record if one has arrived — else the honest `✗ stopped` fallback. The
+ * daemon now emits the exit BEFORE the list, so normally the record is there;
+ * but a transport may still hand the two frames over in separate macrotasks, or
+ * reorder them, and then the drawer would say `✗ stopped` for a clean exit for
+ * the rest of its life. This is the fix-up: the exit record is the single truth
+ * for how a job ended, so it wins over the fallback whenever it lands.
+ *
+ * Only an OPEN drawer on that id is touched (a closed dock has no outcome to
+ * correct), and a drawer that has not frozen (`ended === null`) is still live —
+ * its own freeze will read the record.
+ */
+export function applyLateOutcome(state: DockState, id: string, outcome: DockOutcome): DockState {
+  if (state.focus.kind !== "open" || state.focus.id !== id) {
+    return state;
+  }
+  if (state.focus.ended === null || state.focus.ended === outcome) {
+    return state;
+  }
+  return { ...state, focus: { ...state.focus, ended: outcome } };
 }

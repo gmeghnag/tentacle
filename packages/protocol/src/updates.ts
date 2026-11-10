@@ -11,6 +11,7 @@ import { ContentBlockSchema } from "./content.ts";
 import { PermissionReplyTextSchema } from "./permission-reply.ts";
 import { PermissionRequestUpdateSchema, PermissionResolvedUpdateSchema } from "./permission.ts";
 import {
+  JobRowSchema,
   MAX_SESSION_TITLE,
   QueuedEntrySchema,
   ReturnedEntrySchema,
@@ -256,6 +257,20 @@ export const SessionSettingsUpdateSchema = z.object({
 });
 
 /**
+ * The session's running background shell jobs changed (a start or an exit):
+ * the FULL list, replacing any earlier one (docs/feat/shell-jobs-panel.md).
+ * Sent ONLY on a start or an exit — never a stream, never a delta; the elapsed
+ * time is the client's, from `startedAt`, and the output is read on demand
+ * through `session/job_output`. Display only: a client that skips it loses
+ * nothing daemon-side (the snapshot's first page carries the list) and the
+ * daemon waits on nobody.
+ */
+export const JobsUpdateSchema = z.object({
+  type: z.literal("jobs"),
+  jobs: z.array(JobRowSchema),
+});
+
+/**
  * The session's background sub-agents changed (started, made progress, ended):
  * the FULL list, replacing any earlier one (docs/feat/subagent-background-ui.md).
  * Every attached client gets it, while idle too: a child runs between turns, so
@@ -320,6 +335,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   SessionTitleUpdateSchema,
   QueuedUpdateSchema,
   SubagentsUpdateSchema,
+  JobsUpdateSchema,
   SubagentNotifySchema,
   SubagentMessageUpdateSchema,
   SessionSettingsUpdateSchema,
@@ -370,6 +386,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   queued: "display",
   // Full state, also in the snapshot's first page; nothing waits on a row.
   subagents: "display",
+  // Full state, sent only on a job's start or exit; nothing waits on it.
+  jobs: "display",
   // A notice; the note itself rides the conversation (nothing hangs).
   subagent_notify: "display",
   // The user's own notice (every client shows it); the parent's note lands at its turn.

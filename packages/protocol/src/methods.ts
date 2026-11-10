@@ -38,6 +38,10 @@ import {
   EnqueueResultSchema,
   InitializeParamsSchema,
   InitializeResultSchema,
+  JobKillParamsSchema,
+  JobKillResultSchema,
+  JobOutputParamsSchema,
+  JobOutputResultSchema,
   OpenParamsSchema,
   OpenResultSchema,
   PromptParamsSchema,
@@ -87,6 +91,10 @@ export const Method = {
   SubagentMessage: "session/subagent_message",
   /** The user stops one (the same decision as the model's `agent_control{action:"kill"}`). */
   AgentKill: "session/agent_kill",
+  /** The user reads a background SHELL job's output tail (docs/feat/shell-jobs-panel.md). */
+  JobOutput: "session/job_output",
+  /** The user stops one (the same decision as the model's `shell_kill` tool). */
+  JobKill: "session/job_kill",
   ModelStream: "model/stream",
   ModelStreamChunked: "model/streamChunked",
   /** Daemon → client: the exact prompt size of a request, counted by the laptop's provider. */
@@ -146,6 +154,8 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     result: SubagentMessageResultSchema,
   },
   [Method.AgentKill]: { params: AgentKillParamsSchema, result: AgentKillResultSchema },
+  [Method.JobOutput]: { params: JobOutputParamsSchema, result: JobOutputResultSchema },
+  [Method.JobKill]: { params: JobKillParamsSchema, result: JobKillResultSchema },
   [Method.ModelStream]: { params: ModelStreamParamsSchema, result: ModelStreamResultSchema },
   [Method.ModelStreamChunked]: {
     params: ModelStreamChunkedParamsSchema,

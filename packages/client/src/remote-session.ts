@@ -12,6 +12,8 @@
 import type { ChatMessage } from "@tentacle/core";
 import {
   DomainErrorCode,
+  type JobOutputResult,
+  type JobRow,
   JsonRpcErrorCode,
   type QueueState,
   type SeedTitle,
@@ -433,6 +435,15 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
+   * The session's running background SHELL jobs as the daemon last reported them
+   * (bounded here). Undefined: no report yet, or an older daemon does not
+   * report them (docs/feat/shell-jobs-panel.md).
+   */
+  get jobs(): readonly JobRow[] | undefined {
+    return this.id ? this.client.jobsOf(this.id) : undefined;
+  }
+
+  /**
    * Subscribe to this session's queue as the daemon reports it (every
    * writer's rows, live or a resync's); the current state, if any, is given
    * at once. Returns an unsubscribe (docs/feat/tui-foreign-turns.md C7).
@@ -465,6 +476,28 @@ export class RemoteSession implements SessionStreamListener {
     const now = this.subagents;
     if (now) {
       listener(now);
+    }
+    return unsubscribe;
+  }
+
+  /**
+   * Subscribe to this session's running background SHELL jobs as the daemon
+   * reports them (bounded and sanitized by the client); the current list, if
+   * any, is given at once. A job runs between turns, so this fires while idle.
+   * The notice carries the daemon's own running count beside the rows (H1).
+   * Returns an unsubscribe (docs/feat/shell-jobs-panel.md).
+   */
+  onJobs(listener: (report: { rows: readonly JobRow[]; count: number }) => void): () => void {
+    const unsubscribe = this.client.onSessionJobs((notice) => {
+      if (notice.sessionId === this.id) {
+        listener({ rows: notice.rows, count: notice.count });
+      }
+    });
+    const now = this.jobs;
+    if (now) {
+      // A list already reported: the count is its length (the daemon caps
+      // nothing, so nothing was cut from it — H1).
+      listener({ rows: now, count: now.length });
     }
     return unsubscribe;
   }
@@ -517,6 +550,30 @@ export class RemoteSession implements SessionStreamListener {
       return Promise.resolve({ killed: false });
     }
     return this.client.killSubagent(this.id, agentId);
+  }
+
+  /**
+   * Read one background SHELL job's output tail (`session/job_output`,
+   * docs/feat/shell-jobs-panel.md). The result is bounded and sanitized by the
+   * client; a refusal (unknown id, an older daemon) is `{found: false, reason}`,
+   * never a throw at the TUI. One merged line array, as the model sees it.
+   */
+  jobOutput(
+    jobId: string,
+    opts?: { readonly lines?: number; readonly maxChars?: number },
+  ): Promise<JobOutputResult> {
+    if (!this.id) {
+      return Promise.resolve({ found: false, jobId, reason: "this session is not open yet" });
+    }
+    return this.client.jobOutput(this.id, jobId, opts);
+  }
+
+  /** Stop one background SHELL job (`session/job_kill`); `{killed: false}` when it was not running. */
+  killJob(jobId: string): Promise<{ killed: boolean }> {
+    if (!this.id) {
+      return Promise.resolve({ killed: false });
+    }
+    return this.client.killJob(this.id, jobId);
   }
 
   /**
@@ -1438,6 +1495,7 @@ export class RemoteSession implements SessionStreamListener {
       case "session_title":
       case "queued":
       case "subagents":
+      case "jobs":
       case "subagent_notify":
       case "subagent_message":
         return;
@@ -1534,6 +1592,7 @@ export class RemoteSession implements SessionStreamListener {
       update.type === "session_title" ||
       update.type === "queued" ||
       update.type === "subagents" ||
+      update.type === "jobs" ||
       update.type === "subagent_notify" ||
       update.type === "subagent_message"
     ) {

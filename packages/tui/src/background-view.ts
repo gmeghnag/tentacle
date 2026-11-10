@@ -52,6 +52,24 @@ export function backgroundNames(rows: readonly BackgroundAgentRow[] | undefined)
 }
 
 /**
+ * Whether two reports name the same shell jobs, in the same order. Same reason as
+ * `sameIds`: the daemon sends the full list on every start/exit, and the TUI reads
+ * only the ids and the rows it paints — an unchanged set must not re-render.
+ */
+export function sameJobIds(
+  a: readonly { readonly id: string }[] | undefined,
+  b: readonly { readonly id: string }[] | undefined,
+): boolean {
+  if (a === undefined || b === undefined) {
+    return a === b;
+  }
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((row, i) => row.id === b[i]?.id);
+}
+
+/**
  * Whether two reports name the same children, in the same order. The daemon
  * sends a full state up to 4×/s and the TUI reads only the count and the ids,
  * so an unchanged set must not re-render the whole `App` (LOW-4). A row's other
