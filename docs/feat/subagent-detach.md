@@ -352,3 +352,63 @@ M1/M2 also confirm the plan's own T15 mutation note (a macrotask trigger fails t
 - The child's tool trail stays unpersisted (6a), and a detached child's open ask still holds the session's single permission lane (accepted in the plan).
 - No `PROTOCOL_VERSION` bump; `protocol.json` regenerated through `bun run schema:export`, nothing else in the wire changed.
 - Nothing committed; `TODO.md` untouched; all scratch in `.tentacle/tmp/subagent-detach/`.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-10*
+
+**Verdict: REQUEST-CHANGES.** One MEDIUM (a §7 invariant), no HIGH. The steering window, the withdrawal and the lifecycle hold. Reviewer context was fresh; the executor was DeepSeek, but the plan was written by the same model as this reviewer, so blind spots in the plan may survive.
+
+### Findings
+
+**M1. A steer lets an already-allowed tool run before its "no longer pending" write is on disk.** `packages/daemon/src/hosted-session.ts:805`
+- **Defect.** `await untilAborted(this.persisted(), settleOn)` now also ends on the withdrawal, for every outcome. The comment above it justifies the early exit only because "an aborted turn never runs the tool". A withdrawal aborts neither the turn nor the child, so an `allow` continues and the tool runs.
+- **Failure scenario** (`serve`, the only path with a persister). The child's ask is allowed. The write that clears its `turn.pending` entry is slow or hung. A steer lands in that window and fires `withdrawn`. The wait ends, the tool runs, and the entry is still on disk. A crash before the write lands reloads "pending", so the turn runs the call again: the tool's side effect happens twice. This breaks §7 "pending on disk ⇒ never started", and the `awaitDecision` doc comment. Narrow: it needs the write window plus a crash. A hung disk widens the window.
+- **Evidence** (`.tentacle/tmp/subagent-detach/allow-vs-withdraw.test.ts`, real `HostedSession` + `Agent`, a fake persister whose `flush` is held, real ask, `allow_once`):
+  ```
+  control ran: []                                     (allowed, disk held, no steer: the tool waits)
+  control ran after disk: [ "needs_ok" ]
+  after steer, disk still not landed, ran: [ "needs_ok" ]
+  ```
+- **Exact fix.** Only a withdrawn ask may skip the wait:
+  `await untilAborted(this.persisted(), outcome.outcome === "cancelled" ? settleOn : signal);`
+  Regression test: the scenario above, red on this tree (the tool has run while `flush` is held), green after the fix, with the control kept.
+
+### Gate
+
+`bun run check`: typecheck clean, `biome check .` clean (813 files), `bun test` **6258 pass · 3 skip · 0 fail** (the three opt-in skips), 6261 tests across 439 files.
+
+### Mutations (run here, reverted, `git status` clean afterwards)
+
+| Mutation | Result |
+|---|---|
+| Remove the `return DISMISSED` branch in `awaitDecision` | **T20 red** (no re-ask). The guard is real: `outcomeToResponse(cancelled)` is a plain `{allowed:false}`, so without it the child reads the withdrawal as a refusal |
+| `subagentRequester`: drop `first.dismissed !== true` (re-ask any answer once moved) | **T14 red**. T21 stays green: its refusal lands before the move, so it never reaches this guard. The guard is pinned, by T14 only |
+
+The executor's M1–M8 were not repeated.
+
+### Premises checked against the code
+
+TRUE, read at the cited code: P3 (`enqueue` synchronous past its checks), P4 (`sendNow` one abort point), P5 (`used()` counts both), P6 (`backgroundAgent` logs and schedules synchronously), P7 (`launched` binds `activeTurnId`), P8 (a result returned during an abort is pushed; both paths), P9, P10, P11 (the requester runs inside `grants.serial`). The Context's Repro was not re-run on `main`; T15 and T31 exercise the same property on the branch.
+
+### Attacks tried
+
+| Attack | Result |
+|---|---|
+| Allowed ask + steer during the persist wait | **M1** |
+| Send-now with the child's ask OPEN (Q13 × Q-C, no test covers the pair; scratch trace) | Holds. Old ask `cancelled`, re-asked as `sa-1` with `turnId` T1; next request `[tool: moved…, user: now please]`; the answer runs the tool; one exit; the note reaches the next request |
+| Send-now with two parallel siblings | Holds. `sa-1` and `sa-2`, both results then the prompt in one commit, two exits |
+| Send-now with a not-yet-started sequential sibling (Q-B) | As decided: the started child moves, the other is answered `cancelled` (it never started) |
+| Withdrawal read as a decision or a grant | None found. `DISMISSED` only when `withdraw` is aborted, which happens only after `agentId` is set; `grants.remember` needs `allowed` with `scope: "session"`, from a human's answer to the re-ask |
+| Single broker / pod | Holds. `withdraw` is consumed in `awaitDecision`, absent from the protocol schema; the re-ask is an ordinary `permission_request` through the same `setRequester` path, answered on the laptop |
+| Move racing the child's end, a throwing `move`, unhandled rejections | Holds. `agentId` decides; `settled` never rejects and `running` has a handler; `drive` is caught; `changed()` guards its listeners; a move runs in its own `try` |
+| Peer serialization | No lock or await added to a handler; the trigger is synchronous in both |
+| Full cap, `/clear`, close, restart, `agent_kill`, Esc on a later turn | Read in `adopt`/`drive`/`dispose` and covered by T18, T22–T25; nothing found |
+
+### Drifts
+
+D1 correct: `finishCall` applies the transforms, the code matches the plan's line, and T12b pins it. D5 acceptable: it adds the one expected key and still pins the exact attribution. D2, D3, D4, D6 are harmless. D7: T21 is a valid end-to-end check that a settled refusal gets no second ask, but it does not reach the re-ask guard (see Mutations).
+
+### How the executor behaved
+
+The reported gate matches this run, and the D1 trap and the equivalent mutant were disclosed honestly. M1 is the one place where a line changed semantics that the plan had prescribed ("a hung disk must not trap the re-ask") without checking the `allow` branch of the same `await`: the flaw is in the plan's Design 3 as well as in the code.
