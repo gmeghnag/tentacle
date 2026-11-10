@@ -1189,6 +1189,17 @@ export class HostedSession {
    * stretch that changes it — synchronous, never awaited: it runs inside the
    * steering window. Never throws (a sink error is reported, as `emit`'s).
    */
+  /**
+   * The model id the session's MAIN agent runs on right now, when this daemon can
+   * know it: a child's row shows its own model only when it differs, so the
+   * comparison must read the CURRENT agent, not the one the child started under
+   * (docs/feat/subagent-panel.md, Review round 3 M2). `undefined` over the pod
+   * model tunnel — the laptop's model id stays there (AGENTS §7).
+   */
+  private mainModelId(): string | undefined {
+    return this.session.currentAgent().mainModelId;
+  }
+
   private publishQueue(): void {
     const state = this.queueState();
     if (sameState(state, this.lastQueued)) {
@@ -1212,7 +1223,7 @@ export class HostedSession {
     if (this.closed) {
       return;
     }
-    const rows = subagentRows(this.agentRuntime?.rows() ?? []);
+    const rows = subagentRows(this.agentRuntime?.rows() ?? [], this.mainModelId());
     const structural =
       rows.length !== this.lastSubagents.length ||
       rows.some((row, i) => row.id !== this.lastSubagents[i]?.id);
@@ -1246,7 +1257,9 @@ export class HostedSession {
    * as `emit`'s). Idle: the cut then moves to "now", so the ring's pin follows
    * the frame instead of holding a whole burst until the next commit.
    */
-  private publishSubagents(rows = subagentRows(this.agentRuntime?.rows() ?? [])): void {
+  private publishSubagents(
+    rows = subagentRows(this.agentRuntime?.rows() ?? [], this.mainModelId()),
+  ): void {
     if (sameRows(rows, this.lastSubagents)) {
       return;
     }
@@ -2008,6 +2021,10 @@ export class HostedSession {
     this.settingsReport = state.settingsReport;
     this.persist();
     this.emit({ type: "session_settings", settings: state.settingsReport, id: state.id });
+    // The main model may just have changed, and a running child's `model` label
+    // is decided AGAINST it (`subagentRows`, Review round 3 M2): the list is
+    // republished now, not at the child's next progress event.
+    this.publishSubagents();
   }
 
   /**

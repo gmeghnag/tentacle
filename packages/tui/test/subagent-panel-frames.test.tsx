@@ -11,6 +11,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
 import { resetThemeForTest, setThemeMode } from "../src/theme.ts";
+import { renderAt } from "./real-term.tsx";
 import { BACKGROUND_ROW, type DockTestRow } from "./subagent-row.ts";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
@@ -148,19 +149,23 @@ function fake(steps: {
   };
 }
 
-async function mount(steps: Parameters<typeof fake>[0], columns = 100) {
+/**
+ * Mount the real `App` in a terminal of `columns` × `rows` — through
+ * `renderAt`, so the FRAME is what such a terminal paints (Review round 3 M3:
+ * `ink-testing-library` fixes `columns` at 100 whatever prop it is given).
+ */
+async function mount(
+  steps: Parameters<typeof fake>[0],
+  columns = 100,
+  rows = 24,
+): Promise<{ app: ReturnType<typeof renderAt>; api: FakeSteps; frame: () => string }> {
   const { session, api, jobs } = fake(steps);
-  const app = render(
-    <App
-      createSession={() => session}
-      model="qwen3-27b"
-      cwd="/tmp/work"
-      jobs={jobs as never}
-      columns={columns}
-    />,
+  const app = renderAt(
+    <App createSession={() => session} model="qwen3-27b" cwd="/tmp/work" jobs={jobs as never} />,
+    { columns, rows },
   );
   await delay(40);
-  return { app, api, frame: () => stripAnsi(app.lastFrame() ?? "") };
+  return { app, api, frame: app.frame };
 }
 describe("F1 (design B): at rest there is NO list — only the pill (mockup b · 1)", () => {
   test("a titled rule, then one row per child with its glyph, id, type and counters", async () => {
@@ -204,6 +209,56 @@ describe("F2 (design B): DOWN focuses the PILL, not the list (mockup b · 2)", (
     // Nothing was sent anywhere by merely moving the focus.
     expect(api.messages).toHaveLength(0);
     expect(api.prompts).toHaveLength(0);
+    app.unmount();
+  });
+});
+
+describe("F-M1 (design B): the status bar NEVER loses `auto-accept` while the dock is open", () => {
+  const lastLine = (frame: string): string =>
+    frame
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .at(-1) ?? "";
+
+  test("the drawer open: the last line still carries `auto-accept`", async () => {
+    const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] });
+    await openDropdown(app);
+    app.stdin.write(ENTER);
+    await delay(40);
+    const f = frame();
+    // The dock is really open (the target rule + the drawer's head), and Enter's
+    // meaning is on that rule — never in the status bar, where it displaced
+    // `auto-accept on` (the owner's rule, round 3 M1).
+    expect(f).toContain("→ sa-1");
+    expect(f).toContain("enter sends");
+    expect(lastLine(f)).toContain("auto-accept");
+    expect(f).not.toContain("enter sends to sa-1");
+    app.unmount();
+  });
+});
+
+describe("F-H1 (design B): typing on the focused pill returns the focus, so Enter SENDS", () => {
+  test("DOWN → type → Enter prompts the MAIN agent; the dropdown never opens", async () => {
+    const { app, api, frame } = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] });
+    // The owner's most common slip: a DOWN with an empty draft, then typing.
+    app.stdin.write(DOWN);
+    await delay(30);
+    expect(frame()).toContain("2 agents ⏎");
+    app.stdin.write("hello");
+    await delay(40);
+    // The text went into the input AND the pill lost its focus (no `⏎`).
+    const f = frame();
+    expect(f).toContain("hello");
+    expect(f).toContain("2 agents ↓");
+    expect(f).not.toContain("2 agents ⏎");
+    expect(f).not.toContain("background ·");
+    // Enter is therefore the INPUT's: it sends to the main agent.
+    app.stdin.write(ENTER);
+    await delay(60);
+    expect(api.prompts).toEqual(["hello"]);
+    expect(api.messages).toHaveLength(0);
+    // …and it did not open the dropdown instead.
+    expect(frame()).not.toContain("background · 2");
     app.unmount();
   });
 });
@@ -287,8 +342,11 @@ describe("F6 (design B): the open child ends — Enter is refused, no call", () 
     const f = frame();
     expect(f).toContain("✓ finished");
     // The input KEEPS its target: never a silent re-route to the main agent.
-    expect(f).toContain("→ sa-1");
-    expect(f).toContain("enter does nothing");
+    // Its RULE is the one place that says what Enter does (`round 3 M1`: the
+    // status bar keeps `auto-accept`), and it no longer offers `enter sends`.
+    const rule = f.split("\n").find((l) => l.includes("→ sa-1")) ?? "";
+    expect(rule).toContain("esc back");
+    expect(rule).not.toContain("enter sends");
     app.stdin.write(ENTER);
     await delay(50);
     // The refused send reaches NOBODY: not the dead child, and not the main
@@ -475,42 +533,44 @@ describe("F11: a late refusal never lands in the main input (Review H2)", () => 
 });
 
 describe("F12: the dock's rows are reserved in the viewport (Review H3)", () => {
-  // `ink-testing-library` reports no `rows`, so the App uses its 24-row default
-  // (`stdout.rows ?? 24`) — the reviewer's case, and a real 24-row terminal's.
+  // A REAL 24-row terminal, and its real width (`renderAt`, round 3 M3): the
+  // height is a function of the width, because a row that wraps costs a line.
   const ROWS = 24;
   const lines = (frame: string): number => frame.split("\n").length;
 
-  test("one child in the dropdown: the whole frame fits in 24 rows", async () => {
-    const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1] });
-    await openDropdown(app);
-    const f = frame();
-    expect(f).toContain("background · 1");
-    expect(lines(f)).toBeLessThanOrEqual(ROWS);
-    app.unmount();
-  });
+  for (const columns of [80, 190]) {
+    test(`${columns}×24: one child in the dropdown — the whole frame fits`, async () => {
+      const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1] }, columns, ROWS);
+      await openDropdown(app);
+      const f = frame();
+      expect(f).toContain("background · 1");
+      expect(lines(f)).toBeLessThanOrEqual(ROWS);
+      app.unmount();
+    });
 
-  test("the drawer open: the whole frame fits in 24 rows", async () => {
-    const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1] });
-    await openDropdown(app);
-    app.stdin.write(ENTER);
-    await delay(40);
-    const f = frame();
-    expect(f).toContain("→ sa-1");
-    expect(lines(f)).toBeLessThanOrEqual(ROWS);
-    app.unmount();
-  });
+    test(`${columns}×24: the drawer open — the whole frame fits`, async () => {
+      const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1] }, columns, ROWS);
+      await openDropdown(app);
+      app.stdin.write(ENTER);
+      await delay(40);
+      const f = frame();
+      expect(f).toContain("→ sa-1");
+      expect(lines(f)).toBeLessThanOrEqual(ROWS);
+      app.unmount();
+    });
 
-  test("at rest the pill costs NO rows: the frame is what it was before this task", async () => {
-    const idle = await mount({ rows: [BACKGROUND_ROW.sa1] });
-    const idleLines = lines(idle.frame());
-    idle.app.unmount();
-    const none = await mount({ rows: [] });
-    const noneLines = lines(none.frame());
-    none.app.unmount();
-    // The owner's rule (design B): idle = no extra rows at all.
-    expect(idleLines).toBe(noneLines);
-    expect(idleLines).toBeLessThanOrEqual(ROWS);
-  });
+    test(`${columns}×24: at rest the pill costs NO rows`, async () => {
+      const idle = await mount({ rows: [BACKGROUND_ROW.sa1] }, columns, ROWS);
+      const idleLines = lines(idle.frame());
+      idle.app.unmount();
+      const none = await mount({ rows: [] }, columns, ROWS);
+      const noneLines = lines(none.frame());
+      none.app.unmount();
+      // The owner's rule (design B): idle = no extra rows at all.
+      expect(idleLines).toBe(noneLines);
+      expect(idleLines).toBeLessThanOrEqual(ROWS);
+    });
+  }
 });
 
 describe("F13 (design B): a child waiting on the user turns the PILL warning (Review M1)", () => {
@@ -553,12 +613,12 @@ describe("F13 (design B): a child waiting on the user turns the PILL warning (Re
 describe("the dock paints the same text in light and dark (theme tokens only)", () => {
   test("every SGR code the dock emits comes from the palette, so both modes agree", async () => {
     const dark = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] });
-    const darkFrame = dark.app.lastFrame() ?? "";
+    const darkFrame = dark.app.lastFrame();
     dark.app.unmount();
     setThemeMode("light");
     try {
       const light = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] });
-      const lightFrame = light.app.lastFrame() ?? "";
+      const lightFrame = light.app.lastFrame();
       light.app.unmount();
       // The plain text is identical: the mode changes colour, never layout.
       expect(stripAnsi(lightFrame)).toBe(stripAnsi(darkFrame));
@@ -645,18 +705,26 @@ describe("F14 (design B): SGR clicks on the pill and on a dropdown row", () => {
  * The frame at the two widths the visual truth is drawn at (`mockups/v3/b.html`:
  * every state at 190 and at 80 columns). A row that is wider than the terminal
  * wraps and shifts everything above it — the one failure this suite must catch.
+ *
+ * The terminal is the REAL size (`renderAt`, Review round 3 M3): Ink's own wrap
+ * is then at 190 cells too, so a rule split into 100 + 90 cells (what
+ * `ink-testing-library`'s fixed 100 columns showed while a test passed
+ * `columns={190}`) fails here.
  */
-describe("F15 (design B): every state fits 190 and 80 columns", () => {
+describe("F15 (design B): every state fits 190 and 80 columns at a REAL terminal size", () => {
+  const ROWS = 24;
   const at = async (
     columns: number,
     act: (app: Awaited<ReturnType<typeof mount>>) => Promise<void>,
   ) => {
-    const mounted = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] }, columns);
+    const mounted = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] }, columns, ROWS);
     await act(mounted);
     const lines = mounted.frame().split("\n");
     for (const line of lines) {
       expect([...line].length).toBeLessThanOrEqual(columns);
     }
+    // …and the frame is no taller than the terminal: nothing is pushed off it.
+    expect(lines.length).toBeLessThanOrEqual(ROWS);
     mounted.app.unmount();
     return lines;
   };
@@ -709,14 +777,14 @@ describe("F15 (design B): every state fits 190 and 80 columns", () => {
  * leave its labels floating (the owner's "gap between `background · 2` and the
  * hints"). The pure-side counterpart is `background-list.test.ts`'s T-L0.
  */
-describe("F16 (step 0): the dropdown's rule is one whole line at ~190 columns", () => {
+describe("F16 (step 0): the dropdown's rule is one whole line at 190 REAL columns", () => {
   test("it starts and ends in the rule, and holds nothing but single spaces", async () => {
-    const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] }, 190);
+    // 190 × 24 through `renderAt`: the harness itself is at 190, so a rule that
+    // the terminal wraps (100 + 90) cannot pass as one line (Review round 3 M3).
+    const { app, frame } = await mount({ rows: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2] }, 190, 24);
     await openDropdown(app);
-    const rule =
-      frame()
-        .split("\n")
-        .find((l) => l.includes("background · 2")) ?? "";
+    const lines = frame().split("\n");
+    const rule = lines.find((l) => l.includes("background · 2")) ?? "";
     expect([...rule].length).toBe(190);
     expect(rule.startsWith("─ background · 2 ─")).toBe(true);
     expect(rule.endsWith("esc back ─")).toBe(true);
@@ -724,6 +792,12 @@ describe("F16 (step 0): the dropdown's rule is one whole line at ~190 columns", 
     expect(rule).not.toMatch(/─ +─/);
     // The hint is where the fill ends — not a second label row under the bar.
     expect(rule.indexOf("enter open")).toBeGreaterThan(rule.indexOf("background"));
+    // Every rule line is a WHOLE 190-cell line — never a 100-cell piece plus a
+    // 90-cell remainder (what a 100-column harness showed, round 3 M3).
+    for (const line of lines.filter((l) => /^─+$/.test(l))) {
+      expect([...line].length).toBe(190);
+    }
+    expect(lines.length).toBeLessThanOrEqual(24);
     app.unmount();
   });
 });

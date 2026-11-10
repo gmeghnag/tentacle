@@ -3126,10 +3126,15 @@ export function App({
         // `field`, so `drafts` is empty on the first open/close (Review H1).
         draft: field.value,
       });
+      // The STATE is applied for every verdict, `pass` included: a printable key
+      // on the pill both types into the input AND returns the focus to it (owner
+      // P3 (a)). Applying it only for a non-`pass` verdict left the pill focused,
+      // so the next Enter opened the dropdown and the message never went out
+      // (Review round 3, H1).
+      if (step.state !== dockRef.current) {
+        setDock(step.state);
+      }
       if (step.effect.kind !== "pass") {
-        if (step.state !== dockRef.current) {
-          setDock(step.state);
-        }
         if (step.effect.kind === "stop") {
           killChild(step.effect.id);
         } else if (step.effect.kind === "open" || step.effect.kind === "close") {
@@ -3448,13 +3453,9 @@ export function App({
   // --- the dock's other view-models (pure; the components only paint them) --
   // `openTitle`: the input's rule says `→ sa-N` while a child is open (P2 (a)).
   const openTitle = dock.focus.kind === "open" ? inputTitle(dock.focus) : null;
-  // The status bar's right slot while a child is open: what Enter does there.
-  const statusHint =
-    dock.focus.kind === "open"
-      ? dock.focus.ended === null
-        ? `enter sends to ${dock.focus.id} `
-        : `${dock.focus.id} finished: enter does nothing · esc back `
-      : null;
+  // What Enter does while a child is open lives on the INPUT RULE
+  // (`→ sa-1 · enter sends · esc back`), never in the status bar: the bar's
+  // right slot is `auto-accept`'s, and a hint there replaced it (round 3 M1).
 
   return (
     <Box flexDirection="column">
@@ -3612,7 +3613,6 @@ export function App({
             pill: range,
           };
         }}
-        hint={statusHint}
         link={linkView}
       />
     </Box>

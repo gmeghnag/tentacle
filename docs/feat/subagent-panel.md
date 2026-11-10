@@ -1388,3 +1388,179 @@ it found the real cause.
 - The "190 columns" frames rest on a harness that cannot render 190 columns (M3).
 
 **REQUEST-CHANGES** — H1, M1, M2, M3.
+
+## Execution — fix round 2
+
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+Scope: exactly the four findings of Review round 3 (H1, M1, M2, M3). Nothing else was touched — no
+`PROTOCOL_VERSION` bump, no protocol schema change (`bun run schema:export` ran; `protocol.json` is
+byte-identical), `TODO.md` untouched, no commit.
+
+Both reviewer repros were re-run FIRST and reproduced the bugs on the branch head:
+`.tentacle/tmp/subagent-panel/review/repro3.ts` → `P1 typed shows hello: true | pill still focused
+(⏎): true | after Enter prompts: [] | dropdown opened: true`; `repro190.ts 190` → the drawer state's
+last line read `enter sends to sa-1  ·  2 agents ▴`, with `auto-accept` gone.
+
+### H1 — the pill kept focus after a printable key, so Enter opened the dropdown
+
+**Changed:** `packages/tui/src/App.tsx:3128-3146` — the `dockKey` result's `state` is now applied
+BEFORE the `pass` check, for every verdict:
+
+```ts
+if (step.state !== dockRef.current) {
+  setDock(step.state);
+}
+if (step.effect.kind !== "pass") { …return; }
+```
+
+`background-focus.ts` is unchanged: it already returned the right state (`:296`,
+`{ state: {…focus: "input"}, effect: "pass" }`); the App threw it away (round 1's pattern again).
+
+**Red → green** (new frame test `F-H1` in `packages/tui/test/subagent-panel-frames.test.tsx`, on the
+real `App`: DOWN → type `hello` → Enter):
+
+```
+expect(f).toContain("2 agents ↓")
+Expected to contain: "2 agents ↓"
+Received: "… ❯ hello … enter open · esc back    ⏵⏵ auto-accept off (shift+tab)  ·  2 agents ⏎"
+(fail) F-H1 … DOWN → type → Enter prompts the MAIN agent; the dropdown never opens
+```
+after the fix: `28 pass, 0 fail` for the file; the same test now also asserts
+`api.prompts === ["hello"]`, `api.messages` empty, and no `background · 2`.
+
+**Mutation** (move the state application back inside `if (effect.kind !== "pass")`): F-H1 red again,
+`Expected to contain: "2 agents ↓"` / Received `… 2 agents ⏎`, then restored by the exact inverse
+edit. The reviewer's `repro3.ts` now prints
+`P1 typed shows hello: true | pill still focused (⏎): false | after Enter prompts: ["hello"] |
+dropdown opened: false`.
+
+### M1 — `enter sends to sa-1` displaced `auto-accept` in the status bar
+
+**Changed:** the hint is gone, not given a second slot (the plan line in "The pill" says the bar's
+right side is `auto-accept`'s, and the input rule already says `→ sa-1 · enter sends · esc back`):
+- `packages/tui/src/App.tsx:3455-3459` — `statusHint` deleted (with the reason kept as a comment).
+- `packages/tui/src/App.tsx:3616` — `hint={statusHint}` no longer passed.
+- `packages/tui/src/components/StatusBar.tsx:70-108,110` — the `hint` prop deleted, so the right slot
+  is unconditionally `" ⏵⏵ auto-accept on/off (shift+tab) "`; its comment now states the rule rather
+  than offering the override.
+
+**Red → green** (new frame test `F-M1`: the drawer open, the last line must still carry
+`auto-accept`):
+
+```
+expect(lastLine(f)).toContain("auto-accept")
+Expected to contain: "auto-accept"
+Received: "/tmp/work · ctx –/128k                  enter sends to sa-1  ·  2 agents ▴"
+(fail) F-M1 … the drawer open: the last line still carries `auto-accept`
+```
+F6 pinned the deleted hint text (`enter does nothing`) as its proof that a finished target refuses
+the send; that property moved to the place that now holds it — the input rule, which must still say
+`esc back` and must NOT say `enter sends` (`packages/tui/test/subagent-panel-frames.test.tsx:338-343`).
+
+**Mutation** (`StatusBar`'s `rightHint` forced to `" enter sends to sa-1 "` for any pill): F-M1 red,
+same Received line, restored by the exact inverse edit. The reviewer's `repro190.ts 190` drawer state
+now ends with `⏵⏵ auto-accept off (shift+tab)  ·  2 agents ▴`.
+
+### M2 — the sub-agent's `model` label was frozen at child start
+
+**Root cause.** The "differs from the main model" verdict was taken in the resolver
+(`cli/src/model-provider.ts`), which runs once, at the pick — so the name was decided against
+`config.model` at spawn time and never again. `serve`'s `reusable()` keeps the same `AgentJobs`, so a
+running child kept its start-time verdict forever.
+
+**Changed (the id is daemon-side; the label is decided on every publish):**
+- `core/src/tool.ts:88-97` — `subagent_start` may carry `modelId` (documented as daemon-side only).
+- `agent/src/subagent.ts:324-333` — the pick's `modelId` rides the start event next to `model`.
+- `agent/src/agent.ts` — the nested `subagent_start` event carries `modelId` (`agent.ts:326-339`), and
+  `AgentConfig.modelId` + `get mainModelId()` (`:421-430`, `:717-724`) expose the id the MAIN provider
+  was built for.
+- `core/src/agent-jobs.ts` — `AgentJobLive.modelId` / `AgentJobRow.modelId` (`:126-178`), folded in
+  `foldAgentProgress` (`:181-197`; the ID alone is never a visible change) and emitted by `rows()`
+  (`:283`).
+- `cli/src/wiring.ts:610-618` — `buildAgent` passes `modelId: config.model` when it built the main
+  provider itself (`options.modelOverride === undefined`). A pod's main model is a tunnel to the
+  laptop's, so a **tunnelled** agent passes nothing: a pod never learns the laptop's model id (§7).
+- `cli/src/model-provider.ts:96-118` — the resolver now reports `name` AND `modelId` as facts and no
+  longer decides the label (it cannot: it runs only at spawn).
+- `daemon/src/subagents-view.ts:16-73` — `subagentRows(rows, mainModelId)` decides the label per
+  publish: `undefined` unless the child's resolved id differs from the main model's id right now;
+  with no main id to compare against (a pod tunnel), the pick's NAME stands. Still a `models` NAME on
+  the wire, bounded to 64 by `wireLine`; `modelId` never reaches a `SubagentRow`.
+- `daemon/src/hosted-session.ts:1193-1202` — `mainModelId()` reads the CURRENT agent
+  (`Session.currentAgent()`, new at `agent/src/session.ts:101-108`); `kickSubagents`/`publishSubagents`
+  pass it (`:1226`, `:1261`); `swapAgent` republishes the list right after `session_settings`
+  (`:2026-2027`), which is what a `/model` (a settings sync) rides.
+
+**Red → green.** Three tests, one per layer of the claim:
+- `daemon/test/subagent-background-host.test.ts` — the REVIEWER'S SCENARIO end to end: a live child
+  (never finishing) whose start names `qwen3-8` / `small`, then two real
+  `SessionHost.updateSettings` swaps that rebuild the main agent on `small` and back. The `subagents`
+  frames read `qwen3-8` → `-` → `qwen3-8`. Red on the unfixed code (`Received: "-"`, then, with the
+  republish removed, `Expected: "-" / Received: "qwen3-8"`), no new resolver built anywhere.
+- `daemon/test/subagent-progress.test.ts` — the projection's own unit: same → absent, different →
+  name, back → name again, no main id → the pick's name, and `modelId` never on the row.
+- `cli/test/models-providers.test.ts` — the resolver's two former tests were rewritten (they pinned
+  the removed frozen verdict): it now reports `name`+`modelId` as facts, and its answer does not
+  depend on the main model — which is the point.
+
+**Mutations** (each restored by the exact inverse): (a) `shownModel`'s comparison disabled
+(`if (true) return row.model`) → the integration test red, `Expected: "-" / Received: "qwen3-8"`;
+(b) the republish in `swapAgent` removed → the same test red, same two lines.
+
+### M3 — the "190-column" frame tests rendered in a 100-column terminal
+
+**Changed:** new helper `packages/tui/test/real-term.tsx` — `renderAt(tree, {columns, rows})` renders
+through Ink with a `stdout` that reports the test's real `columns`/`rows` (the reviewer's
+`repro190.ts` shape, plus a `resize`), and returns the plain frame. `subagent-panel-frames.test.tsx`'s
+`mount(steps, columns, rows)` now goes through it and passes **no** `columns` prop: the App's size
+comes from the stream, as in production. F15 (both widths, now also asserting the frame is ≤ 24 rows),
+F16 (the rule is one whole 190-cell line — every `─`-only line must be 190, which is exactly what the
+100-column harness failed) and F12's height checks (80×24 and 190×24: dropdown, drawer, and the
+"rest costs no rows" case) run on it.
+
+**Red → green** (the property, not a compile error): with `mount` temporarily passing
+`columns={columns}` to the App while the harness stays at 100 columns — the old situation exactly —
+F16 fails and the other assertions pass:
+
+```
+for (const line of lines.filter((l) => /^─+$/.test(l))) expect([...line].length).toBe(190)
+Expected: 190   Received: 100
+(fail) F16 (step 0): the dropdown's rule is one whole line at 190 REAL columns
+```
+With the real harness: `31 pass, 0 fail`. Probe of the harness itself at 190/80 columns (scratch,
+`.tentacle/tmp/subagent-panel/fix2/probe190.ts`): `23 lines, max=190` at 190 and `max=80` at 80, the
+dropdown rule one contiguous `rule cells=190` (the old harness on the same input: `24 lines`,
+`rule cells=190` but the frame carried a separate `─[100]─` and `─[90]─` line).
+
+### Gate
+
+```
+$ bun run check
+tsc --noEmit && tsc -p apps/mobile --noEmit     → clean
+biome check .                                   → Checked 834 files. No fixes applied. (0 errors, 0 warnings)
+bun test                                        → 6483 pass, 3 skip, 0 fail (6486 tests, 452 files)
+```
+The 3 skips are the opt-in three (live-k8s, live-docker, the real-socket keepalive — AGENTS §6).
+
+### Drifts / notes
+
+1. **The resolver's semantics changed, deliberately.** `subagentModelResolver` no longer suppresses a
+   name when the entry resolves to the main model's id; it reports the fact and the daemon decides.
+   Its two tests were rewritten accordingly (they asserted the old, broken behaviour). The tunnel
+   resolver is untouched — over the tunnel every named entry IS a different model, and a pod has no
+   main id to compare with.
+2. **`M1` deleted the `StatusBar` `hint` prop** instead of adding a second slot. The plan's rule is
+   that nothing displaces `auto-accept`; a second slot would have to fight the width tiers for the
+   same cells to show a fact the input rule already shows.
+3. **`F6`'s assertion moved** from the status bar's `enter does nothing` to the input rule (still
+   `esc back`, no `enter sends`) — same property, the place that now carries it.
+4. **`AgentConfig.modelId` is optional** and only set where the process really knows the id. Nothing
+   guesses it: a pod daemon (tunnel), and a test factory that omits it, keep the pick's verdict.
+5. **`renderAt` lives in `packages/tui/test/real-term.tsx`** and is typechecked with the rest of the
+   package. Its `stdout`/`stderr`/`stdin` reach Ink through `as never`, exactly as
+   `ink-testing-library` does: Ink's option types name the full `node:tty` shape, and a fake stream
+   cannot be one (the same cast the library itself uses).
+6. Unverified: no live run of `tentacle run --profile …` with a real `/model` swap; the swap is
+   covered by the real `SessionHost.updateSettings` path in the daemon test, which is the same code
+   a `/settings apply` reaches.

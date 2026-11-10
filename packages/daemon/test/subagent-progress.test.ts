@@ -501,10 +501,10 @@ describe("the view: untrusted labels are sanitized, and rows compare cheaply", (
     expect(rows[0]?.toolUses).toBe(2);
   });
 
-  test("the child's MODEL rides the row only when it has one (absent = the main model)", () => {
-    // docs/feat/subagent-panel.md, UI revision: the resolver sets `name` only
-    // when the child really runs a different model, so the projection must pass
-    // it through (and never invent one).
+  test("the child's MODEL rides the row only when it DIFFERS from the main model's, live", () => {
+    // docs/feat/subagent-panel.md, Review round 3 M2: the label is a function of
+    // the child's resolved id and the main model's id RIGHT NOW, decided on every
+    // publish — never frozen when the child started.
     const base = {
       id: "sa-1",
       callId: "c1",
@@ -516,11 +516,22 @@ describe("the view: untrusted labels are sanitized, and rows compare cheaply", (
       startedAt: 3,
       tail: [],
     };
-    expect(subagentRows([base])[0]).not.toHaveProperty("model");
-    const withModel = subagentRows([{ ...base, model: "qwen3-8" }])[0];
-    expect(withModel?.model).toBe("qwen3-8");
+    // No pick named an entry: nothing to show, whatever the main model is.
+    expect(subagentRows([base], "main-model")[0]).not.toHaveProperty("model");
+    // The child runs `small` and the main model is `main-model`: shown.
+    const child = { ...base, model: "qwen3-8", modelId: "small" };
+    expect(subagentRows([child], "main-model")[0]?.model).toBe("qwen3-8");
+    // The main model BECOMES the child's: same model, so no label (it reappears
+    // when the main model moves away again — one function, no state).
+    expect(subagentRows([child], "small")[0]).not.toHaveProperty("model");
+    expect(subagentRows([child], "main-model")[0]?.model).toBe("qwen3-8");
+    // A daemon that cannot know the main id (the pod model tunnel) keeps the
+    // pick's own verdict: a NAME, never an id.
+    expect(subagentRows([child], undefined)[0]?.model).toBe("qwen3-8");
+    // The ID never reaches the wire: only `model` (a name) is a row field.
+    expect(subagentRows([child], "main-model")[0]).not.toHaveProperty("modelId");
     // A `models` name is one line and bounded, like every other label.
-    const hostile = subagentRows([{ ...base, model: "a\nb\u0000c" }])[0];
+    const hostile = subagentRows([{ ...base, model: "a\nb\u0000c", modelId: "x" }], "m")[0];
     expect(hostile?.model).toBe("a b c");
   });
 

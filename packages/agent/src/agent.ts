@@ -328,6 +328,13 @@ export type AgentEvent =
       readonly id: string;
       readonly agentType: string;
       readonly description: string;
+      /**
+       * The model id the child runs on — a DAEMON-side fact, never on the wire
+       * (AGENTS §7: `tool_progress` carries the `models` NAME or nothing). It is
+       * what a row's `model` label is decided against on every publish, so a
+       * mid-session `/model` re-decides it (docs/feat/subagent-panel.md, M2).
+       */
+      readonly modelId?: string;
     }
   | { readonly type: "subagent_tool"; readonly id: string; readonly label: string }
   | {
@@ -389,6 +396,7 @@ function progressToEvent(id: string, event: ToolProgressEvent): AgentEvent {
         id,
         agentType: event.agentType,
         description: event.description,
+        ...(event.modelId !== undefined ? { modelId: event.modelId } : {}),
       };
     case "subagent_tool":
       return { type: "subagent_tool", id, label: event.label };
@@ -412,6 +420,13 @@ function progressToEvent(id: string, event: ToolProgressEvent): AgentEvent {
 
 export interface AgentConfig {
   readonly model: ModelProvider;
+  /**
+   * The model ID `model` was built for (the wiring's `config.model`). DAEMON-side
+   * only, and `undefined` when this process cannot know it — a pod's main model
+   * is a tunnel to the laptop's (AGENTS §7). It is what a sub-agent row's `model`
+   * label is decided against on every publish (docs/feat/subagent-panel.md, M2).
+   */
+  readonly modelId?: string;
   readonly tools: ToolRegistry;
   readonly env: ExecutionEnvironment;
   readonly systemPrompt?: string;
@@ -698,6 +713,15 @@ export class Agent {
   /** Job exits a retired agent had not surfaced: told at this agent's next turn. */
   adoptExits(exits: readonly PendingExit[]): void {
     this.pendingExits.unshift(...exits);
+  }
+
+  /**
+   * The model ID this agent's provider was built for (daemon-side; `undefined`
+   * when this process cannot know it). What a child row's `model` label is
+   * decided against, live (docs/feat/subagent-panel.md, Review round 3 M2).
+   */
+  get mainModelId(): string | undefined {
+    return this.config.modelId;
   }
 
   /**

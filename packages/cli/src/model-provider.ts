@@ -99,19 +99,18 @@ export function subagentModelResolver(
           ...(choice.contextWindow !== undefined ? { contextWindow: choice.contextWindow } : {}),
         };
       case "entry": {
-        // The NAME is what the panel may show, and only when the child really
-        // runs a DIFFERENT model than the main agent (docs/feat/subagent-panel.md:
-        // the owner's "show it only when it differs"): an entry that resolves to
-        // the main model's id is the same model, so it is not named at all. The
-        // wire carries a `models` NAME, never an id (AGENTS §7) — so the compare
-        // happens here, where both are in hand, and the daemon projects the row.
+        // The NAME is what the panel may show, and the ID is what "differs from
+        // the main agent" is decided against — by the DAEMON, on every publish
+        // (docs/feat/subagent-panel.md, Review round 3 M2: a `/model` under a
+        // running child re-decides it). Here both facts are reported as they
+        // are; nothing is frozen. The wire carries a `models` NAME, never an id
+        // (AGENTS §7).
         const entry = config.models[choice.name];
-        const differs = entry !== undefined && entry.model !== config.model;
         return {
           provider: providers.forEntry(choice.name),
           contextWindow: choice.contextWindow,
           modelId: entry?.model ?? choice.name,
-          ...(differs ? { name: choice.name } : {}),
+          name: choice.name,
         };
       }
     }

@@ -99,6 +99,15 @@ export class Session {
     return previous;
   }
 
+  /**
+   * The agent driving the next turn (read at call time: `replaceAgent` swaps it
+   * between turns). For facts about the CURRENT model — e.g. whether a child
+   * runs a different one (docs/feat/subagent-panel.md, M2).
+   */
+  currentAgent(): Agent {
+    return this.agent;
+  }
+
   /** A snapshot of durable state, for persisting or inspecting the session. */
   snapshot(): SessionSnapshot {
     return { id: this.id, messages: [...this.messages] };

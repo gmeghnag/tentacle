@@ -13,6 +13,7 @@ import {
 } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
 import type { Attachment } from "../src/hosted-session.ts";
+import { SUBAGENTS_COALESCE_MS } from "../src/hosted-session.ts";
 import { type AgentFactory, SessionHost } from "../src/session-host.ts";
 import { LogSessionStore } from "../src/session-log-store.ts";
 import { SessionPersister } from "../src/session-persister.ts";
@@ -87,6 +88,81 @@ describe("T32: a settings sync (SessionHost.updateSettings)", () => {
     expect(() => host.updateSettings(hosted, hosted.id, {} as never)).toThrow(/did not reuse/);
     // Disposed: it refuses new work.
     expect(strays[0]?.acquire("x").ok).toBe(false);
+  });
+});
+
+describe("Review round 3 M2: a settings swap republishes a running child's model label", () => {
+  test("the label is decided against the MAIN model live: it goes on the swap, and comes back", async () => {
+    // The bug: the child's `model` was decided once, in the resolver, when the
+    // child started — so a `/model` under a running child left a label reading
+    // "same as main" (or a stale name). The fix keeps the child's resolved id
+    // daemon-side and re-decides the label on every publish.
+    const report = { applied: [], ignored: [] } as never;
+    // What each build's main agent runs on: `main-a`, then `small` (the child's
+    // own model), then `main-a` again. The child itself never changes.
+    const mains = ["main-a", "small", "main-a"];
+    let builds = 0;
+    const factory: AgentFactory = (_cwd, context) => {
+      const agentJobs = context.reuse?.agentJobs ?? new AgentJobs(2);
+      const agent = new Agent({
+        model: new Quiet(),
+        modelId: mains[builds++] ?? "main-a",
+        tools: new ToolRegistry(),
+        env,
+        agentJobs,
+      });
+      return {
+        agent,
+        permissions: context.reuse?.permissions ?? new PermissionBroker(),
+        agentJobs,
+        settingsReport: report,
+      };
+    };
+    const host = new SessionHost({ defaultCwd: CWD, createAgent: factory });
+    const { hosted } = host.open({ create: true }, attachment);
+    // The wire's own view: what each `subagents` frame carries (`-` = no model).
+    const frames: string[] = [];
+    hosted.attach({
+      send: (p) => {
+        if (p.update.type === "subagents") {
+          frames.push(p.update.agents.map((a) => a.model ?? "-").join(","));
+        }
+      },
+    });
+    const runtime = hosted.reusable().agentJobs;
+    expect(runtime).toBeDefined();
+    // A child that never finishes: its row is live across both swaps.
+    const held = Promise.withResolvers<void>();
+    runtime?.start({ callId: "c1", agentType: "general", description: "held" }, async () => {
+      await held.promise;
+      return { report: "R", toolUses: 0, stopReason: "end_turn" };
+    });
+    const tick = async (): Promise<void> => {
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    };
+    // The start publishes at once; a progress event coalesces (one window).
+    const coalesce = (): Promise<void> => Bun.sleep(SUBAGENTS_COALESCE_MS + 60);
+    await tick();
+    // Its pick named `qwen3-8`, resolved to `small` — daemon-side only.
+    runtime?.progress("sa-1", {
+      kind: "subagent_start",
+      agentType: "general",
+      description: "held",
+      model: "qwen3-8",
+      modelId: "small",
+    });
+    await coalesce();
+    // The main agent runs `main-a`; the child runs `small`: the label shows.
+    expect(frames.at(-1)).toBe("qwen3-8");
+    // A settings sync rebuilds the agent on `small` — the child's own model. The
+    // row does not change, but its label must go: nothing differs any more.
+    host.updateSettings(hosted, hosted.id, {} as never);
+    expect(frames.at(-1)).toBe("-");
+    // A second sync back to a different main model brings the label back.
+    host.updateSettings(hosted, hosted.id, {} as never);
+    expect(frames.at(-1)).toBe("qwen3-8");
+    held.resolve();
+    await tick();
   });
 });
 

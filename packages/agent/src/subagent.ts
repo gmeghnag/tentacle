@@ -105,8 +105,9 @@ export interface SubagentModel {
    * The `models` NAME the child runs on (never an id, a URL or a key: AGENTS §7).
    * Set only by a pick that named an entry — absent for the parent's own model
    * (the `default` choice, where there is nothing to tell apart) and for a bare
-   * frontmatter id. The panel shows it only when it differs from the main one
-   * (docs/feat/subagent-panel.md, UI revision).
+   * frontmatter id. Whether the panel SHOWS it is the daemon's decision, taken
+   * on every publish against the main agent's model of that moment
+   * (docs/feat/subagent-panel.md, Review round 3 M2).
    */
   readonly name?: string;
 }
@@ -317,9 +318,9 @@ export function createSubagentRunner(deps: SubagentDeps): {
       return { report: "no sub-agent type available", toolUses: 0, stopReason: "end_turn" };
     }
     // The child's model, picked BEFORE its start event so the row carries it: a
-    // `models` name only (never an id, AGENTS §7), and only for a pick that named
-    // one — `undefined` means "the parent's own model", which is what the panel
-    // shows as nothing at all (owner: show it only when it differs).
+    // `models` name for the wire (never an id, AGENTS §7) and the resolved ID
+    // daemon-side only, which is what a `model` label is decided against on
+    // every publish (docs/feat/subagent-panel.md, Review round 3 M2).
     const chosen = deps.modelFor?.(type, opts.model);
     const onEvent = controls?.onEvent;
     onEvent?.({
@@ -327,6 +328,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
       agentType: type.name,
       description: opts.description,
       ...(chosen?.name !== undefined ? { model: chosen.name } : {}),
+      ...(chosen?.modelId !== undefined ? { modelId: chosen.modelId } : {}),
     });
 
     // Restrict the child's tools to the type's allow-list, always dropping the

@@ -70,7 +70,6 @@ export function StatusBar({
   autoApprove = false,
   pill = { kind: "none" },
   onPillRange,
-  hint = null,
   link = null,
 }: {
   cwd: string;
@@ -102,16 +101,13 @@ export function StatusBar({
    */
   onPillRange?: (range: { readonly start: number; readonly end: number } | null) => void;
   /**
-   * Overrides the right-hand hint while a dock focus is active
-   * (`enter sends to sa-1`); `null` keeps the auto-accept hint (the mockups).
+   * The link's state when it is not up ("reconnecting…", "disconnected: …").
    */
-  hint?: string | null;
-  /** The link's state when it is not up ("reconnecting…", "disconnected: …"). */
   link?: LinkIndicator | null;
 }): ReactElement {
   const width = Math.max(10, columns);
-  const hintText = autoApprove ? " ⏵⏵ auto-accept on " : " ⏵⏵ auto-accept off (shift+tab) ";
-  const rightHint = hint ?? hintText;
+  // The right slot is `auto-accept`'s, always: nothing displaces it (owner's rule).
+  const rightHint = autoApprove ? " ⏵⏵ auto-accept on " : " ⏵⏵ auto-accept off (shift+tab) ";
   const suffix = scrolledUp
     ? ` · ↑${hiddenAbove} more (↓ to follow)`
     : expandAll
@@ -187,7 +183,7 @@ export function StatusBar({
               pill model's own `hint` (empty under the width tier), and it never
               replaces the auto-accept indicator. */}
           <Text {...dimProps()}>{layout.pillHint}</Text>
-          {autoApprove && hint === null ? (
+          {autoApprove ? (
             <Text color={palette().autoAccept}>{layout.hint}</Text>
           ) : (
             <Text {...dimProps()}>{layout.hint}</Text>
