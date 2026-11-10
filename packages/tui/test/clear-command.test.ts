@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   CLEARED_ELSEWHERE_NOTICE,
+  CLEAR_DID_NOTHING_NOTICE,
   type ClearStep,
   clearCommandStep,
   clearErrorNotice,
   clearFailedNotice,
+  clearNoopNotice,
 } from "../src/clear-command.ts";
 
 // docs/feat/clear-keeps-jobs.md — T17: the pure decision behind `/clear`.
@@ -55,5 +57,15 @@ describe("notices", () => {
 
   test("the foreign-clear notice", () => {
     expect(CLEARED_ELSEWHERE_NOTICE).toBe("_the conversation was cleared on another device_");
+  });
+
+  test("a `{0, 0}` clear with a chat on screen is said; an empty transcript says nothing", () => {
+    // docs/fix/clear-silent-noop.md. Mutation: drop `chatShown` → the last two fail.
+    expect(clearNoopNotice({ before: 0, after: 0, chatShown: true })).toBe(
+      CLEAR_DID_NOTHING_NOTICE,
+    );
+    expect(clearNoopNotice({ before: 0, after: 0, chatShown: false })).toBeNull();
+    // A real clear (it reset something) is never a complaint.
+    expect(clearNoopNotice({ before: 6, after: 1, chatShown: true })).toBeNull();
   });
 });
