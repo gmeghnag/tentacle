@@ -115,6 +115,10 @@ const spawnCall = (args: Record<string, string>): StreamEvent => ({
   },
 });
 
+/** A tool result without the `[context: …]` line the loop appends (context awareness). */
+const plain = (results: readonly string[]): string[] =>
+  results.map((r) => r.replace(/\n\n\[context: [^\]]*\]$/, ""));
+
 class MainModel implements ModelProvider {
   readonly id = "main";
   readonly results: string[] = [];
@@ -185,7 +189,7 @@ async function podRun(call: StreamEvent, podOver: Partial<TentacleConfig> = {}) 
 describe("a sub-agent in a pod runs on the laptop's named model", () => {
   test("a type's model: the laptop's entry serves it, with ITS key, and nothing secret crosses", async () => {
     const { main, f, frames } = await podRun(spawnCall({ subagent_type: "explore" }));
-    expect(main.results).toEqual(["from fast-id"]);
+    expect(plain(main.results)).toEqual(["from fast-id"]);
     expect(f.served.get("fast-id")?.length).toBe(1);
     const entry = f.built.find((o) => o.model === "fast-id");
     expect([entry?.baseURL, entry?.apiKey]).toEqual(["http://fast.example/v1", FAST_KEY]);
@@ -213,13 +217,13 @@ describe("a sub-agent in a pod runs on the laptop's named model", () => {
 
   test("the agent's selectable pick reaches the laptop's entry", async () => {
     const { main, f } = await podRun(spawnCall({ subagent_type: "explore", model: "claude" }));
-    expect(main.results).toEqual(["from claude-id"]);
+    expect(plain(main.results)).toEqual(["from claude-id"]);
     expect(f.built.find((o) => o.model === "claude-id")?.apiKey).toBe(CLAUDE_KEY);
   });
 
   test("an unconfigured type stays on the main model; no named provider is even built", async () => {
     const { main, f } = await podRun(spawnCall({ subagent_type: "general" }));
-    expect(main.results).toEqual(["from the MAIN model"]);
+    expect(plain(main.results)).toEqual(["from the MAIN model"]);
     expect(f.built.map((o) => o.model)).toEqual([MAIN_ID]);
   });
 
@@ -232,7 +236,7 @@ describe("a sub-agent in a pod runs on the laptop's named model", () => {
     const { main, f, frames } = await podRun(spawnCall({ subagent_type: "scout" }), {
       packageAgentDirs: [agents],
     });
-    expect(main.results).toEqual(["from the MAIN model"]);
+    expect(plain(main.results)).toEqual(["from the MAIN model"]);
     expect(f.served.get("claude-id")).toBeUndefined();
     expect(f.built.map((o) => o.model)).toEqual([MAIN_ID]);
     expect(frames.some((frame) => frame.includes('"model":"claude"'))).toBe(false);
@@ -276,7 +280,7 @@ describe("a sub-agent in a pod runs on the laptop's named model", () => {
     for await (const _event of session.send("second")) {
       // drain
     }
-    expect(main.results).toEqual(["from fast-id", "from claude-id"]);
+    expect(plain(main.results)).toEqual(["from fast-id", "from claude-id"]);
     connection.close();
     client.close();
   });

@@ -764,7 +764,7 @@ describe("a child's agent_notify in the parent agent (T1, T5, T7, T8, T9)", () =
     const note = session.messages.find((m) => m.note?.kind === "subagent_message");
     expect(note?.note).toEqual({ kind: "subagent_message", id: "sa-1" });
     expect(note?.content).toContain("[sub-agent sa-1 → you] found X");
-    expect(note?.content).toContain('agent_message({ agent_id: "sa-1", text })');
+    expect(note?.content).toContain('agent_control({ action: "message", agent_id: "sa-1", text })');
     const first = model.requests[0]?.messages.map((m) => m.content).join("\n") ?? "";
     expect(first).toContain("[sub-agent sa-1 → you] found X");
     child.done();

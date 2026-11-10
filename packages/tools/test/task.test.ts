@@ -3,6 +3,7 @@ import type { ToolContext } from "@tentacle/core";
 import { type TaskRunResult, createTaskTool } from "../src/task.ts";
 
 const ctx = { sessionId: "s", signal: new AbortController().signal } as unknown as ToolContext;
+const OFF: TaskRunResult = { report: "", toolUses: 0, stopReason: "end_turn" };
 const TYPES = [
   { name: "general", description: "all tools" },
   { name: "explore", description: "read-only" },
@@ -99,5 +100,74 @@ describe("createTaskTool", () => {
     expect(tool.description).toContain("general");
     expect(tool.description).toContain("explore");
     expect(tool.description).not.toContain("general-purpose");
+  });
+});
+
+// fix/agent-task-scope (1) and (2): the neutral text teaches the parent HOW to
+// write the prompt and WHAT this tool is for. The owner's own framing: an
+// empty folder + "create two agents" used to shell out to `codex`/`claude -p`,
+// and two open-ended "adversarial review" children ran with no scope and no
+// stop criterion.
+describe("the neutral description tells the parent how to use it", () => {
+  const text = createTaskTool(() => Promise.resolve(OFF), TYPES).description;
+
+  test("(1) it asks for a scope and a stop criterion in the prompt it writes", () => {
+    expect(text).toContain("Scope each prompt");
+    expect(text).toContain("the files, diff or questions it owns");
+    expect(text).toContain("a stop criterion — what counts as done");
+  });
+
+  test("(2) it says this is THE way to create agents, with a DEFAULT not a ban", () => {
+    expect(text).toContain("To create agents, use this tool.");
+    expect(text).toContain(
+      "To create agents, use this tool. Start another agent CLI (claude, codex, tentacle, …) through the shell only when the user explicitly asks for it.",
+    );
+  });
+
+  test("(2) it names the two patterns: turn-based, and long-lived", () => {
+    expect(text).toContain("Turn-based: one foreground sub-agent at a time");
+    expect(text).toContain("Long-lived: `background: true`, then `agent_control`");
+  });
+
+  test("a custom text replaces the neutral one whole (no scope, no patterns)", () => {
+    const custom = createTaskTool(() => Promise.resolve(OFF), TYPES, {
+      description: "Use me well.",
+    });
+    expect(custom.description.startsWith("Use me well.\n\nAvailable sub-agent types:\n- ")).toBe(
+      true,
+    );
+    expect(custom.description).not.toContain("Scope each prompt");
+  });
+
+  test("off (absent or false): no two-way line, exactly as before the flag", () => {
+    for (const options of [undefined, { twoWay: false }]) {
+      const tool = createTaskTool(() => Promise.resolve(OFF), TYPES, options);
+      expect(tool.description).not.toContain("agent_notify");
+      expect(tool.description).not.toContain("may wake you");
+    }
+    const absent = createTaskTool(() => Promise.resolve(OFF), TYPES).description;
+    const explicit = createTaskTool(() => Promise.resolve(OFF), TYPES, {
+      twoWay: false,
+    }).description;
+    expect(explicit).toBe(absent);
+  });
+
+  test("on: says a background child may reply with agent_notify, and still lists the types", () => {
+    const tool = createTaskTool(() => Promise.resolve(OFF), TYPES, { twoWay: true });
+    expect(tool.description).toContain(
+      "A background sub-agent may reply with `agent_notify`: it arrives as a `[sub-agent sa-N → you]` note and may wake you.",
+    );
+    expect(tool.description).toContain("\n\nAvailable sub-agent types:\n- general: all tools");
+  });
+
+  test("on never rewords a CUSTOM text: it is used as is, the types still follow", () => {
+    const custom = createTaskTool(() => Promise.resolve(OFF), TYPES, {
+      description: "Use me well.",
+      twoWay: true,
+    });
+    expect(custom.description.startsWith("Use me well.\n\nAvailable sub-agent types:\n- ")).toBe(
+      true,
+    );
+    expect(custom.description).not.toContain("agent_notify");
   });
 });

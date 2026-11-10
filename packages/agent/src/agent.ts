@@ -294,7 +294,7 @@ export function userToSubagentNote(note: PendingUserNote): ChatMessage {
 export function agentMessageNote(note: AgentNotify): ChatMessage {
   return {
     role: "user",
-    content: `[sub-agent ${note.agentId} → you] ${note.text}\n(background sub-agent ${note.agentId} (${note.description}) sent this while it was running. To answer, use agent_message({ agent_id: "${note.agentId}", text }). Its final report still arrives as a [background] note.)`,
+    content: `[sub-agent ${note.agentId} → you] ${note.text}\n(background sub-agent ${note.agentId} (${note.description}) sent this while it was running. To answer, use agent_control({ action: "message", agent_id: "${note.agentId}", text }). Its final report still arrives as a [background] note.)`,
     note: { kind: NOTE_KIND.subagentMessage, id: note.agentId },
   };
 }

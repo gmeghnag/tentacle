@@ -1,20 +1,28 @@
 import { describe, expect, test } from "bun:test";
-import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
+import type {
+  ChatRequest,
+  ExecutionEnvironment,
+  ModelProvider,
+  StreamEvent,
+  Tool,
+} from "@tentacle/core";
 import { AgentInbox, AgentJobs, type AgentNotifyResult } from "@tentacle/core";
 import {
+  AGENT_CONTROL_TOOL_NAME,
   AGENT_KILL_TOOL_NAME,
   AGENT_MESSAGE_TOOL_NAME,
   AGENT_NOTIFY_TOOL_NAME,
+  AGENT_STATUS_TOOL_NAME,
   CONTEXT_RESET_TOOL_NAME,
   ToolRegistry,
-  createAgentKillTool,
-  createAgentMessageTool,
+  createAgentControlTool,
   createAgentNotifyTool,
   createContextResetTool,
   createTaskTool,
   fsReadTool,
   shellTool,
 } from "@tentacle/tools";
+import { z } from "zod";
 import { Agent } from "../src/agent.ts";
 import { HookRunner } from "../src/hooks.ts";
 import {
@@ -304,7 +312,7 @@ describe("createSubagentRunner", () => {
     expect(offered[0]).not.toContain(CONTEXT_RESET_TOOL_NAME);
   });
 
-  test("a child is never offered agent_kill, even in a registry that holds it (owner Q1)", async () => {
+  test("a child is never offered agent_control, even in a registry that holds it", async () => {
     const { env } = recordingEnv();
     const offered: string[][] = [];
     const model: ModelProvider = {
@@ -315,9 +323,11 @@ describe("createSubagentRunner", () => {
         yield { type: "done" };
       },
     };
-    // The shape `wiring.ts` gives the shared registry with background on: the
-    // parent holds both the spawn tool and `agent_kill`, so a `tools: "all"`
-    // child would inherit the kill unless the runner drops it.
+    // Exactly the registry `wiring.ts` gives the main agent with background on:
+    // the spawn tool plus `agent_control`. A `tools: "all"` child (the `general`
+    // type) would inherit it unless the runner drops it — and then one child
+    // could read, message and kill every sibling (AGENTS §7: the parent's
+    // handle on its children is never a child's).
     const jobs = new AgentJobs(2);
     const { run } = createSubagentRunner({
       model,
@@ -329,11 +339,12 @@ describe("createSubagentRunner", () => {
             BUILTIN_AGENT_TYPES,
           ),
         )
-        .register(createAgentKillTool(jobs)),
+        .register(createAgentControlTool(jobs)),
     });
     await run({ description: "d", prompt: "go", type: "general" });
     expect(offered[0]?.length).toBeGreaterThan(0);
-    expect(offered[0]).not.toContain(AGENT_KILL_TOOL_NAME);
+    expect(offered[0]).not.toContain(AGENT_CONTROL_TOOL_NAME);
+    expect(offered[0]).toContain("fs_read");
   });
 
   test("the call's requested model reaches modelFor with the type (models-map)", async () => {
@@ -882,8 +893,8 @@ describe("T9d: a text drained by a turn_start stop in a continuation pass is rep
   });
 });
 
-describe("T10: an inbox is never handed to the child as a tool", () => {
-  test("a child is never offered agent_message, and readOnlyType ignores it", async () => {
+describe("T10: the parent's handle on its children is never a child's tool", () => {
+  test("a child is never offered agent_message (nor its old names), and readOnlyType ignores it", async () => {
     const offered: string[][] = [];
     const model: ModelProvider = {
       id: "rec",
@@ -894,6 +905,16 @@ describe("T10: an inbox is never handed to the child as a tool", () => {
       },
     };
     const jobs = new AgentJobs(2);
+    // `agent_control` is what the model is offered now; the two OLD tool names
+    // are registered as stubs on purpose — an old session's replay, or an old
+    // `agents/*.md`, still names them, and the filter must keep dropping them.
+    const stub = (name: string): Tool => ({
+      name,
+      description: "a tool that no longer exists",
+      inputSchema: z.object({ agent_id: z.string().optional() }),
+      permission: "none",
+      execute: async () => ({ content: "", isError: false }),
+    });
     const { run, readOnlyType } = createSubagentRunner({
       model,
       env: recordingEnv().env,
@@ -904,21 +925,36 @@ describe("T10: an inbox is never handed to the child as a tool", () => {
             BUILTIN_AGENT_TYPES,
           ),
         )
-        .register(createAgentKillTool(jobs))
-        .register(createAgentMessageTool(jobs)),
+        .register(createAgentControlTool(jobs))
+        .register(stub(AGENT_KILL_TOOL_NAME))
+        .register(stub(AGENT_MESSAGE_TOOL_NAME)),
       types: [
         {
           name: "reads",
           description: "reads",
           prompt: "p",
-          tools: ["fs_read", AGENT_MESSAGE_TOOL_NAME],
+          tools: [
+            "fs_read",
+            AGENT_CONTROL_TOOL_NAME,
+            AGENT_KILL_TOOL_NAME,
+            AGENT_MESSAGE_TOOL_NAME,
+            AGENT_STATUS_TOOL_NAME,
+          ],
         },
       ],
     });
     await run({ description: "d", prompt: "go", type: "general" });
     expect(offered[0]?.length).toBeGreaterThan(0);
-    expect(offered[0]).not.toContain(AGENT_MESSAGE_TOOL_NAME);
-    // A type naming it is still read-only: a child never gets it.
+    for (const name of [
+      AGENT_CONTROL_TOOL_NAME,
+      AGENT_KILL_TOOL_NAME,
+      AGENT_MESSAGE_TOOL_NAME,
+      AGENT_STATUS_TOOL_NAME,
+    ]) {
+      expect(offered[0]).not.toContain(name);
+    }
+    expect(offered[0]).toContain("fs_read");
+    // A type naming them is still read-only: a child never gets them.
     expect(readOnlyType("reads")).toBe(true);
   });
 });

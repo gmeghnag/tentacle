@@ -89,7 +89,7 @@ export const Method = {
   ResolvePermission: "session/resolve_permission",
   /** The user writes to a RUNNING background child (docs/feat/subagent-panel.md). */
   SubagentMessage: "session/subagent_message",
-  /** The user stops one (the same decision as the model's `agent_kill` tool). */
+  /** The user stops one (the same decision as the model's `agent_control{action:"kill"}`). */
   AgentKill: "session/agent_kill",
   /** The user reads a background SHELL job's output tail (docs/feat/shell-jobs-panel.md). */
   JobOutput: "session/job_output",

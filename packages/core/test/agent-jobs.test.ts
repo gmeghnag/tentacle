@@ -87,8 +87,8 @@ describe("AgentJobs.start", () => {
       expect(refused.reason).toContain("sa-1 (first)");
       expect(refused.reason).toContain("subagents.maxParallel = 1");
       expect(refused.reason).not.toContain("foreground");
-      // 6a-2 (owner Q1 a): with a child running, stopping it is now an option.
-      expect(refused.reason).toContain("agent_kill");
+      // With a child running, stopping it is an option (`agent_control{action:"kill"}`).
+      expect(refused.reason).toContain("agent_control");
     }
     expect(ran).toBe(false);
     expect(log).toEqual(["launched:first"]);
@@ -215,8 +215,8 @@ describe("AgentJobs.acquire (a foreground child)", () => {
       expect(refused.reason).toContain("fg one");
       expect(refused.reason).toContain("subagents.maxParallel = 2");
       expect(refused.reason).toContain("end your turn");
-      // 6a-2: the same text now offers `agent_kill` too (it stops that child).
-      expect(refused.reason).toContain("agent_kill");
+      // The same text offers `agent_control` too (its `kill` stops that child).
+      expect(refused.reason).toContain("agent_control");
       expect(refused.reason).not.toContain("run it in the foreground");
     }
     // The refused try left nothing behind: a release frees exactly one slot.

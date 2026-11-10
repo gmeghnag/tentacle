@@ -4,7 +4,7 @@
  * `JobController`); when it is not wired they report the capability as
  * unavailable rather than throwing.
  */
-import type { AgentJobs, AgentNotifyResult, JobStatus, Tool } from "@tentacle/core";
+import type { AgentNotifyResult, JobStatus, Tool } from "@tentacle/core";
 import { z } from "zod";
 import { jobCursorConcurrency } from "./concurrency.ts";
 
@@ -70,39 +70,15 @@ export const shellKillTool: Tool<z.infer<typeof shellKillInput>> = {
   },
 };
 
-export const AGENT_KILL_TOOL_NAME = "agent_kill";
-
-const agentKillInput = z.object({
-  agent_id: z
-    .string()
-    .min(1)
-    .describe("Id of the background sub-agent to stop (the sa-N `agent_task` returned)."),
-});
-
 /**
- * Stop a background sub-agent (docs/feat/subagent-background-ui.md, owner Q1 a):
- * the mirror of `shell_kill`, built only where the background runtime is wired
- * (without it no child has an id to name). Its exit reports `cancelled`, so the
- * agent learns how it ended from the usual `[background]` note.
+ * The name the model USED to be offered for stopping a child (6a-2,
+ * docs/feat/subagent-background-ui.md). It is no longer a tool: the merge into
+ * `agent_control` (`action: "kill"`, docs/feat/agent-status.md) replaced it. The
+ * constant stays because two things still need the name: the child filter and
+ * `readOnlyType` list it (an old `agents/*.md` may name it), and an old session's
+ * log/transcript still contains its calls, which render as plain names.
  */
-export function createAgentKillTool(jobs: AgentJobs): Tool<z.infer<typeof agentKillInput>> {
-  return {
-    name: AGENT_KILL_TOOL_NAME,
-    description:
-      "Stop a background sub-agent started with agent_task{background: true}. Its report-so-far still arrives later as a [background] note, marked cancelled.",
-    inputSchema: agentKillInput,
-    permission: "none",
-    async execute(input) {
-      const killed = jobs.kill(input.agent_id);
-      return {
-        content: killed
-          ? `killed background sub-agent ${input.agent_id}`
-          : `background sub-agent ${input.agent_id} was not running`,
-        isError: false,
-      };
-    },
-  };
-}
+export const AGENT_KILL_TOOL_NAME = "agent_kill";
 
 export const AGENT_NOTIFY_TOOL_NAME = "agent_notify";
 
@@ -147,49 +123,10 @@ function notifyResultText(wakes: boolean): string {
     : "sent to the parent agent; it is not woken now (too many wakes since the user last wrote), it reads it at its next step. Keep working.";
 }
 
-export const AGENT_MESSAGE_TOOL_NAME = "agent_message";
-
-const agentMessageInput = z.object({
-  agent_id: z
-    .string()
-    .min(1)
-    .describe(
-      "Id of the background sub-agent to write to (the sa-N agent_task returned, or the id it moved to).",
-    ),
-  text: z
-    .string()
-    .min(1)
-    .describe(
-      "What to tell it. It reads this before its next model step, as a user message naming you as the sender.",
-    ),
-});
-
 /**
- * Write into a RUNNING background sub-agent's context (docs/feat/agent-message.md,
- * owner decision B1): one-way, and it never wakes anything (B3). Built only
- * where the background runtime is wired — without it no child has an id.
- *
- * Its result says "queued", never "delivered": a child waiting on a long tool
- * call or a permission ask reads the text after that call, and no reply comes
- * back (the report still arrives as a `[background]` note).
+ * The name the model USED to be offered for writing into a child
+ * (docs/feat/agent-message.md). No longer a tool — the merge into
+ * `agent_control` (`action: "message"`, docs/feat/agent-status.md) replaced it.
+ * The constant stays for the child filter / `readOnlyType` and for old logs.
  */
-export function createAgentMessageTool(jobs: AgentJobs): Tool<z.infer<typeof agentMessageInput>> {
-  return {
-    name: AGENT_MESSAGE_TOOL_NAME,
-    description:
-      "Send a message to a running background sub-agent started with agent_task{background: true}. It reads it before its next model step. One-way: no reply comes back, and its report still arrives later as a [background] note. It does not wake you.",
-    inputSchema: agentMessageInput,
-    permission: "none",
-    async execute(input) {
-      // `AgentJobs.message` decides and pushes synchronously: a text it refuses
-      // was never sent, so the agent can retry or go on.
-      const sent = jobs.message(input.agent_id, input.text, "agent");
-      return sent.ok
-        ? {
-            content: `queued for ${input.agent_id}: it reads it before its next model step. No reply comes back; its report still arrives as a [background] note.`,
-            isError: false,
-          }
-        : { content: sent.reason, isError: true };
-    },
-  };
-}
+export const AGENT_MESSAGE_TOOL_NAME = "agent_message";
