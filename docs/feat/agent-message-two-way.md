@@ -751,3 +751,40 @@ worktree at .tentacle/worktrees/agent-message-two-way`, branch `feat/agent-messa
   plan says: `subagent_notify` / `kind: "agent_message"` / `NOTE_KIND.subagentMessage` versus
   task 7's `subagent_message` / `"user_note"` / `userToSubagent`. Whichever lands second
   rebases onto the other's `PendingExit` union, `pendingExitCount` filter and `NOTE_KIND`.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-10* (fresh context; same model family as the plan's author, a different one from the executor's (DeepSeek). Per the owner's token rule, only HIGH/MEDIUM findings are listed, in one round.)
+
+**Verdict: REQUEST-CHANGES**: two MEDIUM findings, no HIGH.
+
+**Gate (re-run):** `bun run check`: typecheck clean, `biome check .` clean (821 files), `bun test` **6343 pass / 3 skip (the opt-in ones) / 0 fail**, 6346 tests across 445 files.
+
+**What holds (verified against the diff):**
+- `twoWay` off: `wiring.ts` passes no `notify`, so no child gets `agent_notify`. `notesFlushedMidTurn` is never set and `pendingExitCount` is unchanged. No `subagent_notify` is emitted, because `AgentJobs.notify` is never called. `userMessage()` is still called, but it is a no-op reset.
+- `connect` passes no `subagentsTwoWay` (`connect.ts:211`), so the TUI never arms on a notice there. The daemon is the only waker, and `kickWake` is a no-op without `wake`, which is the case on a pod daemon and the in-process worker. There is no double wake.
+- Relay wiring (drift 1): `runtime.createSession()` returns a `PersistingController`, which forwards `onSubagentNotify` (`local-runtime.ts`). The `?.` at `relay.ts:439` is not a silent no-op, and `emit({type:"job_exit"})` goes into the existing `wakeStep`/`relayWakeDue` path. I found no concrete failure scenario beyond M1, which the relay shares.
+- `subagent_notify` is `display` in `UPDATE_CLASS`, the reverse mapping is `null`, and both `RemoteSession` arms skip it. No `PROTOCOL_VERSION` bump is needed.
+- Nothing can throw out of a void path: `notify` is synchronous and wraps each listener in `try`. No await or lock was added to the peer.
+- Ordering: a child's note precedes its own exit in the one queue. The mid-turn flush removes only notes, so the exit still flushes at the next start, and the order is kept.
+- Q3: only `controls.agentId` children get the tool. A child moved with `adopt` keeps its launch registry, so it never gets it. A finished or killed child gets the "not running" or "being stopped" error. A note already queued is still delivered.
+- Budgets: the 9th notify per child is refused with an error. The 4th notify is accepted with `wakes:false` and is not counted by `pendingExitCount`, so neither the daemon nor a client arms for it. Both budgets reset only on `userMessage === true` or a drained steer.
+
+### Findings
+
+**M1: The Q4 guard misses the start-flush race. Two notices back to back give a second, spurious model turn on the TUI and relay drivers.** `packages/agent/src/agent.ts:1012` and `:1150` set the flag only on a mid-turn flush. The guard (`:939-958`) reads it at the turn start and then clears it unconditionally.
+- *Scenario:* a child sends two `agent_notify` calls in one round (parallel tool calls), or two children notify close together. Both are `wake:true`, and the daemon emits notices A and B in the same stretch. The TUI handles A while idle and starts a continuation, setting `running`. It then handles B while running, so `wakeStep(exit)` sets `pending` again (`core/src/auto-wake.ts:24`). On the daemon, the prompt arrives after both notifies, so the turn START flushes A and B, which is not a mid-turn flush. When that turn ends, `wakeIfPending` sends `send("")`. `notesFlushedMidTurn` is false, so the guard does not fire, and the model runs a full turn over an unchanged history. The relay behaves the same way.
+- This contradicts both the failure-mode row "Many children notify at once → ONE wake" and the Q4 (a) decision.
+- *Repro* (`.tentacle/tmp/agent-message-two-way/race.test.ts`, real `Agent`/`Session`/`AgentJobs`): `send("hi")`, then `notify(A)`, `notify(B)`, then `send("")` (2 requests), then `send("")` again. Output: `model requests after the 2nd armed wake: 3`. It should be 2.
+- *Fix:* also set the flag when the turn-start flush delivered a note. Right after the unconditional `this.notesFlushedMidTurn = false;` (`agent.ts:958`), add `if (<flushedAtStart delivered a subagent_message note>) this.notesFlushedMidTurn = true;`. To tell, have `flushBackgroundExits` report whether it hit the `isAgentMessage` branch, instead of re-reading the event texts. Rename the flag to `notesConsumed` if you like.
+- This is still narrow. The guard keeps requiring `flushedAtStart.length === 0` and a history ending in a final answer, so it can never skip a wake with unread notes.
+- Add the repro as a regression test, red before the fix.
+
+**M2: The late-drain flush is untested. T5b is vacuous.** In `packages/agent/test/agent.test.ts:840-866`, T5b calls the notify tool in round 1, so its note is flushed at round 2's iteration boundary, exactly like T5. It never reaches the late drain.
+- *Mutation run:* in `agent.ts:1143` I replaced `const lateNotes = this.flushAgentMessages(messages);` with `const lateNotes: AgentEvent[] = [];`. Result: `agent.test.ts` and `agent-message-two-way.e2e.test.ts` give **33 pass / 0 fail**. Reverted; `git status` is clean.
+- That code sits inside the synchronous late-drain invariant window and has no pin. The plan's T5 asked for "a notify AFTER the last round (pushed from the gate release of the final round) → `continue`, one more round".
+- *Fix:* add a test whose provider calls `jobs.notify(...)` inside the FINAL round's `stream()` (a text-only round, before `done`). Assert three things: three requests in ONE turn (`turn_end` ×1), the third request contains `[sub-agent sa-1 → you]`, and `pendingExitCount === 0` at the end. Show it red under the mutation above.
+
+**Not findings (noted):**
+- The wake budget also counts notes that were delivered mid-turn (3 progress notes during a user turn leave no wake for a later one). This is the plan's accepted debt.
+- The end-to-end relay wake (drift 1) is still not driven. The wiring reads as correct.
