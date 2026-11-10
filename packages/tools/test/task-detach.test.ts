@@ -333,7 +333,7 @@ describe("T12: the moved child's inbox is the same object", () => {
     jobs.detachForeground();
     expect((await running).content).toBe(movedText("sa-1", "map repo"));
     // The move hands that very inbox to the running entry.
-    expect(jobs.message("sa-1", "after the move", "agent")).toEqual({ ok: true });
+    expect(jobs.message("sa-1", "after the move", "agent")).toEqual({ ok: true, index: 1 });
     expect(inbox?.drain()).toEqual(["[message from the parent agent] after the move"]);
     g.finish();
     await tick();
@@ -351,7 +351,7 @@ describe("T12: the moved child's inbox is the same object", () => {
     expect(started.content).toContain("started in background as sa-1");
     const inbox = g.seen[0]?.inbox;
     expect(inbox).toBeDefined();
-    expect(jobs.message("sa-1", "hi", "agent")).toEqual({ ok: true });
+    expect(jobs.message("sa-1", "hi", "agent")).toEqual({ ok: true, index: 1 });
     expect(inbox?.drain()).toEqual(["[message from the parent agent] hi"]);
     g.finish();
     await tick();

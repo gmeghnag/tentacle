@@ -10,6 +10,7 @@ import {
   type AgentJobSpec,
   AgentJobs,
   type AgentNotify,
+  TWO_WAY_REPLY_HINT,
   capSubagentText,
 } from "@tentacle/core";
 import { SUBAGENT_REPORT_MAX_CHARS } from "@tentacle/protocol";
@@ -346,11 +347,11 @@ describe("AgentJobs.message (a text for a running child)", () => {
     const { jobs } = rig();
     const g = inboxRun();
     jobs.start(spec(), g.run);
-    expect(jobs.message("sa-1", "also check X", "agent")).toEqual({ ok: true });
+    expect(jobs.message("sa-1", "also check X", "agent")).toEqual({ ok: true, index: 1 });
     // Ready-to-inject user content, drained at the child's next boundary.
     expect(g.inbox.drain()).toEqual(["[message from the parent agent] also check X"]);
     // The `"user"` sender is task 7's; the channel is the same one.
-    expect(jobs.message("sa-1", "look at Y", "user")).toEqual({ ok: true });
+    expect(jobs.message("sa-1", "look at Y", "user")).toEqual({ ok: true, index: 1 });
     expect(g.inbox.drain()).toEqual(["[message from the user] look at Y"]);
     g.done();
     await tick();
@@ -399,12 +400,81 @@ describe("AgentJobs.message (a text for a running child)", () => {
     await tick();
   });
 
+  // docs/fix/autoaccept-wake-turns.md T7: the read state must reach the ROWS, and
+  // it must reach them through `onChange` (a frame the daemon publishes).
+  // MUTATION: drop the inbox's `onRead` (back to `new AgentInbox()`) → `seen`
+  // loses its one entry, and the daemon-side `sameRows` guard would drop the frame.
+  test("a drain moves rows().userRead and fires onChange", async () => {
+    const { jobs } = rig();
+    const seen: number[] = [];
+    jobs.onChange(() => seen.push(jobs.rows()[0]?.userRead ?? -1));
+    const g = inboxRun();
+    jobs.start(spec(), g.run);
+    expect(jobs.rows()[0]?.userRead).toBe(0);
+    expect(jobs.message("sa-1", "one", "user")).toEqual({ ok: true, index: 1 });
+    expect(jobs.message("sa-1", "two", "user")).toEqual({ ok: true, index: 2 });
+    // Accepted, NOT read: the row still says 0, and the message changed no row.
+    expect(jobs.message("sa-1", "three", "user")).toEqual({ ok: true, index: 3 });
+    expect(jobs.rows()[0]?.userRead).toBe(0);
+    const before = seen.length;
+    // The child reads them at its next boundary: the ONE path that counts.
+    g.inbox.drain();
+    expect(jobs.rows()[0]?.userRead).toBe(3);
+    expect(seen.length).toBeGreaterThan(before);
+    expect(seen.at(-1)).toBe(3);
+    g.done();
+    await tick();
+  });
+
+  test("an agent message does not move a user read count", async () => {
+    const { jobs } = rig();
+    const g = inboxRun();
+    jobs.start(spec(), g.run);
+    expect(jobs.message("sa-1", "from the model", "agent")).toEqual({ ok: true, index: 1 });
+    g.inbox.drain();
+    expect(jobs.rows()[0]?.userRead).toBe(0);
+    expect(jobs.message("sa-1", "from you", "user")).toEqual({ ok: true, index: 1 });
+    g.done();
+    await tick();
+  });
+
+  // docs/fix/autoaccept-wake-turns.md owner Q3 (b), end to end: with
+  // `subagents.twoWay` on, the text the child's own runner drains ends with ONE
+  // short line saying it may answer with `agent_notify`; off, the delivered text
+  // is byte-identical to today's. MUTATION: push the hint unconditionally, or
+  // never → one of the two cases goes red.
+  test("setTwoWay: the delivered text gains one reply hint (on) and nothing (off)", async () => {
+    const { jobs } = rig();
+    const g = inboxRun();
+    jobs.start(spec(), g.run);
+    // Off by default: exactly today's text.
+    jobs.message("sa-1", "also check X", "agent");
+    expect(g.inbox.drain()).toEqual(["[message from the parent agent] also check X"]);
+    jobs.message("sa-1", "look at Y", "user");
+    expect(g.inbox.drain()).toEqual(["[message from the user] look at Y"]);
+    // On: the same text, one line longer.
+    jobs.setTwoWay(true);
+    jobs.message("sa-1", "also check X", "agent");
+    expect(g.inbox.drain()).toEqual([
+      `[message from the parent agent] also check X${TWO_WAY_REPLY_HINT}`,
+    ]);
+    jobs.message("sa-1", "look at Y", "user");
+    expect(g.inbox.drain()).toEqual([`[message from the user] look at Y${TWO_WAY_REPLY_HINT}`]);
+    // Back off: unchanged again (a settings sync), and the read count still counts.
+    jobs.setTwoWay(false);
+    jobs.message("sa-1", "again", "user");
+    expect(g.inbox.drain()).toEqual(["[message from the user] again"]);
+    expect(jobs.rows()[0]?.userRead).toBe(3);
+    g.done();
+    await tick();
+  });
+
   test("the 8-per-child cap: the 9th unread text is refused and nothing is queued", async () => {
     const { jobs } = rig();
     const g = inboxRun();
     jobs.start(spec(), g.run);
     for (let i = 1; i <= AGENT_INBOX_MAX; i++) {
-      expect(jobs.message("sa-1", `m${i}`, "agent")).toEqual({ ok: true });
+      expect(jobs.message("sa-1", `m${i}`, "agent")).toEqual({ ok: true, index: i });
     }
     const over = jobs.message("sa-1", "m9", "agent");
     expect(over.ok).toBe(false);
@@ -575,6 +645,7 @@ describe("AgentJobs.message: the length limit (T5)", () => {
     jobs.start(spec(), g.run);
     expect(jobs.message("sa-1", "x".repeat(AGENT_MESSAGE_MAX_CHARS), "agent")).toEqual({
       ok: true,
+      index: 1,
     });
     expect(g.inbox.drain()).toHaveLength(1);
     const long = jobs.message("sa-1", "x".repeat(AGENT_MESSAGE_MAX_CHARS + 1), "agent");
@@ -606,7 +677,7 @@ describe("AgentJobs.acquire: the slot's inbox and adopt (T6)", () => {
       async () => gate.promise,
     );
     expect(id).toBe("sa-1");
-    expect(jobs.message("sa-1", "after the move", "agent")).toEqual({ ok: true });
+    expect(jobs.message("sa-1", "after the move", "agent")).toEqual({ ok: true, index: 1 });
     expect(slot.inbox.drain()).toEqual(["[message from the parent agent] after the move"]);
     gate.resolve(result());
     await tick();

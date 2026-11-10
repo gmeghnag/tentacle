@@ -198,6 +198,23 @@ export type InitializeResult = z.infer<typeof InitializeResultSchema>;
 export const TurnIdSchema = z.string().min(1).max(128);
 export type TurnId = z.infer<typeof TurnIdSchema>;
 
+/**
+ * The id prefix a daemon reserves for its OWN wake turns — the continuation turn
+ * a `serve` daemon starts by itself when a background job or sub-agent exits
+ * (docs/fix/autoaccept-wake-turns.md). No client may mint one: `session/prompt`
+ * and `session/send_now` refuse a `turnId` carrying it (`InvalidParams`), so a
+ * client cannot borrow another TUI's auto-accept by naming a wake turn.
+ *
+ * This is a protocol-22 reservation: an older daemon accepts it (a skew whose
+ * cost is one `once` approval, which is why both ends must be updated together).
+ */
+export const WAKE_TURN_PREFIX = "wake-";
+
+/** Whether `id` names a daemon-minted wake turn (see `WAKE_TURN_PREFIX`). */
+export function isWakeTurnId(id: string): boolean {
+  return id.startsWith(WAKE_TURN_PREFIX);
+}
+
 export const PromptParamsSchema = z.object({
   sessionId: SessionIdSchema,
   turnId: TurnIdSchema,
@@ -450,6 +467,15 @@ export const SubagentRowSchema = z.object({
    * `subagents` update, so a `/model` mid-session stays right.
    */
   model: ModelNameSchema.optional(),
+  /**
+   * How many of the USER's messages to this child have entered its context (the
+   * cumulative count `AgentInbox.read("user")` keeps, the same one
+   * `agent_control status` reports as unread from the other side). Compared with
+   * a `subagent_message`'s `n`: `n <= userRead` means that message was read
+   * (docs/fix/autoaccept-wake-turns.md, part B). Absent from an older daemon:
+   * the drawer then keeps today's `read before its next step`. Display-only.
+   */
+  userRead: z.number().int().nonnegative().optional(),
 });
 export type SubagentRow = z.infer<typeof SubagentRowSchema>;
 

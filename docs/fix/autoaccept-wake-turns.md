@@ -448,7 +448,167 @@ Iterate per file. Before done: `bun test`, `bun run typecheck`, `bun run lint`
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+### Repro, on this branch's base (8a77ffe, run from `.tentacle/tmp/autoaccept-wake/`)
+
+`repro.ts` (real `startDaemon` + real `connectTui`, requester = `autoApproves(req, ownRequest(t, session.ownsTurn))`):
+
+```
+ask turnId=a22596bb-… tool=shell own=true auto-accepted=true
+ask turnId=wake-81aeeb56-… tool=shell own=false auto-accepted=false
+RESULT: model requests=3; the wake turn's ask was NOT auto-accepted (held for a human)
+```
+
+`forge.ts` (raw WS, `session/prompt{turnId:"wake-forged-by-a-client"}`):
+
+```
+prompt reply: {"jsonrpc":"2.0","id":3,"result":{"turnId":"wake-forged-by-a-client"}}
+turn_start ids: [ "wake-forged-by-a-client" ]
+```
+
+Both reproduce. After the fix, same two scripts with their imports pointed at this worktree:
+
+```
+ask turnId=1aa2d6b3-… tool=shell own=true auto-accepted=true
+ask turnId=wake-715615bb-… tool=shell own=true auto-accepted=true
+RESULT: model requests=4; the wake turn's ask was auto-accepted
+```
+
+```
+prompt reply: {"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"turnId: the \"wake-\" prefix is reserved for the daemon's own wake turns"}}
+turn_start ids: []
+```
+
+(Worktree copies: `repro-wt.ts` / `forge-wt.ts` / `repro-fixed.ts` in that folder. The
+originals import `../../../packages/…`, i.e. the primary checkout, which good practice
+says not to read from here. `bun install` was needed in the worktree first — it ships no
+`node_modules`.)
+
+### As built, in the plan's order
+
+1. **Protocol** (`protocol/src/session.ts`, `updates.ts`, `version.ts`).
+   `WAKE_TURN_PREFIX = "wake-"` + `isWakeTurnId()` next to `TurnIdSchema`; no schema
+   `.refine` (as planned). `SubagentRowSchema.userRead?` and
+   `SubagentMessageUpdateSchema.n?` added. **`PROTOCOL_VERSION` 21 → 22** with the
+   owner's reason in the comment; `bun run schema:export` regenerated
+   `protocol/schema/protocol.json` (the two new properties plus
+   `x-protocol-version: 22`). Both tests pinning 21 moved to 22
+   (`protocol/test/subagent-panel.test.ts`, `daemon/test/version-mismatch.test.ts`, the
+   latter's literal `daemon 21`/`protocol: 21` messages too), and the version-mismatch
+   test's name gained `then autoaccept-wake-turns'`.
+2. **`core/src/agent-inbox.ts`** — items are `{text, from}`; `push(text, from = "agent")`
+   answers `{ok:true, index}` (that sender's cumulative count, so a queued-but-unread
+   text cannot collide with a later one); `read(from)`; `onRead`. `drain()` and
+   `closeIfEmpty()` both count through one private `takeAll()`; `close()` does not count.
+3. **`core/src/agent-jobs.ts`** — one `private inbox()` helper wires
+   `onRead: () => this.changed()` for all three construction sites (the `drive`
+   fallback too); `message()` returns `index`; `rows()` carries `userRead`. Added
+   `setTwoWay()` + `this.twoWay` for Q3 (see drift 2).
+4. **`daemon/src/hosted-session.ts`** — mints with `WAKE_TURN_PREFIX`;
+   `messageSubagent` emits `n: result.index`.
+5. **`daemon/src/connection.ts`** — `refuseWakeTurnId()` called first in `prompt` and
+   `sendNow`, throwing `RpcError(InvalidParams, "turnId: the \"wake-\" prefix is reserved
+   for the daemon's own wake turns")`. `HostedSession.prompt` left unguarded (the daemon's
+   own wake calls it).
+6. **`daemon/src/subagents-view.ts`** — maps `userRead` and compares it in `sameRows`.
+7. **`client/src/subagents.ts`** — `boundCount`/`boundIndex` keep `userRead`/`n` only
+   as nonnegative (resp. positive) safe integers; `remote-client.ts` and
+   `remote-session.ts` thread them to the listeners.
+8. **`client/src/remote-client.ts`** — `RemoteClientOptions.daemonWakes?: boolean`,
+   default off, passed to every `RemoteSession` it builds.
+9. **`client/src/remote-session.ts`** — `autoAcceptsTurn(turnId)` = `ownsTurn ||
+   (daemonWakes && isWakeTurnId)`; `ownsTurn` untouched.
+10. **`cli/src/connect.ts`** — the only `daemonWakes: true`.
+11. **`cli/src/relay-policy.ts`** — module comment only (A8), naming why it must stay
+    `ownsTurn`. `wiring.ts` also gained `agentJobs.setTwoWay(config.subagentsTwoWay)`.
+12. **`tui/src/permission-ui.ts`** — pure, exported `autoAcceptTest(session)` (widest
+    first, `undefined` when no session decides); `autoApproves`/`ownRequest`/
+    `usePermissionBroker` doc comments updated. Exported from `@tentacle/tui`'s index
+    (the CLI tests and their fakes import the same three helpers the hook uses).
+13. **`tui/src/App.tsx`** — `autoAcceptsTurn?` on the session interface; the lambda is
+    now `autoAcceptTest(sessionRef.current)`; `onSubagentMessage` passes `m.n`.
+14. **TUI part B** — `background-view.ts`: `BackgroundAgentRow.userRead?` +
+    `sameReads()`; `background-focus.ts`: `SentText {text, n?}` and
+    `noteSent(…, n?)`; `background-list.ts`: pure `sentState(n, userRead, outcome)`
+    and its four suffixes (`  ✓ read` success / today's dim text for `unread` and
+    `unknown` / `  · not read` dim), the widest suffix reserved in the width math.
+15. **`CHANGELOG.md`** — two `Fixed` entries (auto-accept's wake turns + the drawer's
+    read state) and one `Changed` entry (the two-way hint), the first naming the
+    protocol 22 bump and "client and daemon must be updated together".
+
+Then the tests, each shown RED first (below).
+
+### Tests, and the red/mutation evidence (§9)
+
+New files: `client/test/autoaccept-wake.test.ts` (T2),
+`tui/test/autoaccept-wake.test.tsx` (T4, T4b, T10 frame).
+
+| Test | Where | RED / mutation shown |
+|---|---|---|
+| T1 `wake-` refused in `prompt` and `send_now`; a lookalike id still runs | `daemon/test/integration.test.ts` (3 tests) | RED on the unfixed code, then RED under the named mutation (the call removed): `2 pass 1 fail` |
+| T1 (second half) the daemon's own wake id starts with the prefix | `cli/test/serve-autowake.test.ts` | assertion added to the existing live-wake test; mutation = mint another id |
+| T2 `autoAcceptsTurn` | `client/test/autoaccept-wake.test.ts` | RED under `drop daemonWakes &&`: `1 fail` |
+| T3 real `serve` + `connectTui`: the wake ask is auto-accepted, nothing held | `cli/test/serve-autowake.test.ts` | RED under `drop daemonWakes: true` from `connect.ts`: `1 fail` (both with the wake half only) |
+| T3 (2nd case) C5 holds: a foreign id is still held | same file | passes on both code versions by design; a wildcard `autoAcceptsTurn` would break it |
+| T4 TUI frame: wake ask answered with no dialog; foreign still asks; Shift+Tab grants a wake dialog; a pod session stays foreign | `tui/test/autoaccept-wake.test.tsx` | RED under "prefer `ownsTurn` in `autoAcceptTest`": `3 fail` |
+| T4b `autoAcceptTest` picks the widest / falls back / none | same file | same mutation run |
+| T5 relay PIN (a pod's `wake-` held) | `cli/test/relay-policy.test.ts` | a pin, as the plan says: green on both, red if the relay ever trusts the prefix |
+| T6 `AgentInbox` read counts + `onRead` | `core/test/agent-inbox.test.ts` | RED before the API existed (`index`/`read` absent) |
+| T7 `AgentJobs` rows/`onChange`/`setTwoWay` | `core/test/agent-jobs.test.ts` | RED under "inbox without `onRead`": `1 fail`; and under "hint regardless of `twoWay`": `3 fail` |
+| T8 `subagents-view` `userRead` + `sameRows` | `daemon/test/subagent-progress.test.ts` | assertion pairs the two mutations the plan names (`userRead: row.userRead`, the `sameRows` comparison) |
+| T8b `messageSubagent` emits `n` | `daemon/test/subagent-panel.test.ts` | RED if `n` is dropped from the emit |
+| T9 client bounds `userRead` and `n` | `client/test/subagents.test.ts` | RED without `boundCount`/`boundIndex` |
+| T10 pure: `sentState` truth table, all four suffixes, the 40-column width | `tui/test/background-list.test.ts` | RED if the `n <= userRead` or the ended branch is dropped |
+| T10 frame: `read before its next step` → `✓ read` | `tui/test/autoaccept-wake.test.tsx` | RED under "keep only `sameIds` in `App.setAgents`" — which is how the missing TUI half was FOUND (see drift 3) |
+| Q3 the hint, on and off (both senders), byte-identical when off | `core/test/agent-inbox.test.ts`, `core/test/agent-jobs.test.ts` | RED under "always/never append" |
+| `noteSent` keeps the index | `tui/test/background-focus.test.ts` | RED if the `n` argument is dropped |
+
+Fixtures touched only because the types grew: `agent-jobs-progress.test.ts`,
+`tools/test/agent-status.test.ts` (`userRead: 0`), `tools/test/task-detach.test.ts`
+(`{ok:true, index}`), `tui/test/background-list.test.ts` (`sent` is `SentText[]`),
+`core/test/agent-inbox.test.ts`/`agent-jobs.test.ts` (`index` in the push/message
+assertions).
+
+### Drift from the Implementation (and why)
+
+1. **`sameReads` in the TUI (not in the plan).** The plan fixed the daemon's `sameRows`
+   but not the TUI's own `App.setAgents`, which gated `setSubagents` on `sameIds` — ids
+   only. The T10 frame test caught it: the daemon's row arrived and the frame never
+   repainted. Same class of drop, second place; fixed with a pure `sameReads()`
+   (`background-view.ts`) OR-ed into that gate, plus its unit test. Without it the
+   feature does not work, so it is not scope creep — it is the other half of B3.
+2. **`AgentJobs.setTwoWay` (Q3 (b)).** The hint belongs in the text the child reads,
+   and that text is built in `AgentJobs.message` (`inboxText`), not in the tools'
+   result strings. Carrying `subagents.twoWay` as a live flag (set once in `wiring.ts`,
+   like `setCap`) keeps it off every constructor and lets a settings sync flip it. Off
+   is byte-identical, which the test pins exactly.
+3. **The `InvalidParams` code came from `ErrorCode`, not `JsonRpcErrorCode`.** The alias
+   is not imported in `connection.ts` (it is re-exported by `@tentacle/transport`), and
+   the missing import surfaced as an `InternalError` — caught by T1 itself, not
+   guessed at.
+4. **`autoAcceptTest` also exported from `@tentacle/tui`.** The T3 stack test must
+   decide "exactly as the TUI does"; importing the same three helpers is what makes
+   that claim true. `relay-policy.ts` already imports from the package, so the pattern
+   exists.
+5. **No `TODO.md` edit.** The prompt forbids it; the plan's last step ("the `TODO.md`
+   lines for both items") is therefore left for the owner.
+6. **`serve-autowake.test.ts` hosts T3** (the plan's own "next to it" suggestion)
+   rather than a new file: it already had the fake endpoint, the project helper and the
+   WebSocket client to reuse.
+
+### Known limits, unverified
+
+- **The `wake-` refusal is checked on every daemon** (A2 says so), so a pod daemon also
+  refuses it. Nothing breaks: the relay and every pod client mint `randomUUID`s, and no
+  mint site anywhere produces the prefix (grepped: only `hosted-session.ts`).
+- **T3's second case is a pin, not a red/green pair** — it asserts a property that was
+  already true (C5). It fails only under a wildcard `autoAcceptsTurn`; I did not stage
+  that mutation because the T4c case pins the same thing at the unit level.
+- **Not re-verified: the owner's live `connect` session.** The stack test is the
+  closest thing here (real `startDaemon`, real `connectTui`, a fake `startTui`); the
+  Ink TUI path itself is covered by T4's frame tests, not by T3.
+- `git status` shows no `TODO.md`, `docs/` or lockfile change, and no commit was made.
 
 ## Review
 

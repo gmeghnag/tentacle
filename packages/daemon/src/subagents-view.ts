@@ -46,6 +46,10 @@ export function subagentRows(
       tokens: row.tokens,
       startedAt: row.startedAt,
       tail: row.tail.map((label) => wireLine(label, SUBAGENT_TAIL_MAX_CHARS)),
+      // The read count rides the row because ONE source of truth counts it
+      // (`AgentInbox.read`), and the drawer compares a message's `n` against it
+      // (docs/fix/autoaccept-wake-turns.md, part B). A number, display only.
+      userRead: row.userRead,
       ...(model !== undefined ? { model: wireLine(model, 64) } : {}),
     };
   });
@@ -89,6 +93,10 @@ export function sameRows(a: readonly SubagentRow[], b: readonly SubagentRow[]): 
       row.startedAt === other.startedAt &&
       row.tail.length === other.tail.length &&
       row.tail.every((label, j) => label === other.tail[j]) &&
+      // WITHOUT this, a frame whose only change is a READ is dropped — the
+      // drawer would keep saying "read before its next step" forever
+      // (docs/fix/autoaccept-wake-turns.md B3; the mutation T8 names).
+      row.userRead === other.userRead &&
       row.model === other.model
     );
   });

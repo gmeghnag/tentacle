@@ -3025,6 +3025,10 @@
           "minLength": 1,
           "type": "string"
         },
+        "n": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
         "text": {
           "type": "string"
         },
@@ -3096,6 +3100,10 @@
           "type": "integer"
         },
         "toolUses": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "userRead": {
           "minimum": 0,
           "type": "integer"
         }
@@ -3916,5 +3924,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 21
+  "x-protocol-version": 22
 }

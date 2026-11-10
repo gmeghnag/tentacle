@@ -179,6 +179,11 @@ export async function connectTui(
     // Asked through the same broker; never stored (the folder is on another host).
     hooksTrust: createHooksTrustResolver({ broker: permissions, interactive: true }),
     clientInfo: CLIENT_INFO,
+    // The ONE place this trust bit is set (AGENTS §7, docs/fix/autoaccept-wake-turns.md
+    // A3): a `serve` daemon is trusted and is the only one that starts its own
+    // wake turns, so its `wake-…` asks are this session's — auto-accept answers
+    // them. Every other runtime leaves it off: a pod's `wake-` id stays foreign.
+    daemonWakes: true,
   });
   // Every controller handed to the TUI, by id: what the exit line reports on.
   const handed = new Map<string, RemoteSession>();

@@ -86,6 +86,7 @@ describe("AgentJobs.progress + rows (6a-2)", () => {
         tokens: 0,
         startedAt: 7000,
         tail: [],
+        userRead: 0,
       },
     ]);
     for (let i = 1; i <= 10; i++) {

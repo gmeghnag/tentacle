@@ -1,3 +1,4 @@
+import type { SentText } from "./background-focus.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
 /**
  * The dock under the footbar: the background list, and one child opened
@@ -523,10 +524,58 @@ function drawerMeta(
   return parts.join(" · ");
 }
 
+/**
+ * Whether one message the user sent to a child was READ (docs/fix/autoaccept-wake-turns.md,
+ * part B, owner Q4 a: "read" means it entered the child's context — the same
+ * count `agent_control status` reports as unread from the other side).
+ *
+ * - `read`: the row's `userRead` reached this message's index (`n`). Both are
+ *   cumulative and absolute, so a TUI that attached late agrees.
+ * - `unknown`: `n` or `userRead` is absent (an older daemon): today's text, no
+ *   claim either way.
+ * - `unread_ended`: the child ended with this one unread (`· not read`).
+ * - `unread`: accepted, not read yet: today's "before its next step".
+ *
+ * Pure, so the truth table is understood and tested in one place (AGENTS §7).
+ */
+export function sentState(
+  n: number | undefined,
+  userRead: number | undefined,
+  outcome: DockOutcome | null,
+): "read" | "unread" | "unread_ended" | "unknown" {
+  if (n !== undefined && userRead !== undefined && n <= userRead) {
+    return "read";
+  }
+  if (outcome !== null) {
+    return "unread_ended";
+  }
+  if (n === undefined || userRead === undefined) {
+    return "unknown";
+  }
+  return "unread";
+}
+
+/** What each state says, and its tone (`unknown` keeps today's exact text). */
+const SENT_SUFFIX: Record<
+  ReturnType<typeof sentState>,
+  { readonly text: string; readonly tone: DockTone }
+> = {
+  read: { text: "  ✓ read", tone: "success" },
+  unread: { text: "  · read before its next step", tone: "dim" },
+  unknown: { text: "  · read before its next step", tone: "dim" },
+  unread_ended: { text: "  · not read", tone: "dim" },
+};
+
+/**
+ * The longest suffix, reserved in the width math so a row never wraps when its
+ * state changes (`✓ read` is shorter than today's text, but the room is the same).
+ */
+const SENT_SUFFIX_WIDEST = "  · read before its next step";
+
 /** One child opened: its head rule, how many steps are hidden, its tail, the user's messages. */
 export function drawerView(opts: {
   readonly row: BackgroundAgentRow;
-  readonly sent: readonly string[];
+  readonly sent: readonly SentText[];
   readonly outcome: DockOutcome | null;
   readonly width: number;
   readonly now: number;
@@ -565,22 +614,21 @@ export function drawerView(opts: {
     },
     { text: " ─", tone: "border" },
   ];
-  const sent: DrawerSent[] = opts.sent.slice(-DRAWER_SENT_MAX).map((text) => {
+  const sent: DrawerSent[] = opts.sent.slice(-DRAWER_SENT_MAX).map((item) => {
     // One line each: the FIRST line of what was typed (a prose message may be long).
-    const first = text.split("\n")[0] ?? "";
+    const first = item.text.split("\n")[0] ?? "";
+    const state = sentState(item.n, row.userRead, opts.outcome);
+    const suffix = SENT_SUFFIX[state];
     const body = truncateCells(
       first,
-      Math.max(
-        0,
-        width - cellWidth(`  you → ${row.id}  `) - cellWidth("  · read before its next step"),
-      ),
+      Math.max(0, width - cellWidth(`  you → ${row.id}  `) - cellWidth(SENT_SUFFIX_WIDEST)),
     );
     return {
       text: body,
       segments: [
         { text: `  you → ${row.id}  `, tone: "notice" },
         { text: body, tone: "normal" },
-        { text: "  · read before its next step", tone: "dim" },
+        { text: suffix.text, tone: suffix.tone },
       ],
     };
   });

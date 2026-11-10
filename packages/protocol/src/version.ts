@@ -14,4 +14,10 @@
 // 21: `history_replaced.reason` may be `clear` (`/clear` resets the conversation
 // inside the session, docs/feat/clear-keeps-jobs.md): a `mandatory` update, so
 // an older client would fail the turn on it.
-export const PROTOCOL_VERSION = 21 as const;
+// 22: the `wake-` turn-id prefix is RESERVED for the daemon's own wake turns
+// (docs/fix/autoaccept-wake-turns.md): `session/prompt` and `session/send_now`
+// refuse a client-minted one, because a TUI with auto-accept on answers a wake
+// turn's asks as its own session's. Breaking on purpose — an older `serve` does
+// not refuse it, so a hand-crafted client could borrow that auto-accept for one
+// `once` approval; bumping makes a mixed pair fail cleanly at `initialize`.
+export const PROTOCOL_VERSION = 22 as const;

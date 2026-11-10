@@ -5,6 +5,14 @@
  * ask of the relay's own turn is allowed once and logged. A pod is not trusted
  * (AGENTS §7), so nothing here outlives the call, and a hooks trust ask or
  * another client's turn is never answered.
+ *
+ * The own-vs-foreign test here is `RemoteSession.ownsTurn` — the turns the relay
+ * MINTED — and never the wider `autoAcceptsTurn`
+ * (docs/fix/autoaccept-wake-turns.md A8). A detached run exists only on a pod,
+ * where no daemon wakes on its own: the relay starts its own wake turns, and
+ * they are already `own`. So a pod-supplied `wake-…` id is FOREIGN here, which
+ * is exactly the rule AGENTS §7 asks for. Do not wire `autoAcceptsTurn` (or a
+ * prefix check) into it; `relay-policy.test.ts` pins it.
  */
 import { DISMISSED, type PermissionRequester, type PermissionResponse } from "@tentacle/core";
 import { autoApproves, ownRequest } from "@tentacle/tui";
