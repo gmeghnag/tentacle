@@ -2,7 +2,7 @@
 
 > **Status:** feat — promoted by the owner 2026-11-10 after a live session poison (llama.cpp 500 "Failed to parse tool call arguments as JSON" on every request after one invalid `fs_write` call)
 > **Branch:** `feat/history-validity-invariant`
-> Type: feat · Size: M · Blast: load-bearing · Suited: DeepSeek exec, one fresh Opus review
+> Type: feat · Size: L · Blast: load-bearing · Suited: DeepSeek exec, one fresh Opus review
 
 ## Context
 
@@ -142,7 +142,16 @@ unguarded throw or regression re-opens it silently. Invalid/oversize arguments
 
 ## Implementation
 
-*— claude-opus-5-5, 2026-11-10*
+*— claude-opus-5-5, 2026-11-10 (revised the same day for the owner's answers: Q1 (b) marker, Q2 (a), Q3 (b) notice, Q4 (b) exception-safe loop)*
+
+**Scope: three parts, implemented in this order.**
+- **Part A, the wire repair.** The model's copy of the history is always valid
+  (rules 1–6 below). This is what un-poisons the owner's session.
+- **Part B, the exception-safe tool loop** (Q4). A throw or a consumer stop
+  never leaves an assistant tool call without a result in the **stored**
+  history.
+- **Part C, the one-time notice** (Q3). The user is told once per session that
+  the model was sent a repaired copy.
 
 **The live incident (2026-11-10).** `tentacle connect` → `serve` → llama.cpp
 `server-cuda13` with a local Qwen. The model emitted an `fs_write` call whose
@@ -198,6 +207,8 @@ So a repair at those three sites reaches every runtime: worker, pod, `serve`,
 - *Empirically*, `.tentacle/tmp/history-validity/cure.ts` is the repro above with
   one change: the model is wrapped so that only the **request's** copy has
   non-object arguments replaced by `"{}"`. The stored history is not touched.
+  The Q1 (b) marker is just as much a plain JSON object, so the proof carries
+  over: the fake server's check (`JSON.parse` → plain object) accepts it.
   Output:
   ```
   [write a file] tool_result {"content":"invalid JSON arguments for fs_write","isError":true}
@@ -208,6 +219,29 @@ So a repair at those three sites reaches every runtime: worker, pod, `serve`,
   stored args: "{\"path\":\"a.txt\",\"content\":\"line1\nunterminated"
   ```
   The same turn continues, the next turn works, and the stored bytes are unchanged.
+
+**Part B also rests on one language fact. It was proved by running it.** A
+`finally` in a generator that is delegated through `yield*` runs to
+completion before any of the following happens:
+- (1) the generator's own throw reaches the consumer's `catch`;
+- (2) a throw in the consumer's `for await` body reaches the consumer's
+  `catch` (`for await` calls `return()`, which runs the inner `finally`);
+- (3) the outer generator's `finally` runs.
+
+Script: `.tentacle/tmp/history-validity/finally-order.ts`. It has the shape
+`runToolCalls` ⊂ `Session.send` ⊂ `HostedSession.drive`. Output:
+
+```
+throw/null:          consumer got tool_start → inner finally (push synthesized answers) → outer finally (Session persist) → consumer catch: authorize boom
+yield/tool_result:   consumer got tool_start → consumer got tool_result → inner finally (push synthesized answers) → outer finally (Session persist) → consumer catch: sink boom
+yield/tool_start:    consumer got tool_start → inner finally (push synthesized answers) → outer finally (Session persist) → consumer catch: sink boom
+```
+
+This means answers pushed in `runToolCalls`'s `finally` are already in
+`session.messages` when two things happen:
+- `Session.send`'s `finally` persists (`packages/agent/src/session.ts:148-160`);
+- `HostedSession.drive`'s `catch` runs `closeFailedTurn` and then `finishTurn`
+  (`packages/daemon/src/hosted-session.ts:2235-2248`).
 
 ### Preconditions
 
@@ -251,6 +285,46 @@ So a repair at those three sites reaches every runtime: worker, pod, `serve`,
   JSON such as `[]` or `"x"` as is, and `tool_use.input` must be an object. The
   OpenAI provider sends `""` and bad JSON verbatim. By code reading (not run
   live), llama.cpp's `json::parse("")` throws, so `""` is a latent poison too.
+- **P7. A call waiting on a permission ask is an `await`, not an exit.**
+  `authorizeCall` awaits `gate.authorize` (`agent.ts:2284`). Nothing calls
+  `.return()`/`.throw()` on an agent generator (`rg '\.return\(|\.throw\('`
+  over `agent`/`daemon`/`client`/`cli` src finds nothing). A consumer can only
+  stop the generator while it is suspended at a `yield`.
+  - So a turn suspended on an ask runs no `finally`. It stays suspended, and a
+    process death leaves exactly the shape the reload resumes (P2).
+  - The Part B `finally` runs only on a real abnormal exit: a throw, or a
+    consumer stop at a `yield`.
+- **P8. Cancellation already answers every call on the NORMAL path.**
+  - Alone calls: `agent.ts:1532-1550`.
+  - `authorizeCall` returns `done`+cancelled (`:2290-2301`).
+  - Groups: `:1655-1657`, `:1688-1696`, `:1753-1763`.
+  - Eval scenario D: `close()` aborts the controller, then calls `finishTurn`
+    synchronously (`hosted-session.ts:2759-2779`). The generator then unwinds
+    through these normal paths.
+  - So Part B must be a no-op on every normal return, cancel included. It is
+    gated by a `settled` flag (Design, Part B).
+- **P9. `authorizeCall` never runs the tool** (`agent.ts:2271`, "Never runs the
+  tool"). The tool runs only in `executeCall` (`:2322-2342`), and it is reached
+  only from `:1573` (alone) and `runPrepared` (`:1829-1836`, groups).
+  - So "this call started" is exactly "`executeCall`/`runPrepared` was called
+    for it".
+  - A call not marked started has certainly not run. This makes the "Not run"
+    note honest.
+- **P10. The protocol rule for a new update.** A `display` update needs:
+  - a union member in `SessionUpdateSchema` (`packages/protocol/src/updates.ts:325-350`);
+  - an `UPDATE_CLASS` entry (`:363-399`; a `Record`, so a missing entry is a compile error);
+  - the daemon mapping (`packages/daemon/src/mapping.ts`, `eventToUpdate`, e.g. `:246-247`);
+  - the client reverse mapping (`packages/client/src/mapping.ts:288-289`).
+
+  An older client skips an unknown `display` kind and reports `unsupported`
+  once (AGENTS §7). So a display-only addition needs **no** `PROTOCOL_VERSION`
+  bump (currently `21`, `packages/protocol/src/version.ts:17`).
+  - The committed `packages/protocol/schema/protocol.json` is drift-gated
+    (`packages/protocol/test/json-schema.test.ts:38-39`). Regenerate it with
+    `bun run schema:export`.
+  - `AgentEvent` switches are exhaustive in four places:
+    `daemon/src/mapping.ts`, `client/src/mapping.ts`, `cli/src/render.ts:53`,
+    and `tui/src/state.ts:488`. `tsc` flags each one.
 
 ### Design
 
@@ -276,7 +350,12 @@ export type HistoryIssue =
   | { readonly kind: "unanswered_call"; readonly index: number; readonly callId: string }
   | { readonly kind: "orphan_tool_result"; readonly index: number; readonly toolCallId: string | undefined };
 
-/** `raw` if it parses to a plain JSON object (non-null, non-array); "{}" otherwise. */
+/** The marker that stands in for invalid arguments (owner Q1 (b)). */
+export function invalidArgumentsMarker(bytes: number): string; // JSON.stringify({ _invalid_arguments: true, bytes })
+/**
+ * `raw` if it parses to a plain JSON object (non-null, non-array);
+ * `"{}"` if `raw.trim() === ""`; otherwise `invalidArgumentsMarker(utf8Bytes(raw))`.
+ */
 export function wireArguments(raw: string): string;
 /** The repaired copy + what was repaired. Returns the INPUT array itself when there is nothing to repair. */
 export function repairHistory(messages: readonly ChatMessage[]): {
@@ -287,21 +366,57 @@ export function repairHistory(messages: readonly ChatMessage[]): {
 export function validateHistory(messages: readonly ChatMessage[]): readonly HistoryIssue[];
 export function invalidArgumentsNote(bytes: number): string;
 export const UNANSWERED_CALL_NOTE: string;
+
+/** What the user is told (Part C): counts of the issues that change what the model sees. */
+export interface RepairCounts {
+  readonly invalidArguments: number;
+  readonly unansweredCalls: number;
+  readonly orphanResults: number;
+}
+/** `null` when all three are 0 (`empty_arguments` is NOT counted: it is no error). */
+export function repairCounts(issues: readonly HistoryIssue[]): RepairCounts | null;
+/** The one notice line, shared by the TUI and the plain CLI renderer (Part C). */
+export function describeRepairs(counts: RepairCounts): string;
+
+/**
+ * Part B: the tool messages that answer every call of `calls` still unanswered
+ * in `owner`'s block, `noteFor(call)` as content, in call order. `[]` when
+ * `owner` is no longer in `messages` (a context reset replaced the history) or
+ * when anything other than `tool` messages follows it (never create an orphan;
+ * the wire repair covers such a history).
+ */
+export function answerOutstandingCalls(
+  messages: readonly ChatMessage[],
+  owner: ChatMessage,
+  calls: readonly ToolCall[],
+  noteFor: (call: ToolCall) => string,
+): ChatMessage[];
 ```
 
 **Repair rules.** These are exact. `index` is the position in the **input**.
 1. **Arguments.** Each `toolCalls[k].arguments` → `wireArguments(raw)`.
-   - If `raw.trim() === ""`, the issue is `empty_arguments` and gets no note. The
-     registry and the Anthropic provider already treat `""` as `{}`, so this is
-     not an error.
-   - If `raw` is non-empty and the result differs, the issue is
-     `invalid_arguments`. `bytes` is the UTF-8 length (`new TextEncoder().encode(raw).length`).
+   - If `raw.trim() === ""`, the result is `"{}"`. The issue is
+     `empty_arguments` and gets no note. The registry and the Anthropic provider
+     already treat `""` as `{}`, so this is not an error.
+   - If `raw` is not empty and does not parse to a plain object, the result is
+     the **marker** and the issue is `invalid_arguments` (owner Q1 (b)).
+     - The marker is exactly `JSON.stringify({ _invalid_arguments: true, bytes })`,
+       i.e. `{"_invalid_arguments":true,"bytes":1902}`. The key order is fixed:
+       `_invalid_arguments` first, then `bytes`.
+     - `bytes` is the UTF-8 length of `raw`: `new TextEncoder().encode(raw).length`.
+     - The marker is a plain JSON object, so it passes `wireArguments` unchanged.
+       This keeps the repair idempotent (rule 6), and the provider guard does
+       not rewrite an already repaired request.
    - Only the **copy** of the assistant message changes. The input objects are
      never mutated.
-2. **Telling the model.** The paired `tool` message of an `invalid_arguments`
-   call gets `"\n\n" + invalidArgumentsNote(bytes)` appended to its `content`, in
-   the copy. The note text is:
-   `[history: this call's arguments (N bytes) were not a valid JSON object; they are omitted from this copy of the conversation.]`
+2. **Telling the model.** In the copy, the paired `tool` message of an
+   `invalid_arguments` call gets `"\n\n" + invalidArgumentsNote(bytes)`
+   appended to its `content`. The note text is exactly:
+   `[history: this call's original arguments (N bytes) were not a valid JSON object, so this copy of the conversation shows {"_invalid_arguments":true,"bytes":N} in their place. That marker is not a tool input: never send it as arguments.]`
+   - The last sentence is there because the model sees the marker as something
+     it "called", and the owner accepted that risk.
+   - If the model imitates the marker anyway, it is a valid object. The tool's
+     schema rejects it (`registry.ts:86-92`), so the wire stays valid.
    - The note does **not** claim the call did not run. An MCP tool with a
      permissive schema may run on `[]`. The paired result, which the registry
      wrote, already says what happened.
@@ -332,54 +447,358 @@ export const UNANSWERED_CALL_NOTE: string;
    - A valid history returns **the same array reference** with no issues, so the
      payload is byte-identical and the prompt cache holds.
 
-**Wiring in the agent.** Add one helper next to `renderForModel` in
+**Wiring in the agent (Part A).** Add one helper next to `renderForModel` in
 `packages/agent/src/context-awareness.ts`:
 
 ```ts
-/** The model's copy of the history: repaired for the wire (repairHistory), then rendered. */
-export function modelMessages(history: readonly ChatMessage[]): ChatMessage[] {
-  return repairHistory(history).messages.map(renderForModel);
+/** The model's copy of the history: repaired for the wire (repairHistory), then rendered; plus what to tell the user. */
+export function modelView(history: readonly ChatMessage[]): {
+  readonly messages: ChatMessage[];
+  readonly repairs: RepairCounts | null;
+} {
+  const repaired = repairHistory(history);
+  return { messages: repaired.messages.map(renderForModel), repairs: repairCounts(repaired.issues) };
 }
 ```
 
-Replace `messages.map(renderForModel)` with `modelMessages(messages)` at `agent.ts:1105`,
-`:1292` and `:1422`, and nowhere else. The estimate (`estimateUsed`,
-`context-awareness.ts:87-101`) stays on the stored history (see failure mode F8).
-`notifyModelRequest` (`agent.ts:1115`) then sees the repaired request, which is
-the request actually sent.
+Change these three sites, and no others:
+- **`agent.ts:1104-1109`**, the round request.
+  - Before building `request`, add `const view = modelView(messages);`.
+  - Build `request` with `messages: view.messages`.
+  - Right after the `request` object, and before `const sent = messages.length`
+    (`:1110`), add:
+    `if (view.repairs) { yield { type: "history_repaired", ...view.repairs }; }`.
+- **`agent.ts:1291-1292`**, the final no-tools round. The same change:
+  `const view = modelView(messages);`, then `...view.messages` replaces
+  `...messages.map(renderForModel)`.
+  - Add the same `if (view.repairs) yield …` right before `finalMessages` is
+    built. The code is inside the `try` at `:1290`, which is fine: a yield of a
+    display event cannot throw a model error.
+- **`agent.ts:1422`**, `contextUsage` (not a generator).
+  - Use `messages: modelView(messages).messages`.
+  - It yields nothing; the notice comes from the next round.
 
-**Provider guard.**
+Further rules for these sites:
+- The estimate (`estimateUsed`, `context-awareness.ts:87-101`) stays on the
+  stored history (F8).
+- `notifyModelRequest` (`agent.ts:1115`) then sees the repaired request, which
+  is the request actually sent.
+- The new `yield`s carry no history change, so they are not a `history_commit`
+  point. They sit before the stream's `await`, outside the drain → `turn_end`
+  stretch (`:1209-1222`), so the steering invariant is untouched (P5). The
+  existing `midNotes` yields at `:1094-1096` are the same kind of pre-request
+  yield.
+
+**Provider guard (Part A).**
 - `toWireMessage` (`openai-provider.ts:287`): change
   `arguments: tc.arguments` to `arguments: wireArguments(tc.arguments)`.
+  - This yields the same marker as the Agent repair: one function, so the bytes
+    are identical.
+  - On an already repaired request it changes nothing.
 - `parseArgs` (`anthropic-provider.ts:420-432`): return `{}` for a parsed value
-  that is not a plain object. Also fix its comment ("The agent loop guarantees
-  parseable arguments" is false today. After this change, the Agent's wire
-  repair guarantees it.)
+  that is not a plain object.
+  - Anthropic's `tool_use.input` is an object, and the Agent's copy already
+    holds the marker object, so this only touches requests the Agent did not
+    build.
+  - Fix its comment. "The agent loop guarantees parseable arguments" is false
+    today; after this change, the Agent's wire repair guarantees it.
 
-**Surfacing.** No new user-visible event (owner Q3). The user already sees the
-failed call's row, `invalid JSON arguments for fs_write`, and the repair changes
-only the model's copy. Nothing stored is dropped, so nothing is silently lost.
+**Part B: the exception-safe tool loop (owner Q4).** All of it goes in
+`packages/agent/src/agent.ts`, with the pure helper `answerOutstandingCalls` in
+core.
 
-**Not changed.** Protocol: no change, no `PROTOCOL_VERSION` bump. Persisted
-format: no change (no `schemaVersion` / `DAEMON_STATE_VERSION` bump). The
-registry's error text and `runToolCalls`'s exception safety are unchanged (owner Q4).
+1. **Two notes**, added next to `CANCELLED_TOOL_NOTE` (`agent.ts:190-192`).
+   Both are error-phrased and never read as a success:
+   ```ts
+   /** A call the turn's unexpected stop reached before it started (P9: certainly not run). */
+   const TURN_STOPPED_NOT_RUN_NOTE =
+     "Not run: the turn stopped unexpectedly before this call started. Ask again if it is still needed.";
+   /** A call that had started when the turn stopped unexpectedly: its result was not recorded. */
+   const TURN_STOPPED_INTERRUPTED_NOTE =
+     "Interrupted: the turn stopped unexpectedly after this tool started; its result was not recorded. It may have completed — check before retrying.";
+   ```
+   - The cause is **not** in the note. The `finally` cannot see the error, and
+     a raw error may carry secrets.
+   - `drive`'s `catch` appends the redacted cause as the assistant's
+     `Failed: …` note, through `closeFailedTurn`
+     (`hosted-session.ts:2240-2243`, `persisted-session.ts:280-289`). That
+     function pushes an assistant message after a trailing `tool` message
+     (`:286-287`), so the roles stay valid.
+2. **`runToolCalls`** (`agent.ts:1466-1598`). Wrap the whole body after
+   `const round = planRound(...)` (`:1503-1508`) in
+   `try { … } finally { … }`, with these locals declared before the `try`:
+   ```ts
+   const owner = messages.findLast(
+     (m) => m.role === "assistant" && (m.toolCalls ?? []).some((c) => c.id === calls[0]?.id),
+   );
+   const started = new Set<string>();   // ids whose executeCall/runPrepared was invoked (P9)
+   let inHand: ChatMessage | undefined; // an alone call's finished message, between its tool_result yield and its push
+   let settled = false;                 // set immediately before every normal `return`
+   ```
+   Changes inside the body:
+   - At `:1527`, `return "context_reset"` becomes
+     `settled = true; return "context_reset";`.
+   - At `:1597`, `return undefined` becomes `settled = true; return undefined;`.
+   - At `:1573`, put `started.add(call.id);` on the line **before**
+     `const resultPromise = this.executeCall(prepared, ctx)…`.
+   - At `:1585-1595`, after `const result = keepDenialReply(raw, transformed);`:
+     1. add `const message = toolMessage(call.id, result, durationMs); inHand = message;`;
+     2. keep the `yield { type: "tool_result", … }` as is;
+     3. replace `messages.push(toolMessage(call.id, result, durationMs));` with
+        `messages.push(message); inHand = undefined;`;
+     4. keep the `history_commit` yield after it.
+
+     The event order is unchanged: `tool_result`, push, `history_commit`.
+   - Pass `started` to `runGroup` (a new last parameter) at `:1512`.
+
+   The `finally`. It has **no `yield` and no `await`**: synchronous pushes only.
+   ```ts
+   } finally {
+     if (!settled && owner !== undefined && messages.lastIndexOf(owner) !== -1) {
+       if (inHand !== undefined) {
+         messages.push(inHand); // H: the REAL result, already transformed (redaction/spill applied)
+       }
+       messages.push(
+         ...answerOutstandingCalls(messages, owner, calls, (c) =>
+           started.has(c.id) ? TURN_STOPPED_INTERRUPTED_NOTE : TURN_STOPPED_NOT_RUN_NOTE,
+         ),
+       );
+     }
+   }
+   ```
+   - Why `owner` is checked by identity: a context reset replaces `messages` in
+     place (`:1998-1999`). If an abnormal exit happens after that commit, it
+     must not append answers to the fresh history. The old assistant is gone,
+     so `lastIndexOf` is `-1` and nothing is pushed.
+   - Why only an **untransformed** result is never pushed (scenario B, a
+     transform throws): the transforms carry redaction and spill. Pushing the
+     raw output could leak what a transform exists to hide. Such a call is
+     `started`, so it gets `TURN_STOPPED_INTERRUPTED_NOTE`.
+3. **`runGroup`** (`agent.ts:1627-1792`).
+   - Add the parameter `started: Set<string>`.
+   - Add `started.add(prepared.call.id);` as the **first statement** of
+     `runPrepared` (`:1829-1836`), before its `await`, and add `started` as its
+     new parameter. Pass it through at `:1708` and `:1749`.
+   - Wrap the body after the `answer` helper (`:1641-1650`) in
+     `try { … } finally { … }`, with
+     `const pushed = new Set<number>(); let groupSettled = false;` declared
+     before it.
+     - At `:1717`, after the push, add `pushed.add(index);`.
+     - Before the `return` at `:1722`: `groupSettled = true;`.
+     - In the final loop `:1783-1788`, add `pushed.add(index)` after each push.
+       After the loop, and **before** the `history_commit` yield at `:1791`, add
+       `groupSettled = true;`.
+   - The `finally`, again with no `yield` and no `await`:
+     ```ts
+     } finally {
+       queue.close(); // idempotent (event-queue.ts:24-34); late completions are dropped (push after close is a no-op, :11-14)
+       if (!groupSettled) {
+         for (const [index, call] of calls.entries()) {
+           const run = answered.get(index);
+           if (run !== undefined && !pushed.has(index)) {
+             messages.push(toolMessage(call.id, run.result, run.durationMs));
+           }
+         }
+       }
+     }
+     ```
+   - This keeps the results the clients **already saw**. Their `tool_result`
+     was yielded through `answer`, and the result is transformed, because
+     `finishCall` (`:1844-1867`) never throws. Calls without a result are then
+     answered by `runToolCalls`'s `finally`: "Interrupted" if `started`, else
+     "Not run".
+   - A call of phase 2 that is still running keeps running in the background,
+     exactly as today. Its late result is dropped by the closed queue, and its
+     note says "may have completed" (Notes/debt).
+4. **`runUserSkill`** (`agent.ts:2019-2072`) has the same shape: it pushes the
+   assistant at `:2026`, then yields.
+   - Declare `const owner = messages.at(-1);` right after the push at `:2026`.
+     Also declare `let inHand: ChatMessage | undefined; let settled = false;`.
+   - Wrap `:2027-2071` in `try/finally`.
+   - Keep the `toolMessage(...)` in `inHand` across the `tool_result` yield
+     (`:2063-2070`), with the same pattern as in step 2.
+   - Set `settled = true` after the final `history_commit` yield.
+   - In the `finally` (no yield, no await): `if (!settled && owner && messages.lastIndexOf(owner) !== -1)`,
+     push `inHand` if set, then
+     `answerOutstandingCalls(messages, owner, [call], () => TURN_STOPPED_INTERRUPTED_NOTE)`.
+     A skill read has no "not started" window worth distinguishing: it is a
+     read, so "Interrupted" is the conservative choice.
+5. **Not changed:**
+   - `runContextReset`. An abnormal exit inside it is answered by
+     `runToolCalls`'s `finally`: "Not run", because a reset is never `started`.
+     After its commit the owner is gone, so nothing is pushed.
+   - The cancel paths (P8).
+   - `authorizeCall`.
+   - The resume seam (`runMessages` with `resumeFrom`, `agent.ts:981`). It
+     calls `runToolCalls` with the remaining calls, and `owner` is then the
+     existing assistant message, found by the first remaining call's id.
+
+**How Part B interacts with the rest:**
+- **Cancel.** It has no effect. A cancel ends through the normal paths (P8), so
+  `settled` is `true` and the `finally` does nothing. T5f pins that the
+  history is byte-identical to today's (eval scenario D).
+- **Permission asks.** A pending ask is an `await`, and no `finally` runs (P7).
+  The turn stays suspended; on a reload it is resumed or closed by P2,
+  unchanged.
+  - An ask that **rejects** is scenario A. Today the RPC path turns a reject
+    into `cancelled` (`daemon/src/connection.ts`), so a reject is possible only
+    from a requester installed elsewhere. The call is answered "Not run", and
+    the error goes on to `drive`.
+- **Parallel calls.** Covered by step 3: results already seen are kept, and
+  the others get "Interrupted" or "Not run". The `started` set is shared
+  between the alone path and the group path, so every call of the round is
+  classified once.
+- **The steering window.** The `finally` blocks run only on abnormal exits.
+  Those never reach the drain → `turn_end` stretch, which lives in
+  `runMessages` *after* `runToolCalls` returned (`agent.ts:1209-1252`). They
+  have no `await`, so no macrotask can interleave.
+- **Persistence.** The pushed answers are in `session.messages` before the
+  error reaches either consumer (proved above).
+  - In-process `Session.send` persists them in its `finally` (`session.ts:156-160`).
+  - `serve`/`drive` runs `closeFailedTurn`, then `finishTurn`, which moves the
+    cut and persists (`hosted-session.ts:2240-2248`).
+  - The laptop's copy reads them from `session/log` at turn end, like any
+    `tool` message.
+  - No `history_commit` is yielded from a `finally`, because a `finally`
+    cannot yield. The cut moves at `finishTurn`.
+  - If the process dies between the push and that persist, the last persisted
+    cut lacks the answers. The reload then labels the dangling calls (P2), so
+    it converges either way.
+  - These are plain `tool` messages, so there is no new log entry type and no
+    format change.
+
+**Part C: the one-time notice (owner Q3).** A new `display` update,
+`history_repaired`, is sent at most **once per loaded session**.
+
+1. **Agent event** (`agent.ts`, the `AgentEvent` union at `:302`). Add this
+   member, next to `context_note` (`:375-378`):
+   ```ts
+   // The model was sent a repaired copy of the history (docs/feat/history-validity-invariant.md).
+   // Display only: no history change, never a commit point.
+   | {
+       readonly type: "history_repaired";
+       readonly invalidArguments: number;
+       readonly unansweredCalls: number;
+       readonly orphanResults: number;
+     }
+   ```
+   It is yielded by Part A's two generator sites whenever `view.repairs` is
+   not `null`, which can be every round. The deduplication is in the daemon
+   (step 3), which outlives an agent swap (`assertIdle` + `updateSettings`
+   swap the agent, `hosted-session.ts:2138-2149`).
+2. **Protocol** (`packages/protocol/src/updates.ts`). Add:
+   ```ts
+   /**
+    * The model was sent a repaired copy of the session's history (invalid tool
+    * arguments replaced by a marker, unanswered calls answered, stray tool
+    * results left out; docs/feat/history-validity-invariant.md). The stored
+    * history is unchanged. Sent at most once per loaded session. Display only.
+    */
+   export const HistoryRepairedSchema = z.object({
+     type: z.literal("history_repaired"),
+     invalidArguments: z.number().int().nonnegative(),
+     unansweredCalls: z.number().int().nonnegative(),
+     orphanResults: z.number().int().nonnegative(),
+   });
+   ```
+   - Add it to `SessionUpdateSchema` (`:325-350`).
+   - Add `history_repaired: "display",` to `UPDATE_CLASS` (`:363-399`), with
+     the comment `// A notice; nothing waits on it (the repair is in the model's copy only).`
+   - Export it like its siblings.
+   - Run `bun run schema:export` and keep the regenerated
+     `packages/protocol/schema/protocol.json`.
+   - **No `PROTOCOL_VERSION` bump** (P10): the update is display-only, and an
+     older client skips it with `unsupported` once.
+3. **Daemon** (`packages/daemon/src/hosted-session.ts`).
+   - Add the field `private historyRepairNoticed = false;`.
+   - In `drive` (`:2169-2232`), before `const update = eventToUpdate(named);`
+     (`:2224`), add:
+     ```ts
+     if (event.type === "history_repaired") {
+       if (this.historyRepairNoticed) {
+         continue;
+       }
+       this.historyRepairNoticed = true;
+     }
+     ```
+     This is synchronous, adds no `await`, and keeps the drive-loop invariant
+     (`:2155-2161`).
+   - In `packages/daemon/src/mapping.ts` `eventToUpdate`, add
+     `case "history_repaired": return { type: "history_repaired", invalidArguments: event.invalidArguments, unansweredCalls: event.unansweredCalls, orphanResults: event.orphanResults };`.
+   - **"Once per session" means once per `HostedSession` instance**: per
+     process lifetime of a loaded session. A daemon restart or a reopen notifies
+     again, once.
+     - Persisting the flag would need a sidecar field, i.e. a
+       `DAEMON_STATE_VERSION` change, for a pure notice. Not done.
+     - A sub-agent's own repairs are not surfaced. `subagent.ts:454-470`
+       handles child events with an `if` chain, so the new type is ignored
+       there; this is debt.
+     - In `run`/`attach` the notice comes from the pod's daemon. It is
+       display-only and has no laptop effect, so the "a pod is not trusted"
+       rule needs no gate.
+4. **Client** (`packages/client/src/mapping.ts`, the update → `AgentEvent`
+   switch at `:288`). Add
+   `case "history_repaired": return { type: "history_repaired", invalidArguments: update.invalidArguments, unansweredCalls: update.unansweredCalls, orphanResults: update.orphanResults };`.
+   It is turn-scoped, like `context_note`, so it rides the turn's event stream.
+5. **TUI** (`packages/tui/src/state.ts`, the reducer's `AgentEvent` switch next
+   to `case "context_note"` at `:488`). Add
+   `case "history_repaired": return appendNotice(state, describeRepairs(event));`.
+   - `appendNotice` is at `:172-184`. `describeRepairs` comes from `@tentacle/core`.
+   - The rendering is the existing notice row. No component changes.
+6. **Plain CLI renderer** (`packages/cli/src/render.ts`, the switch at
+   `:53`). Add `case "history_repaired": return \`\n${describeRepairs(event)}\n\`;`.
+7. **`describeRepairs` text** (core). It joins the non-zero parts with `", "`:
+   - `N tool call(s) with invalid arguments`
+   - `N unanswered tool call(s)`
+   - `N stray tool result(s)`
+
+   It is singular for 1 and plural otherwise ("1 tool call", "2 tool calls").
+   The whole line:
+   `history repaired for the model: <parts> — the saved session is unchanged`.
+   Example: `history repaired for the model: 1 tool call with invalid arguments — the saved session is unchanged`.
+
+**Not changed.**
+- Persisted format: no change. No `schemaVersion` / `DAEMON_STATE_VERSION`
+  bump. Part B's answers are ordinary `tool` messages, and Part C's flag is
+  in memory.
+- Protocol: one additive **display** update, so no `PROTOCOL_VERSION` bump.
+- The registry's error text: unchanged.
 
 ### Files
 
-In dependency order:
-1. `packages/core/src/history-validity.ts` (new): the pure module above.
-2. `packages/core/src/index.ts`: add `export * from "./history-validity.ts";`.
-3. `packages/core/test/history-validity.test.ts` (new): unit tests T1.
-4. `packages/providers/src/openai-provider.ts`: `toWireMessage` uses `wireArguments` (:287).
-5. `packages/providers/src/anthropic-provider.ts`: `parseArgs` rejects non-objects (:420-432).
-6. `packages/providers/test/wire-arguments.test.ts` (new): T2.
-7. `packages/agent/src/context-awareness.ts`: add `modelMessages`.
-8. `packages/agent/src/agent.ts`: the three sites (:1105, :1292, :1422) plus the import (:57).
-9. `packages/agent/test/history-validity-e2e.test.ts` (new): T3 (with the fake llama.cpp server).
-10. `packages/daemon/test/persistence.test.ts`, or a new `history-validity-reload.test.ts` beside it: T4.
-11. `TODO.md`: mark the related items (see Notes). This doc: Execution + Review.
+In dependency order. Each file is followed by its test, which is run red
+first.
 
-There are no `client`/`cli`/`tui` changes.
+| # | File | Change | Test |
+|---|---|---|---|
+| 1 | `packages/core/src/history-validity.ts` (new) | The pure module: `invalidArgumentsMarker`, `wireArguments`, `repairHistory`, `validateHistory`, `invalidArgumentsNote`, `UNANSWERED_CALL_NOTE`, `RepairCounts`, `repairCounts`, `describeRepairs`, `answerOutstandingCalls` | T1 |
+| 2 | `packages/core/src/index.ts` | `export * from "./history-validity.ts";` | — |
+| 3 | `packages/core/test/history-validity.test.ts` (new) | T1 | — |
+| 4 | `packages/protocol/src/updates.ts` | `HistoryRepairedSchema`, union member, `UPDATE_CLASS` `display` | T6a |
+| 5 | `packages/protocol/schema/protocol.json` | Regenerated with `bun run schema:export` (never hand-edited) | the existing drift gate |
+| 6 | `packages/protocol/test/updates.test.ts` | T6a | — |
+| 7 | `packages/providers/src/openai-provider.ts` | `toWireMessage` uses `wireArguments` (:287) | T2 |
+| 8 | `packages/providers/src/anthropic-provider.ts` | `parseArgs`: non-object → `{}`, comment fixed (:420-432) | T2 |
+| 9 | `packages/providers/test/wire-arguments.test.ts` (new) | T2 | — |
+| 10 | `packages/agent/src/context-awareness.ts` | `modelView` | T3 |
+| 11 | `packages/agent/src/agent.ts` | Part A: the three sites (:1104-1109, :1291-1292, :1422) + the `history_repaired` yields + the `AgentEvent` member (:302-…). Part B: the two notes (:190-192), `runToolCalls` try/finally (:1466-1598), `runGroup` try/finally + `started` (:1627-1792), `runPrepared` `started` (:1829-1836), `runUserSkill` try/finally (:2019-2072) | T3, T5 |
+| 12 | `packages/agent/test/history-validity-e2e.test.ts` (new) | T3 | — |
+| 13 | `packages/agent/test/tool-loop-finally.test.ts` (new) | T5 | — |
+| 14 | `packages/daemon/src/mapping.ts` | `eventToUpdate` case | T6b |
+| 15 | `packages/daemon/src/hosted-session.ts` | `historyRepairNoticed` + the dedup in `drive` (:2224) | T6c |
+| 16 | `packages/daemon/test/mapping.test.ts` | T6b | — |
+| 17 | `packages/daemon/test/history-validity-daemon.test.ts` (new) | T4 (reload) + T5g (failed turn persisted answered) + T6c (once per session) | — |
+| 18 | `packages/client/src/mapping.ts` | update → `AgentEvent` case (:288) | T6d |
+| 19 | `packages/client/test/mapping.test.ts` | T6d | — |
+| 20 | `packages/cli/src/render.ts` | `case "history_repaired"` (:53) | T6e |
+| 21 | the existing cli render test (`rg -l "render.ts" packages/cli/test`) | T6e | — |
+| 22 | `packages/tui/src/state.ts` | reducer `case "history_repaired"` → `appendNotice(state, describeRepairs(event))` (:488) | T6f |
+| 23 | `packages/tui/test/state.test.ts` | T6f | — |
+| 24 | this doc | Execution + Review | — |
+
+`apps/mobile` needs no change: `rg context_note apps/mobile` finds no
+`AgentEvent` switch. `bun run typecheck` (which includes `tsc -p apps/mobile`)
+confirms it.
 
 ### Failure modes
 
@@ -399,8 +818,8 @@ There are no `client`/`cli`/`tui` changes.
 - **F5. Invalid arguments and a dangling call together.** One synthesized message
   carries both notes (T1).
 - **F6. A pod relay from an older or untrusted daemon** that sends raw arguments.
-  The provider guard rewrites them to `{}` on the laptop (T2). That request has no
-  note, which is acceptable: the request is still valid. A pod can already send
+  The provider guard rewrites them to the marker on the laptop (T2). That
+  request has no note, which is acceptable: the request is still valid. A pod can already send
   arbitrary prompts through the relay, so there is no security delta (§7 "a pod is
   not trusted": this is not a new laptop effect).
 - **F7. An oversize argument that is valid JSON** (for example a 167 KB file
@@ -428,6 +847,51 @@ There are no `client`/`cli`/`tui` changes.
 - **F11. Compaction and context reset.** Neither is affected:
   `renderMessage` drops arguments, and the rebuilt history goes through the same
   three sites afterwards.
+- **F12. The model imitates the marker** (Q1 (b)). The marker is a valid
+  object, so the wire stays valid. The tool's schema rejects it, and the model
+  gets an `invalid arguments` error to retry from (`registry.ts:86-92`). The
+  note tells it not to send the marker. Pinned by T1 (idempotence: a stored
+  marker is not an issue).
+
+Part B:
+- **F13. A double answer.** A normal exit, including a cancel, must never run
+  the `finally` fill: `settled` / `groupSettled` gate it. Even if it did run,
+  `answerOutstandingCalls` skips answered ids.
+  - T5f: the cancel history is byte-identical to today's.
+  - The mutation "drop the `settled` gate" must still pass T5f, because of the
+    answered-id skip. This shows the two guards are independent.
+- **F14. A suspended turn is closed by mistake.** A pending ask never exits the
+  generator (P7), so no `finally` runs. T5h pins that a turn suspended on an
+  ask, whose generator is simply never resumed, leaves the history dangling
+  (the reload's input, unchanged).
+- **F15. Raw output leaks through the `finally`.** Only an already
+  **transformed** result (`inHand`, or a group's `answered`) is ever pushed. A
+  transform that throws gives the "Interrupted" note (T5b asserts that the raw
+  content is absent from the history).
+- **F16. Answers land in a fresh history after a context reset.** `owner` is
+  checked by identity, so nothing is pushed (T5i).
+- **F17. A group's background call finishes after the turn failed.** Its
+  result is dropped (the queue is closed, and push after close is a no-op), and
+  its note says "may have completed". This is the same as today, minus the
+  dangling id. It is debt: such a call is not aborted.
+- **F18. The `finally` yields or awaits.** That would break the drive-loop
+  invariant and return-protocol semantics. It is forbidden in the Design; the
+  Review checks it with `rg -n "finally" -A 15` on the changed blocks.
+- **F19. A crash between the `finally` push and `finishTurn`'s persist.** The
+  answers are not on disk, so the reload labels the dangling calls (P2). This
+  converges.
+
+Part C:
+- **F20. The notice is shown on every round.** The dedup is in `drive`, per
+  `HostedSession` (T6c: two turns over a poisoned history give exactly one
+  update).
+- **F21. An older client.** It gets an unknown `display` kind → `unsupported`
+  once, and the turn goes on (AGENTS §7). No bump.
+- **F22. An `empty_arguments`-only repair raises a notice.** It must not:
+  `repairCounts` ignores that kind, so the result is `null` and nothing is
+  yielded (T1, T6c).
+- **F23. An agent swap mid-session** (`updateSettings`). The flag lives on
+  `HostedSession`, not on the `Agent`, so the notice is not repeated.
 
 ### Tests
 
@@ -452,10 +916,28 @@ repro above (the same shapes).
   - a valid history → `toBe` (the same reference).
 
   Include the eval's A/B/C/E/F/H shapes as fixtures.
+
+  Also assert:
+  - **The marker:** `wireArguments('{"a":')` is exactly
+    `{"_invalid_arguments":true,"bytes":5}`. A non-ASCII raw value counts UTF-8
+    bytes, e.g. `"é"` is 2. `wireArguments(marker) === marker`.
+  - **The note:** the exact `invalidArgumentsNote(1902)` text.
+  - **`repairCounts`:** `null` for `[]` and for an `empty_arguments`-only list;
+    otherwise the exact counts.
+  - **`describeRepairs`:** the exact line for `{1,0,0}`, for `{2,1,1}`
+    (`history repaired for the model: 2 tool calls with invalid arguments, 1 unanswered tool call, 1 stray tool result — the saved session is unchanged`),
+    and for `{0,0,3}`.
+  - **`answerOutstandingCalls`:**
+    - every call answered → `[]`;
+    - two calls, one answered → one message for the other, with its note;
+    - `owner` absent from `messages` → `[]`;
+    - a `user` message after the block → `[]`;
+    - the input array is never mutated.
 - **T2. Provider wire.** Use the `Bun.serve` body-capture pattern of
   `packages/providers/test/tool-duration.test.ts`.
-  - OpenAI: the body for invalid, `""` or non-object arguments carries
-    `"arguments":"{}"`; a valid history's body is byte-identical to the
+  - OpenAI: for invalid or non-object arguments, the body carries
+    `"arguments":"{\"_invalid_arguments\":true,\"bytes\":N}"`. For `""` it carries
+    `"arguments":"{}"`. A valid history's body is byte-identical to the
     pre-change mapping.
   - Anthropic `buildPayload`: `tool_use.input` is `{}` for `[]` / `"x"`.
   - Red: the current `toWireMessage` sends the raw string.
@@ -470,8 +952,13 @@ repro above (the same shapes).
   - **T3a.** Turn 1: the model calls `fs_write` with invalid arguments, then the
     same turn's next round succeeds (text, `turn_end: end_turn`). Turn 2, "hey",
     succeeds.
-    - The captured round-2 request carries `"arguments":"{}"`, and the paired
-      tool content ends with the `[history: … (N bytes) …]` note.
+    - The captured round-2 request carries the marker
+      `{"_invalid_arguments":true,"bytes":N}`, where N is the UTF-8 length of the
+      bad string. The paired tool content ends with the exact
+      `invalidArgumentsNote(N)`.
+    - The turn's events contain one `history_repaired`
+      `{invalidArguments:1, unansweredCalls:0, orphanResults:0}` per repaired
+      round. The Agent does not deduplicate; the daemon does (T6c).
     - `session.messages` still holds the **original** bytes (non-destructive).
     - Red on the current code: both turns throw the 500.
   - **T3b. The owner's case, offline.** Build
@@ -500,53 +987,137 @@ repro above (the same shapes).
   - **T4b.** On a reload of a turn **suspended** on a permission, with a dangling
     call, the turn still resumes (it is asked again), and `contextUsage` on it
     leaves the history unchanged (F3).
+- **T5. Part B, the exception-safe loop**, in
+  `packages/agent/test/tool-loop-finally.test.ts`.
+  - Setup: real `Agent` + `Session` + `ToolRegistry`, a scripted model (the
+    `ScriptedProvider` of `packages/agent/test/session.test.ts`), and the
+    `noopEnv`. Every case asserts the **full** `session.messages` (roles, ids,
+    contents), and that `validateHistory(session.messages)` is `[]`.
+  - Red on the current code: every case below except T5f and T5h ends with an
+    unanswered `assistant[tool_calls]`. This is the eval's repro output for
+    A/B/C/H.
+  - **T5a (A).** A tool with `permission: "ask"` and a requester that throws
+    (`requestPermission`, the seam of `packages/agent/test/permission.test.ts:213-221`).
+    - `send` rejects with the requester's error.
+    - The history is `user`, `assistant[c1]`, then `tool(c1)` with content
+      `TURN_STOPPED_NOT_RUN_NOTE`.
+  - **T5b (B).** `config.resultTransforms` holds one transform that throws, on
+    a call alone.
+    - `send` rejects.
+    - `tool(c1)` is `TURN_STOPPED_INTERRUPTED_NOTE` (the call was `started`).
+    - The tool's raw output string does **not** appear anywhere in
+      `session.messages` (F15).
+  - **T5c (C).** Two calls in one message, sequential. The consumer `break`s
+    out of `for await` right after the first `tool_start`.
+    - Both are answered with `TURN_STOPPED_NOT_RUN_NOTE`, because neither was
+      started.
+  - **T5d (H).** The consumer throws on receiving the first `tool_result`.
+    - `tool(c1)` holds the **real** transformed result (`inHand`), not a note.
+    - The tool's execute spy ran exactly once.
+  - **T5e (parallel).** `toolExecution: { mode: "parallel", maxParallel: 2 }`,
+    three read-class calls, and a `beforeRun` that resolves `true` (copy the
+    setup of `packages/agent/test/parallel-tools.test.ts`). The
+    consumer throws on the **first** phase-2 `tool_result`.
+    - That call's real result is in the history (the group `finally`).
+    - The other two are `TURN_STOPPED_INTERRUPTED_NOTE`, because they were
+      started (`runPrepared`).
+    - The answers follow call order, then the synthesized ones.
+  - **T5f (cancel, falsification).** Abort mid-tool, exactly the eval's
+    scenario D. `session.messages` deep-equals the same run on the pre-change
+    code: `CANCELLED_TOOL_NOTE` answers and no `TURN_STOPPED_*` note anywhere.
+    This must be green both before and after (it is a guard, not a red test).
+  - **T5g (`serve`, persisted).** This one goes in
+    `packages/daemon/test/history-validity-daemon.test.ts`. On a daemon with a
+    store, a tool's requester throws.
+    - The turn ends `error`.
+    - The persisted `<uid>.jsonl`, read back, holds `tool(c1)` with
+      `TURN_STOPPED_NOT_RUN_NOTE`, then the `closeFailedTurn` assistant note.
+    - A reload adds no second answer: `labelUnansweredCalls` finds nothing.
+  - **T5h (suspension untouched).** A requester whose promise never settles.
+    Start `send`, pull until the ask is raised, then stop pulling (do **not**
+    `return()`).
+    - `session.messages` ends with the dangling `assistant[c1]`.
+    - Nothing is synthesized (F14).
+  - **T5i (context reset).** Use the setup of
+    `packages/agent/test/context-reset-loop.test.ts`: a `context_reset` call
+    whose commit is followed by
+    a consumer throw at the `context_reset` yield.
+    - The fresh history gets **no** `TURN_STOPPED_*` message (F16).
+  - **T5j (user skill).** Use the setup of
+    `packages/agent/test/user-skill.test.ts`: `send("x", undefined, { skill })`,
+    and the consumer
+    throws at the skill's `tool_result`.
+    - The history keeps the real activator result (`runUserSkill`'s `inHand`).
+  - **Mutations** (each must turn the named test red; record each one in
+    Execution):
+    - Delete `runToolCalls`'s `finally` body → T5a, T5b and T5c go red.
+    - Delete the `inHand` push → T5d goes red (the note replaces the real result).
+    - Delete `started.add` in the alone path → T5b goes red (it says "Not run").
+    - Delete `started.add` in `runPrepared` → T5e goes red.
+    - Delete the group `finally` → T5e goes red (the real result is missing).
+    - Drop the `owner` identity check → T5i goes red.
+- **T6. Part C, the notice.**
+  - **T6a (protocol, `updates.test.ts`).**
+    - `SessionUpdateSchema.parse` accepts
+      `{type:"history_repaired",invalidArguments:1,unansweredCalls:0,orphanResults:0}`.
+    - It rejects a negative count.
+    - `UPDATE_CLASS.history_repaired === "display"`.
+    - `PROTOCOL_VERSION` is still `21`.
+    - The drift gate (`json-schema.test.ts`) is green after `schema:export`.
+  - **T6b (daemon mapping).** `eventToUpdate` maps the event field by field.
+  - **T6c (once per session, `history-validity-daemon.test.ts`).** Two prompts
+    over a poisoned history, through the fake llama.cpp provider.
+    - The attached client receives **exactly one** `history_repaired` update.
+    - A valid history gives zero.
+    - A history whose only issue is `""` arguments gives zero (F22).
+    - Mutation: remove the `historyRepairNoticed` check → two updates (red).
+  - **T6d (client mapping).** The update maps to the `AgentEvent` field by field.
+  - **T6e (cli render).** The plain renderer prints the `describeRepairs` line.
+  - **T6f (TUI reducer, `state.test.ts`).** The event appends exactly one
+    `notice` item with the `describeRepairs` text.
+  - **Red** for T6a–T6f: the type and cases do not exist, so the tests fail to
+    compile or assert on the current code.
 - **Gate.** Run `bun test` (full), `bun run typecheck` and `bun run lint` against
   the §6 baseline.
 
-### Owner questions
+### Execution order (for the executor)
 
-Decisions only the owner can make. Each lists the recommendation first.
+Do one part at a time. Run the narrow tests per slice (§4), and record each
+red/green and each mutation in Execution.
+1. **Part A.** Files 1–3, 7–12. Red: run `repro.ts`'s shape as T3a on the
+   current code. Then make T1, T2 and T3 green, and run the T3 mutations.
+2. **Part B.** File 11 (the Part B hunks), 13, and T5g in file 17. Red: T5a–e,
+   T5i and T5j on the code after Part A. T5f and T5h are green both before and
+   after. Run the T5 mutations.
+3. **Part C.** Files 4–6, 14–23, plus the `AgentEvent` member and the yields in
+   file 11. Red: T6. Run the T6c mutation.
+4. **Gate.** `bun test` (full), `bun run typecheck`, `bun run lint`. Then the
+   fresh-context Opus Review (§10: load-bearing).
 
-- **Q1. What replaces invalid arguments in the model's copy?**
-  - **(a) `"{}"`, plus the note appended to the paired tool result** *(recommended)*.
-    The arguments slot stays a plain, schema-neutral object. The explanation goes
-    where the model reads outcomes. The model cannot learn to imitate a marker.
-  - (b) A marker object, `{"_invalid_arguments":true,"bytes":N}`. This is
-    self-describing, but the model sees it as something it "called" and may copy it.
-  - (c) An object with a truncated prefix of the raw string, `{"_raw_prefix":"…"}`.
-    This shows the model what it wrote, but re-sends model bytes. Larger, and of
-    little use.
-- **Q2. Also replace valid but oversize arguments in the model's copy?**
-  - **(a) No. This task repairs only what poisons the wire** *(recommended)*.
-    Size belongs to the "Oversize / degenerate tool-call guard" (`TODO.md:90`),
-    which rejects early, at assembly, with an actionable error. It will reuse
-    `wireArguments` for the JSON check. Hiding a *successful* write's content from
-    the model would make it lose track of what it did.
-  - (b) Yes, above N KiB (for example 64 KiB) → `{}` plus a note.
-- **Q3. Surface the repair to the user?**
-  - **(a) No new event** *(recommended)*. The failed call's row already shows the
-    error, and the repair changes only the model's copy. Nothing stored is
-    dropped. Adding an event would need a new `session/update` display kind, which
-    is protocol work for no new information.
-  - (b) A one-time notice per session when a repair first happens, as a new
-    display update kind (`UPDATE_CLASS`, no version bump).
-- **Q4. Also make the loop itself exception-safe** (a `try/finally` in
-  `runToolCalls` that answers the outstanding ids before propagating; eval
-  scenarios A/B/C/H)?
-  - **(a) Defer it to its own `fix`** *(recommended)*. With this feature, dangling
-    ids can no longer poison the wire (rule 3), and the reload already closes cut
-    turns honestly (P2). The `finally` touches the five tool-push sites of the
-    load-bearing loop (`agent.ts:1538-1890`), and H's lost result needs its own
-    design (push before yield). That is a separate change with a separate review.
-    It extends `TODO.md:154`.
-  - (b) Include it here (Size → L).
+### Owner decisions (2026-11-10)
+
+The owner chose:
+- **Q1 (b), the marker** `{"_invalid_arguments":true,"bytes":N}`, plus the
+  note on the paired result (rules 1–2, F12).
+- **Q2 (a).** Valid but oversize arguments are not handled here (F7).
+- **Q3 (b), the one-time notice.** It is a display update with no bump,
+  sent once per loaded session (Part C).
+- **Q4 (b), the exception-safe loop**, in this task, so the Size is L (Part B).
 
 ### Notes / debt
 
 - Subsumes the *persistence/poison* half of `TODO.md:90` (oversize/degenerate
   guard). Its early-reject half stays open, and it should call `wireArguments`.
-- Subsumes the history-corruption consequence of `TODO.md:154` (a requester throw
-  escapes): dangling ids are now harmless on the wire.
+- Subsumes the history-corruption consequence of `TODO.md:154` (a requester
+  throw escapes): Part B answers the call. The throw still ends the turn as an
+  error, which is intended.
+- The notice is in memory, once per **loaded** session. A daemon restart or a
+  reopen shows it again, once. Persisting the flag would change the sidecar
+  format.
+- A sub-agent's own repairs are not surfaced as a notice (`subagent.ts:454-470`
+  ignores the event).
+- When the turn fails, a group's phase-2 calls that are still running are not
+  aborted (F17), which is the same as today.
 - `TODO.md:161` (consecutive `user` after compaction): a deliberate no-op (rule 5).
 - `docs/eval/sse-abort-truncated-toolcall.md` is a *producer* of invalid
   arguments. Its local fix is still worth doing; this module is the backstop.
