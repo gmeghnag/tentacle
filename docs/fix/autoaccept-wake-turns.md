@@ -443,6 +443,9 @@ Iterate per file. Before done: `bun test`, `bun run typecheck`, `bun run lint`
   counts. A child that ignores a read message shows `✓ read`, which is exactly
   "delivered and ignored", the case the owner wanted to tell apart.
 
+
+**Answers (owner, 2026-11-10):** Q1 (a) every attached TUI with auto-accept on may answer a wake turn's ask, first answer wins · **Q2 (b) BUMP `PROTOCOL_VERSION` 21 → 22** for the `wake-` prefix reservation (closes the new-connect/old-serve edge; client and daemon must be updated together) · **Q3 (b) IN this task:** when `subagents.twoWay` is on, the text delivered to a background child with a user/agent message ends with a short hint that it may answer with `agent_notify` (keep it to one short line; off → byte-identical to today) · Q4 (a) `✓ read` = the message entered the child's context (same count as `agent_control status`'s unread).
+
 ## Execution
 
 *— <model-id>, <YYYY-MM-DD>*
