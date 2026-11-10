@@ -675,6 +675,78 @@ describe("connection close", () => {
   });
 });
 
+// docs/fix/autoaccept-wake-turns.md T1: the `wake-` prefix is the daemon's own.
+// RED before the fix: a client-minted `wake-…` turn started and ran (the repro
+// `forge.ts` printed `turn_start ids: [ "wake-forged-by-a-client" ]`).
+// MUTATION: delete the `refuseWakeTurnId` call in `prompt`/`sendNow` → both
+// become green-but-wrong (the turn starts, and the prefix means nothing).
+describe("the `wake-` turn id is reserved for the daemon (protocol 22, T1)", () => {
+  const model = () => new ScriptedProvider([[{ type: "text", delta: "hi" }, { type: "done" }]]);
+
+  test("session/prompt with a wake- turnId is InvalidParams and starts no turn", async () => {
+    const { client, updates } = harness(model(), noopEnv);
+    await client.request("initialize", INIT);
+    const { sessionId } = (await client.request("session/open", { create: true })) as {
+      sessionId: string;
+    };
+    let error: unknown;
+    try {
+      await client.request("session/prompt", {
+        sessionId,
+        turnId: "wake-forged-by-a-client",
+        content: [{ type: "text", text: "x" }],
+      });
+    } catch (thrown) {
+      error = thrown;
+    }
+    expect(error).toBeInstanceOf(RpcError);
+    expect((error as RpcError).code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect((error as RpcError).message).toContain("reserved for the daemon's own wake turns");
+    await tick(30);
+    // Nothing ran: no `turn_start` (and, of course, no turn_end).
+    expect(updates.map((u) => u.update)).toEqual([]);
+  });
+
+  test("session/send_now with a wake- turnId is refused the same way", async () => {
+    const { client, updates } = harness(model(), noopEnv);
+    await client.request("initialize", INIT);
+    const { sessionId } = (await client.request("session/open", { create: true })) as {
+      sessionId: string;
+    };
+    let error: unknown;
+    try {
+      await client.request("session/send_now", {
+        sessionId,
+        turnId: "wake-9a0b",
+        interrupt: false,
+        content: [{ type: "text", text: "x" }],
+      });
+    } catch (thrown) {
+      error = thrown;
+    }
+    expect(error).toBeInstanceOf(RpcError);
+    expect((error as RpcError).code).toBe(JsonRpcErrorCode.InvalidParams);
+    await tick(30);
+    expect(updates.map((u) => u.update)).toEqual([]);
+  });
+
+  test("a turn whose id merely CONTAINS `wake-` is not a wake turn (a prefix, exactly)", async () => {
+    const { client, updates } = harness(model(), noopEnv);
+    await client.request("initialize", INIT);
+    const { sessionId } = (await client.request("session/open", { create: true })) as {
+      sessionId: string;
+    };
+    expect(
+      await client.request("session/prompt", {
+        sessionId,
+        turnId: "my-wake-1",
+        content: [{ type: "text", text: "x" }],
+      }),
+    ).toEqual({ turnId: "my-wake-1" });
+    expect((await turnEnd(updates, "my-wake-1")).stopReason).toBe("end_turn");
+  });
+});
+
 describe("turn lifecycle in the stream (ack, bracket, idempotency)", () => {
   /** A model whose calls each wait for `release()`, then reply via `reply(callIndex, messages)`. */
   class GatedProvider implements ModelProvider {

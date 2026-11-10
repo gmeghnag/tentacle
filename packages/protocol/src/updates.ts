@@ -325,6 +325,13 @@ export const SubagentMessageUpdateSchema = z.object({
   type: z.literal("subagent_message"),
   agentId: z.string().min(1),
   text: z.string(),
+  /**
+   * The message's place among the USER's messages to this child (1-based, the
+   * cumulative count `AgentInbox.push` answers with): a `subagents` row whose
+   * `userRead >= n` says this one was read (docs/fix/autoaccept-wake-turns.md).
+   * Absent from an older daemon; display only.
+   */
+  n: z.number().int().positive().optional(),
 });
 
 export const SessionUpdateSchema = z.discriminatedUnion("type", [

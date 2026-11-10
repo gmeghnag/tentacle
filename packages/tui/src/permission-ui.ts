@@ -48,7 +48,10 @@ export interface PermissionChoice {
  * Whether auto-accept (Shift+Tab) may answer `req`. Never a project-hooks
  * trust request (docs/feat/hooks-project-trust.md): trusting a repo's code is
  * a human decision, not a tool call to wave through. Never a request of a
- * turn that is not `own` (another device's: owner Q3, docs/feat/tui-foreign-turns.md C5).
+ * turn that is not `own` — another device's turn (owner Q3,
+ * docs/feat/tui-foreign-turns.md C5), or, on a trusted `serve` daemon, one of
+ * the session's own wake turns, which `autoAcceptsTurn` accepts
+ * (docs/fix/autoaccept-wake-turns.md).
  */
 export function autoApproves(req: PermissionRequest, own = true): boolean {
   return own && req.kind !== "hooks_trust";
@@ -58,6 +61,11 @@ export function autoApproves(req: PermissionRequest, own = true): boolean {
  * Is a request of MY turn? `owns`: the session's own-vs-foreign test, absent
  * when no session decides (a local one: every request is mine). Under a
  * session that decides, a request with no turn is not known to be mine.
+ *
+ * Feed it the WIDEST test the session offers — `autoAcceptTest` picks
+ * `autoAcceptsTurn` (own turns AND, on a trusted `serve`, the session's own
+ * wake turns) over `ownsTurn` when both exist
+ * (docs/fix/autoaccept-wake-turns.md A5).
  */
 export function ownRequest(
   turnId: string | undefined,
@@ -67,6 +75,32 @@ export function ownRequest(
     return true;
   }
   return turnId !== undefined && owns(turnId);
+}
+
+/**
+ * The own-vs-foreign test the session offers, or `undefined` when it decides
+ * nothing (a local session: every request is mine). The WIDEST one wins:
+ * `autoAcceptsTurn` (own turns, and on a trusted `serve` the session's own wake
+ * turns) over `ownsTurn`, so a wake turn's ask — and one of a background child
+ * it spawned — is not mistaken for another device's
+ * (docs/fix/autoaccept-wake-turns.md A5).
+ *
+ * Pure on purpose (AGENTS §7: branching lives in a pure module): the App hands
+ * this to `usePermissionBroker` and renders nothing of it.
+ */
+export function autoAcceptTest(
+  session:
+    | { ownsTurn?(turnId: string): boolean; autoAcceptsTurn?(turnId: string): boolean }
+    | null
+    | undefined,
+): ((turnId: string) => boolean) | undefined {
+  if (session?.autoAcceptsTurn) {
+    return (turnId: string) => session.autoAcceptsTurn?.(turnId) === true;
+  }
+  if (session?.ownsTurn) {
+    return (turnId: string) => session.ownsTurn?.(turnId) === true;
+  }
+  return undefined;
 }
 
 /** Whether the dialog shows the cwd row (`permissionCwdLine`): tool calls only, not a trust request. */
@@ -205,9 +239,12 @@ export type DraftBack = (text: string, cause: OrphanCause) => void;
 /**
  * `ownsTurn`: read at each request — the current session's own-vs-foreign test
  * (`ownRequest`), or undefined when no session decides. Auto-accept answers
- * only a request of my own turn. `feed`: auto-accept's state lives there
- * (seeded at mount, so a request held until mount is answered by it); absent,
- * it starts off and stays this TUI's.
+ * only a request of my own turn — or, on a trusted `serve` daemon, of the
+ * session's own wake turn (the App supplies `autoAcceptTest`'s widest test, so
+ * a `wake-…` ask is not another device's; docs/fix/autoaccept-wake-turns.md
+ * A5). `feed`: auto-accept's state lives there (seeded at mount, so a request
+ * held until mount is answered by it); absent, it starts off and stays this
+ * TUI's.
  */
 export function usePermissionBroker(
   permissions?: PermissionBroker,

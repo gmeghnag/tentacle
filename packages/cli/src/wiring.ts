@@ -413,6 +413,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // (one cap); a reused runtime takes the (possibly changed) cap of this build.
   const agentJobs = options.agentJobs ?? new AgentJobs(config.subagentMaxParallel);
   agentJobs.setCap(config.subagentMaxParallel);
+  agentJobs.setTwoWay(config.subagentsTwoWay);
   // The harness's value-add layer over raw tool output. Order matters: redact
   // secrets FIRST (so they never reach the context or the spilled file), then
   // handle large output — either an LLM summary (opt-in, costs a model call) or

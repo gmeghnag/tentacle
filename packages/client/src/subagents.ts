@@ -31,10 +31,23 @@ function boundRow(row: SubagentRow): SubagentRow {
     tokens: row.tokens,
     startedAt: row.startedAt,
     tail: row.tail.slice(-MAX_SUBAGENT_TAIL).map(clean),
+    // The read count, bounded to a nonnegative safe integer: a pod's daemon is
+    // not trusted (AGENTS §7), and this is a display figure only. Absent stays
+    // absent (an older daemon: the drawer keeps today's text).
+    ...(boundCount(row.userRead) === undefined ? {} : { userRead: boundCount(row.userRead) }),
     // A `models` name, bounded like every other label (a pod's daemon is not
     // trusted: AGENTS §7). Absent stays absent (the main agent's own model).
     ...(row.model === undefined ? {} : { model: clean(row.model).slice(0, MODEL_LABEL_MAX) }),
   };
+}
+
+/**
+ * A count a daemon sent, kept only when it is a nonnegative safe integer: a
+ * hostile (or buggy) daemon can then at most print a wrong figure — never a
+ * negative, a float or an `Infinity` in the drawer.
+ */
+function boundCount(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 /** The list as this client keeps it: at most `MAX_SUBAGENT_ROWS`, launch order. */
@@ -90,6 +103,12 @@ function boundNotifyText(value: string): string {
 export interface SubagentMessageView {
   readonly agentId: string;
   readonly text: string;
+  /**
+   * Its place among the user's messages to this child (1-based, cumulative):
+   * the drawer compares it with a row's `userRead` for `✓ read`. Absent from an
+   * older daemon (docs/fix/autoaccept-wake-turns.md, part B).
+   */
+  readonly n?: number;
 }
 
 /**
@@ -103,9 +122,17 @@ export interface SubagentMessageView {
 export function boundSubagentMessage(n: {
   readonly agentId: string;
   readonly text: string;
+  readonly n?: number;
 }): SubagentMessageView {
+  const index = boundIndex(n.n);
   return {
     agentId: progressText(n.agentId).slice(0, NOTIFY_ID_MAX),
     text: boundNotifyText(n.text),
+    ...(index === undefined ? {} : { n: index }),
   };
+}
+
+/** A message's index, kept only when it is a POSITIVE safe integer (the schema's rule). */
+function boundIndex(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }

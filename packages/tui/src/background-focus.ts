@@ -27,7 +27,18 @@ export interface DockState {
   /** Per target: `main`, and each `sa-N` — so opening one never loses what was typed. */
   readonly drafts: Readonly<Record<string, string>>;
   /** The last messages sent to each child (the drawer shows the last 3). */
-  readonly sent: Readonly<Record<string, readonly string[]>>;
+  readonly sent: Readonly<Record<string, readonly SentText[]>>;
+}
+
+/**
+ * One text the user sent to a child. `n` is the message's place among the
+ * user's messages to that child (a `subagent_message`'s own index, absent from
+ * an older daemon): a row whose `userRead` reaches it proves it was READ
+ * (docs/fix/autoaccept-wake-turns.md, part B).
+ */
+export interface SentText {
+  readonly text: string;
+  readonly n?: number;
 }
 
 /** The starting state: on the input, nothing typed, nothing sent. */
@@ -440,11 +451,11 @@ export function reconcile(
 }
 
 /** Note what was sent to a child (the drawer's last 3), and its own draft cleared. */
-export function noteSent(state: DockState, id: string, text: string): DockState {
+export function noteSent(state: DockState, id: string, text: string, n?: number): DockState {
   const previous = state.sent[id] ?? [];
   return {
     ...state,
-    sent: { ...state.sent, [id]: [...previous, text] },
+    sent: { ...state.sent, [id]: [...previous, n === undefined ? { text } : { text, n }] },
     drafts: { ...state.drafts, [id]: "" },
   };
 }

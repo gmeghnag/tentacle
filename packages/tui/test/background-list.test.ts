@@ -18,6 +18,7 @@ import {
   listVisible,
   rowText,
   ruleText,
+  sentState,
 } from "../src/background-list.ts";
 import type { BackgroundAgentRow } from "../src/background-view.ts";
 import { cellWidth } from "../src/cells.ts";
@@ -348,7 +349,7 @@ describe("T-L4: the drawer", () => {
   test("`sent` keeps the last 3, one line each, cut by cells", () => {
     const d = drawerView({
       row: full,
-      sent: ["one", "two", "three", "four"],
+      sent: [{ text: "one" }, { text: "two" }, { text: "three" }, { text: "four" }],
       outcome: null,
       width: 80,
       now: 72_000,
@@ -358,7 +359,7 @@ describe("T-L4: the drawer", () => {
     expect(d.sent[2]?.text).toBe("four");
     const long = drawerView({
       row: full,
-      sent: ["x".repeat(500)],
+      sent: [{ text: "x".repeat(500) }],
       outcome: null,
       width: 80,
       now: 72_000,
@@ -367,7 +368,7 @@ describe("T-L4: the drawer", () => {
     // A message with a newline shows its first line only (one row each).
     const multi = drawerView({
       row: full,
-      sent: ["first\nsecond"],
+      sent: [{ text: "first\nsecond" }],
       outcome: null,
       width: 80,
       now: 72_000,
@@ -463,7 +464,7 @@ describe("T-L5: the dock's height, counted into the viewport (Review H3)", () =>
     });
     const d = drawerView({
       row: full,
-      sent: ["one", "two"],
+      sent: [{ text: "one" }, { text: "two" }],
       outcome: null,
       width: 100,
       now: 72_000,
@@ -697,5 +698,65 @@ describe("a shell job's drawer (docs/feat/shell-jobs-panel.md)", () => {
     expect(frozenJob(null)).toBeNull();
     expect(frozenAgent(row(1))?.id).toBe("sa-1");
     expect(frozenJob(row(1))).toBeNull();
+  });
+
+  // docs/fix/autoaccept-wake-turns.md T10 (part B): `✓ read` once the child took
+  // the message into its context — one absolute, cumulative count on both sides.
+  // MUTATION: drop the `n <= userRead` comparison (or the ended branch) → one of
+  // these goes red.
+  test("`sentState`: the truth table (read / unread / unread_ended / unknown)", () => {
+    // Read: the row's count reached this message's index.
+    expect(sentState(1, 1, null)).toBe("read");
+    expect(sentState(1, 3, null)).toBe("read");
+    // Accepted, not read yet: today's text.
+    expect(sentState(3, 2, null)).toBe("unread");
+    // The child ended with it unread: honest, not "before its next step".
+    expect(sentState(3, 2, { kind: "finished" })).toBe("unread_ended");
+    // Read wins over an outcome: it WAS read.
+    expect(sentState(2, 2, { kind: "finished" })).toBe("read");
+    // An older daemon: no index, no count → no claim either way.
+    expect(sentState(undefined, 2, null)).toBe("unknown");
+    expect(sentState(2, undefined, null)).toBe("unknown");
+    expect(sentState(undefined, undefined, { kind: "stopped" })).toBe("unread_ended");
+  });
+
+  test("the drawer's suffixes: `✓ read`, today's text, `· not read`", () => {
+    const suffix = (extra: Partial<BackgroundAgentRow>, sent: { text: string; n?: number }[]) =>
+      drawerView({
+        row: row(1, extra),
+        sent,
+        outcome: null,
+        width: 80,
+        now: 0,
+      })
+        .sent[0]?.segments.map((s) => s.text)
+        .join("");
+    expect(suffix({ userRead: 1 }, [{ text: "hi", n: 1 }])).toContain("  ✓ read");
+    expect(suffix({ userRead: 0 }, [{ text: "hi", n: 1 }])).toContain(
+      "  · read before its next step",
+    );
+    // An older daemon (no `userRead`, or no `n`): today's text, nothing invented.
+    expect(suffix({}, [{ text: "hi", n: 1 }])).toContain("  · read before its next step");
+    expect(suffix({ userRead: 1 }, [{ text: "hi" }])).toContain("  · read before its next step");
+    // Ended with it unread.
+    const ended = drawerView({
+      row: row(1, { userRead: 0 }),
+      sent: [{ text: "hi", n: 1 }],
+      outcome: { kind: "finished" },
+      width: 80,
+      now: 0,
+    });
+    expect(ended.sent[0]?.segments.map((s) => s.text).join("")).toContain("  · not read");
+    // The row's own text is never cut by the suffix at a narrow width.
+    const narrow = drawerView({
+      row: row(1, { userRead: 1 }),
+      sent: [{ text: "x".repeat(300), n: 1 }],
+      outcome: null,
+      width: 40,
+      now: 0,
+    });
+    expect(
+      cellWidth(narrow.sent[0]?.segments.map((s) => s.text).join("") ?? ""),
+    ).toBeLessThanOrEqual(40);
   });
 });

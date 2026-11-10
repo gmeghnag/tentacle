@@ -381,4 +381,34 @@ describe("agent_control: twoWay on changes the message result too", () => {
     r.gate.resolve({ report: "r", toolUses: 0, stopReason: "end_turn" });
     await tick();
   });
+
+  // Review finding 1 (docs/fix/autoaccept-wake-turns.md): a child MOVED to the
+  // background by `adopt` has no `agent_notify`, so the parent must not be told
+  // it may answer — the flag `message` now uses is the same one.
+  test("an ADOPTED child (no agent_notify) is not promised as one that may answer", async () => {
+    const jobs = new AgentJobs(2);
+    let n = 0;
+    jobs.bind({ launched: () => `sa-${++n}`, ended: () => {} });
+    const slot = jobs.acquire("map repo");
+    if (!slot.ok) {
+      throw new Error("expected a slot");
+    }
+    const gate = Promise.withResolvers<{ report: string; toolUses: number; stopReason: string }>();
+    slot.adopt(
+      { callId: "c1", agentType: "general", description: "map repo" },
+      new AbortController(),
+      { toolUses: 0, tokens: 0, tail: [] },
+      async () => gate.promise,
+    );
+    const out = await createAgentControlTool(jobs, { twoWay: true }).execute(
+      { action: "message", agent_id: "sa-1", text: "hi" },
+      ctx,
+    );
+    expect(out.content).toBe(
+      "queued for sa-1: it reads it before its next model step. No reply comes back; its report still arrives as a [background] note.",
+    );
+    expect(out.content).not.toContain("agent_notify");
+    gate.resolve({ report: "r", toolUses: 0, stopReason: "end_turn" });
+    await tick();
+  });
 });

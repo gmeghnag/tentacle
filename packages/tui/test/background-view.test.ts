@@ -10,6 +10,7 @@ import {
   backgroundNames,
   backgroundSuffix,
   sameIds,
+  sameReads,
 } from "../src/background-view.ts";
 
 const row = (i: number): BackgroundAgentRow => ({ id: `sa-${i}` });
@@ -51,5 +52,19 @@ describe("LOW-4: an unchanged report does not re-render the App", () => {
     expect(sameIds([row(1), row(2)], [row(2), row(1)])).toBe(false);
     expect(sameIds([row(1)], [row(2)])).toBe(false);
     expect(sameIds([row(1)], [row(1), row(2)])).toBe(false);
+  });
+
+  // docs/fix/autoaccept-wake-turns.md part B: a report whose ONLY change is a
+  // read must still reach the frame, or the drawer never says `✓ read`.
+  // MUTATION: keep only `sameIds` in `App.setAgents` → this pair is unused and
+  // the T10 frame test goes red.
+  test("sameReads: a read alone is a change; the same reads are not", () => {
+    expect(sameReads([row(1)], [row(1)])).toBe(true);
+    expect(sameReads([{ id: "sa-1", userRead: 1 }], [{ id: "sa-1", userRead: 1 }])).toBe(true);
+    expect(sameReads([{ id: "sa-1", userRead: 0 }], [{ id: "sa-1", userRead: 1 }])).toBe(false);
+    expect(sameReads([row(1)], [{ id: "sa-1", userRead: 2 }])).toBe(false);
+    // A count change is never "nothing to redraw", and neither is a new list.
+    expect(sameReads([row(1)], [row(1), row(2)])).toBe(false);
+    expect(sameReads(undefined, [row(1)])).toBe(false);
   });
 });

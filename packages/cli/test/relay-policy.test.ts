@@ -130,4 +130,27 @@ describe("relay policy (docs/feat/detached-relay.md R1-R3)", () => {
     expect(events.filter((e) => e.type === "ask_raised")).toHaveLength(3);
     controller.abort();
   });
+
+  // docs/fix/autoaccept-wake-turns.md T5 (A8): a PIN, not a red/green pair — it
+  // holds on old and new code, and fails the day someone wires the wider test
+  // (`autoAcceptsTurn`, or a `wake-` prefix check) into the relay. A detached
+  // run exists only on a pod, where no daemon wakes on its own and a `wake-…`
+  // id is pod-supplied: it must stay FOREIGN (AGENTS §7).
+  test("A8 pin: auto-accept on, a pod's `wake-…` turn is HELD, never answered", async () => {
+    const { policy, events } = rig(true);
+    policy.bindOwnsTurn(() => false);
+    const controller = new AbortController();
+    let settled = false;
+    const answer = policy
+      .requester(ask, { signal: controller.signal, turnId: "wake-forged-by-a-pod" })
+      .then((r) => {
+        settled = true;
+        return r;
+      });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(settled).toBe(false);
+    expect(events).toEqual([{ type: "ask_raised", tool: "shell" }]);
+    controller.abort();
+    expect(await answer).toBe(DISMISSED);
+  });
 });
