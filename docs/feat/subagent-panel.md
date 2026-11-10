@@ -973,3 +973,42 @@ input row. F11 checks the input row itself.
 
 **PASS**
 
+
+## UI revision — design B (owner, 2026-11-10)
+
+*— claude-opus-5-5 (designer, mockups v2/v3/B-refined) + orchestrator write-up, 2026-11-10*
+
+**Why.** The owner ran the reviewed build at ~190 columns and rejected the permanent dock under the status bar ("tutto accozzato"): the dock rule rendered with a gap between `background · 2` and the hints, each row's meta sat at the far right edge (~150 columns from its title), `general` repeated on every row, and the hints stacked under `auto-accept on`. Three rounds of mockups followed; the owner chose **B (refined)** and asked that the sub-agent model be shown in this task. P1 (titled rule always visible), P2 (drawer under the footbar) and P8 are superseded by this section; P3, P4, P5, P6, P7 stand.
+
+**Visual truth:** `/Users/gmeghnag/tentacle/.tentacle/tmp/subagent-panel/mockups/v3/b.html` (durable copy in `.tentacle/site/mockup-generator/mockups-subagent-panel/v3/b.html`), every state at 190 and 80 columns, light and dark. Match its glyphs, rules, spacing and hints.
+
+**Layout, top to bottom:** transcript → `Thinking…` → [dropdown OR open sub-agent drawer, only when opened] → input rule → input → bottom rule → **status bar LAST**.
+
+**The pill.** The status bar's right side reads `⏵⏵ auto-accept on · 2 agents ↓` (the `· N shell` part only once P6's shell-job feed exists — NOT in this task; with no feed the pill counts sub-agents only). No permanent list anywhere. With no background item the pill is absent and the screen is exactly as before this task.
+- Unfocused: the pill carries a dim `↓`.
+- DOWN from the input (same DOWN table as today: an empty draft slot, not mid-history, not a multi-line move, no palette) → the pill is FOCUSED: shown with an inverse/accent background; `enter open · esc back` appears just left of it (below 90 columns only a `⏎` inside the pill).
+- Enter or a mouse click (SGR) on the pill → the DROPDOWN opens above the input, first row selected.
+- A permission ask from a background child: the pill turns warning-coloured and reads `▲ sa-2 asks · …`; the permission prompt still takes the input's place as today.
+- A child ends: the pill shows `✓ sa-1 done` for ~5 s, then the new counts; when the last one ends the pill disappears (focus on it → back to the input).
+- `targetBorder` / `statusHint` must never replace `auto-accept on` any more.
+
+**The dropdown** (above the input). Its top rule carries title and keys: `── background · 3 ─── ↑↓ move · enter open · x stop · esc back ─`; the input's top rule becomes a PLAIN line (its bottom edge) — never two labelled rules stacked, and **no model name** on the input rule while the dropdown or a drawer is open (owner). Rows are compact, left-aligned columns: `● sa-1  Ada: turni dispari del dibattito   8 tools · 74k · 1m 24s`; the title column is capped at 56 cells; meta starts 3 cells after the widest title, never padded to the far edge; the type column appears only if some row's type is not `general`; the MODEL column (below) appears only if some row has one. The 5-row window, `↑k ↓m`, `x` then `y` stop, and `reconcile` are reused. Mouse: a click on a row opens it.
+
+**The open sub-agent (drawer)** (above the input, replacing the dropdown): head rule `─ sa-2 · Bruno: turni pari del dibattito · qwen3.8 ─── running … ─` (model only if different), its tail, the sent lines; the input rule reads `─ → sa-2 · enter sends · esc back ───` (no model). Drafts swap per target as already built (H1 fix).
+
+**Esc chain:** drawer → dropdown → pill → input; at the input the rule shows `── <model> ─` again and the main draft is intact.
+
+**Height:** idle = no extra rows; dropdown = 1 + rows (≤ 5) + its edge; drawer as built. Everything above the input is taken from the transcript, so the input and the status bar never move. `dockRows` feeds `activeRows` (H3) for the new placement.
+
+**The sub-agent's model (owner: show it only when it differs from the main agent's).** Protocol: an optional display field `model` on `SubagentRowSchema` (`protocol/src/session.ts` ~:428) = the child's `models` NAME (never an id, URL or key — §7). **The daemon decides**: it fills `model` only when the child's resolved model differs from the main agent's CURRENT model, recomputed on every `subagents` update (the list is always re-sent whole, so a `/model` mid-session stays right); absent = same as main. Strip schema + `display` class → no `PROTOCOL_VERSION` bump; regenerate `protocol.json`. The client bounds it like the other labels (control chars, cell cut). Shown in the dropdown's model column and the drawer's head rule; never in the pill, never on the input rule.
+
+**Code changes (Size M overall), in order:**
+0. FIRST a frame repro (ink-testing-library, ~190 columns) of the owner's broken dock rule (the gap between `background · 2` and the hints) — `ruleSegments` (`background-list.ts` ~:208) already fills to `width`, so the gap comes from rendering; capture, find, fix, keep the test (it must hold for the dropdown's rule).
+1. protocol + daemon + client: the `model` field (above). S.
+2. `background-focus.ts` (pure): states `pill` and `dropdown` added to the focus machine (DOWN → pill → Enter → dropdown → Enter → open; Esc chain; last item ends → input; a click event → same transitions). M.
+3. `background-list.ts` (pure): the list computed only for the open dropdown (`dockRows` 0 when closed); compact left-aligned columns, conditional type and model columns, title cap 56; drawer head rule with the model. S.
+4. `status-view.ts` (pure): the pill model — counts, `▲ sa-N asks` prefix, `✓ done` for ~5 s, normal/focused/open, the hint beside it, and its COLUMN RANGE in the last line for mouse hit-testing; replaces today's `· N sub-agents` suffix. S/M.
+5. `status-line.ts` (pure): input rule label per focus (model / plain / `→ sa-N · enter sends · esc back`); auto-accept never replaced. S.
+6. `StatusBar.tsx`, `BackgroundList.tsx` (components): paint the pill (inverse / accent / warning), the dropdown and drawer from the view-models. S.
+7. `App.tsx` (component): render the dropdown/drawer ABOVE the input rule and the status bar last; route the pill/dropdown keys; SGR clicks on the pill and on dropdown rows; viewport height. M.
+8. Tests: unit tests for the focus machine, the pill model (incl. column range and the 5 s `done`), the row grammar (conditional columns, no far-edge padding), the model field (daemon: same → absent, different → name, `/model` switch → appears); frame tests for each mockup state at 190 and 80 columns, including a click on the pill. Existing frame tests F1–F13 updated to the new placement, each change justified in Execution.
