@@ -55,6 +55,10 @@ function fake(opts: {
   readonly jobs?: readonly DockJobRow[];
   readonly agents?: readonly DockTestRow[];
   readonly noOutput?: boolean;
+  /** The drawer's read answers this output (default: the mockup's three lines). */
+  readonly output?: readonly string[];
+  /** The read says the buffer dropped older output (the `… earlier` row). */
+  readonly truncated?: boolean;
 }): { session: SessionController; api: JobApi; jobs: unknown } {
   const jobListeners = new Set<(r: { rows: readonly DockJobRow[]; count: number }) => void>();
   let rows = opts.jobs ?? [];
@@ -90,10 +94,10 @@ function fake(opts: {
               found: true,
               jobId,
               status: gone === undefined ? "running" : gone.status,
-              ...(gone === undefined ? {} : { exitCode: gone.exitCode }),
-              // Owner Q4 (b): one merged array, as `shell_output` shows it.
-              output: ["found Turno 12", "found Turno 13", ""],
-              truncated: false,
+              ...(gone === undefined || gone.exitCode === null ? {} : { exitCode: gone.exitCode }),
+              // Owner A: one array in arrival order, as `shell_output` reads it.
+              output: opts.output ?? ["found Turno 12", "found Turno 13", ""],
+              truncated: opts.truncated ?? false,
             });
           },
         }),
@@ -133,12 +137,14 @@ function fake(opts: {
       },
       exitJob: (id, status, exitCode) => {
         exits.set(id, { status, exitCode });
-        // The frame first (the row leaves at once), then the exit notice.
-        rows = rows.filter((r) => r.id !== id);
-        for (const l of jobListeners) l({ rows, count: rows.length });
+        // The EXIT first, then the list (the daemon's order, review 3): a client
+        // freezes an open drawer from the exit record, so the outcome is known
+        // before the row that drops it can be acted on.
         for (const l of exitListeners) {
           l({ id, command: "watch", startedAt: 0, status, exitCode });
         }
+        rows = rows.filter((r) => r.id !== id);
+        for (const l of jobListeners) l({ rows, count: rows.length });
       },
       readsOf: (id) => reads.filter((r) => r.jobId === id).length,
     },
@@ -388,6 +394,25 @@ describe("F6: an exit while the drawer is open freezes it", () => {
     expect(f).toContain("─ bg-3 · ");
     app.unmount();
   });
+
+  test("review 3: SPLIT delivery (frame, then the exit 30 ms later) still says `✓ exited (0)`", async () => {
+    // The order the daemon now emits is exit-then-list, so a transport that
+    // splits them cannot freeze the drawer as `✗ stopped`. A transport that
+    // REORDERS them (or a daemon that still sends the list first) would — this
+    // test pins the client's tolerance of the split itself, which is what the
+    // reviewer's repro exercised.
+    const { app, api, frame } = await mount({ jobs: [SHELL_ROW] });
+    await openFirstJob(app);
+    // The row leaves the list NOW; the exit notice lands a macrotask later.
+    api.setJobs([]);
+    await delay(30);
+    api.exitJob("bg-3", "exited", 0);
+    await delay(80);
+    const f = frame();
+    expect(f).not.toContain("✗ stopped");
+    expect(f).toContain("✓ exited (0)");
+    app.unmount();
+  });
 });
 
 describe("F7: an older daemon (no jobOutput) says so once and keeps the frame", () => {
@@ -428,6 +453,133 @@ describe("F8: the 5-row window with 4 children + 3 jobs", () => {
     const moved = frame();
     expect(moved).toContain("› ◆ bg-2");
     expect(moved).toContain("↑1");
+    app.unmount();
+  });
+});
+
+describe("F9 (owner B): the drawer's outcome, tone and total run time", () => {
+  /** A job older than its exit, so the duration is a real figure, not `0s`. */
+  const STOPWATCH: DockJobRow = { ...SHELL_ROW, startedAt: Date.now() - 250_000 };
+
+  test("a clean exit: `✓ exited (0) · 4m …`, never a bare `✓ exited`", async () => {
+    const { app, api, frame } = await mount({ jobs: [STOPWATCH] });
+    await openFirstJob(app);
+    api.exitJob("bg-3", "exited", 0);
+    await delay(80);
+    const f = frame();
+    expect(f).toContain("✓ exited (0) · 4m");
+    app.unmount();
+  });
+
+  test("a non-zero exit says `✗ exited (2)` with the duration — no `✓` anywhere", async () => {
+    const { app, api, frame } = await mount({ jobs: [STOPWATCH] });
+    await openFirstJob(app);
+    api.exitJob("bg-3", "exited", 2);
+    await delay(80);
+    const f = frame();
+    expect(f).toContain("✗ exited (2) · 4m");
+    expect(f).not.toContain("✓ exited");
+    app.unmount();
+  });
+
+  test("a signal death (no code) says `✗ killed`", async () => {
+    const { app, api, frame } = await mount({ jobs: [STOPWATCH] });
+    await openFirstJob(app);
+    api.exitJob("bg-3", "killed", null);
+    await delay(80);
+    const f = frame();
+    expect(f).toContain("✗ killed · 4m");
+    expect(f).not.toContain("✗ stopped");
+    app.unmount();
+  });
+
+  test("stopping it from the dock says `✗ stopped`, not `killed`", async () => {
+    const { app, api, frame } = await mount({ jobs: [STOPWATCH] });
+    await openDropdown(app);
+    app.stdin.write("x");
+    await delay(30);
+    app.stdin.write("y");
+    await delay(40);
+    expect(api.kills).toEqual(["bg-3"]);
+    // The row is still listed until the exit arrives (F5): open it, so the freeze
+    // is what paints the outcome. The kill we asked for is recorded by id.
+    app.stdin.write(ENTER);
+    await delay(60);
+    // The exit the daemon reports for our own kill: `killed`, no code.
+    api.exitJob("bg-3", "killed", null);
+    await delay(80);
+    const f = frame();
+    expect(f).toContain("✗ stopped · 4m");
+    expect(f).not.toContain("✗ killed");
+    app.unmount();
+  });
+});
+
+describe("F10 (review 4): the drawer never outgrows a short terminal", () => {
+  /** A full tail with `truncated`, so the `… earlier output` row is there too. */
+  const FULL = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
+
+  for (const rows of [20, 16]) {
+    test(`at 80x${rows}: the frame is at most ${rows} lines, and the tail is visible`, async () => {
+      const { app, frame } = await mount(
+        { jobs: [SHELL_ROW], output: FULL, truncated: true },
+        80,
+        rows,
+      );
+      await openFirstJob(app);
+      const f = frame();
+      const height = lines(f).length;
+      // The bug: a fixed 14-row drawer (head + `… earlier` + 12 tail) fitted a
+      // 24-row terminal and overflowed this one, so Ink re-cleared it every
+      // repaint (Review H3's flicker class).
+      expect(height).toBeLessThanOrEqual(rows);
+      // And it is still a drawer: the head, and output lines from the tail.
+      expect(f).toContain("─ bg-3 · ");
+      expect(f).toContain("line 30");
+      app.unmount();
+    });
+  }
+
+  test("the same drawer at 80x24 keeps its full 12-line tail", async () => {
+    const { app, frame } = await mount(
+      { jobs: [SHELL_ROW], output: FULL, truncated: true },
+      80,
+      24,
+    );
+    await openFirstJob(app);
+    const f = frame();
+    expect(lines(f).length).toBeLessThanOrEqual(24);
+    // Room for the whole window: nothing is cut that did not have to be.
+    expect(f).toContain("line 19");
+    expect(f).toContain("line 30");
+    app.unmount();
+  });
+});
+
+describe("F11 (owner A supersedes review 2): a stderr-heavy job still shows its stdout", () => {
+  test("20 stderr + 5 stdout lines: the stdout is in the drawer, in arrival order", async () => {
+    // What the daemon now answers: ONE arrival-ordered array, its last 12 lines
+    // to fill a 12-row window. Before owner A the window was `err9…err20` and no
+    // stdout line could ever be painted.
+    const output = [
+      ...Array.from({ length: 7 }, (_, i) => `err${i + 14}`),
+      "OUT1",
+      "OUT2",
+      "OUT3",
+      "OUT4",
+      "OUT5",
+    ];
+    const { app, frame } = await mount({ jobs: [SHELL_ROW], output }, 80, 24);
+    await openFirstJob(app);
+    const f = frame();
+    for (const line of ["OUT1", "OUT2", "OUT3", "OUT4", "OUT5"]) {
+      expect(f).toContain(line);
+    }
+    // Arrival order, not stdout-then-stderr: the last rows are the stdout ones.
+    const body = lines(f)
+      .map((l) => l.replace(/^\s*│\s?/, "").trim())
+      .filter((l) => l.startsWith("OUT") || l.startsWith("err"));
+    expect(body.slice(-5)).toEqual(["OUT1", "OUT2", "OUT3", "OUT4", "OUT5"]);
     app.unmount();
   });
 });

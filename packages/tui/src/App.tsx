@@ -15,6 +15,7 @@ import {
   type DockOutcome,
   type DockState,
   INPUT_DOCK,
+  applyLateOutcome,
   clickDock,
   dockKey,
   dockKindOf,
@@ -92,7 +93,7 @@ import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from
 import { startIdleWarm } from "./idle-warm.ts";
 import { resolveLineInput } from "./input-actions.ts";
 import { inputRowCount } from "./input-view.ts";
-import { JOB_REFRESH_MS, JOB_TAIL_SHOWN, refreshDue } from "./job-drawer.ts";
+import { JOB_REFRESH_MS, JOB_TAIL_SHOWN, jobOutcome, refreshDue } from "./job-drawer.ts";
 import { type LinkFeed, stoppedNotice } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
@@ -821,6 +822,12 @@ export function App({
    */
   const dockFinishedRef = useRef<{ readonly id: string; readonly at: number } | null>(null);
   /**
+   * The jobs THIS dock asked to stop (`x` then `y`). A job's exit record only
+   * says `killed` — it cannot tell the user's own stop (`✗ stopped`) from a
+   * signal nobody here sent (`✗ killed`), which owner B wants apart (fix round 1).
+   */
+  const dockStoppedRef = useRef<Set<string>>(new Set());
+  /**
    * Each open job's last read, by wire id: what its drawer paints. A REF, never
    * state the refresh effect depends on — a fresh read must not re-arm the timer
    * (that is what would break the ≤ 1/s rule); the `jobOutputGen` state beside it
@@ -1009,20 +1016,27 @@ export function App({
     return jobs.onExit((job) => {
       // A sub-agent's exit carries its own stop reason (`end_turn` = a clean
       // finish): the dock's frozen drawer says which (docs/feat/subagent-panel.md).
-      if (job.agent !== undefined) {
-        dockOutcomeRef.current[job.id] =
-          job.agent.stopReason === "end_turn" ? { kind: "finished" } : { kind: "stopped" };
-        // The pill celebrates it for ~5 s (status-view.ts owns the window), then
-        // shows the new counts; the LAST one to end leaves no pill at all.
-        dockFinishedRef.current = { id: job.id, at: Date.now() };
-      } else {
-        // A SHELL JOB (docs/feat/shell-jobs-panel.md): the same record, keyed by
-        // its wire id — `killed` is a stop, anything else a clean exit — so a
-        // frozen drawer says `✓ exited (0)` / `✗ stopped` and the pill names it.
-        dockOutcomeRef.current[job.id] =
-          job.status === "killed" ? { kind: "stopped" } : { kind: "finished" };
-        dockFinishedRef.current = { id: job.id, at: Date.now() };
-      }
+      const outcome: DockOutcome =
+        job.agent !== undefined
+          ? job.agent.stopReason === "end_turn"
+            ? { kind: "finished" }
+            : { kind: "stopped" }
+          : // A SHELL JOB (docs/feat/shell-jobs-panel.md, owner B): the drawer's
+            // outcome comes from THIS record — the code the daemon reported, and
+            // whether the stop was the dock's own (`dockStoppedRef`).
+            jobOutcome({
+              status: job.status,
+              exitCode: job.exitCode,
+              byDock: dockStoppedRef.current.has(job.id),
+            });
+      dockOutcomeRef.current[job.id] = outcome;
+      // An open drawer may already have frozen on the `stopped` fallback (its row
+      // left before this record arrived — review 3): the record is the truth, so
+      // correct it now, whatever macrotask the transport used.
+      setDock((prev) => applyLateOutcome(prev, job.id, outcome));
+      // The pill celebrates it for ~5 s (status-view.ts owns the window), then
+      // shows the new counts; the LAST one to end leaves no pill at all.
+      dockFinishedRef.current = { id: job.id, at: Date.now() };
       stateRef.current = appendBackgroundExit(
         stateRef.current,
         backgroundExitNotice(job.id, job.command, job.status, job.exitCode, job.agent),
@@ -1032,7 +1046,7 @@ export function App({
       // Autonomous wake: react to the exit without a user prompt.
       armWake();
     });
-  }, [jobs, flushNow, armWake]);
+  }, [jobs, flushNow, armWake, setDock]);
 
   // --- host notices ----------------------------------------------------------
   useEffect(() => {
@@ -1187,6 +1201,13 @@ export function App({
             outcome: drawerOpen.ended,
             width: columns,
             now: dockNow,
+            // Review 4 (fix round 1): the drawer used to be a fixed 14 rows, so on
+            // a short terminal (80×20, 80×16) the frame was TALLER than the screen
+            // and Ink re-cleared it on every repaint. The budget is what the
+            // layout has left once the transcript's floor, the running rows and
+            // the input+status block are reserved — the same parts `activeRows`
+            // sums below, so `dockRows` can never reserve more than this.
+            maxRows: Math.max(1, termRows - (RESERVED_ROWS - 1) - inputBoxRows - runningRows - 3),
           })
         : drawerRow !== null
           ? drawerView({
@@ -1408,7 +1429,11 @@ export function App({
       }
       void session.killJob(id).then(
         (result) => {
-          if (!result.killed) {
+          if (result.killed) {
+            // Recorded BEFORE the exit can arrive, so `onExit` reads it: this is
+            // the user's own stop (`✗ stopped`, owner B).
+            dockStoppedRef.current.add(id);
+          } else {
             pushNotice(`_${id} was not running any more: nothing was stopped_`);
           }
         },

@@ -12,6 +12,8 @@ import {
   JOB_REFRESH_MS,
   JOB_TAIL_SHOWN,
   jobDrawerTail,
+  jobEndView,
+  jobOutcome,
   jobTailWindow,
   refreshDue,
 } from "../src/job-drawer.ts";
@@ -72,5 +74,77 @@ describe("jobTailWindow: the last lines, cut to the width, blank as ONE space", 
 
   test("an explicit `shown` overrides the default", () => {
     expect(jobTailWindow(["1", "2", "3"], { shown: 2, width: 80 })).toEqual(["2", "3"]);
+  });
+
+  test("review 4: `maxLines` is the terminal's room, and it caps the tail", () => {
+    const many = Array.from({ length: 30 }, (_, i) => `line ${i}`);
+    // A 20-row terminal leaves 5 body rows: head + 4 tail lines, never 12.
+    expect(jobTailWindow(many, { width: 80, maxLines: 4 })).toHaveLength(4);
+    expect(jobTailWindow(many, { width: 80, maxLines: 4 }).at(-1)).toBe("line 29");
+    // `shown` and `maxLines` compose: the SMALLER wins.
+    expect(jobTailWindow(many, { width: 80, shown: 3, maxLines: 10 })).toHaveLength(3);
+    expect(jobTailWindow(many, { width: 80, shown: 10, maxLines: 3 })).toHaveLength(3);
+    // No room at all: no lines (the head alone still paints).
+    expect(jobTailWindow(many, { width: 80, maxLines: 0 })).toEqual([]);
+    // The default (no `maxLines`) is still JOB_TAIL_SHOWN.
+    expect(jobTailWindow(many, { width: 80 })).toHaveLength(JOB_TAIL_SHOWN);
+  });
+
+  test("review 4: `(no output yet)` still paints when there is room", () => {
+    expect(jobDrawerTail(undefined, { width: 80, maxLines: 4 })).toEqual([JOB_EMPTY_LINE]);
+    expect(jobDrawerTail(undefined, { width: 80, maxLines: 0 })).toEqual([]);
+  });
+});
+
+describe("jobOutcome + jobEndView: the drawer's outcome (owner B, fix round 1)", () => {
+  test("a clean exit is `✓ exited (0)` in the ok tone, with the total run time", () => {
+    const end = jobOutcome({ status: "exited", exitCode: 0, byDock: false });
+    expect(end).toEqual({ kind: "exited", exitCode: 0 });
+    expect(jobEndView({ end, seconds: 250 })).toEqual({
+      text: "✓ exited (0) · 4m 10s",
+      ok: true,
+    });
+  });
+
+  test("a non-zero exit is `✗ exited (<code>)` in the error tone — never `✓`", () => {
+    const end = jobOutcome({ status: "exited", exitCode: 2, byDock: false });
+    const failed = jobEndView({ end, seconds: 4 });
+    expect(failed).toEqual({ text: "✗ exited (2) · 4s", ok: false });
+    expect(failed.text).not.toContain("✓");
+  });
+
+  test("a signal death (no code) is `✗ killed`", () => {
+    const end = jobOutcome({ status: "exited", exitCode: null, byDock: false });
+    expect(end).toEqual({ kind: "killed" });
+    const killed = jobEndView({ end, seconds: 120 });
+    expect(killed).toEqual({ text: "✗ killed · 2m 0s", ok: false });
+    expect(killed.text).not.toContain("✓");
+  });
+
+  test("stopped from the dock is `✗ stopped`, even though the wire says `killed`", () => {
+    const end = jobOutcome({ status: "killed", exitCode: null, byDock: true });
+    expect(end).toEqual({ kind: "stopped" });
+    expect(jobEndView({ end, seconds: 30 })).toEqual({ text: "✗ stopped · 30s", ok: false });
+  });
+
+  test("NO failure case ever paints `✓`, whatever the record says", () => {
+    for (const c of [
+      { status: "exited", exitCode: 1, byDock: false },
+      { status: "exited", exitCode: 127, byDock: false },
+      { status: "killed", exitCode: null, byDock: false },
+      { status: "killed", exitCode: 0, byDock: false },
+      { status: "exited", exitCode: 0, byDock: true },
+    ]) {
+      const view = jobEndView({ end: jobOutcome(c), seconds: 0 });
+      expect(view.ok).toBe(false);
+      expect(view.text).not.toContain("✓");
+    }
+  });
+
+  test("a `finished` record with no code says `✓ exited`, never a made-up `(0)`", () => {
+    expect(jobEndView({ end: { kind: "finished" }, seconds: 5 })).toEqual({
+      text: "✓ exited · 5s",
+      ok: true,
+    });
   });
 });

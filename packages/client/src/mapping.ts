@@ -94,6 +94,32 @@ export function progressText(value: string): string {
 }
 
 /**
+ * A `background_exit`'s TWO pod-supplied strings (Review 5, fix round 1): the id
+ * and the command reach the transcript's notice and the dock's pill, so both take
+ * the SAME treatment a job's row does — control chars gone, the invisible format
+ * classes stripped, one line, bounded. ONE function for both doors
+ * (`remote-client`'s `deliver` and `updateToEvent`), so they cannot drift.
+ *
+ * The format classes are stripped, not spaced: `\u202e` reorders a line without
+ * being a control char, and a space in its place would be a lie about the width.
+ */
+export function gateExitText(
+  jobId: string,
+  command: string,
+  cap: number = PROGRESS_TEXT_MAX,
+): { jobId: string; command: string } {
+  return { jobId: gateLabel(jobId, cap), command: gateLabel(command, cap) };
+}
+
+function gateLabel(value: string, cap: number): string {
+  const clean = progressText(value).replace(INVISIBLE_TEXT, "").trim();
+  return clean.length > cap ? `${clean.slice(0, cap - 1)}…` : clean;
+}
+
+/** The bidi overrides and zero-width spaces: invisible, and reorderable. */
+const INVISIBLE_TEXT = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+/**
  * Reverse of the daemon's `subagent_*` mapping. A progress frame is a label:
  * an unknown kind (a newer daemon's) or a known kind missing its fields is
  * ignored, never a thrown error that would fail the turn.
@@ -248,8 +274,9 @@ export function updateToEvent(
     case "background_exit":
       return {
         type: "background_exit",
-        jobId: update.jobId,
-        command: update.command,
+        // Gated HERE too (Review 5): this is the second door a pod's strings can
+        // take out of a frame, and both must agree (`gateExitText`).
+        ...gateExitText(update.jobId, update.command),
         status: update.status,
         exitCode: update.exitCode,
         ...(update.agent ? { agent: update.agent } : {}),

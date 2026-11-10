@@ -559,8 +559,16 @@ export const JobOutputResultSchema = z.object({
   startedAt: z.number().int().nonnegative().optional(),
   command: z.string().optional(),
   /**
-   * The job's output as the MODEL sees it, one array: stdout and stderr merged
-   * (owner Q4 (b)), lines oldest first, raw — the client sanitises (§7).
+   * The job's output, ONE array in ARRIVAL order (owner A, fix round 1): stdout
+   * and stderr interleaved exactly as the process wrote them — the same stream
+   * the model's `shell_output` reads, and one `lines` budget over the whole of
+   * it, so a stderr-heavy job can never push its stdout out of the window. Lines
+   * oldest first, raw — the client sanitises (§7).
+   *
+   * Known limit: a program that BLOCK-buffers its stdout on a pipe flushes it in
+   * bursts, so its lines can still land after stderr written earlier (a terminal
+   * shows them sooner — a tty is line-buffered). That is the program's buffering,
+   * not a merge the daemon could undo.
    */
   output: z.array(z.string()).optional(),
   /** True: output older than the retained buffer (or a cut line) was dropped. */

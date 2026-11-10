@@ -631,9 +631,15 @@ export class HostedSession {
     // the agent injects a note for the model. The client renders it like a local
     // job-exit notice; the TUI dedupes by job id against that next-turn event.
     this.unsubscribeExit = jobs?.onExit((job) => {
-      // The list FIRST (its row is gone before the notice arrives), then the
-      // exit, then the wake: a panel row must never outlive the death it shows.
-      this.publishJobs();
+      // THE EXIT FIRST, THEN the list (fix round 1, review 3). It used to be the
+      // other way round ("a row must never outlive the death it shows"), but a
+      // client freezes an open drawer the moment its row leaves and takes the
+      // outcome from its exit listener — so with the list first, a transport that
+      // delivered the two frames in separate macrotasks (a pod's exec WebSocket
+      // does) froze a CLEAN exit as `✗ stopped`, and nothing re-read it. Frames
+      // are ordered, so the outcome is recorded before the row goes; a panel row
+      // still cannot outlive its death, because the list that drops it is the
+      // very next frame.
       this.emit({
         type: "background_exit",
         jobId: job.id,
@@ -641,6 +647,7 @@ export class HostedSession {
         status: job.status,
         exitCode: job.exitCode,
       });
+      this.publishJobs();
       // The daemon may wake (re-checked on the macrotask).
       this.kickWake();
     });
@@ -1718,9 +1725,13 @@ export class HostedSession {
       ...(tail.job.exitCode === null ? {} : { exitCode: tail.job.exitCode }),
       startedAt: tail.job.startedAt,
       command: wireLine(tail.job.command, 512),
-      // Owner Q4 (b): ONE array, stdout then stderr, as the model's
-      // `shell_output` merges them. Raw: the client sanitises.
-      output: [...tail.stdout, ...tail.stderr],
+      // Owner A (fix round 1): ONE array in ARRIVAL order — stdout and stderr as
+      // the process interleaved them, exactly the stream the model's
+      // `shell_output` reads. `tail` applies ONE `lines` budget to it, so a
+      // stderr-heavy job can no longer push its stdout out of the window (which
+      // is what two per-stream reads then concatenated did). Raw: the client
+      // sanitises.
+      output: [...tail.output],
       truncated: tail.truncated,
     };
   }

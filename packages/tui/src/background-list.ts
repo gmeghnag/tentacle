@@ -17,7 +17,7 @@ import type { BackgroundAgentRow } from "./background-view.ts";
  */
 import { cellWidth, truncateCells } from "./cells.ts";
 import { formatDuration, formatTokens } from "./format.ts";
-import { jobDrawerTail } from "./job-drawer.ts";
+import { type JobEnd, jobDrawerTail, jobEndView } from "./job-drawer.ts";
 
 /** The most rows the dropdown shows before it windows (mockup 05). */
 export const LIST_MAX_ROWS = 5;
@@ -121,8 +121,15 @@ export type DockFocus =
       readonly frozen: DockFrozen | null;
     };
 
-/** How a child ended, as its drawer's rule says it. */
-export type DockOutcome = { readonly kind: "finished" } | { readonly kind: "stopped" };
+/**
+ * How a background item ended, as its drawer's rule says it.
+ *
+ * A CHILD has two outcomes (`end_turn` = finished, anything else = stopped). A
+ * SHELL JOB carries the exit record itself (`JobEnd`, owner B, fix round 1): the
+ * `killed`/`stopped` split needs the dock's own memory, and the CODE needs the
+ * daemon's exit, so the record — not the frozen row or the last read — decides.
+ */
+export type DockOutcome = { readonly kind: "finished" } | { readonly kind: "stopped" } | JobEnd;
 
 /** The list as the dock paints it: its rule, its window, its hint. */
 export interface BackgroundListView {
@@ -501,7 +508,9 @@ function drawerMeta(
   if (outcome?.kind === "finished") {
     return "✓ finished · report sent to the agent";
   }
-  if (outcome?.kind === "stopped") {
+  if (outcome !== null) {
+    // `stopped` (a cancel) and a job-only `killed` read the same for a child:
+    // it did not finish.
     return "✗ stopped";
   }
   const seconds = row.startedAt === undefined ? null : Math.floor((now - row.startedAt) / 1000);
@@ -588,10 +597,9 @@ export function drawerView(opts: {
  * One SHELL JOB opened: its head rule, the `… earlier output` line, and the tail
  * of its MERGED output (owner Q4 (b)).
  *
- * The head's figure is the outcome once it ended (`✓ exited (0)` / `✗ stopped`),
- * else the live clock from the daemon's `startedAt`. The body is never empty: a
- * job with nothing yet paints the one `(no output yet)` row, so `dockRows`'
- * reservation always matches what is painted (AGENTS §6's 0×0 gotcha).
+ * The head's figure is the outcome once it ended (`jobEndView`, owner B), else
+ * the live clock from the daemon's `startedAt`. The body never outgrows
+ * `maxRows` (review 4): the tail is cut to what the terminal can spare.
  */
 export function jobDrawerView(opts: {
   readonly row: DockJobRow;
@@ -603,18 +611,27 @@ export function jobDrawerView(opts: {
   readonly outcome: DockOutcome | null;
   readonly width: number;
   readonly now: number;
+  /**
+   * The body rows the terminal can spare (review 4, fix round 1). Absent = the
+   * drawer's own default; the caller passes `terminalRows − everything else`, so
+   * the frame never grows past the screen.
+   */
+  readonly maxRows?: number;
 }): DrawerView {
   const width = Math.max(10, opts.width);
   const row = opts.row;
   const seconds = Math.max(0, Math.floor((opts.now - row.startedAt) / 1000));
-  const meta =
-    opts.outcome?.kind === "finished"
-      ? opts.exitCode === null || opts.exitCode === undefined
-        ? "✓ exited"
-        : `✓ exited (${opts.exitCode})`
-      : opts.outcome?.kind === "stopped"
-        ? "✗ stopped"
-        : `running · ${formatDuration(seconds)}`;
+  // Owner B (fix round 1): the outcome is its own pure rule (`jobEndView`), built
+  // from the EXIT RECORD — never the frozen row's `status` (still `running`) and
+  // never the last read's (issued before the exit, it answers `running` too).
+  const end = opts.outcome === null ? null : jobEndView({ end: opts.outcome, seconds });
+  const meta = end === null ? `running · ${formatDuration(seconds)}` : end.text;
+  const maxRows = opts.maxRows ?? Number.POSITIVE_INFINITY;
+  // The head owns row one; `… earlier output not shown` takes the next, and the
+  // tail takes the rest. Each is dropped, never truncated into a lie, when the
+  // room is not there.
+  const hidden = opts.truncated === true && maxRows >= 2;
+  const tailRoom = Math.max(0, maxRows - 1 - (hidden ? 1 : 0));
   const lead = cellWidth(row.id) + cellWidth(" · ") + 2; // "─ " + id + " · "
   const descCols = Math.max(0, width - lead - cellWidth(meta) - 5); // " ─ " + meta + " ─"
   const description = truncateCells(row.command, descCols);
@@ -632,15 +649,15 @@ export function jobDrawerView(opts: {
     { text: " ", tone: "border" },
     {
       text: meta,
-      tone: opts.outcome === null ? "dim" : opts.outcome.kind === "finished" ? "success" : "error",
+      tone: end === null ? "dim" : end.ok ? "success" : "error",
     },
     { text: " ─", tone: "border" },
   ];
   return {
     head,
     meta,
-    hidden: opts.truncated === true ? "… earlier output not shown" : "",
-    tail: jobDrawerTail(opts.output, { width }),
+    hidden: hidden ? "… earlier output not shown" : "",
+    tail: jobDrawerTail(opts.output, { width, maxLines: tailRoom }),
     sent: [],
   };
 }

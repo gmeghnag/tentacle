@@ -478,3 +478,28 @@ export function refusalPlacement(state: DockState, id: string, live: string): "f
 export function resetDock(): DockState {
   return INPUT_DOCK;
 }
+
+/**
+ * A LATE exit record for a drawer that already froze (fix round 1, review 3).
+ *
+ * A drawer freezes when its row leaves the list, taking its outcome from the
+ * exit record if one has arrived — else the honest `✗ stopped` fallback. The
+ * daemon now emits the exit BEFORE the list, so normally the record is there;
+ * but a transport may still hand the two frames over in separate macrotasks, or
+ * reorder them, and then the drawer would say `✗ stopped` for a clean exit for
+ * the rest of its life. This is the fix-up: the exit record is the single truth
+ * for how a job ended, so it wins over the fallback whenever it lands.
+ *
+ * Only an OPEN drawer on that id is touched (a closed dock has no outcome to
+ * correct), and a drawer that has not frozen (`ended === null`) is still live —
+ * its own freeze will read the record.
+ */
+export function applyLateOutcome(state: DockState, id: string, outcome: DockOutcome): DockState {
+  if (state.focus.kind !== "open" || state.focus.id !== id) {
+    return state;
+  }
+  if (state.focus.ended === null || state.focus.ended === outcome) {
+    return state;
+  }
+  return { ...state, focus: { ...state.focus, ended: outcome } };
+}

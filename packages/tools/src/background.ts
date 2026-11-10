@@ -35,10 +35,11 @@ export const shellOutputTool: Tool<z.infer<typeof shellOutputInput>> = {
     if (!out) {
       return { content: `no such background job: ${input.job_id}`, isError: true };
     }
-    const body = [out.stdout, out.stderr]
-      .filter((part) => part.length > 0)
-      .join("\n")
-      .trim();
+    // ONE stream, in ARRIVAL order (owner A): stdout and stderr interleaved the
+    // way the process wrote them, so the model reads one timeline and never a
+    // half. (Two concatenated buffers put every stdout line before every stderr
+    // one, which reads as a different program's output.)
+    const body = out.output.trim();
     const status = statusText(out.job.status, out.job.exitCode);
     return {
       content: `[${input.job_id} · ${status}]\n${body || "(no new output)"}`,

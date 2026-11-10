@@ -542,17 +542,18 @@ describe("a shell job's drawer (docs/feat/shell-jobs-panel.md)", () => {
     expect(rowText({ segments: v.head })).toContain("bg-3");
   });
 
-  test("the outcome replaces the clock: `✓ exited (0)` / `✗ stopped`", () => {
+  test("the outcome replaces the clock, with the total run time (owner B)", () => {
     const done = jobDrawerView({
       row: job,
       output: ["x"],
-      exitCode: 0,
-      outcome: { kind: "finished" },
+      outcome: { kind: "exited", exitCode: 0 },
       width: 100,
       now: 250_000,
     });
-    expect(done.meta).toBe("✓ exited (0)");
-    expect(rowText({ segments: done.head })).toContain("✓ exited (0)");
+    expect(done.meta).toBe("✓ exited (0) · 4m 10s");
+    expect(rowText({ segments: done.head })).toContain("✓ exited (0) · 4m 10s");
+    // The tone: ok for a clean exit, error for anything else.
+    expect(done.head.find((s) => s.text.startsWith("✓"))?.tone).toBe("success");
     const stopped = jobDrawerView({
       row: job,
       output: ["x"],
@@ -560,7 +561,50 @@ describe("a shell job's drawer (docs/feat/shell-jobs-panel.md)", () => {
       width: 100,
       now: 250_000,
     });
-    expect(stopped.meta).toBe("✗ stopped");
+    expect(stopped.meta).toBe("✗ stopped · 4m 10s");
+    expect(stopped.head.find((s) => s.text.startsWith("✗"))?.tone).toBe("error");
+  });
+
+  test("owner B: a failed exit never paints ✓, and the tone says error", () => {
+    const failed = jobDrawerView({
+      row: job,
+      output: ["x"],
+      outcome: { kind: "exited", exitCode: 3 },
+      width: 100,
+      now: 250_000,
+    });
+    expect(failed.meta).toBe("✗ exited (3) · 4m 10s");
+    expect(failed.head.find((s) => s.text.startsWith("✗"))?.tone).toBe("error");
+    const killed = jobDrawerView({
+      row: job,
+      output: ["x"],
+      outcome: { kind: "killed" },
+      width: 100,
+      now: 250_000,
+    });
+    expect(killed.meta).toBe("✗ killed · 4m 10s");
+    expect(killed.head.some((s) => s.text.includes("✓"))).toBe(false);
+  });
+
+  test("review 4: `maxRows` bounds the drawer's total height", () => {
+    const output = Array.from({ length: 30 }, (_, i) => `line ${i}`);
+    for (const maxRows of [8, 5, 2, 1]) {
+      const v = jobDrawerView({ row: job, output, outcome: null, width: 80, now: 0, maxRows });
+      // The reservation `dockRows` makes never exceeds the room the terminal gave.
+      expect(dockRows(null, v)).toBeLessThanOrEqual(maxRows);
+    }
+    // `truncated`'s `… earlier` row is dropped too when only one row is left.
+    const tight = jobDrawerView({
+      row: job,
+      output,
+      truncated: true,
+      outcome: null,
+      width: 80,
+      now: 0,
+      maxRows: 1,
+    });
+    expect(dockRows(null, tight)).toBe(1);
+    expect(tight.hidden).toBe("");
   });
 
   test("a cut read says so, above the tail", () => {

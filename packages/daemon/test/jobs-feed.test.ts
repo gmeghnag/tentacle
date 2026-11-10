@@ -144,7 +144,7 @@ describe("the jobs feed", () => {
     expect(rows[0]?.status).toBe("running");
   });
 
-  test("an exit publishes the list without the row, before the exit notice", () => {
+  test("an exit publishes the exit notice BEFORE the list without the row (review 3)", () => {
     const jobs = controllableJobs();
     const { frames } = makeHosted(jobs);
     jobs.fireStart(job("bg-1"));
@@ -152,8 +152,12 @@ describe("the jobs feed", () => {
 
     jobs.fireExit({ ...job("bg-1"), status: "exited", exitCode: 0 });
 
-    // The list first, then `background_exit` — a row never outlives its death.
-    expect(frames.map((f) => f.type)).toEqual(["jobs", "background_exit"]);
+    // THE ORDER IS LOAD-BEARING (fix round 1, review 3): a client freezes an open
+    // drawer the moment the row leaves the list, and it learns the outcome from
+    // its exit listener. With the list first, a transport that split the two
+    // frames left the drawer frozen as `✗ stopped` for a clean exit, forever.
+    // Frames are ordered, so the outcome is recorded before the row goes.
+    expect(frames.map((f) => f.type)).toEqual(["background_exit", "jobs"]);
     expect(jobFrames(frames)[0]?.jobs).toEqual([]);
   });
 

@@ -2,11 +2,21 @@
  * `BackgroundJobs` — the host-backed `JobController`.
  *
  * It launches commands via `env.spawnBackground`, continuously drains their
- * output streams into a per-job buffer (so output is captured even between
+ * output streams into ONE per-job buffer (so output is captured even between
  * reads), tracks status, and fires `onExit` when a job ends. Reads are
  * incremental: each `read` returns only the output appended since the previous
  * read of that job, with the buffer capped to its tail so a chatty server can
  * run indefinitely without unbounded memory.
+ *
+ * ARRIVAL ORDER (owner A, fix round 1): both pumps append to the SAME buffer, so
+ * stdout and stderr interleave the way the process wrote them — the model's
+ * `shell_output` and the drawer's tail both see one stream. Two concatenated
+ * per-stream buffers (what this did before) is not a merge: it is every stdout
+ * line followed by every stderr line, so a stderr-heavy job hid its stdout for
+ * good. Known limit (unchanged by this, and true of any pipe): a program that
+ * BLOCK-buffers its stdout on a pipe flushes it in bursts, so its lines can
+ * still land later than the stderr lines written before them — a terminal shows
+ * them earlier because a tty is line-buffered.
  */
 import type {
   BackgroundJob,
@@ -18,16 +28,20 @@ import type {
   JobTail,
 } from "@tentacle/core";
 
-/** Max characters retained per stream; older output is dropped from the head. */
-const MAX_BUFFER = 256 * 1024;
+/**
+ * Max characters retained for a job (both streams share it now); older output
+ * is dropped from the head. 2× the old per-stream cap, so a job whose two
+ * streams are both chatty keeps the retention it had.
+ */
+const MAX_BUFFER = 512 * 1024;
 
 /** A generous default for `tail`: more than any drawer paints. */
 const TAIL_LINES = 40;
 /** Default window of a tail read; a UI asks for less, never for the whole buffer. */
 const TAIL_MAX_CHARS = 8 * 1024;
 
-/** One stream's rolling buffer, tracking absolute offsets so reads stay correct. */
-class StreamBuffer {
+/** A job's rolling output buffer, tracking absolute offsets so reads stay correct. */
+class OutputBuffer {
   private buf = "";
   /** Absolute count of characters ever produced. */
   private total = 0;
@@ -63,6 +77,12 @@ class StreamBuffer {
    * one huge line). The head partial line is dropped only when a complete line
    * remains — a job that has written one enormous line and no newline still
    * paints a non-empty, cut line rather than an empty drawer.
+   *
+   * ONE trailing `\r` goes FIRST (fix round 1, review 1): on a CRLF producer the
+   * `\r` is part of the line ENDING, not an overwrite — a terminal's `\r` only
+   * moves the cursor, it erases nothing — so `"alpha\r\n"` is the line `alpha`,
+   * not `""`. Dropping it before the last-`\r` rule keeps both meanings:
+   * `"10%\r50%\r90%\r\n"` is still `90%`.
    */
   tail(lines: number, maxChars: number): { lines: string[]; truncated: boolean } {
     if (this.buf === "") {
@@ -78,8 +98,9 @@ class StreamBuffer {
       truncated = true;
     }
     const cut = window.split("\n").map((line) => {
-      const at = line.lastIndexOf("\r");
-      return at >= 0 ? line.slice(at + 1) : line;
+      const text = line.endsWith("\r") ? line.slice(0, -1) : line;
+      const at = text.lastIndexOf("\r");
+      return at >= 0 ? text.slice(at + 1) : text;
     });
     // Nothing after the final newline yet: that is not a line, it is the gap
     // where the next one will start (an interior `""` IS a blank line).
@@ -104,8 +125,8 @@ class Job {
   status: JobStatus = "running";
   exitCode: number | null = null;
   killed = false;
-  readonly stdout = new StreamBuffer();
-  readonly stderr = new StreamBuffer();
+  /** Both streams, in ARRIVAL order (owner A): one buffer, one cursor, one tail. */
+  readonly output = new OutputBuffer();
   constructor(
     readonly id: string,
     readonly command: string,
@@ -148,8 +169,11 @@ export class BackgroundJobs implements JobController {
     this.jobs.set(id, job);
     this.handles.set(id, () => handle.kill());
 
-    void this.pump(handle.stdout, (s) => job.stdout.append(s));
-    void this.pump(handle.stderr, (s) => job.stderr.append(s));
+    // Both pumps append to the SAME buffer, so the interleaving is the process's
+    // own (see the module comment). Each keeps its own decoder: a multi-byte
+    // character split across chunks of one stream is still reassembled.
+    void this.pump(handle.stdout, (s) => job.output.append(s));
+    void this.pump(handle.stderr, (s) => job.output.append(s));
     handle.exited.then((code) => this.finish(job, code)).catch(() => this.finish(job, null));
 
     const started = job.snapshot();
@@ -171,7 +195,7 @@ export class BackgroundJobs implements JobController {
     if (!job) {
       return undefined;
     }
-    return { job: job.snapshot(), stdout: job.stdout.readNew(), stderr: job.stderr.readNew() };
+    return { job: job.snapshot(), output: job.output.readNew() };
   }
 
   kill(id: string): boolean {
@@ -202,14 +226,8 @@ export class BackgroundJobs implements JobController {
     }
     const lines = opts?.lines ?? TAIL_LINES;
     const maxChars = opts?.maxChars ?? TAIL_MAX_CHARS;
-    const out = job.stdout.tail(lines, maxChars);
-    const err = job.stderr.tail(lines, maxChars);
-    return {
-      job: job.snapshot(),
-      stdout: out.lines,
-      stderr: err.lines,
-      truncated: out.truncated || err.truncated,
-    };
+    const out = job.output.tail(lines, maxChars);
+    return { job: job.snapshot(), output: out.lines, truncated: out.truncated };
   }
 
   dispose(): void {

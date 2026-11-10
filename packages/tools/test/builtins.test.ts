@@ -346,13 +346,27 @@ describe("built-in tools", () => {
     const jobs = fakeJobs();
     jobs.setOutput("bg-1", {
       job: { id: "bg-1", command: "serve", startedAt: 0, status: "exited", exitCode: 0 },
-      stdout: "listening\n",
-      stderr: "",
+      output: "listening\n",
     });
     const result = await shellOutputTool.execute({ job_id: "bg-1" }, ctx(env, jobs));
     expect(result.isError).toBe(false);
     expect(result.content).toContain("exited (exit=0)");
     expect(result.content).toContain("listening");
+  });
+
+  test("owner A: shell_output prints ONE stream in arrival order, no fabricated join", async () => {
+    const env = fakeEnv();
+    const jobs = fakeJobs();
+    // What exec's arrival-ordered buffer hands over: stdout and stderr as the
+    // process interleaved them. The tool must not re-merge it (a join of two
+    // halves is the bug owner A removed) — it prints the string as it is.
+    jobs.setOutput("bg-2", {
+      job: { id: "bg-2", command: "make", startedAt: 0, status: "running", exitCode: null },
+      output: "compiling\nerr: no rule\nlinking\n",
+    });
+    const result = await shellOutputTool.execute({ job_id: "bg-2" }, ctx(env, jobs));
+    expect(result.content).toContain("compiling\nerr: no rule\nlinking");
+    expect(result.content).toContain("[bg-2 · running]");
   });
 
   test("shell_output flags an unknown job", async () => {

@@ -457,14 +457,15 @@ describe("the live list reaches the client (real wire)", () => {
     await until(() => session.jobs !== undefined);
     r.registries[0]?.tails.set("bg-1", {
       job: { id: "bg-1", command: "watch", startedAt: 1, status: "running", exitCode: null },
-      stdout: ["one", "two"],
-      stderr: [],
+      // ONE array, arrival order (owner A): the drawer and `shell_output` read
+      // the same stream, so there is no second half to lose.
+      output: ["one", "two"],
       truncated: false,
     });
 
     const read = await session.jobOutput("bg-1", { lines: 12 });
     expect(read.found).toBe(true);
-    // Owner Q4 (b): ONE merged line array, as the model's `shell_output` sees it.
+    // Owner A: ONE array in arrival order, the same stream `shell_output` reads.
     expect(read.output).toEqual(["one", "two"]);
 
     // The kill goes to the registry, and the row leaves through the exit frame.

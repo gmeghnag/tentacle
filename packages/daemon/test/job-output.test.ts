@@ -163,20 +163,49 @@ describe("session/job_output", () => {
     hosted.jobOutput(job.id);
     hosted.jobOutput(job.id);
     // The model's next `shell_output` still sees the whole output.
-    expect(jobs.read(job.id)?.stdout).toBe("one\ntwo\n");
+    expect(jobs.read(job.id)?.output).toBe("one\ntwo\n");
   });
 
-  test("owner Q4 (b): ONE merged array, stdout then stderr", async () => {
+  test("owner A: ONE array in ARRIVAL order, the stream the model reads", async () => {
     const fake = fakeHandle();
     const jobs = jobsWith(fake);
     const hosted = hostedWith(jobs);
     const job = jobs.start("both");
-    fake.emitOut("out 1\nout 2\n");
+    fake.emitOut("out 1\n");
+    await tick();
     fake.emitErr("err 1\n");
     await tick();
+    fake.emitOut("out 2\n");
+    await tick();
 
+    // Not `out 1, out 2, err 1` (stdout then stderr): the process's own order.
     const result = hosted.jobOutput(job.id);
-    expect(result.output).toEqual(["out 1", "out 2", "err 1"]);
+    expect(result.output).toEqual(["out 1", "err 1", "out 2"]);
+    // And the model's read is the SAME timeline, so the two can never disagree.
+    const model = (jobs.read(job.id)?.output ?? "").split("\n").filter((l) => l !== "");
+    expect(model).toEqual(result.output ?? []);
+  });
+
+  test("owner A: 20 stderr + 5 stdout lines all fit one 12-line window, stdout visible", async () => {
+    const fake = fakeHandle();
+    const jobs = jobsWith(fake);
+    const hosted = hostedWith(jobs);
+    const job = jobs.start("noisy");
+    for (let i = 1; i <= 20; i++) {
+      fake.emitErr(`err${i}\n`);
+    }
+    await tick();
+    for (let i = 1; i <= 5; i++) {
+      fake.emitOut(`OUT${i}\n`);
+    }
+    await tick();
+
+    // The reviewer's finding 2: with a per-stream `lines` budget the merged
+    // window was `err9…err20` and no stdout line ever appeared. One budget over
+    // one arrival-ordered stream makes the stdout the LAST 5 rows — visible.
+    const result = hosted.jobOutput(job.id, { lines: 12 });
+    expect(result.output).toHaveLength(12);
+    expect(result.output?.slice(-5)).toEqual(["OUT1", "OUT2", "OUT3", "OUT4", "OUT5"]);
   });
 
   test("output stays RAW: the client, never the daemon, is the gate", async () => {

@@ -469,3 +469,186 @@ Each finding, and where the plan now addresses it (the Implementation section, e
 | **L3** — test 3's 1 MB assertion could pass on a dropped line | Tests 3: asserts the M1 rule (**a non-empty cut line** plus `truncated`), not only the cap. |
 
 Also on re-check (not a review finding): the relay writes `model.jobs` from two places, not one — `pollJobs` (`relay.ts:547-556`) and the `readUse` path (`:585`). H1's "one writer" therefore gates both, and test 10 covers the second.
+
+## Execution — fix round 1
+
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+Review round 1 (`REQUEST-CHANGES`: 1 HIGH pre-existing, 4 MEDIUM) plus two owner
+decisions taken the same day (A, B). The reviewer's own repros
+(`.tentacle/tmp/shell-jobs-panel/review-tail.ts`, `review-frames.ts`,
+`review-pill.ts`) were run **on the branch before any edit** and reproduced every
+finding; they were run again after the fixes, and each shows the bug gone
+(outputs pasted per item below).
+
+**Two premises I did not take on trust.** (1) Review 2's proposed fix — give each
+stream half the `lines` budget — was **superseded** by owner A: the real defect is
+that "merged" was two concatenated buffers, so the fix is ONE arrival-ordered
+buffer, not a fairer split of two. Finding 2 is therefore closed by A's change,
+with its own test. (2) The drawer's outcome could NOT be built from the latest
+`job_output` read (what the plan implied) nor from the frozen row: both say
+`running` after the job died, and the reviewer's `review-frames.ts` (A) proved it
+(`✗ killed · 5s` for a clean exit once `exitCode` came from the wrong place). The
+exit RECORD is the truth, so the outcome is built from it (`jobOutcome`) and a late
+record corrects an already-frozen drawer (`applyLateOutcome`).
+
+### A. Arrival order, everywhere (owner A) — supersedes review 2
+
+- `exec/src/background.ts`: `StreamBuffer` → `OutputBuffer`, ONE per job; both
+  pumps append to it (`pump(handle.stdout, …)` / `pump(handle.stderr, …)`), each
+  keeping its own decoder so a multi-byte character split across chunks is still
+  reassembled. `read()` returns `{ output }` (one string, arrival order, cursor
+  semantics unchanged: only what is new); `tail()` applies ONE `lines`/`maxChars`
+  budget to the same buffer. `MAX_BUFFER` 256 KiB **per stream** → 512 KiB for the
+  job, so a job with two chatty streams keeps the retention it had.
+- `core/src/jobs.ts`: `JobOutput.stdout/stderr` → `output: string`;
+  `JobTail.stdout/stderr` → `output: readonly string[]`. The per-stream buffers
+  are GONE — nothing still needed them.
+- `tools/src/background.ts`: `shell_output` prints `out.output` (was
+  `[stdout, stderr].join("\n")` — a fabricated order).
+- `daemon/src/hosted-session.ts` `jobOutput`: `output: [...tail.output]`.
+- `protocol/src/session.ts`: the doc comment now says arrival order + the known
+  limit (a program that block-buffers stdout on a pipe still flushes in bursts;
+  a tty is line-buffered, so a terminal shows it sooner).
+- Tests: exec (25 interleaved lines, a tick per emit so the order is the
+  program's; 20 stderr + 5 stdout ⇒ `lines: 12` shows all 5 stdout lines), tools
+  (`shell_output` prints one timeline), daemon (arrival order; the model's `read`
+  equals the drawer's array; 20 stderr + 5 stdout in one 12-line window), TUI F11
+  (the frame paints `OUT1…OUT5`).
+
+### B. The drawer's outcome (owner B)
+
+- `tui/src/job-drawer.ts`: `JobEnd` (`exited{exitCode} | stopped | killed`),
+  `jobOutcome({status, exitCode, byDock})` (the record → outcome; `byDock` is the
+  dock's own memory, because a `killed` status cannot tell the user's stop from
+  the model's `shell_kill`), and `jobEndView({end, seconds})` →
+  `✓ exited (0) · 1m 12s` (ok) / `✗ exited (2) · 4s` / `✗ killed · 2m` /
+  `✗ stopped · 30s`, every case with the TOTAL run time.
+- `tui/src/background-list.ts`: `DockOutcome` gains `JobEnd`; `jobDrawerView` gets
+  the outcome from the record (never `row.status`, never the last read) and paints
+  `success` only when `ok`.
+- `tui/src/App.tsx`: `dockStoppedRef` records the ids this dock killed (set when
+  `session.killJob` answers `killed: true`), `onExit` builds the outcome with
+  `jobOutcome`; `applyLateOutcome` (new, in `background-focus.ts`) corrects a
+  frozen drawer when the record lands after the freeze — which is also the client
+  half of review 3.
+- Tests: `job-drawer.test.ts` (each case by value + "NO failure case ever paints
+  `✓`" + a code-less `finished` says `✓ exited`, never a made-up `(0)`),
+  `background-list.test.ts` (the words and the tones), frames F9 (clean, non-zero,
+  signal, dock-stopped — all through the real App).
+
+### 1. CRLF lines show blank (M) — FIXED
+
+`OutputBuffer.tail` drops ONE trailing `\r` first, then applies the last-`\r`
+rule (`exec/src/background.ts`). Both meanings survive: `"alpha\r\n"` ⇒ `alpha`,
+`"10%\r50%\r90%\r\n"` ⇒ `90%`. Repro before: `{"stdout":["","",""]}`; after:
+`{"output":["alpha","beta","gamma"]}`. Tests: exec CRLF, the progress bar, and a
+mixed writer (`"over\rwrite\r\n"` ⇒ `write`).
+
+### 3. A clean exit can freeze as `✗ stopped` (M) — FIXED
+
+Two independent halves, because the plan's fix alone leaves the client
+unprotected against a transport that reorders: (a) the daemon now emits
+`background_exit` **before** `publishJobs()` (`hosted-session.ts`), pinned by the
+rewritten `jobs-feed.test.ts` order test (`["background_exit","jobs"]`); (b)
+`applyLateOutcome` corrects an already-frozen drawer, pinned by frames F6's split
+variant (frame, then the exit 30 ms later ⇒ `✓ exited (0)`, never `✗ stopped`).
+Repro (A) after both: `head: "─ bg-3 · make build ─ … ✓ exited (0) · 5s ─"`.
+Note the contract change: a panel row can now leave one frame AFTER its exit
+notice — the notice names the death, so nothing dangles; the old "list first"
+comment was rewritten with the reason.
+
+### 4. The drawer ignores terminal height (M) — FIXED
+
+`jobTailWindow`/`jobDrawerTail` take `maxLines`, `jobDrawerView` takes `maxRows`
+(the head and the `… earlier` row are subtracted; `truncated`'s row is dropped
+when only one row is left). The App passes
+`Math.max(1, termRows − (RESERVED_ROWS − 1) − inputBoxRows − runningRows − 3)` at
+the call site — the same parts `activeRows` sums, so `dockRows` can never reserve
+more than the room. Repro (B) before: 80×20 ⇒ 22 lines, 80×16 ⇒ 22; after: 19 and
+15. Tests: `job-drawer.test.ts` (`maxLines` caps, composes with `shown`, 0 ⇒ no
+lines), `background-list.test.ts` (`dockRows ≤ maxRows` for 8/5/2/1), frames F10
+at 80×20 and 80×16 with a full 30-line tail + `truncated`.
+
+### 5. `background_exit` is a raw side door (H, pre-existing) — FIXED
+
+The frame's `jobId`/`command` are unbounded strip-schema strings, and the reviewer
+found TWO doors: `remote-client.ts`'s `deliver` (the one the TUI uses) and
+`mapping.ts`'s `updateToEvent`. Both now call ONE gate, `gateExitText(jobId,
+command)` (`mapping.ts`): control chars → a space (`progressText`), then the
+invisible bidi/zero-width classes STRIPPED (a space would be a lie about the
+width), one line, capped at 200. The second door was found by my own test, which
+failed on `\u202e` surviving `progressText` — the one-gate refactor is what makes
+that fixable in one place. Red first (client test): `CONTROL.test(notice.jobId)`
+was `true`; after: clean, `jobId.length ≤ 200`. Both doors are covered in
+`packages/client/test/exit-notice-gate.test.ts`.
+
+### Red → green, per test file (§9)
+
+Every new or changed assertion was run on the pre-fix code first. The reds that
+name the PROPERTY (not an import/compile error):
+
+```
+# exec — before the CRLF strip
+(fail) review 1: CRLF lines are the lines, never blank
+(fail) review 1: a `\r` progress bar still collapses, and a mixed writer keeps both rules
+# daemon — before the exit-first order
+(fail) the jobs feed > an exit publishes the exit notice BEFORE the list without the row (review 3)
+# client — before gateExitText
+(fail) an id with OSC/ED and a 400-char id: no control, no format char, bounded   (Expected false, Received true)
+# tui — split delivery before applyLateOutcome / the order fix
+(fail) F6 > review 3: SPLIT delivery (frame, then the exit 30 ms later) still says `✓ exited (0)`
+# tui — owner B before jobEndView
+(fail) F9 > a non-zero exit says `✗ exited (2)`…  (+ 6 more, incl. `✓ exited (2)`)
+# tui — review 4 before maxRows
+(fail) F10 > at 80x20 …   (fail) F10 > at 80x16 …
+```
+
+### Mutations (one per item, §9 non-vacuity — each restored byte-identically)
+
+| Item | Mutation | Reds |
+|---|---|---|
+| A | split the buffer back into two (`outBuf`/`errBuf`) and concatenate in `read`/`tail` | **2** (interleave, 12-line window) |
+| B | `jobEndView` back to no duration, no killed/stopped split, `✓ exited (<code>)` | **7** (3 frames + 4 pure) |
+| 1 | remove the `endsWith("\r")` strip | **2** (CRLF, mixed) |
+| 3 | `publishJobs()` before the emit, then drop `applyLateOutcome` | **1** each (order test; F6 split) |
+| 4 | remove `maxRows` from the call site | **2** (80×20, 80×16) |
+| 5 | `jobId: update.jobId` (ungated) | **1** (the client gate test) |
+
+### Gate
+
+`bun run check` (typecheck → lint → test) is green:
+
+```
+$ tsc --noEmit && tsc -p apps/mobile --noEmit     (clean)
+$ biome check .   Checked 849 files in 273ms. No fixes applied.   (0 errors, 0 warnings)
+$ bun test        6636 pass, 3 skip, 0 fail  (6639 tests across 462 files)
+```
+
+The 3 skips are the opt-in ones (`TENTACLE_K8S_SERVER`, `TENTACLE_DOCKER_TESTS`,
+`TENTACLE_SLOW_TESTS`), as the AGENTS §6 baseline; lint baseline unchanged.
+
+### Drift from Implementation (and why)
+
+1. **Review 2 is not fixed as written.** Its per-stream share of the `lines`
+   budget is gone: owner A replaced it with one buffer, so there is no second
+   stream to divide. Its test survives, strengthened (`OUT1…OUT5` are the last five
+   rows, not merely present somewhere).
+2. **The outcome is not built from `job_output`.** The plan implied the read
+   carried it; the repro showed the read and the frozen row both say `running`
+   after the death. The exit record does (`jobOutcome`), and a late record
+   corrects the freeze (`applyLateOutcome`) — needed anyway for review 3.
+3. **Review 5 was fixed at TWO doors, not one.** The reviewer named
+   `mapping.ts` and `deliver`; a shared `gateExitText` makes them one rule. The
+   id and the command share the 200 cap (`JOB_COMMAND_MAX`'s value), because a
+   notice is a label, not a repaint.
+4. **Review 3 gained a client half.** The daemon's order fix is necessary but not
+   sufficient: a transport may reorder, so the client also tolerates the split.
+   Both have their own test.
+5. **`DockOutcome` grew a third member (`JobEnd`).** `✗ stopped` vs `✗ killed`
+   needs the dock's memory of its own kill; the child's two outcomes are unchanged.
+6. **`MAX_BUFFER` is now 512 KiB for the job** (was 256 KiB per stream) — a merge
+   must not halve a chatty job's retention. This is the one size change.
+7. **Not fixed (out of scope):** the CHILD drawer is also uncapped by terminal
+   height (the reviewer called filing it optional). Known limit recorded for
+   owner A: block-buffered stdout on a pipe.

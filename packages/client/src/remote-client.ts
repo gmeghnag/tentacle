@@ -93,6 +93,7 @@ import {
   liveness,
   stopped,
 } from "./link-machine.ts";
+import { gateExitText } from "./mapping.ts";
 import { answerLostCause, normalizePermissionReply } from "./permission-map.ts";
 import { PermissionRouter, type RouterAction } from "./permission-router.ts";
 import { RemoteSession } from "./remote-session.ts";
@@ -2472,17 +2473,22 @@ export class RemoteClient {
       } else if (update.type === "background_exit") {
         // Not turn-scoped: the dedicated listeners fire even when no turn is
         // streaming (`RemoteSession` leaves it to them).
-        const { jobId, command, status, exitCode, agent } = update;
+        //
+        // GATED HERE (Review 5, fix round 1): the frame is pod-supplied and both
+        // strings are unbounded on the wire, yet they land in the transcript's
+        // notice and the dock's pill — so they take the SAME gate a job's row and
+        // output do (`gateExitText`), because this is the one place that sees them
+        // before Ink (§7: never write raw).
+        const { status, exitCode, agent } = update;
         const notice: BackgroundExitNotice = {
-          jobId,
-          command,
+          ...gateExitText(update.jobId, update.command),
           status,
           exitCode,
           ...(agent ? { agent } : {}),
         };
         if (this.exitListeners.size === 0) {
           // Kept for the first subscriber: one per job, the newest 64.
-          if (!this.exitBacklog.some((n) => n.jobId === jobId)) {
+          if (!this.exitBacklog.some((n) => n.jobId === notice.jobId)) {
             this.exitBacklog.push(notice);
             if (this.exitBacklog.length > EXIT_BACKLOG_MAX) {
               this.exitBacklog.shift();

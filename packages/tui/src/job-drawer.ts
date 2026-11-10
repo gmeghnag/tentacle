@@ -12,6 +12,7 @@
  * alias.
  */
 import { truncateCells } from "./cells.ts";
+import { formatDuration } from "./format.ts";
 
 /** How many tail lines the drawer paints (the child drawer's 8-label analogue). */
 export const JOB_TAIL_SHOWN = 12;
@@ -30,12 +31,22 @@ export const BLANK_LINE = " ";
 /**
  * The lines a job's drawer paints: the last `shown` of the merged output, each
  * cell-cut for the width, and a blank line as `" "` (never `""`).
+ *
+ * `maxLines` is the ROOM the terminal left (review 4, fix round 1): the drawer
+ * used to be a fixed 14 rows, so on a short terminal (80×20, 80×16) the frame was
+ * taller than the screen and Ink re-cleared it on every repaint (Review H3's
+ * flicker class). The caller passes the budget the layout can afford; the tail
+ * is cut HERE, in the pure module, where it is testable without a terminal.
  */
 export function jobTailWindow(
   output: readonly string[] | undefined,
-  opts: { readonly shown?: number; readonly width: number },
+  opts: { readonly shown?: number; readonly width: number; readonly maxLines?: number },
 ): string[] {
-  const shown = opts.shown ?? JOB_TAIL_SHOWN;
+  const room = opts.maxLines ?? Number.POSITIVE_INFINITY;
+  if (room <= 0) {
+    return [];
+  }
+  const shown = Math.min(opts.shown ?? JOB_TAIL_SHOWN, room);
   const lines = (output ?? []).slice(-shown);
   return lines.map((line) => {
     if (line === "") {
@@ -49,10 +60,86 @@ export function jobTailWindow(
 /** What the drawer's body is: the window, or the one `(no output yet)` row. */
 export function jobDrawerTail(
   output: readonly string[] | undefined,
-  opts: { readonly shown?: number; readonly width: number },
+  opts: { readonly shown?: number; readonly width: number; readonly maxLines?: number },
 ): string[] {
   const window = jobTailWindow(output, opts);
-  return window.length > 0 ? window : [JOB_EMPTY_LINE];
+  if (window.length > 0) {
+    return window;
+  }
+  // No room at all is the caller's problem (it reserves ≥ 1 row): an empty body
+  // would collapse the dock's reservation (AGENTS §6), so say so instead.
+  return (opts.maxLines ?? 1) > 0 ? [JOB_EMPTY_LINE] : [];
+}
+
+/**
+ * How a shell job ended, as its drawer's rule says it (owner B, fix round 1).
+ *
+ * The EXIT RECORD is the truth (`jobOutcome` builds it from the daemon's own
+ * `status`/`exitCode`), never the last read and never the frozen row: a row that
+ * left the list still says `running`, and a read issued before the exit answers
+ * `running` too, so either would paint the wrong death.
+ */
+export type JobEnd =
+  /** A normal end with the code the daemon reported. */
+  | { readonly kind: "exited"; readonly exitCode: number | null }
+  /** This dock asked for the stop (`x` then `y`). */
+  | { readonly kind: "stopped" }
+  /** A signal death nobody in the dock asked for. */
+  | { readonly kind: "killed" };
+
+/**
+ * Read a job's exit RECORD into its outcome. `byDock` is the dock's own memory
+ * (a `killed` status cannot tell the user's stop from the model's `shell_kill`);
+ * a null code is a signal death even when the status says `exited`, because that
+ * is how a signal-killed process reports itself.
+ */
+export function jobOutcome(opts: {
+  readonly status: string;
+  readonly exitCode: number | null;
+  readonly byDock: boolean;
+}): JobEnd {
+  if (opts.byDock) {
+    return { kind: "stopped" };
+  }
+  if (opts.status === "killed" || opts.exitCode === null) {
+    return { kind: "killed" };
+  }
+  return { kind: "exited", exitCode: opts.exitCode };
+}
+
+/** The drawer's rule's answer: the words, and the tone they take. */
+export interface JobEndView {
+  readonly text: string;
+  /** `true` only for a clean exit: the drawer's rule paints ok vs error tone. */
+  readonly ok: boolean;
+}
+
+/**
+ * The drawer's outcome (owner B, fix round 1): `✓ exited (0) · 1m 12s` in the ok
+ * tone, `✗ exited (2) · 4s`, `✗ killed · 2m`, `✗ stopped · 30s` — the job's TOTAL
+ * run time in every case, and a failure NEVER paints `✓`.
+ *
+ * `end` may also be a `{kind: "finished"}` (a child's shape, or a frozen drawer
+ * from an older path): that is a clean end with no code to quote, so it says
+ * `✓ exited · <time>` rather than inventing a `(0)`.
+ */
+export function jobEndView(opts: {
+  readonly end: JobEnd | { readonly kind: "finished" };
+  readonly seconds: number;
+}): JobEndView {
+  const time = formatDuration(opts.seconds);
+  switch (opts.end.kind) {
+    case "stopped":
+      return { text: `✗ stopped · ${time}`, ok: false };
+    case "killed":
+      return { text: `✗ killed · ${time}`, ok: false };
+    case "finished":
+      return { text: `✓ exited · ${time}`, ok: true };
+    case "exited":
+      return opts.end.exitCode === 0
+        ? { text: `✓ exited (0) · ${time}`, ok: true }
+        : { text: `✗ exited (${opts.end.exitCode ?? "?"}) · ${time}`, ok: false };
+  }
 }
 
 /**
