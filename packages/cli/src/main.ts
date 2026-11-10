@@ -124,6 +124,7 @@ import {
   runStem,
 } from "./run-state.ts";
 import { localAutoAccept, styleInfo } from "./run-ui.ts";
+import { serveModelNotice } from "./serve-model-notice.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { inProcessSessions } from "./session-jobs.ts";
 import { NOT_A_TERMINAL, dimIf, termOf } from "./streams.ts";
@@ -900,6 +901,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       const titleNotice = titleConfigNotice(config);
       if (titleNotice) {
         err(`[daemon] ${titleNotice}\n`);
+      }
+      // A daemon whose own model is unset fails every turn (docs/fix/connect-model-error-drops-connection.md, (d)).
+      const modelNotice = serveModelNotice(config);
+      if (modelNotice) {
+        err(`[daemon] ${modelNotice}\n`);
       }
       // First Ctrl+C: stop, let the session writes land, release the store
       // lock. A second one exits at once (a hung disk must not trap the user).

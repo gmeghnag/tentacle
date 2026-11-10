@@ -197,6 +197,11 @@ async function reloadedHost(
     newSessionSkills: () => skillScan.newSession(),
     // A remote client gets an opaque turn error; the real one is logged here.
     ...(options.onError ? { onTurnError: options.onError } : {}),
+    // ITS host is the user's own machine (AGENTS §7 — the only daemon that
+    // persists for that reason), so a client attached to it may see the real
+    // text of a failed turn — sanitized and bounded, never a raw upstream body
+    // (`sanitizeTurnError`). A pod daemon (`podSessionHost`) does NOT set this.
+    exposeTurnErrors: true,
     persister,
     sessionTtl,
     identity: { tentacle: APP_VERSION, kind: "serve" },

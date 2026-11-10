@@ -96,6 +96,7 @@ import { inputRowCount } from "./input-view.ts";
 import { JOB_REFRESH_MS, JOB_TAIL_SHOWN, jobOutcome, refreshDue } from "./job-drawer.ts";
 import { type LinkFeed, stoppedNotice } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
+import { modelErrorNotice } from "./model-error.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
 import {
   type OpenPanel,
@@ -1996,7 +1997,11 @@ export function App({
           );
           restoreInput(failed.text, failed.notice);
         } else {
-          stateRef.current = failTurn(stateRef.current, String(error), Date.now());
+          stateRef.current = failTurn(
+            stateRef.current,
+            modelErrorNotice(error, model === "remote"),
+            Date.now(),
+          );
         }
       } finally {
         if (reset) {
@@ -2056,6 +2061,7 @@ export function App({
       commitHistory,
       drainHeld,
       skillsSync,
+      model,
     ],
   );
   streamTurnRef.current = streamTurn;
