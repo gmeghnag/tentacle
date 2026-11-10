@@ -17,6 +17,7 @@
 import {
   type AgentJobExit,
   type AgentJobs,
+  type AgentNotify,
   type BackgroundJob,
   COUNT_TOKENS_CAP_MS,
   type ChatMessage,
@@ -214,6 +215,18 @@ interface ToolRun {
 }
 
 /** The last user message's text, for `turn_start` hooks ("" if none). */
+/**
+ * Does the history end in a final answer — an assistant message with no tool
+ * calls? The stale-wake guard's precondition: only then is a continuation over
+ * it a turn with nothing to do (`docs/feat/agent-message-two-way.md`).
+ */
+function endsWithFinalAnswer(messages: readonly ChatMessage[]): boolean {
+  const last = messages.at(-1);
+  return (
+    last?.role === "assistant" && (last.toolCalls === undefined || last.toolCalls.length === 0)
+  );
+}
+
 function lastUserText(messages: readonly ChatMessage[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
@@ -225,7 +238,33 @@ function lastUserText(messages: readonly ChatMessage[]): string {
 }
 
 /** A finished background job awaiting its note: a shell job, or a sub-agent (`agentId` in it). */
-export type PendingExit = BackgroundJob | AgentJobExit;
+export type PendingExit = BackgroundJob | AgentJobExit | PendingAgentMessage;
+
+/**
+ * A running background child's `agent_notify` text, queued for the parent agent
+ * (docs/feat/agent-message-two-way.md). It rides the SAME queue as an exit, so
+ * every existing waker (a turn's start flush, `serve`'s `pendingExitCount`, an
+ * attach's `unflushedExits`) sees it with no second path. `kind` is checked
+ * FIRST: an exit has `agentId` too, and the shell job has neither.
+ */
+export type PendingAgentMessage = { readonly kind: "agent_message" } & AgentNotify;
+
+const isAgentMessage = (job: PendingExit): job is PendingAgentMessage =>
+  "kind" in job && job.kind === "agent_message";
+
+/**
+ * The note a running background child's `agent_notify` leaves in the parent's
+ * conversation (docs/feat/agent-message-two-way.md): a `user` message, so the
+ * model reads it as something it must react to, tagged so a resume renders it
+ * as a notice and never as a row the person typed.
+ */
+export function agentMessageNote(note: AgentNotify): ChatMessage {
+  return {
+    role: "user",
+    content: `[sub-agent ${note.agentId} → you] ${note.text}\n(background sub-agent ${note.agentId} (${note.description}) sent this while it was running. To answer, use agent_message({ agent_id: "${note.agentId}", text }). Its final report still arrives as a [background] note.)`,
+    note: { kind: NOTE_KIND.subagentMessage, id: note.agentId },
+  };
+}
 
 export type AgentEvent =
   | { readonly type: "text"; readonly delta: string }
@@ -531,6 +570,15 @@ export class Agent {
   private unsubscribeExits: (() => void) | undefined;
   /** Leaves the sub-agents' exit stream (`retire`). */
   private unsubscribeAgentExits: (() => void) | undefined;
+  /** Leaves the sub-agents' notify stream (`retire`). */
+  private unsubscribeAgentNotify: (() => void) | undefined;
+  /**
+   * A child's note was flushed INTO a running turn (docs/feat/agent-message-two-way.md):
+   * a continuation armed by that note's notice would start a turn over a
+   * history with nothing new. Memory only; cleared by the turn's start flush,
+   * and read by the narrow stale-wake guard.
+   */
+  private notesFlushedMidTurn = false;
   /**
    * The provider's last measure of each history (keyed by the array a Session
    * keeps for its life), so a turn's first request counts from real numbers.
@@ -560,6 +608,11 @@ export class Agent {
     // conversation (and event stream) at the top of the next turn.
     this.unsubscribeExits = config.jobs?.onExit((job) => this.pendingExits.push(job));
     this.unsubscribeAgentExits = config.agentJobs?.onExit((exit) => this.pendingExits.push(exit));
+    // A running child's `agent_notify` joins the SAME queue, so every existing
+    // waker (the turn-start flush, `pendingExitCount`, `unflushedExits`) sees it.
+    this.unsubscribeAgentNotify = config.agentJobs?.onNotify((note) =>
+      this.pendingExits.push({ kind: "agent_message", ...note }),
+    );
   }
 
   /**
@@ -572,6 +625,8 @@ export class Agent {
     this.unsubscribeExits = undefined;
     this.unsubscribeAgentExits?.();
     this.unsubscribeAgentExits = undefined;
+    this.unsubscribeAgentNotify?.();
+    this.unsubscribeAgentNotify = undefined;
     return this.pendingExits.splice(0);
   }
 
@@ -594,9 +649,13 @@ export class Agent {
     };
   }
 
-  /** Job exits no turn has surfaced yet: what the next turn's start will flush. */
+  /**
+   * Job exits no turn has surfaced yet: what the next turn's start will flush.
+   * A child's note counts only when it ASKS for a wake: a note over the wake
+   * budget is still delivered at the next start, it just wakes nobody.
+   */
   get pendingExitCount(): number {
-    return this.pendingExits.length;
+    return this.pendingExits.filter((job) => !isAgentMessage(job) || job.wakes).length;
   }
 
   /** Job exits a retired agent had not surfaced: told at this agent's next turn. */
@@ -793,14 +852,18 @@ export class Agent {
     const configured = this.config.maxIterations ?? 16;
     const maxIterations = configured < 0 ? Number.POSITIVE_INFINITY : configured;
     // A user message — the turn's own, or a steer drained into it — restarts
-    // the per-message count of context resets.
+    // the per-message count of context resets, and the sub-agents' notify
+    // budgets (docs/feat/agent-message-two-way.md): a person wrote, so ping-pong
+    // with a child is allowed again.
     if (opts.userMessage === true) {
       this.resetsThisMessage = 0;
+      this.config.agentJobs?.userMessage();
     }
     const drain = (): readonly string[] => {
       const texts = drainSteering?.() ?? [];
       if (texts.length > 0) {
         this.resetsThisMessage = 0;
+        this.config.agentJobs?.userMessage();
       }
       return texts;
     };
@@ -861,8 +924,45 @@ export class Agent {
     // event for the frontend and inject a note so the model knows to react.
     // (After a resumed round, never inside it: a note between an assistant's
     // tool calls and their results is an invalid history.)
-    for (const event of this.flushBackgroundExits(messages)) {
+    const flushedAtStart = this.flushBackgroundExits(messages);
+    for (const event of flushedAtStart.events) {
       yield event;
+    }
+
+    // The stale-wake guard (owner Q4 a): a client arms a continuation on a
+    // child's note NOTICE, which may land while this turn is already running.
+    // The note was then delivered mid-turn (below), so this continuation has
+    // nothing new to answer: end it at once, with no model request. Narrow on
+    // purpose — only a continuation (no user message, no resume, no skill), only
+    // after a mid-turn note, only over a history ending in a final answer, and
+    // only when nothing was flushed at this start.
+    if (
+      this.notesFlushedMidTurn &&
+      opts.userMessage !== true &&
+      opts.resumeFrom === undefined &&
+      opts.skill === undefined &&
+      flushedAtStart.events.length === 0 &&
+      endsWithFinalAnswer(messages)
+    ) {
+      this.notesFlushedMidTurn = false;
+      const early = drain();
+      if (early.length === 0) {
+        yield { type: "turn_end", reason: "end_turn" };
+        return;
+      }
+      for (const text of early) {
+        messages.push({ role: "user", content: text });
+        yield { type: "steer", text };
+      }
+    }
+    this.notesFlushedMidTurn = false;
+    // Q4 (a) holds at the START too: a client arms on a note's NOTICE, so two
+    // notices in one stretch (a child's parallel calls, or two children) arm TWO
+    // continuations; the first turn's start flush takes BOTH notes, and the
+    // second continuation would then run a model round over nothing new. So a
+    // start flush that delivered a note counts as the note having been consumed.
+    if (flushedAtStart.deliveredNote) {
+      this.notesFlushedMidTurn = true;
     }
 
     // `turn_start` hooks: not on a resumed turn, which already started (R4).
@@ -911,6 +1011,16 @@ export class Agent {
       for (const text of drain()) {
         messages.push({ role: "user", content: text });
         yield { type: "steer", text };
+      }
+      // A child's note that arrived while this turn ran is delivered HERE, at
+      // the round boundary, in the same turn (docs/feat/agent-message-two-way.md):
+      // it is a steer the parent must see before its next step, never a wake.
+      const midNotes = this.flushAgentMessages(messages);
+      if (midNotes.length > 0) {
+        this.notesFlushedMidTurn = true;
+        for (const event of midNotes) {
+          yield event;
+        }
       }
 
       const tools = this.config.tools.definitions();
@@ -1038,10 +1148,17 @@ export class Agent {
         // steering drain and the turn's end"; the `max_iterations` path below
         // keeps the same invariant.
         const late = drain();
-        if (late.length > 0) {
+        const lateNotes = this.flushAgentMessages(messages);
+        if (late.length > 0 || lateNotes.length > 0) {
           for (const text of late) {
             messages.push({ role: "user", content: text });
             yield { type: "steer", text };
+          }
+          if (lateNotes.length > 0) {
+            this.notesFlushedMidTurn = true;
+            for (const event of lateNotes) {
+              yield event;
+            }
           }
           continue;
         }
@@ -1882,17 +1999,62 @@ export class Agent {
   }
 
   /**
+   * Drain the running children's notes ONLY (`agent_message` members), leaving
+   * every exit in place: a child's or a shell job's exit keeps today's
+   * turn-start behaviour. Synchronous (the late-drain invariant) and order
+   * preserving.
+   */
+  private flushAgentMessages(messages: ChatMessage[]): AgentEvent[] {
+    const notes: PendingAgentMessage[] = [];
+    let kept = 0;
+    for (let i = 0; i < this.pendingExits.length; i++) {
+      const job = this.pendingExits[i];
+      if (job !== undefined && isAgentMessage(job)) {
+        notes.push(job);
+      } else if (job !== undefined) {
+        this.pendingExits[kept++] = job;
+      }
+    }
+    if (notes.length === 0) {
+      return [];
+    }
+    this.pendingExits.length = kept;
+    const events: AgentEvent[] = [];
+    for (const note of notes) {
+      const message = agentMessageNote(note);
+      messages.push(message);
+      events.push({ type: "context_note", text: message.content, reason: "background_exit" });
+    }
+    return events;
+  }
+
+  /**
    * Drain finished background jobs into the conversation. Returns the events to
    * emit; appends a user-visible note per job so the model learns it ended and
-   * can read its output. A no-op when nothing has exited.
+   * can read its output. A no-op when nothing has exited. `deliveredNote` says a
+   * child's `agent_notify` was among them: that note is the ONE thing a notice
+   * asked a client to wake for, so the turn it wakes must not be cut short as a
+   * stale wake (Q4 a, docs/feat/agent-message-two-way.md).
    */
-  private flushBackgroundExits(messages: ChatMessage[]): AgentEvent[] {
+  private flushBackgroundExits(messages: ChatMessage[]): {
+    readonly events: AgentEvent[];
+    readonly deliveredNote: boolean;
+  } {
     if (this.pendingExits.length === 0) {
-      return [];
+      return { events: [], deliveredNote: false };
     }
     const exits = this.pendingExits.splice(0);
     const events: AgentEvent[] = [];
+    let deliveredNote = false;
     for (const job of exits) {
+      // BEFORE the `agentId` branch: a note has an id too, and its own note shape.
+      if (isAgentMessage(job)) {
+        const message = agentMessageNote(job);
+        messages.push(message);
+        deliveredNote = true;
+        events.push({ type: "context_note", text: message.content, reason: "background_exit" });
+        continue;
+      }
       if ("agentId" in job) {
         const status = job.stopReason === "cancelled" ? "killed" : "exited";
         events.push({
@@ -1930,7 +2092,7 @@ export class Agent {
       });
       events.push({ type: "context_note", text: note, reason: "background_exit" });
     }
-    return events;
+    return { events, deliveredNote };
   }
 
   /**

@@ -190,6 +190,12 @@ const P: readonly {
     carried: 2,
   },
   {
+    key: "subagentsTwoWay",
+    file: { subagents: { twoWay: true } },
+    env: { TENTACLE_SUBAGENTS_TWO_WAY: "1" },
+    carried: false,
+  },
+  {
     key: "agentTaskDescription",
     file: { subagents: { agentTaskDescription: "the pod's text" } },
     carried: "the laptop's text",
@@ -215,6 +221,7 @@ const ALL_KEYS = [
   "subagentMaxIterations",
   "subagentMaxParallel",
   "subagentsEnabled",
+  "subagentsTwoWay",
   "summarizeLargeOutput",
   "tabulateJson",
   "toolExecution",
@@ -225,7 +232,7 @@ const read = (key: keyof SessionSettings, config: TentacleConfig): unknown =>
   CARRIED[key].read(config);
 
 describe("the table is complete", () => {
-  test("8 P + 14 W, and the two test tables cover each (publishedModels: its own describe)", () => {
+  test("9 P + 14 W, and the two test tables cover each (publishedModels: its own describe)", () => {
     expect(Object.keys(CARRIED).sort()).toEqual([...ALL_KEYS]);
     const classOf = (name: "P" | "W") =>
       Object.entries(CARRIED)
@@ -324,7 +331,7 @@ describe("carriedSettings: an allowlist", () => {
   test("no custom description: the key is absent, not undefined on the wire", () => {
     const carried = carriedSettings(UNSET);
     expect(Object.hasOwn(carried, "agentTaskDescription")).toBe(false);
-    expect(Object.keys(carried)).toHaveLength(20);
+    expect(Object.keys(carried)).toHaveLength(21);
   });
 });
 

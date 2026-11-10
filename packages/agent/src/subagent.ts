@@ -13,6 +13,7 @@
  */
 import {
   type AgentInbox,
+  type AgentNotifyResult,
   type ExecutionEnvironment,
   type ModelProvider,
   type PermissionRequest,
@@ -25,8 +26,10 @@ import {
 import {
   AGENT_KILL_TOOL_NAME,
   AGENT_MESSAGE_TOOL_NAME,
+  AGENT_NOTIFY_TOOL_NAME,
   CONTEXT_RESET_TOOL_NAME,
   ToolRegistry,
+  createAgentNotifyTool,
 } from "@tentacle/tools";
 import { Agent, type AgentConfig, type AgentStopReason } from "./agent.ts";
 import type { HookRunner } from "./hooks.ts";
@@ -278,6 +281,12 @@ export interface SubagentDeps {
   readonly toolExecution?: AgentConfig["toolExecution"];
   /** Where a child's large output is spilled (the parent's sink). Absent → the child's `env`. */
   readonly toolOutput?: AgentConfig["toolOutput"];
+  /**
+   * A running BACKGROUND child's way back to its parent agent
+   * (docs/feat/agent-message-two-way.md): the session's `AgentJobs.notify`.
+   * Absent (`subagents.twoWay` off) → no child is offered `agent_notify`.
+   */
+  readonly notify?: (agentId: string, text: string) => AgentNotifyResult;
 }
 
 /** Build a sub-agent runner plus the agent types it exposes. */
@@ -316,13 +325,23 @@ export function createSubagentRunner(deps: SubagentDeps): {
         tool.name === spawnToolName ||
         tool.name === CONTEXT_RESET_TOOL_NAME ||
         tool.name === AGENT_KILL_TOOL_NAME ||
-        tool.name === AGENT_MESSAGE_TOOL_NAME
+        tool.name === AGENT_MESSAGE_TOOL_NAME ||
+        // A child's own `agent_notify` is built below, from the id it was given:
+        // a parent registry must never hand one over.
+        tool.name === AGENT_NOTIFY_TOOL_NAME
       ) {
         continue;
       }
       if (type.tools === "all" || type.tools.includes(tool.name)) {
         childTools.register(tool);
       }
+    }
+    // Only a child launched in the BACKGROUND has an `sa-N` to name itself by
+    // (owner Q3 a): a foreground child's report already IS its reply. It
+    // bypasses `type.tools` on purpose — a channel back, not a capability — so
+    // a read-only `explore` child gets it too.
+    if (deps.notify && controls?.agentId !== undefined) {
+      childTools.register(createAgentNotifyTool(controls.agentId, deps.notify));
     }
 
     const chosen = deps.modelFor?.(type, opts.model);
@@ -502,7 +521,8 @@ export function createSubagentRunner(deps: SubagentDeps): {
         toolName === spawnToolName ||
         toolName === CONTEXT_RESET_TOOL_NAME ||
         toolName === AGENT_KILL_TOOL_NAME ||
-        toolName === AGENT_MESSAGE_TOOL_NAME
+        toolName === AGENT_MESSAGE_TOOL_NAME ||
+        toolName === AGENT_NOTIFY_TOOL_NAME
       ) {
         return true;
       }

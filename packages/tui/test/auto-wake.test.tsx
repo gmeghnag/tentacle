@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Agent } from "@tentacle/agent";
+import { Agent, Session } from "@tentacle/agent";
 import type {
   BackgroundJob,
   ChatRequest,
@@ -340,6 +340,99 @@ describe("autonomous wake on job-exit", () => {
     );
     await delay(100);
     expect(sends).toBe(1);
+    unmount();
+  });
+
+  test("T17: a waking notify while idle starts a continuation; a non-waking one only shows a notice", async () => {
+    let fire: (n: { agentId: string; text: string; wake: boolean }) => void = () => {};
+    let turns = 0;
+    const session = {
+      async *send() {
+        turns += 1;
+        yield { type: "text", delta: "WOKE-ON-NOTIFY" } as const;
+        yield { type: "turn_end", reason: "end_turn" } as const;
+      },
+      onSubagentNotify(listener: (n: { agentId: string; text: string; wake: boolean }) => void) {
+        fire = listener;
+        return () => {};
+      },
+      watch: () => () => {},
+      snapshot: () => ({ messages: [] }),
+    } as unknown as SessionController;
+    const { lastFrame, unmount } = render(
+      <App createSession={() => session} model="q" cwd="/tmp/work" subagentsTwoWay />,
+    );
+    await delay(50);
+    fire({ agentId: "sa-1", text: "found X", wake: false });
+    await delay(60);
+    // The notice shows; a non-waking note starts nothing.
+    expect(lastFrame() ?? "").toContain("sa-1 → agent: found X");
+    expect(turns).toBe(0);
+    fire({ agentId: "sa-1", text: "wake up", wake: true });
+    await delay(80);
+    expect(turns).toBe(1);
+    expect(lastFrame() ?? "").toContain("WOKE-ON-NOTIFY");
+    unmount();
+  });
+
+  test("T17b: `twoWay` off — the notice shows, nothing is armed (the laptop's gate)", async () => {
+    let fire: (n: { agentId: string; text: string; wake: boolean }) => void = () => {};
+    let turns = 0;
+    const session = {
+      async *send() {
+        turns += 1;
+        yield { type: "turn_end", reason: "end_turn" } as const;
+      },
+      onSubagentNotify(listener: (n: { agentId: string; text: string; wake: boolean }) => void) {
+        fire = listener;
+        return () => {};
+      },
+      watch: () => () => {},
+      snapshot: () => ({ messages: [] }),
+    } as unknown as SessionController;
+    const { lastFrame, unmount } = render(
+      <App createSession={() => session} model="q" cwd="/tmp/work" />,
+    );
+    await delay(50);
+    fire({ agentId: "sa-1", text: "found X", wake: true });
+    await delay(80);
+    expect(lastFrame() ?? "").toContain("sa-1 → agent: found X");
+    expect(turns).toBe(0);
+    unmount();
+  });
+
+  test("T17c: a waking notify during a running turn starts exactly one continuation after it", async () => {
+    let fire: (n: { agentId: string; text: string; wake: boolean }) => void = () => {};
+    const model = new HeldProvider();
+    const jobs = new FakeJobs();
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv, jobs });
+    const one = new Session(agent);
+    const session = {
+      send: (text: string, signal?: AbortSignal) => one.send(text, signal),
+      onSubagentNotify(listener: (n: { agentId: string; text: string; wake: boolean }) => void) {
+        fire = listener;
+        return () => {};
+      },
+      watch: () => () => {},
+      snapshot: () => ({ messages: [] }),
+    } as unknown as SessionController;
+    const { stdin, unmount } = render(
+      <App createSession={() => session} model="q" cwd="/tmp/work" subagentsTwoWay />,
+    );
+    await delay(50);
+    stdin.write("go");
+    await delay(10);
+    stdin.write("\r");
+    await delay(30);
+    expect(model.turns).toBe(1);
+    fire({ agentId: "sa-1", text: "while you run", wake: true });
+    await delay(40);
+    expect(model.turns).toBe(1); // no second turn while one runs
+    model.release();
+    await delay(90);
+    expect(model.turns).toBe(2);
+    await delay(40);
+    expect(model.turns).toBe(2);
     unmount();
   });
 });

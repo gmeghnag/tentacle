@@ -6,6 +6,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { KEY_DOCS } from "../src/key-docs.ts";
 import { ConfigError, loadConfig } from "../src/load.ts";
 import { FileConfigSchema } from "../src/schema.ts";
 
@@ -74,6 +75,45 @@ describe("subagents.execution / maxParallel", () => {
     for (const subagents of [{ execution: "wild" }, { maxParallel: 0 }, { maxParallel: 1.5 }]) {
       expect(FileConfigSchema.safeParse({ subagents }).success).toBe(false);
     }
+  });
+});
+
+describe("subagents.twoWay (T12, docs/feat/agent-message-two-way.md)", () => {
+  test("defaults to false, and the source says so", async () => {
+    const c = await load({});
+    expect(c.subagentsTwoWay).toBe(false);
+    expect(c.sources.subagentsTwoWay).toBe("default");
+  });
+
+  test("the file sets it; the env wins; a bad env falls through", async () => {
+    const file = { subagents: { twoWay: true } };
+    const fromFile = await load(file);
+    expect(fromFile.subagentsTwoWay).toBe(true);
+    expect(fromFile.sources.subagentsTwoWay).toBe("file");
+
+    const fromEnv = await load(file, { env: { TENTACLE_SUBAGENTS_TWO_WAY: "false" } });
+    expect(fromEnv.subagentsTwoWay).toBe(false);
+    expect(fromEnv.sources.subagentsTwoWay).toBe("env");
+
+    const bad = await load(file, { env: { TENTACLE_SUBAGENTS_TWO_WAY: "maybe" } });
+    expect(bad.subagentsTwoWay).toBe(true);
+  });
+
+  test("a non-boolean in the file is refused", () => {
+    expect(FileConfigSchema.safeParse({ subagents: { twoWay: "yes" } }).success).toBe(false);
+  });
+
+  test("a key-docs entry exists and resolves to the config's value", async () => {
+    const c = await load({ subagents: { twoWay: true } });
+    const doc = KEY_DOCS["subagents.twoWay"];
+    expect(doc).toBeDefined();
+    expect(doc?.carried).toBe("pinned");
+    expect(doc?.env).toBe("TENTACLE_SUBAGENTS_TWO_WAY");
+    expect(doc?.sample).toBe("on");
+    // The `resolved` accessor is checked against a real resolution by
+    // key-docs.test.ts T2 (`emptyResolve`); here the resolved FIELD is pinned.
+    expect(c.subagentsTwoWay).toBe(true);
+    expect(doc?.default?.()).toBe(false);
   });
 });
 

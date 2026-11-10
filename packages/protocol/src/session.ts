@@ -557,6 +557,8 @@ export const SessionSettingsSchema = z.object({
   subagentMaxIterations: IterationLimitSchema.optional(),
   subagentExecution: ExecutionModeSchema.optional(),
   subagentMaxParallel: z.number().int().positive().optional(),
+  /** Background sub-agents may message the agent (`agent_notify`); a note wakes an idle one. */
+  subagentsTwoWay: z.boolean().optional(),
   /** Absent with `settings` present → the neutral default, never the pod's own text. */
   agentTaskDescription: z.string().min(1).max(4096).optional(),
   loadAgentsMd: z.boolean().optional(),

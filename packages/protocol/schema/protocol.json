@@ -2353,6 +2353,9 @@
         "subagentsEnabled": {
           "type": "boolean"
         },
+        "subagentsTwoWay": {
+          "type": "boolean"
+        },
         "summarizeLargeOutput": {
           "type": "boolean"
         },
@@ -2556,6 +2559,7 @@
           "session_settings": "#/$defs/SessionSettingsUpdate",
           "session_title": "#/$defs/SessionTitleUpdate",
           "steer": "#/$defs/Steer",
+          "subagent_notify": "#/$defs/SubagentNotify",
           "subagents": "#/$defs/SubagentsUpdate",
           "tool_call": "#/$defs/ToolCall",
           "tool_call_phase": "#/$defs/ToolCallPhase",
@@ -2626,6 +2630,9 @@
         },
         {
           "$ref": "#/$defs/SubagentsUpdate"
+        },
+        {
+          "$ref": "#/$defs/SubagentNotify"
         },
         {
           "$ref": "#/$defs/SessionSettingsUpdate"
@@ -2809,6 +2816,28 @@
     "StopReason": {
       "enum": ["end_turn", "max_tokens", "max_iterations", "cancelled", "error"],
       "type": "string"
+    },
+    "SubagentNotify": {
+      "additionalProperties": true,
+      "properties": {
+        "agentId": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "type": {
+          "const": "subagent_notify",
+          "type": "string"
+        },
+        "wake": {
+          "type": "boolean"
+        }
+      },
+      "required": ["agentId", "text", "type", "wake"],
+      "type": "object",
+      "x-event-class": "display"
     },
     "SubagentRow": {
       "additionalProperties": true,

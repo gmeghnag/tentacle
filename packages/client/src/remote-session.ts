@@ -36,6 +36,7 @@ import type {
   SessionTitleNotice,
 } from "./remote-client.ts";
 import type { StreamOutput } from "./session-reducer.ts";
+import type { SubagentNotify } from "./subagents.ts";
 
 /** Own turns remembered by `ownsTurn` after they end (the oldest fall off). */
 const MINTED_TURNS_MAX = 256;
@@ -466,6 +467,19 @@ export class RemoteSession implements SessionStreamListener {
       listener(now);
     }
     return unsubscribe;
+  }
+
+  /**
+   * Subscribe to a RUNNING background child's messages to this session's agent
+   * (bounded and sanitized by the client), never given a backlog: a notice is a
+   * moment, not state (docs/feat/agent-message-two-way.md). Returns an unsubscribe.
+   */
+  onSubagentNotify(listener: (notify: SubagentNotify) => void): () => void {
+    return this.client.onSessionSubagentNotify((notice) => {
+      if (notice.sessionId === this.id) {
+        listener(notice.notify);
+      }
+    });
   }
 
   /**
@@ -1343,6 +1357,7 @@ export class RemoteSession implements SessionStreamListener {
       case "session_title":
       case "queued":
       case "subagents":
+      case "subagent_notify":
         return;
       default: {
         // Turn-scoped: always inside its turn's brackets (T-B0), so a null or
@@ -1436,7 +1451,8 @@ export class RemoteSession implements SessionStreamListener {
       update.type === "background_exit" ||
       update.type === "session_title" ||
       update.type === "queued" ||
-      update.type === "subagents"
+      update.type === "subagents" ||
+      update.type === "subagent_notify"
     ) {
       return;
     }

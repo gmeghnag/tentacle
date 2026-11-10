@@ -268,6 +268,23 @@ export const SubagentsUpdateSchema = z.object({
   agents: z.array(SubagentRowSchema),
 });
 
+/**
+ * A RUNNING background sub-agent sent its parent agent a message
+ * (`agent_notify`, docs/feat/agent-message-two-way.md): the text reached the
+ * parent's conversation. `wake` says whether the note asks for a continuation
+ * (the per-user-message wake budget allows it); a note without it is delivered
+ * at the next turn's start and wakes nobody. Session-level, like `subagents`: a
+ * child runs between turns. Display only: a client that skips it loses only the
+ * live notice (the note itself arrives in the conversation), and the daemon
+ * waits on nobody.
+ */
+export const SubagentNotifySchema = z.object({
+  type: z.literal("subagent_notify"),
+  agentId: z.string().min(1),
+  text: z.string(),
+  wake: z.boolean(),
+});
+
 export const SessionUpdateSchema = z.discriminatedUnion("type", [
   AgentMessageChunkSchema,
   AgentThoughtChunkSchema,
@@ -289,6 +306,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   SessionTitleUpdateSchema,
   QueuedUpdateSchema,
   SubagentsUpdateSchema,
+  SubagentNotifySchema,
   SessionSettingsUpdateSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
@@ -337,6 +355,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   queued: "display",
   // Full state, also in the snapshot's first page; nothing waits on a row.
   subagents: "display",
+  // A notice; the note itself rides the conversation (nothing hangs).
+  subagent_notify: "display",
   // A notice; the report also rides every OpenResult (nothing hangs).
   session_settings: "display",
 };

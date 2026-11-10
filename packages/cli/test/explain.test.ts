@@ -21,8 +21,8 @@ describe("explain with no key: the top level only", () => {
   test("one line per top-level key, sections marked with their sub-key count", () => {
     const out = lines(undefined);
     expect(out.some((line) => /^\s*model\b.*\(9 sub-keys\)/.test(line))).toBe(true);
-    // 8 since models-map (`subagents.types`, `subagents.selectableModels`).
-    expect(out.some((line) => /^\s*subagents\b.*\(8 sub-keys\)/.test(line))).toBe(true);
+    // 9 since agent-message-two-way (`subagents.twoWay`).
+    expect(out.some((line) => /^\s*subagents\b.*\(9 sub-keys\)/.test(line))).toBe(true);
     expect(out.some((line) => /^\s*models\b.*\(10 sub-keys\)/.test(line))).toBe(true);
     // A leaf at the top level has no count and no children of its own.
     expect(out.some((line) => /^\s*maxIterations\b/.test(line))).toBe(true);

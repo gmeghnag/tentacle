@@ -4,7 +4,7 @@
  * `JobController`); when it is not wired they report the capability as
  * unavailable rather than throwing.
  */
-import type { AgentJobs, JobStatus, Tool } from "@tentacle/core";
+import type { AgentJobs, AgentNotifyResult, JobStatus, Tool } from "@tentacle/core";
 import { z } from "zod";
 import { jobCursorConcurrency } from "./concurrency.ts";
 
@@ -102,6 +102,49 @@ export function createAgentKillTool(jobs: AgentJobs): Tool<z.infer<typeof agentK
       };
     },
   };
+}
+
+export const AGENT_NOTIFY_TOOL_NAME = "agent_notify";
+
+const agentNotifyInput = z.object({
+  text: z.string().min(1).describe("What to tell the agent that launched you."),
+});
+
+/**
+ * A running BACKGROUND child's way back to its parent agent
+ * (docs/feat/agent-message-two-way.md, owner Q3 a): registered only on a child
+ * that has an `sa-N` (`agent_task{background: true}`), and only where the
+ * session's `subagents.twoWay` wired a `notify`. A reply, if any, arrives as
+ * `[message from the parent agent]` at a later step — the child keeps working,
+ * it never waits for one.
+ */
+export function createAgentNotifyTool(
+  agentId: string,
+  notify: (agentId: string, text: string) => AgentNotifyResult,
+): Tool<z.infer<typeof agentNotifyInput>> {
+  return {
+    name: AGENT_NOTIFY_TOOL_NAME,
+    description:
+      "Send a short message to the agent that launched you, while you keep working. Use it for an intermediate finding or a question it must decide. It may wake it. Your final report is still what it gets when you finish. At most 8 per user message, 8000 characters each. A reply, if any, arrives as [message from the parent agent] before a later step. Do not stop and wait for one.",
+    inputSchema: agentNotifyInput,
+    permission: "none",
+    async execute(input) {
+      // `AgentJobs.notify` decides and delivers synchronously: a text it
+      // refuses never reached the parent, so the child can retry or report it.
+      const sent = notify(agentId, input.text);
+      if (!sent.ok) {
+        return { content: sent.reason, isError: true };
+      }
+      return { content: notifyResultText(sent.wakes), isError: false };
+    },
+  };
+}
+
+/** What the child reads after an accepted notify: how the parent will see it. */
+function notifyResultText(wakes: boolean): string {
+  return wakes
+    ? "sent to the parent agent (it reads it at its next step, now if it is idle). Keep working."
+    : "sent to the parent agent; it is not woken now (too many wakes since the user last wrote), it reads it at its next step. Keep working.";
 }
 
 export const AGENT_MESSAGE_TOOL_NAME = "agent_message";

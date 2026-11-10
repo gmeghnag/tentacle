@@ -1041,6 +1041,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             permissions,
             jobs: runtime.jobs,
             autoWakeOnJobExit: config.autoWake,
+            subagentsTwoWay: config.subagentsTwoWay,
             // A detached run's TUI: its presence follows `/clear`, its `/quit`
             // closes the session for all (docs/fix/detach-live.md A2/A4).
             createSession: run?.createSession ?? runtime.createSession,
@@ -1834,6 +1835,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
               permissions,
               jobs: runtime.jobs,
               autoWakeOnJobExit: config.autoWake,
+              subagentsTwoWay: config.subagentsTwoWay,
               createSession: runtime.createSession,
               link: runtime.link,
               mcpStatus: runtime.mcpStatus,
@@ -1885,6 +1887,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           permissions,
           jobs,
           autoWakeOnJobExit: config.autoWake,
+          subagentsTwoWay: config.subagentsTwoWay,
           createSession,
           mcpStatus: () => mcpTracker.probe(),
           ...sessionOptions,

@@ -104,7 +104,12 @@ import {
   reduceStream,
   sinceOf,
 } from "./session-reducer.ts";
-import { boundSubagents, subagentsFromSnapshot } from "./subagents.ts";
+import {
+  type SubagentNotify,
+  boundSubagentNotify,
+  boundSubagents,
+  subagentsFromSnapshot,
+} from "./subagents.ts";
 import { type DaemonKind, explainVersionMismatch } from "./version-mismatch.ts";
 
 /** A `once` session command whose link dropped before the daemon answered (its outcome is unknown). */
@@ -198,6 +203,17 @@ export interface SessionQueueNotice {
 export interface SessionSubagentsNotice {
   readonly sessionId: string;
   readonly rows: readonly SubagentRow[];
+}
+
+/**
+ * A running background child messaged its agent (a `subagent_notify` update,
+ * docs/feat/agent-message-two-way.md): the text already reached the parent's
+ * conversation; this is only the live notice (and the wake's cue). Not
+ * turn-scoped: a child runs between turns. Display only.
+ */
+export interface SessionSubagentNotifyNotice {
+  readonly sessionId: string;
+  readonly notify: SubagentNotify;
 }
 
 /**
@@ -531,6 +547,9 @@ export class RemoteClient {
   /** Session-independent listeners for queue changes (idle or mid-turn). */
   private readonly queueListeners = new Set<(notice: SessionQueueNotice) => void>();
   private readonly subagentListeners = new Set<(notice: SessionSubagentsNotice) => void>();
+  private readonly subagentNotifyListeners = new Set<
+    (notice: SessionSubagentNotifyNotice) => void
+  >();
   private readonly statusListeners = new Set<(status: LinkStatus) => void>();
   private readonly historyLostListeners = new Set<(notice: HistoryLostNotice) => void>();
   private readonly sessionDeletedListeners = new Set<(notice: SessionDeletedNotice) => void>();
@@ -844,6 +863,15 @@ export class RemoteClient {
   /** The session's background sub-agents as last reported; undefined if never reported. */
   subagentsOf(sessionId: string): readonly SubagentRow[] | undefined {
     return this.sessions.get(sessionId)?.subagents;
+  }
+
+  /**
+   * Subscribe to a running child's messages to its agent, across all sessions
+   * (see `SessionSubagentNotifyNotice`); returns an unsubscribe.
+   */
+  onSessionSubagentNotify(listener: (notice: SessionSubagentNotifyNotice) => void): () => void {
+    this.subagentNotifyListeners.add(listener);
+    return () => this.subagentNotifyListeners.delete(listener);
   }
 
   /**
@@ -1901,6 +1929,13 @@ export class RemoteClient {
     }
   }
 
+  /** A child's message to the agent (bounded and sanitized here): told, never stored. */
+  private subagentNotified(entry: SessionEntry, notify: SubagentNotify): void {
+    for (const listener of this.subagentNotifyListeners) {
+      listener({ sessionId: entry.id, notify });
+    }
+  }
+
   /** A `session_settings` in seq order: the newest report; told unless the sync was this client's. */
   private settingsChanged(
     entry: SessionEntry,
@@ -2296,6 +2331,9 @@ export class RemoteClient {
       } else if (update.type === "subagents") {
         // Not turn-scoped either: a child runs between turns, and so does its row.
         this.subagentsChanged(entry, boundSubagents(update.agents));
+      } else if (update.type === "subagent_notify") {
+        // Not turn-scoped: a child messages the agent while it runs (idle too).
+        this.subagentNotified(entry, boundSubagentNotify(update));
       } else if (update.type === "session_settings") {
         // Not turn-scoped: another client's sync is told while idle too.
         this.settingsChanged(entry, update.settings, update.id);

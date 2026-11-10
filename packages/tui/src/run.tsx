@@ -34,6 +34,8 @@ export interface TuiOptions {
   readonly jobs?: JobController;
   /** Auto-wake on a background-job exit (default true in the App). */
   readonly autoWakeOnJobExit?: boolean;
+  /** `subagents.twoWay`: a child's message may wake this TUI (docs/feat/agent-message-two-way.md). */
+  readonly subagentsTwoWay?: boolean;
   /** A detached run's relay handed over a job's exit no turn has flushed. */
   readonly wakePending?: boolean;
   /** The wake was HANDED OVER by a relay (it owns it): a refused continuation is retried once. wakePending alone (the open reported unflushed exits) is never retried: another TUI may serve it. */
@@ -143,6 +145,9 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         {...(options.jobs ? { jobs: options.jobs } : {})}
         {...(options.autoWakeOnJobExit !== undefined
           ? { autoWakeOnJobExit: options.autoWakeOnJobExit }
+          : {})}
+        {...(options.subagentsTwoWay !== undefined
+          ? { subagentsTwoWay: options.subagentsTwoWay }
           : {})}
         {...(options.wakePending ? { wakePending: true } : {})}
         {...(options.wakeHanded ? { wakeHanded: true } : {})}

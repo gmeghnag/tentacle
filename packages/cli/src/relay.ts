@@ -54,6 +54,7 @@ import {
   finalView,
   initialRelay,
   needsUse,
+  notifyWakes,
   relayExits,
   relayStep,
   relayView,
@@ -430,6 +431,16 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   // count rides the same `subagents` frame the TUI's status line reads.
   const offAgents =
     session.onSubagents?.((rows) => emit({ type: "agents", n: rows.length })) ?? (() => {});
+  // A running child that messaged the agent (docs/feat/agent-message-two-way.md):
+  // a WAKING note asks this relay for the same continuation a job exit does.
+  // The decision is the laptop's own (`autoWake` and `subagents.twoWay` here),
+  // never the pod's.
+  const offNotify =
+    session.onSubagentNotify?.((n) => {
+      if (notifyWakes(n, config)) {
+        emit({ type: "job_exit" });
+      }
+    }) ?? (() => {});
   maybeWake = () => {
     if (!relayWakeDue(model, exiting)) {
       return;
@@ -592,6 +603,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   offLink();
   offExit();
   offAgents();
+  offNotify();
   await runtime.release();
   const unsaved = await saver.drain();
   for (const line of unsaved) {

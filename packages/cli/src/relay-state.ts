@@ -344,6 +344,21 @@ export function exitPlan(model: RelayModel, rm: boolean, use: ResidentUse | null
   return use.others > 0 ? { kind: "leave", why: "another client is using it" } : { kind: "remove" };
 }
 
+/**
+ * Does a child's message to the agent (`subagent_notify`) ask this relay for a
+ * continuation? (docs/feat/agent-message-two-way.md, Design 7.) ONE pure rule,
+ * so the gate is testable and the relay holds no policy of its own: a note is
+ * a wake only when the child says one is allowed (`wake`: the session's wake
+ * budget) and this LAPTOP allows two-way at all — `autoWake` and
+ * `subagents.twoWay`, both read here, never from the pod (AGENTS §7).
+ */
+export function notifyWakes(
+  notify: { readonly wake: boolean },
+  settings: { readonly autoWake: boolean; readonly subagentsTwoWay: boolean },
+): boolean {
+  return notify.wake && settings.autoWake && settings.subagentsTwoWay;
+}
+
 /** The state left behind at exit: nothing runs any more. A `note` stays. */
 export function finalView(model: RelayModel): RelayView {
   const view = relayView(model);

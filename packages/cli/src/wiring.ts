@@ -547,6 +547,9 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       // A child's own rounds follow `tools.*` (task 7, owner decision 4).
       toolExecution: config.toolExecution,
       toolOutput,
+      // Two-way (docs/feat/agent-message-two-way.md): the ONLY switch — with it
+      // off, no runner gets a `notify`, so no child is offered `agent_notify`.
+      ...(config.subagentsTwoWay ? { notify: (id, text) => agentJobs.notify(id, text) } : {}),
     });
     if (published) {
       // Said here because only the pod knows its own types (the laptop cannot).

@@ -1,13 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
-import { AgentInbox, AgentJobs } from "@tentacle/core";
+import { AgentInbox, AgentJobs, type AgentNotifyResult } from "@tentacle/core";
 import {
   AGENT_KILL_TOOL_NAME,
   AGENT_MESSAGE_TOOL_NAME,
+  AGENT_NOTIFY_TOOL_NAME,
   CONTEXT_RESET_TOOL_NAME,
   ToolRegistry,
   createAgentKillTool,
   createAgentMessageTool,
+  createAgentNotifyTool,
   createContextResetTool,
   createTaskTool,
   fsReadTool,
@@ -917,6 +919,85 @@ describe("T10: an inbox is never handed to the child as a tool", () => {
     expect(offered[0]?.length).toBeGreaterThan(0);
     expect(offered[0]).not.toContain(AGENT_MESSAGE_TOOL_NAME);
     // A type naming it is still read-only: a child never gets it.
+    expect(readOnlyType("reads")).toBe(true);
+  });
+});
+
+describe("T10b: only a BACKGROUND child gets agent_notify (owner Q3 a)", () => {
+  function offeredRig(deps: {
+    notify?: (id: string, text: string) => AgentNotifyResult;
+    types?: Parameters<typeof createSubagentRunner>[0]["types"];
+  }) {
+    const offered: string[][] = [];
+    const model: ModelProvider = {
+      id: "rec",
+      async *stream(request) {
+        offered.push((request.tools ?? []).map((t) => t.name));
+        yield { type: "text", delta: "report" };
+        yield { type: "done" };
+      },
+    };
+    const { run, readOnlyType } = createSubagentRunner({
+      model,
+      env: recordingEnv().env,
+      tools: fullRegistry(),
+      ...deps,
+    });
+    return { run, offered, readOnlyType };
+  }
+
+  const yes: (id: string, text: string) => AgentNotifyResult = () => ({ ok: true, wakes: true });
+
+  test("a background child (with an agentId) is offered it; a foreground child is not", async () => {
+    const { run, offered } = offeredRig({ notify: yes });
+    await run({ description: "d", prompt: "go", type: "general" }, { agentId: "sa-1" });
+    expect(offered[0]).toContain(AGENT_NOTIFY_TOOL_NAME);
+    // The foreground is blocked on the report: its reply already exists.
+    await run({ description: "d", prompt: "go", type: "general" });
+    expect(offered[1]).not.toContain(AGENT_NOTIFY_TOOL_NAME);
+  });
+
+  test("with no notify wired (twoWay off) even a background child is not offered it", async () => {
+    const { run, offered } = offeredRig({});
+    await run({ description: "d", prompt: "go", type: "general" }, { agentId: "sa-1" });
+    expect(offered[0]).not.toContain(AGENT_NOTIFY_TOOL_NAME);
+  });
+
+  test("a read-only (explore) child gets it too: it is a channel back, not a capability", async () => {
+    const { run, offered } = offeredRig({
+      notify: yes,
+      types: [{ name: "explore", description: "reads", prompt: "p", tools: ["fs_read"] }],
+    });
+    await run({ description: "d", prompt: "go", type: "explore" }, { agentId: "sa-2" });
+    expect(offered[0]).toEqual(["fs_read", AGENT_NOTIFY_TOOL_NAME]);
+  });
+
+  test("a parent registry holding one never leaks it, and readOnlyType ignores it", async () => {
+    const offered: string[][] = [];
+    const model: ModelProvider = {
+      id: "rec",
+      async *stream(request) {
+        offered.push((request.tools ?? []).map((t) => t.name));
+        yield { type: "text", delta: "report" };
+        yield { type: "done" };
+      },
+    };
+    const { run, readOnlyType } = createSubagentRunner({
+      model,
+      env: recordingEnv().env,
+      tools: fullRegistry().register(createAgentNotifyTool("sa-parent", yes)),
+      types: [
+        {
+          name: "reads",
+          description: "reads",
+          prompt: "p",
+          tools: ["fs_read", AGENT_NOTIFY_TOOL_NAME],
+        },
+      ],
+    });
+    // No `notify` wired: the leak is dropped by the filter, not offered.
+    await run({ description: "d", prompt: "go", type: "reads" });
+    expect(offered[0]).not.toContain(AGENT_NOTIFY_TOOL_NAME);
     expect(readOnlyType("reads")).toBe(true);
   });
 });

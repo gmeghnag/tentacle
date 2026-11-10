@@ -24,6 +24,7 @@ import {
   DEFAULT_PROVIDER,
   DEFAULT_REDACT_SECRETS,
   DEFAULT_SUBAGENTS_ENABLED,
+  DEFAULT_SUBAGENTS_TWO_WAY,
   DEFAULT_SUBAGENT_EXECUTION,
   DEFAULT_SUBAGENT_MAX_ITERATIONS,
   DEFAULT_SUBAGENT_MAX_PARALLEL,
@@ -93,6 +94,8 @@ export interface ResolvedConfig {
   readonly subagentExecution: ToolExecutionMode;
   /** At most this many sub-agents at once (read by `feat/parallel-agents`). */
   readonly subagentMaxParallel: number;
+  /** May a running background sub-agent message the agent (docs/feat/agent-message-two-way.md). */
+  readonly subagentsTwoWay: boolean;
   /** A custom `agent_task` description, resolved (I/O in load.ts); absent → the neutral default. */
   readonly agentTaskDescription?: string;
   /**
@@ -163,6 +166,7 @@ export interface ResolvedConfig {
     readonly subagentMaxIterations: Source;
     readonly subagentExecution: Source;
     readonly subagentMaxParallel: Source;
+    readonly subagentsTwoWay: Source;
     readonly agentTaskDescription: Source;
     readonly autoTitle: Source;
     readonly loadAgentsMd: Source;
@@ -430,6 +434,11 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     fileConfig.subagents?.maxParallel,
     DEFAULT_SUBAGENT_MAX_PARALLEL,
   );
+  const subagentsTwoWay = pick(
+    parseBool(env.TENTACLE_SUBAGENTS_TWO_WAY),
+    fileConfig.subagents?.twoWay,
+    DEFAULT_SUBAGENTS_TWO_WAY,
+  );
   const autoTitle = pick(undefined, model.autoTitle, DEFAULT_AUTO_TITLE);
   // File-only, like `autoTitle`: no env form.
   const contextAwarenessEnabled = pick(
@@ -562,6 +571,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     subagentMaxIterations: subagentMaxIterations.value,
     subagentExecution: subagentExecution.value,
     subagentMaxParallel: subagentMaxParallel.value,
+    subagentsTwoWay: subagentsTwoWay.value,
     ...(ctx.agentTaskDescription !== undefined
       ? { agentTaskDescription: ctx.agentTaskDescription }
       : {}),
@@ -601,6 +611,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       subagentMaxIterations: subagentMaxIterations.source,
       subagentExecution: subagentExecution.source,
       subagentMaxParallel: subagentMaxParallel.source,
+      subagentsTwoWay: subagentsTwoWay.source,
       agentTaskDescription: ctx.agentTaskDescription !== undefined ? "file" : "default",
       autoTitle: autoTitle.source,
       loadAgentsMd: pickAgentsMdEnabled(fileConfig, env).source,

@@ -43,3 +43,40 @@ export function subagentsFromSnapshot(
 ): SubagentRow[] | undefined {
   return rows === undefined ? undefined : boundSubagents(rows);
 }
+
+/** What a client keeps of a child's message to the agent (`subagent_notify`). */
+export interface SubagentNotify {
+  readonly agentId: string;
+  readonly text: string;
+  readonly wake: boolean;
+}
+
+/** The id a child may be named by: a bounded, one-line label. */
+const NOTIFY_ID_MAX = 64;
+/** The text as sent, cut: the note itself arrives in the conversation. */
+const NOTIFY_TEXT_MAX = 8_000;
+
+/**
+ * A `subagent_notify` frame from a daemon that may be a pod (AGENTS §7):
+ * bounded and sanitized HERE, before anything renders it. Control characters
+ * (terminal escapes) become spaces as `progressText` does, but the NEWLINES are
+ * kept — a child's message is prose, and the notice shows its first line.
+ */
+export function boundSubagentNotify(n: {
+  readonly agentId: string;
+  readonly text: string;
+  readonly wake: boolean;
+}): SubagentNotify {
+  return {
+    agentId: progressText(n.agentId).slice(0, NOTIFY_ID_MAX),
+    text: boundNotifyText(n.text),
+    wake: n.wake,
+  };
+}
+
+/** Strip the control characters a terminal must never receive, keep `\n`, cap the length. */
+function boundNotifyText(value: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+  const clean = value.replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, " ");
+  return clean.length > NOTIFY_TEXT_MAX ? `${clean.slice(0, NOTIFY_TEXT_MAX - 1)}…` : clean;
+}
