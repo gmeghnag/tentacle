@@ -84,7 +84,18 @@ export type ToolProgressEvent =
       readonly promptTokens: number;
       readonly completionTokens: number;
     }
-  | { readonly kind: "subagent_end"; readonly toolUses: number; readonly stopReason: string };
+  /**
+   * A child ended. `agentId` is set only when it MOVED to the background: its
+   * tool call ends here, with the `sa-N` it now is, and its report arrives
+   * later as the ordinary background `[background]` note
+   * (docs/feat/subagent-detach.md).
+   */
+  | {
+      readonly kind: "subagent_end";
+      readonly toolUses: number;
+      readonly stopReason: string;
+      readonly agentId?: string;
+    };
 
 export interface ToolContext {
   readonly sessionId: string;

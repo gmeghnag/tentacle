@@ -277,6 +277,7 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
         kind: "subagent_end",
         toolUses: event.toolUses,
         stopReason: event.stopReason,
+        ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
       };
     case "tool_phase":
       return { type: "tool_call_phase", toolCallId: event.id, phase: event.phase };

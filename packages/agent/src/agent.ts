@@ -269,6 +269,12 @@ export type AgentEvent =
       readonly id: string;
       readonly toolUses: number;
       readonly stopReason: string;
+      /**
+       * Set when the child MOVED to the background (someone wrote while it ran):
+       * the `sa-N` it now is (docs/feat/subagent-detach.md). Its report arrives
+       * later as a `[background]` note; the tool call ends here.
+       */
+      readonly agentId?: string;
     }
   // A background shell job finished; surfaced at the start of the next turn.
   | {
@@ -322,7 +328,13 @@ function progressToEvent(id: string, event: ToolProgressEvent): AgentEvent {
         completionTokens: event.completionTokens,
       };
     case "subagent_end":
-      return { type: "subagent_end", id, toolUses: event.toolUses, stopReason: event.stopReason };
+      return {
+        type: "subagent_end",
+        id,
+        toolUses: event.toolUses,
+        stopReason: event.stopReason,
+        ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
+      };
   }
 }
 

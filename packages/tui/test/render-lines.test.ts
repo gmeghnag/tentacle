@@ -1841,3 +1841,58 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
     expect(text(at80)).toBe(COMMAND);
   });
 });
+
+// docs/feat/subagent-detach.md T29: a child that MOVED to the background closes
+// with a SUBTLE row (`→ background as sa-1 · its report will arrive later`),
+// never `✗ background`, and shows no report body of its own: its report arrives
+// later as the ordinary `[background]` note, which is its own item.
+describe("T29: a moved sub-agent block", () => {
+  const movedSub = (over: Partial<ToolItem> = {}): ToolItem => ({
+    kind: "tool",
+    id: "t",
+    name: "agent_task",
+    args: '{"description":"find callers of parseConfig","subagent_type":"explore"}',
+    status: "ok",
+    durationMs: 3,
+    // The tool's own result: the moved-to-background text, never a report.
+    resultText:
+      "moved to background as sa-1: find callers of parseConfig. Its report will arrive later as a [background] note; you can keep working or end your turn.",
+    sub: {
+      agentType: "explore",
+      description: "find callers of parseConfig",
+      activities: Array.from({ length: 3 }, (_, i) => `Read f${i + 1}.ts`),
+      toolUses: 3,
+      tokens: 1200,
+      done: true,
+      stopReason: "background",
+      movedTo: "sa-1",
+    },
+    ...over,
+  });
+
+  test("shows the closing row and NO report body", () => {
+    const rows = itemLines(movedSub(), { expandAll: false, width: 80 }).map((l) =>
+      strip(l).trimEnd(),
+    );
+    const joined = rows.join("\n");
+    // The row says where the work went…
+    expect(
+      rows.some((r) => r.trim() === "└─ → background as sa-1 · its report will arrive later"),
+    ).toBe(true);
+    // …and it is never a failure.
+    expect(joined).not.toContain("✗");
+    // No report body: the tool's own text is the row's job now, and the real
+    // report arrives later as its own `[background]` notice.
+    expect(joined).not.toContain("moved to background as sa-1: find callers");
+    // Its tail is still there (the person can see what it did before moving).
+    expect(joined).toContain("Read f3.ts");
+  });
+
+  test("at a narrow width the row is cut, not wrapped into a failure", () => {
+    const rows = itemLines(movedSub(), { expandAll: false, width: 40 }).map((l) =>
+      strip(l).trimEnd(),
+    );
+    expect(rows.join("\n")).not.toContain("✗");
+    expect(rows.some((r) => r.includes("→ background"))).toBe(true);
+  });
+});

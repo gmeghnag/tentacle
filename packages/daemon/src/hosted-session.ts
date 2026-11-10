@@ -53,6 +53,7 @@ import {
   AgentJobLedger,
   type AgentJobs,
   type ChatMessage,
+  DISMISSED,
   type JobController,
   type ModelProvider,
   NOTE_KIND,
@@ -62,6 +63,7 @@ import {
   type PermissionResponse,
   type SubagentBackgroundBody,
   type SubagentEndBody,
+  anySignal,
   daemonWakeGate,
   wakeDue,
 } from "@tentacle/core";
@@ -730,6 +732,10 @@ export class HostedSession {
       // it as cancelled) — not a decision: there is no turn to approve for.
       return Promise.resolve(outcomeToResponse({ outcome: "cancelled" }));
     }
+    // The ask settles at the first of: the turn's abort, or the ASKER's own
+    // withdrawal (a foreground child moving to the background re-asks it as
+    // `sa-N`: docs/feat/subagent-detach.md Design 3).
+    const settleOn = options?.withdraw ? anySignal([signal, options.withdraw]) : signal;
     // A blocking update only to a session one of whose clients can answer it
     // (docs/feat/protocol-v10-forward-compat.md): otherwise refuse at once,
     // with the reason the model sees — never suspend on a client that cannot
@@ -762,7 +768,7 @@ export class HostedSession {
       requestedAt: this.now(),
       ...(groupStart !== undefined ? { groupStart } : {}),
     };
-    const decided = this.registerAsk(requestId, update, record, signal);
+    const decided = this.registerAsk(requestId, update, record, settleOn);
     // The resumed call asked again: its live ask replaces the record's entry.
     if (toolCallId !== undefined) {
       this.carried = this.carried.filter((p) => p.toolCallId !== toolCallId);
@@ -794,8 +800,20 @@ export class HostedSession {
       // The turn's abort ends this wait: a hung disk must never trap a cancel
       // (docs/fix/cancel-hung-disk.md). Safe: the agent checks the abort
       // before the answer (agent.ts `runTool`), so an aborted turn never runs
-      // the tool and "pending on disk ⇒ never started" still holds.
-      await untilAborted(this.persisted(), signal);
+      // the tool and "pending on disk ⇒ never started" still holds. The
+      // asker's own WITHDRAWAL must never trap the re-ask either — but it
+      // withdraws only an UNANSWERED ask: an ANSWERED one (`allow`) still runs
+      // its tool, so it waits for the write that clears `turn.pending` even
+      // when a steer withdraws the (already settled) ask meanwhile. Skipping
+      // it there leaves the entry on disk while the tool runs, and a crash
+      // reloads "pending" and runs the same call twice
+      // (docs/feat/subagent-detach.md, Review M1).
+      await untilAborted(this.persisted(), outcome.outcome === "cancelled" ? settleOn : signal);
+      // Withdrawn by the ASKER (`options.withdraw`): nobody decided, and the
+      // asker is about to ask it again itself (docs/feat/subagent-detach.md).
+      if (outcome.outcome === "cancelled" && options?.withdraw?.aborted) {
+        return DISMISSED;
+      }
       if (reason !== undefined) {
         return { allowed: false, reason };
       }
@@ -1720,6 +1738,11 @@ export class HostedSession {
         : this.compacting;
     if (running && this.controller) {
       this.successor = reserve();
+      // BEFORE the abort: the child must be unlinked from the turn first, or
+      // this cancel would kill it with the turn
+      // (docs/feat/subagent-detach.md, Q13). Its call's result is pushed and
+      // committed, and it lives on as `sa-N`.
+      this.agentRuntime?.detachForeground();
       this.controller.abort();
       // The reserved turn's prompt and the rows it carries are the queue now.
       this.publishQueue();
@@ -2332,6 +2355,12 @@ export class HostedSession {
     this.enqueued.add(id);
     this.session.enqueue(text);
     this.queue.push({ id, text });
+    // A person wrote while a foreground child runs: it moves to the background
+    // NOW, in this synchronous stretch, so the call it holds is answered in
+    // this round and this steer is drained at the next boundary
+    // (docs/feat/subagent-detach.md). Only here: the three earlier returns and
+    // the throw never detach.
+    this.agentRuntime?.detachForeground();
     this.persist();
     this.publishQueue();
   }

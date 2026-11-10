@@ -10,6 +10,7 @@
  * fails as `ModelUnreachableError`. Applied once, in `createModelProvider`.
  */
 import { createConnection } from "node:net";
+import { anySignal } from "@tentacle/core";
 
 export const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 
@@ -169,10 +170,6 @@ export function withConnectTimeout(
   };
   return timed as typeof fetch;
 }
-
-/** `AbortSignal.any` (Bun has it; the repo's TS lib does not declare it). */
-const anySignal = (signals: AbortSignal[]): AbortSignal =>
-  (AbortSignal as unknown as { any(signals: AbortSignal[]): AbortSignal }).any(signals);
 
 function hostPort(dest: { host: string; port: number }): string {
   return dest.host.includes(":") ? `[${dest.host}]:${dest.port}` : `${dest.host}:${dest.port}`;

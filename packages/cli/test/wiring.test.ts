@@ -118,6 +118,10 @@ describe("inProcessAgents (single-broker invariant, AGENTS §7)", () => {
         toolCallId: "t1",
         origin: "subagent",
         agent: { type: "general", description: "look" },
+        // docs/feat/subagent-detach.md Design 3: a FOREGROUND child of a session
+        // that wires `background` is movable, so its ask carries the withdrawal
+        // signal (`withdraw`). Attribution itself is unchanged by that.
+        withdraw: expect.any(AbortSignal),
       },
     ]);
   });
