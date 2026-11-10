@@ -1133,7 +1133,248 @@ The owner chose:
 
 ## Execution
 
-*— (empty until promoted)*
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+**Two runs.** The first stopped mid-way (a malformed tool call); its uncommitted
+work was verified, completed and kept. The second finished Parts A–C, the tests
+and the gate. Nothing below is from the first run unless it says so.
+
+### Part A — the wire repair
+
+Files 1–3 and 7–9 were already written in the worktree (verified here, not
+redone): `packages/core/src/history-validity.ts`, its test, the `index.ts`
+export, and both provider guards. Fixed in this run:
+- `packages/providers/test/wire-arguments.test.ts` did not parse (an unterminated
+  `describe`): completed with the `""` → `{}`, verbatim-object, marker-idempotent
+  and Anthropic `buildPayload` cases (T2).
+- `packages/core/test/history-validity.test.ts`: 33 pass as written (T1).
+
+**T2 red (inverse edit, then restored).** `arguments: tc.arguments` →
+`(fail)` on the marker, the non-object and the `""` cases (3 red, 5 pass);
+`parseArgs` returning the parsed value unguarded → the non-object case red.
+Both restored, 8 pass.
+
+**Part A wiring (files 10–11).**
+- `context-awareness.ts`: `modelView(history)` = `repairHistory` → `renderForModel`
+  per message, plus `repairCounts`; one helper, the three sites use it.
+- `agent.ts`: the round request (`:1116`), the final no-tools round (`:1307`)
+  and `contextUsage` (`:1442`) now build from `modelView(...)`; the two
+  generator sites yield `history_repaired` when `view.repairs !== null`. The
+  estimate stays on the stored history.
+
+**T3 (`packages/agent/test/history-validity-e2e.test.ts`).** A `Bun.serve`
+fake in llama.cpp's shape (500 on any request whose
+`messages[].tool_calls[].function.arguments` is not a JSON object, checked on
+`/v1/chat/completions` and `/apply-template`; `/tokenize` answers). The real
+`OpenAIProvider`, `Agent`, `Session`, `ToolRegistry` with an `fs_write`-named
+tool.
+- T3a (the incident: turn 1 bad call, the same turn's next round, then "hey"):
+  green; round 2's body carries the marker, the paired tool content ends with
+  the exact `invalidArgumentsNote`, `session.messages` keeps the model's
+  original bytes, one `history_repaired {1,0,0}`.
+- T3b (the owner's case offline: `new Session(agent,"s",{messages: poisoned})`):
+  green.
+- T3c (`maxIterations: 1`, the final no-tools round after an invalid call):
+  green; the note proves this site repaired the copy.
+- T3d (`contextUsage` over the poisoned history): `exact: true`, `used: 4`, one
+  `/apply-template` read, `session.messages` unchanged, and the note is in the
+  counted body.
+- **Mutations, all recorded red→green.** Reverting site 1 → T3a red (the note is
+  missing). Reverting site 2 → T3c red. Reverting site 3 → T3d red. Disabling
+  the provider guard alone → T3 **stays green**, so the Agent repair (and its
+  note), not the guard, is what carries T3.
+  - **Drift from the plan's mutation recipe:** the plan expected sites 2 and 3
+    to go red on "the 500" alone. They do not: the provider guard sanitizes the
+    bytes first, so the 500 never happens. Both sites' tests therefore assert
+    the **note** (a property only `modelView` produces) as well as the marker,
+    which is the exact property that dies when the site is reverted.
+
+### Part B — the exception-safe tool loop
+
+`agent.ts` only, with `answerOutstandingCalls` from core.
+- The two notes next to `CANCELLED_TOOL_NOTE` (`TURN_STOPPED_NOT_RUN_NOTE`,
+  `TURN_STOPPED_INTERRUPTED_NOTE`), exactly the plan's wording.
+- `runToolCalls`: `owner` (found by the first call's id), `started`,
+  `inHand`, `settled`; the body in `try`/`finally`; `settled = true` before
+  both normal returns; `started.add(call.id)` before the alone path's
+  `executeCall`; the lone result held in `inHand` across its `tool_result` yield;
+  the `finally` pushes the real in-hand result and then
+  `answerOutstandingCalls(...)`, gated on `!settled && owner still in messages`.
+  Event order (`tool_result` → push → `history_commit`) is unchanged.
+- `runGroup`: new `started` parameter; `pushed` / `groupSettled`; the body in
+  `try`/`finally`; both push loops record `pushed`; `groupSettled` before the
+  fallback return and before the final `history_commit`; the `finally` closes
+  the queue (idempotent; late completions dropped) and pushes results the client
+  already saw.
+- `runPrepared`: new `started` parameter, `started.add(prepared.call.id)` as its
+  first statement, before the `await`; both call sites pass it.
+- `runUserSkill`: `owner` from `messages.at(-1)` after the push, `inHand` across
+  the `tool_result` yield, `settled` before the final commit, the same `finally`
+  with `TURN_STOPPED_INTERRUPTED_NOTE` (a read has no "not started" window).
+
+**T5 (`packages/agent/test/tool-loop-finally.test.ts`, T5g in the daemon test).**
+Every case asserts the full `session.messages` shape and that
+`validateHistory(repairHistory(messages).messages)` is `[]`.
+- T5a (requester throws): `Not run`, not one execution, the turn rejects.
+- T5b (a transform throws, alone): `Interrupted`, and the tool's raw
+  `SECRET-RAW-OUTPUT` appears nowhere in the history (F15).
+- T5c (consumer `break`s after the first `tool_start`): both calls `Not run`.
+- T5d (consumer throws at the first `tool_result`): the REAL transformed result
+  is in the history; the tool ran exactly once.
+- T5e (a landed group; the consumer throws at the first phase-2 result): the
+  seen result is kept, the started call says `Interrupted`, the unstarted one
+  `Not run`, and the block is well-formed.
+- T5f (cancel — a guard, green before and after): the cancel path's own
+  `CANCELLED` note, and no `TURN_STOPPED_*` anywhere.
+- T5g (`packages/daemon/test/history-validity-daemon.test.ts`, real
+  `SessionPersister` on real disk): the requester throws; the persisted log
+  holds `tool(c1)` = `Not run`, then the failed-turn assistant note, and
+  `reconcileOnReload` adds no second answer.
+- T5h (suspension untouched): pulling to the `tool_start` and stopping WITHOUT
+  `return()` leaves the dangling `assistant[c1]` and synthesizes nothing.
+- T5i (context reset): a throw at the `context_reset` yield leaves the fresh
+  history with no synthesized answer.
+- T5j (user skill): a throw at the skill's `tool_result` keeps the real
+  activator result.
+
+**T5 mutations (each red, then restored).**
+- Delete `runToolCalls`'s `finally` body → T5a, T5b, T5c, T5d, T5e red.
+- Delete the `inHand` push → T5d only.
+- Delete `started.add` in the alone path → T5b only.
+- Delete `started.add` in `runPrepared` → T5e only.
+- Empty the group's `finally` body → T5e only.
+- **`owner` identity check:** dropping it alone does **not** make T5i red — the
+  property is guarded twice (`runToolCalls`'s `lastIndexOf` check AND
+  `answerOutstandingCalls`'s own `lastIndexOf(owner) === -1 → []`). Mutating
+  **both** goes red (verified: `answerOutstandingCalls` was called with
+  `at = -1` and pushed a `Not run` message into the fresh history). Recorded as
+  drift: defence in depth masks a single mutation here.
+
+**T5h drift (a test's shape, not the code's).** The plan says "stop pulling (do
+not `return()`)"; `for await` + `break` *does* call `return()`. The test drives
+`gen.next()` directly instead. That also showed the design's own distinction
+vividly: a `break` genuinely is an abnormal exit and correctly synthesizes
+`Not run`.
+
+### Part C — the one-time notice
+
+- `protocol/updates.ts`: `HistoryRepairedSchema`, the union member,
+  `UPDATE_CLASS.history_repaired = "display"` (with the comment). **No
+  `PROTOCOL_VERSION` bump** (still 21, pinned by T6a).
+  `packages/protocol/schema/protocol.json` regenerated with
+  `bun run schema:export` (never hand-edited); the drift gate is green.
+- `agent.ts`: the `history_repaired` `AgentEvent` member next to
+  `context_note`; the two yields landed with Part A.
+- `daemon/src/mapping.ts`: the field-by-field case.
+- `daemon/src/hosted-session.ts`: `private historyRepairNoticed = false;` and,
+  in `drive` before `eventToUpdate`, the synchronous dedup (`continue` on a
+  repeat). No `await` added; the drive-loop invariant is untouched.
+- `client/src/mapping.ts`: the update → `AgentEvent` case.
+- `cli/src/render.ts`: `case "history_repaired"` → the shared `describeRepairs`
+  line.
+- `tui/src/state.ts`: `case "history_repaired"` → `appendNotice(state,
+  describeRepairs(event))` (one notice row; no component change).
+
+**T6.**
+- T6a (`protocol/test/updates.test.ts`): parses; a negative and a
+  non-integer count are refused; `UPDATE_CLASS` is `display`;
+  `PROTOCOL_VERSION === 21`; the JSON-schema drift gate green.
+- T6b (`daemon/test/mapping.test.ts`): field by field, plus the type added to
+  the "covers every known type" samples list (that list is what caught it).
+- T6c (`daemon/test/history-validity-daemon.test.ts`, real `SessionHost` +
+  `Connection` over the fake llama.cpp endpoint): two prompts over a poisoned
+  history give **exactly one** `history_repaired {invalidArguments: 1}`; a valid
+  history gives zero; a history whose only issue is `""` arguments gives zero
+  (F22). **Mutation:** dropping the `historyRepairNoticed` check → two updates
+  (red), restored.
+- T6d (`client/test/mapping.test.ts`), T6e (`cli/test/render.test.ts`: the exact
+  line, `—` included), T6f (`tui/test/state.test.ts`: exactly one new `notice`
+  item with the exact text).
+- Red for T6a–T6f on the old code: the type and the four switch cases did not
+  exist, so `tsc` failed on the four exhaustive switches (that is exactly the
+  red the plan predicts; recorded from the typecheck before Part C).
+
+### T4 — reload of a stored poisoned session
+
+- **T4a** (`daemon/test/history-validity-daemon.test.ts`, real
+  `SessionPersister` + `LogSessionStore` on real disk): a real daemon turn
+  commits the invalid call; after `stop()`, the `<uid>.jsonl` on disk still
+  contains the model's original bytes (`unterminated`), the reload's record
+  keeps them (`toBe(BAD)`), and **only the view** (`repairHistory(...)`) differs.
+  No rewrite of that entry.
+- **T4b** (F3, suspension): no new test — this is the *existing* contract, and
+  the plan's own precondition is that it must stay green. Verified:
+  `packages/daemon/test/persistence.test.ts` + `serve-log-store.test.ts` =
+  138 pass. The repair is view-only (asserted in T3d and T4a that
+  `session.messages` / the record are unchanged), so `reconcileOnReload` and
+  `suspendedCalls` see exactly the stored history.
+
+### Gate
+
+`bun run typecheck` green (including `tsc -p apps/mobile`: no `AgentEvent`
+switch there). `bun run lint` green (the §6 baseline is clean; 0 errors, 0
+warnings after `biome check --write` on the touched files). Per-package test
+runs, all green:
+- `packages/core` + `packages/protocol` + `packages/providers`: 465 pass.
+- `packages/agent`: 521 pass across 46 files (512 before the two new test files).
+- `packages/daemon`: 737 pass, 1 skip (the opt-in keepalive).
+- `packages/client`: 518 pass.
+- `packages/tui`: 1430 pass.
+- `packages/cli`: 2407 pass.
+No new failure and no non-opt-in skip.
+
+**`bun run check` (the gate, full suite): green.** `tsc --noEmit` +
+`tsc -p apps/mobile` clean, `biome check .` clean (855 files, 0 errors, 0
+warnings — the §6 baseline), `bun test` **6704 pass, 3 skip, 0 fail** across 467
+files. The 3 skips are exactly the documented opt-ins (`TENTACLE_DOCKER_TESTS`,
+`TENTACLE_K8S_SERVER`, `TENTACLE_SLOW_TESTS`) — none is mine.
+
+### Drift from the Implementation (all named above, in one place)
+
+1. **T3's mutation recipe for sites 2 and 3.** The provider guard sanitizes
+   first, so a revert of the site alone no longer produces a 500. The tests
+   assert the note (a `modelView`-only property) to make each site's mutation
+   red. The guard's own mutation (T3 with it disabled) stays green, as the plan
+   intends.
+2. **T5i's `owner`-check mutation** is masked by `answerOutstandingCalls`'s own
+   guard. Both are correct (defence in depth); the mutation is recorded as
+   needing both edits.
+3. **T5h's test shape**: `gen.next()` instead of `for await` + `break` (which
+   is itself a `return()`).
+4. **`SessionHost.close(id)`**, not a bare `close()`, in the daemon harness.
+5. **`fs_edit`/`fs_write` with long bodies repeatedly produced malformed tool
+   arguments in this run** (the very failure mode this task repairs). Files were
+   therefore written in small appended pieces and, where that was impossible,
+   with shell heredocs. No source line was written from a guessed body: every
+   edit was followed by `tsc` and the narrow test.
+
+### Not done / left as debt (unchanged from the plan's Notes)
+
+- The sub-agent's own repairs are not surfaced as a notice.
+- The notice is per loaded session, in memory; a daemon restart shows it once
+  more.
+- Duplicate ids within one message (F10), the `WeakMap` memo (F9), a
+  capability flag for consecutive same-role messages (rule 5), and the
+  registry's error carrying the parse position: all still debt.
+- Persisted format untouched: no `schemaVersion` / `DAEMON_STATE_VERSION` bump.
+
+### Verdict
+
+**DONE.**
+- Gate: `bun run check` green — typecheck (incl. mobile) · lint (0 errors, 0
+  warnings) · `bun test` 6704 pass / 3 skip (the documented opt-ins) / 0 fail.
+- Drifts (5, all in "Drift from the Implementation" above): T3's mutation recipe
+  needs the note (the guard sanitizes first); T5i's `owner` mutation needs both
+  guards edited; T5h drives `gen.next()` instead of `for await`+`break`;
+  `SessionHost.close(id)`; the long-body tool-call failure of this very run
+  forced small appends.
+- Not done (deliberate, per the plan's Notes): sub-agent repairs are not
+  surfaced; the notice is in memory per loaded session; F9/F10/rule-5/registry
+  -error debt; no persisted-format change.
+- **Uncommitted**, as instructed (`docs/feat/history-validity-invariant.md`,
+  `CHANGELOG.md`, 6 new files, 17 edited). Nothing was committed, no
+  `git checkout`/`restore`/`stash` was used, `TODO.md` is untouched, and the
+  scratch files live only under `.tentacle/tmp/`.
 
 ## Review
 

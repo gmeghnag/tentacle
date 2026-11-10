@@ -12,6 +12,19 @@ describe("render", () => {
     expect(render({ type: "context_note", text: "x", reason: "continue" })).toBe("");
   });
 
+  test("history_repaired prints the shared notice line (docs/feat/history-validity-invariant.md)", () => {
+    expect(
+      render({
+        type: "history_repaired",
+        invalidArguments: 1,
+        unansweredCalls: 0,
+        orphanResults: 0,
+      }),
+    ).toBe(
+      "\nhistory repaired for the model: 1 tool call with invalid arguments — the saved session is unchanged\n",
+    );
+  });
+
   test("reasoning is hidden by default", () => {
     expect(render({ type: "reasoning", delta: "thinking" })).toBe("");
   });

@@ -4,7 +4,7 @@
  * whatever it returns.
  */
 import type { AgentEvent } from "@tentacle/agent";
-import { toolLabel } from "@tentacle/core";
+import { describeRepairs, toolLabel } from "@tentacle/core";
 
 export function render(event: AgentEvent): string {
   switch (event.type) {
@@ -53,6 +53,10 @@ export function render(event: AgentEvent): string {
     case "context_note":
       // A user hook's note is shown (R1); the loop's own notes are not.
       return event.reason === "hook" ? `\n${event.text}\n` : "";
+    case "history_repaired":
+      // Once per session: the model was sent a repaired copy, the saved
+      // session is unchanged (docs/feat/history-validity-invariant.md).
+      return `\n${describeRepairs(event)}\n`;
     case "turn_end":
       return event.reason === "end_turn" ? "\n" : `\n[stopped: ${event.reason}]\n`;
   }

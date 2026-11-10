@@ -245,6 +245,15 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
       return { type: "steer", text: event.text, ...(event.id ? { id: event.id } : {}) };
     case "context_note":
       return { type: "context_note", text: event.text, reason: event.reason };
+    // The model was sent a repaired copy of the history; display only, and the
+    // daemon keeps only the first per session (docs/feat/history-validity-invariant.md).
+    case "history_repaired":
+      return {
+        type: "history_repaired",
+        invalidArguments: event.invalidArguments,
+        unansweredCalls: event.unansweredCalls,
+        orphanResults: event.orphanResults,
+      };
     // Nested sub-agent progress rides one display update keyed by the parent call
     // (docs/feat/subagent-progress-wire.md); the final report rides tool_call_update.
     case "subagent_start":

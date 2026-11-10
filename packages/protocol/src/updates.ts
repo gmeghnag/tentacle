@@ -125,6 +125,19 @@ export const ContextNoteSchema = z.object({
 });
 
 /**
+ * The model was sent a repaired copy of the session's history (invalid tool
+ * arguments replaced by a marker, unanswered calls answered, stray tool
+ * results left out; docs/feat/history-validity-invariant.md). The STORED
+ * history is unchanged. Sent at most once per loaded session. Display only.
+ */
+export const HistoryRepairedSchema = z.object({
+  type: z.literal("history_repaired"),
+  invalidArguments: z.number().int().nonnegative(),
+  unansweredCalls: z.number().int().nonnegative(),
+  orphanResults: z.number().int().nonnegative(),
+});
+
+/**
  * Live progress of a tool that runs a nested agent (the `agent_task` sub-agent),
  * keyed by the PARENT tool call. Display-only. `kind` is a free string so a
  * newer daemon's kind is skipped by an older client instead of failing the
@@ -324,6 +337,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   BackgroundExitSchema,
   SteerSchema,
   ContextNoteSchema,
+  HistoryRepairedSchema,
   ToolProgressSchema,
   ToolCallPhaseSchema,
   TurnStartSchema,
@@ -370,6 +384,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   background_exit: "display",
   steer: "display",
   context_note: "display",
+  // A notice; nothing waits on it (the repair is in the model's copy only).
+  history_repaired: "display",
   // A label/meter on a running tool: skipping it hangs nothing (the result rides tool_call_update).
   tool_progress: "display",
   // A row's queued/running label; the laptop's cut labels use `running` (v15).

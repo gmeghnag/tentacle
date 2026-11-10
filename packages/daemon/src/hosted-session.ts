@@ -457,6 +457,12 @@ export class HostedSession {
   /** Insertion-ordered: the last one is the most recently attached. */
   private readonly attachments = new Set<Attachment>();
   private closed = false;
+  /**
+   * The `history_repaired` notice was already sent for this loaded session
+   * (docs/feat/history-validity-invariant.md, Part C): once per session, in
+   * memory — persisting it would change the sidecar format for a notice.
+   */
+  private historyRepairNoticed = false;
   private readonly jobs: JobController | undefined;
   private readonly unsubscribeExit: (() => void) | undefined;
   private readonly unsubscribeStart: (() => void) | undefined;
@@ -2220,6 +2226,14 @@ export class HostedSession {
         // pull): the log says it may have run — "interrupted", never "not run".
         if (event.type === "tool_phase" && event.phase === "running") {
           this.log.callStarted(event.id);
+        }
+        if (event.type === "history_repaired") {
+          // Synchronous, no await: the drive-loop invariant holds. The user is
+          // told ONCE per loaded session (a restart notifies again, once).
+          if (this.historyRepairNoticed) {
+            continue;
+          }
+          this.historyRepairNoticed = true;
         }
         const update = eventToUpdate(named);
         if (update) {

@@ -10,6 +10,7 @@
  */
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
 import type { ChatMessage, ToolResult, ToolResultDetail, ToolResultSpill } from "@tentacle/core";
+import { describeRepairs } from "@tentacle/core";
 import { messagesToItems } from "./resume.ts";
 import { nextToolStatus } from "./tool-phase-view.ts";
 
@@ -487,6 +488,11 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
     // `background_exit`) stay hidden.
     case "context_note":
       return event.reason === "hook" ? appendNotice(state, event.text) : state;
+
+    // The model was sent a repaired copy of the history (once per session;
+    // docs/feat/history-validity-invariant.md). The saved session is unchanged.
+    case "history_repaired":
+      return appendNotice(state, describeRepairs(event));
 
     // A daemon-side bookkeeping marker: nothing to render.
     case "history_commit":
