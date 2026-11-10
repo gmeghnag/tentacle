@@ -1588,3 +1588,34 @@ Everything else red-teamed below holds.
   malformed-tool-call trouble during its own run.
 - The miss is the plan's (F20 assumes all notices go through `drive`). The
   executor did not cause it.
+
+## Execution — fix round 1
+
+*— deepseek (tentacle --profile deepseek), 2026-11-11*
+
+Scope: the Review's one MEDIUM only — the one-shot CLI repeated the
+`history_repaired` notice on every repaired round of a turn.
+
+- **Root cause.** `AnswerSplit.push` rendered every `history_repaired`. The
+  daemon-side dedup (`hosted-session.ts:2230-2237`) does not cover the one-shot
+  path (`main.ts:1929`, `agent.run` with no daemon), and the Agent deliberately
+  yields one notice per repaired request.
+- **Fix** (`packages/cli/src/render.ts`), per the Review:
+  - `private repairNoticed = false` on `AnswerSplit`.
+  - In `push`, a `history_repaired` whose flag is set returns
+    `{ out: "", err: "" }`; the first one sets the flag and renders as before.
+  - The Agent is untouched, so T3a ("one per repaired round") still pins its
+    behaviour; `AnswerSplit` is one instance per one-shot run (`main.ts:1927`)
+    and the repl's per-turn instance is harmless (the daemon already dedups).
+- **Test** (`packages/cli/test/render.test.ts`): two `history_repaired` events
+  pushed into one `AnswerSplit` (with a `text` event between them) yield exactly
+  one `history repaired for the model` line on stderr. Shown red first
+  (`Received length: 2`), green after the fix.
+- **Mutation (non-vacuity).** Making the guard re-arm instead of return
+  (`repairNoticed = false` on the second event) → the new test fails (1 fail,
+  15 pass); restored, green.
+- **Gate.** `bun run check` — typecheck clean, `biome check .` clean; `bun test`
+  6705 pass, 3 skip (the documented opt-ins), 0 fail. (The first full run
+  tripped one unrelated `packages/exec` confinement case under load; it passes
+  in isolation and in the rerun, so it is a flake, not this diff.)
+- No `TODO.md` change, no commit.

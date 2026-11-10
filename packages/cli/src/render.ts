@@ -104,6 +104,12 @@ export class AnswerSplit {
   private errAtLineStart = true;
   /** A trace was written since the last answer text. */
   private traced = false;
+  /**
+   * The `history_repaired` notice was already shown. Once per session: the
+   * one-shot CLI has no daemon-side dedup, and the Agent yields one notice per
+   * repaired round (docs/feat/history-validity-invariant.md).
+   */
+  private repairNoticed = false;
 
   /**
    * `shared`: stdout and stderr are the SAME terminal, so the answer moves the
@@ -134,6 +140,13 @@ export class AnswerSplit {
       out = this.outCursorAtLineStart ? "" : "\n";
       err = event.reason === "end_turn" ? "" : `[stopped: ${event.reason}]\n`;
     } else {
+      if (event.type === "history_repaired") {
+        // Once per session: a later repaired round of the same run stays quiet.
+        if (this.repairNoticed) {
+          return { out: "", err: "" };
+        }
+        this.repairNoticed = true;
+      }
       err = this.freshLine(render(event));
       if (err !== "") {
         this.traced = true;
