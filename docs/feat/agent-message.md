@@ -633,3 +633,41 @@ two new tests.
 
 **Not addressed here:** H1's sibling paths the review accepted as debt (the error path drops texts without a
 count), and no MEDIUM findings were raised.
+
+## Review — round 2
+
+**Verdict: PASS**: H1 is fixed as specified, and the fix adds no HIGH or MEDIUM finding. Scope: the H1 fix
+only (`git diff HEAD~1`).
+
+**Gate** (`bun run check`, run by the reviewer): typecheck clean · `biome check .` clean (817 files) · `bun test`
+**6288 pass, 3 skip (the documented opt-ins), 0 fail**, 6291 tests across 442 files.
+
+**(1) H1 fixed as specified.** The fix is in the runner only (`packages/agent/src/subagent.ts`); `Agent` is unchanged:
+- `unanswered` goes up by one on each `steer` and resets to 0 on `text`, `tool_start` and `usage`.
+- The "were not read" line counts `unread.length + unanswered`.
+
+The two new tests are not vacuous. Reviewer mutations, both reverted, `git status` clean:
+- `missed = unread.length + 0 * unanswered` → T9c and T9d fail.
+- No reset on `text` → T7 and T8 fail. These two catch a false "not read" line: a text that was answered but still counted.
+
+**(2) No new HIGH or MEDIUM issue.** Attacks tried:
+- *A reset event without the model having seen the text.* `Agent.runMessages` reads the inbox at only five
+  points (`agent.ts:890`, `:911`, `:1040`, `:1096`, `:1155`), and none is inside `runToolCalls`. So every `steer` is
+  emitted before the request built from the history that contains it. The resumed round and the user-skill
+  round run before the first read. Hence any later `text`, `tool_start` or `usage` comes from a round whose request
+  carried the steer. No such event comes from outside the model: hooks and nudges yield `context_note`.
+- *An answered steer counted as unread.* A late read (`:1040`) is followed by `continue`. The next round, or
+  the forced final report after `:1096`, resets the count. If the final report stream throws or comes back empty, the count is kept, which
+  is honest: no model output answered the text. A cancel mid-stream after the read is counted as unread; the
+  child stopped without answering, so the line is truthful, not a false positive.
+- *Counts across passes.* `unanswered` is not reset between passes. That is correct: a text read by a pass
+  that a hook stopped stays in the shared history. If a later pass runs a model round, that round sees the text
+  and resets the count.
+- *Double counting with `carry` or `inbox.close()`.* A carried text that gets read is removed from `carry` by the
+  read (`splice`) and emits one `steer`. A carried text that is never read (T9b) emits no `steer`. `close()` returns
+  only texts never read. Each text is counted at most once.
+
+*Reviewer note:* same model family as the plan's author (Opus). The executor fixed exactly the specified H1. Its
+claimed red/green, mutation and gate numbers match the reviewer's run.
+
+*— claude-opus-5-5, 2026-11-10*
