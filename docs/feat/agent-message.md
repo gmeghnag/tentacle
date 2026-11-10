@@ -581,3 +581,55 @@ The executor behaved well. It found and tested a real hole the plan missed (drif
 mutation-only red for T11 honestly, and the gate numbers it claimed match the reviewer's run exactly.
 
 *— claude-opus-5-5, 2026-11-10*
+
+## Execution — fix round 1
+
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+**H1 only.** Runner-only fix; `packages/agent/src/agent.ts` untouched (the review's reason: skipping those
+drains for children makes `closeIfEmpty` re-carry the same text forever on the `turn_start`-stop path).
+
+**Change** — `packages/agent/src/subagent.ts`:
+- `unanswered` (`subagent.ts:404`): `+1` on each `steer` event, reset to `0` on `text`, `tool_start` and
+  `usage` (`subagent.ts:417-440`) — the three events that prove a model round consumed the request carrying
+  the drained text. It counts what the passes DRAINED with no round answering: the `max_iterations` drain
+  after the forced final report (`agent.ts:1155-1158`) and the drain a `turn_start` stop does before ending
+  the pass (`agent.ts:890-894`). Both push into the history, so the inbox is empty and `inbox.close()` returns
+  `[]`; a child has no next turn, so nothing else would ever report them.
+- The report line is `unread.length + unanswered` (`subagent.ts:474-479`). `carry`+`close()` still count as
+  before (T9/T9b unchanged).
+
+**Tests** (`packages/agent/test/subagent.test.ts`, both red first on the current code for the right
+reason — the report lacked the unread line, received `"final report"` / `"r1"` while the text was in no
+request):
+- **T9c** (`subagent.test.ts:775-813`) — the reviewer's repro as a test: `maxIterations: 1`, first round calls a
+  tool, a parent text is pushed while the forced final report streams. Asserts `push` was `ok`, the text is in
+  no request, `stopReason` is `max_iterations`, and the report carries
+  `(1 message(s) … were not read.)`.
+- **T9d** (`subagent.test.ts:818-881`) — a `turn_start` hook (`exitCode: 2` on its second call only) stops the
+  continuation pass that `closeIfEmpty` opened for a text pushed in T8's microtask seam. Asserts 2 hook calls,
+  1 model request, the text in no request, and the unread line.
+
+Red/green:
+```
+# red (before the fix)
+(fail) T9c: … Received: "final report"
+(fail) T9d: … Received: "r1"
+ 28 pass, 2 fail
+# green (after the fix)
+ 30 pass, 0 fail
+```
+
+**Mutation** (non-vacuity): `const missed = unread.length;` (dropping `+ unanswered`) → exactly T9c and T9d
+red (`28 pass, 2 fail`, same two failures); restored → `30 pass, 0 fail`. Neither test passes without the new
+count.
+
+**Gate** — `bun run check`: typecheck clean · `biome check .` clean (817 files) · `bun test` **6288 pass,
+3 skip** (the documented opt-ins), 0 fail, 6291 tests across 442 files. The +2 over the review's 6286 are the
+two new tests.
+
+`git diff --stat`: `packages/agent/src/subagent.ts` (+25/−3), `packages/agent/test/subagent.test.ts` (+112),
+`docs/feat/agent-message.md` (this section). No commit made.
+
+**Not addressed here:** H1's sibling paths the review accepted as debt (the error path drops texts without a
+count), and no MEDIUM findings were raised.

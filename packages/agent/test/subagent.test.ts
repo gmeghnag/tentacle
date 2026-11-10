@@ -768,6 +768,118 @@ describe("T9: a child that stops early reports what it never read", () => {
   });
 });
 
+// docs/feat/agent-message.md H1 (fix round 1): a text DRAINED into the history
+// with no model round behind it. A child has no next turn and the inbox is
+// already empty, so `close()` cannot see it: the runner must count the `steer`
+// events no round answered.
+describe("T9c: a text consumed at max_iterations is reported as unread (H1)", () => {
+  test("a text pushed while the forced final report streams is counted, not lost", async () => {
+    const seen: ChatRequest[] = [];
+    const inbox = new AgentInbox();
+    let pushedOk: boolean | undefined;
+    const model: ModelProvider = {
+      id: "cap",
+      async *stream(request) {
+        seen.push(request);
+        if ((request.tools ?? []).length > 0) {
+          yield toolCall("fs_read", { path: "a" });
+          yield { type: "done" };
+          return;
+        }
+        // The forced final report (no tools left): a parent message arrives
+        // while it streams, after the last drain that a round could answer.
+        pushedOk = inbox.push("[message from the parent agent] during final").ok;
+        yield { type: "text", delta: "final report" };
+        yield { type: "done" };
+      },
+    };
+    const { run } = createSubagentRunner({
+      model,
+      env: recordingEnv().env,
+      tools: fullRegistry(),
+      maxIterations: 1,
+    });
+    const result = await run({ description: "d", prompt: "go", type: "general" }, { inbox });
+    // The sender was told it was queued...
+    expect(pushedOk).toBe(true);
+    expect(result.stopReason).toBe("max_iterations");
+    expect(result.report).toContain("final report");
+    // ...and it was never read: no request carried it.
+    expect(seen.flatMap((r) => userTexts(r))).not.toContain(
+      "[message from the parent agent] during final",
+    );
+    // So the report must SAY so.
+    expect(result.report).toContain(
+      "(1 message(s) sent to this sub-agent arrived after it stopped and were not read.)",
+    );
+  });
+});
+
+describe("T9d: a text drained by a turn_start stop in a continuation pass is reported (H1)", () => {
+  test("the second pass's turn_start hook stops it; the carried text is counted unread", async () => {
+    const seen: ChatRequest[] = [];
+    const inbox = new AgentInbox();
+    const hookCalls: string[] = [];
+    const env: ExecutionEnvironment = {
+      id: "h1",
+      async exec(command) {
+        hookCalls.push(command);
+        // The FIRST pass starts normally; the continuation pass is stopped.
+        return hookCalls.length === 1
+          ? { stdout: "", stderr: "", exitCode: 0 }
+          : { stdout: "", stderr: "", exitCode: 2 };
+      },
+      async readFile() {
+        return "";
+      },
+      async writeFile() {},
+    };
+    // The seam T8 uses: a push far enough down the microtask chain to land
+    // after the last drain of the first pass, so `closeIfEmpty` hands it back
+    // for one more — hook-stopped — pass.
+    let armed = false;
+    const pushLate = (): void => {
+      if (armed) {
+        return;
+      }
+      armed = true;
+      void (async () => {
+        for (let i = 0; i < 8; i++) {
+          await null;
+        }
+        inbox.push("[message from the parent agent] late text");
+      })();
+    };
+    const model: ModelProvider = {
+      id: "gated-hook",
+      async *stream(request) {
+        seen.push(request);
+        pushLate();
+        yield { type: "text", delta: `r${seen.length}` };
+        yield { type: "done" };
+      },
+    };
+    const { run } = createSubagentRunner({
+      model,
+      env,
+      tools: fullRegistry(),
+      hooks: new HookRunner({ specs: [{ event: "turn_start", command: "ts" }], env, cwd: "/w" }),
+    });
+    const result = await run({ description: "d", prompt: "go", type: "general" }, { inbox });
+    // Two passes: the first ran a round, the second was stopped by the hook
+    // before any model call.
+    expect(hookCalls).toHaveLength(2);
+    expect(seen).toHaveLength(1);
+    expect(seen.flatMap((r) => userTexts(r))).not.toContain(
+      "[message from the parent agent] late text",
+    );
+    expect(result.report).toContain(
+      "(1 message(s) sent to this sub-agent arrived after it stopped and were not read.)",
+    );
+    expect(inbox.closed).toBe(true);
+  });
+});
+
 describe("T10: an inbox is never handed to the child as a tool", () => {
   test("a child is never offered agent_message, and readOnlyType ignores it", async () => {
     const offered: string[][] = [];

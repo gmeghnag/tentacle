@@ -393,6 +393,15 @@ export function createSubagentRunner(deps: SubagentDeps): {
     const inbox = controls?.inbox;
     // What `closeIfEmpty` handed back, for the pass that is about to start.
     let carry: string[] = [];
+    // Texts the passes DRAINED with no model round left to answer them: the
+    // `max_iterations` drain after the forced final report, and the drain a
+    // `turn_start` stop does before ending the pass. They were pushed into the
+    // history, so the inbox is empty and `close()` cannot see them; a child has
+    // no next turn, so the report must. Counted per `steer` event and reset by
+    // the first event that proves a round consumed the request carrying it
+    // (`text`, `tool_start`, `usage`) — otherwise a text read at a boundary is
+    // counted as unread too.
+    let unanswered = 0;
     const drain = inbox
       ? () => (carry.length > 0 ? [...carry.splice(0), ...inbox.drain()] : inbox.drain())
       : undefined;
@@ -408,18 +417,25 @@ export function createSubagentRunner(deps: SubagentDeps): {
         )) {
           if (event.type === "text") {
             report += event.delta;
+            unanswered = 0;
           } else if (event.type === "tool_start") {
             toolUses += 1;
+            unanswered = 0;
             onEvent?.({
               kind: "subagent_tool",
               label: childToolLabel(event.name, event.arguments),
             });
           } else if (event.type === "usage") {
+            unanswered = 0;
             onEvent?.({
               kind: "subagent_usage",
               promptTokens: event.usage.promptTokens,
               completionTokens: event.usage.completionTokens,
             });
+          } else if (event.type === "steer") {
+            // Drained into the history for a round that may never come (see
+            // `unanswered`): it is READ only if a round answers it.
+            unanswered += 1;
           } else if (event.type === "turn_end") {
             stopReason = event.reason;
           }
@@ -455,10 +471,13 @@ export function createSubagentRunner(deps: SubagentDeps): {
     }
     // Whatever was never read is REPORTED, never silently dropped. `carry` holds
     // what `closeIfEmpty` handed back for a pass that may never have drained it
-    // (a cancel between the two): it counts as unread, not as lost.
+    // (a cancel between the two): it counts as unread, not as lost. `unanswered`
+    // holds the texts the passes drained but no round answered (H1): the inbox
+    // is empty then, so `close()` cannot see them, and a child has no next turn.
     const unread = [...carry.splice(0), ...(inbox?.close() ?? [])];
-    if (unread.length > 0) {
-      report += `\n\n(${unread.length} message(s) sent to this sub-agent arrived after it stopped and were not read.)`;
+    const missed = unread.length + unanswered;
+    if (missed > 0) {
+      report += `\n\n(${missed} message(s) sent to this sub-agent arrived after it stopped and were not read.)`;
     }
     onEvent?.({ kind: "subagent_end", toolUses, stopReason });
     // Never hand the parent an empty report (the agent loop forces a final
