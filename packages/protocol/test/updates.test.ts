@@ -249,8 +249,9 @@ describe("history_repaired (docs/feat/history-validity-invariant.md, Part C)", (
     };
     expect(SessionUpdateSchema.safeParse(event).success).toBe(true);
     expect(UPDATE_CLASS.history_repaired).toBe("display");
-    // Display only: an older client skips an unknown display kind (§7), so no bump.
-    expect(PROTOCOL_VERSION).toBe(21);
+    // Display only: an older client skips an unknown display kind (§7), so no bump
+    // by this task (22 came from fix/autoaccept-wake-turns).
+    expect(PROTOCOL_VERSION).toBe(22);
   });
 
   test("rejects a negative or non-integer count", () => {
