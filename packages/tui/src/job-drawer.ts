@@ -81,11 +81,11 @@ export function jobDrawerTail(
  */
 export type JobEnd =
   /** A normal end with the code the daemon reported. */
-  | { readonly kind: "exited"; readonly exitCode: number | null }
+  | { readonly kind: "exited"; readonly exitCode: number | null; readonly endedAt?: number }
   /** This dock asked for the stop (`x` then `y`). */
-  | { readonly kind: "stopped" }
+  | { readonly kind: "stopped"; readonly endedAt?: number }
   /** A signal death nobody in the dock asked for. */
-  | { readonly kind: "killed" };
+  | { readonly kind: "killed"; readonly endedAt?: number };
 
 /**
  * Read a job's exit RECORD into its outcome. `byDock` is the dock's own memory
@@ -97,14 +97,40 @@ export function jobOutcome(opts: {
   readonly status: string;
   readonly exitCode: number | null;
   readonly byDock: boolean;
+  /**
+   * When the run ended — the ONE instant the App stamps in its exit handler
+   * (fix round 2). It is read, never re-stamped: `jobEndView`'s duration is the
+   * job's TOTAL run time, so a frozen drawer must not measure to `now`.
+   */
+  readonly endedAt: number;
 }): JobEnd {
+  const endedAt = opts.endedAt;
   if (opts.byDock) {
-    return { kind: "stopped" };
+    return { kind: "stopped", endedAt };
   }
   if (opts.status === "killed" || opts.exitCode === null) {
-    return { kind: "killed" };
+    return { kind: "killed", endedAt };
   }
-  return { kind: "exited", exitCode: opts.exitCode };
+  return { kind: "exited", exitCode: opts.exitCode, endedAt };
+}
+
+/**
+ * How long a job has run — the figure the drawer paints (fix round 2).
+ *
+ * Once the job ENDED the run is over, so the figure is `endedAt − startedAt` and
+ * it stops moving: measuring to `now` made a frozen drawer's `· 6s` read `· 9s`
+ * three seconds later and keep growing for as long as it stayed open. Only while
+ * it still runs is `now` the right clock. A record with no `endedAt` (a frozen
+ * drawer from a departure nobody named, an older peer) keeps the live clock —
+ * the honest answer when the end instant is genuinely unknown.
+ */
+export function jobElapsedSeconds(
+  startedAt: number,
+  end: JobEnd | { readonly kind: "finished" } | null,
+  now: number,
+): number {
+  const endedAt = end !== null && "endedAt" in end ? end.endedAt : undefined;
+  return Math.max(0, Math.floor(((endedAt ?? now) - startedAt) / 1000));
 }
 
 /** The drawer's rule's answer: the words, and the tone they take. */

@@ -701,3 +701,40 @@ Fresh-context review of `a6a222f` (`git diff HEAD~1`). The reviewer model (Opus)
 ### Behaviour
 
 The executor fixed each round-1 finding as specified, adding a second guard for finding 3, and wrote tests that fail on the bug (the mutation confirmed this for finding 3). Owner A and owner B are implemented cleanly, and the stated limits are honest. What was missed: B's "duration" assumed a live clock, and no test advances time after the exit.
+
+## Execution — fix round 2
+
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+Round 2's ONE finding (MEDIUM: a frozen drawer's duration keeps counting) — fixed exactly, nothing else touched.
+
+### What changed, in dependency order
+
+1. **`packages/tui/src/job-drawer.ts`** — the end instant now rides the exit record. Each `JobEnd` variant (`exited` / `stopped` / `killed`) gains `readonly endedAt?: number`, and `jobOutcome` takes a required `endedAt` and puts it on every record it builds (`job-drawer.ts:84-88` and `96-115`). Optional on the TYPE because a record can legitimately lack it (a drawer frozen by a departure nobody named, the `{kind:"finished"}` child shape, an older peer); required on the INPUT because whoever builds a record from a real exit always knows it.
+2. **`packages/tui/src/job-drawer.ts`** — the figure itself is now one pure rule, `jobElapsedSeconds(startedAt, end, now)` (`job-drawer.ts:117-134`): `floor((endedAt ?? now − startedAt)/1000)`, clamped at 0. An ended job measures to its END; a running one (or one whose end instant is genuinely unknown) measures to `now`. It lives next to `jobEndView` so both sides of the drawer's clock are in one tested module (AGENTS §7).
+3. **`packages/tui/src/background-list.ts`** — `jobDrawerView` calls `jobElapsedSeconds` instead of `Math.floor((now − startedAt)/1000)` (`background-list.ts:626`). That single substitution is the fix: the value flows into `jobEndView({end, seconds})`, so the frozen head is the job's TOTAL run time.
+4. **`packages/tui/src/App.tsx`** — the ONE stamp: the `jobs.onExit` handler passes `endedAt: Date.now()` into `jobOutcome` (`App.tsx:1034`). That handler runs once per exit, so the instant is recorded once and never re-stamped; `applyLateOutcome` (review-3's fix) then carries the same record — end time included — onto a drawer that froze early.
+
+No other path builds a `JobEnd`, so there is no second clock: `dockOutcomeRef`'s only writer is this handler, and its `{kind:"stopped"}` fallback (a row that left with no exit record) has no `endedAt`, which is why the optional field keeps the live clock there rather than inventing an end.
+
+### Tests (red first, and mutation-checked)
+
+- **Pure, `test/background-list.test.ts`** — `fix round 2: an ENDED drawer's duration is the job's total run, not a live clock`: one ended `JobEnd` at `now = 70_000`, `73_200` (the review's own 3.2 s gap) and `125_000` ⇒ `✗ exited (2) · 1m 5s` all three times, while the same row RUNNING at those `now` values ticks `1m 10s` → `1m 13s`.
+- **Pure, `test/job-drawer.test.ts`** — `jobElapsedSeconds` directly: ended ⇒ frozen at the end instant, running ⇒ the clock, and a record with NO `endedAt` ⇒ the clock stands (the honest fallback). The five existing `jobOutcome` cases were updated for the new required input (they now assert `endedAt` is carried through).
+- **Frame, `test/shell-panel-frames.test.tsx`** — **F12**, real `App` through `real-term.tsx` at 190×24: open the drawer, exit, capture the head's `✓ exited (0) · …`, wait **1.6 s** (past the drawer's own 1 s repaint cadence, so a live clock would have ticked at least once), and assert the head line is **byte-identical** — plus a non-vacuity assertion that the outcome line was there to begin with and matches `✓ exited (0) · \d+m? ?\d*s ─`.
+
+Red-before-green:
+
+- The pure test failed on the unfixed code: `Expected "✗ exited (2) · 1m 5s" / Received "✗ exited (2) · 1m 10s"` — the live clock, exactly the finding.
+- **Mutation A** — delete `endedAt: Date.now()` from the App's exit handler ⇒ F12 fails (1 fail, 25 pass), the pure tests still pass (they pass their own `endedAt`), proving the FRAME test is what pins the stamping. `App.tsx` restored from `.tentacle/tmp/shell-jobs-panel/App.tsx.fix2.bak`, byte-identical (`git diff` shows only the intended hunk).
+- **Mutation B** — collapse `jobElapsedSeconds` back to `now − startedAt` ⇒ both pure tests fail (2 fail, 58 pass). `job-drawer.ts` restored byte-identically.
+
+### Gate
+
+`bun run check` (once, before this section was written): `tsc --noEmit && tsc -p apps/mobile --noEmit` clean; `biome check .` 849 files, 0 errors / 0 warnings; `bun test` **6639 pass, 3 skip (opt-in), 0 fail**, 6642 tests in 462 files — the baseline 6636 plus exactly the 3 new tests. No new lint issue; `TODO.md` untouched; no commit.
+
+### Drift, and what is left unverified
+
+- None against the review's fix instruction. It offered "`endedAt` on the outcome, **or** a `seconds` value frozen there"; I took the first, and put the subtraction in a pure function next to `jobEndView` rather than inline in `jobDrawerView`, so the clock rule is tested in one place (the review's `jobDrawerView` wording is satisfied — it is the only caller).
+- Accepted, as the review states: the job's `startedAt` is the pod's clock while `endedAt` is the laptop's, so a pod/laptop skew lands in the figure exactly as it already did for the running clock. Not fixed here, by design.
+- Unverified: the review's own repro (`review-frames.ts` (C), a 3.2 s gap) was not re-run. F12 asserts the same property on the same real-`App` seam, and its wait (1.6 s) is the shortest that provably crosses the drawer's 1 s repaint cadence — the review's own criterion for "a live clock would have ticked".

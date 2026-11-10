@@ -1028,6 +1028,10 @@ export function App({
               status: job.status,
               exitCode: job.exitCode,
               byDock: dockStoppedRef.current.has(job.id),
+              // Fix round 2: the ONE instant the run ended, stamped ONCE here (this
+              // handler runs once per exit) — the drawer's duration is the job's
+              // total run time, so a frozen drawer must not keep measuring to `now`.
+              endedAt: Date.now(),
             });
       dockOutcomeRef.current[job.id] = outcome;
       // An open drawer may already have frozen on the `stopped` fallback (its row

@@ -12,6 +12,7 @@ import {
   JOB_REFRESH_MS,
   JOB_TAIL_SHOWN,
   jobDrawerTail,
+  jobElapsedSeconds,
   jobEndView,
   jobOutcome,
   jobTailWindow,
@@ -97,9 +98,12 @@ describe("jobTailWindow: the last lines, cut to the width, blank as ONE space", 
 });
 
 describe("jobOutcome + jobEndView: the drawer's outcome (owner B, fix round 1)", () => {
+  /** The one instant the App stamps in its exit handler (fix round 2). */
+  const AT = 250_000;
+
   test("a clean exit is `✓ exited (0)` in the ok tone, with the total run time", () => {
-    const end = jobOutcome({ status: "exited", exitCode: 0, byDock: false });
-    expect(end).toEqual({ kind: "exited", exitCode: 0 });
+    const end = jobOutcome({ status: "exited", exitCode: 0, byDock: false, endedAt: AT });
+    expect(end).toEqual({ kind: "exited", exitCode: 0, endedAt: AT });
     expect(jobEndView({ end, seconds: 250 })).toEqual({
       text: "✓ exited (0) · 4m 10s",
       ok: true,
@@ -107,23 +111,23 @@ describe("jobOutcome + jobEndView: the drawer's outcome (owner B, fix round 1)",
   });
 
   test("a non-zero exit is `✗ exited (<code>)` in the error tone — never `✓`", () => {
-    const end = jobOutcome({ status: "exited", exitCode: 2, byDock: false });
+    const end = jobOutcome({ status: "exited", exitCode: 2, byDock: false, endedAt: AT });
     const failed = jobEndView({ end, seconds: 4 });
     expect(failed).toEqual({ text: "✗ exited (2) · 4s", ok: false });
     expect(failed.text).not.toContain("✓");
   });
 
   test("a signal death (no code) is `✗ killed`", () => {
-    const end = jobOutcome({ status: "exited", exitCode: null, byDock: false });
-    expect(end).toEqual({ kind: "killed" });
+    const end = jobOutcome({ status: "exited", exitCode: null, byDock: false, endedAt: AT });
+    expect(end).toEqual({ kind: "killed", endedAt: AT });
     const killed = jobEndView({ end, seconds: 120 });
     expect(killed).toEqual({ text: "✗ killed · 2m 0s", ok: false });
     expect(killed.text).not.toContain("✓");
   });
 
   test("stopped from the dock is `✗ stopped`, even though the wire says `killed`", () => {
-    const end = jobOutcome({ status: "killed", exitCode: null, byDock: true });
-    expect(end).toEqual({ kind: "stopped" });
+    const end = jobOutcome({ status: "killed", exitCode: null, byDock: true, endedAt: AT });
+    expect(end).toEqual({ kind: "stopped", endedAt: AT });
     expect(jobEndView({ end, seconds: 30 })).toEqual({ text: "✗ stopped · 30s", ok: false });
   });
 
@@ -135,10 +139,22 @@ describe("jobOutcome + jobEndView: the drawer's outcome (owner B, fix round 1)",
       { status: "killed", exitCode: 0, byDock: false },
       { status: "exited", exitCode: 0, byDock: true },
     ]) {
-      const view = jobEndView({ end: jobOutcome(c), seconds: 0 });
+      const view = jobEndView({ end: jobOutcome({ ...c, endedAt: AT }), seconds: 0 });
       expect(view.ok).toBe(false);
       expect(view.text).not.toContain("✓");
     }
+  });
+
+  test("fix round 2: `jobElapsedSeconds` measures to the END once the job ended", () => {
+    const end = jobOutcome({ status: "exited", exitCode: 2, byDock: false, endedAt: 65_000 });
+    // The end instant, not `now`: two minutes later the figure is unchanged.
+    expect(jobElapsedSeconds(0, end, 70_000)).toBe(65);
+    expect(jobElapsedSeconds(0, end, 190_000)).toBe(65);
+    // Still running: `now` is the clock.
+    expect(jobElapsedSeconds(0, null, 70_000)).toBe(70);
+    expect(jobElapsedSeconds(0, null, 73_200)).toBe(73);
+    // No end instant recorded (a departure nobody named): the live clock stands.
+    expect(jobElapsedSeconds(0, { kind: "stopped" }, 70_000)).toBe(70);
   });
 
   test("a `finished` record with no code says `✓ exited`, never a made-up `(0)`", () => {

@@ -586,6 +586,24 @@ describe("a shell job's drawer (docs/feat/shell-jobs-panel.md)", () => {
     expect(killed.head.some((s) => s.text.includes("✓"))).toBe(false);
   });
 
+  test("fix round 2: an ENDED drawer's duration is the job's total run, not a live clock", () => {
+    // The exit record carries the ONE instant the run ended (`endedAt`, stamped in
+    // the App's exit handler). Two frames minutes apart therefore say the same
+    // thing: `now` is not the clock of a finished job.
+    const ended = { kind: "exited", exitCode: 2, endedAt: 65_000 } as const;
+    const at = (now: number): string =>
+      jobDrawerView({ row: job, output: ["x"], outcome: ended, width: 100, now }).meta;
+    expect(at(70_000)).toBe("✗ exited (2) · 1m 5s");
+    // 3.2 s later — the review's own repro — and then a whole minute later.
+    expect(at(73_200)).toBe("✗ exited (2) · 1m 5s");
+    expect(at(125_000)).toBe("✗ exited (2) · 1m 5s");
+    // While it RUNS there is no end to measure to: the clock still ticks.
+    const running = (now: number): string =>
+      jobDrawerView({ row: job, output: ["x"], outcome: null, width: 100, now }).meta;
+    expect(running(70_000)).toBe("running · 1m 10s");
+    expect(running(73_200)).toBe("running · 1m 13s");
+  });
+
   test("review 4: `maxRows` bounds the drawer's total height", () => {
     const output = Array.from({ length: 30 }, (_, i) => `line ${i}`);
     for (const maxRows of [8, 5, 2, 1]) {

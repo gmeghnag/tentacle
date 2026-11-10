@@ -515,6 +515,30 @@ describe("F9 (owner B): the drawer's outcome, tone and total run time", () => {
   });
 });
 
+describe("F12 (fix round 2): a frozen drawer's duration stops when the job does", () => {
+  /** A job that started long enough ago to paint a real figure, not `0s`. */
+  const STOPWATCH: DockJobRow = { ...SHELL_ROW, startedAt: Date.now() - 250_000 };
+
+  test("the exit freezes the duration: 1.6 s later the head is byte-identical", async () => {
+    const { app, api, frame } = await mount({ jobs: [STOPWATCH] });
+    await openFirstJob(app);
+    api.exitJob("bg-3", "exited", 0);
+    await delay(80);
+    const head = (f: string): string => lines(f).find((l) => l.includes("✓ exited (0) ·")) ?? "";
+    const before = head(frame());
+    // Non-vacuity: the drawer IS open and showing the outcome.
+    expect(before).toContain("✓ exited (0) · ");
+    // Longer than the drawer's own 1 s repaint cadence (JOB_REFRESH_MS), so a
+    // live clock would have ticked at least once by now.
+    await delay(1600);
+    const after = head(frame());
+    expect(after).toBe(before);
+    // And it is the job's total run time, so the figure is a real one.
+    expect(after).toMatch(/✓ exited \(0\) · \d+m? ?\d*s ─/);
+    app.unmount();
+  });
+});
+
 describe("F10 (review 4): the drawer never outgrows a short terminal", () => {
   /** A full tail with `truncated`, so the `… earlier output` row is there too. */
   const FULL = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);

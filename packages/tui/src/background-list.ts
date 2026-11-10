@@ -17,7 +17,7 @@ import type { BackgroundAgentRow } from "./background-view.ts";
  */
 import { cellWidth, truncateCells } from "./cells.ts";
 import { formatDuration, formatTokens } from "./format.ts";
-import { type JobEnd, jobDrawerTail, jobEndView } from "./job-drawer.ts";
+import { type JobEnd, jobDrawerTail, jobElapsedSeconds, jobEndView } from "./job-drawer.ts";
 
 /** The most rows the dropdown shows before it windows (mockup 05). */
 export const LIST_MAX_ROWS = 5;
@@ -620,7 +620,10 @@ export function jobDrawerView(opts: {
 }): DrawerView {
   const width = Math.max(10, opts.width);
   const row = opts.row;
-  const seconds = Math.max(0, Math.floor((opts.now - row.startedAt) / 1000));
+  // Fix round 2: an ENDED job's duration is its total run (`jobElapsedSeconds`
+  // reads the one `endedAt` the App stamped), so a frozen drawer's figure stops
+  // moving; only a RUNNING job measures to `now`.
+  const seconds = jobElapsedSeconds(row.startedAt, opts.outcome, opts.now);
   // Owner B (fix round 1): the outcome is its own pure rule (`jobEndView`), built
   // from the EXIT RECORD — never the frozen row's `status` (still `running`) and
   // never the last read's (issued before the exit, it answers `running` too).
