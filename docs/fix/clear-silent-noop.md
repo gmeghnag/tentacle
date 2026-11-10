@@ -387,3 +387,131 @@ nothing was lost), and it asserted failure mode 8's convergence without testing
 it, which is exactly where M1 is.
 
 **Verdict: REQUEST-CHANGES (M1, M2).**
+
+## Execution — fix round 1
+
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+Both Review findings, nothing else. No `git checkout`/`restore`/`stash` was run:
+every red check and mutation was an exact inverse edit, reverted by hand.
+
+### M1 — my own `/clear` announced as another device's
+
+**What changed.** `packages/tui/src/App.tsx:1940-2041` (`runClear`): the open
+now comes first. `runClear` raises `clearingRef` (the latch also gates the wake a
+clear must delay), then `await`s `session.openForReset?.()` and only *after* it
+settles arms `ownClearsRef += 1` and calls `session.clear()` (a `send()` closure).
+An open rejection releases the latch, says `clearErrorNotice`, and wakes — with
+no count armed, since none was raised. A view that left the session while the
+open settled calls neither. `packages/tui/src/App.tsx:229-236` exposes
+`openForReset?()` on `SessionController`; `packages/cli/src/local-runtime.ts:569-572`
+forwards it (`persistingController`), and `:239-240`/`:494-499` declare and rename
+it there in its own `clear` (memoized: the same open, so the pre-clear read-back
+still finds the history that open applied — the fork is unchanged).
+
+**Test** (`packages/tui/test/clear-resume.test.tsx`, "M1 (App)…"): a second
+`LocalRuntime` on the SAME `SessionHost` keeps the uid live with one turn, then a
+`--resume`d real `App` types `/clear`. Asserts: the old chat is gone, the frame
+has no "cleared on another device", and the other client's own watcher DID see a
+`history{clear}` (so the fix does not suppress the real foreign notice).
+
+**Red on the pre-fix code** (the same file, before the App edit — this run is the
+first `bun test` of the two new tests):
+```
+(fail) M1 (App): an own /clear of a session another device keeps live is not announced as theirs
+  expect(frame).not.toContain("cleared on another device")
+  Received: "⏺ the conversation was cleared on another device\n…"
+  3 pass / 2 fail   Ran 5 tests across 1 file
+```
+**Green after:** `7 pass / 0 fail` for `clear-resume.test.tsx` +
+`clear-attach.test.ts`; the reviewer's own repro
+(`.tentacle/tmp/clear-silent-noop/review/attack.ts live-elsewhere`) went from the
+notice repeated 18× to `grep -c "cleared on another device"` → `0`.
+
+**Mutation M1** — the exact pre-fix ordering (`ownClearsRef.current += 1` moved
+back before the open, the `send()` closure's increment removed):
+`bun test packages/tui/test/clear-resume.test.tsx -t "M1"` → `1 fail` on
+`expect(frame).not.toContain("cleared on another device")`, `0 pass`. Reverted by
+the inverse edit; the M2 test stayed green throughout, so the mutation is
+specific to M1.
+
+### M2 — `/compact`'s hollow `{0, 0}` and the leaked own-compaction count
+
+**What changed.**
+- `packages/client/src/remote-session.ts:678-712,722-735`: `openForClear` → `openForReset`
+  (its doc now says "a reset", `/clear` **or** `/compact`), and
+  `RemoteSession.compact()` awaits it before reading `this.id` — so a resumed,
+  never-opened session compacts the conversation its seed holds instead of
+  answering `{0, 0}`. A fresh session (no seed, no attach) stays the plain no-op:
+  a compaction never CREATES a session.
+- `packages/tui/src/App.tsx:2142-2217` (`/compact` handler): the own-compaction
+  count is raised inside the open's `then`, never before it, and an `armed` flag
+  makes the settle decrement it only if this handler raised it (an open that
+  failed raised none). The `compacting` latch is up meanwhile, so nothing starts
+  a turn. `persistingController.compact` untouched, as the Review directed (it
+  flushes after the compact; no fork is involved).
+- `packages/cli/src/local-runtime.ts:239-240/494-499/569-572`: the rename and the
+  forwarded `openForReset`.
+
+**Tests** (red first, both run before the fix):
+- `packages/tui/test/clear-resume.test.tsx`, "M2 (App)…": a resumed, never-opened
+  real `App` runs `/compact` → the frame holds "Context compacted — 6 → 2
+  messages" and not "0 → 0"; the model's next request no longer carries the old
+  chat; and a later compaction by another client of the same daemon still shows
+  "compacted on another device" (the count did not leak).
+- `packages/client/test/clear-attach.test.ts`, "/compact opens a resumed session
+  nothing has opened…": at the client alone, `compact()` on a seeded,
+  never-opened session returns `{ before: 3, after: 2 }` and the snapshot no
+  longer holds the old chat. This is the half the App test cannot hold once the
+  App awaits the open itself — the mutation below proved it.
+
+**Red on the pre-fix code:**
+```
+(fail) M2 (App): /compact on a resumed session nothing has opened really compacts
+  expect(frame).toContain("Context compacted — 6 → 2 messages")
+  Received: "…⏺ Context compacted — 0 → 0 messages.…"
+```
+**Green after:** the same runs that turned M1 green (7 pass / 0 fail).
+
+**Mutation M2** — `RemoteSession.compact()` with the `await this.openForReset()`
+line removed:
+```
+error: expect(received).toEqual(expected)
+- {"after": 2, "before": 3}
++ {"after": 0, "before": 0}
+(fail) /compact opens a resumed session nothing has opened and compacts THAT chat
+1 pass / 1 fail
+```
+Reverted by the inverse edit. A second mutation, on the count itself (dropping
+the `ownCompactionsRef.current -= 1` in the `history` handler so the count leaks),
+turned the M2 App test red on exactly its foreign-notice assertion
+(`Expected to contain: "compacted on another device"` → the notice is swallowed),
+which shows that assertion is not vacuous. Recording one thing honestly: a third
+attempt — arming `ownCompactionsRef` *before* the open in the App handler — did
+**not** fail any test, because the App awaits the open and then the compaction's
+own history arrives and decrements either way. The open-first ordering in the
+`/compact` handler is kept (it is what makes the count mean "this TUI's
+compaction that actually ran"), but it is not pinned by a test; only the client
+half is mutated-red.
+
+### Gate
+
+`bun run check` → typecheck clean (`tsc --noEmit && tsc -p apps/mobile --noEmit`);
+`biome check .` → 824 files, no fixes; `bun test` → **6355 pass, 3 skip (opt-in),
+0 fail**, 6358 tests across 448 files.
+
+### Drift / notes
+
+- `/compact` arms nothing before its open, so the ordering there is not
+  dead-reckoned red/green (see above); the client-level mutation is what holds
+  M2's fix.
+- `openForReset` is optional on `SessionController` and on the `PersistingController`
+  interface (`?.` at both call sites), so bare test fakes that carry neither are
+  unaffected.
+- Cases (a) `serve`/pod e2e and (b) the now-contrived `{0,0}` notice from
+  round 0 stand unchanged — neither was in this round's scope.
+- `CHANGELOG.md` (Fixed) now names `/compact` alongside `/clear`, and both the
+  own-clear notice and the own-compaction count.
+- `TODO.md` untouched, nothing committed, all scratch in
+  `.tentacle/tmp/clear-silent-noop/r1/` (`red.txt`, `green.txt`,
+  `mut2-red.txt`).

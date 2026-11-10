@@ -10,7 +10,7 @@ those.
 
 ### Fixed
 
-- **`/clear` on a session you just resumed now clears it.** `tentacle --resume <id>` and `/clear` before sending anything did nothing at all: the chat stayed, the model's context stayed, and no message explained it — the daemon had no conversation under that id yet (it was still only your laptop's saved copy), so it answered "nothing to clear". `/clear` now opens that saved conversation first (exactly as your next message would) and then clears it, keeping the dropped chat as its own session, as `/clear` always does. If a `/clear` ever resets nothing while a chat is on screen, it now says so instead of staying silent.
+- **`/clear` and `/compact` on a session you just resumed now really reset it.** `tentacle --resume <id>` and `/clear` (or `/compact`) before sending anything did nothing at all: the chat stayed, the model's context stayed, and the TUI either said nothing or claimed "Context compacted — 0 → 0 messages" — the daemon had no conversation under that id yet (it was still only your laptop's saved copy), so it answered "nothing to reset". Both now open that saved conversation first (exactly as your next message would) and then reset it: `/clear` clears it and keeps the dropped chat as its own session, `/compact` compacts the real history. If a `/clear` ever resets nothing while a chat is on screen, it now says so instead of staying silent. An own `/clear` on a session kept live by another device is no longer announced as "the conversation was cleared on another device" (only the other device is told), and a `/compact` of yours no longer leaves a stale count that would swallow the next "compacted on another device" notice.
 
 ### Changed
 

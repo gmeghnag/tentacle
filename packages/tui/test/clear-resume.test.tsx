@@ -78,17 +78,26 @@ const RESUME = (cwd: string): SessionRecord => ({
   ] as ChatMessage[],
 });
 
-async function rig(resume: SessionRecord | null, model: Quiet) {
-  const host = new SessionHost({
+function makeHost(model: Quiet): SessionHost {
+  return new SessionHost({
     defaultCwd: dir,
     createAgent: () => {
       const agent = new Agent({ model, tools: new ToolRegistry(), env, systemPrompt: "sys" });
       return { agent, permissions: new PermissionBroker() };
     },
   });
+}
+
+/** One frontend on `host`; `tag` keeps two devices' laptop stores apart. */
+async function rig(
+  resume: SessionRecord | null,
+  model: Quiet,
+  host = makeHost(model),
+  tag = "sessions",
+) {
   const [daemonCh, clientCh] = createChannelPair();
   const connection = new Connection(daemonCh, host);
-  const store = new LogSessionStore(join(dir, "sessions"));
+  const store = new LogSessionStore(join(dir, tag));
   const saver = new SessionSaver(store, () => {});
   const runtime = await createLocalRuntime({
     channel: clientCh,
@@ -196,4 +205,89 @@ test("an empty transcript: a `{0, 0}` /clear says nothing (nothing was lost)", a
   await delay(200);
   expect(strip(app.lastFrame())).not.toContain("did nothing");
   app.unmount();
+});
+
+// Review M1 (docs/fix/clear-silent-noop.md): the open `/clear` needs delivers
+// the ATTACH snapshot into the clear's bookkeeping. Arming the latch and the
+// own-clear count before it made this TUI's own clear look like another
+// device's. Live session on a second client of the SAME daemon, then a
+// `--resume`d TUI runs `/clear` here.
+test("M1 (App): an own /clear of a session another device keeps live is not announced as theirs", async () => {
+  const model = new Quiet();
+  const host = makeHost(model);
+  // The other device keeps the uid live: its turn opens it daemon-side.
+  const other = await rig(RESUME(dir), model, host, "other-sessions");
+  const otherSession = other.runtime.createSession();
+  const otherHistory: string[] = [];
+  otherSession.watch((a) => {
+    if (a.kind === "history") {
+      otherHistory.push(String(a.reason));
+    }
+  });
+  for await (const _ of otherSession.send("other device prompt")) {
+    // drained
+  }
+  expect(host.size).toBe(1);
+
+  const me = await rig(RESUME(dir), model, host, "me-sessions");
+  const app = render(
+    <App createSession={me.runtime.createSession} model="m" cwd={dir} initialItems={SEEDED} />,
+  );
+  await delay(80);
+  await type(app.stdin, "/clear");
+  await delay(700);
+  const frame = strip(app.lastFrame());
+  // MY clear, not theirs: the chat went, and nothing blames another device.
+  expect(frame).not.toContain("map the repo");
+  expect(frame).not.toContain("cleared on another device");
+  // The other client IS told (it really was cleared by someone else there).
+  expect(otherHistory).toContain("clear");
+
+  app.unmount();
+  await me.runtime.dispose();
+  await other.runtime.dispose();
+});
+
+// Review M2: `/compact` on a resumed session nothing has opened returned a
+// hollow `{0, 0}`, so the TUI claimed "Context compacted — 0 → 0 messages"
+// with the context untouched and left the own-compaction count armed (the next
+// foreign compaction's notice then swallowed).
+test("M2 (App): /compact on a resumed session nothing has opened really compacts", async () => {
+  const model = new Quiet();
+  const host = makeHost(model);
+  const r = await rig(RESUME(dir), model, host);
+  const app = render(
+    <App createSession={r.runtime.createSession} model="m" cwd={dir} initialItems={SEEDED} />,
+  );
+  await delay(80);
+  expect(r.host.size).toBe(0); // nothing opened yet: the seed IS the conversation
+
+  await type(app.stdin, "/compact");
+  await delay(800);
+  const frame = strip(app.lastFrame());
+  // It really compacted the seeded 6-message chat (never the hollow 0 → 0).
+  expect(frame).toContain("Context compacted — 6 → 2 messages");
+  expect(frame).not.toContain("0 → 0");
+
+  // The model's next request carries the compacted history, not the old chat.
+  await type(app.stdin, "next");
+  await delay(300);
+  const sent = model.requests.at(-1)?.messages.map((m) => m.content) ?? [];
+  expect(sent).not.toContain("map the repo");
+  expect(sent.at(-1)).toBe("next");
+
+  // The own-compaction count is balanced: another client's compaction here
+  // still shows its notice (a leaked +1 would swallow it).
+  const other = await rig(RESUME(dir), model, host, "other-sessions");
+  const otherSession = other.runtime.createSession();
+  for await (const _ of otherSession.send("hello")) {
+    // drained: the session is live on the other client too
+  }
+  await otherSession.compact?.();
+  await delay(400);
+  expect(strip(app.lastFrame())).toContain("compacted on another device");
+
+  app.unmount();
+  await r.runtime.dispose();
+  await other.runtime.dispose();
 });
