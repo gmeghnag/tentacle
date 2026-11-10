@@ -1564,3 +1564,56 @@ The 3 skips are the opt-in three (live-k8s, live-docker, the real-socket keepali
 6. Unverified: no live run of `tentacle run --profile …` with a real `/model` swap; the swap is
    covered by the real `SessionHost.updateSettings` path in the daemon test, which is the same code
    a `/settings apply` reaches.
+
+## Review — round 4
+
+*— claude-opus-5-5, 2026-11-10* (same reviewer and context as rounds 1–3; a different model family
+from the executor)
+
+**Verdict: PASS.** All four round-3 findings (H1, M1, M2, M3) are fixed as specified, and the fix adds
+no new HIGH or MEDIUM issue.
+
+**Gate** (`bun run check`, run once on `1baebf0`): typecheck clean · Biome 0 errors / 0 warnings ·
+`bun test` **6483 pass · 3 skip (the opt-in three) · 0 fail**.
+
+### Each finding
+
+| # | Fix | Holds | Non-vacuity |
+|---|---|---|---|
+| H1 | `App.tsx` applies `step.state` for every verdict, `pass` included | `repro3.ts` P1: `pill still focused: false`, `prompts: ["hello"]`, no dropdown | F-H1 (`prompts == ["hello"]`) fails on the round-3 code (my P1 repro failed exactly so) |
+| M1 | `statusHint` removed; the input rule carries `enter sends` | `repro190.ts` drawer at 190: `⏵⏵ auto-accept off (shift+tab) · 2 agents ▴` | F-M1 asserts `auto-accept` with the drawer open |
+| M2 | The resolver reports the name and the id. `subagentRows(rows, mainModelId())` decides name vs absent on every publish. `swapAgent` republishes | The daemon test drives the real `SessionHost.updateSettings` | **Mutation:** with `this.publishSubagents()` dropped from `swapAgent`, `subagent-background-host.test.ts` goes RED (1 fail). Restored from a byte copy; `git status` clean |
+| M3 | `test/real-term.tsx`: Ink with a stdout of the test's `columns` × `rows`; every frame `mount` goes through it | Same shape as my `repro190.ts`, whose rerun is clean at 190 and 80 (23 lines on 24 rows, no line > width) | The width checks now run on a frame the terminal's width actually wraps |
+
+### Attacks on the fix (nothing at HIGH or MEDIUM)
+
+- **§7: `modelId` never reaches the wire.**
+  - It rides `ToolProgressEvent` → `AgentEvent.subagent_start` → `AgentJobLive`/`AgentJobRow`, all
+    daemon-side.
+  - The wire mapping (`daemon/src/mapping.ts:250-257`) lists its fields explicitly and does not
+    include it. `subagentRows` emits only the NAME (`wireLine`, 64).
+- **§7: nothing is taken from a pod.**
+  - A tunnelled agent gets no `modelId` (`wiring.ts`: only when `modelOverride === undefined`), so
+    `shownModel` keeps the pick's NAME and no laptop id is invented or exposed in the pod.
+  - The pod's rows reach the laptop as untrusted text and are bounded by the client as before.
+- **The republish in `swapAgent`:**
+  - `updateSettings` calls it under `assertIdle()` (`session-host.ts:1003`), synchronously, so it
+    cannot race a running turn.
+  - A second identical publish is dropped by `sameRows`.
+  - After `/clear`, the rows come from `agentRuntime.rows()` (clear keeps background work), so there
+    is no stale list.
+- **The `real-term.tsx` harness:** `unmount` calls `instance.unmount()` + `cleanup()`. It owns no
+  timers, and stdin/stdout are per-instance emitters, so nothing is shared between tests.
+- **Regressions:**
+  - Esc on the pill during a running turn: 0 aborts.
+  - Clicks on the pill in the idle, multi-line and running states open the dropdown.
+  - The Esc chain restores the main draft and the model on the rule.
+  - Height: 23 lines on 24 rows at 80, and 23 through the real-width harness at 190.
+  - The round-1 drafts and late-refusal fixes are unchanged.
+
+### How the executor behaved
+
+Each fix is the one specified, and each comes with a test that fails without it. Unlike round 3, H1's
+test is a frame of the real App, not the pure function alone.
+
+**PASS** — no HIGH/MEDIUM findings. From my side, the sub-agent live feature (6a → 9 + 7) is closed.
