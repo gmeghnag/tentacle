@@ -412,3 +412,37 @@ D1 correct: `finishCall` applies the transforms, the code matches the plan's lin
 ### How the executor behaved
 
 The reported gate matches this run, and the D1 trap and the equivalent mutant were disclosed honestly. M1 is the one place where a line changed semantics that the plan had prescribed ("a hung disk must not trap the re-ask") without checking the `allow` branch of the same `await`: the flaw is in the plan's Design 3 as well as in the code.
+
+## Execution — fix round 1
+
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+M1 only; nothing else touched.
+
+**Change.** `packages/daemon/src/hosted-session.ts:811` — the wait after an ask settles now ends on the withdrawal only for an UNANSWERED ask:
+`await untilAborted(this.persisted(), outcome.outcome === "cancelled" ? settleOn : signal);`
+The comment above it says why (a withdrawal withdraws only an unanswered ask; an allowed one runs its tool, so it must still wait for the write clearing `turn.pending`, else a crash re-runs the call — AGENTS.md §7 "pending on disk ⇒ never started").
+
+**Regression test.** `packages/daemon/test/subagent-detach.test.ts`, `T27` (two cases), with a shared `heldDisk()` fake persister (`flush` resolves with a swappable promise; `schedule` counted) and a `rig({ disk: true })` option:
+- control: allowed, disk held, no steer → the tool waits, then runs once when the write lands (pins the existing "pending on disk ⇒ never started" wait);
+- the M1 scenario: allowed, disk held, a steer lands → the tool must NOT run; release → it runs exactly once. Non-vacuity pinned in the same test: the steer really landed (`["sa-1"]`) and the answered ask was not re-asked (one `permission_request`).
+
+**Red before green** (`bun test packages/daemon/test/subagent-detach.test.ts -t T27`):
+```
+# with the fix reverted (the mutation below)
+456 |     expect(ran).toEqual([]);
+error: expect(received).toEqual(expected)
+- []
++ [ "needs_ok" ]
+(fail) T27 … a steer while the clear is on its way to disk does not let the tool run early
+ 1 pass / 1 fail        ← the control still passes: it does not depend on the fix
+# with the fix
+ 17 pass, 0 fail, 75 expect() calls   (the whole file)
+```
+The reviewer's own repro (`.tentacle/tmp/subagent-detach/allow-vs-withdraw.test.ts`, "steer while the allow") was run first and was red on the current tree for the same reason (`after steer, disk still not landed, ran: [ "needs_ok" ]`).
+
+**Mutation (revert → red → restore).** Replacing `outcome.outcome === "cancelled" ? settleOn : signal` with the old `settleOn` put T27's second case red exactly at the tool-ran assertion above; the control stayed green (so the control alone does not pin M1 — the steer case does). Restored; `git status` shows only the three intended files.
+
+**Gate** (`bun run check`, once): typecheck clean, `biome check .` clean (813 files), `bun test` **6260 pass · 3 skip · 0 fail**, 6263 tests across 439 files. Two new tests (T27 control + steer case); the baseline before this round was 6258 pass.
+
+**Scope.** `git diff --stat`: `hosted-session.ts` (+8/−2), `packages/daemon/test/subagent-detach.test.ts` (+84/−3), this doc. Nothing committed; `TODO.md` untouched.

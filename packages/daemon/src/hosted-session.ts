@@ -801,8 +801,14 @@ export class HostedSession {
       // (docs/fix/cancel-hung-disk.md). Safe: the agent checks the abort
       // before the answer (agent.ts `runTool`), so an aborted turn never runs
       // the tool and "pending on disk ⇒ never started" still holds. The
-      // asker's own WITHDRAWAL must never trap the re-ask either.
-      await untilAborted(this.persisted(), settleOn);
+      // asker's own WITHDRAWAL must never trap the re-ask either — but it
+      // withdraws only an UNANSWERED ask: an ANSWERED one (`allow`) still runs
+      // its tool, so it waits for the write that clears `turn.pending` even
+      // when a steer withdraws the (already settled) ask meanwhile. Skipping
+      // it there leaves the entry on disk while the tool runs, and a crash
+      // reloads "pending" and runs the same call twice
+      // (docs/feat/subagent-detach.md, Review M1).
+      await untilAborted(this.persisted(), outcome.outcome === "cancelled" ? settleOn : signal);
       // Withdrawn by the ASKER (`options.withdraw`): nobody decided, and the
       // asker is about to ask it again itself (docs/feat/subagent-detach.md).
       if (outcome.outcome === "cancelled" && options?.withdraw?.aborted) {

@@ -12,7 +12,8 @@ import {
 import type { KnownLogEntry, KnownSessionUpdateParams, LogCursor } from "@tentacle/protocol";
 import { ToolRegistry, createTaskTool } from "@tentacle/tools";
 import { z } from "zod";
-import { HostedSession } from "../src/hosted-session.ts";
+import { HostedSession, type SessionPersistence } from "../src/hosted-session.ts";
+import type { SessionPersister } from "../src/session-persister.ts";
 
 // docs/feat/subagent-detach.md T15-T26, the daemon half: `HostedSession.enqueue`
 // and `send_now` — the USER's steering paths, never `Session.enqueue` — move a
@@ -75,12 +76,38 @@ const needs: Tool = {
   },
 };
 
+/**
+ * A `serve`-style persister whose disk this test can HOLD (T27, Review M1):
+ * `flush` — the wait the gate does before a tool runs — resolves with
+ * `current`, which a test can swap for a held promise. `schedule` counts the
+ * writes the session asked for (a fake: a real disk is not this test's subject).
+ */
+function heldDisk() {
+  const disk = {
+    current: Promise.resolve() as Promise<void>,
+    schedules: 0,
+    persister: undefined as unknown as SessionPersister,
+  };
+  disk.persister = {
+    schedule: () => {
+      disk.schedules++;
+    },
+    flush: () => disk.current,
+    writable: () => false,
+    write: async () => false,
+  } as unknown as SessionPersister;
+  return disk;
+}
+type HeldDisk = ReturnType<typeof heldDisk>;
+
 function rig(
   opts: {
     cap?: number;
     execution?: "sequential" | "parallel";
     attach?: boolean;
     wake?: boolean;
+    /** `serve`-style persistence with a disk the test holds (T27). */
+    disk?: boolean;
   } = {},
 ) {
   ran.length = 0;
@@ -118,6 +145,10 @@ function rig(
       : {}),
   });
   const session = new Session(agent, "s1", {});
+  const disk = opts.disk ? heldDisk() : undefined;
+  const persistence: SessionPersistence | undefined = disk
+    ? { persister: disk.persister }
+    : undefined;
   const hosted = new HostedSession(
     "s1",
     session,
@@ -126,7 +157,7 @@ function rig(
     {},
     undefined,
     Date.now,
-    undefined,
+    persistence,
     {},
     {},
     {},
@@ -136,7 +167,7 @@ function rig(
   if (opts.attach !== false) {
     hosted.attach({ send: (p) => frames.push(p) });
   }
-  return { parent, child, permissions, hosted, frames, agentJobs, session, agent };
+  return { parent, child, permissions, hosted, frames, agentJobs, session, agent, disk };
 }
 type Rig = ReturnType<typeof rig>;
 
@@ -382,6 +413,56 @@ describe("T20: a steer with the child's ask open (Q-C)", () => {
     // Answering the re-asked prompt runs the tool for the child.
     r.hosted.resolvePermission(second?.requestId as string, "allow_once");
     await settle(8);
+    expect(ran).toEqual(["needs_ok"]);
+  });
+});
+
+describe("T27: an ALLOWED ask waits for its clear even when a steer withdraws (M1)", () => {
+  // The child's ask is ALLOWED; the write that clears `turn.pending` is held;
+  // a steer lands in that window. The withdrawal only ends the wait of an
+  // UNANSWERED ask — an answered one still runs its tool, so it must wait for
+  // the write: otherwise the entry is on disk while the tool runs, and a crash
+  // reloads "pending" and runs the call twice (AGENTS.md §7).
+  async function allowedWithHeldDisk() {
+    const r = rig({ disk: true });
+    const disk = r.disk as HeldDisk;
+    r.parent.steps.push([fgTask("c1", "map repo"), done], [text("carried on"), done]);
+    r.child.steps.push([call("k1", "needs_ok"), done], [text("CHILD DONE"), done]);
+    prompt(r, "T1");
+    await settle(10);
+    const ask = asks(r.frames).at(-1);
+    expect(ask).toBeDefined();
+    expect(ask?.agent?.id).toBeUndefined(); // foreground: the turn's ask, withdrawable
+    // From here the disk hangs; the person allows.
+    const held = Promise.withResolvers<void>();
+    disk.current = held.promise;
+    r.hosted.resolvePermission(ask?.requestId as string, "allow_once");
+    await settle(6);
+    return { r, disk, held };
+  }
+
+  test("control: allowed, disk held, NO steer → the tool waits for the write", async () => {
+    const { r, held } = await allowedWithHeldDisk();
+    expect(ran).toEqual([]);
+    held.resolve();
+    await settle(10);
+    expect(ran).toEqual(["needs_ok"]);
+  });
+
+  test("a steer while the clear is on its way to disk does not let the tool run early", async () => {
+    const { r, held } = await allowedWithHeldDisk();
+    r.hosted.enqueue("e1", "T1", "steer text");
+    await settle(10);
+    // THE property: the steer withdrew a settled ask, and the tool still has
+    // not run — only the held write may release it.
+    expect(ran).toEqual([]);
+    // Not vacuous: the steer really landed and the withdrawal path really ran
+    // (the child moved; the answered ask was not asked again).
+    expect(r.hosted.agentJobsRunning().map((j) => j.agentId)).toEqual(["sa-1"]);
+    expect(asks(r.frames)).toHaveLength(1);
+    held.resolve();
+    await settle(10);
+    // Exactly once: the write landed, then the tool ran.
     expect(ran).toEqual(["needs_ok"]);
   });
 });
