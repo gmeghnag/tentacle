@@ -252,6 +252,9 @@ rename it over ssh, so the swap is atomic. Use a **dedicated deploy key** restri
 
 *— claude-opus-5-5, 2026-11-10*
 
+
+**Answers (owner, 2026-11-10):** Q1 private for now — `.tentacle/site/` as its own private git repo (no remote); the owner may later move it into the product repo · Q2 (a) only `type/slug` tasks · Q3 (a) `Security: yes` marker + keyword net, hidden when in doubt (overrides for false positives) · Q4 (a) dropped tasks hidden · **Q5 (b) the merge commit is a LINK** to `github.com/gmeghnag/tentacle/commit/<hash>` (a 404 for visitors while the repo is private) · Q6 (a) `tentacle.so/board`, linked from the landing's nav · Q7 (a) `—` when no signature.
+
 ## Implementation
 
 — (eval)
