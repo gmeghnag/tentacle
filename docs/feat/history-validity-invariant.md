@@ -1450,3 +1450,141 @@ plus a mutation test (disable the repair → the wire payload has an unanswered 
 **Unverified (one line):** whether the target llama.cpp / vLLM builds reject an
 unanswered `tool_call_id`. To check, POST the scenario-F payload (from `hv.ts`)
 to the live endpoint.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-10* (fresh context, adversarial; a different model
+family from the executor, deepseek. Scope: `git diff main...HEAD`, HIGH/MEDIUM
+only, one round.)
+
+**Verdict: REQUEST-CHANGES.** There is one MEDIUM finding with a small fix.
+Everything else red-teamed below holds.
+
+### Findings
+
+1. **MEDIUM: the one-shot CLI repeats the "once per session" notice on every
+   repaired round** (owner Q3 (b) is broken on one runtime).
+   - **Where:** `packages/cli/src/main.ts:1929` consumes `agent.run(...)`
+     directly, with no daemon and so no `HostedSession`. `AnswerSplit.push`
+     (`packages/cli/src/render.ts:137`) renders every `history_repaired` via
+     `render` (`render.ts:56-59`). The Agent yields one notice per repaired
+     request (`agent.ts:1136-1138`, `:1320-1322`). The only dedup is
+     `hosted-session.ts:2230-2237`, and F20/F23 assume that dedup covers every
+     path.
+   - **Failure scenario (reproduced):**
+     `.tentacle/tmp/history-validity/oneshot.ts` uses the T3 fake llama.cpp
+     server and the real `OpenAIProvider` + `Agent`. In one `agent.run`, round 1
+     makes an invalid `fs_write` call, rounds 2–3 make valid calls, and round 4
+     is text. Output: `history_repaired in ONE agent.run: 3`, `turn_end
+     end_turn`. So `tentacle "<prompt>"` prints `history repaired for the
+     model: …` to stderr once per later round of the same turn.
+   - **Exact fix:** add a `private repairNoticed = false` to `AnswerSplit`. In
+     `push`, if `event.type === "history_repaired"` and the flag is already
+     set, return `{ out: "", err: "" }`; otherwise set the flag and render.
+     `AnswerSplit` is one instance per one-shot run (`main.ts:1927`). The repl
+     creates one per turn (`repl.ts:56`), but it goes through the daemon,
+     which already dedups, so this is harmless there. Add a
+     `cli/test/render.test.ts` case: two `history_repaired` events pushed into
+     one `AnswerSplit` give exactly one stderr line. Show it red first.
+     Alternatively, filter in the `main.ts:1929` loop. Do not dedup in the
+     Agent: T3a pins "one per repaired round" there on purpose.
+
+### Gate (re-run by the reviewer)
+
+`bun run check` exits 0:
+- `tsc --noEmit` and `tsc -p apps/mobile` are clean.
+- `biome check .`: 855 files, no fixes, 0 errors / 0 warnings (the §6
+  baseline).
+- `bun test`: **6704 pass, 3 skip, 0 fail**, 6707 tests in 467 files. The 3
+  skips are the documented opt-ins.
+
+### Mutations (non-vacuity, §9; each restored; `git status --porcelain` empty afterwards)
+
+- **M1.** `answerOutstandingCalls`'s never-splice guard disabled
+  (`history-validity.ts:329`). Result: `answerOutstandingCalls > a non-tool
+  message after the block: nothing (never splice)` fails (1 fail, 46 pass
+  across core + T5 + daemon files).
+- **M2.** `runGroup`'s `finally` no longer pushes results the client already
+  saw (`agent.ts`, the `!pushed.has(index)` branch). Result: T5e fails (1 fail,
+  8 pass).
+
+### Attacks tried
+
+- **(1) Copy-only repair; stored bytes; resume.** Holds.
+  - `repairHistory` never mutates its input and returns the same array when
+    nothing changed (`history-validity.ts:239`; pinned by `toBe(history)` at
+    `core/test/history-validity.test.ts:103,111,299`).
+  - `modelView` only feeds the request and the count (`agent.ts:1129`, `:1320`,
+    `:1455`). No write path calls it.
+  - T4a shows the on-disk `<uid>.jsonl` keeps the original bytes.
+  - Resume: the Part B `finally` runs only at a `yield` stop or a throw. A
+    permission ask is an `await` in `authorizeCall`, and `drive`'s `for await`
+    cannot call `return()` while `next()` is pending. So a suspended turn's
+    calls stay dangling (P7 verified).
+  - The existing resume suites are in the green gate.
+  - Byte identity for a valid history matches `main`. The one exception is a
+    stored `""` argument, which now goes out as `"{}"` on the OpenAI wire: one
+    cache miss after upgrade, then stable. Not a finding.
+- **(2) Repair rules.** Hold.
+  - Marker + note, never mistaken for real input: a stored marker is valid and
+    raises no issue, which makes the repair idempotent.
+  - Unanswered calls are answered at the end of their own block; orphans,
+    duplicate answers and unknown ids are dropped.
+  - The owner's poisoned session recovers with no edits (T3b, T4a).
+- **(3) Part B.** Holds.
+  - Normal exits, including cancel, set `settled` / `groupSettled` before
+    returning. The fill also skips answered ids, so there are no double
+    answers.
+  - Only an already-transformed result (`inHand`, or the group's `answered`)
+    is pushed. A throwing transform yields `Interrupted` and the raw output
+    never appears (T5b).
+  - The group's `finally` runs before the caller's, so the block order stays
+    valid.
+  - `started` is set synchronously before `executeCall` / `runPrepared`'s
+    await, which keeps "Not run" honest.
+  - A `beforeRun` (landed-check) throw gives `Not run` for calls that were
+    never started. That is correct.
+  - Persistence: the answers are in `session.messages` before `drive`'s catch
+    runs `closeFailedTurn` and `finishTurn`, which persist them (T5g; no second
+    answer on reload). On `main`, `closeFailedTurn` added nothing after
+    `assistant[toolCalls]` (`persisted-session.ts:284-288`), so this closes a
+    real dangling-call producer.
+  - Steering window: the `finally` neither yields nor awaits, and the
+    `drive` loop gains no `await`.
+  - `agent_task`: `subagent.ts:454` never breaks out of the child generator.
+    The child's own repairs are not surfaced (declared debt).
+  - A running call left behind on an abnormal exit is not aborted (F17).
+    That was already true on `main`.
+- **(4) Part C.** Holds, except Finding 1.
+  - `UPDATE_CLASS.history_repaired = "display"`, and `PROTOCOL_VERSION` is
+    untouched (no `version.ts` in the diff).
+  - Schema regenerated; both mappings, the CLI render and the TUI `state.ts`
+    are wired.
+  - The daemon dedup is synchronous inside `drive`.
+- **(5) Providers.** Hold.
+  - OpenAI `wireArguments` returns valid object JSON verbatim.
+  - Anthropic `parseArgs` changes only non-object JSON, which becomes `{}`.
+  - Neither can hide an agent-side bug from the tests: disabling the guard
+    leaves T3 green, and reverting a `modelView` site makes it red (the note
+    is asserted).
+- **Other request sites** (`rg renderForModel|countTokensBounded|stream({`).
+  - All three Agent sites are covered.
+  - Compaction drops arguments (F11), and the title job uses user input only.
+  - Pod `model/stream` / `model/countTokens` relays hit the provider guard on
+    the laptop (F6).
+
+### What does not hold, or is weak (below the reporting bar, for the record)
+
+- T5h passes on both the old and the new code: it is a guard, not a red/green
+  test.
+- The round site yields `history_repaired` before `sent = messages.length`
+  (`agent.ts:1136-1140`). Only microtasks fit there, so this is harmless today.
+
+### How the executor behaved
+
+- The Execution is accurate. Every claim I spot-checked matched the code:
+  sites, mutations, T5 cases, the gate counts (identical to mine).
+- Drifts are named honestly, including the masked `owner` mutation and the
+  malformed-tool-call trouble during its own run.
+- The miss is the plan's (F20 assumes all notices go through `drive`). The
+  executor did not cause it.
