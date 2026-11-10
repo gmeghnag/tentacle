@@ -12,6 +12,7 @@
  * `@tentacle/tools`) is the model-facing surface that calls it.
  */
 import {
+  type AgentInbox,
   type ExecutionEnvironment,
   type ModelProvider,
   type PermissionRequest,
@@ -21,7 +22,12 @@ import {
   type ToolProgressEvent,
   toolLabel,
 } from "@tentacle/core";
-import { AGENT_KILL_TOOL_NAME, CONTEXT_RESET_TOOL_NAME, ToolRegistry } from "@tentacle/tools";
+import {
+  AGENT_KILL_TOOL_NAME,
+  AGENT_MESSAGE_TOOL_NAME,
+  CONTEXT_RESET_TOOL_NAME,
+  ToolRegistry,
+} from "@tentacle/tools";
 import { Agent, type AgentConfig, type AgentStopReason } from "./agent.ts";
 import type { HookRunner } from "./hooks.ts";
 import type { ResultTransform } from "./result-pipeline.ts";
@@ -135,6 +141,12 @@ export interface SubagentRunControls {
    * then withdrawable and, once it moved, re-asked as `sa-N`.
    */
   readonly move?: SubagentMoveControls;
+  /**
+   * The child's inbox (docs/feat/agent-message.md): every text a sender wrote
+   * while it runs, drained at its next round boundary like a steer, and CLOSED
+   * when the child stops reading (so a late text is refused, never lost).
+   */
+  readonly inbox?: AgentInbox;
 }
 
 /**
@@ -297,11 +309,14 @@ export function createSubagentRunner(deps: SubagentDeps): {
       // Nor its context reset (a child's context is its own, and short-lived),
       // nor `agent_kill`: only where `background` is, the PARENT may stop a
       // child it launched (owner Q1 a); a child given it could kill its
-      // siblings silently (`permission: "none"`, sequential ids).
+      // siblings silently (`permission: "none"`, sequential ids). Nor
+      // `agent_message`: it names a CHILD's id, and a child has none to write to
+      // (`docs/feat/agent-message.md` Design 4).
       if (
         tool.name === spawnToolName ||
         tool.name === CONTEXT_RESET_TOOL_NAME ||
-        tool.name === AGENT_KILL_TOOL_NAME
+        tool.name === AGENT_KILL_TOOL_NAME ||
+        tool.name === AGENT_MESSAGE_TOOL_NAME
       ) {
         continue;
       }
@@ -368,31 +383,82 @@ export function createSubagentRunner(deps: SubagentDeps): {
     let report = "";
     let toolUses = 0;
     let stopReason: AgentStopReason = "end_turn";
+    // ONE history and ONE session id across every pass of this child: a
+    // continuation reads the same conversation (`Agent.run` would hide it, so
+    // the runner drives `runMessages` itself).
+    const messages = child.startConversation();
+    const newFrom = messages.length;
+    messages.push({ role: "user", content: opts.prompt });
+    const sid = crypto.randomUUID();
+    const inbox = controls?.inbox;
+    // What `closeIfEmpty` handed back, for the pass that is about to start.
+    let carry: string[] = [];
+    const drain = inbox
+      ? () => (carry.length > 0 ? [...carry.splice(0), ...inbox.drain()] : inbox.drain())
+      : undefined;
+    let first = true;
     try {
-      for await (const event of child.run(
-        crypto.randomUUID(),
-        [{ role: "user", content: opts.prompt }],
-        controls?.signal,
-      )) {
-        if (event.type === "text") {
-          report += event.delta;
-        } else if (event.type === "tool_start") {
-          toolUses += 1;
-          onEvent?.({ kind: "subagent_tool", label: childToolLabel(event.name, event.arguments) });
-        } else if (event.type === "usage") {
-          onEvent?.({
-            kind: "subagent_usage",
-            promptTokens: event.usage.promptTokens,
-            completionTokens: event.usage.completionTokens,
-          });
-        } else if (event.type === "turn_end") {
-          stopReason = event.reason;
+      for (;;) {
+        for await (const event of child.runMessages(
+          messages,
+          sid,
+          controls?.signal,
+          drain,
+          first ? { newFrom, userMessage: true } : { userMessage: true },
+        )) {
+          if (event.type === "text") {
+            report += event.delta;
+          } else if (event.type === "tool_start") {
+            toolUses += 1;
+            onEvent?.({
+              kind: "subagent_tool",
+              label: childToolLabel(event.name, event.arguments),
+            });
+          } else if (event.type === "usage") {
+            onEvent?.({
+              kind: "subagent_usage",
+              promptTokens: event.usage.promptTokens,
+              completionTokens: event.usage.completionTokens,
+            });
+          } else if (event.type === "turn_end") {
+            stopReason = event.reason;
+          }
         }
+        first = false;
+        // Only a clean end can continue: a cancelled, failed or capped child
+        // stops here (its leftovers are reported below).
+        if (
+          inbox === undefined ||
+          stopReason !== "end_turn" ||
+          controls?.signal?.aborted === true
+        ) {
+          break;
+        }
+        // SYNCHRONOUS, in the same stretch as the run's end (the load-bearing
+        // assumption, docs/feat/agent-message.md): a text that slipped in after
+        // the last drain comes back and gets one more pass; an empty inbox is
+        // CLOSED here, so no sender can push a text nobody would read.
+        const more = inbox.closeIfEmpty();
+        if (more.length === 0) {
+          break;
+        }
+        carry = more;
       }
     } catch (error) {
+      // Texts nobody will read are reported by the caller's path below
+      // (`close` is idempotent); the report itself is the failure.
+      carry.splice(0);
+      inbox?.close();
       // The tree must not keep its live row beside the call's error.
       onEvent?.({ kind: "subagent_end", toolUses, stopReason: "error" });
       throw error;
+    }
+    // Whatever was never read is REPORTED, never silently dropped. `carry` holds
+    // what `closeIfEmpty` handed back for a pass that may never have drained it
+    // (a cancel between the two): it counts as unread, not as lost.
+    const unread = [...carry.splice(0), ...(inbox?.close() ?? [])];
+    if (unread.length > 0) {
+      report += `\n\n(${unread.length} message(s) sent to this sub-agent arrived after it stopped and were not read.)`;
     }
     onEvent?.({ kind: "subagent_end", toolUses, stopReason });
     // Never hand the parent an empty report (the agent loop forces a final
@@ -416,7 +482,8 @@ export function createSubagentRunner(deps: SubagentDeps): {
       if (
         toolName === spawnToolName ||
         toolName === CONTEXT_RESET_TOOL_NAME ||
-        toolName === AGENT_KILL_TOOL_NAME
+        toolName === AGENT_KILL_TOOL_NAME ||
+        toolName === AGENT_MESSAGE_TOOL_NAME
       ) {
         return true;
       }

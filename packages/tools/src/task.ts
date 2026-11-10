@@ -7,6 +7,7 @@
  * safe; the child's own tools enforce their permissions and confinement.
  */
 import type {
+  AgentInbox,
   AgentJobSpec,
   AgentJobs,
   AgentSlot,
@@ -40,6 +41,12 @@ export interface TaskRunControls {
    * moved they are re-asked as `sa-N` on the background path.
    */
   readonly move?: TaskMoveControls;
+  /**
+   * The child's inbox (docs/feat/agent-message.md): the channel a sender writes
+   * into while it runs. A background child's comes from `AgentJobs.start`; a
+   * movable foreground one's is the slot's, which `adopt` moves into the entry.
+   */
+  readonly inbox?: AgentInbox;
 }
 
 /** What lets a foreground child's open permission ask be withdrawn at the move. */
@@ -195,6 +202,9 @@ async function runMovable(
     onEvent: (event) => sink(event),
     toolCallId,
     sessionId: ctx.sessionId,
+    // The SAME inbox object `adopt` moves into the entry: a text sent to `sa-N`
+    // after the move is drained by this very child (docs/feat/agent-message.md).
+    inbox: slot.inbox,
     move: {
       withdrawn: withdrawn.signal,
       background: () => (agentId !== undefined ? { id: agentId, signal: own.signal } : undefined),
@@ -371,13 +381,15 @@ export function createTaskTool(
         }
         const started = bg.start(
           { callId: ctx.toolCallId, agentType: type, description: args.description },
-          async ({ signal, agentId }) => {
+          async ({ signal, agentId, inbox }) => {
             let outcome: TaskRunResult;
             try {
               // NEVER `ctx.signal`: Esc on the launching turn must not stop the child.
               outcome = await run(runOpts, {
                 signal,
                 agentId,
+                // Its inbox: `AgentJobs.message` finds the SAME object by id.
+                inbox,
                 // The child's activity, folded into its row (the status line's
                 // count and the panel read `bg.rows()`); it reaches no turn.
                 onEvent: (event) => bg.progress(agentId, event),

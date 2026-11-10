@@ -8,6 +8,7 @@
 export * from "./model.ts";
 export * from "./agent-job-ledger.ts";
 export * from "./agent-jobs.ts";
+export * from "./agent-inbox.ts";
 export * from "./env.ts";
 export * from "./execution.ts";
 export * from "./jobs.ts";

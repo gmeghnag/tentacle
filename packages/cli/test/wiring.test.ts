@@ -136,9 +136,17 @@ describe("background sub-agents wiring (docs/feat/subagent-background.md, T38)",
     expect(taskSchema(on.tools)).toContain("background");
     // 6a-2: `agent_kill` rides the same switch: it names a child's id.
     expect(on.tools.get("agent_kill")).toBeDefined();
+    // feat/agent-message: `agent_message` rides it too, for the same reason —
+    // it names a RUNNING background child's id. Registered exactly where
+    // `agent_kill` is: both need the background runtime.
+    expect(on.tools.get("agent_message")).toBeDefined();
+    expect(on.tools.get("agent_message") !== undefined).toBe(
+      on.tools.get("agent_kill") !== undefined,
+    );
     const off = buildAgent({ ...config, subagentsEnabled: false });
     expect(off.tools.definitions().some((d) => d.name === "agent_task")).toBe(false);
     expect(off.tools.get("agent_kill")).toBeUndefined();
+    expect(off.tools.get("agent_message")).toBeUndefined();
   });
 
   test("a reused AgentJobs is the one the agent gets, and the cap is set from the config", () => {
@@ -964,6 +972,9 @@ describe("start-up output pinned (docs/feat/context-reset-refresh.md)", () => {
       // 6a-2 (docs/feat/subagent-background-ui.md): the model's way to stop a
       // child it launched, offered exactly where `background` is.
       "agent_kill",
+      // feat/agent-message (docs/feat/agent-message.md): the model's way to
+      // write into a child it launched, offered exactly where `background` is.
+      "agent_message",
       // Slice 3 (docs/feat/context-reset.md): the one intended change, on by default.
       "context_reset",
     ]);

@@ -353,6 +353,152 @@ task 7 "reuses #8's inbox". The task brief puts it in task 7.
 
 ## Execution
 
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+Implemented in the plan's file order, one slice at a time, each with its test red
+before the code (AGENTS §9). Every test below was run on the code before the step
+that makes it pass; representative red/green lines are quoted. The naive stubs
+used to produce the reds were reverted, never kept.
+
+**Repro (pre-edit, confirmed the capability was missing).** `grep -rn
+"agent_message" packages/*/src` matched only the unrelated ACP
+`agent_message_chunk` (`protocol/updates.ts:32`, `daemon/mapping.ts:212`,
+`client/mapping.ts:213`); `subagent.ts` ran the child with `child.run(…)` and no
+drain; no `AgentInbox`, no `AgentJobs.message`, no `createAgentMessageTool`. The
+plan's Context repro reproduces exactly as written.
+
+**1. `packages/core/src/agent-inbox.ts` (new) + index export.** `AgentInbox`
+(`push`/`drain`/`closeIfEmpty`/`close`, the `closed` getter), `inboxText`, the
+two owner-Q2 constants. Naive stub first (never closes, no cap, `inboxText`
+identity) → T1/T2/T3 red on the property:
+```
+(fail) T1 … a push after closeIfEmpty closed the inbox is refused, and nothing is drained
+  error: expect(received).toBe(expected)  Expected: true  Received: false   (inbox.closed)
+(fail) T2 … the cap is AGENT_INBOX_MAX unread texts …   Expected: {"ok":false,"reason":"full"}  Received: {"ok":true}
+(fail) T3 … each sender has its own prefix …  Expected: "[message from the parent agent] also check X"  Received: "also check X"
+```
+Real implementation → `5 pass 0 fail` (`packages/core/test/agent-inbox.test.ts`).
+
+**2. `packages/core/src/agent-jobs.ts`.** `inbox` on the running entry,
+`AgentJobControls.inbox`, `slot.inbox` on the `ok: true` variant, `adopt` moving
+`entry.inbox` and refusing when `entry.inbox.closed`, `AgentMessageResult` +
+`message(agentId, text, from)`. Naive `message` stub (accepts anything, formats
+nothing, no limits; `adopt` minting a fresh inbox) → 7 red on the assertions, e.g.
+```
+(fail) AgentJobs.message … a child that closed its inbox (finishing) is refused, not queued
+(fail) AgentJobs.message: the length limit (T5) …
+(fail) AgentJobs.acquire … adopt refuses a CLOSED slot inbox: nothing moved, the slot stays foreground
+```
+Real implementation → `packages/core/test/{agent-jobs,agent-jobs-detach,agent-inbox}.test.ts`
+all green (36 pass at that point).
+
+**3. `packages/agent/src/subagent.ts`.** `SubagentRunControls.inbox`; `child.run(…)`
+replaced by one history (`startConversation()` + the prompt) driven through
+`child.runMessages(messages, sid, signal, drain, opts)` in a `for(;;)` pass loop
+with the `closeIfEmpty()` close-or-carry, one hoisted `sid`, the carried-first
+drain, and the `unread` line appended to the report. Naive runner (no drain, no
+close, leftovers uncounted) → T7/T8/T9 red on the property:
+```
+(fail) T7 … injected at the next boundary as a user message, formatted
+(fail) T8: the close window (LBA) … runs ONE more pass and is read   Received length: 1
+(fail) T9 … a queued text on a cancelled child  Expected to contain: "(1 message(s) … were not read.)"
+```
+Real runner → 27 pass; T10 (below) added after the exclusions.
+
+**4. `packages/tools/src/task.ts`.** `TaskRunControls.inbox`; `inbox: slot.inbox`
+on the movable path and `inbox` from the `start` controls on the background path
+(the non-movable foreground path still passes none). Removing both → T12 red:
+```
+(fail) T12 … before the move there is no id; after it, a message is read by that child
+(fail) T12 … a background child is given ITS entry's inbox at launch   expect(received).toBeDefined()
+```
+
+**5. `packages/tools/src/background.ts`.** `AGENT_MESSAGE_TOOL_NAME` +
+`createAgentMessageTool(jobs)` (exported by the package index via `export *`).
+The tool was written before its tests, so the red came from mutating it to a
+fire-and-forget stub (`delivered to …`, no error) → all four T11 cases red, then
+green with the real one (`packages/tools/test/agent-message.test.ts`).
+
+**6. `packages/cli/src/wiring.ts`.** `tools.register(createAgentMessageTool(agentJobs))`
+right after `createAgentKillTool`, inside the same `subagentsEnabled` branch;
+T13 in `wiring.test.ts` (registered exactly when `agent_kill` is, and the pinned
+tool list gains `agent_message` after `agent_kill`). Removing the registration →
+those 2 assertions red.
+
+**7. Exclusions + T10.** `AGENT_MESSAGE_TOOL_NAME` dropped in the child filter
+(`subagent.ts:301-315`) and treated as parent-only in `readOnlyType`
+(`:416-431`). Removing only the filter line → T10 red
+(`Received: [ "fs_read", "agent_message" ]`), green restored.
+
+**8. `packages/cli/test/agent-message.e2e.test.ts` (new).** T14/T15 over the real
+`createLocalRuntime` ↔ `Connection` stack with the gated model: the parent
+launches `sa-1`, messages it during the child's held first round, the client sees
+`queued for sa-1 …`, the child's next request carries
+`user:[message from the parent agent] also check X`, the report reaches the
+parent's NEXT request as an `[background]` note, and the message starts no extra
+parent turn (request count checked). T15: `sa-9` → `tool_result` with `isError`
+and "is not a running background sub-agent". Non-vacuity mutation (the plan's):
+wire the tool to a fresh `AgentJobs` → T14 red ("queued for sa-1" never appears).
+
+**Mutations run (all reverted; each failed exactly the intended tests).**
+1. `closeIfEmpty()` dropped from the loop (naive runner) → T8 fails only.
+2. `closeIfEmpty` that never marks `closed` → T1 fails (and the close-window
+   guarantee is gone).
+3. `AgentJobs.message` ignoring the push refusal (always `ok`) → T4's
+   "closed inbox" + the 8-cap + T11's cap case fail.
+4. `adopt` handing a FRESH inbox instead of the slot's → T6 + T12 fail.
+5. No 8-message cap → T2, T4's cap, T11's cap fail. No 8000-char limit → T5 +
+   T11's length case fail.
+6. The unread line never appended → T9 fails.
+7. Carry dropped from the counted leftovers → T9b fails (see drift 2).
+
+**Gate.** `bun run check` — typecheck clean, `biome check .` clean (817 files, no
+fixes), `bun test` **6286 pass, 3 skip, 0 fail** (6289 across 442 files). The 3
+skips are the documented opt-ins. One unrelated flake seen once and not
+reproduced (`packages/exec/test/confinement.test.ts` R2-4, hard links in the
+sandbox): passes standalone and in the full rerun that produced the numbers above.
+
+**Drift from the Implementation (and why):**
+1. **The `unread` set includes the un-drained carry.** The plan's snippet ends
+   with `const unread = inbox?.close() ?? []`, which misses one case: `closeIfEmpty`
+   hands a text back for a continuation pass, and the signal aborts in that same
+   stretch — the pass ends `cancelled` at its FIRST boundary, before its drain,
+   so the text is in neither the inbox (`close()` is empty; `closeIfEmpty` took
+   it) nor the report. The code reports `[...carry.splice(0), ...(inbox.close() ??
+   [])]`: same intent (report, never lose), one extra term. The `catch` path keeps
+   the plan's documented behaviour (the error report cannot carry the count) and
+   just drops `carry` there.
+2. **T9b added (not in the plan's test list).** That same hole deserves a test:
+   `closeIfEmpty` hands a text back, the signal aborts in that stretch, the
+   continuation ends `cancelled` at its first boundary. Red with `carry` dropped
+   (`Expected "cancelled"` … / "were not read" missing), green with the fix.
+3. **T11's red was obtained by mutation, not naturally.** The tool file was
+   written before its test (the plan lists the tool and its tests separately), so
+   the test was green on first run; the §9 red came from mutating the tool to a
+   fire-and-forget stub and re-running it. Reported as such rather than claimed
+   as a test-first red.
+4. **`AgentMessageSender` lives in `agent-inbox.ts`** (the plan's snippet shows it
+   there too; initially split into a helper file, folded back — no behaviour).
+5. **The tool description text** is one sentence longer than the plan's sketch
+   (it says the message is read "before its next model step" and that the child
+   may be "waiting on a long tool call"): the plan's own "not 'delivered':
+   honest" note asks for it.
+6. **`adopt`'s refusal is placed before `host.launched`** (the plan said "returns
+   `undefined` when `inbox.closed`", order unspecified): refusing first means no
+   id is minted for a child that cannot move.
+
+**Scratch path (one drift from the brief).** Probe scripts ran in
+`<worktree>/.tentacle/tmp/agent-message/` (gitignored, outside `tsconfig` and
+`bun test` discovery) rather than the main checkout's `.tentacle/tmp/agent-message/`:
+the file tool refuses writes outside this worktree. Same guarantees (nothing
+touched the tree or the gate); the two probes that decided the tests
+(`probe-depth2` — a push 8 microtasks deep lands exactly in the close window — and
+`probe-t9b`) are described by their output above.
+
+**Not done:** nothing from the plan's list. Task 7's RPC method + `[user → sa-N]`
+note and task 9's `agent_notify` stay out, as the plan's Q1(a)/§seams say. No
+`tool_start`/`steer` rendering of the delivered text (Notes/debt: task 7's panel).
+
 ## Review
 
 ### Answers (decided by the orchestrator overnight — to confirm by the owner)

@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AGENT_INBOX_MAX,
+  AGENT_MESSAGE_MAX_CHARS,
+  type AgentInbox,
   type AgentJobExit,
   type AgentJobHost,
   type AgentJobResult,
@@ -309,5 +312,181 @@ describe("AgentJobs.setCap", () => {
     a.done();
     b.done();
     await tick();
+  });
+});
+
+// docs/feat/agent-message.md T4-T6. `AgentJobs.message` is THE seam every sender
+// goes through; it decides and pushes in ONE synchronous stretch, so a text it
+// accepts is read by the child or reported by it — never silently dropped.
+
+/** A run that records the inbox it was given and settles on `done`. */
+function inboxRun() {
+  const gate = Promise.withResolvers<AgentJobResult>();
+  let inbox: AgentInbox | undefined;
+  return {
+    run: async (c: { readonly inbox?: AgentInbox }) => {
+      inbox = c.inbox;
+      return gate.promise;
+    },
+    done: () => gate.resolve(result()),
+    /** The child's own inbox, as its run received it. */
+    get inbox(): AgentInbox {
+      if (inbox === undefined) {
+        throw new Error("the run was never given an inbox");
+      }
+      return inbox;
+    },
+  };
+}
+
+describe("AgentJobs.message (a text for a running child)", () => {
+  test("a running child accepts it, formatted, in the inbox its run was given", async () => {
+    const { jobs } = rig();
+    const g = inboxRun();
+    jobs.start(spec(), g.run);
+    expect(jobs.message("sa-1", "also check X", "agent")).toEqual({ ok: true });
+    // Ready-to-inject user content, drained at the child's next boundary.
+    expect(g.inbox.drain()).toEqual(["[message from the parent agent] also check X"]);
+    // The `"user"` sender is task 7's; the channel is the same one.
+    expect(jobs.message("sa-1", "look at Y", "user")).toEqual({ ok: true });
+    expect(g.inbox.drain()).toEqual(["[message from the user] look at Y"]);
+    g.done();
+    await tick();
+  });
+
+  test("an unknown id, a killed one and an ended one each say nothing was sent", async () => {
+    const { jobs } = rig();
+    const g = inboxRun();
+    jobs.start(spec(), g.run);
+    const unknown = jobs.message("sa-9", "hi", "agent");
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) {
+      expect(unknown.reason).toBe(
+        "sa-9 is not a running background sub-agent (it finished, was stopped, or never existed): nothing was sent.",
+      );
+    }
+    jobs.kill("sa-1");
+    const killed = jobs.message("sa-1", "hi", "agent");
+    expect(killed.ok).toBe(false);
+    if (!killed.ok) {
+      expect(killed.reason).toBe("sa-1 is being stopped: nothing was sent.");
+    }
+    g.done();
+    await tick();
+    const ended = jobs.message("sa-1", "hi", "agent");
+    expect(ended.ok).toBe(false);
+    if (!ended.ok) {
+      expect(ended.reason).toContain("is not a running background sub-agent");
+    }
+  });
+
+  test("a child that closed its inbox (finishing) is refused, not queued", async () => {
+    const { jobs } = rig();
+    const g = inboxRun();
+    jobs.start(spec(), g.run);
+    // The child's run ended here: the runner closes when it holds nothing.
+    expect(g.inbox.closeIfEmpty()).toEqual([]);
+    const out = jobs.message("sa-1", "hi", "agent");
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.reason).toBe(
+        "sa-1 is finishing and can no longer read messages: nothing was sent. Its report arrives as a [background] note.",
+      );
+    }
+    g.done();
+    await tick();
+  });
+
+  test("the 8-per-child cap: the 9th unread text is refused and nothing is queued", async () => {
+    const { jobs } = rig();
+    const g = inboxRun();
+    jobs.start(spec(), g.run);
+    for (let i = 1; i <= AGENT_INBOX_MAX; i++) {
+      expect(jobs.message("sa-1", `m${i}`, "agent")).toEqual({ ok: true });
+    }
+    const over = jobs.message("sa-1", "m9", "agent");
+    expect(over.ok).toBe(false);
+    if (!over.ok) {
+      expect(over.reason).toBe(
+        `sa-1 already has ${AGENT_INBOX_MAX} unread messages: nothing was sent. Wait for it to read them or for its report.`,
+      );
+    }
+    expect(g.inbox.drain()).toHaveLength(AGENT_INBOX_MAX);
+    g.done();
+    await tick();
+  });
+
+  test("a foreground child has no id to name: the message is refused", async () => {
+    const { jobs } = rig();
+    expect(jobs.acquire("fg one").ok).toBe(true);
+    expect(jobs.message("fg one", "hi", "agent").ok).toBe(false);
+  });
+});
+
+describe("AgentJobs.message: the length limit (T5)", () => {
+  test("a text over AGENT_MESSAGE_MAX_CHARS is refused with the limit, and nothing is pushed", async () => {
+    const { jobs } = rig();
+    const g = inboxRun();
+    jobs.start(spec(), g.run);
+    expect(jobs.message("sa-1", "x".repeat(AGENT_MESSAGE_MAX_CHARS), "agent")).toEqual({
+      ok: true,
+    });
+    expect(g.inbox.drain()).toHaveLength(1);
+    const long = jobs.message("sa-1", "x".repeat(AGENT_MESSAGE_MAX_CHARS + 1), "agent");
+    expect(long.ok).toBe(false);
+    if (!long.ok) {
+      expect(long.reason).toContain("8000");
+      expect(long.reason).toContain("nothing was sent");
+    }
+    expect(g.inbox.drain()).toEqual([]);
+    g.done();
+    await tick();
+  });
+});
+
+describe("AgentJobs.acquire: the slot's inbox and adopt (T6)", () => {
+  test("a foreground slot carries an inbox the child was given; adopt moves THAT inbox", async () => {
+    const { jobs } = rig();
+    const slot = jobs.acquire("map repo");
+    if (!slot.ok) {
+      throw new Error("expected a slot");
+    }
+    const gate = Promise.withResolvers<AgentJobResult>();
+    // The runner of a MOVED child is handed `slot.inbox` (`agent_task`'s movable
+    // path); a text sent to `sa-1` must land in exactly that object.
+    const id = slot.adopt(
+      spec(),
+      new AbortController(),
+      { toolUses: 0, tokens: 0, tail: [] },
+      async () => gate.promise,
+    );
+    expect(id).toBe("sa-1");
+    expect(jobs.message("sa-1", "after the move", "agent")).toEqual({ ok: true });
+    expect(slot.inbox.drain()).toEqual(["[message from the parent agent] after the move"]);
+    gate.resolve(result());
+    await tick();
+  });
+
+  test("adopt refuses a CLOSED slot inbox: nothing moved, the slot stays foreground", async () => {
+    const { jobs, log } = rig(1);
+    const slot = jobs.acquire("map repo");
+    if (!slot.ok) {
+      throw new Error("expected a slot");
+    }
+    // The child stopped reading (its run ended): moving it would accept texts
+    // nobody reads.
+    slot.inbox.closeIfEmpty();
+    expect(slot.inbox.closed).toBe(true);
+    const id = slot.adopt(
+      spec(),
+      new AbortController(),
+      { toolUses: 0, tokens: 0, tail: [] },
+      async () => result(),
+    );
+    expect(id).toBeUndefined();
+    expect(log).toEqual([]);
+    expect(jobs.list()).toEqual([]);
+    // Still holding its slot: nothing half-moved.
+    expect(jobs.acquire("later").ok).toBe(false);
   });
 });
