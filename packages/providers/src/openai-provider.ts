@@ -18,6 +18,7 @@ import type {
   ToolDefinition,
   Usage,
 } from "@tentacle/core";
+import { wireArguments } from "@tentacle/core";
 import { parseSSE } from "./sse.ts";
 
 export interface OpenAIProviderConfig {
@@ -284,7 +285,7 @@ function toWireMessage(message: ChatMessage): Record<string, unknown> {
     wire.tool_calls = message.toolCalls.map((tc) => ({
       id: tc.id,
       type: "function",
-      function: { name: tc.name, arguments: tc.arguments },
+      function: { name: tc.name, arguments: wireArguments(tc.arguments) },
     }));
   }
   if (message.toolCallId) {

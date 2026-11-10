@@ -337,3 +337,19 @@ describe("updateToEvent: tool_progress (docs/feat/subagent-progress-wire.md)", (
     }
   });
 });
+
+describe("updateToEvent: history_repaired (docs/feat/history-validity-invariant.md)", () => {
+  test("maps the update field by field", () => {
+    expect(
+      updateToEvent(
+        { type: "history_repaired", invalidArguments: 2, unansweredCalls: 1, orphanResults: 0 },
+        new Map(),
+      ),
+    ).toEqual({
+      type: "history_repaired",
+      invalidArguments: 2,
+      unansweredCalls: 1,
+      orphanResults: 0,
+    });
+  });
+});

@@ -25,6 +25,7 @@ import type {
   ToolDefinition,
   Usage,
 } from "@tentacle/core";
+import { wireArguments } from "@tentacle/core";
 import { ModelRequestError, parseRetryAfter } from "./openai-provider.ts";
 import { parseSSE } from "./sse.ts";
 
@@ -423,10 +424,13 @@ function parseArgs(call: ToolCall): unknown {
     return {};
   }
   try {
-    return JSON.parse(trimmed);
+    const parsed: unknown = JSON.parse(trimmed);
+    // `tool_use.input` must be an object: the model's copy is repaired
+    // agent-side (`wireArguments`); this catches a request built elsewhere (a
+    // pod relay; docs/feat/history-validity-invariant.md).
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : {};
   } catch {
-    // The agent loop guarantees parseable arguments; a broken body degrades to
-    // an empty input rather than breaking the whole request.
+    // A broken body degrades to an empty input rather than breaking the whole request.
     return {};
   }
 }

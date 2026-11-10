@@ -12,6 +12,19 @@ describe("render", () => {
     expect(render({ type: "context_note", text: "x", reason: "continue" })).toBe("");
   });
 
+  test("history_repaired prints the shared notice line (docs/feat/history-validity-invariant.md)", () => {
+    expect(
+      render({
+        type: "history_repaired",
+        invalidArguments: 1,
+        unansweredCalls: 0,
+        orphanResults: 0,
+      }),
+    ).toBe(
+      "\nhistory repaired for the model: 1 tool call with invalid arguments — the saved session is unchanged\n",
+    );
+  });
+
   test("reasoning is hidden by default", () => {
     expect(render({ type: "reasoning", delta: "thinking" })).toBe("");
   });
@@ -104,6 +117,18 @@ describe("AnswerSplit", () => {
     expect(err).not.toContain("tokens");
     expect(err).toContain("└─ explore: d");
     expect(err).not.toContain("42");
+  });
+
+  test("history_repaired is noticed once per AnswerSplit (one-shot CLI: one line per run)", () => {
+    // Mutation: drop the `repairNoticed` guard in `push` → one line per round.
+    const notice = {
+      type: "history_repaired" as const,
+      invalidArguments: 1,
+      unansweredCalls: 0,
+      orphanResults: 0,
+    };
+    const { err } = run([notice, { type: "text", delta: "ok" }, notice]);
+    expect(err.match(/history repaired for the model/g) ?? []).toHaveLength(1);
   });
 
   test("an answer-less run writes nothing to stdout; a stop is said on stderr", () => {

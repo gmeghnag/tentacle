@@ -238,3 +238,28 @@ describe("tool_progress (docs/feat/subagent-progress-wire.md)", () => {
     expect(bad.success).toBe(false);
   });
 });
+
+describe("history_repaired (docs/feat/history-validity-invariant.md, Part C)", () => {
+  test("parses, is display-class, and does NOT bump the version", () => {
+    const event = {
+      type: "history_repaired",
+      invalidArguments: 1,
+      unansweredCalls: 0,
+      orphanResults: 0,
+    };
+    expect(SessionUpdateSchema.safeParse(event).success).toBe(true);
+    expect(UPDATE_CLASS.history_repaired).toBe("display");
+    // Display only: an older client skips an unknown display kind (§7), so no bump
+    // by this task (22 came from fix/autoaccept-wake-turns).
+    expect(PROTOCOL_VERSION).toBe(22);
+  });
+
+  test("rejects a negative or non-integer count", () => {
+    for (const bad of [
+      { type: "history_repaired", invalidArguments: -1, unansweredCalls: 0, orphanResults: 0 },
+      { type: "history_repaired", invalidArguments: 0, unansweredCalls: 1.5, orphanResults: 0 },
+    ]) {
+      expect(SessionUpdateSchema.safeParse(bad).success).toBe(false);
+    }
+  });
+});

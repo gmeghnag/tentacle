@@ -37,6 +37,7 @@ import {
   type ToolResult,
   type Usage,
   allowAll,
+  answerOutstandingCalls,
   countTokensBounded,
   subagentReportNote,
 } from "@tentacle/core";
@@ -54,6 +55,7 @@ import {
   type ContextAnchor,
   estimateUsed,
   lastEmitted,
+  modelView,
   renderForModel,
   shouldEmit,
 } from "./context-awareness.ts";
@@ -190,6 +192,18 @@ const CONTINUE_NUDGE = "Continue with the task.";
 /** Result recorded for a tool call skipped because the user cancelled mid-round,
  * so the assistant's `toolCalls` stay answered in the history. */
 const CANCELLED_TOOL_NOTE = "Cancelled by the user before this tool ran.";
+
+/**
+ * A call the turn's unexpected stop (a throw, or a consumer that stopped at a
+ * yield) reached before it started: certainly not run (`authorizeCall` never
+ * runs a tool). Error-phrased, like every synthesized answer — never read as a
+ * success (docs/feat/history-validity-invariant.md, Part B).
+ */
+const TURN_STOPPED_NOT_RUN_NOTE =
+  "Not run: the turn stopped unexpectedly before this call started. Ask again if it is still needed.";
+/** A call that had started when the turn stopped unexpectedly: it may have run. */
+const TURN_STOPPED_INTERRUPTED_NOTE =
+  "Interrupted: the turn stopped unexpectedly after this tool started; its result was not recorded. It may have completed — check before retrying.";
 
 /**
  * A finished call's history message. A spill rides with it, so a resume or a
@@ -375,6 +389,17 @@ export type AgentEvent =
       readonly type: "context_note";
       readonly text: string;
       readonly reason: "continue" | "background_exit" | "hook";
+    }
+  // The model was sent a repaired copy of the history
+  // (docs/feat/history-validity-invariant.md): invalid tool arguments replaced
+  // by a marker, unanswered calls answered, stray tool results left out. The
+  // STORED history is unchanged, so this is never a commit point; it is display
+  // only, and the daemon sends it at most once per session.
+  | {
+      readonly type: "history_repaired";
+      readonly invalidArguments: number;
+      readonly unansweredCalls: number;
+      readonly orphanResults: number;
     }
   // The history now reflects every event yielded so far (a consistent cut for a
   // snapshot + replay). Carries no data; frontends ignore it. Yielded only
@@ -1101,12 +1126,16 @@ export class Agent {
       // The model's copy: stored context lines rendered into `content`, always
       // (enabled or not), so every request repeats the same bytes for a
       // message an earlier one sent — the provider's prompt cache holds.
+      const view = modelView(messages);
       const request: ChatRequest = {
-        messages: messages.map(renderForModel),
+        messages: view.messages,
         tools,
         ...(this.config.temperature !== undefined ? { temperature: this.config.temperature } : {}),
         ...(signal ? { signal } : {}),
       };
+      if (view.repairs !== null) {
+        yield { type: "history_repaired", ...view.repairs };
+      }
       const sent = messages.length;
       unseen = sent;
 
@@ -1288,8 +1317,12 @@ export class Agent {
         yield { type: "steer", text };
       }
       try {
+        const view = modelView(messages);
+        if (view.repairs !== null) {
+          yield { type: "history_repaired", ...view.repairs };
+        }
         const finalMessages: ChatMessage[] = [
-          ...messages.map(renderForModel),
+          ...view.messages,
           {
             role: "user",
             content:
@@ -1419,7 +1452,7 @@ export class Agent {
     // is slow falls through to the estimate.
     const exact = await countTokensBounded(
       this.config.model,
-      { messages: messages.map(renderForModel), tools },
+      { messages: modelView(messages).messages, tools },
       signal,
       timeoutMs,
     );
@@ -1506,95 +1539,135 @@ export class Agent {
       { mode, maxParallel },
       { mode: agentMode, cap: agentCap },
     );
-    for (const { indexes, lane } of round) {
-      const group = indexes.flatMap((i) => (calls[i] ? [calls[i]] : []));
-      if (group.length > 1) {
-        yield* this.runGroup(group, messages, toolContext, hooks, rules[lane]);
-        continue;
-      }
-      const call = group[0];
-      if (call === undefined) {
-        continue;
-      }
-      const resetConfig = this.config.contextReset;
-      if (
-        call.name === CONTEXT_RESET_TOOL_NAME &&
-        resetConfig !== undefined &&
-        this.config.tools.get(CONTEXT_RESET_TOOL_NAME) !== undefined
-      ) {
-        if (yield* this.runContextReset(call, resetConfig, messages, toolContext, signal)) {
-          // The only call of its message (checked): the round is over.
-          return "context_reset";
+    // Part B (docs/feat/history-validity-invariant.md): an abnormal exit (a
+    // throw, or a consumer that stopped at a yield) must never leave the
+    // stored history with an assistant tool call no result answers. Nothing
+    // here yields or awaits — the `finally` below cannot.
+    const owner = messages.findLast(
+      (m) => m.role === "assistant" && (m.toolCalls ?? []).some((c) => c.id === calls[0]?.id),
+    );
+    /** Ids whose `executeCall`/`runPrepared` was invoked: "it may have run". */
+    const started = new Set<string>();
+    /** An alone call's finished message, between its `tool_result` yield and its push. */
+    let inHand: ChatMessage | undefined;
+    /** Set immediately before every normal return. */
+    let settled = false;
+    try {
+      for (const { indexes, lane } of round) {
+        const group = indexes.flatMap((i) => (calls[i] ? [calls[i]] : []));
+        if (group.length > 1) {
+          yield* this.runGroup(group, messages, toolContext, hooks, rules[lane], started);
+          continue;
         }
-        continue;
-      }
-      this.otherCallSinceReset = true;
-      if (signal?.aborted) {
-        // The user cancelled while the previous tool ran (or before this one
-        // could start). It must not start — and must not prompt for
-        // permission either (`authorizeCall` asks). Answer it
-        // synthetically so the assistant's `toolCalls` stay valid in the
-        // history; the next iteration top ends the turn as cancelled.
-        messages.push({
-          role: "tool",
-          content: CANCELLED_TOOL_NOTE,
+        const call = group[0];
+        if (call === undefined) {
+          continue;
+        }
+        const resetConfig = this.config.contextReset;
+        if (
+          call.name === CONTEXT_RESET_TOOL_NAME &&
+          resetConfig !== undefined &&
+          this.config.tools.get(CONTEXT_RESET_TOOL_NAME) !== undefined
+        ) {
+          if (yield* this.runContextReset(call, resetConfig, messages, toolContext, signal)) {
+            // The only call of its message (checked): the round is over.
+            settled = true;
+            return "context_reset";
+          }
+          continue;
+        }
+        this.otherCallSinceReset = true;
+        if (signal?.aborted) {
+          // The user cancelled while the previous tool ran (or before this one
+          // could start). It must not start — and must not prompt for
+          // permission either (`authorizeCall` asks). Answer it
+          // synthetically so the assistant's `toolCalls` stay valid in the
+          // history; the next iteration top ends the turn as cancelled.
+          messages.push({
+            role: "tool",
+            content: CANCELLED_TOOL_NOTE,
+            toolCallId: call.id,
+          });
+          yield {
+            type: "tool_result",
+            id: call.id,
+            name: call.name,
+            result: { content: CANCELLED_TOOL_NOTE, isError: true },
+          };
+          yield { type: "history_commit" };
+          continue;
+        }
+        yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
+        // Interleave the tool's live progress (e.g. a sub-agent's activity) into
+        // our own stream while it runs, then yield the final result.
+        const progress = new EventQueue<AgentEvent>();
+        const ctx: ToolContext = {
+          ...toolContext,
+          emitProgress: (event: ToolProgressEvent) =>
+            progress.push(progressToEvent(call.id, event)),
           toolCallId: call.id,
+          shapeResult: (result, sig) =>
+            this.transformResult(call, result, sig, { sessionId: toolContext.sessionId }),
+        };
+        const prepared = await this.authorizeCall(call, ctx, {
+          beforeStart: hooks.beforeResumedCall,
         });
+        let run: ToolRun & { input: unknown };
+        if (prepared.kind === "done") {
+          run = prepared;
+        } else if (yield* this.signalRunning(call.id, toolContext.signal)) {
+          // Cancelled in the hop after the signal: never started.
+          run = { result: cancelledResult(), input: prepared.input };
+        } else {
+          started.add(call.id);
+          const resultPromise = this.executeCall(prepared, ctx).finally(() => progress.close());
+          for await (const event of progress.drain()) {
+            yield event;
+          }
+          run = await resultPromise;
+        }
+        const { result: raw, input, durationMs } = run;
+        // After the duration was taken: a transform is harness time, not the tool's.
+        const transformed = await this.transformResult(call, raw, signal, {
+          sessionId: toolContext.sessionId,
+          input,
+        });
+        const result = keepDenialReply(raw, transformed);
+        // In hand across the yield below: a consumer that stops at the
+        // `tool_result` has seen this result, so it must reach the history.
+        const message = toolMessage(call.id, result, durationMs);
+        inHand = message;
         yield {
           type: "tool_result",
           id: call.id,
           name: call.name,
-          result: { content: CANCELLED_TOOL_NOTE, isError: true },
+          result,
+          ...(durationMs !== undefined ? { durationMs } : {}),
         };
+        messages.push(message);
+        inHand = undefined;
+        // After the push, not before: the `tool_result` above precedes it.
         yield { type: "history_commit" };
-        continue;
       }
-      yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
-      // Interleave the tool's live progress (e.g. a sub-agent's activity) into
-      // our own stream while it runs, then yield the final result.
-      const progress = new EventQueue<AgentEvent>();
-      const ctx: ToolContext = {
-        ...toolContext,
-        emitProgress: (event: ToolProgressEvent) => progress.push(progressToEvent(call.id, event)),
-        toolCallId: call.id,
-        shapeResult: (result, sig) =>
-          this.transformResult(call, result, sig, { sessionId: toolContext.sessionId }),
-      };
-      const prepared = await this.authorizeCall(call, ctx, {
-        beforeStart: hooks.beforeResumedCall,
-      });
-      let run: ToolRun & { input: unknown };
-      if (prepared.kind === "done") {
-        run = prepared;
-      } else if (yield* this.signalRunning(call.id, toolContext.signal)) {
-        // Cancelled in the hop after the signal: never started.
-        run = { result: cancelledResult(), input: prepared.input };
-      } else {
-        const resultPromise = this.executeCall(prepared, ctx).finally(() => progress.close());
-        for await (const event of progress.drain()) {
-          yield event;
+      settled = true;
+      return undefined;
+    } finally {
+      // No yield, no await: synchronous pushes only. The answers are in
+      // `session.messages` before the error reaches either consumer, so both
+      // persist them (`Session.send`'s finally, `drive`'s closeFailedTurn).
+      if (!settled && owner !== undefined && messages.lastIndexOf(owner) !== -1) {
+        if (inHand !== undefined) {
+          // The REAL result, already transformed (redaction/spill applied):
+          // pushing the raw output could leak what a transform hides.
+          messages.push(inHand);
         }
-        run = await resultPromise;
+        messages.push(
+          ...answerOutstandingCalls(messages, owner, calls, (c) =>
+            started.has(c.id) ? TURN_STOPPED_INTERRUPTED_NOTE : TURN_STOPPED_NOT_RUN_NOTE,
+          ),
+        );
       }
-      const { result: raw, input, durationMs } = run;
-      // After the duration was taken: a transform is harness time, not the tool's.
-      const transformed = await this.transformResult(call, raw, signal, {
-        sessionId: toolContext.sessionId,
-        input,
-      });
-      const result = keepDenialReply(raw, transformed);
-      yield {
-        type: "tool_result",
-        id: call.id,
-        name: call.name,
-        result,
-        ...(durationMs !== undefined ? { durationMs } : {}),
-      };
-      messages.push(toolMessage(call.id, result, durationMs));
-      // After the push, not before: the `tool_result` above precedes it.
-      yield { type: "history_commit" };
     }
-    return undefined;
   }
 
   /**
@@ -1630,6 +1703,7 @@ export class Agent {
     toolContext: ToolContext,
     hooks: RoundHooks,
     rule: GroupRule,
+    started: Set<string>,
   ): AsyncGenerator<AgentEvent, void> {
     const signal = toolContext.signal;
     const head = calls[0]?.id;
@@ -1648,147 +1722,174 @@ export class Agent {
         ...(run.durationMs !== undefined ? { durationMs: run.durationMs } : {}),
       };
     };
-
-    // PHASE 1.
-    for (const [index, call] of calls.entries()) {
-      this.otherCallSinceReset = true;
-      if (signal.aborted) {
-        yield answer(index, call, { result: cancelledResult() });
-        continue;
-      }
-      yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
-      const ctx: ToolContext = {
-        ...toolContext,
-        emitProgress: (event: ToolProgressEvent) =>
-          queue.push({ kind: "event", event: progressToEvent(call.id, event) }),
-        toolCallId: call.id,
-        shapeResult: (result, sig) =>
-          this.transformResult(call, result, sig, { sessionId: toolContext.sessionId }),
-      };
-      const prepared = await this.authorizeCall(call, ctx, {
-        ...(head !== undefined ? { groupStart: head } : {}),
-      });
-      if (prepared.kind === "done") {
-        yield answer(index, call, await this.finishCall(call, prepared, toolContext));
-        continue;
-      }
-      ready.set(index, { prepared, ctx });
-      yield { type: "tool_phase", id: call.id, phase: "queued" };
-    }
-
-    // BETWEEN.
-    let landed = true;
-    if (ready.size > 0 && !signal.aborted) {
-      await hooks.beforeResumedCall?.(signal);
-      if (!signal.aborted && hooks.beforeRun) {
-        const ids = [...ready.keys()].flatMap((i) => (calls[i] ? [calls[i].id] : []));
-        landed = await hooks.beforeRun(ids, signal);
-      }
-    }
-    if (signal.aborted) {
-      for (const index of ready.keys()) {
-        const call = calls[index];
-        if (call) {
+    // Part B (docs/feat/history-validity-invariant.md): results the clients
+    // already saw are kept on an abnormal exit, and no call is left
+    // unanswered (the callers' `finally` classifies what this group did not do).
+    const pushed = new Set<number>();
+    let groupSettled = false;
+    try {
+      // PHASE 1.
+      for (const [index, call] of calls.entries()) {
+        this.otherCallSinceReset = true;
+        if (signal.aborted) {
           yield answer(index, call, { result: cancelledResult() });
+          continue;
+        }
+        yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
+        const ctx: ToolContext = {
+          ...toolContext,
+          emitProgress: (event: ToolProgressEvent) =>
+            queue.push({ kind: "event", event: progressToEvent(call.id, event) }),
+          toolCallId: call.id,
+          shapeResult: (result, sig) =>
+            this.transformResult(call, result, sig, { sessionId: toolContext.sessionId }),
+        };
+        const prepared = await this.authorizeCall(call, ctx, {
+          ...(head !== undefined ? { groupStart: head } : {}),
+        });
+        if (prepared.kind === "done") {
+          yield answer(index, call, await this.finishCall(call, prepared, toolContext));
+          continue;
+        }
+        ready.set(index, { prepared, ctx });
+        yield { type: "tool_phase", id: call.id, phase: "queued" };
+      }
+
+      // BETWEEN.
+      let landed = true;
+      if (ready.size > 0 && !signal.aborted) {
+        await hooks.beforeResumedCall?.(signal);
+        if (!signal.aborted && hooks.beforeRun) {
+          const ids = [...ready.keys()].flatMap((i) => (calls[i] ? [calls[i].id] : []));
+          landed = await hooks.beforeRun(ids, signal);
         }
       }
-      ready.clear();
-    }
-
-    if (!landed) {
-      // One at a time, a commit after each: the first commit clears the
-      // daemon's in-memory in-flight set, after which "the first unanswered
-      // call is the only one that may have started" holds again.
-      for (const [index, call] of calls.entries()) {
-        const entry = ready.get(index);
-        if (entry !== undefined) {
-          if (signal.aborted || (yield* this.signalRunning(call.id, signal))) {
+      if (signal.aborted) {
+        for (const index of ready.keys()) {
+          const call = calls[index];
+          if (call) {
             yield answer(index, call, { result: cancelledResult() });
-          } else {
-            const settled = this.runPrepared(entry.prepared, entry.ctx, toolContext).then((run) => {
-              queue.push({ kind: "done", index, run });
-            });
-            yield* this.drainUntilDone(queue, index, (run) => answer(index, call, run));
-            await settled;
           }
         }
-        const run = answered.get(index);
-        if (run !== undefined) {
-          messages.push(toolMessage(call.id, run.result, run.durationMs));
-          yield { type: "history_commit" };
+        ready.clear();
+      }
+
+      if (!landed) {
+        // One at a time, a commit after each: the first commit clears the
+        // daemon's in-memory in-flight set, after which "the first unanswered
+        // call is the only one that may have started" holds again.
+        for (const [index, call] of calls.entries()) {
+          const entry = ready.get(index);
+          if (entry !== undefined) {
+            if (signal.aborted || (yield* this.signalRunning(call.id, signal))) {
+              yield answer(index, call, { result: cancelledResult() });
+            } else {
+              const settled = this.runPrepared(
+                entry.prepared,
+                entry.ctx,
+                toolContext,
+                started,
+              ).then((run) => {
+                queue.push({ kind: "done", index, run });
+              });
+              yield* this.drainUntilDone(queue, index, (run) => answer(index, call, run));
+              await settled;
+            }
+          }
+          const run = answered.get(index);
+          if (run !== undefined) {
+            messages.push(toolMessage(call.id, run.result, run.durationMs));
+            pushed.add(index);
+            yield { type: "history_commit" };
+          }
+        }
+        queue.close();
+        groupSettled = true;
+        return;
+      }
+
+      // PHASE 2 (landed): concurrent, under the dependency order and the cap.
+      const order = [...ready.keys()];
+      const deps = rule.dependencies(
+        order.map((i) => ({
+          tool: this.config.tools.get(calls[i]?.name ?? ""),
+          input: ready.get(i)?.prepared.input,
+        })),
+      );
+      const states: CallState[] = order.map(() => "pending");
+      let running = 0;
+      while (true) {
+        while (!signal.aborted) {
+          const k = nextRunnable(deps, states, rule.cap);
+          const index = k === undefined ? undefined : order[k];
+          const entry = index === undefined ? undefined : ready.get(index);
+          const call = index === undefined ? undefined : calls[index];
+          if (k === undefined || index === undefined || entry === undefined || call === undefined) {
+            break;
+          }
+          if (yield* this.signalRunning(call.id, signal)) {
+            break; // cancelled in the hop: still pending, answered cancelled below
+          }
+          states[k] = "running";
+          running++;
+          void this.runPrepared(entry.prepared, entry.ctx, toolContext, started).then((run) => {
+            queue.push({ kind: "done", index, run });
+          });
+        }
+        if (signal.aborted) {
+          // Never started: answered cancelled. Running ones are awaited below.
+          for (const [k, state] of states.entries()) {
+            const index = order[k];
+            const call = index === undefined ? undefined : calls[index];
+            if (state === "pending" && index !== undefined && call !== undefined) {
+              states[k] = "settled";
+              yield answer(index, call, { result: cancelledResult() });
+            }
+          }
+        }
+        if (running === 0) {
+          break;
+        }
+        const item = await queue.next();
+        if (item === undefined) {
+          break;
+        }
+        if (item.kind === "event") {
+          yield item.event;
+          continue;
+        }
+        running--;
+        states[order.indexOf(item.index)] = "settled";
+        const call = calls[item.index];
+        if (call) {
+          yield answer(item.index, call, item.run);
         }
       }
       queue.close();
-      return;
-    }
-
-    // PHASE 2 (landed): concurrent, under the dependency order and the cap.
-    const order = [...ready.keys()];
-    const deps = rule.dependencies(
-      order.map((i) => ({
-        tool: this.config.tools.get(calls[i]?.name ?? ""),
-        input: ready.get(i)?.prepared.input,
-      })),
-    );
-    const states: CallState[] = order.map(() => "pending");
-    let running = 0;
-    while (true) {
-      while (!signal.aborted) {
-        const k = nextRunnable(deps, states, rule.cap);
-        const index = k === undefined ? undefined : order[k];
-        const entry = index === undefined ? undefined : ready.get(index);
-        const call = index === undefined ? undefined : calls[index];
-        if (k === undefined || index === undefined || entry === undefined || call === undefined) {
-          break;
+      for (const [index, call] of calls.entries()) {
+        const run = answered.get(index);
+        if (run !== undefined) {
+          messages.push(toolMessage(call.id, run.result, run.durationMs));
+          pushed.add(index);
         }
-        if (yield* this.signalRunning(call.id, signal)) {
-          break; // cancelled in the hop: still pending, answered cancelled below
-        }
-        states[k] = "running";
-        running++;
-        void this.runPrepared(entry.prepared, entry.ctx, toolContext).then((run) => {
-          queue.push({ kind: "done", index, run });
-        });
       }
-      if (signal.aborted) {
-        // Never started: answered cancelled. Running ones are awaited below.
-        for (const [k, state] of states.entries()) {
-          const index = order[k];
-          const call = index === undefined ? undefined : calls[index];
-          if (state === "pending" && index !== undefined && call !== undefined) {
-            states[k] = "settled";
-            yield answer(index, call, { result: cancelledResult() });
+      // After every push: the group's results precede it. No ask is pending: every
+      // call settled, so every sub-agent's ask did too.
+      groupSettled = true;
+      yield { type: "history_commit" };
+    } finally {
+      // No yield, no await. A closed queue drops late completions, so a call
+      // still running cannot push after the answers below.
+      queue.close();
+      if (!groupSettled) {
+        for (const [index, call] of calls.entries()) {
+          const run = answered.get(index);
+          if (run !== undefined && !pushed.has(index)) {
+            messages.push(toolMessage(call.id, run.result, run.durationMs));
           }
         }
       }
-      if (running === 0) {
-        break;
-      }
-      const item = await queue.next();
-      if (item === undefined) {
-        break;
-      }
-      if (item.kind === "event") {
-        yield item.event;
-        continue;
-      }
-      running--;
-      states[order.indexOf(item.index)] = "settled";
-      const call = calls[item.index];
-      if (call) {
-        yield answer(item.index, call, item.run);
-      }
     }
-    queue.close();
-    for (const [index, call] of calls.entries()) {
-      const run = answered.get(index);
-      if (run !== undefined) {
-        messages.push(toolMessage(call.id, run.result, run.durationMs));
-      }
-    }
-    // After every push: the group's results precede it. No ask is pending: every
-    // call settled, so every sub-agent's ask did too.
-    yield { type: "history_commit" };
   }
 
   /**
@@ -1830,7 +1931,10 @@ export class Agent {
     prepared: RunPrepared,
     ctx: ToolContext,
     toolContext: ToolContext,
+    started: Set<string>,
   ): Promise<ToolRun> {
+    // First statement, before the await: from here the call may have run.
+    started.add(prepared.call.id);
     const run = await this.executeCall(prepared, ctx);
     return this.finishCall(prepared.call, run, toolContext);
   }
@@ -2024,51 +2128,73 @@ export class Agent {
   ): AsyncGenerator<AgentEvent> {
     const call = userSkillCall(name);
     messages.push({ role: "assistant", content: "", toolCalls: [call] });
+    const owner = messages.at(-1);
+    let inHand: ChatMessage | undefined;
+    let settled = false;
     yield { type: "history_commit" };
-    yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
-    const cancelled: ToolResult = { content: CANCELLED_TOOL_NOTE, isError: true };
-    let run: ToolRun;
-    const activator = this.activator;
-    if (signal?.aborted) {
-      run = { result: cancelled };
-    } else if (!activator) {
-      run = { result: { content: `Unknown skill "${name}".`, isError: true } };
-    } else {
-      // Like the compaction re-read: a read can hang and takes no signal, so
-      // a cancel must not wait for it. Only the read is timed, not the transforms.
-      run = await unlessAborted(
-        (async (): Promise<ToolRun> => {
-          const timed = await this.timed(() => activator.activate(name, toolContext));
-          return {
-            result: await this.transformResult(call, timed.result, signal, {
-              sessionId: toolContext.sessionId,
-            }),
-            ...(timed.durationMs !== undefined ? { durationMs: timed.durationMs } : {}),
-          };
-        })(),
-        signal,
-      ).catch(
-        (error: unknown): ToolRun =>
-          signal?.aborted
-            ? { result: cancelled }
-            : {
-                result: {
-                  content: `Could not load skill "${name}": ${error instanceof Error ? error.message : String(error)}`,
-                  isError: true,
+    try {
+      yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
+      const cancelled: ToolResult = { content: CANCELLED_TOOL_NOTE, isError: true };
+      let run: ToolRun;
+      const activator = this.activator;
+      if (signal?.aborted) {
+        run = { result: cancelled };
+      } else if (!activator) {
+        run = { result: { content: `Unknown skill "${name}".`, isError: true } };
+      } else {
+        // Like the compaction re-read: a read can hang and takes no signal, so
+        // a cancel must not wait for it. Only the read is timed, not the transforms.
+        run = await unlessAborted(
+          (async (): Promise<ToolRun> => {
+            const timed = await this.timed(() => activator.activate(name, toolContext));
+            return {
+              result: await this.transformResult(call, timed.result, signal, {
+                sessionId: toolContext.sessionId,
+              }),
+              ...(timed.durationMs !== undefined ? { durationMs: timed.durationMs } : {}),
+            };
+          })(),
+          signal,
+        ).catch(
+          (error: unknown): ToolRun =>
+            signal?.aborted
+              ? { result: cancelled }
+              : {
+                  result: {
+                    content: `Could not load skill "${name}": ${error instanceof Error ? error.message : String(error)}`,
+                    isError: true,
+                  },
                 },
-              },
-      );
+        );
+      }
+      const { result, durationMs } = run;
+      // In hand across the yield: a consumer that stops at the `tool_result` has
+      // seen this result, so it must reach the history (Part B).
+      const message = toolMessage(call.id, result, durationMs);
+      inHand = message;
+      yield {
+        type: "tool_result",
+        id: call.id,
+        name: call.name,
+        result,
+        ...(durationMs !== undefined ? { durationMs } : {}),
+      };
+      messages.push(message);
+      inHand = undefined;
+      settled = true;
+      yield { type: "history_commit" };
+    } finally {
+      // No yield, no await. A skill read has no "not started" window worth
+      // distinguishing: "Interrupted" is the conservative answer.
+      if (!settled && owner !== undefined && messages.lastIndexOf(owner) !== -1) {
+        if (inHand !== undefined) {
+          messages.push(inHand);
+        }
+        messages.push(
+          ...answerOutstandingCalls(messages, owner, [call], () => TURN_STOPPED_INTERRUPTED_NOTE),
+        );
+      }
     }
-    const { result, durationMs } = run;
-    yield {
-      type: "tool_result",
-      id: call.id,
-      name: call.name,
-      result,
-      ...(durationMs !== undefined ? { durationMs } : {}),
-    };
-    messages.push(toolMessage(call.id, result, durationMs));
-    yield { type: "history_commit" };
   }
 
   /**

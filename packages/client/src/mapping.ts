@@ -287,6 +287,13 @@ export function updateToEvent(
       return { type: "steer", text: update.text, ...(update.id ? { id: update.id } : {}) };
     case "context_note":
       return { type: "context_note", text: update.text, reason: update.reason };
+    case "history_repaired":
+      return {
+        type: "history_repaired",
+        invalidArguments: update.invalidArguments,
+        unansweredCalls: update.unansweredCalls,
+        orphanResults: update.orphanResults,
+      };
     case "tool_progress":
       return progressToEvent(update);
     // A call's phase in its round: an unknown (newer) phase is skipped.
