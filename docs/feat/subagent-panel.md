@@ -546,4 +546,129 @@ real-socket keepalive) — §6's baseline, not new skips.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-10* (fresh context; a different model family from the executor)
+
+**Verdict: REQUEST-CHANGES.** Three HIGH and two MEDIUM findings. The daemon, agent, protocol and
+client halves hold. The TUI loses the user's text, can send a child's text to the main agent, and
+draws past the bottom of the terminal.
+
+**Gate** (`bun run check`, run once): typecheck clean · Biome 833 files, 0 errors / 0 warnings ·
+`bun test` **6423 pass · 3 skip (the opt-in three) · 0 fail**. The gate is green, but it does not
+cover the defects below.
+
+Repro for H1–H3: `.tentacle/tmp/subagent-panel/review/repro.ts` (ink-testing-library through the
+real `App`). Output:
+
+```
+H idle lines: 25
+H open lines: 33
+A after open, field still shows MAINDRAFT: false
+A after close, MAINDRAFT restored: false | CHILDDRAFT still in field: false
+A reopen, CHILDDRAFT restored: false
+B main field holds the child's text: true (closed)
+B prompts to the MAIN agent: ["for-sa1-only"]
+```
+
+### Findings
+
+**H1 — Opening or closing a child throws away the typed draft, both the main one and the child's.**
+`background-focus.ts:108-130` (`openChild` / `closeOpen`) stash `state.drafts[...]`. Nothing ever
+writes the LIVE field into `drafts`: `dockKey` is never given `field.value` (`App.tsx:3009-3012`), and
+`App.tsx:3019-3020` then calls `field.set(draftIn)`.
+- *Scenario:* type "MAINDRAFT", ↓, Enter. The field is now empty. Type "CHILDDRAFT", then Esc. The
+  field is empty again, and reopening restores nothing (repro A).
+- *Why the tests miss it:* T-F3 (`background-focus.test.ts:124-154`) seeds `drafts` by hand ("Type into
+  sa-1's draft" is a state literal). No frame test does a round trip.
+- *Fix:* add `draft: string` (the live `field.value`) to `DockKeyContext`. `openChild` stashes it as
+  `drafts.main`, and `closeOpen` stashes it as `drafts[id]`. Add a frame test: type → open → type →
+  Esc → main text back; reopen → child text back.
+
+**H2 — A late refusal puts a child's text into the MAIN input. The next Enter sends it to the main
+agent.** This is the silent re-route the plan forbids.
+- *Where:* in `App.tsx` `submitToTarget`, both async refusal handlers (`.then` `!result.ok` and the
+  rejection) call `field.set(value)` unconditionally, next to the correct `restoreRefused`. They do
+  this whatever the focus is now, and whatever the user has typed since.
+- *Scenario:* open sa-1, type "for-sa1-only", Enter, then Esc before the RPC answers (easy over
+  `connect` or a pod). The refusal lands, the main field holds the text, and Enter calls
+  `send("for-sa1-only")` on the main agent (repro B). It also overwrites anything typed after Enter.
+- *Fix:* drop both async `field.set(value)` calls. Make the placement decision pure, for example
+  `refusalPlacement(state, id, liveField)`: put the text into the field only if focus is still
+  `open` on `id` AND the field is empty. Otherwise store it via `restoreRefused` (the child's
+  stashed draft) or quote it in the notice. Add a frame test: delayed refusal + Esc → main field
+  empty, `prompts` empty.
+
+**H3 — The dock's rows are not reserved in the viewport, so the frame is taller than the terminal.**
+`App.tsx:1018-1030`: `activeRows` counts the quit confirm, the permission prompt and the
+input/palette rows, but not the list (rule + up to 5 rows) or the drawer (head + `…earlier` + up to 8
+tail + up to 3 sent).
+- *Scenario:* at the App's default 24 rows, the frame is 25 lines with one child listed and 33 lines
+  with it open (repro H). On a real terminal, Ink re-clears on every overflowing frame (flicker), the
+  top rows scroll away, and the mouse row maths (`panel's first body row`, `:1031`) is off by the
+  dock height.
+- *Fix:* add the dock's height to `activeRows` through a pure helper, for example
+  `dockRows(dockView, drawer)` in `background-list.ts`. Unit-test it, and add a frame test that
+  asserts the frame line count is ≤ `rows` with the list and with the drawer.
+
+**M1 — The ⚠ "needs your permission" row cannot appear.** `dockListVisible` and `drawer` are both
+gated on `!permission.pending` (`App.tsx`, the view-model block before `return`).
+`permission.pendingAgent` is non-null ONLY while a prompt is pending (`permission-ui.ts:372`). So
+`askingId` is always `null` when the list renders. T-L3 tests only the pure view, and F1's comment
+says F9 mounts the ⚠ row, but no frame ever shows `⚠`.
+- *Fix:* keep the list visible under the permission prompt (the prompt already owns every key), and
+  count its rows (H3). Or remove the ⚠ claim from the plan and the mockups. The plan's failure-mode
+  row ("the row shows ⚠ for `pendingAgent.id`") needs the first option. Add a frame test with a
+  pending child ask → `⚠ needs your permission` on that row.
+
+**M2 — Drift 10 is not in Execution.** The executor's stray `git checkout` of `App.tsx` and its
+one-pass reapply are not recorded; the Drifts list stops at 9 (AGENTS §10: Execution must state
+drift honestly).
+- I audited `git diff main...HEAD -- packages/tui/src/App.tsx` hunk by hunk. Every hunk is additive,
+  apart from the `modelBorder` line, which now chooses `targetBorder` while a child is open. Input
+  history (UP/DOWN through `resolveLineInput`/`historyStep`), Esc-aborts-turn (now after the dock
+  dispatch, reached when `dockKey` passes in `input`), the send-now chord, permission-key routing and
+  quit confirm are all intact, and nothing is half-applied. So the revert cost nothing, but the doc
+  must still say it happened.
+- *Fix:* add Drift 10 to Execution.
+
+### What holds (verified against the code)
+
+- **Protocol:** `subagent_message` is `display` in `UPDATE_CLASS`, and there is no `PROTOCOL_VERSION`
+  bump (correct: a new method plus a display update are forward-compatible). Both methods are wired
+  end to end: schemas, `RequestSchemas`, the `connection.ts` cases and the `RemoteClient` calls.
+  `MethodNotFound` → a typed refusal / `{killed:false}`. The update is ignored by turn mapping on
+  both client paths.
+- **Peer not serialized:** both handlers are synchronous, with no lock and no await.
+- **The parent note:**
+  - `pendingExitCount` excludes `user_note`.
+  - Task 9's mid-turn `flushAgentMessages` drains only `agent_message`, so a user note lands only at
+    the turn-start flush, after the user message and never mid-round.
+  - It emits no event, so there is no double notice beside `subagent_notify`.
+  - The stale-wake guard is unaffected: a flushed note means `endsWithFinalAnswer` is false.
+  - It rides `retire`/`adoptExits` (the same array).
+  - It is persisted as an ordinary `message` with `note.kind: "user_to_subagent"`, which is a
+    conversation fact.
+- **Key routing:** quit confirm → chord → permission → panels → dock → Esc-abort. Esc in `list`/`open`
+  returns before the abort branch. Printable keys are swallowed in `list` (P3). `x`/`y` arm and
+  confirm (P4). DOWN enters the list only on `history` + draft slot + `input` focus.
+- **Drift 6** (`dockRef` eager write) is sound, and F6 pins it.
+
+### Mutations and attacks
+
+- **F8 mutation:** `background-focus.ts:185` `key.escape || ctrlT` → `ctrlT`. F8 goes RED (1 fail), so
+  it is non-vacuous. Reverted; `git status` clean.
+- **Attacks:**
+  - (1) Draft round trip → H1.
+  - (2) Refusal racing a close → H2.
+  - (3) Frame height vs terminal → H3.
+  - (4) ⚠ reachability → M1.
+  - (5) A mouse wheel report while `list` is focused → swallowed, nothing leaks into the input (no
+    finding).
+  - (6) The user note vs task 9's wake count and mid-turn drain → holds.
+
+### How the executor behaved
+
+The backend half is careful and matches the plan. The TUI half's pure-module tests seed state by hand
+where the App never writes it (H1), and the frame tests cover single happy paths, never a round trip,
+a race or a height. Drift 10 was left out of the doc.
+
+**REQUEST-CHANGES** — H1, H2, H3, M1, M2.
