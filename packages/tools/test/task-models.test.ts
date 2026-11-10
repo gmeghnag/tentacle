@@ -15,7 +15,7 @@ const TYPES = [
   { name: "explore", description: "read-only" },
 ];
 const NEUTRAL =
-  "Delegate a self-contained task to a sub-agent that runs in its own isolated context and returns a final report. You do NOT see its intermediate steps, so use it to explore or offload work without filling your own context. Prefer it for open-ended search and read-heavy investigation.";
+  "Delegate a self-contained task to a sub-agent that runs in its own isolated context and returns a final report. You do NOT see its intermediate steps, so it offloads read-heavy work without filling your own context. To create agents, use this tool. Start another agent CLI (claude, codex, tentacle, …) through the shell only when the user explicitly asks for it. Scope each prompt: the files, diff or questions it owns, and a stop criterion — what counts as done. Turn-based: one foreground sub-agent at a time, its report the call's result. Long-lived: `background: true`, then `agent_message` to steer it while it works.";
 const TYPE_LIST = "\n\nAvailable sub-agent types:\n- general: all tools\n- explore: read-only";
 
 function spy() {

@@ -547,7 +547,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     env: "TENTACLE_SUBAGENTS_TWO_WAY",
     sample: "on",
     details:
-      "Off: a child is never offered `agent_notify`. On: a child launched with `agent_task{background: true}` may send the agent a short text while it runs, and the agent reads it at its next step — or, if the agent is idle, a continuation turn starts (it follows `autoWake`). Bounded: at most 8 messages per child and 3 wakes per session between two user messages, 8 000 characters each; over the wake budget the text still arrives, it just wakes nothing. The reply, if any, is `agent_message`. A text not yet read is lost if the session ends, like an unflushed background exit.",
+      "Off: a child is never offered `agent_notify`, and the agent's `agent_task`/`agent_message` texts say no reply comes back. On: a child launched with `agent_task{background: true}` may send the agent a short text while it runs, and the agent reads it at its next step — or, if the agent is idle, a continuation turn starts (it follows `autoWake`); the agent's `agent_message` text and result (and a neutral `agent_task` description) say so, a custom `subagents.agentTaskDescription` does not. Bounded: at most 8 messages per child and 3 wakes per session between two user messages, 8 000 characters each; over the wake budget the text still arrives, it just wakes nothing. The reply, if any, is `agent_message`. A text not yet read is lost if the session ends, like an unflushed background exit.",
     example: "true",
   },
   "subagents.agentTaskDescription": {

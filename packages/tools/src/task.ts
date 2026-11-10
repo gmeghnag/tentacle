@@ -95,10 +95,24 @@ export interface TaskToolOptions {
    * a slot of its ONE cap (`subagents.maxParallel`). Absent → neither.
    */
   readonly background?: AgentJobs;
+  /**
+   * `subagents.twoWay` (docs/feat/agent-message-two-way.md). True → the text
+   * says a background child may reply with `agent_notify`. Absent or false →
+   * the text is exactly what it was before the flag existed.
+   */
+  readonly twoWay?: boolean;
 }
 
 const NEUTRAL_DESCRIPTION =
-  "Delegate a self-contained task to a sub-agent that runs in its own isolated context and returns a final report. You do NOT see its intermediate steps, so use it to explore or offload work without filling your own context. Prefer it for open-ended search and read-heavy investigation.";
+  "Delegate a self-contained task to a sub-agent that runs in its own isolated context and returns a final report. You do NOT see its intermediate steps, so it offloads read-heavy work without filling your own context. To create agents, use this tool. Start another agent CLI (claude, codex, tentacle, …) through the shell only when the user explicitly asks for it. Scope each prompt: the files, diff or questions it owns, and a stop criterion — what counts as done. Turn-based: one foreground sub-agent at a time, its report the call's result. Long-lived: `background: true`, then `agent_message` to steer it while it works.";
+
+/**
+ * Appended when `subagents.twoWay` is on: a background child can write back, so
+ * the parent must know it can read a reply instead of waiting for the report
+ * (docs/feat/agent-message-two-way.md). Off: nothing is said, as before.
+ */
+const TWO_WAY_NOTE =
+  " A background sub-agent may reply with `agent_notify`: it arrives as a `[sub-agent sa-N → you]` note and may wake you.";
 
 const OVERLAP_NOTE: Record<TaskExecutionMode, string> = {
   parallel:
@@ -117,8 +131,11 @@ export function taskToolDescription(
   mode: TaskExecutionMode,
   typeList: string,
   modelList = "",
+  twoWay = false,
 ): string {
-  const text = custom ?? `${NEUTRAL_DESCRIPTION}${OVERLAP_NOTE[mode]}`;
+  // A custom text is used as is (its own two-way wording is the user's): only
+  // the neutral one gains the note, which is a fact about the runtime.
+  const text = custom ?? `${NEUTRAL_DESCRIPTION}${OVERLAP_NOTE[mode]}${twoWay ? TWO_WAY_NOTE : ""}`;
   const models =
     modelList === ""
       ? ""
@@ -335,6 +352,7 @@ export function createTaskTool(
       options.mode ?? "sequential",
       typeList,
       renderModelList(models),
+      options.twoWay === true,
     ),
     inputSchema,
     permission: "none",

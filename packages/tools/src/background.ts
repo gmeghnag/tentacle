@@ -166,18 +166,25 @@ const agentMessageInput = z.object({
 
 /**
  * Write into a RUNNING background sub-agent's context (docs/feat/agent-message.md,
- * owner decision B1): one-way, and it never wakes anything (B3). Built only
+ * owner decision B1), and it never wakes anything by itself (B3). Built only
  * where the background runtime is wired — without it no child has an id.
  *
  * Its result says "queued", never "delivered": a child waiting on a long tool
- * call or a permission ask reads the text after that call, and no reply comes
- * back (the report still arrives as a `[background]` note).
+ * call or a permission ask reads the text after that call, and the report still
+ * arrives as a `[background]` note. With `subagents.twoWay` on, the child may
+ * also answer in between, through `agent_notify` (which can wake the parent) —
+ * so both texts say so; with it off they are exactly what they were.
  */
-export function createAgentMessageTool(jobs: AgentJobs): Tool<z.infer<typeof agentMessageInput>> {
+export function createAgentMessageTool(
+  jobs: AgentJobs,
+  options: { readonly twoWay?: boolean } = {},
+): Tool<z.infer<typeof agentMessageInput>> {
+  const twoWay = options.twoWay === true;
   return {
     name: AGENT_MESSAGE_TOOL_NAME,
-    description:
-      "Send a message to a running background sub-agent started with agent_task{background: true}. It reads it before its next model step. One-way: no reply comes back, and its report still arrives later as a [background] note. It does not wake you.",
+    description: twoWay
+      ? "Send a message to a running background sub-agent started with agent_task{background: true}. It reads it before its next model step. It may answer with agent_notify meanwhile: that arrives as a [sub-agent sa-N → you] note and may wake you; its report still arrives later as a [background] note."
+      : "Send a message to a running background sub-agent started with agent_task{background: true}. It reads it before its next model step. One-way: no reply comes back, and its report still arrives later as a [background] note. It does not wake you.",
     inputSchema: agentMessageInput,
     permission: "none",
     async execute(input) {
@@ -186,7 +193,9 @@ export function createAgentMessageTool(jobs: AgentJobs): Tool<z.infer<typeof age
       const sent = jobs.message(input.agent_id, input.text, "agent");
       return sent.ok
         ? {
-            content: `queued for ${input.agent_id}: it reads it before its next model step. No reply comes back; its report still arrives as a [background] note.`,
+            content: twoWay
+              ? `queued for ${input.agent_id}: it reads it before its next model step. It may answer with agent_notify (a [sub-agent ${input.agent_id} → you] note that may wake you); its report still arrives as a [background] note.`
+              : `queued for ${input.agent_id}: it reads it before its next model step. No reply comes back; its report still arrives as a [background] note.`,
             isError: false,
           }
         : { content: sent.reason, isError: true };

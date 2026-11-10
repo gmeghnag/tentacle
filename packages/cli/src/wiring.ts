@@ -566,6 +566,10 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
         mode: config.subagentExecution,
         readOnlyType,
         background: agentJobs,
+        // What the parent reads has to match what the child can do: with
+        // `subagents.twoWay` on, a background child may answer with
+        // `agent_notify` (docs/feat/agent-message-two-way.md).
+        twoWay: config.subagentsTwoWay,
         models: tunnelled
           ? publishedOptions(published)
           : config.selectableModels.map((name) => {
@@ -580,7 +584,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     tools.register(createAgentKillTool(agentJobs));
     // ... and to WRITE to one (docs/feat/agent-message.md): it names a running
     // child's id, so it rides the same switch.
-    tools.register(createAgentMessageTool(agentJobs));
+    tools.register(createAgentMessageTool(agentJobs, { twoWay: config.subagentsTwoWay }));
   }
 
   // Context reset (docs/feat/context-reset.md): the model renews its own
