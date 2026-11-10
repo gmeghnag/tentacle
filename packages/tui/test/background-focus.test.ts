@@ -17,6 +17,7 @@ import {
   closeOpen,
   closeToDropdown,
   dockKey,
+  dockKindOf,
   downEntersList,
   openChild,
   openDropdown,
@@ -390,5 +391,89 @@ describe("T-F4: reconcile", () => {
     const open = openChild(INPUT_DOCK, "sa-1", "").state;
     const after = reconcile(open, ["sa-1", "sa-2"], [{ id: "sa-2", outcome: { kind: "stopped" } }]);
     expect(after.focus).toMatchObject({ kind: "open", id: "sa-1", ended: null });
+  });
+});
+
+describe("T-F5: a shell job in the dock (docs/feat/shell-jobs-panel.md)", () => {
+  const job = { id: "bg-3", command: "watch", startedAt: 0 };
+  const ids = ["sa-1", "bg-3"];
+  const ctx = {
+    ids,
+    openable: (id: string) => id.startsWith("sa-") || id.startsWith("bg-"),
+    draft: "",
+  };
+
+  test("`dockKindOf` reads the wire id, and nothing else", () => {
+    expect(dockKindOf("bg-3")).toBe("job");
+    expect(dockKindOf("sa-1")).toBe("agent");
+    // A foreign id is a child's: the safe default (it never kills a job).
+    expect(dockKindOf("watch-9")).toBe("agent");
+  });
+
+  test("Enter on a job row opens it, with the REAL wire id", () => {
+    const open = openDropdown(toggleList(INPUT_DOCK, ids), ids);
+    const at = dockKey(open, "", { downArrow: true }, ctx).state;
+    expect(at.focus).toMatchObject({ kind: "list", selected: "bg-3" });
+    const step = dockKey(at, "", { return: true }, ctx);
+    expect(step.effect).toEqual({ kind: "open", id: "bg-3", draftOut: "", draftIn: "" });
+    expect(step.state.focus).toMatchObject({ kind: "open", id: "bg-3" });
+  });
+
+  test("typing with a job's drawer open stays on the MAIN agent (owner Q1 (a))", () => {
+    const open = openChild(INPUT_DOCK, "bg-3", "").state;
+    expect(sendTarget(open, "carry on")).toEqual({ kind: "main" });
+    // Even after it ended: a job has no inbox to refuse either.
+    const ended = reconcile(open, [], [{ id: "bg-3", outcome: { kind: "finished" } }]);
+    expect(sendTarget(ended, "carry on")).toEqual({ kind: "main" });
+    // A child's is unchanged: it goes to the child, and refuses once ended.
+    expect(sendTarget(openChild(INPUT_DOCK, "sa-1", "").state, "hi")).toEqual({
+      kind: "agent",
+      id: "sa-1",
+    });
+  });
+
+  test("x then y on a job row is a stop with the real id", () => {
+    const at = dockKey(
+      openDropdown(toggleList(INPUT_DOCK, ids), ids),
+      "",
+      { downArrow: true },
+      ctx,
+    ).state;
+    const armed = dockKey(at, "x", {}, ctx).state;
+    expect(armed.focus).toMatchObject({ kind: "list", selected: "bg-3", armed: true });
+    expect(dockKey(armed, "y", {}, ctx).effect).toEqual({ kind: "stop", id: "bg-3" });
+  });
+
+  test("an open job that leaves the list freezes on its LAST row, its focus kept", () => {
+    const open = openChild(INPUT_DOCK, "bg-3", "").state;
+    // The frame drops it, with the exit's outcome and the row it had.
+    const after = reconcile(
+      open,
+      ["sa-1"],
+      [{ id: "bg-3", outcome: { kind: "finished" } }],
+      [{ kind: "job", row: job }],
+    );
+    expect(after.focus).toMatchObject({ kind: "open", id: "bg-3", ended: { kind: "finished" } });
+    const frozen = after.focus.kind === "open" ? after.focus.frozen : null;
+    // The command and the clock survive, so the drawer keeps painting them.
+    expect(frozen).toEqual({ kind: "job", row: job });
+    // No re-route: the input's draft is untouched.
+    expect(after.drafts).toEqual(open.drafts);
+    // A later report without it does not unfreeze it either.
+    const later = reconcile(after, ["sa-1"], []);
+    expect(later.focus).toMatchObject({ ended: { kind: "finished" } });
+    expect(later.focus.kind === "open" ? later.focus.frozen : null).toEqual({
+      kind: "job",
+      row: job,
+    });
+  });
+
+  test("a live job keeps its drawer's subject from the list (no freeze needed)", () => {
+    const open = openChild(INPUT_DOCK, "bg-3", "").state;
+    const after = reconcile(open, ["bg-3"], [], [{ kind: "job", row: job }]);
+    expect(after.focus.kind === "open" ? after.focus.frozen : null).toEqual({
+      kind: "job",
+      row: job,
+    });
   });
 });

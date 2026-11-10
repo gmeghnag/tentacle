@@ -92,6 +92,9 @@ function fakeJobs(): JobController & {
     list() {
       return [];
     },
+    onStart() {
+      return () => {};
+    },
     onExit() {
       return () => {};
     },

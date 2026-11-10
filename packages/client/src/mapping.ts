@@ -277,13 +277,15 @@ export function updateToEvent(
     // permission events are consumed by `RemoteClient`'s `PermissionRouter`;
     // `session_title` by its title listeners (it is not turn-scoped), and
     // `queued` by its queue listeners (`RemoteClient`, not turn-scoped either),
-    // `subagents` by its own (likewise), `subagent_notify` by its notify
+    // `subagents` by its own (likewise), `jobs` by its own (a shell job's list,
+    // likewise), `subagent_notify` by its notify
     // listeners (a child's message to the agent, likewise), `subagent_message`
     // by its own (the USER's message to a child, likewise), `session_settings`
     // by its settings-change listeners (likewise).
     case "session_title":
     case "queued":
     case "subagents":
+    case "jobs":
     case "subagent_notify":
     case "subagent_message":
     case "session_settings":

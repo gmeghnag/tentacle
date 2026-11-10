@@ -179,6 +179,7 @@ function remoteJobsView(client: RemoteClient): JobController {
     kill: () => false,
     list: () => [],
     dispose: () => {},
+    onStart: () => () => {},
     onExit: (listener) =>
       client.onBackgroundExit((n) =>
         listener({
@@ -242,6 +243,12 @@ export interface PersistingController extends SessionController {
   onQueued: RemoteSession["onQueued"];
   /** `RemoteSession.onSubagents`: the live list of this session's background sub-agents. */
   onSubagents?: RemoteSession["onSubagents"];
+  /** `RemoteSession.onJobs`: this session's running shell jobs (rows + the daemon's count). */
+  onJobs?: RemoteSession["onJobs"];
+  /** `RemoteSession.jobOutput`: one job's bounded, sanitized output tail. */
+  jobOutput?: RemoteSession["jobOutput"];
+  /** `RemoteSession.killJob`: stop one background shell job. */
+  killJob?: RemoteSession["killJob"];
   /** `RemoteSession.onSubagentNotify`: a running child's message to this session's agent. */
   onSubagentNotify?: RemoteSession["onSubagentNotify"];
   /** `/settings` (present only where this laptop carries settings: `run`/`attach`). */
@@ -578,6 +585,15 @@ export function persistingController(
     },
     onSubagents(listener) {
       return inner.onSubagents(listener);
+    },
+    onJobs(listener) {
+      return inner.onJobs(listener);
+    },
+    jobOutput(jobId, opts) {
+      return inner.jobOutput(jobId, opts);
+    },
+    killJob(jobId) {
+      return inner.killJob(jobId);
     },
     onSubagentNotify(listener) {
       return inner.onSubagentNotify(listener);

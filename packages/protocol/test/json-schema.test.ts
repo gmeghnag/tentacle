@@ -197,6 +197,24 @@ const FIXTURES: Record<string, Json[]> = {
   ],
   "methods/session~1agent_kill/params": [{ sessionId: "s", agentId: "sa-1" }],
   "methods/session~1agent_kill/result": [{ killed: true }, { killed: false }],
+  "methods/session~1job_output/params": [
+    { sessionId: "s", jobId: "bg-1" },
+    { sessionId: "s", jobId: "bg-1", lines: 12, maxChars: 4096 },
+  ],
+  "methods/session~1job_output/result": [
+    {
+      found: true,
+      jobId: "bg-1",
+      status: "running",
+      startedAt: 1,
+      command: "watch",
+      output: ["one", "two"],
+      truncated: false,
+    },
+    { found: false, jobId: "bg-1", reason: "this session cannot show a job's output here" },
+  ],
+  "methods/session~1job_kill/params": [{ sessionId: "s", jobId: "bg-1" }],
+  "methods/session~1job_kill/result": [{ killed: true }, { killed: false }],
   "methods/session~1enqueue/params": [{ sessionId: "s", id: "e", turnId: "t", text: "steer" }],
   "methods/session~1enqueue/result": [{}],
   "methods/session~1send_now/params": [

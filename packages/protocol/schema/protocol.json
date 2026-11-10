@@ -599,6 +599,134 @@
         }
       ]
     },
+    "JobId": {
+      "maxLength": 64,
+      "minLength": 1,
+      "type": "string"
+    },
+    "JobKillParams": {
+      "additionalProperties": true,
+      "properties": {
+        "jobId": {
+          "$ref": "#/$defs/JobId"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["jobId", "sessionId"],
+      "type": "object"
+    },
+    "JobKillResult": {
+      "additionalProperties": true,
+      "properties": {
+        "killed": {
+          "type": "boolean"
+        }
+      },
+      "required": ["killed"],
+      "type": "object"
+    },
+    "JobOutputParams": {
+      "additionalProperties": true,
+      "properties": {
+        "jobId": {
+          "$ref": "#/$defs/JobId"
+        },
+        "lines": {
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maxChars": {
+          "maximum": 16384,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["jobId", "sessionId"],
+      "type": "object"
+    },
+    "JobOutputResult": {
+      "additionalProperties": true,
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "exitCode": {
+          "type": "integer"
+        },
+        "found": {
+          "type": "boolean"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "output": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "startedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": ["found", "jobId"],
+      "type": "object"
+    },
+    "JobRow": {
+      "additionalProperties": true,
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "startedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": ["command", "id", "startedAt", "status"],
+      "type": "object"
+    },
+    "JobsUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "jobs": {
+          "items": {
+            "$ref": "#/$defs/JobRow"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "jobs",
+          "type": "string"
+        }
+      },
+      "required": ["jobs", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
     "JsonRpcError": {
       "additionalProperties": true,
       "properties": {
@@ -2574,6 +2702,7 @@
           "background_exit": "#/$defs/BackgroundExit",
           "context_note": "#/$defs/ContextNote",
           "history_replaced": "#/$defs/HistoryReplaced",
+          "jobs": "#/$defs/JobsUpdate",
           "permission_request": "#/$defs/PermissionRequestUpdate",
           "permission_resolved": "#/$defs/PermissionResolvedUpdate",
           "plan": "#/$defs/Plan",
@@ -2654,6 +2783,9 @@
         },
         {
           "$ref": "#/$defs/SubagentsUpdate"
+        },
+        {
+          "$ref": "#/$defs/JobsUpdate"
         },
         {
           "$ref": "#/$defs/SubagentNotify"
@@ -2782,6 +2914,12 @@
         "cursor": {
           "minLength": 1,
           "type": "string"
+        },
+        "jobs": {
+          "items": {
+            "$ref": "#/$defs/JobRow"
+          },
+          "type": "array"
         },
         "messages": {
           "items": {
@@ -3640,6 +3778,22 @@
       },
       "result": {
         "$ref": "#/$defs/EnqueueResult"
+      }
+    },
+    "session/job_kill": {
+      "params": {
+        "$ref": "#/$defs/JobKillParams"
+      },
+      "result": {
+        "$ref": "#/$defs/JobKillResult"
+      }
+    },
+    "session/job_output": {
+      "params": {
+        "$ref": "#/$defs/JobOutputParams"
+      },
+      "result": {
+        "$ref": "#/$defs/JobOutputResult"
       }
     },
     "session/list": {

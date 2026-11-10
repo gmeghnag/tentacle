@@ -68,6 +68,9 @@ class FakeJobs implements JobController {
   dispose(): void {
     this.disposed = true;
   }
+  onStart(): () => void {
+    return () => {};
+  }
   onExit(l: (j: BackgroundJob) => void): () => void {
     this.listeners.add(l);
     return () => this.listeners.delete(l);

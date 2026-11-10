@@ -328,6 +328,7 @@ describe("SessionHost.list over the wire", () => {
       kill: () => false,
       list: () => [job("a", "running"), job("b", "exited"), job("c", "killed")],
       dispose: () => {},
+      onStart: () => () => {},
       onExit: () => () => {},
     };
     const withJobs = daemon({ jobs });

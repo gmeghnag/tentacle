@@ -92,3 +92,40 @@ export function SubagentDrawer({
     </Box>
   );
 }
+
+/**
+ * A SHELL JOB's drawer (docs/feat/shell-jobs-panel.md): the head rule, the
+ * `… earlier output not shown` line, and the output tail. It paints segments and
+ * lines only — every string it shows was computed (and sanitized) upstream, and
+ * a blank line arrives as ONE space, so Ink measures it and the height the
+ * viewport reserved stays true (AGENTS §6).
+ */
+export function JobDrawer({
+  head,
+  hidden,
+  tail,
+  columns,
+}: {
+  head: readonly DockSegment[];
+  hidden: string;
+  tail: readonly string[];
+  columns: number;
+}): ReactElement {
+  return (
+    <Box flexDirection="column" width={Math.max(10, columns)}>
+      <DockSegments segments={head} />
+      {hidden === "" ? null : (
+        <Text wrap="truncate-end">
+          <Text {...toneProps("dim")}>{"  "}</Text>
+          <Text {...toneProps("dim")}>{hidden}</Text>
+        </Text>
+      )}
+      {tail.map((line, i) => (
+        <Text key={i} wrap="truncate-end">
+          <Text {...toneProps("dim")}>{"  │ "}</Text>
+          <Text {...toneProps("dim")}>{line}</Text>
+        </Text>
+      ))}
+    </Box>
+  );
+}

@@ -239,6 +239,12 @@ export interface QuitCommandInput {
   readonly others: number;
   /** Background sub-agents running now: quitting would lose them. */
   readonly agents: number;
+  /**
+   * Background SHELL jobs running now (owner Q3 (a)): a quit that CLOSES the
+   * session loses them too — a job dies with the registry. A `connect` quit only
+   * detaches, so its caller passes 0 and the confirm never claims otherwise.
+   */
+  readonly jobs?: number;
   /** The user said `y` to `quitConfirmText`. */
   readonly confirmed: boolean;
 }
@@ -264,6 +270,11 @@ export function quitCommandStep(input: QuitCommandInput): "exit" | "stop-then-ex
   if (input.agents > 0 && !input.detaches && !input.confirmed) {
     return "confirm";
   }
+  // A running SHELL job is lost too when the session closes (owner Q3 (a)); a
+  // `connect` quit detaches and the job runs on, so there is nothing to ask.
+  if ((input.jobs ?? 0) > 0 && !input.detaches && !input.confirmed) {
+    return "confirm";
+  }
   if (input.endsSession) {
     return input.running ? "stop-then-exit" : "exit";
   }
@@ -272,12 +283,14 @@ export function quitCommandStep(input: QuitCommandInput): "exit" | "stop-then-ex
     : "stop-then-exit";
 }
 
-/** What the confirmation is about: who else, and which children would be lost. */
+/** What the confirmation is about: who else, and which children/jobs would be lost. */
 export interface QuitConfirmFacts {
   readonly others: number;
   readonly agents: number;
   /** The children's ids, in launch order (`sa-1`, `sa-2`). */
   readonly names: readonly string[];
+  /** The SHELL jobs running now (owner Q3 (a)): counted apart from the children. */
+  readonly jobs?: number;
 }
 
 /** Ids the dialog names, and how much of each: one row at 80 columns (LOW-2). */
@@ -287,9 +300,18 @@ const QUIT_NAME_MAX = 12;
 /** The confirmation `/quit` asks with others on the session, or children to lose. */
 export function quitConfirmText(facts: QuitConfirmFacts): string {
   const { others, agents, names } = facts;
+  // A SHELL job is a different thing to lose, and is worded apart (owner Q3 (a)):
+  // it keeps no report, so nothing of it reaches the conversation afterwards.
+  const jobs = facts.jobs ?? 0;
   const who = others === 1 ? "1 other terminal" : `${others} other terminals`;
-  if (agents <= 0) {
+  if (agents <= 0 && jobs <= 0) {
     return `${who} attached — close the session for all? (y/N)`;
+  }
+  if (agents <= 0) {
+    const shells = jobs === 1 ? "1 background shell job" : `${jobs} background shell jobs`;
+    return others > 0
+      ? `${who} attached · ${jobs === 1 ? "1 shell job running" : `${jobs} shell jobs running`} — close the session for all? (y/N)`
+      : `${shells} will be lost — quit? (y/N)`;
   }
   // A hostile pod's ids pass the client's bound (32 rows, 200 chars), so the
   // dialog must bound its own line: it is one row (`QUIT_CONFIRM_ROWS`), and
@@ -303,11 +325,15 @@ export function quitConfirmText(facts: QuitConfirmFacts): string {
     agents === 1
       ? `1 background sub-agent (${shown}${more})`
       : `${agents} background sub-agents (${shown}${more})`;
+  // Both kinds running: the children by id, then the jobs as a count.
+  const shells = jobs <= 0 ? "" : jobs === 1 ? " · 1 shell job" : ` · ${jobs} shell jobs`;
   if (others > 0) {
     const running = agents === 1 ? "1 sub-agent running" : `${agents} sub-agents running`;
-    return `${who} attached · ${running} — close the session for all? (y/N)`;
+    const runningJobs =
+      jobs <= 0 ? "" : jobs === 1 ? " · 1 shell job running" : ` · ${jobs} shell jobs running`;
+    return `${who} attached · ${running}${runningJobs} — close the session for all? (y/N)`;
   }
-  return `${what} will be lost — quit? (y/N)`;
+  return `${what}${shells} will be lost — quit? (y/N)`;
 }
 
 /** A key on that confirmation: only a plain `y`/`Y` closes; anything else (Enter, Ctrl+Y) is No. */
@@ -328,6 +354,8 @@ export interface CtrlCQuitInput {
   readonly others: number;
   /** Background sub-agents running now: quitting would lose them. */
   readonly agents: number;
+  /** Background SHELL jobs running now (owner Q3 (a)): a closing quit loses them. */
+  readonly jobs?: number;
   /** The user said `y` to `quitConfirmText`. */
   readonly confirmed?: boolean;
 }
@@ -341,8 +369,10 @@ export interface CtrlCQuitInput {
  * quit leave at once.
  */
 export function ctrlCQuitStep(input: CtrlCQuitInput): "exit" | "stop" | "confirm" {
+  // A running SHELL job counts too (owner Q3 (a)): it dies with the session, and
+  // a Ctrl+C is as easy to press by accident as `/quit`.
   if (
-    input.agents > 0 &&
+    (input.agents > 0 || (input.jobs ?? 0) > 0) &&
     input.others === 0 &&
     !input.detaches &&
     input.confirmed !== true &&

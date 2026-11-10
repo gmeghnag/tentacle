@@ -51,6 +51,9 @@ class FakeJobs implements JobController {
     return [];
   }
   dispose(): void {}
+  onStart(): () => void {
+    return () => {};
+  }
   onExit(): () => void {
     return () => {};
   }

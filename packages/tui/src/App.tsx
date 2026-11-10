@@ -8,6 +8,7 @@ import {
   wakeDue,
   wakeStep,
 } from "@tentacle/core";
+import type { JobOutputResult, JobRow } from "@tentacle/protocol";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -16,6 +17,7 @@ import {
   INPUT_DOCK,
   clickDock,
   dockKey,
+  dockKindOf,
   downEntersList,
   noteSent,
   reconcile,
@@ -26,10 +28,14 @@ import {
   toggleList,
 } from "./background-focus.ts";
 import {
+  type DockJobRow,
   backgroundListView,
   dockRows,
   drawerView,
+  frozenAgent,
+  frozenJob,
   inputTitle,
+  jobDrawerView,
   listVisible,
 } from "./background-list.ts";
 import {
@@ -37,6 +43,7 @@ import {
   backgroundCount,
   backgroundNames,
   sameIds,
+  sameJobIds,
 } from "./background-view.ts";
 import {
   BLINK_HALF_MS,
@@ -71,7 +78,7 @@ import {
   skillsListError,
   transcriptToMarkdown,
 } from "./commands.ts";
-import { BackgroundList, SubagentDrawer } from "./components/BackgroundList.tsx";
+import { BackgroundList, JobDrawer, SubagentDrawer } from "./components/BackgroundList.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
 import { LineInput } from "./components/LineInput.tsx";
 import { ListPanel } from "./components/ListPanel.tsx";
@@ -85,6 +92,7 @@ import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from
 import { startIdleWarm } from "./idle-warm.ts";
 import { resolveLineInput } from "./input-actions.ts";
 import { inputRowCount } from "./input-view.ts";
+import { JOB_REFRESH_MS, JOB_TAIL_SHOWN, refreshDue } from "./job-drawer.ts";
 import { type LinkFeed, stoppedNotice } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
@@ -357,6 +365,28 @@ export interface SessionController {
   /** Stop one background child (`session/agent_kill`); `{killed: false}` if it was not running. */
   killSubagent?(agentId: string): Promise<{ killed: boolean }>;
   /**
+   * Subscribe to this session's running background SHELL jobs as the daemon
+   * reports them (bounded by the client; `count` is the daemon's own number).
+   * The current list, if any, is given at once. Optional: absent on an older
+   * daemon, and the dock shows no job rows rather than guessing
+   * (docs/feat/shell-jobs-panel.md).
+   */
+  onJobs?(
+    listener: (report: { readonly rows: readonly JobRow[]; readonly count: number }) => void,
+  ): (() => void) | undefined;
+  /**
+   * Read one background shell job's output tail (`session/job_output`). The
+   * result is bounded and sanitized by the client; a refusal is `{found: false,
+   * reason}`, never a throw. Optional: absent on an older daemon.
+   */
+  jobOutput?(
+    jobId: string,
+    opts?: { readonly lines?: number; readonly maxChars?: number },
+  ): Promise<JobOutputResult>;
+  /** Stop one background SHELL job (`session/job_kill`); `{killed: false}` if it was not running. */
+  killJob?(jobId: string): Promise<{ killed: boolean }>;
+
+  /**
    * Subscribe to the USER's own messages to this session's background children
    * (bounded by the client), never given a backlog: a notice is a moment.
    * Returns an unsubscribe (docs/feat/subagent-panel.md).
@@ -423,6 +453,13 @@ export interface AppProps {
   readonly permissions?: PermissionBroker;
   /** Background-job registry; the TUI surfaces job exits live when present. */
   readonly jobs?: JobController;
+  /**
+   * TEST ONLY: how often an open job drawer re-reads its output. The App's real
+   * cadence is `JOB_REFRESH_MS` (≤ 1/s); a frame test shortens it so an exact
+   * read count is provable without waiting a second (AGENTS §9, M4). Nothing
+   * else reads it, and no production caller passes it.
+   */
+  readonly jobRefreshMs?: number;
   /**
    * Auto-wake: when a background job exits while idle, start a continuation turn
    * so the agent reacts to it without a user prompt. Default: true.
@@ -559,6 +596,7 @@ export function App({
   runQuit,
   autoAccept,
   columns: fixedColumns,
+  jobRefreshMs,
 }: AppProps): ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -708,6 +746,8 @@ export function App({
   const activitySubRef = useRef<(() => void) | null>(null);
   const queueSubRef = useRef<(() => void) | null>(null);
   const agentsSubRef = useRef<(() => void) | null>(null);
+  /** The current session's `onJobs` subscription (replaced with it). */
+  const jobsSubRef = useRef<(() => void) | null>(null);
   /** The current session's `onSubagentNotify` subscription (replaced with it). */
   const notifySubRef = useRef<(() => void) | null>(null);
   /** The current session's `onSubagentMessage` subscription (replaced with it). */
@@ -750,6 +790,24 @@ export function App({
   }, []);
   /** The last non-empty rows the dock could paint: what an ended drawer freezes on. */
   const dockLastRowsRef = useRef<readonly BackgroundAgentRow[]>([]);
+  // The session's running shell jobs, as last reported (undefined: not reported).
+  const [jobRows, setJobRowsState] = useState<readonly DockJobRow[] | undefined>(undefined);
+  /** The same list for the callbacks that must not re-create on every frame. */
+  const jobRowsRef = useRef<readonly DockJobRow[] | undefined>(undefined);
+  const setJobs = useCallback((rows: readonly DockJobRow[] | undefined) => {
+    const previous = jobRowsRef.current;
+    // Keep the last rows the dock could paint BEFORE they are replaced: an open
+    // job that this report drops freezes its drawer on them (`reconcile`).
+    if (previous !== undefined && previous.length > 0) {
+      dockLastJobRowsRef.current = previous;
+    }
+    jobRowsRef.current = rows;
+    if (!sameJobIds(previous, rows)) {
+      setJobRowsState(rows);
+    }
+  }, []);
+  /** The last non-empty rows a job's drawer can freeze on. */
+  const dockLastJobRowsRef = useRef<readonly DockJobRow[]>([]);
   /**
    * A child's exit as the transcript's notice already learns it, by id: the
    * `end_turn` that means "finished" (what a frozen drawer says).
@@ -762,6 +820,25 @@ export function App({
    * transcript's notice can never disagree about who ended.
    */
   const dockFinishedRef = useRef<{ readonly id: string; readonly at: number } | null>(null);
+  /**
+   * Each open job's last read, by wire id: what its drawer paints. A REF, never
+   * state the refresh effect depends on — a fresh read must not re-arm the timer
+   * (that is what would break the ≤ 1/s rule); the `jobOutputGen` state beside it
+   * is only a render trigger.
+   */
+  const jobOutputRef = useRef<
+    Record<
+      string,
+      {
+        readonly output: readonly string[];
+        readonly truncated?: boolean;
+        readonly exitCode?: number | null;
+      }
+    >
+  >({});
+  const [, setJobOutputGen] = useState(0);
+  /** When the last read was issued (ms), and for which job: the `refreshDue` input. */
+  const jobReadAtRef = useRef<{ readonly id: string; readonly at: number } | null>(null);
   // The dock (docs/feat/subagent-panel.md): its focus, the drafts per target and
   // the messages sent to each child. `dockRef` is the truth for the key handler
   // (a keypress must read what the last one wrote); the state renders.
@@ -776,19 +853,49 @@ export function App({
     dockRef.current = value;
     setDockState(value);
   }, []);
-  /** The dock's item ids in paint order (the children; shell jobs are P6's follow-up). */
+  /**
+   * The dock's item ids in paint order: the children, then the jobs — the order
+   * `backgroundListView` paints (a job never jumps above a child that started
+   * later). Both kinds' ids are wire ids (`sa-N` / `bg-N`), so they never collide.
+   */
   const dockIds = useCallback(
-    (): readonly string[] => (subagentsRef.current ?? []).map((r) => r.id),
+    (): readonly string[] => [
+      ...(subagentsRef.current ?? []).map((r) => r.id),
+      ...(jobRowsRef.current ?? []).map((r) => r.id),
+    ],
     [],
   );
   /** Whether the list has anything to show (the dock's `listVisible`). */
-  const dockVisible = useCallback((): boolean => listVisible(subagentsRef.current), []);
-  /** The child the drawer paints: its live row, or the last one it had (frozen). */
-  const drawerRow =
-    dock.focus.kind === "open"
-      ? (subagentsRef.current?.find((r) => r.id === (dock.focus as { id: string }).id) ??
-        dock.focus.frozen)
-      : null;
+  const dockVisible = useCallback(
+    (): boolean => listVisible(subagentsRef.current, jobRowsRef.current),
+    [],
+  );
+  /** The item an open drawer paints: its live row (child or job), or the frozen one. */
+  const drawerSubject:
+    | { kind: "agent"; row: BackgroundAgentRow }
+    | { kind: "job"; row: DockJobRow }
+    | null =
+    dock.focus.kind !== "open"
+      ? null
+      : (() => {
+          const id = (dock.focus as { id: string }).id;
+          const live = subagentsRef.current?.find((r) => r.id === id);
+          if (live !== undefined) {
+            return { kind: "agent" as const, row: live };
+          }
+          const liveJob = jobRowsRef.current?.find((r) => r.id === id);
+          if (liveJob !== undefined) {
+            return { kind: "job" as const, row: liveJob };
+          }
+          const frozen = frozenAgent(dock.focus.frozen);
+          if (frozen !== null) {
+            return { kind: "agent" as const, row: frozen };
+          }
+          const frozenJ = frozenJob(dock.focus.frozen);
+          return frozenJ === null ? null : { kind: "job" as const, row: frozenJ };
+        })();
+  const drawerRow = drawerSubject?.kind === "agent" ? drawerSubject.row : null;
+  const drawerJob = drawerSubject?.kind === "job" ? drawerSubject.row : null;
   const layoutOptsRef = useRef<RenderOptions>({
     expandAll: false,
     width: 80,
@@ -907,6 +1014,13 @@ export function App({
           job.agent.stopReason === "end_turn" ? { kind: "finished" } : { kind: "stopped" };
         // The pill celebrates it for ~5 s (status-view.ts owns the window), then
         // shows the new counts; the LAST one to end leaves no pill at all.
+        dockFinishedRef.current = { id: job.id, at: Date.now() };
+      } else {
+        // A SHELL JOB (docs/feat/shell-jobs-panel.md): the same record, keyed by
+        // its wire id — `killed` is a stop, anything else a clean exit — so a
+        // frozen drawer says `✓ exited (0)` / `✗ stopped` and the pill names it.
+        dockOutcomeRef.current[job.id] =
+          job.status === "killed" ? { kind: "stopped" } : { kind: "finished" };
         dockFinishedRef.current = { id: job.id, at: Date.now() };
       }
       stateRef.current = appendBackgroundExit(
@@ -1044,27 +1158,45 @@ export function App({
   // and its row says `⚠ needs your permission` — hiding the list there made that
   // row unreachable (Review M1).
   const dockListVisible =
-    dock.focus.kind === "list" && listVisible(subagents) && quitConfirm === null;
+    dock.focus.kind === "list" && listVisible(subagents, jobRows) && quitConfirm === null;
   const dockView = dockListVisible
     ? backgroundListView({
         rows: subagentsRef.current,
-        jobs: [],
+        jobs: jobRowsRef.current,
         askingId: permission.pendingAgent?.id ?? null,
         focus: dock.focus,
         width: columns,
         now: dockNow,
       })
     : null;
-  const drawer =
-    dock.focus.kind === "open" && drawerRow !== null && quitConfirm === null && !permission.pending
-      ? drawerView({
-          row: drawerRow,
-          sent: dock.sent[dock.focus.id] ?? [],
-          outcome: dock.focus.ended,
-          width: columns,
-          now: dockNow,
-        })
+  // The drawer: a child's (its tools and messages), or a job's (its output tail).
+  const drawerOpen =
+    dock.focus.kind === "open" && quitConfirm === null && !permission.pending
+      ? { id: dock.focus.id, ended: dock.focus.ended }
       : null;
+  const jobOutput = drawerOpen === null ? undefined : jobOutputRef.current[drawerOpen.id];
+  const drawer =
+    drawerOpen === null
+      ? null
+      : drawerJob !== null
+        ? jobDrawerView({
+            row: drawerJob,
+            output: jobOutput?.output,
+            ...(jobOutput?.truncated !== undefined ? { truncated: jobOutput.truncated } : {}),
+            ...(jobOutput?.exitCode !== undefined ? { exitCode: jobOutput.exitCode } : {}),
+            outcome: drawerOpen.ended,
+            width: columns,
+            now: dockNow,
+          })
+        : drawerRow !== null
+          ? drawerView({
+              row: drawerRow,
+              sent: dock.sent[drawerOpen.id] ?? [],
+              outcome: drawerOpen.ended,
+              width: columns,
+              now: dockNow,
+            })
+          : null;
   /** The rows the dock takes ABOVE the input: the dropdown's, or the drawer's. */
   // A permission prompt REPLACES the whole bottom area (it is the input, as
   // today), so nothing of the dock paints under it and it reserves no rows. The
@@ -1076,6 +1208,7 @@ export function App({
   // for the background work, its words and state decided by the pure view-model.
   const pill = pillView({
     agents: subagents?.length ?? 0,
+    jobs: jobRows?.length ?? 0,
     askingId: permission.pendingAgent?.id ?? null,
     finished: dockFinishedRef.current,
     now: dockNow,
@@ -1261,6 +1394,34 @@ export function App({
   );
 
   /**
+   * Stop one background SHELL job (`session/job_kill`, docs/feat/shell-jobs-panel.md):
+   * the same decision the model's `shell_kill` tool makes. A refusal is a typed
+   * result, never a throw: the row is still there, and the exit frame (or the
+   * notice) says what happened.
+   */
+  const killJob = useCallback(
+    (id: string): void => {
+      const session = sessionRef.current;
+      if (!session?.killJob) {
+        pushNotice("_this session cannot stop background jobs: no job kill here_");
+        return;
+      }
+      void session.killJob(id).then(
+        (result) => {
+          if (!result.killed) {
+            pushNotice(`_${id} was not running any more: nothing was stopped_`);
+          }
+        },
+        (error: unknown) =>
+          pushNotice(
+            `_${id} was not stopped: ${error instanceof Error ? error.message : String(error)}_`,
+          ),
+      );
+    },
+    [pushNotice],
+  );
+
+  /**
    * `/agents` and Ctrl+T (docs/feat/subagent-panel.md, owner Q16 (b)): move the
    * focus into the list from anywhere (a multi-line draft, mid-history), or
    * back. An empty list says so instead of opening an empty box.
@@ -1346,7 +1507,10 @@ export function App({
   // The trigger, as a VALUE (not read from a ref): a fresh identity only when a
   // report actually changed the ids (`sameIds` gates `setSubagents`), so this
   // effect runs on a real change and never on a frame (LOW-4).
-  const dockIdKey = (subagents ?? []).map((r) => r.id).join(" ");
+  const dockIdKey = [
+    ...(subagents ?? []).map((r) => r.id),
+    ...(jobRows ?? []).map((r) => r.id),
+  ].join(" ");
   useEffect(() => {
     const ids = dockIdKey === "" ? [] : dockIdKey.split(" ");
     const previous = dockSeenRef.current;
@@ -1357,9 +1521,123 @@ export function App({
       .filter((id) => !ids.includes(id))
       .map((id) => ({ id, outcome: dockOutcomeRef.current[id] ?? { kind: "stopped" as const } }));
     // Freeze on the rows as they were BEFORE this report dropped the departed
-    // ones (`setAgents` keeps them, in `dockLastRowsRef`).
-    setDock((prev) => reconcile(prev, ids, ended, dockLastRowsRef.current));
+    // ones (`setAgents`/`setJobs` keep them, in the two `dockLast*RowsRef`s).
+    setDock((prev) =>
+      reconcile(prev, ids, ended, [
+        ...dockLastRowsRef.current,
+        ...dockLastJobRowsRef.current.map((row) => ({ kind: "job" as const, row })),
+      ]),
+    );
   }, [dockIdKey, setDock]);
+
+  /**
+   * A job's drawer READS its output: at once on open, then at most once a second
+   * (`JOB_REFRESH_MS`), and only while that job's drawer is open — never for a
+   * child, the dropdown, or a job nobody opened (docs/feat/shell-jobs-panel.md).
+   *
+   * The interval is created ONCE per open job target, keyed by its WIRE id, so a
+   * re-render (or a fresh read) cannot re-arm it: the dependency list names only
+   * the focus kind, the target id and the test seam — never the output state
+   * (AGENTS §9, M4). A read writes a ref plus a render-only counter.
+   */
+  const jobTargetId =
+    dock.focus.kind === "open" && dockKindOf(dock.focus.id) === "job" ? dock.focus.id : null;
+  const jobEndedWhileOpen = dock.focus.kind === "open" ? dock.focus.ended : null;
+  // The real cadence, or a test's shortened one (AGENTS §9, M4: ONE seam).
+  const refreshMs = jobRefreshMs ?? JOB_REFRESH_MS;
+  useEffect(() => {
+    if (jobTargetId === null) {
+      jobReadAtRef.current = null;
+      return;
+    }
+    const session = sessionRef.current;
+    const read = session?.jobOutput;
+    if (read === undefined) {
+      // An older daemon: one notice, the drawer stays open and its frame intact.
+      pushNotice("_this session cannot show a job's output (older daemon)_");
+      return;
+    }
+    let cancelled = false;
+    let last = jobReadAtRef.current;
+    if (last?.id !== jobTargetId) {
+      last = null;
+    }
+    const issue = (): void => {
+      jobReadAtRef.current = { id: jobTargetId, at: Date.now() };
+      void read(jobTargetId, { lines: JOB_TAIL_SHOWN, maxChars: 8192 }).then(
+        (result) => {
+          if (cancelled || result.found !== true) {
+            return;
+          }
+          jobOutputRef.current = {
+            ...jobOutputRef.current,
+            [jobTargetId]: {
+              output: result.output ?? [],
+              ...(result.truncated !== undefined ? { truncated: result.truncated } : {}),
+              ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+            },
+          };
+          setJobOutputGen((n) => n + 1);
+        },
+        () => {
+          // A read that failed changes nothing: the next tick tells.
+        },
+      );
+    };
+    // The first read is immediate (`refreshDue` with no prior read: due at once).
+    if (refreshDue("job", last?.at ?? null, Date.now(), refreshMs)) {
+      issue();
+    }
+    const timer = setInterval(() => {
+      const at = jobReadAtRef.current;
+      const lastAt = at?.id === jobTargetId ? at.at : null;
+      if (refreshDue("job", lastAt, Date.now(), refreshMs)) {
+        issue();
+      }
+    }, refreshMs);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [jobTargetId, refreshMs, pushNotice]);
+
+  /**
+   * One LAST read when the open job's exit is seen: the registry keeps an exited
+   * job, so the drawer's final lines land even though the timer is gone (the
+   * focus is still `open`, the target unchanged — the effect above does not
+   * re-run for an outcome, so this is the only thing that reads it).
+   */
+  useEffect(() => {
+    if (jobTargetId === null || jobEndedWhileOpen === null) {
+      return;
+    }
+    const read = sessionRef.current?.jobOutput;
+    if (read === undefined) {
+      return;
+    }
+    let cancelled = false;
+    void read(jobTargetId, { lines: JOB_TAIL_SHOWN, maxChars: 8192 }).then(
+      (result) => {
+        if (cancelled || result.found !== true) {
+          return;
+        }
+        jobOutputRef.current = {
+          ...jobOutputRef.current,
+          [jobTargetId]: {
+            output: result.output ?? [],
+            ...(result.truncated !== undefined ? { truncated: result.truncated } : {}),
+            ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+          },
+        };
+        setJobOutputGen((n) => n + 1);
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [jobTargetId, jobEndedWhileOpen]);
+
   warmErrorRef.current = (error: unknown) => pushNotice(warmFailureNotice(error));
 
   const closePanel = useCallback(() => {
@@ -1946,11 +2224,14 @@ export function App({
       activitySubRef.current?.();
       queueSubRef.current?.();
       agentsSubRef.current?.();
+      jobsSubRef.current?.();
       notifySubRef.current?.();
       dockMsgSubRef.current?.();
       heldRef.current = [];
       setDaemonQueue(undefined);
       setAgents(undefined);
+      setJobs(undefined);
+      jobOutputRef.current = {};
       // The dock belongs to a session: a switch starts it over (its drafts and
       // its `sent` are per session, docs/feat/subagent-panel.md).
       setDock(resetDock());
@@ -1963,6 +2244,7 @@ export function App({
       activitySubRef.current = session?.watch?.((a) => onActivityRef.current?.(a)) ?? null;
       queueSubRef.current = session?.onQueued?.((q) => setDaemonQueue(q)) ?? null;
       agentsSubRef.current = session?.onSubagents?.((rows) => setAgents(rows)) ?? null;
+      jobsSubRef.current = session?.onJobs?.((report) => setJobs(report.rows)) ?? null;
       // A RUNNING background child's message to the agent
       // (docs/feat/agent-message-two-way.md): the notice at once, and — when it
       // asks for one and this laptop allows two-way — the same wake an exit arms.
@@ -2000,7 +2282,17 @@ export function App({
         },
       );
     },
-    [pushNotice, skillsSync, askContext, setAgents, flushNow, armWake, subagentsTwoWay, setDock],
+    [
+      pushNotice,
+      skillsSync,
+      askContext,
+      setAgents,
+      setJobs,
+      flushNow,
+      armWake,
+      subagentsTwoWay,
+      setDock,
+    ],
   );
   useEffect(() => {
     watchSession(sessionRef.current);
@@ -2012,6 +2304,8 @@ export function App({
       queueSubRef.current = null;
       agentsSubRef.current?.();
       agentsSubRef.current = null;
+      jobsSubRef.current?.();
+      jobsSubRef.current = null;
       notifySubRef.current?.();
       notifySubRef.current = null;
     };
@@ -2238,6 +2532,9 @@ export function App({
   const requestQuit = useCallback(
     (confirmed: boolean): void => {
       const agents = backgroundCount(subagentsRef.current);
+      // A running SHELL job dies with the session too (owner Q3 (a)) — but only a
+      // quit that CLOSES it loses one, so a `connect` detach passes none.
+      const jobs = detachOnQuit ? 0 : (jobRowsRef.current?.length ?? 0);
       const step = quitCommandStep({
         running: stateRef.current.running,
         exitPending: exitPendingRef.current,
@@ -2246,12 +2543,14 @@ export function App({
         endsSession: runQuit !== undefined,
         others: confirmed ? 0 : (runQuit?.othersOnSession() ?? 0),
         agents: confirmed ? 0 : agents,
+        jobs: confirmed ? 0 : jobs,
         confirmed,
       });
       if (step === "confirm") {
         setQuitConfirm({
           others: runQuit?.othersOnSession() ?? 0,
           agents,
+          jobs,
           names: backgroundNames(subagentsRef.current),
         });
         return;
@@ -3069,15 +3368,17 @@ export function App({
       // idle Ctrl+C with background sub-agents running asks before losing them.
       const agents = backgroundCount(subagentsRef.current);
       const others = runQuit?.othersOnSession() ?? 0;
+      const jobs = detachOnQuit ? 0 : (jobRowsRef.current?.length ?? 0);
       const step = ctrlCQuitStep({
         running: stateRef.current.running,
         exitPending: exitPendingRef.current,
         detaches: detachOnQuit,
         others,
         agents,
+        jobs,
       });
       if (step === "confirm") {
-        setQuitConfirm({ others: 0, agents, names: backgroundNames(subagentsRef.current) });
+        setQuitConfirm({ others: 0, agents, jobs, names: backgroundNames(subagentsRef.current) });
         return;
       }
       // No abort handle (the turn is already settling) → nothing to stop: quit.
@@ -3199,7 +3500,8 @@ export function App({
     if (panel === null) {
       const step = dockKey(dockRef.current, char, key, {
         ids: dockIds(),
-        openable: (id: string) => id.startsWith("sa-"),
+        // Both kinds open: a child onto its drawer, a JOB onto its output tail.
+        openable: (id: string) => id.startsWith("sa-") || id.startsWith("bg-"),
         // The LIVE field, never a stashed `drafts` copy: typing goes straight to
         // `field`, so `drafts` is empty on the first open/close (Review H1).
         draft: field.value,
@@ -3214,7 +3516,13 @@ export function App({
       }
       if (step.effect.kind !== "pass") {
         if (step.effect.kind === "stop") {
-          killChild(step.effect.id);
+          // Routed by the id's kind, never by which list the row came from: a
+          // job's `x`+`y` goes to `session/job_kill` (the daemon's own registry).
+          if (dockKindOf(step.effect.id) === "job") {
+            killJob(step.effect.id);
+          } else {
+            killChild(step.effect.id);
+          }
         } else if (step.effect.kind === "open" || step.effect.kind === "close") {
           field.set(step.effect.draftIn);
         }
@@ -3620,7 +3928,14 @@ export function App({
                     paint segments (AGENTS §7). Its rows are reserved in
                     `activeRows`, so the input and the status bar never move. */}
                 {dockView !== null ? <BackgroundList view={dockView} columns={columns} /> : null}
-                {drawer !== null ? (
+                {drawer !== null && drawerJob !== null ? (
+                  <JobDrawer
+                    head={drawer.head}
+                    hidden={drawer.hidden}
+                    tail={drawer.tail}
+                    columns={columns}
+                  />
+                ) : drawer !== null ? (
                   <SubagentDrawer
                     head={drawer.head}
                     hidden={drawer.hidden}
@@ -3637,9 +3952,11 @@ export function App({
                     anything (owner). */}
                 <Text color={palette().border}>
                   {inputRuleText(
-                    dock.focus.kind === "open"
+                    // A JOB's drawer is read-only and the input stays on the main
+                    // agent: a PLAIN rule, no `→ bg-3` (owner Q1 (a)).
+                    dock.focus.kind === "open" && drawerJob === null
                       ? { kind: "target", id: dock.focus.id, ended: dock.focus.ended !== null }
-                      : dock.focus.kind === "list"
+                      : dock.focus.kind === "list" || dock.focus.kind === "open"
                         ? { kind: "plain" }
                         : { kind: "model" },
                     model,

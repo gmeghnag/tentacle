@@ -431,6 +431,22 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   // count rides the same `subagents` frame the TUI's status line reads.
   const offAgents =
     session.onSubagents?.((rows) => emit({ type: "agents", n: rows.length })) ?? (() => {});
+  /**
+   * The running shell jobs, fed by the daemon's `jobs` frame (one quantity, one
+   * writer — H1). Once a frame has been seen, the frame OWNS `model.jobs`: the
+   * `session/list` poll's number means shells + children, and letting the two
+   * alternate would flap `ps` between "1 background job(s)" and "1 background
+   * sub-agent(s)" while a child runs. A daemon that sends no frame (an older
+   * pod binary) leaves `shellCounted` false, so the poll stays its source,
+   * exactly as today. `report.count` is the daemon's own running number, taken
+   * BEFORE the client's 32-row cap, so a dock's bound cannot shrink it.
+   */
+  let shellCounted = false;
+  const offJobs =
+    session.onJobs?.((report) => {
+      shellCounted = true;
+      emit({ type: "jobs", n: report.count });
+    }) ?? (() => {});
   // A running child that messaged the agent (docs/feat/agent-message-two-way.md):
   // a WAKING note asks this relay for the same continuation a job exit does.
   // The decision is the laptop's own (`autoWake` and `subagents.twoWay` here),
@@ -549,7 +565,8 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     void runtime.sessionJobs(spec.sessionId).then((n) => {
       polling = false;
       // Unreadable: the last value stands, the next poll tells.
-      if (n !== null) {
+      // A frame feeds this field now (H1): the poll's sums must not alternate.
+      if (n !== null && !shellCounted) {
         emit({ type: "jobs", n });
       }
     });
@@ -582,7 +599,10 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     exiting = false;
     if (model.handover === "none" && !model.wake.pending) {
       log("still in use: not removed yet");
-      emit({ type: "jobs", n: use?.jobs ?? 0 });
+      // The SECOND writer of `jobs`: silenced by the same flag (H1).
+      if (!shellCounted) {
+        emit({ type: "jobs", n: use?.jobs ?? 0 });
+      }
     }
     emit({ type: "busy" });
   }
@@ -603,6 +623,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   offLink();
   offExit();
   offAgents();
+  offJobs();
   offNotify();
   await runtime.release();
   const unsaved = await saver.drain();

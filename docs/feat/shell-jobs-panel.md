@@ -271,7 +271,92 @@ Each is behaviour the owner must decide; my recommendation first.
 
 ## Execution
 
-*— (empty until the plan is approved and executed)*
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+Executed on `feat/shell-jobs-panel` (off `dee9a33`, tip `076795f`+docs) in its own worktree. The **Answers** block is binding and overrides the plan's recommendations wherever they disagree; both override points are marked **[Q4 b]** and **[Q5 b]** below.
+
+### Repro, on the branch before any edit
+
+Re-ran the Context's three repros unchanged (from `.tentacle/tmp/shell-jobs-panel/`, pointed at this worktree):
+
+```
+instance members: constructor, start, read, kill, list, dispose, onExit, pump, finish
+has onStart: false · has onChange: false · has peek: false · has tail: false
+started: bg-1 · onExit fired so far: []          ← the START is silent
+model read #1: "line 1\nline 2\n" / panel read #2: ""   ← read() is the model's cursor
+TAIL(2): "line 3\n" · cursor AFTER tail: 0       ← a slice of `buf` steals nothing
+after a 300 KiB flood: buf.length = 262144 · TAIL(1): ""   ← the head partial, dropped: an empty drawer
+```
+
+`repro2.tsx` (the real `App`, 190 and 80 cols) printed `shell job visible: false` / `pill says shells: false` — the capability is genuinely absent. The last line of `probe-tail` is M1's evidence: a naive tail *does* open empty.
+
+### Steps, in the plan's order
+
+1. **core** (`core/src/jobs.ts`) — `JobTail`, a required `onStart`, an optional `tail?`. Compile-verified first as intended: the 19 `implements JobController` fakes then failed to typecheck (a real red gate for the interface change), and so did 8 object-literal fakes the plan's grep did not name — `agent/test/{background,replace-agent,resume,running-note}.test.ts`, `cli/test/session-titles.test.ts`, `daemon/test/{session-list,update-settings}.test.ts`, `tools/test/builtins.test.ts`. **Drift:** the plan says "the 19 fakes"; the real count is 19 classes + 8 literals = 27 sites. All got `onStart: () => () => {}`.
+2. **exec** (`exec/src/background.ts`) — `onStart` fires inside `start`, after `jobs.set` and before the return, `try`-wrapped per listener; `StreamBuffer.tail` implements the 5-step M1 rule; `BackgroundJobs.tail` merges the two streams and ORs `truncated`. **Drift (small, intent kept):** the plan's step 5 ("keep the last `lines`") is implemented, but a *live* trailing partial line (output that does not end in `\n` yet) is kept as a line — it is the job's current output, and dropping it would blank a `tail -f`'s last line. Only a **head** partial is dropped, and only when a complete line remains (exactly M1). Pinned by a test.
+3. **protocol** (`session.ts`, `updates.ts`, `methods.ts`, `schema:export`) — `JobRow`, `JobOutput*`, `JobKill*`, `SnapshotResult.jobs`, `JobsUpdateSchema` + `UPDATE_CLASS.jobs = "display"`, two methods + `RequestSchemas`. No `PROTOCOL_VERSION` bump. **[Q4 b]** `JobOutputResult.output` is ONE array (stdout then stderr, as `shell_output` merges): no `stdout`/`stderr` pair on the wire. **[Q5 b]** the id is the wire's `bg-N` and every comment says so.
+4. **daemon** (`jobs-view.ts` new; `hosted-session.ts`; `connection.ts`) — `jobRows` (running only, `wireLine(command, 200)`, never capped), `jobCount` (the frame's `n`, before any cap — H1), `sameJobs`; `publishJobs` (start + exit only, `closed` guard, no coalescing timer), the cut/snapshot/history-replaced carry, `jobOutput`/`jobKill`, unsubscribe in `close()`.
+5. **client** (`jobs.ts` new; `remote-client.ts`; `remote-session.ts`; `mapping.ts`) — `boundJobs`/`jobsFromSnapshot`, and **`boundJobOutput` as the one sanitising gate (M2)**: cap ≤200 entries **before** mapping, C0/DEL/C1 ⇒ one space, the bidi/zero-width classes stripped, 512/line, `command` and `reason` too. `SessionJobsNotice` carries `{rows, count}` where `count` is the daemon's own length **before** `boundJobs` (H1). Both methods' `MethodNotFound` ⇒ typed refusals.
+6. **cli** (`local-runtime.ts`, `session-jobs.ts`, `relay.ts`) — the wrapper forwards `onJobs`/`jobOutput`/`killJob`; `SessionJobsView` forwards `onStart`; the relay's `shellCounted` flag silences **both** old writers (the 30 s poll and the `readUse` emit) once a frame has been seen. `relay-state.ts` untouched, as planned.
+7. **tui pure** (`job-drawer.ts` new; `background-list.ts`; `background-focus.ts`; `background-view.ts`; `commands.ts`) — `jobTailWindow`/`jobDrawerTail` (blank ⇒ `" "`, no output ⇒ `(no output yet)`), `JOB_REFRESH_MS`, `refreshDue`; `jobDrawerView`, `DockFrozen`, `frozenJob`/`frozenAgent`, `inputTitle` ⇒ `null` for a job; `dockKindOf`, `sendTarget` ⇒ `main` for a job; `sameJobIds`; the quit confirm counts jobs apart (Q3 a).
+8. **tui component** (`App.tsx`, `components/BackgroundList.tsx`) — `jobRows`+`setJobs`, `dockIds`/`dockVisible`/`drawerSubject` over both kinds, the pill's `jobs`, `onJobs` subscription, the outcome record for a job, `killJob` routed by `dockKindOf`, the one test seam `jobRefreshMs?`, the refresh + final-read effects, the quit/ctrl-C counts, `JobDrawer` in the slot.
+9. **CHANGELOG** `[Unreleased] → Added`: the feature, and the 9d `ps` fix. The sub-agent entry's stale "shell rows are a follow-up" sentence is gone.
+
+**Drifts, all recorded, none a redesign**
+
+- **`JobOutputResult.exitCode` is omitted, not `null.** The plan's sketch said `int|null`; the repo's own `json-schema.test.ts` null-sites guard forbids a new meaningful null on the wire (red), and `status: "killed"` already carries what a missing code means. So the daemon omits the field and the schema is `int.optional()`.
+- **`DockFrozen` also carries jobs** (the plan's Design 6 says so; noted here because the plan's Files row #17 did not spell the `background-view.ts` helper pair): `frozenJob`/`frozenAgent` keep the union honest in one place.
+- **A live trailing partial line is kept** (see step 2).
+- **`JobDrawer` head arithmetic:** the first draft's fill was one cell short of `width` at 80 columns (a test caught it); the head is now exactly `width` cells.
+- **`dockListVisible` also had to switch to `listVisible(subagents, jobRows)`** — the plan's App list named "the pill" and "`dockVisible`", not this line, but without it the dropdown never painted a job-only list.
+- **`App.tsx` has no `props` object** (its props are destructured), so the seam is the destructured `jobRefreshMs`.
+
+### Red → green, per test file (§9)
+
+Every test below was made to fail on the exact property before it passed. Two kinds of red were available and both are reported: (a) tests that were red **before the code existed** because the repo's own guards caught the gap, and (b) mutation reds, reverted by exact inverse edit (no `git checkout`/`restore`/`stash` was run at any point).
+
+**(a) Red on the un-implemented code, unprompted**
+
+- `protocol/test/json-schema.test.ts` — 2 failures once the schemas landed and 2 more refusals: "every method params/result … has a fixture" (2 missing fixtures) and the null-sites guard (`JobOutputResult/properties/exitCode/anyOf/1`). Both are the repo's own guards doing the work the plan called "a real red".
+- `daemon/test/mapping.test.ts:300` — "covers every known type" failed the moment `JobsUpdateSchema` joined the union, exactly as the plan predicted; green with the sample.
+- **`tsc` itself** — `client/src/mapping.ts:211` "Function lacks ending return statement" (the exhaustive switch) until `case "jobs":` was added; and 27 `JobController` fakes refused to compile until `onStart` was implemented.
+- `tui/test/shell-panel-frames.test.tsx` F5 — failed with the job's row not painted because `dockListVisible` still tested children only; that is the App's own gap, caught by the frame.
+
+**(b) Mutation reds (each reverted by exact inverse edit, file diffed to prove identity)**
+
+| Mutation | Test that went red |
+|---|---|
+| `BackgroundJobs.tail` through `readNew` (the model's cursor) | exec: "tail returns the last lines and leaves the model's read cursor alone" |
+| `tail` strips `\r` before splitting (M1, merged progress frames) | exec: "tail splits on newline, keeps a progress bar's last frame" |
+| client sanitiser bypassed (`sanitizeJobText` returns the input) | client: 4 cases — the hostile-bytes gate, the `command` bound, the `reason`, the tab |
+| the frame's `n` computed from the client's ≤32 rows (H1) | client: "the count is the daemon's, never the client's 32-row slice" + the hostile-frame case |
+| the relay's poll writes `model.jobs` after a frame | cli: 2 H1 cases (the flap: poll 2 / frame 1, and the injected poll returning 5) |
+| the relay's `readUse` writer unsilenced (the second writer) | cli: "the `readUse` writer is silenced too once a frame owns the count" |
+| the daemon's `onStart` subscription dropped (a start is silent again) | daemon: 5 feed cases |
+| a blank output line emitted as `""` (the §6 Ink 0×0 gotcha) | tui: "a blank line is ONE space" + "M3: a blank line in the tail" + "no output at all" |
+| a job's `x`+`y` routed to `killSubagent` (`job_kill` bypassed) | tui F5: `killJob("bg-3")` |
+
+**M4's seam, honestly:** the plan asks for a red if the effect "re-arms on each read". Two guards exist by design — the effect's dependency list *and* `refreshDue`. Removing **either alone** stays green (the other holds), which is the intended belt-and-braces; removing **both** makes the frames test hang in an infinite re-read loop (killed at 300 s), which is the failure mode the guards prevent. F4 pins the cadence exactly with a 60 s interval for the boundary counts (1 on open, +1 at the exit, 0 after Esc) and a 50 ms interval for the tick growth, plus "0 reads with the dropdown alone open".
+
+### Gate
+
+`bun run check` (typecheck → lint → test), on this branch, once, at the end:
+
+```
+$ tsc --noEmit && tsc -p apps/mobile --noEmit      → clean
+$ biome check .                                     → Checked 846 files. No fixes applied. 0 errors, 0 warnings
+$ bun test                                          → 6579 pass, 3 skip, 0 fail (460 files, 68499 expect calls)
+```
+
+The 3 skips are the repo's opt-in ones (live-k8s, live-docker, the real-socket keepalive) — not failures. Lint is at the §6 baseline (clean). Note: this worktree needed `bun install` (it ships none); `apps/mobile` typechecks only after `bun install --filter '@tentacle/mobile'`, which CI's `--filter '!@tentacle/mobile'` install would not provide — the mobile project is untouched by this task.
+
+### Not done / left as debt
+
+- **`--in-process` still shows no job rows and no job drawer** — the plan's Notes/debt, unchanged: that runtime's `SessionController` has no `onSubagents` either, so the dock is empty for both kinds there.
+- **`JOB_TAIL_SHOWN = 12`, `maxChars: 8192`** are the App's call-site values; the wire allows `lines ≤ 200` / `maxChars ≤ 16384`. Deliberately generous relative to the drawer (12 rows), so a future wider drawer needs no protocol change.
+- **Not verified live:** the pod path (`run`/`attach` with a real background job in a container) is covered only by the daemon/client wiring tests with a fake registry; nothing was run against a real pod or a real `serve` daemon in this execution.
+- **`protocol/schema/protocol.json`** was regenerated twice (once before the `exitCode` fix); the committed copy is current with the sources.
+- **No commit** (per the brief), and `TODO.md` untouched.
 
 ## Review
 

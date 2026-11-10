@@ -214,6 +214,7 @@ describe("in-process fallback (no daemon)", () => {
           kill: () => false,
           list: () => [],
           dispose: () => {},
+          onStart: () => () => {},
           onExit: () => () => {},
         },
         tools: new ToolRegistry(),

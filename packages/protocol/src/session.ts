@@ -497,6 +497,91 @@ export const AgentKillResultSchema = z.object({
 });
 export type AgentKillResult = z.infer<typeof AgentKillResultSchema>;
 
+// --- the session's background shell jobs (docs/feat/shell-jobs-panel.md) ---
+// The live list of the `shell{run_in_background}` jobs a session started: one
+// full-state update (`jobs`), sent only on a start or an exit (never a stream).
+// The elapsed time is the client's, from `startedAt`. Lenient by design: a pod's
+// command text is untrusted (§7), so nothing is bounded here — the client cuts.
+// The id is the wire handle (`bg-N`), which is what every state key and both
+// methods use; the panel paints it unchanged (owner Q5 (b): no `sh-N` alias).
+
+/** One running background shell job, as the daemon reports it. */
+export const JobRowSchema = z.object({
+  /** Its `bg-N` handle: what `job_kill` takes and the transcript's exit names. */
+  id: z.string().min(1),
+  /** The command, on one line, cut by the daemon — a label, not the truth. */
+  command: z.string(),
+  /**
+   * The daemon's `Date.now()` at `start` (the POD's clock in `run`/`attach`),
+   * so an elapsed time computed against the laptop's clock may skew — the same
+   * accepted behaviour as `SubagentRow.startedAt`.
+   */
+  startedAt: z.number().int().nonnegative(),
+  /** A free string, like `SubagentRow.state`: a newer daemon's state is shown as is. */
+  status: z.string(),
+});
+export type JobRow = z.infer<typeof JobRowSchema>;
+
+/**
+ * A background job's id as the panel's methods take it (`bg-N`): bounded, and
+ * its own NAMED export for the same reason as `SubagentAgentIdSchema`.
+ */
+export const JobIdSchema = z.string().min(1).max(64);
+
+/**
+ * `session/job_output`: the last lines of a job's output, read WITHOUT moving
+ * the model's `shell_output` cursor. Read-only and synchronous daemon-side, so
+ * it never awaits a turn (§7 "Don't serialize the RPC peer"). Additive: an
+ * older daemon answers `MethodNotFound`, which the client shows as a notice.
+ */
+export const JobOutputParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  jobId: JobIdSchema,
+  /** How many lines per stream (capacity, not trust: the daemon bounds sizes). */
+  lines: z.number().int().min(1).max(200).optional(),
+  /** Window size in characters (capacity, not trust: the CLIENT is the gate). */
+  maxChars: z.number().int().min(1).max(16384).optional(),
+});
+export type JobOutputParams = z.infer<typeof JobOutputParamsSchema>;
+
+export const JobOutputResultSchema = z.object({
+  /** `false` with a `reason` when the session's registry cannot tail it. */
+  found: z.boolean(),
+  jobId: z.string(),
+  status: z.string().optional(),
+  /**
+   * The exit code once finished; ABSENT while running and when a signal killed
+   * it (there is no code to report). Never `null`: the wire omits a field it has
+   * nothing to say about (`json-schema.test.ts`'s null-sites guard), and `status`
+   * already says `killed`.
+   */
+  exitCode: z.number().int().optional(),
+  startedAt: z.number().int().nonnegative().optional(),
+  command: z.string().optional(),
+  /**
+   * The job's output as the MODEL sees it, one array: stdout and stderr merged
+   * (owner Q4 (b)), lines oldest first, raw — the client sanitises (§7).
+   */
+  output: z.array(z.string()).optional(),
+  /** True: output older than the retained buffer (or a cut line) was dropped. */
+  truncated: z.boolean().optional(),
+  /** Why nothing could be read: shown to the user as a notice, never thrown. */
+  reason: z.string().optional(),
+});
+export type JobOutputResult = z.infer<typeof JobOutputResultSchema>;
+
+export const JobKillParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  jobId: JobIdSchema,
+});
+export type JobKillParams = z.infer<typeof JobKillParamsSchema>;
+
+export const JobKillResultSchema = z.object({
+  /** `true` iff it existed and was running. */
+  killed: z.boolean(),
+});
+export type JobKillResult = z.infer<typeof JobKillResultSchema>;
+
 export const SnapshotResultSchema = z.object({
   /** Chronological slice of the history, ending at the cut (or at the cursor). */
   messages: z.array(ChatMessageSchema),
@@ -512,6 +597,8 @@ export const SnapshotResultSchema = z.object({
   queued: QueueStateSchema.optional(),
   /** The background sub-agents running at the cut (first page only; an older daemon sends none). */
   subagents: z.array(SubagentRowSchema).optional(),
+  /** The background shell jobs running at the cut (first page only; an older daemon sends none). */
+  jobs: z.array(JobRowSchema).optional(),
 });
 export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
 

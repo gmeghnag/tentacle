@@ -35,6 +35,8 @@ import {
   type HooksTrustParams,
   type HooksTrustResult,
   type InitializeResult,
+  type JobOutputResult,
+  type JobRow,
   JsonRpcErrorCode,
   KNOWN_UPDATE_TYPES,
   type KnownLogEntry,
@@ -77,6 +79,7 @@ import {
 } from "@tentacle/protocol";
 import { type DuplexChannel, type RequestContext, RpcError, RpcPeer } from "@tentacle/transport";
 import { ATTACH_TIMEOUT_MS } from "./constants.ts";
+import { boundJobOutput, boundJobs, jobsFromSnapshot } from "./jobs.ts";
 import {
   ChannelError,
   LIVENESS_MS,
@@ -117,6 +120,9 @@ import { type DaemonKind, explainVersionMismatch } from "./version-mismatch.ts";
 /** A daemon that predates `session/subagent_message`: a typed refusal, never a throw at a UI. */
 export const SUBAGENT_MESSAGE_OLD_DAEMON =
   "this daemon cannot message sub-agents (older version) — nothing was sent";
+
+/** A daemon that predates `session/job_output`: a typed refusal, shown as a notice. */
+export const JOB_OUTPUT_OLD_DAEMON = "this daemon cannot show a job's output (older version)";
 
 /** A `once` session command whose link dropped before the daemon answered (its outcome is unknown). */
 export const DROPPED_NOT_RETRIED = "the connection dropped before the daemon answered; not retried";
@@ -209,6 +215,19 @@ export interface SessionQueueNotice {
 export interface SessionSubagentsNotice {
   readonly sessionId: string;
   readonly rows: readonly SubagentRow[];
+}
+
+/**
+ * The session's running background SHELL jobs as the daemon reports them (a
+ * `jobs` update, or the snapshot of a resync): the full list, already bounded
+ * and sanitized here. Not turn-scoped. Display only. `count` is the DAEMON's own
+ * running number, taken before the bound above — a dock paints the rows, a relay
+ * reports the truth (H1: the client's capped list is not the count).
+ */
+export interface SessionJobsNotice {
+  readonly sessionId: string;
+  readonly rows: readonly JobRow[];
+  readonly count: number;
 }
 
 /**
@@ -399,6 +418,8 @@ interface Snap {
   readonly queued?: QueueState;
   /** The background sub-agents at the cut (absent: an older daemon does not report them). */
   readonly subagents?: readonly SubagentRow[];
+  /** The running shell jobs at the cut (absent: an older daemon does not report them). */
+  readonly jobs?: readonly JobRow[];
 }
 
 /** The error of a session the reducer gave up on, WITH its cause (docs/fix/detach-live.md KO 3). */
@@ -450,6 +471,8 @@ interface SessionEntry {
   queued: QueueState | undefined;
   /** The daemon's last reported background sub-agents; undefined until it reports one. */
   subagents: readonly SubagentRow[] | undefined;
+  /** The daemon's last reported running shell jobs; undefined until it reports one. */
+  jobs: readonly JobRow[] | undefined;
   /** The session's newest settings report (an open's, an own sync's, a `session_settings`). */
   settings: SessionSettingsReport | undefined;
   /** The exits no turn had flushed when the newest open answered (an older daemon: 0). */
@@ -565,6 +588,7 @@ export class RemoteClient {
   /** Session-independent listeners for queue changes (idle or mid-turn). */
   private readonly queueListeners = new Set<(notice: SessionQueueNotice) => void>();
   private readonly subagentListeners = new Set<(notice: SessionSubagentsNotice) => void>();
+  private readonly jobListeners = new Set<(notice: SessionJobsNotice) => void>();
   private readonly subagentNotifyListeners = new Set<
     (notice: SessionSubagentNotifyNotice) => void
   >();
@@ -886,6 +910,17 @@ export class RemoteClient {
     return this.sessions.get(sessionId)?.subagents;
   }
 
+  /** Subscribe to running shell-job changes across all sessions (see the notice type). */
+  onSessionJobs(listener: (notice: SessionJobsNotice) => void): () => void {
+    this.jobListeners.add(listener);
+    return () => this.jobListeners.delete(listener);
+  }
+
+  /** The session's running shell jobs as last reported; undefined if never reported. */
+  jobsOf(sessionId: string): readonly JobRow[] | undefined {
+    return this.sessions.get(sessionId)?.jobs;
+  }
+
   /**
    * Subscribe to a running child's messages to its agent, across all sessions
    * (see `SessionSubagentNotifyNotice`); returns an unsubscribe.
@@ -939,6 +974,50 @@ export class RemoteClient {
    */
   killSubagent(sessionId: string, agentId: string): Promise<{ killed: boolean }> {
     return this.sessionCall(sessionId, Method.AgentKill, { sessionId, agentId }, "once").then(
+      (result) => result as { killed: boolean },
+      (error: unknown): { killed: boolean } => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { killed: false };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * `session/job_output` (docs/feat/shell-jobs-panel.md): the tail of one
+   * background shell job, **bounded and sanitized here** — this is the gate
+   * (AGENTS §7: a pod's daemon is not trusted, so nothing upstream counts as
+   * sanitized). Never a throw for a refusal: `{found: false, reason}` — and an
+   * older daemon's `MethodNotFound` becomes the same typed refusal.
+   */
+  jobOutput(
+    sessionId: string,
+    jobId: string,
+    opts?: { readonly lines?: number; readonly maxChars?: number },
+  ): Promise<JobOutputResult> {
+    return this.sessionCall(
+      sessionId,
+      Method.JobOutput,
+      { sessionId, jobId, ...(opts ?? {}) },
+      "once",
+    ).then(
+      (result) => boundJobOutput(result as JobOutputResult),
+      (error: unknown): JobOutputResult => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { found: false, jobId, reason: JOB_OUTPUT_OLD_DAEMON };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * `session/job_kill` (docs/feat/shell-jobs-panel.md): stop one background
+   * SHELL job. Never a throw for a refusal: `{killed: false}`.
+   */
+  killJob(sessionId: string, jobId: string): Promise<{ killed: boolean }> {
+    return this.sessionCall(sessionId, Method.JobKill, { sessionId, jobId }, "once").then(
       (result) => result as { killed: boolean },
       (error: unknown): { killed: boolean } => {
         if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
@@ -1955,6 +2034,7 @@ export class RemoteClient {
       title,
       queued: undefined,
       subagents: undefined,
+      jobs: undefined,
       settings: undefined,
       unflushedExits: 0,
       attachMark: 0,
@@ -2001,6 +2081,14 @@ export class RemoteClient {
     entry.subagents = rows;
     for (const listener of this.subagentListeners) {
       listener({ sessionId: entry.id, rows });
+    }
+  }
+
+  /** The running shell jobs now (a `jobs` update in seq order, or a resync's snapshot): bounded here. */
+  private jobsChanged(entry: SessionEntry, rows: readonly JobRow[], count: number): void {
+    entry.jobs = rows;
+    for (const listener of this.jobListeners) {
+      listener({ sessionId: entry.id, rows, count });
     }
   }
 
@@ -2241,6 +2329,12 @@ export class RemoteClient {
     if (snapshotRows) {
       this.subagentsChanged(entry, snapshotRows);
     }
+    const snapshotJobs = jobsFromSnapshot(snap.jobs);
+    if (snapshotJobs) {
+      // The snapshot's list is the daemon's full state: its length IS the count
+      // (the daemon caps nothing — H1 — so this is not a capped number).
+      this.jobsChanged(entry, snapshotJobs, snap.jobs?.length ?? 0);
+    }
     this.step(entry, {
       kind: "snapshot",
       messages: snap.messages,
@@ -2413,6 +2507,10 @@ export class RemoteClient {
       } else if (update.type === "subagents") {
         // Not turn-scoped either: a child runs between turns, and so does its row.
         this.subagentsChanged(entry, boundSubagents(update.agents));
+      } else if (update.type === "jobs") {
+        // Likewise a job: it starts and exits between turns. The count is the
+        // frame's own length, taken BEFORE `boundJobs` cuts it (H1).
+        this.jobsChanged(entry, boundJobs(update.jobs), update.jobs.length);
       } else if (update.type === "subagent_notify") {
         // Not turn-scoped: a child messages the agent while it runs (idle too).
         this.subagentNotified(entry, boundSubagentNotify(update));
@@ -2572,6 +2670,7 @@ export class RemoteClient {
       ...(first?.title ? { title: first.title } : {}),
       ...(first?.queued ? { queued: first.queued } : {}),
       ...(first?.subagents ? { subagents: first.subagents } : {}),
+      ...(first?.jobs ? { jobs: first.jobs } : {}),
     };
   }
 
