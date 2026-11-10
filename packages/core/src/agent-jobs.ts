@@ -251,6 +251,14 @@ export class AgentJobs {
     this.cap = maxParallel;
   }
 
+  /**
+   * The cap in force right now (`subagents.maxParallel`): what a refusal names
+   * and what `agent_status` reports, so a settings sync is reflected at once.
+   */
+  get limit(): number {
+    return this.cap;
+  }
+
   bind(host: AgentJobHost): void {
     this.host = host;
   }
@@ -481,6 +489,15 @@ export class AgentJobs {
           ok: false,
           reason: `${agentId} already has ${AGENT_INBOX_MAX} unread messages: nothing was sent. Wait for it to read them or for its report.`,
         };
+  }
+
+  /**
+   * How many `agent_message` texts `agentId` has queued and not yet drained
+   * (docs/feat/agent-status.md). `0` for an id that is not running: the count
+   * is the inbox's own, never a second counter.
+   */
+  pending(agentId: string): number {
+    return this.running.get(agentId)?.inbox.pending ?? 0;
   }
 
   /**

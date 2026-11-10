@@ -62,6 +62,7 @@ import {
   builtinTools,
   createAgentKillTool,
   createAgentMessageTool,
+  createAgentStatusTool,
   createContextResetTool,
   createSkillActivator,
   createSkillTool,
@@ -585,6 +586,9 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     // ... and to WRITE to one (docs/feat/agent-message.md): it names a running
     // child's id, so it rides the same switch.
     tools.register(createAgentMessageTool(agentJobs, { twoWay: config.subagentsTwoWay }));
+    // ... and to SEE what one is doing (`docs/feat/agent-status.md`): read-only,
+    // it names the same ids, so it rides the same switch.
+    tools.register(createAgentStatusTool(agentJobs));
   }
 
   // Context reset (docs/feat/context-reset.md): the model renews its own

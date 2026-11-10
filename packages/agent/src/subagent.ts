@@ -27,6 +27,7 @@ import {
   AGENT_KILL_TOOL_NAME,
   AGENT_MESSAGE_TOOL_NAME,
   AGENT_NOTIFY_TOOL_NAME,
+  AGENT_STATUS_TOOL_NAME,
   CONTEXT_RESET_TOOL_NAME,
   ToolRegistry,
   createAgentNotifyTool,
@@ -340,12 +341,15 @@ export function createSubagentRunner(deps: SubagentDeps): {
       // child it launched (owner Q1 a); a child given it could kill its
       // siblings silently (`permission: "none"`, sequential ids). Nor
       // `agent_message`: it names a CHILD's id, and a child has none to write to
-      // (`docs/feat/agent-message.md` Design 4).
+      // (`docs/feat/agent-message.md` Design 4). Nor `agent_status`: read-only,
+      // but it names every sibling's id and what it is doing
+      // (`docs/feat/agent-status.md`).
       if (
         tool.name === spawnToolName ||
         tool.name === CONTEXT_RESET_TOOL_NAME ||
         tool.name === AGENT_KILL_TOOL_NAME ||
         tool.name === AGENT_MESSAGE_TOOL_NAME ||
+        tool.name === AGENT_STATUS_TOOL_NAME ||
         // A child's own `agent_notify` is built below, from the id it was given:
         // a parent registry must never hand one over.
         tool.name === AGENT_NOTIFY_TOOL_NAME
@@ -541,6 +545,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
         toolName === CONTEXT_RESET_TOOL_NAME ||
         toolName === AGENT_KILL_TOOL_NAME ||
         toolName === AGENT_MESSAGE_TOOL_NAME ||
+        toolName === AGENT_STATUS_TOOL_NAME ||
         toolName === AGENT_NOTIFY_TOOL_NAME
       ) {
         return true;

@@ -52,6 +52,15 @@ export class AgentInbox {
   }
 
   /**
+   * How many texts the child has not drained yet (docs/feat/agent-status.md):
+   * read by `AgentJobs.pending`, so a parent deciding to write again knows
+   * whether the last ones were read. The one reader of `items.length`.
+   */
+  get pending(): number {
+    return this.items.length;
+  }
+
+  /**
    * Queue one text. Refused when the child stopped reading (`closed`) or when it
    * already holds `AGENT_INBOX_MAX` unread ones (`full`): the sender reports it,
    * nothing is queued.

@@ -5,11 +5,13 @@ import {
   AGENT_KILL_TOOL_NAME,
   AGENT_MESSAGE_TOOL_NAME,
   AGENT_NOTIFY_TOOL_NAME,
+  AGENT_STATUS_TOOL_NAME,
   CONTEXT_RESET_TOOL_NAME,
   ToolRegistry,
   createAgentKillTool,
   createAgentMessageTool,
   createAgentNotifyTool,
+  createAgentStatusTool,
   createContextResetTool,
   createTaskTool,
   fsReadTool,
@@ -334,6 +336,43 @@ describe("createSubagentRunner", () => {
     await run({ description: "d", prompt: "go", type: "general" });
     expect(offered[0]?.length).toBeGreaterThan(0);
     expect(offered[0]).not.toContain(AGENT_KILL_TOOL_NAME);
+  });
+
+  test("a child is never offered agent_status: it would read its siblings (feat/agent-status)", async () => {
+    const { env } = recordingEnv();
+    const offered: string[][] = [];
+    const model: ModelProvider = {
+      id: "rec",
+      async *stream(request) {
+        offered.push((request.tools ?? []).map((t) => t.name));
+        yield { type: "text", delta: "report" };
+        yield { type: "done" };
+      },
+    };
+    // Exactly the registry `wiring.ts` gives the main agent with background on:
+    // the spawn tool plus the three agent_* tools. A `tools: "all"` child (the
+    // `general` type) would inherit `agent_status` unless the runner drops it —
+    // and then one child could read every sibling's id and activity.
+    const jobs = new AgentJobs(2);
+    const { run } = createSubagentRunner({
+      model,
+      env,
+      tools: fullRegistry()
+        .register(
+          createTaskTool(
+            async () => ({ report: "", toolUses: 0, stopReason: "end_turn" }),
+            BUILTIN_AGENT_TYPES,
+          ),
+        )
+        .register(createAgentKillTool(jobs))
+        .register(createAgentMessageTool(jobs))
+        .register(createAgentStatusTool(jobs)),
+    });
+    await run({ description: "d", prompt: "go", type: "general" });
+    expect(offered[0]?.length).toBeGreaterThan(0);
+    expect(offered[0]?.length).toBeGreaterThan(0);
+    expect(offered[0]).not.toContain(AGENT_STATUS_TOOL_NAME);
+    expect(offered[0]).toContain("fs_read");
   });
 
   test("the call's requested model reaches modelFor with the type (models-map)", async () => {
