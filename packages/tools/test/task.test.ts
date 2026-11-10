@@ -118,7 +118,7 @@ describe("the neutral description tells the parent how to use it", () => {
   });
 
   test("(2) it says this is THE way to create agents, with a DEFAULT not a ban", () => {
-    expect(text).toContain("This is the way to create and run agents, role/persona ones included.");
+    expect(text).toContain("To create agents, use this tool.");
     expect(text).toContain(
       "To create agents, use this tool. Start another agent CLI (claude, codex, tentacle, …) through the shell only when the user explicitly asks for it.",
     );

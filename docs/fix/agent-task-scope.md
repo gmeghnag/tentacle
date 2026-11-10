@@ -100,7 +100,7 @@ Three additive changes, one flag threaded, no new seam.
 
 **(1)+(2) The neutral text** (`task.ts:106`) — replaced by, verbatim:
 
-> Delegate a self-contained task to a sub-agent that runs in its own isolated context and returns a final report. You do NOT see its intermediate steps, so it offloads read-heavy work without filling your own context. This is the way to create and run agents, role/persona ones included. To create agents, use this tool. Start another agent CLI (claude, codex, tentacle, …) through the shell only when the user explicitly asks for it. Scope each prompt: the files, diff or questions it owns, and a stop criterion — what counts as done. Turn-based: one foreground sub-agent at a time, its report the call's result. Long-lived: `background: true`, then `agent_message` to steer it while it works.
+> Delegate a self-contained task to a sub-agent that runs in its own isolated context and returns a final report. You do NOT see its intermediate steps, so it offloads read-heavy work without filling your own context. To create agents, use this tool. Start another agent CLI (claude, codex, tentacle, …) through the shell only when the user explicitly asks for it. Scope each prompt: the files, diff or questions it owns, and a stop criterion — what counts as done. Turn-based: one foreground sub-agent at a time, its report the call's result. Long-lived: `background: true`, then `agent_message` to steer it while it works.
 
 - The owner's "create agents" sentence is kept **verbatim** (so a test can pin
   it): "To create agents, use this tool. Start another agent CLI (claude, codex,
@@ -223,13 +223,14 @@ As built, in order:
    not). `bun run docs:config` → "README.md's config table is up to date" (the
    `summary` cell, which is what the table renders, is unchanged).
 6. `CHANGELOG.md` — one `[Unreleased] → Fixed` entry (the first under Fixed).
+7. Owner trim: removed the duplicate 'This is the way…' sentence.
 
 Final texts, verbatim:
 
 `agent_task`, `twoWay` OFF (then the overlap note for the mode, then
 `\n\nAvailable sub-agent types:`):
 
-> Delegate a self-contained task to a sub-agent that runs in its own isolated context and returns a final report. You do NOT see its intermediate steps, so it offloads read-heavy work without filling your own context. This is the way to create and run agents, role/persona ones included. To create agents, use this tool. Start another agent CLI (claude, codex, tentacle, …) through the shell only when the user explicitly asks for it. Scope each prompt: the files, diff or questions it owns, and a stop criterion — what counts as done. Turn-based: one foreground sub-agent at a time, its report the call's result. Long-lived: `background: true`, then `agent_message` to steer it while it works.
+> Delegate a self-contained task to a sub-agent that runs in its own isolated context and returns a final report. You do NOT see its intermediate steps, so it offloads read-heavy work without filling your own context. To create agents, use this tool. Start another agent CLI (claude, codex, tentacle, …) through the shell only when the user explicitly asks for it. Scope each prompt: the files, diff or questions it owns, and a stop criterion — what counts as done. Turn-based: one foreground sub-agent at a time, its report the call's result. Long-lived: `background: true`, then `agent_message` to steer it while it works.
 
 `agent_task`, `twoWay` ON — the same, plus, after the overlap note:
 
@@ -283,6 +284,11 @@ Drift from Implementation:
   read-heavy work", "This is the way to create and run agents, role/persona ones
   included" and "Scope each prompt" (same content, fewer words — every word is
   paid per request). The owner's verbatim sentence is untouched.
+- Owner trim (item 7, after the gate above): "This is the way to create and run
+  agents, role/persona ones included." is gone from the final text — it repeated
+  the owner-kept "To create agents, use this tool." The Design quote and the
+  drift bullet above still show the pre-trim wording, and the Execution test
+  counts predate it; the "Final texts, verbatim" block is the truth.
 - `taskToolDescription` takes `twoWay` as a 5th POSITIONAL parameter with a
   default (`= false`), matching the function's existing shape (it already
   takes 4), rather than an options object: callers other than `createTaskTool`
