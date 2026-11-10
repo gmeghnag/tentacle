@@ -1264,3 +1264,127 @@ is the new optional `model`.
 - **P6** (a daemon feed of running shell jobs) is untouched: `jobs: []`, so the
   pill counts sub-agents only and its `· N shell` slot is written but unreachable.
 - **Not committed** (the brief forbids it) and **`TODO.md` untouched**.
+
+## Review — round 3 (UI revision + feature close)
+
+*— claude-opus-5-5, 2026-11-10* (same reviewer and context as rounds 1–2; a different model family
+from the executor)
+
+**Verdict: REQUEST-CHANGES** — 1 HIGH, 3 MEDIUM.
+
+**Gate** (`bun run check`, run once on `8c4b38b`): typecheck clean · Biome 0 errors / 0 warnings ·
+`bun test` **6477 pass · 3 skip (the opt-in three) · 0 fail**.
+
+**Repros**, all through the real `App`, in `.tentacle/tmp/subagent-panel/review/`:
+- `repro3.ts` — ink-testing-library, 24 rows.
+- `repro190.ts` — Ink with a stdout of **real** width (190 / 80 columns, 24 rows). ink-testing-library
+  hard-codes 100 columns; see M3.
+
+### Findings
+
+**H1 — After DOWN, typed text goes into the input but the pill keeps focus, so Enter opens the
+dropdown and the message is never sent.**
+- *Where:* `background-focus.ts:296` returns `{ state: <input focus>, effect: "pass" }` for a
+  printable key on the pill. `App.tsx:3129` applies `step.state` ONLY when the effect is not `pass`,
+  so the focus change is dropped.
+- *Scenario* (`repro3.ts` P1): DOWN, type `hello`, Enter. The frame still shows `2 agents ⏎`,
+  `prompts` is `[]`, and the dropdown opens. This is the most common slip (a DOWN with an empty
+  draft, then typing), and the user's Enter is hijacked.
+- *Why the tests miss it:* the pure test (`background-focus.test.ts:105`) checks the returned state,
+  which the App throws away. No frame test types on the pill.
+- *Fix:* in `App.tsx`, apply the state before the `pass` check:
+  `if (step.state !== dockRef.current) setDock(step.state);`. Then `return` only when
+  `effect !== "pass"`.
+- *Test:* add a frame test "DOWN → type → Enter sends to the main agent (`prompts` = [text]) and the
+  pill is unfocused".
+
+**M1 — While a child is open, the status bar's hint replaces `auto-accept`.**
+- *Where:* `App.tsx:3452` `statusHint` (`enter sends to sa-1 ` / `… finished: …`), passed at
+  `App.tsx:3615` as `hint`.
+- *Scenario* (`repro190.ts`, drawer state, 190 columns): the last line reads
+  `/tmp/w · ctx –/128k … enter sends to sa-1  ·  2 agents ▴` and `⏵⏵ auto-accept off (shift+tab)` is
+  gone. The plan says (UI revision, "The pill"): "`targetBorder` / `statusHint` must never replace
+  `auto-accept on` any more". The input rule already says `→ sa-1 · enter sends · esc back`.
+- *Fix:* stop passing `hint={statusHint}` (delete `statusHint`), or give `StatusBar` a separate slot
+  that never displaces auto-accept.
+- *Test:* add a frame assertion "drawer open → the last line still contains `auto-accept`".
+
+**M2 — The sub-agent's `model` is decided once, when the child starts, and is never recomputed.**
+The plan's premise ("recomputed on every `subagents` update, so a `/model` mid-session stays right")
+is false as built.
+- *Where:*
+  - `cli/src/model-provider.ts:109` compares the child's entry with `config.model`, and only at the
+    pick, which happens when the child spawns.
+  - `core/src/agent-jobs.ts:175` stores the result in `live.model` from `subagent_start`.
+  - `daemon/src/subagents-view.ts` projects it as is.
+  - A settings rebuild reuses the same `AgentJobs` (`hosted-session.ts` `reusable()`), so running
+    children keep their start-time verdict.
+- *Scenario:* main model A; sa-1 starts on entry A (no label); the user switches `/model` to C. sa-1
+  still runs A, but its row shows no model, i.e. "same as main", which is now wrong. The reverse case
+  (a child on B, the user switches to B) shows a stale `B`.
+- *Why the test misses it:* `models-providers.test.ts:270` builds a NEW resolver with the switched
+  config, which only proves the case of a child spawned after the switch.
+- *Fix:* keep the child's resolved model id daemon-side only (in `AgentJobLive`, never on the wire),
+  next to its `models` name. Decide name vs absent in the daemon's projection (`subagentRows`, called
+  from `publishSubagents`) against the session's CURRENT main model, and republish the list on a
+  settings swap.
+- *Test:* a child already running, then a `/model` swap → the next `subagents` update gains or loses
+  `model`.
+
+**M3 — The "190 columns" frame tests render in a 100-column terminal, so they cannot catch a defect
+at the owner's width.**
+- *Where:* `subagent-panel-frames.test.tsx:649-729` (F15, F16) and every `mount(..., 190)`.
+  ink-testing-library's `Stdout.columns` is a constant 100 (`ink-testing-library/build/index.js:4`),
+  and the `columns` prop changes only the App's own maths.
+- *Evidence:* at "190", `repro3.ts` shows the input rule wrapped into a 100-cell and a 90-cell line
+  (`R 190 dropdown rules: [190, 100, 90, 190]`), and the frame is one line taller (24 vs 23).
+  F15's `inputRule` `/^─+$/` and its "≤ columns" checks pass on the wrapped pieces.
+- The real 190-column render (`repro190.ts`) happens to be correct:
+  - every rule is one full line;
+  - there is no gap at any width I tried;
+  - 23 lines on 24 rows at 190 and at 80.
+
+  So step 0's fix holds, but nothing in the suite would catch a regression at 190.
+- *Fix:* a test helper that renders through Ink with a stdout whose `columns` and `rows` are the
+  test's (the `repro190.ts` / the executor's `pty-repro.ts` shape). Run F15, F16 and the height checks
+  on it.
+
+### Checked and holding
+
+- **Placement:** order at 190 and 80 is transcript → dropdown / drawer → input rule → input →
+  bottom rule → status bar last. Idle adds 0 rows. Every state is ≤ 24 rows with the real width.
+- **Esc chain** drawer → dropdown → pill → input: the main draft comes back and the model returns to
+  the rule (`repro3.ts` D). Esc on the pill during a running turn does not abort it (P2: 0 aborts).
+- **DOWN/history:** the table is unchanged (`downEntersList` logic untouched).
+- **Mouse:** a click on the pill opens the dropdown in the idle, multi-line and running states; the
+  row maths agree with the frame (C).
+- **Drift 8:** a mouse report is `pass` and changes no state, so no key leaks. An armed `x` stays
+  armed across a wheel event (a wheel is not a key; acceptable).
+- **Drift 3 is right:** the dropdown and drawer live in the non-prompt branch of the tree
+  (`App.tsx:3490-3543`), so under a prompt nothing of the dock paints and reserving 0 rows is
+  correct. F13 is a real test: `▲ sa-1 asks` on the pill, `sa-2` never named, ≤ 24 lines.
+- **Round-1 fixes still hold:** drafts (D), late refusal (F11 unchanged), and height.
+- **`model` field:**
+  - It is a `ModelNameSchema` name, never an id.
+  - It is bounded twice: by the daemon (`wireLine` 64) and by the client (`clean` + 64), so text
+    from a pod is untrusted and bounded.
+  - It is an optional strip field under `subagents` (display), with no `PROTOCOL_VERSION` change.
+  - Both ends are wired (`sameRows` included).
+- **Feature close (6a→9 + 7):**
+  - The `[user → sa-N]` note emits no event, so it never touches the pill or `subagent_notify`.
+  - `pendingExitCount` still excludes it.
+  - The user's stop (`x`/`y` → `session/agent_kill`) and the agent's `agent_kill` tool both go
+    through `AgentJobs.kill`, so there is one exit path and one notice.
+  - A 6b-detached child is in the same `AgentJobs` rows, so it is in the pill.
+  - Below the bar: the pill says `✓ sa-N done` for a STOPPED child too.
+
+### How the executor behaved
+
+The protocol, daemon and client work is again careful. Step 0 was measured rather than assumed, and
+it found the real cause.
+- H1 repeats round 1's pattern: a pure function is tested, but the App does not apply its result.
+- M1 ignores an explicit plan line.
+- M2 claims a recompute that is not built.
+- The "190 columns" frames rest on a harness that cannot render 190 columns (M3).
+
+**REQUEST-CHANGES** — H1, M1, M2, M3.
