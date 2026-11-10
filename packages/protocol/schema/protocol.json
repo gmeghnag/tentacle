@@ -433,6 +433,30 @@
       "required": ["epoch", "seq"],
       "type": "object"
     },
+    "HistoryRepaired": {
+      "additionalProperties": true,
+      "properties": {
+        "invalidArguments": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "orphanResults": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "history_repaired",
+          "type": "string"
+        },
+        "unansweredCalls": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["invalidArguments", "orphanResults", "type", "unansweredCalls"],
+      "type": "object",
+      "x-event-class": "display"
+    },
     "HistoryReplaced": {
       "additionalProperties": true,
       "properties": {
@@ -2701,6 +2725,7 @@
           "agent_usage": "#/$defs/AgentUsage",
           "background_exit": "#/$defs/BackgroundExit",
           "context_note": "#/$defs/ContextNote",
+          "history_repaired": "#/$defs/HistoryRepaired",
           "history_replaced": "#/$defs/HistoryReplaced",
           "jobs": "#/$defs/JobsUpdate",
           "permission_request": "#/$defs/PermissionRequestUpdate",
@@ -2750,6 +2775,9 @@
         },
         {
           "$ref": "#/$defs/ContextNote"
+        },
+        {
+          "$ref": "#/$defs/HistoryRepaired"
         },
         {
           "$ref": "#/$defs/ToolProgress"
@@ -3025,6 +3053,10 @@
           "minLength": 1,
           "type": "string"
         },
+        "n": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
         "text": {
           "type": "string"
         },
@@ -3096,6 +3128,10 @@
           "type": "integer"
         },
         "toolUses": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "userRead": {
           "minimum": 0,
           "type": "integer"
         }
@@ -3916,5 +3952,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 21
+  "x-protocol-version": 22
 }

@@ -67,7 +67,7 @@ describe("T-P1: the two new request methods", () => {
   });
 
   test("no PROTOCOL_VERSION bump (a new method is free; an older daemon says MethodNotFound)", () => {
-    expect(PROTOCOL_VERSION as number).toBe(21);
+    expect(PROTOCOL_VERSION as number).toBe(22);
   });
 });
 

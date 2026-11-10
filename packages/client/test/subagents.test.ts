@@ -21,7 +21,12 @@ import type { SubagentRow } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
 import { RemoteClient, type SessionSubagentsNotice } from "../src/remote-client.ts";
-import { boundSubagentNotify, boundSubagents, subagentsFromSnapshot } from "../src/subagents.ts";
+import {
+  boundSubagentMessage,
+  boundSubagentNotify,
+  boundSubagents,
+  subagentsFromSnapshot,
+} from "../src/subagents.ts";
 
 const noopEnv = {
   id: "noop",
@@ -188,6 +193,28 @@ describe("T46: rows are bounded and sanitized at the client", () => {
     expect(subagentsFromSnapshot(many)).toHaveLength(32);
     expect(subagentsFromSnapshot(undefined)).toBeUndefined();
     expect(subagentsFromSnapshot([])).toEqual([]);
+  });
+
+  // docs/fix/autoaccept-wake-turns.md T9: the read figures cross the wire from a
+  // daemon that may be a pod, so they are bounded HERE to nonnegative safe
+  // integers (display only). MUTATION: drop `boundCount` → a `-1` and a `1e300`
+  // reach the drawer.
+  test("the read count is kept when sane, dropped when not", () => {
+    expect(boundSubagents([row(1, { userRead: 3 })])[0]?.userRead).toBe(3);
+    expect(boundSubagents([row(1, { userRead: 0 })])[0]?.userRead).toBe(0);
+    expect(boundSubagents([row(1, { userRead: -1 })])[0]).not.toHaveProperty("userRead");
+    expect(boundSubagents([row(1, { userRead: 1e300 })])[0]).not.toHaveProperty("userRead");
+    expect(boundSubagents([row(1, { userRead: 1.5 })])[0]).not.toHaveProperty("userRead");
+    // Absent (an older daemon) stays absent: no invented `0`.
+    expect(boundSubagents([row(1)])[0]).not.toHaveProperty("userRead");
+  });
+
+  test("a message keeps a positive index only", () => {
+    expect(boundSubagentMessage({ agentId: "sa-1", text: "t", n: 2 }).n).toBe(2);
+    expect(boundSubagentMessage({ agentId: "sa-1", text: "t" })).not.toHaveProperty("n");
+    expect(boundSubagentMessage({ agentId: "sa-1", text: "t", n: 0 })).not.toHaveProperty("n");
+    expect(boundSubagentMessage({ agentId: "sa-1", text: "t", n: -3 })).not.toHaveProperty("n");
+    expect(boundSubagentMessage({ agentId: "sa-1", text: "t", n: 1e300 })).not.toHaveProperty("n");
   });
 });
 

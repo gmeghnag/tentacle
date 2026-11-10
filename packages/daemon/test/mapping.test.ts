@@ -256,6 +256,7 @@ describe("toUpdateParams (the session/update frame)", () => {
     { type: "history_replaced", reason: "compact" },
     { type: "session_closed", reason: "closed" },
     { type: "context_note", text: "Continue with the task.", reason: "continue" },
+    { type: "history_repaired", invalidArguments: 1, unansweredCalls: 0, orphanResults: 0 },
     {
       type: "permission_request",
       requestId: "r",
@@ -363,4 +364,22 @@ describe("assertTextOnly (explicit reject until attachments land)", () => {
       expect(String((caught as Error).message)).toContain(block.type);
     });
   }
+});
+
+describe("eventToUpdate: history_repaired (docs/feat/history-validity-invariant.md)", () => {
+  test("maps the event field by field, as a display update", () => {
+    const update = eventToUpdate({
+      type: "history_repaired",
+      invalidArguments: 2,
+      unansweredCalls: 1,
+      orphanResults: 3,
+    });
+    expect(update).toEqual({
+      type: "history_repaired",
+      invalidArguments: 2,
+      unansweredCalls: 1,
+      orphanResults: 3,
+    });
+    expect(UPDATE_CLASS.history_repaired).toBe("display");
+  });
 });

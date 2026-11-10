@@ -4,7 +4,7 @@
  * whatever it returns.
  */
 import type { AgentEvent } from "@tentacle/agent";
-import { toolLabel } from "@tentacle/core";
+import { describeRepairs, toolLabel } from "@tentacle/core";
 
 export function render(event: AgentEvent): string {
   switch (event.type) {
@@ -53,6 +53,10 @@ export function render(event: AgentEvent): string {
     case "context_note":
       // A user hook's note is shown (R1); the loop's own notes are not.
       return event.reason === "hook" ? `\n${event.text}\n` : "";
+    case "history_repaired":
+      // Once per session: the model was sent a repaired copy, the saved
+      // session is unchanged (docs/feat/history-validity-invariant.md).
+      return `\n${describeRepairs(event)}\n`;
     case "turn_end":
       return event.reason === "end_turn" ? "\n" : `\n[stopped: ${event.reason}]\n`;
   }
@@ -100,6 +104,12 @@ export class AnswerSplit {
   private errAtLineStart = true;
   /** A trace was written since the last answer text. */
   private traced = false;
+  /**
+   * The `history_repaired` notice was already shown. Once per session: the
+   * one-shot CLI has no daemon-side dedup, and the Agent yields one notice per
+   * repaired round (docs/feat/history-validity-invariant.md).
+   */
+  private repairNoticed = false;
 
   /**
    * `shared`: stdout and stderr are the SAME terminal, so the answer moves the
@@ -130,6 +140,13 @@ export class AnswerSplit {
       out = this.outCursorAtLineStart ? "" : "\n";
       err = event.reason === "end_turn" ? "" : `[stopped: ${event.reason}]\n`;
     } else {
+      if (event.type === "history_repaired") {
+        // Once per session: a later repaired round of the same run stays quiet.
+        if (this.repairNoticed) {
+          return { out: "", err: "" };
+        }
+        this.repairNoticed = true;
+      }
       err = this.freshLine(render(event));
       if (err !== "") {
         this.traced = true;

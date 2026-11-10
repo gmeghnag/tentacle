@@ -60,11 +60,14 @@ import {
   type SubagentMessageParams,
   type SubagentMessageResult,
   type UpdateSettingsParams,
+  WAKE_TURN_PREFIX,
   type WireChatRequest,
+  isWakeTurnId,
 } from "@tentacle/protocol";
 import {
   DomainErrorCode,
   type DuplexChannel,
+  ErrorCode,
   type RequestContext,
   RpcError,
   RpcPeer,
@@ -561,6 +564,7 @@ export class Connection {
   // Acks at once: the turn runs daemon-side and ends with `turn_end` in the
   // stream, so its outcome survives a lost response.
   private prompt(params: PromptParams): PromptResult {
+    refuseWakeTurnId(params.turnId);
     const hosted = this.lookup(params.sessionId);
     // The PROMPTING connection is asked about project hooks: it is the client
     // with a human behind this turn (docs/feat/hooks-project-trust.md). The
@@ -572,6 +576,7 @@ export class Connection {
   // Acks at once, like `prompt`: the cancel and the new turn happen daemon-side
   // in one step; the new turn is asked about hooks through THIS connection.
   private sendNow(params: SendNowParams): PromptResult {
+    refuseWakeTurnId(params.turnId);
     const hosted = this.lookup(params.sessionId);
     return hosted.sendNow(params.turnId, params.interrupt, params.messages, this.askHooksTrust);
   }
@@ -589,5 +594,26 @@ export class Connection {
         entry.hosted.cancel(turnId);
       }
     }
+  }
+}
+
+/**
+ * `wake-` is the daemon's own: a client that names one in `session/prompt` or
+ * `session/send_now` is refused (docs/fix/autoaccept-wake-turns.md A2).
+ *
+ * This is SECURITY, not UX, on `serve` (AGENTS §7: the `serve` daemon is
+ * trusted, and a TUI with auto-accept on answers a wake turn's asks as its own
+ * session's). Without it, any other client of the same daemon could start a turn
+ * whose id looks like a wake and ride that auto-accept for one `once` approval —
+ * which is exactly the foreign-turn guard (docs/feat/tui-foreign-turns.md C5)
+ * this prefix reservation exists to keep. `HostedSession.prompt` stays
+ * unguarded: the daemon's own wake calls it directly.
+ */
+function refuseWakeTurnId(turnId: string): void {
+  if (isWakeTurnId(turnId)) {
+    throw new RpcError(
+      ErrorCode.InvalidParams,
+      `turnId: the ${JSON.stringify(WAKE_TURN_PREFIX)} prefix is reserved for the daemon's own wake turns`,
+    );
   }
 }

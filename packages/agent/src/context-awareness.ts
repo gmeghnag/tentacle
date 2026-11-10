@@ -12,6 +12,7 @@
  * Pure and React-free: the loop decides WHEN with these functions.
  */
 import type { ChatMessage, ContextUsage, TokenCounter, ToolDefinition } from "@tentacle/core";
+import { type RepairCounts, repairCounts, repairHistory } from "@tentacle/core";
 
 /**
  * What the provider measured: request `len` messages long, whose last one is
@@ -53,6 +54,23 @@ export function renderForModel(m: ChatMessage): ChatMessage {
   }
   const { contextUsage, ...rest } = m;
   return { ...rest, content: `${m.content}\n\n${contextLine(contextUsage)}` };
+}
+
+/**
+ * The model's copy of the history: repaired for the wire
+ * (`repairHistory`, docs/feat/history-validity-invariant.md), then rendered;
+ * plus what to tell the user about the repair. The stored history is untouched:
+ * a suspended turn's dangling calls stay dangling (resume depends on it).
+ */
+export function modelView(history: readonly ChatMessage[]): {
+  readonly messages: ChatMessage[];
+  readonly repairs: RepairCounts | null;
+} {
+  const repaired = repairHistory(history);
+  return {
+    messages: repaired.messages.map(renderForModel),
+    repairs: repairCounts(repaired.issues),
+  };
 }
 
 /** The latest line in `history`, if any — the counting state, never stored apart. */

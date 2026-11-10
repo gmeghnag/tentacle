@@ -271,6 +271,20 @@ describe("display state reducer", () => {
     }
   });
 
+  test("history_repaired appends exactly one notice with the shared text (docs/feat/history-validity-invariant.md)", () => {
+    // Mutation: map it to a no-op state → red.
+    const s = applyEvent(
+      initialState,
+      { type: "history_repaired", invalidArguments: 2, unansweredCalls: 1, orphanResults: 1 },
+      0,
+    );
+    expect(s.items).toHaveLength(initialState.items.length + 1);
+    expect(s.items.at(-1)).toEqual({
+      kind: "notice",
+      text: "history repaired for the model: 2 tool calls with invalid arguments, 1 unanswered tool call, 1 stray tool result — the saved session is unchanged",
+    });
+  });
+
   test("an agent exit reads as a sub-agent; a shell one is unchanged (docs/feat/subagent-background.md)", () => {
     // Mutation: ignore `agent` → the shell wording → red.
     const done = backgroundExitNotice("sa-1", "map repo", "exited", null, {

@@ -252,6 +252,8 @@ export interface SessionSubagentMessageNotice {
   readonly sessionId: string;
   readonly agentId: string;
   readonly text: string;
+  /** Its place among the user's messages to this child (absent from an older daemon). */
+  readonly n?: number;
 }
 
 /**
@@ -333,6 +335,15 @@ export interface RemoteClientOptions {
   readonly clientInfo?: ClientInfo;
   /** Where the daemon runs (default `serve`): picks the advice for a daemon too old to give its own. */
   readonly daemonKind?: DaemonKind;
+  /**
+   * The daemon is a TRUSTED `serve` host that starts its OWN wake turns
+   * (`wake-<uuid>`, docs/fix/autoaccept-wake-turns.md): their asks are this
+   * session's, so auto-accept may answer them. Defaults to OFF, and must: this
+   * is a TRUST bit (AGENTS §7), so it fails closed — never keyed on
+   * `daemonKind`, which defaults to `"serve"`. Set only by `connect`; the
+   * worker, pod `run`/`attach` and the relay never say it.
+   */
+  readonly daemonWakes?: boolean;
   /**
    * Serves the daemon's TITLE calls on the model tunnel (`purpose: "title"`):
    * `model.titleModel`, else the main model. Absent → this laptop's
@@ -635,6 +646,8 @@ export class RemoteClient {
   private readonly hooksTrust?: RemoteClientOptions["hooksTrust"];
   private readonly clientInfo?: ClientInfo;
   private readonly daemonKind: DaemonKind;
+  /** The daemon wakes on its own (`serve`, trusted): `RemoteSession.autoAcceptsTurn` reads it. */
+  private readonly daemonWakes: boolean;
   /** Sessions with a `hooks/trust` prompt in flight (at most one each). */
   private readonly trustAsking = new Set<string>();
   /** Hashes `session/log` checkpoints (`readBack`); absent → `readBack` refuses. */
@@ -665,6 +678,7 @@ export class RemoteClient {
       this.clientInfo = options.clientInfo;
     }
     this.daemonKind = options.daemonKind ?? "serve";
+    this.daemonWakes = options.daemonWakes === true;
     if (options.titleModelProvider) {
       this.titleModelProvider = options.titleModelProvider;
     }
@@ -812,6 +826,7 @@ export class RemoteClient {
       seedTitle,
       opts.attach,
       opts.closeIfLast === true,
+      this.daemonWakes,
     );
   }
 
@@ -2103,7 +2118,12 @@ export class RemoteClient {
   /** The user's own message to a child (bounded and sanitized here): told, never stored. */
   private subagentMessaged(entry: SessionEntry, view: SubagentMessageView): void {
     for (const listener of this.subagentMessageListeners) {
-      listener({ sessionId: entry.id, agentId: view.agentId, text: view.text });
+      listener({
+        sessionId: entry.id,
+        agentId: view.agentId,
+        text: view.text,
+        ...(view.n === undefined ? {} : { n: view.n }),
+      });
     }
   }
 

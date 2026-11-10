@@ -25,6 +25,7 @@ import {
   type SubagentRow,
   type TurnEnd,
   type UpdateSettingsResult,
+  isWakeTurnId,
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import { type ReturnedRow, handBack, restoredByRefusal, stayingRows } from "./hand-back.ts";
@@ -162,6 +163,12 @@ export class RemoteSession implements SessionStreamListener {
   private unsubscribeQueue: (() => void) | null = null;
   /** Built to attach to an existing session (`open`), never to create one. */
   private readonly attach: { readonly reopen?: boolean } | undefined;
+  /**
+   * The daemon is a trusted `serve` host that starts its own wake turns: their
+   * asks count as this session's for auto-accept (`autoAcceptsTurn`). From
+   * `RemoteClientOptions.daemonWakes`; FALSE everywhere but `connect`.
+   */
+  private readonly daemonWakes: boolean;
   /** The memoized eager attach (`open`). */
   private attaching: Promise<void> | null = null;
   /** The memoized create-or-attach of a seeded session (`openSeeded`, or the first send). */
@@ -233,6 +240,7 @@ export class RemoteSession implements SessionStreamListener {
     seedTitle?: SeedTitle,
     attach?: { readonly reopen?: boolean },
     closeIfLast = false,
+    daemonWakes = false,
   ) {
     this.client = client;
     this.seedMessages = seedMessages;
@@ -240,6 +248,7 @@ export class RemoteSession implements SessionStreamListener {
     this.seedTitle = seedTitle;
     this.attach = attach;
     this.closeIfLast = closeIfLast;
+    this.daemonWakes = daemonWakes;
   }
 
   /**
@@ -266,6 +275,23 @@ export class RemoteSession implements SessionStreamListener {
       this.mintedTurns.has(turnId) ||
       [this.active, this.next, this.settling].some((turn) => turn?.turnId === turnId)
     );
+  }
+
+  /**
+   * Auto-accept may answer an ask of this turn: one I minted, or — on a trusted
+   * `serve` daemon that wakes on its own (`daemonWakes`, set by `connect`) — the
+   * SESSION's own wake turn (docs/fix/autoaccept-wake-turns.md A4).
+   *
+   * The prefix test is stateless on purpose: a wake turn that ended, and a
+   * background child it spawned that reports much later, must still be
+   * answered — so the bounded `mintedTurns` cannot apply here. `ownsTurn` is
+   * unchanged: for quit/cancel semantics a wake stays a FOREIGN turn.
+   *
+   * A daemon refuses a CLIENT-minted `wake-` id (`connection.ts`), so on a
+   * `serve` host this prefix identifies exactly the session's own wakes.
+   */
+  autoAcceptsTurn(turnId: string): boolean {
+    return this.ownsTurn(turnId) || (this.daemonWakes && isWakeTurnId(turnId));
   }
 
   /**
@@ -520,10 +546,16 @@ export class RemoteSession implements SessionStreamListener {
    * (bounded and sanitized by the client), never given a backlog: a notice is a
    * moment, not state (docs/feat/subagent-panel.md). Returns an unsubscribe.
    */
-  onSubagentMessage(listener: (notice: { agentId: string; text: string }) => void): () => void {
+  onSubagentMessage(
+    listener: (notice: { agentId: string; text: string; n?: number }) => void,
+  ): () => void {
     return this.client.onSessionSubagentMessage((notice) => {
       if (notice.sessionId === this.id) {
-        listener({ agentId: notice.agentId, text: notice.text });
+        listener({
+          agentId: notice.agentId,
+          text: notice.text,
+          ...(notice.n === undefined ? {} : { n: notice.n }),
+        });
       }
     });
   }

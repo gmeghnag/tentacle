@@ -45,6 +45,7 @@ import {
   backgroundNames,
   sameIds,
   sameJobIds,
+  sameReads,
 } from "./background-view.ts";
 import {
   BLINK_HALF_MS,
@@ -112,6 +113,7 @@ import { insertReply, orphanNotice, replyView, stepPermissionKey } from "./permi
 import {
   type AutoAcceptFeed,
   type DraftBack,
+  autoAcceptTest,
   permissionAgentLine,
   permissionDetailLines,
   permissionShowsCwd,
@@ -344,6 +346,12 @@ export interface SessionController {
   open?(): Promise<void>;
   /** `turnId` is one of my own turns (auto-accept answers only those). */
   ownsTurn?(turnId: string): boolean;
+  /**
+   * Auto-accept's own test, when it is WIDER than `ownsTurn`: an own turn or —
+   * on a trusted `serve` daemon that wakes on its own — the session's own wake
+   * turn (docs/fix/autoaccept-wake-turns.md A5). Absent → `ownsTurn` decides.
+   */
+  autoAcceptsTurn?(turnId: string): boolean;
   /** Subscribe to the daemon's queue (every writer's waiting rows); returns an unsubscribe. */
   onQueued?(listener: (state: DaemonQueue) => void): () => void;
   /**
@@ -394,7 +402,11 @@ export interface SessionController {
    * Returns an unsubscribe (docs/feat/subagent-panel.md).
    */
   onSubagentMessage?(
-    listener: (notice: { readonly agentId: string; readonly text: string }) => void,
+    listener: (notice: {
+      readonly agentId: string;
+      readonly text: string;
+      readonly n?: number;
+    }) => void,
   ): () => void;
   /**
    * Stop following the session WITHOUT ending it — it runs on for any device
@@ -666,12 +678,7 @@ export function App({
   const draftBackRef = useRef<DraftBack | null>(null);
   const permission = usePermissionBroker(
     permissions,
-    () => {
-      const session = sessionRef.current;
-      return session?.ownsTurn
-        ? (turnId: string) => session.ownsTurn?.(turnId) === true
-        : undefined;
-    },
+    () => autoAcceptTest(sessionRef.current),
     autoAccept,
     (text, cause) => draftBackRef.current?.(text, cause),
   );
@@ -786,7 +793,10 @@ export function App({
       dockLastRowsRef.current = previous;
     }
     subagentsRef.current = rows;
-    if (!sameIds(previous, rows)) {
+    // A read count alone must still reach the frame: the drawer's `✓ read`
+    // reads it (docs/fix/autoaccept-wake-turns.md part B). `sameIds` alone would
+    // swallow it, exactly as the daemon's `sameRows` would.
+    if (!sameIds(previous, rows) || !sameReads(previous, rows)) {
       setSubagents(rows);
     }
   }, []);
@@ -1581,7 +1591,9 @@ export function App({
       return;
     }
     const session = sessionRef.current;
-    const read = session?.jobOutput;
+    // Bound to the session (`connect` hands the TUI a CLASS instance, whose
+    // `jobOutput` reads `this`): a method taken off the object would throw.
+    const read = session?.jobOutput === undefined ? undefined : session.jobOutput.bind(session);
     if (read === undefined) {
       // An older daemon: one notice, the drawer stays open and its frame intact.
       pushNotice("_this session cannot show a job's output (older daemon)_");
@@ -1641,7 +1653,8 @@ export function App({
     if (jobTargetId === null || jobEndedWhileOpen === null) {
       return;
     }
-    const read = sessionRef.current?.jobOutput;
+    const session = sessionRef.current;
+    const read = session?.jobOutput === undefined ? undefined : session.jobOutput.bind(session);
     if (read === undefined) {
       return;
     }
@@ -2300,7 +2313,7 @@ export function App({
           stateRef.current = appendNotice(stateRef.current, userToSubagentNotice(m));
           setScrollOffset(0);
           flushNow();
-          setDock((prev) => noteSent(prev, m.agentId, m.text));
+          setDock((prev) => noteSent(prev, m.agentId, m.text, m.n));
         }) ?? null;
       const opening = session?.open?.();
       if (!opening) {
@@ -2614,7 +2627,11 @@ export function App({
     if (!session?.clear) {
       return;
     }
-    const { clear } = session;
+    // Called ON the session: under `connect` this is the `RemoteSession` CLASS
+    // instance, whose `clear` reads `this` (`this.openForReset()`) — a method
+    // taken off the object and called alone loses `this`
+    // (docs/fix/clear-connect-unbound.md).
+    const clear = session.clear.bind(session);
     clearingRef.current = true;
     // The open a reset needs comes FIRST (review M1): it can ATTACH a session
     // another device keeps live, and that attach's snapshot is a

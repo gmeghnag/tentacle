@@ -19,6 +19,7 @@ import {
   dockKey,
   dockKindOf,
   downEntersList,
+  noteSent,
   openChild,
   openDropdown,
   reconcile,
@@ -30,6 +31,24 @@ import {
 const key = (k: Partial<Record<string, boolean>> = {}, char = "") => ({ char, key: k });
 
 describe("T-F1: the DOWN table", () => {
+  test("noteSent keeps a message's index (and clears the draft), with or without an `n`", () => {
+    // docs/fix/autoaccept-wake-turns.md part B: the drawer needs the message's
+    // own index to say `✓ read`. MUTATION: drop the `n` argument → the `✓ read`
+    // frame test goes red (no index to compare).
+    const withIndex = noteSent(INPUT_DOCK, "sa-1", "hi", 2);
+    expect(withIndex.sent["sa-1"]).toEqual([{ text: "hi", n: 2 }]);
+    expect(withIndex.drafts["sa-1"]).toBe("");
+    // An older daemon sends no index: the text alone, and nothing invented.
+    const withoutIndex = noteSent(INPUT_DOCK, "sa-1", "hi");
+    expect(withoutIndex.sent["sa-1"]).toEqual([{ text: "hi" }]);
+    // The last 3 keep their own indexes, in order.
+    const three = noteSent(
+      noteSent(noteSent(INPUT_DOCK, "sa-1", "a", 1), "sa-1", "b", 2),
+      "sa-1",
+      "c",
+    );
+    expect(three.sent["sa-1"]).toEqual([{ text: "a", n: 1 }, { text: "b", n: 2 }, { text: "c" }]);
+  });
   const base = {
     action: "history" as const,
     onDraftSlot: true,

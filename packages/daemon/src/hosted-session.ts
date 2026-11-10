@@ -100,6 +100,7 @@ import {
   type SubagentRow,
   type TurnEnd,
   type TurnError,
+  WAKE_TURN_PREFIX,
   clientSupportsUpdate,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
@@ -507,6 +508,12 @@ export class HostedSession {
   /** Insertion-ordered: the last one is the most recently attached. */
   private readonly attachments = new Set<Attachment>();
   private closed = false;
+  /**
+   * The `history_repaired` notice was already sent for this loaded session
+   * (docs/feat/history-validity-invariant.md, Part C): once per session, in
+   * memory — persisting it would change the sidecar format for a notice.
+   */
+  private historyRepairNoticed = false;
   private readonly jobs: JobController | undefined;
   private readonly unsubscribeExit: (() => void) | undefined;
   private readonly unsubscribeStart: (() => void) | undefined;
@@ -1723,7 +1730,10 @@ export class HostedSession {
     // The note the parent's agent reads at its next turn (never a wake).
     this.session.noteUserToSubagent(agentId, text);
     try {
-      this.emit({ type: "subagent_message", agentId, text });
+      // `n`: this message's place among the user's messages to this child, so a
+      // client can say `✓ read` once its row's `userRead` reaches it
+      // (docs/fix/autoaccept-wake-turns.md, part B).
+      this.emit({ type: "subagent_message", agentId, text, n: result.index });
     } catch (error) {
       this.reportTurnError(error);
     }
@@ -2271,6 +2281,14 @@ export class HostedSession {
         if (event.type === "tool_phase" && event.phase === "running") {
           this.log.callStarted(event.id);
         }
+        if (event.type === "history_repaired") {
+          // Synchronous, no await: the drive-loop invariant holds. The user is
+          // told ONCE per loaded session (a restart notifies again, once).
+          if (this.historyRepairNoticed) {
+            continue;
+          }
+          this.historyRepairNoticed = true;
+        }
         const update = eventToUpdate(named);
         if (update) {
           this.emit(update);
@@ -2407,7 +2425,7 @@ export class HostedSession {
     if (!due) {
       return;
     }
-    const turnId = `wake-${crypto.randomUUID()}`;
+    const turnId = `${WAKE_TURN_PREFIX}${crypto.randomUUID()}`;
     // Idle: the history reflects every emit, so the cut may move to "now". It
     // leaves the session-level `background_exit` frames of the exits this turn
     // will flush BEFORE the cut: a client attaching mid-wake gets them through
