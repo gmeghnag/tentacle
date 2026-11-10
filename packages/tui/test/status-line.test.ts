@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import stringWidth from "string-width";
 import { headCells } from "../src/cells.ts";
-import { contextMeterView, modelBorder, shortPath, statusLayout } from "../src/status-line.ts";
+import { cellWidth } from "../src/cells.ts";
+import {
+  contextMeterView,
+  modelBorder,
+  shortPath,
+  statusLayout,
+  targetBorder,
+} from "../src/status-line.ts";
 import { contextShown } from "../src/status-view.ts";
 
 describe("modelBorder: the model name right-aligned on the input's top border", () => {
@@ -473,5 +480,33 @@ describe("contextMeterView: ctx always carries its max", () => {
   test("estimate: `~` on the percent and the used count", () => {
     const v = contextMeterView(9000, true, 128000);
     expect(v).toMatchObject({ kind: "known", percent: "~7%", used: "~9k", max: "128k", filled: 1 });
+  });
+});
+
+describe("targetBorder: the input's top rule names the CHILD while one is open (feat/subagent-panel)", () => {
+  test("`──── → sa-1 · explore ───── esc back ─`, exactly `width` cells, target on the LEFT", () => {
+    const row = targetBorder({ target: "→ sa-1", sub: "explore" }, " esc back", 60);
+    expect(row.startsWith("─ ")).toBe(true);
+    expect(row).toContain("→ sa-1 · explore");
+    // The right slot says what Esc does here — and it is NOT "stop the turn".
+    expect(row.trimEnd().endsWith("esc back ─")).toBe(true);
+    expect(cellWidth(row)).toBe(60);
+  });
+
+  test("an ended target keeps its name and says so", () => {
+    const row = targetBorder({ target: "→ sa-1", sub: "finished" }, "", 60);
+    expect(row).toContain("→ sa-1 · finished");
+    expect(row).not.toContain("esc back");
+    expect(cellWidth(row)).toBe(60);
+  });
+
+  test("a wide target is cut by cells; a narrow terminal degrades to a plain rule", () => {
+    const row = targetBorder({ target: "→ sa-long-name", sub: "explore-and-migrate" }, "", 30);
+    expect(cellWidth(row)).toBe(30);
+    expect(targetBorder({ target: "→ sa-1", sub: "x" }, "", 5)).toBe("─".repeat(5));
+  });
+
+  test("no sub: just the target (a drawer whose child reports no type)", () => {
+    expect(targetBorder({ target: "→ sa-1", sub: "" }, "", 40)).toContain("→ sa-1 ");
   });
 });

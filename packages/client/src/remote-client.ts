@@ -105,12 +105,18 @@ import {
   sinceOf,
 } from "./session-reducer.ts";
 import {
+  type SubagentMessageView,
   type SubagentNotify,
+  boundSubagentMessage,
   boundSubagentNotify,
   boundSubagents,
   subagentsFromSnapshot,
 } from "./subagents.ts";
 import { type DaemonKind, explainVersionMismatch } from "./version-mismatch.ts";
+
+/** A daemon that predates `session/subagent_message`: a typed refusal, never a throw at a UI. */
+export const SUBAGENT_MESSAGE_OLD_DAEMON =
+  "this daemon cannot message sub-agents (older version) — nothing was sent";
 
 /** A `once` session command whose link dropped before the daemon answered (its outcome is unknown). */
 export const DROPPED_NOT_RETRIED = "the connection dropped before the daemon answered; not retried";
@@ -214,6 +220,18 @@ export interface SessionSubagentsNotice {
 export interface SessionSubagentNotifyNotice {
   readonly sessionId: string;
   readonly notify: SubagentNotify;
+}
+
+/**
+ * The USER wrote to a background child (a `subagent_message` update,
+ * docs/feat/subagent-panel.md): one notice per attached client, the sender's
+ * own included (one render path, no local echo). Not turn-scoped: a child runs
+ * between turns. Display only.
+ */
+export interface SessionSubagentMessageNotice {
+  readonly sessionId: string;
+  readonly agentId: string;
+  readonly text: string;
 }
 
 /**
@@ -550,6 +568,9 @@ export class RemoteClient {
   private readonly subagentNotifyListeners = new Set<
     (notice: SessionSubagentNotifyNotice) => void
   >();
+  private readonly subagentMessageListeners = new Set<
+    (notice: SessionSubagentMessageNotice) => void
+  >();
   private readonly statusListeners = new Set<(status: LinkStatus) => void>();
   private readonly historyLostListeners = new Set<(notice: HistoryLostNotice) => void>();
   private readonly sessionDeletedListeners = new Set<(notice: SessionDeletedNotice) => void>();
@@ -872,6 +893,60 @@ export class RemoteClient {
   onSessionSubagentNotify(listener: (notice: SessionSubagentNotifyNotice) => void): () => void {
     this.subagentNotifyListeners.add(listener);
     return () => this.subagentNotifyListeners.delete(listener);
+  }
+
+  /**
+   * Subscribe to the USER's own messages to background children, across all
+   * sessions (see `SessionSubagentMessageNotice`); returns an unsubscribe.
+   * Never given a backlog: a notice is a moment, not state.
+   */
+  onSessionSubagentMessage(listener: (notice: SessionSubagentMessageNotice) => void): () => void {
+    this.subagentMessageListeners.add(listener);
+    return () => this.subagentMessageListeners.delete(listener);
+  }
+
+  /**
+   * `session/subagent_message` (docs/feat/subagent-panel.md): write the user's
+   * text into a running background child. Resolves `{ok, reason?}` — a refusal
+   * is a RESULT, never thrown at a UI — and an older daemon's `MethodNotFound`
+   * becomes the same typed refusal ("older version"). Not re-sent after a drop
+   * (a user re-types it): `"once"`.
+   */
+  messageSubagent(
+    sessionId: string,
+    agentId: string,
+    text: string,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    return this.sessionCall(
+      sessionId,
+      Method.SubagentMessage,
+      { sessionId, agentId, text },
+      "once",
+    ).then(
+      (result) => result as { ok: boolean; reason?: string },
+      (error: unknown): { ok: boolean; reason?: string } => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { ok: false, reason: SUBAGENT_MESSAGE_OLD_DAEMON };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * `session/agent_kill` (docs/feat/subagent-panel.md): stop one background
+   * child. Never a throw for a refusal: `{killed: false}`.
+   */
+  killSubagent(sessionId: string, agentId: string): Promise<{ killed: boolean }> {
+    return this.sessionCall(sessionId, Method.AgentKill, { sessionId, agentId }, "once").then(
+      (result) => result as { killed: boolean },
+      (error: unknown): { killed: boolean } => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { killed: false };
+        }
+        throw error;
+      },
+    );
   }
 
   /**
@@ -1936,6 +2011,13 @@ export class RemoteClient {
     }
   }
 
+  /** The user's own message to a child (bounded and sanitized here): told, never stored. */
+  private subagentMessaged(entry: SessionEntry, view: SubagentMessageView): void {
+    for (const listener of this.subagentMessageListeners) {
+      listener({ sessionId: entry.id, agentId: view.agentId, text: view.text });
+    }
+  }
+
   /** A `session_settings` in seq order: the newest report; told unless the sync was this client's. */
   private settingsChanged(
     entry: SessionEntry,
@@ -2334,6 +2416,9 @@ export class RemoteClient {
       } else if (update.type === "subagent_notify") {
         // Not turn-scoped: a child messages the agent while it runs (idle too).
         this.subagentNotified(entry, boundSubagentNotify(update));
+      } else if (update.type === "subagent_message") {
+        // Not turn-scoped: the USER wrote to a child, and every client shows it.
+        this.subagentMessaged(entry, boundSubagentMessage(update));
       } else if (update.type === "session_settings") {
         // Not turn-scoped: another client's sync is told while idle too.
         this.settingsChanged(entry, update.settings, update.id);

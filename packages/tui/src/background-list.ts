@@ -1,0 +1,481 @@
+import type { BackgroundAgentRow } from "./background-view.ts";
+/**
+ * The dock under the footbar: the background list, and one child opened
+ * (docs/feat/subagent-panel.md, Design 3). AGENTS §7: every decision that
+ * branches lives HERE — the width tiers, the cells-cut, the 5-row window that
+ * follows the selection, the glyph of a row, the hint each focus offers, the
+ * drawer's `… +k earlier` — so `components/BackgroundList.tsx` and
+ * `SubagentDrawer.tsx` only map a segment's tone to a theme token.
+ *
+ * A segment's `tone` is SEMANTIC (`accent`, `warn`, `dim`, …), never a colour:
+ * the component picks the token, so light/dark stay `theme.ts`'s business.
+ * Every string here is measured in CELLS (`cells.ts`), never code points.
+ *
+ * Shell jobs are painted from the same grammar (owner P6 (a): the daemon feed
+ * of running jobs is a follow-up, so `jobs` is empty today).
+ */
+import { cellWidth, truncateCells } from "./cells.ts";
+import { formatDuration, formatTokens } from "./format.ts";
+
+/** The most rows the dock shows before it windows (mockup 05). */
+export const LIST_MAX_ROWS = 5;
+
+/** How many of the user's messages the drawer keeps (the most recent). */
+export const DRAWER_SENT_MAX = 3;
+
+/** Below this width the token figure leaves a row's meta. */
+const TIER_TOKENS = 90;
+/** Below this width the type column leaves a row and the hint shortens. */
+const TIER_TYPE = 60;
+/** Below this width the hint is `↓ · ctrl+t` (mockup 07). */
+const TIER_HINT = 70;
+/** The description column never goes below this while there is any room at all. */
+const MIN_DESC = 6;
+/** The id column: `sa-12` is two digits of headroom on `sa-9`. */
+const ID_COLS = 5;
+const TYPE_COLS = 8;
+
+/** A run of cells with a semantic tone; the component maps it to a theme token. */
+export interface DockSegment {
+  readonly text: string;
+  readonly tone: DockTone;
+}
+
+export type DockTone =
+  | "accent"
+  | "accentBold"
+  | "bold"
+  | "normal"
+  | "subtle"
+  | "dim"
+  | "warn"
+  | "notice"
+  | "success"
+  | "error"
+  | "border";
+
+/** One painted row of the list: the parts, plus the whole line it makes. */
+export interface BackgroundDockRow {
+  readonly id: string;
+  readonly glyph: "running" | "asking" | "job";
+  /** The child's `agentType` (`explore`, `general`), or `shell` for a job. */
+  readonly typeCol: string;
+  /** Already cut to its column. */
+  readonly description: string;
+  /** The right-hand figure (counters, the ask, the stop confirm). */
+  readonly meta: string;
+  readonly selected: boolean;
+  readonly armed: boolean;
+  readonly segments: readonly DockSegment[];
+}
+
+/** A shell job as the dock paints it (the daemon's feed is P6's follow-up). */
+export interface DockJobRow {
+  readonly id: string;
+  readonly command: string;
+  readonly startedAt: number;
+}
+
+export type DockFocus =
+  | { readonly kind: "input" }
+  | { readonly kind: "list"; readonly selected: string; readonly armed: boolean }
+  | {
+      readonly kind: "open";
+      readonly id: string;
+      readonly ended: DockOutcome | null;
+      readonly frozen: BackgroundAgentRow | null;
+    };
+
+/** How a child ended, as its drawer's rule says it. */
+export type DockOutcome = { readonly kind: "finished" } | { readonly kind: "stopped" };
+
+/** The list as the dock paints it: its rule, its window, its hint. */
+export interface BackgroundListView {
+  /** `background` — the rule's title (accent + bold while the list has focus). */
+  readonly label: string;
+  /** Every item, sub-agents and jobs (the rule's `· 3`). */
+  readonly count: number;
+  readonly rule: readonly DockSegment[];
+  readonly rows: readonly BackgroundDockRow[];
+  /** Index into the full item list of `rows[0]`. */
+  readonly start: number;
+  /** How many items are above / below the window. */
+  readonly above: number;
+  readonly below: number;
+  /** The rule's right-hand content, already composed (tests pin it). */
+  readonly hint: string;
+  readonly focused: boolean;
+}
+
+/** The background list is shown iff something is running (the plan's `listVisible`). */
+export function listVisible(
+  rows: readonly BackgroundAgentRow[] | undefined,
+  jobs: readonly DockJobRow[] = [],
+): boolean {
+  return (rows?.length ?? 0) + jobs.length > 0;
+}
+
+function glyphOf(id: string, askingId: string | null, isJob: boolean): BackgroundDockRow["glyph"] {
+  if (isJob) {
+    return "job";
+  }
+  return id === askingId ? "asking" : "running";
+}
+
+/** `19 tools · 12k · 1m 12s` (the tokens drop below the tier), or the ask, or the confirm. */
+function agentMeta(
+  row: BackgroundAgentRow,
+  width: number,
+  asking: boolean,
+  armed: boolean,
+  now: number,
+): string {
+  if (armed) {
+    return `stop ${row.id}? y/N`;
+  }
+  if (asking) {
+    return "⚠ needs your permission";
+  }
+  const tools = `${row.toolUses ?? 0} tools`;
+  const seconds = row.startedAt === undefined ? null : Math.floor((now - row.startedAt) / 1000);
+  const time = seconds === null ? null : formatDuration(seconds);
+  if (width >= TIER_TOKENS) {
+    return [tools, formatTokens(row.tokens ?? 0), time]
+      .filter((p): p is string => p !== null)
+      .join(" · ");
+  }
+  return [tools, time].filter((p): p is string => p !== null).join(" · ");
+}
+
+/** The segments of one row, cut so the whole line is exactly `width` cells. */
+function rowSegments(opts: {
+  readonly selected: boolean;
+  readonly focused: boolean;
+  readonly glyph: BackgroundDockRow["glyph"];
+  readonly id: string;
+  readonly typeCol: string;
+  readonly description: string;
+  readonly meta: string;
+  readonly width: number;
+  readonly metaTone: DockTone;
+}): { segments: DockSegment[]; description: string; meta: string } {
+  const { selected, focused, metaTone, width } = opts;
+  const typeCols = width >= TIER_TYPE ? TYPE_COLS : 0;
+  // marker(2) + glyph(1) + space(1) + id(ID_COLS+1) + [type(TYPE_COLS+1)] + "  " + meta + " ".
+  const fixed = 2 + 1 + 1 + ID_COLS + 1 + (typeCols === 0 ? 0 : typeCols + 1) + 2 + 1;
+  let meta = opts.meta;
+  if (width - fixed - cellWidth(meta) < MIN_DESC) {
+    meta = truncateCells(meta, Math.max(0, width - fixed - MIN_DESC));
+  }
+  const descCols = Math.max(0, width - fixed - cellWidth(meta));
+  const description = truncateCells(opts.description, descCols);
+  const glyphTone: DockTone =
+    opts.glyph === "asking" ? "warn" : opts.glyph === "job" ? "subtle" : "accent";
+  const glyphChar = opts.glyph === "asking" ? "▲" : opts.glyph === "job" ? "◆" : "●";
+  // The selection grammar (the palette's, the `/mcp` panel's): accent + bold on
+  // the selected row, the rest dimmed; unfocused rows are calm.
+  const idTone: DockTone = selected ? "accentBold" : "subtle";
+  const typeTone: DockTone = selected ? "accent" : "dim";
+  const descTone: DockTone = selected ? "accentBold" : focused ? "subtle" : "normal";
+  const segments: DockSegment[] = [
+    { text: selected ? "› " : "  ", tone: "accent" },
+    { text: glyphChar, tone: glyphTone },
+    { text: " ", tone: "normal" },
+    { text: `${opts.id.padEnd(ID_COLS).slice(0, ID_COLS)} `, tone: idTone },
+    ...(typeCols === 0
+      ? []
+      : [{ text: `${opts.typeCol.padEnd(typeCols).slice(0, typeCols)} `, tone: typeTone }]),
+    { text: description, tone: descTone },
+    { text: "  ", tone: "normal" },
+  ];
+  // The meta fills the rest of the line (the mockups right-align it by padding
+  // it to the column it was given, then the row ends).
+  const pad = Math.max(0, width - fixed - cellWidth(meta) - cellWidth(description));
+  if (pad > 0) {
+    segments.push({ text: " ".repeat(pad), tone: "normal" });
+  }
+  segments.push({ text: meta, tone: selected && metaTone === "dim" ? "accent" : metaTone });
+  segments.push({ text: " ", tone: "normal" });
+  return { segments, description, meta };
+}
+
+/** The whole line a row paints (the tests pin its cells; the component splits it by tone). */
+export function rowText(row: Pick<BackgroundDockRow, "segments">): string {
+  return row.segments.map((s) => s.text).join("");
+}
+
+/** The rule: `── background · 3 ──── ↓ select · ctrl+t ─`, exactly `width` cells. */
+function ruleSegments(
+  width: number,
+  label: string,
+  count: number,
+  hint: string,
+  focused: boolean,
+): DockSegment[] {
+  const left: DockSegment[] = [
+    { text: "─ ", tone: "border" },
+    { text: label, tone: focused ? "accentBold" : "subtle" },
+    { text: ` · ${count}`, tone: "dim" },
+    { text: " ", tone: "border" },
+  ];
+  const right: DockSegment[] = [
+    { text: " ", tone: "border" },
+    { text: hint, tone: "dim" },
+    { text: " ─", tone: "border" },
+  ];
+  const used = [...left, ...right].reduce((n, s) => n + cellWidth(s.text), 0);
+  return [
+    ...left,
+    ...(used < width ? [{ text: "─".repeat(width - used), tone: "border" as const }] : []),
+    ...right,
+  ].slice(0, used < width ? undefined : left.length);
+}
+
+/** The hint the rule carries, by focus (and width, for the unfocused one). */
+export function dockHint(
+  focus: DockFocus,
+  width: number,
+  overflow: { readonly above: number; readonly below: number },
+): string {
+  const focusedOverflow = [
+    overflow.above > 0 ? `↑${overflow.above}` : "",
+    overflow.below > 0 ? `↓${overflow.below}` : "",
+  ]
+    .filter((p) => p !== "")
+    .join(" ");
+  if (focus.kind === "list") {
+    if (focus.armed) {
+      return "y stop · any other key cancels";
+    }
+    const keys = "enter open · x stop · esc back";
+    return focusedOverflow === "" ? keys : `${focusedOverflow} · ${keys}`;
+  }
+  // Unfocused, the mockup says what DOWN would reveal: `↓4 more · ↓ select · ctrl+t`.
+  const more = overflow.below > 0 ? `↓${overflow.below} more` : "";
+  const select = width >= TIER_HINT ? "↓ select · ctrl+t" : "↓ · ctrl+t";
+  return more === "" ? select : `${more} · ${select}`;
+}
+
+/**
+ * The background list's view-model. `focus` decides only what the rule says and
+ * the selection grammar — never which rows exist (a list that changed its
+ * contents on a keypress would jump under the user).
+ */
+export function backgroundListView(opts: {
+  readonly rows: readonly BackgroundAgentRow[] | undefined;
+  readonly jobs?: readonly DockJobRow[];
+  readonly askingId?: string | null;
+  readonly focus: DockFocus;
+  readonly width: number;
+  readonly now: number;
+}): BackgroundListView {
+  const agents = opts.rows ?? [];
+  const jobs = opts.jobs ?? [];
+  const askingId = opts.askingId ?? null;
+  const width = Math.max(10, opts.width);
+  const selectedId = opts.focus.kind === "list" ? opts.focus.selected : null;
+  const armed = opts.focus.kind === "list" && opts.focus.armed;
+  const focused = opts.focus.kind === "list";
+  const total = agents.length + jobs.length;
+
+  // Every item in its paint order: the children first (launch order), the jobs
+  // after — a job's row never jumps above a child that started later (mockup 05).
+  const all: BackgroundDockRow[] = [];
+  for (const row of agents) {
+    const asking = row.id === askingId;
+    const isArmed = armed && row.id === selectedId;
+    const meta = agentMeta(row, width, asking, isArmed, opts.now);
+    const built = rowSegments({
+      selected: row.id === selectedId,
+      focused,
+      glyph: glyphOf(row.id, askingId, false),
+      id: row.id,
+      typeCol: row.agentType ?? "",
+      description: row.description ?? "",
+      meta,
+      width,
+      metaTone: isArmed ? "warn" : asking ? "warn" : "dim",
+    });
+    all.push({
+      id: row.id,
+      glyph: glyphOf(row.id, askingId, false),
+      typeCol: row.agentType ?? "",
+      description: built.description,
+      meta: built.meta,
+      selected: row.id === selectedId,
+      armed: isArmed,
+      segments: built.segments,
+    });
+  }
+  for (const job of jobs) {
+    const seconds = Math.max(0, Math.floor((opts.now - job.startedAt) / 1000));
+    const built = rowSegments({
+      selected: job.id === selectedId,
+      focused,
+      glyph: "job",
+      id: job.id,
+      typeCol: "shell",
+      description: job.command,
+      meta: `running · ${formatDuration(seconds)}`,
+      width,
+      metaTone: "dim",
+    });
+    all.push({
+      id: job.id,
+      glyph: "job",
+      typeCol: "shell",
+      description: built.description,
+      meta: built.meta,
+      selected: job.id === selectedId,
+      armed: false,
+      segments: built.segments,
+    });
+  }
+
+  // The window follows the selection and keeps it at the BOTTOM once it passes
+  // the fifth row (mockup 05's `↑2 ↓2` frame), so the rows above never jump.
+  const selectedAt = selectedId === null ? -1 : all.findIndex((r) => r.id === selectedId);
+  const start =
+    selectedAt < LIST_MAX_ROWS
+      ? 0
+      : Math.min(selectedAt - LIST_MAX_ROWS + 1, Math.max(0, all.length - LIST_MAX_ROWS));
+  const rows = all.slice(start, start + LIST_MAX_ROWS);
+  const above = start;
+  const below = Math.max(0, all.length - start - rows.length);
+  const hint = dockHint(opts.focus, width, { above, below });
+  return {
+    label: "background",
+    count: total,
+    rule: ruleSegments(width, "background", total, hint, focused),
+    rows,
+    start,
+    above,
+    below,
+    hint,
+    focused,
+  };
+}
+
+/** Where a row's own words end and its figure starts (the component colours the runs). */
+export function ruleText(view: BackgroundListView): string {
+  return view.rule.map((s) => s.text).join("");
+}
+
+/** The drawer's segments: the rule, `… +k earlier`, the tail, the user's messages. */
+export interface DrawerHead {
+  readonly segments: readonly DockSegment[];
+}
+
+export interface DrawerSent {
+  readonly text: string;
+  readonly segments: readonly DockSegment[];
+}
+
+export interface DrawerView {
+  readonly head: readonly DockSegment[];
+  /** The head's right-hand figure: `running · 19 tools · 12k · 1m 12s`, or the outcome. */
+  readonly meta: string;
+  /** `… +11 earlier`, or `""` when every step fits. */
+  readonly hidden: string;
+  readonly tail: readonly string[];
+  readonly sent: readonly DrawerSent[];
+}
+
+/** `✓ finished · report sent to the agent` / `✗ stopped`, else the live counters. */
+function drawerMeta(
+  row: BackgroundAgentRow,
+  outcome: DockOutcome | null,
+  width: number,
+  now: number,
+): string {
+  if (outcome?.kind === "finished") {
+    return "✓ finished · report sent to the agent";
+  }
+  if (outcome?.kind === "stopped") {
+    return "✗ stopped";
+  }
+  const seconds = row.startedAt === undefined ? null : Math.floor((now - row.startedAt) / 1000);
+  const parts = [
+    "running",
+    `${row.toolUses ?? 0} tools`,
+    ...(width >= TIER_TOKENS ? [formatTokens(row.tokens ?? 0)] : []),
+    ...(seconds === null ? [] : [formatDuration(seconds)]),
+  ];
+  return parts.join(" · ");
+}
+
+/** One child opened: its head rule, how many steps are hidden, its tail, the user's messages. */
+export function drawerView(opts: {
+  readonly row: BackgroundAgentRow;
+  readonly sent: readonly string[];
+  readonly outcome: DockOutcome | null;
+  readonly width: number;
+  readonly now: number;
+}): DrawerView {
+  const width = Math.max(10, opts.width);
+  const row = opts.row;
+  const meta = drawerMeta(row, opts.outcome, width, opts.now);
+  const tail = (row.tail ?? []).slice(-8);
+  const hiddenCount = Math.max(0, (row.toolUses ?? 0) - tail.length);
+  const typeCol = row.agentType ?? "";
+  // The head: `─ sa-1 · explore · find callers of parseConfig ─── running · 19 tools ─`
+  // (the description gives way, never a figure: it is the one free-text field).
+  const lead = cellWidth(row.id) + cellWidth(typeCol) + 6; // "─ " + id + " · " + type + " · "
+  const descCols = Math.max(0, width - lead - cellWidth(meta) - 5); // " ─ " + meta + " ─"
+  const description = truncateCells(row.description ?? "", descCols);
+  const fill = Math.max(0, width - lead - cellWidth(description) - cellWidth(meta) - 5);
+  const head: DockSegment[] = [
+    { text: "─ ", tone: "border" },
+    { text: row.id, tone: "accentBold" },
+    { text: ` · ${typeCol} · `, tone: "dim" },
+    { text: description, tone: "normal" },
+    { text: " ", tone: "border" },
+    ...(fill > 0 ? [{ text: "─".repeat(fill), tone: "border" as const }] : []),
+    { text: " ", tone: "border" },
+    {
+      text: meta,
+      tone: opts.outcome === null ? "dim" : opts.outcome.kind === "finished" ? "success" : "error",
+    },
+    { text: " ─", tone: "border" },
+  ];
+  const sent: DrawerSent[] = opts.sent.slice(-DRAWER_SENT_MAX).map((text) => {
+    // One line each: the FIRST line of what was typed (a prose message may be long).
+    const first = text.split("\n")[0] ?? "";
+    const body = truncateCells(
+      first,
+      Math.max(
+        0,
+        width - cellWidth(`  you → ${row.id}  `) - cellWidth("  · read before its next step"),
+      ),
+    );
+    return {
+      text: body,
+      segments: [
+        { text: `  you → ${row.id}  `, tone: "notice" },
+        { text: body, tone: "normal" },
+        { text: "  · read before its next step", tone: "dim" },
+      ],
+    };
+  });
+  return {
+    head,
+    meta,
+    hidden: hiddenCount > 0 ? `… +${hiddenCount} earlier` : "",
+    tail,
+    sent,
+  };
+}
+
+/** The input's rule title while a child is open (owner P2 (a): the rule says who Enter reaches). */
+export function inputTitle(
+  focus: DockFocus,
+  row?: { readonly sub?: string },
+): { readonly target: string; readonly sub: string } | null {
+  if (focus.kind !== "open") {
+    return null;
+  }
+  return {
+    target: `→ ${focus.id}`,
+    sub: focus.ended !== null ? "finished" : (row?.sub ?? ""),
+  };
+}

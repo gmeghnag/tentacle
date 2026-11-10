@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import type { BackgroundAgentRow } from "./background-view.ts";
 import {
   EMPTY_EDITOR,
   type EditorState,
@@ -50,6 +51,46 @@ export function useLinkIndicator(link?: LinkFeed): LinkIndicator | null {
     return () => clearTimeout(id);
   }, [status, tick]);
   return linkIndicator(status, Date.now());
+}
+
+/**
+ * The dock's own subscription to a session's background sub-agents
+ * (docs/feat/subagent-panel.md Design 5): subscribing HERE, inside the dock,
+ * keeps the live counters re-rendering THIS subtree and not the whole `App`
+ * (LOW-4's rule, kept). The App's own `onSubagents` stays for the count in the
+ * status bar and the quit confirmation.
+ */
+export function useSubagentRows(
+  session: {
+    readonly onSubagents?: (listener: (rows: readonly BackgroundAgentRow[]) => void) => () => void;
+  } | null,
+): readonly BackgroundAgentRow[] {
+  const [rows, setRows] = useState<readonly BackgroundAgentRow[]>([]);
+  useEffect(() => {
+    if (!session?.onSubagents) {
+      setRows([]);
+      return;
+    }
+    return session.onSubagents((next) => setRows(next));
+  }, [session]);
+  return rows;
+}
+
+/**
+ * A 1 Hz clock while `on` (the dock's live counters: `1m 12s`), 0 while off —
+ * no timer at all when the list is hidden.
+ */
+export function useDockClock(on: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!on) {
+      return;
+    }
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(id);
+  }, [on]);
+  return now;
 }
 
 export interface PaintScheduler {

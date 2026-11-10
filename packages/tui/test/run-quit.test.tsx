@@ -432,7 +432,10 @@ describe("T49/T48: background sub-agents in the TUI (docs/feat/subagent-backgrou
     s.set([{ id: "sa-1" }]);
     await delay(40);
     const afterFirst = commits.length;
-    expect(app.lastFrame() ?? "").toContain("· 1 sub-agent");
+    // feat/subagent-panel: the DOCK's rule says the count now, and the status
+    // bar's `· N sub-agents` suffix is suppressed while it shows (the list says
+    // it — one statement, not two).
+    expect(app.lastFrame() ?? "").toContain("─ background · 1 ─");
     // The same ids again in a FRESH array (what the daemon sends every time):
     // no state change, so no commit.
     s.set([{ id: "sa-1" }]);
@@ -443,25 +446,27 @@ describe("T49/T48: background sub-agents in the TUI (docs/feat/subagent-backgrou
     s.set([{ id: "sa-1" }, { id: "sa-2" }]);
     await delay(60);
     expect(commits.length).toBeGreaterThan(afterFirst);
-    expect(app.lastFrame() ?? "").toContain("· 2 sub-agents");
+    expect(app.lastFrame() ?? "").toContain("─ background · 2 ─");
     app.unmount();
   });
 
-  test("the status line shows the live count, and it clears when the children end", async () => {
-    // Mutations: no `onSubagents` subscription → no count; no `background` prop → none.
+  test("the live count shows (the dock's rule) and it clears when the children end", async () => {
+    // Mutations: no `onSubagents` subscription → no count at all.
+    // feat/subagent-panel: the count moved from the status bar's suffix to the
+    // dock's titled rule (owner P1 (a)); the number is the same fact, said once.
     const s = withAgents();
     const app = render(<App createSession={s.make} model="m" cwd="/tmp/work" />);
     await delay(30);
-    expect(app.lastFrame() ?? "").not.toContain("sub-agent");
+    expect(app.lastFrame() ?? "").not.toContain("background");
     s.set([{ id: "sa-1" }]);
     await delay(30);
-    expect(app.lastFrame() ?? "").toContain("· 1 sub-agent");
+    expect(app.lastFrame() ?? "").toContain("─ background · 1 ─");
     s.set([{ id: "sa-1" }, { id: "sa-2" }]);
     await delay(30);
-    expect(app.lastFrame() ?? "").toContain("· 2 sub-agents");
+    expect(app.lastFrame() ?? "").toContain("─ background · 2 ─");
     s.set([]);
     await delay(30);
-    expect(app.lastFrame() ?? "").not.toContain("sub-agent");
+    expect(app.lastFrame() ?? "").not.toContain("background");
     app.unmount();
   });
 

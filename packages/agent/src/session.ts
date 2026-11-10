@@ -156,6 +156,15 @@ export class Session {
     return this.agent.pendingExitCount;
   }
 
+  /**
+   * The user wrote to a background child (`session/subagent_message`,
+   * docs/feat/subagent-panel.md): the parent's note, on the CURRENT agent (a
+   * replacement carries it over like any pending exit).
+   */
+  noteUserToSubagent(agentId: string, text: string): void {
+    this.agent.noteUserToSubagent(agentId, text);
+  }
+
   /** Whether the user may activate `name` (`/name`) in this session — synchronous, for a pre-ack check. */
   canActivateSkill(name: string): boolean {
     return this.agent.canActivateForUser(name);

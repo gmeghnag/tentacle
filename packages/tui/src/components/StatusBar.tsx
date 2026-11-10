@@ -69,6 +69,8 @@ export function StatusBar({
   expandAll = false,
   autoApprove = false,
   background = 0,
+  backgroundShown = false,
+  hint = null,
   link = null,
 }: {
   cwd: string;
@@ -88,19 +90,31 @@ export function StatusBar({
   autoApprove?: boolean;
   /** Background sub-agents running now: ` · 2 sub-agents`, whole or dropped (docs/feat/subagent-background-ui.md). */
   background?: number;
+  /**
+   * The dock under this bar shows the list (`docs/feat/subagent-panel.md`): its
+   * own rule says the count, so the suffix would say it twice — it is dropped.
+   */
+  backgroundShown?: boolean;
+  /**
+   * Overrides the right-hand hint while a dock focus is active
+   * (`enter sends to sa-1`); `null` keeps the auto-accept hint (the mockups).
+   */
+  hint?: string | null;
   /** The link's state when it is not up ("reconnecting…", "disconnected: …"). */
   link?: LinkIndicator | null;
 }): ReactElement {
   const width = Math.max(10, columns);
   const hintText = autoApprove ? " ⏵⏵ auto-accept on " : " ⏵⏵ auto-accept off (shift+tab) ";
+  const rightHint = hint ?? hintText;
   const suffix = scrolledUp
     ? ` · ↑${hiddenAbove} more (↓ to follow)`
     : expandAll
       ? " · expanded"
       : "";
   // The running children come FIRST (they are news about work in flight); the
-  // scroll hint follows. Both are whole or dropped by `statusLayout`.
-  const withAgents = `${backgroundSuffix(background)}${suffix}`;
+  // scroll hint follows. Both are whole or dropped by `statusLayout`. While the
+  // dock shows the list, its own rule carries the count: no suffix at all.
+  const withAgents = `${backgroundShown ? "" : backgroundSuffix(background)}${suffix}`;
   const meter = contextMeterView(contextTokens, contextApprox, contextWindow);
   // What is shown, and what gives way on a short line, is decided in the pure
   // `statusLayout` (the bar stays ONE row); this component only paints it.
@@ -112,7 +126,7 @@ export function StatusBar({
     home: process.env.HOME,
     tokens,
     meter,
-    hint: hintText,
+    hint: rightHint,
     suffix: withAgents,
   });
   const lead = [layout.path, layout.tokens].filter((p): p is string => p !== null && p !== "");
@@ -158,7 +172,7 @@ export function StatusBar({
       </Box>
       {layout.hint !== null ? (
         <Box flexShrink={0}>
-          {autoApprove ? (
+          {autoApprove && hint === null ? (
             <Text color={palette().autoAccept}>{layout.hint}</Text>
           ) : (
             <Text {...dimProps()}>{layout.hint}</Text>

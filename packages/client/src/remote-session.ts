@@ -483,6 +483,43 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
+   * Subscribe to the USER's own messages to this session's background children
+   * (bounded and sanitized by the client), never given a backlog: a notice is a
+   * moment, not state (docs/feat/subagent-panel.md). Returns an unsubscribe.
+   */
+  onSubagentMessage(listener: (notice: { agentId: string; text: string }) => void): () => void {
+    return this.client.onSessionSubagentMessage((notice) => {
+      if (notice.sessionId === this.id) {
+        listener({ agentId: notice.agentId, text: notice.text });
+      }
+    });
+  }
+
+  /**
+   * Write the user's text into a RUNNING background child
+   * (`session/subagent_message`, docs/feat/subagent-panel.md). Resolves a typed
+   * result: a refusal (not running, full, finishing, an older daemon) is
+   * `{ok: false, reason}`, never a throw at the TUI.
+   */
+  messageSubagent(agentId: string, text: string): Promise<{ ok: boolean; reason?: string }> {
+    if (!this.id) {
+      return Promise.resolve({
+        ok: false,
+        reason: "this session is not open yet: nothing was sent",
+      });
+    }
+    return this.client.messageSubagent(this.id, agentId, text);
+  }
+
+  /** Stop one background child (`session/agent_kill`); `{killed: false}` when it was not running. */
+  killSubagent(agentId: string): Promise<{ killed: boolean }> {
+    if (!this.id) {
+      return Promise.resolve({ killed: false });
+    }
+    return this.client.killSubagent(this.id, agentId);
+  }
+
+  /**
    * Subscribe to MY rows coming back (docs/feat/queued-broadcast.md): a row I
    * queued that its turn left undrained, which no send-now carried on. Each
    * row is given once, with the text I typed (never the daemon's), then
@@ -1358,6 +1395,7 @@ export class RemoteSession implements SessionStreamListener {
       case "queued":
       case "subagents":
       case "subagent_notify":
+      case "subagent_message":
         return;
       default: {
         // Turn-scoped: always inside its turn's brackets (T-B0), so a null or
@@ -1452,7 +1490,8 @@ export class RemoteSession implements SessionStreamListener {
       update.type === "session_title" ||
       update.type === "queued" ||
       update.type === "subagents" ||
-      update.type === "subagent_notify"
+      update.type === "subagent_notify" ||
+      update.type === "subagent_message"
     ) {
       return;
     }

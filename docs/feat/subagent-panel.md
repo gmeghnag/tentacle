@@ -373,7 +373,176 @@ if still there. **Recommend (a):** predictable after the list changed under you;
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+### Repro (before any edit)
+
+Branch base `4306faf` on `feat/subagent-panel` (main `3728d51`), run in
+`.tentacle/tmp/subagent-panel/`:
+
+```
+$ git log --oneline -1
+4306faf docs(subagent-panel): owner answers P1–P8 (a)
+$ grep -rn "subagent_message|agent_kill|messageSubagent|killSubagent" packages/{protocol,daemon,client,tui}/src
+packages/protocol/src/session.ts:429:  /** Its `sa-N` id: what `agent_kill` takes and a note names. */
+$ grep -rn "backgroundSuffix(" packages/tui/src
+packages/tui/src/background-view.ts:25:export function backgroundSuffix(count: number): string {
+packages/tui/src/components/StatusBar.tsx:103:  const withAgents = `${backgroundSuffix(background)}${suffix}`;
+$ grep -rn "noteUserToSubagent|userToSubagent" packages/*/src
+(none)
+```
+
+The capability is missing: no method, no note kind, and the only TUI surface is
+the count suffix (as the Context said). Nothing contradicted the plan, so I
+proceeded.
+
+### As built, in the plan's file order
+
+1. **protocol** — `SubagentMessageParams/ResultSchema` and
+   `AgentKillParams/ResultSchema` in `session.ts`; `Method.SubagentMessage` /
+   `Method.AgentKill` + their `RequestSchemas` entries in `methods.ts`;
+   `SubagentMessageUpdateSchema`, the union member and
+   `UPDATE_CLASS.subagent_message = "display"` in `updates.ts`. No
+   `PROTOCOL_VERSION` bump (still 21). `bun run schema:export` regenerated
+   `protocol/schema/protocol.json`; the fixtures map in
+   `test/json-schema.test.ts` gained the two methods' entries (the drift gate
+   demanded it — see Drift 1).
+2. **core/agent** — `NOTE_KIND.userToSubagent`, `PendingUserNote`
+   (`{kind:"user_note"}`) as a 4th `PendingExit` member, `Agent.noteUserToSubagent`,
+   `pendingExitCount` skipping notes, and the flush writing
+   `userToSubagentNote` with no event; `Session.noteUserToSubagent` passthrough.
+3. **daemon** — `HostedSession.messageSubagent` / `killSubagent` (synchronous,
+   no lock) and the two `connection.ts` cases.
+4. **client** — `boundSubagentMessage`, `RemoteClient.messageSubagent` /
+   `killSubagent` / `onSessionSubagentMessage`, the update routing,
+   `RemoteSession`'s three methods, and `mapping.ts`'s no-event case.
+5. **tui pure** — `background-list.ts` (the view-model: width tiers, cells-cut,
+   5-row window, glyphs, hints, `drawerView`, `inputTitle`, `listVisible`) and
+   `background-focus.ts` (the focus machine, the DOWN table, `dockKey`,
+   `sendTarget`, `reconcile`, draft bookkeeping); `status-line.ts`'s
+   `targetBorder`.
+6. **tui components/App** — `useDockClock`, `components/BackgroundList.tsx`
+   (`BackgroundList`, `SubagentDrawer`), `components/dock-tone.ts` (tone →
+   theme token), `StatusBar` (`hint`, `backgroundShown`), `/agents`, and the
+   App's wiring: the dock state, the one dispatch before the Esc-stops-turn
+   branch, the DOWN check, `submitToTarget`, `killChild`, `toggleAgents`, the
+   `onSubagentMessage` subscription, and the two view-models before `return`.
+7. `CHANGELOG.md` `[Unreleased]` entry (user-visible).
+
+### Drifts (and why)
+
+1. **A named schema export** (`SubagentAgentIdSchema`). The plan implied an
+   inline `agentId` field. The JSON-schema exporter refuses a reused anonymous
+   schema (`non-name $ref … SubagentMessageParams/properties/agentId ->
+   AgentKillParams/properties/agentId`), so the bound is one named export both
+   params schemas reuse. Smallest change that keeps the plan's intent.
+2. **The mockups' private number formats are not the repo's.** The mockups say
+   `12.4k` and `1m12s`; the plan names `formatTokens` and `formatDuration`
+   (`format.ts`), which produce `12k` and `1m 12s`. The repo's formatters win
+   (they are the ones the rest of the TUI paints); the tests pin those. Glyphs,
+   rules, spacing, tiers and hints are the mockups'.
+3. **The list's window keeps the selection at the BOTTOM once it passes row 5**
+   (`↑2 ↓2` for 9 rows, selected on the 7th), matching mockup 05, rather than
+   centring. My first pass centred; the mockup and the "rows above never jump"
+   rule decided it.
+4. **`dockKey` returns `pass` from the `open` focus** for every key but Esc /
+   Ctrl+T, so the App's line editing keeps running behind the drawer — that is
+   Design 4's "the input stays live", not a second key path.
+5. **A frozen drawer needs the row it ended with**, which the daemon's next
+   report no longer carries. `setAgents` now keeps the last non-empty rows
+   (`dockLastRowsRef`) before replacing them, and the outcome comes from
+   `jobs.onExit`'s `stopReason` (`end_turn` = finished) — the same fact the
+   transcript's exit notice uses. Without it the drawer painted nothing.
+6. **`setDock` writes `dockRef` EAGERLY**, outside the React state updater. A
+   ref written inside the updater lands at render time, so the next keypress in
+   the same tick read a stale focus — and F6 caught it: Enter on an ended child
+   sent. This is a real bug the frame test found, not a style choice.
+7. **`App` gained an optional `columns` prop** (like `initialItems`): a runtime
+   never sets it, a frame test pins a tier with it. `ink-testing-library` is
+   always 100 columns, and the plan asks for a frame at 80.
+8. **Two existing tests changed with the behaviour the plan mandates**:
+   `run-quit.test.tsx` asserted the status bar's `· N sub-agents` suffix, which
+   the plan suppresses while the list shows the count; they assert the dock's
+   rule (`─ background · N ─`) now. `daemon/test/mapping.test.ts`'s
+   "covers every known type" sample list gained `subagent_message` (that guard
+   exists to catch exactly this).
+9. **`components/dock-tone.ts` spreads `dimProps()`** rather than naming a
+   `dimColor` prop: `theme-no-stray.test.ts` forbids a bare one outside the
+   token table (light mode needs a measurable grey, and SGR 2 is
+   terminal-defined).
+
+### Tests: red before green
+
+Every test below was run BEFORE the step that makes it pass and failed on the
+assertion (not on an import, except where the whole surface is new — noted).
+
+- **T-P1/T-P2** `protocol/test/subagent-panel.test.ts` — first red:
+  `SyntaxError: Export named 'AgentKillParamsSchema' not found` (brand-new
+  surface). Then assertion-level reds by mutation:
+  - drop `text.max(8000)` → `Expected: false / Received: true` on the 8001-char
+    case;
+  - unbound `agentId` → red on `agentId: "x".repeat(65)`.
+- **T-A1..T-A4** `agent/test/subagent-panel-note.test.ts` — red:
+  `TypeError: agent.noteUserToSubagent is not a function`. **Plan mutation
+  (T-A1)**: `pendingExitCount` counts every member →
+  `Expected: 0 / Received: 1`, red.
+- **T-D1..T-D4** `daemon/test/subagent-panel.test.ts` — red:
+  `TypeError: r.hosted.killSubagent is not a function`. Mutation: drop
+  `session.noteUserToSubagent` → T-D1 red on `last[at+1]` being `undefined`.
+- **T-C1/T-C2** `client/test/subagent-panel.test.ts` — red:
+  `Export named 'boundSubagentMessage' not found`, then green.
+- **T-L1..T-L4** `tui/test/background-list.test.ts` — red:
+  `Cannot find module '../src/background-list.ts'`. Mutations: a code-point
+  `slice` instead of `truncateCells` → `Expected: 80 / Received: 121` (the CJK
+  row overflowed); pinning the window to the top → T-L2 red twice.
+- **T-F1..T-F4** `tui/test/background-focus.test.ts` — red:
+  `Cannot find module '../src/background-focus.ts'`. Mutations, all red:
+  - **T-F1 (plan-named)**: drop the `onDraftSlot` check → "mid-history keeps
+    walking history" red;
+  - **DOWN to history vs list**: enter the list from a `moveVertical` too →
+    "a line below the cursor keeps moving" red;
+  - **Esc in `open`**: let it fall through to the App → "Esc in `open` closes
+    (never stops the turn)" red;
+  - **Esc in `list`**: same → "Esc returns to the input and NEVER stops the
+    turn" red.
+- **F1..F9** `tui/test/subagent-panel-frames.test.tsx` — red first on the
+  missing dock (the frames had no `─ background` line at all). F6 then found the
+  `setDock` staleness (Drift 6); F8 passed once the fake yielded real
+  `AgentEvent`s.
+
+### Gate
+
+```
+$ bun run check
+$ tsc --noEmit && tsc -p apps/mobile --noEmit     (clean)
+$ biome check .    Checked 833 files. No fixes applied.   (0 errors, 0 warnings — §6 baseline)
+$ bun test
+ 6423 pass · 3 skip · 0 fail · 452 files · 247.86 s
+```
+
+The 3 skips are the documented opt-in ones (live-k8s, live-docker, the
+real-socket keepalive) — §6's baseline, not new skips.
+
+### Not done (and honest limits)
+
+- **Shell jobs in the list.** `jobs: []` everywhere, as owner P6 (a) decided:
+  the grammar and the view-model paint a shell row (`◆`, `running · 5m`,
+  `dockVisible`/`listVisible` count them, Enter is refused by `openable`), but
+  no daemon feed of running jobs exists yet, so nothing populates them. The
+  follow-up task adds the feed and Enter → output tail.
+- **Mouse.** Out of scope per the plan: a click on a dock row does nothing.
+- **The `finished` vs `stopped` word.** The frozen drawer's outcome comes from
+  `jobs.onExit`'s `stopReason`. A departure whose exit this TUI never saw (a
+  resumed session, a second TUI that did not get the exit) freezes as `stopped`
+  — honest ("it is gone") but not always the exact word. The transcript's exit
+  notice is the precise record.
+- **Queued permission asks** are still invisible to the TUI (the plan's noted
+  debt): only the ask ON SCREEN marks its row `⚠`.
+- **Light theme at the frame level.** The harness renders with colour off, so
+  the frames prove the TEXT parity and not the colours; `theme-contrast` and
+  `theme-components` pin the tokens, and the dock uses only existing ones.
+- **Mutation coverage** is the four named/nearby ones above; the rest of the
+  suite's non-vacuity rests on the red-before-green record.
 
 ## Review
 

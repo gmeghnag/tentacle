@@ -5,7 +5,7 @@
  * Everything is measured in terminal CELLS (`cells.ts`, `string-width`), never
  * code points: a double-width character must not push the ctx max off the line.
  */
-import { cellWidth, headCells, tailCells } from "./cells.ts";
+import { cellWidth, headCells, tailCells, truncateCells } from "./cells.ts";
 import { oneLine } from "./commands.ts";
 import { formatTokens } from "./format.ts";
 import type { TokenTotals } from "./state.ts";
@@ -31,6 +31,35 @@ export function modelBorder(model: string, width: number): string {
   const shown = cellWidth(model) <= room ? model : `…${tailCells(model, room - 1)}`;
   const lead = w - cellWidth(shown) - 3;
   return `${RULE.repeat(lead)} ${shown} ${RULE}`;
+}
+
+/**
+ * The input's top border while a background child is OPEN (docs/feat/subagent-panel.md):
+ * `─ → sa-1 · explore ──────────────── esc back ─`. The target sits on the
+ * LEFT (where `modelBorder`'s name never goes), so nobody sends to the wrong
+ * agent; `right` is the key hint (`" esc back"`, or empty once it ended).
+ * Exactly `width` cells; too narrow for a title → a plain rule.
+ */
+export function targetBorder(
+  title: { readonly target: string; readonly sub: string },
+  right: string,
+  width: number,
+): string {
+  const w = Math.max(0, width);
+  const label = title.sub === "" ? `─ ${title.target} ` : `─ ${title.target} · ${title.sub} `;
+  const tail = right === "" ? ` ${RULE}` : ` ${right} ${RULE}`;
+  const used = cellWidth(label) + cellWidth(tail);
+  if (used > w) {
+    // Too narrow even for the whole label: cut it by CELLS, keeping the target.
+    const room = w - cellWidth(tail) - 1;
+    if (room < 4) {
+      return RULE.repeat(w);
+    }
+    const cut = truncateCells(label, room);
+    const fill = Math.max(1, w - cellWidth(cut) - cellWidth(tail));
+    return `${cut}${RULE.repeat(fill)}${tail}`;
+  }
+  return `${label}${RULE.repeat(w - used)}${tail}`;
 }
 
 /** `cwd` with `$HOME` as `~`, at most `max` CELLS: over it, `…` + the tail. */

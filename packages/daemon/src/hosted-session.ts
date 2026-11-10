@@ -1580,6 +1580,55 @@ export class HostedSession {
   }
 
   /**
+   * `session/subagent_message` (docs/feat/subagent-panel.md): the USER's text
+   * into a running background child — the same seam the model's `agent_message`
+   * tool uses (`AgentJobs.message`), so the child drains it at its next
+   * boundary. Synchronous end to end and never throwing, so it holds no lock
+   * and runs concurrently with a `session/prompt` (AGENTS §7).
+   *
+   * On acceptance: the parent's `[user → sa-N]` note is queued (the next turn
+   * reads it; it wakes nobody) and ONE `subagent_message` update goes to every
+   * attached client, the sender's included — one render path, no local echo, so
+   * two TUIs on the session stay consistent. A refusal notes and emits nothing.
+   */
+  messageSubagent(agentId: string, text: string): { ok: boolean; reason?: string } {
+    const runtime = this.agentRuntime;
+    if (runtime === undefined) {
+      return {
+        ok: false,
+        reason: "background sub-agents are not available in this mode: nothing was sent.",
+      };
+    }
+    const result = runtime.message(agentId, text, "user");
+    if (!result.ok) {
+      return { ok: false, reason: result.reason };
+    }
+    // The note the parent's agent reads at its next turn (never a wake).
+    this.session.noteUserToSubagent(agentId, text);
+    try {
+      this.emit({ type: "subagent_message", agentId, text });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    // Idle: nothing is being committed, so the frame is safe to pin AND to let
+    // go of (the same rule as `publishSubagents`).
+    if (this.controller === null) {
+      this.recordCut(null);
+    }
+    return { ok: true };
+  }
+
+  /**
+   * `session/agent_kill` (docs/feat/subagent-panel.md): the user stops one
+   * background child — the same decision the model's `agent_kill` tool makes
+   * (`AgentJobs.kill`). Synchronous; the exit, its note and the list's next
+   * update all follow the EXISTING path.
+   */
+  killSubagent(agentId: string): { killed: boolean } {
+    return { killed: this.agentRuntime?.kill(agentId) ?? false };
+  }
+
+  /**
    * `session/log`: one page of the committed log after `after` (see
    * `SessionLog.read`). Synchronous, served from derived entries only — never
    * from the live history — so it is exact at any microtask (AGENTS §7: the

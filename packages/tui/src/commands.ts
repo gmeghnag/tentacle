@@ -38,6 +38,10 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: "/mcp", description: "MCP servers: reachability and their tools" },
   { name: "/skills", description: "every skill found: who can use it, and any problems" },
   {
+    name: "/agents",
+    description: "background sub-agents and jobs: select, open, stop (ctrl+t)",
+  },
+  {
     name: "/settings",
     description: "the session's settings vs this terminal's (/settings sync to use yours)",
   },

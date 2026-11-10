@@ -187,6 +187,16 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1reclaim/result": [{}],
   "methods/session~1rename/params": [{ sessionId: "s", title: " Fix\tlogin " }],
   "methods/session~1rename/result": [{ title: { text: "Fix login", source: "user" } }],
+  // feat/subagent-panel: the user writes to / stops one background child.
+  "methods/session~1subagent_message/params": [
+    { sessionId: "s", agentId: "sa-1", text: "skip the tests folder" },
+  ],
+  "methods/session~1subagent_message/result": [
+    { ok: true },
+    { ok: false, reason: "sa-1 already has 8 unread messages: nothing was sent." },
+  ],
+  "methods/session~1agent_kill/params": [{ sessionId: "s", agentId: "sa-1" }],
+  "methods/session~1agent_kill/result": [{ killed: true }, { killed: false }],
   "methods/session~1enqueue/params": [{ sessionId: "s", id: "e", turnId: "t", text: "steer" }],
   "methods/session~1enqueue/result": [{}],
   "methods/session~1send_now/params": [

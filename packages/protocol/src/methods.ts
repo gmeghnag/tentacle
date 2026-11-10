@@ -21,6 +21,8 @@ import {
 import { ResolvePermissionParamsSchema, ResolvePermissionResultSchema } from "./permission.ts";
 import { LogParamsSchema, LogResultSchema } from "./session-log.ts";
 import {
+  AgentKillParamsSchema,
+  AgentKillResultSchema,
   CancelParamsSchema,
   ClearParamsSchema,
   ClearResultSchema,
@@ -51,6 +53,8 @@ import {
   SessionListResultSchema,
   SnapshotParamsSchema,
   SnapshotResultSchema,
+  SubagentMessageParamsSchema,
+  SubagentMessageResultSchema,
   UpdateSettingsParamsSchema,
   UpdateSettingsResultSchema,
 } from "./session.ts";
@@ -79,6 +83,10 @@ export const Method = {
   Rename: "session/rename",
   Reclaim: "session/reclaim",
   ResolvePermission: "session/resolve_permission",
+  /** The user writes to a RUNNING background child (docs/feat/subagent-panel.md). */
+  SubagentMessage: "session/subagent_message",
+  /** The user stops one (the same decision as the model's `agent_kill` tool). */
+  AgentKill: "session/agent_kill",
   ModelStream: "model/stream",
   ModelStreamChunked: "model/streamChunked",
   /** Daemon → client: the exact prompt size of a request, counted by the laptop's provider. */
@@ -133,6 +141,11 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     params: ResolvePermissionParamsSchema,
     result: ResolvePermissionResultSchema,
   },
+  [Method.SubagentMessage]: {
+    params: SubagentMessageParamsSchema,
+    result: SubagentMessageResultSchema,
+  },
+  [Method.AgentKill]: { params: AgentKillParamsSchema, result: AgentKillResultSchema },
   [Method.ModelStream]: { params: ModelStreamParamsSchema, result: ModelStreamResultSchema },
   [Method.ModelStreamChunked]: {
     params: ModelStreamChunkedParamsSchema,

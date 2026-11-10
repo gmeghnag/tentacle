@@ -80,3 +80,27 @@ function boundNotifyText(value: string): string {
   const clean = value.replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, " ");
   return clean.length > NOTIFY_TEXT_MAX ? `${clean.slice(0, NOTIFY_TEXT_MAX - 1)}…` : clean;
 }
+
+/** What a client keeps of the user's own message to a child (`subagent_message`). */
+export interface SubagentMessageView {
+  readonly agentId: string;
+  readonly text: string;
+}
+
+/**
+ * A `subagent_message` frame (the USER wrote to a background child,
+ * docs/feat/subagent-panel.md) from a daemon that may be a pod (AGENTS §7):
+ * bounded and sanitized HERE, before anything renders it. The same rule as the
+ * child's own notice — control characters become spaces, the NEWLINES are kept
+ * (a message is prose, and the notice shows its first line) — and both fields
+ * are capped, so a hostile daemon can at most print one bounded line.
+ */
+export function boundSubagentMessage(n: {
+  readonly agentId: string;
+  readonly text: string;
+}): SubagentMessageView {
+  return {
+    agentId: progressText(n.agentId).slice(0, NOTIFY_ID_MAX),
+    text: boundNotifyText(n.text),
+  };
+}

@@ -443,6 +443,50 @@ export const SubagentRowSchema = z.object({
 });
 export type SubagentRow = z.infer<typeof SubagentRowSchema>;
 
+// --- the user writes to / stops one background child (docs/feat/subagent-panel.md) ---
+// `session/subagent_message`: the user's own text into a RUNNING child's inbox
+// (the same inbox the model's `agent_message` tool uses). The daemon also
+// queues a `[user → sa-N]` note for the parent agent, flushed at its next turn.
+// `session/agent_kill`: the same decision the model's `agent_kill` tool makes.
+// Both are short and synchronous daemon-side (nothing awaits a turn), so they
+// run concurrently with a `session/prompt` (AGENTS §7). Additive: an older
+// daemon answers `MethodNotFound` and the client reports a typed refusal.
+
+/**
+ * A background child's id as the panel's methods take it (`sa-N`): bounded, and
+ * its own NAMED export — the JSON-schema exporter refuses a reused anonymous
+ * schema (two `$defs` would point at one unnamed hole).
+ */
+export const SubagentAgentIdSchema = z.string().min(1).max(64);
+
+export const SubagentMessageParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  agentId: SubagentAgentIdSchema,
+  /** The user's text, exactly as typed. One measure: the child's inbox cap (task 8's 8 000). */
+  text: z.string().min(1).max(8000),
+});
+export type SubagentMessageParams = z.infer<typeof SubagentMessageParamsSchema>;
+
+export const SubagentMessageResultSchema = z.object({
+  /** `false` with a `reason` the child's inbox gave (not running, full, finishing). */
+  ok: z.boolean(),
+  /** Why nothing was sent: shown to the user as a notice, never thrown at a UI. */
+  reason: z.string().optional(),
+});
+export type SubagentMessageResult = z.infer<typeof SubagentMessageResultSchema>;
+
+export const AgentKillParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  agentId: SubagentAgentIdSchema,
+});
+export type AgentKillParams = z.infer<typeof AgentKillParamsSchema>;
+
+export const AgentKillResultSchema = z.object({
+  /** `true` iff it was running and is now being stopped. */
+  killed: z.boolean(),
+});
+export type AgentKillResult = z.infer<typeof AgentKillResultSchema>;
+
 export const SnapshotResultSchema = z.object({
   /** Chronological slice of the history, ending at the cut (or at the cursor). */
   messages: z.array(ChatMessageSchema),
