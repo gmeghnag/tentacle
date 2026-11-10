@@ -49,6 +49,7 @@ import type {
   SessionGrants,
 } from "@tentacle/agent";
 import {
+  AGENT_MESSAGE_MAX_CHARS,
   type AgentJob,
   AgentJobLedger,
   type AgentJobs,
@@ -457,6 +458,8 @@ export class HostedSession {
    */
   private readonly agentRuntime: AgentJobs | undefined;
   private readonly unsubscribeAgentExit: (() => void) | undefined;
+  /** The `AgentJobs.onNotify` subscription (a child's message to the agent); removed in `close`. */
+  private readonly unsubscribeAgentNotify: (() => void) | undefined;
   /** The `AgentJobs.onChange` subscription (the live list); removed in `close`. */
   private readonly unsubscribeAgentRows: (() => void) | undefined;
   /** Background child id → the turn that spawned it (its ask names it on the wire). */
@@ -659,6 +662,21 @@ export class HostedSession {
         agent: { stopReason: exit.stopReason, toolUses: exit.toolUses },
       });
       this.kickWake();
+    });
+    // A running child spoke to the agent (docs/feat/agent-message-two-way.md):
+    // the laptop gets the notice, and a waking one asks for the continuation.
+    // The Agent's own listener was registered at its construction — BEFORE this
+    // one — so the note is already in `pendingExits` when `kickWake` reads it.
+    this.unsubscribeAgentNotify = agentRuntime?.onNotify((note) => {
+      this.emit({
+        type: "subagent_notify",
+        agentId: wireLine(note.agentId, 64),
+        text: wireLine(note.text, AGENT_MESSAGE_MAX_CHARS),
+        wake: note.wakes,
+      });
+      if (note.wakes) {
+        this.kickWake();
+      }
     });
     // A child's visible state changed: a start and an end publish at once, a
     // progress event coalesces (docs/feat/subagent-background-ui.md Design 3).
@@ -2609,6 +2627,7 @@ export class HostedSession {
     // Children abort (their signal settles a pending ask); no `end`, no exit
     // frame: at a reopen the `bg` without an `end` gives the lost note.
     this.unsubscribeAgentExit?.();
+    this.unsubscribeAgentNotify?.();
     this.unsubscribeAgentRows?.();
     this.agentRuntime?.dispose();
   }

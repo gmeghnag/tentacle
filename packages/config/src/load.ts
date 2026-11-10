@@ -161,6 +161,8 @@ export interface TentacleConfig {
   readonly subagentExecution: ResolvedConfig["subagentExecution"];
   /** At most this many sub-agents at once (read by `feat/parallel-agents`; on a pod the laptop's, carried). */
   readonly subagentMaxParallel: number;
+  /** May a running background sub-agent message the agent (docs/feat/agent-message-two-way.md; carried, pinned). */
+  readonly subagentsTwoWay: boolean;
   /** A custom `agent_task` description, resolved (read by `feat/parallel-agents`; on a pod the laptop's, carried). */
   readonly agentTaskDescription?: string;
   /**
@@ -854,6 +856,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     subagentMaxIterations: resolved.subagentMaxIterations,
     subagentExecution: resolved.subagentExecution,
     subagentMaxParallel: resolved.subagentMaxParallel,
+    subagentsTwoWay: resolved.subagentsTwoWay,
     ...(resolved.agentTaskDescription !== undefined
       ? { agentTaskDescription: resolved.agentTaskDescription }
       : {}),

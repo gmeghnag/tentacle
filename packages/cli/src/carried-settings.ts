@@ -85,6 +85,15 @@ export const CARRIED: { readonly [K in Key]: Row<K> } = {
     read: (c) => c.subagentMaxParallel,
     write: (c, v) => ({ ...c, subagentMaxParallel: v }),
   },
+  // docs/feat/agent-message-two-way.md: whether a background child may message
+  // the agent is the LAPTOP's decision — it is what wakes the laptop.
+  subagentsTwoWay: {
+    class: "P",
+    configKey: "subagents.twoWay",
+    source: "subagentsTwoWay",
+    read: (c) => c.subagentsTwoWay,
+    write: (c, v) => ({ ...c, subagentsTwoWay: v }),
+  },
   agentTaskDescription: {
     class: "P",
     configKey: "subagents.agentTaskDescription",

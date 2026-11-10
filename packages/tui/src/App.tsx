@@ -170,6 +170,7 @@ import {
 } from "./state.ts";
 import { modelBorder } from "./status-line.ts";
 import { type ContextOpen, contextShown, statusTokens } from "./status-view.ts";
+import { type SubagentNotifyView, subagentNotifyNotice } from "./subagent-notify.ts";
 import type { TargetBadge } from "./target-view.ts";
 import { dimProps, palette } from "./theme.ts";
 import { CLICK_IDLE, type ClickState, nextClick, toggleExpanded } from "./tool-expand.ts";
@@ -299,6 +300,12 @@ export interface SessionController {
    */
   onSubagents?(listener: (rows: readonly BackgroundAgentRow[]) => void): () => void;
   /**
+   * Subscribe to a RUNNING background child's messages to this session's agent
+   * (bounded); a notice is a moment, never a backlog. Returns an unsubscribe
+   * (docs/feat/agent-message-two-way.md).
+   */
+  onSubagentNotify?(listener: (notify: SubagentNotifyView) => void): () => void;
+  /**
    * Stop following the session WITHOUT ending it — it runs on for any device
    * (`/sessions` switches away with it). Rejects when the daemon cannot (an
    * older one): nothing changed. Optional: absent where nobody else can reach it.
@@ -362,6 +369,12 @@ export interface AppProps {
    * so the agent reacts to it without a user prompt. Default: true.
    */
   readonly autoWakeOnJobExit?: boolean;
+  /**
+   * `subagents.twoWay`: a running background child may message this agent, and
+   * its message may wake it (docs/feat/agent-message-two-way.md). False → a
+   * notice is still shown, nothing is armed. Default: false.
+   */
+  readonly subagentsTwoWay?: boolean;
   /** A detached run's relay handed over a job's exit no turn has flushed (docs/fix/detached-autowake.md). */
   readonly wakePending?: boolean;
   /** The wake was HANDED OVER by a relay (it owns it): a refused continuation is retried once. wakePending alone (the open reported unflushed exits) is never retried: another TUI may serve it. */
@@ -464,6 +477,7 @@ export function App({
   permissions,
   jobs,
   autoWakeOnJobExit = true,
+  subagentsTwoWay = false,
   wakePending = false,
   wakeHanded = false,
   notices,
@@ -623,6 +637,8 @@ export function App({
   const activitySubRef = useRef<(() => void) | null>(null);
   const queueSubRef = useRef<(() => void) | null>(null);
   const agentsSubRef = useRef<(() => void) | null>(null);
+  /** The current session's `onSubagentNotify` subscription (replaced with it). */
+  const notifySubRef = useRef<(() => void) | null>(null);
   // My `/compact`s whose history has not arrived yet: that compaction's notice
   // is mine ("Context compacted"), not "on another device" (C6).
   const ownCompactionsRef = useRef(0);
@@ -726,6 +742,37 @@ export function App({
   const watchedRef = useRef(false);
 
   // --- live background-job exits -------------------------------------------
+  /**
+   * The ONE wake step a live notice arms (a background exit's, a child's
+   * message to the agent): if a turn is running, defer to its post-turn check
+   * (it flushes the notes at its next start); if idle, start a continuation
+   * turn now. Multiple notices coalesce — the agent drains them all at the next
+   * turn's start (docs/feat/agent-message-two-way.md Design 7).
+   */
+  const armWake = useCallback((): void => {
+    wakeRef.current = wakeStep(wakeRef.current, { type: "exit" });
+    // Before the session is watched (a subscriber's backlog — exits that arrived
+    // before the TUI mounted — is delivered inside THIS effect, ahead of the
+    // watch effect): never start the turn here. The history the watch replays
+    // next would wipe its rows (docs/fix/attach-unflushed-exits.md, round 3).
+    // The deferred check runs after every mount effect, re-reading the gate.
+    if (!watchedRef.current) {
+      wakeIfPendingRef.current?.();
+      return;
+    }
+    const gate = {
+      enabled: autoWakeOnJobExit,
+      idle: !stateRef.current.running,
+      // A `/clear` in flight: its history has not been applied yet, a turn
+      // now would be wiped by it (review H2). `wakeIfPending` runs again then.
+      blocked: clearingRef.current,
+    };
+    if (wakeDue(wakeRef.current, gate)) {
+      wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" });
+      runRef.current?.("", { continuation: true });
+    }
+  }, [autoWakeOnJobExit]);
+
   // Surface a finished background job the instant it exits, even while idle.
   // The agent also emits a `background_exit` event at the next turn; the shared
   // jobId dedupes (appendBackgroundExit) so the notice shows exactly once.
@@ -740,33 +787,10 @@ export function App({
       );
       setScrollOffset(0);
       flushNow();
-      // Autonomous wake: react to the exit without a user prompt. If a turn is
-      // running, defer to its post-turn check (it flushes exits at the next
-      // start); if idle, start a continuation turn now. Multiple exits coalesce
-      // — the agent drains all pending exits at the next turn's start.
-      wakeRef.current = wakeStep(wakeRef.current, { type: "exit" });
-      // Before the session is watched (a subscriber's backlog — exits that arrived
-      // before the TUI mounted — is delivered inside THIS effect, ahead of the
-      // watch effect): never start the turn here. The history the watch replays
-      // next would wipe its rows (docs/fix/attach-unflushed-exits.md, round 3).
-      // The deferred check runs after every mount effect, re-reading the gate.
-      if (!watchedRef.current) {
-        wakeIfPendingRef.current?.();
-        return;
-      }
-      const gate = {
-        enabled: autoWakeOnJobExit,
-        idle: !stateRef.current.running,
-        // A `/clear` in flight: its history has not been applied yet, a turn
-        // now would be wiped by it (review H2). `wakeIfPending` runs again then.
-        blocked: clearingRef.current,
-      };
-      if (wakeDue(wakeRef.current, gate)) {
-        wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" });
-        runRef.current?.("", { continuation: true });
-      }
+      // Autonomous wake: react to the exit without a user prompt.
+      armWake();
     });
-  }, [jobs, flushNow, autoWakeOnJobExit]);
+  }, [jobs, flushNow, armWake]);
 
   // --- host notices ----------------------------------------------------------
   useEffect(() => {
@@ -1583,6 +1607,7 @@ export function App({
       activitySubRef.current?.();
       queueSubRef.current?.();
       agentsSubRef.current?.();
+      notifySubRef.current?.();
       heldRef.current = [];
       setDaemonQueue(undefined);
       setAgents(undefined);
@@ -1595,6 +1620,18 @@ export function App({
       activitySubRef.current = session?.watch?.((a) => onActivityRef.current?.(a)) ?? null;
       queueSubRef.current = session?.onQueued?.((q) => setDaemonQueue(q)) ?? null;
       agentsSubRef.current = session?.onSubagents?.((rows) => setAgents(rows)) ?? null;
+      // A RUNNING background child's message to the agent
+      // (docs/feat/agent-message-two-way.md): the notice at once, and — when it
+      // asks for one and this laptop allows two-way — the same wake an exit arms.
+      notifySubRef.current =
+        session?.onSubagentNotify?.((n) => {
+          stateRef.current = appendNotice(stateRef.current, subagentNotifyNotice(n));
+          setScrollOffset(0);
+          flushNow();
+          if (n.wake && subagentsTwoWay) {
+            armWake();
+          }
+        }) ?? null;
       const opening = session?.open?.();
       if (!opening) {
         onOpened?.(true); // nothing to open (a local session)
@@ -1610,7 +1647,7 @@ export function App({
         },
       );
     },
-    [pushNotice, skillsSync, askContext, setAgents],
+    [pushNotice, skillsSync, askContext, setAgents, flushNow, armWake, subagentsTwoWay],
   );
   useEffect(() => {
     watchSession(sessionRef.current);
@@ -1622,6 +1659,8 @@ export function App({
       queueSubRef.current = null;
       agentsSubRef.current?.();
       agentsSubRef.current = null;
+      notifySubRef.current?.();
+      notifySubRef.current = null;
     };
   }, [watchSession]);
 

@@ -240,6 +240,8 @@ export interface PersistingController extends SessionController {
   onQueued: RemoteSession["onQueued"];
   /** `RemoteSession.onSubagents`: the live list of this session's background sub-agents. */
   onSubagents?: RemoteSession["onSubagents"];
+  /** `RemoteSession.onSubagentNotify`: a running child's message to this session's agent. */
+  onSubagentNotify?: RemoteSession["onSubagentNotify"];
   /** `/settings` (present only where this laptop carries settings: `run`/`attach`). */
   settings?(): readonly SettingsLine[];
   /** `/settings sync`: the outcome as lines, never a rejection; a success is saved at once. */
@@ -558,6 +560,9 @@ export function persistingController(
     },
     onSubagents(listener) {
       return inner.onSubagents(listener);
+    },
+    onSubagentNotify(listener) {
+      return inner.onSubagentNotify(listener);
     },
     close() {
       closed = true;

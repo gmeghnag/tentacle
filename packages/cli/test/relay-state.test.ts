@@ -10,6 +10,7 @@ import {
   finalView,
   initialRelay,
   needsUse,
+  notifyWakes,
   relayExits,
   relayStep,
   relayView,
@@ -489,5 +490,25 @@ describe("H23 the hand-over (docs/feat/detached-handover.md)", () => {
     expect(wantsAwake(done)).toBe(false);
     expect(relayExits(run([{ type: "tick", now: 1 }], done), Number.MAX_SAFE_INTEGER)).toBe(false);
     expect(relayExits(run([{ type: "drained" }], done), 1)).toBe(true);
+  });
+});
+
+describe("T16: a child's message to the agent asks the relay for a wake", () => {
+  const allowed = { autoWake: true, subagentsTwoWay: true };
+
+  test("a waking note starts a continuation when this laptop allows two-way", () => {
+    expect(notifyWakes({ wake: true }, allowed)).toBe(true);
+  });
+
+  test("a NON-waking note never does (the session's wake budget said so)", () => {
+    expect(notifyWakes({ wake: false }, allowed)).toBe(false);
+  });
+
+  test("`subagents.twoWay` off: a note still arrives, and arms nothing", () => {
+    expect(notifyWakes({ wake: true }, { ...allowed, subagentsTwoWay: false })).toBe(false);
+  });
+
+  test("`autoWake` off: the same, the laptop's other gate", () => {
+    expect(notifyWakes({ wake: true }, { ...allowed, autoWake: false })).toBe(false);
   });
 });

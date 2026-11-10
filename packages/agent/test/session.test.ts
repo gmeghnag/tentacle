@@ -203,6 +203,7 @@ describe("Session.clearConversation (docs/feat/clear-keeps-jobs.md, T2)", () => 
       agentJobs: {
         list: () => [{ agentId: "sa-1", description: "audit" }],
         onExit: () => () => {},
+        onNotify: () => () => {},
       } as never,
     });
     const session = new Session(agent, undefined, {

@@ -7,9 +7,10 @@ import type {
   StreamEvent,
   Tool,
 } from "@tentacle/core";
+import { AgentJobs } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
 import { z } from "zod";
-import { Agent, type AgentEvent } from "../src/index.ts";
+import { Agent, type AgentEvent, Session } from "../src/index.ts";
 
 /** A model whose turns are scripted; records every request it receives. */
 class ScriptedProvider implements ModelProvider {
@@ -703,6 +704,266 @@ describe("history_commit (the snapshot cut)", () => {
     const tail = events.slice(events.findLastIndex((e) => e.type === "history_commit") + 1);
     expect(tail.map((e) => e.type)).toEqual(["text", "turn_end"]);
     expect(events.at(-1)).toEqual({ type: "turn_end", reason: "max_iterations" });
+  });
+});
+
+describe("a child's agent_notify in the parent agent (T1, T5, T7, T8, T9)", () => {
+  /** A rig: the session's AgentJobs (one per session) with a fake started child. */
+  function notifyRig(cap = 2) {
+    let n = 0;
+    const jobs = new AgentJobs(cap);
+    jobs.bind({ launched: () => `sa-${++n}`, ended: () => {} });
+    return jobs;
+  }
+
+  /** A started child that never settles until `done()`. */
+  const startedChild = (jobs: AgentJobs, description = "map repo") => {
+    const gate = Promise.withResolvers<{
+      report: string;
+      toolUses: number;
+      stopReason: string;
+    }>();
+    const started = jobs.start(
+      { callId: "c1", agentType: "general", description },
+      () => gate.promise,
+    );
+    if (!started.ok) {
+      throw new Error("the child did not start");
+    }
+    return {
+      agentId: started.agentId,
+      done: () => gate.resolve({ report: "R", toolUses: 0, stopReason: "end_turn" }),
+    };
+  };
+
+  /** A tool that fires one notify from inside the parent's own call. */
+  const notifyTool = (jobs: AgentJobs, child: { agentId: string }): Tool<{ text: string }> => ({
+    name: "notify_now",
+    description: "fires a child notify from inside a call",
+    inputSchema: z.object({ text: z.string() }),
+    permission: "none",
+    async execute(input) {
+      jobs.notify(child.agentId, input.text);
+      return { content: "ok" };
+    },
+  });
+
+  test("T1: a notify counts at once and the next turn's first request carries the note", async () => {
+    const jobs = notifyRig();
+    const model = new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv, agentJobs: jobs });
+    const child = startedChild(jobs);
+    expect(jobs.notify(child.agentId, "found X")).toEqual({ ok: true, wakes: true });
+    // In the same synchronous stretch, with nothing awaited.
+    expect(agent.pendingExitCount).toBe(1);
+
+    const session = new Session(agent, "s1");
+    await collect(session.send(""));
+    expect(agent.pendingExitCount).toBe(0);
+
+    const note = session.messages.find((m) => m.note?.kind === "subagent_message");
+    expect(note?.note).toEqual({ kind: "subagent_message", id: "sa-1" });
+    expect(note?.content).toContain("[sub-agent sa-1 → you] found X");
+    expect(note?.content).toContain('agent_message({ agent_id: "sa-1", text })');
+    const first = model.requests[0]?.messages.map((m) => m.content).join("\n") ?? "";
+    expect(first).toContain("[sub-agent sa-1 → you] found X");
+    child.done();
+  });
+
+  test("T7: a non-waking note is not counted, but is still flushed at the next start", async () => {
+    const jobs = notifyRig(4);
+    const text = (delta: string) => [{ type: "text" as const, delta }, { type: "done" as const }];
+    const model = new ScriptedProvider([text("a"), text("b")]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv, agentJobs: jobs });
+    const children = ["first", "second", "third", "fourth"].map((d) => startedChild(jobs, d));
+    for (const child of children) {
+      jobs.notify(child.agentId, "hi");
+    }
+    // Only the three waking ones ask for a turn.
+    expect(agent.pendingExitCount).toBe(3);
+    const session = new Session(agent, "s1");
+    await collect(session.send(""));
+    // All four were delivered, in arrival order.
+    expect(session.messages.filter((m) => m.note?.kind === "subagent_message")).toHaveLength(4);
+    expect(agent.pendingExitCount).toBe(0);
+    for (const child of children) {
+      child.done();
+    }
+  });
+
+  test("T7: a child's notify flushes before its own exit note (queue order)", async () => {
+    const jobs = notifyRig();
+    const model = new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv, agentJobs: jobs });
+    const child = startedChild(jobs);
+    jobs.notify(child.agentId, "halfway");
+    child.done();
+    await new Promise((r) => setTimeout(r, 5));
+    const session = new Session(agent, "s1");
+    await collect(session.send(""));
+    expect(session.messages.filter((m) => m.note !== undefined).map((m) => m.note?.kind)).toEqual([
+      "subagent_message",
+      "subagent_report",
+    ]);
+  });
+
+  test("T5: a notify during round 1 is in round 2 of the SAME turn", async () => {
+    const jobs = notifyRig();
+    const child = startedChild(jobs);
+    const model = new ScriptedProvider([
+      [
+        {
+          type: "tool_call",
+          toolCall: { id: "c1", name: "notify_now", arguments: '{"text":"mid"}' },
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "done" }, { type: "done" }],
+    ]);
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry().register(notifyTool(jobs, child)),
+      env: noopEnv,
+      agentJobs: jobs,
+    });
+    const session = new Session(agent, "s1");
+    const events = await collect(session.send("hi"));
+    // Same turn: two model rounds, one turn_end.
+    expect(model.requests).toHaveLength(2);
+    const second = model.requests[1]?.messages.map((m) => m.content).join("\n") ?? "";
+    expect(second).toContain("[sub-agent sa-1 → you] mid");
+    expect(events.filter((e) => e.type === "turn_end")).toHaveLength(1);
+    expect(agent.pendingExitCount).toBe(0);
+    child.done();
+  });
+
+  test("T5b: a notify after the last round is delivered by the late drain, in the same turn", async () => {
+    const jobs = notifyRig();
+    const child = startedChild(jobs);
+    const model = new ScriptedProvider([
+      [
+        {
+          type: "tool_call",
+          toolCall: { id: "c1", name: "notify_now", arguments: '{"text":"late"}' },
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "done" }, { type: "done" }],
+    ]);
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry().register(notifyTool(jobs, child)),
+      env: noopEnv,
+      agentJobs: jobs,
+    });
+    const session = new Session(agent, "s1");
+    const events = await collect(session.send("hi"));
+    const delivered = session.messages.find((m) => m.note?.kind === "subagent_message");
+    expect(delivered?.content).toContain("[sub-agent sa-1 → you] late");
+    expect(events.filter((e) => e.type === "turn_end")).toHaveLength(1);
+    expect(agent.pendingExitCount).toBe(0);
+    child.done();
+  });
+
+  test("T8: a mid-turn note, then a continuation → turn_end at once, zero requests", async () => {
+    const jobs = notifyRig();
+    const child = startedChild(jobs);
+    const model = new ScriptedProvider([
+      [
+        {
+          type: "tool_call",
+          toolCall: { id: "c1", name: "notify_now", arguments: '{"text":"x"}' },
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "answer" }, { type: "done" }],
+      [{ type: "text", delta: "unexpected" }, { type: "done" }],
+    ]);
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry().register(notifyTool(jobs, child)),
+      env: noopEnv,
+      agentJobs: jobs,
+    });
+    const session = new Session(agent, "s1");
+    await collect(session.send("hi"));
+    // Round 1 called the tool: its note was flushed at round 2's boundary.
+    expect(model.requests).toHaveLength(2);
+    expect(agent.pendingExitCount).toBe(0);
+
+    // The continuation a TUI/relay armed on that note's notice: nothing new.
+    const events = await collect(session.send(""));
+    expect(model.requests).toHaveLength(2); // NO model request
+    expect(events.filter((e) => e.type === "turn_end")).toEqual([
+      { type: "turn_end", reason: "end_turn" },
+    ]);
+    child.done();
+  });
+
+  test("T8b: the guard is NARROW — a plain continuation over the same history still calls the model", async () => {
+    const jobs = notifyRig();
+    const text = (delta: string) => [{ type: "text" as const, delta }, { type: "done" as const }];
+    const model = new ScriptedProvider([text("a"), text("b"), text("c")]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv, agentJobs: jobs });
+    const session = new Session(agent, "s1");
+    await collect(session.send("hi"));
+    expect(model.requests).toHaveLength(1);
+    // No mid-turn note happened: today's behaviour, a model round.
+    await collect(session.send(""));
+    expect(model.requests).toHaveLength(2);
+
+    // And a note delivered at the START (not mid-turn) is real work.
+    const child = startedChild(jobs);
+    jobs.notify(child.agentId, "at start");
+    await collect(session.send(""));
+    expect(model.requests).toHaveLength(3);
+    child.done();
+  });
+
+  test("T8c: a user message after a mid-turn note is never cut short", async () => {
+    const jobs = notifyRig();
+    const child = startedChild(jobs);
+    const model = new ScriptedProvider([
+      [
+        {
+          type: "tool_call",
+          toolCall: { id: "c1", name: "notify_now", arguments: '{"text":"x"}' },
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "answer" }, { type: "done" }],
+      [{ type: "text", delta: "second" }, { type: "done" }],
+    ]);
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry().register(notifyTool(jobs, child)),
+      env: noopEnv,
+      agentJobs: jobs,
+    });
+    const session = new Session(agent, "s1");
+    await collect(session.send("hi"));
+    await collect(session.send("carry on"));
+    // The user's own message always gets a model round.
+    expect(model.requests).toHaveLength(3);
+    child.done();
+  });
+
+  test("T9: a user message resets the budgets; a continuation does not", async () => {
+    const jobs = notifyRig();
+    let calls = 0;
+    const original = jobs.userMessage.bind(jobs);
+    jobs.userMessage = () => {
+      calls += 1;
+      original();
+    };
+    const text = (delta: string) => [{ type: "text" as const, delta }, { type: "done" as const }];
+    const model = new ScriptedProvider([text("a"), text("b")]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv, agentJobs: jobs });
+    const session = new Session(agent, "s1");
+    await collect(session.send("hi"));
+    expect(calls).toBe(1);
+    await collect(session.send(""));
+    expect(calls).toBe(1);
   });
 });
 

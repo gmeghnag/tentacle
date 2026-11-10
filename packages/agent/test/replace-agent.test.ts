@@ -7,6 +7,7 @@ import type {
   ModelProvider,
   StreamEvent,
 } from "@tentacle/core";
+import { AgentJobs } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
 import { Agent } from "../src/agent.ts";
 import { Session } from "../src/session.ts";
@@ -160,5 +161,57 @@ describe("Agent.retire / adoptExits", () => {
     expect(old.retire().map((j) => ("id" in j ? j.id : j.agentId))).toEqual(["bg-1"]);
     expect(old.retire()).toEqual([]);
     expect(jobs.listeners()).toBe(0);
+  });
+
+  test("T6: a pending child's note survives retire/adopt exactly once", async () => {
+    let n = 0;
+    const agentJobs = new AgentJobs(2);
+    agentJobs.bind({ launched: () => `sa-${++n}`, ended: () => {} });
+    const gate = Promise.withResolvers<{
+      report: string;
+      toolUses: number;
+      stopReason: string;
+    }>();
+    const started = agentJobs.start(
+      { callId: "c1", agentType: "general", description: "map" },
+      () => gate.promise,
+    );
+    if (!started.ok) {
+      throw new Error("the child did not start");
+    }
+    const make = () =>
+      new Agent({
+        model: new RecordingProvider(),
+        tools: new ToolRegistry(),
+        env: noopEnv,
+        agentJobs,
+      });
+    const old = make();
+    expect(agentJobs.notify(started.agentId, "found X")).toEqual({ ok: true, wakes: true });
+    expect(old.pendingExitCount).toBe(1);
+    const carried = old.retire();
+    expect(carried).toHaveLength(1);
+    expect(old.pendingExitCount).toBe(0);
+    const next = make();
+    next.adoptExits(carried);
+    expect(next.pendingExitCount).toBe(1);
+    // The retired agent stops collecting notifies; the new one keeps counting.
+    expect(agentJobs.notify(started.agentId, "more")).toEqual({ ok: true, wakes: true });
+    expect(old.pendingExitCount).toBe(0);
+    expect(next.pendingExitCount).toBe(2);
+
+    const model = new RecordingProvider();
+    const fresh = new Agent({
+      model,
+      tools: new ToolRegistry(),
+      env: noopEnv,
+      agentJobs,
+    });
+    fresh.adoptExits(next.retire());
+    const session = new Session(fresh, "s1");
+    await drain(session, "go");
+    // Exactly once: the two notes, and nothing repeated across the swap.
+    expect(session.messages.filter((m) => m.note?.kind === "subagent_message")).toHaveLength(2);
+    gate.resolve({ report: "R", toolUses: 0, stopReason: "end_turn" });
   });
 });

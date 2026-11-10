@@ -2,12 +2,14 @@ import { describe, expect, test } from "bun:test";
 import {
   AGENT_INBOX_MAX,
   AGENT_MESSAGE_MAX_CHARS,
+  AGENT_NOTIFY_PER_CHILD,
   type AgentInbox,
   type AgentJobExit,
   type AgentJobHost,
   type AgentJobResult,
   type AgentJobSpec,
   AgentJobs,
+  type AgentNotify,
   capSubagentText,
 } from "@tentacle/core";
 import { SUBAGENT_REPORT_MAX_CHARS } from "@tentacle/protocol";
@@ -420,6 +422,149 @@ describe("AgentJobs.message (a text for a running child)", () => {
     const { jobs } = rig();
     expect(jobs.acquire("fg one").ok).toBe(true);
     expect(jobs.message("fg one", "hi", "agent").ok).toBe(false);
+  });
+});
+
+/** A rig that also collects notifies: what a parent Agent subscribes to. */
+function notifyRig(cap = 2) {
+  const base = rig(cap);
+  const notes: AgentNotify[] = [];
+  base.jobs.onNotify((n) => notes.push(n));
+  return { ...base, notes };
+}
+
+describe("AgentJobs.notify (T2: what it refuses)", () => {
+  test("an unknown id, a killed child and an over-length text each say nothing was sent", async () => {
+    const { jobs, notes } = notifyRig();
+    const g = inboxRun();
+    jobs.start(spec(), g.run);
+
+    const unknown = jobs.notify("sa-9", "hi");
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) {
+      expect(unknown.reason).toBe(
+        "sa-9 is not a running background sub-agent (it finished, was stopped, or never existed): nothing was sent.",
+      );
+    }
+
+    jobs.kill("sa-1");
+    const killed = jobs.notify("sa-1", "hi");
+    expect(killed.ok).toBe(false);
+    if (!killed.ok) {
+      expect(killed.reason).toBe("sa-1 is being stopped: nothing was sent.");
+    }
+    g.done();
+    await tick();
+    expect(notes).toEqual([]);
+  });
+
+  test("a text over AGENT_MESSAGE_MAX_CHARS is refused with the limit, and nothing is sent", async () => {
+    const { jobs, notes } = notifyRig();
+    const g = inboxRun();
+    jobs.start(spec(), g.run);
+    const over = jobs.notify("sa-1", "x".repeat(AGENT_MESSAGE_MAX_CHARS + 1));
+    expect(over.ok).toBe(false);
+    if (!over.ok) {
+      expect(over.reason).toContain(`${AGENT_MESSAGE_MAX_CHARS}-character limit`);
+      expect(over.reason).toContain("nothing was sent");
+    }
+    expect(notes).toEqual([]);
+    g.done();
+    await tick();
+  });
+
+  test("no parent listening: refused with a reason, never a silent drop", async () => {
+    const { jobs } = rig();
+    const g = inboxRun();
+    jobs.start(spec(), g.run);
+    const out = jobs.notify("sa-1", "found X");
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.reason).toBe(
+        "no parent agent is listening: nothing was sent. Put it in your final report.",
+      );
+    }
+    g.done();
+    await tick();
+  });
+
+  test("the 8-per-child cap: the 9th notify since the user last wrote is refused", async () => {
+    const { jobs, notes } = notifyRig();
+    const g = inboxRun();
+    jobs.start(spec(), g.run);
+    for (let i = 1; i <= AGENT_NOTIFY_PER_CHILD; i++) {
+      expect(jobs.notify("sa-1", `n${i}`).ok).toBe(true);
+    }
+    const over = jobs.notify("sa-1", "n9");
+    expect(over.ok).toBe(false);
+    if (!over.ok) {
+      expect(over.reason).toBe(
+        `you already sent ${AGENT_NOTIFY_PER_CHILD} messages to the parent agent since the user last wrote: nothing was sent. Put the rest in your final report.`,
+      );
+    }
+    expect(notes).toHaveLength(AGENT_NOTIFY_PER_CHILD);
+    // A user message starts the per-child count over.
+    jobs.userMessage();
+    expect(jobs.notify("sa-1", "n10").ok).toBe(true);
+    g.done();
+    await tick();
+  });
+});
+
+describe("AgentJobs.notify: the wake budget (T3)", () => {
+  test("3 waking notifies per user message, then the note is still delivered without a wake", async () => {
+    const { jobs, notes } = notifyRig(4);
+    const a = inboxRun();
+    const b = inboxRun();
+    jobs.start(spec("first"), a.run);
+    jobs.start(spec("second"), b.run);
+    expect(jobs.notify("sa-1", "one")).toEqual({ ok: true, wakes: true });
+    expect(jobs.notify("sa-2", "two")).toEqual({ ok: true, wakes: true });
+    expect(jobs.notify("sa-1", "three")).toEqual({ ok: true, wakes: true });
+    // Over the budget: accepted, delivered, and it wakes nobody.
+    expect(jobs.notify("sa-2", "four")).toEqual({ ok: true, wakes: false });
+    expect(notes.map((n) => n.wakes)).toEqual([true, true, true, false]);
+    // A user message restarts both budgets.
+    jobs.userMessage();
+    expect(jobs.notify("sa-2", "five")).toEqual({ ok: true, wakes: true });
+    a.done();
+    b.done();
+    await tick();
+  });
+});
+
+describe("AgentJobs.notify: the listeners (T4)", () => {
+  test("every listener is called synchronously, before notify returns, with the description", async () => {
+    const { jobs } = rig();
+    const g = inboxRun();
+    jobs.start(spec("map the repo"), g.run);
+    const order: string[] = [];
+    let secondSawFirst = -1;
+    jobs.onNotify((n) => order.push(`a:${n.text}:${n.description}`));
+    jobs.onNotify((n) => {
+      // Inside the call: listener 1 has already run — no await happened.
+      secondSawFirst = order.length;
+      order.push(`b:${n.text}:${n.wakes}`);
+    });
+    expect(jobs.notify("sa-1", "found X")).toEqual({ ok: true, wakes: true });
+    expect(secondSawFirst).toBe(1);
+    // Read right after the call, with nothing awaited: every listener had run.
+    expect(order).toEqual(["a:found X:map the repo", "b:found X:true"]);
+    g.done();
+    await tick();
+  });
+
+  test("unsubscribing stops the calls; dispose clears the listeners", async () => {
+    const { jobs } = rig();
+    const g = inboxRun();
+    jobs.start(spec(), g.run);
+    const seen: string[] = [];
+    const off = jobs.onNotify((n) => seen.push(n.text));
+    off();
+    expect(jobs.notify("sa-1", "x").ok).toBe(false); // no listener left
+    expect(seen).toEqual([]);
+    g.done();
+    await tick();
   });
 });
 

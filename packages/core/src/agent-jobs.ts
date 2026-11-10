@@ -65,6 +65,28 @@ export type AgentMessageResult =
 
 export interface AgentJobExit extends RunningAgentJob, AgentJobResult {}
 
+/**
+ * What a running background child's `agent_notify` asks its parent agent to
+ * read (docs/feat/agent-message-two-way.md). `wakes` is the wake budget's
+ * decision: a note over it is still delivered, and wakes nobody.
+ */
+export interface AgentNotify {
+  readonly agentId: string;
+  readonly description: string;
+  readonly text: string;
+  readonly wakes: boolean;
+}
+
+/** What `AgentJobs.notify` answers: nothing throws, the child's tool reports. */
+export type AgentNotifyResult =
+  | { readonly ok: true; readonly wakes: boolean }
+  | { readonly ok: false; readonly reason: string };
+
+/** Accepted notifies per child between two user messages (owner Q1 a). */
+export const AGENT_NOTIFY_PER_CHILD = 8;
+/** Waking notifies per session between two user messages (owner Q1 a, eval B3). */
+export const AGENT_NOTIFY_WAKES = 3;
+
 export type AgentJobStart =
   | { readonly ok: true; readonly agentId: string }
   | { readonly ok: false; readonly reason: string };
@@ -164,6 +186,8 @@ export class AgentJobs {
       killed: boolean;
       /** Every sender's way in (`message`); it dies with the entry. */
       readonly inbox: AgentInbox;
+      /** How many notifies this child sent since the user last wrote. */
+      notified: number;
     }
   >();
   /**
@@ -180,6 +204,10 @@ export class AgentJobs {
     }
   >();
   private readonly listeners = new Set<(exit: AgentJobExit) => void>();
+  /** The parent Agent's subscriptions: a child's `agent_notify` reaches it here. */
+  private readonly notifyListeners = new Set<(notify: AgentNotify) => void>();
+  /** Waking notifies left before the next user message (`AGENT_NOTIFY_WAKES`). */
+  private notifyWakesLeft = AGENT_NOTIFY_WAKES;
   /** Told after every visible change to `rows()` (a start, a progress, an end). */
   private readonly changeListeners = new Set<() => void>();
   /** Per child, the visible state folded from its progress events. */
@@ -314,6 +342,7 @@ export class AgentJobs {
       controller,
       killed: false,
       inbox,
+      notified: 0,
     });
     this.live.set(agentId, { toolUses: 0, tokens: 0, tail: [] });
     this.changed();
@@ -371,6 +400,7 @@ export class AgentJobs {
           controller,
           killed: false,
           inbox: entry.inbox,
+          notified: 0,
         });
         this.live.set(agentId, seed);
         this.changed();
@@ -422,10 +452,94 @@ export class AgentJobs {
         };
   }
 
+  /**
+   * A running background child speaks to the PARENT AGENT
+   * (docs/feat/agent-message-two-way.md): the one source of truth for both
+   * budgets, synchronous and never throwing, like `message`. Every accepted
+   * note reaches every listener in the same stretch, so a note it accepts is
+   * queued in the parent's exit queue before the child's tool returns.
+   *
+   * Over the WAKE budget the note is still accepted (`wakes: false`): the
+   * parent reads it at its next step, it just asks for no continuation. Over
+   * the per-child cap, or with no parent listening, nothing is sent and the
+   * child is told — never a silent drop.
+   */
+  notify(agentId: string, text: string): AgentNotifyResult {
+    const entry = this.running.get(agentId);
+    if (entry === undefined) {
+      return {
+        ok: false,
+        reason: `${agentId} is not a running background sub-agent (it finished, was stopped, or never existed): nothing was sent.`,
+      };
+    }
+    if (entry.killed) {
+      return { ok: false, reason: `${agentId} is being stopped: nothing was sent.` };
+    }
+    if (text.length > AGENT_MESSAGE_MAX_CHARS) {
+      return {
+        ok: false,
+        reason: `the message is ${text.length} characters, over the ${AGENT_MESSAGE_MAX_CHARS}-character limit: nothing was sent. Send a shorter one.`,
+      };
+    }
+    if (this.notifyListeners.size === 0) {
+      // An agent that nobody listens for would swallow the text: the child must
+      // learn to put it in its report instead.
+      return {
+        ok: false,
+        reason: "no parent agent is listening: nothing was sent. Put it in your final report.",
+      };
+    }
+    if (entry.notified >= AGENT_NOTIFY_PER_CHILD) {
+      return {
+        ok: false,
+        reason: `you already sent ${AGENT_NOTIFY_PER_CHILD} messages to the parent agent since the user last wrote: nothing was sent. Put the rest in your final report.`,
+      };
+    }
+    entry.notified += 1;
+    const wakes = this.notifyWakesLeft > 0;
+    if (wakes) {
+      this.notifyWakesLeft -= 1;
+    }
+    const note: AgentNotify = {
+      agentId,
+      description: entry.job.description,
+      text,
+      wakes,
+    };
+    for (const listener of [...this.notifyListeners]) {
+      try {
+        listener(note);
+      } catch {
+        // A throwing listener never loses the others.
+      }
+    }
+    return { ok: true, wakes };
+  }
+
+  /** Subscribe to the running children's notifies; returns an unsubscribe. */
+  onNotify(listener: (notify: AgentNotify) => void): () => void {
+    this.notifyListeners.add(listener);
+    return () => this.notifyListeners.delete(listener);
+  }
+
+  /**
+   * A user message reached the parent agent: both budgets start over
+   * (docs/feat/agent-message-two-way.md). A parent's own `agent_message` never
+   * resets them, so ping-pong stays bounded until the person writes.
+   */
+  userMessage(): void {
+    this.notifyWakesLeft = AGENT_NOTIFY_WAKES;
+    for (const entry of this.running.values()) {
+      entry.notified = 0;
+    }
+  }
+
   /** Aborts every child. No `ended`, no exit: the session is going away. */
   dispose(): void {
     this.disposed = true;
     this.listeners.clear();
+    this.notifyListeners.clear();
+    this.notifyWakesLeft = AGENT_NOTIFY_WAKES;
     this.changeListeners.clear();
     for (const { controller } of this.running.values()) {
       controller.abort();

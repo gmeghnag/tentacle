@@ -367,6 +367,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `subagents.maxIterations` | `TENTACLE_SUBAGENT_MAX_ITERATIONS` | 50 | Step limit for a sub-agent's own loop. |
 | `subagents.maxParallel` | `TENTACLE_SUBAGENT_MAX_PARALLEL` | 4 | At most this many sub-agents at once — the only limit; match it to your server. |
 | `subagents.selectableModels` | — | — | `models` entries the agent may pick per `agent_task` call; absent or empty: off. |
+| `subagents.twoWay` | `TENTACLE_SUBAGENTS_TWO_WAY` | false | Background sub-agents may message the agent (`agent_notify`); a message wakes an idle agent. |
 | `subagents.types.*.model` | — | — | The `models` entry this type runs on (beats the type's `agents/*.md` `model`). |
 | `systemPromptFile` | `TENTACLE_SYSTEM_PROMPT` (inline, not a path) | `PROMPT.md` in the config dir | The system prompt file: relative to the config dir, or absolute. |
 | `tools.dedupOutput` | `TENTACLE_DEDUP_OUTPUT` | true | Collapse runs of identical consecutive output lines. |

@@ -9,6 +9,7 @@ import {
   PermissionBroker,
   type StreamEvent,
 } from "@tentacle/core";
+import { AgentJobs } from "@tentacle/core";
 import {
   type KnownSessionUpdateParams,
   type OpenResult,
@@ -124,6 +125,9 @@ function rig(
 ) {
   const jobs = new FakeJobs();
   const model = new Model();
+  // The session's background sub-agents (docs/feat/agent-message-two-way.md):
+  // the host binds its ledger, the agent subscribes, and a test "child" notifies.
+  const agentJobs = new AgentJobs(2);
   const audit: string[] = [];
   const errors: Error[] = [];
   const host = new SessionHost({
@@ -140,6 +144,7 @@ function rig(
         tools: new ToolRegistry().register(shellTool),
         env,
         jobs,
+        agentJobs,
         requestPermission: (req, options) => permissions.request(req, options),
         // A stand-in hook runner: only the members the agent reads (W-7b).
         ...(opts.hooks ? { hooks: opts.hooks as AgentConfig["hooks"] } : {}),
@@ -148,6 +153,7 @@ function rig(
         agent,
         permissions,
         jobs,
+        agentJobs,
         ...(context.settings
           ? { settingsReport: { carried: context.settings, overridden: {} } }
           : {}),
@@ -199,7 +205,7 @@ function rig(
     await settle();
     return a;
   };
-  return { jobs, model, audit, errors, host, connect, hosted, detachedAfterTurn };
+  return { jobs, agentJobs, model, audit, errors, host, connect, hosted, detachedAfterTurn };
 }
 
 describe("a serve daemon wakes a session nobody is attached to", () => {
@@ -586,5 +592,110 @@ describe("a serve daemon wakes a session nobody is attached to", () => {
     await settle();
     expect(r.model.seen.length).toBe(2);
     expect(r.model.wokeFor("j1")).toBe(1);
+  });
+
+  /** A started background child on the session's own runtime (a notify needs a running id). */
+  const startChild = (r: ReturnType<typeof rig>) => {
+    const gate = Promise.withResolvers<{
+      report: string;
+      toolUses: number;
+      stopReason: string;
+    }>();
+    const started = r.agentJobs.start(
+      { callId: "c1", agentType: "general", description: "map repo" },
+      () => gate.promise,
+    );
+    if (!started.ok) {
+      throw new Error("the child did not start");
+    }
+    return started.agentId;
+  };
+  /** Every `subagent_notify` a connected client got. */
+  const notified = (updates: readonly KnownSessionUpdateParams[]) =>
+    updates
+      .map((u) => u.update)
+      .filter(
+        (u): u is Extract<SessionUpdate, { type: "subagent_notify" }> =>
+          u.type === "subagent_notify",
+      );
+
+  test("N-1 a WAKING notify with nobody attached starts ONE wake turn whose request has the note", async () => {
+    // Mutation: drop the `kickWake()` in the notify listener → no second model call.
+    const r = rig();
+    await r.detachedAfterTurn();
+    expect(r.model.seen.length).toBe(1);
+    expect(r.agentJobs.notify(startChild(r), "found X")).toEqual({ ok: true, wakes: true });
+    await settle();
+    expect(r.model.seen.length).toBe(2);
+    const request = r.model.seen[1];
+    expect(request?.messages.map((m) => String(m.content)).join("\n")).toContain(
+      "[sub-agent sa-1 → you] found X",
+    );
+    expect(r.hosted().unflushedExits).toBe(0);
+  });
+
+  test("N-2 a NON-waking notify starts no turn, and is delivered at the next turn's start", async () => {
+    const r = rig();
+    await r.detachedAfterTurn();
+    const child = startChild(r);
+    // Spend the wake budget (3) so the 4th is quiet.
+    for (let i = 0; i < 3; i++) {
+      r.agentJobs.notify(child, `wake ${i}`);
+    }
+    await settle();
+    const before = r.model.seen.length;
+    expect(r.agentJobs.notify(child, "quiet")).toEqual({ ok: true, wakes: false });
+    await settle();
+    // No wake: the counted queue is 0 (only the three waking ones asked).
+    expect(r.model.seen.length).toBe(before);
+    // The note is still there for the next turn the client starts.
+    const b = await r.connect();
+    await b.open();
+    await b.prompt("t2");
+    await settle();
+    const last =
+      r.model.seen
+        .at(-1)
+        ?.messages.map((m) => String(m.content))
+        .join("\n") ?? "";
+    expect(last).toContain("[sub-agent sa-1 → you] quiet");
+  });
+
+  test("N-3 a notify during a compaction is held, and woken for after it", async () => {
+    const r = rig();
+    await r.detachedAfterTurn();
+    const child = startChild(r);
+    const { step, release } = gated([text("summary"), done]);
+    r.model.steps.push(step);
+    const compaction = r.hosted().compact();
+    await flush();
+    expect(r.agentJobs.notify(child, "during compaction")).toEqual({ ok: true, wakes: true });
+    await settle();
+    // Held: no new turn while the slot is taken.
+    expect(r.model.seen.length).toBe(2);
+    release();
+    await compaction;
+    await settle();
+    expect(r.model.seen.length).toBe(3);
+    const last =
+      r.model.seen
+        .at(-1)
+        ?.messages.map((m) => String(m.content))
+        .join("\n") ?? "";
+    expect(last).toContain("[sub-agent sa-1 → you] during compaction");
+  });
+
+  test("N-4 an attached client gets the notice, with the id and the text, live", async () => {
+    // Mutation: emit without `kickWake`/without the emit → the client sees nothing.
+    const r = rig();
+    const a = await r.connect();
+    await a.open({ create: true });
+    await a.prompt("t1");
+    await settle();
+    const child = startChild(r);
+    r.agentJobs.notify(child, "live one");
+    await settle();
+    const seen = notified(a.updates);
+    expect(seen.at(-1)).toMatchObject({ agentId: "sa-1", text: "live one", wake: true });
   });
 });

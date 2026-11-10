@@ -283,6 +283,11 @@ const settingsShape = {
        */
       maxParallel: z.number().int().positive().optional(),
       /**
+       * May a running background sub-agent message the agent (`agent_notify`)
+       * and wake it? Default off. On `run`/`attach` the laptop's (pinned).
+       */
+      twoWay: z.boolean().optional(),
+      /**
        * Replaces the `agent_task` tool's description (at most 4096 bytes, trimmed).
        * Owner: as `execution`. Not with `agentTaskDescriptionFile`.
        */

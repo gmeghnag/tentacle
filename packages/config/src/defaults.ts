@@ -20,6 +20,12 @@ export const DEFAULT_SUBAGENT_MAX_ITERATIONS = 50;
 export const DEFAULT_SUBAGENT_EXECUTION = "parallel" as const;
 /** At most this many sub-agents at once (read by `feat/parallel-agents`). */
 export const DEFAULT_SUBAGENT_MAX_PARALLEL = 4;
+/**
+ * May a running background sub-agent message the agent (`agent_notify`, and
+ * wake it)? Off by default: it changes what a child can do to its parent
+ * (docs/feat/agent-message-two-way.md, owner Q3 a).
+ */
+export const DEFAULT_SUBAGENTS_TWO_WAY = false;
 /** Max bytes of a custom `agent_task` description, after trimming. */
 export const MAX_AGENT_TASK_DESCRIPTION_BYTES = 4096;
 /**

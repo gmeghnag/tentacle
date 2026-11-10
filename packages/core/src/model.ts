@@ -85,6 +85,8 @@ export const NOTE_KIND = {
   backgroundExit: "background_exit",
   /** A finished background sub-agent's report, delivered. */
   subagentReport: "subagent_report",
+  /** A running background sub-agent's `agent_notify` text, delivered mid-run. */
+  subagentMessage: "subagent_message",
   /** A background sub-agent a restart found unfinished: its work product is gone. */
   subagentLost: "subagent_lost",
   /** What was still running when the chat was cleared (`/clear`'s head note). */

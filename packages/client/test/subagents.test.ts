@@ -21,7 +21,7 @@ import type { SubagentRow } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
 import { RemoteClient, type SessionSubagentsNotice } from "../src/remote-client.ts";
-import { boundSubagents, subagentsFromSnapshot } from "../src/subagents.ts";
+import { boundSubagentNotify, boundSubagents, subagentsFromSnapshot } from "../src/subagents.ts";
 
 const noopEnv = {
   id: "noop",
@@ -72,6 +72,72 @@ function row(i: number, extra: Partial<SubagentRow> = {}): SubagentRow {
     ...extra,
   };
 }
+
+describe("T15: a child's message to the agent (subagent_notify)", () => {
+  test("a notify frame reaches onSubagentNotify, bounded (control characters stripped, 8000 cap)", async () => {
+    const r = rig();
+    await r.client.initialize();
+    const session = r.client.newSession();
+    const turnDone = drain(session.send("hello"));
+    await until(() => r.sid() !== "");
+    const seen: { agentId: string; text: string; wake: boolean }[] = [];
+    session.onSubagentNotify((n) => seen.push(n));
+    const runtime = r.runtimes[0];
+    if (runtime === undefined) return;
+    const stopped = Promise.withResolvers<void>();
+    runtime.start(
+      { callId: "c1", agentType: "general", description: "map repo" },
+      async (ctl) =>
+        new Promise((resolve) => {
+          ctl.signal.addEventListener("abort", () => {
+            stopped.resolve();
+            resolve({ report: "", toolUses: 0, stopReason: "cancelled" });
+          });
+        }),
+    );
+    await until(() => runtime.rows().length === 1);
+    // An escape sequence and a newline never reach the terminal as themselves:
+    // the daemon's `wireLine` makes untrusted text one line (the client bounds
+    // it again for a pod daemon that does not).
+    expect(runtime.notify("sa-1", "line one\nline two\u001b[31m red")).toEqual({
+      ok: true,
+      wakes: true,
+    });
+    await until(() => seen.length > 0);
+    expect(seen.at(-1)).toEqual({
+      agentId: "sa-1",
+      text: "line one line two [31m red",
+      wake: true,
+    });
+    // Over the 8 000 cap: the tool refuses it (the size check is BEFORE the
+    // wire), so the client's own cap is pinned by `boundSubagentNotify` below
+    // (a hostile pod daemon is the case it exists for).
+    expect(runtime.notify("sa-1", "x".repeat(9000)).ok).toBe(false);
+    // Exactly at the cap goes through, uncut.
+    runtime.notify("sa-1", "y".repeat(8000));
+    await until(() => seen.length > 1);
+    expect(seen.at(-1)?.text).toHaveLength(8000);
+    runtime.kill("sa-1");
+    stopped.resolve();
+    await turnDone;
+    r.close();
+  });
+
+  test("boundSubagentNotify: the id is one bounded line, the text cut at 8000, the wake kept", () => {
+    const bounded = boundSubagentNotify({
+      agentId: `sa-1\n${"y".repeat(200)}`,
+      text: "ok",
+      wake: false,
+    });
+    expect(bounded.agentId.length).toBeLessThanOrEqual(64);
+    expect(bounded.agentId).not.toContain("\n");
+    expect(bounded.wake).toBe(false);
+    // A hostile pod daemon's 20 000 characters: cut, with an ellipsis.
+    const long = boundSubagentNotify({ agentId: "sa-1", text: "z".repeat(20_000), wake: true });
+    expect(long.text).toHaveLength(8000);
+    expect(long.text.endsWith("…")).toBe(true);
+  });
+});
 
 describe("T46: rows are bounded and sanitized at the client", () => {
   test("at most 32 rows, kept in launch order", () => {

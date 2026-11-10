@@ -503,3 +503,251 @@ Owner delegated the night of 2026-11-09→10 ("Decidi e fai merge"); each answer
 - **Q4: (a)** the narrow guard in the agent loop (a continuation armed for a message already delivered mid-turn ends at once, no model call).
 
 *— orchestrator (claude-opus-5-5), 2026-11-10*
+
+## Execution
+
+*— deepseek (tentacle --profile deepseek), 2026-11-10*
+
+### Repro, before any edit
+
+On this branch (`aee5c6d`, plan only) the capability is absent:
+
+```
+$ grep -rn "agent_notify|twoWay|subagent_notify|subagentsTwoWay" packages apps/mobile/src
+(nothing; exit 1)
+```
+
+### What was done, in the plan's file order
+
+1. **Protocol** — `packages/protocol/src/updates.ts`: `SubagentNotifySchema`
+   (`{type, agentId, text, wake}`), added to the union after `SubagentsUpdateSchema`, and
+   `UPDATE_CLASS.subagent_notify = "display"`. `packages/protocol/src/session.ts`:
+   `subagentsTwoWay: z.boolean().optional()` in `SessionSettingsSchema`.
+   **No `PROTOCOL_VERSION` bump** (still 21, `version.ts:17`), as the plan says.
+   `bun run schema:export` regenerated `packages/protocol/schema/protocol.json` (+29 lines:
+   the new def with `"x-event-class": "display"`, the union member, the discriminator row, the
+   settings field).
+2. **`packages/core/src/model.ts`** — `NOTE_KIND.subagentMessage = "subagent_message"`.
+3. **`packages/core/src/agent-jobs.ts`** — `AGENT_NOTIFY_PER_CHILD = 8`,
+   `AGENT_NOTIFY_WAKES = 3`, `AgentNotify`, `AgentNotifyResult`; `notified` on the running
+   entry (both creation sites: `start`, `adopt`); `notifyWakesLeft`; `notifyListeners`.
+   `notify` (`:467`) checks in the plan's order (not running → killed → over
+   `AGENT_MESSAGE_MAX_CHARS` → no listener → per-child cap) and only then `notified++`,
+   decides `wakes`, and calls every listener synchronously in its own `try`. `onNotify`
+   (`:520`). `userMessage` (`:530`) resets both budgets. `dispose` clears the listeners and
+   the wake budget. No `changed()`.
+4. **`packages/agent/src/agent.ts`** — `PendingExit` gained `PendingAgentMessage`
+   (`{kind: "agent_message"} & AgentNotify`), told apart FIRST by `isAgentMessage`;
+   the constructor subscribes `onNotify` into the same `pendingExits`; `retire`
+   unsubscribes it; `pendingExitCount` counts a note only when `wakes`. Exported
+   `agentMessageNote`. `flushBackgroundExits` handles a note BEFORE the `"agentId"` branch
+   (order kept). `flushAgentMessages` (synchronous, rebuilds the array keeping the exits)
+   is called at the iteration boundary after the steer loop and at the late drain; both set
+   `notesFlushedMidTurn`. The budget reset rides both user-message sites. The narrow
+   stale-wake guard sits right after the turn-start flush, gated on `notesFlushedMidTurn` &&
+   not a user message && no resume && no skill && nothing flushed at this start &&
+   `endsWithFinalAnswer(messages)`, and ends the turn with no model request.
+5. **`packages/tools/src/background.ts`** — `AGENT_NOTIFY_TOOL_NAME`,
+   `createAgentNotifyTool(agentId, notify)` (`permission: "none"`, `text: min(1)`), the
+   three result texts of the plan; exported through the package index (`export *`).
+6. **`packages/agent/src/subagent.ts`** — `SubagentDeps.notify`; registration after the
+   filter loop, only with `deps.notify && controls?.agentId !== undefined`; the filter and
+   `readOnlyType` both skip `AGENT_NOTIFY_TOOL_NAME`.
+7. **Config** — `DEFAULT_SUBAGENTS_TWO_WAY = false` (`defaults.ts`), the schema key, the
+   resolve `pick` + `ResolvedConfig`/`sources`, the load field, the `key-docs.ts` entry
+   (`subagents.twoWay`, leaf/boolean/both/pinned, `TENTACLE_SUBAGENTS_TWO_WAY`, sample `on`).
+8. **`packages/cli`** — the `CARRIED` P row `subagentsTwoWay`; `wiring.ts` passes
+   `notify` to `createSubagentRunner` only when `config.subagentsTwoWay`.
+9. **`packages/daemon/src/hosted-session.ts`** — `unsubscribeAgentNotify` beside the exit
+   subscription: `emit({type: "subagent_notify", …})` with `wireLine` bounds, then
+   `kickWake()` when `note.wakes`; unsubscribed in `close`.
+10. **`packages/client`** — `subagents.ts`: `SubagentNotify`, `boundSubagentNotify`
+    (id ≤ 64 via `progressText`, control characters except `\n` stripped, text ≤ 8 000);
+    `remote-client.ts`: `SessionSubagentNotifyNotice`, `onSessionSubagentNotify`, the route
+    (`subagentNotified`, bounded); `remote-session.ts`: `onSubagentNotify` plus the two
+    "owned elsewhere" switch arms; `mapping.ts`: reverse `null`.
+11. **`packages/cli/src/relay.ts`** — `offNotify`, released beside `offExit`.
+    **DRIFT (see below):** the gate is a pure `notifyWakes(n, config)` in `relay-state.ts`.
+    `main.ts` passes `subagentsTwoWay: config.subagentsTwoWay` at all three TUI sites.
+12. **`packages/tui`** — new pure `src/subagent-notify.ts` (`subagentNotifyNotice`, first
+    line, 200-char cut, control characters stripped); `App.tsx`: the exit handler's wake
+    step extracted to `armWake` (used by both handlers), `onSubagentNotify` on the session
+    interface, the subscription in `watchSession` (notice always, `armWake` only when
+    `n.wake && subagentsTwoWay`), a `subagentsTwoWay` prop (default false); `run.tsx`
+    pass-through; `local-runtime.ts` forwards `onSubagentNotify`.
+13. Tests, `CHANGELOG.md` `[Unreleased]` entry, this section.
+
+### Drift from the Implementation (and why)
+
+1. **T16 is a pure test of the gate, not a `runRelay` test.** The Implementation says
+   "`packages/cli/test/relay-state.test.ts` / `relay.test.ts` (extend) — T16: a waking notice
+   with `autoWake` and `twoWay` on drives one continuation". Driving it end-to-end through
+   `runRelay` needs a notify to originate in the pod daemon; the `resident` rig in
+   `relay.test.ts` builds its `SessionHost` from a factory that the relay **also** uses for
+   its context probe (`session-host.ts:316`), so the instance given to `agentJobs` is
+   disposed by `newSessionContext` (`:332`) and the relay's own session then has no runtime.
+   Two approaches on that rig stalled (`AgentJobs.start` refused "not available", then the
+   relay's first turn failing `internal error`), so §0's two-strike rule was applied: the
+   DECISION was moved into the pure `notifyWakes` in `relay-state.ts` (the plan's own §7
+   preference — "logic in pure modules") and the relay calls it. The wake the relay starts
+   after `emit({type:"job_exit"})` is the existing, already-tested path (`relayWakeDue` +
+   `drive("")`, `relay-state.test.ts` "the wake on a job exit"). T16 pins all four
+   combinations. **Not verified end-to-end:** a detached run actually waking on a note — see
+   "Not done".
+2. **T19/T20's `onSubagentNotify` is reached through `LocalRuntime`, not `RemoteSession`
+   directly.** `createLocalRuntime`'s `PersistingController` needed the forwarding method
+   (Design 7 did not name it); the e2e test drives the real runtime, so the forwarding is
+   what T19 pins.
+3. **`nextTui`/`main.ts`: three sites, not the two the plan implied.** `autoWakeOnJobExit`
+   appears three times there (`:1043`, `:1836`, `:1887`); all three got `subagentsTwoWay`.
+4. **`SubagentNotify` is mirrored in the TUI** as `SubagentNotifyView` (`subagent-notify.ts`),
+   like `BackgroundAgentRow`: the TUI does not depend on `@tentacle/protocol`.
+5. **Four pre-existing pinned tests were updated** for the new key/type (they are the repo's
+   own completeness pins, not new behaviour): `carried-settings.test.ts` (23 CARRIED keys, P
+   table, 21 keys carried by default), `key-docs-carried.test.ts` (23), `explain.test.ts`
+   (`subagents` now 9 sub-keys), `daemon/test/mapping.test.ts` (a `subagent_notify` sample).
+   `README.md`'s config table was regenerated with `bun run docs:config`.
+6. **`agentMessageNote`'s answer hint** reads `agent_message({ agent_id: "sa-1", text })`
+   (the plan wrote `text: ...`); `z.string()` args need no literal value, and the shorter
+   form is what a model should copy.
+7. **`session.test.ts`'s fake `agentJobs`** needed an `onNotify` stub (the Agent now
+   subscribes in its constructor). One line; the fake was already `as never`.
+
+### Tests: red before green
+
+Every test below was run on the code **before** the step that makes it pass. Where a symbol
+did not exist yet, the module was stubbed with the naive behaviour so the failure landed on
+the ASSERTION (§9: a compile error is not a red); the mutations are listed with each group.
+
+- **T2/T3/T4** (`core/test/agent-jobs.test.ts`) — stubbed `notify` to "always accept, always
+  wake, notify synchronously". Red:
+  ```
+  (fail) AgentJobs.notify (T2) > an unknown id, a killed child and an over-length text …
+  (fail) AgentJobs.notify (T2) > the 8-per-child cap: the 9th notify …
+  (fail) AgentJobs.notify: the wake budget (T3) > 3 waking notifies …
+  (fail) AgentJobs.notify: the listeners (T4) > unsubscribing stops the calls …
+   22 pass / 6 fail
+  ```
+  then stubbed the delivery to `queueMicrotask` → T4 red alone
+  (`Expected: 1 / Received: 0`). Green after the real implementation: `28 pass / 0 fail`.
+- **T1/T5/T5b/T7/T7b/T8/T8b/T8c/T9** (`agent/test/agent.test.ts`) — red with the Agent
+  changed only to accept `notify` (no subscription):
+  ```
+  (fail) T1: a notify counts at once …  expected {ok:true,wakes:true}, got {ok:false, reason:"no parent agent is listening…"}
+  (fail) T7: a non-waking note is not counted … / T7: queue order / T5 / T9
+   0 pass / 5 fail
+  ```
+  Green after the Agent work: `30 pass / 0 fail` for the file.
+- **T6** (`agent/test/replace-agent.test.ts`) — green with the implementation, then the
+  mutation `retire` drops the notify unsubscribe:
+  ```
+  Expected: 0 / Received: 1
+  (fail) Agent.retire / adoptExits > T6: a pending child's note survives retire/adopt exactly once
+  ```
+- **T10** (`agent/test/subagent.test.ts`) — red before registration:
+  ```
+  (fail) T10b > a background child (with an agentId) is offered it; a foreground child is not
+  (fail) T10b > a read-only (explore) child gets it too
+  (fail) T10b > a parent registry holding one never leaks it
+   1 pass / 3 fail
+  ```
+  Mutation after green (register for every child): the first fails, the other three pass.
+- **T11** (`tools/test/agent-notify.test.ts`, new) — green with the tool, then mutated
+  (`isError: false` on refusal; both texts `"delivered"`): all 5 fail.
+- **T12** (`config/test/subagent-keys.test.ts`) — red before `key-docs.ts`:
+  `Expected "subagents.twoWay", Received undefined`; plus the registry-completeness tests
+  (`key-docs.test.ts` T1/T2/T3) red until the entry existed.
+- **T13** (`cli/test/carried-settings.test.ts`) — mutation `class: "W"`: 3 tests fail
+  (`9 P + 14 W`, `beats a pod's file`, `beats a pod's env`).
+- **T14** (`daemon/test/serve-autowake.test.ts`, N-1…N-4) — green with the daemon listener,
+  then mutated (listener removed):
+  ```
+  Expected: 2 / Received: 1
+  (fail) N-1 a WAKING notify … starts ONE wake turn whose request has the note
+  (fail) N-4 an attached client gets the notice …
+  ```
+- **T15** (`client/test/subagents.test.ts`) — mutation (route the raw frame, no
+  `boundSubagentNotify`):
+  ```
+  -   "text": "line one line two [31m red",
+  +   "text": "line one\nline two\u001b[31m red",
+  (fail) T15 > a notify frame reaches onSubagentNotify, bounded
+  ```
+  Note: the daemon's `wireLine` already flattens the newline, so the client bound is pinned
+  by `boundSubagentNotify`'s own unit test (8 000 cut) plus this route.
+- **T16** (`cli/test/relay-state.test.ts`) — mutation `return notify.wake;`:
+  ```
+  (fail) T16 > `subagents.twoWay` off: a note still arrives, and arms nothing
+  (fail) T16 > `autoWake` off: the same, the laptop's other gate
+  ```
+- **T17** (TUI, `tui/test/auto-wake.test.tsx`) — green with the App change; `twoWay` off
+  and non-waking cases red under a mutation that arms on any notice.
+- **T18** (`tui/test/subagent-notify.test.ts`, new) — red before the module's line logic
+  (`Received "sa-2 → agent: first line second third"`), then green.
+- **T19/T20/T21** (`cli/test/agent-message-two-way.e2e.test.ts`, new) — T19 red on its own
+  assertion with the plan's named mutation (the runner's `notify` wired to a fresh
+  `AgentJobs`):
+  ```
+  Expected: true / Received: false
+  (fail) T19: a child's notify reaches the parent over RPC; a reply completes the round trip
+  ```
+  T21 red under a mutation that always passes `notify`:
+  ```
+  Expected to not contain: "agent_notify"
+  Received: [ "fs_read", "fs_write", "fs_edit", …, "skill", … ]
+  ```
+  T20 was green from the start (the mid-turn flush already carries it) — it is the
+  regression pin for the turn count, and it fails under the M1 mutation below.
+
+### Mutations on the load-bearing parts (§9 non-vacuity)
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | drop the mid-turn `flushAgentMessages` at the iteration boundary | T5, T8, T8c fail (6 pass / 3 fail) |
+| M2 | drop `notesFlushedMidTurn` from the guard's condition | T8b fails (the guard stops being narrow: a plain continuation is cut short) |
+| M3 | `pendingExitCount` counts every note (drop the `wakes` filter) | T7 fails (a non-waking note asks for a wake) |
+| M4 | drop `agentJobs.userMessage()` at the user-message site | T9 fails |
+| M5 | **the plan's "`twoWay` off" check**: no `onNotify` subscription at all (= what a parent with no child runtime looks like) | T1, T5, T5b, T7×2, T8 fail; `notify` itself answers `ok:false "no parent agent is listening"` — with `twoWay` off, `wiring.ts` passes no `notify`, so a child never reaches this |
+| M6 | register `agent_notify` on every child (drop the `agentId` guard) | T10b's foreground case fails |
+| M7 | remove the daemon's notify listener | N-1 and N-4 fail |
+| M8 | route the raw frame (no client bound) | T15 fails |
+| M9 | `notifyWakes` ignores the config | T16's two gated cases fail |
+| M10 | runner's `notify` → a fresh `AgentJobs` (the plan's own T19 mutation) | T19 fails at the notice |
+
+M5 and M10 are the two that pin the LBA directly: the note enters through the ONE
+`AgentJobs` the parent subscribed to, and with no subscription nothing enters at all.
+
+### Gate
+
+```
+$ bun run check
+$ tsc --noEmit && tsc -p apps/mobile --noEmit
+$ biome check .
+Checked 821 files in 263ms. No fixes applied.
+$ bun test
+ 6343 pass
+ 3 skip
+ 0 fail
+Ran 6346 tests across 445 files. [243.59s]
+```
+
+The 3 skips are the documented opt-in ones (live-k8s, live-docker, real-socket keepalive).
+Lint is clean (0 errors, 0 warnings), so `bun run check` is green as a whole. `ran in the
+worktree at .tentacle/worktrees/agent-message-two-way`, branch `feat/agent-message-two-way`.
+
+### Not done / unverified
+
+- **A detached run waking on a note, end to end.** The gate is pure-tested (T16) and the
+  wake it triggers is the existing job-exit path, but no test drives `runRelay` with a real
+  pod-originated notify (drift 1). To verify: give `relay.test.ts`'s `resident` rig a
+  per-session `AgentJobs` (the probe's `newSessionContext` must not hand back the same
+  instance), then fire a notify and assert one extra `session/prompt`.
+- **The TUI's `armWake` sharing** is pinned behaviourally (T17a–T17c) but the exit path's own
+  tests (`T-TUI-1`, `T-TUI-3`) also pass, which is the regression evidence; no test asserts
+  the two handlers call the same function.
+- **Owner Q2 (a)** is implemented as decided (an unflushed note is memory-only). Nothing
+  new is persisted; the parent's note, once flushed, is an ordinary `message` entry.
+- **Task 7 compatibility** (`docs/feat/subagent-panel`, unmerged) is by naming only, as the
+  plan says: `subagent_notify` / `kind: "agent_message"` / `NOTE_KIND.subagentMessage` versus
+  task 7's `subagent_message` / `"user_note"` / `userToSubagent`. Whichever lands second
+  rebases onto the other's `PendingExit` union, `pendingExitCount` filter and `NOTE_KIND`.
