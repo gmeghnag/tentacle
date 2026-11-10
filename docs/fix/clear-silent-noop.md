@@ -290,3 +290,100 @@ deliberate belt-and-braces, not a live path. (c) `/compact` has the same hollow
 `{0,0}` return for an unopened resumed session (`remote-session.ts:721-726`) — the
 same class of bug, out of this task's scope; worth its own entry in `TODO.md` (not
 touched, per instruction). (d) `TODO.md` untouched, nothing committed.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-10* (fresh context; a different model family from the executor)
+
+**Verdict: REQUEST-CHANGES** — the core fix is right and tested at the real
+interface, but the open it adds can deliver the attach snapshot into the
+`/clear` latch, and the user's own clear is then announced as someone else's.
+
+### Findings
+
+**M1 — your own `/clear` says "the conversation was cleared on another device"
+when the open ATTACHES a live session** (Implementation's failure modes 8 and 4b).
+`App.tsx:1935-1936` raises `clearingRef` and `ownClearsRef += 1` *before*
+`session.clear()`. Then `openForClear` (`remote-session.ts:707-717`) attaches.
+The attach's snapshot is a `history{reason: null}`, and at `App.tsx:1539-1544`
+it releases the latch and **zeroes `ownClearsRef`**. So when the clear's own
+`history{clear}` arrives, `ownClear` is false (`:1527`) and the TUI pushes
+`CLEARED_ELSEWHERE_NOTICE` (`:1553`). The latch also lets go before the clear
+has landed.
+*Scenario (reproduced, real `App` over real RPC,
+`.tentacle/tmp/clear-silent-noop/review/attack.ts live-elsewhere`):* a second
+client keeps the uid live with one turn, then this TUI is `--resume`d and runs
+`/clear`. The frame shows `⏺ the conversation was cleared on another device`.
+The chat itself is cleared correctly, and a prompt typed right after still went
+out on a clean context (`attack2.ts live-type` → `["sys","next"]`). The same
+sequence applies to 4b (`/clear` typed during a `connect`/`attach` eager dial).
+Row 8 of the plan ("says 'cleared on another device' only to the others") is
+FALSE as built. The new tests miss it because none attaches to a live id from
+the App (`clear-attach.test.ts` checks the client only).
+*Fix:* in `runClear`, do the open first and arm the bookkeeping after it:
+`clearingRef.current = true; await session.openForClear?.();` (it settles after
+the snapshot has been applied), then `clearingRef.current = true;
+ownClearsRef.current += 1; session.clear()`. Expose `openForClear?` on the TUI
+session type and the persisting controller. Add the App test above (session live
+on a second client → `/clear` → frame has no "another device"). Show it red
+first.
+
+**M2 — `/compact` has the same hole, and the TUI reports a false success**
+(executor's (c), confirmed). `remote-session.ts:720-725` returns `{0,0}` without
+opening. `App.tsx:2148-2151` takes that as `ok`, and `send-now.ts:108` prints
+`Context compacted — 0 → 0 messages.`, so the context is untouched and the user
+is told otherwise. `ownCompactionsRef` (`:2116`) stays at +1 because only
+`!ok` decrements it (`:2124`). The next FOREIGN compaction is then treated as
+this client's, and its "on another device" notice is swallowed.
+*Fix (batches into this branch):* rename `openForClear` → `openForReset` and
+`await` it at the top of `RemoteSession.compact()`. `persistingController.compact`
+needs no change: it flushes after the compact, and no fork is involved. Apply
+M1's open-first ordering to the `/compact` handler too: increment
+`ownCompactionsRef` after the open. Test: a resumed, unopened session →
+`/compact` → `before > 0` and the model's next request is the compacted one.
+
+### Checked and holding
+
+- **Gate:** `bun run check` → typecheck clean; `biome` 824 files with no fixes;
+  `bun test` **6352 pass / 3 skip (opt-in) / 0 fail**, 6355 tests across 448
+  files.
+- **Mutations** (restored by file copy, `git status` clean afterwards): removing
+  `await inner.openForClear?.()` from `local-runtime.ts:494` turns
+  `cli/test/clear-resume.test.ts` red (1 fail). Removing the `attach` branch of
+  `openForClear` turns `clear-attach.test.ts` red (1 fail). Both restored.
+- **Tree vs. the commit:** `git status` was clean when the review started and is
+  clean now. `git diff main...HEAD` holds all four product files plus the tests,
+  and the gate is green on it. Nothing from the executor's `checkout`/`apply`
+  round-trip was lost (it is still a process breach of §9).
+- **Fork / persistence:** the open happens before the bounded read-back
+  (`local-runtime.ts:494` → `:496-497`), so `lastRead` holds the resumed chat and
+  `armFork` queues it before the post-clear `flush` (`:519-520`). The cli test
+  asserts the fork record. `connect` goes through `RemoteSession.clear()`, which
+  awaits the same open and keeps no laptop copy. No `serve` e2e was run
+  (executor's (a); still unverified).
+- **Open failure:** a rejection from `openForClear` happens before `clearSent`,
+  so it never arms a fork. It reaches `runClear`'s reject branch
+  (`App.tsx:1976-1990`), which releases the latch and shows `clearErrorNotice`.
+  That path is loud.
+- **Notice (`clearNoopNotice`):** it fires only on `{0,0}` with a `user`/`tool`
+  row on screen, never on an empty or welcome-only transcript (that test was
+  run), and only in the success branch, so it cannot mask an error.
+- **History account:** `git log -S` places the hollow `clear()` in `df42111` and
+  the `{0,0}` TUI branch in `7aab601`, and `clear-fork-history.md:607` row 14
+  says exactly what the doc quotes. The account is **correct**.
+- **Attacks tried:** (1) a plain resumed `/clear` → cleared, no notice. OK.
+  (2) A prompt typed 1 ms after `/clear` → the model gets `["sys","next"]`. OK:
+  the send awaits the same memoized open and the latch. (3) A session already
+  live elsewhere → **M1**. (4) The same plus a quick prompt → context is right,
+  wrong notice (M1). Not tried: a quit right after `/clear` (unverified, low
+  prior: the persister flushes on exit as before).
+
+### Executor behaviour
+
+The diagnosis is precise and confirmed against git history. The fix is small,
+the tests are at the real interface, and the mutations are honest. Two issues:
+it reverted product files with `git checkout` for the red check (forbidden;
+nothing was lost), and it asserted failure mode 8's convergence without testing
+it, which is exactly where M1 is.
+
+**Verdict: REQUEST-CHANGES (M1, M2).**
