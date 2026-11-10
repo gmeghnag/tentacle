@@ -612,4 +612,94 @@ assertions).
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-10* (fresh context; adversarial; HIGH/MEDIUM only, one round.
+Same model family as the plan's author, different from the executor (DeepSeek).)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, in the Q3 hint; part A and the protocol bump hold).
+
+### Findings
+
+1. **MEDIUM — the two-way hint tells a MOVED child to use a tool it does not have.**
+   `core/src/agent-jobs.ts:508` appends `TWO_WAY_REPLY_HINT` to every message whenever
+   `this.twoWay` is on. But `agent_notify` is registered only when the runner gets an
+   `agentId` (`agent/src/subagent.ts:368-369`). A foreground child that moved to the
+   background (`adopt`, `agent-jobs.ts:464`) was started by `tools/src/task.ts:217-228`
+   with no `agentId` in its controls, so it never got the tool. The move does not
+   rebuild the child's tool registry.
+   *Failure scenario:* with `subagents.twoWay` on, the user types while an `agent_task`
+   runs. The child moves to the background as `sa-1`, then the user (or the parent's
+   `agent_control{action:"message"}`) messages `sa-1`. The child reads "You may answer
+   with agent_notify…" and calls a tool it does not have. That call fails as an unknown
+   tool, and the step is wasted. A weak local model may retry it. Off is unaffected.
+   *Fix:* store `notifiable: boolean` on the running entry: `true` in `start`
+   (`:402`, the path that passes `agentId`), `false` in `adopt` (`:464`). At `:508`, use
+   `inboxText(from, text, this.twoWay && entry.notifiable)`. Add a test in
+   `core/test/agent-jobs.test.ts`: `setTwoWay(true)`, `acquire` → `adopt` → `message`,
+   then the drained text does **not** end with `TWO_WAY_REPLY_HINT` (red today), while a
+   `start`ed child's text still does. The `agent_control` "message" reply text
+   (`tools/src/agent-control.ts:165`) already made the same claim for a moved child
+   before this branch. It reaches the parent, not the child, so fixing it is optional
+   here and could take the same flag.
+
+No other HIGH/MEDIUM.
+
+### Gate (run by the reviewer)
+
+`bun run check`: typecheck clean · `biome check .` 852 files, no fixes · `bun test`
+**6672 pass, 3 skip (the three opt-in), 0 fail** (6675 tests, 465 files).
+
+### Mutation non-vacuity (done here; tree restored, `git status` clean after each)
+
+| Mutation | Test | Result |
+|---|---|---|
+| `connect.ts` `daemonWakes: true` → `false` | `cli/test/serve-autowake.test.ts` | **2 fail**: T3 wake case red (the wake ask is held, the model stalls), and the C5 case red too (it asserts `held == ["F1"]`, and the wake id appears) |
+| `subagents-view.ts` delete `row.userRead === other.userRead &&` | `daemon/test/subagent-progress.test.ts` | **1 fail** ("a read alone makes a frame necessary") |
+
+### Attacks tried (§7 red-team)
+
+- **Trust bit scope.** The only `new RemoteSession(` is `remote-client.ts:822`, and it
+  passes `this.daemonWakes`. `daemonWakes` is set only at `connect.ts:186`. The default is
+  `=== true` (fails closed), not keyed on `daemonKind`. `local-runtime` never sets it, and
+  the relay binds `ownsTurn` (pinned by T5). **Holds.**
+- **Forged `wake-` from a client.** `connection.ts` refuses it in `prompt` and `sendNow`
+  before the lookup. The other turn-id carriers (`enqueue`, `cancel`,
+  `resolve_permission`) name an existing turn and cannot start one. The daemon's own wake
+  calls `HostedSession.prompt` directly (`hosted-session.ts:2376`), so it is unaffected.
+  Another client can still *steer* a running wake (`enqueue`). Its texts then join the
+  context of a turn this TUI auto-accepts. That is the same exposure as steering this
+  TUI's own turns today, and the plan accepts it (Q1 a). **Holds.**
+- **Pod forging `wake-`.** The pod client has no `daemonWakes`, so the id is foreign and
+  the gate on the laptop does not widen. Auto-accept stays scope `once`
+  (`permission-ui.ts`). No lasting approval is created. **Holds.**
+- **Quit/cancel semantics.** `ownsTurn` is untouched. `autoAcceptsTurn` is used only by
+  `autoAcceptTest`. **Holds.**
+- **Bump 21 → 22.** `version.ts`, `schema/protocol.json` `x-protocol-version: 22`, both
+  pins (`protocol/test/subagent-panel.test.ts`, `daemon/test/version-mismatch.test.ts`
+  including the mismatch messages), and the CHANGELOG ("client and daemon must be updated
+  together"). `apps/mobile` imports the constant and pins no number. **Holds.**
+- **`✓ read` loops and over-claims.** `onRead` fires only on a non-empty `takeAll`, so
+  there is one `changed()` per drain and none on an empty boundary. No listener drains,
+  so there is no feedback loop. The non-structural publish is still coalesced
+  (`hosted-session.ts:1262-1276`). `sameRows` and `sameReads` compare `userRead`. `n` is
+  computed as `read + unread-of-sender` after the push, so it is unique and monotonic.
+  `close()` leftovers do not count. The client bounds both numbers. The state shows
+  `read` only once a row with `userRead ≥ n` arrives: never early. One residual (below
+  MEDIUM): a child that reads a message and ends within one coalescing window freezes
+  with the pre-read row, so it shows `· not read`. That needs a sub-250 ms final model
+  step.
+- **Q3 hint, off.** `inboxText(..., false)` returns `head`, byte-identical, and a test
+  pins it. **On:** one line, appended for both senders. See finding 1 for the moved-child
+  hole.
+
+### Notes (below the bar, not blocking)
+
+- T3's C5 case injects the foreign ask with `broker.request({turnId:"F1"})` on the
+  laptop. The plan asked for a raw second client prompting over the wire. The
+  wire-level refusal is covered by T1 instead. This drift is not listed in Execution.
+
+### How the executor behaved
+
+The executor followed the plan's order and implemented the owner's answers (bump 22,
+Q3 b). It found and fixed a second dropped-frame site (`sameReads`) through its own frame
+test, and reported every other drift. Its mutation claims for T3 and T8 reproduced here.
+It missed the moved-child path when it wired the Q3 hint, which is the one finding.
