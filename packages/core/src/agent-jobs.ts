@@ -60,7 +60,11 @@ export interface RunningAgentJob extends AgentJobSpec {
 
 /** What `AgentJobs.message` answers: nothing throws, the sender reports. */
 export type AgentMessageResult =
-  | { readonly ok: true }
+  | {
+      readonly ok: true;
+      /** Its place among the sender's messages to this child (1-based, cumulative). */
+      readonly index: number;
+    }
   | { readonly ok: false; readonly reason: string };
 
 export interface AgentJobExit extends RunningAgentJob, AgentJobResult {}
@@ -157,6 +161,12 @@ export interface AgentJobRow {
   /** The `models` NAME its pick named; shown only when it differs (M2). */
   readonly model?: string;
   /**
+   * How many of the USER's messages this child has read (taken into its own
+   * context): what the drawer compares a message's `n` against for `✓ read`
+   * (docs/fix/autoaccept-wake-turns.md, part B). The inbox's own count.
+   */
+  readonly userRead: number;
+  /**
    * The model ID it really runs on: DAEMON-side only (never on the wire).
    * `subagentRows` compares it with the main model's current id.
    */
@@ -217,6 +227,13 @@ export class AgentJobs {
       readonly inbox: AgentInbox;
       /** How many notifies this child sent since the user last wrote. */
       notified: number;
+      /**
+       * Its runner was given an `agentId`, so it registered `agent_notify`
+       * (`agent/src/subagent.ts`). A child MOVED to the background by `adopt`
+       * was started without one: a tool it never got is never offered to it
+       * (docs/fix/autoaccept-wake-turns.md Review 1).
+       */
+      readonly notifiable: boolean;
     }
   >();
   /**
@@ -241,6 +258,12 @@ export class AgentJobs {
   private readonly changeListeners = new Set<() => void>();
   /** Per child, the visible state folded from its progress events. */
   private readonly live = new Map<string, AgentJobLive>();
+  /**
+   * `subagents.twoWay`: a text handed to a child ends with one hint that it may
+   * answer with `agent_notify` (docs/fix/autoaccept-wake-turns.md owner Q3 b).
+   * Off → the delivered text is byte-identical to what it was.
+   */
+  private twoWay = false;
 
   constructor(maxParallel: number) {
     this.cap = maxParallel;
@@ -249,6 +272,15 @@ export class AgentJobs {
   /** A settings sync changed `subagents.maxParallel`. Kills nothing; new work sees it. */
   setCap(maxParallel: number): void {
     this.cap = maxParallel;
+  }
+
+  /**
+   * A settings sync changed `subagents.twoWay`: from now on a text handed to a
+   * child carries the reply hint (or stops carrying it). Messages already queued
+   * keep the shape they were pushed with.
+   */
+  setTwoWay(twoWay: boolean): void {
+    this.twoWay = twoWay;
   }
 
   /**
@@ -284,7 +316,7 @@ export class AgentJobs {
    * A child that ended has no row: this is the live state, not a history.
    */
   rows(): readonly AgentJobRow[] {
-    return [...this.running.values()].map(({ job }) => {
+    return [...this.running.values()].map(({ job, inbox }) => {
       const live = this.live.get(job.agentId);
       return {
         id: job.agentId,
@@ -296,6 +328,7 @@ export class AgentJobs {
         tokens: live?.tokens ?? 0,
         startedAt: job.startedAt,
         tail: live?.tail ?? [],
+        userRead: inbox.read("user"),
         ...(live?.model !== undefined ? { model: live.model } : {}),
         ...(live?.modelId !== undefined ? { modelId: live.modelId } : {}),
       };
@@ -372,7 +405,7 @@ export class AgentJobs {
     }
     const agentId = host.launched(spec);
     const controller = new AbortController();
-    const inbox = new AgentInbox();
+    const inbox = this.inbox();
     this.running.set(agentId, {
       job: {
         ...spec,
@@ -383,6 +416,8 @@ export class AgentJobs {
       killed: false,
       inbox,
       notified: 0,
+      // `start` hands the runner its `agentId`: it registers `agent_notify`.
+      notifiable: true,
     });
     this.live.set(agentId, { toolUses: 0, tokens: 0, tail: [] });
     this.changed();
@@ -405,7 +440,7 @@ export class AgentJobs {
       return { ok: false, reason: this.refusal() };
     }
     const token = Symbol("foreground");
-    const inbox = new AgentInbox();
+    const inbox = this.inbox();
     this.foreground.set(token, {
       description,
       startedAt: this.host?.now?.() ?? 0,
@@ -441,6 +476,9 @@ export class AgentJobs {
           killed: false,
           inbox: entry.inbox,
           notified: 0,
+          // It began as a foreground child (`agent_task`'s movable path), whose
+          // runner got no `agentId`: the move does not rebuild its tools.
+          notifiable: false,
         });
         this.live.set(agentId, seed);
         this.changed();
@@ -458,7 +496,9 @@ export class AgentJobs {
    * one stretch, so a text it accepts is drained by the child at its next
    * boundary or reported by it — never accepted and then lost.
    *
-   * No `changed()`: a message changes no row.
+   * No `changed()` here: a message changes no row. The READ does — the inbox's
+   * `onRead` runs when the child takes it, and that is when the row's `userRead`
+   * moves (docs/fix/autoaccept-wake-turns.md).
    */
   message(agentId: string, text: string, from: AgentMessageSender): AgentMessageResult {
     const entry = this.running.get(agentId);
@@ -477,9 +517,10 @@ export class AgentJobs {
         reason: `the message is ${text.length} characters, over the ${AGENT_MESSAGE_MAX_CHARS}-character limit: nothing was sent. Send a shorter one.`,
       };
     }
-    const pushed = entry.inbox.push(inboxText(from, text));
+    // The hint names `agent_notify`: only a child that HAS it is told to use it.
+    const pushed = entry.inbox.push(inboxText(from, text, this.twoWay && entry.notifiable), from);
     if (pushed.ok) {
-      return { ok: true };
+      return { ok: true, index: pushed.index };
     }
     return pushed.reason === "closed"
       ? {
@@ -499,6 +540,16 @@ export class AgentJobs {
    */
   pending(agentId: string): number {
     return this.running.get(agentId)?.inbox.pending ?? 0;
+  }
+
+  /**
+   * Whether `agentId`'s runner got an `agentId` (so it has `agent_notify`):
+   * `agent_control{action:"message"}` reads it, so it never tells the parent a
+   * moved child may answer when it cannot (docs/fix/autoaccept-wake-turns.md
+   * Review 1). `false` for an id that is not running.
+   */
+  notifiable(agentId: string): boolean {
+    return this.running.get(agentId)?.notifiable ?? false;
   }
 
   /**
@@ -598,6 +649,16 @@ export class AgentJobs {
     this.foreground.clear();
   }
 
+  /**
+   * A child's inbox, wired to this registry's change listeners: the READ of a
+   * message moves the row's `userRead`, so a frame must follow it
+   * (docs/fix/autoaccept-wake-turns.md — without this, a drained text publishes
+   * nothing and the drawer never says `✓ read`).
+   */
+  private inbox(): AgentInbox {
+    return new AgentInbox({ onRead: () => this.changed() });
+  }
+
   /** Tell every change listener, each in its own `try`: one bad sink loses no other. */
   private changed(): void {
     for (const listener of [...this.changeListeners]) {
@@ -650,7 +711,7 @@ export class AgentJobs {
         // The entry always exists here (both paths set it before `drive`), so the
         // inbox the child drains is the one `message` finds. A disposed runtime
         // never runs anything; the fallback is unreachable, kept for the type.
-        inbox: inbox ?? new AgentInbox(),
+        inbox: inbox ?? this.inbox(),
       });
     } catch (error) {
       result = {

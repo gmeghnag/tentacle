@@ -410,6 +410,7 @@ describe("LOW-3: the coalescing timer's other two properties", () => {
       tokens: 0,
       startedAt: 1,
       tail: [],
+      userRead: 0,
     });
     const realRows = runtime.rows.bind(runtime);
     let scripted: readonly AgentJobRow[] = [row("sa-1")];
@@ -493,12 +494,36 @@ describe("the view: untrusted labels are sanitized, and rows compare cheaply", (
         tokens: 5,
         startedAt: 1,
         tail: ["x\u0000y\nz"],
+        userRead: 0,
       },
     ]);
     expect(rows[0]?.description.includes("\n")).toBe(false);
     expect(rows[0]?.description.length).toBeLessThanOrEqual(200);
     expect(rows[0]?.tail).toEqual(["x y z"]);
     expect(rows[0]?.toolUses).toBe(2);
+  });
+
+  // docs/fix/autoaccept-wake-turns.md T8 (part B): the read count must ride the
+  // row, AND `sameRows` must compare it — otherwise the frame whose only change
+  // is a read is dropped, and the drawer keeps saying "read before its next step".
+  // MUTATION: delete `userRead: row.userRead` → the first case goes red; delete
+  // the `row.userRead === other.userRead` comparison → the second goes red.
+  test("the read count rides the row, and a read alone makes a frame necessary", () => {
+    const row = {
+      id: "sa-1",
+      callId: "c1",
+      agentType: "general",
+      description: "d",
+      state: "running",
+      toolUses: 1,
+      tokens: 2,
+      startedAt: 3,
+      tail: [],
+      userRead: 2,
+    };
+    expect(subagentRows([row])[0]?.userRead).toBe(2);
+    expect(sameRows(subagentRows([row]), subagentRows([{ ...row, userRead: 3 }]))).toBe(false);
+    expect(sameRows(subagentRows([row]), subagentRows([{ ...row }]))).toBe(true);
   });
 
   test("the child's MODEL rides the row only when it DIFFERS from the main model's, live", () => {
@@ -515,6 +540,7 @@ describe("the view: untrusted labels are sanitized, and rows compare cheaply", (
       tokens: 2,
       startedAt: 3,
       tail: [],
+      userRead: 0,
     };
     // No pick named an entry: nothing to show, whatever the main model is.
     expect(subagentRows([base], "main-model")[0]).not.toHaveProperty("model");

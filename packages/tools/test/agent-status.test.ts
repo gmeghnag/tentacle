@@ -30,6 +30,7 @@ function row(over: Partial<AgentJobRow> = {}): AgentJobRow {
     tokens: 0,
     startedAt: 1_000,
     tail: [],
+    userRead: 0,
     ...over,
   };
 }

@@ -161,9 +161,12 @@ function message(
     return { content: sent.reason, isError: true };
   }
   return {
-    content: twoWay
-      ? `queued for ${agentId}: it reads it before its next model step. It may answer with agent_notify (a [sub-agent ${agentId} → you] note that may wake you); its report still arrives as a [background] note.`
-      : `queued for ${agentId}: it reads it before its next model step. No reply comes back; its report still arrives as a [background] note.`,
+    // A child MOVED to the background (`adopt`) has no `agent_notify`: never
+    // promise a reply from it (docs/fix/autoaccept-wake-turns.md Review 1).
+    content:
+      twoWay && jobs.notifiable(agentId)
+        ? `queued for ${agentId}: it reads it before its next model step. It may answer with agent_notify (a [sub-agent ${agentId} → you] note that may wake you); its report still arrives as a [background] note.`
+        : `queued for ${agentId}: it reads it before its next model step. No reply comes back; its report still arrives as a [background] note.`,
     isError: false,
   };
 }

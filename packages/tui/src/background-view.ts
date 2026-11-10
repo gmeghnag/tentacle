@@ -31,6 +31,12 @@ export interface BackgroundAgentRow {
    * (`SubagentRow.model`, docs/feat/subagent-panel.md). Absent = the main one.
    */
   readonly model?: string;
+  /**
+   * How many of the USER's messages this child has read (`SubagentRow.userRead`):
+   * compared with a `subagent_message`'s own `n`, so the drawer can say
+   * `✓ read` (docs/fix/autoaccept-wake-turns.md, part B). Absent = an older daemon.
+   */
+  readonly userRead?: number;
 }
 
 /** How many are running now; 0 when there is nothing to report. */
@@ -86,4 +92,22 @@ export function sameIds(
     return false;
   }
   return a.every((row, i) => row.id === b[i]?.id);
+}
+
+/**
+ * Whether the same children report the same READ COUNTS. `sameIds` alone drops a
+ * report whose only change is a read, so the frame never repaints and the
+ * drawer keeps saying `read before its next step` (docs/fix/autoaccept-wake-turns.md
+ * part B — the TUI half of the daemon's `sameRows` fix). A read happens once per
+ * message, never four times a second, so this does not undo LOW-4: it adds a
+ * render exactly when the drawer's own state moved.
+ */
+export function sameReads(
+  a: readonly BackgroundAgentRow[] | undefined,
+  b: readonly BackgroundAgentRow[] | undefined,
+): boolean {
+  if (a === undefined || b === undefined || a.length !== b.length) {
+    return false;
+  }
+  return a.every((row, i) => row.userRead === b[i]?.userRead);
 }

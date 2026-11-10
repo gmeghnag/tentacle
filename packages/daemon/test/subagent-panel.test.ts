@@ -148,8 +148,12 @@ describe("T-D1: an accepted message", () => {
     expect(childInbox?.drain()).toEqual(["[message from the user] skip the tests folder"]);
 
     // 2. Every attached client gets one display update (the sender too: one render path).
+    //    `n`: this message's place among the user's messages to the child, so the
+    //    drawer can say `✓ read` against a later row's `userRead`
+    //    (docs/fix/autoaccept-wake-turns.md, part B). Mutation: drop `n` in
+    //    `messageSubagent` → red.
     expect(notes(r.frames)).toEqual([
-      { type: "subagent_message", agentId: "sa-1", text: "skip the tests folder" },
+      { type: "subagent_message", agentId: "sa-1", text: "skip the tests folder", n: 1 },
     ]);
     expect(notes(r.frames2)).toHaveLength(1);
 
