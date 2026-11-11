@@ -265,5 +265,186 @@ Restored → `3 pass · 0 fail`.
 
 ## Review
 
-*— pending*
+*— deepseek (tentacle --profile deepseek), 2026-11-11, fresh-context review*
+
+**Same model family as the executor** (only the context is fresh): shared blind
+spots survive both passes, so the two findings below are exactly the kind a
+different model should confirm before merge. This task is `cross-module`, not
+`load-bearing`, so fresh-context-in-family is the routing AGENTS §10 allows.
+
+### Verdict
+
+**REQUEST-CHANGES.** The product fix is right, minimal, and proven end to end;
+both findings are in the **structural guard** — the deliverable whose stated job
+is "the next panel member cannot be forgotten silently". It can be, and its own
+comment invites a change that silently breaks `attach` auto-accept. Neither
+finding is a nit: each has a concrete path to a silent wrong state.
+
+### Findings
+
+**1 (MEDIUM) — the guard's coverage silently shrinks if a member moves off the
+prototype, and its floor does not notice.**
+`packages/cli/test/subagent-panel-controller.test.ts:271-278` selects what to
+check with `name in RemoteSession.prototype`, then floors the count with
+`expect(forwarded.length).toBeGreaterThan(20)` (`:278`). `RemoteSession`
+implemented as a constructor-bound **arrow property** is absent from the
+prototype, so it leaves the guard's list *and* the pass/fail check with no
+signal. Measured (scratch probe, `.tentacle/tmp/review-lsp/guard-hole.ts`,
+removing the three members from the prototype only):
+
+```
+baseline forwarded: 24 | has messageSubagent? true
+after 3 members moved off the prototype: 21 | has messageSubagent? false
+guard's floor is >20 → still PASSES? true
+```
+
+Failure scenario: someone applies this repo's own fix for the unbound-`this`
+bug class (`docs/fix/clear-connect-unbound.md`; the App today has to
+`session.clear.bind(session)` at `App.tsx:2662` and bind `jobOutput` at
+`:1612`) by turning `messageSubagent`/`killSubagent`/`onSubagentMessage` — or
+any panel member — into bound arrow properties. The guard drops them from
+scope, stays green (21 > 20, four members of slack), and the next removal of
+the wrapper's forward is now undetected: the original bug returns with a green
+guard. Cheap fixes: test presence on an **instance**
+(`new RemoteSession(...)`, works today — the probe built one) instead of the
+prototype, and/or pin the exact set rather than a `> 20` floor.
+
+**2 (MEDIUM) — the `autoAcceptsTurn` exemption is correct today, its stated
+reason is incomplete, and wiring it the obvious way silently breaks `attach`
+auto-accept — unpinned.**
+The test excludes it (`:274`) and `:268-273` justifies that only via
+`daemonWakes` (`connect.ts:188`), closing with "Adding one of them here without
+wiring it is the only way this list may change" — i.e. it invites wiring. But
+`RemoteSession.autoAcceptsTurn` is `ownsTurn || (daemonWakes && wake-…)`
+(`remote-session.ts:293-295`) and knows nothing of the **adopted run turn**,
+which exists only on the wrapper:
+`ownsTurn(turnId) { return turnId === adoptedTurn || inner.ownsTurn(turnId) }`
+(`local-runtime.ts:594-595`), set from `attach-run.ts:368` →
+`local-runtime.ts:947`. And `autoAcceptTest` **prefers** `autoAcceptsTurn` when
+present (`permission-ui.ts:97`), which is what the App feeds the broker
+(`App.tsx:695`).
+
+Failure scenario: to satisfy the guard, a future change forwards
+`autoAcceptsTurn: inner.autoAcceptsTurn` (mirroring `ownsTurn`'s forward one
+line above). In `tentacle attach <name>` of a `run --detach --auto-accept`
+run, `autoAcceptTest` now uses the inner test, which says the run's turn is
+**not** own → every permission ask of the run's own turn is held for a human
+who typed nothing: the attached TUI stalls mid-run. Nothing catches it: the
+guarded `ownsTurn` is pinned (`cli/test/local-runtime.test.ts:1620` D21) but no
+test runs `autoAcceptTest` against the real wrapper with an adopted turn —
+`cli/test/attach-run.test.ts:660,693,723` uses a fake `LocalRuntime` whose
+controller has no `autoAcceptsTurn`, and `serve-autowake.test.ts:352` drives a
+bare `connect` session. Cheap fix: say *both* reasons in the test comment (the
+inner test is NARROWER than the wrapper's `ownsTurn` under `adoptTurn`, not
+just wider under `daemonWakes`), and name the only safe wiring shape
+(`ownsTurn(t) || inner.autoAcceptsTurn(t)`) with a small test.
+
+### Gate (re-run by this review, same tree)
+
+- `bunx tsc --noEmit` — clean (exit 0).
+- `bun run lint` — `Checked 881 files. No fixes applied.` (AGENTS §6 baseline).
+- `bun run typecheck` — its second half, `tsc -p apps/mobile`, fails on
+  `apps/mobile/App.tsx` (`Cannot find module 'react-native'`):
+  `apps/mobile/node_modules` is absent in this worktree. Environment, not this
+  diff; same cause as the one `bun test` fail the executor reported.
+- `bun test` — **6822 pass · 3 skip · 1 fail · 1 error**, and the fail/error is
+  `apps/mobile/test/rn-websocket.test.ts` (`Cannot find module
+  '@tentacle/client'`). Executor's counts match exactly; the 3 skips are the
+  AGENTS §6 opt-ins.
+- One pre-existing load flake seen in this review and cleared:
+  `packages/client/test/reattach.test.ts` "a replay past the client's buffer
+  bound converges" timed out once (`3001 ms`) in a full run, then 54/54 twice
+  standalone. A different file from the executor's `serve-log-store` flake,
+  same signature — the suite has load-sensitive timing tests, this diff touches
+  none of them.
+- The new file alone: `3 pass · 0 fail`, **8 consecutive runs**, no flakes.
+
+### Mutation non-vacuity (AGENTS §9)
+
+Forbidden from editing, so run in-process against the real controller
+(`.tentacle/tmp/review-lsp/guard-mutation.ts`, same `declared`/`connectOnly`
+logic as the test, each forward set to `undefined` on the live wrapper one at a
+time): **every one of the 24 forwarded members is named individually when
+dropped** (`send`, `compact`, `clear`, `openForReset`, `enqueue`, `sendNow`,
+`close`, `skills`, `context`, `rename`, `onReturned`, `watch`, `open`,
+`ownsTurn`, `onQueued`, `onSubagents`, `onSubagentNotify`, `messageSubagent`,
+`killSubagent`, `onJobs`, `jobOutput`, `killJob`, `onSubagentMessage`), and
+`baseline missing: []`. So the guard is non-vacuous member-by-member, and the
+`required()` helper throws on the exact missing member (its message is what the
+executor's red output shows). Finding 1 is about *scope* drift, not about the
+comparison being fake.
+
+### Premises (each row opened; `main:` = the pre-fix line the Context cites)
+
+| Premise | Line | Verdict |
+|---|---|---|
+| `startWorkerRuntime` is plain `tentacle`'s path | `main.ts:1828`; `local-runtime.ts:1079` (main: `:1062`) | TRUE |
+| → `createLocalRuntime` | `local-runtime.ts:747` (main: `:730`) | TRUE |
+| → `createSession` → `build` → `persistingController` | `:885`, `:816` (main `:799`), `:837` (main `:804`-region) | TRUE |
+| Wrapper type `PersistingController extends SessionController` | `local-runtime.ts:211` | TRUE |
+| Only three panel members were missing | my live-controller probe: 24/24 now present; `main:` had 21 (the red guard named 7, 4 of them wrong tests — see Execution) | TRUE |
+| `App` guards on presence before calling | `App.tsx:1516` (`messageSubagent`), `:1427` (`killSubagent`) | TRUE |
+| `connect` drives a bare `RemoteSession` | `connect.ts:232-234` | TRUE |
+| An older daemon is a typed refusal, never a missing member | `remote-client.ts:121-123` | TRUE |
+| `subagent_message` is a display update (no version bump) | `protocol/updates.ts:440` | TRUE |
+| `sessions` (the `/sessions` directory) is passed only by `connect` | `connect.ts:253`; `main.ts:1040-1070` and `attach-run.ts:725` pass only `TuiSessions` | TRUE |
+| `daemonWakes` set only at `connect` | `connect.ts:188` | TRUE |
+| Old notice text pinned by no test/doc | `grep -rI` across the tree: only `CHANGELOG.md:13` (new), `TODO.md:482` (the backlog quote), this doc | TRUE |
+
+### Attacks tried (≥3, incl. those that found nothing)
+
+1. **Any other `SessionController` member a `RemoteSession` implements still
+   missing?** No. `App.tsx` declares 29; minus `settings`/`updateSettings` (not
+   on the session) and the 3 named exclusions = **24, all present** on the live
+   wrapper. The two findings are about the guard's durability, not a 4th gap.
+2. **Is the `connectOnly` set right for the laptop worker *and* `run`/`attach`?**
+   Yes, and stronger than the doc argues: `detach`/`stayingRows` are reachable
+   only through `switchTo` (`App.tsx:3130-3143`), which returns early without
+   the `sessions` prop; `autoAcceptsTurn` must NOT be forwarded — `autoAcceptTest`'s
+   preference would swap the wrapper's wider (`adoptTurn`) test for the inner
+   narrower one (finding 2). Result: correct today, fragile in its reasoning.
+3. **Does the new test drive the real runtime controller?** Yes — a real
+   `Connection` + `SessionHost` + `createLocalRuntime`, controller from
+   `runtime.createSession()` (the wrapper), no fake session. It stops short of
+   `startWorkerRuntime`/a real `Worker` as `TODO.md:482` asked, which the doc
+   states; the wrapper is the same object on that path, so the residual risk is
+   the transport only.
+4. **One end-to-end trace through the REAL App** (`.tentacle/tmp/review-lsp/e2e-app.ts`:
+   real runtime controller + `ink-testing-library`): pill `· 1 agent ↓` → DOWN →
+   ENTER → drawer `→ sa-1` open → type → ENTER →
+   `notice row present: true`, `blamed an older daemon / local mode: false`,
+   `refusal line: (none)`, and after releasing the child,
+   `child's later request carries it: true` (`[message from the user] skip the
+   tests folder`). The user-visible property holds on the fixed code.
+5. **`n` (the `✓ read` key) survives the new forward?** Yes:
+   `RemoteClient.subagentMessaged → {"…","n":1}` and the session listener gets
+   `n: 1`. The test's listener narrows to `{agentId, text}` (`:189`) so it does
+   not pin `n`; the client/daemon tests do, so not a finding.
+6. **Unbound-`this` hazard** (the `connect` class-instance trap,
+   `docs/fix/clear-connect-unbound.md`): none — the wrapper's three forwards are
+   closures over `inner`, and the App calls them as methods. Holds.
+7. **Is the notice change safe?** Yes (attachment table row 12): no test or doc
+   pinned the old string; the new text is reached only for a member-less
+   session (`--in-process`), and an older daemon still gets its own typed
+   refusal. The sibling guards (`:1428`, `:1456`) keep their old wording — a
+   cosmetic inconsistency, not reported.
+
+### What holds
+
+The root cause is exactly as cited; the fix is three forwards + three
+type members on the existing seam (no second code path, AGENTS §7); no save or
+`watch` behaviour is touched; the red-first evidence matches what the code
+predicts; the gate counts are reproducible in this worktree. The guard is
+non-vacuous per member and does pin the "next member" for today's
+implementation style.
+
+### How the executor behaved
+
+Well: it reported the drift honestly (the first guard run named 7 members, and
+it separated the 3 real gaps from `sessionId` (a string, mis-tested) and from
+its own test-ordering bug), pinned each forward by mutation, and its gate
+numbers reproduce exactly — including the mobile-module fail. The miss is
+narrow and in the same direction both times: the guard's *justifications* were
+verified for today's code and not stress-tested against the refactors and
+future edits they invite — which is what findings 1 and 2 are.
 
