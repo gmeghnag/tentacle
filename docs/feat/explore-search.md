@@ -1,7 +1,7 @@
 # feat/explore-search — a bounded, read-only `search` tool for the agent tree
 
-> **Status:** context + implementation (awaiting owner approval) · **Branch:** `feat/explore-search` (off `main`)
-> **Type:** feat · **Size:** S–M · **Blast:** cross-module · **Suited:** DeepSeek exec
+> **Status:** context + implementation, **revision 1** (all 7 HIGH + 7 MEDIUM of the design review addressed; **open owner decisions: Q1, Q3, Q5, Q6, Q7, Q8** — Q2 and Q4 carry a recommended default) · **Branch:** `feat/explore-search` (off `main`)
+> **Type:** feat · **Size:** M (it grew from S–M with revision 1: `glob` + files-with-matches, the dialect table, the probe/demotion path, the confinement rule) · **Blast:** cross-module (a new built-in tool + one array in `subagent.ts`; no wire, persistence or §7-invariant change) · **Suited:** DeepSeek exec, **Review in a fresh context** (the two dialect tables and the confinement rule are the failure-prone parts)
 
 ## Context
 
@@ -81,7 +81,10 @@ So: **shape and bounds are identical by construction** (one JS renderer over
 both engines' `path:line:text` lines), the result sets agree wherever
 `.gitignore` is expressible as a top-level literal name (the common case), and
 the residual difference — a `*.log` glob or a nested `pkg/a/` — is printed as a
-note, never silent.
+note, never silent. *(Revision 1 narrows "identical" to shape/bounds/ordering and
+adds the regex-dialect divergence, which this BSD-only table could not see: see
+the measured-facts block at the end of this Context and the Load-bearing
+assumption.)*
 
 **Pre-repro (rejected shapes, measured, so the plan does not re-propose them).**
 - *`rg` vs plain `grep -rn`.* Their line format already agrees
@@ -117,18 +120,171 @@ note, never silent.
   nested `pkg/a/`) — printed as a note, never silent (Design 3, F-notes).
 
 
-## Implementation
+**Revision 1 — the fallback measured on GNU and busybox (the gate H4 demanded).**
+The design review's central charge was that every fallback claim was measured
+only on **BSD** tools (`grep 2.6.0-FreeBSD`, BSD `find`) on macOS. Re-measured
+2026-11-11 on a fixture (`fxf/`: `.git`, a `.gitignore` with `node_modules/`,
+`dist/`, `coverage`, `*.log`, `pkg/a/`, a hidden file, a NUL file, a leading-dash
+file, `app/[id].ts` and `app/[id]/k.ts`, a symlink to `/etc`) mounted read-only:
+
+```
+$ podman images | head -3                 # already pulled, nothing new to fetch
+docker.io/library/nginx  alpine          76090a34b858   70.5 MB
+$ podman pull -q busybox:latest debian:bookworm-slim alpine:3.20
+$ podman run --rm -v "$PWD/fxf:/w:ro" -w /w <img> sh <script>
+```
+
+Engines under test: **busybox 1.38.0** (`busybox:latest`), **busybox 1.36.1**
+(`alpine:3.20`), **GNU grep 3.8** + GNU find (`debian:bookworm-slim`), **rg
+14.1.0** (`alpine` + `apk add ripgrep`), and the macOS originals (**BSD grep
+2.6.0-FreeBSD**, BSD find, **rg 15.2.0**).
+
+*(a) busybox `grep`: option support — H4's premise is half wrong, and the half
+that is right is worse than "rejects the option".*
+
+```
+$ grep --help                      # busybox: "-I" is NOT in the usage line
+Usage: grep [-HhnlLoqvsrRiwFE] [-m N] [-A|B|C N] { PATTERN | -e PATTERN... | -f FILE... } [FILE]...
+	-E	PATTERN is an extended regexp          <- present
+	-F / -i / -w / -x / -l / -c / -o / -q / -s / -r   <- all present
+                                               no -I, no --include, no --binary-files
+$ grep --version            busybox: "unrecognized option '--version'" rc=2 | GNU: "grep (GNU grep) 3.8"
+$ grep -I -n needle /w/bin.dat       # busybox: "1:needle"  rc=0   <- -I ACCEPTED, DOES NOTHING
+$ grep    -n needle /w/bin.dat       # busybox: "1:needle"  rc=0
+$ grep -I -n needle /w/bin.dat       # GNU    : no output      rc=1 (suppressed)
+$ grep    -n needle /w/bin.dat       # GNU    : "binary file matches" rc=0
+$ grep -n --binary-files=without-match needle /w/bin.dat   # busybox rc=2 (unrecognized) | GNU rc=1
+$ grep -r --include='*.ts' needle /w                       # busybox rc=2 (unrecognized) | GNU: 3 files
+```
+
+So: busybox **has** `-I`, `-r`, `-E`, `-H`, `-l`, `-c`, `-o`, `-i`, `-F`, `-s`
+and `-exec {} +` (all used below); it has **no** `--include`, no
+`--binary-files`, no `--version`. `-I` is accepted and ignored — a grep that
+"rejects the option" would at least have failed loudly; this one silently
+searches binaries, which is the divergence F6 claimed was impossible. The
+capability probe is therefore **mandatory** (H4 accepted), and its form is
+measured: one process, `printf 'a\000needle\n' | grep -I -q -e needle -`
+→ **rc 1 on GNU/BSD (binary filtered)**, **rc 0 on busybox (not filtered)**,
+so `-I` is passed only when the probe says it works, and the JS parser filters a
+`binary file matches` line / a NUL byte either way.
+
+*(b) The real divergence is the regex dialect — H1, measured on three engines.*
+
+```
+$ grep -E -e '<pat>' dg.txt     # L1 A1 / L2 foo_bar / L3 x  y / L4 \D \W / L5 back\1ref
+                                # L6 (?:ab) / L7 \x41 hex / L8 aab / L9 abc / L10 arr[0
+pat          BSD 2.6.0-FreeBSD        busybox 1.38.0                GNU 3.8
+\d+          rc0 ALL 10 lines         rc1  no match, SILENT          rc1  no match, SILENT
+\w+          rc0 ALL 10 lines         rc0  ALL 10 lines             rc0  ALL 10 lines
+\s           rc0 ALL 10 lines         rc0  ALL 10 lines             rc0  ALL 10 lines
+\bfoo\b      rc1  none                rc1  none                    rc1  none
+(?i)abc      rc0  L9 (case-folds!)    rc2  "bad regex"             rc1  WARNING on stderr, no match
+(?:ab)       rc0  L6,L8,L9            rc2  "bad regex"             rc0  L6 (warning)
+\x41         rc0  L1 (hex escape)     rc0  L7 (literal \x41!)      rc0  L7 (literal \x41!)
+\p{L}        rc1  none                rc2  "bad regex"             rc1  none
+[[:word:]]   rc2  invalid class       rc2  invalid class           rc2  invalid class
+a**          rc2  repetition operand  rc0  ALL 10 lines (!)        rc0  ALL 10 lines (!)
+a.*?b        rc0  L6,L8,L9            rc0  L6,L8,L9                rc0  L6,L8,L9
+rg 15.2      \d+ ALL  \p{L} ALL  (?i)abc L9  \x41 L1  (?:ab) L6,L8,L9  [[:word:]] ALL
+```
+
+`\d+` is the killer: **BSD grep matches every line containing a `d`**, GNU and
+busybox match **nothing**, rg matches digits — three answers, two of them
+silent. Asserted in T-S1 as a table (H1 accepted), with the design below.
+
+*(c) Exit codes are lost by the plan's own `| head -c` — H3, confirmed.*
+
+```
+$ { grep -E -e 'foo(' /w/src/a.ts; echo "rc=$?" >&2; } 2>e | head -c 262145 >/dev/null
+e: "rc=2"                                    # the brace group carries it
+$ grep -E -e 'foo(' /w/src/a.ts 2>/dev/null | head -c 262145 >/dev/null; echo $?
+0                                            # the bare pipeline loses it (old shape)
+```
+
+Verified with the **final command shape** on busybox, alpine and debian
+(`fin2.sh`): plain hit → `outer rc=0, stderr "TENTACLE_RC=0"`; no match →
+`TENTACLE_RC=1`; bad regex → busybox `grep: bad regex 'foo(': Unmatched (` +
+`TENTACLE_RC=1`, GNU `grep: Unmatched ( or \(` + `TENTACLE_RC=1`; missing path
+→ pre-check `[ -f ] || [ -d ] || [ -L ]` exits **3** with `TENTACLE_MISSING`
+and no walk; bracket root `/w/app/[id]` and leading-dash root `/w/-dash.ts`
+both searched correctly. `find … -exec {} +` returns **1** for both "no match"
+and "grep died", so on the fallback a parse error is detected by **stderr**,
+not by rc (see Design 3c).
+
+*(d) Two more measured parity facts the old plan got wrong.*
+
+```
+$ find /w/etc-link -type f  | wc -l      # 0     (a symlink given as PATH is not entered)
+$ find -H /w/etc-link -type f | wc -l    # 55    (POSIX -H: follow only the ARGUMENT)
+$ rg   --files -- /w/etc-link            # lists /etc/*  (rg follows an argument symlink)
+$ find -dash.ts …      busybox "unrecognized: -dash.ts" | GNU "unknown predicate" | BSD "illegal option"
+$ find ./-dash.ts …    all three: ./-dash.ts        <- ./ prefix is the portable fix
+$ find '/w/.hid[x]' \( -name '.*' ! -path '/w/.hid[x]' \) -prune -o -type f -print
+                       all three: (nothing)         <- guard fails to exempt the root, `-name '.*'` prunes it
+$ find '/w/.hid[x]' \( -name '.*' ! -path '/w/.hid\[x\]' \) -prune -o -type f -print
+                       all three: /w/.hid[x]/f.ts   <- escaping the operand fixes it (M1)
+$ find '/w/app/[id]' …   raw and escaped: both /w/app/[id]/k.ts   (NOT affected — its basename
+                       matches no prune `-name`, so nothing prunes it; measured, same on all three)
+```
+
+So `-path` is a *pattern* and the guard only matters when the root's **basename
+also matches a prune clause** (`-name '.*'` for a hidden directory, or
+`node_modules`/`dist`/`.git`). Escaping costs nothing and closes it; the first
+draft of this revision over-stated it by claiming `app/[id]` broke too.
+
+*(e) rg's `.gitignore` behaviour without `.git` — M2 confirmed, and it is real.*
+
+```
+$ podman run --rm -v fxm:/w:ro alpine:3.20 sh -c 'apk add -q ripgrep; rg --files -- /w; rg --no-require-git --files -- /w'
+rg 14.1.0  default     : /w/sub/s.ts /w/src/a.ts /w/src/y.log /w/deep/x/z.ts /w/pkg/a/x.ts   (ignores NOTHING)
+rg 14.1.0  --no-require-git: /w/src/a.ts /w/deep/x/z.ts                                     (.gitignore applied)
+rg 15.2.0  same fixture, default and --no-require-git both apply it (15.x changed the default)
+```
+
+In a workspace copied **without** `.git` the old plan's rg side would ignore
+nothing while the fallback (Design 3b) still prunes from `.gitignore` — the
+**fallback is the stricter one**, so the note pointed the wrong way. `--no-require-git`
+fixes it at no measurable cost (`24 ms vs 25 ms` on `rg --files .`).
+
+*(f) Cost of the two flags M3 asked to reconsider.*
+
+```
+rg -e needle -- packages/          39 ms | --sort path   50 ms   (repo-wide: 38 ms vs 50 ms, 14 lines)
+rg --max-columns 1200 --max-columns-preview on a 300 KB single-line file: 1234 bytes, other hits intact
+rg --max-columns 1200 (no preview)      : "[Omitted long matching line]" — useless, so preview is required
+```
+
+`--sort path` costs ~11 ms — nothing next to one model step, and it makes the
+`head -c` subset deterministic, so it is taken (M3).
+
+*(g) Fallback vs rg cost and parity, re-measured on this repo's `packages/`
+with the final shape (`find -H … -exec grep -n -H -I -s -E`, macOS BSD tools):*
+
+```
+fallback 174 / 165 / 273 ms      rg (--no-require-git --sort path) 46 / 50 / 40 ms
+same query through both: 36 lines each, identical set (68 lines each on the worktree root)
+```
+
+So the fallback is ~4-5× slower on a small tree (and the walk-dominated 7×
+figure from the pre-repro still applies to a tree with `node_modules`/`dist` in
+it), which is why `engine=grep` is in the header and why the timeout exists.
 
 *— deepseek (tentacle --profile deepseek), 2026-11-11*
+
+## Implementation
+
+*— deepseek (tentacle --profile deepseek), 2026-11-11 (revision 1)*
 
 ### Load-bearing assumption
 
 **A tool that spells its whole operation as ONE `sh -c` string built from a
 fixed flag list plus single-quoted arguments is safe and portable across every
-`ctx.env` (laptop, docker, pod), and its output can be made identical whether
-the engine inside is `rg` or POSIX `find`+`grep`.**
+`ctx.env` (laptop, docker, pod), and the SAME SHAPE, BOUNDS AND ORDERING come
+out whether the engine inside is `rg` or POSIX `find`+`grep` — while the result
+SET is best-effort and the header names the engine.**
 
-Proven, both halves, before anything else:
+Revision 1 narrows the second half deliberately (review M2/H1): "identical
+output" was over-claimed. What is proven:
 
 1. **Quoting.** `shq(s) = "'" + s.replaceAll("'", "'\\''") + "'"` — POSIX
    single-quoting, the only form in which the shell interprets nothing. Run
@@ -148,24 +304,32 @@ Proven, both halves, before anything else:
    Every pattern matched its own line and nothing was expanded: no command
    substitution, no glob, no variable. A **leading `-`** is handled by never
    letting the pattern sit in flag position: the pattern always follows `-e`
-   (or `--fixed-strings -e`), and the path always follows `--`
-   (`rg … -e PAT -- PATH`, `grep … -e PAT -- {} +`, `find PATH …`). Verified:
-   `rg --version` as a *pattern* matched nothing (`repro-doc.ts`), and a
-   `$(touch pwned)` pattern created no file (same run: `a $(touch pwned)
+   (or `-F -e`), and the path always follows `--` on `grep`. `find` has no
+   portable `--` (review M1), so the path is never bare on the fallback either:
+   every relative path is `./`-prefixed in the pure module (measured above:
+   `find -dash.ts` is an error on all three, `find ./-dash.ts` works) and an
+   absolute path is confined before it is ever built into a command (H7).
+   Verified: `rg --version` as a *pattern* matched nothing (`repro-doc.ts`), and
+   a `$(touch pwned)` pattern created no file (same run: `a $(touch pwned)
    pattern created a file: false`).
 
-2. **One shape from two engines.** With a shared fixed prune list, rg's own
-   default walk, and the `.gitignore`'s top-level literal names added to the
-   fallback's prunes, the two paths render **identically** — 7/7 on the fixture
-   (`design-final.ts`) and 11/11 on the hostile table (`repro-doc.ts`), both
-   data sets reduced through the **same** JS renderer, which is the point:
-   sorting, bounding and truncation happen once, in JS, so the engine cannot
-   influence the shape. On the whole repository the two paths agree line for
-   line (`parity3.ts`: `repo-wide: rg=796ms lines=129 fallback=5040ms
-   lines=129 parity=true`).
+2. **One shape from two engines — shape only.** Both engines emit
+   `path:line:text` lines (or bare paths in `files` mode), and **one** JS
+   renderer sorts, caps and truncates them, so *shape* cannot depend on the
+   engine; that part still holds by construction (`design-final.ts` 7/7,
+   `repro-doc.ts` 11/11 on BSD tools, and the `fin2.sh` runs above reproduce the
+   same shape on busybox, alpine and debian). What could not be held, and is now
+   stated instead of claimed:
+   - the **result set** (which files are walked) differs whenever `.gitignore`
+     says something `find -name` cannot express — printed as a note, never
+     silent (Design 3b, M2);
+   - the **regex dialect** differs and cannot be unified — `\d+` matches every
+     line with a `d` on BSD grep and nothing on GNU/busybox (measured above), so
+     the pattern is normalised or refused in the pure module before it reaches
+     either engine (Design 3c, H1/H2).
 
-The whole feature stands or falls on this: if the two paths disagreed on shape,
-"same output shape and bounds" would be false and the model would see a
+The whole feature stands or falls on this: if the two paths disagreed on
+*shape*, "same output shape and bounds" would be false and the model would see a
 different tool depending on the image.
 
 ### Preconditions
@@ -174,13 +338,17 @@ Each verified against the code on this branch:
 
 1. **Every tool effect goes through `ctx.env`, and `ctx.env.exec` is `sh -c
    <string>`.** `ToolContext.env` is an `ExecutionEnvironment`
-   (`packages/core/src/tool.ts:121`), whose only member is
-   `exec(command, options)` (`packages/core/src/execution.ts:42-54`);
+   (`packages/core/src/tool.ts:121`), whose members are `exec`, `readFile`,
+   `writeFile` and an optional `spawnBackground`
+   (`packages/core/src/execution.ts:42-58` — review M7c: revision 0 said "only
+   member", which was wrong, and Design 3b needs `readFile`);
    `HostExecution.exec` is `Bun.spawn(["/bin/sh", "-c", command])`
    (`packages/exec/src/host-execution.ts:238,303-323`). So a single command
    string is the portable unit, and `ExecOptions` gives `cwd`, `signal`,
-   `timeoutMs` (`execution.ts:14-23`) — cancellation and a wall-clock bound come
-   for free, exactly as `shell` uses them (`builtins.ts:300-305`).
+   `timeoutMs` (`execution.ts:15-22`) — cancellation and a wall-clock bound come
+   for free, exactly as `shell` uses them (`builtins.ts:300-305`). `exec` also
+   returns `stderr` and `exitCode` as first-class fields (`execution.ts:9-13`),
+   which is what H3's fix relies on.
 2. **A tool is a `name` + `description` + zod `inputSchema` + `permission` +
    optional `concurrency` + `execute`**, registered into a `ToolRegistry`
    (`packages/core/src/tool.ts:154-181`, `packages/tools/src/registry.ts:15-22`)
@@ -207,11 +375,22 @@ Each verified against the code on this branch:
    that cannot touch anything, and `fs_read` is the precedent (`builtins.ts:83`).
    The permission gate is host-side and unconfined for `exec` (`host-execution.ts:14-16`
    says so out loud), so a search that ran arbitrary commands would be a hole —
-   hence: no free-form command argument anywhere in the schema (Design 2).
+   hence: no free-form command argument anywhere in the schema (Design, *Input
+   schema*). Note
+   what `fs_read` precedent does **not** buy (review H7): `fs_read` is unconfined
+   but *inert* — it reads a path the caller already names — while a recursive
+   search **discovers** paths, so `permission: "none"` on it is a decision the
+   owner has to make explicitly (Q6).
 6. **The documenting rule for a tool name is `toolLabel`**
    (`packages/core/src/tool-labels.ts:7-17`, display only) and, for a child's
    progress row, `childToolLabel` (`subagent.ts:234-255`). Both need an entry or
    the row reads as a bare `search`.
+7. **There is no workspace root on the `ExecutionEnvironment` contract.**
+   `HostExecution` keeps one privately (`host-execution.ts:211`, `:232`) and
+   confines *writes* by it, but the interface exposes only `id`, `exec`,
+   `readFile`, `writeFile` (`execution.ts:42-58`) — so a confinement rule in the
+   pure module cannot ask the env for its root; it must derive one from
+   `exec`/`pwd` or be lexical against `cwd` (Q6, Design 3c step 0).
 
 ### Design
 
@@ -233,46 +412,140 @@ owner prefers two tools, the split is mechanical — `search` (content) and
 `find_files` (paths) — at the definition cost above.)
 
 **Input schema** (zod, `z.object` — all fields described, since the description
-is what the model reads):
+is what the model reads). Revision 1 adds `glob` (H6), defines it as a basename
+glob (H5), and moves `pattern`'s regex dialect into the schema (H1):
 
 | field | type | default | notes |
 |---|---|---|---|
-| `pattern` | `string` | — (required) | In `files` mode: a glob (`*.ts`, `src/**/a*.ts`). In `content` mode: a regex. |
-| `path` | `string` | `"."` | File or directory, workspace-relative. The only thing in path position. |
+| `pattern` | `string` | — (required in `content`; required in `files` only when `glob` is absent) | `content`: a regex (see *dialect* below). `files` **with** `pattern`: files-**with-matches** for that pattern (`rg -l` / `grep -l`, H6) — the "which files contain X" answer. |
+| `glob` | `string` | — | **basename glob** (`*.ts`, `a*.ts`, `[[]id[]].ts`): no `/`, no `**`, no leading `!`, no `..` (H5). `content`: restrict the walk (`-g` / `-name`). `files` without `pattern`: the file list (`-g` / `-name`). |
+| `path` | `string` | `"."` | File or directory. Relative is `./`-prefixed in the pure module; absolute is allowed only if Q6 says so (H7/M1). The only thing in path position. |
 | `output_mode` | `"content" \| "files"` | `"content"` | `files` lists matching paths only. |
-| `fixed_strings` | `boolean` | `false` | `content` only: treat `pattern` literally (`--fixed-strings` / `grep -F`). |
-| `ignore_case` | `boolean` | `false` | `--ignore-case` / `grep -i`. |
+| `fixed_strings` | `boolean` | `false` | `content`/`files`-with-pattern: treat `pattern` literally (`-F -e` / `grep -F`). |
+| `ignore_case` | `boolean` | `false` | `--ignore-case` / `-i` for content; `--iglob` / `-iname` for a `glob` (H5 — previously unspecified). |
 | `max_results` | `int ≥ 1` | `100` | The count bound. Clamped to a hard ceiling (`MAX_RESULTS_CEILING = 1000`). |
 
-Deliberately absent: `command`, `exclude`, `before`/`after` context,
-`glob`-and-pattern together, `multiline`. Each is a new quoting surface or a new
-definition cost; none is needed to *find* a symbol, which is the whole point.
+**`glob` is a basename glob, and that is enforced, not documented** (H5). Measured:
+`rg --files -g 'src/**/a*.ts' -- fxf` → `rc=1`, nothing; `find fxf -name 'src/**/a*.ts'`
+→ nothing. So the schema `.refine`s it — `/` present ⇒ reject with "`glob` is a
+file-name pattern; put the directory in `path` instead", same for `**`, a
+leading `!` (rg negates, `find` takes it literally), and `..`. Allowed metacharacters
+stay `*`, `?`, `[...]`; a literal `[` is spelled `[[]` (measured: `find -name
+'[[]id[]].ts'` matches `[id].ts` on busybox, alpine, debian and BSD `find`);
+`ignore_case` maps to `--iglob` / `-iname` (measured: `find -iname '*-dash*'`
+matches `-dash.ts` on all three; `rg --iglob '*.TS'` matches `.ts`).
 
-**Bounds, enforced in this order** (the same on both paths, and the reason the
-fixture agrees):
+**`pattern`'s dialect, per engine (H1).** The tool must not hand a model a
+dialect it cannot see. On `engine=grep` the pure module classifies `pattern`
+against the ERE baseline actually measured on GNU 3.8, busybox 1.38 and BSD
+2.6.0 (table in Context (b)), in three classes:
 
-1. **Raw cap, in the shell**: `| head -c 262145`. A backstop so a pathological
+- **translated** — `\d`→`[0-9]`, `\D`→`[^0-9]`, `\w`→`[[:alnum:]_]`, `\W`→`[^[:alnum:]_]`,
+  `\s`→`[[:space:]]`, `\S`→`[^[:space:]]`, and `[:word:]`→`[:alnum:]`. Measured
+  identical to rg for `\w`, `\s`, `[[:word:]]`; **`\d` differs** (BSD: every `d`;
+  GNU/busybox: nothing) — so translating is not a nicety, it is the fix.
+- **refused with a message naming the engine** — `(?…` flags/groups (busybox:
+  rc 2; GNU: a **warning on stderr and rc 1**, i.e. silently no match), `\p{…}`
+  (busybox rc 2; GNU/BSD rc 1 — silently nothing), `(?:` (busybox rc 2; GNU:
+  rc 0 but matching only the *literal* `(?:ab)` text — a silent meaning change),
+  lazy `*?`/`+?` (**measured, not assumed**: with `-o` on `axxbxxxb`, BSD and rg
+  return `axxb` for `a.*?b` and `axxbxxxb` for `a.*b`, while busybox and GNU
+  return `axxbxxxb` for **both** — the `?` is a literal quantifier, a silent
+  meaning change that the *line* set hides; the tool never passes `-o`, so the
+  distinction only shows in the match text, which is exactly the kind of
+  difference that is refused on "different meaning", not on a mismatched line
+  set), a `{n,m}`
+  brace form (`a{2}` matched nothing on GNU, busybox and BSD — rg matches), and
+  `\x41`/`\u` (BSD: a hex escape; GNU and busybox: the literal text `\x41` —
+  three engines, two meanings, both silent). Each refusal says what to do
+  instead: `fixed_strings: true`, or a POSIX class.
+- **NOT refused, because measurement says it works (a correction to the review):**
+  `\b` / `\B`. Measured `\bfoo\b` → `foo` (and not `xfoo`/`fooX`) on BSD 2.6.0,
+  busybox 1.38.0, GNU 3.8 **and** rg 15.2.0, so it is passed through.
+- **passed through** — everything else, which is ERE in both dialects.
+
+On `engine=rg` the same classifier still runs, but only to *report* (the tool
+description states the dialect; no rewriting happens when rg is present, because
+rg accepts the whole Rust-regex set). The refusal is the one place the two
+engines differ *by design* rather than by accident: identical on both paths
+beats silently-different, and the message tells the model how to proceed.
+
+**A pattern the fallback cannot express is not an error the model cannot act on
+(H1/H2 ⇒ Q7).** Whatever Q7 decides (translate + refuse; or retry literally with
+a note; or single-engine), the *fallback* path always ends in an actionable
+`ToolResult`: either a translated run with a `[note: pattern rewritten for
+grep: \d → [0-9]]` line, or a refusal (`isError: true`) whose body names the
+offending construct, the engine, and the two ways forward. Never `no matches`.
+
+**Bounds, enforced in this order** (the same on both paths, unless stated):
+
+0. **Confinement, before anything runs** (H7/M1, Q6). In the pure
+   module, lexically: reject a NUL/`\n`/`\r` in `pattern`, `path` or `glob`;
+   normalise a relative `path` to `./…`; and, per Q6, refuse an absolute `path`
+   or one that climbs out of the workspace with `..`. A refusal is a
+   `ToolResult` with `isError: true` and a message naming the rule — never a
+   silent rewrite.
+1. **Existence pre-check, in the shell** (`[ -e ]`, H3):
+   `if [ ! -f P ] && [ ! -d P ] && [ ! -L P ]; then printf 'TENTACLE_MISSING\n' >&2; exit 3; fi;`
+   — POSIX, one line, measured correct on busybox, alpine, debian and BSD with
+   a file, a dir, a symlink and a missing path. It replaces F3's "read find's
+   stderr and guess": a missing path is now a **distinct status 3**, so the
+   diagnosis never depends on parsing an engine's wording.
+2. **Raw cap, in the shell**: `| head -c 262145`. A backstop so a pathological
    walk cannot buffer unbounded output into `exec`'s `Response.text()`
    (`host-execution.ts:259-263` — already named as a debt for `shell`,
    `TODO.md:84-85`). 256 KiB is far above the display bound, so it never
-   truncates a legitimate result.
-2. **Count bound, in JS**: keep the first `max_results` whole lines; if the raw
+   truncates a legitimate result; hit exactly at 262145 bytes it keeps one byte
+   of slack so JS can *detect* that it was hit (`raw.length === CAP`) and say so
+   (M3).
+3. **Count bound, in JS**: keep the first `max_results` whole lines; if the raw
    stream held more, emit `[search truncated: first N matches — narrow the
-   pattern or path]`.
-3. **Byte bound, in JS**: keep whole lines summing to ≤ `MAX_BYTES = 12000`
+   pattern or path]` **plus the per-file hit counts that were cut** (H6):
+   `[more matches in: ./pkg/a/x.ts 12, ./README.md 9, …+3 files]`, computed from
+   the lines already buffered (one cheap pass, no second run), capped to 5
+   entries. That is the "where else do I look" answer, and it is bounded.
+4. **Byte bound, in JS**: keep whole lines summing to ≤ `MAX_BYTES = 12000`
    (under `tools.maxInlineOutputChars`'s default 16000,
    `packages/config/src/defaults.ts:49`, so a normal search never reaches the
    spill path at all — see the spill note below); if it cut, emit
    `[search truncated: 12000 bytes — narrow the pattern or path]`.
-4. **Per-line cap, in JS**: `MAX_LINE = 300` characters, `…` when cut. A
+5. **Per-line cap, in JS**: `MAX_LINE = 300` characters, `…` when cut. A
    minified bundle is one line; without this a single hit eats the whole byte
-   budget.
+   budget. On `engine=rg` the same cap is *also* pushed down as
+   `--max-columns 1200 --max-columns-preview` (M3): measured, an 300 KB single
+   line becomes 1234 bytes and every other hit survives, whereas
+   `--max-columns` **without** `--max-columns-preview` prints
+   `[Omitted long matching line]` (useless). The fallback has no equivalent and
+   relies on this JS step alone.
 
 A line cap in JS, not `cut -c`, because `cut -c` is neither byte- nor
 character-safe across BSD and GNU (measured: BSD `cut -c` on CJK cut mid-byte —
 the plan's pre-repro rejected it).
 
-**Output format** — two header shapes, so a child can tell them apart without
+**Status and stderr, carried out explicitly (H3).** The `| head -c` pipeline
+makes `sh` report *head's* status: measured, `grep -E -e 'foo(' … 2>/dev/null |
+head -c …; echo $?` → **0**, while the same grep alone → **2**. POSIX `sh` has
+no `pipefail` (debian's `dash`: `set -o pipefail` fails; busybox `sh`: it
+happens to support it — do not rely on either). So the command carries the
+engine's status out on **stderr**, which `exec` returns as its own field
+(`execution.ts:9-13`) and which is *never* `2>/dev/null`'d for the whole
+pipeline:
+
+```
+{ <walk> ; printf 'TENTACLE_RC=%s\n' "$?" >&2; } | head -c 262145
+```
+
+Measured with this exact shape on busybox, alpine and debian: hit →
+`TENTACLE_RC=0`; no match → `TENTACLE_RC=1`; bad regex → the engine's own
+message plus `TENTACLE_RC=1` (`find -exec {} +` collapses both 1 and 2 to 1 —
+so a **parse error is detected from stderr** (`bad regex`/`Unmatched`/`warning:`
+/`regex parse error`), not from rc); missing path → status **3** and
+`TENTACLE_MISSING`. Per-file `grep` noise is suppressed with `-s` (`-s -e
+needle -- /w/nope` → rc 2 on GNU/busybox/BSD, so `-s` is safe and kept), and the
+`head`-induced SIGPIPE chatter (`find: 'grep' terminated by signal 13` on debian)
+is filtered by the parser, not by discarding stderr.
+
+**Output format** — three header shapes, so a child can tell them apart without
 guessing:
 
 ```
@@ -286,81 +559,161 @@ guessing:
 ./src/a.ts
 ./src/deep/z.ts
 ```
+```
+[files containing "needle" in .]  (engine=rg)
+./src/a.ts
+./README.md
+```
 
-- `path:line:text`, one hit per line, **sorted by path then line number** in JS
-  (never by the engine — pre-repro: rg's `--sort path` costs 45 % and does not
-  help the fallback).
+- `path:line:text`, one hit per line, **sorted by path then line number** in JS.
+  Revision 1 *also* passes `--sort path` to rg (M3): measured cost **11 ms**
+  (38→50 ms repo-wide; the earlier "45 %" figure does not reproduce), and it
+  makes the `head -c` subset deterministic instead of a parallel-order sample —
+  so "first N matches" is a true statement rather than a lottery. The fallback's
+  `find` order is still engine-defined, so **the JS sort remains the source of
+  ordering** on both paths; `--sort path` only makes truncation sane.
+- **A tab survives** (M7b): the control-character strip keeps `\t` and drops the
+  other C0/DEL characters, so indentation in a hit is readable.
 - `no matches` alone when the set is empty — an explicit sentence, not an empty
   body, because an empty result is the most common answer and an empty string
   reads like a failure.
 - **`engine=…` is in the header on purpose.** The fallback's ignore rules are
   weaker (Design 3), and a child that knows it is on the fallback can widen its
   own query. It is one token on a line that carries the query anyway.
-- A note line, when a rule could not be applied:
-  `[note: 2 .gitignore rules (*.log, pkg/a/) are not applied on this engine; results may include ignored files]`
-  — **fallback only** (Q3.1), and **never silent** (Failure modes).
+- A note line, when a rule could not be applied —
+  `[note: 2 .gitignore rules (*.log, pkg/a/) are not applied on this engine; results may differ]`
+  — **fallback only**, and **never silent** (Failure modes). The wording is
+  "may **differ**", not "may include ignored files" (M2): measured, the two
+  directions both occur — the fallback can include files rg ignored, and (with
+  `.git` absent and rg < 15) rg can include files the fallback pruned.
+- A truncation that hit the **raw cap** gets its own marker (M3): `[search
+  truncated at 256 KiB — results are INCOMPLETE, not the first N]`, because a
+  cut byte stream is a nondeterministic subset even with `--sort path` (the cap
+  can bite mid-walk). The trailing partial line is dropped before parsing.
 
-**Design 3 — the two engines, and how they are kept identical.**
+**Design 3 — the two engines, and how far they are kept identical.**
 
-*Engine detection, cached per `env`.* One probe, once per environment:
+*The honest contract (M2).* After revision 1 the claim is exactly this:
+**same shape, same bounds, same ordering; the result set is best-effort, and the
+header names the engine.** rg honours nested `.gitignore`s, `.ignore`,
+`.rgignore`, `.git/info/exclude` and the global excludes file; it applies
+`.gitignore` where a repo is detected (`--no-require-git` removes that
+condition); the fallback can only prune by *name*. So the two sets can differ in
+both directions, and the note says "may differ" rather than "may include ignored
+files". What is *not* best-effort: `path:line:text`, the JS sort, the five
+bounds (Design, *Bounds*), the truncation markers, `no matches`, and the three
+header shapes.
 
-```
-command -v rg >/dev/null 2>&1 && echo rg || echo grep
-```
+*What the note covers (M2).* Design 3b reads the **workspace root's**
+`.gitignore` whatever `path` is — that is deliberate and now said out loud: a
+nested `.gitignore` under `path` is not read on either side (rg applies it
+itself; the fallback cannot), so the note is about the root file only, and a
+nested rule is invisible to the fallback. Q3(a) is amended to match the Design
+(fallback only).
 
-`command -v` is POSIX and `sh`-builtin, so it adds no process; measured at
-**24-29 ms** (`cost.ts`) — paid once per session per env, then cached by
-`WeakMap<ExecutionEnvironment, Promise<Engine>>` next to the existing
-`pathLocksFor` precedent (`packages/core/src/path-locks.ts:84-92`). Caching is
-correct because an env's `PATH` does not change under it (a pod's is fixed at
-exec time; `HostExecution` builds the child env from `process.env` per call,
-`host-execution.ts:354-358`, and nothing in the product mutates it). A failed
-probe caches `"grep"` — the conservative path.
-
-*Search commands.* Verbs differ; prune lists and shape do not. `PRUNE` is one
-constant, applied to rg as negated globs and to `find` as `-prune` clauses, so
-the same *names* are excluded on both paths — and **rg keeps its own default
+*Search commands.* Verbs differ; prune lists, shape and status do not. `PRUNE` is
+one constant, applied to rg as negated globs and to `find` as `-prune` clauses,
+so the same *names* are excluded on both paths — and **rg keeps its own default
 walk** (`.gitignore`, hidden entries) rather than being told to ignore nothing,
 because that is what keeps the fast path fast (measured: 45 ms vs 409-453 ms,
-pre-repro):
+pre-repro). Revision 1's shape (H3, H5, H6, M1, M3 all applied):
 
 ```
-PRUNE = [".git", ".hg", ".svn", "node_modules", "dist"]   // + .gitignore's top-level literal names
+CAP = 262145            # 256 KiB + 1 byte of slack so JS can detect the cap
+PRE = [ -f P ] || [ -d P ] || [ -L P ]      # else: TENTACLE_MISSING on stderr, exit 3
+EXIT = { <walk> ; printf 'TENTACLE_RC=%s\n' "$?" >&2; } | head -c CAP
 
-rg   (content): rg --no-heading --line-number --color=never --with-filename
-                  -g '!**/.git/**' … -e PATTERN -- PATH
-rg   (files):   rg --files -g GLOB -g '!**/.git/**' … -- PATH
-find (content): find PATH \( -name '.*' ! -path PATH \) -prune -o \
-                  \( -name '.git' ! -path PATH \) -prune -o … -o \
-                  -type f -exec grep -n -H -I -E -e PATTERN -- {} + 2>/dev/null
-find (files):   find PATH \( … -prune \) -o -type f -name GLOB -print
+rg   (content): rg --no-require-git --sort path --max-columns 1200
+                   --max-columns-preview --no-heading --line-number
+                   --color=never --with-filename [-i] [--fixed-strings]
+                   -g '!**/.git/**' [-g GLOB] -e PATTERN -- PATH
+rg   (files):   rg --files --no-require-git --sort path
+                   -g GLOB [-g '!**/.git/**'] -- PATH          # glob only
+                rg -l --no-require-git --sort path [-i] [--fixed-strings]
+                   [-g GLOB] -e PATTERN -- PATH                 # files WITH matches
+
+find (content): find -H PATH \( -name .git ! -path PATH \) -prune -o \
+                   \( -name node_modules ! -path PATH \) -prune -o … -o \
+                   -type f [-name GLOB] -exec grep -n -H [-I] -s -E -e PATTERN -- {} +
+find (files):   find -H PATH \( … -prune \) -o -type f -name GLOB -print
+find (fwm):     find -H PATH \( … -prune \) -o -type f [-name GLOB] \
+                   -exec grep -l [-I] -s -E -e PATTERN -- {} +
 ```
 
-Four points here are load-bearing and were each measured:
+Seven points here are load-bearing and were each measured (Context (a)–(g)):
 
-- **rg keeps its defaults; the fallback is pruned to match.** The owner's
-  constraint is the same *shape and bounds* on both paths, and that is met
-  structurally: both engines emit `path:line:text` lines, and **one** JS
-  renderer sorts, caps and truncates them, so shape cannot depend on the engine.
-  The *result set* is then made to agree by sharing the prune names, and by
-  adding the `.gitignore`'s top-level literal names to the fallback's prunes
-  (Design 3b) — measured 7/7 identical on a fixture with `.git`, `.gitignore`, a
-  hidden dir, a binary, a dash file and a symlink loop (`design-final.ts`).
-  `--no-ignore` was measured and **rejected**: it makes rg walk
-  `node_modules`/`dist`/`.tentacle/worktrees` and costs 7× (409-453 ms vs
-  61-64 ms), and adding the same `-g` prunes back does not recover it (453 ms) —
-  the walk, not the filter, is the cost.
-- **`-I` on grep, `2>/dev/null`, `--color=never`.** Without `-I`, grep prints
-  `Binary file … matches` for a match rg silently drops (measured). Without
-  `--color=never`, rg colours when it thinks it is on a tty.
-- **`! -path ROOT` on every prune clause.** `find .` matches its own root
-  against `-name '.*'` — without the guard the whole walk prunes itself and
-  returns nothing (measured: an early prototype returned `[]` for every query).
+- **`-H` on `find` (new, measured):** a symlink given as `PATH` is not entered
+  by plain `find` (0 files vs 55) while **rg follows an argument symlink**. POSIX
+  `-H` follows only the argument, never the walk, so it restores parity without
+  ever introducing a loop (F7 still holds: no `-L`).
+- **`-I` only when the probe says it works (H4).** busybox **accepts** `-I` and
+  ignores it (measured), GNU honours it. So the flag is conditional, and the
+  parser drops a `binary file matches` line / a NUL-bearing line either way.
+- **`-s` instead of `2>/dev/null` (H3).** Per-file read errors are silenced at
+  the grep, which is what `-s` is for; stderr stays available for the regex
+  diagnosis and the `TENTACLE_RC` line.
+- **`--no-require-git` on rg (M2, measured).** Without it, rg < 15 applies
+  `.gitignore` only inside a git repo, so in a workspace copied without `.git`
+  the *fallback* would be the stricter path and the note would point the wrong
+  way. Cost measured at 24 ms vs 25 ms.
+- **`--sort path` + `--max-columns`/`--max-columns-preview` on rg (M3).**
+  11 ms, and both make the byte-capped subset deterministic and bounded per
+  line. Without `--max-columns-preview` rg prints `[Omitted long matching line]`,
+  which is useless; with it, a 300 KB line costs 1234 bytes.
+- **`! -path ROOT` on every prune clause, with the operand glob-escaped (M1).**
+  `find .` matches its own root against `-name '.*'` — without the guard the
+  whole walk prunes itself. And `-path` takes a *pattern*: a root like
+  `app/[id]` or `.hid[x]` in the root makes the guard unreliable; measured: a
+  **hidden** metachar root (`.hid[x]`) prunes itself to zero results unescaped
+  and returns its files escaped, on busybox, alpine, debian and BSD — while a
+  non-hidden `app/[id]` root is unaffected (its basename matches no prune
+  clause), so escaping is cheap insurance rather than a universal fix.
 - **A prune name the caller NAMED in `path` is exempt on both sides.** Asking
   for `src/node_modules` must search it; rg's `-g '!**/node_modules/**'` is
   dropped and `find`'s clause is skipped for that name. Measured: parity holds
   for every root once the exemption is in (`.`, `./`, `src`, `./.config`,
-  `.hidden.txt`, `node_modules`, `src/node_modules`).
+  `.hidden.txt`, `node_modules`, `src/node_modules`). Revision 1 scopes the
+  exemption to paths **inside** the workspace (Q6), because `path: "~/.ssh"`
+  must not lift the hidden-entry prune.
+
+`--no-ignore` was measured and **rejected**: it makes rg walk
+`node_modules`/`dist`/`.tentacle/worktrees` and costs 7× (409-453 ms vs
+61-64 ms), and adding the same `-g` prunes back does not recover it (453 ms) —
+the walk, not the filter, is the cost.
+
+**Design 3a — the capability probe, cached, and never poisoned (M4 + H4).** One
+probe process, once per environment, emitting three facts on stdout:
+
+```
+if rg --version >/dev/null 2>&1; then printf 'TENTACLE_ENGINE=rg\n'; else printf 'TENTACLE_ENGINE=grep\n'; fi
+grep -E -H -e _t_ -- /dev/null >/dev/null 2>&1;              printf 'TENTACLE_GREP_CAPS=%s\n' "$?"
+printf 'a\000needle\n' | grep -I -q -e needle - >/dev/null 2>&1; printf 'TENTACLE_BINFILTER=%s\n' "$?"
+```
+
+Measured end-to-end inside the container (`podman run … sh probe2.sh`):
+`TENTACLE_ENGINE=grep`, `TENTACLE_GREP_CAPS=1`, `TENTACLE_BINFILTER=0` on
+busybox (so: `-I` is ignored → do not pass it, filter in JS) and
+`…_BINFILTER=1` on debian (so: `-I` works → pass it). Host cost per probe:
+30-38 ms (`command -v rg` 30 ms, `rg --version` 38 ms, a `grep` start-up 36 ms).
+
+Four deliberate changes from revision 0:
+
+- **`rg --version`, not `command -v rg`.** `command -v` proves a file exists,
+  not that it runs; measured, a broken wrapper would pass `command -v` and fail
+  every search. `--version` costs the same and is the only real test.
+- **The probe carries NO `ctx.signal` (M4).** A turn cancelled during the first
+  search must not cache a failed probe; the probe has its own 5 s `timeoutMs`
+  instead.
+- **Only a definitive answer is cached.** `TENTACLE_ENGINE` present ⇒ cache it.
+  Probe rc ≠ 0, a timeout, an abort or unparseable output ⇒ **cache nothing**
+  and use the fallback for *this* call; the next call probes again. The
+  `WeakMap<ExecutionEnvironment, Promise<Engine>>` sits next to the
+  `pathLocksFor` precedent (`packages/core/src/path-locks.ts:84-92`).
+- **F14 demotes the cache (M4).** When rg was chosen but the run fails with a
+  parse-free, engine-shaped failure (stderr mentions `rg:` and rc ≥ 2 for a
+  reason that is not a regex error), the cached engine is **overwritten with
+  `"grep"`** for that env before the single retry, so the next call does not pay
+  rg again. One retry per call, one demotion per env — no loop (§0).
 
 **Design 3b — reading `.gitignore`, for prunes and for the note.** The
 workspace root's `.gitignore` is read with `ctx.env.readFile` (cheap,
@@ -371,28 +724,64 @@ unconfined by design, `host-execution.ts:14-15`) and each rule is classified:
   the *only* rule `find -name` can honour.
 - **anything else** — a glob (`*.log`), a nested path (`pkg/a/`), a negation
   (`!.env.example`), a character class → **counted**, and one note line says so:
-  `[note: 2 .gitignore rules (*.log, pkg/a/) are not applied on this engine; results may include ignored files]`.
+  `[note: 2 .gitignore rules (*.log, pkg/a/) are not applied on this engine; results may differ]`.
 
 A missing, unreadable or unparseable `.gitignore` is not an error. **The note's
-source is `ctx.env.readFile`, never a `shell`.**
+source is `ctx.env.readFile`, never a `shell`.** (Precondition 1, corrected per
+M7c: `readFile` *is* on the contract, `execution.ts:46`.)
 
-**Where the note is printed** (Q3.1): on the **fallback only**, by default —
-rg applied every rule, so on rg the note would be noise; and the header's
-`engine=grep` already tells a child it is on the weaker path. The stricter
-option (print it on both, so no two runs ever look more alike than they are)
-costs one line on the common path; the owner can take it. Either way the
-difference is **printed, never silent**.
+**Where the note is printed** (settled — M2): on the **fallback only**.
+rg applied every rule it knows, so on rg the note would be noise, and the
+header's `engine=grep` already tells a child it is on the weaker path. Q3(a)'s
+old text said "on both engines"; the Design was always fallback-only, and the
+Design wins — Q3(a) is reworded below. Either way the difference is **printed,
+never silent**.
+
+**Design 3c — what the pure module does before a command exists (H1, H2, H5,
+M1, M3, H7).** Everything that could make the two engines disagree *silently* is
+decided here, on strings, with no I/O — which is also why it is unit-testable
+without a subprocess (§7 "logic lives in pure modules"):
+
+| step | input | output / refusal |
+|---|---|---|
+| `validateInput` | raw input | NUL/`\n`/`\r` in `pattern`/`path`/`glob`; `glob` with `/`, `**`, a leading `!` or `..`; empty pattern in `content` mode (F12); `max_results` clamp (F11); `path` confinement per Q6 |
+| `normalizePath` | `pattern`-independent | `./`-prefix on a relative path (measured: `find -dash.ts` fails on all three engines, `find ./-dash.ts` works); the `-path` guard operand built from it with `[]*?\` escaped (measured: unescaped `[id]` self-prunes the root to zero results) |
+| `classifyPattern` | `pattern`, `fixed_strings`, `ignore_case` | `{ kind: "ere" \| "translated" \| "refused", text?, refusal? }` — the dialect table above; skipped entirely when `fixed_strings` is true (`-F` is literal on every engine, measured) |
+| `buildSearchPlan` | the above + engine | the command string *and* the notes it owes (`translated` ⇒ a rewrite note; `engine=grep` ⇒ the ignore note) |
+| `parseSearchOutput` | raw stdout, stderr, exitCode | `{ hits, registrationNote, engineStatus, parseError? }` — recognises `TENTACLE_RC=`/`TENTACLE_MISSING`, the three-grammar regex error (`bad regex`/`Unmatched`/`parentheses not balanced`/`warning:`/`regex parse error`), `binary file matches`, the debian `terminated by signal 13` SIGPIPE line, and a trailing partial line at the raw cap (M3) |
+| `renderSearchResult` | hits + notes + bounds | the final string: header, sorted lines, the five bounds, the markers |
+
+Two consequences worth naming, because the review asked for them explicitly:
+
+- **A parse error is a first-class outcome (H2), not a `no matches`.** Measured:
+  on the fallback `find -exec {} +` returns **1** for both "no match" and
+  "grep died", and with `2>/dev/null` grep's message is gone — the old plan would
+  have printed `no matches` for `foo(`, `arr[0`, `a{`. Revision 1 keeps stderr,
+  matches the three grammars, and returns `isError: true` with the engine's own
+  text plus "retry with `fixed_strings: true`" (or Q7's literal retry). **F14
+  excludes parse errors** so they never trigger a second slow run.
+- **The `head -c` subset is honest (M3).** `raw.length === CAP` ⇒ the
+  `INCOMPLETE` marker, not "first N"; the trailing partial line is dropped;
+  decoding is non-fatal (`TextDecoder{ fatal: false }` → U+FFFD) rather than a
+  throw on a split UTF-8 byte.
 
 **Design 4 — the granted tool-set and the prompt.**
 
 `explore`'s list becomes `["fs_read", "search"]` (`subagent.ts:86`). Because
 `search` must declare a read-class `concurrency` for `readOnlyType` to keep
-saying yes (precondition 4), it gets
-`concurrency: (input) => isRecord(input) && typeof input.path === "string" ? [{mode:"read", resource: pathResource(input.path)}] : [{mode:"read", resource: "search:*"}]`
-— built with the existing `pathConcurrency("read")` helper where the input has
-a `path` (`packages/tools/src/concurrency.ts:22-38`), so a `search .` conflicts
-with an `fs_edit a.ts` that another call is doing (a coarse basename key,
-`packages/core/src/path-locks.ts:47-51`) and two searches run side by side.
+saying yes (precondition 4), it gets `pathConcurrency("read")` — the existing
+helper (`packages/tools/src/concurrency.ts:22-38`), which already returns
+`"exclusive"` for a non-string `path`. **Correction (M7a):** that does *not*
+make a `search .` conflict with an `fs_edit a.ts`. `pathResource` is the
+case-folded **basename** (`packages/core/src/path-locks.ts:47-51`), so
+`search path:"."` keys `path:.` and `fs_edit path:"a.ts"` keys `path:a.ts` —
+different keys, no conflict, they may run in the same round. That is
+**acceptable and now stated** instead of claimed away: a search reads whatever
+the file was at walk time, exactly as a concurrent `fs_read` would, and
+`fs_edit` replaces the file atomically on write (`host-execution.ts:14-20`, temp
++ rename), so a hit's text is never a torn byte sequence — at worst a line
+number that shifted. Two searches still run side by side, which is the point of
+the key.
 
 The prompt is aligned to the tool that now exists — **and it is the place the
 cost is actually saved**, so it names the anti-pattern by name:
@@ -447,8 +836,9 @@ display):
 
 | file | change |
 |---|---|
-| `packages/tools/src/search.ts` | **new.** The pure core: `buildSearchPlan(input, engine) → SearchPlan` (the command string + the note), `parseSearchOutput(raw, mode) → Hit[]`, `renderSearchResult(hits, opts) → string`. No I/O, no `Tool`. This is the module the "logic lives in pure modules" rule (§7) wants, and the one the two-path tests drive **directly** — no subprocess needed for the shape tests. |
-| `packages/tools/src/search-tool.ts` (or same file, second half) | the `Tool`: schema, description, `permission: "none"`, read-class `concurrency`, `execute` = read gitignore → probe/cache engine → `ctx.env.exec` → parse → render. |
+| `packages/tools/src/search.ts` | **new.** The pure core (Design 3c): `validateInput`, `normalizePath`, `classifyPattern`, `buildSearchPlan(input, engine) → { command, notes }`, `parseSearchOutput(raw, stderr, exitCode, mode)`, `renderSearchResult(...)`. No I/O, no `Tool`. This is the module the "logic lives in pure modules" rule (§7) wants, and the one the two-path tests drive **directly** — no subprocess needed for the shape tests. It is expected to land around 300–350 lines (validation + confinement, the dialect table, the two command builders, the parser, the renderer), which is where `search-dialect.ts` below splits it. |
+| `packages/tools/src/search-tool.ts` (or same file, second half) | the `Tool`: schema (with the `glob`/`path`/newline `.refine`s), description (incl. the dialect, H1), `permission: "none"`, `concurrency: pathConcurrency("read")`, `execute` = read gitignore → probe/cache engine → `ctx.env.exec` → parse → render, with F14's single retry + demotion. |
+| `packages/tools/src/search-dialect.ts` | **new** (only if `search.ts` exceeds ~350 lines): the three-class ERE table from Context (b), pure and table-driven. |
 | `packages/tools/src/index.ts:11` | export it. |
 | `packages/tools/src/builtins.ts:320-328` | `searchTool` into `builtinTools`. |
 | `packages/agent/src/subagent.ts:86` | `tools: ["fs_read", "search"]`. |
@@ -456,8 +846,8 @@ display):
 | `packages/agent/src/subagent.ts:234-255` | `childToolLabel` `search` case. |
 | `packages/core/src/tool-labels.ts:13` | `search: "Search"`. |
 | `packages/tui/src/render-lines.ts:568` | `toolSubtitle` `search` case. |
-| `packages/tools/test/search.test.ts` | **new.** The pure module, both paths, hostile table (Tests). |
-| `packages/tools/test/search-tool.test.ts` | **new.** The `Tool` against a fake `ExecutionEnvironment` (probe, commands, bounds) + one real-`sh` run per path. |
+| `packages/tools/test/search.test.ts` | **new.** The pure module, both paths, hostile pattern **and path** tables, dialect table, truncation markers (Tests: T-S1, T-S2, T-S6 pure, T-S8) + the recorded rg fixture `test/fixtures/search-rg.txt` (M6). |
+| `packages/tools/test/search-tool.test.ts` | **new.** The `Tool` against a fake `ExecutionEnvironment` (probe/cache/demotion, commands, bounds, refusals) + one real-`sh` fallback run per path (Tests: T-S3, T-S5). |
 | `packages/agent/test/subagent.test.ts` | extend: the `explore` child is offered `["fs_read","search"]`; `readOnlyType("explore")` still true; one child **end-to-end through the real agent loop** that searches then reads (Tests). |
 | `packages/tui/test/render-lines.test.ts` | one row: `search` renders `Search x in y`. |
 
@@ -469,20 +859,20 @@ drop.
 
 | # | mode | how it converges |
 |---|---|---|
-| F1 | **No `rg` in the image** (a UBI/busybox pod) | the probe caches `grep`; the fallback runs; the header says `engine=grep`. Tested on a `PATH` with no `rg` — the whole `repro-doc.ts` B table is that case. |
-| F2 | **No `grep -r`, or no `-E`/`-I`/`-H`, or `find` without a needed primary** (busybox/dash variants) | the fallback uses **only** `find PATH … -prune -o -type f -exec grep -n -H -I -E -e PAT -- {} +`. `-r` is deliberately *not* used: `find` does the recursion, so a `grep` that lacks `-r` still works, and `-exec … {} +` is POSIX (`grep -r` is not, in the POSIX spec). `-E` and `-H` are POSIX. `-I` is a GNU/BSD extension — **the one real portability risk**; a `grep` without it prints `Binary file … matches`, which the parser already recognises and turns into a note (`binary files matched (N) — not shown`), so the *shape* holds even then. A capability probe (`grep -E -I -H -e x -- /dev/null`, one process, **measured at 38-47 ms** — a `grep` start-up, not a walk) is cached with the engine; the parser's binary-line handling means a missing `-I` degrades to a note rather than a broken shape, so the probe is a nicety, not a correctness requirement. |
-| F3 | **A path that does not exist** | rg exits 2 with `rg: PATH: IO error for operation on PATH: No such file or directory`; find/grep exit non-zero with `find: PATH: No such file or directory`. Both come back on **stderr**, which is *not* discarded — the tool reads `ExecResult.stderr` (measured: `err="rg: ./nope: IO error…"` / `err="find: ./nope: No such file or directory"`). The tool returns `[search "p" in ./nope]` + `path not found: ./nope` + a `note` (`isError: true`), so the child widens its path instead of reporting "no matches". |
-| F4 | **A busybox `find` without `-mindepth`** | `-mindepth` is GNU/BSD, not POSIX — it is **not used**. The root-vs-`-name '.*'` trap is closed by `! -path ROOT` on each prune clause, which is POSIX primary syntax and measured to work on BSD `find` (and is what makes `parity3.ts`'s root table all `true`). |
-| F5 | **A huge repo / a runaway walk** | the 256 KiB raw cap bounds memory; `ctx.signal` is threaded into `env.exec` (`execution.ts:16`, as `shell` does at `builtins.ts:302`) so a cancelled turn kills the walk through the process group (`host-execution.ts:246-256`); an optional `timeoutMs` (default 20 s, half of `shell`'s 120 s, since a search is not a build) bounds it on the wall clock. **Measured floor**: fallback on this repo 5.0 s vs rg 0.8 s — the fallback is slow, which is why the timeout exists and why `engine=grep` is in the header. A cancel surfaces as `ExecResult.exitCode === 124` with the same note `shell` uses (`builtins.ts:312-315`), reworded for a search. |
-| F6 | **Binary files** | `-I` drops them on the fallback; rg drops them silently by default (measured: `rg` prints nothing for `needle` in a file holding `\0`; `grep -rn` without `-I` printed `Binary file ./src/bin.dat matches`). Both paths therefore print nothing for them — identical. The parser still recognises a `binary file matches` line (a `grep` without `-I`, F2) and counts it into one note line. |
-| F7 | **Symlink loops** | `find` without `-L` does not follow symlinks — a loop is never entered (measured on `src/loop -> ..`). rg does not follow them either. No `-L` is ever passed. |
-| F8 | **A pattern containing a newline** | `rg` **refuses** a literal newline in a regex (*"the literal `\n` is not allowed in a regex"*, rc 2) while `grep -E` accepts it and matches a *line* — a genuine divergence (measured). Not fixable by quoting. So: the schema rejects a `pattern` containing `\n`/`\r` with a validation message telling the model to search for a single line and use `fs_read` for context. That is the honest shape — the tool never sends a pattern the two engines disagree about. |
-| F9 | **A pod's untrusted output (§7)** | the pod owns its daemon, so a match's *text* is pod-supplied bytes. The result is not treated as trusted: the tool strips C0/DEL control characters per line (the same class `wireLine`/`oneLineText` drop, `mapping.ts:64-66`, `hosted-session.ts:345-368`), caps each line, and prefixes every result with the `[search …]` header so the text is never bare. It is **not** marked as an instruction anywhere, and it carries no path that another tool then trusts. A pod cannot use this to escalate: the tool's effect is a read-only walk inside the pod, with no shell and no writable file. |
-| F10 | **Cancel mid-walk** | `ctx.signal` → `exec`'s abort → SIGTERM to the whole process group, SIGKILL after the grace (`host-execution.ts:340-348`); the tool returns `search cancelled` (`isError: true`) rather than a partial list the child would misread as complete. |
+| F1 | **No `rg` in the image** (a UBI/busybox pod) | the probe caches `grep`; the fallback runs; the header says `engine=grep`. Measured live on **busybox 1.38, busybox 1.36 (alpine) and GNU (debian)** — the whole `fin2.sh` run in Context (c) is that case. |
+| F2 | **A `grep` without a needed option** (busybox/dash variants) | measured on busybox: `-E`, `-H`, `-n`, `-l`, `-c`, `-i`, `-F`, `-s`, `-r`, `-I` and `-exec {} +` are all present; `--include`, `--binary-files`, `--version` are **not** (`rc=2`, "unrecognized option"). So the command uses only the first group, and the two option-level risks get a probe, not a hope: **`-I` is accepted-and-ignored by busybox** (measured: a NUL file is searched and its line printed as `bin.dat:1:needle`), so `-I` is passed **only when the binary probe says it filters** (`TENTACLE_BINFILTER=1`; GNU 3.8 and BSD 2.6: 1, busybox: 0), and the parser also drops a `binary file matches` line / a NUL-bearing line (F6). The probe is **mandatory**, cached with the engine (Design 3a) — revision 0 called it a nicety, and was wrong. |
+| F3 | **A path that does not exist** | a shell pre-check before the walk: `[ -f P ] \|\| [ -d P ] \|\| [ -L P ]` else `TENTACLE_MISSING` on stderr + exit **3** (measured on busybox, alpine, debian, BSD for a file, a dir, a symlink and a missing path). The tool returns `[search "p" in ./nope]` + `path not found: ./nope` + `isError: true`, so the child widens its path instead of reporting "no matches". This **replaces** revision 0's "read find's/rg's stderr and guess": the diagnosis never depends on an engine's wording, and the `2>/dev/null` that made it impossible is gone (only `grep -s` remains, per-file). |
+| F4 | **A busybox `find` without `-mindepth`** | `-mindepth` is GNU/BSD, not POSIX — it is **not used**. The root-vs-`-name '.*'` trap is closed by `! -path ROOT` on each prune clause, with the operand's glob metacharacters escaped (M1): measured, a **hidden** metachar root (`.hid[x]`) self-prunes to **zero** results unescaped and returns its files escaped, on busybox, alpine, debian and BSD; a non-hidden `app/[id]` root is unaffected either way. |
+| F5 | **A huge repo / a runaway walk** | the 256 KiB raw cap bounds memory; `ctx.signal` is threaded into `env.exec` (`execution.ts:19`, as `shell` does at `builtins.ts:302`) so a cancelled turn kills the walk through the process group (`host-execution.ts:246-256`); a `timeoutMs` (default 20 s, half of `shell`'s 120 s, since a search is not a build) bounds it on the wall clock. `find` keeps walking after `head` exits until each `grep` dies on SIGPIPE (measured on debian: `find: 'grep' terminated by signal 13`) — bounded by the timeout, and that stderr line is filtered by the parser rather than by discarding stderr. **Measured floor**: fallback on this repo 5.0 s vs rg 0.8 s — the fallback is slow, which is why the timeout exists and why `engine=grep` is in the header. A cancel surfaces as `ExecResult.exitCode === 124` with the same note `shell` uses (`builtins.ts:312-315`), reworded for a search. |
+| F6 | **Binary files** | rg drops them silently (measured: nothing for a match in a file holding `\0`). GNU/BSD `grep -I` drops them (rc 1); **busybox `grep -I` does not** (measured: `1:needle` printed). So: pass `-I` only when the probe says it works, and **always** filter in JS — drop a line whose text carries a NUL, and count a `binary file matches` line into one note (`binary files matched (N) — not shown`). Identical rendering on all three engines; measured `bin.dat` present in busybox output, absent on GNU, both reduced to absent by the parser. |
+| F7 | **Symlink loops** | `find` without `-L` does not follow symlinks — a loop is never entered (measured on `src/loop -> ..`). rg does not follow them either. No `-L` is ever passed. **`-H` IS passed** (new, measured): POSIX `-H` follows only the *argument*, so a symlinked `path` behaves as it does for rg (55 files through `/w/etc-link`, 0 without `-H`) and a loop inside the tree is still never entered. |
+| F8 | **A pattern containing a newline** | `rg` **refuses** a literal newline in a regex (*"the literal `\n` is not allowed in a regex"*, rc 2) while `grep -E` accepts it and matches a *line* — a genuine divergence (measured). Not fixable by quoting. So: the schema rejects a `pattern` containing `\n`/`\r` (and a NUL) with a validation message telling the model to search for a single line and use `fs_read` for context. That is the honest shape — the tool never sends a pattern the two engines disagree about. |
+| F9 | **A pod's untrusted output (§7)** | the pod owns its daemon, so a match's *text* is pod-supplied bytes. The result is not treated as trusted: the tool strips C0/DEL control characters per line **except `\t`** (M7b — otherwise every indented hit is mangled; the same class `wireLine`/`oneLineText` drop, `mapping.ts:64-66`, `hosted-session.ts:345-368`), caps each line, and prefixes every result with the `[search …]` header so the text is never bare. It is **not** marked as an instruction anywhere, and it carries no path that another tool then trusts. A pod cannot use this to escalate: the tool's effect is a read-only walk inside the pod, with no shell and no writable file. |
+| F10 | **Cancel mid-walk** | `ctx.signal` → `exec`'s abort → SIGTERM to the whole process group, SIGKILL after the grace (`host-execution.ts:340-348`); the tool returns `search cancelled` (`isError: true`) rather than a partial list the child would misread as complete. The *probe* deliberately does not take `ctx.signal` (M4), so a cancel cannot poison the cached engine. |
 | F11 | **`max_results` absurdly large, or 0** | the zod schema is `int().min(1)` and the value is clamped to `MAX_RESULTS_CEILING` in the pure module — a 10⁹ asks for the ceiling, never for an unbounded buffer. |
-| F12 | **An empty or whitespace-only `pattern`** | `z.string().min(1)`; a pattern of only spaces is legal and searches for spaces (harmless, bounded). In `files` mode an empty glob would match everything, so `min(1)` covers it. |
+| F12 | **An empty `pattern`, or neither `pattern` nor `glob`** | `pattern` is `z.string().min(1)` **conditionally**: in `content` mode it is required; in `files` mode exactly one of `pattern` / `glob` must be present (H6's new surface), enforced by a `.refine` with a message naming both fields — a `files` call with neither would otherwise list the whole tree unbounded. A pattern of only spaces is legal and searches for spaces (harmless, bounded). |
 | F13 | **`.gitignore` unreadable, absent, or a symlink out of the workspace** | `readFile` failure is caught and ignored (no note, no error); it is a convenience for a note, never a precondition. |
-| F14 | **The probe succeeds but rg then fails** (a wrapper on `PATH`, a broken binary) | the exec's stderr and non-zero exit reach the tool; if rg fails with rc 2 *and* stderr mentions the engine, the tool re-runs **once** on the fallback and reports `engine=grep` (with the rg error as a note). One retry, never a loop (§0). |
+| F14 | **The probe succeeds but rg then fails** (a wrapper on `PATH`, a broken binary) | the exec's stderr and non-zero exit reach the tool; if rg fails with rc ≥ 2 *and* stderr names the engine (`rg:`) **and it is not a regex parse error** (H2 — a parse error is a user error, reported, never retried), the tool **demotes the cached engine to `grep` for that env (M4)**, re-runs **once** on the fallback, and reports `engine=grep` with the rg error as a note. One retry per call, one demotion per env, never a loop (§0). Tested in T-S3(b). |
 | F15 | **A result so large it reaches the spill path** | designed out: the byte bound (12000) sits below the spill threshold (16000), so `search` never spills — which also keeps the TODO `explore`-spills-a-file item unreachable *for this tool* (Design 5). If a user lowers `tools.maxInlineOutputChars` below 12000, the spill machinery handles it exactly as for `shell` — no new code. |
 
 ### Tests
@@ -490,34 +880,97 @@ drop.
 The repo rule (§9): **red before green**, prove the exact property, test the
 failure modes, use injectable seams.
 
-**T-S1 — the pure module, both paths, one table** (`packages/tools/test/search.test.ts`).
-*Property*: for the same fixture and the same input, `renderSearchResult(parseSearchOutput(cmd_result))` is **identical** whether the command came from `buildSearchPlan(…, "rg")` or from `buildSearchPlan(…, "grep")`.
-Driven as: build both plans, run **each real command** once through
-`Bun.spawnSync(["/bin/sh","-c", …])` against a `.tentacle/tmp` fixture — the rg
-one with the real `PATH`, the fallback one with a scrubbed `PATH` — then compare
-the rendered strings. That is exactly `repro-doc.ts` B, promoted to a test.
-Table: a plain hit, a regex hit, a no-match, a hostile set (`it's`,
-`say "hi"`, `$(echo PWNED)`, `` `id` ``, `a;b|$(id)`, `-n`, `--version`), a
-truncation-by-count case, a truncation-by-bytes case, a 5000-char line, a binary
-file, a symlink loop.
-*Guards the vacuity risk*: the test asserts the rg run **actually used rg** and
-the fallback run **actually could not** (`command -v rg` in each PATH) — otherwise a
-machine without rg would make both sides the fallback and prove nothing.
+**How the real-engine half runs in CI, and where it runs without `rg` (M6).**
+CI runs no tests today (`.github/workflows/build.yml` only compiles and
+smoke-tests binaries; there is no `bun test` job), so the plan must not depend on
+an unstated install. Decision: **the suite never needs `rg`, and never skips.**
+The default run executes the **fallback for real** and compares it against a
+**recorded** rg transcript; the "is the recording still what real rg produces"
+check is a **documented validation step**, not a suite member. Two repo facts
+drive this over a new opt-in env var:
 
-**T-S2 — quoting, as a property of the built command, not of a shell**
-(`search.test.ts`). *Property*: for each hostile pattern, the built command,
-executed, produces a hit for a file containing that pattern **literally** and
-creates no file named `pwned`. Mutation check (§9): replace `shq` with identity
-and the `$(touch pwned)` / `a;b|$(id)` cases must go red — they do (measured:
-without quoting the shell splits the command).
+- a new `TENTACLE_SEARCH_RG` would be **stripped** by the test guard —
+  `scripts/test-env-guard.ts` deletes every `TENTACLE_*` except its explicit
+  keep-list (k8s, docker, `SLOW_TESTS`), so the opt-in would additionally need a
+  guard change plus a `test-env-guard.test.ts` case;
+- AGENTS §6 pins the baseline as "all pass except the **three** opt-in skips", so
+  a fourth skip is a rule change, not a detail — and this feature does not need
+  one.
+
+- **In the default suite** (`bun test`, everywhere): T-S1 runs the **fallback**
+  command for real (POSIX `find`/`grep` — measured present on busybox, alpine,
+  debian and macOS, so it needs no install) and compares it against the
+  **recorded** rg transcript (`packages/tools/test/fixtures/search-rg.txt`,
+  produced once on this machine and pasted verbatim, with the rg version in the
+  first line). The pure-module tests need no engine at all.
+- **The recording is re-verified, not trusted**: the **Execution** section records
+  the exact command that regenerates the fixture (the built rg command, run on
+  this machine, rg 15.2.0) and its output, and **Review** re-runs it and diffs.
+  The generator itself stays in `.tentacle/tmp/explore-search/` (the fixture is
+  the artefact; a script for it would be a fourth thing to maintain). If CI ever
+  installs rg, that step is promoted to a real test with no plan change.
+- **Review gate before merge** (one live run, output pasted in Review): the
+  fallback on **busybox** *and* on a **GNU** image, i.e. the commands in
+  `fin2.sh` re-run in `podman run --rm busybox:latest` and
+  `podman run --rm debian:bookworm-slim`. This revision already contains those
+  runs (Context (a)–(g)); the gate is that they are re-run against the *final*
+  `buildSearchPlan` output, not a script that mirrors it. Per AGENTS §6 a live
+  container run is an opt-in test, so it stays a **documented Review step**, not
+  a suite member — and this is the one verification the executor must not fake.
+
+**T-S1 — the pure module, both paths, one table** (`packages/tools/test/search.test.ts`).
+*Property*: for the same fixture and the same input, `renderSearchResult(parseSearchOutput(cmd_result))` is **byte-identical** whether the command came from `buildSearchPlan(…, "rg")` or from `buildSearchPlan(…, "grep")` — for every row of the table, *except* the rows the design deliberately makes differ (a refusal, which is engine-specific by design and asserted separately).
+Driven as: build both plans, run the fallback command for real through
+`Bun.spawnSync(["/bin/sh","-c", …])` with a scrubbed `PATH` (no rg), and the rg
+command against the recording (re-verified per the block above, never skipped), then
+compare the rendered strings. That is exactly `repro-doc.ts` B, promoted.
+Table: a plain hit; a regex hit; a no-match; the hostile **pattern** set (`it's`,
+`say "hi"`, `$(echo PWNED)`, `` `id` ``, `a;b|$(id)`, `-n`, `--version`); the
+hostile **path** set (M1: a leading `-`, a space, quotes, `$(…)`, `[id]`, a
+nested `.hid[x]`, a `\`); a truncation-by-count case; a truncation-by-bytes case;
+a 5000-char line; a binary file; a **symlink root** (`-H`); a `files`-mode glob;
+a files-with-matches query; the dialect table of Context (b) — `\d+`, `\w+`,
+`\s`, `\bfoo\b`, `(?i)abc`, `(?:ab)`, `\p{L}`, `a{2}`, `a**` — each as
+translate/refuse/pass, asserted on both paths; a **parse error** (`foo(`,
+`arr[0`) asserting `isError` + the retry advice; a **missing path** asserting
+status 3 and `path not found`.
+*Guards the vacuity risk*: the test asserts the fallback run **actually could
+not** use rg (`command -v rg` under the scrubbed `PATH`) — otherwise a machine
+with rg would make both sides the rg path and prove nothing.
+
+**T-S2 — quoting and path safety, as a property of the built command, not of a
+shell** (`search.test.ts`). *Property*: for each hostile **pattern** and each
+hostile **path** (M1), the built command, executed, produces a hit for a file
+containing that pattern **literally** / for that directory's files, and creates
+no file named `pwned`. The path half is new and has its own red cases: `path:
+"-dash.ts"` (measured: `find -dash.ts` → "unrecognized"/"unknown predicate"/
+"illegal option" on the three engines, `find ./-dash.ts` works), `path:
+"app/[id]"` and `path: ".hid[x]"` (measured: a **hidden** metachar root → zero
+results with an unescaped `-path` guard, correct with it), `path: "a b"`,
+`path: "it's"`, `path: "$(touch pwned)"`, `path: "back\\slash"`. Mutation check
+(§9): replace `shq` with identity and the `$(touch pwned)` / `a;b|$(id)` cases
+must go red (measured: without quoting the shell splits the command); drop the
+`./`-prefix and the `-dash.ts` row must go red; drop the `-path` escaping and
+the `[id]` row must go red.
 
 **T-S3 — the `Tool` against a fake env** (`search-tool.test.ts`).
 *Property*: with a scripted `ExecutionEnvironment` (the `recordingEnv` pattern,
 `packages/agent/test/subagent.test.ts:47-62`), the tool sends **exactly one**
 probe then **exactly one** search, caches the engine across two `execute` calls
-(probe count stays 1), passes `ctx.signal`, and never puts `input.pattern` or
-`input.path` outside a quoted position. Red-before-green: written against a
-stub that returns `""`, red on the engine/command assertions, then wired.
+(probe count stays 1), passes `ctx.signal` to the **search** and **not** to the
+probe (M4), and never puts `input.pattern` or `input.path` outside a quoted
+position. Four failure-mode cases the review demanded:
+(a) a probe that **rejects/times out** ⇒ the fallback is used **and nothing is
+cached** (a second `execute` probes again) — the anti-poison property;
+(b) rg present but the search fails engine-shaped ⇒ **one** retry on the
+fallback, the cache is demoted, and the *next* call issues **no** probe and **no**
+rg run (F14/M4);
+(c) a parse error (`foo(`) ⇒ **no** retry, `isError: true`, retry advice (H2);
+(d) `TENTACLE_RC=`/`TENTACLE_MISSING` in stderr are honoured even though the
+outer `exec` exit code is 0 (H3) — asserted by returning `exitCode: 0` with a
+stderr line, which is exactly what the shell produces.
+Red-before-green: written against a stub that returns `""`, red on the
+engine/command assertions, then wired.
 
 **T-S4 — the real agent loop, `explore` end to end** (`packages/agent/test/subagent.test.ts`).
 *Property*: a child of type `explore` is offered **`["fs_read","search"]`**;
@@ -530,48 +983,91 @@ goes false, `agent_task`'s `spawnKind` flips to `"writer"`
 (`task.ts:360-363`) and a scheduling test goes red. Mutation: drop `concurrency`
 from the tool and confirm that test fails.
 
-**T-S5 — the schema refuses a newline pattern** (`search-tool.test.ts`).
-*Property*: `pattern: "a\nb"` is a validation error with a message naming
-`fs_read` for context. Red on the code before the `.refine`.
+**T-S5 — the schema refuses what it says it refuses** (`search-tool.test.ts`).
+*Property*, one case each, red before the `.refine`s: `pattern: "a\nb"` (F8);
+`pattern` empty in `content` mode (F12); `glob: "src/**/a*.ts"` and `glob:
+"!*.ts"` and `glob: "a/b.ts"` with a message pointing at `path` (H5 — measured:
+`rg --files -g 'src/**/a*.ts'` → rc 1, nothing; `find -name 'src/**/a*.ts'` →
+nothing); `files` mode with **neither** `pattern` nor `glob` (F12); and, per
+Q6's answer, `path: "/abs"` / `path: "../x"` refusing or passing.
 
 **T-S6 — bounds** (`search-tool.test.ts`, pure). *Property*: 500 hits with
-`max_results: 3` yields exactly 3 lines **and** the count marker; a single
-40000-char line yields one line of ≤300 chars **and** a `…`; a result at the
-byte bound yields only whole lines and the byte marker — never a split line.
-Mutation: move the byte bound before the count bound and the whole-lines
-assertion goes red on the multi-byte fixture.
+`max_results: 3` yields exactly 3 lines **and** the count marker **and** the
+per-file `[more matches in: …]` digest (H6); a single 40000-char line yields one
+line of ≤300 chars **and** a `…`; a result at the byte bound yields only whole
+lines and the byte marker — never a split line; a raw stream of exactly `CAP`
+bytes yields the **`INCOMPLETE`** marker and drops the trailing partial line
+(M3), while a shorter over-`max_results` stream yields `first N` — two different
+markers, asserted apart. Mutation: move the byte bound before the count bound and
+the whole-lines assertion goes red on the multi-byte fixture.
 
 **T-S7 — display** (`render-lines.test.ts`): the `search` row reads
 `Search <pattern> in <path>`; `childToolLabel("search", …)` the same. One case
 each — display only, so this is the shallow test, deliberately.
 
+**T-S8 — the dialect classifier is a table** (`search.test.ts`, pure, no shell).
+*Property*: for each row of Context (b), `classifyPattern` returns the expected
+`kind` and, for `translated`, a text that the **opposite** engine actually
+matches on the fixture: `\d+` → `[0-9]+` (measured: BSD `\d+` matched all 10
+lines, GNU/busybox none, `[0-9]+` the digits line on all three); `\w+`/`\s` pass
+through (measured ALL on all three); `\bfoo\b` passes (measured: `foo` on all
+three). The refused rows are refused for three *different* measured reasons, and
+each is asserted as such: `(?i)abc` — busybox rc 2, **GNU rc 1 with only a
+stderr warning** (the silent case); `(?:ab)` — busybox rc 2, GNU rc 0 but
+matching only the *literal* line L6 (a silent **meaning** change); `\p{L}` —
+busybox rc 2, GNU/BSD rc 1 (silently nothing); `a{2}` — rc 1 on all three
+(silently nothing, so it is a divergence from rg only); `\x41` — BSD matched L1
+as a hex escape while GNU and busybox matched L7 as the literal text `\x41`
+(three engines, two meanings, both silent); lazy `a.*?b` — with `-o` on
+`axxbxxxb`, BSD and rg give `axxb`, busybox and GNU give `axxbxxxb` for both
+`a.*?b` **and** `a.*b` (measured; the line sets agree, the meaning does not).
+Mutation: delete the `\d` row from the translate map and the `\d+` case goes red
+on the fallback run.
+
 **Not tested here, and said out loud**: the docker/pod transport (`env.exec` is
 the same contract everywhere, precondition 1, and a pod's `rg` presence is only
 knowable in the pod — F1 is the answer and the `engine=` header is its
 observable). Verification for that is one live `tentacle run` search in an image
-without rg; it is named in Review, not claimed here.
+without rg; it is named in Review, not claimed here. Revision 1 *did* run the
+fallback inside three images by hand (Context (a)–(g)) — that is evidence, not a
+test, and Review re-runs it against the built command.
 
 ## Owner questions
 
 Each with 2-3 options; **my recommendation first**, and what the measurement says.
+Revision 1 rewrote Q1 (M5), amended Q3 (M2's contradiction), and **added Q6
+(path confinement, H7), Q7 (a pattern the fallback cannot express, H1/H2) and
+Q8 (the `glob` filter + files-with-matches surface, H6)** — the three the design
+review said were missing and needed the owner.
 
 **Q1 — Who gets `search`: `explore` only, or `general` and the main agent too?**
-- **(a) `explore` only — RECOMMENDED.** It is the type with the measured
-  problem (183 steps / 18M tokens by opening files in slices) and the type with
-  no substitute: the main agent and `general` already have `shell`, so `grep -rn`
-  is one call away for them, and adding `search` to them buys a second way to do
-  what they can already do — at a cost of ~600 chars of tool definition in every
-  request of every session, and a *worse* tool for them (bounded, no context
-  flags, no `--glob` combinations) than the shell they have. Blast stays at one
-  array in `subagent.ts`.
-- **(b) `explore` + `general`, not the main agent.** `general` is a writer, so
-  a bounded search helps it the least (it can and should use `shell`), and it
-  costs the same per request. Only if the owner wants a "read-only by tool set"
-  story for `general` too.
-- **(c) Everyone.** Cheapest to describe, most expensive per request, and it
-  invites the main agent to prefer `search` over `shell` for a query `search`
-  deliberately cannot express (multi-line, context, aggregated counts) — a
-  papercut per query, forever, to save one tool call.
+*(rewritten per M5: the permission angle was missing, and it changes the
+recommendation.)*
+- **(a) Everyone — `explore`, `general` and the main agent — RECOMMENDED,
+  conditional on Q6 being settled.** The old argument ("they already have
+  `shell`, so `grep -rn` is one call away") ignores what that call *costs*:
+  `shell` is `permission: "ask"` (`builtins.ts:286`), so every grep the main
+  agent runs is a **prompt** (or a standing allow-rule, which is worse: a
+  free-form shell allowlist is a much bigger surface than one read-only tool),
+  and its output is **unbounded** — the model must remember `| head`, and the
+  result goes straight into context. `search` is `permission: "none"` and
+  bounded by construction. That is a UX and safety gain, not "a second way to do
+  the same thing", and ~600 chars of definition is a weak counter-argument
+  against it: one prompt per grep costs the user more than that, every time.
+  Note the pairing: a prompt-free search for the **main** agent makes Q6 sharper,
+  not weaker — hence "conditional on Q6".
+- **(b) `explore` + `general`, not the main agent.** Middle ground: gives the
+  read-only child its primitive and a writer a cheap locate, keeps the main
+  agent's prompt-free surface at zero. Costs the same per request for `general`
+  and leaves the most-used agent with the prompt-per-grep papercut.
+- **(c) `explore` only.** Still defensible on one ground: it is the type with
+  the measured disease (183 steps / 18M tokens), it is prompt-free today, and
+  the blast stays one array in `subagent.ts`. It leaves the main agent
+  unchanged — including the prompt-on-every-grep behaviour, which is the status
+  quo the owner has lived with.
+- *What the measurement adds:* nothing here is timed; the cost is (i) definition
+  bytes per request (~600 per extra always-on tool) and (ii) one permission
+  prompt per `shell` grep avoided. The second dominates for any interactive use.
 
 **Q2 — the owner's note: read-only MCP tools for `explore`, and `mcp__<server>__*`.
 This task, or separate?**
@@ -599,12 +1095,16 @@ This task, or separate?**
 **Q3 — the two paths' ignore rules: rg keeps its defaults with a shared prune
 list (this plan's Design 3), or `--no-ignore` on both for literal parity?**
 - **(a) rg keeps its defaults + a shared prune list + `.gitignore`'s top-level
-  literal names on the fallback — RECOMMENDED, and what the measurements
-  support.** Shape and bounds are identical *by construction* (one JS renderer
-  over both engines' `path:line:text` lines), the result sets agree on everything
-  a POSIX `find` can express (measured 7/7, `design-final.ts`), and rg stays at
-  45-50 ms. The residual divergence — a `.gitignore` glob or nested path — is
-  **printed**, never silent, on both engines.
+  literal names on the fallback + `--no-require-git` — RECOMMENDED, and what the
+  measurements support.** Shape, bounds and ordering are identical *by
+  construction* (one JS renderer over both engines' `path:line:text` lines); the
+  result sets agree on everything a POSIX `find` can express; rg stays at
+  45-50 ms. The residual divergence — a `.gitignore` glob, a nested path, a
+  nested `.gitignore` — is **printed**, never silent, **on the fallback only**
+  (M2: revision 0's text here said "on both engines" while the Design said
+  fallback-only; the Design wins, and the note now says "results may **differ**").
+  `--no-require-git` is part of (a) (measured: without it, rg < 15 ignores
+  nothing where there is no `.git`, making the *fallback* the stricter path).
 - **(b) `--no-ignore` on both, ignoring nothing.** Literal, total parity of the
   result set — but measured at **409-453 ms vs 61-64 ms on this repo** for rg,
   and adding the same `-g` prunes back does not recover it (the *walk* is the
@@ -614,19 +1114,14 @@ list (this plan's Design 3), or `--no-ignore` on both for literal parity?**
 - **(c) Ship rg only; fail with a clear error when it is absent.** Cheapest and
   fastest, but it breaks the owner's binding constraint ("NEVER assume `rg`
   exists … must fall back") — listed only to be rejected explicitly.
-- **Sub-question Q3.1 (my default in (a)):** print the "n rules not applied"
-  note on **both** engines (honest, one line, tells a child the runs are not
-  comparable) or **only on the fallback** (shorter output on the common path,
-  but the same query then looks like it always agreed). I would print it only on
-  the fallback and put the engine in the header (`engine=grep`) — say if you want
-  the stricter version.
 
 **Q4 — the engine probe: cached per `env` (this plan), or per call?**
-- **(a) Cached per `env` in a `WeakMap` — RECOMMENDED.** The probe costs 24-29 ms
-  and an env's `PATH` does not change under it (Design 3). Matches the existing
-  `pathLocksFor` precedent (`path-locks.ts:84-92`).
-- **(b) Per call.** Simpler to reason about, +25 ms on every search — on a
-  183-step child that is ~4.5 s of pure probing, which is the disease this task
+- **(a) Cached per `env` in a `WeakMap` — RECOMMENDED**, with revision 1's
+  qualifications (M4): only a **definitive** answer is cached, the probe carries
+  no `ctx.signal`, `rg --version` replaces `command -v rg`, and F14 demotes the
+  cached engine. Measured probe cost: 30-38 ms, paid once per env.
+- **(b) Per call.** Simpler to reason about, +30-38 ms on every search — on a
+  183-step child that is ~6 s of pure probing, which is the disease this task
   cures. Rejected.
 
 **Q5 — `max_results` default 100 / byte bound 12000: right size?**
@@ -639,6 +1134,104 @@ list (this plan's Design 3), or `--no-ignore` on both for literal parity?**
 - **(c) 50 / 8000.** Cheapest per call; risks two searches where one would do,
   which costs more than the bytes saved.
 
+**Q6 — may a `permission: "none"` search name a `path` outside the workspace?
+(H7 — this is the one the plan never asked.)**
+
+The issue in one sentence: `fs_read` is unconfined and prompt-free too, but it
+reads a path the caller already **knows**; a recursive search **discovers** — so
+`search {path: "/Users/x", pattern: "BEGIN OPENSSH|AKIA"}` runs with **no
+prompt** and *finds* keys a model could not have named, and naming `~/.ssh` in
+`path` today would *lift* the hidden-entry prune (the "named in `path` is
+exempt" rule). Nothing on the `ExecutionEnvironment` contract exposes the
+workspace root (precondition 7), so this is a rule the pure module applies to
+the string, with `cwd` as the reference.
+- **(a) Refuse, lexically, in the pure module — RECOMMENDED.** Reject an
+  absolute `path`, and any `path` whose normalised form climbs out of `cwd` with
+  `..` — **except** when Q6(b)'s escape hatch applies. The message names the
+  rule and suggests a workspace-relative path. Two measured facts make this safe
+  to specify: neither engine follows a symlink *inside* the walk (no `-L`;
+  measured: `find` on a `loop -> ..` never enters it, rg likewise), and the
+  only symlink that is followed is the **argument** itself (`-H`, added for
+  parity with rg) — so a symlink *out* of the workspace is the one remaining
+  hole, closed by `realpath`-ing the argument when the env can (`pwd -P`), or by
+  refusing a `path` that is a symlink (`[ -L ]`, already probed in F3's
+  pre-check).
+- **(b) Refuse absolute, but keep `..` (and an explicit opt-out) for the
+  multi-root case — the alternative.** A pod/docker workspace is one root, but a
+  laptop session legitimately searches a sibling checkout (`../other-repo`), and
+  `attach`/`run` put the root somewhere the pure module cannot see. This option
+  keeps `..` but requires the *resolved* path to stay under `cwd` — the same
+  rule as (a) in practice, minus the absolute-path part, which is where the
+  `~/.ssh` case lives. Weak, unless the owner wants `../` to keep working.
+- **(c) Allow anything, and make confinement the *caller's* job (raise the tool
+  to `permission: "ask"` when `path` is absolute or escapes)** — the honest
+  fallback if the owner wants no new restriction: the tool stays
+  `permission: "none"` for relative paths and asks for anything else. Costs a
+  prompt the model may hit once per session, and couples the tool's permission
+  to its *input*, which the current `Tool` shape does not support
+  (`permission` is a constant, `tool.ts:154-181`) — it would need a new seam.
+- **My recommendation: (a)**, with the symlink argument resolved where the env
+  can and refused where it cannot. If Q1 lands on "everyone", (a) becomes
+  mandatory rather than merely recommended.
+
+**Q7 — what does a pattern the fallback cannot express do? (H1/H2 — translate,
+refuse, or retry literally?)**
+
+Measured divergence, one table (Context (b)): `\d+` matches *every line with a
+`d`* on BSD grep, **nothing** on GNU and busybox, digits on rg; `(?i)abc` works
+on BSD and rg, is a **warning + no match** on GNU (rc 1, easy to miss) and a hard
+error on busybox; `\p{L}` works only on rg. So "same tool on both paths" cannot
+be true for a regex, and a choice has to be made.
+- **(a) Translate the safe shorthands, refuse the rest with an actionable
+  message — RECOMMENDED.** `\d`/`\w`/`\s`/`\D`/`\W`/`\S` and `[:word:]` become
+  POSIX classes (measured identical to rg for `\w`, `\s`; **`\d` is the fix**,
+  not a nicety); `(?…`, `\p{…}`, `(?:`, lazy quantifiers, `\x`/`\u`, `{n,m}`
+  are refused with the engine named and two ways forward (`fixed_strings: true`,
+  or a POSIX class). The refusal is identical on both engines on purpose — a
+  tool that behaves differently by image is the bug being fixed. Cost: a pattern
+  rg could have matched is refused when rg *is* present; mitigated by the
+  message offering `fixed_strings`.
+- **(b) Translate, and on refusal retry **once** as a literal string with a
+  note — the "never fails" option.** No refusal ever reaches the model;
+  `(?i)abc` becomes a literal search for `(?i)abc` (usually 0 hits) plus
+  `[note: searched literally; this engine cannot express (?i)]`. Cheaper for the
+  model, but it can return a **plausible wrong answer** ("no matches") for a
+  pattern that meant something — exactly the failure H2 is about. Only if the
+  owner prefers never-erroring to never-lying.
+- **(c) Engine-as-is, and put the dialect in the tool description + the
+  header.** Smallest diff, no translation table to maintain; leaves the silent
+  `\d+` → nothing case in place on GNU/busybox (measured), which is the
+  divergence the review opened with. Rejected unless the owner accepts
+  "different tool depending on the image" as documented behaviour.
+- **My recommendation: (a).** Note it composes with Q1: the more agents get the
+  tool, the less acceptable a silently-different result becomes.
+
+**Q8 — the `glob` filter and the files-with-matches surface: add both? (H6)**
+
+The task exists to cut **steps**, so the question is whether two missing
+arguments cost more steps than one more field costs definition bytes. Measured:
+`rg --files -g '*.ts'` and `find -name '*.ts'` agree exactly; `rg --files -g
+'src/**/a*.ts'` matches **nothing** (so the field must be a basename glob, H5);
+`grep -l` and `rg -l` are POSIX-clean and agree on the fixture.
+- **(a) Add `glob` (basename) valid in **both** modes, and make `files` +
+  `pattern` mean files-with-matches — RECOMMENDED.** Covers the two commonest
+  queries that currently force extra steps: "`needle` in `*.ts` only" (without
+  it, docs/fixtures/lockfiles fill the 100 lines and the child re-searches) and
+  "which files contain X" (without it, a symbol with 400 hits shows only the
+  alphabetically-first directories and the child re-searches or falls back to
+  slices). Cost: one field, one more `shq` argument, one more refine, and a
+  third header shape. Context lines (`-C`) stay out — `fs_read path:start:end`
+  covers them.
+- **(b) Add `glob` only; keep `files` as glob-listing only.** Cheaper to
+  describe and test; leaves "which files contain X" answered by a truncated
+  content list plus (with revision 1) the per-file digest — which is *close*,
+  but a digest of 5 files is not a list of 40.
+- **(c) Neither; keep the revision-0 surface.** Smallest blast, and the
+  per-file digest added for M3 partially compensates. It keeps the two
+  most-common searches as two-step operations, which is the disease.
+- **My recommendation: (a).** The measured step cost of *not* having it is the
+  whole reason for the task; the extra definition is ~120 characters.
+
 ## Execution
 
 *— (empty: PLAN ONLY; the executor fills this)*
@@ -646,6 +1239,49 @@ list (this plan's Design 3), or `--no-ignore` on both for literal parity?**
 ## Review
 
 *— (empty: PLAN ONLY; a fresh context fills this)*
+
+## Revision 1 (response to design review)
+
+*— deepseek (tentacle --profile deepseek), 2026-11-11*
+
+Every finding is applied or argued. "Applied" means the Implementation text was
+replaced (not appended) and the change is traceable to a Design/Tests/Failure
+section; "argued" means the finding did not reproduce as stated, with the
+measurement named. Nothing in this table is a promise — the sections above are
+the plan.
+
+| # | finding (short) | change in this revision |
+|---|---|---|
+| **H1** | regex dialect (Rust vs ERE) unmentioned → silent wrong match | **Applied.** New `classifyPattern` in the pure module (Design 3c) with a measured three-class table (translate / refuse / pass): `\d`→`[0-9]`, `\w`, `\s`→POSIX classes; `(?…)`, `(?:`, `\p{}`, lazy, `\x`, `{n,m}` refused with the engine named + `fixed_strings` advice. Dialect stated in the tool description. Table added to T-S1 and a separate pure T-S8. Concedes the review's point *and* corrects one of its examples: `\bfoo\b` **works on all three** greps (measured), so it is passed through, not refused. Owner decision in **Q7**. |
+| **H2** | invalid regex reads as `no matches`; F14 would retry a parse error | **Applied.** F2/F3 rewritten: stderr is kept (`grep -s` replaces the whole-command `2>/dev/null`), the three grammars (`bad regex` / `Unmatched` / `parentheses not balanced` / `warning:` / `regex parse error`) are parsed, a parse error returns `isError: true` with the engine's text + "retry with `fixed_strings: true`", and **F14 explicitly excludes parse errors**. Measured: `find -exec {} +` returns **1** for both "no match" and "grep died", so rc alone cannot tell them apart — stderr is the only signal. Tested in T-S3(c). |
+| **H3** | `\| head -c` loses the exit code; `2>/dev/null` hides F3's message | **Applied.** Bounds step 1/2 rewritten: every command is `{ <walk> ; printf 'TENTACLE_RC=%s\n' "$?" >&2; } \| head -c 262145`, plus a POSIX existence pre-check `[ -f ] \|\| [ -d ] \|\| [ -L ]` exiting **3** with `TENTACLE_MISSING`. F3 rewritten around them. Measured on busybox/alpine/debian/BSD with the final shape (Context (c)); re-measurement of the *final* command is an explicit Review gate. Tested in T-S3(d). |
+| **H4** | busybox likely rejects `-I` → every search says "no matches"; probe must be mandatory | **Applied, with the premise corrected by measurement.** The capability probe is now **mandatory** and cached with the engine (Design 3a). But busybox does not *reject* `-I` — it **accepts and ignores** it (measured: a NUL file is searched and printed), which is worse than a rejection because there is no error to see. Hence `-I` is conditional on a live probe (`printf 'a\000needle' \| grep -I -q -e needle -` → rc 1 filters / rc 0 does not) and the parser also filters NUL-bearing lines. Live runs in `busybox:latest`, `alpine:3.20`, `debian:bookworm-slim` are in Context (a)–(g) and are the merge gate. |
+| **H5** | `files` mode is a different tool per engine (`src/**/a*.ts`, `!`, `ignore_case`) | **Applied.** `glob` is defined and **enforced** as a basename glob: `/`, `**`, a leading `!` and `..` are rejected by the schema with a message pointing at `path`; `ignore_case` maps to `--iglob` / `-iname` (both measured); `[[]id[]]` is the documented literal-`[` spelling (measured on all four engines). Measured `rg -g 'src/**/a*.ts'` → nothing, which is why the field is narrow. Tested in T-S5. |
+| **H6** | no `glob` in content mode; no "which files" answer; no per-file counts | **Applied.** `glob` added for both modes (Design, *Input schema*); `files` + `pattern` = files-with-matches (`rg -l` / `grep -l`, both measured POSIX-clean); on a count truncation a bounded `[more matches in: path n, …]` digest is appended from the already-buffered lines. Third header shape added. Tests in T-S1/T-S6. Owner decision in **Q8**. |
+| **H7** | `path` unconfined while `permission: "none"` — a discovery tool | **Applied as a question + a design.** Bounds step 0 and precondition 7 added; `permission: "none"` justified only inside the workspace; the "named in `path` is exempt" rule is now scoped **inside** the workspace; symlink argument is `-H`-followed and must be resolved/refused. **Owner decision in Q6**, with the reviewer's recommendation (refuse absolute / `..`) as option (a) and mine. |
+| **M1** | path quoting half-designed; `find` has no `--`; `-path` operand is a pattern | **Applied.** `./`-prefix on every relative path (measured: `find -dash.ts` fails on all three engines, `find ./-dash.ts` works); the `-path` guard operand is glob-escaped (measured: a hidden metachar root `.hid[x]` self-prunes to zero unescaped, works escaped, on busybox/alpine/debian/BSD; a non-hidden `app/[id]` root is unaffected — stated honestly rather than over-claimed); NUL/`\n`/`\r` rejected in `pattern` **and** `path`/`glob`; hostile **path** table added to T-S2 with its own mutations. |
+| **M2** | "result sets agree" over-claimed; `.gitignore` only inside a git repo; note points wrong way; Q3 vs Design contradiction | **Applied.** Contract restated as "same shape, bounds, ordering; result set best-effort; header names the engine" (Load-bearing assumption + Design 3). `--no-require-git` added (measured: rg 14.1.0 applies nothing without `.git` by default, everything with the flag; measured cost 24 vs 25 ms). Note wording changed to "may **differ**". Q3(a) reworded to fallback-only; Q3.1 removed as a live question (its answer was already the Design's). |
+| **M3** | raw-cap subset presented as "first N"; 300 KB line; `--sort path` reconsidered | **Applied.** A distinct `INCOMPLETE` marker when `raw.length === CAP`, trailing partial line dropped, non-fatal decode; rg gets `--max-columns 1200 --max-columns-preview` (measured: 300 KB line → 1234 bytes, other hits intact; without `--preview` → useless `[Omitted long matching line]`); `--sort path` **taken** — measured 11 ms (38→50 ms repo-wide), the earlier "45 %" does not reproduce. Tested in T-S6. |
+| **M4** | cache can be poisoned; F14 never demotes | **Applied.** Probe is `rg --version` (not `command -v rg`), carries **no** `ctx.signal` (own 5 s timeout), caches **only** a definitive answer (a rejection/timeout caches nothing), and F14 **overwrites the cache with `grep`** before its single retry. Tested in T-S3(a)(b); Q4 amended. |
+| **M5** | Q1 misses the permission angle | **Applied.** Q1 rewritten: `shell` is `permission: "ask"` (`builtins.ts:286`) so every grep is a prompt and unbounded output; recommendation flipped to **(a) everyone**, conditional on Q6. |
+| **M6** | T-S1 has no stated behaviour without `rg` | **Applied.** New "How the real-engine half runs in CI" block: the default suite runs the **fallback for real** (measured present on every platform) against a **recorded** rg transcript, so it **never skips** and needs no install; the recording is re-verified as a documented Execution/Review step. A `TENTACLE_SEARCH_RG` opt-in was considered and **rejected**: `scripts/test-env-guard.ts` strips every `TENTACLE_*` outside its keep-list (so it would need a guard change plus a test), and AGENTS §6 pins the baseline at *three* opt-in skips. Live container runs are a documented **Review gate**, not a suite member. |
+| **M7** | (a) `search .` vs `fs_edit a.ts` do not conflict; (b) F9 strips `\t`; (c) `exec` is not the env's only member | **Applied, all three.** (a) Design 4 now states the truth — `pathResource` is the basename (`path-locks.ts:47-51`), the keys differ, they may run concurrently, and why that is acceptable (atomic rename, no torn bytes). (b) F9 keeps `\t`. (c) Precondition 1 corrected to `exec`/`readFile`/`writeFile`/`spawnBackground` (`execution.ts:42-58`) with the `readFile` line cited for Design 3b. |
+
+**What this revision does not do** (deliberately, and visible): it does not pick
+Q6/Q7/Q8 — they are owner decisions with a recommendation each; it does not
+implement the `permission`-depends-on-input seam Q6(c) would need (that would be
+a `core` change, recommended against until the owner asks); and it does not add
+context lines (`-C`), which stay covered by `fs_read path:start:end`.
+
+**One review claim that did not reproduce, recorded so nobody "fixes" it again:**
+`\bfoo\b` is *not* a dialect break — measured on BSD 2.6.0-FreeBSD, busybox
+1.38.0, GNU 3.8 **and** rg 15.2.0, it matches `foo` and not `xfoo`/`fooX`. So it
+is passed through, not refused. Its cousin `\B` is also accepted by all three.
+(This is the kind of thing that only a run settles: the review reasoned from
+"ERE has no `\b`", and ERE *does* fix `\b` as a word boundary in practice on all
+these implementations.)
+
+*— deepseek (tentacle --profile deepseek), 2026-11-11*
 
 ## Design review
 
