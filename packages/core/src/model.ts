@@ -109,12 +109,22 @@ export interface Usage {
   readonly completionTokens: number;
 }
 
+/**
+ * Why a model's streamed reply ended, as the provider's own stop reason reads
+ * (docs/fix/truncated-reply-silent.md). `length`: the reply was CUT at the
+ * model's output limit (`finish_reason: "length"`, `max_tokens`, `refusal`);
+ * `stop`: it finished on its own; `tool_calls`: it asked for tools;
+ * `other`: the stream produced no stop reason at all — the body was cut, so
+ * the reply is incomplete data, not a short answer.
+ */
+export type ModelStopReason = "stop" | "length" | "tool_calls" | "other";
+
 /** A single event in the model's streamed response. */
 export type StreamEvent =
   | { readonly type: "text"; readonly delta: string }
   | { readonly type: "reasoning"; readonly delta: string }
   | { readonly type: "tool_call"; readonly toolCall: ToolCall }
-  | { readonly type: "done"; readonly usage?: Usage };
+  | { readonly type: "done"; readonly usage?: Usage; readonly stopReason?: ModelStopReason };
 
 export interface ChatRequest {
   readonly messages: readonly ChatMessage[];

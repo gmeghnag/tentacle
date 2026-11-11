@@ -145,6 +145,40 @@ export const DsmlLeakUpdateSchema = z.object({
 });
 
 /**
+ * The model's reply was CUT (docs/fix/truncated-reply-silent.md): `length` — it
+ * hit its output limit (`finish_reason: "length"`, `max_tokens`), so the answer
+ * on screen is incomplete and the loop is re-asking once; `cut` — the stream
+ * ended with no stop reason at all, so the turn fails (`turn_end{error}`).
+ *
+ * Its own display KIND, not a `context_note` reason, for the reason proved in
+ * docs/fix/deepseek-dsml-leak.md (Review MEDIUM-1): a new enum member of a
+ * KNOWN kind makes an older client report `malformed`. Display class, so no
+ * `PROTOCOL_VERSION` bump (AGENTS §7: a display kind is free to add).
+ */
+export const TruncatedReplySchema = z.object({
+  type: z.literal("truncated_reply"),
+  reason: z.enum(["length", "cut"]),
+  /**
+   * Whether the loop is re-asking the model once from where it stopped — the
+   * fact a frontend cannot derive: the re-ask budget is bounded, and a round
+   * that cuts again after it is spent reports `false`, so the notice stops
+   * promising a continuation that will not come (Review MEDIUM-2, the owner's
+   * own case). An extra field on a display kind: free, no bump.
+   */
+  retrying: z.boolean().optional(),
+});
+
+/**
+ * The turn is ending with NOTHING produced: the model returned an empty reply
+ * and the loop's bounded nudges ran out (docs/fix/truncated-reply-silent.md).
+ * Its own display kind, so an older client shows `unsupported` once instead of
+ * failing a known kind's schema. Nothing waits on it; display only.
+ */
+export const EmptyTurnSchema = z.object({
+  type: z.literal("empty_turn"),
+});
+
+/**
  * The model was sent a repaired copy of the session's history (invalid tool
  * arguments replaced by a marker, unanswered calls answered, stray tool
  * results left out; docs/feat/history-validity-invariant.md). The STORED
@@ -365,6 +399,8 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   SteerSchema,
   ContextNoteSchema,
   DsmlLeakUpdateSchema,
+  TruncatedReplySchema,
+  EmptyTurnSchema,
   HistoryRepairedSchema,
   ToolProgressSchema,
   ToolCallPhaseSchema,
@@ -414,6 +450,9 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   context_note: "display",
   // The DSML re-ask notice; the re-ask note rides the conversation itself.
   dsml_leak: "display",
+  // A cut reply / an empty turn: notices only, nothing waits on them.
+  truncated_reply: "display",
+  empty_turn: "display",
   // A notice; nothing waits on it (the repair is in the model's copy only).
   history_repaired: "display",
   // A label/meter on a running tool: skipping it hangs nothing (the result rides tool_call_update).

@@ -8,11 +8,13 @@
  *   - reasoning (`reasoning_content` or `reasoning`) → `reasoning`
  *   - incrementally-streamed tool calls, reassembled per index → `tool_call`
  *   - usage (when the server reports it)             → `done`
+ *   - `finish_reason` (`stop`/`length`/`tool_calls`) → `done.stopReason`
  */
 import type {
   ChatMessage,
   ChatRequest,
   ModelProvider,
+  ModelStopReason,
   StreamEvent,
   ToolDefinition,
   Usage,
@@ -162,6 +164,12 @@ export class OpenAIProvider implements ModelProvider {
     /** The visible text, accumulated only to check it for leaked DSML markup. */
     let answer = "";
     let sawToolCall = false;
+    /**
+     * The last `finish_reason` the server sent, normalised. Absent from the
+     * body's end means the stream was CUT, not finished (docs/fix/
+     * truncated-reply-silent.md): the caller must not present it as an answer.
+     */
+    let finishReason: ModelStopReason | undefined;
 
     for await (const data of parseSSE(res.body, request.signal)) {
       if (data === "[DONE]" || data.length === 0) {
@@ -204,6 +212,7 @@ export class OpenAIProvider implements ModelProvider {
         tools.add(delta.tool_calls);
       }
       if (choice.finish_reason) {
+        finishReason = normalizeFinishReason(choice.finish_reason);
         for (const call of tools.drain()) {
           sawToolCall = true;
           yield { type: "tool_call", toolCall: call };
@@ -227,8 +236,33 @@ export class OpenAIProvider implements ModelProvider {
       throw new DsmlToolCallLeakError(new TextEncoder().encode(answer).length);
     }
 
-    yield usage ? { type: "done", usage } : { type: "done" };
+    // No `finish_reason` at all: the body ended mid-reply (`parseSSE` returns
+    // quietly on EOF, `sse.ts`), which is missing data, not an answer — report
+    // it as "other" rather than letting it look like a finished one.
+    yield doneEvent(usage, finishReason ?? "other");
   }
+}
+
+/**
+ * The wire's `finish_reason` as the shared vocabulary. Anything unknown (a
+ * gateway's own value) is `"stop"`: it named a reason, so the body was not
+ * cut, and only `length`/`other` change what the loop does.
+ */
+function normalizeFinishReason(reason: string): ModelStopReason {
+  switch (reason) {
+    case "length":
+      return "length";
+    case "tool_calls":
+    case "function_call":
+      return "tool_calls";
+    default:
+      return "stop";
+  }
+}
+
+/** `done` with its optional fields only when they were measured. */
+function doneEvent(usage: Usage | undefined, stopReason: ModelStopReason): StreamEvent {
+  return usage ? { type: "done", usage, stopReason } : { type: "done", stopReason };
 }
 
 function buildPayload(

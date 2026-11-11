@@ -42,11 +42,29 @@ export const WireUsageSchema = z.object({
   completionTokens: z.number().int().nonnegative(),
 });
 
+/**
+ * Why a streamed reply ended, as the LAPTOP's provider saw it
+ * (docs/fix/truncated-reply-silent.md). Mirrors core's `ModelStopReason`, which
+ * cannot be imported here (protocol must not depend on core). Optional: an
+ * older laptop leaves it out, and the pod's loop then behaves exactly as it did
+ * before — an absent value is `undefined`, never a failed turn (AGENTS §7:
+ * adding an optional field is free, so `PROTOCOL_VERSION` does not bump).
+ *
+ * It must be ON THE WIRE: the pod-side agent runs the loop and decides from this
+ * fact alone, so stripping it made `run`/`attach` accept a cut reply as
+ * complete (Review HIGH-1).
+ */
+export const WireStopReasonSchema = z.enum(["stop", "length", "tool_calls", "other"]);
+
 export const WireStreamEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text"), delta: z.string() }),
   z.object({ type: z.literal("reasoning"), delta: z.string() }),
   z.object({ type: z.literal("tool_call"), toolCall: ModelToolCallSchema }),
-  z.object({ type: z.literal("done"), usage: WireUsageSchema.optional() }),
+  z.object({
+    type: z.literal("done"),
+    usage: WireUsageSchema.optional(),
+    stopReason: WireStopReasonSchema.optional(),
+  }),
 ]);
 export type WireStreamEvent = z.infer<typeof WireStreamEventSchema>;
 

@@ -20,6 +20,7 @@ import type {
   ChatMessage,
   ChatRequest,
   ModelProvider,
+  ModelStopReason,
   StreamEvent,
   ToolCall,
   ToolDefinition,
@@ -277,8 +278,30 @@ export class AnthropicProvider implements ModelProvider {
         completionTokens: completionTokens ?? 0,
       };
     }
-    yield usage ? { type: "done", usage } : { type: "done" };
+    // A cut TEXT reply is reported, not refused here (the call refusal above is
+    // the provider's own, because a partial call must never enter the history):
+    // the agent loop re-asks once and shows the notice
+    // (docs/fix/truncated-reply-silent.md). No `stop_reason` at all means the
+    // body was cut mid-stream, which the loop fails the turn on.
+    yield doneEvent(usage, stopReason === undefined ? "other" : normalizeStopReason(stopReason));
   }
+}
+
+/**
+ * Anthropic's `stop_reason` in the shared vocabulary: `max_tokens`/`refusal`
+ * CUT the reply (`TRUNCATING_STOP_REASONS`), `tool_use` asked for tools, and
+ * everything else (`end_turn`, `stop_sequence`, …) finished on its own.
+ */
+function normalizeStopReason(reason: string): ModelStopReason {
+  if (TRUNCATING_STOP_REASONS.has(reason)) {
+    return "length";
+  }
+  return reason === "tool_use" ? "tool_calls" : "stop";
+}
+
+/** `done` with its optional fields only when they were measured. */
+function doneEvent(usage: Usage | undefined, stopReason: ModelStopReason): StreamEvent {
+  return usage ? { type: "done", usage, stopReason } : { type: "done", stopReason };
 }
 
 /** A complete `tool_call` event from an accumulated (or flushed) tool_use block. */

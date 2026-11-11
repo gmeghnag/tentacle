@@ -249,6 +249,13 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
     // older client skips it as `unsupported`, docs/fix/deepseek-dsml-leak.md).
     case "dsml_leak":
       return { type: "dsml_leak", text: event.text };
+    // A reply was cut (and the loop re-asks once within `length`) / a turn ended
+    // with nothing at all: notices only (docs/fix/truncated-reply-silent.md).
+    // `retrying` rides along: only the loop knows whether a re-ask is left.
+    case "truncated_reply":
+      return { type: "truncated_reply", reason: event.reason, retrying: event.retrying };
+    case "empty_turn":
+      return { type: "empty_turn" };
     // The model was sent a repaired copy of the history; display only, and the
     // daemon keeps only the first per session (docs/feat/history-validity-invariant.md).
     case "history_repaired":

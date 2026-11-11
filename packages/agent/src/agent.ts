@@ -29,6 +29,8 @@ import {
   HeuristicTokenCounter,
   type JobController,
   type ModelProvider,
+  type ModelStopReason,
+  ModelStreamCutError,
   NOTE_KIND,
   type PermissionRequester,
   type TokenCounter,
@@ -193,6 +195,15 @@ const MAX_HOOK_CONTINUES = 3;
 const CONTINUE_NUDGE = "Continue with the task.";
 /** Max re-asks per turn after the model leaked a tool call as DSML text (never unbounded). */
 const MAX_DSML_REASKS = 1;
+/**
+ * Max re-asks per turn after a reply was CUT at the model's output limit: ONE,
+ * because a truncation caused by a full context re-truncates at once — a second
+ * would loop (docs/fix/truncated-reply-silent.md, Q1a; the `dsml_leak` shape).
+ */
+const MAX_TRUNCATION_REASKS = 1;
+/** The internal note that re-asks a model whose reply was cut at its output limit. */
+const TRUNCATION_REASK_NOTE =
+  "Your previous reply was cut off at the output limit. Continue from exactly where it stopped — no preamble, no repetition of what you already wrote.";
 /** Result recorded for a tool call skipped because the user cancelled mid-round,
  * so the assistant's `toolCalls` stay answered in the history. */
 const CANCELLED_TOOL_NOTE = "Cancelled by the user before this tool ran.";
@@ -400,6 +411,24 @@ export type AgentEvent =
   // reason: it crosses the wire as its own update KIND, so an older client
   // skips it as `unsupported` instead of failing its schema (Review MEDIUM-1).
   | { readonly type: "dsml_leak"; readonly text: string }
+  // The model's reply was CUT at its output limit (`finish_reason: "length"`,
+  // `max_tokens`) — or its stream was cut outright (`cut`: no stop reason at
+  // all, which the loop turns into a failed turn). Its own display KIND, for
+  // the same reason as `dsml_leak` (docs/fix/truncated-reply-silent.md).
+  //
+  // `retrying` is what the LOOP knows and the frontends cannot guess: whether
+  // it is re-asking the model once from where it stopped. A re-ask that cuts
+  // again reports `false`, so the user is told the recovery failed instead of
+  // being promised a continuation that never comes (Review MEDIUM-2).
+  | {
+      readonly type: "truncated_reply";
+      readonly reason: "length" | "cut";
+      readonly retrying: boolean;
+    }
+  // The turn is ending with NOTHING produced: the model kept returning an empty
+  // reply and the loop's bounded nudges ran out. Before this, the turn ended
+  // `end_turn` in complete silence and the TUI looked hung. Display only.
+  | { readonly type: "empty_turn" }
   // The model was sent a repaired copy of the history
   // (docs/feat/history-validity-invariant.md): invalid tool arguments replaced
   // by a marker, unanswered calls answered, stray tool results left out. The
@@ -1110,6 +1139,14 @@ export class Agent {
     let budgetFrom = 0;
     /** Re-asks spent on a DSML-leaked tool call, per turn (`MAX_DSML_REASKS`). */
     let dsmlReasks = 0;
+    /** Re-asks spent on a reply cut at the output limit, per turn (`MAX_TRUNCATION_REASKS`). */
+    let truncationReasks = 0;
+    /**
+     * Whether ANY of this turn's replies carried text. A later empty round must
+     * not report `empty_turn` then: the turn did produce something (a cut reply's
+     * text is kept, owner Q1a), so the honest end is silence on that count.
+     */
+    let turnSaidSomething = false;
     for (let iteration = 0; iteration - budgetFrom < maxIterations; iteration++) {
       if (signal?.aborted) {
         this.notifyTurnEnd(sessionId, "cancelled");
@@ -1153,6 +1190,8 @@ export class Agent {
 
       let text = "";
       const toolCalls: ToolCall[] = [];
+      /** Why the provider's stream ended; `undefined` from a provider that does not say. */
+      let stopReason: ModelStopReason | undefined;
       this.notifyModelRequest(sessionId, iteration, request);
       try {
         for await (const event of this.config.model.stream(request)) {
@@ -1168,6 +1207,7 @@ export class Agent {
               toolCalls.push(event.toolCall);
               break;
             case "done":
+              stopReason = event.stopReason;
               if (event.usage) {
                 this.anchorContext(messages, sent, event.usage);
                 yield { type: "usage", usage: event.usage };
@@ -1219,6 +1259,51 @@ export class Agent {
         return;
       }
 
+      // A stream with NO stop reason at all ended mid-reply: missing data, not a
+      // short answer (owner Q2a), so the turn FAILS. The text already shown is
+      // kept in the history, as in the provider-throw path below — this is a
+      // decision on a completed stream, not a throw from the provider
+      // (docs/fix/truncated-reply-silent.md).
+      if (stopReason === "other") {
+        // Never retried: a stream that was cut is missing data, not a short
+        // answer, so no re-ask follows (owner Q2a).
+        yield { type: "truncated_reply", reason: "cut", retrying: false };
+        if (text !== "") {
+          messages.push({ role: "assistant", content: text });
+        }
+        throw new ModelStreamCutError("no-stop-reason", text.trim() !== "");
+      }
+
+      // A reply cut at the output limit (`finish_reason: "length"`) is real work,
+      // just unfinished. Never run its tool call: the arguments may be partial
+      // JSON (measured: 17 rounds on one cut call), so it is refused exactly as
+      // `AnthropicProvider` already refuses one (case 5).
+      if (stopReason === "length" && toolCalls.length > 0) {
+        // Refused outright, so no re-ask follows either.
+        yield { type: "truncated_reply", reason: "length", retrying: false };
+        throw new ModelStreamCutError("cut-tool-call", text.trim() !== "", {
+          toolCalls: toolCalls.length,
+          argumentBytes: toolCalls.reduce((n, call) => n + call.arguments.length, 0),
+        });
+      }
+
+      // A reply cut at the output limit: keep whatever text it managed as the
+      // answer (it is real work, just unfinished), show the notice, and re-ask
+      // ONCE from where it stopped (owner Q1a — the bounded `dsml_leak` shape).
+      // With NO text either, the same one re-ask applies: an empty `length`
+      // round is not the model's choice to say nothing (case 3).
+      const cutByLength = stopReason === "length";
+      if (cutByLength) {
+        // Only the loop knows whether a re-ask is still available: a bounded
+        // budget may already be spent, and a frontend guessing it from the
+        // reason promised a continuation that never came (Review MEDIUM-2).
+        yield {
+          type: "truncated_reply",
+          reason: "length",
+          retrying: truncationReasks < MAX_TRUNCATION_REASKS,
+        };
+      }
+
       messages.push(
         toolCalls.length > 0
           ? { role: "assistant", content: text, toolCalls }
@@ -1228,6 +1313,9 @@ export class Agent {
       // Any real progress (text or a tool call) resets the stall counter.
       if (toolCalls.length > 0 || text.trim() !== "") {
         emptyRounds = 0;
+      }
+      if (text.trim() !== "") {
+        turnSaidSomething = true;
       }
       // A round with tool calls is kept as is: commit it. (Not without tool
       // calls: an empty round's message is popped again below.)
@@ -1296,6 +1384,26 @@ export class Agent {
         // bounded number of times, rather than ending the turn with nothing
         // (which forced the user to type "go on" to un-stick it). The nudge is
         // internal: it is not surfaced as a `steer` event.
+        //
+        // A CUT reply (`length`) is not the model's choice to stop: whatever it
+        // managed is the answer (text) or nothing at all (empty), and either way
+        // it gets ONE re-ask from where it stopped — not the stall nudge, so a
+        // cut round never spends `MAX_EMPTY_CONTINUES`. Bounded to ONE: a
+        // truncation caused by a full context re-truncates at once, so a second
+        // would loop. The `truncated_reply` notice above already told the user.
+        if (cutByLength && truncationReasks < MAX_TRUNCATION_REASKS) {
+          truncationReasks++;
+          if (text.trim() === "") {
+            messages.pop(); // drop the empty assistant turn; keep history clean
+          }
+          messages.push({ role: "user", content: TRUNCATION_REASK_NOTE });
+          yield { type: "context_note", text: TRUNCATION_REASK_NOTE, reason: "continue" };
+          // The re-ask replaces the cut round, not the turn's budget for real
+          // work: `budgetFrom` moves WITH the iteration, so the next round costs
+          // what this one would have (the `context_reset` shape, one step).
+          budgetFrom++;
+          continue;
+        }
         if (text.trim() === "" && emptyRounds < MAX_EMPTY_CONTINUES) {
           emptyRounds++;
           messages.pop(); // drop the empty assistant turn; keep history clean
@@ -1304,6 +1412,13 @@ export class Agent {
             yield { type: "context_note", text: CONTINUE_NUDGE, reason: "continue" };
           }
           continue;
+        }
+        // Nothing was produced and nothing is left to try: SAY so. Before this
+        // the turn ended in complete silence and the TUI looked hung
+        // (`agent4.ts`: 3 model calls, no user-visible event at all). Only when
+        // the WHOLE turn said nothing — a cut reply's text was already shown.
+        if (text.trim() === "" && !turnSaidSomething) {
+          yield { type: "empty_turn" };
         }
         yield { type: "turn_end", reason: "end_turn" };
         return;

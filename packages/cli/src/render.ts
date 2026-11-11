@@ -4,7 +4,13 @@
  * whatever it returns.
  */
 import type { AgentEvent } from "@tentacle/agent";
-import { describeRepairs, toolLabel } from "@tentacle/core";
+import {
+  type TruncationReason,
+  describeEmptyTurn,
+  describeRepairs,
+  describeTruncation,
+  toolLabel,
+} from "@tentacle/core";
 
 export function render(event: AgentEvent): string {
   switch (event.type) {
@@ -57,6 +63,15 @@ export function render(event: AgentEvent): string {
       // The reply was refused as a leaked tool call and the model re-asked: the
       // user must know why their answer was dropped (docs/fix/deepseek-dsml-leak.md).
       return `\n${event.text}\n`;
+    case "truncated_reply":
+      // A partial answer is never presented as a complete one. `AnswerSplit`
+      // owns the per-turn dedupe and the "was anything shown?" fact, so this
+      // arm (the raw per-event renderer) names the conservative case.
+      return `\n[truncated] ${describeTruncation(event.reason, { answered: true, retrying: event.retrying })}\n`;
+    case "empty_turn":
+      // The turn produced nothing: on stderr with the rest of the trace, so
+      // stdout stays clean data while the user still learns why.
+      return `\n[empty turn] ${describeEmptyTurn()}\n`;
     case "history_repaired":
       // Once per session: the model was sent a repaired copy, the saved
       // session is unchanged (docs/feat/history-validity-invariant.md).
@@ -64,6 +79,29 @@ export function render(event: AgentEvent): string {
     case "turn_end":
       return event.reason === "end_turn" ? "\n" : `\n[stopped: ${event.reason}]\n`;
   }
+}
+
+/**
+ * The two facts a `truncated_reply` trace line needs: the loop's own `retrying`
+ * (never derived from the reason) and whether this turn's answer reached stdout.
+ */
+export interface TruncationNotice {
+  readonly reason: TruncationReason;
+  readonly retrying: boolean;
+  readonly answered: boolean;
+}
+
+/**
+ * The `[truncated]` trace line, with the ONE fact the renderer cannot know:
+ * whether this turn had already written an answer (docs/fix/truncated-reply-silent.md).
+ * `retrying` comes from the EVENT, never from the reason: the loop's re-ask
+ * budget may already be spent (Review MEDIUM-2).
+ */
+export function truncationNotice(event: TruncationNotice): string {
+  return `\n[truncated] ${describeTruncation(event.reason, {
+    answered: event.answered,
+    retrying: event.retrying,
+  })}\n`;
 }
 
 /**
@@ -114,6 +152,18 @@ export class AnswerSplit {
    * repaired round (docs/feat/history-validity-invariant.md).
    */
   private repairNoticed = false;
+  /**
+   * The `truncated_reply` notice already shown for THIS turn, keyed
+   * `reason/retrying`. The reducer's own rule, one layer up
+   * (docs/fix/truncated-reply-silent.md): a re-asked round cuts again and repeats
+   * its cause, and the user needs the fact once — but when the re-ask budget is
+   * spent the SECOND fact is a different one (`retrying: false`), so it gets its
+   * own line (Review MEDIUM-2). Reset by `turn_end`, so the next turn may say it
+   * again.
+   */
+  private truncationNoticed: string | null = null;
+  /** Whether this turn's model text reached stdout (see `truncationNoticed`). */
+  private turnAnswered = false;
 
   /**
    * `shared`: stdout and stderr are the SAME terminal, so the answer moves the
@@ -139,10 +189,13 @@ export class AnswerSplit {
       if (event.delta !== "") {
         out = `${this.traced && !this.outCursorAtLineStart ? "\n" : ""}${event.delta}`;
         this.traced = false;
+        this.turnAnswered = true;
       }
     } else if (event.type === "turn_end") {
       out = this.outCursorAtLineStart ? "" : "\n";
       err = event.reason === "end_turn" ? "" : `[stopped: ${event.reason}]\n`;
+      this.truncationNoticed = null;
+      this.turnAnswered = false;
     } else {
       if (event.type === "history_repaired") {
         // Once per session: a later repaired round of the same run stays quiet.
@@ -150,6 +203,28 @@ export class AnswerSplit {
           return { out: "", err: "" };
         }
         this.repairNoticed = true;
+      }
+      if (event.type === "truncated_reply") {
+        // Once per TURN for the SAME fact, and honest about whether an answer
+        // was on screen. The key is `(reason, retrying)`: a re-asked round that
+        // cuts again is a NEW fact ("no further retry"), not a repeat of the
+        // first one (Review MEDIUM-2) — so it must not be dropped.
+        const key = `${event.reason}/${event.retrying}`;
+        if (this.truncationNoticed === key) {
+          return { out: "", err: "" };
+        }
+        this.truncationNoticed = key;
+        err = this.freshLine(
+          truncationNotice({
+            reason: event.reason,
+            retrying: event.retrying,
+            answered: this.turnAnswered,
+          }),
+        );
+        if (err !== "") {
+          this.traced = true;
+        }
+        return { out, err };
       }
       err = this.freshLine(render(event));
       if (err !== "") {
