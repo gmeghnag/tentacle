@@ -25,6 +25,14 @@ import { type ThemeSetting, themeProbeWasLate } from "./theme.ts";
 
 export interface TuiOptions {
   readonly model: string;
+  /**
+   * The name to PAINT for the model, when it is not `model` itself: a `connect`
+   * session's daemon runs its own model, and the TUI learns it at `initialize`
+   * (docs/fix/connect-model-error-drops-connection.md round 2). `model` stays
+   * the semantic value (`"remote"` still means "the daemon's"), which the error
+   * hint and every other decision read.
+   */
+  readonly modelLabel?: string;
   readonly cwd: string;
   readonly contextWindow?: number;
   /** In a container/pod: the status bar's badge (`engine-runtime`'s laptop-side facts). */
@@ -138,6 +146,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         {...(agent ? { agent } : {})}
         {...(options.createSession ? { createSession: options.createSession } : {})}
         model={options.model}
+        {...(options.modelLabel !== undefined ? { modelLabel: options.modelLabel } : {})}
         cwd={options.cwd}
         {...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {})}
         {...(options.target ? { target: options.target } : {})}

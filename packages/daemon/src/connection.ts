@@ -449,7 +449,21 @@ export class Connection {
     return {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: { tools: true, permissions: true },
-      ...(this.host.identity ? { agentInfo: { version: this.host.identity.tentacle } } : {}),
+      ...(this.host.identity
+        ? {
+            agentInfo: {
+              version: this.host.identity.tentacle,
+              // The daemon's OWN model, for a client's display: a name and a
+              // window, never an id or a key (AGENTS §7).
+              ...(this.host.modelInfo
+                ? {
+                    model: this.host.modelInfo.name,
+                    contextWindow: this.host.modelInfo.contextWindow,
+                  }
+                : {}),
+            },
+          }
+        : {}),
     };
   }
 

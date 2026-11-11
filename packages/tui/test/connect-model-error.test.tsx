@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { PermissionBroker } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { loadConfig } from "../../cli/src/config.ts";
+import { connectTui } from "../../cli/src/connect.ts";
 import { startDaemon } from "../../cli/src/serve.ts";
 import { RemoteClient, webSocketChannelFactory } from "../../client/src/index.ts";
 import { App } from "../src/App.tsx";
@@ -149,4 +150,50 @@ test("Esc escapes a hung model call; the next message runs once the model is bac
   expect(recovered).toContain("recovered");
   expect(recovered).not.toContain("Working…");
   app.unmount();
+}, 30_000);
+
+// --- round 2: the daemon's OWN model is what the screen shows ---------------
+// Item 1 (the ctx meter's max) and item D (the input rule's name). The real
+// stack, driven the way `connect` drives it: `connectTui` reads `initialize`
+// and hands the TUI the daemon's own name + window. Mutations: (a) `connect.ts`
+// passes nothing (`servedModel` → `{}`) → the rule reads `remote` and the max
+// `128k`; (b) `App` paints `model` instead of `shownModel` → `remote` again.
+test("the ctx meter and the input rule show the serve's own model and window", async () => {
+  dir = await mkdtemp(join(tmpdir(), "connect-served-model-"));
+  process.env.TENTACLE_CONFIG_DIR = join(dir, "config");
+  const api = Bun.serve({ port: 0, fetch: () => say("hi") });
+  stops.push(() => api.stop(true));
+  // The DAEMON's own model config: its window is 200000, its name `served-m`.
+  const config = {
+    ...(await loadConfig({ cwd: dir })),
+    provider: "openai" as const,
+    baseURL: `http://127.0.0.1:${api.port}/v1`,
+    model: "served-m",
+    apiKey: "k",
+    contextWindow: 200000,
+  };
+  const handle = await startDaemon(config, { host: "127.0.0.1", port: 0 });
+  stops.push(() => handle.stop());
+  // One real socket; `connectTui` does the dial, `initialize`, and the mount.
+  const dial = webSocketChannelFactory(handle.url, {});
+  let frame = "";
+  await connectTui({ url: handle.url }, () => {}, {
+    dial: () => dial,
+    startTui: async (_agent, options) => {
+      const instance = render(<App {...options} />);
+      stops.push(() => instance.unmount());
+      await delay(500);
+      instance.stdin.write("hello");
+      await delay(60);
+      instance.stdin.write("\r");
+      await delay(1500);
+      frame = strip(instance.lastFrame() ?? "");
+    },
+  });
+  // The input rule names the daemon's model, never `remote`.
+  expect(frame).toContain("served-m");
+  expect(frame).not.toContain(" remote ");
+  // The meter's max is the daemon's window, never the laptop's default 128k.
+  expect(frame).toContain("/200k");
+  expect(frame).not.toContain("/128k");
 }, 30_000);

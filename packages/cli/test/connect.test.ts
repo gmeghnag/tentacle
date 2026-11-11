@@ -9,7 +9,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
 import { DomainErrorCode, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
-import { bufferedErrorSink, connectTui, tlsTrustHint } from "../src/connect.ts";
+import { bufferedErrorSink, connectTui, servedModel, tlsTrustHint } from "../src/connect.ts";
 import { resolveTls } from "../src/flags.ts";
 import { APP_VERSION } from "../src/version.ts";
 
@@ -746,5 +746,49 @@ describe("connect: TLS trust passthrough + insecure warning (docs/feat/client-tl
       wakePending: undefined,
       wakeHanded: undefined,
     });
+  });
+});
+
+describe("servedModel (the daemon's own model, docs/fix/connect-model-error round 2)", () => {
+  const handshake = (agentInfo?: unknown) =>
+    ({ protocolVersion: 22, agentCapabilities: {}, ...(agentInfo ? { agentInfo } : {}) }) as never;
+
+  test("a name and a window are taken as reported", () => {
+    expect(
+      servedModel(handshake({ version: "1", model: "served-m", contextWindow: 200000 })),
+    ).toEqual({ label: "served-m", contextWindow: 200000 });
+  });
+
+  test("no facts (an older daemon, a pod) → nothing, so the TUI keeps its defaults", () => {
+    expect(servedModel(handshake({ version: "1" }))).toEqual({});
+    expect(servedModel(handshake())).toEqual({});
+  });
+
+  // A daemon is a peer: the label is made ONE line and capped before Ink sees it
+  // (the wire's `line(128)` is the other gate). Mutation: pass `info.model` raw →
+  // the escape sequence survives.
+  test("a hostile label is flattened and capped", () => {
+    const served = servedModel(
+      handshake({
+        version: "1",
+        model: `\u001b[31mevil\nname ${"x".repeat(200)}`,
+        contextWindow: 1000,
+      }),
+    );
+    expect(served.label).not.toContain("\u001b");
+    expect(served.label?.length).toBeLessThanOrEqual(64);
+  });
+
+  // A window with no name is not a fact we can attribute: it is dropped whole.
+  test("a window without a name is dropped", () => {
+    expect(servedModel(handshake({ version: "1", contextWindow: 200000 }))).toEqual({});
+  });
+
+  test("a nonsense window is ignored, the name kept", () => {
+    for (const bad of [0, -1, 1.5]) {
+      expect(servedModel(handshake({ version: "1", model: "m", contextWindow: bad }))).toEqual({
+        label: "m",
+      });
+    }
   });
 });

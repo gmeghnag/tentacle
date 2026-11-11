@@ -410,3 +410,234 @@ passes had not. One loop was caught and broken: `rg -rn` was silently
 text) were all executed, never reasoned.
 
 
+
+## Implementation — round 2
+
+*— deepseek (tentacle --profile deepseek), 2026-11-11*
+
+Round 1 fixed whose *error text* a client sees. Round 2 fixes whose *model facts*
+the `connect` TUI shows, and answers the carried-`contextWindow` question
+(`TODO.md`: `fix/connect-ctx-window` folded in, plus item D of
+`fix/connect-functest-batch`).
+
+### Load-bearing assumption
+
+**The `serve` daemon and its clients disagree about which model is running, and
+the daemon is the only side that knows.** Proven by probe (real `startDaemon`,
+real `RemoteClient`, real `App`, daemon window 200000, laptop env
+`TENTACLE_CONTEXT_WINDOW=71680`):
+
+```
+initialize: {"protocolVersion":22,"agentCapabilities":{…},"agentInfo":{"version":"dev"}}
+─── remote ─                 ← the input rule (item D)
+ws://127.0.0.1:57144 · ctx ░░░░░░░░░░ ~2% (~2.7k/128k)     ← the meter (item 1)
+```
+
+`128k` is `App`'s own default (`packages/tui/src/App.tsx:591`) — `connect.ts`
+passes no `contextWindow` at all (`packages/cli/src/connect.ts:217` passes only
+`model: "remote"`), and `remote` is a *magic* string, not a name. The daemon's
+window never crosses the wire: `InitializeResultSchema` carries only
+`protocolVersion`, `agentCapabilities` and `agentInfo{version}`
+(`packages/protocol/src/session.ts:183-188`), and `SessionHost` has no model fact
+to report (`packages/daemon/src/session-host.ts:198` is `identity` only).
+
+### Preconditions (verified here)
+
+- **`agentInfo` is the right existing field to extend.** It is the daemon's own
+  facts, sent once per connection at `initialize` — before Ink mounts and before
+  any session exists (a `connect` session is created lazily at the first prompt,
+  `packages/cli/src/connect.ts:219-224`), which is exactly when the meter needs
+  it. `OpenResult` is per-session and too late (`session.ts:808`).
+- **`agentInfo` is built from the host in one place**
+  (`packages/daemon/src/connection.ts:452`), and `serve` is the only daemon that
+  sets `identity` from a host whose model is its own (`packages/cli/src/serve.ts:207`);
+  the pod (`serve.ts:517`) and the worker (`packages/cli/src/worker.ts:109`)
+  also set it, so the model facts are a separate option, not part of
+  `DaemonIdentity`.
+- **A carried `contextWindow` is honoured by ONE code path, the pod's.**
+  `applyCarried` has exactly two call sites, both in `serve.ts` and both in the
+  `--model-proxy` (pod) agent factory (`packages/cli/src/serve.ts:428`, `:521`);
+  the `serve` host builds each session's agent from its OWN config
+  (`serve.ts:183-196`) and never sees `session/open.settings`. A settings sync on
+  `serve` returns `{applied: false}` because its factory reports no
+  `settingsReport` (`packages/daemon/src/session-host.ts:1014-1026`).
+- **`connect` already sends no `settings` at all**, pinned by
+  `packages/cli/test/connect.test.ts:188` ("connect never sends `settings`"), so
+  item 2's answer is structural, not accidental.
+- The daemon's effective window is its `config.contextWindow`: it is what the
+  context line the model sees is computed against
+  (`packages/cli/src/wiring.ts:496-500` → `packages/agent/src/agent.ts:1422`).
+- `model` in the TUI is not just a label: `App.tsx:2015` tests
+  `model === "remote"` to decide the daemon's-own-model hint (round 1's fix). The
+  daemon's name therefore needs its OWN prop — overloading `model` would silently
+  undo round 1.
+
+### Design
+
+1. **The daemon reports its model facts, as a NAME and a number.** Extend
+   `agentInfo` (additive, display-only):
+
+   ```ts
+   agentInfo: z.object({
+     version: z.string(),
+     /** This daemon's own model, for display — a bounded line, never an id, a URL or a key. */
+     model: line(128).optional(),
+     /** The window that model counts against (what its context line uses). */
+     contextWindow: z.number().int().positive().max(999_999_999).optional(),
+   }).optional()
+   ```
+
+   `line()` (`packages/protocol/src/text-line.ts`) is the existing "display text
+   from a maybe-hostile peer" type: non-empty, bounded, no control characters.
+   Not `ModelNameSchema`: a real model string (`rits/deepseek-ai/DeepSeek-…`) is
+   not `[A-Za-z0-9_-]`.
+
+   `SessionHostOptions.modelInfo?: { name: string; contextWindow: number }`
+   (`session-host.ts`, beside `identity`) → `Connection.initialize` spreads it
+   into `agentInfo` (`connection.ts:452`). `serve`'s `reloadedHost` passes
+   `{ name: config.model, contextWindow: config.contextWindow }` — its own
+   config, never the client's. Pod and worker pass nothing: a pod's model is the
+   LAPTOP's (AGENTS §7, reverse tunnel) and `connect` never meets one, so the
+   field stays absent there and the TUI keeps today's default.
+
+   **No `PROTOCOL_VERSION` bump**: an added OPTIONAL field inside `agentInfo`,
+   which is a strip schema — an older client drops it and shows today's
+   `128k`/`remote`. Nothing mandatory, nothing blocking, no changed meaning.
+
+2. **`connect` hands the daemon's facts to the TUI.** `connectTui` keeps the
+   `initialize` result (today discarded at `connect.ts:203`) and passes
+   `contextWindow` + a NEW `modelLabel` to `startTui`. The label is sanitised at
+   the client (`oneLine` + cap, the `untrustedText` rule) before it can reach the
+   ink tree — a daemon is not to be trusted with terminal control.
+
+3. **The TUI uses the label for display and keeps `model` for semantics.**
+   `TuiOptions.modelLabel?: string` (`run.tsx`) → `AppProps.modelLabel?`
+   (`App.tsx`); `App` derives `shownModel = modelLabel ?? model` and uses it for
+   the input rule (`App.tsx:4013-4014`) and `/model` (`App.tsx:2980`) only.
+   `modelErrorNotice(error, model === "remote")` is untouched.
+
+4. **Item 2 needs no fix — it needs a pin.** `connect` sends no settings
+   (already pinned) and a `serve` daemon builds every agent from its own config,
+   so its context line, its warns and its `/compact` threshold are its own
+   window. Carrying it is CORRECT where it does apply (a pod `--model-proxy`
+   daemon: there the laptop's model IS the model). The regression test drives the
+   real stack with a client that DOES carry a laptop `contextWindow` (the pod
+   shape) and asserts the `serve` daemon's request still says its own window.
+
+### Files
+
+- `packages/protocol/src/session.ts` — `agentInfo.model`, `agentInfo.contextWindow`.
+- `packages/protocol/schema/protocol.json` — regenerated (`bun run schema:export`).
+- `packages/daemon/src/session-host.ts` — `SessionHostOptions.modelInfo` + field.
+- `packages/daemon/src/connection.ts` — `initialize` spreads `modelInfo`.
+- `packages/cli/src/serve.ts` — `modelInfo` on the `serve` host only.
+- `packages/cli/src/connect.ts` — keep the handshake result, pass `contextWindow` + `modelLabel`.
+- `packages/tui/src/run.tsx`, `packages/tui/src/App.tsx` — `modelLabel`, `shownModel`.
+- Tests: `packages/cli/test/connect-model-error.test.ts` (real serve+connect:
+  facts on the wire, the carried-window pin), `packages/tui/test/connect-model-error.test.tsx`
+  (the frame: `200k` and the name), `packages/daemon/test/integration.test.ts`
+  (`agentInfo`'s new fields; absent without `modelInfo`).
+- `CHANGELOG.md` `[Unreleased] → Fixed`.
+
+### Failure modes
+
+- **A daemon that reports nothing** (older, pod, worker): the field is absent →
+  `connect` passes nothing → the TUI shows exactly what it shows today (`128k`,
+  `remote`). No half-state.
+- **A hostile label** (`\x1b[…`, 4 KB): `line(128)` rejects it at the peer's parse
+  (`modelInfo` is the daemon's, but the client validates), and `connect`
+  sanitises again with `oneLine` + a cap before it reaches Ink (§7: one gate each
+  side).
+- **A window of 0 / negative / absurd**: refused by the schema; the client falls
+  back to its default rather than dividing by zero (the meter's own guard,
+  `status-line.ts:158-175`).
+- **A reconnect after the mount**: `initialize` runs again on the redial, but the
+  TUI keeps the facts it mounted with. Acceptable and documented: a `serve`
+  daemon's own model config does not change under a live process (`tentacle
+  config` writes take effect at its next start).
+- **Item 2's real risk** — carrying `contextWindow` to a daemon that uses its own
+  model — is a regression PIN, not a fix: the pod path must keep honouring it.
+
+### Tests
+
+Red before green on the real `serve` + `connect` stack for items 1 and 3, and a
+TUI frame for both. Item 2's test is green-before/after by construction (nothing
+changes); its non-vacuity is shown by mutation (`applyCarried` wired into the
+serve factory → the assertion fails).
+
+## Execution — round 2
+
+*— deepseek (tentacle --profile deepseek), 2026-11-11*
+
+### What was done, in order
+
+0. **`git merge main` first** (main was at 22): one conflict, `CHANGELOG.md`
+   `[Unreleased] → Fixed` (this branch's round-1 entries vs. main's new ones) —
+   kept both blocks, both in the same section. Merge commit `60d2fce`; the tree
+   gated after it (see Gate).
+1. **Probed the real stack before touching code** (`.tentacle/tmp/connect-model-error/probe1.test.tsx`):
+   real `startDaemon` with `contextWindow: 200000`, real `RemoteClient`, real
+   `App`, laptop env at 71680. The frame showed `ctx …/128k` and `─── remote ─`,
+   and `initialize` carried `agentInfo{version}` only. Both round-2 symptoms and
+   the absence of any model fact on the wire, measured — not inferred.
+2. **Protocol**: `agentInfo.model` (`line(128)`) and `agentInfo.contextWindow`
+   (optional, positive, ≤ 999999999) — `packages/protocol/src/session.ts`.
+   `bun run schema:export`: `protocol.json` +11 lines, `x-protocol-version` still
+   22.
+3. **Daemon**: `SessionHostOptions.modelInfo` + the host's field
+   (`session-host.ts`), spread into `agentInfo` by `Connection.initialize`
+   (`connection.ts`). **`serve` only** passes it (`serve.ts`, its own
+   `config.model` + `config.contextWindow`); the pod and the worker pass nothing.
+4. **Client**: `servedModel(handshake)` (new, pure, exported) in `connect.ts` —
+   one line + a 64-cell cap (`oneLine`, the `untrustedText` rule), and a window
+   dropped when it is not a positive integer or when there is no name to
+   attribute it to. `connectTui` keeps the handshake result (it used to discard
+   it) and passes `modelLabel` + `contextWindow` to `startTui`.
+5. **TUI**: `TuiOptions.modelLabel` → `AppProps.modelLabel`; `App` derives
+   `shownModel = modelLabel ?? model` and uses it at exactly two display sites —
+   the input rule (`inputRuleText`) and `/model`'s notice. `model === "remote"`
+   (the error hint, round 1's (c)) is untouched.
+6. **Tests** (red before green, mutations below), then the doc and `CHANGELOG.md`.
+
+### Drift from Implementation (and why)
+
+- **`agentInfo` needs `identity`.** The plan spread `modelInfo` beside the
+  `agentInfo` object; the code nests it INSIDE, so facts without an `identity`
+  produce no `agentInfo` at all. Every real host sets both, and it keeps the
+  wire shape honest (`agentInfo` is "who answers"). First written wrong and
+  fixed while typechecking.
+- **`servedModel` is exported** and unit-tested (the plan had it private,
+  covered only through the stack). The edge cases the plan listed as failure
+  modes — a hostile label, a window with no name, a nonsense window — are cheap
+  as pure cases and would be flaky to force through a daemon.
+- **Item 3's fix is presentation-only, as planned, but `modelLabel` also feeds
+  `/model`.** Not in the plan; it is the same "what is painted" question, and a
+  `/model` that answered `remote` while the rule named the daemon's model would
+  be the same bug one screen over.
+
+### Gate
+
+```
+npx tsc --noEmit                 → clean (0 errors)
+bunx biome check .               → "Checked 864 files … No fixes applied."
+bun test (all but apps/mobile)   → 6761 pass, 3 skip, 474 files, 256 s
+```
+
+`apps/mobile` is excluded as in round 1: its dependencies are not installed in
+this worktree (`Cannot find module '@tentacle/client'`; `tsc -p apps/mobile`'s
+47 errors are all `apps/mobile`/`node_modules` — 0 in any package this task
+touches). CI installs with `--filter '!@tentacle/mobile'` (AGENTS §6).
+
+### Red-before-green, and the mutations that bite
+
+| Test | Mutation | Result |
+|---|---|---|
+| `(1) the daemon reports its own model NAME and window` (real serve+connect) | drop `modelInfo` from `serve.ts` | **fails** (`agentInfo.model` undefined) |
+| `the ctx meter and the input rule show the serve's own model` (TUI frame) | `servedModel` returns `{}` (what `connect` did before) | **fails**, and the frame is the owner's report: `─── remote ─`, `ctx …/128k` |
+| the same frame test | `shownModel = model` in `App.tsx` | **fails** (`served-m` missing) |
+| `(2) a carried contextWindow never moves a serve daemon's own window` | wire `applyCarried(config, ctx?.settings)` into `serve.ts`'s `createAgent` | **fails**: the request says `[context: 2k / 72k tokens (3%)]` — the carried 71680, the owner's suspicion, reproduced and excluded |
+| `L1b initialize: agentInfo carries the daemon's own model facts` | — (unit pin) | passes; absent-`modelInfo` shape asserted as today's |
+| `servedModel` (5 pure cases) | pass `info.model` raw | the hostile-label case fails |
+
+Every red was observed before the fix, and each mutation was reverted and the
+suite re-run green.

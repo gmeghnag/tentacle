@@ -196,6 +196,15 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * refusal names only the protocol on the daemon side.
    */
   readonly identity?: DaemonIdentity;
+  /**
+   * The model THIS daemon runs, for a client's own display (the `connect` TUI's
+   * ctx meter and its input rule, docs/fix/connect-model-error-drops-connection.md
+   * round 2): reported in `initialize`'s `agentInfo`. A NAME and a number only —
+   * never an id, a URL or a key (AGENTS §7). `serve` passes its own config's
+   * values; a pod daemon and the worker pass nothing (their model is the
+   * LAPTOP's, over the reverse tunnel, so the laptop's own figures are right).
+   */
+  readonly modelInfo?: { readonly name: string; readonly contextWindow: number };
   /** The bound on one title request (default `TITLE_TIMEOUT_MS`; tests shorten it). */
   readonly titleTimeoutMs?: number;
   /**
@@ -285,10 +294,13 @@ export class SessionHost {
 
   /** Who this daemon is (`SessionHostOptions.identity`). */
   readonly identity: DaemonIdentity | undefined;
+  /** The model this daemon runs, for a client's display (`SessionHostOptions.modelInfo`). */
+  readonly modelInfo: { readonly name: string; readonly contextWindow: number } | undefined;
 
   constructor(opts: SessionHostOptions) {
     this.opts = opts;
     this.identity = opts.identity;
+    this.modelInfo = opts.modelInfo;
   }
 
   /**

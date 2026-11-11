@@ -166,6 +166,38 @@ describe("daemon ↔ client (in-memory)", () => {
     expect("agentInfo" in (await initialized())).toBe(false);
   });
 
+  // Round 2 (docs/fix/connect-model-error-drops-connection.md): a `serve` daemon
+  // reports its OWN model's name and window, for a client's display only.
+  // Mutations: drop the `modelInfo` spread in `connection.ts` → neither field;
+  // report them without `identity` → the whole `agentInfo` vanishes.
+  test("L1b initialize: agentInfo carries the daemon's own model facts when it has them", async () => {
+    const initialized = async (
+      identity?: { tentacle: string; kind: "serve" },
+      modelInfo?: { name: string; contextWindow: number },
+    ) => {
+      const host = new SessionHost({
+        defaultCwd: "/tmp/daemon-work",
+        createAgent: () => {
+          throw new Error("unused");
+        },
+        ...(identity ? { identity } : {}),
+        ...(modelInfo ? { modelInfo } : {}),
+      });
+      const [daemonCh, clientCh] = createChannelPair();
+      new Connection(daemonCh, host);
+      return (await new RpcPeer(clientCh, {}).request("initialize", INIT)) as Record<
+        string,
+        unknown
+      >;
+    };
+    const serve = { tentacle: "1.2.3", kind: "serve" } as const;
+    expect(
+      (await initialized(serve, { name: "served-m", contextWindow: 200000 })).agentInfo,
+    ).toEqual({ version: "1.2.3", model: "served-m", contextWindow: 200000 });
+    // No facts (a pod daemon, the worker): exactly today's shape.
+    expect((await initialized(serve)).agentInfo).toEqual({ version: "1.2.3" });
+  });
+
   test("handshake → open → prompt streams updates and resolves the stop reason", async () => {
     const model = new ScriptedProvider([
       [

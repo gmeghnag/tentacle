@@ -19,6 +19,7 @@ import {
 import { readFileConfig } from "@tentacle/config";
 import { PermissionBroker } from "@tentacle/core";
 import { MAX_SESSION_LIST } from "@tentacle/protocol";
+import type { InitializeResult } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import { type SessionPick, type ThemeSetting, oneLine, startTui } from "@tentacle/tui";
 import {
@@ -193,7 +194,7 @@ export async function connectTui(
     return session;
   };
   try {
-    await client.initialize();
+    const handshake = await client.initialize();
     // Before Ink mounts (AGENTS §7): the list, the picker, the eager attach. The
     // picker is handed the palette `connectTheme` settled (HIGH 2: the caller
     // CANNOT know it — `connect` loads no config — and a closure over its own
@@ -213,8 +214,17 @@ export async function connectTui(
       return;
     }
     let pending = first;
+    // What the daemon says about ITS OWN model (round 2): the ctx meter must
+    // draw the daemon's window, not this laptop's, and the input rule must name
+    // that model instead of `remote`. Absent (an older daemon, a pod) → nothing
+    // is passed and the TUI keeps its own defaults.
+    const served = servedModel(handshake);
     await deps.startTui(null, {
+      // `remote` still means "the model is the daemon's" for every SEMANTIC use
+      // (the error hint, docs/fix/…(c)); `modelLabel` is what is PAINTED.
       model: "remote",
+      ...(served.label !== undefined ? { modelLabel: served.label } : {}),
+      ...(served.contextWindow !== undefined ? { contextWindow: served.contextWindow } : {}),
       cwd: options.url,
       permissions,
       // The resumed session first (already attached), then fresh lazy ones (a `/clear`).
@@ -271,6 +281,37 @@ export async function connectTui(
     }
   }
 }
+
+/**
+ * What a `connect` TUI may learn from `initialize` about the daemon's OWN model
+ * (docs/fix/connect-model-error-drops-connection.md round 2).
+ *
+ * A daemon is a peer, not to be trusted with the terminal (AGENTS §7): the name
+ * is made one line and capped HERE, before it can reach the ink tree, whatever
+ * the wire schema already refused. `label` is absent when the daemon reported no
+ * model (an older daemon, a pod, whose model is the laptop's) — and `contextWindow`
+ * is dropped with it: a window with no name is not a fact we can attribute.
+ */
+export function servedModel(handshake: InitializeResult): {
+  readonly label?: string;
+  readonly contextWindow?: number;
+} {
+  const info = handshake.agentInfo;
+  const name = info?.model === undefined ? "" : oneLine(info.model).slice(0, MODEL_LABEL_MAX);
+  if (name === "") {
+    return {};
+  }
+  const window = info?.contextWindow;
+  return {
+    label: name,
+    ...(window !== undefined && Number.isInteger(window) && window > 0
+      ? { contextWindow: window }
+      : {}),
+  };
+}
+
+/** A model name's cap on the input rule (a real id like `rits/deepseek-ai/DeepSeek-V4.1` fits). */
+export const MODEL_LABEL_MAX = 64;
 
 /**
  * The session the first view shows (`--resume` / `--continue`), resolved and

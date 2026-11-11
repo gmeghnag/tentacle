@@ -203,3 +203,67 @@ test("(b) a second send while a turn runs is refused, and that turn still ends",
   expect(done.error).toBeNull();
   expect(done.texts.join("")).toBe("first");
 }, 30_000);
+
+// --- round 2: the daemon's OWN model reaches the client ---------------------
+// Item 1/3 (`fix/connect-ctx-window` + item D of `fix/connect-functest-batch`):
+// a `serve` daemon runs ITS OWN model, so a client's ctx meter and input rule
+// must use that model's name and window, not the laptop's. Mutation: drop
+// `modelInfo` from `serve.ts` → the handshake carries neither field.
+test("(1) the daemon reports its own model NAME and window at initialize", async () => {
+  const config = {
+    ...(await projectConfig("http://127.0.0.1:1/v1", "facts")),
+    contextWindow: 200000,
+  };
+  const handle = await startDaemon(
+    { ...config, model: "served-model" },
+    { host: "127.0.0.1", port: 0 },
+  );
+  stops.push(() => handle.stop());
+  const client = await connectTo(handle.url);
+  // A fresh handshake: `connectTo` initialized with the same daemon already.
+  const dial = webSocketChannelFactory(handle.url, {});
+  const fresh = new RemoteClient(await dial(), new PermissionBroker(), undefined, {
+    channelFactory: dial,
+  });
+  stops.push(() => fresh.close());
+  const info = (await fresh.initialize()).agentInfo;
+  expect(info?.model).toBe("served-model");
+  expect(info?.contextWindow).toBe(200000);
+  client.close();
+});
+
+// The window the daemon counts against is its OWN config's, whatever a client
+// carries. This is the pod shape (a laptop that DOES send `settings`): a `serve`
+// daemon never applies it, because it builds each agent from its own config
+// (`serve.ts`'s createAgent) — so its context line, warns and `/compact` use its
+// own window. Mutation: wire `applyCarried` into that factory → 71680 below.
+test("(2) a carried contextWindow never moves a serve daemon's own window", async () => {
+  // The model's own copy carries the context line, so the window is readable
+  // from the request the daemon sends.
+  const bodies: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      bodies.push(await req.text());
+      return say("ok");
+    },
+  });
+  stops.push(() => server.stop(true));
+  const serve = await serveAt(`http://127.0.0.1:${server.port}/v1`, "carried");
+  // A client that CARRIES a laptop window of 71680 (the shape a pod session
+  // sends). A `serve` daemon builds each agent from its OWN config, so it must
+  // ignore it: its context line is its own window (128000, the default here).
+  const dial = webSocketChannelFactory(serve.url, {});
+  const client = new RemoteClient(await dial(), new PermissionBroker(), undefined, {
+    channelFactory: dial,
+    sessionSettings: { contextWindow: 71680 },
+  });
+  stops.push(() => client.close());
+  await client.initialize();
+  const session = client.newSession();
+  const turn = await sendAndSettle(client, session, "hello");
+  expect(turn.error).toBeNull();
+  const sent = bodies.join("");
+  expect(sent).toContain("128k tokens");
+  expect(sent).not.toContain("71k tokens");
+}, 30_000);
