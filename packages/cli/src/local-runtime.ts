@@ -259,6 +259,12 @@ export interface PersistingController extends SessionController {
   killJob?: RemoteSession["killJob"];
   /** `RemoteSession.onSubagentNotify`: a running child's message to this session's agent. */
   onSubagentNotify?: RemoteSession["onSubagentNotify"];
+  /** `RemoteSession.messageSubagent`: the user's text into a running background child. */
+  messageSubagent?: RemoteSession["messageSubagent"];
+  /** `RemoteSession.killSubagent`: stop one background child. */
+  killSubagent?: RemoteSession["killSubagent"];
+  /** `RemoteSession.onSubagentMessage`: the notice that the user's text reached a child. */
+  onSubagentMessage?: RemoteSession["onSubagentMessage"];
   /** `/settings` (present only where this laptop carries settings: `run`/`attach`). */
   settings?(): readonly SettingsLine[];
   /** `/settings sync`: the outcome as lines, never a rejection; a success is saved at once. */
@@ -605,6 +611,17 @@ export function persistingController(
     },
     onSubagentNotify(listener) {
       return inner.onSubagentNotify(listener);
+    },
+    // docs/feat/subagent-panel.md: the panel writes to and stops a child, and
+    // draws its own rows from the daemon's one notice (never a local echo).
+    messageSubagent(agentId, text) {
+      return inner.messageSubagent(agentId, text);
+    },
+    killSubagent(agentId) {
+      return inner.killSubagent(agentId);
+    },
+    onSubagentMessage(listener) {
+      return inner.onSubagentMessage(listener);
     },
     close() {
       closed = true;

@@ -8,6 +8,10 @@ those.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Writing to and stopping a background sub-agent works in plain `tentacle` again (and in `run`/`attach`).** The laptop runtime wrapped its session in the persisting controller, which forwarded every panel member except three, so the panel's own guards refused on every attempt: sending to a running child always showed `this session cannot message background sub-agents (older daemon or local mode)`, and `x` then `y` hit its twin (`no agent kill here`) — while `tentacle connect` worked, since it drives the bare session. The controller now carries `messageSubagent`, `killSubagent` and `onSubagentMessage`, so a message reaches the child and its `✓` row comes from the daemon as before, a stop ends the child, and the notice blames nothing it should not: a runtime with no sub-agent panel at all (e.g. `--in-process`) now says `this session's runtime cannot write to sub-agents`, where the old text guessed at an older daemon or "local mode".
+
 ## [0.4.0] - 2026-11-11
 
 ### Added

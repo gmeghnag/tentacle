@@ -1515,9 +1515,11 @@ export function App({
       const session = sessionRef.current;
       if (!session?.messageSubagent) {
         field.set(value);
-        pushNotice(
-          "_this session cannot message background sub-agents (older daemon or local mode)_",
-        );
+        // NOT "older daemon": that would be a typed refusal from
+        // `messageSubagent` (`RemoteClient`), never a missing member. A missing
+        // one means THIS runtime's session has no sub-agent panel at all (e.g.
+        // `--in-process`), which is what the notice says.
+        pushNotice("_this session's runtime cannot write to sub-agents_");
         return true;
       }
       field.reset();
