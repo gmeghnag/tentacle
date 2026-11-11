@@ -197,9 +197,22 @@ async function reloadedHost(
     newSessionSkills: () => skillScan.newSession(),
     // A remote client gets an opaque turn error; the real one is logged here.
     ...(options.onError ? { onTurnError: options.onError } : {}),
+    // ITS host is the user's own machine (AGENTS §7 — the only daemon that
+    // persists for that reason), so a client attached to it may see the real
+    // text of a failed turn — sanitized and bounded, never a raw upstream body
+    // (`sanitizeTurnError`). A pod daemon (`podSessionHost`) does NOT set this.
+    exposeTurnErrors: true,
     persister,
     sessionTtl,
     identity: { tentacle: APP_VERSION, kind: "serve" },
+    modelInfo: { name: config.model, contextWindow: config.contextWindow },
+    // ITS OWN model, told to a client for DISPLAY only (a `connect` TUI's ctx
+    // meter and input rule, docs/fix/connect-model-error-drops-connection.md
+    // round 2): this daemon runs its own config's model, so the laptop's window
+    // is the wrong one to draw. A name and a number — never an id, URL or key.
+    // The pod (`podSessionHost`) and the worker pass nothing: their model is the
+    // LAPTOP's over the reverse tunnel, so the laptop's figures are already right.
+
     // This host's own `autoWake` (never a carried setting): a session nobody
     // is attached to wakes on a job exit (docs/feat/serve-autowake.md). The
     // stdio (pod) daemon and the worker never set it.

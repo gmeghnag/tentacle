@@ -183,8 +183,29 @@ export type SkillSummary = z.infer<typeof SkillSummarySchema>;
 export const InitializeResultSchema = z.object({
   protocolVersion: z.number().int(),
   agentCapabilities: AgentCapabilitiesSchema,
-  /** Who answers: the daemon's own build, for `--resident-status`. Absent from an older one. */
-  agentInfo: z.object({ version: z.string() }).optional(),
+  /**
+   * Who answers: the daemon's own build, for `--resident-status`. Absent from an
+   * older one.
+   */
+  agentInfo: z
+    .object({
+      version: z.string(),
+      /**
+       * The model THIS daemon runs, for display only — its own config's name
+       * (`serve`: the daemon's model, never the client's). A bounded display
+       * line, never an id, a URL or a key: those stay wherever the model is
+       * (AGENTS §7). Absent: the daemon reports nothing (an older one, a pod,
+       * whose model is the LAPTOP's over the reverse tunnel).
+       */
+      model: line(128).optional(),
+      /**
+       * The context window that model counts against: what its own context
+       * line, warns and `/compact` use. Absent with `model`, and from an older
+       * daemon — a client then keeps its own default.
+       */
+      contextWindow: z.number().int().positive().max(999_999_999).optional(),
+    })
+    .optional(),
 });
 export type InitializeResult = z.infer<typeof InitializeResultSchema>;
 

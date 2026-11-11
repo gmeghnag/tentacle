@@ -97,6 +97,7 @@ import { inputRowCount } from "./input-view.ts";
 import { JOB_REFRESH_MS, JOB_TAIL_SHOWN, jobOutcome, refreshDue } from "./job-drawer.ts";
 import { type LinkFeed, stoppedNotice } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
+import { modelErrorNotice } from "./model-error.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
 import {
   type OpenPanel,
@@ -458,6 +459,13 @@ export interface AppProps {
   /** Factory for a session (local or remote). Overrides `agent` when present. */
   readonly createSession?: () => SessionController;
   readonly model: string;
+  /**
+   * What to PAINT as the model's name when it differs from `model` (a `connect`
+   * session's daemon runs its own model: docs/fix/connect-model-error-drops-connection.md
+   * round 2). Presentation only — every semantic use still reads `model`, so
+   * `model === "remote"` keeps meaning "the model is the daemon's".
+   */
+  readonly modelLabel?: string;
   readonly cwd: string;
   readonly contextWindow?: number;
   /** In a container/pod: the status bar's accent badge (laptop-side facts). Absent: local. */
@@ -586,6 +594,7 @@ export function App({
   agent,
   createSession,
   model,
+  modelLabel,
   cwd,
   contextWindow = 128000,
   target,
@@ -613,6 +622,10 @@ export function App({
 }: AppProps): ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  // The name the screen SHOWS for the model: the daemon's own, when `connect`
+  // learned it at `initialize`; `model` otherwise. Never read by a decision —
+  // `model === "remote"` still means "the daemon's model" (the error hint).
+  const shownModel = modelLabel ?? model;
 
   const [size, setSize] = useState(() => ({
     columns: fixedColumns ?? stdout?.columns ?? 80,
@@ -2009,7 +2022,11 @@ export function App({
           );
           restoreInput(failed.text, failed.notice);
         } else {
-          stateRef.current = failTurn(stateRef.current, String(error), Date.now());
+          stateRef.current = failTurn(
+            stateRef.current,
+            modelErrorNotice(error, model === "remote"),
+            Date.now(),
+          );
         }
       } finally {
         if (reset) {
@@ -2069,6 +2086,7 @@ export function App({
       commitHistory,
       drainHeld,
       skillsSync,
+      model,
     ],
   );
   streamTurnRef.current = streamTurn;
@@ -2971,7 +2989,7 @@ export function App({
           return;
         }
         case "/model":
-          pushNotice(`Model: \`${model}\``);
+          pushNotice(`Model: \`${shownModel}\``);
           return;
         case "/mcp": {
           if (!mcpStatus) {
@@ -3069,7 +3087,7 @@ export function App({
       skillsSync,
       askContext,
       flushNow,
-      model,
+      shownModel,
       pushNotice,
       requestQuit,
       restoreInput,
@@ -4005,7 +4023,7 @@ export function App({
                       : dock.focus.kind === "list" || dock.focus.kind === "open"
                         ? { kind: "plain" }
                         : { kind: "model" },
-                    model,
+                    shownModel,
                     columns,
                   )}
                 </Text>

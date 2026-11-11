@@ -1126,6 +1126,15 @@ export class RemoteSession implements SessionStreamListener {
     if (id === null) {
       throw new RpcError(DomainErrorCode.UnknownSession, "the session is not open");
     }
+    // A send never CLOBBERS a turn already in flight: the old turn would lose
+    // its owner here, its `turn_end` would find no turn to end (`turnFor` does
+    // not see it), and its stream would never settle — the session stays
+    // "running" for ever and every later send is queued or refused (the
+    // owner's engine-restart repro). Refused with the daemon's own code, so a
+    // caller that handles a daemon refusal handles this one too.
+    if (this.active !== null && !this.active.ended) {
+      throw new RpcError(DomainErrorCode.TurnInProgress, "a turn is already running");
+    }
     const turn: ActiveTurn = {
       turnId,
       prompt,

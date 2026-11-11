@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { redactText } from "@tentacle/agent";
 /**
  * A single hosted conversation on the daemon: wraps the agent `Session`, drives
  * one turn at a time, fans every `session/update` out to the attached clients,
@@ -337,14 +338,63 @@ export interface TurnErrorPolicy {
   readonly onTurnError?: (error: Error) => void;
 }
 
+/** The most of a failed turn's message the wire carries (it may be an upstream body). */
+export const TURN_ERROR_MAX = 400;
+
+/** One line: every whitespace run and control character becomes a single space, and
+ * the bidi/zero-width controls that could reorder or hide what follows are dropped. */
+function oneLineText(text: string): string {
+  let out = "";
+  let space = false;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    // Whitespace, C0 controls and DEL: one space between the visible runs.
+    if (code <= 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
+      space = true;
+      continue;
+    }
+    // Zero-width and bidi controls (overrides that reorder a transcript): gone.
+    if (
+      (code >= 0x200b && code <= 0x200f) ||
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2060 && code <= 0x2069) ||
+      code === 0xfeff
+    ) {
+      continue;
+    }
+    if (space && out !== "") {
+      out += " ";
+    }
+    space = false;
+    out += char;
+  }
+  return out;
+}
+
+/**
+ * A failed turn's message, safe to put on the wire to a TRUSTED client (the
+ * in-process worker, and `serve` — whose host is the user's own, AGENTS §7).
+ * Never raw: one line (no control or bidi characters, no embedded frames), the
+ * secret shapes a provider message can echo masked (`redactText`), and capped.
+ */
+export function sanitizeTurnError(error: unknown): TurnError {
+  const raw = error instanceof Error ? error.message : String(error);
+  const message = redactText(oneLineText(raw));
+  if (message === "") {
+    return { message: "internal error" };
+  }
+  return {
+    message: message.length > TURN_ERROR_MAX ? `${message.slice(0, TURN_ERROR_MAX - 1)}…` : message,
+  };
+}
+
 /** The wire form of a turn failure: same policy as the peer's handler errors. */
 export function redactTurnError(error: unknown, expose: boolean): TurnError {
   if (error instanceof RpcError) {
     return { code: error.code, message: error.message };
   }
   if (expose) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { message: message || "internal error" };
+    return sanitizeTurnError(error);
   }
   return { message: "internal error" };
 }

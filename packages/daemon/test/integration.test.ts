@@ -15,7 +15,13 @@ import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import { Connection } from "../src/connection.ts";
-import { type Attachment, HostedSession, type UpdateSink } from "../src/hosted-session.ts";
+import {
+  type Attachment,
+  HostedSession,
+  TURN_ERROR_MAX,
+  type UpdateSink,
+  sanitizeTurnError,
+} from "../src/hosted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
 
 /** A test client attached to a hosted session: receives updates. */
@@ -158,6 +164,38 @@ describe("daemon ↔ client (in-memory)", () => {
       version: "4.5.6",
     });
     expect("agentInfo" in (await initialized())).toBe(false);
+  });
+
+  // Round 2 (docs/fix/connect-model-error-drops-connection.md): a `serve` daemon
+  // reports its OWN model's name and window, for a client's display only.
+  // Mutations: drop the `modelInfo` spread in `connection.ts` → neither field;
+  // report them without `identity` → the whole `agentInfo` vanishes.
+  test("L1b initialize: agentInfo carries the daemon's own model facts when it has them", async () => {
+    const initialized = async (
+      identity?: { tentacle: string; kind: "serve" },
+      modelInfo?: { name: string; contextWindow: number },
+    ) => {
+      const host = new SessionHost({
+        defaultCwd: "/tmp/daemon-work",
+        createAgent: () => {
+          throw new Error("unused");
+        },
+        ...(identity ? { identity } : {}),
+        ...(modelInfo ? { modelInfo } : {}),
+      });
+      const [daemonCh, clientCh] = createChannelPair();
+      new Connection(daemonCh, host);
+      return (await new RpcPeer(clientCh, {}).request("initialize", INIT)) as Record<
+        string,
+        unknown
+      >;
+    };
+    const serve = { tentacle: "1.2.3", kind: "serve" } as const;
+    expect(
+      (await initialized(serve, { name: "served-m", contextWindow: 200000 })).agentInfo,
+    ).toEqual({ version: "1.2.3", model: "served-m", contextWindow: 200000 });
+    // No facts (a pod daemon, the worker): exactly today's shape.
+    expect((await initialized(serve)).agentInfo).toEqual({ version: "1.2.3" });
   });
 
   test("handshake → open → prompt streams updates and resolves the stop reason", async () => {
@@ -1541,5 +1579,29 @@ describe("compaction is exclusive with a turn", () => {
     });
     expect(model.summaries).toBe(0);
     expect(hosted.running).toBe(false);
+  });
+});
+
+// `sanitizeTurnError` (docs/fix/connect-model-error-drops-connection.md): the
+// message a TRUSTED host may expose is one line, secret-masked and bounded.
+describe("sanitizeTurnError", () => {
+  test("masks what a provider message can echo, on one line, capped", () => {
+    const key = sanitizeTurnError(
+      new Error("bad key Bearer sk-abcdefghijklmnopqrstuvwxyz012345\nsecond line"),
+    );
+    expect(key.message).toBe("bad key Bearer [REDACTED] second line");
+    // A URL's credentials, and an assignment-shaped secret.
+    expect(sanitizeTurnError(new Error("GET https://user:pw@host/v1 failed")).message).toBe(
+      "GET https://[REDACTED]@host/v1 failed",
+    );
+    expect(sanitizeTurnError(new Error("api_key=supersecretvalue rejected")).message).toBe(
+      "api_key=[REDACTED] rejected",
+    );
+    const long = sanitizeTurnError(new Error("x".repeat(1000)));
+    expect(long.message.length).toBe(TURN_ERROR_MAX);
+    expect(long.message.endsWith("…")).toBe(true);
+    // Never an empty message, and a non-Error is still worded.
+    expect(sanitizeTurnError(new Error("")).message).toBe("internal error");
+    expect(sanitizeTurnError("plain string").message).toBe("plain string");
   });
 });
