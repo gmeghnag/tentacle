@@ -10,9 +10,11 @@ import {
 } from "../src/container-version.ts";
 
 describe("parseVersionLine (the container's `tentacle --version`)", () => {
-  test("`tentacle <version>` → the version", () => {
+  test("`tentacle <version>` → the version, cut at `+` (the build is judged separately)", () => {
     expect(parseVersionLine("tentacle 0.2.0\n")).toBe("0.2.0");
-    expect(parseVersionLine("  tentacle 1.0.0-rc.1+abc  ")).toBe("1.0.0-rc.1+abc");
+    // A dev build answers `0.3.0+<id>`; `expected` is a PLAIN marker, so the
+    // comparison is at the release version (docs/fix/dev-build-version-skew.md).
+    expect(parseVersionLine("  tentacle 1.0.0-rc.1+abc  ")).toBe("1.0.0-rc.1");
   });
 
   test("anything else is unknown", () => {
@@ -97,6 +99,31 @@ describe("containerDecision", () => {
   test("the laptop's exact version, or no expectation → reuse (today)", () => {
     expect(containerDecision(ok("tentacle 0.3.0\n"), "0.3.0")).toEqual({ kind: "reuse" });
     expect(containerDecision(ok("tentacle 0.1.0\n"), undefined)).toEqual({ kind: "reuse" });
+  });
+
+  test("a dev build's own `+<id>` answer against the plain expected version → reuse", () => {
+    // docs/fix/dev-build-version-skew.md, fix round 1 (the review's finding 3):
+    // the container answers `tentacle 0.3.0+<id>` (it runs a dev build, the one
+    // `TENTACLE_POD_BIN` / this laptop injected), while `expected` is the file's
+    // PLAIN marker. Compared whole, every re-attach replaced its own build with
+    // itself — and `StaleBuildError` guards only `reason: "build"`, so a busy
+    // resident was killed. The build difference stays the build rule's job.
+    expect(containerDecision(ok("tentacle 0.3.0+1a2b3c4d5e6f\n"), "0.3.0")).toEqual({
+      kind: "reuse",
+    });
+    // …and a DIFFERENT version still differs, `+` or not.
+    expect(containerDecision(ok("tentacle 0.3.0+1a2b3c4d5e6f\n"), "0.4.0")).toEqual({
+      kind: "replace",
+      had: "0.3.0",
+      reason: "version",
+    });
+    // The build rule still replaces an older build of the SAME release version.
+    expect(
+      containerDecision(ok("tentacle 0.3.0+1a2b3c4d5e6f\n"), "0.3.0", {
+        expected: "1a2b3c4d5e6f",
+        found: "ba9876543210",
+      }),
+    ).toEqual({ kind: "replace", had: "0.3.0", reason: "build" });
   });
 
   test("another version, older OR newer, or an unreadable one → replace", () => {

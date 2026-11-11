@@ -80,7 +80,7 @@ import { StatusLine } from "./status-line.ts";
 import { type StreamTerm, termOf } from "./streams.ts";
 import { untrustedText } from "./untrusted-text.ts";
 import { readBinaryBuildId, readBinaryVersion } from "./version-marker.ts";
-import { APP_VERSION } from "./version.ts";
+import { APP_RELEASE_VERSION } from "./version.ts";
 import { type WorkspaceMount, attachCwdWarning } from "./workspace-mount.ts";
 
 /**
@@ -271,7 +271,10 @@ export interface EngineRuntimeDeps {
   readonly daemonLogPath?: (name: string) => string | undefined;
   /** In-TUI notices (the session's `NoticeHub`), e.g. a reconnect that lost the last turn. */
   readonly notify?: (text: string, hint?: string) => void;
-  /** This tentacle's version for the pod-binary check (tests); defaults to `APP_VERSION`. */
+  /**
+   * This tentacle's version for the pod-binary check and the container probe
+   * (tests); defaults to `APP_RELEASE_VERSION` (a plain version: it is compared).
+   */
   readonly appVersion?: string;
 }
 
@@ -699,7 +702,10 @@ export interface EngineAttachRuntimeDeps {
   readonly container?: string;
   /** Install dir for the injected binary (default `/usr/local/bin`; `--bin-dir` for a read-only rootfs). */
   readonly binDir?: string;
-  /** This tentacle's version for the pod-binary check (tests); defaults to `APP_VERSION`. */
+  /**
+   * This tentacle's version for the pod-binary check and the container probe
+   * (tests); defaults to `APP_RELEASE_VERSION` (a plain version: it is compared).
+   */
   readonly appVersion?: string;
   readonly permissions: PermissionBroker;
   readonly saver: SessionSaver;
@@ -840,7 +846,7 @@ export async function attachEngineRuntime(
     // override there is nothing to compare (Q3: reused as before). Known before
     // the probe, so the probe asks for the build in the same exec.
     const expectedBuild = await expectedContainerBuild({
-      appVersion: deps.appVersion ?? APP_VERSION,
+      appVersion: deps.appVersion ?? APP_RELEASE_VERSION,
       ...(process.env.TENTACLE_POD_BIN ? { podBinOverride: process.env.TENTACLE_POD_BIN } : {}),
       binaries: config.configDir
         ? POD_BINARY_TARGETS.map((target) =>
@@ -879,7 +885,7 @@ export async function attachEngineRuntime(
     // re-attach); any other version is replaced, so the daemon speaks this
     // client's protocol. From source with no override: reused as before.
     const expected = await expectedContainerVersion({
-      appVersion: deps.appVersion ?? APP_VERSION,
+      appVersion: deps.appVersion ?? APP_RELEASE_VERSION,
       ...(process.env.TENTACLE_POD_BIN ? { podBinOverride: process.env.TENTACLE_POD_BIN } : {}),
       readMarker: (path) => readBinaryVersion(path),
     });

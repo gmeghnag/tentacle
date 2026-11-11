@@ -145,6 +145,27 @@ function deps(gh: ReturnType<typeof fakeGitHub>, extra: Partial<UpdateDeps> = {}
 }
 
 describe("tentacle update", () => {
+  test("a COMPILED DEV BUILD at the latest release says up to date, and downloads nothing", async () => {
+    // docs/fix/dev-build-version-skew.md, fix round 1 (the review's finding 2):
+    // `update` must compare its PLAIN version. With the suffixed one, latest
+    // `v0.3.0` made both pods "stale" → `--check` exited 10 and a real run would
+    // download tag `v0.3.0+<id>` (404). Spawned: from source `APP_VERSION` is "dev",
+    // so the suite's own process cannot present a compiled dev build.
+    const configDirOfFixture = join(root, "fixture-config");
+    mkdirSync(join(configDirOfFixture, "bin"), { recursive: true });
+    for (const target of PODS) {
+      writeFileSync(join(configDirOfFixture, "bin", target), binary(target, "0.3.0"));
+    }
+    const proc = Bun.spawnSync(["bun", join(import.meta.dir, "fixtures/dev-build.ts")], {
+      env: { ...process.env, FIXTURE: "update", FIXTURE_CONFIG_DIR: configDirOfFixture },
+    });
+    const reported = JSON.parse(proc.stdout.toString().trim().split("\n").at(-1) ?? "{}");
+    expect(reported.appVersion).toBe("0.3.0+1a2b3c4d5e6f");
+    expect(reported.out).toContain("tentacle 0.3.0 is up to date (v0.3.0)");
+    expect(reported.downloads).toEqual([]); // no tag v0.3.0+<id>
+    expect(reported.code).toBe(0); // --check: nothing to do (not EXIT_UPDATE_AVAILABLE)
+  }, 30_000);
+
   test("up to date: CLI and pods at the latest → exit 0, nothing downloaded", async () => {
     install("0.3.0", ["0.3.0", "0.3.0"]);
     const gh = fakeGitHub({ "v0.3.0": releaseOf("0.3.0") }, "v0.3.0");

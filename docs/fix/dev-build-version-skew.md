@@ -82,7 +82,12 @@ without guessing.
   explicitly ignores `+…` build metadata (`update-plan.ts:39`) — and `update`
   refuses a non-release `appVersion` (nothing is published for a `+` version;
   it cannot be named by `--version`, see `normalizeTag`, `update-plan.ts:18`).
-  So no existing comparison changes meaning.
+  **Corrected by fix round 1 — as originally written this was false.** Only
+  `compareVersions` strips `+`: every other consumer compares `APP_VERSION`
+  against a binary's plain version MARKER, so a compiled dev build
+  (`0.3.0+<id>`) disagreed with its own binaries. The comparisons are now fed
+  `APP_RELEASE_VERSION` (plain) and the `+` is display/wire only; see the
+  fresh-context Review and *Execution — fix round 1*.
 - The daemon already words the refusal from both sides' facts and ships them in
   `VersionMismatchData` (`daemon/src/version-mismatch.ts:110`); every daemon
   since protocol 10 sends it, and the client shows it unchanged
@@ -415,3 +420,114 @@ release can match it; container/older-client branches unchanged). Narrow
 tests pass (62/62) — they pass precisely because none exercises a `+`
 `appVersion` through the equality consumers, so no mutation was needed to
 show the gap.
+
+## Execution — fix round 1
+
+*— deepseek (tentacle --profile deepseek), 2026-11-11*
+
+Applied the fresh-context Review's REQUEST-CHANGES exactly: the plain version is
+now the identity every **comparison** uses; the `+<id>` one is display/wire only.
+The three findings are one root cause — `APP_VERSION` was both — so the fix is
+one split, not three patches.
+
+**What changed**
+
+- `version.ts`: `APP_RELEASE_VERSION = parseVersionMarker(compiledVersionMarker())
+  ?? "dev"` (plain), and `APP_VERSION = devBuildVersion(APP_RELEASE_VERSION,
+  APP_BUILD)`. The false sentence is gone; the header now says which constant is
+  for comparing and which for displaying. `APP_VERSION` keeps `--version`
+  (`main.ts:541,557`), `CLIENT_INFO` (`:127`), `serve`'s identity
+  (`serve.ts:207,525`) and the worker bootstrap (`local-runtime.ts:1087`).
+- Every comparing consumer takes the plain one: `podBinaryProblem`'s callers
+  `checkPodBinaries` (`pod-binary-build.ts:293`) and `resolvePodBinary` (`:337`)
+  defaults; `expectedContainerBuild`/`expectedContainerVersion` defaults
+  (`engine-runtime.ts:849,888`); `runUpdate` (`main.ts:631`).
+- `parseVersionLine` (`container-version.ts:21`) cuts at `+`, so a container's
+  `0.3.0+<id>` answer compares equal to the plain marker of the binary this
+  laptop would inject. The build difference is untouched: it stays the build
+  rule's (`parseBuildFromVersionProbe`), which is why a same-version older build
+  is still replaced (`reason: "build"`) and a busy resident still protected.
+- Swept every other `APP_VERSION` consumer (below). All are display, wire, or an
+  informational run-state/control-socket field — none compares or keys a path.
+
+**Consumer sweep** (`rg -n "APP_VERSION" packages scripts apps`)
+
+| consumer | kind | verdict |
+| --- | --- | --- |
+| `main.ts:541,557` | `--version`, `--help` version | display — keep suffixed |
+| `version.ts:127` `CLIENT_INFO` | `initialize`'s client identity | wire — keep (the `+` is what an old daemon's message needs) |
+| `serve.ts:207,525` | daemon identity (`serve`, `container`) | wire — keep |
+| `local-runtime.ts:1087` | worker bootstrap `version` | wire — keep |
+| `relay.ts:229,518`, `attach-run.ts:432` | run-state record + control reply | written, read only for validity (`run-state.ts:186`), never compared — keep (the Review allowed this) |
+| `update.ts` message lines | `tentacle X is up to date` etc. | fed `deps.appVersion`, which is now plain — see note |
+
+Note on `update`'s wording: its messages print `deps.appVersion`, so they now
+print the plain version a released binary would. For a dev build that is the
+honest answer (`update` can only ever install a release, and it names the
+release lineage it is on); the build's own identity is `--version`'s job.
+
+**Tests (each RED first, one mutation each, reverted after)**
+
+1. `pod-binary-build.test.ts` — *a COMPILED DEV BUILD finds its own pod
+   binaries*: `checkPodBinaries` with the DEFAULT `appVersion` and plain-marker
+   binaries must not throw. Mutation: defaults back to `APP_VERSION` → RED with
+   the review's own text (`… is at version 0.3.0 …; this tentacle is
+   0.3.0+1a2b3c4d5e6f): run "tentacle update"`).
+2. `update.test.ts` — *a COMPILED DEV BUILD at the latest release says up to
+   date, and downloads nothing*: `update --check` on a dev build with latest
+   `v0.3.0` must exit 0, say `tentacle 0.3.0 is up to date (v0.3.0)` and fetch no
+   `/download/`. Mutation: `main.ts` passes `APP_VERSION` → RED, exit 10 with
+   `bun-linux-x64: 0.3.0 → 0.3.0+1a2b3c4d5e6f` (finding 2 verbatim).
+3. `container-version.test.ts` — *a dev build's `+<id>` answer against the plain
+   expected version → reuse*, plus the two neighbours that must NOT regress
+   (a different version still replaces; the build rule still replaces an older
+   build of the same version). Mutation: drop the `+` cut in `parseVersionLine`
+   → RED (both that test and its `parseVersionLine` unit).
+
+A spawned process is required for 1 and 2: from source `APP_VERSION` is `"dev"`,
+so the suite's own process cannot present a compiled dev build. `version.ts`
+reads its literals via `typeof __TENTACLE_*`, which resolves on `globalThis` when
+no `define` exists, so `test/fixtures/dev-build.ts` seeds the two marker globals
+before the first import — byte-for-byte what `bun run compile` bakes in — and the
+tests run it with `Bun.spawnSync` (a fresh module cache, a fake `fetch`, no
+network). The three pre-existing `parseVersionLine` expectations that pinned the
+old whole-string behaviour were updated to the new rule.
+
+**Drift from the Review:** none in substance. One clarification: the Review
+suggested `parseVersionLine` "return the version up to `+`" — done in
+`parseVersionLine` itself rather than in `containerDecision`, so `had` and the
+`replacedNotice` line also stop reporting a `+` id for a binary the build rule
+already describes. `update`'s user-facing messages consequently print the plain
+version (see the note above); the Review did not specify them.
+
+**Gate** (this worktree, `--filter '!@tentacle/mobile'` install — `apps/mobile`
+deps are absent here):
+
+```
+bunx tsc --noEmit   → clean (exit 0)
+bunx tsc -p apps/mobile → 47 errors, all in apps/mobile/* or lib.dom/node_modules (deps absent)
+bun run lint        → biome check .: 872 files, 0 errors, 0 warnings (baseline, §6)
+bun test            → 6788 pass, 3 skip, 1 fail, 1 error (480 files, 289 s)
+```
+
+6788 pass = the 6785 pre-fix baseline + exactly the 3 new tests. The 1 fail + 1
+error are the documented environmental one,
+`apps/mobile/test/rn-websocket.test.ts` (`Cannot find module '@tentacle/client'`
+— the mobile install is absent; it fails alone, before any test body, and
+`git diff --name-only | grep apps/mobile` is empty). The 3 skips are the opt-in
+ones (live-k8s, live-docker, real-socket keepalive).
+
+**Verified on a real compiled binary** (not just the `globalThis` seam): a
+`bun run compile` of this branch reports `tentacle 0.3.0+26f68a892baa`, and with a
+config dir holding plain `0.3.0` pod binaries — `update --check` prints
+`tentacle 0.3.0 is up to date (v0.3.0)`, both pods listed at `0.3.0` with no
+`→`, exit 0; `run`'s preflight passes (it reaches pod creation, failing only on
+the deliberately unreachable API server `https://127.0.0.1:1`). Mutating
+`checkPodBinaries`'s default back to `APP_VERSION`, recompiling and re-running the
+same `run` gives the review's finding 1 on a real binary: `[pod] failed: the Linux
+pod binary for x64 is at version 0.3.0 (…; this tentacle is 0.3.0+<id>)`. Reverted
+and recompiled (the `dist/tentacle` left in place is the unmutated build).
+
+**Not verified:** nothing on the release path changed in this round, so the CI
+`TENTACLE_RELEASE=1` case stands as Review recorded it; the mobile project's
+typecheck/test still needs `bun install` without the mobile filter.
