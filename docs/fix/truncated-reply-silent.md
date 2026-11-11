@@ -832,3 +832,92 @@ The executor was honest about drift. It caught the plan's `budgetFrom--` error
 and wrote a test for it, and it noted the pre-existing test fake change. It
 missed that a third runtime (the pod tunnel) re-serialises `StreamEvent` through
 a strip schema, and stated the pod failure mode from the plan without testing it.
+
+## Review round 2
+
+*— claude-opus-5-5, 2026-11-11*
+
+**Verdict: PASS.** No HIGH/MEDIUM findings. Both round-1 findings are closed.
+
+### HIGH-1 (pods drop `done.stopReason`): closed
+
+- **Laptop sends it.** `RemoteClient.onModelStream` and the chunked server
+  (`packages/client/src/remote-client.ts:2736`, `:2948`) forward the provider's
+  `StreamEvent` unchanged, so `stopReason` goes out on both the batch and the
+  chunked path.
+- **The wire carries it.** `packages/protocol/src/model.ts:57` adds
+  `WireStopReasonSchema` (the same 4 values as core's `ModelStopReason`) to `done`
+  as `.optional()` on a strip schema. `PROTOCOL_VERSION` stays 22, which §7 allows
+  for an added field. If an older laptop leaves it out, the value is `undefined`
+  and the pod behaves as before, so no turn fails.
+- **The pod uses it.** `ProxyModelProvider` parses with this schema and hands
+  `done` to the loop. `daemon/test/proxy-model.test.ts` covers both paths:
+  "a `length` done arrives intact" (chunked and batch), and "the pod's agent loop
+  takes the truncation path: a cut tool call is NEVER run" (a real `Agent` over
+  the proxy).
+- **Trust.** The value goes laptop → pod. Whatever a pod sends back is only a
+  `truncated_reply` notice, which is display-only (`retrying` included), or a
+  re-ask inside its own loop that stays bounded. It causes no effect on the laptop.
+- **Mutation:** with `stopReason` removed from the wire `done` member, 8 tests go
+  RED (protocol `wire-stop-reason`, `proxy-model` ×3, client
+  `model-stream-stop-reason` ×2). Restored.
+- **Future change to watch (not a finding):** a stop-reason value outside the enum
+  fails the batch parse, and the test checks that on purpose. If a future laptop
+  adds a fifth value, that is a breaking change for older pods and needs a
+  `PROTOCOL_VERSION` bump (§7 "changed meaning"). Today the laptop maps every
+  value to one of the 4.
+
+### MEDIUM-2 (a failed re-ask is hidden): closed
+
+- **Agent.** `retrying` is computed when the notice is emitted
+  (`packages/agent/src/agent.ts:1300-1304`, `truncationReasks < MAX_TRUNCATION_REASKS`).
+  It is `false` on `cut` and on a cut tool call.
+- **Schema and mappings.** `TruncatedReplySchema.retrying` is
+  `z.boolean().optional()` (`updates.ts:168`). The daemon mapping sends it
+  (`daemon/src/mapping.ts:256`). The client mapping uses `update.retrying ?? false`
+  (`client/src/mapping.ts:299-303`): an older daemon never promises a re-ask.
+- **Frontends.** Both use `event.retrying`: TUI at `state.ts:536`; CLI at
+  `render.ts:70` and in `AnswerSplit`.
+  - TUI: dedupe still keys on the notice text, which now includes `retrying`.
+  - CLI: dedupe keys on `${reason}/${retrying}`, and that key only changes when
+    the fact changes:
+    - `length/true` can happen at most once per turn (budget 1);
+    - repeats of `length/false` from the stall rounds are dropped, as they should be;
+    - a `cut` after a `length` now gets its own line, which closes round 1's CLI
+      sub-point.
+- **The real App frames** (`tui/test/truncated-reply-notice.test.tsx:136-166`)
+  show two DISTINCT notices: "output limit" twice, "asking it to continue" once.
+  The CLI render test pins the same.
+- **Mutation:** forcing `retrying: true` in the agent turns "the ONE re-ask is
+  BOUNDED: the first cut says a re-ask is coming, the second says it is not" RED.
+  Restored. The TUI and CLI tests feed the events directly, so they pin the
+  frontend half and the agent test pins the emission.
+
+### Round-1 "holds" re-checked against the round-1 diff
+
+The round-1 diff only adds a field to existing yields, the wire `done` member and
+the notice dedupe/wording. It does not touch control flow in the loop:
+`budgetFrom++`, the three separate budgets, the abort check before the `"other"`
+branch, the provider `finish_reason`/`stop_reason` mapping, the refusal of
+parallel cut calls, the sub-agent throw path and the history writes are
+byte-identical to round 1. The narrow suite (12 files, 80 tests) passes.
+
+### Gate
+
+- `bunx tsc --noEmit`: clean.
+- `bun run lint`: clean, 893 files.
+- `bun test`: 6889 pass / 3 opt-in skips / 1 fail. The fail is
+  `apps/mobile/test/rn-websocket.test.ts` (`Cannot find module '@tentacle/client'`),
+  because the apps/mobile deps are not installed in this worktree. It is unrelated
+  to the branch, and for the same reason `tsc -p apps/mobile` (inside
+  `bun run check`) cannot run here.
+- `git status` was clean after both mutations, before this doc edit.
+
+### Below MEDIUM, for the record
+
+When a cut `length` reply is followed by a `turn_end` hook that continues, or by a
+late steer, the notice says "asking it to continue". That round then runs the
+hook note or the steer instead of the re-ask, but the re-ask budget is not spent,
+so the re-ask still happens on a later cut. The wording is imprecise, and it stays
+bounded.
+
