@@ -123,6 +123,7 @@ import {
 export type { AutoAcceptFeed };
 import {
   CLEARED_ELSEWHERE_NOTICE,
+  CLEARED_NOTICE,
   clearCommandStep,
   clearErrorNotice,
   clearNoopNotice,
@@ -200,6 +201,7 @@ import {
   backgroundExitNotice,
   endWithoutOutcome,
   failTurn,
+  forgetContextFill,
   initialState,
   pushNoticeItem,
   replaceWithNotices,
@@ -2161,6 +2163,21 @@ export function App({
    * through the SAME loop as an own one; its controller's abort cancels it
    * (Esc / Ctrl+C stop what runs, whoever started it — owner Q2).
    */
+  /**
+   * Ask the daemon for the session's context (never awaited by render). An
+   * answer for a session the view has since left is dropped; a failure leaves
+   * the figure as it was (`ctx –/max` until something measures).
+   */
+  const askContext = useCallback((session: SessionController | null): void => {
+    void session?.context?.().then(
+      (open) => {
+        if (sessionRef.current === session) {
+          setContextOpen(open);
+        }
+      },
+      () => {},
+    );
+  }, []);
   const onActivity = useCallback(
     (activity: SessionActivity): void => {
       const inFlight =
@@ -2220,12 +2237,24 @@ export function App({
           const apply = action === "append" ? appendHistory : resetHistory;
           void commitHistory((s) => apply(s, activity.messages)).then(() => {
             setScrollOffset(0);
-            if (cleared && !ownClear) {
-              // After the replace: it would wipe a notice pushed before it.
-              pushNotice(CLEARED_ELSEWHERE_NOTICE);
+            if (cleared) {
+              // After the replace: it would wipe a notice pushed before it. This
+              // TUI's own `/clear` said nothing at all under `connect` — the
+              // cleared transcript just vanished (docs/fix/connect-functest-batch.md
+              // item E); another device's clear already has its own words.
+              pushNotice(ownClear ? CLEARED_NOTICE : CLEARED_ELSEWHERE_NOTICE);
             }
             flushNow();
             drainHeld();
+            // The meter must follow a REPLACED history at once: its figure came
+            // from the chat this clear just dropped, and waiting for the next
+            // turn's usage left it stale on screen (docs/fix/connect-functest-batch.md
+            // item E). The measured fill is forgotten, then the daemon is asked
+            // to count what the session holds now.
+            if (cleared || action === "replace") {
+              stateRef.current = forgetContextFill(stateRef.current);
+              askContext(sessionRef.current);
+            }
             // A wake the latch held back: the cleared chat is on screen now.
             wakeIfPending();
           });
@@ -2254,6 +2283,7 @@ export function App({
       setQuitConfirm,
       streamTurn,
       wakeIfPending,
+      askContext,
     ],
   );
   onActivityRef.current = onActivity;
@@ -2264,21 +2294,6 @@ export function App({
    * history is never missed. The previous session's subscriptions end, and
    * what was held for it is dropped.
    */
-  /**
-   * Ask the daemon for the session's context (never awaited by render). An
-   * answer for a session the view has since left is dropped; a failure leaves
-   * the figure as it was (`ctx –/max` until something measures).
-   */
-  const askContext = useCallback((session: SessionController | null): void => {
-    void session?.context?.().then(
-      (open) => {
-        if (sessionRef.current === session) {
-          setContextOpen(open);
-        }
-      },
-      () => {},
-    );
-  }, []);
   const watchSession = useCallback(
     (session: SessionController | null, onOpened?: (ok: boolean) => void) => {
       activitySubRef.current?.();

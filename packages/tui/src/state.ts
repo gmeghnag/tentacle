@@ -534,6 +534,22 @@ export function unsupportedNotice(kind: string): string {
 }
 
 /**
+ * Forget the MEASURED context fill after the history this TUI measured was
+ * replaced (a `/clear`, a compaction): `lastTurnTokens.prompt` was the fill of a
+ * chat that no longer exists, and the meter fell back to it for ever (the
+ * measured figure outranks the daemon's count at open, `contextShown`) — so it
+ * sat at the old chat's figure until the next turn happened to measure one
+ * (docs/fix/connect-functest-batch.md item E). The SESSION totals stay: they
+ * are this session's usage, not this history's fill.
+ *
+ * The caller then asks the daemon for the count of what it holds NOW
+ * (`session/context`), which is the meter's figure until a turn measures again.
+ */
+export function forgetContextFill(state: DisplayState): DisplayState {
+  return state.lastTurnTokens === null ? state : { ...state, lastTurnTokens: null };
+}
+
+/**
  * Replace the transcript with `messages` (a resync), keeping the turn's state.
  * A call with no result in a turn that is still running is running (or waiting
  * for approval), not done — `messagesToItems` marks every historical call `ok`.

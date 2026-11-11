@@ -169,8 +169,16 @@ export interface LocalRuntime {
   ): Promise<ResidentUse | null>;
 }
 
-/** A client-side `JobController` whose only live capability is `onExit`. */
-function remoteJobsView(client: RemoteClient): JobController {
+/**
+ * A client-side `JobController` whose only live capability is `onExit`.
+ *
+ * Exported for `connect` (docs/fix/connect-functest-batch.md item A): the TUI's
+ * ONE exit handler (where a shell job's outcome and `endedAt` are stamped) is
+ * fed by `jobs.onExit`, so a runtime that hands the TUI no `jobs` leaves a
+ * finished job's drawer on the `✗ stopped` fallback, counting forever. Every RPC
+ * runtime that has a `RemoteClient` uses THIS view — never a second copy.
+ */
+export function remoteJobsView(client: RemoteClient): JobController {
   return {
     start() {
       throw new Error("jobs are managed daemon-side; the client cannot start one");

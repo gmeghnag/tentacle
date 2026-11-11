@@ -49,6 +49,7 @@ import type {
   Session,
   SessionGrants,
 } from "@tentacle/agent";
+import { EMPTY_TITLE, sessionTitle } from "@tentacle/agent";
 import {
   AGENT_MESSAGE_MAX_CHARS,
   type AgentJob,
@@ -1119,9 +1120,34 @@ export class HostedSession {
 
   /** Hand the persister this session's state as of NOW (a no-op without one, or once closed). */
   private persist(): void {
+    this.pinAutoTitle();
     if (this.persister && !this.closed) {
       this.persister.schedule(this.id, (after) => this.persistedState(after));
     }
+  }
+
+  /**
+   * Name the session NOW, if it is still derived (`auto`, with no text) and its
+   * first real user message is in the history.
+   *
+   * An `auto` title is derived from the history's first user message
+   * (`sessionTitle`), and a compaction (or the model's own context reset)
+   * REPLACES that message with the summary / restart text it installs — so
+   * every later derivation named the session after the summary, in `/sessions`
+   * and every list (docs/fix/connect-functest-batch.md item C). Pinning the
+   * derived name at the first save keeps the session's own name for good; a
+   * model- or user-chosen title still wins (`applyGenerated` / `applyRename`),
+   * and `/clear` drops the pin (a fresh chat names itself).
+   */
+  private pinAutoTitle(): void {
+    if (this.title.source !== "auto" || this.title.text !== undefined) {
+      return;
+    }
+    const text = sessionTitle(this.session.messages);
+    if (text === EMPTY_TITLE) {
+      return; // nothing the person wrote yet: derive again next time
+    }
+    this.title = { source: "auto", text };
   }
 
   /**
@@ -2703,7 +2729,10 @@ export class HostedSession {
     }
     // BEFORE the barrier: its segment's `title` entry must reflect the reset. A
     // `user` rename stays (it names the session, which goes on).
-    if (this.title.source === "model") {
+    // An `auto` title's PIN drops too: the fresh chat has no first message yet,
+    // so it must name itself at its own first prompt rather than keep the old
+    // chat's words (docs/fix/connect-functest-batch.md item C).
+    if (this.title.source !== "user") {
       this.title = { source: "auto" };
     }
     const result = this.session.clearConversation(() => this.historyReplaced("clear"));

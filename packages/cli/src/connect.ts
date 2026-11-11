@@ -32,6 +32,7 @@ import {
   shortId,
 } from "./connect-resume.ts";
 import { createHooksTrustResolver } from "./hooks-trust.ts";
+import { remoteJobsView } from "./local-runtime.ts";
 import { CLIENT_INFO } from "./version.ts";
 
 export interface ConnectOptions {
@@ -233,6 +234,18 @@ export async function connectTui(
         pending = null;
         return track(session);
       },
+      jobs: remoteJobsView(client),
+      // The TUI's ONE live job exit feed (`docs/fix/connect-functest-batch.md`
+      // item A): without it the drawer's outcome/`endedAt` handler never fires
+      // and a finished job freezes on the `✗ stopped` fallback, its clock
+      // counting. The SAME view every RPC runtime uses (`remoteJobsView`).
+      // …and `connect` NEVER wakes: the `serve` daemon owns that, per ITS OWN
+      // host's `autoWake` (docs/feat/serve-autowake.md — it wakes a session
+      // nobody is attached to, and a `connect` TUI attached to it, too). The exit
+      // feed above is for the DRAWER's outcome, not for a turn: with the App's
+      // default on, this TUI would start a second continuation (and would
+      // override a `serve` host that set `autoWake: false`).
+      autoWakeOnJobExit: false,
       link: client,
       mcpStatus: () => client.mcpStatus(),
       detachOnQuit: true,

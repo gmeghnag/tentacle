@@ -38,9 +38,15 @@ export interface RecordTitle {
 /**
  * A session's title as its owner (the daemon) holds it: `auto` is derived from
  * the history (`sessionTitle`); `model` / `user` were chosen and are kept as is.
+ *
+ * An `auto` title may carry `text`: the name the conversation HAD, pinned. A
+ * compaction (or a context reset) replaces the history's head, so deriving
+ * again would name the session after the summary written in its place
+ * (docs/fix/connect-functest-batch.md item C); the pinned text keeps the
+ * session's own name until something chooses another. Absent → derive.
  */
 export type TitleState =
-  | { readonly source: "auto" }
+  | { readonly source: "auto"; readonly text?: string }
   | { readonly source: "model" | "user"; readonly text: string };
 
 /** Max length of a chosen title in a record (the wire's `MAX_SESSION_TITLE`). */
@@ -51,31 +57,42 @@ export function recordTitleText(record: Pick<SessionRecord, "title">): string {
   return typeof record.title === "string" ? record.title : record.title.text;
 }
 
-/** The record's title as a `TitleState` (a string is the derived, `auto` one). */
+/**
+ * The record's title as a `TitleState`. A plain string is a DERIVED title:
+ * pinned to that text (an `auto` title carrying it), never re-derived — the
+ * record's string already IS this session's name, and deriving it again from
+ * the messages names it after a compaction's summary instead.
+ * `recordTitleText` keeps reading that string as the name.
+ */
 export function recordTitleState(record: Pick<SessionRecord, "title">): TitleState {
-  return typeof record.title === "string"
-    ? { source: "auto" }
-    : { source: record.title.source, text: record.title.text };
+  if (typeof record.title !== "string") {
+    return { source: record.title.source, text: record.title.text };
+  }
+  // The sentinel is not a name: a session with no visible message yet derives
+  // again at the next save (its first prompt must become its title).
+  return record.title === EMPTY_TITLE ? { source: "auto" } : { source: "auto", text: record.title };
 }
 
-/** The record form of `state`: `auto` → today's string (derived from `messages`), chosen → the object. */
+/** The record form of `state`: `auto` → its pinned text, else today's string (derived from `messages`); chosen → the object. */
 export function encodeTitle(
   state: TitleState,
   messages: readonly ChatMessage[],
 ): string | RecordTitle {
   return state.source === "auto"
-    ? sessionTitle(messages)
+    ? (state.text ?? sessionTitle(messages))
     : { text: state.text, source: state.source };
 }
 
 const TITLE_MAX = 80;
+/** What `sessionTitle` answers with when the history holds no message the person wrote. */
+export const EMPTY_TITLE = "(empty)";
 
 /** A short, single-line label for a session (its first user message). */
 export function sessionTitle(messages: readonly ChatMessage[]): string {
   const firstUser = messages.find((m) => m.role === "user" && m.note === undefined);
   const text = (firstUser?.content ?? "").replace(/\s+/g, " ").trim();
   if (text === "") {
-    return "(empty)";
+    return EMPTY_TITLE;
   }
   return text.length > TITLE_MAX ? `${text.slice(0, TITLE_MAX - 1)}…` : text;
 }

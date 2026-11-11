@@ -77,3 +77,13 @@ export function clearErrorNotice(message: string): string {
 
 /** Another device cleared the shared conversation. */
 export const CLEARED_ELSEWHERE_NOTICE = "_the conversation was cleared on another device_";
+
+/**
+ * This TUI's own `/clear` succeeded: the conversation is gone, the session (and
+ * its background work) goes on. Said, never silent — the user asked for
+ * something and must see it happened (docs/fix/connect-functest-batch.md item E:
+ * on `connect` the cleared transcript just vanished). `after` is the daemon's
+ * own count of what the fresh chat holds; it is not shown: the transcript is the
+ * record, and a message count beside an empty screen is noise.
+ */
+export const CLEARED_NOTICE = "_Conversation cleared — a fresh chat in this session_";

@@ -10,7 +10,7 @@
  * daemon's own processing of what it holds (the model's output, a client's
  * rename) — never a client guessing what the daemon knows.
  */
-import { type TitleState, sessionTitle } from "@tentacle/agent";
+import { EMPTY_TITLE, type TitleState, sessionTitle } from "@tentacle/agent";
 import type { ChatMessage, ChatRequest } from "@tentacle/core";
 import { MAX_SESSION_TITLE } from "@tentacle/protocol";
 import { wireLine } from "./mapping.ts";
@@ -39,9 +39,9 @@ export interface TitleInput {
   readonly firstReply: string;
 }
 
-/** The text a title state shows (`auto`: derived from `messages`). */
+/** The text a title state shows (`auto`: its pinned text, else derived from `messages`). */
 export function titleText(state: TitleState, messages: readonly ChatMessage[]): string {
-  return state.source === "auto" ? sessionTitle(messages) : state.text;
+  return state.source === "auto" ? (state.text ?? sessionTitle(messages)) : state.text;
 }
 
 /**
@@ -142,11 +142,18 @@ export function renameText(raw: string): string | null {
 /**
  * A chosen title that came from outside this incarnation (an `open` seed, a
  * reloaded record) as a state: made one clean line, `auto` when absent or
- * nothing visible is left.
+ * nothing visible is left. A plain STRING is the record's derived title —
+ * pinned to that text (docs/fix/connect-functest-batch.md item C: re-deriving
+ * it from a compacted history would name the session after its summary).
  */
 export function seedState(
-  title: { readonly text: string; readonly source: "model" | "user" } | undefined,
+  title: { readonly text: string; readonly source: "model" | "user" } | string | undefined,
 ): TitleState {
+  if (typeof title === "string") {
+    const text = wireLine(title, MAX_SESSION_TITLE);
+    // The record's "no name yet" sentinel is not a name: derive.
+    return text === "" || text === EMPTY_TITLE ? { source: "auto" } : { source: "auto", text };
+  }
   const text = title ? wireLine(title.text, MAX_SESSION_TITLE) : "";
   return title && text !== "" ? { source: title.source, text } : { source: "auto" };
 }
