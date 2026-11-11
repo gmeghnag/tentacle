@@ -10,7 +10,7 @@
  */
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
 import type { ChatMessage, ToolResult, ToolResultDetail, ToolResultSpill } from "@tentacle/core";
-import { describeRepairs } from "@tentacle/core";
+import { describeEmptyTurn, describeRepairs, describeTruncation } from "@tentacle/core";
 import { messagesToItems } from "./resume.ts";
 import { nextToolStatus } from "./tool-phase-view.ts";
 
@@ -183,6 +183,33 @@ export function appendNotice(
     ...(opts.host ? { host: true as const } : {}),
   };
   return { ...state, items: append(state.items, item) };
+}
+
+/**
+ * Whether the transcript already carries a notice whose text is `text` in this
+ * TURN — the current turn's items only, so a new message may say the same thing
+ * again. Used by the notices that must appear ONCE per turn rather than once per
+ * round (a re-asked round repeats its cause, docs/fix/truncated-reply-silent.md).
+ */
+function noticeSeenThisTurn(state: DisplayState, text: string): boolean {
+  const at = state.items.findLastIndex((item) => item.kind === "user");
+  return state.items.slice(at + 1).some((item) => item.kind === "notice" && item.text === text);
+}
+
+/**
+ * Whether any of this turn's MODEL text reached the screen: a cut reply that had
+ * none must not claim "this answer is incomplete" (there is no answer on
+ * screen). A command notice (`notice: true`) is not model text.
+ */
+function turnHasAnswerText(state: DisplayState): boolean {
+  const at = state.items.findLastIndex((item) => item.kind === "user");
+  return state.items
+    .slice(at + 1)
+    .some(
+      (item) =>
+        (item.kind === "assistant" && item.notice !== true && item.text.trim() !== "") ||
+        item.kind === "tool",
+    );
 }
 
 /**
@@ -494,6 +521,25 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
     // (docs/fix/deepseek-dsml-leak.md).
     case "dsml_leak":
       return appendNotice(state, event.text);
+
+    // A reply cut at the model's output limit, or a stream cut outright: shown,
+    // because a partial answer presented as complete is the bug being fixed
+    // (docs/fix/truncated-reply-silent.md). `cut` also fails the turn, so the
+    // App's own error path adds the failure line.
+    case "truncated_reply": {
+      // ONE notice per TURN (a re-asked round cuts again and repeats its cause):
+      // the reducer sees every round, while the user needs the fact once.
+      const text = describeTruncation(event.reason, {
+        answered: turnHasAnswerText(state),
+        retrying: event.reason === "length",
+      });
+      return noticeSeenThisTurn(state, text) ? state : appendNotice(state, text);
+    }
+
+    // The turn is ending with nothing produced: SAY so, never leave the screen
+    // as it was (the reported "looks hung").
+    case "empty_turn":
+      return appendNotice(state, describeEmptyTurn());
 
     // The model was sent a repaired copy of the history (once per session;
     // docs/feat/history-validity-invariant.md). The saved session is unchanged.

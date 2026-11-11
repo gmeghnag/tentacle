@@ -4,7 +4,13 @@
  * whatever it returns.
  */
 import type { AgentEvent } from "@tentacle/agent";
-import { describeRepairs, toolLabel } from "@tentacle/core";
+import {
+  type TruncationReason,
+  describeEmptyTurn,
+  describeRepairs,
+  describeTruncation,
+  toolLabel,
+} from "@tentacle/core";
 
 export function render(event: AgentEvent): string {
   switch (event.type) {
@@ -57,6 +63,15 @@ export function render(event: AgentEvent): string {
       // The reply was refused as a leaked tool call and the model re-asked: the
       // user must know why their answer was dropped (docs/fix/deepseek-dsml-leak.md).
       return `\n${event.text}\n`;
+    case "truncated_reply":
+      // A partial answer is never presented as a complete one. `AnswerSplit`
+      // owns the per-turn dedupe and the "was anything shown?" fact, so this
+      // arm (the raw per-event renderer) names the conservative case.
+      return `\n[truncated] ${describeTruncation(event.reason, { answered: true, retrying: event.reason === "length" })}\n`;
+    case "empty_turn":
+      // The turn produced nothing: on stderr with the rest of the trace, so
+      // stdout stays clean data while the user still learns why.
+      return `\n[empty turn] ${describeEmptyTurn()}\n`;
     case "history_repaired":
       // Once per session: the model was sent a repaired copy, the saved
       // session is unchanged (docs/feat/history-validity-invariant.md).
@@ -64,6 +79,17 @@ export function render(event: AgentEvent): string {
     case "turn_end":
       return event.reason === "end_turn" ? "\n" : `\n[stopped: ${event.reason}]\n`;
   }
+}
+
+/**
+ * The `[truncated]` trace line, with the ONE fact the renderer cannot know:
+ * whether this turn had already written an answer (docs/fix/truncated-reply-silent.md).
+ */
+export function truncationNotice(reason: TruncationReason, answered: boolean): string {
+  return `\n[truncated] ${describeTruncation(reason, {
+    answered,
+    retrying: reason === "length",
+  })}\n`;
 }
 
 /**
@@ -114,6 +140,15 @@ export class AnswerSplit {
    * repaired round (docs/feat/history-validity-invariant.md).
    */
   private repairNoticed = false;
+  /**
+   * A `truncated_reply` notice was already shown for THIS turn. The reducer's
+   * own rule, one layer up (docs/fix/truncated-reply-silent.md): a re-asked
+   * round cuts again and repeats its cause, and the user needs the fact once.
+   * Reset by `turn_end`, so the next turn may say it again.
+   */
+  private truncationNoticed = false;
+  /** Whether this turn's model text reached stdout (see `truncationNoticed`). */
+  private turnAnswered = false;
 
   /**
    * `shared`: stdout and stderr are the SAME terminal, so the answer moves the
@@ -139,10 +174,13 @@ export class AnswerSplit {
       if (event.delta !== "") {
         out = `${this.traced && !this.outCursorAtLineStart ? "\n" : ""}${event.delta}`;
         this.traced = false;
+        this.turnAnswered = true;
       }
     } else if (event.type === "turn_end") {
       out = this.outCursorAtLineStart ? "" : "\n";
       err = event.reason === "end_turn" ? "" : `[stopped: ${event.reason}]\n`;
+      this.truncationNoticed = false;
+      this.turnAnswered = false;
     } else {
       if (event.type === "history_repaired") {
         // Once per session: a later repaired round of the same run stays quiet.
@@ -150,6 +188,18 @@ export class AnswerSplit {
           return { out: "", err: "" };
         }
         this.repairNoticed = true;
+      }
+      if (event.type === "truncated_reply") {
+        // Once per TURN, and honest about whether an answer was on screen.
+        if (this.truncationNoticed) {
+          return { out: "", err: "" };
+        }
+        this.truncationNoticed = true;
+        err = this.freshLine(truncationNotice(event.reason, this.turnAnswered));
+        if (err !== "") {
+          this.traced = true;
+        }
+        return { out, err };
       }
       err = this.freshLine(render(event));
       if (err !== "") {

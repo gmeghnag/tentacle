@@ -290,6 +290,11 @@ export function updateToEvent(
     case "dsml_leak":
       // Its own kind, so an older client skips it (docs/fix/deepseek-dsml-leak.md).
       return { type: "dsml_leak", text: update.text };
+    case "truncated_reply":
+      // A cut reply / an empty turn: notices only (docs/fix/truncated-reply-silent.md).
+      return { type: "truncated_reply", reason: update.reason };
+    case "empty_turn":
+      return { type: "empty_turn" };
     case "history_repaired":
       return {
         type: "history_repaired",

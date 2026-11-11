@@ -401,6 +401,18 @@
       "type": "object",
       "x-event-class": "display"
     },
+    "EmptyTurn": {
+      "additionalProperties": true,
+      "properties": {
+        "type": {
+          "const": "empty_turn",
+          "type": "string"
+        }
+      },
+      "required": ["type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
     "EnqueueParams": {
       "additionalProperties": true,
       "properties": {
@@ -2752,6 +2764,7 @@
           "background_exit": "#/$defs/BackgroundExit",
           "context_note": "#/$defs/ContextNote",
           "dsml_leak": "#/$defs/DsmlLeakUpdate",
+          "empty_turn": "#/$defs/EmptyTurn",
           "history_repaired": "#/$defs/HistoryRepaired",
           "history_replaced": "#/$defs/HistoryReplaced",
           "jobs": "#/$defs/JobsUpdate",
@@ -2770,6 +2783,7 @@
           "tool_call_phase": "#/$defs/ToolCallPhase",
           "tool_call_update": "#/$defs/ToolCallUpdate",
           "tool_progress": "#/$defs/ToolProgress",
+          "truncated_reply": "#/$defs/TruncatedReply",
           "turn_end": "#/$defs/TurnEndUpdate",
           "turn_start": "#/$defs/TurnStart"
         },
@@ -2805,6 +2819,12 @@
         },
         {
           "$ref": "#/$defs/DsmlLeakUpdate"
+        },
+        {
+          "$ref": "#/$defs/TruncatedReply"
+        },
+        {
+          "$ref": "#/$defs/EmptyTurn"
         },
         {
           "$ref": "#/$defs/HistoryRepaired"
@@ -3369,6 +3389,22 @@
       },
       "required": ["chars", "head", "omitted", "tail"],
       "type": "object"
+    },
+    "TruncatedReply": {
+      "additionalProperties": true,
+      "properties": {
+        "reason": {
+          "enum": ["length", "cut"],
+          "type": "string"
+        },
+        "type": {
+          "const": "truncated_reply",
+          "type": "string"
+        }
+      },
+      "required": ["reason", "type"],
+      "type": "object",
+      "x-event-class": "display"
     },
     "TurnEnd": {
       "additionalProperties": true,

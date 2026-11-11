@@ -395,7 +395,11 @@ describe("AnthropicProvider.stream", () => {
     ]);
 
     const done = events.at(-1);
-    expect(done).toEqual({ type: "done", usage: { promptTokens: 10, completionTokens: 5 } });
+    expect(done).toEqual({
+      type: "done",
+      usage: { promptTokens: 10, completionTokens: 5 },
+      stopReason: "tool_calls",
+    });
   });
 
   test("maps thinking deltas to reasoning events", async () => {
@@ -403,7 +407,11 @@ describe("AnthropicProvider.stream", () => {
     const reasoning = events.find((e) => e.type === "reasoning");
     expect(reasoning).toEqual({ type: "reasoning", delta: "hmm" });
     const done = events.at(-1);
-    expect(done).toEqual({ type: "done", usage: { promptTokens: 3, completionTokens: 2 } });
+    expect(done).toEqual({
+      type: "done",
+      usage: { promptTokens: 3, completionTokens: 2 },
+      stopReason: "stop",
+    });
   });
 
   test("throws ModelRequestError on a non-2xx response", async () => {
@@ -616,13 +624,18 @@ describe("prompt usage with prompt caching", () => {
         cache_read_input_tokens: 11000,
         cache_creation_input_tokens: 960,
       }),
-    ).toEqual({ type: "done", usage: { promptTokens: 12000, completionTokens: 30 } });
+    ).toEqual({
+      type: "done",
+      usage: { promptTokens: 12000, completionTokens: 30 },
+      stopReason: "stop",
+    });
   });
 
   test("absent cache counts add nothing", async () => {
     expect(await done({ input_tokens: 40 })).toEqual({
       type: "done",
       usage: { promptTokens: 40, completionTokens: 30 },
+      stopReason: "stop",
     });
   });
 });

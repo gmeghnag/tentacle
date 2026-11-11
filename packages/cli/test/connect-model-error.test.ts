@@ -212,6 +212,10 @@ test("(b) a second send while a turn runs is refused, and that turn still ends",
             choices: [{ delta: { role: "assistant", content: "first" }, finish_reason: null }],
           };
           controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chunk)}\n\n`));
+          // A COMPLETE reply names its stop reason: a stream that just ends is
+          // an error since docs/fix/truncated-reply-silent.md (owner Q2a).
+          const finish = { choices: [{ delta: {}, finish_reason: "stop" }] };
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(finish)}\n\n`));
           controller.close();
         },
       });

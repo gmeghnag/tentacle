@@ -77,7 +77,11 @@ describe("OpenAIProvider.stream", () => {
     });
 
     const done = events.at(-1);
-    expect(done).toEqual({ type: "done", usage: { promptTokens: 10, completionTokens: 5 } });
+    expect(done).toEqual({
+      type: "done",
+      usage: { promptTokens: 10, completionTokens: 5 },
+      stopReason: "tool_calls",
+    });
   });
 
   test("throws ModelRequestError on a non-2xx response", async () => {

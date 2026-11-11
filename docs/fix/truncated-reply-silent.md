@@ -1,6 +1,6 @@
 # fix/truncated-reply-silent — a cut-off reply is accepted as complete, and a dead turn ends with nothing shown
 
-> **Status:** context + implementation drafted; awaiting owner decisions Q1–Q5
+> **Status:** execution complete; awaiting fresh-context Review
 > **Branch:** `fix/truncated-reply-silent`
 > **Type:** fix · **Size:** S–M · **Blast:** cross-module · **Suited:** DeepSeek exec (fresh-context Review: it touches the agent loop)
 
@@ -437,7 +437,177 @@ Q1 (a) visible notice + ONE bounded "continue" re-ask · Q2 (a) a cut stream is 
 
 ## Execution
 
-*— (empty: this run is triage + plan; no production code changed)*
+*— deepseek (executor), 2026-11-11*
+
+### Repro first (on the branch as found, commit `256e4e0`)
+
+The repro scripts were still in the worktree's own `.tentacle/tmp/truncated-reply/`
+(gitignored, so they are not in git). Note a tooling constraint, not a code one:
+the outer path `/Users/gmeghnag/tentacle/.tentacle/tmp/truncated-reply/` named in
+the spawn brief is outside this worktree's writable roots, so all scratch lives in
+`.tentacle/tmp/truncated-reply/` INSIDE the worktree (still gitignored, still
+outside `tsconfig`/`bun test` discovery, AGENTS §6).
+
+Before any edit, every row of the Context's triage reproduced identically:
+
+```
+$ bun repro.ts
+--- length: [{"type":"text","delta":"la vera"},{"type":"text","delta":" soluzione"},{"type":"done"}]
+--- nodone: [{"type":"text","delta":"la vera"},{"type":"text","delta":" soluzione"},{"type":"done"}]
+--- empty_length: [{"type":"done"}]
+--- toolcut_length: [{"type":"tool_call",...arguments":"{\"path\":\"a.ts\","}},{"type":"done"}]
+$ bun e2e.ts      # length/nodone -> ["text","text","turn_end"]; empty_length -> ["context_note","turn_end"]
+$ bun toolcut2.ts # rounds: 17, tool_result isError=true "invalid JSON arguments for echo", turn_end(max_iterations)
+$ bun agent4.ts   # model rounds: 3, events: ["context_note(continue)","turn_end"]  <- nothing user-visible
+$ bun tui-e2e.ts  # length: partial text as the answer; empty_length: "› hi" and then nothing
+```
+
+### As built, in the plan's order
+
+1. `packages/core/src/model.ts` — `ModelStopReason` (`stop|length|tool_calls|other`)
+   and `StreamEvent.done.stopReason?`. Additive and optional, so every existing
+   producer and consumer kept compiling.
+2. `packages/core/src/truncation.ts` (new, re-exported from `core/src/index.ts`) —
+   the wording (`describeTruncation`, `describeEmptyTurn`) and
+   `ModelStreamCutError` (constructors `no-stop-reason` / `cut-tool-call`). One
+   pure module, so the TUI and the CLI cannot drift (AGENTS §7).
+3. `packages/providers/src/openai-provider.ts` — records the last
+   `finish_reason` (`normalizeFinishReason`) and reports it on `done`; NO
+   `finish_reason` at all reports `"other"` (the stream was cut).
+4. `packages/providers/src/anthropic-provider.ts` — same, from
+   `message_delta.stop_reason`, reusing `TRUNCATING_STOP_REASONS`
+   (`max_tokens`/`refusal` → `"length"`); a stream with no `message_delta` → `"other"`.
+5. `packages/agent/src/agent.ts` — four decisions on the round's `stopReason`:
+   `"other"` → `truncated_reply{cut}` then `ModelStreamCutError` (the turn fails);
+   `"length"` + a tool call → `truncated_reply{length}` then
+   `ModelStreamCutError{cut-tool-call}` (never dispatched); `"length"` with text
+   → the text is kept as the answer, `truncated_reply{length}`, ONE bounded
+   re-ask (`MAX_TRUNCATION_REASKS = 1`, note `TRUNCATION_REASK_NOTE`); `"length"`
+   with nothing at all → the same one re-ask, charged to its own budget so it
+   never spends `MAX_EMPTY_CONTINUES`. The turn's stall tail yields
+   `empty_turn` before `turn_end` when the WHOLE turn said nothing.
+6. `packages/protocol/src/updates.ts` — `TruncatedReplySchema`
+   (`reason: length|cut`) and `EmptyTurnSchema`, both `display` in
+   `UPDATE_CLASS`, union members. **No `PROTOCOL_VERSION` bump** (still 22).
+7. `packages/daemon/src/mapping.ts` / 8. `packages/client/src/mapping.ts` — the
+   two arms, both directions.
+9. `packages/tui/src/state.ts` (one notice per TURN, honest `answered`) and
+   `packages/cli/src/render.ts` (`AnswerSplit` dedupes per turn the same way).
+10. `packages/protocol/schema/protocol.json` regenerated (`bun run schema:export`).
+11. `CHANGELOG.md` (Fixed).
+
+### Drift from the Implementation (and why)
+
+- **The re-ask does not preserve the step budget the way the plan said.** The
+  Implementation pointed at `dsml_leak`'s `budgetFrom--`. Measured, that SHRINKS
+  the budget (`iteration - budgetFrom` grows), and with `maxIterations: 1` the
+  re-ask ended the turn as `max_iterations` before delivering the rest. The
+  re-ask now does `budgetFrom++`, i.e. moves the window WITH the iteration, which
+  is what "replaces the cut round" means here. Pinned by "the re-ask does not eat
+  the turn's step budget" (`truncated-reply.test.ts`), which is RED on
+  `budgetFrom--`.
+- **The plan's two `length` branches are ONE branch.** The Implementation named
+  `length` with text and `length` with nothing separately; they differ only in
+  whether the empty assistant message is popped, so they are merged (one re-ask
+  budget, one note), which is what keeps case 3 and case 1 from drifting apart.
+- **`MAX_EMPTY_CONTINUES` is untouched, but one flag was added**:
+  `turnSaidSomething`. Without it, a turn whose ONLY text was a cut reply ended
+  with `empty_turn` after its re-ask came back empty — telling the user nothing
+  was produced when their (partial) answer was on screen. Pinned by "a turn whose
+  ONLY text is a cut reply keeps its text and never says empty".
+- **`length` with NO text is a separate branch.** The plan's step 3 folded it into
+  the "keep the text" case; there is no text to keep, and its re-ask must not be
+  charged to `emptyRounds` (case 3). Two branches, one re-ask budget.
+- **The notice is deduped per TURN in both frontends.** Not in the plan, found by
+  rendering the real thing: a re-asked round cuts again, so `truncated_reply`
+  arrives twice per turn and the TUI printed the same paragraph twice. The
+  reducer keeps one per turn (`noticeSeenThisTurn`), `AnswerSplit` does the same,
+  reset at `turn_end` — so a new message may say it again. Measured
+  (`tui-after.ts`, `empty_length`): 4 repeats before, 1 now.
+- **`answered` is computed, not assumed.** The plan had the frontend pass a
+  constant. It now asks whether THIS turn put model text on screen
+  (`turnHasAnswerText` in the TUI, `turnAnswered` in `AnswerSplit`), so an empty
+  `length` round reads `the model returned nothing: it hit its output limit
+  before writing anything` instead of claiming an answer was cut.
+- **A pre-existing test fake had to name its stop reason.**
+  `cli/test/connect-model-error.test.ts` (case (b)) served a COMPLETE reply with
+  no `finish_reason`, which the new rule (owner Q2a) correctly fails. The fake now
+  sends `finish_reason: "stop"` — the intended contract change, not a workaround.
+- **`AgentEvent` lives in `@tentacle/agent`, not `@tentacle/core`** (three test
+  files re-imported it accordingly).
+- `daemon/test/mapping.test.ts`'s "covers every known type" sample list grew the
+  two kinds (that guard exists to catch exactly this).
+
+### Verification
+
+Red-before-green, each shown RED on the code as it was, then green. The mutation
+column is the non-vacuity check asked for (§9): break the production hunk, watch
+the named tests fail, restore.
+
+| Case | Test file · test name | Mutation → result |
+| --- | --- | --- |
+| (1) text + `length` | `agent/test/truncated-reply.test.ts` · "keeps the text, says so, and re-asks ONCE"; "the re-ask is BOUNDED to one"; "the re-ask does not eat the turn's step budget" | `cutByLength = ... && false` → all 3 RED (5 `fail` in the 2 agent files, 6 with case 5) |
+| (2) cut stream | `agent/test/truncated-reply.test.ts` · "FAILS the turn — partial text is not an answer"; "the cut's text is kept in the history" | `stopReason === "other"` → `&& false` → both RED |
+| (3) empty + `length` | `agent/test/empty-turn.test.ts` · "gets the truncation re-ask, not the stall nudge"; "does NOT spend the stall nudges" | `cutByLength` mutation → both RED |
+| (4) nudges exhausted | `agent/test/empty-turn.test.ts` · "yields `empty_turn` before `turn_end`, instead of silence" | `&& false` on the `empty_turn` yield → RED |
+| (5) tool args cut | `agent/test/truncated-reply.test.ts` · "refused before dispatch: no tool_start, no round loop" | `stopReason === "length" && toolCalls.length > 0` → `&& false` → RED |
+| provider boundary | `providers/test/openai-stop-reason.test.ts` (7), `anthropic-stop-reason.test.ts` (4) | `finishReason ?? "other"` → never the recorded value → 5 of 7 RED |
+| the user's screen (TUI) | `tui/test/truncated-reply-notice.test.tsx` (8, real `App` frames) | each notice arm → `return state` → 5 RED; both → 6 RED |
+| the CLI's trace | `cli/test/truncated-render.test.ts` (7) | each arm → `return ""` → 3 RED |
+| the wire | `protocol/test/truncated-kind.test.ts` (5), `daemon/client *-truncated-mapping` (5) | arms absent means the union/mapping cannot exist (tabulated guard) |
+| the wording | `core/test/truncation.test.ts` (5) | functions absent before the fix |
+
+Post-fix trace of the same five cases (`bun after.ts`, the Context's fakes):
+
+```
+--- length: rounds=2 events=["text","truncated_reply","note","text","turn_end"]
+--- nodone: rounds=0 events=["text","text","truncated_reply"] THREW ModelStreamCutError (no stop reason)
+--- empty_length: rounds=4 events=["truncated_reply","note","truncated_reply","note","truncated_reply","truncated_reply","empty_turn","turn_end"]
+--- toolcut_length: rounds=0 events=["truncated_reply"] THREW ModelStreamCutError (the call was not run)
+```
+
+TUI frames of the REAL `App` (`bun tui-after.ts`), the owner's two symptoms:
+
+```
+===== length =====
+› hi
+⏺ la vera soluzione
+⏺ the reply was cut at the model's output limit — this answer is incomplete; asking it to continue
+⏺ la vera soluzione
+===== nodone =====
+⏺ the model's stream was cut before it finished — this answer is incomplete
+⏺ ⚠ ModelStreamCutError: the model's stream was cut before the reply finished (no stop reason) — …
+===== empty_length =====
+⏺ the model returned nothing: it hit its output limit before writing anything; asking it to continue
+⏺ the model returned an empty reply and did not continue when asked — nothing was produced for this turn (check the model's context window and the server's logs)
+```
+
+Gate:
+
+```
+$ bunx tsc --noEmit      # clean
+$ bun run lint           # biome check . — clean (baseline per AGENTS §6)
+$ bun test packages/     # 6832 pass, 3 opt-in skips, 0 fail (493 files)
+$ bun test               # 6871 pass, 3 skip, + apps/mobile/test/rn-websocket.test.ts:
+                         #   error: Cannot find module '@tentacle/client' — apps/mobile deps
+                         #   are absent in this checkout, and bun counts that one file as
+                         #   both the 1 fail and the 1 error. The only failure.
+```
+
+### Known debt / not done here
+
+- The trailing EMPTY assistant message an exhausted stall leaves in the history
+  (`agent4.ts`'s tail: `{"role":"assistant","content":""}`) is pre-existing on
+  both sides of this fix and is left alone; the turn now says `empty_turn`
+  regardless, which is what the user was missing.
+- The TUI's error line renders `⚠ ModelStreamCutError: …` (the error's `name` and
+  message). That is the App's existing failed-turn rendering for every error, not
+  new here; making it read `⚠ <message>` alone is a separate, cross-cutting
+  change.
+- A genuinely complete reply from a shim that never sends `finish_reason` now
+  FAILS its turn (owner Q2a's accepted risk). The `providers` tests pin both
+  shapes, so changing that decision later is a one-line change in
+  `openai-provider.ts`.
 
 ## Review
 
