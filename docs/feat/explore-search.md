@@ -1232,6 +1232,11 @@ arguments cost more steps than one more field costs definition bytes. Measured:
 - **My recommendation: (a).** The measured step cost of *not* having it is the
   whole reason for the task; the extra definition is ~120 characters.
 
+
+#### Owner answers (2026-11-12)
+
+Q1 **(c) `explore` only** (owner chose against the recommendation: the main agent and `general` keep `shell`) · Q2 (a) MCP read-only + `mcp__<server>__*` are separate tasks · Q3 (a) · Q4 (a) · Q5 (a) 100 results / 12000 bytes · Q6 **(a)** refuse absolute paths and lexically escaping `..`, symlinks resolved-or-refused · Q7 **(a)** translate `\d \w \s`, refuse the rest with an actionable message (decided by the orchestrator on the owner's delegation: "fai tu la scelta migliore in termini di compatibilità multipiattaforma" — the only option that is never silently wrong on any engine) · Q8 (a) `glob` in both modes + files-with-matches. Plan approved for execution.
+
 ## Execution
 
 *— (empty: PLAN ONLY; the executor fills this)*
