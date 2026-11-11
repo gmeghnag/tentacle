@@ -53,6 +53,10 @@ export function render(event: AgentEvent): string {
     case "context_note":
       // A user hook's note is shown (R1); the loop's own notes are not.
       return event.reason === "hook" ? `\n${event.text}\n` : "";
+    case "dsml_leak":
+      // The reply was refused as a leaked tool call and the model re-asked: the
+      // user must know why their answer was dropped (docs/fix/deepseek-dsml-leak.md).
+      return `\n${event.text}\n`;
     case "history_repaired":
       // Once per session: the model was sent a repaired copy, the saved
       // session is unchanged (docs/feat/history-validity-invariant.md).

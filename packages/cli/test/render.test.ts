@@ -119,6 +119,29 @@ describe("AnswerSplit", () => {
     expect(err).not.toContain("42");
   });
 
+  test("a context_note shows for a hook; a refused DSML tool call shows as its own kind", () => {
+    const hook = run([
+      { type: "context_note", text: "hook said so", reason: "hook" },
+      { type: "turn_end", reason: "end_turn" },
+    ]);
+    expect(`${hook.out}${hook.err}`).toContain("hook said so");
+
+    // The loop's own notes stay hidden — but the re-ask after a leaked DSML
+    // tool call is the one the user must see, and it rides its own kind
+    // (docs/fix/deepseek-dsml-leak.md, Review MEDIUM-1).
+    const leak = run([
+      { type: "dsml_leak", text: "use the tool mechanism" },
+      { type: "turn_end", reason: "end_turn" },
+    ]);
+    expect(`${leak.out}${leak.err}`).toContain("use the tool mechanism");
+
+    const nudge = run([
+      { type: "context_note", text: "Continue with the task.", reason: "continue" },
+      { type: "turn_end", reason: "end_turn" },
+    ]);
+    expect(`${nudge.out}${nudge.err}`).not.toContain("Continue with the task.");
+  });
+
   test("history_repaired is noticed once per AnswerSplit (one-shot CLI: one line per run)", () => {
     // Mutation: drop the `repairNoticed` guard in `push` → one line per round.
     const notice = {

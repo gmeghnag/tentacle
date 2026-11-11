@@ -71,6 +71,10 @@ function applyUpdate(items: Item[], update: SessionUpdate): void {
       return;
     case "steer":
     case "context_note":
+    // The DSML re-ask note is pushed to the history as a user message too
+    // (docs/fix/deepseek-dsml-leak.md): folding it the same way keeps a live
+    // transcript and a resynced one in agreement.
+    case "dsml_leak":
       items.push({ kind: "user", text: update.text });
       return;
     default:
@@ -117,6 +121,7 @@ export function foldEvents(
         items.push({ kind: "user", text: event.text });
         break;
       case "context_note":
+      case "dsml_leak":
         items.push({ kind: "user", text: event.text });
         break;
       case "text":

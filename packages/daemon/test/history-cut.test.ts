@@ -227,6 +227,7 @@ function applyUpdates(base: Item[], updates: readonly KnownSessionUpdateParams[]
         break;
       case "steer":
       case "context_note":
+      case "dsml_leak":
         flush();
         out.push(`user:${u.text}`);
         break;

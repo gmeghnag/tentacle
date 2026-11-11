@@ -117,11 +117,31 @@ export const SteerSchema = z.object({
  * Display-only (frontends usually hide the loop's own notes), but it makes
  * every history message replayable, so a client that resynced and one that
  * did not agree.
+ *
+ * The DSML re-ask is deliberately NOT a reason here: adding a member to a
+ * KNOWN kind's enum would make an older client see a known update whose value
+ * fails its schema (`malformed context_note`) — a new KIND is free instead
+ * (docs/fix/deepseek-dsml-leak.md, Review MEDIUM-1).
  */
 export const ContextNoteSchema = z.object({
   type: z.literal("context_note"),
   text: z.string(),
   reason: z.enum(["continue", "background_exit", "hook"]),
+});
+
+/**
+ * The model wrote a tool call as DSML text and the reply was refused, so it is
+ * being asked once more (docs/fix/deepseek-dsml-leak.md). Its own kind, not a
+ * `context_note` reason: an OLDER client does not know this tag, so it skips it
+ * and says `unsupported` once — where a new enum value on the known
+ * `context_note` would have failed its schema and surfaced as `malformed`
+ * (Review MEDIUM-1). Display only: nothing waits on it, and the re-ask note
+ * itself rides the conversation.
+ */
+export const DsmlLeakUpdateSchema = z.object({
+  type: z.literal("dsml_leak"),
+  /** The note the model was re-asked with (the same text it received). */
+  text: z.string(),
 });
 
 /**
@@ -344,6 +364,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   BackgroundExitSchema,
   SteerSchema,
   ContextNoteSchema,
+  DsmlLeakUpdateSchema,
   HistoryRepairedSchema,
   ToolProgressSchema,
   ToolCallPhaseSchema,
@@ -391,6 +412,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   background_exit: "display",
   steer: "display",
   context_note: "display",
+  // The DSML re-ask notice; the re-ask note rides the conversation itself.
+  dsml_leak: "display",
   // A notice; nothing waits on it (the repair is in the model's copy only).
   history_repaired: "display",
   // A label/meter on a running tool: skipping it hangs nothing (the result rides tool_call_update).

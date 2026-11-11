@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionUpdate, SessionUpdateParams } from "@tentacle/protocol";
+import { SessionUpdateSchema } from "@tentacle/protocol";
 import { classifyUpdate, stopReasonFromProtocol, updateToEvent } from "../src/mapping.ts";
 
 describe("stopReasonFromProtocol", () => {
@@ -206,6 +207,21 @@ describe("classifyUpdate (event classes: unknown display is 'unsupported', fail 
       kind: "unsupported",
       type: "toString",
     });
+  });
+
+  test("the DSML re-ask notice is a KNOWN display kind here, mapped to its own event", () => {
+    const update: SessionUpdate = { type: "dsml_leak", text: "use the tool mechanism" };
+    expect(classifyUpdate(frame(update))).toEqual({ kind: "update", update });
+    expect(updateToEvent(update, new Map())).toEqual({
+      type: "dsml_leak",
+      text: "use the tool mechanism",
+    });
+    // `context_note` did NOT grow a member for it (an older client would call
+    // that `malformed context_note`, docs/fix/deepseek-dsml-leak.md MEDIUM-1).
+    expect(
+      SessionUpdateSchema.safeParse({ type: "context_note", text: "x", reason: "leaked_tool_call" })
+        .success,
+    ).toBe(false);
   });
 });
 

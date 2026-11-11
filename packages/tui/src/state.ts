@@ -489,6 +489,12 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
     case "context_note":
       return event.reason === "hook" ? appendNotice(state, event.text) : state;
 
+    // The reply was refused as a leaked DSML tool call and the model re-asked:
+    // shown, so the user knows why their answer was dropped
+    // (docs/fix/deepseek-dsml-leak.md).
+    case "dsml_leak":
+      return appendNotice(state, event.text);
+
     // The model was sent a repaired copy of the history (once per session;
     // docs/feat/history-validity-invariant.md). The saved session is unchanged.
     case "history_repaired":

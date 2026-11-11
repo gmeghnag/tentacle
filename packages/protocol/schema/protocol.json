@@ -386,6 +386,21 @@
       "properties": {},
       "type": "object"
     },
+    "DsmlLeakUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "type": {
+          "const": "dsml_leak",
+          "type": "string"
+        }
+      },
+      "required": ["text", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
     "EnqueueParams": {
       "additionalProperties": true,
       "properties": {
@@ -2736,6 +2751,7 @@
           "agent_usage": "#/$defs/AgentUsage",
           "background_exit": "#/$defs/BackgroundExit",
           "context_note": "#/$defs/ContextNote",
+          "dsml_leak": "#/$defs/DsmlLeakUpdate",
           "history_repaired": "#/$defs/HistoryRepaired",
           "history_replaced": "#/$defs/HistoryReplaced",
           "jobs": "#/$defs/JobsUpdate",
@@ -2786,6 +2802,9 @@
         },
         {
           "$ref": "#/$defs/ContextNote"
+        },
+        {
+          "$ref": "#/$defs/DsmlLeakUpdate"
         },
         {
           "$ref": "#/$defs/HistoryRepaired"

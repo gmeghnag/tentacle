@@ -271,6 +271,12 @@ describe("display state reducer", () => {
     }
   });
 
+  test("the DSML re-ask notice is a visible notice of its own (MEDIUM-1)", () => {
+    const text = "use the tool-calling mechanism";
+    const s = applyEvent(initialState, { type: "dsml_leak", text }, 0);
+    expect(s.items.at(-1)).toEqual({ kind: "notice", text });
+  });
+
   test("history_repaired appends exactly one notice with the shared text (docs/feat/history-validity-invariant.md)", () => {
     // Mutation: map it to a no-op state → red.
     const s = applyEvent(

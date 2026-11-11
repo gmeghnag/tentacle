@@ -23,6 +23,8 @@ import {
   type ChatMessage,
   type ChatRequest,
   type ContextUsage,
+  DSML_REASK_NOTE,
+  DsmlToolCallLeakError,
   type ExecutionEnvironment,
   HeuristicTokenCounter,
   type JobController,
@@ -189,6 +191,8 @@ const MAX_EMPTY_CONTINUES = 2;
 const MAX_HOOK_CONTINUES = 3;
 /** The internal nudge injected to un-stick a model that returned an empty round. */
 const CONTINUE_NUDGE = "Continue with the task.";
+/** Max re-asks per turn after the model leaked a tool call as DSML text (never unbounded). */
+const MAX_DSML_REASKS = 1;
 /** Result recorded for a tool call skipped because the user cancelled mid-round,
  * so the assistant's `toolCalls` stay answered in the history. */
 const CANCELLED_TOOL_NOTE = "Cancelled by the user before this tool ran.";
@@ -390,6 +394,12 @@ export type AgentEvent =
       readonly text: string;
       readonly reason: "continue" | "background_exit" | "hook";
     }
+  // The model wrote a tool call as DSML text and the reply was refused; the
+  // re-ask note rides the conversation, this is the notice to show
+  // (docs/fix/deepseek-dsml-leak.md). Its own event, not a `context_note`
+  // reason: it crosses the wire as its own update KIND, so an older client
+  // skips it as `unsupported` instead of failing its schema (Review MEDIUM-1).
+  | { readonly type: "dsml_leak"; readonly text: string }
   // The model was sent a repaired copy of the history
   // (docs/feat/history-validity-invariant.md): invalid tool arguments replaced
   // by a marker, unanswered calls answered, stray tool results left out. The
@@ -1098,6 +1108,8 @@ export class Agent {
     // ("fresh context, fresh rounds"). `iteration` stays the turn's round
     // index (the `model_request` hook's).
     let budgetFrom = 0;
+    /** Re-asks spent on a DSML-leaked tool call, per turn (`MAX_DSML_REASKS`). */
+    let dsmlReasks = 0;
     for (let iteration = 0; iteration - budgetFrom < maxIterations; iteration++) {
       if (signal?.aborted) {
         this.notifyTurnEnd(sessionId, "cancelled");
@@ -1172,11 +1184,26 @@ export class Agent {
           yield { type: "turn_end", reason: "cancelled" };
           return;
         }
-        // A failure after text was streamed (a lost model connection): what the
-        // user already saw stays in the history, so a later attach or resume
-        // shows it too (docs/fix/detach-live.md round 10, owner B). Its tool
-        // calls never ran: dropped. The host closes the history with the cause.
-        if (text !== "") {
+        // The model leaked a tool call as DSML text (docs/fix/deepseek-dsml-leak.md):
+        // not an answer, so never stored as one. Tell the model how to call for
+        // real and run the round again — bounded to ONE re-ask (a second leak is
+        // a model-side failure the user must see, not a loop to sit in).
+        // `continue` needs no history fixup: nothing was pushed for this round.
+        if (error instanceof DsmlToolCallLeakError && dsmlReasks < MAX_DSML_REASKS) {
+          dsmlReasks++;
+          yield { type: "dsml_leak", text: DSML_REASK_NOTE };
+          messages.push({ role: "user", content: DSML_REASK_NOTE });
+          // The re-ask replaces the leaked round, not the turn's budget for
+          // real work (as an accepted context reset does, as `budgetFrom`).
+          budgetFrom--;
+          continue;
+        }
+        // A DSML leak is NOT an answer: the text is dropped, never pushed, so a
+        // second leak fails the turn without storing markup as the assistant's
+        // reply. A failure after other text was streamed (a lost model
+        // connection) keeps what the user already saw, so a later attach or
+        // resume shows it too (docs/fix/detach-live.md round 10, owner B).
+        if (text !== "" && !(error instanceof DsmlToolCallLeakError)) {
           messages.push({ role: "assistant", content: text });
         }
         throw error;
