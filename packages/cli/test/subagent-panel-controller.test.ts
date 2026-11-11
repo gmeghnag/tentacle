@@ -16,7 +16,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, createSubagentRunner } from "@tentacle/agent";
-import { RemoteSession } from "@tentacle/client";
+import { type RemoteClient, RemoteSession } from "@tentacle/client";
 import {
   AgentJobs,
   type ChatRequest,
@@ -29,8 +29,9 @@ import { Connection, LogSessionStore, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry, createTaskTool } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
 import type { SessionController } from "@tentacle/tui";
+import { autoAcceptTest, ownRequest } from "@tentacle/tui";
 import ts from "typescript";
-import { createLocalRuntime } from "../src/local-runtime.ts";
+import { createLocalRuntime, persistingController } from "../src/local-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 
 const macro = () => new Promise((r) => setTimeout(r, 2));
@@ -231,14 +232,56 @@ test("the runtime's controller stops the running child", async () => {
   }
 });
 
+/**
+ * `autoAcceptsTurn` is the ONE `SessionController` member a `RemoteSession` has
+ * that the wrapper must NOT forward, for TWO reasons: the inner test is WIDER
+ * than the wrapper's `ownsTurn` on a trusted `serve` (`daemonWakes`, set only by
+ * `connect`: it also accepts the session's own wake turns), AND NARROWER on an
+ * adopted run turn (`adoptTurn`): `ownsTurn` is `turnId === adoptedTurn ||
+ * inner.ownsTurn(turnId)` (`local-runtime.ts:594-595`), while
+ * `RemoteSession.autoAcceptsTurn` knows nothing of the adopted turn. The only
+ * safe wiring shape is therefore `ownsTurn(t) || inner.autoAcceptsTurn(t)` —
+ * never a plain forward, which `autoAcceptTest` (`permission-ui.ts:97`) would
+ * PREFER over `ownsTurn`, holding every ask of the run's own turn for a human
+ * who is not there. This pins the adopted-turn half on the REAL wrapper.
+ */
+test("auto-accept answers the adopted run turn's asks through the REAL wrapper (a plain `autoAcceptsTurn` forward would not)", () => {
+  // A run turn this client did not mint (its relay did: `attach-run.ts:368`).
+  const runTurn = "77777777-7777-4777-8777-777777777777";
+  const inner = {
+    ownsTurn: () => false, // a bare `RemoteSession` under `attach`: a foreign turn
+    autoAcceptsTurn: (turnId: string) => inner.ownsTurn(turnId), // as the REAL one: `ownsTurn || …`
+    onTitle: () => () => {},
+    watch: () => () => {},
+    readBack: async () => null,
+  } as unknown as RemoteSession;
+  const ctl = persistingController(
+    inner,
+    () => {},
+    () => {},
+    { source: "auto" },
+    runTurn,
+  );
+  // Whatever the App feeds the broker (`App.tsx:695`): the WIDEST test offered.
+  const test = autoAcceptTest(ctl);
+  if (!test) {
+    throw new Error("the runtime's controller offers no own-vs-foreign test at all");
+  }
+  expect(ctl.ownsTurn(runTurn)).toBe(true);
+  expect(inner.autoAcceptsTurn(runTurn)).toBe(false);
+  expect(test(runTurn)).toBe(true);
+  expect(ownRequest(runTurn, test)).toBe(true);
+  // A turn nobody here owns is still foreign: auto-accept must not answer it.
+  expect(test("88888888-8888-4888-8888-888888888888")).toBe(false);
+});
+
 test("GUARD: every `SessionController` member a `RemoteSession` has is on the runtime's controller", async () => {
   const dir = await mkdtemp(join(tmpdir(), "subagent-panel-ctl-"));
   const r = await runtimeOf(dir);
   try {
     // Read the DECLARATION, not a copy: `SessionController` is what the App
     // holds, so a member added there must reach this wrapper too (the next
-    // `messageSubagent` cannot be forgotten). Syntactic: no type checker needed,
-    // and `in RemoteSession.prototype` handles an optional member either way.
+    // `messageSubagent` cannot be forgotten). Syntactic: no type checker needed.
     const file = new URL("../../tui/src/App.tsx", import.meta.url);
     const source = ts.createSourceFile(
       file.pathname,
@@ -263,25 +306,85 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
     }
     // `settings`/`updateSettings` are the controller's own (a `run`/`attach`
     // laptop setting), not a `RemoteSession` member: only those the session has
-    // are the wrapper's to forward.
+    // are the wrapper's to forward (`undefined` for those two below).
+    //
+    // Selected off a real INSTANCE, never `RemoteSession.prototype`: a member
+    // written as a constructor-bound arrow property — this repo's own fix for
+    // the unbound-`this` class (docs/fix/clear-connect-unbound.md) — is absent
+    // from the prototype but present on every session. Selecting by the
+    // prototype would silently drop such a member from this guard, leaving the
+    // original bug (a forward dropped, the App refusing every call) green.
+    //
     // The three exclusions are CONNECT-ONLY by construction, never forgotten
     // forwards: `sessions` (the `/sessions` directory, `connect.ts:253`) is what
-    // reaches `detach`/`stayingRows` (`App.tsx:3135,3141`), and `daemonWakes`
-    // (`connect.ts:188`) is what makes `autoAcceptsTurn` wider than the
-    // `ownsTurn` the wrapper does forward. Adding one of them here without
+    // reaches `detach`/`stayingRows` (`App.tsx:3135,3141`); and
+    // `autoAcceptsTurn` MUST NOT be forwarded (`remote-session.ts:293-295`: it is
+    // wider than `ownsTurn` only under `daemonWakes`, `connect.ts:188`, and
+    // NARROWER than the wrapper's `ownsTurn` under `adoptTurn`,
+    // `local-runtime.ts:594-595`, `attach-run.ts:368` — `autoAcceptTest`
+    // (`permission-ui.ts:97`) prefers it, so a naive forward stalls `attach`
+    // auto-accept; pinned by the test below). Adding one of them here without
+    // wiring it is the only way this list may change; anything ELSE that falls
+    // out of `forwarded` is a real gap and fails below.
+    // `settings`/`updateSettings` are the controller's own (a `run`/`attach`
+    // laptop setting), not a `RemoteSession` member: only those the session has
+    // are the wrapper's to forward (`undefined` for those two below).
+    //
+    // Selected off a real INSTANCE, never `RemoteSession.prototype`: a member
+    // written as a constructor-bound arrow property — this repo's own fix for
+    // the unbound-`this` class (docs/fix/clear-connect-unbound.md) — is absent
+    // from the prototype but present on every session. Selecting by the
+    // prototype would silently drop such a member from this guard, leaving the
+    // original bug (a forward dropped, the App refusing every call) green.
+    const session: RemoteSession = new RemoteSession({} as unknown as RemoteClient);
+    expect(session).toBeInstanceOf(RemoteSession);
+    //
+    // The three exclusions are CONNECT-ONLY by construction, never forgotten
+    // forwards: `sessions` (the `/sessions` directory, `connect.ts:253`) is what
+    // reaches `detach`/`stayingRows` (`App.tsx:3135,3141`); and
+    // `autoAcceptsTurn` MUST NOT be forwarded (`remote-session.ts:293-295`: it is
+    // wider than `ownsTurn` only under `daemonWakes`, `connect.ts:188`, and
+    // NARROWER than the wrapper's `ownsTurn` under `adoptTurn`,
+    // `local-runtime.ts:594-595`, `attach-run.ts:368` — `autoAcceptTest`
+    // (`permission-ui.ts:97`) prefers it, so a naive forward stalls `attach`
+    // auto-accept; pinned by the test below). Adding one of them here without
     // wiring it is the only way this list may change; anything ELSE that falls
     // out of `forwarded` is a real gap and fails below.
     const connectOnly = new Set(["autoAcceptsTurn", "detach", "stayingRows"]);
-    const forwarded = declared.filter(
-      (name) => name in RemoteSession.prototype && !connectOnly.has(name),
-    );
-    expect(forwarded.length).toBeGreaterThan(20);
+    const forwarded = declared.filter((name) => name in session && !connectOnly.has(name));
+    // The exact set, not a floor: a `> 20` threshold left four members of slack,
+    // so a shrinking selection passed silently. A member added to
+    // `SessionController` and `RemoteSession` is a deliberate new entry here.
+    expect(forwarded).toEqual([
+      "send",
+      "compact",
+      "clear",
+      "openForReset",
+      "enqueue",
+      "sendNow",
+      "close",
+      "skills",
+      "context",
+      "rename",
+      "onReturned",
+      "watch",
+      "open",
+      "ownsTurn",
+      "onQueued",
+      "onSubagents",
+      "onSubagentNotify",
+      "messageSubagent",
+      "killSubagent",
+      "onJobs",
+      "jobOutput",
+      "killJob",
+      "onSubagentMessage",
+      "sessionId",
+    ]);
     // Presence, not `typeof function`: `sessionId` is a string and `open` a
     // method — an optional member that is present at all is wired.
-    const missing = forwarded.filter(
-      (name) => (r.controller as unknown as Record<string, unknown>)[name] === undefined,
-    );
-    expect(missing).toEqual([]);
+    const seen = r.controller as unknown as Record<string, unknown>;
+    expect(forwarded.filter((name) => seen[name] === undefined)).toEqual([]);
   } finally {
     r.close();
     await rm(dir, { recursive: true, force: true });

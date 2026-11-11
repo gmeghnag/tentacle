@@ -263,6 +263,104 @@ Restored → `3 pass · 0 fail`.
   same forward is on that path by construction (`startWorkerRuntime` →
   `createLocalRuntime`), but only a real binary run proves it end to end.
 
+### Round 1 (fix)
+
+*— deepseek (tentacle --profile deepseek), 2026-11-11 — review round 1*
+
+Both review findings were in `packages/cli/test/subagent-panel-controller.test.ts`
+only. **No product change:** `packages/cli/src/local-runtime.ts`,
+`packages/client/src/remote-session.ts` and `packages/tui/src/App.tsx` are
+byte-identical to the pre-review tree (`git diff --stat` names the test file
+alone). Two reasons:
+
+**1 (MEDIUM) — the guard's scope.** The selector is now
+`declared.filter((name) => name in session && …)` off a real
+`new RemoteSession({} as unknown as RemoteClient)` **instance** (`:339`), never
+`RemoteSession.prototype`, and the `> 20` floor is replaced by the **exact**
+24-member set (`expect(forwarded).toEqual([…])`, `:358-384`). The `autoAcceptsTurn`
+exclusion's comment now gives both reasons, names the only safe wiring shape
+(`ownsTurn(t) || inner.autoAcceptsTurn(t)`), and points at the new test.
+
+Mutation (non-vacuity, AGENTS §9), in `.tentacle/tmp/subagent-panel-unwired/`.
+First the hole, measured in-process (`guard-scope.ts`: the real class's
+prototype stripped, its three panel members re-declared as constructor-bound
+**arrow properties** on a scratch subclass — the `clear-connect-unbound` refactor
+shape — and the wrapper's `messageSubagent` forward deleted):
+
+```
+baseline            — prototype: 24 | instance: 24
+3 moved off proto   — prototype: 21 | instance: 24
+  messageSubagent    prototype-scope? false  instance-scope? true
+  killSubagent       prototype-scope? false  instance-scope? true
+  onSubagentMessage  prototype-scope? false  instance-scope? true
+  OLD guard, floor `> 20` on the shrunk set → still PASSES? true
+  NEW guard, exact set pinned             → scope kept?   true
+wrapper forward `messageSubagent` dropped:
+  prototype-selected → missing: [] → guard result: GREEN (bug slips)
+  instance-selected  → missing: ["messageSubagent"] → guard result: RED (bug caught)
+```
+
+Then the same refactor in the real tree (`remote-session.ts`'s
+`messageSubagent` turned into an arrow property, the wrapper's forward deleted),
+running each guard version against it:
+
+```
+=== OLD guard (prototype + >20 floor), tree MUTATED (arrow prop + forward dropped) ===
+ 1 pass            ← the original bug, green (the finding, reproduced)
+=== NEW guard on the same MUTATED tree ===
++   "messageSubagent",
+(fail) GUARD: every `SessionController` member a `RemoteSession` has is on the runtime's controller
+ 0 pass · 1 fail   ← caught
+```
+
+Both source edits reverted (`git diff` shows no product file); on the restored
+tree `killSubagent` dropped alone still reddens the guard naming exactly it —
+`+ "killSubagent"`, `1 pass · 2 fail` — as the original Execution recorded.
+
+**2 (MEDIUM) — the `autoAcceptsTurn` exemption.** Its test comment now states
+both halves (`:235-247`): the inner test is WIDER under `daemonWakes`
+(`connect.ts:188`) and NARROWER than the wrapper's `ownsTurn` under `adoptTurn`
+(`local-runtime.ts:594-595`, `attach-run.ts:368`), so the only safe wiring shape
+is `ownsTurn(t) || inner.autoAcceptsTurn(t)`. A new test
+(`:248-276`) runs `autoAcceptTest` (`@tentacle/tui`, `permission-ui.ts:97` — the
+same call the App makes at `App.tsx:695`) against the **real**
+`persistingController` built with `adoptTurn`, over an inner session that
+answers `autoAcceptsTurn` like the real one (`ownsTurn || wake-…`) and says the
+run turn is foreign:
+
+```
+    expect(ctl.ownsTurn(runTurn)).toBe(true);
+    expect(inner.autoAcceptsTurn(runTurn)).toBe(false);
+    expect(test(runTurn)).toBe(true);
+    expect(ownRequest(runTurn, test)).toBe(true);
+    expect(test("88888888-…")).toBe(false); // a foreign turn stays foreign
+```
+
+Mutation — the naive forward the finding names, added to the real wrapper
+(`autoAcceptsTurn(turnId) { return inner.autoAcceptsTurn(turnId); }` beside
+`ownsTurn`), then reverted:
+
+```
+272 |   expect(test(runTurn)).toBe(true);
+error: expect(received).toBe(expected)
+Expected: true
+Received: false
+(fail) auto-accept answers the adopted run turn's asks through the REAL wrapper (a plain `autoAcceptsTurn` forward would not) [0.22ms]
+ 3 pass · 1 fail
+```
+
+So the guard's own invitation is now red when taken naively. Restored → `4 pass
+· 0 fail`.
+
+Gate (this tree, after both fixes):
+`bunx tsc --noEmit` exit 0 · `bun run lint` "Checked 881 files. No fixes
+applied." (one Biome formatting pass applied to the edited test) · `bun test
+packages/cli` **2452 pass · 0 fail**. A full `bun test` run during this round hit
+the known load-sensitive flake `packages/client/test/reattach.test.ts` "a replay
+past the client's buffer bound converges" (`3002.73ms`); standalone it is 54/54,
+same file and signature the review already recorded, and this diff touches no
+product code.
+
 ## Review
 
 *— deepseek (tentacle --profile deepseek), 2026-11-11, fresh-context review*
