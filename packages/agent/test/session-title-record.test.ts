@@ -50,10 +50,18 @@ describe("record titles (docs/feat/session-titles.md)", () => {
   // (A malformed chosen title is refused by the `serve` state file's parser:
   // `daemon/test/serve-log-store.test.ts`; `parseSessionRecord` is gone with
   // the JSON record store.)
-  test("A1 a string title (any older file, or an auto title) reads as auto", () => {
+  test("A1 a string title reads as auto, PINNED to its text (a compaction must not rename the session)", () => {
+    // docs/fix/connect-functest-batch.md item C: a string is the name the
+    // session HAD. Re-deriving it from the messages named the session after the
+    // summary a compaction installed in the first message's place.
     const record = { ...base, title: "please fix the login bug" };
-    expect(call("recordTitleState", record)).toEqual({ source: "auto" });
+    expect(call("recordTitleState", record)).toEqual({
+      source: "auto",
+      text: "please fix the login bug",
+    });
     expect(call("recordTitleText", record)).toBe("please fix the login bug");
+    // The sentinel is not a name: such a record derives again.
+    expect(call("recordTitleState", { ...base, title: "(empty)" })).toEqual({ source: "auto" });
   });
 
   test("A1 a chosen title reads with its source", () => {

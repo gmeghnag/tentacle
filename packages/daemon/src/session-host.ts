@@ -808,7 +808,10 @@ export class SessionHost {
     const reconciled = reconcileOnReload(record);
     const now = this.now();
     const lastActiveAt = restoredActivity(record, now);
-    const kept = renamed ?? (typeof record.title === "string" ? undefined : record.title);
+    // A rename made elsewhere wins; else the record's own title — a chosen one,
+    // or the DERIVED string it holds (pinned: re-deriving it from a compacted
+    // history would name the session after its summary).
+    const kept = renamed ?? record.title;
     const hosted = this.build(record.id, reconciled.messages, {
       title: seedState(kept),
       createdAt: record.createdAt,

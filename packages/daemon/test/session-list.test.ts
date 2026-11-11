@@ -418,7 +418,9 @@ describe("SessionHost.list over the wire", () => {
       model: "m",
       createdAt: 3,
       updatedAt: 7,
-      title: "t",
+      // The record's own name, not its history's: a string title is PINNED
+      // (docs/fix/connect-functest-batch.md item C).
+      title: "an old name",
       messages: [{ role: "user", content: "an old question" }],
       lastActiveAt: 9,
       turns: [],
@@ -444,7 +446,7 @@ describe("SessionHost.list over the wire", () => {
       },
       {
         sessionId: "back",
-        title: "an old question",
+        title: "an old name",
         cwd: CWD,
         createdAt: 3,
         updatedAt: 7,

@@ -722,18 +722,25 @@ describe("connect: TLS trust passthrough + insecure warning (docs/feat/client-tl
     expect(inPod).toBeUndefined();
   });
 
-  test("a `serve` daemon is the only waker: the connect TUI gets no wake input (no double wake)", async () => {
+  test("a `serve` daemon is the only waker: no wake INPUT from connect (no double wake)", async () => {
     // docs/feat/serve-autowake.md (owner answer, fix round 2): the daemon wakes its
-    // session on a job exit, attached clients or not. A TUI with `jobs` /
-    // `autoWakeOnJobExit` / `wakePending` would start a second continuation.
-    // Mutation: pass `jobs`, `autoWakeOnJobExit: true` or `wakePending` from connect → fails.
+    // session on a job exit, attached clients or not. A TUI with
+    // `autoWakeOnJobExit` on, or `wakePending`, would start a second continuation.
+    //
+    // `jobs` IS passed since docs/fix/connect-functest-batch.md item A: the TUI's
+    // ONE exit handler (a finished job's outcome and `endedAt` — the drawer's
+    // `✗ exited (3)` and its frozen clock) is fed by `jobs.onExit`, and without
+    // it a `connect` drawer froze on the `stopped` fallback. It is NOT a wake
+    // input: `autoWakeOnJobExit: false` is passed with it, so the exit reaches
+    // the drawer and no continuation is started here.
+    // Mutation: pass `autoWakeOnJobExit: true` (or leave it out) or `wakePending` → fails.
     const { dial } = capturingDial();
     let seen: Record<string, unknown> = { called: false };
     await connectTui({ url: "wss://fake" }, () => {}, {
       dial,
       startTui: async (_agent, options) => {
         seen = {
-          jobs: options.jobs,
+          hasJobs: options.jobs !== undefined,
           autoWakeOnJobExit: options.autoWakeOnJobExit,
           wakePending: options.wakePending,
           wakeHanded: options.wakeHanded,
@@ -741,8 +748,8 @@ describe("connect: TLS trust passthrough + insecure warning (docs/feat/client-tl
       },
     });
     expect(seen).toEqual({
-      jobs: undefined,
-      autoWakeOnJobExit: undefined,
+      hasJobs: true,
+      autoWakeOnJobExit: false,
       wakePending: undefined,
       wakeHanded: undefined,
     });

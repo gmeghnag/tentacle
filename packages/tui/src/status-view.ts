@@ -98,9 +98,14 @@ export function pillView(input: PillInput): PillView {
     return { kind: "none" };
   }
   // The counts by kind: a pill that says `3` for two agents and a shell hides
-  // what is running; `1 agent` is singular (`2 agents`, `1 shell`).
-  const agents = `${input.agents} ${input.agents === 1 ? "agent" : "agents"}`;
-  const counts = jobs > 0 ? `${agents} · ${jobs} ${jobs === 1 ? "shell" : "shells"}` : agents;
+  // what is running; `1 agent` is singular (`2 agents`, `1 shell`). A kind with
+  // NOTHING running contributes no words at all: a shell alone reads `1 shell`,
+  // never `0 agents · 1 shell` (docs/fix/connect-functest-batch.md item B).
+  const parts = [
+    ...(input.agents > 0 ? [`${input.agents} ${input.agents === 1 ? "agent" : "agents"}`] : []),
+    ...(jobs > 0 ? [`${jobs} ${jobs === 1 ? "shell" : "shells"}`] : []),
+  ];
+  const counts = parts.join(" · ");
   const asking = input.askingId ?? null;
   const finished =
     input.finished != null && input.now - input.finished.at < PILL_DONE_MS ? input.finished : null;
