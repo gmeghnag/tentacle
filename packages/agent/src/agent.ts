@@ -415,7 +415,16 @@ export type AgentEvent =
   // `max_tokens`) — or its stream was cut outright (`cut`: no stop reason at
   // all, which the loop turns into a failed turn). Its own display KIND, for
   // the same reason as `dsml_leak` (docs/fix/truncated-reply-silent.md).
-  | { readonly type: "truncated_reply"; readonly reason: "length" | "cut" }
+  //
+  // `retrying` is what the LOOP knows and the frontends cannot guess: whether
+  // it is re-asking the model once from where it stopped. A re-ask that cuts
+  // again reports `false`, so the user is told the recovery failed instead of
+  // being promised a continuation that never comes (Review MEDIUM-2).
+  | {
+      readonly type: "truncated_reply";
+      readonly reason: "length" | "cut";
+      readonly retrying: boolean;
+    }
   // The turn is ending with NOTHING produced: the model kept returning an empty
   // reply and the loop's bounded nudges ran out. Before this, the turn ended
   // `end_turn` in complete silence and the TUI looked hung. Display only.
@@ -1256,7 +1265,9 @@ export class Agent {
       // decision on a completed stream, not a throw from the provider
       // (docs/fix/truncated-reply-silent.md).
       if (stopReason === "other") {
-        yield { type: "truncated_reply", reason: "cut" };
+        // Never retried: a stream that was cut is missing data, not a short
+        // answer, so no re-ask follows (owner Q2a).
+        yield { type: "truncated_reply", reason: "cut", retrying: false };
         if (text !== "") {
           messages.push({ role: "assistant", content: text });
         }
@@ -1268,7 +1279,8 @@ export class Agent {
       // JSON (measured: 17 rounds on one cut call), so it is refused exactly as
       // `AnthropicProvider` already refuses one (case 5).
       if (stopReason === "length" && toolCalls.length > 0) {
-        yield { type: "truncated_reply", reason: "length" };
+        // Refused outright, so no re-ask follows either.
+        yield { type: "truncated_reply", reason: "length", retrying: false };
         throw new ModelStreamCutError("cut-tool-call", text.trim() !== "", {
           toolCalls: toolCalls.length,
           argumentBytes: toolCalls.reduce((n, call) => n + call.arguments.length, 0),
@@ -1282,7 +1294,14 @@ export class Agent {
       // round is not the model's choice to say nothing (case 3).
       const cutByLength = stopReason === "length";
       if (cutByLength) {
-        yield { type: "truncated_reply", reason: "length" };
+        // Only the loop knows whether a re-ask is still available: a bounded
+        // budget may already be spent, and a frontend guessing it from the
+        // reason promised a continuation that never came (Review MEDIUM-2).
+        yield {
+          type: "truncated_reply",
+          reason: "length",
+          retrying: truncationReasks < MAX_TRUNCATION_REASKS,
+        };
       }
 
       messages.push(

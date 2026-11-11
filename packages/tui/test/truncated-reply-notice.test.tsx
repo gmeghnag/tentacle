@@ -51,7 +51,7 @@ describe("a reply cut at the output limit (case 1)", () => {
   test("the partial text is shown, AND the user is told it is incomplete", async () => {
     const frames = await framesFor([
       { type: "text", delta: "la vera soluzione" },
-      { type: "truncated_reply", reason: "length" },
+      { type: "truncated_reply", reason: "length", retrying: true },
       { type: "turn_end", reason: "end_turn" },
     ]);
     // The text the model managed is still there (never dropped: it is work).
@@ -69,7 +69,7 @@ describe("a reply cut at the output limit (case 1)", () => {
       <App
         createSession={sessionOf([
           { type: "text", delta: "cut here" },
-          { type: "truncated_reply", reason: "length" },
+          { type: "truncated_reply", reason: "length", retrying: true },
           { type: "turn_end", reason: "end_turn" },
         ])}
         model="qwen3"
@@ -92,7 +92,7 @@ describe("a reply cut at the output limit (case 1)", () => {
 
   test("an empty reply cut by 'length' is described as such, not as a short answer", async () => {
     const frames = await framesFor([
-      { type: "truncated_reply", reason: "length" },
+      { type: "truncated_reply", reason: "length", retrying: true },
       { type: "turn_end", reason: "end_turn" },
     ]);
     // Nothing was shown for this round, so the notice must not claim an answer
@@ -102,16 +102,17 @@ describe("a reply cut at the output limit (case 1)", () => {
     expect(frames).not.toContain("this answer is incomplete");
   });
 
-  test("ONE notice per turn, however many cut rounds preceded it", async () => {
-    // The re-ask round cuts again (a full context re-truncates at once), so the
-    // loop yields the notice again; the user needs the fact ONCE.
+  test("ONE notice for the SAME fact, however many rounds repeat it", async () => {
+    // Two rounds that both say "the stream was cut" are the same fact; the
+    // dedupe is keyed on the TEXT, so the user sees it once. (Two `length`
+    // rounds are a DIFFERENT case: the second one has no re-ask left, so it is
+    // a new fact and gets its own line — the test below.)
     const app = render(
       <App
         createSession={sessionOf([
           { type: "text", delta: "la vera" },
-          { type: "truncated_reply", reason: "length" },
-          { type: "text", delta: " soluzione" },
-          { type: "truncated_reply", reason: "length" },
+          { type: "truncated_reply", reason: "cut", retrying: false },
+          { type: "truncated_reply", reason: "cut", retrying: false },
           { type: "turn_end", reason: "end_turn" },
         ])}
         model="qwen3"
@@ -125,8 +126,42 @@ describe("a reply cut at the output limit (case 1)", () => {
       app.stdin.write("\r");
       await delay(200);
       const last = app.lastFrame() ?? "";
-      const occurrences = last.split("cut at the model's output limit").length - 1;
+      const occurrences = last.split("stream was cut").length - 1;
       expect(occurrences).toBe(1);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  test("a re-ask that is ALSO cut says so, and does not promise another one (Review MEDIUM-2)", async () => {
+    // The owner's own case: the first reply is cut and the loop re-asks; the
+    // continuation is cut too and the budget is spent. The second notice must
+    // differ from the first — on the buggy code the wording was identical
+    // ("asking it to continue") and the dedupe dropped it, so the screen ended
+    // promising a continuation that never came.
+    const app = render(
+      <App
+        createSession={sessionOf([
+          { type: "text", delta: "la vera" },
+          { type: "truncated_reply", reason: "length", retrying: true },
+          { type: "text", delta: " soluzione" },
+          { type: "truncated_reply", reason: "length", retrying: false },
+          { type: "turn_end", reason: "end_turn" },
+        ])}
+        model="qwen3"
+        cwd="/tmp/work"
+      />,
+    );
+    try {
+      await delay(30);
+      app.stdin.write("hi");
+      await delay(20);
+      app.stdin.write("\r");
+      await delay(200);
+      const last = app.lastFrame() ?? "";
+      // Two DISTINCT notices, not one repeated.
+      expect(last.split("cut at the model's output limit").length - 1).toBe(2);
+      expect(last.split("asking it to continue").length - 1).toBe(1);
     } finally {
       app.unmount();
     }
@@ -136,7 +171,7 @@ describe("a reply cut at the output limit (case 1)", () => {
     const app = render(
       <App
         createSession={sessionOf([
-          { type: "truncated_reply", reason: "length" },
+          { type: "truncated_reply", reason: "length", retrying: true },
           { type: "turn_end", reason: "end_turn" },
         ])}
         model="qwen3"
@@ -207,7 +242,7 @@ describe("a stream cut with no stop reason (case 2) fails the turn loudly", () =
     const createSession = () => ({
       async *send(): AsyncGenerator<AgentEvent> {
         yield { type: "text", delta: "la vera" };
-        yield { type: "truncated_reply", reason: "cut" };
+        yield { type: "truncated_reply", reason: "cut", retrying: false };
         throw new Error(
           "the model's stream was cut before the reply finished (no stop reason) — the answer is incomplete",
         );

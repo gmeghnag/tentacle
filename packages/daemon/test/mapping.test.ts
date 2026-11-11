@@ -267,7 +267,7 @@ describe("toUpdateParams (the session/update frame)", () => {
     { type: "session_closed", reason: "closed" },
     { type: "context_note", text: "Continue with the task.", reason: "continue" },
     { type: "dsml_leak", text: "use the tool-calling mechanism" },
-    { type: "truncated_reply", reason: "length" },
+    { type: "truncated_reply", reason: "length", retrying: true },
     { type: "empty_turn" },
     { type: "history_repaired", invalidArguments: 1, unansweredCalls: 0, orphanResults: 0 },
     {

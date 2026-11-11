@@ -76,4 +76,20 @@ describe("the truncation and empty-turn notices are their own display KINDS", ()
       false,
     );
   });
+
+  test("`retrying` is OPTIONAL on the kind: an older daemon's frame still parses (Review MEDIUM-2)", () => {
+    // An extra field on a display kind is free (AGENTS §7), and the reverse —
+    // a frame that lacks it — must keep parsing: a new client never refuses an
+    // older daemon's notice over a field it can live without.
+    for (const reason of ["length", "cut"]) {
+      expect(SessionUpdateSchema.safeParse({ type: "truncated_reply", reason }).success).toBe(true);
+      expect(
+        SessionUpdateSchema.safeParse({ type: "truncated_reply", reason, retrying: true }).success,
+      ).toBe(true);
+    }
+    expect(
+      SessionUpdateSchema.safeParse({ type: "truncated_reply", reason: "length", retrying: "yes" })
+        .success,
+    ).toBe(false);
+  });
 });

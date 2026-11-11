@@ -76,7 +76,7 @@ describe("case (1): text cut by finish_reason 'length'", () => {
 
     // The notice crosses as its own event, and the turn still ends normally.
     expect(events.filter((e) => e.type === "truncated_reply")).toEqual([
-      { type: "truncated_reply", reason: "length" },
+      { type: "truncated_reply", reason: "length", retrying: true },
     ]);
     expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
 
@@ -103,6 +103,50 @@ describe("case (1): text cut by finish_reason 'length'", () => {
     expect(model.seen).toHaveLength(2);
     expect(events.filter((e) => e.type === "truncated_reply")).toHaveLength(2);
     expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+  });
+
+  test("the ONE re-ask is BOUNDED: the first cut says a re-ask is coming, the second says it is not (Review MEDIUM-2)", async () => {
+    // The owner's own case: the reply is cut, the loop re-asks once, and the
+    // continuation is cut too. `retrying` is the loop's own fact, so the two
+    // notices DIFFER — a frontend guessing it from the reason (as both did)
+    // promised a continuation that could never come.
+    const cut = (delta: string): StreamEvent[] => [
+      { type: "text", delta },
+      { type: "done", stopReason: "length" },
+    ];
+    const model = new Scripted([cut("la vera"), cut(" soluzione")]);
+    const { events } = await run(model);
+    expect(events.flatMap((e) => (e.type === "truncated_reply" ? [e.retrying] : []))).toEqual([
+      true,
+      false,
+    ]);
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+  });
+
+  test("a refused cut tool call is never retried: `retrying` is false", async () => {
+    // No re-ask follows a refused call (the arguments are partial JSON), so the
+    // notice must not promise one.
+    const model = new Scripted([
+      [
+        { type: "tool_call", toolCall: { id: "c1", name: "nope", arguments: "{" } },
+        { type: "done", stopReason: "length" },
+      ],
+    ]);
+    const events: AgentEvent[] = [];
+    try {
+      for await (const event of new Agent({
+        model,
+        tools: new ToolRegistry(),
+        env: noopEnv,
+      }).runMessages([{ role: "user", content: "hi" }], "s1")) {
+        events.push(event);
+      }
+    } catch {
+      // the turn fails: asserted by the case (5) test above
+    }
+    expect(events.flatMap((e) => (e.type === "truncated_reply" ? [e.retrying] : []))).toEqual([
+      false,
+    ]);
   });
 
   test("the re-ask does not eat the turn's step budget", async () => {
@@ -222,7 +266,7 @@ describe("case (5): a tool call cut by 'length' is NEVER run", () => {
     expect(model.seen).toHaveLength(1);
     // The user is told which cut it was, and why the call did not run.
     expect(events.filter((e) => e.type === "truncated_reply")).toEqual([
-      { type: "truncated_reply", reason: "length" },
+      { type: "truncated_reply", reason: "length", retrying: false },
     ]);
     expect((error as Error).message).toContain("the call was not run");
   });

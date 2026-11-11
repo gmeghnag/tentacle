@@ -11,14 +11,16 @@ import { KNOWN_UPDATE_TYPES, SessionUpdateSchema, UPDATE_CLASS } from "@tentacle
 import { eventToUpdate, toUpdateParams } from "../src/mapping.ts";
 
 describe("daemon: AgentEvent → SessionUpdate", () => {
-  test("a cut reply is its own display kind, reason carried", () => {
-    expect(eventToUpdate({ type: "truncated_reply", reason: "length" })).toEqual({
+  test("a cut reply is its own display kind, reason AND `retrying` carried", () => {
+    expect(eventToUpdate({ type: "truncated_reply", reason: "length", retrying: true })).toEqual({
       type: "truncated_reply",
       reason: "length",
+      retrying: true,
     });
-    expect(eventToUpdate({ type: "truncated_reply", reason: "cut" })).toEqual({
+    expect(eventToUpdate({ type: "truncated_reply", reason: "cut", retrying: false })).toEqual({
       type: "truncated_reply",
       reason: "cut",
+      retrying: false,
     });
     expect(UPDATE_CLASS.truncated_reply).toBe("display");
   });
@@ -30,7 +32,7 @@ describe("daemon: AgentEvent → SessionUpdate", () => {
 
   test("both pass the wire schema, and a mandatory frame is never needed for them", () => {
     for (const update of [
-      { type: "truncated_reply", reason: "length" } as const,
+      { type: "truncated_reply", reason: "length", retrying: true } as const,
       { type: "empty_turn" } as const,
     ]) {
       expect(SessionUpdateSchema.safeParse(update).success).toBe(true);

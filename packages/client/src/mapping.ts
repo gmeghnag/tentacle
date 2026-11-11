@@ -292,7 +292,15 @@ export function updateToEvent(
       return { type: "dsml_leak", text: update.text };
     case "truncated_reply":
       // A cut reply / an empty turn: notices only (docs/fix/truncated-reply-silent.md).
-      return { type: "truncated_reply", reason: update.reason };
+      // `retrying` is the LOOP's fact, never re-derived from the reason here (that
+      // guess is the bug: it promised a continuation the loop had no budget for,
+      // Review MEDIUM-2). A daemon too old to send it means `false`: the notice
+      // never claims a re-ask that this client cannot verify.
+      return {
+        type: "truncated_reply",
+        reason: update.reason,
+        retrying: update.retrying ?? false,
+      };
     case "empty_turn":
       return { type: "empty_turn" };
     case "history_repaired":

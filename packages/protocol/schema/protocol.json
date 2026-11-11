@@ -3397,6 +3397,9 @@
           "enum": ["length", "cut"],
           "type": "string"
         },
+        "retrying": {
+          "type": "boolean"
+        },
         "type": {
           "const": "truncated_reply",
           "type": "string"
@@ -3611,6 +3614,10 @@
       "required": ["messages"],
       "type": "object"
     },
+    "WireStopReason": {
+      "enum": ["stop", "length", "tool_calls", "other"],
+      "type": "string"
+    },
     "WireStreamEvent": {
       "discriminator": {
         "mapping": {
@@ -3639,6 +3646,9 @@
     "WireStreamEventDone": {
       "additionalProperties": true,
       "properties": {
+        "stopReason": {
+          "$ref": "#/$defs/WireStopReason"
+        },
         "type": {
           "const": "done",
           "type": "string"

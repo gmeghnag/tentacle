@@ -14,12 +14,29 @@ import { updateToEvent } from "../src/mapping.ts";
 const frame = (update: SessionUpdate) => update;
 
 describe("client: SessionUpdate → AgentEvent", () => {
-  test("a cut reply keeps its reason", () => {
+  test("a cut reply keeps its reason AND the loop's `retrying`", () => {
     for (const reason of ["length", "cut"] as const) {
-      const update: SessionUpdate = { type: "truncated_reply", reason };
-      expect(frame(update)).toEqual(update);
-      expect(updateToEvent(update, new Map())).toEqual({ type: "truncated_reply", reason });
+      for (const retrying of [true, false]) {
+        const update: SessionUpdate = { type: "truncated_reply", reason, retrying };
+        expect(frame(update)).toEqual(update);
+        expect(updateToEvent(update, new Map())).toEqual({
+          type: "truncated_reply",
+          reason,
+          retrying,
+        });
+      }
     }
+  });
+
+  test("an older daemon that omits `retrying` never promises a re-ask", () => {
+    // The field is new and optional (a display kind: free to add). A client must
+    // not re-derive it from the reason — that guess is the bug (Review MEDIUM-2)
+    // — so the absent case is the conservative `false`.
+    expect(updateToEvent({ type: "truncated_reply", reason: "length" }, new Map())).toEqual({
+      type: "truncated_reply",
+      reason: "length",
+      retrying: false,
+    });
   });
 
   test("an empty turn maps to its own event", () => {

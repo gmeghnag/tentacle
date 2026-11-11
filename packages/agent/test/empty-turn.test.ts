@@ -96,7 +96,7 @@ describe("case (3): an empty reply cut by 'length'", () => {
     }
     // The cut is announced, the reply arrives, the turn ends normally.
     expect(events.filter((e) => e.type === "truncated_reply")).toEqual([
-      { type: "truncated_reply", reason: "length" },
+      { type: "truncated_reply", reason: "length", retrying: true },
     ]);
     expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
     expect(messages.filter((m) => m.role === "assistant").map((m) => m.content)).toEqual([

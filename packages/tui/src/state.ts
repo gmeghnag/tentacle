@@ -527,11 +527,13 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
     // (docs/fix/truncated-reply-silent.md). `cut` also fails the turn, so the
     // App's own error path adds the failure line.
     case "truncated_reply": {
-      // ONE notice per TURN (a re-asked round cuts again and repeats its cause):
-      // the reducer sees every round, while the user needs the fact once.
+      // The loop says whether a re-ask is coming; the frontends no longer guess
+      // it from the reason (Review MEDIUM-2). So a re-ask that cuts again says
+      // "incomplete" WITHOUT promising a continuation, and the text-keyed
+      // dedupe lets that second, different sentence through.
       const text = describeTruncation(event.reason, {
         answered: turnHasAnswerText(state),
-        retrying: event.reason === "length",
+        retrying: event.retrying,
       });
       return noticeSeenThisTurn(state, text) ? state : appendNotice(state, text);
     }

@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { Agent } from "@tentacle/agent";
+import type { AgentEvent } from "@tentacle/agent";
 import type { ChatRequest } from "@tentacle/core";
-import { JsonRpcErrorCode } from "@tentacle/protocol";
+import { ModelStreamCutError } from "@tentacle/core";
+import { JsonRpcErrorCode, ModelStreamResultSchema } from "@tentacle/protocol";
 import type { ModelStreamChunkedResult } from "@tentacle/protocol";
+import { ToolRegistry } from "@tentacle/tools";
 import { ProxyModelProvider } from "../src/proxy-model.ts";
 
 const REQ: ChatRequest = { messages: [{ role: "user", content: "x" }] };
@@ -309,6 +313,115 @@ describe("ProxyModelProvider — chunked (streaming) cut", () => {
       error && typeof error === "object" && (error as { name?: string }).name === "cancelled",
     ).toBe(true);
     expect(seen).toEqual([]);
+  });
+});
+
+/**
+ * The stop reason is the ONLY place "this reply was cut" exists, and it is on
+ * `done` (docs/fix/truncated-reply-silent.md). The tunnel re-serialises every
+ * `StreamEvent` through a strip schema, so a `done` the schema does not name
+ * arrives at the pod with the fact silently gone: the pod-side loop then
+ * accepts a cut reply as complete, and RUNS a tool call cut mid-JSON (Review
+ * HIGH-1). These pin the fact crossing both transports.
+ */
+describe("ProxyModelProvider — the stop reason crosses the tunnel", () => {
+  test("a `length` done arrives intact (chunked batch)", async () => {
+    const seen: unknown[] = [];
+    const provider = new ProxyModelProvider(
+      () => Promise.reject(new Error("no batch")),
+      (_req, { onProgress }) => {
+        onProgress(
+          [
+            { type: "text", delta: "la vera" },
+            { type: "done", stopReason: "length" },
+          ],
+          0,
+        );
+        return Promise.resolve({ chunks: 1 });
+      },
+    );
+    for await (const e of provider.stream(REQ)) {
+      seen.push(e);
+    }
+    expect(seen).toEqual([
+      { type: "text", delta: "la vera" },
+      { type: "done", stopReason: "length" },
+    ]);
+  });
+
+  test("a `length` done arrives intact (batch result, parsed as the peer parses it)", async () => {
+    // The real peer validates the response with the method's result schema, so
+    // the sender here plays the wire: it hands back what the laptop sent.
+    const result = ModelStreamResultSchema.parse({
+      events: [
+        { type: "text", delta: "cut" },
+        { type: "done", stopReason: "length" },
+      ],
+    });
+    const provider = new ProxyModelProvider(() => Promise.resolve(result));
+    const seen: unknown[] = [];
+    for await (const e of provider.stream(REQ)) {
+      seen.push(e);
+    }
+    expect(seen.at(-1)).toEqual({ type: "done", stopReason: "length" });
+  });
+
+  test("the pod's agent loop takes the truncation path: a cut tool call is NEVER run", async () => {
+    // The end-to-end property: this is a POD agent, its only model is the
+    // proxy, and the laptop says `length`. On the buggy schema the loop saw
+    // `stopReason: undefined` and ran the partial call (case 5, 17 rounds).
+    let ran = 0;
+    const echo = {
+      name: "echo",
+      description: "echo",
+      inputSchema: {
+        _def: {},
+        parse: (v: unknown) => v,
+        safeParse: (v: unknown) => ({ success: true as const, data: v }),
+      },
+      permission: "none" as const,
+      async execute(): Promise<{ content: string }> {
+        ran++;
+        return { content: "ran" };
+      },
+    };
+    const provider = new ProxyModelProvider(
+      () => Promise.reject(new Error("no batch")),
+      (_req, { onProgress }) => {
+        onProgress(
+          [
+            { type: "tool_call", toolCall: { id: "c1", name: "echo", arguments: '{"text":"one' } },
+            { type: "done", stopReason: "length" },
+          ],
+          0,
+        );
+        return Promise.resolve({ chunks: 1 });
+      },
+    );
+    const agent = new Agent({
+      model: provider,
+      tools: new ToolRegistry().register(echo as never),
+      env: {
+        id: "noop",
+        exec: () => Promise.resolve({ stdout: "", stderr: "", exitCode: 0 }),
+        readFile: () => Promise.resolve(""),
+        writeFile: () => Promise.resolve(),
+      },
+    });
+    const events: AgentEvent[] = [];
+    let error: unknown;
+    try {
+      for await (const event of agent.runMessages([{ role: "user", content: "hi" }], "s1")) {
+        events.push(event);
+      }
+    } catch (thrown) {
+      error = thrown;
+    }
+    expect(error).toBeInstanceOf(ModelStreamCutError);
+    expect(ran).toBe(0);
+    expect(events.flatMap((e) => (e.type === "truncated_reply" ? [e.reason] : []))).toEqual([
+      "length",
+    ]);
   });
 });
 

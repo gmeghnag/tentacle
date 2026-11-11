@@ -158,6 +158,14 @@ export const DsmlLeakUpdateSchema = z.object({
 export const TruncatedReplySchema = z.object({
   type: z.literal("truncated_reply"),
   reason: z.enum(["length", "cut"]),
+  /**
+   * Whether the loop is re-asking the model once from where it stopped — the
+   * fact a frontend cannot derive: the re-ask budget is bounded, and a round
+   * that cuts again after it is spent reports `false`, so the notice stops
+   * promising a continuation that will not come (Review MEDIUM-2, the owner's
+   * own case). An extra field on a display kind: free, no bump.
+   */
+  retrying: z.boolean().optional(),
 });
 
 /**

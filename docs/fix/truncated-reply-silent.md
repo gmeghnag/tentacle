@@ -1,6 +1,6 @@
 # fix/truncated-reply-silent — a cut-off reply is accepted as complete, and a dead turn ends with nothing shown
 
-> **Status:** execution complete; awaiting fresh-context Review
+> **Status:** execution complete; Round 1 (Review fixes) applied — awaiting re-review
 > **Branch:** `fix/truncated-reply-silent`
 > **Type:** fix · **Size:** S–M · **Blast:** cross-module · **Suited:** DeepSeek exec (fresh-context Review: it touches the agent loop)
 
@@ -608,6 +608,114 @@ $ bun test               # 6871 pass, 3 skip, + apps/mobile/test/rn-websocket.te
   FAILS its turn (owner Q2a's accepted risk). The `providers` tests pin both
   shapes, so changing that decision later is a one-line change in
   `openai-provider.ts`.
+
+### Round 1 (fix)
+
+*— claude-sonnet-4-5 (executor, review round 1), 2026-11-11*
+
+Both Review findings applied, red before green. Nothing else touched: the
+pre-existing DSML `budgetFrom--` and the `compact.ts` `stopReason` gap stay
+untouched (separate tasks, as the Round-1 brief requires).
+
+**HIGH-1 — the pod tunnel dropped `done.stopReason`.** Measured first, on the
+real schemas:
+
+```
+$ bun .tentacle/tmp/truncated-reply/round1/measure.ts
+batch schema : {"type":"done"}          <- stopReason: "length" gone
+chunked batch: [{"type":"done"}]
+```
+
+1. `protocol/src/model.ts` — `WireStopReasonSchema` (`stop|length|tool_calls|other`)
+   added, and `stopReason` on the wire `done` member. **Optional**, so an older
+   laptop's frame still parses (`undefined` → the old behaviour, never a failed
+   turn) and no `PROTOCOL_VERSION` bump is needed. It is NOT a
+   laptop-side-only field: the pod runs the loop and decides from it.
+2. `protocol/schema/protocol.json` regenerated (`bun run schema:export`): only
+   `WireStopReason` + the `done` property appear.
+3. The laptop side already **sends** it — `RemoteClient.onModelStream` /
+   `onModelStreamChunked` forward the provider's `StreamEvent` objects as
+   `WireStreamEvent` (`remote-client.ts:2734`, `:2950`) and the value rides the
+   `done` event. So the sender needed no code change; the strip schema was the
+   only loss. Pinned by the round-trip tests rather than assumed.
+
+Tests: `protocol/test/wire-stop-reason.test.ts` (5) — the fact survives both
+transports' parse, is optional, refuses a bad value, and `PROTOCOL_VERSION` is
+still 22. `daemon/test/proxy-model.test.ts` (+3) — a tunnelled `length` arrives
+intact on the chunked and the batch path, and a POD `Agent` over the proxy
+refuses a cut tool call (`ModelStreamCutError`, tool never run). 
+`client/test/model-stream-stop-reason.test.ts` (new, 3) — the laptop → pod
+round trip through REAL `RemoteClient` + `Connection` over a channel pair,
+both transports, plus "no stop reason stays absent, never invented".
+
+**MEDIUM-2 — a failed re-ask was hidden, because the frontends guessed.** The
+loop now states the fact:
+
+1. `agent/src/agent.ts` — `truncated_reply` gains `retrying: boolean`. The
+   length+text/empty yield computes `truncationReasks < MAX_TRUNCATION_REASKS`;
+   the two branches that never retry (`cut`, and a refused cut tool call) say
+   `false`.
+2. `protocol/src/updates.ts` — `retrying: z.boolean().optional()`. Optional
+   because it is an addition to a display kind and an older daemon omits it (§7:
+   no bump; an older client of a NEWER daemon drops it, which is the display
+   class's contract).
+3. `daemon/src/mapping.ts` passes it through;
+   `client/src/mapping.ts` defaults an absent one to **`false`**, never to
+   `reason === "length"` — re-deriving it from the reason is exactly the bug.
+4. `tui/src/state.ts` uses `event.retrying`; the text-keyed dedupe then lets the
+   second, different sentence through.
+5. `cli/src/render.ts` keys the dedupe on `(reason, retrying)`
+   (`truncationNoticed: string | null`), and `truncationNotice` now takes the
+   event's fact instead of the reason (so a `cut` after a `length` is shown too).
+
+Tests: `agent/test/truncated-reply.test.ts` +2 ("the first cut says a re-ask is
+coming, the second says it is not"; "a refused cut tool call is never retried"),
+`tui/test/truncated-reply-notice.test.tsx` (real `App` frames: two DIFFERENT
+notices, "asking it to continue" exactly once; the same fact twice still shown
+once — the old case re-phrased onto `cut`, since two `length` rounds are now
+deliberately different facts), `cli/test/truncated-render.test.ts` (+2, the same
+two properties on `AnswerSplit`), plus the mapping tests on both ends and the
+protocol optional-field guard.
+
+Existing assertions updated for the new required field: every `truncated_reply`
+literal in `agent`, `daemon`, `tui`, `cli` tests now names `retrying`, with the
+value that round really has (`true` for the round the loop re-asks after,
+`false` where it does not). One comment was corrected rather than a test: the
+old "ONE notice per turn" TUI test's premise (two `length` rounds are one fact)
+is no longer true, which is the point of the fix.
+
+**Drift from the Review's exact wording:** it asked for the dedupe to key on
+`(reason, retrying)` in the CLI only. The TUI is left keyed on the rendered
+TEXT — with `retrying` in the text, that is the same key expressed once, and it
+keeps the reducer's shared `noticeSeenThisTurn` helper. Both give the required
+behaviour and both are pinned on real frames.
+
+Mutations (each run, observed, restored — `git status` clean of them after):
+
+```
+HIGH-1  strip `stopReason` off the wire `done` again
+        → wire-stop-reason 3 RED, proxy-model 3 RED, round-trip 2 RED  (8 fail)
+MEDIUM-2 TUI `event.retrying` → `event.reason === "length"`
+        → "a re-ask that is ALSO cut says so" RED
+MEDIUM-2 CLI back to `truncationNoticed` boolean + guess from reason
+        → "the owner's case" RED, "a `cut` after a `length`" RED
+MEDIUM-2 agent always `retrying: true`
+        → "the first cut says a re-ask is coming, the second says it is not" RED
+```
+
+Gate (`apps/mobile` deps are absent in this checkout — pre-existing, unchanged):
+
+```
+$ bunx tsc --noEmit   # clean
+$ bun run lint        # biome check . — 893 files, clean (baseline per AGENTS §6)
+$ bun test            # 6889 pass, 3 opt-in skips, 1 fail =
+                      #   apps/mobile/test/rn-websocket.test.ts:
+                      #   Cannot find module '@tentacle/client' (deps absent).
+                      #   Nothing in this round touches apps/mobile; the same
+                      #   failure is recorded in Round 0's Execution and in the
+                      #   Opus review's gate (not re-run on the parent commit —
+                      #   no `git checkout` is allowed in this worktree).
+```
 
 ## Review
 
