@@ -479,3 +479,45 @@ history, so a live transcript and a resynced one still agree.
   kind `dsml_leak` wired on both ends; `context_note`'s enum unchanged;
   `PROTOCOL_VERSION` stays 22; an older client's parse skips it rather than
   erroring (pinned). Doc precondition corrected.
+
+## Review (Opus) — round 2
+
+*— claude-opus-5-5, 2026-11-11*
+
+**Verdict: PASS.** No HIGH or MEDIUM findings remain. Scope: `git diff HEAD~1`
+(5502ce6).
+
+- **HIGH-1: fixed.**
+  - **Incident bytes:** my round-1 probe (`.tentacle/tmp/dsml-leak/review/incident.ts`)
+    on the log's literal text from "Base64 works" on, with no opening invoke tag,
+    now prints `{ bytes: 817, hasInvokeOpen: false, guardFires: true }`.
+  - **No false refusals:** prose that mentions DSML, a lone parameter tag, a lone
+    closer and a block cut before its first closer all return false. The
+    provider test's "clean" reply now mentions DSML and is accepted.
+  - **Bounded scan:** both regexes (`packages/core/src/dsml.ts:22-24`) have no
+    nested quantifiers. A match attempt can only start at the literal
+    `<｜DSML｜` prefix, and `[^<>]*` stops at the first `>` or `<`. Adversarial
+    inputs (`.tentacle/tmp/dsml-leak/review/round2.ts`): 2.8 MB of unclosed
+    open-prefixes took 1.8 ms; 1.9 MB of incomplete closers took 1.7 ms.
+  - **Fixtures:** they are now the log's bytes (base64 body shortened), and the
+    test asserts the premise that the text has no opening invoke tag.
+- **MEDIUM-1: fixed by design, and no bump is needed.**
+  - **The new kind:** `dsml_leak` is its own kind in the `SessionUpdateSchema`
+    union, with `UPDATE_CLASS.dsml_leak = "display"` (`packages/protocol/src/updates.ts`).
+    `context_note.reason` is back to the main enum.
+  - **Both ends wired:** `AgentEvent` → `eventToUpdate` (`daemon/src/mapping.ts:250`)
+    → `updateToEvent` (`client/src/mapping.ts:290`) → CLI `render.ts` and TUI
+    `state.ts` notices. `tsc --noEmit` is clean, so every exhaustive switch
+    covers it.
+  - **Older client:** `classifyUpdate` has no diff against main, and main's
+    union lacks the tag. A tag unknown to the client classifies as
+    `{ kind: "unsupported" }`, not an error. That is the §7 display rule, so
+    `PROTOCOL_VERSION` stays 22, which is correct.
+- **No new HIGH/MEDIUM.**
+  - Not a finding: an older client that skips the notice does not add the
+    re-ask note as a user item in its live transcript. A resync shows it from
+    the history. This is display-only and has the same cost as any skipped
+    display kind.
+- **Gate (narrow):** `tsc --noEmit` clean · `biome check .` clean · 376 pass /
+  0 fail across the touched test files plus `packages/protocol` (includes the
+  schema drift gate).
