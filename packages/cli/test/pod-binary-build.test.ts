@@ -13,7 +13,7 @@ import {
   resolvePodBinary,
 } from "../src/pod-binary-build.ts";
 import type { PodBinaryTarget } from "../src/pod-binary.ts";
-import { readBinaryVersion } from "../src/version-marker.ts";
+import { readBinaryBuildId, readBinaryVersion } from "../src/version-marker.ts";
 import { formatVersionMarker } from "../src/version.ts";
 
 /** A fake build that "compiles" by writing a marker file (no real build). */
@@ -314,8 +314,21 @@ describe("version marker in a real compiled binary (D2)", () => {
     const outfile = join(dir, "tentacle");
     try {
       // Host target: no cross-compile runtime download, no network.
-      expect(await buildBinary(outfile, undefined)).toBe(true);
+      // A dev build (a build id, docs/fix/dev-build-version-skew.md).
+      expect(await buildBinary(outfile, undefined, computeBuildId())).toBe(true);
       expect(await readBinaryVersion(outfile)).toBe(cliVersion());
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("a release build (no build id) carries no build marker, so its version stays plain", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "harness-podbin-release-"));
+    const outfile = join(dir, "tentacle");
+    try {
+      expect(await buildBinary(outfile, undefined, undefined)).toBe(true);
+      expect(await readBinaryVersion(outfile)).toBe(cliVersion());
+      expect(await readBinaryBuildId(outfile)).toBeUndefined();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -85,7 +85,18 @@ export function findYogaWasm(): string {
  * two never drift. Returns `true` on success, `false` (after logging) on
  * failure — the caller decides whether to exit.
  */
-export async function buildBinary(outfile: string, target: string | undefined): Promise<boolean> {
+export async function buildBinary(
+  outfile: string,
+  target: string | undefined,
+  /**
+   * The build id this binary reports (`0.3.0+<id>`), or `undefined` for a
+   * RELEASE build, whose version must stay exactly the package.json version
+   * (docs/fix/dev-build-version-skew.md). Required, with no default: a default
+   * would swallow a release's explicit `undefined` (a JS default applies to
+   * `undefined` too), and a release build would silently carry a build marker.
+   */
+  build: string | undefined,
+): Promise<boolean> {
   const root = repoRoot();
   const wasmPath = findYogaWasm();
   const yogaShim = resolve(root, "scripts/yoga-auto.ts");
@@ -112,7 +123,11 @@ export async function buildBinary(outfile: string, target: string | undefined): 
     define: {
       __TENTACLE_VERSION_MARKER__: JSON.stringify(formatVersionMarker(cliVersion())),
       // The build id (docs/fix/stale-pod-binary.md): same idea, a second literal.
-      __TENTACLE_BUILD_MARKER__: JSON.stringify(formatBuildMarker(computeBuildId(root))),
+      // It is also what makes the version say `+<id>` (`devBuildVersion`); a
+      // release build compiles in NO build marker, so its version stays plain.
+      ...(build !== undefined
+        ? { __TENTACLE_BUILD_MARKER__: JSON.stringify(formatBuildMarker(build)) }
+        : {}),
     },
     minify: true,
     plugins: [
@@ -175,6 +190,19 @@ export function computeBuildId(root: string = repoRoot()): string {
     hash.update("\0");
   }
   return hash.digest("hex").slice(0, 12);
+}
+
+/**
+ * The build id a build of this source carries, or `undefined` for a RELEASE
+ * build — the one decision that makes a binary's version say `+<id>` or stay
+ * plain (docs/fix/dev-build-version-skew.md). Pure, so `scripts/build.ts`'s
+ * contract is testable without compiling anything.
+ */
+export function buildIdFor(
+  env: Readonly<Record<string, string | undefined>>,
+  sourceId: string,
+): string | undefined {
+  return env.TENTACLE_RELEASE === "1" ? undefined : sourceId;
 }
 
 /** `packages/cli/package.json` `version`: the single source of a build's version. */
@@ -292,7 +320,11 @@ export async function resolvePodBinary(
   options: ResolvePodBinaryOptions = {},
 ): Promise<Uint8Array> {
   const log = options.log ?? (() => {});
-  const build = options.build ?? buildBinary;
+  // A build by the cache is a local one, never a release: it carries this
+  // source's build id, so its binary says `+<id>` too.
+  const build =
+    options.build ??
+    ((outfile: string, target: string) => buildBinary(outfile, target, computeBuildId()));
   // 1) An explicit prebuilt binary wins — the primary "I build it myself" knob.
   const override = process.env.TENTACLE_POD_BIN;
   if (override) {

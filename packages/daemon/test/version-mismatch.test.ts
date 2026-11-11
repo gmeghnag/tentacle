@@ -68,12 +68,70 @@ describe("versionMismatch (the daemon words the refusal)", () => {
     );
   });
 
+  test("a non-CLI client gets no CLI build step: it keeps the plain advice", () => {
+    const { message } = versionMismatch(
+      { protocol: 22, tentacle: "1.0.0+1a2b3c4d5e6f", name: "tentacle-mobile" },
+      { protocol: 16, identity: { tentacle: "0.3.0", kind: "serve" } },
+    );
+    expect(message).toBe(
+      'protocol version mismatch: client 22 (tentacle-mobile 1.0.0+1a2b3c4d5e6f), daemon 16 (tentacle 0.3.0) — update the daemon: run "tentacle update" on that host and restart "tentacle serve"',
+    );
+  });
+
   test("no daemon identity (tests): the daemon side says only its protocol", () => {
     const { message, data } = versionMismatch({ protocol: 9 }, { protocol: 10 });
     expect(message).toBe(
       'protocol version mismatch: client 9, daemon 10 — update this client: "tentacle update"',
     );
     expect(data.daemon).toEqual({ protocol: 10 });
+  });
+
+  test("an older daemon + a DEV-build client: install the same build there, never `tentacle update`", () => {
+    // The live case (docs/fix/dev-build-version-skew.md): the laptop runs a
+    // `main` build (protocol 22, version 0.3.0+<build>) and the host the latest
+    // RELEASE v0.3.0 (protocol 16). `tentacle update` there reinstalls v0.3.0 —
+    // the same old release — because no published release has this client's
+    // protocol. The fix that works is to put this build on that host.
+    const { message, data } = versionMismatch(
+      { protocol: 22, tentacle: "0.3.0+1a2b3c4d5e6f", name: "tentacle" },
+      { protocol: 16, identity: { tentacle: "0.3.0", kind: "serve" } },
+    );
+    expect(message).toBe(
+      'protocol version mismatch: client 22 (tentacle 0.3.0+1a2b3c4d5e6f), daemon 16 (tentacle 0.3.0) — the client is a newer build than any release: install the same build on that host (build this source there, then run "tentacle serve")',
+    );
+    expect(message).not.toContain("tentacle update");
+    expect(data.update).toBe("daemon");
+    expect(data.daemon).toEqual({ protocol: 16, tentacle: "0.3.0" });
+  });
+
+  test("a daemon that IS a release keeps the update hint (update really moves it)", () => {
+    const { message } = versionMismatch(
+      { protocol: 22, tentacle: "0.4.0", name: "tentacle" },
+      { protocol: 16, identity: { tentacle: "0.3.0", kind: "serve" } },
+    );
+    expect(message).toBe(
+      'protocol version mismatch: client 22 (tentacle 0.4.0), daemon 16 (tentacle 0.3.0) — update the daemon: run "tentacle update" on that host and restart "tentacle serve"',
+    );
+  });
+
+  test("a container daemon keeps its attach advice, even with a dev-build client (it re-injects this build)", () => {
+    const { message } = versionMismatch(
+      { protocol: 22, tentacle: "0.3.0+1a2b3c4d5e6f", name: "tentacle" },
+      { protocol: 16, identity: { tentacle: "0.3.0+999999999999", kind: "container" } },
+    );
+    expect(message).toBe(
+      'protocol version mismatch: client 22 (tentacle 0.3.0+1a2b3c4d5e6f), daemon 16 (tentacle 0.3.0+999999999999) — update the container\'s tentacle: run "tentacle attach" again from an up-to-date laptop (it replaces an older one)',
+    );
+  });
+
+  test("an older client is told to update even when it is a dev build (its fix is its checkout)", () => {
+    const { message } = versionMismatch(
+      { protocol: 15, tentacle: "0.3.0", name: "tentacle" },
+      { protocol: 16, identity: { tentacle: "0.3.0+1a2b3c4d5e6f", kind: "serve" } },
+    );
+    expect(message).toBe(
+      'protocol version mismatch: client 15 (tentacle 0.3.0), daemon 16 (tentacle 0.3.0+1a2b3c4d5e6f) — update this client: "tentacle update"',
+    );
   });
 });
 

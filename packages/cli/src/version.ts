@@ -47,18 +47,13 @@ export function compiledVersionMarker(): string | undefined {
 }
 
 /**
- * The app version: parsed from the marker literal injected at compile time
- * (`define` in `buildBinary`), or `"dev"` when running from source.
- */
-export const APP_VERSION: string = parseVersionMarker(compiledVersionMarker()) ?? "dev";
-
-/**
  * The BUILD id (docs/fix/stale-pod-binary.md): beside the version, a second
  * compiled-in literal `TENTACLE_BUILD_MARKER:<id>:END` naming the exact source
  * a binary was built from (`computeBuildId`: 12 hex of a content hash). Two
  * builds of one version differ, so `attach` can tell a container's tentacle is
- * not this laptop's even when `--version` agrees. A separate marker, not a
- * suffix of the version: `update` compares versions exactly against the release.
+ * not this laptop's even when `--version` agrees. It is ALSO what makes a dev
+ * build's version say it is not a release (`devBuildVersion`): a released
+ * binary carries no build id, so its version stays plain.
  */
 export const BUILD_MARKER_PREFIX = "TENTACLE_BUILD_MARKER:";
 /** A build id: 12 lowercase hex characters. */
@@ -87,6 +82,35 @@ declare const __TENTACLE_BUILD_MARKER__: string | undefined;
 /** This binary's build id, or `undefined` from source. */
 export const APP_BUILD: string | undefined = parseBuildMarker(
   typeof __TENTACLE_BUILD_MARKER__ === "string" ? __TENTACLE_BUILD_MARKER__ : undefined,
+);
+
+/**
+ * The version a build reports (docs/fix/dev-build-version-skew.md): the plain
+ * version, plus `+<build id>` when the build carries one. A RELEASED binary
+ * always reports the plain version (a release is cut from a clean tagged
+ * `main`, and both `scripts/release.ts` and build.yml refuse a tag that is not
+ * `packages/cli/package.json`'s), so the `+` says exactly one thing: this is
+ * not a release. Without it two builds of one version are indistinguishable in
+ * a `VersionMismatch` ("client 21 (tentacle 0.3.0), daemon 16 (tentacle 0.3.0)"
+ * — a `main` checkout against release v0.3.0).
+ *
+ * `update` compares versions exactly and ignores `+…` metadata
+ * (`compareVersions`), and a `+` version names no release, so nothing that
+ * compares or installs a version changes meaning. An id that is not a build id
+ * (no build marker, a malformed one) adds nothing: a version is never made up.
+ */
+export function devBuildVersion(version: string, build: string | undefined): string {
+  return build !== undefined && BUILD_ID_RE.test(build) ? `${version}+${build}` : version;
+}
+
+/**
+ * The app version: parsed from the marker literal injected at compile time
+ * (`define` in `buildBinary`), or `"dev"` when running from source. A build
+ * that carries a build id reports it (`0.3.0+<id>`): see `devBuildVersion`.
+ */
+export const APP_VERSION: string = devBuildVersion(
+  parseVersionMarker(compiledVersionMarker()) ?? "dev",
+  APP_BUILD,
 );
 
 /** Who this CLI is in `initialize` (a daemon words a version skew with it). */

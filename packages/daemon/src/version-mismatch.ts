@@ -31,6 +31,11 @@ function side(protocol: number, program: string, version: string | undefined): s
   return version === undefined ? `${protocol}` : `${protocol} (${program} ${version})`;
 }
 
+/** Whether a version string names a build that is not a release (`0.3.0+<build id>`, `devBuildVersion`). */
+function isDevBuild(version: string | undefined): boolean {
+  return version?.includes("+") === true;
+}
+
 function advice(
   client: MismatchClient,
   daemon: MismatchDaemon,
@@ -45,6 +50,14 @@ function advice(
   }
   if (daemon.identity?.kind === "container") {
     return 'update the container\'s tentacle: run "tentacle attach" again from an up-to-date laptop (it replaces an older one)';
+  }
+  // A dev-build client (0.3.0+<build id>) is newer than any published release,
+  // so `tentacle update` on that host would reinstall the same old release — the
+  // live case (docs/fix/dev-build-version-skew.md). Nothing published has this
+  // client's protocol; the fix is to put THIS build there. CLI only: another
+  // program (the app) has no "build this source" step to point at.
+  if ((client.name ?? CLI_NAME) === CLI_NAME && isDevBuild(client.tentacle)) {
+    return 'the client is a newer build than any release: install the same build on that host (build this source there, then run "tentacle serve")';
   }
   // `serve` (a `worker` is the client's own build: never older, unreachable).
   return 'update the daemon: run "tentacle update" on that host and restart "tentacle serve"';

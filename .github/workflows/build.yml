@@ -54,6 +54,11 @@ jobs:
       - name: Compile
         env:
           TARGET: ${{ matrix.target }}
+          # A release build reports the PLAIN version (docs/fix/dev-build-version-skew.md):
+          # a `v*` tag publishes these binaries, `update` installs by exact version,
+          # and the release job below refuses a tag that differs from package.json.
+          # Every other build (push to main, manual) stays `+<build id>`.
+          TENTACLE_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '' }}
         run: |
           bun run compile
           mv dist/tentacle "dist/tentacle-${TARGET}"
