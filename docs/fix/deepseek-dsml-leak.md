@@ -243,3 +243,106 @@ Known, deliberately not fixed: the pod path (see Execution) — a pod session fa
 its turn with `internal error` instead of re-asking. Follow-up, not a regression.
 
 
+## Review (Opus)
+
+*— claude-opus-5-5, 2026-11-11*
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 1 MEDIUM). Gate: `bun run check` green
+(lint clean, 6813 pass / 3 opt-in skip / 0 fail). Tree clean after mutations.
+
+### What holds
+
+- `ToolCallAssembler` (`packages/providers/src/tool-call-stream.ts:565-577`): an
+  explicit `index` is authoritative, so interleaved parallel calls assemble
+  correctly (pinned). An index-less continuation joins the running call; an
+  index-less delta with a different id opens a new slot. Nameless slots are
+  dropped at `drain()`. For an index-always server the only change is the
+  restated-name skip and the nameless drop.
+- Re-ask (`packages/agent/src/agent.ts:1186-1203`): the abort check runs first.
+  It is bounded by `dsmlReasks`. Nothing is pushed for the leaked round on
+  either path. The note follows the same `user`-message pattern as
+  `CONTINUE_NUDGE`/hook notes. Steering is drained at the top of the next
+  iteration as usual. `budgetFrom--` is bounded by the same counter. The
+  in-process worker builds the agent with the local provider
+  (`packages/cli/src/worker.ts:123`), so `instanceof` holds there.
+  `RetryingModelProvider` rethrows it unchanged (`retry.ts:199`).
+- Non-vacuity (my own mutations, restored):
+  - M1 (`keyFor` always returns `nextKey` for an index-less delta) → 3 fail:
+    the unit tests for an omitted index and a repeated id, plus the e2e
+    omitted-index test.
+  - M2 (`MAX_DSML_REASKS = 5`) → 2 fail: "bounded" and "never leaves the
+    leaked text".
+
+### HIGH-1 — the guard does not fire on the incident it was built for
+
+`packages/core/src/dsml.ts:230,241-251`: `hasDsmlToolCallMarkup` requires an
+opening `<｜DSML｜ invoke>` tag. **The incident log has none.** The distinct DSML
+tags in `exec-history-validity.log` 772–779 are:
+
+- `<｜DSML｜ parameter name="fs_write">`
+- `<｜DSML｜ parameter name="content" string="true">`
+- `<｜DSML｜ parameter name="path" string="true">`
+- `</｜DSML｜ parameter>` ×3
+- `</｜DSML｜ invoke>`
+- `</｜DSML｜ calls>`
+
+There is no opening invoke tag at all. Repro
+(`.tentacle/tmp/dsml-leak/review/incident.ts`, the log's text from "Base64
+works" on, fed to the shipped function):
+
+```
+{ bytes: 817, hasInvokeOpen: false, guardFires: false }
+```
+
+So the exact reply in the incident still ends the turn as a "final answer",
+which is symptom 1 unfixed. The tests pass only because the fixture
+`packages/providers/test/dsml-leak.test.ts:610-617` (and `core/test/dsml.test.ts`)
+add a `<｜DSML｜ invoke>` line that the log does not contain. The doc's "spelled as
+the incident's log has it" is false. The template's real invoke tag also
+carries attributes (`invoke name="…"`), which the exact `invoke>` match would
+miss too.
+
+**Fix:**
+
+- Recognise the observed shape. Require at least one opening
+  `<｜DSML｜␠?parameter name="…"…>` and, after it, a closing `</｜DSML｜␠?` tag
+  (`parameter`/`invoke`/`calls`). Allow an optional space after the bar and
+  attributes on any opening tag.
+- Keep the "bare mention / prose is not refused" negatives.
+- Replace both fixtures with the log's literal bytes (lines 773–778, the base64
+  body may be shortened) and show it red on the current matcher.
+
+### MEDIUM-1 — new enum value on a known display kind breaks an older client; needs `PROTOCOL_VERSION` 22→23
+
+`packages/protocol/src/updates.ts:334` adds `leaked_tool_call` to
+`ContextNoteSchema.reason`. An older client does not see this as an unknown
+kind. It sees a known kind whose member fails its schema, and
+`classifyUpdate` (`packages/client/src/mapping.ts:57-58`) returns
+`malformed context_note update from the daemon`. The session reducer then
+emits it as an error (`session-reducer.ts:284`). Repro
+(`.tentacle/tmp/dsml-leak/review/skew.ts`, a reason the client's enum lacks):
+
+```
+error malformed context_note update from the daemon
+```
+
+**Scenario:** a v22 laptop on a pre-fix build `connect`s to a post-fix `serve`
+(or runs a newer pod binary). The model leaks DSML, and the user gets a
+"malformed update" error instead of the notice and re-ask. Both versions say 22,
+so `initialize` does not catch the mismatch. By §7 this is a changed field
+domain, i.e. "truly breaking". The doc's precondition "display → no bump" is
+wrong.
+
+**Fix:**
+
+- Bump `PROTOCOL_VERSION` to 23 in `packages/protocol/src/version.ts`, with a
+  history line.
+- Regenerate `protocol.json`.
+- Fix the doc's precondition.
+- Alternative: emit the notice under an existing reason. That loses the
+  render distinction, so the bump is preferred.
+
+Executor behaviour: a careful extraction with good red/green discipline on the
+assembler. The DSML half, though, was tested against an invented fixture
+instead of the cited evidence, which is exactly the "weaker correlate" trap of
+§2/§9.
