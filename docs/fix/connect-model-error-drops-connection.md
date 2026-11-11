@@ -641,3 +641,58 @@ touches). CI installs with `--filter '!@tentacle/mobile'` (AGENTS §6).
 
 Every red was observed before the fix, and each mutation was reverted and the
 suite re-run green.
+
+## Review — fresh-context adversarial (round 1 + round 2)
+
+*— claude-opus-5-5, 2026-11-11* (a different model family from the executor; fresh context; scope `git diff main...HEAD` only)
+
+**Verdict: REQUEST-CHANGES**: four MEDIUM findings, no HIGH. The core fixes hold: serve-only exposure, the sanitizer, the orphan guard, and the daemon's model facts. Three of the doc's claimed pins or premises are not true, and the start-up warning misfires on the default setup.
+
+### Findings
+
+1. **MEDIUM: nothing pins the pod's redaction, although the doc says a test does.** `packages/cli/src/serve.ts:525` (`podSessionHost`). *Mutation run:* adding `exposeTurnErrors: true` to the pod `SessionHost` literal leaves **all 2430 `packages/cli` tests and `packages/daemon/test/integration.test.ts` green**. Failure modes says the pod is "pinned by a `podSessionHost`-shaped test", and the round-1 Review says it is "pinned by the still-green `integration.test.ts` redaction cases". Neither is true: those cases build a bare `SessionHost`, not the pod's. *Scenario:* a later edit (for example copying the serve options into the pod host) exposes pod turn errors and no test notices. *Fix:* add a test that builds `podSessionHost(config)` with a provider that throws `new Error("model request failed with status 401: secret-ish")`, runs one turn through `Connection`, and expects `turn_end.error.message === "internal error"`. Show it red under this mutation.
+
+2. **MEDIUM: `serveModelNotice` gives a false warning on the default zero-config setup.** `packages/cli/src/serve-model-notice.ts:27-36`. The defaults are `http://localhost:8080/v1`, model `"default"`, no key (`packages/config/src/defaults.ts:5,8`). That is a keyless local llama-server, a valid working setup the config template is written around (`defaults.ts:134`). With it, `serve` prints "no model is configured on this host: **every turn will fail**", which is false. *Fix:* do not claim failure. Word it as a fact plus a hint, e.g. `using the built-in default model endpoint (http://localhost:8080/v1, model "default") with no API key — if turns fail (401 / connection refused), set model.baseURL/model.model/model.apiKey with \`tentacle config\` on this host; a client's own model is never used here`. Adjust `serve-model-notice.test.ts`.
+
+3. **MEDIUM: the reconnect regression test (R5) is claimed but does not exist.** Context decision (b) says "a regression test now pins it", and the round-1 Review row (b) says "now pinned by a test (daemon restart → same session id → the send runs)". No test in the diff restarts a daemon. `packages/cli/test/connect-model-error.test.ts:82` `freePort()` is defined and never used, which suggests the test was dropped. *Fix:* add it (stop the daemon, start a new `startDaemon` on the same `freePort()` port with the same project dir, then assert the client re-opens the SAME session id and the next send returns the model text). Or remove `freePort` and correct both doc claims.
+
+4. **MEDIUM: `servedModel` trusts an `agentInfo` that nobody validated, and the round-2 failure mode states a false premise.** `packages/cli/src/connect.ts:300`. The client never parses `initialize` with `InitializeResultSchema`: it casts (`packages/client/src/remote-client.ts:1812`, `raw as InitializeResult`). So "`line(128)` rejects it at the peer's parse … one gate each side" is FALSE: `servedModel` is the only gate. *Scenario:* a daemon (another build, or a misconfigured one) sends `agentInfo.model: 42` or an object. `oneLine(info.model)` then throws inside `connectTui` before Ink mounts, and `connect` fails outright over a display-only field. The doc promises the opposite ("Absent/odd → TUI keeps its defaults"). *Fix:* in `servedModel`, `const raw = info?.model; const name = typeof raw === "string" ? oneLine(raw).slice(0, MODEL_LABEL_MAX) : "";` and `typeof window === "number" && Number.isInteger(window) && window > 0`. Add a `servedModel` case with `model: 42` / `contextWindow: "200000"` → `{}`. Correct the round-2 Failure-modes bullet.
+
+### Premise table (spot-checked)
+
+| Claim | Verdict |
+|---|---|
+| Only `tentacle serve` reaches `reloadedHost` (`startDaemon` ← `main.ts:889` only); pod hosts come from `podSessionHost` (`serve.ts:503`, `pod-resident.ts:803`, `serve.ts:568`) | TRUE |
+| `exposeTurnErrors: true` only on the serve host (`serve.ts:204`) | TRUE |
+| Pod redaction is pinned by a test | **FALSE** (F1) |
+| Reconnect (R5) pinned by a test | **FALSE** (F3) |
+| The wire schema `line(128)` gates `agentInfo.model` at the client | **FALSE** (F4) |
+| A local (`model !== "remote"`) failure renders byte-identically (`model-error.ts`, `!remote → String(error)`) | TRUE |
+| `TurnInProgress` from the guard restores input in the TUI (`lostSlot`, `turn-feed.ts:125`) | TRUE |
+
+### Attacks tried
+
+- **Secret leak through the exposed message**: probed `sanitizeTurnError` with an OpenAI JSON 401 (`sk-proj-…`), `{"api_key": …}`, `x-api-key:`, a URL `?key=AIza…`, a `ghp_` token, and bidi/ESC/BEL. All were masked or flattened. Not masked: `Authorization: Basic <b64>`. It is left as a note, not a finding, because the host is trusted and the text is capped. The client re-sanitises it (`laptopText`, `remote-session.ts:1665`). → holds.
+- **A pod exposing errors**: structurally, no pod path sets the flag (holds today). The pin is missing (F1).
+- **Orphan guard: does it make a new "every send fails" wedge?** `active` is cleared in `runTurn`'s `finally` when the consumer leaves (for-await `return`), and ended by `turn_end`, resync loss (`:1280`), or `ended()` (`:1599`). So an unended `active` with no consumer cannot persist through the TUI path. `send_now` (`this.next`) and foreign turns are untouched. → holds. *Mutation:* `if (false)` on the guard makes test (b) fail with `HUNG`. Restored.
+- **Hung model call (R3)**: the follow-up is stated honestly (Review row (b) "PARTIAL"). The Esc test drives the real `serve`: the endpoint's request is aborted, and the NEXT message runs (`recovered`, no `Working…`). → holds as stated.
+- **Round 2**: the name comes from `config.model` and the window from `config.contextWindow`. No URL or key is added to `agentInfo` (`connection.ts:452-466`). An older daemon or a pod → `{}` → defaults. `model === "remote"` stays semantic, and `/model` plus the input rule use `shownModel`. Not wiring the carried `contextWindow` into `serve` is correct, pinned by test (2). → holds, apart from F4.
+- **Version skew**: additive optional fields in a strip schema, no `PROTOCOL_VERSION` bump. Correct under §7, since nothing is mandatory or blocking.
+
+### Mutations (run by this reviewer; tree restored byte-identical, `git status` clean)
+
+| Mutation | Result |
+|---|---|
+| `exposeTurnErrors: true` on `podSessionHost` | **survives**: 2430/2430 cli + daemon integration green (F1) |
+| orphan guard → `if (false)` (`remote-session.ts:1135`) | **killed**: `(b) … refused, and that turn still ends` → `Received: "HUNG"` |
+
+### Gate (this reviewer, 2026-11-11)
+
+- `bun run check` short-circuits at `tsc -p apps/mobile`: its dependencies are not installed in this worktree (DOM/`@types/ws` duplicate-identifier errors under `node_modules`). This is unrelated to the branch.
+- `bunx tsc --noEmit` (root): clean.
+- `bun run lint`: `Checked 864 files … No fixes applied.`
+- `bun test --path-ignore-patterns 'apps/mobile/**'`: **6761 pass, 3 skip, 0 fail**, 473 files. The 3 skips are the opt-in skips.
+
+### How the executor behaved
+
+The executor reproduced on the real stack before reading code, and stated the R3 residual honestly instead of claiming (b) whole. The round-2 drift is well documented. The weakness is claims of pins that do not exist (F1, F3) and one invented premise (F4). The plan also listed a `remote-session` unit test for the refusal; it was not written, and the guard is pinned only by the real-stack test (it is pinned).
