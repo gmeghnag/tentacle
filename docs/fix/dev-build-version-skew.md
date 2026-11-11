@@ -531,3 +531,38 @@ and recompiled (the `dist/tentacle` left in place is the unmutated build).
 **Not verified:** nothing on the release path changed in this round, so the CI
 `TENTACLE_RELEASE=1` case stands as Review recorded it; the mobile project's
 typecheck/test still needs `bun install` without the mobile filter.
+
+## Review — round 2
+
+*— claude-opus-5-5, 2026-11-11*
+
+**Verdict: PASS.** Scope: the fix commit `9dc03c0` (`git diff HEAD~1`) against round-1 findings 1–3, a sweep of every version consumer, and new HIGH/MEDIUM.
+
+**(1) Findings fixed as specified, tests really red/green.**
+- `version.ts:116/124`: there are now two versions. `APP_RELEASE_VERSION` is plain and comes from the marker. `APP_VERSION = devBuildVersion(APP_RELEASE_VERSION, APP_BUILD)` adds the build id.
+- F1: the defaults in `pod-binary-build.ts:293,337` and `engine-runtime.ts:849,888` now use `APP_RELEASE_VERSION`.
+- F2: `main.ts:631` now passes `APP_RELEASE_VERSION` to `runUpdate`.
+- F3: `parseVersionLine` cuts the version at `+` (`container-version.ts:21`). The build rule is untouched, and the new test pins that an older build of the same version is still replaced (`reason: "build"`).
+- The new F1 and F2 tests spawn `test/fixtures/dev-build.ts`. It seeds the two `__TENTACLE_*` globals before `version.ts` is imported, so the code really runs as a compiled dev build (`APP_VERSION` = `0.3.0+1a2b3c4d5e6f`, asserted). The suite's own process cannot do this, because from source the version is `"dev"`.
+- Mutation run (I put back all three old sites at once):
+  - the `pod-binary-build.ts` defaults back to `APP_VERSION`;
+  - `main.ts:631` back to `APP_VERSION`;
+  - `parseVersionLine` no longer cuts at `+`.
+
+  Result: 4 fails, which are the two spawned dev-build tests, the `parseVersionLine` `+` test and the `containerDecision` reuse test. I reversed each mutation exactly; `git status` was clean afterwards and the tests were green again.
+
+**(2) Sweep: no comparison still uses the version with `+`.** `rg APP_VERSION` over `packages/*/src`:
+- **Display or wire only, never compared:** `--version`/help (`main.ts:541,557`), `CLIENT_INFO` (connect and the local runtime), `serve`'s identity (`serve.ts:207,525`) and the worker bootstrap (`local-runtime.ts:1087`).
+- **Run-state owner records** (`relay.ts:229,518`, `attach-run.ts:432`): `run-state.ts:186/201` and `control-socket.ts:112` only parse and pass them on. No reader compares them.
+- **Every comparison uses the plain version:**
+  - pod-binary checks and resolution;
+  - the version `attach` expects for the container (`expectedContainerVersion`) and the build rule (`expectedContainerBuild`);
+  - every equality check in `update` (`update.ts:257,274,291`);
+  - `compareVersions`, which strips `+` anyway.
+- `parseVersionLine` cuts at `+`; its other caller (`engine-runtime.ts:989`) only builds a warning to display.
+- `install.sh:150-151` compares `--version` of a published binary with the tag. A tag build sets `TENTACLE_RELEASE=1`, so that output is plain.
+- The release job's tag check (`build.yml:87-88`) reads `package.json`, not the binary. Not affected.
+
+**(3) New HIGH/MEDIUM: none.** One gap remains, and `main` has it too, so this branch did not add it. A dev-build laptop whose config-dir pod binaries are released ones (no build marker) has no build rule. On `attach` it reuses or injects a release binary, which may speak a different protocol, and the refusal then says "run tentacle attach again", which cannot help. This is outside this fix's scope. A follow-up could make it inject its own build.
+
+Narrow tests (container-version, update, pod-binary-build, version, version-mismatch, connect): 136 pass, 0 fail.
