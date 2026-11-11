@@ -612,3 +612,115 @@ $ bun test               # 6871 pass, 3 skip, + apps/mobile/test/rn-websocket.te
 ## Review
 
 *— (empty: a fresh-context adversarial pass once Execution lands)*
+
+## Review (Opus)
+
+*— claude-opus-5-5, 2026-11-11*
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 1 MEDIUM).
+
+### Gate
+
+- Narrow: 8 files (both agent files, both provider stop-reason files, TUI notice,
+  CLI render, protocol kind, `daemon/test/proxy-model.test.ts`): 57 pass / 0 fail.
+- `bunx tsc --noEmit` clean; `bun run lint` clean (891 files); `bun test` 6871
+  pass / 3 opt-in skips / 1 fail = `apps/mobile/test/rn-websocket.test.ts`
+  (`Cannot find module '@tentacle/client'`: the apps/mobile deps are not installed
+  in this worktree). `bun run check` stops at `tsc -p apps/mobile` for the same
+  reason (a stray `bun-types@1.1.37`). Neither failure comes from this branch.
+- Mutations, run and reverted by hand (`git status` clean after):
+  `budgetFrom++`→`budgetFrom--` turns "the re-ask does not eat the turn's step
+  budget" RED; `truncationReasks < MAX`→`<= MAX` turns "the re-ask is BOUNDED to
+  one" RED. Both tests catch the mutation.
+
+### HIGH-1 — pods (`run`/`attach`) get none of the fix: the tunnel drops `stopReason`
+
+- `packages/protocol/src/model.ts:49` — the `done` member of
+  `WireStreamEventSchema` is `{ type, usage? }`. Payload schemas strip unknown
+  fields, so the pod daemon's `ProxyModelProvider`
+  (`packages/daemon/src/proxy-model.ts:270`, `ModelStreamProgressValueSchema.safeParse`)
+  receives `done` with **no `stopReason`**. Measured:
+  `WireStreamEventSchema.parse({type:"done",stopReason:"length"})` →
+  `{"type":"done"}`.
+- Scenario: `tentacle run` against llama-server; the laptop's `OpenAIProvider`
+  reports `length` correctly, but the pod-side agent sees `undefined`. So a cut
+  text reply is accepted silently (case 1). A tool call cut by `length` **runs**,
+  and the round repeats until the step cap (case 5, 17 rounds). A cut stream ends
+  as `end_turn` (case 2). No notice is shown. The plan's failure mode "Pod: the
+  daemon-side agent runs the loop, so it takes the same branches" is false, and no
+  test covers the tunnel.
+- Fix: add `stopReason: z.enum(["stop", "length", "tool_calls", "other"]).optional()`
+  to the `done` member, then regenerate `protocol.json`. Adding an optional field
+  is free under §7, so no `PROTOCOL_VERSION` bump. When an older laptop leaves it
+  out, the value is `undefined` and the old behaviour applies; it never fails a
+  turn. Trust is unchanged: the value goes laptop → pod, and a pod cannot use it
+  to cause any effect on the laptop. Add a `proxy-model` test: a tunnelled
+  `done{stopReason:"length"}` arrives intact, and an `Agent` over the proxy yields
+  `truncated_reply` and does not run a cut call. Show it RED on the current schema.
+
+### MEDIUM-2 — when the one re-ask also fails, the user is never told (the owner's own case)
+
+- `packages/tui/src/state.ts:692-696` hard-codes `retrying: event.reason === "length"`
+  and drops a notice whose text was already shown this turn.
+  `packages/cli/src/render.ts:258-262` drops **every** `truncated_reply` after the
+  first in a turn, including a `cut`. The loop's re-ask budget is spent at
+  `packages/agent/src/agent.ts:1375`, but the event does not say so.
+- Scenario: llama-server's slot is full. The reply `la vera soluzione è` ends with
+  `length`. The notice says "…incomplete; asking it to continue". The continuation
+  is also cut by `length`, but there is no second re-ask, and the turn ends
+  `end_turn`. The second notice has the same wording ("asking it to continue"),
+  so it is dropped. The screen shows a continuation as if it were complete, and
+  the last thing it says is that a continuation is coming. If the continuation
+  comes back empty, the stall nudges run (2 more calls) and nothing says the
+  recovery failed. Bounded, but silent, which is the bug this task fixes. In the
+  CLI, a `cut` after a `length` is also dropped (the failure still shows as
+  `[stopped: error]`).
+- Fix: compute `retrying = truncationReasks < MAX_TRUNCATION_REASKS` at the yield
+  (`agent.ts:1285`). Carry it as `retrying: boolean` on the `AgentEvent`, on
+  `TruncatedReplySchema` (an extra field on a display kind: no bump) and in both
+  mappings. Both frontends then use `event.retrying` instead of
+  `reason === "length"`. The TUI's text-based dedupe will then show the final
+  "cut — this answer is incomplete" once. Key the CLI dedupe on
+  `(reason, retrying)`. Add a test with two `length` rounds: two distinct notices,
+  and the second does not say "asking it to continue".
+
+### Checked and holding
+
+- **`budgetFrom++` is right.** The loop guard is `iteration - budgetFrom < maxIterations`,
+  so `++` keeps the re-ask round free and `truncationReasks` caps the free rounds
+  at one. The plan's `budgetFrom--` would cost two steps. Side note: the existing
+  DSML re-ask (`agent.ts:1229`) has that same `--`, so it already costs 2 steps
+  instead of 0. That bug predates this branch and is out of scope; it deserves its
+  own small fix.
+- **Bounds:** DSML, truncation and stall budgets are separate counters, each
+  bounded. Worst case for empty-`length` rounds: 1 re-ask + 2 nudges = 4 calls,
+  then `empty_turn`. No double nudge: the re-ask path `continue`s before the stall
+  branch. No path to an unbounded loop.
+- **Cancel:** `signal.aborted` is checked before the `"other"` branch
+  (`agent.ts:1247` vs `:1258`). An abort that makes `parseSSE` return quietly
+  still ends as a clean `cancelled`.
+- **Q2a edge cases:** a sticky `finishReason` survives a final `choices: []`
+  usage chunk and `[DONE]`. `finish_reason: null`/`""` is ignored, and an unknown
+  value maps to `"stop"`. A shim that never sends a `finish_reason` now fails
+  (owner-accepted risk).
+- **Anthropic:** `max_tokens`/`refusal` map to `length`. A stream with no
+  `message_delta` maps to `"other"`. The existing refusal of a cut `tool_use` is
+  unchanged.
+- **Cut tool args:** `toolCalls.length > 0` covers parallel calls where only the
+  last one is cut. All calls are refused and none is dispatched.
+- **Protocol:** both kinds are `display`, `PROTOCOL_VERSION` is still 22, and both
+  mappings are wired.
+- **Sub-agents:** a child's `ModelStreamCutError` goes through `subagent.ts:506`
+  (`subagent_end{error}`, rethrown), so the parent gets an error tool result.
+  Bounded.
+- **History:** the partial text is kept, and the re-ask is a plain user message,
+  as with the existing `CONTINUE_NUDGE`. A resumed session loads normally.
+- **Out of scope:** `compact.ts:77,115` ignores `stopReason`, so a compaction
+  summary cut by `length` is still accepted. Same class of bug; worth a TODO.
+
+### How the executor behaved
+
+The executor was honest about drift. It caught the plan's `budgetFrom--` error
+and wrote a test for it, and it noted the pre-existing test fake change. It
+missed that a third runtime (the pod tunnel) re-serialises `StreamEvent` through
+a strip schema, and stated the pod failure mode from the plan without testing it.
