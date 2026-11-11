@@ -344,3 +344,74 @@ What does not hold / residual risk, stated honestly:
   first release compile) and the first draft keying the advice on the wrong
   side (caught by writing the test against the live shape first). Both are
   recorded in Execution as drift.
+
+## Review (fresh context)
+
+*— claude-opus-5-5, 2026-11-11*
+
+**Verdict: REQUEST-CHANGES.** The hint logic, the CI expression
+(`startsWith(github.ref, 'refs/tags/v') && '1' || ''` → `"1"` on a `v*` tag,
+`""` on a branch/manual run, and `buildIdFor` treats `""` as dev) and the
+release job's tag-vs-`package.json` check (reads the file, not the binary) are
+correct. The load-bearing claim in `version.ts` — "`update` … ignores `+…`
+metadata, so nothing that compares or installs a version changes meaning" — is
+**false**: only `compareVersions` strips `+`; every other consumer compares
+`APP_VERSION` for exact equality with a binary's **version marker**, and the
+marker stays plain (`buildBinary` writes `formatVersionMarker(cliVersion())`).
+So every compiled non-release build (`bun run compile`, CI on `main`) now has
+`APP_VERSION = "0.3.0+<id>"` against its own marker `"0.3.0"`. Repro
+(`.tentacle/tmp/version-skew/repro.ts`, run against the branch):
+
+```
+podBinaryProblem: the Linux pod binary for x64 is at version 0.3.0 (…; this tentacle is 0.3.0+1a2b3c4d5e6f): run `tentacle update`
+planUpdate latest=0.3.0: {"self":null,"podVersion":"0.3.0+1a2b3c4d5e6f","podTargets":["bun-linux-x64","bun-linux-arm64"],"status":"update"}
+update self-check refuses (marker 0.3.0 !== appVersion): true
+attach, TENTACLE_POD_BIN = dev build, container runs that same build: {"kind":"replace","had":"0.3.0+1a2b3c4d5e6f","reason":"version"}
+```
+
+Findings (all HIGH — each breaks a command that worked on `main` for a compiled dev build):
+
+1. **`run`/`attach` can never inject a pod binary** — `packages/cli/src/pod-binary-build.ts:276`
+   (`version === appVersion`), reached from `checkPodBinaries` :293 and
+   `resolvePodBinary` :337. A dev build is not `"dev"`, so it takes the release
+   path and requires a config-dir binary whose marker equals `0.3.0+<id>` —
+   which no binary carries. Scenario: compile `main`, `tentacle run` → always
+   `PodBinaryError … run tentacle update`, and `update` cannot fix it (#2).
+2. **`tentacle update` is broken for a dev build** — `packages/cli/src/update-plan.ts:128-132`
+   and `packages/cli/src/update.ts:287`. (a) latest == `0.3.0`: `podVersion`
+   becomes `0.3.0+<id>`, both pods are "stale", status `update` (and `--check`
+   exits `EXIT_UPDATE_AVAILABLE`), then it downloads tag `v0.3.0+<id>` → 404.
+   (b) latest `0.4.0`: the "never overwrite a file that is not this tentacle"
+   guard reads marker `0.3.0` ≠ `0.3.0+<id>` → refuses to update itself.
+3. **`attach` with `TENTACLE_POD_BIN` replaces its own build every time** —
+   `packages/cli/src/container-version.ts:38/43` + `:176`. `expected` comes from
+   the file's plain marker, `found` from the container's `--version`
+   (`0.3.0+<id>`) → `replace … reason: "version"` on every re-attach, and the
+   `StaleBuildError` "never kill a live daemon" guard (`engine-runtime.ts:893`)
+   covers only `reason: "build"`, so a busy resident is replaced.
+
+Exact fix (smallest, keeps the user-visible `+<id>`): keep the plain version as
+the identity every **comparison** uses, and use the suffixed one only for
+**display / the wire**. In `version.ts` export `APP_RELEASE_VERSION =
+parseVersionMarker(compiledVersionMarker()) ?? "dev"` (plain) and
+`APP_VERSION = devBuildVersion(APP_RELEASE_VERSION, APP_BUILD)`; pass the plain
+one to `checkPodBinaries`/`resolvePodBinary`/`expectedContainer*`/`runUpdate`
+(`engine-runtime.ts:843,882` defaults, `pod-binary-build.ts:293,337` defaults,
+`main.ts:631`; the run-state owner records at `relay.ts:229` /
+`attach-run.ts:432` are informational and may keep `APP_VERSION`), and have
+`parseVersionLine` (`container-version.ts:13`) return the version up to `+`
+(the build is already judged separately by the build rule). Keep
+`APP_VERSION` for `--version`, `CLIENT_INFO`, `serve` identity and the worker
+bootstrap. Add regression tests that fail today: `checkPodBinaries` with
+`appVersion` from a dev build and a matching plain-marker binary passes;
+`runUpdate` with a dev `appVersion` vs latest equal → "up to date", no
+download; `containerDecision` for a `+` probe against a plain expected →
+`reuse`. Also correct the false sentence in `version.ts:97-99` and the
+Context/Review claim that consumers are unaffected.
+
+Not findings: the three hint branches are right per case (a dev client is
+reached only with `client.protocol > daemon.protocol`, where no published
+release can match it; container/older-client branches unchanged). Narrow
+tests pass (62/62) — they pass precisely because none exercises a `+`
+`appVersion` through the equality consumers, so no mutation was needed to
+show the gap.
