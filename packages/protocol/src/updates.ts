@@ -121,7 +121,7 @@ export const SteerSchema = z.object({
 export const ContextNoteSchema = z.object({
   type: z.literal("context_note"),
   text: z.string(),
-  reason: z.enum(["continue", "background_exit", "hook"]),
+  reason: z.enum(["continue", "background_exit", "hook", "leaked_tool_call"]),
 });
 
 /**

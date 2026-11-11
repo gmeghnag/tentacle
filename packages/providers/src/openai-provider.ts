@@ -14,13 +14,12 @@ import type {
   ChatRequest,
   ModelProvider,
   StreamEvent,
-  ToolCall,
   ToolDefinition,
   Usage,
 } from "@tentacle/core";
-import { wireArguments } from "@tentacle/core";
+import { DsmlToolCallLeakError, hasDsmlToolCallMarkup, wireArguments } from "@tentacle/core";
 import { parseSSE } from "./sse.ts";
-
+import { ToolCallAssembler, type WireToolCallDelta } from "./tool-call-stream.ts";
 export interface OpenAIProviderConfig {
   /** Base URL including the API version, e.g. `http://host:8080/v1`. */
   readonly baseURL: string;
@@ -70,12 +69,6 @@ export function parseRetryAfter(
   return Number.isFinite(ms) && ms >= 0 ? Math.round(ms) : undefined;
 }
 
-interface WireToolCallDelta {
-  readonly index: number;
-  readonly id?: string;
-  readonly function?: { readonly name?: string; readonly arguments?: string };
-}
-
 interface WireChunk {
   readonly choices?: ReadonlyArray<{
     readonly delta?: {
@@ -87,40 +80,6 @@ interface WireChunk {
     readonly finish_reason?: string | null;
   }>;
   readonly usage?: { readonly prompt_tokens?: number; readonly completion_tokens?: number } | null;
-}
-
-/** Reassembles tool calls streamed incrementally across chunks, keyed by index. */
-class ToolCallAssembler {
-  private readonly calls = new Map<number, { id: string; name: string; args: string }>();
-
-  add(deltas: ReadonlyArray<WireToolCallDelta>): void {
-    for (const d of deltas) {
-      const cur = this.calls.get(d.index) ?? { id: "", name: "", args: "" };
-      if (d.id) {
-        cur.id = d.id;
-      }
-      if (d.function?.name) {
-        cur.name += d.function.name;
-      }
-      if (d.function?.arguments) {
-        cur.args += d.function.arguments;
-      }
-      this.calls.set(d.index, cur);
-    }
-  }
-
-  drain(): ToolCall[] {
-    const out: ToolCall[] = [];
-    for (const c of this.calls.values()) {
-      out.push({ id: c.id || crypto.randomUUID(), name: c.name, arguments: c.args });
-    }
-    this.calls.clear();
-    return out;
-  }
-
-  get size(): number {
-    return this.calls.size;
-  }
 }
 
 export class OpenAIProvider implements ModelProvider {
@@ -200,6 +159,9 @@ export class OpenAIProvider implements ModelProvider {
 
     const tools = new ToolCallAssembler();
     let usage: Usage | undefined;
+    /** The visible text, accumulated only to check it for leaked DSML markup. */
+    let answer = "";
+    let sawToolCall = false;
 
     for await (const data of parseSSE(res.body, request.signal)) {
       if (data === "[DONE]" || data.length === 0) {
@@ -228,6 +190,10 @@ export class OpenAIProvider implements ModelProvider {
 
       const delta = choice.delta;
       if (delta?.content) {
+        if (!sawToolCall) {
+          // Kept only to check for leaked DSML markup at the end of the reply.
+          answer += delta.content;
+        }
         yield { type: "text", delta: delta.content };
       }
       const reasoning = delta?.reasoning_content ?? delta?.reasoning;
@@ -239,6 +205,7 @@ export class OpenAIProvider implements ModelProvider {
       }
       if (choice.finish_reason) {
         for (const call of tools.drain()) {
+          sawToolCall = true;
           yield { type: "tool_call", toolCall: call };
         }
       }
@@ -247,8 +214,17 @@ export class OpenAIProvider implements ModelProvider {
     // Flush tool calls if the stream ended without a finish_reason.
     if (tools.size > 0) {
       for (const call of tools.drain()) {
+        sawToolCall = true;
         yield { type: "tool_call", toolCall: call };
       }
+    }
+
+    // A reply that is a DSML tool call in TEXT form is not an answer: the tool
+    // never ran, so accepting it ends the turn as if the work were done. The
+    // check runs only when the server streamed no real call — a mixed reply
+    // (text quoting markup AND a real call) is a genuine answer.
+    if (!sawToolCall && hasDsmlToolCallMarkup(answer)) {
+      throw new DsmlToolCallLeakError(new TextEncoder().encode(answer).length);
     }
 
     yield usage ? { type: "done", usage } : { type: "done" };

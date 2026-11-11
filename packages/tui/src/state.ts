@@ -487,7 +487,9 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
     // nudge, a background note — the exit itself renders from
     // `background_exit`) stay hidden.
     case "context_note":
-      return event.reason === "hook" ? appendNotice(state, event.text) : state;
+      return event.reason === "hook" || event.reason === "leaked_tool_call"
+        ? appendNotice(state, event.text)
+        : state;
 
     // The model was sent a repaired copy of the history (once per session;
     // docs/feat/history-validity-invariant.md). The saved session is unchanged.

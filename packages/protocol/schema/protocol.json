@@ -341,7 +341,7 @@
       "additionalProperties": true,
       "properties": {
         "reason": {
-          "enum": ["continue", "background_exit", "hook"],
+          "enum": ["continue", "background_exit", "hook", "leaked_tool_call"],
           "type": "string"
         },
         "text": {
