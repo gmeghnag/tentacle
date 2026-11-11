@@ -23,7 +23,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { PodBinaryTarget } from "./pod-binary.ts";
 import { readBinaryVersion } from "./version-marker.ts";
-import { APP_VERSION, formatBuildMarker, formatVersionMarker } from "./version.ts";
+import { APP_RELEASE_VERSION, formatBuildMarker, formatVersionMarker } from "./version.ts";
 
 /**
  * Resolve the monorepo root so the cache/build paths work in BOTH run modes:
@@ -85,7 +85,18 @@ export function findYogaWasm(): string {
  * two never drift. Returns `true` on success, `false` (after logging) on
  * failure — the caller decides whether to exit.
  */
-export async function buildBinary(outfile: string, target: string | undefined): Promise<boolean> {
+export async function buildBinary(
+  outfile: string,
+  target: string | undefined,
+  /**
+   * The build id this binary reports (`0.3.0+<id>`), or `undefined` for a
+   * RELEASE build, whose version must stay exactly the package.json version
+   * (docs/fix/dev-build-version-skew.md). Required, with no default: a default
+   * would swallow a release's explicit `undefined` (a JS default applies to
+   * `undefined` too), and a release build would silently carry a build marker.
+   */
+  build: string | undefined,
+): Promise<boolean> {
   const root = repoRoot();
   const wasmPath = findYogaWasm();
   const yogaShim = resolve(root, "scripts/yoga-auto.ts");
@@ -106,13 +117,17 @@ export async function buildBinary(outfile: string, target: string | undefined): 
     // @ts-expect-error - `compile` is supported by the Bun bundler
     compile: { outfile, ...(target ? { target } : {}) },
     // Inject the CLI package version as the marker literal
-    // `TENTACLE_VERSION_MARKER:<version>:END` (D2): `APP_VERSION` (version.ts)
-    // is parsed from it, and `readBinaryVersion` finds it in the file without
-    // executing it. From source it is undefined → "dev".
+    // `TENTACLE_VERSION_MARKER:<version>:END` (D2): `APP_RELEASE_VERSION`
+    // (version.ts) is parsed from it, and `readBinaryVersion` finds it in the
+    // file without executing it. From source it is undefined → "dev".
     define: {
       __TENTACLE_VERSION_MARKER__: JSON.stringify(formatVersionMarker(cliVersion())),
       // The build id (docs/fix/stale-pod-binary.md): same idea, a second literal.
-      __TENTACLE_BUILD_MARKER__: JSON.stringify(formatBuildMarker(computeBuildId(root))),
+      // It is also what makes the version say `+<id>` (`devBuildVersion`); a
+      // release build compiles in NO build marker, so its version stays plain.
+      ...(build !== undefined
+        ? { __TENTACLE_BUILD_MARKER__: JSON.stringify(formatBuildMarker(build)) }
+        : {}),
     },
     minify: true,
     plugins: [
@@ -177,6 +192,19 @@ export function computeBuildId(root: string = repoRoot()): string {
   return hash.digest("hex").slice(0, 12);
 }
 
+/**
+ * The build id a build of this source carries, or `undefined` for a RELEASE
+ * build — the one decision that makes a binary's version say `+<id>` or stay
+ * plain (docs/fix/dev-build-version-skew.md). Pure, so `scripts/build.ts`'s
+ * contract is testable without compiling anything.
+ */
+export function buildIdFor(
+  env: Readonly<Record<string, string | undefined>>,
+  sourceId: string,
+): string | undefined {
+  return env.TENTACLE_RELEASE === "1" ? undefined : sourceId;
+}
+
 /** `packages/cli/package.json` `version`: the single source of a build's version. */
 export function cliVersion(): string {
   return JSON.parse(readFileSync(resolve(repoRoot(), "packages/cli/package.json"), "utf8")).version;
@@ -211,8 +239,8 @@ export interface ResolvePodBinaryOptions {
   readonly build?: (outfile: string, target: string) => Promise<boolean>;
   readonly log?: (line: string) => void;
   /**
-   * This tentacle's version (tests); defaults to `APP_VERSION`. `"dev"` (from
-   * source) keeps the cache/build path; a release requires a
+   * This tentacle's version (tests); defaults to `APP_RELEASE_VERSION`.
+   * `"dev"` (from source) keeps the cache/build path; a release requires a
    * `<configDir>/bin` binary whose version marker equals it (D1/D2).
    */
   readonly appVersion?: string;
@@ -262,7 +290,7 @@ export async function podBinaryProblem(
 export async function checkPodBinaries(
   options: Pick<ResolvePodBinaryOptions, "configDir" | "appVersion"> = {},
 ): Promise<void> {
-  const appVersion = options.appVersion ?? APP_VERSION;
+  const appVersion = options.appVersion ?? APP_RELEASE_VERSION;
   if (appVersion === "dev" || process.env.TENTACLE_POD_BIN) {
     return;
   }
@@ -292,7 +320,11 @@ export async function resolvePodBinary(
   options: ResolvePodBinaryOptions = {},
 ): Promise<Uint8Array> {
   const log = options.log ?? (() => {});
-  const build = options.build ?? buildBinary;
+  // A build by the cache is a local one, never a release: it carries this
+  // source's build id, so its binary says `+<id>` too.
+  const build =
+    options.build ??
+    ((outfile: string, target: string) => buildBinary(outfile, target, computeBuildId()));
   // 1) An explicit prebuilt binary wins — the primary "I build it myself" knob.
   const override = process.env.TENTACLE_POD_BIN;
   if (override) {
@@ -302,7 +334,7 @@ export async function resolvePodBinary(
   // 2r) A release build (D1/D2): only <configDir>/bin, and only at exactly this
   // version (its marker, read without executing it). Never the repo cache or a
   // build, never the network: a miss is an error pointing at `tentacle update`.
-  const appVersion = options.appVersion ?? APP_VERSION;
+  const appVersion = options.appVersion ?? APP_RELEASE_VERSION;
   if (appVersion !== "dev") {
     const problem = await podBinaryProblem(target, options.configDir, appVersion);
     if (problem || !options.configDir) {

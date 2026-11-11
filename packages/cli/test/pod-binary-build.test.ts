@@ -13,7 +13,7 @@ import {
   resolvePodBinary,
 } from "../src/pod-binary-build.ts";
 import type { PodBinaryTarget } from "../src/pod-binary.ts";
-import { readBinaryVersion } from "../src/version-marker.ts";
+import { readBinaryBuildId, readBinaryVersion } from "../src/version-marker.ts";
 import { formatVersionMarker } from "../src/version.ts";
 
 /** A fake build that "compiles" by writing a marker file (no real build). */
@@ -187,6 +187,31 @@ describe("resolvePodBinary in a release build (D1/D2: offline, exact version)", 
     return { dir, configDir, cacheDir: join(dir, "cache") };
   };
 
+  test("a COMPILED DEV BUILD finds its own pod binaries (the default is the plain version)", async () => {
+    // docs/fix/dev-build-version-skew.md, fix round 1: `run`'s preflight takes the
+    // DEFAULT `appVersion`. A dev build reports `0.3.0+<id>` but its pod binaries
+    // (and every released one) carry the plain marker `0.3.0`, so a default of
+    // `APP_VERSION` made every `run` on a compiled `main` build fail with "run
+    // `tentacle update`" — which could not help (the review's finding 1).
+    // A spawned process is required: from source `APP_VERSION` is "dev".
+    const { dir, configDir } = await seed({
+      "bun-linux-x64": fakeBinary("0.3.0"),
+      "bun-linux-arm64": fakeBinary("0.3.0"),
+    });
+    try {
+      const proc = Bun.spawnSync(["bun", join(import.meta.dir, "fixtures/dev-build.ts")], {
+        env: { ...process.env, FIXTURE: "checkPodBinaries", FIXTURE_CONFIG_DIR: configDir },
+      });
+      const reported = JSON.parse(proc.stdout.toString().trim().split("\n").at(-1) ?? "{}");
+      expect(reported.appVersion).toBe("0.3.0+1a2b3c4d5e6f"); // the build IS a dev one
+      expect(reported.appReleaseVersion).toBe("0.3.0");
+      expect(reported.error).toBeUndefined(); // no throw: both arches pass
+      expect(proc.exitCode).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("a <configDir>/bin binary whose marker equals the app version is injected", async () => {
     const { dir, configDir, cacheDir } = await seed({ "bun-linux-x64": fakeBinary("0.3.0") });
     const { built, build } = fakeBuild(() => "SHOULD-NOT-BUILD");
@@ -314,8 +339,21 @@ describe("version marker in a real compiled binary (D2)", () => {
     const outfile = join(dir, "tentacle");
     try {
       // Host target: no cross-compile runtime download, no network.
-      expect(await buildBinary(outfile, undefined)).toBe(true);
+      // A dev build (a build id, docs/fix/dev-build-version-skew.md).
+      expect(await buildBinary(outfile, undefined, computeBuildId())).toBe(true);
       expect(await readBinaryVersion(outfile)).toBe(cliVersion());
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("a release build (no build id) carries no build marker, so its version stays plain", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "harness-podbin-release-"));
+    const outfile = join(dir, "tentacle");
+    try {
+      expect(await buildBinary(outfile, undefined, undefined)).toBe(true);
+      expect(await readBinaryVersion(outfile)).toBe(cliVersion());
+      expect(await readBinaryBuildId(outfile)).toBeUndefined();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

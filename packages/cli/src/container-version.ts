@@ -7,11 +7,18 @@
 import { untrustedText } from "./untrusted-text.ts";
 import { BUILD_ID_RE, MARKER_VERSION_RE } from "./version.ts";
 
-/** The version in a `tentacle --version` line (`tentacle <version>`), else `undefined`. */
+/**
+ * The version in a `tentacle --version` line (`tentacle <version>`), else
+ * `undefined`. Cut at `+`: the answer may be a dev build's `0.3.0+<id>`, while
+ * `expected` is the PLAIN marker of the binary this laptop would inject, so the
+ * two are comparable only at the release version. Whether that build differs is
+ * judged separately, and more precisely, by the build rule
+ * (`parseBuildFromVersionProbe`) — cutting here does not weaken it.
+ */
 export function parseVersionLine(stdout: string): string | undefined {
   // The first line only: `--version --build-id` adds the build id on a second.
   const match = /^tentacle (\S+)$/.exec((stdout.trim().split("\n")[0] ?? "").trim());
-  const version = match?.[1];
+  const version = match?.[1]?.split("+")[0];
   return version !== undefined && MARKER_VERSION_RE.test(version) ? version : undefined;
 }
 

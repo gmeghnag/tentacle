@@ -4,9 +4,10 @@
  * A compiled binary carries `TENTACLE_VERSION_MARKER:<version>:END` as a string
  * literal (a `define` in `buildBinary`), so another tentacle can read the
  * version of a binary it cannot execute (a Linux pod binary on a macOS laptop)
- * by scanning its bytes (`version-marker.ts`). `APP_VERSION` is derived FROM the
- * marker, so the literal is load-bearing (never tree-shaken) and `--version`
- * and the marker can never disagree. From source there is no define: "dev".
+ * by scanning its bytes (`version-marker.ts`). `APP_RELEASE_VERSION` is derived
+ * FROM the marker, so the literal is load-bearing (never tree-shaken) and
+ * `--version` and the marker can never disagree. From source there is no define:
+ * "dev".
  */
 
 /** The marker's fixed prefix. The full marker is `<prefix><version>:END`. */
@@ -47,18 +48,13 @@ export function compiledVersionMarker(): string | undefined {
 }
 
 /**
- * The app version: parsed from the marker literal injected at compile time
- * (`define` in `buildBinary`), or `"dev"` when running from source.
- */
-export const APP_VERSION: string = parseVersionMarker(compiledVersionMarker()) ?? "dev";
-
-/**
  * The BUILD id (docs/fix/stale-pod-binary.md): beside the version, a second
  * compiled-in literal `TENTACLE_BUILD_MARKER:<id>:END` naming the exact source
  * a binary was built from (`computeBuildId`: 12 hex of a content hash). Two
  * builds of one version differ, so `attach` can tell a container's tentacle is
- * not this laptop's even when `--version` agrees. A separate marker, not a
- * suffix of the version: `update` compares versions exactly against the release.
+ * not this laptop's even when `--version` agrees. It is ALSO what makes a dev
+ * build's version say it is not a release (`devBuildVersion`): a released
+ * binary carries no build id, so its version stays plain.
  */
 export const BUILD_MARKER_PREFIX = "TENTACLE_BUILD_MARKER:";
 /** A build id: 12 lowercase hex characters. */
@@ -88,6 +84,44 @@ declare const __TENTACLE_BUILD_MARKER__: string | undefined;
 export const APP_BUILD: string | undefined = parseBuildMarker(
   typeof __TENTACLE_BUILD_MARKER__ === "string" ? __TENTACLE_BUILD_MARKER__ : undefined,
 );
+
+/**
+ * The version a build reports (docs/fix/dev-build-version-skew.md): the plain
+ * version, plus `+<build id>` when the build carries one. A RELEASED binary
+ * always reports the plain version (a release is cut from a clean tagged
+ * `main`, and both `scripts/release.ts` and build.yml refuse a tag that is not
+ * `packages/cli/package.json`'s), so the `+` says exactly one thing: this is
+ * not a release. Without it two builds of one version are indistinguishable in
+ * a `VersionMismatch` ("client 21 (tentacle 0.3.0), daemon 16 (tentacle 0.3.0)"
+ * — a `main` checkout against release v0.3.0).
+ *
+ * A `+` version names no release, so it may be DISPLAYED and put on the wire,
+ * never COMPARED: every consumer that compares a version (a pod binary's plain
+ * marker, a container's `--version`, `update`'s), or keys a path on it, uses
+ * `APP_RELEASE_VERSION`. An id that is not a build id (no build marker, a
+ * malformed one) adds nothing: a version is never made up.
+ */
+export function devBuildVersion(version: string, build: string | undefined): string {
+  return build !== undefined && BUILD_ID_RE.test(build) ? `${version}+${build}` : version;
+}
+
+/**
+ * The RELEASE version: the marker literal injected at compile time (`define` in
+ * `buildBinary`, i.e. `packages/cli/package.json`), or `"dev"` from source.
+ * ALWAYS plain. This is the identity every COMPARISON uses — a pod binary's
+ * version marker, a container's `--version`, `update`'s current version — since
+ * all of those are plain too: comparing the suffixed `APP_VERSION` there would
+ * find a dev build's own binaries "not at this version".
+ */
+export const APP_RELEASE_VERSION: string = parseVersionMarker(compiledVersionMarker()) ?? "dev";
+
+/**
+ * The version this build REPORTS: `APP_RELEASE_VERSION`, plus `+<build id>`
+ * when the build carries one (see `devBuildVersion`). For DISPLAY and the WIRE
+ * only — `--version`, `CLIENT_INFO`, `serve`'s identity, the worker bootstrap —
+ * never for a comparison (use `APP_RELEASE_VERSION` there).
+ */
+export const APP_VERSION: string = devBuildVersion(APP_RELEASE_VERSION, APP_BUILD);
 
 /** Who this CLI is in `initialize` (a daemon words a version skew with it). */
 export const CLIENT_INFO = { name: "tentacle", version: APP_VERSION } as const;

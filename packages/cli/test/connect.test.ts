@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { Agent } from "@tentacle/agent";
 import { ChannelError, RemoteClient } from "@tentacle/client";
 import { PermissionBroker } from "@tentacle/core";
-import { Connection, SessionHost } from "@tentacle/daemon";
+import { Connection, SessionHost, versionMismatch } from "@tentacle/daemon";
+import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { DomainErrorCode, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
 import { bufferedErrorSink, connectTui, servedModel, tlsTrustHint } from "../src/connect.ts";
@@ -638,6 +639,37 @@ describe("connect: the reconnecting client (docs/feat/client-reattach-frontends.
     expect(seen).toEqual([
       expect.objectContaining({ clientInfo: { name: "tentacle", version: APP_VERSION } }),
     ]);
+  });
+
+  test("a version skew at startup, the LIVE case: a dev-build client against the latest release daemon names the fix that works", async () => {
+    // docs/fix/dev-build-version-skew.md. The laptop runs a `main` build
+    // (newer protocol than any release); the host runs release v0.3.0, the
+    // latest there is. "update the daemon" would reinstall v0.3.0, so the
+    // message must say to install THIS build instead. The daemon words it (it
+    // has both versions); connect shows it unchanged.
+    const [daemonCh, clientCh] = createChannelPair();
+    new RpcPeer(daemonCh, {
+      onRequest: () => {
+        const { message, data } = versionMismatch(
+          { protocol: PROTOCOL_VERSION, tentacle: "0.3.0+1a2b3c4d5e6f", name: "tentacle" },
+          { protocol: 16, identity: { tentacle: "0.3.0", kind: "serve" } },
+        );
+        throw new RpcError(DomainErrorCode.VersionMismatch, message, data);
+      },
+      onNotification: () => {},
+    });
+    let mounted = false;
+    await expect(
+      connectTui({ url: "ws://fake" }, () => {}, {
+        dial: () => async () => clientCh,
+        startTui: async () => {
+          mounted = true;
+        },
+      }),
+    ).rejects.toThrow(
+      'protocol version mismatch: client 22 (tentacle 0.3.0+1a2b3c4d5e6f), daemon 16 (tentacle 0.3.0) — the client is a newer build than any release: install the same build on that host (build this source there, then run "tentacle serve")',
+    );
+    expect(mounted).toBe(false);
   });
 
   test("a rejected token at startup surfaces the factory's message before the TUI mounts", async () => {

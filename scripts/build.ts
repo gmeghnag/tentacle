@@ -17,18 +17,34 @@
  * to cross-compile; see `bun build --help` for target triples).
  */
 import { resolve } from "node:path";
-import { buildBinary, cliVersion, computeBuildId } from "../packages/cli/src/pod-binary-build.ts";
+import {
+  buildBinary,
+  buildIdFor,
+  cliVersion,
+  computeBuildId,
+} from "../packages/cli/src/pod-binary-build.ts";
 import {
   findAllBuildMarkers,
   findAllVersionMarkers,
   readBinaryVersion,
 } from "../packages/cli/src/version-marker.ts";
+import { devBuildVersion } from "../packages/cli/src/version.ts";
 
 const root = resolve(import.meta.dir, "..");
 const outfile = resolve(root, "dist/tentacle");
 const target = process.env.TARGET; // e.g. bun-linux-x64, bun-darwin-arm64
 
-const ok = await buildBinary(outfile, target);
+// What this build calls itself (docs/fix/dev-build-version-skew.md). A RELEASE
+// build reports the plain version, so the release job sets TENTACLE_RELEASE=1:
+// `update` installs by exact version, and build.yml refuses a tag that differs
+// from `packages/cli/package.json`. Every other build (a checkout, a local
+// build, the pod-binary cache) carries `+<build id>`, because otherwise two
+// builds of one version are indistinguishable in a VersionMismatch — the live
+// case: "client 21 (tentacle 0.3.0), daemon 16 (tentacle 0.3.0)", a `main`
+// checkout against release v0.3.0. The decision itself is `buildIdFor` (tested).
+const buildId = buildIdFor(process.env, computeBuildId(root));
+
+const ok = await buildBinary(outfile, target, buildId);
 if (!ok) {
   process.exit(1);
 }
@@ -63,15 +79,28 @@ if (markers.length !== 1 || markers[0] !== expected || marked !== expected) {
 }
 console.log(`version marker ${marked} ok`);
 
-// The build id (docs/fix/stale-pod-binary.md): exactly one, and this source's.
-const expectedBuild = computeBuildId();
+// The build id (docs/fix/stale-pod-binary.md): a dev build carries exactly one,
+// and it is this source's; a release build carries none, and its version is
+// then plain (below). Exactly one well-formed marker either way, so a second
+// one can never shadow it (review N1).
+const expectedBuild = buildId;
 const builds = findAllBuildMarkers(new Uint8Array(await Bun.file(outfile).arrayBuffer()));
-if (builds.length !== 1 || builds[0] !== expectedBuild) {
+if (
+  expectedBuild === undefined
+    ? builds.length !== 0
+    : builds.length !== 1 || builds[0] !== expectedBuild
+) {
   console.error(
-    `error: ${outfile} carries build marker(s) [${builds.join(", ") || "none"}], expected exactly one: ${expectedBuild}`,
+    `error: ${outfile} carries build marker(s) [${builds.join(", ") || "none"}], expected ${expectedBuild === undefined ? "none (a release build)" : `exactly one: ${expectedBuild}`}`,
   );
   process.exit(1);
 }
-console.log(`build marker ${expectedBuild} ok`);
+console.log(
+  expectedBuild === undefined
+    ? "build marker none (release build) ok"
+    : ["build marker", expectedBuild, "ok"].join(" "),
+);
 
-console.log(`compiled → ${outfile}`);
+// The version the binary reports is `marked` — the package.json version, plus
+// `+<build id>` for anything that is not a release build (`devBuildVersion`).
+console.log(`compiled tentacle ${devBuildVersion(marked, expectedBuild)} → ${outfile}`);

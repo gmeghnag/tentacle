@@ -42,7 +42,11 @@ export interface UpdateOptions {
 }
 
 export interface UpdateDeps {
-  /** This CLI's version (`APP_VERSION`); `"dev"` is refused. */
+  /**
+   * This CLI's RELEASE version (`APP_RELEASE_VERSION`, never the `+<id>`
+   * `APP_VERSION`): it is compared with the latest tag, the pods' plain markers
+   * and the install's own marker. `"dev"` is refused.
+   */
   readonly appVersion: string;
   /** The running executable (`process.execPath`), the file the CLI update replaces. */
   readonly execPath: string;

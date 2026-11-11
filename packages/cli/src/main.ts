@@ -137,7 +137,7 @@ import {
 } from "./tui-sessions.ts";
 import { untrustedText } from "./untrusted-text.ts";
 import { runUpdate, spawnVersion } from "./update.ts";
-import { APP_BUILD, APP_VERSION } from "./version.ts";
+import { APP_BUILD, APP_RELEASE_VERSION, APP_VERSION } from "./version.ts";
 import { buildAgent, connectConfiguredMcp, inProcessAgents, loadUserAgentTypes } from "./wiring.ts";
 import {
   type WorkspacePlan,
@@ -628,7 +628,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     return runUpdate(
       { check: parsed.bools.has("check"), ...(version !== undefined ? { version } : {}) },
       {
-        appVersion: APP_VERSION,
+        appVersion: APP_RELEASE_VERSION,
         execPath: process.execPath,
         configDir: configDirFromEnv(),
         platform: process.platform,
