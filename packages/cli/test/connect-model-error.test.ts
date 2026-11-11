@@ -13,8 +13,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
 import { PermissionBroker } from "@tentacle/core";
+import { Connection } from "@tentacle/daemon";
+import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
-import { startDaemon } from "../src/serve.ts";
+import { podSessionHost, startDaemon } from "../src/serve.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -164,6 +166,35 @@ test("(a) the exposed message is sanitized: no secrets, one line", async () => {
   expect(message).not.toContain("\n");
 });
 
+// A pod daemon's host is NOT trusted with more than it needs (AGENTS §7): its
+// turns fail with an opaque "internal error" and the real message goes to the
+// daemon's log. This is the ONLY pin on `podSessionHost`'s redaction — a bare
+// `SessionHost` says nothing about it. Mutation: add `exposeTurnErrors: true`
+// to the `podSessionHost` literal (`serve.ts`) → "status 401" appears here.
+test("(a) a pod daemon's failed turn stays 'internal error' (never exposed)", async () => {
+  const api = endpoint([() => new Response("Invalid API Key", { status: 401 })]);
+  const logs: string[] = [];
+  const pod = await projectConfig(api.baseURL, "pod-redacted");
+  // A pod daemon's own config decides (no model proxy here): its provider is
+  // this endpoint, and it fails.
+  const [daemonCh, clientCh] = createChannelPair();
+  const connection = new Connection(
+    daemonCh,
+    podSessionHost(pod, (line) => logs.push(line), {}),
+  );
+  const client = new RemoteClient(clientCh, new PermissionBroker(), undefined);
+  stops.push(() => {
+    connection.close();
+    client.close();
+  });
+  await client.initialize();
+  const session = client.newSession(undefined, "P");
+  const turn = await sendAndSettle(client, session, "hello");
+  expect(turn.error).toBe("internal error");
+  // Never silent: the real message reached the daemon's own log instead.
+  expect(logs.join("\n")).toContain("status 401");
+});
+
 // (b) A second send while a turn is genuinely in flight must not ORPHAN that
 // turn: it is refused with the daemon's own `TurnInProgress`, and the first
 // turn still ends when the model answers. Mutation: drop the guards in
@@ -266,4 +297,79 @@ test("(2) a carried contextWindow never moves a serve daemon's own window", asyn
   const sent = bodies.join("");
   expect(sent).toContain("128k tokens");
   expect(sent).not.toContain("71k tokens");
+}, 30_000);
+
+// --- R5: the link DOES reconnect, and the SAME session comes back ------------
+// Context decision (b): a daemon that goes away and comes back on the same port
+// is not the end of the session — the client redials (bounded backoff), re-opens
+// the SAME session id (`session/open{sessionId:"R", since}` on the wire), and the
+// next send runs. Mutation (run 2026-11-11): in `remote-client.ts`'s `recover`,
+// open `crypto.randomUUID()` instead of `entry.id` → the wire assertion fails
+// (the client would attach a stranger id and recreate from its own copy).
+test("(R5) a restarted daemon: the client re-opens the same session and sends", async () => {
+  const bodies: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      bodies.push(await req.text());
+      return say(bodies.length === 1 ? "first" : "after restart");
+    },
+  });
+  stops.push(() => server.stop(true));
+  // ONE config (own project dir ⇒ own store): the second daemon restores the
+  // record the first one wrote, because both are the same project.
+  const config = await projectConfig(`http://127.0.0.1:${server.port}/v1`, "restart");
+  const port = await freePort();
+  const first = await startDaemon(config, { host: "127.0.0.1", port });
+  stops.push(() => first.stop());
+
+  // What the client SENDS, generation by generation (the tap keeps each channel's
+  // own handlers: a spread would drop the class's methods).
+  const frames: string[] = [];
+  const dial = webSocketChannelFactory(first.url, {});
+  const tappedDial = async (): Promise<DuplexChannel> => {
+    const channel = await dial();
+    return {
+      send: (data) => {
+        frames.push(data);
+        channel.send(data);
+      },
+      close: () => channel.close(),
+      setOnMessage: (handler) => channel.setOnMessage(handler),
+      setOnClose: (handler) => channel.setOnClose(handler),
+    };
+  };
+  const client = new RemoteClient(await tappedDial(), new PermissionBroker(), undefined, {
+    channelFactory: tappedDial,
+  });
+  stops.push(() => client.close());
+  const states: string[] = [];
+  client.onLinkStatus((status) => states.push(status.state));
+  await client.initialize();
+  const session = client.newSession(undefined, "R");
+  const before = await sendAndSettle(client, session, "one");
+  expect(before.error).toBeNull();
+  expect(before.texts.join("")).toBe("first");
+  expect(session.sessionId).toBe("R");
+
+  frames.length = 0;
+  await first.stop();
+  const second = await startDaemon(config, { host: "127.0.0.1", port });
+  stops.push(() => second.stop());
+  // Bounded backoff: the drop is seen, then the redial succeeds.
+  for (let i = 0; i < 200 && states.at(-1) !== "up"; i++) await delay(50);
+  expect(states).toContain("reconnecting");
+  expect(states.at(-1)).toBe("up");
+  // The reconnect re-opened THIS id, not a fresh one.
+  const reopened = frames.filter((frame) => frame.includes('"method":"session/open"'));
+  expect(reopened.length).toBeGreaterThan(0);
+  expect(reopened.every((frame) => frame.includes('"sessionId":"R"'))).toBe(true);
+
+  // The SAME id, and the daemon's restored history went to the model.
+  expect(session.sessionId).toBe("R");
+  const after = await sendAndSettle(client, session, "again");
+  expect(after.error).toBeNull();
+  expect(after.texts.join("")).toBe("after restart");
+  expect(bodies.length).toBe(2);
+  expect(bodies[1]).toContain('"role":"assistant","content":"first"');
 }, 30_000);

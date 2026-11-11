@@ -287,24 +287,29 @@ export async function connectTui(
  * (docs/fix/connect-model-error-drops-connection.md round 2).
  *
  * A daemon is a peer, not to be trusted with the terminal (AGENTS §7): the name
- * is made one line and capped HERE, before it can reach the ink tree, whatever
- * the wire schema already refused. `label` is absent when the daemon reported no
- * model (an older daemon, a pod, whose model is the laptop's) — and `contextWindow`
- * is dropped with it: a window with no name is not a fact we can attribute.
+ * is made one line and capped HERE, before it can reach the ink tree — and its
+ * TYPE is checked HERE too, because this is the only gate: the client casts the
+ * handshake instead of parsing it with the wire schema (`remote-client.ts`), so
+ * a daemon of another build (or one sending a number or an object) must be
+ * ignored, never throw over a display-only fact. `label` is absent when the
+ * daemon reported no model (an older daemon, a pod, whose model is the laptop's)
+ * — and `contextWindow` is dropped with it: a window with no name is not a fact
+ * we can attribute.
  */
 export function servedModel(handshake: InitializeResult): {
   readonly label?: string;
   readonly contextWindow?: number;
 } {
   const info = handshake.agentInfo;
-  const name = info?.model === undefined ? "" : oneLine(info.model).slice(0, MODEL_LABEL_MAX);
+  const raw: unknown = info?.model;
+  const name = typeof raw === "string" ? oneLine(raw).slice(0, MODEL_LABEL_MAX) : "";
   if (name === "") {
     return {};
   }
-  const window = info?.contextWindow;
+  const window: unknown = info?.contextWindow;
   return {
     label: name,
-    ...(window !== undefined && Number.isInteger(window) && window > 0
+    ...(typeof window === "number" && Number.isInteger(window) && window > 0
       ? { contextWindow: window }
       : {}),
   };

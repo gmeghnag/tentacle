@@ -149,15 +149,19 @@ after : first: model request failed with status 401: Invalid API Key
   never for a pod daemon (its `SessionHost` stays redacting — a pod is not
   trusted, AGENTS §7).
 - **(b)** Reconnect already works and is kept as is (a regression test now pins
-  it). The real "never recovers" defect is R4, an **orphaned turn**, and that is
+  it: `(R5)` in `connect-model-error.test.ts` — written in fix round 1, F3; the
+  earlier claim that one existed was false). The real "never recovers" defect is
+  R4, an **orphaned turn**, and that is
   what gets fixed: a turn already in flight is never clobbered; a second `send`
   is refused locally with the same `TurnInProgress` the daemon would give, and
   the in-flight turn keeps its owner and ends normally.
 - **(c)** The failed-turn notice names whose model it was: on a remote
   (`model: "remote"`) session, a model-error notice carries the hint that the
   daemon uses ITS OWN model config (`tentacle config` on that host).
-- **(d)** `serve` says at start-up when no model is configured — one line, before
-  listening, through the existing `onNotice` sink.
+- **(d)** `serve` says at start-up which model it is using when its own config
+  names none — one line, before listening, through the existing `onNotice` sink.
+  It states a fact plus an "if turns fail" hint, never a prediction (fix round 1,
+  F2: the defaults are a keyless local llama-server, a valid setup).
 - No `PROTOCOL_VERSION` bump: no wire schema changes. `turn_end.error.message`
   already carries a string; only *whose* string it is changes, and it is already
   documented as redactable (`packages/protocol/src/session.ts:224`).
@@ -229,11 +233,13 @@ or the turn failed before any output) — anything else (a session lost, a link
 that stopped) is left alone. `App.tsx:1999`'s `failTurn` call routes through it
 with `model === "remote"`.
 
-### 4. `serve` warns when no model is configured (d)
+### 4. `serve` says which model it uses at start-up (d)
 
 `packages/cli/src/serve-model-notice.ts` (new, pure):
 `serveModelNotice(config)` → a line when the daemon has no API key
 (`apiKeySource === "none"`) and is on the default endpoint+model, else `null`.
+The line names the endpoint and model and hints "if turns fail", never predicting
+one (fix round 1, F2: the defaults are a valid keyless local llama-server).
 `main.ts`'s `serve` branch prints it beside `titleConfigNotice` (`:900`), through
 the same `err(...)`/`[daemon]` sink. (In-process and pod daemons are untouched:
 they either have the key or get the model through the tunnel.)
@@ -249,14 +255,17 @@ they either have the key or get the model through the tunnel.)
   `packages/tui/test/connect-model-error.test.tsx` (the frame),
   `packages/daemon/test/hosted-session`-level unit tests for the sanitizer,
   `packages/client/test/remote-session`-level unit test for the refusal,
-  `packages/cli/test/serve-model-notice.test.ts`.
+  `packages/cli/test/serve-model-notice.test.ts`, `packages/cli/test/connect.test.ts`
+  (`servedModel`).
 - `CHANGELOG.md` `[Unreleased]` → Fixed.
 
 ## Failure modes
 
-- A pod daemon must never expose a message: pinned by a `podSessionHost`-shaped
-  test (no `exposeTurnErrors` on that literal) and by keeping the redacting
-  branch untouched.
+- A pod daemon must never expose a message: pinned by a test that builds
+  `podSessionHost(config)` over a `Connection` with a failing provider and
+  expects `turn_end.error.message === "internal error"` (fix round 1, F1 — the
+  earlier claim of a pod-shaped pin was false), plus the redacting branch left
+  untouched.
 - A provider message carrying a key/URL: masked by `redactText`, capped — pinned
   by the sanitizer's unit tests (bearer, `sk-`, url creds, an over-long body).
 - A refused second `send` must restore the caller's text exactly as a daemon
@@ -367,8 +376,8 @@ fresh-context Opus pass is still owed (Blast: load-bearing, AGENTS §10).*
 
 | Item | Verdict | What is and is not covered |
 |---|---|---|
-| **(a)** a model error is a failed turn with the provider's message, link kept, next send works | **FIXED** | Real-stack test: 401 → `model request failed with status 401: Invalid API Key`; the next send on the same session returns `recovered`. The message is one line, secret-masked, capped at 400. The pod path is untouched (`podSessionHost` sets no flag) — its behaviour is pinned by the still-green `integration.test.ts` redaction cases. |
-| **(b)** a dropped connection reconnects to the same session, never a state where every send fails | **PARTIAL** | The reconnect half already held and is now pinned by a test (daemon restart → same session id → the send runs). The "every send fails" half — the orphaned turn — is **FIXED** and mutation-proven. **Not fixed:** a model call that hangs with the socket up has no bound (root cause 3). A turn there stays `Working…` until the user presses Esc (pinned by its own test) or the OS's own TCP/stream timeout fires. Bounding it needs a product decision (a first-byte/idle timeout for a model call, and what to tell the user), which is out of this fix's blast radius — proposed as a follow-up below. |
+| **(a)** a model error is a failed turn with the provider's message, link kept, next send works | **FIXED** | Real-stack test: 401 → `model request failed with status 401: Invalid API Key`; the next send on the same session returns `recovered`. The message is one line, secret-masked, capped at 400. The pod path is untouched (`podSessionHost` sets no flag) — its behaviour is now pinned by ITS OWN test (`(a) a pod daemon's failed turn stays 'internal error'`, built from `podSessionHost` over a `Connection`; added in fix round 1, F1, because this row's earlier claim — the `integration.test.ts` cases — was false: those build a bare `SessionHost`). |
+| **(b)** a dropped connection reconnects to the same session, never a state where every send fails | **PARTIAL** | The reconnect half already held and is now pinned by a test — added in fix round 1, F3 (`(R5)` in `connect-model-error.test.ts`: daemon restart on the same port → the client re-opens the SAME session id on the wire → the next send runs); the earlier claim that such a test already existed was false. The "every send fails" half — the orphaned turn — is **FIXED** and mutation-proven. **Not fixed:** a model call that hangs with the socket up has no bound (root cause 3). A turn there stays `Working…` until the user presses Esc (pinned by its own test) or the OS's own TCP/stream timeout fires. Bounding it needs a product decision (a first-byte/idle timeout for a model call, and what to tell the user), which is out of this fix's blast radius — proposed as a follow-up below. |
 | **(c)** the notice names the daemon's own model config | **FIXED** | The remote notice reads `… — the daemon runs its own model: check its config and key with "tentacle config" on that host`, asserted in a real TUI frame. A local failure renders exactly as before. |
 | **(d)** `serve` warns at start-up with no model | **FIXED** | `serveModelNotice` + one `[daemon]` line in `main.ts`; unit-tested for the four cases (no key, file key, command key, an explicitly configured endpoint/model). Not covered end to end (it is a `main.ts` print), which is honest but thin. |
 
@@ -544,13 +553,22 @@ to report (`packages/daemon/src/session-host.ts:198` is `identity` only).
 - **A daemon that reports nothing** (older, pod, worker): the field is absent →
   `connect` passes nothing → the TUI shows exactly what it shows today (`128k`,
   `remote`). No half-state.
-- **A hostile label** (`\x1b[…`, 4 KB): `line(128)` rejects it at the peer's parse
-  (`modelInfo` is the daemon's, but the client validates), and `connect`
-  sanitises again with `oneLine` + a cap before it reaches Ink (§7: one gate each
-  side).
-- **A window of 0 / negative / absurd**: refused by the schema; the client falls
-  back to its default rather than dividing by zero (the meter's own guard,
-  `status-line.ts:158-175`).
+- **A hostile label** (`\x1b[…`, 4 KB): `connect` makes it one line and caps it
+  with `oneLine` + `MODEL_LABEL_MAX` before it reaches Ink. The wire schema is
+  NOT a second gate (corrected in fix round 1, F4): the client CASTS the
+  handshake (`remote-client.ts`, `raw as InitializeResult`) and never parses it
+  with the schema, so `servedModel` is the only gate — and it therefore checks
+  the TYPE too, ignoring anything that is not a string.
+- **A window of 0 / negative / absurd / of the wrong type**: `servedModel`
+  ignores it (the name stands, the window drops) rather than trusting it; the
+  client falls back to its default instead of dividing by zero (the meter's own
+  guard, `status-line.ts:158-175`).
+- **A fact of the wrong type** (`agentInfo.model: 42`, an object;
+  `contextWindow: "200000"`): a daemon of another build, or a misconfigured one,
+  must never break `connect` over a display-only field — `servedModel` checks
+  `typeof` before use (`typeof model === "string"`, `typeof contextWindow ===
+  "number"`) and returns `{}` for anything else (fix round 1, F4; pinned by its
+  wrong-type test).
 - **A reconnect after the mount**: `initialize` runs again on the redial, but the
   TUI keeps the facts it mounted with. Acceptable and documented: a `serve`
   daemon's own model config does not change under a live process (`tentacle
@@ -637,7 +655,8 @@ touches). CI installs with `--filter '!@tentacle/mobile'` (AGENTS §6).
 | the same frame test | `shownModel = model` in `App.tsx` | **fails** (`served-m` missing) |
 | `(2) a carried contextWindow never moves a serve daemon's own window` | wire `applyCarried(config, ctx?.settings)` into `serve.ts`'s `createAgent` | **fails**: the request says `[context: 2k / 72k tokens (3%)]` — the carried 71680, the owner's suspicion, reproduced and excluded |
 | `L1b initialize: agentInfo carries the daemon's own model facts` | — (unit pin) | passes; absent-`modelInfo` shape asserted as today's |
-| `servedModel` (5 pure cases) | pass `info.model` raw | the hostile-label case fails |
+| `servedModel` (6 pure cases) | pass `info.model` raw | the hostile-label case fails |
+| `servedModel` "a fact of the wrong TYPE" (fix round 1, F4) | drop the `typeof` guards | **fails**: `model: 42` throws `text.replace is not a function` |
 
 Every red was observed before the fix, and each mutation was reverted and the
 suite re-run green.
@@ -696,3 +715,139 @@ suite re-run green.
 ### How the executor behaved
 
 The executor reproduced on the real stack before reading code, and stated the R3 residual honestly instead of claiming (b) whole. The round-2 drift is well documented. The weakness is claims of pins that do not exist (F1, F3) and one invented premise (F4). The plan also listed a `remote-session` unit test for the refusal; it was not written, and the guard is pinned only by the real-stack test (it is pinned).
+
+## Execution — fix round 1
+
+*— deepseek (tentacle --profile deepseek), 2026-11-11*
+
+Scope: exactly the four MEDIUM findings of the fresh-context Review above.
+Small edits only; no `git checkout`/`restore`/`stash` (mutations were applied by a
+targeted string edit and reverted by restoring a saved copy under
+`.tentacle/tmp/fixround1/`); no `TODO.md`; no commit.
+
+### F1 — the pod's redaction had no pin
+
+`packages/cli/test/connect-model-error.test.ts`, new test `(a) a pod daemon's
+failed turn stays 'internal error' (never exposed)`: it builds
+`podSessionHost(config, log, {})` (the pod literal, no model proxy) over a real
+`Connection`/`createChannelPair`, with the scripted endpoint answering `401
+Invalid API Key`, runs one turn through `RemoteClient`/`newSession().send`, and
+asserts `turn.error === "internal error"` **and** that the real text reached the
+daemon's own log (`logs.join("")` contains `status 401`) — never silent.
+
+Red/green: no code change was needed in `serve.ts`; the pin is the deliverable.
+Mutation (the one this finding names): `exposeTurnErrors: true` added to the
+`podSessionHost` `SessionHost` literal → **fails**, `Received: "model request
+failed with status 401: Invalid API Key"`. Reverted; file byte-identical
+(`git diff packages/cli/src/serve.ts` empty).
+
+### F2 — the start-up notice claimed every turn would fail
+
+`packages/cli/src/serve-model-notice.ts`: the line is now the fact plus a hint,
+`using the built-in default model endpoint (http://localhost:8080/v1, model
+"default") with no API key — if turns fail (401 / connection refused), set
+model.baseURL/model.model/model.apiKey with \`tentacle config\` on this host; a
+client's own model is never used here`. The module doc no longer says "every turn
+comes back 401" (the defaults are a valid keyless local llama-server).
+
+`packages/cli/test/serve-model-notice.test.ts`: the "nothing configured" case now
+asserts the endpoint, `model "default"`, "no API key", `tentacle config` and the
+"never a client's model" clause; a new case `it never predicts failure for the
+default setup` asserts `not.toContain("every turn will fail")` **and**
+`toContain("if turns fail")`.
+
+Red/green: written against the OLD wording first — both cases **failed**
+(`Expected to not contain: "every turn will fail"` / the endpoint missing), then
+green after the edit. `CHANGELOG.md`'s sentence was reworded to match (it
+described a "warn" only).
+
+### F3 — the reconnect (R5) test was claimed but absent
+
+Preferring to add it over deleting `freePort`. `packages/cli/test/connect-model-error.test.ts`,
+new test `(R5) a restarted daemon: the client re-opens the same session and
+sends`: one `projectConfig` (own project dir ⇒ own store), `freePort()`, a first
+`startDaemon` on that port, a real `RemoteClient` whose channel factory is TAPPED
+(so the frames the client sends are recorded), a turn (`first`), then
+`first.stop()` and a second `startDaemon` on the SAME port with the same config.
+It waits (≤10 s, bounded backoff) for the link to come back, then asserts:
+`reconnecting` was seen and `up` is the last status; the frames include
+`"method":"session/open"` and **every** such frame names `"sessionId":"R"`; the
+session id is still `R`; the next send returns `after restart`; and the second
+model request carries the restored history (`"role":"assistant","content":"first"`).
+
+Red/green / mutation: the first draft's assertions were too weak — mutating
+`remote-client.ts`'s `recover` to open `crypto.randomUUID()` instead of
+`entry.id` SURVIVED (the client transparently recreates, so the text still came
+back). The test was strengthened with the wire assertion above; the same mutation
+then **failed** it (`expect(reopened.every(… "sessionId":"R")) → false`).
+Reverted (`git diff packages/client/src/remote-client.ts` empty). The test was run
+3× consecutively, green each time (no flake).
+
+### F4 — `servedModel` trusted unvalidated `agentInfo`
+
+`packages/cli/src/connect.ts` `servedModel`: `const raw: unknown = info?.model`
+and `typeof raw === "string" ? oneLine(raw)… : ""`; the window is
+`typeof window === "number" && Number.isInteger(window) && window > 0`. The doc
+comment now says this is the ONLY gate (the client casts the handshake rather
+than parsing it) and that the type is checked here.
+
+`packages/cli/test/connect.test.ts`: new case `a fact of the wrong TYPE is
+ignored, never a throw` — `model: 42` → `{}`, `model: {id:"m"}` → `{}`,
+`model: null` → `{}`, `contextWindow: "200000"` → `{label:"m"}`,
+`contextWindow: {n:200000}` → `{label:"m"}`.
+
+Red/green: **failed** on the old code with
+`TypeError: text.replace is not a function` (from `oneLine`, inside `servedModel`,
+before Ink mounts — exactly the finding's scenario); green after the edit.
+
+### Doc corrections (all four findings' claims, plus the ones they invalidate)
+
+- Failure modes (round 2's): "`line(128)` rejects it at the peer's parse … one
+  gate each side" replaced by the corrected premise (the client casts; `servedModel`
+  is the only gate and checks the type); the "0 / negative / absurd … refused by
+  the schema" bullet corrected likewise, plus a new "wrong type" bullet.
+- Decisions (b) and the round-1 Review row (a)/(b): the R5 and pod-pin claims now
+  say the test was added in this round and that the earlier claim was false.
+- Failure modes §"A pod daemon must never expose a message": now names the real
+  `podSessionHost`-built test.
+- §4's heading/body and the round-2 mutation table (`servedModel` 6 pure cases +
+  the wrong-type row); "Tests" list gains `connect.test.ts`.
+- `CHANGELOG.md`'s `serve` sentence reworded (F2).
+
+### Drift from the Implementation
+
+- No `serve.ts` change: F1 asked for a pin, not a behaviour change (the review's
+  own mutation shows the code was already right).
+- The reviewer's suggested F4 shape is implemented as written, with `unknown`
+  intermediates so the `typeof` check is a real narrowing (typecheck clean).
+- F3's assertions go further than the review's sketch (the wire's
+  `session/open{sessionId}`), because the behavioural half alone survives the
+  mutation — stated rather than glossed.
+
+### Gate (this executor, 2026-11-11, worktree `connect-model-error`)
+
+- `bunx tsc --noEmit` (root): clean, exit 0.
+- `bun run typecheck` **fails at `tsc -p apps/mobile`**: `apps/mobile`'s
+  dependencies are not installed in this worktree (`ESM syntax is not allowed in a
+  CommonJS module …`, `TS1286`, and the DOM/`@types/ws` duplicate-identifier errors
+  the reviewer also hit). Unrelated to this branch; the root half is clean, which is
+  the reviewer's own split.
+- `bun run lint`: `Checked 864 files … No fixes applied.` — clean (0 errors,
+  0 warnings; the two errors it raised on my own new code — a needless template
+  literal and a line-break format — were fixed).
+- `bun test --path-ignore-patterns 'apps/mobile/**'`: **6765 pass, 3 skip, 0 fail**,
+  473 files, 69 153 expects. The 3 skips are the opt-in ones (live k8s, docker,
+  slow keepalive) — not failures. 6765 = the reviewer's 6761 + the four tests added here
+  (F1's pod pin, F3's reconnect, F2's no-false-prediction case, F4's wrong-type
+  case).
+
+### Findings
+
+1. Pod redaction pinned by a real `podSessionHost` + `Connection` test, red under
+   `exposeTurnErrors: true` → **FIXED**
+2. Start-up notice states the endpoint/model and says "if turns fail"; test
+   asserts it never claims failure → **FIXED**
+3. The daemon-restart reconnect test exists (same id on the wire, next send runs),
+   red under a fresh-id mutation; `freePort` now used → **FIXED**
+4. `servedModel` validates `typeof` (name string, window number), wrong types
+   ignored and never thrown; test red before → **FIXED**

@@ -764,8 +764,9 @@ describe("servedModel (the daemon's own model, docs/fix/connect-model-error roun
     expect(servedModel(handshake())).toEqual({});
   });
 
-  // A daemon is a peer: the label is made ONE line and capped before Ink sees it
-  // (the wire's `line(128)` is the other gate). Mutation: pass `info.model` raw →
+  // A daemon is a peer: the label is made ONE line and capped before Ink sees it.
+  // This is the ONLY gate — the client casts the handshake instead of parsing it
+  // (fix round 1, F4). Mutation: pass `info.model` raw →
   // the escape sequence survives.
   test("a hostile label is flattened and capped", () => {
     const served = servedModel(
@@ -790,5 +791,23 @@ describe("servedModel (the daemon's own model, docs/fix/connect-model-error roun
         label: "m",
       });
     }
+  });
+
+  // The client never parses `initialize` with the wire schema (it casts, see
+  // `remote-client.ts`), so THIS is the only type gate: a daemon of another
+  // build sending a number or an object must be ignored, never throw before
+  // Ink mounts. Mutation: `oneLine(info.model)` without the `typeof` → the 42
+  // case throws ("model.replace is not a function").
+  test("a fact of the wrong TYPE is ignored, never a throw", () => {
+    expect(servedModel(handshake({ version: "1", model: 42 }))).toEqual({});
+    expect(servedModel(handshake({ version: "1", model: { id: "m" } }))).toEqual({});
+    expect(servedModel(handshake({ version: "1", model: null }))).toEqual({});
+    // A stringified window is not a window: the name stands, the window drops.
+    expect(servedModel(handshake({ version: "1", model: "m", contextWindow: "200000" }))).toEqual({
+      label: "m",
+    });
+    expect(
+      servedModel(handshake({ version: "1", model: "m", contextWindow: { n: 200000 } })),
+    ).toEqual({ label: "m" });
   });
 });
