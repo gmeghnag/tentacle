@@ -98,8 +98,15 @@ of a call already open — the server sent one call and tentacle counted two.
   nameless drain is dispatched, not rejected earlier.
 - The agent loop runs whatever `tool_call` events the provider yields
   (`packages/agent/src/agent.ts:1146-1155`), so a phantom call is a real round-trip.
-- `context_note` is a **display** update (`packages/protocol/src/updates.ts:393`),
-  so a new reason needs no `PROTOCOL_VERSION` bump; the enum is extended on both ends.
+- A new update KIND of class `display` needs no `PROTOCOL_VERSION` bump (AGENTS §7).
+- **CORRECTED after Review MEDIUM‑1.** The first version of this doc claimed a
+  new `context_note.reason` ALSO needed no bump "because `context_note` is
+  display". That is wrong: an older client does not see a new enum value as an
+  unknown kind — it sees a KNOWN kind whose member fails its schema, and
+  `classifyUpdate` (`packages/client/src/mapping.ts:57-58`) returns
+  `malformed context_note update from the daemon`, which the reducer emits as an
+  error mid-turn. So the notice is a new display KIND (`dsml_leak`), and the
+  `context_note` reason enum stays exactly as it was.
 - The DSML bytes come from the incident's log: `U+FF5C` each side of `DSML`, a
   space before `invoke`/`parameter`.
 
@@ -119,17 +126,20 @@ computation in a pure module, one owner) and gains the own-call rule:
 **Symptom 1 (a) — a narrow guard, both ends.**
 
 - `packages/core/src/dsml.ts`: `hasDsmlToolCallMarkup` — true only for a WHOLE
-  block (opening invoke tag, at least one parameter tag, closing invoke tag). No
-  other markup family is guessed at. `DsmlToolCallLeakError` carries the byte
-  count, never the text.
+  block, anchored on an opening PARAMETER tag (attributes allowed, optional
+  space after the bar) plus, after it, one of the block's closing tags
+  (`parameter`/`invoke`/`calls`). Anchoring on an opening invoke tag was the
+  bug Review HIGH-1 found: the incident's reply has no opening invoke at all.
+  No other markup family is guessed at. `DsmlToolCallLeakError` carries the
+  byte count, never the text.
 - `openai-provider.ts`: accumulates the visible text and, at the end of a reply
   that streamed **no real tool call**, throws if that text holds a DSML block. A
   reply with text PLUS a real call is left alone.
-- `agent.ts`: catches it, emits a `context_note` (`leaked_tool_call`), pushes
-  `DSML_REASK_NOTE` as a user message and runs the round again — **bounded to
-  one** re-ask per turn. A second leak fails the turn, so the user sees a real
-  failure instead of an endless retry. The leaked text is never stored as the
-  assistant's answer.
+- `agent.ts`: catches it, emits a `dsml_leak` event (its own display KIND on the
+  wire, `packages/protocol/src/updates.ts`), pushes `DSML_REASK_NOTE` as a user
+  message and runs the round again — **bounded to one** re-ask per turn. A
+  second leak fails the turn, so the user sees a real failure instead of an
+  endless retry. The leaked text is never stored as the assistant's answer.
 
 ### Files
 
@@ -137,11 +147,12 @@ computation in a pure module, one owner) and gains the own-call rule:
 2. `packages/providers/src/tool-call-stream.ts` (new; the assembler)
 3. `packages/providers/src/openai-provider.ts` (import it; DSML guard at stream end)
 4. `packages/providers/src/index.ts`
-5. `packages/agent/src/agent.ts` (bounded re-ask; `context_note` reason)
-6. `packages/protocol/src/updates.ts` (reason enum)
+5. `packages/agent/src/agent.ts` (bounded re-ask; the `dsml_leak` event)
+6. `packages/protocol/src/updates.ts` (the `dsml_leak` display kind — a new
+   KIND, never a `context_note` reason: see the corrected precondition)
 7. Tests: `core/test/dsml.test.ts`, `providers/test/tool-call-stream.test.ts`,
    `providers/test/tool-call-split-e2e.test.ts`, `providers/test/dsml-leak.test.ts`,
-   `agent/test/dsml-leak.test.ts`
+   `agent/test/dsml-leak.test.ts`, `protocol/test/dsml-leak-kind.test.ts`
 8. `CHANGELOG.md` (Fixed), this doc.
 
 ### Failure modes
@@ -167,14 +178,24 @@ Red-before-green per symptom, each shown failing on the pre-fix code:
 - `tool-call-split-e2e.test.ts` — the incident's shape over a fake SSE server: one
   long body, many deltas → ONE complete call. **RED: the omitted-index case
   failed.** (The repeated-index case passes on both — kept as a guard, not as proof.)
-- `dsml.test.ts` — whole block yes; prose, bare mention, truncated block no.
+- `dsml.test.ts` — the incident's LITERAL bytes (no opening invoke tag): yes;
+  the template's full block with attributes: yes; prose, a bare mention, an
+  orphan closer, a truncated block: no.
 - `dsml-leak.test.ts` (providers) — a fake SSE server whose content IS the
-  incident's block: refused. **RED with the guard disabled.**
+  incident's block: refused; prose that MENTIONS DSML: accepted.
+  **RED on the old matcher (3 failures).**
+- `dsml-leak-kind.test.ts` (protocol) — the notice is its own `display` KIND,
+  `context_note`'s enum did NOT grow, an older client's catch-all parses the
+  frame and skips it, and `PROTOCOL_VERSION` stays 22. **RED when the enum value
+  is put back.**
+- `mapping.test.ts` (client + daemon) — the kind maps both ways; a
+  `context_note{reason: "leaked_tool_call"}` is NOT accepted.
 - `dsml-leak.test.ts` (agent) — one leak → one re-ask → turn proceeds; two leaks →
   the turn fails after exactly two attempts; the leaked text never enters the
   history. **RED with the re-ask disabled.**
-- `cli/test/render.test.ts` — the `leaked_tool_call` notice is visible, while the
-  loop's other notes stay hidden. **RED with the render change reverted.**
+- `cli/test/render.test.ts`, `tui/test/state.test.ts` — the `dsml_leak` notice is
+  visible, while the loop's other notes stay hidden. **RED with the render change
+  reverted.**
 
 ## Execution
 
@@ -346,3 +367,115 @@ Executor behaviour: a careful extraction with good red/green discipline on the
 assembler. The DSML half, though, was tested against an invented fixture
 instead of the cited evidence, which is exactly the "weaker correlate" trap of
 §2/§9.
+
+## Execution — fix round 1
+
+*— deepseek (tentacle --profile deepseek), 2026-11-11*
+
+Both findings fixed. The review was right on both counts.
+
+### HIGH-1 — the matcher now fires on the incident's own bytes
+
+`packages/core/src/dsml.ts`: the matcher no longer anchors on an opening
+`invoke` tag. It requires
+
+- one opening `<｜DSML｜␠?parameter …>` — the space after the bar optional, attributes
+  allowed (`(?:\\s[^<>]*)?`), so `parameter name="fs_write"` and
+  `parameter name="content" string="true"` both match; and
+- after it, one of the block's closers (`</ parameter>`, `</ invoke>`,
+  `</ calls>`, any of them, bar spacing free).
+
+That is exactly the shape in the log: no opening invoke at all, an opening
+parameter tag, then `</ invoke>` / `</ calls>`.
+
+**Fixtures replaced with the log's LITERAL bytes**, copied from
+`.tentacle/tmp/orchestration/runs/exec-history-validity.log` 773-778 (prose
+prefix + the block; only the long base64 body is shortened, as the review
+allowed). Both `packages/core/test/dsml.test.ts` and
+`packages/providers/test/dsml-leak.test.ts` now carry them, and a checker
+script re-read the log and compared every line character by character
+(`U+FF5C` included, spaces included): byte-exact, 5 block lines each. The test
+itself asserts the premise — `INCIDENT.includes(OPEN)` is `false` — so an
+"invented fixture" cannot creep back silently.
+
+The negatives are kept: plain prose, a bare `DSML` mention, an orphan closing
+tag, and a truncated block (cut before its first closer) are all NOT refused.
+The provider test's "clean" reply now mentions DSML in prose on purpose, so
+"prose about DSML is accepted" is pinned end-to-end.
+
+Red → green, on the shipped code, by swapping only `dsml.ts` back to `HEAD`'s
+version:
+
+```
+(fail) recognises the INCIDENT's own bytes: no opening invoke tag, attributes on every tag
+(fail) recognises the template's full block, an opening invoke WITH attributes
+(fail) a DSML tool call leaked as text > is refused, not accepted as the answer
+ 6 pass · 3 fail        → 9 pass · 0 fail  (new matcher)
+```
+
+Mutation (non-vacuity): making the parameter tag's attributes optional-off
+(`parameter>`) → 4 fail (both positive cases in core + the provider test +
+"matches the incident text regardless of surrounding prose"); making the matcher
+return `true` after the opening tag (dropping the closer requirement) → 2 fail
+(the bare mention and the truncated block). Both reverted.
+
+### MEDIUM-1 — the notice is a new display KIND, no version bump
+
+Done as the orchestrator directed: **no value added to `context_note.reason`
+(it stays `continue | background_exit | hook`), no `PROTOCOL_VERSION` bump
+(stays 22).** The notice rides a new update kind `dsml_leak` of class `display`:
+
+- `packages/protocol/src/updates.ts` — `DsmlLeakUpdateSchema` (`{type: "dsml_leak",
+  text}`), added to the union and to `UPDATE_CLASS` as `display`; the
+  `ContextNoteSchema` doc comment now says why the re-ask is NOT a reason there.
+- `packages/agent/src/agent.ts` — the loop yields its own `AgentEvent`
+  `{type: "dsml_leak", text}` instead of `context_note{leaked_tool_call}`.
+- `packages/daemon/src/mapping.ts` — `dsml_leak` event → `dsml_leak` update.
+- `packages/client/src/mapping.ts` — update → the same event (both ends wired).
+- `packages/cli/src/render.ts`, `packages/tui/src/state.ts` — the notice is
+  shown; `context_note` is back to `reason === "hook"` only.
+- `packages/protocol/schema/protocol.json` regenerated with
+  `bun run schema:export` (`ContextNote.reason` enum shrunk back to the three
+  older values, `DsmlLeakUpdate` added with `x-event-class: display`).
+
+**Test (the review's exact ask):** `packages/protocol/test/dsml-leak-kind.test.ts`
+— a client that does NOT know the tag (`KNOWN_UPDATE_TYPES` minus `dsml_leak`,
+i.e. a v22 client) parses the frame through its catch-all
+(`UnknownSessionUpdateSchema` / `SessionUpdateOrUnknownSchema`) and
+`clientSupportsUpdate` says no: a SKIP, not an error. It also pins that
+`context_note{reason: "leaked_tool_call"}` is rejected by the schema (so the
+old shape cannot return) and that `PROTOCOL_VERSION` is 22.
+
+Red: putting the enum value back (`z.enum([... "leaked_tool_call"])`) → 1 fail
+("`context_note` keeps an OLDER client's reason enum: no member was added");
+reverted. The client and daemon mapping tests add the two-way mapping and the
+same negative.
+
+Both ends are also folded consistently in the test-support transcript helpers
+(`client/test/support/transcript.ts`, `daemon/test/history-cut.test.ts`,
+`client/test/foreign-turns.test.ts`): the re-ask note IS a user message in the
+history, so a live transcript and a resynced one still agree.
+
+### Doc corrections
+
+- The precondition that claimed "a new `context_note` reason needs no bump
+  because `context_note` is display" was **wrong** and is corrected in place
+  (Preconditions), with the malformed-update mechanism stated.
+- Implementation's Design/Files/Tests bullets now describe the shipped shape
+  (parameter-anchored matcher, `dsml_leak` kind, the new test files).
+
+### Gate
+
+`bun run typecheck` clean · `bun run lint` clean (0 errors, 0 warnings) ·
+`bun test` **6822 pass / 3 skip (the opt-in k8s + docker + slow-keepalive) /
+0 fail**. `bun run schema:export` re-run, no drift.
+
+### Findings
+
+- **HIGH-1** — FIXED. The matcher recognises the incident's literal bytes
+  (shown red on the old matcher); fixtures are the log's own characters,
+  verified byte-exact; the prose/bare-mention/truncated negatives are kept.
+- **MEDIUM-1** — FIXED (orchestrator's decision implemented). New `display`
+  kind `dsml_leak` wired on both ends; `context_note`'s enum unchanged;
+  `PROTOCOL_VERSION` stays 22; an older client's parse skips it rather than
+  erroring (pinned). Doc precondition corrected.

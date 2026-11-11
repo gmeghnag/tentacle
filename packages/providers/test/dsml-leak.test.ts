@@ -2,21 +2,24 @@
  * docs/fix/deepseek-dsml-leak.md, symptom A: the endpoint sent a tool call as
  * ordinary content text in DeepSeek's DSML markup, tentacle took it as the
  * final answer and ended the turn. The provider must refuse it instead.
+ *
+ * The fixture is the INCIDENT's own bytes (log 773-778, the base64 body
+ * shortened): prose, then parameter tags with attributes, then the closers —
+ * and no opening invoke tag (Review HIGH-1).
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { DsmlToolCallLeakError } from "@tentacle/core";
 import type { StreamEvent } from "@tentacle/core";
 import { OpenAIProvider } from "../src/index.ts";
 
-const B = "\uFF5C";
-/** The leaked reply, spelled as the incident's log has it. */
+/** The leaked reply, the log's literal bytes. */
 const LEAK = [
-  "Base64 works.",
-  `<${B}DSML${B} invoke>`,
-  `<${B}DSML${B} parameter name="fs_write">`,
-  "CiAgdGVzdCg=",
-  `</${B}DSML${B} invoke>`,
-  `</${B}DSML${B} calls>`,
+  "Base64 works reliably. Appending the rest.</｜DSML｜ parameter>",
+  '<｜DSML｜ parameter name="fs_write">',
+  '<｜DSML｜ parameter name="content" string="true">CiAgdGVzdCgiYW4gZW1w</｜DSML｜ parameter>',
+  '<｜DSML｜ parameter name="path" string="true">/Users/gmeghnag/tentacle/.tentacle/worktrees/history-validity/packages/providers/test/p4.txt</｜DSML｜ parameter>',
+  "</｜DSML｜ invoke>",
+  "</｜DSML｜ calls>",
 ].join("\n");
 
 /** One SSE frame carrying content text. */
@@ -32,8 +35,12 @@ beforeAll(() => {
     port: 0,
     async fetch(req) {
       const body = (await req.json()) as { model: string };
-      // "leak": the reply is a tool call in TEXT form. "clean": prose.
-      const answer = body.model === "leak" ? LEAK : "The file is written.";
+      // "leak": the reply is a tool call in TEXT form. "clean": prose that
+      // MENTIONS DSML (the guard must not refuse it).
+      const answer =
+        body.model === "leak"
+          ? LEAK
+          : "DSML is DeepSeek's markup; a real tool call is fine. The file is written.";
       return new Response(text(answer), {
         headers: { "content-type": "text/event-stream" },
       });
@@ -66,7 +73,7 @@ describe("a DSML tool call leaked as text", () => {
     expect(error).toBeInstanceOf(DsmlToolCallLeakError);
   });
 
-  test("ordinary prose is still accepted", async () => {
+  test("ordinary prose — even one mentioning DSML — is still accepted", async () => {
     expect(await attempt("clean")).toBeUndefined();
   });
 });

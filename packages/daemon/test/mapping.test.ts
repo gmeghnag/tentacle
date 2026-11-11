@@ -240,6 +240,16 @@ describe("eventToUpdate: sub-agent progress rides the wire (docs/feat/subagent-p
   });
 });
 
+describe("eventToUpdate: the DSML re-ask notice (docs/fix/deepseek-dsml-leak.md)", () => {
+  test("its own agent event → its own display KIND, and back on the client side", () => {
+    // Its own kind, never a `context_note` reason: an older client skips an
+    // unknown display tag, but fails a known kind whose enum grew (MEDIUM-1).
+    const update = eventToUpdate({ type: "dsml_leak", text: "use the tool mechanism" });
+    expect(update).toEqual({ type: "dsml_leak", text: "use the tool mechanism" });
+    expect(UPDATE_CLASS.dsml_leak).toBe("display");
+  });
+});
+
 describe("toUpdateParams (the session/update frame)", () => {
   const samples: SessionUpdate[] = [
     { type: "agent_message_chunk", content: { type: "text", text: "a" } },
@@ -256,6 +266,7 @@ describe("toUpdateParams (the session/update frame)", () => {
     { type: "history_replaced", reason: "compact" },
     { type: "session_closed", reason: "closed" },
     { type: "context_note", text: "Continue with the task.", reason: "continue" },
+    { type: "dsml_leak", text: "use the tool-calling mechanism" },
     { type: "history_repaired", invalidArguments: 1, unansweredCalls: 0, orphanResults: 0 },
     {
       type: "permission_request",

@@ -392,8 +392,14 @@ export type AgentEvent =
   | {
       readonly type: "context_note";
       readonly text: string;
-      readonly reason: "continue" | "background_exit" | "hook" | "leaked_tool_call";
+      readonly reason: "continue" | "background_exit" | "hook";
     }
+  // The model wrote a tool call as DSML text and the reply was refused; the
+  // re-ask note rides the conversation, this is the notice to show
+  // (docs/fix/deepseek-dsml-leak.md). Its own event, not a `context_note`
+  // reason: it crosses the wire as its own update KIND, so an older client
+  // skips it as `unsupported` instead of failing its schema (Review MEDIUM-1).
+  | { readonly type: "dsml_leak"; readonly text: string }
   // The model was sent a repaired copy of the history
   // (docs/feat/history-validity-invariant.md): invalid tool arguments replaced
   // by a marker, unanswered calls answered, stray tool results left out. The
@@ -1185,7 +1191,7 @@ export class Agent {
         // `continue` needs no history fixup: nothing was pushed for this round.
         if (error instanceof DsmlToolCallLeakError && dsmlReasks < MAX_DSML_REASKS) {
           dsmlReasks++;
-          yield { type: "context_note", text: DSML_REASK_NOTE, reason: "leaked_tool_call" };
+          yield { type: "dsml_leak", text: DSML_REASK_NOTE };
           messages.push({ role: "user", content: DSML_REASK_NOTE });
           // The re-ask replaces the leaked round, not the turn's budget for
           // real work (as an accepted context reset does, as `budgetFrom`).

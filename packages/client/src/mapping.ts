@@ -287,6 +287,9 @@ export function updateToEvent(
       return { type: "steer", text: update.text, ...(update.id ? { id: update.id } : {}) };
     case "context_note":
       return { type: "context_note", text: update.text, reason: update.reason };
+    case "dsml_leak":
+      // Its own kind, so an older client skips it (docs/fix/deepseek-dsml-leak.md).
+      return { type: "dsml_leak", text: update.text };
     case "history_repaired":
       return {
         type: "history_repaired",

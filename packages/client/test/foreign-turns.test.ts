@@ -767,6 +767,7 @@ describe("the bracket property, pinned (T-B0)", () => {
     "agent_usage",
     "steer",
     "context_note",
+    "dsml_leak",
     "permission_request",
     "permission_resolved",
   ]);

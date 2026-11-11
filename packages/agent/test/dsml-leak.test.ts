@@ -54,8 +54,10 @@ describe("a DSML-leaked tool call", () => {
     expect(note?.role).toBe("user");
     expect(note?.content).toContain("DSML");
 
-    // The turn ended normally, not as an error.
+    // The turn ended normally, not as an error; the notice rides its own event,
+    // which crosses the wire as its own display KIND (Review MEDIUM-1).
     expect(events.at(-1)?.type).toBe("turn_end");
+    expect(events.filter((e) => e.type === "dsml_leak")).toHaveLength(1);
   });
 
   test("is bounded: a SECOND leak fails the turn instead of looping", async () => {

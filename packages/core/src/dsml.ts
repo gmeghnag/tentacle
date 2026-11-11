@@ -14,28 +14,34 @@
  */
 const BAR = "\uFF5C";
 
-/** The opening `<｜DSML｜invoke>` and the closing tag, spelled as the template does. */
-const INVOKE_OPEN = `<${BAR}DSML${BAR} invoke>`;
-const INVOKE_CLOSE = `</${BAR}DSML${BAR} invoke>`;
-/** The tag that opens each argument of the call. */
-const PARAMETER_OPEN = `${BAR}DSML${BAR} parameter`;
+/**
+ * The tag that opens one argument of the call. The space after the bar is
+ * optional and any attributes are allowed (`parameter name="fs_write"`,
+ * `parameter name="content" string="true"`): both are the template's own bytes.
+ */
+const PARAMETER_OPEN = new RegExp(`<${BAR}DSML${BAR}\\s*parameter(?:\\s[^<>]*)?>`);
+/** Any of the block's closing tags: `parameter`, `invoke` or `calls`. */
+const BLOCK_CLOSE = new RegExp(`</${BAR}DSML${BAR}\\s*(?:parameter|invoke|calls)\\s*>`);
 
 /**
- * True when `text` carries a whole DSML tool-call block: an opening invoke tag,
- * at least one parameter tag, and the closing invoke tag. Requiring the full
- * shape — never a bare `DSML` mention or one orphan tag — keeps ordinary prose
- * (and a truncated block, which the next round replaces) from being refused.
+ * True when `text` carries a DSML tool-call block: an opening parameter tag
+ * (with its attributes) and, after it, one of the block's closing tags.
+ *
+ * Anchored on the PARAMETER tag, not on an opening invoke tag: the incident's
+ * reply had no opening invoke at all (only `parameter` tags, then `</ invoke>`
+ * and `</ calls>`) and would have slipped through the guard entirely
+ * (docs/fix/deepseek-dsml-leak.md, Review HIGH-1). Requiring both an opening
+ * parameter tag and a closer — never a bare `DSML` mention or one orphan tag —
+ * keeps ordinary prose (and a block truncated mid-write, which the next round
+ * replaces) from being refused.
  */
 export function hasDsmlToolCallMarkup(text: string): boolean {
-  const invoke = text.indexOf(INVOKE_OPEN);
-  if (invoke < 0) {
+  const open = PARAMETER_OPEN.exec(text);
+  if (open === null) {
     return false;
   }
-  const close = text.indexOf(INVOKE_CLOSE, invoke + INVOKE_OPEN.length);
-  if (close < 0) {
-    return false;
-  }
-  return text.slice(invoke, close).includes(PARAMETER_OPEN);
+  const rest = text.slice(open.index + open[0].length);
+  return BLOCK_CLOSE.test(rest);
 }
 
 /**

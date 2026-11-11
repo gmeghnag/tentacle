@@ -119,7 +119,7 @@ describe("AnswerSplit", () => {
     expect(err).not.toContain("42");
   });
 
-  test("a context_note shows for a hook and for a refused DSML tool call", () => {
+  test("a context_note shows for a hook; a refused DSML tool call shows as its own kind", () => {
     const hook = run([
       { type: "context_note", text: "hook said so", reason: "hook" },
       { type: "turn_end", reason: "end_turn" },
@@ -127,9 +127,10 @@ describe("AnswerSplit", () => {
     expect(`${hook.out}${hook.err}`).toContain("hook said so");
 
     // The loop's own notes stay hidden — but the re-ask after a leaked DSML
-    // tool call is the one the user must see (docs/fix/deepseek-dsml-leak.md).
+    // tool call is the one the user must see, and it rides its own kind
+    // (docs/fix/deepseek-dsml-leak.md, Review MEDIUM-1).
     const leak = run([
-      { type: "context_note", text: "use the tool mechanism", reason: "leaked_tool_call" },
+      { type: "dsml_leak", text: "use the tool mechanism" },
       { type: "turn_end", reason: "end_turn" },
     ]);
     expect(`${leak.out}${leak.err}`).toContain("use the tool mechanism");

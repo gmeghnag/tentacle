@@ -341,7 +341,7 @@
       "additionalProperties": true,
       "properties": {
         "reason": {
-          "enum": ["continue", "background_exit", "hook", "leaked_tool_call"],
+          "enum": ["continue", "background_exit", "hook"],
           "type": "string"
         },
         "text": {
@@ -385,6 +385,21 @@
       "additionalProperties": true,
       "properties": {},
       "type": "object"
+    },
+    "DsmlLeakUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "type": {
+          "const": "dsml_leak",
+          "type": "string"
+        }
+      },
+      "required": ["text", "type"],
+      "type": "object",
+      "x-event-class": "display"
     },
     "EnqueueParams": {
       "additionalProperties": true,
@@ -2736,6 +2751,7 @@
           "agent_usage": "#/$defs/AgentUsage",
           "background_exit": "#/$defs/BackgroundExit",
           "context_note": "#/$defs/ContextNote",
+          "dsml_leak": "#/$defs/DsmlLeakUpdate",
           "history_repaired": "#/$defs/HistoryRepaired",
           "history_replaced": "#/$defs/HistoryReplaced",
           "jobs": "#/$defs/JobsUpdate",
@@ -2786,6 +2802,9 @@
         },
         {
           "$ref": "#/$defs/ContextNote"
+        },
+        {
+          "$ref": "#/$defs/DsmlLeakUpdate"
         },
         {
           "$ref": "#/$defs/HistoryRepaired"

@@ -245,6 +245,10 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
       return { type: "steer", text: event.text, ...(event.id ? { id: event.id } : {}) };
     case "context_note":
       return { type: "context_note", text: event.text, reason: event.reason };
+    // The reply was refused as a leaked DSML tool call (its own display kind: an
+    // older client skips it as `unsupported`, docs/fix/deepseek-dsml-leak.md).
+    case "dsml_leak":
+      return { type: "dsml_leak", text: event.text };
     // The model was sent a repaired copy of the history; display only, and the
     // daemon keeps only the first per session (docs/feat/history-validity-invariant.md).
     case "history_repaired":
