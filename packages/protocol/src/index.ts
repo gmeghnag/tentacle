@@ -15,6 +15,7 @@ export * from "./version.ts";
 export * from "./jsonrpc.ts";
 export * from "./content.ts";
 export * from "./attachment.ts";
+export * from "./attachment-upload.ts";
 export * from "./session.ts";
 export * from "./session-log.ts";
 export * from "./spill.ts";

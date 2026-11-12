@@ -48,6 +48,13 @@ export const DomainErrorCode = {
   SessionArchived: -32014,
   /** A `session/open` of an id removed by `session/delete` (the daemon keeps a tombstone): never recreate it. */
   SessionDeleted: -32015,
+  /**
+   * An `attachment/put` the store will not take: `data.reason` is
+   * `AttachmentRefusedReason` (`too_large` | `store_full` | `hash_mismatch` |
+   * `bad_chunk`, docs/feat/attachments-upload.md). A `hash_mismatch` drops the
+   * partial, so the client may resend the blob from 0.
+   */
+  AttachmentRefused: -32016,
 } as const;
 
 /**

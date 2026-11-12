@@ -11,6 +11,7 @@
 import type { AskHooksTrust } from "@tentacle/agent";
 import {
   type AgentKillParams,
+  type AttachmentPutParams,
   type CancelParams,
   type ClearParams,
   type ClearResult,
@@ -300,6 +301,14 @@ export class Connection {
         return this.sessionSkills(params as SessionSkillsParams);
       case Method.SessionContext:
         return this.sessionContext(params as SessionContextParams, context?.signal);
+      // Synchronous from the offset check to the append, holding no lock
+      // (AGENTS §7): a store `put` that awaited would let two chunks of one
+      // blob interleave at the same offset. The store belongs to the SESSION,
+      // not this connection, so a re-attach resumes where it stopped.
+      case Method.AttachmentPut: {
+        const { sessionId, ...chunk } = params as AttachmentPutParams;
+        return this.lookup(sessionId).uploads.put(chunk);
+      }
       // A read of the registry: does not attach this connection to anything.
       case Method.SessionList:
         return this.host.list(params as SessionListParams);

@@ -9,3 +9,6 @@ export * from "./port-channel.ts";
 export * from "./stream-channel.ts";
 export * from "./errors.ts";
 export * from "./peer.ts";
+/** RFC 4648 base64 (dependency-free: the app's Hermes has neither `Buffer` nor `btoa`), shared
+ *  with the secure channel's framing — `attachment/put` chunks ride it as text. */
+export { encodeBase64 } from "./noise-frame.ts";

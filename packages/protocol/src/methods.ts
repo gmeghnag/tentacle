@@ -5,6 +5,7 @@
  * place keeps client and daemon provably in sync.
  */
 import type { z } from "zod";
+import { AttachmentPutParamsSchema, AttachmentPutResultSchema } from "./attachment-upload.ts";
 import { SessionTtlParamsSchema, SessionTtlResultSchema } from "./daemon.ts";
 import { HooksTrustParamsSchema, HooksTrustResultSchema } from "./hooks.ts";
 import { McpStatusParamsSchema, McpStatusResultSchema } from "./mcp.ts";
@@ -107,6 +108,8 @@ export const Method = {
   SessionTtl: "daemon/session_ttl",
   /** Daemon → client: may this session run the project's hooks? */
   HooksTrust: "hooks/trust",
+  /** Client → daemon: one chunk of an image's bytes into the session's store (docs/feat/attachments-upload.md). */
+  AttachmentPut: "attachment/put",
 } as const;
 export type MethodName = (typeof Method)[keyof typeof Method];
 
@@ -173,6 +176,10 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.SessionSkills]: { params: SessionSkillsParamsSchema, result: SessionSkillsResultSchema },
   [Method.SessionTtl]: { params: SessionTtlParamsSchema, result: SessionTtlResultSchema },
   [Method.HooksTrust]: { params: HooksTrustParamsSchema, result: HooksTrustResultSchema },
+  [Method.AttachmentPut]: {
+    params: AttachmentPutParamsSchema,
+    result: AttachmentPutResultSchema,
+  },
 };
 
 /** params schema for every notification method. */

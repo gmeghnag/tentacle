@@ -105,6 +105,7 @@ import {
   clientSupportsUpdate,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import { AttachmentStore, UploadBudget } from "./attachment-store.ts";
 import type { ModelLink } from "./connection.ts";
 import { jobRows, sameJobs } from "./jobs-view.ts";
 import {
@@ -420,6 +421,13 @@ export function untilAborted(done: Promise<unknown>, signal: AbortSignal): Promi
 
 export class HostedSession {
   readonly id: string;
+  /**
+   * This session's image store (`attachment/put`, docs/feat/attachments-upload.md):
+   * the bytes behind the refs its history names, and sub-task 2b's
+   * `AttachmentSource`. It lives with the SESSION, not a connection, so a
+   * detached-then-reattached client resumes where it stopped.
+   */
+  readonly uploads: AttachmentStore;
   /** What the factory did with `session/open.settings`; told to whoever attaches. */
   settingsReport: SessionSettingsReport | undefined;
   /** The session's approvals (the factory's), handed to the next agent on a settings sync. */
@@ -595,8 +603,10 @@ export class HostedSession {
     wake?: SessionWake,
     logOptions: SessionLogOptions = {},
     agentRuntime?: AgentJobs,
+    uploads: AttachmentStore = new AttachmentStore(new UploadBudget()),
   ) {
     this.id = id;
+    this.uploads = uploads;
     this.now = now;
     this.wake = wake;
     const restored = persistence?.restored;
@@ -2894,6 +2904,9 @@ export class HostedSession {
       this.subagentsKick = null;
     }
     this.attachments.clear();
+    // The single END of a live session covers close, archive, the reaper, the
+    // detached cap and delete (P4): the upload reservations go back here.
+    this.uploads.dispose();
     this.unsubscribeExit?.();
     this.unsubscribeStart?.();
     this.jobs?.dispose();
