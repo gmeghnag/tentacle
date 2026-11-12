@@ -647,6 +647,15 @@ describe("childToolLabel", () => {
     expect(childToolLabel("fs_edit", '{"path":"a.ts"}')).toBe("Edit a.ts");
   });
 
+  test("a `search` row names the query and where it looked (T-S7)", () => {
+    expect(childToolLabel("search", '{"pattern":"needle","path":"src"}')).toBe(
+      "Search needle in src",
+    );
+    expect(childToolLabel("search", '{"glob":"*.ts","output_mode":"files"}')).toBe(
+      "Search *.ts in .",
+    );
+  });
+
   test("any other tool shows its display label, or its name when it has none", () => {
     expect(childToolLabel("fs_multi_edit", '{"path":"a.ts","edits":[]}')).toBe("MultiEdit");
     expect(childToolLabel("shell_output", '{"job_id":"j1"}')).toBe("BashOutput");

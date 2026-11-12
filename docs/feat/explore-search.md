@@ -1,6 +1,6 @@
 # feat/explore-search — a bounded, read-only `search` tool for the agent tree
 
-> **Status:** context + implementation, **revision 1** (all 7 HIGH + 7 MEDIUM of the design review addressed; **open owner decisions: Q1, Q3, Q5, Q6, Q7, Q8** — Q2 and Q4 carry a recommended default) · **Branch:** `feat/explore-search` (off `main`)
+> **Status:** **EXECUTED** (2026-11-12) — Implementation + Revision 1 approved with the owner answers committed; Execution below is the as-built, with three drifts (see *Drift*). Review pending in a fresh context. · **Branch:** `feat/explore-search` (off `main`)
 > **Type:** feat · **Size:** M (it grew from S–M with revision 1: `glob` + files-with-matches, the dialect table, the probe/demotion path, the confinement rule) · **Blast:** cross-module (a new built-in tool + one array in `subagent.ts`; no wire, persistence or §7-invariant change) · **Suited:** DeepSeek exec, **Review in a fresh context** (the two dialect tables and the confinement rule are the failure-prone parts)
 
 ## Context
@@ -840,7 +840,10 @@ display):
 | `packages/tools/src/search-tool.ts` (or same file, second half) | the `Tool`: schema (with the `glob`/`path`/newline `.refine`s), description (incl. the dialect, H1), `permission: "none"`, `concurrency: pathConcurrency("read")`, `execute` = read gitignore → probe/cache engine → `ctx.env.exec` → parse → render, with F14's single retry + demotion. |
 | `packages/tools/src/search-dialect.ts` | **new** (only if `search.ts` exceeds ~350 lines): the three-class ERE table from Context (b), pure and table-driven. |
 | `packages/tools/src/index.ts:11` | export it. |
-| `packages/tools/src/builtins.ts:320-328` | `searchTool` into `builtinTools`. |
+| `packages/tools/src/subagent-tools.ts` | **new** (drift, see Execution): `exploreTools` + `subagentExtraTools(typeName)` — owner Q1 (c) decided in ONE place, because `builtinTools` is registered wholesale into the PARENT's registry (`wiring.ts:407`), so a built-in `search` would be offered to the main agent and `general` too. |
+| `packages/cli/src/wiring.ts:547` | `extraTools: (type) => subagentExtraTools(type.name)` on `createSubagentRunner`. |
+| `packages/agent/src/subagent.ts:304` | `SubagentDeps.extraTools` — a child-only tool the parent's registry does not hold (and the parent's instance wins on a name clash). |
+| `packages/tools/src/builtins.ts:320-328` | ~~`searchTool` into `builtinTools`~~ — **superseded by owner Q1 (c)**: a built-in is offered to every session, so `search` is NOT here (Execution, drift 1). |
 | `packages/agent/src/subagent.ts:86` | `tools: ["fs_read", "search"]`. |
 | `packages/agent/src/subagent.ts:67-71` | `EXPLORE_PROMPT` as in Design 4. |
 | `packages/agent/src/subagent.ts:234-255` | `childToolLabel` `search` case. |
@@ -1239,7 +1242,295 @@ Q1 **(c) `explore` only** (owner chose against the recommendation: the main agen
 
 ## Execution
 
-*— (empty: PLAN ONLY; the executor fills this)*
+*— claude (tentacle --profile claude), 2026-11-12*
+
+### Repro first (the capability really was missing)
+
+`.tentacle/tmp/explore-search/repro-doc.ts` on this branch before any edit:
+
+```
+A1 explore child is offered: ["fs_read"]
+A2 built-in tool names: ["fs_read","fs_write","fs_edit","fs_multi_edit","shell","shell_output","shell_kill"]
+A3 any search/glob tool: false
+```
+
+### As-built, in the plan's order
+
+1. **`packages/tools/src/search-dialect.ts`** (new, 176 lines) — the three-class
+   ERE table: `\d \D \w \W \s \S` and `[:word:]` → POSIX classes;
+   `(?…` / `\p{…}` / `\x..` / `\u…` / lazy quantifiers / `{n,m}` / a shorthand
+   inside `[…]` refused, each with a measured reason and the two ways forward;
+   everything else passes (including `\b`/`\B`, measured working on all three
+   greps). `fixed_strings` skips the table. `hasGroupSyntax`/`bracketSpans` are
+   escape-aware, so `\(?` and `[[:word:]]` are not misread.
+2. **`packages/tools/src/search.ts`** (new, ~780 lines) — the pure core:
+   `validateSearchInput` (control chars, the two mode requirements, the
+   basename-glob rule, Q6 a confinement: absolute refused, `..` refused),
+   `classifyGitignore`, `buildSearchPlan(input, engine, facts)`,
+   `parseSearchOutput(raw, stderr, mode, filesWithMatches)`,
+   `renderSearchResult(parsed, options)`, and `shq`. The command shape is the
+   plan's: existence pre-check → walk → `TENTACLE_RC` on stderr →
+   `| head -c 262145`; rg keeps `.gitignore` and gets `--no-require-git
+   --sort path --max-columns 1200 --max-columns-preview`; `find -H` gets one
+   `-prune` clause per name with the root exempted through an **escaped** `-path`
+   operand, a hidden-entry prune, `./`-prefixed paths, `-F`/`-E` (never both),
+   and `-I` only when the probe says it filters.
+3. **`packages/tools/src/search-tool.ts`** (new, 290 lines) — the `Tool`: the
+   one-process probe (`rg --version` + `grep -E -H` caps + the NUL
+   binary-filter test) cached in a `WeakMap<ExecutionEnvironment, Probed>`;
+   **only a definitive answer is cached**; the probe carries no `ctx.signal` and
+   its own 5 s timeout; `F14` demotes the cache to `grep` before the single
+   retry, and a parse error is never retried. `permission: "none"`,
+   `concurrency: pathConcurrency("read")`.
+4. **The `explore` grant and the prompt** (`packages/agent/src/subagent.ts`):
+   `tools: ["fs_read", "search"]`, the new `EXPLORE_PROMPT` ("SEARCH first, then
+   read" …), a `childToolLabel` `search` case, `SubagentDeps.extraTools`.
+5. **Display**: `search: "Search"` (`tool-labels.ts`), the TUI `toolSubtitle`
+   case (`render-lines.ts`).
+6. **Tests** (all new unless named): `packages/tools/test/search-fixture.ts`
+   (the shared fixture + `scrubbedPath`), `search.test.ts` (T-S1, T-S2 both
+   tables, T-S8, T-S6-pure, the parser table, `classifyGitignore`, the plan's
+   shape), `search-tool.test.ts` (T-S3 a/b/c/d, T-S5),
+   `packages/agent/test/explore-search.test.ts` (T-S4 through the real loop),
+   `packages/tools/test/fixtures/search-rg.txt` (the recorded rg transcript),
+   plus one `search` row each in `core/test/tool-labels.test.ts`,
+   `tui/test/render-lines.test.ts`, `agent/test/subagent.test.ts`.
+
+### Drift from the Implementation — three items, all forced by the code
+
+**1. `search` is NOT in `builtinTools` (Files row superseded).** The plan puts it
+there and adds `"search"` to `explore`'s list. That contradicts binding owner
+answer **Q1 (c) — `explore` only**: `builtinTools` is registered wholesale into
+the **parent's** registry (`wiring.ts:407`), and a child's tools are filtered
+*from* that registry (`subagent.ts:339`). A built-in `search` is therefore
+offered to the main agent and to every `general` child — exactly the option Q1
+rejected. Shipped instead: a new `packages/tools/src/subagent-tools.ts` with
+`exploreTools` and `subagentExtraTools(typeName)` (the ONE place Q1 is decided),
+a new `SubagentDeps.extraTools` seam so a child can be offered a tool its parent
+does not hold, and `wiring.ts:547` wiring it. The parent already holding a name
+wins, so a child never gets two instances of one tool.
+
+**2. A hidden-entry prune was added to the fallback (not in the plan).** The
+plan's fallback command has no hidden rule, but rg skips hidden entries by
+default, so `.hidx/f.ts` and `.hidden.txt` appeared only on the grep path — a
+real shape divergence, caught by the T-S1 table. `find` now carries
+`\( -name '.*' ! -path ROOT \) -prune -o` with the **escaped** root, which is
+what makes the plan's M1 escaping load-bearing rather than dead code (mutation 4
+below).
+
+**3. `-F` replaces `-E` instead of joining it.** Measured: `grep -E -F` is
+`rc 2` on GNU, so the plan's `[-I] [-F] -E` shape would have made every
+`fixed_strings` search a parse error on GNU/busybox. The fallback passes exactly
+one of `-F`/`-E`.
+
+Smaller, recorded rather than argued: `validateSearchInput` takes no `cwd` (Q6 a
+refuses *every* absolute path, which is strictly what the owner answered — no
+lexical workspace-root comparison was needed); the schema's `.superRefine`
+delegates to the same `validateSearchInput` instead of restating the rules in
+Zod; `parseSearchOutput` takes `outputMode`+`filesWithMatches` rather than the
+whole plan (the plan's `parseSearchOutput(raw, stderr, exitCode, mode)` shape,
+minus the unused exit code — the carried status is read from `TENTACLE_RC=`,
+which is H3's whole point).
+
+### Tests, per slice, with the names
+
+- **T-S1** `T-S1: the fallback and the recorded rg run render the same SHAPE` —
+  14 rows, each `"<name>" renders identically on both engines`, plus
+  `vacuity guard: the scrubbed PATH really has no rg`. The real fallback runs
+  through `/bin/sh` with a `PATH` of symlinks to `sh find grep head printf cat
+  sort env ls` only; the rg side is the recorded transcript
+  (`packages/tools/test/fixtures/search-rg.txt`, rg 15.2.0, generated from the
+  final `buildSearchPlan(rg)` — see *Regenerating the recording* below).
+- **T-S2** `T-S2: hostile PATTERNS never reach the shell` — 8 patterns
+  (`it's`, `say "hi"`, `$(echo PWNED)`, `` `id` ``, `a;b|$(id)`, `-n`,
+  `--version`, `back\slash`) each matching its own literal line, plus
+  `no hostile pattern creates a file, and nothing is expanded`.
+  `T-S2: hostile PATHS are confined, prefixed and escaped` — `-dash.ts`,
+  `.hid[x]` (the escaped `-path`), `a b`, `it's`, `/etc` + `../x` +
+  `a/../../y` refused, `~/.ssh` kept literal, a missing path = status 3,
+  `node_modules` exempt.
+- **T-S8** `T-S8: the dialect classifier is a table` — 19 rows, one per measured
+  construct, plus `fixed_strings skips the table`, `an escaped paren is not
+  group syntax`, `a translated pattern really matches what rg matches (the \d
+  fix)`, `a refused pattern is a refusal with the engine named`.
+- **T-S6 (pure)** `T-S6 (pure): the bounds` — count + per-file digest, the
+  40000-char line → `MAX_LINE` + `…`, whole lines at the byte bound, the
+  `INCOMPLETE` marker vs `first N` asserted apart, `no matches`, a binary note, a
+  NUL line dropped, a tab kept.
+- **the parser** `the parser reads the engines' own words` — 8 stderr shapes
+  (incl. GNU's `brackets ([ ]) not balanced` and busybox's
+  `bad regex 'foo(': Unmatched`, both measured) + the SIGPIPE line as noise.
+- **T-S3** `T-S3: the probe is once per env, and its answer is cached` (probe
+  count 1 across two calls; the probe has **no** `ctx.signal` and a 5 s timeout
+  while the search carries both `signal` and 20 s; nothing unquoted),
+  `T-S3(a): a non-definitive probe caches NOTHING` (a timeout, a throw and
+  unparseable output each re-probe), `T-S3(b): a broken rg is demoted, retried
+  ONCE` (one rg run + one fallback run, the note, and the next call issues no
+  probe and no rg) and `a PARSE error is never retried`, `T-S3(d)` (status 3 in
+  stderr with outer rc 0; a 124 = timeout, not a partial list), and the
+  `grep`-engine rows (`-I` passed only when `BINFILTER=1`).
+- **T-S5** `T-S5: the schema refuses what it says it refuses` — newline/CR/NUL,
+  empty pattern, `files` with neither, `/`+`**`+`!`+`..` globs (and two legal
+  basename globs accepted), `/etc` + `../x` at the tool boundary, and
+  `max_results: 10^9` clamped rather than refused.
+- **T-S4** `T-S4: an `explore` child is offered search, runs it, and reads a
+  hit` (6 cases) — the type's list, the child's first request offering exactly
+  `["fs_read","search"]`, a real search-then-read with the hit
+  `./src/a.ts:3:needleTwo();`, a `general` child NOT offered it,
+  `shell` still absent, and Q1 asserted on both sides of `subagentExtraTools`.
+- **T-S7 (display)** one row each: `core/test/tool-labels.test.ts`
+  (`search` → `Search`), `tui/test/render-lines.test.ts`
+  (`{label:"Search", subtitle:"needle in src"}`, and the glob form),
+  `agent/test/subagent.test.ts` (`childToolLabel` → `Search needle in src`).
+
+### The Review gate — the FINAL `buildSearchPlan` output, inside the images
+
+`.tentacle/tmp/explore-search/gate.ts` prints, for each query, the command
+`buildSearchPlan` really produced (`ENGINES=grep,rg bun gate.ts > gate.sh`), and
+`gate.sh` is fed to the container's `sh` on stdin with the fixture mounted
+read-only. Images: `busybox:latest` (busybox 1.38.0), `debian:bookworm-slim`
+(GNU grep 3.8), `alpine:3.20` + `apk add ripgrep` (rg 14.1.0). Commands:
+
+```
+podman machine start                      # the VM was down; started it
+podman pull -q busybox:latest; podman pull -q debian:bookworm-slim
+podman run --rm -i -v "$PWD/fxgate:/w:ro" -w /w busybox:latest sh < gate.sh
+podman run --rm -i -v "$PWD/fxgate:/w:ro" -w /w debian:bookworm-slim sh < gate.sh
+ENGINES=rg bun gate.ts > gate-rg.sh
+podman run --rm -i -v "$PWD/fxgate:/w:ro" -w /w alpine:3.20 \
+  sh -c 'apk add -q ripgrep 2>/dev/null; exec sh' < gate-rg.sh
+```
+
+`diff out-busybox.txt out-debian.txt` — the two fallbacks agree on **every
+result line**; the only differences are the two engines' own stderr wording
+(`sh: line 6: rg: not found` vs `sh: 6: …`, and busybox's
+`bad regex 'foo(': Unmatched` vs GNU's `Unmatched ( or \(`), both of which the
+parser reduces to the same `pattern rejected` + `fixed_strings` advice. Extracts
+(busybox, then debian where it differs):
+
+```
+=== plain-hit [grep]
+TENTACLE_RC=0
+./-dash.ts:1:needle dash
+./its.txt:1:needle
+./app/[id].ts:1:needle
+./app/[id]/k.ts:1:needle
+./app/x/k.ts:1:needle
+./deep/z.ts:1:needle
+./it's/q.txt:1:needle
+./a b/sp ace.ts:1:needle
+./pkg/a/x.ts:1:needle
+./src/a.ts:1:export const needleOne = 1;
+./src/a.ts:3:needleTwo();
+./src/debug.log:1:needle log
+--- outer rc=0
+=== translated-d [grep]
+TENTACLE_RC=0
+./src/a.ts:1:export const needleOne = 1;
+./src/a.ts:2:const x = 2;
+=== no-match [grep]
+TENTACLE_RC=1
+=== hostile-pattern [grep]          # `it's`
+TENTACLE_RC=1                       # (a shell split would have errored, rc 2/127)
+=== hostile-dollar [grep]           # `$(touch pwned)`
+TENTACLE_RC=1
+=== hostile-dash-flag [grep]        # `-n` as a PATTERN
+TENTACLE_RC=1
+=== path-dash-file [grep]
+TENTACLE_RC=0
+./-dash.ts:1:needle dash
+=== path-space [grep]
+./a b/sp ace.ts:1:needle
+=== path-quote [grep]
+./it's/q.txt:1:needle
+=== path-hidden-metachar [grep]     # path `.hid[x]`
+./.hid[x]/g.ts:1:needle            # the escaped `-path` guard, in the image
+=== parse-error [grep]              # `foo(`
+grep: bad regex 'foo(': Unmatched ( or \(     # busybox
+grep: Unmatched ( or \(                        # debian
+TENTACLE_RC=1
+=== missing-path [grep]
+TENTACLE_MISSING
+--- outer rc=3
+```
+
+rg in alpine (rg 14.1.0), `gate-rg.sh`:
+
+```
+=== plain-hit [rg]
+TENTACLE_RC=0
+Same 12 lines as the fallback above, same order.
+=== translated-d [rg] ./src/a.ts:1 … ; ./src/a.ts:2 …
+=== files-with-matches [rg]  (bare paths, `-l`)
+=== parse-error [rg]
+rg: regex parse error:
+    (?:foo()
+    ^
+error: unclosed group
+TENTACLE_RC=2
+=== missing-path [rg]
+TENTACLE_MISSING
+--- outer rc=3
+```
+
+So on **busybox**, **GNU** and **rg**: the same shape, the same `TENTACLE_RC`
+carried out, status **3** + `TENTACLE_MISSING` for a missing path, no hostile
+pattern in flag position, and no `pwned` file created (`ls` after the run shows
+only the fixture's own files). `rg: not found` in busybox/debian is the
+`rc=127` the probe sees, which is why `TENTACLE_ENGINE` never says `rg` there.
+
+### Non-vacuity (mutation), each reverted and re-greened
+
+Baseline before every mutation: `bun test packages/tools/test/search.test.ts` →
+78 pass, `…/search-tool.test.ts` → 18 pass, `…/agent/test/explore-search.test.ts`
+→ 6 pass.
+
+| # | mutation | result |
+|---|---|---|
+| 1 | delete the `d: "[0-9]"` row from the translate map | **RED** `T-S1 > "digits" renders identically` + `T-S8 > "\\d+" is translated` (2 fail, 75 pass) |
+| 2 | allow absolute paths and `..` (`if (false && …)`, keep `..`) | **RED** `T-S2 > an absolute path and a climbing .. are REFUSED` (1 fail) |
+| 3 | drop the `./` path prefix | **RED** 4: `T-S1 > "path-file"`, `T-S2 > a leading-dash path is usable`, `… > a literal ~ is not a home directory`, `… > a missing path is status 3` |
+| 4 | drop the `-path` operand escaping | **RED** `T-S2 > a HIDDEN metachar root is searched, not self-pruned` (first attempt: 0 fail — the hidden prune had exempted hidden roots wholesale, which made the escape dead code; that was a real defect, fixed in drift 2, and after it the mutation is red) |
+| 5 | `demoteCache` becomes a no-op | **RED** `T-S3(b) > one retry, the note names the failure, and the next call never runs rg again` |
+| 6 | cache a FAILED probe as `grep` (the poison M4 forbids) | **RED** `T-S3(a) > a probe that times out … probes again next time` + `> unparseable probe output caches nothing` |
+| 7 | give `search` to every type (`subagentExtraTools`) | **RED** `T-S4 > a general child is NOT offered search` + `> the real search TOOL is the one offered` |
+
+Mutation 7 is why the Q1 decision lives in `subagent-tools.ts` and not inline in
+`wiring.ts` (the first attempt at that mutation, against an inline arrow, stayed
+**green** — an untestable decision, which is the §7 rule about logic in pure
+modules).
+
+### Regenerating the recording
+
+The fixture and the rg transcript are one artefact of the same code path:
+
+```
+cd .tentacle/tmp/explore-search && bun record3.ts > recording3.txt
+# then: first line replaced by the header, copied over
+# packages/tools/test/fixtures/search-rg.txt
+```
+
+`record3.ts` makes the fixture in a **non-repo** `mktemp -d` tree (a parent repo's
+`.gitignore` would otherwise apply to it — measured: this repo's own
+`.tentacle/` rule silently dropped the fixture's `.hidx/`), then runs the final
+`buildSearchPlan(rg)` per query. Review re-runs it and diffs.
+
+### Gate
+
+```
+$ bunx tsc --noEmit            # clean
+$ bun run lint                 # 889 files, 0 errors / 0 warnings (baseline clean)
+$ bun test packages            # 6888 pass, 3 skip (the three opt-in), 0 fail
+$ bun test                     # 6927 pass, 3 skip, 1 fail + 1 error — apps/mobile ONLY
+```
+
+The single `bun test` fail/error is pre-existing and environmental:
+`apps/mobile/test/rn-websocket.test.ts` cannot resolve `@tentacle/client`
+because `apps/mobile`'s dependencies are **not installed in this worktree**
+(`apps/mobile/node_modules` absent, and `bunx tsc -p apps/mobile --noEmit`
+fails the same way on untouched files). `git status` shows nothing of mine under
+`apps/mobile`. `bun test packages` (every package, including all of mine) is
+green with exactly the three baseline skips.
 
 ## Review
 

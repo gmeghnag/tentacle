@@ -1293,6 +1293,18 @@ describe("toolTitle labels", () => {
     });
   });
 
+  test("search shows its query and where it looked", () => {
+    expect(toolTitle(tool("search", '{"pattern":"needle","path":"src"}'))).toEqual({
+      label: "Search",
+      subtitle: "needle in src",
+    });
+    // `files` + `glob` has no pattern: the glob is the query.
+    expect(toolTitle(tool("search", '{"glob":"*.ts","output_mode":"files"}'))).toEqual({
+      label: "Search",
+      subtitle: "*.ts in .",
+    });
+  });
+
   test("an unlabelled (MCP) tool keeps its name and raw args", () => {
     expect(toolTitle(tool("mcp__x__y", '{"q":1}'))).toEqual({
       label: "mcp__x__y",
