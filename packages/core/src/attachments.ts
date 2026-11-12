@@ -56,9 +56,7 @@ export function sanitizeAttachmentName(raw: string): string | undefined {
   if (kept === "") {
     return undefined;
   }
-  return kept.length > ATTACHMENT_NAME_MAX_CHARS
-    ? kept.slice(0, ATTACHMENT_NAME_MAX_CHARS)
-    : kept;
+  return kept.length > ATTACHMENT_NAME_MAX_CHARS ? kept.slice(0, ATTACHMENT_NAME_MAX_CHARS) : kept;
 }
 
 /**

@@ -20,24 +20,25 @@
  * one buffer, so a type can never describe bytes other than the ones sent.
  */
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import {
-  sanitizeAttachmentName,
   type AttachmentRef,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_IMAGE_BYTES,
+  sanitizeAttachmentName,
 } from "@tentacle/core";
-import { type AttachRefusal, refusalText } from "./attach-refusal.ts";
+import type { CandidateText } from "./attach-candidates.ts";
+import { type AttachRefusal, refusalMeansText, refusalText } from "./attach-refusal.ts";
 import { sniffImageType } from "./image-sniff.ts";
 
 /**
  * What the probe learned about an OPEN handle, in the terms a refusal needs.
- * `kind` is `other` for anything that is not a regular file — a fifo, a
- * device, a socket — which is refused unread, because reading one can block
- * forever.
+ * `directory` and `other` (a fifo, a device, a socket) are refused unread:
+ * reading a special file can block forever, and a directory is not an image.
  */
 export interface ProbedFile {
-  readonly kind: "file" | "other";
+  readonly kind: "file" | "directory" | "other";
   readonly size: number;
   /** Every byte of the file, in ONE buffer read to EOF (at most `cap + 1` bytes). */
   readonly bytes: Uint8Array;
@@ -111,9 +112,12 @@ export async function inspectPath(probe: FileProbe, path: string): Promise<Inspe
     return refuse({ reason: "not-found", path });
   }
   // A fifo/device/socket carries no bytes to sniff — refused by the HANDLE's
-  // kind, so nothing is ever read from one.
+  // kind, so nothing is ever read from one; a directory is not an image.
   if (file.kind === "other") {
     return refuse({ reason: "not-file", path });
+  }
+  if (file.kind === "directory") {
+    return refuse({ reason: "directory", path });
   }
   const bytes = file.bytes;
   if (bytes.length === 0) {
@@ -147,10 +151,12 @@ function nameField(name: string | undefined): { name?: string } {
   return name === undefined ? {} : { name };
 }
 
-/** Where a candidate ended up: an image, or a refusal that either keeps the text or is shown. */
+/** Where a candidate ended up: an image, a refusal, or an image the cap left out. */
 export type CandidateOutcome =
   | { readonly kind: "image"; readonly image: AttachedImage }
-  | { readonly kind: "refused"; readonly refusal: AttachRefusal };
+  | { readonly kind: "refused"; readonly refusal: AttachRefusal }
+  /** A real image that the per-message cap left out (counted in the ONE `too-many`). */
+  | { readonly kind: "over-cap" };
 
 /** What a batch of candidates produced: the images that passed, and why the rest did not. */
 export interface CollectedAttachments {
@@ -217,13 +223,21 @@ export async function collectAttachments(
       outcomes.push({ kind: "refused", refusal: result.refusal });
       continue;
     }
-    const overCap = wouldHold >= MAX_ATTACHMENTS_PER_MESSAGE;
     const duplicate = ids.has(result.image.ref.id);
-    if (overCap || duplicate) {
+    if (duplicate) {
+      // Its own sentence, and it does NOT count toward the message's total: a
+      // repeat of an attached image is a repeat, not a 6th image.
+      const refusal: AttachRefusal = { reason: "duplicate", path };
+      refusals.push(refusal);
+      outcomes.push({ kind: "refused", refusal });
+      continue;
+    }
+    if (wouldHold >= MAX_ATTACHMENTS_PER_MESSAGE) {
       // Counted, not announced one by one: a rejected candidate still counts
-      // toward the total, so the reply is one sentence about the whole paste.
+      // toward the total, so the reply is ONE sentence about the whole paste.
       wouldHold += 1;
       dropped += 1;
+      outcomes.push({ kind: "over-cap" });
       continue;
     }
     wouldHold += 1;
@@ -235,6 +249,95 @@ export async function collectAttachments(
     refusals.push({ reason: "too-many", count: wouldHold, dropped });
   }
   return { images, refusals, outcomes };
+}
+
+/**
+ * What a paste BECOMES — the one decision 3b consumes, so the rule "only image
+ * paths" is decided (and tested) here, not re-derived in a component.
+ *
+ * `attachments` — every candidate became an image: the refs to attach, the
+ * images, and nothing wrong. `text` — the paste stays plain text, with the
+ * refusals worth SHOWING (usually none: a sentence, a source file or a slash
+ * command is not an error).
+ */
+export type AttachmentDecision =
+  | {
+      readonly kind: "attachments";
+      readonly refs: readonly AttachmentRef[];
+      readonly images: readonly AttachedImage[];
+      readonly refusals: readonly AttachRefusal[];
+    }
+  | { readonly kind: "text"; readonly refusals: readonly AttachRefusal[] };
+
+/** Options for `attachPaths`/`decideAttachment`. */
+export interface DecideOptions extends CollectOptions {
+  /**
+   * The user SAID "a file" (`/attach <path…>`): then every failure is a
+   * refusal the TUI shows. Absent, a candidate whose BYTES are not an image
+   * means the paste was never an attachment (owner Q3 (a)).
+   */
+  readonly explicit?: boolean;
+}
+
+/**
+ * The paste rule (owner Q3 (a)): a pasted/dropped TEXT becomes attachments ONLY
+ * when every candidate is a regular file whose BYTES are an image. One missing
+ * path, one directory, one source file, one slash command and the WHOLE paste
+ * stays plain text — nothing is dropped, and nothing is refused at the user for
+ * a file they were only mentioning.
+ *
+ * A candidate that IS an image by its bytes never collapses the paste: it is
+ * attached, or its failure (`heic`, `too-large`, `duplicate`, the cap) is a
+ * refusal the caller shows beside the images that did pass — so a pasted
+ * `shot.png` + `IMG.HEIC` attaches the PNG and says why the HEIC did not.
+ *
+ * `explicit` (`/attach <path…>`) shows EVERY failure: there the user said "a
+ * file", so a missing one is an error worth a sentence.
+ */
+export async function attachPaths(
+  probe: FileProbe,
+  paths: readonly string[],
+  options: DecideOptions = {},
+): Promise<AttachmentDecision> {
+  if (paths.length === 0) {
+    return { kind: "text", refusals: [] };
+  }
+  const collected = await collectAttachments(probe, paths, options);
+  const shown =
+    options.explicit === true
+      ? collected.refusals
+      : collected.refusals.filter((refusal) => !refusalMeansText(refusal));
+  // A candidate whose bytes are NOT an image means the paste was never an
+  // attachment (a sentence, a dragged source file): the whole paste stays text
+  // and no refusal is shown for it.
+  if (options.explicit !== true && collected.refusals.some(refusalMeansText)) {
+    return { kind: "text", refusals: [] };
+  }
+  if (collected.images.length === 0) {
+    return { kind: "text", refusals: shown };
+  }
+  return {
+    kind: "attachments",
+    refs: refsOf(collected),
+    images: collected.images,
+    refusals: shown,
+  };
+}
+
+/**
+ * The same decision from the PURE candidate (`attachmentCandidateText`'s
+ * result): `{kind:"text"}` — a sentence, an empty paste — is text without
+ * touching the disk, so prose never costs a `stat`.
+ */
+export async function decideAttachment(
+  probe: FileProbe,
+  candidate: CandidateText,
+  options: DecideOptions = {},
+): Promise<AttachmentDecision> {
+  if (candidate.kind === "text") {
+    return { kind: "text", refusals: [] };
+  }
+  return attachPaths(probe, candidate.paths, options);
 }
 
 /**
@@ -252,18 +355,22 @@ export function nodeFileProbe(): FileProbe {
       try {
         // `O_NONBLOCK`: opening a fifo would otherwise block the render thread
         // forever before we could ask the handle what it is.
-        handle = await open(path, O_RDONLY | O_NONBLOCK);
+        handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
       } catch (error) {
         if (isMissing(error)) {
           return null;
         }
+        // Linux answers EISDIR at open; macOS opens it and fails at read.
         if (isDirectoryError(error)) {
-          return null;
+          return { kind: "directory", size: 0, bytes: new Uint8Array(0) };
         }
         throw error;
       }
       try {
         const info = await handle.stat();
+        if (info.isDirectory()) {
+          return { kind: "directory", size: Number(info.size), bytes: new Uint8Array(0) };
+        }
         if (!info.isFile()) {
           return { kind: "other", size: Number(info.size), bytes: new Uint8Array(0) };
         }

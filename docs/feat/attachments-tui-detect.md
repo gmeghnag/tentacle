@@ -416,3 +416,121 @@ drift honestly (dependency on `@tentacle/core`, not `@tentacle/protocol`; the
 red test), and its mutation table reproduces. One inaccuracy: Execution says
 "the clash check runs before the count check", but the code checks the count
 first (`attach-files.ts:190` vs `:194`).
+
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-12*
+
+**State inherited.** The previous round was cut by an ECONNRESET mid-way; its
+partial edits were committed as `7c386ad` (`wip … PARTIAL`). It had rewritten
+the `FileProbe` seam (one `read` call instead of `stat`+`read`), added
+`ATTACHMENT_NAME_RE` + `sanitizeAttachmentName` to protocol/core, wired
+`refName` to it, dropped `not-file` refusal handling onto the handle's kind and
+added `refusalMeansText` to `attach-refusal.ts`. **The tests were still on the
+old API and the new code was not type-clean**: 22 of the file's tests failed
+(`probe.stat is not a function`, `ProbedStat` gone), `O_RDONLY`/`O_NONBLOCK`
+were used without importing `node:fs`'s `constants`, and `sniffImageType` read
+`file.bytes` for a directory handle (which the partial seam collapsed into
+`not-file`, losing the `directory` refusal). So this round **finished** the
+seam and then closed the 4 findings.
+
+**M1 — `refName` sanitises with the wire's own rule (FIXED).**
+`protocol/src/attachment.ts:46` now exports `ATTACHMENT_NAME_RE = /^[^\p{Cc}]*$/u`
+and the schema at `:69` uses it (one regex, one rule).
+`core/src/attachments.ts:53 sanitizeAttachmentName` applies it per code point
+(`[...raw]`, so a capped name never ends in half a surrogate pair), caps at the
+wire's 255 and returns `undefined` when nothing usable is left; `core` re-exports
+the regex so an entry point needs one import. `attach-files.ts:84 refName` is now
+a one-line delegation — the C0+DEL filter is gone. Tests:
+`helpers > M1: a C1 control character (NEL) is dropped by the WIRE's own rule`
+(`x\u0085y.png` → `xy.png`, `x\u009by.png` → `xy.png`, a name that is only a
+control char → `undefined`) and `the entry point and the wire agree (M1) > a C1
+name never reaches Session.send` — `collectAttachments` on a `x\u0085y.png`
+produces a ref it feeds to `checkAttachmentRefs`, which no longer throws.
+
+**M2 — one open, one buffer, whole-file read (FIXED).**
+`FileProbe` is now ONE call (`read(path, cap) → {kind, size, bytes} | null`), so
+the type and the bytes cannot come from different reads by construction
+(`attach-files.ts:47`). `inspectPath` opens once and sniffs **that** buffer
+(`:170`); `size` and `id` are the buffer's own length and sha256 (`:177`), never
+`stat.size`, so a short read or a file that grew is described honestly.
+`nodeFileProbe` (`:395`) opens with `constants.O_RDONLY | constants.O_NONBLOCK`
+**once**, `fstat`s the handle (`handle.stat()`), and refuses a non-regular file on
+the handle before reading (`:412`) — a fifo cannot block the render thread.
+`readToEof` (`:434`) loops `handle.read` until EOF **or** the cap, so a short read
+is never taken for a whole file, and the cap passed by `inspectPath` is
+`MAX_IMAGE_BYTES + 1`, so an over-cap file is caught, not buffered. Tests:
+`inspectPath — one read, one buffer (M2)`: ONE open per candidate, a swapped file
+never becomes a PNG ref, a short read yields the bytes it got (ref size 64 despite
+a claimed 5000), a growth past the cap is `too-large`; and `nodeFileProbe`: a
+real FIFO returns `{kind:"other"}` instead of hanging (`mkfifo` + the call
+returning), plus the directory case now yields `{kind:"directory"}`.
+
+**M3 — caps and duplicates across calls (FIXED).**
+`collectAttachments` takes `options.existing: readonly AttachmentRef[]` (what 3b's
+chips hold, `attach-files.ts:170`), counts its length toward
+`MAX_ATTACHMENTS_PER_MESSAGE` and seeds the id set from it. Two bugs in the
+partial code were found by the new tests and fixed: a **duplicate was reported as
+`too-many`** (`ids.has` shared one branch with the count check) — now its own
+`duplicate` refusal that does not consume a slot (`:222`); and the per-file
+`too-many` spam is now **ONE** refusal `{count, dropped}` for the whole paste
+(`:240`), with over-cap candidates recorded as an `over-cap` outcome instead of a
+refusal. Tests: `the cap holds across paste for the WHOLE message` (3 + 3 → 2
+attach, composed with the first paste it passes `checkAttachmentRefs`), `8
+candidates give ONE refusal, not three identical ones` (count 8, dropped 3), `the
+same image dropped in a SECOND paste is a duplicate`.
+
+**M4 — the paste decision is image-bytes-only, and typed for 3b (FIXED).**
+`attach-files.ts:249 AttachmentDecision = {kind:"attachments", refs, images,
+refusals} | {kind:"text", refusals}`; `attachPaths` (`:270`) is the rule and
+`decideAttachment` (`:315`) takes `attachmentCandidateText`'s result directly, so
+a `{kind:"text"}` candidate never touches the disk (tested: zero probe calls).
+The rule: if **any** candidate's refusal means "never an image" (missing,
+directory, special file, non-image bytes — via `refusalMeansText`,
+`attach-refusal.ts:79`) the WHOLE paste stays text with **no** refusal shown, so
+`/help`, `/clear`, a dragged `main.ts` and a mixed PNG+`.ts` paste are inserted as
+plain text (`attachPaths` returns `text, refusals: []`). A candidate that IS an
+image by its bytes never collapses the paste: its failure (`heic`, `too-large`,
+`duplicate`, `too-many`) is a refusal shown beside the images that passed — so a
+pasted `shot.png` + `IMG.HEIC` attaches the PNG **and** explains the HEIC, never
+silently dropping it. `{explicit: true}` (`/attach <path…>`) shows every failure,
+including `not-found` and `not-image`. Tests: `attachPaths — the paste rule (M4)`
+(only-images → attachments; mixed → text with no refusal; a `.ts` alone → text,
+never "not a PNG"); `refusals for files that ARE images by their bytes (M4)`
+(HEIC, over-cap, unreadable/empty image vs non-image, duplicate, `too-many`);
+`decideAttachment (M4)` (text candidate reads nothing; `/attach` refuses a
+missing path and a non-image).
+
+**Drive-by fix, M2/M4 adjacent.** `ProbedFile.kind` regained `directory` (the
+partial seam folded a directory into `other`, so `inspectPath` answered `not-file`
+for a folder); `nodeFileProbe` maps `EISDIR`/`isDirectory()` to it.
+
+**Mutations (§9, each reverted; script
+`.tentacle/tmp/attachments-tui-detect/mut-r1-followup.sh`, tree restored).**
+
+| # | Mutation | Result |
+|---|---|---|
+| M2a | the sniff reads bytes OTHER than the carried buffer | **8 fail**, incl. `a file that changed under us is never a PNG ref over non-PNG bytes` |
+| M2b | the ref/size come from a 12-byte head | **8 fail**, incl. `a short read … never a hole` and both cap tests |
+| M4a | `not-image` means "show a refusal" | **2 fail**: the mixed paste and the dragged `.ts` |
+| M4b | image failures (`heic`/`too-large`/…) mean text | **5 fail**, incl. `one good PNG + one HEIC … no silent drop` |
+| M4c | the "any non-image ⇒ all text" rule removed | **1 fail**: the mixed paste (the `.ts` is dropped) |
+| M1 | names filtered by C0+DEL only | **2 fail**: both M1 tests |
+| M3a | `existing` not counted toward the cap | **2 fail**: the cross-paste cap test |
+| M3b | one `too-many` per dropped file | **4 fail**: incl. `8 candidates give ONE refusal` |
+| M3c | duplicates not recognised | **3 fail**: incl. the second-paste duplicate |
+
+**Gate (`bunx tsc --noEmit`, `bun run lint`, `bun test`), final tree:**
+`tsc --noEmit` clean; `biome check .` → `Checked 926 files … No fixes applied.`
+(§6 clean baseline; the first pass had 4 formatting errors in my own test file,
+fixed with `biome check --write`); `bun test` → **7257 pass, 3 skip, 0 fail**
+(the three opt-in skips of §6). The task's 3 files: **94 pass, 0 fail** (the
+attach-files file alone is 54).
+
+**Unverified (per §5).** One full-suite run had a single failure in
+`packages/tui/test/connect-model-error.test.tsx` (a 2023 ms timing test that
+imports none of these modules); it passes alone (3/3, twice) and in the final
+full run. Treated as a timing flake, not caused by this change — worth watching if
+it recurs. A real Terminal.app drop, a `chflags`-unreadable file and a real HEIC
+from Photos are still only covered by fakes plus one real FIFO/tmp file; 3b is
+where a real drop is seen end to end.
