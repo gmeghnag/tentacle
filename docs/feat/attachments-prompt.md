@@ -616,4 +616,83 @@ by construction on `main`'s shape.
 
 ## Review
 
-*(empty — mandatory fresh-context review after Execution)*
+*— claude-opus-5-5, 2026-11-12* (fresh context; same model as the plan's
+author, different from the executor — plan-level blind spots may survive.)
+
+**Verdict: REQUEST-CHANGES**
+
+**Gate (narrow + static):** the 16 touched test files → 220 pass / 0 fail;
+`bun run lint` clean (946 files); `bun run typecheck` clean. Full `bun test`
+not re-run by this reviewer.
+
+**Findings**
+
+1. **HIGH — a pod decides whether the laptop ships image bytes into it
+   (§7 "a pod is not trusted"; upload Owner Q2 (a) "no bytes in a pod").**
+   `client/src/image-input.ts:58-60` returns `upload` for `input:"upload"`
+   regardless of `local.servesModel`, and `RemoteClient.attachImage`
+   (`remote-client.ts:735-737`) then `attachment/put`s the bytes. Every
+   laptop-launched pod runs `--model-proxy` (`cli/src/engine-runtime.ts:95`;
+   the resident inherits it, `pod-resident.ts:790`), so a laptop that serves
+   the model being told `upload` happens only when the pod daemon is lying
+   (a replaced binary, or any same-uid process that took over the resident
+   socket). *Scenario:* a hostile pod answers `initialize` with
+   `images:{input:"upload"}` → 3b's `/attach` of a screenshot uploads its
+   bytes into the pod, where any pod process can read them. The gate is the
+   pod's own claim, i.e. a daemon-side check used as security. The test
+   `client/test/image-input.test.ts:42-47` pins this as intended, so the
+   flaw is in the D5 table itself. *Fix:* `servesModel && input === "upload"`
+   → `off` (or `laptop`), with a T5 row plus a T8 case (a fake pod declaring
+   `upload` to a serving laptop → zero `attachment/put` frames).
+2. **MEDIUM — the "factory forgets `ctx.attachments`" failure mode is pinned
+   for 1 of 3 hosts, and the worker's policy line not at all.** The plan's T10
+   asks for a turn's `ChatRequest.attachments` per host. As built, only
+   `workerAgentFactory` is driven end to end. `startDaemon`'s factory
+   (`serve.ts:206-217`) and `podSessionHost`'s non-proxy factory
+   (`serve.ts:553-566`) are pinned only by shape, and `worker.ts:145-147`
+   (`images` on the host) is uncovered (Execution's M9c, green). *Scenario:*
+   a refactor drops `...(ctx.attachments ? …)` in `serve.ts`, the suite stays
+   green, and every `serve` image becomes `[image unavailable]` with no error.
+   Execution states this gap honestly. It still breaks a load-bearing
+   failure-mode row. Inject `createProvider` through `podSessionHost` /
+   `reloadedHost` (or extract each factory like the worker's) and add the turn
+   test.
+
+**Premise spot-checks:** three `createAgent(` sites in `daemon/src` and three
+`params.request as unknown as ChatRequest` casts in `client/src`: TRUE.
+`prompt` is synchronous from the retry check to `session.send`: TRUE (the
+retry check runs before `splitPrompt`/`checkPromptImages`,
+`hosted-session.ts:1993-2001`). `model/stream*` carry no `sessionId`: TRUE
+(the plan relies on it for per-client scope).
+
+**Mutation (non-vacuity):** removing `laptopRequest` from the
+`model/countTokens` cast (`remote-client.ts:3176`) → T8 "model/countTokens
+carries it too" FAILS (10 pass / 1 fail). File restored from a scratch copy,
+and `git status --porcelain` shows nothing. The executor's mutation table was
+not re-run in full.
+
+**Attacks tried**
+- A pod lies about `input` to a serving laptop → finding 1.
+- A pod names a ref the laptop never added, or the right id at the wrong
+  size → `LaptopImages.read` → `null`, and the provider re-hashes. Holds.
+- `session/update_settings` under `client` vs `store`: the source is passed
+  again only for `store`. Holds.
+- A refused prompt leaves no state: refs are checked before skill/busy/turn
+  state and before the log. Holds.
+- A keyed re-send after a drop carries the refs (`ActiveTurn.attachments`)
+  and the retry check answers first. Holds.
+- Protocol: the prompt-only union leaves `ContentBlockSchema` and the
+  update classes untouched. `images.input` is a free bounded string, and an
+  unknown value means off. Additive, so no `PROTOCOL_VERSION` bump needed.
+  Holds.
+
+**What holds:** single session path (no new loop, only a source at the
+existing seams); the single broker is untouched; the model stays on the
+laptop (refs only over `model/stream*`, T9 spies for base64); `imageLimits()`
+is one truth shared by provider and capability.
+
+**Executor behaviour:** disciplined and honest. It re-ran the load-bearing
+greps first, recorded drift with reasons, called equivalent and uncovered
+mutants (M10, M9c) by their names instead of hiding them, and committed no
+weakened tests. Finding 1 follows the approved plan, so it is a plan defect,
+not an execution one.
