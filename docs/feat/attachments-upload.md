@@ -421,3 +421,7 @@ Recommendation first.
 ## Review
 
 *— <model-id>, <YYYY-MM-DD>*
+
+#### Owner answers (2026-11-12)
+
+Q1 (a) 100 MiB per session / 256 MiB per daemon, kept until session end, explicit refusal when full. Q2 (a) no bytes in a pod: pod runtimes send refs only; `attachment/put` for worker, `serve`, mobile. Q3 (a) a stalled partial (≥ 10 min) is evicted only when space is needed, no timer. Implementation APPROVED.
