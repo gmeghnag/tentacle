@@ -534,3 +534,60 @@ full run. Treated as a timing flake, not caused by this change — worth watchin
 it recurs. A real Terminal.app drop, a `chflags`-unreadable file and a real HEIC
 from Photos are still only covered by fakes plus one real FIFO/tmp file; 3b is
 where a real drop is seen end to end.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-12* (same fresh reviewer context; diff `7a3d096..HEAD`)
+
+**Verdict: REQUEST-CHANGES**: one new MEDIUM, in the typed result 3b consumes.
+Findings 1–4 are fixed.
+
+**Gate.** The 3 task files + `packages/core` + `packages/protocol` give `543
+pass, 0 fail`. `bun run lint` is clean (926 files). `bun run typecheck` was not
+run here (the command needed a permission approval that was not given), so the
+reviewer did not verify it. Tree clean after the mutations.
+
+**Round-1 findings, re-checked with the round-1 repros (`r2.ts`), on real files where they matter:**
+
+| # | Status | Evidence | Mutation |
+|---|---|---|---|
+| 1 C1 name | **fixed** (`sanitizeAttachmentName`, wire's own `ATTACHMENT_NAME_RE`) | `x\u0085y\u009b.png` → name `xy.png`, `checkAttachmentRefs` OK | filter back to C0+DEL → 2 fail (`M1: a C1 control…`, `a C1 name never reaches Session.send`) |
+| 2 two reads / short read / fifo | **fixed** (one `open(O_NONBLOCK)`, `fstat` on the handle, one buffer sniffed + hashed, `readToEof`) | real fs: `Shot 1.png` → png, a real `mkfifo` → `not-file` in 1 ms (no hang), dir → `directory`, missing → `not-found`. A type/bytes swap is no longer possible (one buffer). | `readToEof` reduced to ONE read → **0 fail**: the short-read loop is untested (the fake probe bypasses `nodeFileProbe`). This is a test gap, not a bug (the loop reads correctly). |
+| 3 per-call cap | **fixed** (`existing` option; one `too-many {count, dropped}`) | 3 + (3 + dup + re-drop of an attached one) → 5 refs, `checkAttachmentRefs` OK, refusals `duplicate, duplicate, too-many{6,1}` | `existing` ignored → 2 fail (`M3: the cap holds across paste…`, `…SECOND paste is a duplicate`) |
+| 4 only image paths | **fixed per the orchestrator rule** (`refusalMeansText`, `attachPaths`/`decideAttachment`) | `/help`, `/clear`, `/etc/hosts`, `PNG + dir`, `PNG + missing` → text with no refusal; a lone dragged PNG → attachments | early text-return disabled → 3 fail (mixed paste, duplicate-is-text, too-many) |
+
+**New finding:**
+
+5. **MEDIUM: `AttachmentDecision.kind: "text"` means two different things**
+   (`attach-files.ts:263`, returned at `:316`). The type documents `text` as
+   "the paste stays plain text". But it is also returned, *with* refusals, when
+   every candidate WAS an image by its bytes and none could be attached:
+   - a lone 15 MB+ PNG paste → `{kind:"text", refusals:[too-large]}`
+   - a HEIC-only drop, or the same image dropped again → `{kind:"text",
+     refusals:[duplicate]}`, pinned by test `a duplicate image refused; the
+     paste is text`
+   - every failed `/attach` → `{kind:"text", refusals:[not-found]}`, pinned by
+     test ``/attach is EXPLICIT``
+
+   A 3b that follows the documented contract inserts the dragged path into the
+   prompt next to "already attached". After a failed `/attach /nope.png`, it
+   puts the literal command back in the input, ready to be sent to the model.
+   This also contradicts the orchestrator rule ("text" only when some token is
+   NOT an image by its bytes). Today 3b would have to infer "insert?" from
+   `refusals.length === 0`, an unpinned side channel. Fix: a third variant
+   (e.g. `{kind:"refused", refusals}`: nothing attached, do NOT insert the
+   text), with `text` meaning "insert, no refusals" only. Re-pin the 3 tests
+   above.
+
+**Not blocking (noted only):**
+- `sanitizeAttachmentName` (`core/src/attachments.ts:59`) still cuts in UTF-16
+  units, so `254×"a" + 😀` ends in a lone surrogate (repro: `true 255`). Its
+  comment claims the opposite. Display only: the wire accepts it.
+- 3a now edits `protocol` and `core`: an additive export plus a shared regex,
+  with no wire change and no version bump needed. The blast stays acceptable,
+  but the metadata line still says `contained`, new `packages/tui` files only.
+
+**Executor behaviour:** it addressed all four findings at the root (one open
+for TOCTOU, the wire's regex instead of a copy, and the `existing` seam), each
+with a test that fails under mutation. The only gaps are the untested
+`readToEof` loop and the overloaded `text` variant.
