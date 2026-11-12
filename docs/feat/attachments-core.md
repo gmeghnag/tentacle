@@ -653,3 +653,136 @@ T5 reader, T13).
 ## Review
 
 *(empty)*
+
+## Review (Opus)
+
+*— claude-opus-5-5, 2026-11-12*
+
+Fresh-context adversarial pass, one round, HIGH/MEDIUM only. Read: AGENTS §7
+(persistence, protocol, pod trust) and §9, this doc, `attachments.md`
+§Promotion, `git diff main...HEAD`.
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 3 MEDIUM).
+
+### Gate (re-run here)
+
+- Narrow: the 14 attachment test files → 123 pass, 0 fail.
+- Full `bun test` → **7001 pass, 3 skip (the opt-ins), 0 fail**, 511 files.
+- `bunx tsc --noEmit` clean; `bun run lint` clean (909 files). `tsc -p apps/mobile`
+  NOT run: the `apps/mobile` deps are not installed in this worktree.
+- Mutations run by me, restored by copying back saved files; `git status` clean:
+  - `canonicalMessage` always appends the refs element → 4 fail (C9 vector pin,
+    no-ref byte-identity, the refs-element case, the `note` digest test). **Killed.**
+  - Anthropic tool-merge guard back to `prev.role === "user" && Array.isArray(prev.content)`
+    → **0 fail. Survived** (M3).
+
+### What holds
+
+- (1) Load-bearing grep re-run: no eighth field-by-field rebuild. The new hits
+  are all *constructors* of fresh text messages (agent loop nudges,
+  `context-reset.ts:73`, `subagent.ts:434`, `cli/main.ts:1931`), as the plan says.
+- (2) An older build meets `media_message` as an unknown critical type: the whole
+  file is refused, untouched (`session-log-file.ts:240-246`). Text-only sessions
+  still write `message`, and their digest is byte-identical (mutation above).
+  The fork (`segmentFromMessages`), `SessionLog.commit/segment`, `replayFromBase`,
+  `laxEntry`, the owes checks (file and reader) all know the media types.
+- (3) `PROTOCOL_VERSION` 23, both schemas (`ChatMessageSchema`,
+  `WireChatMessageSchema`) carry refs, and the committed JSON Schema is regenerated.
+  An older peer fails at `initialize` (the existing version-mismatch path).
+- (4) A pod's refs reach the laptop provider with `request.attachments`
+  undefined (T7), so the laptop reads nothing. Refs that come back are
+  sha256-checked and size-checked before they are inlined (`images.ts:118-124`).
+- (6) Compaction labels only, `context_reset` builds new text, the token
+  estimate is charged per ref, sub-agents get text. All as the owner decided.
+
+### Findings
+
+**H1. The owner's binding provider-limit requirement is not implemented, and
+Execution reports it as done.** `packages/providers/src/images.ts:81` (`sendable`)
+and `:147` check only the global `MAX_IMAGE_BYTES` (15 MiB). No provider
+has its own limit. `anthropic-provider.ts:135` / `openai-provider.ts:162` inline
+whatever passes.
+*Scenario* (repro below, C): a verified 10 MB PNG on Anthropic puts
+13,981,016 base64 bytes into the body. Anthropic documents a 5 MB per-image cap
+(to verify, as the owner said). The API answers a 400 for that image, as a generic
+`ModelRequestError` that names neither the image nor the limit. The history is
+resent every round, and the image stays among the last 5, so **every later turn
+400s**: a poisoned session (the class AGENTS warns about). Execution's
+"oversized image refused with a message naming it and the limit (T10)" covers
+only > 15 MiB at `Session.send`.
+*Fix:* add a per-provider `maxImageBytes`. Put it on `AnthropicProviderConfig` /
+`OpenAIProviderConfig` / `CreateModelProviderOptions`. Anthropic's default
+comes from its documented cap (e.g. 5 MiB of base64 ⇒ 3,932,160 raw; verify).
+OpenAI-compatible endpoints get their own default. Check it in `sendable()`
+(never read) and in `placeholder()` →
+`[image omitted: 10 MB is over this model's 3.75 MB limit — <label>]`. Export
+the effective limit so 2b/3b refuse at entry with the same text. Test (red
+first): a 10 MB ref on anthropic → that placeholder, `read` never called, the
+body has no image block.
+
+**M1. The `serve` sidecar `tail` strips refs silently on an older build.**
+`packages/daemon/src/daemon-state-file.ts:258-264` parses `tail` (a prompt
+accepted but not yet committed) with `ChatMessageSchema`, and
+`DAEMON_STATE_VERSION` stays 1 (`:42`).
+*Scenario* (reachable from 2b): `serve` accepts an image prompt and crashes before
+the commit. The log has no `media_message` yet, and the sidecar tail holds the
+refs. An older daemon then reloads the store. The log loads (no unknown type),
+the old schema strips `attachments` from the tail, and `:388`/`reconcileOnReload`
+appends it as a plain `message`. That is a silent half-load: the turn re-runs
+without the image. This breaks §7 "never half-loads" on the one on-disk record
+this plan did not cover (the failure-mode table says "laptop or `serve`").
+*Fix:* write the sidecar with `schemaVersion: 2` only when some tail message
+`hasAttachments`, else 1. The reader accepts {1, 2}. An older build then refuses
+that one session loudly and leaves its files untouched (the existing path at
+`:233-237`), which mirrors the media-entry rule. Tests: a tail with refs is
+written as v2, without refs as v1, and a v1-only reader refuses v2 and leaves
+the files byte-identical.
+
+**M2. Plain `message` / `replace` entries still accept `attachments`, so the
+media rule holds only by convention.** `packages/protocol/src/session-log.ts:132,140`
+use `ChatMessageSchema`, which now has `attachments` optional.
+*Scenario* (repro A): a pod (not trusted) returns `{type:"message",
+message:{…, attachments:[ref]}}` from `session/log`. The laptop validates it
+(`session-log-reader.ts:263`) and writes it verbatim (`session-log-store.ts:702`,
+`entryLines`). The laptop `<uid>.jsonl` now holds a `message` with refs. An older
+laptop build loads it and strips the refs: a half-load of data the laptop
+"validated". The same applies to any future emitter that skips `appendEntryBody`.
+*Fix:* give `message`/`replace` a message shape that refuses refs (a
+`chatMessageShape()` variant with `attachments: z.undefined()`, or a post-parse
+`hasAttachments` rejection in the reader and `parseLogFile` if the exporter
+refuses `z.undefined`). Such an entry is then a loud "malformed entry". Test:
+that entry fails `KnownLogEntrySchema`, and the store refuses the read (red
+on this branch).
+
+**M3. The tool-merge guard test is vacuous (§9).**
+`packages/providers/test/anthropic-images.test.ts:266-284` puts an `assistant`
+message between the image turn and the tool message, so `prev` is never the
+multimodal turn. The plan's required mutation ("revert the tool-merge guard →
+T8") survives (above), and Execution's mutation table leaves it out.
+*Fix:* put the tool message directly after `user("look", [one])`, assert 2
+messages, `messages[0]` = the unchanged image turn and `messages[1]` = its own
+`tool_result` turn. Show it red with the old condition.
+
+### Repro (A, C)
+
+`bun /Users/gmeghnag/tentacle/.tentacle/tmp/attachments/review/repro.ts`
+(it imports the worktree's `protocol`/`providers`/`session-log-file.ts` by
+relative path): a plain `message` entry with a ref goes through
+`KnownLogEntrySchema.safeParse`, then `entryLines`. Then an Anthropic provider
+with an injected `fetch` streams one 10 MiB ref from a source that returns the
+matching bytes.
+
+```
+A parse: true {"type":"message",...,"critical":true,"message":{"role":"user","content":"hi","attachments":[{"id":"aaaa…","mimeType":"image/png","size":10}]}}
+C inline base64 bytes sent: 13981016
+```
+
+### How the implementing model behaved
+
+It followed the plan closely. It ran the load-bearing check first and
+documented every drift with a reason (schema factory for the exporter, T13
+moved for the dependency direction). It ran 7 real mutations. Gaps: it skipped
+2 of the plan's 10 mutations (one would have caught M3), read the owner's
+"provider limit" answer as satisfied by the global 15 MiB check (H1), and
+signed Execution as `claude-sonnet-4-5` although the executor was DeepSeek. The
+signature should name the actual model (AGENTS §10).
