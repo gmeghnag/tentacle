@@ -277,3 +277,90 @@ the printable key also CHANGES the state).
 *— deepseek (tentacle --profile deepseek), 2026-11-11*
 
 *(To be done in a fresh context, per AGENTS §10 for a `cross-module` fix. Not self-approved here.)*
+
+## Review (Opus)
+
+*— claude-opus-5-5, 2026-11-12*
+
+Fresh-context adversarial pass over (A) `git diff main...HEAD` and (B) the merged `f8d0490`.
+Scope: HIGH/MEDIUM only.
+
+**Gate (re-run here).** Narrow (5 files: dock-type-through-frames, background-focus,
+background-list, subagent-panel-frames, shell-panel-frames) → `153 pass / 0 fail`.
+`packages/cli/test/subagent-panel-controller.test.ts` → `4 pass / 0 fail`. Full `bun test` →
+`6906 pass, 3 skip (the three opt-ins), 1 fail`. The one fail is
+`apps/mobile/test/rn-websocket.test.ts: Cannot find module '@tentacle/client'`: `apps/mobile`
+deps are not installed in this worktree. That is an environment gap, not this change.
+
+**Mutations (mine, each restored exactly, `git status` clean afterwards):**
+- R1: Esc in the pinned state sets `typing:false` instead of closing (`background-focus.ts`, Esc
+  branch) → **2 fail** (D2, T-F2). The Esc-closes property holds.
+- R2: every stop routed to `killChild`, so `session/job_kill` is never used (`App.tsx`, the
+  `dockKindOf(...) === "job"` branch) → `shell-panel-frames` F5/F9 **fail**, and **D6 stays
+  green**. The fake's `killJob` and `killSubagent` both push to the same `kills` array, so D6
+  checks "something was killed", not the route the doc says it pins. The route is still pinned
+  (by F5), so this needs no change. It does mean the doc's "D6 → `session/job_kill`" claim is
+  overstated.
+
+**What holds (A).**
+- Esc in the pinned state returns `none` before the App's abort branch (`App.tsx` dock block
+  precedes `key.escape && running`). D2 and R1 both show it.
+- With the list focused (`typing:false`), `ctrl+x` is kept from the chord and the dock reads it.
+  Arm then confirm works for sub-agent rows (D4) and shell-job rows (D6/F5).
+- Typed text, pastes and mouse reports can never arm or confirm a stop. `ctrlX` requires
+  `key.ctrl`. A paste and a printable key are type-through. `isMouseReport` runs first, and the
+  ESC-prefixed fix is a real latent bug fixed.
+- `reconcile` disarms when the selected row changes and leaves `typing` alone. If the list
+  empties it goes to `input` (`background-focus.ts:547-556`).
+- In a multi-line draft, ↓ keeps the DOWN table's meaning (`downEntersList` accepts the pinned
+  state; `downToDock` is pure).
+- No new rule was left in `App.tsx`: the guard and DOWN both call pure functions.
+
+**M1 (MEDIUM) — the pinned dropdown hijacks `ctrl+x` from the input.**
+- Where: `packages/tui/src/background-focus.ts:333` (`dockClaimsCtrlX` is true for every `list`,
+  including `typing:true`), `background-focus.ts:407-415` (the `typing` + `ctrlX` branch arms a
+  stop), `App.tsx:3373`.
+- Why it is wrong: by the owner's decision, in the pinned state the keys belong to the input,
+  and the DOWN table already treats it as the input. The chord does not.
+- Scenario, checked against the pure module (`.tentacle/tmp/dock-type-through/chord-pinned.ts`):
+  ```
+  pinned+typing claims ctrl+x (chord bypassed): true
+  ctrl+x -> {"kind":"list","selected":"sa-1","armed":true,"typing":false} none
+  ctrl+s -> {"kind":"list","selected":"sa-1","armed":false,"typing":false} none
+  ```
+  1. While typing with the dropdown pinned, `ctrl+x ctrl+s` (send queued now) no longer sends.
+     It arms a stop and swallows `ctrl+s`, and the keys leave the input.
+  2. Worse: a doubled `ctrl+x` (a fumbled chord) is harmless at the bare input, because
+     `stepChord` just re-arms. In the pinned state it **stops the selected child or job**, and
+     that row was painted calm (not focused) when the first press landed. A stop the user never
+     aimed is a destructive misroute.
+- Exact fix:
+  1. `dockClaimsCtrlX` → `return state.focus.kind === "list" && !state.focus.typing;`.
+  2. Delete the `if (ctrlX) {…}` arm inside `if (typing)` (lines 408-415), so `ctrl+x` in the
+     pinned state passes to the chord exactly as at the input. To stop from there the user
+     presses ↓ first, which puts focus on the list with the rule highlighted.
+  3. Update the Implementation table row `typing:true | ctrl+x`. Flip its pure test, and add a
+     red-first frame test: pinned state, `ctrl+x ctrl+x` → `api.kills` stays `[]`.
+  4. If the owner explicitly wants a stop reachable straight from the pinned state, record that
+     as an owner decision. At minimum the doubled-`ctrl+x` kill must then be argued and pinned.
+
+**(B) `fix/local-subagent-panel-unwired` (merged).** The three missing forwards
+(`messageSubagent`, `killSubagent`, `onSubagentMessage`) are added to `PersistingController` and
+to `persistingController`. Each is a plain delegation to `inner`, so no `this` binding is lost.
+The guard reads `SessionController`'s members from the source AST. It intersects them with a
+real `RemoteSession` *instance*, so arrow properties are counted. It pins the exact list with
+`toEqual`, not a floor, and requires each member to be present on the controller.
+
+I checked the `connectOnly` exemption, and its reasoning holds: `detach`/`stayingRows` are only
+reached through connect's `sessions`, and forwarding `autoAcceptsTurn` would narrow the
+wrapper's `ownsTurn` under `adoptTurn`. The changed App notice is accurate. No HIGH/MEDIUM
+finding. (Nit, not blocking: the guard's comment block is pasted twice,
+`subagent-panel-controller.test.ts:307-328` and `:329-352`.)
+
+**How the implementing model behaved.** It wrote red-first tests and recorded honest mutation
+results. It found and fixed the latent `isMouseReport` bug, and logged its drift with reasons.
+The miss is M1: it reasoned the chord guard only for the list-focused state, and never asked
+whether the pinned state is "the input" for `ctrl+x` too, even though its own DOWN-table drift
+says it is.
+
+**Verdict: REQUEST-CHANGES** — M1 (A). (B) PASS.
