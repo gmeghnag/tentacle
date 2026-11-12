@@ -47,7 +47,10 @@ const view = (opts: Partial<Parameters<typeof backgroundListView>[0]> = {}) =>
 
 describe("T-L1: the width tiers, cells-cut, one line per row", () => {
   test("100 columns: id, type, title and `tools · tokens · time`", () => {
-    const v = view({ rows: [row(1)], focus: { kind: "list", selected: "sa-1", armed: false } });
+    const v = view({
+      rows: [row(1)],
+      focus: { kind: "list", selected: "sa-1", armed: false, typing: false },
+    });
     const [first] = v.rows;
     expect(first).toBeDefined();
     const line = rowText(first ?? { segments: [] });
@@ -83,7 +86,7 @@ describe("T-L1: the width tiers, cells-cut, one line per row", () => {
     const v = view({
       width: 80,
       rows: [row(1, { description: cjk })],
-      focus: { kind: "list", selected: "sa-1", armed: false },
+      focus: { kind: "list", selected: "sa-1", armed: false, typing: false },
     });
     const [first] = v.rows;
     expect(first).toBeDefined();
@@ -98,8 +101,8 @@ describe("T-L1: the width tiers, cells-cut, one line per row", () => {
     for (const width of [100, 90, 80, 70, 60, 56, 40, 20]) {
       for (const focus of [
         { kind: "input" as const },
-        { kind: "list" as const, selected: "sa-1", armed: false },
-        { kind: "list" as const, selected: "sa-1", armed: true },
+        { kind: "list" as const, selected: "sa-1", armed: false, typing: false },
+        { kind: "list" as const, selected: "sa-1", armed: true, typing: false },
       ]) {
         const v = view({ width, rows: [row(1), row(2)], focus });
         for (const r of v.rows) {
@@ -195,8 +198,8 @@ describe("T-L0: the rule is ALWAYS one whole line of `width` cells", () => {
     for (let width = 20; width <= 200; width += 1) {
       for (const focus of [
         { kind: "input" as const },
-        { kind: "list" as const, selected: "sa-1", armed: false },
-        { kind: "list" as const, selected: "sa-1", armed: true },
+        { kind: "list" as const, selected: "sa-1", armed: false, typing: false },
+        { kind: "list" as const, selected: "sa-1", armed: true, typing: false },
       ]) {
         const rule = ruleText(view({ width, rows: [row(1)], focus }));
         expect(cellWidth(rule)).toBe(width);
@@ -211,10 +214,14 @@ describe("T-L0: the rule is ALWAYS one whole line of `width` cells", () => {
   });
 
   test("the hint is what gives way, never the fill (the owner's gap)", () => {
-    // 45 columns cannot hold `enter open · x stop · esc back`: the rule keeps its
+    // 45 columns cannot hold `enter open · ctrl+x stop · esc back`: the rule keeps its
     // title and its fill and drops only the keys.
     const narrow = ruleText(
-      view({ width: 45, rows: [row(1)], focus: { kind: "list", selected: "sa-1", armed: false } }),
+      view({
+        width: 45,
+        rows: [row(1)],
+        focus: { kind: "list", selected: "sa-1", armed: false, typing: false },
+      }),
     );
     expect(cellWidth(narrow)).toBe(45);
     expect(narrow).toContain("background · 1");
@@ -222,9 +229,13 @@ describe("T-L0: the rule is ALWAYS one whole line of `width` cells", () => {
     expect(narrow.endsWith("─")).toBe(true);
     // Wide enough, the keys are back and the fill still closes the line.
     const wide = ruleText(
-      view({ width: 90, rows: [row(1)], focus: { kind: "list", selected: "sa-1", armed: false } }),
+      view({
+        width: 90,
+        rows: [row(1)],
+        focus: { kind: "list", selected: "sa-1", armed: false, typing: false },
+      }),
     );
-    expect(wide).toContain("enter open · x stop · esc back");
+    expect(wide).toContain("enter open · ctrl+x stop · esc back");
     expect(cellWidth(wide)).toBe(90);
   });
 });
@@ -246,7 +257,7 @@ describe("T-L2: nine rows → a window of 5 that follows the selection", () => {
     const v = view({
       rows: nine,
       width: 100,
-      focus: { kind: "list", selected: "sa-7", armed: false },
+      focus: { kind: "list", selected: "sa-7", armed: false, typing: false },
     });
     // The selection holds the window's last row once it passes the fifth, so the
     // rows above it never jump away (mockup 05: `↑2 ↓2`, the item at the bottom).
@@ -255,14 +266,14 @@ describe("T-L2: nine rows → a window of 5 that follows the selection", () => {
     expect(v.below).toBe(2);
     expect(v.start).toBe(2);
     expect(v.hint).toContain("↑2 ↓2");
-    expect(v.hint).toContain("enter open · x stop · esc back");
+    expect(v.hint).toContain("enter open · ctrl+x stop · esc back");
   });
 
   test("selected on the LAST row: the window is flush with the end", () => {
     const v = view({
       rows: nine,
       width: 100,
-      focus: { kind: "list", selected: "sa-9", armed: false },
+      focus: { kind: "list", selected: "sa-9", armed: false, typing: false },
     });
     expect(v.rows.map((r) => r.id)).toEqual(["sa-5", "sa-6", "sa-7", "sa-8", "sa-9"]);
     expect(v.above).toBe(4);
@@ -309,13 +320,39 @@ describe("T-L3: the asking row, and the header hints per focus", () => {
     expect(idle.hint).toBe("↓ select · ctrl+t");
     expect(view({ rows: [row(1)], width: 60 }).hint).toBe("↓ · ctrl+t");
     expect(
-      view({ rows: [row(1)], focus: { kind: "list", selected: "sa-1", armed: false } }).hint,
-    ).toBe("enter open · x stop · esc back");
-    // Armed: the confirm's own words, and the arming row says what `y` does.
-    const armed = view({ rows: [row(1)], focus: { kind: "list", selected: "sa-1", armed: true } });
-    expect(armed.hint).toBe("y stop · any other key cancels");
+      view({
+        rows: [row(1)],
+        focus: { kind: "list", selected: "sa-1", armed: false, typing: false },
+      }).hint,
+    ).toBe("enter open · ctrl+x stop · esc back");
+    // Armed: the confirm's own words, and the arming row says what the second
+    // `ctrl+x` does.
+    const armed = view({
+      rows: [row(1)],
+      focus: { kind: "list", selected: "sa-1", armed: true, typing: false },
+    });
+    expect(armed.hint).toBe("ctrl+x stop · any other key cancels");
     expect(armed.rows[0]?.armed).toBe(true);
-    expect(armed.rows[0]?.meta).toBe("stop sa-1? y/N");
+    expect(armed.rows[0]?.meta).toBe("stop sa-1? ctrl+x");
+    // TYPING with the dropdown pinned (docs/fix/dock-list-type-through.md): the
+    // rule offers only the two keys that still concern the dock — never `enter
+    // open`, which now sends. The row stays SELECTED (↓ comes back to it) but the
+    // rule paints calm, so the accent says where the keys really are.
+    const typing = view({
+      rows: [row(1), row(2)],
+      focus: { kind: "list", selected: "sa-2", armed: false, typing: true },
+    });
+    expect(typing.hint).toBe("↓ list · esc close");
+    expect(typing.focused).toBe(false);
+    expect(typing.rows[1]?.selected).toBe(true);
+    // The overflow prefix still says how much is out of view.
+    expect(
+      view({
+        rows: Array.from({ length: 9 }, (_, i) => row(i + 1)),
+        focus: { kind: "list", selected: "sa-9", armed: false, typing: true },
+        width: 100,
+      }).hint,
+    ).toBe("↑4 · ↓ list · esc close");
   });
 });
 
@@ -492,7 +529,7 @@ describe("T-L5: the dock's height, counted into the viewport (Review H3)", () =>
 describe("the input title and the list's visibility", () => {
   test("`inputTitle`: none while the dock is on the input, `→ sa-N · <type|finished>` when open", () => {
     expect(inputTitle({ kind: "input" })).toBeNull();
-    expect(inputTitle({ kind: "list", selected: "sa-1", armed: false })).toBeNull();
+    expect(inputTitle({ kind: "list", selected: "sa-1", armed: false, typing: false })).toBeNull();
     expect(
       inputTitle({ kind: "open", id: "sa-1", ended: null, frozen: null }, { sub: "explore" }),
     ).toEqual({ target: "→ sa-1", sub: "explore" });

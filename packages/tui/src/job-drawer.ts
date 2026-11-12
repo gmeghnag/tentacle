@@ -82,7 +82,7 @@ export function jobDrawerTail(
 export type JobEnd =
   /** A normal end with the code the daemon reported. */
   | { readonly kind: "exited"; readonly exitCode: number | null; readonly endedAt?: number }
-  /** This dock asked for the stop (`x` then `y`). */
+  /** This dock asked for the stop (`ctrl+x` then `ctrl+x`). */
   | { readonly kind: "stopped"; readonly endedAt?: number }
   /** A signal death nobody in the dock asked for. */
   | { readonly kind: "killed"; readonly endedAt?: number };

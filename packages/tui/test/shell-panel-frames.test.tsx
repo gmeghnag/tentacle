@@ -232,7 +232,7 @@ describe("F2: the dropdown paints the mockup's shell row (190 and 80 columns)", 
       await openDropdown(app);
       const f = frame();
       expect(f).toContain("─ background · 3 ");
-      expect(f).toContain("enter open · x stop · esc back");
+      expect(f).toContain("enter open · ctrl+x stop · esc back");
       // The mockup's row (gen-v3.ts:236), with the wire's id (owner Q5 (b)).
       expect(f).toContain("◆ bg-3");
       expect(f).toContain("shell");
@@ -360,15 +360,15 @@ describe("F4: the ≤ 1/s refresh — exact counts through the ONE seam (M4)", (
   });
 });
 
-describe("F5: x then y stops the job through session/job_kill", () => {
+describe("F5: ctrl+x then ctrl+x stops the job through session/job_kill", () => {
   test("killJob('bg-3'), and the row is still painted until the exit frame", async () => {
     const { app, api, frame } = await mount({ jobs: [SHELL_ROW] });
     await openDropdown(app);
-    app.stdin.write("x");
+    app.stdin.write("\x18");
     await delay(30);
-    // The armed rule says what `y` will do.
-    expect(frame()).toContain("y stop · any other key cancels");
-    app.stdin.write("y");
+    // The armed rule says what the second ctrl+x will do.
+    expect(frame()).toContain("ctrl+x stop · any other key cancels");
+    app.stdin.write("\x18");
     await delay(40);
     expect(api.kills).toEqual(["bg-3"]);
     // No exit frame yet: the row is still there, as the mockup paints it.
@@ -496,9 +496,9 @@ describe("F9 (owner B): the drawer's outcome, tone and total run time", () => {
   test("stopping it from the dock says `✗ stopped`, not `killed`", async () => {
     const { app, api, frame } = await mount({ jobs: [STOPWATCH] });
     await openDropdown(app);
-    app.stdin.write("x");
+    app.stdin.write("\x18");
     await delay(30);
-    app.stdin.write("y");
+    app.stdin.write("\x18");
     await delay(40);
     expect(api.kills).toEqual(["bg-3"]);
     // The row is still listed until the exit arrives (F5): open it, so the freeze

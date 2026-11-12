@@ -17,9 +17,11 @@ import {
   INPUT_DOCK,
   applyLateOutcome,
   clickDock,
+  dockClaimsCtrlX,
   dockKey,
   dockKindOf,
   downEntersList,
+  downToDock,
   noteSent,
   reconcile,
   refusalPlacement,
@@ -1416,7 +1418,7 @@ export function App({
   );
 
   /**
-   * Stop one child (`session/agent_kill`) — the `x` then `y` arm's second step
+   * Stop one child (`session/agent_kill`) — the `ctrl+x` then `ctrl+x` arm's second step
    * (docs/feat/subagent-panel.md, owner P4 (a)). A refusal is a notice, never a
    * throw; the row leaves on the daemon's next list update, and the transcript
    * gets the existing exit notice (`backgroundExitNotice`, unchanged).
@@ -3365,15 +3367,23 @@ export function App({
     }
     // The `Ctrl+X Ctrl+S` chord (send the queued messages now): before the
     // permission dialog, so it works while one is up (D3). A key that breaks
-    // the chord goes on below unchanged.
-    const chord = stepChord(chordRef.current, char, key, Date.now());
-    chordRef.current = chord.state;
-    if (chord.action === "consumed") {
-      return;
-    }
-    if (chord.action === "sendNow") {
-      sendNow();
-      return;
+    // the chord goes on below unchanged — EXCEPT while the LIST has the keys
+    // (the dropdown focused, not the pinned typing sub-state): there `ctrl+x` is
+    // the dock's stop (arm, then confirm, docs/fix/dock-list-type-through.md),
+    // so the chord must not consume it. With the dropdown PINNED the keys are the
+    // input's, so the chord keeps `ctrl+x` (Review round 1, M1).
+    if (dockClaimsCtrlX(dockRef.current)) {
+      chordRef.current = idleChord;
+    } else {
+      const chord = stepChord(chordRef.current, char, key, Date.now());
+      chordRef.current = chord.state;
+      if (chord.action === "consumed") {
+        return;
+      }
+      if (chord.action === "sendNow") {
+        sendNow();
+        return;
+      }
     }
     // While the permission dialog is up, keys drive it (nothing else). Every
     // decision is `stepPermissionKey`'s (docs/feat/permission-reply.md); this
@@ -3578,6 +3588,8 @@ export function App({
     // The dock (docs/feat/subagent-panel.md) BEFORE anything that could read a
     // key as something else: Esc in `list`/`open` closes the dock and must never
     // reach "Esc stops a running turn" below. `dockKey` decides; we execute.
+    // A `ctrl+x` that the DOCK owns (its stop's arm/confirm) was already kept out
+    // of the send-now chord above, so it reaches `dockKey` as an ordinary key.
     if (panel === null) {
       const step = dockKey(dockRef.current, char, key, {
         ids: dockIds(),
@@ -3859,7 +3871,7 @@ export function App({
         focus: dockRef.current.focus,
       })
     ) {
-      setDock((prev) => toggleList(prev, dockIds()));
+      setDock((prev) => downToDock(prev, dockIds()));
       return;
     }
     switch (action.kind) {

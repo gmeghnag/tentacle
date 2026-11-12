@@ -1825,7 +1825,7 @@ export class HostedSession {
   /**
    * `session/job_kill` (docs/feat/shell-jobs-panel.md): the user stops one
    * background SHELL job — the same decision the model's `shell_kill` tool
-   * makes (`JobController.kill`). Laptop-originated (the user's `x` then `y`),
+   * makes (`JobController.kill`). Laptop-originated (the user's `ctrl+x` then `ctrl+x`),
    * and it acts only on THIS daemon's own registry: no laptop effect, no
    * lasting approval (§7). Synchronous; the exit, its `background_exit` and the
    * list's next frame all follow the existing path.
