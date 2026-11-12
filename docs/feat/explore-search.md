@@ -2566,3 +2566,65 @@ engine inherits (O1) or the second dialect it accepts from the model, the glob
 (O3/O4).
 
 *— claude-opus-5-5, 2026-11-12*
+
+## Review round 2 (Opus)
+
+Re-verification of `a2f30bd` against `## Review (Opus)` O1–O4, re-running the
+round-1 repros (`.tentacle/tmp/explore-search/opus/run.ts`, `demote.ts`;
+`demote.ts`'s glob changed from `*.{ts` — now refused before rg — to `*[`, which
+still reaches rg).
+
+**Verdict: PASS** — O1–O4 closed, no HIGH/MEDIUM regression.
+
+### O1–O4, re-run
+
+| | Round 1 | Round 2 |
+|---|---|---|
+| O1 rg + ripgreprc `--follow`, `pattern:"AKIA"` | `./link/creds.txt:1:AKIA_SECRET_KEY` | `no matches` (rc 1) — `--no-config --no-follow` in the fixed list, all three verbs (`search.ts:447`) |
+| O2 line `… // Binary file foo matches` | dropped, `[binary files matched (1)]` | kept as `./src/a.ts:1:…` on rg AND grep (parse first, anchored `BINARY_NOTICE`) |
+| O3 `glob:"*.{ts,tsx}"` | rg 2 hits / fallback `no matches` | refused at validation on both engines (`globProblem`) |
+| O4 malformed glob (`*[`) reaching rg | demote + `no matches`, later calls "no ripgrep" | `glob rejected by the engine: rg: error parsing glob '*[' …`, `isError`; next call `x{1,3}` still `engine=rg` with hits |
+
+### Round-1 "holds", re-checked against the diff
+
+- Shell construction unchanged except two constant flags; nothing new from
+  input reaches the command.
+- Confinement untouched (`confinePath`, `confinementCheck`); O1 now makes the
+  "no symlink followed inside the walk" premise true on rg regardless of env.
+- Bounds/stripping: the new `globError` goes through `oneWireLine` like
+  `parseError`; the new refusal text is constant.
+- O2 order change: a line that does not parse is still counted binary (NUL,
+  engine notice), and the anchored notice can never match a hit (`./` prefix
+  on every engine path). Real binary file + rg: rg skips it silently, same as
+  round 1 — not a regression.
+- `explore`-only wiring and agent-loop test untouched by the diff.
+
+Not raised (below MEDIUM): `GLOB_ERROR` is an unanchored stderr match, so a
+pod file *named* `error parsing glob` that is unreadable would turn a result
+into a glob refusal — pod-controlled display only, loud (`isError`), never a
+silent wrong answer or a laptop effect.
+
+### Non-vacuity (each restored by exact edit, `git status` clean)
+
+1. `search.ts:447` drop `--no-config`, `--no-follow` → `search.test.ts` 2 fail
+   (T-S9 flag-list test and the real-rg `RIPGREP_CONFIG_PATH` escape test).
+2. `search-tool.ts` drop `parsed.globError === undefined &&` → `search-tool.test.ts`
+   1 fail (T-S12 "one malformed glob does not pin the fallback").
+
+### Gate
+
+Narrow: `search.test.ts` 99, `search-tool.test.ts` 22 — green after restore
+(inside the full run). Full `bun test`: 6953 pass, 3 skip (the opt-ins),
+1 fail + 1 error — both `apps/mobile/test/rn-websocket.test.ts`
+(`@tentacle/client` unresolvable: apps/mobile deps absent in this worktree;
+`bun test apps/mobile` alone reproduces exactly 1 fail + 1 error). Round 1's
+`session-log-store` flake did not recur. Typecheck/lint not re-run by this
+review (no source changed by it).
+
+### How the executor behaved
+
+Each finding fixed at the stated site with the stated shape, plus red-first
+regression tests that bite under mutation; the O1 fix went beyond the flag
+string to a real-rg env test, which is the gap round 1 named.
+
+*— claude-opus-5-5, 2026-11-12*
