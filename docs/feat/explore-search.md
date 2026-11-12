@@ -2291,3 +2291,139 @@ F9's control-character strip) which a same-family pass read past, so a
 **different-family** review (Fable, as on the plan) is worth having before
 merge; the doc declares `Blast: cross-module`, but H1/H2 touch the §7 "a pod is
 not trusted" invariant directly.
+
+## Review (Opus)
+
+Fresh-context, different-family adversarial pass over `git diff main...HEAD`
+(after round-1 fixes `9471dd7`). Scope per brief: HIGH/MEDIUM only.
+
+**Verdict: REQUEST-CHANGES** — one HIGH (confinement escape through the user's
+ripgrep config), three MEDIUM (silent wrong answers / silent demotion).
+Repro script + output: `.tentacle/tmp/explore-search/opus/run.ts`,
+`demote.ts` (gitignored; the output is quoted below).
+
+### HIGH
+
+**O1 — `RIPGREP_CONFIG_PATH` is inherited, so a user `--follow` (or
+`--hidden`/`--no-ignore`/`-L`) defeats Q6 (a) on rg.** `search.ts:432` builds
+rg's flags without `--no-config`; `HostExecution.exec` passes
+`scrubSensitiveEnv(process.env)` (`exec/src/host-execution.ts:354-356`), which
+keeps `RIPGREP_CONFIG_PATH`. The pre-check (`search.ts:372-391`) only resolves
+the ARGUMENT; the "neither engine follows a symlink inside the walk" premise
+(Q6 a) holds only for rg's *defaults*. Scenario: a workspace containing
+`link -> ~/creds-dir`, the user's `~/.ripgreprc` has `--follow` (a common
+setting): `search {pattern:"AKIA"}` (path `.`, passes every check) returns
+`./link/creds.txt:1:AKIA_SECRET_KEY` — a prompt-free discovery outside the
+workspace. Without the config the same call says `no matches`. Measured:
+
+```
+== A: rg + user ripgreprc '--follow'
+./link/creds.txt:1:AKIA_SECRET_KEY        stderr: "TENTACLE_RC=0\n"
+== A0: rg, no config
+no matches                                 stderr: "TENTACLE_RC=1\n"
+```
+
+It also breaks the rg↔fallback parity contract (a user `--hidden`,
+`--no-ignore`, `--max-count`, `--json`, `--null` changes the result set or the
+parse). **Fix:** add `--no-config` and an explicit `--no-follow` to the fixed
+rg flag list (`search.ts:432`), for all three rg verbs; pin it with a
+`buildSearchPlan` string test AND a real-rg test that sets
+`RIPGREP_CONFIG_PATH` to a file holding `--follow` over the fixture's
+`etc-link`-style symlink and asserts no outside hit (red on the current code).
+
+### MEDIUM
+
+**O2 — a content line that contains `binary file … matches` is silently
+dropped.** `search.ts:622` tests the WHOLE stdout line with
+`/binary file .* matches/i` before parsing it as `path:line:text`, so file
+CONTENT is matched. Scenario (both engines): `src/a.ts` line 1
+`const x = 1; // Binary file foo matches`; `search {pattern:"const",
+path:"src"}` returns only line 2 plus `[binary files matched (1) — not shown]`.
+Searching this repo for `matches` in `search.ts` loses its own line 622. A
+silently wrong answer, which is what the task exists to prevent. **Fix:**
+parse first and count as binary only lines that do NOT parse as a hit, and
+anchor the notice: `/^binary file .* matches$/i` (busybox/BSD stdout form; a
+real hit always starts `./` here). Test: the fixture line above, red now.
+
+**O3 — `glob` is not translate-or-refuse: `{a,b}` works on rg, matches nothing
+on the fallback.** `globProblem` (`search.ts:164-175`) refuses only `/`, `!`,
+`..`. rg's globset honours brace alternation; POSIX `find -name` does not.
+Measured: `search {pattern:"needle", glob:"*.{ts,tsx}"}` → rg: 2 hits;
+fallback: `no matches`, `isError: false`. Same class as Q7's `{n,m}`, the one
+place the owner's "never silently wrong on any engine" decision is not
+applied. **Fix:** refuse `{` / `}` in `glob` on both engines with a message
+("brace alternation is not portable: run one search per extension, or omit
+`glob` and narrow `path`"); test both engines.
+
+**O4 — a malformed (model-supplied) `glob` demotes the env to the fallback for
+the rest of the process, and the retry answers `no matches`.** rg reports
+`rg: error parsing glob '*.{ts': unclosed alternate group …` with status 2;
+`REGEX_ERROR` (`search.ts:538-539`) does not match it, so `isEngineFailure`
+(`search-tool.ts:271-281`) calls it an engine failure → `demoteCache`
+(`search-tool.ts:197`). Measured with the real tool (`demote.ts`):
+
+```
+call 1: [search "needle" in .]  (engine=grep)   no matches
+        [note: ripgrep failed (rg: error parsing glob '*.{ts': …); this result came from the POSIX fallback]
+call 3 ({n,m}, valid on rg): pattern not supported on the POSIX-grep engine (this image has no ripgrep): …
+```
+
+One typo by the model pins every later `explore` search on a machine that HAS
+rg to the slower, narrower dialect and makes the refusals lie ("this image
+has no ripgrep") — the M4 silent-demotion direction, reached through user
+input rather than a broken binary. **Fix:** treat `error parsing glob` (and
+any rg usage error naming the input) as a user error: add it to the parse-error
+class (or a separate `globError` → `isError: true`, "glob rejected by the
+engine"), never retry/demote on it; better, have O3's refusal catch braces
+before rg sees them. Test: one malformed glob, then assert the next call's
+header still says `engine=rg`.
+
+### What holds (attacked, nothing found)
+
+- Shell construction: pattern, path, glob and the escaped `-path` root all go
+  through `shq`; pattern always follows `-e`; path is `./`-prefixed (find) and
+  after `--` (rg); controls refused in all three fields. No injection found.
+- Lexical confinement (`confinePath`) + shell `cd`/`pwd -P` realpath check:
+  `..` after normalisation, absolute, symlinked argument, symlinked parent
+  component all refused; case-insensitive FS is moot since the check compares
+  resolved paths. A pod lying about its own filesystem is inside "not trusted"
+  and gains nothing on the laptop.
+- Every rendered field stripped (C0/DEL) and bounded: hits (`MAX_LINE`,
+  `MAX_BYTES`), noise (5 × `oneWireLine`), parse error, ignore note, retry
+  reason. Header echoes the model's own (control-free) pattern, unbounded in
+  length — model-supplied, not a finding.
+- `explore` only: `subagentExtraTools` is the single source, one call site
+  (`wiring.ts:547`); not in `builtinTools`.
+- Real agent-loop test (`agent/test/explore-search.test.ts`) drives the runner
+  and the real tool.
+
+### Non-vacuity (mutations, each restored via exact edit, `git status` clean)
+
+1. `search.ts` confinement `case "$p" in "$r"|"$r"/*)` → `case "$p" in *)`:
+   `search.test.ts` fails "a symlink out of the workspace is REFUSED on the
+   fallback (H1, Q6 a)" (107 pass / 1 fail). Note only the fallback case went
+   red — there is no rg-engine symlink-out test, which is how O1 slipped.
+2. `subagent-tools.ts` `typeName === "explore"` → `true`: 2 fails in
+   `explore-search.test.ts` ("a `general` child is NOT offered search", "the
+   real `search` TOOL is the one offered").
+
+### Gate
+
+Narrow: `search.test.ts` + `search-tool.test.ts` 108 pass; `explore-search.test.ts`
+7 pass. Full `bun test`: 6940 pass, 3 skip (the opt-ins), 1 fail, 1 error.
+The error is `apps/mobile/test/rn-websocket.test.ts` (`@tentacle/client` not
+resolvable: apps/mobile deps are not installed in this worktree — environment,
+not the branch). The fail is `daemon/test/session-log-store.test.ts` "T4 the
+fork precedes the source's next write", which passes 40/40 when the file runs
+alone — a load flake in a package this branch does not touch. Typecheck/lint
+not re-run (no source changed by this review).
+
+### How the executor behaved
+
+Disciplined and well-documented; the round-1 fixes are real and tested. The
+miss pattern is consistent: contracts are verified against the engines'
+*defaults* and against the regex dialect, but not against the environment the
+engine inherits (O1) or the second dialect it accepts from the model, the glob
+(O3/O4).
+
+*— claude-opus-5-5, 2026-11-12*
