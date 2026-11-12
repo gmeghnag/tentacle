@@ -797,3 +797,47 @@ two formatting issues from my edits fixed with `biome check --write`); `bun test
 — **7232 pass, 3 skip (the opt-in k8s/docker/slow ones), 0 fail**, 521 files
 (7235 total, +9 from round 1's 7226). No `protocol.json`, `TODO.md`, CHANGELOG or
 `PROTOCOL_VERSION` change; no commit.
+
+### Round 2
+
+**Verdict: PASS.** Scope: `git diff e62515c..HEAD` (91391a9), round-1
+findings only, plus regressions the fix introduced.
+
+- **Finding 1 (HIGH, spin): fixed.** The round-1 repro `review-spin.ts`, re-run
+  on 91391a9, now prints `upload rejected: UploadLinkLostError … ; puts
+  sent=3` after 304 ms (before the fix it starved the event loop).
+  `reconnectable = factory && entry` cuts both spin shapes, and the bounded
+  `liveGeneration` (deadline + abort listener) keeps the reconnectable path
+  from waiting forever.
+- **Finding 2 (MEDIUM, vacuous W=2): fixed.** The literal `2` and `toBe(2)` are
+  now measured on the wire.
+
+**Mutations (this review; each reverted by its exact inverse edit, `git status
+--porcelain` empty afterwards):**
+
+| # | Mutation | Result |
+|---|---|---|
+| MA | `!reconnectable` guard disabled (old unconditional retry) | RED ×3: no-factory drop, no-factory no-session, factory no-session. The breaker ended each one, so the runner did not hang |
+| MB | reconnect deadline × 1e6 (effectively none) | RED: "a factory that cannot reconnect at all" (2.0 s backstop) |
+| MC | `UPLOAD_WINDOW = 4` | RED: "never more than 2 puts in flight" (green in round 1), plus T5 reconnect |
+| MD | abort listener in `liveGeneration` removed | RED: "an abort while the link is down" |
+
+**Gate (this review):** `bun test packages/client packages/protocol` + both
+attachment daemon files: **878 pass, 0 fail** (90 files). The upload files
+alone: 32 pass / 0 fail. I could not run `bun run lint` or the full suite
+here (the run needed an approval I didn't have), so I rely on the fix round's
+numbers (lint clean; 7232 pass / 3 opt-in skips).
+
+**Regression check, no HIGH/MEDIUM found.** The success path with a working
+reconnect is pinned ("with a reconnect that works, a drop is resumed"). The
+deadline resets on every answered probe, so a long healthy upload is never cut
+by the 30 s bound. Non-drop errors still rethrow unchanged
+(`gen === this.gen && this.up`). One nit, not blocking: when
+`liveGeneration` gives up through its timer or an abort, the inner `whenLive`
+waiter stays registered until the link comes back or stops. Its later settle
+is handled, so this is a small bounded leak per abandoned upload, not a bug.
+
+Reviewer: claude-opus-5-5, fresh context, different family from the executor
+(DeepSeek).
+
+*— claude-opus-5-5, 2026-11-12*
