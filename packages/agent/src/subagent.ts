@@ -20,6 +20,7 @@ import {
   type PermissionRequestOptions,
   type PermissionRequester,
   type PermissionResponse,
+  type Tool,
   type ToolProgressEvent,
   toolLabel,
 } from "@tentacle/core";
@@ -64,10 +65,17 @@ parent agent. Work independently to complete it end to end using the tools
 available, then finish with a concise report of what you found or did — that
 report is the ONLY thing the parent receives, so make it self-contained.`;
 
-const EXPLORE_PROMPT = `You are a read-only investigator sub-agent. Search and read files to answer
-the task; you cannot modify anything. Finish with a concise, self-contained
-report of your findings, citing concrete file paths and line references — that
-report is the only thing the parent receives.`;
+const EXPLORE_PROMPT = `You are a read-only investigator sub-agent. SEARCH first, then read: use
+\`search\` to locate a symbol, string or file before you open anything, and
+\`fs_read\` with \`offset\`/\`limit\` to read only the lines a hit pointed at.
+Never open a file end to end "to get the picture" — a whole file, or one
+large file read in slices, stays in your context for every later step and is
+what makes an investigation expensive. Narrow the search (a file, a glob, a
+tighter pattern) instead of reading more files.
+
+You cannot modify anything. Finish with a concise, self-contained report of
+your findings, citing concrete file paths and line references — that report is
+the only thing the parent receives.`;
 
 /** The built-in sub-agent types. */
 export const BUILTIN_AGENT_TYPES: readonly AgentType[] = [
@@ -83,7 +91,7 @@ export const BUILTIN_AGENT_TYPES: readonly AgentType[] = [
     description:
       "Read-only investigator: searches and reads files to answer a question. Cannot modify anything.",
     prompt: EXPLORE_PROMPT,
-    tools: ["fs_read"],
+    tools: ["fs_read", "search"],
   },
 ];
 
@@ -250,6 +258,13 @@ export function childToolLabel(name: string, args: string): string {
       return `Write ${str("path") ?? ""}`.trimEnd();
     case "fs_edit":
       return `Edit ${str("path") ?? ""}`.trimEnd();
+    case "search": {
+      // `Search <pattern> in <path>`. A pod's pattern is pod text (§7): the
+      // label path already bounds it (`mapping.ts:64-66`).
+      const target = str("pattern") ?? str("glob") ?? "";
+      const path = str("path") ?? ".";
+      return `Search ${target} in ${path}`.trimEnd();
+    }
     default:
       return toolLabel(name);
   }
@@ -269,6 +284,13 @@ export interface SubagentDeps {
   readonly requestPermission?: PermissionRequester;
   readonly maxIterations?: number;
   readonly types?: readonly AgentType[];
+  /**
+   * Tools a child may use that the PARENT's registry does not hold, by type name
+   * (docs/feat/explore-search.md: `explore` alone gets `search`, so the main
+   * agent and `general` cannot call it). A name here is still subject to the
+   * type's own allow-list, and to the spawn-tool exclusion below.
+   */
+  readonly extraTools?: (type: AgentType) => readonly Tool[];
   /** The spawn tool's name, always excluded from children (default `agent_task`). */
   readonly spawnToolName?: string;
   /** Result transforms (e.g. spill large output) given to each child agent. */
@@ -336,7 +358,13 @@ export function createSubagentRunner(deps: SubagentDeps): {
     // Restrict the child's tools to the type's allow-list, always dropping the
     // spawn tool so a sub-agent cannot spawn its own sub-agents.
     const childTools = new ToolRegistry();
-    for (const tool of deps.tools.list()) {
+    // A type may need a tool the PARENT's registry does not hold (owner Q1 c:
+    // `explore` alone gets `search`), so the runner offers it before filtering.
+    // A name the parent already holds wins: one instance per tool in a child.
+    const extra = deps.extraTools?.(type) ?? [];
+    const parentTools = deps.tools.list();
+    const parentNames = new Set(parentTools.map((tool) => tool.name));
+    for (const tool of [...parentTools, ...extra.filter((tool) => !parentNames.has(tool.name))]) {
       // Nor its context reset (a child's context is its own, and short-lived),
       // nor `agent_control`: only where `background` is, the PARENT may see,
       // write to or stop a child it launched (owner Q1 a); a child given it could
@@ -539,6 +567,13 @@ export function createSubagentRunner(deps: SubagentDeps): {
     if (!type || type.tools === "all") {
       return false;
     }
+    // The tool a CHILD of this type actually gets: the parent's, else the one
+    // `extraTools` offers it (M1). Resolving through `deps.tools` alone made
+    // every allow-listed name absent from the parent registry short-circuit to
+    // "read-only" — `search` is exactly that name (drift 1), so its
+    // `concurrency` was never consulted and a mutation to `exclusive` stayed
+    // green.
+    const offered = deps.extraTools?.(type) ?? [];
     return type.tools.every((toolName) => {
       // Never given to a child, so they make it no less read-only.
       if (
@@ -552,9 +587,17 @@ export function createSubagentRunner(deps: SubagentDeps): {
       ) {
         return true;
       }
-      const tool = deps.tools.get(toolName);
+      // The parent's instance wins, as it does when the child's registry is
+      // built (`parentNames` above): one tool, one concurrency key.
+      const tool =
+        deps.tools.get(toolName) ?? offered.find((candidate) => candidate.name === toolName);
+      // Nothing provides it (an `agents/*.md` naming an absent tool), so it can
+      // do nothing: read-only by default, which is the safe direction.
+      if (tool === undefined) {
+        return true;
+      }
       // The probe gives a path-keyed tool its key; other tools ignore it.
-      return tool === undefined || isReadClass(classOf(tool, { path: "_" }));
+      return isReadClass(classOf(tool, { path: "_" }));
     });
   };
 

@@ -10,6 +10,7 @@ describe("toolLabel", () => {
     expect(toolLabel("fs_write")).toBe("Write");
     expect(toolLabel("fs_edit")).toBe("Edit");
     expect(toolLabel("fs_multi_edit")).toBe("MultiEdit");
+    expect(toolLabel("search")).toBe("Search");
     expect(toolLabel("agent_task")).toBe("Agent");
     expect(toolLabel("skill")).toBe("Skill");
   });

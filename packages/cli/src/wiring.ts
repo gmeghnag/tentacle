@@ -65,6 +65,7 @@ import {
   createSkillActivator,
   createSkillTool,
   createTaskTool,
+  subagentExtraTools,
 } from "@tentacle/tools";
 import { logDaemonError } from "./daemon-log.ts";
 import { createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
@@ -540,6 +541,10 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       requestPermission: (req, options) => permissions.request(req, options),
       maxIterations: config.subagentMaxIterations,
       types: agentTypes,
+      // Owner Q1 (c): `search` belongs to `explore` ALONE. It is not a built-in
+      // (that would offer it to the main agent and `general`, which keep
+      // `shell`), so the child's own registry is where it is offered.
+      extraTools: (type) => subagentExtraTools(type.name),
       resultTransforms,
       ...(hooks ? { hooks } : {}),
       ...(contextAwareness ? { contextAwareness } : {}),

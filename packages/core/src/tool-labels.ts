@@ -12,6 +12,7 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   fs_write: "Write",
   fs_edit: "Edit",
   fs_multi_edit: "MultiEdit",
+  search: "Search",
   agent_task: "Agent",
   skill: "Skill",
 };

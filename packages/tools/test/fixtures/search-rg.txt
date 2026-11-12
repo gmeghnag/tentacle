@@ -1,0 +1,97 @@
+# Recorded rg transcript for the search fixture (packages/tools/test/search-fixture.ts).
+# Generated from the FINAL buildSearchPlan(rg) on ripgrep 15.2.0 / macOS BSD tools.
+# `### <name>` then the engine's raw stdout, `[stderr] <line>` for its stderr.
+### needle
+./-dash.ts:1:needle dash
+./a b/sp ace.ts:1:needle
+./app/[id]/k.ts:1:needle
+./app/[id].ts:1:needle
+./app/x/k.ts:1:needle
+./deep/z.ts:1:needle
+./it's/q.txt:1:needle
+./its.txt:1:needle
+./pkg/a/x.ts:1:needle
+./src/a.ts:1:export const needleOne = 1;
+./src/a.ts:3:needleTwo();
+./src/debug.log:1:needle log
+[stderr] TENTACLE_RC=0
+### regex
+./src/a.ts:3:needleTwo();
+[stderr] TENTACLE_RC=0
+### digits
+./src/a.ts:1:export const needleOne = 1;
+./src/a.ts:2:const x = 2;
+[stderr] TENTACLE_RC=0
+### words
+./-dash.ts:1:needle dash
+./a b/sp ace.ts:1:needle
+./app/[id]/k.ts:1:needle
+./app/[id].ts:1:needle
+./app/x/k.ts:1:needle
+./deep/z.ts:1:needle
+./it's/q.txt:1:needle
+./its.txt:1:needle
+./pkg/a/x.ts:1:needle
+./src/a.ts:1:export const needleOne = 1;
+./src/a.ts:2:const x = 2;
+./src/a.ts:3:needleTwo();
+./src/debug.log:1:needle log
+[stderr] TENTACLE_RC=0
+### no-match
+[stderr] TENTACLE_RC=1
+### files-with-matches
+./-dash.ts
+./a b/sp ace.ts
+./app/[id]/k.ts
+./app/[id].ts
+./app/x/k.ts
+./deep/z.ts
+./it's/q.txt
+./its.txt
+./pkg/a/x.ts
+./src/a.ts
+./src/debug.log
+[stderr] TENTACLE_RC=0
+### glob-ts
+./-dash.ts
+./a b/sp ace.ts
+./app/[id]/k.ts
+./app/[id].ts
+./app/x/k.ts
+./deep/z.ts
+./pkg/a/x.ts
+./src/a.ts
+[stderr] TENTACLE_RC=0
+### path-file
+./-dash.ts:1:needle dash
+[stderr] TENTACLE_RC=0
+### path-space
+./a b/sp ace.ts:1:needle
+[stderr] TENTACLE_RC=0
+### path-quote
+./it's/q.txt:1:needle
+[stderr] TENTACLE_RC=0
+### path-bracket
+./app/[id].ts:1:needle
+[stderr] TENTACLE_RC=0
+### path-hidden
+./.hidx/f.ts:1:needle
+[stderr] TENTACLE_RC=0
+### path-named-prune
+./node_modules/m.ts:1:needle
+[stderr] TENTACLE_RC=0
+### count-cut
+./-dash.ts:1:needle dash
+./a b/sp ace.ts:1:needle
+./app/[id]/k.ts:1:needle
+./app/[id].ts:1:needle
+./app/x/k.ts:1:needle
+./deep/z.ts:1:needle
+./it's/q.txt:1:needle
+./its.txt:1:needle
+./pkg/a/x.ts:1:needle
+./src/a.ts:1:export const needleOne = 1;
+./src/a.ts:3:needleTwo();
+./src/debug.log:1:needle log
+[stderr] TENTACLE_RC=0
+

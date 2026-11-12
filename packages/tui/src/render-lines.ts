@@ -579,6 +579,11 @@ function toolSubtitle(
     }
     case "shell":
       return str("command") ?? "";
+    case "search": {
+      // `Search <pattern> in <path>`: the query is the point of the row.
+      const target = str("pattern") ?? str("glob") ?? "";
+      return `${target} in ${str("path") ?? "."}`;
+    }
     case "shell_output":
     case "shell_kill":
       return str("job_id") ?? "";
