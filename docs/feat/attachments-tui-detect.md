@@ -680,3 +680,43 @@ with a test that fails under mutation. The only gaps are the untested
 `readToEof` loop and the overloaded `text` variant.
 
 **Fix round 2** addresses all four items above: see `## Execution` → `### Fix round 2`.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-12* (same fresh reviewer context; diff `HEAD~2..HEAD` code only, `5316067`)
+
+**Verdict: PASS.**
+
+- **Round-2 MEDIUM (overloaded `text`): fixed.** `AttachmentDecision` now has
+  three variants (`attach-files.ts:272-280`), and `text` carries no refusals
+  at all. Re-running the round-2 repro (`r2.ts`):
+  - a lone over-cap PNG → `refused [too-large]`
+  - a failed `/attach /nope.png` → `refused [not-found]`
+  - `/help`, `/clear`, `/etc/hosts`, `PNG + dir`, `PNG + missing` → `{kind:"text"}`
+  - a lone dragged PNG → `attachments`
+
+  3b can now map the variants directly: `text` → insert the text, `refused` →
+  show the refusals and do not insert, `attachments` → add chips and show the
+  refusals.
+- **Read-loop gap: closed.** `readToEof` is exported behind a `ByteReader`
+  seam, and its test covers a short read, EOF, and the exact-cap case.
+- **Name cap (non-blocking note): fixed.** It now cuts on code points, so
+  `254×a + 😀` gives 254 characters with no lone surrogate.
+
+**Mutations (each reverted; `git status` clean after):**
+
+| Mutation | Result |
+|---|---|
+| `refused` branch returns `{kind:"text"}` | 7 fail (HEIC, lone over-cap, unreadable/empty image, re-dropped duplicate, both `/attach` tests) |
+| `readToEof` does ONE read | 1 fail (`readToEof loops: … EVERY byte`) |
+| name cap back to a UTF-16 `slice(0,255)` | 1 fail (`the length cap cuts on a code POINT`) |
+
+**Regressions:** the 3 task files + `packages/core` + `packages/protocol` give
+`545 pass, 0 fail`, and `bun run lint` is clean (926 files). `bun run
+typecheck` was not run, because the command was refused permission again, so
+it is unverified by this reviewer. It must be green before the merge.
+
+**Executor behaviour:** a precise fix of what was asked. The new variant is
+documented by what 3b must do with it, the three tests that pinned the old
+behaviour were re-pinned (not deleted), and the read loop is tested through a
+small seam rather than a real mount.
