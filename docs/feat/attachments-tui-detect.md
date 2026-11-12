@@ -307,4 +307,112 @@ end. Verify by dragging a file into the TUI once 3b is wired.
 
 ## Review
 
-*(standard in-context Review, per §10 `contained`/S)*
+*— claude-opus-5-5, 2026-11-12* (fresh context. Different model from the
+DeepSeek executor, but the Context/Implementation were written by the same
+model family as this reviewer.)
+
+**Verdict: REQUEST-CHANGES.** There are 4 MEDIUM findings and no HIGH. Each is a
+cheap fix, but each would reach 3b as a wire throw or a wrong state.
+
+**Gate (as the reviewer was asked to run it):** the 3 task test files give
+`68 pass, 0 fail, 159 expect()`. `bun run lint` gives `Checked 926 files … No
+fixes applied.` The full `bun test`/`typecheck` was not re-run, because this
+review was scoped to these 3 files + lint. The Execution reports 7230/0/3.
+
+### Findings
+
+1. **MEDIUM: `refName` strips only C0 + DEL, but the wire refuses all of
+   `\p{Cc}`** (`attach-files.ts:68` vs `protocol/src/attachment.ts:59`).
+   Scenario: a file named `x\u0085y.png` (NEL, or a C1 `\u009b` CSI) passes
+   `collectAttachments` with `name: "x\u0085y.png"`, and then
+   `checkAttachmentRefs` throws `a name carries no control character`. The
+   throw refuses the WHOLE message, not just that image. This is the
+   "entry point and wire disagree" case the Context says is designed out. Fix:
+   strip `/\p{Cc}/gu`, and test with a C1 name through `checkAttachmentRefs`.
+   Repro output: `C1 images: 1 … wire THROWS: invalid image references: a name
+   carries no control character`.
+2. **MEDIUM: the type comes from one read and the bytes from another**
+   (`attach-files.ts:112` head read, `:128` full read: two separate `open`s).
+   If the file changes between the reads (an editor or screenshot tool
+   rewriting it, a swap), the ref carries `image/png` over bytes that are not
+   a PNG. A fake probe that returns PNG first and `%PDF…` second gives `ok:
+   true, mimeType image/png, bytes "%PDF-1.7"`, so "the media type comes from
+   the bytes" does not hold for the bytes that are actually sent. Related
+   problems on the same edge:
+   - `nodeFileProbe.read` (`:223`) is a single `handle.read`, and its result
+     is never compared to `stat.size`, so a short read (network/FUSE mount)
+     yields a truncated image with a valid hash.
+   - The stat→open gap lets a path become a fifo after `stat`, and `open`
+     then blocks.
+
+   Fix: sniff the FULL buffer, loop the read to EOF or the cap, compare it
+   with the size, and ideally `fstat` the open handle (`O_NONBLOCK`) instead
+   of a path `stat`.
+3. **MEDIUM: the cap and the duplicate check are per call, but 3b's chips
+   accumulate across pastes** (`attach-files.ts:177-201`).
+   `collectAttachments` takes no already-attached refs. Dropping 3 images and
+   then 3 more yields 6 `ok` images, and `checkAttachmentRefs` then throws
+   `Array must contain at most 5 element(s)`. The same holds for the same
+   image dropped twice across two pastes. Also, `too-many` reports `count:
+   images.length + 1`, so 8 given ⇒ three identical refusals of "(6 were
+   given)" (`:191`). Fix: take `existing: readonly AttachmentRef[]` (or a
+   count + id set), and emit one `too-many` with the real total.
+4. **MEDIUM: "only image paths" is not what `attachmentCandidateText`
+   decides, and the fallback to text is unspecified**
+   (`attach-candidates.ts:169,188-205`). The owner's rule (core doc Q3 (a)) is
+   "only **image** paths → chips; same **at submit**". But `"/help"`,
+   `"/clear"`, `"/etc/hosts"` and a dragged `"/Users/me/Desktop/main.ts "` all
+   classify as `{kind:"paths"}` (repro), and a non-image or missing path then
+   becomes a `not-image`/`not-found` *refusal*. So at submit a slash command is
+   a path candidate. Dragging a source file to put its path in the prompt (the
+   most common terminal drag) would be refused with "not a PNG, JPEG…" instead
+   of staying text. The 3a API/tests leave 3b with no pinned rule for which
+   refusals mean "this was text, insert it" (not-found / not-image / directory
+   / not-file) and which mean "an image that failed" (too-large / heic /
+   unreadable / empty). That is exactly where a path gets silently dropped.
+   Fix: give `collectAttachments` a per-candidate disposition (or a pure
+   `keepsAsText(refusal)`), and test a mixed paste (1 PNG + 1 `.ts`) and a
+   slash command.
+
+### Mutations (§9), each reverted; tree clean after (`git status` empty, 68/0)
+
+| Mutation | Result |
+|---|---|
+| `isWebp` drops the `WEBP` check | 1 fail: `RIFF container that is not WEBP (WAVE)` |
+| `collectAttachments` duplicate check disabled | 1 fail: `the same file twice is refused as a duplicate` |
+| `inspectPath` `kind === "other"` branch disabled | 1 fail: `a fifo/device is refused by kind, never read` |
+
+The executor's M1–M3 (sniff, `>`→`>=`, sentence rule) were not repeated. The
+mutations above cover different properties, and all were non-vacuous.
+
+### Attacks tried
+
+- **Drag forms.** Terminal.app `\ `, iTerm2/Ghostty quotes (incl. `'it'\''s'`
+  concatenation), kitty/VS Code `file://` + `%C3%9C`/`%2520`, the trailing space
+  Terminal.app appends, `\r\n` lists. All handled by `tokenizePaths`; nothing
+  found.
+- **Prose wrongly turned into an attachment.** A sentence with a path, an
+  unclosed quote, a bare word: stays text. But see finding 4 (slash commands,
+  non-image paths).
+- **Sniff gaps.** PNG/JPEG/GIF/WebP/HEIF brands are correct, and too few bytes
+  ⇒ not-image. AVIF with major brand `mif1` reads as "HEIC" (wording only, not
+  reported).
+- **TOCTOU / fifo:** finding 2. **Caps vs wire:** the constants are shared (no
+  duplicate), but they are enforced per call (finding 3) and the name rule
+  differs (finding 1).
+- **API for 3b:** findings 3 and 4.
+
+### What holds
+
+The modules are pure, and only `nodeFileProbe` touches `node:fs` (§7). The
+caps are the protocol's own constants via core. Refusals are complete
+sentences, and no half-built ref is returned on any refusal path. HEIC is
+recognised and refused, not reported as "not an image". The tokenizer is
+careful (Windows `"C:\…"`, run-based percent decoding).
+
+**How the executor behaved:** disciplined. It ran a repro first, recorded its
+drift honestly (dependency on `@tentacle/core`, not `@tentacle/protocol`; the
+`not-file`/`duplicate` refusals it added; the percent-decoding fix found by a
+red test), and its mutation table reproduces. One inaccuracy: Execution says
+"the clash check runs before the count check", but the code checks the count
+first (`attach-files.ts:190` vs `:194`).
