@@ -9,6 +9,7 @@ import {
   decideAttachment,
   inspectPath,
   nodeFileProbe,
+  readToEof,
   refName,
   refsOf,
   refusalLines,
@@ -466,8 +467,9 @@ describe("attachPaths — the paste rule (M4, owner Q3 (a): only image paths)", 
       "/a/main.ts": { kind: "file", bytes: new TextEncoder().encode("export const x = 1;\n") },
     });
     const decision = await attachPaths(probe, ["/a/one.png", "/a/main.ts"]);
-    expect(decision.kind).toBe("text");
-    expect(decision.kind === "text" && decision.refusals).toEqual([]);
+    // A `text` decision carries NO refusals at all: it is the only variant a
+    // component may put back into the prompt.
+    expect(decision).toEqual({ kind: "text" });
   });
 
   test("a drag of a source file alone stays text — never 'not a PNG, JPEG…'", async () => {
@@ -475,41 +477,41 @@ describe("attachPaths — the paste rule (M4, owner Q3 (a): only image paths)", 
       "/Users/me/Desktop/main.ts": { kind: "file", bytes: new TextEncoder().encode("x\n") },
     });
     const decision = await attachPaths(probe, ["/Users/me/Desktop/main.ts"]);
-    expect(decision.kind).toBe("text");
-    expect(decision.kind === "text" && decision.refusals.length).toBe(0);
+    expect(decision).toEqual({ kind: "text" });
   });
 
   test("a slash command stays text (it is never a path at submit)", async () => {
     const probe = fakeProbe({});
     for (const command of ["/help", "/clear"]) {
-      const decision = await attachPaths(probe, [command]);
-      expect(decision.kind).toBe("text");
+      expect(await attachPaths(probe, [command])).toEqual({ kind: "text" });
     }
   });
 
   test("a missing path and a directory stay text, with no refusal", async () => {
     const probe = fakeProbe({ "/a/dir": { kind: "directory" } });
-    expect((await attachPaths(probe, ["/a/gone.png"])).kind).toBe("text");
-    expect((await attachPaths(probe, ["/a/dir"])).kind).toBe("text");
+    expect(await attachPaths(probe, ["/a/gone.png"])).toEqual({ kind: "text" });
+    expect(await attachPaths(probe, ["/a/dir"])).toEqual({ kind: "text" });
     const fifo = fakeProbe({ "/a/fifo": { kind: "other" } });
-    expect((await attachPaths(fifo, ["/a/fifo"])).kind).toBe("text");
+    expect(await attachPaths(fifo, ["/a/fifo"])).toEqual({ kind: "text" });
   });
 
   test("an EMPTY paste is text", async () => {
     const decision = await attachPaths(fakeProbe({}), []);
-    expect(decision.kind).toBe("text");
+    expect(decision).toEqual({ kind: "text" });
   });
 });
 
 describe("refusals for files that ARE images by their bytes (M4)", () => {
   const png = (seed: number): Uint8Array => imageBytes(seed);
 
-  test("HEIC bytes → ONE refusal naming the conversion, and the paste stays text", async () => {
+  test("HEIC bytes → ONE refusal naming the conversion, and the paste is REFUSED", async () => {
     const probe = fakeProbe({ "/a/IMG_0001.HEIC": { kind: "file", bytes: sized(HEIC, 64) } });
     const decision = await attachPaths(probe, ["/a/IMG_0001.HEIC"]);
-    expect(decision.kind).toBe("text");
-    if (decision.kind !== "text") {
-      throw new Error("expected text");
+    // An IMAGE that could not be attached is never `text` (3b would otherwise
+    // put the path back into the prompt, ready to be sent as a literal path).
+    expect(decision.kind).toBe("refused");
+    if (decision.kind !== "refused") {
+      throw new Error("expected refused");
     }
     expect(decision.refusals.map((r) => r.reason)).toEqual(["heic"]);
     expect(refusalText(decision.refusals[0] ?? { reason: "empty", path: "" })).toContain(
@@ -534,26 +536,26 @@ describe("refusals for files that ARE images by their bytes (M4)", () => {
     ]);
   });
 
-  test("an over-cap PNG → a too-large refusal (it IS an image, by its bytes)", async () => {
+  test("a LONE over-cap PNG paste is REFUSED (an image, never text)", async () => {
     const probe = fakeProbe({
       "/a/big.png": { kind: "file", bytes: sized(PNG_SIG, MAX_IMAGE_BYTES + 1) },
     });
     const decision = await attachPaths(probe, ["/a/big.png"]);
-    expect(decision.kind).toBe("text");
-    expect(decision.kind === "text" && decision.refusals[0]?.reason).toBe("too-large");
+    expect(decision).toEqual({
+      kind: "refused",
+      refusals: [{ reason: "too-large", path: "/a/big.png", size: MAX_IMAGE_BYTES + 1 }],
+    });
   });
 
   test("an UNREADABLE image path is a refusal; an unreadable non-image is text", async () => {
     const locked = fakeProbe({ "/a/locked.png": { kind: "file", openError: true } });
     const asImage = await attachPaths(locked, ["/a/locked.png"]);
-    expect(asImage.kind === "text" && asImage.refusals.map((r) => r.reason)).toEqual([
+    expect(asImage.kind === "refused" && asImage.refusals.map((r) => r.reason)).toEqual([
       "unreadable",
     ]);
 
     const plain = fakeProbe({ "/a/locked.ts": { kind: "file", openError: true } });
-    const asText = await attachPaths(plain, ["/a/locked.ts"]);
-    expect(asText.kind).toBe("text");
-    expect(asText.kind === "text" && asText.refusals).toEqual([]);
+    expect(await attachPaths(plain, ["/a/locked.ts"])).toEqual({ kind: "text" });
   });
 
   test("an EMPTY image path is a refusal; an empty non-image is text", async () => {
@@ -561,24 +563,23 @@ describe("refusals for files that ARE images by their bytes (M4)", () => {
     const image = await attachPaths(fakeProbe({ "/a/empty.png": { kind: "file", bytes: empty } }), [
       "/a/empty.png",
     ]);
-    expect(image.kind === "text" && image.refusals.map((r) => r.reason)).toEqual(["empty"]);
+    expect(image.kind === "refused" && image.refusals.map((r) => r.reason)).toEqual(["empty"]);
 
     const other = await attachPaths(fakeProbe({ "/a/empty.txt": { kind: "file", bytes: empty } }), [
       "/a/empty.txt",
     ]);
-    expect(other.kind).toBe("text");
-    expect(other.kind === "text" && other.refusals).toEqual([]);
+    expect(other).toEqual({ kind: "text" });
   });
 
-  test("a duplicate image refused; the paste is text (nothing became a chip)", async () => {
+  test("a RE-DROPPED duplicate is REFUSED, never text (nothing became a chip)", async () => {
     const probe = fakeProbe({ "/a/one.png": { kind: "file", bytes: png(4) } });
     const first = await attachPaths(probe, ["/a/one.png"]);
     if (first.kind !== "attachments") {
       throw new Error("expected attachments");
     }
     const again = await attachPaths(probe, ["/a/one.png"], { existing: first.refs });
-    expect(again.kind).toBe("text");
-    expect(again.kind === "text" && again.refusals.map((r) => r.reason)).toEqual(["duplicate"]);
+    expect(again.kind).toBe("refused");
+    expect(again.kind === "refused" && again.refusals.map((r) => r.reason)).toEqual(["duplicate"]);
   });
 
   test("too-many: one refusal, naming how many were dropped", async () => {
@@ -615,19 +616,21 @@ describe("decideAttachment — the ONE decision 3b consumes (M4)", () => {
       },
     };
     const decision = await decideAttachment(counting, { kind: "text" });
-    expect(decision).toEqual({ kind: "text", refusals: [] });
+    expect(decision).toEqual({ kind: "text" });
     expect(reads).toBe(0);
   });
 
-  test("`/attach` is EXPLICIT: there every failure is a refusal, even a missing path", async () => {
+  test("a FAILED `/attach` is REFUSED, never text (nothing is put back in the input)", async () => {
     const probe = fakeProbe({});
     const decision = await decideAttachment(
       probe,
       { kind: "paths", paths: ["/a/gone.png"] },
       { explicit: true },
     );
-    expect(decision.kind).toBe("text");
-    expect(decision.kind === "text" && decision.refusals.map((r) => r.reason)).toEqual([
+    // The regression: a failed `/attach` was `text`, so 3b re-inserted the
+    // literal command into the prompt ready to be sent to the model.
+    expect(decision.kind).toBe("refused");
+    expect(decision.kind === "refused" && decision.refusals.map((r) => r.reason)).toEqual([
       "not-found",
     ]);
   });
@@ -641,7 +644,7 @@ describe("decideAttachment — the ONE decision 3b consumes (M4)", () => {
       { kind: "paths", paths: ["/a/main.ts"] },
       { explicit: true },
     );
-    expect(decision.kind === "text" && decision.refusals.map((r) => r.reason)).toEqual([
+    expect(decision.kind === "refused" && decision.refusals.map((r) => r.reason)).toEqual([
       "not-image",
     ]);
   });
@@ -672,6 +675,27 @@ describe("helpers", () => {
     expect(refName("/a/\u0085")).toBeUndefined();
   });
 
+  test("the length cap cuts on a code POINT, never through an emoji", () => {
+    // 254 BMP chars + one astral char: the 255th UTF-16 unit is the emoji's high
+    // surrogate, so a `slice(0, 255)` cut left a LONE surrogate in the name —
+    // and `attachmentLabel`/a placeholder then rendered a replacement glyph.
+    const emoji = "\u{1F600}";
+    const name = refName(`/${"a".repeat(254)}${emoji}.png`);
+    // Dropped whole, never half: what came back is exactly the 254 `a`s.
+    expect(name).toBe("a".repeat(254));
+    expect(name?.includes("\uFFFD")).toBe(false);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(name ?? "")).toBe(false);
+    // And a name of astral characters stays inside the wire's own bound.
+    const astral = refName(`/${"\u{1F600}".repeat(200)}.png`);
+    expect((astral ?? "").length).toBeLessThanOrEqual(255);
+    expect(astral).toBe("\u{1F600}".repeat(127));
+    expect(() =>
+      checkAttachmentRefs([
+        { id: sha256Hex(imageBytes(9)), mimeType: "image/png", size: 40, name: astral ?? "x" },
+      ]),
+    ).not.toThrow();
+  });
+
   test("sha256Hex is lowercase hex of the bytes", () => {
     expect(sha256Hex(new Uint8Array([1, 2, 3]))).toBe(
       createHash("sha256")
@@ -693,6 +717,42 @@ describe("the entry point and the wire agree (M1)", () => {
 });
 
 describe("nodeFileProbe — the production seam (one real file, then deleted)", () => {
+  test("readToEof loops: a probe that short-reads yields EVERY byte, not the first chunk", async () => {
+    // A FUSE/network mount answers short reads. One read returns 3 bytes; the
+    // real file is 10. A single `read` would sniff a truncated head and hash it.
+    const whole = new Uint8Array([...PNG_SIG, 0xaa, 0xbb]);
+    let served = 0;
+    const reader = {
+      async read(buffer: Uint8Array, offset: number, length: number, position: number) {
+        // Honour the offset the caller asked for, so a loop that does not advance
+        // its position re-reads the same 3 bytes forever (and the test hangs red).
+        expect(position).toBe(served);
+        const bytesRead = Math.min(3, length, whole.length - served);
+        buffer.set(whole.subarray(served, served + bytesRead), offset);
+        served += bytesRead;
+        return { bytesRead };
+      },
+    };
+    expect(Array.from(await readToEof(reader, 4096))).toEqual(Array.from(whole));
+    expect(served).toBe(whole.length);
+    // EOF stops the loop, not a full buffer: 0 bytes read is done, not an error.
+    const empty = {
+      read: async () => ({ bytesRead: 0 }),
+    };
+    expect((await readToEof(empty, 4096)).length).toBe(0);
+    // The cap bounds it, and an exact-cap file raises no extra read.
+    let reads = 0;
+    const capped = {
+      async read(buffer: Uint8Array, offset: number, length: number) {
+        reads += 1;
+        const bytesRead = Math.min(length, 4);
+        buffer.set(new Uint8Array(bytesRead).fill(7), offset);
+        return { bytesRead };
+      },
+    };
+    expect((await readToEof(capped, 12)).length).toBe(12);
+    expect(reads).toBe(3);
+  });
   test("one call gives the kind, the size and every byte; a missing path is null", async () => {
     const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
     const { tmpdir } = await import("node:os");

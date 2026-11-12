@@ -51,12 +51,23 @@ export const ATTACHMENT_NAME_MAX_CHARS = 255;
  * `checkAttachmentRefs`, refusing the WHOLE message instead of one image.
  */
 export function sanitizeAttachmentName(raw: string): string | undefined {
-  // `for…of` walks code POINTS: a capped name never ends in half a surrogate pair.
-  const kept = [...raw].filter((char) => ATTACHMENT_NAME_RE.test(char)).join("");
-  if (kept === "") {
-    return undefined;
+  // `for…of` walks code POINTS, so neither the filter nor the cap can split a
+  // surrogate pair (a UTF-16 `slice` at 255 left half an emoji behind:
+  // `254×"a" + 😀` came out ending in a lone high surrogate). The budget is
+  // UTF-16 units, because that is what the wire's `.max(255)` counts — so a name
+  // of astral characters is cut SHORTER, never over the wire's bound.
+  let kept = "";
+  for (const char of raw) {
+    if (!ATTACHMENT_NAME_RE.test(char)) {
+      continue;
+    }
+    const extended = kept + char;
+    if (extended.length > ATTACHMENT_NAME_MAX_CHARS) {
+      break;
+    }
+    kept = extended;
   }
-  return kept.length > ATTACHMENT_NAME_MAX_CHARS ? kept.slice(0, ATTACHMENT_NAME_MAX_CHARS) : kept;
+  return kept === "" ? undefined : kept;
 }
 
 /**

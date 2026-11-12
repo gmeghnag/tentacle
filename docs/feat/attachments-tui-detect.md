@@ -2,11 +2,12 @@
 
 > **Status:** execution (awaiting Review)
 > **Branch:** `feat/attachments-tui-detect`
-> **Type:** feat · **Size:** S · **Blast:** contained · **Suited:** DeepSeek (executor) + standard in-context Review
+> **Type:** feat · **Size:** S · **Blast:** contained (code) / **cross-module** (touches `packages/protocol` + `packages/core`: an additive export, a shared regex, and a code-point name cap) · **Suited:** DeepSeek (executor) + standard in-context Review
 
 <!--
 Sub-task 3a of docs/feat/attachments.md (§Split row 3a). Pure modules only: the
-wiring into `App` is 3b, so this task touches NO existing component.
+wiring into `App` is 3b, so this task touches NO existing component (it does
+edit two package modules additively — see `### Files`).
 -->
 
 ## Context
@@ -156,6 +157,15 @@ New, in dependency order (each is a leaf; the last two import the earlier ones):
 3. `packages/tui/src/attach-refusal.ts`
 4. `packages/tui/src/attach-files.ts`
 
+**Edited (not only new files, round-1/2 drift):** the plan said "no existing
+file edited", but two package files ARE edited — additively, no wire change and
+no `PROTOCOL_VERSION` bump:
+
+- `packages/protocol/src/attachment.ts` — `ATTACHMENT_NAME_RE` extracted and
+exported (the schema now uses the same constant, so core cannot copy it).
+- `packages/core/src/attachments.ts` — `sanitizeAttachmentName` +
+`ATTACHMENT_NAME_MAX_CHARS`, and the code-point-safe cap (fix round 2, item 3).
+
 Tests: `packages/tui/test/image-sniff.test.ts`,
 `attach-candidates.test.ts`, `attach-files.test.ts`.
 Also: `CHANGELOG.md` (one `Added` bullet), and — because the modules are meant
@@ -175,6 +185,7 @@ when it wires them; exporting unused API is dead surface).
 | Not an image (PDF, `.txt`, a renamed `.png`) | `not-image`, naming the sniffed-absence, never the extension |
 | More than 5 candidates | `too-many` at the 6th, naming the cap; the first 5 stay |
 | Text that is not only paths | `{kind:"text"}` — the sentence is never mangled into attachments |
+| Images found, NONE attachable (over-cap, HEIC, re-dropped duplicate, a failed `/attach`) | `{kind:"refused", refusals}` — shown, and the text is NOT put back into the prompt (3b) |
 | Path with spaces / quotes / unicode / `%20` | one candidate, decoded exactly once (no double-decode of a literal `%2520`) |
 | A path whose read throws mid-way | refusal, no partial ref, `bytes` absent |
 | Duplicate candidate (same path twice, or same bytes) | second is a duplicate: the sha256 is already collected → refused as "attached twice" by `checkAttachmentRefs` in `collectAttachments` |
@@ -304,6 +315,82 @@ removed after) but NOT against a real macOS Terminal.app drop, a `chflags`
 unreadable file, or a fifo — those forms come from the documented behaviour of
 the terminals and from `stat`'s kind, and 3b is where a real drop is seen end to
 end. Verify by dragging a file into the TUI once 3b is wired.
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-12* (executor; branch `feat/attachments-tui-detect`)
+
+Round 2's four items. Each fix has a test that is **red on the pre-fix shape**:
+the mutation table below restores the pre-fix code and every `(fail)` line is
+that test's red run. (The tests were written before the source edit, but red was
+*observed* through those mutations rather than before the edit — the honest
+account, per §9.)
+
+**1 (MEDIUM), `AttachmentDecision` no longer overloads `text`.** The type is now
+three variants with one meaning each (`attach-files.ts:272-281`):
+
+- `{kind:"text"}` — plain text and **nothing was ever an image**; it **carries no
+  refusals at all** (the field is gone, so a component cannot read the
+  `refusals.length === 0` side channel).
+- `{kind:"refused", refusals}` — images were found and none could be attached.
+- `{kind:"attachments", refs, images, refusals}` — unchanged.
+
+`attachPaths` returns `refused` at the `collected.images.length === 0` branch
+(`:329`), and `decideAttachment` returns `text` with no refusals for a pure text
+candidate (`:350`). Every failed `/attach` is therefore `refused`, never `text`.
+Re-pinned: `a LONE over-cap PNG paste is REFUSED`, `a RE-DROPPED duplicate is
+REFUSED, never text`, `a FAILED /attach is REFUSED, never text` (all three had
+asserted `text`), plus the HEIC/unreadable/empty image tests, the four paste-rule
+tests (now `toEqual({kind:"text"})`, which also pins "no refusal on text"), and
+both remaining `/attach` tests.
+
+**2, the `readToEof` loop is tested.** `readToEof` and its `ByteReader` seam are
+exported (`attach-files.ts:359-367, 412`) so a fake handle can short-read.
+New test `readToEof loops: a probe that short-reads yields EVERY byte, not the
+first chunk`: a reader that answers 3 bytes per call for a 10-byte file must
+yield all 10 (and it asserts `position === served`, so a loop that re-reads the
+same offset cannot pass either), 0 bytes ⇒ EOF, and a 12-byte cap at 4
+bytes/read ⇒ exactly 3 reads.
+
+**3, the name cap cuts on a code point.** `sanitizeAttachmentName`
+(`core/src/attachments.ts:53-71`) builds the name one code point at a time and
+stops when the NEXT point would exceed `ATTACHMENT_NAME_MAX_CHARS`. The budget
+stays in UTF-16 units because that is what the wire's `.max(255)` counts — a
+name of astral characters is cut shorter, never over the bound. New test `the
+length cap cuts on a code POINT, never through an emoji`: `254×"a" + 😀` →
+exactly `254×"a"` (no lone surrogate, no U+FFFD), and `200×😀` → `127×😀`
+(≤255 units) which `checkAttachmentRefs` accepts.
+
+**4, the doc.** The metadata line now records the real blast: `contained` for the
+tui code, **cross-module** because `packages/protocol` and `packages/core` are
+edited (an additive export, the shared regex, the code-point cap) — no wire
+change, no `PROTOCOL_VERSION` bump. `### Files` gained an "Edited" paragraph
+naming both files; the stale "no existing file edited" claim is gone.
+
+**Mutations (§9, each reverted; script
+`.tentacle/tmp/attachments-tui-detect/mut-r2.sh`, backup copies + `cp` restore,
+never git checkout/restore/stash).**
+
+| # | Mutation (pre-fix shape restored) | Result |
+|---|---|---|
+| M5a | `refused` branch returns `{kind:"text", refusals: shown}` again | **7 fail**: the HEIC, lone over-cap, unreadable, empty and re-dropped-duplicate image refusals + both `/attach` tests |
+| M5b | the "a non-image collapses the paste" early return disabled | **6 fail**: the four paste-rule tests + the unreadable/empty non-image halves |
+| M5c | `text` carries a refusal again (the side channel 3b would infer from) | **1 fail**: `a non-path candidate never reads the disk: it is text at once` |
+| M6 | `readToEof` reduced to ONE `read` | **1 fail**: `readToEof loops: a probe that short-reads yields EVERY byte…` |
+| M7 | the cap back to a UTF-16 `slice(0, 255)` | **1 fail**: `the length cap cuts on a code POINT, never through an emoji` |
+
+M6 is the round-2 gap closed: the reviewer's "`readToEof` reduced to ONE read →
+0 fail" now fails the test that names the property.
+
+**Gate (`bunx tsc --noEmit`, `bun run lint`, `bun test`), final tree:**
+`tsc --noEmit` clean; `biome check .` → `Checked 926 files … No fixes applied.`
+(§6 clean baseline); `bun test` → **7259 pass, 3 skip, 0 fail** (the three opt-in
+skips of §6). The task's three test files: **97 pass, 0 fail**
+(`attach-files.test.ts` alone is 56).
+
+**Unverified (per §5).** A real FUSE short read is still only faked (the fake
+`ByteReader` is the seam the production path uses, not a real mount), and a real
+Terminal.app drop remains 3b's end-to-end check.
 
 ## Review
 
@@ -591,3 +678,5 @@ reviewer did not verify it. Tree clean after the mutations.
 for TOCTOU, the wire's regex instead of a copy, and the `existing` seam), each
 with a test that fails under mutation. The only gaps are the untested
 `readToEof` loop and the overloaded `text` variant.
+
+**Fix round 2** addresses all four items above: see `## Execution` → `### Fix round 2`.

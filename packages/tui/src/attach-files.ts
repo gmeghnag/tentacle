@@ -255,10 +255,19 @@ export async function collectAttachments(
  * What a paste BECOMES — the one decision 3b consumes, so the rule "only image
  * paths" is decided (and tested) here, not re-derived in a component.
  *
- * `attachments` — every candidate became an image: the refs to attach, the
- * images, and nothing wrong. `text` — the paste stays plain text, with the
- * refusals worth SHOWING (usually none: a sentence, a source file or a slash
- * command is not an error).
+ * Three variants, and each means ONE thing to 3b:
+ *
+ * - `attachments` — at least one candidate became an image: attach these refs,
+ *   and SHOW the refusals beside them (a HEIC, a duplicate, the cap) so nothing
+ *   is dropped silently.
+ * - `text` — plain text, and nothing was ever an image: a sentence, a slash
+ *   command, a dragged source file, an empty paste. INSERT the text, and show
+ *   nothing ("not a PNG" is not an error for a file the user only mentioned).
+ *   `text` never carries a refusal — a refusal means something WAS an image.
+ * - `refused` — images were found and NONE could be attached: an over-cap PNG,
+ *   a HEIC, a re-dropped duplicate, a failed `/attach`. Show every refusal and
+ *   do NOT insert the text: putting a path back into the prompt after a failed
+ *   `/attach /nope.png` would hand the literal command to the model.
  */
 export type AttachmentDecision =
   | {
@@ -267,7 +276,8 @@ export type AttachmentDecision =
       readonly images: readonly AttachedImage[];
       readonly refusals: readonly AttachRefusal[];
     }
-  | { readonly kind: "text"; readonly refusals: readonly AttachRefusal[] };
+  | { readonly kind: "text" }
+  | { readonly kind: "refused"; readonly refusals: readonly AttachRefusal[] };
 
 /** Options for `attachPaths`/`decideAttachment`. */
 export interface DecideOptions extends CollectOptions {
@@ -300,7 +310,7 @@ export async function attachPaths(
   options: DecideOptions = {},
 ): Promise<AttachmentDecision> {
   if (paths.length === 0) {
-    return { kind: "text", refusals: [] };
+    return { kind: "text" };
   }
   const collected = await collectAttachments(probe, paths, options);
   const shown =
@@ -311,10 +321,12 @@ export async function attachPaths(
   // attachment (a sentence, a dragged source file): the whole paste stays text
   // and no refusal is shown for it.
   if (options.explicit !== true && collected.refusals.some(refusalMeansText)) {
-    return { kind: "text", refusals: [] };
+    return { kind: "text" };
   }
   if (collected.images.length === 0) {
-    return { kind: "text", refusals: shown };
+    // Images were found (that is the only way not to be `text` by now: every
+    // candidate was an image, or `explicit` was set) and none could be attached.
+    return { kind: "refused", refusals: shown };
   }
   return {
     kind: "attachments",
@@ -335,9 +347,22 @@ export async function decideAttachment(
   options: DecideOptions = {},
 ): Promise<AttachmentDecision> {
   if (candidate.kind === "text") {
-    return { kind: "text", refusals: [] };
+    return { kind: "text" };
   }
   return attachPaths(probe, candidate.paths, options);
+}
+
+/**
+ * The one method `readToEof` needs of an open handle, so the short-read loop is
+ * testable with a fake (a real handle only short-reads on a FUSE/network mount).
+ */
+export interface ByteReader {
+  read(
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position: number,
+  ): Promise<{ readonly bytesRead: number }>;
 }
 
 /**
@@ -384,10 +409,7 @@ export function nodeFileProbe(): FileProbe {
 }
 
 /** Read `handle` from EOF or `cap` bytes, whichever comes first (never one short read). */
-async function readToEof(
-  handle: Awaited<ReturnType<typeof open>>,
-  cap: number,
-): Promise<Uint8Array> {
+export async function readToEof(handle: ByteReader, cap: number): Promise<Uint8Array> {
   const buffer = new Uint8Array(cap);
   let filled = 0;
   while (filled < cap) {
