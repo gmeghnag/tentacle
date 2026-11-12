@@ -22,7 +22,12 @@
 import type { RecordTitle } from "@tentacle/agent";
 import { RECORD_TITLE_MAX } from "@tentacle/agent";
 import { type ChatMessage, subagentLoadNotes } from "@tentacle/core";
-import { ChatMessageSchema, type LogCursor, type ReturnedEntry } from "@tentacle/protocol";
+import {
+  ChatMessageSchema,
+  type LogCursor,
+  type ReturnedEntry,
+  hasAttachments,
+} from "@tentacle/protocol";
 import type {
   DaemonSessionRecord,
   PendingPermission,
@@ -38,13 +43,32 @@ import {
 
 /** The state file's `format` tag. */
 export const DAEMON_STATE_FORMAT = "tentacle-daemon-state";
-/** The state file's own version (separate from the log header's and the wire's). */
-export const DAEMON_STATE_VERSION = 1;
+/**
+ * The state file's own version (separate from the log header's and the wire's).
+ *
+ * 1: no image refs anywhere in the file.
+ * 2: some `tail` message carries image refs (`attachments`), written only when
+ *    it does. The bump exists for the SAME reason as the media log entry types
+ *    (AGENTS §7, "never half-loads"): an older build's `ChatMessageSchema`
+ *    strips `attachments` silently, so a v1-stamped file with refs in its tail
+ *    would reload as a plain message — a half-load. Stamping 2 makes that
+ *    build refuse the ONE session loudly and leave its files untouched, and
+ *    keeps every session without images readable by both.
+ */
+export const DAEMON_STATE_VERSION = 2;
+/** The version a state file without image refs is written as (readable by every build). */
+export const DAEMON_STATE_VERSION_NO_MEDIA = 1;
+/** The versions this build READS (a tail without refs is equally valid as either). */
+export const DAEMON_STATE_VERSIONS: readonly number[] = [
+  DAEMON_STATE_VERSION_NO_MEDIA,
+  DAEMON_STATE_VERSION,
+];
 
 /** The state file, as written (compact JSON, one object). */
 export interface DaemonSidecar {
   readonly format: typeof DAEMON_STATE_FORMAT;
-  readonly schemaVersion: typeof DAEMON_STATE_VERSION;
+  /** `1` without image refs in the tail, `2` when some tail message carries them. */
+  readonly schemaVersion: number;
   readonly id: string;
   /** The log entry this state was captured at: the loader reads the log only through it. */
   readonly logHead: LogCursor;
@@ -76,13 +100,16 @@ export function sharedPrefix(a: readonly ChatMessage[], b: readonly ChatMessage[
 /** The state file of `record` (its overlay computed against `record.logged`, by reference). */
 export function sidecarOf(record: DaemonSessionRecord): DaemonSidecar {
   const k = sharedPrefix(record.logged, record.messages);
+  const tail = record.messages.slice(k);
   return {
     format: DAEMON_STATE_FORMAT,
-    schemaVersion: DAEMON_STATE_VERSION,
+    // v2 exactly when a tail message carries refs: a file that does not is
+    // readable by every build, which is the whole point of the split.
+    schemaVersion: tail.some(hasAttachments) ? DAEMON_STATE_VERSION : DAEMON_STATE_VERSION_NO_MEDIA,
     id: record.id,
     logHead: { seq: record.logHead.seq, id: record.logHead.id },
     k,
-    tail: record.messages.slice(k),
+    tail,
     lastActiveAt: record.lastActiveAt,
     updatedAt: record.updatedAt,
     title: record.title,
@@ -230,12 +257,13 @@ export function parseSidecar(text: string, id: string): Result<DaemonSidecar> {
   if (!isObject(value) || value.format !== DAEMON_STATE_FORMAT) {
     return { ok: false, reason: "not a tentacle daemon state file" };
   }
-  if (value.schemaVersion !== DAEMON_STATE_VERSION) {
+  if (!DAEMON_STATE_VERSIONS.includes(value.schemaVersion as number)) {
     return {
       ok: false,
-      reason: `state file schemaVersion ${JSON.stringify(value.schemaVersion)} is not ${DAEMON_STATE_VERSION} (written by another tentacle version): update tentacle`,
+      reason: `state file schemaVersion ${JSON.stringify(value.schemaVersion)} is not ${DAEMON_STATE_VERSIONS.join(" or ")} (written by another tentacle version): update tentacle`,
     };
   }
+  const version = value.schemaVersion as number;
   if (value.id !== id) {
     return { ok: false, reason: `id ${JSON.stringify(value.id)} does not match the file name` };
   }
@@ -262,6 +290,15 @@ export function parseSidecar(text: string, id: string): Result<DaemonSidecar> {
       return { ok: false, reason: `tail message ${index} is malformed` };
     }
     tail.push(parsed.data as ChatMessage);
+  }
+  // v1 PROMISES no refs in the tail, so a v1 file that has them is not this
+  // build's file: refused loudly rather than loaded as the older build would
+  // have (refs stripped — the half-load version 2 exists to prevent).
+  if (version === DAEMON_STATE_VERSION_NO_MEDIA && tail.some(hasAttachments)) {
+    return {
+      ok: false,
+      reason: 'a schemaVersion 1 state file carries image refs in its "tail" (it must be 2)',
+    };
   }
   if (!isFiniteNumber(value.lastActiveAt)) {
     return { ok: false, reason: '"lastActiveAt" is not a finite number' };
@@ -309,7 +346,7 @@ export function parseSidecar(text: string, id: string): Result<DaemonSidecar> {
     ok: true,
     value: {
       format: DAEMON_STATE_FORMAT,
-      schemaVersion: DAEMON_STATE_VERSION,
+      schemaVersion: version,
       id,
       logHead: { seq: head.seq as number, id: head.id },
       k: value.k,

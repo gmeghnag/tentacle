@@ -25,7 +25,7 @@ export interface ModelProviders {
 export function createModelProviders(
   config: Pick<
     TentacleConfig,
-    "provider" | "baseURL" | "apiKey" | "maxTokens" | "configDir" | "models"
+    "provider" | "baseURL" | "apiKey" | "maxTokens" | "maxImageBytes" | "configDir" | "models"
   >,
   create: ProviderFactory = createModelProvider,
 ): ModelProviders {
@@ -49,6 +49,7 @@ export function createModelProviders(
         model: entry.model,
         ...(entry.apiKey ? { apiKey: entry.apiKey } : {}),
         ...(entry.maxTokens !== undefined ? { maxTokens: entry.maxTokens } : {}),
+        ...(entry.maxImageBytes !== undefined ? { maxImageBytes: entry.maxImageBytes } : {}),
         onRetry,
       });
       entries.set(name, made);
@@ -65,6 +66,7 @@ export function createModelProviders(
         model: modelId,
         ...(config.apiKey ? { apiKey: config.apiKey } : {}),
         ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
+        ...(config.maxImageBytes !== undefined ? { maxImageBytes: config.maxImageBytes } : {}),
         onRetry,
       });
       ids.set(modelId, made);
@@ -154,7 +156,7 @@ export function tunnelSubagentResolver(
 export function configuredModelProvider(
   config: Pick<
     TentacleConfig,
-    "provider" | "baseURL" | "model" | "apiKey" | "maxTokens" | "configDir"
+    "provider" | "baseURL" | "model" | "apiKey" | "maxTokens" | "maxImageBytes" | "configDir"
   >,
   /** A model id on the same endpoint (the title model); defaults to `config.model`. */
   model: string = config.model,
@@ -166,6 +168,7 @@ export function configuredModelProvider(
     model,
     ...(config.apiKey ? { apiKey: config.apiKey } : {}),
     ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
+    ...(config.maxImageBytes !== undefined ? { maxImageBytes: config.maxImageBytes } : {}),
     onRetry: (info) => logModelRetry(config.configDir, info),
   });
 }

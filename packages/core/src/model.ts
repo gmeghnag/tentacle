@@ -6,7 +6,10 @@
  * `/v1/chat/completions` endpoint (local llama.cpp / vLLM / cloud) and the
  * native Anthropic Messages API (`/v1/messages`). See ADR-003.
  */
+import type { AttachmentRef } from "@tentacle/protocol";
 import type { ToolResultSpill } from "./tool.ts";
+
+export type { AttachmentRef };
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
@@ -66,6 +69,13 @@ export interface ChatMessage {
    * such a message as a notice, not as a row the person typed.
    */
   readonly note?: MessageNote;
+  /**
+   * On a USER message: image refs to send with it (docs/feat/attachments-core.md).
+   * Refs, never bytes: the bytes live behind an `AttachmentSource` on the side
+   * trusted to read them, and non-empty when present. A message without refs
+   * has no key (never `[]`), so it hashes and serialises as it always did.
+   */
+  readonly attachments?: readonly AttachmentRef[];
 }
 
 /**
@@ -132,6 +142,21 @@ export interface ChatRequest {
   readonly temperature?: number;
   readonly maxTokens?: number;
   readonly signal?: AbortSignal;
+  /**
+   * Where this side reads an image ref's bytes from (docs/feat/attachments-core.md).
+   * Non-serialisable, like `signal` — it is NOT on the wire: a pod sends refs,
+   * and the laptop's request carries whatever the laptop itself is allowed to read.
+   */
+  readonly attachments?: AttachmentSource;
+}
+
+/**
+ * The bytes behind an image ref, or `null` when this source does not hold them
+ * (absent is not an error: the provider shows a placeholder). Throw only for a
+ * transient failure — the stream then rejects before any bytes reach a provider.
+ */
+export interface AttachmentSource {
+  read(ref: AttachmentRef, signal?: AbortSignal): Promise<Uint8Array | null>;
 }
 
 export interface ModelProvider {

@@ -55,6 +55,7 @@ describe("the DSML re-ask notice is its own display KIND (no enum value, no vers
   });
 
   test("it is a display kind: nothing waits on it and it needs no protocol bump", () => {
-    expect(PROTOCOL_VERSION).toBe(22);
+    // 23 is the attachments bump (docs/feat/attachments-core.md), not this kind.
+    expect(PROTOCOL_VERSION).toBe(23);
   });
 });

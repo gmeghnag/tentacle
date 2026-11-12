@@ -64,6 +64,10 @@ export const UNKNOWN_ALLOWED: readonly string[] = [
   "#/$defs/ProgressParams/properties/value",
   "#/$defs/ToolCall/properties/rawInput",
   "#/$defs/WireToolDefinition/properties/parameters",
+  // NOT an "anything" field: `{"not":{}}` is the one shape that accepts
+  // NOTHING, emitted for `z.undefined()` (a plain log entry refuses
+  // `attachments` — review M2). Its inner `{}` is what the walker sees.
+  "#/$defs/MessageWithoutAttachments/properties/attachments/not",
 ];
 
 /** zod kinds the library maps faithfully. Anything else would be dropped or loosened silently. */
@@ -85,6 +89,10 @@ const SUPPORTED_KINDS = new Set([
   "ZodCatch",
   "ZodUnknown",
   "ZodNull",
+  // Emitted as `{"not":{}}`: the only shape that accepts NOTHING, which is
+  // what `z.undefined()` means. Used by a plain `message`/`replace` entry to
+  // refuse `attachments` outright (review M2).
+  "ZodUndefined",
 ]);
 
 /**

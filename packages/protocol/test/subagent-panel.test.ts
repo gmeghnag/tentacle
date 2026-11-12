@@ -67,7 +67,8 @@ describe("T-P1: the two new request methods", () => {
   });
 
   test("no PROTOCOL_VERSION bump (a new method is free; an older daemon says MethodNotFound)", () => {
-    expect(PROTOCOL_VERSION as number).toBe(22);
+    // 23 is the attachments bump (docs/feat/attachments-core.md), not this method.
+    expect(PROTOCOL_VERSION as number).toBe(23);
   });
 });
 

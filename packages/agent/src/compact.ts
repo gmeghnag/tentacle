@@ -6,6 +6,7 @@
  * round (docs/feat/skills-compaction.md). Pure w.r.t. the provider (injected).
  */
 import type { ChatMessage, ChatRequest, ModelProvider, ToolCall } from "@tentacle/core";
+import { attachmentLabel } from "@tentacle/core";
 
 const COMPACT_SYSTEM =
   "You compress a coding-assistant conversation into a dense briefing for the " +
@@ -31,7 +32,10 @@ function renderMessage(message: ChatMessage, kept: string | undefined): string {
     message.toolCalls && message.toolCalls.length > 0
       ? ` [called: ${message.toolCalls.map((c) => c.name).join(", ")}]`
       : "";
-  return `${role}: ${message.content}${calls}`;
+  // Images do NOT survive compaction (owner Q6): the summary learns that one
+  // existed, by name, so it can say so — and never claims to have seen it.
+  const images = (message.attachments ?? []).map((ref) => ` [image: ${attachmentLabel(ref)}]`);
+  return `${role}: ${message.content}${calls}${images.join("")}`;
 }
 
 /**

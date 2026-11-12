@@ -12,6 +12,7 @@
  *   5. `session/close`  — end the session for every client (idempotent).
  */
 import { z } from "zod";
+import { AttachmentsSchema } from "./attachment.ts";
 import { ContentBlockSchema } from "./content.ts";
 import { ModelNameSchema } from "./model.ts";
 import { PermissionReplyTextSchema } from "./permission-reply.ts";
@@ -48,7 +49,12 @@ export const MessageNoteSchema = z.object({
 });
 export type MessageNote = z.infer<typeof MessageNoteSchema>;
 
-export const ChatMessageSchema = z.object({
+/**
+ * Fresh instances per call (the `envelopeShape()` pattern in session-log.ts):
+ * the JSON Schema export refuses a schema object reused by two named exports,
+ * and the media entry below needs this shape with refs REQUIRED.
+ */
+const chatMessageShape = () => ({
   role: z.enum(["system", "user", "assistant", "tool"]),
   content: z.string(),
   toolCalls: z.array(WireToolCallSchema).optional(),
@@ -76,8 +82,47 @@ export const ChatMessageSchema = z.object({
    * applied to a display-only field. Never tighten into a lock-out (review M3).
    */
   note: MessageNoteSchema.optional().catch(undefined),
+  /**
+   * On a USER message: image refs to send with it (docs/feat/attachments-core.md).
+   * Refs, never bytes — the bytes live behind an `AttachmentSource` on the side
+   * that may read them (a pod's refs read nothing on the laptop).
+   */
+  attachments: AttachmentsSchema.optional(),
 });
+
+export const ChatMessageSchema = z.object(chatMessageShape());
 export type WireChatMessage = z.infer<typeof ChatMessageSchema>;
+
+/**
+ * A message the log stores as `media_message`/`media_replace`: the same shape,
+ * with refs REQUIRED (a message without them belongs on `/message`)
+ * — docs/feat/attachments-core.md, D2.
+ */
+export const MessageWithAttachmentsSchema = z.object({
+  ...chatMessageShape(),
+  attachments: AttachmentsSchema,
+});
+export type MessageWithAttachments = z.infer<typeof MessageWithAttachmentsSchema>;
+
+/**
+ * A message the log stores as a PLAIN `message`/`replace`: the same shape with
+ * `attachments` explicitly ABSENT (review M2). Without this, the media rule held
+ * only by convention: a pod is not trusted (AGENTS §7), so a
+ * `{type:"message", message:{…, attachments:[ref]}}` it returned from
+ * `session/log` would validate, be re-serialized and WRITTEN — and an older
+ * build would then load that line and strip the refs, a half-load of data this
+ * build "validated". A plain entry carrying refs is now a MALFORMED entry,
+ * refused loudly (never written as-is); refs belong on
+ * `media_message`/`media_replace`.
+ *
+ * `z.undefined()` (not `.optional()`) is what makes a PRESENT key a failure; it
+ * exports as `{"not":{}}`, which the JSON-Schema exporter represents.
+ */
+export const MessageWithoutAttachmentsSchema = z.object({
+  ...chatMessageShape(),
+  attachments: z.undefined(),
+});
+export type MessageWithoutAttachments = z.infer<typeof MessageWithoutAttachmentsSchema>;
 
 // --- initialize ---------------------------------------------------------
 

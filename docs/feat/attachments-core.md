@@ -1,0 +1,1005 @@
+# feat/attachments-core — image references in the history, end to end (no producer yet)
+
+> **Status:** implementation (awaiting owner approval of §Owner questions)
+> **Branch:** `feat/attachments-core`
+> **Type:** feat · **Size:** M · **Blast:** load-bearing (persisted log format + a new critical entry type, `PROTOCOL_VERSION`, providers, agent-loop entry, pod tunnel) · **Suited:** DeepSeek executes (strong-model slot); **mandatory fresh-context Review** red-teaming AGENTS §7 "never half-loads", "model stays on the laptop", "a pod is not trusted"
+
+Umbrella + split + re-verified state: `docs/feat/attachments.md` §Promotion.
+
+## Context
+
+*— claude-opus-5-5, 2026-11-12*
+
+The owner wants a photo dragged into the laptop TUI to reach the model on
+every runtime (§Promotion). That needs four sub-tasks (1 → 2a → 2b → 3b). This
+one is the foundation and the only one whose mistakes are **silent**: today a
+`ChatMessage` carrying image refs loses them at 4 boundaries without an error
+(repro *r2*–*r6*), and an older build reading a log with images would
+half-load it. It has **no user-visible producer**: the daemon keeps refusing
+image prompts (`mapping.ts:128-136`) until 2b. A fake `AttachmentSource`
+exercises every path.
+
+Constraints (binding): parent point 18 / D10 (`docs/eval/session-reattach.md`
+:355-365, :469) — refs by sha256, history stores refs never bytes, text
+placeholder when bytes are missing, only the last K images inline, images
+before text. AGENTS §7: strip schemas (never `.strict()`), a new critical log
+type is an owner decision + `PROTOCOL_VERSION` bump (`session-log.ts:17-19`).
+
+**Repro** (2026-11-12, bun 1.4.3, `main` @ 27e8b44; run as
+`bun /Users/gmeghnag/tentacle/.tentacle/tmp/attachments/boundaries.ts`):
+
+```ts
+// boundaries.ts (2026-11-12) — where does an image (wire block) or an
+// `attachments` field on a ChatMessage get dropped or refused TODAY?
+import { assertTextOnly, ProxyModelProvider, SessionLog } from "@tentacle/daemon";
+import { buildPayload } from "@tentacle/providers";
+import { ChatMessageSchema, LogMessageEntrySchema, Method, PROTOCOL_VERSION, RequestSchemas } from "@tentacle/protocol";
+
+const ref = { id: "a".repeat(64), mimeType: "image/png", size: 1234 };
+const userWithRef = { role: "user", content: "what is in this picture?", attachments: [ref] };
+const has = (o: unknown) => typeof o === "object" && o !== null && "attachments" in o;
+
+console.log("0 PROTOCOL_VERSION =", PROTOCOL_VERSION);
+try {
+  assertTextOnly([{ type: "text", text: "x" }, { type: "image", mimeType: "image/png", data: "iVBO" }]);
+  console.log("1 prompt image block: accepted");
+} catch (e) {
+  console.log("1 prompt image block: REJECTED:", (e as Error).message);
+}
+const cm = ChatMessageSchema.safeParse(userWithRef);
+console.log("2 ChatMessageSchema:", cm.success ? `ok, attachments kept=${has(cm.data)}` : "REJECTED");
+const ms = RequestSchemas[Method.ModelStream].params.safeParse({ request: { messages: [userWithRef] } });
+console.log("3 model/stream params:", ms.success ? `ok, attachments kept=${has(ms.data.request.messages[0])}` : "REJECTED");
+const le = LogMessageEntrySchema.safeParse({ type: "message", seq: 1, id: "i/1", ts: 0, critical: true, message: userWithRef });
+console.log("4 log message entry:", le.success ? `ok, attachments kept=${has(le.data.message)}` : "REJECTED");
+let seen: unknown = null;
+const proxy = new ProxyModelProvider(async (wire) => {
+  seen = wire.messages[0];
+  return { events: [{ type: "done" }] };
+});
+for await (const _ of proxy.stream({ messages: [userWithRef as never] })) {
+  // drain
+}
+console.log("5 proxy wire message =", JSON.stringify(seen));
+const p = buildPayload("m", { messages: [userWithRef as never] }) as { messages: unknown[] };
+console.log("6 anthropic payload message =", JSON.stringify(p.messages[0]));
+const log = new SessionLog("inc");
+console.log("7 SessionLog ctor ok:", typeof log);
+```
+```
+0 PROTOCOL_VERSION = 22
+1 prompt image block: REJECTED: only text content is supported (got image); see docs/eval/attachments.md
+2 ChatMessageSchema: ok, attachments kept=false
+3 model/stream params: ok, attachments kept=false
+4 log message entry: ok, attachments kept=false
+5 proxy wire message = {"role":"user","content":"what is in this picture?"}
+6 anthropic payload message = {"role":"user","content":"what is in this picture?"}
+7 SessionLog ctor ok: object
+```
+
+Reading: *r1* the daemon already refuses (good, stays until 2b). *r2*–*r6*:
+every boundary drops the field **silently**. *r4* is the persisted-format
+hazard: the log entry type is known and critical, so an older build parses it
+and silently loses the image.
+
+## Implementation
+
+*— claude-opus-5-5, 2026-11-12*
+
+### Load-bearing assumption
+
+**Every place a `ChatMessage` travels from `Session.send` to a provider's HTTP
+body, to the `session/log` wire and to `<uid>.jsonl` either passes the object
+whole (spread or cast — an extra field survives) or is one of exactly SEVEN
+enumerated sites this plan changes.** If an eighth field-by-field mapper or
+schema exists, images vanish silently there and the plan is wrong.
+
+The seven: (1) `ChatMessageSchema` `protocol/src/session.ts:51-79` (strip, *r2*)
+· (2) `WireChatMessageSchema` `protocol/src/model.ts:19-24` (strip, *r3*) ·
+(3) the log entry schemas `session-log.ts:127-141` (strip via (1), *r4*) ·
+(4) `toWireRequest` `daemon/src/proxy-model.ts:57-72` (*r5*) · (5) Anthropic
+`buildPayload` `anthropic-provider.ts:360-420` (*r6*) · (6) OpenAI
+`toWireMessage` `openai-provider.ts:292-305` · (7) `canonicalMessage`
+`session-log.ts:338-352` (fixed field list → digest).
+
+Proof (2026-11-12):
+- `rg -n "role: m\.role|role: message\.role|content: m\.content|content: message\.content|role: msg\.role" packages --glob '!**/test/**' --glob '!**/node_modules/**'`
+  → only `hooks.ts:719` (hook `new_messages` payload: `{role, content}` by
+  contract, out of scope, documented below), `tools/src/skill.ts:105` (reads
+  a tool result's text), and sites (4)–(6).
+- Spreads that keep extra fields: `core/src/history-validity.ts:116,181`
+  (`repairHistory`), `agent/src/agent.ts:1567` (context-usage stamp),
+  `agent/src/context-awareness.ts:55-56` (`renderForModel`).
+- Casts that keep the object: emitter `daemon/src/session-log.ts:329-331`
+  (`wire()`), folds `client/src/session-log-reader.ts:161`,
+  `daemon/src/session-log-file.ts:296,365`, laptop handler
+  `client/src/remote-client.ts:2736`.
+- Constructors build NEW text-only messages and never copy an incoming one
+  (compaction, context reset, notes, sub-agent prompt, step-limit nudge):
+  `compact.ts:67-69,108-109,276-281`, `context-reset.ts:71-78`, `subagent.ts:434`,
+  `agent.ts:326,1470-1476`, `history-validity.ts:338`,
+  `persisted-session.ts:253`.
+
+**Executor: re-run the `rg` above and `boundaries.ts` first. A new hit that is
+not in this list → STOP and amend this plan (AGENTS §0, §8).**
+
+### Preconditions
+
+| Fact | Evidence |
+|---|---|
+| TUI always over RPC: every runtime's history crosses `ChatMessageSchema` (seed `session/open{messages}`, `session/log`) | AGENTS §7; `session.ts:808,991`; `session-log.ts:131,140` |
+| Model stays on the laptop: in pod modes the provider runs in `RemoteClient.onModelStream*` and receives the parsed wire request by cast, with NO byte source | `remote-client.ts:2730-2743`, `:2891` |
+| Strip schemas everywhere; `.strict()` forbidden | `protocol/src/index.ts:8-12` |
+| Unknown **critical** log type → reader refuses the whole read/file loudly; file left untouched | `session-log-reader.ts:254-262`; `session-log-file.ts:14-17`; KNOWN = keys of `LOG_ENTRY_CRITICAL` (`reader :76`, `file :97`) |
+| A new critical type is an owner decision and bumps `PROTOCOL_VERSION` | `session-log.ts:17-19` |
+| core may import protocol | `packages/core/package.json` deps `@tentacle/protocol` |
+| Provider tests can capture the HTTP body via injected `fetch` | `select-provider.ts:30`, `CreateModelProviderOptions.fetch` |
+| A tunnel-field precedent with tests exists (`stopReason` over `model/stream`) | `protocol/src/model.ts:43-55`; `packages/client/test/model-stream-stop-reason.test.ts` |
+| `node:crypto` `createHash` is already used in agent | `agent/src/session-store.ts:8` |
+
+### Design
+
+**D1 — protocol: the ref (source of truth for the shape).** New
+`packages/protocol/src/attachment.ts`, exported from `index.ts`:
+
+```ts
+export const ATTACHMENT_ID_RE = /^[0-9a-f]{64}$/;            // sha256, lowercase hex
+/** What a provider may send as an image. Entry points (Session.send, the TUI) accept ONLY these. */
+export const IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+export type ImageMimeType = (typeof IMAGE_MIME_TYPES)[number];
+export const MAX_ATTACHMENTS_PER_MESSAGE = 5;                 // owner Q4
+export const MAX_IMAGE_BYTES = 3_932_160;                     // 3.75 MiB raw → ≤ 5 MiB base64 (owner Q4)
+export const AttachmentRefSchema = z.object({
+  id: z.string().regex(ATTACHMENT_ID_RE),
+  // A bounded FREE string, never z.enum(IMAGE_MIME_TYPES): refs ride CRITICAL
+  // log entries, and an enum would make a newer build's type (image/heic)
+  // refuse the whole log (the MessageNote rule, session.ts:34-40).
+  mimeType: z.string().min(1).max(64).regex(/^image\/[a-z0-9.+-]+$/),
+  size: z.number().int().positive(),
+  // Display only, never a path. No control chars.
+  name: z.string().min(1).max(255).regex(/^[^\u0000-\u001f\u007f]*$/).optional(),
+});
+export type AttachmentRef = z.infer<typeof AttachmentRefSchema>;
+export const AttachmentsSchema = z.array(AttachmentRefSchema).min(1).max(MAX_ATTACHMENTS_PER_MESSAGE);
+```
+
+Add `attachments: AttachmentsSchema.optional()` to `ChatMessageSchema`
+(`session.ts:51`) and to `WireChatMessageSchema` (`model.ts:19`) — with a
+one-line doc comment ("user messages only; refs, never bytes;
+docs/feat/attachments-core.md"). Both stay strip.
+
+**D2 — protocol: the log (owner Q2 = (a)).** In `session-log.ts`:
+
+```ts
+export const LogMediaMessageEntrySchema = z.object({
+  ...envelopeShape(), ...critical(),
+  type: z.literal("media_message"),
+  message: ChatMessageSchema.extend({ attachments: AttachmentsSchema }),   // required here
+});
+export const LogMediaReplaceEntrySchema = z.object({
+  ...envelopeShape(), ...critical(),
+  type: z.literal("media_replace"),
+  index: z.number().int().nonnegative(),
+  message: ChatMessageSchema.extend({ attachments: AttachmentsSchema }),
+});
+```
+
+- Add both to `KnownLogEntrySchema` and to `LOG_ENTRY_CRITICAL` as `true`;
+  update the module comment's v1 table ("v2, owner-approved 2026-11-xx:
+  + `media_message`, `media_replace`").
+- Helpers (exported, used by EVERY emitter and fold — no other code compares
+  to the literal `"message"`/`"replace"` after this change):
+  ```ts
+  export function hasAttachments(m: { readonly attachments?: readonly unknown[] }): boolean {
+    return m.attachments !== undefined && m.attachments.length > 0;
+  }
+  export function appendEntryType(m: WireChatMessage): "message" | "media_message";   // by hasAttachments
+  export function replaceEntryType(m: WireChatMessage): "replace" | "media_replace";
+  export function isAppendEntry(e: KnownLogEntry): e is LogMessageEntry | LogMediaMessageEntry;
+  ```
+- `projectEntry`: `case "media_message":` falls through with `"message"`,
+  `case "media_replace":` with `"replace"`.
+- `canonicalMessage`: append ONE element **only when** `hasAttachments(m)`:
+  `m.attachments.map((a) => [a.id, a.mimeType, a.size, a.name ?? null])`.
+  A message without refs must hash byte-identically to today (checkpoints in
+  existing files stay valid).
+- `DigestibleMessage` gains the readonly `attachments?` shape.
+
+Why new types and not a field on `message`: an older build knows `message`
+and strips the field (*r4*) → half-load. An unknown critical type makes it
+refuse loudly, only for sessions that contain images (text-only sessions stay
+readable by older builds, unlike a header `schemaVersion` bump).
+
+**D3 — protocol version.** `PROTOCOL_VERSION = 23` with a comment line:
+"23: image refs on messages (`attachments`) and the critical log types
+`media_message`/`media_replace` (docs/feat/attachments-core.md): an older
+peer would strip the refs silently". Update every test pinning 22
+(`rg -n "toBe\(22\)" packages/*/test`). Regenerate the committed schema:
+`bun run schema:export` (`package.json:19`) → `packages/protocol/schema/protocol.json`.
+
+**D4 — core.** `core/src/model.ts`:
+```ts
+import type { AttachmentRef } from "@tentacle/protocol";
+export type { AttachmentRef };
+/** Bytes for a ref, or null when this source does not have them (never throw for "absent"; throw only for a transient failure). */
+export interface AttachmentSource {
+  read(ref: AttachmentRef, signal?: AbortSignal): Promise<Uint8Array | null>;
+}
+// ChatMessage: readonly attachments?: readonly AttachmentRef[];   (user messages only; non-empty when present)
+// ChatRequest: readonly attachments?: AttachmentSource;           (non-serialisable, like `signal`)
+```
+New `core/src/attachments.ts` (exported from `core/src/index.ts`):
+- `export class InvalidAttachmentError extends Error`.
+- `export function checkAttachmentRefs(refs: readonly AttachmentRef[]): void`
+  — throws `InvalidAttachmentError` unless: `AttachmentsSchema.safeParse(refs).success`,
+  every `mimeType` ∈ `IMAGE_MIME_TYPES`, every `size ≤ MAX_IMAGE_BYTES`, ids
+  distinct.
+- `export const IMAGE_TOKEN_ESTIMATE = 1600;` (≈ a 1568-px image; rounds up,
+  `token-counter.ts:6-7` contract).
+- `export function attachmentLabel(ref): string` → `name` (control chars
+  already excluded by schema, cut to 80 chars) else `mimeType`, then
+  ` sha256:<first 12 of id>`.
+
+`HeuristicTokenCounter.countMessages` (`token-counter.ts:38`): `+
+IMAGE_TOKEN_ESTIMATE` per ref of a message.
+
+**D5 — agent.**
+- `SendOptions.attachments?: readonly AttachmentRef[]` (`session.ts:32`).
+- `Session.send` (`session.ts:132`): after the skill check, `const refs =
+  opts.attachments ?? []; if (refs.length > 0) checkAttachmentRefs(refs);`
+  (throws BEFORE anything is pushed). Then
+  `const pushed = text !== "" || refs.length > 0;` and push
+  `{ role: "user", content: text, ...(refs.length > 0 ? { attachments: [...refs] } : {}) }`
+  when `pushed`; pass `userMessage: pushed` (was `text !== ""`, `:150`).
+  The skill rule stays: a skill with empty text still rejects.
+- `AgentConfig.attachments?: AttachmentSource` (`agent.ts:485`). Every
+  `ChatRequest` the agent builds gets
+  `...(this.config.attachments ? { attachments: this.config.attachments } : {})`:
+  the loop request (`agent.ts:1178`), the step-limit final request (`:1477`),
+  the context count (`:1597`). Nothing wires a source yet (2b does).
+- `compact.ts` `renderMessage` (`:25-35`): append
+  ` [image: ${attachmentLabel(ref)}]` per ref, so the summary knows an image
+  existed. Compaction and `context_reset` keep NO images (owner Q6 = (a)).
+
+**D6 — providers.** New `packages/providers/src/images.ts` (exported from
+`index.ts`), pure except for `source.read`:
+
+```ts
+export const MAX_INLINE_IMAGES = 5;                       // owner Q4 (last K)
+export type ImagePart = { readonly kind: "image"; readonly mimeType: ImageMimeType; readonly base64: string };
+export type TextPart = { readonly kind: "text"; readonly text: string };
+export type ResolvedImages = ReadonlyMap<string, string>;  // id → base64, ONLY verified bytes
+/** Read the last `keep` distinct image refs of USER messages (newest first walk), verify, encode. */
+export async function resolveImages(req: ChatRequest, keep = MAX_INLINE_IMAGES): Promise<ResolvedImages>;
+/** A user message's parts, images first (D10), then its text if non-empty. */
+export function userParts(m: ChatMessage, images: ResolvedImages, vision: boolean, inlined: ReadonlySet<string>): (ImagePart | TextPart)[];
+/** Placeholder lines for refs on a NON-user message (never inlined). */
+export function strayRefsText(m: ChatMessage): string;
+```
+
+- `resolveImages`: no `req.attachments` → empty map. For each selected ref:
+  `bytes = await source.read(ref, req.signal)`; `null` → skip; keep only if
+  `bytes.length === ref.size` AND `createHash("sha256").update(bytes).digest("hex") === ref.id`;
+  base64 via `Buffer.from(bytes).toString("base64")`. Each distinct id read
+  ONCE. A throwing source propagates (the stream rejects before `fetch`).
+  Refs whose `mimeType ∉ IMAGE_MIME_TYPES` are never read.
+- `inlined` = the ids `resolveImages` SELECTED (selection is a separate pure
+  `selectInlineIds(messages, keep): Set<string>`, so `userParts` can tell
+  "older" from "unavailable").
+- Placeholder texts (exact; `L` = `attachmentLabel(ref)`), in the ref's slot:
+  | Case | Text |
+  |---|---|
+  | `vision === false` | `[image omitted: this model does not take images — L]` |
+  | mime not in `IMAGE_MIME_TYPES` | `[image omitted: unsupported type <mime> — L]` |
+  | not in `inlined` | `[image omitted: only the last 5 images are sent — L]` |
+  | selected, not in map | `[image unavailable — L]` |
+  | ref on a non-user message | same "unavailable" text, appended to `content` after `\n` (`strayRefsText`) |
+- Provider option `images?: boolean` on `AnthropicProviderConfig`
+  (default **true**), `OpenAIProviderConfig` (default **false**) and
+  `CreateModelProviderOptions` (passed through in `select-provider.ts:57-63`).
+  `vision = config.images ?? default`. When `vision === false`,
+  `resolveImages` is NOT called (no reads).
+- Both providers: `stream()` and `countTokens()` compute
+  `const images = vision ? await resolveImages(request) : EMPTY;` then call the
+  sync builder with `{ images, vision }` as a new optional LAST parameter
+  (default `{ images: EMPTY, vision: true }` so existing test calls compile).
+- Anthropic `buildPayload` (`:360`): a `user` message with
+  `hasAttachments` → `content: parts.map(p => p.kind === "image"
+  ? { type: "image", source: { type: "base64", media_type: p.mimeType, data: p.base64 } }
+  : { type: "text", text: p.text })` — never dropped even when `content === ""`.
+  Tool-result merge guard: keep a local `const toolTurns = new Set<object>()`
+  of the user messages created FOR tool results; merge into `prev` only if
+  `toolTurns.has(prev)` (was "any user message with array content", `:379`).
+  Non-user with refs: `content + strayRefsText(m)`.
+- OpenAI `toWireMessage` (`:292`): user with refs → `content: parts.map(p =>
+  p.kind === "image" ? { type: "image_url", image_url: { url: `data:${p.mimeType};base64,${p.base64}` } }
+  : { type: "text", text: p.text })`. Non-user with refs: `content + strayRefsText(m)`.
+
+**D7 — daemon.**
+- `proxy-model.ts` `toWireRequest` (`:59-72`): add
+  `...(m.attachments && m.attachments.length > 0 ? { attachments: m.attachments.map((a) => ({ id: a.id, mimeType: a.mimeType, size: a.size, ...(a.name !== undefined ? { name: a.name } : {}) })) } : {})`.
+  The pod sends refs only — never bytes (AGENTS §7).
+- `session-log.ts` emitter: `:106` `type: replaceEntryType(message)`; `:115`
+  and `:291` `type: appendEntryType(message)`; `replayFromBase` (`:341-342`)
+  handles the media types (use `isAppendEntry`).
+- `session-log-file.ts`: `laxEntry` (`:142`) — `case "media_message":` with
+  `"message"`, `case "media_replace":` with `"replace"`; owes check (`:291`)
+  `!isAppendEntry(entry)`; `segmentFromMessages` (`:514`)
+  `type: appendEntryType(message)`.
+
+**D8 — client.** `session-log-reader.ts`: owes check (`:156`)
+`!isAppendEntry(e)`; `case "message":` (`:173`) also `case "media_message":`.
+`remote-client.ts` unchanged: the pod's refs reach the laptop provider with no
+`attachments` source → placeholders, no laptop read (2b adds the scoped one).
+
+Not changed (documented limits): `hosted-session.ts` still refuses image
+prompts (`assertTextOnly`) — 2b. `tui` — 3b. Hooks' `new_messages`
+(`hooks.ts:719`) stay `{role, content}`. Sub-agents get text (`subagent.ts:434`).
+Title input uses text (`session-title.ts:64`): an image-only first message
+gives `firstUser: ""`, the reply still names it.
+
+### Files (dependency order)
+
+1. `packages/protocol/src/attachment.ts` (new) · `packages/protocol/src/index.ts`
+2. `packages/protocol/src/session.ts` (`ChatMessageSchema`) · `packages/protocol/src/model.ts` (`WireChatMessageSchema`)
+3. `packages/protocol/src/session-log.ts` (types, critical table, helpers, `projectEntry`, `canonicalMessage`)
+4. `packages/protocol/src/version.ts` (23) · tests pinning 22 · `packages/protocol/schema/protocol.json` (`bun run schema:export`)
+5. `packages/core/src/model.ts` · `packages/core/src/attachments.ts` (new) · `packages/core/src/index.ts` · `packages/core/src/token-counter.ts`
+6. `packages/providers/src/images.ts` (new) · `packages/providers/src/index.ts` · `anthropic-provider.ts` · `openai-provider.ts` · `select-provider.ts`
+7. `packages/agent/src/session.ts` · `packages/agent/src/agent.ts` · `packages/agent/src/compact.ts`
+8. `packages/daemon/src/proxy-model.ts` · `packages/daemon/src/session-log.ts` · `packages/daemon/src/session-log-file.ts`
+9. `packages/client/src/session-log-reader.ts`
+
+No `cli`, no `tui`, no `config` change.
+
+### Failure modes
+
+| Mode | What happens | Converges how | Pinned by |
+|---|---|---|---|
+| Silent drop at a mapper (*r2*–*r6*) | the reason for the task | D1, D6, D7; the 7-site list | T1, T6, T7, T8, T9, T13 |
+| **Version skew**, older peer/pod (`attach` can reuse an older injected binary) | an older peer would strip refs | bump 23 → `VersionMismatch` at `initialize` before any session traffic | T2 (version pin) + existing `version-mismatch.test.ts` |
+| Older build reads a `<uid>.jsonl` with images (laptop or `serve`) | unknown critical `media_message` | whole file refused loudly, file left untouched (existing path); text-only sessions still load | T4 |
+| Checkpoint drift with images | refs outside the digest would hide divergence | `canonicalMessage` includes refs when present; unchanged otherwise | T2 (literal pin) |
+| Model without vision | `images: false` (openai default) | placeholder text per ref, no reads; turn runs. Refusing up-front is 2b/3b (owner Q5) | T8, T9 |
+| Bytes missing (no source — the only state until 2b —, resume, pod gone) | — | `[image unavailable — L]`; the session never poisons (history resent every round) | T8, T9 |
+| Bytes wrong (corrupt store, a pod answering other bytes in 2b) | — | sha256 + size checked on every resolve → unavailable placeholder | T8 |
+| Transient read error / abort | source throws | stream rejects BEFORE `fetch`; history already holds the refs → retry works | T8 (fetch spy not called) |
+| HEIC / unknown type in a ref | schema accepts (free string) | never read; `unsupported type` placeholder. Entry points refuse it (`checkAttachmentRefs`; TUI in 3a) | T1, T8, T10 |
+| Huge / too many | `MAX_IMAGE_BYTES`, `MAX_ATTACHMENTS_PER_MESSAGE` refused at entry and by schema; only last 5 inlined per request | — | T1, T8, T10 |
+| Pod's untrusted output (2b onward; refs on any role, any ids) | laptop provider has no source in this task → nothing read; non-user refs → placeholder line; a malformed ref → strip parse fails → `InvalidParams` on that `model/stream` | loud for malformed, inert otherwise | T7, T8 |
+| Image-only prompt | was read as continuation (`session.ts:144`) | pushed when refs non-empty; `userMessage: true` | T10 |
+| Invalid ref at `Session.send` | — | `InvalidAttachmentError` before any push; history unchanged | T10 |
+| Tool result merged into a multimodal user turn (`anthropic :379`) | — | merge only into tool-built turns | T8 |
+| Compaction / `context_reset` | images dropped from the new history | summary transcript carries `[image: L]`; owner Q6 | T12 |
+| Context-usage stamp / repair on an image message | spreads keep refs (`agent.ts:1567`, `history-validity.ts:116,181`) | — | T11 |
+| Resume (`--resume`, `serve` reload, `/clear` fork) | refs load from the log (fork: `segmentFromMessages` emits media types) | bytes come with 4 (`attachments-durable`); until then placeholder | T4, T5 |
+| Sub-agents | parent images not forwarded (text prompt by contract) | documented | — |
+
+### Tests
+
+Property: **the verified bytes of every referenced image reach the provider's
+HTTP body, images-before-text, on every path (worker/serve provider and the
+pod tunnel); an image that cannot be sent reaches it as a visible placeholder,
+never as nothing; and the refs survive the log round trip, refusing older
+builds loudly.** "Schema accepts the field" alone is too weak.
+
+No `App` frame test in this sub-task: nothing user-visible changes (the daemon
+still refuses image prompts). 3b carries the frame tests (typing/pasting a
+path → chip → `[image: name]` row).
+
+Write each test first, show it RED on this branch's base, then implement.
+
+| # | File | Asserts | Red because |
+|---|---|---|---|
+| T1 | `protocol/test/attachment.test.ts` (new) | `ChatMessageSchema` and `WireChatMessageSchema` keep `attachments` deep-equal; reject bad id, size 0, `[]`, 6 refs, `text/plain`, a control char in `name`; accept `image/heic` (free string) | stripped (*r2*, *r3*) |
+| T2 | `protocol/test/session-log.test.ts` | `LOG_ENTRY_CRITICAL.media_message/media_replace === true`; `projectEntry` folds both; `canonicalMessage` of a no-ref message equals a pinned literal string computed on the base; with refs it differs; `PROTOCOL_VERSION === 23` | types absent |
+| T3 | `daemon/test/session-log.test.ts` | `commit` of a user message with refs emits `{type:"media_message", critical:true}` with refs; changing it in place emits `media_replace`; a text message still `message`; `replayFromBase` round-trips refs | emitter writes `message` |
+| T4 | `daemon/test/session-log-file.test.ts` + `session-log-store.test.ts` | a file `base(count 2)` + `media_message` + `message` loads with refs deep-equal; `segmentFromMessages` uses the media type; the store save→load round-trips refs; a file whose media entry is renamed to an unknown critical type is refused and left byte-identical | refs stripped / unknown type |
+| T5 | `client/test/session-log-reader.test.ts` | a page `base(count 1)` + `media_message` + `checkpoint` (digest from the daemon's `projectionDigest`) projects refs and flags NO drift | "base owes 1 messages, got media_message" |
+| T6 | `daemon/test/proxy-model.test.ts` | the batch AND chunked wire requests carry `attachments` deep-equal | *r5* |
+| T7 | `client/test/model-stream-attachments.test.ts` (new; copy `model-stream-stop-reason.test.ts`) | real `RemoteClient` serving `model/stream` and `model/streamChunked` with a fake laptop provider: `request.messages[i].attachments` deep-equal; `request.attachments === undefined` (a pod's refs read nothing on the laptop) | stripped (*r3*) |
+| T8 | `providers/test/anthropic-provider.test.ts` (injected `fetch` body) | 2 refs + text → `[image, image, text]`, `data` = base64 of the source bytes; `content:""` + ref → images only, message present; source `null` → unavailable placeholder; sha mismatch → placeholder; size mismatch → placeholder; `images:false` → no-vision placeholder and `read` never called; 6 refs across turns → oldest gets "only the last 5" text; `image/heic` → unsupported, never read; tool msg after a multimodal user msg → separate user turn; ref on an assistant msg → placeholder line; `read` once per distinct id; throwing source → stream rejects, fetch spy NOT called; `countTokens` body carries the same image blocks | no image blocks (*r6*) |
+| T9 | `providers/test/openai-provider.test.ts` | same core cases with `image_url` data URLs; default (no `images`) → no-vision placeholder, no reads | `content` is a string |
+| T10 | `agent/test/session.test.ts` | `send("", s, {attachments:[ref]})` appends `{role:"user", content:"", attachments:[ref]}` and runs a model round; `image/heic`, oversize, 6 refs, duplicate id → `InvalidAttachmentError`, history length unchanged, model never called; `send("hi")` message has no `attachments` key | continuation path |
+| T11 | `agent/test/context-awareness-loop.test.ts` | with `AgentConfig.attachments = src`, the loop request, the step-limit final request and the `countTokens` request all carry `attachments === src`; after a context-usage stamp the stored user message still has its refs | field absent |
+| T12 | `core/test/token-counter.test.ts`, `agent/test/compact.test.ts` | count(text+1 ref) = count(text) + 1600; the summariser transcript contains `[image: cat.png sha256:…]` | ignored |
+| T13 | `daemon/test/integration.test.ts` | pod shape: real `Connection` + `RemoteClient`, daemon model = `ProxyModelProvider` → fake laptop provider; `session/open{messages}` seeded with a ref message; a prompt turn → the laptop provider's `ChatRequest.messages` holds the ref deep-equal; `session/log` returns it as `media_message` | stripped at seed (*r2*) |
+
+Mutations (each must turn the named tests red; revert after):
+- drop `attachments` in `toWireRequest` → T6, T13
+- remove `attachments` from `WireChatMessageSchema` → T1, T7
+- emitter uses `"message"` for every message → T3, T4
+- remove the media cases from `projectEntry` → T2, T4, T5
+- make `canonicalMessage` always append the element → T2 (literal pin)
+- skip the sha256 check → T8 mismatch case
+- ignore `vision === false` → T8, T9
+- revert `Session.send` to `text !== ""` → T10
+- revert the tool-merge guard → T8 merge case
+- drop `attachments` from one agent `ChatRequest` site → T11
+
+Gate before done: `bun run check` (typecheck → lint → test), lint baseline
+clean (AGENTS §4, §6).
+
+### Owner questions
+
+Recommendation first in each.
+
+1. **Protocol bump.** (a) **Bump to 23 in this task** — required anyway by a
+   new critical log type, and closes the strip-silently skew with an older pod;
+   2a/2b then add methods/fields for free. (b) No bump; rely on capability
+   negotiation — leaves the older-peer silent strip open. (c) Bump in 2b with
+   the first producer — but the log types land here.
+2. **Persisted shape (a `critical: true` decision).** (a) **Two new critical
+   types `media_message` / `media_replace`** — older builds refuse only
+   sessions that contain images. (b) Bump the log header `schemaVersion` —
+   older builds refuse every file a new build writes. (c) A plain field on
+   `message` — older builds half-load (violates AGENTS §7).
+3. **How the TUI detects a dropped path (3a/3b).** (a) **A paste whose whole
+   content is 1..N image paths (escaped spaces, quotes, `file://`, `~`)
+   becomes chips; same at submit when the whole input is only image paths
+   (terminals that don't bracket a drop); plus `/attach <path>`.** A path
+   inside prose stays text (the user may mean the workspace file). (b) Any
+   token that is an existing image path, anywhere in the input. (c) Only
+   `/attach`.
+4. **Caps and downscale.** (a) **No client downscale in v1; ≤ 3.75 MiB raw per
+   image (≤ 5 MiB base64), ≤ 5 per message, last K = 5 inlined per request;
+   bigger → a clear "shrink it" error; downscale/HEIC convert as sub-task 6.**
+   (b) Client downscale to 1568 px now (needs `sips`/ImageMagick: platform
+   deps). (c) No caps, let the provider 4xx.
+5. **Model without vision.** (a) **`model.images` (default anthropic `true`,
+   openai `false`); TUI refuses before uploading and the daemon refuses the
+   prompt (2b/3b); the provider placeholder here is the backstop.** (b)
+   Placeholder only, the turn runs and the model says it can't see. (c) Send
+   anyway.
+6. **Images and compaction / `context_reset`.** (a) **They do not survive; the
+   summary transcript gets `[image: name]`.** (b) Re-attach the last K images
+   to the first post-compaction user message. (c) Keep all.
+7. **Parallel branches.** (a) **Allow 3a (new TUI files only) to run beside
+   1/2a/2b**; everything else strictly sequential. (b) Strictly one branch at
+   a time (AGENTS §10 as written).
+
+
+#### Owner answers (2026-11-12)
+
+- **Log on disk / `critical`:** (a) two NEW `critical: true` entry types `media_message` and `media_replace` (an older build refuses a session with images loudly; sessions without images stay readable by every build).
+- **Dropped path detection:** (a) a paste made only of image paths becomes attachments (chip), same at submit when the input holds only paths, plus explicit `/attach <path>`; a path inside a sentence stays text.
+- **Caps (owner override):** up to **15 MB per image**, NO client downscale for now (downscale stays sub-task 6, in TODO). Note for the executor: provider-side limits are lower than 15 MB for some providers (to verify) — a provider rejection must surface as a clear, specific error naming the image and the limit, never a generic failure; the per-message count and "last K images per request" keep the plan's recommendation (5 / 5).
+- **Q1** (a) bump `PROTOCOL_VERSION` to 23 in core (Mac and pods/serve updated together) · **Q5** (a) `model.images` flag, refuse before upload, placeholder as safety net · **Q6** (a) images do not survive compaction, the summary sees `[image: name]` · **Q7** (a) only 3a may run in parallel; the rest in sequence (owner-approved exception to AGENTS §10 for 3a).
+
+Plan approved for execution.
+
+## Execution
+
+*— deepseek (tentacle --profile deepseek), 2026-11-12*
+
+### Load-bearing check (re-run first, as the plan requires)
+
+**The SEVEN points are still the only ones — no eighth.** Proof, on this
+branch's base (27e8b44 + the doc commits):
+
+- `rg -n "role: m\.role|role: message\.role|content: m\.content|content: message\.content|role: msg\.role" packages --glob '!**/test/**' --glob '!**/node_modules/**'`
+  → the same hits the plan lists: `anthropic-provider.ts:383,392,409,419`,
+  `openai-provider.ts:293`, `proxy-model.ts:60-61`, plus the two documented
+  out-of-scope reads (`hooks.ts:719` — hook payload by contract;
+  `tools/src/skill.ts:105` — reads a tool result's *text*).
+- Two corroborating greps for a *new* rebuild site: every
+  `ChatMessageSchema`/`WireChatMessageSchema` use (`session.ts:51,80`,
+  `session.ts:642,808,991`, `session-log.ts:131,140`, `model.ts:19,33`,
+  `daemon-state-file.ts:260`) is a seed/log/state parse (a cast keeps the
+  object), and the only two field-by-field `.map((m) => ({` rebuilds under
+  `packages/*/src` are `hooks.ts:719` and `proxy-model.ts:59`.
+- `boundaries.ts` output is **identical to the Context** (*r0*–*r7*,
+  `PROTOCOL_VERSION = 22`, every boundary strips): the capability was still
+  missing, as the plan says.
+
+Conclusion: implement as written. No STOP was needed.
+
+### As-built, in the plan's order
+
+**1. Protocol.** New `packages/protocol/src/attachment.ts`:
+`ATTACHMENT_ID_RE`, `IMAGE_MIME_TYPES`, `MAX_ATTACHMENTS_PER_MESSAGE = 5`,
+`MAX_IMAGE_BYTES = 15 MiB` (owner override), `AttachmentRefSchema` (a free
+`image/*` string, never an enum), `AttachmentsSchema`, `isKnownImageType`.
+`attachments` added to `ChatMessageSchema` and `WireChatMessageSchema` (both
+still strip). `session-log.ts`: `LogMediaMessageEntrySchema` /
+`LogMediaReplaceEntrySchema` (both `critical: true`), added to
+`KnownLogEntrySchema` and `LOG_ENTRY_CRITICAL`; `projectEntry` folds them;
+helpers `hasAttachments`, `appendEntryType`, `replaceEntryType`,
+`isAppendEntry`, `appendEntryBody`/`replaceEntryBody`; `canonicalMessage`
+appends ONE element only when refs are present (a no-ref message hashes
+byte-identically — the literal and digest pins are unchanged).
+`PROTOCOL_VERSION = 23` with its comment line;
+`packages/protocol/schema/protocol.json` regenerated.
+
+**2. Core.** `model.ts`: `AttachmentRef` re-exported, `ChatMessage.attachments`,
+`ChatRequest.attachments` (`AttachmentSource`, non-serialisable like `signal`).
+New `core/src/attachments.ts`: `InvalidAttachmentError`,
+`checkAttachmentRefs`, `formatBytes`, `IMAGE_TOKEN_ESTIMATE = 1600`,
+`attachmentLabel`. `HeuristicTokenCounter.countMessages` charges 1600 per ref.
+
+**3. Providers.** New `src/images.ts`: `MAX_INLINE_IMAGES = 5`,
+`selectInlineIds`, `resolveImages` (sha256 + size verified, each distinct id
+read once, a throwing source propagates before `fetch`), `userParts` (images
+first), `strayRefsText`, the placeholder table. Both providers: an `images?`
+option (anthropic default **true**, openai default **false**), an
+`imageOptions()` that reads nothing when `vision === false`, image content
+blocks (`image`/`base64` vs `image_url` data URLs), anthropic's tool-merge
+guard now keyed on the turns it created (`toolTurns`), and `select-provider.ts`
+passing `images` through.
+
+**4. Agent.** `SendOptions.attachments`; `Session.send` checks the refs BEFORE
+anything is pushed (`InvalidAttachmentError`) and treats
+`text !== "" || refs.length > 0` as "a prompt was sent" (`userMessage: pushed`),
+so an image-only prompt starts a turn. `AgentConfig.attachments` carried on all
+three `ChatRequest` sites (the loop, the step-limit final request, the context
+count). `compact.ts` `renderMessage` appends ` [image: <label>]`.
+
+**5. Daemon.** `toWireRequest` spreads refs (never bytes, no `name` key when
+absent); the emitter uses `appendEntryBody`/`replaceEntryBody` in `commit` and
+`segment`; `replayFromBase` folds both media types; `session-log-file.ts`'s
+`laxEntry`, owes check and `segmentFromMessages` know them.
+
+**6. Client.** `session-log-reader.ts`: the owes check is `!isAppendEntry(e)`
+(was `e.type !== "message"`) and the seed-count switch counts `media_message`.
+
+No `cli`, no `tui`, no `config` change — as the plan says.
+
+### Drift from the Implementation (and why)
+
+1. **`ChatMessageSchema` became a shape factory** (`chatMessageShape()`, like
+   `envelopeShape()` in `session-log.ts`) plus a new named
+   `MessageWithAttachmentsSchema`. The plan's `.extend()` produced a schema the
+   committed-JSON-Schema exporter refuses ("non-name `$ref` (a reused anonymous
+   schema)"), because `extend` reuses `ChatMessage`'s field instances. Fresh
+   instances keep the export green; the wire shape is unchanged.
+2. **The entry bodies are built by two helpers with one documented cast each**
+   (`appendEntryBody`/`replaceEntryBody`), not by a `type:`-only helper. A
+   boolean cannot narrow `message` to the media schema's REQUIRED
+   `attachments`, and `packages/daemon` cannot see such a cast at its call
+   sites. The invariant (never `attachments: []`) holds by construction in
+   `Session.send`.
+3. **`strayRefsText(message, vision, images)`** takes no `inlined` set: a
+   non-user message's refs are never selected, so passing the request's
+   selection made them read "only the last 5 images are sent" instead of
+   "unavailable". The function marks its OWN ids as selected, so the true reason
+   is shown. Found by T8; fixed in the code, not the test.
+4. **`packages/providers/package.json` gained `@tentacle/protocol`**, and
+   `packages/client/package.json` gained `@tentacle/agent` (dev). `images.ts`
+   needs `isKnownImageType`/`MAX_IMAGE_BYTES`; core re-exports the caps so
+   `agent` did not need the dependency too.
+5. **The shared test fixture (`daemon/test/support/log-fixture.ts`)** now emits
+   the media types. Its `msg`/`replace` claimed to be "the real envelope"; a
+   fixture writing `message` for a ref-carrying message would have hidden the
+   very bug this task fixes.
+6. **T4's "file left untouched" is proved in two files**
+   (`attachments-log-file.test.ts` for the parser, `attachments-store.test.ts`
+   for the store's byte-identity), not one — the store path is what an older
+   build actually runs.
+7. **T13 lives in `packages/client/test/pod-attachments-e2e.test.ts`** (not
+   `daemon/test/integration.test.ts`, as the plan's table says): it needs a real
+   `RemoteClient`, and `@tentacle/daemon` cannot import `@tentacle/client` (the
+   dependency runs the other way).
+8. **`Worker`/`serve` persistence needed no change**: the store, the fork
+   (`segmentFromMessages`) and the reader all go through the two helpers, which
+   is why they were introduced.
+9. **The `name` control-character check is `\p{Cc}` on a plain regex**, not
+   `.refine()`. Biome flags a `\u0000-\u001f` range as a likely typo, and a
+   `.refine()` wraps the string in a `ZodEffects`, which the JSON Schema
+   exporter cannot represent (it failed the export — caught by the full gate,
+   not by a narrow test). `\p{Cc}` is the same predicate, stays a plain
+   `ZodString`, and exports.
+10. **`cli/test/connect.test.ts`'s skew message derives `PROTOCOL_VERSION`**
+    instead of hard-coding `22`: the assertion is about the WORDING, and the
+    bump had made it fail on a literal (same class as the other 22-pins the
+    plan does list, found only by the full suite).
+
+### Tests (new files unless noted)
+
+| # | File | Result |
+|---|---|---|
+| T1 | `protocol/test/attachment.test.ts` | 12 pass |
+| T2 | `protocol/test/session-log.test.ts` (+5 cases); the 22-pins in `wire-stop-reason`, `dsml-leak-kind`, `updates`, `subagent-panel`, `truncated-kind` and `daemon/test/version-mismatch.test.ts` moved to 23 | pass |
+| T3 | `daemon/test/attachments-log.test.ts` | 7 pass |
+| T4 | `daemon/test/attachments-log-file.test.ts` (5) + `daemon/test/attachments-store.test.ts` (4) | pass |
+| T5 | `client/test/session-log-reader-attachments.test.ts` | 4 pass |
+| T6 | `daemon/test/attachments-log.test.ts` (T6 block) | pass |
+| T7 | `client/test/model-stream-attachments.test.ts` | 5 pass |
+| T8 | `providers/test/anthropic-images.test.ts` | 17 pass |
+| T9 | `providers/test/openai-images.test.ts` | 9 pass |
+| T10 | `agent/test/session-attachments.test.ts` | 11 pass |
+| T11 | `agent/test/loop-attachments.test.ts` | 4 pass |
+| T12 | `core/test/token-counter.test.ts` (+2) + `agent/test/compact-attachments.test.ts` (4) | pass |
+| T13 | `client/test/pod-attachments-e2e.test.ts` | 1 pass |
+
+Failure modes covered, as the plan lists them: an older peer/pod refused by the
+version bump (the 23 pins + the existing `version-mismatch` suite); an older
+build refusing a session with media entries loudly and leaving the file
+byte-identical (T4 ×2); a model without vision (T8/T9 `images: false` and the
+openai default); an oversized image refused with a message naming it and the
+limit (T10); compaction/`context_reset` (T12); sub-agents (unchanged by design:
+a text prompt, `subagent.ts:434`); resume of a session with images (T4 store,
+T5 reader, T13).
+
+### Mutations (non-vacuity — each reverted; `diff` against a saved copy confirmed)
+
+| Mutation | Killed |
+|---|---|
+| `appendEntryBody`/`replaceEntryBody` always return the plain type | 8 fail: T3 ×3, T4 ×3, T4-store ×1, T13 |
+| the anthropic builder keeps only text parts | 5 fail: T8 image-first, image-only, default-vision, last-5, countTokens |
+| anthropic ignores `images: false` (`vision = true`) | 1 fail: T8 "no-vision placeholder and NOT ONE READ" |
+| openai default becomes `vision = true` | 3 fail: T9 no-vision ×3 |
+| `toWireRequest` drops `attachments` | 6 fail: T6 ×2, T7 ×3, T13 |
+| `resolveImages` skips the sha256 check | 2 fail: T8 and T9 sha-mismatch |
+| `Session.send` back to `text !== ""` | 1 fail: T10 image-only prompt |
+
+### Gate
+
+- `bunx tsc --noEmit` — clean.
+- `bun run lint` (`biome check .`) — clean, 909 files, no fixes applied (the
+  committed baseline: 0 errors, 0 warnings).
+- `bun test` — **7001 pass, 3 skip, 0 fail** across 511 files (~306 s). The 3
+  skips are the documented opt-ins (live-k8s, live-docker, the real-socket
+  keepalive).
+- `packages/protocol/schema/protocol.json` regenerated (`bun run schema:export`)
+  and the drift gate passes.
+- `apps/mobile` was **not** typechecked: `tsc -p apps/mobile` needs its own
+  install, which is absent in this worktree, so `bun run typecheck`'s second
+  half did not run. Unverified here; nothing in this change touches `apps/`.
+- **Unverified:** nothing reached the real provider HTTP endpoints — every
+  provider assertion is on the captured request body via an injected `fetch`.
+  A live end-to-end image send needs the producer (`2b`/`3b`), which this task
+  deliberately does not add.
+
+### Round 1 (fix) — H1, M1, M2, M3
+
+*— deepseek (tentacle --profile deepseek), 2026-11-12*
+
+All four findings applied in the reviewer's order, each with the fix it named.
+Every new test was shown RED on the un-fixed code (by mutation where the fix
+was already in place — noted per finding).
+
+**H1 — a per-provider image cap, checked before any read.** A second cap now
+exists beside the entry-point bound (`MAX_IMAGE_BYTES`, 15 MiB):
+`maxImageBytes`, on `ImageBuildOptions`, `AnthropicProviderConfig`,
+`OpenAIProviderConfig` and `CreateModelProviderOptions`, with defaults
+`ANTHROPIC_MAX_IMAGE_BYTES = 3_932_160` (5 MB of base64 ⇒ 3.75 MiB raw, per
+Anthropic's documented per-image cap — **TO VERIFY** against the live API, as
+the owner said) and `OPENAI_MAX_IMAGE_BYTES = 5 MiB` (deliberately
+conservative: the model behind an OpenAI-compatible URL is unknown).
+`sendable()`/`resolveImages()` apply it, so an over-limit image is **never
+read**; `placeholder()` names the image AND the model's limit
+(`[image omitted: 10 MB is over this model's 3.8 MB limit — huge.png
+sha256:…]`). Nothing else had to change to avoid the poisoned session: the
+placeholder is in the message's slot, so the history stays valid and the next
+turn is built the same safe way.
+- Config override per model: `model.maxImageBytes` (skipped by `models`),
+  `models.*.maxImageBytes`, threaded `schema.ts → resolve → models → load →
+  cli/model-provider.ts → select-provider.ts`; documented in `key-docs.ts`
+  (both entries) and the README table regenerated (`bun run docs:config`).
+- `userParts`/`strayRefsText` now take the whole `ImageBuildOptions` (one
+  parameter instead of three, so a new cap cannot be forgotten at a call site) —
+  drift 2 below.
+- Tests (`anthropic-images.test.ts` +3, `openai-images.test.ts` +1): a 10 MB
+  PNG on anthropic → no image block in the body, `read` never called, the named
+  limit; a 4 MiB image blocked by default and sent with
+  `maxImageBytes: 8 MiB`; the openai 6 MiB default. The poisoned-session case is
+  the reviewer's scenario C end to end: a fake endpoint that 400s on any
+  `"type":"image"`, two turns over the same history → **both** answer `ok`, no
+  request carries the image, both name the limit, zero reads.
+- **RED**: reverting `sendable` to ignore `max` (mutation E) fails 4 of these.
+
+**M1 — the sidecar's version tracks its tail's refs.** `sidecarOf` stamps
+`schemaVersion: 2` only when some `tail` message `hasAttachments`, else 1
+(`DAEMON_STATE_VERSION = 2`, `DAEMON_STATE_VERSION_NO_MEDIA = 1`); the reader
+accepts `DAEMON_STATE_VERSIONS = [1, 2]` and additionally refuses a **v1 file
+that carries refs** (it must be 2 — the older build's silent strip is exactly
+what the bump prevents). An older daemon's `!== 1` check then refuses the one
+session loudly and leaves both files untouched, which mirrors the media entry
+rule.
+- Tests (`attachments-store.test.ts`, new M1 block, 4): stamp 2 with refs / 1
+  without; both versions read, refs preserved, a v2 file without refs accepted;
+  the older-daemon refusal (v1-only) naming the version, plus the v2 reload
+  through `parseSidecar` → `rebuild` → `decodeFiles` carrying the refs; a v1
+  file WITH refs refused. `persistence.test.ts`'s "another state version" case
+  moved from 2 to 3 (2 is now valid).
+- **RED**: stamping always 1 fails 3 of the 4.
+
+**M2 — a plain `message`/`replace` may not carry refs.** New
+`MessageWithoutAttachmentsSchema` (`chatMessageShape()` +
+`attachments: z.undefined()`), used by `LogMessageEntrySchema` and
+`LogReplaceEntrySchema`; `media_message`/`media_replace` keep
+`MessageWithAttachmentsSchema`. A pod-sent `message` with refs is now a
+malformed entry: the laptop's reader (`KnownLogEntrySchema` →
+`parseEntry`) refuses the read with `malformed message entry`, so the store
+never writes it — and nothing can be half-loaded later.
+- Two follow-on edits the export forced: `SUPPORTED_KINDS` gains
+  `ZodUndefined` (it emits `{"not":{}}`, the one shape that accepts NOTHING),
+  and `UNKNOWN_ALLOWED` lists that inner `not` pointer with the reason.
+  `protocol.json` regenerated.
+- `appendEntryBody`/`replaceEntryBody` cast through `MessageWithoutAttachments`
+  (a `WireChatMessage` may carry refs; the body type may not — the invariant is
+  now in the TYPE, not only in the boolean).
+- Tests: `protocol/test/plain-entry-refs.test.ts` (new, 6) — the reviewer's
+  repro A shape fails `KnownLogEntrySchema`, the error path is
+  `message.attachments`, `replace` too, a JSON round trip of an absent key still
+  passes, both media types still accept refs, and the two emitter helpers keep
+  the invariant; plus `session-log-reader-attachments.test.ts` +1 (a forged
+  plain entry carrying refs → `malformed message entry`, not a projection).
+- **RED**: switching both schemas back to `ChatMessageSchema` fails 3 of 6
+  (protocol) and 1 of 5 (reader).
+
+**M3 — the tool-merge guard test is now real.** The case is the reviewer's
+shape: `user("look", [one])` followed DIRECTLY by the tool message (no
+`assistant` in between, which is what made `prev` the image turn), asserting 2
+messages, `messages[0]` the unchanged image turn, `messages[1]` its own
+`tool_result` turn.
+- **RED**: reverting the guard to `prev.role === "user" && Array.isArray(prev.content)`
+  → 1 fail, `Received length: 1` (the `tool_result` merged into the image turn).
+
+**Signature.** `## Execution`'s signature said `claude-sonnet-4-5`; the
+executor was DeepSeek. Corrected.
+
+### Mutations run this round
+
+The plan's ten (all re-run or completed here; both of the two the first
+Execution skipped are now covered), plus three for this round's fixes.
+
+| # | Mutation | Killed |
+|---|---|---|
+| 1 | `toWireRequest` drops `attachments` (proxy-model) | 3 fail: T6 ×2, T13 |
+| 2 | `ChatMessageSchema` loses `attachments` | 11 fail: T1 ×11 |
+| 3 | `appendEntryBody` always returns `message` | 4 fail: T3/T4 |
+| 4 | `projectEntry` drops the `media_message` case | 6 fail: T2, T4 ×2, T5 ×3 |
+| 5 | `canonicalMessage` always appends the refs element | 3 fail: C9 vector pin, no-ref byte-identity, refs element |
+| 6 | `resolveImages` skips the sha256 check | 2 fail: T8 and T9 mismatch |
+| 7 | anthropic ignores `images: false` (`vision = true`) | 1 fail: T8 no-vision + NOT ONE READ |
+| 8 | `Session.send` back to `text !== ""` | 1 fail: T10 image-only prompt |
+| 9 | **the tool-merge guard reverted** (the plan's skipped one) | 1 fail: T8 merge case |
+| 10 | one agent `ChatRequest` site drops `attachments` | 1 fail: T11 |
+| 11 | **H1**: `sendable` ignores the model cap | 4 fail: the two cap tests, the override, the poisoned-session case |
+| 12 | **M1**: the sidecar stamps 1 always | 3 fail: stamp, both-versions, older-daemon |
+| 13 | **M2**: both plain schemas back to `ChatMessageSchema` | 3 fail (protocol) + 1 fail (reader forge) |
+
+Restored by copying saved files back; `git status` shows only the intended
+files.
+
+### Gate (round 1)
+
+- `bunx tsc --noEmit` — clean.
+- `bun run lint` (`biome check .`) — clean, 910 files, **0 errors 0 warnings**
+  (the baseline; `biome check --write` was applied once for formatting/import
+  order in the nine touched files).
+- `bun test` — **7016 pass, 3 skip, 0 fail** across 512 files (~308 s). The 3
+  skips are the documented opt-ins (live-k8s, live-docker, the real-socket
+  keepalive). Two existing tests moved because a version number they pinned as
+  "unreadable" is now readable: `daemon/test/persistence.test.ts` (2 → 3) and
+  `cli/test/serve-persistence.test.ts`'s A11 `newer` record (2 → 3) — both are
+  the `DAEMON_STATE_VERSIONS` set, and 2 is the image-refs version now.
+- `apps/mobile` was NOT typechecked (its deps are absent in this worktree), as
+  in the first Execution: nothing here touches `apps/`.
+- **Unverified:** `ANTHROPIC_MAX_IMAGE_BYTES` is Anthropic's documented 5 MB
+  per-image payload, converted to 3.75 MiB raw. Neither figure was checked
+  against the live API in this round. It is deliberately the SAFE direction (a
+  wrong-but-lower cap costs a placeholder, never a 400 loop).
+
+### Drift from the Investigation (round 1)
+
+1. **`model.maxImageBytes` reaches the wire through six files** (schema →
+   resolve → models → load → cli → select-provider), more than the review's
+   "put it on `AnthropicProviderConfig`/`OpenAIProviderConfig`/
+   `CreateModelProviderOptions`" named. The extra files are what makes it a
+   CONFIG override per model rather than a code constant; the review's wording
+   asks for both, and a key that `schema.ts` rejects would not be an override.
+   `cli/test/explain.test.ts`'s sub-key counts moved (`model` 9→10, `models`
+   10→11) because two keys were added — the same class as the 22-pins the first
+   Execution hit.
+2. **`userParts`/`strayRefsText` take `ImageBuildOptions`** instead of
+   `(images, vision, inlined)` / `(vision, images)`. The cap is a fourth thing a
+   placeholder needs; passing the options object means a future field (a fifth
+   reason) cannot be silently dropped at a call site. Call sites: 2.
+3. **`parseSidecar` refuses a v1 file that carries refs**, which the review did
+   not ask for. Without it a hand-edited or older-tool-written file could still
+   half-load; with it the invariant is "a version stamp and its content agree",
+   checkable at the reader. No file this build writes hits it.
+
+## Review
+
+*(empty)*
+
+## Review (Opus)
+
+*— claude-opus-5-5, 2026-11-12*
+
+Fresh-context adversarial pass, one round, HIGH/MEDIUM only. Read: AGENTS §7
+(persistence, protocol, pod trust) and §9, this doc, `attachments.md`
+§Promotion, `git diff main...HEAD`.
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 3 MEDIUM).
+
+### Gate (re-run here)
+
+- Narrow: the 14 attachment test files → 123 pass, 0 fail.
+- Full `bun test` → **7001 pass, 3 skip (the opt-ins), 0 fail**, 511 files.
+- `bunx tsc --noEmit` clean; `bun run lint` clean (909 files). `tsc -p apps/mobile`
+  NOT run: the `apps/mobile` deps are not installed in this worktree.
+- Mutations run by me, restored by copying back saved files; `git status` clean:
+  - `canonicalMessage` always appends the refs element → 4 fail (C9 vector pin,
+    no-ref byte-identity, the refs-element case, the `note` digest test). **Killed.**
+  - Anthropic tool-merge guard back to `prev.role === "user" && Array.isArray(prev.content)`
+    → **0 fail. Survived** (M3).
+
+### What holds
+
+- (1) Load-bearing grep re-run: no eighth field-by-field rebuild. The new hits
+  are all *constructors* of fresh text messages (agent loop nudges,
+  `context-reset.ts:73`, `subagent.ts:434`, `cli/main.ts:1931`), as the plan says.
+- (2) An older build meets `media_message` as an unknown critical type: the whole
+  file is refused, untouched (`session-log-file.ts:240-246`). Text-only sessions
+  still write `message`, and their digest is byte-identical (mutation above).
+  The fork (`segmentFromMessages`), `SessionLog.commit/segment`, `replayFromBase`,
+  `laxEntry`, the owes checks (file and reader) all know the media types.
+- (3) `PROTOCOL_VERSION` 23, both schemas (`ChatMessageSchema`,
+  `WireChatMessageSchema`) carry refs, and the committed JSON Schema is regenerated.
+  An older peer fails at `initialize` (the existing version-mismatch path).
+- (4) A pod's refs reach the laptop provider with `request.attachments`
+  undefined (T7), so the laptop reads nothing. Refs that come back are
+  sha256-checked and size-checked before they are inlined (`images.ts:118-124`).
+- (6) Compaction labels only, `context_reset` builds new text, the token
+  estimate is charged per ref, sub-agents get text. All as the owner decided.
+
+### Findings
+
+**H1. The owner's binding provider-limit requirement is not implemented, and
+Execution reports it as done.** `packages/providers/src/images.ts:81` (`sendable`)
+and `:147` check only the global `MAX_IMAGE_BYTES` (15 MiB). No provider
+has its own limit. `anthropic-provider.ts:135` / `openai-provider.ts:162` inline
+whatever passes.
+*Scenario* (repro below, C): a verified 10 MB PNG on Anthropic puts
+13,981,016 base64 bytes into the body. Anthropic documents a 5 MB per-image cap
+(to verify, as the owner said). The API answers a 400 for that image, as a generic
+`ModelRequestError` that names neither the image nor the limit. The history is
+resent every round, and the image stays among the last 5, so **every later turn
+400s**: a poisoned session (the class AGENTS warns about). Execution's
+"oversized image refused with a message naming it and the limit (T10)" covers
+only > 15 MiB at `Session.send`.
+*Fix:* add a per-provider `maxImageBytes`. Put it on `AnthropicProviderConfig` /
+`OpenAIProviderConfig` / `CreateModelProviderOptions`. Anthropic's default
+comes from its documented cap (e.g. 5 MiB of base64 ⇒ 3,932,160 raw; verify).
+OpenAI-compatible endpoints get their own default. Check it in `sendable()`
+(never read) and in `placeholder()` →
+`[image omitted: 10 MB is over this model's 3.75 MB limit — <label>]`. Export
+the effective limit so 2b/3b refuse at entry with the same text. Test (red
+first): a 10 MB ref on anthropic → that placeholder, `read` never called, the
+body has no image block.
+
+**M1. The `serve` sidecar `tail` strips refs silently on an older build.**
+`packages/daemon/src/daemon-state-file.ts:258-264` parses `tail` (a prompt
+accepted but not yet committed) with `ChatMessageSchema`, and
+`DAEMON_STATE_VERSION` stays 1 (`:42`).
+*Scenario* (reachable from 2b): `serve` accepts an image prompt and crashes before
+the commit. The log has no `media_message` yet, and the sidecar tail holds the
+refs. An older daemon then reloads the store. The log loads (no unknown type),
+the old schema strips `attachments` from the tail, and `:388`/`reconcileOnReload`
+appends it as a plain `message`. That is a silent half-load: the turn re-runs
+without the image. This breaks §7 "never half-loads" on the one on-disk record
+this plan did not cover (the failure-mode table says "laptop or `serve`").
+*Fix:* write the sidecar with `schemaVersion: 2` only when some tail message
+`hasAttachments`, else 1. The reader accepts {1, 2}. An older build then refuses
+that one session loudly and leaves its files untouched (the existing path at
+`:233-237`), which mirrors the media-entry rule. Tests: a tail with refs is
+written as v2, without refs as v1, and a v1-only reader refuses v2 and leaves
+the files byte-identical.
+
+**M2. Plain `message` / `replace` entries still accept `attachments`, so the
+media rule holds only by convention.** `packages/protocol/src/session-log.ts:132,140`
+use `ChatMessageSchema`, which now has `attachments` optional.
+*Scenario* (repro A): a pod (not trusted) returns `{type:"message",
+message:{…, attachments:[ref]}}` from `session/log`. The laptop validates it
+(`session-log-reader.ts:263`) and writes it verbatim (`session-log-store.ts:702`,
+`entryLines`). The laptop `<uid>.jsonl` now holds a `message` with refs. An older
+laptop build loads it and strips the refs: a half-load of data the laptop
+"validated". The same applies to any future emitter that skips `appendEntryBody`.
+*Fix:* give `message`/`replace` a message shape that refuses refs (a
+`chatMessageShape()` variant with `attachments: z.undefined()`, or a post-parse
+`hasAttachments` rejection in the reader and `parseLogFile` if the exporter
+refuses `z.undefined`). Such an entry is then a loud "malformed entry". Test:
+that entry fails `KnownLogEntrySchema`, and the store refuses the read (red
+on this branch).
+
+**M3. The tool-merge guard test is vacuous (§9).**
+`packages/providers/test/anthropic-images.test.ts:266-284` puts an `assistant`
+message between the image turn and the tool message, so `prev` is never the
+multimodal turn. The plan's required mutation ("revert the tool-merge guard →
+T8") survives (above), and Execution's mutation table leaves it out.
+*Fix:* put the tool message directly after `user("look", [one])`, assert 2
+messages, `messages[0]` = the unchanged image turn and `messages[1]` = its own
+`tool_result` turn. Show it red with the old condition.
+
+### Repro (A, C)
+
+`bun /Users/gmeghnag/tentacle/.tentacle/tmp/attachments/review/repro.ts`
+(it imports the worktree's `protocol`/`providers`/`session-log-file.ts` by
+relative path): a plain `message` entry with a ref goes through
+`KnownLogEntrySchema.safeParse`, then `entryLines`. Then an Anthropic provider
+with an injected `fetch` streams one 10 MiB ref from a source that returns the
+matching bytes.
+
+```
+A parse: true {"type":"message",...,"critical":true,"message":{"role":"user","content":"hi","attachments":[{"id":"aaaa…","mimeType":"image/png","size":10}]}}
+C inline base64 bytes sent: 13981016
+```
+
+### How the implementing model behaved
+
+It followed the plan closely. It ran the load-bearing check first and
+documented every drift with a reason (schema factory for the exporter, T13
+moved for the dependency direction). It ran 7 real mutations. Gaps: it skipped
+2 of the plan's 10 mutations (one would have caught M3), read the owner's
+"provider limit" answer as satisfied by the global 15 MiB check (H1), and
+signed Execution as `claude-sonnet-4-5` although the executor was DeepSeek. The
+signature should name the actual model (AGENTS §10).
+
+## Review round 2
+
+*— claude-opus-5-5, 2026-11-12*
+
+Verifies the `### Round 1 (fix)` commit `8d57a47` against the round-1 findings.
+HIGH/MEDIUM only.
+
+**Verdict: PASS.** H1, M1, M2 and M3 are closed. No regression found in what
+round 1 confirmed.
+
+### Gate (re-run here)
+
+- Full `bun test` → **7016 pass, 3 skip (the opt-ins), 0 fail**, 512 files.
+- `bunx tsc --noEmit` clean. `bun run lint` clean (910 files). `tsc -p apps/mobile`
+  was not run: the `apps/mobile` deps are not installed in this worktree.
+- Repro (`.tentacle/tmp/attachments/review/repro.ts`, re-run on HEAD):
+  ```
+  A parse: false
+  C inline base64 bytes sent: 0
+  C placeholder: [image omitted: 10 MB is over this model's 3.8 MB limit — image/png sha256:e5b844cc57f5] reads: 0
+  ```
+- Mutations run by me. Both files were restored from saved copies, and
+  `git status` is clean:
+  - Anthropic merge guard `toolTurns.has(prev)` → `true`: 1 test fails (the
+    rewritten M3 test). **Killed.**
+  - `sidecarOf` always writes `schemaVersion: 1`: 3 M1 tests fail (v2 when
+    refs, read both, older reader refuses v2). **Killed.**
+
+### Per finding
+
+- **H1 closed.** `images.ts` adds a per-provider cap: `ANTHROPIC_MAX_IMAGE_BYTES`
+  = 3,932,160, i.e. 5 MiB as base64 (still marked TO VERIFY). The
+  OpenAI-compatible cap is 5 MiB. `model.maxImageBytes` overrides it and
+  `effectiveMaxImageBytes` bounds it to 15 MiB. `sendable()` checks it before
+  any read, and `placeholder()` names the image and the limit. Repro C: no
+  read, no inline bytes, and a placeholder takes the image's slot, so the
+  session can no longer be poisoned. The config is wired through `schema` →
+  `resolve` → `load` → `models` → `cli/model-provider.ts` →
+  `createModelProvider`, sub-agent model entries included.
+- **M1 closed.** The state file is written as v2 exactly when a tail message
+  `hasAttachments`, else as v1. The reader accepts both. A v1 file with refs
+  is refused. An older v1-only build refuses v2 loudly and leaves the files
+  untouched (pinned by test and by the mutation above).
+- **M2 closed.** `message`/`replace` use `MessageWithoutAttachmentsSchema`
+  (`attachments: z.undefined()`, exported as `{"not":{}}` and allow-listed in
+  the exporter walker). A pod's plain entry carrying refs now fails
+  `KnownLogEntrySchema` (repro A). The reader and `parseLogFile` refuse it as
+  malformed, so it is never written. An `attachments: []` on a plain message
+  would also be refused. That cannot happen by construction: `Session.send`
+  spreads refs only when non-empty, the wire schema has `min(1)`, and
+  `toWireRequest` omits an empty list.
+- **M3 closed.** The test now puts the tool message right after the image turn.
+  The guard mutation turns it red.
+- **`packages/protocol/src/session.ts`**: the round-1 diff (`HEAD~1..HEAD`) is
+  exactly +20 lines: the doc comment plus `MessageWithoutAttachmentsSchema` and
+  its type. Nothing else changed, and the working tree matches HEAD. The
+  disclosed `git checkout --` and `git show HEAD:` restore left no residue.
+
+### Non-blocking (not a finding)
+
+`formatBytes` rounds 3,932,160 to "3.8 MB". An image between about 3.75 and
+3.85 MiB would read "3.8 MB is over this model's 3.8 MB limit". Showing the
+limit with two decimals, or in exact bytes, would make the message unambiguous.
+Cosmetic: it fits in a 3b touch-up.

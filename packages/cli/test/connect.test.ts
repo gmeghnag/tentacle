@@ -667,7 +667,9 @@ describe("connect: the reconnecting client (docs/feat/client-reattach-frontends.
         },
       }),
     ).rejects.toThrow(
-      'protocol version mismatch: client 22 (tentacle 0.3.0+1a2b3c4d5e6f), daemon 16 (tentacle 0.3.0) — the client is a newer build than any release: install the same build on that host (build this source there, then run "tentacle serve")',
+      // `PROTOCOL_VERSION` (not a literal): this assertion is about the WORDING,
+      // and a bump must not fail it (docs/feat/attachments-core.md, 23).
+      `protocol version mismatch: client ${PROTOCOL_VERSION} (tentacle 0.3.0+1a2b3c4d5e6f), daemon 16 (tentacle 0.3.0) — the client is a newer build than any release: install the same build on that host (build this source there, then run "tentacle serve")`,
     );
     expect(mounted).toBe(false);
   });

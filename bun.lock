@@ -78,6 +78,7 @@
         "@tentacle/transport": "workspace:*",
       },
       "devDependencies": {
+        "@tentacle/agent": "workspace:*",
         "@tentacle/daemon": "workspace:*",
         "@tentacle/tools": "workspace:*",
         "zod": "3.23.8",
@@ -162,6 +163,7 @@
       "version": "0.4.0",
       "dependencies": {
         "@tentacle/core": "workspace:*",
+        "@tentacle/protocol": "workspace:*",
       },
     },
     "packages/tools": {

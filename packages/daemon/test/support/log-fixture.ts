@@ -6,7 +6,13 @@
  * a `ReadBack` would (`read.from` = the head the read continued).
  */
 import type { ChatMessage } from "@tentacle/core";
-import { type KnownLogEntry, type LogCursor, projectEntry } from "@tentacle/protocol";
+import {
+  type KnownLogEntry,
+  type LogCursor,
+  appendEntryBody,
+  projectEntry,
+  replaceEntryBody,
+} from "@tentacle/protocol";
 import type { LogMeta, LogWrite } from "../../src/session-log-store.ts";
 
 export const META: LogMeta = { cwd: "/w", model: "m", createdAt: 1 };
@@ -47,10 +53,12 @@ export class FakeLog {
     ];
   }
   msg(message: ChatMessage): KnownLogEntry {
-    return this.next({ type: "message", critical: true, message });
+    // The real emitter's choice: a message carrying image refs rides
+    // `media_message` (docs/feat/attachments-core.md); the fixture follows it.
+    return this.next(appendEntryBody(message));
   }
   replace(index: number, message: ChatMessage): KnownLogEntry {
-    return this.next({ type: "replace", critical: true, index, message });
+    return this.next(replaceEntryBody(index, message));
   }
   title(text: string, source: "auto" | "model" | "user" = "user"): KnownLogEntry {
     return this.next({ type: "title", title: { text, source } });

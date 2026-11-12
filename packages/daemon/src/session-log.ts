@@ -33,8 +33,11 @@ import {
   type Sha256,
   type StopReason,
   type WireChatMessage,
+  appendEntryBody,
   digestOfDigests,
+  isAppendEntry,
   messageDigest,
+  replaceEntryBody,
 } from "@tentacle/protocol";
 
 /** One retained entry: its wire object (a checkpoint's built on first read) and its size, once known. */
@@ -103,7 +106,7 @@ export class SessionLog {
     for (let i = 0; i < shared; i++) {
       const message = messages[i];
       if (message !== undefined && message !== this.ref[i]) {
-        this.push({ type: "replace", critical: true, index: i, message: wire(message) });
+        this.push(replaceEntryBody(i, wire(message)));
       }
     }
     if (length < old) {
@@ -112,7 +115,7 @@ export class SessionLog {
     for (let i = old; i < length; i++) {
       const message = messages[i];
       if (message !== undefined) {
-        this.push({ type: "message", critical: true, message: wire(message) });
+        this.push(appendEntryBody(wire(message)));
       }
     }
     this.ref = messages.slice(0, length);
@@ -288,7 +291,7 @@ export class SessionLog {
       ...(turn ? { turn } : {}),
     });
     for (const message of messages) {
-      this.push({ type: "message", critical: true, message: wire(message) });
+      this.push(appendEntryBody(wire(message)));
     }
     this.ref = messages.slice();
     // Every segment carries the title again (the caller logs it next): a cold
@@ -338,8 +341,9 @@ export function replayFromBase(entries: readonly KnownLogEntry[]): ChatMessage[]
   let projection: ChatMessage[] = [];
   for (const e of entries) {
     if (e.type === "base") projection = [];
-    else if (e.type === "message") projection.push(e.message as ChatMessage);
-    else if (e.type === "replace") projection[e.index] = e.message as ChatMessage;
+    else if (isAppendEntry(e)) projection.push(e.message as ChatMessage);
+    else if (e.type === "replace" || e.type === "media_replace")
+      projection[e.index] = e.message as ChatMessage;
     else if (e.type === "truncate") projection.length = e.length;
   }
   return projection;

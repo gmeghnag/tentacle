@@ -46,6 +46,11 @@ export const ModelConfigSchema = z
     contextWindow: z.number().int().positive().optional(),
     /** Max output tokens per model response (`max_tokens` on the wire). */
     maxTokens: z.number().int().positive().optional(),
+    /**
+     * Raw bytes one image may have on THIS model's wire (docs/feat/attachments-core.md,
+     * review H1). Unset: the provider's documented default.
+     */
+    maxImageBytes: z.number().int().positive().optional(),
   })
   .strict();
 

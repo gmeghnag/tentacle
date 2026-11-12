@@ -59,6 +59,18 @@ function toWireRequest(request: ChatRequest): WireChatRequest {
     messages: request.messages.map((m) => ({
       role: m.role,
       content: m.content,
+      ...(m.attachments && m.attachments.length > 0
+        ? {
+            // REFS only, never bytes (AGENTS §7): the laptop decides whether it
+            // holds these bytes and may read them (docs/feat/attachments-core.md).
+            attachments: m.attachments.map((a) => ({
+              id: a.id,
+              mimeType: a.mimeType,
+              size: a.size,
+              ...(a.name !== undefined ? { name: a.name } : {}),
+            })),
+          }
+        : {}),
       ...(m.toolCalls && m.toolCalls.length > 0
         ? {
             toolCalls: m.toolCalls.map((tc) => ({

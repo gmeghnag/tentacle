@@ -20,6 +20,17 @@ import type {
   Usage,
 } from "@tentacle/core";
 import { DsmlToolCallLeakError, hasDsmlToolCallMarkup, wireArguments } from "@tentacle/core";
+import {
+  type ImageBuildOptions,
+  MAX_INLINE_IMAGES,
+  NO_IMAGES,
+  OPENAI_MAX_IMAGE_BYTES,
+  effectiveMaxImageBytes,
+  resolveImages,
+  selectInlineIds,
+  strayRefsText,
+  userParts,
+} from "./images.ts";
 import { parseSSE } from "./sse.ts";
 import { ToolCallAssembler, type WireToolCallDelta } from "./tool-call-stream.ts";
 export interface OpenAIProviderConfig {
@@ -34,6 +45,20 @@ export interface OpenAIProviderConfig {
   readonly id?: string;
   /** Injectable fetch, for tests. Defaults to the global `fetch`. */
   readonly fetch?: typeof fetch;
+  /**
+   * Whether this model takes images at all (docs/feat/attachments-core.md, Q5).
+   * Default FALSE: an OpenAI-COMPATIBLE endpoint here is usually a local
+   * llama.cpp/vLLM server whose model may not be multimodal, and sending an
+   * unknown model an image block is a 400. `model.images: true` opts in.
+   */
+  readonly images?: boolean;
+  /**
+   * The most raw bytes ONE image may have on this endpoint. Defaults to
+   * `OPENAI_MAX_IMAGE_BYTES`, deliberately conservative: the model behind an
+   * OpenAI-compatible URL is unknown (a local llama.cpp may take less than any
+   * documented cloud cap). An image over it is never read or sent.
+   */
+  readonly maxImageBytes?: number;
 }
 
 /** Thrown when the endpoint returns a non-2xx response. */
@@ -119,7 +144,12 @@ export class OpenAIProvider implements ModelProvider {
       }
       return (await res.json().catch(() => null)) as Record<string, unknown> | null;
     };
-    const payload = buildPayload(this.config.model, request);
+    const payload = buildPayload(
+      this.config.model,
+      request,
+      undefined,
+      await this.imageOptions(request),
+    );
     const templated = await post("/apply-template", {
       messages: payload.messages,
       ...(payload.tools ? { tools: payload.tools } : {}),
@@ -134,6 +164,27 @@ export class OpenAIProvider implements ModelProvider {
     return Array.isArray(tokens) ? tokens.length : undefined;
   }
 
+  /**
+   * What this request may inline. `images: false` (the default) reads NOTHING:
+   * a model with no vision must not cost a byte read, and its placeholders say
+   * why no image was sent.
+   */
+  private async imageOptions(request: ChatRequest): Promise<ImageBuildOptions> {
+    const vision = this.config.images ?? false;
+    const inlined = selectInlineIds(request.messages);
+    const maxImageBytes = effectiveMaxImageBytes(
+      this.config.maxImageBytes ?? OPENAI_MAX_IMAGE_BYTES,
+    );
+    return vision
+      ? {
+          images: await resolveImages(request, MAX_INLINE_IMAGES, maxImageBytes),
+          vision,
+          inlined,
+          maxImageBytes,
+        }
+      : { images: new Map(), vision, inlined, maxImageBytes };
+  }
+
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.config.apiKey) {
@@ -143,7 +194,14 @@ export class OpenAIProvider implements ModelProvider {
     const init: RequestInit = {
       method: "POST",
       headers,
-      body: JSON.stringify(buildPayload(this.config.model, request, this.config.maxTokens)),
+      body: JSON.stringify(
+        buildPayload(
+          this.config.model,
+          request,
+          this.config.maxTokens,
+          await this.imageOptions(request),
+        ),
+      ),
     };
     if (request.signal) {
       init.signal = request.signal;
@@ -269,10 +327,11 @@ function buildPayload(
   model: string,
   req: ChatRequest,
   defaultMaxTokens?: number,
+  options: ImageBuildOptions = NO_IMAGES,
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     model,
-    messages: req.messages.map(toWireMessage),
+    messages: req.messages.map((m) => toWireMessage(m, options)),
     stream: true,
     stream_options: { include_usage: true },
   };
@@ -289,8 +348,36 @@ function buildPayload(
   return payload;
 }
 
-function toWireMessage(message: ChatMessage): Record<string, unknown> {
-  const wire: Record<string, unknown> = { role: message.role, content: message.content };
+function toWireMessage(
+  message: ChatMessage,
+  options: ImageBuildOptions = NO_IMAGES,
+): Record<string, unknown> {
+  // A user message with refs: images first, then its text (docs/feat/attachments-core.md,
+  // D10). `image_url` wants a data URL; an image-only prompt keeps its message.
+  if (message.role === "user" && (message.attachments?.length ?? 0) > 0) {
+    const parts = userParts(message, options);
+    const wire: Record<string, unknown> = {
+      role: "user",
+      content: parts.map((part) =>
+        part.kind === "image"
+          ? { type: "image_url", image_url: { url: `data:${part.mimeType};base64,${part.base64}` } }
+          : { type: "text", text: part.text },
+      ),
+    };
+    if (message.toolCalls && message.toolCalls.length > 0) {
+      wire.tool_calls = message.toolCalls.map((tc) => ({
+        id: tc.id,
+        type: "function",
+        function: { name: tc.name, arguments: wireArguments(tc.arguments) },
+      }));
+    }
+    return wire;
+  }
+  const stray = strayRefsText(message, options);
+  const wire: Record<string, unknown> = {
+    role: message.role,
+    content: `${message.content}${stray}`,
+  };
   if (message.toolCalls && message.toolCalls.length > 0) {
     wire.tool_calls = message.toolCalls.map((tc) => ({
       id: tc.id,

@@ -27,6 +27,8 @@ import {
   KnownLogEntrySchema,
   LOG_ENTRY_CRITICAL,
   type SessionTitle,
+  appendEntryBody,
+  isAppendEntry,
   projectEntry,
 } from "@tentacle/protocol";
 import {
@@ -140,10 +142,12 @@ function laxEntry(value: Record<string, unknown>): KnownLogEntry | null {
         ? (value as unknown as KnownLogEntry)
         : null;
     case "message":
+    case "media_message":
       return isObject(value.message) && typeof value.message.role === "string"
         ? (value as unknown as KnownLogEntry)
         : null;
     case "replace":
+    case "media_replace":
       return typeof value.index === "number" && isObject(value.message)
         ? (value as unknown as KnownLogEntry)
         : null;
@@ -288,7 +292,7 @@ export function parseLogFile(
     }
     seg.lastSeq = entry.seq;
     if (seg.owed > 0) {
-      if (entry.type !== "message") {
+      if (!isAppendEntry(entry)) {
         return { ok: false, reason: `line ${lineNo}: a base owes ${seg.owed} messages` };
       }
       seg.owed--;
@@ -511,7 +515,7 @@ export function segmentFromMessages(
   };
   push({ type: "base", critical: true, inc, reason: "create", count: messages.length });
   for (const message of messages) {
-    push({ type: "message", critical: true, message });
+    push(appendEntryBody(message));
   }
   if (title !== undefined) {
     push({ type: "title", title });

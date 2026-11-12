@@ -280,6 +280,16 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "Unset: omitted for openai (the server decides), 64000 for anthropic (its API requires one). Lower it for a model with a smaller cap.",
     example: "64000",
   },
+  "model.maxImageBytes": {
+    summary: "Raw bytes one image may have on this model's wire (its own limit).",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    details:
+      "Unset: the provider default (anthropic 3.75 MB, an OpenAI-compatible endpoint 5 MB). An image over it is never read or sent: the model sees a placeholder naming the image and the limit, so an over-limit image can never 400 every later turn of the session.",
+    example: "3932160",
+  },
   models: {
     summary:
       "Named models for sub-agents: each has the keys of `model`; unset keys come from `model`.",
@@ -384,6 +394,16 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     scope: "both",
     carried: "no",
     example: "8192",
+  },
+  "models.*.maxImageBytes": {
+    summary: "Raw bytes one image may have on this model's wire; unset: `model`'s.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    details:
+      "For an endpoint whose image limit differs from this model's provider default. An image over it is never read or sent: the model sees a placeholder naming the image, so the session stays usable.",
+    example: "3932160",
   },
   "models.*.description": {
     summary: "When to pick this model — shown to the agent when it is selectable.",
