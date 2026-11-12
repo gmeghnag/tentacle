@@ -554,7 +554,104 @@ CHANGELOG `Added` under `[Unreleased]`.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+**Verdict: REQUEST-CHANGES** (one HIGH, one MEDIUM). Scope: `git diff
+main...HEAD` @ f3317ac only.
+
+#### Findings
+
+1. **HIGH: `upload()` spins forever, starving the event loop, when the link
+   drops on a client with no `channelFactory`**
+   (`client/src/remote-client.ts:1553`, together with `liveGeneration` beside it).
+   The retry condition is `gen !== this.gen || !this.up`. Without a factory,
+   `onLinkClosed` → `stop()` sets `up = false` **for good**, and
+   `liveGeneration` returns `this.gen` straight away (no `whenLive`). So every
+   iteration does probe → `peer.request` on a closed peer →
+   `Promise.reject("peer is closed")` → `!this.up` → `continue`. That is a pure
+   microtask loop: no timer, render or I/O ever runs again, and `upload()` never
+   settles. `signal` cannot rescue it either, because the abort event can't be
+   dispatched. Repro (`.tentacle/tmp/attachments-upload/review-spin.ts`: a real
+   `Connection`, a plain `createChannelPair` client, the channel closed before
+   the 2nd data chunk): `SPIN: 100000 putChunk calls on a dead link; 300ms
+   timer never ran`. The same loop also runs WITH a factory when `entry` is
+   undefined (an upload to a session this client did not open): the spin
+   starves the redial timer, so the link never comes back. Fix direction: retry
+   only when a reconnect can happen (`this.channelFactory && entry &&
+   !this.stopError`), or else rethrow. Add a red test: a plain link closed
+   mid-upload must reject. The Failure-modes table covered "disconnect" only
+   with a factory (T5), and no test covers this path.
+2. **MEDIUM: T5's "never more than 2 puts in flight" is vacuous**
+   (`client/test/upload.test.ts:216`). It asserts `peak <=
+   UPLOAD_WINDOW`, the imported constant, so it moves with the code under
+   test. Mutation `UPLOAD_WINDOW = 4` leaves this test **green** (only T4's pure
+   test and T5's reconnect bound went red). The property "≤ 2 on the wire" is
+   claimed (§Tests T5) but not proved end to end. Compare against the literal
+   `2`, and re-show red under W=4.
+
+#### Gate (this review)
+
+New files plus `json-schema.test.ts`: **86 pass, 0 fail** (6 files). `bun run lint`:
+927 files, clean. I did not re-run the full `bun test` or `typecheck` here, so I
+rely on the Execution's numbers (7226 pass / 3 opt-in skips) for those.
+
+#### Mutations (each reverted by its exact inverse edit; `git status --porcelain` empty afterwards)
+
+| # | Mutation | Result |
+|---|---|---|
+| R1 | rule 7 writes the duplicate (`buf.set` in the duplicate branch) | RED: "a duplicate chunk carrying DIFFERENT bytes leaves the blob byte-identical" |
+| R2 | digest compare → `=== "never"` (never mismatch) | RED: "a wrong last chunk is `hash_mismatch`…" (1 of 41) |
+| R3 | drop `this.uploads.dispose()` from `HostedSession.close` | RED: "after `session/close` and after `session/delete`: … budget back to 0" |
+| R4 | `UPLOAD_WINDOW = 4` | RED: T4 "default window is 2", T5 reconnect; **green: T5 in-flight (finding 2)** |
+
+#### Attacks tried
+
+- **No serialized peer (§7):** the `case` in `connection.ts` is sync, with no
+  lock and no await, and `put` is sync end to end (`Buffer.from`,
+  `hasher.update`, `digest`). Holds.
+- **Pod not trusted:** the id comes from the laptop's own bytes, the returned
+  `{id,size}` never comes from an ack, and the send cap is cumulative across
+  reconnects (the window is not rebuilt per retry), so drift 6 (no clamp on
+  rewind) cannot be used to loop sends. Holds. One weakness, not a finding: a
+  lying daemon answering `have:size, complete:false` to a non-last chunk makes
+  `upload()` resolve without ever seeing `complete`. That is harmless, because
+  a hostile daemon can equally answer `complete:true`.
+- **Bounded memory 100/256 MiB:** the declared size is reserved before any
+  byte. `fits` checks both caps, and `take` reserves the budget first. On
+  mismatch or dispose, `drop` releases. There is one source construction site
+  (`session-host.ts:985`, so no stray default budget), and eviction only takes
+  this store's stale partials. Holds. By design, another session's completed
+  blobs can hold the daemon budget until that session ends (owner Q1a).
+- **Hash / duplicate / gap / straddle / out-of-order:** rules 7–8 never write.
+  A `Complete` is only ever the verified buffer, and a mismatch drops the
+  entry and its reservation. Holds (R1, R2).
+- **Disconnect with a factory:** `whenLive` → probe → rewind works (T5 test).
+  **Disconnect without a factory: broken (finding 1).**
+- **sha256Bytes seam / drift 4:** justified. The text seam UTF-8-encodes, and
+  `blob()` contains bytes > 0x7f, so the "laptop's own digest" test would catch
+  the wrong seam. Injection and the non-Bun refusal path are untested (nit).
+- **Executor drifts 1–10:** I checked each against the code, and each is
+  reasoned and in scope. Drift 8's honest report that M19/M20 stayed green is
+  correct and to the executor's credit.
+
+#### What holds
+
+The store logic, caps, auth boundary (`lookup`), dispose on the single
+`close`, the additive protocol (no bump; `MethodNotFound` →
+`AttachmentsUnsupportedError`) and the pure window are sound, and their tests
+are non-vacuous under R1–R3.
+
+#### How the executor behaved
+
+Disciplined: it re-ran the load-bearing repro first, documented its drifts
+with reasons, and reported vacuous mutations honestly instead of hiding them.
+It missed the factory-less drop path and one tautological assertion. Note: the
+Execution section is signed `claude-sonnet-4-5`, but the commit says
+`(deepseek)`. The signature should name the model that actually executed
+(AGENTS §10).
+
+Reviewer: claude-opus-5-5, fresh context. Different family from the executor
+(DeepSeek, per the commit).
+
+*— claude-opus-5-5, 2026-11-12*
 
 #### Owner answers (2026-11-12)
 
