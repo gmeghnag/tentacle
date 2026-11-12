@@ -155,8 +155,8 @@ history holds `[user → sa-1] …` right after the user message; `retire()` →
 - **`background-list.ts`** (new) — the view-model of the dock under the footbar.
   `backgroundListView({ rows, jobs: [], askingId, focus, width, now }) → ListView`:
   - `header`: `{ label: "background", count, right: hint }`; the hint by focus:
-    unfocused `↓ select · ctrl+t` (`↓ · ctrl+t` under 70 cols), list `enter open · x stop · esc
-    back`, armed `y stop · any other key cancels`, overflow prefix `↑k ↓m`.
+    unfocused `↓ select · ctrl+t` (`↓ · ctrl+t` under 70 cols), list `enter open · ctrl+x stop · esc
+    back`, armed `ctrl+x stop · any other key cancels`, overflow prefix `↑k ↓m`.
   - `rows`: at most **`LIST_MAX_ROWS = 5`** (mockup 05), a window that follows the selection; order =
     launch order, sub-agents first then shell jobs (stable: nothing jumps).
   - Per row: `{ id, glyph: "running" | "asking" | "job", typeCol?, description, meta, selected,
@@ -200,9 +200,9 @@ Focus ring: **input ⇄ list**, and **open** (the input re-targeted to one child
 | any | PgUp/PgDn | scroll the transcript (unchanged). |
 | list | ↑ / ↓ | move; ↑ on the first row → back to the input (cursor and draft untouched); ↓ on the last row stays (no wrap). |
 | list | Enter | open the selected sub-agent: stash the main draft, restore that child's draft. A shell row: P6. |
-| list | x | arm "stop sa-N? y/N" on that row; `y` → `session/agent_kill`; any other key disarms and is swallowed (P4). |
+| list | ctrl+x | arm "stop sa-N? ctrl+x" on that row; `ctrl+x` again → `session/agent_kill`; any other key disarms and is swallowed (P4, as revised 2026-11-11: bare `x`/`y` no longer stop anything — `docs/fix/dock-list-type-through.md`). |
 | list | Esc / Ctrl+T | back to the input. **Never stops the turn.** |
-| list | printable | P3 (recommended: ignored). |
+| list | printable | typed THROUGH: the keys move to the input and the character is typed there, the dropdown stays visible (P3, revised 2026-11-11). Esc then closes the dropdown, ↓ goes back into the list. |
 | open | Enter | non-empty text not starting with `/` → `session/subagent_message` (never the main agent, never steering, never queued); text starting with `/` → the command path as today. Ended target → refused with a notice, draft kept (never re-routed). Over 8000 chars → refused before sending. |
 | open | Esc | close: stash the child's draft, restore the main draft. Does NOT stop the turn (a second Esc does). |
 | any | Ctrl+C, quit confirm, permission prompt | unchanged and FIRST: both own every key while shown (`App.tsx:2506,2536`); the dock state is untouched underneath. |
@@ -309,8 +309,9 @@ module/method → fail), then green. Non-vacuity by mutation where noted.
   - T-F1 the DOWN table: multi-line buffer (moves), mid-history (history), draft slot + visible
     (enters), palette open (palette), empty list (nothing), `open` (nothing) — mutation: drop the
     `onDraftSlot` check → the history case goes red;
-  - T-F2 list: ↑ from first → input; Esc → input with effect `none` on the turn; `x` then `y` →
-    `stop`, `x` then other → disarmed and swallowed;
+  - T-F2 list: ↑ from first → input; Esc → input with effect `none` on the turn; `ctrl+x` then
+    `ctrl+x` → `stop`, `ctrl+x` then other → disarmed and swallowed; a bare printable key →
+    `pass` with the list kept visible (`typing`);
   - T-F3 open/close swap drafts per target; `sendTarget` refuses an ended target and `/…` goes to
     `main`;
   - T-F4 `reconcile`: selected leaves → neighbour; last leaves → `input`; open leaves → frozen.
@@ -344,9 +345,18 @@ view.
 (b) type-through: focus goes back to the input and the key is typed there (02 table). **Recommend
 (a):** with (b), typing "xy…" by mistake would arm and confirm a stop; (a) is predictable.
 
+> **SUPERSEDED by the owner on 2026-11-11 — (b), type-through, is what ships:** a printable key
+> at `list` focus moves the keys to the input and is typed there, the dropdown STAYS VISIBLE
+> (Esc closes it, ↓ goes back into the list), and the stop key became `ctrl+x` twice so typing can
+> never arm or confirm one. See `docs/fix/dock-list-type-through.md`. The trade-off above is real
+> and was accepted knowing it: the old (a) left the input's cursor on screen while swallowing every
+> key, so the screen read as hung (the owner hit it live).
+
 **P4. The stop key and its confirm.** (a) **`x`, then `y` on an inline `stop sa-N? y/N`** (02,
 second frame); (b) `x` stops at once (no confirm); (c) Delete/Backspace + `y`. **Recommend (a):**
-the eval's key, and a stop loses the child's work.
+the eval's key, and a stop loses the child's work. **As shipped (owner 2026-11-11): `ctrl+x`,
+then `ctrl+x` on `stop sa-N? ctrl+x`** — the same two presses with a key typing cannot produce
+(`docs/fix/dock-list-type-through.md`).
 
 **P5. A finished / stopped item.** (a) **leaves the list at once**; the transcript's exit notice is
 the record (06, option A); (b) lingers 4 s dimmed and not selectable, then leaves (06, option B).
@@ -368,6 +378,10 @@ small local model otherwise tends to act on the text itself (re-send it to sa-1 
 if still there. **Recommend (a):** predictable after the list changed under you; Ctrl+T matches it.
 
 **Answers (owner, 2026-11-10):** P1–P8 = **(a)** — titled rule; drawer under the footbar; printable keys ignored while the list has focus; `x` then `y` to stop; a finished item leaves at once; shell jobs are a follow-up (`jobs: []` here); the two-line note; DOWN lands on the first row.
+
+> **Revised by the owner, 2026-11-11 (two answers above changed):** P3 → type-through (the dropdown
+> stays visible) and P4 → `ctrl+x` twice. Live evidence: with (a) the input's cursor still showed
+> while every printable key was swallowed, so the screen read as hung. `docs/fix/dock-list-type-through.md`.
 
 **Note (orchestrator, 2026-11-10):** `feat/agent-message-two-way` (task 9) merged into main AFTER this plan was written (6a2621d): it touched `packages/tui/src/App.tsx`, `run.tsx`, `packages/client/src/subagents.ts`, `remote-session.ts`, `mapping.ts` and added `packages/tui/src/subagent-notify.ts` + the `subagent_notify` display update. Cited line numbers in those files may have moved: re-locate by symbol; a real contradiction goes to Execution as a drift.
 
@@ -992,7 +1006,7 @@ input row. F11 checks the input row itself.
 - A child ends: the pill shows `✓ sa-1 done` for ~5 s, then the new counts; when the last one ends the pill disappears (focus on it → back to the input).
 - `targetBorder` / `statusHint` must never replace `auto-accept on` any more.
 
-**The dropdown** (above the input). Its top rule carries title and keys: `── background · 3 ─── ↑↓ move · enter open · x stop · esc back ─`; the input's top rule becomes a PLAIN line (its bottom edge) — never two labelled rules stacked, and **no model name** on the input rule while the dropdown or a drawer is open (owner). Rows are compact, left-aligned columns: `● sa-1  Ada: turni dispari del dibattito   8 tools · 74k · 1m 24s`; the title column is capped at 56 cells; meta starts 3 cells after the widest title, never padded to the far edge; the type column appears only if some row's type is not `general`; the MODEL column (below) appears only if some row has one. The 5-row window, `↑k ↓m`, `x` then `y` stop, and `reconcile` are reused. Mouse: a click on a row opens it.
+**The dropdown** (above the input). Its top rule carries title and keys: `── background · 3 ─── ↑↓ move · enter open · ctrl+x stop · esc back ─`; the input's top rule becomes a PLAIN line (its bottom edge) — never two labelled rules stacked, and **no model name** on the input rule while the dropdown or a drawer is open (owner). Rows are compact, left-aligned columns: `● sa-1  Ada: turni dispari del dibattito   8 tools · 74k · 1m 24s`; the title column is capped at 56 cells; meta starts 3 cells after the widest title, never padded to the far edge; the type column appears only if some row's type is not `general`; the MODEL column (below) appears only if some row has one. The 5-row window, `↑k ↓m`, `ctrl+x` then `ctrl+x` stop, and `reconcile` are reused. Mouse: a click on a row opens it. Typing with the dropdown up keeps it VISIBLE and gives the keys to the input (the rule then reads `↓ list · esc close`) — `docs/fix/dock-list-type-through.md`.
 
 **The open sub-agent (drawer)** (above the input, replacing the dropdown): head rule `─ sa-2 · Bruno: turni pari del dibattito · qwen3.8 ─── running … ─` (model only if different), its tail, the sent lines; the input rule reads `─ → sa-2 · enter sends · esc back ───` (no model). Drafts swap per target as already built (H1 fix).
 

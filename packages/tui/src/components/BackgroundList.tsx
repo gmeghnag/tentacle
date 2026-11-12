@@ -30,7 +30,7 @@ export function DockSegments({ segments }: { segments: readonly DockSegment[] })
 
 /**
  * The dropdown: its titled rule (`── background · 3 ──── ↑↓ move · enter open ·
- * x stop · esc back ─`), then at most `LIST_MAX_ROWS` compact rows. Blank rows
+ * ctrl+x stop · esc back ─`), then at most `LIST_MAX_ROWS` compact rows. Blank rows
  * are never rendered (the height is `1 + rows.length`), so it never holds a
  * collapsed empty `<Text>`.
  */

@@ -114,7 +114,19 @@ export type DockFocus =
    * it opens (owner: "first row selected").
    */
   | { readonly kind: "pill" }
-  | { readonly kind: "list"; readonly selected: string; readonly armed: boolean }
+  /**
+   * The dropdown is up. `typing` is the owner's decision of 2026-11-11
+   * (docs/fix/dock-list-type-through.md, superseding P3 (a)): a printable key
+   * moves the keys to the INPUT while the list stays VISIBLE — so `typing: true`
+   * means "the dropdown is pinned, the input has the keyboard". The selection is
+   * kept either way (↓ comes back to it), and `armed` is always false there.
+   */
+  | {
+      readonly kind: "list";
+      readonly selected: string;
+      readonly armed: boolean;
+      readonly typing: boolean;
+    }
   | {
       readonly kind: "open";
       readonly id: string;
@@ -174,7 +186,7 @@ function agentMeta(
   now: number,
 ): string {
   if (armed) {
-    return `stop ${row.id}? y/N`;
+    return `stop ${row.id}? ctrl+x`;
   }
   if (asking) {
     return "⚠ needs your permission";
@@ -366,10 +378,16 @@ export function dockHint(
     .filter((p) => p !== "")
     .join(" ");
   if (focus.kind === "list") {
-    if (focus.armed) {
-      return "y stop · any other key cancels";
+    // Typing with the dropdown pinned: the two keys that still concern the dock.
+    // Enter is NOT one of them — it now sends the text to the main agent.
+    if (focus.typing) {
+      const typing = "↓ list · esc close";
+      return focusedOverflow === "" ? typing : `${focusedOverflow} · ${typing}`;
     }
-    const keys = "enter open · x stop · esc back";
+    if (focus.armed) {
+      return "ctrl+x stop · any other key cancels";
+    }
+    const keys = "enter open · ctrl+x stop · esc back";
     return focusedOverflow === "" ? keys : `${focusedOverflow} · ${keys}`;
   }
   // Unfocused, the mockup says what DOWN would reveal: `↓4 more · ↓ select · ctrl+t`.
@@ -397,7 +415,10 @@ export function backgroundListView(opts: {
   const width = Math.max(10, opts.width);
   const selectedId = opts.focus.kind === "list" ? opts.focus.selected : null;
   const armed = opts.focus.kind === "list" && opts.focus.armed;
-  const focused = opts.focus.kind === "list";
+  // The rule is accent + bold while the LIST has the keys; with the dropdown
+  // pinned and the input typing (owner 2026-11-11) it paints calm, while the
+  // selection stays marked (↓ comes back to that row).
+  const focused = opts.focus.kind === "list" && !opts.focus.typing;
   const total = agents.length + jobs.length;
 
   // Every item in its paint order: the children first (launch order), the jobs

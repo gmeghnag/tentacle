@@ -318,7 +318,7 @@ describe("F5 (design B): nine rows → five shown, in the dropdown (mockup b · 
     // The dropdown's rule says how many are out of view with the mockup's own
     // `↑k ↓m` grammar (the `more` variant is the unfocused pill's hint, which
     // this surface replaced).
-    expect(f).toContain("↓4 · enter open · x stop · esc back");
+    expect(f).toContain("↓4 · enter open · ctrl+x stop · esc back");
     for (const i of [1, 2, 3, 4, 5]) expect(f).toContain(`sa-${i}`);
     for (const i of [6, 7, 8, 9]) expect(f).not.toContain(`sa-${i}`);
     app.unmount();
@@ -374,7 +374,7 @@ describe("F7 (design B): 80 columns — no row wraps, in the dropdown too", () =
     expect(f).not.toContain("12k");
     // The status bar's pill fits too, and the dropdown's hint is the short one.
     expect(f).toContain("2 agents");
-    expect(f).toContain("enter open · x stop · esc");
+    expect(f).toContain("enter open · ctrl+x stop · esc");
 
     app.unmount();
   });
@@ -751,7 +751,7 @@ describe("F15 (design B): every state fits 190 and 80 columns at a REAL terminal
       expect(lines.some((l) => l.includes("qwen3-27b"))).toBe(false);
       // The dropdown's rule carries the title AND every key.
       expect(lines[ruleAt]).toContain("background · 2");
-      expect(lines[ruleAt]).toContain("enter open · x stop · esc");
+      expect(lines[ruleAt]).toContain("enter open · ctrl+x stop · esc");
     });
 
     test(`${columns} columns: a child open — the target rule, no model`, async () => {

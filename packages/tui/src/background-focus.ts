@@ -11,11 +11,21 @@ import type { DockFocus, DockFrozen, DockJobRow, DockOutcome } from "./backgroun
  * module exists to remove: in `open` and in `list` it closes, and it NEVER
  * reaches the App's "Esc stops a running turn" branch (`effect: "none"`).
  *
+ * THE LIST HAS TWO SUB-STATES (owner decision 2026-11-11, docs/fix/dock-list-type-through.md,
+ * superseding P3 (a)): `typing: false` is the list with the keys (↑↓ move,
+ * Enter opens, `ctrl+x` twice stops); `typing: true` is the SAME dropdown
+ * pinned on screen with the keys back on the input — a printable key at list
+ * focus moves there and is typed, Enter sends to the MAIN agent, Esc closes the
+ * dropdown, and ↓ walks back into the list. Nothing is ever swallowed, so
+ * typing can never arm or confirm a stop (`ctrl+x` is the only stop key).
+ *
  * THE ESC CHAIN (docs/feat/subagent-panel.md, UI revision): drawer → dropdown →
  * pill → input. The pill is the status bar's one control (the counts); DOWN from
  * the input focuses it, Enter (or a click on it) opens the dropdown, Enter there
  * opens a child. So the states, in that order: `input`, `pill`, `list` (the
- * dropdown), `open` (the drawer).
+ * dropdown), `open` (the drawer). A `typing` dropdown is already PAST the pill's
+ * step — the keys are the input's — so its Esc closes the dropdown onto the
+ * input, which is where the user's hands already are.
  */
 import type { BackgroundAgentRow } from "./background-view.ts";
 
@@ -111,6 +121,11 @@ export interface DockKey {
  *
  * DOWN focuses the pill, never the list: the dropdown is one Enter further (the
  * pill is what DOWN points at — it is the bottom-most thing on the screen).
+ *
+ * The PINNED dropdown (`list` + `typing`, the input's keys with the list kept on
+ * screen) is "the input" for this table too — that is the whole point of the
+ * owner's decision: only the draft slot's DOWN leaves for the list, while a
+ * multi-line buffer still edits and a history walk still walks.
  */
 export function downEntersList(ctx: {
   readonly action: "history" | "moveVertical" | string;
@@ -119,7 +134,12 @@ export function downEntersList(ctx: {
   readonly visible: boolean;
   readonly focus: DockFocus;
 }): boolean {
-  if (ctx.paletteOpen || !ctx.visible || ctx.focus.kind !== "input") {
+  if (ctx.paletteOpen || !ctx.visible) {
+    return false;
+  }
+  const fromInput = ctx.focus.kind === "input";
+  const fromPinned = ctx.focus.kind === "list" && ctx.focus.typing;
+  if (!fromInput && !fromPinned) {
     return false;
   }
   // Only the DOWN that reached the history rule is a candidate; a move inside a
@@ -144,6 +164,22 @@ export function toggleList(state: DockState, ids: readonly string[]): DockState 
 }
 
 /**
+ * DOWN at the draft slot (`downEntersList` said yes): onto the PILL from the
+ * input, or back into the LIST from the pinned dropdown — the one move DOWN
+ * means in each. Ctrl+T and `/agents` keep `toggleList`'s meaning (an explicit
+ * toggle out of the dock), so the two never share a branch.
+ */
+export function downToDock(state: DockState, ids: readonly string[]): DockState {
+  if (ids.length === 0) {
+    return state;
+  }
+  if (state.focus.kind === "list" && state.focus.typing) {
+    return { ...state, focus: { ...state.focus, typing: false } };
+  }
+  return toggleList(state, ids);
+}
+
+/**
  * The pill's Enter (or a click on it): open the DROPDOWN above the input with its
  * first row selected (owner: "first row selected"). Nothing to show → stay put.
  */
@@ -151,7 +187,7 @@ export function openDropdown(state: DockState, ids: readonly string[]): DockStat
   if (ids.length === 0) {
     return state;
   }
-  return { ...state, focus: { kind: "list", selected: ids[0] ?? "", armed: false } };
+  return { ...state, focus: { kind: "list", selected: ids[0] ?? "", armed: false, typing: false } };
 }
 
 /**
@@ -172,7 +208,11 @@ export function clickDock(
   }
   // A row click selects AND opens it in one gesture (the mockups' keys table).
   const selected = ids.includes(hit.id) ? hit.id : (ids[0] ?? "");
-  return openChild({ ...state, focus: { kind: "list", selected, armed: false } }, selected, "");
+  return openChild(
+    { ...state, focus: { kind: "list", selected, armed: false, typing: false } },
+    selected,
+    "",
+  );
 }
 
 /** Open a child: the main draft (the LIVE field) is stashed, the target's comes back. */
@@ -217,7 +257,12 @@ export function closeToDropdown(
   const focus: DockFocus =
     ids.length === 0
       ? { kind: "input" }
-      : { kind: "list", selected: ids.includes(id) ? id : (ids[0] ?? ""), armed: false };
+      : {
+          kind: "list",
+          selected: ids.includes(id) ? id : (ids[0] ?? ""),
+          armed: false,
+          typing: false,
+        };
   return { state: { ...closed.state, focus }, effect: closed.effect };
 }
 
@@ -259,16 +304,34 @@ function isPrintable(char: string, key: DockKey): boolean {
 
 /**
  * An SGR mouse report reaches `useInput` as ordinary `char` data, and it must
- * NEVER be read as a key: at `list` focus a printable key is deliberately
- * swallowed (owner P3 (a)), so an unguarded report would vanish there — no
- * click on a row, no wheel, no selection (docs/feat/subagent-panel.md: "Mouse is
- * part of the design"). Recognised here, in the one module that decides what a
- * key means; the App's own mouse handling then acts on it.
+ * NEVER be read as a key: a report is never a printable character, yet it looks
+ * like one (`[<0;4;9M`), and an unguarded read would type it into the input or
+ * move the selection — no click on a row, no wheel, no selection
+ * (docs/feat/subagent-panel.md: "Mouse is part of the design"). Recognised here,
+ * in the one module that decides what a key means; the App's own mouse handling
+ * then acts on it.
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: an SGR report starts with ESC
 const MOUSE_REPORT = /^\x1b?\[<\d+;\d+;\d+[Mm]/;
 function isMouseReport(char: string): boolean {
-  return char.startsWith("[") && MOUSE_REPORT.test(char);
+  // Both forms are recognised: Ink normally strips the leading ESC and hands the
+  // report over as `[<…`, but a terminal that writes the raw thing must not get
+  // it typed into the input either (the regex's `\x1b?` says so; the
+  // `startsWith` guard used to defeat it, so the ESC-prefixed form fell through
+  // to the printable branch).
+  return MOUSE_REPORT.test(char);
+}
+
+/**
+ * Does the DOCK own `ctrl+x` this keypress? It does while the dropdown has the
+ * keys (either sub-state): that is the stop's arm/confirm
+ * (docs/fix/dock-list-type-through.md). The App asks this BEFORE handing the key
+ * to the `Ctrl+X Ctrl+S` send-now chord (`chord.ts`), which consumes `ctrl+x`
+ * unconditionally — a chord that ran first would swallow the arm, and no stop
+ * could ever be asked for from the dock.
+ */
+export function dockClaimsCtrlX(state: DockState): boolean {
+  return state.focus.kind === "list";
 }
 
 /**
@@ -285,7 +348,8 @@ export function dockKey(
   const none: DockKeyResult = { state, effect: { kind: "none" } };
   const ctrlT = key.ctrl === true && char === "t";
   // A mouse report is never the dock's key: it goes on to the App's mouse path,
-  // in EVERY focus (a printable key would otherwise be swallowed at `list`).
+  // in EVERY focus (in the `typing` state an unguarded report would be typed
+  // into the input, and in the list it would move the selection).
   if (isMouseReport(char)) {
     return { state, effect: { kind: "pass" } };
   }
@@ -331,10 +395,47 @@ export function dockKey(
 
   // --- the list has focus ---------------------------------------------------
   const selected = state.focus.selected;
+  const typing = state.focus.typing;
+  const ctrlX = key.ctrl === true && char.toLowerCase() === "x";
+  // Typing with the dropdown PINNED (owner 2026-11-11): the keyboard is the
+  // input's while the list stays on screen. ONLY the two keys that walk back
+  // into it act here; everything else — a printable character, Enter, an arrow,
+  // a chord — is the input's, exactly as with no dropdown open at all. So
+  // Enter sends to the MAIN agent (the drawer is not open, so `sendTarget` cannot
+  // re-route it to a child) and Esc closes the dropdown before the App's own
+  // "Esc stops a running turn" branch is reached.
+  if (typing) {
+    if (ctrlX) {
+      // The stop's arm, from the typing sub-state: the list takes the keys back
+      // armed, so a second `ctrl+x` confirms (the same two presses as in the list).
+      return {
+        state: { ...state, focus: { ...state.focus, typing: false, armed: true } },
+        effect: { kind: "none" },
+      };
+    }
+    if (key.escape) {
+      // The dropdown closes — one step, and NEVER the turn's abort.
+      return { state: { ...state, focus: { kind: "input" } }, effect: { kind: "none" } };
+    }
+    if (ctrlT) {
+      // Ctrl+T toggles the dock's SURFACES, so from the typing sub-state it
+      // undoes the type-through: the list takes the keys back, same row.
+      return {
+        state: { ...state, focus: { ...state.focus, typing: false } },
+        effect: { kind: "none" },
+      };
+    }
+    // ↓ is NOT the dock's here: the DOWN table (`downEntersList`,
+    // `resolveLineInput`) runs first in the App, so a line below the cursor and
+    // a history walk keep their meanings, and only the draft slot's DOWN walks
+    // back into the list.
+    return { state, effect: { kind: "pass" } };
+  }
   const index = Math.max(0, ctx.ids.indexOf(selected));
-  // Armed: `y` stops, ANY other key disarms and is swallowed (owner P4 (a)).
+  // Armed: the second `ctrl+x` stops; ANY other key disarms and is swallowed
+  // (owner P4 (a), the confirm is the same key twice).
   if (state.focus.armed) {
-    if (char === "y" && !key.ctrl && !key.meta) {
+    if (ctrlX) {
       return {
         state: { ...state, focus: { ...state.focus, armed: false } },
         effect: { kind: "stop", id: selected },
@@ -375,16 +476,21 @@ export function dockKey(
     }
     return openChild(state, selected, ctx.draft);
   }
-  if (char === "x" && !key.ctrl && !key.meta) {
+  if (ctrlX) {
     return {
       state: { ...state, focus: { ...state.focus, armed: true } },
       effect: { kind: "none" },
     };
   }
-  // A printable key is IGNORED (owner P3 (a)): with type-through, typing "xy"
-  // by mistake would arm and confirm a stop.
+  // A printable key is TYPE-THROUGH (owner decision 2026-11-11, superseding P3
+  // (a)): focus moves to the input, the key is typed there, and the dropdown
+  // stays VISIBLE. The bug this replaces: the key was swallowed while the
+  // input's cursor still showed, so the screen looked hung.
   if (isPrintable(char, key)) {
-    return none;
+    return {
+      state: { ...state, focus: { ...state.focus, typing: true, armed: false } },
+      effect: { kind: "pass" },
+    };
   }
   // Anything else (Ctrl+C, chords, PgUp/PgDn, paste) goes on to the App: Ctrl+C
   // must still quit/confirm, and the wheel must still scroll.

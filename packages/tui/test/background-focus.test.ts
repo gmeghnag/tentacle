@@ -16,9 +16,11 @@ import {
   clickDock,
   closeOpen,
   closeToDropdown,
+  dockClaimsCtrlX,
   dockKey,
   dockKindOf,
   downEntersList,
+  downToDock,
   noteSent,
   openChild,
   openDropdown,
@@ -103,7 +105,7 @@ describe("T-F2: the pill's and the dropdown's own keys", () => {
     const pill = toggleList(INPUT_DOCK, three);
     expect(pill.focus).toEqual({ kind: "pill" });
     const drop = dockKey(pill, "", { return: true }, ctx).state;
-    expect(drop.focus).toEqual({ kind: "list", selected: "sa-1", armed: false });
+    expect(drop.focus).toEqual({ kind: "list", selected: "sa-1", armed: false, typing: false });
     // ↓ on the pill points the same way as Enter (a dropdown opens downward).
     expect(dockKey(pill, "", { downArrow: true }, ctx).state.focus).toMatchObject({
       kind: "list",
@@ -162,12 +164,12 @@ describe("T-F2: the pill's and the dropdown's own keys", () => {
     expect(step(third, "", { upArrow: true }).state.focus).toMatchObject({ selected: "sa-2" });
   });
 
-  test("`x` then `y` stops; `x` then anything else disarms AND is swallowed", () => {
+  test("`ctrl+x` then `ctrl+x` stops; `ctrl+x` then anything else disarms AND is swallowed", () => {
     const at = atList();
-    const armed = step(at, "x");
+    const armed = dockKey(at, "x", { ctrl: true }, ctx);
     expect(armed.state.focus).toMatchObject({ armed: true });
     expect(armed.effect.kind).toBe("none");
-    const stopped = step(armed.state, "y");
+    const stopped = dockKey(armed.state, "x", { ctrl: true }, ctx);
     expect(stopped.effect).toEqual({ kind: "stop", id: "sa-1" });
     expect(stopped.state.focus).toMatchObject({ armed: false });
     // Any other key disarms and does nothing else — never typed into the input.
@@ -176,12 +178,111 @@ describe("T-F2: the pill's and the dropdown's own keys", () => {
     expect(cancelled.effect).toEqual({ kind: "none" });
   });
 
-  test("a printable key with the dropdown focused is IGNORED (owner P3 (a))", () => {
+  test("a bare `x`/`y` is just typing now: never an arm, never a stop (owner 2026-11-11)", () => {
+    // docs/fix/dock-list-type-through.md: the stop key is `ctrl+x`, so a user
+    // typing "xyz" can neither arm nor confirm. MUTATION: make the arm read a
+    // bare `x` again → this goes red with `armed: true`.
+    const at = atList();
+    for (const char of ["x", "y", "X", "Y"]) {
+      const r = step(at, char);
+      expect(r.state.focus).toEqual({ kind: "list", selected: "sa-1", armed: false, typing: true });
+      expect(r.effect).toEqual({ kind: "pass" });
+    }
+  });
+
+  test("a printable key with the dropdown focused is TYPED THROUGH (owner 2026-11-11, supersedes P3 (a))", () => {
+    // The bug: the key vanished while the input's cursor still showed. Now the
+    // key reaches the input (`pass`) and the dropdown STAYS VISIBLE (`typing`).
     const at = atList();
     for (const char of ["a", "z", "1", " "]) {
       const r = step(at, char);
-      expect(r.state).toBe(at);
-      expect(r.effect).toEqual({ kind: "none" });
+      expect(r.state.focus).toEqual({
+        kind: "list",
+        selected: "sa-1",
+        armed: false,
+        typing: true,
+      });
+      expect(r.effect).toEqual({ kind: "pass" });
+    }
+  });
+
+  test("typing keeps the selection; ↓ walks back into the list, Esc closes the dropdown", () => {
+    const second = step(atList(), "", { downArrow: true }).state;
+    const typing = step(second, "h").state;
+    expect(typing.focus).toMatchObject({ kind: "list", selected: "sa-2", typing: true });
+    // ↓ is NOT this module's in the typing state: the App's DOWN table runs
+    // first (a line below the cursor still moves, a history walk still walks),
+    // and only the draft slot's DOWN walks back in — `downToDock`.
+    expect(dockKey(typing, "", { downArrow: true }, ctx).effect).toEqual({ kind: "pass" });
+    const back = downToDock(typing, three);
+    expect(back.focus).toMatchObject({ kind: "list", selected: "sa-2", typing: false });
+    // From the INPUT it is still the pill (DOWN points at the bottom-most thing).
+    expect(downToDock(INPUT_DOCK, three).focus).toEqual({ kind: "pill" });
+    // …and with nothing to show there is nothing to walk into.
+    expect(downToDock(typing, [])).toBe(typing);
+    // Esc closes the dropdown (the input, where the hands are) and NEVER stops
+    // the turn: `none`, so the App's abort branch is not reached.
+    const closed = dockKey(typing, "", { escape: true }, ctx);
+    expect(closed.state.focus).toEqual({ kind: "input" });
+    expect(closed.effect).toEqual({ kind: "none" });
+    // Ctrl+T is the direct toggle it always was.
+    expect(dockKey(typing, "t", { ctrl: true }, ctx).state.focus).toMatchObject({
+      kind: "list",
+      typing: false,
+    });
+  });
+
+  test("with typing on, Enter and an arrow are the INPUT's (`pass`); Send goes to the main agent", () => {
+    const typing = step(atList(), "h").state;
+    expect(dockKey(typing, "", { return: true }, ctx).effect).toEqual({ kind: "pass" });
+    expect(dockKey(typing, "", { upArrow: true }, ctx).effect).toEqual({ kind: "pass" });
+    expect(dockKey(typing, "", { tab: true }, ctx).effect).toEqual({ kind: "pass" });
+    expect(dockKey(typing, "", {}, ctx).effect).toEqual({ kind: "pass" });
+    // The state is the dock's (no re-route): Enter sends to whoever owns the
+    // draft, and with no drawer open that is the MAIN agent.
+    expect(sendTarget(typing, "hello")).toEqual({ kind: "main" });
+  });
+
+  test("`ctrl+x` from the typing sub-state re-arms the LIST (the same two presses)", () => {
+    const typing = step(atList(), "h").state;
+    const armed = dockKey(typing, "x", { ctrl: true }, ctx);
+    expect(armed.state.focus).toMatchObject({ kind: "list", armed: true, typing: false });
+    expect(armed.effect).toEqual({ kind: "none" });
+    expect(dockKey(armed.state, "x", { ctrl: true }, ctx).effect).toEqual({
+      kind: "stop",
+      id: "sa-1",
+    });
+  });
+
+  test("`dockClaimsCtrlX`: the dropdown owns ctrl+x; the input does not (the chord keeps it)", () => {
+    // MUTATION: drop the App's guard and the send-now chord consumes the arm —
+    // no stop could ever be asked for from the dock.
+    expect(dockClaimsCtrlX(atList())).toBe(true);
+    expect(dockClaimsCtrlX(step(atList(), "h").state)).toBe(true);
+    expect(dockClaimsCtrlX(INPUT_DOCK)).toBe(false);
+    expect(dockClaimsCtrlX(toggleList(INPUT_DOCK, three))).toBe(false);
+  });
+
+  test("an SGR mouse report is NEVER a key — in the list or in the pinned typing state", () => {
+    // docs/fix/dock-list-type-through.md: with type-through on, an unguarded
+    // report would be TYPED into the input (the list swallowed it before, which
+    // is why the bug stayed hidden). Both delivery forms: Ink usually strips the
+    // leading ESC, and the raw one must not slip through either — the
+    // `startsWith("[")` guard used to let exactly that form reach the printable
+    // branch. MUTATION: `MOUSE_REPORT.test(char)` → `char.startsWith("[") && …`
+    // → the `press` case goes red.
+    const reports = [
+      "\u001b[<0;4;9M", // press, ESC kept (the raw terminal bytes)
+      "[<0;4;9M", // press, ESC stripped by Ink (the usual arrival)
+      "[<64;10;5M", // a wheel notch
+      "[<0;4;9m", // release
+    ];
+    for (const state of [atList(), step(atList(), "h").state]) {
+      for (const char of reports) {
+        const r = dockKey(state, char, {}, ctx);
+        expect(r.effect).toEqual({ kind: "pass" });
+        expect(r.state).toBe(state);
+      }
     }
   });
 
@@ -336,7 +437,7 @@ describe("T-F5: where a late refusal's text goes (Review H2)", () => {
     expect(refusalPlacement(openOn("sa-2"), "sa-1", "")).toBe("notice");
     expect(
       refusalPlacement(
-        { ...INPUT_DOCK, focus: { kind: "list", selected: "sa-1", armed: false } },
+        { ...INPUT_DOCK, focus: { kind: "list", selected: "sa-1", armed: false, typing: false } },
         "sa-1",
         "",
       ),
@@ -347,7 +448,12 @@ describe("T-F5: where a late refusal's text goes (Review H2)", () => {
     // The mockups' mouse rule, decided here so the App only routes the report.
     const three = ["sa-1", "sa-2", "sa-3"];
     const clickedPill = clickDock(INPUT_DOCK, { kind: "pill" }, three);
-    expect(clickedPill.state.focus).toEqual({ kind: "list", selected: "sa-1", armed: false });
+    expect(clickedPill.state.focus).toEqual({
+      kind: "list",
+      selected: "sa-1",
+      armed: false,
+      typing: false,
+    });
     const clickedRow = clickDock(clickedPill.state, { kind: "row", id: "sa-2" }, three);
     expect(clickedRow.state.focus).toMatchObject({ kind: "open", id: "sa-2" });
     expect(clickedRow.effect).toEqual({ kind: "open", id: "sa-2", draftOut: "", draftIn: "" });
@@ -378,13 +484,16 @@ describe("T-F4: reconcile", () => {
     // sa-2 leaves: the row that took its place is sa-3.
     expect(reconcile(at, ["sa-1", "sa-3"], []).focus).toMatchObject({ selected: "sa-3" });
     // sa-3 (the last) leaves: the one above.
-    const atLast = { ...at, focus: { kind: "list" as const, selected: "sa-3", armed: false } };
+    const atLast = {
+      ...at,
+      focus: { kind: "list" as const, selected: "sa-3", armed: false, typing: false },
+    };
     expect(reconcile(atLast, ["sa-1", "sa-2"], []).focus).toMatchObject({ selected: "sa-2" });
   });
 
   test("the last row leaves → back to the input, the draft untouched; a focused pill follows it too", () => {
     const at: DockState = {
-      focus: { kind: "list", selected: "sa-1", armed: false },
+      focus: { kind: "list", selected: "sa-1", armed: false, typing: false },
       drafts: { main: "keep me" },
       sent: {},
     };
@@ -451,16 +560,16 @@ describe("T-F5: a shell job in the dock (docs/feat/shell-jobs-panel.md)", () => 
     });
   });
 
-  test("x then y on a job row is a stop with the real id", () => {
+  test("ctrl+x then ctrl+x on a job row is a stop with the real id", () => {
     const at = dockKey(
       openDropdown(toggleList(INPUT_DOCK, ids), ids),
       "",
       { downArrow: true },
       ctx,
     ).state;
-    const armed = dockKey(at, "x", {}, ctx).state;
+    const armed = dockKey(at, "x", { ctrl: true }, ctx).state;
     expect(armed.focus).toMatchObject({ kind: "list", selected: "bg-3", armed: true });
-    expect(dockKey(armed, "y", {}, ctx).effect).toEqual({ kind: "stop", id: "bg-3" });
+    expect(dockKey(armed, "x", { ctrl: true }, ctx).effect).toEqual({ kind: "stop", id: "bg-3" });
   });
 
   test("an open job that leaves the list freezes on its LAST row, its focus kept", () => {
