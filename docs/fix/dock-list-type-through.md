@@ -105,7 +105,8 @@ screen, the keys back in the input.
 | `list` `typing:false` | `ctrl+x` | state → `armed:true`, effect `none` |
 | `list` `typing:false` armed | `ctrl+x` | effect `stop{id}`, disarmed |
 | `list` `typing:false` armed | any other | disarmed, swallowed (`none`) — unchanged |
-| `list` `typing:true` | `ctrl+x` | state → `typing:false, armed:true` (the list takes the keys back armed) |
+| `list` `typing:true` | `ctrl+x` | the **input's** (`pass`, state untouched) — the `Ctrl+X Ctrl+S` chord's, exactly as with no dropdown open; never an arm, never a stop (Review round 1, M1) |
+| `list` `typing:true` | ↓ | not `dockKey`'s (`pass`): the DOWN table's `downToDock` puts the keys back on the list — and only then is `ctrl+x` the stop's |
 | `list` `typing:true` | Esc | state → `input` (the dropdown closes), effect `none` |
 | `list` `typing:true` | `ctrl+t` | state → `typing:false` (undo the type-through) |
 | `list` `typing:true` | everything else | `pass` — the input's |
@@ -116,10 +117,13 @@ the pinned dropdown; a new pure `downToDock(state, ids)` executes it — pill fr
 from the pinned dropdown — while `toggleList` keeps Ctrl+T's `/agents` meaning (an explicit toggle
 OUT of the dock).
 
-**The chord guard:** new pure `dockClaimsCtrlX(state)` (true for `list`, either sub-state). The App
-asks it before `stepChord`; when the dock owns `ctrl+x`, the chord is reset to idle and the key goes
-down the normal path to `dockKey`. So `ctrl+x ctrl+s` (send queued messages now) is unchanged
-everywhere the dropdown is not focused.
+**The chord guard:** pure `dockClaimsCtrlX(state)`, true **only** for `list` with `typing:false` (the
+list has the keys). The App asks it before `stepChord`; when the dock owns `ctrl+x`, the chord is
+reset to idle and the key goes down the normal path to `dockKey`. So `ctrl+x ctrl+s` (send queued
+messages now) is unchanged everywhere the dock does not own the keys — **the pinned (`typing:true`)
+dropdown included**: there the keys are the input's, so a doubled `ctrl+x` merely re-arms the chord
+instead of stopping the child whose row was painted calm (Review round 1, M1; a stop from the pinned
+state is ↓ first, then `ctrl+x` twice).
 
 **Hints** (`background-list.ts` `dockHint`, `agentMeta`): `enter open · ctrl+x stop · esc back`
 (focused list), `ctrl+x stop · any other key cancels` (armed), `stop sa-N? ctrl+x` (the armed row's
@@ -152,9 +156,9 @@ is `list && !typing`) but the selection stays marked.
 - **The list empties while typing.** `reconcile` returns to `input` on an empty list — the draft and
   the text stay, and the dropdown had nothing left to show. No new branch: `reconcile` only touches
   `list` focus, and `typing` rides along in the spread.
-- **`ctrl+x` while the input is focused** — the chord's, as before (`dockClaimsCtrlX` is false).
-  A chord armed just before the dropdown opened is reset when a list key is pressed, so a stale arm
-  cannot fire `sendNow` afterwards.
+- **`ctrl+x` while the input is focused — or while the dropdown is pinned** — the chord's, as before
+  (`dockClaimsCtrlX` is false in both). A chord armed just before the dropdown opened is reset when a
+  list key is pressed, so a stale arm cannot fire `sendNow` afterwards.
 - **A mouse report** is matched before every branch (`isMouseReport`), so the wheels and clicks keep
   working in the pinned state.
 - **Esc in the pinned state** returns `none`, so the App's "Esc stops a running turn" is never
@@ -173,15 +177,22 @@ Red before green (§9); the exact property each pins:
     still paints `background · 2`.
   - **D2** with a held turn running, type and Esc → the dropdown closes, the text survives, and
     `api.aborts()` does not move (the Esc chain stays honest).
-  - **D3** typing `xyz` → the text is in the input, no `stop sa-1?` and `api.kills` empty.
-  - **D4** `ctrl+x` twice on a sub-agent row → `api.kills === ["sa-1"]`, the armed rule names
-    `ctrl+x`.
+  - **D3** typing `xyz` → the text is in the input, no `stop sa-1?` and neither kill spy moves.
+  - **D4** `ctrl+x` twice on a sub-agent row → `api.killSubagents === ["sa-1"]` (and
+    `api.killJobs` empty), the armed rule names `ctrl+x`.
   - **D5** `↓` returns to the list after typing; and `↓` inside a multi-line draft still moves the
     cursor (the DOWN table wins).
-  - **D6** the shell row: `ctrl+x` twice → `api.kills === ["bg-3"]` (`session/job_kill`).
+  - **D6** the shell row: `ctrl+x` twice → `api.killJobs === ["bg-3"]` (`session/job_kill`, and
+    `api.killSubagents` empty — the ROUTE, not just "a kill").
+  - **D7** pinned (`typing`) + `ctrl+x ctrl+x` → **no** kill (both spies empty), never armed, the
+    draft still there and still editable; and `ctrl+x ctrl+s` while pinned → `api.sendNows ===
+    [["queued one"]]` (the chord fires, as without a dropdown). Red-first for Review round 1, M1.
+  - **D8** from the pinned state `↓` first, then `ctrl+x` twice → `api.killSubagents === ["sa-1"]`:
+    the stop is still reachable, one ↓ away, with the rule highlighted.
 - **`background-focus.test.ts`** (pure): type-through = `pass` + `typing`, the selection kept,
-  Esc/`ctrl+t`/`ctrl+x` in the typing sub-state, `downToDock` vs `toggleList`, `dockClaimsCtrlX`,
-  and a bare `x`/`y` never arming.
+  Esc/`ctrl+t` in the typing sub-state, `ctrl+x` there being the input's (`pass`, state untouched),
+  `downToDock` vs `toggleList`, `dockClaimsCtrlX` (true only for the list with the keys), and a bare
+  `x`/`y` never arming.
 
 Mutations (non-vacuity, §9): see Execution.
 
@@ -193,8 +204,9 @@ Mutations (non-vacuity, §9): see Execution.
 
 **RED first.** The frame test was written against unmodified `main` and run: **6 fail / 0 pass**
 (`0 pass 6 fail`), each on its own property assertion — D1 on `expect(f).toContain("hello")`, D2 on
-the text, D3 on `"xyz"`, D4 on the armed rule, D5 on `↓ list · esc close`, D6 on `api.kills`
-(received `[]`). Not one of them failed on an import or a compile error. Context's **Repro** pastes
+the text, D3 on `"xyz"`, D4 on the armed rule, D5 on `↓ list · esc close`, D6 on the kill spy
+(received `[]`; both kinds shared one array then — split in Execution round 1). Not one of them
+failed on an import or a compile error. Context's **Repro** pastes
 D3's frame plus D4's and D6's assertions from that same run (all six were recorded; the file was
 captured as `.tentacle/tmp/dock-type-through/red.txt`-shaped output — the gitignored scratch, so the
 paste in Context is the durable record).
@@ -244,7 +256,7 @@ restored:
 |---|---|---|
 | M1 | the type-through reverted: a printable key at `list` focus returns `none` again | **9 fail** — the frame tests D1, D2, D3, D5 and D5b, plus 4 pure cases (type-through, bare `x`/`y`, the ↓/Esc sub-state, "Enter is the input's") |
 | M2 | the arm/confirm read a bare `x` again (`const ctrlX = char === "x"`) | **2 fail** — D3 (`xyz` arms) and the pure "bare `x`/`y` is just typing" |
-| M3 | the App's `dockClaimsCtrlX` guard dropped (the chord eats `ctrl+x`) | **2 fail** — D4 and D6 (`api.kills` stays `[]`) |
+| M3 | the App's `dockClaimsCtrlX` guard dropped (the chord eats `ctrl+x`) | **2 fail** — D4 and D6 (the kill spy stays `[]`) |
 | M4 | Esc in the typing state `pass`es to the App instead of closing | **2 fail** — D2 (the abort count moves) and the pure Esc case |
 | M5 | the dropdown hidden while `typing` | **3 fail** — D1, D5, D5b |
 | M6 | the pinned dropdown excluded from `downEntersList` | **1 fail** — D5 (↓ can never return) |
@@ -271,6 +283,81 @@ ALL MOUSE REPORTS PASS THROUGH
 
 The control line is what keeps that check non-vacuous (everything in that state returns `pass`; only
 the printable key also CHANGES the state).
+
+### Round 1 (fix)
+
+*— claude-opus-5-5 (executing model), 2026-11-12*
+
+**Review round 1 (Opus) was REQUEST-CHANGES on ONE MEDIUM (M1):** the pinned dropdown (`typing:
+true`) still claimed `ctrl+x`, taking it from the input's `Ctrl+X Ctrl+S` chord; a doubled `ctrl+x`
+there could stop the selected child — whose row was painted CALM, not focused, when the first press
+landed. Reproduced here by the RED frame test below (D7 on the unmodified pure module: `Received
+length: 1` — one kill from a doubled `ctrl+x` while pinned); the reviewer's own pure repro of the
+same on `main` is in its M1.
+
+**The fix, exactly as the reviewer specified** (code: `background-focus.ts` + `App.tsx` only; then the
+strings):
+
+1. `background-focus.ts:343` — `dockClaimsCtrlX` → `state.focus.kind === "list" &&
+   !state.focus.typing;`: the chord keeps `ctrl+x` in the pinned state, exactly as at the bare input.
+2. `background-focus.ts:417` — the `if (ctrlX) {…}` arm **deleted** from the `if (typing)` branch, so
+   `ctrl+x` there is `pass` with the state untouched: never an arm, never a stop, and the keys never
+   leave the input. A stop from the pinned state is ↓ first (the rule highlights) then `ctrl+x` twice.
+   Its old job (walk back into the list) is ↓'s alone, unchanged in shape (`downToDock`).
+3. `App.tsx:3368-3375` comment updated to say "the LIST has the keys (not the pinned typing
+   sub-state)". No rule added to the App: the guard still calls the pure function.
+4. Strings that described the old behaviour: `docs/feat/subagent-panel.md`'s keys table gained the
+   pinned-state `ctrl+x` row, and `CHANGELOG.md`'s entry now says the chord keeps `ctrl+x` while you
+   type with the dropdown pinned.
+5. The reviewer's item 4 (an explicit owner decision if a stop were to stay reachable straight from
+   the pinned state) is NOT taken: the shipped shape is the reviewer's default — ↓ first. D8 shows
+   the capability is intact, so no owner decision is needed.
+
+**RED first (§9).** `dock-type-through-frames.test.tsx` gained **D7** (pinned + `ctrl+x ctrl+x` → both
+kill spies empty, never armed, the draft still editable) and its chord half (pinned + `ctrl+x ctrl+s`
+→ `api.sendNows === [["queued one"]]`), plus **D8** (pinned → ↓ → `ctrl+x ctrl+x` → `killSubagents
+=== ["sa-1"]`: the stop stays reachable). Run on the unmodified `background-focus.ts`:
+
+```
+(fail) D7 … `ctrl+x ctrl+x` kills nothing … [319.62ms]
+  expect(api.killSubagents).toHaveLength(0)   Expected length: 0   Received length: 1
+(fail) D7 … the chord itself works while pinned … [573.37ms]
+  expect(api.sendNows).toEqual([["queued one"]])   Received: []
+ 8 pass
+ 2 fail
+```
+
+Both failed on the **property**, not on an import or a compile error. D8 passed before and after
+(the capability was never in doubt — that is what made the fix safe to make). After the fix: **10
+pass / 0 fail**. The pure test was flipped with it: "`ctrl+x` from the typing sub-state re-arms the
+LIST" → "`ctrl+x` in the typing sub-state is the INPUT's: it never arms, never stops, never leaves
+the input" (asserts `pass`, `state` **identical by reference**, and still a stop after `downToDock`),
+and `dockClaimsCtrlX(step(atList(), "h").state)` → `false`. `background-focus.test.ts`: 45 pass.
+
+**The doc's D6 overstatement, corrected.** The reviewer found that the fake pushed `killSubagent` and
+`killJob` into ONE `kills` array, so D6 checked "something was killed", not the `session/job_kill`
+route the plan claims (R2 left D6 green). The spies are now split — `api.killSubagents`,
+`api.killJobs` (plus `api.sendNows` for D7's chord half) — and every case asserts the route **and**
+that the other spy is empty (D4, D6, D7, D8). Re-running the reviewer's R2 now **does** fail D6,
+which is what the claim says it should. The Implementation's D3/D4/D6 rows, the chord-guard
+paragraph and the `typing:true | ctrl+x` table row were updated to the fixed semantics.
+
+**Mutations (non-vacuity, §9; script `.tentacle/tmp/dock-type-through/round1-mutations.sh`, each file
+restored byte-identical — `cmp` clean):**
+
+| # | mutation | red tests |
+|---|---|---|
+| R1 | the M1 bug put back: `dockClaimsCtrlX` true for every `list` **and** the `typing` + `ctrlX` arm restored | **4 fail** — frame D7 (both cases: a kill, and `sendNows` `[]`) + pure (`ctrl+x` in the typing sub-state; `dockClaimsCtrlX`) |
+| R2 | every stop routed to `killSubagent` (`App.tsx`: `if (false)` for the job branch) | **3 fail** — frame **D6** (new: the split spy catches the route) + `shell-panel-frames` F5, F9 |
+
+Restored afterwards: frames `10 pass / 0 fail`, pure `45 pass / 0 fail`, both sources `cmp`-identical
+to the backup.
+
+**Gate.** `bunx tsc --noEmit` → clean. `bun run lint` → `Checked 895 files … No fixes applied` (the
+repo's 0/0 baseline). `bun test packages/tui` → **1482 pass / 0 fail** (104 files; was 1479 — the
+three new frame cases). Narrow six-file set (`dock-type-through-frames`, `background-focus`,
+`send-now-app`, `shell-panel-frames`, `subagent-panel-frames`, `background-list`) → `198 pass / 0
+fail`. `TODO.md` untouched; nothing committed.
 
 ## Review
 
@@ -300,7 +387,8 @@ deps are not installed in this worktree. That is an environment gap, not this ch
   green**. The fake's `killJob` and `killSubagent` both push to the same `kills` array, so D6
   checks "something was killed", not the route the doc says it pins. The route is still pinned
   (by F5), so this needs no change. It does mean the doc's "D6 → `session/job_kill`" claim is
-  overstated.
+  overstated. **[Round 1: fixed anyway — the spies are split, so D6 now pins the route too; see
+  Execution's `### Round 1 (fix)`.]**
 
 **What holds (A).**
 - Esc in the pinned state returns `none` before the App's abort branch (`App.tsx` dock block

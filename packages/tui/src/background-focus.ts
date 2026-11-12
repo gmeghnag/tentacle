@@ -17,7 +17,9 @@ import type { DockFocus, DockFrozen, DockJobRow, DockOutcome } from "./backgroun
  * pinned on screen with the keys back on the input — a printable key at list
  * focus moves there and is typed, Enter sends to the MAIN agent, Esc closes the
  * dropdown, and ↓ walks back into the list. Nothing is ever swallowed, so
- * typing can never arm or confirm a stop (`ctrl+x` is the only stop key).
+ * typing can never arm or confirm a stop. In the pinned state `ctrl+x` is the
+ * INPUT's — the `Ctrl+X Ctrl+S` send-now chord's, exactly as with no dropdown
+ * open — so a stop is always ↓ first, with the list's rule highlighted.
  *
  * THE ESC CHAIN (docs/feat/subagent-panel.md, UI revision): drawer → dropdown →
  * pill → input. The pill is the status bar's one control (the counts); DOWN from
@@ -323,15 +325,23 @@ function isMouseReport(char: string): boolean {
 }
 
 /**
- * Does the DOCK own `ctrl+x` this keypress? It does while the dropdown has the
- * keys (either sub-state): that is the stop's arm/confirm
+ * Does the DOCK own `ctrl+x` this keypress? Only while the LIST has the keys
+ * (`typing: false`): there it is the stop's arm/confirm
  * (docs/fix/dock-list-type-through.md). The App asks this BEFORE handing the key
  * to the `Ctrl+X Ctrl+S` send-now chord (`chord.ts`), which consumes `ctrl+x`
  * unconditionally — a chord that ran first would swallow the arm, and no stop
  * could ever be asked for from the dock.
+ *
+ * NEVER in the pinned state (`typing: true`): those keys are the INPUT's (the
+ * owner's decision, and what the DOWN table already does), so `ctrl+x` there is
+ * the chord's, exactly as with no dropdown open. A doubled `ctrl+x` at the input
+ * merely re-arms the chord; were it the dock's, that same fumble would stop the
+ * selected child — whose row was painted CALM, not focused, when it landed
+ * (Review round 1, M1). To stop from the pinned state, ↓ first puts the keys (and
+ * the highlighted rule) back on the list.
  */
 export function dockClaimsCtrlX(state: DockState): boolean {
-  return state.focus.kind === "list";
+  return state.focus.kind === "list" && !state.focus.typing;
 }
 
 /**
@@ -405,14 +415,6 @@ export function dockKey(
   // re-route it to a child) and Esc closes the dropdown before the App's own
   // "Esc stops a running turn" branch is reached.
   if (typing) {
-    if (ctrlX) {
-      // The stop's arm, from the typing sub-state: the list takes the keys back
-      // armed, so a second `ctrl+x` confirms (the same two presses as in the list).
-      return {
-        state: { ...state, focus: { ...state.focus, typing: false, armed: true } },
-        effect: { kind: "none" },
-      };
-    }
     if (key.escape) {
       // The dropdown closes — one step, and NEVER the turn's abort.
       return { state: { ...state, focus: { kind: "input" } }, effect: { kind: "none" } };
@@ -429,6 +431,10 @@ export function dockKey(
     // `resolveLineInput`) runs first in the App, so a line below the cursor and
     // a history walk keep their meanings, and only the draft slot's DOWN walks
     // back into the list.
+    // `ctrl+x` is not the dock's either (`dockClaimsCtrlX` is false here): it is
+    // the `Ctrl+X Ctrl+S` chord's, exactly as at the input, so a doubled `ctrl+x`
+    // only re-arms the chord — it can never stop the child whose row sits above
+    // the cursor (Review round 1, M1). The stop is ↓ then `ctrl+x` twice.
     return { state, effect: { kind: "pass" } };
   }
   const index = Math.max(0, ctx.ids.indexOf(selected));

@@ -243,22 +243,37 @@ describe("T-F2: the pill's and the dropdown's own keys", () => {
     expect(sendTarget(typing, "hello")).toEqual({ kind: "main" });
   });
 
-  test("`ctrl+x` from the typing sub-state re-arms the LIST (the same two presses)", () => {
+  test("`ctrl+x` in the typing sub-state is the INPUT's: it never arms, never stops, never leaves the input", () => {
+    // Review round 1, M1: by the owner's rule the pinned state's keys are the
+    // input's, so `ctrl+x` is the `Ctrl+X Ctrl+S` chord's there — a doubled
+    // `ctrl+x` is a fumbled chord at the input, not a kill of the child whose row
+    // was painted calm. The stop is ↓ first, then the list's two presses.
+    // MUTATION: `dockClaimsCtrlX` → `kind === "list"` + this branch restored → red.
     const typing = step(atList(), "h").state;
-    const armed = dockKey(typing, "x", { ctrl: true }, ctx);
+    expect(dockClaimsCtrlX(typing)).toBe(false);
+    const r = dockKey(typing, "x", { ctrl: true }, ctx);
+    expect(r.effect).toEqual({ kind: "pass" });
+    expect(r.state).toBe(typing); // the state is untouched: still typing, still calm, never armed
+    const twice = dockKey(r.state, "x", { ctrl: true }, ctx);
+    expect(twice.effect).toEqual({ kind: "pass" });
+    expect(dockKey(twice.state, "x", { ctrl: true }, ctx).effect).toEqual({ kind: "pass" });
+    // ↓ is what walks back in, and THERE the two presses stop the row.
+    const back = downToDock(typing, three);
+    const armed = dockKey(back, "x", { ctrl: true }, ctx);
     expect(armed.state.focus).toMatchObject({ kind: "list", armed: true, typing: false });
-    expect(armed.effect).toEqual({ kind: "none" });
     expect(dockKey(armed.state, "x", { ctrl: true }, ctx).effect).toEqual({
       kind: "stop",
       id: "sa-1",
     });
   });
 
-  test("`dockClaimsCtrlX`: the dropdown owns ctrl+x; the input does not (the chord keeps it)", () => {
+  test("`dockClaimsCtrlX`: the LIST owns ctrl+x; the input and the pinned dropdown do not (the chord keeps it)", () => {
     // MUTATION: drop the App's guard and the send-now chord consumes the arm —
     // no stop could ever be asked for from the dock.
     expect(dockClaimsCtrlX(atList())).toBe(true);
-    expect(dockClaimsCtrlX(step(atList(), "h").state)).toBe(true);
+    // …and the mirror of it (Review round 1, M1): pinned, it is the chord's,
+    // exactly as at the input, so a doubled ctrl+x cannot stop a child.
+    expect(dockClaimsCtrlX(step(atList(), "h").state)).toBe(false);
     expect(dockClaimsCtrlX(INPUT_DOCK)).toBe(false);
     expect(dockClaimsCtrlX(toggleList(INPUT_DOCK, three))).toBe(false);
   });

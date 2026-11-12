@@ -3367,9 +3367,11 @@ export function App({
     }
     // The `Ctrl+X Ctrl+S` chord (send the queued messages now): before the
     // permission dialog, so it works while one is up (D3). A key that breaks
-    // the chord goes on below unchanged — EXCEPT while the dropdown has the
-    // keys: there `ctrl+x` is the dock's stop (arm, then confirm,
-    // docs/fix/dock-list-type-through.md), so the chord must not consume it.
+    // the chord goes on below unchanged — EXCEPT while the LIST has the keys
+    // (the dropdown focused, not the pinned typing sub-state): there `ctrl+x` is
+    // the dock's stop (arm, then confirm, docs/fix/dock-list-type-through.md),
+    // so the chord must not consume it. With the dropdown PINNED the keys are the
+    // input's, so the chord keeps `ctrl+x` (Review round 1, M1).
     if (dockClaimsCtrlX(dockRef.current)) {
       chordRef.current = idleChord;
     } else {

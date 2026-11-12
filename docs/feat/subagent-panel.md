@@ -203,6 +203,7 @@ Focus ring: **input ⇄ list**, and **open** (the input re-targeted to one child
 | list | ctrl+x | arm "stop sa-N? ctrl+x" on that row; `ctrl+x` again → `session/agent_kill`; any other key disarms and is swallowed (P4, as revised 2026-11-11: bare `x`/`y` no longer stop anything — `docs/fix/dock-list-type-through.md`). |
 | list | Esc / Ctrl+T | back to the input. **Never stops the turn.** |
 | list | printable | typed THROUGH: the keys move to the input and the character is typed there, the dropdown stays visible (P3, revised 2026-11-11). Esc then closes the dropdown, ↓ goes back into the list. |
+| list (typing/pinned) | ctrl+x | the INPUT's: the `Ctrl+X Ctrl+S` send-now chord's, exactly as with no dropdown open — never an arm, never a stop (Review round 1, `docs/fix/dock-list-type-through.md`). A stop from here is ↓ first, then `ctrl+x` twice. |
 | open | Enter | non-empty text not starting with `/` → `session/subagent_message` (never the main agent, never steering, never queued); text starting with `/` → the command path as today. Ended target → refused with a notice, draft kept (never re-routed). Over 8000 chars → refused before sending. |
 | open | Esc | close: stash the child's draft, restore the main draft. Does NOT stop the turn (a second Esc does). |
 | any | Ctrl+C, quit confirm, permission prompt | unchanged and FIRST: both own every key while shown (`App.tsx:2506,2536`); the dock state is untouched underneath. |
