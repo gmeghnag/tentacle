@@ -938,3 +938,68 @@ moved for the dependency direction). It ran 7 real mutations. Gaps: it skipped
 "provider limit" answer as satisfied by the global 15 MiB check (H1), and
 signed Execution as `claude-sonnet-4-5` although the executor was DeepSeek. The
 signature should name the actual model (AGENTS §10).
+
+## Review round 2
+
+*— claude-opus-5-5, 2026-11-12*
+
+Verifies the `### Round 1 (fix)` commit `8d57a47` against the round-1 findings.
+HIGH/MEDIUM only.
+
+**Verdict: PASS.** H1, M1, M2 and M3 are closed. No regression found in what
+round 1 confirmed.
+
+### Gate (re-run here)
+
+- Full `bun test` → **7016 pass, 3 skip (the opt-ins), 0 fail**, 512 files.
+- `bunx tsc --noEmit` clean. `bun run lint` clean (910 files). `tsc -p apps/mobile`
+  was not run: the `apps/mobile` deps are not installed in this worktree.
+- Repro (`.tentacle/tmp/attachments/review/repro.ts`, re-run on HEAD):
+  ```
+  A parse: false
+  C inline base64 bytes sent: 0
+  C placeholder: [image omitted: 10 MB is over this model's 3.8 MB limit — image/png sha256:e5b844cc57f5] reads: 0
+  ```
+- Mutations run by me. Both files were restored from saved copies, and
+  `git status` is clean:
+  - Anthropic merge guard `toolTurns.has(prev)` → `true`: 1 test fails (the
+    rewritten M3 test). **Killed.**
+  - `sidecarOf` always writes `schemaVersion: 1`: 3 M1 tests fail (v2 when
+    refs, read both, older reader refuses v2). **Killed.**
+
+### Per finding
+
+- **H1 closed.** `images.ts` adds a per-provider cap: `ANTHROPIC_MAX_IMAGE_BYTES`
+  = 3,932,160, i.e. 5 MiB as base64 (still marked TO VERIFY). The
+  OpenAI-compatible cap is 5 MiB. `model.maxImageBytes` overrides it and
+  `effectiveMaxImageBytes` bounds it to 15 MiB. `sendable()` checks it before
+  any read, and `placeholder()` names the image and the limit. Repro C: no
+  read, no inline bytes, and a placeholder takes the image's slot, so the
+  session can no longer be poisoned. The config is wired through `schema` →
+  `resolve` → `load` → `models` → `cli/model-provider.ts` →
+  `createModelProvider`, sub-agent model entries included.
+- **M1 closed.** The state file is written as v2 exactly when a tail message
+  `hasAttachments`, else as v1. The reader accepts both. A v1 file with refs
+  is refused. An older v1-only build refuses v2 loudly and leaves the files
+  untouched (pinned by test and by the mutation above).
+- **M2 closed.** `message`/`replace` use `MessageWithoutAttachmentsSchema`
+  (`attachments: z.undefined()`, exported as `{"not":{}}` and allow-listed in
+  the exporter walker). A pod's plain entry carrying refs now fails
+  `KnownLogEntrySchema` (repro A). The reader and `parseLogFile` refuse it as
+  malformed, so it is never written. An `attachments: []` on a plain message
+  would also be refused. That cannot happen by construction: `Session.send`
+  spreads refs only when non-empty, the wire schema has `min(1)`, and
+  `toWireRequest` omits an empty list.
+- **M3 closed.** The test now puts the tool message right after the image turn.
+  The guard mutation turns it red.
+- **`packages/protocol/src/session.ts`**: the round-1 diff (`HEAD~1..HEAD`) is
+  exactly +20 lines: the doc comment plus `MessageWithoutAttachmentsSchema` and
+  its type. Nothing else changed, and the working tree matches HEAD. The
+  disclosed `git checkout --` and `git show HEAD:` restore left no residue.
+
+### Non-blocking (not a finding)
+
+`formatBytes` rounds 3,932,160 to "3.8 MB". An image between about 3.75 and
+3.85 MiB would read "3.8 MB is over this model's 3.8 MB limit". Showing the
+limit with two decimals, or in exact bytes, would make the message unambiguous.
+Cosmetic: it fits in a 3b touch-up.
