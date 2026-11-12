@@ -102,7 +102,7 @@ const searchInput = z
       .string()
       .optional()
       .describe(
-        "File-NAME glob, e.g. `*.ts` or `a*.ts` (no `/`, no `**`, no leading `!` — put the directory in `path`). Restricts a content search, or is the file list in `files` mode.",
+        "File-NAME glob, e.g. `*.ts` or `a*.ts` (no `/`, no `**`, no leading `!`, no `{a,b}` brace alternation — put the directory in `path`). Restricts a content search, or is the file list in `files` mode.",
       ),
     path: z
       .string()
@@ -243,7 +243,12 @@ async function execPlan(
     input.output_mode,
     filesWithMatches,
   );
-  if (facts.engine === "rg" && parsed.parseError === undefined && isEngineFailure(result, parsed)) {
+  if (
+    facts.engine === "rg" &&
+    parsed.parseError === undefined &&
+    parsed.globError === undefined &&
+    isEngineFailure(result, parsed)
+  ) {
     return { retry: firstEngineLine(result.stderr) };
   }
   return {
@@ -267,6 +272,13 @@ async function execPlan(
  * search — the silent-demotion direction M4 exists to prevent. F14 is "rg was
  * chosen but broke" (a wrapper on `PATH`, a broken binary): that is a failure
  * carrying no path.
+ *
+ * O4: a GLOB the model wrote is the same shape of user error as a bad pattern.
+ * `rg: error parsing glob '*['` arrives with status 2, and demoting on it pinned
+ * the session to the fallback for one typo — and made the later dialect
+ * refusals lie ("this image has no ripgrep"). `parseSearchOutput` classifies it
+ * as `globError` (the ONE `GLOB_ERROR` regex) and the caller excludes it here,
+ * so a glob refusal never reaches this function.
  */
 function isEngineFailure(
   result: { stdout: string; stderr: string; exitCode: number },

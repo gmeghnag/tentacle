@@ -171,6 +171,14 @@ function globProblem(glob: string): string | undefined {
   if (glob === ".." || glob.includes("..")) {
     return "`glob` cannot contain `..`.";
   }
+  // O3: `{a,b}` is brace ALTERNATION on rg's globset and a literal on
+  // `find -name`, so the same call matched on one engine and answered `no
+  // matches` on the other (measured: `*.{ts,tsx}` → 2 hits on rg, nothing on
+  // the fallback). The owner's decision is "never silently wrong on any
+  // engine", so this is refused — same rule as `{n,m}` in `pattern`.
+  if (glob.includes("{") || glob.includes("}")) {
+    return "`glob` cannot use brace alternation (`{a,b}`): ripgrep matches it and `find -name` does not, so it would answer differently per engine. Run one search per extension, or omit `glob` and narrow `path`.";
+  }
   return undefined;
 }
 
@@ -429,7 +437,14 @@ function buildWalk(input: SearchInput, engine: SearchEngine, options: WalkOption
   const pattern = shq(options.pattern);
   const glob = input.glob !== undefined ? shq(input.glob) : undefined;
   if (engine === "rg") {
-    const flags = ["--no-require-git", "--sort path"];
+    // O1: `--no-config` and `--no-follow` are NOT defaults we may rely on.
+    // `RIPGREP_CONFIG_PATH` survives `scrubSensitiveEnv` (exec/src/
+    // host-execution.ts:355 keeps it), so a user ripgreprc holding `--follow`
+    // let the walk follow `./link` OUT of the workspace prompt-free — the exact
+    // escape Q6 (a) forbids — and a `--hidden`/`--no-ignore`/`--max-count` there
+    // made rg's result set silently diverge from the fallback's. Both flags are
+    // in the FIXED list, before `--`, for all three verbs.
+    const flags = ["--no-config", "--no-follow", "--no-require-git", "--sort path"];
     if (input.ignore_case) {
       flags.push("--ignore-case");
     }
@@ -520,6 +535,8 @@ export interface ParsedSearch {
    *  and 2) is a failure too — never `no matches` (M2 b). */
   readonly failed: boolean;
   readonly parseError?: string;
+  /** The engine refused the GLOB (O4): a user error, never an engine demotion. */
+  readonly globError?: string;
   /** Lines dropped as binary (`binary file matches`, a NUL byte) — F6. */
   readonly binaryMatches: number;
   /** The raw stream hit the cap: the subset is INCOMPLETE, not "the first N" (M3). */
@@ -538,6 +555,20 @@ export interface ParsedSearch {
 const REGEX_ERROR =
   /(bad regex|invalid regular expression|Unmatched|not balanced|warning:|regex parse error|trailing backslash|repetition-operator|invalid character class|invalid character range|invalid collation character)/i;
 const SIGPIPE_NOISE = /terminated by signal 13|write error: Broken pipe/;
+/**
+ * The engines' binary-match NOTICE, as a whole line (O2). GNU capitalises,
+ * busybox/BSD do not; both end at `matches`. Anchored at BOTH ends so a hit
+ * whose text merely contains the phrase is never mistaken for it.
+ */
+const BINARY_NOTICE = /^binary file .* matches$/i;
+/**
+ * rg's glob refusal (O4). It is a USER error — the model wrote the glob — and
+ * it is neither a pattern error (no `fixed_strings` retry helps) nor a broken
+ * engine: `rg: error parsing glob '*.{ts': unclosed alternate group; missing
+ * '}'`. Measured with ripgrep 15.2.0 and status 2, which the engine-failure
+ * classifier used to read as demotable.
+ */
+const GLOB_ERROR = /error parsing glob/i;
 /**
  * A per-PATH condition (M3): one file or directory the walk met, not a broken
  * engine. `find` says it on stderr with a normal status; rg says it with 2, and
@@ -583,6 +614,7 @@ export function parseSearchOutput(
   const outsidePath = stderr.includes("TENTACLE_OUTSIDE");
   const noise: string[] = [];
   let parseError: string | undefined;
+  let globError: string | undefined;
   for (const line of stderr.split("\n")) {
     const text = line.trim();
     if (
@@ -596,6 +628,13 @@ export function parseSearchOutput(
     if (SIGPIPE_NOISE.test(text)) {
       // Truly chatter (our own `head -c` closing the pipe): dropped, never
       // rendered — the ONE stderr class that is not a fact about the result.
+      continue;
+    }
+    if (GLOB_ERROR.test(text)) {
+      // O4: the engine refused the GLOB. Checked BEFORE the regex class: the
+      // message is a user error about input the model wrote, so it is a
+      // refusal (isError, advice) and never an engine failure to retry/demote.
+      globError ??= oneWireLine(text);
       continue;
     }
     if (REGEX_ERROR.test(text)) {
@@ -619,12 +658,22 @@ export function parseSearchOutput(
     if (line === "") {
       continue;
     }
-    if (/binary file .* matches/i.test(line)) {
+    // O2: PARSE FIRST. The old order tested the whole stdout line with an
+    // unanchored `/binary file .* matches/i` BEFORE parsing it, so it matched
+    // file CONTENT — measured: a real hit
+    // `./src/a.ts:1:const x = 1; // Binary file foo matches` was dropped and
+    // reported as `[binary files matched (1) — not shown]`, a silently wrong
+    // answer on both engines. A line the parser rejects is a binary match (a
+    // NUL byte, the engines' notice); a line it accepts is a HIT.
+    const parsed = parseLine(line, outputMode, filesWithMatches);
+    if (parsed === undefined) {
       binaryMatches += 1;
       continue;
     }
-    const parsed = parseLine(line, outputMode, filesWithMatches);
-    if (parsed === undefined) {
+    // The notice is the engines' whole line (`binary file ./b.dat matches`,
+    // capitalised on GNU), anchored at both ends. It can never be a real hit:
+    // both engines print a hit with its `./` path in front.
+    if (BINARY_NOTICE.test(line)) {
       binaryMatches += 1;
       continue;
     }
@@ -644,6 +693,7 @@ export function parseSearchOutput(
       // the hits it found are real, so the result is PARTIAL, not an error.
       !noise.some((line) => PER_PATH_NOISE.test(line)),
     ...(parseError !== undefined ? { parseError } : {}),
+    ...(globError !== undefined ? { globError } : {}),
     binaryMatches,
     rawCapped,
     counts: [...counts.entries()],
@@ -748,6 +798,22 @@ export function renderSearchResult(
         `${header}  ${engine}`,
         `[search timed out or was interrupted after ${SEARCH_TIMEOUT_MS / 1000}s — narrow the pattern or path, or pass a smaller \`max_results\`]`,
         ...notes.map(noteLine),
+      ].join("\n"),
+      isError: true,
+    };
+  }
+  if (parsed.globError !== undefined) {
+    // O4: a glob the ENGINE refused is a user error about the model's own
+    // input, so it renders as a refusal with advice — not "the walk did not
+    // complete" (which is what a broken engine says), and never as a reason to
+    // retry on the fallback.
+    return {
+      content: [
+        `${header}  ${engine}`,
+        `glob rejected by the engine: ${parsed.globError}`,
+        "Retry with a simpler file-name glob (e.g. `*.ts`, `a*.ts`) — no brace alternation, no unbalanced `[`/`{`.",
+        ...notes.map(noteLine),
+        ...problems,
       ].join("\n"),
       isError: true,
     };

@@ -1660,6 +1660,145 @@ regression test `a symlink INSIDE the workspace is still searched` pins that.
 H1's suggestion 3 (a symlink met *inside* the walk) was not needed: neither
 engine descends one, which the Review itself notes.
 
+### Round 2 (fix)
+
+*— claude-sonnet-4-5, 2026-11-12 — executor of the `## Review (Opus)`
+REQUEST-CHANGES (O1 HIGH, O2–O4 MEDIUM)*
+
+All four applied. Repro: `.tentacle/tmp/explore-search/r2/repro.ts` (the
+reviewer's own scenarios, re-measured on the branch before any edit) and
+`demote.ts` (the real tool, real rg). Tests were **red on the buggy code first**
+— 10 red, each on the *property's own assertion*, not on an import or a
+signature — then green; each fix then confirmed non-vacuous by a mutation,
+restored from a scratch backup and checked by `sha1sum`
+(`search.ts` `cf45bdff…`, `search-tool.ts` `28979754…`, both before and after
+every run).
+
+**Measured before (all four, one run):**
+
+```
+== O1 rg + user ripgreprc '--follow'      ./link/creds.txt:1:AKIA_SECRET_KEY
+== O1 rg, no config                       no matches
+== O2 rg  content line holds the phrase   ./src/a.ts:2:const y = 2; // needle
+                                          [binary files matched (1) — not shown]
+== O2 grep  same                          ./src/a.ts:2:…  [binary files matched (1) …]
+== O3 rg   glob *.{ts,tsx}                ./src/a.ts:2:… / ./src/b.tsx:1:needle tsx
+== O3 grep glob *.{ts,tsx}                no matches
+== O4 rg   glob *[                       search failed (engine status 2) — the walk did not complete.
+```
+
+**Measured after (same script, same fixture):**
+
+```
+== O1 rg + user ripgreprc '--follow'      no matches          (identical to the no-config row)
+== O2 rg  content line holds the phrase   ./src/a.ts:1:const x = 1; // Binary file foo matches
+                                          ./src/a.ts:2:const y = 2; // needle
+== O2 grep  same                          same two lines, `(engine=grep)`, no binary note
+== O3 rg / grep  glob *.{ts,tsx}          REFUSED `glob` cannot use brace alternation (`{a,b}`) …
+== O4 rg   glob *[                       glob rejected by the engine: rg: error parsing glob '*[' …
+```
+
+and the demotion is gone end to end (`r2/demote.ts`, real rg 15.2.0): call 1
+with `glob:"*["` is the refusal above, and call 3 (`x{1,3}`, valid on rg) still
+says **`engine=rg`** — before the fix it said `(engine=grep)` and lied that
+"this image has no ripgrep".
+
+**O1 (HIGH) — rg's inherited environment.** `buildWalk`'s fixed rg flag list
+now starts `--no-config --no-follow` (`search.ts:447`), ahead of `--`, for all
+three verbs (`--files`, `--files-with-matches`, the content run), so one edit
+covers them. `RIPGREP_CONFIG_PATH` does survive `scrubSensitiveEnv`
+(`exec/src/host-execution.ts:355`), and the pre-check only resolves the
+*argument*, so a user `--follow` was a prompt-free discovery outside the
+workspace. `--no-config` also restores the rg↔fallback parity the Review named
+(a `--hidden`/`--no-ignore`/`--max-count`/`--json` in the rc changed the result
+set or the parse). Pinned two ways: a `buildSearchPlan` string test over all
+three verbs (the flag is present *and* before the last ` -- `), and a real-rg
+test that writes `--follow` into a throwaway rc, points
+`RIPGREP_CONFIG_PATH` at it, symlinks a workspace entry at an outside dir, and
+asserts no hit escapes — with a **vacuity guard inside the test** that runs the
+same rg *without* our flags first and asserts the escape really happens there
+(`expect(plain.stdout).toContain("link/creds.txt")`), so it cannot silently
+pass on a machine whose rg ignores the rc.
+
+**The missing test the Review named — a symlink out of the workspace through
+the rg engine** — is added (`search.test.ts`, "a symlink OUT of the workspace
+is refused on the rg engine too"). It was **green before the fix** (`case "$p"`
+confinement lives in the shell pre-check, which both engines share) but it is
+**not vacuous**: mutating that `case` line to `*)` makes it fail alongside the
+fallback one (2 fail / 97 pass, quoted below). That is the H1 gap the Review
+noted — the two-engine pair is what pins this now.
+
+**O2 (MEDIUM) — the binary notice dropped real hits.** The order is now
+parse-first: `parseLine` decides (a NUL-bearing line or an unparseable one is a
+binary match), and only a line that *does* parse is tested against
+`BINARY_NOTICE = /^binary file .* matches$/i` (`search.ts:563`, `:668-676`) —
+anchored at both ends, so a hit whose *text* holds the phrase is a hit, while
+the engines' own notice (busybox/BSD lowercase, GNU capitalised) is still one
+`[binary files matched (N)]` note and never a bogus `./bin.dat` path. Tests: the
+parser on both engines' output shape, the **real fallback** over a fixture file
+holding that line, and the notice still counted in `content` *and* `files` mode
+(the latter is what proves the check runs after the parse).
+
+**O3 (MEDIUM) — `glob` is translate-or-refuse.** `globProblem`
+(`search.ts:179-181`) now refuses `{`/`}` with the Review's wording: brace
+alternation is rg's globset, literal on `find -name`, so the same call answered
+differently per engine. Same class as Q7's `{n,m}` in `pattern`, same decision.
+Tests: the refusal (message names `brace` and the workaround), a positive guard
+that `*.ts` / `a*.ts` / `[[]id[]].ts` are still accepted end to end on the
+fallback, and a tool-boundary test that a brace glob never reaches the engine at
+all (`rig.searches()).toHaveLength(0)`).
+
+**O4 (MEDIUM) — a malformed glob demoted the session.** `parseSearchOutput` gets
+a fourth stderr class: `GLOB_ERROR = /error parsing glob/i`
+(`search.ts:571`), classified **before** the regex class (no
+`fixed_strings` retry helps a glob) and carried as a new `globError` fact;
+`renderSearchResult` renders it as `glob rejected by the engine: …` +
+`isError: true` with glob-specific advice, so it is neither "the walk did not
+complete" nor `no matches`. `execPlan` refuses to retry when
+`parsed.globError` is set (`search-tool.ts:246-251`), which is what keeps
+`demoteCache` — and therefore the false "this image has no ripgrep" — out of
+reach. Test: the reviewer's own scenario, one malformed glob and then a second
+call asserted to still carry `(engine=rg)`, no `find -H` command, one probe.
+
+**One drift: no second guard in `isEngineFailure`.** The Review offered
+"add it to the parse-error class (or a separate `globError`)" — I took the
+separate-fact route and also briefly duplicated the regex inside
+`isEngineFailure`. The mutation showed either guard alone turns the test red, so
+one of them was untested code: I dropped the duplicate and left `globError` +
+the `execPlan` exclusion as the single source of truth (`search-tool.ts:249`).
+Two smaller wording edits ride along: the `glob` field's `describe` names the
+brace rule (`search-tool.ts:105`), so the model reads it before it tries.
+
+**Non-vacuity — five mutations, each red, each restored byte-identically.**
+
+| # | finding | mutation | red |
+|---|---|---|---|
+| 1 | O1 | drop `--no-config` / drop `--no-follow` / drop both from `flags` | 1 fail (string test) or **2 fail** (string + real-rg escape) |
+| 2 | O2 | `BINARY_NOTICE` → the old unanchored `/binary file .* matches/i` | 2 fail (parser line, real fallback) |
+| 3 | O3 | `if (glob.includes("{") …)` → `if (false)` | 3 fail (refusal, fallback symptom, tool boundary) |
+| 4 | O4 | `globError ??= oneWireLine(text)` → `if (text.includes("\u0000")) …` (never set) | 2 fail (classification, rendered refusal) |
+| 4b | O4 | `parsed.globError === undefined &&` removed from `execPlan` | 1 fail (`one malformed glob does not pin the fallback`) |
+| — | H1 (round 1's gap) | `case "$p" in "$r"|"$r"/*) …` → `case "$p" in *)` | **2 fail** — the fallback test *and* the new rg one |
+
+`sha1sum` before/after every mutation: `search.ts` `cf45bdff…`,
+`search-tool.ts` `28979754…`; `git status` shows only the four task files.
+
+**Gate (round 2).** `bunx tsc --noEmit`: **clean**. `bun run lint`: **clean, 0
+errors / 0 warnings** (`Checked 889 files`, baseline clean). Narrow:
+`packages/tools/test/` 262 pass / 0 fail; `+ agent/test/explore-search.test.ts`
+269 pass / 0 fail. Full `bun test`: **6953 pass, 3 skip** (the three opt-ins),
+and exactly the pre-existing environmental fail+error in
+`apps/mobile/test/rn-websocket.test.ts` (`@tentacle/client` unresolvable —
+`apps/mobile/node_modules` is absent in this worktree; it fails identically
+with `git stash`-free trees untouched by this branch, and the file runs alone
+the same way). `packages/daemon` alone: 750 pass / 1 skip / 0 fail, so the
+`session-log-store` flake the Review saw is not reproducible now.
+
+**Unverified, one line:** the O1 real-rg test early-returns when `rg` is not on
+`PATH` (`Bun.which("rg")`), which is the repo's no-new-opt-in-skip rule — on an
+image without rg it proves nothing beyond the string test; verify on such an
+image by adding `--config`-bearing rc manually.
+
 ## Review
 
 *— (empty: PLAN ONLY; a fresh context fills this)*

@@ -302,6 +302,53 @@ describe("T-S3: the fallback never runs when the probe says grep and there is no
   });
 });
 
+describe("T-S12 (O4): a bad `glob` is a USER error — never a demotion", () => {
+  test("one malformed glob does not pin the fallback for the session", async () => {
+    // Measured: rg reports `error parsing glob` with status 2, which
+    // `isEngineFailure` read as a broken engine → `demoteCache`. One typo by
+    // the model then pinned every later search to the POSIX dialect.
+    const rig = scriptedEnv((command) => {
+      if (command.includes(PROBE)) {
+        return probeRg();
+      }
+      if (command.includes("'*['")) {
+        // rg's real stdout/stderr for this glob (measured, ripgrep 15.2.0).
+        return {
+          stdout: "",
+          stderr:
+            "rg: error parsing glob '*[': unclosed character class; missing ']'\nTENTACLE_RC=2\n",
+          exitCode: 0,
+        };
+      }
+      return hit();
+    });
+    forgetProbedEngine(rig.env);
+    const first = await searchTool.execute({ pattern: "needle", glob: "*[" }, ctxFor(rig.env));
+    expect(first.isError).toBe(true);
+    expect(first.content).toContain("glob rejected by the engine");
+    // NOT retried on the fallback, and NOT demoted: the next call still uses rg.
+    expect(rig.searches().filter((call) => call.command.includes("rg "))).toHaveLength(1);
+    expect(rig.searches().some((call) => call.command.includes("find -H"))).toBe(false);
+    const before = rig.searches().length;
+    const next = await searchTool.execute({ pattern: "needle" }, ctxFor(rig.env));
+    expect(next.content).toContain("(engine=rg)");
+    expect(rig.probes()).toHaveLength(1);
+    expect(rig.searches().slice(before)[0]?.command).toContain("rg ");
+  });
+
+  test("a brace glob never reaches rg at all (O3's refusal, at the tool boundary)", async () => {
+    const rig = scriptedEnv((command) => (command.includes(PROBE) ? probeRg() : hit()));
+    forgetProbedEngine(rig.env);
+    const result = await searchTool.execute(
+      { pattern: "needle", glob: "*.{ts,tsx}" },
+      ctxFor(rig.env),
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("brace");
+    expect(rig.searches()).toHaveLength(0);
+  });
+});
+
 describe("T-S5: the schema refuses what it says it refuses", () => {
   function refusal(raw: unknown): string {
     const parsed = searchTool.inputSchema.safeParse(raw);

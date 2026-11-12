@@ -794,3 +794,225 @@ describe("the plan's shape", () => {
     copyFileSync(join(FX, "src/a.ts"), join(ROOT, "copy.ts"));
   });
 });
+
+/**
+ * Round 2 (docs/feat/explore-search.md, `## Review (Opus)`): O1 — the
+ * environment rg INHERITS; O2 — a content line that reads like the binary
+ * notice; O3/O4 — `glob`, the second pattern dialect the model supplies.
+ */
+const RG = Bun.which("rg");
+
+/** A plan run for real with an EXTRA environment (O1 needs `RIPGREP_CONFIG_PATH`). */
+function searchReal(
+  engine: "rg" | "grep",
+  raw: Record<string, unknown>,
+  cwd: string,
+  env: Record<string, string> = {},
+) {
+  const validated = validateSearchInput(raw);
+  if (!validated.ok) {
+    return { refused: validated.refusal.message };
+  }
+  const built = buildSearchPlan(validated.input, engine, { binaryFilter: true });
+  if (!built.ok) {
+    return { refused: built.refusal.message };
+  }
+  const proc = Bun.spawnSync(["/bin/sh", "-c", built.plan.command], {
+    cwd,
+    env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...env },
+  });
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  const stdout = decoder.decode(new Uint8Array(proc.stdout));
+  const stderr = decoder.decode(new Uint8Array(proc.stderr));
+  const filesWithMatches =
+    validated.input.output_mode === "files" && validated.input.pattern !== undefined;
+  const parsed = parseSearchOutput(stdout, stderr, validated.input.output_mode, filesWithMatches);
+  return {
+    ...renderSearchResult(parsed, { input: validated.input, engine, notes: built.plan.notes }),
+    parsed,
+    command: built.plan.command,
+    stdout,
+  };
+}
+
+describe("T-S9 (O1): rg ignores the user's ripgrep config and follows nothing", () => {
+  test("all THREE rg verbs carry --no-config and --no-follow", () => {
+    const raws: Record<string, unknown>[] = [
+      { pattern: "needle" },
+      { pattern: "needle", output_mode: "files" },
+      { glob: "*.ts", output_mode: "files" },
+    ];
+    for (const raw of raws) {
+      const validated = validateSearchInput(raw);
+      if (!validated.ok) {
+        throw new Error("refused");
+      }
+      const built = buildSearchPlan(validated.input, "rg", { binaryFilter: true });
+      if (!built.ok) {
+        throw new Error("no plan");
+      }
+      // The fixed flag list, and never after `--` (nothing in the input may
+      // land in flag position).
+      const command = built.plan.command;
+      expect(command).toContain("--no-config");
+      expect(command).toContain("--no-follow");
+      // Before the LAST `--`, the one that ends rg's flag list (the confinement
+      // check earlier in the command has its own `cd --`).
+      expect(command.indexOf("--no-config")).toBeLessThan(command.lastIndexOf(" -- "));
+    }
+  });
+
+  test("a user ripgreprc with `--follow` cannot reach outside the workspace (Q6 a)", () => {
+    if (RG === undefined) {
+      // rg is not installed here: the string test above is the part that cannot
+      // be skipped (AGENTS §6 — no new opt-in skip).
+      return;
+    }
+    const root = mkdtempSync(join(ROOT, "rgconf-"));
+    const outside = join(root, "outside");
+    const ws = join(root, "ws");
+    mkdirSync(outside, { recursive: true });
+    mkdirSync(join(ws, "src"), { recursive: true });
+    writeFileSync(join(outside, "creds.txt"), "AKIA_SECRET_KEY\n");
+    writeFileSync(join(ws, "src/a.ts"), "const needle = 1;\n");
+    writeFileSync(join(root, "rgrc"), "--follow\n");
+    try {
+      symlinkSync(outside, join(ws, "link"));
+    } catch {
+      return;
+    }
+    const env = { RIPGREP_CONFIG_PATH: join(root, "rgrc") };
+    // Vacuity guard: THIS rg really honours that config — without the fixed
+    // flags the escape happens, so the assertion below is not vacuous.
+    const plain = Bun.spawnSync(["/bin/sh", "-c", "rg --no-heading --line-number -e AKIA -- ."], {
+      cwd: ws,
+      env: { PATH: process.env.PATH ?? "", ...env },
+    });
+    expect(new TextDecoder().decode(new Uint8Array(plain.stdout))).toContain("link/creds.txt");
+
+    const result = searchReal("rg", { pattern: "AKIA" }, ws, env);
+    if ("refused" in result) {
+      throw new Error("refused");
+    }
+    // The header echoes the model's own pattern, so assert on the HIT (the raw
+    // stdout and the secret), not on the word.
+    expect(result.stdout).not.toContain("creds.txt");
+    expect(result.content).not.toContain("AKIA_SECRET_KEY");
+    expect(result.content).toContain("no matches");
+  });
+
+  test("a symlink OUT of the workspace is refused on the rg engine too (H1's missing half)", () => {
+    if (RG === undefined || !existsSync(join(FX, "etc-link"))) {
+      return;
+    }
+    const result = searchReal("rg", { pattern: "root", path: "etc-link" }, FX);
+    if ("refused" in result) {
+      throw new Error("refused");
+    }
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("resolves outside the workspace");
+    expect(result.content).not.toContain("no matches");
+    expect(result.content).not.toMatch(/etc-link\/\S+:\d+:/);
+  });
+});
+
+describe("T-S10 (O2): a content line that reads like the binary notice is a HIT", () => {
+  const phrase = "const x = 1; // Binary file foo matches";
+
+  test("the parser keeps it, in both engines' output shape (O2)", () => {
+    const validated = validateSearchInput({ pattern: "const", path: "src" });
+    if (!validated.ok) {
+      throw new Error("refused");
+    }
+    // rg and grep print the same `path:line:text` here, so one input proves both.
+    for (const engine of ["rg", "grep"] as const) {
+      const parsed = parseSearchOutput(`./src/a.ts:1:${phrase}`, "TENTACLE_RC=0", "content", false);
+      expect(parsed.binaryMatches).toBe(0);
+      expect(parsed.hits).toEqual([{ path: "./src/a.ts", line: 1, text: phrase }]);
+      const rendered = renderSearchResult(parsed, { input: validated.input, engine });
+      expect(rendered.content).toContain(phrase);
+      expect(rendered.content).not.toContain("[binary files matched");
+    }
+  });
+
+  test("the REAL fallback prints that line as a hit, not as a binary note", () => {
+    const root = mkdtempSync(join(ROOT, "o2-"));
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src/a.ts"), `${phrase}\nconst y = 2;\n`);
+    const result = searchGrep({ pattern: "const", path: "src" }, classifyGitignore(""), root);
+    if ("refused" in result) {
+      throw new Error("refused");
+    }
+    expect(result.content).toContain(`./src/a.ts:1:${phrase}`);
+    expect(result.content).not.toContain("[binary files matched");
+  });
+
+  test("the engines' own binary NOTICE line is still one note, never a hit", () => {
+    // busybox/BSD lowercase, GNU capitalised — the anchored forms (O2). In
+    // `files` mode the parser accepts any bare line as a path, so this also
+    // pins that the notice is checked after the parse.
+    for (const line of ["binary file ./bin.dat matches", "Binary file ./bin.dat matches"]) {
+      for (const files of [false, true]) {
+        const parsed = files
+          ? parseSearchOutput(line, "TENTACLE_RC=0", "files", false)
+          : parseSearchOutput(line, "TENTACLE_RC=0", "content", false);
+        expect(parsed.hits).toEqual([]);
+        expect(parsed.binaryMatches).toBe(1);
+      }
+    }
+  });
+});
+
+describe("T-S11 (O3): `glob` is translate-or-refuse, like `pattern`", () => {
+  test("brace alternation is REFUSED: rg matches it, `find -name` does not (measured)", () => {
+    const refused = validateSearchInput({ pattern: "needle", glob: "*.{ts,tsx}" });
+    expect(refused.ok).toBe(false);
+    if (refused.ok) {
+      throw new Error("accepted a brace glob");
+    }
+    expect(refused.refusal.message).toContain("brace");
+    expect(refused.refusal.message).toContain("one search per extension");
+  });
+
+  test("a single-pattern glob is still accepted, on both engines", () => {
+    for (const raw of [{ glob: "*.ts" }, { glob: "[[]id[]].ts" }, { glob: "a*.ts" }]) {
+      expect(validateSearchInput({ pattern: "needle", ...raw }).ok).toBe(true);
+      expect("refused" in searchGrep({ pattern: "needle", ...raw })).toBe(false);
+    }
+  });
+
+  test("the fallback no longer answers `no matches` for it (the O3 symptom)", () => {
+    const result = searchGrep({ pattern: "needle", glob: "*.{ts,tsx}" });
+    if (!("refused" in result)) {
+      throw new Error("accepted a brace glob");
+    }
+    expect(result.refused).toContain("brace");
+  });
+});
+
+describe("T-S12 (O4): a glob the ENGINE rejects is a user error, not a broken engine", () => {
+  const stderr =
+    "rg: error parsing glob '*[': unclosed character class; missing ']'\nTENTACLE_RC=2\n";
+
+  test("`error parsing glob` is a glob refusal — not a regex error, not noise", () => {
+    const parsed = parseSearchOutput("", stderr, "content", false);
+    expect(parsed.globError).toContain("error parsing glob");
+    expect(parsed.parseError).toBeUndefined();
+    expect(parsed.noise).toEqual([]);
+  });
+
+  test("it renders as an input error naming the glob, with advice", () => {
+    // `*[` is NOT caught by O3's brace refusal, so it really reaches rg.
+    const validated = validateSearchInput({ pattern: "needle", glob: "*[" });
+    if (!validated.ok) {
+      throw new Error("refused");
+    }
+    const rendered = renderSearchResult(parseSearchOutput("", stderr, "content", false), {
+      input: validated.input,
+      engine: "rg",
+    });
+    expect(rendered.isError).toBe(true);
+    expect(rendered.content).toContain("glob rejected by the engine");
+    expect(rendered.content).not.toContain("failed (engine status");
+  });
+});
