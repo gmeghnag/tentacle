@@ -8,7 +8,17 @@
  * no ripgrep and adds no opt-in skip (AGENTS §6).
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyPattern } from "../src/search-dialect.ts";
@@ -325,6 +335,43 @@ describe("T-S2: hostile PATHS are confined, prefixed and escaped", () => {
     expect(result.content).not.toContain("no matches");
   });
 
+  test("a symlink out of the workspace is REFUSED on the fallback (H1, Q6 a)", () => {
+    // The fixture's `etc-link -> /etc` is the ready-made outside target
+    // (search-fixture.ts:57): `find -H` follows an ARGUMENT symlink on purpose,
+    // so the lexical rule alone reads `/etc` prompt-free.
+    if (!existsSync(join(FX, "etc-link"))) {
+      // A filesystem that refuses symlinks (the fixture documents this).
+      return;
+    }
+    const result = searchGrep({ pattern: "root", path: "etc-link" });
+    if ("refused" in result) {
+      throw new Error("refused");
+    }
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("resolves outside the workspace");
+    expect(result.content).toContain("Q6 a");
+    expect(result.content).not.toContain("no matches");
+    expect(result.content).not.toMatch(/etc-link\/\S+:\d+:/);
+  });
+
+  test("a symlink INSIDE the workspace is still searched (the rule is not over-broad)", () => {
+    // Any repo has one (a linked vendor dir): refusing every symlink would break it.
+    const inner = join(ROOT, "inner");
+    mkdirSync(join(inner, "src"), { recursive: true });
+    writeFileSync(join(inner, "src/a.ts"), "needle inner\n");
+    try {
+      symlinkSync("src", join(inner, "parent-link"));
+    } catch {
+      return;
+    }
+    const result = searchGrep({ pattern: "needle", path: "parent-link" }, undefined, inner);
+    if ("refused" in result) {
+      throw new Error("refused");
+    }
+    expect(result.isError).toBe(false);
+    expect(result.content).toContain("./parent-link/a.ts:1:needle inner");
+  });
+
   test("a named prune is exempt: asking for `node_modules` searches it", () => {
     const result = searchGrep({ pattern: "needle", path: "node_modules" });
     if ("refused" in result) {
@@ -408,6 +455,14 @@ describe("T-S6 (pure): the bounds", () => {
       throw new Error("refused");
     }
     return renderSearchResult(parsed, { input: validated.input, engine: "grep" }).content;
+  }
+
+  function rendered(parsed: ReturnType<typeof parseSearchOutput>, raw: Record<string, unknown>) {
+    const validated = validateSearchInput(raw);
+    if (!validated.ok) {
+      throw new Error("refused");
+    }
+    return renderSearchResult(parsed, { input: validated.input, engine: "grep" });
   }
 
   function parsedOf(hits: { path: string; line: number; text: string }[]) {
@@ -522,6 +577,94 @@ describe("T-S6 (pure): the bounds", () => {
     );
     expect(parsed.hits[0]?.text).toBe("\tif (x) {");
   });
+
+  test("a NON-ASCII raw stream at the byte CAP gets the INCOMPLETE marker (H3)", () => {
+    // `head -c RAW_CAP` counts BYTES; `raw.length` counts UTF-16 units, so a
+    // 3-byte character made the cap invisible (measured: bytes=262146,
+    // utf16=87394, rawCapped=false, 1 of 41 matches, "complete").
+    const filler = `./a.ts:1:${"あ".repeat(120000)}\n${"./a.ts:2:x\n".repeat(40)}`;
+    expect(Buffer.byteLength(filler, "utf8")).toBeGreaterThan(RAW_CAP);
+    const parsed = parseSearchOutput(filler, "TENTACLE_RC=0", "content", false);
+    expect(parsed.rawCapped).toBe(true);
+    const content = render(parsed, { pattern: "x" });
+    expect(content).toContain(
+      "[search truncated at 256 KiB — results are INCOMPLETE, not the first N]",
+    );
+  });
+
+  test("an ESC in a .gitignore rule is stripped, not painted into the transcript (H2)", () => {
+    // A pod controls `.gitignore`; the note must not carry `ESC[2J`.
+    const gitignore = classifyGitignore(
+      "*.log\n\u001b[2J\u001b[31mFAKE PROMPT> rm -rf /\u001b[0m\n",
+    );
+    const input = validateSearchInput({ pattern: "needle" });
+    if (!input.ok) {
+      throw new Error("refused");
+    }
+    const built = buildSearchPlan(input.input, "grep", { gitignore, binaryFilter: false });
+    if (!built.ok || built.plan.ignoreNote === undefined) {
+      throw new Error("no note");
+    }
+    const parsed = parseSearchOutput("./a.txt:1:needle here", "TENTACLE_RC=0", "content", false);
+    const rendered = renderSearchResult(parsed, {
+      input: input.input,
+      engine: "grep",
+      notes: built.plan.notes,
+      ignoreNote: built.plan.ignoreNote,
+    });
+    expect(rendered.content).toContain(".gitignore rules");
+    expect(rendered.content).not.toContain("\u001b");
+  });
+
+  test("an ESC and a 200 KiB line in engine stderr are stripped and bounded (H2)", () => {
+    // `parseError` is the raw first stderr line: measured uncapped (200 170
+    // bytes) and unstripped, and a pod names its own directories.
+    const stderr = `grep: ./x not balanced \u001b[2J\u001b[31mFAKE PROMPT> ${"y".repeat(200000)}\nTENTACLE_RC=2\n`;
+    const parsed = parseSearchOutput("", stderr, "content", false);
+    const content = render(parsed, { pattern: "x" });
+    expect(content).toContain("pattern rejected by the engine");
+    expect(content).not.toContain("\u001b");
+    expect(Buffer.byteLength(content, "utf8")).toBeLessThan(MAX_BYTES);
+  });
+
+  test("engine noise is RENDERED, not swallowed (M2)", () => {
+    // An unreadable subtree and a missing `find` are facts, not "no matches".
+    const parsed = parseSearchOutput(
+      "",
+      "find: ./locked: Permission denied\nTENTACLE_RC=1\n",
+      "content",
+      false,
+    );
+    const content = render(parsed, { pattern: "needle" });
+    expect(content).toContain("Permission denied");
+    expect(content).not.toContain("no matches");
+  });
+
+  test("noise carrying an ESC is stripped and bounded too (M2 + H2)", () => {
+    const parsed = parseSearchOutput(
+      "",
+      `find: ./e\u001b[2J\u001b[31mFAKE PROMPT> : Permission denied ${"z".repeat(30000)}\nTENTACLE_RC=1\n`,
+      "content",
+      false,
+    );
+    const content = render(parsed, { pattern: "needle" });
+    expect(content).not.toContain("\u001b");
+    expect(Buffer.byteLength(content, "utf8")).toBeLessThan(MAX_BYTES);
+  });
+
+  test("a status that is neither 0, 1, 3 nor a kill is an ERROR, not `no matches` (M2 b)", () => {
+    // `find` missing on PATH -> `/bin/sh: find: command not found` + rc 127.
+    const parsed = parseSearchOutput(
+      "",
+      "/bin/sh: find: command not found\nTENTACLE_RC=127\n",
+      "content",
+      false,
+    );
+    const content = render(parsed, { pattern: "needle" });
+    expect(content).toContain("command not found");
+    expect(content).not.toContain("no matches");
+    expect(rendered(parsed, { pattern: "needle" }).isError).toBe(true);
+  });
 });
 
 describe("the parser reads the engines' own words", () => {
@@ -534,6 +677,10 @@ describe("the parser reads the engines' own words", () => {
     { stderr: "grep: brackets ([ ]) not balanced\n", expect: {} },
     { stderr: "rg: regex parse error:\n", expect: {} },
     { stderr: "grep: warning: ? at start of expression\n", expect: {} },
+    // M2 (c): the two shapes a GNU/BSD grep rejects that were falling through to
+    // `no matches` while rg rejected the same pattern loudly (measured).
+    { stderr: "grep: invalid character class\n", expect: {} },
+    { stderr: "grep: invalid character range\n", expect: {} },
   ];
   for (const row of cases) {
     test(`stderr ${JSON.stringify(row.stderr)}`, () => {
@@ -548,7 +695,8 @@ describe("the parser reads the engines' own words", () => {
         row.stderr.includes("bad regex") ||
         row.stderr.includes("not balanced") ||
         row.stderr.includes("regex parse") ||
-        row.stderr.includes("warning:")
+        row.stderr.includes("warning:") ||
+        row.stderr.includes("invalid character")
       ) {
         expect(parsed.parseError).toBeDefined();
         const rendered = renderSearchResult(parsed, {
@@ -633,6 +781,11 @@ describe("the plan's shape", () => {
       expect(plan.plan.command).toContain(`| head -c ${RAW_CAP}`);
       // The pattern is never in flag position: it always follows `-e`.
       expect(plan.plan.command).toContain("-e 'needle'");
+      // H1: the pre-check also settles confinement by REALPATH (Q6 a), which the
+      // pure module cannot do — the shell is the only place that can.
+      expect(plan.plan.command).toContain("pwd -P");
+      expect(plan.plan.command).toContain("TENTACLE_OUTSIDE");
+      expect(plan.plan.command).toContain("exit 4");
     }
   });
 

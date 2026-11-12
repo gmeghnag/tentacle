@@ -1532,6 +1532,134 @@ fails the same way on untouched files). `git status` shows nothing of mine under
 `apps/mobile`. `bun test packages` (every package, including all of mine) is
 green with exactly the three baseline skips.
 
+### Round 1 (fix)
+
+*— deepseek (tentacle --profile deepseek), 2026-11-12 — executor of the
+fresh-context Review's REQUEST-CHANGES*
+
+All six findings applied (H1–H3, M1–M3), each with a test that was **red on the
+buggy code first** (§9), and each confirmed non-vacuous by a mutation that was
+then restored to the same `shasum -a 256`. Repro and verification scripts live
+in `.tentacle/tmp/explore-search/` (`probe-r1.ts`, `probe-r1b.ts`,
+`verify-r1.ts` — gitignored, so their output is pasted here).
+
+**H1 — `path` confinement is now resolved-or-refused, in the shell.**
+`confinementCheck` (`search.ts:369-390`) replaces the bare pre-check: it keeps
+status 3 + `TENTACLE_MISSING` for a missing path, then canonicalises with the
+one portable form (`cd -- "<parent>" && pwd -P`, then the last component by `cd`
+if it is a directory — `dirname`/`realpath` are not guaranteed in a minimal
+image, so the split is parameter expansion), and refuses (`TENTACLE_OUTSIDE`,
+status 4) unless the result equals or is under `$(pwd -P)`. `parseSearchOutput`
+carries `outsidePath`; `renderSearchResult` renders
+`path refused: … resolves outside the workspace (… owner Q6 a)` with
+`isError: true`. A symlink the shell cannot resolve (a linked **file**: `cd`
+needs a directory) is refused rather than guessed at — that is Q6 (a)'s
+"resolved-**or**-refused". Measured on the reviewer's own two targets, plus the
+inside case that must keep working:
+
+```
+--- H1 grep path=outlink isError=true
+path refused: ./outlink resolves outside the workspace (a search may only walk the real workspace; owner Q6 a).
+--- H1 grep path=etc-link isError=true
+path refused: ./etc-link resolves outside the workspace (…owner Q6 a).
+--- H1 inside-link isError=false
+./inner-link/a.txt:1:needle
+```
+
+**H2 — the strip is total at the boundary.** One private-turned-exported
+`oneWireLine(s)` = `stripControls` + `truncateLine` (`search.ts:503-511`, bounded
+by the same `MAX_LINE` a hit line obeys), applied to **every** untrusted piece
+before assembly: `parseError` (`:545`), each `.gitignore` rule in the note
+(`:325-329`), engine `noise` (`noiseNotes`, `:830-841`, capped at
+`MAX_NOISE_LINES = 5`), and the demotion note in the tool
+(`search-tool.ts:203-206`). Measured:
+
+```
+--- H2 gitignore hasESC=false hasCLEAR=false
+[note: 2 .gitignore rules (*.log, [2J[31mFAKE> rm -rf /[0m) are not applied on this engine; …]
+```
+
+and a 200 KiB stderr line now yields an error body under `MAX_BYTES` (the old
+behaviour was a 200 170-byte `parseError`).
+
+**H3 — the cap is measured in the unit the cap is in.**
+`rawCapped = Buffer.byteLength(raw, "utf8") >= RAW_CAP` (`search.ts:558`).
+Measured on a non-ASCII fixture, fallback engine:
+
+```
+--- H3 nonASCII rawCapped=true marker=true
+```
+
+**M1 — `readOnlyType` consults what the child is actually offered.**
+It now resolves `deps.tools.get(name) ?? offered.find(…)`, where `offered` is
+`deps.extraTools?.(type)` — the same list, and the same parent-wins order, the
+child's registry is built from (`subagent.ts:564-596`). An absent name is still
+read-only (it can do nothing), which stays the safe direction.
+
+**M2 — a failure is surfaced, in all three shapes.** (a) `noise` is rendered as
+`[note: …]` lines (`noiseNotes`) instead of being dead state, and a zero-hit
+answer with noise no longer claims `no matches`; (b) a carried status that is
+neither 0, 1, 3 nor `KILLED_EXIT_CODE` is an **error**
+(`search failed (engine status N) — the walk did not complete.`), except that a
+per-path message keeps the hits it found (`PER_PATH_NOISE`, partial answer);
+(c) `invalid character class` / `invalid character range` /
+`invalid collation character` join `REGEX_ERROR`. Measured:
+
+```
+--- M2 unreadable isError=false  (noise rendered, no "no matches")
+[note: find: ./unread/locked: Permission denied]
+--- M2 no-find status=127 isError=true
+[note: /bin/sh: find: command not found]
+--- M2c grep [z-a] isError=true
+pattern rejected by the engine: grep: invalid character range
+--- M2c grep [[:foo:]] isError=true
+pattern rejected by the engine: grep: invalid character class
+```
+
+**M3 — demotion is narrowed to engine failures, not path conditions.**
+`isEngineFailure` (`search-tool.ts:257-278`) now also excludes a stderr naming
+`Permission denied` / `IO error` / `No such file or directory`: F14 is "rg was
+chosen but broke", not "rg met a bad file". The probe cache keeps `rg`, so the
+next search does not silently run on the fallback's narrower dialect.
+
+**Non-vacuity — eight mutations, each red, each restored byte-identically**
+(`shasum -a 256` recorded before and after every one: `search.ts`
+`2b9ee42e…`, `search-tool.ts` `10aecf3a…`, `subagent.ts` `6eacb6e5…`; the only
+later change to `search.ts` is Biome's formatting and one message wording, both
+after the mutation runs, leaving `dd230114…` and the same green suite):
+
+| # | finding | mutation | red |
+|---|---|---|---|
+| 1 | H1 | `case "$p" in …` → `: "$p" "$r"` (no prefix refusal) | 1 fail (`a symlink out of the workspace is REFUSED`) |
+| 2 | H3 | bytes → `raw.length` | 1 fail (`a NON-ASCII raw stream at the byte CAP …`) |
+| 3 | H2 | `oneWireLine` → `truncateLine` (no strip) | 3 fail (gitignore ESC, 200 KiB stderr, noise ESC) |
+| 4 | M2 | `problems` → `[]` (noise never rendered) | 3 fail (noise rendered, status-is-error, M3 per-path) |
+| 5 | M2(b) | `failed` → `false` | 1 fail (`a status that is neither 0, 1, 3 …`) |
+| 6 | M2(c) | drop the two `invalid character …` alternatives | 2 fail (both grammar rows) |
+| 7 | M3 | drop `!perPath` | 1 fail (`a PER-PATH rg failure does NOT demote`) |
+| 8 | M1 | `deps.tools.get` only (the reviewer's mutation 4) | 1 fail (`readOnlyType consults … extraTools`) |
+
+Mutation 8 is the one the Review found **vacuous** (24 pass / 0 fail); it is now
+red, which is the point of the change.
+
+**Gate (round 1).** `bunx tsc --noEmit`: clean for `packages` + `scripts`
+(the only output is the pre-existing `apps/mobile`/`node_modules` noise, and the
+diff touches no mobile file). `bun run lint`: **clean, 0 errors, 0 warnings**
+(`Checked 889 files`). `bun test packages scripts`: **6940 pass / 0 fail /
+3 opt-in skips**. Bare `bun test` adds exactly one pre-existing environmental
+error — `apps/mobile/test/rn-websocket.test.ts` cannot resolve
+`@tentacle/client` because this worktree has no `apps/mobile/node_modules`
+(the same condition the earlier gate recorded; it passes in the main worktree,
+where the dependencies are installed).
+
+**One drift from the Review's suggested fix, and why.** H1's suggestion (1) —
+"refuse any symlink via `-L`, treat the result as an error" — would break every
+repo with a linked vendor dir, so the *positive* resolution form (its
+suggestion 2) is what shipped, and a symlink that stays inside is searched: the
+regression test `a symlink INSIDE the workspace is still searched` pins that.
+H1's suggestion 3 (a symlink met *inside* the walk) was not needed: neither
+engine descends one, which the Review itself notes.
+
 ## Review
 
 *— (empty: PLAN ONLY; a fresh context fills this)*

@@ -188,4 +188,29 @@ describe("T-S4: an `explore` child is offered search, runs it, and reads a hit",
     expect(subagentExtraTools("general")).toEqual([]);
     expect(subagentExtraTools("anything-else")).toEqual([]);
   });
+
+  test("`readOnlyType` consults the tool `extraTools` offers, not just the parent (M1)", () => {
+    // `search` is NOT in the parent registry (drift 1), so resolving through
+    // `deps.tools` alone short-circuits on `undefined` and returns true without
+    // ever calling the tool's `concurrency`: the seam's own safety argument was
+    // unverified and a mutation to `"exclusive"` stayed green.
+    const writer = { ...searchTool, concurrency: (): "exclusive" => "exclusive" };
+    const { readOnlyType } = createSubagentRunner({
+      model: new ScriptedProvider([[{ type: "done" }]]),
+      env: hostEnv(),
+      tools: parentTools(),
+      extraTools: (type) =>
+        type.name === "explore" ? [fsReadTool, writer] : subagentExtraTools(type.name),
+    });
+    // The mutation IS seen: a writer tool makes the type not read-only.
+    expect(readOnlyType("explore")).toBe(false);
+    // And the real tool, which IS read-class, keeps it read-only.
+    const plain = createSubagentRunner({
+      model: new ScriptedProvider([[{ type: "done" }]]),
+      env: hostEnv(),
+      tools: parentTools(),
+      extraTools: (type) => subagentExtraTools(type.name),
+    });
+    expect(plain.readOnlyType("explore")).toBe(true);
+  });
 });

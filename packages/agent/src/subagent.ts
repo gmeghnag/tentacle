@@ -567,6 +567,13 @@ export function createSubagentRunner(deps: SubagentDeps): {
     if (!type || type.tools === "all") {
       return false;
     }
+    // The tool a CHILD of this type actually gets: the parent's, else the one
+    // `extraTools` offers it (M1). Resolving through `deps.tools` alone made
+    // every allow-listed name absent from the parent registry short-circuit to
+    // "read-only" — `search` is exactly that name (drift 1), so its
+    // `concurrency` was never consulted and a mutation to `exclusive` stayed
+    // green.
+    const offered = deps.extraTools?.(type) ?? [];
     return type.tools.every((toolName) => {
       // Never given to a child, so they make it no less read-only.
       if (
@@ -580,9 +587,17 @@ export function createSubagentRunner(deps: SubagentDeps): {
       ) {
         return true;
       }
-      const tool = deps.tools.get(toolName);
+      // The parent's instance wins, as it does when the child's registry is
+      // built (`parentNames` above): one tool, one concurrency key.
+      const tool =
+        deps.tools.get(toolName) ?? offered.find((candidate) => candidate.name === toolName);
+      // Nothing provides it (an `agents/*.md` naming an absent tool), so it can
+      // do nothing: read-only by default, which is the safe direction.
+      if (tool === undefined) {
+        return true;
+      }
       // The probe gives a path-keyed tool its key; other tools ignore it.
-      return tool === undefined || isReadClass(classOf(tool, { path: "_" }));
+      return isReadClass(classOf(tool, { path: "_" }));
     });
   };
 

@@ -17,6 +17,7 @@ import {
   type SearchInput,
   buildSearchPlan,
   classifyGitignore,
+  oneWireLine,
   parseSearchOutput,
   renderSearchResult,
   validateSearchInput,
@@ -199,7 +200,9 @@ async function runSearch(
       return { content: fallback.refusal ?? "search failed", isError: true };
     }
     return {
-      content: `${fallback.rendered.content}\n[note: ripgrep failed (${outcome.retry}); this result came from the POSIX fallback]`,
+      // H2: the retry reason is raw rg stderr (a pod names its own
+      // directories), so it is stripped and bounded like every other field.
+      content: `${fallback.rendered.content}\n[note: ripgrep failed (${oneWireLine(outcome.retry)}); this result came from the POSIX fallback]`,
       isError: fallback.rendered.isError,
     };
   }
@@ -254,15 +257,27 @@ async function execPlan(
   };
 }
 
-/** An engine-shaped failure: rg said so, with a status that is not "no match". */
+/**
+ * An ENGINE-shaped failure: rg said so, with a status that is not "no match" —
+ * and NOT a per-PATH condition (M3).
+ *
+ * A permission error, an `IO error` or a `No such file` names a file the walk
+ * met; it says nothing about rg's dialect, so demoting the whole session on it
+ * would pin the POSIX fallback (and its narrower pattern set) for every later
+ * search — the silent-demotion direction M4 exists to prevent. F14 is "rg was
+ * chosen but broke" (a wrapper on `PATH`, a broken binary): that is a failure
+ * carrying no path.
+ */
 function isEngineFailure(
   result: { stdout: string; stderr: string; exitCode: number },
   parsed: { hits: readonly unknown[]; status: number | undefined },
 ): boolean {
   const status = parsed.status ?? result.exitCode;
   const named = /(^|\n)rg[:\s]/.test(result.stderr);
+  // A path-shaped message is the walk's environment, not rg's dialect.
+  const perPath = /(Permission denied|IO error|No such file or directory)/i.test(result.stderr);
   // rc 1 is grep's/rg's "no match"; 124 is our own kill (reported, not retried).
-  return named && status >= 2 && status !== KILLED_EXIT_CODE;
+  return named && status >= 2 && status !== KILLED_EXIT_CODE && !perPath;
 }
 
 function firstEngineLine(stderr: string): string {

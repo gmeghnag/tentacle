@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ExecOptions, ExecResult, ExecutionEnvironment, ToolContext } from "@tentacle/core";
 import { forgetProbedEngine, searchTool } from "../src/search-tool.ts";
+import { MAX_BYTES } from "../src/search.ts";
 
 const PROBE = "TENTACLE_ENGINE";
 
@@ -197,6 +198,62 @@ describe("T-S3(b): a broken rg is demoted, retried ONCE, and the cache pins grep
     expect(result.isError).toBe(true);
     expect(result.content).toContain("fixed_strings: true");
     expect(searches).toBe(1);
+  });
+
+  test("a PER-PATH rg failure does NOT demote the cache (M3)", async () => {
+    // One unreadable directory is the walk's environment, not rg's dialect:
+    // demoting on it pins the POSIX fallback (and its narrower pattern set) for
+    // the rest of the session, which the model cannot undo.
+    let searches = 0;
+    const rig = scriptedEnv((command) => {
+      if (command.includes(PROBE)) {
+        return probeRg();
+      }
+      searches += 1;
+      if (command.includes("rg ")) {
+        return {
+          stdout: "./src/a.ts:1:needle\n",
+          stderr: "rg: ./locked: Permission denied (os error 13)\nTENTACLE_RC=2\n",
+          exitCode: 0,
+        };
+      }
+      return hit();
+    });
+    forgetProbedEngine(rig.env);
+    const first = await searchTool.execute({ pattern: "needle" }, ctxFor(rig.env));
+    // No retry, no fallback, and the path problem is REPORTED (M2), not lost.
+    expect(first.content).toContain("(engine=rg)");
+    expect(first.content).toContain("Permission denied");
+    expect(first.content).not.toContain("POSIX fallback");
+    // The cache still holds rg: the next call runs rg again and never re-probes.
+    const before = rig.searches().length;
+    await searchTool.execute({ pattern: "needle" }, ctxFor(rig.env));
+    expect(rig.probes()).toHaveLength(1);
+    expect(rig.searches().slice(before)[0]?.command).toContain("rg ");
+    expect(searches).toBe(2);
+  });
+
+  test("the demotion note is stripped and bounded (H2)", async () => {
+    // The retry reason is raw rg stderr: a pod controls the image's `rg` and the
+    // names it prints, so the line can carry `ESC[2J` and be arbitrarily long.
+    const rig = scriptedEnv((command) => {
+      if (command.includes(PROBE)) {
+        return probeRg();
+      }
+      if (command.includes("rg ")) {
+        return {
+          stdout: "",
+          stderr: `rg: error loading config file \u001b[2J\u001b[31mFAKE PROMPT> ${"y".repeat(5000)}\nTENTACLE_RC=2\n`,
+          exitCode: 0,
+        };
+      }
+      return hit();
+    });
+    forgetProbedEngine(rig.env);
+    const result = await searchTool.execute({ pattern: "needle" }, ctxFor(rig.env));
+    expect(result.content).toContain("ripgrep failed");
+    expect(result.content).not.toContain("\u001b");
+    expect(Buffer.byteLength(result.content, "utf8")).toBeLessThan(MAX_BYTES);
   });
 });
 

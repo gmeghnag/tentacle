@@ -22,6 +22,8 @@ export const DEFAULT_MAX_RESULTS = 100;
 export const MAX_BYTES = 12000;
 /** Per-line cap, so one minified line cannot eat the byte budget. */
 export const MAX_LINE = 300;
+/** Engine stderr lines rendered as notes (M2): enough for a few denied paths. */
+export const MAX_NOISE_LINES = 5;
 /** Names pruned from the walk on both engines. `.git` is pruned as `.git` only. */
 export const PRUNE: readonly string[] = [".git", "node_modules", "dist"];
 /** `env.exec` gets a wall-clock bound; a search is not a build (F5). */
@@ -320,7 +322,9 @@ export function buildSearchPlan(
   let ignoreNote: string | undefined;
   const unexpressible = facts.gitignore?.unexpressible ?? [];
   if (engine === "grep" && unexpressible.length > 0) {
-    const shown = unexpressible.slice(0, 3).join(", ");
+    // H2: a pod writes its own `.gitignore`, so a rule may carry `ESC[2J` — the
+    // note is a boundary and strips/bounds each piece before it is assembled.
+    const shown = unexpressible.slice(0, 3).map(oneWireLine).join(", ");
     ignoreNote = `${unexpressible.length} .gitignore rule${unexpressible.length === 1 ? "" : "s"} (${shown}${unexpressible.length > 3 ? ", …" : ""}) ${unexpressible.length === 1 ? "is" : "are"} not applied on this engine; results may differ`;
   }
 
@@ -332,7 +336,7 @@ export function buildSearchPlan(
     binaryFilter: facts.binaryFilter ?? false,
   });
 
-  const preCheck = `if [ ! -f ${shq(effective.path)} ] && [ ! -d ${shq(effective.path)} ] && [ ! -L ${shq(effective.path)} ]; then printf 'TENTACLE_MISSING\\n' >&2; exit 3; fi`;
+  const preCheck = confinementCheck(effective.path);
   const command = `${preCheck}; { ${walk} ; printf 'TENTACLE_RC=%s\\n' "$?" >&2; } | head -c ${RAW_CAP}`;
   return {
     ok: true,
@@ -344,6 +348,46 @@ export function buildSearchPlan(
       ...(ignoreNote !== undefined ? { ignoreNote } : {}),
     },
   };
+}
+
+/**
+ * Q6 (a)'s second half — "symlinks resolved-or-refused" — which the pure module
+ * cannot decide (it has no `realpath` and no workspace root; precondition 7).
+ * The shell does both, BEFORE the walk:
+ *
+ * 1. the existence pre-check (status **3** + `TENTACLE_MISSING`, F3) — a missing
+ *    path is not an escape;
+ * 2. `p=$(cd -- <path> && pwd -P)`: the RESOLVED path, with every component's
+ *    symlink followed, so `outlink`, `comp/link/secret.env` and a linked tree
+ *    all land here as their real target;
+ * 3. a prefix test against `$(pwd -P)`, the resolved workspace root — equal to
+ *    it, or under it, is inside. `case` is POSIX and needs no external binary.
+ *
+ * A path outside is status **4** + `TENTACLE_OUTSIDE`, and the renderer turns
+ * that into an error naming the rule: never `no matches` (the H1 hole was a
+ * silent, prompt-free read of `/etc` through the fixture's `etc-link`).
+ * `head -c` can still cut the sentinel line, so the failure is also visible
+ * through the status alone (`renderSearchResult`).
+ */
+function confinementCheck(path: string): string {
+  const quoted = shq(path);
+  return [
+    `if [ ! -f ${quoted} ] && [ ! -d ${quoted} ] && [ ! -L ${quoted} ]; then printf 'TENTACLE_MISSING\\n' >&2; exit 3; fi`,
+    `t=${quoted}`,
+    // `cd` + `pwd -P` is the one PORTABLE canonicaliser: the parent is resolved
+    // (so `comp/link/secret.env` lands on the real target), then the last
+    // component through `cd` when it is a directory. `dirname`/`readlink` are
+    // not guaranteed in a minimal image, so the split is parameter expansion.
+    `d=$(cd -- "\${t%/*}" 2>/dev/null && pwd -P) || { printf 'TENTACLE_MISSING\\n' >&2; exit 3; }`,
+    "b=${t##*/}",
+    `if [ -d "$d/$b" ]; then p=$(cd -- "$d/$b" 2>/dev/null && pwd -P) || { printf 'TENTACLE_MISSING\\n' >&2; exit 3; }`,
+    // A symlink the shell cannot resolve (a linked FILE — `cd` needs a
+    // directory) is REFUSED, not guessed at: Q6 (a) says resolved-or-refused.
+    `elif [ -L "$d/$b" ]; then printf 'TENTACLE_OUTSIDE\\n' >&2; exit 4`,
+    `else p="$d/$b"; fi`,
+    "r=$(pwd -P)",
+    `case "$p" in "$r"|"$r"/*) ;; *) printf 'TENTACLE_OUTSIDE\\n' >&2; exit 4 ;; esac`,
+  ].join("; ");
 }
 
 /** One `-prune` clause per pruned name, the ROOT itself exempted (M1). */
@@ -470,6 +514,11 @@ export interface ParsedSearch {
   /** The engine's status, carried out on stderr (`TENTACLE_RC=`) because the pipe loses it (H3). */
   readonly status: number | undefined;
   readonly missingPath: boolean;
+  /** The resolved path is OUTSIDE the workspace: status 4 + `TENTACLE_OUTSIDE` (H1). */
+  readonly outsidePath: boolean;
+  /** Status 4 is the confinement refusal; a status no engine should give (≥ 4,
+   *  and 2) is a failure too — never `no matches` (M2 b). */
+  readonly failed: boolean;
   readonly parseError?: string;
   /** Lines dropped as binary (`binary file matches`, a NUL byte) — F6. */
   readonly binaryMatches: number;
@@ -487,8 +536,24 @@ export interface ParsedSearch {
  * rg `regex parse error`, and GNU also only WARNS on stderr for `(?i)`.
  */
 const REGEX_ERROR =
-  /(bad regex|invalid regular expression|Unmatched|not balanced|warning:|regex parse error|trailing backslash|repetition-operator)/i;
+  /(bad regex|invalid regular expression|Unmatched|not balanced|warning:|regex parse error|trailing backslash|repetition-operator|invalid character class|invalid character range|invalid collation character)/i;
 const SIGPIPE_NOISE = /terminated by signal 13|write error: Broken pipe/;
+/**
+ * A per-PATH condition (M3): one file or directory the walk met, not a broken
+ * engine. `find` says it on stderr with a normal status; rg says it with 2, and
+ * the difference matters — the hits it DID find are real.
+ */
+const PER_PATH_NOISE = /(Permission denied|IO error|No such file or directory|not readable)/i;
+
+/**
+ * What one line of untrusted text may bring: no C0/DEL, and bounded in BYTES
+ * (H2). The cap is the renderer's own per-line rule, so no field — a note, a
+ * parse error, an engine's stderr — can be longer than a hit line. Exported so
+ * the TOOL's own note (the demotion reason) goes through the same boundary.
+ */
+export function oneWireLine(text: string): string {
+  return truncateLine(stripControls(text));
+}
 
 /** Strip C0/DEL controls but KEEP `\t` (M7b: otherwise every indented hit is mangled). */
 function stripControls(text: string): string {
@@ -515,25 +580,37 @@ export function parseSearchOutput(
   const statusMatch = /TENTACLE_RC=(\d+)/.exec(stderr);
   const status = statusMatch?.[1] !== undefined ? Number(statusMatch[1]) : undefined;
   const missingPath = stderr.includes("TENTACLE_MISSING");
+  const outsidePath = stderr.includes("TENTACLE_OUTSIDE");
   const noise: string[] = [];
   let parseError: string | undefined;
   for (const line of stderr.split("\n")) {
     const text = line.trim();
-    if (text === "" || text.startsWith("TENTACLE_RC=") || text === "TENTACLE_MISSING") {
+    if (
+      text === "" ||
+      text.startsWith("TENTACLE_RC=") ||
+      text === "TENTACLE_MISSING" ||
+      text === "TENTACLE_OUTSIDE"
+    ) {
       continue;
     }
     if (SIGPIPE_NOISE.test(text)) {
-      noise.push(text);
+      // Truly chatter (our own `head -c` closing the pipe): dropped, never
+      // rendered — the ONE stderr class that is not a fact about the result.
       continue;
     }
     if (REGEX_ERROR.test(text)) {
-      parseError ??= text;
+      // H2: the raw stderr line is untrusted (a pod names its own directories)
+      // and was uncapped — measured at 200 170 bytes for a 200 KiB line.
+      parseError ??= oneWireLine(text);
       continue;
     }
-    noise.push(text);
+    noise.push(oneWireLine(text));
   }
 
-  const rawCapped = raw.length >= RAW_CAP;
+  // H3: `head -c` counts BYTES; `raw.length` counts UTF-16 units, so a
+  // non-ASCII stream crossed the byte cap invisibly (measured: bytes=262146,
+  // utf16=87394, rawCapped=false for a 1-of-41 answer marked complete).
+  const rawCapped = Buffer.byteLength(raw, "utf8") >= RAW_CAP;
   const body = rawCapped ? raw.slice(0, raw.lastIndexOf("\n") + 1) : raw;
   const hits: SearchHit[] = [];
   const counts = new Map<string, number>();
@@ -558,6 +635,14 @@ export function parseSearchOutput(
     hits,
     status,
     missingPath,
+    outsidePath,
+    failed:
+      status !== undefined &&
+      ![0, 1, 3].includes(status) &&
+      status !== KILLED_EXIT_CODE &&
+      // A denial on one path is the walk's environment, not a broken engine:
+      // the hits it found are real, so the result is PARTIAL, not an error.
+      !noise.some((line) => PER_PATH_NOISE.test(line)),
     ...(parseError !== undefined ? { parseError } : {}),
     binaryMatches,
     rawCapped,
@@ -629,12 +714,29 @@ export function renderSearchResult(
   if (options.ignoreNote !== undefined) {
     notes.push(options.ignoreNote);
   }
+  // M2: engine noise is a FACT (an unreadable subtree, a missing `find`), never
+  // dead state — it is rendered, stripped and bounded (H2), and it is why a
+  // zero-hit answer with noise does not claim `no matches`.
+  const problems = noiseNotes(parsed.noise);
 
   if (parsed.missingPath) {
     return {
       content: [
         `${header}  ${engine}`,
         `path not found: ${input.path}`,
+        ...notes.map(noteLine),
+      ].join("\n"),
+      isError: true,
+    };
+  }
+  if (parsed.outsidePath) {
+    // H1/Q6 (a): resolved through its symlinks, the path is not in the workspace.
+    // This is the ONE case a prompt-free walk must never take, so it is an error
+    // naming the rule rather than an empty answer.
+    return {
+      content: [
+        `${header}  ${engine}`,
+        `path refused: ${input.path} resolves outside the workspace (a search may only walk the real workspace; owner Q6 a).`,
         ...notes.map(noteLine),
       ].join("\n"),
       isError: true,
@@ -657,6 +759,20 @@ export function renderSearchResult(
         `pattern rejected by the engine: ${parsed.parseError}`,
         "Retry with `fixed_strings: true` for a literal search, or simplify the pattern.",
         ...notes.map(noteLine),
+        ...problems,
+      ].join("\n"),
+      isError: true,
+    };
+  }
+  if (parsed.failed) {
+    // M2 (b): a carried status that is not 0/1/3 is a BROKEN run — a `find` that
+    // is not on PATH (127), an unreadable subtree (2) — not an empty answer.
+    return {
+      content: [
+        `${header}  ${engine}`,
+        `search failed (engine status ${parsed.status ?? "unknown"}) — the walk did not complete.`,
+        ...notes.map(noteLine),
+        ...problems,
       ].join("\n"),
       isError: true,
     };
@@ -722,16 +838,40 @@ export function renderSearchResult(
 
   if (lines.length === 0) {
     // An explicit sentence, not an empty body: an empty result is the most
-    // common answer and an empty string reads like a failure.
+    // common answer and an empty string reads like a failure. Noise means the
+    // walk did NOT complete, so it must not claim `no matches` (M2).
+    const body = [`${header}  ${engine}`, ...notes.map(noteLine), ...problems, ...tail].join("\n");
     return {
-      content: `${[`${header}  ${engine}`, ...notes.map(noteLine), ...tail].join("\n")}\n\nno matches`,
+      content:
+        problems.length === 0
+          ? `${body}\n\nno matches`
+          : `${body}\n\nthe walk did not complete — no hits in what could be read (the engine reported problems; see the note above)`,
       isError: false,
     };
   }
   return {
-    content: [`${header}  ${engine}`, ...notes.map(noteLine), ...lines, ...tail].join("\n"),
+    content: [`${header}  ${engine}`, ...notes.map(noteLine), ...problems, ...lines, ...tail].join(
+      "\n",
+    ),
+    // Hits survived a broken walk: the answer is partial, and the note says so.
     isError: false,
   };
+}
+
+/**
+ * `[note: …]` lines for engine noise (M2): the caller's own patches — a
+ * per-path `Permission denied`, a missing `find` — that used to be collected
+ * and never rendered, turning a loud failure into `no matches`.
+ */
+function noiseNotes(noise: readonly string[]): string[] {
+  const shown = noise.slice(0, MAX_NOISE_LINES);
+  const more = noise.length - shown.length;
+  return [
+    ...shown.map((line) => noteLine(oneWireLine(line))),
+    ...(more > 0
+      ? [noteLine(`${more} more engine message${more === 1 ? "" : "s"} not shown`)]
+      : []),
+  ];
 }
 
 function noteLine(note: string): string {
