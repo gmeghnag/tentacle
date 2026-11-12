@@ -38,6 +38,7 @@ import {
   type UpdateSettingsResult,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import { AttachmentStore, DAEMON_UPLOAD_BYTES, UploadBudget } from "./attachment-store.ts";
 import type { ModelLink } from "./connection.ts";
 import {
   type Attachment,
@@ -142,6 +143,12 @@ export interface SessionHostOptions extends TurnErrorPolicy {
   readonly defaultCwd: string;
   /** Replay budget per session, in bytes (default `DEFAULT_RING_BYTES`). */
   readonly ringBytes?: number;
+  /**
+   * This daemon's image-upload allowance, shared by every session's store
+   * (`attachment/put`, docs/feat/attachments-upload.md; default
+   * `DAEMON_UPLOAD_BYTES`).
+   */
+  readonly uploadBytes?: number;
   /** The clock for liveness stamps and the sweep (default `Date.now`). */
   readonly now?: () => number;
   /** Refuse to CREATE (or reopen) a session past this many live ones on the daemon. Unset = no limit. */
@@ -284,6 +291,16 @@ function withoutReclaimed(
 
 export class SessionHost {
   private readonly opts: SessionHostOptions;
+  /**
+   * ONE per daemon, shared by every session's store (owner Q1): the process's
+   * byte allowance, not a connection's or a session's.
+   */
+  private readonly uploadBudget: UploadBudget;
+
+  /** Bytes every session's image store holds together (the daemon cap's used side). */
+  get uploadBytesUsed(): number {
+    return this.uploadBudget.used;
+  }
   private readonly sessions = new Map<string, HostedSession>();
   /** ARCHIVED sessions (a persisting host only). An id is in ONE of the two maps, never both. */
   private readonly archived = new Map<string, ArchivedEntry>();
@@ -299,6 +316,7 @@ export class SessionHost {
 
   constructor(opts: SessionHostOptions) {
     this.opts = opts;
+    this.uploadBudget = new UploadBudget(opts.uploadBytes ?? DAEMON_UPLOAD_BYTES);
     this.identity = opts.identity;
     this.modelInfo = opts.modelInfo;
   }
@@ -993,6 +1011,7 @@ export class SessionHost {
         : undefined,
       log,
       agentJobs,
+      new AttachmentStore(this.uploadBudget),
     );
     bound.hosted = hosted;
     hosted.settingsReport = settingsReport;

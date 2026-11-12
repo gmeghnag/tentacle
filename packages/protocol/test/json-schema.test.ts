@@ -282,6 +282,15 @@ const FIXTURES: Record<string, Json[]> = {
     },
   ],
   "methods/hooks~1trust/result": [{ trusted: true }, { trusted: false }],
+  "methods/attachment~1put/params": [
+    { sessionId: "s1", id: "a".repeat(64), size: 4, offset: 0, data: "YWJjZA==" },
+    // The probe: no bytes, only `have` back (docs/feat/attachments-upload.md).
+    { sessionId: "s1", id: "a".repeat(64), size: 4, offset: 4, data: "" },
+  ],
+  "methods/attachment~1put/result": [
+    { have: 0, complete: false },
+    { have: 4, complete: true },
+  ],
   "methods/daemon~1session_ttl/params": [{}, { idleTtlMs: 3600000 }, { idleTtlMs: "never" }],
   "methods/daemon~1session_ttl/result": [
     { idleTtlMs: "never", persisted: false },

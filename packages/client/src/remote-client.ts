@@ -27,6 +27,8 @@ import {
   countTokensBounded,
 } from "@tentacle/core";
 import {
+  ATTACHMENT_CHUNK_BYTES,
+  type AttachmentPutResult,
   type ClearResult,
   type ClientInfo,
   type CompactResult,
@@ -42,6 +44,7 @@ import {
   type KnownLogEntry,
   type LogCursor,
   type LogResult,
+  MAX_IMAGE_BYTES,
   type McpServerStatus,
   type McpStatusResult,
   Method,
@@ -77,7 +80,13 @@ import {
   type WireStreamEvent,
   text,
 } from "@tentacle/protocol";
-import { type DuplexChannel, type RequestContext, RpcError, RpcPeer } from "@tentacle/transport";
+import {
+  type DuplexChannel,
+  type RequestContext,
+  RpcError,
+  RpcPeer,
+  encodeBase64,
+} from "@tentacle/transport";
 import { ATTACH_TIMEOUT_MS } from "./constants.ts";
 import { boundJobOutput, boundJobs, jobsFromSnapshot } from "./jobs.ts";
 import {
@@ -116,6 +125,7 @@ import {
   boundSubagents,
   subagentsFromSnapshot,
 } from "./subagents.ts";
+import { UploadAbortedError, UploadProtocolError, UploadWindow } from "./upload-window.ts";
 import { type DaemonKind, explainVersionMismatch } from "./version-mismatch.ts";
 
 /** A daemon that predates `session/subagent_message`: a typed refusal, never a throw at a UI. */
@@ -124,6 +134,29 @@ export const SUBAGENT_MESSAGE_OLD_DAEMON =
 
 /** A daemon that predates `session/job_output`: a typed refusal, shown as a notice. */
 export const JOB_OUTPUT_OLD_DAEMON = "this daemon cannot show a job's output (older version)";
+
+/** A daemon that predates `attachment/put`: a typed refusal, never a throw at a UI. */
+export const ATTACHMENTS_OLD_DAEMON =
+  "this daemon cannot receive images (older version) — update tentacle";
+
+/** An `attachment/put` this daemon refuses outright: no retry (the bytes are not the problem). */
+export class AttachmentsUnsupportedError extends RpcError {
+  constructor(cause: unknown) {
+    super(
+      JsonRpcErrorCode.MethodNotFound,
+      ATTACHMENTS_OLD_DAEMON,
+      cause instanceof RpcError ? { code: cause.code } : undefined,
+    );
+    this.name = "AttachmentsUnsupportedError";
+  }
+}
+
+/** `RemoteClient.upload()`'s options. */
+export interface UploadOptions {
+  readonly signal?: AbortSignal;
+  /** Called as the daemon confirms bytes: `(have, size)`. */
+  readonly onProgress?: (have: number, size: number) => void;
+}
 
 /** A `once` session command whose link dropped before the daemon answered (its outcome is unknown). */
 export const DROPPED_NOT_RETRIED = "the connection dropped before the daemon answered; not retried";
@@ -365,6 +398,14 @@ export interface RemoteClientOptions {
    * never reads back) `readBack` refuses. Injected: this package stays node-free.
    */
   readonly sha256?: Sha256;
+  /**
+   * SHA-256 (hex) over BINARY bytes: the `sha256` seam above takes text, and
+   * UTF-8 re-encodes anything above 0x7f, so an image's digest cannot go
+   * through it. Absent → Bun's `CryptoHasher` when running on Bun; elsewhere
+   * (mobile, which uploads nothing yet) `upload` refuses. Injected: this
+   * package stays node-free.
+   */
+  readonly sha256Bytes?: (bytes: Uint8Array) => string;
 }
 
 /** A sha-256 hex hasher from Bun's runtime, when there is one. */
@@ -386,6 +427,40 @@ function bunSha256(): Sha256 | undefined {
     hasher.update(text);
     return hasher.digest("hex");
   };
+}
+
+/**
+ * The sha256 (hex) of BINARY bytes, from Bun's runtime when there is one.
+ * `CryptoHasher.update` takes a `Uint8Array` directly, so no encoding is in the
+ * way — unlike the text `Sha256` seam, whose UTF-8 would change any byte above
+ * 0x7f.
+ */
+function bunSha256Bytes(): ((bytes: Uint8Array) => string) | undefined {
+  const bun = (
+    globalThis as {
+      Bun?: {
+        CryptoHasher: new (
+          algorithm: string,
+        ) => {
+          update(bytes: Uint8Array): unknown;
+          digest(encoding: "hex"): string;
+        };
+      };
+    }
+  ).Bun;
+  if (bun === undefined) {
+    return undefined;
+  }
+  return (bytes) => {
+    const hasher = new bun.CryptoHasher("sha256");
+    hasher.update(bytes);
+    return hasher.digest("hex");
+  };
+}
+
+/** An older daemon's answer to a method it does not have (AGENTS §7: additive methods). */
+function isMethodNotFound(error: unknown): boolean {
+  return error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound;
 }
 
 /** Restarts of one `readBack` (a rebase between pages, a refused read retried cold, a drifted checkpoint re-read cold). */
@@ -652,6 +727,8 @@ export class RemoteClient {
   private readonly trustAsking = new Set<string>();
   /** Hashes `session/log` checkpoints (`readBack`); absent → `readBack` refuses. */
   private readonly sha256: Sha256 | undefined;
+  /** SHA-256 over binary bytes (an image's id); Bun's, unless injected. */
+  private readonly sha256Bytes: ((bytes: Uint8Array) => string) | undefined;
 
   constructor(
     channel: DuplexChannel,
@@ -687,6 +764,7 @@ export class RemoteClient {
     }
     this.carried = options.sessionSettings ? { settings: options.sessionSettings } : {};
     this.sha256 = options.sha256 ?? bunSha256();
+    this.sha256Bytes = options.sha256Bytes ?? bunSha256Bytes();
     this.link = { ...initialLink, upSince: this.clock.now() };
     this.lastInboundAt = this.clock.now();
     this.peer = this.makePeer(channel, 0);
@@ -1409,6 +1487,161 @@ export class RemoteClient {
       throw error;
     }
     return running.finally(settled);
+  }
+
+  /**
+   * Send one image's bytes into the session's daemon store (`attachment/put`,
+   * docs/feat/attachments-upload.md D5). Resolves with the ref's identity —
+   * `{id, size}` from the LAPTOP's own bytes, never from a daemon answer — and
+   * the bytes are readable daemon-side only once the whole blob is
+   * sha256-verified there. Additive: a daemon older than this method refuses it
+   * with `AttachmentsUnsupportedError`.
+   *
+   * Two chunks are in flight at once (`UploadWindow`); the steps that decide
+   * what to send live in that pure module. A drop mid-upload resumes: the store
+   * belongs to the session, so the probe reads back the `have` it kept and only
+   * the missing chunks are resent. Any other failure rejects — a refusal, a
+   * closed session, a daemon that lies about its acks — because retrying none
+   * of those can succeed.
+   */
+  async upload(
+    sessionId: string,
+    bytes: Uint8Array,
+    options: UploadOptions = {},
+  ): Promise<{ id: string; size: number }> {
+    const size = bytes.length;
+    if (size === 0) {
+      throw new RangeError("an image has no bytes to upload");
+    }
+    if (size > MAX_IMAGE_BYTES) {
+      throw new RangeError(`an image is at most ${MAX_IMAGE_BYTES} bytes (this one is ${size})`);
+    }
+    const hasher = this.sha256Bytes;
+    if (hasher === undefined) {
+      throw new Error("upload needs a binary sha-256 hasher (RemoteClientOptions.sha256Bytes)");
+    }
+    // From OUR bytes: a daemon answer never names what was stored.
+    const id = hasher(bytes);
+    const entry = this.sessions.get(sessionId);
+    const window = new UploadWindow(size);
+    const progress = (): void => options.onProgress?.(window.have, size);
+
+    for (;;) {
+      this.throwIfAborted(options.signal);
+      const gen = await this.liveGeneration(entry);
+      try {
+        // The probe: how much of this blob does the daemon already hold? It
+        // also dedupes a re-attached image (complete → nothing to send).
+        const at = await this.putChunk(sessionId, { id, size, offset: 0, data: "" });
+        if (window.probe(at.have, at.complete) === "complete") {
+          progress();
+          return { id, size };
+        }
+        progress();
+        await this.pump(sessionId, bytes, id, size, window, options, progress);
+        return { id, size };
+      } catch (error) {
+        // Only a dropped link is retryable here: the session's store still
+        // holds `have`, so a fresh probe resumes. Everything else is the
+        // daemon's own answer and belongs to the caller.
+        if (isMethodNotFound(error)) {
+          throw new AttachmentsUnsupportedError(error);
+        }
+        // A dropped link is the ONLY retryable case: the store belongs to the
+        // session, so a fresh probe reads back what landed and the missing
+        // chunks are resent. Anything else is the daemon's own answer.
+        if (gen !== this.gen || !this.up) {
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Issue chunk after chunk until the window says done, `UPLOAD_WINDOW` at a
+   * time. A failing put is captured (never an unhandled rejection) and rethrown
+   * here, so the caller's drop/refusal handling sees it once.
+   */
+  private async pump(
+    sessionId: string,
+    bytes: Uint8Array,
+    id: string,
+    size: number,
+    window: UploadWindow,
+    options: UploadOptions,
+    progress: () => void,
+  ): Promise<void> {
+    const running = new Set<Promise<void>>();
+    let failure: unknown;
+    let failed = false;
+    for (;;) {
+      this.throwIfAborted(options.signal);
+      if (failed) {
+        await Promise.allSettled(running);
+        throw failure;
+      }
+      const step = window.next();
+      if (step.kind === "done") {
+        await Promise.all(running);
+        if (window.have !== size) {
+          throw new UploadProtocolError(`the upload stopped at ${window.have} of ${size} bytes`);
+        }
+        return;
+      }
+      if (step.kind === "wait") {
+        if (running.size === 0) {
+          throw new UploadProtocolError(`nothing is in flight and ${window.have} of ${size} is in`);
+        }
+        // At least one settle wakes this; every task RESOLVES (failures are
+        // captured above), so a race can never reject or hang.
+        await Promise.race(running);
+        continue;
+      }
+      const { offset, length } = step;
+      const settled = (async (): Promise<void> => {
+        try {
+          const result = await this.putChunk(sessionId, {
+            id,
+            size,
+            offset,
+            data: encodeBase64(bytes.subarray(offset, offset + length)),
+          });
+          window.ack(offset, result);
+          progress();
+        } catch (error) {
+          failed = true;
+          failure = error;
+        }
+      })();
+      running.add(settled);
+      void settled.then(() => running.delete(settled));
+    }
+  }
+
+  /** One `attachment/put`, on the current peer. */
+  private putChunk(
+    sessionId: string,
+    chunk: { id: string; size: number; offset: number; data: string },
+  ): Promise<AttachmentPutResult> {
+    return this.call(this.peer, Method.AttachmentPut, {
+      sessionId,
+      ...chunk,
+    }) as Promise<AttachmentPutResult>;
+  }
+
+  /** The generation to run on: waits out a drop when the session is known, else the current one. */
+  private async liveGeneration(entry: SessionEntry | undefined): Promise<number> {
+    if (!this.channelFactory || !entry) {
+      return this.gen;
+    }
+    return this.whenLive(entry);
+  }
+
+  private throwIfAborted(signal: AbortSignal | undefined): void {
+    if (signal?.aborted) {
+      throw new UploadAbortedError();
+    }
   }
 
   /**

@@ -416,7 +416,141 @@ Recommendation first.
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-sonnet-4-5, 2026-11-12*
+
+**Load-bearing check, re-run FIRST (before any edit).** `bun
+/Users/gmeghnag/tentacle/.tentacle/tmp/attachments-upload/dispatch.ts` on this
+branch (bun 1.4.3) — identical to the plan's recorded output:
+
+```
+put-0@1ms put-1@1ms put-2@1ms put-3@1ms slow@202ms
+order: slow:start | put-0:have=1 | put-1:have=2 | put-2:have=3 | put-3:have=4 | slow:end
+final have = 4
+```
+
+Still holds: the four puts are answered at 1 ms while the slow request is in
+flight (no serialization), and each ran its synchronous check-and-append whole,
+in arrival order. Every P1–P11 citation was re-read against the code and
+matched (`peer.ts:322,333-342`, `channel.ts:36-40`, `connection.ts:242-316` and
+its `lookup` at `:476-486`, `hosted-session.ts:2896`, `attachment.ts:18,36`,
+`version.ts:23-27`, `remote-client.ts` `whenLive`). Nothing in the plan was
+contradicted, so no step was stopped.
+
+**Slice 1 — protocol (DONE).** `packages/protocol/src/attachment-upload.ts`
+(new: `ATTACHMENT_CHUNK_BYTES`, `ATTACHMENT_CHUNK_B64_MAX`, params/result
+schemas, `AttachmentRefusedReason`), exported from `index.ts`;
+`Method.AttachmentPut` + its `RequestSchemas` row; `DomainErrorCode.
+AttachmentRefused = -32016`; `schema/protocol.json` regenerated
+(`bun run schema:export`, +51 lines). No `PROTOCOL_VERSION` bump, as planned.
+Tests: `protocol/test/attachment-upload.test.ts` (11), plus the two
+`json-schema.test.ts` fixture rows the drift gate requires.
+
+**Slice 2 — daemon (DONE).** `packages/daemon/src/attachment-store.ts` (new:
+`UploadBudget`, `AttachmentStore`, `SESSION_UPLOAD_BYTES`,
+`DAEMON_UPLOAD_BYTES`, `PARTIAL_IDLE_MS`); `HostedSession` gained a trailing
+`uploads` constructor param (default keeps every existing test constructor
+compiling) and `close()` calls `uploads.dispose()` beside
+`attachments.clear()`; `SessionHost` owns ONE `UploadBudget` (`uploadBytes?`
+option, plus a read-only `uploadBytesUsed` for the tests) and passes
+`new AttachmentStore(this.uploadBudget)`; `Connection.onRequest` gained the one
+sync case; `daemon/src/index.ts` exports the module.
+Tests: `daemon/test/attachment-store.test.ts` (21),
+`daemon/test/attachment-put.test.ts` (6).
+
+**Slice 3 — client (DONE).** `packages/client/src/upload-window.ts` (new: pure
+`UploadWindow` + `UPLOAD_WINDOW`, `UPLOAD_MAX_SENT_FACTOR`, `UploadProtocolError`,
+`UploadAbortedError`), exported from `client/src/index.ts`;
+`RemoteClient.upload()` beside `snapshot()`, with the private `pump` /
+`putChunk` / `liveGeneration` helpers and `AttachmentsUnsupportedError`
+(`ATTACHMENTS_OLD_DAEMON`). `packages/transport/src/index.ts` now also exports
+`encodeBase64` (see drift 3).
+Tests: `client/test/upload-window.test.ts` (12), `client/test/upload.test.ts`
+(14).
+
+**Drift from the Implementation (each with its reason).**
+
+1. **D2's `probe` became a window method, not just a rule.** `put`'s probe
+   branch was as planned, but the early-`complete` violation had to apply to the
+   PROBE's answer too, and the window was the only place with the blob's size.
+   Added `UploadWindow.probe(have, complete)` (throws on an early `complete`,
+   else `rewind`s) and `RemoteClient.upload` calls it instead of `finish()` +
+   `rewind()` separately. Same behaviour, one place to test it.
+2. **D4's rewind rule needed the chunk's own length.** "Rewind when `have <
+   sentOffset`" does not fire for a reordered pair (chunk 2 acked with
+   `have === CHUNK` while chunk 1 is still in flight), so the client would have
+   kept sending from the far cursor and skipped the missing chunk. `ack` now
+   rewinds when `have < sentOffset + length` (the chunk's own end), which covers
+   gaps, reorders and a straddle; the pure test pins it with a window-2 reorder.
+3. **`encodeBase64` — a new export on `@tentacle/transport`.** `RemoteClient`
+   is the package the mobile app depends on (`@tentacle/client`), and it has no
+   `Buffer`/`btoa` there; the repo already has a dependency-free RFC 4648
+   encoder (`transport/src/noise-frame.ts`) written for exactly that reason. It
+   is now re-exported from the transport barrel rather than duplicated in
+   `client`.
+4. **A new seam: `RemoteClientOptions.sha256Bytes?`.** The plan assumed the id
+   came from the existing `sha256` option (P11). That seam takes TEXT and
+   UTF-8-encodes it, so the digest of anything above `0x7f` differs from the
+   digest of the bytes (verified: `sha256(utf8(latin1(bytes))) !==
+   sha256(bytes)`), and `upload` would have computed an id the daemon never
+   accepts (`hash_mismatch` on every image). The text seam is untouched
+   (`readBack` keeps using it); `sha256Bytes` is a second, injected option
+   (Bun's `CryptoHasher.update(Uint8Array)` by default), keeping `@tentacle/
+   client` node-free and the package's "inject, don't import" rule intact.
+5. **`SessionHost.uploadBytesUsed`** (a read-only getter on the shared budget)
+   was added beyond the plan's `Files` list so T3 can assert "the budget is back
+   to 0" at the daemon level rather than through a store handle the test would
+   otherwise have to reach into.
+6. **`UploadWindow.rewind` no longer clamps to the previous `acked`.** After a
+   drop the daemon is the truth; a LOWER `have` (a restarted store) is real
+   progress lost, not a violation — clamping would have made the client send
+   from a point the daemon no longer holds.
+7. **The bounded-send check moved before the chunk is handed out**, so `sent` can
+   never exceed `3 × size + window × chunk` (the plan's bound is on what goes on
+   the wire, so an off-by-one chunk would have been a real overrun).
+8. **T3's "a `session/log` between chunks is answered before the last ack" was
+   strengthened, and a second test was added.** The first version could not fail
+   for the property it named (puts are synchronous, so the ordering it checked
+   was trivially true — confirmed by mutation: injecting a 30 ms `await` into the
+   new `case` left it green). It now asserts the SETTLE order, and a new
+   `Gated`-model test holds a `session/prompt` suspended on the model and
+   asserts a put is still answered — red under a never-resolving `await` in the
+   prompt path (mutation M21).
+9. **The `json-schema.test.ts` fixture table needed two rows** for the new
+   method (`methods/attachment~1put/params|result`) — the drift gate's "every
+   method has a fixture" test. Not named in the plan's `Files`, but required by
+   the existing gate.
+10. **`daemon/test/attachment-put.test.ts` needs a `hooks/trust` answer** (the
+    turn asks its prompting connection before it runs); the test client declines.
+
+**Mutations run (each reverted; the named tests went red, then green again).**
+M1 write duplicates instead of skipping (rule 7) → T2 duplicate-bytes. M2
+`if (false &&` on the digest compare → T2 `hash_mismatch`. M3 drop the entry but
+keep the reservation on mismatch → T2 budget. M4 `dispose()` a no-op → T2
+`dispose`. M5 `async put` → T2 happy paths + the sync case. M6 no stale
+eviction → T2 stale/fresh. M7 no declared-size reservation → T2 four cap cases.
+M8 remove `uploads.dispose()` from `HostedSession.close` → T3 close/delete.
+M9 `host.get` instead of `lookup` → T3 not-open + close/delete. M10/M15
+`UPLOAD_WINDOW = 4` → T4 window + T5 reconnect (send bound). M11/M17 no send
+bound → T4 (both bound cases), T5 hostile. M12 trust `complete` without
+`have === size` → T4 early-complete, T5 early-complete. M13 no rewind on a lower
+`have` → T4 reorder. M16 the same guard removed via `if (false)` → same as M12.
+M18 skip the daemon's digest, T5 side → T2 mismatch (the client's own id and the
+store's verification are what make this unreachable from T5 — stated, not
+faked). M19 a 30 ms `await` inside the new `case` → **stays green**, reported
+honestly: the store's own atomicity is what the sync rule protects, and a
+delay before an atomic step cannot be observed through the wire in a test with
+no interleaving peer; the property is pinned by T2's sync case (M5) and by the
+dispatch repro. M20 a per-connection mutex around `onRequest` → also green for
+the same reason (the in-memory channel settles a sync handler in the same
+microtask), so it is NOT claimed as covered — M21 (a never-resolving `await` in
+the prompt path) is the red proof for the no-serialization test, and the
+`dispatch.ts` repro is the direct evidence.
+
+**Gate.** `bunx tsc --noEmit` clean; `bunx tsc -p apps/mobile` clean (the mobile
+workspace's deps ARE installed here); `bun run lint` clean (927 files, 0 errors,
+0 warnings — the §6 baseline); `bun test` — **7226 pass, 3 skip (the opt-in
+k8s/docker/slow ones), 0 fail**, 521 files. `schema/protocol.json` regenerated.
+CHANGELOG `Added` under `[Unreleased]`.
 
 ## Review
 
