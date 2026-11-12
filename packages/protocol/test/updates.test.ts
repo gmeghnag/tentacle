@@ -250,8 +250,8 @@ describe("history_repaired (docs/feat/history-validity-invariant.md, Part C)", (
     expect(SessionUpdateSchema.safeParse(event).success).toBe(true);
     expect(UPDATE_CLASS.history_repaired).toBe("display");
     // Display only: an older client skips an unknown display kind (§7), so no bump
-    // by this task (22 came from fix/autoaccept-wake-turns).
-    expect(PROTOCOL_VERSION).toBe(22);
+    // by this task (23 is the attachments bump, docs/feat/attachments-core.md).
+    expect(PROTOCOL_VERSION).toBe(23);
   });
 
   test("rejects a negative or non-integer count", () => {

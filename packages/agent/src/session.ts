@@ -5,7 +5,12 @@
  * the model sees prior turns (and their tool results). This is what turns the
  * one-shot loop into an interactive assistant.
  */
-import { type ChatMessage, NOTE_KIND } from "@tentacle/core";
+import {
+  type AttachmentRef,
+  type ChatMessage,
+  NOTE_KIND,
+  checkAttachmentRefs,
+} from "@tentacle/core";
 import {
   type Agent,
   type AgentEvent,
@@ -42,6 +47,13 @@ export interface SendOptions {
   readonly steering?: readonly string[];
   /** Makes a parallel group's start durable before it runs (see `RunOptions.beforeRun`). */
   readonly beforeRun?: BeforeRun;
+  /**
+   * Image refs to send with this turn (docs/feat/attachments-core.md). Checked
+   * BEFORE anything is pushed: an unsendable one throws and the history is
+   * unchanged. With refs and no text, the turn still starts (an image-only
+   * prompt is a prompt, not a continuation).
+   */
+  readonly attachments?: readonly AttachmentRef[];
 }
 
 /** Per-turn options of `resume`. */
@@ -137,18 +149,28 @@ export class Session {
     if (opts.skill !== undefined && (text === "" || !this.canActivateSkill(opts.skill))) {
       throw new UnknownSkillError(opts.skill);
     }
+    const refs = opts.attachments ?? [];
+    if (refs.length > 0) {
+      // Before anything is pushed: a refused image leaves no half-written turn.
+      checkAttachmentRefs(refs);
+    }
+    const pushed = text !== "" || refs.length > 0;
     // A fresh turn starts with its seed only (abort may have left undrained
     // items from a previous turn; a caller that keeps them passes them).
     this.steering = [...(opts.steering ?? [])];
     // What this turn adds starts here (its context line may ride on it).
     const newFrom = this.messages.length;
-    if (text !== "") {
-      this.messages.push({ role: "user", content: text });
+    if (pushed) {
+      this.messages.push({
+        role: "user",
+        content: text,
+        ...(refs.length > 0 ? { attachments: [...refs] } : {}),
+      });
     }
     try {
       yield* this.agent.runMessages(this.messages, this.id, signal, () => this.steering.splice(0), {
         newFrom,
-        userMessage: text !== "",
+        userMessage: pushed,
         ...(opts.skill !== undefined ? { skill: opts.skill } : {}),
         ...(opts.askHooksTrust !== undefined ? { askHooksTrust: opts.askHooksTrust } : {}),
         ...(opts.beforeRun !== undefined ? { beforeRun: opts.beforeRun } : {}),

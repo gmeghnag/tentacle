@@ -29,6 +29,7 @@ import {
   type SessionTitle,
   type Sha256,
   digestOfDigests,
+  isAppendEntry,
   messageDigest,
   projectEntry,
 } from "@tentacle/protocol";
@@ -153,7 +154,7 @@ export function applyLogRead(
   let title: SessionTitle | undefined;
   let drift: { seq: number } | undefined;
   for (const e of entries) {
-    if (expect > 0 && e.type !== "message") {
+    if (expect > 0 && !isAppendEntry(e)) {
       return { error: `base owes ${expect} messages, got ${e.type}` };
     }
     // The shared fold (the disk log applies the same step), on both lists.
@@ -171,6 +172,7 @@ export function applyLogRead(
         if (e === firstBase && expect === 0) seed = [];
         break;
       case "message":
+      case "media_message":
         if (expect > 0 && --expect === 0 && seed === undefined && firstBase !== undefined) {
           seed = [...digests];
         }
@@ -187,7 +189,7 @@ export function applyLogRead(
         title = e.title;
         break;
       default:
-        break; // `replace`/`truncate` (projected above) and the turn markers
+        break; // `replace`/`media_replace`/`truncate` (projected above) and the turn markers
     }
   }
   if (expect > 0) {

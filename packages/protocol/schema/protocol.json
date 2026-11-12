@@ -88,6 +88,41 @@
       "type": "object",
       "x-event-class": "display"
     },
+    "AttachmentRef": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "mimeType": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^image\\/[a-z0-9.+-]+$",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "pattern": "^[^\\p{Cc}]*$",
+          "type": "string"
+        },
+        "size": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["id", "mimeType", "size"],
+      "type": "object"
+    },
+    "Attachments": {
+      "items": {
+        "$ref": "#/$defs/AttachmentRef"
+      },
+      "maxItems": 5,
+      "minItems": 1,
+      "type": "array"
+    },
     "BackgroundExit": {
       "additionalProperties": true,
       "properties": {
@@ -161,6 +196,9 @@
     "ChatMessage": {
       "additionalProperties": true,
       "properties": {
+        "attachments": {
+          "$ref": "#/$defs/Attachments"
+        },
         "content": {
           "type": "string"
         },
@@ -909,6 +947,8 @@
           "base": "#/$defs/LogBaseEntry",
           "call_started": "#/$defs/LogCallStartedEntry",
           "checkpoint": "#/$defs/LogCheckpointEntry",
+          "media_message": "#/$defs/LogMediaMessageEntry",
+          "media_replace": "#/$defs/LogMediaReplaceEntry",
           "message": "#/$defs/LogMessageEntry",
           "replace": "#/$defs/LogReplaceEntry",
           "subagent_background": "#/$defs/LogSubagentBackgroundEntry",
@@ -928,7 +968,13 @@
           "$ref": "#/$defs/LogMessageEntry"
         },
         {
+          "$ref": "#/$defs/LogMediaMessageEntry"
+        },
+        {
           "$ref": "#/$defs/LogReplaceEntry"
+        },
+        {
+          "$ref": "#/$defs/LogMediaReplaceEntry"
         },
         {
           "$ref": "#/$defs/LogTruncateEntry"
@@ -1131,6 +1177,78 @@
       "maxLength": 256,
       "minLength": 1,
       "type": "string"
+    },
+    "LogMediaMessageEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "critical": {
+          "const": true,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "message": {
+          "$ref": "#/$defs/MessageWithAttachments"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "media_message",
+          "type": "string"
+        }
+      },
+      "required": ["critical", "id", "message", "seq", "ts", "type"],
+      "type": "object"
+    },
+    "LogMediaReplaceEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "critical": {
+          "const": true,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "index": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "$ref": "#/$defs/MessageWithAttachments"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "media_replace",
+          "type": "string"
+        }
+      },
+      "required": ["critical", "id", "index", "message", "seq", "ts", "type"],
+      "type": "object"
     },
     "LogMessageEntry": {
       "additionalProperties": true,
@@ -1559,6 +1677,60 @@
         }
       },
       "required": ["kind"],
+      "type": "object"
+    },
+    "MessageWithAttachments": {
+      "additionalProperties": true,
+      "properties": {
+        "attachments": {
+          "$ref": "#/$defs/Attachments"
+        },
+        "content": {
+          "type": "string"
+        },
+        "contextUsage": {
+          "additionalProperties": true,
+          "properties": {
+            "used": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "window": {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": ["used", "window"],
+          "type": "object"
+        },
+        "denialReply": {
+          "$ref": "#/$defs/PermissionReplyText"
+        },
+        "durationMs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "note": {
+          "$ref": "#/$defs/MessageNote"
+        },
+        "role": {
+          "enum": ["system", "user", "assistant", "tool"],
+          "type": "string"
+        },
+        "spill": {
+          "$ref": "#/$defs/ToolResultSpill"
+        },
+        "toolCallId": {
+          "type": "string"
+        },
+        "toolCalls": {
+          "items": {
+            "$ref": "#/$defs/WireToolCall"
+          },
+          "type": "array"
+        }
+      },
+      "required": ["attachments", "content", "role"],
       "type": "object"
     },
     "ModelCountTokensParams": {
@@ -3568,6 +3740,9 @@
     "WireChatMessage": {
       "additionalProperties": true,
       "properties": {
+        "attachments": {
+          "$ref": "#/$defs/Attachments"
+        },
         "content": {
           "type": "string"
         },
@@ -4028,5 +4203,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 22
+  "x-protocol-version": 23
 }

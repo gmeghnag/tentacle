@@ -6,6 +6,7 @@
  * providers/tools/environments arrive in F1+.
  */
 export * from "./model.ts";
+export * from "./attachments.ts";
 export * from "./dsml.ts";
 export * from "./truncation.ts";
 export * from "./history-validity.ts";

@@ -18,6 +18,7 @@ import {
   type AgentJobExit,
   type AgentJobs,
   type AgentNotify,
+  type AttachmentSource,
   type BackgroundJob,
   COUNT_TOKENS_CAP_MS,
   type ChatMessage,
@@ -501,6 +502,13 @@ export interface AgentConfig {
   readonly requestPermission?: PermissionRequester;
   /** User hooks (docs/feat/hooks-core.md): `tool_call` in the gate, `tool_result` in the pipeline. */
   readonly hooks?: HookRunner;
+  /**
+   * Where this side reads an image ref's bytes from (docs/feat/attachments-core.md).
+   * Carried on every request the loop builds — the run, the step-limit final
+   * request and the context count — so all three inline the same images. Nothing
+   * wires one in this task: until a producer exists, every ref is a placeholder.
+   */
+  readonly attachments?: AttachmentSource;
   /** The trust asker when a turn brings none (the in-process TUI: no RPC). */
   readonly askHooksTrust?: AskHooksTrust;
   /** Background-job registry; when set, the shell tools can launch jobs and
@@ -1181,6 +1189,7 @@ export class Agent {
         tools,
         ...(this.config.temperature !== undefined ? { temperature: this.config.temperature } : {}),
         ...(signal ? { signal } : {}),
+        ...(this.config.attachments ? { attachments: this.config.attachments } : {}),
       };
       if (view.repairs !== null) {
         yield { type: "history_repaired", ...view.repairs };
@@ -1479,6 +1488,7 @@ export class Agent {
             ? { temperature: this.config.temperature }
             : {}),
           ...(signal ? { signal } : {}),
+          ...(this.config.attachments ? { attachments: this.config.attachments } : {}),
         };
         this.notifyModelRequest(sessionId, "final", finalRequest);
         for await (const event of this.config.model.stream(finalRequest)) {
@@ -1594,7 +1604,11 @@ export class Agent {
     // is slow falls through to the estimate.
     const exact = await countTokensBounded(
       this.config.model,
-      { messages: modelView(messages).messages, tools },
+      {
+        messages: modelView(messages).messages,
+        tools,
+        ...(this.config.attachments ? { attachments: this.config.attachments } : {}),
+      },
       signal,
       timeoutMs,
     );

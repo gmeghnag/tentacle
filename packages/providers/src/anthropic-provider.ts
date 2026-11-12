@@ -27,6 +27,14 @@ import type {
   Usage,
 } from "@tentacle/core";
 import { wireArguments } from "@tentacle/core";
+import {
+  type ImageBuildOptions,
+  NO_IMAGES,
+  resolveImages,
+  selectInlineIds,
+  strayRefsText,
+  userParts,
+} from "./images.ts";
 import { ModelRequestError, parseRetryAfter } from "./openai-provider.ts";
 import { parseSSE } from "./sse.ts";
 
@@ -55,6 +63,12 @@ export interface AnthropicProviderConfig {
   readonly id?: string;
   /** Injectable fetch, for tests. Defaults to the global `fetch`. */
   readonly fetch?: typeof fetch;
+  /**
+   * Whether this model takes images at all (docs/feat/attachments-core.md, Q5).
+   * Default TRUE (every current Claude model does). When false, an image ref is
+   * never read and the model sees a text placeholder instead.
+   */
+  readonly images?: boolean;
 }
 
 /** A content block while streaming: text/thinking accumulate, tool_use buffers JSON. */
@@ -93,12 +107,13 @@ export class AnthropicProvider implements ModelProvider {
       headers["x-api-key"] = this.config.apiKey;
     }
     // The stream payload minus what only generation uses.
+    const options = await this.imageOptions(request);
     const {
       max_tokens: _m,
       stream: _s,
       temperature: _t,
       ...body
-    } = buildPayload(this.config.model, request, this.config.maxTokens);
+    } = buildPayload(this.config.model, request, this.config.maxTokens, options);
     const init: RequestInit = { method: "POST", headers, body: JSON.stringify(body) };
     if (request.signal) {
       init.signal = request.signal;
@@ -110,6 +125,19 @@ export class AnthropicProvider implements ModelProvider {
     const json = (await res.json().catch(() => null)) as { input_tokens?: unknown } | null;
     const n = json?.input_tokens;
     return typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : undefined;
+  }
+
+  /**
+   * What this request may inline. `images: false` reads NOTHING (a model with
+   * no vision must not cost a byte read); the refs still reach the model as
+   * text placeholders.
+   */
+  private async imageOptions(request: ChatRequest): Promise<ImageBuildOptions> {
+    const vision = this.config.images ?? true;
+    const inlined = selectInlineIds(request.messages);
+    return vision
+      ? { images: await resolveImages(request), vision, inlined }
+      : { images: new Map(), vision, inlined };
   }
 
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
@@ -124,7 +152,14 @@ export class AnthropicProvider implements ModelProvider {
     const init: RequestInit = {
       method: "POST",
       headers,
-      body: JSON.stringify(buildPayload(this.config.model, request, this.config.maxTokens)),
+      body: JSON.stringify(
+        buildPayload(
+          this.config.model,
+          request,
+          this.config.maxTokens,
+          await this.imageOptions(request),
+        ),
+      ),
     };
     if (request.signal) {
       init.signal = request.signal;
@@ -356,14 +391,24 @@ function parseEvent(data: string): AnthropicEvent | null {
  * in the harness history) becomes the top-level `system` field; assistant tool
  * calls become `tool_use` content blocks; runs of `role:"tool"` results become
  * single `user` messages of `tool_result` blocks.
+ *
+ * A user message that carries image refs becomes a content-block array with the
+ * images FIRST, then its text — never dropped, even when the text is empty (an
+ * image-only prompt). `options` is the resolved bytes (default: none, so every
+ * existing caller compiles and behaves exactly as before).
  */
 export function buildPayload(
   model: string,
   req: ChatRequest,
   defaultMaxTokens?: number,
+  options: ImageBuildOptions = NO_IMAGES,
 ): Record<string, unknown> {
   const systems: string[] = [];
   const messages: Record<string, unknown>[] = [];
+  // The user messages this build created FOR tool results: the ONLY ones a
+  // later tool result may merge into (a multimodal user turn must stay its own
+  // message — merging a `tool_result` block into images is a 400).
+  const toolTurns = new Set<Record<string, unknown>>();
   for (const message of req.messages) {
     if (message.role === "system") {
       if (message.content !== "") {
@@ -376,14 +421,14 @@ export function buildPayload(
       // belong in a single message (the harness emits one tool message per
       // call, in order).
       const prev = messages.at(-1);
-      if (prev && prev.role === "user" && Array.isArray(prev.content)) {
+      if (prev !== undefined && toolTurns.has(prev) && Array.isArray(prev.content)) {
         (prev.content as Record<string, unknown>[]).push({
           type: "tool_result",
           tool_use_id: message.toolCallId ?? "",
           content: message.content,
         });
       } else {
-        messages.push({
+        const turn: Record<string, unknown> = {
           role: "user",
           content: [
             {
@@ -392,26 +437,45 @@ export function buildPayload(
               content: message.content,
             },
           ],
-        });
+        };
+        toolTurns.add(turn);
+        messages.push(turn);
       }
+      continue;
+    }
+    // A user message with refs: images first, then its text (D10).
+    if (message.role === "user" && (message.attachments?.length ?? 0) > 0) {
+      const parts = userParts(message, options.images, options.vision, options.inlined);
+      messages.push({
+        role: "user",
+        content: parts.map((part) =>
+          part.kind === "image"
+            ? {
+                type: "image",
+                source: { type: "base64", media_type: part.mimeType, data: part.base64 },
+              }
+            : { type: "text", text: part.text },
+        ),
+      });
       continue;
     }
     // user / assistant. Plain text stays a string (the simplest valid form);
     // only a tool-bearing assistant turn needs content blocks (text + tool_use).
+    const stray = strayRefsText(message, options.vision, options.images);
     const calls = message.toolCalls ?? [];
     if (calls.length === 0) {
       // The API rejects empty content; the loop can persist an empty assistant
       // turn (a stalled round). Dropping it is safe: consecutive same-role
       // turns are merged by the API.
-      if (message.content === "") {
+      if (message.content === "" && stray === "") {
         continue;
       }
-      messages.push({ role: message.role, content: message.content });
+      messages.push({ role: message.role, content: `${message.content}${stray}` });
       continue;
     }
     const content: Record<string, unknown>[] = [];
-    if (message.content !== "") {
-      content.push({ type: "text", text: message.content });
+    if (message.content !== "" || stray !== "") {
+      content.push({ type: "text", text: `${message.content}${stray}` });
     }
     for (const call of calls) {
       content.push({ type: "tool_use", id: call.id, name: call.name, input: parseArgs(call) });

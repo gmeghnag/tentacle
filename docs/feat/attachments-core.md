@@ -470,7 +470,185 @@ Plan approved for execution.
 
 ## Execution
 
-*(empty — awaiting owner approval)*
+*— claude-sonnet-4-5, 2026-11-12*
+
+### Load-bearing check (re-run first, as the plan requires)
+
+**The SEVEN points are still the only ones — no eighth.** Proof, on this
+branch's base (27e8b44 + the doc commits):
+
+- `rg -n "role: m\.role|role: message\.role|content: m\.content|content: message\.content|role: msg\.role" packages --glob '!**/test/**' --glob '!**/node_modules/**'`
+  → the same hits the plan lists: `anthropic-provider.ts:383,392,409,419`,
+  `openai-provider.ts:293`, `proxy-model.ts:60-61`, plus the two documented
+  out-of-scope reads (`hooks.ts:719` — hook payload by contract;
+  `tools/src/skill.ts:105` — reads a tool result's *text*).
+- Two corroborating greps for a *new* rebuild site: every
+  `ChatMessageSchema`/`WireChatMessageSchema` use (`session.ts:51,80`,
+  `session.ts:642,808,991`, `session-log.ts:131,140`, `model.ts:19,33`,
+  `daemon-state-file.ts:260`) is a seed/log/state parse (a cast keeps the
+  object), and the only two field-by-field `.map((m) => ({` rebuilds under
+  `packages/*/src` are `hooks.ts:719` and `proxy-model.ts:59`.
+- `boundaries.ts` output is **identical to the Context** (*r0*–*r7*,
+  `PROTOCOL_VERSION = 22`, every boundary strips): the capability was still
+  missing, as the plan says.
+
+Conclusion: implement as written. No STOP was needed.
+
+### As-built, in the plan's order
+
+**1. Protocol.** New `packages/protocol/src/attachment.ts`:
+`ATTACHMENT_ID_RE`, `IMAGE_MIME_TYPES`, `MAX_ATTACHMENTS_PER_MESSAGE = 5`,
+`MAX_IMAGE_BYTES = 15 MiB` (owner override), `AttachmentRefSchema` (a free
+`image/*` string, never an enum), `AttachmentsSchema`, `isKnownImageType`.
+`attachments` added to `ChatMessageSchema` and `WireChatMessageSchema` (both
+still strip). `session-log.ts`: `LogMediaMessageEntrySchema` /
+`LogMediaReplaceEntrySchema` (both `critical: true`), added to
+`KnownLogEntrySchema` and `LOG_ENTRY_CRITICAL`; `projectEntry` folds them;
+helpers `hasAttachments`, `appendEntryType`, `replaceEntryType`,
+`isAppendEntry`, `appendEntryBody`/`replaceEntryBody`; `canonicalMessage`
+appends ONE element only when refs are present (a no-ref message hashes
+byte-identically — the literal and digest pins are unchanged).
+`PROTOCOL_VERSION = 23` with its comment line;
+`packages/protocol/schema/protocol.json` regenerated.
+
+**2. Core.** `model.ts`: `AttachmentRef` re-exported, `ChatMessage.attachments`,
+`ChatRequest.attachments` (`AttachmentSource`, non-serialisable like `signal`).
+New `core/src/attachments.ts`: `InvalidAttachmentError`,
+`checkAttachmentRefs`, `formatBytes`, `IMAGE_TOKEN_ESTIMATE = 1600`,
+`attachmentLabel`. `HeuristicTokenCounter.countMessages` charges 1600 per ref.
+
+**3. Providers.** New `src/images.ts`: `MAX_INLINE_IMAGES = 5`,
+`selectInlineIds`, `resolveImages` (sha256 + size verified, each distinct id
+read once, a throwing source propagates before `fetch`), `userParts` (images
+first), `strayRefsText`, the placeholder table. Both providers: an `images?`
+option (anthropic default **true**, openai default **false**), an
+`imageOptions()` that reads nothing when `vision === false`, image content
+blocks (`image`/`base64` vs `image_url` data URLs), anthropic's tool-merge
+guard now keyed on the turns it created (`toolTurns`), and `select-provider.ts`
+passing `images` through.
+
+**4. Agent.** `SendOptions.attachments`; `Session.send` checks the refs BEFORE
+anything is pushed (`InvalidAttachmentError`) and treats
+`text !== "" || refs.length > 0` as "a prompt was sent" (`userMessage: pushed`),
+so an image-only prompt starts a turn. `AgentConfig.attachments` carried on all
+three `ChatRequest` sites (the loop, the step-limit final request, the context
+count). `compact.ts` `renderMessage` appends ` [image: <label>]`.
+
+**5. Daemon.** `toWireRequest` spreads refs (never bytes, no `name` key when
+absent); the emitter uses `appendEntryBody`/`replaceEntryBody` in `commit` and
+`segment`; `replayFromBase` folds both media types; `session-log-file.ts`'s
+`laxEntry`, owes check and `segmentFromMessages` know them.
+
+**6. Client.** `session-log-reader.ts`: the owes check is `!isAppendEntry(e)`
+(was `e.type !== "message"`) and the seed-count switch counts `media_message`.
+
+No `cli`, no `tui`, no `config` change — as the plan says.
+
+### Drift from the Implementation (and why)
+
+1. **`ChatMessageSchema` became a shape factory** (`chatMessageShape()`, like
+   `envelopeShape()` in `session-log.ts`) plus a new named
+   `MessageWithAttachmentsSchema`. The plan's `.extend()` produced a schema the
+   committed-JSON-Schema exporter refuses ("non-name `$ref` (a reused anonymous
+   schema)"), because `extend` reuses `ChatMessage`'s field instances. Fresh
+   instances keep the export green; the wire shape is unchanged.
+2. **The entry bodies are built by two helpers with one documented cast each**
+   (`appendEntryBody`/`replaceEntryBody`), not by a `type:`-only helper. A
+   boolean cannot narrow `message` to the media schema's REQUIRED
+   `attachments`, and `packages/daemon` cannot see such a cast at its call
+   sites. The invariant (never `attachments: []`) holds by construction in
+   `Session.send`.
+3. **`strayRefsText(message, vision, images)`** takes no `inlined` set: a
+   non-user message's refs are never selected, so passing the request's
+   selection made them read "only the last 5 images are sent" instead of
+   "unavailable". The function marks its OWN ids as selected, so the true reason
+   is shown. Found by T8; fixed in the code, not the test.
+4. **`packages/providers/package.json` gained `@tentacle/protocol`**, and
+   `packages/client/package.json` gained `@tentacle/agent` (dev). `images.ts`
+   needs `isKnownImageType`/`MAX_IMAGE_BYTES`; core re-exports the caps so
+   `agent` did not need the dependency too.
+5. **The shared test fixture (`daemon/test/support/log-fixture.ts`)** now emits
+   the media types. Its `msg`/`replace` claimed to be "the real envelope"; a
+   fixture writing `message` for a ref-carrying message would have hidden the
+   very bug this task fixes.
+6. **T4's "file left untouched" is proved in two files**
+   (`attachments-log-file.test.ts` for the parser, `attachments-store.test.ts`
+   for the store's byte-identity), not one — the store path is what an older
+   build actually runs.
+7. **T13 lives in `packages/client/test/pod-attachments-e2e.test.ts`** (not
+   `daemon/test/integration.test.ts`, as the plan's table says): it needs a real
+   `RemoteClient`, and `@tentacle/daemon` cannot import `@tentacle/client` (the
+   dependency runs the other way).
+8. **`Worker`/`serve` persistence needed no change**: the store, the fork
+   (`segmentFromMessages`) and the reader all go through the two helpers, which
+   is why they were introduced.
+9. **The `name` control-character check is `\p{Cc}` on a plain regex**, not
+   `.refine()`. Biome flags a `\u0000-\u001f` range as a likely typo, and a
+   `.refine()` wraps the string in a `ZodEffects`, which the JSON Schema
+   exporter cannot represent (it failed the export — caught by the full gate,
+   not by a narrow test). `\p{Cc}` is the same predicate, stays a plain
+   `ZodString`, and exports.
+10. **`cli/test/connect.test.ts`'s skew message derives `PROTOCOL_VERSION`**
+    instead of hard-coding `22`: the assertion is about the WORDING, and the
+    bump had made it fail on a literal (same class as the other 22-pins the
+    plan does list, found only by the full suite).
+
+### Tests (new files unless noted)
+
+| # | File | Result |
+|---|---|---|
+| T1 | `protocol/test/attachment.test.ts` | 12 pass |
+| T2 | `protocol/test/session-log.test.ts` (+5 cases); the 22-pins in `wire-stop-reason`, `dsml-leak-kind`, `updates`, `subagent-panel`, `truncated-kind` and `daemon/test/version-mismatch.test.ts` moved to 23 | pass |
+| T3 | `daemon/test/attachments-log.test.ts` | 7 pass |
+| T4 | `daemon/test/attachments-log-file.test.ts` (5) + `daemon/test/attachments-store.test.ts` (4) | pass |
+| T5 | `client/test/session-log-reader-attachments.test.ts` | 4 pass |
+| T6 | `daemon/test/attachments-log.test.ts` (T6 block) | pass |
+| T7 | `client/test/model-stream-attachments.test.ts` | 5 pass |
+| T8 | `providers/test/anthropic-images.test.ts` | 17 pass |
+| T9 | `providers/test/openai-images.test.ts` | 9 pass |
+| T10 | `agent/test/session-attachments.test.ts` | 11 pass |
+| T11 | `agent/test/loop-attachments.test.ts` | 4 pass |
+| T12 | `core/test/token-counter.test.ts` (+2) + `agent/test/compact-attachments.test.ts` (4) | pass |
+| T13 | `client/test/pod-attachments-e2e.test.ts` | 1 pass |
+
+Failure modes covered, as the plan lists them: an older peer/pod refused by the
+version bump (the 23 pins + the existing `version-mismatch` suite); an older
+build refusing a session with media entries loudly and leaving the file
+byte-identical (T4 ×2); a model without vision (T8/T9 `images: false` and the
+openai default); an oversized image refused with a message naming it and the
+limit (T10); compaction/`context_reset` (T12); sub-agents (unchanged by design:
+a text prompt, `subagent.ts:434`); resume of a session with images (T4 store,
+T5 reader, T13).
+
+### Mutations (non-vacuity — each reverted; `diff` against a saved copy confirmed)
+
+| Mutation | Killed |
+|---|---|
+| `appendEntryBody`/`replaceEntryBody` always return the plain type | 8 fail: T3 ×3, T4 ×3, T4-store ×1, T13 |
+| the anthropic builder keeps only text parts | 5 fail: T8 image-first, image-only, default-vision, last-5, countTokens |
+| anthropic ignores `images: false` (`vision = true`) | 1 fail: T8 "no-vision placeholder and NOT ONE READ" |
+| openai default becomes `vision = true` | 3 fail: T9 no-vision ×3 |
+| `toWireRequest` drops `attachments` | 6 fail: T6 ×2, T7 ×3, T13 |
+| `resolveImages` skips the sha256 check | 2 fail: T8 and T9 sha-mismatch |
+| `Session.send` back to `text !== ""` | 1 fail: T10 image-only prompt |
+
+### Gate
+
+- `bunx tsc --noEmit` — clean.
+- `bun run lint` (`biome check .`) — clean, 909 files, no fixes applied (the
+  committed baseline: 0 errors, 0 warnings).
+- `bun test` — **7001 pass, 3 skip, 0 fail** across 511 files (~306 s). The 3
+  skips are the documented opt-ins (live-k8s, live-docker, the real-socket
+  keepalive).
+- `packages/protocol/schema/protocol.json` regenerated (`bun run schema:export`)
+  and the drift gate passes.
+- `apps/mobile` was **not** typechecked: `tsc -p apps/mobile` needs its own
+  install, which is absent in this worktree, so `bun run typecheck`'s second
+  half did not run. Unverified here; nothing in this change touches `apps/`.
+- **Unverified:** nothing reached the real provider HTTP endpoints — every
+  provider assertion is on the captured request body via an injected `fetch`.
+  A live end-to-end image send needs the producer (`2b`/`3b`), which this task
+  deliberately does not add.
 
 ## Review
 

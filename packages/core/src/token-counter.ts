@@ -6,6 +6,7 @@
  * small structural overhead per message. It rounds UP so the budget never
  * *underestimates* real usage, which would risk overflowing the context window.
  */
+import { IMAGE_TOKEN_ESTIMATE } from "./attachments.ts";
 import type { TokenCounter } from "./context.ts";
 import type { ChatMessage } from "./model.ts";
 
@@ -39,6 +40,9 @@ export class HeuristicTokenCounter implements TokenCounter {
     let total = 0;
     for (const message of messages) {
       total += this.perMessageOverhead + this.countText(message.content);
+      // An inline image is not text: it has no characters to divide. Charged per
+      // ref, so a budget that ignores images never underestimates the prompt.
+      total += (message.attachments?.length ?? 0) * IMAGE_TOKEN_ESTIMATE;
       if (message.toolCalls) {
         for (const call of message.toolCalls) {
           total += this.countText(call.name) + this.countText(call.arguments);

@@ -20,4 +20,8 @@
 // turn's asks as its own session's. Breaking on purpose — an older `serve` does
 // not refuse it, so a hand-crafted client could borrow that auto-accept for one
 // `once` approval; bumping makes a mixed pair fail cleanly at `initialize`.
-export const PROTOCOL_VERSION = 22 as const;
+// 23: image refs on messages (`attachments`) plus the CRITICAL log types
+// `media_message`/`media_replace` (docs/feat/attachments-core.md): an older
+// peer would strip the refs silently on the wire, and an older build would
+// half-load a log that holds them.
+export const PROTOCOL_VERSION = 23 as const;

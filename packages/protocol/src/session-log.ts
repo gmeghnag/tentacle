@@ -16,7 +16,10 @@
  * `truncate`; not critical = `title`, `checkpoint`, `turn_start`, `turn_end`,
  * `call_started`, `subagent_background`, `subagent_end`. Adding a critical type
  * (or changing a value) is decided with the owner AND bumps `PROTOCOL_VERSION`,
- * like a `mandatory` update class.
+ * like a `mandatory` update class. v2 (owner-approved 2026-11-12,
+ * docs/feat/attachments-core.md) adds two more CRITICAL types, `media_message`
+ * and `media_replace`: a message that carries image refs, which an older build
+ * would silently strip if it rode a plain `message`.
  *
  * The RESULT carries entries as the open envelope (`.passthrough()`): one
  * unknown type must not reject the whole read at the peer's result parse. The
@@ -36,6 +39,8 @@
 import { z } from "zod";
 import {
   ChatMessageSchema,
+  type MessageWithAttachments,
+  MessageWithAttachmentsSchema,
   SessionIdSchema,
   SessionTitleSchema,
   StopReasonSchema,
@@ -140,6 +145,29 @@ export const LogReplaceEntrySchema = z.object({
   message: ChatMessageSchema,
 });
 
+/**
+ * Append one message that CARRIES image refs (docs/feat/attachments-core.md).
+ * A separate, critical type on purpose: an older build knows `message` and
+ * would strip `attachments` — a silent half-load. An unknown critical type
+ * makes it refuse the whole log loudly, and only for sessions with images
+ * (a text-only session stays readable by every build, unlike a header bump).
+ */
+export const LogMediaMessageEntrySchema = z.object({
+  ...envelopeShape(),
+  ...critical(),
+  type: z.literal("media_message"),
+  message: MessageWithAttachmentsSchema,
+});
+
+/** `projection[index] = message`, where the message carries image refs (see above). */
+export const LogMediaReplaceEntrySchema = z.object({
+  ...envelopeShape(),
+  ...critical(),
+  type: z.literal("media_replace"),
+  index: z.number().int().nonnegative(),
+  message: MessageWithAttachmentsSchema,
+});
+
 /** `projection.length = length` (never grows it): the removal entry (F3). */
 export const LogTruncateEntrySchema = z.object({
   ...envelopeShape(),
@@ -221,7 +249,9 @@ export const LogSubagentEndEntrySchema = z.object({
 export const KnownLogEntrySchema = z.discriminatedUnion("type", [
   LogBaseEntrySchema,
   LogMessageEntrySchema,
+  LogMediaMessageEntrySchema,
   LogReplaceEntrySchema,
+  LogMediaReplaceEntrySchema,
   LogTruncateEntrySchema,
   LogTitleEntrySchema,
   LogCheckpointEntrySchema,
@@ -232,13 +262,19 @@ export const KnownLogEntrySchema = z.discriminatedUnion("type", [
   LogSubagentEndEntrySchema,
 ]);
 export type KnownLogEntry = z.infer<typeof KnownLogEntrySchema>;
+export type LogMessageEntry = z.infer<typeof LogMessageEntrySchema>;
+export type LogMediaMessageEntry = z.infer<typeof LogMediaMessageEntrySchema>;
+export type LogReplaceEntry = z.infer<typeof LogReplaceEntrySchema>;
+export type LogMediaReplaceEntry = z.infer<typeof LogMediaReplaceEntrySchema>;
 export type LogEntryType = KnownLogEntry["type"];
 
 /** The v1 critical table (owner-approved, binding — see the module comment). */
 export const LOG_ENTRY_CRITICAL: Readonly<Record<LogEntryType, boolean>> = {
   base: true,
   message: true,
+  media_message: true,
   replace: true,
+  media_replace: true,
   truncate: true,
   title: false,
   checkpoint: false,
@@ -248,6 +284,75 @@ export const LOG_ENTRY_CRITICAL: Readonly<Record<LogEntryType, boolean>> = {
   subagent_background: false,
   subagent_end: false,
 };
+
+/**
+ * True when a message carries image refs: the ONE test every emitter and fold
+ * uses to pick the media entry type. No other code compares to the literal
+ * `"message"`/`"replace"` for this decision.
+ */
+export function hasAttachments(m: object): boolean {
+  const attachments = (m as { readonly attachments?: readonly unknown[] }).attachments;
+  return attachments !== undefined && attachments.length > 0;
+}
+
+/** The append entry type for `m`: a message with refs rides `media_message`. */
+export function appendEntryType(m: object): "message" | "media_message" {
+  return hasAttachments(m) ? "media_message" : "message";
+}
+
+/** The replace entry type for `m`: a message with refs rides `media_replace`. */
+export function replaceEntryType(m: object): "replace" | "media_replace" {
+  return hasAttachments(m) ? "media_replace" : "replace";
+}
+
+/** A message as an emitter holds it: core's readonly one, or the wire's parsed one. */
+export type AppendableMessage = Readonly<Omit<WireChatMessage, "attachments" | "toolCalls">> & {
+  readonly toolCalls?: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly arguments: string;
+  }>;
+  readonly attachments?: ReadonlyArray<{
+    readonly id: string;
+    readonly mimeType: string;
+    readonly size: number;
+    readonly name?: string | undefined;
+  }>;
+};
+
+/** An entry without its envelope: what an emitter fills in with `seq`/`id`/`prev`/`ts`. */
+type WithoutEnvelope<T> = T extends unknown ? Omit<T, "seq" | "id" | "prev" | "ts"> : never;
+
+/** The body of an append entry (`message` or `media_message`). */
+export type EntryBody = WithoutEnvelope<LogMessageEntry | LogMediaMessageEntry>;
+/** The body of a replace entry (`replace` or `media_replace`). */
+export type ReplaceEntryBody = WithoutEnvelope<LogReplaceEntry | LogMediaReplaceEntry>;
+
+/**
+ * The append entry for `message` (a `media_message` when it carries refs).
+ * The one cast: a boolean cannot narrow the message's type to the media
+ * schema's REQUIRED `attachments`, and the invariant holds by construction —
+ * nothing in this build stores `attachments: []` (`Session.send` refuses it).
+ */
+export function appendEntryBody(m: AppendableMessage): EntryBody {
+  return hasAttachments(m)
+    ? { type: "media_message", critical: true, message: m as MessageWithAttachments }
+    : { type: "message", critical: true, message: m as WireChatMessage };
+}
+
+/** The replace entry for `message` (a `media_replace` when it carries refs). See above. */
+export function replaceEntryBody(index: number, m: AppendableMessage): ReplaceEntryBody {
+  return hasAttachments(m)
+    ? { type: "media_replace", critical: true, index, message: m as MessageWithAttachments }
+    : { type: "replace", critical: true, index, message: m as WireChatMessage };
+}
+
+/** True for the two entry types that APPEND a message to the projection. */
+export function isAppendEntry(
+  entry: KnownLogEntry,
+): entry is LogMessageEntry | LogMediaMessageEntry {
+  return entry.type === "message" || entry.type === "media_message";
+}
 
 /**
  * The projection step of ONE entry — the shared fold: the client's reader and
@@ -268,9 +373,11 @@ export function projectEntry<T>(
       list.length = 0;
       return null;
     case "message":
+    case "media_message":
       list.push(item(entry.message));
       return null;
     case "replace":
+    case "media_replace":
       if (entry.index >= list.length) {
         return `replace at ${entry.index} past the end (${list.length})`;
       }
@@ -322,18 +429,28 @@ export type LogResult = z.infer<typeof LogResultSchema>;
 export type Sha256 = (text: string) => string;
 
 /** A message as both ends hold it (the wire's parsed object, or core's readonly one). */
-export type DigestibleMessage = Readonly<Omit<WireChatMessage, "toolCalls">> & {
+export type DigestibleMessage = Readonly<Omit<WireChatMessage, "toolCalls" | "attachments">> & {
   readonly toolCalls?: readonly {
     readonly id: string;
     readonly name: string;
     readonly arguments: string;
   }[];
+  readonly attachments?: ReadonlyArray<{
+    readonly id: string;
+    readonly mimeType: string;
+    readonly size: number;
+    readonly name?: string | undefined;
+  }>;
 };
 
 /**
  * The fields of a message this protocol version knows, in a FIXED order (absent
  * → `null`): what both ends hash. A field a newer peer adds is outside it, so
  * it never trips a checkpoint; spread order or schema order give one result.
+ *
+ * `attachments` is appended ONLY when present, as ONE element: a message
+ * without refs must hash byte-identically to a pre-attachments build, so every
+ * checkpoint already on disk stays valid.
  */
 export function canonicalMessage(m: DigestibleMessage): string {
   const spill = m.spill
@@ -348,6 +465,9 @@ export function canonicalMessage(m: DigestibleMessage): string {
     m.durationMs ?? null,
     m.denialReply ?? null,
     m.contextUsage ? [m.contextUsage.used, m.contextUsage.window] : null,
+    ...(hasAttachments(m)
+      ? [m.attachments?.map((a) => [a.id, a.mimeType, a.size, a.name ?? null])]
+      : []),
   ]);
 }
 

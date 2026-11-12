@@ -9,6 +9,7 @@
  * mirror the core model types (minus the non-serialisable `AbortSignal`).
  */
 import { z } from "zod";
+import { AttachmentsSchema } from "./attachment.ts";
 
 export const ModelToolCallSchema = z.object({
   id: z.string(),
@@ -21,6 +22,8 @@ export const WireChatMessageSchema = z.object({
   content: z.string(),
   toolCalls: z.array(ModelToolCallSchema).optional(),
   toolCallId: z.string().optional(),
+  /** User messages only; refs, never bytes (docs/feat/attachments-core.md). */
+  attachments: AttachmentsSchema.optional(),
 });
 
 export const WireToolDefinitionSchema = z.object({
