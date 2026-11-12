@@ -7,6 +7,7 @@
  * actually sends an image ever reads them.
  */
 import {
+  ATTACHMENT_NAME_RE,
   type AttachmentRef,
   AttachmentsSchema,
   IMAGE_MIME_TYPES,
@@ -18,12 +19,12 @@ import {
 // the schema enforces them); re-exported here because an entry point that must
 // refuse a ref needs them and the packages doing that depend on core.
 export {
+  ATTACHMENT_NAME_RE,
   IMAGE_MIME_TYPES,
   type ImageMimeType,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_IMAGE_BYTES,
 } from "@tentacle/protocol";
-
 /** A ref an entry point refuses (too big, wrong type, duplicate id, malformed). */
 export class InvalidAttachmentError extends Error {
   constructor(message: string) {
@@ -34,6 +35,40 @@ export class InvalidAttachmentError extends Error {
 
 /** How many characters of a ref's name a placeholder shows at most. */
 const LABEL_NAME_MAX_CHARS = 80;
+
+/** Most characters a ref's `name` may carry (the wire's bound, `AttachmentRefSchema.name`). */
+export const ATTACHMENT_NAME_MAX_CHARS = 255;
+
+/**
+ * A ref's `name` from a raw file name: every character the wire REFUSES removed
+ * by the wire's OWN rule (`ATTACHMENT_NAME_RE`, the regex
+ * `AttachmentRefSchema.name` enforces — imported, never copied, so the entry
+ * point and the wire cannot drift), capped to the wire's length, and
+ * `undefined` when nothing usable is left.
+ *
+ * The failure this prevents: a name with a C1 control character (NEL `\u0085`, a
+ * CSI `\u009b`) passed a narrower local filter and then threw at
+ * `checkAttachmentRefs`, refusing the WHOLE message instead of one image.
+ */
+export function sanitizeAttachmentName(raw: string): string | undefined {
+  // `for…of` walks code POINTS, so neither the filter nor the cap can split a
+  // surrogate pair (a UTF-16 `slice` at 255 left half an emoji behind:
+  // `254×"a" + 😀` came out ending in a lone high surrogate). The budget is
+  // UTF-16 units, because that is what the wire's `.max(255)` counts — so a name
+  // of astral characters is cut SHORTER, never over the wire's bound.
+  let kept = "";
+  for (const char of raw) {
+    if (!ATTACHMENT_NAME_RE.test(char)) {
+      continue;
+    }
+    const extended = kept + char;
+    if (extended.length > ATTACHMENT_NAME_MAX_CHARS) {
+      break;
+    }
+    kept = extended;
+  }
+  return kept === "" ? undefined : kept;
+}
 
 /**
  * Refuse `refs` unless every one is sendable: the schema's bounds (at least one,
