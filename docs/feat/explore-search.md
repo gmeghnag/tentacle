@@ -1748,3 +1748,418 @@ Q3 is a real question but the smaller one; missing and needing the owner are
 **H7** (confinement of `path`), **H1/H2** (what a pattern the fallback cannot
 express does: translate, refuse, or retry literally) and **H6** (the `glob`
 field and files-with-matches).
+
+## Review
+
+**Verdict: REQUEST-CHANGES** — 3 HIGH, 3 MEDIUM. The design is strong and the
+gate is green (6927 pass / 0 fail / 3 opt-in skips; `bun run lint` clean;
+`bun run typecheck` clean in `packages` + `scripts`, its only errors being the
+pre-existing `apps/mobile`/`node_modules` ones — the diff touches no mobile
+file). What fails is the thing the doc's own Context calls the point: **a
+prompt-free discovery tool that cannot leave the workspace, and cannot present
+a truncated result as a complete one.** Both happen below, reproducibly, on the
+engine this build actually runs.
+
+Method: every finding is a scratchpad run under `.tentacle/tmp/explore-search/`
+against the **real** `search.ts` / `search-tool.ts` through a real `/bin/sh`
+and a real `ExecutionEnvironment`-shaped seam (AGENTS §1, §9). No production
+code or test was edited except four temporary mutations, each restored
+byte-identically (`shasum -a 256` recorded before/after).
+
+*— deepseek (tentacle --profile deepseek), 2026-11-12, fresh-context review*
+
+### Premise table (the Implementation's load-bearing `file:line` claims)
+
+| # | premise | verdict |
+|---|---|---|
+| 1 | `builtinTools` is `registerAll`'d into the PARENT registry (`wiring.ts:408`); a child's tools are filtered FROM it (`subagent.ts:367`) | **TRUE** — verified; `builtinTools` has no `search`, parent registry `get("search") === undefined` |
+| 2 | `search` reaches `explore` only, through `SubagentDeps.extraTools` (`subagent.ts:364-367`, `wiring.ts:547`) | **TRUE** — `subagentExtraTools("general"\|"analyze"\|"Plan"\|"EXPLORE"\|"")` all `[]` |
+| 3 | `pathConcurrency("read")` makes `readOnlyType("explore")` true (`subagent.ts:583`) | **FALSE as stated** — see M1; the assertion is true but vacuous |
+| 4 | `readFile` exists on the contract Design 3b uses (`execution.ts:46`) | **TRUE** |
+| 5 | `HostExecution` reports a kill as 124 (`builtins.ts:312`) | **TRUE** (`builtins.ts:262,313`; `host-execution.ts:266`) |
+| 6 | Q6 (a) is "refuse absolute paths and lexically escaping `..`, **symlinks resolved-or-refused**" | **FALSE in the code** — see **H1**; only the lexical half shipped |
+| 7 | `.gitignore`'s unexpressible rules are only ever put in a note, and F9's control-character strip protects the result (F9, `search.ts:322-326`) | **FALSE** — see **H2** |
+| 8 | a cut raw stream is never presented as complete (M3, `search.ts:536`) | **FALSE on the fallback** — see **H3** |
+
+### Findings
+
+---
+
+**H1 (HIGH) — `path` confinement is lexical only: a symlink walks `search`
+straight out of the workspace, prompt-free, on BOTH engines.**
+
+Owner Q6 (a) is binding and says *"symlinks resolved-or-refused"*
+(`docs/feat/explore-search.md:1241`), and the doc's own Q6 text names the exact
+hole: *"a symlink out of the workspace is the one remaining hole, closed by
+`realpath`-ing the argument when the env can (`pwd -P`), or by refusing a path
+that is a symlink (`[ -L ]`, already probed in F3's pre-check)"*
+(`:1155-1160`). `confinePath` (`search.ts:180-209`) does neither: it only
+rejects a leading `/` and a lexically-climbing `..`, then `./`-prefixes. The
+`[ -L ]` in the pre-check (`search.ts:332`) is there to make a **missing** path
+report status 3, not to refuse a symlink — a symlink passes it and is then
+walked.
+
+Reproduced (`.tentacle/tmp/explore-search/probe2.ts`, `probe41.ts`), with
+`ws/outlink -> …/outside` and `outside/secret.env` holding `SECRET_TOKEN=abc123`:
+
+```
+--- rg path="outlink" isError=false
+[search "SECRET_TOKEN" in ./outlink]  (engine=rg)
+./outlink/secret.env:1:SECRET_TOKEN=abc123
+--- grep path="outlink" isError=false
+[search "SECRET_TOKEN" in ./outlink]  (engine=grep)
+./outlink/secret.env:1:SECRET_TOKEN=abc123
+```
+
+Both engines: `find -H` follows the argument (by design, added for rg parity),
+and `rg` follows it too — and a symlink that is a **parent component**
+(`comp/link/secret.env`) is followed even without `-H`. The worst form is an
+entire foreign tree: with the task's **own** fixture, which builds
+`etc-link -> /etc` (`test/search-fixture.ts:57`) and never searches it,
+`probe45.ts` returns `./etc-link/apache2/httpd.conf:194:# httpd as root …` —
+`search {path: "etc-link", pattern: "root"}` reads `/etc`, `isError: false`,
+no prompt. This is exactly the `~/.ssh`/`AKIA` scenario Q6 (a) exists to
+refuse, and `permission: "none"` means nothing asks.
+
+Not hypothetically reachable: any repo with a symlinked vendor dir, a
+`node_modules` symlink, or a checkout that links to a sibling has the entry, and
+the model needs only to *name* it once — which is also the one case where
+`glob`/listing mode discovers it (`output_mode: "files"`).
+
+**Fix (one place, `search.ts`):** make `confinePath` do what Q6 (a) says. The
+pure module cannot `realpath`, so refuse the lexical symlink shapes it *can*
+see and let the shell do the resolution:
+1. In `confinePath`, keep the current rules and add: reject any path whose
+   resolved form the shell cannot verify — i.e. have the caller pass the
+   pre-check's verdict back. Concretely, emit **two** sentinels in the
+   pre-check (`search.ts:332`), which already runs before the walk:
+   `if [ -L $p ]; then printf 'TENTACLE_SYMLINK\n' >&2; exit 4; fi` (after the
+   `-L` existence test, so a missing path still says 3), and make
+   `parseSearchOutput`/`renderSearchResult` treat `symlink` as an **error**
+   naming the rule ("`path` is a symlink; a search may only walk the real
+   workspace"), never as `no matches`.
+2. Because `-H` follows an argument symlink on purpose, also add the
+   resolution-positive form the doc asks for where the env can: run the walk on
+   `[ -L p ] && p = "$(cd p && pwd -P)"` — refuse unless the resolved prefix
+   still starts with the workspace root. The workspace root is the one thing
+   the pure module lacks (`:393`); the cheapest honest shape is to prepend, in
+   the shell, `p=$(cd -- <path> 2>/dev/null && pwd -P) || exit 3` and then
+   compare against `$(pwd -P)` of the cwd: refuse if the resolved path does not
+   start with it.
+3. Whatever shape is chosen, **also** refuse a symlink encountered *inside* the
+   walk for the "discovery" modes if the concern is discovery — but note
+   neither engine descends an inner symlink, so (1) + (2) closes the hole.
+4. Ship the regression test the doc promises: the existing fixture's
+   `etc-link` is a ready-made outside target. `search {path: "etc-link"}` must
+   be `isError: true` and must contain no `/etc/` path, on both engines. Today
+   `grep -rn etc-link packages/tools/test packages/agent/test` finds **only the
+   builder** (`search-fixture.ts:57`) — the hole is not covered.
+
+---
+
+**H2 (HIGH) — engine stderr and `.gitignore` lines reach `content` with raw
+ESC/C0 characters: the F9 guarantee ("a pod's untrusted output") is not
+implemented.**
+
+F9 (`:873`) claims the result is not trusted: *"the tool strips C0/DEL control
+characters per line except `\t`"*. That strip (`stripControls`,
+`search.ts:494-502`) is applied in exactly one place — a hit's **text** and
+**path** (`search.ts:594,600`). Three other strings reach `content` unstripped:
+
+1. `parsed.parseError` — `parseError ??= text` (`search.ts:530`), the raw
+   stderr line, rendered verbatim (`search.ts:657`). No cap, no strip.
+2. `ignoreNote` — the unexpressible `.gitignore` names, joined verbatim
+   (`search.ts:322-326`).
+3. `firstEngineLine(stderr)` — the demotion note (`search-tool.ts:268-273`,
+   rendered at `:203-206`), i.e. raw rg stderr.
+
+(`parsed.noise` is the fourth stderr sink — it is collected
+(`search.ts:526,533`) and **never rendered at all**; see M2.)
+
+Reproduced. A workspace whose `.gitignore` holds an ANSI sequence:
+
+```
+[search "needle" in .]  (engine=grep)
+[note: 2 .gitignore rules (*.log, \x1b[2J\x1b[31mFAKE PROMPT> rm -rf /\x1b[0m) are not applied on this engine; results may differ]
+./a.txt:1:needle here
+```
+(`probe12.ts`; `has ESC: true | has CLEAR: true`)
+
+and a directory whose **name** carries one, on the retry path
+(`probe31.ts`):
+```
+… [note: ripgrep failed (rg: ./ent2/locked \x1b[2JFAKE PROMPT> : IO error …);
+   this result came from the POSIX fallback]
+has ESC: true
+```
+and through `parseError` (`probe30.ts`) — an unreadable directory named
+`x not balanced \x1b[2J\x1b[31mFAKE PROMPT> ` yields
+`pattern rejected by the engine: rg: ./ent/x not balanced \x1b[2J…`.
+
+Why it matters (§7, "a pod is not trusted"; F9 in this very doc): in a
+`run`/`attach` session the pod's filesystem names and the pod's `grep`/`rg` are
+pod-controlled. The result travels to the laptop's TUI and into the model's
+context. `eventToUpdate`/`toolResultContent` (`daemon/src/mapping.ts:177-196`,
+`:223-234`) pass `result.content` through untouched, and the TUI's non-spill
+tool body colourises each line and prints it with no `stripAnsi`
+(`tui/src/render-lines.ts:523-527`). Verified in the harness:
+
+```
+"⏺ Search in ."
+"⎿ [search \"needle\" in .]  (engine=grep)"
+"  [note: 2 .gitignore rules (*.log, \x1b[2J\x1b[31mFAKE PROMPT> rm -rf /\x1b[0m) are not applied …"
+```
+(`probe13.ts`) — `ESC[2J` clears the screen, `ESC[31m` recolours, and a pod can
+draw a fake prompt/banner inside the transcript. That is precisely the class
+F9 says is handled.
+
+**Fix:** make the strip **total at the boundary**, not per-field. One private
+`oneWireLine(s)` = `stripControls` + cut, and apply it inside
+`renderSearchResult` to *every* assembled piece (header already goes through
+`JSON.stringify`; add notes, the parse error, the demotion note). Concretely:
+- `search.ts:530` → `parseError ??= stripControls(text).slice(0, MAX_LINE)`;
+- `search.ts:324` → build `shown` from `unexpressible.slice(0,3).map(stripControls)`;
+- `search-tool.ts:203-206` → the note's `outcome.retry`/`firstEngineLine`
+  through the same strip (export it, or `renderSearchResult` takes the retry
+  reason instead of the tool concatenating a raw string);
+- then a test asserting `!content.includes("\u001b")` for each of the three
+  paths — **none exists today** (mutation 2 below shows the strip is only
+  pinned for `text`).
+
+Note also that `noise` (`search.ts:526,533`) is dead state: either render it
+stripped (an unreadable subtree is a fact the model should see — see **M2**)
+or drop the field.
+
+---
+
+**H3 (HIGH) — the raw cap is compared in UTF-16 units against a BYTE cap, so
+the fallback can hand back 1 of 41 matches, marked COMPLETE.**
+
+`rawCapped = raw.length >= RAW_CAP` (`search.ts:536`) compares a **JS string
+length** against `RAW_CAP = 262145`, which the doc is explicit is a **byte**
+cap (`search.ts:18`, `| head -c ${RAW_CAP}` at `:334`). `head -c` counts bytes;
+`raw.length` counts UTF-16 code units. For non-ASCII content bytes > units, so
+the truncation is invisible; for astral/CJK the factor is 2–3×.
+
+Reproduced on the **fallback** — the engine a pod without ripgrep actually runs
+(`probe38.ts`, a file with one long CJK line then 40 short matching lines):
+
+```
+=== grep
+   raw: bytes=262146 utf16len=87396 cap=262145
+   rawCapped=false  hits=1 of 41 matching lines
+   content mentions any truncation: false
+   rendered lines: 2
+```
+
+`head -c` cut the stream mid-line at byte 262145 (the first line alone is
+300 KB). The half line is dropped as unparseable (`parseLine → undefined` →
+counted as a **binary match**, `search.ts:551`), `rawCapped` is false because
+87396 < 262145, and the render emits
+`[search "needle" in ./cjk] (engine=grep)` + one hit — **no
+`INCOMPLETE` marker, no `first N` marker, no binary note**. The model is told
+this is the complete answer for a query with 41 matching lines. This is M3's
+own failure mode inverted, on the path that has no ripgrep — and the doc's
+"F1/F5" convergence claims are what it breaks.
+
+It bites the *documented* case too: `probe35.ts`/`probe37.ts` (40 pure-3-byte
+CJK lines) gives `hits=30/40`, `rawCapped=false`, and only the byte marker —
+i.e. `first N` truncated, presented as if the walk had ended.
+
+The byte path also earns a second, cheaper guard: `raw.lastIndexOf("\n")` on
+the cut stream is fine, but a cut mid-**multi-byte** character yields a lone
+surrogate (Bun decodes lossily), so the `.slice()` is on a lossy string.
+
+**Fix (one line, `search.ts:536`):**
+`const rawCapped = Buffer.byteLength(raw, "utf8") >= RAW_CAP;` — verified
+working: with the mutation applied, the same fixture gives
+`rawCapped=true hits=0/41 marker=true`. (`Buffer` is already used at
+`search.ts:679` for `MAX_BYTES`, so the dependency is in place.) Add the
+regression: a fixture whose matching lines are non-ASCII must render the
+INCOMPLETE marker on the **grep** engine — the existing T-S6 case
+(`search.test.ts:464`) builds ASCII only, so it cannot see this (mutation 3).
+
+Related, same family, **not** counted separately because it is bounded and
+says so: `raw.length >= RAW_CAP` also makes the fallback's *complete* output
+at exactly the cap indistinguishable — with the fix, `>=` on bytes is right, so
+this goes away.
+
+---
+
+**M1 (MEDIUM) — `readOnlyType` never looks at `search`: the read-class
+`concurrency` is untested, and a mutation to `exclusive` is green.**
+
+`readOnlyType` resolves each allow-listed name through **`deps.tools`** — the
+PARENT registry (`subagent.ts:583`) — and returns `true` when the lookup is
+`undefined`: `return tool === undefined || isReadClass(...)`. `search` is
+deliberately absent from the parent registry (drift 1). So for every built-in
+`explore` the name `search` short-circuits on `tool === undefined`, and the
+tool's `concurrency` is never consulted.
+
+Proof (`probe25.ts` + a mutation): with `search-tool.ts:159` mutated to
+`concurrency: () => "exclusive"`, **both** `packages/agent/test/explore-search.test.ts`
+and `packages/tools/test/search-tool.test.ts` pass (24 pass / 0 fail); the
+"read-class" test at `explore-search.test.ts:109` stays green because it is
+vacuously true. The doc states this as the reason the seam works
+(`:370-371`, `:771`, `:984`) — it is the design's own justification, and it is
+not what the code does. Consequence is latent today (the tool *is* read-class),
+but the seam's safety argument is unverified, and a future `extraTools`
+offering a writer tool would silently keep `explore` "read-only" for the round
+scheduler.
+
+**Fix:** resolve through the **merged** set the child actually gets — build the
+combined `parentTools + extra` list once (it already exists at
+`subagent.ts:365-367`) and consult it in `readOnlyType`, e.g. keep a
+`Map<string, Tool>` of what `extraTools` offers per type and use
+`deps.tools.get(name) ?? extraMap.get(name)`. Then the mutation above must go
+red. (Also cheap: `search.test.ts`'s claim that a `Tool` without `concurrency`
+is `exclusive` is right — the point is nobody checks.)
+
+---
+
+**M2 (MEDIUM) — an unreadable subtree, a missing `find`, and TWO measured grep
+pattern errors all render as `no matches` (or, on rg, as a *pattern* error).**
+
+The parser separates stderr into exactly three buckets: `TENTACLE_RC` /
+`TENTACLE_MISSING` (`:517-518`), `SIGPIPE_NOISE` (dropped), `REGEX_ERROR`
+(`:489-490`), everything else → `noise`, which is **never rendered**. So any
+engine failure that is neither a regex error nor a kill is silently swallowed:
+
+| trigger | measured stderr | rendered |
+|---|---|---|
+| `path` is an unreadable dir, grep | `find: ./unread/locked: Permission denied\nTENTACLE_RC=1` | `no matches`, `isError: false` (`probe16.ts`) |
+| same, rg | `rg: … Permission denied\nTENTACLE_RC=2` | `no matches`, `isError: false` |
+| `find` not on `PATH` (a minimal image) | `/bin/sh: find: command not found\nTENTACLE_RC=127` | `no matches`, `isError: false` (`probe14.ts`) |
+| grep `[[:foo:]]` / `[z-a]` / `needle)` — **file a GNU/BSD grep rejects** | `grep: invalid character class` / `invalid character range` / rc 1 | `no matches` (`probe24.ts`, `probe27.ts`) — whereas rg rejects the same patterns loudly |
+
+The last row is an **engine divergence the doc's parity goal forbids**: the same
+`[z-a]` is `pattern rejected by the engine` on rg and `no matches` on grep
+(`probe27.ts`), because what GNU/BSD print there matches none of
+`REGEX_ERROR`'s alternatives; and `find`'s 127 — a *broken image*, F2's own
+topic — looks like a successful empty search.
+
+**Fix:** (a) render `noise` (stripped per H2, capped) as a `[note: …]` line —
+a silent drop is exactly the "convergence that turns a loud failure into a
+silent wrong state" the brief warns about; (b) treat a carried status that is
+neither 0, 1, 3 nor `KILLED_EXIT_CODE` (so 2 and ≥ 4) as an **error** with the
+first stderr line, not as `no matches`; (c) add the two measured grep shapes
+(`invalid character class`, `invalid character range`) to `REGEX_ERROR`, which
+closes the `[z-a]`/`[[:foo:]]`/`needle)` divergence in one line each.
+
+---
+
+**M3 (MEDIUM) — the demotion cache pins the fallback for the whole session on a
+*path-shaped* rg failure: permission-denied is demoted, and the next search then
+refuses a pattern rg handles.**
+
+`isEngineFailure` (`search-tool.ts:258-266`) demotes whenever stderr matches
+`/^|\nrg[:\s]/` and the carried status is ≥ 2. A **per-path** failure — one
+unreadable directory anywhere under the walk — matches, so `demoteCache`
+(`search-tool.ts:83-85`) writes `engine: "grep"` for the env, permanently. F14
+is about "rg was chosen but broke (a wrapper on PATH, a broken binary)"; a
+permission error is not that, yet:
+
+```
+1) unreadable subtree -> isError=false | engine line: …(engine=grep) | demotion note: true
+2) after demotion, same session: isError=true | "... pattern rejected by the engine:
+   grep: braces not balanced  Retry with fixed_strings: true …"
+```
+(`probe28.ts`, pattern `needle{1` — **valid on rg**, refused by grep; see also
+`probe17.ts`, where the demotion is the only difference between two otherwise
+identical results.)
+
+Why MEDIUM not HIGH: the result is loud (`isError: true`) and offers
+`fixed_strings`. But the convergence is wrong in the "silent demotion"
+direction the doc's M4 was written to prevent: a transient **path** condition
+degrades the tool's *dialect* for the rest of the session, and the model
+cannot recover it (only `forgetProbedEngine`, a test seam, can). A pod that
+makes one directory unreadable gets the rest of the session on the fallback's
+pattern subset.
+
+**Fix:** distinguish the two. (a) Demote only on failures that are not
+per-path: exclude a stderr line naming the searched path (or exclude the
+`Permission denied`/`IO error`/`No such file` shapes) from
+`isEngineFailure`. (b) Or make demotion **scoped**: cache `grep` for this
+`path` only, or expire it after one call, since the honest predicate is "rg
+broke, not rg met a bad file". (c) `isEngineFailure` also demotes on
+`TENTACLE_RC` alone with a status from any source — pass the *engine's* status,
+not one that could have come from the shell's 127, to keep this narrow.
+
+### Non-vacuity: four mutations, each restored byte-identically
+
+`shasum -a 256` of `packages/tools/src/search.ts` before/after every mutation:
+`b6ac6e464ed46bed4d25c6d425a1c91e041b264c71e678af501a6b1d5b7b7989` (and
+`search-tool.ts` `eb5cad7f…` after the concurrency mutation).
+
+| # | mutation | result | verdict |
+|---|---|---|---|
+| 1 | `confinePath`'s `if (segments.length === 0)` → `if (false)` (the `..` refusal) | `search.test.ts` 1 fail, 77 pass (`an absolute path and a climbing .. are REFUSED`) | **non-vacuous** |
+| 2 | `isControlCode` → `return false` (all control-chars kept) | 2 fail (`a NUL / newline / CR … is refused`, `a tab survives, other C0 characters do not`) | **non-vacuous, but blind to H2**: both failures are about *input* refusal and a hit's *text*, not the notes/parse-error/noise that carry the ESC |
+| 3 | `rawCapped` → `false` | 1 fail (`a raw stream at the CAP gets the INCOMPLETE marker`) | non-vacuous **for ASCII**; blind to H3 — the test builds ASCII (`search.test.ts:464`), where `raw.length == bytes` |
+| 4 | `search-tool.ts` `concurrency: pathConcurrency("read")` → `() => "exclusive"` | **24 pass / 0 fail** across `explore-search.test.ts` + `search-tool.test.ts` | **VACUOUS** (= M1) |
+
+The correct fix for #3 changes the same expression, so it also keeps that test
+green; the missing coverage is a **non-ASCII** cap fixture.
+
+### Attacks tried — including the ones that found nothing
+
+| attack | result |
+|---|---|
+| Shell injection through the **pattern**: `$(touch pwned1)`, `` `touch pwned2` ``, `'; touch pwned3; '`, `"…"`, `it's`, `-e --version`, `a\`, `'$(touch pwned5)'`, both engines | **0 files created** (`probe42.ts`); `shq` holds. Pattern never reaches flag position (`-e '…'`, `find -name`'s operand) |
+| Shell injection through the **path** (spaces, quotes, `;`, `$(…)`) | holds — single-quoted, `./`-prefixed |
+| Leading `-` path / `-` glob | holds: `./-dash.ts` works on both; `rg --files -g '-a.ts'` and `find -name '-a.ts'` both list it (`probe33`) |
+| NUL / newline / CR in pattern, path, glob | **refused** at validate (mutation 2's red test) — correct |
+| A **pod filename** containing a newline, forging a hit line (`. /etc/passwd:1:root::0:0:forged`) | **it forges**: rendered as `./etc/passwd:1:root::0:0:forged:1:needle forged` on both engines (`probe47.ts`) — it cannot inject a *frame* (§7's real boundary is `wireLine`), and F9 does not claim path-sanitising beyond control chars, so I am **not** counting it as a finding: it is a `search`-output lie, and the fix is H2's strip if `\n` is added to it. Worth a note in F9's text. |
+| Pattern/path reaching `permission: "none"`'s decision | no input-dependent permission exists (`tool.ts` `permission` is a constant, as the doc says) — the confinement rule is the only gate, hence H1's severity |
+| `general` / main agent getting `search` | **correct**: not in `builtinTools`, parent registry `get("search") === undefined`, `subagentExtraTools` `[]` for every other name (`probe43.ts`) |
+| Cache poisoning: a timed-out/rejected/unparseable probe | **correct**: not cached (T-S3 a) — `probe9` re-probes |
+| Cache poisoning: a transient rg failure demoting permanently | **fails** — M3 |
+| `glob` dialect parity (`*.{ts,js}`, `[[:alpha:]].ts`, `[!x].ts`, `a\*b.ts`) | **diverges**: `*.{ts,js}` matches on rg, **nothing** on find; `[[:alpha:]].ts` matches on find, **nothing** on rg (`probe46.ts`). `!`/`[]`/escapes agree. Basename-only validation does not stop brace/`[[:class:]]` divergence → folded into M2's "surface, don't swallow" family; not counted separately because both are visible as `no matches` **and** the fix is the same one (render the engine note / validate the metachar subset) |
+| Truncation markers on the happy path (ASCII, both engines) | **correct**: `first N` + digest for count cuts, `INCOMPLETE` for the byte cap, byte cap keeps whole lines (`probe20`, `probe7`) — 3478 hits → 100 kept, marker present |
+| Error path unbounded? | bounded in one dimension: `parseError` is only the **first** matching stderr line (`:530`) but that line is **uncapped** — a 200 KiB line yields a 200 170-byte error (`probe29.ts`, vs `MAX_BYTES = 12000`). Folded into H2 (same fix site) |
+| One end-to-end trace through the real loop (`Agent` → registry → `search` → `sh`) | `toolUses: 2`, report produced (`probe44.ts`); the search ran on `path: "outlink"` and returned the outside file in the transcript |
+
+### What holds
+
+The pure/logic split (§7) is real and good: `search.ts` is I/O-free and the
+whole malformed/dialect/cap surface is testable without a subprocess; the
+schema delegates to the same `validateSearchInput` (one source of truth); the
+probe-cache discipline (cache only a definitive answer, no `ctx.signal`, own
+timeout) is right and pinned; the `-F`/`-E` and escaped-`-path` findings are
+genuine measurements turned into code; `shq` is correct under every injection
+tried; Q1 (c) is implemented exactly, in one place, with the parent-wins rule;
+the truncation markers are honest **where the accounting is honest** (ASCII);
+and the Execution's three drift notes are accurate and well-reasoned — drift 1
+(the `extraTools` seam) is the right shape and is what makes Q1 (c) work. The
+`explore` prompt change is a real, measured step saving.
+
+The doc itself is excellent *as a document*: it names the symlink hole (Q6) and
+the untrusted-output requirement (F9) explicitly, and each one is exactly where
+the code falls short of it. These are implementation gaps against a good plan,
+not a bad plan.
+
+### How the executor behaved
+
+Honest and unusually good about friction: the three drifts are disclosed with
+reasons, measured rather than argued; the M7/F9 corrections from the design
+review were applied (the `\t` exception is in); the red-before-green habit is
+visible in test names that cite the failure row they pin. Two behavioural
+weaknesses: (1) **the gate was trusted over the shape** — `bun test` green was
+treated as "Q6 (a) shipped" and "F9 shipped" and "M3 shipped", when each has a
+gap no test crosses, which is exactly what §9's "prove the exact property"
+warns about; (2) **premise 3 (`readOnlyType`) and the non-ASCII cap were
+asserted, not measured** — the doc's own justification for the seam is the one
+line mutation 4 shows is unverified. The self-review looked like a *reading*
+pass over the diff, not an *attack* on it (no symlink fixture, no non-ASCII
+fixture, no unreadable-directory fixture — though the fixture builder and the
+`Permission denied` path were both there to be used).
+
+**Same model family as the executor, different context.** The plan and the
+Execution are **DeepSeek**; this Review is `deepseek` (`tentacle --profile
+deepseek`) — a *fresh context only*, so shared blind spots survive both passes
+(exactly the case AGENTS §10 warns about). Two of the three HIGH findings are
+gaps against requirements the doc itself spells out (Q6's `realpath`,
+F9's control-character strip) which a same-family pass read past, so a
+**different-family** review (Fable, as on the plan) is worth having before
+merge; the doc declares `Blast: cross-module`, but H1/H2 touch the §7 "a pod is
+not trusted" invariant directly.
