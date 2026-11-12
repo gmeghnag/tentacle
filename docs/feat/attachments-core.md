@@ -458,6 +458,16 @@ Recommendation first in each.
    1/2a/2b**; everything else strictly sequential. (b) Strictly one branch at
    a time (AGENTS §10 as written).
 
+
+#### Owner answers (2026-11-12)
+
+- **Log on disk / `critical`:** (a) two NEW `critical: true` entry types `media_message` and `media_replace` (an older build refuses a session with images loudly; sessions without images stay readable by every build).
+- **Dropped path detection:** (a) a paste made only of image paths becomes attachments (chip), same at submit when the input holds only paths, plus explicit `/attach <path>`; a path inside a sentence stays text.
+- **Caps (owner override):** up to **15 MB per image**, NO client downscale for now (downscale stays sub-task 6, in TODO). Note for the executor: provider-side limits are lower than 15 MB for some providers (to verify) — a provider rejection must surface as a clear, specific error naming the image and the limit, never a generic failure; the per-message count and "last K images per request" keep the plan's recommendation (5 / 5).
+- **Q1** (a) bump `PROTOCOL_VERSION` to 23 in core (Mac and pods/serve updated together) · **Q5** (a) `model.images` flag, refuse before upload, placeholder as safety net · **Q6** (a) images do not survive compaction, the summary sees `[image: name]` · **Q7** (a) only 3a may run in parallel; the rest in sequence (owner-approved exception to AGENTS §10 for 3a).
+
+Plan approved for execution.
+
 ## Execution
 
 *(empty — awaiting owner approval)*
