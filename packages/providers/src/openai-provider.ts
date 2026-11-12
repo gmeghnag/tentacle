@@ -24,8 +24,7 @@ import {
   type ImageBuildOptions,
   MAX_INLINE_IMAGES,
   NO_IMAGES,
-  OPENAI_MAX_IMAGE_BYTES,
-  effectiveMaxImageBytes,
+  imageLimits,
   resolveImages,
   selectInlineIds,
   strayRefsText,
@@ -170,11 +169,8 @@ export class OpenAIProvider implements ModelProvider {
    * why no image was sent.
    */
   private async imageOptions(request: ChatRequest): Promise<ImageBuildOptions> {
-    const vision = this.config.images ?? false;
+    const { vision, maxBytes: maxImageBytes } = imageLimits("openai", this.config);
     const inlined = selectInlineIds(request.messages);
-    const maxImageBytes = effectiveMaxImageBytes(
-      this.config.maxImageBytes ?? OPENAI_MAX_IMAGE_BYTES,
-    );
     return vision
       ? {
           images: await resolveImages(request, MAX_INLINE_IMAGES, maxImageBytes),

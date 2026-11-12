@@ -4,6 +4,22 @@
     "AgentCapabilities": {
       "additionalProperties": true,
       "properties": {
+        "images": {
+          "additionalProperties": true,
+          "properties": {
+            "input": {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxBytes": {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": ["input"],
+          "type": "object"
+        },
         "permissions": {
           "default": true,
           "type": "boolean"
@@ -87,6 +103,20 @@
       "required": ["completionTokens", "promptTokens", "type"],
       "type": "object",
       "x-event-class": "display"
+    },
+    "AttachmentContent": {
+      "additionalProperties": true,
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/AttachmentRef"
+        },
+        "type": {
+          "const": "attachment",
+          "type": "string"
+        }
+      },
+      "required": ["ref", "type"],
+      "type": "object"
     },
     "AttachmentPutParams": {
       "additionalProperties": true,
@@ -2239,12 +2269,37 @@
       "required": ["id", "seq"],
       "type": "object"
     },
+    "PromptContentBlock": {
+      "discriminator": {
+        "mapping": {
+          "attachment": "#/$defs/AttachmentContent",
+          "image": "#/$defs/ImageContent",
+          "resource": "#/$defs/ResourceContent",
+          "text": "#/$defs/TextContent"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TextContent"
+        },
+        {
+          "$ref": "#/$defs/ImageContent"
+        },
+        {
+          "$ref": "#/$defs/ResourceContent"
+        },
+        {
+          "$ref": "#/$defs/AttachmentContent"
+        }
+      ]
+    },
     "PromptParams": {
       "additionalProperties": true,
       "properties": {
         "content": {
           "items": {
-            "$ref": "#/$defs/ContentBlock"
+            "$ref": "#/$defs/PromptContentBlock"
           },
           "minItems": 1,
           "type": "array"

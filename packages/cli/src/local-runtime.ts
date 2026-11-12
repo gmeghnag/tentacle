@@ -705,6 +705,12 @@ export interface LocalRuntimeDeps {
   readonly resume: SessionRecord | null;
   /** Local model the daemon can tunnel calls back to (pod reverse-tunnel, F4.d). */
   readonly modelProvider?: ModelProvider;
+  /**
+   * This LAPTOP's vision config (`imageLimits`), passed beside a `modelProvider`
+   * only: with a `client`-mode pod the bytes stay here, so the laptop's own cap
+   * is what an attach is held to (docs/feat/attachments-prompt.md D4/D5).
+   */
+  readonly localImages?: { readonly vision: boolean; readonly maxBytes: number };
   /** Serves the pod's TITLE calls; absent → refused (the laptop's `model.autoTitle` is off). */
   readonly titleModelProvider?: ModelProvider;
   /** The entries this laptop published to a pod; absent → every name is refused. */
@@ -765,6 +771,9 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     ...(deps.titleModelProvider ? { titleModelProvider: deps.titleModelProvider } : {}),
     ...(deps.namedModels ? { namedModels: deps.namedModels } : {}),
     ...(deps.sessionSettings ? { sessionSettings: deps.sessionSettings } : {}),
+    // Only beside a model provider: a client that serves no model cannot hold a
+    // pod's image bytes (docs/feat/attachments-prompt.md D5's table).
+    ...(deps.modelProvider && deps.localImages ? { localImages: deps.localImages } : {}),
     // `session/log` checkpoints (docs/feat/session-log.md): the daemon hashes the same way.
     sha256: (text) => createHash("sha256").update(text).digest("hex"),
   });

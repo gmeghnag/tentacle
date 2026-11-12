@@ -169,7 +169,14 @@ describe("a HOSTILE pod", () => {
         apiKey: "stolen",
         provider: "anthropic",
       });
-      expect(Object.keys(fast.seen[0] ?? {}).filter((k) => k !== "signal")).toEqual(["messages"]);
+      // `attachments` is the LAPTOP's own scoped source
+      // (docs/feat/attachments-prompt.md D6), added after the pod's fields are
+      // stripped: the pod still cannot supply one, and nothing else rides over.
+      const keys = Object.keys(fast.seen[0] ?? {}).filter(
+        (k) => k !== "signal" && k !== "attachments",
+      );
+      expect(keys).toEqual(["messages"]);
+      expect((fast.seen[0] as { attachments?: unknown }).attachments).toBeDefined();
       pod.client.close();
     });
 

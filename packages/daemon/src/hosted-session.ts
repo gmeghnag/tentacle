@@ -67,10 +67,14 @@ import {
   type SubagentBackgroundBody,
   type SubagentEndBody,
   anySignal,
+  attachmentLabel,
+  checkAttachmentRefs,
   daemonWakeGate,
+  formatBytes,
   wakeDue,
 } from "@tentacle/core";
 import {
+  type AttachmentRef,
   BLOCKING_UPDATE_TYPES,
   type HistoryCut,
   type JobOutputResult,
@@ -84,6 +88,7 @@ import {
   MAX_SESSION_TITLE,
   type PermissionOutcome,
   type PermissionRequestUpdate,
+  type PromptContentBlock,
   type PromptResult,
   type QueueState,
   type QueuedEntry,
@@ -109,10 +114,10 @@ import { AttachmentStore, UploadBudget } from "./attachment-store.ts";
 import type { ModelLink } from "./connection.ts";
 import { jobRows, sameJobs } from "./jobs-view.ts";
 import {
-  assertTextOnly,
   contentToText,
   eventToUpdate,
   frameFor,
+  splitPrompt,
   stopReasonToProtocol,
   toSessionSkills,
   toUpdateParams,
@@ -132,6 +137,7 @@ import {
 import { EMPTY_QUEUE, leftovers, queueView, returnCause, sameState } from "./queue-view.ts";
 import { SessionRing } from "./ring.ts";
 import { forkableMessages } from "./session-fork.ts";
+import type { ImagePolicy } from "./session-host.ts";
 import type { SessionSummary } from "./session-list.ts";
 import { type LogBase, SessionLog, replayFromBase } from "./session-log.ts";
 import type { SessionPersister } from "./session-persister.ts";
@@ -430,6 +436,12 @@ export class HostedSession {
   readonly uploads: AttachmentStore;
   /** What the factory did with `session/open.settings`; told to whoever attaches. */
   settingsReport: SessionSettingsReport | undefined;
+  /**
+   * What this daemon does with image prompts (`SessionHost.build` sets it, like
+   * `settingsReport`). Unset = off, so a `HostedSession` built by hand refuses
+   * images exactly as a daemon with no policy does.
+   */
+  imagesPolicy: ImagePolicy | undefined;
   /** The session's approvals (the factory's), handed to the next agent on a settings sync. */
   grants: SessionGrants | undefined;
   private readonly session: Session;
@@ -1912,6 +1924,56 @@ export class HostedSession {
   }
 
   /**
+   * Refuse a prompt's image refs BEFORE anything is recorded
+   * (docs/feat/attachments-prompt.md D3), synchronously — `prompt` acks in the
+   * same stretch, so a refusal leaves no turn, no log entry and nothing to
+   * retry. The reason is structured so a client branches without matching text.
+   *
+   * With a `store` policy the daemon holds the bytes, so it can check them;
+   * with `client` it CANNOT (the laptop has them, upload Owner Q2) and the
+   * laptop's own gate decides — exactly the rule "whoever runs the provider
+   * holds the bytes".
+   */
+  private checkPromptImages(refs: readonly AttachmentRef[]): void {
+    const policy = this.imagesPolicy;
+    if (!policy) {
+      throw new RpcError(
+        DomainErrorCode.AttachmentRefused,
+        "this session's model does not take images (model.images is off, or the daemon predates images)",
+        { reason: "images_off" },
+      );
+    }
+    try {
+      checkAttachmentRefs(refs);
+    } catch (error) {
+      throw new RpcError(
+        DomainErrorCode.AttachmentRefused,
+        error instanceof Error ? error.message : String(error),
+        { reason: "invalid_ref" },
+      );
+    }
+    if (policy.source !== "store") {
+      return;
+    }
+    for (const ref of refs) {
+      if (ref.size > policy.maxBytes) {
+        throw new RpcError(
+          DomainErrorCode.AttachmentRefused,
+          `${attachmentLabel(ref)}: ${formatBytes(ref.size)} is over the ${formatBytes(policy.maxBytes)} limit`,
+          { reason: "invalid_ref" },
+        );
+      }
+      if (!this.uploads.holds(ref)) {
+        throw new RpcError(
+          DomainErrorCode.AttachmentRefused,
+          `image ${attachmentLabel(ref)} is not on this daemon — upload it again`,
+          { reason: "not_uploaded" },
+        );
+      }
+    }
+  }
+
+  /**
    * Accept a turn and ack at once; the turn itself runs in `drive` and ends
    * with a `turn_end` update. Synchronous up to the ack ON PURPOSE: two prompts
    * arriving together must see the first one's controller (an `await` before it
@@ -1923,7 +1985,7 @@ export class HostedSession {
    */
   prompt(
     turnId: string,
-    content: Parameters<typeof contentToText>[0],
+    content: readonly PromptContentBlock[],
     skill?: string,
     askHooksTrust?: AskHooksTrust,
   ): PromptResult {
@@ -1933,8 +1995,10 @@ export class HostedSession {
       return known.end ? { turnId, ended: known.end } : { turnId };
     }
     // Before the busy check: a rejected prompt starts and records nothing.
-    assertTextOnly(content);
-    const text = contentToText(content);
+    const { text, refs } = splitPrompt(content);
+    if (refs.length > 0) {
+      this.checkPromptImages(refs);
+    }
     if (skill !== undefined && (text === "" || !this.session.canActivateSkill(skill))) {
       throw new RpcError(
         JsonRpcErrorCode.InvalidParams,
@@ -1968,6 +2032,7 @@ export class HostedSession {
       turnId,
       this.session.send(text, controller.signal, {
         ...(skill !== undefined ? { skill } : {}),
+        ...(refs.length > 0 ? { attachments: refs } : {}),
         ...(askHooksTrust !== undefined ? { askHooksTrust } : {}),
         beforeRun: this.beforeRunFn,
       }),

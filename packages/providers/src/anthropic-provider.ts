@@ -28,11 +28,10 @@ import type {
 } from "@tentacle/core";
 import { wireArguments } from "@tentacle/core";
 import {
-  ANTHROPIC_MAX_IMAGE_BYTES,
   type ImageBuildOptions,
   MAX_INLINE_IMAGES,
   NO_IMAGES,
-  effectiveMaxImageBytes,
+  imageLimits,
   resolveImages,
   selectInlineIds,
   strayRefsText,
@@ -143,11 +142,8 @@ export class AnthropicProvider implements ModelProvider {
    * text placeholders.
    */
   private async imageOptions(request: ChatRequest): Promise<ImageBuildOptions> {
-    const vision = this.config.images ?? true;
+    const { vision, maxBytes: maxImageBytes } = imageLimits("anthropic", this.config);
     const inlined = selectInlineIds(request.messages);
-    const maxImageBytes = effectiveMaxImageBytes(
-      this.config.maxImageBytes ?? ANTHROPIC_MAX_IMAGE_BYTES,
-    );
     return vision
       ? {
           images: await resolveImages(request, MAX_INLINE_IMAGES, maxImageBytes),

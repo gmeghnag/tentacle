@@ -51,6 +51,13 @@ export const ModelConfigSchema = z
      * review H1). Unset: the provider's documented default.
      */
     maxImageBytes: z.number().int().positive().optional(),
+    /**
+     * Whether this model takes images at all (docs/feat/attachments-prompt.md D4).
+     * Unset keeps the provider's default (anthropic true, an OpenAI-compatible
+     * endpoint false); `true` opts an openai endpoint in, `false` makes even
+     * anthropic refuse image prompts. The one truth is `imageLimits()`.
+     */
+    images: z.boolean().optional(),
   })
   .strict();
 

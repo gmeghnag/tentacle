@@ -16,14 +16,17 @@
  * `messagePortChannel` ignores non-string frames, so they don't reach the RPC.
  */
 import type { TentacleConfig } from "@tentacle/config";
-import type { Tool } from "@tentacle/core";
+import type { AttachmentSource, Tool } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
 import { setGroupForwarder } from "@tentacle/exec";
 import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import type { ToolRegistry } from "@tentacle/tools";
 import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
+import { daemonImagePolicy } from "./image-policy.ts";
 import {
+  type SkillScan,
+  type WiredAgent,
   buildAgent,
   createSkillScan,
   sweepToolOutput,
@@ -31,6 +34,30 @@ import {
   workerSessionBuild,
 } from "./wiring.ts";
 import type { WorkerBootstrap } from "./worker-bootstrap.ts";
+
+/**
+ * The worker's per-session wiring, exported so a test can drive it with an
+ * injected `createProvider` (docs/feat/attachments-prompt.md T10): the ONE
+ * place that shows this host hands the session's image store to its agent.
+ * Extracted from the `createAgent` body — no behaviour change.
+ */
+export function workerAgentFactory(
+  config: TentacleConfig,
+  ctx: { readonly attachments?: AttachmentSource },
+  options: { readonly skillScan?: SkillScan } = {},
+): WiredAgent {
+  return buildAgent(
+    config,
+    // Hook failures go to the daemon error log, never the terminal Ink owns.
+    {
+      log: (line) => logDaemonError(config.configDir, line),
+      ...(options.skillScan ? { skillScan: options.skillScan } : {}),
+      // The session's store: this host runs the laptop's own model in this
+      // process, so it holds an image's bytes (docs/feat/attachments-prompt.md D4).
+      ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
+    },
+  );
+}
 
 // `globalThis` in a worker exposes postMessage/addEventListener at runtime; the
 // non-DOM TS lib doesn't type them, so go through the endpoint shape.
@@ -102,6 +129,9 @@ port.addEventListener("message", (event: { data: unknown }) => {
   // not created yet (docs/feat/skills-hot-reload.md).
   const skillScan = createSkillScan(config);
   sweepToolOutput(config);
+  // This worker runs the laptop's own model in this process, so it holds an
+  // image's bytes (docs/feat/attachments-prompt.md D4). `undefined` = off.
+  const images = daemonImagePolicy(config);
   const host = new SessionHost({
     defaultCwd: config.cwd,
     onSessionDeleted: (id) => void toolOutputStore().removeSession(id),
@@ -112,6 +142,9 @@ port.addEventListener("message", (event: { data: unknown }) => {
     // A fresh session's context count lacks the MCP tools until they connect:
     // shown as an estimate (`~`) till then (docs/feat/tui-target-badge.md).
     toolsReady: () => mcpReady,
+    // The worker runs its own config's model on this machine, so it holds the
+    // bytes (docs/feat/attachments-prompt.md D4). `undefined` = images off.
+    ...(images ? { images } : {}),
     // A failed turn now ends in the stream (`turn_end.error`), not as a handler
     // throw: same policy as below — the real message to this LOCAL client, the
     // full error (with stack) to the daemon error log.
@@ -119,12 +152,8 @@ port.addEventListener("message", (event: { data: unknown }) => {
     onTurnError: (error) => {
       logDaemonError(config.configDir, error);
     },
-    createAgent: (cwd) => {
-      const wired = buildAgent(
-        { ...config, cwd },
-        // Hook failures go to the daemon error log, never the terminal Ink owns.
-        { log: (line) => logDaemonError(config.configDir, line), skillScan },
-      );
+    createAgent: (cwd, ctx) => {
+      const wired = workerAgentFactory(config, ctx, { skillScan });
       register(wired.tools);
       // If MCP hasn't resolved yet, register into this registry once it does.
       if (!mcpReady) {

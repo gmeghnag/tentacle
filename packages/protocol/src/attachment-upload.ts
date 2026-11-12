@@ -54,5 +54,19 @@ export const AttachmentPutResultSchema = z.object({
 });
 export type AttachmentPutResult = z.infer<typeof AttachmentPutResultSchema>;
 
-/** Why the daemon refused a `put` (`AttachmentRefused`'s `data.reason`). */
-export type AttachmentRefusedReason = "too_large" | "store_full" | "hash_mismatch" | "bad_chunk";
+/**
+ * Why the daemon refused a `put` (`AttachmentRefused`'s `data.reason`) — or a
+ * prompt's image ref (docs/feat/attachments-prompt.md D3), so a client branches
+ * on a reason and never on text: `images_off` (this session's model takes no
+ * images), `invalid_ref` (malformed, over the cap, unsupported type) and
+ * `not_uploaded` (the daemon holds no complete blob for that id — upload it
+ * again). A TS type only, so adding a reason is additive on the wire.
+ */
+export type AttachmentRefusedReason =
+  | "too_large"
+  | "store_full"
+  | "hash_mismatch"
+  | "bad_chunk"
+  | "images_off"
+  | "invalid_ref"
+  | "not_uploaded";

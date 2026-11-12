@@ -19,15 +19,19 @@
  */
 import {
   type AnswerLostCause,
+  type AttachmentRef,
   type ChatMessage,
   type ChatRequest,
   DISMISSED,
   type ModelProvider,
   type PermissionBroker,
+  checkAttachmentRefs,
   countTokensBounded,
+  formatBytes,
 } from "@tentacle/core";
 import {
   ATTACHMENT_CHUNK_BYTES,
+  type AgentCapabilities,
   type AttachmentPutResult,
   type ClearResult,
   type ClientInfo,
@@ -88,7 +92,9 @@ import {
   encodeBase64,
 } from "@tentacle/transport";
 import { ATTACH_TIMEOUT_MS, UPLOAD_RECONNECT_MS } from "./constants.ts";
+import { type ImageInput, imageInput } from "./image-input.ts";
 import { boundJobOutput, boundJobs, jobsFromSnapshot } from "./jobs.ts";
+import { LaptopImages } from "./laptop-images.ts";
 import {
   ChannelError,
   LIVENESS_MS,
@@ -161,6 +167,20 @@ export interface UploadOptions {
   readonly signal?: AbortSignal;
   /** Called as the daemon confirms bytes: `(have, size)`. */
   readonly onProgress?: (have: number, size: number) => void;
+}
+
+/**
+ * This client may not send an image to this daemon at all
+ * (docs/feat/attachments-prompt.md D5): no `images` capability, a `client` mode
+ * on a laptop that serves no model, its model without vision, or an `input`
+ * this build does not know. Raised BEFORE any frame — nothing is uploaded, and
+ * the message is the sentence a user reads.
+ */
+export class ImagesUnavailableError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "ImagesUnavailableError";
+  }
 }
 
 /** A `once` session command whose link dropped before the daemon answered (its outcome is unknown). */
@@ -411,6 +431,14 @@ export interface RemoteClientOptions {
    * package stays node-free.
    */
   readonly sha256Bytes?: (bytes: Uint8Array) => string;
+  /**
+   * This LAPTOP's own vision config, from `imageLimits()`: it decides whether a
+   * `client`-mode daemon may send images through this laptop at all, and the
+   * cap it advertises (docs/feat/attachments-prompt.md D5). Only meaningful
+   * beside a `modelProvider` (the client that serves the model); absent → this
+   * client takes no images even when the daemon says `client`.
+   */
+  readonly localImages?: { readonly vision: boolean; readonly maxBytes: number };
 }
 
 /** A sha-256 hex hasher from Bun's runtime, when there is one. */
@@ -734,6 +762,20 @@ export class RemoteClient {
   private readonly sha256: Sha256 | undefined;
   /** SHA-256 over binary bytes (an image's id); Bun's, unless injected. */
   private readonly sha256Bytes: ((bytes: Uint8Array) => string) | undefined;
+  /** This laptop's own vision config (see the option): the `client`-mode gate. */
+  private readonly localImages?: { readonly vision: boolean; readonly maxBytes: number };
+  /**
+   * The laptop's own image bytes (`docs/feat/attachments-prompt.md` D5/D6):
+   * what a pod's refs resolve against. Always present, so a caller needs no
+   * null check; empty until `attachImage` adds one.
+   */
+  readonly images = new LaptopImages();
+  /**
+   * The LAST handshake's `agentCapabilities` (re-read on every reconnect: a
+   * replaced pod binary may change what its daemon does with images).
+   * `undefined` until the first handshake answers.
+   */
+  private capabilities: AgentCapabilities | undefined;
 
   constructor(
     channel: DuplexChannel,
@@ -770,6 +812,9 @@ export class RemoteClient {
     this.carried = options.sessionSettings ? { settings: options.sessionSettings } : {};
     this.sha256 = options.sha256 ?? bunSha256();
     this.sha256Bytes = options.sha256Bytes ?? bunSha256Bytes();
+    if (options.localImages) {
+      this.localImages = options.localImages;
+    }
     this.link = { ...initialLink, upSince: this.clock.now() };
     this.lastInboundAt = this.clock.now();
     this.peer = this.makePeer(channel, 0);
@@ -1587,6 +1632,97 @@ export class RemoteClient {
   }
 
   /**
+   * What this client may do with an image on THIS daemon right now
+   * (docs/feat/attachments-prompt.md D5): the one entry point 3b calls before
+   * it offers `/attach`. Pure — it reads the last handshake, nothing else.
+   */
+  imageInput(): ImageInput {
+    return imageInput(this.capabilities?.images, {
+      servesModel: this.modelProvider !== undefined,
+      ...(this.localImages?.vision !== undefined ? { vision: this.localImages.vision } : {}),
+      ...(this.localImages?.maxBytes !== undefined ? { maxBytes: this.localImages.maxBytes } : {}),
+    });
+  }
+
+  /**
+   * Attach one image to a session (docs/feat/attachments-prompt.md D5): the
+   * ref 3b then names in a prompt, or refuses to send.
+   *
+   * Two paths, decided by `imageInput()` — never guessed:
+   * - `upload` (the daemon runs the model): the bytes go by `attachment/put`,
+   *   and the ref is built from THIS laptop's bytes, never from a daemon answer;
+   * - `laptop` (this laptop runs the model for a pod): the bytes stay here, in
+   *   `this.images`, and no frame is sent at all (upload Owner Q2).
+   *
+   * Everything checkable without a daemon is checked first and sends zero
+   * frames: the mode (`ImagesUnavailableError`), the size against the mode's cap
+   * and `MAX_IMAGE_BYTES`, and the ref's own validity (`checkAttachmentRefs`).
+   */
+  async attachImage(
+    sessionId: string,
+    bytes: Uint8Array,
+    meta: { readonly mimeType: string; readonly name?: string },
+    options: UploadOptions = {},
+  ): Promise<AttachmentRef> {
+    const mode = this.imageInput();
+    if (mode.kind === "off") {
+      throw new ImagesUnavailableError(mode.reason);
+    }
+    const size = bytes.length;
+    if (size === 0) {
+      throw new RangeError("an image has no bytes to attach");
+    }
+    if (size > mode.maxBytes) {
+      throw new RangeError(
+        `image ${meta.name ?? meta.mimeType} is ${formatBytes(size)}, over the ${formatBytes(mode.maxBytes)} limit`,
+      );
+    }
+    const label = meta.name !== undefined ? { name: meta.name } : {};
+    const hasher = this.sha256Bytes;
+    if (hasher === undefined) {
+      throw new Error(
+        "attachImage needs a binary sha-256 hasher (RemoteClientOptions.sha256Bytes)",
+      );
+    }
+    // The ref is built from THIS laptop's bytes (never a daemon answer), and
+    // validated BEFORE any frame goes out: an unsupported type or a bad name
+    // must not cost an upload the daemon would then keep.
+    const id = hasher(bytes);
+    const ref: AttachmentRef = { id, mimeType: meta.mimeType, size, ...label };
+    checkAttachmentRefs([ref]);
+    if (mode.kind === "upload") {
+      await this.upload(sessionId, bytes, options);
+      return ref;
+    }
+    // Held BEFORE the ref can be named: a prompt that raced ahead of this would
+    // otherwise reach the provider as a placeholder for a real image.
+    this.images.add(id, bytes);
+    options.onProgress?.(size, size);
+    return ref;
+  }
+
+  /**
+   * A pod's `model/stream*` request, plus THIS laptop's own byte source
+   * (docs/feat/attachments-prompt.md D6 — the AGENTS §7 rule, "a pod is not
+   * trusted").
+   *
+   * The pod chooses only which refs to name. This laptop reads only ids IT
+   * added itself, in this process, through `attachImage`; the provider then
+   * re-verifies each byte string's sha256 and size, so a pod that names a
+   * stranger's id (or the right id at the wrong size) gets `null` → a visible
+   * placeholder, never bytes. No laptop file is ever opened: `LaptopImages`
+   * holds bytes, not paths. And the bytes go only to this laptop's own
+   * provider — `model/stream*` returns model EVENTS, never bytes.
+   *
+   * ONE helper, used at ALL THREE serving casts (`model/stream`,
+   * `model/streamChunked`, `model/countTokens`): wiring two of them would
+   * silently turn the third path's images into placeholders.
+   */
+  private laptopRequest(request: ChatRequest): ChatRequest {
+    return { ...request, attachments: this.images };
+  }
+
+  /**
    * Issue chunk after chunk until the window says done, `UPLOAD_WINDOW` at a
    * time. A failing put is captured (never an unhandled rejection) and rethrown
    * here, so the caller's drop/refusal handling sees it once.
@@ -1873,11 +2009,21 @@ export class RemoteClient {
     prompt: string,
     onSent?: () => void,
     skill?: string,
+    attachments?: readonly AttachmentRef[],
   ): Promise<PromptResult> {
+    // An image-only prompt is `[attachment, …]` with no text block at all: a
+    // `{type:"text",text:""}` would read as an empty prompt daemon-side.
+    const content =
+      attachments !== undefined && attachments.length > 0
+        ? [
+            ...(prompt !== "" ? [{ type: "text" as const, text: prompt }] : []),
+            ...attachments.map((ref) => ({ type: "attachment" as const, ref })),
+          ]
+        : [text(prompt)];
     return this.sessionCall(
       sessionId,
       Method.Prompt,
-      { sessionId, turnId, content: [text(prompt)], ...(skill !== undefined ? { skill } : {}) },
+      { sessionId, turnId, content, ...(skill !== undefined ? { skill } : {}) },
       "keyed",
       onSent,
     ).then((result) => result as PromptResult);
@@ -2115,7 +2261,13 @@ export class RemoteClient {
       clientCapabilities: { streaming: true, updates: [...KNOWN_UPDATE_TYPES] },
       ...(this.clientInfo ? { clientInfo: this.clientInfo } : {}),
     }).then(
-      (raw) => raw as InitializeResult,
+      (raw) => {
+        const result = raw as InitializeResult;
+        // Re-read on EVERY handshake: a replaced pod binary may take images
+        // differently now, and the client must follow the daemon it has.
+        this.capabilities = result.agentCapabilities;
+        return result;
+      },
       // A version skew says who must update — at start and on every reconnect.
       (error: unknown) => {
         throw explainVersionMismatch(error, this.daemonKind) ?? error;
@@ -3021,7 +3173,7 @@ export class RemoteClient {
     // endpoint never holds the pod's request, nor `servingCall`, nor a quit.
     const tokens = await countTokensBounded(
       model,
-      params.request as unknown as ChatRequest,
+      this.laptopRequest(params.request as unknown as ChatRequest),
       signal,
     );
     return tokens === undefined ? {} : { tokens };
@@ -3039,7 +3191,9 @@ export class RemoteClient {
     const model = this.servingModel(Method.ModelStream, params.purpose, params.model);
     const events: WireStreamEvent[] = [];
     try {
-      for await (const event of model.stream(params.request as unknown as ChatRequest)) {
+      for await (const event of model.stream(
+        this.laptopRequest(params.request as unknown as ChatRequest),
+      )) {
         events.push(event as WireStreamEvent);
       }
     } catch (error) {
@@ -3250,7 +3404,7 @@ export class RemoteClient {
     };
     try {
       for await (const event of model.stream({
-        ...(params.request as unknown as ChatRequest),
+        ...this.laptopRequest(params.request as unknown as ChatRequest),
         ...(signal ? { signal } : {}),
       })) {
         const wire = event as WireStreamEvent;

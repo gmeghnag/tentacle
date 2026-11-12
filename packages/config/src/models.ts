@@ -25,6 +25,8 @@ export interface MainModel {
   readonly maxTokens?: number;
   /** `model.maxImageBytes`, inherited like `maxTokens` when the entry sets none. */
   readonly maxImageBytes?: number;
+  /** `model.images`, inherited like `maxTokens` when the entry sets none. */
+  readonly images?: boolean;
   /** The main key when known without a command (env or file); a command's is filled in by load. */
   readonly apiKey?: string;
 }
@@ -40,6 +42,8 @@ export interface ResolvedModel {
   readonly maxTokens?: number;
   /** `model.maxImageBytes`: raw bytes one image may have on this model's wire. */
   readonly maxImageBytes?: number;
+  /** `model.images`: whether this model takes images (`imageLimits` reads it). */
+  readonly images?: boolean;
   readonly description?: string;
   /** Where the key comes from — never the key. `inherited` = the main model's (same endpoint). */
   readonly apiKeySource: "inherited" | "file" | "command" | "none";
@@ -63,12 +67,14 @@ export function resolveModelEntry(main: MainModel, entry: ModelEntryConfig): Res
   const ownsConnection = CONNECTION_KEYS.some((key) => entry[key] !== undefined);
   const maxTokens = entry.maxTokens ?? main.maxTokens;
   const maxImageBytes = entry.maxImageBytes ?? main.maxImageBytes;
+  const images = entry.images ?? main.images;
   const rest = {
     model: entry.model ?? main.model,
     ...(entry.model === undefined ? { modelInherited: true as const } : {}),
     contextWindow: entry.contextWindow ?? main.contextWindow,
     ...(maxTokens !== undefined ? { maxTokens } : {}),
     ...(maxImageBytes !== undefined ? { maxImageBytes } : {}),
+    ...(images !== undefined ? { images } : {}),
     ...(entry.description !== undefined ? { description: entry.description } : {}),
   };
   if (!ownsConnection) {

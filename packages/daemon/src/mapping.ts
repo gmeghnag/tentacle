@@ -6,6 +6,7 @@
 import type { AgentEvent, AgentStopReason, SkillListing } from "@tentacle/agent";
 import type { ToolResult } from "@tentacle/core";
 import {
+  type AttachmentRef,
   BLOCKING_UPDATE_TYPES,
   type ContentBlock,
   JsonRpcErrorCode,
@@ -14,6 +15,7 @@ import {
   MAX_SKILL_DESCRIPTION,
   MAX_SKILL_LIST,
   MAX_SKILL_PROBLEMS,
+  type PromptContentBlock,
   type SessionSkillsResult,
   type SessionUpdate,
   type SkillListEntry,
@@ -118,6 +120,34 @@ export function contentToText(content: readonly ContentBlock[]): string {
     .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
     .map((b) => b.text)
     .join("\n");
+}
+
+/**
+ * A prompt's two halves (docs/feat/attachments-prompt.md D3): its text, joined
+ * like `contentToText`, and its image refs in the order named. The refs are
+ * resolved where the model runs — never here.
+ */
+export function splitPrompt(content: readonly PromptContentBlock[]): {
+  readonly text: string;
+  readonly refs: AttachmentRef[];
+} {
+  const texts: string[] = [];
+  const refs: AttachmentRef[] = [];
+  for (const block of content) {
+    if (block.type === "text") {
+      texts.push(block.text);
+    } else if (block.type === "attachment") {
+      refs.push(block.ref);
+    } else {
+      // Dropping the block silently would let the model answer as if it had
+      // seen the image (parent `session-reattach` point 18).
+      throw new RpcError(
+        JsonRpcErrorCode.InvalidParams,
+        `only text and attachment content is supported (got ${block.type}); send an image as { type: "attachment", ref }`,
+      );
+    }
+  }
+  return { text: texts.join("\n"), refs };
 }
 
 /**

@@ -17,6 +17,7 @@ import {
 } from "@tentacle/agent";
 import type {
   AgentJobs,
+  AttachmentSource,
   ChatMessage,
   JobController,
   ModelProvider,
@@ -64,6 +65,21 @@ import type { DaemonIdentity } from "./version-mismatch.ts";
 export const DEFAULT_MAX_SESSIONS = 64;
 export const DEFAULT_MAX_DETACHED_SESSIONS = 16;
 
+/**
+ * What this daemon does with image prompts (docs/feat/attachments-prompt.md
+ * D2). Absent = images are off: every prompt naming a ref is refused
+ * `images_off`, and `initialize` advertises no `images` capability.
+ *
+ * `store`: this daemon runs the model, so it holds the bytes — the client
+ * uploads them (`attachment/put`) and the provider reads them from the
+ * session's store; `maxBytes` is the advertised per-image cap.
+ * `client`: the LAPTOP runs the model (a pod `--model-proxy`), so it keeps the
+ * bytes; the pod receives refs only and checks nothing (upload Owner Q2).
+ */
+export type ImagePolicy =
+  | { readonly source: "store"; readonly maxBytes: number }
+  | { readonly source: "client" };
+
 /** What the host gives the agent it builds for one session. */
 export interface AgentContext {
   /**
@@ -78,6 +94,13 @@ export interface AgentContext {
    * (`serve`, the worker) ignores it by construction.
    */
   readonly settings?: SessionSettings;
+  /**
+   * The session's image store, when THIS daemon runs the model
+   * (`images.source === "store"`): the provider must read a ref's bytes here.
+   * Absent when images are off, or when the LAPTOP runs the model and holds
+   * the bytes itself (`"client"`, docs/feat/attachments-prompt.md D2/D6).
+   */
+  readonly attachments?: AttachmentSource;
   /**
    * A LIVE session's state the new agent must take over instead of building
    * its own (`session/update_settings`, docs/feat/session-settings-apply.md):
@@ -149,6 +172,12 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * `DAEMON_UPLOAD_BYTES`).
    */
   readonly uploadBytes?: number;
+  /**
+   * What this daemon does with image prompts: where the bytes live, and the
+   * capability `initialize` advertises (docs/feat/attachments-prompt.md D2).
+   * Unset = off, so every host that does not opt in keeps refusing them.
+   */
+  readonly images?: ImagePolicy;
   /** The clock for liveness stamps and the sweep (default `Date.now`). */
   readonly now?: () => number;
   /** Refuse to CREATE (or reopen) a session past this many live ones on the daemon. Unset = no limit. */
@@ -300,6 +329,14 @@ export class SessionHost {
   /** Bytes every session's image store holds together (the daemon cap's used side). */
   get uploadBytesUsed(): number {
     return this.uploadBudget.used;
+  }
+
+  /**
+   * What this daemon does with image prompts (`initialize` advertises it,
+   * `prompt` enforces it). Unset = images off.
+   */
+  get images(): ImagePolicy | undefined {
+    return this.opts.images;
   }
   private readonly sessions = new Map<string, HostedSession>();
   /** ARCHIVED sessions (a persisting host only). An id is in ONE of the two maps, never both. */
@@ -974,10 +1011,14 @@ export class SessionHost {
     // The agent exists before its session (P4): its link is bound late, and a
     // session is only reachable (hence prompted) once built.
     const bound: { hosted?: HostedSession } = {};
+    // Created BEFORE the agent: a "store" policy hands it to the factory, which
+    // puts it on the provider's requests (the one place bytes can come from).
+    const uploads = new AttachmentStore(this.uploadBudget);
     const { agent, permissions, jobs, agentJobs, titleModel, settingsReport, grants } =
       this.opts.createAgent(this.opts.defaultCwd, {
         modelLink: () => bound.hosted?.modelLink() ?? null,
         ...(settings ? { settings } : {}),
+        ...(this.opts.images?.source === "store" ? { attachments: uploads } : {}),
       });
     // core `ChatMessage` is structurally the wire schema.
     const session = new Session(agent, id, messages && messages.length > 0 ? { messages } : {});
@@ -1011,10 +1052,11 @@ export class SessionHost {
         : undefined,
       log,
       agentJobs,
-      new AttachmentStore(this.uploadBudget),
+      uploads,
     );
     bound.hosted = hosted;
     hosted.settingsReport = settingsReport;
+    hosted.imagesPolicy = this.opts.images;
     hosted.grants = grants;
     return hosted;
   }
@@ -1040,6 +1082,8 @@ export class SessionHost {
       modelLink: () => hosted.modelLink(),
       settings,
       reuse,
+      // A settings sync must not silently turn every image into a placeholder.
+      ...(this.opts.images?.source === "store" ? { attachments: hosted.uploads } : {}),
     });
     const foreign =
       next.permissions !== reuse.permissions ||

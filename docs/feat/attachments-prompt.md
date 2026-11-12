@@ -443,7 +443,176 @@ Each open question decided with the recommended option; one line of reason.
 
 ## Execution
 
-*(empty — not started)*
+*— deepseek, 2026-11-12*
+
+### Load-bearing check, re-run first (per the brief)
+
+Both greps and `seams.ts` match the plan exactly on the branch base:
+
+- `rg -n "createAgent\(" packages/daemon/src` → the three sites
+  (`session-host.ts:346,978,1039`); no fourth.
+- `rg -n "params.request as unknown as ChatRequest" packages/client/src` → the
+  three casts (`remote-client.ts:3024,3042,3253`); no fourth.
+- `bun .tentacle/tmp/attachments-prompt/seams.ts` → byte-identical to the plan's
+  recorded output (`1 … REJECTED (invalid_union_discriminator)`, `2 … true`,
+  `3 AgentContext keys: ["modelLink"] | agentCapabilities: {"tools":true,
+  "permissions":true}`, `3b … true`, `4 proxy wire keys: ["messages"]`). The
+  capability is genuinely missing; nothing had drifted.
+
+Branch base was `main @ 924186b`, working in
+`.tentacle/worktrees/attachments-prompt` (the task's worktree).
+
+### As-built, in the Implementation's order
+
+1. **protocol.** `content.ts`: `AttachmentContentSchema` +
+   `PromptContentBlockSchema` (prompt-only union, as decided — `ContentBlockSchema`
+   untouched, so no update class and no `client/mapping.ts` change).
+   `session.ts`: `PromptParamsSchema.content` takes the prompt union;
+   `AgentCapabilitiesSchema.images = { input: string(1..32), maxBytes? }`.
+   `attachment-upload.ts`: the three new refusal reasons. Regenerated
+   `schema/protocol.json` (`bun run schema:export`) and added fixture rows for
+   an attachment-only and a mixed prompt plus both `images` capability shapes;
+   the union count went 6 → 7.
+2. **providers.** `imageLimits(provider, {images?, maxImageBytes?})` in
+   `images.ts` is now the ONE source for both providers' `vision` and effective
+   cap; `anthropic-provider.ts` / `openai-provider.ts` dropped their inline
+   `?? true` / `?? false` and their cap defaults.
+3. **config.** `model.images` on the strict `ModelConfigSchema`, threaded through
+   `resolve` → `load` → `models` (per-entry inheritance) → `key-docs` (both
+   `model.images` and `models.*.images`) → `cli/model-provider.ts` at its three
+   provider sites; README config table regenerated with `bun run docs:config`.
+   File-only, exactly like `maxImageBytes`: no `sourceKey`, no `resolved` (the
+   key-docs test that pins "no default, no env source" caught my first attempt).
+4. **daemon.** `AttachmentStore.holds(ref)` (synchronous twin of `read`'s
+   predicate; `read` reuses it). `splitPrompt(content)` in `mapping.ts` replaces
+   `assertTextOnly`+`contentToText` in `prompt` only (`contentToText` kept for
+   its other callers). `ImagePolicy` + `SessionHostOptions.images` +
+   `SessionHost.images`; `AgentContext.attachments`; `build()` creates the store
+   before the factory and passes it iff `source === "store"`, then gives the SAME
+   store to `HostedSession`; `updateSettings` re-passes `hosted.uploads`;
+   the context probe passes none. `HostedSession.prompt` runs `splitPrompt`,
+   then `checkPromptImages(refs)` before the skill/busy checks, then
+   `session.send(text, signal, { attachments: refs })`.
+   `connection.ts` `initialize` advertises `images` from the policy.
+5. **client.** New pure `image-input.ts` (the D5 table) and `laptop-images.ts`
+   (bytes, dedupe, 100 MiB, `LaptopImagesFullError`, never evicts).
+   `RemoteClient`: `localImages` option, caps captured on EVERY handshake,
+   `readonly images`, `imageInput()`, `attachImage()`, `prompt(…, attachments)`,
+   `ImagesUnavailableError`, and `laptopRequest()` used at all three serving
+   casts. `RemoteSession`: `send(…, {attachments})` stored on `ActiveTurn` so
+   every keyed re-send carries them.
+6. **cli.** New pure `image-policy.ts` with `daemonImagePolicy`;
+   `serve.ts` (both hosts), `worker.ts` (host) call it; all three factories
+   forward `ctx.attachments` into `buildAgent`, which puts it on the `Agent`
+   config. `engine-runtime.ts` `laptopModels()` also returns `localImages`
+   (from the same `imageLimits()`), which both `createLocalRuntime` call sites
+   spread; `local-runtime.ts` passes it only beside a `modelProvider`.
+7. `CHANGELOG.md` (`[Unreleased] ### Added`) and this section. `TODO.md`
+   deliberately untouched, per the brief.
+
+### Drift from the Implementation (and why)
+
+- **`worker.ts`'s factory signature.** The plan said "extract its `createAgent`
+  body into an exported `workerAgentFactory(config, …)`". As built it is
+  `workerAgentFactory(config, ctx, {skillScan})` — the `AgentContext` itself is
+  the second parameter, so the `ctx.attachments` forwarding lives INSIDE the
+  exported body rather than at the call site. Reason: with the forwarding left at
+  the call site, mutation "a cli factory forgets `ctx.attachments`" stayed green
+  (the test drove the factory directly, bypassing the call site). Moving it in
+  makes the mutation red. No behaviour change.
+- **T10's per-host test is split.** A turn driven through `podSessionHost`'s
+  non-proxy factory uses a REAL provider built from config, so the round would
+  leave the machine; those two tests assert the HOST's policy
+  (`podSessionHost` store / client) and the exported worker factory's forwarding
+  is pinned end-to-end (turn → request → the session's own store). The
+  `startDaemon` host's factory forwarding is therefore pinned by shape and by the
+  same `buildAgent` option, not by a turn. Stated as a gap, not as covered.
+- **Two existing tests changed meaning, on purpose.** `named-models.test.ts` and
+  the T7 case in `model-stream-attachments.test.ts` used to assert that a
+  laptop's `model/stream` request carries NO `attachments` field. D6 replaces
+  "no source" with "a source scoped to what this laptop itself added", so they
+  now assert the stronger property: the field is the laptop's own `LaptopImages`,
+  and a pod-named ref reads `null`. Same for `pod-attachments-e2e.test.ts`'s
+  `(b)`. The security property ("a pod cannot make the laptop read anything") is
+  preserved and now tested directly (T8's stranger-ref and wrong-size cases).
+- **`explain.test.ts` counts.** `model` went 10 → 11 direct sub-keys and
+  `models` 10 → 12 (it counts the `*` entry's keys too, so `models.*.images` is
+  the second). Numbers updated with a comment naming the change.
+- **`key-docs.ts` placement.** My first insert put `model.images` inside the
+  `models.*` block; `explain` showed `models: 12` vs `model: 11` and the move
+  fixed it. Worth noting because the failure mode (a key documented under the
+  wrong parent) is silent in every other test.
+
+### Tests (each written first, red on the branch base, then green)
+
+T1 `protocol/test/attachment-prompt.test.ts` (new) · T2 `daemon/test/mapping.test.ts`
+(`splitPrompt`) · T3 `daemon/test/attachment-store.test.ts` (`holds`) · T4
+`daemon/test/attachment-prompt.test.ts` (new, real `Connection`+`SessionHost`) ·
+T5 `client/test/image-input.test.ts` (new) · T6 `client/test/laptop-images.test.ts`
+(new) · T7 `client/test/attach-image.test.ts` (new, frame spy) · T8 extended
+`client/test/model-stream-attachments.test.ts` · T9 extended
+`client/test/pod-attachments-e2e.test.ts` · T10 `cli/test/image-policy.test.ts`
+(new) + `cli/test/image-hosts.test.ts` (new) · T11
+`providers/test/images.test.ts` (new) + `config/test/model-images.test.ts` (new).
+
+Red-then-green, recorded per slice: slice 1 failed on `AgentCapabilitiesSchema`
+returning `images: undefined` and accepting `input: ""` (property failures, not
+imports — the first draft used a symbol that did not exist yet and was rewritten
+for exactly that reason); slices 2, 4, 5, 6 for the NEW pure modules failed on
+the absent symbol (`imageLimits`, `splitPrompt`/`holds`, `image-input.ts`/
+`laptop-images.ts`, `image-policy.ts`), which is what the plan's table predicts
+for a capability that does not exist; T4/T7/T8/T9's behavioural cases were red on
+their assertions (e.g. `hosted.uploads` not reaching the request; the laptop's
+source absent at the casts) after the modules existed. One extra non-vacuity
+mutation was run against the OLD behaviour directly (M1b: `prompt` restored to
+`assertTextOnly` + no refs) — 8 T4 cases go red, so those tests are not passing
+by construction on `main`'s shape.
+
+### Mutations (each run, then reverted; site restored from a copy, no git commands)
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `prompt` skips `checkPromptImages` | **RED** — 7 T4 cases (`not_uploaded` ×2, `invalid_ref` ×2, `images_off`, re-try after upload, client-mode `invalid_ref`) |
+| M1b | `prompt` → old `assertTextOnly` path | **RED** — 8 T4 cases |
+| M2 | `holds` ignores the size | **RED** — T3 + the existing `read`-seam test |
+| M3a | `build()` passes the store regardless of policy | **RED** — T4 (`images_off`, client-mode no-source) |
+| M3b | `build()` never passes the store | **RED** — T4 (store case, update_settings case) |
+| M4 | `updateSettings` drops `attachments` | **RED** — T4 update_settings case |
+| M5 | `laptopRequest` at the chunked cast only | **RED** — 5 cases across T7/T8 |
+| M5b | `laptopRequest` removed from the `countTokens` cast | **RED** — T8 `countTokens` case (proves the THIRD cast) |
+| M6a | `LaptopImages.read` ignores the size | **RED** — T6 + T8 wrong-size |
+| M6b | `imageInput` treats an unknown `input` as `upload` | **RED** — T5 forward-compat |
+| M7 | `attachImage` uploads in laptop mode | **RED** — 5 T8 cases (incl. the zero-frame assertion) |
+| M8 | `ActiveTurn` not storing refs | **RED** — T7 keyed re-send |
+| M9a | worker factory forgets `ctx.attachments` | **RED** (after the signature fix above; green before it) |
+| M9b | `buildAgent` drops the `attachments` option | **RED** — worker factory test |
+| M9c | worker host not given the image policy | **GREEN — uncovered.** `worker.ts`'s host builder is not exported and starts a real MCP/model stack; T10 covers the policy value through `daemonImagePolicy` and `podSessionHost`, not through `worker.ts`'s own `SessionHost(...)` call |
+| M10 | anthropic keeps its inline `?? true` beside `imageLimits` | **GREEN — equivalent mutant, not uncovered.** Verified by running both expressions over `{undefined, true, false}` × both providers: identical for every input, and no config can separate them (two copies would only diverge after a future default change; AGENTS §9 forbids a test that cannot fail) |
+
+### Gate
+
+- `bunx tsc --noEmit` — clean.
+- `bun run lint` — clean (`biome check .`: 946 files, no fixes applied; matches
+  the §6 baseline of 0 errors / 0 warnings).
+- `bun test` — **7410 pass, 0 fail, 3 skip** (the three opt-in skips: live-k8s,
+  live-docker, real-socket keepalive), 533 files, 70,969 assertions.
+- `packages/protocol/schema/protocol.json` regenerated and committed with the
+  code changes (the drift gate in `json-schema.test.ts` is green).
+
+### Not verified / left open
+
+- `worker.ts`'s own `SessionHost(...)` policy wiring (M9c). One line; confirmed
+  by reading, not by a test, because the builder is inside the worker entry
+  point. Extracting it would be the honest fix and is a follow-up.
+- T9 uses a stand-in provider rather than the real `AnthropicProvider` (the plan
+  named one): `packages/client` does not depend on `packages/providers`, and
+  adding that edge for a test would be worse than the gap. The property proved
+  is unchanged — the laptop's source arrives at the provider holding the exact
+  bytes and the pod never sees the base64 — and the provider side of the same
+  seam is covered by `providers/test/anthropic-images.test.ts`.
+- Multi-attach pods (another laptop is the model link) still yield a placeholder,
+  as decided (Orchestrator decision 10); nothing in this task changes that.
+
 
 ## Review
 

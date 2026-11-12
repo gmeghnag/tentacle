@@ -6,9 +6,9 @@ import { RpcError } from "@tentacle/transport";
 import {
   DIFF_MIME,
   HOOK_MIME,
-  assertTextOnly,
   contentToText,
   eventToUpdate,
+  splitPrompt,
   stopReasonToProtocol,
   toUpdateParams,
   toolResultContent,
@@ -356,19 +356,41 @@ describe("toUpdateParams (the session/update frame)", () => {
   });
 });
 
-describe("assertTextOnly (explicit reject until attachments land)", () => {
-  test("text-only content passes", () => {
-    expect(() => assertTextOnly([{ type: "text", text: "a" }])).not.toThrow();
+describe("splitPrompt (a prompt's text and its image refs)", () => {
+  const ref = { id: "a".repeat(64), mimeType: "image/png", size: 11 };
+
+  test("joins text blocks with \\n and collects refs in order", () => {
+    expect(
+      splitPrompt([
+        { type: "text", text: "one" },
+        { type: "text", text: "two" },
+      ]),
+    ).toEqual({ text: "one\ntwo", refs: [] });
+    const both = splitPrompt([
+      { type: "text", text: "look" },
+      { type: "attachment", ref },
+      { type: "attachment", ref: { ...ref, id: "b".repeat(64), size: 3 } },
+    ]);
+    expect(both.text).toBe("look");
+    expect(both.refs.map((r) => r.id)).toEqual([ref.id, "b".repeat(64)]);
+  });
+
+  test("an empty prompt is empty text and no refs", () => {
+    expect(splitPrompt([])).toEqual({ text: "", refs: [] });
+  });
+
+  test("an image-only prompt is empty text with its ref (a turn, not a no-op)", () => {
+    expect(splitPrompt([{ type: "attachment", ref }])).toEqual({ text: "", refs: [ref] });
   });
 
   for (const block of [
     { type: "image", mimeType: "image/png", data: "AA==" },
     { type: "resource", uri: "file:///a", text: "x" },
   ] as const) {
-    test(`a ${block.type} block is rejected with InvalidParams naming it`, () => {
+    test(`a ${block.type} block is still rejected with InvalidParams naming it`, () => {
       let caught: unknown;
       try {
-        assertTextOnly([{ type: "text", text: "look" }, block]);
+        splitPrompt([{ type: "text", text: "look" }, block]);
       } catch (error) {
         caught = error;
       }

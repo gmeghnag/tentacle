@@ -66,6 +66,18 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/initialize/result": [
     { protocolVersion: 1, agentCapabilities: { tools: true, permissions: false } },
     { protocolVersion: 1, agentCapabilities: { tools: true, permissions: true } },
+    {
+      protocolVersion: 1,
+      agentCapabilities: {
+        tools: true,
+        permissions: true,
+        images: { input: "upload", maxBytes: 3932160 },
+      },
+    },
+    {
+      protocolVersion: 1,
+      agentCapabilities: { tools: true, permissions: true, images: { input: "client" } },
+    },
   ],
   "methods/session~1open/params": [
     {
@@ -103,6 +115,24 @@ const FIXTURES: Record<string, Json[]> = {
         { type: "text", text: "hi" },
         { type: "image", mimeType: "image/png", data: "AA==" },
         { type: "resource", uri: "file:///a", mimeType: "text/plain", text: "x" },
+      ],
+    },
+    {
+      sessionId: "s",
+      turnId: "t",
+      content: [
+        { type: "text", text: "what is this?" },
+        {
+          type: "attachment",
+          ref: { id: "a".repeat(64), mimeType: "image/png", size: 11, name: "shot.png" },
+        },
+      ],
+    },
+    {
+      sessionId: "s",
+      turnId: "t",
+      content: [
+        { type: "attachment", ref: { id: "b".repeat(64), mimeType: "image/jpeg", size: 3 } },
       ],
     },
   ],
@@ -528,7 +558,8 @@ describe("tagged-union shape (what codegen needs)", () => {
       }
     }
     // +1: `KnownLogEntry` (session/log, protocol 17).
-    expect(unions).toBe(6);
+    // +1: `PromptContentBlock` (prompt-only attachment block, attachments-prompt).
+    expect(unions).toBe(7);
   });
 
   test("every $ref names a $def", () => {

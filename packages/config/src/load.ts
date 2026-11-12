@@ -155,6 +155,11 @@ export interface TentacleConfig {
    * (docs/feat/attachments-core.md, review H1). Unset → the provider's default.
    */
   readonly maxImageBytes?: number;
+  /**
+   * `model.images`: whether this model takes images at all
+   * (docs/feat/attachments-prompt.md D4). Unset → the provider's default.
+   */
+  readonly images?: boolean;
   readonly systemPrompt: string;
   /** The identity part of `systemPrompt`: with `agentsMdContent`, what a recompose needs. */
   readonly promptIdentity: string;
@@ -855,6 +860,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     contextReset: resolved.contextReset,
     ...(resolved.maxTokens !== undefined ? { maxTokens: resolved.maxTokens } : {}),
     ...(resolved.maxImageBytes !== undefined ? { maxImageBytes: resolved.maxImageBytes } : {}),
+    ...(resolved.images !== undefined ? { images: resolved.images } : {}),
     systemPrompt: resolved.systemPrompt,
     promptIdentity: resolved.promptIdentity,
     ...(agentsMd !== undefined ? { agentsMdContent: agentsMd } : {}),
