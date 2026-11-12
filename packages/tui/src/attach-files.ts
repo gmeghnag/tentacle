@@ -14,27 +14,46 @@
  * through core, so the TUI cannot accept something `checkAttachmentRefs` (and
  * with it `Session.send`) would refuse. Nothing is ever attached silently and a
  * refusal never leaves a half-built ref: a caller appends only `ok` items.
+ *
+ * **One read decides everything.** A candidate is opened ONCE; its bytes are
+ * read to EOF (bounded by the cap) and BOTH the sniff and the ref come from that
+ * one buffer, so a type can never describe bytes other than the ones sent.
  */
 import { createHash } from "node:crypto";
-import { open, stat } from "node:fs/promises";
-import { type AttachmentRef, MAX_ATTACHMENTS_PER_MESSAGE, MAX_IMAGE_BYTES } from "@tentacle/core";
+import { open } from "node:fs/promises";
+import {
+  sanitizeAttachmentName,
+  type AttachmentRef,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  MAX_IMAGE_BYTES,
+} from "@tentacle/core";
 import { type AttachRefusal, refusalText } from "./attach-refusal.ts";
-import { IMAGE_HEAD_BYTES, sniffImageType } from "./image-sniff.ts";
+import { sniffImageType } from "./image-sniff.ts";
 
-/** What `stat` says about a path, in the terms a refusal needs. */
-export interface ProbedStat {
-  readonly kind: "file" | "directory" | "other";
+/**
+ * What the probe learned about an OPEN handle, in the terms a refusal needs.
+ * `kind` is `other` for anything that is not a regular file — a fifo, a
+ * device, a socket — which is refused unread, because reading one can block
+ * forever.
+ */
+export interface ProbedFile {
+  readonly kind: "file" | "other";
   readonly size: number;
+  /** Every byte of the file, in ONE buffer read to EOF (at most `cap + 1` bytes). */
+  readonly bytes: Uint8Array;
 }
 
 /**
- * The file-system seam. `stat` returns null for a path that does not exist and
- * throws for another failure; `read` returns AT MOST `maxBytes` (fewer at EOF)
- * and throws when the file cannot be read.
+ * The file-system seam: ONE call, ONE open. It returns `null` when the path does
+ * not exist (or is a directory, which is not a file to read), throws when it
+ * cannot be opened, and otherwise reports the handle's own kind, size and bytes.
+ *
+ * One call on purpose — a `stat` then a `read` would let the path change between
+ * them (a swap, a rewrite, a fifo) and hand back a type that does not describe
+ * the bytes actually sent.
  */
 export interface FileProbe {
-  stat(path: string): Promise<ProbedStat | null>;
-  read(path: string, maxBytes: number): Promise<Uint8Array>;
+  read(path: string, cap: number): Promise<ProbedFile | null>;
 }
 
 /** An image that passed every check: its ref, its bytes, and where it came from. */
@@ -55,21 +74,14 @@ export function baseName(path: string): string {
   return cut === -1 ? trimmed : trimmed.slice(cut + 1);
 }
 
-/** Most characters a ref's `name` may carry (the wire's bound, `AttachmentRefSchema.name`). */
-const NAME_MAX_CHARS = 255;
-
 /**
- * A display name a ref accepts: the basename without control characters, capped.
- * `undefined` when nothing usable is left — a name is display only, so dropping
- * it is honest, while a control character would break a placeholder line.
+ * A display name a ref accepts, or `undefined` when nothing usable is left. The
+ * RULE is the wire's: `sanitizeAttachmentName` (core) applies the very regex
+ * `AttachmentRefSchema.name` enforces — imported, never copied, so this entry
+ * point cannot hand `Session.send` a name it would throw on.
  */
 export function refName(path: string): string | undefined {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: strips control bytes from a file name
-  const cleaned = baseName(path).replace(/[\u0000-\u001f\u007f]/g, "");
-  if (cleaned === "") {
-    return undefined;
-  }
-  return cleaned.length > NAME_MAX_CHARS ? cleaned.slice(0, NAME_MAX_CHARS) : cleaned;
+  return sanitizeAttachmentName(baseName(path));
 }
 
 /** The sha256 of `bytes`, lowercase hex — a ref's `id` (content-addressed). */
@@ -78,42 +90,39 @@ export function sha256Hex(bytes: Uint8Array): string {
 }
 
 /**
- * Read one candidate and decide. Order matters: cheap refusals first (existence,
- * kind, size), so a 4 GB file or a dropped folder costs one `stat` and nothing
- * else, and a NON-image costs one small head read rather than a full one.
+ * Read one candidate and decide, from ONE open and ONE buffer.
+ *
+ * The bytes are the only evidence: the type is sniffed from the very buffer the
+ * ref's `id` and `size` describe, so "the media type comes from the bytes" holds
+ * for the bytes that are actually sent. The head is not read separately — a
+ * 15 MiB ceiling (owner Q4) makes one full read cheaper than two opens and a
+ * class of TOCTOU bug.
  */
 export async function inspectPath(probe: FileProbe, path: string): Promise<InspectResult> {
   const refuse = (refusal: AttachRefusal): InspectResult => ({ ok: false, refusal });
-  let info: ProbedStat | null;
+  let file: ProbedFile | null;
   try {
-    info = await probe.stat(path);
+    // ONE byte past the cap: a file that grew past it is caught, not buffered.
+    file = await probe.read(path, MAX_IMAGE_BYTES + 1);
   } catch {
     return refuse({ reason: "unreadable", path });
   }
-  if (info === null) {
+  if (file === null) {
     return refuse({ reason: "not-found", path });
   }
-  if (info.kind === "directory") {
-    return refuse({ reason: "directory", path });
-  }
-  // A fifo/device/socket is never an image, and reading one can block forever —
-  // refuse it by kind, so a dropped special file cannot hang the TUI.
-  if (info.kind === "other") {
+  // A fifo/device/socket carries no bytes to sniff — refused by the HANDLE's
+  // kind, so nothing is ever read from one.
+  if (file.kind === "other") {
     return refuse({ reason: "not-file", path });
   }
-  if (info.size === 0) {
+  const bytes = file.bytes;
+  if (bytes.length === 0) {
     return refuse({ reason: "empty", path });
   }
-  if (info.size > MAX_IMAGE_BYTES) {
-    return refuse({ reason: "too-large", path, size: info.size });
-  }
-  let head: Uint8Array;
-  try {
-    head = await probe.read(path, IMAGE_HEAD_BYTES);
-  } catch {
-    return refuse({ reason: "unreadable", path });
-  }
-  const sniffed = sniffImageType(head);
+  // The sniff comes BEFORE the cap so a refusal can say what it is about: an
+  // image that is too large is `too-large`, and a 4 GB video is `not-image`
+  // (the bytes decide, and only the first ones need to be right).
+  const sniffed = sniffImageType(bytes);
   if (sniffed.kind === "heic") {
     // Only the flavours that need a conversion land here (sub-task 6 does it).
     return refuse({ reason: "heic", path });
@@ -121,19 +130,8 @@ export async function inspectPath(probe: FileProbe, path: string): Promise<Inspe
   if (sniffed.kind !== "image") {
     return refuse({ reason: "not-image", path });
   }
-  let bytes: Uint8Array;
-  try {
-    // One byte past the cap: a file that grew since `stat` is caught, not read
-    // whole into memory.
-    bytes = await probe.read(path, MAX_IMAGE_BYTES + 1);
-  } catch {
-    return refuse({ reason: "unreadable", path });
-  }
-  if (bytes.length === 0) {
-    return refuse({ reason: "empty", path });
-  }
   if (bytes.length > MAX_IMAGE_BYTES) {
-    return refuse({ reason: "too-large", path, size: bytes.length });
+    return refuse({ reason: "too-large", path, size: Math.max(file.size, bytes.length) });
   }
   const ref: AttachmentRef = {
     id: sha256Hex(bytes),
@@ -149,10 +147,21 @@ function nameField(name: string | undefined): { name?: string } {
   return name === undefined ? {} : { name };
 }
 
+/** Where a candidate ended up: an image, or a refusal that either keeps the text or is shown. */
+export type CandidateOutcome =
+  | { readonly kind: "image"; readonly image: AttachedImage }
+  | { readonly kind: "refused"; readonly refusal: AttachRefusal };
+
 /** What a batch of candidates produced: the images that passed, and why the rest did not. */
 export interface CollectedAttachments {
   readonly images: readonly AttachedImage[];
   readonly refusals: readonly AttachRefusal[];
+  /**
+   * Every candidate in the order given, with its disposition — so a caller can
+   * decide per candidate (3b turns the whole paste into text when none of them
+   * became an image).
+   */
+  readonly outcomes: readonly CandidateOutcome[];
 }
 
 /** The refs of `images`, ready for `Session.send`. */
@@ -165,63 +174,101 @@ export function refusalLines(collected: CollectedAttachments): string[] {
   return collected.refusals.map(refusalText);
 }
 
+/** Options for `collectAttachments`: what the pending message already holds. */
+export interface CollectOptions {
+  /**
+   * The refs of the images ALREADY attached to this message (3b's chips). The
+   * cap and the duplicate check hold for the whole MESSAGE, not one paste, so
+   * two pastes of three images cannot reach `checkAttachmentRefs` with six.
+   */
+  readonly existing?: readonly AttachmentRef[];
+}
+
+/** Nothing to collect: no images, no refusals, no outcomes. */
+export const NOTHING_COLLECTED: CollectedAttachments = { images: [], refusals: [], outcomes: [] };
+
 /**
  * Inspect every candidate, keeping the ones that pass.
  *
- * The per-message cap is enforced here, at the point a candidate WOULD be added
- * (`MAX_ATTACHMENTS_PER_MESSAGE`, the wire's own constant): the first
- * `MAX_ATTACHMENTS_PER_MESSAGE` images stay, and the 6th is refused with a text
- * naming the cap. A file already collected is refused as a duplicate rather than
- * silently dropped or attached twice (the wire refuses a repeated id).
+ * The per-message cap (`MAX_ATTACHMENTS_PER_MESSAGE`, the wire's own constant)
+ * and the duplicate check are counted against `existing` TOO — the chips a
+ * message already carries — so what this returns ALWAYS composes with them into
+ * something `checkAttachmentRefs` accepts. A candidate over the cap is left out
+ * and reported as ONE refusal for the whole paste (naming how many were
+ * dropped), never one refusal per file.
  */
 export async function collectAttachments(
   probe: FileProbe,
   paths: readonly string[],
+  options: CollectOptions = {},
 ): Promise<CollectedAttachments> {
+  const existing = options.existing ?? [];
+  const kept = existing.length;
+  const ids = new Set(existing.map((ref) => ref.id));
   const images: AttachedImage[] = [];
   const refusals: AttachRefusal[] = [];
-  const seen = new Set<string>();
+  const outcomes: CandidateOutcome[] = [];
+  let wouldHold = kept;
+  let dropped = 0;
   for (const path of paths) {
     const result = await inspectPath(probe, path);
     if (!result.ok) {
       refusals.push(result.refusal);
+      outcomes.push({ kind: "refused", refusal: result.refusal });
       continue;
     }
-    if (images.length >= MAX_ATTACHMENTS_PER_MESSAGE) {
-      refusals.push({ reason: "too-many", count: images.length + 1 });
+    const overCap = wouldHold >= MAX_ATTACHMENTS_PER_MESSAGE;
+    const duplicate = ids.has(result.image.ref.id);
+    if (overCap || duplicate) {
+      // Counted, not announced one by one: a rejected candidate still counts
+      // toward the total, so the reply is one sentence about the whole paste.
+      wouldHold += 1;
+      dropped += 1;
       continue;
     }
-    if (seen.has(result.image.ref.id)) {
-      refusals.push({ reason: "duplicate", path });
-      continue;
-    }
-    seen.add(result.image.ref.id);
+    wouldHold += 1;
+    ids.add(result.image.ref.id);
     images.push(result.image);
+    outcomes.push({ kind: "image", image: result.image });
   }
-  return { images, refusals };
+  if (dropped > 0) {
+    refusals.push({ reason: "too-many", count: wouldHold, dropped });
+  }
+  return { images, refusals, outcomes };
 }
 
-/** The one place a real file system is read: `attach-files`' production probe. */
+/**
+ * The one place a real file system is read: `attach-files`' production probe.
+ *
+ * One `open`, then everything from the HANDLE: `fstat` for the kind and the size
+ * (so a path that became a fifo after any earlier look is never read) and one
+ * read loop to EOF bounded by `cap`, so a short read (a network/FUSE mount, a
+ * file that grew) is never mistaken for a whole file.
+ */
 export function nodeFileProbe(): FileProbe {
   return {
-    async stat(path) {
+    async read(path, cap) {
+      let handle: Awaited<ReturnType<typeof open>>;
       try {
-        const info = await stat(path);
-        const kind = info.isFile() ? "file" : info.isDirectory() ? "directory" : "other";
-        return { kind, size: Number(info.size) };
+        // `O_NONBLOCK`: opening a fifo would otherwise block the render thread
+        // forever before we could ask the handle what it is.
+        handle = await open(path, O_RDONLY | O_NONBLOCK);
       } catch (error) {
         if (isMissing(error)) {
           return null;
         }
+        if (isDirectoryError(error)) {
+          return null;
+        }
         throw error;
       }
-    },
-    async read(path, maxBytes) {
-      const handle = await open(path, "r");
       try {
-        const buffer = new Uint8Array(maxBytes);
-        const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
-        return buffer.subarray(0, bytesRead);
+        const info = await handle.stat();
+        if (!info.isFile()) {
+          return { kind: "other", size: Number(info.size), bytes: new Uint8Array(0) };
+        }
+        const bytes = await readToEof(handle, cap);
+        return { kind: "file", size: Number(info.size), bytes };
       } finally {
         await handle.close();
       }
@@ -229,7 +276,30 @@ export function nodeFileProbe(): FileProbe {
   };
 }
 
+/** Read `handle` from EOF or `cap` bytes, whichever comes first (never one short read). */
+async function readToEof(
+  handle: Awaited<ReturnType<typeof open>>,
+  cap: number,
+): Promise<Uint8Array> {
+  const buffer = new Uint8Array(cap);
+  let filled = 0;
+  while (filled < cap) {
+    const { bytesRead } = await handle.read(buffer, filled, cap - filled, filled);
+    if (bytesRead === 0) {
+      break;
+    }
+    filled += bytesRead;
+  }
+  return buffer.subarray(0, filled);
+}
+
 function isMissing(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
   return code === "ENOENT" || code === "ENOTDIR";
+}
+
+function isDirectoryError(error: unknown): boolean {
+  // Linux answers EISDIR; macOS opens a directory read-only and fails at read.
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "EISDIR";
 }

@@ -7,6 +7,7 @@
  * actually sends an image ever reads them.
  */
 import {
+  ATTACHMENT_NAME_RE,
   type AttachmentRef,
   AttachmentsSchema,
   IMAGE_MIME_TYPES,
@@ -18,12 +19,12 @@ import {
 // the schema enforces them); re-exported here because an entry point that must
 // refuse a ref needs them and the packages doing that depend on core.
 export {
+  ATTACHMENT_NAME_RE,
   IMAGE_MIME_TYPES,
   type ImageMimeType,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_IMAGE_BYTES,
 } from "@tentacle/protocol";
-
 /** A ref an entry point refuses (too big, wrong type, duplicate id, malformed). */
 export class InvalidAttachmentError extends Error {
   constructor(message: string) {
@@ -34,6 +35,31 @@ export class InvalidAttachmentError extends Error {
 
 /** How many characters of a ref's name a placeholder shows at most. */
 const LABEL_NAME_MAX_CHARS = 80;
+
+/** Most characters a ref's `name` may carry (the wire's bound, `AttachmentRefSchema.name`). */
+export const ATTACHMENT_NAME_MAX_CHARS = 255;
+
+/**
+ * A ref's `name` from a raw file name: every character the wire REFUSES removed
+ * by the wire's OWN rule (`ATTACHMENT_NAME_RE`, the regex
+ * `AttachmentRefSchema.name` enforces — imported, never copied, so the entry
+ * point and the wire cannot drift), capped to the wire's length, and
+ * `undefined` when nothing usable is left.
+ *
+ * The failure this prevents: a name with a C1 control character (NEL `\u0085`, a
+ * CSI `\u009b`) passed a narrower local filter and then threw at
+ * `checkAttachmentRefs`, refusing the WHOLE message instead of one image.
+ */
+export function sanitizeAttachmentName(raw: string): string | undefined {
+  // `for…of` walks code POINTS: a capped name never ends in half a surrogate pair.
+  const kept = [...raw].filter((char) => ATTACHMENT_NAME_RE.test(char)).join("");
+  if (kept === "") {
+    return undefined;
+  }
+  return kept.length > ATTACHMENT_NAME_MAX_CHARS
+    ? kept.slice(0, ATTACHMENT_NAME_MAX_CHARS)
+    : kept;
+}
 
 /**
  * Refuse `refs` unless every one is sendable: the schema's bounds (at least one,

@@ -37,6 +37,15 @@ export const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 export const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
 /**
+ * The ONE rule a ref `name` obeys: no control character — `\p{Cc}`, so C0, DEL
+ * and the C1 block (NEL, CSI) alike. Exported because an entry point that builds
+ * a ref must sanitise a name with the wire's own rule, not a copy of it: a C1
+ * name would pass a narrower local filter and then throw at `Session.send`,
+ * refusing the WHOLE message.
+ */
+export const ATTACHMENT_NAME_RE = /^[^\p{Cc}]*$/u;
+
+/**
  * One image reference. `name` is display only — never a path — so it carries no
  * control characters; it is absent when the source had no name.
  */
@@ -57,7 +66,7 @@ export const AttachmentRefSchema = z.object({
     // category, DEL included) rather than a `\u0000-\u001f` range, which the
     // linter treats as a typo — and a plain regex, not `.refine()`, because the
     // JSON Schema export cannot represent a ZodEffects.
-    .regex(/^[^\p{Cc}]*$/u, "a name carries no control character")
+    .regex(ATTACHMENT_NAME_RE, "a name carries no control character")
     .optional(),
 });
 export type AttachmentRef = z.infer<typeof AttachmentRefSchema>;
