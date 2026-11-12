@@ -1,8 +1,67 @@
-# eval/attachments — images and files from any client (sister of the v2 redesign)
+# feat/attachments — images and files from any client (sister of the v2 redesign)
 
-> **Status:** implementation drafted (split; sub-task 1 planned) — awaiting owner approval (2026-10-19)
-> **Branch:** none until promoted
-> **Type:** eval → feat · **Size:** L → split (see Review) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (persisted format, agent loop, providers, AGENTS §7)
+> **Status:** promoted 2026-11-12 — umbrella doc; work happens in the sub-tasks of `## Promotion` (first: `docs/feat/attachments-core.md`)
+> **Branch:** none for this umbrella; one per sub-task (`feat/attachments-core` first)
+> **Type:** feat (umbrella) · **Size:** L → split (see Promotion) · **Blast:** load-bearing · **Suited:** per sub-task (Promotion table)
+
+## Promotion (2026-11-12)
+
+*— claude-opus-5-5, 2026-11-12*
+
+**Owner goal:** attach a PHOTO from the laptop TUI ASAP — drag the file into
+the terminal (it pastes the path) or type/paste a path; tentacle recognises an
+image and the model SEES it, on every runtime (in-process worker, `connect` →
+`serve`, pod `run`/`attach`). Mobile and clipboard-image paste come later.
+Everything below **supersedes** the 2026-10-19 Implementation where they differ
+(that text is kept as history; its sub-task 1 design is replaced by
+`attachments-core.md`).
+
+### Re-verified state (`main` @ 27e8b44, bun 1.4.3)
+
+Repro `.tentacle/tmp/attachments/boundaries.ts` (pasted in full in
+`attachments-core.md` §Context), output `0`–`7` cited as *r0*–*r7*.
+
+| # | Eval claim (2026-10-19) | Now | Evidence |
+|---|---|---|---|
+| 1 | Wire has `image` (inline b64) + `resource` blocks | holds | `protocol/src/content.ts:13-32` |
+| 2 | Daemon drops non-text silently | **changed**: rejected loudly (`InvalidParams`) before anything is recorded | `daemon/src/mapping.ts:128-136`, `hosted-session.ts:1926`; *r1* |
+| 3 | `ChatMessage.content` is a `string` | holds; 5 optional fields since (`spill`, `durationMs`, `denialReply`, `contextUsage`, `note`) | `core/src/model.ts:28-69` |
+| 4 | Providers: no images | holds. User text → plain string (`anthropic-provider.ts:409`, `openai-provider.ts:293`); Anthropic merges a tool result into ANY previous user message whose content is an array (`:379`). **New:** both have `countTokens` built on the same `buildPayload` (`anthropic :87-110`, `openai :105-135`) | *r6* |
+| 5 | 8 MiB frame cap | holds, `serve` WS only (`ws-server.ts:54,224`); `peer.ts:281` checks only when set; stdio/pod uncapped. Log pages ≤ 256 KiB (`session-log.ts:51`), model-stream batches ≤ 64 KiB (`remote-client.ts:556`) | — |
+| 6 | `ChatMessageSchema` is `.strict()` → loud reject | **changed**: every payload is a STRIP schema since v10 (`protocol/src/index.ts:8-12`) → an unknown `attachments` is **dropped silently**. `session/new` is gone; the seed is `session/open{messages}` (`session.ts:808,991`) | `session.ts:51-79`; *r2* |
+| 7 | `model/stream` wire strips; eval proposed making it `.strict()` | strips (*r3*). Making it strict is now **forbidden** (AGENTS §7 forward-compat) | `model.ts:19-24` |
+| 8 | `toWireRequest` is the only field-by-field mapper | holds for `ChatMessage` transport (`proxy-model.ts:57-72`, *r5*). Others: the 2 provider builders, `hooks.ts:719` (hook payload, text by contract), `tui/src/resume.ts:66-82` (tool-row display) | `rg "role: m\.role\|content: m\.content"` |
+| 9 | Token counting not on a live path | **changed**: live — `context-awareness.ts:113-117` (heuristic, `agent.ts:186`) and provider `countTokens` (`core/src/context.ts:44`) | — |
+| 10 | `agentCapabilities` strict → needs bump | **changed**: strip `{tools, permissions}` (`session.ts:105-108`) → adding a capability is free | — |
+| 11 | Persisted file = `JsonSessionStore` + `MESSAGE_KEYS` | **gone**. Persistence = typed log `<uid>.jsonl` (`daemon/src/session-log-file.ts:1-23`), laptop AND `serve`. `message`/`replace` are `critical` (`session-log.ts:127-141,238-250`) but parsed with the strip schema → an older build **half-loads** an image message (*r4*) — forbidden (AGENTS §7 "never half-loads"). Needs an owner-approved critical type or header bump | *r4* |
+| 12 | Images do not survive compaction | holds, and also `context_reset`: both rebuild text-only histories | `compact.ts:25-35`, `context-reset.ts:54-80` |
+| 13 | Sub-agents get a text prompt | holds | `subagent.ts:434` |
+| 14 | Empty text = continuation (image-only prompt lost) | holds | `agent/src/session.ts:144-150` |
+| 15 | Bump only with the first producer | `PROTOCOL_VERSION = 22` (`version.ts:23`); **a new critical log type bumps it** (`session-log.ts:17-19`) | — |
+| 16 | *(new)* checkpoint digest covers a FIXED field list | `canonicalMessage` (`session-log.ts:338-352`) → refs must join it, or drift detection misses them | — |
+| 17 | *(new)* laptop serves `model/stream` by cast, no byte source | `remote-client.ts:2736` → a pod's refs can read nothing on the laptop today (secure default) | — |
+| 18 | *(new)* `"message"` is special-cased in the folds | emitter `session-log.ts:106,115,291`; replay `:341`; disk `session-log-file.ts:142,291,514`; reader `session-log-reader.ts:156,173` | — |
+
+### Split (no XL; owner goal ships at the end of 3b)
+
+| # | Slug / doc | Scope | Type · Size · Blast | Suited | Needs | Parallel (file sets) |
+|---|---|---|---|---|---|---|
+| 1 | `feat/attachments-core` (`attachments-core.md`) | Image **refs** in history end-to-end: protocol ref + log types + bump 23, core types/seam, both providers (vision, placeholders, last-K), agent `Session.send`, pod tunnel, log folds, token/compaction text | feat · M · load-bearing | DeepSeek (strong) + **mandatory fresh-context Review** | — | ∥ 2a, 3a |
+| 2a | `feat/attachments-upload` | `attachment/put` chunked (256 KiB), idempotent, resumable (`have` offset in each ack); daemon per-session content-addressed store (bounded memory; caps); `RemoteClient.upload()` W=2 pacing | feat · M · load-bearing (new RPC writing client bytes to a pod) | strong + mandatory fresh Review | (1's `attachment.ts` id regex) | ∥ 1 (new files + `methods.ts`, `connection.ts`, an upload method in `remote-client.ts`; only `protocol/src/index.ts` export line shared), ∥ 3a |
+| 2b | `feat/attachments-prompt` | prompt block `{type:"attachment", ref}` → `Session.send(…, {attachments})`; daemon store as the `AgentConfig.attachments` source; **laptop scoped source** for `model/stream*` (only hashes this client uploaded); `model.images` config → provider `images` + `agentCapabilities.images` | feat · M · load-bearing (prompt wire, pod trust) | strong + mandatory fresh Review | 1, 2a | ∥ 3a only |
+| 3a | `feat/attachments-tui-detect` | pure modules: dropped/pasted path → image candidates (escaped spaces, quotes, `file://`, `~`), magic-byte sniff, caps, HEIC refusal text | feat · S · contained | weaker model OK + standard Review | — | ∥ 1, 2a, 2b (new `packages/tui/src/*.ts` only) |
+| 3b | `feat/attachments-tui` | wire 3a into `App`: chips in the input view, `/attach`, upload progress (Ink, never raw stdout), `[image: name]` rows live + `resume.ts`, `turn_start` refs for other clients (display update), errors | feat · M · cross-module | strong + standard Review (App frames) | 2b, 3a | — **goal ships here** |
+| 4 | `feat/attachments-durable` | bytes survive: `serve` store on disk with the session (archive/delete GC); laptop CAS cache for `--resume`/pods; re-upload on `open` | feat · M · load-bearing (persistence) | strong + mandatory fresh Review | 3b | ∥ 5, 6 |
+| 5 | `feat/attachments-clipboard` | clipboard image paste (macOS/Wayland/X11 helpers) | feat · S–M · contained | weaker OK | 3b | ∥ 4, 6 |
+| 6 | `feat/attachments-downscale` | client downscale/convert (HEIC→JPEG, long side 1568) if owner Q4 = (a) | feat · S–M · contained | weaker OK | 3b | ∥ 4, 5 |
+| — | `eval/attachments-files` | non-image files → workspace `uploads/<sha>.<ext>` (old sub-task 3 file half) | eval | — | — | any |
+
+Parallelism needs the owner's waiver of AGENTS §10 "one code-task branch at a
+time"; without it, run 1 → 2a → 2b → 3a → 3b strictly in order (3a is the
+cheapest to slot in anywhere because it touches only new files).
+
+Owner questions: see `attachments-core.md` §Owner questions (they cover the
+whole feature; numbers decided there bind every sub-task — parent D10).
 
 ## Context
 
