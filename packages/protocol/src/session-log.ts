@@ -41,6 +41,8 @@ import {
   ChatMessageSchema,
   type MessageWithAttachments,
   MessageWithAttachmentsSchema,
+  type MessageWithoutAttachments,
+  MessageWithoutAttachmentsSchema,
   SessionIdSchema,
   SessionTitleSchema,
   StopReasonSchema,
@@ -128,12 +130,13 @@ export const LogBaseEntrySchema = z.object({
   turn: TurnIdSchema.optional(),
 });
 
-/** Append one message to the projection. */
+/** Append one message to the projection. A message WITH refs rides `media_message` (below):
+ * a plain `message` that carries them is MALFORMED, never half-loaded (review M2). */
 export const LogMessageEntrySchema = z.object({
   ...envelopeShape(),
   ...critical(),
   type: z.literal("message"),
-  message: ChatMessageSchema,
+  message: MessageWithoutAttachmentsSchema,
 });
 
 /** `projection[index] = message` (`index` < the projection's length). */
@@ -142,7 +145,7 @@ export const LogReplaceEntrySchema = z.object({
   ...critical(),
   type: z.literal("replace"),
   index: z.number().int().nonnegative(),
-  message: ChatMessageSchema,
+  message: MessageWithoutAttachmentsSchema,
 });
 
 /**
@@ -337,14 +340,23 @@ export type ReplaceEntryBody = WithoutEnvelope<LogReplaceEntry | LogMediaReplace
 export function appendEntryBody(m: AppendableMessage): EntryBody {
   return hasAttachments(m)
     ? { type: "media_message", critical: true, message: m as MessageWithAttachments }
-    : { type: "message", critical: true, message: m as WireChatMessage };
+    : {
+        type: "message",
+        critical: true,
+        message: m as unknown as MessageWithoutAttachments,
+      };
 }
 
 /** The replace entry for `message` (a `media_replace` when it carries refs). See above. */
 export function replaceEntryBody(index: number, m: AppendableMessage): ReplaceEntryBody {
   return hasAttachments(m)
     ? { type: "media_replace", critical: true, index, message: m as MessageWithAttachments }
-    : { type: "replace", critical: true, index, message: m as WireChatMessage };
+    : {
+        type: "replace",
+        critical: true,
+        index,
+        message: m as unknown as MessageWithoutAttachments,
+      };
 }
 
 /** True for the two entry types that APPEND a message to the projection. */

@@ -1261,7 +1261,7 @@
           "$ref": "#/$defs/LogEntryId"
         },
         "message": {
-          "$ref": "#/$defs/ChatMessage"
+          "$ref": "#/$defs/MessageWithoutAttachments"
         },
         "prev": {
           "maxLength": 256,
@@ -1316,7 +1316,7 @@
           "type": "integer"
         },
         "message": {
-          "$ref": "#/$defs/ChatMessage"
+          "$ref": "#/$defs/MessageWithoutAttachments"
         },
         "prev": {
           "maxLength": 256,
@@ -1731,6 +1731,60 @@
         }
       },
       "required": ["attachments", "content", "role"],
+      "type": "object"
+    },
+    "MessageWithoutAttachments": {
+      "additionalProperties": true,
+      "properties": {
+        "attachments": {
+          "not": {}
+        },
+        "content": {
+          "type": "string"
+        },
+        "contextUsage": {
+          "additionalProperties": true,
+          "properties": {
+            "used": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "window": {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": ["used", "window"],
+          "type": "object"
+        },
+        "denialReply": {
+          "$ref": "#/$defs/PermissionReplyText"
+        },
+        "durationMs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "note": {
+          "$ref": "#/$defs/MessageNote"
+        },
+        "role": {
+          "enum": ["system", "user", "assistant", "tool"],
+          "type": "string"
+        },
+        "spill": {
+          "$ref": "#/$defs/ToolResultSpill"
+        },
+        "toolCallId": {
+          "type": "string"
+        },
+        "toolCalls": {
+          "items": {
+            "$ref": "#/$defs/WireToolCall"
+          },
+          "type": "array"
+        }
+      },
+      "required": ["content", "role"],
       "type": "object"
     },
     "ModelCountTokensParams": {

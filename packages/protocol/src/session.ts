@@ -104,6 +104,26 @@ export const MessageWithAttachmentsSchema = z.object({
 });
 export type MessageWithAttachments = z.infer<typeof MessageWithAttachmentsSchema>;
 
+/**
+ * A message the log stores as a PLAIN `message`/`replace`: the same shape with
+ * `attachments` explicitly ABSENT (review M2). Without this, the media rule held
+ * only by convention: a pod is not trusted (AGENTS §7), so a
+ * `{type:"message", message:{…, attachments:[ref]}}` it returned from
+ * `session/log` would validate, be re-serialized and WRITTEN — and an older
+ * build would then load that line and strip the refs, a half-load of data this
+ * build "validated". A plain entry carrying refs is now a MALFORMED entry,
+ * refused loudly (never written as-is); refs belong on
+ * `media_message`/`media_replace`.
+ *
+ * `z.undefined()` (not `.optional()`) is what makes a PRESENT key a failure; it
+ * exports as `{"not":{}}`, which the JSON-Schema exporter represents.
+ */
+export const MessageWithoutAttachmentsSchema = z.object({
+  ...chatMessageShape(),
+  attachments: z.undefined(),
+});
+export type MessageWithoutAttachments = z.infer<typeof MessageWithoutAttachmentsSchema>;
+
 // --- initialize ---------------------------------------------------------
 
 export const ClientCapabilitiesSchema = z.object({

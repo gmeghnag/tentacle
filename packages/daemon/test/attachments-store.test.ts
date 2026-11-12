@@ -12,8 +12,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AttachmentRef, ChatMessage } from "@tentacle/core";
 import { type KnownLogEntry, appendEntryBody } from "@tentacle/protocol";
-import { headerLine } from "../src/session-log-file.ts";
+import {
+  DAEMON_STATE_VERSION,
+  DAEMON_STATE_VERSIONS,
+  DAEMON_STATE_VERSION_NO_MEDIA,
+  type DaemonSidecar,
+  encodeSidecar,
+  parseSidecar,
+  sidecarOf,
+} from "../src/daemon-state-file.ts";
+import type { DaemonSessionRecord } from "../src/persisted-session.ts";
+import { entryLines, headerLine } from "../src/session-log-file.ts";
 import { LogSessionStore } from "../src/session-log-store.ts";
+import { type SessionFiles, decodeFiles } from "./support/daemon-store-spy.ts";
 import { FakeLog, FakeReader, META, asst, user } from "./support/log-fixture.ts";
 
 let dir: string;
@@ -71,6 +82,105 @@ describe("T4 — save → load keeps the refs", () => {
     const result = await store.load("s");
     if (result.status !== "ok") throw new Error(`load failed: ${result.status}`);
     expect(result.record.messages[0]?.attachments).toEqual([ref()]);
+  });
+});
+
+describe("M1 — the state file is versioned for image refs (never half-loaded)", () => {
+  // The `serve` sidecar's `tail` is a prompt accepted but not yet committed. An
+  // OLDER build parses it with a `ChatMessageSchema` that strips `attachments`,
+  // then appends it as a plain `message`: a silent half-load. So the version
+  // number — not a schema — is what protects it, exactly as the critical media
+  // log entry type protects the log.
+  const recordWith = (messages: readonly ChatMessage[]): DaemonSessionRecord => ({
+    id: "s",
+    cwd: "/w",
+    model: "m",
+    createdAt: 1,
+    updatedAt: 2,
+    title: "t",
+    messages,
+    lastActiveAt: 3,
+    turns: [],
+    enqueueIds: [],
+    returned: [],
+    // Nothing shared with the log: the whole history is the overlay.
+    logged: [],
+    logHead: { seq: 1, id: "d/1" },
+    paired: true,
+    loadNotes: [],
+  });
+
+  test("a tail with refs is written schemaVersion 2; without refs, 1", () => {
+    expect(sidecarOf(recordWith([user("hi")])).schemaVersion).toBe(DAEMON_STATE_VERSION_NO_MEDIA);
+    expect(sidecarOf(recordWith([user("hi"), imageMessage()])).schemaVersion).toBe(
+      DAEMON_STATE_VERSION,
+    );
+    // The refs themselves survive: the bump is not instead of carrying them.
+    expect(sidecarOf(recordWith([imageMessage()])).tail[0]?.attachments).toEqual([ref()]);
+  });
+
+  test("the reader accepts BOTH versions, and a v2 file keeps its refs", () => {
+    // v1: no refs anywhere (every build can read it).
+    const plain = encodeSidecar(sidecarOf(recordWith([user("hi")])));
+    expect(JSON.parse(plain).schemaVersion).toBe(DAEMON_STATE_VERSION_NO_MEDIA);
+    const plainParsed = parseSidecar(plain, "s");
+    if (!plainParsed.ok) throw new Error(`v1 refused: ${plainParsed.reason}`);
+    expect(plainParsed.value.tail).toEqual([user("hi")]);
+
+    // v2: the tail carries refs, and they survive the round trip.
+    const media = encodeSidecar(sidecarOf(recordWith([user("hi"), imageMessage()])));
+    expect(JSON.parse(media).schemaVersion).toBe(DAEMON_STATE_VERSION);
+    const mediaParsed = parseSidecar(media, "s");
+    if (!mediaParsed.ok) throw new Error(`v2 refused: ${mediaParsed.reason}`);
+    expect(mediaParsed.value.tail[1]?.attachments).toEqual([ref()]);
+    // A v2 file WITHOUT refs is read too: a build may bump without adding one.
+    const v2NoRefs = encodeSidecar({
+      ...sidecarOf(recordWith([user("hi")])),
+      schemaVersion: DAEMON_STATE_VERSION,
+    });
+    expect(parseSidecar(v2NoRefs, "s").ok).toBe(true);
+  });
+
+  test("an OLDER daemon (v1-only) refuses v2 loudly and leaves the files untouched", () => {
+    // The older build, modelled exactly: it accepts ONLY version 1, and its
+    // message schema strips `attachments` (that is why v2 exists).
+    const olderAccepts = (text: string): "ok" | string => {
+      const value = JSON.parse(text) as { schemaVersion?: unknown };
+      return value.schemaVersion === 1
+        ? "ok"
+        : `state file schemaVersion ${JSON.stringify(value.schemaVersion)} is not 1 (written by another tentacle version): update tentacle`;
+    };
+    const text = encodeSidecar(sidecarOf(recordWith([imageMessage()])));
+    expect(olderAccepts(text)).toContain("is not 1");
+
+    // And the reload path really carries the refs: a paired sidecar (its
+    // `logHead` the log's last entry, `k` its projection's length) rebuilds
+    // the record with the overlay's refs intact.
+    const logEntries = new FakeLog("D1").base([user("hi")]);
+    const head = logEntries.at(-1);
+    if (head === undefined) throw new Error("no log entries");
+    const paired = encodeSidecar({
+      ...sidecarOf(recordWith([imageMessage()])),
+      k: 1,
+      logHead: { seq: head.seq, id: head.id },
+    });
+    const files: SessionFiles = {
+      log: `${headerLine({ id: "s", ...META })}${entryLines(logEntries)}`,
+      state: paired,
+    };
+    expect(decodeFiles("s", files).messages.at(-1)?.attachments).toEqual([ref()]);
+    // An older build's refusal is the version check, and it fires before any
+    // message parse: the reason names the version, never a stripped tail.
+    expect(olderAccepts(paired)).toContain("is not 1");
+  });
+
+  test("a v1 file that DOES carry refs is refused (it must be 2), never loaded", () => {
+    const text = encodeSidecar({
+      ...sidecarOf(recordWith([imageMessage()])),
+      schemaVersion: DAEMON_STATE_VERSION_NO_MEDIA,
+    });
+    const parsed = parseSidecar(text, "s");
+    expect(parsed.ok ? "ok" : parsed.reason).toContain("carries image refs");
   });
 });
 

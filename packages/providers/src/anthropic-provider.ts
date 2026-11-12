@@ -28,8 +28,11 @@ import type {
 } from "@tentacle/core";
 import { wireArguments } from "@tentacle/core";
 import {
+  ANTHROPIC_MAX_IMAGE_BYTES,
   type ImageBuildOptions,
+  MAX_INLINE_IMAGES,
   NO_IMAGES,
+  effectiveMaxImageBytes,
   resolveImages,
   selectInlineIds,
   strayRefsText,
@@ -69,6 +72,13 @@ export interface AnthropicProviderConfig {
    * never read and the model sees a text placeholder instead.
    */
   readonly images?: boolean;
+  /**
+   * The most raw bytes ONE image may have on this model's wire. Defaults to
+   * `ANTHROPIC_MAX_IMAGE_BYTES` (5 MB of base64, the documented cap). An image
+   * over it is never read and never sent — a placeholder naming the limit takes
+   * its place, so it can never become a 400 on every later turn of the session.
+   */
+  readonly maxImageBytes?: number;
 }
 
 /** A content block while streaming: text/thinking accumulate, tool_use buffers JSON. */
@@ -135,9 +145,17 @@ export class AnthropicProvider implements ModelProvider {
   private async imageOptions(request: ChatRequest): Promise<ImageBuildOptions> {
     const vision = this.config.images ?? true;
     const inlined = selectInlineIds(request.messages);
+    const maxImageBytes = effectiveMaxImageBytes(
+      this.config.maxImageBytes ?? ANTHROPIC_MAX_IMAGE_BYTES,
+    );
     return vision
-      ? { images: await resolveImages(request), vision, inlined }
-      : { images: new Map(), vision, inlined };
+      ? {
+          images: await resolveImages(request, MAX_INLINE_IMAGES, maxImageBytes),
+          vision,
+          inlined,
+          maxImageBytes,
+        }
+      : { images: new Map(), vision, inlined, maxImageBytes };
   }
 
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
@@ -421,7 +439,12 @@ export function buildPayload(
       // belong in a single message (the harness emits one tool message per
       // call, in order).
       const prev = messages.at(-1);
-      if (prev !== undefined && toolTurns.has(prev) && Array.isArray(prev.content)) {
+      if (
+        prev !== undefined &&
+        prev.role === "user" &&
+        Array.isArray(prev.content) &&
+        toolTurns.has(prev)
+      ) {
         (prev.content as Record<string, unknown>[]).push({
           type: "tool_result",
           tool_use_id: message.toolCallId ?? "",
@@ -445,7 +468,7 @@ export function buildPayload(
     }
     // A user message with refs: images first, then its text (D10).
     if (message.role === "user" && (message.attachments?.length ?? 0) > 0) {
-      const parts = userParts(message, options.images, options.vision, options.inlined);
+      const parts = userParts(message, options);
       messages.push({
         role: "user",
         content: parts.map((part) =>
@@ -461,7 +484,7 @@ export function buildPayload(
     }
     // user / assistant. Plain text stays a string (the simplest valid form);
     // only a tool-bearing assistant turn needs content blocks (text + tool_use).
-    const stray = strayRefsText(message, options.vision, options.images);
+    const stray = strayRefsText(message, options);
     const calls = message.toolCalls ?? [];
     if (calls.length === 0) {
       // The API rejects empty content; the loop can persist an empty assistant

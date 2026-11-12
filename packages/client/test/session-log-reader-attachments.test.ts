@@ -106,4 +106,23 @@ describe("T5 — a page with a media entry is applied, not refused", () => {
     expect(second.state.digests).toEqual(first.state.digests);
     expect(second.drift).toBeUndefined();
   });
+
+  // Review M2: a pod is not trusted. The reader is the gate between what a pod
+  // says and what the laptop WRITES, so a plain `message` carrying refs must be
+  // refused here — before it can reach `<uid>.jsonl` and be half-loaded later.
+  test("a forge: a PLAIN message entry carrying refs is refused, not projected", () => {
+    const log = newLog();
+    log.start([m("system", "S")], "create");
+    const forged = pages(log);
+    const last = forged.at(-1);
+    if (last === undefined) throw new Error("no page");
+    const entries = last.entries.map((entry) =>
+      entry.type === "message"
+        ? { ...entry, message: { role: "user", content: "hi", attachments: [ref()] } }
+        : entry,
+    );
+    const applied = applyLogRead(null, [{ ...last, entries }], sha256);
+    // An error, not a projection: `applyLogRead`'s failure shape.
+    expect("error" in applied ? applied.error : "applied").toContain("malformed message entry");
+  });
 });

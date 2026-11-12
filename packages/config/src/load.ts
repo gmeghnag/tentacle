@@ -150,6 +150,11 @@ export interface TentacleConfig {
   /** The model's `context_reset` tool and its cap (on a pod: its own env and file, else the laptop's, carried). */
   readonly contextReset: ResolvedConfig["contextReset"];
   readonly maxTokens?: number;
+  /**
+   * `model.maxImageBytes`: raw bytes one image may have on this model's wire
+   * (docs/feat/attachments-core.md, review H1). Unset → the provider's default.
+   */
+  readonly maxImageBytes?: number;
   readonly systemPrompt: string;
   /** The identity part of `systemPrompt`: with `agentsMdContent`, what a recompose needs. */
   readonly promptIdentity: string;
@@ -849,6 +854,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     contextAwareness: resolved.contextAwareness,
     contextReset: resolved.contextReset,
     ...(resolved.maxTokens !== undefined ? { maxTokens: resolved.maxTokens } : {}),
+    ...(resolved.maxImageBytes !== undefined ? { maxImageBytes: resolved.maxImageBytes } : {}),
     systemPrompt: resolved.systemPrompt,
     promptIdentity: resolved.promptIdentity,
     ...(agentsMd !== undefined ? { agentsMdContent: agentsMd } : {}),

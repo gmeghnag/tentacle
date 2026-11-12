@@ -22,7 +22,10 @@ import type {
 import { DsmlToolCallLeakError, hasDsmlToolCallMarkup, wireArguments } from "@tentacle/core";
 import {
   type ImageBuildOptions,
+  MAX_INLINE_IMAGES,
   NO_IMAGES,
+  OPENAI_MAX_IMAGE_BYTES,
+  effectiveMaxImageBytes,
   resolveImages,
   selectInlineIds,
   strayRefsText,
@@ -49,6 +52,13 @@ export interface OpenAIProviderConfig {
    * unknown model an image block is a 400. `model.images: true` opts in.
    */
   readonly images?: boolean;
+  /**
+   * The most raw bytes ONE image may have on this endpoint. Defaults to
+   * `OPENAI_MAX_IMAGE_BYTES`, deliberately conservative: the model behind an
+   * OpenAI-compatible URL is unknown (a local llama.cpp may take less than any
+   * documented cloud cap). An image over it is never read or sent.
+   */
+  readonly maxImageBytes?: number;
 }
 
 /** Thrown when the endpoint returns a non-2xx response. */
@@ -162,9 +172,17 @@ export class OpenAIProvider implements ModelProvider {
   private async imageOptions(request: ChatRequest): Promise<ImageBuildOptions> {
     const vision = this.config.images ?? false;
     const inlined = selectInlineIds(request.messages);
+    const maxImageBytes = effectiveMaxImageBytes(
+      this.config.maxImageBytes ?? OPENAI_MAX_IMAGE_BYTES,
+    );
     return vision
-      ? { images: await resolveImages(request), vision, inlined }
-      : { images: new Map(), vision, inlined };
+      ? {
+          images: await resolveImages(request, MAX_INLINE_IMAGES, maxImageBytes),
+          vision,
+          inlined,
+          maxImageBytes,
+        }
+      : { images: new Map(), vision, inlined, maxImageBytes };
   }
 
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
@@ -337,7 +355,7 @@ function toWireMessage(
   // A user message with refs: images first, then its text (docs/feat/attachments-core.md,
   // D10). `image_url` wants a data URL; an image-only prompt keeps its message.
   if (message.role === "user" && (message.attachments?.length ?? 0) > 0) {
-    const parts = userParts(message, options.images, options.vision, options.inlined);
+    const parts = userParts(message, options);
     const wire: Record<string, unknown> = {
       role: "user",
       content: parts.map((part) =>
@@ -355,7 +373,7 @@ function toWireMessage(
     }
     return wire;
   }
-  const stray = strayRefsText(message, options.vision, options.images);
+  const stray = strayRefsText(message, options);
   const wire: Record<string, unknown> = {
     role: message.role,
     content: `${message.content}${stray}`,

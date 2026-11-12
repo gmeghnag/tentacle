@@ -38,6 +38,34 @@ function sourceOf(
   };
 }
 
+/**
+ * A ref whose bytes are `size` zero bytes, and the source bytes that MATCH it.
+ * Allocated once per call so a multi-MB ref costs one buffer, not a copy per
+ * read (`Buffer.from(bytes)` inside the provider is the only one).
+ */
+function bigRef(
+  size: number,
+  over: Partial<AttachmentRef> = {},
+): { readonly ref: AttachmentRef; readonly bytes: Uint8Array } {
+  const bytes = new Uint8Array(size);
+  return { ref: { id: sha(bytes), mimeType: "image/png", size, ...over }, bytes };
+}
+
+/** A source keyed by REF, holding real bytes (a multi-MB ref cannot be a string). */
+function sourceBytesOf(
+  entries: readonly { bytes: Uint8Array; ref: AttachmentRef }[],
+): AttachmentSource & { reads: string[] } {
+  const reads: string[] = [];
+  const byId = new Map(entries.map((e) => [e.ref.id, e.bytes]));
+  return {
+    reads,
+    async read(ref: AttachmentRef): Promise<Uint8Array | null> {
+      reads.push(ref.id);
+      return byId.get(ref.id) ?? null;
+    },
+  };
+}
+
 const user = (content: string, attachments?: AttachmentRef[]): ChatMessage =>
   attachments === undefined ? { role: "user", content } : { role: "user", content, attachments };
 
@@ -79,13 +107,14 @@ afterAll(() => {
 /** Run a request and give back the body the provider POSTed. */
 async function bodyFor(
   request: ChatRequest,
-  config: { images?: boolean } = {},
+  config: { images?: boolean; maxImageBytes?: number } = {},
 ): Promise<Record<string, unknown>> {
   lastBody = undefined;
   const provider = new AnthropicProvider({
     baseURL,
     model: "m",
     ...(config.images !== undefined ? { images: config.images } : {}),
+    ...(config.maxImageBytes !== undefined ? { maxImageBytes: config.maxImageBytes } : {}),
   });
   for await (const _ of provider.stream(request)) {
     // drain
@@ -253,6 +282,40 @@ describe("an image that cannot be sent is a VISIBLE placeholder, never nothing",
     expect(source.reads).not.toContain(refs[0]?.id as string);
   });
 
+  // Review H1: the global 15 MiB cap is the ENTRY-POINT bound, not the model's.
+  // Anthropic caps an image at 5 MB of base64 (3,932,160 raw, to verify): an
+  // image over it is a 400 for this request AND for every later turn, because
+  // the history is resent — a poisoned session. It must never be read or sent.
+  test("an image over the MODEL's cap is never read or sent, and names the limit", async () => {
+    const big = bigRef(10 * 1024 * 1024, { name: "huge.png" });
+    const source = sourceBytesOf([{ bytes: big.bytes, ref: big.ref }]);
+    const body = await bodyFor({ messages: [user("look", [big.ref])], attachments: source });
+    expect(source.reads).toEqual([]);
+    expect(JSON.stringify(contentOf(body))).not.toContain('"type":"image"');
+    const label = `huge.png sha256:${big.ref.id.slice(0, 12)}`;
+    expect(contentOf(body)).toEqual([
+      { type: "text", text: `[image omitted: 10 MB is over this model's 3.8 MB limit — ${label}]` },
+      { type: "text", text: "look" },
+    ]);
+  });
+
+  test("a per-model override RAISES the cap (the config decides, not a hard-coded default)", async () => {
+    // 4 MiB: over anthropic's documented default (3.75 MiB), under a model
+    // that declares it takes more.
+    const big = bigRef(4 * 1024 * 1024);
+    const source = sourceBytesOf([{ bytes: big.bytes, ref: big.ref }]);
+    const blocked = await bodyFor({ messages: [user("", [big.ref])], attachments: source });
+    expect(source.reads).toEqual([]);
+    expect(JSON.stringify(contentOf(blocked))).not.toContain('"type":"image"');
+
+    const raised = await bodyFor(
+      { messages: [user("", [big.ref])], attachments: source },
+      { maxImageBytes: 8 * 1024 * 1024 },
+    );
+    expect(source.reads).toEqual([big.ref.id]);
+    expect(JSON.stringify(contentOf(raised))).toContain('"type":"image"');
+  });
+
   test("an assistant message that carries refs (only a pod could) gets a placeholder LINE", async () => {
     const one = refFor("x", { name: "cat.png" });
     const body = await bodyFor({
@@ -262,22 +325,83 @@ describe("an image that cannot be sent is a VISIBLE placeholder, never nothing",
   });
 });
 
+describe("the cap keeps a session ALIVE (never a 400 on every later turn)", () => {
+  test("a 10 MB image: no request carries it, the limit is named, the NEXT turn works", async () => {
+    // The reviewer's scenario C: the API 400s on an over-limit image, the
+    // history is resent every round, and the image stays among the last 5 —
+    // so EVERY later turn fails. This fake endpoint does exactly that.
+    const big = bigRef(10 * 1024 * 1024, { name: "huge.png" });
+    const bodies: Record<string, unknown>[] = [];
+    const fakeFetch = (async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      bodies.push(body);
+      if (JSON.stringify(body).includes('"type":"image"')) {
+        return new Response('{"error":"image exceeds 5 MB"}', { status: 400 });
+      }
+      return new Response(DONE_SSE, { headers: { "content-type": "text/event-stream" } });
+    }) as unknown as typeof fetch;
+    const provider = new AnthropicProvider({
+      baseURL: "http://fake/v1",
+      model: "m",
+      fetch: fakeFetch,
+    });
+    const source = sourceBytesOf([{ bytes: big.bytes, ref: big.ref }]);
+
+    const ask = async (messages: ChatMessage[]): Promise<string> => {
+      let text = "";
+      for await (const event of provider.stream({ messages, attachments: source })) {
+        if (event.type === "text") {
+          text += event.delta;
+        }
+      }
+      return text;
+    };
+    const history: ChatMessage[] = [user("look", [big.ref])];
+    expect(await ask(history)).toBe("ok");
+    history.push({ role: "assistant", content: "ok" }, user("and now?"));
+    // The over-limit image is still in the history (resent), and still safe.
+    expect(await ask(history)).toBe("ok");
+
+    expect(bodies).toHaveLength(2);
+    for (const body of bodies) {
+      expect(JSON.stringify(body)).not.toContain('"type":"image"');
+    }
+    // The user sees WHICH image and WHICH limit, on both turns.
+    for (const body of bodies) {
+      expect(JSON.stringify(body)).toContain("10 MB is over this model's 3.8 MB limit");
+      expect(JSON.stringify(body)).toContain("huge.png");
+    }
+    // And the image is never read at all.
+    expect(source.reads).toEqual([]);
+  });
+});
+
 describe("the tool-result merge never swallows a multimodal user turn", () => {
-  test("a tool message AFTER a user message with images starts its own turn", async () => {
-    const one = refFor("x");
+  // DIRECTLY after the multimodal turn: that is what makes `prev` the image
+  // turn, so the guard is the only thing that can keep the `tool_result` out
+  // of it. With an `assistant` message in between, `prev` is never the image
+  // turn and the case passes whatever the guard says (review M3).
+  test("a tool message RIGHT AFTER a user message with images starts its own turn", async () => {
+    const one = refFor("x", { name: "cat.png" });
     const body = await bodyFor({
-      messages: [
-        user("look", [one]),
-        { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "run", arguments: "{}" }] },
-        { role: "tool", content: "done", toolCallId: "c1" },
-      ],
+      messages: [user("look", [one]), { role: "tool", content: "done", toolCallId: "c1" }],
       attachments: sourceOf([{ text: "x", ref: one }]),
     });
     const messages = body.messages as Record<string, unknown>[];
-    expect(messages).toHaveLength(3);
-    expect(messages[1]?.role).toBe("assistant");
-    // Its own user turn of `tool_result` blocks, not pushed into the image turn.
-    expect(messages[2]).toEqual({
+    expect(messages).toHaveLength(2);
+    // The image turn is untouched: no `tool_result` block pushed into it.
+    expect(messages[0]).toEqual({
+      role: "user",
+      content: [
+        {
+          type: "image",
+          source: { type: "base64", media_type: "image/png", data: b64(bytesOf("x")) },
+        },
+        { type: "text", text: "look" },
+      ],
+    });
+    // Its own user turn of `tool_result` blocks, not merged into the image turn.
+    expect(messages[1]).toEqual({
       role: "user",
       content: [{ type: "tool_result", tool_use_id: "c1", content: "done" }],
     });

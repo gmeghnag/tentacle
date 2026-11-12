@@ -470,7 +470,7 @@ Plan approved for execution.
 
 ## Execution
 
-*— claude-sonnet-4-5, 2026-11-12*
+*— deepseek (tentacle --profile deepseek), 2026-11-12*
 
 ### Load-bearing check (re-run first, as the plan requires)
 
@@ -649,6 +649,158 @@ T5 reader, T13).
   provider assertion is on the captured request body via an injected `fetch`.
   A live end-to-end image send needs the producer (`2b`/`3b`), which this task
   deliberately does not add.
+
+### Round 1 (fix) — H1, M1, M2, M3
+
+*— deepseek (tentacle --profile deepseek), 2026-11-12*
+
+All four findings applied in the reviewer's order, each with the fix it named.
+Every new test was shown RED on the un-fixed code (by mutation where the fix
+was already in place — noted per finding).
+
+**H1 — a per-provider image cap, checked before any read.** A second cap now
+exists beside the entry-point bound (`MAX_IMAGE_BYTES`, 15 MiB):
+`maxImageBytes`, on `ImageBuildOptions`, `AnthropicProviderConfig`,
+`OpenAIProviderConfig` and `CreateModelProviderOptions`, with defaults
+`ANTHROPIC_MAX_IMAGE_BYTES = 3_932_160` (5 MB of base64 ⇒ 3.75 MiB raw, per
+Anthropic's documented per-image cap — **TO VERIFY** against the live API, as
+the owner said) and `OPENAI_MAX_IMAGE_BYTES = 5 MiB` (deliberately
+conservative: the model behind an OpenAI-compatible URL is unknown).
+`sendable()`/`resolveImages()` apply it, so an over-limit image is **never
+read**; `placeholder()` names the image AND the model's limit
+(`[image omitted: 10 MB is over this model's 3.8 MB limit — huge.png
+sha256:…]`). Nothing else had to change to avoid the poisoned session: the
+placeholder is in the message's slot, so the history stays valid and the next
+turn is built the same safe way.
+- Config override per model: `model.maxImageBytes` (skipped by `models`),
+  `models.*.maxImageBytes`, threaded `schema.ts → resolve → models → load →
+  cli/model-provider.ts → select-provider.ts`; documented in `key-docs.ts`
+  (both entries) and the README table regenerated (`bun run docs:config`).
+- `userParts`/`strayRefsText` now take the whole `ImageBuildOptions` (one
+  parameter instead of three, so a new cap cannot be forgotten at a call site) —
+  drift 2 below.
+- Tests (`anthropic-images.test.ts` +3, `openai-images.test.ts` +1): a 10 MB
+  PNG on anthropic → no image block in the body, `read` never called, the named
+  limit; a 4 MiB image blocked by default and sent with
+  `maxImageBytes: 8 MiB`; the openai 6 MiB default. The poisoned-session case is
+  the reviewer's scenario C end to end: a fake endpoint that 400s on any
+  `"type":"image"`, two turns over the same history → **both** answer `ok`, no
+  request carries the image, both name the limit, zero reads.
+- **RED**: reverting `sendable` to ignore `max` (mutation E) fails 4 of these.
+
+**M1 — the sidecar's version tracks its tail's refs.** `sidecarOf` stamps
+`schemaVersion: 2` only when some `tail` message `hasAttachments`, else 1
+(`DAEMON_STATE_VERSION = 2`, `DAEMON_STATE_VERSION_NO_MEDIA = 1`); the reader
+accepts `DAEMON_STATE_VERSIONS = [1, 2]` and additionally refuses a **v1 file
+that carries refs** (it must be 2 — the older build's silent strip is exactly
+what the bump prevents). An older daemon's `!== 1` check then refuses the one
+session loudly and leaves both files untouched, which mirrors the media entry
+rule.
+- Tests (`attachments-store.test.ts`, new M1 block, 4): stamp 2 with refs / 1
+  without; both versions read, refs preserved, a v2 file without refs accepted;
+  the older-daemon refusal (v1-only) naming the version, plus the v2 reload
+  through `parseSidecar` → `rebuild` → `decodeFiles` carrying the refs; a v1
+  file WITH refs refused. `persistence.test.ts`'s "another state version" case
+  moved from 2 to 3 (2 is now valid).
+- **RED**: stamping always 1 fails 3 of the 4.
+
+**M2 — a plain `message`/`replace` may not carry refs.** New
+`MessageWithoutAttachmentsSchema` (`chatMessageShape()` +
+`attachments: z.undefined()`), used by `LogMessageEntrySchema` and
+`LogReplaceEntrySchema`; `media_message`/`media_replace` keep
+`MessageWithAttachmentsSchema`. A pod-sent `message` with refs is now a
+malformed entry: the laptop's reader (`KnownLogEntrySchema` →
+`parseEntry`) refuses the read with `malformed message entry`, so the store
+never writes it — and nothing can be half-loaded later.
+- Two follow-on edits the export forced: `SUPPORTED_KINDS` gains
+  `ZodUndefined` (it emits `{"not":{}}`, the one shape that accepts NOTHING),
+  and `UNKNOWN_ALLOWED` lists that inner `not` pointer with the reason.
+  `protocol.json` regenerated.
+- `appendEntryBody`/`replaceEntryBody` cast through `MessageWithoutAttachments`
+  (a `WireChatMessage` may carry refs; the body type may not — the invariant is
+  now in the TYPE, not only in the boolean).
+- Tests: `protocol/test/plain-entry-refs.test.ts` (new, 6) — the reviewer's
+  repro A shape fails `KnownLogEntrySchema`, the error path is
+  `message.attachments`, `replace` too, a JSON round trip of an absent key still
+  passes, both media types still accept refs, and the two emitter helpers keep
+  the invariant; plus `session-log-reader-attachments.test.ts` +1 (a forged
+  plain entry carrying refs → `malformed message entry`, not a projection).
+- **RED**: switching both schemas back to `ChatMessageSchema` fails 3 of 6
+  (protocol) and 1 of 5 (reader).
+
+**M3 — the tool-merge guard test is now real.** The case is the reviewer's
+shape: `user("look", [one])` followed DIRECTLY by the tool message (no
+`assistant` in between, which is what made `prev` the image turn), asserting 2
+messages, `messages[0]` the unchanged image turn, `messages[1]` its own
+`tool_result` turn.
+- **RED**: reverting the guard to `prev.role === "user" && Array.isArray(prev.content)`
+  → 1 fail, `Received length: 1` (the `tool_result` merged into the image turn).
+
+**Signature.** `## Execution`'s signature said `claude-sonnet-4-5`; the
+executor was DeepSeek. Corrected.
+
+### Mutations run this round
+
+The plan's ten (all re-run or completed here; both of the two the first
+Execution skipped are now covered), plus three for this round's fixes.
+
+| # | Mutation | Killed |
+|---|---|---|
+| 1 | `toWireRequest` drops `attachments` (proxy-model) | 3 fail: T6 ×2, T13 |
+| 2 | `ChatMessageSchema` loses `attachments` | 11 fail: T1 ×11 |
+| 3 | `appendEntryBody` always returns `message` | 4 fail: T3/T4 |
+| 4 | `projectEntry` drops the `media_message` case | 6 fail: T2, T4 ×2, T5 ×3 |
+| 5 | `canonicalMessage` always appends the refs element | 3 fail: C9 vector pin, no-ref byte-identity, refs element |
+| 6 | `resolveImages` skips the sha256 check | 2 fail: T8 and T9 mismatch |
+| 7 | anthropic ignores `images: false` (`vision = true`) | 1 fail: T8 no-vision + NOT ONE READ |
+| 8 | `Session.send` back to `text !== ""` | 1 fail: T10 image-only prompt |
+| 9 | **the tool-merge guard reverted** (the plan's skipped one) | 1 fail: T8 merge case |
+| 10 | one agent `ChatRequest` site drops `attachments` | 1 fail: T11 |
+| 11 | **H1**: `sendable` ignores the model cap | 4 fail: the two cap tests, the override, the poisoned-session case |
+| 12 | **M1**: the sidecar stamps 1 always | 3 fail: stamp, both-versions, older-daemon |
+| 13 | **M2**: both plain schemas back to `ChatMessageSchema` | 3 fail (protocol) + 1 fail (reader forge) |
+
+Restored by copying saved files back; `git status` shows only the intended
+files.
+
+### Gate (round 1)
+
+- `bunx tsc --noEmit` — clean.
+- `bun run lint` (`biome check .`) — clean, 910 files, **0 errors 0 warnings**
+  (the baseline; `biome check --write` was applied once for formatting/import
+  order in the nine touched files).
+- `bun test` — **7016 pass, 3 skip, 0 fail** across 512 files (~308 s). The 3
+  skips are the documented opt-ins (live-k8s, live-docker, the real-socket
+  keepalive). Two existing tests moved because a version number they pinned as
+  "unreadable" is now readable: `daemon/test/persistence.test.ts` (2 → 3) and
+  `cli/test/serve-persistence.test.ts`'s A11 `newer` record (2 → 3) — both are
+  the `DAEMON_STATE_VERSIONS` set, and 2 is the image-refs version now.
+- `apps/mobile` was NOT typechecked (its deps are absent in this worktree), as
+  in the first Execution: nothing here touches `apps/`.
+- **Unverified:** `ANTHROPIC_MAX_IMAGE_BYTES` is Anthropic's documented 5 MB
+  per-image payload, converted to 3.75 MiB raw. Neither figure was checked
+  against the live API in this round. It is deliberately the SAFE direction (a
+  wrong-but-lower cap costs a placeholder, never a 400 loop).
+
+### Drift from the Investigation (round 1)
+
+1. **`model.maxImageBytes` reaches the wire through six files** (schema →
+   resolve → models → load → cli → select-provider), more than the review's
+   "put it on `AnthropicProviderConfig`/`OpenAIProviderConfig`/
+   `CreateModelProviderOptions`" named. The extra files are what makes it a
+   CONFIG override per model rather than a code constant; the review's wording
+   asks for both, and a key that `schema.ts` rejects would not be an override.
+   `cli/test/explain.test.ts`'s sub-key counts moved (`model` 9→10, `models`
+   10→11) because two keys were added — the same class as the 22-pins the first
+   Execution hit.
+2. **`userParts`/`strayRefsText` take `ImageBuildOptions`** instead of
+   `(images, vision, inlined)` / `(vision, images)`. The cap is a fourth thing a
+   placeholder needs; passing the options object means a future field (a fifth
+   reason) cannot be silently dropped at a call site. Call sites: 2.
+3. **`parseSidecar` refuses a v1 file that carries refs**, which the review did
+   not ask for. Without it a hand-edited or older-tool-written file could still
+   half-load; with it the invariant is "a version stamp and its content agree",
+   checkable at the reader. No file this build writes hits it.
 
 ## Review
 

@@ -181,6 +181,40 @@ describe("the default is NO vision: not one byte is read", () => {
     expect(JSON.stringify(contentOf(body))).toContain("does not take images");
   });
 
+  test("an image over the OPENAI-COMPATIBLE default cap (5 MiB) is never read", async () => {
+    // Review H1: the global 15 MiB entry-point bound is not the endpoint's. The
+    // default here is deliberately conservative (the model behind the URL is
+    // unknown); `model.maxImageBytes` raises it.
+    const size = 6 * 1024 * 1024;
+    const bytes = new Uint8Array(size);
+    const ref: AttachmentRef = {
+      id: createHash("sha256").update(bytes).digest("hex"),
+      mimeType: "image/png",
+      size,
+      name: "big.png",
+    };
+    let reads = 0;
+    const source: AttachmentSource = {
+      async read(): Promise<Uint8Array | null> {
+        reads += 1;
+        return bytes;
+      },
+    };
+    const body = await bodyFor(
+      { messages: [user("look", [ref])], attachments: source },
+      {
+        images: true,
+      },
+    );
+    expect(reads).toBe(0);
+    expect(JSON.stringify(contentOf(body))).not.toContain("image_url");
+    const label = `big.png sha256:${ref.id.slice(0, 12)}`;
+    expect(contentOf(body)).toEqual([
+      { type: "text", text: `[image omitted: 6 MB is over this model's 5 MB limit — ${label}]` },
+      { type: "text", text: "look" },
+    ]);
+  });
+
   test("an assistant message with refs gets a placeholder LINE either way", async () => {
     const one = refFor("x", { name: "cat.png" });
     const body = await bodyFor({

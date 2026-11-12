@@ -7,6 +7,13 @@
  * detected and the image is replaced by a visible placeholder — never sent as
  * "some image", never silently dropped.
  *
+ * Two caps, not one (review H1). `MAX_IMAGE_BYTES` (15 MiB) is what an ENTRY
+ * POINT accepts; a model's own cap is lower and is the one that decides what
+ * reaches the wire. An image over it is a 400 for THIS request and for every
+ * later turn (the history is resent), so it is checked here, BEFORE any read:
+ * the request carries a placeholder naming the image and the model's limit, and
+ * the session stays usable.
+ *
  * Pure except for `source.read`: selection (`selectInlineIds`), the parts of a
  * message (`userParts`) and the placeholder text are all testable without I/O.
  */
@@ -17,6 +24,25 @@ import { MAX_IMAGE_BYTES, isKnownImageType } from "@tentacle/protocol";
 
 /** How many images one request may inline: the last K distinct refs (owner Q4). */
 export const MAX_INLINE_IMAGES = 5;
+
+/**
+ * The most raw image bytes a model's wire accepts, by provider.
+ *
+ * Anthropic documents **5 MB per image** as the limit of the base64 payload,
+ * which is 3.75 MiB of raw bytes (`5 MB × 3/4 = 3,932,160`, the figure the
+ * owner's answer uses). **TO VERIFY** against the live API: the exact cap and
+ * whether it counts raw or base64 bytes. Kept at the documented 3.75 MiB
+ * because a wrong cap in the SAFE direction costs a placeholder, while one too
+ * high is a 400 on every turn of the session.
+ */
+export const ANTHROPIC_MAX_IMAGE_BYTES = 3_932_160;
+
+/**
+ * The default for an OpenAI-COMPATIBLE endpoint: deliberately conservative,
+ * because we cannot know the model behind it (a local llama.cpp may take less
+ * than any documented cloud cap). `model.maxImageBytes` raises it.
+ */
+export const OPENAI_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 export type ImagePart = {
   readonly kind: "image";
@@ -39,6 +65,11 @@ export interface ImageBuildOptions {
    * "older than the last K" from "selected but its bytes are missing".
    */
   readonly inlined: ReadonlySet<string>;
+  /**
+   * This model's per-image cap in raw bytes (`ANTHROPIC_MAX_IMAGE_BYTES` /
+   * `OPENAI_MAX_IMAGE_BYTES`, or `model.maxImageBytes`).
+   */
+  readonly maxImageBytes: number;
 }
 
 /** No bytes, vision assumed: what every existing `buildPayload` caller gets. */
@@ -46,6 +77,7 @@ export const NO_IMAGES: ImageBuildOptions = {
   images: EMPTY_RESOLVED,
   vision: true,
   inlined: new Set(),
+  maxImageBytes: MAX_IMAGE_BYTES,
 };
 
 /**
@@ -77,9 +109,14 @@ export function selectInlineIds(
   return chosen;
 }
 
-/** True when this ref could ever be inlined, before any read. */
-function sendable(ref: AttachmentRef): boolean {
-  return isKnownImageType(ref.mimeType) && ref.size <= MAX_IMAGE_BYTES;
+/** True when this ref could ever be inlined, before any read (`max` = the model's cap). */
+function sendable(ref: AttachmentRef, max: number): boolean {
+  return isKnownImageType(ref.mimeType) && ref.size <= Math.min(max, MAX_IMAGE_BYTES);
+}
+
+/** The cap that decides: the model's, never above the entry point's own bound. */
+export function effectiveMaxImageBytes(max: number): number {
+  return Math.min(max, MAX_IMAGE_BYTES);
 }
 
 /**
@@ -89,10 +126,15 @@ function sendable(ref: AttachmentRef): boolean {
  * distinct id is read ONCE. A source that throws propagates: the stream rejects
  * before any provider sees a partial request, and the history keeps its refs so
  * a retry works.
+ *
+ * `maxImageBytes` is the MODEL's cap: an image over it is never read
+ * (`sendable`), so a request can never be built around an image the endpoint
+ * would 400 on every turn of the session.
  */
 export async function resolveImages(
   req: ChatRequest,
   keep: number = MAX_INLINE_IMAGES,
+  maxImageBytes: number = MAX_IMAGE_BYTES,
 ): Promise<ResolvedImages> {
   const source = req.attachments;
   if (source === undefined) {
@@ -102,13 +144,14 @@ export async function resolveImages(
   if (selected.size === 0) {
     return EMPTY_RESOLVED;
   }
+  const max = effectiveMaxImageBytes(maxImageBytes);
   const refs = new Map<string, AttachmentRef>();
   for (const message of req.messages) {
     if (message.role !== "user") {
       continue;
     }
     for (const ref of message.attachments ?? []) {
-      if (selected.has(ref.id) && sendable(ref) && !refs.has(ref.id)) {
+      if (selected.has(ref.id) && sendable(ref, max) && !refs.has(ref.id)) {
         refs.set(ref.id, ref);
       }
     }
@@ -133,24 +176,27 @@ export async function resolveImages(
  */
 function placeholder(
   ref: AttachmentRef,
-  images: ResolvedImages,
-  vision: boolean,
-  inlined: ReadonlySet<string>,
+  options: Pick<ImageBuildOptions, "images" | "vision" | "inlined" | "maxImageBytes">,
 ): string {
   const label = attachmentLabel(ref);
-  if (!vision) {
+  if (!options.vision) {
     return `[image omitted: this model does not take images — ${label}]`;
   }
   if (!isKnownImageType(ref.mimeType)) {
     return `[image omitted: unsupported type ${ref.mimeType} — ${label}]`;
   }
-  if (ref.size > MAX_IMAGE_BYTES) {
-    return `[image omitted: ${formatBytes(ref.size)} is over the ${formatBytes(MAX_IMAGE_BYTES)} limit — ${label}]`;
+  const max = effectiveMaxImageBytes(options.maxImageBytes);
+  if (ref.size > max) {
+    // The MODEL's cap when it is the binding one (the entry point already
+    // refused anything over `MAX_IMAGE_BYTES`, but a request may be built from
+    // history a bigger build wrote), named as such so the fix is obvious.
+    const which = max < MAX_IMAGE_BYTES ? "this model's" : "the";
+    return `[image omitted: ${formatBytes(ref.size)} is over ${which} ${formatBytes(max)} limit — ${label}]`;
   }
-  if (!inlined.has(ref.id)) {
+  if (!options.inlined.has(ref.id)) {
     return `[image omitted: only the last ${MAX_INLINE_IMAGES} images are sent — ${label}]`;
   }
-  if (!images.has(ref.id)) {
+  if (!options.images.has(ref.id)) {
     return `[image unavailable — ${label}]`;
   }
   return "";
@@ -162,20 +208,15 @@ function placeholder(
  * that cannot be sent becomes a text part in its slot, so the model (and the
  * transcript) always sees that something was attached.
  */
-export function userParts(
-  m: ChatMessage,
-  images: ResolvedImages,
-  vision: boolean,
-  inlined: ReadonlySet<string>,
-): (ImagePart | TextPart)[] {
+export function userParts(m: ChatMessage, options: ImageBuildOptions): (ImagePart | TextPart)[] {
   const parts: (ImagePart | TextPart)[] = [];
   for (const ref of m.attachments ?? []) {
-    const base64 = images.get(ref.id);
-    if (base64 !== undefined && vision && isKnownImageType(ref.mimeType)) {
+    const base64 = options.images.get(ref.id);
+    if (base64 !== undefined && options.vision && isKnownImageType(ref.mimeType)) {
       parts.push({ kind: "image", mimeType: ref.mimeType, base64 });
       continue;
     }
-    const text = placeholder(ref, images, vision, inlined);
+    const text = placeholder(ref, options);
     if (text !== "") {
       parts.push({ kind: "text", text });
     }
@@ -191,11 +232,7 @@ export function userParts(
  * inlined — a ref is only ever inlined from a USER message — so each one says
  * "unavailable" (or the more specific reason), and none are silent.
  */
-export function strayRefsText(
-  m: ChatMessage,
-  vision = true,
-  images: ResolvedImages = EMPTY_RESOLVED,
-): string {
+export function strayRefsText(m: ChatMessage, options: Omit<ImageBuildOptions, "inlined">): string {
   const refs = m.attachments ?? [];
   if (refs.length === 0) {
     return "";
@@ -203,6 +240,8 @@ export function strayRefsText(
   // Its own ids count as "selected", so the reason shown is the true one
   // (unavailable), never the "only the last K" one meant for an older user ref.
   const own = new Set(refs.map((ref) => ref.id));
-  const lines = refs.map((ref) => placeholder(ref, images, vision, own)).filter((l) => l !== "");
+  const lines = refs
+    .map((ref) => placeholder(ref, { ...options, inlined: own }))
+    .filter((l) => l !== "");
   return lines.length === 0 ? "" : `\n${lines.join("\n")}`;
 }

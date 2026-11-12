@@ -1334,7 +1334,7 @@ describe("persisted-session (pure)", () => {
     expect(sidecarReason({ format: "tentacle.daemon-session" })).toMatch(
       /not a tentacle daemon state file/,
     );
-    expect(sidecarReason({ schemaVersion: 2 })).toMatch(/state file schemaVersion 2 is not 1/);
+    expect(sidecarReason({ schemaVersion: 3 })).toMatch(/state file schemaVersion 3 is not 1 or 2/);
     expect(reason(base(), "/elsewhere")).toMatch(/another project/);
     expect(reason({ ...base(), turns: [{ turnId: "x", end: { stopReason: "nope" } }] })).toMatch(
       /invalid end/,

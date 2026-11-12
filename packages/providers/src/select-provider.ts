@@ -40,6 +40,13 @@ export interface CreateModelProviderOptions {
    */
   readonly images?: boolean;
   /**
+   * `model.maxImageBytes`: the most raw bytes one image may have on THIS model's
+   * wire. Unset keeps the provider's documented default (anthropic 3.75 MiB,
+   * openai-compatible 5 MiB) — checked before any read, so an oversized image
+   * becomes a placeholder naming the limit instead of a 400 on every turn.
+   */
+  readonly maxImageBytes?: number;
+  /**
    * Injectable probe, for tests. An injected `fetch` without one is not
    * wrapped: a test fetch has no TCP connection to time.
    */
@@ -66,6 +73,7 @@ export function createModelProvider(options: CreateModelProviderOptions): Retryi
     ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
     ...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
     ...(options.images !== undefined ? { images: options.images } : {}),
+    ...(options.maxImageBytes !== undefined ? { maxImageBytes: options.maxImageBytes } : {}),
     fetch: timed,
   };
   // `openai` is the default (existing behaviour); the config schema is the
