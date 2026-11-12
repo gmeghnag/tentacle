@@ -416,7 +416,9 @@ Recommendation first.
 
 ## Execution
 
-*— claude-sonnet-4-5, 2026-11-12*
+*— deepseek-v4.1-flash, 2026-11-12* (round 1 was authored by the same executor;
+its `claude-sonnet-4-5` signature was a mis-signature, corrected here after the
+review flagged it — see **Fix round 1** below)
 
 **Load-bearing check, re-run FIRST (before any edit).** `bun
 /Users/gmeghnag/tentacle/.tentacle/tmp/attachments-upload/dispatch.ts` on this
@@ -656,3 +658,142 @@ Reviewer: claude-opus-5-5, fresh context. Different family from the executor
 #### Owner answers (2026-11-12)
 
 Q1 (a) 100 MiB per session / 256 MiB per daemon, kept until session end, explicit refusal when full. Q2 (a) no bytes in a pod: pod runtimes send refs only; `attachment/put` for worker, `serve`, mobile. Q3 (a) a stalled partial (≥ 10 min) is evicted only when space is needed, no timer. Implementation APPROVED.
+
+### Fix round 1
+
+*— deepseek-v4.1-flash, 2026-11-12* (via `tentacle --profile deepseek`; the
+`claude-sonnet-4-5` signature on the round-1 Execution above was wrong — that
+model did not execute this task)
+
+Both findings fixed; the two fixes needed **three extra tests** beyond the ones
+the review named, because the first mutations showed the naive versions to be
+vacuous (see Mutations H3/H5).
+
+#### Finding 1 (HIGH) — `upload()` on a dead link must not spin
+
+**Reproduced first**, on the pre-fix code (`review-spin.ts`, the reviewer's own
+file, run from `.tentacle/tmp/attachments-upload/`):
+
+```
+SPIN: 100000 putChunk calls on a dead link; 300ms timer never ran
+```
+
+**Measured first (it decided the test shape):** Bun 1.4.3's per-test timeout
+does **not** fire during a microtask-starvation spin — two throwaway tests in
+`.tentacle/tmp/attachments-upload/` showed a bounded spin being caught only by
+its own `throw` (463 ms), while an unbounded one hung the runner until an outer
+`timeout` killed it (`bun_exit=124`). A red test therefore **cannot** rely on a
+timeout; it must bound the loop itself. That is what the `breaker` helper in
+`upload.test.ts` does: it counts `attachment/put` requests on `RpcPeer.prototype`
+and, past a limit, aborts the upload's own `signal` — which `upload()` re-reads
+synchronously at the top of each iteration, so a spinning loop *ends* and the
+failure lands on an assertion (`expect(guard.count()).toBeLessThan(n)`).
+
+**As built** (`client/src/remote-client.ts`):
+
+- `reconnectable = this.channelFactory !== undefined && entry !== undefined`
+  (`:1531`). Retry needs both halves: a factory to dial, and an `entry` whose
+  `session/open` is replayed on the new link. Neither alone can bring the link
+  back, and both were part of the spin: the no-factory case (`stop()` sets
+  `up = false` for good) and the factory-with-no-`entry` case (`liveGeneration`
+  returned `this.gen` at once, so the retry re-ran a closed peer immediately).
+- Not reconnectable ⇒ `throw new UploadLinkLostError()` at once
+  (`:1566`-`:1570`) — the caller gets a clear, actionable error instead of a
+  spinner that never stops.
+- Reconnectable ⇒ the loop continues, but `liveGeneration` is now **bounded**
+  (`:1651`-`:1700`): it waits on `whenLive(entry)` *and* on a
+  `this.clock.setTimeout(…, UPLOAD_RECONNECT_MS)` deadline, whichever comes
+  first, plus an abort listener so a cancel lands while the link is down. The
+  deadline lives in a per-call `wait` object, set at the first drop and cleared
+  when a probe is answered — so a genuinely flapping link gets a fresh window per
+  real reconnect, while a link that never returns rejects at 30 s with
+  `UploadLinkLostError(30_000)` ("did not come back within 30s; … uploading
+  again resumes"). `UPLOAD_RECONNECT_MS = 30_000` is in `client/src/constants.ts`
+  (same order as `ATTACH_TIMEOUT_MS`).
+- `UploadLinkLostError` lives in the **pure** module `upload-window.ts`, beside
+  `UploadProtocolError`/`UploadAbortedError`, so all three upload outcomes are
+  classified in one React-free place (AGENTS §7).
+
+Why not the reviewer's suggested one-liner (`retry only when channelFactory &&
+entry && !stopError`, else rethrow)? It fixes the no-reconnect spin but leaves
+the reconnectable case unbounded: a factory that keeps failing redials made
+`upload()` wait for ever (redial backoff is capped at 30 s and retried
+indefinitely, `link-machine.ts:10-11`), which is the same "never settles" bug
+with a working event loop. `!this.stopError` is also implied by
+`whenLive` rejecting with it.
+
+#### Finding 2 (MEDIUM) — the in-flight test moved with the code
+
+`client/test/upload.test.ts`: `expect(dial.peak.value).toBeLessThanOrEqual(2)` —
+the literal, not the imported `UPLOAD_WINDOW` — plus
+`expect(dial.peak.value).toBe(2)`, because `<= 2` alone is also satisfied by a
+window of **1** (five chunks would then be fully serial). Both are measured on
+the wire by the existing `Dialer` (frames written and not yet answered), so the
+number is real concurrency, not the window's own bookkeeping.
+
+#### Red before green (final evidence)
+
+All five new link-loss tests against the **pre-fix** file (`git show
+f3317ac:packages/client/src/remote-client.ts`, restored from a backup — no
+`git checkout`/`restore`):
+
+```
+Received: 201 (fail) no `channelFactory`: a link dropped mid-upload rejects, promptly
+Received: 201 (fail) no `channelFactory`, no session of ours either: rejects at once, zero puts
+timed out 20s (fail) a factory that cannot reconnect at all: rejects, bounded, never spins
+            (fail) an abort while the link is down ends the upload at once
+            (fail) a factory, but a session this client never opened: rejects, bounded
+ 15 pass / 5 fail
+```
+
+Green after the fix: `20 pass, 0 fail` (file), `32 pass, 0 fail` with
+`upload-window.test.ts`.
+
+#### Mutations (each reverted; `git status --porcelain` back to the same 4 files)
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `UPLOAD_WINDOW = 4` | **RED**: "never more than 2 puts in flight…" (`Received: 4`), "the default window is 2…", T5 reconnect (send bound). This is the mutation the review found the test **green** under |
+| H1 | `reconnectable = true` (≈ the original `!this.up → continue`) | **RED**: all three no-reconnect tests (`Received: 201` twice, once from the breaker) |
+| H2 | drop the `UPLOAD_RECONNECT_MS` deadline (no timer) | **RED**: "a factory that cannot reconnect at all" fails on `expect(controller.signal.aborted).toBe(false)` at 2.0 s (the test's real-time backstop aborts it) — not a hang |
+| H3 | delete the `signal?.addEventListener("abort", …)` in `liveGeneration` | **RED**: "an abort while the link is down…" → `Received value: "still waiting"`. **This mutation was originally GREEN**, so the abort test was added to cover it |
+| H5 | `reconnectable = this.channelFactory !== undefined` (drop the `entry` half) | **RED**: "a factory, but a session this client never opened" → no `UploadLinkLostError`. **Originally GREEN**, so that test was added to cover it |
+| H6 | restore the pre-fix `remote-client.ts` wholesale | **RED**: the 5 fail / 15 pass table above |
+
+H3 and H5 are the interesting ones: the review named one scenario each for the
+two trap shapes, and the first mutation pass showed my first three tests proved
+neither. That is the §9 non-vacuity check doing its job.
+
+#### Drift from the Implementation (this round)
+
+11. **`liveGeneration` was given the reviewer's fix *plus* a bound.** The
+    Implementation said only that a drop retries "with a factory". A bare
+    `channelFactory && entry` guard is not sufficient for the invariant "it
+    rejects promptly", because a redial that keeps failing never settles. The
+    bound is a new option-independent constant, not a new knob.
+12. **New exported error `UploadLinkLostError`** (in `upload-window.ts`) and
+    `UPLOAD_RECONNECT_MS` (in `constants.ts`). A rejection needs a class a caller
+    can branch on without matching text; the file list in `Files` did not name a
+    new public error, but `AttachmentsUnsupportedError` set the precedent, and
+    keeping it in the pure module matches the §7 split.
+13. **`breaker` / `manualClock` / `fakeUploadDaemon` helpers in the test file.**
+    Needed because Bun's timeout cannot fire under a spin (measured above) and
+    because the reconnect bound has to be driven by an injected clock. All three
+    are local to `upload.test.ts` and use only existing fakes `RpcPeer` /
+    `createChannelPair`.
+14. **Two of the five new tests exist only because a mutation stayed green**
+    (H3 abort-during-wait, H5 factory-without-entry). Reported rather than
+    silently dropped, as with M19/M20 in round 1.
+
+**Not covered (stated, not faked):** the `30_000` value itself is not asserted
+end to end (the test injects a clock and asserts "settled on its deadline, not
+on an abort", so a typo in the constant would pass while a missing deadline
+would not); and a reconnect that succeeds *after* the deadline has passed is not
+tested — the code path closes it, because `left <= 0` throws before dialling.
+
+**Gate (fix round 1).** `bunx tsc --noEmit` clean; `bun run lint` clean (927
+files, 0 errors, 0 warnings — the §6 baseline; one `noUnnecessaryContinue` and
+two formatting issues from my edits fixed with `biome check --write`); `bun test`
+— **7232 pass, 3 skip (the opt-in k8s/docker/slow ones), 0 fail**, 521 files
+(7235 total, +9 from round 1's 7226). No `protocol.json`, `TODO.md`, CHANGELOG or
+`PROTOCOL_VERSION` change; no commit.

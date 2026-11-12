@@ -33,6 +33,23 @@ export class UploadProtocolError extends Error {
   }
 }
 
+/**
+ * The link dropped and this client cannot (or could not, in time) get it back,
+ * so nothing more can be sent. Distinct from `UploadAbortedError` (the caller
+ * asked to stop) and from `UploadProtocolError` (the daemon misbehaved): the
+ * daemon's partial stays, so a later `upload()` resumes from what landed.
+ */
+export class UploadLinkLostError extends Error {
+  constructor(waitedMs?: number) {
+    super(
+      waitedMs === undefined
+        ? "the link to the daemon dropped during the upload and cannot be re-established (no reconnect here, or a session this client did not open); the daemon keeps what it acknowledged, so uploading again resumes"
+        : `the link to the daemon dropped during the upload and did not come back within ${waitedMs / 1000}s; the daemon keeps what it acknowledged, so uploading again resumes`,
+    );
+    this.name = "UploadLinkLostError";
+  }
+}
+
 /** The caller's `signal` aborted the upload; the daemon's partial stays, so a later upload resumes. */
 export class UploadAbortedError extends Error {
   constructor() {

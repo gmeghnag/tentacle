@@ -87,7 +87,7 @@ import {
   RpcPeer,
   encodeBase64,
 } from "@tentacle/transport";
-import { ATTACH_TIMEOUT_MS } from "./constants.ts";
+import { ATTACH_TIMEOUT_MS, UPLOAD_RECONNECT_MS } from "./constants.ts";
 import { boundJobOutput, boundJobs, jobsFromSnapshot } from "./jobs.ts";
 import {
   ChannelError,
@@ -125,7 +125,12 @@ import {
   boundSubagents,
   subagentsFromSnapshot,
 } from "./subagents.ts";
-import { UploadAbortedError, UploadProtocolError, UploadWindow } from "./upload-window.ts";
+import {
+  UploadAbortedError,
+  UploadLinkLostError,
+  UploadProtocolError,
+  UploadWindow,
+} from "./upload-window.ts";
 import { type DaemonKind, explainVersionMismatch } from "./version-mismatch.ts";
 
 /** A daemon that predates `session/subagent_message`: a typed refusal, never a throw at a UI. */
@@ -1503,6 +1508,13 @@ export class RemoteClient {
    * the missing chunks are resent. Any other failure rejects — a refusal, a
    * closed session, a daemon that lies about its acks — because retrying none
    * of those can succeed.
+   *
+   * A drop is retried ONLY where a reconnect can happen: with a factory and a
+   * session this client opened. The wait for the link back is bounded
+   * (`UPLOAD_RECONNECT_MS`), and its absence rejects at once with
+   * `UploadLinkLostError` — a retry with no link in sight would re-run a closed
+   * peer's rejection in a microtask loop, starving timers and never settling
+   * (review round 1, finding 1).
    */
   async upload(
     sessionId: string,
@@ -1523,16 +1535,30 @@ export class RemoteClient {
     // From OUR bytes: a daemon answer never names what was stored.
     const id = hasher(bytes);
     const entry = this.sessions.get(sessionId);
+    // A drop is retryable ONLY where something can bring the link back: a
+    // factory AND a session this client opened (its `session/open` is replayed
+    // on the new link). Without both, a retry can only re-run a closed peer's
+    // rejection, which is a microtask loop that starves every timer and never
+    // settles (review round 1, finding 1).
+    const reconnectable = this.channelFactory !== undefined && entry !== undefined;
+    // `wait.deadline`: when the CURRENT drop's reconnect wait gives up. Set at
+    // the first drop of an attempt and cleared once a probe is answered (the
+    // link is demonstrably back), so a flapping link gets a fresh window per
+    // real reconnect while a link that never returns cannot be waited on for
+    // ever.
+    const wait = { deadline: null as number | null };
     const window = new UploadWindow(size);
     const progress = (): void => options.onProgress?.(window.have, size);
 
     for (;;) {
       this.throwIfAborted(options.signal);
-      const gen = await this.liveGeneration(entry);
+      const gen = await this.liveGeneration(entry, options.signal, wait);
       try {
         // The probe: how much of this blob does the daemon already hold? It
         // also dedupes a re-attached image (complete → nothing to send).
         const at = await this.putChunk(sessionId, { id, size, offset: 0, data: "" });
+        // Answered: the link really is back (a later drop gets its own window).
+        wait.deadline = null;
         if (window.probe(at.have, at.complete) === "complete") {
           progress();
           return { id, size };
@@ -1541,19 +1567,21 @@ export class RemoteClient {
         await this.pump(sessionId, bytes, id, size, window, options, progress);
         return { id, size };
       } catch (error) {
-        // Only a dropped link is retryable here: the session's store still
-        // holds `have`, so a fresh probe resumes. Everything else is the
-        // daemon's own answer and belongs to the caller.
         if (isMethodNotFound(error)) {
           throw new AttachmentsUnsupportedError(error);
         }
-        // A dropped link is the ONLY retryable case: the store belongs to the
-        // session, so a fresh probe reads back what landed and the missing
-        // chunks are resent. Anything else is the daemon's own answer.
-        if (gen !== this.gen || !this.up) {
-          continue;
+        // A dropped link is the ONLY retryable case, and only where something
+        // can bring it back: the store belongs to the session, so a fresh probe
+        // reads back what landed and the missing chunks are resent. Anything
+        // else — a refusal, a closed session, a lying daemon — is the daemon's
+        // own answer and belongs to the caller.
+        if (gen === this.gen && this.up) {
+          throw error;
         }
-        throw error;
+        if (!reconnectable) {
+          throw new UploadLinkLostError();
+        }
+        // Else: loop. The `await liveGeneration` at the top waits out the drop.
       }
     }
   }
@@ -1630,12 +1658,57 @@ export class RemoteClient {
     }) as Promise<AttachmentPutResult>;
   }
 
-  /** The generation to run on: waits out a drop when the session is known, else the current one. */
-  private async liveGeneration(entry: SessionEntry | undefined): Promise<number> {
+  /**
+   * The generation to run on: waits out a drop when the session is known and a
+   * reconnect is possible, else the current one. The wait is BOUNDED
+   * (`UPLOAD_RECONNECT_MS` from the first drop of this attempt, `wait.deadline`
+   * carrying it across iterations): `whenLive` rejects only when the link is
+   * stopped for good or the session is gone, so a redial that keeps failing
+   * would otherwise hold the caller's upload — and its spinner — for ever.
+   * `signal` aborts the wait too, so an abort lands while the link is down.
+   */
+  private async liveGeneration(
+    entry: SessionEntry | undefined,
+    signal: AbortSignal | undefined,
+    wait: { deadline: number | null },
+  ): Promise<number> {
     if (!this.channelFactory || !entry) {
       return this.gen;
     }
-    return this.whenLive(entry);
+    if (wait.deadline === null) {
+      wait.deadline = this.clock.now() + UPLOAD_RECONNECT_MS;
+    }
+    const deadline = wait.deadline;
+    const left = deadline - this.clock.now();
+    if (left <= 0) {
+      throw new UploadLinkLostError(UPLOAD_RECONNECT_MS);
+    }
+    return new Promise<number>((resolve, reject) => {
+      let done = false;
+      const finish = (settle: () => void): void => {
+        if (done) {
+          return;
+        }
+        done = true;
+        this.clock.clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        settle();
+      };
+      const timer = this.clock.setTimeout(() => {
+        finish(() => reject(new UploadLinkLostError(UPLOAD_RECONNECT_MS)));
+      }, left);
+      const onAbort = (): void => {
+        finish(() => reject(new UploadAbortedError()));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      // The link's own answer: live (resolve); stopped for good or the session
+      // gone (reject) — exactly the states `whenLive`'s other callers see. The
+      // timer above is what bounds a redial that merely keeps failing.
+      this.whenLive(entry).then(
+        (gen) => finish(() => resolve(gen)),
+        (error: unknown) => finish(() => reject(error)),
+      );
+    });
   }
 
   private throwIfAborted(signal: AbortSignal | undefined): void {

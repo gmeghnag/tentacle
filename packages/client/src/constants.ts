@@ -10,3 +10,11 @@ export const HOOK_SCHEME = "hook://";
  * redial, one open.
  */
 export const ATTACH_TIMEOUT_MS = 30_000;
+/**
+ * How long a dropped `upload()` waits for its link to come back before it
+ * rejects with `UploadLinkLostError` (docs/feat/attachments-upload.md fix
+ * round 1, finding 1). A drop mid-upload is resumable, so waiting is right —
+ * but not for ever: the caller is holding an image and a spinner, and the
+ * daemon keeps what landed, so failing is recoverable where hanging is not.
+ */
+export const UPLOAD_RECONNECT_MS = 30_000;

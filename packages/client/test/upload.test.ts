@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
  * (docs/feat/attachments-upload.md T5).
  *
  * The property: a blob reaches the daemon store complete and byte-identical in
- * a bounded number of frames, at most `UPLOAD_WINDOW` puts at a time; a drop
+ * a bounded number of frames, at most 2 puts at a time; a drop
  * mid-upload resumes from what the store kept; and a daemon that lies or
  * refuses cannot make the laptop send forever, read a file, or report success.
  */
@@ -21,8 +21,13 @@ import {
   PROTOCOL_VERSION,
 } from "@tentacle/protocol";
 import { type DuplexChannel, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
-import { AttachmentsUnsupportedError, RemoteClient, UploadAbortedError } from "../src/index.ts";
-import { UPLOAD_WINDOW, UploadProtocolError } from "../src/upload-window.ts";
+import {
+  AttachmentsUnsupportedError,
+  type Clock,
+  RemoteClient,
+  UploadAbortedError,
+} from "../src/index.ts";
+import { UploadLinkLostError, UploadProtocolError } from "../src/upload-window.ts";
 
 const CHUNK = ATTACHMENT_CHUNK_BYTES;
 
@@ -147,6 +152,98 @@ class Dialer {
 
 const tick = (ms = 5): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** Timers a test fires by hand, so a bounded wait is provable without real time. */
+function manualClock(): { clock: Clock; advance: (ms: number) => void } {
+  let now = 0;
+  let next = 0;
+  const timers = new Map<number, { at: number; fn: () => void }>();
+  const clock: Clock = {
+    now: () => now,
+    setTimeout: (fn, ms) => {
+      next += 1;
+      timers.set(next, { at: now + ms, fn });
+      return next;
+    },
+    clearTimeout: (handle) => {
+      timers.delete(handle as number);
+    },
+  };
+  const advance = (ms: number): void => {
+    now += ms;
+    for (;;) {
+      const due = [...timers.entries()]
+        .filter(([, timer]) => timer.at <= now)
+        .sort((a, b) => a[1].at - b[1].at)[0];
+      if (!due) return;
+      timers.delete(due[0]);
+      due[1].fn();
+    }
+  };
+  return { clock, advance };
+}
+
+/**
+ * A circuit breaker for a client that would otherwise retry with no I/O at all
+ * (review finding 1: a synchronous microtask spin). Past `limit`
+ * `attachment/put` attempts it trips — `upload()` re-reads the caller's signal
+ * synchronously at the top of each iteration, so a spinning loop ENDS and the
+ * test fails on its assertion instead of hanging the runner. (Bun's per-test
+ * timeout cannot fire while microtasks never yield: measured, it does not.)
+ */
+function breaker(limit: number, trip: () => void): { restore: () => void; count: () => number } {
+  const proto = RpcPeer.prototype;
+  const real = proto.request;
+  let attempts = 0;
+  proto.request = function (this: RpcPeer, ...args: Parameters<typeof real>) {
+    if (args[0] === Method.AttachmentPut) {
+      attempts += 1;
+      if (attempts > limit) trip();
+    }
+    return real.apply(this, args);
+  };
+  return {
+    restore: () => {
+      proto.request = real;
+    },
+    count: () => attempts,
+  };
+}
+
+/**
+ * A daemon that answers `initialize` / `open` / `put` with no session
+ * bookkeeping, so a client can upload to a session id it never opened (the
+ * link-loss paths below).
+ */
+function fakeUploadDaemon(link: DuplexChannel, onDataPut?: (n: number) => void): void {
+  let dataPuts = 0;
+  new RpcPeer(link, {
+    onRequest: async (method, params) => {
+      if (method === Method.Initialize) {
+        return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, daemonKind: "serve" };
+      }
+      if (method === Method.Open) {
+        return {
+          sessionId: "S",
+          epoch: "e0",
+          created: true,
+          resync: false,
+          messages: [],
+          title: { source: "auto" },
+        };
+      }
+      if (method === Method.AttachmentPut) {
+        const chunk = params as { offset: number; data: string; size: number };
+        if (chunk.data === "") return { have: 0, complete: false };
+        dataPuts += 1;
+        onDataPut?.(dataPuts);
+        const end = chunk.offset + Buffer.from(chunk.data, "base64").length;
+        return { have: end, complete: end === chunk.size };
+      }
+      return {};
+    },
+  });
+}
+
 /** A client on a plain (non-factory) link, handshaken, with a session open. */
 async function connected(h: SessionHostType): Promise<{
   client: RemoteClient;
@@ -210,10 +307,15 @@ describe("the window bounds what is on the wire", () => {
     const puts = dial.puts();
     expect(puts.filter((p) => p.data === "").length).toBe(1);
     expect(puts.filter((p) => p.data !== "").length).toBe(5);
-    // The real concurrency, measured on the wire: at most UPLOAD_WINDOW puts
-    // written and unanswered at any moment, and never more than one per chunk
-    // (nothing was resent).
-    expect(dial.peak.value).toBeLessThanOrEqual(UPLOAD_WINDOW);
+    // The real concurrency, measured on the wire: at most TWO puts written and
+    // unanswered at any moment, and never more than one per chunk (nothing was
+    // resent). The literal 2 is deliberate — comparing against the imported
+    // `UPLOAD_WINDOW` moved with the code under test (review finding 2: it
+    // stayed green with the window set to 4).
+    expect(dial.peak.value).toBeLessThanOrEqual(2);
+    // …and the window is really TWO, not one: 5 chunks would still be 1-deep
+    // serial. A vacuous `<= 2` would also pass on a window of 1.
+    expect(dial.peak.value).toBe(2);
     // Never more than one put per chunk: the five data offsets are distinct
     // (nothing was resent), plus the single probe at 0.
     const data = puts.filter((p) => p.data !== "");
@@ -468,6 +570,270 @@ describe("abort", () => {
       client.upload(sessionId, blob(CHUNK), { signal: controller.signal }),
     ).rejects.toBeInstanceOf(UploadAbortedError);
     expect(dial.puts().length).toBe(before);
+    client.close();
+  });
+});
+
+describe("a dead link ends the upload — it never spins", () => {
+  // Review finding 1. On a client with no `channelFactory` the link is gone for
+  // good: `stop()` sets `up = false` permanently, so a retry can only re-run a
+  // closed peer's `Promise.reject("peer is closed")` — a pure microtask loop
+  // that starves timers and never settles. Each test below is bounded: the
+  // breaker trips the caller's signal, which `upload()` reads synchronously, so
+  // the WRONG behaviour fails an assertion here instead of hanging.
+  test("no `channelFactory`: a link dropped mid-upload rejects, promptly", async () => {
+    const [d, c] = createChannelPair();
+    fakeUploadDaemon(d, (n) => {
+      if (n === 1) c.close(); // drop before the 2nd data chunk leaves
+    });
+    const client = new RemoteClient(c, new PermissionBroker());
+    await client.initialize();
+    const sessionId = await client.openSession(undefined, undefined, "S");
+    const controller = new AbortController();
+    const guard = breaker(200, () => controller.abort());
+    const started = Date.now();
+    let outcome: unknown;
+    try {
+      outcome = await client.upload(sessionId, blob(4 * CHUNK), { signal: controller.signal }).then(
+        () => "resolved" as const,
+        (error: unknown) => error,
+      );
+    } finally {
+      guard.restore();
+    }
+    // Assertions first, breaker second: on the buggy code the loop ends via the
+    // trip, and the failure names the property.
+    expect(guard.count()).toBeLessThan(200);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(outcome).toBeInstanceOf(UploadLinkLostError);
+    expect(String(outcome)).toMatch(/connection closed|link is gone|reconnect/);
+    expect(controller.signal.aborted).toBe(false); // it settled on its own
+    client.close();
+  });
+
+  test("no `channelFactory`, no session of ours either: rejects at once, zero puts", async () => {
+    const [d, c] = createChannelPair();
+    fakeUploadDaemon(d);
+    const client = new RemoteClient(c, new PermissionBroker());
+    await client.initialize();
+    // A session id this client never opened: `entry` is undefined, so no
+    // `session/open` could ever be replayed for it — there is nothing to wait
+    // for, and the call must fail on the first closed-peer rejection.
+    const controller = new AbortController();
+    const guard = breaker(200, () => controller.abort());
+    c.close();
+    await tick(5); // let the close reach the client
+    let outcome: unknown;
+    try {
+      outcome = await client
+        .upload("never-opened", blob(CHUNK), {
+          signal: controller.signal,
+        })
+        .then(
+          () => "resolved" as const,
+          (error: unknown) => error,
+        );
+    } finally {
+      guard.restore();
+    }
+    // One attempt (the probe), not a retry loop: the link is gone for good.
+    expect(guard.count()).toBe(1);
+    expect(outcome).toBeInstanceOf(UploadLinkLostError);
+    expect(controller.signal.aborted).toBe(false);
+    client.close();
+  });
+
+  test("a factory that cannot reconnect at all: rejects, bounded, never spins", async () => {
+    const h = host();
+    const dial = new Dialer(h);
+    const { clock, advance } = manualClock();
+    let opens = 0;
+    const client = new RemoteClient(dial.connect(), new PermissionBroker(), undefined, {
+      channelFactory: async () => {
+        opens += 1;
+        throw new Error("no route to the daemon");
+      },
+      clock,
+      // A real backoff (not 0): the redial timer must not be able to fire in a
+      // tight loop, or the test's own clock would never reach the deadline.
+      random: () => 0.5,
+    });
+    await client.initialize();
+    const sessionId = await client.openSession(undefined, undefined, "S");
+    const controller = new AbortController();
+    // Two independent bounds, because a wrong implementation HANGS rather
+    // than fails (a hang is not a red test, AGENTS §9): the breaker trips on
+    // a spin, this real timer trips on a wait that never ends.
+    const guard = breaker(500, () => controller.abort());
+    const backstop = setTimeout(() => controller.abort(), 2_000);
+    dial.onDataPut = (n) => {
+      if (n === 1) dial.last?.close();
+    };
+    let outcome: unknown;
+    try {
+      const upload = client
+        .upload(sessionId, blob(4 * CHUNK), {
+          signal: controller.signal,
+        })
+        .then(
+          (value) => value,
+          (error: unknown) => error,
+        );
+      // Drive the injected clock past the bound, letting each failed redial run.
+      for (let i = 0; i < 40; i++) {
+        advance(2_000);
+        await tick(0);
+      }
+      outcome = await upload;
+    } finally {
+      clearTimeout(backstop);
+      dial.onDataPut = null;
+      guard.restore();
+    }
+    expect(guard.count()).toBeLessThan(500);
+    expect(controller.signal.aborted).toBe(false); // it settled on its own deadline
+    expect(outcome).toBeInstanceOf(UploadLinkLostError);
+    expect(String(outcome)).toMatch(/did not come back|30s/);
+    expect(opens).toBeGreaterThan(0); // it really tried to reconnect
+    client.close();
+  }, 20_000);
+
+  test("an abort while the link is down ends the upload at once", async () => {
+    // The wait for a reconnect must not swallow the caller's abort: the user
+    // cancels, so nothing more is sent and the partial stays for a later retry.
+    const h = host();
+    const dial = new Dialer(h);
+    const { clock, advance } = manualClock();
+    const client = new RemoteClient(dial.connect(), new PermissionBroker(), undefined, {
+      channelFactory: async () => {
+        throw new Error("no route to the daemon");
+      },
+      clock,
+      random: () => 0.5,
+    });
+    await client.initialize();
+    const sessionId = await client.openSession(undefined, undefined, "S");
+    const controller = new AbortController();
+    dial.onDataPut = (n) => {
+      if (n === 1) dial.last?.close(); // the link drops mid-upload
+    };
+    const upload = client.upload(sessionId, blob(4 * CHUNK), { signal: controller.signal }).then(
+      (value) => value,
+      (error: unknown) => error,
+    );
+    // Let the drop and a failed redial land (the fake clock, so no real wait).
+    for (let i = 0; i < 5; i++) {
+      advance(600);
+      await tick(0);
+    }
+    dial.onDataPut = null;
+    // The link is down and the redial keeps failing: now the caller aborts.
+    controller.abort();
+    // A fake clock hides real time: give the abort a couple of turns to land.
+    for (let i = 0; i < 5; i++) {
+      advance(1);
+      await tick(0);
+    }
+    const outcome = await Promise.race([upload, tick(1_000).then(() => "still waiting" as const)]);
+    expect(outcome).toBeInstanceOf(UploadAbortedError);
+    client.close();
+  });
+
+  test("a factory, but a session this client never opened: rejects, bounded", async () => {
+    // Review finding 1's second half: with a factory but no `entry`, nothing can
+    // replay a `session/open`, so `liveGeneration` returns the current
+    // generation at once and a retry re-runs a closing peer — the same spin,
+    // this time starving the redial timer so the link never comes back.
+    const [d, c] = createChannelPair();
+    let links = 0;
+    const opens: string[] = [];
+    const daemon = (link: DuplexChannel): void => {
+      new RpcPeer(link, {
+        onRequest: async (method, params) => {
+          if (method === Method.Initialize) {
+            return {
+              protocolVersion: PROTOCOL_VERSION,
+              agentCapabilities: {},
+              daemonKind: "serve",
+            };
+          }
+          if (method === Method.Open) {
+            opens.push(String((params as { sessionId?: string }).sessionId));
+            return {
+              sessionId: String((params as { sessionId?: string }).sessionId),
+              epoch: "e0",
+              created: true,
+              resync: false,
+            };
+          }
+          if (method === Method.AttachmentPut) {
+            const chunk = params as { offset: number; data: string; size: number };
+            if (chunk.data === "") return { have: 0, complete: false };
+            if (chunk.offset > 0) c.close(); // drop on the 2nd data chunk
+            return { have: chunk.offset, complete: false };
+          }
+          return {};
+        },
+      });
+    };
+    daemon(d);
+    const client = new RemoteClient(c, new PermissionBroker(), undefined, {
+      channelFactory: async () => {
+        links += 1;
+        const [nd, nc] = createChannelPair();
+        daemon(nd);
+        return nc;
+      },
+      random: () => 0.5,
+    });
+    await client.initialize();
+    // A session id this client holds no entry for (`entry === undefined`): it
+    // never opened it, so nothing could replay an open for it on a new link.
+    await client.openSession(undefined, undefined, "S");
+    const controller = new AbortController();
+    const guard = breaker(300, () => controller.abort());
+    let outcome: unknown;
+    try {
+      outcome = await client
+        .upload("other", blob(4 * CHUNK), {
+          signal: controller.signal,
+        })
+        .then(
+          () => "resolved" as const,
+          (error: unknown) => error,
+        );
+    } finally {
+      guard.restore();
+    }
+    // Bounded and never a loop: the probe + the first data chunk + the one that
+    // found the link dead is the whole attempt (no retry — nothing to replay).
+    expect(outcome).toBeInstanceOf(UploadLinkLostError);
+    expect(guard.count()).toBe(3);
+    expect(controller.signal.aborted).toBe(false);
+    expect(links).toBe(0); // no redial was needed, let alone a spin
+    client.close();
+    void opens;
+  });
+
+  test("with a reconnect that works, a drop is resumed, not failed", async () => {
+    // The complement: the fix must not turn a recoverable drop into a rejection.
+    const h = host();
+    const dial = new Dialer(h);
+    const client = new RemoteClient(dial.connect(), new PermissionBroker(), undefined, {
+      channelFactory: dial.factory,
+      random: () => 0,
+    });
+    await client.initialize();
+    const sessionId = await client.openSession(undefined, undefined, "S");
+    const bytes = blob(4 * CHUNK);
+    dial.onDataPut = (n) => {
+      if (n === 1) dial.last?.close();
+    };
+    expect(await client.upload(sessionId, bytes)).toEqual({ id: sha(bytes), size: bytes.length });
+    dial.onDataPut = null;
+    expect(await storedHex(h, sessionId, sha(bytes), bytes.length)).toBe(
+      Buffer.from(bytes).toString("hex"),
+    );
     client.close();
   });
 });
