@@ -2022,3 +2022,26 @@ with other task suites (CPU contention), so its 331.9 s wall time is not a
 performance measurement — the pass/skip/fail counts are what it establishes.
 `bun run check` was not run as one command; its three steps were run separately
 and are the same three.
+
+### Round 2 — PASS
+
+**Scope:** `git diff HEAD~1` (11b9765). No `packages/` change (`git diff --stat
+HEAD~1 -- packages` empty): one fragment deleted, the plan/Execution amended.
+
+- **Finding 1 — FIXED.** `changelog.d/` now holds only `device-pairing-9b` and
+  `mobile-session-view-12b`; `changelog-guard` + `changelog` tests green. The
+  executor's red/green probe (fragment present → bullet published, absent → not)
+  is the right mutation for a deletion; I accept it and did not re-run it.
+- **Finding 2 — FIXED.** *What stays*, M2 and drift 4 now state the constraint as
+  "no hook that owns an effect". I checked that against the code: `useMouse.ts`
+  has no `useEffect`/`useLayoutEffect` (the only matches are the `MouseEffect`
+  type, `:25` and `:170`). The executor's F2 mutation (a real effect injected →
+  `app-structural-order` red) shows a future effect added there would be caught.
+  F1 (a no-op effect survives) is honestly recorded.
+- **Regressions:** none possible in code (doc + deletion only). `bun run
+  typecheck` clean; `bun run lint` 1050 files clean; the changelog tests plus the
+  two S4 test files: 46 pass / 0 fail.
+- Nit (no action needed): the Fix round's F3 line says the per-event read being
+  pinned by M14 is "as the review itself noted". The S4 review never said that.
+
+*— claude-opus-5-5, 2026-11-14*
