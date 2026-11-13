@@ -921,3 +921,21 @@ All questions answered as recommended. Implementation APPROVED.
 - N3 (constraint for 9b/9c): `findPairing` sweeps files (`:857`) and throws on a malformed code (`pairingCodeHash`, `:93`). So it must not back `authorize` (P2: no side effects). 9b needs a side-effect-free "any live window" read, which 9a does not export. 9c must catch the throw on peer input.
 
 **Executor behaviour.** Drift is documented honestly, and the mutation table is accurate for the cases I checked. One discrepancy: commit `11dfe31` says "exec (deepseek)", but Execution is signed claude-opus-5-5. The owner should fix whichever one is wrong (§10 honest signing). This reviewer is claude-opus-5-5. If that signature is correct, this was the same model in a fresh context, so shared blind spots are possible.
+
+### 9b `device-route` — Review
+
+*— claude-opus-5-5, 2026-11-13*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM finding; it has a repro).
+
+**Findings**
+1. **MEDIUM — the no-identity path leaks a handshake slot for good.** `ws-server.ts:361-367`: when `staticKey()` is `undefined`, `pending.get(ws)?.()` runs *before* `pending.set` (`:376`). So `finish` is never registered, and the `close` handler (`:338`) finds nothing to call either. Each such socket keeps `limiter.begin`'s concurrent slot forever. Repro (`.tentacle/tmp/device-pairing-9b/leak.ts`): an authority with no identity and `maxConcurrent: 2`, four dials → `open, open, close 1002, close 1002`. After `maxConcurrent` (32) dials during any F14 window (unreadable identity, or the gap in a `devices reset` rewrite), `/e2e` answers 429 to everyone until a restart, even once the store is fixed. That contradicts the authority-level "recovers, no sticky denial" property. Fix: call `limiter?.end()` directly on this path. Test: a route test with no identity dials past `maxConcurrent`, then writes an identity and gets a successful handshake (red today).
+2. **MEDIUM — F26 is applied to every bind, not only to non-loopback ones (undocumented drift).** `serve.ts:173` + `deviceAuthority` (`:99-112`): `devices` is on by default. An unusable `identity.json` therefore makes a plain loopback `serve` refuse to start, even for a user who never pairs. The plan scopes F26 to "non-loopback bind without token". Execution's drift list does not mention this. Either scope the throw to F26's own case (on loopback, warn and start without the device route), or record the decision as drift and get the owner's OK.
+
+**Gate.** Touched files: 149 pass / 0 fail (7 files). `bun run lint`: clean. `bun run typecheck`: clean. I did not re-run the full `bun test` here.
+
+**Mutation (all reverted; `git status` clean afterwards).** I applied four mutations together: skip the pairing method gate, ignore the verdict cap (`readVerdict` → fallback), drop `authorize`'s stat-refresh, and the poll not closing. Result: 12 fails across the route, authority and noise tests. Each mutation is caught by its named test.
+
+**Attacks tried.** (a) Limiter balance on every `openDevice` exit → finding 1. (b) A pairing principal reaching a session via notifications: `session/cancel` needs an attached session, which is unreachable → holds. (c) A revoke racing `authorize`'s refresh before the poll: the poll compares the live map with the current snapshot (not a diff), so it still closes → holds. (d) A `devices reset` refreshed by `authorize` before the tick: `reset` reads false, but the empty registry closes everything anyway → holds, as long as the CLI empties the registry (9d must keep that). (e) F21: without `devices`, `/e2e` is the plain route → holds (test). (f) Same session path: `Connection` is unchanged on the secure channel, and no second loop → holds.
+
+**Executor behaviour.** The scope is tight, the tests are non-vacuous, and the drift notes are honest except for finding 2. The executor was DeepSeek and this reviewer is Opus, a different model family.
