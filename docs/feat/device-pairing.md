@@ -1242,3 +1242,25 @@ All questions answered as recommended. Implementation APPROVED.
 - **Finding 1 (slot leak) — fixed.** `ws-server.ts:368` now calls `limiter?.end()` on the no-identity path. It cannot run twice for one socket: `pending` is not set yet, so the `close` handler finds nothing to end. Repro `leak.ts`: four dials now give `open ×4` (round 1: `open, open, close 1002, close 1002`). *Mutation:* removed `:368` → `a no-identity window gives every handshake slot back` turns red.
 - **Finding 2 (F26 on every bind) — fixed.** `serve.ts:249` now throws only for a non-loopback bind without a token. In every other case `serve` starts without the device route, reports one `onError` line naming the file, and writes no daemon record. *Mutation:* changed the condition to `if (true)` → `an unusable identity on a LOOPBACK bind starts WITHOUT the device route` turns red. Both mutations reverted; `git status` clean.
 - **Regressions.** Touched files: 112 pass / 0 fail. `bun run lint` clean; `bun run typecheck` clean. Case checked: token + non-loopback + broken identity → starts without `/e2e`, plain route still token-gated. Nothing widens access.
+
+### 9c `device-pair-exchange` — Review
+
+*— claude-opus-5-5, 2026-11-13* (fresh context; same model family as parts of the plan — shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES.** Gate: touched files 83 pass / 0 fail (5 files); `bun run lint` clean (1047 files); `bun run typecheck` clean. Full `bun test` was not re-run here. Mutation: `waitForDecision`'s accepted-without-registry branch forced to `ok` → 2 handler tests turn red. Reverted from a copy; `git status` clean. Repros: `.tentacle/tmp/device-pairing-9c/rev/{cap,f3}.ts`.
+
+1. **MEDIUM — the attempt cap does not stop requests that arrive together** (`pairing-handler.ts:110-125`, `:233-246`). `pair()` never checks `attempts >= PAIRING_MAX_ATTEMPTS` when it starts. The close is deferred to a macrotask, and `RpcPeer` dispatches requests concurrently. So every request already queued before that close still runs `findPairing` + `claimPairing`. Repro `cap.ts`: 8 wrong codes then the right one, sent without awaiting → `attempts 8`, and **the window is claimed** by the 9th code. F6/F16 ("5 tries per connection") does not hold. Fix: refuse at entry once the cap is reached, with no lookup. Add a test that pipelines more than 5 requests.
+2. **MEDIUM — the window watcher breaks F3** (`ws-server.ts:254-262`). The watcher closes the connection once no live window remains. It ignores a pending claim. `pair` writes registry → decision → removes the window on exit. If the 1 s watcher fires before the handler's 100 ms poll, the socket closes: the key IS registered, but `pairDevice` throws `connection closed`, not success. Repro `f3.ts` at the defaults (`pairingCheckMs` 1000): **2/40 and 1/20 trials registered-but-failed**. Fix: do not close a pairing connection whose handler holds a claim. The handler already ends its own wait on expiry or claim removal, after checking the registry first. Add a test for it.
+3. **MEDIUM — the client's `device/pair` times out at 30 s; the window lasts 5 min** (`client/src/pairing.ts:73,158,177`; `PAIRING_TTL_MS` `device-store.ts:69`). A human who takes more than 30 s to answer `[y/N]` makes the phone fail with a timeout. The phone then closes the socket. The claim stays, so the terminal still asks, and a `y` registers a device whose phone reported failure. Fix: no per-request timeout on `device/pair` (let the daemon's expiry/`timeout` answer decide), or at least `PAIRING_TTL_MS` plus slack. Add a test.
+
+**Holds:**
+- The key comes from the channel (F18): params are strip objects with no key field.
+- The 9b method gate is intact.
+- `already_paired` is returned for token and device principals.
+- A decision with no registry entry declines.
+- `findPairing`'s throw is absorbed.
+- The abort stops the wait.
+- No lock on `Connection`: `device/pair` waits inside its own handler.
+- Additive protocol (new method, new error code, strip schemas) → no bump, consistent with §7.
+
+**Executor:** a thorough, honest record (a flake was reported, the drift was justified). The three findings are timing and limit interactions that the per-request tests drive at test speeds only.
