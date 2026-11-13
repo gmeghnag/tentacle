@@ -1,0 +1,13 @@
+appId: so.tentacle.app
+---
+# 01 (docs/feat/mobile-app-shell.md): the app launches on Computers and shows
+# the dev computer's project row.
+# Assertions are by testID only: React Native under the new architecture exposes
+# no text/label to XCUITest (established empirically — a plain `Text` reads as
+# an empty string), so asserting on visible text would be permanently red.
+- launchApp:
+    clearState: true
+- assertVisible:
+    id: "computer-dev"
+- assertVisible:
+    id: "computers-list"

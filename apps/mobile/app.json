@@ -2,7 +2,14 @@
   "expo": {
     "name": "tentacle",
     "slug": "tentacle",
-    "ios": { "bundleIdentifier": "so.tentacle.spike", "supportsTablet": true },
-    "plugins": [["expo-build-properties", { "ios": { "deploymentTarget": "26.0" } }]]
+    "ios": {
+      "bundleIdentifier": "so.tentacle.app",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "tentacle connects to your computers on the local network",
+        "NSAppTransportSecurity": { "NSAllowsLocalNetworking": true }
+      }
+    },
+    "plugins": [["expo-build-properties", { "ios": { "deploymentTarget": "18.0" } }]]
   }
 }

@@ -1,0 +1,23 @@
+appId: so.tentacle.app
+---
+# 02 (docs/feat/mobile-app-shell.md): tapping the project opens the session
+# list with both sections. Assertions are by testID only: React Native under the
+# new architecture exposes NO text to XCUITest (established empirically — a plain
+# `Text` reads as an empty string), so a visible-text assertion is permanently
+# red. The harness passes the seeded ids with `-e`.
+- launchApp:
+    clearState: true
+- tapOn:
+    id: "computer-dev"
+- assertVisible:
+    id: "sessions-list"
+- assertVisible:
+    id: "section-active"
+- assertVisible:
+    id: "session-${ALPHA_ID}"
+- assertVisible:
+    id: "session-${CHARLIE_ID}"
+- assertVisible:
+    id: "section-archived"
+- assertVisible:
+    id: "session-${BRAVO_ID}"

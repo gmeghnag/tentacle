@@ -1,0 +1,35 @@
+appId: so.tentacle.app
+---
+# 05 (docs/feat/mobile-app-shell.md): the daemon goes away → the list shows the
+# honest "Can't connect" notice; it comes back → a refresh lists the sessions
+# again (serve persisted them).
+#
+# The recovery step asserts something that CANNOT pass in the broken state
+# (review round 1 finding 2): a seeded row is back AND the stale notice is gone.
+# `sessions-list` alone was the ScrollView, on screen in every state, so the old
+# final assertion was vacuous — it is why a list that never cleared `stale`
+# passed this flow.
+- launchApp:
+    clearState: true
+- tapOn:
+    id: "computer-dev"
+- assertVisible:
+    id: "sessions-list"
+- runScript:
+    file: "05-stop-serve.js"
+- swipe:
+    start: "50%, 30%"
+    end: "50%, 80%"
+- assertVisible:
+    id: "sessions-stale"
+- runScript:
+    file: "05-start-serve.js"
+- swipe:
+    start: "50%, 30%"
+    end: "50%, 80%"
+# A row proves the list was actually re-read from the restarted daemon…
+- assertVisible:
+    id: "session-${ALPHA_ID}"
+# …and no stale notice proves the successful page cleared it (finding 1).
+- assertNotVisible:
+    id: "sessions-stale"
