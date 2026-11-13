@@ -1,6 +1,6 @@
 # feat/app-decomposition — Break up `App.tsx` so TUI features stop colliding
 
-> **Status:** implementation (plan awaiting owner approval)
+> **Status:** S0 executed; plan REVISED after the Fable design review (S0b + S1+ re-approval pending — see *Design review response*)
 > **Branch:** `feat/app-decomposition` (parent/plan); one child branch per slice, below
 > Type: feat · Size: L (split) · Blast: load-bearing · Suited: Opus plan, DeepSeek exec per slice, fresh Opus review per slice
 
@@ -88,6 +88,19 @@ a `y` never approves a freshly opened ask, App.tsx:3814–3833; dock-owned
 `useInput` in App calling ONE pure `routeKey`, over an explicit ordered layer
 list. S0 adds a test that pins this (two layers claiming the same key: only
 the first acts).
+
+**Revised (Fable H3):** "first claimer wins" is too weak. Five layers act AND
+pass (chord steps `chordRef` on every key, 3841–3853; the sessions panel
+disarms then falls through, 3976–3979; the dock applies `step.state` on `pass`,
+4075–4077; the mouse layer consumes a held partial and hands a restored `[` to
+line editing, 4255–4307; paste is consumed but dropped behind a panel, 3964),
+and there is a 14th, unnamed layer: "behind a panel nothing edits", 4292. So a
+layer returns `{ effects, verdict: "consumed" | "pass", carry }` and `routeKey`
+runs the effects of every layer it passes through, then stops at the first
+`consumed`; `carry` (e.g. the restored `[`) is input to the next layer. Each
+snapshot field **keeps its current source** (ref read at key time vs render
+closure — table in S3) so two keys delivered with no render between behave as
+today.
 
 ### Preconditions (verified)
 
@@ -192,7 +205,9 @@ diff exceeds ~400 lines.
 |---|---|---|
 | Key-order drift | a key reaches a later layer (e.g. `y` approves an ask) | one `useInput`, one ordered list; S0 precedence matrix |
 | Stale closure | a moved `useCallback` with a narrower dep array reads old state | move dep arrays verbatim; ref-backed reads stay refs; Biome `useExhaustiveDependencies` (in the `recommended` set, `biome.json:8`; executor confirms it fires on a moved hook) + S0 |
-| Effect order | effects run in declaration order; moving one into a hook reorders it | call hooks in the original declaration order; slice doc lists every moved effect and its old index |
+| Effect order | effects run in declaration order; moving one into a hook reorders it | **revised (H1):** effects stay in App in today's order; one moves only if its index is unchanged; S0b mount-order test |
+| Identity drift | a port field loses its identity → an effect (2773 watch) re-subscribes every render | **added (H2):** per-field identity rule, deps name fields not `ctx`; S0b subscribe-count test |
+| Freshness drift | a ref read becomes a render read (or vice versa) → two keys with no render between change outcome | **added (H3):** snapshot fields keep their source; S0b no-render-between tests |
 | Cycle breakage | `run`↔`handleCommand`↔`swapSession` lose late binding | keep the forward refs; never pass a not-yet-defined callback by value |
 | Render perf | hooks returning fresh objects per render → extra renders under the 33 ms stream throttle (`FRAME_MS`, 614) | hook results memoised (`useMemo`/stable refs); S9a checks render count during a streamed turn (spy on `usePaintScheduler`) vs `main` |
 | Ink gotchas | empty `<Text>` collapses rows; raw writes corrupt alt-screen | S10 keeps `" "` blank rows; no module imports `process.stdout` (rg check in each review) |
@@ -205,7 +220,9 @@ Props intake, construction of the per-concern ports, the hook calls in fixed
 order (`useLineEditor`, `usePermissionBroker`, `useSessionLink`,
 `useTurnDriver`, `useDock`, `useAttachments`, `usePanels`, `useQuitClear`,
 `useMouse`), the ONE `useInput(… routeKey …)`, and `<AppView model={…}/>`.
-Target ≲ 600 lines, no feature logic.
+Target ≲ 600 lines, no feature logic. **Revised (H1/M2):** no `useMouse` hook
+(per-event function); the 20 effects stay here in today's order; target ≲ 800
+lines.
 
 ### Other hotspots (CHANGELOG.md, TODO.md, `PROTOCOL_VERSION`)
 
@@ -236,6 +253,147 @@ TODO line.
    diff) only; cleanups become their own S task after S10.
 6. **Commands as one file each, or grouped?** Rec: one file per command
    (maximal parallelism; 17 small files is fine).
+
+New, from the Fable review (Q1–Q6 stay answered; Q3's S1 freeze is moot — S1 is
+dissolved below):
+
+7. **Effects: stay in App in today's order (a), or move into hooks with every
+   reorder argued and tested (b)?** Rec: **(a)**. One hook per concern cannot
+   keep an interleaved order (H1), and (b) turns every hook slice into a
+   load-bearing ordering proof. With (a) an effect moves into its hook only when
+   its index among App's 20 effects is unchanged (contiguous with the hook
+   call); anything else waits for a separate, reviewed slice — or never moves.
+8. **S0b gates S4+?** Rec: yes. The identity / mount-order / no-render-between
+   tests are the only net for the three things the moves actually stress
+   (order, identity, freshness — M4); without them S4–S9 are reviewed by eye.
+9. **"New App-level tests go in a new file, never `app.test.tsx`" — a rule for
+   this task only, or for the repo?** Rec: this task's slices now; promoting it
+   to AGENTS.md is a rule change → its own `feat` (§10 carve-out (c)).
+
+### Design review response (Fable REVISE)
+
+*— claude-opus-5-5, 2026-11-13*
+
+Every finding was re-checked against `packages/tui/src/App.tsx` on this branch
+(`git diff --stat 46454d1 -- packages/tui/src` is empty, so the review's line
+numbers are current). **All four HIGHs and all five MEDIUMs hold; none is
+rebutted.** The revisions below override the module map, slice table, Tests,
+Failure modes and "What stays" sections above wherever they conflict. S0 is not
+redone; its gaps become a new tests-only slice **S0b**.
+
+**H1 — effect order (CONFIRMED).** `watchedRef` (1141–1162) is set only by the
+watch effect (2773–2775), after the initial-prompt (2548) and wake (2557)
+effects; the plan's final hook order would put the watch (session link) before
+the initial prompt (turn driver). → **Change:** Owner Q7 (a). Hooks own
+refs/state/callbacks; the 20 `useEffect`s (847, 1130, 1179, 1223, 1239, 1258,
+1296, 1501, 1511, 1523, 1544, 1716, 1750, 1814, 2125, 2548, 2557, 2773, 3772,
+3798) stay in App.tsx **in this order**, calling functions the hooks return. An
+effect moves into a hook only if its index in that list does not change; each
+slice doc lists the indices before/after. "What stays in App.tsx" now includes
+the ordered effect list, and the target becomes ≲ 800 lines (effects included),
+not 600. S0b adds the mount-order test the review names (initial prompt +
+replayed history + a pending job exit at mount → surviving rows + `send` count),
+shown red under a swap of 2548 and 2773.
+
+**H2 — callback identity (CONFIRMED).** `watchSession`'s deps (2765–2771) take
+`setAgents`, `setJobs`, `flushNow`, `armWake`, `subagentsTwoWay`, `setDock`;
+the 2773 effect re-subscribes whenever its identity changes. → **Change:**
+(1) no port is built "once": every port field is either a ref-backed getter
+(`() => ref.current`) or a value that keeps its **current identity rule**
+(stable setter; `useCallback` with its dep array moved verbatim; props/state
+such as `shownModel`, `sessions`, `mcpStatus`, `cwd`, `skills` stay values with
+their current deps). The slice doc states the rule per field. (2) A hook
+destructures its inputs at the top and its `useCallback`/`useEffect` deps name
+**the fields, never `ctx`** — so `useExhaustiveDependencies` keeps seeing each
+one; a dep array containing a whole port object is a review blocker. (3) S0b
+adds the identity test: count `SessionController` subscribe/unsubscribe and
+`session/open` calls across N forced re-renders (typing, a dock-clock tick, a
+resize); pinned at one subscribe per session. Render counting in S9a stays but
+is secondary.
+
+**H3 — the router contract (CONFIRMED, all five sites + 4292 read).** →
+**Change:** the Load-bearing assumption is revised (above): layer =
+`{ effects, verdict, carry }`, 14 layers. S3's slice doc carries a
+**snapshot-source table**: ref-read today (`quitConfirmRef` 3814, `dockRef`
+3841/4062, `stateRef.current.running` 4107, `panelRef` 4013/4371,
+`permission.readMode()` 3858) stay ref getters; render-closure today (`panel`
+3964/3975/4045/4061/4292, `paletteOpen` 4119, `field.value` 4068, `commandSel`
+4130) stay render values. No "clean-up" to one source inside S3. S0b adds the
+review's matrix rows (chord-breaking key still does its job; non-panel key on
+an armed sessions row disarms AND acts; printable key on the focused pill types,
+returns focus, then Enter sends; `[`+Enter; `[`+letter; paste with a panel
+open; a key behind a panel after a half mouse report) and one **no-render-
+between** test per safety pair (two synchronous `stdin.write`s): `/quit`
+confirm + `y`; ask arriving + `y`; Esc on a just-closed panel mid-turn.
+
+**H4 — where the collisions are (CONFIRMED in direction).** Not re-counted with
+`-L`; independently, `state.ts` + `render-lines.ts` + `app.test.tsx` alone saw
+65 distinct commits since 2026-10-01, and `panel.ts` has the `kind ===`
+branches cited (76, 89, 92, 120, 149). → **Changes:** (1) **S1 is dissolved**:
+no single `app-types.ts`. Each hook slice takes its own types with it
+(`DockProps`, `AttachProps`, `SessionJobs`, … next to the hook);
+`AppProps`/`SessionController` become `extends` lists in `app-types.ts`,
+created by the first hook slice that needs it; `index.ts` re-exports keep the
+test boundary stable. (2) Measurable target per feature KIND: command / key
+binding / panel → **zero App.tsx lines**; stateful feature → a hook file plus
+**≤ 4 append-only App.tsx lines** (prop intake, hook call, effect wiring if
+any, view-model field). The goal sentence is restated honestly: this task
+removes App.tsx as the collision point; `state.ts`, `render-lines.ts`,
+`app.test.tsx`, `run.tsx`, `commands.ts` are the **next hotspots**, named here
+and not fixed here. (3) `CommandContext` is per-capability: a command file
+declares `Pick<…>` of the ports it uses, so a new command with an existing
+capability edits nothing shared; a new capability is an honest edit of the
+port + App's construction of it (stated, not hidden). (4) **S7 must replace
+`panel.ts`'s `kind ===` branches and the sessions/tree key paths (3975–4045)
+with per-panel methods**, or the "new panel = file + registry line" claim is
+dropped from the doc. (5) Owner Q9 for the test-file rule.
+
+**M1 — frozen names (CONFIRMED: `dockRef`/`setDock` used at 3841, 4062–4076;
+`routeAttachRef` 3967).** → **Rule:** a hook slice destructures into the SAME
+identifiers (`const { dockRef, setDock, dockIds, killJob, … } = useDock(…)`),
+zero use-site edits. Only then is the parallel-safe column valid.
+
+**M2 — S4 (CONFIRMED).** → `dispatchMouse` becomes a **per-event function**
+called by the router with a render snapshot (`total`, `viewport`, `listView`,
+`panelBodyTop`, `dockTop`, `dockView`, `layout.laid`, `win`, `visible`,
+`expandAll`, `columns`, `statusRowRef`), not a hook taking them every render.
+`stepMouseChunk` returns `{ reports, hold, restored, swallowBehindPanel }`.
+S4 goes **before** S3 and defines the layer contract S3 generalises; blast
+raised to cross-module (it edits the `useInput` body), fresh review.
+
+**M3 — SGR blind spot (CONFIRMED: `lastFrame()` strips SGR).** → S0b captures
+SGR-preserving raw frames for selection drag (`inverse`), attach row, running +
+queued, and a pill click after each layout state (running rows, dock open,
+attach row) to pin `onPillRange` (4589–4597). **S10 is restricted to a verbatim
+JSX move** (no prop re-plumbing); anything beyond that is a later task.
+
+**M4 — structural mutations (CONFIRMED gap: the 40-row table has no order /
+identity / freshness mutant).** → S0b's mutation table must show red for:
+swap effects 2548↔2773; drop `useCallback` from `watchSession` (2698);
+replace `stateRef.current.running` at 4107 by the render `running`, and
+`panelRef.current` at 4013 by `panel`. A survivor is a hole to close before S4.
+
+**M5 — `/compact` and `/clear` are driver logic (CONFIRMED: `setCompacting`,
+`compactionOwnedRef`, `ownCompactionsRef` at 3274–3322; `clearAfterTurnRef` at
+3231, read by the turn at 2418).** → their bodies become App-level driver
+functions `startCompaction()` / `requestClear()` (moving later with S9a / S8);
+`commands/compact.ts` and `commands/clear.ts` call them in one line. S2 adds no
+compaction/clear state to `CommandContext`.
+
+**Revised slice order** (supersedes the table's order; rows not listed keep
+their files/size):
+
+| # | Change vs table | Blocks on |
+|---|---|---|
+| S0b `feat/app-decomp-0b-structural` | NEW · S · contained (tests only): mount-order, identity, no-render-between, H3 matrix rows, SGR frames + pill clicks, M4 mutations | S0 (done) |
+| S4 mouse | moved first; per-event fn; layer contract; cross-module | S0b |
+| S3 keyroute | 14 layers, `{effects, verdict, carry}`, snapshot-source table | S4 |
+| S2 commands | driver fns for `/compact` `/clear`; per-command `Pick<>` context | S0b; parallel with S3 (disjoint hunks) |
+| S5 dock ‖ S6 attach | own types; same identifiers; effects stay in App | S3 (both edit names S3 reads only via frozen identifiers) |
+| ~~S1 types~~ | dissolved into S5/S6/S8/S9 | — |
+| S7 panels | per-panel methods replace `kind ===` | S3 |
+| S8 → S9a → S9b | unchanged order; each takes its types; effects stay | S2 / serial |
+| S10 view | verbatim JSX move only | S9b, S0b's SGR pins |
 
 ## Execution
 
