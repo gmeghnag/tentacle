@@ -2547,7 +2547,10 @@ describe("durable images on the laptop (docs/feat/attachments-durable.md T7/T8)"
   const sha = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
   const img = (text: string) => {
     const bytes = new TextEncoder().encode(text);
-    return { bytes, ref: { id: sha(bytes), mimeType: "image/png", size: bytes.length, name: `${text}.png` } };
+    return {
+      bytes,
+      ref: { id: sha(bytes), mimeType: "image/png", size: bytes.length, name: `${text}.png` },
+    };
   };
   const same = (got: Uint8Array | null | undefined, want: Uint8Array) =>
     got !== null && got !== undefined && Buffer.compare(got, want) === 0;
@@ -2633,7 +2636,9 @@ describe("durable images on the laptop (docs/feat/attachments-durable.md T7/T8)"
     const where = join(dir, name);
     const logStore = new LogSessionStore(where);
     const notices: string[] = [];
-    const saver = new SessionSaver(opts.store ? opts.store(where) : logStore, (t) => notices.push(t));
+    const saver = new SessionSaver(opts.store ? opts.store(where) : logStore, (t) =>
+      notices.push(t),
+    );
     const runtime = await createLocalRuntime({
       channel: daemon.channel,
       disposeTransport: () => {},
@@ -2681,10 +2686,12 @@ describe("durable images on the laptop (docs/feat/attachments-durable.md T7/T8)"
     const session = runtime.createSession();
     const a = img("keep-before");
     let resolved = false;
-    const attached = session.attachImage(a.bytes, { mimeType: "image/png", name: "a.png" }).then((r) => {
-      resolved = true;
-      return r;
-    });
+    const attached = session
+      .attachImage(a.bytes, { mimeType: "image/png", name: "a.png" })
+      .then((r) => {
+        resolved = true;
+        return r;
+      });
     await new Promise((r) => setTimeout(r, 30));
     expect(resolved).toBe(false);
     gate.resolve();
@@ -2721,7 +2728,12 @@ describe("durable images on the laptop (docs/feat/attachments-durable.md T7/T8)"
     for (const x of six) await logStore.putBlob("R6", x.ref.id, x.bytes);
     await drain(runtime.createSession().send("again"));
     const ids = new Set(daemon.sent.filter((s) => s.method === "attachment/put").map((s) => s.id));
-    expect([...ids].sort()).toEqual(six.slice(1).map((x) => x.ref.id).sort());
+    expect([...ids].sort()).toEqual(
+      six
+        .slice(1)
+        .map((x) => x.ref.id)
+        .sort(),
+    );
     await runtime.dispose();
   });
 
@@ -2758,7 +2770,11 @@ describe("durable images on the laptop (docs/feat/attachments-durable.md T7/T8)"
       protocolVersion: (await import("@tentacle/protocol")).PROTOCOL_VERSION,
       clientCapabilities: { streaming: true },
     });
-    await other.request("session/open", { sessionId: "RH", create: true, messages: record.messages });
+    await other.request("session/open", {
+      sessionId: "RH",
+      create: true,
+      messages: record.messages,
+    });
     await other.request("attachment/put", {
       sessionId: "RH",
       id: a.ref.id,

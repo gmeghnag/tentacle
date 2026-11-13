@@ -398,9 +398,7 @@ describe("T10 (docs/feat/attachments-durable.md D6): a laptop model link that ne
       // The pod names both: the one in scope, and one it injected (e.g. via its
       // own session/log) that the laptop holds only under another session.
       for await (const _ of proxy.stream({
-        messages: [
-          { role: "user", content: "look", attachments: [mineRef, foreignRef] },
-        ],
+        messages: [{ role: "user", content: "look", attachments: [mineRef, foreignRef] }],
       })) {
         // drain
       }

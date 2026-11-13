@@ -21,13 +21,20 @@ const user = (refs: AttachmentRef[], content = "u"): ChatMessage => ({
 describe("imagesToRestore", () => {
   test("empty history, or no refs → []", () => {
     expect(imagesToRestore([])).toEqual([]);
-    expect(imagesToRestore([{ role: "user", content: "hi" }, { role: "assistant", content: "x" }])).toEqual(
-      [],
-    );
+    expect(
+      imagesToRestore([
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "x" },
+      ]),
+    ).toEqual([]);
   });
 
   test("newest first; within a message, last ref first", () => {
-    const h = [user([ref(1), ref(2)]), { role: "assistant", content: "a" } as ChatMessage, user([ref(3)])];
+    const h = [
+      user([ref(1), ref(2)]),
+      { role: "assistant", content: "a" } as ChatMessage,
+      user([ref(3)]),
+    ];
     expect(imagesToRestore(h).map((r) => r.id)).toEqual([ref(3).id, ref(2).id, ref(1).id]);
   });
 

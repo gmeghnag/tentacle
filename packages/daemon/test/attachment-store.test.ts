@@ -419,7 +419,11 @@ describe("disk-backed (`serve`): docs/feat/attachments-durable.md T3", () => {
     };
   }
 
-  const ref = (bytes: Uint8Array) => ({ id: sha(bytes), mimeType: "image/png", size: bytes.length });
+  const ref = (bytes: Uint8Array) => ({
+    id: sha(bytes),
+    mimeType: "image/png",
+    size: bytes.length,
+  });
   const settled = async <T>(p: Promise<T>) => {
     let state: "pending" | "resolved" | "rejected" = "pending";
     p.then(

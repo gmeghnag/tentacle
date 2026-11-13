@@ -825,7 +825,7 @@ export class RemoteClient {
     this.images = new LaptopImages(
       options.imageFallback ? { fallback: options.imageFallback } : {},
     );
-    this.link ={ ...initialLink, upSince: this.clock.now() };
+    this.link = { ...initialLink, upSince: this.clock.now() };
     this.lastInboundAt = this.clock.now();
     this.peer = this.makePeer(channel, 0);
   }

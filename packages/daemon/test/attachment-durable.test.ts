@@ -23,12 +23,7 @@ import {
 import { Method, PROTOCOL_VERSION } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
-import {
-  Connection,
-  LogSessionStore,
-  SessionHost,
-  SessionPersister,
-} from "../src/index.ts";
+import { Connection, LogSessionStore, SessionHost, SessionPersister } from "../src/index.ts";
 
 const CWD = "/tmp/attachment-durable";
 const env = {

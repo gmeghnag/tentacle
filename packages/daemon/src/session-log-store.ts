@@ -43,6 +43,7 @@ import {
   type SessionTitle,
   canonicalMessage,
 } from "@tentacle/protocol";
+import { BLOB_DIR_SUFFIX, SessionBlobs } from "./session-blobs.ts";
 import {
   type LogSegment,
   type ParsedLogFile,
@@ -53,7 +54,6 @@ import {
   parseLogFile,
   segmentFromMessages,
 } from "./session-log-file.ts";
-import { BLOB_DIR_SUFFIX, SessionBlobs } from "./session-blobs.ts";
 
 /** The facts the header holds (immutable for a session). */
 export interface LogMeta {

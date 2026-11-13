@@ -367,7 +367,7 @@ history (core Owner Q6); their blobs stay with the session until delete
 3. `packages/daemon/src/attachment-store.ts` (`disk` option, `stored`/landing, `holds`/`read`/caps, `store_failed`) · `session-persister.ts` (`blobs(id)`) · `session-host.ts` (`build` passes `disk`) · `connection.ts` (`put` case returns the store's value — may now be a promise; comment kept)
 4. `packages/client/src/restore-images.ts` (new, pure) · `laptop-images.ts` (`fallback`, `allowSession`) · `remote-client.ts` (construct `LaptopImages` with a fallback from `RemoteClientOptions.imageFallback?`) · `index.ts`
 5. `packages/cli/src/session-saver.ts` (`putBlob`, `readBlob`, respects `removed`) · `local-runtime.ts` (`persistingController.attachImage` + restore memo + `allowSession`; `imageFallback` wired to the saver) · `serve.ts` (D3 sweep) · `package.json` (devDependency `ink-testing-library@4.0.0`, Owner Q8)
-6. `CHANGELOG.md` (`Added`: images survive restart/resume) · `TODO.md` (row 4 → this doc) · `docs/feat/attachments.md` §Split row 4 link
+6. `CHANGELOG.md` (`Added`: images survive restart/resume) · `TODO.md` (row 4 → this doc; **drift:** the executor brief for this run forbids touching `TODO.md`, so it is left to the reviewer/owner) · `docs/feat/attachments.md` §Split row 4 link
 
 No `tui` source change: notices already render through `deps.notify` /
 `NoticeHub` (`local-runtime.ts:717`), and the `[image: name]` rows come from 3b.
@@ -463,7 +463,131 @@ Recommendation first in each. Nothing here is approved until answered.
 
 ## Execution
 
-*(empty — Implementation not approved yet)*
+*— claude-opus-5-5, 2026-11-13 (resumed after a quota cut; the daemon + client
+slices were already at HEAD `b0dcc82`, by an earlier `deepseek` run)*
+
+**Load-bearing check, re-run first.** `.tentacle/tmp/attachments-durable/resume-bytes-wt.ts`
+on the resumed branch prints the Context's own lines:
+
+```
+1 holds after open (resume seed): false
+2 turn after resume names the ref: true
+3 turn after resume, source.read(ref): null
+4 probe on resumed session: {"have":0,"complete":false}
+5 re-upload ack: {"have":5,"complete":true} holds: true
+6 next turn, source.read(ref) equals bytes: true
+```
+
+PASS: no wire change, no log change; bytes put after the (re)open are resolved
+by the next round (`resolveImages` per request, no "absent" cache). Nothing in
+the design needed a re-prompt or a history rewrite.
+
+**State at resume (verified against the plan, not assumed).** At HEAD the daemon
+slices were complete and green (T1–T5: `session-blobs.ts`, `LogSessionStore`'s
+`putBlob`/`readBlob`/`blobIndex`/`blobOrphans`/`removeBlobs`, `removeLocked` +
+`fork`, `AttachmentStore`'s `disk`/`stored`/`landing`, `SessionPersister.blobs`,
+`SessionHost.build`, `connection.ts`); so were the client slices (T10/T11:
+`restore-images.ts`, `LaptopImages` `fallback`/`allowSession`,
+`RemoteClientOptions.imageFallback`), `SessionSaver.putBlob`/`readBlob`/
+`blobIndex`/`isRemoved` (T6), the D3 sweep in `serve.ts` (T5) and the T7/T8
+tests — **written but red**: `packages/cli/test/local-runtime.test.ts`'s 7
+`attachments-durable` tests failed on the missing D4/D5 wiring. Missing
+entirely: the cli seam itself, T9, `CHANGELOG`, the cli devDependency.
+
+**As-built, in the plan's dependency order.**
+
+1. **D4 — keep what this laptop attached.** New `LaptopKeeper`
+   (`cli/src/laptop-blobs.ts:104-160`): the per-session 100 MiB cap
+   (`keptBytes` over `saver.blobIndex(uid)`), a `FLUSH_ON_EXIT_TIMEOUT_MS` bound,
+   and ONE notice per session (owner Q6 wording, `keepFailedNotice`). Bound in
+   `local-runtime.ts:958-980` to `deps.saver.putBlob`; called by
+   `persistingController.attachImage` (`local-runtime.ts:556-566`) AFTER the
+   ref exists and BEFORE it returns — so a write cannot be lost by a ref that
+   already entered a history. A failed/slow/over-cap write never fails the
+   attach. **Drift:** `writer` also checks `saving` (the `stopSaving`
+   hand-over, D4 step 2's "skipped once `saving` is false"), which the plan
+   left to `saver.removed`; both are now respected.
+2. **D5 — give them back after an (re)open.** `durable.pending` =
+   `imagesToRestore(record?.messages ?? [])` (`local-runtime.ts:974`) — the
+   seed for a resume, the laptop's own record for an `attach` (P14), empty for
+   a fresh session. `restoring` is memoized per controller and awaited by
+   `send`, `sendNow` and `attachImage` (`:525-541`, `:545-566`); it calls
+   `restoreImages(durable.pending, durable.read, inner.attachImage)` — the ONE
+   existing entry point, so upload/probe-only/laptop-held is decided by
+   `RemoteClient` and a `--model-proxy` pod gets ZERO `attachment/put` frames.
+   One notice at most (`restoreNotice`); the send proceeds either way.
+3. **D6 scope.** `client.images.allowSession(uid)` at the one build site
+   (`local-runtime.ts:964`), so a pod's model link may read exactly the
+   session uids this client built.
+4. **T9** `cli/test/attach-durable-app.test.tsx`: REAL `App` + REAL
+   `createLocalRuntime` over an in-memory channel to a store-policy
+   `SessionHost`, a `SessionSaver` on a temp dir holding a record with an image
+   + its blob, `notices` → the App. Asserts the `[image: …]` row, the
+   provider's `read(ref)` = the exact bytes with no warning in the frame, and
+   (blob deleted) exactly ONE `1 earlier image(s) … not on this laptop` notice
+   with the prompt still sent. `cli/package.json` gains
+   `ink-testing-library@4.0.0` (Owner Q8) **plus `ink@5.0.1`, `react@18.3.1`,
+   `@types/react@18.3.12`** — mounting a real `App` from `cli` needs them
+   resolvable there (`tui`'s copies are not; verified: a bare import probe
+   failed on both). `mobile`'s React 19 is pinned separately and its `tsc`
+   stays green.
+5. `CHANGELOG.md` `[Unreleased] ### Added` entry; `docs/feat/attachments.md`
+   §Split row 4 links this doc.
+
+**Drift from the Implementation.**
+- The Files list also names `TODO.md` (row 4 → this doc). This run's brief
+  forbids touching `TODO.md`; it is left for the reviewer/owner (noted in §Files).
+- `docs/feat/attachments-durable.md` §Files step 5 says the cli devDependency is
+  `ink-testing-library` alone; T9 needs `ink`/`react`/`@types/react` beside it
+  (above). `bun.lock` re-hoists `react@18.3.1` for `cli`; `tui`/`mobile` are
+  unaffected (both `tsc` passes green).
+- Nothing else: no wire method, no update kind, no log entry type, no sidecar
+  field, no `PROTOCOL_VERSION` bump, and `packages/protocol/schema/protocol.json`
+  is untouched (`store_failed` is a TS-only union, P13 — `git status` on
+  `packages/protocol/` is empty).
+
+**Red before green** (narrow files, on the resumed branch before the cli seam):
+`bun test packages/cli/test/local-runtime.test.ts` → `70 pass, 7 fail`, every
+failure one of the T7/T8 assertions (`attachImage` resolved before any write;
+no `attachment/put` before `session/prompt`; `read(ref)` not the bytes).
+After the seam: `77 pass, 0 fail`. T9's two cases fail on the same missing seam
+(mutation M12 below). The daemon/client/saver/sweep slices were already green
+from the earlier run; their red state is pinned by the mutations instead.
+
+**Mutations** (`bun .tentacle/tmp/attachments-durable/mutate.ts <list>`, exact
+single-match patches, reverted after each; every one turns its named test red):
+
+```
+M1 put acks without awaiting landing        → 8 fail (T3 x3, T4 x5)
+M2 holds true while landing                 → 1 fail (T3)
+M3 archive (close) also removes the blob dir→ 1 fail (T4 archive→reopen)
+M4 removeLocked skips removeAll             → 3 fail (T2 remove, T4 delete, T4 fork)
+M5 fork does not link                       → 2 fail (T2 fork, T4 fork)
+M6 build omits disk for restored sessions    → 3 fail (T4 restart, archive, fork)
+M7 attachImage keeps the blob after returning→ 1 fail (T7 keep-before-resolve)
+M8 restore runs AFTER inner.send             → 2 fail (T7 ordering, +1 collateral)
+M9 both cap bounds removed (every image)     → 3 fail (T7 6→5, T11 x2)
+M10 allowSession is a no-op                  → 3 fail (T10 x3)
+M11 the keep notice per failure, not once    → 1 fail (T8)
+M11b the non-hex id guard dropped            → 1 fail (T10 malformed id)
+M12 durable seam's pending emptied           → 7 fail (T9 x2, T7 x5)
+```
+
+Two first attempts were **weak mutations, and were replaced** rather than
+counted: `M8` as "call `restored()` synchronously before `inner.send`" changed
+nothing observable (the promise still resolved before the prompt), and `M9` as
+"loosen the OUTER bound only" was masked by the inner one — both corrected
+(`yield*` then `await restored()`; both bounds). That is the §9 non-vacuity
+check doing its job.
+
+**Gate.** `bunx tsc --noEmit` clean (also `tsc -p apps/mobile`, after the react
+hoist); `bun run lint` → `Checked 958 files. No fixes applied.` (baseline:
+0 errors, 0 warnings); `bun test` → **7572 pass, 3 skip (the three opt-in
+skips), 0 fail** across 541 files.
+
+**Unverified.** None outstanding. (The full suite was re-run after the final
+`biome --write` reformat and the `saving` hand-over guard on the keeper's
+`write`: same 7572/3/0 result, so nothing is left on a stale measurement.)
 
 ## Review
 

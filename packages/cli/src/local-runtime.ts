@@ -21,12 +21,14 @@ import {
   AttachTimeoutError,
   type Clock,
   type DaemonKind,
+  LAPTOP_IMAGE_BYTES,
   type LinkStatus,
   type NamedModels,
   type ReadBack,
   RemoteClient,
   type RemoteSession,
   type SessionEvent,
+  imagesToRestore,
 } from "@tentacle/client";
 import type { TentacleConfig } from "@tentacle/config";
 import type {
@@ -50,6 +52,14 @@ import type { SessionController } from "@tentacle/tui";
 import { createSettingsNotifier } from "./carried-settings.ts";
 import { logDaemonError } from "./daemon-log.ts";
 import { type HooksTrustStore, createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
+import {
+  type DurableImages,
+  LaptopKeeper,
+  keepFailedNotice,
+  keptBytes,
+  restoreImages,
+  restoreNotice,
+} from "./laptop-blobs.ts";
 import { type ResidentUse, residentUseOf } from "./relay-state.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import {
@@ -341,6 +351,12 @@ export function persistingController(
   setAside?: (messages: readonly ChatMessage[], title: TitleState) => Promise<void>,
   /** `/clear`: keep the chat it drops (docs/feat/clear-fork-history.md). Absent: `connect`, unit fakes. */
   keepFork?: (messages: readonly ChatMessage[], title: TitleState) => void,
+  /**
+   * This session's images on THIS laptop's disk
+   * (docs/feat/attachments-durable.md D4/D5). Absent → nothing is kept and
+   * nothing is restored (`connect`, unit fakes, a store with no blobs).
+   */
+  durable?: DurableImages,
 ): PersistingController {
   /** The newest read held (what `/clear` forks) and the read head already forked. */
   let lastRead: {
@@ -499,20 +515,53 @@ export function persistingController(
       onFlushError(error instanceof Error ? error : new Error(String(error)));
     }
   };
+  /**
+   * D5: the give-back, run ONCE per session, started by the first
+   * `send`/`sendNow`/`attachImage` and awaited before it goes on — so a
+   * resumed history's refs reach the provider with bytes, and never cost
+   * anything for a session that is only viewed. `null` once done (or absent
+   * `durable`: `connect`, unit fakes).
+   */
+  let restoring: Promise<void> | null = null;
+  const restore = async (): Promise<void> => {
+    if (durable === undefined || durable.pending.length === 0) return;
+    const report = await restoreImages(durable.pending, durable.read, (bytes, meta) =>
+      // Through the session's OWN attachImage (already open: this runs from a
+      // send that opened it): a probe when the daemon holds the bytes, an
+      // upload otherwise, or laptop-held memory in `--model-proxy` mode. Never
+      // a second path (§7).
+      inner.attachImage(bytes, meta),
+    );
+    const notice = restoreNotice(report);
+    if (notice !== null) durable.notify(notice);
+  };
+  const restored = (): Promise<void> => {
+    restoring ??= restore().catch(() => {});
+    return restoring;
+  };
   return {
-    send(prompt, signal, opts) {
-      return saved(inner.send(prompt, signal, opts));
+    // D5 runs before the prompt: the daemon must hold the bytes for the refs
+    // the restored history names by the time the turn's model round reads them.
+    async *send(prompt, signal, opts) {
+      await restored();
+      yield* saved(inner.send(prompt, signal, opts));
     },
     // A refusal rejects untouched (the caller falls back); the old turn is
     // saved by its own `send`.
     async sendNow(messages, target, signal) {
+      await restored();
       return saved(await inner.sendNow(messages, target, signal));
     },
     // The image seam goes STRAIGHT to the session (docs/feat/attachments-tui.md
     // D4): the bytes are the session's to upload (it opens itself first), and
     // nothing here needs saving — the ref only becomes history at the prompt.
-    attachImage(bytes, meta, options) {
-      return inner.attachImage(bytes, meta, options);
+    // D4 of the durable doc: what this laptop attached is KEPT here, on the way
+    // out, so a restart can give it back (bounded; a failure is one notice).
+    async attachImage(bytes, meta, options) {
+      await restored();
+      const ref = await inner.attachImage(bytes, meta, options);
+      await durable?.keep(ref, bytes, meta.name ?? meta.mimeType);
+      return ref;
     },
     imageInput() {
       return inner.imageInput();
@@ -905,6 +954,29 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
           }),
         );
       },
+      // D4/D5: this session's images on THIS laptop's disk. The history it was
+      // (re)opened with names what to give back — for an `attach` (the session is
+      // already live daemon-side) the record's history, which is the copy this
+      // laptop kept (P14); a fresh session has none.
+      (() => {
+        // D6: a pod's model link may read THIS session's blobs from disk — the
+        // scope is what this laptop published, this session included.
+        client.images.allowSession(uid);
+        const keeper = new LaptopKeeper({
+          // A hand-over (`stopSaving`): whoever saves the log saves the blobs.
+          write: (id, bytes) => (saving ? deps.saver.putBlob(uid, id, bytes) : Promise.resolve()),
+          used: () => keptBytes(deps.saver.blobIndex(uid)),
+          maxBytes: LAPTOP_IMAGE_BYTES,
+          timeoutMs: FLUSH_ON_EXIT_TIMEOUT_MS,
+          notice: (text) => deps.notify?.(text),
+        });
+        return {
+          pending: imagesToRestore(record?.messages ?? []),
+          read: (id) => deps.saver.readBlob(uid, id),
+          keep: (ref, bytes, label) => keeper.keep(ref, bytes, label),
+          notify: (text) => deps.notify?.(text),
+        };
+      })(),
     );
     controllers.add(controller);
     return controller;

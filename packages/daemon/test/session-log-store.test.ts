@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   appendFile,
   chmod,
@@ -11,7 +12,6 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionRecord } from "@tentacle/agent";

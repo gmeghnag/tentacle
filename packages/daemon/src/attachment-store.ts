@@ -417,4 +417,5 @@ export class AttachmentStore implements AttachmentSource {
 
 const touched = (entry: Entry): number => (entry.kind === "partial" ? entry.touchedAt : 0);
 
-const sizeOf = (entry: Entry): number => (entry.kind === "complete" ? entry.bytes.length : entry.size);
+const sizeOf = (entry: Entry): number =>
+  entry.kind === "complete" ? entry.bytes.length : entry.size;

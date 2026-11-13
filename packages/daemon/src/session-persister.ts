@@ -31,6 +31,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from 
 import { join } from "node:path";
 import { encodeTitle, isValidSessionId } from "@tentacle/agent";
 import type { LogCursor } from "@tentacle/protocol";
+import type { AttachmentDisk } from "./attachment-store.ts";
 import {
   type DaemonSidecar,
   encodeSidecar,
@@ -46,7 +47,6 @@ import type {
 } from "./persisted-session.ts";
 import { forkWrite } from "./session-fork.ts";
 import { type LogFileHeader, parseHeaderLine, parseLogFile } from "./session-log-file.ts";
-import type { AttachmentDisk } from "./attachment-store.ts";
 import type { LogWrite, RawSessionFiles, RawSessionState } from "./session-log-store.ts";
 import type { TombstoneStore } from "./session-tombstones.ts";
 
