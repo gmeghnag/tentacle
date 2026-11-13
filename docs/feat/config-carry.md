@@ -222,6 +222,7 @@ drives the overlay.
 | `autoTitle` | `model.autoTitle` | P | — | `autoTitle` |
 | `subagentsEnabled` | `subagents.enabled` | P | — | `subagentsEnabled` |
 | `subagentMaxIterations` | `subagents.maxIterations` | P | — | `subagentMaxIterations` |
+| `subagentMaxTokens` | `subagents.maxTokens` | P | — | `subagentMaxTokens` |
 | `loadAgentsMd` | `loadAgentsMd` | W | `loadAgentsMd` (new) | `agentsMdEnabled` + recompose |
 | `loadSkills` | `loadSkills` | W | `loadSkills` (new) | `skillsEnabled`, `skills`, `skillDiagnostics` + recompose |
 | `maxIterations` | `maxIterations` | W | `maxIterations` | `maxIterations` |
@@ -272,10 +273,11 @@ already W, and task 7 passes it to children.
 **Wire (`protocol`).** In `session.ts`, next to `OpenParamsSchema`:
 
 - `SessionSettingsSchema`: every key above, each `.optional()`, with the same bounds
-  as the config: `maxIterations` / `subagentMaxIterations` / `contextResetMaxPerMessage`
-  are `IterationLimitSchema`, the union of `-1` and a positive int (`schema.ts:207-211`,
-  `:218-222`, `:245-249`); `contextWindow`, `toolMaxParallel` and `subagentMaxParallel`
-  are positive ints; `maxInlineOutputChars` is a non-negative int;
+  as the config: `maxIterations` / `subagentMaxIterations` / `subagentMaxTokens` /
+  `contextResetMaxPerMessage` are `IterationLimitSchema`, the union of `-1` and a
+  positive int (`schema.ts:207-211`, `:218-222`, `:245-249`); `contextWindow`,
+  `toolMaxParallel` and `subagentMaxParallel` are positive ints;
+  `maxInlineOutputChars` is a non-negative int;
   `contextAwarenessStepPercent` is 1..100; `toolExecution` and `subagentExecution` are
   `ExecutionModeSchema`, the enum of `schema.ts:322`. `agentTaskDescription` is
   `.min(1).max(4096)`, in units: the 4096-BYTE cap lives in the config load, on the

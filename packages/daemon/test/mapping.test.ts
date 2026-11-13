@@ -19,6 +19,10 @@ describe("stopReasonToProtocol", () => {
     expect(stopReasonToProtocol("end_turn")).toBe("end_turn");
     expect(stopReasonToProtocol("cancelled")).toBe("cancelled");
     expect(stopReasonToProtocol("max_iterations")).toBe("max_iterations");
+    // docs/feat/subagent-token-budget.md T10: the new reason survives the wire
+    // losslessly too (an older client would fail the turn on it, hence
+    // PROTOCOL_VERSION 24). Mutation: fall through to max_iterations → red.
+    expect(stopReasonToProtocol("max_token_budget")).toBe("max_token_budget");
   });
 });
 

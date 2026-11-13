@@ -71,6 +71,13 @@ export const CARRIED: { readonly [K in Key]: Row<K> } = {
     read: (c) => c.subagentMaxIterations,
     write: (c, v) => ({ ...c, subagentMaxIterations: v }),
   },
+  subagentMaxTokens: {
+    class: "P",
+    configKey: "subagents.maxTokens",
+    source: "subagentMaxTokens",
+    read: (c) => c.subagentMaxTokens,
+    write: (c, v) => ({ ...c, subagentMaxTokens: v }),
+  },
   subagentExecution: {
     class: "P",
     configKey: "subagents.execution",

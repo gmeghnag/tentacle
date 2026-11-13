@@ -167,6 +167,8 @@ export interface TentacleConfig {
   readonly agentsMdContent?: string;
   readonly subagentsEnabled: boolean;
   readonly subagentMaxIterations: number;
+  /** Sub-agent token budget for its whole life (prompt + completion, summed); a positive integer or -1 (unlimited). */
+  readonly subagentMaxTokens: number;
   /** How a parent's `agent_task` calls may overlap (read by `feat/parallel-agents`; on a pod the laptop's, carried). */
   readonly subagentExecution: ResolvedConfig["subagentExecution"];
   /** At most this many sub-agents at once (read by `feat/parallel-agents`; on a pod the laptop's, carried). */
@@ -866,6 +868,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     ...(agentsMd !== undefined ? { agentsMdContent: agentsMd } : {}),
     subagentsEnabled: resolved.subagentsEnabled,
     subagentMaxIterations: resolved.subagentMaxIterations,
+    subagentMaxTokens: resolved.subagentMaxTokens,
     subagentExecution: resolved.subagentExecution,
     subagentMaxParallel: resolved.subagentMaxParallel,
     subagentsTwoWay: resolved.subagentsTwoWay,

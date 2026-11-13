@@ -28,6 +28,7 @@ import {
   DEFAULT_SUBAGENT_EXECUTION,
   DEFAULT_SUBAGENT_MAX_ITERATIONS,
   DEFAULT_SUBAGENT_MAX_PARALLEL,
+  DEFAULT_SUBAGENT_MAX_TOKENS,
   DEFAULT_SUMMARIZE_LARGE_OUTPUT,
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_TABULATE_JSON,
@@ -100,6 +101,8 @@ export interface ResolvedConfig {
   readonly subagentsEnabled: boolean;
   /** Sub-agent step limit; a positive integer, or -1 (unlimited). */
   readonly subagentMaxIterations: number;
+  /** Sub-agent token budget for its whole life; a positive integer, or -1 (unlimited). */
+  readonly subagentMaxTokens: number;
   /** How a parent's `agent_task` calls may overlap (read by `feat/parallel-agents`). */
   readonly subagentExecution: ToolExecutionMode;
   /** At most this many sub-agents at once (read by `feat/parallel-agents`). */
@@ -174,6 +177,7 @@ export interface ResolvedConfig {
     readonly systemPrompt: Source;
     readonly subagentsEnabled: Source;
     readonly subagentMaxIterations: Source;
+    readonly subagentMaxTokens: Source;
     readonly subagentExecution: Source;
     readonly subagentMaxParallel: Source;
     readonly subagentsTwoWay: Source;
@@ -441,6 +445,11 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     fileConfig.subagents?.maxIterations,
     DEFAULT_SUBAGENT_MAX_ITERATIONS,
   );
+  const subagentMaxTokens = pick(
+    parseIterationLimit(env.TENTACLE_SUBAGENT_MAX_TOKENS),
+    fileConfig.subagents?.maxTokens,
+    DEFAULT_SUBAGENT_MAX_TOKENS,
+  );
   const subagentExecution = pick<ToolExecutionMode>(
     parseToolExecution(env.TENTACLE_SUBAGENT_EXECUTION),
     fileConfig.subagents?.execution,
@@ -590,6 +599,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     skills,
     subagentsEnabled: subagentsEnabled.value,
     subagentMaxIterations: subagentMaxIterations.value,
+    subagentMaxTokens: subagentMaxTokens.value,
     subagentExecution: subagentExecution.value,
     subagentMaxParallel: subagentMaxParallel.value,
     subagentsTwoWay: subagentsTwoWay.value,
@@ -630,6 +640,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       systemPrompt: systemPrompt.source,
       subagentsEnabled: subagentsEnabled.source,
       subagentMaxIterations: subagentMaxIterations.source,
+      subagentMaxTokens: subagentMaxTokens.source,
       subagentExecution: subagentExecution.source,
       subagentMaxParallel: subagentMaxParallel.source,
       subagentsTwoWay: subagentsTwoWay.source,

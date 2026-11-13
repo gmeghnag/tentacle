@@ -79,7 +79,7 @@ function setup(
   specs: readonly HookSpec[],
   script: readonly (readonly StreamEvent[])[],
   answer: Parameters<typeof fakeEnv>[0],
-  over: { maxIterations?: number; modelRequestHooks?: boolean } = {},
+  over: { maxIterations?: number; maxTokens?: number; modelRequestHooks?: boolean } = {},
 ) {
   const { env, calls, of } = fakeEnv(answer);
   const logs: string[] = [];
@@ -98,6 +98,7 @@ function setup(
     env,
     hooks,
     ...(over.maxIterations !== undefined ? { maxIterations: over.maxIterations } : {}),
+    ...(over.maxTokens !== undefined ? { maxTokens: over.maxTokens } : {}),
   });
   return { agent, model, calls, of, logs };
 }
@@ -403,6 +404,29 @@ describe("turn_end notifications (cancelled / max_iterations)", () => {
     const events = await drive(agent, [{ role: "user", content: "go" }], ac.signal);
     expect(events.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
     expect(of("te").map((c) => c.input.reason)).toEqual(["cancelled"]);
+  });
+
+  test("max_token_budget: the hook hears the honest reason, never max_iterations", async () => {
+    // docs/feat/subagent-token-budget.md: a spend-shaped stop must not be
+    // reported to a user hook as a step one. Mutation: leave the union (or the
+    // `notifyTurnEnd` call site) at max_iterations → red.
+    const { agent, of } = setup(
+      [{ event: "turn_end", command: "te" }],
+      [
+        [
+          { type: "tool_call", toolCall: { id: "c1", name: "missing", arguments: "{}" } },
+          // Usage is what the cap counts: without one the counter never grows.
+          { type: "done", usage: { promptTokens: 900, completionTokens: 100 } },
+        ],
+        say("report"),
+      ],
+      () => never(),
+      { maxIterations: 50, maxTokens: 500 },
+    );
+    const messages: ChatMessage[] = [{ role: "user", content: "go" }];
+    const events = await drive(agent, messages);
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "max_token_budget" });
+    expect(of("te").map((c) => c.input.reason)).toEqual(["max_token_budget"]);
   });
 });
 

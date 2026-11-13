@@ -115,6 +115,7 @@ const CLOSING_LABELS: Readonly<Record<string, string>> = {
   cancelled: "cancelled",
   error: "error",
   max_iterations: "iteration cap",
+  max_token_budget: "token cap",
 };
 
 /**
@@ -126,6 +127,7 @@ const CLOSING_LABELS: Readonly<Record<string, string>> = {
 const OUTCOME_NOTES: Readonly<Record<string, string>> = {
   cancelled: "_(sub-agent cancelled)_",
   max_iterations: "_(sub-agent hit its iteration cap)_",
+  max_token_budget: "_(sub-agent hit its token cap)_",
 };
 
 /**

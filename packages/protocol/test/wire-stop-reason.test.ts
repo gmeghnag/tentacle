@@ -54,8 +54,9 @@ describe("a tunnelled `done` carries the stop reason", () => {
   });
 
   test("no bump: an optional field is free on the wire", () => {
-    // 23 is the attachments bump (docs/feat/attachments-core.md), not this field.
-    expect(PROTOCOL_VERSION).toBe(23);
+    // 24 is the sub-agent token-budget bump (docs/feat/subagent-token-budget.md),
+    // not this field.
+    expect(PROTOCOL_VERSION).toBe(24);
   });
 
   test("a reason outside the enum is refused, never silently coerced", () => {
