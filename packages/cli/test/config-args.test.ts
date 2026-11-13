@@ -4,11 +4,12 @@ import { type ConfigArgs, parseConfigArgs } from "../src/config-args.ts";
 /** Parse a `tentacle config …` argv (flags already split by `parseArgs`). */
 function parse(
   args: readonly string[],
-  opts: { profile?: string; unset?: string; json?: boolean; yes?: boolean } = {},
+  opts: { profile?: string; unset?: string; json?: boolean; yes?: boolean; set?: boolean } = {},
 ): ConfigArgs {
   const bools = new Set<string>();
   if (opts.json === true) bools.add("json");
   if (opts.yes === true) bools.add("yes");
+  if (opts.set === true) bools.add("set");
   const flags = new Map<string, string>();
   if (opts.profile !== undefined) flags.set("profile", opts.profile);
   if (opts.unset !== undefined) flags.set("unset", opts.unset);
@@ -140,10 +141,24 @@ describe("unset, get, list, path (owner Q4/Q7)", () => {
   });
 
   test("`list` and `path` take no key", () => {
-    expect(ok(["list"]).op).toEqual({ kind: "list" });
+    expect(ok(["list"]).op).toEqual({ kind: "list", setOnly: false });
+    expect(ok(["list"], { set: true }).op).toEqual({ kind: "list", setOnly: true });
     expect(ok(["path"]).op).toEqual({ kind: "path" });
     expect(failed(["list", "model.model"])).toContain("unexpected argument");
     expect(failed(["path", "x"])).toContain("unexpected argument");
+  });
+
+  test("`--set` belongs to `list` alone (a silently ignored flag is the bug)", () => {
+    // Mutation: drop the guard in parseConfigArgs → each of these parses fine and
+    // the flag disappears without a word.
+    for (const words of [
+      ["get", "model.model"],
+      ["path"],
+      ["unset", "model.model"],
+      ["set", "x", "1"],
+    ]) {
+      expect(failed(words, { set: true })).toContain("belongs to");
+    }
   });
 });
 

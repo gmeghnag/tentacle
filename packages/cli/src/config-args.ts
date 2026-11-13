@@ -7,8 +7,11 @@
  *   tentacle config set <key> <value>       tentacle config <key>=<value>
  *   tentacle config unset <key>             tentacle config --unset <key>
  *   tentacle config get <key> [--json]
- *   tentacle config list [--json]
+ *   tentacle config list [--set] [--json]
  *   tentacle config path
+ *
+ * `list` shows every known key with its effective value and origin; `--set`
+ * shows only what the file holds (docs/feat/config-list-effective.md).
  *
  * `--profile <name>` targets `profiles.<name>.` in the SAME user file (profiles
  * live inside it, `schema.ts:393-400`), so a key that already names a profile is
@@ -26,7 +29,8 @@ export type ConfigOp =
   | { readonly kind: "set"; readonly key: string; readonly value: ValueSource }
   | { readonly kind: "unset"; readonly key: string }
   | { readonly kind: "get"; readonly key: string }
-  | { readonly kind: "list" }
+  /** `list`: every known key with its effective value and origin; `setOnly` = only what the FILE holds (the old output). */
+  | { readonly kind: "list"; readonly setOnly: boolean }
   | { readonly kind: "path" };
 
 export type ConfigArgs =
@@ -42,7 +46,7 @@ export type ConfigArgs =
   | { readonly ok: false; readonly error: string };
 
 const FORMS =
-  "usage: tentacle config set <key> <value> | <key>=<value> | unset <key> | get <key> | list | path";
+  "usage: tentacle config set <key> <value> | <key>=<value> | unset <key> | get <key> | list [--set] | path";
 
 const fail = (error: string): ConfigArgs => ({ ok: false, error });
 
@@ -102,6 +106,12 @@ export function parseConfigArgs(
   const words = [...positional];
   const first = words[0];
 
+  // `--set` belongs to `list` alone: on any other command it would be silently
+  // ignored, which is the strict-args rule's exact failure.
+  if (bools.has("set") && first !== undefined && first !== "list") {
+    return fail(`--set belongs to \`config list\`; ${FORMS}`);
+  }
+
   if (unsetFlag !== undefined) {
     if (unsetFlag === "") {
       return fail("--unset needs a key");
@@ -121,7 +131,10 @@ export function parseConfigArgs(
     if (words.length > 1) {
       return fail(`unexpected argument ${JSON.stringify(words[1])}; ${FORMS}`);
     }
-    return out(first === "list" ? { kind: "list" } : { kind: "path" });
+    if (first === "path") {
+      return out({ kind: "path" });
+    }
+    return out({ kind: "list", setOnly: bools.has("set") });
   }
 
   if (first === "get") {
