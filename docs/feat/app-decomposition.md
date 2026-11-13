@@ -1266,3 +1266,38 @@ H4 dissolved the slice it was executing.
 
 *— claude-opus-5-5, 2026-11-13* (fresh context; different family from the
 deepseek executor)
+
+### Round 2
+
+**Verdict: PASS.** Both findings are fixed. The fix commit (`8498947`) adds
+no regressions.
+
+- **Finding 2 (changelog fragment): FIXED.** The fragment file is deleted, and
+  `changelog.d/` has no `app-decomp*` file left.
+- **Finding 1 (plan contradiction): FIXED.**
+  - The doc now agrees with itself. The header (l. 3), H4(1) (struck), the new
+    *H4(1) status after S1* paragraph, the slice-table row, Q7's preamble and
+    the revised-order row all say "S1 re-instated by the owner and executed".
+    The type rule is kept as a resident/movable split.
+  - The pin test now matches that split. It pins where `AppProps` and
+    `SessionController` are declared. For the other four types it pins only
+    that each re-export resolves to a module that declares the type.
+  - I did not verify the owner's re-instatement independently. The orchestrator
+    launched the slice, and the doc now records that.
+- **Mutations (all reverted; `git diff` empty after each).**
+  - (A) `export interface RunQuit` → `interface RunQuit` in `app-types.ts`:
+    **RED**, 2 fail ("App.tsx still re-exports…", "index.ts exports … and no
+    more").
+  - (B) `SettingsNoticeLine` added to the type block in `index.ts`: **RED**,
+    1 fail ("… and no more").
+  - The re-export resolution therefore has teeth even though the test was
+    narrowed.
+- **Regressions.** `git diff HEAD~1` touches no `packages/tui/src` or
+  `packages/cli` file: it is the test, the doc and the fragment deletion only.
+  `app-types.test.ts` + `subagent-panel-controller.test.ts`: 10 pass / 0 fail.
+  `bun run typecheck`: clean. `bun run lint`: `Checked 977 files … No fixes
+  applied.` The full suite was not re-run, because this round changed no src
+  file.
+
+*— claude-opus-5-5, 2026-11-13* (fresh context; different family from the
+deepseek executor)
