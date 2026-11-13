@@ -418,6 +418,24 @@ new), `README.md`, the changelog fragment, this doc.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-13* (fresh context; different model family from the executor)
 
-(pending)
+**Verdict: REQUEST-CHANGES.**
+
+Gate (scoped as instructed): the 4 touched test files 111 pass / 0 fail; `bun run lint` clean (964 files); `bun run typecheck` OK. Full `bun test` not re-run.
+
+**Findings**
+
+1. **HIGH: env-only keys report a wrong effective value/origin.** `config-effective.ts:279-286`: a leaf with `env` but no `sourceKey` (`model.apiKey`/`TENTACLE_MODEL_API_KEY`, `engine`/`TENTACLE_ENGINE`) never checks the env. That contradicts the Design ("read from the registry so it also covers keys with no `sourceKey`"). Probe output:
+   `TENTACLE_MODEL_API_KEY=sk… → model.apiKey = (unset)  # no default` (the loader uses the env key, `resolve.ts:542`); with a file key as well it says `***  # file`, but env wins.
+   `TENTACLE_ENGINE=docker → engine = "kubernetes"  # default`, or `"k8s"  # file` (the CLI uses docker, `engine-select.ts:81`).
+   `config get model.apiKey` then exits 1 with "no effective value".
+2. **MEDIUM: a provider-dependent default is labelled `profile <name>`.** Fixture: `profiles.w.model.provider=anthropic`, `--profile w`. Output: `model.images = true  # profile w` and `model.maxImageBytes = 3932160  # profile w`, but neither key is set in the profile. `movedByProfile` (`:299-302`) compares *resolved* values, so a default that follows the provider counts as "moved". Expected: `# default (anthropic)`.
+3. **MEDIUM: `get` and `list` disagree under `TENTACLE_PROFILE`.** `main.ts:684` passes no `env`. `effectiveEntryOf` (`config-run.ts:796`) reads `input.env?.TENTACLE_PROFILE`, so it ignores the real env. `listAll` uses `envOf` → `process.env`. With `TENTACLE_PROFILE=w`: `get model.maxImageBytes` → `5242880 # default (openai-compatible)`, while `list` → `3932160 # profile w`.
+4. **MEDIUM: `config get --profile w <unset key>` still exits 1.** `effectiveEntryOf` looks up `profiles.w.model.images` (`config-run.ts:846`), but `effectiveEntries` skips every `profiles*` path (`config-effective.ts:438`). So the owner's rule 3 is not met under `--profile`.
+
+**Attacks tried:** env origin for keys without a `sourceKey` (found 1) · profile changing the provider (found 2) · `get` vs `list` under `--profile`/`TENTACLE_PROFILE` (found 3, 4) · a secret set by env (masked, no leak, but see 1) · a file value that env overrides (`model.images` file + env provider → `# file`, correct) · a profile value equal to the base value (`maxIterations` → `# file`, correct).
+
+**Mutation:** disabling the `source === "env"` branch makes T-E4 fail (2 tests), so the env path is not vacuous. Reverted; `git status` clean. No test covers findings 1–4, so each fix needs a red test first.
+
+**Executor behaviour:** the drift is documented honestly and the red/green evidence is real. But the Design's own env rule for keys without a `sourceKey` was dropped silently, and the `get` path was not checked for parity with `list` under a profile.
