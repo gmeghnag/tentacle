@@ -497,8 +497,316 @@ Red-before-green: flows 06–08 run against 11a's placeholder fail (no
 
 ## Execution
 
+*— claude-opus-5-5 (executor of slice 12a), 2026-11-13*
+
+**Slice 12a only.** 12b/12c untouched (no transcript model, no screen, no
+`marked`/`highlight.js`, no e2e flow, no `changelog.d/mobile-session-view.added.md`
+— 12c's). Nothing under `packages/**` changed: no protocol schema, no
+`protocol.json` regeneration, no `protocol.d/` note (P11 held).
+
+### Load-bearing check (re-run first, as required)
+
+The plan's assumption is the TUI's attach path unchanged, with ONE broker.
+Re-verified against this branch's code before any edit:
+
+- `SessionStreamListener` is "a session's consumer (`RemoteSession`, a mobile
+  view)" — `packages/client/src/remote-client.ts:211-214`; `newSession(…,
+  {attach})` → `RemoteSession` (`:954-969`); the eager `open()` is
+  `attachSession` = `session/open{sessionId, reopen?}`, never a create,
+  bounded by `ATTACH_TIMEOUT_MS` (`:983-1037`, `packages/client/src/constants.ts:12`).
+- `PermissionBroker` with `holdUntilSet` queues requests while no requester is
+  set and hands them, in order, to the next `setRequester`
+  (`packages/core/src/permission.ts:162-208`).
+- `RemoteSession.detach()` is `session/detach` (`packages/client/src/remote-session.ts:798`);
+  `RemoteSession.close()` is `session/close` (`:752-764`); `RemoteClient.drain()`
+  (`remote-client.ts:1444`) and `closeSessions()` (`:1478`) are as the plan says.
+
+Then re-ran the plan's own probe (`.tentacle/tmp/mobile-session-view-12a/`,
+this branch's copy of `deny-hazard.ts`) and added the two properties 12a needs
+that it does not cover:
+
+```
+$ bun deny-hazard.ts denyAll
+mode=denyAll turn=ended laptopAsked=1
+   {"type":"tool_result",… "Permission denied by the user: `ask` was not run." …}
+$ bun deny-hazard.ts hold
+mode=hold turn=still waiting (ask pending) laptopAsked=1
+```
+
+```
+$ bun link-probe.ts          # hold broker + detach + closeSessions
+phone attached: archived=false attached=2 running=false
+ask with the hold broker: turn=pending
+after phone detach(): archived=false attached=1 running=true
+phone re-attached: archived=false attached=2 running=true
+after closeSessions() (11a exit path): archived=false attached=1 running=true
+```
+
+The last line is why the harness had to change: `closeSessions` there was a
+no-op because the LAPTOP was still attached. The hazard is the phone as the
+LAST client, which `last-client.ts` isolates:
+
+```
+$ bun last-client.ts detach  # decision 4: detach
+phone attached:                sessions=[["2238",false,2,false]]
+laptop left; phone is last:    sessions=[["2238",false,1,false]]
+after the phone's detach():    sessions=[["2238",false,0,false]]   ← kept, live
+$ bun last-client.ts close   # 11a's exit path
+phone attached:                sessions=[["611e",false,2,false]]
+laptop left; phone is last:    sessions=[["611e",false,1,false]]
+after closeSessions()+close(): sessions=[]                          ← GONE (Hazard 3)
+```
+
+So the load-bearing assumption HOLDS (the attach path needs no new code), and
+both hazards are real. Check passed → implementation proceeded.
+
+### As-built, in dependency order
+
+1. **`apps/mobile/src/foreground-gate.ts` (new, pure).** `createForegroundGate(inner)`
+   → `{dial, suspend, resume, isSuspended}`. `suspend()` arms the hold *before*
+   closing the live channel (so a dial in flight waits instead of slipping
+   through), `resume()` releases every dial waiting on that one hold, both are
+   idempotent; a channel that arrives while suspended is closed and the dial
+   waits again. It wraps the factory; it is not a second transport.
+2. **`apps/mobile/src/session-controller.ts` (new, pure, injected).**
+   `createSessionController<S extends SessionHandle>({newSession})` →
+   `{open, leave, dispose, follows}`. `open` never creates (`{attach}`/
+   `{reopen}`, supplied by the app's seam) and never throws: it answers
+   `{ok:true, session}` or `{ok:false, reason}` with
+   `openFailureReason` = `timeout` (`AttachTimeoutError`), `archived`/
+   `deleted`/`gone`/`too-many` (`DomainErrorCode.SessionArchived/SessionDeleted/
+   UnknownSession/TooManySessions`), else `link` — by class then code, never
+   message text. `leave` is `detach()`, never `close()`. Both are serialised per
+   session id (one tail promise per id), so a back-then-forward cannot overlap
+   the client's id-keyed session table; a repeated `open` of an id already
+   followed reuses the handle; `dispose()` unsubscribes and detaches an attach
+   that lands afterwards.
+3. **`apps/mobile/src/connection.ts`.** `createLinkBroker()` — `new
+   PermissionBroker(undefined, {holdUntilSet: true})`, exported so the app's
+   *actual* broker is what the tests drive; `leaveComputer(client)` —
+   `drain()` + `close()`, the one exit path, exported for the same reason;
+   `openComputer` now dials through the gate (`createForegroundGate(…)`, first
+   dial included), passes `gate.dial` as the client's `channelFactory`, and its
+   `ComputerLink` exposes `permissions`, `suspend()`, `resume()`, and a
+   `close()` = `leaveComputer`. The failure path is `drain()` + `close()` too.
+4. **`apps/mobile/App.tsx` (wiring only).** A `LIVE_LINKS` set; the registry's
+   `open` suspends a link dialled while `AppState.currentState !== "active"` and
+   registers it; one `AppState` `change` effect suspends on leaving `active` and
+   resumes on `active`; `close` → `link.close()` (the link's own exit path).
+   The `Session` route stays 11a's placeholder (12c).
+5. **Tests** (`apps/mobile/test/`): `foreground-gate.test.ts` (new, 4),
+   `session-controller.test.ts` (new, 9), `session-link.test.ts` (new, 7 =
+   plan T1–T6 + the archived→reopen reason), `connection.test.ts` (broker test
+   inverted to hold-and-deliver, plus the leave-as-last-client test over a real
+   WebSocket). All 20 new tests, plus the 2 rewritten, were RED first: T1/T3/T4
+   ran red against 11a's `connection.ts` (denyAll answers at once, `close()`
+   sends `session/close`), and the pure modules' tests were red before their
+   implementations existed.
+6. **`changelog.d/mobile-session-view-12a.changed.md`** — one bullet (validated
+   with `scripts/changelog.ts`'s own parser). No `TODO.md` edit, no
+   `CHANGELOG.md` edit.
+
+### Mutations (each applied, run, reverted — pasted results)
+
+| Mutation | Red test(s) |
+|---|---|
+| `createLinkBroker` → `new PermissionBroker(denyAll)` | T1 (and `connection.test.ts`'s hold test) |
+| `leaveComputer` → `closeSessions()` + `close()` | T4 **and** `connection.test.ts` "link.close() leaves without a session/close" |
+| controller `leave` → `session.close()` | T3 + "leave calls detach, NEVER close" (and the serialisation test, which needs a real detach) |
+| `resume()` does not `releaseHold()` | T5, T6 + 3 of the 4 gate tests |
+| drop the per-id serialisation in the controller | "an open … AWAITS it" |
+
+Verbatim, e.g. the exit path:
+
+```
+=== MUTATION 2: closeSessions() in link.close ===
+(fail) openComputer over a real daemon > link.close() leaves without a session/close: … [107.47ms]
+ 11 pass  1 fail
+=== MUTATION 4: resume() does not release ===
+(fail) createForegroundGate > a dial while suspended WAITS … [2.88ms]
+(fail) createForegroundGate > a channel that arrives while suspending is CLOSED … [3.92ms]
+(fail) createForegroundGate > every dial waiting on one hold is released … [2.68ms]
+(fail) the phone's session link over a real daemon > T5 suspend → the daemon sees the detach … [3156.21ms]
+(fail) the phone's session link over a real daemon > T6 an answer given just before suspend … [5001.73ms]
+ 6 pass  5 fail
+```
+
+### Drift from the Implementation (and why)
+
+- **Two exported seams instead of inline construction** — `createLinkBroker()`
+  and `leaveComputer()`. Not cosmetic: with the broker built inline, mutation 1
+  left T1 GREEN (the test held a look-alike), and with the exit path inline,
+  mutation 2 only reddened the real-socket test. A mutation that does not
+  redden the test named for it is a vacuous test (§9), so the app's decision now
+  has exactly one implementation and the tests drive it.
+- **`openComputer`'s first dial goes through the gate** (the plan says "the
+  factory wrapped by the gate"). Same thing, taken literally: the initial
+  channel is `gate.dial()` too, so `suspend()` also closes the *first* socket
+  (otherwise a backgrounding between `openComputer` and the client's next dial
+  left the original socket live).
+- **`App.tsx` also suspends a link dialled while already backgrounded** — an
+  addition the plan does not name (F2/F3's cousin): a dial that completes while
+  iOS is not active would open the ghost attachment the gate exists to remove.
+- **The test harness closes the in-memory server `Connection`** when its channel
+  closes, mirroring `ws-server.ts:223-234`. Without it no test could observe a
+  detach: `createChannelPair` has no server side, so a closed client stayed
+  "attached". This is a harness fact, not a product one.
+- No other drift. Files changed are exactly the plan's 12a table.
+
+### Notes / unverified
+
+- **iOS/Maestro not run**: 12a adds no UI, and the plan's flows are 12c's. The
+  `AppState` wiring is exercised by the pure gate tests and by
+  `bunx tsc -p apps/mobile`; its on-device behaviour (foreground → detach →
+  re-attach) is unverified here and is flow `10-background-ask`'s job in 12c.
+- The owner's image-attachments requirement is 12b (model) + 12c (screen); it
+  has no 12a footprint and was not touched.
+
+### Gate
+
+```
+$ bunx tsc --noEmit          → clean
+$ bunx tsc -p apps/mobile    → clean
+$ bun run lint               → 1018 files checked, no fixes applied, 0 errors/warnings
+$ bun test                   → 7943 pass, 3 skip (the opt-in ones), 0 fail, 569 files, 341.84s
+```
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-13* (fix round 1 executor; same model as round 0
+and the Review — fresh context only, so shared blind spots remain possible)
+
+**Reproduction first (both findings, on the round-0 code, in
+`.tentacle/tmp/mobile-session-view-12a/fix1-repro.ts`):**
+
+```
+F1: dialled=["ch0","ch1","ch2","ch3","ch4"] closed-on-suspend=["ch0"]
+F2: follows=true detaches=0
+```
+
+F1 = finding 1: three callers (one stale attempt + two redials) released
+together made five inner dials, and `suspend()` closed `ch0` — not the socket a
+caller holds. F2 = finding 2: `leave` during an attach left the session
+followed (`follows=true`) with no detach.
+
+**Finding 1 (HIGH) — `apps/mobile/src/foreground-gate.ts`.** Root cause: the
+gate identified nothing, so every dial parked on the one hold was released
+together, each called `inner()`, and `current` was whichever connected *last*;
+the client's abandoned attempts (`dialChannel`'s `LIVENESS_MS` give-up,
+`remote-client.ts:2351-2380`) were indistinguishable from the awaited one. Fix:
+a generation counter (`generation`) claimed by each `dial()`; a dial whose
+generation is no longer newest fails with `ChannelError("unreachable", …)`
+*before* dialling, and a channel that arrives for it is closed and rejected —
+so an abandoned attempt never opens a socket and never becomes `current`, and
+`current` is only ever what the newest caller received (`foreground-gate.ts:36-43`
+for the reason, `:73,86-110` for the guard). Rejecting (not silently returning)
+is what makes the gate a faithful `channelFactory`: the client treats it as a
+failed dial and backs off, which is exactly a give-up. Double `close()` of an
+abandoned channel is safe — `DuplexChannel.close` is idempotent
+(`packages/transport/src/channel.ts:12`).
+
+```
+$ bun test apps/mobile/test/foreground-gate.test.ts
+  red (before the fix): 2 fail — Expected 1 / Received 2 (N dials on one
+  resume), Expected "ChannelError" / Received "resolved" (stale becomes current)
+  green (after):        5 pass, 0 fail
+$ bun run fix1-repro.ts  (after)
+F1a (2 redials, abandoned socket last): dialled=["ch0","ch1"]
+    results=["rejected:ChannelError","ch1"] closed-on-suspend=["ch0","ch1"]
+F1b (2 redials, live socket last):     dialled=["ch0","ch1"]
+    results=["rejected:ChannelError","ch1"] closed-on-suspend=["ch0","ch1"]
+```
+
+Two dials for three callers (the abandoned one never dials), and the channel
+closed on the second `suspend()` is the live one in both orderings.
+
+**Finding 2 (MEDIUM) — `apps/mobile/src/session-controller.ts`.** Root cause:
+`leave()` read `live` synchronously, before `serialise`, so an attach still in
+flight was not in `live` yet: the queued leave found no entry, detached
+nothing, and the open then registered the session + listener. Fix: a
+`left: Set<string>` marks an id when `leave` finds no handle, and the open's
+serialised run detaches instead of registering when the mark is set
+(`session-controller.ts:100-120,155-172`); the mark is cleared by the leave's own
+serialised run, which the per-id tail orders *after* that open, so it is
+per-leave and cannot poison the next open. The open answers
+`{ok:false, reason:"link"}`, the same answer the existing `dispose()`
+mid-attach path gives (the screen is gone either way).
+
+```
+$ bun test apps/mobile/test/session-controller.test.ts
+  red (before the fix): 1 fail — Expected {ok:false, reason:"link"} / Received ok:true
+  green (after):        11 pass, 0 fail
+$ bun run fix1-repro.ts  (after)
+F2: open="link" follows=false detaches=1
+```
+
+**Mutations (each applied, run, restored; `git status` shows only the 4 intended
+files after each):**
+
+1. Gate — both `if (abandoned())` guards deleted →
+   `2 fail`: `Expected: 1 / Received: 2` and `Expected: "ChannelError" /
+   Received: "resolved"`.
+2. Controller — `if (disposed || left.has(sessionId))` → `if (disposed)` →
+   `1 fail`: `Expected {ok:false,reason:"link"} / Received ok:true`.
+3. Controller — `left.delete(sessionId)` dropped (the mark is never cleared) →
+   the new poisoning test `1 fail`: the second open of the same id does not
+   attach. This is the risk the fix itself introduces, pinned shut.
+
+**Gate (fix round 1):**
+
+```
+$ bunx tsc --noEmit          → clean
+$ bunx tsc -p apps/mobile    → clean
+$ bun run lint               → 1018 files checked, no fixes applied
+$ bun test apps/mobile/test  → 119 pass, 0 fail
+$ bun test                   → 7946 pass, 3 skip (the opt-in ones), 0 fail, 569 files, 344.55s
+```
+
+7943 → 7946: this round adds four tests (two gate, two controller) and removes
+one (the old "every dial waiting on one hold is released by a single resume",
+whose premise the fix makes unreachable — a second parked dial is now a
+superseded one; its hold-arming half is covered by the first new gate test).
+Verified in this worktree.
+
+**Not re-touched, deliberately:** the Review's scope note (the plan header says
+12a adds no changelog fragment while Execution added
+`changelog.d/mobile-session-view-12a.changed.md`) is a docs bookkeeping point,
+not a code finding; left for the 12c/orchestrator pass rather than editing the
+plan's header here. **Unverified:** the gate's new behaviour is pinned by pure
+tests only — the on-device variant (background > 15 s, foreground, background
+again) is still flow `10-background-ask`'s job in 12c, as round 0 noted.
+
 ## Review
 
 #### Owner answers (2026-11-13)
 
 All questions answered as recommended. Implementation APPROVED. Added owner requirement: image attachments (media_message refs) are shown in the transcript (12b model + 12c screen; thumbnails fetched over the existing channel, never auto-downloaded beyond the visible rows).
+
+### Review — slice 12a (fresh context)
+
+*— claude-opus-5-5, 2026-11-13* (same model as the 12a executor: fresh context only, shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES.**
+
+1. **HIGH — `apps/mobile/src/foreground-gate.ts:71-73`: the gate can lose track of the live socket, so `suspend()` closes a dead one and the real one stays up.** While suspended the client keeps redialling; each `dialChannel` gives up after `LIVENESS_MS` (15 s, `remote-client.ts:2351-2380`) but the gate's held `dial()` stays pending. All held dials share one hold, so `resume()` releases N concurrent `inner()` dials; the abandoned ones' channels are closed by `dialChannel` (`late`), but `current` is whichever one connects LAST. Repro (`.tentacle/tmp/mobile-session-view-12a/review-repro.ts`): two held dials, the stale one connects after the live one → `A: client holds ch1; closed on suspend=["ch0"] (live closed? false)`. Scenario: background > ~15 s, foreground, background again → the live socket is never closed: the ghost attachment the gate exists to avoid, and on return a socket nobody told the client was dead (F2/F3/F9 do not converge). Also an N-socket burst on every resume. Fix direction: a held dial that its caller abandoned must not dial at all (e.g. one pending dial at a time / generation counter), and `current` only ever the channel the latest caller received; add a test for that ordering.
+2. **MEDIUM — `apps/mobile/src/session-controller.ts:155-168`: `leave()` during an in-flight `open()` is a no-op.** `leave` reads `live` synchronously before serialising; an attach still running (up to 30 s) is not in `live` yet, so the queued leave detaches nothing and the open then registers the session + listener. Repro: `B: after leave-during-open: follows=true detaches=0`. Scenario (F17 in reverse, the common one): tap a session, back before the attach answers → the phone stays attached with a listener into an unmounted screen; asks are re-offered to the phone's held broker. Fix: look up `live` inside the serialised run (or mark the id "left" so the pending open detaches). Test it.
+
+**Gate (touched files):** `bun test` of the 4 touched test files: 25 pass, 0 fail. `bun run lint`: 1018 files, clean. `bun run typecheck`: clean. Full suite not re-run here (Execution reports 7943 pass / 3 opt-in skip).
+
+**Mutations (applied, run, reverted; `git status` clean after):** `leaveComputer` → `closeSessions()`: connection.test + T4 red. Broker → a deny requester: connection.test + T1 red. Both tests are non-vacuous.
+
+**Attacks tried:** (a) single broker — one `createLinkBroker()` per `RemoteClient`, exposed as `permissions`, no second instance in the diff: holds. (b) leaving never closes — no `closeSessions`/`session/close` left in `apps/mobile` (also the `openComputer` failure path now `drain()`s): holds. (c) gate vs client give-up — `dialFailed` never stops on a timeout (`link-machine.ts:129-146`), so a long suspend does not kill the link: holds; but see finding 1. (d) controller per-id serialisation open-after-leave: holds; leave-during-open: finding 2. (e) error reasons by class/code, not message: holds.
+
+**Scope notes:** the image-attachments owner requirement has no 12a footprint (12b/12c), correctly untouched. The plan said 12a adds no changelog fragment; Execution added `changelog.d/mobile-session-view-12a.changed.md` — harmless, but the plan's header should be updated to match or the fragment folded into 12c's.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-13* (fresh-context reviewer; same model family as round 1)
+
+**Verdict: PASS** (round-1 findings 1 and 2 fixed; no new HIGH/MEDIUM).
+
+- **Finding 1 (gate, HIGH) — fixed.** A generation counter supersedes every parked dial (`foreground-gate.ts` `dial`): an abandoned caller never dials and a late channel is closed and never becomes `current`. Round-1 repro now: `A: client holds ch0; closed on suspend=["ch0"] (live closed? true)`. Regression check: the superseded rejection is `ChannelError("unreachable")`, which `terminalReason` (`link-machine.ts:85-97`) does not treat as terminal, and `dialChannel` ignores a rejection that arrives after its deadline (`late`), so the client's link is never stopped by it.
+- **Finding 2 (controller, MEDIUM) — fixed.** A `left` mark makes the still-attaching open detach instead of registering; the leave's serialised run clears it, so the next open of that id is not affected. Repro now: `follows=false detaches=1`.
+- **Mutations (applied, run, reverted; `git status` clean):** supersession check disabled → both new gate tests red; `left.has` dropped from the open's post-attach check → both new controller tests red.
+- **Gate:** `bun test apps/mobile/test` 120 pass / 0 fail; `bun run lint` clean (1018 files); `bun run typecheck` clean.
+- **Nit (not blocking):** the detach of an abandoned open is fire-and-forget inside the serialised run (`session-controller.ts` post-attach branch), so an immediate re-open of the same id does not wait for it. The client's `endSession` only forgets its own entry, so the table stays consistent; awaiting it (as `leave` does) would make F17's "awaits the pending detach" hold literally.

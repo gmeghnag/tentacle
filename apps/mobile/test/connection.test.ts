@@ -96,6 +96,16 @@ async function seeded(url: string, token: string): Promise<RemoteClient> {
   return client;
 }
 
+/** A plain second client over the real socket (a laptop's). */
+async function dialTo(url: string, token: string): Promise<RemoteClient> {
+  const factory = webSocketChannelFactory(url, { token });
+  const client = new RemoteClient(await factory(), new PermissionBroker(), undefined, {
+    channelFactory: factory,
+  });
+  await client.initialize();
+  return client;
+}
+
 function record(url: string, token: string): ComputerRecord {
   return { id: "dev", name: "e2e-mac", url, token };
 }
@@ -129,23 +139,74 @@ describe("openComputer over a real daemon", () => {
     });
   });
 
-  test("the client's broker is a deny broker, never allowAll (mutation: pass no requester → fails)", async () => {
+  test("the client's broker HOLDS with no requester, never denying on its own (mutation: denyAll → red)", async () => {
     await withDaemon("good", async (url) => {
       const link = await openComputer(record(url, "good"), { WebSocket: RNShapedWebSocket });
       try {
-        // The broker lives behind RemoteClient (AGENTS §7 single broker); asking
-        // it is what the app would ever do with a daemon-side request.
+        // The ONE broker lives behind RemoteClient (AGENTS §7 single broker) and
+        // is exposed on the link: what the session screen sets its sheet on.
+        expect(link.permissions).toBeInstanceOf(PermissionBroker);
         const broker = (link.client as unknown as { permissions: PermissionBroker }).permissions;
-        expect(broker).toBeInstanceOf(PermissionBroker);
-        const answer = await broker.request({
-          id: "r1",
-          kind: "command",
-          command: "rm -rf /",
-        } as never);
-        expect(answer.allowed).toBe(false);
+        expect(broker).toBe(link.permissions); // the same instance, not a copy
+        let answered = false;
+        const pending = broker
+          .request({
+            id: "r1",
+            kind: "command",
+            command: "rm -rf /",
+          } as never)
+          .then((answer) => {
+            answered = true;
+            return answer;
+          });
+        // Give a deny broker every chance to answer: it must NOT (11a's denyAll
+        // answered a "No" nobody gave — the plan's Repro 2).
+        await Bun.sleep(50);
+        expect(answered).toBe(false);
+        // The sheet mounts: the held request is delivered to its requester.
+        const asked: string[] = [];
+        link.permissions.setRequester(async (req) => {
+          asked.push((req as unknown as { id: string }).id);
+          return { allowed: true };
+        });
+        expect(await pending).toEqual({ allowed: true });
+        expect(asked).toEqual(["r1"]);
       } finally {
         await link.close();
       }
+    });
+  });
+
+  test("link.close() leaves without a session/close: as the last client it does not end the session (mutation: closeSessions() → red)", async () => {
+    await withDaemon("good", async (url, h) => {
+      const seeder = await seeded(url, "good");
+      const link = await openComputer(record(url, "good"), { WebSocket: RNShapedWebSocket });
+      const session = link.client.newSession(undefined, SESSION_ID, undefined, { attach: {} });
+      await session.open();
+      const live = h.get(SESSION_ID);
+      if (live === undefined) throw new Error("the session is not live");
+      expect(live.attachedCount).toBe(2);
+      // The laptop (the seeder) leaves first, so the phone is the LAST attached
+      // client — exactly the case where 11a's `closeSessions()` ended the
+      // session (Hazard 3 / decision 4).
+      await seeder.drain();
+      seeder.close();
+      await Bun.sleep(50);
+      expect(live.attachedCount).toBe(1);
+      // The app's exit path.
+      await link.close();
+      await Bun.sleep(50);
+      // Still live daemon-side: `drain()` + `close()` detached it, never closed it.
+      expect(h.get(SESSION_ID)).toBeDefined();
+      expect(h.get(SESSION_ID)?.attachedCount).toBe(0);
+      // The session is observably usable to a fresh client (a reopen/attach of
+      // the SAME id finds it live, not archived).
+      const observer = await dialTo(url, "good");
+      const page = await observer.sessionList({ limit: 10 });
+      const entry = page.sessions.find((s) => s.sessionId === SESSION_ID);
+      expect(entry?.archived).toBe(false);
+      expect(entry?.attached).toBe(0);
+      observer.close();
     });
   });
 
