@@ -25,7 +25,7 @@ import {
   attachRowRows,
   attachRowView,
   draftRefs,
-  imageDropOnly,
+  enterConvertsToChips,
   imageRowText,
   looksLikeCommand,
   removeLastChip,
@@ -840,6 +840,10 @@ export function App({
   }, []);
   const attachChainRef = useRef<Promise<void>>(Promise.resolve());
   const attachGenRef = useRef(0);
+  // The text a `convert` already probed and put back with `NOT_AN_IMAGE_NOTICE`:
+  // the next Enter on that same text sends it as a message instead of probing
+  // the same paths again forever (review round 2, finding R2-1).
+  const probedTextRef = useRef<string | null>(null);
   useEffect(() => {
     return () => {
       attachGenRef.current += 1; // a decision landing after this is ignored
@@ -2011,6 +2015,9 @@ export function App({
         // why, instead of a cleared field that sent nothing (review round 1,
         // finding 1).
         if (decision.kind === "text") {
+          // Recorded BEFORE the restore: the next Enter on this same text is a
+          // message, not another probe (round 2, R2-1).
+          probedTextRef.current = text;
           restoreInput(text, NOT_AN_IMAGE_NOTICE);
           return;
         }
@@ -3583,6 +3590,14 @@ export function App({
         return;
       }
       const text = value.trim();
+      // A probed drop is a PATH, never a command: `looksLikeCommand` already said
+      // so before the disk was read, so the coarse `/`-prefix branch below must
+      // not turn it into "Unknown command" (round 2, R2-1).
+      const probedText = probedTextRef.current;
+      const isProbedDrop = probedText !== null && probedText === text;
+      if (probedText !== text) {
+        probedTextRef.current = null; // an edited (or cleared) drop is a new drop
+      }
       // Enter WITH images is decided before the field is reset: a refusal must
       // leave the text where it is (docs/feat/attachments-tui.md D8), and an
       // image-only prompt ("") is a real submit.
@@ -3593,12 +3608,15 @@ export function App({
         compacting: compactingRef.current,
         dockOpen: false, // `submitToTarget` already took a child-owned text
         mode: attachMode(),
-        onlyPaths: imageDropOnly(text, home !== undefined ? { home } : {}),
+        onlyPaths: enterConvertsToChips(text, probedText, home !== undefined ? { home } : {}),
       });
       if (plan.kind === "refuse") {
         pushNotice(plan.notice);
         return;
       }
+      // The notice promised exactly ONE Enter; this is it (a refusal above keeps
+      // it, since the text stayed put). Round 2, R2-1.
+      probedTextRef.current = null;
       if (plan.kind === "send") {
         field.reset();
         historyRef.current = pushHistory(historyRef.current, plan.text);
@@ -3622,7 +3640,7 @@ export function App({
       if (text === "") {
         return;
       }
-      if (text.startsWith("/")) {
+      if (text.startsWith("/") && !isProbedDrop) {
         handleCommand(text);
         return;
       }

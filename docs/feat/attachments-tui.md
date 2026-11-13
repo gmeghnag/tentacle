@@ -682,6 +682,101 @@ bun test                   → 7513 pass · 3 skip · 0 fail (7516 tests, 537 fi
 `attach-app.test.tsx`/`attach-draft.test.ts` instead). A real terminal drag after
 these fixes is still the owner's manual check, unchanged from round 0.
 
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-13*
+
+Review round 2 left one MEDIUM, **R2-1**: a typed path that claims an image but
+is not one (a mixed drop `/w/a.png /w/notes.txt`, a missing `~/gone.png`) could
+never be sent. `convertToChips` restores the text with `NOT_AN_IMAGE_NOTICE`
+("Enter again sends it as a message"), but `imageDropOnly` was still true on that
+same text — one path still claims an image — so Enter converted, probed,
+decided `text` and restored again, forever.
+
+**Reproduce first** (the reviewer's `repro.test.ts` E/F, real `App`, fake
+probe/session), before any edit:
+
+```
+bun test repro.test.ts -t "E:"  → FAIL  E sent: []  (field cleared, nothing sent)
+bun test repro.test.ts           → E FAIL, F FAIL; A–D pass (round-1 fixes held)
+```
+
+**Root cause, two halves.** (a) Enter had no memory of "this exact text was
+already probed". (b) Even with such a memory, `submit`'s coarse
+`text.startsWith("/")` branch turned the restored absolute path into
+`Unknown command: /w/a.png` — found while fixing (a), and the reason the mixed
+absolute-path case is now a test of its own.
+
+**Fix** (pure decision in the module, per §7):
+
+- `attach-draft.ts` `enterConvertsToChips(text, probedText, {home})` (new): the
+  `onlyPaths` Enter uses — it is `imageDropOnly` minus the text that was already
+  probed; any other text (an edit, `""`) is a fresh drop.
+- `App.tsx` `probedTextRef`: set by `convertToChips` right before it restores a
+  `text` decision; **one-shot** — spent by the next Enter that gets past the
+  `refuse` plans (a refusal leaves the text in place, so the promise still
+  holds), and cleared when that Enter's text differs from the recorded one.
+- `App.tsx` `submit`: computes `isProbedDrop` and exempts it from the
+  `/`-prefix command branch (a probed drop is a path: `looksLikeCommand` already
+  said so before the disk was read).
+
+One known, deliberate limit: clearing the field without pressing Enter and then
+typing the very same text again still counts as the recorded drop, so that one
+Enter sends it as a message instead of probing again. Nothing is lost (that text
+was already probed and found not to be an image), and the alternative — a
+per-keystroke clear — would defeat the fix for the case it exists for.
+
+**Drift from the Implementation:** none to the Design — R2-1 is a review finding,
+not a plan change. The `/`-prefix exemption is additive and not in the plan: it
+is the second half of the same finding (the plan's `looksLikeCommand` rule was
+applied at the paste/convert decision but not at `submit`'s command branch).
+
+**Tests (red before green — each shown failing on the un-fixed code).**
+
+| Test | File | Red as (on the buggy code) |
+|---|---|---|
+| "a text that was already probed and came back `text` is sent, not re-converted" | `attach-draft.test.ts` | `enterConvertsToChips` → `true` |
+| "nothing probed yet, or a DIFFERENT text: a drag converts as usual" | `attach-draft.test.ts` | a guard: green both ways, kept so an over-broad memory cannot pass |
+| "the memory never turns a real command or prose into a probe" | `attach-draft.test.ts` | a guard: green both ways |
+| "a typed drop whose partner is not an image goes out on the next Enter" | `attach-app.test.tsx` | `sent: []` |
+| "a typed missing .png path goes out on the next Enter too" | `attach-app.test.tsx` | `sent: []` |
+| "the memory is ONE-shot: dropping the same paths again probes afresh" | `attach-app.test.tsx` | red under mutations A and C (it pins the *bound* of the memory) |
+| "editing the restored text makes it a NEW drop: it probes again, never sends" | `attach-app.test.tsx` | a guard: green both ways |
+
+**Mutations (each run by hand, then restored byte-identical — `diff` against
+`.tentacle/tmp/attachments-tui/*.r2final`, no output):**
+
+```
+A  attach-draft.ts: `if (text === probedText)` → `&& false`   (round-1 behaviour)
+   → pure "already probed … is sent" RED 1/49; App "goes out on the next Enter",
+   "missing .png path" and "the memory is ONE-shot" RED 3/30  (each on its
+   assertion, not an import error)
+B  App.tsx: the `/`-prefix command branch ignores `isProbedDrop`
+   → App "a typed drop whose partner is not an image" RED 1/30 ("Unknown command")
+C  App.tsx: the one-shot spend removed (`probedTextRef.current = probedTextRef.current`)
+   → App "the memory is ONE-shot" RED 1/30
+```
+
+A and C each go red on the ONE-shot test, from opposite directions (A: the text
+is never treated as sent; C: it is treated as sent forever). B proves the App
+test is not vacuous on the second half of the fix: with the pure helper correct,
+the absolute-path drop still became `Unknown command` without the exemption.
+Every mutation was reverted and confirmed by `diff` against the saved copy.
+
+**Gate:**
+
+```
+bunx tsc --noEmit          → clean (exit 0, no output)
+bun run lint               → Checked 951 files, no fixes applied (0 errors, 0 warnings — §6 baseline)
+bun test                   → 7520 pass · 3 skip · 0 fail (7523 tests, 537 files)
+                             the 3 skips are the opt-in ones (live-k8s, live-docker, slow keepalive)
+                             (round 1 was 7513 + 3 skips; +7 = the 7 tests above)
+```
+
+**Not verified (stated, not claimed):** the reviewer's `repro.test.ts` E/F stay
+in `.tentacle/tmp` (gitignored); their two cases are the real tests above. A real
+terminal drag remains the owner's manual check.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-12* (fresh context; a different model family from the executor)

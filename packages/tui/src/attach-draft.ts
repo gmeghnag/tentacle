@@ -266,6 +266,27 @@ export function imageDropOnly(text: string, options: { readonly home?: string } 
 }
 
 /**
+ * Enter's `onlyPaths`, with the ONE fact `imageDropOnly` cannot see: a text that
+ * was already probed and came back `text` goes out as a message on the next
+ * Enter. `probedText` is that text — `convertToChips` recorded it when it put
+ * the text back with `NOT_AN_IMAGE_NOTICE`. Without this the notice lied: one
+ * of the paths still claims an image, so Enter converted again, probed again,
+ * decided `text` again and restored the text again — the message could never be
+ * sent (review round 2, finding R2-1). A different text (`""` included) is
+ * probed as usual: editing the drop makes it a new drop.
+ */
+export function enterConvertsToChips(
+  text: string,
+  probedText: string | null,
+  options: { readonly home?: string } = {},
+): boolean {
+  if (text === probedText) {
+    return false;
+  }
+  return imageDropOnly(text, options);
+}
+
+/**
  * The chip/upload row, in ONE line at most: chips as `name size`, truncated to
  * `width` with `+N` for the rest; while an upload runs its own text. `null`
  * when there is nothing to show — the caller then reserves no row (P8).

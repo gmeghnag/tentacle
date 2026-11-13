@@ -641,6 +641,78 @@ describe("fix round 1, finding 1: a path that is not an image never swallows the
   });
 });
 
+describe("fix round 2, R2-1: the notice's second Enter really sends the text", () => {
+  test("a typed drop whose partner is not an image goes out on the next Enter", async () => {
+    // The notice promises "Enter again sends it as a message". Round 1's test
+    // pressed Enter ONCE; the second one converted again, probed again and
+    // restored again, so the message could never be sent.
+    const session = fakeSession({});
+    const m = mount(session, {
+      files: { [PNG_PATH]: PNG, "/w/b.txt": new Uint8Array([104, 105]) },
+    });
+    await delay(30);
+    await m.type(`${PNG_PATH} /w/b.txt`); // Enter #1: probed, text restored, nothing sent
+    expect(session.sent).toEqual([]);
+    expect(m.frame()).toContain("/w/b.txt");
+    m.stdin.write(ENTER); // Enter #2 on the same text: a message
+    await delay(150);
+    expect(session.sent).toHaveLength(1);
+    expect(session.sent[0]?.prompt).toBe(`${PNG_PATH} /w/b.txt`);
+    expect(session.sent[0]?.attachments).toBeUndefined();
+    expect(m.frame()).not.toContain("Unknown command");
+    m.unmount();
+  });
+
+  test("a typed missing .png path goes out on the next Enter too", async () => {
+    const session = fakeSession({});
+    const m = mount(session, {});
+    await delay(30);
+    await m.type("~/gone.png"); // Enter #1: `text` decision, restored
+    expect(session.sent).toEqual([]);
+    m.stdin.write(ENTER);
+    await delay(150);
+    expect(session.sent).toHaveLength(1);
+    expect(session.sent[0]?.prompt).toBe("~/gone.png");
+    m.unmount();
+  });
+
+  test("the memory is ONE-shot: dropping the same paths again probes afresh", async () => {
+    // The notice promises one Enter. A later drop of the very same text is a new
+    // drop and must probe the disk again, never ride the old answer.
+    const session = fakeSession({});
+    const m = mount(session, {
+      files: { [PNG_PATH]: PNG, "/w/b.txt": new Uint8Array([104, 105]) },
+    });
+    await delay(30);
+    await m.type(`${PNG_PATH} /w/b.txt`); // Enter #1: probed, restored
+    m.stdin.write(ENTER); // Enter #2: sent
+    await delay(150);
+    expect(session.sent).toHaveLength(1);
+    await m.type(`${PNG_PATH} /w/b.txt`); // dropped again, unchanged: a NEW probe
+    // Restored, not sent: a spent flag must not ride the old answer.
+    expect(m.frame()).toContain("/w/b.txt");
+    expect(session.sent).toHaveLength(1);
+    m.unmount();
+  });
+
+  test("editing the restored text makes it a NEW drop: it probes again, never sends", async () => {
+    // The one-shot flag must not turn a later, different drag into a message.
+    const session = fakeSession({});
+    const m = mount(session, {
+      files: { [PNG_PATH]: PNG, "/w/b.txt": new Uint8Array([104, 105]) },
+    });
+    await delay(30);
+    await m.type(`${PNG_PATH} /w/b.txt`);
+    expect(session.sent).toEqual([]);
+    m.stdin.write(" /w/c.png"); // a different text (still only image-claiming paths)
+    await delay(20);
+    m.stdin.write(ENTER);
+    await delay(150);
+    expect(session.sent).toEqual([]); // probed again (now missing), restored again
+    m.unmount();
+  });
+});
+
 describe("fix round 1, finding 2: Enter during an upload never sends the prompt twice", () => {
   test("a second Enter while the chip uploads is refused; exactly one send", async () => {
     const finished: (() => void)[] = [];

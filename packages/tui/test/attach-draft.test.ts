@@ -17,6 +17,7 @@ import {
   attachRowView,
   chipLabel,
   draftRefs,
+  enterConvertsToChips,
   imageDropOnly,
   imageRowText,
   looksLikeCommand,
@@ -389,6 +390,30 @@ describe("draftRefs and the no-seam mode", () => {
   test("a session with no seam is OFF, with a reason a person can read", () => {
     expect(NO_IMAGE_SEAM.kind).toBe("off");
     if (NO_IMAGE_SEAM.kind === "off") expect(NO_IMAGE_SEAM.reason.length).toBeGreaterThan(0);
+  });
+});
+
+describe("enterConvertsToChips (round 2, R2-1: the second Enter sends)", () => {
+  test("a text that was already probed and came back `text` is sent, not re-converted", () => {
+    // One path still CLAIMS an image, so `imageDropOnly` alone says "convert"
+    // forever; remembering the probed text is what makes Enter terminate.
+    const text = "/w/a.png /w/notes.txt";
+    expect(imageDropOnly(text, { home: "/home/u" })).toBe(true);
+    expect(enterConvertsToChips(text, text, { home: "/home/u" })).toBe(false);
+  });
+
+  test("nothing probed yet, or a DIFFERENT text: a drag converts as usual", () => {
+    const text = "/w/a.png /w/notes.txt";
+    expect(enterConvertsToChips(text, null, { home: "/home/u" })).toBe(true);
+    expect(enterConvertsToChips(text, "/w/other.png", { home: "/home/u" })).toBe(true);
+    // An edited drop is a new drop, even when the old one was the empty string.
+    expect(enterConvertsToChips("/w/a.png", "", { home: "/home/u" })).toBe(true);
+  });
+
+  test("the memory never turns a real command or prose into a probe", () => {
+    for (const text of ["/help", "/compact", "~/notes.md", "hi there"]) {
+      expect(enterConvertsToChips(text, text, { home: "/home/u" })).toBe(false);
+    }
   });
 });
 
