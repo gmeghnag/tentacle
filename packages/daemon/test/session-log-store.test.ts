@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   appendFile,
   chmod,
@@ -15,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionRecord } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
+import { SessionBlobs } from "../src/session-blobs.ts";
 import { forkWrite } from "../src/session-fork.ts";
 import { currentSegment, headerLine, parseLogFile } from "../src/session-log-file.ts";
 import {
@@ -996,5 +998,130 @@ describe("fork (docs/feat/clear-fork-history.md): a NEW session holding the chat
     const store = new LogSessionStore(where);
     await expect(store.fork("s", forkOf("../evil"))).rejects.toBeInstanceOf(ForkWriteError);
     expect(await readdir(where).catch(() => [])).toEqual([]);
+  });
+});
+
+describe("image blobs beside the log (docs/feat/attachments-durable.md T2)", () => {
+  const same = (got: Uint8Array | null, want: Uint8Array): boolean =>
+    got !== null && Buffer.compare(got, want) === 0;
+  const png = (text: string) => {
+    const bytes = new TextEncoder().encode(text);
+    const id = createHash("sha256").update(bytes).digest("hex");
+    return { bytes, ref: { id, mimeType: "image/png", size: bytes.length, name: `${text}.png` } };
+  };
+
+  /** A `SessionBlobs` that records, at each mutation, what the folder held. */
+  class SpyBlobs extends SessionBlobs {
+    readonly seen: string[] = [];
+    constructor(private readonly where: string) {
+      super(where);
+    }
+    private async files(): Promise<string[]> {
+      return readdir(this.where).catch(() => []);
+    }
+    override async write(uid: string, id: string, bytes: Uint8Array): Promise<void> {
+      const f = await this.files();
+      this.seen.push(`write locked=${f.includes(`.${uid}.lock`)}`);
+      return super.write(uid, id, bytes);
+    }
+    override async removeAll(uid: string): Promise<void> {
+      const f = await this.files();
+      this.seen.push(
+        `removeAll locked=${f.includes(`.${uid}.lock`)} log=${f.includes(`${uid}.jsonl`)} state=${f.includes(`${uid}.state.json`)}`,
+      );
+      return super.removeAll(uid);
+    }
+    override async link(from: string, to: string, ids: Iterable<string>): Promise<void> {
+      const f = await this.files();
+      const list = [...ids].sort();
+      this.seen.push(
+        `link ${from}->${to} [${list.join(",")}] locked=${f.includes(`.${to}.lock`)} log=${f.includes(`${to}.jsonl`)}`,
+      );
+      return super.link(from, to, list);
+    }
+  }
+
+  test("putBlob lands under the session's lock; readBlob/blobIndex read it back", async () => {
+    const where = fresh();
+    const blobs = new SpyBlobs(where);
+    const store = new LogSessionStore(where, { blobs });
+    const a = png("a");
+    await store.putBlob("s", a.ref.id, a.bytes);
+    expect(blobs.seen).toEqual(["write locked=true"]);
+    expect(store.blobIndex("s")).toEqual(new Map([[a.ref.id, a.bytes.length]]));
+    const got = await store.readBlob("s", a.ref.id);
+    expect(same(got, a.bytes)).toBe(true);
+    expect(await readdir(where)).not.toContain(".s.lock");
+  });
+
+  test("remove deletes <uid>.attachments AFTER the state file and the log, under the lock", async () => {
+    const where = fresh();
+    const blobs = new SpyBlobs(where);
+    const store = new LogSessionStore(where, { blobs });
+    const a = png("r");
+    await store.write({
+      ...new FakeReader("s").read(new FakeLog("D1").base([user("a")]), "cold"),
+      sidecar: "{}",
+    });
+    await store.putBlob("s", a.ref.id, a.bytes);
+    await store.remove("s");
+    expect(blobs.seen.at(-1)).toBe("removeAll locked=true log=false state=false");
+    expect(await readdir(where)).toEqual([]);
+  });
+
+  test("fork links exactly the unit's image ids from the source, after the fork's log, under its lock", async () => {
+    const where = fresh();
+    const blobs = new SpyBlobs(where);
+    const store = new LogSessionStore(where, { blobs });
+    const a = png("in-fork");
+    const b = png("also-in-fork");
+    const c = png("source-only");
+    for (const x of [a, b, c]) await store.putBlob("s", x.ref.id, x.bytes);
+    const messages: ChatMessage[] = [
+      { role: "user", content: "look", attachments: [a.ref, b.ref] },
+      asst("ok"),
+      { role: "user", content: "again", attachments: [a.ref] },
+    ];
+    await store.fork(
+      "s",
+      forkWrite({ id: "f1", meta: META, messages, title: { source: "auto" }, ts: 5 }),
+    );
+    const ids = [a.ref.id, b.ref.id].sort().join(",");
+    expect(blobs.seen.at(-1)).toBe(`link s->f1 [${ids}] locked=true log=true`);
+    expect([...store.blobIndex("f1").keys()].sort()).toEqual([a.ref.id, b.ref.id].sort());
+    // Deleting the source keeps the fork's bytes.
+    await store.remove("s");
+    const got = await store.readBlob("f1", a.ref.id);
+    expect(same(got, a.bytes)).toBe(true);
+  });
+
+  test("a fork with no images links nothing", async () => {
+    const where = fresh();
+    const blobs = new SpyBlobs(where);
+    const store = new LogSessionStore(where, { blobs });
+    await store.fork(
+      "s",
+      forkWrite({
+        id: "f1",
+        meta: META,
+        messages: [user("x"), asst("y")],
+        title: { source: "auto" },
+        ts: 5,
+      }),
+    );
+    expect(blobs.seen.filter((s) => s.startsWith("link"))).toEqual([]);
+    expect(await readdir(where)).not.toContain("f1.attachments");
+  });
+
+  test("every scan ignores a blob dir: a store holding only one lists nothing", async () => {
+    const where = fresh();
+    const store = new LogSessionStore(where);
+    const a = png("only");
+    await store.putBlob("lonely", a.ref.id, a.bytes);
+    expect(await readdir(where)).toContain("lonely.attachments");
+    expect(await store.list()).toEqual({ records: [], skipped: [] });
+    expect(await store.loadAll()).toEqual({ records: [], skipped: [] });
+    expect(await store.daemonFiles()).toEqual({ logs: [], orphanStates: [] });
+    expect(await store.blobOrphans()).toEqual(["lonely"]);
   });
 });

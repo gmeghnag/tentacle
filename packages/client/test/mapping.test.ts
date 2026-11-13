@@ -7,6 +7,9 @@ describe("stopReasonFromProtocol", () => {
   test("keeps cancelled/max_iterations and collapses the rest to end_turn", () => {
     expect(stopReasonFromProtocol("cancelled")).toBe("cancelled");
     expect(stopReasonFromProtocol("max_iterations")).toBe("max_iterations");
+    // docs/feat/subagent-token-budget.md T10: the child's token cap is kept, so
+    // the TUI can say "token cap" rather than lie about a step cap.
+    expect(stopReasonFromProtocol("max_token_budget")).toBe("max_token_budget");
     expect(stopReasonFromProtocol("end_turn")).toBe("end_turn");
     expect(stopReasonFromProtocol("error")).toBe("end_turn");
     expect(stopReasonFromProtocol("max_tokens")).toBe("end_turn");

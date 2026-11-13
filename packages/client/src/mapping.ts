@@ -83,6 +83,8 @@ export function stopReasonFromProtocol(reason: StopReason): AgentStopReason {
       return "cancelled";
     case "max_iterations":
       return "max_iterations";
+    case "max_token_budget":
+      return "max_token_budget";
     default:
       // end_turn / max_tokens / error all just end the turn for the TUI;
       // any error detail arrived as a prior update.

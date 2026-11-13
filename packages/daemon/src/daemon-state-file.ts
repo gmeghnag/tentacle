@@ -139,7 +139,14 @@ const isFiniteNumber = (v: unknown): v is number => typeof v === "number" && Num
 const isWireStamp = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
 const isStringArray = (v: unknown): v is string[] =>
   Array.isArray(v) && v.every((x) => typeof x === "string");
-const STOP_REASONS = new Set(["end_turn", "max_tokens", "max_iterations", "cancelled", "error"]);
+const STOP_REASONS = new Set([
+  "end_turn",
+  "max_tokens",
+  "max_iterations",
+  "max_token_budget",
+  "cancelled",
+  "error",
+]);
 const RETURN_CAUSES = new Set(["cancelled", "failed", "ended"]);
 const TITLE_KEYS = new Set(["text", "source"]);
 

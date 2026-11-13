@@ -178,6 +178,12 @@ const P: readonly {
     carried: 42,
   },
   {
+    key: "subagentMaxTokens",
+    file: { subagents: { maxTokens: 900_000 } },
+    env: { TENTACLE_SUBAGENT_MAX_TOKENS: "900000" },
+    carried: 1_234_567,
+  },
+  {
     key: "subagentExecution",
     file: { subagents: { execution: "sequential" } },
     env: { TENTACLE_SUBAGENT_EXECUTION: "sequential" },
@@ -220,6 +226,7 @@ const ALL_KEYS = [
   "subagentExecution",
   "subagentMaxIterations",
   "subagentMaxParallel",
+  "subagentMaxTokens",
   "subagentsEnabled",
   "subagentsTwoWay",
   "summarizeLargeOutput",
@@ -232,7 +239,7 @@ const read = (key: keyof SessionSettings, config: TentacleConfig): unknown =>
   CARRIED[key].read(config);
 
 describe("the table is complete", () => {
-  test("9 P + 14 W, and the two test tables cover each (publishedModels: its own describe)", () => {
+  test("10 P + 14 W, and the two test tables cover each (publishedModels: its own describe)", () => {
     expect(Object.keys(CARRIED).sort()).toEqual([...ALL_KEYS]);
     const classOf = (name: "P" | "W") =>
       Object.entries(CARRIED)
@@ -249,7 +256,7 @@ describe("the table is complete", () => {
 });
 
 describe("carriedSettings: an allowlist", () => {
-  test("exactly the 22 keys, and no secret or code, whatever the config holds", async () => {
+  test("exactly the 23 keys, and no secret or code, whatever the config holds", async () => {
     const laptop = await loadConfig({
       configDir: dir({
         "config.jsonc": JSON.stringify({
@@ -331,7 +338,7 @@ describe("carriedSettings: an allowlist", () => {
   test("no custom description: the key is absent, not undefined on the wire", () => {
     const carried = carriedSettings(UNSET);
     expect(Object.hasOwn(carried, "agentTaskDescription")).toBe(false);
-    expect(Object.keys(carried)).toHaveLength(21);
+    expect(Object.keys(carried)).toHaveLength(22);
   });
 });
 

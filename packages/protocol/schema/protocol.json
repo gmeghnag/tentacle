@@ -2886,6 +2886,9 @@
           "exclusiveMinimum": 0,
           "type": "integer"
         },
+        "subagentMaxTokens": {
+          "$ref": "#/$defs/IterationLimit"
+        },
         "subagentsEnabled": {
           "type": "boolean"
         },
@@ -3380,7 +3383,14 @@
       "x-event-class": "display"
     },
     "StopReason": {
-      "enum": ["end_turn", "max_tokens", "max_iterations", "cancelled", "error"],
+      "enum": [
+        "end_turn",
+        "max_tokens",
+        "max_iterations",
+        "max_token_budget",
+        "cancelled",
+        "error"
+      ],
       "type": "string"
     },
     "SubagentAgentId": {
@@ -4370,5 +4380,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 23
+  "x-protocol-version": 24
 }

@@ -164,7 +164,9 @@ function foregroundResult(result: TaskRunResult): ToolResult {
       ? "\n\n_(sub-agent cancelled)_"
       : result.stopReason === "max_iterations"
         ? "\n\n_(sub-agent hit its iteration cap)_"
-        : "";
+        : result.stopReason === "max_token_budget"
+          ? "\n\n_(sub-agent hit its token cap)_"
+          : "";
   const body = result.report.length > 0 ? result.report : "(the sub-agent produced no output)";
   return { content: `${body}${note}` };
 }
@@ -459,7 +461,9 @@ export function createTaskTool(
           ? "\n\n_(sub-agent cancelled)_"
           : result.stopReason === "max_iterations"
             ? "\n\n_(sub-agent hit its iteration cap)_"
-            : "";
+            : result.stopReason === "max_token_budget"
+              ? "\n\n_(sub-agent hit its token cap)_"
+              : "";
       const body = result.report.length > 0 ? result.report : "(the sub-agent produced no output)";
       return { content: `${body}${note}` };
     },

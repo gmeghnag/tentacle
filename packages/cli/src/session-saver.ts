@@ -18,7 +18,7 @@ import type { LogMeta, LogSessionStore, LogWrite } from "@tentacle/daemon";
  * `saveAside` when the store can keep a diverged copy.
  */
 export type SaveTarget = Pick<LogSessionStore, "write" | "saveSnapshot" | "remove"> &
-  Partial<Pick<LogSessionStore, "saveAside" | "fork">>;
+  Partial<Pick<LogSessionStore, "saveAside" | "fork" | "putBlob" | "readBlob" | "blobIndex">>;
 
 /** A uid's last save outcome: fine, or failing with the latest error. */
 export type SaveState =
@@ -168,6 +168,49 @@ export class SessionSaver {
     } catch {
       // A broken listener must not undo a write that landed.
     }
+  }
+
+  /**
+   * Keep one image this laptop attached to `id` on disk, beside its log
+   * (docs/feat/attachments-durable.md D4), in the store's per-uid queue — so a
+   * `remove` queued after it leaves no orphan dir. Resolves once durable, or
+   * at once when there is nothing to do (the uid was removed, the store keeps
+   * no blobs); REJECTS when the write failed (the caller says so once).
+   * `drain` waits for it like a save.
+   */
+  putBlob(id: string, blobId: string, bytes: Uint8Array): Promise<void> {
+    if (!this.target.putBlob || this.removed.has(id)) {
+      return Promise.resolve();
+    }
+    let started: Promise<void>;
+    try {
+      started = this.target.putBlob(id, blobId, bytes);
+    } catch (error) {
+      started = Promise.reject(error);
+    }
+    const settled = started.then(
+      () => {},
+      () => {},
+    );
+    this.pending.set(settled, id);
+    void settled.finally(() => this.pending.delete(settled));
+    return started;
+  }
+
+  /** One image of `id` on this laptop's disk, or `null` (absent, unreadable, no blob store). */
+  async readBlob(id: string, blobId: string): Promise<Uint8Array | null> {
+    if (!this.target.readBlob) return null;
+    return this.target.readBlob(id, blobId).catch(() => null);
+  }
+
+  /** `id`'s images on this laptop's disk, id → size (the per-session cap's used side). */
+  blobIndex(id: string): ReadonlyMap<string, number> {
+    return this.target.blobIndex ? this.target.blobIndex(id) : new Map();
+  }
+
+  /** Whether `id`'s local copy was removed (nothing of it is written again). */
+  isRemoved(id: string): boolean {
+    return this.removed.has(id);
   }
 
   /**

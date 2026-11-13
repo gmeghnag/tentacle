@@ -90,7 +90,7 @@ import type { SessionGrants } from "./session-grants.ts";
 import { EMPTY_SKILL_LISTING, type SkillListing, userRescanListing } from "./session-skills.ts";
 import type { ToolOutputSink } from "./tool-output.ts";
 
-export type AgentStopReason = "end_turn" | "cancelled" | "max_iterations";
+export type AgentStopReason = "end_turn" | "cancelled" | "max_iterations" | "max_token_budget";
 
 /**
  * `runMessages` was asked to resume before a tool call the history is not
@@ -497,6 +497,14 @@ export interface AgentConfig {
   readonly systemPrompt?: string;
   /** Max tool-call rounds before giving up. Default 16. */
   readonly maxIterations?: number;
+  /**
+   * Token budget for this whole conversation: `promptTokens + completionTokens`
+   * summed over every model call, never reset by a `context_reset`. Reaching it
+   * exits the round loop like a spent step budget does, forcing the final
+   * report (`max_token_budget`). Absent or `-1` = unlimited (only a sub-agent is
+   * given one today, docs/feat/subagent-token-budget.md).
+   */
+  readonly maxTokens?: number;
   readonly temperature?: number;
   /** Authorizes `"ask"` tools before they run. Defaults to approving all. */
   readonly requestPermission?: PermissionRequester;
@@ -705,6 +713,13 @@ export class Agent {
    * Memory only: a reload starts from the estimate.
    */
   private readonly anchors = new WeakMap<ChatMessage[], ContextAnchor>();
+  /**
+   * Tokens each conversation has spent so far (keyed by the array a Session — or
+   * a sub-agent — keeps for its life, as `anchors` is), against
+   * `AgentConfig.maxTokens`. Memory only: a new conversation starts at 0, and a
+   * reload cannot resume a child's count.
+   */
+  private readonly spend = new WeakMap<ChatMessage[], { tokens: number }>();
   /** Spill names already used on the env fallback path: see `spillId`. Memory only. */
   private readonly spillNames = new Set<string>();
   /**
@@ -996,6 +1011,13 @@ export class Agent {
     // cancel / error); otherwise cap the number of model/tool rounds.
     const configured = this.config.maxIterations ?? 16;
     const maxIterations = configured < 0 ? Number.POSITIVE_INFINITY : configured;
+    // The same for the conversation's token budget: a negative limit is
+    // unlimited, so the extra loop condition is always false.
+    const configuredTokens = this.config.maxTokens ?? Number.POSITIVE_INFINITY;
+    const maxTokens = configuredTokens < 0 ? Number.POSITIVE_INFINITY : configuredTokens;
+    /** Whether this conversation has spent its token budget. Checked at a round
+     * boundary, like the step cap, so the overshoot is at most one round. */
+    const overBudget = (): boolean => this.spendOf(messages) >= maxTokens;
     // A user message — the turn's own, or a steer drained into it — restarts
     // the per-message count of context resets, and the sub-agents' notify
     // budgets (docs/feat/agent-message-two-way.md): a person wrote, so ping-pong
@@ -1155,7 +1177,7 @@ export class Agent {
      * text is kept, owner Q1a), so the honest end is silence on that count.
      */
     let turnSaidSomething = false;
-    for (let iteration = 0; iteration - budgetFrom < maxIterations; iteration++) {
+    for (let iteration = 0; iteration - budgetFrom < maxIterations && !overBudget(); iteration++) {
       if (signal?.aborted) {
         this.notifyTurnEnd(sessionId, "cancelled");
         yield { type: "turn_end", reason: "cancelled" };
@@ -1219,6 +1241,7 @@ export class Agent {
               stopReason = event.stopReason;
               if (event.usage) {
                 this.anchorContext(messages, sent, event.usage);
+                this.addSpend(messages, event.usage);
                 yield { type: "usage", usage: event.usage };
               }
               break;
@@ -1429,7 +1452,13 @@ export class Agent {
         if (text.trim() === "" && !turnSaidSomething) {
           yield { type: "empty_turn" };
         }
-        yield { type: "turn_end", reason: "end_turn" };
+        // A spent token budget still ends the turn honestly, even when the
+        // child answers in prose on that very round: the cap is why it ended.
+        const clean: AgentStopReason = overBudget() ? "max_token_budget" : "end_turn";
+        if (clean !== "end_turn") {
+          this.notifyTurnEnd(sessionId, clean);
+        }
+        yield { type: "turn_end", reason: clean };
         return;
       }
 
@@ -1454,6 +1483,18 @@ export class Agent {
       yield { type: "turn_end", reason: "cancelled" };
       return;
     }
+    // WHY the loop ended: a spent token budget is never blamed on steps (a
+    // spend-shaped stop must say so), and when both are spent in the same
+    // boundary the token one is the honest answer.
+    const capped: AgentStopReason = overBudget() ? "max_token_budget" : "max_iterations";
+    // The same in prose: a token-capped child told about a step limit would be
+    // told a falsehood, and it is what the report it writes is shaped by.
+    const nudge =
+      capped === "max_token_budget"
+        ? "You've reached the token budget for this task. Give your final answer/report now, " +
+          "using what you've gathered so far. Do not call any tools."
+        : "You've reached the step limit. Give your final answer/report now, " +
+          "using what you've gathered so far. Do not call any tools.";
 
     // Out of iterations. Give the model ONE final turn with no tools offered, so
     // it must deliver its answer/report in prose instead of calling yet another
@@ -1476,9 +1517,7 @@ export class Agent {
           ...view.messages,
           {
             role: "user",
-            content:
-              "You've reached the step limit. Give your final answer/report now, " +
-              "using what you've gathered so far. Do not call any tools.",
+            content: nudge,
           },
         ];
         let finalText = "";
@@ -1498,6 +1537,11 @@ export class Agent {
           } else if (event.type === "reasoning") {
             yield { type: "reasoning", delta: event.delta };
           } else if (event.type === "done" && event.usage) {
+            // The forced report is a real model call and its tokens are really
+            // spent: count them, or a step-capped pass leaks a whole context
+            // and the NEXT pass (a `twoWay` continuation) runs a productive
+            // round it should have been refused.
+            this.addSpend(messages, event.usage);
             yield { type: "usage", usage: event.usage };
           }
           // tool_call events are ignored: no tools were offered.
@@ -1533,8 +1577,8 @@ export class Agent {
       }
     }
 
-    this.notifyTurnEnd(sessionId, "max_iterations");
-    yield { type: "turn_end", reason: "max_iterations" };
+    this.notifyTurnEnd(sessionId, capped);
+    yield { type: "turn_end", reason: capped };
   }
 
   /**
@@ -1587,6 +1631,28 @@ export class Agent {
     }
   }
 
+  /** Tokens this conversation has spent (`prompt + completion`, cache included). */
+  private spendOf(messages: ChatMessage[]): number {
+    return this.spend.get(messages)?.tokens ?? 0;
+  }
+
+  /**
+   * Add one model call's spend to the conversation's running total — the same
+   * `done`-with-usage branch as `anchorContext`, so every call that is measured
+   * is counted, the forced final report's included. Keyed by the CONVERSATION
+   * array: a continuation pass cannot refill its budget, and a `context_reset`
+   * un-spends nothing (it restarts rounds, not tokens).
+   */
+  private addSpend(messages: ChatMessage[], usage: Usage): void {
+    const entry = this.spend.get(messages);
+    const spent = (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0);
+    if (entry === undefined) {
+      this.spend.set(messages, { tokens: spent });
+    } else {
+      entry.tokens += spent;
+    }
+  }
+
   /**
    * The size of the request `messages` would become now — the context a client
    * shows BEFORE any turn measured it (docs/feat/tui-target-badge.md). Counted
@@ -1621,8 +1687,11 @@ export class Agent {
     };
   }
 
-  /** `turn_end` notification hooks (cancelled / max_iterations): synchronous, never awaited. */
-  private notifyTurnEnd(sessionId: string, reason: "cancelled" | "max_iterations"): void {
+  /** `turn_end` notification hooks (cancelled / a spent budget): synchronous, never awaited. */
+  private notifyTurnEnd(
+    sessionId: string,
+    reason: "cancelled" | "max_iterations" | "max_token_budget",
+  ): void {
     if (this.config.hooks?.hasAny("turn_end")) {
       void this.config.hooks.turnEndNotify({ sessionId, reason });
     }

@@ -315,6 +315,7 @@ export const StopReasonSchema = z.enum([
   "end_turn",
   "max_tokens",
   "max_iterations",
+  "max_token_budget",
   "cancelled",
   "error",
 ]);
@@ -812,6 +813,8 @@ export const SessionSettingsSchema = z.object({
   autoTitle: z.boolean().optional(),
   subagentsEnabled: z.boolean().optional(),
   subagentMaxIterations: IterationLimitSchema.optional(),
+  /** A sub-agent's whole-life token budget (prompt + completion summed); a positive integer or -1. */
+  subagentMaxTokens: IterationLimitSchema.optional(),
   subagentExecution: ExecutionModeSchema.optional(),
   subagentMaxParallel: z.number().int().positive().optional(),
   /** Background sub-agents may message the agent (`agent_notify`); a note wakes an idle one. */

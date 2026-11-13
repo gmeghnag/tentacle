@@ -285,6 +285,16 @@ const settingsShape = {
         .refine((n) => n > 0 || n === -1, "must be a positive integer or -1 (unlimited)")
         .optional(),
       /**
+       * Token budget for a sub-agent's whole life (prompt + completion, summed
+       * over its model calls); a positive integer, or -1 (unlimited)
+       * (docs/feat/subagent-token-budget.md).
+       */
+      maxTokens: z
+        .number()
+        .int()
+        .refine((n) => n > 0 || n === -1, "must be a positive integer or -1 (unlimited)")
+        .optional(),
+      /**
        * How a parent's `agent_task` calls of one round may overlap: `sequential`,
        * `read-only` or `parallel` (default). On `run`/`attach` the laptop's.
        */
