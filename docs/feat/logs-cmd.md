@@ -338,3 +338,7 @@ sanitized.
 8. **Limits**: 8 watchers per session, 60 s poll-idle drop, 25 s long-poll,
    queue 1 MiB — config keys or constants? *Rec: constants in v1 (they bound
    memory, not behaviour); make them keys only if a real use needs it.*
+
+#### Owner answers (2026-11-14, one at a time)
+
+- Q1 split: **yes, 3 sub-tasks** (logs-tail → logs-watch → logs-follow-detached) — BUT **one single review for all three** (owner): execute the three in order on one branch, then one fresh Opus review of the whole, then merge.
