@@ -206,6 +206,50 @@ describe("S0b pill click: `onPillRange` reports the cells the bar actually paint
     running.app.unmount();
   });
 
+  test("pill click with the DROPDOWN open re-derives the bar's row from the dock's own height", async () => {
+    const t = await mount(fake({ agents: [AGENT] }));
+    await t.keys(CTRL_T); // focus the pill
+    await t.keys(ENTER); // open the dropdown: the dock paints rows above the input
+    expect(stripAnsi(t.app.lastFrame() ?? "")).toContain("background · 1");
+    const at = pillAt(t.rawRows());
+    expect(at.col).toBeGreaterThan(0);
+    // The drawer is a taller dock than the dropdown, and `dockHeight` is part of
+    // the row the bar reports. Clicking the pill must still land.
+    await t.keys(ENTER); // open the child: the drawer (a taller dock)
+    const drawer = stripAnsi(t.app.lastFrame() ?? "");
+    expect(drawer).toContain("find callers of parseConfig");
+    const atDrawer = pillAt(t.rawRows());
+    expect(atDrawer.col).toBeGreaterThan(0);
+    t.app.stdin.write(press(atDrawer.col, atDrawer.row));
+    await delay(160);
+    // The pill's click opened the DROPDOWN for the open child, i.e. it landed.
+    // When `dockHeight` is dropped from the reported row the click misses the
+    // pill entirely and the drawer stays exactly as it was (mutation M13).
+    const after = stripAnsi(t.app.lastFrame() ?? "");
+    expect(after).toContain("background · 1");
+    expect(after).toContain("find callers of parseConfig");
+    t.app.unmount();
+  });
+
+  test("a click on the pill with an ATTACH row painted still lands (the row derivation counts the chip row)", async () => {
+    const t = await mount(fake({ agents: [AGENT] }));
+    await t.keys("/tmp/a.png");
+    await delay(150);
+    t.app.stdin.write(ENTER);
+    await delay(400);
+    expect(stripAnsi(t.rawRows().join("\n"))).toContain("📎 a.png");
+    const at = pillAt(t.rawRows());
+    expect(at.col).toBeGreaterThan(0);
+    t.app.stdin.write(press(at.col, at.row));
+    await delay(180);
+    // The chip row sits INSIDE the input box and shrinks the viewport by one, so
+    // it is part of `inputBoxRows` — the row the bar reports. A derivation that
+    // forgets it puts the bar one row lower than it paints and the click misses
+    // (mutation M14: the frame is 24 rows and nothing opens).
+    expect(stripAnsi(t.app.lastFrame() ?? "")).toContain("background · 1");
+    t.app.unmount();
+  });
+
   test("a click OUTSIDE the pill's cells does nothing (the range is the pill's, not the bar's)", async () => {
     const t = await mount(fake({ agents: [AGENT] }));
     const at = pillAt(t.rawRows());

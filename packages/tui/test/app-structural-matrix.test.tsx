@@ -203,6 +203,45 @@ describe("S0b router matrix: layers that act AND pass, and a carried bracket", (
     t.app.unmount();
   });
 
+  // Fix round 1 (M1/M4): the held-`[` TIMER is the one place in the key path
+  // that runs in a FROZEN closure — `holdMouse` is memoised on `[field.insert]`,
+  // so its `panel` is the mount's `null` forever, while `panelRef.current` is
+  // live. The two therefore disagree only when the panel is OPEN when the timer
+  // fires (measured; a panel closing inside the window does NOT discriminate,
+  // because a frozen `null` and a live `null` agree). Mutant M4 replaces the ref
+  // read with the render one and THIS test is what sees it.
+  test("a `[` held for the mouse window is not restored while a panel is open (the timer reads the live `panelRef`)", async () => {
+    const f = fake();
+    const t = await mount(f);
+    await t.keys("/mcp", ENTER);
+    expect(t.frame()).toContain("MCP servers");
+    // A bare `[` is indistinguishable from a mouse report's first half, so it is
+    // HELD for 100 ms; the timer that releases it must see the panel as it is
+    // NOW, not as it was when `holdMouse` was created.
+    await t.keys("[");
+    await delay(200); // past the hold: the timer fires with the panel still open
+    expect(draft(t.frame())).toBe("");
+    // Closing the panel afterwards does not resurrect the dropped bracket.
+    await t.keys(ESC);
+    expect(t.frame()).not.toContain("MCP servers");
+    expect(draft(t.frame())).toBe("");
+    t.app.unmount();
+  });
+
+  test("a bracketed paste behind an open panel never edits the hidden input", async () => {
+    const f = fake();
+    const t = await mount(f);
+    await t.keys("/mcp", ENTER);
+    expect(t.frame()).toContain("MCP servers");
+    // A terminal paste arrives as ONE chunk wrapped in the paste markers.
+    t.app.stdin.write("\u001b[200~PASTED\u001b[201~");
+    await delay(120);
+    expect(t.frame()).toContain("MCP servers"); // still the panel's frame
+    await t.keys(ESC);
+    expect(draft(t.frame())).toBe(""); // and the panel's text never landed
+    t.app.unmount();
+  });
+
   test("a key behind a list panel after a half mouse report edits nothing (the panel keeps the keys)", async () => {
     const f = fake();
     const t = await mount(f);

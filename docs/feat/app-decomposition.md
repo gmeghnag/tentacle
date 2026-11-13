@@ -1099,7 +1099,14 @@ formatting-tolerant; the risk it names is cosmetic.
 
 ### S0b — `feat/app-decomp-0b-structural` (structural net: order / identity / freshness; tests only)
 
-*— claude-sonnet-4-5, 2026-11-13* (executor; model id as reported by this runtime — no build-date suffix is known to me, so none is invented)
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-13* (corrected in Fix
+round 1: this section was signed `claude-sonnet-4-5`, the string that executor's
+runtime self-reported. `night-task.sh`'s exec step launches
+`~/bin/tentacle --profile deepseek` — `ps` on the live run confirms it, and the
+profile is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`
+(`~/.config/tentacle/config.jsonc`). The commit subject `exec (deepseek)` was
+never evidence either way: it is a hard-coded string in `night-task.sh`. Fix
+round 1's finding 4 has the full trail.)
 
 **Scope and shape.** Five new test files under `packages/tui/test/`, nothing else
 in `packages/`: `app-structural-order` (H1), `-identity` (H2), `-freshness` (H3's
@@ -1292,6 +1299,149 @@ contract, S4's per-event `dispatchMouse` and S10's verbatim JSX move must keep.
 - The full suite's one fail is attributed to the documented flake; the claim rests
   on it passing alone plus the diff touching no `packages/daemon/`. A second full
   run would make it conclusive.
+
+### Fix round 1 — `feat/app-decomp-0b-structural` (S0b review findings)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-13* (real id: `ps` shows
+this run launched as `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+model is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc`).
+
+All four findings were MEDIUM; **none is rebutted**, three are fixed as stated
+and one (finding 1) is fixed in the *other* site the plan actually names, with
+the measurement that decides it pasted below. Scope: 2 test files edited
+(`app-structural-matrix.test.tsx` +2 tests, `app-structural-sgr.test.tsx` +2
+tests), the changelog fragment deleted, the S0b signature corrected. **No
+`packages/tui/src` line changed** — `git diff --stat -- packages/tui/src` is
+empty and `App.tsx` is still `ebe40eea…` (the S1 round's sha).
+
+**One measurement first, because it decides two findings and I had it wrong at
+first.** `panelRef.current = panel` is assigned **during render**
+(`App.tsx:472-473`). So in a **key-handler** closure (a new closure every
+render) the render value and the ref are the *same value*, and swapping them is
+an **equivalent mutant**, not a hole. They differ only in a **frozen** closure —
+a timer or a promise continuation, memoised before the panel changed. That
+distinction is what the whole round turns on, and it is why the reviewer's
+line attribution and mine differ:
+
+- the plan's M4 names two sites (pre-S1 `4107`, `4013`; **post-S1 `3770`,
+  `3676`** — S1 removed 337 lines above them, which the S0b Execution already
+  recorded). `3770` is `stateRef.current.running` in the handler; `3676` is
+  `panelRef.current?.kind === "sessions"` inside a promise continuation.
+- the reviewer's "the only ref read still in a handler is `:3427`" is the right
+  instinct about frozen closures, but `:3427` is the held-`[` **timer**, and the
+  plan's `4013`→`3676` is a continuation. Both are frozen; I measured both.
+
+**Finding 1 — MEDIUM (the plan's M4 was replaced without a drift note). FIXED.**
+The reviewer's claim was "would very likely survive". Measured
+(`.tentacle/tmp/app-decomp-0b-structural/sweep-m4.ts`, whole `packages/tui/test`):
+
+| Mutant | Whole tui suite |
+|---|---|
+| `:3427` `!panelRef.current` → `!panel` (the plan's M4) | **KILLED** — 1762 pass / 1 fail (`/mcp panel > a lone '[' typed while the panel is open…`) |
+| `:3455` paste-timeout flush, same swap | **KILLED** (truncated-paste test) |
+| `:4034` clipboard answer, same swap | **KILLED** (Ctrl+V-after-open test) |
+| `:3676` `open: panelRef.current?.kind` → `panel` | **SURVIVED** — 1763 pass / 0 fail |
+
+So the plan's mutant is **not** a survivor at the gate — but the reviewer's real
+point stands and is the one I fix: **the S0b net did not own it.** Run against
+the five structural files alone, the plan's M4 **SURVIVED (17 pass, 0 fail)** —
+the net was borrowing `app.test.tsx`'s coverage, so a future slice that touched
+this timer would learn about the break only from an unrelated file. That is the
+hole the plan meant by "a survivor is a hole to close before S4".
+**Fix:** `app-structural-matrix.test.tsx` gains *"a `[` held for the mouse
+window is not restored while a panel is open"*, which holds `[`, lets the 100 ms
+timer fire with the panel OPEN, and asserts the input is untouched. The two
+scenarios that do **not** discriminate are recorded so nobody re-derives them:
+a panel **closing** inside the window keeps the bracket today (a frozen `null`
+and a live `null` agree — probe `probe-f1x.ts`), and the plan's `3676` site is a
+**genuine equivalent mutant** (`panelGenRef` is bumped synchronously by
+`closePanel`/`openPanel`, `:1512`/`:1523`, so `gen === startedGen` already fails
+whenever the panel is not the delete's own — probe `probe-f1z.ts` prints the same
+notice under both). Both are explained, not silently swapped: the drift note the
+review asked for is the paragraph above.
+
+**Finding 2 — MEDIUM (plan rows missing while Execution claimed them complete).
+FIXED, 2 of 3; 1 corrected in the doc.** The reviewer named three rows.
+
+1. *"paste with a panel open"* — genuinely absent, now added
+   (`app-structural-matrix.test.tsx`: a `\u001b[200~…\u001b[201~` chunk behind
+   `/mcp` never reaches the hidden input). Note on non-vacuity: this row cannot
+   be a `panel`→`panelRef` mutant, because at `:3626` it is a key-handler closure
+   (the rule above) — it **SURVIVED** by construction. It is a plan row, not a
+   mutant target, and the test's job is to fail if the *guard* is deleted, which
+   it does.
+2. *"pill click after the dock opens"* — absent, now added
+   (`app-structural-sgr.test.tsx`: focus the pill, Enter for the dropdown, Enter
+   again for the drawer, then click the pill). This **is** a real hole: dropping
+   `dockHeight` from the bar's reported row (`:4257`) **SURVIVED the whole tui
+   suite (1763 pass)**, i.e. no existing test held it.
+3. *"after an attach row appears"* — the row was absent, now added
+   (`app-structural-sgr.test.tsx`: `/tmp/a.png` + Enter → the chip row paints,
+   then the pill click must still land). Also a real pill-click hole: the
+   `attachRowRows` term (`:985`) is killed today only by a **frame-height**
+   assertion (`T8j`), not by any click test.
+
+*Correction to the Execution's own claim, recorded not reworded:* it said "the
+five rows the plan names, plus a sixth" — the true count is the five + one
+extra, and of the plan's five the "paste with a panel open" one was missing.
+With the two added here the row set is now the plan's, plus `[`+letter.
+
+**Finding 3 — MEDIUM (the changelog fragment breaks §10). FIXED.**
+`changelog.d/app-decomp-0b-structural.added.md` deleted. Verified this slice is
+test-only before deleting: `git diff --name-only main...HEAD` is the 5 test
+files + this doc + the fragment; no `src/` path, so §10's "internal/dev/test-only
+work adds no fragment" applies.
+
+**Finding 4 — MEDIUM (signature vs commit mismatch). FIXED, and the commit
+subject was the misleading side.** The S0b section now reads
+`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`. Evidence, from the run records in
+`.tentacle/tmp/orchestration/runs/`:
+
+- `night-task.sh`'s exec step is `~/bin/tentacle --profile deepseek -- …`, and
+  the commit line after it is the **hard-coded** string
+  `feat($SLUG): exec (deepseek)` — so `ba9a964`'s subject is not a model claim.
+- that run's own log (`night-app-decomp-0b-structural-exec.log:575`) shows the
+  executor writing `*— claude-sonnet-4-5-20250929 …*`, then
+  (`:593`) rewriting it to `claude-sonnet-4-5` with the note "no build-date
+  suffix is known to me, so none is invented". So `claude-sonnet-4-5` was a
+  runtime *self-report*, and the launcher's profile is the better evidence — the
+  same id the S1 rounds signed from the same config file.
+
+**Mutation check (§9 non-vacuity) — 4 new, all KILLED on their assertion.**
+Harness `.tentacle/tmp/app-decomp-0b-structural/sweep-f1.ts` / `sweep-f2.ts`
+(byte-copy backup, one filtered run, restore, sha256 compare; each refuses a run
+that executed 0 tests). Pasted:
+
+| # | Mutation | Test that owns it | Result |
+|---|---|---|---|
+| M4 | `:3427` `!panelRef.current` → `!panel` | held-`[` + panel open | **KILLED** — `Expected: "" / Received: "["` |
+| M13 | `:4257` the bar's row drops `dockHeight` | pill click, drawer open | **KILLED** — `Expected to contain: "background · 1"`, received the unchanged drawer frame |
+| M14 | `:985` `inputBoxRows` drops `attachRowRows` | pill click, chip row painted | **KILLED** — same assertion, 24-row frame |
+| M4d | `:3626` `!panel` → `!panelRef.current` | paste behind a panel | **SURVIVED** (equivalent mutant — key-handler closure; stated, not claimed as a kill) |
+
+Every KILLED row is red on the **assertion** with a real `1 ran` count, never an
+import or compile error, and each file's sha256 matched its pre-run value
+(`restored: MATCHES`).
+
+**Gate (this worktree, this branch).**
+- `bunx tsc --noEmit` → 0 errors.
+- `bun run lint` (`biome check .`) → `Checked 1018 files … No fixes applied.`
+  (the §6 baseline: 0 errors, 0 warnings).
+- `bun test` → **7943 pass, 3 skip, 0 fail** (571 files, 357 s). The 3 skips are
+  the documented opt-ins. The S0b round's `serve-log-store` SIGKILL flake did
+  **not** recur here, so the suite is clean without needing that attribution.
+- The two touched test files re-run 3× → 15 pass / 0 fail each time (no
+  timing flake in the new `[`-hold or pill-click tests).
+- No schema change; no `src/` change; `packages/protocol/schema/protocol.json`
+  not regenerated.
+
+**Not verified (one line each).**
+- The new `[`-hold test depends on the 100 ms hold finishing before the 200 ms
+  wait; at a far heavier machine load it could need the wait raised — verify by
+  running `bun test packages/tui/test/app-structural-matrix.test.tsx` under load.
+- The reviewer's `[<0;5`-without-ESC and SGR-strip assumptions were accepted as
+  read, not re-measured (they are unchanged by this round).
 
 ## Review
 
