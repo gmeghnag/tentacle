@@ -843,3 +843,18 @@ previous round, passed here) — but it remains load-sensitive, as round 1 wrote
 still does not exist (Drift 1 — no `attachment/get` in the protocol), so the
 driver's port is exercised by a fake only. Nothing here is simulator-verified;
 12c wires `createThumbnailDriver` into the screen.
+
+### Round 2
+
+**Verdict: APPROVE.** Commit `7e0a7a1` fixes both round-1 findings.
+
+- **Finding 1 (in-flight limit and abort): fixed.** Each request now gets its own `AbortController` (`thumbnails.ts` `plan`), and `view()` aborts the ids that scrolled out. I re-ran my round-1 trace against the new driver (`.tentacle/tmp/mobile-session-view-12b/drive2.ts`, with a fake source that honours the abort signal). After 4 window changes, **4 fetches are open** (was 16), and `inFlight` holds only the current window's ids.
+  - Mutation M-A (remove the per-id `abort()`): RED, "a window change ABANDONS the fetches…".
+- **Finding 2 (stale settle overwrites newer state): fixed.** There is now one driver per screen, which holds one state, and a settle counts only if its controller is still the current one for that id. Trace: `i142` stays loaded after the stale `i0` settles. `i0` is neither cached nor marked failed, so scrolling back requests it again.
+  - Mutation M-B (remove the guard): RED, 2 tests fail.
+  - Mutation M-D (settle onto the initial state instead of the latest): RED, 2 tests fail.
+- **Mutation hygiene:** each mutation was restored from a byte copy, and `git status` was clean afterwards.
+- **Checks:** `bun test apps/mobile/test` 192 pass / 0 fail. `bun run lint` clean (1030 files). `bun run typecheck` clean. No callers of the removed `drive` are left. The diff touches only `thumbnails.ts`, its test and this doc.
+- **Nit (not blocking):** an `initial` state passed in with `inFlight` ids but no controllers would hold those slots forever. Today `initial` defaults to empty, so nothing triggers it. 12c should not seed `initial` with in-flight ids.
+
+*— claude-opus-5-5, 2026-11-13* (fresh context. The fix was executed by deepseek, per the commit message.)
