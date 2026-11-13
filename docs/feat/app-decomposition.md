@@ -1,6 +1,8 @@
 # feat/app-decomposition — Break up `App.tsx` so TUI features stop colliding
 
-> **Status:** S0 executed; plan REVISED after the Fable design review (S0b + S1+ re-approval pending — see *Design review response*)
+> **Status:** S0 executed; plan REVISED after the Fable design review. S1 was
+> re-instated by the owner and executed (see Fix round 1 — who, and why H4(1)
+> survives it); S0b + S2+ re-approval pending.
 > **Branch:** `feat/app-decomposition` (parent/plan); one child branch per slice, below
 > Type: feat · Size: L (split) · Blast: load-bearing · Suited: Opus plan, DeepSeek exec per slice, fresh Opus review per slice
 
@@ -114,6 +116,13 @@ today.
 - `AppProps` is the only boundary tests use (28 files render `<App …/>`), and
   `index.ts:23–31` re-exports App's types. Keeping both stable means **no
   existing test changes** in any slice — that is the behaviour-preservation proof.
+  **Corrected by S1:** one test depends on WHERE a declaration is written, not
+  just that it exists — `packages/cli/test/subagent-panel-controller.test.ts`
+  parses `App.tsx` with `ts.createSourceFile` to find the `SessionController`
+  interface. S1 repointed it at `app-types.ts` (2 lines, no assertion changed),
+  and any later slice that moves the interface must repoint it again. So the
+  proof is "no test changes EXCEPT a source-locator that must follow the
+  declaration"; every other slice still adds only new tests.
 - Forward refs break cycles today (`handleCommandRef` 1127/3530,
   `streamTurnRef` 2171, `swapRef` 2183, `routeAttachRef` 791,
   `runClearRef` 919, `wakeIfPendingRef` 1140). Extracted hooks keep them as
@@ -155,8 +164,8 @@ fresh-context Opus review. Order maximises parallelism unlocked early.
 
 | # | Branch | Size · Blast | Files | Parallel-safe with |
 |---|---|---|---|---|
-| S0 | `feat/app-decomp-0-charnet` | S–M · contained (tests only) | new `test/app-keys-precedence.test.tsx`, `test/app-commands.test.tsx`, `test/app-frames.test.tsx` | anything (no src edit); MUST merge before S1+ |
-| S1 | `feat/app-decomp-1-types` | S · cross-module | `app-types.ts`, App.tsx (delete + import), `index.ts` | none on App.tsx head (touches imports block); 1 day, do it alone |
+| S0 `feat/app-decomp-0-charnet` | S–M · contained (tests only) | new `test/app-keys-precedence.test.tsx`, `test/app-commands.test.tsx`, `test/app-frames.test.tsx` | anything (no src edit); MUST merge before S1+ |
+| S1 `feat/app-decomp-1-types` | S · cross-module | `app-types.ts` (new), App.tsx (delete the type block + `export type` re-export + trim now-unused type imports), `index.ts`, `test/app-types.test.ts` (new), **+ `packages/cli/test/subagent-panel-controller.test.ts` (2-line source-locator repoint — see Preconditions)** | none on App.tsx head (touches imports block); done alone. **Executed (Fix round 1); re-instated by the owner over H4(1)'s dissolution, which the type split preserves — see *H4(1) status after S1*** |
 | S2 | `feat/app-decomp-2-commands` | M · cross-module | `commands/*`, `commands.ts` (derive list), App.tsx 3161–3530 | S3, S4 (disjoint hunks) |
 | S3 | `feat/app-decomp-3-keyroute` | M · load-bearing | `keys/route.ts`, `keys/layers.ts`, `keys/*.ts`, App.tsx 3802–4421 except the mouse block | S2; NOT S4 (same `useInput`) unless S4 lands first |
 | S4 | `feat/app-decomp-4-mouse` | S · contained | `mouse-stream.ts`, `useMouse.ts`, App.tsx 3719–3776 + 4156–4307 | S2, S5, S6 |
@@ -254,8 +263,8 @@ TODO line.
 6. **Commands as one file each, or grouped?** Rec: one file per command
    (maximal parallelism; 17 small files is fine).
 
-New, from the Fable review (Q1–Q6 stay answered; Q3's S1 freeze is moot — S1 is
-dissolved below):
+New, from the Fable review (Q1–Q6 stay answered; Q3's S1 freeze is moot — S1 was
+re-instated and executed alone, see *H4(1) status after S1*):
 
 7. **Effects: stay in App in today's order (a), or move into hooks with every
    reorder argued and tested (b)?** Rec: **(a)**. One hook per concern cannot
@@ -329,12 +338,14 @@ confirm + `y`; ask arriving + `y`; Esc on a just-closed panel mid-turn.
 **H4 — where the collisions are (CONFIRMED in direction).** Not re-counted with
 `-L`; independently, `state.ts` + `render-lines.ts` + `app.test.tsx` alone saw
 65 distinct commits since 2026-10-01, and `panel.ts` has the `kind ===`
-branches cited (76, 89, 92, 120, 149). → **Changes:** (1) **S1 is dissolved**:
+branches cited (76, 89, 92, 120, 149). → **Changes:** (1) ~~**S1 is dissolved**:
 no single `app-types.ts`. Each hook slice takes its own types with it
 (`DockProps`, `AttachProps`, `SessionJobs`, … next to the hook);
 `AppProps`/`SessionController` become `extends` lists in `app-types.ts`,
 created by the first hook slice that needs it; `index.ts` re-exports keep the
-test boundary stable. (2) Measurable target per feature KIND: command / key
+test boundary stable.~~ **S1 was re-instated by the owner and executed** (see
+*H4(1) status after S1* for the resident/movable split this leaves behind, and
+Execution §S1). (2) Measurable target per feature KIND: command / key
 binding / panel → **zero App.tsx lines**; stateful feature → a hook file plus
 **≤ 4 append-only App.tsx lines** (prop intake, hook call, effect wiring if
 any, view-model field). The goal sentence is restated honestly: this task
@@ -352,6 +363,23 @@ dropped from the doc. (5) Owner Q9 for the test-file rule.
 `routeAttachRef` 3967).** → **Rule:** a hook slice destructures into the SAME
 identifiers (`const { dockRef, setDock, dockIds, killJob, … } = useDock(…)`),
 zero use-site edits. Only then is the parallel-safe column valid.
+
+**H4(1) status after S1 (supersedes "S1 is dissolved" above).** The owner
+re-instated S1 as its own slice and it is executed (Execution §S1); the
+"dissolved" line in H4(1) and the struck row in the revised-order table below
+are struck *as slices*, not as the type rule. What survives from H4(1), and what
+every later slice must follow:
+- **Resident** in `app-types.ts` for the whole decomposition: `AppProps`,
+  `SessionController`. They are the `extends` lists every hook slice feeds; a
+  later slice edits them IN PLACE, never moves them.
+- **Resident today, movable to its own hook's module**: `SessionDirectory`,
+  `NoticeFeed`, `RunQuit`, `SettingsNoticeLine`. The slice that owns one takes it
+  with it (next to the hook), and **re-exports it from `App.tsx` and `index.ts`
+  exactly as today**, so the test boundary does not move.
+`test/app-types.test.ts` is written to that split: it pins where the two resident
+types are declared, and for the other four it pins only that a re-export
+resolves to a module that really declares them — so a planned move is green and
+a breaking one is red (Fix round 1, mutation F1/F2/F4).
 
 **M2 — S4 (CONFIRMED).** → `dispatchMouse` becomes a **per-event function**
 called by the router with a render snapshot (`total`, `viewport`, `listView`,
@@ -390,7 +418,7 @@ their files/size):
 | S3 keyroute | 14 layers, `{effects, verdict, carry}`, snapshot-source table | S4 |
 | S2 commands | driver fns for `/compact` `/clear`; per-command `Pick<>` context | S0b; parallel with S3 (disjoint hunks) |
 | S5 dock ‖ S6 attach | own types; same identifiers; effects stay in App | S3 (both edit names S3 reads only via frozen identifiers) |
-| ~~S1 types~~ | dissolved into S5/S6/S8/S9 | — |
+| ~~S1 types~~ | re-instated by the owner and EXECUTED as its own slice (Execution §S1); its type rule survives as *H4(1) status after S1* | — |
 | S7 panels | per-panel methods replace `kind ===` | S3 |
 | S8 → S9a → S9b | unchanged order; each takes its types; effects stay | S2 / serial |
 | S10 view | verbatim JSX move only | S9b, S0b's SGR pins |
@@ -790,6 +818,282 @@ net is clean (8/8 under load), and the unnamed full-suite failure is now named
 and attributed to a `packages/client` test deadline outside this diff — one
 line, method, and owner recorded above (it needs its own `fix/` task).
 
+### S1 — `feat/app-decomp-1-types` (the type surface leaves App.tsx)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-13* (real id; launched as
+`tentacle --profile deepseek`, verified from the invoker's own command line. This
+section's first draft was signed `claude-opus-5-5` by copying the surrounding
+doc; corrected — a signature names the model that did the work.) Branch
+`feat/app-decomp-1-types`, off `main` `632aeb5`; one slice only, S0b and S2–S10
+untouched.
+
+**Load-bearing check, re-run first (per the brief).** The Implementation's
+Preconditions bullet claims *"`AppProps` is the only boundary tests use, and
+`index.ts:23–31` re-exports App's types. Keeping both stable means no existing
+test changes."* Re-verified on this branch:
+
+- `git diff --stat main -- packages/tui/src` → **empty** (no src change to
+  reconcile against).
+- **30** test files import `App` from `../src/App.tsx`, **22** of them also a
+  type (`SessionController` 22, `AppProps` 3, `SessionDirectory` 3, `NoticeFeed`
+  1, `RunQuit` 1, `SettingsNoticeLine` 0) — so `App.tsx` must keep exporting all
+  six names (`SettingsNoticeLine` for the one internal use at App.tsx:3003).
+- `@tentacle/tui` consumers (`packages/cli/src`: `main.ts`, `local-runtime.ts`,
+  `session-jobs.ts`, `notice-hub.ts`, `tui-sessions.ts`, `attach-run.ts`) import
+  `SessionController`/`NoticeFeed`/`RunQuit` from the PACKAGE, i.e. through
+  `index.ts`.
+- **One correction to the plan:** `index.ts` exported **five** of the six, not
+  six — `SettingsNoticeLine` was never on the package surface (`git show
+  main:packages/tui/src/index.ts`). The slice therefore keeps the public surface
+  identical rather than compatible, and the new test pins the exact five.
+
+The check **passed**; no STOP condition. The Dependency-order work below is one
+slice, so the order is: test (red) → `app-types.ts` → `App.tsx` → `index.ts`.
+
+**What was done, in order.**
+1. `packages/tui/test/app-types.test.ts` (**new**, 6 tests) written FIRST and
+   shown RED on the un-moved tree: 5 fail / 1 pass (the pass is the deliberate
+   non-vacuity case). It pins: the module exists and declares each of the six;
+   `App.tsx` declares none of them and imports from `./app-types.ts`; `App.tsx`
+   still re-exports all six; `index.ts` exports the five it always did **and no
+   more**; and `app-types.ts` has **zero runtime exports** (`Object.keys(await
+   import(...))` is `[]`) — a type-only module, so nothing behavioural can ride
+   along with a "move".
+2. `packages/tui/src/app-types.ts` (**new**, 361 lines): an 18-line type-import
+   header + the moved block. Derived mechanically, not retyped: `block.txt` was
+   `sed -n '272,608p'` of `App.tsx`, and the header's imports were computed by
+   scanning which App.tsx import bindings the block actually references
+   (`.tentacle/tmp/app-decomp-1-types/deps.ts`).
+3. `packages/tui/src/App.tsx`: source lines 272–608 deleted (337 lines) and
+   replaced by 8 lines — an `import type` of the three used locally
+   (`AppProps`, `SessionController`, `SettingsNoticeLine`) plus the six-name
+   `export type { … } from "./app-types.ts"` that keeps every importer working.
+   Then 8 now-unused type imports trimmed (`Agent`, `JobController`,
+   `PermissionBroker`, `JobOutputResult`/`JobRow`, `LinkFeed`, `McpServerView`,
+   `QueuedMessage`/`ReturnedCause`, `SessionsView`, `SessionSkillsView`,
+   `SubagentNotifyView`, `TargetBadge`) — each verified to have exactly 1
+   remaining occurrence (the import itself) before removal. App.tsx: 4602 → 4265.
+4. `packages/tui/src/index.ts`: `App` + `AutoAcceptFeed` still come from
+   `App.tsx`; the five types now name `./app-types.ts`.
+5. `changelog.d/app-decomp-1-types.changed.md` — see drift (a) below.
+
+**Pure move, proved byte-for-byte.** `git show main:packages/tui/src/App.tsx |
+sed -n '272,608p'` vs `sed -n '25,361p' packages/tui/src/app-types.ts`:
+`diff -q` → IDENTICAL, both `sha256 13b0d477…`. Not one character inside the
+moved block changed — no comment, no `readonly`, no reordering. Only the import
+header is new text, and only the host files lost lines.
+
+**Red before green (§9).** Red: `bun test packages/tui/test/app-types.test.ts`
+on the un-moved tree → `1 pass / 5 fail`, each fail on its own assertion
+(`app-types.ts has no runtime exports` → `Expected: true, Received: false`, etc.).
+Green after: **6 pass / 0 fail**, 30 expects.
+
+**Mutation table — 6/6 killed (§9 non-vacuity).** `.tentacle/tmp/app-decomp-1-types/`
+`mutate.sh` + `mut-names.sh`; each mutation applied, the S1 file run, the
+original restored by `cp`, then verified by sha256 (all three files back to
+`85ee52f9…`, `ebe40eea…`, `5ae91e51…`):
+
+| # | Mutation | Killed by (assertion, not a compile error) |
+|---|---|---|
+| M1 | a moved type also left behind in App.tsx (duplicate) | `App.tsx declares none of them any more` |
+| M2 | `RunQuit` not `export`ed from app-types.ts | `app-types.ts exists and declares each moved type` |
+| M3 | App.tsx drops its six-name re-export | `App.tsx still re-exports every moved name` |
+| M4 | index.ts drops its five-type block | `index.ts exports each already-public moved type` |
+| M5 | `export const NOTICE_CHANNEL = "notice";` added to app-types.ts | `app-types.ts has no runtime exports` |
+| M6 | app-types.ts drops `JobOutputResult`/`JobRow` | `tsc`: `TS2304: Cannot find name 'JobRow'` (a compile-time mutant, as designed — see drift (c)) |
+
+**Failure modes from the Implementation, checked for this slice.**
+- *Silent behaviour change in a "move"* → the byte-identical sha256 above, plus
+  M5 (no runtime export) — the strongest form available for a type-only slice.
+- *Cycle breakage* → the new module imports only leaf modules; verified no module
+  in the header imports `App.tsx` (checked all 17 by `rg`, only `turn-feed.ts`
+  mentions it and only in a comment). `app-types.ts` is a leaf of the graph.
+- *The test boundary drifting* → 1746 `packages/tui` tests pass with **no test
+  file edited except the new one** (`git status`: the only `??` test is
+  `app-types.test.ts`), so "no existing test changes" is a fact, not a claim.
+- *Stale closure / effect order / identity / freshness / render perf / Ink /
+  single-broker* → **not applicable**: this slice moves zero runtime code, so
+  there is no hook, effect, dep array or render path in the diff. Those modes
+  belong to S3–S10 and stay open there.
+
+**Gate.** `bunx tsc --noEmit` clean · `bun run typecheck` (`tsc --noEmit && tsc -p
+apps/mobile`) clean · `bun run lint`: `Checked 977 files. No fixes applied.`
+(clean; after `biome check --write` on the one new file) · `bun test packages/tui`
+**1746 pass / 0 fail** (13 snapshots, 48900 expects, 179 s) · changelog guard +
+parser tests 21 pass · **full `bun test`: 7790 pass / 3 skip / 0 fail** (72083
+expects, 554 files, 346 s) — the 3 skips are the documented opt-ins (live-k8s,
+live-docker, the ~12 s real-socket keepalive), not failures. `packages/tui` alone
+was green BEFORE drift (d) was found, which is exactly why §4's full-suite step is
+not optional: the one broken guard lives in `packages/cli`.
+
+**Drift from Implementation — four, all deliberate and stated.**
+- **(a) A changelog fragment was written, against this doc's "Other hotspots".**
+  The plan says slices "add no CHANGELOG line (internal refactor; one entry when
+  the last slice merges)"; the execution brief asked for
+  `changelog.d/app-decomp-1-types.<category>.md`. The fragment was written, then
+  **deleted by Fix round 1**: the review is right that AGENTS §10 ("internal/
+  dev/test-only work adds no fragment") overrides a brief, and this doc's own
+  rule says so too. Executing a `rm` was the whole fix.
+- **(b) `SettingsNoticeLine` is exported from `App.tsx` but not from `index.ts`**
+  — the plan says "`index.ts` re-exports keep the test boundary stable", which
+  holds; the plan implies six, the code shows five. Recorded rather than fixed,
+  because adding it would GROW the public surface, which is not a move (§10,
+  Owner Q5 "no cleanup while moving").
+- **(c) This slice is not purely additive in App.tsx's import block.** It deletes
+  8 import names as well as adding 2 lines. The plan's S1 row says only
+  "`app-types.ts`, App.tsx (delete + import), `index.ts`", which is what was
+  done; the 8 deletions are the mechanical consequence (a name the moved types
+  were the sole user of), and leaving them would fail `tsc`/Biome. No use site
+  changed — every deletion was an import binding with 1 occurrence.
+- **(d) ONE existing test DID change — the Preconditions bullet is falsified.**
+  `packages/cli/test/subagent-panel-controller.test.ts:285` parsed `App.tsx` as
+  SOURCE TEXT (`ts.createSourceFile`, then `forEachChild` for
+  `ts.isInterfaceDeclaration` named `SessionController`) to prove every
+  controller member a `RemoteSession` has reaches the runtime's wrapper. After the
+  move that file holds an `export type … from` re-export and no interface, so the
+  guard threw `no SessionController in packages/tui/src/App.tsx` — caught by the
+  full suite (`7789 pass / 3 skip / 1 fail`), not by `packages/tui` alone, which
+  is why §4's "narrow file per slice" left it until the end. This is the ONE
+  place where the Implementation's *"`AppProps` is the only boundary tests use …
+  no existing test changes"* does not hold: a test can also depend on WHERE a
+  declaration is written.
+  **Fix, minimal and in the guard's own spirit** ("read the DECLARATION, not a
+  copy"): the two lines naming the file now name `../../tui/src/app-types.ts`
+  (and the error message with them); no assertion, list or comment about
+  forwarding changed. Non-vacuity re-proved after the repoint, since a guard that
+  silently reads an empty file would be worse than the failure it replaced:
+  renaming `jobOutput` in `app-types.ts` to `jobOutputRenamed` makes it **RED**
+  (`GUARD: every SessionController member … [7.50ms]`, 3 pass / 1 fail), restored
+  to `sha256 85ee52f9…`. A mutation that adds a member `RemoteSession` does NOT
+  have (`bogusMember`) stays green BY DESIGN: the guard's direction is
+  "declared ∧ on the session ⇒ must be forwarded".
+  **Plan updated** (this bullet): the S1 row's Files and the Preconditions
+  bullet's "no existing test changes" now name this guard as the one exception.
+  Every *other* slice that keeps `SessionController` in `app-types.ts` inherits
+  this fix; a slice that MOVES it again must repoint the guard again.
+
+**Not verified (one line).** `main` moved from `632aeb5` to `83d5864` while this
+slice ran (`feat/mobile-app-shell`, `feat/config-list-effective`); those commits
+touch nothing under `packages/tui` (`git diff --stat HEAD main -- packages/tui`
+is empty), so a rebase is a no-op here — but the merge must re-run the gate
+(AGENTS §10 merge step) to confirm on the merged tree. Left deliberately: `run.tsx`
+still imports its five types from `./App.tsx` (the re-export) rather than
+`./app-types.ts`; both typecheck, and repointing it is a second edit outside this
+slice's Files list — a one-line cleanup for whichever slice next touches it.
+
+**Verdict for S1: DONE.** Blast radius was `cross-module` (a public type surface
+used by 22 tests and 6 `packages/cli` files, plus one source-parsing guard); the
+fresh-context Review is the next stage, not this section.
+
+### Fix round 1 — `feat/app-decomp-1-types` (S1 review findings)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-13* (real id, read from
+`~/.config/tentacle/config.jsonc` — the `deepseek` profile this session was
+launched with, `ps` confirms `tentacle --profile deepseek`.)
+
+Both findings were MEDIUM, neither was rebutted; both are fixed. Scope: 3 files
+(2 edits, 1 deletion), no `packages/tui/src` line changed — verified below.
+
+**Finding 1 — MEDIUM, the pin test contradicted the plan's own type rule. FIXED
+(2 parts).** The review is precise: H4(1) (l. 341 + the struck row at l. 400) and
+the live S1 rows (l. 166, l. 963) said opposite things, and
+`test/app-types.test.ts` pinned all six declarations in `app-types.ts`, so a
+later slice doing the planned thing (S8 takes `RunQuit` next to `useQuitClear`)
+would go red on a *correct* move.
+
+*Reproduced first, on the pre-fix test, before editing it.*
+`.tentacle/tmp/app-decomp-1-types/fix1/sim-later-slice.sh apply` performs exactly
+that planned move (block out of `app-types.ts` → `use-quit-clear.ts`, then
+`export type { RunQuit } from "./use-quit-clear.ts"` in both `App.tsx` and
+`index.ts`). Pre-fix test: **4 pass / 2 fail**, on the assertions the review
+named —
+`app-types.ts exists and declares each moved type` and
+`index.ts exports each already-public moved type from app-types.ts`
+(`Expected to contain: "RunQuit"`). That is the review's failure scenario,
+demonstrated rather than argued. The same simulation on the FIXED test: **6 pass
+/ 0 fail**.
+
+*Test fix (`packages/tui/test/app-types.test.ts`, +104/−42).* The file now pins a
+**split** instead of a file: `RESIDENT = [AppProps, SessionController]` (H4(1)'s
+`extends` lists — later slices edit them in place, so their declaration site is
+pinned) versus the other four, for which it pins a **re-export that RESOLVES**:
+`typeExports()` now returns `{name, from}`, `from` resolved to the real file, and
+`reexportResolves()` reads that file and requires it to declare the type. So the
+property is "every name still reaches a real declaration through App.tsx and
+index.ts" — true for a planned move, false for a breaking one. The public-surface
+pin is unchanged (exactly the same five, never more).
+
+*Doc fix (this file, 5 places).* Header status now says S1 was re-instated and
+executed (it named "S1+ re-approval pending", which is what made the branch
+contradict itself); H4(1) is struck as a *slice decision* with a new
+**"H4(1) status after S1"** paragraph recording the resident/movable split that
+the pin test now encodes; the revised-order row reads "re-instated by the owner
+and EXECUTED" instead of "dissolved"; the slice-table row and Owner Q7's preamble
+say the same. Fix round 1 was launched by the orchestrator on the owner's
+instruction; the doc now records that instead of leaving it to be inferred.
+
+*Mutation table (§9) — 9 killed, 1 green BY DESIGN, 0 unexpected.*
+`.tentacle/tmp/app-decomp-1-types/fix1/mut.py`; each mutation applied, the file
+run, the tree restored, sha256 verified (`85ee52f9…`, `ebe40eea…`, `5ae91e51…`
+after every single one):
+
+| # | Mutation | Result |
+|---|---|---|
+| F1 | later slice moves `RunQuit` to its hook module and re-exports it (**the plan's move**) | **SURVIVED — by design**, this is the finding |
+| F2 | …but `App.tsx` forgets the re-export (non-vacuity of F1) | KILLED — `App.tsx still re-exports every moved name` |
+| F3 | …but `index.ts` grows the surface (`SettingsNoticeLine` added) | KILLED — `index.ts exports … and no more` |
+| F4 | `SessionController` (**resident**) leaves for a hook module | KILLED — `app-types.ts … declares its resident types` |
+| M1 | a moved type also left behind in App.tsx | KILLED — `App.tsx declares none of them any more` |
+| M2 | `app-types.ts` stops exporting `RunQuit` | KILLED — 2 fails (both re-exports no longer resolve) |
+| M3 | App.tsx drops its six-name re-export | KILLED — 2 fails |
+| M4 | `index.ts` drops its five-type block | KILLED — 2 fails |
+| M5 | a value export rides along in `app-types.ts` | KILLED — `app-types.ts has no runtime exports` |
+| M8 | `index.ts` adds `SettingsNoticeLine` (surface growth) | KILLED — `… and no more` |
+
+The narrowing did not cost teeth: M2 survived the *first* narrowing attempt (the
+test still pinned `RunQuit`'s declaration site, then only its presence), which is
+why the `{name, from}` resolution check exists — found by this table, not by
+inspection. M6 (dropping `JobOutputResult`/`JobRow`) is unchanged and stays a
+compile-time mutant, as recorded in the S1 Execution.
+
+**Finding 2 — MEDIUM, the changelog fragment breaks AGENTS §10. FIXED (deleted).**
+`changelog.d/app-decomp-1-types.changed.md` is gone; nothing else referenced it.
+The review is right that AGENTS.md overrides a brief, and this doc's own "Other
+hotspots" said the same. Evidence that it would really have shipped, rather than
+an assertion: `.tentacle/tmp/app-decomp-1-types/fix1/frag-ships.ts` runs the real
+`assemble()` over the real `CHANGELOG.md` — with the fragment (read back from
+`HEAD`) it produces a `### Changed` bullet describing an internal file move;
+without it, the section is empty. Drift (a) in the S1 Execution was amended to
+say it was written and then deleted, so the doc does not keep a stale claim.
+Changelog gate after the deletion: `changelog-guard` + `changelog` + `release`
+tests **57 pass / 0 fail**, `[Unreleased]` guard green.
+
+**Gate (this round).** `bunx tsc --noEmit` clean · `bun run lint` `Checked 977
+files in 304ms. No fixes applied.` · `bun test packages/tui` **1746 pass / 0
+fail** (115 files, 179 s) · full `bun test` **7790 pass / 3 skip / 0 fail**
+(7793 tests, 554 files, 344 s) — the 3 skips are the documented opt-ins. The
+touched files, re-run last on the final tree: **31 pass / 0 fail** (S1 pin test,
+the CLI source-locator guard, `changelog-guard`, `changelog`).
+
+**One flake, attributed — not this diff.** The first full-suite run of this
+round ended `7788 pass / 3 skip / 2 fail`, both in
+`packages/daemon/test/serve-log-store.test.ts` (S2 (a) and (b): a 3 s `until()`
+deadline, then `expect(state.k).toBeLessThan(0)`). `git diff --stat main...HEAD --
+packages/daemon packages/client` is **empty**: this branch cannot reach them. That
+file alone: **22 pass / 0 fail, three runs in a row**; the full suite re-run:
+0 fail. Recorded here rather than silently re-run away, per the standing
+"treat red as real until a `(fail)` name says otherwise" instruction (S0 fix
+rounds, l. 790).
+
+**No source line changed by this round.** `git diff --stat` is exactly 3 files:
+the test (+104/−42), this doc, and the deleted fragment. After every mutation and
+simulation, `packages/tui/src/{app-types.ts,App.tsx,index.ts}` are back to HEAD's
+sha256 (`85ee52f9…`, `ebe40eea…`, `5ae91e51…`), verified each time.
+
+**Not verified (one line).** I did not re-run the review's own attack (e) (the
+pinned `export { App, type AutoAcceptFeed }` text) beyond making it
+formatting-tolerant; the risk it names is cosmetic.
+
 ## Review
 
 ### S0 review — REQUEST-CHANGES
@@ -887,3 +1191,113 @@ outside this diff.
 
 *— claude-opus-5-5, 2026-11-13* (fresh context; same model as Fix round 1's
 executor, different family from the deepseek executor)
+
+## Review
+
+### S1 review — REQUEST-CHANGES
+
+**Verdict: REQUEST-CHANGES**, for two doc/file fixes. The code is a clean pure move.
+
+**Findings.**
+1. **MEDIUM — the branch carries out a slice the plan dissolved, and does not
+   say so.** *Design review response* H4 (this doc, l. 339–342) and the revised
+   order table (l. 400, `~~S1 types~~ | dissolved into S5/S6/S8/S9`) were
+   already on the branch base `632aeb5`. The header (l. 3) still says
+   "S1+ re-approval pending". The S1 Execution never mentions this. It edits the
+   old slice-table row (l. 166) as if S1 were still live, so the doc now
+   contradicts itself: l. 166 + l. 963 say "S1 DONE"; l. 342 + l. 400 say "no
+   single `app-types.ts`, created by the first hook slice that needs it".
+   *Failure scenario:* an S5/S6/S8 executor follows l. 342/400 and keeps its
+   types next to the hook. That moves `SessionDirectory`/`NoticeFeed`/`RunQuit`
+   out of `app-types.ts`, and the new `test/app-types.test.ts:36-42` (which
+   pins all six declared there) goes red on a planned move. Or the executor
+   finds the file already there and has no recorded rule to follow. *Fix:*
+   record who re-approved S1 and why (the orchestrator launched it, but nothing
+   in the doc says so). Strike the "dissolved" row and update H4's (1). Narrow
+   the pin test to the members that are meant to stay (`AppProps`,
+   `SessionController`), or state that later slices may edit it.
+2. **MEDIUM — `changelog.d/app-decomp-1-types.changed.md` breaks AGENTS §10
+   ("Internal/dev/test-only work adds no fragment") and this plan (l. 241).**
+   The bullet describes an internal file move with "No behaviour change". It
+   would ship in the user-facing CHANGELOG at the next `bun run release`.
+   Drift (a) (l. 909) blames the brief, but AGENTS.md overrides a brief. *Fix:*
+   delete the file.
+
+**Gate (re-run by me).** `bun test` on `app-types.test.ts` +
+`subagent-panel-controller.test.ts`: **10 pass / 0 fail** (45 expects).
+`bun run typecheck`: clean. `bun run lint`: `Checked 977 files … No fixes
+applied.` The full suite was not re-run (my brief limited it to the touched
+files). The Execution reports 7790 pass / 3 skip / 0 fail.
+
+**Premise table.**
+| Claim | Result |
+|---|---|
+| `main:App.tsx` l. 272–608 ≡ `app-types.ts` l. 25–361 | TRUE (`cmp` against `632aeb5`: identical) |
+| `index.ts` exported 5 of 6 (no `SettingsNoticeLine`) | TRUE (diff) |
+| The CLI guard parses the declaring file by source text | TRUE (`subagent-panel-controller.test.ts:285`) |
+| S1 is part of the approved plan | **FALSE** (l. 339, 400; see finding 1) |
+
+**Mutation (§9).** Renamed `jobOutput` → `jobOutputX` in `app-types.ts:197`.
+The CLI guard went **RED** (`(fail) GUARD: every SessionController member …`,
+3 pass / 1 fail). After the revert, `git status` is clean. So the repointed
+guard reads the real declaration and is not vacuous.
+
+**Attacks tried.**
+- (a) Runtime code riding along with the move: none. The header is
+  `import type` only, and `Object.keys(import)` is `[]`.
+- (b) An import cycle through `app-types.ts`: none. All its imports are
+  type-only and erased at runtime.
+- (c) A public surface change through `@tentacle/tui`: none. The same five
+  types plus `App`/`AutoAcceptFeed` are exported.
+- (d) A §7 invariant touched (single broker, RPC path, raw terminal writes): no
+  runtime code changed, so none applies.
+- (e) The pinned test text in `app-types.test.ts:84`
+  (`export { App, type AutoAcceptFeed }`) is brittle to formatting. Noted only;
+  it is not a defect.
+
+**What holds.** The move is byte-identical. The 8 import trims are correct
+(tsc/Biome clean). Drift (d), the guard repoint, is honest and was mutation-
+proven.
+
+**How the executor behaved.** Careful and honest on the mechanics: it derived
+the block mechanically, used sha256 to prove it, corrected its signature, and
+found the CLI guard through the full suite. It missed the plan-level fact that
+H4 dissolved the slice it was executing.
+
+*— claude-opus-5-5, 2026-11-13* (fresh context; different family from the
+deepseek executor)
+
+### Round 2
+
+**Verdict: PASS.** Both findings are fixed. The fix commit (`8498947`) adds
+no regressions.
+
+- **Finding 2 (changelog fragment): FIXED.** The fragment file is deleted, and
+  `changelog.d/` has no `app-decomp*` file left.
+- **Finding 1 (plan contradiction): FIXED.**
+  - The doc now agrees with itself. The header (l. 3), H4(1) (struck), the new
+    *H4(1) status after S1* paragraph, the slice-table row, Q7's preamble and
+    the revised-order row all say "S1 re-instated by the owner and executed".
+    The type rule is kept as a resident/movable split.
+  - The pin test now matches that split. It pins where `AppProps` and
+    `SessionController` are declared. For the other four types it pins only
+    that each re-export resolves to a module that declares the type.
+  - I did not verify the owner's re-instatement independently. The orchestrator
+    launched the slice, and the doc now records that.
+- **Mutations (all reverted; `git diff` empty after each).**
+  - (A) `export interface RunQuit` → `interface RunQuit` in `app-types.ts`:
+    **RED**, 2 fail ("App.tsx still re-exports…", "index.ts exports … and no
+    more").
+  - (B) `SettingsNoticeLine` added to the type block in `index.ts`: **RED**,
+    1 fail ("… and no more").
+  - The re-export resolution therefore has teeth even though the test was
+    narrowed.
+- **Regressions.** `git diff HEAD~1` touches no `packages/tui/src` or
+  `packages/cli` file: it is the test, the doc and the fragment deletion only.
+  `app-types.test.ts` + `subagent-panel-controller.test.ts`: 10 pass / 0 fail.
+  `bun run typecheck`: clean. `bun run lint`: `Checked 977 files … No fixes
+  applied.` The full suite was not re-run, because this round changed no src
+  file.
+
+*— claude-opus-5-5, 2026-11-13* (fresh context; different family from the
+deepseek executor)
