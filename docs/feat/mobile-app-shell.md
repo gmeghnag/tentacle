@@ -791,3 +791,21 @@ $ bun run e2e:mobile --ios 26
 - **`SessionsRoute`'s effect body** (`App.tsx`) is wiring and stays outside the
   harness, as before: every decision it wires is now in a pure module
   (`link-status-watcher.ts`, `session-list*.ts`).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-13* (fresh context; reviewed `git diff HEAD~1`)
+
+**Verdict: PASS** (all five round-1 findings are fixed, and I found no new HIGH or MEDIUM issue)
+
+Gate: `bun run typecheck` is clean, `bun run lint` is clean (996 files), and `bun test apps/mobile` gives 96 pass / 0 fail across 12 files. I did not re-run the full suite or Maestro.
+
+Mutations: I applied four at once, ran the tests, then reverted them. Afterwards `git status --porcelain` was empty and the tests were green again. Each mutation broke its own test:
+- F1, dropping `stale: false` from `page`: "a successful page clears stale" fails.
+- F3, putting the `entries.length > 0` guard back: "link up re-reads an EMPTY loaded list too" and "link up retries a FAILED list" fail.
+- F4, letting the watcher keep the first link forever: "a NEW link replaces the old subscription" fails.
+- F5, showing the raw `Error.message` instead of `describeError`: 4 `computerRow` tests fail.
+
+F2 is checked by reading the flow: `05-daemon-down.yaml` now asserts the row `session-${ALPHA_ID}` and `assertNotVisible sessions-stale`. Neither can pass while the list is still stale. I did not re-run it on the simulator.
+
+Regressions I looked for: re-subscription loops (`watch` of the same link is a no-op, so none); a `link(up)` refresh before the first read (guarded by `status !== "idle"`); App.tsx wiring. One LOW: an in-flight `load` that resolves after unmount can still call `watcher.watch` after `stop()`. That leaves one listener on the registry's client, and since `controller.link` returns early once disposed, it changes no state.
