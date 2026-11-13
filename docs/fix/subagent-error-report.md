@@ -412,7 +412,186 @@ Gate: narrow files per slice, then `bun run check` (lint baseline clean, §6).
 
 ## Execution
 
-*(empty — executor)*
+*— claude-opus-5-5, 2026-11-13*
+
+Branch `feat/subagent-error-report` (worktree
+`.tentacle/worktrees/subagent-error-report`, base `ed2baff`). Implementation
+followed the plan's dependency order; every slice test was RED on the property
+before the fix. All 13 mutation checks below were run and reverted.
+
+**Drift from the plan noted up front:** (a) the executor was this model, not
+DeepSeek (owner Q6's recommendation) — the run's own signature above; (b)
+`formatEndedAgent` claims an age only when the host gave a clock (`endedAt > 0`),
+because the repro's host has none and computed an absurd `498496h 37m ago`; (c)
+a test the plan's list implied but omitted was added for `drive`'s own catcher.
+
+### Load-bearing check, re-run first
+
+`bun repro.ts` on the branch's base (= plan's `5961917`), pasted:
+
+```
++ 12ms host.ended(sa-1, error) report="the sub-agent failed: provider stream failed: HTTP 500"
++ 12ms jobs.onExit → {sa-1, stopReason:error, toolUses:0}
++ 68ms turn 1 over. parent model ever saw sa-1's note during turn 1? false. pendingExitCount=1
++ 68ms parent event context_note: [background] sub-agent sa-1 (trace smem) finished (error):
+the sub-agent failed: provider stream failed: HTTP 500
+partial finding reached the parent? false
+```
+
+It reproduces: the note waits for the next turn (`sawNote false`,
+`pendingExitCount=1`), it says `finished (error)`, and the partial finding is
+gone. The assumption (an exit note can be pushed at the round boundary exactly
+where a child's `agent_message` note already is) held: no history-validity or
+persistence change was needed, and `agent.ts:1195`'s existing boundary was the
+only site touched.
+
+### Slices, in order
+
+1. **`packages/core/src/agent-jobs.ts`** — `SubagentFailure` (Error subclass with
+   `partialReport`/`toolUses`/`cause`) and `subagentFailureResult(error,
+   fallbackToolUses)`; `EndedAgentJob` + `AGENT_RECENT_ENDED_MAX = 16`; the
+   bounded `recent` map written by a new private `remember()` **before** the exit
+   listeners, read by `ended(id)` / `recentlyEnded()` and flipped by
+   `delivered(id)`; `drive`'s catch is now `subagentFailureResult(error, 0)`;
+   `dispose()` clears `recent`. Exported through `packages/core/src/index.ts`
+   already (`export *`).
+2. **`packages/core/src/agent-job-ledger.ts`** — `subagentReportNote`'s load
+   headline reads `failed` for `stopReason: "error"` (owner Q5); every other stop
+   reason is byte-identical.
+3. **`packages/agent/src/subagent.ts`** — the runner's catch throws
+   `new SubagentFailure(message, { partialReport: report, toolUses, cause })`,
+   keeping the inbox close and the `subagent_end` progress event it already did.
+4. **`packages/agent/src/agent.ts`** — `flushAgentMessages` became
+   `flushMidTurn`: it takes `agent_message` notes **and** sub-agent exits
+   (`isSubagentExit`: not a note/user-note and `"agentId" in job`), in queue
+   order; shell jobs and `user_note`s stay for the turn's start (Q1). The
+   `"agentId" in job` branch of `flushBackgroundExits` was extracted into one
+   `subagentExitNote()` used by both drains (the `background_exit` event, the
+   `subagentReportNote`, the `context_note`, `agentJobs.delivered(id)`, and the
+   `failed` headline). Both existing call sites (`agent.ts:1195`, the late drain)
+   call it, and both set `notesFlushedMidTurn`.
+5. **`packages/tools/src/task.ts`** — both catchers call
+   `subagentFailureResult` (moved: `live.toolUses`; `background:true`: `0`
+   fallback, the failure's own count wins); a new `failureError()` puts the same
+   text into the foreground (never-moved) tool error (owner Q3).
+6. **`packages/tools/src/agent-status.ts` + `agent-control.ts`** —
+   `formatEndedAgent(record, now)` and `formatRecentlyEnded(records, now)` (pure,
+   `oneLine`-bounded, `AGENT_STATUS_MAX_CHARS`-capped); `status` falls back to
+   `jobs.ended(id)` before "no such" (`isError: false`) and appends one
+   `recently ended:` line to the no-id listing (owner Q4). `AGENT_CONTROL`'s
+   description is unchanged.
+7. **`packages/tui/src/state.ts`, `background-list.ts`** — the notice reads
+   `sa-3 failed · 77 tool uses · … — the agent gets its error and partial output
+   at its next step` (others: `… gets its report at its next step`), the panel
+   `✓ finished · report queued for the agent` (owner Q2).
+8. **`changelog.d/subagent-error-report.fixed.md`** — one bullet.
+
+### Tests (10 of the plan's 10, plus one it implied but did not list)
+
+1. `agent/test/subagent-background.test.ts` — mid-turn delivery at the boundary
+   (`pendingExitCount === 0`, the note in the parent's NEXT request, exactly 3
+   model rounds). RED before: `pendingExitCount === 1` and no note.
+2. Same file — an exit during the final answer's round gets one more round
+   (3 requests). RED before: 2.
+3. Same file — a shell job's exit is still turn-start only, stays queued. RED
+   before implementation is not the interesting leg; the mutation is (below).
+4. Same file — the client-armed continuation ends with no model request. RED
+   before: a third round ran.
+5. `agent/test/subagent.test.ts` — the runner rejects with `SubagentFailure`
+   carrying `PARTIAL FINDING…`, `toolUses === 1`, the message, the `cause`;
+   plus a child that throws before any text (`partialReport` blank, 0 uses).
+6. `tools/test/task-background.test.ts` + `tools/test/task-detach.test.ts` — the
+   `background:true` catcher's count is the failure's (never 0); the MOVED
+   catcher's too (never the folded live sink's 0); the foreground error carries
+   the same text.
+7. `core/test/agent-jobs.test.ts` — `recent`: written BEFORE the listeners (a
+   listener sees it), host clock, `delivered` flips, eviction at 17, `dispose`
+   clears; plus `drive` rendering a thrown `SubagentFailure` through the helper
+   (a gap in the plan's list — `drive`'s own catcher had no test; added).
+8. `tools/test/agent-status.test.ts` + `tools/test/agent-control.test.ts` — the
+   ended text (undelivered / delivered / 0-`endedAt`), one bounded line, the
+   capped `recently ended:` listing, an unknown id keeping `no such`.
+9. `tui/test/state.test.ts`, `background-list.test.ts` — the new wording,
+   including the `error` case.
+10. The repro, re-run (below).
+
+### The repro after the fix
+
+```
++ 11ms host.ended(sa-1, error) report="the sub-agent failed after 1 tool use: provider stream failed: HTTP 500
+
+Partial output before the failure:
+PARTIAL FINDING: smem needed 101KB > 99KB limit."
++ 67ms parent event background_exit "sa-1"
++ 67ms parent event context_note "[background] sub-agent sa-1 (trace smem) failed:
+the sub-agent failed after 1 tool use: … Partial output before the failure: PARTIAL FINDING: …"
+  tool result: "sa-1 ended (error) after 1 tool use. Its report was delivered to you as the [background] note "sub-agent sa-1 (trace smem)"."
++ 67ms turn 1 over. parent model ever saw sa-1's note during turn 1? true. pendingExitCount=0
+partial finding reached the parent? true
+```
+
+All four expected values from the plan hold. The `status` text names
+`ended (error)` — with no age, because the repro's `AgentJobs` host binds no
+`now` (`endedAt: 0`): a `Date.now()` age against a record with no clock read
+`498496h 37m ago` in the first run, which is a lie, so an age is only claimed
+when the host gave a clock. That is drift from the plan's example text (which
+assumed a host clock); the shape is otherwise as designed.
+
+### Mutation checks (each applied, run, reverted)
+
+| # | Mutation | Red test |
+|---|---|---|
+| 1 | drop exits from the mid-turn drain | tests 1, 2, 4 |
+| 2 | drain ALL exits mid-turn (shell jobs too) | test 3 |
+| 3 | set `notesFlushedMidTurn` only for `agent_message` | tests 1, 4 |
+| 4 | remove the late-drain delivery | test 2 |
+| 5 | write `recent` AFTER the listeners | test 7 (before-listener) |
+| 6 | `drive`'s catch back to inline message + `toolUses: 0` | the added `drive` test |
+| 7 | ledger `failed` headline reverted | ledger Q5 test |
+| 8 | runner rethrows the raw error | test 5 (both legs) |
+| 9 | `background:true` catcher reverted | test 6 (background) |
+| 10 | MOVED catcher reverted to `live.toolUses` | test 6 (moved) |
+| 11 | remove `jobs.ended` fallback | test 8 (undelivered, delivered, and the old finished-child case) |
+| 12 | drop the `recently ended:` line | test 8 (listing) |
+| 13 | restore the old TUI wording | test 9 (both) |
+
+### Failure modes from the plan, walked
+
+- *Exit during a parallel tool group*: the drain is after the whole group — the
+  existing test for the round boundary still passes, and 1's third request shows
+  the note after both results.
+- *Exit after the late drain*: nothing was added between the drain and
+  `turn_end` (the new code is the same synchronous stretch); a shell job left in
+  the queue by test 3 proves exits still survive to the next start.
+- *Double delivery*: `flushMidTurn` splices, so the start flush cannot see it
+  again — test 1's exact-3-rounds assertion and the repro's single
+  `background_exit` cover it; the stale-wake guard is test 4.
+- *Cancel before the boundary*: unchanged (not drained); nothing in the new code
+  touches the cancel paths.
+- *Context reset / compaction*: the note is the same typed `subagent_report`
+  message, and `hosted-session.ts` still closes delivery on the
+  `background_exit` event wherever in the turn it is yielded — unchanged, and
+  the daemon suite is green.
+- *Retired agent*: `delivered` lives on the session-level `AgentJobs`, so a
+  swap keeps it; `retire/adopt` tests still pass.
+- *Killed child*: `cancelled` still reads `killed` (test in
+  `subagent-background.test.ts`, unchanged).
+- *Non-`Error` throw*: `subagentFailureResult` stringifies (tested).
+- *Huge partial*: still capped by `capSubagentText` in `drive` (existing cap
+  test green); the `background:true` catcher's report goes through `shape`.
+- *Many ended children*: bounded at 16, eviction tested; an evicted id answers
+  `no such`, as before.
+- *Pod*: no laptop-side effect added; the partial is pod-supplied text, treated
+  as report text already is. No wire/schema change, so no `PROTOCOL_VERSION`
+  bump and no `protocol.json` regeneration.
+- *Version skew*: no wire change.
+
+### Gate
+
+`bunx tsc --noEmit` + `bunx tsc -p apps/mobile --noEmit` → clean.
+`bun run lint` → `Checked 962 files. No fixes applied.` (the repo baseline is
+0 errors/0 warnings). `bun test` → **7637 pass, 3 skip (the opt-in live-k8s,
+live-docker and slow keepalive), 0 fail** across 544 files.
 
 ## Review
 

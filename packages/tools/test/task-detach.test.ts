@@ -4,6 +4,7 @@ import {
   AgentJobs,
   type PermissionRequest,
   type PermissionRequester,
+  SubagentFailure,
   type ToolContext,
 } from "@tentacle/core";
 import {
@@ -54,7 +55,12 @@ function gatedRunner() {
     seen.push(controls ?? {});
     return gate.promise;
   };
-  return { run, seen, finish: (r: TaskRunResult = DONE) => gate.resolve(r) };
+  return {
+    run,
+    seen,
+    finish: (r: TaskRunResult = DONE) => gate.resolve(r),
+    fail: (e: unknown) => gate.reject(e),
+  };
 }
 
 /** The moved-to-background text, exactly (`docs/feat/subagent-detach.md` Design 2). */
@@ -375,5 +381,49 @@ describe("T12: the moved child's inbox is the same object", () => {
     expect(inbox?.drain()).toEqual(["[message from the parent agent] hi"]);
     g.finish();
     await tick();
+  });
+});
+
+// docs/fix/subagent-error-report.md root cause B, test 6 (the MOVED catcher) and
+// owner Q3 (a foreground failure keeps the partial too).
+describe("B: the moved catcher and the foreground failure", () => {
+  const partial = (n: number) =>
+    `the sub-agent failed after ${n} tool use${n === 1 ? "" : "s"}: provider stream failed: HTTP 500\n\nPartial output before the failure:\nPARTIAL FINDING: smem needed 101KB`;
+  const failure = () =>
+    new SubagentFailure("provider stream failed: HTTP 500", {
+      partialReport: "PARTIAL FINDING: smem needed 101KB",
+      toolUses: 3,
+    });
+
+  test("a MOVED child that throws reports the failure's count, not the live sink's", async () => {
+    // Mutation: revert this catcher to `toolUses: live.toolUses` with an inline
+    // message → the count is the folded progress (0 here) and the partial is
+    // gone → red.
+    const { jobs, exits } = jobsRig();
+    const g = gatedRunner();
+    const tool = createTaskTool(g.run, TYPES, { background: jobs });
+    const { ctx } = ctxWith();
+    const running = tool.execute({ description: "map repo", prompt: "p" }, ctx);
+    await tick();
+    jobs.detachForeground();
+    expect((await running).content).toBe(movedText("sa-1", "map repo"));
+    g.fail(failure());
+    await tick();
+    expect(exits).toEqual([`sa-1:${partial(3)}`]);
+  });
+
+  test("a foreground (never moved) failure reaches the agent through the same renderer", async () => {
+    // Owner Q3: the same loss, so the same text — the tool error the model reads
+    // carries the count and the partial, not just the exception message.
+    const { jobs } = jobsRig();
+    const tool = createTaskTool(
+      async () => {
+        throw failure();
+      },
+      TYPES,
+      { background: jobs },
+    );
+    const { ctx } = ctxWith();
+    await expect(tool.execute({ description: "d", prompt: "p" }, ctx)).rejects.toThrow(partial(3));
   });
 });

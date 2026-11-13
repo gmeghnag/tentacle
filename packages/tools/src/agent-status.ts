@@ -14,7 +14,7 @@
  * before it enters the text, the row count and the total length are capped, and
  * nothing is phrased as an instruction from the child. A label reads as data.
  */
-import type { AgentJobRow } from "@tentacle/core";
+import type { AgentJobRow, EndedAgentJob } from "@tentacle/core";
 
 /**
  * The name the model USED to be offered for this answer. No longer a tool — the
@@ -143,8 +143,52 @@ function childBlock(row: AgentJobRow, input: AgentStatusInput, actions: number):
   return `${head}\n  ${actionsLine(row, actions)}`;
 }
 
-/** The tail line: the TUI's own labels, oldest first, plus how much is not here. */
-function actionsLine(row: AgentJobRow, actions: number): string {
+/**
+ * A child that has ENDED, by id (docs/fix/subagent-error-report.md root cause C):
+ * the live row is gone the moment it ends, and answering "no such sub-agent" for
+ * a child that just reported is a lie the model then acts on. Bounded like every
+ * other answer here (`oneLine`, one line, the char cap), and it never restates a
+ * report: it says where the report is.
+ */
+export function formatEndedAgent(record: EndedAgentJob, now: number): string {
+  const n = record.toolUses;
+  // `endedAt === 0`: the host had no clock (a one-shot, some tests), and an age
+  // computed off `Date.now()` would be a wild lie (498496h) — say none.
+  const age = record.endedAt > 0 ? ` ${formatElapsed((now - record.endedAt) / 1000)} ago` : "";
+  const head = `${oneLine(record.agentId, 24)} ended (${oneLine(record.stopReason, 32)})${age} after ${formatCount(n)} tool use${n === 1 ? "" : "s"}.`;
+  const where = record.delivered
+    ? `Its report was delivered to you as the [background] note "sub-agent ${oneLine(record.agentId, 24)} (${oneLine(record.description)})".`
+    : record.stopReason === "error"
+      ? "Its report — the error and any partial output — reaches you as a [background] note at your next step."
+      : "Its report reaches you as a [background] note at your next step.";
+  return oneLine(`${head} ${where}`, AGENT_STATUS_MAX_CHARS);
+}
+
+/**
+ * One `recently ended:` line for the no-id listing: id and outcome, oldest
+ * first, capped at `AGENT_STATUS_MAX_CHILDREN` like the running list. Empty when
+ * nothing has ended (never a bare label).
+ */
+export function formatRecentlyEnded(
+  records: readonly EndedAgentJob[],
+  now: number,
+): readonly string[] {
+  if (records.length === 0) {
+    return [];
+  }
+  const shown = records.slice(-AGENT_STATUS_MAX_CHILDREN);
+  const parts = shown.map((r) => {
+    const how = r.stopReason === "error" ? "failed" : `ended (${oneLine(r.stopReason, 32)})`;
+    const age = r.endedAt > 0 ? ` ${formatElapsed((now - r.endedAt) / 1000)} ago` : "";
+    return `${oneLine(r.agentId, 24)} ${how}${age}`;
+  });
+  return [oneLine(`recently ended: ${parts.join(" · ")}`, AGENT_STATUS_MAX_CHARS)];
+}
+
+/** The tail line: the TUI's own labels, oldest first, plus how much is not here. */ function actionsLine(
+  row: AgentJobRow,
+  actions: number,
+): string {
   if (row.tail.length === 0) {
     return "no tool calls yet";
   }

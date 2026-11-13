@@ -17,7 +17,7 @@ import type {
   ToolProgressEvent,
   ToolResult,
 } from "@tentacle/core";
-import { foldAgentProgress } from "@tentacle/core";
+import { SubagentFailure, foldAgentProgress, subagentFailureResult } from "@tentacle/core";
 import { z } from "zod";
 
 export interface TaskRunResult {
@@ -171,6 +171,18 @@ function foregroundResult(result: TaskRunResult): ToolResult {
   return { content: `${body}${note}` };
 }
 
+/**
+ * A thrown child as the tool error the agent loop records: the one renderer's
+ * text (`subagentFailureResult`), never the bare message — a foreground failure
+ * loses its partial output exactly as a background one did (owner Q3).
+ */
+function failureError(error: unknown): Error {
+  if (error instanceof SubagentFailure) {
+    return new Error(subagentFailureResult(error, 0).report, { cause: error });
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
 /** The result of a call that returned but whose child now runs in the background. */
 function movedText(agentId: string, description: string): string {
   return `moved to background as ${agentId}: ${description}. Its report will arrive later as a [background] note; you can keep working or end your turn.`;
@@ -236,11 +248,7 @@ async function runMovable(
     },
     (error: unknown) => {
       finished = true;
-      return {
-        report: `the sub-agent failed: ${error instanceof Error ? error.message : String(error)}`,
-        toolUses: live.toolUses,
-        stopReason: "error",
-      };
+      return subagentFailureResult(error, live.toolUses);
     },
   );
   const moved = Promise.withResolvers<void>();
@@ -277,7 +285,11 @@ async function runMovable(
   if (agentId !== undefined) {
     return { content: movedText(agentId, args.description) };
   }
-  const result = await running;
+  const result = await running.catch((error: unknown) => {
+    // A thrown child surfaces as this call's error — with what it found: the
+    // same renderer every other catcher uses (owner Q3).
+    throw failureError(error);
+  });
   // NEVER `shape`d here: the agent loop applies the call's transforms to this
   // result itself (`agent.ts` `finishCall`), so shaping here would run
   // redaction, the hooks and the spill twice. Only a MOVED child's report is
@@ -417,11 +429,7 @@ export function createTaskTool(
                 sessionId: ctx.sessionId,
               });
             } catch (error) {
-              outcome = {
-                report: `the sub-agent failed: ${error instanceof Error ? error.message : String(error)}`,
-                toolUses: 0,
-                stopReason: "error",
-              };
+              outcome = subagentFailureResult(error, 0);
             }
             return shape(outcome, signal);
           },

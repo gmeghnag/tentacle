@@ -117,10 +117,13 @@ describe("agent_control: the three actions do what their old tools did", () => {
     );
     r.gate.resolve({ report: "r", toolUses: 0, stopReason: "end_turn" });
     await tick();
-    // A finished child has no row: same text, not a silent empty answer.
+    // A finished child has no row, but it still answers truthfully — never "no
+    // such" for a child that just reported (docs/fix/subagent-error-report.md C).
+    // This rig binds no host clock, so the record has no age and none is claimed.
     expect(await tool.execute({ action: "status", agent_id: "sa-1" }, ctx)).toEqual({
-      content: miss("sa-1"),
-      isError: true,
+      content:
+        "sa-1 ended (end_turn) after 0 tool uses. Its report reaches you as a [background] note at your next step.",
+      isError: false,
     });
   });
 
@@ -410,5 +413,66 @@ describe("agent_control: twoWay on changes the message result too", () => {
     expect(out.content).not.toContain("agent_notify");
     gate.resolve({ report: "r", toolUses: 0, stopReason: "end_turn" });
     await tick();
+  });
+});
+
+// docs/fix/subagent-error-report.md root cause C, test 8: a child that just
+// ENDED answers for itself instead of "no such", and says where its report is.
+describe("agent_control status: a recently ended child", () => {
+  /** A child that ends at `endedAt` with a chosen outcome; `now` is fixed. */
+  function endedRig(outcome: { report: string; toolUses: number; stopReason: string }) {
+    const startedAt = 1_000;
+    let clock = startedAt;
+    let n = 0;
+    const jobs = new AgentJobs(2);
+    jobs.bind({ launched: () => `sa-${++n}`, ended: () => {}, now: () => clock });
+    const gate = Promise.withResolvers<typeof outcome>();
+    jobs.start(
+      { callId: "c1", agentType: "general", description: "Trace FA shared-mem root cause" },
+      async () => gate.promise,
+    );
+    clock = startedAt + 30_000;
+    gate.resolve(outcome);
+    return { jobs, now: () => clock };
+  }
+
+  const endedText =
+    "sa-1 ended (error) 0s ago after 77 tool uses. Its report — the error and any partial output — reaches you as a [background] note at your next step.";
+
+  test("undelivered: the ended text, not an error", async () => {
+    // Mutation: drop the `jobs.ended` fallback → "no such" and isError true → red.
+    const r = endedRig({ report: "the sub-agent failed: boom", toolUses: 77, stopReason: "error" });
+    await tick();
+    const tool = createAgentControlTool(r.jobs, { now: r.now });
+    expect(await tool.execute({ action: "status", agent_id: "sa-1" }, ctx)).toEqual({
+      content: endedText,
+      isError: false,
+    });
+  });
+
+  test("delivered: it says the report is in hand, never promises it again", async () => {
+    const r = endedRig({ report: "R", toolUses: 2, stopReason: "end_turn" });
+    await tick();
+    r.jobs.delivered("sa-1");
+    const tool = createAgentControlTool(r.jobs, { now: r.now });
+    expect((await tool.execute({ action: "status", agent_id: "sa-1" }, ctx)).content).toBe(
+      'sa-1 ended (end_turn) 0s ago after 2 tool uses. Its report was delivered to you as the [background] note "sub-agent sa-1 (Trace FA shared-mem root cause)".',
+    );
+  });
+
+  test("the no-id listing adds one `recently ended:` line; an unknown id keeps `no such`", async () => {
+    // Mutation: keep the listing silent → red.
+    const r = endedRig({ report: "R", toolUses: 1, stopReason: "error" });
+    await tick();
+    const tool = createAgentControlTool(r.jobs, { now: r.now });
+    const listing = await tool.execute({ action: "status" }, ctx);
+    expect(listing.isError).toBe(false);
+    expect(listing.content.split("\n").at(-1)).toBe("recently ended: sa-1 failed 0s ago");
+    const miss = await tool.execute({ action: "status", agent_id: "sa-9" }, ctx);
+    expect(miss).toEqual({
+      content:
+        "no such background sub-agent: sa-9 — it finished, was stopped, or never existed. If it just finished, its report arrives as a [background] note.",
+      isError: true,
+    });
   });
 });

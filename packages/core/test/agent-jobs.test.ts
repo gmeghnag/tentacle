@@ -3,6 +3,7 @@ import {
   AGENT_INBOX_MAX,
   AGENT_MESSAGE_MAX_CHARS,
   AGENT_NOTIFY_PER_CHILD,
+  AGENT_RECENT_ENDED_MAX,
   type AgentInbox,
   type AgentJobExit,
   type AgentJobHost,
@@ -10,8 +11,10 @@ import {
   type AgentJobSpec,
   AgentJobs,
   type AgentNotify,
+  SubagentFailure,
   TWO_WAY_REPLY_HINT,
   capSubagentText,
+  subagentFailureResult,
 } from "@tentacle/core";
 import { SUBAGENT_REPORT_MAX_CHARS } from "@tentacle/protocol";
 
@@ -745,5 +748,129 @@ describe("AgentJobs.acquire: the slot's inbox and adopt (T6)", () => {
     expect(jobs.list()).toEqual([]);
     // Still holding its slot: nothing half-moved.
     expect(jobs.acquire("later").ok).toBe(false);
+  });
+});
+
+describe("subagentFailureResult: a thrown child keeps what it found (B)", () => {
+  test("a SubagentFailure renders its count and the partial output", () => {
+    const r = subagentFailureResult(
+      new SubagentFailure("provider stream failed: HTTP 500", {
+        partialReport: "PARTIAL FINDING: smem needed 101KB",
+        toolUses: 3,
+      }),
+      0,
+    );
+    expect(r.stopReason).toBe("error");
+    expect(r.toolUses).toBe(3);
+    expect(r.report).toBe(
+      "the sub-agent failed after 3 tool uses: provider stream failed: HTTP 500\n\nPartial output before the failure:\nPARTIAL FINDING: smem needed 101KB",
+    );
+  });
+
+  test("one tool use is singular; a blank partial adds no section", () => {
+    expect(
+      subagentFailureResult(
+        new SubagentFailure("boom", { partialReport: "  \n ", toolUses: 1 }),
+        0,
+      ),
+    ).toEqual({
+      report: "the sub-agent failed after 1 tool use: boom",
+      toolUses: 1,
+      stopReason: "error",
+    });
+    expect(subagentFailureResult(new SubagentFailure("boom", { toolUses: 0 }), 0).report).toBe(
+      "the sub-agent failed after 0 tool uses: boom",
+    );
+  });
+
+  test("a plain error reads as today, and keeps the fallback count", () => {
+    expect(subagentFailureResult(new Error("boom"), 2)).toEqual({
+      report: "the sub-agent failed: boom",
+      toolUses: 2,
+      stopReason: "error",
+    });
+    // Never an `Error` instance: stringified, as the catchers already do.
+    expect(subagentFailureResult("nope", 0).report).toBe("the sub-agent failed: nope");
+  });
+
+  test("`drive` renders a thrown SubagentFailure through the same helper", async () => {
+    // Mutation: revert `drive`'s catch to its inline message + `toolUses: 0` →
+    // the exit loses the child's 5 tool uses and its partial → red.
+    const { jobs, exits } = rig(1);
+    jobs.start(spec(), async () => {
+      throw new SubagentFailure("stream failed", { partialReport: "FOUND IT", toolUses: 5 });
+    });
+    await tick();
+    expect(exits[0]?.toolUses).toBe(5);
+    expect(exits[0]?.report).toBe(
+      "the sub-agent failed after 5 tool uses: stream failed\n\nPartial output before the failure:\nFOUND IT",
+    );
+  });
+});
+
+describe("AgentJobs: the recently-ended record (C)", () => {
+  function recentRig() {
+    let n = 0;
+    let clock = 1_000;
+    const jobs = new AgentJobs(1);
+    jobs.bind({ launched: () => `sa-${++n}`, ended: () => {}, now: () => clock });
+    return {
+      jobs,
+      tickClock: (by = 1_000) => {
+        clock += by;
+      },
+    };
+  }
+
+  test("written BEFORE the exit listeners run, with the host clock", async () => {
+    const { jobs, tickClock } = recentRig();
+    let seen: ReturnType<AgentJobs["ended"]>;
+    jobs.onExit((e) => {
+      seen = jobs.ended(e.agentId);
+    });
+    const startedAt = 1_000;
+    jobs.start({ callId: "c1", agentType: "general", description: "map repo" }, async () => ({
+      report: "R",
+      toolUses: 4,
+      stopReason: "end_turn",
+    }));
+    tickClock(12_000);
+    await tick();
+    expect(seen).toEqual({
+      agentId: "sa-1",
+      description: "map repo",
+      stopReason: "end_turn",
+      toolUses: 4,
+      endedAt: startedAt + 12_000,
+      delivered: false,
+    });
+    expect(jobs.ended("sa-9")).toBeUndefined();
+  });
+
+  test("delivered flips the flag, and an evicted id answers nothing", async () => {
+    const { jobs } = recentRig();
+    for (let i = 0; i < AGENT_RECENT_ENDED_MAX + 1; i++) {
+      jobs.start({ callId: `c${i}`, agentType: "general", description: `d${i}` }, async () =>
+        result(),
+      );
+      await tick();
+    }
+    expect(jobs.ended("sa-1")).toBeUndefined();
+    expect(jobs.ended("sa-2")?.delivered).toBe(false);
+    jobs.delivered("sa-2");
+    expect(jobs.ended("sa-2")?.delivered).toBe(true);
+    // A no-op for an id with no record.
+    jobs.delivered("sa-404");
+    expect(jobs.recentlyEnded()).toHaveLength(AGENT_RECENT_ENDED_MAX);
+  });
+
+  test("dispose clears it", async () => {
+    const { jobs } = recentRig();
+    jobs.start(spec(), async () => result());
+    await tick();
+    expect(jobs.recentlyEnded()).toHaveLength(1);
+    jobs.dispose();
+    expect(jobs.recentlyEnded()).toEqual([]);
+    expect(jobs.ended("sa-1")).toBeUndefined();
   });
 });
