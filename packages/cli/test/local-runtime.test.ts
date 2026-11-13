@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type SessionRecord } from "@tentacle/agent";
 import { ChannelError, type RemoteSession } from "@tentacle/client";
 import type {
+  AttachmentRef,
   BackgroundJob,
   ChatMessage,
   ChatRequest,
@@ -2538,5 +2540,278 @@ describe("session/log on the laptop (docs/feat/session-log.md)", () => {
       host.get(UID)?.snapshotPage().messages as SessionRecord["messages"],
     );
     runtime.dispose();
+  });
+});
+
+describe("durable images on the laptop (docs/feat/attachments-durable.md T7/T8)", () => {
+  const sha = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
+  const img = (text: string) => {
+    const bytes = new TextEncoder().encode(text);
+    return { bytes, ref: { id: sha(bytes), mimeType: "image/png", size: bytes.length, name: `${text}.png` } };
+  };
+  const same = (got: Uint8Array | null | undefined, want: Uint8Array) =>
+    got !== null && got !== undefined && Buffer.compare(got, want) === 0;
+
+  class Recorder implements ModelProvider {
+    readonly id = "recorder";
+    readonly requests: ChatRequest[] = [];
+    async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+      this.requests.push(request);
+      yield { type: "text", delta: "ok" };
+      yield { type: "done" };
+    }
+  }
+
+  /** Every frame the laptop sent: method + (for a put) its data length. */
+  type Sent = { method: string; data?: number; id?: string };
+
+  /** A daemon whose provider is `model` (`store`: it holds the bytes; `client`: a --model-proxy pod). */
+  function imageDaemon(model: Recorder, policy: "store" | "client") {
+    const ref: { connection?: Connection } = {};
+    const host = new SessionHost({
+      defaultCwd: "/tmp/work",
+      images: policy === "store" ? { source: "store", maxBytes: 4 << 20 } : { source: "client" },
+      createAgent: (_cwd, ctx) => ({
+        agent: new Agent({
+          model:
+            policy === "store"
+              ? model
+              : new ProxyModelProvider(
+                  (request) => {
+                    if (!ref.connection) throw new Error("no connection");
+                    return ref.connection.requestModelStream(request);
+                  },
+                  (request, handlers) => {
+                    if (!ref.connection) throw new Error("no connection");
+                    return ref.connection.requestModelStreamChunked(request, handlers);
+                  },
+                ),
+          tools: new ToolRegistry(),
+          env: noopEnv,
+          ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
+        }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+    const [daemonCh, clientCh] = createChannelPair();
+    ref.connection = new Connection(daemonCh, host);
+    const sent: Sent[] = [];
+    const tap = {
+      send: (data: string) => {
+        const frame = JSON.parse(data) as {
+          method?: string;
+          params?: { data?: string; id?: string };
+        };
+        if (frame.method !== undefined) {
+          sent.push({
+            method: frame.method,
+            ...(frame.method === "attachment/put"
+              ? { data: frame.params?.data?.length ?? 0, id: frame.params?.id ?? "" }
+              : {}),
+          });
+        }
+        clientCh.send(data);
+      },
+      close: () => clientCh.close(),
+      setOnMessage: (handler: (d: string) => void) => clientCh.setOnMessage(handler),
+      setOnClose: (handler: () => void) => clientCh.setOnClose(handler),
+    };
+    return { host, channel: tap, sent };
+  }
+
+  async function runtimeOn(
+    name: string,
+    opts: {
+      policy?: "store" | "client";
+      resume?: SessionRecord | null;
+      store?: (where: string) => ConstructorParameters<typeof SessionSaver>[0];
+    } = {},
+  ) {
+    const model = new Recorder();
+    const policy = opts.policy ?? "store";
+    const daemon = imageDaemon(model, policy);
+    const where = join(dir, name);
+    const logStore = new LogSessionStore(where);
+    const notices: string[] = [];
+    const saver = new SessionSaver(opts.store ? opts.store(where) : logStore, (t) => notices.push(t));
+    const runtime = await createLocalRuntime({
+      channel: daemon.channel,
+      disposeTransport: () => {},
+      permissions: new PermissionBroker(),
+      saver,
+      cwd: "/tmp/work",
+      model: "m",
+      resume: opts.resume ?? null,
+      notify: (t) => notices.push(t),
+      ...(policy === "client"
+        ? { modelProvider: model, localImages: { vision: true, maxBytes: 4 << 20 } }
+        : {}),
+    });
+    return { model, daemon, where, logStore, saver, notices, runtime };
+  }
+
+  const recordWith = (uid: string, images: { ref: AttachmentRef }[]): SessionRecord => ({
+    id: uid,
+    cwd: "/tmp/work",
+    model: "m",
+    createdAt: 1,
+    updatedAt: 1,
+    title: "t",
+    messages: images.flatMap(({ ref }, i) => [
+      { role: "user" as const, content: `look ${i}`, attachments: [ref] },
+      { role: "assistant" as const, content: `seen ${i}` },
+    ]),
+  });
+
+  test("attachImage keeps the bytes on the laptop BEFORE it resolves", async () => {
+    const gate = Promise.withResolvers<void>();
+    let stored = false;
+    const { runtime, where } = await runtimeOn("keep-before", {
+      store: (w) => {
+        const real = new LogSessionStore(w);
+        return Object.assign(real, {
+          putBlob: async (id: string, blobId: string, bytes: Uint8Array) => {
+            await gate.promise;
+            await LogSessionStore.prototype.putBlob.call(real, id, blobId, bytes);
+            stored = true;
+          },
+        });
+      },
+    });
+    const session = runtime.createSession();
+    const a = img("keep-before");
+    let resolved = false;
+    const attached = session.attachImage(a.bytes, { mimeType: "image/png", name: "a.png" }).then((r) => {
+      resolved = true;
+      return r;
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(resolved).toBe(false);
+    gate.resolve();
+    expect(await attached).toEqual({ ...a.ref, name: "a.png" });
+    expect(stored).toBe(true);
+    const uid = session.sessionId ?? "";
+    expect(await readdir(join(where, `${uid}.attachments`))).toEqual([a.ref.id]);
+    await runtime.dispose();
+  });
+
+  test("resume: the first send re-uploads the history's image BEFORE the prompt; the provider reads its bytes", async () => {
+    const a = img("resume-a");
+    const { runtime, daemon, model, logStore, notices } = await runtimeOn("resume", {
+      resume: recordWith("R1", [a]),
+    });
+    await logStore.putBlob("R1", a.ref.id, a.bytes);
+    const session = runtime.createSession();
+    await drain(session.send("again"));
+    const methods = daemon.sent.map((s) => s.method);
+    const firstPut = methods.indexOf("attachment/put");
+    expect(firstPut).toBeGreaterThanOrEqual(0);
+    expect(firstPut).toBeLessThan(methods.indexOf("session/prompt"));
+    expect(daemon.sent.some((s) => s.method === "attachment/put" && (s.data ?? 0) > 0)).toBe(true);
+    const last = model.requests.at(-1);
+    expect(JSON.stringify(last?.messages)).toContain(a.ref.id);
+    expect(same(await last?.attachments?.read(a.ref), a.bytes)).toBe(true);
+    expect(notices).toEqual([]);
+    await runtime.dispose();
+  });
+
+  test("only the ids a provider would inline are restored (6 images → 5)", async () => {
+    const six = [1, 2, 3, 4, 5, 6].map((n) => img(`six-${n}`));
+    const { runtime, daemon, logStore } = await runtimeOn("six", { resume: recordWith("R6", six) });
+    for (const x of six) await logStore.putBlob("R6", x.ref.id, x.bytes);
+    await drain(runtime.createSession().send("again"));
+    const ids = new Set(daemon.sent.filter((s) => s.method === "attachment/put").map((s) => s.id));
+    expect([...ids].sort()).toEqual(six.slice(1).map((x) => x.ref.id).sort());
+    await runtime.dispose();
+  });
+
+  test("a blob missing on the laptop: ONE notice, and the prompt is still sent", async () => {
+    const a = img("missing-a");
+    const b = img("missing-b");
+    const { runtime, daemon, model, logStore, notices } = await runtimeOn("missing", {
+      resume: recordWith("RM", [a, b]),
+    });
+    await logStore.putBlob("RM", b.ref.id, b.bytes); // a is not on this laptop
+    const session = runtime.createSession();
+    await drain(session.send("again"));
+    await drain(session.send("and again"));
+    expect(daemon.sent.filter((s) => s.method === "session/prompt")).toHaveLength(2);
+    expect(notices).toEqual([
+      "⚠ 1 earlier image(s) of this session are not on this laptop — the model sees them as unavailable",
+    ]);
+    const last = model.requests.at(-1);
+    expect(await last?.attachments?.read(a.ref)).toBeNull();
+    expect(same(await last?.attachments?.read(b.ref), b.bytes)).toBe(true);
+    await runtime.dispose();
+  });
+
+  test("the daemon still holds the bytes: the restore is a probe only, zero data chunks", async () => {
+    const a = img("held-a");
+    const record = recordWith("RH", [a]);
+    const { runtime, daemon, logStore } = await runtimeOn("held", { resume: record });
+    await logStore.putBlob("RH", a.ref.id, a.bytes);
+    // Another client left the session live on the daemon, its image uploaded.
+    const [d, c] = createChannelPair();
+    new Connection(d, daemon.host);
+    const other = new RpcPeer(c, { onRequest: async () => ({ trusted: false }) });
+    await other.request("initialize", {
+      protocolVersion: (await import("@tentacle/protocol")).PROTOCOL_VERSION,
+      clientCapabilities: { streaming: true },
+    });
+    await other.request("session/open", { sessionId: "RH", create: true, messages: record.messages });
+    await other.request("attachment/put", {
+      sessionId: "RH",
+      id: a.ref.id,
+      size: a.ref.size,
+      offset: 0,
+      data: Buffer.from(a.bytes).toString("base64"),
+    });
+    await drain(runtime.createSession().send("again"));
+    const puts = daemon.sent.filter((s) => s.method === "attachment/put");
+    expect(puts.length).toBeGreaterThan(0);
+    expect(puts.every((s) => s.data === 0)).toBe(true);
+    await runtime.dispose();
+  });
+
+  test("--model-proxy pod (laptop mode): restored from disk with ZERO attachment/put frames; the laptop's provider reads the bytes", async () => {
+    const a = img("pod-a");
+    const { runtime, daemon, model, logStore } = await runtimeOn("pod", {
+      policy: "client",
+      resume: recordWith("RP", [a]),
+    });
+    await logStore.putBlob("RP", a.ref.id, a.bytes);
+    const session = runtime.createSession();
+    expect(session.imageInput().kind).toBe("laptop");
+    await drain(session.send("again"));
+    expect(daemon.sent.filter((s) => s.method === "attachment/put")).toEqual([]);
+    const last = model.requests.at(-1);
+    expect(JSON.stringify(last?.messages)).toContain(a.ref.id);
+    expect(same(await last?.attachments?.read(a.ref), a.bytes)).toBe(true);
+    await runtime.dispose();
+  });
+
+  test("T8 a failing laptop save: attach still resolves with the ref; exactly ONE notice per session across two failures", async () => {
+    const { runtime, notices } = await runtimeOn("keep-fail", {
+      store: (w) =>
+        Object.assign(new LogSessionStore(w), {
+          putBlob: async () => {
+            throw new Error("no space left on device (ENOSPC)");
+          },
+        }),
+    });
+    const session = runtime.createSession();
+    const a = img("fail-a");
+    const b = img("fail-b");
+    expect(await session.attachImage(a.bytes, { mimeType: "image/png", name: "a.png" })).toEqual({
+      ...a.ref,
+      name: "a.png",
+    });
+    expect((await session.attachImage(b.bytes, { mimeType: "image/png", name: "b.png" })).id).toBe(
+      b.ref.id,
+    );
+    expect(notices).toEqual([
+      "⚠ image a.png could not be saved on this laptop — after a restart the model will see it as unavailable (no space left on device (ENOSPC))",
+    ]);
+    await runtime.dispose();
   });
 });

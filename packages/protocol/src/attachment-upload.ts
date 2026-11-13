@@ -60,7 +60,9 @@ export type AttachmentPutResult = z.infer<typeof AttachmentPutResultSchema>;
  * on a reason and never on text: `images_off` (this session's model takes no
  * images), `invalid_ref` (malformed, over the cap, unsupported type) and
  * `not_uploaded` (the daemon holds no complete blob for that id — upload it
- * again). A TS type only, so adding a reason is additive on the wire.
+ * again), `store_failed` (a `serve` daemon verified the blob but could not
+ * make it durable on disk — retry; docs/feat/attachments-durable.md D2). A TS
+ * type only, so adding a reason is additive on the wire.
  */
 export type AttachmentRefusedReason =
   | "too_large"
@@ -69,4 +71,5 @@ export type AttachmentRefusedReason =
   | "bad_chunk"
   | "images_off"
   | "invalid_ref"
-  | "not_uploaded";
+  | "not_uploaded"
+  | "store_failed";

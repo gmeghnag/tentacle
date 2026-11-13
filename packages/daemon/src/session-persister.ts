@@ -46,6 +46,7 @@ import type {
 } from "./persisted-session.ts";
 import { forkWrite } from "./session-fork.ts";
 import { type LogFileHeader, parseHeaderLine, parseLogFile } from "./session-log-file.ts";
+import type { AttachmentDisk } from "./attachment-store.ts";
 import type { LogWrite, RawSessionFiles, RawSessionState } from "./session-log-store.ts";
 import type { TombstoneStore } from "./session-tombstones.ts";
 
@@ -65,6 +66,10 @@ export interface DaemonStore {
   readRaw(id: string): Promise<RawSessionFiles>;
   /** The log's header line and the state file's text (the log itself unread). */
   readState(id: string): Promise<RawSessionState>;
+  /** A verified image blob made durable beside the log, in the session's queue (absent: no blobs kept). */
+  putBlob?(id: string, blobId: string, bytes: Uint8Array): Promise<void>;
+  readBlob?(id: string, blobId: string): Promise<Uint8Array | null>;
+  blobIndex?(id: string): Map<string, number>;
 }
 
 /** What a session builds at each write; `after` = this persister's log cursor for it. */
@@ -479,6 +484,26 @@ export class SessionPersister {
    */
   writable(id: string): boolean {
     return !this.blocked.has(id) && isValidSessionId(id);
+  }
+
+  /**
+   * The disk a session's `AttachmentStore` makes its verified blobs durable on
+   * (docs/feat/attachments-durable.md D2), bound to `id`: `<uid>.attachments/`
+   * beside its log, written in its queue. `undefined` (a memory store, as
+   * before) when `id` is never written (blocked, an unsafe name), the persister
+   * stopped, or the store keeps no blobs.
+   */
+  blobs(id: string): AttachmentDisk | undefined {
+    const { store } = this.opts;
+    if (this.stopped || !this.writable(id)) return undefined;
+    if (!store.putBlob || !store.readBlob || !store.blobIndex) return undefined;
+    const putBlob = store.putBlob.bind(store);
+    const readBlob = store.readBlob.bind(store);
+    return {
+      index: store.blobIndex(id),
+      write: (blobId, bytes) => putBlob(id, blobId, bytes),
+      read: (blobId) => readBlob(id, blobId),
+    };
   }
 
   /** Whether `id` may be written; reports once (per id) why not. */

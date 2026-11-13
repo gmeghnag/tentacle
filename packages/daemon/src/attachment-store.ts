@@ -19,6 +19,12 @@
  * the bytes come from the caller and are verified against the id they claim
  * (AGENTS §7, "a pod is not trusted"). A `Complete` entry is always the
  * verified bytes of its id.
+ *
+ * A `serve` session's store is given an `AttachmentDisk`
+ * (docs/feat/attachments-durable.md D2): it is seeded from what is on disk,
+ * and the ack of a completed blob is sent only once the disk made it durable
+ * (`put` then returns a promise — only from the verified last chunk on, so
+ * the synchronous prefix above is unchanged).
  */
 import { createHash } from "node:crypto";
 import type { AttachmentRef, AttachmentSource } from "@tentacle/core";
@@ -76,15 +82,47 @@ interface Partial {
   touchedAt: number;
 }
 
-/** A verified blob: its reservation is kept until the store is disposed. */
+/** The ack of a `put`: `have` contiguous bytes, `complete` = verified (and, with a disk, durable). */
+export interface PutAck {
+  readonly have: number;
+  readonly complete: boolean;
+}
+
+/**
+ * A verified blob in memory: its reservation is kept until the store is
+ * disposed — or, with a disk, until it LANDS (`landing`: the ack, which
+ * resolves once the file is durable, then the entry becomes `stored`).
+ */
 interface Complete {
   readonly kind: "complete";
   readonly bytes: Uint8Array;
+  readonly landing: Promise<PutAck> | null;
 }
 
-type Entry = Partial | Complete;
+/** A verified blob on disk only (docs/feat/attachments-durable.md D2): nothing in memory. */
+interface Stored {
+  readonly kind: "stored";
+  readonly size: number;
+}
+
+type Entry = Partial | Complete | Stored;
+
+/**
+ * Where a `serve` session's verified blobs are made durable
+ * (`SessionPersister.blobs`): absent = memory only (worker, pod daemons).
+ */
+export interface AttachmentDisk {
+  /** The blobs already on disk (id → size), read once at construction. */
+  readonly index: ReadonlyMap<BlobId, number>;
+  /** Make the verified `bytes` of `id` durable; rejects when it could not. */
+  write(id: BlobId, bytes: Uint8Array): Promise<void>;
+  /** The bytes on disk, or `null`. */
+  read(id: BlobId): Promise<Uint8Array | null>;
+}
 
 export interface AttachmentStoreOptions {
+  /** A disk to make completed blobs durable on (`serve`); absent = memory only. */
+  readonly disk?: AttachmentDisk;
   /** This session's cap (default `SESSION_UPLOAD_BYTES`). */
   readonly maxBytes?: number;
   /** How long a partial may sit untouched and still be evictable-for-space (default `PARTIAL_IDLE_MS`). */
@@ -111,7 +149,12 @@ export class AttachmentStore implements AttachmentSource {
   private readonly maxBytes: number;
   private readonly partialIdleMs: number;
   private readonly now: () => number;
-  /** This store's own reservation (its partials' sizes + its completed blobs). */
+  private readonly disk: AttachmentDisk | undefined;
+  /**
+   * This session's cap count: its partials' sizes + its completed blobs,
+   * landing or on disk. The daemon `budget` counts only what is in MEMORY
+   * (partials + complete in-memory blobs): a landed blob gives that back.
+   */
   private used = 0;
   private disposed = false;
 
@@ -120,6 +163,11 @@ export class AttachmentStore implements AttachmentSource {
     this.maxBytes = opts.maxBytes ?? SESSION_UPLOAD_BYTES;
     this.partialIdleMs = opts.partialIdleMs ?? PARTIAL_IDLE_MS;
     this.now = opts.now ?? Date.now;
+    this.disk = opts.disk;
+    for (const [id, size] of opts.disk?.index ?? []) {
+      this.entries.set(id, { kind: "stored", size });
+      this.used += size;
+    }
   }
 
   /** Bytes this session's store holds, partials' declared sizes included. */
@@ -132,7 +180,7 @@ export class AttachmentStore implements AttachmentSource {
    * atomicity the design relies on (module comment). Throws an
    * `AttachmentRefused` `RpcError`; every other outcome is an ack of `have`.
    */
-  put(chunk: PutChunk): { have: number; complete: boolean } {
+  put(chunk: PutChunk): PutAck | Promise<PutAck> {
     const { id, size, offset, data } = chunk;
     // 1. The schema already refused these (P2); kept as a guard for a direct caller.
     if (size <= 0 || size > MAX_IMAGE_BYTES) {
@@ -140,12 +188,19 @@ export class AttachmentStore implements AttachmentSource {
     }
     const existing = this.entries.get(id);
     // 2. Already here: dedupe. A re-attached image transfers zero chunks; a
-    //    different size under a verified id is a broken client.
+    //    different size under a verified id is a broken client. A blob still
+    //    landing answers with ITS ack (sent once the file is durable).
     if (existing?.kind === "complete") {
       if (existing.bytes.length === size) {
-        return { have: size, complete: true };
+        return existing.landing ?? { have: size, complete: true };
       }
       throw refuse("bad_chunk", `the blob is already complete at ${existing.bytes.length} bytes`);
+    }
+    if (existing?.kind === "stored") {
+      if (existing.size === size) {
+        return { have: size, complete: true };
+      }
+      throw refuse("bad_chunk", `the blob is already complete at ${existing.size} bytes`);
     }
     // 3. A new blob: it must start at 0 (or be a bare probe), and it pays for
     //    its declared size NOW, before a byte arrives.
@@ -182,7 +237,7 @@ export class AttachmentStore implements AttachmentSource {
     id: BlobId,
     offset: number,
     data: string,
-  ): { have: number; complete: boolean } {
+  ): PutAck | Promise<PutAck> {
     // 5. The probe: `have` back, no bytes, and the entry counts as touched.
     if (data === "") {
       partial.touchedAt = this.now();
@@ -218,11 +273,48 @@ export class AttachmentStore implements AttachmentSource {
     // The last chunk: the digest decides. Verified → keep the buffer as is (no
     // copy) and keep the reservation, which belongs to the completed blob.
     if (partial.hasher.digest("hex") !== id) {
-      this.drop(id, partial.size);
+      this.drop(id, partial);
       throw refuse("hash_mismatch", "the bytes do not hash to the id they claimed");
     }
-    this.entries.set(id, { kind: "complete", bytes: partial.buf });
-    return { have: partial.size, complete: true };
+    if (this.disk === undefined) {
+      this.entries.set(id, { kind: "complete", bytes: partial.buf, landing: null });
+      return { have: partial.size, complete: true };
+    }
+    // With a disk (docs/feat/attachments-durable.md D2): the ack waits for the
+    // file to be durable, so no client is told "complete" about bytes a crash
+    // could still lose. Everything above stayed synchronous (module comment).
+    return this.land(id, partial.buf);
+  }
+
+  /**
+   * Make a verified blob durable. Until it lands it is `complete` with a
+   * `landing` ack (readable from memory, NOT `holds`); landed → `stored` and
+   * its memory reservation goes back to the daemon; failed → dropped (both
+   * reservations released) and the ack rejects `store_failed`.
+   */
+  private land(id: BlobId, bytes: Uint8Array): Promise<PutAck> {
+    const disk = this.disk;
+    if (disk === undefined) throw new Error("land() without a disk");
+    const size = bytes.length;
+    const { promise, resolve, reject } = Promise.withResolvers<PutAck>();
+    const entry: Complete = { kind: "complete", bytes, landing: promise };
+    this.entries.set(id, entry);
+    disk.write(id, bytes).then(
+      () => {
+        // Disposed meanwhile (or replaced): its reservations went with it.
+        if (this.entries.get(id) === entry) {
+          this.entries.set(id, { kind: "stored", size });
+          this.budget.release(size);
+        }
+        resolve({ have: size, complete: true });
+      },
+      (error: unknown) => {
+        this.drop(id, entry);
+        const why = error instanceof Error ? error.message : String(error);
+        reject(refuse("store_failed", `the image could not be stored on the daemon: ${why}`));
+      },
+    );
+    return promise;
   }
 
   /**
@@ -243,7 +335,7 @@ export class AttachmentStore implements AttachmentSource {
         break;
       }
       if (entry.kind === "partial") {
-        this.drop(staleId, entry.size);
+        this.drop(staleId, entry);
       }
     }
     return this.fits(size) && this.take(size);
@@ -261,12 +353,19 @@ export class AttachmentStore implements AttachmentSource {
     return true;
   }
 
-  private drop(id: BlobId, size: number): void {
-    if (!this.entries.delete(id)) {
+  /** Forget `id` (only if it is still `only`, when given) and give back what it reserved. */
+  private drop(id: BlobId, only?: Entry): void {
+    const entry = this.entries.get(id);
+    if (entry === undefined || (only !== undefined && entry !== only)) {
       return;
     }
+    this.entries.delete(id);
+    const size = sizeOf(entry);
     this.used = Math.max(0, this.used - size);
-    this.budget.release(size);
+    // A blob on disk holds no memory: its daemon reservation went when it landed.
+    if (entry.kind !== "stored") {
+      this.budget.release(size);
+    }
   }
 
   /**
@@ -277,31 +376,45 @@ export class AttachmentStore implements AttachmentSource {
    */
   async read(ref: AttachmentRef): Promise<Uint8Array | null> {
     const entry = this.entries.get(ref.id);
-    return this.holds(ref) && entry?.kind === "complete" ? entry.bytes : null;
+    if (entry?.kind === "complete") {
+      // In memory: a memory store's blob, or one still landing on disk.
+      return entry.bytes.length === ref.size ? entry.bytes : null;
+    }
+    if (entry?.kind === "stored" && entry.size === ref.size && this.disk !== undefined) {
+      // On disk: the size is re-checked here, the sha256 by the provider (P11).
+      const bytes = await this.disk.read(ref.id);
+      return bytes !== null && bytes.length === ref.size ? bytes : null;
+    }
+    return null;
   }
 
   /**
    * The SYNCHRONOUS twin of `read`'s predicate: this store holds the ref's
    * complete bytes, of exactly its size. `prompt` calls it inside its ack
    * (AGENTS §7: nothing awaited there), so a not-yet-uploaded image is refused
-   * before anything is recorded.
+   * before anything is recorded. A blob still LANDING on disk is not held: a
+   * ref recorded now could name bytes a crash then loses (the other client
+   * gets `not_uploaded`, re-uploads, and dedupes on the landed blob).
    */
   holds(ref: AttachmentRef): boolean {
     const entry = this.entries.get(ref.id);
-    return entry?.kind === "complete" && entry.bytes.length === ref.size;
+    if (entry?.kind === "stored") return entry.size === ref.size;
+    return entry?.kind === "complete" && entry.landing === null && entry.bytes.length === ref.size;
   }
 
-  /** Release every reservation. Idempotent: `close()` may run twice. */
+  /** Release every MEMORY reservation (never touches the disk). Idempotent: `close()` may run twice. */
   dispose(): void {
     if (this.disposed) {
       return;
     }
     this.disposed = true;
-    for (const [id, entry] of this.entries) {
-      this.drop(id, entry.kind === "partial" ? entry.size : entry.bytes.length);
+    for (const id of [...this.entries.keys()]) {
+      this.drop(id);
     }
     this.entries.clear();
   }
 }
 
 const touched = (entry: Entry): number => (entry.kind === "partial" ? entry.touchedAt : 0);
+
+const sizeOf = (entry: Entry): number => (entry.kind === "complete" ? entry.bytes.length : entry.size);
