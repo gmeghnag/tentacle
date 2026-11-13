@@ -843,3 +843,47 @@ the self-guarded `/compact` refusal because it treated "session-mutating" as the
 #### Owner answers (2026-11-13)
 
 Q1–Q6 as recommended. Opus executes the slices; Fable design-reviews this plan while S0 runs. Implementation APPROVED.
+
+## Review
+
+### S0 re-review (after Fix rounds 1–3) — PASS
+
+**Scope:** `git diff main...HEAD`, S0 only: 3 test files, CHANGELOG, this doc.
+`git diff main...HEAD -- packages/tui/src` is empty, so S0 touches no §7
+invariant. It only pins the single-`useInput` precedence that S3 must keep.
+
+**Gate (re-run).** The three S0 files: **58 pass / 0 fail** (13 inline
+snapshots, 149 expects). `bun run lint`: clean, 954 files. `bun run typecheck`:
+clean. I did not re-run the full suite this round.
+
+**Findings: no HIGH or MEDIUM.**
+- Prior MEDIUM 1 (`/compact` mid-turn refusal): the test exists, and the guard
+  list now comes from `SESSION_MUTATING` with a pinned list.
+- Note: the frame `norm` collapses every rule of 3+ `─` to `…`. Whole border
+  rows become `…`, so if a later slice changes border or rule width, the frame
+  set will not catch it. This is accepted for S0, but S10 (verbatim JSX move)
+  should not rely on S0 frames for box geometry. S0b's SGR pins should cover it.
+
+**Attacks tried.**
+(a) Checked that `quit-confirm vs permission` is not vacuous: if the order is
+swapped, `n` denies the ask, so `answers` would be non-empty and the test fails.
+(b) Sessions-panel Esc: the `not.toBe(opened)` assertion is weak, because the
+spinner changes the frame anyway. But `aborts()==0`, then `==1` on the second
+Esc, still decides the case. Holds.
+(c) Snapshots: no empty `toMatchInlineSnapshot()`, so nothing can self-write.
+(d) Chord-before-permission (D3) and the panel paste-drop act-and-pass layers
+are not in S0. They are in S0b's scope (H3), so this is not an S0 gap.
+(e) My own mutations (quit-confirm never clears on `n`; a changed `Thinking`
+hint string; `false &&` on `dockClaimsCtrlX`) **were not run**. Shell
+permission for edits/hashing in this session was denied. Non-vacuity rests on
+the executor's 39/40 table, Fix rounds 1–3's red/green pairs, and round 1's
+M1 spot-check. To verify, run
+`.tentacle/tmp/app-decomposition/rev4-mut.sh` (it restores and checks sha256).
+
+**Executor behaviour.** All three fix rounds were honest. They re-proved
+earlier claims instead of trusting them, closed the finding's class empirically
+(N1–N3), and attributed the long-standing flake to a `packages/client` deadline
+outside this diff.
+
+*— claude-opus-5-5, 2026-11-13* (fresh context; same model as Fix round 1's
+executor, different family from the deepseek executor)
