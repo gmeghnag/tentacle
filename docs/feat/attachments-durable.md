@@ -676,3 +676,15 @@ confirmed: the four sites are byte-identical to the committed fix
 **Unverified.** None outstanding for these two findings. Not re-audited here:
 the rest of Review round 1's attacks (a)–(e), which that round already ran
 against unchanged code.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-13 (fresh context; same model family as the plan, so blind spots may be shared)*
+
+**Verdict: PASS.** Both round-1 findings are fixed and pinned by tests (diff `HEAD~1`: `local-runtime.ts` +11, `local-runtime.test.ts` +2 tests).
+
+- **Finding 1 (D6 unwired) — fixed.** `imageFallback: (uid, ref) => deps.saver.readBlob(uid, ref.id)` at the runtime's `new RemoteClient` (`local-runtime.ts:850-854`). New test "D6 the runtime wires …": a `--model-proxy` session that never sent is served from disk, and another session's blob stays `null`. Mutations: fallback line removed → that test red (78/1); `allowSession(uid)` dropped → red (78/1). In round 1 the `allowSession` mutation survived.
+- **Finding 2 (restore when images are off) — fixed.** Early return on `inner.imageInput().kind === "off"` (`local-runtime.ts:533`). New test "images off …": no notice, zero `attachment/put`, prompt still sent. Mutation: guard removed → red (78/1).
+- Each mutation reverted; `git diff --quiet` confirmed.
+- **Regressions:** `packages/client/test` (all) + `local-runtime` + `attach-durable-app` + `connect` → 748 pass, 0 fail. `bun run typecheck` clean; `bun run lint` 958 files, no fixes. The fallback is set for every runtime, but `LaptopImages` is read only in laptop (`--model-proxy`) mode, and `SessionSaver.readBlob` never throws, so upload mode and the worker are unchanged. `connect` builds its own client (`connect.ts:178`) and is unaffected (§7 "no laptop copy").
+- **Full `bun test` not re-run in this round.**
