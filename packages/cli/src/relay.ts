@@ -245,6 +245,11 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   };
   /** Start the wake if it is due. Set once the session exists; nothing is due before. */
   let maybeWake = (): void => {};
+  /**
+   * Re-read the running-job count NOW. Set once `pollJobs` exists (below); a
+   * no-op before that, and once the daemon's own `jobs` frame owns the number.
+   */
+  let refreshJobs = (): void => {};
   const emit = (event: RelayEvent): void => {
     model = relayStep(model, event);
     record(relayView(model));
@@ -421,11 +426,18 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
       });
     }
   };
-  // The laptop's setting, read from this relay's own config (no spec field, and
-  // never carried to the pod); the decision stays here, not in the daemon.
-  const offExit = config.autoWake
-    ? runtime.jobs.onExit(() => emit({ type: "job_exit" }))
-    : () => {};
+  // A job's exit has two consequences, and only one is the laptop's wake
+  // setting: the WAKE (`autoWake`, read from this relay's own config — no spec
+  // field, and never carried to the pod: the decision stays here, not in the
+  // daemon) and the `ps` COUNT. So the subscription is unconditional and the
+  // wake alone is gated; the count is refreshed by `refreshJobs`, which does
+  // nothing once the daemon's own `jobs` frame owns the number (H1, 9d).
+  const offExit = runtime.jobs.onExit(() => {
+    if (config.autoWake) {
+      emit({ type: "job_exit" });
+    }
+    refreshJobs();
+  });
   // A running background sub-agent needs the laptop for its MODEL (the reverse
   // tunnel), so the relay must not sleep (or exit idle) while one runs: its
   // count rides the same `subagents` frame the TUI's status line reads.
@@ -560,6 +572,13 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
 
   let nextPoll = 0;
   let polling = false;
+  /**
+   * A known exit landed while a read was in flight, so that read was issued
+   * against the count from BEFORE the exit: it is not the freshest one, and
+   * dropping the refresh on `polling` would leave `ps` stale until the next
+   * 30 s poll. The read's completion re-polls once for it.
+   */
+  let staleJobs = false;
   const pollJobs = (): void => {
     polling = true;
     void runtime.sessionJobs(spec.sessionId).then((n) => {
@@ -569,7 +588,33 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
       if (n !== null && !shellCounted) {
         emit({ type: "jobs", n });
       }
+      if (staleJobs) {
+        staleJobs = false;
+        // Once, and only while the poll still owns the number.
+        if (!shellCounted) {
+          pollJobs();
+        }
+      }
     });
+  };
+  /**
+   * A known exit, so a count that may be stale NOW (docs/feat/detach-small-fixes.md
+   * item 9d): an older pod binary sends no `jobs` frame, and the 30 s poll would
+   * leave `ps` saying "1 background job(s) running" long after the job died.
+   * One writer still: once a frame has been seen it owns the number and this
+   * reads nothing. Reads never stack: a read already in flight is asked to
+   * re-read when it lands (`staleJobs`), because it may answer the pre-exit
+   * count it was issued against.
+   */
+  refreshJobs = (): void => {
+    if (shellCounted) {
+      return;
+    }
+    if (polling) {
+      staleJobs = true;
+      return;
+    }
+    pollJobs();
   };
   /** One fresh read; unanswered is unreadable: the polled `jobs` may be stale. */
   const readUse = (): Promise<ResidentUse | null> =>

@@ -421,7 +421,7 @@ describe("T-L4: the drawer", () => {
       width: 100,
       now: 72_000,
     });
-    expect(d.meta).toBe("✓ finished · report sent to the agent");
+    expect(d.meta).toBe("✓ finished · report queued for the agent");
     const killed = drawerView({
       row: full,
       sent: [],

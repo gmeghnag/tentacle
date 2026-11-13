@@ -40,6 +40,14 @@ export interface ResumeRequest {
    * says "starting fresh".
    */
   readonly live?: true;
+  /**
+   * `uid` is tentacle's own choice, not the person's: a kept run's conversation
+   * re-opened for an `attach` (docs/feat/detach-small-fixes.md item 5). Nobody
+   * asked, so the `[resume] <uid> — <title>` announcement is noise — it is
+   * written pre-mount and would be the last thing left on screen after exit.
+   * Warnings and failures still print: they are what the person must know.
+   */
+  readonly implicit?: true;
 }
 
 /**
@@ -117,11 +125,15 @@ export async function openTuiSessions(
     );
     return { exit: 1 };
   }
-  const quiet = resume.live === true && resolved.record === null && !resolved.fatal;
-  // A live run's session (attach to a detached run): the `[resume] <uid> — <title>`
-  // line is noise (round 6); its warnings, and every error/refusal, still print.
+  // Tentacle chose this uid (a live run's session, or a kept run's own
+  // conversation re-opened for an `attach`): the `[resume] <uid> — <title>`
+  // announcement is noise — it is what the person sees pre-mount, and the
+  // alternate screen hides it until exit. `silent`: it is tentacle's choice AND
+  // there is nothing else to say. Warnings, and every error/refusal, still print.
+  const silent = resume.live === true || resume.implicit === true;
+  const quiet = silent && resolved.record === null && !resolved.fatal;
   const lines =
-    resume.live === true && resolved.record !== null
+    silent && resolved.record !== null
       ? resolved.notices.map((w) => `[resume] ${w}\n`)
       : resolved.lines;
   for (const line of quiet ? [] : lines) {

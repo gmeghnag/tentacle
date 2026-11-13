@@ -17,6 +17,7 @@
     "format": "biome format --write .",
     "check": "bun run typecheck && bun run lint && bun run test",
     "schema:export": "bun packages/protocol/src/json-schema.ts && biome format --write packages/protocol/schema/protocol.json",
+    "protocol:bump": "bun scripts/protocol-bump.ts",
     "docs:config": "bun scripts/config-docs.ts",
     "compile": "bun run scripts/build.ts",
     "release": "bun run scripts/release.ts"

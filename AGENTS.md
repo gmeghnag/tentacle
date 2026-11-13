@@ -244,7 +244,14 @@ assume.
     compat shims, fallbacks or capability negotiation for old peers — pick the
     cleanest shape. A breaking change MUST bump `PROTOCOL_VERSION`, so a
     mixed-version pair fails with a clean `VersionMismatch` at `initialize`
-    instead of a confusing mid-session error.
+    instead of a confusing mid-session error. **But you do not edit the number
+    on your branch** (it is one shared line, so two parallel breaks would
+    conflict): write `protocol.d/<slug>.md` — one note, what broke and why the
+    number must move — and the orchestrator runs `bun run protocol:bump` once at
+    merge, which folds every note into `version.ts`, assigns the numbers in slug
+    order, deletes the notes and regenerates `protocol.json`. The exact number is
+    pinned in ONE test (`packages/protocol/test/version.test.ts`); every other
+    test asserts a floor. Design: `docs/feat/protocol-version-at-merge.md`.
   - **Forward compatibility (since v10; holds once public too).** Design:
     `docs/feat/protocol-v10-forward-compat.md`.
     - **Fields and methods are free.** Payloads are strip schemas, never
@@ -258,7 +265,8 @@ assume.
       - **display:** free to add. An older client shows `unsupported` once
         per kind.
       - **mandatory:** an older client fails the turn loudly. So it needs a
-        `PROTOCOL_VERSION` bump, unless the daemon gives a client that did not
+        `PROTOCOL_VERSION` bump (a `protocol.d/` note, not an edit), unless the
+        daemon gives a client that did not
         declare it (`initialize` `clientCapabilities.updates`) a fallback,
         e.g. a resync.
       - **blocking:** the daemon WAITS on a client to answer it. It must be
@@ -268,7 +276,7 @@ assume.
         the fallback is taken at once. Anything else the daemon waits on is
         an RPC request.
     - **Truly breaking** (a changed or removed field, a changed meaning) →
-      bump `PROTOCOL_VERSION`.
+      a `protocol.d/` note, folded into a `PROTOCOL_VERSION` bump at merge.
     - **On-disk records are versioned separately from the wire.** A `serve`
       session's log carries the same header `schemaVersion` as the laptop's,
       and its sidecar its own (`DAEMON_STATE_VERSION`); an unknown one of
@@ -468,6 +476,14 @@ lifecycle. It is mandatory.
   → Review → merge. An **`eval`** is just Context + a Review verdict, committed
   straight to `main` (no branch, no merge); its Implementation/Execution stay
   empty until it is promoted (which opens the code branch).
+- **Merge step (the orchestrator's, every merge):** `git merge` the branch, then
+  run **`bun run protocol:bump`** and a full `bun run check` on the result. That
+  one command applies any `protocol.d/` notes (assigning `PROTOCOL_VERSION`
+  numbers — never edit the number on a branch, see §7) and **regenerates
+  `packages/protocol/schema/protocol.json`**, which is generated and must never
+  be hand-merged (`.gitattributes` marks it `-merge`, so git reports a conflict
+  instead of auto-merging a chimera; `protocol/test/json-schema.test.ts` proves
+  no drift). With no notes it is still the schema refresh — run it either way.
 - **Index & registries:** `TODO.md` is the backlog/index — each item links its
   task doc. `docs/library-bugs.md` is the cross-cutting upstream-bug registry (a
   reference, not a task). Docs under `docs/` predating this standard are legacy;

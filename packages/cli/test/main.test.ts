@@ -2079,6 +2079,25 @@ describe("cli main: --engine", () => {
           expect(r.seen.resume?.id).toBe(A);
           expect(r.seen.resume?.messages).toHaveLength(2);
           expect(r.seen.notices).toEqual([]);
+          // docs/feat/detach-small-fixes.md item 5: the person never typed this
+          // uid, so the pre-mount `[resume] <uid> — <title>` line is noise that
+          // only survives exit. Mutation: drop `implicit` from the reopen's
+          // request -> `[resume] 11111111-… — conv 1111` is printed here.
+          expect(r.text).not.toContain("[resume]");
+        });
+        cleanup();
+      });
+
+      test("a person who typed `--resume` still gets the line naming the session", async () => {
+        // The other half of item 5: choosing a session is exactly when its name
+        // is the point. Mutation: silence every resume line -> nothing here.
+        await index({}, [record(B, folder)]);
+        await withEnv(unreachable, async () => {
+          const r = await attached(["attach", "box", "--resume", B], true, true);
+          expect(r.code).toBe(0);
+          expect(r.seen.resume?.id).toBe(B);
+          // The uid is what identifies it; the title follows the same line.
+          expect(r.text).toContain(`[resume] ${B} — `);
         });
         cleanup();
       });

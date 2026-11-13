@@ -273,8 +273,17 @@ describe("permission gate in the agent loop", () => {
 
 describe("describeToolCall titles", () => {
   test("a tool without a dedicated title is shown by its display label", () => {
+    // `search` is labelled but has no case of its own (the three file-editing
+    // tools do: docs/feat/detach-small-fixes.md item 4).
+    const tool = { name: "search", permission: "ask" } as unknown as Tool;
+    expect(describeToolCall(tool, {}).title).toBe("Run Search");
+  });
+
+  test("a multi-edit is titled as the edit it is, and its subject names the file", () => {
     const tool = { name: "fs_multi_edit", permission: "ask" } as unknown as Tool;
-    expect(describeToolCall(tool, {}).title).toBe("Run MultiEdit");
+    const req = describeToolCall(tool, { path: "a.ts", edits: [{}, {}] });
+    expect(req.title).toBe("Edit a file");
+    expect(req.detail).toBe("a.ts · 2 edits");
   });
 
   test("an unlabelled tool (MCP) is shown by its name", () => {

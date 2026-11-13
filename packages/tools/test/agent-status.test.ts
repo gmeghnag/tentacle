@@ -8,7 +8,7 @@
  * and description is one line, cut, and the whole answer has a char budget.
  */
 import { describe, expect, test } from "bun:test";
-import type { AgentJobRow } from "@tentacle/core";
+import type { AgentJobRow, EndedAgentJob } from "@tentacle/core";
 import {
   AGENT_STATUS_ACTIONS_DEFAULT,
   AGENT_STATUS_MAX_CHARS,
@@ -17,6 +17,8 @@ import {
   formatAgentStatus,
   formatCount,
   formatElapsed,
+  formatEndedAgent,
+  formatRecentlyEnded,
 } from "../src/agent-status.ts";
 
 function row(over: Partial<AgentJobRow> = {}): AgentJobRow {
@@ -163,5 +165,50 @@ describe("agent_status: the formatter (pure)", () => {
     expect(out.endsWith("… (cut: name one child with agent_id)")).toBe(true);
     // It is a cut, not a silent rewrite: one line was started and not finished.
     expect(out.slice(0, -"\n… (cut: name one child with agent_id)".length)).not.toEndWith("\n");
+  });
+});
+
+describe("agent_status: a child that has ENDED (docs/fix/subagent-error-report.md C)", () => {
+  const ended = (over: Partial<EndedAgentJob> = {}): EndedAgentJob => ({
+    agentId: "sa-3",
+    description: "Trace FA shared-mem root cause",
+    stopReason: "error",
+    toolUses: 77,
+    endedAt: NOW - 12_000,
+    delivered: false,
+    ...over,
+  });
+
+  test("undelivered: names the outcome, the count and where its report comes", () => {
+    // Mutation: read `finished (error)` here → the model reads a failure as a
+    // success-ish finish (owner Q5) → red.
+    expect(formatEndedAgent(ended(), NOW)).toBe(
+      "sa-3 ended (error) 12s ago after 77 tool uses. Its report — the error and any partial output — reaches you as a [background] note at your next step.",
+    );
+    expect(formatEndedAgent(ended({ stopReason: "end_turn", toolUses: 1 }), NOW)).toContain(
+      "sa-3 ended (end_turn) 12s ago after 1 tool use.",
+    );
+  });
+
+  test("delivered: says it is in hand instead of promising it again", () => {
+    expect(formatEndedAgent(ended({ delivered: true, stopReason: "end_turn" }), NOW)).toBe(
+      'sa-3 ended (end_turn) 12s ago after 77 tool uses. Its report was delivered to you as the [background] note "sub-agent sa-3 (Trace FA shared-mem root cause)".',
+    );
+    // A clock behind the record never reads "−3s".
+    expect(formatEndedAgent(ended({ endedAt: NOW + 3_000 }), NOW)).toContain(" 0s ago");
+  });
+
+  test("untrusted text is one bounded line, and the listing is capped", () => {
+    const nasty = ended({ description: "a\u0000b\nc".repeat(80) });
+    const out = formatEndedAgent(nasty, NOW);
+    expect(out).not.toContain("\n");
+    expect(out.length).toBeLessThanOrEqual(AGENT_STATUS_MAX_CHARS);
+    const many = Array.from({ length: AGENT_STATUS_MAX_CHILDREN + 4 }, (_, i) =>
+      ended({ agentId: `sa-${i + 1}` }),
+    );
+    const lines = formatRecentlyEnded(many, NOW);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.startsWith("recently ended: ")).toBe(true);
+    expect(lines[0]?.split(" · ")).toHaveLength(AGENT_STATUS_MAX_CHILDREN);
   });
 });

@@ -2832,6 +2832,94 @@ describe("9d + H1: one writer for the run's job count (docs/feat/shell-jobs-pane
 
   const QUIET = { autoWake: false };
 
+  test("no frames (an older pod binary): a job's exit refreshes the polled count at once (9d)", async () => {
+    // docs/feat/detach-small-fixes.md item 9d. A daemon that never publishes a
+    // `jobs` list leaves `shellCounted` false, so the 30 s poll owns the number:
+    // today the exit changes nothing and `ps` keeps saying "1 background job(s)
+    // running" until the next poll. RED first: `reads` does not advance.
+    const shellJobs = new ShellJobs();
+    const model = new Scripted([[{ type: "text", delta: "done" }, { type: "done" }]]);
+    // No daemon-side jobs: nothing ever publishes a list, so no frame exists.
+    const pod = resident(model);
+    // The pod's own answer, through `session/list`: one job, until it exits. It
+    // is NOT the `jobs` frame: `resident()` is given no `options.jobs`, so the
+    // daemon publishes no list and `shellCounted` stays false.
+    let polled = 1;
+    let reads = 0;
+    // `autoWake: false`: the count is nobody's wake decision (it must refresh either way).
+    const { dir, start } = rig({}, { jobsPollMs: 60_000 }, QUIET);
+    const exit = start(async (config, deps) => ({
+      ...(await pod.attach(config, deps)),
+      jobs: shellJobs,
+      sessionJobs: async () => {
+        reads += 1;
+        return polled;
+      },
+    }));
+    await waitFor(() => owner(dir)?.detail === "1 background job(s) running", "the poll's count");
+    const readsAtExit = reads;
+
+    // The job exits (a daemon-side registry the relay's `jobs` view forwards).
+    polled = 0;
+    shellJobs.add("bg-1");
+    shellJobs.remove("bg-1");
+    const deadline = Date.now() + 1500;
+    while (Date.now() < deadline && reads === readsAtExit) {
+      await tick(2);
+    }
+    expect(reads).toBeGreaterThan(readsAtExit);
+    await waitFor(() => owner(dir)?.state === "idle", "the refreshed count");
+    expect(owner(dir)?.detail ?? "").not.toContain("background job(s) running");
+    expect(await afterGrace(exit)).toBe(0);
+  });
+
+  test("a read in flight across the exit is not trusted: the count is re-read once it lands (9d)", async () => {
+    // docs/feat/detach-small-fixes.md item 9d. A `session/list` read issued
+    // BEFORE the exit can answer with the pre-exit count, so "a read in flight
+    // is already the freshest one" is false: dropping the refresh there leaves
+    // `ps` on "1 background job(s) running" until the next 30 s poll — the very
+    // symptom 9d removes. RED first: `reads` stops at 1.
+    const shellJobs = new ShellJobs();
+    const model = new Scripted([[{ type: "text", delta: "done" }, { type: "done" }]]);
+    const pod = resident(model);
+    // The poll's first read is held open ACROSS the exit; it then answers the
+    // count it was issued against (1 — the job was still alive). Any later read
+    // answers the daemon's current truth (0).
+    const held: { resolve?: (n: number | null) => void } = {};
+    let reads = 0;
+    const { dir, start } = rig({}, { jobsPollMs: 60_000 }, QUIET);
+    const exit = start(async (config, deps) => ({
+      ...(await pod.attach(config, deps)),
+      jobs: shellJobs,
+      sessionJobs: () => {
+        reads += 1;
+        if (reads === 1) {
+          return new Promise<number | null>((resolve) => {
+            held.resolve = resolve;
+          });
+        }
+        return Promise.resolve(0);
+      },
+    }));
+    await waitFor(() => held.resolve !== undefined, "the loop's poll to be in flight");
+    const readsAtExit = reads;
+
+    // The job exits while that read is open: the refresh cannot pre-empt it.
+    shellJobs.add("bg-1");
+    shellJobs.remove("bg-1");
+    await tick(10);
+    expect(reads).toBe(readsAtExit);
+
+    // The stale read lands: the count it shows is the pre-exit one, so the
+    // relay must ask again — one extra read, not a stack of them.
+    held.resolve?.(1);
+    await waitFor(() => reads > readsAtExit, "the re-read after the stale one");
+    expect(reads).toBe(readsAtExit + 1);
+    await waitFor(() => owner(dir)?.state === "idle", "the fresh count");
+    expect(owner(dir)?.detail ?? "").not.toContain("background job(s) running");
+    expect(await afterGrace(exit)).toBe(0);
+  });
+
   test("a `jobs` frame drives the run's count, and its end clears it without a poll (9d)", async () => {
     // RED today: only the 30 s poll can turn the number back to 0 (and with
     // `jobsPollMs` large here, it never gets the chance).

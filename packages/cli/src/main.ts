@@ -981,7 +981,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // THIS folder's sessions). `{ exit }` = don't start (reason written). The
   // picker (docs/feat/resume-picker.md) runs only on a terminal, before any
   // runtime or pod starts, so the chosen session seeds it like `--resume <uid>`.
-  const openSessions = (flags: Map<string, string>, bools: Set<string>) =>
+  const openSessions = (flags: Map<string, string>, bools: Set<string>, implicit = false) =>
     openTuiSessions(
       {
         root: join(config.configDir, "sessions"),
@@ -992,6 +992,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         wanted: bools.has("resume") || flags.has("resume") || bools.has("continue"),
         uid: flags.get("resume"),
         latest: bools.has("continue"),
+        // Tentacle picked this uid (a kept run's own conversation): its
+        // `[resume] <uid> — <title>` announcement would only be left on screen
+        // after exit (docs/feat/detach-small-fixes.md item 5).
+        ...(implicit ? { implicit: true as const } : {}),
       },
       err,
       pick ? (choices) => pick(choices, { theme: config.tui?.theme ?? "auto" }) : undefined,
@@ -1717,6 +1721,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const sessions = await openSessions(
       reopen === undefined ? attachFlags : new Map([...attachFlags, ["resume", reopen]]),
       attachBools,
+      // Re-opened because the run has it, not because the person named it.
+      reopen !== undefined,
     );
     if ("exit" in sessions) {
       return sessions.exit;
