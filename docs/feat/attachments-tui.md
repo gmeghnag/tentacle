@@ -728,3 +728,27 @@ emitted only when non-empty, schema export + drift fixture updated, `-32016` mat
 **Executor behaviour:** a thorough Execution record with a full mutation table, and an honest
 "Not verified" section; the misses are re-entrancy and the text-decision branch, which none of the
 listed mutations covered.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-12* (fresh context, reviewing `2512bc4`)
+
+**Verdict: REQUEST-CHANGES** (round-1 findings fixed; 1 new MEDIUM regression, introduced by the fix)
+
+Round-1 findings, each confirmed by my repro (A–D now pass) and by mutation (each reverted, `git status` clean):
+- **F1 fixed.** Dropping `text` from `routeAttach`'s `routeDecision` again → 2 new "finding 1" App tests red.
+- **F2 fixed.** `submitPlan` upload guard disabled → the App "second Enter" test and the `submitPlan` unit test red.
+- **F3 fixed.** The success-path `uploadCtrlRef = null` disabled → the "first Esc" test red. Unmount aborting the upload is pinned too.
+
+**New finding R2-1 — MEDIUM: a typed path that looks like an image but is not one can never be sent.**
+`convertToChips` (`App.tsx` ≈L2013) restores the text with `NOT_AN_IMAGE_NOTICE` ("Enter again sends it as
+a message"). But on the next Enter `imageDropOnly(text)` is still true (one path still has an image
+extension), so `submitPlan` again returns `convert`. That probes again, decides `text` and restores again,
+so Enter loops forever. Repro (`repro.test.ts` E/F): type `/w/a.png /w/notes.txt` (or `~/gone.png`, a
+missing file), then Enter, Enter → `sent: []`, with the text stuck in the input. Nothing is lost, but the
+notice is false and the message can't be sent. The App test "a typed drop whose partner is not an image"
+presses Enter only once, so it misses this. Fix shape: remember the restored text, or a one-shot
+"send as text" flag, so the next Enter on the same text is `text`. Add a two-Enter test.
+
+**Gate:** `attach-app` + `attach-draft` 72 pass / 0 fail; `bun run lint` clean (951 files);
+`bun run typecheck` clean. Full `bun test` was not re-run.
