@@ -2568,16 +2568,24 @@ describe("durable images on the laptop (docs/feat/attachments-durable.md T7/T8)"
   /** Every frame the laptop sent: method + (for a put) its data length. */
   type Sent = { method: string; data?: number; id?: string };
 
-  /** A daemon whose provider is `model` (`store`: it holds the bytes; `client`: a --model-proxy pod). */
-  function imageDaemon(model: Recorder, policy: "store" | "client") {
+  /** A daemon whose provider is `model` (`store`: it holds the bytes; `client`: a --model-proxy pod; `off`: images off). */
+  function imageDaemon(model: Recorder, policy: "store" | "client" | "off") {
     const ref: { connection?: Connection } = {};
     const host = new SessionHost({
       defaultCwd: "/tmp/work",
-      images: policy === "store" ? { source: "store", maxBytes: 4 << 20 } : { source: "client" },
+      // `off`: no images capability at all — a daemon whose model has no vision.
+      ...(policy === "off"
+        ? {}
+        : {
+            images:
+              policy === "store"
+                ? { source: "store" as const, maxBytes: 4 << 20 }
+                : { source: "client" as const },
+          }),
       createAgent: (_cwd, ctx) => ({
         agent: new Agent({
           model:
-            policy === "store"
+            policy === "store" || policy === "off"
               ? model
               : new ProxyModelProvider(
                   (request) => {
@@ -2597,7 +2605,8 @@ describe("durable images on the laptop (docs/feat/attachments-durable.md T7/T8)"
       }),
     });
     const [daemonCh, clientCh] = createChannelPair();
-    ref.connection = new Connection(daemonCh, host);
+    const connection = new Connection(daemonCh, host);
+    ref.connection = connection;
     const sent: Sent[] = [];
     const tap = {
       send: (data: string) => {
@@ -2619,13 +2628,13 @@ describe("durable images on the laptop (docs/feat/attachments-durable.md T7/T8)"
       setOnMessage: (handler: (d: string) => void) => clientCh.setOnMessage(handler),
       setOnClose: (handler: () => void) => clientCh.setOnClose(handler),
     };
-    return { host, channel: tap, sent };
+    return { host, channel: tap, sent, connection };
   }
 
   async function runtimeOn(
     name: string,
     opts: {
-      policy?: "store" | "client";
+      policy?: "store" | "client" | "off";
       resume?: SessionRecord | null;
       store?: (where: string) => ConstructorParameters<typeof SessionSaver>[0];
     } = {},
@@ -2828,6 +2837,44 @@ describe("durable images on the laptop (docs/feat/attachments-durable.md T7/T8)"
     expect(notices).toEqual([
       "⚠ image a.png could not be saved on this laptop — after a restart the model will see it as unavailable (no space left on device (ENOSPC))",
     ]);
+    await runtime.dispose();
+  });
+
+  test("D6 the runtime wires the laptop's blob dir as the model link's fallback: a session that never sent is served from disk, in scope only", async () => {
+    const a = img("d6-a");
+    const b = img("d6-b");
+    const { runtime, daemon, model, logStore } = await runtimeOn("d6", {
+      policy: "client",
+      resume: recordWith("RD", [a]),
+    });
+    await logStore.putBlob("RD", a.ref.id, a.bytes);
+    // Another laptop session's image: on the same disk, but this client never
+    // built that session, so the pod's ref must not reach it.
+    await logStore.putBlob("RDOTHER", b.ref.id, b.bytes);
+    // Built, so its uid is in scope — and NOTHING is sent (no D5 restore ran).
+    runtime.createSession();
+    await daemon.connection.requestModelStream({
+      messages: [{ role: "user", content: "look", attachments: [a.ref, b.ref] }],
+    });
+    const source = model.requests.at(-1)?.attachments;
+    expect(same(await source?.read(a.ref), a.bytes)).toBe(true);
+    expect(await source?.read(b.ref)).toBeNull();
+    await runtime.dispose();
+  });
+
+  test("images off: the restore is skipped silently, so no 'could not be re-sent' notice", async () => {
+    const a = img("off-a");
+    const { runtime, daemon, logStore, notices } = await runtimeOn("off", {
+      policy: "off",
+      resume: recordWith("RO", [a]),
+    });
+    await logStore.putBlob("RO", a.ref.id, a.bytes);
+    const session = runtime.createSession();
+    expect(session.imageInput().kind).toBe("off");
+    await drain(session.send("again"));
+    expect(notices).toEqual([]);
+    expect(daemon.sent.filter((s) => s.method === "attachment/put")).toEqual([]);
+    expect(daemon.sent.some((s) => s.method === "session/prompt")).toBe(true);
     await runtime.dispose();
   });
 });

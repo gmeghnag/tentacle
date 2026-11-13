@@ -610,3 +610,69 @@ skips), 0 fail** across 541 files.
 #### Owner answers (2026-11-13)
 
 Q1–Q9 all (a), as recommended. Implementation APPROVED.
+
+### Fix round 1
+
+*— claude-sonnet-4-5-20250929, 2026-11-13 (executor of Review round 1's two
+findings; branch `feat/attachments-durable`, no checkout/commit)*
+
+**Finding 1 (HIGH) — D6 wired in production. FIXED.**
+`packages/cli/src/local-runtime.ts:854` — the runtime's one `new
+RemoteClient` now passes `imageFallback: (uid, ref) => deps.saver.readBlob(uid,
+ref.id)`, exactly as §Files step 5 says. `RemoteClient`'s constructor already
+handed it to `LaptopImages` (`remote-client.ts:826`) and `allowSession(uid)` at
+`local-runtime.ts:975` already scoped it; the fallback was the missing half, so
+before this change `LaptopImages.fallback` was `undefined` and a laptop model
+link that never attached resolved every pod-named ref to `null`
+(`laptop-images.ts:98`). No other change: the scope is unchanged (this client's
+own built uids), and the id is still checked against `ATTACHMENT_ID_RE` before
+any `join` inside the store's `readBlob`.
+
+**Finding 2 (MEDIUM) — restore skipped when images are `off`. FIXED.**
+`packages/cli/src/local-runtime.ts:533` — `restore()` now returns before
+`restoreImages` when `inner.imageInput().kind === "off"` (the plan's D5 rule
+"`off` → skipped silently"), so a `--resume` of an image session under a
+non-vision model / an images-off pod no longer shows
+`⚠ N earlier image(s) could not be re-sent: <ImagesUnavailableError>` for refs
+the session could never take. The send proceeds unchanged; the `off` reason is
+still surfaced where it belongs (the attach path's own refusal).
+
+**Tests (red before green, on the buggy code, per §9).** Two cases in
+`packages/cli/test/local-runtime.test.ts`, both over the REAL
+`createLocalRuntime` + a real `Connection`/`SessionHost` pair (the existing
+`imageDaemon`/`runtimeOn` helpers, extended with an `"off"` policy and the
+daemon `Connection` on the return):
+- `D6 the runtime wires the laptop's blob dir as the model link's fallback`
+  (`:2843`) — a `--model-proxy` pod, a blob for session `RD` on disk, a blob for
+  `RDOTHER` on the same disk whose session this client never built; one
+  `model/stream` naming both, with **no** `send` (so no D5 restore ran). The
+  laptop's provider gets `a`'s bytes and `b` → `null` (scope held).
+- `images off: the restore is skipped silently` (`:2865`) — `--resume` of a
+  record with a blob present, an images-off daemon: **no notice at all**, zero
+  `attachment/put`, the prompt still sent.
+Helper drift: `imageDaemon` takes `"off"` (no `images` capability),
+`runtimeOn`'s `policy` widens to match, and `imageDaemon` returns its
+`connection` (needed to drive `model/stream` from the pod side).
+
+**Mutations (each applied to `local-runtime.ts` alone, run on the named test,
+reverted — `git diff` re-checked after every revert).** Three independent
+properties, so a fix cannot pass on a narrower correlate:
+```
+M-F1a drop `imageFallback: …` from the RemoteClient options (the finding)   → RED on `D6 …` assertion 1 (bytes: false)
+M-F1b drop `client.images.allowSession(uid)` (the scope)                    → RED on `D6 …` assertion 1 (bytes: false)
+M-F1c allowSession("RDOTHER") instead of the built uid (scope too wide)      → RED on `D6 …` assertion 2 (got Uint8Array(4), want null)
+M-F2  drop the `imageInput().kind === "off"` guard                          → RED on `images off …` ([] vs the ⚠ "could not be re-sent" notice)
+```
+M-F1c is the §7 check the finding turns on: with the scope widened to a uid
+from the (pod-derived) log, the pod's ref reads bytes it must not. Reverts
+confirmed: the four sites are byte-identical to the committed fix
+(`git diff --stat` = the 2 intended files).
+
+**Gate.** `bun run check` green: `tsc --noEmit && tsc -p apps/mobile` clean,
+`biome check .` → `Checked 958 files. No fixes applied.` (baseline 0/0),
+`bun test` → **7574 pass, 3 skip (the three opt-in skips), 0 fail**, 541 files
+(7572 + these 2 tests).
+
+**Unverified.** None outstanding for these two findings. Not re-audited here:
+the rest of Review round 1's attacks (a)–(e), which that round already ran
+against unchanged code.

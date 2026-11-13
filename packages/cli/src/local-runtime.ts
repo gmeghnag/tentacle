@@ -525,6 +525,12 @@ export function persistingController(
   let restoring: Promise<void> | null = null;
   const restore = async (): Promise<void> => {
     if (durable === undefined || durable.pending.length === 0) return;
+    // D5: `off` → skipped SILENTLY (the plan's own rule, owner Q6 "at most one
+    // notice per event"): `RemoteClient.attachImage` would throw
+    // `ImagesUnavailableError` for every ref, and the report would show a
+    // "could not be re-sent" warning for a session that simply cannot take
+    // images (a non-vision model, an images-off pod).
+    if (inner.imageInput().kind === "off") return;
     const report = await restoreImages(durable.pending, durable.read, (bytes, meta) =>
       // Through the session's OWN attachImage (already open: this runs from a
       // send that opened it): a probe when the daemon holds the bytes, an
@@ -841,6 +847,11 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     // Only beside a model provider: a client that serves no model cannot hold a
     // pod's image bytes (docs/feat/attachments-prompt.md D5's table).
     ...(deps.modelProvider && deps.localImages ? { localImages: deps.localImages } : {}),
+    // D6: a laptop model link that never attached reads THIS laptop's blob dir
+    // for the sessions this client built (a 2nd TUI on the pod, a pod turn the
+    // daemon re-runs before any send). Scoped by `allowSession` at the one build
+    // site below — never by a ref from a (pod-supplied) history.
+    imageFallback: (uid, ref) => deps.saver.readBlob(uid, ref.id),
     // `session/log` checkpoints (docs/feat/session-log.md): the daemon hashes the same way.
     sha256: (text) => createHash("sha256").update(text).digest("hex"),
   });
