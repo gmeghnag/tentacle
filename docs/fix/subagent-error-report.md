@@ -417,3 +417,7 @@ Gate: narrow files per slice, then `bun run check` (lint baseline clean, §6).
 ## Review
 
 *(empty — fresh-context reviewer)*
+
+#### Owner answers (2026-11-13)
+
+Q1–Q6 all as recommended (Q6: DeepSeek executes, mandatory fresh Opus review). Implementation APPROVED.
