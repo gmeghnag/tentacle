@@ -1,0 +1,419 @@
+# fix/subagent-error-report — a failed background sub-agent reaches its parent late, without its findings, and `status` denies it existed
+
+> **Status:** implementation (awaiting owner approval)
+> **Branch:** `fix/subagent-error-report`
+> **Type:** fix · **Size:** M · **Blast:** load-bearing (the agent loop's round-boundary drain) · **Suited:** DeepSeek exec; mandatory fresh-context Review (see Owner question 6)
+> **Changelog:** `changelog.d/subagent-error-report.fixed.md` — written by the executor, not by the planner.
+
+## Context
+
+*— claude-opus-5-5, 2026-11-13*
+
+**Owner report (2026-11-13, plain `tentacle` TUI, local Qwen3.8-27B, auto-accept on;
+screenshot `.tentacle/tmp/subagent-error-report/owner-screenshot.png`).** The
+transcript shows
+
+```
+● sa-3 ended (error) · 77 tool uses · Trace FA shared-mem root cause — report sent to the agent
+```
+
+and right after it the main agent writes "the sub-agent is still running", keeps
+working, calls `agent_control status sa-3` and gets
+
+```
+no such background sub-agent: sa-3 — it finished, was stopped, or never existed. If it just finished, its report arrives as a [background] note.
+```
+
+then tells the user it will wait for "the full report (exact bytes, the 2-vs-4 table,
+ranked fixes)" — from a child that FAILED and whose 77 tool uses of findings are gone.
+
+**Symptom characterisation (AGENTS §1).**
+- *Trigger:* a background child (`sa-N`; here a foreground `agent_task` moved to the
+  background — `77 tool uses` comes from the move path's live counter) ends while the
+  parent's turn is RUNNING.
+- *Magnitude:* not a timing jitter — the parent learns nothing until its NEXT turn
+  starts, whatever the number of rounds left in the current one.
+- *Collateral:* the TUI notice says the report was sent; `agent_control status` denies
+  the child; the eventual note carries only the exception message.
+
+**Repro** (`.tentacle/tmp/subagent-error-report/repro.ts`, run 2026-11-13 on this
+branch = `main` 5961917, `bun repro.ts`). Real `Agent` + real `createSubagentRunner` +
+real `createTaskTool({ background })` + real `createAgentControlTool` on one
+`AgentJobs`; scripted providers. The child writes a partial finding and makes one tool
+call, then its provider throws. The parent: spawns the child in the background → runs
+a 60 ms tool (the child fails meanwhile) → `agent_control status sa-1` → final text.
+Then a second `runMessages` stands in for the auto-wake continuation.
+
+```ts
+// Repro: a background sub-agent that FAILS mid-run while the parent's turn is running.
+// Imports by absolute path into the WORKTREE (not the main checkout).
+import { AgentJobs, type ChatMessage, type ExecutionEnvironment, type ModelProvider, type StreamEvent, type ChatRequest } from "<worktree>/packages/core/src/index.ts";
+import { ToolRegistry, createTaskTool, createAgentControlTool, shellTool } from "<worktree>/packages/tools/src/index.ts";
+import { Agent } from "<worktree>/packages/agent/src/agent.ts";
+import { createSubagentRunner } from "<worktree>/packages/agent/src/subagent.ts";
+import { z } from "<worktree>/packages/tools/node_modules/zod/lib/index.js";
+
+const log = (...a: unknown[]) => console.log(...a);
+const t0 = Date.now();
+const ts = () => `+${String(Date.now() - t0).padStart(3)}ms`;
+
+type Step = readonly StreamEvent[] | (() => never);
+class Scripted implements ModelProvider {
+  readonly id = "scripted";
+  readonly seen: ChatRequest[] = [];
+  private i = 0;
+  constructor(private readonly name: string, private readonly script: Step[]) {}
+  async *stream(req: ChatRequest): AsyncIterable<StreamEvent> {
+    this.seen.push(req);
+    const step = this.script[this.i++] ?? [{ type: "text", delta: "ok" }, { type: "done" }];
+    log(ts(), `${this.name} model round ${this.i}`);
+    if (typeof step === "function") step();
+    for (const e of step as readonly StreamEvent[]) yield e;
+  }
+}
+const env: ExecutionEnvironment = {
+  id: "noop",
+  exec: async () => { await new Promise((r) => setTimeout(r, 5)); return { stdout: "ran", stderr: "", exitCode: 0 }; },
+  readFile: async () => "",
+  writeFile: async () => {},
+};
+const call = (id: string, name: string, args: unknown): StreamEvent => ({ type: "tool_call", toolCall: { id, name, arguments: JSON.stringify(args) } });
+
+// CHILD: round 1 writes partial findings + a tool call; round 2 the provider throws.
+const child = new Scripted("child", [
+  [{ type: "text", delta: "PARTIAL FINDING: smem needed 101KB > 99KB limit." }, call("k1", "shell", { command: "ls" }), { type: "done" }],
+  () => { throw new Error("provider stream failed: HTTP 500"); },
+]);
+const { run } = createSubagentRunner({ model: child, env, tools: new ToolRegistry().register(shellTool), requestPermission: async () => ({ allowed: true }) });
+
+let n = 0;
+const jobs = new AgentJobs(2);
+jobs.bind({ launched: () => `sa-${++n}`, ended: (id, sr, rep) => log(ts(), `host.ended(${id}, ${sr}) report=${JSON.stringify(rep)}`) });
+// What the daemon does on this listener (hosted-session.ts:756-769): emit background_exit → TUI "report sent to the agent".
+jobs.onExit((e) => log(ts(), `jobs.onExit → daemon emits background_exit {${e.agentId}, stopReason:${e.stopReason}, toolUses:${e.toolUses}} → TUI notice "...report sent to the agent"`));
+
+const slow = { name: "probe", description: "slow", inputSchema: z.object({}), permission: "none" as const,
+  execute: async () => { await new Promise((r) => setTimeout(r, 60)); return { content: "probe done" }; } };
+const tools = new ToolRegistry()
+  .register(createTaskTool(run, [{ name: "general", description: "g" }], { background: jobs }))
+  .register(createAgentControlTool(jobs))
+  .register(slow as never);
+
+// PARENT: spawn bg child → slow tool (child fails meanwhile) → agent_control status → final text.
+const parent = new Scripted("parent", [
+  [call("p1", "agent_task", { description: "trace smem", prompt: "go", background: true }), { type: "done" }],
+  [call("p2", "probe", {}), { type: "done" }],
+  [call("p3", "agent_control", { action: "status", agent_id: "sa-1" }), { type: "done" }],
+  [{ type: "text", delta: "the sub-agent is still running, I'll wait for its report" }, { type: "done" }],
+  [{ type: "text", delta: "got it" }, { type: "done" }],
+]);
+const agent = new Agent({ model: parent, tools, env, agentJobs: jobs });
+
+const messages: ChatMessage[] = [{ role: "user", content: "investigate" }];
+log("=== TURN 1 (user turn) ===");
+for await (const e of agent.runMessages(messages, "s1")) {
+  if (e.type === "tool_end" || e.type === "background_exit" || e.type === "context_note" || e.type === "turn_end")
+    log(ts(), "parent event", e.type, JSON.stringify((e as { result?: { content?: string } }).result?.content ?? (e as { text?: string }).text ?? (e as { reason?: string }).reason ?? (e as { jobId?: string }).jobId));
+}
+for (const m of messages) if (m.role === "tool") log("  tool result:", JSON.stringify(m.content));
+const sawNote = parent.seen.some((r) => r.messages.some((m) => typeof m.content === "string" && m.content.includes("[background]") && m.content.includes("sa-1 (")));
+log(ts(), `turn 1 over. parent model ever saw sa-1's note during turn 1? ${sawNote}. pendingExitCount=${agent.pendingExitCount}`);
+
+log("=== TURN 2 (the auto-wake continuation) ===");
+for await (const e of agent.runMessages(messages, "s1")) {
+  if (e.type === "context_note") log(ts(), "parent event context_note:\n" + e.text);
+}
+log("partial finding reached the parent?", messages.some((m) => typeof m.content === "string" && m.content.includes("PARTIAL FINDING") && m.role === "user"));
+```
+
+Output:
+
+```
+=== TURN 1 (user turn) ===
++  2ms parent model round 1
++  4ms child model round 1
++  5ms parent model round 2
++ 11ms child model round 2
++ 11ms host.ended(sa-1, error) report="the sub-agent failed: provider stream failed: HTTP 500"
++ 11ms jobs.onExit → daemon emits background_exit {sa-1, stopReason:error, toolUses:0} → TUI notice "...report sent to the agent"
++ 67ms parent model round 3
++ 67ms parent model round 4
++ 67ms parent event turn_end "end_turn"
+  tool result: "started in background as sa-1: trace smem. Its report will arrive later as a [background] note; you can keep working or end your turn."
+  tool result: "probe done"
+  tool result: "no such background sub-agent: sa-1 — it finished, was stopped, or never existed. If it just finished, its report arrives as a [background] note."
++ 67ms turn 1 over. parent model ever saw sa-1's note during turn 1? false. pendingExitCount=1
+=== TURN 2 (the auto-wake continuation) ===
++ 67ms parent event context_note:
+[background] sub-agent sa-1 (trace smem) finished (error):
+the sub-agent failed: provider stream failed: HTTP 500
++ 67ms parent model round 5
+partial finding reached the parent? false
+```
+
+The owner's screenshot is this exact sequence (notice → "still running" → `status` "no
+such" → "I'll wait for the report").
+
+**Answers, with evidence.**
+
+1. **Does the parent get a `[background]` note, what is in it, when?** Yes, but only
+   at the start of its NEXT turn, never mid-turn. `Agent` queues every exit in
+   `pendingExits` (`packages/agent/src/agent.ts:744-745`) and drains exits only in
+   `flushBackgroundExits`, called once, at the turn's start (`agent.ts:1094`). The
+   round-boundary drain (`agent.ts:1195`) and the late drain (`agent.ts:1400`) call
+   `flushAgentMessages`, which takes ONLY a child's `agent_notify` notes and leaves
+   every exit in place on purpose (`agent.ts:2425-2445`). In the repro the child dies
+   at +11 ms, the parent makes two more model rounds and ends its turn without it.
+   Content: the headline `finished (error)` (`agent.ts:2501`) and the report — which
+   for a failure is ONLY `the sub-agent failed: <error.message>`; every partial
+   finding is discarded (see root cause B).
+2. **Does an errored child trigger the auto-wake like a successful one?** Yes — the
+   child's stopReason is not an input anywhere. `pendingExitCount` counts every exit
+   (`agent.ts:794-797`; repro: `pendingExitCount=1`); the TUI arms on every live
+   `background_exit` and, during a turn, defers to the post-turn check
+   (`packages/tui/src/App.tsx:1152-1173`); the `serve` gate looks only at the
+   PARENT's last end (`packages/core/src/auto-wake.ts:45-61`). So the failure is
+   eventually delivered by the wake turn (repro TURN 2) — unless auto-wake is off or
+   the parent's turn ended `error`/`cancelled` (`lastEndBad`), in which case it waits
+   for the user's next prompt.
+3. **Why does `agent_control status` say "no such" for a just-ended child?** The
+   registry forgets a child the moment it ends: `drive` deletes it from `running` and
+   `live` (`packages/core/src/agent-jobs.ts:723-727`) BEFORE the exit listeners run,
+   and nothing keeps an ended record. `status` reads only `jobs.rows()`
+   (`packages/tools/src/agent-control.ts:131-137`) and answers the catch-all on a miss
+   (`agent-control.ts:138-142`). Combined with (1), the parent is told "if it just
+   finished, its report arrives as a [background] note" while the note is sitting
+   undelivered for the rest of the turn.
+4. **What does "report sent to the agent" claim vs reality?** The line is built from
+   the daemon's LIVE `background_exit`, emitted at the child's exit
+   (`packages/daemon/src/hosted-session.ts:756-769` → `packages/tui/src/state.ts:173-179`).
+   At that instant the report has only been QUEUED in the parent's `pendingExits`; the
+   model sees it at the next turn start (1). For an error the "report" is just the
+   exception message (B), and the line shows no error text at all. The same wording is
+   in the panel (`packages/tui/src/background-list.ts:523-531`).
+
+**Root causes.**
+- **A — exits are turn-start-only.** `agent.ts:1094` is the only drain of a child's
+  exit; `flushAgentMessages` (`agent.ts:2431-2453`) skips exits. A child that ends
+  while the parent works is invisible to the parent until the next turn.
+- **B — a thrown child loses its partial report and its tool count.**
+  `createSubagentRunner`'s catch rethrows the raw error (`packages/agent/src/subagent.ts:548-556`);
+  the accumulated `report` (every `text` delta, `subagent.ts:502-504`) and `toolUses`
+  die with the frame. The three catchers synthesise a message-only report:
+  `packages/tools/src/task.ts:237-243` (moved child — keeps the live count),
+  `task.ts:419-425` (`background:true` — `toolUses: 0`, the repro's `toolUses:0`),
+  `packages/core/src/agent-jobs.ts:716-721` (generic, `toolUses: 0`).
+- **C — no ended record.** `agent-jobs.ts:723-727` + `agent-control.ts:138-142`, see (3).
+- **D — the notice over-claims.** `state.ts:178`, `background-list.ts:531`: "sent"
+  is said at queue time; an error carries no error text.
+
+Note: `stopReason: "error"` never comes from the `Agent` loop (`AgentStopReason`,
+`agent.ts:93`, has no `error`): a child "ends (error)" only by THROWING (a provider
+failure, a tunnel drop — eval F5, `docs/eval/subagent-live.md:493-496`). So B is the
+whole error path, not an edge.
+
+## Implementation
+
+*— claude-opus-5-5, 2026-11-13*
+
+### Load-bearing assumption
+
+**A sub-agent's exit note can be pushed at the round boundary exactly where a child's
+`agent_notify` note already is, with no new history-validity or persistence risk.**
+Proof: `flushAgentMessages` already pushes a user-role noted message at the round
+boundary after steers (`agent.ts:1187-1201`) and at the late drain, followed by
+`continue` so a model round answers it (`agent.ts:1399-1413`). The boundary is after
+every tool result of the previous round, so a user message there is a valid history
+(the comment at `agent.ts:1092-1093` forbids only "between an assistant's tool calls
+and their results"). The sub-agent note's shape is unchanged (`subagentReportNote`,
+`agent.ts:2499-2503`), and the daemon closes its ledger delivery on the
+`background_exit` event wherever in the turn it is yielded
+(`hosted-session.ts:2371-2376`), and clears `wakeUnflushed` on the same event
+(`hosted-session.ts:2367-2370`).
+
+### Preconditions
+
+- Single exit queue: `pendingExits` gets sub-agent exits through one listener
+  (`agent.ts:745`), and `pendingExitCount` / `retire` / `adoptExits` read it
+  (`agent.ts:758-803`) — draining an exit early simply removes it from all three.
+- The late-drain invariant: no `await` between the last drain and `turn_end`
+  (`agent.ts:1387-1398`). The new drain stays synchronous, in the same function.
+- Stale-wake guard: a client-armed continuation after a mid-turn delivery ends with no
+  model request when `notesFlushedMidTurn` is set (`agent.ts:1099-1123`). The TUI arms
+  that continuation on every live exit while a turn runs (`App.tsx:1152-1173`), so a
+  mid-turn exit delivery MUST set the flag, or the wake turn re-runs a round over
+  nothing.
+- The TUI dedupes the live and the in-turn `background_exit` by `jobId`
+  (`state.ts:256`), so a mid-turn event adds no second notice.
+- `AgentJobs.drive` runs the listeners after `host.ended` (`agent-jobs.ts:738-751`): the
+  durable marker carries the report, so a crash before delivery still derives the note
+  at load (`packages/core/src/agent-job-ledger.ts:350-363`) — unchanged.
+- §7 Protocol: no schema change is needed (the note and `background_exit` exist);
+  `PROTOCOL_VERSION` is untouched. §7 Persistence: the note is the same typed
+  `subagent_report` message, only earlier in the log.
+
+### Design
+
+1. **Deliver a sub-agent's exit at the next round boundary (A).** Generalise
+   `flushAgentMessages` into a mid-turn drain that takes, in queue order, (a) every
+   `agent_message` (as today) and (b) every SUB-AGENT exit (`"agentId" in job` and not
+   a note/user-note), rendering (b) exactly as `flushBackgroundExits` does (the same
+   `background_exit` event + `subagentReportNote` + `context_note`; extract that
+   branch of `agent.ts:2488-2505` into one helper used by both). Shell-job exits and
+   `user_note`s stay where they are (Owner question 1). Called at the two existing
+   sites (`agent.ts:1195`, `agent.ts:1400`); any delivery sets `notesFlushedMidTurn`.
+   At the late drain an exit causes one more round (the existing `continue`), so the
+   parent reacts in the same turn instead of after a wake. NOT at the
+   `max_iterations` end (no round left): the exit stays queued for the next start, as
+   today.
+2. **A failure keeps its partial report and its count (B).** Add to `@tentacle/core`
+   (next to `AgentJobResult`) `class SubagentFailure extends Error { partialReport:
+   string; toolUses: number; cause }` and a pure `subagentFailureResult(error,
+   fallbackToolUses): AgentJobResult` that renders
+   `the sub-agent failed after N tool use(s): <message>` + (when the partial is
+   non-blank) `\n\nPartial output before the failure:\n<partial>`; a non-
+   `SubagentFailure` error renders as today, with `fallbackToolUses`. The runner's
+   catch (`subagent.ts:548-556`) throws `new SubagentFailure(...)` with `report` and
+   `toolUses` (keeping the inbox close and `subagent_end` it does now). The three
+   catchers (`task.ts:237-243` with `live.toolUses`, `task.ts:419-425`,
+   `agent-jobs.ts:716-721`) call the helper. The report is still capped by
+   `capSubagentText` (`agent-jobs.ts:734-737`) and shaped (`task.ts:385-393`). A
+   foreground (non-moved) failure still surfaces as a tool error; its message gets the
+   partial too, through the same helper (Owner question 3). The live headline for
+   `error` reads `failed` instead of `finished (error)` (`agent.ts:2501`; the load
+   headline `agent-job-ledger.ts:358` gets the same word).
+3. **`status` answers truthfully for a recently ended child (C).** `AgentJobs` keeps a
+   bounded `recent` map (last 16 ended, oldest evicted; cleared by `dispose`) of
+   `{ agentId, description, stopReason, toolUses, endedAt (host clock), delivered }`,
+   written in `drive` before the listeners, plus `ended(id)` to read it and
+   `delivered(id)` to flip the flag. The `Agent` calls `agentJobs.delivered(agentId)`
+   wherever it pushes a sub-agent note (start flush and the new mid-turn drain). A pure
+   `formatEndedAgent(record, now)` in `packages/tools/src/agent-status.ts` (beside
+   `formatAgentStatus`) renders e.g. `sa-3 ended (error) 12s ago after 77 tool uses.
+   Its report — the error and any partial output — reaches you as a [background] note
+   at your next step.` or `… was delivered to you as the [background] note "sub-agent
+   sa-3 …".` `agent_control status <id>` falls back to it before the "no such"
+   answer, `isError: false`. The no-id listing adds one `recently ended:` line (Owner
+   question 4). "no such" is kept only for a truly unknown id.
+4. **The notice says what is true (D).** `backgroundExitNotice`'s agent branch
+   (`state.ts:173-179`) → `sa-3 failed · 77 tool uses · <desc> — the agent gets its
+   error and partial output at its next step` for `error`; for the others `— the agent
+   gets its report at its next step`. The panel meta (`background-list.ts:531`) →
+   `✓ finished · report queued for the agent`. Pure-module change only (§7 "logic in
+   pure modules"). Exact wording: Owner question 2.
+
+### Files
+
+Dependency order (no protocol change):
+1. `packages/core/src/agent-jobs.ts` — `SubagentFailure`, `subagentFailureResult`,
+   `recent` map + `ended()` / `delivered()`, `drive`'s catch uses the helper. Export
+   from `packages/core/src/index.ts`.
+2. `packages/core/src/agent-job-ledger.ts` — load headline word for `error`.
+3. `packages/agent/src/subagent.ts` — throw `SubagentFailure` with the partial.
+4. `packages/agent/src/agent.ts` — mid-turn sub-agent exit drain (one shared helper
+   with the start flush), `delivered()` calls, `failed` headline.
+5. `packages/tools/src/task.ts` — the two catchers use the helper (+ foreground
+   error message, if Q3 = yes).
+6. `packages/tools/src/agent-status.ts`, `packages/tools/src/agent-control.ts` —
+   `formatEndedAgent` + the fallback; `AGENT_CONTROL` description unchanged.
+7. `packages/tui/src/state.ts`, `packages/tui/src/background-list.ts` — wording.
+8. Tests (below); `changelog.d/subagent-error-report.fixed.md` (executor).
+
+### Failure modes
+
+- **Exit lands during a tool call of a parallel group.** The drain is at the boundary
+  after the whole group (`agent.ts:1187`): never between calls and results.
+- **Exit lands after the late drain (between it and `turn_end`).** Impossible inside
+  the synchronous stretch (`agent.ts:1387-1398`); an exit after `turn_end` stays in
+  `pendingExits` and wakes as today (`pendingExitCount`).
+- **Double delivery.** Draining splices the exit out of `pendingExits`; the start
+  flush can't see it again. The TUI wake armed by the live notice hits the stale-wake
+  guard (requires `notesFlushedMidTurn`, set by this drain). Test both.
+- **Turn cancelled after the exit was queued but before the boundary.** Not drained;
+  stays queued for the next start (today's path). A cancel AFTER delivery: the note is
+  in `messages`, persisted with the turn's history like any steer.
+- **Context reset / compaction mid-turn.** The note pushed before it is part of the
+  replaced history; the daemon closed delivery on the event (`hosted-session.ts:2374`),
+  so a reset never re-notes it (task 5 review L3, unchanged).
+- **Retired agent (settings apply).** Undelivered exits move through `retire/adopt`
+  (`agent.ts:758-803`); `delivered` lives on the session-level `AgentJobs`, so the
+  status record survives the swap.
+- **Child killed.** `cancelled` path unchanged; the partial is not involved (the
+  runner returns, it doesn't throw, on a cancel).
+- **Error thrown that is not an `Error`.** `subagentFailureResult` stringifies, as
+  today.
+- **Huge partial.** Capped by `capSubagentText` / `SUBAGENT_REPORT_MAX_CHARS` and the
+  spill transform, as a normal report.
+- **Many ended children.** `recent` bounded at 16 — an evicted id answers "no such",
+  the same as today; no unbounded growth over a long session.
+- **Pod (`run`/`attach`).** The partial is pod-supplied text, already treated as such
+  (the report path is the same); no laptop-side effect added (§7 pod not trusted).
+- **Version skew.** No wire change; an older TUI shows its old wording.
+
+### Tests
+
+Red-first on current code; each lists the mutation that must turn it red again.
+
+1. `packages/agent/test/subagent-background.test.ts` — **"a sub-agent exit that lands
+   mid-turn is delivered at the next round boundary"**: the repro's shape (bg child
+   ends during a slow tool); assert the parent's NEXT model request contains the
+   `[background] sub-agent sa-1` note and `pendingExitCount === 0` after the turn. Red
+   today (`sawNote false`, count 1). *Mutation:* drop exits from the mid-turn drain.
+2. Same file — **"…at the late drain it runs one more round"**: child ends while the
+   parent's final-answer round streams; assert a further model request carries the
+   note in the same turn. *Mutation:* remove the late-drain call.
+3. Same file — **"a shell job's exit is still delivered at turn start only"** (pins
+   Q1's scope). *Mutation:* drain all exits mid-turn.
+4. Same file — **"the continuation armed by the live exit ends without a model
+   request"**: after test 1's turn, `runMessages` with no user message → `turn_end`,
+   zero new provider calls. *Mutation:* don't set `notesFlushedMidTurn` on exits.
+5. `packages/agent/test/subagent.test.ts` (runner) — **"a thrown child carries its
+   partial report and tool count"**: child streams text + 1 tool call then throws;
+   `run` rejects with `SubagentFailure` whose `partialReport` contains the text and
+   `toolUses === 1`. *Mutation:* rethrow the raw error.
+6. `packages/tools/test/task-detach.test.ts` / a background task test — **both
+   catchers** produce `failed after N tool use(s): … Partial output before the
+   failure: …` (moved: N = live count; `background:true`: N from the failure, not 0).
+   *Mutation:* revert either catcher.
+7. `packages/core/test/agent-jobs.test.ts` — `recent`: ended record written before the
+   listeners (a listener calling `ended(id)` sees it), `delivered` flips, eviction at
+   17, `dispose` clears. *Mutation:* write after the listeners.
+8. `packages/tools/test/agent-control.test.ts` — status of an ended, undelivered child
+   → the ended text, `isError: false`; delivered → the "was delivered" text; unknown id
+   → today's "no such" (keep the existing assertion at `agent-control.test.ts:110`).
+   *Mutation:* remove the fallback.
+9. `packages/tui/test/state.test.ts:300-307`, `background-list.test.ts:424` — new
+   wording, incl. an `error` case. *Mutation:* old string.
+10. Re-run the repro: expected `parent model ever saw sa-1's note during turn 1? true`,
+    `pendingExitCount=0`, status text names `ended (error)`, partial reached the parent
+    `true`; paste the output into Execution.
+
+Gate: narrow files per slice, then `bun run check` (lint baseline clean, §6).
+
+### Owner questions
+
+1. **Scope of the mid-turn drain: sub-agent exits only, or shell-job exits too?**
+   *Rec:* sub-agents only — a shell job is pollable (`shell_output`) and has no report
+   to lose; keeps the change narrow. Shell jobs can follow in their own task.
+2. **Notice wording.** *Rec:* `sa-3 failed · 77 tool uses · <desc> — the agent gets
+   its error and partial output at its next step` (others: `… gets its report at its
+   next step`); panel `✓ finished · report queued for the agent`.
+3. **Foreground (non-moved) failure: put the partial output in its tool error too?**
+   *Rec:* yes, through the same helper — same loss, one-line change.
+4. **`agent_control status` without an id: add a `recently ended:` line?** *Rec:*
+   yes, one line (id, outcome, age), max the same 16 records.
+5. **Headline word for `stopReason: "error"` in the note (`finished (error)`):**
+   *Rec:* `failed` in both the live and the load headline — the model read
+   "finished" as success-ish in the report.
+6. **Executor vs AGENTS §10:** the change touches the agent loop (blast
+   load-bearing), where §10 asks for a stronger executor. *Rec:* keep DeepSeek as
+   requested (the seam is pre-existing and fully specified), with the mandatory
+   fresh-context Review red-teaming the late-drain invariant and the stale-wake guard.
+
+## Execution
+
+*(empty — executor)*
+
+## Review
+
+*(empty — fresh-context reviewer)*
