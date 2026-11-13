@@ -20,15 +20,14 @@ export {
 export * from "./scroll.ts";
 export * from "./commands.ts";
 export * from "./link-status.ts";
-export {
-  App,
-  type AppProps,
-  type AutoAcceptFeed,
-  type NoticeFeed,
-  type RunQuit,
-  type SessionController,
-  type SessionDirectory,
-} from "./App.tsx";
+export { App, type AutoAcceptFeed } from "./App.tsx";
+export type {
+  AppProps,
+  NoticeFeed,
+  RunQuit,
+  SessionController,
+  SessionDirectory,
+} from "./app-types.ts";
 export { autoAcceptTest, autoApproves, ownRequest } from "./permission-ui.ts";
 export type { SessionsEntry, SessionsView } from "./sessions-panel.ts";
 export { startTui, type TuiOptions } from "./run.tsx";

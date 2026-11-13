@@ -282,7 +282,10 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
     // Read the DECLARATION, not a copy: `SessionController` is what the App
     // holds, so a member added there must reach this wrapper too (the next
     // `messageSubagent` cannot be forgotten). Syntactic: no type checker needed.
-    const file = new URL("../../tui/src/App.tsx", import.meta.url);
+    // It lives in `app-types.ts` (docs/feat/app-decomposition.md S1), which is
+    // where `App.tsx` and `index.ts` both name it — reading `App.tsx` would now
+    // find the re-export and no interface at all.
+    const file = new URL("../../tui/src/app-types.ts", import.meta.url);
     const source = ts.createSourceFile(
       file.pathname,
       readFileSync(file, "utf8"),
@@ -296,7 +299,7 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       }
     });
     if (!iface) {
-      throw new Error("no SessionController in packages/tui/src/App.tsx");
+      throw new Error("no SessionController in packages/tui/src/app-types.ts");
     }
     const declared: string[] = [];
     for (const member of (iface as ts.InterfaceDeclaration).members) {
