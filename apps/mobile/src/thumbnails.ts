@@ -7,8 +7,15 @@
  * - WHICH images want bytes: only those on rows a `FlatList` currently shows
  *   (plus the window either side), never the whole history;
  * - WHEN: a request is issued once per image id, and the in-flight set is
- *   bounded (`MAX_IN_FLIGHT`), so a fast scroll cannot flood the channel;
+ *   bounded (`MAX_IN_FLIGHT`), so a fast scroll cannot flood the channel — an
+ *   id that scrolls out of the window is **cancelled** on its own controller,
+ *   never merely forgotten;
  * - what happens on arrival / failure, and when the cache must drop an id.
+ *
+ * One mounted screen owns one `createThumbnailDriver`: it keeps the state and
+ * the controllers across every window change, because a per-window call cannot
+ * (review round 1's two findings — a shared signal left N × `MAX_IN_FLIGHT`
+ * fetches running, and a stale window's settle rolled back a newer one's).
  *
  * What it does NOT decide: how the bytes travel. That is an injected
  * `fetchThumbnail` port (`ThumbnailSource`). **The transport does not exist
@@ -56,14 +63,21 @@ export const initialThumbnails: ThumbnailState = { loaded: [], inFlight: [], fai
 
 export interface Request {
   readonly ref: ImageRef;
-  readonly signal: AbortSignal;
+  /**
+   * This request's OWN controller: the driver never hands out one shared signal,
+   * because an off-window request must be cancellable on its own. The driver's
+   * unmount signal aborts every controller it started.
+   */
+  readonly controller: AbortController;
 }
 
-/** One step: what the driver should start, and what it should abort. */
+/** One step: what the driver should start, what it should abort, and the state. */
 export interface Plan {
   readonly start: readonly Request[];
   /** Ids no longer in the visible window whose fetch should be abandoned. */
   readonly abort: readonly string[];
+  /** The controllers of the requests still wanted after this step. */
+  readonly pending: ReadonlyMap<string, AbortController>;
   readonly state: ThumbnailState;
 }
 
@@ -107,7 +121,8 @@ export function plan(
   rows: readonly { readonly kind: string }[],
   first: number,
   last: number,
-  controller: AbortSignal,
+  signal: AbortSignal,
+  pending: ReadonlyMap<string, AbortController> = new Map(),
 ): Plan {
   const wanted = visibleRefs(rows, first, last);
   const wantedIds = new Set(wanted.map((ref) => ref.id));
@@ -116,6 +131,13 @@ export function plan(
   const stillInFlight = state.inFlight.filter((id) => wantedIds.has(id));
   const loadedIds = new Set(state.loaded.map((thumb) => thumb.id));
   const start: Request[] = [];
+  const next = new Map<string, AbortController>();
+  for (const id of stillInFlight) {
+    const controller = pending.get(id);
+    if (controller !== undefined) {
+      next.set(id, controller);
+    }
+  }
   let inFlight = stillInFlight;
   for (const ref of wanted) {
     if (inFlight.length >= MAX_IN_FLIGHT) {
@@ -124,10 +146,17 @@ export function plan(
     if (loadedIds.has(ref.id) || state.failed.includes(ref.id) || inFlight.includes(ref.id)) {
       continue;
     }
-    start.push({ ref, signal: controller });
+    const controller = new AbortController();
+    // The driver's own unmount listener aborts every request it keeps; a signal
+    // that fired before this request existed must not leave it running.
+    if (signal.aborted) {
+      controller.abort();
+    }
+    start.push({ ref, controller });
+    next.set(ref.id, controller);
     inFlight = [...inFlight, ref.id];
   }
-  return { start, abort, state: { ...state, inFlight } };
+  return { start, abort, pending: next, state: { ...state, inFlight } };
 }
 
 /** One thumbnail arrived. */
@@ -161,39 +190,81 @@ export function thumbnailFor(state: ThumbnailState, id: string): Thumbnail | und
 }
 
 /**
- * Drive the port above for one window: starts what `plan` asks, records every
- * outcome. The caller re-runs it when the window changes (a `FlatList`
- * `onViewableItemsChanged`) and aborts the controller on unmount.
+ * The screen's thumbnail driver: one object per mounted transcript, so every
+ * window change shares ONE state and ONE table of in-flight controllers.
  *
- * Each outcome is applied to the LATEST state, never to the one `plan` returned:
- * with up to `MAX_IN_FLIGHT` requests open, two answers land in the same tick,
- * and the second must not overwrite the first's thumbnail (found by this
- * module's own test).
+ * Without that sharing, two things broke (both found by review, both pinned by
+ * `thumbnails.test.ts`):
+ * - `plan`'s `abort` list only dropped ids from `inFlight`; the fetches kept
+ *   running on the shared signal, so N window changes left N × `MAX_IN_FLIGHT`
+ *   requests open — "never downloaded beyond the visible rows" was false;
+ * - each `drive` call captured the state `plan` returned, so a settle from an
+ *   earlier window wrote that older state over everything a later window had
+ *   produced (a visible thumbnail vanished, its id was requested again).
  */
-export function drive(
-  state: ThumbnailState,
+export interface ThumbnailDriver {
+  /** A new visible window: start what is wanted, abort what scrolled away. */
+  view(rows: readonly { readonly kind: string }[], first: number, last: number): void;
+  /** The latest state (what the screen renders). */
+  state(): ThumbnailState;
+  /** Unmount: abort every request still running. */
+  close(): void;
+}
+
+export function createThumbnailDriver(
   source: ThumbnailSource,
-  rows: readonly { readonly kind: string }[],
-  first: number,
-  last: number,
-  controller: AbortSignal,
   onChange: (next: ThumbnailState) => void,
-): void {
-  const step = plan(state, rows, first, last, controller);
-  let current = step.state;
-  onChange(current);
-  const settle = (next: ThumbnailState): void => {
-    current = next;
-    onChange(current);
+  unmount: AbortSignal,
+  initial: ThumbnailState = initialThumbnails,
+): ThumbnailDriver {
+  let state = initial;
+  let pending = new Map<string, AbortController>();
+  const commit = (next: ThumbnailState): void => {
+    state = next;
+    onChange(next);
   };
-  for (const request of step.start) {
-    void source.fetch(request.ref, request.signal).then(
-      (thumb) => {
-        settle(thumb === null ? failed(current, request.ref.id) : loaded(current, thumb));
-      },
-      () => {
-        settle(failed(current, request.ref.id));
-      },
-    );
-  }
+  const close = (): void => {
+    for (const controller of pending.values()) {
+      controller.abort();
+    }
+    pending = new Map();
+  };
+  // ONE listener on the screen's signal: it reaches every request this driver
+  // starts, however the window moved in between (`plan` aborts a request whose
+  // window opened after the signal already fired).
+  unmount.addEventListener("abort", close, { once: true });
+  return {
+    state: () => state,
+    close,
+    view: (rows, first, last) => {
+      const step = plan(state, rows, first, last, unmount, pending);
+      // Abandoned fetches are CANCELLED, not just forgotten: their bytes are
+      // never wanted and a late arrival must not be cached.
+      for (const id of step.abort) {
+        pending.get(id)?.abort();
+      }
+      pending = new Map(step.pending);
+      commit(step.state);
+      for (const request of step.start) {
+        const id = request.ref.id;
+        const settle = (next: ThumbnailState): void => {
+          // A request that was abandoned (or superseded) settles nothing: the
+          // state has moved on, and this outcome is for a row nobody shows.
+          if (pending.get(id) !== request.controller) {
+            return;
+          }
+          pending.delete(id);
+          commit(next);
+        };
+        void source.fetch(request.ref, request.controller.signal).then(
+          (thumb) => {
+            settle(thumb === null ? failed(state, id) : loaded(state, thumb));
+          },
+          () => {
+            settle(failed(state, id));
+          },
+        );
+      }
+    },
+  };
 }

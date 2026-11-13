@@ -708,3 +708,138 @@ All questions answered as recommended. Implementation APPROVED. Added owner requ
 **Executor:** disciplined and honest. The drift is documented, and the flaky full-suite test is disclosed. The gap: the M8 fix was tested inside one `drive` call only.
 
 *— claude-opus-5-5, 2026-11-13* (fresh context). The Execution section is signed claude-opus-5-5, but commit `b6de752` says "exec (deepseek)". The executor's real identity is unclear and should be corrected.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-13 (executor of this round; branch
+`feat/mobile-session-view-12b`, no checkout/restore/stash/commit)*
+
+> Note on the review's identity remark: the id above is this session's real
+> model id (read from `~/.claude/projects/…/<session>.jsonl`, every assistant
+> record `"model":"claude-opus-5-5"`). Round 1's "exec (deepseek)" commit
+> subject and the Execution signature above are left exactly as the executing
+> round wrote them — this round does not overwrite another model's claim.
+
+Both findings live in `apps/mobile/src/thumbnails.ts`, the owner's image
+requirement's decision module. They share one root cause: the module was shaped
+around a **one-shot `drive(state, …)` call** — one captured state, one shared
+signal — when a screen has **many** window changes on **one** lifetime. The fix
+is that shape, not two patches: a `createThumbnailDriver` object owns the state
+and the per-request controllers for the mounted screen, and `drive` (the API the
+review attacked) is gone.
+
+**Finding 1 (MEDIUM) — `MAX_IN_FLIGHT` and "abort off-window" did not hold.
+FIXED.**
+`thumbnails.ts:64` (`Request.controller`), `:119` (`plan`), `:244`.
+`plan` used to hand every request the caller's ONE shared `AbortSignal`, so the
+ids it listed in `abort` were only dropped from `inFlight`: their fetches kept
+running on a signal nobody aborted. Now `plan` creates **one `AbortController`
+per request**, keeps them in a `Map<id, AbortController>` across steps
+(`pending`), and the driver **actually aborts** each abandoned one
+(`:244`). A late arrival from an abandoned request is dropped by the identity
+check at `:253` (a settle only lands if its id still maps to *its own*
+controller), so it can never reach the cache. The driver installs ONE listener on
+the screen's unmount signal (`:235`), which reaches every request however the
+window moved in between; `plan` also aborts a request created after that signal
+already fired (`:152`).
+The review's trace, re-run against the fixed code
+(`.tentacle/tmp/mobile-session-view-12b/fix1-drive.ts`):
+
+```
+before: MAX_IN_FLIGHT 4 | fetches open: 16 | state.inFlight: 4
+        after D loaded: [ "i142" ] | after stale A settles: [ "i0" ] | inFlight [ "i1","i2","i3" ]
+after:  MAX_IN_FLIGHT 4 | fetches open: 4  | state.inFlight: 4
+        after D loaded: [ "i142" ] | after the stale A settle: [ "i142" ] | inFlight 3
+        after unmount, fetches open: 0
+```
+
+**Finding 2 (MEDIUM) — a stale `drive` overwrote newer state. FIXED.**
+`thumbnails.ts:214` (`createThumbnailDriver`). Each `drive` call had its own
+closed-over `current`, so a settle from an earlier window wrote that older state
+over everything later windows produced. The driver keeps ONE `state` for the
+mounted screen and every settle reads the **live** value at settle time
+(`loaded(state, …)` inside the callback, `state` read then, not captured), so a
+later window's `loaded`/`inFlight` survives an earlier window's settle, and the
+`:253` identity check drops an abandoned request's outcome entirely. `drive`
+was **removed** rather than kept as a thin per-window wrapper: leaving the
+one-call API exported would leave the exact trap that produced this finding
+reachable by the 12c screen. `drive`'s only callers were its own tests.
+
+**Tests (red before green, §9).** New block `the driver: one state and one
+controller table per screen` in `apps/mobile/test/thumbnails.test.ts` (`:269`,
+`:293`, `:303`, `:323`, `:332`), driven through the real driver against a
+deferred fake `ThumbnailSource` (the review's own scenario, not a toy):
+- `:269` three window changes, nothing settled → **4** unaborted fetches, **8**
+  aborted, `inFlight` 4, and the live ids are the LAST window's;
+- `:293` an abandoned fetch that arrives late is not cached (`loaded` stays `[]`);
+- `:303` window D's `i142` loads, then window A's `i0` settles → `loaded` is
+  still `["file://142"]` and `inFlight` is unchanged (the review's exact trace);
+- `:323` unmount aborts every request still running; `:332` a signal that had
+  already fired leaves nothing running.
+The three pre-existing `drive` tests were re-pointed at `mount()`/`driver.view`
+(no assertion weakened), so M8's regression case is still covered.
+
+**RED, on the buggy code.** Two forms, because this fix replaces the API the
+review attacked:
+
+1. *Against the pre-fix module* (`git show HEAD:apps/mobile/src/thumbnails.ts`),
+   through its own per-window `drive(state, …)` API re-called across windows —
+   exactly what the module invited and what the review's trace did
+   (`.tentacle/tmp/mobile-session-view-12b/fix1-red.log`): the three cases failed
+   **on their assertions**, not on a compile error:
+
+```
+(fail) drive > a window change ABANDONS the fetches it scrolled away from (one controller each)
+(fail) drive > an abandoned fetch that arrives late is NOT cached
+       - []  + [ { id: "…0", uri: "file://stale" } ]
+(fail) drive > a settle from an EARLIER window never rolls back a later one
+       - "file://142"  + "file://0"
+ 15 pass · 3 fail
+```
+
+2. *Against the fixed module*, the final driver-shaped cases cannot compile on
+   the pre-fix source (`drive` is gone, `Request` carries a controller), so their
+   red proof is the mutation form below: reintroducing each bug in the NEW driver
+   (N1, N2) turns exactly those cases red. That is the §9 non-vacuity check for a
+   redesign — the same property, proven twice: once on the code that had it
+   broken, once by breaking it again.
+
+**Mutations (each applied to `thumbnails.ts` alone, run on the file, reverted —
+`git diff` re-checked after every revert).**
+
+| # | Mutation | Result |
+|---|---|---|
+| N1 | abandoned ids are dropped, not aborted (`pending.get(id)?.abort()` → `void id`) | **RED** — "a window change ABANDONS…" (4 vs 12 live) |
+| N2 | no identity guard on settle (`pending.get(id) !== request.controller` → `false`) | **RED** — "an abandoned fetch that arrives late is NOT cached" + "a settle from an EARLIER window never rolls back" |
+| N3 | the unmount listener is never installed (`void close`) | **RED** — "unmount aborts every request still in flight" |
+| N4 | `plan` ignores an already-aborted signal (drop the `signal.aborted` branch) | **RED** — "a signal that already fired leaves nothing running" |
+
+N1/N2 are the two findings one-for-one; N3/N4 pin the unmount reach the design
+claim rests on (non-vacuity: each mutation fails ONLY its own case, so no case is
+riding on another's fix).
+
+**Drift from the Implementation (and why).** None beyond finding 2's fix shape:
+`drive` is deleted and `plan` gained a `pending` parameter (`thumbnails.ts:119`)
+carrying the live controller table. Both are within the plan's "pure decision
+module behind an injected port" — no `packages/**` file, no protocol, no wire
+change (P11 still holds: `git diff --name-only` is `apps/mobile/src/thumbnails.ts`
+and `apps/mobile/test/thumbnails.test.ts` only).
+
+**Gate (re-run by me, after the fix).**
+
+```
+$ bunx tsc --noEmit                    # clean
+$ bunx tsc --noEmit -p apps/mobile     # clean
+$ bun run lint                         # Checked 1030 files. No fixes applied. (0 errors, 0 warnings — §6 baseline)
+$ bun test apps/mobile/test            # 192 pass · 0 fail (19 files; the 12b files alone: 96)
+$ bun test                             # 8018 pass · 3 skip · 0 fail · 13 snapshots (573 files, 346s)
+```
+
+The three skips are the §6 opt-ins. The full run was green on this round's first
+attempt (`packages/daemon/test/serve-log-store.test.ts` S11, load-flaky on the
+previous round, passed here) — but it remains load-sensitive, as round 1 wrote.
+
+**Unverified / left open.** Unchanged from Execution: the thumbnail TRANSPORT
+still does not exist (Drift 1 — no `attachment/get` in the protocol), so the
+driver's port is exercised by a fake only. Nothing here is simulator-verified;
+12c wires `createThumbnailDriver` into the screen.
