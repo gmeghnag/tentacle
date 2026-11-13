@@ -497,6 +497,190 @@ Red-before-green: flows 06–08 run against 11a's placeholder fail (no
 
 ## Execution
 
+#### 12b — the transcript model (M · contained)
+
+*— claude-opus-5-5, 2026-11-13*
+
+**Load-bearing check (re-run first).** 12b's own load-bearing items are the
+plan's Step 0 (the two libraries must run under Hermes in a Release build on the
+26.5 simulator) and P8 (`tui/src/state.ts` is pure enough to `import` test-only
+from `apps/mobile/test/`). Both PASSED, and both changed a decision:
+
+1. **P8 — the test-only TUI import works.** `bun test` resolves a relative
+   `../../../packages/tui/src/state.ts` from `apps/mobile/test/` (a bare
+   `@tentacle/tui` specifier does NOT: `apps/mobile` does not depend on it). So
+   the parity test imports the TUI's fold by path, and the app's SOURCE never
+   references `@tentacle/tui` or `@tentacle/agent` (grep-guarded below).
+
+2. **Step 0 — PASSED on the iPhone 17 Pro simulator, iOS 26.5, Release.**
+   `marked@12.0.2` + `highlight.js@11.12.0/lib/core` bundled into a Release
+   build; a temporary probe screen set one testID per question and Maestro
+   asserted them (testID-only, per P9):
+
+   ```
+   $ maestro --device 0FA4B51F… test probe.yaml
+   Launch app "so.tentacle.app" with clear state... COMPLETED
+   Assert that id: probe-marked-ok is visible... COMPLETED
+   Assert that id: probe-hljs-ok is visible... COMPLETED
+   Assert that id: probe-regex-ok is visible... COMPLETED
+   Assert that id: probe-bound-ok is visible... COMPLETED
+   ```
+
+   The probe found a real API fact the plan did not state, and the design
+   follows it: **`hljs.highlight()` THROWS on an unregistered language**
+   (`Unknown language: "nosuch"`; the first probe run was RED on exactly that
+   assertion). So `highlight.ts` gates on `languageOf` + `getLanguage` BEFORE
+   any parse — not on a `try`/`catch` around a parse that cannot finish.
+
+   Pins chosen: `marked` at the TUI's exact `12.0.2` (the plan's instruction);
+   `highlight.js` at `11.12.0` (latest 11.x — the first line that ships
+   `lib/core` with `exports` maps AND a `types/index.d.ts` covering it; the
+   in-tree `10.7.3` that `cli-highlight` drags in is not a direct dependency and
+   its `lib/core` has no typed surface). Both are `apps/mobile` entries; the
+   lockfile also gained a `cli-highlight/highlight.js@10.7.3` entry, because the
+   TUI's transitive pin is now nested rather than hoisted.
+
+   The probe file (`apps/mobile/probe-step0.tsx`) and the `index.ts` switch that
+   loaded it are **deleted / reverted**: no probe code is committed.
+
+**As built, in the plan's order.**
+
+- `apps/mobile/package.json` + `bun.lock` — `marked@12.0.2`,
+  `highlight.js@11.12.0` (dependencies; Step 0 above).
+- `apps/mobile/src/transcript-rows.ts` (new) — the row types and the two pure
+  helpers, split out so the history mapper and the fold share ONE definition
+  without an import cycle.
+- `apps/mobile/src/transcript-history.ts` (new) — the daemon's `ChatMessage[]`
+  → rows (the TUI's `messagesToItems` rules: system prompt hidden, a tentacle
+  note a notice, a context reset's separator + restart row, a tool result onto
+  its call's row, a refusal-with-a-reply `denied`).
+  **It duplicates the context-reset header string** — the plan's P8 constraint
+  (no `@tentacle/agent` in the app bundle) makes importing `restartPromptOf`
+  impossible, so the copy is pinned to the real function by a parity-test case.
+- `apps/mobile/src/transcript.ts` (new) — `State` + `apply`: `history` (replace /
+  append on a `context_reset` / keep + notice on a compaction), the turn bracket
+  (`turn_started`/`turn_ended` with `ended|cancelled|interrupted|lost|failed`),
+  `closed`, `link`, and every `SessionEvent` the client yields. Notices reuse
+  `@tentacle/core`'s own wording (`describeTruncation`/`describeEmptyTurn`/
+  `describeRepairs`), so the phone and the TUI say the same thing.
+- `apps/mobile/src/markdown.ts` (new) — `marked`'s **lexer** → an own token tree
+  (no HTML at all); a link token carries its `href` as DATA; raw HTML is a
+  `literal`; over `PARSE_MAX_CHARS` (20 000) nothing is parsed (a "chunked"
+  result with the count held back); `createParseCache` keyed by row key +
+  version.
+- `apps/mobile/src/highlight.ts` (new) — `highlight.js/lib/core` + a fixed
+  14-grammar set, → `{text, scope}` spans; unknown/absent/over-long → one plain
+  span, gated by `getLanguage` (Step 0).
+- `apps/mobile/src/diff-view.ts` (new) — a unified patch → hunks with both line
+  numbers and `add|del|ctx`; `countDiff` is the client's rule, rule for rule,
+  and the test proves it against the real `mapping.ts` on one patch; bounded at
+  400 lines / 200 000 chars.
+- `apps/mobile/src/stream-batch.ts` (new) — coalesces prose deltas into one
+  commit per ~50 ms window on an INJECTED clock; anything non-prose flushes
+  first; a reasoning→answer switch is a boundary, never a merge.
+- `apps/mobile/src/thumbnails.ts` (new) — the owner's added requirement's
+  DECISION half: only the rows a `FlatList` shows (plus `PREFETCH_ROWS` either
+  side) want bytes, one request per id, `MAX_IN_FLIGHT` 4, LRU cache 60, a
+  failure never retried. The transport is an injected `ThumbnailSource` port —
+  see Drift 1.
+- Tests (new, each named by the plan): `transcript.test.ts` (24),
+  `transcript-parity.test.ts` (4), `markdown.test.ts` (17), `highlight.test.ts`
+  (12), `diff-view.test.ts` (9), `stream-batch.test.ts` (10),
+  `thumbnails.test.ts` (15) — **91 cases, and 2 fixture files** under
+  `apps/mobile/test/fixtures/transcript/`.
+- `changelog.d/mobile-session-view-12b.added.md` — one bullet (the plan said
+  12a/12b add none, but the briefing requires a fragment and the transcript model
+  is user-visible work even before its screen renders; the fragment says so).
+
+**Drift from the Implementation (and why).**
+
+1. **Thumbnails: the requirement's transport does not exist.** The owner's
+   requirement says thumbnails are "fetched over the existing channel". They
+   cannot be: the protocol's only attachment method is `attachment/put`
+   (client → daemon), and `docs/feat/attachments-upload.md:174-177` states there
+   is deliberately "No `attachment/get` / `status` method … nothing reads bytes
+   back over the wire". A daemon also never emits an `image` content block
+   (`packages/protocol/src/content.ts:30-36` is prompt-only), so the bytes of a
+   `media_message` ref are not obtainable by ANY current client, web or phone.
+   So 12b ships what is decidable and honest:
+   - the refs ride the row (`UserRow.images`, `transcript.test.ts` proves it),
+     labelled `[image: name]` — the TUI's own `imageRowText`, pinned by a test;
+   - the visible-rows-only / no-duplicate / bounded-concurrency policy is
+     implemented and fully tested (`thumbnails.ts`), behind an injected
+     `ThumbnailSource` port.
+   **The one step this contradicts was not forced**: I did not invent a
+   read-back frame (that would break AGENTS §7 "one session path" and the
+   protocol rule), and I did not fetch bytes some other way. Adding
+   `attachment/get` is an ADDITIVE new method (no `PROTOCOL_VERSION` bump, §7
+   "Fields and methods are free") — a small follow-up task, and 12c then draws
+   the thumbnails by wiring the port. This needs an owner decision; recorded
+   rather than silently dropped.
+2. **`TurnRow` is not a row.** The plan lists `turn (running indicator)` among
+   the rows. It is `State.turn` instead: a virtualised list that gains and loses
+   an item at the end shifts every key's position twice per turn, and the
+   indicator is one element under the list. Same information, no key churn.
+3. **`version` is the text's length, not a counter.** The plan asks for "a
+   monotonically growing `version`" for the markdown cache; a counter makes the
+   batched and unbatched folds produce DIFFERENT rows (`version: 2` vs `1` for
+   the same text), which breaks the plan's own F23 equality test. Text length is
+   monotonic (deltas only append) and identical either way.
+4. **`ToolStatus` has `denied` as well as the plan's four.** The plan's row list
+   says `queued|running|ok|error|denied` and then names four; both are honoured —
+   `denied` is the refusal-with-a-reply state (`ToolResult.denialReply`), which
+   the TUI also distinguishes.
+5. **Reasoning is a row here, a spinner flag in the TUI.** So row-for-row parity
+   is impossible on that one kind; the parity test normalises it explicitly
+   (reasoning rows are skipped, and two assistant rows split AT a reasoning row
+   are joined) and still fails on any other divergence — proved by mutation M2.
+
+**Mutations (each run, red, then reverted).**
+
+| # | Target (the plan's own mutation) | Result |
+|---|---|---|
+| M1 | fold branches on `own` (`text` dropped for a foreign turn) | **RED** — `transcript.test.ts`: "an OWN and a FOREIGN turn produce identical rows" |
+| M2 | drop the reasoning→assistant boundary in the app's fold | **RED** — `transcript-parity.test.ts` (both fixtures) + `transcript.test.ts` "a reasoning chunk ends it" (2 fail) |
+| M3 | `PARSE_MAX_CHARS` = `Number.MAX_SAFE_INTEGER` (no size bound) | **RED** — `markdown.test.ts` size-bound block (3 fail) |
+| M4 | no `getLanguage` gate (parse-and-catch, unknown alias treated as registered) | **RED** — `highlight.test.ts` "a language whose name collides with no grammar" |
+| M5 | `countDiff` counts `+++`/`---` file headers as changes | **RED** — `diff-view.test.ts` counts block (2 fail, incl. the real `mapping.ts` case) |
+| M6a | no coalescing (every delta its own commit) | **RED** — `stream-batch.test.ts` window block (2 fail) |
+| M6b | merge across a reasoning→answer boundary | **RED** — `stream-batch.test.ts` equality + boundary (3 fail) |
+| M7 | fetch every image in the whole history (not only visible rows) | **RED** — `thumbnails.test.ts` visible-window block (2 fail) |
+| M8 | `drive` applies each outcome to the pre-`plan` state (a real bug the test caught) | **RED** — `thumbnails.test.ts` drive block (3 fail) |
+
+M8 is worth naming: it was not a hypothetical mutation — the first
+`thumbnails.test.ts` run found that two thumbnails landing in the same tick
+overwrote each other, because `drive` closed over the state `plan` returned.
+Fixed by settling each outcome onto the LATEST state, and the test that caught it
+is kept ("two answers landing together both land").
+
+**Gate.**
+
+```
+$ bunx tsc --noEmit                    # clean
+$ bunx tsc -p apps/mobile              # clean
+$ bun run lint                         # Checked 1030 files. No fixes applied.   (0 errors, 0 warnings — the §6 baseline)
+$ bun test                             # 8013 pass · 3 skip · 0 fail · 13 snapshots (573 files)
+$ bun test apps/mobile/test             # 187 pass, 0 fail (the 11a/12b files together;
+                                        #   the 12b files alone: 91)
+```
+
+No schema changed, so `packages/protocol/schema/protocol.json` was NOT
+regenerated (nothing in `packages/**` is touched — plan P11, re-verified: the
+diff is `apps/mobile/**`, `bun.lock` and the changelog fragment only).
+
+Gate honesty: one FULL run failed
+`packages/daemon/test/serve-log-store.test.ts` "S11 — a real SIGKILL at random
+points" (`loads` 0, expected > 100) — and it failed on TWO of the four full runs
+I did, always under the parallel load of the whole suite. It is a
+wall-clock/load-sensitive restart test, in a package this slice does not touch;
+it passes alone (3/3 runs) and the full suite passed twice (8013 pass · 3 skip ·
+0 fail). Not caused by, and not fixed by, 12b — but the reviewer should know it
+is load-flaky rather than watertight.
+
+**Unverified / left open.** The real thumbnail transport (Drift 1) — needs
+`attachment/get` and an owner decision. 12c renders these rows on the simulator;
+nothing in 12b is simulator-verified beyond Step 0's probe.
+
 ## Review
 
 #### Owner answers (2026-11-13)

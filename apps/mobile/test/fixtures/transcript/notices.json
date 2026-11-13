@@ -1,0 +1,15 @@
+{
+  "name": "notice-producing-events",
+  "events": [
+    { "type": "turn_started", "turnId": "t2", "own": false },
+    { "type": "text", "delta": "partial answer" },
+    { "type": "context_note", "text": "a hook injected this", "reason": "hook" },
+    { "type": "context_note", "text": "the loop's own nudge", "reason": "continue" },
+    { "type": "dsml_leak", "text": "the model wrote a tool call as text" },
+    { "type": "empty_turn" },
+    { "type": "history_repaired", "invalidArguments": 1, "unansweredCalls": 2, "orphanResults": 0 },
+    { "type": "unsupported", "kind": "brand_new_update" },
+    { "type": "steer", "text": "also check b.txt" },
+    { "type": "turn_ended", "outcome": "ended" }
+  ]
+}

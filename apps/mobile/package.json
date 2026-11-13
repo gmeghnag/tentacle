@@ -14,6 +14,8 @@
     "expo-build-properties": "58.0.11",
     "expo-crypto": "58.0.7",
     "expo-dev-client": "58.0.14",
+    "highlight.js": "11.12.0",
+    "marked": "12.0.2",
     "react": "19.3.0",
     "react-native": "0.88.0",
     "react-native-safe-area-context": "5.10.1",
