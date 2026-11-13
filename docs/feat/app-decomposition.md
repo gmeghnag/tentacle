@@ -1500,3 +1500,44 @@ no regressions.
 
 *— claude-opus-5-5, 2026-11-13* (fresh context; different family from the
 deepseek executor)
+
+## Review
+
+### S0b review — REQUEST-CHANGES
+
+Scope: `git diff main...HEAD` (5 test files, changelog fragment, doc). Gate:
+5 structural files **17 pass / 0 fail**; `bun run lint` clean (1018 files);
+`bun run typecheck` clean. No `src/` change. The full suite was not re-run.
+My own mutation runs were **blocked by tool permission**, so this review
+mutated nothing. The 12-row table is the executor's word, not something I
+checked.
+
+1. **MEDIUM: an M4 mutant the plan requires was replaced, and the swap is not
+   recorded.** The plan (M4) asks for `panelRef.current` → `panel` at the
+   handler's ref read, and says a survivor is a hole to close before S4. The
+   only ref read still in a handler is `packages/tui/src/App.tsx:3427` (the
+   held-`[` timer flush, `!panelRef.current`). M4c mutates the opposite way
+   (`panel` → `panelRef`). No test holds a `[` while a panel opens or closes
+   inside the 100 ms window, so the plan's mutant would very likely survive.
+   The doc lists this without any drift note.
+2. **MEDIUM: plan rows are missing while Execution says the rows are complete.**
+   The H3 matrix names 7 rows, including "paste with a panel open". Execution
+   says "the five rows the plan names, plus a sixth". No structural test
+   pastes anything (`grep -i paste` finds nothing). M3 asks for a pill click
+   after the dock opens and after an attach row appears; only rest and running
+   are tested (`app-structural-sgr.test.tsx:182`), and only the queued gap is
+   recorded.
+3. **MEDIUM: the changelog fragment breaks §10.** The task is tests only, and
+   "internal/dev/test-only work adds no fragment"
+   (`changelog.d/app-decomp-0b-structural.added.md`). Delete it.
+4. **MEDIUM: the executor signature does not match the commit.** Execution is
+   signed `claude-sonnet-4-5`, but commit `ba9a964` says "exec (deepseek)".
+   §10 asks for honest model signatures. Correct whichever is wrong.
+
+Attacks tried: the §7 "logic in pure modules" and "TUI over RPC" invariants
+are untouched (tests only, no src). `[<0;5` with no ESC is fine because Ink
+strips the ESC before the handler sees it. Order/identity/freshness tests read
+as asserting the property, not a correlate. The tree is clean after review.
+
+*— claude-opus-5-5, 2026-11-13* (fresh context; different family from the
+executor, whichever of the two named it is)
