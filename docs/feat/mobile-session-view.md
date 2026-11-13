@@ -686,3 +686,25 @@ nothing in 12b is simulator-verified beyond Step 0's probe.
 #### Owner answers (2026-11-13)
 
 All questions answered as recommended. Implementation APPROVED. Added owner requirement: image attachments (media_message refs) are shown in the transcript (12b model + 12c screen; thumbnails fetched over the existing channel, never auto-downloaded beyond the visible rows).
+
+#### 12b review
+
+**Verdict: REQUEST-CHANGES** (two MEDIUM findings, both in `thumbnails.ts`, the module for the owner's image requirement).
+
+1. **MEDIUM: `MAX_IN_FLIGHT` and "abort off-window" don't hold** (`apps/mobile/src/thumbnails.ts:115-127`, `:189-191`). Every request gets the same shared `controller` signal, so the ids `plan` puts in `abort` can't be cancelled one by one. They are only dropped from `inFlight`, and their fetches keep running. Trace (`.tentacle/tmp/mobile-session-view-12b/drive.ts`): four window changes with nothing settled leave **16 fetches open, while `state.inFlight` says 4**. This breaks the bound, and it breaks "never downloaded beyond the visible rows". A stale fetch that lands later is also cached (`i0` ends up in `loaded` after the user has scrolled away).
+2. **MEDIUM: a stale `drive` overwrites newer state** (`thumbnails.ts:183-192`). The M8 fix only covers settles *within one* `drive` call. Each call has its own `current`, so a settle from an earlier window writes `loaded(current_old, …)` over everything later calls produced. Trace: window D's thumbnail `i142` loads, then a window-A fetch settles, and `loaded` becomes `["i0"]` (`i142` is lost) and `inFlight` becomes A's `["i1","i2","i3"]`. A visible thumbnail disappears and D's ids get requested again. No test calls `drive` twice with fetches still pending, which is why mutation M8 didn't catch this.
+   Fix direction for both: one AbortController per request, and settle through a state getter or reducer instead of a captured `current`. Add red tests for both cases.
+
+**Gate (re-run by the reviewer):** the seven 12b test files ran 91 pass / 0 fail; `bun run lint` clean (1030 files); `bun run typecheck` clean. I did not re-run the full `bun test`.
+
+**Premises checked:** Drift 1 is true: the only attachment method is `attachment/put` (`packages/protocol/src/methods.ts:112`), and `attachments-upload.md:175-176` says nothing reads bytes back. The diff touches no `packages/**` file, so no protocol, persistence or broker invariant is involved (P11 holds).
+
+**Attacks tried:**
+- (a) Own mutation `denied`→`error` in `transcript.ts:409-410`: red (1 fail in `transcript.test.ts`), reverted, tree clean.
+- (b) Thumbnail driver across several windows: found 1 and 2.
+- (c) `stream-batch.ts`: order kept (non-prose flushes first) and prose kinds never merged across each other. Nothing found.
+- (d) Owner image requirement: the refs ride `UserRow.images`. The missing transport is reported honestly as drift, not faked.
+
+**Executor:** disciplined and honest. The drift is documented, and the flaky full-suite test is disclosed. The gap: the M8 fix was tested inside one `drive` call only.
+
+*— claude-opus-5-5, 2026-11-13* (fresh context). The Execution section is signed claude-opus-5-5, but commit `b6de752` says "exec (deepseek)". The executor's real identity is unclear and should be corrected.
