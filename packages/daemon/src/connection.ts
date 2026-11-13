@@ -23,6 +23,8 @@ import {
   type DeleteResult,
   type DetachParams,
   type DetachResult,
+  type DevicePairParams,
+  type DevicePairResult,
   type EnqueueParams,
   type EnqueueResult,
   type HooksTrustResult,
@@ -74,6 +76,7 @@ import {
   RpcPeer,
 } from "@tentacle/transport";
 import type { Attachment, HostedSession } from "./hosted-session.ts";
+import { type PairHandler, pairingRefusedError } from "./pairing-handler.ts";
 import type { SessionHost } from "./session-host.ts";
 import { versionMismatch } from "./version-mismatch.ts";
 
@@ -100,13 +103,14 @@ export interface ConnectionOptions {
    */
   readonly servesModel?: boolean;
   /**
-   * WHO this connection is (docs/feat/device-pairing.md 9b). Absent = a token
+   * WHO this connection is (docs/feat/device-pairing.md 9b/9c). Absent = a token
    * client, today's behaviour: every method. A `device` has exactly the same
    * rights (one user, many devices — decision 5): the socket's key already
    * decided it, and revocation lives in the ws-server's per-device map, not
    * here. A `pairing` connection may do ONE thing — `device/pair` (9c) — and
    * `initialize`; everything else is `Unauthorized`, which is what makes an
-   * unregistered peer during a pairing window harmless (F16).
+   * unregistered peer during a pairing window harmless (F16). Its `pair`
+   * handler is per connection: the attempt cap belongs to the socket.
    */
   readonly principal?: ConnectionPrincipal;
 }
@@ -118,7 +122,8 @@ export interface ConnectionOptions {
 export type ConnectionPrincipal =
   | { readonly kind: "token" }
   | { readonly kind: "device"; readonly id: string }
-  | { readonly kind: "pairing" };
+  /** An unregistered key admitted during a pairing window: only `device/pair`. */
+  | { readonly kind: "pairing"; readonly pair: PairHandler };
 
 /** The two tunnel requests of a model-serving connection (the pod reverse-tunnel). */
 export type ModelLink = Pick<Connection, "requestModelStream" | "requestModelStreamChunked"> &
@@ -261,10 +266,13 @@ export class Connection {
     if (!this.initialized) {
       throw new RpcError(DomainErrorCode.NotInitialized, "initialize before any other method");
     }
+    if (method === Method.DevicePair) {
+      return this.devicePair(this.principal, params as DevicePairParams, context?.signal);
+    }
     // A pairing connection may do exactly nothing else (F16): its peer is an
     // UNREGISTERED key, admitted only so it can prove the one-time code. The
     // method gate is here, on the daemon's own side (never the pod's, never
-    // the client's), and `device/pair` itself lands in 9c.
+    // the client's).
     if (this.principal.kind === "pairing") {
       throw new RpcError(
         DomainErrorCode.Unauthorized,
@@ -460,6 +468,28 @@ export class Connection {
     text: string,
   ): SubagentMessageResult {
     return hosted.messageSubagent(agentId, text);
+  }
+
+  /**
+   * `device/pair` — the ONLY request a pairing connection may make (9c). It is
+   * answered from the principal's own handler, so the key that gets registered
+   * is the one THIS socket authenticated as, and the attempt cap is this
+   * socket's. A token or `device` principal has nothing to pair: refused with
+   * `already_paired` (a paired phone re-pairing is a new key or `revoke`).
+   */
+  private async devicePair(
+    principal: ConnectionPrincipal,
+    params: DevicePairParams,
+    signal: AbortSignal | undefined,
+  ): Promise<DevicePairResult> {
+    if (principal.kind !== "pairing") {
+      throw pairingRefusedError("already_paired");
+    }
+    const outcome = await principal.pair.pair(params, signal);
+    if (!outcome.ok) {
+      throw pairingRefusedError(outcome.reason);
+    }
+    return outcome.result;
   }
 
   private initialize(params: InitializeParams): InitializeResult {
