@@ -19,11 +19,13 @@ import {
   type AttachDraft,
   type AttachMode,
   EMPTY_DRAFT,
+  NOT_AN_IMAGE_NOTICE,
   NO_IMAGE_SEAM,
   attachErrorText,
   attachRowRows,
   attachRowView,
   draftRefs,
+  imageDropOnly,
   imageRowText,
   looksLikeCommand,
   removeLastChip,
@@ -841,6 +843,11 @@ export function App({
   useEffect(() => {
     return () => {
       attachGenRef.current += 1; // a decision landing after this is ignored
+      // Nothing is left half-sent on a quit either: an upload in flight is
+      // aborted, exactly as Esc aborts it (the failure table's "unmount mid-
+      // upload" row; review round 1, finding 3).
+      uploadCtrlRef.current?.abort();
+      uploadCtrlRef.current = null;
     };
   }, []);
   // Esc aborts an upload in flight (decision 7's neighbour: nothing is left half-sent).
@@ -1936,7 +1943,11 @@ export function App({
         if (gen !== attachGenRef.current) {
           return; // unmounted while the disk was read
         }
-        const routed = routeDecision(attachRef.current, decision, attachMode());
+        // The paste's own text comes back when the decision is `text` (a missing
+        // path, a directory, a source file): the 3a rule is that the WHOLE paste
+        // stays text, and dropping it silently would lose what was pasted
+        // (review round 1, finding 1).
+        const routed = routeDecision(attachRef.current, decision, attachMode(), text);
         setAttach(routed.draft);
         if (routed.insert !== undefined) {
           field.insert(routed.insert);
@@ -1996,6 +2007,13 @@ export function App({
         const routed = routeDecision(attachRef.current, decision, attachMode());
         setAttach(routed.draft);
         showNotices(routed.notices);
+        // A typed drag whose bytes are NOT an image: the text goes back and says
+        // why, instead of a cleared field that sent nothing (review round 1,
+        // finding 1).
+        if (decision.kind === "text") {
+          restoreInput(text, NOT_AN_IMAGE_NOTICE);
+          return;
+        }
         // Said only when something WAS attached: a refusal already spoke.
         if (routed.draft.chips.length > attachRef.current.chips.length) {
           pushNotice(
@@ -2004,7 +2022,7 @@ export function App({
         }
       });
     },
-    [attachMode, fileProbe, home, pushNotice, setAttach, showNotices],
+    [attachMode, fileProbe, home, pushNotice, restoreInput, setAttach, showNotices],
   );
   /**
    * Send the prompt with the draft's chips: every chip goes through the
@@ -2050,12 +2068,20 @@ export function App({
         if (gen !== attachGenRef.current) {
           return;
         }
+        // The upload is over: Esc must go back to stopping the TURN, not abort a
+        // finished controller (review round 1, finding 3).
+        if (uploadCtrlRef.current === controller) {
+          uploadCtrlRef.current = null;
+        }
         setAttach((draft) => uploadDone({ ...draft, chips: [] }));
         await runRef.current?.(text, { attachments: refs, images: chips });
       };
       upload().catch((error: unknown) => {
         if (gen !== attachGenRef.current) {
           return;
+        }
+        if (uploadCtrlRef.current === controller) {
+          uploadCtrlRef.current = null;
         }
         // The chips stay (bytes included): Enter uploads them again.
         setAttach((draft) => uploadDone(draft));
@@ -3567,9 +3593,7 @@ export function App({
         compacting: compactingRef.current,
         dockOpen: false, // `submitToTarget` already took a child-owned text
         mode: attachMode(),
-        onlyPaths:
-          !looksLikeCommand(text) &&
-          attachmentCandidateText(text, home !== undefined ? { home } : {}).kind === "paths",
+        onlyPaths: imageDropOnly(text, home !== undefined ? { home } : {}),
       });
       if (plan.kind === "refuse") {
         pushNotice(plan.notice);
@@ -4056,8 +4080,10 @@ export function App({
     // Esc aborts an upload in flight (docs/feat/attachments-tui.md: nothing is
     // left half-sent); the chips stay and the failure path says "upload cancelled".
     if (key.escape && uploadCtrlRef.current !== null) {
-      uploadCtrlRef.current.abort();
+      const ctrl = uploadCtrlRef.current;
       uploadCtrlRef.current = null;
+      setAttach((draft) => uploadDone(draft)); // the row goes now, not at the catch
+      ctrl.abort();
       return;
     }
     if (key.escape && stateRef.current.running && abortRef.current) {

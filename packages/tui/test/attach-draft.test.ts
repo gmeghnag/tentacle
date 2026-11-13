@@ -11,11 +11,13 @@ import {
   type AttachMode,
   EMPTY_DRAFT,
   NO_IMAGE_SEAM,
+  UPLOADING_NOTICE,
   attachErrorText,
   attachRowRows,
   attachRowView,
   chipLabel,
   draftRefs,
+  imageDropOnly,
   imageRowText,
   looksLikeCommand,
   removeLastChip,
@@ -217,6 +219,36 @@ describe("submitPlan", () => {
     ).toMatchObject({
       kind: "send",
     });
+  });
+
+  test("an upload in flight refuses every Enter, so one prompt is never sent twice", () => {
+    // Review round 1, finding 2: while the chips upload, `running` is still
+    // false, so Enter planned a SECOND send with the same chips.
+    const draft: AttachDraft = {
+      ...draftWith(chipOf("a.png")),
+      upload: { index: 0, count: 1, name: "a.png", sent: 1, size: 10 },
+    };
+    const plan = submitPlan({ ...base, text: "q2", draft });
+    expect(plan.kind).toBe("refuse");
+    if (plan.kind === "refuse") expect(plan.notice).toBe(UPLOADING_NOTICE);
+    // …even for an image-only prompt, and even with no chips text at all.
+    expect(submitPlan({ ...base, text: "", draft }).kind).toBe("refuse");
+  });
+});
+
+describe("imageDropOnly (which Enter may convert, decision 5)", () => {
+  test("only paths that CLAIM an image are a drag", () => {
+    for (const text of ["/tmp/a.png", "'~/Pictures/Shot 1.jpeg'", "/tmp/a.png /tmp/b.webp"]) {
+      expect(imageDropOnly(text, { home: "/home/u" })).toBe(true);
+    }
+  });
+
+  test("a typed non-image path is NOT a drag: Enter sends it as a message", () => {
+    // Review round 1, finding 1: this used to convert, probe, decide `text` and
+    // clear the field with nothing sent and nothing said.
+    for (const text of ["~/notes.md", "/w/a.txt", "/w/b.txt", "hi there", "/compact", ""]) {
+      expect(imageDropOnly(text, { home: "/home/u" })).toBe(false);
+    }
   });
 });
 

@@ -587,3 +587,158 @@ describe("the chip is removable and Esc aborts an upload", () => {
     m.unmount();
   });
 });
+
+describe("fix round 1, finding 1: a path that is not an image never swallows the user's text", () => {
+  test("a pasted missing path stays in the input (the 3a 'whole paste stays text' rule)", async () => {
+    const session = fakeSession({});
+    const m = mount(session, { files: { [PNG_PATH]: PNG } });
+    await delay(30);
+    await m.paste("~/missing.md");
+    const frame = m.frame();
+    expect(frame).toContain("missing.md");
+    expect(session.sent).toEqual([]);
+    m.unmount();
+  });
+
+  test("a pasted directory or source file stays in the input too", async () => {
+    const session = fakeSession({});
+    const m = mount(session, {
+      files: { "/w/a.txt": new Uint8Array([104, 105]), "/w/b.txt": new Uint8Array([104, 105]) },
+    });
+    await delay(30);
+    await m.paste("/w/a.txt /w/b.txt");
+    expect(m.frame()).toContain("/w/a.txt");
+    expect(session.sent).toEqual([]);
+    m.unmount();
+  });
+
+  test("a typed drop whose partner is not an image keeps the text (and says why)", async () => {
+    // `imageDropOnly` says "a drag" (a.png claims an image), but 3a's rule makes
+    // the WHOLE text stay text: it must come back, with an explanation.
+    const session = fakeSession({});
+    const m = mount(session, {
+      files: { [PNG_PATH]: PNG, "/w/b.txt": new Uint8Array([104, 105]) },
+    });
+    await delay(30);
+    await m.type(`${PNG_PATH} /w/b.txt`);
+    const frame = m.frame();
+    expect(frame).toContain("not an image");
+    expect(frame).toContain("/w/b.txt"); // back in the input, not lost
+    expect(session.sent).toEqual([]);
+    m.unmount();
+  });
+
+  test("a TYPED non-image path + Enter sends it as a message, never a silent clear", async () => {
+    // Review finding 1's second half: `convertToChips` probed, got `text`, and
+    // cleared the field with nothing sent and nothing said.
+    const session = fakeSession({});
+    const m = mount(session, { files: { [PNG_PATH]: PNG } });
+    await delay(30);
+    await m.type("~/notes.md");
+    expect(session.sent).toHaveLength(1);
+    expect(session.sent[0]?.prompt).toBe("~/notes.md");
+    m.unmount();
+  });
+});
+
+describe("fix round 1, finding 2: Enter during an upload never sends the prompt twice", () => {
+  test("a second Enter while the chip uploads is refused; exactly one send", async () => {
+    const finished: (() => void)[] = [];
+    const session = fakeSession({
+      attach: async (bytes, meta) => {
+        await new Promise<void>((resolve) => finished.push(resolve));
+        return {
+          id: "f".repeat(64),
+          mimeType: meta.mimeType,
+          size: bytes.length,
+          ...(meta.name !== undefined ? { name: meta.name } : {}),
+        };
+      },
+    });
+    const m = mount(session, { files: { [PNG_PATH]: PNG } });
+    await delay(30);
+    await m.paste(PNG_PATH);
+    m.stdin.write("q1");
+    await delay(20);
+    m.stdin.write(ENTER); // starts the upload
+    await delay(120);
+    m.stdin.write("q2");
+    await delay(20);
+    m.stdin.write(ENTER); // during the upload: refused, not a second send
+    await delay(80);
+    expect(m.frame()).toContain("still uploading");
+    for (const f of finished.splice(0)) f();
+    await delay(150);
+    expect(session.sent).toHaveLength(1);
+    expect(session.sent[0]?.prompt).toBe("q1");
+    expect(session.sent[0]?.attachments).toHaveLength(1);
+    m.unmount();
+  });
+});
+
+describe("fix round 1, finding 3: the first Esc after an image prompt stops the turn", () => {
+  test("a finished upload leaves no controller for Esc to swallow", async () => {
+    let aborted = 0;
+    const session: SessionController = {
+      send(_prompt, signal) {
+        return (async function* (): AsyncIterable<SessionEvent> {
+          // A turn that only ends when it is aborted.
+          await new Promise<void>((resolve) => {
+            if (signal?.aborted === true) {
+              aborted += 1;
+              resolve();
+              return;
+            }
+            signal?.addEventListener(
+              "abort",
+              () => {
+                aborted += 1;
+                resolve();
+              },
+              { once: true },
+            );
+          });
+          yield { type: "turn_end", reason: "cancelled" as never };
+        })();
+      },
+      imageInput: () => ({ kind: "upload" as const, maxBytes: 4 * 1024 * 1024 }),
+      attachImage: async (bytes, meta) => ({
+        id: "a".repeat(64),
+        mimeType: meta.mimeType,
+        size: bytes.length,
+        ...(meta.name !== undefined ? { name: meta.name } : {}),
+      }),
+    };
+    const m = mount(session, { files: { [PNG_PATH]: PNG } });
+    await delay(30);
+    await m.paste(PNG_PATH);
+    m.stdin.write("q");
+    await delay(20);
+    m.stdin.write(ENTER);
+    await delay(200); // the upload finished long ago
+    await m.press(ESC); // the FIRST Esc must reach the turn
+    expect(aborted).toBe(1);
+    m.unmount();
+  });
+
+  test("unmounting mid-upload aborts it (nothing left half-sent)", async () => {
+    let signal: AbortSignal | undefined;
+    const session = fakeSession({
+      attach: (_bytes, _meta, o) =>
+        new Promise<AttachmentRef>(() => {
+          signal = o?.signal;
+        }),
+    });
+    const m = mount(session, { files: { [PNG_PATH]: PNG } });
+    await delay(30);
+    await m.paste(PNG_PATH);
+    m.stdin.write("what?");
+    await delay(20);
+    m.stdin.write(ENTER);
+    await delay(120);
+    expect(signal?.aborted).toBe(false);
+    m.unmount();
+    await delay(40);
+    expect(signal?.aborted).toBe(true);
+  });
+});

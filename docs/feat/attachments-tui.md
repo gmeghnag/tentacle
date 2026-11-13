@@ -575,6 +575,113 @@ bun test                   → 7503 pass · 3 skip · 0 fail (7506 tests, 537 fi
   opt-in live suites stay skipped). The seam it depends on is the same
   `PersistingController` forward pinned by T7.
 
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-13*
+
+Review round 1 raised 3 findings (2 HIGH, 1 MEDIUM). All three were reproduced
+first, with the reviewer's `repro.test.ts` (real `App`, fake probe/session) on
+`.tentacle/tmp/attachments-tui/`:
+
+```
+bun test repro.test.ts        → B FAIL (frame: empty input)
+                                C FAIL (sent: [{"q1",1},{"q2",1}])
+                                D FAIL (aborted after one Esc: 0)
+                                A pass (prose paste was never the bug)
+```
+
+**Finding 1 (HIGH) — a non-image path is swallowed.** Root cause: the two
+callers that route a decided paste/convert never handed the pasted text back, so
+a `{kind:"text"}` decision (missing file, directory, source file) had nothing to
+insert; `convertToChips` additionally probed text that could only ever become a
+message.
+
+- `App.tsx` `routeAttach`: `routeDecision(attachRef.current, decision, attachMode(), text)`
+  — the pasted text is the `insert` a `text` decision yields.
+- `App.tsx` `convertToChips`: a `text` decision now puts the text BACK with
+  `NOT_AN_IMAGE_NOTICE` instead of leaving an empty field and no message.
+- `attach-draft.ts` `imageDropOnly(text, {home})` (new, pure): Enter only
+  converts a drag whose paths CLAIM an image (`claimsImagePath`); `submit` uses
+  it instead of `!looksLikeCommand(text) && candidate.kind === "paths"`. This is
+  why a typed `~/notes.md` + Enter now sends as a message (the failure-table
+  row's other half) while `/tmp/a.png` still converts.
+- `NOT_AN_IMAGE_NOTICE`, `UPLOADING_NOTICE` exported from `attach-draft.ts` so
+  the one sentence lives with the decision, not in the App.
+
+**Finding 2 (HIGH) — Enter during an upload sent twice.** Root cause:
+`submitPlan` did not look at `draft.upload`, and `state.running` is still false
+while chips upload, so the second Enter planned a second `send` with the same
+chips (and overwrote `uploadCtrlRef`, making the first upload uncancellable).
+
+- `attach-draft.ts` `submitPlan`: `draft.upload !== null` → `{kind:"refuse",
+  notice: UPLOADING_NOTICE}`, before the chips branch, so it covers an
+  image-only Enter too. Pure, so pinned without a terminal.
+
+**Finding 3 (MEDIUM) — the first Esc after an image prompt did not stop the
+turn.** Root cause: `uploadCtrlRef` was never cleared once the upload finished,
+so the Esc branch (`uploadCtrlRef.current !== null`) aborted a dead controller
+and returned before the "stop the running turn" branch. The failure table's
+"upload aborted on unmount" row was also unimplemented.
+
+- `App.tsx` `sendWithImages`: both the success and the catch paths clear
+  `uploadCtrlRef` when it is still THEIR controller (so a newer upload is never
+  clobbered).
+- `App.tsx` the unmount effect: aborts an upload in flight, like Esc.
+- `App.tsx` the Esc branch: clears the row through `uploadDone` as it aborts, so
+  the upload row goes immediately instead of at the catch.
+
+**Drift from the Implementation:** none in shape. Two additive lines the review
+implies but the plan did not spell out: `imageDropOnly` (the convert predicate
+moved to the pure module, per §7 — it was inline in `submit`) and the unmount
+abort. `attachMode`'s two-branch `NO_IMAGE_SEAM` ternary (pre-existing, a
+no-op) was left untouched: not a finding, not this round's scope.
+
+**Tests (red before green, per finding).** Each was run RED on the un-fixed code
+and is green after:
+
+| Finding | Test | Red as |
+|---|---|---|
+| 1 | `attach-app` "a pasted missing path stays in the input" | `missing.md` absent from the frame |
+| 1 | `attach-app` "a pasted directory or source file stays in the input too" | `/w/a.txt` absent |
+| 1 | `attach-app` "a typed drop whose partner is not an image keeps the text" | no notice, text lost |
+| 1 | `attach-app` "a TYPED non-image path + Enter sends it as a message" | `sent: []` |
+| 1 | `attach-draft` "a typed non-image path is NOT a drag" | `imageDropOnly` → `false` (absent) |
+| 2 | `attach-app` "a second Enter while the chip uploads is refused" | `sent.length === 2` |
+| 2 | `attach-draft` "an upload in flight refuses every Enter" | `kind: "send"` |
+| 3 | `attach-app` "a finished upload leaves no controller for Esc to swallow" | `aborted === 0` |
+| 3 | `attach-app` "unmounting mid-upload aborts it" | `signal.aborted === false` |
+
+**Mutations (each fix reverted alone, the named tests re-run, then restored
+byte-identical from `.tentacle/tmp/attachments-tui/*.fixed`):**
+
+| Mutation | Files | Result |
+|---|---|---|
+| M1 `routeDecision(…)` drops its `text` argument | `App.tsx` | finding-1 paste tests RED (2/26) |
+| M2 `onlyPaths` back to the `candidate.kind === "paths"` predicate | `App.tsx` | "TYPED non-image path" RED (1/72) |
+| M3 `submitPlan` drops the `upload !== null` branch | `attach-draft.ts` | finding-2 App + pure tests RED (2/72) |
+| M4 no `uploadCtrlRef` clear after a successful upload | `App.tsx` | "first Esc" RED (1/26) |
+| M5 no abort on unmount | `App.tsx` | "unmounting mid-upload" RED (1/26) |
+| M6 `convertToChips` drops the `text` restore | `App.tsx` | "typed drop whose partner is not an image" RED (1/26) |
+
+Mutation M3 also proves the pure test is not vacuous on the App test (both go
+red together, on the same property). Every mutation was reverted and confirmed
+by `diff` against the saved fixed copy (`restored`, no output).
+
+**Gate:**
+
+```
+bunx tsc --noEmit          → clean (exit 0, no output)
+bun run lint               → Checked 951 files, no fixes applied (0 errors, 0 warnings — §6 baseline)
+bun test                   → 7513 pass · 3 skip · 0 fail (7516 tests, 537 files)
+                             the 3 skips are the opt-in ones (live-k8s, live-docker, slow keepalive)
+```
+
+**Not verified (stated, not claimed):** the reviewer's repro file stays in
+`.tentacle/tmp` (gitignored, so its 4 cases are reproduced above as real tests in
+`attach-app.test.tsx`/`attach-draft.test.ts` instead). A real terminal drag after
+these fixes is still the owner's manual check, unchanged from round 0.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-12* (fresh context; a different model family from the executor)

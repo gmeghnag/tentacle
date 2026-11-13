@@ -13,6 +13,7 @@
  * stays outside) and `refusalText`. This module never reads a file.
  */
 import { MAX_ATTACHMENTS_PER_MESSAGE, formatBytes } from "@tentacle/core";
+import { attachmentCandidateText } from "./attach-candidates.ts";
 import type { AttachedImage } from "./attach-files.ts";
 import { type AttachRefusal, claimsImagePath, refusalText } from "./attach-refusal.ts";
 
@@ -170,14 +171,33 @@ export interface SubmitInput {
   readonly onlyPaths: boolean;
 }
 
+/** Enter while an upload runs: nothing new starts (the upload's own send follows). */
+export const UPLOADING_NOTICE =
+  "_an image is still uploading — wait for it to finish, or press Esc to cancel_";
+
+/**
+ * A typed drag whose bytes turned out NOT to be an image: the text goes back to
+ * the input and says why, so nothing is silently swallowed — and the next Enter
+ * sends it as a message instead of probing the disk again.
+ */
+export const NOT_AN_IMAGE_NOTICE =
+  "_that is not an image — the text is kept; Enter again sends it as a message_";
+
 /**
  * Enter's plan. Enter WITH chips is never queued: enqueue/steer are text-only
  * (2b decision 9), so dropping the images silently is the one thing forbidden —
  * the chips are refused and kept (decision 7). Images OFF with chips is a
  * refusal too: the mode changed under them (a reconnect), and the reason is the
  * honest answer instead of an upload that would fail at the seam.
+ *
+ * An upload in flight refuses EVERY Enter: the send that follows the upload is
+ * already decided, so a second one would upload the same chips again and send
+ * the prompt twice (review round 1, finding 2).
  */
 export function submitPlan(input: SubmitInput): SubmitPlan {
+  if (input.draft.upload !== null) {
+    return { kind: "refuse", notice: UPLOADING_NOTICE };
+  }
   if (input.draft.chips.length === 0) {
     return input.onlyPaths ? { kind: "convert" } : { kind: "text" };
   }
@@ -224,6 +244,25 @@ export function looksLikeCommand(text: string): boolean {
   // A bare word, or a command with arguments: a command. Several words whose
   // first one is itself a nested path (`/Users/me/Shot 1.png`) is a drag.
   return rest.length === 0 || !first.slice(1).includes("/");
+}
+
+/**
+ * Is this text an unbracketed DRAG that Enter should probe — decision 5's
+ * `convert`?
+ *
+ * Only paths, and at least one of them CLAIMS an image by its extension: the
+ * same fact `looksLikeCommand` rests on (a dragged file keeps its extension in
+ * every terminal's form). Without it a typed `~/notes.md` + Enter would clear
+ * the field, probe the disk and say nothing — a sent message silently lost
+ * (review round 1, finding 1). A path with no image extension keeps today's
+ * meaning: text to send.
+ */
+export function imageDropOnly(text: string, options: { readonly home?: string } = {}): boolean {
+  if (looksLikeCommand(text)) {
+    return false;
+  }
+  const candidate = attachmentCandidateText(text, options);
+  return candidate.kind === "paths" && candidate.paths.some(claimsImagePath);
 }
 
 /**
