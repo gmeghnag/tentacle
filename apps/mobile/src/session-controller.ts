@@ -101,6 +101,12 @@ export function createSessionController<S extends SessionHandle>(
   const live = new Map<string, { readonly session: S; readonly unwatch: () => void }>();
   /** Per id: the settle of the last operation, so the next one starts after it. */
   const tails = new Map<string, Promise<unknown>>();
+  /**
+   * Per id: a `leave` was asked for and its detach has not settled yet. The open
+   * that is still attaching must NOT register it (a fast back-then-forward, and
+   * the common tap-then-back during a 30 s attach): it detaches instead.
+   */
+  const left = new Set<string>();
   let disposed = false;
 
   /** Run `run` after everything already queued for `id` has settled. */
@@ -142,9 +148,11 @@ export function createSessionController<S extends SessionHandle>(
       } catch (error) {
         return { ok: false, reason: openFailureReason(error) } as const;
       }
-      if (disposed) {
-        // The screen went away while the attach was in flight: never leave a
-        // listener behind (the detach itself is fire-and-forget).
+      if (disposed || left.has(sessionId)) {
+        // The screen went away while the attach was in flight (`dispose`, or a
+        // back before the attach answered): never leave a listener behind, and
+        // detach — the session was already reached at the daemon (the detach
+        // itself is fire-and-forget).
         void session.detach().catch(() => {});
         return { ok: false, reason: "link" } as const;
       }
@@ -161,8 +169,16 @@ export function createSessionController<S extends SessionHandle>(
     if (entry !== undefined) {
       live.delete(sessionId);
       entry.unwatch();
+    } else {
+      // No handle yet: a `leave` while the same id's open is still attaching.
+      // Mark it so that open detaches instead of registering (the screen is
+      // gone; registering it would keep a listener into an unmounted screen and
+      // re-offer asks to the phone's held broker). Cleared by the run below,
+      // which the tail guarantees settles after that open.
+      left.add(sessionId);
     }
     return serialise(sessionId, async () => {
+      left.delete(sessionId);
       if (entry === undefined) {
         return;
       }

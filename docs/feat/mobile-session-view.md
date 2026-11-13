@@ -671,6 +671,111 @@ $ bun run lint               → 1018 files checked, no fixes applied, 0 errors/
 $ bun test                   → 7943 pass, 3 skip (the opt-in ones), 0 fail, 569 files, 341.84s
 ```
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-13* (fix round 1 executor; same model as round 0
+and the Review — fresh context only, so shared blind spots remain possible)
+
+**Reproduction first (both findings, on the round-0 code, in
+`.tentacle/tmp/mobile-session-view-12a/fix1-repro.ts`):**
+
+```
+F1: dialled=["ch0","ch1","ch2","ch3","ch4"] closed-on-suspend=["ch0"]
+F2: follows=true detaches=0
+```
+
+F1 = finding 1: three callers (one stale attempt + two redials) released
+together made five inner dials, and `suspend()` closed `ch0` — not the socket a
+caller holds. F2 = finding 2: `leave` during an attach left the session
+followed (`follows=true`) with no detach.
+
+**Finding 1 (HIGH) — `apps/mobile/src/foreground-gate.ts`.** Root cause: the
+gate identified nothing, so every dial parked on the one hold was released
+together, each called `inner()`, and `current` was whichever connected *last*;
+the client's abandoned attempts (`dialChannel`'s `LIVENESS_MS` give-up,
+`remote-client.ts:2351-2380`) were indistinguishable from the awaited one. Fix:
+a generation counter (`generation`) claimed by each `dial()`; a dial whose
+generation is no longer newest fails with `ChannelError("unreachable", …)`
+*before* dialling, and a channel that arrives for it is closed and rejected —
+so an abandoned attempt never opens a socket and never becomes `current`, and
+`current` is only ever what the newest caller received (`foreground-gate.ts:36-43`
+for the reason, `:73,86-110` for the guard). Rejecting (not silently returning)
+is what makes the gate a faithful `channelFactory`: the client treats it as a
+failed dial and backs off, which is exactly a give-up. Double `close()` of an
+abandoned channel is safe — `DuplexChannel.close` is idempotent
+(`packages/transport/src/channel.ts:12`).
+
+```
+$ bun test apps/mobile/test/foreground-gate.test.ts
+  red (before the fix): 2 fail — Expected 1 / Received 2 (N dials on one
+  resume), Expected "ChannelError" / Received "resolved" (stale becomes current)
+  green (after):        5 pass, 0 fail
+$ bun run fix1-repro.ts  (after)
+F1a (2 redials, abandoned socket last): dialled=["ch0","ch1"]
+    results=["rejected:ChannelError","ch1"] closed-on-suspend=["ch0","ch1"]
+F1b (2 redials, live socket last):     dialled=["ch0","ch1"]
+    results=["rejected:ChannelError","ch1"] closed-on-suspend=["ch0","ch1"]
+```
+
+Two dials for three callers (the abandoned one never dials), and the channel
+closed on the second `suspend()` is the live one in both orderings.
+
+**Finding 2 (MEDIUM) — `apps/mobile/src/session-controller.ts`.** Root cause:
+`leave()` read `live` synchronously, before `serialise`, so an attach still in
+flight was not in `live` yet: the queued leave found no entry, detached
+nothing, and the open then registered the session + listener. Fix: a
+`left: Set<string>` marks an id when `leave` finds no handle, and the open's
+serialised run detaches instead of registering when the mark is set
+(`session-controller.ts:100-120,155-172`); the mark is cleared by the leave's own
+serialised run, which the per-id tail orders *after* that open, so it is
+per-leave and cannot poison the next open. The open answers
+`{ok:false, reason:"link"}`, the same answer the existing `dispose()`
+mid-attach path gives (the screen is gone either way).
+
+```
+$ bun test apps/mobile/test/session-controller.test.ts
+  red (before the fix): 1 fail — Expected {ok:false, reason:"link"} / Received ok:true
+  green (after):        11 pass, 0 fail
+$ bun run fix1-repro.ts  (after)
+F2: open="link" follows=false detaches=1
+```
+
+**Mutations (each applied, run, restored; `git status` shows only the 4 intended
+files after each):**
+
+1. Gate — both `if (abandoned())` guards deleted →
+   `2 fail`: `Expected: 1 / Received: 2` and `Expected: "ChannelError" /
+   Received: "resolved"`.
+2. Controller — `if (disposed || left.has(sessionId))` → `if (disposed)` →
+   `1 fail`: `Expected {ok:false,reason:"link"} / Received ok:true`.
+3. Controller — `left.delete(sessionId)` dropped (the mark is never cleared) →
+   the new poisoning test `1 fail`: the second open of the same id does not
+   attach. This is the risk the fix itself introduces, pinned shut.
+
+**Gate (fix round 1):**
+
+```
+$ bunx tsc --noEmit          → clean
+$ bunx tsc -p apps/mobile    → clean
+$ bun run lint               → 1018 files checked, no fixes applied
+$ bun test apps/mobile/test  → 119 pass, 0 fail
+$ bun test                   → 7946 pass, 3 skip (the opt-in ones), 0 fail, 569 files, 344.55s
+```
+
+7943 → 7946: this round adds four tests (two gate, two controller) and removes
+one (the old "every dial waiting on one hold is released by a single resume",
+whose premise the fix makes unreachable — a second parked dial is now a
+superseded one; its hold-arming half is covered by the first new gate test).
+Verified in this worktree.
+
+**Not re-touched, deliberately:** the Review's scope note (the plan header says
+12a adds no changelog fragment while Execution added
+`changelog.d/mobile-session-view-12a.changed.md`) is a docs bookkeeping point,
+not a code finding; left for the 12c/orchestrator pass rather than editing the
+plan's header here. **Unverified:** the gate's new behaviour is pinned by pure
+tests only — the on-device variant (background > 15 s, foreground, background
+again) is still flow `10-background-ask`'s job in 12c, as round 0 noted.
+
 ## Review
 
 #### Owner answers (2026-11-13)

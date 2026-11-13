@@ -98,17 +98,48 @@ describe("createForegroundGate", () => {
     expect(h.closed).toEqual(["c0"]);
   });
 
-  test("every dial waiting on one hold is released by a single resume", async () => {
+  test("a resume dials ONCE for the newest caller: the dials the client abandoned never reach the socket (mutation: drop the supersession check → red)", async () => {
     const h = harness();
     h.gate.suspend();
-    const both = Promise.all([h.gate.dial(), h.gate.dial()]);
+    // The client's `dialChannel` gives up after LIVENESS_MS and dials again; the
+    // abandoned attempt stays parked in the gate (`dialFailed` never sees it).
+    const abandoned = h.gate.dial().then(
+      () => "resolved",
+      (error: unknown) => (error as Error).name,
+    );
+    const kept = h.gate.dial();
     await flush();
-    expect(h.count()).toBe(0);
+    expect(h.count()).toBe(0); // both held: neither reached the socket
     h.gate.resume();
     await flush();
-    expect(h.count()).toBe(2);
+    expect(h.count()).toBe(1); // one dial, not a burst of N
+    expect(await abandoned).toBe("ChannelError"); // the abandoned one gave up, without dialling
     h.open(0);
-    h.open(1);
-    await both;
+    await kept;
+    h.gate.suspend();
+    // `current` is the channel the NEWEST caller received, so it is the one closed.
+    expect(h.closed).toEqual(["c0"]);
+  });
+
+  test("a channel from an attempt the client abandoned is closed and never becomes `current` (mutation: drop the supersession check → the live socket is never closed)", async () => {
+    const h = harness();
+    const stale = h.gate.dial().then(
+      () => "resolved",
+      (error: unknown) => (error as Error).name,
+    );
+    await flush(); // dialling: `c0` connects LAST
+    h.gate.suspend(); // the app backgrounds; the client will give this attempt up
+    const live = h.gate.dial();
+    h.gate.resume();
+    await flush();
+    expect(h.count()).toBe(2); // the newest dialled; the stale one is still in flight
+    h.open(1); // the newest caller's socket connects first
+    await live;
+    h.open(0); // ...and the abandoned attempt's connects last, with the app foregrounded
+    expect(await stale).toBe("ChannelError");
+    h.gate.suspend();
+    // The live socket (c1) is closed; the stale one was closed on arrival. Without
+    // the guard, `current` would be c0 and c1 would stay up: the ghost attachment.
+    expect(h.closed).toEqual(["c0", "c1"]);
   });
 });

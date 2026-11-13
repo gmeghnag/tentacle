@@ -233,6 +233,45 @@ describe("createSessionController", () => {
     expect((await retry).ok).toBe(true);
   });
 
+  test("leave during an in-flight open detaches: the attach registers nothing (mutation: read `live` before serialising → red)", async () => {
+    const log: string[] = [];
+    const fake = fakeHandle(log, "s1");
+    const controller = createSessionController({ newSession: () => fake.handle });
+    const opening = controller.open("s1", { watch: () => {} });
+    await flush(); // the attach is at the daemon (up to 30 s in the app)
+    const leaving = controller.leave("s1"); // back tapped: the screen unmounts
+    fake.settleOpen();
+    const result = await opening;
+    expect(result).toEqual({ ok: false, reason: "link" }); // nothing to follow
+    await leaving;
+    expect(fake.handle.watched).toBe(0); // never subscribed at all: no listener into a gone screen
+    expect(controller.follows("s1")).toBe(false);
+    // It had already reached the daemon, so the session is detached, never closed.
+    expect(log).toEqual(["open:s1", "detach:s1"]);
+  });
+
+  test("a leave marked during an open does not poison the NEXT open of that id (mutation: never clear the mark → red)", async () => {
+    const log: string[] = [];
+    const fakes: Fake[] = [fakeHandle(log, "s1"), fakeHandle(log, "s1")];
+    let next = 0;
+    const controller = createSessionController({
+      newSession: () => (fakes[next++] as Fake).handle,
+    });
+    const opening = controller.open("s1", { watch: () => {} });
+    await flush();
+    const leaving = controller.leave("s1");
+    (fakes[0] as Fake).settleOpen();
+    await opening;
+    await leaving;
+    // Tapped again: a fresh open must attach (the mark was per-leave, not sticky).
+    const again = controller.open("s1", { watch: () => {} });
+    await flush();
+    (fakes[1] as Fake).settleOpen();
+    expect((await again).ok).toBe(true);
+    expect(controller.follows("s1")).toBe(true);
+    expect(log).toEqual(["open:s1", "detach:s1", "open:s1"]);
+  });
+
   test("dispose unsubscribes and detaches an attach that lands afterwards", async () => {
     const log: string[] = [];
     const fake = fakeHandle(log, "s1");
