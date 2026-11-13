@@ -498,3 +498,7 @@ Red-before-green: flows 06–08 run against 11a's placeholder fail (no
 ## Execution
 
 ## Review
+
+#### Owner answers (2026-11-13)
+
+All questions answered as recommended. Implementation APPROVED. Added owner requirement: image attachments (media_message refs) are shown in the transcript (12b model + 12c screen; thumbnails fetched over the existing channel, never auto-downloaded beyond the visible rows).
