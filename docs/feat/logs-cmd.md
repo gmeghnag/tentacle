@@ -343,3 +343,4 @@ sanitized.
 
 - Q1 split: **yes, 3 sub-tasks** (logs-tail → logs-watch → logs-follow-detached) — BUT **one single review for all three** (owner): execute the three in order on one branch, then one fresh Opus review of the whole, then merge.
 - Q2 output: **(a)** human lines by default, `--json` for NDJSON, no TTY auto-switch.
+- Q3 overflow: **(a)** drop oldest droppable (text/progress) with `N events lost`; disconnect only when asks/turn ends would be lost.
