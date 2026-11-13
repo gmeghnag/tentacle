@@ -24,6 +24,7 @@ import {
   carryOverSkills,
   compactedHistory,
   summarizeConversation,
+  summarizeText,
 } from "../src/compact.ts";
 import { HookRunner } from "../src/hooks.ts";
 import type { ResultTransform } from "../src/result-pipeline.ts";
@@ -120,6 +121,97 @@ describe("empty-summary guard", () => {
     expect(session.messages).toEqual(before);
     expect(session.snapshot().messages).toEqual(before);
     expect(persisted).toHaveLength(0);
+  });
+});
+
+describe("cut-summary guard", () => {
+  // A summary the provider cut at the output limit (`finish_reason: "length"`)
+  // or a stream that ended with no stop reason at all (`"other"`) is INCOMPLETE
+  // data, not a short briefing. Accepting it replaces the whole history with a
+  // brief that lost its end (the open tasks / next steps go last) — irreversibly.
+  test("summarizeConversation rejects a summary cut at the output limit", async () => {
+    const model = new ScriptedProvider([
+      [
+        { type: "text", delta: "Goals: fix the parser. Decisions: use" },
+        { type: "done", stopReason: "length" },
+      ],
+    ]);
+    await expect(
+      summarizeConversation(model, [{ role: "user", content: "hi" }]),
+    ).rejects.toBeInstanceOf(CompactError);
+  });
+
+  test("summarizeConversation rejects a stream that ended with no stop reason", async () => {
+    const model = new ScriptedProvider([
+      [
+        { type: "text", delta: "Goals: fix the parser. Decisions: use" },
+        { type: "done", stopReason: "other" },
+      ],
+    ]);
+    await expect(
+      summarizeConversation(model, [{ role: "user", content: "hi" }]),
+    ).rejects.toBeInstanceOf(CompactError);
+  });
+
+  test("summarizeConversation accepts a finished summary, and one with no stop reason", async () => {
+    // No false failure: a provider that does not report a reason is accepted as
+    // before, and so is the normal `stop` (and `tool_calls` — a summariser is
+    // tool-free, so this is insurance, not a case that occurs).
+    for (const stopReason of ["stop", undefined] as const) {
+      const model = new ScriptedProvider([
+        [
+          { type: "text", delta: "a complete brief" },
+          { type: "done", stopReason },
+        ],
+      ]);
+      expect(await summarizeConversation(model, [{ role: "user", content: "hi" }])).toBe(
+        "a complete brief",
+      );
+    }
+  });
+
+  test("Session.compact leaves the history untouched and unpersisted on a cut summary", async () => {
+    const model = new ScriptedProvider([
+      [
+        { type: "text", delta: "half a brief" },
+        { type: "done", stopReason: "length" },
+      ],
+    ]);
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry(),
+      env: noopEnv,
+      systemPrompt: "SYS",
+    });
+    const persisted: unknown[] = [];
+    const session = new Session(agent, "cut-guard", {
+      onPersist: (snap) => {
+        persisted.push(snap);
+      },
+    });
+    const before = session.messages.map((m) => ({ ...m }));
+
+    await expect(session.compact()).rejects.toBeInstanceOf(CompactError);
+
+    expect(session.messages).toEqual(before);
+    expect(persisted).toHaveLength(0);
+  });
+});
+
+describe("summarizeText", () => {
+  test("rejects a summary cut at the output limit", async () => {
+    const model = new ScriptedProvider([
+      [
+        { type: "text", delta: "half" },
+        { type: "done", stopReason: "length" },
+      ],
+    ]);
+    await expect(summarizeText(model, "a big output")).rejects.toThrow(/cut off/);
+  });
+
+  test("returns a finished summary", async () => {
+    const model = new ScriptedProvider([[{ type: "text", delta: "terse" }, { type: "done" }]]);
+    expect(await summarizeText(model, "a big output")).toBe("terse");
   });
 });
 

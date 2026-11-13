@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { ToolResult } from "@tentacle/core";
+import type { ModelProvider, StreamEvent, ToolResult } from "@tentacle/core";
+import { summarizeText } from "../src/compact.ts";
 import {
   type ResultTransformContext,
   applyResultTransforms,
@@ -199,6 +200,26 @@ describe("summarizeLargeOutput", () => {
       },
     })({ content: "y".repeat(500) }, ctx());
     expect(out.content).toContain("summary failed");
+  });
+
+  test("falls back to a pointer when the model cut the summary off", async () => {
+    // The real summariser, over a provider whose reply was cut at the output
+    // limit: `summarizeText` throws, so the model gets the honest "summary
+    // failed" pointer (the full output is already spilled) instead of reading
+    // half a summary as if it were the whole.
+    const model: ModelProvider = {
+      id: "cut",
+      async *stream(): AsyncIterable<StreamEvent> {
+        yield { type: "text", delta: "the first half of" };
+        yield { type: "done", stopReason: "length" };
+      },
+    };
+    const out = await summarizeLargeOutput({
+      maxInlineChars: 10,
+      summarize: (text, signal) => summarizeText(model, text, signal),
+    })({ content: "z".repeat(500) }, ctx());
+    expect(out.content).toContain("summary failed");
+    expect(out.content).not.toContain("the first half of");
   });
 });
 

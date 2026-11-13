@@ -1,6 +1,6 @@
 # fix/reask-budget-and-compact-length — the DSML re-ask eats two steps, and compaction keeps a summary cut at the output limit
 
-> **Status:** implementation (plan written, NOT approved — see Owner questions)
+> **Status:** implementation (plan APPROVED; Execution written — Review pending)
 > **Branch:** `fix/reask-budget-and-compact-length`
 > **Type:** fix · **Size:** S · **Blast:** cross-module · **Suited:** DeepSeek exec (fresh-context Review: one line in the agent loop's budget arithmetic)
 > **Changelog:** `changelog.d/reask-budget-and-compact-length.fixed.md`
@@ -265,7 +265,153 @@ All red on current `main` first (§9); record the red output in Execution.
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-13*
+
+Worktree `/Users/gmeghnag/tentacle/.tentacle/worktrees/reask-budget-and-compact-length`,
+branch `feat/reask-budget-and-compact-length` at `c6e5682`. Scratch:
+`.tentacle/tmp/reask-budget-and-compact-length/` in the MAIN checkout (the worktree
+has no `.tentacle/`, and the gitignored repro lives there).
+
+### Load-bearing check (re-run first, per the brief)
+
+`bun .tentacle/tmp/reask-budget-and-compact-length/repro.ts` on the branch **before
+any edit** — reproduced exactly as the Context documents:
+
+```
+bug1: real (tool-offered) rounds after the leak = 0 (want 2), turn_end = max_iterations
+bug2: accepted summary = "Goals: fix the parser. Decisions: use" (want CompactError)
+```
+
+The assumption was also verified statically: `budgetFrom` is read at exactly
+`agent.ts:1176` (init), `:1187` (the loop's only step test), `:1282` (this fix),
+`:1448` (the truncation re-ask, already `++`) and `:1482` (context reset, an
+absolute `iteration + 1`). So nothing can accumulate a `++` into a wider window.
+
+### As built, in order
+
+1. **`agent.ts:1276-1282`** — `budgetFrom--` → `budgetFrom++`, comment rewritten to
+   state the arithmetic (`continue` also does `iteration++`, so −1 costs 2 steps,
+   +1 costs 0) and why. Exactly the one operator the design named; `MAX_DSML_REASKS`
+   is untouched.
+2. **`compact.ts:60-100`** — one shared reader `collectSummary(model, request) →
+   { text, stopReason }`, plus `cutReason()` (`"length" | "other"` ⇒ cut;
+   `"stop"`, `"tool_calls"`, `undefined` ⇒ accepted), `cutCause()` and
+   `cutMessage()`.
+3. **`compact.ts:129-140`** — `summarizeConversation` reads through the helper and
+   throws `CompactError` on a cut summary **before** the empty-text check (so a
+   cut-and-empty reply names the real cause). Message: `model's summary was cut off
+   (<cause>) — conversation left intact — retry /compact, or raise the model's
+   output limit`.
+4. **`compact.ts:168-175`** — `summarizeText` gets the same check, throwing a plain
+   `Error` so the pipeline's existing catch renders its `summary failed`
+   placeholder. (Owner Q1 = yes.)
+5. **Tests** written and shown red before the fix (below).
+
+### Drift from the Implementation
+
+- **None on the design.** One deliberate refinement, no behaviour change: the cut
+  test lives in `cutReason()`/`cutMessage()` helpers shared by both functions
+  rather than being inlined twice, so `summarizeConversation` and `summarizeText`
+  cannot drift on which reasons count as cut. The plan's `collectSummary` idea
+  implied this; spelling it out in three small functions is the same seam.
+- **The plan's mutation list had a fourth *target* accidentally available:**
+  mutating `summarizeText`'s check alone is not caught by any test in
+  `compact.test.ts`'s `summarizeText` block unless T1 also exists — both do
+  (`summarizeText` unit test *and* `summarizeLargeOutput`). Both were shown red.
+- `changelog.d/reask-budget-and-compact-length.fixed.md` existed (planner-written).
+  I **replaced** its text with one that keeps the planner's wording and adds the
+  opt-in `summarizeLargeOutput` half (now in scope via Q1), rather than adding a
+  second fragment.
+- No protocol, persistence or terminal path touched ⇒ **no** `protocol.d/` note,
+  **no** schema change, `protocol.json` untouched.
+
+### Red → green (§9)
+
+Red, on the branch, **after** writing the tests and **before** touching `src`
+(assertions, not import errors):
+
+```
+(fail) a DSML-leaked tool call > a re-ask does not cost the turn's step budget
+       Expected: 2   Received: 0
+(fail) a DSML-leaked tool call > a leak on the last allowed round still gets its replacement round
+       Expected: true  Received: false
+(fail) cut-summary guard > summarizeConversation rejects a summary cut at the output limit
+(fail) cut-summary guard > summarizeConversation rejects a stream that ended with no stop reason
+(fail) cut-summary guard > Session.compact leaves the history untouched and unpersisted on a cut summary
+(fail) summarizeText > rejects a summary cut at the output limit
+(fail) summarizeLargeOutput > falls back to a pointer when the model cut the summary off
+ 49 pass, 5 fail   (compact + result-pipeline)   |   3 pass, 2 fail (dsml-leak)
+```
+
+Green after the fix: `59 pass, 0 fail` across the three files. The after-fix repro
+reads:
+
+```
+bug1: real (tool-offered) rounds after the leak = 2 (want 2), turn_end = max_iterations
+bug2: rejected CompactError
+```
+
+### Tests added
+
+- `dsml-leak.test.ts` — **B1** "a re-ask does not cost the turn's step budget"
+  (`maxIterations: 2` ⇒ exactly 2 tool-offered rounds after the leak, `turn_end`
+  `max_iterations`); **B2** "a leak on the last allowed round still gets its
+  replacement round" (`maxIterations: 1` ⇒ round 1 runs with tools offered, turn
+  ends `end_turn` with its text stored).
+- `compact.test.ts` — `cut-summary guard` block: **C1** `length` ⇒ `CompactError`,
+  **C2** `other` ⇒ `CompactError`, **C3** `stop` and `undefined` accepted (no false
+  failure), **C4** `Session.compact` on a cut summary leaves `messages` identical
+  and `onPersist` uncalled. Plus a `summarizeText` block (`length` throws `cut off`;
+  a finished summary is returned).
+- `result-pipeline.test.ts` — **T1** `summarizeLargeOutput` over a real
+  `summarizeText` on a `length`-cut provider yields the `summary failed`
+  placeholder and **not** the cut text.
+
+### Mutations (§9 non-vacuity) — each run, each caught
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | `budgetFrom++` → `budgetFrom--` (today's bug) | B1 `Received: 0`, B2 `Received: false` — **2 fail** |
+| 2 | delete the `budgetFrom` line (a re-ask costs one step) | B1 `Received: 1`, B2 red — **2 fail** |
+| 3 | `budgetFrom += 2` | B1 `Received: 3` — **1 fail** (B2 passes: a wider window still runs round 1) |
+| 4 | drop the cut check in `summarizeConversation` | C1, C2, C4 — **3 fail** |
+| 5 | treat only `"length"` as cut | C2 only — **1 fail** |
+| 6 | treat `undefined` as cut | C3 plus 14 pre-existing happy-path compaction tests (`sends a tool-free…`, `Session.compact > replaces…`, skills carry-over, cancellation) — **15 fail** |
+| 7 | move the guard AFTER the replacement (inside `Session.compact`) | C4 **and** the pre-existing empty-summary guard test — **2 fail** |
+| 8 | drop the cut check in `summarizeText` | T1 **and** the `summarizeText` unit test — **2 fail** |
+
+Mutation 7 was done by hand-editing `Session.compact` to wipe+persist before
+rethrowing; `session.ts` was restored from a backup and is **not** in the diff.
+
+### Gate
+
+```
+bunx tsc --noEmit      → exit 0
+bun run typecheck      → exit 0 (tsc --noEmit && tsc -p apps/mobile)
+bun run lint           → exit 0 (975 files, no fixes applied)
+bun test               → 7793 pass, 3 skip (opt-in), 0 fail — 553 files, 339s
+```
+
+Lint was dirty on first run (2 formatting errors, long lines in my new tests);
+fixed with `biome check --write` on the touched files only. Baseline was clean, and
+it is clean again. `packages/protocol/schema/protocol.json` not regenerated: no
+schema changed.
+
+### Files changed
+
+`packages/agent/src/agent.ts` (+8/−2) · `packages/agent/src/compact.ts` (+76/−13) ·
+`packages/agent/test/dsml-leak.test.ts` (+103/−2) ·
+`packages/agent/test/compact.test.ts` (+77) ·
+`packages/agent/test/result-pipeline.test.ts` (+23/−1) ·
+`changelog.d/reask-budget-and-compact-length.fixed.md` (rewritten, +1 bullet).
+
+### Unverified
+
+Nothing in the acceptance path. One thing deliberately left: a model whose context
+is so large that every summary re-cuts keeps failing cleanly (the user sees the
+error and an intact conversation) — the staged/capped summary is out of scope per
+Owner Q2, as the Implementation says.
+
 
 ## Review
 
