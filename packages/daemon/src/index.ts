@@ -6,6 +6,7 @@
  */
 export * from "./mapping.ts";
 export * from "./attachment-store.ts";
+export * from "./device-store.ts";
 export * from "./permission-map.ts";
 export * from "./hosted-session.ts";
 export * from "./session-host.ts";

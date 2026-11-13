@@ -575,6 +575,134 @@ paired; `revoke` → the phone's live connection closes.
 
 ## Execution
 
+### 9a `device-registry` — DONE
+
+*— claude-opus-5-5, 2026-11-13*
+
+Scope: slice 9a only (the store + codecs, no wiring). 9b/9c/9d untouched.
+
+**Load-bearing check (re-run first, as asked).** `.tentacle/tmp/device-pairing/loadbearing.ts`:
+
+```
+1. capability missing: 3/3 (protocol/src/pairing.ts, transport/src/pairing-sas.ts, daemon/src/device-store.ts)
+   exports today: parsePairingPayload=undefined loadOrCreateIdentity=undefined
+2. P4 workspace-mount.ts:709 -> const always: HidePath = { label: "tentacle's config", path: input.configDir, file: false };
+3. link race: 32 creators -> winners=1 EEXIST=31 file=key-0 agree=true
+   mode=600
+```
+
+P4 holds (`configDir` is unconditionally the first always-on hide entry, so
+`<configDir>/devices/` cannot be read from a mounted workspace) and the
+mechanism the identity stands on (`tmp` + `link`, loser reads the winner) is
+verified in-process. Both checks moved no code.
+
+**As built, in dependency order.**
+
+1. `packages/protocol/src/pairing.ts` (new, exported from `index.ts`) —
+   `formatPairingPayload` / `parsePairingPayload` + `PairingPayload`,
+   `PairingRefusal` (`prefix | version | key | name | code | address | no_address`),
+   `PAIRING_PAYLOAD_VERSION = 1`, `PAIRING_CODE_ALPHABET` (Crockford),
+   `PAIRING_CODE_LENGTH`, `MAX_PAIRING_ADDRESSES`, `PAIRING_ADDRESS_SUFFIX`,
+   `isPairingAddress`, `normalizePairingCode`, `isPairingName`, and the
+   base64url codec (`encodeBase64Url` / `decodeBase64Url`). Unknown params
+   ignored, required-and-wrong refused with a reason. No `*Schema` is exported
+   here on purpose, so the JSON-Schema export never lists a QR payload as
+   protocol — `packages/protocol/schema/protocol.json` is unchanged (no regen
+   needed; the drift test agrees).
+2. `packages/transport/src/pairing-sas.ts` (new) — `pairingSas`,
+   `formatPairingSas`, `PAIRING_SAS_PREFIX`, `PAIRING_SAS_DIGITS`; re-exported
+   from `noise-channel.ts` (the `@tentacle/transport/noise` subpath).
+3. `packages/daemon/src/device-store.ts` (new, exported from `index.ts`) —
+   identity (`readIdentity`, `loadOrCreateIdentity` tmp+`link`,
+   `replaceIdentity`), registry (`readRegistry`, `writeRegistry`, `addDevice`,
+   `removeDevices`, `dedupeName`, modes 0600/0700), `acquireRegistryLock`
+   (exclusive-create pid lock, dead-holder takeover, no wait), last seen
+   (`touchSeen` mtime, `readSeen`), pairing windows (`openPairing`,
+   `findPairing`, `claimPairing` `wx`, `readClaim`, `writePairingDecision`,
+   `readPairingDecision`, `closePairing`, `sweepPairings`) and daemon records
+   (`writeDaemonRecord`, `removeDaemonRecord`, `readDaemonRecords`).
+4. Tests: `packages/protocol/test/pairing-payload.test.ts` (18),
+   `packages/transport/test/pairing-sas.test.ts` (6),
+   `packages/daemon/test/device-store.test.ts` (27) — 51 new, all green.
+5. `changelog.d/device-pairing.added.md` — ONE fragment for the task, the
+   9a text from the plan's *Changelog fragments* (the plan drafts one per
+   sub-task; the executor instruction is one per task, so 9b/9c/9d add theirs
+   on their own branches and this one stays the registry's).
+
+**Drift from the Implementation (and why).**
+
+- **`formatPairingSas` added** (not in the plan's 9a list): the `123 456`
+  grouping the design's prompt shows is presentation, but it is the same
+  string two screens must agree on, so it is defined once beside the SAS
+  rather than re-derived in 9c and 9d.
+- **`base64url` codec lives in `protocol/src/pairing.ts`**, not in the daemon:
+  the plan's table says the store keeps keys as b64url and the payload too —
+  two encoders for one 32-byte key is the bug class §9 warns about, so the
+  store imports the payload's.
+- **`decodeBase64Url` enforces canonicality** (rejects a padded or
+  trailing-pad-bit form). Not in the plan; without it two strings decode to
+  one key, which makes "is this key registered?" depend on spelling. Pinned by
+  a test and a mutation.
+- **`removeDevices` also removes `seen/<id>`.** The plan lists `seen/` as
+  daemon-written; a revoked device leaving its "last seen" behind would list
+  it as if still known. `devices` (9d) reads the registry, so this is
+  cosmetic from its side, but it keeps the store honest.
+- **`readDaemonRecords` sorts** (oldest `startedAt` first, ties by pid). The
+  plan says nothing; `readdir` order is unspecified and 9d puts these addresses
+  in a QR in order, so the order is part of the contract. Found by a flaky
+  test of my own, fixed in the source rather than by loosening the test.
+- **`DeviceStoreFailure.missing`** is a flag, not a message prefix: the first
+  draft let `loadOrCreateIdentity` decide "may I create?" by
+  `reason.startsWith("missing")`, which is exactly the kind of string coupling
+  that rots. The flag is the design's "a missing file is not an error", made
+  explicit.
+- **`writeRegistry` validates every entry's id against its key** before
+  writing (the plan only says it writes under the lock). A registry whose id
+  and key disagree would authorise one device and revoke another; the reader
+  already refuses it, so the writer must not be able to produce it.
+- **Daemon records carry `DAEMON_RECORD_VERSION`**, a third version constant
+  beside `DEVICE_STORE_VERSION`. The plan's table shows `{ v: 1, … }` for the
+  daemons dir; keeping it separate means task 10 can version its own siblings.
+- Nothing in the plan's table was dropped, and no plan step contradicted the
+  code.
+
+**Mutations run (each restored immediately; `git diff` empty afterwards —
+`.tentacle/tmp/device-pairing/mutate.sh` copies the file aside and restores
+it, no git command is used).**
+
+| # | Mutation | Test that caught it |
+|---|---|---|
+| M1 | identity `link` → `rename` (plain replace) | `identity > concurrent creators converge on one key (separate processes)` |
+| M2 | `tightenModes` no-op | `identity > a loose mode … is tightened when the identity is loaded` |
+| M3 | identity `v` accepted unchecked | `identity > an unknown version is refused and the file is untouched` |
+| M4 | JSON parse error reads as ABSENT | `registry > a garbled registry is refused and left byte-for-byte alone` |
+| M5 | registry `v` accepted unchecked | `registry > an unknown version is refused` |
+| M6 | claim written without `wx` | `pairing windows > a claim is exclusive: the second one sees used` |
+| M7 | `findPairing` ignores the pid being dead | `pairing windows > a window whose pair died is not found` |
+| M8 | `dedupeName` bypassed in `addDevice` | `registry > re-adding the same key is idempotent; a new key … suffixed` |
+| M9 | lock does not take over a dead holder | `registry > the lock refuses a live holder and takes over a dead one` |
+| M10 | SAS hashes only the computer key | `pairingSas > matches an independently computed vector` + `swapping the two keys changes the code` |
+| M11 | payload `v` accepted unchecked | `refusals … > an unknown or missing version` |
+| M12 | payload address validation dropped | `refusals … > an address that is not a ws(s) URL ending in /e2e` |
+| M13 | base64url canonicality dropped | `base64url > refuses a non-canonical encoding (two strings, one key)` |
+
+Two tests were caught being vacuous and rewritten around the real property:
+the canonicality test (its first form only asserted `false === false` when the
+forged string happened to be invalid) and the mode test (it only asserted the
+read succeeded). M13 and M2 are red on the rewritten ones.
+
+**Gate.** `bun run check` green: `tsc --noEmit && tsc -p apps/mobile` clean,
+`biome check .` 968 files no fixes (lint baseline clean, §6), `bun test`
+7665 pass / 3 skip (the opt-in live-k8s, live-docker and slow keepalive skips
+of §6) / 0 fail, 7668 tests in 547 files. `packages/protocol/schema/protocol.json`
+unchanged (nothing new is a wire schema).
+
+**Not verified here (one line each).** The store is fake-fs-driven and real-fs
+tested in a temp dir, so nothing 9a ships is unexercised; what 9a cannot show
+is that a `serve` daemon actually authorises a device from this registry and
+that a revoke closes a live socket — that is 9b's `DeviceAuthority` and its
+loopback test, and no code in 9a is on that path yet.
+
 ## Review
 
 #### Owner answers (2026-11-13)

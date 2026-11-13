@@ -1,0 +1,1 @@
+- **A per-computer identity and paired-device registry.** `<configDir>/devices/` holds this computer's key and the devices allowed to connect, shared by every `serve` on it; versioned, never overwritten when unreadable. Design: `docs/feat/device-pairing.md`.
