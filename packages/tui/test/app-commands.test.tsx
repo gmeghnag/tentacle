@@ -341,4 +341,25 @@ describe("S0 command smoke: the session-mutating commands are refused mid-turn",
       t.app.unmount();
     });
   }
+
+  test("/compact while a turn runs → its own refusal, compact is never called", async () => {
+    // `/compact` guards itself (it is NOT in SESSION_MUTATING: the message is
+    // tailored, App.tsx:3265). A dropped guard would compact under a live turn
+    // and rewrite the history the turn is streaming into.
+    const compacted: string[] = [];
+    const f = fake({
+      extra: {
+        compact: () => {
+          compacted.push("compact");
+          return Promise.resolve({ before: 1, after: 1 });
+        },
+      },
+    });
+    const t = await mount(f);
+    await t.line("hang");
+    await t.line("/compact");
+    expect(t.frame()).toContain("Can't compact while a turn is running.");
+    expect(compacted).toEqual([]);
+    t.app.unmount();
+  });
 });

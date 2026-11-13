@@ -396,6 +396,50 @@ C15–C17 patch `settings-command.ts` / `App.tsx` (the `/settings` decision,
 then its executor); the harness restores every patched file in a `finally`,
 and `git status` after the run shows only the two test files modified.
 
+### Fix round 1 — `feat/app-decomposition` (S0 review findings)
+
+*— claude-opus-5-5, 2026-11-14*
+
+**Scope.** Both S0-review findings; tests only, no `src/` change
+(`git status --short` → `M packages/tui/test/app-commands.test.tsx`).
+
+**1 (MEDIUM) — `/compact`'s mid-turn refusal is now pinned.** `packages/tui/test/app-commands.test.tsx:345`
+adds a case to the mid-turn describe: a session with `compact` (a spy) plus a
+`hang` turn → `/compact` must show `Can't compact while a turn is running.` and
+the spy must never be called. It sits beside the `SESSION_MUTATING` loop on
+purpose: `/compact` is NOT in that set (`commands.ts:170`) — it guards itself
+with a tailored message at `App.tsx:3265` — so the plan's wording
+("each session-mutating command") needs both paths covered, which is exactly
+what the reviewer found missing.
+
+**2 (Note) — the net is not flaky: full suite ×3, all green.** Each run
+`7574 pass / 0 fail / 3 skip` (the three opt-in skips: live-k8s, live-docker,
+real-socket keepalive), `Ran 7577 tests across 540 files`, 340.99 s / 334.52 s /
+335.12 s. 7574 = the pre-fix 7573 + the one case added here. The single
+unattributed failure the reviewer saw once in three runs did not recur; treat
+S1–S10 red as real until a `(fail)` name says otherwise.
+
+**Mutations (each shown red on the assertion, then reverted; tree clean after).**
+- M1 `if (false && stateRef.current.running)` at `App.tsx:3265` (the reviewer's
+  surviving mutant): case red —
+  `Expected to contain: "Can't compact while a turn is running." / Received: … "⏺ Context compacted — 1 → 1 messages."`,
+  `22 pass / 1 fail`. This is the finding's own mutation, now killed.
+- M2 drop the `return` at `App.tsx:3267` (falls through to the compaction): red —
+  `- Expected / + Received + 3`, i.e. the frame shows
+  `Compacting the conversation…` + `Context compacted`. Kills the weaker mutant
+  (notice without the abort).
+
+**Gate.** `bunx tsc --noEmit` exit 0 · `bun run lint` clean (954 files) ·
+`bun test` ×3 → 7574 pass / 0 fail / 3 skip each. Narrow file:
+`bun test packages/tui/test/app-commands.test.tsx` 23 pass / 0 fail.
+
+**Drift from Implementation.** None — S0 is tests-only and the design's Tests §2
+wording is what finding 1 restored. No existing test edited; the new case is
+additive, so the behaviour-preservation proof for S1–S10 is untouched.
+
+**Verdict per finding.** 1 FIXED · 2 FIXED (evidence attached; nothing to change
+in code).
+
 
 ## Review
 
