@@ -768,3 +768,14 @@ WeakMap key survives; carried setting is `pinned` (§7 laptop-owned).
 Reviewer is Opus; executor was DeepSeek (different family).
 
 *— claude-opus-5-5, 2026-11-13*
+
+### Round 2 — Verdict: PASS
+
+Finding 1 fixed: the final-report `done` branch now calls `addSpend`
+(`packages/agent/src/agent.ts:1544`); `capped` is computed before the report,
+so the stop reason is unchanged. T6 (`subagent-budget.test.ts:262-316`) pins
+the review scenario. Mutation: removing the line fails T6 only (5 pass /
+1 fail); reverted, tree clean. Regressions: `packages/agent/test` 571 pass /
+0 fail; `bun run lint` clean; `bun run typecheck` clean. No new HIGH/MEDIUM.
+
+*— claude-opus-5-5, 2026-11-13*
