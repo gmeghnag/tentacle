@@ -549,6 +549,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       tools,
       requestPermission: (req, options) => permissions.request(req, options),
       maxIterations: config.subagentMaxIterations,
+      maxTokens: config.subagentMaxTokens,
       types: agentTypes,
       // Owner Q1 (c): `search` belongs to `explore` ALONE. It is not a built-in
       // (that would offer it to the main agent and `general`, which keep

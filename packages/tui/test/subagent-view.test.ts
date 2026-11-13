@@ -241,6 +241,15 @@ describe("subAgentView: the outcome", () => {
 
   // Owner default, awaiting confirmation (review N3): `max_iterations` is the
   // wire's identifier, not English, and it read beside a prose note.
+  test("a token-cap end reads `✗ token cap`, and an unmapped reason still prints as-is", () => {
+    // docs/feat/subagent-token-budget.md T9. Mutation: no `CLOSING_LABELS`
+    // entry → the row reads the wire's `✗ max_token_budget`.
+    expect(
+      subAgentView(sub({ activities: labels(1), done: true, stopReason: "max_token_budget" })).done
+        ?.closing,
+    ).toBe("✗ token cap");
+  });
+
   test("a capped end reads `✗ iteration cap`; an unmapped reason stays as the wire says", () => {
     expect(
       subAgentView(sub({ activities: labels(1), done: true, stopReason: "max_iterations" })).done
@@ -281,6 +290,17 @@ describe("subAgentReport: the outcome is said once", () => {
     expect(subAgentReport("ran out\n\n_(sub-agent hit its iteration cap)_", "max_iterations")).toBe(
       "ran out",
     );
+  });
+
+  test("drops the token-cap note too (said once, by the closing row)", () => {
+    // The tool's note lands LAST (the runner's `(token budget reached: …)` line
+    // is inside its report), so the strip still works and the count survives.
+    expect(
+      subAgentReport(
+        "ran out\n\n(token budget reached: 8,000 of 5,000 tokens used)\n\n_(sub-agent hit its token cap)_",
+        "max_token_budget",
+      ),
+    ).toBe("ran out\n\n(token budget reached: 8,000 of 5,000 tokens used)");
   });
 
   test("keeps the note when the reason does not carry it (an errored child)", () => {

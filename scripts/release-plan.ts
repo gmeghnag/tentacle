@@ -88,29 +88,22 @@ export function bumpBunLock(text: string, from: string, to: string, expected: nu
 }
 
 /**
- * `## [Unreleased]` → a fresh empty `## [Unreleased]` above
- * `## [<version>] - <date>`, which keeps the old body. Refuses a missing or
- * empty `[Unreleased]`. GitHub compare links (`[Unreleased]: …/compare/X...HEAD`),
- * when the file has them, are moved on to the new version.
+ * Refuse a `CHANGELOG.md` whose `## [Unreleased]` holds content. The release
+ * assembles the new section from `changelog.d/` (`changelog.ts`), so an entry
+ * here has no place to land — and accepting it would restore the shared append
+ * point (and the silent mis-filing into a released version) this replaced.
  */
-export function releaseChangelog(text: string, version: string, date: string): string {
-  const heading = /^## \[Unreleased\][ \t]*$/m;
-  const match = heading.exec(text);
-  if (!match) {
+export function refuseUnreleasedEntries(text: string): void {
+  const heading = /^## \[Unreleased\][ \t]*$/m.exec(text);
+  if (!heading) {
     throw new ReleaseError('CHANGELOG.md has no "## [Unreleased]" section');
   }
-  const bodyStart = match.index + match[0].length;
-  const rest = text.slice(bodyStart);
+  const rest = text.slice(heading.index + heading[0].length);
   const end = rest.search(/^(## |\[[^\]]+\]: )/m);
   const body = end < 0 ? rest : rest.slice(0, end);
-  if (body.trim() === "") {
-    throw new ReleaseError("CHANGELOG.md: [Unreleased] is empty; write the release notes first");
+  if (body.trim() !== "") {
+    throw new ReleaseError(
+      "CHANGELOG.md: [Unreleased] has entries; they belong in changelog.d/<slug>.<category>.md",
+    );
   }
-  let out = `${text.slice(0, match.index)}## [Unreleased]\n\n## [${version}] - ${date}${rest}`;
-  out = out.replace(
-    /^\[Unreleased\]: (https:\/\/github\.com\/[^/\s]+\/[^/\s]+)\/compare\/(\S+)\.\.\.HEAD$/m,
-    (_m, base: string, previous: string) =>
-      `[Unreleased]: ${base}/compare/v${version}...HEAD\n[${version}]: ${base}/compare/${previous}...v${version}`,
-  );
-  return out;
 }

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { appendFile, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionRecord } from "@tentacle/agent";
@@ -236,5 +237,60 @@ describe("SessionSaver", () => {
     broken.remove("abcdef0123");
     expect(await broken.drain()).toEqual([]);
     expect(notices).toEqual(["⚠ Session abcdef01's local copy could not be removed — EACCES."]);
+  });
+});
+
+describe("image blobs (docs/feat/attachments-durable.md T6)", () => {
+  const png = new TextEncoder().encode("a png");
+  const ID = createHash("sha256").update(png).digest("hex");
+
+  test("putBlob lands beside the log; readBlob/blobBytes read it back; drain waits for it", async () => {
+    const where = join(dir, "blobs-1");
+    const saver = new SessionSaver(new LogSessionStore(where), () => {});
+    const landing = saver.putBlob("S", ID, png);
+    expect(await saver.drain()).toEqual([]);
+    await landing;
+    expect(await readdir(join(where, "S.attachments"))).toEqual([ID]);
+    const got = await saver.readBlob("S", ID);
+    expect(got !== null && Buffer.compare(got, png) === 0).toBe(true);
+    expect(saver.blobIndex("S")).toEqual(new Map([[ID, png.length]]));
+    expect(await saver.readBlob("S", "f".repeat(64))).toBeNull();
+  });
+
+  test("skipped once the uid was removed", async () => {
+    const where = join(dir, "blobs-2");
+    const saver = new SessionSaver(new LogSessionStore(where), () => {});
+    saver.remove("S");
+    await saver.putBlob("S", ID, png);
+    await saver.drain();
+    expect(await readdir(where).catch(() => [])).not.toContain("S.attachments");
+  });
+
+  test("a write queued before a remove: the remove follows it — no orphan dir", async () => {
+    const where = join(dir, "blobs-3");
+    const saver = new SessionSaver(new LogSessionStore(where), () => {});
+    const landing = saver.putBlob("S", ID, png);
+    saver.remove("S");
+    await landing;
+    await saver.drain();
+    expect(await readdir(where).catch(() => [])).not.toContain("S.attachments");
+  });
+
+  test("a failing write rejects (the caller says so); no save state is touched", async () => {
+    const notices: string[] = [];
+    const saver = new SessionSaver(
+      {
+        write: async () => {},
+        saveSnapshot: async () => {},
+        remove: async () => {},
+        putBlob: async () => {
+          throw new Error("ENOSPC");
+        },
+      },
+      (t) => notices.push(t),
+    );
+    await expect(saver.putBlob("S", ID, png)).rejects.toThrow("ENOSPC");
+    expect(await saver.drain()).toEqual([]);
+    expect(notices).toEqual([]);
   });
 });

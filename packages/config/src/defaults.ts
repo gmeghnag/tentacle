@@ -16,6 +16,15 @@ export const DEFAULT_SUBAGENTS_ENABLED = true;
  * delegated investigation/task often needs more tool rounds. `-1` = unlimited.
  */
 export const DEFAULT_SUBAGENT_MAX_ITERATIONS = 50;
+/**
+ * Token budget for a sub-agent's whole life — `promptTokens + completionTokens`
+ * summed over every model call it makes, however many continuation passes it
+ * runs. Steps bound cost badly (a resend loop grows quadratically: the reported
+ * runaway was 183 steps for 18M tokens), so this is the bound that actually
+ * holds a child's spend. ~2–10× a healthy child (0.2–1.0M) and ~3–9× under the
+ * reported runaways. `-1` = unlimited (docs/feat/subagent-token-budget.md Q3).
+ */
+export const DEFAULT_SUBAGENT_MAX_TOKENS = 2_000_000;
 /** How a parent's `agent_task` calls of one round may overlap (read by `feat/parallel-agents`). */
 export const DEFAULT_SUBAGENT_EXECUTION = "parallel" as const;
 /** At most this many sub-agents at once (read by `feat/parallel-agents`). */
@@ -149,7 +158,8 @@ export const DEFAULT_CONFIG_JSONC = `{
   // "maxIterations": ${DEFAULT_MAX_ITERATIONS}, // -1 = unlimited
 
   // Sub-agents: the \`agent_task\` tool that delegates work to an isolated child agent.
-  // "subagents": { "enabled": ${DEFAULT_SUBAGENTS_ENABLED}, "maxIterations": ${DEFAULT_SUBAGENT_MAX_ITERATIONS}, "execution": "${DEFAULT_SUBAGENT_EXECUTION}", "maxParallel": ${DEFAULT_SUBAGENT_MAX_PARALLEL} }, // maxIterations: -1 = unlimited
+  // "subagents": { "enabled": ${DEFAULT_SUBAGENTS_ENABLED}, "maxIterations": ${DEFAULT_SUBAGENT_MAX_ITERATIONS}, "maxTokens": ${DEFAULT_SUBAGENT_MAX_TOKENS}, "execution": "${DEFAULT_SUBAGENT_EXECUTION}", "maxParallel": ${DEFAULT_SUBAGENT_MAX_PARALLEL} }, // maxIterations / maxTokens: -1 = unlimited
+  // maxTokens bounds a child's whole-life spend (prompt + completion tokens summed over its model calls) and forces its final report when reached; the check runs at a round boundary, so it can overshoot by one round plus that report.
   // execution: "parallel", "read-only" (only sub-agents that cannot write overlap) or "sequential". maxParallel: at most that many at once — set it to what your model server can run in parallel.
   // "agentTaskDescription" or "agentTaskDescriptionFile": replace the tool's description, at most ${MAX_AGENT_TASK_DESCRIPTION_BYTES} bytes.
 

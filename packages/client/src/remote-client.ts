@@ -94,7 +94,7 @@ import {
 import { ATTACH_TIMEOUT_MS, UPLOAD_RECONNECT_MS } from "./constants.ts";
 import { type ImageInput, imageInput } from "./image-input.ts";
 import { boundJobOutput, boundJobs, jobsFromSnapshot } from "./jobs.ts";
-import { LaptopImages } from "./laptop-images.ts";
+import { type LaptopImageFallback, LaptopImages } from "./laptop-images.ts";
 import {
   ChannelError,
   LIVENESS_MS,
@@ -439,6 +439,12 @@ export interface RemoteClientOptions {
    * client takes no images even when the daemon says `client`.
    */
   readonly localImages?: { readonly vision: boolean; readonly maxBytes: number };
+  /**
+   * Where `images` (the pod's byte source) falls back on a miss: this laptop's
+   * blob dir of a session this client built (`images.allowSession`;
+   * docs/feat/attachments-durable.md D6). Absent → memory only.
+   */
+  readonly imageFallback?: LaptopImageFallback;
 }
 
 /** A sha-256 hex hasher from Bun's runtime, when there is one. */
@@ -767,9 +773,10 @@ export class RemoteClient {
   /**
    * The laptop's own image bytes (`docs/feat/attachments-prompt.md` D5/D6):
    * what a pod's refs resolve against. Always present, so a caller needs no
-   * null check; empty until `attachImage` adds one.
+   * null check; empty until `attachImage` adds one (its disk fallback, when
+   * given, reads only the sessions `allowSession` named).
    */
-  readonly images = new LaptopImages();
+  readonly images: LaptopImages;
   /**
    * The LAST handshake's `agentCapabilities` (re-read on every reconnect: a
    * replaced pod binary may change what its daemon does with images).
@@ -815,6 +822,9 @@ export class RemoteClient {
     if (options.localImages) {
       this.localImages = options.localImages;
     }
+    this.images = new LaptopImages(
+      options.imageFallback ? { fallback: options.imageFallback } : {},
+    );
     this.link = { ...initialLink, upSince: this.clock.now() };
     this.lastInboundAt = this.clock.now();
     this.peer = this.makePeer(channel, 0);
@@ -1710,8 +1720,10 @@ export class RemoteClient {
    * added itself, in this process, through `attachImage`; the provider then
    * re-verifies each byte string's sha256 and size, so a pod that names a
    * stranger's id (or the right id at the wrong size) gets `null` → a visible
-   * placeholder, never bytes. No laptop file is ever opened: `LaptopImages`
-   * holds bytes, not paths. And the bytes go only to this laptop's own
+   * placeholder, never bytes. No path comes from the pod: `LaptopImages`
+   * holds bytes, and its disk fallback (docs/feat/attachments-durable.md D6)
+   * opens only `<uid>.attachments/<id>` for uids this client built and ids
+   * matching `ATTACHMENT_ID_RE`. And the bytes go only to this laptop's own
    * provider — `model/stream*` returns model EVENTS, never bytes.
    *
    * ONE helper, used at ALL THREE serving casts (`model/stream`,

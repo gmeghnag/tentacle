@@ -1339,6 +1339,13 @@ describe("persisted-session (pure)", () => {
     expect(reason({ ...base(), turns: [{ turnId: "x", end: { stopReason: "nope" } }] })).toMatch(
       /invalid end/,
     );
+    // docs/feat/subagent-token-budget.md: `max_token_budget` is a real end on
+    // disk (a `turn_end` reason the log can carry). Mutation: leave it out of
+    // `STOP_REASONS` → an older build half-loads nothing and this record is
+    // refused instead.
+    expect(
+      reason({ ...base(), turns: [{ turnId: "x", end: { stopReason: "max_token_budget" } }] }),
+    ).toBe("ok");
     expect(reason({ ...base(), turn: { turnId: "x", steering: [1] } })).toMatch(/"turn"/);
     // Every steer has its id (no record without them exists any more).
     expect(reason({ ...base(), turn: { turnId: "x", steering: ["a"], steeringIds: [] } })).toMatch(

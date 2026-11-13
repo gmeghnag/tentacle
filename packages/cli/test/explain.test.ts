@@ -21,8 +21,8 @@ describe("explain with no key: the top level only", () => {
   test("one line per top-level key, sections marked with their sub-key count", () => {
     const out = lines(undefined);
     expect(out.some((line) => /^\s*model\b.*\(11 sub-keys\)/.test(line))).toBe(true);
-    // 9 since agent-message-two-way (`subagents.twoWay`).
-    expect(out.some((line) => /^\s*subagents\b.*\(9 sub-keys\)/.test(line))).toBe(true);
+    // 10 since subagent-token-budget (`subagents.maxTokens`).
+    expect(out.some((line) => /^\s*subagents\b.*\(10 sub-keys\)/.test(line))).toBe(true);
     // 12 since attachments-prompt (`models.*.images`).
     expect(out.some((line) => /^\s*models\b.*\(12 sub-keys\)/.test(line))).toBe(true);
     // A leaf at the top level has no count and no children of its own.
@@ -154,8 +154,9 @@ describe("explain <section>: its summary and its DIRECT sub-keys", () => {
     const out = text("subagents");
     expect(out).toContain("4");
     expect(out).toContain("parallel");
-    // 8 direct sub-keys since models-map, most wrapping once at 80 columns.
-    expect(out.split("\n").length).toBeLessThan(25);
+    // 9 direct sub-keys since subagent-token-budget, most wrapping once at 80
+    // columns.
+    expect(out.split("\n").length).toBeLessThan(26);
   });
 
   test("profiles: the profile settings, not the base keys", () => {

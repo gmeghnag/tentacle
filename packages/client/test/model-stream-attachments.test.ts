@@ -17,9 +17,12 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AttachmentRef, ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
 import { PermissionBroker } from "@tentacle/core";
-import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
+import { Connection, LogSessionStore, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
 import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
 import { RemoteClient } from "../src/remote-client.ts";
 import { ImagesUnavailableError } from "../src/remote-client.ts";
@@ -357,5 +360,60 @@ describe("T8 — the laptop's scoped source at every serving cast", () => {
     expect(laptop.imageInput().kind).toBe("off");
     connection.close();
     laptop.close();
+  });
+});
+
+describe("T10 (docs/feat/attachments-durable.md D6): a laptop model link that never attached serves from the laptop's disk, in scope only", () => {
+  test("two clients on one laptop store: the non-attaching one serves model/stream with the bytes; a foreign id stays null", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "laptop-fallback-"));
+    try {
+      const store = new LogSessionStore(dir);
+      // Client A (the TUI that attached) kept its image under its session "S";
+      // another laptop session "T" holds a different image.
+      const mine = bytesOf("attached by A to S");
+      const foreign = bytesOf("attached to T, another session");
+      await store.putBlob("S", sha(mine), mine);
+      await store.putBlob("T", sha(foreign), foreign);
+      const mineRef = { ...refFor("attached by A to S") };
+      const foreignRef = { ...refFor("attached to T, another session") };
+
+      // Client B: the pod's model link, never attached anything.
+      const model = new RecordingModel();
+      const [d, c] = createChannelPair();
+      const reads: string[] = [];
+      const b = new RemoteClient(c, new PermissionBroker(), model, {
+        localImages: { vision: true, maxBytes: 4 * 1024 * 1024 },
+        imageFallback: (uid, r) => {
+          reads.push(uid);
+          return store.readBlob(uid, r.id);
+        },
+      });
+      b.images.allowSession("S");
+      const connection = new Connection(d, podHost());
+      const proxy = new ProxyModelProvider(
+        (request) => connection.requestModelStream(request),
+        (request, handlers) => connection.requestModelStreamChunked(request, handlers),
+      );
+      await b.initialize();
+      // The pod names both: the one in scope, and one it injected (e.g. via its
+      // own session/log) that the laptop holds only under another session.
+      for await (const _ of proxy.stream({
+        messages: [{ role: "user", content: "look", attachments: [mineRef, foreignRef] }],
+      })) {
+        // drain
+      }
+      const source = model.requests[0]?.attachments;
+      if (source === undefined) throw new Error("the laptop attaches its own scoped source");
+      const got = await source.read(mineRef);
+      expect(got !== null && Buffer.compare(got, mine) === 0).toBe(true);
+      expect(await source.read(foreignRef)).toBeNull();
+      expect(reads.every((uid) => uid === "S")).toBe(true);
+      // Nothing was ever added to memory: it came from the disk, in scope.
+      expect(b.images.count).toBe(0);
+      connection.close();
+      b.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

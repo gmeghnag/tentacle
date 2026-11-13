@@ -79,3 +79,66 @@ describe("bounded, and never evicting", () => {
     expect(message).toContain("4");
   });
 });
+
+describe("the disk fallback, scoped to the sessions this client built (docs/feat/attachments-durable.md T10)", () => {
+  /** A laptop store on disk: uid → id → bytes; every fallback call recorded. */
+  function disk(files: Record<string, Record<string, Uint8Array>>) {
+    const calls: string[] = [];
+    const fallback = async (uid: string, r: { id: string }) => {
+      calls.push(uid);
+      return files[uid]?.[r.id] ?? null;
+    };
+    return { fallback, calls };
+  }
+  const png = bytesOf("on disk");
+  const ID = "1".repeat(64);
+
+  test("a blob under a session NOT allowed → null, and that session is never asked", async () => {
+    const { fallback, calls } = disk({ other: { [ID]: png } });
+    const images = new LaptopImages({ fallback });
+    images.allowSession("mine");
+    expect(await images.read(ref(ID, png.length))).toBeNull();
+    expect(calls).toEqual(["mine"]);
+  });
+
+  test("an allowed session's blob resolves; first hit wins; a wrong size is null", async () => {
+    const { fallback, calls } = disk({ b: { [ID]: png } });
+    const images = new LaptopImages({ fallback });
+    images.allowSession("a");
+    images.allowSession("b");
+    images.allowSession("c");
+    expect(await images.read(ref(ID, png.length))).toEqual(png);
+    expect(calls).toEqual(["a", "b"]);
+    expect(await images.read(ref(ID, png.length + 1))).toBeNull();
+    // Not cached into memory: `holds` (the attach dedupe) stays memory-only.
+    expect(images.holds(ID, png.length)).toBe(false);
+  });
+
+  test("a memory hit never asks the disk", async () => {
+    const { fallback, calls } = disk({ a: { [ID]: png } });
+    const images = new LaptopImages({ fallback });
+    images.allowSession("a");
+    images.add(ID, png);
+    expect(await images.read(ref(ID, png.length))).toEqual(png);
+    expect(calls).toEqual([]);
+  });
+
+  test("a malformed id never reaches the fallback (no path built from it)", async () => {
+    const { fallback, calls } = disk({});
+    const images = new LaptopImages({ fallback });
+    images.allowSession("a");
+    expect(await images.read(ref("../../etc/passwd", 5))).toBeNull();
+    expect(await images.read(ref("A".repeat(64), 5))).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  test("a failing fallback is a miss, never a throw", async () => {
+    const images = new LaptopImages({
+      fallback: async () => {
+        throw new Error("EACCES");
+      },
+    });
+    images.allowSession("a");
+    expect(await images.read(ref(ID, 3))).toBeNull();
+  });
+});
