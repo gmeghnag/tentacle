@@ -384,3 +384,7 @@ the Step 0 shell (no list) fails, then passes. The green run's summary
 ## Execution
 
 ## Review
+
+#### Owner answers (2026-11-13)
+
+All questions answered as recommended. Implementation APPROVED. Tooling (owner): the orchestrator installs Java 17 (brew openjdk@17), Maestro (brew mobile-dev-inc/tap) and the iOS 18 runtime before Execution; executor = DeepSeek.
