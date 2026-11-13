@@ -342,3 +342,4 @@ sanitized.
 #### Owner answers (2026-11-14, one at a time)
 
 - Q1 split: **yes, 3 sub-tasks** (logs-tail → logs-watch → logs-follow-detached) — BUT **one single review for all three** (owner): execute the three in order on one branch, then one fresh Opus review of the whole, then merge.
+- Q2 output: **(a)** human lines by default, `--json` for NDJSON, no TTY auto-switch.
