@@ -1,0 +1,352 @@
+/**
+ * Image thumbnails (12b; the owner's added requirement): the DECISION module is
+ * `thumbnails.ts`; this file pins the two rules the requirement names —
+ * never beyond the visible rows, and never the same image twice — plus the
+ * failure modes a fetch has (arrive, fail, be scrolled away).
+ *
+ * `ThumbnailSource` is an injected port and is FAKE here: the channel has no
+ * method that reads an image back yet (`docs/feat/attachments-upload.md`,
+ * "nothing reads bytes back over the wire"), so there is no real one to use and
+ * a fake is the honest test of the decisions.
+ */
+import { describe, expect, test } from "bun:test";
+import {
+  MAX_CACHED,
+  MAX_IN_FLIGHT,
+  PREFETCH_ROWS,
+  type ThumbnailDriver,
+  type ThumbnailSource,
+  type ThumbnailState,
+  aborted,
+  createThumbnailDriver,
+  failed,
+  initialThumbnails,
+  loaded,
+  plan,
+  thumbnailFor,
+  visibleRefs,
+} from "../src/thumbnails.ts";
+import type { ImageRef, UserRow } from "../src/transcript.ts";
+
+function ref(name: string): ImageRef {
+  return { id: `${"a".repeat(63)}${name}`, mimeType: "image/png", size: 10, name: `${name}.png` };
+}
+
+function userRow(images: readonly ImageRef[]): UserRow {
+  return { kind: "user", key: `k-${images[0]?.id ?? "none"}`, text: "look", images };
+}
+
+const NOTICE = { kind: "notice", key: "n", text: "a notice" };
+
+describe("only the visible rows' images are wanted", () => {
+  const rows = [
+    userRow([ref("1")]),
+    NOTICE,
+    userRow([ref("2")]),
+    userRow([ref("3")]),
+    NOTICE,
+    userRow([ref("4")]),
+  ];
+
+  test("a window's rows plus PREFETCH_ROWS either side", () => {
+    const wanted = visibleRefs(rows, 2, 2).map((image) => image.name);
+    expect(wanted).toEqual(["1.png", "2.png", "3.png", "4.png"]);
+    // ... and a narrow window far from the top does NOT drag the whole history in.
+    const many = Array.from({ length: 100 }, (_, at) => userRow([ref(`${at}`)]));
+    const near = visibleRefs(many, 50, 52);
+    expect(near).toHaveLength(1 + PREFETCH_ROWS * 2 + 2);
+  });
+
+  test("a row with no images contributes nothing, and a duplicate id is one request", () => {
+    const shared = ref("shared");
+    const withDupe = [userRow([shared]), NOTICE, userRow([shared])];
+    expect(visibleRefs(withDupe, 0, 2)).toHaveLength(1);
+    expect(visibleRefs([NOTICE, NOTICE], 0, 1)).toHaveLength(0);
+  });
+
+  test("the window is clamped at both ends (no negative or past-the-end indexes)", () => {
+    // The WINDOW is clamped, then pre-fetched `PREFETCH_ROWS` either side of it —
+    // which is what makes a flick upward instant rather than blank. So a window
+    // ending before row 0, or starting past the end, still resolves to real rows.
+    expect(visibleRefs(rows, -5, 0).map((image) => image.name)).toEqual([
+      "1.png",
+      "2.png",
+      "3.png",
+      "4.png",
+    ]);
+    expect(visibleRefs(rows, 5, 99).map((image) => image.name)).toEqual([
+      "1.png",
+      "2.png",
+      "3.png",
+      "4.png",
+    ]);
+    // And a window in the middle does NOT reach the whole list.
+    const many = Array.from({ length: 40 }, (_, at) => userRow([ref(`${at}`)]));
+    expect(visibleRefs(many, 20, 20).length).toBeLessThan(40);
+  });
+});
+
+describe("plan: what to start, what to abandon", () => {
+  const rows = [userRow([ref("1")]), userRow([ref("2")]), userRow([ref("3")])];
+
+  test("an unchanged window starts nothing the second time (idempotent)", () => {
+    const controller = new AbortController();
+    const first = plan(initialThumbnails, rows, 0, 2, controller.signal);
+    expect(first.start.map((request) => request.ref.name)).toEqual(["1.png", "2.png", "3.png"]);
+    const second = plan(first.state, rows, 0, 2, controller.signal);
+    expect(second.start).toHaveLength(0);
+  });
+
+  test("requests in flight are bounded", () => {
+    const many = Array.from({ length: 20 }, (_, at) => userRow([ref(`${at}`)]));
+    const step = plan(initialThumbnails, many, 0, 19, new AbortController().signal);
+    expect(step.start).toHaveLength(MAX_IN_FLIGHT);
+    expect(step.state.inFlight).toHaveLength(MAX_IN_FLIGHT);
+  });
+
+  test("a request scrolled out of the window is abandoned, a visible one is not", () => {
+    const controller = new AbortController();
+    const started = plan(initialThumbnails, rows, 0, 2, controller.signal);
+    const moved = plan(started.state, rows, 2, 2, controller.signal);
+    // Row 2 (image 3) is still in the window; 1 and 2 are PREFETCH_ROWS away or less.
+    expect(moved.abort).toEqual([]);
+    const far = Array.from({ length: 100 }, (_, at) => userRow([ref(`${at}`)]));
+    const wide = plan({ ...initialThumbnails, inFlight: ["far"] }, far, 50, 52, controller.signal);
+    expect(wide.abort).toEqual(["far"]);
+  });
+
+  test("an image already loaded or already failed is never requested", () => {
+    const controller = new AbortController();
+    const withLoaded: ThumbnailState = {
+      ...initialThumbnails,
+      loaded: [{ id: ref("1").id, uri: "file://1" }],
+    };
+    const step = plan(withLoaded, rows, 0, 2, controller.signal);
+    expect(step.start.map((request) => request.ref.name)).toEqual(["2.png", "3.png"]);
+    const withFailed: ThumbnailState = { ...initialThumbnails, failed: [ref("2").id] };
+    expect(plan(withFailed, rows, 0, 2, controller.signal).start.map((r) => r.ref.name)).toEqual([
+      "1.png",
+      "3.png",
+    ]);
+  });
+});
+
+describe("outcomes", () => {
+  test("loaded thumbnails are found by id and the cache is bounded", () => {
+    let state: ThumbnailState = initialThumbnails;
+    for (let at = 0; at < MAX_CACHED + 5; at += 1) {
+      state = loaded(state, { id: `id-${at}`, uri: `file://${at}` });
+    }
+    expect(state.loaded).toHaveLength(MAX_CACHED);
+    expect(thumbnailFor(state, "id-0")).toBeUndefined(); // the oldest fell out
+    expect(thumbnailFor(state, `id-${MAX_CACHED + 4}`)?.uri).toBe(`file://${MAX_CACHED + 4}`);
+  });
+
+  test("a completed request leaves the in-flight set", () => {
+    const started: ThumbnailState = { ...initialThumbnails, inFlight: ["x"] };
+    expect(loaded(started, { id: "x", uri: "file://x" }).inFlight).toEqual([]);
+  });
+
+  test("a failure is recorded once and never retried", () => {
+    const once = failed({ ...initialThumbnails, inFlight: ["x"] }, "x");
+    expect(once.failed).toEqual(["x"]);
+    expect(once.inFlight).toEqual([]);
+    expect(failed(once, "x").failed).toEqual(["x"]);
+  });
+
+  test("an abandoned request is not a failure (it may be wanted again)", () => {
+    const state = aborted({ ...initialThumbnails, inFlight: ["x"] }, "x");
+    expect(state.failed).toEqual([]);
+    expect(state.inFlight).toEqual([]);
+  });
+});
+
+describe("the driver applies each outcome to a thumbnail", () => {
+  /** A fake source that answers from a table, and records every call. */
+  function fakeSource(answers: Readonly<Record<string, string | null>>): ThumbnailSource & {
+    readonly calls: readonly string[];
+  } {
+    const calls: string[] = [];
+    return {
+      calls,
+      fetch: async (image: ImageRef) => {
+        calls.push(image.id);
+        const uri = answers[image.name ?? ""];
+        if (uri === undefined) {
+          throw new Error("no answer");
+        }
+        return uri === null ? null : { id: image.id, uri };
+      },
+    };
+  }
+
+  test("an answer becomes a thumbnail", async () => {
+    const rows = [userRow([ref("1")]), userRow([ref("2")])];
+    const source = fakeSource({ "1.png": "file://1", "2.png": "file://2" });
+    const { driver, state } = mount(source);
+    driver.view(rows, 0, 1);
+    await settle();
+    expect(source.calls).toHaveLength(2);
+    expect(thumbnailFor(state(), ref("1").id)?.uri).toBe("file://1");
+  });
+
+  test("a null answer is a failure (the bytes are not showable)", async () => {
+    const rows = [userRow([ref("1")]), userRow([ref("2")])];
+    const source = fakeSource({ "1.png": "file://1", "2.png": null });
+    const { driver, state } = mount(source);
+    driver.view(rows, 0, 1);
+    await settle();
+    expect(state().failed).toEqual([ref("2").id]);
+    expect(state().inFlight).toEqual([]);
+  });
+
+  test("two answers landing together both land (the second never overwrites the first)", async () => {
+    // The bug this pins (M8): each outcome was applied to the state `plan`
+    // returned, so with MAX_IN_FLIGHT requests open the second answer's write
+    // dropped the first's thumbnail.
+    const rows = [userRow([ref("1")]), userRow([ref("2")])];
+    const source = fakeSource({ "1.png": "file://1", "2.png": "file://2" });
+    const { driver, state } = mount(source);
+    driver.view(rows, 0, 1);
+    await settle();
+    expect(thumbnailFor(state(), ref("1").id)?.uri).toBe("file://1");
+    expect(thumbnailFor(state(), ref("2").id)?.uri).toBe("file://2");
+  });
+});
+
+/**
+ * Drain the microtask queue the way an RN frame would: `settle` runs inside
+ * promise callbacks, so the assertions below run after they have landed.
+ */
+async function settle(): Promise<void> {
+  await Bun.sleep(1);
+}
+
+/** A mounted screen's driver, with its latest state kept for assertions. */
+function mount(
+  source: ThumbnailSource,
+  unmount: AbortSignal = new AbortController().signal,
+): { readonly driver: ThumbnailDriver; readonly state: () => ThumbnailState } {
+  let state: ThumbnailState = initialThumbnails;
+  const driver = createThumbnailDriver(
+    source,
+    (next) => {
+      state = next;
+    },
+    unmount,
+  );
+  return { driver, state: () => state };
+}
+
+describe("the driver: one state and one controller table per screen", () => {
+  /** A source that never settles on its own: the test decides when and how. */
+  function deferredSource(): {
+    readonly source: ThumbnailSource;
+    readonly calls: readonly {
+      readonly id: string;
+      readonly signal: AbortSignal;
+      readonly resolve: (thumb: { id: string; uri: string } | null) => void;
+    }[];
+  } {
+    const calls: {
+      id: string;
+      signal: AbortSignal;
+      resolve: (thumb: { id: string; uri: string } | null) => void;
+    }[] = [];
+    return {
+      calls,
+      source: {
+        fetch: (image: ImageRef, signal: AbortSignal) =>
+          new Promise((resolve) => {
+            calls.push({ id: image.id, signal, resolve });
+          }),
+      },
+    };
+  }
+
+  const many = Array.from({ length: 200 }, (_, at) => userRow([ref(`${at}`)]));
+
+  test("a window change ABANDONS the fetches it scrolled away from", () => {
+    // Finding 1 (review round 1). Before the fix every request got the SAME
+    // shared signal, so `plan.abort` only dropped ids from `inFlight`: the
+    // fetches kept running, three window changes left 12 requests open while
+    // `inFlight` said 4, and "never downloaded beyond the visible rows" was false.
+    const { source, calls } = deferredSource();
+    const { driver, state } = mount(source);
+    for (const first of [0, 60, 120]) {
+      driver.view(many, first, first + 2);
+    }
+    const live = calls.filter((call) => !call.signal.aborted);
+    expect(live).toHaveLength(MAX_IN_FLIGHT);
+    expect(calls.filter((call) => call.signal.aborted)).toHaveLength(8);
+    expect(state().inFlight).toHaveLength(MAX_IN_FLIGHT);
+    // The still-wanted ones are the LAST window's, never an earlier one's.
+    expect(live.map((call) => call.id)).toEqual(
+      many
+        .slice(112, 123)
+        .flatMap((row) => (row as UserRow).images ?? [])
+        .map((image) => image.id)
+        .slice(0, MAX_IN_FLIGHT),
+    );
+  });
+
+  test("an abandoned fetch that arrives late is NOT cached", async () => {
+    const { source, calls } = deferredSource();
+    const { driver, state } = mount(source);
+    driver.view(many, 0, 2);
+    driver.view(many, 150, 152);
+    calls.find((call) => call.id === ref("0").id)?.resolve({ id: ref("0").id, uri: "file://0" });
+    await settle();
+    expect(state().loaded).toEqual([]);
+  });
+
+  test("a settle from an EARLIER window never rolls back a later one", async () => {
+    // Finding 2 (review round 1): each `drive` call captured its own `current`,
+    // so a settle from window A wrote A's state over everything window D
+    // produced — D's visible thumbnail vanished, and D's ids were re-requested.
+    const { source, calls } = deferredSource();
+    const { driver, state } = mount(source);
+    driver.view(many, 0, 2);
+    driver.view(many, 150, 152);
+    calls
+      .find((call) => call.id === ref("142").id)
+      ?.resolve({ id: ref("142").id, uri: "file://142" });
+    await settle();
+    expect(state().loaded.map((thumb) => thumb.uri)).toEqual(["file://142"]);
+    const inFlightAfterLater = [...state().inFlight];
+    calls.find((call) => call.id === ref("0").id)?.resolve({ id: ref("0").id, uri: "file://0" });
+    await settle();
+    expect(state().loaded.map((thumb) => thumb.uri)).toEqual(["file://142"]);
+    expect(state().inFlight).toEqual(inFlightAfterLater);
+  });
+
+  test("unmount aborts every request still in flight", () => {
+    const { source, calls } = deferredSource();
+    const unmount = new AbortController();
+    const { driver } = mount(source, unmount.signal);
+    driver.view(many, 0, 2);
+    unmount.abort();
+    expect(calls.filter((call) => !call.signal.aborted)).toHaveLength(0);
+  });
+
+  test("a signal that already fired leaves nothing running", () => {
+    const { source, calls } = deferredSource();
+    const unmount = new AbortController();
+    unmount.abort();
+    const { driver } = mount(source, unmount.signal);
+    driver.view(many, 0, 2);
+    expect(calls.filter((call) => !call.signal.aborted)).toHaveLength(0);
+  });
+
+  test("a throwing source is a failure, not an unhandled rejection", async () => {
+    const source: ThumbnailSource = {
+      fetch: async () => {
+        throw new Error("no answer");
+      },
+    };
+    const { driver, state } = mount(source);
+    driver.view([userRow([ref("9")])], 0, 0);
+    await settle();
+    expect(state().failed).toEqual([ref("9").id]);
+  });
+});
