@@ -8,6 +8,7 @@ import {
   DEFAULT_MODEL,
   DEFAULT_PROVIDER,
   DEFAULT_SUBAGENT_MAX_ITERATIONS,
+  DEFAULT_SUBAGENT_MAX_TOKENS,
   DEFAULT_SYSTEM_PROMPT,
 } from "../src/defaults.ts";
 import { type ResolveContext, composeSystemPrompt, resolveConfig } from "../src/resolve.ts";
@@ -95,6 +96,32 @@ describe("resolveConfig precedence", () => {
     expect(
       resolveConfig(ctx({ env: { TENTACLE_SUBAGENT_MAX_ITERATIONS: "0" } })).subagentMaxIterations,
     ).toBe(DEFAULT_SUBAGENT_MAX_ITERATIONS);
+  });
+
+  test("sub-agent token budget resolves env > file > default, and allows -1 (unlimited)", () => {
+    // Default when nothing is set: the shipped budget, not "off".
+    expect(resolveConfig(ctx({})).subagentMaxTokens).toBe(DEFAULT_SUBAGENT_MAX_TOKENS);
+    // File value wins over the default.
+    expect(
+      resolveConfig(ctx({ fileConfig: { subagents: { maxTokens: 900_000 } } })).subagentMaxTokens,
+    ).toBe(900_000);
+    // -1 (unlimited) is accepted from the file...
+    expect(
+      resolveConfig(ctx({ fileConfig: { subagents: { maxTokens: -1 } } })).subagentMaxTokens,
+    ).toBe(-1);
+    // ...and from the env, which wins over the file.
+    const envWins = resolveConfig(
+      ctx({
+        env: { TENTACLE_SUBAGENT_MAX_TOKENS: "-1" },
+        fileConfig: { subagents: { maxTokens: 900_000 } },
+      }),
+    );
+    expect(envWins.subagentMaxTokens).toBe(-1);
+    expect(envWins.sources.subagentMaxTokens).toBe("env");
+    // A bad env value (0, non-integer) falls through to the file/default.
+    expect(
+      resolveConfig(ctx({ env: { TENTACLE_SUBAGENT_MAX_TOKENS: "0" } })).subagentMaxTokens,
+    ).toBe(DEFAULT_SUBAGENT_MAX_TOKENS);
   });
 
   test("sub-agents toggle resolves env > file > default", () => {

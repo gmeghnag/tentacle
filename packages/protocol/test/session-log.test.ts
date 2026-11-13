@@ -254,8 +254,8 @@ describe("media entries (docs/feat/attachments-core.md, D2: owner Q2 = (a))", ()
     expect(isAppendEntry({ type: "media_replace" } as never)).toBe(false);
   });
 
-  test("PROTOCOL_VERSION is 23: a new CRITICAL type breaks an older peer, so it is bumped", () => {
-    expect(PROTOCOL_VERSION).toBe(23);
+  test("PROTOCOL_VERSION is 24: the newest bump (sub-agent token budget) breaks an older peer", () => {
+    expect(PROTOCOL_VERSION).toBe(24);
   });
 });
 

@@ -287,6 +287,26 @@ describe("T13: a foreground rejection before any move still fails the call", () 
     const r = await tool.execute({ description: "d", prompt: "p" }, ctx);
     expect(r.content).toBe("R\n\n_(sub-agent hit its iteration cap)_");
   });
+
+  test("a token-capped end here is NOT silent", async () => {
+    // The second branch site (the movable/wrapped foreground path,
+    // docs/feat/subagent-token-budget.md T6): mutation — leave its token branch
+    // out and the parent reads no note at all on this path, while the plain
+    // one has "token cap".
+    const { jobs } = jobsRig();
+    const run: TaskRunner = async () => ({
+      report: "R",
+      toolUses: 3,
+      stopReason: "max_token_budget",
+    });
+    const tool = createTaskTool(run, TYPES, { background: jobs });
+    // NO call id: that is what skips the movable path and reaches site 2.
+    const { ctx } = ctxWith({ toolCallId: undefined });
+    const r = await tool.execute({ description: "d", prompt: "p" }, ctx);
+    expect(r.content).not.toBe("R");
+    expect(r.content).toContain("_(sub-agent hit its token cap)_");
+    expect(r.content).not.toContain("iteration cap");
+  });
 });
 
 // A requester is only needed for typing here; the tools package never asks itself.

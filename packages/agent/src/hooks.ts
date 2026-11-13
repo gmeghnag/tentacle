@@ -669,7 +669,7 @@ export class HookRunner {
   /** `turn_end` for a turn that stopped otherwise: a notification. Never throws. */
   async turnEndNotify(i: {
     readonly sessionId: string;
-    readonly reason: "cancelled" | "max_iterations";
+    readonly reason: "cancelled" | "max_iterations" | "max_token_budget";
   }): Promise<void> {
     for (const spec of this.byEvent("turn_end")) {
       const r = await this.run(spec, { ...this.base("turn_end", i.sessionId), reason: i.reason });
