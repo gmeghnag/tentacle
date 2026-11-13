@@ -440,6 +440,72 @@ additive, so the behaviour-preservation proof for S1–S10 is untouched.
 **Verdict per finding.** 1 FIXED · 2 FIXED (evidence attached; nothing to change
 in code).
 
+### Fix round 2 — `feat/app-decomposition` (S0 findings, re-verified)
+
+*— deepseek-v4.1-flash, 2026-11-13* (real id:
+`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`, run with `--profile deepseek`)
+
+**Which Review round this answers.** Round 2's reviewer call never ran: its
+`--resume` returned `No conversation found with session ID:
+a9bd6a7d-…` (`runs/night-app-decomposition-review2.json`, 76 bytes), so
+**no Round-2 findings exist**. The latest real Review is still the S0
+REQUEST-CHANGES below; this round re-proves both of its findings from scratch
+rather than trusting Fix round 1's report, and closes the class behind finding 1.
+
+**1 (MEDIUM) — `/compact`'s mid-turn refusal: re-proved, and the gap behind it
+closed.** Fix round 1's test does kill the reviewer's mutant. Re-run here:
+`if (false && stateRef.current.running)` at `App.tsx:3265` →
+`1 fail` on the property assertion (`Expected to contain: "Can't compact while a
+turn is running." / Received: … "Context compacted — 1 → 1 messages."`),
+`22 pass / 1 fail` filtered. `App.tsx` restored byte-identically (sha256
+`750856b0…`).
+
+But the finding's *cause* — "treated 'session-mutating' as the `SESSION_MUTATING`
+set rather than the plan's wording" — survived: the new describe still looped a
+**hardcoded** `["/retry", "/clear", "/close"]`, so a member added to
+`SESSION_MUTATING` (`commands.ts:170`, the source of truth the App's generic
+guard reads) was silently uncovered again. Shown red-before-green by mutation:
+`+"/tokens"` in the set → pre-fix file `23 pass / 0 fail`; post-fix `1 fail`
+(`- Expected - 0 / + Received + 1`, the guard test). Fix at
+`packages/tui/test/app-commands.test.tsx:327–345`: the loop is now
+`SLASH_COMMANDS.map((c) => c.name).filter(isSessionMutating)` plus a pinned
+`toEqual(["/clear","/close","/retry"])`, so a new member is a *decision* (the
+guard test goes red and forces the case in) instead of a silent hole. The probe
+also confirmed the App's guard is generic, not per-command: a newly added member
+is refused with the standard notice without touching `App.tsx`.
+
+**2 (Note) — the net is not flaky: 8 concurrent stress runs, all green.** The
+runner's own report (`r2-loop.sh`, 8 × [the three S0 files + `app.test.tsx`] in
+parallel, `r2-loop-{1..8}.log`) → every run `170 pass / 0 fail`, zero `(fail)`
+lines. That is 8 under-load runs on top of Fix round 1's 3 full suites
+(`7574 pass / 0 fail / 3 skip` each) and the executor's 3 before it: 14 clean
+runs, the one unattributed failure never reproduced and no name was ever
+captured. Standing instruction for S1–S10 is unchanged: treat red as real until
+a `(fail)` name says otherwise. Full suite this round: see the gate line.
+
+**Mutations (each red on the assertion, then reverted; `git status` after →
+only `M packages/tui/test/app-commands.test.tsx` + this doc).**
+- R1 = the reviewer's exact mutant, `if (false && stateRef.current.running)`
+  (`App.tsx:3265`) → red, the compact test, `22 pass / 1 fail`.
+- R2 = `SESSION_MUTATING` gains `/tokens` (`commands.ts:170`) → red, the derived
+  guard test, `24 pass / 1 fail`; **the same mutation against the pre-fix test
+  file was green (`23 pass / 0 fail`)** — that pair is this round's
+  non-vacuity proof (§9).
+
+**Gate.** `bunx tsc --noEmit` exit 0 · `bun run lint` clean (954 files) ·
+`bun test` full suite **7575 pass / 0 fail / 3 skip** (`Ran 7578 tests across 540
+files`, 332.66 s, `EXIT=0`; 7575 = the pre-fix 7574 + the one derived guard test
+added here; the 3 skips are the documented opt-ins — live-k8s, live-docker,
+real-socket keepalive). Narrow file: `bun test
+packages/tui/test/app-commands.test.tsx` → 24 pass / 0 fail.
+
+**Drift from Implementation.** None. Tests + this doc only; no `packages/tui/src`
+change in the final tree (both mutations restored), so S1–S10's
+behaviour-preservation proof is untouched.
+
+**Verdict per finding.** 1 FIXED (round 1's instance re-proved; its class fixed
+this round) · 2 FIXED (8/8 stressed runs, no flake).
+
 
 ## Review
 

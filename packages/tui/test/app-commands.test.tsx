@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { PermissionBroker } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type AppProps, type SessionController } from "../src/App.tsx";
-import { SLASH_COMMANDS } from "../src/commands.ts";
+import { SLASH_COMMANDS, isSessionMutating } from "../src/commands.ts";
 import { BACKGROUND_ROW, type DockTestRow } from "./subagent-row.ts";
 
 const ENTER = "\r";
@@ -324,8 +324,21 @@ describe("S0 command smoke: every built-in command answers", () => {
   });
 });
 
+/**
+ * The commands the App refuses mid-turn by the GENERIC guard
+ * (`isSessionMutating`, App.tsx:3198) — derived from the predicate itself, not
+ * hardcoded, so a new member of the set can never be silently uncovered (the
+ * round-1 review found exactly that reasoning error). `/compact` is not here:
+ * it guards itself with a tailored message, and is pinned separately below.
+ */
+const MID_TURN_REFUSED = SLASH_COMMANDS.map((c) => c.name).filter(isSessionMutating);
+
 describe("S0 command smoke: the session-mutating commands are refused mid-turn", () => {
-  for (const cmd of ["/retry", "/clear", "/close"]) {
+  test("the derived mid-turn set is exactly these three (a new member is a decision, not a silent gap)", () => {
+    expect(MID_TURN_REFUSED).toEqual(["/clear", "/close", "/retry"]);
+  });
+
+  for (const cmd of MID_TURN_REFUSED) {
     test(`${cmd} while a turn runs → the refusal, nothing else`, async () => {
       // No `clear` on this session: `/clear` is the legacy close-and-replace,
       // which must wait (only an in-place clear is exempt).
