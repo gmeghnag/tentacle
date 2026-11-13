@@ -39,11 +39,17 @@ describe("input: upload (the daemon runs the model)", () => {
     ).toEqual({ kind: "upload", maxBytes: MAX_IMAGE_BYTES });
   });
 
-  test("a laptop that serves a model of its own still uploads when the daemon runs it", () => {
-    expect(imageInput({ input: "upload", maxBytes: 100 }, servesModel)).toEqual({
-      kind: "upload",
-      maxBytes: 100,
-    });
+  // Review round 1, finding 1 (HIGH): a pod's OWN claim must never make this
+  // laptop put image bytes inside it (AGENTS §7 "a pod is not trusted"). The
+  // only laptop that serves a model is a `--model-proxy` pod's, i.e. a `client`
+  // daemon; a daemon that says `upload` to such a laptop is lying (a replaced
+  // binary, or a same-uid process on its socket), so the answer is off.
+  test("a laptop that serves the model NEVER uploads into the daemon that asks", () => {
+    for (const local of [servesModel, { servesModel: true, vision: true, maxBytes: 512 }]) {
+      const got = imageInput({ input: "upload", maxBytes: 100 }, local);
+      expect({ local, kind: got.kind }).toEqual({ local, kind: "off" });
+      if (got.kind === "off") expect(got.reason).toContain("serving its model");
+    }
   });
 });
 

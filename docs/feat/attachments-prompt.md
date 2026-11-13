@@ -282,11 +282,20 @@ the client never guesses.
   | `caps.images` | Result |
   |---|---|
   | absent | off: "this daemon does not take images (its model has no vision, or it predates images — update it)" |
-  | `input: "upload"` | upload; `maxBytes = min(caps.maxBytes ?? MAX_IMAGE_BYTES, MAX_IMAGE_BYTES)` |
+  | `input: "upload"`, client serves no model | upload; `maxBytes = min(caps.maxBytes ?? MAX_IMAGE_BYTES, MAX_IMAGE_BYTES)` |
+  | `input: "upload"`, client SERVES the model | off: "this daemon asks for image uploads while this client is serving its model — the daemon's claim is not trustworthy, so nothing is uploaded" |
   | `input: "client"`, client serves no model | off: "the daemon expects this client to serve the model, and it does not" |
   | `input: "client"`, `local.vision !== true` | off: "this laptop's model does not take images (model.images)" |
   | `input: "client"`, vision | laptop; `maxBytes = local.maxBytes` |
   | any other `input` | off: "unknown image input <input> — update tentacle" |
+
+  *Amended by Review round 1 (HIGH):* the first draft returned `upload` for
+  `input:"upload"` regardless of `local.servesModel`, so a hostile pod's own
+  `initialize` answer could make the laptop ship image bytes into it — a
+  daemon-side claim used as security (AGENTS §7; upload Owner Q2 "no bytes in a
+  pod"). A laptop that serves a model is a `--model-proxy` pod's, i.e. it talks
+  to a `client` daemon, so `upload` from it is a lie: OFF, pinned by T5 and by a
+  T8 case (zero `attachment/put` frames).
 
 - `client/src/laptop-images.ts` (new, pure): `class LaptopImages implements
   AttachmentSource` — `add(id, bytes)` (dedupe by id; throws
@@ -601,9 +610,8 @@ by construction on `main`'s shape.
 
 ### Not verified / left open
 
-- `worker.ts`'s own `SessionHost(...)` policy wiring (M9c). One line; confirmed
-  by reading, not by a test, because the builder is inside the worker entry
-  point. Extracting it would be the honest fix and is a follow-up.
+- ~~`worker.ts`'s own `SessionHost(...)` policy wiring (M9c)~~ — **closed by fix
+  round 1**: `workerSessionHost` is exported and a turn through it is tested.
 - T9 uses a stand-in provider rather than the real `AnthropicProvider` (the plan
   named one): `packages/client` does not depend on `packages/providers`, and
   adding that edge for a test would be worse than the gap. The property proved
@@ -612,6 +620,105 @@ by construction on `main`'s shape.
   seam is covered by `providers/test/anthropic-images.test.ts`.
 - Multi-attach pods (another laptop is the model link) still yield a placeholder,
   as decided (Orchestrator decision 10); nothing in this task changes that.
+- T9 uses a stand-in provider rather than the real `AnthropicProvider` (the plan
+  named one): `packages/client` does not depend on `packages/providers`, and
+  adding that edge for a test would be worse than the gap. The property proved
+  is unchanged — the laptop's source arrives at the provider holding the exact
+  bytes and the pod never sees the base64 — and the provider side of the same
+  seam is covered by `providers/test/anthropic-images.test.ts`.
+- Multi-attach pods (another laptop is the model link) still yield a placeholder,
+  as decided (Orchestrator decision 10); nothing in this task changes that.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-12* (executor; branch `feat/attachments-prompt`)
+
+Both findings fixed. Red was **observed**, and for finding 2 through the
+per-host mutations below (the new tests were written before the fix, but the
+fix that makes them green is the same line the mutation removes — the honest
+account, per §9).
+
+**1 (HIGH) — a pod's `upload` claim no longer ships bytes into it.**
+`imageInput` now answers **off** when `caps.images.input === "upload"` AND
+`local.servesModel` (`client/src/image-input.ts:58-72`), with its own sentence.
+The premise is what makes it safe: a client that holds a model provider is a
+`--model-proxy` pod's laptop, so the daemon it talks to is a `client` daemon;
+`upload` from that daemon is only reachable from a replaced binary or a same-uid
+process on the resident socket, i.e. exactly the pod's own claim, which §7
+forbids as a gate. `attachImage` inherits it through `imageInput()` and fails
+loudly (`ImagesUnavailableError`) with **zero frames** — no `attachment/put`,
+no bytes.
+
+The D5 table in this doc was the source of the flaw, so it is **amended in
+Implementation** (a new row + a note), not left contradicting the code (§8).
+The test that pinned the old behaviour (`a laptop that serves a model of its own
+still uploads when the daemon runs it`) is replaced, never weakened: it now
+asserts the opposite, and the corrected `input:"client"`/vision rows still
+require `servesModel`.
+
+- **T5** `client/test/image-input.test.ts`: `a laptop that serves the model
+  NEVER uploads into the daemon that asks` — two `local` shapes (bare
+  `servesModel`, and `{servesModel, vision:true, maxBytes}`), both **off**, and
+  the reason names the situation.
+- **T8** `client/test/model-stream-attachments.test.ts`: `a pod that claims
+  `upload` to its own model link gets ZERO bytes` — a real `SessionHost` with
+  `images:{source:"store"}` (so `initialize` advertises exactly
+  `{input:"upload", maxBytes}`) behind a frame tap; asserts
+  `ImagesUnavailableError`, `sent.slice(before) === []`, and
+  `imageInput().kind === "off"`.
+
+**2 (MEDIUM) — the silent "factory forgets `ctx.attachments`" is now pinned by
+a TURN, on all three hosts.** Each factory is injectable and driveable:
+
+- `serve.ts`: the `reloadedHost` factory's body is now the exported
+  `createServeAgent(config, options, skillScan, ctx)` (`serve.ts:121-141`), and
+  `ServeOptions.createProvider` (`serve.ts:90-95`) is forwarded to `buildAgent`
+  (`serve.ts:134`), so a test's recorder is the provider a real turn reaches. The host
+  itself is unchanged (it passes `cwd` through, as before).
+- `serve.ts`: `PodDaemonOptions.createProvider` (`serve.ts:528-534`) is forwarded in the
+  non-proxy branch of `podSessionHost` (`serve.ts:592`).
+- `worker.ts`: the host's construction is now the exported
+  `workerSessionHost(config, deps)` (`worker.ts:74-122`) — the
+  `daemonImagePolicy` → `images:` line (`worker.ts:104`) — and, in the factory
+  it calls, the `ctx.attachments` forwarding (`worker.ts:60`) are inside the exported body, so the entry point keeps
+  only what it owns (MCP registries, tracker, bootstrap `version`). No behaviour
+  change: same options, same order, same `onBuilt` effect.
+
+Four new turn tests in `cli/test/image-hosts.test.ts`, each asserting the
+request's source **reads back exactly the uploaded bytes** (not just non-null,
+which a stranger-source could pass): `workerSessionHost` (`a TURN through the
+worker's host…`), `podSessionHost` non-proxy (`…the pod's non-proxy factory…`),
+`startDaemon` over a real WebSocket with a real `RemoteClient` (`…the serve
+daemon…`). The worker's is also a **policy** test: M3 below removes the
+`images:` line and its turn is refused `images_off`, so the policy line is
+covered, not just the forwarding (Execution's M9c gap is closed).
+
+**Mutations (each run, then reverted; the site restored from a copy, no git
+commands):**
+
+| # | Mutation | Result |
+|---|---|---|
+| F1-M1 | `imageInput` believes a pod's `upload` claim again (`if (false)`) | **RED** — T5 `a laptop that serves the model NEVER uploads…` + T8 `a pod that claims upload… ZERO bytes` (20 pass / 2 fail) |
+| F2-M1 | `createServeAgent` drops `ctx.attachments` | **RED** — `startDaemon > a TURN through the serve daemon carries that session's store` (6 pass / 1 fail) |
+| F2-M2 | `podSessionHost`'s non-proxy factory drops `attachments` | **RED** — `podSessionHost > a TURN through the pod's non-proxy factory…` (6 / 1) |
+| F2-M3 | `workerSessionHost` drops the `images:` policy line | **RED** — `workerAgentFactory > a TURN through the worker's host…` (6 / 1) — the turn is refused `images_off` |
+| F2-M4 | `workerAgentFactory` drops `ctx.attachments` | **RED** — both worker tests (5 pass / 2 fail) |
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` clean (946 files, 0 errors /
+0 warnings — the §6 baseline) · `bun test` **7414 pass, 0 fail, 3 skip**
+(the three opt-in skips; +4 vs the pre-fix 7410) across 533 files, 70,980
+assertions.
+
+**Still open, stated plainly:** the `serve` turn test reaches the factory through
+`createServeAgent`, not through `reloadedHost` itself — `reloadedHost` is
+reachable only by starting a `serve` daemon on its real store, which the test
+does (`startDaemon` → the WebSocket → a turn), so the path covered is the whole
+one including `reloadedHost`. The one line NOT covered by a turn is
+`reloadedHost`'s own `createAgent: (cwd, ctx) => createServeAgent(…, { ...ctx,
+cwd })` argument spread (`serve.ts:226`); a mutation of `{...ctx, cwd}` → `{cwd}` is equivalent
+to F1-M1/F2-M1 for the property at stake and would be caught by the same three
+tests only if it dropped `attachments` — it does not (the spread is what parses
+the type), so it is a shape, not a behaviour, and I left it.
 
 
 ## Review

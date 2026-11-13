@@ -56,6 +56,20 @@ export function imageInput(
     };
   }
   if (capability.input === "upload") {
+    // A client that serves a model is a `--model-proxy` pod's laptop, so the
+    // daemon it talks to is a `client` daemon. An `upload` from it means the
+    // daemon is lying (a replaced binary, or a same-uid process on its socket),
+    // and the claim is its OWN: believing it would put image bytes inside a
+    // pod that asked for them (AGENTS §7 "a pod is not trusted"; upload Owner
+    // Q2 "no bytes in a pod"). The gate is on the laptop, so this is OFF — never
+    // an upload, never a guess.
+    if (local.servesModel) {
+      return {
+        kind: "off",
+        reason:
+          "this daemon asks for image uploads while this client is serving its model — the daemon's claim is not trustworthy, so nothing is uploaded",
+      };
+    }
     return { kind: "upload", maxBytes: clamp(capability.maxBytes) };
   }
   if (capability.input === "client") {

@@ -22,6 +22,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
 import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
 import { RemoteClient } from "../src/remote-client.ts";
+import { ImagesUnavailableError } from "../src/remote-client.ts";
 
 const ref = (over: Partial<AttachmentRef> = {}): AttachmentRef => ({
   id: "a".repeat(64),
@@ -304,6 +305,56 @@ describe("T8 — the laptop's scoped source at every serving cast", () => {
     const before = sent.length;
     await laptop.attachImage("S", bytesOf("local only"), { mimeType: "image/png" });
     expect(sent.slice(before)).toEqual([]);
+    connection.close();
+    laptop.close();
+  });
+
+  // Review round 1, finding 1 (HIGH): the pod picks its own `initialize`
+  // answer, so `input: "upload"` from a daemon this laptop is the model link
+  // for is a CLAIM, not a fact (a replaced binary, or any same-uid process on
+  // the resident socket). Believing it puts the screenshot's bytes inside the
+  // pod, where any pod process reads them (AGENTS §7; upload Owner Q2).
+  test("a pod that claims `upload` to its own model link gets ZERO bytes", async () => {
+    const model = new RecordingModel();
+    const [daemonCh, clientCh] = createChannelPair();
+    const sent: string[] = [];
+    const tap: DuplexChannel = {
+      send: (data: string) => {
+        const frame = JSON.parse(data) as { method?: string };
+        if (frame.method !== undefined) sent.push(frame.method);
+        clientCh.send(data);
+      },
+      close: () => clientCh.close(),
+      setOnMessage: (handler: (d: string) => void) => clientCh.setOnMessage(handler),
+      setOnClose: (handler: () => void) => clientCh.setOnClose(handler),
+    };
+    // A `store` host advertises exactly `{input:"upload", maxBytes}`.
+    const connection = new Connection(
+      daemonCh,
+      new SessionHost({
+        defaultCwd: "/pod/work",
+        images: { source: "store", maxBytes: 4 * 1024 * 1024 },
+        createAgent: () => {
+          throw new Error("not used: no session is opened here");
+        },
+      }),
+    );
+    const laptop = new RemoteClient(tap, new PermissionBroker(), model, {
+      localImages: { vision: true, maxBytes: 4 * 1024 * 1024 },
+    });
+    await laptop.initialize();
+    const before = sent.length;
+    let refused: unknown;
+    try {
+      await laptop.attachImage("S", bytesOf("a screenshot"), { mimeType: "image/png" });
+    } catch (error) {
+      refused = error;
+    }
+    expect(refused).toBeInstanceOf(ImagesUnavailableError);
+    // Not one `attachment/put`, not one chunk of the bytes: the frame log is
+    // the proof, and it covers every write this client made.
+    expect(sent.slice(before)).toEqual([]);
+    expect(laptop.imageInput().kind).toBe("off");
     connection.close();
     laptop.close();
   });
