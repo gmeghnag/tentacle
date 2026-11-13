@@ -399,7 +399,53 @@ and `git status` after the run shows only the two test files modified.
 
 ## Review
 
-*(empty; one fresh-context Opus review per slice)*
+### S0 review — REQUEST-CHANGES
+
+*— claude-opus-5-5, 2026-11-13* (fresh context; different model family from the
+executor deepseek-v4.1-flash)
+
+**Scope:** `git diff main...HEAD` — 3 new test files, CHANGELOG, this doc; no
+`packages/tui/src` change (verified: empty diff).
+
+**Gate.** S0 files: 53 pass / 0 fail. `bun run lint`: clean (954 files).
+`bun run typecheck`: clean. Full `bun test`, three runs: 7573/3 skip/0 fail
+twice, **7572/3 skip/1 fail once** (test not captured; not reproduced; the
+three S0 files and `app.test.tsx` are timing-based, 20–25 ms `delay`s — see 2).
+
+**Findings**
+1. **MEDIUM — `/compact`'s mid-turn refusal is unpinned.** Plan (Tests 2) asks
+   for "the mid-turn refusal for each session-mutating command";
+   `app-commands.test.tsx:328` covers only `SESSION_MUTATING`
+   (`/retry`,`/clear`,`/close`), but `/compact` guards itself
+   (`commands.ts:167`, `App.tsx:3265–3268`). Mutation
+   `if (false && stateRef.current.running)` at `App.tsx:3265`: **all 1727
+   `packages/tui` tests stay green** (reverted, tree clean). S2 moves exactly
+   this case into its own file; a dropped guard would compact under a live turn
+   unnoticed. Fix: a session with `compact` + a `hang` turn → `/compact` shows
+   "Can't compact while a turn is running." and `compact` is not called; show
+   red under the same mutation.
+2. **Note (not blocking) — one unattributed full-suite failure in 3 runs.** The
+   executor already found one timing flake in this net. Before S1 relies on the
+   net, it should run the full suite ≥3× and capture `(fail)` names; a flaky
+   net makes S1–S10 reviewers ignore red.
+
+**Attacks tried.** (a) Mutation spot-check M1 (drop the quit-confirm `return`,
+`App.tsx:3832`) → precedence test red, reverted: claim holds. (b) `/compact`
+guard mutation → survived everything (finding 1). (c) Pinned-dropdown `ctrl+x`
+(plan "dropdown focused vs pinned") missing from S0 → already pinned by
+`dock-type-through-frames.test.tsx:303`; no gap. (d) Skill mid-turn refusal →
+pinned by `slash-skills.test.tsx:134`. (e) Inline snapshots: committed as
+literals (no `__snapshots__` dir needed), mismatch fails (executor's F1).
+
+**What holds.** Load-bearing assumption (one `useInput`, App.tsx:3802) is true;
+no src change; precedence matrix covers the named pairs; registry-exhaustiveness
+test forces new commands into the file; the `norm` rule-elision fix is sound
+(it hides rule *length* only — accepted, low).
+
+**Executor behaviour.** Honest and thorough: found and fixed its own flake,
+explained the one equivalent mutant correctly (M3), kept the tree clean. Missed
+the self-guarded `/compact` refusal because it treated "session-mutating" as the
+`SESSION_MUTATING` set rather than the plan's wording.
 
 #### Owner answers (2026-11-13)
 
