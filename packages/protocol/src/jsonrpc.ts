@@ -55,6 +55,13 @@ export const DomainErrorCode = {
    * partial, so the client may resend the blob from 0.
    */
   AttachmentRefused: -32016,
+  /**
+   * A `device/pair` the daemon will not complete: `data.reason` is a
+   * `PairingRefusedReason` (`invalid_code` | `used` | `declined` | `timeout` |
+   * `too_many_attempts` | `already_paired`, docs/feat/device-pairing.md). An
+   * unknown reason reads as a generic refusal, so adding one is additive.
+   */
+  PairingRefused: -32017,
 } as const;
 
 /**

@@ -9,6 +9,7 @@ export * from "./attachment-store.ts";
 export * from "./device-store.ts";
 export * from "./handshake-limit.ts";
 export * from "./device-authority.ts";
+export * from "./pairing-handler.ts";
 export * from "./permission-map.ts";
 export * from "./hosted-session.ts";
 export * from "./session-host.ts";

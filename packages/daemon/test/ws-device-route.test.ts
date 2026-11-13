@@ -15,6 +15,7 @@ import { NoiseError, noiseInitiator, publicKeyOf, systemRandom } from "@tentacle
 import { DeviceAuthority, PAIRING_MAX_MESSAGE_BYTES } from "../src/device-authority.ts";
 import {
   addDevice,
+  closePairing,
   loadOrCreateIdentity,
   openPairing,
   readIdentity,
@@ -482,5 +483,183 @@ describe("the bind rule (owner question 1)", () => {
     expect(() => startWsServer({ host: "0.0.0.0", port: 0, sessionHost: dummyHost })).toThrow(
       /non-loopback/i,
     );
+  });
+});
+
+describe("a pairing connection ends with its window (9c)", () => {
+  /**
+   * A pairing connection is admitted only while a window is open, so it must
+   * NOT outlive it (F16): `pair`'s exit handler removes the window, and the
+   * worst case (a `pair` killed -9) is the window's own expiry. The route polls
+   * the store, so either way the socket goes.
+   */
+  test("closing the window closes the pairing connection (mutation: drop the watcher → red)", async () => {
+    const configDir = store();
+    const identity = readIdentity(configDir);
+    if (!identity.ok) throw new Error(identity.reason);
+    const opened = openPairing(configDir, {
+      code: "K7M2QX9AB3",
+      now: Date.now(),
+      pid: process.pid,
+    });
+    if (!opened.ok) throw new Error(opened.reason);
+    const audit: string[] = [];
+    const authority = new DeviceAuthority({
+      configDir,
+      pollIntervalMs: 10,
+      onAudit: (l) => audit.push(l),
+    });
+    const server = startWsServer({
+      host: "127.0.0.1",
+      port: 0,
+      sessionHost: dummyHost,
+      devices: { authority, pairingCheckMs: 20 },
+      onAudit: (l) => audit.push(l),
+    });
+    servers.push(server);
+    let closed = false;
+    const client = await connect(`${server.url}/e2e`, key(9), identity.identity.publicKey, () => {
+      closed = true;
+    });
+    await client.init();
+    // Close the window the way `pair`'s exit handler does: the connection must
+    // go with it (its own socket `close` fires — a refused request would not,
+    // because a pairing connection is refused EVERY method but device/pair).
+    closePairing(configDir, opened.session.sid);
+    const deadline = Date.now() + 3_000;
+    while (!closed && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    expect(closed).toBe(true);
+    expect(audit).toContain("pairing-closed");
+    client.close();
+  });
+
+  test("`device/pair` on a DEVICE connection is `already_paired` (PairingRefused)", async () => {
+    // A paired phone is not a pairing connection: its privilege was fixed at
+    // the handshake, and re-pairing is a new key or `devices revoke`.
+    const configDir = store();
+    const identity = readIdentity(configDir);
+    if (!identity.ok) throw new Error(identity.reason);
+    addDevice(configDir, { publicKey: publicKeyOf(key(2)), name: "iPhone", now: 2_000 });
+    const { url } = serve(configDir);
+    const client = await connect(url, key(2), identity.identity.publicKey);
+    try {
+      await client.init();
+      // `.catch` rather than `expect(...).rejects`: the pairing gate's error must
+      // arrive as a `PairingRefused` RpcError with its reason, and reading it
+      // out explicitly keeps the assertion on the DATA (Bun's `rejects` on a
+      // long-lived peer can observe the later "connection closed" instead).
+      const failure = (await client
+        .call("device/pair", {
+          code: "K7M2QX9AB3",
+          name: "iPhone",
+        })
+        .catch((e) => e)) as { code: number; data?: unknown };
+      expect(failure.code).toBe(-32017);
+      expect(failure.data).toEqual({ reason: "already_paired" });
+    } finally {
+      client.close();
+    }
+  });
+
+  test("a pairing connection still cannot reach a session method (the 9b gate holds)", async () => {
+    // 9c adds `device/pair` to the pairing principal's allowed set. Everything
+    // else must stay refused, or the exchange would have widened the privilege.
+    const configDir = store();
+    const identity = readIdentity(configDir);
+    if (!identity.ok) throw new Error(identity.reason);
+    openPairing(configDir, { code: "K7M2QX9AB3", now: Date.now(), pid: process.pid });
+    const { url } = serve(configDir);
+    const client = await connect(url, key(9), identity.identity.publicKey);
+    try {
+      await client.init();
+      for (const method of ["session/list", "session/open", "daemon/session_ttl"]) {
+        await expect(client.call(method, {})).rejects.toMatchObject({ code: -32001 });
+      }
+    } finally {
+      client.close();
+    }
+  });
+});
+
+describe("a pairing held open does not serialise the daemon (§7)", () => {
+  test("while `device/pair` waits on the human, another connection's `session/list` is answered", async () => {
+    // The invariant: `RpcPeer` dispatches inbound requests concurrently, so a
+    // `device/pair` held for the human's `y` must not block anything else —
+    // including the daemon's own other work on ANOTHER connection. Mutation:
+    // serialise `Connection`'s handler (an await/lock around dispatch) -> the
+    // `session/list` below would only be answered once pairing finished.
+    const configDir = store();
+    const identity = readIdentity(configDir);
+    if (!identity.ok) throw new Error(identity.reason);
+    addDevice(configDir, { publicKey: publicKeyOf(key(2)), name: "iPhone", now: 2_000 });
+    openPairing(configDir, { code: "K7M2QX9AB3", now: Date.now(), pid: process.pid });
+    const { server } = serve(configDir);
+    const pairing = await connect(`${server.url}/e2e`, key(9), identity.identity.publicKey);
+    const device = await connect(`${server.url}/e2e`, key(2), identity.identity.publicKey);
+    try {
+      await pairing.init();
+      await device.init();
+      // The pairing request is STARTED and deliberately never answered: no
+      // claim is accepted and no window is closed, so the handler is parked in
+      // its wait for the whole test.
+      let pairingSettled = false;
+      const pending = pairing
+        .call("device/pair", { code: "K7M2QX9AB3", name: "iPhone" })
+        .finally(() => {
+          pairingSettled = true;
+        });
+      pending.catch(() => {});
+      // The OTHER connection is served meanwhile: this is the property.
+      const started = Date.now();
+      const list = (await device.call("session/list", {})) as { sessions: unknown[] };
+      expect(Array.isArray(list.sessions)).toBe(true);
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(pairingSettled).toBe(false);
+      pairing.close();
+      await pending.catch(() => {});
+    } finally {
+      pairing.close();
+      device.close();
+    }
+  });
+});
+
+describe("the attempt cap over a real socket (F6/F16)", () => {
+  test("five wrong codes answer `too_many_attempts` and then close the connection", async () => {
+    // The cap's teeth are on the SOCKET (the handler is per connection): a
+    // hostile peer during a window gets five guesses and is then gone, so it
+    // cannot grind a 50-bit code on one connection.
+    const configDir = store();
+    const identity = readIdentity(configDir);
+    if (!identity.ok) throw new Error(identity.reason);
+    openPairing(configDir, { code: "K7M2QX9AB3", now: Date.now(), pid: process.pid });
+    const { url } = serve(configDir);
+    let socketClosed = false;
+    const client = await connect(url, key(9), identity.identity.publicKey, () => {
+      socketClosed = true;
+    });
+    async function refusal(): Promise<{ code: number; data?: unknown }> {
+      const raw = await client
+        .call("device/pair", { code: "ZZZZZZZZZZ", name: "attacker" })
+        .catch((e: unknown) => e);
+      return raw as { code: number; data?: unknown };
+    }
+    try {
+      await client.init();
+      for (let i = 1; i <= 4; i++) {
+        const answer = await refusal();
+        expect(answer.code).toBe(-32017);
+        expect(answer.data).toEqual({ reason: "invalid_code" });
+      }
+      const fifth = await refusal();
+      expect(fifth.code).toBe(-32017);
+      expect(fifth.data).toEqual({ reason: "too_many_attempts" });
+      // The refusal frame goes out FIRST, then the socket is closed.
+      const deadline = Date.now() + 3_000;
+      while (!socketClosed && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+      expect(socketClosed).toBe(true);
+    } finally {
+      client.close();
+    }
   });
 });

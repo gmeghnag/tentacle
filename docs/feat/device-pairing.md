@@ -1,6 +1,6 @@
 # feat/device-pairing — `tentacle pair`, per-computer device registry, `devices` / `revoke` (mobile task 9)
 
-> **Status:** implementation (plan written, **not approved**)
+> **Status:** implementation (plan written, **not approved**; 9a, 9b and 9c built, 9d outstanding)
 > **Branch:** umbrella `feat/device-pairing` (this doc). Each sub-task runs on its own branch + doc, carved from its section below (the `attachments` precedent): `feat/device-registry` (9a), `feat/device-route` (9b), `feat/device-pair-exchange` (9c), `feat/device-cli` (9d).
 > **Size:** L as a whole → split: 9a M · 9b M · 9c M · 9d M · **Blast:** 9a cross-module · 9b **load-bearing** · 9c **load-bearing** · 9d cross-module · **Suited:** 9b/9c a strong executor + mandatory fresh-context Review that red-teams the "pod not trusted" and "single session path" invariants; 9a/9d any executor + fresh-context Review (security-relevant files).
 > **Changelog:** one fragment per sub-task, written on that sub-task's branch (texts drafted under *Changelog fragments*): `changelog.d/device-registry.added.md`, `changelog.d/device-route.added.md`, `changelog.d/device-pair-exchange.added.md`, `changelog.d/device-cli.added.md`.
@@ -989,6 +989,198 @@ The F2 scope is a decision I took under the Review's "either/or"; the owner may
 pick the strict reading instead (see above). F1's production value (32) is not
 driven by a test — the test uses 2 to make the leak cheap to see; the arithmetic
 is the same rule.
+
+### 9c `device-pair-exchange` — DONE
+
+*— claude-opus-5-5, 2026-11-13*
+
+Scope: slice 9c only — `device/pair` and both its ends. 9a's store and 9b's
+route/authority are used as they are (two additive touches to 9b's source files,
+`connection.ts` and `ws-server.ts`, listed under drift); 9d (`pair`, `devices`,
+the QR, `flags.ts`, `main.ts`) is untouched, so nothing here can run a pairing
+from a terminal yet.
+
+**Load-bearing check (re-run first, as asked) — PASSES.**
+`.tentacle/tmp/device-pairing-9c/lb.ts` + `lb2.ts`.
+
+```
+1. Method.DevicePair=undefined PairingRefused=undefined
+   protocol/src/device.ts exists=false  daemon/src/pairing-handler.ts exists=false  PairHandler export=undefined
+   isMethodName("device/pair")=false PROTOCOL_VERSION=24
+   client exports["./pairing"]=undefined
+2. pairing connection: initialize OK, audit pairing-open=true
+   device/pair today -> rejected code=-32601 unknown method: device/pair
+   claim written? no
+3. channel's authenticated key (client side): remoteStatic==deviceKey=false  (it is the PINNED daemon key — see lb2)
+   peer dispatch concurrent (no lock): yes
+   ws-server builds the pairing principal: yes
+4. store API for the handler: findPairing=function claimPairing=function readClaim=function
+   readPairingDecision=function readRegistry=function addDevice=function deviceIdOf=function dedupeName=function
+   pairingSas over the wire module: function formatPairingSas=function
+5. daemon-side SecureChannel.remoteStatic == publicKeyOf(phoneKey): true
+   client-side SecureChannel.remoteStatic == daemonPub: true
+   authorize saw the device key: true
+   sas agreed: 049319 / 049319
+```
+
+The capability is missing exactly as the plan says (no method, no code, no
+handler, no client subpath), and the seam the slice stands on holds: the
+DAEMON-side `SecureChannel.remoteStatic` is the initiator's authenticated static
+key, so the claim/registry can take the key from the channel and `device/pair`'s
+params need none — which is what F18 depends on. Point 3's `false` is my first
+probe being misaimed (on the client side `remoteStatic` is the pinned peer key);
+`lb2.ts` measures the right side, in-process, and both ends agree on the SAS.
+Point 2 also shows 9b's gate intact: a pairing connection gets `initialize` and
+nothing else, so the only thing missing was the method itself.
+
+**As built, in dependency order.**
+
+1. `packages/protocol/src/device.ts` (new, exported from `index.ts`) —
+   `DevicePairParamsSchema` (`code` exactly `PAIRING_CODE_LENGTH`, `name` a
+   `line(64)` display line), `DevicePairResultSchema` (`deviceId` 16-hex,
+   `computer { id, name }`), `PairingRefusedReason` + `PAIRING_REFUSED_REASONS`
+   + `isPairingRefusedReason`, `PairingRefusedDataSchema`, `DEVICE_ID_RE`. Strip
+   objects, no `.strict()` (§7): an unknown param — including a key a hostile
+   peer tries to smuggle (F18) — is DROPPED.
+2. `packages/protocol/src/jsonrpc.ts` — `PairingRefused: -32017`.
+3. `packages/protocol/src/methods.ts` — `Method.DevicePair = "device/pair"` + its
+   `RequestSchemas` entry, so the peer validates params/result at both ends.
+4. `packages/protocol/schema/protocol.json` — regenerated
+   (`bun run schema:export`, +70 lines: `DevicePairParams`,
+   `DevicePairResult`, `DeviceComputer`, `PairingRefusedData`, the method and the
+   error code). The drift test agrees; no hand edit.
+5. `packages/daemon/src/pairing-handler.ts` (new, exported from `index.ts`) —
+   `PairHandler` (per connection: `attemptCount`, the idempotent own-claim
+   memory, `PAIRING_MAX_ATTEMPTS = 5`), `pairingRefusedError`,
+   `PAIRING_POLL_MS`. Sequence: `findPairing` (throw-absorbed: 9a Review N3),
+   `claimPairing` with the CHANNEL key, wait on the registry-then-decision, then
+   the result or a reason; `signal` stops the wait when the peer hangs up.
+6. `packages/daemon/src/connection.ts` — `ConnectionPrincipal`'s pairing variant
+   carries its handler (`{ kind: "pairing"; pair: PairHandler }`); `Method.
+   DevicePair` dispatches to `devicePair`, which refuses a token/device
+   principal with `already_paired` and otherwise maps `PairOutcome` to the
+   result or `PairingRefused`. The 9b method gate stays exactly as it was, with
+   `device/pair` now the one allowed method.
+7. `packages/daemon/src/ws-server.ts` — the pairing principal builds its
+   `PairHandler` with `authority.configDir`, the identity the handshake was
+   admitted against, and `secure.remoteStatic`; a pairing connection is closed
+   when its window goes (`watchPairingWindow` → `hasLivePairing`, default 1 s,
+   `pairingCheckMs` injectable), the watcher stopped on every teardown path.
+8. `packages/client/src/pairing.ts` (new) + `exports["./pairing"]` —
+   `pairDevice` (one dial per address, `secureChannelFactory`, `initialize`,
+   `onCompare(sas)` BEFORE the code is sent, `device/pair`, close),
+   `PairingRefused` + `pairingRefusedFrom`, `PAIRING_REFUSED_MESSAGES`. A
+   one-shot RPC: no `RemoteClient`, no session.
+9. Tests — `protocol/test/device-pair.test.ts` (13),
+   `daemon/test/pairing-handler.test.ts` (21), `daemon/test/ws-device-route.test.ts`
+   (+6, real loopback), `client/test/pairing.test.ts` (8, real loopback against a
+   real daemon), `protocol/test/json-schema.test.ts` (+1 fixture pair).
+10. `changelog.d/device-pairing-9c.added.md` — the plan's
+    `device-pair-exchange` text, as the `added` fragment. The plan's drafted
+    FILE NAME (`device-pair-exchange.added.md`) is not the one used: the task's
+    own instruction is one fragment named `device-pairing-9c.<category>.md`, and
+    9b already set that precedent (`device-pairing-9b.added.md`). The text is the
+    plan's, unchanged.
+
+**Drift from the Implementation (and why).**
+
+- **The pairing principal carries its `PairHandler`** (`{ kind: "pairing"; pair:
+  PairHandler }`) — the plan's own shape, replacing 9b's bare `{ kind: "pairing" }`.
+  Recorded here because it is a 9b type that 9c had to extend, and because the
+  handler's placement is a decision: per CONNECTION, not per daemon. A per-daemon
+  handler would make the attempt cap global (one hostile peer could spend a real
+  phone's five tries) and would have to look the channel key up per request;
+  building it at the resolve gives both the key and the cap for free.
+- **`code` is length-checked, not alphabet-checked, at the schema.** A wrong
+  alphabet must read as `invalid_code` — the same answer as a stale code — or a
+  mistyping human and a brute-forcer get different replies on an unauthenticated
+  connection. The handler normalises via the 9a store, which throws on a bad
+  alphabet (9a N3), so that throw is absorbed (`safely`) and counted as an
+  attempt.
+- **A registry ALONE decides success** (plan F3 says so): a decision file with no
+  entry declines rather than admits. The plan's step 5 orders `pair` as
+  registry-then-decision, so `accepted: true` is a hint, not an authority — never
+  fail open. Pinned by a test and M-F14.
+- **The attempt cap's close is deferred to a macrotask** (`setTimeout(…, 0)`),
+  not called inline: `RpcPeer` writes the response frame in a microtask
+  continuation, so an inline `close()` beats the `PairingRefused` frame to the
+  wire and the peer sees only a dropped socket (the test asserts the reason
+  ARRIVES, then that the socket closes). This is 9b's own audit-line ordering
+  lesson, in the send path.
+- **The pairing connection's window watcher is new in `ws-server.ts`** (the
+  plan lists "close pairing connections at their session's expiry" as a 9c file
+  change, and 9b left no mechanism): 1 s poll of `hasLivePairing`, injectable
+  (`pairingCheckMs`), `unref`'d, stopped by `ws.data.release` on every teardown
+  path including F22's orphan path.
+- **`onCompare` receives `{ protocolVersion }`** as well as the SAS: the plan
+  says `onCompare(sas)`; a pairing screen needs to say "update tentacle on this
+  computer" for an old daemon (F23, task 11), and the handshake answer is the
+  only place that fact exists. One extra field on a client-side callback (no
+  wire change).
+- **`random` is REQUIRED on `PairDeviceOptions`** (the plan implies an injectable
+  default): `InitiatorOptions.random` has no fallback anywhere in the transport,
+  and the app must pass `expo-crypto` (Hermes has no WebCrypto). A default would
+  be a silent weak-key risk in a crypto path.
+- **`channelErrorFromNoise` is NOT re-mapped in `pairing.ts`**: `secureChannel-
+  Factory` already maps `denied` → `unauthorized` (9b/task 8), so a second
+  mapping would drift. The wrong-pin test therefore asserts "a channel failure,
+  never a `PairingRefused`" rather than one exact kind.
+- **`closePairing` had to be imported in 9b's route test** (already exported by
+  9a) — a test-only addition, no source change to 9a.
+- Nothing in the plan's 9c file set was dropped; no plan step contradicted the
+  code. `docs/feat/device-pairing.md`'s own file table needed no edit.
+
+**Mutations run (each restored immediately from a copy in
+`.tentacle/tmp/device-pairing-9c/mut/`; no `git checkout`/`restore`/`stash`; the
+worktree's `git status` shows only 9c's real files afterwards).**
+
+| # | Mutation | Test that caught it |
+|---|---|---|
+| M1 | params gain a `publicKey` field AND the handler registers it (the plan's F18 mutation) | `device-pair > an unknown field is DROPPED` + `pairing-handler > a foreign key in the params is ignored` |
+| M2 | the claim keeps using `remoteKey` but the `claimed`-sid guard is removed (`&& false`) | 10 handler tests (the whole pairing path collapses) |
+| M3 | the own-claim memory is bypassed (`\|\| true`: every retry re-claims) | `a retry of the same code on the SAME connection is idempotent` |
+| M4 | an unreadable registry reads as "lists everybody" (`ok ? … : true`) | `an unreadable registry never admits (F14)` (**survived first** — no test covered it; this test was written for it) |
+| M5 | `onCompare` moved AFTER `device/pair` (the plan's exact mutation) | `onCompare fires BEFORE device/pair is sent` — `Expected false, Received true` on "a claim exists at compare time" |
+| M6 | `onCompare` never called | `a code, the human's y and the SAS` + the ordering test |
+| M7 | the pairing window watcher is never started | `closing the window closes the pairing connection` |
+| M8 | the cap's `close()` called inline instead of deferred | `five wrong codes … and then close` (the reason frame never arrives) |
+| M9 | the cap threshold raised to 999 | the same two route/handler cap tests |
+| M10 | the `findPairing` throw is not absorbed | `a code that is not the alphabet is invalid_code, never a throw` |
+| M11 | the abort check is dropped | `a peer that hangs up mid-wait stops the wait` (times out) |
+| M12 | `accepted: false` reads as success | `the human's N is declined, and the registry stays empty` |
+| M13 | a token/device principal may call `device/pair` | `device/pair on a DEVICE connection is already_paired` |
+
+**Gate.** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
+`bun run lint` 1047 files, no fixes applied (0 errors/0 warnings, §6 baseline) ·
+`bun test` **8144 pass / 3 skip / 0 fail**, 8147 tests across 583 files, 318–327 s
+— the 3 skips are §6's opt-ins (live-k8s, live-docker, the slow keepalive). 9c
+adds **48 tests** of its own (13 `device-pair`, 21 `pairing-handler`, 6
+`ws-device-route`, 8 `client/pairing`) plus one fixture pair in the existing
+schema-drift test; the rest of the rise over 9b's 7975 comes from branches merged
+into `main` since. `packages/protocol/schema/protocol.json` regenerated (a wire
+schema DID change — `device/pair` + `PairingRefused`).
+
+One flake, reported rather than hidden: the FIRST full run had 1 failure —
+`serve-log-store.test.ts` S11 ("200 kills"), a real-SIGKILL chain that
+`docs/feat/mobile-session-view.md:1117` and `docs/fix/local-subagent-panel-
+unwired.md:256` already record as LOAD-FLAKY. It passed 5/5 standalone
+(`-t "200 kills"`), it touches nothing 9c changed (its fixture imports only the
+agent/core/tools/store/persister), and the second full run was green — so it is
+not attributable to this slice, but it is not "clean on the first try" either.
+`packages/protocol/schema/protocol.json` regenerated (a wire schema DID
+change).
+
+**Not verified here (one line each).**
+- No terminal can start a pairing yet: `tentacle pair` (the QR, the address
+  choice, the human's `[y/N]` prompt, the exit handler that clears the window)
+  is 9d, and the tests drive the human with a fake that writes the registry and
+  the decision itself — so the ORDER those two writes take is 9d's to prove end
+  to end (`cli/test/pair-e2e.test.ts`).
+- The SAS is verified byte-identical between both ends in-process (`lb2.ts`) and
+  against the store's claim in two tests, but no real phone has displayed it.
+- `PAIRING_CHECK_MS` (1 s) and `PAIRING_POLL_MS` (100 ms) are only ever driven at
+  test speeds; nobody has measured a real 5-minute window's polling cost (it is
+  two `readdir`s and a stat per second per pairing connection).
 
 ## Review
 
