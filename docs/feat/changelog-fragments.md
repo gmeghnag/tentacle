@@ -529,9 +529,38 @@ outside `.tentacle/tmp/` was affected; the final code is the verified one.
 
 ## Review
 
-*(empty — the reviewer fills it in a fresh context; it must red-team the §10 rule
-wording and confirm the guard test is non-vacuous by mutation, since a guard that
-passes on a hand-edited `[Unreleased]` would silently restore this bug.)*
+**Verdict: REQUEST-CHANGES** (one MEDIUM; everything else holds).
+
+**F1 (MEDIUM) — a misnamed fragment is silently dropped, not refused.**
+`scripts/release.ts:110` scans only `changelog.d/*.md` and
+`scripts/test/changelog-guard.test.ts:40` keeps only names ending `.md`, so
+`parseFragments`'s name check (`changelog.ts:52-57`, unit-tested on `.txt`) never
+sees a bad extension or a subdirectory. Probe: with `changelog.d/lost-task.added`
+(no `.md`) and `changelog.d/sub/nested-task.fixed.md` on disk, the guard went
+**4/4 green**; a release would leave both entries out of the notes and never
+delete them. The plan's "Malformed fragment → red in `bun run test`" row is false
+for these names. Fix: guard and release both list **every** entry in
+`changelog.d/` (files and directories) and refuse anything that is not a valid
+`<slug>.<category>.md` file, with a test for each case shown red first.
+
+**Gate (run here):** `bun test scripts/test/` 59 pass / 0 fail · `bun run lint`
+clean · `bun run typecheck` clean. The full `bun test` was not re-run by this review.
+
+**Mutations (all reverted; `git status --porcelain` empty afterwards):**
+M1 a bullet under `[Unreleased]` → guard I1 **red**. M2a deletions not staged
+(`git add -A` → `git status`) → 2 release tests **red**. M2b staging read-back
+disabled → happy path **red** (`ls-tree` assertion).
+
+**Attacks tried:** the migration diff (the 4 fragments match main's
+`CHANGELOG.md:13-16` byte for byte, holds) · a fragment that is untracked or dirty
+at release time (the clean-tree check uses `status --porcelain`, so it is refused,
+holds) · a dotted, uppercase or `-`-leading slug and a heading or second bullet
+(all refused loudly, holds) · a commit failure (fragment contents rewritten and
+`changelog.d` reset, covered by the snapshot test, holds) · extension and
+subdirectory names (**F1**).
+
+*— claude-opus-5-5, 2026-11-13* (a fresh context, from a different model family
+than the DeepSeek executor)
 
 #### Owner answers (2026-11-13)
 
