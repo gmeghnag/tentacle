@@ -78,7 +78,19 @@ export interface PairDeviceOptions {
     sas: string,
     info: { readonly protocolVersion: number },
   ) => void | Promise<void>;
-  /** Per-request timeout for `initialize`/`device/pair` (default 30 s; the human may take a while). */
+  /**
+   * Per-request timeout for `initialize` (default 30 s).
+   *
+   * It does NOT cover `device/pair`: that request waits on a HUMAN pressing
+   * `[y/N]` on the computer, and the pairing window lasts `PAIRING_TTL_MS`
+   * (5 min), so a 30 s deadline would fail a phone whose user simply took a
+   * minute — and the phone would hang up while the claim, and the terminal's
+   * prompt, still stood: a `y` then registers a device that reported failure
+   * (F3 against the human's intent). The daemon's own expiry answers `timeout`
+   * (and its `declined` answers a refusal), which is the ONE deadline the
+   * exchange is designed around; a socket that dies is still caught, because
+   * `RpcPeer` rejects every pending request when the channel closes.
+   */
   readonly requestTimeoutMs?: number;
 }
 
@@ -148,19 +160,35 @@ async function pairAt(address: string, options: PairDeviceOptions): Promise<Pair
   // `unauthorized`, common/terminal for a wrong pinned key — F23).
   const secure = await factory();
   const timeoutMs = options.requestTimeoutMs ?? 30_000;
+  // NO peer-wide deadline: it would cap `device/pair` too, which waits on a
+  // human whose window is 5 minutes (`PAIRING_TTL_MS`). A 30 s cap there fails
+  // a phone whose user took 31 s while the computer's terminal keeps asking, so
+  // a later `y` registers a device that already reported failure. The exchange's
+  // deadline is the DAEMON's (expiry → `timeout`); a dead channel still rejects
+  // the pending request, because `RpcPeer` rejects on close.
   const peer = new RpcPeer(secure, {
     onRequest: async () => {
       throw new RpcError(DomainErrorCode.Unauthorized, "the daemon does not ask during pairing");
     },
     onNotification: () => {},
-    requestTimeoutMs: timeoutMs,
   });
+  // `initialize` is a HANDSHAKE, not a human's decision: it keeps its own
+  // deadline, or a daemon that accepts the socket and then says nothing would
+  // hang the pairing screen.
+  const initAbort = new AbortController();
+  const initTimer = setTimeout(() => initAbort.abort(), timeoutMs);
+  (initTimer as { unref?: () => void }).unref?.();
   try {
-    const init = (await peer.request(Method.Initialize, {
-      protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: {},
-      clientInfo: { name: "tentacle-app", version: "0" },
-    })) as { protocolVersion: number };
+    const init = (await peer.request(
+      Method.Initialize,
+      {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {},
+        clientInfo: { name: "tentacle-app", version: "0" },
+      },
+      { signal: initAbort.signal },
+    )) as { protocolVersion: number };
+    clearTimeout(initTimer);
     if (options.onCompare) {
       // The SAS both screens must agree on: the payload's computer key and OUR
       // key (the one this handshake authenticated as).
@@ -177,6 +205,7 @@ async function pairAt(address: string, options: PairDeviceOptions): Promise<Pair
     }
     throw error;
   } finally {
+    clearTimeout(initTimer);
     // One-shot: the socket goes whatever happened. A failed pairing must not
     // leave a pairing-only connection open on the computer.
     peer.close();

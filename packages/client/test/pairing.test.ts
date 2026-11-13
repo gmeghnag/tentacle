@@ -23,6 +23,7 @@ import {
   SessionHost,
   addDevice,
   claimPairing,
+  deviceIdOf,
   loadOrCreateIdentity,
   openPairing,
   readClaim,
@@ -31,8 +32,13 @@ import {
   writePairingDecision,
 } from "@tentacle/daemon";
 import type { PairingPayload } from "@tentacle/protocol";
-import { type DuplexChannel, RpcPeer } from "@tentacle/transport";
-import { noiseInitiator, publicKeyOf, systemRandom } from "@tentacle/transport/noise";
+import { type DuplexChannel, RpcPeer, createChannelPair } from "@tentacle/transport";
+import {
+  noiseInitiator,
+  noiseResponder,
+  publicKeyOf,
+  systemRandom,
+} from "@tentacle/transport/noise";
 import { PairingRefused, pairDevice } from "../src/pairing.ts";
 
 const CODE = "K7M2QX9AB3";
@@ -155,6 +161,18 @@ async function human(
   writePairingDecision(configDir, sid, decision.accept);
 }
 
+/** The same human, but thinking for `delayMs` first (a slow `[y/N]` answer). */
+async function humanAfter(
+  configDir: string,
+  sid: string,
+  delayMs: number,
+  decision: { accept: boolean; name?: string },
+): Promise<void> {
+  await until(() => readClaim(configDir, sid) !== undefined);
+  await sleep(delayMs);
+  await human(configDir, sid, decision);
+}
+
 describe("pairDevice, the happy path", () => {
   test("a code, the human's `y` and the SAS → a device id; then a device dial works", async () => {
     const { configDir, identity } = store();
@@ -238,6 +256,87 @@ describe("pairDevice, the happy path", () => {
 });
 
 describe("pairDevice, the refusals", () => {
+  test("a human slower than the request timeout still pairs (the window is 5 min, F3)", async () => {
+    // The bug: one 30 s deadline covered `device/pair`, so a human who took
+    // longer made the phone fail while the computer's terminal kept asking — a
+    // `y` then registered a device that had reported failure. The property: the
+    // request timeout applies to `initialize` ONLY; `device/pair` waits for the
+    // DAEMON's answer (its 5-minute window, or a refusal). Driven at test speed
+    // with a 50 ms `requestTimeoutMs` and a human who answers after 400 ms.
+    {
+      const { configDir, identity } = store();
+      const { url } = serve(configDir);
+      const opened = openPairing(configDir, { code: CODE, now: Date.now(), pid: process.pid });
+      if (!opened.ok) throw new Error(opened.reason);
+      const answering = humanAfter(configDir, opened.session.sid, 400, {
+        accept: true,
+        name: "iPhone di Gabriel",
+      });
+      const result = await pairDevice({
+        payload: payloadFor(identity, url),
+        deviceKey: key(7),
+        name: "iPhone di Gabriel",
+        dial,
+        random: systemRandom,
+        requestTimeoutMs: 50,
+      });
+      await answering;
+      expect(result.deviceId).toBe(deviceIdOf(publicKeyOf(key(7))));
+    }
+  });
+
+  test("a daemon that accepts the socket and never answers `initialize` still fails fast", async () => {
+    // The other half: `initialize` must KEEP its deadline. A silent daemon (a
+    // real Noise responder whose peer never answers) must not hang the pairing
+    // screen — the timeout removed from `device/pair` still guards the
+    // handshake.
+    const { identity } = store();
+    const [clientEnd, serverEnd] = createChannelPair();
+    void noiseResponder(serverEnd, {
+      staticKey: identity.privateKey,
+      random: systemRandom,
+      authorize: () => true,
+    }).then((secure) => {
+      // A peer that answers nothing at all.
+      new RpcPeer(secure, {
+        onRequest: () => new Promise(() => {}),
+        onNotification: () => {},
+      });
+    });
+    const failure = await pairDevice({
+      payload: payloadFor(identity, "ws://127.0.0.1:1/e2e"),
+      deviceKey: key(7),
+      name: "iPhone",
+      dial: () => async () => clientEnd,
+      random: systemRandom,
+      requestTimeoutMs: 60,
+    }).catch((e) => e);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as { name?: string }).name).toBe("cancelled");
+  });
+
+  test("`device/pair` is the only request without a deadline: a refusal still arrives", async () => {
+    // A refusal is the daemon's answer, so it is what a slow human's socket sees
+    // when the computer says `N` — the deadline change must not have swallowed
+    // the reason (it is `RpcPeer`'s own reject, never a timeout).
+    const { configDir, identity } = store();
+    const { url } = serve(configDir);
+    const opened = openPairing(configDir, { code: CODE, now: Date.now(), pid: process.pid });
+    if (!opened.ok) throw new Error(opened.reason);
+    const answering = humanAfter(configDir, opened.session.sid, 300, { accept: false });
+    const failure = await pairDevice({
+      payload: payloadFor(identity, url),
+      deviceKey: key(7),
+      name: "iPhone",
+      dial,
+      random: systemRandom,
+      requestTimeoutMs: 50,
+    }).catch((e) => e);
+    await answering;
+    expect(failure).toBeInstanceOf(PairingRefused);
+    expect((failure as PairingRefused).reason).toBe("declined");
+  });
+
   test("a wrong code is `PairingRefused{invalid_code}`", async () => {
     const { configDir, identity } = store();
     const { url } = serve(configDir);

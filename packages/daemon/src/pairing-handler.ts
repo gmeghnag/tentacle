@@ -80,6 +80,17 @@ export class PairHandler {
    * without losing its socket must not be told its own claim is a stranger's.
    */
   private claimed: string | undefined;
+  /**
+   * True while this connection is INSIDE its wait on the human for a claim it
+   * holds. The route's window watcher reads it (`ws-server.ts`): `pair` writes
+   * the registry and THEN removes the window on exit, so "no live window" is
+   * exactly the instant a successful exchange is being answered — closing the
+   * socket there would answer a phone whose device IS registered with
+   * "connection closed" (F3). While this is true the handler ends its own
+   * wait (registry first, then the decision, then the expiry), and the next
+   * watcher tick closes the socket if nothing is left.
+   */
+  private waiting = false;
 
   constructor(options: PairHandlerOptions) {
     this.options = options;
@@ -88,6 +99,18 @@ export class PairHandler {
   /** Wrong codes this connection has sent so far (the cap is `PAIRING_MAX_ATTEMPTS`). */
   get attemptCount(): number {
     return this.attempts;
+  }
+
+  /**
+   * Is this connection waiting on the human for a claim it holds? The route's
+   * window watcher must leave such a connection alone: a `pair` that has just
+   * written the registry removes its window on exit, so the gap between "the
+   * registry lists the key" and "the answer went out" is a moment with NO live
+   * window — closing on it would break F3 (registered, but the phone is told
+   * the connection closed).
+   */
+  get holdingClaim(): boolean {
+    return this.waiting;
   }
 
   /**
@@ -100,6 +123,18 @@ export class PairHandler {
   async pair(params: DevicePairParams, signal?: AbortSignal): Promise<PairOutcome> {
     const now = this.now();
     const remoteKey = this.options.remoteStatic;
+    // The cap is checked BEFORE any lookup (F6/F16). `RpcPeer` dispatches
+    // requests CONCURRENTLY (§7), so every request a peer pipelined before this
+    // connection's close was already in flight when the fifth wrong code was
+    // answered: without this gate each of them would still run `findPairing`
+    // and `claimPairing` — eight wrong codes plus the right one, sent without
+    // waiting, would spend the window on the ninth guess even though the cap
+    // had been reached at the fifth. So a spent connection refuses at entry,
+    // spending nothing and looking at nothing (it cannot even learn whether a
+    // code exists).
+    if (this.attempts >= PAIRING_MAX_ATTEMPTS) {
+      return { ok: false, reason: "too_many_attempts" };
+    }
     // `findPairing` hashes the code and THROWS on a bad alphabet (9a Review N3:
     // it was written for our own `pair`, never for peer input). A peer's code
     // is therefore caught here and answered as a refusal, never as an internal
@@ -138,7 +173,19 @@ export class PairHandler {
     }
     // The claim is OURS: the human decides, and the registry write is `pair`'s
     // (it holds the lock, and it is the process the human is talking to).
-    const decided = await this.waitForDecision(session.sid, remoteKey, session.expiresAt, signal);
+    // `waiting` tells the route's window watcher not to close this connection
+    // while the answer is being produced: `pair` removes the window right after
+    // writing the registry, so the winning exchange's last moments have no live
+    // window, and a close there would lose a registration that DID happen (F3).
+    this.waiting = true;
+    let decided:
+      | { readonly ok: true }
+      | { readonly ok: false; readonly reason: PairingRefusedReason };
+    try {
+      decided = await this.waitForDecision(session.sid, remoteKey, session.expiresAt, signal);
+    } finally {
+      this.waiting = false;
+    }
     if (!decided.ok) {
       return decided;
     }

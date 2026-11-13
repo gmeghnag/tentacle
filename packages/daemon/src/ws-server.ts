@@ -242,6 +242,14 @@ class WsChannel implements DuplexChannel {
  * with two `pair` windows keeps the connection open, which is right: any live
  * window may still be the one this peer scanned.
  *
+ * It never closes a connection that is ANSWERING a claim it holds
+ * (`holdingClaim`): `pair` writes the registry and THEN removes its window, so
+ * the winning exchange's last moment is exactly a moment with no live window —
+ * closing there would report "the connection closed" for a device that IS
+ * registered, breaking F3. That connection is the handler's to end (registry
+ * first, then the decision, then the expiry), and the next tick closes the
+ * socket normally if nothing is left.
+ *
  * Returns the stopper, called on every teardown path (so no timer outlives a
  * socket).
  */
@@ -250,9 +258,13 @@ function watchPairingWindow(
   route: DeviceRouteOptions,
   options: WsServerOptions,
   handle: DeviceClose,
+  holdingClaim: () => boolean,
 ): () => void {
   const watcher = setInterval(() => {
     if (hasLivePairing(configDir) !== undefined) {
+      return;
+    }
+    if (holdingClaim()) {
       return;
     }
     options.onAudit?.("pairing-closed");
@@ -491,7 +503,15 @@ export function startWsServer(options: WsServerOptions): RunningServer {
           // clean up still closes it, and `pair`'s exit handler (which removes
           // the window) closes it within a check. `hasLivePairing` is the
           // side-effect-free read (9a Review N3), never `findPairing`.
-          stopWatcher = watchPairingWindow(authority.configDir, route, options, handle);
+          stopWatcher = watchPairingWindow(
+            authority.configDir,
+            route,
+            options,
+            handle,
+            // A connection answering a claim it holds is never closed by the
+            // watcher (F3): see `watchPairingWindow`.
+            () => (principal.kind === "pairing" ? principal.pair.holdingClaim : false),
+          );
           options.onAudit?.("pairing-open");
         }
         // The socket closed between the confirm and this point (F22): the

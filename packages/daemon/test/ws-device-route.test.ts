@@ -16,13 +16,17 @@ import { DeviceAuthority, PAIRING_MAX_MESSAGE_BYTES } from "../src/device-author
 import {
   addDevice,
   closePairing,
+  deviceIdOf,
   loadOrCreateIdentity,
   openPairing,
+  readClaim,
   readIdentity,
   readSeen,
   removeDevices,
+  writePairingDecision,
 } from "../src/device-store.ts";
 import type { HandshakeLimitOptions } from "../src/handshake-limit.ts";
+import { PAIRING_POLL_MS } from "../src/pairing-handler.ts";
 import { SessionHost } from "../src/session-host.ts";
 import { startWsServer } from "../src/ws-server.ts";
 
@@ -151,9 +155,10 @@ function serve(
   configDir: string,
   over: Partial<Parameters<typeof startWsServer>[0]> & {
     handshakeLimit?: HandshakeLimitOptions;
+    pairingCheckMs?: number;
   } = {},
 ) {
-  const { handshakeLimit, ...rest } = over;
+  const { handshakeLimit, pairingCheckMs, ...rest } = over;
   // ONE operator sink for both halves (the route's and the authority's own
   // lines: `device-revoked` is the authority's, `device-open` the route's).
   const audit: string[] = [];
@@ -166,7 +171,11 @@ function serve(
     host: "127.0.0.1",
     port: 0,
     sessionHost: dummyHost,
-    devices: { authority, ...(handshakeLimit ? { handshakeLimit } : {}) },
+    devices: {
+      authority,
+      ...(handshakeLimit ? { handshakeLimit } : {}),
+      ...(pairingCheckMs !== undefined ? { pairingCheckMs } : {}),
+    },
     onAudit: (line) => audit.push(line),
     ...rest,
   });
@@ -533,6 +542,48 @@ describe("a pairing connection ends with its window (9c)", () => {
     client.close();
   });
 
+  test("a window that goes away right after the human's `y` still answers SUCCESS (F3)", async () => {
+    // F3's real shape: `pair` writes the registry and then removes its window on
+    // exit, so the winning exchange's last moments have NO live window while the
+    // daemon is still answering. The route's watcher (every 20 ms here) must not
+    // close a connection that holds a claim — the handler (polling at its own
+    // 100 ms) reads the REGISTRY first and answers success. Mutation: drop the
+    // `holdingClaim` skip -> the socket closes first and the client sees a
+    // dropped connection for a device that IS registered (measured: ~2/40 at the
+    // 1 s default, i.e. every time once the watcher is faster than the poll).
+    const configDir = store();
+    const identity = readIdentity(configDir);
+    if (!identity.ok) throw new Error(identity.reason);
+    const opened = openPairing(configDir, {
+      code: "K7M2QX9AB3",
+      now: Date.now(),
+      pid: process.pid,
+    });
+    if (!opened.ok) throw new Error(opened.reason);
+    // The watcher ticks FASTER than the handler's poll (100 ms by default), so
+    // the race this test pins is the one production has at 1 s vs 100 ms.
+    const { url } = serve(configDir, { pairingCheckMs: PAIRING_POLL_MS / 5 });
+    const deviceKeyPublic = publicKeyOf(key(7));
+    const client = await connect(url, key(7), identity.identity.publicKey);
+    try {
+      await client.init();
+      const request = client
+        .call("device/pair", { code: "K7M2QX9AB3", name: "iPhone di Gabriel" })
+        .catch((e: unknown) => e as Error);
+      // The human's `y`, exactly as `pair` orders it: registry FIRST…
+      await until(() => readClaim(configDir, opened.session.sid) !== undefined, 3_000);
+      addDevice(configDir, { publicKey: deviceKeyPublic, name: "iPhone di Gabriel", now: 2_000 });
+      writePairingDecision(configDir, opened.session.sid, true);
+      // …and then `pair` exits, cleaning the window up (its exit handler).
+      closePairing(configDir, opened.session.sid);
+      const answer = (await request) as { deviceId?: string } & Error;
+      expect(answer).not.toBeInstanceOf(Error);
+      expect(answer.deviceId).toBe(deviceIdOf(deviceKeyPublic));
+    } finally {
+      client.close();
+    }
+  });
+
   test("`device/pair` on a DEVICE connection is `already_paired` (PairingRefused)", async () => {
     // A paired phone is not a pairing connection: its privilege was fixed at
     // the handshake, and re-pairing is a new key or `devices revoke`.
@@ -658,6 +709,49 @@ describe("the attempt cap over a real socket (F6/F16)", () => {
       const deadline = Date.now() + 3_000;
       while (!socketClosed && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
       expect(socketClosed).toBe(true);
+    } finally {
+      client.close();
+    }
+  });
+
+  test("requests PIPELINED past the cap cannot spend the window (F6/F16)", async () => {
+    // `RpcPeer` dispatches inbound requests CONCURRENTLY (§7) and the cap's
+    // close is a macrotask, so a peer that fires eight wrong codes and then the
+    // right one, without awaiting, has them all in flight before the close.
+    // Mutation: drop the handler's entry check -> the 9th request claims the
+    // window (the 5-guesses-per-connection promise gone).
+    const configDir = store();
+    const identity = readIdentity(configDir);
+    if (!identity.ok) throw new Error(identity.reason);
+    const opened = openPairing(configDir, {
+      code: "K7M2QX9AB3",
+      now: Date.now(),
+      pid: process.pid,
+    });
+    if (!opened.ok) throw new Error(opened.reason);
+    const { url } = serve(configDir);
+    const client = await connect(url, key(9), identity.identity.publicKey);
+    const calls: Promise<unknown>[] = [];
+    try {
+      await client.init();
+      for (let i = 0; i < 8; i++) {
+        calls.push(
+          client.call("device/pair", { code: "ZZZZZZZZZZ", name: "attacker" }).catch((e) => e),
+        );
+      }
+      // The RIGHT code last, in the same burst.
+      calls.push(
+        client
+          .call("device/pair", { code: "K7M2QX9AB3", name: "attacker" })
+          .catch((e: unknown) => e),
+      );
+      const answered = (await Promise.all(calls)) as { code: number; data?: { reason?: string } }[];
+      const reasons = answered.map((a) => a.data?.reason);
+      // The first five are guesses; everything pipelined behind them is refused
+      // without a lookup, so the right code never reaches the store.
+      expect(reasons.slice(0, 4)).toEqual(Array(4).fill("invalid_code"));
+      expect(reasons.slice(4)).toEqual(Array(5).fill("too_many_attempts"));
+      expect(readClaim(configDir, opened.session.sid)).toBeUndefined();
     } finally {
       client.close();
     }

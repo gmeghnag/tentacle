@@ -328,6 +328,70 @@ describe("the attempt cap (F6/F16)", () => {
     expect(closed).toBe(0);
   });
 
+  test("requests PIPELINED past the cap are refused too, and cannot spend the window", async () => {
+    // `RpcPeer` dispatches requests concurrently (§7), and the cap's close is a
+    // macrotask: everything a peer sent before that close is already running.
+    // Without an entry check, each of those still runs `findPairing` +
+    // `claimPairing`, so 8 wrong codes and then the right one — sent without
+    // awaiting — spend the window on guess NINE (F6/F16 broken). The property:
+    // once the cap is reached, NO later request on this connection looks at
+    // anything, and the window stays unclaimed.
+    const { configDir, identity } = store();
+    const sid = window(configDir);
+    const channelKey = key(7);
+    let closed = 0;
+    const connection = handler(configDir, identity, channelKey, {
+      close: () => {
+        closed++;
+      },
+    });
+    // Five wrong codes sent together (never awaited between them).
+    const wrong = Array.from({ length: PAIRING_MAX_ATTEMPTS }, () =>
+      connection.pair(params({ code: OTHER_CODE })),
+    );
+    // …then the RIGHT code, pipelined behind them, and the human saying yes.
+    const right = connection.pair(params());
+    accept(configDir, sid, channelKey, "iPhone di Gabriel");
+    const outcomes = await Promise.all([...wrong, right]);
+    expect(outcomes.map((o) => (o.ok ? "ok" : o.reason))).toEqual([
+      "invalid_code",
+      "invalid_code",
+      "invalid_code",
+      "invalid_code",
+      "too_many_attempts",
+      "too_many_attempts",
+    ]);
+    // The window was never claimed (the fake human's `accept` writes the
+    // registry unconditionally, so the CLAIM is the property here).
+    expect(readClaim(configDir, sid)).toBeUndefined();
+    // The close still happens (exactly once: only the fifth wrong code spends).
+    await new Promise((r) => setTimeout(r, 20));
+    expect(closed).toBe(1);
+  });
+
+  test("a spent connection spends nothing more: no claim, no lookup, no count", async () => {
+    // Stronger than the ordering above: after the cap, a request with the
+    // CORRECT code is refused without touching the store at all. Mutation:
+    // drop the entry check -> the right code claims the window (the human's
+    // `y` then registers a device on a connection that was already closed).
+    const { configDir, identity } = store();
+    const sid = window(configDir);
+    const channelKey = key(7);
+    const connection = handler(configDir, identity, channelKey);
+    for (let i = 0; i < PAIRING_MAX_ATTEMPTS; i++) {
+      await connection.pair(params({ code: OTHER_CODE }));
+    }
+    const spent = await connection.pair(params());
+    expect(spent).toEqual({ ok: false, reason: "too_many_attempts" });
+    expect(connection.attemptCount).toBe(PAIRING_MAX_ATTEMPTS);
+    expect(readClaim(configDir, sid)).toBeUndefined();
+    // The one-time code is still usable by a real phone on a NEW connection.
+    const fresh = handler(configDir, identity, key(9));
+    const attempt = fresh.pair(params({ name: "a real phone" }));
+    accept(configDir, sid, key(9), "a real phone");
+    expect((await attempt).ok).toBe(true);
+  });
+
   test("the audit line names the reason and the attempt count", async () => {
     const { configDir, identity } = store();
     window(configDir);
