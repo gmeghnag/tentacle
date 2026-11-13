@@ -662,3 +662,8 @@ drifted (`serve.ts:634` → `:723`). The web facts were re-checked on 2026-11-13
 - Upper ranges marked [E] in §5.
 
 *(pending the owner's verdict on the questions above)*
+
+#### Owner answers (2026-11-14, one at a time)
+
+- Q1 supervisor split: **yes (a)** — owner asked how the front is configured/placed: not a hook; a `VoiceFront` client component at the audio edge, its model called at the key holder, route-first constrained output executed by deterministic client code (verbatim transcript delegation).
+- Q2 front modality: **B+** (cascade: on-device VAD/STT → small front LLM → on-device TTS) is the realtime mode; C only if E4/E5 prove it worth it.
