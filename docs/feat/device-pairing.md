@@ -1118,3 +1118,37 @@ All questions answered as recommended. Implementation APPROVED.
 - Its claim that every 9d seam is exercised end-to-end is not true: finding 1 hides behind `--address`.
 - Signing: Execution is signed `claude-opus-4-5-20250929, 2026-11-14` (a future date), while commit `8efe2f2` says "exec (deepseek)". The owner should correct it (§10).
 - This reviewer is claude-opus-5-5, in a fresh context.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-13*
+
+**Verdict: PASS (APPROVE-WITH-NITS).** Scope: `git diff HEAD~1` (`b493377`).
+
+**Round-1 findings, each verified by mutation** (each applied with Edit and reverted; `git status` empty afterwards):
+
+| # | Fix | Mutation | Caught by |
+|---|---|---|---|
+| 1 | `pairAddressesOf` defaults to `machineInterfaces()` (`pair.ts:195`) | back to `?? []` | `pair.test.ts` "a wildcard record expands to the real interfaces…" + `pair-dispatch.test.ts` "a wildcard serve record yields the machine's own addresses" (real `main`) |
+| 2a | after the answer, `io.now() >= expiresAt` → declined | check removed | "the CLOCK alone refuses a late 'y'…" |
+| 2b | the prompt races the window's timer | plain `await ask` | "a prompt nobody answers does not hold pair past the window" (hangs → fails at the timeout) |
+| 3 | the `PairWrites` seam observes the order | `decide(true)` before `add` | "the registry holds the key BEFORE the decision is written" |
+
+My round-1 repros now behave as fixed:
+- `late-yes.test.ts` is green.
+- `wildcard.test.ts` now publishes `192.168.1.6` / `100.91.157.243` and waits for a claim; before the fix it refused.
+
+**Gate.**
+- `bun run lint`: 1021 files, clean.
+- `bun run typecheck`: clean.
+- `bun test packages/cli/test/`: 2087 pass, 0 fail.
+- I did not re-run the full suite.
+
+**Regressions checked on the diff:**
+- The exit-hook disposer drops only its own listeners, and `pairCommand`'s `finally` disposes them.
+- A timer-won race leaves `askLine`'s readline open. That is harmless, because the bin calls `process.exit(await main(...))` (`main.ts:2085`).
+- The default writes keep 9a's calls unchanged.
+
+**Nit (LOW):** both finding-1 regression tests `return` early on a host with no non-internal IPv4 (`pair-dispatch.test.ts:194`, `pair.test.ts:431`). On such a CI runner they pass vacuously. A `test.skipIf` would make the skip visible.
+
+The round-1 LOW nit (the `devices` hint vs. `reset` refusing an unreadable registry) is unaddressed. It is still LOW.
