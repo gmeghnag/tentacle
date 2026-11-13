@@ -847,3 +847,24 @@ presses Enter only once, so it misses this. Fix shape: remember the restored tex
 
 **Gate:** `attach-app` + `attach-draft` 72 pass / 0 fail; `bun run lint` clean (951 files);
 `bun run typecheck` clean. Full `bun test` was not re-run.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-12* (fresh context, reviewing `069f1f9`)
+
+**Verdict: PASS** (R2-1 fixed; no new HIGH/MEDIUM)
+
+- **R2-1 fixed.** Repro E (`/w/a.png /w/notes.txt`) and F (`~/gone.png`), each with two Enters, now send
+  exactly one text-only message. Repros A–D from round 1 still pass.
+- **Mutation A:** `enterConvertsToChips` ignores `probedText` → 3 App R2-1 tests + 1 unit test red.
+- **Mutation B:** `&& !isProbedDrop` removed from the `/` command branch → 2 App tests red (the drop
+  became "Unknown command"). Both reverted; `git status` clean.
+- **Regressions attacked:** the one-shot memory is cleared on any other text and after any non-refused
+  Enter, and kept on a refusal, so the text is unchanged. A re-drop of the same text probes afresh, and an
+  edited drop probes again (both pinned). The command bypass applies only to a text that
+  `looksLikeCommand` already rejected before the probe, so real `/commands` are unaffected.
+  `app.test.tsx` still passes.
+- **Gate:** `attach-app` + `attach-draft` + `app.test.tsx` 195 pass / 0 fail; `bun run lint` clean
+  (951 files); `bun run typecheck` clean. Full `bun test` was not re-run by the reviewer.
+- **Still open (owner):** a manual drag test in real terminals, and the pod `run`/`attach` live paths
+  (as stated in Execution).
