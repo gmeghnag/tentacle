@@ -703,6 +703,293 @@ is that a `serve` daemon actually authorises a device from this registry and
 that a revoke closes a live socket — that is 9b's `DeviceAuthority` and its
 loopback test, and no code in 9a is on that path yet.
 
+### 9b `device-route` — DONE
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-13*
+
+Scope: slice 9b only. 9a's store is used unchanged except for one added read
+(nit N3); 9c (`device/pair`, `PairHandler`, the client helper) and 9d (`pair`,
+`devices`, the QR) are untouched. `Connection` gets the principal flag the plan
+assigns to 9b/9c, with the pairing method gate; `device/pair` itself does not
+exist yet, so a pairing connection can currently call `initialize` and nothing
+else — which is the fail-closed half of F16.
+
+**Load-bearing check (re-run first, as asked) — PASSES.**
+`.tentacle/tmp/device-pairing-9b/lb1.ts` + `lb2.ts` (scratch; pasted below).
+
+```
+1. RESPONDER_MAX_MESSAGE_BYTES=33554432 (fixed before authorize; verdict is boolean)
+2. today: /e2e + iOS Origin -> 401; /e2e headerless -> 426
+   originAllowed(iOS Origin)=false
+   server: authorize 516cbdef -> true
+   server: UNCHANGED Connection built for 516cbdef
+3. known key + iOS Origin over /e2e -> initialize protocolVersion=24
+4. after revoke, in-flight request -> connection closed
+   server: authorize 516cbdef -> false
+5. redial after revoke -> kind=unauthorized
+   server: responder rejected: denied
+   server: authorize d823b0f4 -> false
+6. unknown key -> kind=unauthorized
+```
+
+The capability is missing on `main` (a phone's `Origin` is 401'd on the only
+route, which is `e2e`'s whole blocker) and the seam holds: a route + an
+`authorize` verdict yields a device-bound connection with `Connection`,
+`RpcPeer`, `RemoteClient` and `SessionHost` unchanged. P1 is confirmed as the
+plan states it: the responder's cap is read at `noise-channel.ts:410`, before
+the key is known at `:427`, so a per-verdict cap is required.
+
+**As built, in dependency order.**
+
+1. `packages/transport/src/noise-channel.ts` — `authorize` may return
+   `AuthorizeAllow { allow: true; maxMessageBytes }` (`AuthorizeVerdict =
+   boolean | AuthorizeAllow`); `readVerdict` reads it and FAILS CLOSED on
+   anything else (`null`, `{allow:false,…}`, a non-positive/non-integer cap →
+   the deny path, no channel built). The cap goes to the `Secured` built in the
+   responder only.
+2. `packages/daemon/src/handshake-limit.ts` (new, pure, injectable clock) —
+   `HandshakeLimiter`: per-address token bucket (`admit`), a GLOBAL
+   concurrent-handshake cap (`begin`/`end`, `inFlight`), a bounded bucket map
+   (`tracked`, `maxTrackedAddresses`), and one rule the plan does not state but
+   F6/F15 need: a refusal by the CAP does not spend the address's token, so a
+   burst of unrelated peers cannot starve a real device.
+3. `packages/daemon/src/device-store.ts` — `hasLivePairing`, a side-effect-free
+   "any usable window" read. This is 9a Review nit N3's requirement (9a's
+   `findPairing` sweeps as it goes and throws on a malformed code, so it must
+   not back `authorize`, which runs on replayed message 1s).
+4. `packages/daemon/src/device-authority.ts` (new) — `DeviceAuthority`:
+   `authorize` (stat-refresh + a fresh pairing read, returning
+   `{kind:"device",id}` / `{kind:"pairing"}` / `false`), the 1 s poll that
+   closes revoked devices and — on an identity change — every device, `register`
+   / `unregister` / `liveCount`, `staticKey`, `identity`, `configDir`, `stop`;
+   `PAIRING_MAX_MESSAGE_BYTES = 64 KiB`, `DEVICE_MAX_MESSAGE_BYTES = 32 MiB`.
+   Fail-closed on an unreadable or unknown-version store, with one audit line
+   per fault.
+5. `packages/daemon/src/connection.ts` — `ConnectionPrincipal` (`token` |
+   `device` | `pairing`, absent = token) and the pairing gate: a pairing
+   connection calling anything but `initialize` gets `Unauthorized` (-32001).
+6. `packages/daemon/src/ws-server.ts` — `devices?: DeviceRouteOptions`; the
+   `/e2e` route (no token, no Origin check), the rate-limited upgrade (429
+   before any crypto), `openDevice` (responder → resolve → unchanged
+   `Connection` on the RESOLVED channel → register under the device id →
+   `touchSeen` → `device-open` / `pairing-open`; `device-denied` /
+   `e2e-violation` on the failure path), the F22 orphan check, and the bind
+   rule (a non-loopback bind without a token is allowed when `devices` is set,
+   and the plain route then answers 401 to everyone).
+7. `packages/cli/src/serve.ts` — `deviceAuthority()` at start-up
+   (`loadOrCreateIdentity`, fatal on an unusable one, naming the file),
+   `ServeOptions.devices` (default on; `false` = today's listener),
+   `devices` passed to `listen`, the authority stopped in `release`, and
+   `<configDir>/daemons/<pid>.json` written at listen / removed at stop.
+8. Tests — `daemon/test/handshake-limit.test.ts` (10), `daemon/test/device-authority.test.ts` (18),
+   `daemon/test/ws-device-route.test.ts` (13, real loopback),
+   `cli/test/serve-devices.test.ts` (7, real disk + real socket),
+   `daemon/test/device-store.test.ts` (+2), `transport/test/noise-channel.test.ts` (+3).
+9. `changelog.d/device-pairing-9b.added.md` — the plan's `device-route` text.
+   `packages/protocol/schema/protocol.json` is UNCHANGED and needed no regen:
+   9b adds no wire schema (only 9a's non-schema payload codec and 9c's
+   `device/pair` are protocol surface).
+
+**Drift from the Implementation (and why).**
+
+- **`DeviceVerdict` carries `allow: true` + `maxMessageBytes` as extra fields
+  on the SAME object**, rather than a separate return channel. The plan says
+  "the verdict object carries the reassembly cap"; keeping one object means
+  the role and the cap cannot be paired wrongly.
+- **The plan's `DeviceRouteOptions` had a `configDir`**; I moved it onto
+  `DeviceAuthority.configDir` and the route reads it from there. Two fields
+  that must agree (the store the authority reads and the `seen/` dir the route
+  writes) are now one value by construction.
+- **The plain route's "answer 401 to everyone" is scoped to a NON-LOOPBACK
+  bind.** The plan's sentence is unconditional; taken literally it also
+  refuses a local CLI on a loopback `serve` with no token, which is today's
+  normal local case and would have been a silent regression (it broke 14
+  existing `serve-persistence` tests before I caught it — see the failure
+  below). On loopback the plain route is unreachable from the network, so the
+  exposure the rule protects does not exist there. This is the one place I
+  narrowed the plan; flagging it for Review.
+- **The route is chosen at the UPGRADE** (`SocketData.route`), never inferred
+  in `open` from "is `devices` set". Also found by the same regression: with
+  the branch on `devices`, every plain client on a device-route server was
+  pushed into the Noise responder and hung. Pinned by a test and M27.
+- **`hasLivePairing` is new in 9a's file** (nit N3), so 9a gained one exported
+  pure read and two tests. 9a's own behaviour is unchanged.
+- **A device's live connection is one `DeviceClose` handle per connection**
+  (`{close()}` closing both the `Connection` and the socket), held by the
+  authority and unregistered by the same identity on every teardown path — so
+  a revoke's later `unregister` can never touch a different socket.
+- **The audit line is emitted BEFORE the sockets are closed**: `close()` reaches
+  the ws-server's teardown synchronously enough to unregister the very entry
+  being iterated, so an ordering that logged afterwards could lose the line
+  (it did, while I was building this).
+- **`DeviceAuthority`'s poll is `unref`'d** where the runtime supports it. Not
+  in the plan; an armed interval is otherwise a reason for a process to stay
+  alive, which `serve`'s listener — not housekeeping — should decide.
+- **`serve-limits.test.ts`'s sweep-timer test now passes `devices: false`.**
+  That test counts 1 s timers as a proxy for "the reaper", and the device poll
+  shares that period; leaving it on would make the test's own mutation
+  (`arm` starting a reaper when the period is null) no longer detectable. The
+  device poll's lifecycle is pinned instead in `serve-devices.test.ts`, so
+  neither side is unchecked. This is the only test I changed outside my own
+  files.
+- Nothing in the plan's file set was dropped. No step contradicted the code.
+
+**Mutations run (each restored immediately; no `git checkout`/`restore`/`stash`
+— the file is copied aside to `.tentacle/tmp/device-pairing-9b/mut/` and copied
+back).** Nine survived a first pass and the tests were rewritten or the code
+fixed, as noted.
+
+| # | Mutation | Caught by |
+|---|---|---|
+| M1 | responder ignores the verdict's cap (builds with `max`) | `authorize's verdict … > an allowed stranger is capped at the verdict's bytes` |
+| M2 | an unreadable verdict is treated as allow | `… > a verdict it cannot read fails CLOSED` |
+| M3 | the concurrent cap does not gate `begin` | `the concurrent-handshake cap > past the cap every address is refused…` |
+| M4 | a cap refusal spends the address's token | `… > a capped-out begin does not spend the address's token` (**survived first**: burst 5 hid the spent token — test rewritten to burst 1) |
+| M5 | the bucket map is unbounded | `the buckets are bounded … > more addresses than the cache holds…` |
+| M6 | the injected clock ignored (`Date.now`) | `the per-IP token bucket > a burst is admitted…` + `a long absence refills…` |
+| M7 | `hasLivePairing` sweeps dead windows | `hasLivePairing … > is SIDE-EFFECT FREE` (**survived first**: readdir order let a live window answer before the sweep — the test now has no live window) |
+| M8 | `hasLivePairing` ignores expiry | `… > finds a live window without the code…` |
+| M9 | `hasLivePairing` ignores a dead pid | `… > finds a live window…` + `is SIDE-EFFECT FREE` |
+| M10 | the poll does not close | `a revoke closes the live socket > … within ONE tick` |
+| M11 | `authorize` is snapshot-only (no stat refresh) | `… > revoke BEFORE the tick: the next authorize already denies` (F8) |
+| M12 | a broken store fails OPEN (every key a device) | `an unreadable store fails CLOSED > a garbled registry denies a KNOWN key` |
+| M13 | an unknown key with no window is admitted | `… > an unknown key with no pairing window is DENIED` (F15) |
+| M14 | the pairing verdict gets the device cap | `a pairing window > … capped small` (P1) |
+| M15 | an identity change does not close devices | `… > devices reset closes EVERY device` (F11) |
+| M16 | the injected `alive` never reaches the pairing read | `… > a window whose pair died denies` (**survived first**: the test's pid was genuinely dead, so the real `processAlive` denied too — test now uses our own live pid) |
+| M17 | expiry judged on a clock captured at construction | `… > a window that expired denies` (F24) |
+| M18 | the pairing principal's method gate skipped | `a pairing connection is pairing-only > session/list … is Unauthorized` (F16) |
+| M19 | the plain route refuses a loopback client too | `a plain client on the SAME server is untouched` |
+| M20 | `touchSeen` called inside `authorize` | `a replayed Noise message 1 leaves seen/ untouched` (F4/P2) (**survived first**: the deny/resolve test could not see it — a real replay test replaced it) |
+| M21 | `/e2e` taken even with no `devices` | `without devices, /e2e is the PLAIN route` (F21) |
+| M22 | no rate limit at the upgrade | `past the burst … 429` (F6) |
+| M23 | the verdict cap ignored end to end | `a frame over the pairing cap closes it` |
+| M24 | `serve` creates no identity | 4 tests in `serve-devices` |
+| M25 | an unusable identity is tolerated | `an unreadable identity REFUSES to start` (F26) |
+| M26 | the daemon record is never removed | `is written at listen … and removed at stop` |
+| M27 | `open` branches on `devices`, not the socket's route | `a plain client on the SAME server is untouched` (the real bug I hit) |
+| M28 | the poll is never cleared at stop | `the device poll's timer is owned by the daemon …` (**survived first**: "some timer was cleared" — now asserts THAT handle) |
+
+**Gate.** `bunx tsc --noEmit` clean, `bunx tsc -p apps/mobile --noEmit` clean,
+`bun run lint` 1019 files clean (0 errors/0 warnings, §6 baseline),
+`bun test` **7975 pass / 3 skip / 0 fail**, 7978 tests in 570 files — the 3
+skips are §6's opt-ins (live-k8s, live-docker, the slow keepalive).
+`packages/protocol/schema/protocol.json` unchanged.
+
+**Not verified here (one line each).**
+- The pairing EXCHANGE is absent by design (9c): `device/pair` does not exist,
+  so a pairing connection currently cannot complete a pairing — the tests prove
+  the gate and the cap, not a pairing.
+- The rate limiter is exercised through a real upgrade, but its *default*
+  (8 per 500 ms, 32 concurrent) is only unit-tested; nobody has driven a real
+  phone's reconnect storm against it.
+- `unref` is Bun-only trivia asserted by no test (a runtime property, not our
+  contract): verify by starting `serve` and checking the process exits when the
+  listener stops.
+- The `0.0.0.0` bind is tested on loopback addresses; a real LAN/phone dial of
+  `/e2e` is 9d's `pair-e2e` and the device itself.
+
+### Fix round 1 (9b)
+
+*— claude-opus-5-5, 2026-11-13*
+
+Scope: 9b's two MEDIUM findings only. Two source files, two test files; no
+other slice touched.
+
+**F1 (MEDIUM) — the no-identity path leaked a handshake slot for good.**
+
+Reproduced first, in `.tentacle/tmp/device-pairing-9b/leak2.ts` (an authority
+with no identity, `maxConcurrent: 2`, 8 dials of `/e2e`), on the unfixed code:
+
+```
+audit: e2e-no-identity
+audit: connection-close
+0 open
+audit: e2e-no-identity
+audit: connection-close
+1 open
+audit: e2e-rate-limited 127.0.0.1
+2 error
+audit: e2e-rate-limited 127.0.0.1
+3 error
+… (dial 4-7: e2e-rate-limited)
+```
+
+Dials 0-1 were admitted and each kept its concurrent slot; from dial 2 on,
+every device is 429'd — permanently, since nothing ever calls `limiter.end()`
+for a socket that never reached `pending.set`.
+
+Root cause, one sentence: `openDevice` closes a no-identity socket and returns
+BEFORE registering `finish` in `pending`, so neither the responder's settle
+paths nor the `close` handler ever ends the slot `begin` took at the upgrade.
+
+Fix (`ws-server.ts:359-372`): call `limiter?.end()` directly on that path.
+
+Test: `daemon/test/ws-device-route.test.ts` → *"a no-identity window gives every
+handshake slot back, so the route recovers (F14)"*. Five dials with
+`maxConcurrent: 2` must all be **admitted then closed** (never refused), then an
+identity is written, the authority's poll picks it up, and a real paired key
+completes `initialize` with no restart. RED before the fix, on the assertion:
+
+```
+- Expected  - 3      + Received  + 3
+   "closed",
+-  "closed",        +  "refused",
+-  "closed",        +  "refused",
+-  "closed",        +  "refused",
+```
+
+**F2 (MEDIUM) — F26 was applied to every bind, not only non-loopback ones.**
+
+Reproduced: an unusable `identity.json` made a loopback `serve` reject at
+start-up (`deviceAuthority` threw), for a user who never pairs. Fix scoped to
+F26's own case (`serve.ts:235-266`): the throw stands for `!isLoopbackHost(host)
+&& !token` (no other gate exists there); everywhere else the daemon starts
+WITHOUT the device route and reports one line naming the file. Nothing
+advertises a route it does not have: `daemons/<pid>.json` is written only when
+an authority exists, so `pair` (9d) never dials a disabled `/e2e`.
+
+Tests (`cli/test/serve-devices.test.ts`):
+- *"an unreadable identity REFUSES a non-loopback token-less start …"* — the
+  existing F26 test, narrowed to F26's own bind (`0.0.0.0`), still red on an
+  unscoped throw.
+- *"an unusable identity on a LOOPBACK bind starts WITHOUT the device route
+  (F26 is scoped)"* — starts, `onError` contains `identity.json`, the file is
+  byte-identical afterwards, and `readDaemonRecords` is empty. RED before the
+  fix (`startDaemon` rejected at `serve.ts:245`).
+
+This is now a recorded decision for the owner, not silent drift: a loopback
+`serve` degrades (device route off, one error line) rather than refusing to
+start. If the owner prefers the strict reading — refuse on every bind — the
+change is one `&&` and the second test is deleted.
+
+**Mutations (each applied, tested, restored from a copy in
+`.tentacle/tmp/device-pairing-9b/`; no `git checkout`/`restore`/`stash`).**
+
+| # | Mutation | Result |
+|---|---|---|
+| F1-M | drop the no-identity path's `limiter.end()` | RED: the route test's 3rd-5th dials come back `refused` (13 pass / 1 fail) |
+| F2-M1 | `if (!isLoopbackHost(host) && !token)` → `if (true)` (throw on every bind, i.e. the pre-fix behaviour) | RED: the loopback test's `startDaemon` rejects (7 pass / 1 fail) |
+| F2-M2 | drop the file name from the degraded-start error line | RED: `expect(errors.join()).toContain("identity.json")` (7 pass / 1 fail) |
+
+One mutation attempt is reported honestly: my first F2-M2 edit produced a
+syntax error (`void (…);` left a stray `)`), which `bun test` surfaced as a load
+error (0 pass / 1 fail / 1 error) — that proves nothing, so I re-did it as a
+valid mutation (F2-M2 above) and only that result is claimed.
+
+**Gate.** `bunx tsc --noEmit` clean · `bun run lint` 1019 files, no fixes
+applied (0 errors/0 warnings, §6 baseline) · `bun test` **7977 pass / 3 skip /
+0 fail**, 7980 tests across 570 files, 337 s — the 3 skips are §6's opt-ins
+(live-k8s, live-docker, the slow keepalive). That is +2 tests over the round's
+start (7975 pass / 7978 tests): the new route test and the new scoped-F26 serve
+test. `packages/protocol/schema/protocol.json` unchanged (no wire surface here).
+
+**Not verified / left open.** None of the findings' own behaviour is unverified.
+The F2 scope is a decision I took under the Review's "either/or"; the owner may
+pick the strict reading instead (see above). F1's production value (32) is not
+driven by a test — the test uses 2 to make the leak cheap to see; the arithmetic
+is the same rule.
+
 ## Review
 
 #### Owner answers (2026-11-13)
@@ -735,3 +1022,31 @@ All questions answered as recommended. Implementation APPROVED.
 - N3 (constraint for 9b/9c): `findPairing` sweeps files (`:857`) and throws on a malformed code (`pairingCodeHash`, `:93`). So it must not back `authorize` (P2: no side effects). 9b needs a side-effect-free "any live window" read, which 9a does not export. 9c must catch the throw on peer input.
 
 **Executor behaviour.** Drift is documented honestly, and the mutation table is accurate for the cases I checked. One discrepancy: commit `11dfe31` says "exec (deepseek)", but Execution is signed claude-opus-5-5. The owner should fix whichever one is wrong (§10 honest signing). This reviewer is claude-opus-5-5. If that signature is correct, this was the same model in a fresh context, so shared blind spots are possible.
+
+### 9b `device-route` — Review
+
+*— claude-opus-5-5, 2026-11-13*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM finding; it has a repro).
+
+**Findings**
+1. **MEDIUM — the no-identity path leaks a handshake slot for good.** `ws-server.ts:361-367`: when `staticKey()` is `undefined`, `pending.get(ws)?.()` runs *before* `pending.set` (`:376`). So `finish` is never registered, and the `close` handler (`:338`) finds nothing to call either. Each such socket keeps `limiter.begin`'s concurrent slot forever. Repro (`.tentacle/tmp/device-pairing-9b/leak.ts`): an authority with no identity and `maxConcurrent: 2`, four dials → `open, open, close 1002, close 1002`. After `maxConcurrent` (32) dials during any F14 window (unreadable identity, or the gap in a `devices reset` rewrite), `/e2e` answers 429 to everyone until a restart, even once the store is fixed. That contradicts the authority-level "recovers, no sticky denial" property. Fix: call `limiter?.end()` directly on this path. Test: a route test with no identity dials past `maxConcurrent`, then writes an identity and gets a successful handshake (red today).
+2. **MEDIUM — F26 is applied to every bind, not only to non-loopback ones (undocumented drift).** `serve.ts:173` + `deviceAuthority` (`:99-112`): `devices` is on by default. An unusable `identity.json` therefore makes a plain loopback `serve` refuse to start, even for a user who never pairs. The plan scopes F26 to "non-loopback bind without token". Execution's drift list does not mention this. Either scope the throw to F26's own case (on loopback, warn and start without the device route), or record the decision as drift and get the owner's OK.
+
+**Gate.** Touched files: 149 pass / 0 fail (7 files). `bun run lint`: clean. `bun run typecheck`: clean. I did not re-run the full `bun test` here.
+
+**Mutation (all reverted; `git status` clean afterwards).** I applied four mutations together: skip the pairing method gate, ignore the verdict cap (`readVerdict` → fallback), drop `authorize`'s stat-refresh, and the poll not closing. Result: 12 fails across the route, authority and noise tests. Each mutation is caught by its named test.
+
+**Attacks tried.** (a) Limiter balance on every `openDevice` exit → finding 1. (b) A pairing principal reaching a session via notifications: `session/cancel` needs an attached session, which is unreachable → holds. (c) A revoke racing `authorize`'s refresh before the poll: the poll compares the live map with the current snapshot (not a diff), so it still closes → holds. (d) A `devices reset` refreshed by `authorize` before the tick: `reset` reads false, but the empty registry closes everything anyway → holds, as long as the CLI empties the registry (9d must keep that). (e) F21: without `devices`, `/e2e` is the plain route → holds (test). (f) Same session path: `Connection` is unchanged on the secure channel, and no second loop → holds.
+
+**Executor behaviour.** The scope is tight, the tests are non-vacuous, and the drift notes are honest except for finding 2. The executor was DeepSeek and this reviewer is Opus, a different model family.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-13*
+
+**Verdict: PASS.** Both round-1 findings are fixed. Diff checked: `c04bad1`.
+
+- **Finding 1 (slot leak) — fixed.** `ws-server.ts:368` now calls `limiter?.end()` on the no-identity path. It cannot run twice for one socket: `pending` is not set yet, so the `close` handler finds nothing to end. Repro `leak.ts`: four dials now give `open ×4` (round 1: `open, open, close 1002, close 1002`). *Mutation:* removed `:368` → `a no-identity window gives every handshake slot back` turns red.
+- **Finding 2 (F26 on every bind) — fixed.** `serve.ts:249` now throws only for a non-loopback bind without a token. In every other case `serve` starts without the device route, reports one `onError` line naming the file, and writes no daemon record. *Mutation:* changed the condition to `if (true)` → `an unusable identity on a LOOPBACK bind starts WITHOUT the device route` turns red. Both mutations reverted; `git status` clean.
+- **Regressions.** Touched files: 112 pass / 0 fail. `bun run lint` clean; `bun run typecheck` clean. Case checked: token + non-loopback + broken identity → starts without `/e2e`, plain route still token-gated. Nothing widens access.
