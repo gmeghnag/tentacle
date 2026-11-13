@@ -933,3 +933,41 @@ All questions answered as recommended. Implementation APPROVED.
 - N3 (constraint for 9b/9c): `findPairing` sweeps files (`:857`) and throws on a malformed code (`pairingCodeHash`, `:93`). So it must not back `authorize` (P2: no side effects). 9b needs a side-effect-free "any live window" read, which 9a does not export. 9c must catch the throw on peer input.
 
 **Executor behaviour.** Drift is documented honestly, and the mutation table is accurate for the cases I checked. One discrepancy: commit `11dfe31` says "exec (deepseek)", but Execution is signed claude-opus-5-5. The owner should fix whichever one is wrong (§10 honest signing). This reviewer is claude-opus-5-5. If that signature is correct, this was the same model in a fresh context, so shared blind spots are possible.
+
+### 9d `device-cli` — Review
+
+*— claude-opus-5-5, 2026-11-13*
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 2 MEDIUM). Scope: `git diff main...HEAD`, slice 9d only.
+
+**Gate (re-run).** The 5 touched test files: 73 pass, 0 fail. `bun run lint`: 1021 files, clean. `bun run typecheck`: clean. I did not re-run the full `bun test`.
+
+**Findings.**
+1. **HIGH: a `0.0.0.0` serve never yields an address in the real CLI.** `pair.ts:126` defaults `interfaces` to `[]`. `main.ts:174-197` (`runDeviceCommands`) never passes them, and nothing in `packages/cli/src` calls `os.networkInterfaces()`. So the Design's main path (wildcard → each non-internal IPv4) is dead in production.
+   - Repro (`.tentacle/tmp/device-pairing-9d/review/wildcard.test.ts`, real `main`): a live `0.0.0.0:7777` daemon record on a machine with `192.168.1.6` and `100.91.157.243` gives exit 1 and `[error] no daemon this phone can reach: start one with \`tentacle serve --host 0.0.0.0\`…`. That hint is the very configuration that was already running.
+   - The unit tests inject `LAN`, and `pair-e2e.test.ts:124-125` wrongly comments that the `0.0.0.0` record "contributes this machine's interfaces". The test passes only because of `--address`.
+   - Fix: default to a flattened `os.networkInterfaces()` in `pairCommand`/`main`, and add a dispatch test that does not inject interfaces.
+2. **MEDIUM: a `y` typed after the window expired still pairs the device.** `answerClaim` (`pair.ts:282-322`) has no expiry check, and `ask` has no timeout. The plan's F-table says "`N` / timeout / Ctrl+C → decision declined", and 9c's daemon answers the phone `timeout` at expiry.
+   - Repro (`late-yes.test.ts`): `ttlMs: 300`, the claim lands, the human answers `y` after 600 ms. Result: exit 0, "Paired 'late'", and the registry holds 1 device the phone was told failed. A prompt left open also blocks `pair` forever.
+   - Fix: refuse (decision `false`, exit 1) when `now >= expiresAt` at answer time, and bound the prompt by the window.
+3. **MEDIUM: the F3 ordering is not pinned, though the test header says it is.** `pair.test.ts:15-16` claims "registry written BEFORE the decision (mutation: swap them)".
+   - Mutation: write `writePairingDecision(sid, true)` before `addDevice` (`pair.ts:306`). `pair.test.ts` + `pair-e2e.test.ts` stay 20/20 green.
+   - The ordering that `pair.ts:14-17` calls load-bearing has no test, and the coverage claim is false. Fix: a test whose decision write observes that the registry already holds the key (for example a failing `addDevice` must leave no `accepted: true`), then show it red under this mutation.
+
+**Mutations** (each applied with Edit and reverted; `git status` empty afterwards):
+- F3 swap: **survived** (finding 3).
+- `renderDevices` raw name: caught (`the table > a control character …`).
+
+**Attacks that found nothing:**
+- `revoke` resolution: exact name first, an ambiguous match is refused, and a non-hex word never matches by prefix.
+- `reset` order: read → replace identity → empty the registry. If the clear fails, the old devices stay listed but pinned a key that no longer exists.
+- `--address` repeat parsing: the conflict and given-twice rules are intact for non-repeated flags.
+- No wire/protocol change, and nothing writes to a terminal Ink owns. 9b/9c files are untouched.
+
+**Nit (LOW):** `devicesCommand` (`devices-cmd.ts:148`) advises `devices reset` for an unreadable registry, but `resetCommand` (`:211-215`) refuses exactly that case. F14 lists reset as the way out. Align either the hint or the plan.
+
+**Executor behaviour.**
+- Execution's deferral of the live-connection assertion to 9b/9c is honest and justified.
+- Its claim that every 9d seam is exercised end-to-end is not true: finding 1 hides behind `--address`.
+- Signing: Execution is signed `claude-opus-4-5-20250929, 2026-11-14` (a future date), while commit `8efe2f2` says "exec (deepseek)". The owner should correct it (§10).
+- This reviewer is claude-opus-5-5, in a fresh context.
