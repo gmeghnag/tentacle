@@ -539,3 +539,15 @@ last bullet).
 - Malformed notes refused before any write (dir, non-slug, empty): I read the code and it holds. I did not re-run the mutation matrix M1–M9 myself.
 
 **Executor behaviour.** Thorough plan and tests. However, its idempotence claim was proven only for the single-note case and was then stated as general.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-13* (fresh context, reviewing `git diff HEAD~1`)
+
+**Verdict: PASS.**
+
+- **#1 HIGH (re-run after a crash folds a note twice): fixed.** `pendingNotes` now checks the last `notes.length` blocks, not only the newest (`scripts/protocol-bump.ts`, `pendingNotes`). A crash in the middle of the deletion loop is covered too: the notes still on disk are the last ones in slug order, and their blocks are the last blocks. My round-1 repro now converges at 26 instead of 27.
+- **#2 MEDIUM (a continuation line starting with `<n>:`): fixed.** `foldNote` keeps such a word on the previous line (`BLOCK_START_WORD`). The repro now gives `…x 7:` / `// y`, and the next bump goes through.
+- **Mutations (reverted afterwards; `git status` clean).** I applied `slice(-notes.length)`→`slice(-1)` and `tooWide && !wouldMisread`→`tooWide` together: 3 tests failed, namely the 2-note applyBump test, the wrap test and the end-to-end re-run test. I applied the two mutations together, not one at a time; each test's name and assertions point at only one of them.
+- **Gate.** `bun test scripts/test/protocol-bump.test.ts packages/protocol/test`: 310 pass, 0 fail. `bun run lint` is clean and `bun run typecheck` is clean. I did not run the full suite.
+- **Leftover risk (low, not blocking).** A NEW note whose text is identical to one of the last `k` blocks of a previous release is skipped and then deleted, so that break never gets a number. That needs a word-for-word copy of earlier prose. The risk is the same kind as before the fix, only with a wider window. The doc's "residual" comment covers the case of a match *outside* the window but not this one.
