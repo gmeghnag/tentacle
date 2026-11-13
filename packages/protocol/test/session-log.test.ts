@@ -254,8 +254,11 @@ describe("media entries (docs/feat/attachments-core.md, D2: owner Q2 = (a))", ()
     expect(isAppendEntry({ type: "media_replace" } as never)).toBe(false);
   });
 
-  test("PROTOCOL_VERSION is 24: the newest bump (sub-agent token budget) breaks an older peer", () => {
-    expect(PROTOCOL_VERSION).toBe(24);
+  test("the exact pin moved to protocol/test/version.test.ts (docs/feat/protocol-version-at-merge.md)", () => {
+    // A FLOOR here, the ONE exact pin there: the number is assigned at merge, so a
+    // bump is `version.ts` + that one line. This test keeps its real property —
+    // the log format this file pins landed at or before the current version.
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(23);
   });
 });
 

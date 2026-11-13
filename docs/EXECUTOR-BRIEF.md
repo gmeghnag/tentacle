@@ -45,7 +45,11 @@ report** — the task may be stale or wrong.
   compared to the lint baseline in AGENTS §6. If it is not, you are not done.
 - A task with user-visible impact writes **`changelog.d/<slug>.<category>.md`**
   (one bullet) — never `CHANGELOG.md`, whose `[Unreleased]` must stay empty
-  (AGENTS §10); a missing or malformed fragment fails the gate.
+  (AGENTS §10); a missing or malformed fragment fails the gate. Likewise a task
+  that **breaks the wire** writes `protocol.d/<slug>.md` and never edits
+  `PROTOCOL_VERSION` (AGENTS §7): the orchestrator folds it at merge with
+  `bun run protocol:bump`. A display-class addition, a new method, or an optional
+  field needs neither.
 - Report per AGENTS §5: what changed (`file:line`), why in one sentence, the
   evidence. If something is unverified, say so in one line and how to verify it.
 
