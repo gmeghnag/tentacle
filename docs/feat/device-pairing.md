@@ -901,6 +901,153 @@ end-to-end — 9c's; 9d's half (the window, the hash lookup, the claim and the
 decision files) is exercised here. All three close when 9b and 9c merge, which
 the plan orders before 9d.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-13*
+
+Scope: the 9d Review's 1 HIGH + 2 MEDIUM (`docs/feat/device-pairing.md`, section
+`### 9d — Review`). The two LOW nits are left (below). No 9b/9c file touched, no
+wire/protocol change.
+
+**Reproduced first, on the branch as it stood.**
+`.tentacle/tmp/device-pairing-9d/r1/repro.test.ts`, driven at the real `main`
+and the real `pairCommand`:
+
+```
+F1 HIGH:  machine v4: [ "192.168.1.6", "100.91.157.243" ], a live 0.0.0.0:7777
+          record → code 1, out "", err "[error] no daemon this phone can reach:
+          start one with `tentacle serve --host 0.0.0.0`…"
+F2 MEDIUM: ttlMs 300, the human answers `y` after 600 ms → code 0, devices 1
+F2b:       the same claim with an unanswered prompt → still pending at 1500 ms
+```
+
+**Findings.**
+
+1. **HIGH — `0.0.0.0` never yields an address in the real CLI. FIXED.**
+   Root cause: `pairAddressesOf` defaulted `interfaces` to `[]` and nothing in
+   `packages/cli/src` read `os.networkInterfaces()`, so the Design's main path
+   (wildcard → each non-internal IPv4) was dead in production while the unit
+   tests injected `LAN`.
+   - `packages/cli/src/pair.ts`: new `machineInterfaces()` (flattens Node's map
+     of lists, keeps only the rule's three fields) and the default is now
+     `options.interfaces ?? machineInterfaces()`.
+   - Tests: `pair.test.ts` "the addresses of THIS machine" drives `pairCommand`
+     with **no** `interfaces` and reads the expected addresses straight from
+     `os` (not through the helper `pair` uses);
+     `pair-dispatch.test.ts` "a wildcard serve record yields the machine's own
+     addresses" goes through the real `main`, claims the window (asserting the
+     claim happened, so it cannot pass vacuously) and asserts each real IPv4 is
+     in the payload.
+
+2. **MEDIUM — a `y` typed after the window expired still paired. FIXED.** Root
+   cause: `answerClaim` had no expiry check and the prompt had no bound, so the
+   registry could gain a device the daemon had already told `timeout`.
+   - `pair.ts`: `answerClaim` takes `expiresAt` and refuses (decision `false`,
+     exit 1) when `now >= expiresAt` at answer time; the question is raced
+     against a new `PairTimer` seam (`options.timer`, default a cancellable
+     `setTimeout`) bounded by `expiresAt - now`, so a prompt nobody answers
+     releases the terminal at the expiry instead of hanging.
+   - New `expiredBeforeAnswer()` writes the DECLINE, so a daemon still waiting
+     stops now rather than at expiry.
+   - Tests: "the CLOCK alone refuses a late 'y', with a timer that never fires"
+     (window 50 ms, answer at 250 ms, a timer that never fires ⇒ only the clock
+     check can stop it) and "a prompt nobody answers does not hold pair past the
+     window" (a claim, then an `ask` that never resolves).
+
+3. **MEDIUM — the F3 ordering was not pinned and the coverage claim was false.
+   FIXED.** Root cause: both writes are synchronous and the window is deleted on
+   the way out, so nothing outside could observe their order.
+   - `pair.ts`: new injected `PairWrites` seam (`options.writes`, default 9a's
+     `addDevice`/`writePairingDecision` for this window); `answerClaim` goes
+     through it.
+   - `pair.test.ts` "the registry holds the key BEFORE the decision is written":
+     the `decide` write reads the registry and asserts the accepted key is
+     already in it (the property, not just the call order).
+   - The false header claim (`pair.test.ts`) is corrected: it now says which
+     test pins F3 and that the seam is why it can.
+
+**One more defect, found by the full-suite gate (not in the Review). FIXED.**
+My new dispatch test made the full suite exit **130** (SIGINT) with no test
+output. Cause: `pair` installed its F2 `exit`/SIGINT/SIGTERM hooks and never
+removed them, so a *finished* `pair` left them in the process; another test
+(`output-streams.test.ts:206`) does `process.emit("SIGINT")`, which ran a
+cleanup for a window that was long gone and then `removeAllListeners` +
+`process.kill(process.pid, "SIGINT")` — killing the runner. The bug was latent:
+no test had driven `main` past `openPairing` before.
+- `pair.ts`: `exitHooks` may now return a disposer; `pair` calls it in the same
+  `finally` that closes the window.
+- `main.ts`: the hook returns a disposer that removes exactly the three
+  handlers it added, and the signal handler removes only its OWN listener
+  instead of `removeAllListeners(signal)` (the host may legitimately own
+  others — a TUI's terminal restore, another task's exit net).
+- Test: `pair-dispatch.test.ts` "a returned pair leaves NO signal listener
+  behind" (and this is why the whole suite was passing before with no test
+  covering it).
+- Also moved the hook registration INSIDE `pair`'s `try`: a hook that throws now
+  still closes the window it was given, instead of leaving a live window behind
+  a thrown error.
+
+**Drift from the Implementation (and why).** Additive, three new seams, all
+optional and all defaulted to production behaviour: `options.timer`,
+`options.writes`, and `exitHooks`'s return value. The Implementation's Design is
+unchanged; the Review asked for the behaviours, not the mechanism. No plan step
+contradicted the code. `pair-addresses.ts` needed no change: the rule was right,
+only its input default was wrong — the bug was in the wiring, so it is fixed
+there.
+
+**Mutations** (each applied to `packages/cli/src/pair.ts` with a scratch script,
+run against `pair.test.ts` + `pair-dispatch.test.ts`, restored immediately; no
+git command used, and `git status` afterwards shows only this round's five
+files):
+
+| # | Mutation | Test that caught it |
+|---|---|---|
+| M1 | `interfaces` default back to `[]` (finding 1) | "a wildcard record expands to the real interfaces…" **and** "a wildcard serve record yields the machine's own addresses" → 2 fail |
+| M2 | drop `io.now() >= expiresAt` at answer time (finding 2, the clock guard) | "the CLOCK alone refuses a late 'y', with a timer that never fires" → 1 fail |
+| M3 | `await io.ask(...)` unbounded, no timer (finding 2, the hang) | "a prompt nobody answers does not hold pair past the window" → 1 fail (at its 5 s race) |
+| M4 | write the decision BEFORE the registry (finding 3, the F3 swap) | "the registry holds the key BEFORE the decision is written" → 1 fail |
+| M5 | drop `dispose?.()` (the listener leak) | "a returned pair leaves NO signal listener behind" → 1 fail |
+
+Two intermediate mutations **survived** and were fixed rather than claimed:
+
+- M3 first survived because my hang test never claimed the window, so it never
+  reached the prompt (vacuous). The test now claims it and asserts `claimed`.
+- M2 first survived because with the real timer the timer wins the race, so the
+  clock check was unreachable in that test. That test also proves the *bound*,
+  not the clock guard, so a second test pins the clock alone (M2's row above).
+  The production code still keeps both: the clock check is what closes the
+  window between the answer arriving and the registry write.
+
+An unnecessary `options.clock` seam I added mid-round was removed once the two
+guards were properly separated (a test-only seam with no production user is
+ceremony).
+
+**Gate.** `bunx tsc --noEmit` clean; `bun run lint` → `biome check .` 1021
+files, **0 errors/warnings** (baseline clean, §6); `bun test` → see the gate
+line at the end of this section. `packages/protocol/schema/protocol.json` is
+untouched and needs no regeneration (no wire change; no `protocol.d/` note
+either). No changelog fragment is added by this round: it fixes a feature that
+is not on `main` yet, and `changelog.d/device-pairing-9d.added.md` already
+describes the (now correct) user-visible behaviour — a "fixed" fragment would
+announce a bug no released version ever had.
+
+**LOW nits, deliberately left** (out of this round's HIGH/MEDIUM scope):
+- The Review's 9a nit N1 (`writeRegistry`'s id/key guard has no test) is 9a's
+  file, not on this slice's change set.
+- 9d's nit: `devicesCommand` advises `devices reset` for an unreadable registry,
+  but `resetCommand` refuses exactly that. Still open; it is a wording/behaviour
+  mismatch in an error path, and the Review rated it LOW.
+
+**Not verified here (one line).** Whether the new bounded prompt behaves well
+on a real terminal — `askLine`'s `readline` keeps stdin open after `pair`
+returns; the prompter is detached, not destroyed, so a keystroke typed after the
+expiry is discarded by readline, not by us. The seam tests cover the logic; a
+manual `tentacle pair` on a TTY is the check.
+
+**Gate line:** `bunx tsc --noEmit` clean · `bun run lint` 1021 files, 0
+errors/warnings · `bun test` **8002 pass / 3 skip / 0 fail**, 8005 tests across 571 files (the three §6
+opt-in skips).
+
 ## Review
 
 #### Owner answers (2026-11-13)

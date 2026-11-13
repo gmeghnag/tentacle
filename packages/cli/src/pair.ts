@@ -19,9 +19,11 @@
  * Plain stdout/stderr, never Ink (AGENTS §7: nothing writes raw to a terminal
  * Ink owns — there is no Ink here).
  */
-import { hostname as osHostname } from "node:os";
+import { networkInterfaces, hostname as osHostname } from "node:os";
 import {
+  type AddDeviceResult,
   type DaemonRecord,
+  type DeviceStoreFailure,
   addDevice,
   closePairing,
   loadOrCreateIdentity,
@@ -59,6 +61,7 @@ export interface PairOptions {
   readonly pollMs?: number;
   readonly random?: Random;
   readonly alive?: (pid: number) => boolean;
+  /** `os.networkInterfaces()`, flat. Default: `machineInterfaces()`. */
   readonly interfaces?: readonly InterfaceEntry[];
   /** Draw the QR (a terminal). A pipe gets the pasteable line, which is the point of it. */
   readonly qr?: boolean;
@@ -70,19 +73,82 @@ export interface PairOptions {
   readonly ask?: (prompt: string) => Promise<string>;
   /** Default: `setTimeout`. */
   readonly sleep?: (ms: number) => Promise<void>;
+  /** Default: a cancellable `setTimeout`. Bounds the `[y/N]` by the window. */
+  readonly timer?: (ms: number) => PairTimer;
+  /** Default: 9a's `addDevice` / `writePairingDecision` for this window (F3). */
+  readonly writes?: PairWrites;
   /**
    * Register a cleanup for a `pair` that is killed (F2). Main passes a hook on
    * `exit`/SIGINT/SIGTERM; without it the window is closed only on the normal
    * path (a crash then leaves the files, which the pid check and the sweep of
    * both `pair` and the daemon already refuse).
+   *
+   * RETURN a disposer: `pair` calls it when it returns, so a finished `pair`
+   * leaves the process exactly as it found it. Without this the hooks
+   * outlive the command and a later signal in the same process runs a cleanup
+   * for a window that is long gone (and re-raises, killing the host).
    */
-  readonly exitHooks?: (cleanup: () => void) => void;
+  readonly exitHooks?: (cleanup: () => void) => (() => void) | undefined;
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+
+/**
+ * This machine's addresses, flat — Node's `os.networkInterfaces()` is a map of
+ * lists. `pairAddresses` needs them whenever a `serve` binds a WILDCARD
+ * (`0.0.0.0`), which is the documented way to be reachable (REACHABLE_HINT); a
+ * `pair` that defaulted to `[]` would refuse exactly the `serve` it recommends.
+ * Only the rule's two fields are kept, so nothing else about the machine leaks.
+ */
+export function machineInterfaces(): readonly InterfaceEntry[] {
+  const flat: InterfaceEntry[] = [];
+  for (const entries of Object.values(networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      flat.push({ address: entry.address, family: entry.family, internal: entry.internal });
+    }
+  }
+  return flat;
+}
+
+/** A cancellable "later", so the human's window can bound the question. */
+export interface PairTimer {
+  readonly elapsed: Promise<void>;
+  readonly cancel: () => void;
+}
+
+/**
+ * The two writes a pairing makes, in ONE object: the registry entry FIRST and
+ * the decision second (F3). Injected because the order between them is
+ * load-bearing and otherwise unobservable — both writes are synchronous and the
+ * window is deleted on the way out, so no test can interleave between them.
+ * With this seam the test can watch the decision write and see whether the
+ * registry already held the key (mutation: swap the two → red).
+ */
+export interface PairWrites {
+  readonly add: (device: {
+    readonly publicKey: Uint8Array;
+    readonly name: string;
+  }) => AddDeviceResult;
+  readonly decide: (accepted: boolean) => DeviceStoreFailure | { readonly ok: true };
+}
+
+const defaultTimer = (ms: number): PairTimer => {
+  let handle: ReturnType<typeof setTimeout> | undefined;
+  let cancel = (): void => {};
+  const elapsed = new Promise<void>((resolve) => {
+    handle = setTimeout(resolve, ms);
+    cancel = () => {
+      if (handle !== undefined) {
+        clearTimeout(handle);
+        resolve();
+      }
+    };
+  });
+  return { elapsed, cancel };
+};
 
 /**
  * A fresh pairing code: 10 Crockford base32 characters (50 bits). Rejection-free
@@ -123,7 +189,10 @@ export function pairAddressesOf(
   }
   return pairAddresses({
     records,
-    interfaces: options.interfaces ?? [],
+    // NOT `[]`: a `0.0.0.0` bind expands to these, and a default of none would
+    // make `pair` refuse the very `serve` REACHABLE_HINT tells the user to run
+    // (review round 1, finding 1).
+    interfaces: options.interfaces ?? machineInterfaces(),
     ...(options.extraAddresses !== undefined ? { extra: options.extraAddresses } : {}),
   });
 }
@@ -202,9 +271,9 @@ export async function pairCommand(options: PairOptions): Promise<number> {
       closePairing(configDir, session.sid);
     }
   };
-  options.exitHooks?.(close);
-
+  let dispose: (() => void) | undefined;
   try {
+    dispose = options.exitHooks?.(close);
     const payload = formatPairingPayload({
       v: 1,
       key: identity.identity.publicKey,
@@ -229,6 +298,8 @@ export async function pairCommand(options: PairOptions): Promise<number> {
       computerName: identity.identity.name,
       ...(options.pollMs !== undefined ? { pollMs: options.pollMs } : {}),
       sleep,
+      timer: options.timer ?? defaultTimer,
+      ...(options.writes !== undefined ? { writes: options.writes } : {}),
       now: Date.now,
       ...(options.ask !== undefined ? { ask: options.ask } : {}),
       out,
@@ -237,6 +308,10 @@ export async function pairCommand(options: PairOptions): Promise<number> {
     return verdict;
   } finally {
     close();
+    // The window is closed, so the hooks have nothing left to do: detach them
+    // or a later SIGINT in this process would run a stale cleanup (and, in
+    // main, re-raise the signal at a host that no longer expects it).
+    dispose?.();
   }
 }
 
@@ -258,6 +333,8 @@ async function waitForClaim(
     readonly computerName: string;
     readonly pollMs?: number;
     readonly sleep: (ms: number) => Promise<void>;
+    readonly timer: (ms: number) => PairTimer;
+    readonly writes?: PairWrites;
     readonly now: () => number;
     readonly ask?: (prompt: string) => Promise<string>;
     readonly out: (text: string) => void;
@@ -268,7 +345,7 @@ async function waitForClaim(
   for (;;) {
     const claim = readClaim(io.configDir, sid);
     if (claim !== undefined) {
-      return answerClaim(sid, claim, io);
+      return answerClaim(sid, claim, expiresAt, io);
     }
     if (io.now() >= expiresAt) {
       io.err("[pair] the code expired without being used. Run `tentacle pair` again.\n");
@@ -282,34 +359,54 @@ async function waitForClaim(
 async function answerClaim(
   sid: string,
   claim: { readonly publicKey: Uint8Array; readonly name: string; readonly sas: string },
+  expiresAt: number,
   io: {
     readonly configDir: string;
     readonly computerName: string;
+    readonly timer: (ms: number) => PairTimer;
+    readonly writes?: PairWrites;
+    readonly now: () => number;
     readonly ask?: (prompt: string) => Promise<string>;
     readonly out: (text: string) => void;
     readonly err: (text: string) => void;
   },
 ): Promise<Verdict> {
+  const writes: PairWrites = io.writes ?? {
+    add: (device) => addDevice(io.configDir, device),
+    decide: (accepted) => writePairingDecision(io.configDir, sid, accepted),
+  };
   if (io.ask === undefined) {
     // No terminal, no human: a claim is never auto-accepted (decision 2). The
     // answer is written so a waiting daemon stops at once instead of at expiry.
     io.err("[pair] a device is trying to pair, but there is no terminal to confirm it.\n");
-    refuse(sid, io.configDir);
+    refuse(writes, false);
     return 1;
   }
-  const answer = await io.ask(pairPrompt(claim.name, claim.sas));
+  // The question is bounded by the window: a prompt nobody answers must not
+  // hold `pair` past the expiry (the F-table's "N / timeout / Ctrl+C →
+  // declined"), while the daemon has already told the phone `timeout`.
+  const deadline = io.timer(Math.max(0, expiresAt - io.now()));
+  const answer = await Promise.race([io.ask(pairPrompt(claim.name, claim.sas)), deadline.elapsed]);
+  deadline.cancel();
+  // Checked AFTER the human's answer, not only before it: a `y` typed after the
+  // window closed must not pair the phone the daemon already told `timeout`
+  // (review round 1, finding 2 — the registry would then hold a device the
+  // phone was told failed). `undefined` is the timer winning the race.
+  if (answer === undefined || io.now() >= expiresAt) {
+    return expiredBeforeAnswer(writes, io.err);
+  }
   if (!isYes(answer)) {
     io.err("[pair] not added.\n");
-    refuse(sid, io.configDir);
+    refuse(writes, false);
     return 1;
   }
-  const added = addDevice(io.configDir, { publicKey: claim.publicKey, name: claim.name });
+  const added = writes.add({ publicKey: claim.publicKey, name: claim.name });
   if (!added.ok) {
     io.err(`[error] cannot write the device registry: ${added.path}: ${added.reason}\n`);
-    refuse(sid, io.configDir);
+    refuse(writes, false);
     return 1;
   }
-  const decided = writePairingDecision(io.configDir, sid, true);
+  const decided = writes.decide(true);
   if (!decided.ok) {
     // The registry already holds the key, so the phone is paired even if the
     // daemon never reads this (F3). Say so rather than pretending otherwise.
@@ -321,7 +418,17 @@ async function answerClaim(
   return 0;
 }
 
+/**
+ * The window closed before the human's `[y/N]` was answered: pair nobody, and
+ * write the decline so a daemon still waiting stops now instead of at expiry.
+ */
+function expiredBeforeAnswer(writes: PairWrites, err: (text: string) => void): Verdict {
+  err("[pair] the code expired before you answered, so the device was not added.\n");
+  refuse(writes, false);
+  return 1;
+}
+
 /** Write a `declined` decision, best effort: the daemon also stops at expiry. */
-function refuse(sid: string, configDir: string): void {
-  writePairingDecision(configDir, sid, false);
+function refuse(writes: PairWrites, accepted: boolean): void {
+  writes.decide(accepted);
 }

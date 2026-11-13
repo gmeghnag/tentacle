@@ -121,9 +121,10 @@ describe("pair → devices → revoke, through main", () => {
       "ws://192.168.1.8:4000/e2e",
     ]);
     expect(paired.code).toBe(0);
-    // The payload carried the --address (the daemon's own 0.0.0.0 record also
-    // contributes this machine's interfaces; a test cannot know them, so assert
-    // only what it does know: the given one is there).
+    // The payload carried the `--address`. The daemon's own `0.0.0.0` record
+    // ALSO contributes this machine's interfaces (the default when none are
+    // injected — the CLI's real path, `pair-dispatch.test.ts` pins it), but a
+    // test cannot know them, so assert only what it does know: the given one.
     expect(paired.out[0]).toContain(encodeURIComponent("ws://192.168.1.8:4000/e2e"));
 
     const registry = readRegistry(configDir);

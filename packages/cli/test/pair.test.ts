@@ -13,26 +13,43 @@
  *   a device name clears the user's terminal);
  * - `y` writes the registry entry, `N` writes none (mutation: always accept);
  * - the registry is written BEFORE the decision (F3; mutation: swap them — a
- *   `pair` that dies in between leaves a phone that is not paired);
+ *   `pair` that dies in between leaves a phone that is not paired). Pinned by
+ *   the injected `writes` seam, which is the only place the two synchronuous
+ *   writes can be observed in order (review round 1, finding 3);
+ * - a `y` typed after the window closed pairs nobody (mutation: drop the expiry
+ *   check at answer time → a device the phone was told `timeout` for), and the
+ *   question is BOUNDED by the window (mutation: await `ask` → hangs);
+ * - a wildcard `serve` record expands to this machine's real interfaces when
+ *   none are injected, which is what `main` passes (mutation: default to `[]`
+ *   → the CLI refuses the `serve` its own hint recommends);
  * - the window's files are gone when `pair` returns, on every path (mutation:
  *   close only on the success path);
  * - nothing reachable → exit 1 with the hint, and NO window opened.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { hostname, networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  addDevice,
   claimPairing,
   deviceIdOf,
   findPairing,
   loadOrCreateIdentity,
   readRegistry,
   writeDaemonRecord,
+  writePairingDecision,
 } from "@tentacle/daemon";
 import { pairingSas } from "@tentacle/transport/noise";
 import type { InterfaceEntry } from "../src/pair-addresses.ts";
-import { PAIR_POLL_MS, newPairingCode, pairCommand, pairPrompt } from "../src/pair.ts";
+import {
+  PAIR_POLL_MS,
+  type PairTimer,
+  type PairWrites,
+  newPairingCode,
+  pairCommand,
+  pairPrompt,
+} from "../src/pair.ts";
 
 const LAN: readonly InterfaceEntry[] = [
   { address: "192.168.1.8", family: "IPv4", internal: false },
@@ -82,8 +99,13 @@ async function runPair(input: {
   readonly extraAddresses?: readonly string[];
   readonly ttlMs?: number;
   readonly name?: string;
+  readonly writes?: PairWrites;
+  /** A timer that replaces the default (the prompt's bound). */
+  readonly timer?: (ms: number) => PairTimer;
+  /** The human answers this long after the prompt (the window can expire first). */
+  readonly lateAnswerMs?: number;
   readonly phone?: (payload: string) => void;
-  readonly signalled?: (cleanup: () => void) => void;
+  readonly signalled?: (cleanup: () => void) => (() => void) | undefined;
 }): Promise<PairRun> {
   const out: string[] = [];
   const err: string[] = [];
@@ -94,9 +116,20 @@ async function runPair(input: {
     ...(input.extraAddresses !== undefined ? { extraAddresses: input.extraAddresses } : {}),
     ...(input.ttlMs !== undefined ? { ttlMs: input.ttlMs } : {}),
     ...(input.name !== undefined ? { name: input.name } : {}),
+    ...(input.writes !== undefined ? { writes: input.writes } : {}),
+    ...(input.timer !== undefined ? { timer: input.timer } : {}),
     out: (text) => out.push(text),
     err: (text) => err.push(text),
-    ...(input.answer !== undefined ? { ask: async () => input.answer ?? "" } : {}),
+    ...(input.answer !== undefined
+      ? {
+          ask: async () => {
+            if (input.lateAnswerMs !== undefined) {
+              await Bun.sleep(input.lateAnswerMs);
+            }
+            return input.answer ?? "";
+          },
+        }
+      : {}),
     ...(input.signalled !== undefined ? { exitHooks: input.signalled } : {}),
     pollMs: PAIR_POLL_MS,
     // The only fake: waiting. The first call is the phone's moment.
@@ -335,7 +368,10 @@ describe("the window's files", () => {
     const run = await runPair({
       configDir,
       ttlMs: 0,
-      signalled: (cleanup) => hooks.push(cleanup),
+      signalled: (cleanup) => {
+        hooks.push(cleanup);
+        return () => {};
+      },
     });
     expect(run.code).toBe(1); // expired
     expect(hooks).toHaveLength(1);
@@ -377,5 +413,194 @@ describe("a 'yes' that cannot be recorded", () => {
     expect(run.err.join("")).toContain("device registry");
     expect(run.out.join("")).not.toContain("Paired");
     expect(readFileSync(join(configDir, "devices", "registry.json"), "utf8")).toBe("{ not json");
+  });
+});
+
+describe("the addresses of THIS machine (review round 1, finding 1)", () => {
+  test("a wildcard record expands to the real interfaces when none are injected", async () => {
+    // `main` injects nothing, so the DEFAULT is what a user gets: a `0.0.0.0`
+    // serve — the very configuration REACHABLE_HINT recommends — must yield
+    // addresses. Read the machine's own IPv4 addresses straight from `os`, not
+    // through the helper `pair` uses, so the two are independent (mutation:
+    // default `interfaces` to `[]` → the payload carries only `--address`, or
+    // `pair` refuses outright).
+    const v4 = Object.values(networkInterfaces())
+      .flat()
+      .filter((entry) => entry !== undefined && entry.family === "IPv4" && !entry.internal)
+      .map((entry) => entry?.address ?? "");
+    if (v4.length === 0) {
+      // A machine with no LAN address has nothing to expand; the refusal is the
+      // right answer there and `pair-addresses.test.ts` owns the rule itself.
+      return;
+    }
+    const configDir = newDir();
+    recordServing(configDir, 4321);
+    const out: string[] = [];
+    const code = await pairCommand({
+      configDir,
+      ttlMs: 0,
+      out: (text) => out.push(text),
+      err: () => {},
+      sleep: async () => {},
+    });
+    expect(code).toBe(1); // expired, no claim — but only AFTER printing a payload
+    const printed = decodeURIComponent(out.join(""));
+    for (const address of v4) {
+      expect(printed).toContain(`ws://${address}:4321/e2e`);
+    }
+  });
+});
+
+describe("a 'y' that arrives after the window closed (review round 1, finding 2)", () => {
+  test("pairs nobody, and tells the daemon the answer is DECLINED", async () => {
+    // The daemon has already told the phone `timeout` at expiry; a `pair` that
+    // still writes the registry leaves a device the phone thinks failed
+    // (mutation: drop the expiry check at answer time → exit 0 and one device).
+    const configDir = newDir();
+    recordServing(configDir);
+    const decisions: boolean[] = [];
+    let adds = 0;
+    const run = await runPair({
+      configDir,
+      ttlMs: 300,
+      writes: {
+        add: (device) => {
+          adds++;
+          return addDevice(configDir, device);
+        },
+        decide: (accepted) => {
+          decisions.push(accepted);
+          return { ok: true };
+        },
+      },
+      answer: "y",
+      lateAnswerMs: 450,
+      phone: (payload) => {
+        const sid = findPairing(configDir, { code: payloadCode(payload) })?.sid;
+        if (sid === undefined) throw new Error("no window to claim");
+        claimPairing(configDir, { sid, deviceKey: key32(9), name: "late" });
+      },
+    });
+    expect(run.code).toBe(1);
+    expect(adds).toBe(0);
+    expect(decisions).toEqual([false]);
+    const registry = readRegistry(configDir);
+    expect(registry.ok ? registry.registry.devices : []).toEqual([]);
+  });
+
+  test("the CLOCK alone refuses a late 'y', with a timer that never fires", async () => {
+    // The other guard, on its own: a `y` typed after `expiresAt` is refused even
+    // when nothing interrupted the prompt (mutation: drop the `io.now() >=
+    // expiresAt` check → exit 0, one device, and the phone was told `timeout`).
+    const configDir = newDir();
+    recordServing(configDir);
+    const decisions: boolean[] = [];
+    let adds = 0;
+    const run = await runPair({
+      configDir,
+      // The window is real (the first poll finds the claim) and the human
+      // answers well after it closes.
+      ttlMs: 50,
+      answer: "y",
+      lateAnswerMs: 250,
+      // A timer that never fires: only the clock check can stop this pair.
+      timer: () => ({ elapsed: new Promise<void>(() => {}), cancel: () => {} }),
+      writes: {
+        add: (device) => {
+          adds++;
+          return addDevice(configDir, device);
+        },
+        decide: (accepted) => {
+          decisions.push(accepted);
+          return { ok: true };
+        },
+      },
+      phone: (payload) => {
+        const sid = findPairing(configDir, { code: payloadCode(payload) })?.sid;
+        if (sid === undefined) throw new Error("no window to claim");
+        claimPairing(configDir, { sid, deviceKey: key32(17), name: "late" });
+      },
+    });
+    expect(run.code).toBe(1);
+    expect(adds).toBe(0);
+    expect(decisions).toEqual([false]);
+    expect(run.err.join("")).toContain("expired before you answered");
+  });
+
+  test("a prompt nobody answers does not hold pair past the window", async () => {
+    // The same rule from the other side: the question is BOUNDED, so a claim
+    // whose human walked away releases the terminal at the expiry instead of
+    // blocking `pair` forever (mutation: await `ask` unbounded → this never
+    // returns; the 5 s `Promise.race` is what keeps the suite from hanging).
+    const configDir = newDir();
+    recordServing(configDir);
+    const out: string[] = [];
+    let claimed = false;
+    const code = await Promise.race([
+      pairCommand({
+        configDir,
+        interfaces: LAN,
+        ttlMs: 300,
+        out: (text) => out.push(text),
+        err: () => {},
+        ask: () => new Promise<string>(() => {}),
+        sleep: async () => {
+          if (claimed) return;
+          const sid = findPairing(configDir, { code: payloadCode(out[0] ?? "") })?.sid;
+          if (sid === undefined) return;
+          claimed = claimPairing(configDir, { sid, deviceKey: key32(6), name: "away" }).ok;
+        },
+      }),
+      Bun.sleep(5_000).then(() => "hung" as const),
+    ]);
+    // A claim really was made, so the prompt really was reached.
+    expect(claimed).toBe(true);
+    expect(code).toBe(1);
+    const registry = readRegistry(configDir);
+    expect(registry.ok ? registry.registry.devices : []).toEqual([]);
+  });
+});
+
+describe("the write ORDER (F3; review round 1, finding 3)", () => {
+  test("the registry holds the key BEFORE the decision is written", async () => {
+    // F3's whole point: a `pair` that dies between the two writes must leave a
+    // PAIRED phone (the daemon accepts a claim whose key the registry holds),
+    // never a decision with no device behind it. Both writes are synchronous
+    // and the window is deleted on the way out, so only the `writes` seam can
+    // see the order (mutation: swap the two calls in `answerClaim` → the
+    // decision is written for a registry that is still empty).
+    const configDir = newDir();
+    recordServing(configDir);
+    const deviceKey = key32(31);
+    const order: string[] = [];
+    let registryAtDecision: readonly string[] | undefined;
+    let claimSid = "";
+    const run = await runPair({
+      configDir,
+      answer: "y",
+      writes: {
+        add: (device) => {
+          order.push("add");
+          return addDevice(configDir, device);
+        },
+        decide: (accepted) => {
+          order.push("decide");
+          const registry = readRegistry(configDir);
+          registryAtDecision = registry.ok ? registry.registry.devices.map((d) => d.id) : [];
+          return writePairingDecision(configDir, claimSid, accepted);
+        },
+      },
+      phone: (payload) => {
+        const sid = findPairing(configDir, { code: payloadCode(payload) })?.sid;
+        if (sid === undefined) throw new Error("no window to claim");
+        claimSid = sid;
+        claimPairing(configDir, { sid, deviceKey, name: "iPhone" });
+      },
+    });
+    expect(run.code).toBe(0);
+    expect(order).toEqual(["add", "decide"]);
+    // The property, not just the call order: at the moment the decision is
+    // written, the key it accepts is already authorised.
+    expect(registryAtDecision).toEqual([deviceIdOf(deviceKey)]);
   });
 });

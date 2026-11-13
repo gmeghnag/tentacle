@@ -184,16 +184,32 @@ async function runDeviceCommands(
       ...(io.ask !== undefined ? { ask: io.ask } : {}),
       // The window is deleted when `pair` is interrupted, not only on success
       // (F2). Ctrl+C is a normal way to stop waiting, so both paths share it.
+      // The returned disposer detaches them when `pair` returns: a listener
+      // left behind would run a stale cleanup on the NEXT signal in this
+      // process — and, worse, re-raise it at a host that is no longer `pair`
+      // (the test suite's own in-process SIGINT did exactly that).
       exitHooks: (cleanup) => {
-        process.once("exit", cleanup);
+        const onExit = (): void => cleanup();
+        const onSignal = new Map<NodeJS.Signals, () => void>();
+        process.once("exit", onExit);
         for (const signal of ["SIGINT", "SIGTERM"] as const) {
-          process.once(signal, () => {
+          const handler = (): void => {
             cleanup();
-            // Do not swallow the signal: restore the default action and re-raise.
-            process.removeAllListeners(signal);
+            // Do not swallow the signal: drop only OUR handler (never
+            // `removeAllListeners` — the host may own others) and re-raise, so
+            // the process still dies with 128+signum.
+            process.removeListener(signal, handler);
             process.kill(process.pid, signal);
-          });
+          };
+          onSignal.set(signal, handler);
+          process.once(signal, handler);
         }
+        return () => {
+          process.removeListener("exit", onExit);
+          for (const [signal, handler] of onSignal) {
+            process.removeListener(signal, handler);
+          }
+        };
       },
     });
   }
