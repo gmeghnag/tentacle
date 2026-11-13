@@ -230,9 +230,14 @@ Props intake, construction of the per-concern ports, the hook calls in fixed
 order (`useLineEditor`, `usePermissionBroker`, `useSessionLink`,
 `useTurnDriver`, `useDock`, `useAttachments`, `usePanels`, `useQuitClear`,
 `useMouse`), the ONE `useInput(… routeKey …)`, and `<AppView model={…}/>`.
-Target ≲ 600 lines, no feature logic. **Revised (H1/M2):** no `useMouse` hook
-(per-event function); the 20 effects stay here in today's order; target ≲ 800
-lines.
+Target ≲ 600 lines, no feature logic. **Revised (H1/M2):** the mouse layer is a
+pure module driven per event, not a second effect-owning hook — the 20 effects
+stay here in today's order; target ≲ 800 lines. **Amended in S4 (fix round 1):
+it IS a `useMouse` hook, owning refs/timer only and declaring NO effect.** The
+H1/M2 constraint is "no hook that owns an EFFECT", not "no hook": `mouse-stream.ts`
+holds every decision, and `useMouse` holds only the partial-report ref + its
+100 ms timer + the click recogniser, so the effect list is untouched. Corrected
+here rather than contradicting the plan — see S4's drift 4.
 
 ### Other hotspots (CHANGELOG.md, TODO.md, `PROTOCOL_VERSION`)
 
@@ -389,6 +394,15 @@ called by the router with a render snapshot (`total`, `viewport`, `listView`,
 `stepMouseChunk` returns `{ reports, hold, restored, swallowBehindPanel }`.
 S4 goes **before** S3 and defines the layer contract S3 generalises; blast
 raised to cross-module (it edits the `useInput` body), fresh review.
+
+**Amended in S4 (fix round 1).** As built: the snapshot is built per event at
+the `useInput` call site and `dispatchMouse` is a pure per-event function in
+`mouse-stream.ts` — as required. The thin `useMouse` hook is retained ONLY for
+state a per-event function cannot hold (the partial-report ref + its 100 ms
+timer, the click recogniser); it declares no effect, and `stepMouseChunk`
+returns `{reports, hold, restored, submit, swallowBehindPanel}` (`submit`
+added — drift 2). The M2 constraint is "no hook that owns an effect"; it is
+met, so the plan text is corrected rather than the code.
 
 **M3 — SGR blind spot (CONFIRMED: `lastFrame()` strips SGR).** → S0b captures
 SGR-preserving raw frames for selection drag (`inverse`), attach row, running +
@@ -1718,3 +1732,316 @@ unverified under load.
 
 *— claude-opus-5-5, 2026-11-13* (fresh context; different family from the
 DeepSeek executor)
+## Execution
+
+### S4 — `feat/app-decomp-4-mouse` (the mouse layer leaves `App.tsx`)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-13* (real id: `ps` shows
+this run launched as `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc:29`.)
+
+**Scope.** `packages/tui/src/mouse-stream.ts` (new, pure), `useMouse.ts` (new,
+the hook), `App.tsx` (−163 lines), two new test files, one changelog fragment.
+No existing test edited, no `packages/protocol` change (so `protocol.json` was
+not regenerated), no other slice touched.
+
+**Load-bearing check, re-run first (PASSED).** The plan's claim is that Ink
+calls every active `useInput` listener, so the handler cannot be split across
+hooks. Re-verified on this branch, not trusted:
+`packages/tui/node_modules/ink/build/hooks/use-input.js:89` registers
+`internal_eventEmitter?.on('input', handleData)` and `handleData` (`:80-87`) has
+no return value anyone consumes and no stop-propagation; the emitter is
+per-App (`components/StdinContext.js:11`). `rg "useInput\(" packages/tui/src` →
+`App.tsx:3439` (was `:3465`) and the separate pre-mount
+`components/SessionPicker.tsx:85`. **Holds** — so `App` keeps the ONE
+`useInput`, and S4 moves only its mouse BODY.
+
+**Design, as built (dependency order).**
+1. **`mouse-stream.ts`** — the two pure decisions, no React import:
+   - `stepMouseChunk({held, char, key, panelOpen})` → `{reports, hold, restored,
+     submit, swallowBehindPanel, verdict}` (the plan's five fields plus
+     `submit`, which the plan folded into `restored`; see drift 2).
+   - `dispatchMouse(state, report, snapshot)` → `{state, effects}`: ONE report,
+     the effects the App applies, and the threaded `{click, selection}` state.
+     `MouseEffect` is data (`scroll | panelClick | dockPill | dockRow |
+     toggleTool | copySelection`) so the App keeps only execution.
+   - `plainKeyOf(key)` — the "is this a real keypress" rule, extracted so the
+     swallow rule is unit-testable rather than inline.
+2. **`useMouse.ts`** — owns the partial-report ref + its 100 ms timer and the
+   click recogniser; executes the effects through a narrow port (`panelRef`,
+   `dockRef`, `selectionRef`, `setSelection`, `field`, `clipboard`,
+   `pushNotice`, `setScrollOffset`, `setPanel`, `setDock`, `setExpandedIds`,
+   `dockIds`, `clickDock`, `panelClick`, `clampOffset`, `submit`). Deps name
+   FIELDS, never the port (Fable H2).
+3. **`App.tsx`** — the inline `dispatchMouse` (pre-S1 4156–4252), the chunk
+   state machine (4254–4307) and the selection/hold helpers (3719–3776) are
+   gone; in their place a `useMouse({…})` call and, inside the one `useInput`,
+   a snapshot built AT THE EVENT:
+   `{listView, panelOpen, columns, panelBodyTop, dockTop, dockView, statusRow,
+   laid, win, total, viewport, visibleCount, expandAll}` then
+   `if (mouse.handleChunk(char, key, snap) === "consumed") return;`.
+
+**What did NOT move, and why (Fable M1/H1, stated rather than discovered late).**
+- The **live selection** (`selection`, `selectionRef`, `setSelection`), because
+  the JSX paints it and the scroll-anchor effect declared ABOVE the hook reads
+  `selectionRef`; moving it would have moved that effect's index. It stays in
+  `App` and reaches the hook as a port field.
+- The **hold's unmount cleanup** stays in App's ordered effect list (index 19 of
+  20 before AND after: `git show HEAD:… | grep -n useEffect(` vs the working
+  tree both list it 19th, at `:3435` before and `:3409` now). No effect was
+  added, removed or reordered by this slice — the hook declares none.
+- `WHEEL_LINES` moved to `mouse-stream.ts` (it is the wheel decision's own
+  constant); `clickRef`/`CLICK_IDLE`/`ClickState` moved into the hook.
+
+**Drift from the Implementation (all three recorded, none silent).**
+1. **`selection` travels in `MouseState`, not as an effect.** The plan's M2
+   names the dispatch's inputs but not how the selection threads. It has to
+   thread through the reports (a coalesced press+drag+release must copy), and
+   today's `setSelection` writes its ref synchronously — which made the
+   obvious pin VACUOUS. Measured, not assumed: M14 (re-read the refs per report)
+   **SURVIVED** the selection tests (1 pass / 0 fail) and only went red once a
+   COALESCED press+release CLICK was pinned, because the click state reaches its
+   ref only after the loop. Cost: one extra App-seam test. The alternative
+   (cloning today's bug into a passing test) was rejected.
+2. **`submit` is its own field of the step, not implied by `restored`.** The
+   plan's `{reports, hold, restored, swallowBehindPanel}` cannot express "the
+   restored `[` must be submitted WITH this Enter rather than inserted": the App
+   would have to re-read `key.return` outside the pure function. Keeping the
+   decision inside `stepMouseChunk` is the §7 rule (decide in the pure module).
+   `verdict: "pass"` still accompanies it, so the carry reaches the caller.
+3. **The snapshot carries `panelOpen` (a RENDER value) as well as `panelRef`.**
+   S0b's freshness pin records that a key-path panel read is the render value;
+   the hold's 100 ms TIMER is the frozen closure that needs the ref. Both exist,
+   each with its own source, exactly as H3's per-field rule requires — so the
+   hook takes `panelRef` (timer) and the snapshot takes `panelOpen` (key path).
+4. **There IS a `useMouse` hook — the plan's revised *What stays* / M2 said
+   "no `useMouse` hook (per-event function)".** Recorded late: this contradiction
+   was NOT declared in the first Execution (the S4 review's finding 2, fixed in
+   fix round 1). The REVIEWED reading of H1/M2 is "no hook that owns an EFFECT",
+   and that holds: `packages/tui/src/useMouse.ts:21` imports only
+   `useCallback`/`useRef`, it declares no `useEffect`, and `dispatchMouse`
+   (`mouse-stream.ts`) is a pure per-event function, with the render snapshot
+   built at the event (`App.tsx:3790`). The hook exists only to hold what a
+   per-event function cannot: the partial-report ref, its 100 ms timer, the
+   click recogniser. *What stays* and M2 were amended to say this rather than
+   leave the plan contradicting the build.
+
+**Tests (new only).** `packages/tui/test/mouse-stream.test.ts` (22 tests, pure):
+the chunk machine's every branch (coalesced reports, a trailing half held, a
+prefix held while the key is plain and NOT held when it is not, a held `[`
+completed / restored / submitted / dropped, a panel swallow, and that a report
+still dispatches with a panel open) and the dispatch's whole priority order
+(wheel → panel body → pill → dock row → click recogniser → tool header →
+selection), each with its neighbour as the negative case.
+`packages/tui/test/app-mouse-layer.test.tsx` (3 tests, the App seam): a
+coalesced press+release CLICK expands the call; a coalesced press+motion+release
+COPIES; the same gesture split across chunks copies the same text.
+**All S0 (39/40) and S0b (21 tests) nets stay green, unedited** — the suite that
+pins this behaviour was not touched, which is the behaviour-preservation proof.
+
+**Mutation check (§9 non-vacuity) — 14/14 KILLED.** Harness
+`.tentacle/tmp/app-decomp-4-mouse/mutate.ts` (byte-copy, one mutation, one
+filtered `bun test -t`, restore, sha256 compare; a 0-test run is reported
+INVALID so a bad filter cannot look like a kill — M14 first looked "SURVIVED"
+and that finding is why the click pin exists).
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | a trailing half report is not held | **KILLED** (0 pass / 1 fail) |
+| M2 | a growable prefix chunk is never held | **KILLED** |
+| M3 | a prefix chunk is held even when the key is not plain | **KILLED** |
+| M4 | a held bare `[` is not restored | **KILLED** |
+| M5 | the restored `[` is not carried into the same-event Enter | **KILLED** |
+| M6 | behind a panel the layer passes instead of consuming | **KILLED** |
+| M7 | a longer truncated hold is restored | **KILLED** |
+| M8 | the wheel notch's direction is flipped | **KILLED** |
+| M9 | the wheel is not decided before the panel body | **KILLED** |
+| M10 | the pill hit test is inclusive at `start` | **KILLED** |
+| M11 | the dock row offset drops the rule row | **KILLED** |
+| M12 | the Ctrl+O guard is dropped | **KILLED** |
+| M13 | the drag's motion bit is ignored | **KILLED** |
+| M14 | the per-report state is re-read from the refs | **KILLED** |
+
+Every row is a red on the ASSERTION with a real count (never an import/compile
+error), and after each the mutated file's sha256 `MATCHES` its pre-run value;
+`git status --short packages/tui/src` lists only `App.tsx` (modified) and the
+two new modules — no mutation survived into the tree.
+
+**Gate (this worktree, this branch).** `bun run check` → `tsc --noEmit` clean,
+`tsc -p apps/mobile --noEmit` clean, `biome check .` **1050 files, 0 errors 0
+warnings** (the AGENTS §6 baseline), `bun test` **8143 pass / 3 skip / 0 fail**
+(the 3 skips are the documented opt-ins: live-k8s, live-docker, the real-socket
+keepalive). No schema change → `packages/protocol/schema/protocol.json` not
+regenerated. ~~`changelog.d/app-decomp-4-mouse.changed.md` added~~ — **withdrawn
+in fix round 1, the fragment deleted** (an internal refactor adds none, AGENTS
+§10; see finding 1 there).
+`TODO.md` untouched (the orchestrator's line, per §10).
+
+**Unverified (one line each).**
+- The plan's coverage check (`bun test --coverage packages/tui`, App.tsx +
+  new-files line total not dropping) was **not** run; the moved lines are pinned
+  by 25 new tests plus the untouched S0/S0b nets, but the percentage is unmeasured.
+- The queued-row variant of a pill click (S0b's recorded gap) is still unpinned;
+  S4 does not change that path, and the record stands as S0b left it.
+
+## Review
+
+### S4 review — REQUEST-CHANGES
+
+**Scope:** `git diff main...HEAD` only. **Gate (re-run):** touched files 25 pass / 0
+fail; `bun test packages/tui` 1792 pass / 0 fail (S0 + S0b nets unedited, green);
+`bun run lint` 1050 files, clean; `bun run typecheck` clean. Full `bun test` not
+re-run by the reviewer.
+
+**Findings (MEDIUM; no HIGH):**
+1. `changelog.d/app-decomp-4-mouse.changed.md:1` — a fragment for a change that
+   says of itself "Behaviour is unchanged. Internal refactor". AGENTS §10:
+   internal work adds no fragment; this plan (*Other hotspots*, "slices add no
+   CHANGELOG line … one entry when the last slice merges"). Failure: the next
+   `bun run release` publishes a user-facing bullet about an internal module
+   move, and every later slice copies the precedent. Fix: delete the fragment.
+2. Undeclared drift: the plan's revised *What stays* ("**no `useMouse` hook**
+   (per-event function)") vs `packages/tui/src/useMouse.ts:96` and
+   `App.tsx:3388`. Execution says "all three [drifts] recorded, none silent";
+   this one is not recorded. The design built is sound (the hook owns only
+   refs/timer, no effect; the snapshot is per-event at `App.tsx:3790`), but §8
+   requires the plan be fixed, not contradicted. Fix: a drift line + amend *What
+   stays* / M2.
+
+**Behaviour trace (static, against the removed inline block):** report order
+wheel → panel → pill → dock row → click → selection is verbatim; copy reads the
+in-chunk selection because `setSelection` writes the ref synchronously
+(`useMouse.ts:250`) before the next report's `copySelection`; toggle-then-clear
+order swap is within one batched event (no observable); `clickRef` written after
+the loop — nothing reads it mid-chunk; `hold`'s deps `[field, panelRef]` vs
+`[field.insert]`: `field` is a fresh object every render (`hooks.ts:188`), the
+timer calls the stable `insert` — equivalent; `submit(field.value + "[")` reads
+the same-render `field` as before. Effect list: the hook declares no effect; the
+hold cleanup keeps its index. `statusRowRef.current` read once per event, as the
+inline code did per report within the same event.
+
+**Attacks tried:** (a) coalesced press+drag+release copy with state applied
+before effects — would lose the copy; pinned by `app-mouse-layer.test.tsx`
+(static check). (b) restored `[` + Enter — pinned by S0b matrix
+(`app-structural-matrix.test.tsx:218`). (c) timer-path panel guard — the panel-
+open timer branch is unpinned, but the code is byte-equivalent to `main` (pre-
+existing gap, not a finding). (d) stray `process.stdout` in new modules — none.
+(e) port identity / dep arrays naming the port object — none; deps name fields.
+
+**Mutation:** the reviewer's own mutation run on `useMouse.ts` was blocked by the
+sandbox (permission denied); non-vacuity rests on the executor's 14/14 table plus
+the static mapping above. Not independently confirmed.
+
+**Executor behaviour:** careful, honest about unmeasured coverage; over-claimed
+"no silent drift" (finding 2) and missed the no-fragment rule (finding 1).
+Reviewer is a different family from the DeepSeek executor.
+
+*— claude-opus-5-5, 2026-11-13*
+
+### Fix round 1 — `feat/app-decomp-4-mouse` (S4 review findings)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-13* (real id: this run was
+launched as `/Users/gmeghnag/bin/tentacle --profile deepseek`; that profile's
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`,
+`~/.config/tentacle/config.jsonc:29`.)
+
+Both review findings were MEDIUM; there was no HIGH. **No `src/` file changed
+in this round** (`git diff --stat -- packages/tui/src` is empty) — one file
+deleted, one doc corrected.
+
+**Finding 1 (MEDIUM) — the changelog fragment: FIXED.**
+`changelog.d/app-decomp-4-mouse.changed.md` is deleted. The review's failure
+mode was "the next `bun run release` publishes a user-facing bullet about an
+internal module move"; I did not take that on trust, I reproduced it with the
+release path's own code rather than a command:
+
+Repro (`.tentacle/tmp/app-decomp-4-mouse/frag-probe.ts`) — the real
+`readFragmentDir` + `parseFragments` + `assemble` over this worktree's real
+`CHANGELOG.md` and `changelog.d/`, for a fictional `9.9.9`. RED, before:
+```
+fragments scanned: changelog.d/app-decomp-4-mouse.changed.md, changelog.d/device-pairing-9b.added.md, changelog.d/mobile-session-view-12b.added.md
+S4 internal bullet under a RELEASED heading: true
+  published as: - **The TUI's mouse layer is a pure module plus a hook, not a block in `App.tsx`.** SGR wheel, c…
+```
+The mutation here IS the file's presence — nothing else differs between the two
+runs. GREEN, the same probe after `rm`:
+```
+fragments scanned: changelog.d/device-pairing-9b.added.md, changelog.d/mobile-session-view-12b.added.md
+S4 internal bullet under a RELEASED heading: false
+```
+`bun test scripts/test/changelog-guard.test.ts scripts/test/changelog.test.ts`
+→ **21 pass / 0 fail** after the deletion (I2 scans the directory; an empty-of-
+this-slug dir still parses). The claim that the deletion was *required* is
+AGENTS §10's rule, and the prior Execution's "withdrawn" line now records it.
+
+**Finding 2 (MEDIUM) — undeclared drift: FIXED, and the plan corrected.**
+Verified against the code, not the review's static claim: `useMouse.ts:21`
+imports only `useCallback`/`useRef`; the only `useEffect`-shaped matches in the
+file are the `MouseEffect` type (`:25`, `:170`). The snapshot is built at the
+`useInput` site (`App.tsx:3790`). So the built design meets the *reviewed*
+H1/M2 constraint ("no hook that owns an EFFECT"), and the plan text was what was
+wrong. Three edits, per §8 ("fix the plan, don't force the code"):
+- *What stays* (line ~233): the absolute "no `useMouse` hook" replaced by the
+  actual constraint + why a refs-only hook satisfies it. (The paragraph also
+  self-contradicted — it listed `useMouse` in the hook order one sentence
+  earlier — so this removes an internal inconsistency, not just a stale line.)
+- **M2** (line ~385): an "Amended in S4" note — per-event function as required,
+  thin hook retained for state a per-event function cannot hold, `submit` field
+  added.
+- Execution **drift 4** added: the contradiction was NOT declared in the first
+  Execution; it is now, with the `file:line` evidence above.
+
+**Mutation check (§9) — the amended claim has teeth, shown, not asserted.**
+The property the fix writes into the plan is "`useMouse` declares no effect, so
+App's effect list is untouched". Pinning it needs a mutant that *adds* an effect
+there, not a code change I can revert into different behaviour:
+
+| # | Mutation (to `useMouse.ts`, restored after) | Result |
+|---|---|---|
+| F1 | a no-op effect added (`useEffect(() => {}, [])`) | **SURVIVED** (1 pass) — expected: no-op is unobservable, so it is not the property |
+| F2 | a real effect at the hook's position (`useEffect(() => submit("injected by useMouse"), [submit])`) | **KILLED** — `app-structural-order.test.tsx` 0 pass / 1 fail, diff shows `+ "injected by useMouse"` ×2 |
+| F3 | (not run) hoist the snapshot out of the per-event site | **not claimed** — the coalesced-chunk tests fire after layout settles, so they would not catch it; the per-event read stays pinned by the pre-existing M14 (the click state), as the review itself noted |
+
+F1 is recorded because it is the honest half: a no-op effect survives, so the
+claim I wrote into the plan is *not* "frozen file contents", it is "an
+effect introduced here is caught" — which F2 shows. After F2,
+`sha256sum -c useMouse.sha` → **OK**, and `grep -n useEffect` finds only the two
+`MouseEffect` type references. `git status --short packages/tui/src` is empty.
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` clean (exit 0);
+`bun run lint` → `biome check .` **1050 files, 0 errors 0 warnings** (§6
+baseline); the S0/S0b/S4 net (7 files) **46 pass / 0 fail**; full `bun test`
+**8143 pass / 3 skip / 0 fail** across 587 files (331.9 s) — the identical
+count to the pre-round Execution, the 3 skips being the §6 documented opt-ins
+(live-k8s, live-docker, the real-socket keepalive).
+
+**Unverified (one line each).** F3 is unpinned by this round, exactly as the S4
+review recorded it. The full suite was run once, on this worktree, concurrently
+with other task suites (CPU contention), so its 331.9 s wall time is not a
+performance measurement — the pass/skip/fail counts are what it establishes.
+`bun run check` was not run as one command; its three steps were run separately
+and are the same three.
+
+### Round 2 — PASS
+
+**Scope:** `git diff HEAD~1` (11b9765). No `packages/` change (`git diff --stat
+HEAD~1 -- packages` empty): one fragment deleted, the plan/Execution amended.
+
+- **Finding 1 — FIXED.** `changelog.d/` now holds only `device-pairing-9b` and
+  `mobile-session-view-12b`; `changelog-guard` + `changelog` tests green. The
+  executor's red/green probe (fragment present → bullet published, absent → not)
+  is the right mutation for a deletion; I accept it and did not re-run it.
+- **Finding 2 — FIXED.** *What stays*, M2 and drift 4 now state the constraint as
+  "no hook that owns an effect". I checked that against the code: `useMouse.ts`
+  has no `useEffect`/`useLayoutEffect` (the only matches are the `MouseEffect`
+  type, `:25` and `:170`). The executor's F2 mutation (a real effect injected →
+  `app-structural-order` red) shows a future effect added there would be caught.
+  F1 (a no-op effect survives) is honestly recorded.
+- **Regressions:** none possible in code (doc + deletion only). `bun run
+  typecheck` clean; `bun run lint` 1050 files clean; the changelog tests plus the
+  two S4 test files: 46 pass / 0 fail.
+- Nit (no action needed): the Fix round's F3 line says the per-event read being
+  pinned by M14 is "as the review itself noted". The S4 review never said that.
+
+*— claude-opus-5-5, 2026-11-14*
