@@ -13,7 +13,7 @@
  */
 import { z } from "zod";
 import { AttachmentsSchema } from "./attachment.ts";
-import { ContentBlockSchema } from "./content.ts";
+import { ContentBlockSchema, PromptContentBlockSchema } from "./content.ts";
 import { ModelNameSchema } from "./model.ts";
 import { PermissionReplyTextSchema } from "./permission-reply.ts";
 import { ToolResultSpillSchema } from "./spill.ts";
@@ -150,6 +150,22 @@ export type ClientCapabilities = z.infer<typeof ClientCapabilitiesSchema>;
 export const AgentCapabilitiesSchema = z.object({
   tools: z.boolean().default(true),
   permissions: z.boolean().default(true),
+  /**
+   * What this daemon does with images (docs/feat/attachments-prompt.md D1).
+   * Absent = it takes none. `input` is a bounded FREE string, not an enum: an
+   * enum would make an older client refuse a newer daemon's whole `initialize`
+   * result (the `MessageNote` rule), while an unknown value just means "off"
+   * client-side. Known values: `"upload"` (bytes go by `attachment/put`, then
+   * refs) and `"client"` (the client that serves the model holds the bytes;
+   * refs only).
+   */
+  images: z
+    .object({
+      input: z.string().min(1).max(32),
+      /** The daemon's own per-image cap; absent = the client's default (`MAX_IMAGE_BYTES`). */
+      maxBytes: z.number().int().positive().optional(),
+    })
+    .optional(),
 });
 export type AgentCapabilities = z.infer<typeof AgentCapabilitiesSchema>;
 
@@ -284,7 +300,7 @@ export function isWakeTurnId(id: string): boolean {
 export const PromptParamsSchema = z.object({
   sessionId: SessionIdSchema,
   turnId: TurnIdSchema,
-  content: z.array(ContentBlockSchema).min(1),
+  content: z.array(PromptContentBlockSchema).min(1),
   /**
    * The user activates this skill (`/name`, from the session's `session/skills`):
    * the daemon loads it as a `skill` tool round right after the prompt,

@@ -341,6 +341,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `model.autoTitle` | — | false | Ask a model to name each session after its first exchange. |
 | `model.baseURL` | `TENTACLE_MODEL_BASE_URL` | `http://localhost:8080/v1` (openai) or `https://api.anthropic.com/v1` (anthropic) | The endpoint, including its API version. |
 | `model.contextWindow` | `TENTACLE_CONTEXT_WINDOW` | 128000 | The context window in tokens: the fill meter and the model's context line. |
+| `model.images` | — | — | Whether this model takes images at all (an attached screenshot reaches it). |
 | `model.maxImageBytes` | — | — | Raw bytes one image may have on this model's wire (its own limit). |
 | `model.maxTokens` | `TENTACLE_MAX_TOKENS` | omitted for openai (the server decides); `64000` for anthropic | Max output tokens per response (`max_tokens` on the wire). |
 | `model.model` | `TENTACLE_MODEL` | "default" | The model id sent to the endpoint (`--model <id>` beats it, for that command). |
@@ -352,6 +353,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `models.*.baseURL` | — | — | The endpoint; unset with no other connection key: `model`'s. |
 | `models.*.contextWindow` | — | — | This model's context window in tokens; unset: `model`'s. |
 | `models.*.description` | — | — | When to pick this model — shown to the agent when it is selectable. |
+| `models.*.images` | — | — | Whether this model takes images at all; unset: `model`'s. |
 | `models.*.maxImageBytes` | — | — | Raw bytes one image may have on this model's wire; unset: `model`'s. |
 | `models.*.maxTokens` | — | — | Max output tokens per response; unset: `model`'s. |
 | `models.*.model` | — | — | The model id sent to the endpoint; unset: `model`'s. |

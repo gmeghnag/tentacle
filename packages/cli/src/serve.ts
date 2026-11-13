@@ -6,6 +6,7 @@
 import { join } from "node:path";
 import { EMPTY_SKILL_LISTING, projectKey } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
+import type { AttachmentSource } from "@tentacle/core";
 import {
   type AgentReuse,
   Connection,
@@ -30,6 +31,8 @@ import type { ModelPurpose, SessionSettings, SessionSettingsReport } from "@tent
 import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@tentacle/transport";
 import { applyCarried } from "./carried-settings.ts";
 import type { ServeLimits } from "./flags.ts";
+import { daemonImagePolicy } from "./image-policy.ts";
+import type { ProviderFactory } from "./model-provider.ts";
 import { APP_VERSION } from "./version.ts";
 import {
   type SkillScan,
@@ -84,6 +87,12 @@ export interface ServeOptions extends ServeLimits {
   readonly onNotice?: (line: string) => void;
   /** Reaper sweep period (ms); tests shorten it. */
   readonly sweepIntervalMs?: number;
+  /**
+   * How this daemon's agents build their providers (docs/feat/attachments-prompt.md
+   * T10): a test injects a recorder so a turn's `ChatRequest` can be inspected
+   * without leaving the machine. Default `createModelProvider`.
+   */
+  readonly createProvider?: ProviderFactory;
 }
 
 /** A running `serve`: `stop` waits for every session write, then releases the store. */
@@ -99,6 +108,36 @@ export interface ServeHandle {
  */
 export function daemonStoreDir(config: Pick<TentacleConfig, "configDir" | "cwd">): string {
   return join(config.configDir, "daemon", projectKey(config.cwd));
+}
+
+/**
+ * The `serve` daemon's per-session agent, exported so a test can drive a whole
+ * turn through it with an injected `createProvider`
+ * (docs/feat/attachments-prompt.md T10) — the failure it pins is SILENT: a
+ * factory that forgets `ctx.attachments` turns every image into
+ * `[image unavailable]` with no error anywhere. Extracted from `createAgent`'s
+ * body; no behaviour change.
+ */
+export function createServeAgent(
+  config: TentacleConfig,
+  options: Pick<ServeOptions, "onError" | "onNotice" | "createProvider">,
+  skillScan: SkillScan,
+  ctx: { readonly cwd: string; readonly attachments?: AttachmentSource },
+): WiredAgent {
+  return buildAgent(
+    { ...config, cwd: ctx.cwd },
+    // Hook failures: the daemon's error sink, like a turn error.
+    {
+      ...(options.onError ? { log: (line) => options.onError?.(new Error(line)) } : {}),
+      // Not failures: the startup-facts sink, not the error one.
+      ...(options.onNotice ? { notice: options.onNotice } : {}),
+      ...(options.createProvider ? { createProvider: options.createProvider } : {}),
+      skillScan,
+      // The session's store, so the provider can read a ref's bytes
+      // (docs/feat/attachments-prompt.md D4). Absent when images are off.
+      ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
+    },
+  );
 }
 
 /**
@@ -175,6 +214,7 @@ async function reloadedHost(
   const skillScan = createSkillScan(config);
   // The lock is held: this is THE daemon of the store. Silent, not awaited.
   sweepToolOutput(config);
+  const images = daemonImagePolicy(config);
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
     // A deleted session takes its spilled tool output with it.
@@ -183,17 +223,7 @@ async function reloadedHost(
     maxDetachedSessions: options.maxDetachedSessions ?? DEFAULT_MAX_DETACHED_SESSIONS,
     ...(options.onAudit ? { onAudit: options.onAudit } : {}),
     // Each session gets its own agent, confined to the daemon's cwd.
-    createAgent: (cwd) =>
-      buildAgent(
-        { ...config, cwd },
-        // Hook failures: the daemon's error sink, like a turn error.
-        {
-          ...(options.onError ? { log: (line) => options.onError?.(new Error(line)) } : {}),
-          // Not failures: the startup-facts sink, not the error one.
-          ...(options.onNotice ? { notice: options.onNotice } : {}),
-          skillScan,
-        },
-      ),
+    createAgent: (cwd, ctx) => createServeAgent(config, options, skillScan, { ...ctx, cwd }),
     newSessionSkills: () => skillScan.newSession(),
     // A remote client gets an opaque turn error; the real one is logged here.
     ...(options.onError ? { onTurnError: options.onError } : {}),
@@ -217,6 +247,9 @@ async function reloadedHost(
     // is attached to wakes on a job exit (docs/feat/serve-autowake.md). The
     // stdio (pod) daemon and the worker never set it.
     wakeOnJobExit: config.autoWake,
+    // This daemon runs its own config's model, so it holds the bytes
+    // (docs/feat/attachments-prompt.md D4); `undefined` = no image input at all.
+    ...(images ? { images } : {}),
   });
   const notice = options.onNotice ?? (() => {});
   let restored = 0;
@@ -491,6 +524,13 @@ export function tunnelledAgent(
 /** A pod daemon's flag, set by the laptop that launched it (`podDaemonCommand`). */
 export interface PodDaemonOptions {
   readonly modelProxy?: boolean;
+  /**
+   * How this pod's agents build a provider when it runs its OWN model
+   * (docs/feat/attachments-prompt.md T10): a test injects a recorder so a
+   * turn's `ChatRequest` can be inspected without leaving the machine. Ignored
+   * under `--model-proxy` (the laptop's provider is the one that matters).
+   */
+  readonly createProvider?: ProviderFactory;
 }
 
 /**
@@ -518,9 +558,17 @@ export function podSessionHost(
     }
   };
   sweepToolOutput(config);
+  // `--model-proxy`: the LAPTOP is the model link, so the pod declares `client`
+  // and holds no bytes (upload Owner Q2). Without it the pod runs its own
+  // model, so it is a normal `store` daemon (docs/feat/attachments-prompt.md
+  // D4, Orchestrator decision 8).
+  const images = daemonImagePolicy(config, {
+    modelProxy: options.modelProxy === true,
+  });
   return new SessionHost({
     defaultCwd: config.cwd,
     onSessionDeleted: (id) => void toolOutputStore().removeSession(id),
+    ...(images ? { images } : {}),
     // `run`/`attach`'s daemon: a skew is fixed by attaching again (it replaces it).
     identity: { tentacle: APP_VERSION, kind: "container" },
     // Only the model-proxy branch honours `settings`: a daemon the laptop does
@@ -533,10 +581,20 @@ export function podSessionHost(
     // than it needs, and stays symmetric with `serve`); the real one goes to
     // the daemon's stderr log (piped + routed by the laptop, never inherited).
     ...(log ? { onTurnError: (error: Error) => log(`error: ${error.message}`) } : {}),
-    createAgent: (cwd, { modelLink, settings, reuse }) => {
+    createAgent: (cwd, { modelLink, settings, reuse, attachments }) => {
       if (!options.modelProxy) {
         // It reports nothing: a settings sync answers `applied: false`.
-        return buildAgent({ ...config, cwd }, { ...(log ? { log, notice: log } : {}), skillScan });
+        return buildAgent(
+          { ...config, cwd },
+          {
+            ...(log ? { log, notice: log } : {}),
+            skillScan,
+            ...(options.createProvider ? { createProvider: options.createProvider } : {}),
+            // A pod daemon without `--model-proxy` runs its OWN model, so it
+            // holds the bytes (D4, Orchestrator decision 8).
+            ...(attachments ? { attachments } : {}),
+          },
+        );
       }
       const wired = tunnelledAgent({ ...config, cwd }, modelLink, {
         ...(settings ? { settings } : {}),

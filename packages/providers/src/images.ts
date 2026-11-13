@@ -119,6 +119,36 @@ export function effectiveMaxImageBytes(max: number): number {
   return Math.min(max, MAX_IMAGE_BYTES);
 }
 
+/** The providers whose vision defaults differ (P6). */
+export type VisionProvider = "anthropic" | "openai";
+
+export interface ImageLimitsOptions {
+  /** `model.images`: unset keeps the provider's own default. */
+  readonly images?: boolean;
+  /** `model.maxImageBytes`: this model's per-image cap in raw bytes. */
+  readonly maxImageBytes?: number;
+}
+
+/**
+ * What a model can take, from ONE place (docs/feat/attachments-prompt.md D4).
+ *
+ * Both providers derive their `vision` and cap from here, and so does the
+ * daemon's advertised `agentCapabilities.images` — so the capability cannot
+ * disagree with what the provider actually does. `maxBytes` is the effective
+ * cap (`effectiveMaxImageBytes`), so a caller that advertises it and refuses
+ * above it can never refuse an image the provider would have sent.
+ */
+export function imageLimits(
+  provider: VisionProvider,
+  options: ImageLimitsOptions,
+): { readonly vision: boolean; readonly maxBytes: number } {
+  const fallback = provider === "anthropic" ? ANTHROPIC_MAX_IMAGE_BYTES : OPENAI_MAX_IMAGE_BYTES;
+  return {
+    vision: options.images ?? provider === "anthropic",
+    maxBytes: effectiveMaxImageBytes(options.maxImageBytes ?? fallback),
+  };
+}
+
 /**
  * Read and verify the bytes of the refs `selectInlineIds` chose. No source, or
  * nothing selected, reads nothing. A ref whose bytes are absent (`null`), the

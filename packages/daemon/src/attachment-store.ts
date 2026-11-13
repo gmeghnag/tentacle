@@ -277,10 +277,18 @@ export class AttachmentStore implements AttachmentSource {
    */
   async read(ref: AttachmentRef): Promise<Uint8Array | null> {
     const entry = this.entries.get(ref.id);
-    if (entry?.kind !== "complete" || entry.bytes.length !== ref.size) {
-      return null;
-    }
-    return entry.bytes;
+    return this.holds(ref) && entry?.kind === "complete" ? entry.bytes : null;
+  }
+
+  /**
+   * The SYNCHRONOUS twin of `read`'s predicate: this store holds the ref's
+   * complete bytes, of exactly its size. `prompt` calls it inside its ack
+   * (AGENTS §7: nothing awaited there), so a not-yet-uploaded image is refused
+   * before anything is recorded.
+   */
+  holds(ref: AttachmentRef): boolean {
+    const entry = this.entries.get(ref.id);
+    return entry?.kind === "complete" && entry.bytes.length === ref.size;
   }
 
   /** Release every reservation. Idempotent: `close()` may run twice. */

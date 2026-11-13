@@ -334,6 +334,28 @@ describe("the 2b seam: `read`", () => {
   });
 });
 
+describe("`holds`: the synchronous twin of `read` (attachments-prompt D2)", () => {
+  test("true only for a complete blob whose length matches the ref's size", () => {
+    const { store: s } = store();
+    const bytes = blob(2 * CHUNK);
+    const id = sha(bytes);
+    const ref = { id, mimeType: "image/png", size: bytes.length };
+    s.put({ id, size: bytes.length, offset: 0, data: chunkAt(bytes, 0) });
+    expect(s.holds(ref)).toBe(false); // a partial
+    upload(s, bytes);
+    expect(s.holds(ref)).toBe(true);
+    expect(s.holds({ ...ref, size: bytes.length - 1 })).toBe(false);
+    expect(s.holds({ ...ref, id: "f".repeat(64) })).toBe(false);
+  });
+
+  test("returns a boolean, never a Promise (it is called inside a synchronous ack)", () => {
+    const { store: s } = store();
+    const held = s.holds({ id: "a".repeat(64), mimeType: "image/png", size: 4 });
+    expect(held).not.toBeInstanceOf(Promise);
+    expect(held).toBe(false);
+  });
+});
+
 describe("synchronous by contract (AGENTS §7: the peer is never serialized)", () => {
   test("`put` returns a plain ack object, never a Promise", () => {
     const { store: s } = store();

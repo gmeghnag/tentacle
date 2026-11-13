@@ -290,6 +290,16 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "Unset: the provider default (anthropic 3.75 MB, an OpenAI-compatible endpoint 5 MB). An image over it is never read or sent: the model sees a placeholder naming the image and the limit, so an over-limit image can never 400 every later turn of the session.",
     example: "3932160",
   },
+  "model.images": {
+    summary: "Whether this model takes images at all (an attached screenshot reaches it).",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    details:
+      "Unset: the provider default (anthropic true, an OpenAI-compatible endpoint false). `true` opts a compatible endpoint in; `false` refuses image prompts even on anthropic. A session whose model takes no images advertises no image input, so a client refuses the attach before uploading anything.",
+    example: "true",
+  },
   models: {
     summary:
       "Named models for sub-agents: each has the keys of `model`; unset keys come from `model`.",
@@ -394,6 +404,16 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     scope: "both",
     carried: "no",
     example: "8192",
+  },
+  "models.*.images": {
+    summary: "Whether this model takes images at all; unset: `model`'s.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    details:
+      "For a `models` entry whose endpoint differs from the main model's: a vision-capable cloud model beside a local text-only one, say. Unset inherits `model.images`.",
+    example: "true",
   },
   "models.*.maxImageBytes": {
     summary: "Raw bytes one image may have on this model's wire; unset: `model`'s.",

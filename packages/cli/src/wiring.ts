@@ -48,6 +48,7 @@ import {
 } from "@tentacle/config";
 import {
   AgentJobs,
+  type AttachmentSource,
   type JobController,
   type ModelProvider,
   PermissionBroker,
@@ -374,6 +375,14 @@ export interface BuildAgentOptions {
    * inject a spy; default `createModelProvider`. Unused over a `modelOverride`.
    */
   readonly createProvider?: ProviderFactory;
+  /**
+   * Where this agent's provider reads an image ref's bytes
+   * (docs/feat/attachments-prompt.md D4): the session's `AttachmentStore` when
+   * THIS daemon runs the model. Absent → images are never resolvable here (an
+   * `images: {source:"client"}` pod, where the laptop holds them, or a daemon
+   * with no policy at all).
+   */
+  readonly attachments?: AttachmentSource;
 }
 
 /** `agent_task`'s model list over the tunnel: the laptop's selectable names, with their text. */
@@ -624,6 +633,8 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     env,
     jobs,
     agentJobs,
+    // The session's bytes, where this side holds them (docs/feat/attachments-prompt.md D4).
+    ...(options.attachments ? { attachments: options.attachments } : {}),
     resultTransforms,
     toolOutput,
     systemPrompt: config.systemPrompt,

@@ -85,6 +85,11 @@ export interface ResolvedConfig {
    * (docs/feat/attachments-core.md, review H1). Unset → the provider's default.
    */
   readonly maxImageBytes?: number;
+  /**
+   * `model.images`: whether this model takes images at all
+   * (docs/feat/attachments-prompt.md D4). Unset → the provider's default.
+   */
+  readonly images?: boolean;
   readonly systemPrompt: string;
   /** The identity part of `systemPrompt`, before AGENTS.md and the skills catalog. */
   readonly promptIdentity: string;
@@ -408,6 +413,9 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   // the fallback and it differs by provider (review H1). Read straight off the
   // file, so it needs no `sources` entry (and no env var to trace).
   const maxImageBytes = model.maxImageBytes;
+  // File-only, like `maxImageBytes`: whether this model takes images at all.
+  // The effective value (with the provider's default) is `imageLimits()`.
+  const images = model.images;
   // System prompt = identity (env | PROMPT.md | default). AGENTS.md, when
   // auto-loaded, is appended AFTER it as repo rules — additive, never replacing
   // the identity. Disable via env TENTACLE_NO_AGENTS_MD (truthy, wins) or file
@@ -541,6 +549,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     contextWindow: contextWindow.value,
     ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
     ...(maxImageBytes !== undefined ? { maxImageBytes } : {}),
+    ...(images !== undefined ? { images } : {}),
     ...(apiKey !== undefined ? { apiKey } : {}),
   };
   const models: Record<string, ResolvedModel> = {};
@@ -574,6 +583,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     },
     ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
     ...(maxImageBytes !== undefined ? { maxImageBytes } : {}),
+    ...(images !== undefined ? { images } : {}),
     systemPrompt: systemPromptValue,
     promptIdentity: systemPrompt.value,
     agentsMdLoaded,

@@ -20,10 +20,11 @@ const lines = (key: string | undefined, opts: { all?: boolean } = {}): string[] 
 describe("explain with no key: the top level only", () => {
   test("one line per top-level key, sections marked with their sub-key count", () => {
     const out = lines(undefined);
-    expect(out.some((line) => /^\s*model\b.*\(10 sub-keys\)/.test(line))).toBe(true);
+    expect(out.some((line) => /^\s*model\b.*\(11 sub-keys\)/.test(line))).toBe(true);
     // 9 since agent-message-two-way (`subagents.twoWay`).
     expect(out.some((line) => /^\s*subagents\b.*\(9 sub-keys\)/.test(line))).toBe(true);
-    expect(out.some((line) => /^\s*models\b.*\(11 sub-keys\)/.test(line))).toBe(true);
+    // 12 since attachments-prompt (`models.*.images`).
+    expect(out.some((line) => /^\s*models\b.*\(12 sub-keys\)/.test(line))).toBe(true);
     // A leaf at the top level has no count and no children of its own.
     expect(out.some((line) => /^\s*maxIterations\b/.test(line))).toBe(true);
     expect(out.some((line) => /^\s*maxIterations\b.*sub-keys/.test(line))).toBe(false);
@@ -58,8 +59,8 @@ describe("explain with no key: the top level only", () => {
     if (!result.ok) throw new Error("expected ok");
     const model = result.entries.find((e) => e.path === "model");
     expect(model?.kind).toBe("section");
-    expect(model?.subKeys).toBe(10);
-    expect(text(undefined)).toContain("(10 sub-keys)");
+    expect(model?.subKeys).toBe(11);
+    expect(text(undefined)).toContain("(11 sub-keys)");
   });
 
   test("it is a list, not a wall of prose: one line per key on a wide terminal", () => {
@@ -295,7 +296,7 @@ describe("--json", () => {
     const parsed = JSON.parse(renderExplainJson(result)) as {
       entries: { path: string; subKeys?: number }[];
     };
-    expect(parsed.entries.find((e) => e.path === "model")?.subKeys).toBe(10);
+    expect(parsed.entries.find((e) => e.path === "model")?.subKeys).toBe(11);
   });
 
   test("an error serialises as the error, with its suggestions", () => {

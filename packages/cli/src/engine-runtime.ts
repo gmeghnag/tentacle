@@ -28,7 +28,7 @@ import type { SessionRecord } from "@tentacle/agent";
 import { ModelNameRefusedError, type NamedModels } from "@tentacle/client";
 import { type TentacleConfig, publishedModelNames } from "@tentacle/config";
 import type { ModelProvider, PermissionBroker } from "@tentacle/core";
-import { createModelProvider } from "@tentacle/providers";
+import { createModelProvider, imageLimits } from "@tentacle/providers";
 import type { DuplexChannel } from "@tentacle/transport";
 import type { TargetBadge } from "@tentacle/tui";
 import { carriedSettings } from "./carried-settings.ts";
@@ -110,7 +110,15 @@ export function laptopModels(
   readonly modelProvider: ModelProvider;
   readonly titleModelProvider?: ModelProvider;
   readonly namedModels?: NamedModels;
+  /**
+   * This laptop's own vision config, decided by the SAME `imageLimits()` the
+   * provider uses (docs/feat/attachments-prompt.md D4): a `client`-mode pod's
+   * advertised capability must match what this laptop can actually send.
+   */
+  readonly localImages: { readonly vision: boolean; readonly maxBytes: number };
 } {
+  const limits = imageLimits(config.provider, config);
+  const localImages = { vision: limits.vision, maxBytes: limits.maxBytes };
   const modelProvider = configuredModelProvider(config, config.model, create);
   const names = new Set(publishedModelNames(config));
   const providers = createModelProviders(config, create);
@@ -133,13 +141,13 @@ export function laptopModels(
           },
         };
   if (!config.autoTitle) {
-    return { modelProvider, ...named };
+    return { modelProvider, localImages, ...named };
   }
   const titleModelProvider =
     config.titleModel !== undefined
       ? configuredModelProvider(config, config.titleModel, create)
       : modelProvider;
-  return { modelProvider, titleModelProvider, ...named };
+  return { modelProvider, titleModelProvider, localImages, ...named };
 }
 
 /** A started runtime; `markFault` reports a failure only the caller sees (the TUI throwing). */

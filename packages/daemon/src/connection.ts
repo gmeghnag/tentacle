@@ -457,7 +457,21 @@ export class Connection {
     }
     return {
       protocolVersion: PROTOCOL_VERSION,
-      agentCapabilities: { tools: true, permissions: true },
+      agentCapabilities: {
+        tools: true,
+        permissions: true,
+        // What a client may send as an image (docs/feat/attachments-prompt.md
+        // D2): absent when this daemon takes none, so an older daemon and a
+        // model without vision read the same way.
+        ...(this.host.images
+          ? {
+              images:
+                this.host.images.source === "store"
+                  ? { input: "upload", maxBytes: this.host.images.maxBytes }
+                  : { input: "client" },
+            }
+          : {}),
+      },
       ...(this.host.identity
         ? {
             agentInfo: {
