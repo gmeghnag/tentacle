@@ -2,10 +2,11 @@
  * The app's shell (docs/feat/mobile-app-shell.md): `NavigationContainer` + a
  * native stack, and the ONE client registry. Wiring only — every decision with
  * a branch lives in a pure module (`routes.ts`, `computers.ts`, `connection.ts`,
- * `session-list*.ts`, `link-registry.ts`); this file maps them to React.
+ * `session-list*.ts`, `link-registry.ts`, `foreground-gate.ts`); this file maps
+ * them to React.
  *
- * No `session/open` anywhere: 11a lists sessions and shows a placeholder
- * (attaching the phone is task 12).
+ * The session screen is still 11a's placeholder: 12a builds the LINK (one held
+ * broker, detach-not-close, the foreground gate) and 12c the screen itself.
  */
 import { NavigationContainer, useFocusEffect } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -37,16 +38,31 @@ const SOURCE = devComputerSource({
 /** What a computer is, by id (filled when the source is read). */
 const RECORDS = new Map<string, ComputerRecord>();
 
+/** Every link currently open: what the `AppState` effect suspends and resumes. */
+const LIVE_LINKS = new Set<ComputerLink>();
+
 /** One live client per computer, closed when the app unmounts (AGENTS §7). */
 const LINKS = createLinkRegistry<ComputerLink>({
-  open: (id) => {
+  open: async (id) => {
     const record = RECORDS.get(id);
     if (record === undefined) {
-      return Promise.reject(new Error(`unknown computer ${id}`));
+      throw new Error(`unknown computer ${id}`);
     }
-    return openComputer(record, { WebSocket: WebSocket as never });
+    const link = await openComputer(record, { WebSocket: WebSocket as never });
+    // A link dialled while the app is already in the background starts held:
+    // iOS would suspend it anyway, and a socket opened now would be a ghost
+    // attachment for the daemon (docs/feat/mobile-session-view.md 12a.4).
+    if (AppState.currentState !== "active") {
+      link.suspend();
+    }
+    LIVE_LINKS.add(link);
+    return link;
   },
-  close: (link) => link.close(),
+  close: (link) => {
+    LIVE_LINKS.delete(link);
+    // The link's own exit path: `drain()` + `close()`, i.e. detach, never close.
+    return link.close();
+  },
 });
 
 /** Rejections carry a message worth showing; anything else is a bug, not a UI state. */
@@ -251,6 +267,22 @@ export default function App(): JSX.Element {
     return () => {
       void LINKS.closeAll();
     };
+  }, []);
+
+  // Leaving the foreground drops the sockets and holds the redial; coming back
+  // releases it, and the client's OWN re-attach does the rest (12a.4). The
+  // decision is `foreground-gate.ts`'s; this is the `AppState` wiring.
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      for (const link of LIVE_LINKS) {
+        if (state === "active") {
+          link.resume();
+        } else {
+          link.suspend();
+        }
+      }
+    });
+    return () => subscription.remove();
   }, []);
 
   if (computers === null) {
