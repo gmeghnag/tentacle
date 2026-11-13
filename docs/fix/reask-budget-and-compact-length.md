@@ -415,7 +415,17 @@ Owner Q2, as the Implementation says.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+**Verdict: APPROVE** (no HIGH/MEDIUM findings).
+
+- **Gate:** touched files 59 pass / 0 fail; `bun run lint` clean (975 files); `bun run typecheck` clean. Full `bun test`: 7792 pass / 3 skip (opt-in) / 1 fail — `serve-log-store.test.ts` S11 "200 kills" (13.7 s, under load); re-run alone 22/0. Not touched by this diff (daemon store) → a load flake, not a regression.
+- **Mutations (each reverted, `git status` clean after):** DSML `budgetFrom++`→`--` → both new dsml tests fail; line deleted → both fail; `cutReason` → `return undefined` → 5 fail (both compact rejects, Session.compact untouched, summarizeText, summarizeLargeOutput pointer).
+- **Premises:** `agent.ts:1187` loop bound `iteration - budgetFrom < maxIterations` TRUE; truncation re-ask already `budgetFrom++` (`:1448`) TRUE; context reset absolute `budgetFrom = iteration + 1` (`:1482`) TRUE; providers map a missing finish/stop reason to `"other"` (`openai-provider.ts:296`, `anthropic-provider.ts:335`) TRUE; the only callers of the summarisers are `agent.ts:912` (`Session.compact`) and `cli/wiring.ts:434` (pipeline) TRUE.
+- **Attacks tried:** (1) hand-trace `maxIterations: 2` + leak at round 0 → rounds 1 and 2 run, cap at 3 — correct; (2) `"other"` false positives: the agent loop already fails a turn on `"other"` (`agent.ts:1311`), so compaction is now consistent with it, not stricter; (3) pod path: `ProxyModelProvider` forwards `stopReason` (`protocol/model.ts:69`, optional), so a cut summary is caught in a pod too, and a missing field stays `undefined` → accepted; (4) a cut summary vs persistence: the throw comes before `Session.compact` mutates anything, and the test pins zero `onPersist` calls; (5) Anthropic `refusal` normalises to `length`, so a refused summary is rejected too (correct). The message just says "output limit" — LOW, not filed.
+- **LOW (not blocking):** for `"other"`, `cutMessage` still suggests "raise the model's output limit", which doesn't apply. The "cut before empty" ordering has no test of its own.
+- **Executor:** a minimal, well-scoped diff that matches the Implementation; the comments explain the `++` and the off-by-two. Its mutation claims reproduce.
+- Reviewer is from a different model family than the executor (DeepSeek), with a fresh context.
+
+*— claude-opus-5-5, 2026-11-13*
 
 #### Owner answers (2026-11-13)
 
