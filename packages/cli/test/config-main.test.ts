@@ -357,6 +357,77 @@ describe("the command surface (owner Q7)", () => {
     }
   });
 
+  test("get answers for an env-only key too, and never prints the env's secret (review fix 1)", async () => {
+    // `model.apiKey` and `engine` have no `sources` field: the loader reads their
+    // env var directly, so before the fix `get` said "not set" while the CLI was
+    // using the env value. Mutation: drop the ENV_DIRECT predicates → exit 1.
+    seeded();
+    process.env.TENTACLE_MODEL_API_KEY = "sk-MUSTNOTAPPEAR";
+    process.env.TENTACLE_ENGINE = "docker";
+    try {
+      const key = await run(["get", "model.apiKey"]);
+      expect(key.code).toBe(0);
+      expect(key.out.trim()).toBe("model.apiKey = ***  # env TENTACLE_MODEL_API_KEY");
+      expect(`${key.out}${key.err}`).not.toContain("sk-MUSTNOTAPPEAR");
+      const engine = await run(["get", "engine"]);
+      expect(engine.code).toBe(0);
+      expect(engine.out.trim()).toBe('engine = "docker"  # env TENTACLE_ENGINE');
+      // Nothing leaks through the machine form either.
+      const json = await run(["list", "--json"]);
+      expect(json.code).toBe(0);
+      expect(json.out).not.toContain("sk-MUSTNOTAPPEAR");
+    } finally {
+      for (const name of ["TENTACLE_MODEL_API_KEY", "TENTACLE_ENGINE"]) {
+        delete process.env[name]; // computed, so `noDelete` allows it (AGENTS §6)
+      }
+    }
+  });
+
+  test("get follows TENTACLE_PROFILE exactly as list does (review fix 3)", async () => {
+    // The two forms must read ONE environment. `list` already resolved
+    // `TENTACLE_PROFILE` from `process.env`; `get` read only the injected `env`,
+    // so with the real variable set it answered for no profile at all.
+    // Mutation: pass `input.env?` instead of `envOf(input)` → the two disagree
+    // (`5242880  # default (openai-compatible)` vs the profile's answer).
+    seeded();
+    await run(["set", "model.provider", "anthropic", "--profile", "work"]);
+    process.env.TENTACLE_PROFILE = "work";
+    try {
+      const got = await run(["get", "model.maxImageBytes"]);
+      expect(got.code).toBe(0);
+      expect(got.out.trim()).toBe("model.maxImageBytes = 3932160  # default (anthropic)");
+      // …and the two forms agree on that key, which is what was broken.
+      const listed = await run(["list"]);
+      expect(listed.out).toContain("model.maxImageBytes = 3932160  # default (anthropic)");
+    } finally {
+      const name = "TENTACLE_PROFILE";
+      delete process.env[name]; // computed, so `noDelete` allows it (AGENTS §6)
+    }
+  });
+
+  test("get --profile <unset key> answers for the SETTING, not the file's profile path (review fix 4)", async () => {
+    // `resolveTarget` prefixes `profiles.<name>.`; the effective view lists the
+    // setting's own path. Looking up the prefixed path found nothing, so the
+    // owner's rule 3 (exit 0 for an unset key) did not hold under `--profile`.
+    // Mutation: look up `target.segments.join(".")` → back to exit 1.
+    seeded();
+    await run(["set", "model.provider", "anthropic", "--profile", "work"]);
+    const unset = await run(["get", "model.images", "--profile", "work"]);
+    expect(unset.code).toBe(0);
+    expect(unset.out.trim()).toBe("model.images = true  # default (anthropic)");
+    // A provider-dependent default the profile only INFLUENCED says `default`,
+    // never `profile work` (fix 2, end to end).
+    const limit = await run(["get", "model.maxImageBytes", "--profile", "work"]);
+    expect(limit.code).toBe(0);
+    expect(limit.out.trim()).toBe("model.maxImageBytes = 3932160  # default (anthropic)");
+    // A key the profile SETS is still printed as stored (that path never changed).
+    const provider = await run(["get", "model.provider", "--profile", "work"]);
+    expect(provider.out.trim()).toBe('"anthropic"');
+    // No `--profile`: unchanged, the base view.
+    const base = await run(["get", "model.maxImageBytes"]);
+    expect(base.out.trim()).toBe("model.maxImageBytes = 5242880  # default (openai-compatible)");
+  });
+
   test("get on a key with NO value at all still refuses, and an unknown key still refuses", async () => {
     seeded();
     // A key with no default and nothing set has no effective value to print.

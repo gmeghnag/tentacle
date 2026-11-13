@@ -783,7 +783,8 @@ async function write(
 
 /** The effective entry for `key`, built from the file as it was parsed. */
 function effectiveEntryOf(
-  key: string,
+  /** The key's segments IN THE FILE (`profiles.work.model.images` with --profile). */
+  segments: readonly string[],
   fileValue: unknown,
   input: ConfigRunInput,
 ): EffectiveEntry | undefined {
@@ -793,11 +794,22 @@ function effectiveEntryOf(
   const fileConfig = (
     typeof fileValue === "object" && fileValue !== null ? fileValue : {}
   ) as never;
-  const profile = input.profile ?? (input.env?.TENTACLE_PROFILE || undefined);
-  return effectiveEntry(key, {
+  // ONE environment for both forms: `list` reads `envOf` (the process's own when
+  // a test injects none), so `get` must too, or `TENTACLE_PROFILE=w` makes the
+  // two disagree about the same key.
+  const env = envOf(input);
+  const profile = input.profile ?? (env.TENTACLE_PROFILE || undefined);
+  // The view lists the SETTING's own path (`model.images`), never the file's
+  // `profiles.<name>.…` — the profile is folded into the view, and the origin
+  // column says `profile <name>` (config-effective.ts). Look the key up the same way.
+  const settings =
+    profile !== undefined && segments[0] === "profiles" && segments[1] === profile
+      ? segments.slice(2)
+      : segments;
+  return effectiveEntry(settings.join("."), {
     fileConfig,
     ...(profile !== undefined ? { profile } : {}),
-    env: input.env ?? process.env,
+    env,
   });
 }
 
@@ -843,7 +855,7 @@ function get(input: ConfigRunInput, op: Extract<ConfigOp, { kind: "get" }>): Con
     // profile's) — that is the answer the owner asked for. A key the registry
     // does not know never reaches here: `resolveTarget` refused it above, so
     // nothing is ever invented for an unknown path.
-    const effective = effectiveEntryOf(target.segments.join("."), parsed.value, input);
+    const effective = effectiveEntryOf(target.segments, parsed.value, input);
     if (effective !== undefined && effective.origin.kind !== "unset") {
       return effectiveGet(effective, target.segments.join("."), input);
     }

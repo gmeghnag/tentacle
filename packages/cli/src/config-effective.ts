@@ -72,11 +72,10 @@ export interface EffectiveInput {
   readonly cwd?: string | undefined;
 }
 
-/** The two file views and their resolutions: everything a layer test reads. */
+/** The two file views and their resolution: everything a layer test reads. */
 interface Ctx {
   readonly base: FileConfig;
   readonly merged: FileConfig;
-  readonly resolvedBase: ResolvedConfig;
   readonly resolved: ResolvedConfig;
   readonly env: Env;
   readonly profile?: string | undefined;
@@ -118,6 +117,23 @@ function envFlag(env: Env, name: string): boolean | undefined {
   }
   return undefined;
 }
+
+/**
+ * The two leaves whose env var the loader reads DIRECTLY, with the loader's own
+ * "is it set?" predicate: `resolveConfig` reports no `sources` field for them,
+ * so the registry's `env` is the only record that they have one
+ * (`model.apiKey` — `resolve.ts:542`; `engine` — `engine-select.ts:81`). A leaf
+ * with a `sourceKey` never comes here: its `pick()` already fell through an
+ * unparseable value, which `sources` reports.
+ */
+const ENV_DIRECT: Readonly<Record<string, (env: Env) => boolean>> = {
+  // `if (env.TENTACLE_MODEL_API_KEY)`: a non-empty value wins over both file forms.
+  "model.apiKey": (env) => Boolean(env.TENTACLE_MODEL_API_KEY),
+  // A non-empty `TENTACLE_ENGINE` wins whatever it says: `chooseEngine` REFUSES
+  // an unknown engine instead of falling through to the file (that is a usage
+  // error), so env owns the origin and the text shows why the CLI will refuse.
+  engine: (env) => (env.TENTACLE_ENGINE ?? "") !== "",
+};
 
 /** One `models` entry of the merged resolution, by concrete name. */
 const modelEntry = (
@@ -173,6 +189,12 @@ const EXTRA: Readonly<Record<string, Probe>> = {
   // endpoint, 64000 for anthropic (`ANTHROPIC_DEFAULT_MAX_TOKENS`) — the
   // registry keeps it as text, this is the value behind the text.
   "model.maxTokens": (ctx) => (ctx.resolved.provider === "anthropic" ? 64_000 : undefined),
+  // The env-only keys: the loader's OWN value, so the line cannot disagree with
+  // what the CLI acts on (the `apiKey` precedence env › file `apiKey`, and
+  // `chooseEngine`'s env-over-configured).
+  "model.apiKey": (ctx) => ctx.resolved.apiKey,
+  engine: (ctx) =>
+    ENV_DIRECT.engine?.(ctx.env) === true ? ctx.env.TENTACLE_ENGINE : ctx.resolved.engine,
   // The inverted env vars: the BOOLEAN, not the raw env text (a truthy
   // `TENTACLE_NO_AGENTS_MD` turns the setting off).
   loadAgentsMd: (ctx) => {
@@ -277,9 +299,14 @@ function originFor(
 ): EffectiveOrigin {
   const source = doc.sourceKey === undefined ? undefined : ctx.resolved.sources[doc.sourceKey];
   if (doc.sourceKey === undefined) {
-    // No `sources` entry (a CLI-side default, a passthrough, `model.images`):
-    // only the file can move these, so the two file views are the test.
-    if (ctx.profile !== undefined && movedByProfile(doc, path, segments, ctx)) {
+    // No `sources` entry: either the loader reads this leaf's env var DIRECTLY
+    // (`ENV_DIRECT`, the same predicate the loader uses), or nothing but the
+    // file can move it, so the two file views are the test.
+    const envSet = ENV_DIRECT[path]?.(ctx.env) === true;
+    if (envSet && doc.env !== undefined) {
+      return { kind: "env", name: doc.env };
+    }
+    if (ctx.profile !== undefined && movedByProfile(segments, ctx)) {
       return { kind: "profile", name: ctx.profile };
     }
     return storedIn(ctx.merged, segments).found ? { kind: "file" } : { kind: "default" };
@@ -288,19 +315,21 @@ function originFor(
     return { kind: "env", name: doc.env };
   }
   if (source === "file") {
-    return ctx.profile !== undefined && movedByProfile(doc, path, segments, ctx)
+    return ctx.profile !== undefined && movedByProfile(segments, ctx)
       ? { kind: "profile", name: ctx.profile }
       : { kind: "file" };
   }
   return { kind: "default" };
 }
 
-/** Whether the profile (not the base file) is where this value came from. */
-function movedByProfile(doc: KeyDoc, path: string, segments: readonly string[], ctx: Ctx): boolean {
-  const baseCtx: Ctx = { ...ctx, resolved: ctx.resolvedBase };
-  if (!same(layerValue(ctx, doc, path, segments), layerValue(baseCtx, doc, path, segments))) {
-    return true;
-  }
+/**
+ * Whether the PROFILE is where this value came from: only if the profile's own
+ * subtree sets it. Comparing the two RESOLUTIONS instead would credit the
+ * profile with a default that merely followed another key it set (a profile
+ * setting `model.provider` makes `model.images`' default flip to `true`, but the
+ * profile does not set `model.images` — its origin is `default (anthropic)`).
+ */
+function movedByProfile(segments: readonly string[], ctx: Ctx): boolean {
   const merged = storedIn(ctx.merged, segments);
   const base = storedIn(ctx.base, segments);
   if (merged.found !== base.found) {
@@ -428,7 +457,6 @@ export function effectiveEntries(input: EffectiveInput): readonly EffectiveEntry
   const ctx: Ctx = {
     base: base.config,
     merged: applied.config,
-    resolvedBase: resolveConfig({ fileConfig: base.config, env: input.env, defaultCwd: cwd }),
     resolved: resolveConfig({ fileConfig: applied.config, env: input.env, defaultCwd: cwd }),
     env: input.env,
     profile: input.profile,

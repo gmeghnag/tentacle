@@ -439,3 +439,130 @@ Gate (scoped as instructed): the 4 touched test files 111 pass / 0 fail; `bun ru
 **Mutation:** disabling the `source === "env"` branch makes T-E4 fail (2 tests), so the env path is not vacuous. Reverted; `git status` clean. No test covers findings 1–4, so each fix needs a red test first.
 
 **Executor behaviour:** the drift is documented honestly and the red/green evidence is real. But the Design's own env rule for keys without a `sourceKey` was dropped silently, and the `get` path was not checked for parity with `list` under a profile.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-13*
+
+Scope: the 4 Review findings (HIGH 1, MEDIUM 2–4). Each fixed red first, then
+green, then mutation-checked. No design change beyond what the findings name.
+
+**1. HIGH — env-only keys reported the wrong value/origin**
+(`config-effective.ts`). Two leaves carry an `env` but no `sourceKey`, and
+`resolveConfig` reports no `sources` field for them, so the origin test fell to
+"only the file can move this": `TENTACLE_MODEL_API_KEY` and `TENTACLE_ENGINE`
+were invisible.
+- `ENV_DIRECT` (`config-effective.ts:120-137`): the loader's own predicate per
+  leaf — `Boolean(env.TENTACLE_MODEL_API_KEY)` (`resolve.ts:542`) and
+  `(env.TENTACLE_ENGINE ?? "") !== ""` (`engine-select.ts:71`, where an empty
+  value is "not set", so it must not claim `env`). `originFor` consults it for a
+  leaf with no `sourceKey` → `# env TENTACLE_…`.
+- `EXTRA["model.apiKey"]` / `EXTRA.engine` (`:195-197`): the VALUE is the
+  loader's own — `resolved.apiKey` (masked by `renderStored`, so `***`), and the
+  env engine when set else `resolved.engine`. For `engine`, env-over-configured
+  is `chooseEngine`'s precedence; an unknown value is shown AS WRITTEN, because
+  the CLI refuses it rather than falling through — the honest answer, and the one
+  place this deliberately departs from the Design's "env is the origin only when
+  the value moved" rule (recorded here, not silently).
+
+**2. MEDIUM — a provider-dependent default was labelled `profile <name>`**
+(`config-effective.ts:325-341`). `movedByProfile` compared the two RESOLUTIONS,
+so a profile setting `model.provider` made `model.images`' default flip and count
+as "moved". It now compares only the STORED subtree (profile vs base): the label
+follows what the profile actually sets. The same class for `models.<n>.*` is
+fixed with it (a profile setting one `models` field used to claim the whole
+inherited entry) — the before/after below shows both.
+
+**3. MEDIUM — `get` ignored `TENTACLE_PROFILE`** (`config-run.ts:785-816`).
+`effectiveEntryOf` read `input.env?.TENTACLE_PROFILE`, i.e. the injected env
+only, while `list` reads `envOf(input)` (the process's own when a test injects
+none). Both now go through `envOf`.
+
+**4. MEDIUM — `config get --profile w <unset key>` still exited 1**
+(`config-run.ts:802-811`). `resolveTarget` prefixes `profiles.<name>.`, and
+`effectiveEntries` lists the SETTING's own path, so the lookup found nothing.
+`effectiveEntryOf` now takes the target's SEGMENTS and strips
+`profiles.<name>.` before the lookup.
+
+**Tests (red on the pre-fix code first, §9).** +7 tests, all new:
+`packages/cli/test/config-effective.test.ts` T-E8 ×2 (env-only `model.apiKey`,
+`engine`) and T-E9 ×2 (a default that followed the profile, and one the profile
+really sets); `packages/cli/test/config-main.test.ts` 3 (an env-only key through
+`get` with no leak · `get` follows `TENTACLE_PROFILE` · `get --profile <unset
+key>` exits 0).
+
+RED, the pre-fix source copied back into place (nothing checked out/restored/
+stashed; the copies live in `.tentacle/tmp/config-list-effective/fixround/`),
+new tests in place:
+```
+(fail) get answers for an env-only key too, and never prints the env's secret (review fix 1)
+(fail) get follows TENTACLE_PROFILE exactly as list does (review fix 3)
+(fail) get --profile <unset key> answers for the SETTING, not the file's profile path (review fix 4)
+(fail) T-E8 > model.apiKey: TENTACLE_MODEL_API_KEY is the value (masked), and env beats the file
+(fail) T-E8 > engine: TENTACLE_ENGINE wins over the file, as `chooseEngine` layers it
+(fail) T-E9 > a profile setting only the provider does not own the image defaults
+ 60 pass   6 fail
+
+Expected: 0                    Received: 1
+Expected: "model.maxImageBytes = 3932160  # default (anthropic)"
+Received: "model.maxImageBytes = 5242880  # default (openai-compatible)"
+Expected: "model.apiKey = ***  # env TENTACLE_MODEL_API_KEY"
+Received: "model.apiKey = (unset)  # no default"
+Expected: "engine = "docker"  # env TENTACLE_ENGINE"
+Received: "engine = "kubernetes"  # default"
+Expected: "model.images = true  # default (anthropic)"
+Received: "model.images = true  # profile w"
+```
+With the fix back: 118 pass / 0 fail across the four config test files.
+
+**Mutation checks — one per fix, each red then reverted to green.**
+```
+M-F1   `const envSet = ENV_DIRECT[path]?.(ctx.env) === true` → `const envSet = false`
+   (fail) get answers for an env-only key too, and never prints the env's secret
+   (fail) T-E8 > model.apiKey: …
+   (fail) T-E8 > engine: …
+   63 pass / 3 fail → reverted
+
+M-F1b  keep the origin, drop the VALUE probe `EXTRA["model.apiKey"]`
+   (fail) get answers for an env-only key too, …
+   (fail) T-E8 > model.apiKey: …
+   64 pass / 2 fail → reverted      (the origin alone does not carry the line)
+
+M-F2   put `resolvedBase` back and compare the two RESOLUTIONS in `movedByProfile`
+   (fail) get follows TENTACLE_PROFILE exactly as list does (review fix 3)
+   (fail) get --profile <unset key> … (review fix 4)
+   (fail) T-E9 > a profile setting only the provider does not own the image defaults
+   63 pass / 3 fail → reverted
+
+M-F3   `input.profile ?? (input.env?.TENTACLE_PROFILE || undefined)` (the pre-fix line)
+   (fail) get follows TENTACLE_PROFILE exactly as list does (review fix 3)
+   65 pass / 1 fail → reverted
+
+M-F4   `const settings = segments;` (no profile-prefix strip)
+   (fail) get --profile <unset key> … (review fix 4)
+   65 pass / 1 fail → reverted
+```
+
+**Fix 2, blast check.** The whole effective view for one fixture (base
+`model.model: "base-id"`, `maxIterations: 8`, `models.fast.description`; profile
+`w` setting `model.provider: anthropic`, `model.model: "w-id"`,
+`tools.execution`, `models.fast.description: "quick"`), old vs new — 69 lines,
+exactly 8 changed, every one of them the finding's class, no other origin moved:
+```
+OLD model.images = true  # profile w
+NEW model.images = true  # default (anthropic)
+OLD model.maxImageBytes = 3932160  # profile w
+NEW model.maxImageBytes = 3932160  # default (anthropic)
+OLD models.fast.baseURL/contextWindow/images/maxImageBytes/model/provider …  # profile w
+NEW …  # default (from model)                                    (6 lines)
+```
+
+**No drift from the fixes as scoped.** The one deliberate departure is fix 1's
+`engine` case, recorded above: `chooseEngine` REFUSES an unknown
+`TENTACLE_ENGINE` instead of falling through, so `env` is the origin there
+whatever the text says — showing `default` while the CLI stops with a usage
+error would be the dishonest answer.
+
+**Gate:** `bunx tsc --noEmit` OK · `bun run lint` (`biome check .`, 964 files)
+clean · `bun test` **7644 pass, 3 skip (the three opt-in skips: live-k8s,
+live-docker, real-socket keepalive), 0 fail** (71682 expects, 545 files).

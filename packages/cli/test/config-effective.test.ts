@@ -221,6 +221,72 @@ describe("T-E6: maps and arrays", () => {
   });
 });
 
+describe("T-E8: a leaf whose env var the loader reads DIRECTLY (review fix 1)", () => {
+  test("model.apiKey: TENTACLE_MODEL_API_KEY is the value (masked), and env beats the file", () => {
+    // Mutation: drop the ENV_DIRECT predicate → the env-only case says `(unset)`.
+    const envOnly = view({ fileConfig: {}, env: { TENTACLE_MODEL_API_KEY: "sk-env-only" } });
+    expect(lineOf(envOnly, "model.apiKey")).toBe(
+      "model.apiKey = ***  # env TENTACLE_MODEL_API_KEY",
+    );
+    expect(JSON.stringify(envOnly)).not.toContain("sk-env-only");
+    // env › file `apiKey` (`resolve.ts:542`): the answer is the env one, masked.
+    const both = view({
+      fileConfig: { model: { apiKey: "sk-from-file" } },
+      env: { TENTACLE_MODEL_API_KEY: "sk-env-only" },
+    });
+    expect(lineOf(both, "model.apiKey")).toBe("model.apiKey = ***  # env TENTACLE_MODEL_API_KEY");
+    // No env: unchanged — the file owns it, and with neither there is still none.
+    expect(
+      lineOf(view({ fileConfig: { model: { apiKey: "sk-from-file" } } }), "model.apiKey"),
+    ).toBe("model.apiKey = ***  # file");
+    expect(lineOf(view({ fileConfig: {} }), "model.apiKey")).toBe(
+      "model.apiKey = (unset)  # no default",
+    );
+  });
+
+  test("engine: TENTACLE_ENGINE wins over the file, as `chooseEngine` layers it", () => {
+    expect(lineOf(view({ fileConfig: {}, env: { TENTACLE_ENGINE: "docker" } }), "engine")).toBe(
+      'engine = "docker"  # env TENTACLE_ENGINE',
+    );
+    // env › configured (`engine-select.ts:71`): the file's value does not win.
+    expect(
+      lineOf(
+        view({ fileConfig: { engine: "kubernetes" }, env: { TENTACLE_ENGINE: "podman" } }),
+        "engine",
+      ),
+    ).toBe('engine = "podman"  # env TENTACLE_ENGINE');
+    // An EMPTY env var is not set at all (`chooseEngine`'s `!== ""`).
+    expect(
+      lineOf(view({ fileConfig: { engine: "podman" }, env: { TENTACLE_ENGINE: "" } }), "engine"),
+    ).toBe('engine = "podman"  # file');
+    expect(lineOf(view({ fileConfig: {} }), "engine")).toBe('engine = "kubernetes"  # default');
+  });
+});
+
+describe("T-E9: a default that FOLLOWED the profile is still a default (review fix 2)", () => {
+  test("a profile setting only the provider does not own the image defaults", () => {
+    // Mutation: compare the two RESOLUTIONS in `movedByProfile` → these two
+    // lines say `profile w` for a value the profile never sets.
+    const entries = view({
+      fileConfig: { profiles: { w: { model: { provider: "anthropic" } } } },
+      profile: "w",
+    });
+    expect(lineOf(entries, "model.provider")).toBe('model.provider = "anthropic"  # profile w');
+    expect(lineOf(entries, "model.images")).toBe("model.images = true  # default (anthropic)");
+    expect(lineOf(entries, "model.maxImageBytes")).toBe(
+      "model.maxImageBytes = 3932160  # default (anthropic)",
+    );
+  });
+
+  test("a key the profile really sets is still `profile <name>`", () => {
+    const entries = view({
+      fileConfig: { profiles: { w: { model: { provider: "anthropic", images: true } } } },
+      profile: "w",
+    });
+    expect(lineOf(entries, "model.images")).toBe("model.images = true  # profile w");
+  });
+});
+
 describe("T-E7: the printed form", () => {
   test("each origin reads as its trailing comment", () => {
     expect(originText({ kind: "file" })).toBe("file");
