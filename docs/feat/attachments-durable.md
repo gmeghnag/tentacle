@@ -1,6 +1,6 @@
 # feat/attachments-durable — image bytes survive restart, resume, archive and re-attach
 
-> **Status:** implementation (draft — **NOT approved**; see `### Owner questions`)
+> **Status:** implementation APPROVED (owner answers 2026-11-13: all (a))
 > **Branch:** `feat/attachments-durable` (off `main` @ e9e7036: core, upload, tui-detect, prompt, tui merged)
 > **Type:** feat · **Size:** M · **Blast:** load-bearing (persistence §7: the `serve` store gains files beside `<uid>.jsonl`, the laptop store gains files beside its logs; the laptop-held pod source widens from "this process" to "this laptop's disk"; §7 "a pod is not trusted") · **Suited:** strong model executes + **mandatory fresh-context Review** red-teaming the pod scope (D5) and the archive/delete/fork lifecycle (D2)
 
@@ -468,3 +468,7 @@ Recommendation first in each. Nothing here is approved until answered.
 ## Review
 
 *(empty)*
+
+#### Owner answers (2026-11-13)
+
+Q1–Q9 all (a), as recommended. Implementation APPROVED.
