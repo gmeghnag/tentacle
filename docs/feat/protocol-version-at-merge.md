@@ -420,3 +420,25 @@ last bullet).
   merge is the safer call — recommended, and the reason this section does not
   claim to be the final gate.
 
+
+## Review
+
+*— claude-opus-5-5, 2026-11-13* (fresh context; a different model family from the executor)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Gate.** `bun test scripts/test/protocol-bump.test.ts packages/protocol/test packages/daemon/test/version-mismatch.test.ts`: 328 pass, 0 fail. `bun run lint` clean (965 files). `bun run typecheck` clean. I did not run the full `bun test`.
+
+**Findings.**
+
+1. **HIGH — the crash re-run folds a note twice when 2 or more notes are pending** (`scripts/protocol-bump.ts:192-196`, `pendingNotes`). The "already folded" check compares each note only to the **newest** block. Notes `a`, `b` fold as 25 and 26; a crash before the `rmSync` loop (`:266-268`) leaves both notes on disk; the re-run skips `b` (it matches 26) and folds `a` again as **27**. The numbers stay consecutive, so neither `applyBump`'s guards nor `version.test.ts` catches it: one break silently burns two version numbers and the reason block repeats itself. Repro (`.tentacle/tmp/protocol-version-at-merge/crash.ts`): `rerun: [24…, 25 "break A", 26 "break B", 27 "break A"]`. The test (`scripts/test/protocol-bump.test.ts:120`) uses only one note, so it cannot see this. The Implementation's failure-mode row (`:225`) also says "refuses" where the code skips. Fix: treat a note as applied when its text matches **any** of the last `k` blocks (or the whole trailing run), and add a 2-note crash test that fails on the current code.
+2. **MEDIUM — `foldNote` can write a continuation line that `readBumps` reads as a new block** (`scripts/protocol-bump.ts:150-167` vs `:117-131`). If the prose wraps so that a line starts with `<digits>: ` (e.g. "…since 7: …"), the result is `// 7: y`. The next bump then refuses with "the number is 25 but the newest reason comment is 7", and `version.test.ts` goes red at the merge gate. It fails loudly, but only after the bad fold has already been written, and someone has to fix the block by hand. Repro: the same script, its last line. Fix: never start a continuation with a `\d+: ` word (fold it onto the previous line), or reject such a note in `parseNote`.
+
+**Attacks tried.**
+- Multi-note crash idempotence: found #1.
+- Wrap/re-read round-trip: found #2.
+- §7 protocol rule (`AGENTS.md`), "exact number pinned in ONE test": holds. The 7 edited tests now assert floors (or derive the value from `PROTOCOL_VERSION`), and only `version.test.ts:31` pins 24.
+- `.gitattributes -merge` on `protocol.json`: present. `schema:export` runs on every bump, including one with zero notes.
+- Malformed notes refused before any write (dir, non-slug, empty): I read the code and it holds. I did not re-run the mutation matrix M1–M9 myself.
+
+**Executor behaviour.** Thorough plan and tests. However, its idempotence claim was proven only for the single-note case and was then stated as general.
