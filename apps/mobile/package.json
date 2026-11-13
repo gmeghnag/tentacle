@@ -4,6 +4,8 @@
   "license": "Apache-2.0",
   "main": "index.ts",
   "dependencies": {
+    "@react-navigation/native": "7.5.1",
+    "@react-navigation/native-stack": "7.21.0",
     "@tentacle/client": "workspace:*",
     "@tentacle/core": "workspace:*",
     "@tentacle/protocol": "workspace:*",
@@ -13,9 +15,14 @@
     "expo-crypto": "58.0.7",
     "expo-dev-client": "58.0.14",
     "react": "19.3.0",
-    "react-native": "0.88.0"
+    "react-native": "0.88.0",
+    "react-native-safe-area-context": "5.10.1",
+    "react-native-screens": "4.30.1"
   },
   "devDependencies": {
+    "@tentacle/agent": "workspace:*",
+    "@tentacle/daemon": "workspace:*",
+    "@tentacle/tools": "workspace:*",
     "@types/react": "19.3.0"
   }
 }

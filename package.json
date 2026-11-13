@@ -18,6 +18,7 @@
     "check": "bun run typecheck && bun run lint && bun run test",
     "schema:export": "bun packages/protocol/src/json-schema.ts && biome format --write packages/protocol/schema/protocol.json",
     "docs:config": "bun scripts/config-docs.ts",
+    "e2e:mobile": "bun apps/mobile/e2e/run.ts",
     "compile": "bun run scripts/build.ts",
     "release": "bun run scripts/release.ts"
   },

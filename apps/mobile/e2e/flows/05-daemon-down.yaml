@@ -1,0 +1,25 @@
+appId: so.tentacle.app
+---
+# 05 (docs/feat/mobile-app-shell.md): the daemon goes away → the list shows the
+# honest "Can't connect" notice; it comes back → a refresh lists the sessions
+# again (serve persisted them).
+- launchApp:
+    clearState: true
+- tapOn:
+    id: "computer-dev"
+- assertVisible:
+    id: "sessions-list"
+- runScript:
+    file: "05-stop-serve.js"
+- swipe:
+    start: "50%, 30%"
+    end: "50%, 80%"
+- assertVisible:
+    id: "sessions-stale"
+- runScript:
+    file: "05-start-serve.js"
+- swipe:
+    start: "50%, 30%"
+    end: "50%, 80%"
+- assertVisible:
+    id: "sessions-list"

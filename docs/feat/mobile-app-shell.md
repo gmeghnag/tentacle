@@ -383,6 +383,200 @@ the Step 0 shell (no list) fails, then passes. The green run's summary
 
 ## Execution
 
+*— claude-opus-5-5, 2026-11-13*
+
+### Step 0 (blocking risk) — RETIRED, GREEN
+
+`App.tsx` was replaced by a one-`Text` shell (`testID="shell-ready"`), built
+Release and driven by a one-step flow. **A Release build of this Bun-workspace
+app works, and Maestro drives it by `testID`.**
+
+```
+$ cd apps/mobile && CI=1 ./node_modules/.bin/expo run:ios \
+    --configuration Release --device 0FA4B51F-… --no-bundler
+  › Build Succeeded
+  › Installing …/Release-iphonesimulator/tentacle.app            exit 0
+$ JAVA_HOME=$(brew --prefix openjdk@17) PATH="$(brew --prefix openjdk@17)/bin:$PATH" \
+    maestro test apps/mobile/e2e/flows/00-step0.yaml
+  Launch app "so.tentacle.spike" with clear state... COMPLETED
+  Assert that id: shell-ready is visible... COMPLETED              exit 0
+```
+
+`bunx expo` must NOT be used: it fetches an out-of-tree expo and fails with
+"Cannot determine the project's Expo SDK version". The workspace's own binary
+(`apps/mobile/node_modules/.bin/expo`) is the one to call.
+
+### The repro (capability missing) — confirmed
+
+`rg -c 'sessionList|e2e:mobile' apps/mobile package.json` → no matches, before
+the change; `apps/mobile` held only the spike. After: the list, the shell and
+`bun run e2e:mobile` all exist.
+
+### What was built, in dependency order
+
+1. **Nav/route types + `initialRoute`** — `src/routes.ts`.
+2. **The pairing seam** — `src/computers.ts`: `ComputerRecord`,
+   `ComputerSource`, `devComputerSource` (build env → 0 or 1 computer,
+   `ws:`/`wss:` only, `ComputerConfigError` naming the variable).
+3. **The link** — `src/connection.ts`: `openComputer` over the unchanged
+   `webSocketChannelFactory` + `RemoteClient` + `PermissionBroker(denyAll)`;
+   the spike's `withDiagnostics` close-code logging moved here as `onError`.
+4. **The pure list** — `src/session-list.ts`: `reduce` (generation counter,
+   dedupe-by-`sessionId`-keeping-newer, `refresh` replaces / `more` appends,
+   a failed refresh keeps the rows marked stale), `rows`, `relativeTime`
+   (future stamps clamped to "just now"), `projectLabel`, `describeError`.
+5. **The list's network side** — `src/session-list-controller.ts`: which
+   request is in flight, dropping answers for a disposed screen,
+   refresh-on-link-up. Extracted because the effect body is where the
+   generation counter is actually *used* (AGENTS §7).
+6. **The link registry** — `src/link-registry.ts`: one live client per
+   computer, concurrent callers share one dial, a failure is forgotten so Retry
+   re-dials, `closeAll` on unmount.
+7. **Theme + 4 screens** — `src/theme.ts` (accent `#0E7490` / `#06B6D4`),
+   `screens/{Pair,Computers,Sessions,Session}Screen.tsx`.
+8. **`App.tsx`** rewritten (NavigationContainer + native stack + registry);
+   `src/spike.ts` **deleted**.
+9. **`app.json`** — bundle id `so.tentacle.app`, deployment target 18.0,
+   `NSLocalNetworkUsageDescription` + `ATS/NSAllowsLocalNetworking`.
+10. **The harness** — `e2e/{run,preflight,mock-model,strip-origin,proxy,
+    seed,hooks}.ts`, `flows/0{1..5}-*.yaml` + 3 `runScript` bodies,
+    `e2e/README.md`; root `"e2e:mobile"`.
+11. **Tests** — 9 files, 77 tests.
+12. **Changelog fragment** — `changelog.d/mobile-app-shell.added.md`.
+
+### Drift from the Implementation (and why)
+
+- **`e2e/proxy.ts` is new (not in the plan's file list).** The plan put the
+  strip-origin rewrite in `e2e/strip-origin.ts` as a pure function; the socket
+  half had to live somewhere, and `node:net` byte-piping is a different concern
+  from the rewrite. `stripOrigin` stayed pure and tested as planned.
+- **`src/session-list-controller.ts` and `src/link-registry.ts` are new.** The
+  plan put the "generation counter drops late results" rule in the pure reducer
+  and left the effect body in the component. The reducer needs to be *driven*
+  by something that owns the in-flight request, and a component is untestable
+  in this harness — so the driver is a pure, injected module (AGENTS §7). The
+  registry likewise: "one live client per computer" is a rule, not layout.
+- **`src/react19-guard.ts` — the plan's mutation is NOT achievable.** The plan
+  said "delete the `paths` pin and show `tsc -p apps/mobile` fail". It does
+  not: with the pin deleted, Expo's own `bundler` resolution still finds the
+  app's `@types/react` 19, and **both** React type versions sit in the program
+  anyway (`tsc --listFiles` shows `@types+react@19.3.0` and
+  `@types+react@18.3.12`). So the pin is redundant here, and the guard was
+  proved live a different way: an 18-ONLY type (`ReactChild`) FAILS under the
+  real config (`TS2305`), while the 19-only `useActionState` resolves. That is
+  the property the guard needs; recorded as debt, not silently dropped.
+- **Assertions are by `testID` only, never by visible text.** Established
+  empirically, and it changed the plan's flows: React Native on the new
+  architecture exposes **no** text to XCUITest. A minimal one-`Text` app reads
+  back as `text: ""`, and an `accessibilityLabel` did not surface either. The
+  plan's "assert `e2e-mac` / `Alpha` / `Charlie`" is therefore permanently red.
+  Every flow asserts a stable `testID` instead (`computer-dev`,
+  `session-<uuid>`, `badge-<uuid>-running`, `section-active`,
+  `section-archived`, `sessions-list`, `sessions-stale`, `session-placeholder`).
+- **`headerTransparent: false`** in the stack's `screenOptions` — a bug the
+  flows found, not a preference: with the default translucent header the
+  project row's bounds were `[16,43][386,96]`, *under* the large title
+  (`[0,62][402,168]`), so the tap landed on the header and flow 02 could never
+  navigate. Opaque puts the row at `[16,211]`.
+- **The harness runs `expo prebuild` before every build.** `ios/` is generated
+  (CNG) and gitignored, so a fresh checkout has none — and a stale one carried
+  the SPIKE's bundle id (`so.tentacle.spike`), which made Maestro launch the
+  wrong app. Prebuilding is idempotent and applies `app.json`'s bundle id and
+  deployment target.
+- **Maestro env is passed with `-e K=V`, not through the process environment.**
+  Its `${VAR}` substitution reads only its own `-e` flags; a shell `export` is
+  invisible to it (this is why `${ALPHA_ID}` was being sent literally).
+- **Flow 04 taps `BackButton`, not `back`.** `backPressCommand` completed but
+  did not pop the native-stack screen (the flow stayed on the placeholder);
+  `waitForAnimationToEnd` was added on top, since the pop animation outlives
+  the command.
+- **`serve`'s tool probes**: `xcodebuild -version` (exits 64 on `--version`)
+  and `maestro --version` **with** `JAVA_HOME` set (its launcher cannot print a
+  version without a JDK) — both were initially wrong and made preflight report
+  a false "Xcode/Maestro missing".
+- **`simctl list -j runtimes` has no `devices` key**; the device lookup needs
+  its own `simctl list -j devices`. Pinned by a test.
+- **Navigation deps pinned exactly** (Owner Q1 = a): `@react-navigation/native`
+  7.5.1, `@react-navigation/native-stack` 7.21.0, `react-native-screens` 4.30.1,
+  `react-native-safe-area-context` 5.10.1 (the last two are Expo 58's
+  `bundledNativeModules` versions). `bun.lock` changed inside the
+  `apps/mobile` entries as the Owner allowed. `@tentacle/{agent,daemon,tools}`
+  were needed as devDeps: without them `apps/mobile/test/connection.test.ts`
+  cannot import the in-process daemon ("Cannot find module '@tentacle/agent'").
+- **iOS 18 is NOT covered.** The orchestrator recorded that Xcode 27.1 cannot
+  download an iOS 18 runtime. Preflight therefore reports the missing runtime
+  and exits 2 (correct, and the reason `--ios 26` was used). The iOS 26 run is
+  green; **the iOS 18 leg is unverified** — see "Unverified".
+- **The dev computer's title is the first message.** A session's title is its
+  first prompt until renamed, so the seeded titles are `Alpha`, `Bravo` and
+  `HOLD Charlie` — flows assert ids, not titles, for that reason too.
+
+### Mutations (AGENTS §9)
+
+Each was applied, the narrow test run, then reverted; all three restored green.
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | Drop the reducer's generation check (`session-list.ts`) | **2 tests fail** — "a stale generation's page is dropped", "a page arriving with nothing in flight is ignored" |
+| 2 | `new PermissionBroker()` (the `allowAll` default) instead of `denyAll` (`connection.ts`) | **1 test fails** — "the client's broker is a deny broker, never allowAll" (asserts `answer.allowed === false`) |
+| 3 | Match `Origin` case-sensitively (`strip-origin.ts`) | **1 test fails** — "the field name is case-insensitive, and every Origin line goes" |
+
+The React-19 guard's planned mutation could not be performed (see Drift); it
+was proved by an 18-only type failing (`TS2305: no exported member
+'ReactChild'`) under the real config.
+
+### The Maestro run, green (iOS 26.5)
+
+```
+$ bun run e2e:mobile --ios 26
+e2e:mobile run 1794589087271 → .tentacle/tmp/e2e-mobile/1794589087271
+serve on 127.0.0.1:…, proxy at ws://127.0.0.1:…/
+seeded alpha=… bravo=… charlie=…
+
+=== iOS 26 (0FA4B51F-A0E3-421B-BE66-CE29EF45213D) ===
+✓ 01-shell (iOS 26)
+✓ 02-session-list (iOS 26)
+✓ 03-refresh (iOS 26)
+✓ 04-session-placeholder (iOS 26)
+✓ 05-daemon-down (iOS 26)
+
+PASS — logs in …/.tentacle/tmp/e2e-mobile/1794589087271
+exit 0
+```
+
+It exercises, end to end: a real `serve` from source, a real mock model
+streaming a held turn, the seed through `RemoteClient`, a strip-origin proxy
+whose `Origin` removal is logged, the Release build installed on the simulator,
+and five flows — including the daemon being stopped and restarted mid-run.
+
+**Red-before-green for the flows** was established the strong way rather than
+claimed: flows 01/02 were RED against the Step 0 shell (no list, no project
+row), and flow 02 stayed red through four real bugs (wrong bundle id from a
+stale `ios/`; no text exposed to XCUITest; the row under the translucent
+header; Maestro's env not passed with `-e`) before passing.
+
+### Unverified
+
+- **The iOS 18 leg.** The runtime is not installable with Xcode 27.1
+  (orchestrator's recorded decision), so only 26.5 ran. To verify on a machine
+  that has it: `bun run e2e:mobile` (both) — preflight names the runtime and its
+  install command if it is absent.
+- **A physical device.** 11a is simulator-only by design (no `appleTeamId`).
+
+### Gate
+
+- `bunx tsc --noEmit` + `tsc -p apps/mobile` — clean.
+- `bun run lint` — clean (0 errors, 0 warnings; the AGENTS §6 baseline).
+- `bun test` — **7688 pass, 3 opt-in skips, 0 fail** (`apps/mobile`: 77 pass).
+  One `packages/daemon` fork-ordering test failed once under full-suite load
+  and passes 3/3 in isolation; that package is untouched by this branch
+  (`git status packages/daemon` is empty), so it is pre-existing timing
+  sensitivity, not this change.
+- No protocol schema changed → `packages/protocol/schema/protocol.json` not
+  regenerated.
+- Changelog: `changelog.d/mobile-app-shell.added.md`; `CHANGELOG.md`
+  untouched, `[Unreleased]` empty.
+
 ## Review
 
 #### Owner answers (2026-11-13)

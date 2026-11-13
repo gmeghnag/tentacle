@@ -1,0 +1,18 @@
+appId: so.tentacle.app
+---
+# 03 (docs/feat/mobile-app-shell.md): pull-to-refresh picks up a session created
+# AFTER the list was first read. The hook adds "Delta"; its row's id is the
+# observable (ids only — see 01).
+- launchApp:
+    clearState: true
+- tapOn:
+    id: "computer-dev"
+- assertVisible:
+    id: "sessions-list"
+- runScript:
+    file: "03-add-delta.js"
+- swipe:
+    start: "50%, 30%"
+    end: "50%, 80%"
+- assertVisible:
+    id: "session-${output.deltaId}"

@@ -1,0 +1,24 @@
+appId: so.tentacle.app
+---
+# 04 (docs/feat/mobile-app-shell.md): tapping a session opens the PLACEHOLDER
+# (11a never calls `session/open` — attaching the phone is task 12), and going
+# back leaves the list intact.
+#
+# iOS: `back` (backPressCommand) does NOT pop a native-stack screen here — the
+# flow stayed on the placeholder — so this taps the header's BackButton, which
+# is what a person does. `waitForAnimationToEnd` then covers the pop animation.
+- launchApp:
+    clearState: true
+- tapOn:
+    id: "computer-dev"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${ALPHA_ID}"
+- assertVisible:
+    id: "session-placeholder"
+- tapOn:
+    id: "BackButton"
+- waitForAnimationToEnd
+- assertVisible:
+    id: "sessions-list"
