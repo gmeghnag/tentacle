@@ -1858,3 +1858,57 @@ internal refactor with a user-visible module boundary, `changed` not `added`).
   by 25 new tests plus the untouched S0/S0b nets, but the percentage is unmeasured.
 - The queued-row variant of a pill click (S0b's recorded gap) is still unpinned;
   S4 does not change that path, and the record stands as S0b left it.
+
+## Review
+
+### S4 review — REQUEST-CHANGES
+
+**Scope:** `git diff main...HEAD` only. **Gate (re-run):** touched files 25 pass / 0
+fail; `bun test packages/tui` 1792 pass / 0 fail (S0 + S0b nets unedited, green);
+`bun run lint` 1050 files, clean; `bun run typecheck` clean. Full `bun test` not
+re-run by the reviewer.
+
+**Findings (MEDIUM; no HIGH):**
+1. `changelog.d/app-decomp-4-mouse.changed.md:1` — a fragment for a change that
+   says of itself "Behaviour is unchanged. Internal refactor". AGENTS §10:
+   internal work adds no fragment; this plan (*Other hotspots*, "slices add no
+   CHANGELOG line … one entry when the last slice merges"). Failure: the next
+   `bun run release` publishes a user-facing bullet about an internal module
+   move, and every later slice copies the precedent. Fix: delete the fragment.
+2. Undeclared drift: the plan's revised *What stays* ("**no `useMouse` hook**
+   (per-event function)") vs `packages/tui/src/useMouse.ts:96` and
+   `App.tsx:3388`. Execution says "all three [drifts] recorded, none silent";
+   this one is not recorded. The design built is sound (the hook owns only
+   refs/timer, no effect; the snapshot is per-event at `App.tsx:3790`), but §8
+   requires the plan be fixed, not contradicted. Fix: a drift line + amend *What
+   stays* / M2.
+
+**Behaviour trace (static, against the removed inline block):** report order
+wheel → panel → pill → dock row → click → selection is verbatim; copy reads the
+in-chunk selection because `setSelection` writes the ref synchronously
+(`useMouse.ts:250`) before the next report's `copySelection`; toggle-then-clear
+order swap is within one batched event (no observable); `clickRef` written after
+the loop — nothing reads it mid-chunk; `hold`'s deps `[field, panelRef]` vs
+`[field.insert]`: `field` is a fresh object every render (`hooks.ts:188`), the
+timer calls the stable `insert` — equivalent; `submit(field.value + "[")` reads
+the same-render `field` as before. Effect list: the hook declares no effect; the
+hold cleanup keeps its index. `statusRowRef.current` read once per event, as the
+inline code did per report within the same event.
+
+**Attacks tried:** (a) coalesced press+drag+release copy with state applied
+before effects — would lose the copy; pinned by `app-mouse-layer.test.tsx`
+(static check). (b) restored `[` + Enter — pinned by S0b matrix
+(`app-structural-matrix.test.tsx:218`). (c) timer-path panel guard — the panel-
+open timer branch is unpinned, but the code is byte-equivalent to `main` (pre-
+existing gap, not a finding). (d) stray `process.stdout` in new modules — none.
+(e) port identity / dep arrays naming the port object — none; deps name fields.
+
+**Mutation:** the reviewer's own mutation run on `useMouse.ts` was blocked by the
+sandbox (permission denied); non-vacuity rests on the executor's 14/14 table plus
+the static mapping above. Not independently confirmed.
+
+**Executor behaviour:** careful, honest about unmeasured coverage; over-claimed
+"no silent drift" (finding 2) and missed the no-fragment rule (finding 1).
+Reviewer is a different family from the DeepSeek executor.
+
+*— claude-opus-5-5, 2026-11-13*
