@@ -1274,8 +1274,12 @@ export class Agent {
           yield { type: "dsml_leak", text: DSML_REASK_NOTE };
           messages.push({ role: "user", content: DSML_REASK_NOTE });
           // The re-ask replaces the leaked round, not the turn's budget for
-          // real work (as an accepted context reset does, as `budgetFrom`).
-          budgetFrom--;
+          // real work: `budgetFrom` moves WITH the iteration, so the next round
+          // costs what this one would have (the `context_reset` shape, one
+          // step). Moving it DOWN would spend TWO steps on the re-ask, since
+          // `continue` increments `iteration` as well — a small cap is then gone
+          // before any work (docs/fix/reask-budget-and-compact-length.md).
+          budgetFrom++;
           continue;
         }
         // A DSML leak is NOT an answer: the text is dropped, never pushed, so a

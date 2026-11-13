@@ -1,10 +1,25 @@
 import { describe, expect, test } from "bun:test";
-import type { ChatMessage, ChatRequest, ExecutionEnvironment, ModelProvider } from "@tentacle/core";
+import type {
+  ChatMessage,
+  ChatRequest,
+  ExecutionEnvironment,
+  ModelProvider,
+  Tool,
+} from "@tentacle/core";
 import { DsmlToolCallLeakError } from "@tentacle/core";
 import type { StreamEvent } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
-import { Agent } from "../src/agent.ts";
+import { z } from "zod";
+import { Agent, type AgentEvent, type AgentStopReason } from "../src/agent.ts";
 import { Session } from "../src/session.ts";
+
+const noopTool: Tool = {
+  name: "noop",
+  description: "does nothing",
+  inputSchema: z.object({}),
+  permission: "none",
+  execute: () => Promise.resolve({ content: "ok", isError: false }),
+};
 
 const noopEnv: ExecutionEnvironment = {
   id: "noop",
@@ -65,6 +80,90 @@ describe("a DSML-leaked tool call", () => {
     await expect(run(model)).rejects.toBeInstanceOf(DsmlToolCallLeakError);
     // Exactly two attempts: the turn does not sit in a retry loop.
     expect(model.seen).toHaveLength(2);
+  });
+
+  test("a re-ask does not cost the turn's step budget", async () => {
+    // The bug (docs/fix/reask-budget-and-compact-length.md): the re-ask used to
+    // move `budgetFrom` DOWN, so `iteration - budgetFrom` grew by 2 per leak and
+    // a small cap (sub-agents run with one) was spent before any real work.
+    // Round 0 leaks; every tool-offered round calls the tool; the tool-free
+    // final report ends the turn. `maxIterations: 2` must buy TWO real rounds.
+    let toolRounds = 0;
+    let call = 0;
+    const model: ModelProvider = {
+      id: "leak-budget",
+      async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+        const round = call++;
+        if (round === 0) {
+          yield { type: "text", delta: "x" };
+          throw new DsmlToolCallLeakError(42);
+        }
+        if (request.tools && request.tools.length > 0) {
+          toolRounds++;
+          yield { type: "tool_call", toolCall: { id: `c${round}`, name: "noop", arguments: "{}" } };
+          yield { type: "done", stopReason: "tool_calls" };
+          return;
+        }
+        yield { type: "text", delta: "final report" };
+        yield { type: "done", stopReason: "stop" };
+      },
+    };
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry().register(noopTool),
+      env: noopEnv,
+      maxIterations: 2,
+    });
+    const session = new Session(agent);
+    const ends: AgentStopReason[] = [];
+    for await (const event of session.send("go")) {
+      if (event.type === "turn_end") {
+        ends.push(event.reason);
+      }
+    }
+
+    // The exact property: the leak is free, so both real rounds run, then the cap.
+    // `budgetFrom--` (the bug) → 0; deleting the line (a re-ask costs a step) → 1.
+    expect(toolRounds).toBe(2);
+    expect(ends).toEqual(["max_iterations"]);
+  });
+
+  test("a leak on the last allowed round still gets its replacement round", async () => {
+    // `maxIterations: 1`: round 0 leaks (free), round 1 must still run — with
+    // tools offered, answering in text — so the turn ends on its own answer
+    // instead of jumping straight to the forced `max_iterations` report.
+    let call = 0;
+    let lastOfferedTools: boolean | undefined;
+    const model: ModelProvider = {
+      id: "leak-last-round",
+      async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+        const round = call++;
+        if (round === 0) {
+          yield { type: "text", delta: "x" };
+          throw new DsmlToolCallLeakError(7);
+        }
+        lastOfferedTools = (request.tools?.length ?? 0) > 0;
+        yield { type: "text", delta: "recovered" };
+        yield { type: "done", stopReason: "stop" };
+      },
+    };
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry().register(noopTool),
+      env: noopEnv,
+      maxIterations: 1,
+    });
+    const session = new Session(agent);
+    const events: AgentEvent[] = [];
+    for await (const event of session.send("go")) {
+      events.push(event);
+    }
+
+    expect(call).toBe(2);
+    expect(lastOfferedTools).toBe(true);
+    const end = events.find((e) => e.type === "turn_end");
+    expect(end).toEqual({ type: "turn_end", reason: "end_turn" });
+    expect(session.messages.at(-1)?.content).toBe("recovered");
   });
 
   test("never leaves the leaked text in the history", async () => {
