@@ -13,8 +13,19 @@
  * Bytes, never paths: a screenshot's temp file may be gone by the time the
  * model call runs. Never evicts, and refuses loudly when full: an eviction
  * would silently turn an image the user already sent into `[image unavailable]`.
+ *
+ * A miss may fall back to this laptop's DISK (docs/feat/attachments-durable.md
+ * D6: a 2nd TUI that is the model link, a pod turn resumed before any send) —
+ * but only for the sessions THIS client built (`allowSession`), and only
+ * through the injected `fallback`, which reads the blob dir the laptop wrote
+ * from its own attaches. The scope is the laptop's own publication, never a
+ * ref in a (pod-supplied) log; a pod still chooses only the id.
  */
 import type { AttachmentRef, AttachmentSource } from "@tentacle/core";
+import { ATTACHMENT_ID_RE } from "@tentacle/protocol";
+
+/** Reads `<uid>.attachments/<ref.id>` from the laptop's store (`null`: absent). */
+export type LaptopImageFallback = (uid: string, ref: AttachmentRef) => Promise<Uint8Array | null>;
 
 /** The laptop store's own cap (bytes), mirroring the daemon's per-session store. */
 export const LAPTOP_IMAGE_BYTES = 100 * 1024 * 1024;
@@ -33,10 +44,19 @@ export class LaptopImagesFullError extends Error {
 export class LaptopImages implements AttachmentSource {
   private readonly entries = new Map<string, Uint8Array>();
   private readonly maxBytes: number;
+  private readonly fallback: LaptopImageFallback | undefined;
+  /** The session uids this client built: the only ones `fallback` is asked about. */
+  private readonly allowed = new Set<string>();
   private used = 0;
 
-  constructor(opts: { maxBytes?: number } = {}) {
+  constructor(opts: { maxBytes?: number; fallback?: LaptopImageFallback } = {}) {
     this.maxBytes = opts.maxBytes ?? LAPTOP_IMAGE_BYTES;
+    this.fallback = opts.fallback;
+  }
+
+  /** Let `read` fall back to `uid`'s blobs on this laptop's disk (a session this client built). */
+  allowSession(uid: string): void {
+    this.allowed.add(uid);
   }
 
   /** Bytes held right now. */
@@ -72,9 +92,26 @@ export class LaptopImages implements AttachmentSource {
     return held !== undefined && held.length === size;
   }
 
-  /** The bytes of `ref`, or `null` (absent, or a size that disagrees). */
+  /**
+   * The bytes of `ref`, or `null` (absent, or a size that disagrees). A miss
+   * asks `fallback` for each allowed session, first hit wins; the id is
+   * checked before (never a path from a malformed one), the size after, the
+   * sha256 by the provider.
+   */
   async read(ref: AttachmentRef): Promise<Uint8Array | null> {
     const held = this.entries.get(ref.id);
-    return held !== undefined && held.length === ref.size ? held : null;
+    if (held !== undefined) {
+      return held.length === ref.size ? held : null;
+    }
+    if (this.fallback === undefined || !ATTACHMENT_ID_RE.test(ref.id)) {
+      return null;
+    }
+    for (const uid of this.allowed) {
+      const bytes = await this.fallback(uid, ref).catch(() => null);
+      if (bytes !== null && bytes.length === ref.size) {
+        return bytes;
+      }
+    }
+    return null;
   }
 }
