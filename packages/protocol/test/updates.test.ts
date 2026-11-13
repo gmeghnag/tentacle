@@ -250,9 +250,9 @@ describe("history_repaired (docs/feat/history-validity-invariant.md, Part C)", (
     expect(SessionUpdateSchema.safeParse(event).success).toBe(true);
     expect(UPDATE_CLASS.history_repaired).toBe("display");
     // Display only: an older client skips an unknown display kind (§7), so no bump
-    // by this task (24 is the sub-agent token-budget bump,
-    // docs/feat/subagent-token-budget.md).
-    expect(PROTOCOL_VERSION).toBe(24);
+    // by this task. A FLOOR, not the exact number — that is assigned at merge
+    // (docs/feat/protocol-version-at-merge.md), so this never needs editing again.
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(24);
   });
 
   test("rejects a negative or non-integer count", () => {
