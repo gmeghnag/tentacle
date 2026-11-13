@@ -507,6 +507,131 @@ behaviour-preservation proof is untouched.
 this round) · 2 FIXED (8/8 stressed runs, no flake).
 
 
+### Fix round 3 — `feat/app-decomposition` (finding 1's class, still open)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-13* (real id; launched
+with `--profile deepseek`)
+
+**Which Review round this answers.** Rounds ≥2 have no findings: the
+orchestrator's reviewer step is `opus resume $R_SID`, and `$R_SID`
+(`a9bd6a7d-…`, round 1's session) is unknown to the CLI, so
+`runs/night-app-decomposition-review{2,3}.json` are both the 76-byte string
+`No conversation found with session ID: …` — read and verified, not inferred.
+The latest real Review is therefore still the **S0 REQUEST-CHANGES** above
+(MEDIUM 1: `/compact`'s mid-turn refusal; Note 2: the flake).
+
+**Round 2's claim re-proved first (not trusted).** The reviewer's own mutant
+`if (false && stateRef.current.running)` at `App.tsx:3265` → narrow file
+`26 pass / 1 fail`, red on the property (`Expected to contain: "Can't compact
+while a turn is running."`). Finding 1 holds fixed. `App.tsx` restored
+byte-identically (sha256 `750856b0…`, unchanged from before this round).
+
+**Then the finding's CLASS, hunted empirically instead of by reading** (round 2
+closed the `SESSION_MUTATING` *set*; that was one shape of it). Method: a guard
+inside `handleCommand` is disabled with the same `false &&` edit, and **all
+1729 `packages/tui` tests** are run — the reviewer's own standard of "survived
+everything". Three survivors, all in branches S2 is about to move, each a
+`clearCommandStep`/`settingsCommand` outcome the pure unit test pins but the
+App's *use* of it does not:
+
+| # | site | mutant | before |
+|---|---|---|---|
+| N1 | `App.tsx:3227` `/clear` during a compaction | `false && step === "compacting"` | **1729 pass / 0 fail** |
+| N2 | `App.tsx:3225` a second `/clear` while one is in flight | `false && step === "busy"` | **1729 pass / 0 fail** |
+| N3 | `App.tsx:3349` `/settings sync` during a compaction | `compacting: false` | **1731 pass** / 0 fail (`bun test packages/tui`) |
+
+A fourth candidate, `/retry`'s `plan.kind === "gone"` (`App.tsx:3452`), also
+survives the suite — but it is **not** a test gap: `bunx tsc --noEmit` kills it
+(`TS2339: Property 'command' does not exist on type 'RetryPlan'`), because the
+narrowing is what types `plan.text`. Recorded so it is not re-hunted.
+
+The two `/clear` refusals are a real behaviour hole: without them a clear runs
+*under* a live compaction (rewriting the history being summarised) and a second
+clear is sent for a conversation already being reset. `/settings sync` writes
+settings under the summary.
+
+**Fixes — 3 tests, no `src` change** (`packages/tui/test/app-commands.test.tsx`):
+- `:410` new `describe("S0 command smoke: /clear is refused while the session is
+  held")` with two cases on the real `App`: `/clear` during a held `compact` →
+  its own notice, `clear` never called; `/clear` twice → "A /clear is already
+  running.", `clear` called once. The session fakes hold the promise, so the
+  latch is up for the whole test rather than relying on a timing window.
+- `:289` `/settings sync` during a held compaction → `Can't sync settings while
+  a compaction is running.`, `updateSettings` never called.
+
+**Mutations (§9: red on the assertion, each from a clean restore; `git status`
+after → `M packages/tui/test/app-commands.test.tsx` + this doc only).**
+- R1 = the reviewer's exact `/compact` mutant → `26 pass / 1 fail` (above).
+- M3 = N1's mutant, post-fix → `25 pass / 1 fail`, `(fail) … /clear while a
+  compaction runs → its own refusal, clear is never called`, `Expected to
+  contain: "Can't clear while a compaction is running."` — and pre-fix the same
+  mutant was **1729/0** (N1's row): that pair is the non-vacuity proof.
+- M4 = N2's mutant, post-fix → `25 pass / 1 fail`, `(fail) … /clear twice: the
+  second says one is already running`, `Expected to contain: "A /clear is
+  already running."`; pre-fix **1729/0**.
+- M5 = N3's mutant, post-fix → `26 pass / 1 fail`, `(fail) … /settings sync
+  while a compaction runs → refused by the step, sync is never called`; pre-fix
+  **1731/0**.
+- Bounded sweep of the rest of `handleCommand`'s refusals, to stop at a known
+  edge: `/rename` unavailable → `1 fail` (already pinned); `/copy` no-reply and
+  `/mcp` unavailable → already pinned by existing cases; `/retry` gone → killed
+  by `tsc` (above). No further survivor.
+- Every restore verified by sha256 (`App.tsx` `750856b0…`, `commands.ts`
+  `7a569a55…`), not by `git checkout` (forbidden here).
+
+**Note 2 (flake) — 8 concurrent stress runs of the S0 net, 0 fail; then the
+full suite named the culprit the reviewer could not.** The four timing-based S0
+files (`app-commands`, `app-keys-precedence`, `app-frames`, `app.test`) × 8 in
+parallel (`.tentacle/tmp/app-decomposition/r3-loop.sh`) → each run `174 pass /
+0 fail`, **zero `(fail)` lines** (`r3-loop-{1..8}.log`). So the S0 net itself is
+clean under load: 8 runs here + 8 in round 2 + 3 in round 1.
+
+The full suite then reproduced the *other* failure — the one that had gone
+unnamed for three rounds — and this time with a name:
+`(fail) attach mid-turn behind a long reply (docs/fix/detach-live.md, round 9 /
+KO 3) > a replay past the client's buffer bound converges …` at
+`packages/client/test/reattach.test.ts:773`, `error: until: timed out after 3000
+ms waiting for () => model.waiting` (3003.45 ms — the deadline, not a wrong
+answer). **It is not this task's test and not this round's code:** this branch's
+diff is `docs/feat/app-decomposition.md` + `packages/tui/test/app-commands.test.tsx`
+only (`git diff --stat`: 2 files, +171, no `src`), and `git diff main --
+packages/client/` shows this branch never touched that package. It passes 3/3 in
+isolation (3.8 s) and 1/1 again with 6 concurrent `bun test packages/tui` runs
+loading the machine (`r3-under-load.log`, `54 pass / 0 fail / EXIT=0`) — so it
+is a **3000 ms-deadline timing margin** in `packages/client/test/support/fakes.ts:95`
+under full-suite contention, not a logic failure, and it is what round 1's
+unattributed `1 fail` in 3 runs was.
+
+That is a finding in its own right, and it is **out of this task's scope**
+(a `packages/client` test-harness deadline, not `App.tsx` decomposition): it
+needs its own `fix/` task to widen/poll that deadline (or make `GatedModel`'s
+gate observable rather than polled). Recorded here so it stops being an
+unattributable flake. The standing S1–S10 instruction is sharpened accordingly:
+treat red as real until a `(fail)` name says otherwise — and this is now a known
+name to discount, once it is fixed at the source.
+
+**Gate.** `bunx tsc --noEmit` exit 0 (`r3-tsc.log`) · `bun run lint` clean, 954
+files, 0 warnings (`r3-lint.log`) · `bun test` full suite **twice**: run 1
+`7577 pass / 3 skip / 1 fail` — the named `packages/client` deadline above
+(`r3-full.log`, `TEST_EXIT=1`), run 2 **`7578 pass / 3 skip / 0 fail`**, `Ran
+7581 tests across 540 files`, 331.87 s, `TEST_EXIT=0` (`r3-full2.log`). The two
+runs differ by exactly that one intermittent test; 7581 total = the pre-round
+7578 + the 3 tests added here, and the 3 skips are the documented opt-ins
+(live-k8s, live-docker, real-socket keepalive). Narrow file: `bun test
+packages/tui/test/app-commands.test.tsx` → **27 pass / 0 fail**. Package
+baseline before this round: `bun test packages/tui` → 1729 pass / 0 fail
+(172.59 s); the 3 new tests bring it to 1732.
+
+**Drift from Implementation.** None. `packages/tui/src` is byte-identical to
+HEAD (verified by sha256 above) — this round is tests + this doc, so S1–S10's
+behaviour-preservation proof is untouched and no slice is pre-empted.
+
+**Verdict per finding.** Review MEDIUM 1 → FIXED (re-proved, and its class
+closed at 3 more sites) · Review Note 2 → FIXED as far as this task can: the S0
+net is clean (8/8 under load), and the unnamed full-suite failure is now named
+and attributed to a `packages/client` test deadline outside this diff — one
+line, method, and owner recorded above (it needs its own `fix/` task).
+
 ## Review
 
 ### S0 review — REQUEST-CHANGES

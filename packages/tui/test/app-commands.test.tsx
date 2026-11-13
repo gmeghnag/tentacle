@@ -286,6 +286,29 @@ describe("S0 command smoke: every built-in command answers", () => {
     t.app.unmount();
   });
 
+  test("/settings sync while a compaction runs → refused by the step, sync is never called", async () => {
+    // `settingsCommand`'s `compacting` argument is the App's wiring
+    // (App.tsx:3349): hardwiring it `false` left all 1731 `packages/tui` tests
+    // green. A sync mid-compaction would write settings under the summary.
+    const synced: string[] = [];
+    const f = fake({
+      extra: {
+        settings: () => [{ text: "model: qwen3" }],
+        updateSettings: () => {
+          synced.push("sync");
+          return Promise.resolve([{ text: "settings synced" }]);
+        },
+        compact: () => new Promise(() => {}), // held: the latch stays up
+      },
+    });
+    const t = await mount(f);
+    await t.line("/compact");
+    await t.line("/settings sync");
+    expect(t.frame()).toContain("Can't sync settings while a compaction is running.");
+    expect(synced).toEqual([]);
+    t.app.unmount();
+  });
+
   test("/attach with no path shows its usage line; it is not a prompt", async () => {
     const f = fake();
     const t = await mount(f);
@@ -373,6 +396,60 @@ describe("S0 command smoke: the session-mutating commands are refused mid-turn",
     await t.line("/compact");
     expect(t.frame()).toContain("Can't compact while a turn is running.");
     expect(compacted).toEqual([]);
+    t.app.unmount();
+  });
+});
+
+/**
+ * `/clear`'s own two refusals (`clearCommandStep`, clear-command.ts) — its
+ * branch in `handleCommand` is neither the generic mid-turn guard nor
+ * `/compact`'s: it decides `busy`/`compacting` itself, and those two outcomes
+ * are covered HERE or nowhere (the pure step is pinned, the App's use of it was
+ * not: both mutants left all 1729 `packages/tui` tests green).
+ */
+describe("S0 command smoke: /clear is refused while the session is held", () => {
+  test("/clear while a compaction runs → its own refusal, clear is never called", async () => {
+    // Mutation: `false && step === "compacting"` (App.tsx:3227) → this goes red.
+    // A clear now would reset the conversation the compaction is summarising.
+    const cleared: string[] = [];
+    const f = fake({
+      extra: {
+        clear: () => {
+          cleared.push("clear");
+          return Promise.resolve({ before: 1, after: 0 });
+        },
+        // Held: the latch (`compacting`) stays up for the rest of the test.
+        compact: () => new Promise(() => {}),
+      },
+    });
+    const t = await mount(f);
+    await t.line("hello");
+    await t.line("/compact");
+    await t.line("/clear");
+    expect(t.frame()).toContain("Can't clear while a compaction is running.");
+    expect(cleared).toEqual([]);
+    t.app.unmount();
+  });
+
+  test("/clear twice: the second says one is already running, and clears once", async () => {
+    // Mutation: `false && step === "busy"` (App.tsx:3225) → this goes red: the
+    // second `/clear` would send a second reset for the same conversation.
+    const cleared: string[] = [];
+    const f = fake({
+      extra: {
+        clear: () => {
+          cleared.push("clear");
+          return new Promise(() => {}); // held: the first clear never answers
+        },
+      },
+    });
+    const t = await mount(f);
+    await t.line("hello");
+    await t.line("/clear");
+    expect(cleared).toEqual(["clear"]);
+    await t.line("/clear");
+    expect(t.frame()).toContain("A /clear is already running.");
+    expect(cleared).toEqual(["clear"]);
     t.app.unmount();
   });
 });
