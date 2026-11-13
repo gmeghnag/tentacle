@@ -192,3 +192,54 @@ describe("clear keeps the old chat (persistingController)", () => {
     expect(r.forks).toHaveLength(0);
   });
 });
+
+/**
+ * `PersistingController` forwards the image seam to its session
+ * (docs/feat/attachments-tui.md D4, T7). Without it every `run`/`attach`/worker
+ * TUI is image-less: `App` sees no `attachImage` on the object it is handed.
+ */
+describe("the image seam is forwarded to the session", () => {
+  test("attachImage and imageInput reach the inner session, and send passes attachments", async () => {
+    const seen: unknown[] = [];
+    const sent: { prompt: string; opts: unknown }[] = [];
+    const bytes = new Uint8Array([1, 2, 3]);
+    const ref = { id: "a".repeat(64), mimeType: "image/png", size: 3, name: "a.png" };
+    const inner = {
+      attachImage: async (b: Uint8Array, meta: unknown, opts: unknown) => {
+        seen.push({ b, meta, opts });
+        return ref;
+      },
+      imageInput: () => ({ kind: "upload", maxBytes: 1024 }),
+      send: (prompt: string, _signal?: AbortSignal, opts?: unknown) => {
+        sent.push({ prompt, opts });
+        return (async function* () {})();
+      },
+      readBack: async () => ({
+        messages: [],
+        entries: [],
+        read: { head: null, outcome: "linear" },
+      }),
+      watch: () => () => {},
+      runningCalls: () => new Set<string>(),
+      onTitle: () => () => {},
+      enqueue: async () => {},
+      close: () => {},
+    } as unknown as RemoteSession;
+    const ctl = persistingController(
+      inner,
+      () => {},
+      () => {},
+      { source: "auto" },
+    );
+    const meta = { mimeType: "image/png", name: "a.png" };
+    const opts = { signal: new AbortController().signal, onProgress: () => {} };
+    expect(await ctl.attachImage?.(bytes, meta, opts)).toEqual(ref);
+    expect(seen).toEqual([{ b: bytes, meta, opts }]);
+    expect(ctl.imageInput?.()).toEqual({ kind: "upload", maxBytes: 1024 });
+    for await (const _ of ctl.send("what?", undefined, { attachments: [ref] })) {
+      // drained
+    }
+    expect(sent[0]?.opts).toEqual({ attachments: [ref] });
+    ctl.seal();
+  });
+});

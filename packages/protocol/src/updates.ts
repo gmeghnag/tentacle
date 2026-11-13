@@ -7,6 +7,7 @@
  * clients (forward compatibility of a streamed event feed).
  */
 import { z } from "zod";
+import { AttachmentRefSchema, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachment.ts";
 import { ContentBlockSchema } from "./content.ts";
 import { PermissionReplyTextSchema } from "./permission-reply.ts";
 import { PermissionRequestUpdateSchema, PermissionResolvedUpdateSchema } from "./permission.ts";
@@ -242,6 +243,14 @@ export const TurnStartSchema = z.object({
   type: z.literal("turn_start"),
   turnId: TurnIdSchema,
   prompt: z.string(),
+  /**
+   * The prompt's image refs (docs/feat/attachments-tui.md D1): DISPLAY data for
+   * another device's rows, so a prompt this TUI did not send still shows
+   * `[image: name]`. Optional and additive — a strip schema, so an older client
+   * drops it (AGENTS §7 forward compat, no version bump); absent for a
+   * text-only turn (never an empty array).
+   */
+  attachments: z.array(AttachmentRefSchema).max(MAX_ATTACHMENTS_PER_MESSAGE).optional(),
 });
 
 /** A turn ended (last update of every turn): the turn's outcome, in the stream. */

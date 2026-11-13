@@ -331,3 +331,20 @@ describe("/mcp (docs/feat/mcp-status.md; the panel: mcp-panel.test.ts)", () => {
     );
   });
 });
+
+describe("transcriptToMarkdown with images (attachments-tui D7)", () => {
+  test("a saved transcript carries the prompt's image lines", () => {
+    const md = transcriptToMarkdown([
+      { kind: "user", text: "what is this?", images: ["[image: a.png]", "[image: b.png]"] },
+    ]);
+    expect(md).toContain("## User");
+    expect(md).toContain("what is this?");
+    expect(md).toContain("[image: a.png]");
+    expect(md).toContain("[image: b.png]");
+  });
+
+  test("an image-only prompt saves its image lines", () => {
+    const md = transcriptToMarkdown([{ kind: "user", text: "", images: ["[image: a.png]"] }]);
+    expect(md).toContain("[image: a.png]");
+  });
+});

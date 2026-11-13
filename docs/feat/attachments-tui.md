@@ -409,7 +409,171 @@ Each open question decided with the recommended option; one line of reason.
 
 ## Execution
 
-*(empty — awaiting the executor)*
+*— deepseek, 2026-11-13*
+
+### Load-bearing check re-run (first thing, per the plan)
+
+`.tentacle/tmp/attachments-tui/seams.ts` on the branch (before any edit):
+
+```
+1 imageInput: {"kind":"upload","maxBytes":1048576}
+2 attach before first send: REJECTED unknown session: fa4e2ad1-… (not open on this connection)
+3 attach after openSeeded: ok, held = true
+4 SessionController.send opts: {skill} only
+5 App mentions attachImage: false | PersistingController forwards attachImage: false
+```
+
+*r2* still REJECTED and *r5* still `false | false` → the plan's assumption holds,
+proceed. `rg -n "createSession: \(\) =>" packages/cli/src` → `connect.ts:232`
+(a `RemoteSession`, `track` returns it) and `local-runtime.ts:894` (a
+`PersistingController`), plus `session-jobs.ts:133` (`inProcessSessions`, the
+documented image-less fallback, decision 9). No third shape: no STOP needed.
+
+After the work, the same script:
+
+```
+4 SessionController.send opts: changed
+5 App mentions attachImage: true | PersistingController forwards attachImage: true
+```
+
+### As built, in the plan's order
+
+1. **protocol (D1).** `TurnStartSchema.attachments` — `z.array(AttachmentRefSchema)
+   .max(MAX_ATTACHMENTS_PER_MESSAGE).optional()` (`updates.ts:238-252`).
+   `bun run schema:export` regenerated `schema/protocol.json` (one `TurnStart`
+   property block, `maxItems: 5`); a fixture row added to
+   `json-schema.test.ts:406-412`. No `UPDATE_CLASS` / `mapping.ts` change, no
+   `PROTOCOL_VERSION` bump.
+2. **daemon (D2).** `hosted-session.ts:2043-2051`: the one `turn_start` emit
+   spreads `attachments: refs` only when non-empty.
+3. **client (D3).** `RemoteSession.attachImage` / `imageInput`
+   (`remote-session.ts:379-421`): the mode is read FIRST (off ⇒ zero frames,
+   `ImagesUnavailableError`), then the session opens itself (`open()` for an
+   attach-only session, else the memoized `createOrAttach()`), then
+   `client.attachImage(own id, …)`. `SessionEvent.user_message` gained
+   `attachments?` (`mapping.ts:29-41`); `startForeign` takes them and pushes
+   the bubble when `prompt !== "" || refs.length > 0`; the reset re-delivery
+   (`onUpdate`) does the same through a small `hasRefs` helper.
+4. **cli (D4).** `PersistingController`: `send` opts type + `attachImage` /
+   `imageInput` forwards to `inner` (`local-runtime.ts:211-235`, `:494-506`).
+   Nothing is saved on the forward itself — a ref only becomes history at the
+   prompt.
+5. **tui.** New pure `attach-draft.ts` (D6, 318 lines: `routeDecision`,
+   `withChips`, `removeLastChip`, `submitPlan`, `uploadProgress`/`uploadDone`,
+   `attachRowView`/`attachRowRows`, `chipLabel`, `imageRowText`,
+   `attachErrorText`, `looksLikeCommand`, `NO_IMAGE_SEAM`). `turn-feed.ts`
+   gained `refusedBeforeStart` (code `-32016`, only before `streamed`).
+   `state.ts`: `UserItem.images`, `startTurn(state, text, now, images?)`,
+   `user_message` folds refs to rows. `resume.ts` maps a message's
+   `attachments` to rows; `render-lines.ts` emits the text rows (none for an
+   image-only prompt, P9) then one subtle row per image;
+   `commands.ts` adds `/attach` to `SLASH_COMMANDS` and the image lines to
+   `transcriptToMarkdown`. `App.tsx`: the two optional seam members,
+   `fileProbe`/`home`/`localCwd` props, the draft (ref + state + one in-flight
+   decision chain + an unmount generation), `routeAttach` / `attachCommand` /
+   `convertToChips` / `sendWithImages` / `restoreChips`, the three paste sites,
+   `submitPlan` in `submit`, `images`/`attachments`/`restoreChips` through
+   `run` and `StreamOpts.own`, the refusal branch in `streamTurn`, the attach
+   row inside the input box (a `flexDirection="column"` wrapper), `inputBoxRows
+   + attachRowRows(...)`, Backspace-on-empty, Esc aborting an upload, and the
+   `/retry` notice.
+6. **CHANGELOG.md** `[Unreleased] ### Added` entry (first bullet). `TODO.md`
+   untouched, as instructed.
+
+### Drift from the Implementation (and why)
+
+- **`looksLikeCommand` was not in the plan — it is a new pure rule in D6.** The
+  plan's paste path took `attachmentCandidateText(text)` at face value. In the
+  running App that broke two real behaviours: `/compact` alone parses as a
+  *path* candidate (so a paste would stat `/compact`), and an absolute path
+  (`/tmp/a.png`) would be read as a command and never attached. The rule now
+  lives in `attach-draft.ts` (pure, tested): a slash text whose first word does
+  not NAME an image is a command. Red-first shown by
+  `slash-skills.test.tsx` "an unknown /name (or a path)…".
+- **An image-only prompt is restored on a LOST SLOT too, not only on an
+  `AttachmentRefused`.** The plan's D8 covers `refusedBeforeStart`; while
+  mutation-checking the plan's own target ("`streamTurn` own-test left as
+  `own.text !== ""` → T8i'") the sibling path (`lostSlot`, code `-32004`) was
+  found to have the identical hole — an image-only prompt read as a wake. Both
+  branches now test `text !== "" || images.length > 0`, and both restore the
+  chips (`restoreChips`). T8i' pins the `lostSlot` case, T8i the refusal case.
+- **The protocol/daemon/client/cli tests were written before their code where
+  the plan named them (T4, T5, T6, T7); T1/T2/T3/T8 were written before their
+  wiring but after `attach-draft.ts` existed** in the case of T1 (the module
+  and its test were created together and the module was corrected until green).
+  Every target of the plan's mutation list was then verified by mutation (§
+  below) — which is the proof that each test holds on the property, not on the
+  order the two were written in.
+- **`connect-functest-stack.tsx` gained `Stack.cwd`** (one field) so T9 can
+  find the daemon's store directory (`daemonStoreDir({configDir, cwd})`). No
+  behaviour change to the harness.
+- **`subagent-panel-controller.test.ts`'s guard list gained `attachImage` and
+  `imageInput`.** That guard is exact on purpose; the two members are wired
+  (D4), so they belong on the list.
+- **`attachRowView` truncation** is "as many chips as fit, then `+N`"
+  (first-fit with the marker's own width reserved), and it always shows at
+  least one chip. The plan said "truncated to `width` with `+N`" without
+  pinning the algorithm; T1 pins the properties (`more` counts the rest, a wide
+  input shows all, one row).
+- **The chip row paints `📎`** and a two-space indent — presentation, in the
+  component, as AGENTS §7 requires; the text is `attach-draft.ts`'s.
+
+### Tests (red before green, and where)
+
+| # | File | Red shown as |
+|---|---|---|
+| T1 | `tui/test/attach-draft.test.ts` (new, 39 tests) | module absent (created with it, corrected until green); each failure-mode row of the plan's table is one case |
+| T2 | `tui/test/resume.test.ts` (+4) | `user_message` had no `images` (3 failures) |
+| T3 | `tui/test/render-lines.test.ts` (+5) | image rows not rendered |
+| T4 | `protocol/test/attachment-prompt.test.ts` (+2) | "Expected 8, received 1": the field was stripped; the malformed ref parsed |
+| T5 | `daemon/test/attachment-prompt.test.ts` (+2) | `turn_start` carried no `attachments` |
+| T6 | `client/test/remote-session-attach.test.ts` (new, 7) | `session.attachImage is not a function` |
+| T7 | `cli/test/clear-fork-controller.test.ts` (+1) | `attachImage` undefined on the controller |
+| T8 | `tui/test/attach-app.test.tsx` (new, 19) | 12 of 19 red on the first run (no wiring) |
+| T9 | `tui/test/attach-connect.e2e.test.tsx` (new) | passes only with the whole chain; mutation 3 turns it red |
+
+`bun test` per slice (narrow first), then the full gate.
+
+### Mutations (the plan's ten, each run by hand, reverted after)
+
+| Mutation | Turned red |
+|---|---|
+| `RemoteSession.attachImage` skips the open | T6 ×4 (LAZY, image-only, attach-only, reset re-delivery) |
+| `PersistingController` drops the `attachImage` forward (and `imageInput`) | T7 |
+| `run` drops `sendOpts.attachments` | T8b, T8e, T8f, **T9** |
+| `inputBoxRows` ignores `attachRowRows` | T8j |
+| daemon omits `turn_start.attachments` | T5 ×2, plus 6 pre-existing attachment-prompt cases |
+| `resume.ts` ignores `attachments` | T2 ×3 |
+| `submitPlan` enqueues with chips while running (the refuse branch removed) | T8g, T1 ×2 |
+| `routeDecision` inserts text when off (the `off` branch removed) | T8d, T1 ×2 |
+| `streamTurn` own-test left as `own.text !== ""` | T8i' |
+| `refusedBeforeStart` unwired (`else if (false)`) | T8i |
+
+All ten hold: each named test fails on exactly the property the plan named, and
+passes again on revert (`git diff` checked after every revert).
+
+### Gate
+
+```
+bunx tsc --noEmit          → clean (the `bun run typecheck` pair, mobile included: clean)
+bun run lint               → Clean — 951 files, no fixes applied (AGENTS §6 baseline: 0/0)
+bun test                   → 7503 pass · 3 skip · 0 fail (7506 tests, 537 files)
+                             the 3 skips are the opt-in ones (live-k8s, live-docker, slow keepalive)
+```
+
+`schema/protocol.json` regenerated (`bun run schema:export`); the drift gate
+`json-schema.test.ts` passes.
+
+### Not verified (stated, not claimed)
+
+- **A real drag** in Terminal.app / iTerm2 / Ghostty into `tentacle connect` was
+  not performed. What IS proved is the paste FORM each emulator sends
+  (bracketed paste of a path — T8, T9, both in the real App, T9 over the real
+  `serve`+`connect` socket) and the decoder for the escaped/quoted/`file://`
+  forms (3a's suites). The manual check remains for the owner.
+- **A pod `run`/`attach` TUI with real k8s/docker**: not run here (the two
+  opt-in live suites stay skipped). The seam it depends on is the same
+  `PersistingController` forward pinned by T7.
 
 ## Review
 

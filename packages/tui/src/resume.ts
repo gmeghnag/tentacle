@@ -5,6 +5,7 @@
  */
 import { restartPromptOf } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
+import { imageRowText } from "./attach-draft.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 
 /** The separator before a context reset's restart prompt (decision 9, docs/eval/context-reset.md). */
@@ -48,7 +49,14 @@ export function messagesToItems(messages: readonly ChatMessage[]): DisplayItem[]
       } else if (m.note !== undefined) {
         items.push(noteItem(m));
       } else {
-        items.push({ kind: "user", text: m.content });
+        // A resumed image prompt says so: `[image: name]` under the text, and
+        // the ONLY rows of an image-only prompt (docs/feat/attachments-tui.md D7).
+        const images = (m.attachments ?? []).map(imageRowText);
+        items.push({
+          kind: "user",
+          text: m.content,
+          ...(images.length > 0 ? { images } : {}),
+        });
       }
     } else if (m.role === "assistant") {
       if (m.content.trim() !== "") {
