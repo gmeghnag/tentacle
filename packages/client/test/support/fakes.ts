@@ -25,7 +25,17 @@ export class GatedModel implements ModelProvider {
   calls = 0;
   waiting = false;
   private release: (() => void) | null = null;
-  constructor(private readonly script: readonly (readonly Step[])[]) {}
+  /**
+   * How one step yields: `"timer"` (default) is a real `setTimeout(0)`, so the
+   * stream advances on wall clock and a reconnect races it; `"immediate"` is
+   * the same macrotask yield at ~1 µs — for a LONG script whose only job is to
+   * stream thousands of deltas BEFORE any reconnect (a timer's ~1 ms
+   * granularity would make that seconds of pure fake, docs/fix/reattach-replay-flake.md).
+   */
+  constructor(
+    private readonly script: readonly (readonly Step[])[],
+    private readonly yieldEach: "timer" | "immediate" = "timer",
+  ) {}
   open(): void {
     this.release?.();
   }
@@ -44,7 +54,9 @@ export class GatedModel implements ModelProvider {
       // One event per macrotask: the stream keeps moving while the client
       // reconnects, so live updates race the `open` and the cut moves between
       // the `open` and its snapshot (the overlap seq dedupe must absorb).
-      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) =>
+        this.yieldEach === "immediate" ? setImmediate(r) : setTimeout(r, 0),
+      );
       yield step.event;
     }
   }

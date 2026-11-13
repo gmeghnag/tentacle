@@ -762,10 +762,14 @@ describe("attach mid-turn behind a long reply (docs/fix/detach-live.md, round 9 
     // The cut is the turn's start: the attach replays every delta streamed so
     // far — more than the old 2048-update buffer, whose eviction lost the
     // replay's head on every reopen → "keeps skipping events; giving up".
+    // `immediate`: the whole reply streams BEFORE the attach, so these yields
+    // race nothing — only a real timer would make them cost ~1 ms each
+    // (2049 × 1.25 ms ≈ the 3 s `until` budget, docs/fix/reattach-replay-flake.md).
     const n = 2048 + 200;
-    const model = new GatedModel([
-      [...Array.from({ length: n }, (_, i) => t(`${i} `)), { kind: "gate" }, t("end"), done],
-    ]);
+    const model = new GatedModel(
+      [[...Array.from({ length: n }, (_, i) => t(`${i} `)), { kind: "gate" }, t("end"), done]],
+      "immediate",
+    );
     const target = new Target(makeHost(model, { n: 0 }));
     const a = new RemoteClient(target.connect(), new PermissionBroker());
     await a.initialize();
