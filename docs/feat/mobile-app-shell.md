@@ -584,3 +584,24 @@ header; Maestro's env not passed with `-e`) before passing.
 All questions answered as recommended. Implementation APPROVED. Tooling (owner): the orchestrator installs Java 17 (brew openjdk@17), Maestro (brew mobile-dev-inc/tap) and the iOS 18 runtime before Execution; executor = DeepSeek.
 
 Tooling installed by the orchestrator (2026-11-13): Java 17 at `$(brew --prefix openjdk@17)` (keg-only: run Maestro with `JAVA_HOME=$(brew --prefix openjdk@17) PATH="$(brew --prefix openjdk@17)/bin:$PATH"`), Maestro 2.12.1 (`maestro`). The iOS 18 runtime is NOT downloadable with Xcode 27.1 (`xcodebuild -downloadPlatform iOS -buildVersion 18.6/18.5` → not available): run on iOS 26.5 only; iOS 18 is deferred (orchestrator decision, recorded here).
+
+## Review
+
+*— claude-opus-5-5, 2026-11-13* (fresh context; same model family as the plan's author, a different model from the DeepSeek executor)
+
+**Verdict: REQUEST-CHANGES**
+
+Gate: `bun run typecheck` is clean, `bun run lint` is clean (991 files), and `bun test apps/mobile` gives 77 pass / 0 fail. I did not re-run the full suite or the Maestro run.
+
+Findings:
+1. **HIGH: a successful refresh never clears `stale`** (`apps/mobile/src/session-list.ts:125-131`). `fail` sets `stale: true` (`:147`), and `page` spreads `rest`, so the flag survives. Repro (`.tentacle/tmp/mobile-app-shell/stale.ts`): load OK → refresh fails while the link is up → refresh OK gives `{stale: true, error: undefined}`. The screen then shows `sessions-stale` "Reconnecting…" forever (`SessionsScreen.tsx:121-125`), even though the link is up. The link stays up, so no `link(up)` ever arrives to clear it. No test pins "a page clears stale".
+2. **HIGH: flow 05's recovery step can't fail** (`apps/mobile/e2e/flows/05-daemon-down.yaml:24-25`). After the restart it asserts only `sessions-list`, the ScrollView, which is on screen in every state. It does not assert that a `session-<id>` row is back or that `sessions-stale` is gone. That is why finding 1 passed the "green" e2e run. The flow claims a recovery it does not check.
+3. **MEDIUM: an empty or failed list never refreshes when the link comes back** (`session-list-controller.ts:119`). The guard needs `entries.length > 0`. Repro: an empty list → `link(false)` → a refresh while down → `link(true)` stays at `{status: "failed", error: "Reconnecting…"}`. This contradicts the Failure-modes row "sessionList while down → refreshed on up".
+4. **MEDIUM: the link-status subscription is made once and never re-made** (`App.tsx:188-204`). If the first `LINKS.get` fails (daemon down when the screen opens), the registry forgets it, and Retry dials a new client. Nothing subscribes to that client's `onStatus`, so later drops neither mark the list stale nor refresh it.
+5. **MEDIUM: Computers bypasses `describeError`** (`App.tsx:126-134`). It shows the raw `ChannelError` text (`ws-channel.ts:148`: "the daemon answered 401 to the token"; on iOS "cannot reach the daemon (close 1006)"). That breaks the carry-over that the app never words an error from the channel's guess. The row-building logic with its try/catch also sits in a component, against AGENTS §7 "logic in pure modules".
+
+Attacks tried: (a) the stale lifecycle across fail → success: found 1. (b) An empty list with the link down then up: found 3. (c) Re-subscription after a failed first dial: found 4. (d) Single broker: `connection.ts:86` uses `denyAll`, one broker per client, no `session/open`: holds. (e) One session path: the same `webSocketChannelFactory` + `RemoteClient` stack, no new transport: holds. (f) Generation and dedupe in the reducer: they read correctly. My mutation re-run was not executed (my shell could not run it without approval), so the executor's mutation table stands but I have not checked it myself.
+
+Holds: the protocol is untouched, `serve` binds 127.0.0.1, all scratch output stays under `.tentacle/tmp`, and the strip-origin proxy is test-only.
+
+How the executor behaved: the drift is recorded honestly (testID-only assertions, the guard mutation that could not be done, iOS 18 not covered). But the e2e gate's last assertion is vacuous, and the reducer's stale path has no test. Both are gaps in the evidence, so "green" here claimed more than it showed. Also, the Execution section is signed `claude-opus-5-5`, while the commit says DeepSeek executed. Fix the signature.
