@@ -572,6 +572,13 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
 
   let nextPoll = 0;
   let polling = false;
+  /**
+   * A known exit landed while a read was in flight, so that read was issued
+   * against the count from BEFORE the exit: it is not the freshest one, and
+   * dropping the refresh on `polling` would leave `ps` stale until the next
+   * 30 s poll. The read's completion re-polls once for it.
+   */
+  let staleJobs = false;
   const pollJobs = (): void => {
     polling = true;
     void runtime.sessionJobs(spec.sessionId).then((n) => {
@@ -581,17 +588,30 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
       if (n !== null && !shellCounted) {
         emit({ type: "jobs", n });
       }
+      if (staleJobs) {
+        staleJobs = false;
+        // Once, and only while the poll still owns the number.
+        if (!shellCounted) {
+          pollJobs();
+        }
+      }
     });
   };
   /**
    * A known exit, so a count that may be stale NOW (docs/feat/detach-small-fixes.md
    * item 9d): an older pod binary sends no `jobs` frame, and the 30 s poll would
    * leave `ps` saying "1 background job(s) running" long after the job died.
-   * One writer still: once a frame has been seen it owns the number, and this
-   * reads nothing (a read in flight is already the freshest one).
+   * One writer still: once a frame has been seen it owns the number and this
+   * reads nothing. Reads never stack: a read already in flight is asked to
+   * re-read when it lands (`staleJobs`), because it may answer the pre-exit
+   * count it was issued against.
    */
   refreshJobs = (): void => {
-    if (shellCounted || polling) {
+    if (shellCounted) {
+      return;
+    }
+    if (polling) {
+      staleJobs = true;
       return;
     }
     pollJobs();

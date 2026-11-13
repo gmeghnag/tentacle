@@ -277,7 +277,7 @@ own count is already authoritative there, and `relay-state.ts` needs no change
 | (9d) the exit's poll is unanswered (`sessionJobs` → `null`) | the last value stands, the next tick's poll tells — the same rule the loop already uses (`relay.ts:567-571`) |
 | (9d) a frame arrives anyway (a current pod) | `shellCounted` is true, the hook is a no-op: no second writer, no flapping (the existing H1 tests hold) |
 | (9d) a waking sub-agent notify (also a `job_exit`) | refreshes the polled count, decrements nothing — one quantity, one writer |
-| (9d) many exits at once | `polling` is already true → the extra calls return instead of stacking reads |
+| (9d) many exits at once | `polling` is already true → the extra calls set `staleJobs` and return; one re-read serves all of them, so reads never stack (see Fix round 1) |
 
 ### Tests
 
@@ -456,3 +456,52 @@ than implied. What was checked:
 - Multi-edit malformed input (`edits` a string, empty, `null` input): no throw, falls back to path or `—`. Holds.
 
 **Executor behaviour:** the drift (un-gating the exit subscription) is recorded honestly, and the mutations claimed are real. The one miss is the in-flight coalescing, asserted as safe without a test.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-13*
+
+Fixing the one finding of Review round 1 (no HIGH was raised; the review's
+single MEDIUM). Scratch: `.tentacle/tmp/detach-small-fixes/` only. No
+`git checkout/restore/stash/commit` was run.
+
+**FINDING 1 (MEDIUM) — in-flight coalescing dropped the refresh. FIXED.**
+
+- `packages/cli/src/relay.ts:574-611` — `refreshJobs` no longer returns silently
+  on `polling`: it sets `staleJobs = true`, and `pollJobs`' completion re-polls
+  once when that flag is set (and only while `shellCounted` is still false, so
+  the H1 one-writer rule is untouched). The comment states the real reason:
+  a read issued before the exit can answer the pre-exit count.
+- `packages/cli/test/relay.test.ts` (`9d + H1` describe, new test "a read in
+  flight across the exit is not trusted: the count is re-read once it lands
+  (9d)") — holds a `sessionJobs` read open across the exit, resolves it with
+  the stale `1`, and asserts exactly one extra read follows (`reads ===
+  readsAtExit + 1`, so the coalescing is pinned, not just "some read
+  happened"), then that `ps` leaves `1 background job(s) running`.
+- **Red first:** with the pre-fix `refreshJobs` (`if (shellCounted || polling)
+  return;`) the test fails on its own assertion — `error: timed out waiting for
+  the re-read after the stale one` at `relay.test.ts:2916`, 1 fail. Green after
+  the fix: 1 pass / 4 expects.
+- **Mutations (each applied alone, run, reverted; the restored file is
+  byte-identical to the green copy kept in scratch):**
+
+  | Mutation | Result |
+  |---|---|
+  | `if (polling) { staleJobs = true; ... }` → `if (polling) { return; }` (drop the flag) | `timed out waiting for the re-read after the stale one` — 1 fail |
+  | `if (staleJobs) { staleJobs = false; if (!shellCounted) pollJobs(); }` → `staleJobs = false;` (drop the re-poll) | same timeout, 1 fail |
+  | `staleJobs = true; return;` → `pollJobs(); return;` (uncoalesced: stack a read) | `expect(received).toBe(expected) / Expected: 1 / Received: 2` — the coalescing half is non-vacuous |
+  | restored | `relay.test.ts` 101 pass / 0 fail |
+
+- **Doc drift corrected:** Implementation's failure-mode row "(9d) many exits at
+  once" now says the extra calls set `staleJobs` and one re-read serves them,
+  which is what the code does; the old "the extra calls return" was the same
+  false claim the reviewer caught.
+
+**Not changed:** the Review's "what does NOT hold" items (the `(empty)` title,
+the current pod binary's path, a SIGKILLed relay) stand as stated — they are
+outside this finding.
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` clean (963 files) ·
+`bun test`: **7627 pass, 3 skip, 0 fail** (7630 tests / 545 files, 312 s) — the
+three skips are the documented opt-ins (AGENTS §6). The `session-log-store`
+flake named in the earlier Execution did not recur.
