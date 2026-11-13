@@ -889,6 +889,107 @@ skips are §6's opt-ins (live-k8s, live-docker, the slow keepalive).
 - The `0.0.0.0` bind is tested on loopback addresses; a real LAN/phone dial of
   `/e2e` is 9d's `pair-e2e` and the device itself.
 
+### Fix round 1 (9b)
+
+*— claude-opus-5-5, 2026-11-13*
+
+Scope: 9b's two MEDIUM findings only. Two source files, two test files; no
+other slice touched.
+
+**F1 (MEDIUM) — the no-identity path leaked a handshake slot for good.**
+
+Reproduced first, in `.tentacle/tmp/device-pairing-9b/leak2.ts` (an authority
+with no identity, `maxConcurrent: 2`, 8 dials of `/e2e`), on the unfixed code:
+
+```
+audit: e2e-no-identity
+audit: connection-close
+0 open
+audit: e2e-no-identity
+audit: connection-close
+1 open
+audit: e2e-rate-limited 127.0.0.1
+2 error
+audit: e2e-rate-limited 127.0.0.1
+3 error
+… (dial 4-7: e2e-rate-limited)
+```
+
+Dials 0-1 were admitted and each kept its concurrent slot; from dial 2 on,
+every device is 429'd — permanently, since nothing ever calls `limiter.end()`
+for a socket that never reached `pending.set`.
+
+Root cause, one sentence: `openDevice` closes a no-identity socket and returns
+BEFORE registering `finish` in `pending`, so neither the responder's settle
+paths nor the `close` handler ever ends the slot `begin` took at the upgrade.
+
+Fix (`ws-server.ts:359-372`): call `limiter?.end()` directly on that path.
+
+Test: `daemon/test/ws-device-route.test.ts` → *"a no-identity window gives every
+handshake slot back, so the route recovers (F14)"*. Five dials with
+`maxConcurrent: 2` must all be **admitted then closed** (never refused), then an
+identity is written, the authority's poll picks it up, and a real paired key
+completes `initialize` with no restart. RED before the fix, on the assertion:
+
+```
+- Expected  - 3      + Received  + 3
+   "closed",
+-  "closed",        +  "refused",
+-  "closed",        +  "refused",
+-  "closed",        +  "refused",
+```
+
+**F2 (MEDIUM) — F26 was applied to every bind, not only non-loopback ones.**
+
+Reproduced: an unusable `identity.json` made a loopback `serve` reject at
+start-up (`deviceAuthority` threw), for a user who never pairs. Fix scoped to
+F26's own case (`serve.ts:235-266`): the throw stands for `!isLoopbackHost(host)
+&& !token` (no other gate exists there); everywhere else the daemon starts
+WITHOUT the device route and reports one line naming the file. Nothing
+advertises a route it does not have: `daemons/<pid>.json` is written only when
+an authority exists, so `pair` (9d) never dials a disabled `/e2e`.
+
+Tests (`cli/test/serve-devices.test.ts`):
+- *"an unreadable identity REFUSES a non-loopback token-less start …"* — the
+  existing F26 test, narrowed to F26's own bind (`0.0.0.0`), still red on an
+  unscoped throw.
+- *"an unusable identity on a LOOPBACK bind starts WITHOUT the device route
+  (F26 is scoped)"* — starts, `onError` contains `identity.json`, the file is
+  byte-identical afterwards, and `readDaemonRecords` is empty. RED before the
+  fix (`startDaemon` rejected at `serve.ts:245`).
+
+This is now a recorded decision for the owner, not silent drift: a loopback
+`serve` degrades (device route off, one error line) rather than refusing to
+start. If the owner prefers the strict reading — refuse on every bind — the
+change is one `&&` and the second test is deleted.
+
+**Mutations (each applied, tested, restored from a copy in
+`.tentacle/tmp/device-pairing-9b/`; no `git checkout`/`restore`/`stash`).**
+
+| # | Mutation | Result |
+|---|---|---|
+| F1-M | drop the no-identity path's `limiter.end()` | RED: the route test's 3rd-5th dials come back `refused` (13 pass / 1 fail) |
+| F2-M1 | `if (!isLoopbackHost(host) && !token)` → `if (true)` (throw on every bind, i.e. the pre-fix behaviour) | RED: the loopback test's `startDaemon` rejects (7 pass / 1 fail) |
+| F2-M2 | drop the file name from the degraded-start error line | RED: `expect(errors.join()).toContain("identity.json")` (7 pass / 1 fail) |
+
+One mutation attempt is reported honestly: my first F2-M2 edit produced a
+syntax error (`void (…);` left a stray `)`), which `bun test` surfaced as a load
+error (0 pass / 1 fail / 1 error) — that proves nothing, so I re-did it as a
+valid mutation (F2-M2 above) and only that result is claimed.
+
+**Gate.** `bunx tsc --noEmit` clean · `bun run lint` 1019 files, no fixes
+applied (0 errors/0 warnings, §6 baseline) · `bun test` **7977 pass / 3 skip /
+0 fail**, 7980 tests across 570 files, 337 s — the 3 skips are §6's opt-ins
+(live-k8s, live-docker, the slow keepalive). That is +2 tests over the round's
+start (7975 pass / 7978 tests): the new route test and the new scoped-F26 serve
+test. `packages/protocol/schema/protocol.json` unchanged (no wire surface here).
+
+**Not verified / left open.** None of the findings' own behaviour is unverified.
+The F2 scope is a decision I took under the Review's "either/or"; the owner may
+pick the strict reading instead (see above). F1's production value (32) is not
+driven by a test — the test uses 2 to make the leak cheap to see; the arithmetic
+is the same rule.
+
 ## Review
 
 #### Owner answers (2026-11-13)

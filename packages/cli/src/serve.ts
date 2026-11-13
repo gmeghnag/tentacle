@@ -25,6 +25,7 @@ import {
   type SessionTtlControl,
   TombstoneFile,
   acquireStoreLock,
+  isLoopbackHost,
   loadOrCreateIdentity,
   readIdentity,
   removeDaemonRecord,
@@ -228,9 +229,12 @@ export async function startDaemon(
  * This daemon's device authority, over the shared `<configDir>/devices/` store
  * (decision 7: one identity and one registry per computer). The identity is
  * loaded or created here — the FIRST `serve` on a fresh computer creates it —
- * and an UNREADABLE one is fatal, naming the file: serving a non-loopback bind
- * with no usable identity would either admit nobody (pointless) or, worse,
- * invite "fixing" it by trusting everyone (F26).
+ * and an UNREADABLE one is fatal ONLY in F26's own case: a non-loopback bind
+ * with no token, where the device route is the only gate and serving would
+ * either admit nobody (pointless) or invite "fixing" it by trusting everyone
+ * (F26). Everywhere else — a loopback bind, or a token that already gates the
+ * plain route — the daemon starts WITHOUT the device route and says so once: a
+ * user who never pairs must not lose their `serve` to a file only pairing needs.
  */
 function deviceAuthority(
   config: TentacleConfig,
@@ -242,9 +246,19 @@ function deviceAuthority(
   const configDir = config.configDir;
   const identity = loadOrCreateIdentity(configDir, { name: hostname() });
   if (!identity.ok) {
-    throw new Error(
-      `cannot start serve: ${identity.path} is unusable (${identity.reason}) — fix it or run "tentacle devices reset"`,
+    if (!isLoopbackHost(options.host) && !options.token) {
+      throw new Error(
+        `cannot start serve: ${identity.path} is unusable (${identity.reason}) — fix it or run "tentacle devices reset"`,
+      );
+    }
+    // Not fatal here: the plain route is gated another way (loopback, or the
+    // token), so the daemon serves without `/e2e` — never with a fake gate.
+    options.onError?.(
+      new Error(
+        `device route disabled: ${identity.path} is unusable (${identity.reason}) — fix it or run "tentacle devices reset"`,
+      ),
     );
+    return undefined;
   }
   return new DeviceAuthority({
     configDir,

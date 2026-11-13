@@ -359,8 +359,13 @@ export function startWsServer(options: WsServerOptions): RunningServer {
     const identity = authority.staticKey();
     if (identity === undefined) {
       // No usable identity (an unreadable store, F14/F26): nothing can be
-      // authenticated, so the socket is closed rather than left half-open.
+      // authenticated, so the socket is closed rather than left half-open — and
+      // its limiter slot goes back HERE: `finish` is not registered yet, and
+      // this socket will never reach the `close` handler's `pending` lookup, so
+      // returning without `limiter.end()` would leak a slot per dial and 429
+      // every device until a restart (production `maxConcurrent` is 32).
       options.onAudit?.("e2e-no-identity");
+      limiter?.end();
       channel.close();
       pending.get(ws)?.();
       pending.delete(ws);

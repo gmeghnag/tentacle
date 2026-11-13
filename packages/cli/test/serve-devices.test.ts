@@ -5,7 +5,7 @@
  * reads these for addresses).
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "@tentacle/config";
@@ -71,11 +71,10 @@ describe("serve creates the computer's identity", () => {
     expect(second.publicKey).toBe(first.publicKey);
   });
 
-  test("an unreadable identity REFUSES to start and names the file (F26)", async () => {
+  test("an unreadable identity REFUSES a non-loopback token-less start and names the file (F26)", async () => {
     const { dir, configDir } = await serve();
     await handles.pop()?.stop();
     const path = join(configDir, DEVICE_DIR, "identity.json");
-    const { writeFileSync } = await import("node:fs");
     writeFileSync(path, "{ nope");
     const config = await loadConfig({
       configDir,
@@ -83,11 +82,42 @@ describe("serve creates the computer's identity", () => {
       scaffold: false,
       env: { HOME: dir, TENTACLE_MODEL_API_KEY: "k" },
     });
-    await expect(startDaemon(config, { host: "127.0.0.1", port: 0 })).rejects.toThrow(
+    // F26's OWN case: a LAN-exposed bind with no token has no other gate.
+    await expect(startDaemon(config, { host: "0.0.0.0", port: 0 })).rejects.toThrow(
       /identity\.json/,
     );
     // Left exactly as it was: the human fixes it or runs `devices reset`.
     expect(readFileSync(path, "utf8")).toBe("{ nope");
+  });
+
+  test("an unusable identity on a LOOPBACK bind starts WITHOUT the device route (F26 is scoped)", async () => {
+    // F26 covers a non-loopback bind with no token. A user who never pairs must
+    // not be refused a working loopback `serve` by a file only pairing needs:
+    // here the daemon starts, the device route is off, and ONE line names the
+    // file. Mutation: throw for every bind -> red (this start rejects).
+    const { dir, configDir } = await serve();
+    await handles.pop()?.stop();
+    const path = join(configDir, DEVICE_DIR, "identity.json");
+    writeFileSync(path, "{ nope");
+    const config = await loadConfig({
+      configDir,
+      cwd: dir,
+      scaffold: false,
+      env: { HOME: dir, TENTACLE_MODEL_API_KEY: "k" },
+    });
+    const errors: string[] = [];
+    const handle = await startDaemon(config, {
+      host: "127.0.0.1",
+      port: 0,
+      onError: (error) => errors.push(error.message),
+    });
+    handles.push(handle);
+    expect(handle.port).toBeGreaterThan(0);
+    expect(errors.join("\n")).toContain("identity.json");
+    // The human's file is untouched, and nothing advertises a device route
+    // `pair` could dial (`daemons/<pid>.json` is written only with the route).
+    expect(readFileSync(path, "utf8")).toBe("{ nope");
+    expect(readDaemonRecords(configDir)).toEqual([]);
   });
 });
 

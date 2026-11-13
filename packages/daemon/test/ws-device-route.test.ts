@@ -54,6 +54,21 @@ function store(): string {
   return configDir;
 }
 
+/** A config dir with NO identity yet: the F14 window, where nothing authenticates. */
+function emptyStore(): string {
+  const configDir = mkdtempSync(join(tmpdir(), "ws-device-route-empty-"));
+  dirs.push(configDir);
+  return configDir;
+}
+
+/** Wait for `check` (the authority's poll is the only thing that re-reads the store). */
+async function until(check: () => boolean, ms = 2_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!check() && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 /** Dial a real WebSocket and adapt it to a `DuplexChannel` (the Repro's shape). */
 function dial(
   url: string,
@@ -409,6 +424,46 @@ describe("the upgrade is rate limited before any crypto (F6)", () => {
     // The first two pass the limiter (426: no upgrade header), the rest 429.
     expect(statuses.slice(0, 2)).toEqual([426, 426]);
     expect(statuses.slice(2)).toEqual([429, 429]);
+  });
+
+  test("a no-identity window gives every handshake slot back, so the route recovers (F14)", async () => {
+    // The store is unreadable/absent: `staticKey()` is `undefined`, so the
+    // socket can never authenticate and the route closes it at once. Each such
+    // dial must END its limiter slot, or `maxConcurrent` dials during any F14
+    // window brick `/e2e` with 429s until a restart — even after the human
+    // fixes the store. Mutation: drop the no-identity path's `limiter.end()`.
+    const configDir = emptyStore();
+    const { server, authority } = serve(configDir, {
+      handshakeLimit: { burst: 100, refillMs: 60_000, maxConcurrent: 2 },
+    });
+    const url = `${server.url}/e2e`;
+    // Well past `maxConcurrent` (2): no slot is ever held long enough to matter.
+    const outcomes: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      outcomes.push(
+        await new Promise<string>((resolve) => {
+          const ws = new WebSocket(url, { headers: { Origin: IOS_ORIGIN } } as never);
+          ws.addEventListener("close", () => resolve("closed"));
+          // A 429 refuses the upgrade: the client only sees an error.
+          ws.addEventListener("error", () => resolve("refused"));
+        }),
+      );
+    }
+    // Every dial was ADMITTED and then closed for its own reason (no identity).
+    expect(outcomes).toEqual(["closed", "closed", "closed", "closed", "closed"]);
+    // The human fixes the store: the very next handshake is admitted, with no
+    // restart and no leftover 429.
+    const created = loadOrCreateIdentity(configDir, { name: "gabriel-mac", now: 1_000 });
+    if (!created.ok) throw new Error(created.reason);
+    addDevice(configDir, { publicKey: publicKeyOf(key(2)), name: "iPhone", now: 2_000 });
+    await until(() => authority.staticKey() !== undefined);
+    const client = await connect(url, key(2), created.identity.publicKey);
+    try {
+      const result = (await client.init()) as { protocolVersion: number };
+      expect(result.protocolVersion).toBe(24);
+    } finally {
+      client.close();
+    }
   });
 });
 
