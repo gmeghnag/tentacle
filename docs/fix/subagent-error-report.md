@@ -595,7 +595,62 @@ live-docker and slow keepalive), 0 fail** across 544 files.
 
 ## Review
 
-*(empty — fresh-context reviewer)*
+*— claude-opus-5-5, 2026-11-13*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM test gap, one MEDIUM process mismatch; no HIGH).
+
+**Gate (re-run):** `bun test` → 7637 pass, 3 skip (opt-in), 0 fail, 544 files;
+`bun run lint` → 962 files, clean; `bun run typecheck` → clean. Touched files: 239 pass.
+
+**Findings**
+1. **MEDIUM — `Agent` → `AgentJobs.delivered()` is not pinned by any test.**
+   `packages/agent/src/agent.ts:2498` (`this.config.agentJobs?.delivered(job.agentId)`).
+   Mutation: commented it out → `packages/agent`, `packages/tools`, `packages/daemon`
+   suites all green (1699 pass). Scenario: a regression drops the call; after a
+   mid-turn delivery `agent_control status sa-N` says "Its report … reaches you as a
+   [background] note at your next step" for a note already in history — the model
+   waits again for a report it holds, the exact owner bug (root cause C) in a new
+   form. The tests cover `AgentJobs.delivered` alone and `formatEndedAgent` alone,
+   never the wiring. Fix: in `subagent-background.test.ts` assert
+   `jobs.ended("sa-1")?.delivered === true` after the mid-turn and the start flush
+   (or drive `agent_control status` as the repro does).
+2. **MEDIUM — branch ↔ doc ↔ executor record disagree (AGENTS §10).** Branch is
+   `feat/subagent-error-report`; the doc is `docs/fix/…` and its header says
+   `Branch: fix/subagent-error-report` (and Status still "awaiting owner approval").
+   The commit `b0b5701` says "exec (deepseek)" but Execution is signed
+   claude-opus-5-5 and states "the executor was this model, not DeepSeek". One must
+   be corrected; §10's 1:1 rule and the model signature are the point of the record.
+   Consequence for this Review: if Execution really is claude-opus-5-5, this review
+   is the SAME model (fresh context only) — shared blind spots survive both passes.
+
+**Mutations (each applied with Edit, run, reverted; tree byte-identical after):**
+drop sub-agent exits from `flushMidTurn` → 3 red (A: boundary, late round,
+stale-wake) ✔; `failureError` returns the raw error → 1 red (foreground renderer) ✔;
+no `delivered()` call → **0 red** ✘ (finding 1).
+
+**Attacks tried**
+- *Late-drain invariant* (`agent.ts:1407-1420`): the new drain is the same
+  synchronous `flushMidTurn` call; no `await` added before `turn_end`. Holds.
+- *Stale-wake / double wake:* every `background_exit` (turn-stream or live) reaches
+  the TUI's exit listener (`remote-client.ts:2963`) and arms one deferred wake; the
+  in-turn event is deduped by jobId; the continuation hits the guard because the
+  drain sets `notesFlushedMidTurn` (both sites). `serve` wakes on
+  `session.pendingExitCount` (`hosted-session.ts:2524`), which the drain zeroes. Holds.
+- *Ledger delivery mid-turn:* `noteSeen` fires on any `background_exit` with
+  `agent` in the drive loop (`hosted-session.ts:2374`) — position-independent;
+  `wakeUnflushed` only matches a wake turn's id. Holds.
+- *Clock skew in the age:* `endedAt` = host `now` (daemon `this.now`, `Date.now`),
+  `agent_control` default `Date.now`; `endedAt 0` → no age. Holds.
+- *Foreground path:* `settled` swallows the rejection but the not-moved path awaits
+  `running` (`task.ts:288`), so the failure still fails the call, now with the
+  partial. Holds (and pinned).
+- *§7 protocol/persistence:* no schema change, note shape unchanged
+  (`subagentReportNote`), only its position; pod partial text takes the same
+  report path and caps. Holds.
+
+**Executor behaviour:** plan followed in order, drift declared (age clock, extra
+`drive` test), 13 mutations listed — but the list missed the one wiring seam above,
+and the executor identity is recorded inconsistently.
 
 #### Owner answers (2026-11-13)
 
