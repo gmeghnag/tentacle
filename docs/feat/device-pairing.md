@@ -1040,3 +1040,13 @@ All questions answered as recommended. Implementation APPROVED.
 **Attacks tried.** (a) Limiter balance on every `openDevice` exit → finding 1. (b) A pairing principal reaching a session via notifications: `session/cancel` needs an attached session, which is unreachable → holds. (c) A revoke racing `authorize`'s refresh before the poll: the poll compares the live map with the current snapshot (not a diff), so it still closes → holds. (d) A `devices reset` refreshed by `authorize` before the tick: `reset` reads false, but the empty registry closes everything anyway → holds, as long as the CLI empties the registry (9d must keep that). (e) F21: without `devices`, `/e2e` is the plain route → holds (test). (f) Same session path: `Connection` is unchanged on the secure channel, and no second loop → holds.
 
 **Executor behaviour.** The scope is tight, the tests are non-vacuous, and the drift notes are honest except for finding 2. The executor was DeepSeek and this reviewer is Opus, a different model family.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-13*
+
+**Verdict: PASS.** Both round-1 findings are fixed. Diff checked: `c04bad1`.
+
+- **Finding 1 (slot leak) — fixed.** `ws-server.ts:368` now calls `limiter?.end()` on the no-identity path. It cannot run twice for one socket: `pending` is not set yet, so the `close` handler finds nothing to end. Repro `leak.ts`: four dials now give `open ×4` (round 1: `open, open, close 1002, close 1002`). *Mutation:* removed `:368` → `a no-identity window gives every handshake slot back` turns red.
+- **Finding 2 (F26 on every bind) — fixed.** `serve.ts:249` now throws only for a non-loopback bind without a token. In every other case `serve` starts without the device route, reports one `onError` line naming the file, and writes no daemon record. *Mutation:* changed the condition to `if (true)` → `an unusable identity on a LOOPBACK bind starts WITHOUT the device route` turns red. Both mutations reverted; `git status` clean.
+- **Regressions.** Touched files: 112 pass / 0 fail. `bun run lint` clean; `bun run typecheck` clean. Case checked: token + non-loopback + broken identity → starts without `/e2e`, plain route still token-gated. Nothing widens access.
