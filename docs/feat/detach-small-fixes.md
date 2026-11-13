@@ -505,3 +505,12 @@ outside this finding.
 `bun test`: **7627 pass, 3 skip, 0 fail** (7630 tests / 545 files, 312 s) — the
 three skips are the documented opt-ins (AGENTS §6). The `session-log-store`
 flake named in the earlier Execution did not recur.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-13*
+
+**Verdict: PASS.** Finding 1 (MEDIUM, a read in flight across the exit) is fixed at `packages/cli/src/relay.ts:575-617`. A job exit during an open read sets `staleJobs`. When that read finishes, the relay re-reads once, and only while the poll still owns the count (`!shellCounted`), so the one-writer rule (H1) holds. The new test holds a read open across the exit.
+- **Mutations (reverted, `git status` clean):** removing `staleJobs = true` makes the new test fail (`reads` stops). Re-reading twice, without the guard, also makes it fail (`reads === readsAtExit + 1`), so stacked reads are caught.
+- **Regressions:** `relay.test.ts` passes (101 tests, 0 fail). `bun run lint` is clean (963 files) and `bun run typecheck` is clean.
+- **Residual, not a finding:** the stale read still writes its `1` for a moment, until the re-read lands. The `!shellCounted` guard on the re-read has no test of its own, but it cannot do harm: `pollJobs` checks `shellCounted` again before it writes.
