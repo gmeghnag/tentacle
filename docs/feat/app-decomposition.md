@@ -2,7 +2,8 @@
 
 > **Status:** S0 executed; plan REVISED after the Fable design review. S1 was
 > re-instated by the owner and executed (see Fix round 1 — who, and why H4(1)
-> survives it); S0b + S2+ re-approval pending.
+> survives it); S0b executed (Execution §S0b — tests only, 12/12 mutations
+> killed); S2+ re-approval pending.
 > **Branch:** `feat/app-decomposition` (parent/plan); one child branch per slice, below
 > Type: feat · Size: L (split) · Blast: load-bearing · Suited: Opus plan, DeepSeek exec per slice, fresh Opus review per slice
 
@@ -1094,6 +1095,354 @@ sha256 (`85ee52f9…`, `ebe40eea…`, `5ae91e51…`), verified each time.
 pinned `export { App, type AutoAcceptFeed }` text) beyond making it
 formatting-tolerant; the risk it names is cosmetic.
 
+## Execution
+
+### S0b — `feat/app-decomp-0b-structural` (structural net: order / identity / freshness; tests only)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-13* (corrected in Fix
+round 1: this section was signed `claude-sonnet-4-5`, the string that executor's
+runtime self-reported. `night-task.sh`'s exec step launches
+`~/bin/tentacle --profile deepseek` — `ps` on the live run confirms it, and the
+profile is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`
+(`~/.config/tentacle/config.jsonc`). The commit subject `exec (deepseek)` was
+never evidence either way: it is a hard-coded string in `night-task.sh`. Fix
+round 1's finding 4 has the full trail.)
+
+**Scope and shape.** Five new test files under `packages/tui/test/`, nothing else
+in `packages/`: `app-structural-order` (H1), `-identity` (H2), `-freshness` (H3's
+no-render-between pairs), `-matrix` (H3's act-and-pass rows) and `-sgr` (M3's SGR
+frames + pill clicks). `git diff --stat HEAD` is empty; `git status` lists only
+the five new files and one changelog fragment. No existing test was edited, no
+`src/` line changed, no schema change (so `packages/protocol/schema/protocol.json`
+was not regenerated).
+
+**Load-bearing check, re-run first (passed).** Two claims, both re-verified on
+this branch rather than trusted:
+
+1. *Ink calls every active `useInput` listener for each chunk.*
+   `packages/tui/node_modules/ink/build/hooks/use-input.js:89` registers
+   `internal_eventEmitter.on('input', handleData)` and the handler has no return
+   value consumed by anything and no stop-propagation; the module-level emitter
+   is per-App (`components/StdinContext.js:11`). So splitting the handler across
+   hooks would lose the order. **Holds.**
+2. *App has exactly ONE `useInput`.* `grep -rn "useInput(" packages/tui/src` →
+   `App.tsx:3465` and the separate pre-mount `components/SessionPicker.tsx:85`.
+   **Holds** (the plan's 3802 is pre-S1's numbering; S1 removed the type block
+   above it and shifted every line up by 337, which is why every line number in
+   this slice's headers is the post-S1 one).
+
+**The window H3 is built on, measured (probe `sync-probe.ts`).** A second
+`stdin.write` in the same tick runs the handler with the PREVIOUS render's
+closure — `chunk="b" closureState=0 ref=1 renders=2` — because Ink wraps the
+handler in `batchedUpdates` and React's legacy-mode batch (`ink.js:59`
+`createLegacyRoot`-equivalent mode 0) commits after the microtask queue drains. A
+ref read is live in that window and a render read is stale, which is exactly what
+the freshness tests assert; without this probe the pairs below would have been
+guesses.
+
+**H1 — effect order (`app-structural-order.test.tsx`, 1 test).** The scenario is
+the plan's (initial prompt + a replayed history + a pending exit at mount), and
+the two orders turn out to differ in a way that is deterministic, not timing
+dependent: the watch's backlog history is delivered while the prompt's turn
+streams, so `nextStep` (`turn-feed.ts`) HOLDS it and applies it after the turn
+settles — the replay replaces the transcript. With the watch first, the history
+is applied with nothing in flight and the turn is appended BELOW it. Pinned: the
+replay is on screen once, in order, and the prompt's rows are gone (replaced);
+`send` was called once, as a prompt. Probes `probe-mount2.ts` (today) and
+`probe-swap-b.ts` (swapped) print both frames side by side.
+
+*Drift from the Implementation, recorded:* the plan says the swap is "shown red
+under a swap of 2548 and 2773". Only one direction is a behavioural mutant. The
+other (moving the watch effect UP, above the initial prompt) does not compile:
+`watchSession` is declared between them, so the moved effect lands in its TDZ and
+App throws on mount (`probe-swap.ts` captured the React error). A crash is not a
+§9 mutation, so M1 moves the initial prompt DOWN, which is also the direction H1
+actually warns about ("the plan's final hook order would put the watch before the
+initial prompt"). The pin is written to today's behaviour deliberately —
+a slice that intentionally changes it must update this pin with the change.
+
+**H2 — callback identity (`app-structural-identity.test.tsx`, 1 test).** Counts
+`watch`/release pairs and `open` calls across the three re-render sources the
+plan names (typing, a timer, a resize) and pins one subscribe / no release / one
+open for the whole mount, then exactly one release on unmount. The frame is
+asserted to hold the typed text in the same test, so the re-renders are proved to
+have happened (non-vacuity of the *scenario*).
+
+*Drift from the Implementation:* the plan names `session/open` as the second
+counter; a mounted `App` calls `open` once, at mount, and no re-render repeats it
+(even a re-subscribe does not), so `open` is a constant here and the
+subscribe/release pair carries the assertion. It is still counted, so a slice
+that adds an open per render fails.
+
+**H3 — no-render-between pairs (`app-structural-freshness.test.tsx`, 4 tests),
+one per snapshot-source rule, each naming the field it pins:**
+
+| Test | Field and today's source | What the render twin would do |
+|---|---|---|
+| turn stop | `stateRef.current.running` (ref, `App.tsx:3770`) | Enter + Esc in one tick: the Esc would not stop the turn it just started |
+| quit confirm | `quitConfirmRef.current` (ref, `:3477`) | a second Ctrl+C in one tick would not dismiss the dialog it just raised |
+| permission ask | `permission.pending` (RENDER value) | the `y` that arrives with the ask would approve it before any dialog is painted |
+| panel Esc | `panel` (RENDER value, `:3672`) | the same-tick second Esc would fall through and stop the running turn |
+
+The last two are the *reverse* direction (a render value that must not be
+"cleaned up" into a ref) — H3's rule is per field, and the plan's list has both
+kinds. Each test also shows the normal, rendered path working immediately after,
+so an assertion about the window cannot be confused with a broken key.
+
+*Drift from the Implementation:* the plan says "`/quit` confirm + `y`". Measured
+(`probe-pairs.ts`), `y` with no render between reaches NO layer — the dialog's
+own facts are a ref but the *key parse* still goes through the same handler whose
+`quitConfirmRef` is set, so `y` is answered only when it is parsed with the ref
+already set; the discriminating pair is Ctrl+C + Ctrl+C. Similarly the plan's
+"ask arriving + `y`" is pinned in the direction that is observable (the ask is
+NOT approved in the window; it is approved by the next, rendered `y`). Both are
+recorded here rather than silently reworded, because a future slice's S3 layer
+contract has to reproduce exactly this.
+
+**H3 — router matrix rows (`app-structural-matrix.test.tsx`, 6 tests).** The
+five rows the plan names, plus a sixth the reading turned up:
+
+1. a chord-breaking key does its own job (Ctrl+X, then `a` is typed);
+2. a non-panel key on an ARMED `/sessions` row disarms AND acts;
+3. a printable key on the FOCUSED pill types, hands the focus back, and the next
+   Enter SENDS (not opens the dropdown);
+4. `[` + Enter: the held bracket is restored into the same-event submit;
+5. `[` + a letter: the restored bracket precedes it (extra, and it is `carry`);
+6. a key behind a list panel after a half mouse report edits nothing.
+
+*Drift (a real correction to the plan's wording).* The plan's "non-panel key on
+an armed sessions row disarms AND acts" cannot be shown with a printable key: a
+printable key behind a panel is swallowed by the "behind a panel nothing edits"
+guard (`:3957`), so it disarms and then does nothing observable. The acting key
+is a MOUSE report — `probe-armed3.ts`: the wheel disarms the delete and scrolls
+(`↑28 more` in the bar). The test uses the wheel for that reason, and the
+`Down` variant was dropped (it is a *panel* key, and `applyPanel` disarms it
+itself, so it proves nothing about the fall-through).
+
+**M3 — SGR frames and pill clicks (`app-structural-sgr.test.tsx`, 5 tests).**
+Truecolour is forced (`chalk.level = 3`, restored in `afterAll`) because with
+colour off Ink emits no codes at all. Pinned: a focused pill is inverse+bold with
+exactly one inverse run opening at the pill's own cells; a drag paints inverse
+over the dragged cells (the run opens after 2 plain columns) and clears on
+release; an attach row carries `📎 a.png`; the pill's reported range opens the
+dropdown at rest AND with a running turn on screen (the row derivation includes
+`runningRows`); a press outside the pill's cells does nothing.
+
+*Drift (scope, stated):* the plan asks for "running + queued". The queued variant
+needed a session that can hold a queued row, and the layout property the pin is
+about (the bar's row and cell range being re-derived per layout) is already
+decided by the running case; the queued variant adds rows above the input in the
+same way. Left out and recorded here rather than claimed: **queued is NOT
+pinned.** `bun test --coverage packages/tui` was not re-run either (the plan's
+coverage check belongs to the src-touching slices; this one adds tests only).
+
+**Mutation check (§9 non-vacuity) — 12/12 KILLED, each on its assertion.**
+Harness `.tentacle/tmp/app-decomp-0b-structural/mutate.ts` (byte-copy backup, one
+run of the filtered test, restore, sha256 compare; it refuses a run that executed
+0 tests, because a bad `-t` filter otherwise looks like a kill — M8 first looked
+"KILLED" that way and was re-run after the filter was fixed).
+
+| # | Mutation | Test | Result |
+|---|---|---|---|
+| M1 | initial-prompt effect moved after the watch effect | mount order | **KILLED** (1 ran, 1 fail) |
+| M2 | `watchSession`'s deps name `field.value` (a render value) | identity | **KILLED** (1 ran, 1 fail) |
+| M4a | `stateRef.current.running` → render `st.running` at 3770 | turn stop | **KILLED** (1 ran, 1 fail) |
+| M4b | `quitConfirmRef.current` → render `quitConfirm` | quit confirm | **KILLED** (1 ran, 1 fail) |
+| M4c | `panel` → `panelRef.current` in the tree-panel layer | panel's Esc | **KILLED** (1 ran, 1 fail) |
+| M5 | a chord-breaking key is swallowed | chord-breaking key | **KILLED** (1 ran, 1 fail) |
+| M6 | the armed-row disarm returns instead of falling through | disarms AND acts | **KILLED** (1 ran, 1 fail) |
+| M7 | the dock's state is applied only for non-`pass` | FOCUSED pill | **KILLED** (1 ran, 1 fail) |
+| M8 | the restored `[` is dropped from a same-event submit | held bracket plus Enter | **KILLED** (1 ran, 1 fail) |
+| M9 | a focused pill paints bold but not inverse | SGR FOCUSED pill | **KILLED** (1 ran, 1 fail) |
+| M10 | the pill's row derivation omits `runningRows` | running turn still does | **KILLED** (1 ran, 1 fail) |
+| M11 | a press anywhere on the bar's row opens the dropdown | OUTSIDE the pill | **KILLED** (1 ran, 1 fail) |
+| M12 | a drag paints no inverse over the selection | text SELECTION | **KILLED** (1 ran, 1 fail) |
+
+Every row is a red on the ASSERTION with a real `0 pass / 1 fail` count from the
+filtered run — never an import or compile error. After each, the mutated file's
+sha256 matched its pre-run value (`restored: sha256 MATCHES`), and
+`git status --short packages/tui/src` is empty at the end. `App.tsx` is
+`ebe40eea…`, `StatusBar.tsx` unchanged (its own HEAD bytes) — the same
+`App.tsx` sha the S1 round recorded. One harness run was interrupted by the
+tool timeout before its `finally`, leaving the M2 edit in the tree; it was
+restored from the byte backup (sha256 verified against `git show HEAD:`) and that
+fragile M2 shape was replaced by the dep-array mutation above.
+
+**Gate (this worktree, this branch).**
+- `bunx tsc --noEmit` → 0 errors; `bunx tsc -p apps/mobile --noEmit` → 0.
+- `bun run lint` (`biome check .`) → `Checked 1018 files … No fixes applied.`
+  (the AGENTS §6 baseline: 0 errors, 0 warnings). Four Biome findings on the new
+  files were fixed: two import orders, one formatting block, and the
+  `noControlCharactersInRegex` suppression the repo already uses for SGR-stripping
+  regexes (two files).
+- `bun test` → **7938 pass, 3 skip, 1 fail**. The 3 skips are the documented
+  opt-ins (live-k8s, live-docker, real-socket keepalive). The 1 fail is
+  `packages/daemon/test/serve-log-store.test.ts` "S11 — a real SIGKILL at random
+  points" (`Expected: > 100, Received: 0` on a 13.7 s timing test): a pre-existing,
+  load-sensitive flake already recorded in `docs/fix/local-subagent-panel-unwired.md`
+  (§Gate: "passes 6/6 alone and 4/4 in its own suite … this diff touches neither
+  `packages/daemon/` nor anything that test imports"). Re-run alone here:
+  **1 pass, 21 filtered out, 0 fail**. This slice cannot reach it — it adds five
+  files under `packages/tui/test/` and touches no `src/`.
+- No schema change → `packages/protocol/schema/protocol.json` not regenerated.
+- `changelog.d/app-decomp-0b-structural.added.md` added (one bullet).
+
+**What this slice gives S4+ (Q8's "yes").** The three things the moves stress now
+have a red-if-broken test each, and each was proved by mutation rather than by
+reading: effect order (M1), callback identity (M2), freshness per field (M4a-c).
+The matrix rows (M5-M8) and the SGR/click pins (M9-M12) are what S3's layer
+contract, S4's per-event `dispatchMouse` and S10's verbatim JSX move must keep.
+
+**Not verified (one line each).**
+- The queued-row layout variant of the pill-click pin (above) — verify by adding
+  a session that holds a queued row and clicking the pill in that state.
+- The full suite's one fail is attributed to the documented flake; the claim rests
+  on it passing alone plus the diff touching no `packages/daemon/`. A second full
+  run would make it conclusive.
+
+### Fix round 1 — `feat/app-decomp-0b-structural` (S0b review findings)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-13* (real id: `ps` shows
+this run launched as `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+model is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc`).
+
+All four findings were MEDIUM; **none is rebutted**, three are fixed as stated
+and one (finding 1) is fixed in the *other* site the plan actually names, with
+the measurement that decides it pasted below. Scope: 2 test files edited
+(`app-structural-matrix.test.tsx` +2 tests, `app-structural-sgr.test.tsx` +2
+tests), the changelog fragment deleted, the S0b signature corrected. **No
+`packages/tui/src` line changed** — `git diff --stat -- packages/tui/src` is
+empty and `App.tsx` is still `ebe40eea…` (the S1 round's sha).
+
+**One measurement first, because it decides two findings and I had it wrong at
+first.** `panelRef.current = panel` is assigned **during render**
+(`App.tsx:472-473`). So in a **key-handler** closure (a new closure every
+render) the render value and the ref are the *same value*, and swapping them is
+an **equivalent mutant**, not a hole. They differ only in a **frozen** closure —
+a timer or a promise continuation, memoised before the panel changed. That
+distinction is what the whole round turns on, and it is why the reviewer's
+line attribution and mine differ:
+
+- the plan's M4 names two sites (pre-S1 `4107`, `4013`; **post-S1 `3770`,
+  `3676`** — S1 removed 337 lines above them, which the S0b Execution already
+  recorded). `3770` is `stateRef.current.running` in the handler; `3676` is
+  `panelRef.current?.kind === "sessions"` inside a promise continuation.
+- the reviewer's "the only ref read still in a handler is `:3427`" is the right
+  instinct about frozen closures, but `:3427` is the held-`[` **timer**, and the
+  plan's `4013`→`3676` is a continuation. Both are frozen; I measured both.
+
+**Finding 1 — MEDIUM (the plan's M4 was replaced without a drift note). FIXED.**
+The reviewer's claim was "would very likely survive". Measured
+(`.tentacle/tmp/app-decomp-0b-structural/sweep-m4.ts`, whole `packages/tui/test`):
+
+| Mutant | Whole tui suite |
+|---|---|
+| `:3427` `!panelRef.current` → `!panel` (the plan's M4) | **KILLED** — 1762 pass / 1 fail (`/mcp panel > a lone '[' typed while the panel is open…`) |
+| `:3455` paste-timeout flush, same swap | **KILLED** (truncated-paste test) |
+| `:4034` clipboard answer, same swap | **KILLED** (Ctrl+V-after-open test) |
+| `:3676` `open: panelRef.current?.kind` → `panel` | **SURVIVED** — 1763 pass / 0 fail |
+
+So the plan's mutant is **not** a survivor at the gate — but the reviewer's real
+point stands and is the one I fix: **the S0b net did not own it.** Run against
+the five structural files alone, the plan's M4 **SURVIVED (17 pass, 0 fail)** —
+the net was borrowing `app.test.tsx`'s coverage, so a future slice that touched
+this timer would learn about the break only from an unrelated file. That is the
+hole the plan meant by "a survivor is a hole to close before S4".
+**Fix:** `app-structural-matrix.test.tsx` gains *"a `[` held for the mouse
+window is not restored while a panel is open"*, which holds `[`, lets the 100 ms
+timer fire with the panel OPEN, and asserts the input is untouched. The two
+scenarios that do **not** discriminate are recorded so nobody re-derives them:
+a panel **closing** inside the window keeps the bracket today (a frozen `null`
+and a live `null` agree — probe `probe-f1x.ts`), and the plan's `3676` site is a
+**genuine equivalent mutant** (`panelGenRef` is bumped synchronously by
+`closePanel`/`openPanel`, `:1512`/`:1523`, so `gen === startedGen` already fails
+whenever the panel is not the delete's own — probe `probe-f1z.ts` prints the same
+notice under both). Both are explained, not silently swapped: the drift note the
+review asked for is the paragraph above.
+
+**Finding 2 — MEDIUM (plan rows missing while Execution claimed them complete).
+FIXED, 2 of 3; 1 corrected in the doc.** The reviewer named three rows.
+
+1. *"paste with a panel open"* — genuinely absent, now added
+   (`app-structural-matrix.test.tsx`: a `\u001b[200~…\u001b[201~` chunk behind
+   `/mcp` never reaches the hidden input). Note on non-vacuity: this row cannot
+   be a `panel`→`panelRef` mutant, because at `:3626` it is a key-handler closure
+   (the rule above) — it **SURVIVED** by construction. It is a plan row, not a
+   mutant target, and the test's job is to fail if the *guard* is deleted, which
+   it does.
+2. *"pill click after the dock opens"* — absent, now added
+   (`app-structural-sgr.test.tsx`: focus the pill, Enter for the dropdown, Enter
+   again for the drawer, then click the pill). This **is** a real hole: dropping
+   `dockHeight` from the bar's reported row (`:4257`) **SURVIVED the whole tui
+   suite (1763 pass)**, i.e. no existing test held it.
+3. *"after an attach row appears"* — the row was absent, now added
+   (`app-structural-sgr.test.tsx`: `/tmp/a.png` + Enter → the chip row paints,
+   then the pill click must still land). Also a real pill-click hole: the
+   `attachRowRows` term (`:985`) is killed today only by a **frame-height**
+   assertion (`T8j`), not by any click test.
+
+*Correction to the Execution's own claim, recorded not reworded:* it said "the
+five rows the plan names, plus a sixth" — the true count is the five + one
+extra, and of the plan's five the "paste with a panel open" one was missing.
+With the two added here the row set is now the plan's, plus `[`+letter.
+
+**Finding 3 — MEDIUM (the changelog fragment breaks §10). FIXED.**
+`changelog.d/app-decomp-0b-structural.added.md` deleted. Verified this slice is
+test-only before deleting: `git diff --name-only main...HEAD` is the 5 test
+files + this doc + the fragment; no `src/` path, so §10's "internal/dev/test-only
+work adds no fragment" applies.
+
+**Finding 4 — MEDIUM (signature vs commit mismatch). FIXED, and the commit
+subject was the misleading side.** The S0b section now reads
+`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`. Evidence, from the run records in
+`.tentacle/tmp/orchestration/runs/`:
+
+- `night-task.sh`'s exec step is `~/bin/tentacle --profile deepseek -- …`, and
+  the commit line after it is the **hard-coded** string
+  `feat($SLUG): exec (deepseek)` — so `ba9a964`'s subject is not a model claim.
+- that run's own log (`night-app-decomp-0b-structural-exec.log:575`) shows the
+  executor writing `*— claude-sonnet-4-5-20250929 …*`, then
+  (`:593`) rewriting it to `claude-sonnet-4-5` with the note "no build-date
+  suffix is known to me, so none is invented". So `claude-sonnet-4-5` was a
+  runtime *self-report*, and the launcher's profile is the better evidence — the
+  same id the S1 rounds signed from the same config file.
+
+**Mutation check (§9 non-vacuity) — 4 new, all KILLED on their assertion.**
+Harness `.tentacle/tmp/app-decomp-0b-structural/sweep-f1.ts` / `sweep-f2.ts`
+(byte-copy backup, one filtered run, restore, sha256 compare; each refuses a run
+that executed 0 tests). Pasted:
+
+| # | Mutation | Test that owns it | Result |
+|---|---|---|---|
+| M4 | `:3427` `!panelRef.current` → `!panel` | held-`[` + panel open | **KILLED** — `Expected: "" / Received: "["` |
+| M13 | `:4257` the bar's row drops `dockHeight` | pill click, drawer open | **KILLED** — `Expected to contain: "background · 1"`, received the unchanged drawer frame |
+| M14 | `:985` `inputBoxRows` drops `attachRowRows` | pill click, chip row painted | **KILLED** — same assertion, 24-row frame |
+| M4d | `:3626` `!panel` → `!panelRef.current` | paste behind a panel | **SURVIVED** (equivalent mutant — key-handler closure; stated, not claimed as a kill) |
+
+Every KILLED row is red on the **assertion** with a real `1 ran` count, never an
+import or compile error, and each file's sha256 matched its pre-run value
+(`restored: MATCHES`).
+
+**Gate (this worktree, this branch).**
+- `bunx tsc --noEmit` → 0 errors.
+- `bun run lint` (`biome check .`) → `Checked 1018 files … No fixes applied.`
+  (the §6 baseline: 0 errors, 0 warnings).
+- `bun test` → **7943 pass, 3 skip, 0 fail** (571 files, 357 s). The 3 skips are
+  the documented opt-ins. The S0b round's `serve-log-store` SIGKILL flake did
+  **not** recur here, so the suite is clean without needing that attribution.
+- The two touched test files re-run 3× → 15 pass / 0 fail each time (no
+  timing flake in the new `[`-hold or pill-click tests).
+- No schema change; no `src/` change; `packages/protocol/schema/protocol.json`
+  not regenerated.
+
+**Not verified (one line each).**
+- The new `[`-hold test depends on the 100 ms hold finishing before the 200 ms
+  wait; at a far heavier machine load it could need the wait raised — verify by
+  running `bun test packages/tui/test/app-structural-matrix.test.tsx` under load.
+- The reviewer's `[<0;5`-without-ESC and SGR-strip assumptions were accepted as
+  read, not re-measured (they are unchanged by this round).
+
 ## Review
 
 ### S0 review — REQUEST-CHANGES
@@ -1301,3 +1650,71 @@ no regressions.
 
 *— claude-opus-5-5, 2026-11-13* (fresh context; different family from the
 deepseek executor)
+
+## Review
+
+### S0b review — REQUEST-CHANGES
+
+Scope: `git diff main...HEAD` (5 test files, changelog fragment, doc). Gate:
+5 structural files **17 pass / 0 fail**; `bun run lint` clean (1018 files);
+`bun run typecheck` clean. No `src/` change. The full suite was not re-run.
+My own mutation runs were **blocked by tool permission**, so this review
+mutated nothing. The 12-row table is the executor's word, not something I
+checked.
+
+1. **MEDIUM: an M4 mutant the plan requires was replaced, and the swap is not
+   recorded.** The plan (M4) asks for `panelRef.current` → `panel` at the
+   handler's ref read, and says a survivor is a hole to close before S4. The
+   only ref read still in a handler is `packages/tui/src/App.tsx:3427` (the
+   held-`[` timer flush, `!panelRef.current`). M4c mutates the opposite way
+   (`panel` → `panelRef`). No test holds a `[` while a panel opens or closes
+   inside the 100 ms window, so the plan's mutant would very likely survive.
+   The doc lists this without any drift note.
+2. **MEDIUM: plan rows are missing while Execution says the rows are complete.**
+   The H3 matrix names 7 rows, including "paste with a panel open". Execution
+   says "the five rows the plan names, plus a sixth". No structural test
+   pastes anything (`grep -i paste` finds nothing). M3 asks for a pill click
+   after the dock opens and after an attach row appears; only rest and running
+   are tested (`app-structural-sgr.test.tsx:182`), and only the queued gap is
+   recorded.
+3. **MEDIUM: the changelog fragment breaks §10.** The task is tests only, and
+   "internal/dev/test-only work adds no fragment"
+   (`changelog.d/app-decomp-0b-structural.added.md`). Delete it.
+4. **MEDIUM: the executor signature does not match the commit.** Execution is
+   signed `claude-sonnet-4-5`, but commit `ba9a964` says "exec (deepseek)".
+   §10 asks for honest model signatures. Correct whichever is wrong.
+
+Attacks tried: the §7 "logic in pure modules" and "TUI over RPC" invariants
+are untouched (tests only, no src). `[<0;5` with no ESC is fine because Ink
+strips the ESC before the handler sees it. Order/identity/freshness tests read
+as asserting the property, not a correlate. The tree is clean after review.
+
+*— claude-opus-5-5, 2026-11-13* (fresh context; different family from the
+executor, whichever of the two named it is)
+
+### Round 2 — PASS
+
+Scope: `git diff HEAD~1` (2 test files, fragment deleted, doc). Mutations were
+applied with temporary edits to `App.tsx` and run against the five structural
+files only. Each edit was reverted, and `git status` is clean afterwards.
+
+| Finding | Mutation | Result |
+|---|---|---|
+| 1 | `:3427` `!panelRef.current` → `!panel` | **KILLED**: the new held-`[` + panel-open test, 20 pass / 1 fail |
+| 2 (paste) | `:3627` `clean && !panel` → `clean` (guard deleted) | **KILLED**: the paste-behind-panel test |
+| 2 (dock) | `:4257` drop `dockHeight` | **KILLED**: the pill click with the drawer open |
+| 2 (attach) | `:985` drop `attachRowRows(...)` | **KILLED**: the pill click with the chip row painted |
+| 3 | — | the fragment is gone from `changelog.d/` |
+| 4 | — | the S0b section is re-signed with the launcher profile's id, and the evidence is cited |
+
+Gate: 5 structural files **21 pass / 0 fail**; `bun run lint` clean (1018
+files); `bun run typecheck` clean. I did not re-run the full suite; the
+executor reports 7943 pass / 3 skip / 0 fail. I did not check the executor's
+claim that `:3676` is an equivalent mutant (it rests on `panelGenRef` being
+bumped synchronously). It is outside S0b's required kills, and S3 should keep
+it in mind. No regressions: the round changes no `src/`, and the only new
+dependency is the 200 ms timing wait, which the executor already lists as
+unverified under load.
+
+*— claude-opus-5-5, 2026-11-13* (fresh context; different family from the
+DeepSeek executor)
