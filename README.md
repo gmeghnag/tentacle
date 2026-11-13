@@ -415,9 +415,18 @@ tentacle config set model.model qwen3       # the same, as two words
 tentacle config set tools.writableDirs '["/tmp","~/scratch"]'
 tentacle config --unset subagents.maxParallel
 tentacle config get subagents.maxParallel   # the value as stored (--json)
-tentacle config list                        # every setting in the file
+tentacle config list                        # every KNOWN setting: value + its origin
+tentacle config list --set                  # only the settings this file holds
 tentacle config path                        # which file these edit
 ```
+
+`config list` walks the key registry, so a setting you never wrote is listed too,
+with the value it really has and where that value comes from:
+`model.images = false  # default (openai-compatible)`, `maxIterations = 8  # file`,
+`model.model = "work-id"  # profile work`, `engine = "docker"  # env TENTACLE_ENGINE`.
+A key with no value at all reads `(unset)  # no default`. `config get <key>` answers
+for an unset key with the same line (exit 0) instead of failing; a key the registry
+does not know is still refused. `--set` keeps the file-only list for scripts.
 
 A value is typed by the key, not guessed: `true`/`false` for a boolean, a number
 for a numeric key, one of the listed values for an enum, and JSON for an array or

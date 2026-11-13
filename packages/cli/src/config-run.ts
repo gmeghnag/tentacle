@@ -33,6 +33,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import {
   type EditOp,
+  type Env,
   KEY_DOCS,
   type KeyNode,
   appliesToText,
@@ -54,6 +55,13 @@ import {
   validateFileConfig,
 } from "@tentacle/config";
 import type { ConfigOp } from "./config-args.ts";
+import {
+  type EffectiveEntry,
+  effectiveEntries,
+  effectiveEntry,
+  effectiveLine,
+  originText,
+} from "./config-effective.ts";
 
 /** What `stat` says about the config file. */
 export interface FileStat {
@@ -143,6 +151,11 @@ export interface ConfigRunInput {
   /** A hidden prompt on a terminal (no echo: the value may be a key). A
    * resolved `undefined` means the user cancelled (Ctrl+C / EOF). */
   readonly readSecret?: (prompt: string) => Promise<string | undefined>;
+  /**
+   * The environment the EFFECTIVE view reads (`config list`, `get` on an unset
+   * key). Default: `process.env` — the same environment the loader will see.
+   */
+  readonly env?: Env;
 }
 
 export interface ConfigRunResult {
@@ -768,7 +781,57 @@ async function write(
   return { code: 0, out: out.join(""), err: err.join("") };
 }
 
-/** `get`: the value AS STORED, masked when secret, exit 1 when it is not set. */
+/** The effective entry for `key`, built from the file as it was parsed. */
+function effectiveEntryOf(
+  /** The key's segments IN THE FILE (`profiles.work.model.images` with --profile). */
+  segments: readonly string[],
+  fileValue: unknown,
+  input: ConfigRunInput,
+): EffectiveEntry | undefined {
+  // The registry refuses what it does not know (`resolveTarget`), and the view is
+  // only ever built from a file this run parsed: `parsed.value` stays unknown to
+  // keep `config-effective` free of the schema's I/O-free subset assumptions.
+  const fileConfig = (
+    typeof fileValue === "object" && fileValue !== null ? fileValue : {}
+  ) as never;
+  // ONE environment for both forms: `list` reads `envOf` (the process's own when
+  // a test injects none), so `get` must too, or `TENTACLE_PROFILE=w` makes the
+  // two disagree about the same key.
+  const env = envOf(input);
+  const profile = input.profile ?? (env.TENTACLE_PROFILE || undefined);
+  // The view lists the SETTING's own path (`model.images`), never the file's
+  // `profiles.<name>.…` — the profile is folded into the view, and the origin
+  // column says `profile <name>` (config-effective.ts). Look the key up the same way.
+  const settings =
+    profile !== undefined && segments[0] === "profiles" && segments[1] === profile
+      ? segments.slice(2)
+      : segments;
+  return effectiveEntry(settings.join("."), {
+    fileConfig,
+    ...(profile !== undefined ? { profile } : {}),
+    env,
+  });
+}
+
+/** `get` on an unset key: the effective value AND its origin, exit 0 (owner 2026-11-13). */
+function effectiveGet(entry: EffectiveEntry, key: string, input: ConfigRunInput): ConfigRunResult {
+  if (input.json) {
+    return {
+      code: 0,
+      out: `${JSON.stringify({
+        key,
+        value: entry.value ?? entry.text,
+        origin: originText(entry.origin),
+      })}\n`,
+      err: "",
+    };
+  }
+  return { code: 0, out: line(effectiveLine(entry)), err: "" };
+}
+
+/** `get`: the value AS STORED, masked when secret; an unset KEY answers with its
+ * effective value and origin, exit 0 (owner 2026-11-13); only a key with no
+ * value at all (no default, unset) is exit 1. */
 function get(input: ConfigRunInput, op: Extract<ConfigOp, { kind: "get" }>): ConfigRunResult {
   const fs = input.fs ?? nodeConfigFs;
   const target = resolveTarget(op.key, input.profile);
@@ -788,6 +851,14 @@ function get(input: ConfigRunInput, op: Extract<ConfigOp, { kind: "get" }>): Con
   }
   const found = readPath(parsed.value, target.segments);
   if (!found.found) {
+    // An unset key still HAS an effective value (its default, an env var, its
+    // profile's) — that is the answer the owner asked for. A key the registry
+    // does not know never reaches here: `resolveTarget` refused it above, so
+    // nothing is ever invented for an unknown path.
+    const effective = effectiveEntryOf(target.segments, parsed.value, input);
+    if (effective !== undefined && effective.origin.kind !== "unset") {
+      return effectiveGet(effective, target.segments.join("."), input);
+    }
     const doc = docForKey(target.segments.join("."));
     const fallback =
       doc?.defaultText ?? (doc?.default === undefined ? undefined : JSON.stringify(doc.default()));
@@ -796,7 +867,8 @@ function get(input: ConfigRunInput, op: Extract<ConfigOp, { kind: "get" }>): Con
       out: "",
       err:
         line(`[error] ${op.key} is not set in ${shown(input.configPath)}`) +
-        (fallback !== undefined ? line(`default: ${fallback}`) : ""),
+        (fallback !== undefined ? line(`default: ${fallback}`) : "") +
+        (effective !== undefined ? line("nothing is set, so there is no effective value") : ""),
     };
   }
   // HIGH-2: every form renders the MASKED tree, never `found.value` — an object
@@ -812,8 +884,11 @@ function get(input: ConfigRunInput, op: Extract<ConfigOp, { kind: "get" }>): Con
   return { code: 0, out: line(renderStored(masked, target.segments)), err: "" };
 }
 
-/** `list`: every setting the file holds, one `key = value` line, secrets masked. */
-function list(input: ConfigRunInput): ConfigRunResult {
+/**
+ * `list --set`: every setting the FILE holds, one `key = value` line, secrets
+ * masked — the behaviour of every earlier build, output byte-identical.
+ */
+function listSet(input: ConfigRunInput): ConfigRunResult {
   const fs = input.fs ?? nodeConfigFs;
   if (fs.kind(input.configPath) === "missing") {
     return { code: 0, out: "", err: line(`[error] no config file at ${shown(input.configPath)}`) };
@@ -857,6 +932,69 @@ function list(input: ConfigRunInput): ConfigRunResult {
   };
 }
 
+/** Who decides the origin: the process's own environment unless a test injects one. */
+const envOf = (input: ConfigRunInput): Env => input.env ?? process.env;
+
+/**
+ * `list` (owner 2026-11-13): every KNOWN key — the registry — with its effective
+ * value and the origin as a trailing comment. `--set` keeps the file-only view.
+ */
+function listAll(input: ConfigRunInput): ConfigRunResult {
+  const fs = input.fs ?? nodeConfigFs;
+  const present = fs.kind(input.configPath) !== "missing";
+  const snapshot = present ? readSnapshot(fs, input.configPath) : undefined;
+  if (snapshot !== undefined && !snapshot.ok) {
+    return snapshot.result;
+  }
+  const parsed = snapshot === undefined ? undefined : parseConfigText(snapshot.text);
+  if (parsed !== undefined && !parsed.ok) {
+    return planRefusal(parsed.error, parsed, "the file");
+  }
+  const profile = input.profile ?? (envOf(input).TENTACLE_PROFILE || undefined);
+  if (profile !== undefined) {
+    // Refuse an unknown profile BEFORE printing defaults for it: the origin
+    // column would otherwise say `profile <name>` about a profile that is not
+    // there. `effectiveEntries` answers nothing for one, so this is the honest
+    // refusal, in the same words `--set` uses.
+    const defined = readPath(parsed?.value ?? {}, ["profiles", profile]);
+    if (!defined.found) {
+      return {
+        code: 1,
+        out: "",
+        err: line(`[error] no profile "${profile}" in ${shown(input.configPath)}`),
+      };
+    }
+  }
+  const file = parsed?.value ?? {};
+  if (typeof file !== "object" || file === null || Array.isArray(file)) {
+    // A config file is a JSON OBJECT. Saying so is honest; walking a string or an
+    // array as if it were settings would invent paths (`0 = "x"`) that the
+    // loader will refuse anyway.
+    return {
+      code: 1,
+      out: "",
+      err: line(`[error] ${shown(input.configPath)}: a config file is a JSON object`),
+    };
+  }
+  const entries = effectiveEntries({
+    fileConfig: file as never,
+    ...(profile !== undefined ? { profile } : {}),
+    env: envOf(input),
+  });
+  if (input.json) {
+    const rows = entries.map((entry) =>
+      JSON.stringify({
+        path: entry.path,
+        value: entry.value ?? entry.text,
+        origin: originText(entry.origin),
+      }),
+    );
+    return { code: 0, out: rows.length === 0 ? "[]\n" : `[${rows.join(",")}]\n`, err: "" };
+  }
+  const missing = present ? "" : line(`[error] no config file at ${shown(input.configPath)}`);
+  return { code: 0, out: `${entries.map(effectiveLine).join("\n")}\n`, err: missing };
+}
+
 /** Answer one `tentacle config` invocation. Pure logic above; I/O only here. */
 export async function runConfig(input: ConfigRunInput): Promise<ConfigRunResult> {
   const op = input.op;
@@ -864,7 +1002,7 @@ export async function runConfig(input: ConfigRunInput): Promise<ConfigRunResult>
     case "path":
       return { code: 0, out: line(input.configPath), err: "" };
     case "list":
-      return list(input);
+      return op.setOnly ? listSet(input) : listAll(input);
     case "get":
       return get(input, op);
     case "set":

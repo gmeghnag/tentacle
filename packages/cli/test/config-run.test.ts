@@ -510,8 +510,8 @@ describe("HIGH-2/Q-B: get and list render only the masked tree", () => {
       await run({ kind: "get", key: "mcpServers.fs" }, { json: true }),
       await run({ kind: "get", key: "profiles" }, { json: true }),
       await run({ kind: "get", key: "model.apiKey" }, { json: true }),
-      await run({ kind: "list" }),
-      await run({ kind: "list" }, { json: true }),
+      await run({ kind: "list", setOnly: true }),
+      await run({ kind: "list", setOnly: true }, { json: true }),
     ];
     for (const got of runs) {
       expect(got.code).toBe(0);
@@ -538,7 +538,7 @@ describe("HIGH-2/Q-B: get and list render only the masked tree", () => {
     // from `list`/`get`, so only the registry's secret set masks.
     // (docs/fix/config-unknown-plain.md)
     seededUnknown();
-    const listed = await run({ kind: "list" });
+    const listed = await run({ kind: "list", setOnly: true });
     expect(listed.code).toBe(0);
     expect(listed.out).toContain('model.foo = "hello-typo"');
     // An unknown OBJECT recurses like any plain section (no mask stops the walk).
@@ -549,10 +549,9 @@ describe("HIGH-2/Q-B: get and list render only the masked tree", () => {
     expect(listed.out).toContain("mcpServers.fs.env.ANYTHING = ***");
     expect(listed.out).toContain("mcpServers.fs.headers.Y = ***");
     expect(listed.out).not.toContain(SECRET);
-    const json = JSON.parse((await run({ kind: "list" }, { json: true })).out) as Record<
-      string,
-      unknown
-    >;
+    const json = JSON.parse(
+      (await run({ kind: "list", setOnly: true }, { json: true })).out,
+    ) as Record<string, unknown>;
     expect(json["model.foo"]).toBe("hello-typo");
     expect(json["model2.nope"]).toBe("visible");
     expect(json.bogus).toBe("wrong-place");

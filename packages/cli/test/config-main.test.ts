@@ -324,16 +324,120 @@ describe("the command surface (owner Q7)", () => {
     expect(readFileSync(configPath, "utf8")).toContain("// Max model/tool iterations per turn.");
   });
 
-  test("get prints the value as stored; a missing one names the default", async () => {
+  test("get prints the value as stored; an unset key answers with its effective value", async () => {
     seeded();
     await run(["subagents.maxParallel=3"]);
     const got = await run(["get", "subagents.maxParallel"]);
     expect(got.code).toBe(0);
     expect(got.out.trim()).toBe("3");
-    const absent = await run(["get", "tools.maxParallel"]);
-    expect(absent.code).toBe(1);
-    expect(absent.err).toContain("not set");
-    expect(absent.err).toContain("8");
+    // A set key is unchanged: the stored value alone, no comment.
+    await run(["model.model=qwen3"]);
+    const stored = await run(["get", "model.model"]);
+    expect(stored.code).toBe(0);
+    expect(stored.out.trim()).toBe('"qwen3"');
+  });
+
+  test("get on an unset key prints the effective value and its origin, exit 0", async () => {
+    // The owner's rule (2026-11-13): the error is gone, the answer takes its
+    // place. Mutation: restore the old `not set` refusal → both fail.
+    seeded();
+    const images = await run(["get", "model.images"]);
+    expect(images.code).toBe(0);
+    expect(images.out.trim()).toBe("model.images = false  # default (openai-compatible)");
+    const limit = await run(["get", "model.maxImageBytes"]);
+    expect(limit.code).toBe(0);
+    expect(limit.out.trim()).toBe("model.maxImageBytes = 5242880  # default (openai-compatible)");
+    // An env var is an origin too, and the value follows it.
+    process.env.TENTACLE_PROVIDER = "anthropic";
+    try {
+      const anthropic = await run(["get", "model.images"]);
+      expect(anthropic.out.trim()).toBe("model.images = true  # default (anthropic)");
+    } finally {
+      process.env.TENTACLE_PROVIDER = undefined;
+    }
+  });
+
+  test("get answers for an env-only key too, and never prints the env's secret (review fix 1)", async () => {
+    // `model.apiKey` and `engine` have no `sources` field: the loader reads their
+    // env var directly, so before the fix `get` said "not set" while the CLI was
+    // using the env value. Mutation: drop the ENV_DIRECT predicates → exit 1.
+    seeded();
+    process.env.TENTACLE_MODEL_API_KEY = "sk-MUSTNOTAPPEAR";
+    process.env.TENTACLE_ENGINE = "docker";
+    try {
+      const key = await run(["get", "model.apiKey"]);
+      expect(key.code).toBe(0);
+      expect(key.out.trim()).toBe("model.apiKey = ***  # env TENTACLE_MODEL_API_KEY");
+      expect(`${key.out}${key.err}`).not.toContain("sk-MUSTNOTAPPEAR");
+      const engine = await run(["get", "engine"]);
+      expect(engine.code).toBe(0);
+      expect(engine.out.trim()).toBe('engine = "docker"  # env TENTACLE_ENGINE');
+      // Nothing leaks through the machine form either.
+      const json = await run(["list", "--json"]);
+      expect(json.code).toBe(0);
+      expect(json.out).not.toContain("sk-MUSTNOTAPPEAR");
+    } finally {
+      for (const name of ["TENTACLE_MODEL_API_KEY", "TENTACLE_ENGINE"]) {
+        delete process.env[name]; // computed, so `noDelete` allows it (AGENTS §6)
+      }
+    }
+  });
+
+  test("get follows TENTACLE_PROFILE exactly as list does (review fix 3)", async () => {
+    // The two forms must read ONE environment. `list` already resolved
+    // `TENTACLE_PROFILE` from `process.env`; `get` read only the injected `env`,
+    // so with the real variable set it answered for no profile at all.
+    // Mutation: pass `input.env?` instead of `envOf(input)` → the two disagree
+    // (`5242880  # default (openai-compatible)` vs the profile's answer).
+    seeded();
+    await run(["set", "model.provider", "anthropic", "--profile", "work"]);
+    process.env.TENTACLE_PROFILE = "work";
+    try {
+      const got = await run(["get", "model.maxImageBytes"]);
+      expect(got.code).toBe(0);
+      expect(got.out.trim()).toBe("model.maxImageBytes = 3932160  # default (anthropic)");
+      // …and the two forms agree on that key, which is what was broken.
+      const listed = await run(["list"]);
+      expect(listed.out).toContain("model.maxImageBytes = 3932160  # default (anthropic)");
+    } finally {
+      const name = "TENTACLE_PROFILE";
+      delete process.env[name]; // computed, so `noDelete` allows it (AGENTS §6)
+    }
+  });
+
+  test("get --profile <unset key> answers for the SETTING, not the file's profile path (review fix 4)", async () => {
+    // `resolveTarget` prefixes `profiles.<name>.`; the effective view lists the
+    // setting's own path. Looking up the prefixed path found nothing, so the
+    // owner's rule 3 (exit 0 for an unset key) did not hold under `--profile`.
+    // Mutation: look up `target.segments.join(".")` → back to exit 1.
+    seeded();
+    await run(["set", "model.provider", "anthropic", "--profile", "work"]);
+    const unset = await run(["get", "model.images", "--profile", "work"]);
+    expect(unset.code).toBe(0);
+    expect(unset.out.trim()).toBe("model.images = true  # default (anthropic)");
+    // A provider-dependent default the profile only INFLUENCED says `default`,
+    // never `profile work` (fix 2, end to end).
+    const limit = await run(["get", "model.maxImageBytes", "--profile", "work"]);
+    expect(limit.code).toBe(0);
+    expect(limit.out.trim()).toBe("model.maxImageBytes = 3932160  # default (anthropic)");
+    // A key the profile SETS is still printed as stored (that path never changed).
+    const provider = await run(["get", "model.provider", "--profile", "work"]);
+    expect(provider.out.trim()).toBe('"anthropic"');
+    // No `--profile`: unchanged, the base view.
+    const base = await run(["get", "model.maxImageBytes"]);
+    expect(base.out.trim()).toBe("model.maxImageBytes = 5242880  # default (openai-compatible)");
+  });
+
+  test("get on a key with NO value at all still refuses, and an unknown key still refuses", async () => {
+    seeded();
+    // A key with no default and nothing set has no effective value to print.
+    const unset = await run(["get", "model.titleModel"]);
+    expect(unset.code).toBe(1);
+    expect(unset.err).toContain("is not set");
+    // An unknown key is refused before anything is computed (unchanged).
+    const unknown = await run(["get", "model2"]);
+    expect(unknown.code).toBe(1);
+    expect(unknown.err).toContain("unknown config key");
   });
 
   test("a parseable file that fails the schema: `get`/`list` still answer", async () => {
@@ -346,8 +450,39 @@ describe("the command surface (owner Q7)", () => {
     expect(got.out.trim()).toBe("8");
     const listed = await run(["list"]);
     expect(listed.code).toBe(0);
-    expect(listed.out).toContain('model.provider = "nope"');
-    expect(listed.out).toContain("maxIterations = 8");
+    expect(listed.out).toContain('model.provider = "nope"  # file');
+    expect(listed.out).toContain("maxIterations = 8  # file");
+  });
+
+  test("a value of the wrong SHAPE never crashes the effective view", async () => {
+    // `list` runs BEFORE the loader, on the file as written, so a wrong shape is
+    // a thing to answer for — never a TypeError. The loader itself refuses these
+    // loudly at startup; this view just must not be the thing that dies.
+    mkdirSync(configDir, { recursive: true });
+    const shapes = [
+      '{\n  "model": "not-an-object",\n  "profiles": { "work": { "tools": 5 } }\n}\n',
+      '{\n  "maxIterations": "abc",\n  "subagents": 5,\n  "hooks": "x"\n}\n',
+    ];
+    for (const text of shapes) {
+      writeFileSync(configPath, text);
+      const plain = await run(["list"]);
+      expect(plain.code).toBe(0);
+      expect(plain.out).toContain("model.images = false  # default (openai-compatible)");
+      const withProfile = await run(["list", "--profile", "work"]);
+      // Shape 1 defines `profiles.work` (badly); shape 2 defines none at all — an
+      // unknown profile is refused in words, and a bad one still answers.
+      expect(`${withProfile.out}${withProfile.err}`).not.toContain("TypeError");
+      if (withProfile.code === 0) {
+        expect(withProfile.out).toContain("model.images = false  # default");
+      } else {
+        expect(withProfile.err).toContain("no profile");
+      }
+    }
+    // A file that is not a JSON OBJECT at all: refused, in words, not walked.
+    writeFileSync(configPath, '"x"\n');
+    const notObject = await run(["list"]);
+    expect(notObject.code).toBe(1);
+    expect(notObject.err).toContain("a config file is a JSON object");
   });
 
   test("a map entry is created from one leaf, and the schema infers `type`", async () => {
@@ -386,8 +521,22 @@ describe("the command surface (owner Q7)", () => {
     await run(["subagents.maxParallel=3"]);
     const got = JSON.parse((await run(["get", "subagents.maxParallel", "--json"])).out) as unknown;
     expect(got).toEqual({ key: "subagents.maxParallel", value: 3 });
-    const listed = JSON.parse((await run(["list", "--json"])).out) as unknown;
+    const listed = JSON.parse((await run(["list", "--set", "--json"])).out) as unknown;
     expect(listed).toEqual({ model: {}, "subagents.maxParallel": 3 });
+    // The default `--json` form is the effective array, with an origin per key.
+    const effective = JSON.parse((await run(["list", "--json"])).out) as {
+      path: string;
+      value: unknown;
+      origin: string;
+    }[];
+    const images = effective.find((entry) => entry.path === "model.images");
+    expect(images).toEqual({
+      path: "model.images",
+      value: false,
+      origin: "default (openai-compatible)",
+    });
+    const set = effective.find((entry) => entry.path === "subagents.maxParallel");
+    expect(set).toEqual({ path: "subagents.maxParallel", value: 3, origin: "file" });
   });
 
   test("--profile targets profiles.<name> in the same file", async () => {
@@ -401,7 +550,65 @@ describe("the command surface (owner Q7)", () => {
     const got = await run(["get", "model.model", "--profile", "work"]);
     expect(got.out.trim()).toBe('"qwen3-coder"');
     const listed = await run(["list", "--profile", "work"]);
-    expect(listed.out).toContain("profiles.work.model.model");
+    expect(listed.out).toContain('model.model = "qwen3-coder"  # profile work');
+  });
+
+  test("list: every known key with its effective value and origin (owner 2026-11-13)", async () => {
+    // The repro of this task, turned green: the unset `model.images` is listed —
+    // so `config list | grep image` finds it — with the default it really has.
+    // Mutation: make `list` print only the file again → every assertion fails.
+    seeded();
+    await run(["maxIterations=8"]);
+    const { code, out } = await run(["list"]);
+    expect(code).toBe(0);
+    expect(out).toContain("model.images = false  # default (openai-compatible)");
+    expect(out).toContain("maxIterations = 8  # file");
+    expect(out.split("\n").filter((line) => line.includes("image")).length).toBeGreaterThan(1);
+    // Every known leaf, one line each, and the file's unknown key still shown.
+    const paths = out
+      .trim()
+      .split("\n")
+      .map((line) => line.split(" = ")[0]);
+    expect(new Set(paths).size).toBe(paths.length);
+    expect(paths).toContain("model.maxImageBytes");
+    expect(paths).toContain("tui.theme");
+    expect(paths).not.toContain("model"); // a section is not a setting
+    // A key with no value at all says so instead of inventing one.
+    expect(out).toContain("model.titleModel = (unset)  # no default");
+  });
+
+  test("list --set prints exactly what it used to: only the file's own keys", async () => {
+    // The compatibility half of the owner's decision: the old output is still
+    // reachable, byte for byte (no origin column, nothing unset).
+    seeded();
+    await run(["maxIterations=8"]);
+    await run(["model.model=qwen3"]);
+    const { code, out, err } = await run(["list", "--set"]);
+    expect(code).toBe(0);
+    expect(err).toBe("");
+    expect(out).toBe('maxIterations = 8\nmodel.model = "qwen3"\n');
+    // …and the default form is what changed, so the two cannot be the same code.
+    const all = await run(["list"]);
+    expect(all.out).not.toBe(out);
+  });
+
+  test("list --json carries path, value and origin", async () => {
+    seeded();
+    const listed = JSON.parse((await run(["list", "--json"])).out) as {
+      path: string;
+      value: unknown;
+      origin: string;
+    }[];
+    expect(listed.length).toBeGreaterThan(60);
+    expect(listed.find((entry) => entry.path === "model.images")).toEqual({
+      path: "model.images",
+      value: false,
+      origin: "default (openai-compatible)",
+    });
+    // A secret is masked in this form too (never a prefix, never a length).
+    await run(["model.apiKey=sk-JSON4"]);
+    const withSecret = (await run(["list", "--json"])).out;
+    expect(withSecret).not.toContain("sk-JSON4");
   });
 
   test("a key that already names a profile is ambiguous with --profile", async () => {

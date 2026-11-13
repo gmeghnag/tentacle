@@ -180,9 +180,10 @@ export const ARGS = {
   // `tentacle config set/unset/get/list/path` (docs/feat/config-set.md). The
   // positional words are the command and its key/value: a key never holds `=` or
   // a space, so the shorthand `<key>=<value>` cannot be confused with them.
+  // `--set` narrows `list` to what the FILE holds (feat/config-list-effective).
   config: {
     values: { profile: {}, unset: {} },
-    bools: { json: {}, yes: {} },
+    bools: { json: {}, yes: {}, set: {} },
     positional: { min: 0, max: 3 },
   },
   update: { values: { version: {} }, bools: { check: {} }, positional: { min: 0, max: 0 } },
@@ -736,7 +737,7 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   package: "tentacle package install <path|git-url>[#ref] | list | remove <name> | update [<name>]",
   explain: "tentacle explain [key] [--all] [--json]",
   config:
-    "tentacle config set <key> <value> | <key>=<value> | unset <key> | get <key> | list | path [--profile <name>] [--json] [--yes]",
+    "tentacle config set <key> <value> | <key>=<value> | unset <key> | get <key> | list [--set] | path [--profile <name>] [--json] [--yes]",
   update: "tentacle update [--check] [--version vX.Y.Z]",
   tui: "tentacle [-i] [--resume [uid]|--continue] [--in-process] [--model <id>] [--profile <name>]",
 };
