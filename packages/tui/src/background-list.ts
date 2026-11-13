@@ -520,7 +520,7 @@ export interface DrawerView {
   readonly sent: readonly DrawerSent[];
 }
 
-/** `✓ finished · report sent to the agent` / `✗ stopped`, else the live counters. */
+/** `✓ finished · report queued for the agent` / `✗ stopped`, else the live counters. */
 function drawerMeta(
   row: BackgroundAgentRow,
   outcome: DockOutcome | null,
@@ -528,7 +528,7 @@ function drawerMeta(
   now: number,
 ): string {
   if (outcome?.kind === "finished") {
-    return "✓ finished · report sent to the agent";
+    return "✓ finished · report queued for the agent";
   }
   if (outcome !== null) {
     // `stopped` (a cancel) and a job-only `killed` read the same for a child:

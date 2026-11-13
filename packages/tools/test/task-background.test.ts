@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { AgentJobs, type ToolContext, type ToolResult } from "@tentacle/core";
+import { AgentJobs, SubagentFailure, type ToolContext, type ToolResult } from "@tentacle/core";
 import { type TaskRunResult, type TaskRunner, createTaskTool } from "../src/task.ts";
 
 const TYPES = [{ name: "general", description: "all tools" }];
@@ -178,5 +178,37 @@ describe("agent_task background", () => {
     await tick();
     expect(shaped).toEqual(["THE REPORT", "the sub-agent failed: boom"]);
     expect(exits).toEqual(["[shaped] THE REPORT", "[shaped] the sub-agent failed: boom"]);
+  });
+});
+
+// docs/fix/subagent-error-report.md root cause B, test 6: the catcher that
+// turned a thrown child into "the sub-agent failed: <msg>" with `toolUses: 0`
+// must render the child's count and its partial output instead.
+describe("B: a thrown background child keeps its count and partial output", () => {
+  const PARTIAL =
+    "the sub-agent failed after 3 tool uses: provider stream failed: HTTP 500\n\nPartial output before the failure:\nPARTIAL FINDING: smem needed 101KB";
+
+  test("the background catcher reports the failure's own count, never 0", async () => {
+    // Mutation: revert this catcher to its inline `toolUses: 0` shape → red.
+    const { jobs } = jobsRig(2);
+    const exits: { report: string; toolUses: number }[] = [];
+    jobs.onExit((e) => exits.push({ report: e.report, toolUses: e.toolUses }));
+    const tool = createTaskTool(
+      async () => {
+        throw new SubagentFailure("provider stream failed: HTTP 500", {
+          partialReport: "PARTIAL FINDING: smem needed 101KB",
+          toolUses: 3,
+        });
+      },
+      TYPES,
+      { background: jobs },
+    );
+    const { ctx } = ctxWith();
+    // The call itself returns at once: the child runs behind it.
+    expect(
+      (await tool.execute({ description: "d", prompt: "p", background: true }, ctx)).content,
+    ).toContain("started in background as sa-1");
+    await tick();
+    expect(exits).toEqual([{ report: PARTIAL, toolUses: 3 }]);
   });
 });

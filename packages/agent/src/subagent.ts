@@ -20,6 +20,7 @@ import {
   type PermissionRequestOptions,
   type PermissionRequester,
   type PermissionResponse,
+  SubagentFailure,
   type Tool,
   type ToolProgressEvent,
   toolLabel,
@@ -552,7 +553,14 @@ export function createSubagentRunner(deps: SubagentDeps): {
       inbox?.close();
       // The tree must not keep its live row beside the call's error.
       onEvent?.({ kind: "subagent_end", toolUses, stopReason: "error" });
-      throw error;
+      // The throw used to take the child's findings and its count with it
+      // (docs/fix/subagent-error-report.md root cause B): EVERY catcher renders
+      // this one shape, so the parent reads what the child had found.
+      throw new SubagentFailure(error instanceof Error ? error.message : String(error), {
+        partialReport: report,
+        toolUses,
+        cause: error,
+      });
     }
     // Whatever was never read is REPORTED, never silently dropped. `carry` holds
     // what `closeIfEmpty` handed back for a pass that may never have drained it

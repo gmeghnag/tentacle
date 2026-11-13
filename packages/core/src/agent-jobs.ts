@@ -46,6 +46,77 @@ export interface AgentJobResult {
   readonly stopReason: string;
 }
 
+/**
+ * A child that THREW (a provider failure, a dropped tunnel — the only way to
+ * `stopReason: "error"`, since `AgentStopReason` has no such member). It carries
+ * what the raw error used to discard: the report the child had written, and its
+ * tool uses (docs/fix/subagent-error-report.md root cause B).
+ */
+export class SubagentFailure extends Error {
+  /** Every `text` delta the child streamed before it threw, verbatim. */
+  readonly partialReport: string;
+  /** Its tool uses at the throw (the cap's overshoot included, as the runner counts). */
+  readonly toolUses: number;
+
+  constructor(
+    message: string,
+    options: {
+      readonly partialReport?: string;
+      readonly toolUses: number;
+      readonly cause?: unknown;
+    },
+  ) {
+    super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
+    this.name = "SubagentFailure";
+    this.partialReport = options.partialReport ?? "";
+    this.toolUses = options.toolUses;
+  }
+}
+
+/**
+ * The `AgentJobResult` of a child that threw: THE one renderer for it, so every
+ * catcher (the runner's own callers, `task.ts`'s two paths, `drive`) says the
+ * same thing — the error, the count, and the partial output when there is one.
+ * A plain error reads exactly as it always did, with the caller's fallback count.
+ */
+export function subagentFailureResult(error: unknown, fallbackToolUses: number): AgentJobResult {
+  if (!(error instanceof SubagentFailure)) {
+    return {
+      report: `the sub-agent failed: ${error instanceof Error ? error.message : String(error)}`,
+      toolUses: fallbackToolUses,
+      stopReason: "error",
+    };
+  }
+  const n = error.toolUses;
+  const head = `the sub-agent failed after ${n} tool use${n === 1 ? "" : "s"}: ${error.message}`;
+  const partial = error.partialReport.trim();
+  return {
+    report: partial === "" ? head : `${head}\n\nPartial output before the failure:\n${partial}`,
+    toolUses: n,
+    stopReason: "error",
+  };
+}
+
+/**
+ * What `agent_control status` can still say about a child that has ENDED
+ * (docs/fix/subagent-error-report.md root cause C): the live row is gone the
+ * moment it ends, and "no such sub-agent" for a child that just reported is a
+ * lie the model acts on. Bounded, memory only.
+ */
+export interface EndedAgentJob {
+  readonly agentId: string;
+  readonly description: string;
+  readonly stopReason: string;
+  readonly toolUses: number;
+  /** When it ended, on the host's clock (`0` when the host has none). */
+  readonly endedAt: number;
+  /** Its report was already handed to the parent agent as a note. */
+  readonly delivered: boolean;
+}
+
+/** How many ended children `AgentJobs.ended` remembers (`AGENT_RECENT_ENDED_MAX`). */
+export const AGENT_RECENT_ENDED_MAX = 16;
+
 export interface AgentJobControls {
   /** The child's own signal: NEVER the launching turn's. */
   readonly signal: AbortSignal;
@@ -250,6 +321,12 @@ export class AgentJobs {
     }
   >();
   private readonly listeners = new Set<(exit: AgentJobExit) => void>();
+  /**
+   * The last `AGENT_RECENT_ENDED_MAX` ended children, oldest evicted: what
+   * `agent_control status` answers for an id with no live row (root cause C).
+   * Insertion ordered; memory only, cleared by `dispose`.
+   */
+  private readonly recent = new Map<string, EndedAgentJob>();
   /** The parent Agent's subscriptions: a child's `agent_notify` reaches it here. */
   private readonly notifyListeners = new Set<(notify: AgentNotify) => void>();
   /** Waking notifies left before the next user message (`AGENT_NOTIFY_WAKES`). */
@@ -303,6 +380,32 @@ export class AgentJobs {
   onExit(listener: (exit: AgentJobExit) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * The record of a child that has ENDED, if it is still remembered
+   * (`AGENT_RECENT_ENDED_MAX` of them). `agent_control status` falls back to it
+   * before saying "no such": an evicted id answers `undefined`, exactly as before.
+   */
+  ended(agentId: string): EndedAgentJob | undefined {
+    return this.recent.get(agentId);
+  }
+
+  /**
+   * The parent agent pushed this child's report as a note: `status` may say so
+   * instead of "its report arrives at your next step". A no-op for an id with
+   * no record (an evicted child, or one that never existed).
+   */
+  delivered(agentId: string): void {
+    const record = this.recent.get(agentId);
+    if (record !== undefined && !record.delivered) {
+      this.recent.set(agentId, { ...record, delivered: true });
+    }
+  }
+
+  /** Every remembered ended child, oldest first. */
+  recentlyEnded(): readonly EndedAgentJob[] {
+    return [...this.recent.values()];
   }
 
   /** Subscribe to a change of `rows()`; the caller re-reads it. Never awaited. */
@@ -647,6 +750,7 @@ export class AgentJobs {
     this.running.clear();
     this.live.clear();
     this.foreground.clear();
+    this.recent.clear();
   }
 
   /**
@@ -667,6 +771,26 @@ export class AgentJobs {
       } catch {
         // A client's render sink: a failure there is not the child's problem.
       }
+    }
+  }
+
+  /** Insert (or replace) one ended child's record, evicting the oldest past the cap. */
+  private remember(spec: RunningAgentJob, stopReason: string, toolUses: number): void {
+    this.recent.delete(spec.agentId);
+    this.recent.set(spec.agentId, {
+      agentId: spec.agentId,
+      description: spec.description,
+      stopReason,
+      toolUses,
+      endedAt: this.host?.now?.() ?? 0,
+      delivered: false,
+    });
+    while (this.recent.size > AGENT_RECENT_ENDED_MAX) {
+      const oldest = this.recent.keys().next();
+      if (oldest.done === true) {
+        break;
+      }
+      this.recent.delete(oldest.value);
     }
   }
 
@@ -714,11 +838,7 @@ export class AgentJobs {
         inbox: inbox ?? this.inbox(),
       });
     } catch (error) {
-      result = {
-        report: `the sub-agent failed: ${error instanceof Error ? error.message : String(error)}`,
-        toolUses: 0,
-        stopReason: "error",
-      };
+      result = subagentFailureResult(error, 0);
     }
     const killed = this.running.get(agentId)?.killed === true;
     this.running.delete(agentId);
@@ -742,6 +862,9 @@ export class AgentJobs {
       // listeners below run unconditionally, and nothing is left rejected.
     }
     const exit: AgentJobExit = { ...spec, agentId, ...result, stopReason, report };
+    // BEFORE the listeners: a listener that reports this child (`agent_control
+    // status`, a plugin) must find it, never "no such" (root cause C).
+    this.remember({ ...spec, agentId }, stopReason, result.toolUses);
     for (const listener of [...this.listeners]) {
       try {
         listener(exit);

@@ -353,9 +353,15 @@ export function subagentLostNote(job: AgentJob): ChatMessage {
  */
 export function subagentReportNote(job: AgentJob, headline?: string): ChatMessage {
   const stopped = job.stopReason !== undefined ? ` (${job.stopReason})` : "";
+  // A child that THREW ended `error`: "finished" reads as success-ish to the
+  // model (owner Q5, docs/fix/subagent-error-report.md), so the load headline
+  // says `failed` — the live one is `agent.ts`'s, same word.
+  const failed = job.stopReason === "error";
   const head =
     headline ??
-    `[background] sub-agent ${subjectOf(job)} finished${stopped} before the session restarted:`;
+    (failed
+      ? `[background] sub-agent ${subjectOf(job)} failed before the session restarted:`
+      : `[background] sub-agent ${subjectOf(job)} finished${stopped} before the session restarted:`);
   const content =
     job.report !== undefined && job.report !== ""
       ? `${head}\n${job.report}`

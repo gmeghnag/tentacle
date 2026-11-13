@@ -171,11 +171,22 @@ export function backgroundExitNotice(
   agent?: { readonly stopReason: string; readonly toolUses: number },
 ): NoticeItem {
   if (agent) {
-    const how = agent.stopReason === "end_turn" ? "finished" : `ended (${agent.stopReason})`;
+    // A child that THREW `failed`, and never "report sent": at queue time the
+    // note only reaches the model at its next step, and a failure's "report" is
+    // the error plus whatever partial output it had (owner Q2, root cause D).
+    const failed = agent.stopReason === "error";
+    const how = failed
+      ? "failed"
+      : agent.stopReason === "end_turn"
+        ? "finished"
+        : `ended (${agent.stopReason})`;
+    const gets = failed
+      ? "the agent gets its error and partial output at its next step"
+      : "the agent gets its report at its next step";
     return {
       kind: "notice",
       jobId,
-      text: `${jobId} ${how} · ${agent.toolUses} tool uses · ${command} — report sent to the agent`,
+      text: `${jobId} ${how} · ${agent.toolUses} tool uses · ${command} — ${gets}`,
     };
   }
   const code = exitCode !== null ? ` (exit=${exitCode})` : "";
