@@ -798,3 +798,15 @@ All questions answered as recommended. Implementation APPROVED. Added owner requ
 **Attacks tried:** (a) single broker — one `createLinkBroker()` per `RemoteClient`, exposed as `permissions`, no second instance in the diff: holds. (b) leaving never closes — no `closeSessions`/`session/close` left in `apps/mobile` (also the `openComputer` failure path now `drain()`s): holds. (c) gate vs client give-up — `dialFailed` never stops on a timeout (`link-machine.ts:129-146`), so a long suspend does not kill the link: holds; but see finding 1. (d) controller per-id serialisation open-after-leave: holds; leave-during-open: finding 2. (e) error reasons by class/code, not message: holds.
 
 **Scope notes:** the image-attachments owner requirement has no 12a footprint (12b/12c), correctly untouched. The plan said 12a adds no changelog fragment; Execution added `changelog.d/mobile-session-view-12a.changed.md` — harmless, but the plan's header should be updated to match or the fragment folded into 12c's.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-13* (fresh-context reviewer; same model family as round 1)
+
+**Verdict: PASS** (round-1 findings 1 and 2 fixed; no new HIGH/MEDIUM).
+
+- **Finding 1 (gate, HIGH) — fixed.** A generation counter supersedes every parked dial (`foreground-gate.ts` `dial`): an abandoned caller never dials and a late channel is closed and never becomes `current`. Round-1 repro now: `A: client holds ch0; closed on suspend=["ch0"] (live closed? true)`. Regression check: the superseded rejection is `ChannelError("unreachable")`, which `terminalReason` (`link-machine.ts:85-97`) does not treat as terminal, and `dialChannel` ignores a rejection that arrives after its deadline (`late`), so the client's link is never stopped by it.
+- **Finding 2 (controller, MEDIUM) — fixed.** A `left` mark makes the still-attaching open detach instead of registering; the leave's serialised run clears it, so the next open of that id is not affected. Repro now: `follows=false detaches=1`.
+- **Mutations (applied, run, reverted; `git status` clean):** supersession check disabled → both new gate tests red; `left.has` dropped from the open's post-attach check → both new controller tests red.
+- **Gate:** `bun test apps/mobile/test` 120 pass / 0 fail; `bun run lint` clean (1018 files); `bun run typecheck` clean.
+- **Nit (not blocking):** the detach of an abandoned open is fire-and-forget inside the serialised run (`session-controller.ts` post-attach branch), so an immediate re-open of the same id does not wait for it. The client's `endSession` only forgets its own entry, so the table stays consistent; awaiting it (as `leave` does) would make F17's "awaits the pending detach" hold literally.
