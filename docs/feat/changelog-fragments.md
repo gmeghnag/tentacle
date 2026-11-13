@@ -403,3 +403,7 @@ in the meantime. `TODO.md` needs only the convention (Q5), not a task.
 *(empty — the reviewer fills it in a fresh context; it must red-team the §10 rule
 wording and confirm the guard test is non-vacuous by mutation, since a guard that
 passes on a hand-edited `[Unreleased]` would silently restore this bug.)*
+
+#### Owner answers (2026-11-13)
+
+All questions answered as recommended. Implementation APPROVED.
