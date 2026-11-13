@@ -566,3 +566,21 @@ error would be the dishonest answer.
 **Gate:** `bunx tsc --noEmit` OK · `bun run lint` (`biome check .`, 964 files)
 clean · `bun test` **7644 pass, 3 skip (the three opt-in skips: live-k8s,
 live-docker, real-socket keepalive), 0 fail** (71682 expects, 545 files).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-13* (fresh context, reviewing `git diff HEAD~1`)
+
+**Verdict: PASS.** All four round-1 findings are fixed. I re-ran the round-1 probes on the new code, and each fix is pinned by a test that fails when the fix is broken.
+
+| # | Round-1 probe, now | Mutation (each reverted; `git status` clean) | Result |
+| --- | --- | --- | --- |
+| 1 | `TENTACLE_MODEL_API_KEY` → `model.apiKey = ***  # env TENTACLE_MODEL_API_KEY` (wins over a file key too); `TENTACLE_ENGINE=docker` → `"docker"  # env` | `ENV_DIRECT` origin branch disabled | 3 fail (T-E8 ×2, get env-only) |
+| 2 | profile sets only `model.provider` → `model.images = true  # default (anthropic)` | `movedByProfile` → true for the image keys | 4 fail (T-E9, get via profile ×2, shape) |
+| 3 | `TENTACLE_PROFILE=w`: `get` = `list` = `3932160  # default (anthropic)` | `effectiveEntryOf` env = `input.env ?? {}` | 3 fail (incl. "get follows TENTACLE_PROFILE") |
+| 4 | `get --profile w model.images` → exit 0, `true  # default (anthropic)` | drop the `profiles.<name>.` strip | 1 fail |
+
+**Regression probes on the diff (none HIGH/MEDIUM):** an env API key is masked in the line and in the JSON `value` (`"***"`). An empty `TENTACLE_MODEL_API_KEY` falls through to `# file`, as the loader's `if (env…)` does. `TENTACLE_ENGINE` beats a profile engine, and a profile engine alone shows `# profile w`. Dropping `resolvedBase` broke no test.
+Nit: when a profile's `model.provider` unit-move drops the base `apiKey`, the line reads `model.apiKey = (unset)  # profile w`. That is accurate (the profile removed it) but terse.
+
+**Gate:** the 4 touched test files: 118 pass / 0 fail (494 expects). `bun run lint`: clean (964 files). `bun run typecheck`: OK. I did not re-run the full `bun test`; the executor reports 7644 pass / 3 opt-in skips.
