@@ -244,3 +244,7 @@ TODO line.
 ## Review
 
 *(empty; one fresh-context Opus review per slice)*
+
+#### Owner answers (2026-11-13)
+
+Q1–Q6 as recommended. Opus executes the slices; Fable design-reviews this plan while S0 runs. Implementation APPROVED.
