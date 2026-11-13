@@ -233,3 +233,28 @@ bun test            → 7690 pass, 3 skip (the opt-in ones), 0 fail · 549 files
 **How the implementing model behaved:** reproduced before diagnosing (§1) and
 rejected its own first fix on evidence rather than shipping it, which is the
 behaviour the flake class needs.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-13* (fresh-context adversarial review, `git diff main...HEAD`)
+
+**Verdict: PASS** — no HIGH/MEDIUM findings in the code.
+
+- **Scope:** test-only (`fakes.ts`, `reattach.test.ts`); no §7 invariant is
+  touched (no product, protocol, persistence or terminal path).
+- **Claim "races nothing" holds:** all 2248 pre-gate deltas stream before
+  `until(() => model.waiting)` returns, i.e. before client `b` connects; only
+  `"end"`/`done` stream after `model.open()`, and the asserted property
+  (every delta once, in order, ≤1 reset) is unchanged.
+- **Default preserved:** `"timer"` stays the default; the replay test is the
+  only `"immediate"` caller, so the interleaving that T-B5 and the other
+  reconnect-race tests rely on is unchanged.
+- **Non-vacuity, re-run here:** `MAX_BUFFERED_BYTES` 64 MiB → 1024 ⇒
+  `until: timed out … texts.at(-1) === "end"`, 0 pass / 1 fail; reverted (tree clean).
+- **Gate (here):** `reattach.test.ts` 54/54 pass (replay test 76 ms);
+  `packages/client`+`packages/cli` 2601 pass / 0 fail; `bun run lint` clean
+  (971 files); `bun run typecheck` exit 0. Full `bun test` not re-run (the
+  Execution reports 7690 pass / 3 opt-in skips).
+- **Process note (low):** the doc header says `Branch: fix/reattach-replay-flake`
+  but the branch is `feat/reattach-replay-flake`; §10 wants `<type>/<slug>` to
+  match `docs/fix/`. Rename the branch (or fix the header) before merge.
