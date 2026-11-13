@@ -676,3 +676,20 @@ $ bun test                   → 7943 pass, 3 skip (the opt-in ones), 0 fail, 56
 #### Owner answers (2026-11-13)
 
 All questions answered as recommended. Implementation APPROVED. Added owner requirement: image attachments (media_message refs) are shown in the transcript (12b model + 12c screen; thumbnails fetched over the existing channel, never auto-downloaded beyond the visible rows).
+
+### Review — slice 12a (fresh context)
+
+*— claude-opus-5-5, 2026-11-13* (same model as the 12a executor: fresh context only, shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES.**
+
+1. **HIGH — `apps/mobile/src/foreground-gate.ts:71-73`: the gate can lose track of the live socket, so `suspend()` closes a dead one and the real one stays up.** While suspended the client keeps redialling; each `dialChannel` gives up after `LIVENESS_MS` (15 s, `remote-client.ts:2351-2380`) but the gate's held `dial()` stays pending. All held dials share one hold, so `resume()` releases N concurrent `inner()` dials; the abandoned ones' channels are closed by `dialChannel` (`late`), but `current` is whichever one connects LAST. Repro (`.tentacle/tmp/mobile-session-view-12a/review-repro.ts`): two held dials, the stale one connects after the live one → `A: client holds ch1; closed on suspend=["ch0"] (live closed? false)`. Scenario: background > ~15 s, foreground, background again → the live socket is never closed: the ghost attachment the gate exists to avoid, and on return a socket nobody told the client was dead (F2/F3/F9 do not converge). Also an N-socket burst on every resume. Fix direction: a held dial that its caller abandoned must not dial at all (e.g. one pending dial at a time / generation counter), and `current` only ever the channel the latest caller received; add a test for that ordering.
+2. **MEDIUM — `apps/mobile/src/session-controller.ts:155-168`: `leave()` during an in-flight `open()` is a no-op.** `leave` reads `live` synchronously before serialising; an attach still running (up to 30 s) is not in `live` yet, so the queued leave detaches nothing and the open then registers the session + listener. Repro: `B: after leave-during-open: follows=true detaches=0`. Scenario (F17 in reverse, the common one): tap a session, back before the attach answers → the phone stays attached with a listener into an unmounted screen; asks are re-offered to the phone's held broker. Fix: look up `live` inside the serialised run (or mark the id "left" so the pending open detaches). Test it.
+
+**Gate (touched files):** `bun test` of the 4 touched test files: 25 pass, 0 fail. `bun run lint`: 1018 files, clean. `bun run typecheck`: clean. Full suite not re-run here (Execution reports 7943 pass / 3 opt-in skip).
+
+**Mutations (applied, run, reverted; `git status` clean after):** `leaveComputer` → `closeSessions()`: connection.test + T4 red. Broker → a deny requester: connection.test + T1 red. Both tests are non-vacuous.
+
+**Attacks tried:** (a) single broker — one `createLinkBroker()` per `RemoteClient`, exposed as `permissions`, no second instance in the diff: holds. (b) leaving never closes — no `closeSessions`/`session/close` left in `apps/mobile` (also the `openComputer` failure path now `drain()`s): holds. (c) gate vs client give-up — `dialFailed` never stops on a timeout (`link-machine.ts:129-146`), so a long suspend does not kill the link: holds; but see finding 1. (d) controller per-id serialisation open-after-leave: holds; leave-during-open: finding 2. (e) error reasons by class/code, not message: holds.
+
+**Scope notes:** the image-attachments owner requirement has no 12a footprint (12b/12c), correctly untouched. The plan said 12a adds no changelog fragment; Execution added `changelog.d/mobile-session-view-12a.changed.md` — harmless, but the plan's header should be updated to match or the fragment folded into 12c's.
