@@ -708,3 +708,30 @@ loopback test, and no code in 9a is on that path yet.
 #### Owner answers (2026-11-13)
 
 All questions answered as recommended. Implementation APPROVED.
+
+### 9a `device-registry` — Review
+
+*— claude-opus-5-5, 2026-11-13*
+
+**Verdict: APPROVE-WITH-NITS (PASS: no HIGH/MEDIUM).** Scope: `git diff main...HEAD`, slice 9a only.
+
+**Gate (re-run).** The 3 touched test files: 51 pass, 0 fail. `bun run lint`: 968 files, clean. `bun run typecheck`: clean. I did not re-run the full `bun test`.
+
+**Premises.** P4 TRUE (`workspace-mount.ts:709` always hides `configDir`). The P8 lock pattern is TRUE: the code mirrors `session-persister.ts:642-690`.
+
+**Mutations** (each applied with Edit, reverted, `git status` empty afterwards):
+- `sameHash` always true → caught (`finds a live window by code and not by a wrong one`).
+- `writeRegistry`'s id/key guard (`device-store.ts:513-517`) disabled → **survives**: no test covers it.
+
+**Attacks tried:**
+1. Concurrent `addDevice` from 8 processes × 20 rounds → no lost entry.
+2. The same, starting from a stale dead-pid lock → no lost entry.
+3. An unreadable identity or registry under create/write → refused, bytes unchanged. `link` EEXIST also protects the identity when the `missing` check is skipped.
+4. The SAS byte order and domain prefix match the Design. The base64url decoder rejects non-canonical forms.
+
+**Nits (LOW, not blocking):**
+- N1: add a test for the `writeRegistry` id/key guard (the surviving mutation above).
+- N2: `acquireRegistryLock` (`device-store.ts:452-474`) reads a just-created, still-empty lock as pid 0, which counts as stale. That is a theoretical double-holder (F13), not reproduced in 40 rounds. The same window exists in the prior-art store lock.
+- N3 (constraint for 9b/9c): `findPairing` sweeps files (`:857`) and throws on a malformed code (`pairingCodeHash`, `:93`). So it must not back `authorize` (P2: no side effects). 9b needs a side-effect-free "any live window" read, which 9a does not export. 9c must catch the throw on peer input.
+
+**Executor behaviour.** Drift is documented honestly, and the mutation table is accurate for the cases I checked. One discrepancy: commit `11dfe31` says "exec (deepseek)", but Execution is signed claude-opus-5-5. The owner should fix whichever one is wrong (§10 honest signing). This reviewer is claude-opus-5-5. If that signature is correct, this was the same model in a fresh context, so shared blind spots are possible.
