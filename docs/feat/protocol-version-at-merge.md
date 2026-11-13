@@ -222,7 +222,7 @@ No `packages/` production code changes: the blast is the *process*.
 | A note is a directory / misnamed / empty | — | `parseNotes` refuses **by name**, exit 1, nothing written (F1 pattern, `changelog.ts:78-95`) |
 | Script fails partway | — | notes are deleted only after `version.ts` is written; a failed write leaves the note in place, so a re-run converges (the fold is idempotent-when-no-notes) |
 | `schema:export` not run after a merge | chimera `protocol.json` on a clean auto-merge | Q4's `.gitattributes -merge` makes the conflict loud, and `bun run protocol:bump` refreshes the file as part of the one merge command; `json-schema.test.ts:39` proves no drift |
-| Crash between write and delete | — | the note is still there and `version.ts` already folded it ⇒ a re-run would fold it twice. Guarded: `applyBump` refuses when the newest comment's `N` already equals `PROTOCOL_VERSION` **and** its text equals the note (already applied), and skips that note |
+| Crash between write and delete | — | the note(s) are still there and `version.ts` already folded them ⇒ a re-run would fold them again. Guarded (fix round 1): a note whose text matches **any** of the last `notes.length` blocks (one fold writes at most one block per note, so that window holds the crashed run's blocks) is skipped, so a re-run after a write with no deletions converges — for one note and for many. Residue: a note whose prose duplicates a block from *before* that window is folded again (a visible duplicate block, never a silently dropped note) |
 
 ### Tests
 
@@ -363,6 +363,105 @@ branch, so I left it out; (iii) `protocol.d/` does not exist in the tree yet (it
 is created by the first task that needs it) — `readNoteDir` treats a missing
 directory as empty, which the test pins.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-13*
+
+Fix round 1 addresses the fresh-context Review's two findings
+(`docs/feat/protocol-version-at-merge.md`, second Review section): **#1 HIGH**
+(a multi-note crash re-run folds a note twice) and **#2 MEDIUM** (`foldNote` can
+emit a continuation line that reads back as a block). Nothing else was touched:
+no change to the Design, no protocol note (this task still makes no wire change),
+no changelog fragment (internal process, per the metadata block).
+
+**(1) HIGH — multi-note crash idempotence** (`scripts/protocol-bump.ts:194-211`,
+`pendingNotes`). Root cause: the "already folded" check compared each note to the
+**newest block only**, so after a crash between the write and the `rmSync` loop
+the re-run skipped the last note and re-folded the others under fresh numbers —
+consecutive, so no guard and no `version.test.ts` assertion went red.
+
+- Fix: a note is applied when its text matches **any** block in the last
+  `notes.length` blocks. One fold writes at most one block per note, so the
+  blocks a crashed run wrote necessarily lie inside that window. A shorter window
+  (the previous newest-block-only check) is the bug; a wider one (the whole
+  file) would be safe against this bug but could skip a genuine re-break whose
+  prose happens to duplicate an old release's, so the window is exactly
+  `notes.length`. `notes.length === 0` short-circuits: `slice(-0)` is
+  `slice(0)`, which would otherwise make the whole file "already folded".
+- Residual, now stated in the failure-mode table instead of implied away: a note
+  whose prose exactly duplicates a block from *before* that window is folded
+  again — a visible duplicate block, never a silently dropped note.
+- Tests: `applyBump` "a crash re-run with TWO notes folded skips both" (the
+  Review's exact scenario: `[25 break A, 26 break B]` must come back unchanged)
+  and the end-to-end `runProtocolBump` "a crash re-run (notes folded, not yet
+  deleted)" — both **red before the fix** (`+ // 27: break A`,
+  `= 27 as const` / `PROTOCOL_VERSION is now 27`), green after.
+
+**(2) MEDIUM — a continuation line that reads back as a block**
+(`scripts/protocol-bump.ts:38-45`, `:158-184`). Root cause: `foldNote` wrapped on
+width alone, so prose containing a word like `7: followed` could start a
+continuation line `// 7: followed`, which `readBumps` parses as block 7 — the
+next bump then refuses ("the number is 25 but the newest reason comment is 7")
+*after* the bad block is already written, and `version.test.ts` goes red at the
+merge gate.
+
+- Fix: a word matching `BLOCK_START_WORD` (`/^\d+:(\s|$)/` — tested on the word,
+  because the joining space is not in it yet) never **starts** a continuation;
+  it stays on the previous line even past the width. Overflowing is cosmetic; a
+  mis-read block breaks the merge. Only continuations are affected — the first
+  line's `// <n>: ` prefix is `readBumps`' own anchor. The Review offered
+  "reject the note in `parseNote`" as the alternative; refusing a legitimate
+  reason for its prose was the worse trade, so the fold absorbs it.
+- Test: `applyBump` "a wrapped reason never starts a continuation line that
+  reads back as a block" — **red before the fix** (4 `// <n>: ` lines where 3
+  are expected), green after; it asserts the block count, the round-trip of the
+  block's text, and that the *next* bump still folds onto it (i.e. the refusal
+  the bug caused is gone).
+
+**Mutations (each applied, run, reverted — file restored byte-identical).**
+
+| # | Mutation | Red? |
+| --- | --- | --- |
+| M12 | `pendingNotes` window back to the newest block (`.slice(-1)`) | 2 red: "TWO notes folded skips both", the `runProtocolBump` crash re-run |
+| M13 | `fold` ignores `wouldMisread` (`if (tooWide)`) | 1 red: "never starts a continuation line that reads back as a block" |
+| M14 | `BLOCK_START_WORD` without the space/end lookahead (`/^\d+: /`) — the word is `7:`, so it never matches | 1 red: same test |
+
+M14 is the non-vacuity check that matters for (2): it shows the test fails on a
+guard that *looks* right but cannot fire, not merely on a missing one.
+
+M15 (delete `pendingNotes`' `notes.length === 0` short-circuit) **survived** —
+and that is the honest result, not a missing test: with no notes the filter runs
+over an empty array and returns `[]` regardless, so the guard is defensive (it
+keeps `slice(-0)` from meaning "the whole file" if the function is ever reused
+with the filter removed) and has no observable behaviour to pin. It stays, with a
+comment saying why it cannot be tested rather than a test that proves nothing.
+
+**Gate** (from the worktree): `bunx tsc --noEmit` **0 errors** · `bun run lint`
+**clean** (965 files; the one trip was Biome format on the new test, fixed with
+`biome check --write` on those two files) · `bun test` — **7639 pass, 3 skip,
+0 fail** (7642 tests, 546 files, 305 s; the 3 skips are the documented opt-in
+ones: live-k8s, live-docker, the real-socket keepalive).
+
+- Narrow slice (`scripts/test/protocol-bump.test.ts` +
+  `packages/protocol/test/version.test.ts`): **24 pass / 0 fail**, then **25
+  pass / 0 fail** after the end-to-end test was added (AGENTS §4: narrow per
+  slice).
+- Full suite, run 4× because of two unrelated flakes in files this branch does
+  not touch (`git diff main --name-only` has no `packages/exec` or
+  `packages/client` entry): run 1 failed `packages/client/test/reattach.test.ts:773`
+  (`until: timed out after 3000 ms`, a timing test that passes **54/54 alone**);
+  run 2 failed `packages/exec/test/confinement.test.ts` "F2: a hard link…"
+  (`WorkspaceWriteError` on a `/var` vs `/private/var` path — passes **46/46
+  alone**, 3 consecutive runs); runs 3 and 4 — the last on the **final tree**
+  (326 s) — were **fully green**. Neither flake touches the narrow slices, and
+  neither is reachable from `scripts/`.
+
+**Unverified, stated honestly:** finding #1's "the Implementation's failure-mode
+row also says *refuses* where the code skips" was true — the row is rewritten to
+describe what the code does (skip within a window, plus the residual). I did not
+re-run the executor's M1–M11 matrix; this round adds M12–M14 and re-ran the
+narrow files only, then the full suite.
+
 ## Review
 
 *— deepseek-v4-pro, 2026-11-13*
@@ -419,8 +518,6 @@ last bullet).
   touches a rule other models follow, so a fresh-context `/code-review` before
   merge is the safer call — recommended, and the reason this section does not
   claim to be the final gate.
-
-
 ## Review
 
 *— claude-opus-5-5, 2026-11-13* (fresh context; a different model family from the executor)

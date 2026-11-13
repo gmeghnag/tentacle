@@ -124,6 +124,38 @@ describe("applyBump", () => {
     expect(readVersion(twice)).toBe(25);
   });
 
+  test("a crash re-run with TWO notes folded skips both, not just the newest", () => {
+    // The crash window is between the single write and the deletions, so a
+    // multi-note fold leaves EVERY note on disk. Skipping only the newest folds
+    // the others again: the numbers stay consecutive, nothing goes red, and one
+    // break silently burns two version numbers (review round 1, HIGH).
+    const pending = [note("alpha", "break A"), note("zeta", "break B")];
+    const once = applyBump(VERSION, pending);
+    const twice = applyBump(once, pending);
+    expect(twice).toBe(once);
+    expect(readVersion(twice)).toBe(26);
+    expect(readBumps(twice).slice(-2)).toEqual([
+      { number: 25, text: "break A" },
+      { number: 26, text: "break B" },
+    ]);
+  });
+
+  test("a wrapped reason never starts a continuation line that reads back as a block", () => {
+    // `// 7: y` as a CONTINUATION reads back as block 7 (review round 1, MEDIUM):
+    // the next bump then refuses ("the number is 25 but the newest reason
+    // comment is 7") after the bad block is already written.
+    const text = `${"x ".repeat(40).trim()} 7: y`;
+    const out = applyBump(VERSION, [note("task-x", text)]);
+    expect(out.split("\n").filter((l) => /^\/\/ \d+: /.test(l)).length).toBe(
+      VERSION.split("\n").filter((l) => /^\/\/ \d+: /.test(l)).length + 1,
+    );
+    expect(readBumps(out).at(-1)).toEqual({ number: 25, text });
+    expect(readVersion(out)).toBe(25);
+    // And the block is still foldable onto: a mis-read block makes this refuse.
+    const next = applyBump(out, [note("task-y", "the y break")]);
+    expect(readVersion(next)).toBe(26);
+  });
+
   test("refuses a hand-bumped number whose newest reason comment disagrees", () => {
     // Mutation target: accept this silently and the reason block lies about the number.
     const handBumped = VERSION.replace("= 24 as const", "= 25 as const");
@@ -264,6 +296,30 @@ describe("runProtocolBump (the orchestrator's one merge command)", () => {
       expect(code).toBe(0);
       expect(notePresentAtWrite).toBe(`${NOTE_DIR}/alpha.md`);
       expect(readNoteDir(root)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a crash re-run (notes folded, not yet deleted) folds nothing and deletes them", async () => {
+    // End-to-end form of the HIGH: the crash window leaves BOTH notes on disk
+    // with version.ts already at 26. A re-run must converge on 26, not 28.
+    const root = fixture();
+    const out: string[] = [];
+    try {
+      writeFileSync(join(root, `${NOTE_DIR}/alpha.md`), "break A\n");
+      writeFileSync(join(root, `${NOTE_DIR}/zeta.md`), "break B\n");
+      // Simulate the crash: the write landed, the deletions did not.
+      writeFileSync(join(root, VERSION_PATH), applyBump(VERSION, parseNotes(readNoteDir(root))));
+      const code = await runProtocolBump({
+        root,
+        exportSchema: async () => true,
+        write: (t) => out.push(t),
+      });
+      expect(code).toBe(0);
+      expect(readVersion(readFileSync(join(root, VERSION_PATH), "utf8"))).toBe(26);
+      expect(readNoteDir(root)).toEqual([]);
+      expect(out.join("")).toContain("no new protocol.d/ notes");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -36,6 +36,14 @@ const NUMBER_LINE = /^export const PROTOCOL_VERSION = (\d+) as const;$/m;
 /** One `// <n>: <text>` reason comment, and its continuation lines. */
 const COMMENT_LINE = /^\/\/ (\d+): (.*)$/;
 
+/**
+ * A word that, at the START of a continuation line, reads back as a new reason
+ * block (`readBumps`' `COMMENT_LINE`): a line beginning `7:` becomes `// 7: y`.
+ * The space comes from the join, so the test is on the word's prefix, not on a
+ * finished line.
+ */
+const BLOCK_START_WORD = /^\d+:(\s|$)/;
+
 /** One validated note: the file it came from, plus the reason text. */
 export interface Note {
   readonly path: string;
@@ -145,6 +153,12 @@ export function readVersion(versionText: string): number {
  * Wrap a note's prose into `// ` continuation lines (Biome's 100-col width), so a
  * long reason is still one comment block, and each new number gets exactly one
  * `// <n>: ` first line (`readBumps` reads that).
+ *
+ * A word of the form `<digits>: ` never STARTS a continuation line: it would
+ * read back as a new block (`BLOCK_START_WORD`), so the next bump would refuse
+ * — after the bad block was already written — and `version.test.ts` would go red
+ * at the merge gate. Such a word stays on the previous line instead, even past
+ * the width: overflowing is cosmetic, a mis-read block is a broken merge.
  */
 export function foldNote(number: number, text: string, width = 88): string[] {
   const prefix = `// ${number}: `;
@@ -153,7 +167,11 @@ export function foldNote(number: number, text: string, width = 88): string[] {
   let line = "";
   for (const word of words) {
     const candidate = line === "" ? word : `${line} ${word}`;
-    if (line !== "" && `${prefix}${candidate}`.length > width) {
+    const tooWide = line !== "" && `${prefix}${candidate}`.length > width;
+    // Only a CONTINUATION can misread: the first line's `// <n>: ` prefix is
+    // `readBumps`' own anchor, so its digits are the block it belongs to.
+    const wouldMisread = tooWide && line !== "" && BLOCK_START_WORD.test(word);
+    if (tooWide && !wouldMisread) {
       lines.push(line);
       line = word;
     } else {
@@ -167,15 +185,34 @@ export function foldNote(number: number, text: string, width = 88): string[] {
 }
 
 /**
- * The notes not yet folded: a note whose reason is already the newest block's
- * text has been applied (a crash between "written" and "note deleted"), so it is
- * skipped rather than folded twice. Shared by `applyBump` and the shell so the
- * count it prints is the count it folded.
+ * The notes not yet folded. A crash between the write and the deletions leaves
+ * EVERY note of the fold on disk, so idempotence must cover all of them, not the
+ * newest block only: skipping just the last one re-folded the others under fresh
+ * numbers — consecutive, so nothing went red, and one break silently burned two
+ * version numbers (review round 1, HIGH).
+ *
+ * A fold writes at most ONE block per note, so the blocks a crashed run wrote
+ * are among the last `notes.length` ones; anything earlier belongs to another
+ * release. Shared by `applyBump` and the shell so the count it prints is the
+ * count it folded.
+ *
+ * The residual: a note whose prose duplicates a block from BEFORE that window
+ * is folded again (a visible duplicate block, never a silently dropped note).
+ *
+ * No notes ⇒ no window to compute and nothing to skip (`slice(-0)` would be
+ * the whole file, which is why the empty case returns here rather than relying
+ * on the filter).
  */
 export function pendingNotes(versionText: string, notes: readonly Note[]): Note[] {
-  const bumps = readBumps(versionText);
-  const newest = bumps[bumps.length - 1];
-  return notes.filter((note) => !(newest !== undefined && newest.text === note.text));
+  if (notes.length === 0) {
+    return [];
+  }
+  const folded = new Set(
+    readBumps(versionText)
+      .slice(-notes.length)
+      .map((bump) => bump.text),
+  );
+  return notes.filter((note) => !folded.has(note.text));
 }
 
 /**
