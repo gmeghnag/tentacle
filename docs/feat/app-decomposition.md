@@ -1061,3 +1061,78 @@ outside this diff.
 
 *— claude-opus-5-5, 2026-11-13* (fresh context; same model as Fix round 1's
 executor, different family from the deepseek executor)
+
+## Review
+
+### S1 review — REQUEST-CHANGES
+
+**Verdict: REQUEST-CHANGES**, for two doc/file fixes. The code is a clean pure move.
+
+**Findings.**
+1. **MEDIUM — the branch carries out a slice the plan dissolved, and does not
+   say so.** *Design review response* H4 (this doc, l. 339–342) and the revised
+   order table (l. 400, `~~S1 types~~ | dissolved into S5/S6/S8/S9`) were
+   already on the branch base `632aeb5`. The header (l. 3) still says
+   "S1+ re-approval pending". The S1 Execution never mentions this. It edits the
+   old slice-table row (l. 166) as if S1 were still live, so the doc now
+   contradicts itself: l. 166 + l. 963 say "S1 DONE"; l. 342 + l. 400 say "no
+   single `app-types.ts`, created by the first hook slice that needs it".
+   *Failure scenario:* an S5/S6/S8 executor follows l. 342/400 and keeps its
+   types next to the hook. That moves `SessionDirectory`/`NoticeFeed`/`RunQuit`
+   out of `app-types.ts`, and the new `test/app-types.test.ts:36-42` (which
+   pins all six declared there) goes red on a planned move. Or the executor
+   finds the file already there and has no recorded rule to follow. *Fix:*
+   record who re-approved S1 and why (the orchestrator launched it, but nothing
+   in the doc says so). Strike the "dissolved" row and update H4's (1). Narrow
+   the pin test to the members that are meant to stay (`AppProps`,
+   `SessionController`), or state that later slices may edit it.
+2. **MEDIUM — `changelog.d/app-decomp-1-types.changed.md` breaks AGENTS §10
+   ("Internal/dev/test-only work adds no fragment") and this plan (l. 241).**
+   The bullet describes an internal file move with "No behaviour change". It
+   would ship in the user-facing CHANGELOG at the next `bun run release`.
+   Drift (a) (l. 909) blames the brief, but AGENTS.md overrides a brief. *Fix:*
+   delete the file.
+
+**Gate (re-run by me).** `bun test` on `app-types.test.ts` +
+`subagent-panel-controller.test.ts`: **10 pass / 0 fail** (45 expects).
+`bun run typecheck`: clean. `bun run lint`: `Checked 977 files … No fixes
+applied.` The full suite was not re-run (my brief limited it to the touched
+files). The Execution reports 7790 pass / 3 skip / 0 fail.
+
+**Premise table.**
+| Claim | Result |
+|---|---|
+| `main:App.tsx` l. 272–608 ≡ `app-types.ts` l. 25–361 | TRUE (`cmp` against `632aeb5`: identical) |
+| `index.ts` exported 5 of 6 (no `SettingsNoticeLine`) | TRUE (diff) |
+| The CLI guard parses the declaring file by source text | TRUE (`subagent-panel-controller.test.ts:285`) |
+| S1 is part of the approved plan | **FALSE** (l. 339, 400; see finding 1) |
+
+**Mutation (§9).** Renamed `jobOutput` → `jobOutputX` in `app-types.ts:197`.
+The CLI guard went **RED** (`(fail) GUARD: every SessionController member …`,
+3 pass / 1 fail). After the revert, `git status` is clean. So the repointed
+guard reads the real declaration and is not vacuous.
+
+**Attacks tried.**
+- (a) Runtime code riding along with the move: none. The header is
+  `import type` only, and `Object.keys(import)` is `[]`.
+- (b) An import cycle through `app-types.ts`: none. All its imports are
+  type-only and erased at runtime.
+- (c) A public surface change through `@tentacle/tui`: none. The same five
+  types plus `App`/`AutoAcceptFeed` are exported.
+- (d) A §7 invariant touched (single broker, RPC path, raw terminal writes): no
+  runtime code changed, so none applies.
+- (e) The pinned test text in `app-types.test.ts:84`
+  (`export { App, type AutoAcceptFeed }`) is brittle to formatting. Noted only;
+  it is not a defect.
+
+**What holds.** The move is byte-identical. The 8 import trims are correct
+(tsc/Biome clean). Drift (d), the guard repoint, is honest and was mutation-
+proven.
+
+**How the executor behaved.** Careful and honest on the mechanics: it derived
+the block mechanically, used sha256 to prove it, corrected its signature, and
+found the CLI guard through the full suite. It missed the plan-level fact that
+H4 dissolved the slice it was executing.
+
+*— claude-opus-5-5, 2026-11-13* (fresh context; different family from the
+deepseek executor)
