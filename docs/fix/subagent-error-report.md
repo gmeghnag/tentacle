@@ -1,7 +1,10 @@
 # fix/subagent-error-report — a failed background sub-agent reaches its parent late, without its findings, and `status` denies it existed
 
-> **Status:** implementation (awaiting owner approval)
-> **Branch:** `fix/subagent-error-report`
+> **Status:** fix round 1 done (Review round 1 findings 1–2 addressed; awaiting Review round 2)
+> **Branch:** `feat/subagent-error-report` — the ACTUAL branch. The name is a misnomer
+> (this task is a `fix`, so the doc stays in `docs/fix/`); renaming it is a merge-time
+> or orchestrator act, not the executor's (AGENTS §10, Review 1 finding 2). Earlier
+> header text said `fix/subagent-error-report`, a branch that never existed.
 > **Type:** fix · **Size:** M · **Blast:** load-bearing (the agent loop's round-boundary drain) · **Suited:** DeepSeek exec; mandatory fresh-context Review (see Owner question 6)
 > **Changelog:** `changelog.d/subagent-error-report.fixed.md` — written by the executor, not by the planner.
 
@@ -414,15 +417,25 @@ Gate: narrow files per slice, then `bun run check` (lint baseline clean, §6).
 
 *— claude-opus-5-5, 2026-11-13*
 
+**Signature correction (Review round 1, finding 2):** this Execution is signed
+by `claude-opus-5-5` because that is the model that ran it — the commit subject
+`exec (deepseek)` and the original note claiming "the executor was this model,
+not DeepSeek — owner Q6's recommendation" were wrong on the second half: the
+model never changed, so Q6's recommendation (DeepSeek executes) was **not**
+honoured. The signature stays the truth; the mislabelled commit subject is left
+as-is (the executor may not rewrite history), and this paragraph is the record.
+A consequence: Review round 1 is the SAME model family as this Execution (fresh
+context only), so shared blind spots survive both passes — the reviewer of
+round 1 flagged exactly that.
+
 Branch `feat/subagent-error-report` (worktree
 `.tentacle/worktrees/subagent-error-report`, base `ed2baff`). Implementation
 followed the plan's dependency order; every slice test was RED on the property
 before the fix. All 13 mutation checks below were run and reverted.
 
-**Drift from the plan noted up front:** (a) the executor was this model, not
-DeepSeek (owner Q6's recommendation) — the run's own signature above; (b)
-`formatEndedAgent` claims an age only when the host gave a clock (`endedAt > 0`),
-because the repro's host has none and computed an absurd `498496h 37m ago`; (c)
+**Drift from the plan noted up front:** (a) `formatEndedAgent` claims an age only
+when the host gave a clock (`endedAt > 0`),
+because the repro's host has none and computed an absurd `498496h 37m ago`; (b)
 a test the plan's list implied but omitted was added for `drive`'s own catcher.
 
 ### Load-bearing check, re-run first
@@ -592,6 +605,78 @@ assumed a host clock); the shape is otherwise as designed.
 `bun run lint` → `Checked 962 files. No fixes applied.` (the repo baseline is
 0 errors/0 warnings). `bun test` → **7637 pass, 3 skip (the opt-in live-k8s,
 live-docker and slow keepalive), 0 fail** across 544 files.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-13*
+
+Review round 1 raised no HIGH and two MEDIUMs; both are addressed. Code changed
+in ONE test file; the other fix is the record itself.
+
+**Finding 1 (MEDIUM) — `Agent` → `AgentJobs.delivered()` unpinned. FIXED.**
+Two assertions, one per drain site, both in
+`packages/agent/test/subagent-background.test.ts`:
+- `"it counts, and the next turn flushes ONE noted report…"` (the TURN-START
+  flush, `agent.ts:1137`/`2545` path): `expect(jobs.ended("sa-1")?.delivered).toBe(true)` after the drain.
+- `"it is delivered at the next round boundary…"` (the MID-TURN drain,
+  `agent.ts:1408` → `subagentExitNote`): the same assertion at the end.
+They are two separate call sites of the one renderer, so pinning one would not
+have covered the other; the reviewer's scenario is the mid-turn one.
+
+**RED before green:** with `this.config.agentJobs?.delivered(job.agentId)`
+(`packages/agent/src/agent.ts:2498`) replaced by a comment — the reviewer's exact
+mutation — `bun test packages/agent/test/subagent-background.test.ts` → **2 fail**,
+both on this assertion (`Expected: true / Received: false`, at the T16 and the
+A-boundary test), the other 9 pass:
+
+```
+(fail) a sub-agent's exit in the parent agent (T16, T17) > it counts, and the next turn flushes ONE noted report before the first model round
+444 |     expect(jobs.ended("sa-1")?.delivered).toBe(true);
+error: expect(received).toBe(expected)   Expected: true   Received: false
+(fail) A: a sub-agent exit that lands mid-turn > it is delivered at the next round boundary, and nothing stays queued
+ 9 pass · 2 fail
+```
+
+Reverted the mutation (file restored from a scratch copy, `git diff` on
+`agent.ts` empty): 11 pass, 0 fail. So the new assertions fail on the exact
+property (a `status` that promises a note the model already holds) and only the
+wiring flip makes them green — non-vacuous by mutation, as §9 asks.
+
+**Finding 2 (MEDIUM) — branch ↔ doc ↔ executor record. FIXED (record).**
+- Header: `Branch:` now says `feat/subagent-error-report` (the real branch) with
+  a note that the name is a misnomer (`fix` task, doc rightly under `docs/fix/`)
+  and that renaming a branch is not the executor's act. `Status:` moves off
+  "awaiting owner approval" (approved 2026-11-13) to fix-round-1-done.
+- Execution signature: the signer is `claude-opus-5-5`, which **is** what ran it
+  (verified: the session that produced this Execution and `b0b5701` carries only
+  `"model":"claude-opus-5-5"`). The bogus claim "the executor was this model,
+  not DeepSeek — owner Q6's recommendation" is replaced by the honest statement:
+  Q6's recommendation (DeepSeek executes) was **not** honoured; the commit
+  subject `exec (deepseek)` is wrong and is left as history (the executor may not
+  rewrite it). The consequence the reviewer named is recorded: Review round 1 is
+  the same model family, so it is not an independent pass.
+
+**Mutations run this round (applied, run, reverted; tree verified clean after):**
+
+| # | Mutation | Result |
+|---|---|---|
+| 14 | `agent.ts:2498` `delivered()` call removed | **2 red** (the two new assertions) ✔ |
+
+No other code changed, so the previous 13 mutations still stand. No changelog
+change (the fragment was already written; this round adds no user-visible
+behaviour).
+
+**Gate (this round):** `bunx tsc --noEmit` → clean · `bun run lint` →
+`Checked 962 files. No fixes applied.` · `bun test` → **7637 pass, 3 skip (the
+opt-in live-k8s, live-docker, slow keepalive), 0 fail**, 544 files, 71628
+`expect()` calls · `bun run typecheck` (both projects) → clean.
+
+**Unverified / left open:** (a) AGENTS §10's branch-slug 1:1 is still formally
+violated by the branch name; only the orchestrator/owner can rename
+`feat/subagent-error-report` → `fix/subagent-error-report`, and the doc cannot
+fix it alone. (b) The task is still absent from `TODO.md`'s index — the same
+orchestrator-level bookkeeping, not touched here to keep this round's diff to
+code + this doc.
 
 ## Review
 

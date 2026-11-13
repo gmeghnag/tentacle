@@ -185,6 +185,11 @@ describe("a sub-agent's exit in the parent agent (T16, T17)", () => {
     );
     // ONE note, and the model saw it in its first request.
     expect(messages.filter((m) => m.note !== undefined)).toHaveLength(1);
+    // The wiring `agent_control status` reads: the record says the report is in
+    // hand. Mutation: drop `agentJobs?.delivered(...)` from `subagentExitNote` →
+    // this stays `false` and `status` tells the model to wait for a note it
+    // already holds → red (docs/fix/subagent-error-report.md, Review 1 finding 1).
+    expect(jobs.ended("sa-1")?.delivered).toBe(true);
     const first = model.seen[0]?.messages.map((m) => m.content).join("\n") ?? "";
     expect(first).toContain("THE REPORT");
     // A cancelled child reads as killed on the wire.
@@ -433,6 +438,10 @@ describe("A: a sub-agent exit that lands mid-turn", () => {
     // The event stream said so too, and the queue is empty.
     expect(events.filter((e) => e.type === "background_exit")).toHaveLength(1);
     expect(agent.pendingExitCount).toBe(0);
+    // …and the MID-TURN drain flips the same record (the start flush's own
+    // `delivered` assertion is in T16 above): mutation → `false`, `status`
+    // promises a note already in history → red.
+    expect(jobs.ended("sa-1")?.delivered).toBe(true);
   });
 
   test("an exit that lands during the final answer's round gets one more round", async () => {
