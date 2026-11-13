@@ -591,7 +591,21 @@ skips), 0 fail** across 541 files.
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-13 (fresh context; same model family as the plan and the resumed executor — shared blind spots possible)*
+
+**Verdict: REQUEST-CHANGES.**
+
+**Findings.**
+1. **HIGH — D6 is not wired in production.** `RemoteClientOptions.imageFallback` is never passed: the only `new RemoteClient` of the runtime (`packages/cli/src/local-runtime.ts:831-846`) omits it, so `LaptopImages.fallback` is `undefined` and the `client.images.allowSession(uid)` at `local-runtime.ts:964` has no effect (`laptop-images.ts:98`, returns `null` on a miss). Plan §Files step 5 ("`imageFallback` wired to the saver") is not done, yet Execution item 3 reports D6 as done. Failure scenario: `--model-proxy` pod, laptop restart, `attach` from a 2nd TUI (or a pod turn the daemon re-runs on attach before the first `send`, e.g. a re-asked suspended turn): the pod's `model/stream` names the ref, the model link has nothing in memory → `[image unavailable]` although `<uid>.attachments/<id>` is on the laptop. These are the failure-mode rows "Two TUIs on one laptop, model link never sends" and the D6 rationale. T10 passes only because it injects its own `imageFallback` (`client/test/model-stream-attachments.test.ts`, T10). **Not pinned:** mutation "drop the `allowSession(uid)` call in `local-runtime.ts`" → `local-runtime.test.ts` + `attach-durable-app.test.tsx` 79 pass / 0 fail. Fix: pass `imageFallback: (uid, ref) => deps.saver.readBlob(uid, ref.id)` at `:831`, plus a cli-level test (real `createLocalRuntime`, a laptop-mode pod, a blob on disk, no `send`, a `model/stream` naming it → bytes; a uid not built by this client → `null`).
+2. **MEDIUM — restore is not skipped when images are `off`.** Plan D5: "`off` → skipped silently". `restore()` (`local-runtime.ts:527-537`) calls `inner.attachImage` without checking `imageInput()`, and `RemoteClient.attachImage` throws `ImagesUnavailableError` in `off` mode (`remote-client.ts:1677-1679`). Scenario: `--resume` of an image session under a non-vision model (or an images-off pod) → the first send shows `⚠ N earlier image(s) could not be re-sent: …` — a spurious extra notice against owner Q6 ("at most one per event"; a success/irrelevant case should be silent). Fix: return early when `inner.imageInput().kind === "off"`; a test.
+
+**Gate (touched files, as asked).** 11 touched test files: 230 pass, 0 fail. `bun run lint`: 958 files, no fixes. `bun run typecheck` (tsc + mobile): clean. Full `bun test` not re-run here (Execution reports 7572/3 skip/0 fail).
+
+**Mutations (mine; each reverted, `git diff --quiet` confirmed).** D3 sweep also removes dirs WITH a log → T5 red (1 fail). `SessionSaver.putBlob` ignores `removed` → T6 red (1 fail). Runtime `allowSession` dropped → **survives** (finding 1). Executor's M1–M12 not re-run.
+
+**Attacks tried.** (a) Queue coalescing dropping a `blob` op: `enqueue`/`pump` are FIFO, no merge — holds. (b) Landing vs `dispose`/delete: `land` checks entry identity before `stored`, budget released once either way; blob op is queued before the delete's `remove` — holds. (c) D3 sweep vs an unknown-schema log: `ids()` is filename-based, so such a session's dir is kept — holds. (d) Fork linking pod-injected ids: `link` reads only the SOURCE's own blob dir, which only D4 writes — no cross-session leak — holds. (e) Peer serialization (§7): `put` stays sync to the append; only the verified last chunk returns a promise — holds. (f) D6 production wiring — **fails** (finding 1).
+
+**Executor behaviour.** Thorough on the daemon/saver slices and honest about weak mutations it replaced; but it reported D6 as done from the client-level test without checking the runtime passes the fallback — a claim of the plan's Files list not verified against the code.
 
 #### Owner answers (2026-11-13)
 
