@@ -1691,3 +1691,30 @@ as asserting the property, not a correlate. The tree is clean after review.
 
 *— claude-opus-5-5, 2026-11-13* (fresh context; different family from the
 executor, whichever of the two named it is)
+
+### Round 2 — PASS
+
+Scope: `git diff HEAD~1` (2 test files, fragment deleted, doc). Mutations were
+applied with temporary edits to `App.tsx` and run against the five structural
+files only. Each edit was reverted, and `git status` is clean afterwards.
+
+| Finding | Mutation | Result |
+|---|---|---|
+| 1 | `:3427` `!panelRef.current` → `!panel` | **KILLED**: the new held-`[` + panel-open test, 20 pass / 1 fail |
+| 2 (paste) | `:3627` `clean && !panel` → `clean` (guard deleted) | **KILLED**: the paste-behind-panel test |
+| 2 (dock) | `:4257` drop `dockHeight` | **KILLED**: the pill click with the drawer open |
+| 2 (attach) | `:985` drop `attachRowRows(...)` | **KILLED**: the pill click with the chip row painted |
+| 3 | — | the fragment is gone from `changelog.d/` |
+| 4 | — | the S0b section is re-signed with the launcher profile's id, and the evidence is cited |
+
+Gate: 5 structural files **21 pass / 0 fail**; `bun run lint` clean (1018
+files); `bun run typecheck` clean. I did not re-run the full suite; the
+executor reports 7943 pass / 3 skip / 0 fail. I did not check the executor's
+claim that `:3676` is an equivalent mutant (it rests on `panelGenRef` being
+bumped synchronously). It is outside S0b's required kills, and S3 should keep
+it in mind. No regressions: the round changes no `src/`, and the only new
+dependency is the 200 ms timing wait, which the executor already lists as
+unverified under load.
+
+*— claude-opus-5-5, 2026-11-13* (fresh context; different family from the
+DeepSeek executor)
