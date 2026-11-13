@@ -577,4 +577,47 @@ bun test                   → 7503 pass · 3 skip · 0 fail (7506 tests, 537 fi
 
 ## Review
 
-*(empty — mandatory fresh-context Review, AGENTS §10)*
+*— claude-opus-5-5, 2026-11-12* (fresh context; a different model family from the executor)
+
+**Verdict: REQUEST-CHANGES** (3 findings, 2 HIGH, 1 MEDIUM; each reproduced in the real `App`)
+
+1. **HIGH — a pasted path that turns out NOT to be an image is silently deleted.**
+   `App.tsx` `routeAttach` (≈L1934) calls `routeDecision(attachRef.current, decision, attachMode())`
+   with no `text` argument, so a `{kind:"text"}` decision from `decideAttachment` (a missing file, a
+   source file, a directory: the 3a rule says "the WHOLE paste stays text") yields `insert` undefined.
+   Pasting `~/missing.md` (or `/w/a.txt /w/b.txt`) leaves the input empty with no notice. The same hole
+   is in `convertToChips` (≈L1990): typing `~/notes.md` + Enter clears the field, sends nothing, says
+   nothing. A single absolute path escapes only by accident (`looksLikeCommand` treats it as a command).
+   The failure-table row "Only paths, one a source file / missing → stays text" has no App test (T1 tests
+   the pure function with `text` passed).
+2. **HIGH — Enter during an upload sends the prompt twice.** `submitPlan` (`attach-draft.ts:178`)
+   ignores `draft.upload !== null`, and `state.running` is still false while chips upload
+   (`App.tsx` `sendWithImages` clears chips only after every `attachImage`). Paste PNG, `q1` Enter, `q2`
+   Enter during the upload → `send` called twice, both with the ref (`[{"q1",1},{"q2",1}]`); the second
+   `sendWithImages` also overwrites `uploadCtrlRef`, so Esc can no longer cancel the first.
+3. **MEDIUM — the first Esc after an image prompt does not stop the turn.** `uploadCtrlRef` is never
+   cleared after a successful upload, so the Esc branch at ≈L4058 (`uploadCtrlRef.current !== null`)
+   swallows the first Esc (it aborts a finished controller) before the "stop running turn" branch.
+   Repro: turn hangs until abort → after one Esc, `aborted = 0`. Unmount does not abort an in-flight
+   upload either (failure table row "upload aborted" is not implemented: only the gen guard is).
+
+**Repro** (`.tentacle/tmp/attachments-tui/repro.test.ts`, real `App`, fake probe/session, the
+`attach-app.test.tsx` pattern): B (missing path paste) FAIL — frame shows an empty input; C FAIL —
+`sent: [{"prompt":"q1","n":1},{"prompt":"q2","n":1}]`; D FAIL — `aborted after one Esc: 0`.
+
+**Gate:** the 13 touched test files: 295 pass / 0 fail; `bun run lint` clean (951 files);
+`bun run typecheck` clean. Full `bun test` was not re-run here.
+
+**Mutation:** `run` drops `sendOpts.attachments` (`> 0` → `> 99`) → T8b, T8e, T8f red (3/19);
+reverted, `git status` clean.
+
+**Attacks tried:** §7 one-session-path: `attachImage` lives on `RemoteSession`, `PersistingController`
+only forwards, no second open path (holds). Never-raw-stdout: progress/refusals go only through the
+attach row and `pushNotice` (holds). Protocol: `turn_start.attachments` is optional on a strip schema,
+emitted only when non-empty, schema export + drift fixture updated, `-32016` matches
+`DomainErrorCode.AttachmentRefused` (holds). Paste-of-non-image path (finding 1), re-entrant Enter
+(finding 2), Esc routing (finding 3).
+
+**Executor behaviour:** a thorough Execution record with a full mutation table, and an honest
+"Not verified" section; the misses are re-entrancy and the text-decision branch, which none of the
+listed mutations covered.
