@@ -1718,3 +1718,143 @@ unverified under load.
 
 *— claude-opus-5-5, 2026-11-13* (fresh context; different family from the
 DeepSeek executor)
+## Execution
+
+### S4 — `feat/app-decomp-4-mouse` (the mouse layer leaves `App.tsx`)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-13* (real id: `ps` shows
+this run launched as `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc:29`.)
+
+**Scope.** `packages/tui/src/mouse-stream.ts` (new, pure), `useMouse.ts` (new,
+the hook), `App.tsx` (−163 lines), two new test files, one changelog fragment.
+No existing test edited, no `packages/protocol` change (so `protocol.json` was
+not regenerated), no other slice touched.
+
+**Load-bearing check, re-run first (PASSED).** The plan's claim is that Ink
+calls every active `useInput` listener, so the handler cannot be split across
+hooks. Re-verified on this branch, not trusted:
+`packages/tui/node_modules/ink/build/hooks/use-input.js:89` registers
+`internal_eventEmitter?.on('input', handleData)` and `handleData` (`:80-87`) has
+no return value anyone consumes and no stop-propagation; the emitter is
+per-App (`components/StdinContext.js:11`). `rg "useInput\(" packages/tui/src` →
+`App.tsx:3439` (was `:3465`) and the separate pre-mount
+`components/SessionPicker.tsx:85`. **Holds** — so `App` keeps the ONE
+`useInput`, and S4 moves only its mouse BODY.
+
+**Design, as built (dependency order).**
+1. **`mouse-stream.ts`** — the two pure decisions, no React import:
+   - `stepMouseChunk({held, char, key, panelOpen})` → `{reports, hold, restored,
+     submit, swallowBehindPanel, verdict}` (the plan's five fields plus
+     `submit`, which the plan folded into `restored`; see drift 2).
+   - `dispatchMouse(state, report, snapshot)` → `{state, effects}`: ONE report,
+     the effects the App applies, and the threaded `{click, selection}` state.
+     `MouseEffect` is data (`scroll | panelClick | dockPill | dockRow |
+     toggleTool | copySelection`) so the App keeps only execution.
+   - `plainKeyOf(key)` — the "is this a real keypress" rule, extracted so the
+     swallow rule is unit-testable rather than inline.
+2. **`useMouse.ts`** — owns the partial-report ref + its 100 ms timer and the
+   click recogniser; executes the effects through a narrow port (`panelRef`,
+   `dockRef`, `selectionRef`, `setSelection`, `field`, `clipboard`,
+   `pushNotice`, `setScrollOffset`, `setPanel`, `setDock`, `setExpandedIds`,
+   `dockIds`, `clickDock`, `panelClick`, `clampOffset`, `submit`). Deps name
+   FIELDS, never the port (Fable H2).
+3. **`App.tsx`** — the inline `dispatchMouse` (pre-S1 4156–4252), the chunk
+   state machine (4254–4307) and the selection/hold helpers (3719–3776) are
+   gone; in their place a `useMouse({…})` call and, inside the one `useInput`,
+   a snapshot built AT THE EVENT:
+   `{listView, panelOpen, columns, panelBodyTop, dockTop, dockView, statusRow,
+   laid, win, total, viewport, visibleCount, expandAll}` then
+   `if (mouse.handleChunk(char, key, snap) === "consumed") return;`.
+
+**What did NOT move, and why (Fable M1/H1, stated rather than discovered late).**
+- The **live selection** (`selection`, `selectionRef`, `setSelection`), because
+  the JSX paints it and the scroll-anchor effect declared ABOVE the hook reads
+  `selectionRef`; moving it would have moved that effect's index. It stays in
+  `App` and reaches the hook as a port field.
+- The **hold's unmount cleanup** stays in App's ordered effect list (index 19 of
+  20 before AND after: `git show HEAD:… | grep -n useEffect(` vs the working
+  tree both list it 19th, at `:3435` before and `:3409` now). No effect was
+  added, removed or reordered by this slice — the hook declares none.
+- `WHEEL_LINES` moved to `mouse-stream.ts` (it is the wheel decision's own
+  constant); `clickRef`/`CLICK_IDLE`/`ClickState` moved into the hook.
+
+**Drift from the Implementation (all three recorded, none silent).**
+1. **`selection` travels in `MouseState`, not as an effect.** The plan's M2
+   names the dispatch's inputs but not how the selection threads. It has to
+   thread through the reports (a coalesced press+drag+release must copy), and
+   today's `setSelection` writes its ref synchronously — which made the
+   obvious pin VACUOUS. Measured, not assumed: M14 (re-read the refs per report)
+   **SURVIVED** the selection tests (1 pass / 0 fail) and only went red once a
+   COALESCED press+release CLICK was pinned, because the click state reaches its
+   ref only after the loop. Cost: one extra App-seam test. The alternative
+   (cloning today's bug into a passing test) was rejected.
+2. **`submit` is its own field of the step, not implied by `restored`.** The
+   plan's `{reports, hold, restored, swallowBehindPanel}` cannot express "the
+   restored `[` must be submitted WITH this Enter rather than inserted": the App
+   would have to re-read `key.return` outside the pure function. Keeping the
+   decision inside `stepMouseChunk` is the §7 rule (decide in the pure module).
+   `verdict: "pass"` still accompanies it, so the carry reaches the caller.
+3. **The snapshot carries `panelOpen` (a RENDER value) as well as `panelRef`.**
+   S0b's freshness pin records that a key-path panel read is the render value;
+   the hold's 100 ms TIMER is the frozen closure that needs the ref. Both exist,
+   each with its own source, exactly as H3's per-field rule requires — so the
+   hook takes `panelRef` (timer) and the snapshot takes `panelOpen` (key path).
+
+**Tests (new only).** `packages/tui/test/mouse-stream.test.ts` (22 tests, pure):
+the chunk machine's every branch (coalesced reports, a trailing half held, a
+prefix held while the key is plain and NOT held when it is not, a held `[`
+completed / restored / submitted / dropped, a panel swallow, and that a report
+still dispatches with a panel open) and the dispatch's whole priority order
+(wheel → panel body → pill → dock row → click recogniser → tool header →
+selection), each with its neighbour as the negative case.
+`packages/tui/test/app-mouse-layer.test.tsx` (3 tests, the App seam): a
+coalesced press+release CLICK expands the call; a coalesced press+motion+release
+COPIES; the same gesture split across chunks copies the same text.
+**All S0 (39/40) and S0b (21 tests) nets stay green, unedited** — the suite that
+pins this behaviour was not touched, which is the behaviour-preservation proof.
+
+**Mutation check (§9 non-vacuity) — 14/14 KILLED.** Harness
+`.tentacle/tmp/app-decomp-4-mouse/mutate.ts` (byte-copy, one mutation, one
+filtered `bun test -t`, restore, sha256 compare; a 0-test run is reported
+INVALID so a bad filter cannot look like a kill — M14 first looked "SURVIVED"
+and that finding is why the click pin exists).
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | a trailing half report is not held | **KILLED** (0 pass / 1 fail) |
+| M2 | a growable prefix chunk is never held | **KILLED** |
+| M3 | a prefix chunk is held even when the key is not plain | **KILLED** |
+| M4 | a held bare `[` is not restored | **KILLED** |
+| M5 | the restored `[` is not carried into the same-event Enter | **KILLED** |
+| M6 | behind a panel the layer passes instead of consuming | **KILLED** |
+| M7 | a longer truncated hold is restored | **KILLED** |
+| M8 | the wheel notch's direction is flipped | **KILLED** |
+| M9 | the wheel is not decided before the panel body | **KILLED** |
+| M10 | the pill hit test is inclusive at `start` | **KILLED** |
+| M11 | the dock row offset drops the rule row | **KILLED** |
+| M12 | the Ctrl+O guard is dropped | **KILLED** |
+| M13 | the drag's motion bit is ignored | **KILLED** |
+| M14 | the per-report state is re-read from the refs | **KILLED** |
+
+Every row is a red on the ASSERTION with a real count (never an import/compile
+error), and after each the mutated file's sha256 `MATCHES` its pre-run value;
+`git status --short packages/tui/src` lists only `App.tsx` (modified) and the
+two new modules — no mutation survived into the tree.
+
+**Gate (this worktree, this branch).** `bun run check` → `tsc --noEmit` clean,
+`tsc -p apps/mobile --noEmit` clean, `biome check .` **1050 files, 0 errors 0
+warnings** (the AGENTS §6 baseline), `bun test` **8143 pass / 3 skip / 0 fail**
+(the 3 skips are the documented opt-ins: live-k8s, live-docker, the real-socket
+keepalive). No schema change → `packages/protocol/schema/protocol.json` not
+regenerated. `changelog.d/app-decomp-4-mouse.changed.md` added (one bullet; an
+internal refactor with a user-visible module boundary, `changed` not `added`).
+`TODO.md` untouched (the orchestrator's line, per §10).
+
+**Unverified (one line each).**
+- The plan's coverage check (`bun test --coverage packages/tui`, App.tsx +
+  new-files line total not dropping) was **not** run; the moved lines are pinned
+  by 25 new tests plus the untouched S0/S0b nets, but the percentage is unmeasured.
+- The queued-row variant of a pill click (S0b's recorded gap) is still unpinned;
+  S4 does not change that path, and the record stands as S0b left it.

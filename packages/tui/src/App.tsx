@@ -126,7 +126,6 @@ import { inputRowCount } from "./input-view.ts";
 import { JOB_REFRESH_MS, JOB_TAIL_SHOWN, jobOutcome, refreshDue } from "./job-drawer.ts";
 import { stoppedNotice } from "./link-status.ts";
 import { modelErrorNotice } from "./model-error.ts";
-import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
 import {
   type OpenPanel,
   applyPanel,
@@ -147,6 +146,7 @@ import {
   permissionShowsCwd,
   usePermissionBroker,
 } from "./permission-ui.ts";
+import { useMouse } from "./useMouse.ts";
 
 export type { AutoAcceptFeed };
 import {
@@ -180,7 +180,7 @@ import {
 } from "./render-lines.ts";
 import { runChunked } from "./run-chunked.ts";
 import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
-import { type Selection, extractSelection, isNonEmpty, rowSelectionRange } from "./selection.ts";
+import { type Selection, rowSelectionRange } from "./selection.ts";
 import {
   COMPACTING_NO_TURN,
   type CompactionResult,
@@ -239,8 +239,6 @@ import { inputRuleText } from "./status-line.ts";
 import { type ContextOpen, contextShown, pillView, statusTokens } from "./status-view.ts";
 import { subagentNotifyNotice, userToSubagentNotice } from "./subagent-notify.ts";
 import { dimProps, palette } from "./theme.ts";
-import { CLICK_IDLE, type ClickState, nextClick, toggleExpanded } from "./tool-expand.ts";
-import { toolCallAtViewport } from "./tool-hit.ts";
 import { panelHeight, panelMaxBody, treeKey } from "./tree-panel.ts";
 import {
   FOREIGN_COMPACTED_NOTICE,
@@ -285,8 +283,6 @@ const MAX_INPUT_ROWS = 10;
 
 const WELCOME = "Tentacle ready. Type a task, or `/help` for commands.";
 
-// Lines scrolled per mouse-wheel notch.
-const WHEEL_LINES = 3;
 // Clipboard reads are trimmed: copied terminal output often has a trailing
 // newline that would otherwise land as a stray blank line.
 const flattenPasted = (text: string): string => sanitizePasted(text).trim();
@@ -397,9 +393,8 @@ export function App({
   // The tool calls whose full command is shown wrapped under the header (a left
   // click on ONE call; docs/feat/tui-tool-expand.md). Keyed by the call's stable
   // daemon id, so it survives re-renders and new messages; sorted, so it is a
-  // cheap layout cache key. The click recogniser's state rides beside it.
+  // cheap layout cache key. (The click recogniser's state lives in `useMouse`.)
   const [expandedIds, setExpandedIds] = useState<readonly string[]>([]);
-  const clickRef = useRef<ClickState>(CLICK_IDLE);
   // The ONE blink clock of running tool calls (docs/feat/tui-tool-blink.md).
   // `blink.ts` owns the whole rule — when the clock runs, when it restarts ON,
   // what a tick renders; the App only relays a timer into `advanceBlink` and
@@ -473,11 +468,8 @@ export function App({
   panelRef.current = panel;
   const [selection, setSelectionState] = useState<Selection | null>(null);
   const selectionRef = useRef<Selection | null>(null);
-  // Partial SGR mouse report held across data chunks (see the mouse handling
-  // in useInput): some terminals/ptys split a report in half.
-  const pendingMouseRef = useRef("");
-  const pendingMouseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Carry-over buffer while a bracketed paste spans multiple input chunks.
+  // Bracketed paste: the carry-over buffer while a paste spans chunks, and its
+  // recovery timer (see below). The MOUSE hold moved to `useMouse` (S4).
   const pasteBufRef = useRef<string | null>(null);
   // Recovery timer: fires if a paste's closing marker never arrives (see below).
   const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -3379,59 +3371,41 @@ export function App({
   // buffer, independent of input-handler ordering.
 
   // --- mouse text selection → clipboard ------------------------------------
+  // The selection itself stays here: the JSX paints it and the scroll-anchor
+  // effect above reads `selectionRef` (docs/feat/app-decomposition.md S4,
+  // Fable M1/H1 — no use-site edit, no effect reorder). The mouse layer
+  // (`useMouse`) drives it through this setter.
   const setSelection = useCallback((next: Selection | null) => {
     selectionRef.current = next;
     setSelectionState(next);
   }, []);
 
-  /** Copy the current selection's text, then clear it. `rows` is the colour buffer. */
-  const finishSelection = useCallback(
-    (rows: readonly string[]) => {
-      const sel = selectionRef.current;
-      setSelection(null);
-      if (!sel || !isNonEmpty(sel)) {
-        return;
-      }
-      const text = extractSelection(rows.map(stripAnsi), sel);
-      if (text.trim() === "") {
-        return;
-      }
-      // Copy silently on success: the on-screen notice made the viewport jump
-      // (pushNotice resets scrollOffset to the tail). Surface failures only.
-      void clipboard(text).catch(() => pushNotice("_Clipboard unavailable._"));
-    },
-    [clipboard, pushNotice, setSelection],
-  );
-
-  // --- fragmented SGR mouse reports ----------------------------------------
-  // Hold a partial report until the next data chunk completes it. The timer
-  // releases the hold when nothing follows — i.e. the held "[" was really a
-  // typed bracket (the two halves of a real report arrive within the same pty
-  // read window, so 100 ms is far longer than any split).
-  const clearMouseHold = useCallback(() => {
-    if (pendingMouseTimerRef.current) {
-      clearTimeout(pendingMouseTimerRef.current);
-      pendingMouseTimerRef.current = null;
-    }
-  }, []);
-  const holdMouse = useCallback(
-    (partial: string) => {
-      pendingMouseRef.current = partial;
-      if (pendingMouseTimerRef.current) {
-        clearTimeout(pendingMouseTimerRef.current);
-      }
-      pendingMouseTimerRef.current = setTimeout(() => {
-        pendingMouseTimerRef.current = null;
-        const p = pendingMouseRef.current;
-        pendingMouseRef.current = "";
-        if (p === "[" && !panelRef.current) {
-          field.insert(p); // it was a typed bracket after all
-        }
-        // A longer p was a truncated report: drop it.
-      }, 100);
-    },
-    [field.insert],
-  );
+  // --- the mouse layer (S4) -------------------------------------------------
+  // The chunk state machine and the per-report dispatch are `mouse-stream.ts`'s
+  // (pure); this hook owns their state and executes the effects. The RENDER
+  // SNAPSHOT each event reads is built at the call site in `useInput` below, so
+  // a coalesced chunk's reports all see the frame they landed on (Fable M2).
+  const mouse = useMouse({
+    panelRef,
+    dockRef,
+    selectionRef,
+    setSelection,
+    field,
+    clipboard,
+    pushNotice,
+    setScrollOffset,
+    setPanel,
+    setDock,
+    setExpandedIds,
+    dockIds,
+    clickDock,
+    panelClick,
+    clampOffset,
+    submit,
+  });
+  // The hold's unmount cleanup keeps its place in App's ordered effect list
+  // (Fable H1); the hook itself declares no effect.
+  const clearMouseHold = mouse.clearHold;
   useEffect(() => {
     return () => clearMouseHold();
   }, [clearMouseHold]);
@@ -3809,164 +3783,27 @@ export function App({
         return;
       }
     }
-    // Mouse (SGR 1006). Ink strips the leading ESC and hands us the report(s)
-    // as `char`. A fast wheel or drag coalesces several reports into one chunk,
-    // and some terminals/ptys split one report across two chunks (the first
-    // half then arriving as a bare "[", indistinguishable from a typed
-    // bracket). So a chunk may carry any number of complete reports plus, at
-    // the end, a half-delivered one. We dispatch every complete report and hold
-    // any trailing partial, so no report byte ever leaks into the input.
-    const dispatchMouse = (r: MouseReport): void => {
-      // Wheel notches (64=up, 65=down).
-      if (r.btn & 64) {
-        const dir = r.btn & 1 ? -WHEEL_LINES : WHEEL_LINES;
-        setScrollOffset((o) => clampOffset(o + dir, total, viewport));
-        return;
-      }
-      // A left press on a list panel body row selects it (a head row also
-      // expands/collapses). Drags and releases there do nothing.
-      if (listView && r.y >= panelBodyTop && r.y < panelBodyTop + listView.rows.length) {
-        if (r.press && r.btn === 0) {
-          const bodyIndex = r.y - panelBodyTop;
-          setPanel((p) => (p ? panelClick(p, listView, bodyIndex, columns) : p));
-        }
-        return;
-      }
-      // The DOCK's two controls (docs/feat/subagent-panel.md, UI revision): a
-      // click on the PILL opens the dropdown; a click on a dropdown ROW opens
-      // that child. Both hit tests are the view-models' (the pill's cell range is
-      // `statusLayout`'s, the rows' are their screen rows), so nothing here
-      // re-derives a layout.
-      if (r.press && r.btn === 0) {
-        const range = statusRowRef.current;
-        // The bar is the row the component just painted, and `r.y` is 1-based on
-        // the same frame; the range is in cells, also 1-based per column.
-        const clickedPill =
-          range !== null &&
-          range.pill !== null &&
-          r.y === range.y &&
-          r.x > range.pill.start &&
-          r.x <= range.pill.end;
-        if (clickedPill) {
-          const step = clickDock(dockRef.current, { kind: "pill" }, dockIds());
-          if (step.state !== dockRef.current) {
-            setDock(step.state);
-          }
-          return;
-        }
-        // `dockTop` is the dropdown's own RULE row; row 0 is the one under it.
-        const rowIndex =
-          dockTop !== null && r.y > dockTop && r.y <= dockTop + (dockView?.rows.length ?? 0)
-            ? r.y - dockTop - 1
-            : -1;
-        const rowId = rowIndex < 0 ? undefined : dockView?.rows[rowIndex]?.id;
-        if (rowId !== undefined && rowId !== "") {
-          const step = clickDock(dockRef.current, { kind: "row", id: rowId }, dockIds());
-          if (step.state !== dockRef.current) {
-            setDock(step.state);
-          }
-          if (step.effect.kind === "open") {
-            field.set(step.effect.draftIn);
-          }
-          return;
-        }
-      }
-      // Left button, part 1: classify the report as click / drag / neither.
-      // The whole rule is `tool-expand.ts`'s (`nextClick`); here we only feed it
-      // and act on a completed click. A click is a press and a release on the
-      // SAME cell with no motion in between, and a coalesced chunk (both reports
-      // in one write) is seen as press then release, in order.
-      const step = nextClick(clickRef.current, r);
-      clickRef.current = step.state;
-      if (step.click) {
-        // The call under the cursor's SCREEN row, or null when the row is
-        // outside the transcript viewport (the prompt rule, the input box, the
-        // status bar) — `tool-hit.ts` owns the whole rule, window included.
-        // Under Ctrl+O every call's command already shows, so a click has
-        // nothing to reveal and must not toggle the hidden per-call state.
-        const id = expandAll ? null : toolCallAtViewport(layout.laid, win, step.click.y);
-        // Only a tool call's HEADER row is a control; anywhere else the click
-        // stays what it is today (a zero-length selection, i.e. nothing).
-        if (id !== null) {
-          setSelection(null);
-          setExpandedIds((ids) => toggleExpanded(ids, id));
-          return;
-        }
-      }
-      // Left button, part 2: release copies the selection, press/drag starts/extends it.
-      if (!r.press) {
-        // Selection can span rows scrolled out of view, so assemble the whole
-        // buffer here — only on release, never on the per-frame render path.
-        finishSelection(sliceLaid(layout.laid, 0, total));
-        return;
-      }
-      const visibleIndex = r.y - 1;
-      if ((r.btn & 3) === 0 && visibleIndex >= 0 && visibleIndex < visible.length) {
-        const row = win.start + visibleIndex;
-        const col = Math.max(0, r.x - 1);
-        const point = { row, col };
-        const dragging = (r.btn & 32) !== 0;
-        setSelection(
-          dragging && selectionRef.current
-            ? { anchor: selectionRef.current.anchor, head: point }
-            : { anchor: point, head: point },
-        );
-      }
-    };
-
-    // Prepend any partial report held from the previous chunk.
-    const held = pendingMouseRef.current;
-    if (held) {
-      pendingMouseRef.current = "";
-      clearMouseHold();
-    }
-    const data = held + char;
-    const { reports, rest } = splitMouseReports(data);
-    if (reports.length > 0) {
-      for (const r of reports) {
-        dispatchMouse(r);
-      }
-      if (isMousePrefix(rest)) {
-        holdMouse(rest); // a trailing, half-delivered report
-      }
+    // The MOUSE layer (S4). Its chunk state machine and its per-report dispatch
+    // are pure (`mouse-stream.ts`); the hook owns their state and executes the
+    // effects. The render SNAPSHOT is built HERE, at the moment of the event, so
+    // every report of a coalesced chunk reads the frame it landed on.
+    const mouseStep = mouse.handleChunk(char, key, {
+      listView,
+      panelOpen: panel !== null,
+      columns,
+      panelBodyTop,
+      dockTop,
+      dockView,
+      statusRow: statusRowRef.current,
+      laid: layout.laid,
+      win,
+      total,
+      viewport,
+      visibleCount: visible.length,
+      expandAll,
+    });
+    if (mouseStep === "consumed") {
       return;
-    }
-    // No complete report. If the chunk is still a growable report prefix (and
-    // this event is not a real keypress), keep holding it for the next chunk.
-    const plainKey =
-      !key.return &&
-      !key.ctrl &&
-      !key.meta &&
-      !key.tab &&
-      !key.escape &&
-      !key.upArrow &&
-      !key.downArrow &&
-      !key.pageUp &&
-      !key.pageDown &&
-      !key.leftArrow &&
-      !key.rightArrow &&
-      !key.backspace &&
-      !key.delete;
-    if (isMousePrefix(data) && plainKey) {
-      holdMouse(data);
-      return;
-    }
-    // Behind a list panel nothing edits the (hidden) input.
-    if (panel) {
-      return;
-    }
-    // Not a report or a continuable prefix: a held bare "[" was a typed bracket,
-    // so restore it (a longer truncated hold is dropped). It precedes whatever
-    // this event's own key does below.
-    const restored = held === "[" ? "[" : "";
-    if (restored) {
-      if (key.return) {
-        // Same-event submit: `field` is still the pre-insert closure value, so
-        // append the restored bracket here instead of inserting it.
-        submit(field.value + restored);
-        return;
-      }
-      field.insert(restored);
     }
 
     // Line editing works while idle AND while a turn runs (so a task can be
