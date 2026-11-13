@@ -11,6 +11,7 @@ import { PermissionBroker, type PermissionRequest, type PermissionResponse } fro
 import { render } from "ink-testing-library";
 import { App, type AppProps, type SessionController, type SessionDirectory } from "../src/App.tsx";
 import type { DockJobRow } from "../src/background-list.ts";
+import type { SessionActivity } from "../src/turn-feed.ts";
 import { BACKGROUND_ROW, type DockTestRow } from "./subagent-row.ts";
 
 const ESC = "\x1b";
@@ -204,6 +205,75 @@ describe("S0 key precedence: the first claiming layer wins, later ones never see
     t.app.unmount();
   });
 
+  test("Esc with an upload in flight aborts the UPLOAD, never the running turn", async () => {
+    // Two layers claim `key.escape`: the upload's abort (App.tsx:4098) is above
+    // the turn's (App.tsx:4105). Swapping them aborts the turn and leaves the
+    // bytes half-sent — the one thing attachments-tui decision 7 forbids.
+    let uploadAborted = 0;
+    let turnAborts = 0;
+    let raise: (activity: SessionActivity) => void = () => {};
+    const f = fake({
+      extra: {
+        imageInput: () => ({ kind: "upload" as const, maxBytes: 4 * 1024 * 1024 }),
+        attachImage: (_bytes: Uint8Array, _meta: unknown, o?: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            o?.signal?.addEventListener(
+              "abort",
+              () => {
+                uploadAborted += 1;
+                reject(Object.assign(new Error("aborted"), { name: "UploadAbortedError" }));
+              },
+              { once: true },
+            );
+          }),
+        // A turn raised from OUTSIDE (another device's), so one runs while the
+        // upload is in flight — the only state in which both layers claim Esc.
+        watch(listener: (activity: SessionActivity) => void) {
+          raise = listener;
+          return () => {};
+        },
+      },
+    });
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const t = await mount(f, {
+      home: "/home/u",
+      localCwd: "/work",
+      fileProbe: {
+        read: async (path: string) =>
+          path === "/tmp/a.png" ? { kind: "file", size: png.length, bytes: png } : null,
+      },
+    });
+    await t.keys("\x1b[200~/tmp/a.png\x1b[201~");
+    await delay(80);
+    // Enter uploads; the prompt is sent when the upload settles.
+    await t.keys(ENTER);
+    await delay(60);
+    // Another device's turn now runs while the bytes are still going up.
+    raise({
+      kind: "turn",
+      turnId: "other-1",
+      cancel: () => {
+        turnAborts += 1;
+      },
+      events: (async function* () {
+        await new Promise<void>((resolve) => setTimeout(resolve, 400));
+        yield { type: "turn_end", reason: "end_turn" as const };
+      })(),
+    });
+    await delay(60);
+    expect(t.frame()).toContain("Working…");
+    await t.keys(ESC);
+    // The FIRST Esc is the upload's: the bytes are stopped, the turn is not.
+    expect(uploadAborted).toBe(1);
+    expect(turnAborts).toBe(0);
+    // With nothing left uploading, the NEXT Esc is the turn's (the layer below
+    // is intact, not merely shadowed).
+    await t.keys(ESC);
+    expect(turnAborts).toBe(1);
+    expect(uploadAborted).toBe(1);
+    t.app.unmount();
+  });
+
   test("the sessions panel's Esc closes the panel, never stops the running turn", async () => {
     const f = fake();
     const t = await mount(f, { sessions: sessionsDir() });
@@ -319,6 +389,22 @@ describe("S0 key precedence: the first claiming layer wins, later ones never see
     await t.keys(SHIFT_TAB);
     expect(t.answers).toEqual([{ allowed: true, scope: "once" }]);
     expect(t.frame()).toContain("auto-accept on");
+    t.app.unmount();
+  });
+
+  test("shift+tab mid-turn toggles auto-accept, never stops the turn", async () => {
+    // The layer is checked FIRST, "in any state (idle, running, …)": a running
+    // turn is the state where a Tab could otherwise reach the palette/history.
+    const f = fake();
+    const t = await mount(f);
+    await t.keys("hang", ENTER);
+    expect(f.prompts).toEqual(["hang"]);
+    expect(t.frame()).toContain("auto-accept off");
+    await t.keys(SHIFT_TAB);
+    expect(t.frame()).toContain("auto-accept on");
+    await t.keys(SHIFT_TAB);
+    expect(t.frame()).toContain("auto-accept off");
+    expect(f.aborts()).toBe(0);
     t.app.unmount();
   });
 });

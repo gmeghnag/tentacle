@@ -253,6 +253,75 @@ describe("S0 command smoke: every built-in command answers", () => {
     expect(t.frame()).toContain("Unknown command: /nope. Try /help.");
     t.app.unmount();
   });
+
+  test("/settings with no settings seam says so; `sync` says it too", async () => {
+    const f = fake();
+    const t = await mount(f);
+    await t.line("/settings");
+    expect(t.frame()).toContain("/settings isn't available for this session.");
+    await t.line("/settings sync");
+    expect(t.frame()).toContain("/settings isn't available for this session.");
+    expect(f.prompts).toEqual([]);
+    t.app.unmount();
+  });
+
+  test("/settings with a seam shows the session's lines, and `sync` shows its answer", async () => {
+    const synced: string[] = [];
+    const f = fake({
+      extra: {
+        settings: () => [{ text: "model: qwen3" }, { text: "auto-accept: off", hint: "shift+tab" }],
+        updateSettings: () => {
+          synced.push("sync");
+          return Promise.resolve([{ text: "settings synced" }]);
+        },
+      },
+    });
+    const t = await mount(f);
+    await t.line("/settings");
+    expect(t.frame()).toContain("model: qwen3");
+    expect(t.frame()).toContain("auto-accept: off");
+    await t.line("/settings sync");
+    expect(synced).toEqual(["sync"]);
+    expect(t.frame()).toContain("settings synced");
+    t.app.unmount();
+  });
+
+  test("/attach with no path shows its usage line; it is not a prompt", async () => {
+    const f = fake();
+    const t = await mount(f);
+    await t.line("/attach");
+    expect(t.frame()).toContain("Usage: /attach <path>");
+    expect(f.prompts).toEqual([]);
+    t.app.unmount();
+  });
+
+  test("/exit (the alias of /quit) asks first with a background child", async () => {
+    const t = await mount(fake({ agents: [BACKGROUND_ROW.sa1] }));
+    await t.line("/exit");
+    expect(t.frame()).toContain("(y/N)");
+    t.app.unmount();
+  });
+
+  test("/exit with nothing to lose exits: Ink unmounts, nothing is closed here", async () => {
+    // `/exit` is `/quit`'s alias (they share a case): with no background child
+    // it exits AT ONCE. The runtime delivers the close on its exit path
+    // (docs/feat/detach-live.md), so `close()` is not the App's to call — the
+    // observable fact here is the unmount, spied through the notice feed.
+    const f = fake();
+    const log: string[] = [];
+    const t = await mount(f, {
+      notices: {
+        onNotice: () => () => {
+          log.push("unmounted");
+        },
+      },
+    });
+    await t.line("/exit");
+    await delay(60);
+    expect(log).toEqual(["unmounted"]);
+    expect(f.closes()).toBe(0);
+    t.app.unmount();
+  });
 });
 
 describe("S0 command smoke: the session-mutating commands are refused mid-turn", () => {

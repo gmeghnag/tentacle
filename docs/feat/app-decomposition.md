@@ -239,7 +239,163 @@ TODO line.
 
 ## Execution
 
-*(empty until the plan is approved; one tagged sub-section per slice, S0 first)*
+### S0 — `feat/app-decomp-0-charnet` (characterization net; tests only)
+
+*— deepseek-v4.1-flash, 2026-11-13*
+
+**What S0 is.** A behaviour-preservation net for S1–S10: no `src/` change at all
+(`git diff --stat main -- packages/tui/src` is empty on this branch), and the
+three test files the plan names under `packages/tui/test/`.
+
+**Load-bearing check re-run first (passed).** `use-input.js:89` registers each
+listener with `internal_eventEmitter.on('input', handleData)` and there is no
+stop-propagation or return-value short-circuit, so Ink calls EVERY active
+`useInput` for each chunk — splitting App's handler across hooks would lose the
+ordering. And App has exactly ONE `useInput`, at `App.tsx:3802`
+(`grep -n "useInput(" packages/tui/src` → App.tsx:3802, the separate pre-mount
+`components/SessionPicker.tsx:85` only). The assumption holds as written.
+**As built (this run; the earlier run was cut by quota with only the three files
+committed at f28d6d7).** The three files were audited against the plan's Tests
+list, and the gaps were closed:
+
+- `test/app-keys-precedence.test.tsx` (+2 tests, 18 → 20). The plan names
+  "Esc with upload in flight" and "shift+tab in every state"; both were missing
+  and are now pinned:
+  - *Esc with an upload in flight aborts the UPLOAD, never the running turn* —
+    the upload's Esc (`App.tsx:4098`) above the turn's (`App.tsx:4105`). Needs a
+    turn running UNDER an upload, which no keyboard path produces (Enter with
+    chips uploads first), so the turn is raised through `session.watch` as
+    another device's. Asserts the first Esc aborts the upload and leaves the
+    turn alone, the second Esc reaches the turn — so the lower layer is intact,
+    not merely shadowed.
+  - *shift+tab mid-turn toggles auto-accept, never stops the turn* — the
+    first-checked layer in the state where a stray Tab could otherwise reach the
+    palette/history.
+- `test/app-commands.test.tsx` (+5 tests, 17 → 22). The registry test asserts
+  "the registry this file covers is exactly SLASH_COMMANDS", but three of the 17
+  had no case. Added `/settings` (unavailable, and its show/sync answer with a
+  seam), `/attach` (usage line, nothing sent), `/exit` (alias of `/quit`, the
+  `(y/N)` path with a child, and a real unmount with nothing to lose — spied
+  through the notice feed, since `/exit` closes nothing itself).
+- `test/app-frames.test.tsx` — the 12 frame pins already covered the plan's
+  frame set (idle, running, permission, palette, sessions/mcp/skills panels,
+  dock pill/dropdown/two drawers, quit confirm, attach chip), but the file was
+  **time-dependent and flaked**: a drawer header pads its rule to the terminal
+  width using the UN-normalised elapsed text, so the wall clock crossing a digit
+  boundary (`9s` → `10s`) shifted one dash and failed a pin on an otherwise
+  identical frame (caught on a full-suite run, `full-run-3.log`; it passed 20/20
+  in isolation, which is why the first runs missed it). Fixed in `norm`, which
+  now elides a rule run (3+ `─`) to `…` — the filler's length is not the property
+  under test, the content either side is. Proved both ways: a raw 9s/10s header
+  pair differs, the normalised pair is identical (`.tentacle/tmp/
+  app-decomposition/norm-check.ts`); then 20/20 consecutive runs green.
+
+**Mutation check (§9 non-vacuity).** 40 single-edit mutations of the code the
+tests pin, each run against the named test (`-t` filter), then reverted;
+harness `.tentacle/tmp/app-decomposition/mutate.ts`, log `mut-final.log`.
+**39 of 40 KILLED (red)** — full table below.
+
+- `M3 esc-abort before paste` SURVIVED, and that is correct, not a gap: it is an
+  **equivalent mutant**. Ink's `parse-keypress.js:195-222` sets `name: 'escape'`
+  only for a lone ESC — a paste chunk (`\x1b[200~…`) parses as an fn-key
+  sequence, so `key.escape` (`use-input.js:55`) is false and the esc-abort
+  branch cannot fire for it wherever it sits in the order. The observable half
+  of that ordering — the paste layer's own mid-turn handling — is `M3b`, which
+  is killed. No test can distinguish the two orders, so no test should.
+- Every kill is on the **assertion of the property**, with real `0 pass / N fail`
+  counts from the filtered run, never an import/compile error.
+
+**Coverage (no drop; it rose).** `bun test --coverage packages/tui` → **1727
+pass, 0 fail** (113 files), App.tsx **93.75 % functions / 96.95 % lines**,
+against the plan's baseline of 90.7 % / 94.5 %. S0 only adds tests, and the new
+ones cover lines the previous net left uncovered (the `/settings` branches,
+`/attach`'s usage, the `/exit` alias, the upload's Esc).
+
+**Gate (this worktree, this branch).**
+- `bunx tsc --noEmit` → 0 errors.
+- `bun run lint` (`biome check .`) → clean, 954 files, 0 errors/warnings (the
+  AGENTS §6 baseline).
+- `bun test` → **7573 pass, 3 skip, 0 fail** (7576 across 540 files; two full
+  runs green after the frame-normaliser fix). The 3 skips are the opt-in
+  live-k8s / live-docker / real-socket-keepalive ones, i.e. the documented
+  baseline, not failures. Note the flake below was found ONLY by full runs: the
+  frames file passed 20/20 in isolation and failed on two of five full suites,
+  because the drawer's rule padding depends on when its clock crosses a digit
+  boundary.
+- No schema change → `packages/protocol/schema/protocol.json` not regenerated
+  (S0 touches no protocol type).
+- `CHANGELOG.md` entry under `[Unreleased] ### Added` (written in f28d6d7;
+  extended here to name the two extra precedence pairs, the three commands, and
+  the mutation result).
+
+**Drift from the Implementation:** none in scope or design. Three additions
+inside S0's own stated list: the two missing precedence pairs, the three missing
+command cases, and the frame-normaliser fix (a real defect in the earlier run's
+work — the frames file it committed was time-dependent and flaked on a digit
+boundary). Nothing in another slice was started.
+
+**Unverified (one line):** these tests pin behaviour on the current `main` src
+— every file they pin was byte-identical to this branch's and unchanged by the
+22 commits `main` gained meanwhile (the only `packages/tui/src` delta is
+`subagent-view.ts`'s two additive close-reason labels, which no S0 test touches)
+— but the branch was NOT rebased onto that newer `main` (commit-moving is out of
+bounds for this run), so keeping the net green across S1–S10 is the claim those
+slices must honour, verified slice by slice. *Merge preview done instead:* with
+`main`'s version of that one changed file dropped in place, S0's 53 tests plus
+`subagent-view.test.ts` all pass (89 pass, 0 fail), then the file was restored.
+
+#### S0 mutation table (39/40 killed; 1 equivalent mutant, explained)
+
+Each row: one text edit to the code, the test that must notice it. `KILLED`
+= that test went red (counts are the real pass/fail of the filtered run).
+
+| Mutation | What it breaks | Test | Result |
+|---|---|---|---|
+| M1 | quit-confirm moved after permission | quit-confirm before permission | KILLED |
+| M2 | chord takes the dock's `ctrl+x` | dock-owned ctrl+x | KILLED |
+| M3 | esc-abort moved above the paste layer | bracketed paste mid-turn | **SURVIVED — equivalent mutant** (see above) |
+| M3b | paste dropped mid-turn | bracketed paste mid-turn | KILLED |
+| M4 | esc-abort above the sessions panel | sessions panel's Esc | KILLED |
+| M5 | esc-abort above the dock | dock's Esc | KILLED |
+| M6 | palette lets ↑ through | palette arrows | KILLED |
+| M7 | palette ↓ steps by 2 | palette Down+Tab | KILLED |
+| M8 | palette Esc does not reset | palette Down+Tab | KILLED |
+| M9 | palette Enter does not run | palette Enter | KILLED |
+| M10 | `ctrl+t` dropped | ctrl+t toggles the dock | KILLED |
+| M11 | shift+tab after quit-confirm | shift+tab toggles first | KILLED |
+| M12 | killChild loses "not running" | dock stop on a CHILD | KILLED |
+| M13 | job routed to killChild | dock stop on a JOB | KILLED |
+| M14 | permission ↓ selection ignored | permission Down selects | KILLED |
+| M15 | permission reply paste not inserted | Ctrl+V pastes | KILLED |
+| M16 | trailing half mouse report dropped | trailing half report | KILLED |
+| M17 | convertToChips no-op | typed image path → chip | KILLED |
+| M18 | esc-abort placed above the upload's | Esc with an upload in flight | KILLED |
+| M19 | shift+tab skipped mid-turn | shift+tab mid-turn | KILLED |
+| C1 | `/help` silent | /help lists the commands | KILLED |
+| C2 | `/model` wrong model | /model names the model | KILLED |
+| C3 | `/tokens` total wrong | /tokens totals | KILLED |
+| C4 | `/agents` dropped | /agents | KILLED |
+| C5 | `/copy` failure silent | /copy | KILLED |
+| C6 | `/retry` not sent | /retry | KILLED |
+| C7 | `/save` path wrong | /save | KILLED |
+| C8 | `/sessions` unavailable silent | runtime-dependent notices | KILLED |
+| C9 | `/rename` usage silent | /rename usage | KILLED |
+| C10 | `/mcp` opens no panel | /mcp and /skills | KILLED |
+| C11 | `/close` closes nothing | /close ends the session | KILLED |
+| C12 | `/quit` skips the confirm | /quit asks first | KILLED |
+| C13 | unknown command silent | unknown → /help | KILLED |
+| C14 | mid-turn guard off | the three refusals | KILLED (3 fail) |
+| C15 | `/settings` unavailable silent | /settings, no seam | KILLED |
+| C16 | `/settings` show dropped | /settings with a seam | KILLED |
+| C17 | `/settings sync` not sent | /settings with a seam | KILLED |
+| C18 | `/attach` usage silent | /attach with no path | KILLED |
+| C19 | `/exit` alias dropped | /exit | KILLED |
+| F1 | welcome text changed by a char | the whole frame set | KILLED (11 fail) |
+
+C15–C17 patch `settings-command.ts` / `App.tsx` (the `/settings` decision,
+then its executor); the harness restores every patched file in a `finally`,
+and `git status` after the run shows only the two test files modified.
+
 
 ## Review
 

@@ -18,9 +18,20 @@ const CTRL_C = "\x03";
 const CTRL_T = "\x14";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Spinner glyph → `*`; elapsed figures (`0s`, `1m 12s`, `4m`) → `N<unit>`. */
+/**
+ * Spinner glyph → `*`; elapsed figures (`0s`, `1m 12s`, `4m`) → `N<unit>`; a run
+ * of box-drawing rule (3+ `─`) → `…`. The last one is not cosmetic: a header's
+ * rule is padded to the terminal width using the UN-normalised elapsed text, so
+ * the wall clock crossing a digit boundary (`9s` → `10s`) shifts one dash and
+ * flakes the pin on an otherwise identical frame. The filler's LENGTH is not the
+ * property under test — the content either side of it is — so it is elided and
+ * marked as such. Single `─` glyphs (bracket edges) are untouched.
+ */
 const norm = (frame: string): string =>
-  frame.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, "*").replace(/\b\d+(m|s|h)\b/g, "N$1");
+  frame
+    .replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, "*")
+    .replace(/\b\d+(m|s|h)\b/g, "N$1")
+    .replace(/─{3,}/g, "…");
 
 /**
  * Bun's inline snapshot. The pinned `bun-types` predates its typing, so it is
@@ -130,9 +141,9 @@ describe("S0 frame set", () => {
 
 
 
-      ──────────────────────────────────────────────────────────────────────────────────────────────── m ─
+      … m ─
       ❯  Type a task or /command
-      ────────────────────────────────────────────────────────────────────────────────────────────────────
+      …
       /tmp/work · ctx –/128k                                               ⏵⏵ auto-accept off (shift+tab)"
     `);
     t.app.unmount();
@@ -161,9 +172,9 @@ describe("S0 frame set", () => {
 
 
       * Working… Ns · esc/ctrl+c to stop
-      ──────────────────────────────────────────────────────────────────────────────────────────────── m ─
+      … m ─
       ❯  Queue a task…
-      ────────────────────────────────────────────────────────────────────────────────────────────────────
+      …
       /tmp/work · ctx –/128k                                               ⏵⏵ auto-accept off (shift+tab)"
     `);
     t.app.unmount();
@@ -196,7 +207,7 @@ describe("S0 frame set", () => {
 
 
 
-      ╭─ Run a shell command ────────────────────────────────────────────────────────────────────────────
+      ╭─ Run a shell command …
        rm -rf build
        /tmp/work · writes limited to here + allowed dirs
       ❯ Yes
@@ -231,9 +242,9 @@ describe("S0 frame set", () => {
         /close     end this session and quit
         /model     show the active model
         /retry     re-send the last prompt
-      ──────────────────────────────────────────────────────────────────────────────────────────────── m ─
+      … m ─
       ❯ /
-      ────────────────────────────────────────────────────────────────────────────────────────────────────
+      …
       /tmp/work · ctx –/128k                                               ⏵⏵ auto-accept off (shift+tab)"
     `);
     t.app.unmount();
@@ -269,7 +280,7 @@ describe("S0 frame set", () => {
 
 
 
-      ╭─ Sessions ───────────────────────────────────────────────────────────────────────────────────────
+      ╭─ Sessions …
         No sessions on this daemon.
        esc close
       /tmp/work · ctx –/128k                                               ⏵⏵ auto-accept off (shift+tab)"
@@ -300,7 +311,7 @@ describe("S0 frame set", () => {
 
 
 
-      ╭─ MCP servers ────────────────────────────────────────────────────────────────────────────────────
+      ╭─ MCP servers …
         No MCP servers on this daemon.
        esc close
       /tmp/work · ctx –/128k                                               ⏵⏵ auto-accept off (shift+tab)"
@@ -331,7 +342,7 @@ describe("S0 frame set", () => {
 
 
 
-      ╭─ Skills ─────────────────────────────────────────────────────────────────────────────────────────
+      ╭─ Skills …
         No skills on this daemon.
        esc close
       /tmp/work · ctx –/128k                                               ⏵⏵ auto-accept off (shift+tab)"
@@ -362,9 +373,9 @@ describe("S0 frame set", () => {
 
 
 
-      ──────────────────────────────────────────────────────────────────────────────────────────────── m ─
+      … m ─
       ❯  Type a task or /command
-      ────────────────────────────────────────────────────────────────────────────────────────────────────
+      …
       /tmp/work · ctx –/128k"
     `);
     await t.keys(ENTER);
@@ -384,13 +395,13 @@ describe("S0 frame set", () => {
 
 
 
-      ─ background · 3 ───────────────────────────────────────────── enter open · ctrl+x stop · esc back ─
+      ─ background · 3 … enter open · ctrl+x stop · esc back ─
       › ● sa-1  explore  find callers of parseConfig        19 tools · 12k · Nm Ns
         ● sa-2           migrate config tests to bun:test   6 tools · 3.1k · Nm Ns
         ◆ bg-3  shell    watch: tail -f log                 running · Nm Ns
-      ────────────────────────────────────────────────────────────────────────────────────────────────────
+      …
       ❯  Type a task or /command
-      ────────────────────────────────────────────────────────────────────────────────────────────────────
+      …
       /tmp/work · ctx –/128k                      ⏵⏵ auto-accept off (shift+tab)  ·  2 agents · 1 shell ▴"
     `);
     await t.keys(ENTER);
@@ -404,7 +415,7 @@ describe("S0 frame set", () => {
 
 
 
-      ─ sa-1 · explore · find callers of parseConfig ───────────────── running · 19 tools · 12k · Nm Ns ─
+      ─ sa-1 · explore · find callers of parseConfig … running · 19 tools · 12k · Nm Ns ─
         … +11 earlier
         │ fs_read packages/config/src/schema.ts
         │ fs_grep "parseConfig(" packages/
@@ -414,9 +425,9 @@ describe("S0 frame set", () => {
         │ fs_grep "parseConfig" apps/
         │ fs_read packages/config/src/index.ts
         │ shell bun test packages/config
-      ─ → sa-1 · enter sends · esc back ──────────────────────────────────────────────────────────────────
+      ─ → sa-1 · enter sends · esc back …
       ❯  Type a task or /command
-      ────────────────────────────────────────────────────────────────────────────────────────────────────
+      …
       /tmp/work · ctx –/128k                      ⏵⏵ auto-accept off (shift+tab)  ·  2 agents · 1 shell ▴"
     `);
     t.app.unmount();
@@ -443,11 +454,11 @@ describe("S0 frame set", () => {
 
 
 
-      ─ bg-3 · watch: tail -f log ────────────────────────────────────────────────────── running · Nm Ns ─
+      ─ bg-3 · watch: tail -f log … running · Nm Ns ─
         │ line
-      ────────────────────────────────────────────────────────────────────────────────────────────────────
+      …
       ❯  Type a task or /command
-      ────────────────────────────────────────────────────────────────────────────────────────────────────
+      …
       /tmp/work · ctx –/128k                                 ⏵⏵ auto-accept off (shift+tab)  ·  1 shell ▴"
     `);
     t.app.unmount();
@@ -476,9 +487,9 @@ describe("S0 frame set", () => {
 
 
 
-      ────────────────────────────────────────────────────────────────────────────────────────────────────
+      …
       1 background sub-agent (sa-1) will be lost — quit? (y/N)
-      ────────────────────────────────────────────────────────────────────────────────────────────────────
+      …
       /tmp/work · ctx –/128k                                   ⏵⏵ auto-accept off (shift+tab)  · 1 agent ↓"
     `);
     t.app.unmount();
@@ -507,10 +518,10 @@ describe("S0 frame set", () => {
 
 
 
-      ──────────────────────────────────────────────────────────────────────────────────────────────── m ─
+      … m ─
         📎 a.png 29 B
       ❯  Type a task or /command
-      ────────────────────────────────────────────────────────────────────────────────────────────────────
+      …
       /tmp/work · ctx –/128k                                               ⏵⏵ auto-accept off (shift+tab)"
     `);
     t.app.unmount();
