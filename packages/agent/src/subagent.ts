@@ -20,6 +20,7 @@ import {
   type PermissionRequestOptions,
   type PermissionRequester,
   type PermissionResponse,
+  SubagentFailure,
   type Tool,
   type ToolProgressEvent,
   toolLabel,
@@ -283,6 +284,13 @@ export interface SubagentDeps {
   readonly tools: ToolRegistry;
   readonly requestPermission?: PermissionRequester;
   readonly maxIterations?: number;
+  /**
+   * Token budget for each child's whole life (`prompt + completion` summed over
+   * its model calls, across continuation passes); a positive integer or `-1`
+   * (unlimited). Reaching it forces the child's final report —
+   * docs/feat/subagent-token-budget.md.
+   */
+  readonly maxTokens?: number;
   readonly types?: readonly AgentType[];
   /**
    * Tools a child may use that the PARENT's registry does not hold, by type name
@@ -411,6 +419,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
       env: deps.env,
       systemPrompt: type.prompt,
       ...(deps.maxIterations !== undefined ? { maxIterations: deps.maxIterations } : {}),
+      ...(deps.maxTokens !== undefined ? { maxTokens: deps.maxTokens } : {}),
       ...(deps.requestPermission
         ? {
             requestPermission: subagentRequester(
@@ -454,6 +463,11 @@ export function createSubagentRunner(deps: SubagentDeps): {
     let report = "";
     let toolUses = 0;
     let stopReason: AgentStopReason = "end_turn";
+    // The child's own spend, summed from the same `usage` events the tree's row
+    // counts (`subagent_usage`): the cap itself lives in the child's `Agent`,
+    // but the REPORT has to say how much was spent, and only the runner knows
+    // the cap and the count together.
+    let tokens = 0;
     // ONE history and ONE session id across every pass of this child: a
     // continuation reads the same conversation (`Agent.run` would hide it, so
     // the runner drives `runMessages` itself).
@@ -498,6 +512,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
             });
           } else if (event.type === "usage") {
             unanswered = 0;
+            tokens += event.usage.promptTokens + event.usage.completionTokens;
             onEvent?.({
               kind: "subagent_usage",
               promptTokens: event.usage.promptTokens,
@@ -538,7 +553,14 @@ export function createSubagentRunner(deps: SubagentDeps): {
       inbox?.close();
       // The tree must not keep its live row beside the call's error.
       onEvent?.({ kind: "subagent_end", toolUses, stopReason: "error" });
-      throw error;
+      // The throw used to take the child's findings and its count with it
+      // (docs/fix/subagent-error-report.md root cause B): EVERY catcher renders
+      // this one shape, so the parent reads what the child had found.
+      throw new SubagentFailure(error instanceof Error ? error.message : String(error), {
+        partialReport: report,
+        toolUses,
+        cause: error,
+      });
     }
     // Whatever was never read is REPORTED, never silently dropped. `carry` holds
     // what `closeIfEmpty` handed back for a pass that may never have drained it
@@ -550,6 +572,15 @@ export function createSubagentRunner(deps: SubagentDeps): {
     if (missed > 0) {
       report += `\n\n(${missed} message(s) sent to this sub-agent arrived after it stopped and were not read.)`;
     }
+    // Say WHY it stopped where the parent reads it: the model gets the tool
+    // result, so it can narrow the task instead of re-spawning blindly. The
+    // count is the runner's own (the cap's overshoot included), never rounded.
+    // Appended to `finalReport` BELOW the empty-report fallback, which must still
+    // fire for a child that wrote nothing (the note is not a report).
+    const budgetNote =
+      stopReason === "max_token_budget" && deps.maxTokens !== undefined && deps.maxTokens > 0
+        ? `\n\n(token budget reached: ${tokens.toLocaleString("en-US")} of ${deps.maxTokens.toLocaleString("en-US")} tokens used)`
+        : "";
     onEvent?.({ kind: "subagent_end", toolUses, stopReason });
     // Never hand the parent an empty report (the agent loop forces a final
     // summary even at the step limit, but a provider hiccup could still yield
@@ -558,8 +589,8 @@ export function createSubagentRunner(deps: SubagentDeps): {
     const finalReport =
       trimmed !== ""
         ? trimmed
-        : `(The ${type.name} sub-agent finished (${stopReason}) after ${toolUses} tool use(s) without producing a report. Try a narrower task or a higher step limit.)`;
-    return { report: finalReport, toolUses, stopReason };
+        : `(The ${type.name} sub-agent finished (${stopReason}) after ${toolUses} tool use(s) without producing a report. Try a narrower task or a higher limit.)`;
+    return { report: `${finalReport}${budgetNote}`, toolUses, stopReason };
   };
 
   const readOnlyType = (name: string): boolean => {

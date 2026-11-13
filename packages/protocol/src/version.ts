@@ -24,4 +24,9 @@
 // `media_message`/`media_replace` (docs/feat/attachments-core.md): an older
 // peer would strip the refs silently on the wire, and an older build would
 // half-load a log that holds them.
-export const PROTOCOL_VERSION = 23 as const;
+// 24: `StopReasonSchema` gained `max_token_budget` — a sub-agent's token cap
+// (docs/feat/subagent-token-budget.md). A `mandatory` update carries it, so an
+// older client would fail the turn on it; `subagents.maxTokens` rides
+// `SessionSettings` (an additive optional field on its own, but the enum member
+// forces the bump, AGENTS §7).
+export const PROTOCOL_VERSION = 24 as const;

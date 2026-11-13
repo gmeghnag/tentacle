@@ -54,8 +54,10 @@ describe("the DSML re-ask notice is its own display KIND (no enum value, no vers
     expect(SessionUpdateOrUnknownSchema.safeParse(FRAME).success).toBe(true);
   });
 
-  test("it is a display kind: nothing waits on it and it needs no protocol bump", () => {
-    // 23 is the attachments bump (docs/feat/attachments-core.md), not this kind.
-    expect(PROTOCOL_VERSION).toBe(23);
+  test("it is a display kind: nothing waits on it", () => {
+    // Display only, so no bump by this kind (AGENTS §7). A FLOOR, not the exact
+    // number: the number is assigned at merge (docs/feat/protocol-version-at-merge.md),
+    // so this assertion must never need editing again. `dsml_leak` landed at 23.
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(23);
   });
 });

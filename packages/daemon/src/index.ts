@@ -6,6 +6,7 @@
  */
 export * from "./mapping.ts";
 export * from "./attachment-store.ts";
+export * from "./device-store.ts";
 export * from "./permission-map.ts";
 export * from "./hosted-session.ts";
 export * from "./session-host.ts";
@@ -21,4 +22,5 @@ export { SessionLog, replayFromBase, type LogBase } from "./session-log.ts";
 export * from "./daemon-state-file.ts";
 export * from "./session-log-file.ts";
 export * from "./session-log-store.ts";
+export * from "./session-blobs.ts";
 export * from "./session-fork.ts";

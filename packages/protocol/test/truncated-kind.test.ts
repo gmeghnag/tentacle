@@ -41,8 +41,9 @@ describe("the truncation and empty-turn notices are their own display KINDS", ()
   });
 
   test("no protocol bump: a display kind is free to add", () => {
-    // 23 is the attachments bump (docs/feat/attachments-core.md), not this kind.
-    expect(PROTOCOL_VERSION).toBe(23);
+    // Display only, so no bump by this kind (AGENTS §7). A FLOOR: the exact
+    // number is assigned at merge (docs/feat/protocol-version-at-merge.md).
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(23);
   });
 
   test("`context_note` keeps an OLDER client's reason enum: no member was added", () => {

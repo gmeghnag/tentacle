@@ -304,7 +304,10 @@ export class Connection {
       // Synchronous from the offset check to the append, holding no lock
       // (AGENTS §7): a store `put` that awaited would let two chunks of one
       // blob interleave at the same offset. The store belongs to the SESSION,
-      // not this connection, so a re-attach resumes where it stopped.
+      // not this connection, so a re-attach resumes where it stopped. A `serve`
+      // store returns a PROMISE for a verified last chunk (the ack waits for the
+      // file to be durable, docs/feat/attachments-durable.md D2) — after its
+      // synchronous prefix, so returning it here serializes nothing.
       case Method.AttachmentPut: {
         const { sessionId, ...chunk } = params as AttachmentPutParams;
         return this.lookup(sessionId).uploads.put(chunk);

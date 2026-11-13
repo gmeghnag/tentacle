@@ -6,7 +6,7 @@ import type {
   StreamEvent,
   Tool,
 } from "@tentacle/core";
-import { AgentInbox, AgentJobs, type AgentNotifyResult } from "@tentacle/core";
+import { AgentInbox, AgentJobs, type AgentNotifyResult, SubagentFailure } from "@tentacle/core";
 import {
   AGENT_CONTROL_TOOL_NAME,
   AGENT_KILL_TOOL_NAME,
@@ -1088,5 +1088,74 @@ describe("T9b: a carried text whose pass never drains it is still reported", () 
       "(1 message(s) sent to this sub-agent arrived after it stopped",
     );
     expect(inbox.closed).toBe(true);
+  });
+});
+
+// docs/fix/subagent-error-report.md root cause B, test 5: a child that THROWS
+// (a provider failure — the only error path there is) must not take its partial
+// findings and its tool count with it.
+describe("B: a thrown child carries its partial report and tool count", () => {
+  /** Round 1: findings + one tool call. Round 2: the provider throws. */
+  function failingChild(): ModelProvider {
+    let round = 0;
+    return {
+      id: "fails",
+      async *stream() {
+        round += 1;
+        if (round === 1) {
+          yield { type: "text", delta: "PARTIAL FINDING: smem needed 101KB > 99KB limit." };
+          yield toolCall("shell", { command: "ls" });
+          yield { type: "done" };
+          return;
+        }
+        throw new Error("provider stream failed: HTTP 500");
+      },
+    };
+  }
+
+  test("`run` rejects with a SubagentFailure holding the text and the count", async () => {
+    // Mutation: rethrow the raw error → no count, no partial → red.
+    const { env } = recordingEnv();
+    const { run } = createSubagentRunner({
+      model: failingChild(),
+      env,
+      tools: fullRegistry(),
+      requestPermission: async () => ({ allowed: true }),
+    });
+    const failure = await run({ description: "trace smem", prompt: "go", type: "general" }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(SubagentFailure);
+    const f = failure as SubagentFailure;
+    expect(f.message).toBe("provider stream failed: HTTP 500");
+    expect(f.partialReport).toContain("PARTIAL FINDING: smem needed 101KB > 99KB limit.");
+    expect(f.toolUses).toBe(1);
+    // The cause is kept, so a caller can still inspect the original error.
+    expect((f.cause as Error | undefined)?.message).toBe("provider stream failed: HTTP 500");
+  });
+
+  test("a child that throws before it says anything still reports honestly", async () => {
+    const { env } = recordingEnv();
+    const { run } = createSubagentRunner({
+      model: {
+        id: "boom",
+        // biome-ignore lint/correctness/useYield: it never yields — that is the case.
+        async *stream(): AsyncIterable<StreamEvent> {
+          throw new Error("tunnel dropped");
+        },
+      },
+      env,
+      tools: fullRegistry(),
+      requestPermission: async () => ({ allowed: true }),
+    });
+    const failure = (await run({
+      description: "d",
+      prompt: "go",
+      type: "general",
+    }).catch((error: unknown) => error)) as SubagentFailure;
+    expect(failure).toBeInstanceOf(SubagentFailure);
+    expect(failure.partialReport.trim()).toBe("");
+    expect(failure.toolUses).toBe(0);
   });
 });

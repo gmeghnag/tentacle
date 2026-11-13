@@ -297,14 +297,25 @@ describe("display state reducer", () => {
       stopReason: "end_turn",
       toolUses: 4,
     });
-    expect(done.text).toBe("sa-1 finished · 4 tool uses · map repo — report sent to the agent");
+    expect(done.text).toBe(
+      "sa-1 finished · 4 tool uses · map repo — the agent gets its report at its next step",
+    );
     expect(done.jobId).toBe("sa-1");
     const stopped = backgroundExitNotice("sa-2", "x", "killed", null, {
       stopReason: "cancelled",
       toolUses: 1,
     });
     expect(stopped.text).toBe(
-      "sa-2 ended (cancelled) · 1 tool uses · x — report sent to the agent",
+      "sa-2 ended (cancelled) · 1 tool uses · x — the agent gets its report at its next step",
+    );
+    // A child that THREW: `failed`, and the notice no longer claims a report was
+    // sent — it says what the agent actually gets (owner Q2, root cause D).
+    const failed = backgroundExitNotice("sa-3", "trace smem", "exited", null, {
+      stopReason: "error",
+      toolUses: 77,
+    });
+    expect(failed.text).toBe(
+      "sa-3 failed · 77 tool uses · trace smem — the agent gets its error and partial output at its next step",
     );
     expect(backgroundExitNotice("bg-1", "ls", "exited", 0).text).toBe(
       "background job bg-1 exited (exit=0): ls",

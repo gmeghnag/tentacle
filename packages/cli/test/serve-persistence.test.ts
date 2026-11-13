@@ -258,6 +258,34 @@ describe("serve persistence (end to end, real disk)", () => {
     }
   });
 
+  test("attachments-durable D3/T5: a start removes image blob dirs with no log (tombstoned or never logged), keeps one with a log", async () => {
+    // Mutations: skip the blob sweep → `ghost`/`gone` dirs stay; sweep dirs that HAVE
+    // a log → `kept.attachments` is removed.
+    const first = await serve();
+    const a = await client(first.url);
+    await a.request("session/open", { sessionId: "kept", messages: seed });
+    await a.request("session/open", { sessionId: "gone", messages: seed });
+    await a.request("session/delete", { sessionId: "gone" });
+    a.ws.close();
+    await first.stop();
+    const blobId = "a".repeat(64);
+    for (const id of ["kept", "ghost", "gone"]) {
+      await mkdir(join(daemonStoreDir(config), `${id}.attachments`), { recursive: true });
+      await writeFile(join(daemonStoreDir(config), `${id}.attachments`, blobId), "png");
+    }
+    const second = await serve();
+    try {
+      const names = await readdir(daemonStoreDir(config));
+      expect(names).toContain("kept.jsonl");
+      expect(names).toContain("kept.attachments");
+      expect(names).not.toContain("ghost.attachments");
+      expect(names).not.toContain("gone.attachments");
+      expect(await readdir(join(daemonStoreDir(config), "kept.attachments"))).toEqual([blobId]);
+    } finally {
+      await second.stop();
+    }
+  });
+
   test("FM 5 / M2: only a readable log header of THIS version with no state file is set aside; a newer or corrupt one is skipped, untouched", async () => {
     // Mutation: the missing-state check before the header parse in `loadState` → the
     // newer and corrupt logs are moved to `.aside` (review M2).

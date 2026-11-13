@@ -34,6 +34,7 @@ import {
   DEFAULT_SUBAGENT_EXECUTION,
   DEFAULT_SUBAGENT_MAX_ITERATIONS,
   DEFAULT_SUBAGENT_MAX_PARALLEL,
+  DEFAULT_SUBAGENT_MAX_TOKENS,
   DEFAULT_SUMMARIZE_LARGE_OUTPUT,
   DEFAULT_TABULATE_JSON,
   DEFAULT_TOOL_EXECUTION,
@@ -541,6 +542,21 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     details:
       "A positive integer, or -1 for no limit. More generous than the parent's limit on purpose: a delegated investigation usually needs more tool rounds.",
     example: "50",
+  },
+  "subagents.maxTokens": {
+    summary: "Token budget for a sub-agent's whole life.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "pinned",
+    default: () => DEFAULT_SUBAGENT_MAX_TOKENS,
+    resolved: (c) => c.subagentMaxTokens,
+    sourceKey: "subagentMaxTokens",
+    env: "TENTACLE_SUBAGENT_MAX_TOKENS",
+    sample: "500000",
+    details:
+      "A positive integer, or -1 for no limit. Counts every model call's `promptTokens + completionTokens`, cache reads and writes included, summed across the child's continuation passes. When it is reached the child is asked for one final tool-free report (`max_token_budget`) — checked at a round boundary, so it can overshoot by one round plus that report.",
+    example: "2000000",
   },
   "subagents.execution": {
     summary:

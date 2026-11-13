@@ -1013,7 +1013,11 @@ export class SessionHost {
     const bound: { hosted?: HostedSession } = {};
     // Created BEFORE the agent: a "store" policy hands it to the factory, which
     // puts it on the provider's requests (the one place bytes can come from).
-    const uploads = new AttachmentStore(this.uploadBudget);
+    // A `serve` session's store keeps its verified blobs on disk beside its log
+    // and is seeded from them — new AND restored sessions, from this one site
+    // (docs/feat/attachments-durable.md D2); every other host: memory only.
+    const disk = this.opts.persister?.blobs(id);
+    const uploads = new AttachmentStore(this.uploadBudget, disk ? { disk } : {});
     const { agent, permissions, jobs, agentJobs, titleModel, settingsReport, grants } =
       this.opts.createAgent(this.opts.defaultCwd, {
         modelLink: () => bound.hosted?.modelLink() ?? null,

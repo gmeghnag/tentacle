@@ -285,6 +285,13 @@ async function reloadedHost(
     // A state file with no log: a removal cut short between the two (FM 25).
     await store.removeState(id).catch((error) => options.onError?.(error as Error));
   }
+  // An image blob dir with no log (docs/feat/attachments-durable.md D3): a
+  // delete cut short after its log (tombstoned), an older build's delete, or a
+  // session that uploaded but never wrote a log. Nothing is live before the
+  // host serves, and no history can name those bytes: removed.
+  for (const id of await store.blobOrphans()) {
+    await store.removeBlobs(id).catch((error) => options.onError?.(error as Error));
+  }
   for (const id of logs) {
     if (sessionHost.isDeleted(id)) {
       // Finish the removal the user asked for (its tombstone is already on disk).

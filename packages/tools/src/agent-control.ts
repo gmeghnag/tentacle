@@ -18,7 +18,12 @@
  */
 import type { AgentJobs, ResourceKey, Tool, ToolConcurrency } from "@tentacle/core";
 import { z } from "zod";
-import { formatAgentStatus, oneLine } from "./agent-status.ts";
+import {
+  formatAgentStatus,
+  formatEndedAgent,
+  formatRecentlyEnded,
+  oneLine,
+} from "./agent-status.ts";
 
 export const AGENT_CONTROL_TOOL_NAME = "agent_control";
 
@@ -128,20 +133,31 @@ function status(
   input: AgentControlInput,
   now: () => number,
 ): { content: string; isError: boolean } {
+  const at = now();
   const text = formatAgentStatus({
     rows: jobs.rows(),
     pending: (id) => jobs.pending(id),
-    now: now(),
+    now: at,
     maxParallel: jobs.limit,
     ...(input.agent_id !== undefined ? { agentId: input.agent_id } : {}),
   });
-  if (text === undefined) {
-    return {
-      content: `no such background sub-agent: ${oneLine(input.agent_id ?? "", 64)} — it finished, was stopped, or never existed. If it just finished, its report arrives as a [background] note.`,
-      isError: true,
-    };
+  if (text !== undefined) {
+    // The no-id listing adds ONE line about the children that just ended: the
+    // model otherwise has no way to see one it (or an earlier round) spawned
+    // (owner Q4, docs/fix/subagent-error-report.md C).
+    const ended = input.agent_id === undefined ? formatRecentlyEnded(jobs.recentlyEnded(), at) : [];
+    return { content: [text, ...ended].join("\n"), isError: false };
   }
-  return { content: text, isError: false };
+  // No live row: a child that just ENDED still answers, truthfully (root cause
+  // C). "no such" is kept for an id this session never had (or one evicted).
+  const record = input.agent_id === undefined ? undefined : jobs.ended(input.agent_id);
+  if (record !== undefined) {
+    return { content: formatEndedAgent(record, at), isError: false };
+  }
+  return {
+    content: `no such background sub-agent: ${oneLine(input.agent_id ?? "", 64)} — it finished, was stopped, or never existed. If it just finished, its report arrives as a [background] note.`,
+    isError: true,
+  };
 }
 
 /** `"message"`: today's `agent_message`, both variants of its result text. */

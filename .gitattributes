@@ -1,0 +1,6 @@
+# Generated, never hand-merged (docs/feat/changelog-fragments.md Q4,
+# docs/feat/protocol-version-at-merge.md): a merge conflict must be LOUD rather
+# than an auto-merged chimera. Regenerate with `bun run protocol:bump` (which
+# runs `bun run schema:export`) after every merge; the drift gate
+# packages/protocol/test/json-schema.test.ts proves the result.
+packages/protocol/schema/protocol.json -merge

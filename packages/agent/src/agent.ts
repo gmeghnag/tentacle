@@ -90,7 +90,7 @@ import type { SessionGrants } from "./session-grants.ts";
 import { EMPTY_SKILL_LISTING, type SkillListing, userRescanListing } from "./session-skills.ts";
 import type { ToolOutputSink } from "./tool-output.ts";
 
-export type AgentStopReason = "end_turn" | "cancelled" | "max_iterations";
+export type AgentStopReason = "end_turn" | "cancelled" | "max_iterations" | "max_token_budget";
 
 /**
  * `runMessages` was asked to resume before a tool call the history is not
@@ -300,6 +300,13 @@ const isUserNote = (job: PendingExit): job is PendingUserNote =>
   "kind" in job && job.kind === "user_note";
 
 /**
+ * A finished SUB-AGENT's exit (`sa-N`), as opposed to a shell job's (`id`). The
+ * two note shapes are checked first: they carry an `agentId` too.
+ */
+const isSubagentExit = (job: PendingExit): job is AgentJobExit =>
+  !isAgentMessage(job) && !isUserNote(job) && "agentId" in job;
+
+/**
  * The note a user's direct message to a background child leaves in the parent's
  * conversation: a `user` message (the model reads it as a fact it may act on),
  * tagged so a resume renders it as a notice and never as a row the person typed.
@@ -497,6 +504,14 @@ export interface AgentConfig {
   readonly systemPrompt?: string;
   /** Max tool-call rounds before giving up. Default 16. */
   readonly maxIterations?: number;
+  /**
+   * Token budget for this whole conversation: `promptTokens + completionTokens`
+   * summed over every model call, never reset by a `context_reset`. Reaching it
+   * exits the round loop like a spent step budget does, forcing the final
+   * report (`max_token_budget`). Absent or `-1` = unlimited (only a sub-agent is
+   * given one today, docs/feat/subagent-token-budget.md).
+   */
+  readonly maxTokens?: number;
   readonly temperature?: number;
   /** Authorizes `"ask"` tools before they run. Defaults to approving all. */
   readonly requestPermission?: PermissionRequester;
@@ -705,6 +720,13 @@ export class Agent {
    * Memory only: a reload starts from the estimate.
    */
   private readonly anchors = new WeakMap<ChatMessage[], ContextAnchor>();
+  /**
+   * Tokens each conversation has spent so far (keyed by the array a Session — or
+   * a sub-agent — keeps for its life, as `anchors` is), against
+   * `AgentConfig.maxTokens`. Memory only: a new conversation starts at 0, and a
+   * reload cannot resume a child's count.
+   */
+  private readonly spend = new WeakMap<ChatMessage[], { tokens: number }>();
   /** Spill names already used on the env fallback path: see `spillId`. Memory only. */
   private readonly spillNames = new Set<string>();
   /**
@@ -996,6 +1018,13 @@ export class Agent {
     // cancel / error); otherwise cap the number of model/tool rounds.
     const configured = this.config.maxIterations ?? 16;
     const maxIterations = configured < 0 ? Number.POSITIVE_INFINITY : configured;
+    // The same for the conversation's token budget: a negative limit is
+    // unlimited, so the extra loop condition is always false.
+    const configuredTokens = this.config.maxTokens ?? Number.POSITIVE_INFINITY;
+    const maxTokens = configuredTokens < 0 ? Number.POSITIVE_INFINITY : configuredTokens;
+    /** Whether this conversation has spent its token budget. Checked at a round
+     * boundary, like the step cap, so the overshoot is at most one round. */
+    const overBudget = (): boolean => this.spendOf(messages) >= maxTokens;
     // A user message — the turn's own, or a steer drained into it — restarts
     // the per-message count of context resets, and the sub-agents' notify
     // budgets (docs/feat/agent-message-two-way.md): a person wrote, so ping-pong
@@ -1155,7 +1184,7 @@ export class Agent {
      * text is kept, owner Q1a), so the honest end is silence on that count.
      */
     let turnSaidSomething = false;
-    for (let iteration = 0; iteration - budgetFrom < maxIterations; iteration++) {
+    for (let iteration = 0; iteration - budgetFrom < maxIterations && !overBudget(); iteration++) {
       if (signal?.aborted) {
         this.notifyTurnEnd(sessionId, "cancelled");
         yield { type: "turn_end", reason: "cancelled" };
@@ -1167,10 +1196,11 @@ export class Agent {
         messages.push({ role: "user", content: text });
         yield { type: "steer", text };
       }
-      // A child's note that arrived while this turn ran is delivered HERE, at
-      // the round boundary, in the same turn (docs/feat/agent-message-two-way.md):
+      // A child's note, and a SUB-AGENT's exit, that arrived while this turn ran
+      // are delivered HERE, at the round boundary, in the same turn
+      // (docs/feat/agent-message-two-way.md, docs/fix/subagent-error-report.md):
       // it is a steer the parent must see before its next step, never a wake.
-      const midNotes = this.flushAgentMessages(messages);
+      const midNotes = this.flushMidTurn(messages);
       if (midNotes.length > 0) {
         this.notesFlushedMidTurn = true;
         for (const event of midNotes) {
@@ -1219,6 +1249,7 @@ export class Agent {
               stopReason = event.stopReason;
               if (event.usage) {
                 this.anchorContext(messages, sent, event.usage);
+                this.addSpend(messages, event.usage);
                 yield { type: "usage", usage: event.usage };
               }
               break;
@@ -1374,7 +1405,7 @@ export class Agent {
         // steering drain and the turn's end"; the `max_iterations` path below
         // keeps the same invariant.
         const late = drain();
-        const lateNotes = this.flushAgentMessages(messages);
+        const lateNotes = this.flushMidTurn(messages);
         if (late.length > 0 || lateNotes.length > 0) {
           for (const text of late) {
             messages.push({ role: "user", content: text });
@@ -1429,7 +1460,13 @@ export class Agent {
         if (text.trim() === "" && !turnSaidSomething) {
           yield { type: "empty_turn" };
         }
-        yield { type: "turn_end", reason: "end_turn" };
+        // A spent token budget still ends the turn honestly, even when the
+        // child answers in prose on that very round: the cap is why it ended.
+        const clean: AgentStopReason = overBudget() ? "max_token_budget" : "end_turn";
+        if (clean !== "end_turn") {
+          this.notifyTurnEnd(sessionId, clean);
+        }
+        yield { type: "turn_end", reason: clean };
         return;
       }
 
@@ -1454,6 +1491,18 @@ export class Agent {
       yield { type: "turn_end", reason: "cancelled" };
       return;
     }
+    // WHY the loop ended: a spent token budget is never blamed on steps (a
+    // spend-shaped stop must say so), and when both are spent in the same
+    // boundary the token one is the honest answer.
+    const capped: AgentStopReason = overBudget() ? "max_token_budget" : "max_iterations";
+    // The same in prose: a token-capped child told about a step limit would be
+    // told a falsehood, and it is what the report it writes is shaped by.
+    const nudge =
+      capped === "max_token_budget"
+        ? "You've reached the token budget for this task. Give your final answer/report now, " +
+          "using what you've gathered so far. Do not call any tools."
+        : "You've reached the step limit. Give your final answer/report now, " +
+          "using what you've gathered so far. Do not call any tools.";
 
     // Out of iterations. Give the model ONE final turn with no tools offered, so
     // it must deliver its answer/report in prose instead of calling yet another
@@ -1476,9 +1525,7 @@ export class Agent {
           ...view.messages,
           {
             role: "user",
-            content:
-              "You've reached the step limit. Give your final answer/report now, " +
-              "using what you've gathered so far. Do not call any tools.",
+            content: nudge,
           },
         ];
         let finalText = "";
@@ -1498,6 +1545,11 @@ export class Agent {
           } else if (event.type === "reasoning") {
             yield { type: "reasoning", delta: event.delta };
           } else if (event.type === "done" && event.usage) {
+            // The forced report is a real model call and its tokens are really
+            // spent: count them, or a step-capped pass leaks a whole context
+            // and the NEXT pass (a `twoWay` continuation) runs a productive
+            // round it should have been refused.
+            this.addSpend(messages, event.usage);
             yield { type: "usage", usage: event.usage };
           }
           // tool_call events are ignored: no tools were offered.
@@ -1533,8 +1585,8 @@ export class Agent {
       }
     }
 
-    this.notifyTurnEnd(sessionId, "max_iterations");
-    yield { type: "turn_end", reason: "max_iterations" };
+    this.notifyTurnEnd(sessionId, capped);
+    yield { type: "turn_end", reason: capped };
   }
 
   /**
@@ -1587,6 +1639,28 @@ export class Agent {
     }
   }
 
+  /** Tokens this conversation has spent (`prompt + completion`, cache included). */
+  private spendOf(messages: ChatMessage[]): number {
+    return this.spend.get(messages)?.tokens ?? 0;
+  }
+
+  /**
+   * Add one model call's spend to the conversation's running total — the same
+   * `done`-with-usage branch as `anchorContext`, so every call that is measured
+   * is counted, the forced final report's included. Keyed by the CONVERSATION
+   * array: a continuation pass cannot refill its budget, and a `context_reset`
+   * un-spends nothing (it restarts rounds, not tokens).
+   */
+  private addSpend(messages: ChatMessage[], usage: Usage): void {
+    const entry = this.spend.get(messages);
+    const spent = (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0);
+    if (entry === undefined) {
+      this.spend.set(messages, { tokens: spent });
+    } else {
+      entry.tokens += spent;
+    }
+  }
+
   /**
    * The size of the request `messages` would become now — the context a client
    * shows BEFORE any turn measured it (docs/feat/tui-target-badge.md). Counted
@@ -1621,8 +1695,11 @@ export class Agent {
     };
   }
 
-  /** `turn_end` notification hooks (cancelled / max_iterations): synchronous, never awaited. */
-  private notifyTurnEnd(sessionId: string, reason: "cancelled" | "max_iterations"): void {
+  /** `turn_end` notification hooks (cancelled / a spent budget): synchronous, never awaited. */
+  private notifyTurnEnd(
+    sessionId: string,
+    reason: "cancelled" | "max_iterations" | "max_token_budget",
+  ): void {
     if (this.config.hooks?.hasAny("turn_end")) {
       void this.config.hooks.turnEndNotify({ sessionId, reason });
     }
@@ -2354,33 +2431,80 @@ export class Agent {
   }
 
   /**
-   * Drain the running children's notes ONLY (`agent_message` members), leaving
-   * every exit in place: a child's or a shell job's exit keeps today's
-   * turn-start behaviour. Synchronous (the late-drain invariant) and order
-   * preserving.
+   * Drain what a mid-turn boundary may deliver: the running children's notes
+   * (`agent_message`) AND a SUB-AGENT's exit (`sa-N`), in queue order
+   * (docs/fix/subagent-error-report.md root cause A — a child that ends while
+   * the parent works is invisible until the next turn otherwise). A shell job's
+   * exit and the USER's note stay where they are: the turn's start only (owner
+   * Q1). Synchronous (the late-drain invariant) and order preserving.
    */
-  private flushAgentMessages(messages: ChatMessage[]): AgentEvent[] {
-    const notes: PendingAgentMessage[] = [];
+  private flushMidTurn(messages: ChatMessage[]): AgentEvent[] {
+    const midTurn: PendingExit[] = [];
     let kept = 0;
     for (let i = 0; i < this.pendingExits.length; i++) {
       const job = this.pendingExits[i];
-      if (job !== undefined && isAgentMessage(job)) {
-        notes.push(job);
+      if (job !== undefined && (isAgentMessage(job) || isSubagentExit(job))) {
+        midTurn.push(job);
       } else if (job !== undefined) {
         this.pendingExits[kept++] = job;
       }
     }
-    if (notes.length === 0) {
+    if (midTurn.length === 0) {
       return [];
     }
     this.pendingExits.length = kept;
     const events: AgentEvent[] = [];
-    for (const note of notes) {
-      const message = agentMessageNote(note);
-      messages.push(message);
-      events.push({ type: "context_note", text: message.content, reason: "background_exit" });
+    for (const job of midTurn) {
+      // A child's own note: a steer the parent must see before its next step.
+      if (isAgentMessage(job)) {
+        const message = agentMessageNote(job);
+        messages.push(message);
+        events.push({ type: "context_note", text: message.content, reason: "background_exit" });
+        continue;
+      }
+      if (!isSubagentExit(job)) {
+        continue;
+      }
+      const rendered = this.subagentExitNote(job);
+      messages.push(rendered.message);
+      events.push(rendered.event, {
+        type: "context_note",
+        text: rendered.message.content,
+        reason: "background_exit",
+      });
     }
     return events;
+  }
+
+  /**
+   * One sub-agent's exit as the note it leaves and the live `background_exit` a
+   * frontend renders. THE one renderer: a turn's start flush and the mid-turn
+   * drain both use it, so the note reads the same wherever it lands.
+   */
+  private subagentExitNote(job: AgentJobExit): {
+    readonly event: AgentEvent;
+    readonly message: ChatMessage;
+  } {
+    const status = job.stopReason === "cancelled" ? "killed" : "exited";
+    const event: AgentEvent = {
+      type: "background_exit",
+      jobId: job.agentId,
+      command: job.description,
+      status,
+      exitCode: null,
+      agent: { stopReason: job.stopReason, toolUses: job.toolUses },
+    };
+    // The record `agent_control status` reads now says its report is in hand.
+    this.config.agentJobs?.delivered(job.agentId);
+    // The same helper as a load's note, with the live headline: a child that
+    // THREW `failed`, never "finished (error)" — the model read that as
+    // success-ish (owner Q5, docs/fix/subagent-error-report.md).
+    const headline =
+      job.stopReason === "error"
+        ? `[background] sub-agent ${job.agentId} (${job.description}) failed:`
+        : `[background] sub-agent ${job.agentId} (${job.description}) finished (${job.stopReason}):`;
+    const message = subagentReportNote({ ...job, state: "ended" }, headline);
+    return { event, message };
   }
 
   /**
@@ -2417,22 +2541,15 @@ export class Agent {
         continue;
       }
       if ("agentId" in job) {
-        const status = job.stopReason === "cancelled" ? "killed" : "exited";
+        // ONE renderer with the mid-turn drain (docs/fix/subagent-error-report.md).
+        const rendered = this.subagentExitNote(job);
+        events.push(rendered.event);
+        messages.push(rendered.message);
         events.push({
-          type: "background_exit",
-          jobId: job.agentId,
-          command: job.description,
-          status,
-          exitCode: null,
-          agent: { stopReason: job.stopReason, toolUses: job.toolUses },
+          type: "context_note",
+          text: rendered.message.content,
+          reason: "background_exit",
         });
-        // The same helper as a load's note, with the live headline.
-        const message = subagentReportNote(
-          { ...job, state: "ended" },
-          `[background] sub-agent ${job.agentId} (${job.description}) finished (${job.stopReason}):`,
-        );
-        messages.push(message);
-        events.push({ type: "context_note", text: message.content, reason: "background_exit" });
         continue;
       }
       events.push({

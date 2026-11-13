@@ -1,14 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   ReleaseError,
   bumpBunLock,
   bumpPackageJson,
   parseReleaseVersion,
-  releaseChangelog,
+  refuseUnreleasedEntries,
 } from "../release-plan.ts";
 import { type ReleaseDeps, runRelease } from "../release.ts";
 
@@ -85,29 +85,22 @@ describe("file rewrites", () => {
   const changelog = (unreleased: string, links = "") =>
     `# Changelog\n\nIntro.\n\n## [Unreleased]\n${unreleased}\n## [0.1.0-beta.1] - 2026-10-21\n\nFirst.\n${links}`;
 
-  test("releaseChangelog dates [Unreleased] and opens a fresh empty one", () => {
-    const out = releaseChangelog(changelog("\n### Added\n\n- A thing.\n"), "0.1.0", "2026-10-22");
-    expect(out).toBe(
-      "# Changelog\n\nIntro.\n\n## [Unreleased]\n\n## [0.1.0] - 2026-10-22\n\n### Added\n\n- A thing.\n\n## [0.1.0-beta.1] - 2026-10-21\n\nFirst.\n",
+  // The release no longer dates [Unreleased]: `assemble` builds the section from
+  // changelog.d/ (changelog.test.ts). What stays here is the refusal that keeps a
+  // hand-written entry out of the tree — the second way in, now closed.
+  test("refuseUnreleasedEntries refuses entries and accepts an empty [Unreleased]", () => {
+    expect(() => refuseUnreleasedEntries(changelog("\n### Added\n\n- A thing.\n"))).toThrow(
+      /\[Unreleased\] has entries; they belong in changelog\.d\/<slug>\.<category>\.md/,
     );
+    expect(() => refuseUnreleasedEntries(changelog("\n\n"))).not.toThrow();
+    expect(() =>
+      refuseUnreleasedEntries(changelog("\n\n", "\n[Unreleased]: https://x/y\n")),
+    ).not.toThrow();
   });
 
-  test("releaseChangelog refuses an empty or missing [Unreleased]", () => {
-    expect(() => releaseChangelog(changelog("\n\n"), "0.1.0", "2026-10-22")).toThrow(
-      /\[Unreleased\] is empty/,
-    );
-    expect(() => releaseChangelog("# Changelog\n\n## [0.1.0] - x\n", "0.2.0", "d")).toThrow(
+  test("refuseUnreleasedEntries refuses a missing [Unreleased]", () => {
+    expect(() => refuseUnreleasedEntries("# Changelog\n\n## [0.1.0] - x\n")).toThrow(
       /no "## \[Unreleased\]"/,
-    );
-  });
-
-  test("releaseChangelog rewrites GitHub compare links when present", () => {
-    const links =
-      "\n[Unreleased]: https://github.com/o/r/compare/v0.1.0-beta.1...HEAD\n[0.1.0-beta.1]: https://github.com/o/r/releases/tag/v0.1.0-beta.1\n";
-    const out = releaseChangelog(changelog("\n- A thing.\n", links), "0.1.0", "2026-10-22");
-    expect(out).toContain("[Unreleased]: https://github.com/o/r/compare/v0.1.0...HEAD\n");
-    expect(out).toContain(
-      "[0.1.0]: https://github.com/o/r/compare/v0.1.0-beta.1...v0.1.0\n[0.1.0-beta.1]:",
     );
   });
 });
@@ -118,8 +111,9 @@ const PKG = (name: string, version: string) =>
   `{\n  "name": "${name}",\n  "version": "${version}",\n  "private": true,\n  "license": "MIT"\n}\n`;
 const LOCK = (version: string) =>
   `{\n  "lockfileVersion": 1,\n  "workspaces": {\n    "": {\n      "name": "root",\n    },\n    "packages/a": {\n      "name": "@x/a",\n      "version": "${version}",\n    },\n    "packages/cli": {\n      "name": "@x/cli",\n      "version": "${version}",\n    },\n  },\n  "packages": {}\n}\n`;
-const CHANGELOG =
-  "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Everything.\n\n## [0.1.0-beta.1] - 2026-10-21\n\nFirst.\n";
+const CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n## [0.1.0-beta.1] - 2026-10-21\n\nFirst.\n";
+/** The fragment the fixture repo ships: an empty [Unreleased] means the entry lives here. */
+const FRAGMENT = "- Everything.\n";
 
 let base: string;
 let repo: string;
@@ -157,6 +151,8 @@ beforeEach(async () => {
   writeFileSync(join(repo, "stubs/s/package.json"), PKG("stub", "0.0.0"));
   writeFileSync(join(repo, "bun.lock"), LOCK("0.1.0-beta.1"));
   writeFileSync(join(repo, "CHANGELOG.md"), CHANGELOG);
+  mkdirSync(join(repo, "changelog.d"), { recursive: true });
+  writeFileSync(join(repo, "changelog.d/everything.added.md"), FRAGMENT);
   git(repo, "add", "-A");
   git(repo, "commit", "-q", "-m", "init");
   git(repo, "tag", "-a", "v0.1.0-beta.1", "-m", "beta");
@@ -179,7 +175,13 @@ const deps = (extra: Partial<ReleaseDeps> = {}): ReleaseDeps => ({
   write: (t) => out.push(t),
   ...extra,
 });
-const read = (p: string) => readFileSync(join(repo, p), "utf8");
+const read = (p: string) => {
+  try {
+    return readFileSync(join(repo, p), "utf8");
+  } catch {
+    return "<absent>"; // a case may delete the fragment; the snapshot still compares
+  }
+};
 const snapshot = () =>
   [
     "package.json",
@@ -187,6 +189,7 @@ const snapshot = () =>
     "packages/cli/package.json",
     "bun.lock",
     "CHANGELOG.md",
+    "changelog.d/everything.added.md",
   ]
     .map(read)
     .join("\0");
@@ -208,6 +211,9 @@ describe("runRelease", () => {
     expect(read("CHANGELOG.md")).toBe(
       "# Changelog\n\n## [Unreleased]\n\n## [0.1.0] - 2026-10-22\n\n### Added\n\n- Everything.\n\n## [0.1.0-beta.1] - 2026-10-21\n\nFirst.\n",
     );
+    // The fragment is consumed by the release: gone from disk and from the commit.
+    expect(existsSync(join(repo, "changelog.d/everything.added.md"))).toBe(false);
+    expect(git(repo, "ls-tree", "-r", "HEAD", "--name-only")).not.toContain("changelog.d/");
     expect(git(repo, "rev-list", "--count", `${before}..HEAD`)).toBe("1");
     expect(git(repo, "log", "-1", "--format=%s")).toBe("chore(release): v0.1.0");
     expect(git(repo, "log", "-1", "--format=%B")).toBe("chore(release): v0.1.0"); // no trailer
@@ -277,16 +283,65 @@ describe("runRelease", () => {
     expect(out.join("")).toContain("fetching origin");
   });
 
-  test("an empty [Unreleased] is refused before the gate", async () => {
-    writeFileSync(
-      join(repo, "CHANGELOG.md"),
-      "# Changelog\n\n## [Unreleased]\n\n## [0.1.0-beta.1] - 2026-10-21\n\nFirst.\n",
-    );
-    git(repo, "commit", "-q", "-am", "empty unreleased");
+  test("no fragments is refused before the gate", async () => {
+    rmSync(join(repo, "changelog.d"), { recursive: true, force: true });
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "no fragments");
     git(repo, "push", "-q", "origin", "main");
-    await refused(["0.1.0"], /\[Unreleased\] is empty/);
+    await refused(["0.1.0"], /changelog\.d\/ has no fragments; a release needs at least one/);
     expect(gateRuns).toBe(0);
   });
+
+  test("a hand-written entry under [Unreleased] is refused before the gate", async () => {
+    writeFileSync(
+      join(repo, "CHANGELOG.md"),
+      "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Written by hand.\n\n## [0.1.0-beta.1] - 2026-10-21\n\nFirst.\n",
+    );
+    git(repo, "commit", "-q", "-am", "hand-written unreleased");
+    git(repo, "push", "-q", "origin", "main");
+    await refused(["0.1.0"], /\[Unreleased\] has entries; they belong in changelog\.d\//);
+    expect(gateRuns).toBe(0);
+  });
+
+  test("a malformed fragment is refused before the gate", async () => {
+    writeFileSync(join(repo, "changelog.d/Bad_Slug.md"), "- A thing.\n");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "bad fragment");
+    git(repo, "push", "-q", "origin", "main");
+    await refused(["0.1.0"], /Bad_Slug\.md: a fragment is named <slug>\.<category>\.md/);
+    expect(gateRuns).toBe(0);
+  });
+
+  // F1: the scan must see EVERY entry in changelog.d/, not just `*.md` files. A
+  // name the scan skips is never parsed, so it is neither in the release notes
+  // nor deleted by the release: silently lost, and green.
+  for (const [label, path, message] of [
+    [
+      "with no .md extension",
+      "changelog.d/lost-task.added",
+      /changelog\.d\/lost-task\.added: a fragment is named <slug>\.<category>\.md/,
+    ],
+    [
+      "in a subdirectory",
+      "changelog.d/sub/nested-task.fixed.md",
+      /changelog\.d\/sub: changelog\.d\/ holds fragment files only, no subdirectories/,
+    ],
+    [
+      "a dotfile (a stray .DS_Store is not a fragment)",
+      "changelog.d/.DS_Store",
+      /changelog\.d\/\.DS_Store: a fragment is named <slug>\.<category>\.md/,
+    ],
+  ] as const) {
+    test(`a fragment ${label} is refused before the gate`, async () => {
+      mkdirSync(dirname(join(repo, path)), { recursive: true });
+      writeFileSync(join(repo, path), "- A thing.\n");
+      git(repo, "add", "-A");
+      git(repo, "commit", "-q", "-m", "misnamed fragment");
+      git(repo, "push", "-q", "origin", "main");
+      await refused(["0.1.0"], message);
+      expect(gateRuns).toBe(0);
+    });
+  }
 
   test("a red gate aborts with nothing written", async () => {
     await refused(["0.1.0"], /gate failed/, {
@@ -309,7 +364,15 @@ describe("runRelease", () => {
     const text = out.join("");
     expect(text).toContain("dry run");
     expect(text).toContain("packages/cli/package.json: 0.1.0-beta.1 → 0.1.0");
-    expect(text).toContain("CHANGELOG.md: [Unreleased] → [0.1.0] - 2026-10-22");
+    expect(text).toContain(
+      "CHANGELOG.md: 1 fragment → [0.1.0] - 2026-10-22 ([Unreleased] stays empty)",
+    );
+    expect(text).toContain("changelog.d/: 1 fragment deleted");
+    expect(text).toContain(
+      "The section it would add:\n\n## [0.1.0] - 2026-10-22\n\n### Added\n\n- Everything.",
+    );
+    // The preview is a preview: the fragment is still there, unread only.
+    expect(read("changelog.d/everything.added.md")).toBe(FRAGMENT);
     expect(text).toContain("chore(release): v0.1.0");
   });
 

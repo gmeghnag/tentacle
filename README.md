@@ -370,6 +370,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `subagents.execution` | `TENTACLE_SUBAGENT_EXECUTION` | "parallel" | `agent_task` overlap: `parallel` (default; they share one workspace), `read-only`, `sequential`. |
 | `subagents.maxIterations` | `TENTACLE_SUBAGENT_MAX_ITERATIONS` | 50 | Step limit for a sub-agent's own loop. |
 | `subagents.maxParallel` | `TENTACLE_SUBAGENT_MAX_PARALLEL` | 4 | At most this many sub-agents at once — the only limit; match it to your server. |
+| `subagents.maxTokens` | `TENTACLE_SUBAGENT_MAX_TOKENS` | 2000000 | Token budget for a sub-agent's whole life. |
 | `subagents.selectableModels` | — | — | `models` entries the agent may pick per `agent_task` call; absent or empty: off. |
 | `subagents.twoWay` | `TENTACLE_SUBAGENTS_TWO_WAY` | false | Background sub-agents may message the agent (`agent_notify`); a message wakes an idle agent. |
 | `subagents.types.*.model` | — | — | The `models` entry this type runs on (beats the type's `agents/*.md` `model`). |

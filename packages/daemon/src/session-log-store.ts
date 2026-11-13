@@ -43,6 +43,7 @@ import {
   type SessionTitle,
   canonicalMessage,
 } from "@tentacle/protocol";
+import { BLOB_DIR_SUFFIX, SessionBlobs } from "./session-blobs.ts";
 import {
   type LogSegment,
   type ParsedLogFile,
@@ -158,6 +159,8 @@ export interface LogSessionStoreOptions {
   readonly io?: LogStoreIo;
   /** Told of every aside a replace made (a notice; never a raw terminal write). */
   readonly onAside?: (info: LogAsideInfo) => void;
+  /** The session image bytes beside the logs (docs/feat/attachments-durable.md D1); injectable for tests. */
+  readonly blobs?: SessionBlobs;
   /** How long a live holder of a session's lock is waited for. Default 2 s. */
   readonly lockWaitMs?: number;
   /** A lock whose stamp is older than this is stale (taken over). Default 30 s. */
@@ -190,6 +193,8 @@ type Op =
   | { readonly kind: "aside"; readonly reason: string }
   | { readonly kind: "dropState" }
   | { readonly kind: "forget" }
+  | { readonly kind: "blob"; readonly blobId: string; readonly bytes: Uint8Array }
+  | { readonly kind: "dropBlobs" }
   | { readonly kind: "remove" };
 
 interface Slot {
@@ -264,6 +269,17 @@ function titleOf(title: SessionTitle | undefined, messages: readonly ChatMessage
   return encodeTitle(state, messages);
 }
 
+/** The image ids the entries' messages carry (`media_message` / `media_replace`). */
+export function blobIdsOf(entries: readonly KnownLogEntry[]): Set<string> {
+  const ids = new Set<string>();
+  for (const entry of entries) {
+    if (entry.type === "media_message" || entry.type === "media_replace") {
+      for (const ref of entry.message.attachments) ids.add(ref.id);
+    }
+  }
+  return ids;
+}
+
 /** The id at which `entries` holds `id`, searching from the end (the usual case is near it). */
 function indexOfId(entries: readonly KnownLogEntry[], id: string): number {
   for (let i = entries.length - 1; i >= 0; i--) {
@@ -283,12 +299,14 @@ export class LogSessionStore {
   /** Tells two store instances of ONE process apart in a lock body. */
   private readonly token = randomUUID().slice(0, 8);
   private swept = false;
+  private readonly blobs: SessionBlobs;
 
   constructor(
     private readonly dir: string,
     private readonly options: LogSessionStoreOptions = {},
   ) {
     this.io = options.io ?? defaultIo;
+    this.blobs = options.blobs ?? new SessionBlobs(dir);
     this.keepSuperseded = options.keepSuperseded === true;
     this.lockWaitMs = options.lockWaitMs ?? 2000;
     this.lockStaleMs = options.lockStaleMs ?? 30_000;
@@ -373,6 +391,43 @@ export class LogSessionStore {
       return Promise.reject(new Error(`invalid session id ${JSON.stringify(id)}`));
     }
     return this.enqueue(id, { kind: "remove" });
+  }
+
+  /**
+   * Keep one verified image blob of the session on disk, `<uid>.attachments/<blobId>`
+   * (docs/feat/attachments-durable.md D1), under its lock, in its queue — so a
+   * `remove` queued after it leaves no orphan dir. The caller verified the
+   * bytes hash to `blobId`; resolves once the file is durable.
+   */
+  putBlob(id: string, blobId: string, bytes: Uint8Array): Promise<void> {
+    if (!isValidSessionId(id)) {
+      return Promise.reject(new Error(`invalid session id ${JSON.stringify(id)}`));
+    }
+    return this.enqueue(id, { kind: "blob", blobId, bytes });
+  }
+
+  /** One blob of the session, or `null` (absent, unreadable, a bad id). Files are immutable once in: no lock. */
+  readBlob(id: string, blobId: string): Promise<Uint8Array | null> {
+    return this.blobs.read(id, blobId);
+  }
+
+  /** The session's blob ids on disk, with their sizes (synchronous: a store is built synchronously). */
+  blobIndex(id: string): Map<string, number> {
+    return this.blobs.index(id);
+  }
+
+  /** The session ids that have a blob dir but no `<uid>.jsonl` (`serve`'s start-up sweep, D3). */
+  async blobOrphans(): Promise<string[]> {
+    const withLog = new Set(await this.ids());
+    return (await this.blobs.owners()).filter((id) => !withLog.has(id));
+  }
+
+  /** Delete only the session's blob dir, under its lock, in its queue (D3: a logless dir). */
+  removeBlobs(id: string): Promise<void> {
+    if (!isValidSessionId(id)) {
+      return Promise.reject(new Error(`invalid session id ${JSON.stringify(id)}`));
+    }
+    return this.enqueue(id, { kind: "dropBlobs" });
   }
 
   /**
@@ -466,7 +521,7 @@ export class LogSessionStore {
       state.forks = [...(state.forks ?? []), op.update];
       this.writers.set(id, state);
       await mkdir(this.dir, { recursive: true });
-      await this.writeForks(state);
+      await this.writeForks(id, state);
       return;
     }
     const target = this.file(id);
@@ -481,7 +536,7 @@ export class LogSessionStore {
         if (op.kind === "write") {
           // A fork still pending (it failed before) goes first: it fails this save too.
           const pending = this.writers.get(id);
-          if (pending?.forks) await this.writeForks(pending);
+          if (pending?.forks) await this.writeForks(id, pending);
           await this.writeLocked(id, op.update);
           if (op.update.sidecar !== undefined) {
             await this.writeStateLocked(id, op.update.sidecar);
@@ -491,6 +546,8 @@ export class LogSessionStore {
         else if (op.kind === "aside") await this.asideLocked(id, op.reason);
         else if (op.kind === "dropState") await rm(this.stateFile(id), { force: true });
         else if (op.kind === "forget") this.writers.delete(id);
+        else if (op.kind === "blob") await this.blobs.write(id, op.blobId, op.bytes);
+        else if (op.kind === "dropBlobs") await this.blobs.removeAll(id);
         else await this.removeLocked(id);
       } finally {
         await release();
@@ -503,20 +560,24 @@ export class LogSessionStore {
       ) {
         throw error;
       }
-      const verb = op.kind === "remove" ? "remove" : "write";
-      throw new Error(`couldn't ${verb} ${target}: ${describeFsError(error)}`, { cause: error });
+      const verb = op.kind === "remove" || op.kind === "dropBlobs" ? "remove" : "write";
+      const what =
+        op.kind === "blob" || op.kind === "dropBlobs"
+          ? join(this.dir, `${id}${BLOB_DIR_SUFFIX}`)
+          : target;
+      throw new Error(`couldn't ${verb} ${what}: ${describeFsError(error)}`, { cause: error });
     }
   }
 
   /** Every pending fork of a source, oldest first; one that fails stays (and so do the ones after it). */
-  private async writeForks(state: WriterState): Promise<void> {
+  private async writeForks(sourceId: string, state: WriterState): Promise<void> {
     while (state.forks !== undefined) {
       const next = state.forks[0];
       if (next === undefined) {
         state.forks = undefined;
         return;
       }
-      await this.writeFork(next);
+      await this.writeFork(sourceId, next);
       state.forks.shift();
     }
   }
@@ -531,8 +592,13 @@ export class LogSessionStore {
    * re-applying this cold update then would replace the fork's log — which may
    * have been reopened and moved on — and rewind its sidecar. A log with no
    * sidecar where one is expected (the sidecar write failed) still goes through.
+   *
+   * The images its entries name are linked from the source's blob dir AFTER
+   * its log (and sidecar) landed (docs/feat/attachments-durable.md D1) — also
+   * for a fork that already landed, whose link may be what failed: a link
+   * only adds files, so a retry is harmless.
    */
-  private async writeFork(update: LogWrite): Promise<void> {
+  private async writeFork(sourceId: string, update: LogWrite): Promise<void> {
     const id = update.id;
     if (!isValidSessionId(id)) {
       throw new ForkWriteError(`invalid session id ${JSON.stringify(id)}`);
@@ -541,12 +607,14 @@ export class LogSessionStore {
       const release = await this.lock(id);
       try {
         if (await this.landed(update)) {
+          await this.linkForkBlobs(sourceId, update);
           if (update.sidecar === undefined) this.writers.delete(id);
           return;
         }
         this.advance(id, update);
         await this.writeLocked(id, update);
         if (update.sidecar !== undefined) await this.writeStateLocked(id, update.sidecar);
+        await this.linkForkBlobs(sourceId, update);
       } finally {
         await release();
       }
@@ -557,6 +625,12 @@ export class LogSessionStore {
         { cause: error },
       );
     }
+  }
+
+  /** Link the blobs the fork's image entries name (none: nothing touched). */
+  private async linkForkBlobs(sourceId: string, update: LogWrite): Promise<void> {
+    const ids = blobIdsOf(update.entries);
+    if (ids.size > 0) await this.blobs.link(sourceId, update.id, ids);
   }
 
   /** The fork's files are the ones this update would write: log, and the sidecar when one is expected. */
@@ -899,7 +973,7 @@ export class LogSessionStore {
     try {
       names = await readdir(this.dir);
     } catch {
-      return;
+      names = [];
     }
     const prefix = `${id}.stale-`;
     for (const name of names) {
@@ -907,6 +981,10 @@ export class LogSessionStore {
         await rm(join(this.dir, name), { force: true }).catch(() => {});
       }
     }
+    // The images LAST (docs/feat/attachments-durable.md D1): a remove cut short
+    // leaves blobs with no log (swept by `serve` at start), never a log whose
+    // images are gone.
+    await this.blobs.removeAll(id);
   }
 
   /** temp + fsync + rename: the old file or the new one, never half of one. */
@@ -1042,6 +1120,7 @@ export class LogSessionStore {
         // Vanished or unreadable: not worth failing over.
       }
     }
+    await this.blobs.sweep().catch(() => {});
   }
 
   /** One session's history, as a LOAD gives it (an open turn closed). */

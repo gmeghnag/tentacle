@@ -91,6 +91,19 @@ describe("createTaskTool", () => {
     );
   });
 
+  test("a token-capped run gets its OWN note, never the iteration cap's", async () => {
+    // docs/feat/subagent-token-budget.md T6. Mutation: fall through to the
+    // `max_iterations` branch → the model reads "iteration cap" and narrows the
+    // wrong knob (it would raise the step limit, not the token budget).
+    const tokens = createTaskTool(
+      runnerReturning({ report: "partial", toolUses: 4, stopReason: "max_token_budget" }).run,
+      TYPES,
+    );
+    const result = await tokens.execute({ description: "d", prompt: "p" }, ctx);
+    expect(result.content).toBe("partial\n\n_(sub-agent hit its token cap)_");
+    expect(result.content).not.toContain("iteration cap");
+  });
+
   test("the tool itself needs no permission and lists the types", () => {
     const tool = createTaskTool(
       runnerReturning({ report: "", toolUses: 0, stopReason: "end_turn" }).run,

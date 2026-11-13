@@ -92,6 +92,59 @@ describe("openTuiSessions", () => {
     expect(out.join("")).toContain("starting fresh");
   });
 
+  test("`implicit` (the run's own conversation, re-opened for an attach): no line, warnings kept", async () => {
+    // docs/feat/detach-small-fixes.md item 5. Mutation: print the line for an
+    // implicit uid -> the `[resume] <uid> — <title>` survives exit again.
+    const root = join(dir, "implicit");
+    const uid = "99999999-9999-4999-8999-999999999999";
+    await saveFixture(new LogSessionStore(join(root, projectKey("/w"))), rec(uid, 5));
+    const out: string[] = [];
+    const sessions = opened(
+      await openTuiSessions({ root, cwd: "/w" }, { wanted: true, uid, implicit: true }, (l) =>
+        out.push(l),
+      ),
+    );
+    expect(sessions.resume?.id).toBe(uid);
+    expect(out).toEqual([]);
+    // Its failures are still printed (a warning here needs the LIST branch, which
+    // an explicit uid never takes): an unreadable log stays fatal and loud.
+    await writeFile(new LogSessionStore(join(root, projectKey("/w"))).file(uid), "{trunc");
+    const loud: string[] = [];
+    const refused = await openTuiSessions(
+      { root, cwd: "/w" },
+      { wanted: true, uid, implicit: true },
+      (l) => loud.push(l),
+    );
+    expect(refused).toEqual({ exit: 1 });
+    expect(loud).toHaveLength(1);
+    expect(loud[0]).toContain(`[resume] session "${uid}" is unreadable`);
+  });
+
+  test('`implicit` with no record says nothing (like `live`), never "starting fresh"', async () => {
+    // Unreachable from `main.ts` (it passes `implicit` only for a record it read),
+    // kept honest so the rule is the flag's, not the caller's.
+    const out: string[] = [];
+    const none = opened(
+      await openTuiSessions(
+        { root: join(dir, "implicit-none"), cwd: "/w" },
+        { wanted: true, uid: "aaaaaaaa-9999-4999-8999-999999999999", implicit: true },
+        (l) => out.push(l),
+      ),
+    );
+    expect(none.resume).toBeNull();
+    expect(out).toEqual([]);
+  });
+
+  test("without `implicit`, the same reopen still announces the session", async () => {
+    // The control: the person typed the uid, so its name is the point.
+    const root = join(dir, "explicit");
+    const uid = "bbbbbbbb-9999-4999-8999-999999999999";
+    await saveFixture(new LogSessionStore(join(root, projectKey("/w"))), rec(uid, 5));
+    const out: string[] = [];
+    await openTuiSessions({ root, cwd: "/w" }, { wanted: true, uid }, (l) => out.push(l));
+    expect(out).toEqual([`[resume] ${uid} — title ${uid}\n`]);
+  });
+
   test("a startup notice (model.titleModel without autoTitle) reaches the TUI once, never a raw write", async () => {
     // docs/feat/session-titles.md follow-up 1. Mutation: drop the queueing → the TUI gets nothing.
     const out: string[] = [];

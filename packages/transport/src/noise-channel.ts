@@ -21,6 +21,13 @@ import { Reassembler, TYPE_CONFIRM, chunk, decodeFrame, encodeFrame } from "./no
 import { type CipherState, IkInitiator, IkResponder, NoiseError, publicKeyOf } from "./noise.ts";
 
 export { NoiseError, type NoiseErrorKind, publicKeyOf } from "./noise.ts";
+/** The pairing compare code rides the same subpath: a client that pairs loads this crypto once. */
+export {
+  PAIRING_SAS_DIGITS,
+  PAIRING_SAS_PREFIX,
+  formatPairingSas,
+  pairingSas,
+} from "./pairing-sas.ts";
 
 /** This channel's own version, bound in the prologue (not `PROTOCOL_VERSION`: a skew stays a clean `VersionMismatch`). */
 export const E2E_CHANNEL_VERSION = 1;

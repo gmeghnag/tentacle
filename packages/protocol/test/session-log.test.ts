@@ -254,8 +254,11 @@ describe("media entries (docs/feat/attachments-core.md, D2: owner Q2 = (a))", ()
     expect(isAppendEntry({ type: "media_replace" } as never)).toBe(false);
   });
 
-  test("PROTOCOL_VERSION is 23: a new CRITICAL type breaks an older peer, so it is bumped", () => {
-    expect(PROTOCOL_VERSION).toBe(23);
+  test("the exact pin moved to protocol/test/version.test.ts (docs/feat/protocol-version-at-merge.md)", () => {
+    // A FLOOR here, the ONE exact pin there: the number is assigned at merge, so a
+    // bump is `version.ts` + that one line. This test keeps its real property —
+    // the log format this file pins landed at or before the current version.
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(23);
   });
 });
 

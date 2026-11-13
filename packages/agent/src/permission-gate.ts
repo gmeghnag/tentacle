@@ -51,6 +51,12 @@ export function describeToolCall(tool: Tool, input: unknown): PermissionRequest 
       return { ...base, title: "Write a file", ...detail(str("path")) };
     case "fs_edit":
       return { ...base, title: "Edit a file", ...detail(str("path")) };
+    // Several edits, one file: the same act as `fs_edit`, so the same title — and
+    // its subject says HOW MANY, the one thing that differs (the transcript row
+    // words it the same way, tui/src/render-lines.ts). Without a readable
+    // `edits` the file's path alone still beats the `—` fallback.
+    case "fs_multi_edit":
+      return { ...base, title: "Edit a file", ...detail(multiEditSubject(obj, str)) };
     // The user sees what the model keeps: everything else is discarded.
     case CONTEXT_RESET_TOOL_NAME:
       return {
@@ -65,6 +71,26 @@ export function describeToolCall(tool: Tool, input: unknown): PermissionRequest 
 
 function detail(value: string | undefined): { detail?: string } {
   return value !== undefined ? { detail: value } : {};
+}
+
+/**
+ * A `fs_multi_edit` call's subject for the permission prompt: the path, and
+ * ` · N edit(s)` when the input's `edits` really is a non-empty array. A hook
+ * may rewrite the input to a shape this cannot read: then it is the path alone,
+ * or no detail at all (never a throw, and never a count taken from a guess).
+ */
+function multiEditSubject(
+  obj: Record<string, unknown>,
+  str: (key: string) => string | undefined,
+): string | undefined {
+  const path = str("path");
+  const edits = obj.edits;
+  const count = Array.isArray(edits) ? edits.length : 0;
+  const how = count === 0 ? "" : `${count} ${count === 1 ? "edit" : "edits"}`;
+  if (path === undefined) {
+    return how === "" ? undefined : how;
+  }
+  return how === "" ? path : `${path} · ${how}`;
 }
 
 /** The gate's answer: run (with the effective `input`) or refuse, and who decided. */

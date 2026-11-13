@@ -353,6 +353,22 @@ describe("subagentLoadNotes — THE load derivation (laptop load + serve reload)
     expect(notes[0]?.content).toContain("it left no report");
   });
 
+  test("owner Q5: a failed child's load headline reads `failed`, not `finished (error)`", () => {
+    // Mutation: keep the `finished (<stopReason>)` wording for `error` → the model
+    // reads a failure as a success-ish finish (the owner's report) → red.
+    const notes = subagentLoadNotes(
+      [bg("sa-1"), endEntry("sa-1", { stopReason: "error", report: "the sub-agent failed: boom" })],
+      [],
+    );
+    expect(notes[0]?.content).toBe(
+      "[background] sub-agent sa-1 (map the repo) failed before the session restarted:\nthe sub-agent failed: boom",
+    );
+    // Every other stop reason keeps the old wording byte for byte.
+    expect(subagentLoadNotes([bg("sa-2"), endEntry("sa-2", { report: "R" })], [])[0]?.content).toBe(
+      "[background] sub-agent sa-2 (map the repo) finished (end_turn) before the session restarted:\nR",
+    );
+  });
+
   test("FM 5: an `end` without its `bg` still yields its note, without a description", () => {
     const notes = subagentLoadNotes([endEntry("sa-9", { report: "ORPHAN REPORT" })], []);
     expect(notes).toHaveLength(1);

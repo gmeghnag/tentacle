@@ -185,6 +185,8 @@ export function stopReasonToProtocol(reason: AgentStopReason): StopReason {
       return "cancelled";
     case "max_iterations":
       return "max_iterations";
+    case "max_token_budget":
+      return "max_token_budget";
   }
 }
 
