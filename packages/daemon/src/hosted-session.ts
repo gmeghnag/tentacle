@@ -2019,7 +2019,14 @@ export class HostedSession {
     // Before the turn's messages (they join the log at its first commit).
     this.log.turnStart(turnId);
     try {
-      this.emit({ type: "turn_start", turnId, prompt: text });
+      this.emit({
+        type: "turn_start",
+        turnId,
+        prompt: text,
+        // Another client's rows (docs/feat/attachments-tui.md D2): the refs the
+        // prompt named, absent for a text-only turn (never `[]`).
+        ...(refs.length > 0 ? { attachments: refs } : {}),
+      });
     } catch (error) {
       // The turn is accepted (state above): a throwing sink must not strand it
       // as "running" forever — run it anyway; it ends through `finishTurn`.

@@ -29,20 +29,27 @@ import {
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import { type ReturnedRow, handBack, restoredByRefusal, stayingRows } from "./hand-back.ts";
+import type { ImageInput } from "./image-input.ts";
 import { turnRecovery } from "./link-machine.ts";
 import { type SessionEvent, stopReasonFromProtocol, updateToEvent } from "./mapping.ts";
 import { AsyncQueue } from "./queue.ts";
-import type {
-  ReadBack,
-  RemoteClient,
-  SessionStreamListener,
-  SessionTitleNotice,
+import {
+  ImagesUnavailableError,
+  type ReadBack,
+  type RemoteClient,
+  type SessionStreamListener,
+  type SessionTitleNotice,
+  type UploadOptions,
 } from "./remote-client.ts";
 import type { StreamOutput } from "./session-reducer.ts";
 import type { SubagentNotify } from "./subagents.ts";
 
 /** Own turns remembered by `ownsTurn` after they end (the oldest fall off). */
 const MINTED_TURNS_MAX = 256;
+
+/** An own turn's re-delivery needs the bubble when there ARE refs (`""` + refs is a prompt). */
+const hasRefs = (refs: readonly AttachmentRef[] | undefined): refs is readonly AttachmentRef[] =>
+  refs !== undefined && refs.length > 0;
 
 /** The turn this session is streaming. */
 interface ActiveTurn {
@@ -397,6 +404,52 @@ export class RemoteSession implements SessionStreamListener {
       this.creating = opening;
     }
     return this.creating;
+  }
+
+  /**
+   * Attach one image to THIS session (docs/feat/attachments-tui.md D3): the ref
+   * a prompt then names, or a refusal to show.
+   *
+   * The method lives on the SESSION, not the client, because a fresh one is
+   * LAZY: the daemon's `attachment/put` only knows a session opened on this
+   * connection (*r2* of the task doc), and only the session can await its own
+   * open. It is the SAME memoized open the first `send` uses, so a prompt right
+   * after reuses it (no second `session/open`), and it goes through
+   * `RemoteClient.attachImage`, which alone decides upload vs laptop-held from
+   * the daemon's capability — no second session path (AGENTS §7).
+   *
+   * Rejects like the client's: `ImagesUnavailableError` (off, zero frames),
+   * `RangeError` (size), `InvalidAttachmentError` (ref), upload errors.
+   */
+  async attachImage(
+    bytes: Uint8Array,
+    meta: { readonly mimeType: string; readonly name?: string },
+    options: UploadOptions = {},
+  ): Promise<AttachmentRef> {
+    if (this.closed) {
+      throw new RpcError(DomainErrorCode.UnknownSession, "this session was closed");
+    }
+    this.refuseIfRemoteClosed();
+    // The mode first: unsupported sends nothing at all — not even an open.
+    const mode = this.client.imageInput();
+    if (mode.kind === "off") {
+      throw new ImagesUnavailableError(mode.reason);
+    }
+    if (this.attach) {
+      await this.open();
+    } else {
+      await this.createOrAttach();
+    }
+    const id = this.id;
+    if (id === null) {
+      throw new RpcError(DomainErrorCode.UnknownSession, "the session is not open");
+    }
+    return this.client.attachImage(id, bytes, meta, options);
+  }
+
+  /** What this session may do with an image right now (the daemon's capability, D5). */
+  imageInput(): ImageInput {
+    return this.client.imageInput();
   }
 
   private raise(activity: SessionActivity): void {
@@ -1335,7 +1388,11 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /** A turn this session did not start: tracked, announced to the watcher, never sent. */
-  private startForeign(turnId: string, prompt: string): ActiveTurn {
+  private startForeign(
+    turnId: string,
+    prompt: string,
+    attachments?: readonly AttachmentRef[],
+  ): ActiveTurn {
     const turn: ActiveTurn = {
       turnId,
       prompt,
@@ -1355,9 +1412,14 @@ export class RemoteSession implements SessionStreamListener {
       turn.queue.push(notice);
     }
     // Its prompt, as the daemon sent it (none for a continuation, or for a
-    // turn already running at a reset: the snapshot shows it).
-    if (prompt !== "") {
-      turn.queue.push({ type: "user_message", text: prompt });
+    // turn already running at a reset: the snapshot shows it). An image-only
+    // prompt ("" + refs) IS pushed: the refs alone say what was asked.
+    if (prompt !== "" || (attachments?.length ?? 0) > 0) {
+      turn.queue.push({
+        type: "user_message",
+        text: prompt,
+        ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
+      });
     }
     this.raise({
       kind: "turn",
@@ -1526,7 +1588,7 @@ export class RemoteSession implements SessionStreamListener {
           if (!own.ended) this.onUpdate(own, update);
           return;
         }
-        this.startForeign(update.turnId, update.prompt);
+        this.startForeign(update.turnId, update.prompt, update.attachments);
         return;
       }
       case "turn_end": {
@@ -1629,8 +1691,12 @@ export class RemoteSession implements SessionStreamListener {
         if (turn.sendNow) {
           turn.started = true;
         }
-        if ((turn.sendNow || turn.reset) && update.prompt !== "") {
-          turn.queue.push({ type: "user_message", text: update.prompt });
+        if ((turn.sendNow || turn.reset) && (update.prompt !== "" || hasRefs(update.attachments))) {
+          turn.queue.push({
+            type: "user_message",
+            text: update.prompt,
+            ...(hasRefs(update.attachments) ? { attachments: update.attachments } : {}),
+          });
         }
       }
       return;

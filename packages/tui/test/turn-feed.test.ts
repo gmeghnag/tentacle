@@ -10,6 +10,7 @@ import {
   lostSlot,
   needsWarm,
   nextStep,
+  refusedBeforeStart,
 } from "../src/turn-feed.ts";
 
 // docs/feat/tui-foreign-turns.md C2/C3/C6/C8: the pure decisions the App executes.
@@ -120,5 +121,31 @@ describe("closedNotice (docs/feat/connect-sessions.md)", () => {
     expect(closedNotice("deleted", true)).toBe(
       "_this session was deleted on another device — what you type next starts a new session_",
     );
+  });
+});
+
+/**
+ * A prompt the daemon REFUSED before the turn started
+ * (docs/feat/attachments-tui.md D8, T8i): an image prompt whose refs the
+ * daemon no longer holds (`AttachmentRefused`). Its bubble goes, its text and
+ * chips come back — decided by the error CODE, never its text.
+ */
+describe("refusedBeforeStart: a prompt refused before anything streamed", () => {
+  const refused = (reason: string) =>
+    Object.assign(new Error("refused"), { code: -32016, data: { reason } });
+
+  test("an AttachmentRefused before any event is withdrawn", () => {
+    expect(refusedBeforeStart(refused("not_uploaded"), false)).toBe(true);
+    expect(refusedBeforeStart(refused("images_off"), false)).toBe(true);
+  });
+
+  test("after the turn streamed it is an ordinary failure, never withdrawn", () => {
+    expect(refusedBeforeStart(refused("not_uploaded"), true)).toBe(false);
+  });
+
+  test("another code, or no code at all, is not this case", () => {
+    expect(refusedBeforeStart(Object.assign(new Error("x"), { code: -32004 }), false)).toBe(false);
+    expect(refusedBeforeStart(new Error("AttachmentRefused"), false)).toBe(false);
+    expect(refusedBeforeStart(undefined, false)).toBe(false);
   });
 });

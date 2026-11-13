@@ -736,8 +736,15 @@ function noticeLines(text: string, expanded: boolean, hint?: string, body?: stri
 export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
   switch (item.kind) {
     case "user": {
-      const rows = userLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH));
-      return item.restart ? [theme.subtle("restart prompt"), ...rows] : rows;
+      // An image-only prompt has no text: its rows are the image lines alone
+      // (a blank text row would collapse — Ink measures an empty <Text> 0×0, P9).
+      const hasImages = (item.images ?? []).length > 0;
+      const rows =
+        item.text === "" && hasImages
+          ? []
+          : userLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH));
+      const images = (item.images ?? []).map((row) => theme.subtle(row));
+      return [...(item.restart ? [theme.subtle("restart prompt")] : []), ...rows, ...images];
     }
     case "assistant":
       return assistantLines(item.text);

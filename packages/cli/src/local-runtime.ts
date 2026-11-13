@@ -30,6 +30,7 @@ import {
 } from "@tentacle/client";
 import type { TentacleConfig } from "@tentacle/config";
 import type {
+  AttachmentRef,
   ChatMessage,
   JobController,
   JobStatus,
@@ -209,12 +210,20 @@ export const QUIT_MODEL_DRAIN_MS = 10_000;
 
 /** A `SessionController` whose post-turn saves can be awaited. */
 export interface PersistingController extends SessionController {
-  /** `RemoteSession.send`: `opts.turnId` mints the turn's id (a relay's run, B2). */
+  /** `RemoteSession.send`: `opts.turnId` mints the turn's id (a relay's run, B2); `opts.attachments` are the prompt's image refs. */
   send(
     prompt: string,
     signal?: AbortSignal,
-    opts?: { readonly skill?: string; readonly turnId?: string },
+    opts?: {
+      readonly skill?: string;
+      readonly turnId?: string;
+      readonly attachments?: readonly AttachmentRef[];
+    },
   ): AsyncIterable<SessionEvent>;
+  /** `RemoteSession.attachImage`: the ref a prompt then names (docs/feat/attachments-tui.md D4). */
+  attachImage: RemoteSession["attachImage"];
+  /** `RemoteSession.imageInput`: what this session may do with an image right now. */
+  imageInput: RemoteSession["imageInput"];
   /** `RemoteSession.enqueue`: `id` is the caller's key for the text (a `sendNow` cites it). */
   enqueue(text: string, id?: string): Promise<void>;
   /** `RemoteSession.sendNow`; the new turn is saved once it settles, like `send`'s. */
@@ -498,6 +507,15 @@ export function persistingController(
     // saved by its own `send`.
     async sendNow(messages, target, signal) {
       return saved(await inner.sendNow(messages, target, signal));
+    },
+    // The image seam goes STRAIGHT to the session (docs/feat/attachments-tui.md
+    // D4): the bytes are the session's to upload (it opens itself first), and
+    // nothing here needs saving — the ref only becomes history at the prompt.
+    attachImage(bytes, meta, options) {
+      return inner.attachImage(bytes, meta, options);
+    },
+    imageInput() {
+      return inner.imageInput();
     },
     async compact() {
       const result = await inner.compact();

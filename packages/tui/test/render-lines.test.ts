@@ -1953,3 +1953,55 @@ describe("T29: a moved sub-agent block", () => {
     expect(rows.some((r) => r.includes("→ background"))).toBe(true);
   });
 });
+
+/**
+ * Image rows on a user prompt (docs/feat/attachments-tui.md D7, T3): the text
+ * rows first, then one `[image: name]` line each; an image-only prompt has NO
+ * blank text row above them (Ink measures an empty <Text> 0×0, P9).
+ */
+describe("user prompt image rows", () => {
+  test("text rows, then one image line per ref", () => {
+    const rows = itemLines(
+      { kind: "user", text: "what is this?", images: ["[image: a.png]"] },
+      opts,
+    ).map((r) => strip(r).trimEnd());
+    expect(rows).toEqual(["› what is this?", "[image: a.png]"]);
+    expect(rows.filter((r) => r.includes("[image: a.png]"))).toHaveLength(1);
+  });
+
+  test("image-only: exactly the image rows, no empty text row", () => {
+    const rows = itemLines({ kind: "user", text: "", images: ["[image: a.png]"] }, opts).map((r) =>
+      strip(r).trimEnd(),
+    );
+    expect(rows).toEqual(["[image: a.png]"]);
+    expect(rows.every((r) => r.trim() !== "")).toBe(true);
+  });
+
+  test("two images, two lines, in order", () => {
+    const rows = itemLines(
+      { kind: "user", text: "q", images: ["[image: a.png]", "[image: b.png]"] },
+      opts,
+    ).map((r) => strip(r).trimEnd());
+    expect(rows.slice(-2)).toEqual(["[image: a.png]", "[image: b.png]"]);
+  });
+
+  test("a prompt with no images renders exactly as before", () => {
+    expect(itemLines({ kind: "user", text: "hi" }, opts).map((r) => strip(r).trimEnd())).toEqual([
+      "› hi",
+    ]);
+  });
+
+  test("the transcript keeps the image line under its own prompt, not merged into it", () => {
+    const lines = transcriptLines(
+      [
+        { kind: "user", text: "look", images: ["[image: a.png]"] },
+        { kind: "assistant", text: "a cat" },
+      ],
+      opts,
+    ).map((r) => strip(r).trimEnd());
+    expect(lines).toContain("[image: a.png]");
+    expect(lines.indexOf("[image: a.png]")).toBeLessThan(
+      lines.findIndex((l) => l.includes("a cat")),
+    );
+  });
+});

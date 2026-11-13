@@ -168,3 +168,54 @@ describe("messagesToItems", () => {
     expect(expanded.join("\n")).not.toContain("to expand");
   });
 });
+
+/**
+ * A resumed image prompt (docs/feat/attachments-tui.md D7, T2): the history has
+ * the refs, so the row says `[image: name]` — for an image-only prompt too,
+ * where the item has no text at all.
+ */
+describe("resumed image prompts", () => {
+  const ref = (name: string, id: string) => ({
+    id: id.repeat(64).slice(0, 64),
+    mimeType: "image/png",
+    size: 2048,
+    name,
+  });
+
+  test("a user message with two refs becomes one item with two image rows", () => {
+    const items = messagesToItems([
+      {
+        role: "user",
+        content: "what are these?",
+        attachments: [ref("a.png", "a"), ref("b.png", "b")],
+      },
+    ]);
+    expect(items).toEqual([
+      { kind: "user", text: "what are these?", images: ["[image: a.png]", "[image: b.png]"] },
+    ]);
+  });
+
+  test("an image-only prompt is an item with no text, just its rows (P9)", () => {
+    const items = messagesToItems([
+      { role: "user", content: "", attachments: [ref("a.png", "a")] },
+    ]);
+    expect(items).toEqual([{ kind: "user", text: "", images: ["[image: a.png]"] }]);
+  });
+
+  test("a text-only message carries no images key at all", () => {
+    expect(messagesToItems([{ role: "user", content: "hi" }])).toEqual([
+      { kind: "user", text: "hi" },
+    ]);
+  });
+
+  test("a nameless ref shows its MIME type", () => {
+    const items = messagesToItems([
+      {
+        role: "user",
+        content: "",
+        attachments: [{ id: "c".repeat(64), mimeType: "image/gif", size: 5 }],
+      },
+    ]);
+    expect(items[0]).toMatchObject({ images: ["[image: image/gif]"] });
+  });
+});

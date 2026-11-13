@@ -126,6 +126,20 @@ export function lostSlot(error: unknown, streamed: boolean): boolean {
   return !streamed && errorCode(error) === SendNowErrorCode.TurnInProgress;
 }
 
+/** The daemon refused an image prompt before the turn started (`data.reason`: images_off/invalid_ref/not_uploaded). */
+const ATTACHMENT_REFUSED = -32016;
+
+/**
+ * My own prompt was refused before the turn started because of its IMAGES
+ * (docs/feat/attachments-tui.md D8): the daemon's `AttachmentRefused`
+ * (`docs/feat/attachments-prompt.md` D3) — decided by CODE, never its text.
+ * Its bubble is withdrawn, the text and the chips come back, and the reason is
+ * shown: an image-only prompt must not be mistaken for a wake (P10).
+ */
+export function refusedBeforeStart(error: unknown, streamed: boolean): boolean {
+  return !streamed && errorCode(error) === ATTACHMENT_REFUSED;
+}
+
 /**
  * Past this many items a history is warmed in time-budgeted chunks before it
  * is committed (the resize pattern), so a long history never stalls input.

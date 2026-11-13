@@ -3793,6 +3793,13 @@
     "TurnStart": {
       "additionalProperties": true,
       "properties": {
+        "attachments": {
+          "items": {
+            "$ref": "#/$defs/AttachmentRef"
+          },
+          "maxItems": 5,
+          "type": "array"
+        },
         "prompt": {
           "type": "string"
         },

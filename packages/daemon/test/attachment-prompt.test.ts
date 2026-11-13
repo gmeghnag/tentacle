@@ -21,7 +21,7 @@ import {
   type ModelProvider,
   PermissionBroker,
 } from "@tentacle/core";
-import { DomainErrorCode, Method, PROTOCOL_VERSION } from "@tentacle/protocol";
+import { DomainErrorCode, Method, Notification, PROTOCOL_VERSION } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { Connection, type ImagePolicy, SessionHost } from "../src/index.ts";
@@ -65,6 +65,8 @@ interface Harness {
   /** What the factory was given as `AgentContext.attachments`, per build. */
   readonly sources: (AttachmentSource | undefined)[];
   readonly frames: { method?: string; params?: Record<string, unknown> }[];
+  /** Every `session/update` payload the daemon sent, in order. */
+  readonly updates: { type: string; [k: string]: unknown }[];
 }
 
 function harness(policy?: ImagePolicy): Harness {
@@ -104,13 +106,20 @@ function harness(policy?: ImagePolicy): Harness {
     setOnMessage: (handler: (d: string) => void) => c.setOnMessage(handler),
     setOnClose: (handler: () => void) => c.setOnClose(handler),
   };
+  const updates: { type: string; [k: string]: unknown }[] = [];
   const client = new RpcPeer(tap, {
+    onNotification: (method, params) => {
+      if (method === Notification.SessionUpdate) {
+        const u = (params as { update: { type: string } }).update;
+        updates.push(u as never);
+      }
+    },
     onRequest: async (method: string) => {
       if (method === Method.HooksTrust) return { trusted: false };
       throw new Error(`unexpected request ${method}`);
     },
   });
-  return { host, client, model, sources, frames };
+  return { host, client, model, sources, frames, updates };
 }
 
 async function ready(h: Harness, sessionId = "S"): Promise<void> {
@@ -467,5 +476,46 @@ describe("a settings sync keeps the source", () => {
     if (store === undefined) throw new Error("no session store");
     expect(h.sources).toEqual([store, store]);
     expect(h.model.requests.at(-1)?.attachments).toBe(store);
+  });
+});
+
+/**
+ * `turn_start.attachments` (docs/feat/attachments-tui.md D2, T5): another
+ * client's image prompt shows `[image: name]`. The field carries the refs the
+ * prompt named, and a text-only prompt carries none at all (never `[]`).
+ */
+describe("turn_start carries the prompt's refs", () => {
+  test("a prompt with refs emits them, and a text prompt emits no field", async () => {
+    const h = harness(storePolicy());
+    await ready(h);
+    const bytes = bytesFor("shown");
+    const ref = refFor("shown", { name: "shot.png" });
+    await put(h, bytes);
+    await prompt(h, "t1", [
+      { type: "text", text: "what is this?" },
+      { type: "attachment", ref },
+    ]);
+    await settle();
+    await prompt(h, "t2", [{ type: "text", text: "just words" }]);
+    await settle();
+
+    const starts = h.updates.filter((u) => u.type === "turn_start");
+    expect(starts).toHaveLength(2);
+    expect(starts[0]?.attachments).toEqual([ref]);
+    expect(starts[1]?.attachments).toBeUndefined();
+  });
+
+  test("an image-only prompt carries its refs beside an empty prompt", async () => {
+    const h = harness(storePolicy());
+    await ready(h);
+    const bytes = bytesFor("only");
+    const ref = refFor("only", { name: "a.png" });
+    await put(h, bytes);
+    await prompt(h, "t1", [{ type: "attachment", ref }]);
+    await settle();
+
+    const start = h.updates.find((u) => u.type === "turn_start");
+    expect(start?.prompt).toBe("");
+    expect(start?.attachments).toEqual([ref]);
   });
 });

@@ -32,6 +32,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: "/close", description: "end this session and quit" },
   { name: "/model", description: "show the active model" },
   { name: "/retry", description: "re-send the last prompt" },
+  { name: "/attach", description: "attach an image (or drag its file into the terminal)" },
   { name: "/copy", description: "copy the last assistant reply to the clipboard" },
   { name: "/save", description: "save the transcript to a Markdown file" },
   { name: "/tokens", description: "show token usage for the session" },
@@ -487,7 +488,9 @@ export function transcriptToMarkdown(items: readonly DisplayItem[]): string {
   const parts: string[] = [];
   for (const item of items) {
     if (item.kind === "user") {
-      parts.push(`## User\n\n${item.text}`);
+      // The prompt's images, the rows `/save` shows (docs/feat/attachments-tui.md D7).
+      const images = (item.images ?? []).map((row) => `\n\n${row}`).join("");
+      parts.push(`## User\n\n${item.text}${images}`);
     } else if (item.kind === "assistant") {
       if (item.text.trim() !== "") {
         parts.push(`## Assistant\n\n${item.text}`);

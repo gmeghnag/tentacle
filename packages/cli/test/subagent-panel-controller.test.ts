@@ -357,6 +357,11 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
     // `SessionController` and `RemoteSession` is a deliberate new entry here.
     expect(forwarded).toEqual([
       "send",
+      // The image seam (docs/feat/attachments-tui.md D4): the bytes go through
+      // the session, and a runtime that forgets these hands the App an
+      // image-less controller with no reason shown.
+      "attachImage",
+      "imageInput",
       "compact",
       "clear",
       "openForReset",

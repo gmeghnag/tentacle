@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { AgentCapabilitiesSchema, ContentBlockSchema, PromptParamsSchema } from "../src/index.ts";
+import {
+  AgentCapabilitiesSchema,
+  ContentBlockSchema,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  PromptParamsSchema,
+  TurnStartSchema,
+} from "../src/index.ts";
 
 const ref = {
   id: "a".repeat(64),
@@ -76,6 +82,64 @@ describe("AgentCapabilitiesSchema.images", () => {
     expect(AgentCapabilitiesSchema.safeParse({ images: { input: "" } }).success).toBe(false);
     expect(
       AgentCapabilitiesSchema.safeParse({ images: { input: "upload", maxBytes: 0 } }).success,
+    ).toBe(false);
+  });
+});
+
+/**
+ * `turn_start.attachments` (docs/feat/attachments-tui.md D1, T4): one additive
+ * optional field, so another client's image prompt shows `[image: name]`. The
+ * field is a STRIP schema member (an older client drops it, AGENTS §7), and a
+ * malformed ref fails the frame exactly like any other bad `turn_start`.
+ */
+describe("turn_start.attachments", () => {
+  const ref = { id: "a".repeat(64), mimeType: "image/png", size: 11, name: "shot.png" };
+
+  test("a turn_start carries refs, and one without them still parses", () => {
+    const withRefs = TurnStartSchema.safeParse({
+      type: "turn_start",
+      turnId: "t1",
+      prompt: "what is this?",
+      attachments: [ref],
+    });
+    expect(withRefs.success).toBe(true);
+    if (withRefs.success) expect(withRefs.data.attachments).toEqual([ref]);
+
+    // An image-only prompt: no text, one ref.
+    const only = TurnStartSchema.safeParse({
+      type: "turn_start",
+      turnId: "t2",
+      prompt: "",
+      attachments: [ref],
+    });
+    expect(only.success).toBe(true);
+
+    const plain = TurnStartSchema.safeParse({ type: "turn_start", turnId: "t3", prompt: "hi" });
+    expect(plain.success).toBe(true);
+    if (plain.success) expect(plain.data.attachments).toBeUndefined();
+  });
+
+  test("a malformed ref and one over the cap are rejected", () => {
+    const bad = { ...ref, id: "not-hex" };
+    expect(
+      TurnStartSchema.safeParse({
+        type: "turn_start",
+        turnId: "t",
+        prompt: "x",
+        attachments: [bad],
+      }).success,
+    ).toBe(false);
+    const tooMany = Array.from({ length: MAX_ATTACHMENTS_PER_MESSAGE + 1 }, (_, k) => ({
+      ...ref,
+      id: String(k + 1).repeat(64),
+    }));
+    expect(
+      TurnStartSchema.safeParse({
+        type: "turn_start",
+        turnId: "t",
+        prompt: "x",
+        attachments: tooMany,
+      }).success,
     ).toBe(false);
   });
 });

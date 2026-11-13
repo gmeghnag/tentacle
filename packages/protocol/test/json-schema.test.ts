@@ -404,6 +404,12 @@ const FIXTURES: Record<string, Json[]> = {
     update({ type: "background_exit", jobId: "j", command: "c", status: "exited", exitCode: null }),
     update({ type: "steer", text: "x" }),
     update({ type: "turn_start", turnId: "t", prompt: "go" }),
+    update({
+      type: "turn_start",
+      turnId: "t",
+      prompt: "go",
+      attachments: [{ id: "a".repeat(64), mimeType: "image/png", size: 11, name: "shot.png" }],
+    }),
     update({ type: "turn_end", turnId: "t", stopReason: "cancelled" }),
     update({ type: "turn_end", turnId: "t", stopReason: "cancelled", delivered: false }),
     update({ type: "turn_end", turnId: "t", stopReason: "error", error: { message: "boom" } }),

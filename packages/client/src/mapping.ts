@@ -8,7 +8,7 @@
  * diff render identical to a local one. Pure and unit-tested.
  */
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
-import type { ChatMessage, ToolResult, ToolResultDetail } from "@tentacle/core";
+import type { AttachmentRef, ChatMessage, ToolResult, ToolResultDetail } from "@tentacle/core";
 import {
   type ContentBlock,
   type SessionUpdate,
@@ -29,7 +29,16 @@ import { DIFF_SCHEME, HOOK_SCHEME } from "./constants.ts";
 export type SessionEvent =
   | AgentEvent
   | { readonly type: "history_reset"; readonly messages: readonly ChatMessage[] }
-  | { readonly type: "user_message"; readonly text: string }
+  /**
+   * The turn's prompt, re-delivered after a reset (or another device's, on a
+   * turn this client attached to). `attachments`: the image refs it named
+   * (docs/feat/attachments-tui.md D3) — absent for a text-only prompt.
+   */
+  | {
+      readonly type: "user_message";
+      readonly text: string;
+      readonly attachments?: readonly AttachmentRef[];
+    }
   /**
    * The daemon sent an update type this client does not know (a newer
    * daemon's, display class): shown once per type per session, then skipped.

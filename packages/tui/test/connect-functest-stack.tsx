@@ -103,6 +103,8 @@ export interface Stack {
   readonly url: string;
   /** Every chat request the fake endpoint served, in order. */
   readonly requests: WireRequest[];
+  /** The daemon's project cwd (its store is `<configDir>/daemon/<projectKey(cwd)>`). */
+  readonly cwd: string;
   /** Stop the daemon and the endpoint. */
   readonly stop: () => Promise<void>;
 }
@@ -154,6 +156,7 @@ export async function serveStack(
   return {
     url: handle.url,
     requests,
+    cwd,
     stop: async () => {
       await handle.stop();
       api.stop(true);

@@ -9,8 +9,15 @@
  * logic testable without React.
  */
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
-import type { ChatMessage, ToolResult, ToolResultDetail, ToolResultSpill } from "@tentacle/core";
+import type {
+  AttachmentRef,
+  ChatMessage,
+  ToolResult,
+  ToolResultDetail,
+  ToolResultSpill,
+} from "@tentacle/core";
 import { describeEmptyTurn, describeRepairs, describeTruncation } from "@tentacle/core";
+import { imageRowText } from "./attach-draft.ts";
 import { messagesToItems } from "./resume.ts";
 import { nextToolStatus } from "./tool-phase-view.ts";
 
@@ -23,6 +30,11 @@ export type ToolStatus = "queued" | "running" | "ok" | "error";
 export interface UserItem {
   readonly kind: "user";
   readonly text: string;
+  /**
+   * The prompt's image rows, precomputed (`[image: name]`, docs/feat/attachments-tui.md
+   * D7): one line under the text, and for an image-only prompt the ONLY rows.
+   */
+  readonly images?: readonly string[];
   /** The model's restart prompt after a context reset (labelled "restart prompt"). */
   readonly restart?: true;
 }
@@ -287,10 +299,19 @@ export function failTurn(state: DisplayState, message: string, _now: number): Di
 }
 
 /** Begin a new turn: append the user's message and mark the turn running. */
-export function startTurn(state: DisplayState, text: string, now: number): DisplayState {
+export function startTurn(
+  state: DisplayState,
+  text: string,
+  now: number,
+  images?: readonly string[],
+): DisplayState {
   return {
     ...state,
-    items: append(state.items, { kind: "user", text }),
+    items: append(state.items, {
+      kind: "user",
+      text,
+      ...(images !== undefined && images.length > 0 ? { images } : {}),
+    }),
     running: true,
     reasoning: false,
     reasoningStartedAt: null,
@@ -578,7 +599,12 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
 export type SessionEvent =
   | AgentEvent
   | { readonly type: "history_reset"; readonly messages: readonly ChatMessage[] }
-  | { readonly type: "user_message"; readonly text: string }
+  | {
+      readonly type: "user_message";
+      readonly text: string;
+      /** The prompt's image refs, when it had any (docs/feat/attachments-tui.md D7). */
+      readonly attachments?: readonly AttachmentRef[];
+    }
   /** A newer daemon's update type this client does not know (once per type per session). */
   | { readonly type: "unsupported"; readonly kind: string };
 
@@ -641,7 +667,16 @@ export function applySessionEvent(
     return resetHistory(state, event.messages);
   }
   if (event.type === "user_message") {
-    return { ...state, items: append(state.items, { kind: "user", text: event.text }) };
+    return {
+      ...state,
+      items: append(state.items, {
+        kind: "user",
+        text: event.text,
+        ...(event.attachments !== undefined && event.attachments.length > 0
+          ? { images: event.attachments.map(imageRowText) }
+          : {}),
+      }),
+    };
   }
   if (event.type === "unsupported") {
     return appendNotice(state, unsupportedNotice(event.kind));

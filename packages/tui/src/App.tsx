@@ -1,5 +1,8 @@
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { type Agent, Session } from "@tentacle/agent";
 import {
+  type AttachmentRef,
   DISMISSED,
   type JobController,
   type PermissionBroker,
@@ -11,6 +14,33 @@ import {
 import type { JobOutputResult, JobRow } from "@tentacle/protocol";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
+import { attachmentCandidateText, parseAttachCommand } from "./attach-candidates.ts";
+import {
+  type AttachDraft,
+  type AttachMode,
+  EMPTY_DRAFT,
+  NOT_AN_IMAGE_NOTICE,
+  NO_IMAGE_SEAM,
+  attachErrorText,
+  attachRowRows,
+  attachRowView,
+  draftRefs,
+  enterConvertsToChips,
+  imageRowText,
+  looksLikeCommand,
+  removeLastChip,
+  routeDecision,
+  submitPlan,
+  uploadDone,
+  uploadProgress,
+  withChips,
+} from "./attach-draft.ts";
+import {
+  type AttachedImage,
+  type FileProbe,
+  decideAttachment,
+  nodeFileProbe,
+} from "./attach-files.ts";
 import {
   type DockOutcome,
   type DockState,
@@ -235,6 +265,7 @@ import {
   lostSlot,
   needsWarm,
   nextStep,
+  refusedBeforeStart,
   warmFailureNotice,
 } from "./turn-feed.ts";
 
@@ -257,8 +288,26 @@ export interface SessionController {
   send(
     prompt: string,
     signal?: AbortSignal,
-    opts?: { readonly skill?: string },
+    opts?: { readonly skill?: string; readonly attachments?: readonly AttachmentRef[] },
   ): AsyncIterable<SessionEvent>;
+  /**
+   * Attach one image to this session and resolve its ref
+   * (docs/feat/attachments-tui.md D5): the SESSION does it (only it can await a
+   * lazy open), so `App` never needs a daemon id. Rejects with a typed error
+   * (`ImagesUnavailableError`, `RangeError`, an upload failure) — never a
+   * silent drop. Optional: absent (the in-process fallback) → images are off,
+   * with the reason `NO_IMAGE_SEAM` gives.
+   */
+  attachImage?(
+    bytes: Uint8Array,
+    meta: { readonly mimeType: string; readonly name?: string },
+    opts?: {
+      readonly signal?: AbortSignal;
+      readonly onProgress?: (sent: number, size: number) => void;
+    },
+  ): Promise<AttachmentRef>;
+  /** What this session may do with an image right now (structurally `ImageInput`); present with `attachImage`. */
+  imageInput?(): AttachMode;
   /** Compact the conversation (summarise + replace history); optional. */
   compact?(signal?: AbortSignal): Promise<{ before: number; after: number }>;
   /**
@@ -358,8 +407,7 @@ export interface SessionController {
   autoAcceptsTurn?(turnId: string): boolean;
   /** Subscribe to the daemon's queue (every writer's waiting rows); returns an unsubscribe. */
   onQueued?(listener: (state: DaemonQueue) => void): () => void;
-  /**
-   * Subscribe to this session's background sub-agents (the live list, bounded);
+  /** Subscribe to this session's background sub-agents (the live list, bounded);
    * returns an unsubscribe (docs/feat/subagent-background-ui.md).
    */
   onSubagents?(listener: (rows: readonly BackgroundAgentRow[]) => void): () => void;
@@ -510,6 +558,20 @@ export interface AppProps {
   readonly clipboard?: (text: string) => Promise<void>;
   /** Injectable for tests (defaults to the OS clipboard read). */
   readonly paste?: () => Promise<string>;
+  /**
+   * The file-system seam an attachment is decided from
+   * (docs/feat/attachments-tui.md D8). Injectable for tests; the default reads
+   * the real disk.
+   */
+  readonly fileProbe?: FileProbe;
+  /** The user's home directory, for `~` expansion in a pasted/`/attach` path. */
+  readonly home?: string;
+  /**
+   * The LAPTOP's working directory, which a relative `/attach` path resolves
+   * against. Never `cwd`: under `connect` that prop is the daemon's URL (P15),
+   * while the bytes are always this machine's.
+   */
+  readonly localCwd?: string;
   readonly saveFile?: (path: string, content: string) => Promise<void>;
   /** Transcript to seed on start (a resumed session); replaces the welcome line. */
   readonly initialItems?: readonly DisplayItem[];
@@ -568,6 +630,25 @@ const flattenPasted = (text: string): string => sanitizePasted(text).trim();
 
 const INPUT_PLACEHOLDER = "Type a task or /command";
 
+/** The real file seam and the laptop's own paths (a test injects all three). */
+const defaultFileProbe: FileProbe = nodeFileProbe();
+/** `os.homedir()`, tolerant of a host that cannot answer (`~` then stays as typed). */
+function defaultHome(): string | undefined {
+  try {
+    return homedir();
+  } catch {
+    return undefined;
+  }
+}
+/** The laptop process's cwd: what a relative `/attach` path means (P15). */
+function defaultLocalCwd(): string {
+  try {
+    return process.cwd();
+  } catch {
+    return ".";
+  }
+}
+
 /**
  * A send-now in progress (docs/feat/send-now-c.md). `atomic`: the request is
  * out, or its new turn waits for the old turn's end. `fallback` (an older
@@ -580,8 +661,18 @@ interface StreamOpts {
   readonly successor?: boolean;
   /** Another device's turn (or one running when this TUI attached). */
   readonly foreign?: boolean;
-  /** My own prompt: its bubble and text, withdrawn / restored if it loses the slot. */
-  readonly own?: { readonly item: DisplayItem | undefined; readonly text: string };
+  /**
+   * My own prompt: its bubble and text, withdrawn / restored if it loses the
+   * slot. `images`: its refs' row texts — an image-only prompt has none of the
+   * text, so it is a prompt, never a wake (docs/feat/attachments-tui.md P10).
+   */
+  readonly own?: {
+    readonly item: DisplayItem | undefined;
+    readonly text: string;
+    readonly images?: readonly string[];
+    /** The chips whose refs this prompt named: put back if the daemon refuses them. */
+    readonly restoreChips?: readonly AttachedImage[];
+  };
 }
 
 interface PendingSendNow {
@@ -613,6 +704,9 @@ export function App({
   mcpStatus,
   clipboard = copyToClipboard,
   paste = readClipboard,
+  fileProbe = defaultFileProbe,
+  home = defaultHome(),
+  localCwd = defaultLocalCwd(),
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
   initialItems,
   initialPrompt,
@@ -692,6 +786,12 @@ export function App({
   // A reply draft that was not sent goes back to the input (wired below, once
   // `restoreInput` exists; docs/feat/permission-reply.md).
   const draftBackRef = useRef<DraftBack | null>(null);
+  // A pasted text's router (prose → insert, image paths → chips): a ref, because
+  // the paste handlers are defined before the one that decides.
+  const routeAttachRef = useRef<(text: string) => void>(() => {});
+  // The last prompt named images: `/retry` re-sends its TEXT only, and says so
+  // (docs/feat/attachments-tui.md decision 8).
+  const lastHadImagesRef = useRef(false);
   const permission = usePermissionBroker(
     permissions,
     () => autoAcceptTest(sessionRef.current),
@@ -726,6 +826,36 @@ export function App({
   const historyRef = useRef<string[]>([]);
   const histIndexRef = useRef(0);
   const draftRef = useRef("");
+  // The input's image chips + the upload in flight (docs/feat/attachments-tui.md
+  // D6). The REF is the truth an async handler reads; the state renders and
+  // feeds `inputBoxRows`. `attachSeqRef` keeps one decision in flight at a time
+  // (two pastes are serialized, so `existing` is always the current chips), and
+  // `attachGenRef` drops a late result after an unmount.
+  const [attach, setAttachState] = useState<AttachDraft>(EMPTY_DRAFT);
+  const attachRef = useRef<AttachDraft>(EMPTY_DRAFT);
+  const setAttach = useCallback((next: AttachDraft | ((prev: AttachDraft) => AttachDraft)) => {
+    const value = typeof next === "function" ? next(attachRef.current) : next;
+    attachRef.current = value;
+    setAttachState(value);
+  }, []);
+  const attachChainRef = useRef<Promise<void>>(Promise.resolve());
+  const attachGenRef = useRef(0);
+  // The text a `convert` already probed and put back with `NOT_AN_IMAGE_NOTICE`:
+  // the next Enter on that same text sends it as a message instead of probing
+  // the same paths again forever (review round 2, finding R2-1).
+  const probedTextRef = useRef<string | null>(null);
+  useEffect(() => {
+    return () => {
+      attachGenRef.current += 1; // a decision landing after this is ignored
+      // Nothing is left half-sent on a quit either: an upload in flight is
+      // aborted, exactly as Esc aborts it (the failure table's "unmount mid-
+      // upload" row; review round 1, finding 3).
+      uploadCtrlRef.current?.abort();
+      uploadCtrlRef.current = null;
+    };
+  }, []);
+  // Esc aborts an upload in flight (decision 7's neighbour: nothing is left half-sent).
+  const uploadCtrlRef = useRef<AbortController | null>(null);
 
   const stateRef = useRef<DisplayState>({
     ...initialState,
@@ -958,7 +1088,17 @@ export function App({
   // Latest `run`, so the jobs subscription and the post-turn check can start a
   // continuation turn without re-subscribing or a circular callback dependency.
   const runRef = useRef<
-    ((text: string, opts?: { continuation?: boolean; fallback?: boolean }) => void) | null
+    | ((
+        text: string,
+        opts?: {
+          continuation?: boolean;
+          fallback?: boolean;
+          skill?: string;
+          attachments?: readonly AttachmentRef[];
+          images?: readonly AttachedImage[];
+        },
+      ) => void)
+    | null
   >(null);
   // Build a session from the factory, or from the local agent by default.
   const makeSession = useCallback((): SessionController => {
@@ -1175,7 +1315,11 @@ export function App({
   // (and with a soft-wrapped long line), capped at MAX_INPUT_ROWS content rows;
   // +2 for its top/bottom borders.
   const inputContentLines = inputRowCount(field.value, field.cursor, columns, MAX_INPUT_ROWS);
-  const inputBoxRows = inputContentLines + 2;
+  // One more row while the draft holds chips or an upload: the attach row sits
+  // INSIDE the input box and is counted HERE, once — so the viewport shrinks by
+  // one and the frame's height never changes (P8).
+  const attachRow = attachRowView(attach, Math.max(1, columns - 2));
+  const inputBoxRows = inputContentLines + 2 + attachRowRows(attach, Math.max(1, columns - 2));
   const listView = panel
     ? panelView(panel, columns, panelMaxBody(termRows), sessionRef.current?.sessionId ?? null)
     : null;
@@ -1745,6 +1889,215 @@ export function App({
   );
   draftBackRef.current = (text, cause) => restoreInput(text, orphanNotice(cause));
 
+  // --- images in the input (docs/feat/attachments-tui.md D8) ----------------
+  /** What the CURRENT session takes: its own answer, or the reason a session with no seam gives. */
+  const attachMode = useCallback((): AttachMode => {
+    const session = sessionRef.current;
+    const answered = session?.imageInput?.();
+    if (answered !== undefined) {
+      return answered;
+    }
+    return session?.attachImage === undefined ? NO_IMAGE_SEAM : NO_IMAGE_SEAM;
+  }, []);
+  /**
+   * Put a refused prompt's chips back (docs/feat/attachments-tui.md D8): the
+   * bytes are still in them, so Enter uploads them again. Appended, never
+   * replacing what the user attached meanwhile.
+   */
+  const restoreChips = useCallback(
+    (chips: readonly AttachedImage[] | undefined) => {
+      if (chips === undefined || chips.length === 0) {
+        return;
+      }
+      setAttach((draft) => ({ ...withChips(draft, chips).draft, upload: null }));
+    },
+    [setAttach],
+  );
+  /** Say each notice as its own row (never joined: one refusal per line). */
+  const showNotices = useCallback(
+    (notices: readonly string[]) => {
+      for (const notice of notices) {
+        pushNotice(notice);
+      }
+    },
+    [pushNotice],
+  );
+  /**
+   * Decide what a pasted/dropped text is and act: prose is inserted as it always
+   * was, image paths become chips, a refusal is SAID. One decision at a time
+   * (a promise chain, so `existing` sees the previous paste's chips), and a
+   * result that lands after an unmount is dropped.
+   */
+  const routeAttach = useCallback(
+    (text: string): void => {
+      // A `/command` is always text: `/compact` alone is a legal path candidate
+      // to `tokenizePaths`, and a paste must never stat one.
+      const candidate = looksLikeCommand(text)
+        ? ({ kind: "text" } as const)
+        : attachmentCandidateText(text, home !== undefined ? { home } : {});
+      if (candidate.kind === "text") {
+        field.insert(text); // prose never touches the disk
+        return;
+      }
+      const gen = attachGenRef.current;
+      attachChainRef.current = attachChainRef.current.then(async () => {
+        const decision = await decideAttachment(fileProbe, candidate, {
+          existing: draftRefs(attachRef.current),
+        });
+        if (gen !== attachGenRef.current) {
+          return; // unmounted while the disk was read
+        }
+        // The paste's own text comes back when the decision is `text` (a missing
+        // path, a directory, a source file): the 3a rule is that the WHOLE paste
+        // stays text, and dropping it silently would lose what was pasted
+        // (review round 1, finding 1).
+        const routed = routeDecision(attachRef.current, decision, attachMode(), text);
+        setAttach(routed.draft);
+        if (routed.insert !== undefined) {
+          field.insert(routed.insert);
+        }
+        showNotices(routed.notices);
+      });
+    },
+    [attachMode, field, fileProbe, home, setAttach, showNotices],
+  );
+  routeAttachRef.current = routeAttach;
+  /**
+   * `/attach <path…>`: the explicit form (every failure a refusal). A relative
+   * path resolves against the LAPTOP's cwd, never the `cwd` prop (P15).
+   */ const attachCommand = useCallback(
+    (raw: string): void => {
+      const parsed = parseAttachCommand(raw, home !== undefined ? { home } : {});
+      if (parsed === null) {
+        pushNotice("_Usage: `/attach <path>` (a path may be dragged into the terminal)_");
+        return;
+      }
+      const paths = parsed.paths.map((path) => resolve(localCwd, path));
+      const gen = attachGenRef.current;
+      attachChainRef.current = attachChainRef.current.then(async () => {
+        const decision = await decideAttachment(
+          fileProbe,
+          { kind: "paths", paths },
+          { existing: draftRefs(attachRef.current), explicit: true },
+        );
+        if (gen !== attachGenRef.current) {
+          return;
+        }
+        const routed = routeDecision(attachRef.current, decision, attachMode());
+        setAttach(routed.draft);
+        if (routed.insert !== undefined) {
+          field.insert(routed.insert);
+        }
+        showNotices(routed.notices);
+      });
+    },
+    [attachMode, field, fileProbe, home, localCwd, pushNotice, setAttach, showNotices],
+  );
+  /** An unbracketed drop + Enter: the paths become chips and NOTHING is sent (decision 5). */
+  const convertToChips = useCallback(
+    (text: string): void => {
+      const candidate = attachmentCandidateText(text, home !== undefined ? { home } : {});
+      if (candidate.kind !== "paths") {
+        return;
+      }
+      const gen = attachGenRef.current;
+      attachChainRef.current = attachChainRef.current.then(async () => {
+        const decision = await decideAttachment(fileProbe, candidate, {
+          existing: draftRefs(attachRef.current),
+        });
+        if (gen !== attachGenRef.current) {
+          return;
+        }
+        const routed = routeDecision(attachRef.current, decision, attachMode());
+        setAttach(routed.draft);
+        showNotices(routed.notices);
+        // A typed drag whose bytes are NOT an image: the text goes back and says
+        // why, instead of a cleared field that sent nothing (review round 1,
+        // finding 1).
+        if (decision.kind === "text") {
+          // Recorded BEFORE the restore: the next Enter on this same text is a
+          // message, not another probe (round 2, R2-1).
+          probedTextRef.current = text;
+          restoreInput(text, NOT_AN_IMAGE_NOTICE);
+          return;
+        }
+        // Said only when something WAS attached: a refusal already spoke.
+        if (routed.draft.chips.length > attachRef.current.chips.length) {
+          pushNotice(
+            `_attached ${routed.draft.chips.length} image${routed.draft.chips.length === 1 ? "" : "s"} — type your message and press Enter_`,
+          );
+        }
+      });
+    },
+    [attachMode, fileProbe, home, pushNotice, restoreInput, setAttach, showNotices],
+  );
+  /**
+   * Send the prompt with the draft's chips: every chip goes through the
+   * SESSION's own `attachImage` (one upload at a time, progress on the chip
+   * row), then the prompt names the refs. A failure restores the text, keeps
+   * the chips and says why — Enter retries, and the store's put is idempotent.
+   */
+  const sendWithImages = useCallback(
+    (text: string, chips: readonly AttachedImage[]): void => {
+      const session = sessionRef.current;
+      const seam = session?.attachImage;
+      if (seam === undefined) {
+        restoreInput(text, "_images are off: this session does not take images_");
+        return;
+      }
+      const gen = attachGenRef.current;
+      const controller = new AbortController();
+      uploadCtrlRef.current = controller;
+      const upload = async (): Promise<void> => {
+        const refs: AttachmentRef[] = [];
+        for (const [index, chip] of chips.entries()) {
+          const name =
+            chip.ref.name !== undefined && chip.ref.name !== "" ? chip.ref.name : chip.ref.mimeType;
+          setAttach((draft) => uploadProgress(draft, index, chips.length, name, 0, chip.ref.size));
+          refs.push(
+            await seam.call(
+              session,
+              chip.bytes,
+              {
+                mimeType: chip.ref.mimeType,
+                ...(chip.ref.name !== undefined ? { name: chip.ref.name } : {}),
+              },
+              {
+                signal: controller.signal,
+                onProgress: (sent, size) =>
+                  setAttach((draft) =>
+                    uploadProgress(draft, index, chips.length, name, sent, size),
+                  ),
+              },
+            ),
+          );
+        }
+        if (gen !== attachGenRef.current) {
+          return;
+        }
+        // The upload is over: Esc must go back to stopping the TURN, not abort a
+        // finished controller (review round 1, finding 3).
+        if (uploadCtrlRef.current === controller) {
+          uploadCtrlRef.current = null;
+        }
+        setAttach((draft) => uploadDone({ ...draft, chips: [] }));
+        await runRef.current?.(text, { attachments: refs, images: chips });
+      };
+      upload().catch((error: unknown) => {
+        if (gen !== attachGenRef.current) {
+          return;
+        }
+        if (uploadCtrlRef.current === controller) {
+          uploadCtrlRef.current = null;
+        }
+        // The chips stay (bytes included): Enter uploads them again.
+        setAttach((draft) => uploadDone(draft));
+        restoreInput(text, attachErrorText(error));
+      });
+    },
+    [restoreInput, setAttach],
+  );
+
   /**
    * Watch `session` for my rows coming back (docs/feat/queued-broadcast.md):
    * they leave the list and go to the input field with the notice. Nothing is
@@ -2011,13 +2364,24 @@ export function App({
           // Its bubble goes and its text is back in the input — never lost
           // (decision 15); the held foreign turn renders once this settles.
           stateRef.current = withdrawUserTurn(stateRef.current, opts.own.item);
-          if (opts.own.text !== "") {
+          // An image-only prompt has no text but IS a prompt, not a wake (P10).
+          if (opts.own.text !== "" || (opts.own.images?.length ?? 0) > 0) {
             restoreInput(opts.own.text, SLOT_LOST_NOTICE);
+            restoreChips(opts.own.restoreChips);
           } else if (handedWakeRef.current) {
             // Once: `wakeIfPending` below fires it when the turn that won ends.
             handedWakeRef.current = false;
             wakeRef.current = wakeStep(wakeRef.current, { type: "refused" });
           }
+        } else if (opts.own && refusedBeforeStart(error, streamed)) {
+          // The daemon refused these images BEFORE the turn started
+          // (docs/feat/attachments-tui.md D8): the bubble goes, the text is back
+          // in the input and the chips with it, and the reason is said —
+          // Enter uploads and tries again (the put is idempotent).
+          stateRef.current = withdrawUserTurn(stateRef.current, opts.own.item);
+          abortRef.current = null;
+          restoreInput(opts.own.text, attachErrorText(error));
+          restoreChips(opts.own.restoreChips);
         } else if (failed.kind === "restore") {
           for (const id of failed.ids) restoredRef.current.add(id);
           setRows(() => []);
@@ -2093,12 +2457,24 @@ export function App({
       drainHeld,
       skillsSync,
       model,
+      restoreChips,
     ],
   );
   streamTurnRef.current = streamTurn;
 
   const run = useCallback(
-    async (text: string, opts?: { continuation?: boolean; skill?: string; fallback?: boolean }) => {
+    async (
+      text: string,
+      opts?: {
+        continuation?: boolean;
+        skill?: string;
+        fallback?: boolean;
+        /** The prompt's image refs (already uploaded: docs/feat/attachments-tui.md D8). */
+        attachments?: readonly AttachmentRef[];
+        /** The chips whose refs those are: their `[image: …]` rows and a restore. */
+        images?: readonly AttachedImage[];
+      },
+    ) => {
       const session = sessionRef.current;
       if (!session) {
         return;
@@ -2121,23 +2497,44 @@ export function App({
       }
       if (!continuation) {
         lastUserRef.current = text;
+        lastHadImagesRef.current = (opts?.images?.length ?? 0) > 0;
       }
+      const images = (opts?.images ?? []).map((chip) => imageRowText(chip.ref));
       const controller = new AbortController();
       abortRef.current = controller;
       stoppedHereRef.current = false;
       stateRef.current = continuation
         ? startContinuation(stateRef.current, Date.now())
-        : startTurn(stateRef.current, text, Date.now());
+        : startTurn(stateRef.current, text, Date.now(), images.length > 0 ? images : undefined);
       setScrollOffset(0);
       flushNow();
       // The bubble `startTurn` appended (none for a continuation): withdrawn by
       // identity if the prompt loses the slot (C3).
       const item = continuation ? undefined : stateRef.current.items.at(-1);
-      const sendOpts = opts?.skill !== undefined ? { skill: opts.skill } : undefined;
+      const sendOpts = {
+        ...(opts?.skill !== undefined ? { skill: opts.skill } : {}),
+        ...(opts?.attachments !== undefined && opts.attachments.length > 0
+          ? { attachments: opts.attachments }
+          : {}),
+      };
       await streamTurn(
-        () => session.send(continuation ? "" : text, controller.signal, sendOpts),
+        () =>
+          session.send(
+            continuation ? "" : text,
+            controller.signal,
+            Object.keys(sendOpts).length > 0 ? sendOpts : undefined,
+          ),
         controller,
-        { own: { item, text: continuation ? "" : text } },
+        {
+          own: {
+            item,
+            text: continuation ? "" : text,
+            ...(images.length > 0 ? { images } : {}),
+            ...(opts?.images !== undefined && opts.images.length > 0
+              ? { restoreChips: opts.images }
+              : {}),
+          },
+        },
       );
     },
     [flushNow, pushNotice, streamTurn],
@@ -3050,6 +3447,8 @@ export function App({
             return;
           }
           const plan = retryPlan(last, skills());
+          // Read BEFORE `run`: the retry's own turn resets it (it names no images).
+          const hadImages = lastHadImagesRef.current;
           if (plan.kind === "gone") {
             pushNotice(`_Can't retry: ${plan.command} is no longer available._`);
           } else if (plan.kind === "skill") {
@@ -3057,8 +3456,16 @@ export function App({
           } else {
             void run(plan.text);
           }
+          if (hadImages) {
+            // Text only, said out loud (decision 8): the refs of the last prompt
+            // are not kept — 5×15 MB per prompt is too much for a rare key.
+            pushNotice("_retry sends the text only: attach the image again with /attach_");
+          }
           return;
         }
+        case "/attach":
+          attachCommand(raw);
+          return;
         case "/copy": {
           const text = lastAssistantText(stateRef.current.items);
           if (!text) {
@@ -3117,6 +3524,7 @@ export function App({
       skills,
       toggleAgents,
       wakeIfPending,
+      attachCommand,
     ],
   );
   handleCommandRef.current = handleCommand;
@@ -3182,11 +3590,57 @@ export function App({
         return;
       }
       const text = value.trim();
+      // A probed drop is a PATH, never a command: `looksLikeCommand` already said
+      // so before the disk was read, so the coarse `/`-prefix branch below must
+      // not turn it into "Unknown command" (round 2, R2-1).
+      const probedText = probedTextRef.current;
+      const isProbedDrop = probedText !== null && probedText === text;
+      if (probedText !== text) {
+        probedTextRef.current = null; // an edited (or cleared) drop is a new drop
+      }
+      // Enter WITH images is decided before the field is reset: a refusal must
+      // leave the text where it is (docs/feat/attachments-tui.md D8), and an
+      // image-only prompt ("") is a real submit.
+      const plan = submitPlan({
+        text,
+        draft: attachRef.current,
+        running: stateRef.current.running,
+        compacting: compactingRef.current,
+        dockOpen: false, // `submitToTarget` already took a child-owned text
+        mode: attachMode(),
+        onlyPaths: enterConvertsToChips(text, probedText, home !== undefined ? { home } : {}),
+      });
+      if (plan.kind === "refuse") {
+        pushNotice(plan.notice);
+        return;
+      }
+      // The notice promised exactly ONE Enter; this is it (a refusal above keeps
+      // it, since the text stayed put). Round 2, R2-1.
+      probedTextRef.current = null;
+      if (plan.kind === "send") {
+        field.reset();
+        historyRef.current = pushHistory(historyRef.current, plan.text);
+        histIndexRef.current = historyRef.current.length;
+        draftRef.current = "";
+        const refusedPrompt = switchingRefusal(switchingRef.current, { kind: "prompt" });
+        if (refusedPrompt) {
+          restoreInput(plan.text, refusedPrompt);
+          return;
+        }
+        sendWithImages(plan.text, plan.images);
+        return;
+      }
+      if (plan.kind === "convert") {
+        // An unbracketed drop: the paths become chips and NOTHING is sent (decision 5).
+        field.reset();
+        convertToChips(text);
+        return;
+      }
       field.reset();
       if (text === "") {
         return;
       }
-      if (text.startsWith("/")) {
+      if (text.startsWith("/") && !isProbedDrop) {
         handleCommand(text);
         return;
       }
@@ -3242,7 +3696,19 @@ export function App({
       }
       void run(text);
     },
-    [handleCommand, pushNotice, restoreInput, run, field.reset, setRows, submitToTarget],
+    [
+      handleCommand,
+      pushNotice,
+      restoreInput,
+      run,
+      field.reset,
+      setRows,
+      submitToTarget,
+      attachMode,
+      convertToChips,
+      home,
+      sendWithImages,
+    ],
   );
 
   // All line editing lives in `useLineEditor` (pure `editor.ts` ops), so no
@@ -3324,11 +3790,11 @@ export function App({
         const clean = sanitizePasted(buf);
         // An open reply field takes it, never the hidden main field.
         if (clean && !insertIntoReply(clean) && !panelRef.current) {
-          field.insert(clean);
+          routeAttachRef.current(clean);
         }
       }
     }, PASTE_TIMEOUT_MS);
-  }, [clearPasteTimeout, field.insert, insertIntoReply]);
+  }, [clearPasteTimeout, insertIntoReply]);
   useEffect(() => {
     return () => clearPasteTimeout();
   }, [clearPasteTimeout]);
@@ -3496,7 +3962,9 @@ export function App({
       if (pasteStep.text !== undefined) {
         const clean = sanitizePasted(pasteStep.text);
         if (clean && !panel) {
-          field.insert(clean);
+          // A paste of image paths becomes chips; prose is inserted as before
+          // (docs/feat/attachments-tui.md D8).
+          routeAttachRef.current(clean);
         }
       }
       return;
@@ -3626,6 +4094,15 @@ export function App({
         toggleAgents();
         return;
       }
+    }
+    // Esc aborts an upload in flight (docs/feat/attachments-tui.md: nothing is
+    // left half-sent); the chips stay and the failure path says "upload cancelled".
+    if (key.escape && uploadCtrlRef.current !== null) {
+      const ctrl = uploadCtrlRef.current;
+      uploadCtrlRef.current = null;
+      setAttach((draft) => uploadDone(draft)); // the row goes now, not at the catch
+      ctrl.abort();
+      return;
     }
     if (key.escape && stateRef.current.running && abortRef.current) {
       stoppedHereRef.current = true;
@@ -3892,7 +4369,7 @@ export function App({
           (text) => {
             const clean = flattenPasted(text);
             if (clean && !panelRef.current) {
-              field.insert(clean);
+              routeAttachRef.current(clean);
             }
           },
           () => pushNotice("_Clipboard unavailable._"),
@@ -3916,6 +4393,12 @@ export function App({
         field.moveLine(action.edge, action.extend);
         return;
       case "deleteBack":
+        // Backspace on an EMPTY input with chips removes the last one
+        // (docs/feat/attachments-tui.md decision 13): the smallest control.
+        if (field.value === "" && field.cursor === 0 && attachRef.current.chips.length > 0) {
+          setAttach((draft) => removeLastChip(draft));
+          return;
+        }
         field.deleteBack();
         return;
       case "deleteWord":
@@ -4063,7 +4546,18 @@ export function App({
                   borderTop={false}
                   borderLeft={false}
                   borderRight={false}
+                  flexDirection="column"
                 >
+                  {attachRow === null ? null : (
+                    // ONE row, above the input: the chips (`name size`, +N) or
+                    // the upload in flight. Colours and the glyph only — the
+                    // text is `attach-draft.ts`'s (docs/feat/attachments-tui.md D8).
+                    <Text color={palette().subtle} wrap="truncate-end">
+                      {attachRow.kind === "upload"
+                        ? `  ${attachRow.text}`
+                        : `  📎 ${attachRow.items.join("  ")}${attachRow.more > 0 ? `  +${attachRow.more}` : ""}`}
+                    </Text>
+                  )}
                   <LineInput
                     value={field.value}
                     cursor={field.cursor}
