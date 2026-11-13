@@ -388,3 +388,5 @@ the Step 0 shell (no list) fails, then passes. The green run's summary
 #### Owner answers (2026-11-13)
 
 All questions answered as recommended. Implementation APPROVED. Tooling (owner): the orchestrator installs Java 17 (brew openjdk@17), Maestro (brew mobile-dev-inc/tap) and the iOS 18 runtime before Execution; executor = DeepSeek.
+
+Tooling installed by the orchestrator (2026-11-13): Java 17 at `$(brew --prefix openjdk@17)` (keg-only: run Maestro with `JAVA_HOME=$(brew --prefix openjdk@17) PATH="$(brew --prefix openjdk@17)/bin:$PATH"`), Maestro 2.12.1 (`maestro`). The iOS 18 runtime is NOT downloadable with Xcode 27.1 (`xcodebuild -downloadPlatform iOS -buildVersion 18.6/18.5` → not available): run on iOS 26.5 only; iOS 18 is deferred (orchestrator decision, recorded here).
