@@ -650,6 +650,29 @@ subdirectory names (**F1**).
 *— claude-opus-5-5, 2026-11-13* (a fresh context, from a different model family
 than the DeepSeek executor)
 
+### Round 2
+
+**Verdict: PASS.** F1 is fixed (`c0674d7`). No new HIGH or MEDIUM.
+
+- **F1 fixed.** `readFragmentDir` (`scripts/changelog.ts`) lists every entry
+  in `changelog.d/`, including directories and dotfiles. The release
+  (`scripts/release.ts:118`) and guard I2 both use it, so the two cannot
+  diverge. `parseFragment` refuses a directory by name.
+- **Mutations (reverted; `git status --porcelain` empty):** M3a put the `*.md`
+  filter back in `readFragmentDir` → 4 tests **red** (3 release cases + the guard
+  scan test). M3b dropped `directory === true` → 3 **red**.
+- **Gate:** `bun test scripts/test/` 64 pass / 0 fail · `bun run lint` clean ·
+  `bun run typecheck` clean. The full `bun test` was not re-run.
+- **Regressions checked:** the happy path, the dry run and the commit-failure
+  restore still pass. A Finder `.DS_Store` in `changelog.d/` is now refused loudly
+  by both the release and the guard, which is the intended fail-loud behaviour.
+- **Note (non-blocking):** the Context, Implementation, Execution and Fix round 1
+  sections are signed `claude-opus-5-5`, but the commits say `(deepseek)`. Fix
+  round 1 is also dated 2026-11-14. §10's signatures should name the model that
+  actually wrote each section; the orchestrator should correct them.
+
+*— claude-opus-5-5, 2026-11-13*
+
 #### Owner answers (2026-11-13)
 
 All questions answered as recommended. Implementation APPROVED.
