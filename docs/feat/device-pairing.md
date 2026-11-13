@@ -1413,3 +1413,17 @@ All questions answered as recommended. Implementation APPROVED.
 - Additive protocol (new method, new error code, strip schemas) → no bump, consistent with §7.
 
 **Executor:** a thorough, honest record (a flake was reported, the drift was justified). The three findings are timing and limit interactions that the per-request tests drive at test speeds only.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; diff checked: `d12af92`)
+
+**Verdict: PASS.** All three round-1 findings are fixed. Each fix was checked by a mutation, and each mutation was reverted from a copy (`git status` clean).
+
+- **Finding 1 (cap bypassed by pipelining) — fixed.** `pairing-handler.ts` now refuses at entry once `attempts >= PAIRING_MAX_ATTEMPTS`, with no lookup. *Mutation:* removed the entry check → 3 red (handler ×2, real socket ×1). The round-1 repro `cap.ts` now gives `attempts 5` and `claim exists: false`.
+- **Finding 2 (watcher breaks F3) — fixed.** `watchPairingWindow` now skips a connection whose handler is waiting on a claim it holds (`holdingClaim`, set in a `try/finally` around the wait). *Mutation:* removed the skip → `a window that goes away right after the human's y still answers SUCCESS (F3)` turns red. The round-1 repro `f3.ts` at the 1 s default: **0/30** registered-but-failed (round 1: 2/40).
+- **Finding 3 (30 s client deadline) — fixed.** The peer-wide timeout is gone. Only `initialize` keeps a deadline, through an `AbortSignal`. *Mutation:* put `requestTimeoutMs` back on the peer → 2 client tests turn red.
+- **Regressions.** Touched files: 108 pass / 0 fail (6 files, incl. `device-authority`). `bun run lint` clean (1047 files). `bun run typecheck` clean. Full `bun test` not re-run.
+- **Nits (not blocking).**
+  - With a claim held, a SIGKILLed `pair` (window files left, pid dead) now keeps the pairing socket open until the window expires, at most 5 min. Before this fix the 1 s watcher closed it. The wait still ends, and the connection can reach nothing but `device/pair`.
+  - `device/pair` has no client deadline. A daemon that never answers hangs the phone until the app cancels; the daemon's own expiry is the designed bound.
