@@ -694,3 +694,32 @@ skips are the baseline opt-ins (`TENTACLE_K8S_SERVER`, `TENTACLE_DOCKER_TESTS`,
 #### Owner answers (2026-11-13)
 
 All questions answered as recommended. Implementation APPROVED.
+
+### Review round 1 — Verdict: REQUEST-CHANGES
+
+1. **MEDIUM — the forced final report's tokens never reach the cap's counter.**
+   `addSpend` is called only in the round loop's `done` branch
+   (`packages/agent/src/agent.ts:1244`); the final-report stream
+   (`agent.ts:1539-1540`) yields `usage` but never calls it — contradicting
+   `addSpend`'s own JSDoc ("the forced final report's included", `agent.ts:1634-1637`)
+   and the "whole-life" contract. The runner's `tokens` does count it
+   (`subagent.ts:514`), so the report line and the cap disagree. Scenario
+   (repro in `.tentacle/tmp/subagent-token-budget/final-report-spend.test.ts`):
+   `maxIterations: 1, maxTokens: 4000`, 2,000 tokens/call; pass 1 = 1 round +
+   step-capped report = 4,000 really spent, counter says 2,000; a `twoWay`
+   continuation then runs a **productive round with a tool call** (2 requests,
+   expected 1) before capping. Each step-capped pass leaks one uncounted
+   report (≈ one full context) — the runaway shape this task bounds. Fix:
+   `this.addSpend(messages, event.usage)` in the final-report `done` branch +
+   a test pinning it (this scenario).
+
+Gate: touched tests 2,549 pass / 0 fail (155 files); `bun run lint` clean;
+`bun run typecheck` clean. Mutation: `>=`→`>` in `overBudget` fails T1+T2
+(reverted, tree clean). Holds: protocol bump 23→24 with both mappings + JSON
+schema; main agent never gets `maxTokens` (`wiring.ts:552` sub-agent deps only),
+so the log's `turn_end.stopReason` (strict `StopReasonSchema`) never carries the
+new member; `context_reset` mutates in place (`agent.ts:2322`), so the
+WeakMap key survives; carried setting is `pinned` (§7 laptop-owned).
+Reviewer is Opus; executor was DeepSeek (different family).
+
+*— claude-opus-5-5, 2026-11-13*
