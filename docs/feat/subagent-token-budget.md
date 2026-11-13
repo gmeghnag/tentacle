@@ -547,3 +547,7 @@ Red-first (§9) — each red on current `main`, then green. Fakes: the
 ## Review
 
 *— (empty — an adversarial pass happens after Execution, AGENTS §10)*
+
+#### Owner answers (2026-11-13)
+
+All questions answered as recommended. Implementation APPROVED.
