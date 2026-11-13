@@ -258,3 +258,60 @@ describe("T5: context_reset does not refund the token counter (Agent level)", ()
     expect(events.at(-1)).toEqual({ type: "turn_end", reason: "max_token_budget" });
   });
 });
+
+describe("T6: the forced final report's own tokens are spent (Agent level)", () => {
+  test("a step-capped pass cannot leak its report's context into the next pass", async () => {
+    // Review round 1 (MEDIUM): the report stream yielded `usage` but never
+    // called `addSpend`, so the tokens of a STEP-capped pass's forced report
+    // were really spent yet never counted. 1 round (2,000) + the forced step
+    // report (2,000) = 4,000 against a 4,000 cap; a `twoWay` continuation must
+    // therefore open with the token-capped report and NO productive round.
+    // Uncounted, the counter says 2,000 and that round runs (2 requests, not 1).
+    let round = 0;
+    const requests: ChatRequest[] = [];
+    const model: ModelProvider = {
+      id: "report-spend",
+      async *stream(request) {
+        requests.push(request);
+        round += 1;
+        // Only a productive round (tools offered) calls a tool; a forced report
+        // is offered none and answers in prose.
+        if ((request.tools ?? []).length > 0) {
+          yield toolCall(`c${round}`);
+        } else {
+          yield { type: "text", delta: "REPORT" };
+        }
+        yield { type: "done", usage: { promptTokens: 1_500, completionTokens: 500 } };
+      },
+    };
+    const agent = new Agent({
+      model,
+      tools: tools(),
+      env: noopEnv,
+      maxIterations: 1,
+      maxTokens: 4_000,
+    });
+    const messages = agent.startConversation();
+    messages.push({ role: "user", content: "go" });
+    const runPass = async (): Promise<string | undefined> => {
+      let reason: string | undefined;
+      for await (const event of agent.runMessages(messages, "s6", undefined)) {
+        if (event.type === "turn_end") {
+          reason = event.reason;
+        }
+      }
+      return reason;
+    };
+    // Pass 1 spends its one allowed round, then the forced STEP report.
+    expect(await runPass()).toBe("max_iterations");
+    const before = requests.length;
+    messages.push({ role: "user", content: "please continue" });
+    // Pass 2: 4,000 of 4,000 spent, so the header check refuses every round
+    // and the pass is one request — the tool-free, token-nudged report.
+    expect(await runPass()).toBe("max_token_budget");
+    const secondPass = requests.slice(before);
+    expect(secondPass).toHaveLength(1);
+    expect(secondPass[0]?.tools ?? []).toEqual([]);
+    expect(String(secondPass[0]?.messages.at(-1)?.content)).toContain("token budget");
+  });
+});

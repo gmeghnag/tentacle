@@ -1537,6 +1537,11 @@ export class Agent {
           } else if (event.type === "reasoning") {
             yield { type: "reasoning", delta: event.delta };
           } else if (event.type === "done" && event.usage) {
+            // The forced report is a real model call and its tokens are really
+            // spent: count them, or a step-capped pass leaks a whole context
+            // and the NEXT pass (a `twoWay` continuation) runs a productive
+            // round it should have been refused.
+            this.addSpend(messages, event.usage);
             yield { type: "usage", usage: event.usage };
           }
           // tool_call events are ignored: no tools were offered.

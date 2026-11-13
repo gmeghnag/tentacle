@@ -687,6 +687,51 @@ clean) · `bun test` → **7,534 pass, 3 skip, 0 fail** (538 files, 298 s). The 
 skips are the baseline opt-ins (`TENTACLE_K8S_SERVER`, `TENTACLE_DOCKER_TESTS`,
 `TENTACLE_SLOW_TESTS`), not new ones.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-13*
+
+Review round 1 raised exactly one finding (MEDIUM): the forced final report's
+`usage` was yielded but never passed to `addSpend`, so a step-capped pass's
+report tokens were really spent yet never counted — contradicting `addSpend`'s
+own JSDoc ("the forced final report's included", `agent.ts:1634-1637`) and
+letting a `twoWay` continuation open with a productive round it should have
+been refused.
+
+- **Reproduced RED first.** The reviewer's scenario, re-run as a standalone
+  script in `.tentacle/tmp/subagent-token-budget/final-report-spend.test.ts`
+  (Agent level, `maxIterations: 1`, `maxTokens: 4_000`, 2,000 tokens/call):
+  pass 1 = 1 productive round + forced step report = 4,000 really spent; pass 2
+  reported the right reason but issued **2** model requests (a productive round
+  plus the report) where 1 is correct. Asserted `requests === 1` → failed
+  `Expected: 1, Received: 2`.
+- **Fix** — `packages/agent/src/agent.ts:1541-1546`: the final-report stream's
+  `done`-with-usage branch now calls `this.addSpend(messages, event.usage)`
+  before yielding `usage`, mirroring the round loop's branch (`agent.ts:1242-1246`).
+  The report is a real model call, so it is really spent. Nothing else changed:
+  the reason selection, the nudge text and the runner's own `tokens` counter
+  (`subagent.ts:514`) were already correct.
+- **Regression test** — `packages/agent/test/subagent-budget.test.ts:262` (T6,
+  "the forced final report's own tokens are spent"): the same scenario in-repo,
+  asserting the second pass is **one** request, tool-free and token-nudged, and
+  that pass 1 still ends `max_iterations` (the step cap, honestly reported).
+  The runner's `tokens` line was already counting it, so only the counter was
+  wrong — this test pins the counter, not the report string.
+- **Mutation check (non-vacuity, §9).** Deleting **only** that one
+  `this.addSpend(...)` line (both other uses of `addSpend` intact) → `bun test
+  packages/agent/test/subagent-budget.test.ts` → **T6 fails, 5 pass / 1 fail**,
+  on the property (`Expected length: 1, Received length: 2`), with T1–T5 still
+  green — so T6 fails on the assertion of the property, not on a compile/import
+  error, and no other test covers it. Line restored, 6/6 green.
+- **No drift** from the Implementation. The rest of the design (protocol bump,
+  wiring, carried setting, archive semantics) is untouched by this round.
+
+**Gate** (AGENTS §4/§6, from the worktree):
+`bunx tsc --noEmit` → 0 · `bun run lint` → 0 issues (952 files, baseline clean) ·
+`bun test` → **7,535 pass, 3 skip, 0 fail** (538 files, 323 s). The 3 skips are
+the baseline opt-ins (`TENTACLE_K8S_SERVER`, `TENTACLE_DOCKER_TESTS`,
+`TENTACLE_SLOW_TESTS`), not new ones.
+
 ## Review
 
 *— (empty — an adversarial pass happens after Execution, AGENTS §10)*
