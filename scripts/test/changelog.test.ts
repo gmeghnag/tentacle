@@ -44,6 +44,16 @@ describe("parseFragments", () => {
     refuse("changelog.d/task-x.added.txt", "- A thing.\n", /named <slug>\.<category>\.md/);
   });
 
+  test("refuses a missing extension, and a subdirectory, by name", () => {
+    // F1: these are what a `*.md` scan silently skipped.
+    refuse("changelog.d/task-x.added", "- A thing.\n", /named <slug>\.<category>\.md/);
+    refuse("changelog.d/sub/nested.added.md", "- A.\n", /no subdirectories/);
+    // A directory entry, as `readFragmentDir` reports it (the file read would throw).
+    expect(() => parseFragments([{ path: "changelog.d/sub", text: "", directory: true }])).toThrow(
+      /no subdirectories/,
+    );
+  });
+
   test("refuses a category that is not one of the six", () => {
     refuse("changelog.d/task-x.misc.md", "- A thing.\n", /category must be one of added, changed/);
     refuse("changelog.d/task-x.Added.md", "- A thing.\n", /category must be one of/);

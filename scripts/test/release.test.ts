@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   ReleaseError,
   bumpBunLock,
@@ -311,6 +311,37 @@ describe("runRelease", () => {
     await refused(["0.1.0"], /Bad_Slug\.md: a fragment is named <slug>\.<category>\.md/);
     expect(gateRuns).toBe(0);
   });
+
+  // F1: the scan must see EVERY entry in changelog.d/, not just `*.md` files. A
+  // name the scan skips is never parsed, so it is neither in the release notes
+  // nor deleted by the release: silently lost, and green.
+  for (const [label, path, message] of [
+    [
+      "with no .md extension",
+      "changelog.d/lost-task.added",
+      /changelog\.d\/lost-task\.added: a fragment is named <slug>\.<category>\.md/,
+    ],
+    [
+      "in a subdirectory",
+      "changelog.d/sub/nested-task.fixed.md",
+      /changelog\.d\/sub: changelog\.d\/ holds fragment files only, no subdirectories/,
+    ],
+    [
+      "a dotfile (a stray .DS_Store is not a fragment)",
+      "changelog.d/.DS_Store",
+      /changelog\.d\/\.DS_Store: a fragment is named <slug>\.<category>\.md/,
+    ],
+  ] as const) {
+    test(`a fragment ${label} is refused before the gate`, async () => {
+      mkdirSync(dirname(join(repo, path)), { recursive: true });
+      writeFileSync(join(repo, path), "- A thing.\n");
+      git(repo, "add", "-A");
+      git(repo, "commit", "-q", "-m", "misnamed fragment");
+      git(repo, "push", "-q", "origin", "main");
+      await refused(["0.1.0"], message);
+      expect(gateRuns).toBe(0);
+    });
+  }
 
   test("a red gate aborts with nothing written", async () => {
     await refused(["0.1.0"], /gate failed/, {

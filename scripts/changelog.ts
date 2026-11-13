@@ -1,12 +1,16 @@
 /**
  * The pure rules of per-task changelog fragments (docs/feat/changelog-fragments.md):
  * what a fragment is, and how a release assembles `changelog.d/` into a new
- * version section. No I/O; `release.ts` reads the files and writes the result.
+ * version section. No I/O for the rules themselves; the one disk read is
+ * `readFragmentDir`, shared by the release and the guard so they cannot diverge
+ * on which entries count (F1: a filter in either one silently dropped a fragment).
  *
  * A fragment is one file, one bullet, named `<slug>.<category>.md` — the task
  * slug, so it rides that task's branch and dies with an abandoned one. Two tasks
  * never share a path, so two tasks never edit one shared line.
  */
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { ReleaseError, refuseUnreleasedEntries } from "./release-plan.ts";
 
 /** Keep a Changelog's sections, in the order they appear in a release. */
@@ -44,13 +48,49 @@ export interface Fragment {
 export interface FragmentFile {
   readonly path: string;
   readonly text: string;
+  /** Set when the entry is a directory: refused by name (`readFragmentDir`). */
+  readonly directory?: boolean;
+}
+
+/**
+ * Read EVERY entry in `<root>/changelog.d/` — files and directories, dotfiles
+ * included — as fragment candidates. The name check is `parseFragments`'s, not a
+ * glob's: a `*.md` filter would never parse `lost-task.added` or
+ * `sub/nested.md`, so both would be left out of the notes and never deleted, and
+ * nothing would go red (F1). A directory is returned with empty text so the
+ * parser refuses it by name, one message for one offence.
+ *
+ * A missing `changelog.d/` is the normal post-release state: no fragments.
+ */
+export function readFragmentDir(root: string): FragmentFile[] {
+  const dir = join(root, FRAGMENT_DIR);
+  const names = (() => {
+    try {
+      return readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return []; // no changelog.d/: a release emptied it, or nothing is in flight
+    }
+  })();
+  return names
+    .map((entry) => ({ path: `${FRAGMENT_DIR}/${entry.name}`, full: join(dir, entry.name) }))
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    .map(({ path, full }) =>
+      statSync(full).isDirectory()
+        ? { path, text: "", directory: true }
+        : { path, text: readFileSync(full, "utf8") },
+    );
 }
 
 /** Validate one fragment file; throws `ReleaseError` naming the offence. */
-function parseFragment({ path, text }: FragmentFile): Fragment {
+function parseFragment({ path, text, directory }: FragmentFile): Fragment {
   const name = path.startsWith(`${FRAGMENT_DIR}/`) ? path.slice(FRAGMENT_DIR.length + 1) : "";
+  if (directory === true || name.includes("/")) {
+    throw new ReleaseError(
+      `${path}: ${FRAGMENT_DIR}/ holds fragment files only, no subdirectories`,
+    );
+  }
   const stem = name.endsWith(".md") ? name.slice(0, -".md".length) : "";
-  if (name.includes("/") || stem === "" || !stem.includes(".")) {
+  if (stem === "" || !stem.includes(".")) {
     throw new ReleaseError(
       `${path}: a fragment is named <slug>.<category>.md (e.g. my-task.added.md)`,
     );

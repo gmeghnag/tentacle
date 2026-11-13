@@ -15,7 +15,13 @@
  */
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { FRAGMENT_DIR, type Fragment, assemble, parseFragments } from "./changelog.ts";
+import {
+  FRAGMENT_DIR,
+  type Fragment,
+  assemble,
+  parseFragments,
+  readFragmentDir,
+} from "./changelog.ts";
 import {
   ReleaseError,
   bumpBunLock,
@@ -107,9 +113,9 @@ export async function runRelease(argv: readonly string[], deps: ReleaseDeps): Pr
     const lock = readFileSync(join(root, "bun.lock"), "utf8");
     planned.set("bun.lock", bumpBunLock(lock, current, version, files.length - 1));
     const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
-    const fragmentFiles = [...new Bun.Glob(`${FRAGMENT_DIR}/*.md`).scanSync({ cwd: root })]
-      .sort()
-      .map((path) => ({ path, text: readFileSync(join(root, path), "utf8") }));
+    // readFragmentDir, not a `*.md` glob: an entry the scan skips is never parsed,
+    // so a misnamed fragment is neither in the notes nor refused (F1).
+    const fragmentFiles = readFragmentDir(root);
     if (fragmentFiles.length === 0) {
       throw new ReleaseError(
         `${FRAGMENT_DIR}/ has no fragments; a release needs at least one user-visible entry (AGENTS §10)`,

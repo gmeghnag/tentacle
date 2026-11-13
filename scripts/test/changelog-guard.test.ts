@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FRAGMENT_DIR, parseFragments } from "../changelog.ts";
+import { FRAGMENT_DIR, parseFragments, readFragmentDir } from "../changelog.ts";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const CHANGELOG = join(ROOT, "CHANGELOG.md");
-const FRAGMENTS = join(ROOT, FRAGMENT_DIR);
 
 /** The text an `[Unreleased]` heading holds, up to the next top-level heading. */
 function unreleasedBody(text: string): string {
@@ -32,29 +32,48 @@ describe("I1: [Unreleased] is empty in the tree", () => {
   });
 });
 
-describe("I2: every changelog.d/ file is a well-formed fragment", () => {
-  /** Every fragment file on disk; a missing directory is the normal post-release state. */
-  const files = (): { path: string; text: string }[] => {
-    const names = (() => {
-      try {
-        return readdirSync(FRAGMENTS).filter((n) => n.endsWith(".md"));
-      } catch {
-        return []; // no changelog.d/: a release emptied it, or nothing is in flight
-      }
-    })();
-    return names.map((n) => ({
-      path: `${FRAGMENT_DIR}/${n}`,
-      text: readFileSync(join(FRAGMENTS, n), "utf8"),
-    }));
-  };
-
+describe("I2: every entry in changelog.d/ is a well-formed fragment", () => {
   test("the directory on disk parses (vacuously, after a release)", () => {
-    expect(() => parseFragments(files())).not.toThrow();
+    expect(() => parseFragments(readFragmentDir(ROOT))).not.toThrow();
   });
 
   test("the same check over a bad file is red (non-vacuity of the scan above)", () => {
     expect(() =>
       parseFragments([{ path: `${FRAGMENT_DIR}/Task_x.md`, text: "not a bullet\n" }]),
     ).toThrow();
+  });
+
+  // F1: the scan is the only way a name reaches the parser, so it must list every
+  // entry — a `*.md` filter made a misnamed fragment invisible and green.
+  test("the scan lists every entry: no extension, a subdirectory, a dotfile", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tentacle-fragments-"));
+    try {
+      mkdirSync(join(dir, FRAGMENT_DIR, "sub"), { recursive: true });
+      for (const rel of ["ok.added.md", "lost-task.added", ".DS_Store"]) {
+        writeFileSync(join(dir, FRAGMENT_DIR, rel), "- A thing.\n");
+      }
+      expect(readFragmentDir(dir).map((f) => f.path)).toEqual([
+        `${FRAGMENT_DIR}/.DS_Store`,
+        `${FRAGMENT_DIR}/lost-task.added`,
+        `${FRAGMENT_DIR}/ok.added.md`,
+        `${FRAGMENT_DIR}/sub`,
+      ]);
+      // …and the scan+parse pair refuses each bad shape, so listing them is
+      // enough to go red in `bun run test`.
+      expect(() => parseFragments(readFragmentDir(dir))).toThrow(
+        /changelog\.d\/\.DS_Store: a fragment is named <slug>\.<category>\.md/,
+      );
+      for (const [path, text] of [
+        [`${FRAGMENT_DIR}/lost-task.added`, "- A thing.\n"],
+        [`${FRAGMENT_DIR}/.DS_Store`, "- A thing.\n"],
+      ] as const) {
+        expect(() => parseFragments([{ path, text }])).toThrow(/named <slug>\.<category>\.md/);
+      }
+      expect(() =>
+        parseFragments([{ path: `${FRAGMENT_DIR}/sub`, text: "", directory: true }]),
+      ).toThrow(/no subdirectories/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

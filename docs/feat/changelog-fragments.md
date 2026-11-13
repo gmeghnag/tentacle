@@ -1,6 +1,6 @@
 # feat/changelog-fragments — per-task changelog fragments, so no task edits `CHANGELOG.md`
 
-> **Status:** context + implementation (APPROVED) + execution done — Review pending
+> **Status:** context + implementation (APPROVED) + execution + fix round 1 (F1 fixed) — Review round 2 pending
 > **Branch:** `feat/changelog-fragments`, cut from local `main` (`e9e7036`, 30 ahead of `origin/main` `5534668`)
 > **Type:** feat · **Size:** S–M · **Blast:** cross-module (process) · **Suited:** DeepSeek exec
 > **Owner questions:** 6, all answered as recommended (below) — Implementation APPROVED
@@ -526,6 +526,94 @@ merge time, `protocol.json` queue regeneration, the optional `.gitattributes`
 run, `scripts/changelog.ts` was restored from the pre-refactor backup, and the
 refactor was re-applied and re-verified (52/52, then the full gate). Nothing
 outside `.tentacle/tmp/` was affected; the final code is the verified one.
+
+## Fix round 1
+
+*— claude-opus-5-5, 2026-11-14*
+
+**F1 (MEDIUM) — FIXED.** A misnamed fragment was silently dropped, not refused.
+
+**Reproduced first** (branch as reviewed, in `.tentacle/tmp/changelog-fragments/`):
+with `changelog.d/lost-task.added` (no `.md`) and
+`changelog.d/sub/nested-task.fixed.md` on disk, `bun test
+scripts/test/changelog-guard.test.ts` went **4 pass / 0 fail**, and `runRelease`
+in the fixture repo **returned 0** (a release would have shipped with both
+entries missing from the notes and both files left undeleted). `git status
+--porcelain` confirmed the two entries were the only change; both were then
+removed.
+
+**Root cause, one sentence:** two independent name filters — `release.ts`'s
+`Bun.Glob("changelog.d/*.md")` and the guard test's `readdirSync().filter(n =>
+n.endsWith(".md"))` — decided which entries existed, so a name neither filter
+accepted never reached `parseFragments`' name check, and the check's own `.txt`
+unit test passed on a path the product never builds.
+
+**The fix (smallest shape that removes the divergence):** the scan is now ONE
+exported function in the pure module, `readFragmentDir(root)`
+(`scripts/changelog.ts:65`), and both callers use it — so "which entries count"
+has a single definition and cannot drift again.
+
+- `scripts/changelog.ts:65-83` — `readFragmentDir`: `readdirSync(dir,
+  {withFileTypes:true})`, **no name filter**, sorted by path; a directory is
+  returned as `{path, text:"", directory:true}` instead of being read (the read
+  would throw EISDIR); a missing `changelog.d/` stays `[]` (the normal
+  post-release state).
+- `scripts/changelog.ts:50-54` — `FragmentFile.directory?: boolean`, the flag the
+  scan sets.
+- `scripts/changelog.ts:85-92` — `parseFragment` refuses a directory (and any
+  nested path) by name: `changelog.d/: holds fragment files only, no
+  subdirectories`. A missing `.md` already fell through to the existing
+  `<slug>.<category>.md` refusal — the message was right, nothing reached it.
+- `scripts/release.ts:110-112` — the glob is replaced by `readFragmentDir(root)`;
+  the "no fragments" refusal and everything after it are unchanged, so the
+  refusal still happens before the gate with nothing written.
+- `scripts/test/changelog-guard.test.ts:35-70` — the local filter is **deleted**
+  (the bug was a second definition); the guard now calls `readFragmentDir(ROOT)`,
+  plus a new test that drives the scan over a temp dir holding all three bad
+  shapes and asserts the exact listing AND that parse refuses each.
+- `scripts/test/release.test.ts` — three end-to-end cases (no `.md`; a
+  subdirectory; a stray `.DS_Store`), each asserting exit 1, the message
+  **and** `gateRuns === 0`.
+- `scripts/test/changelog.test.ts` — the refusal matrix gains the no-extension
+  and subdirectory entries.
+
+**Red before green (§9), each on the assertion of the property:**
+`runRelease`'s three new cases on the unfixed code were `Expected: 1, Received:
+0` — the release *succeeded*, which is the finding exactly (no import/compile
+error). The guard-side scan test was written against `readFragmentDir`, so its
+red-first evidence is mutation **M2** below, not a pre-fix run (stated honestly,
+as the plan's test 2 requires).
+
+**Mutation checks (§9 non-vacuity; each applied, run, reverted):**
+- **M1** — `release.ts` scan reverted to `Bun.Glob("changelog.d/*.md")`:
+  `bun test scripts/test/release.test.ts` → **3 fail**
+  (`…no .md extension`, `…in a subdirectory`, `…a dotfile`), 33 pass.
+- **M2** — `readFragmentDir`'s `readdirSync` filtered to `.md` again:
+  `changelog-guard.test.ts` → **1 fail** (`the scan lists every entry…`), 4 pass.
+- **M3** — the `directory === true` clause removed from `parseFragment`:
+  `bun test scripts/test/` → **3 fail** (the subdirectory case in
+  `release.test.ts`, the same in `changelog.test.ts`, and the guard scan test),
+  61 pass.
+All three reverted; `bun test scripts/test/` → **64 pass / 0 fail**.
+
+**Drift from the plan:** none in behaviour. Two shape notes: (a) the plan kept
+the name check inside `parseFragments` only; it stays there, and the scan's sole
+job is to hand it **every** entry — the plan's "guard and release both list every
+entry" is met by sharing one function rather than by two matching filters, which
+would have let them drift again. (b) `FragmentFile.directory` is a small
+extension of a test-facing interface, not a wire or persisted format.
+
+**Gate (run here):** `bunx tsc --noEmit` **clean** · `bun run lint` **clean**
+(954 files, 0 errors/0 warnings — the §6 baseline) · `bun test` **7545 pass,
+3 skip, 0 fail** across 539 files (the 3 skips are the opt-in live-k8s /
+live-docker / real-socket keepalive, not failures; +5 tests over the reviewed
+run).
+
+**Unverified here:** nothing about F1. Two things I did **not** touch, since the
+review raised no finding and the instruction was findings-only: (1) the release
+summary still counts `fragments.length` — correct, because a bad entry now
+refuses before that line; (2) `TODO.md`'s `eval/parallel-tasks` point (2) is
+still unticked (execution's deliberate D5), left for the orchestrator on `main`.
 
 ## Review
 
