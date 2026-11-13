@@ -1,24 +1,27 @@
 /**
  * `bun run release <version> [--dry-run]` (docs/RELEASING.md,
  * docs/feat/release-script.md, D7): bump every package.json (+ bun.lock),
- * date the CHANGELOG's [Unreleased] section, commit `chore(release): v<version>`
- * and create the annotated tag `v<version>`. It NEVER pushes: it prints the
- * two push commands. The rules are in `release-plan.ts`; this is the shell
- * around them (git, the gate, the writes).
+ * assemble `CHANGELOG.md`'s new section from `changelog.d/` and delete the
+ * fragments, commit `chore(release): v<version>` and create the annotated tag
+ * `v<version>`. It NEVER pushes: it prints the two push commands. The rules are
+ * in `changelog.ts` + `release-plan.ts`; this is the shell around them (git, the
+ * gate, the writes).
  *
  * Order: arguments → clean tree on `main` → fetch, not behind origin → the
- * version (incl. tags on origin) → every new file text computed → the gate
- * (`bun run check`) → writes → commit → tag. Anything refused before the
- * writes leaves the repo exactly as it was.
+ * version (incl. tags on origin) → every new file text computed (and the
+ * fragments validated, so no release starts with a bad fragment) → the gate
+ * (`bun run check`) → writes + fragment deletion → commit → tag. Anything
+ * refused before the writes leaves the repo exactly as it was.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { FRAGMENT_DIR, type Fragment, assemble, parseFragments } from "./changelog.ts";
 import {
   ReleaseError,
   bumpBunLock,
   bumpPackageJson,
   parseReleaseVersion,
-  releaseChangelog,
+  refuseUnreleasedEntries,
 } from "./release-plan.ts";
 
 const USAGE = "usage: bun run release <version> [--dry-run]   (e.g. bun run release 0.1.0)";
@@ -104,7 +107,17 @@ export async function runRelease(argv: readonly string[], deps: ReleaseDeps): Pr
     const lock = readFileSync(join(root, "bun.lock"), "utf8");
     planned.set("bun.lock", bumpBunLock(lock, current, version, files.length - 1));
     const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
-    planned.set("CHANGELOG.md", releaseChangelog(changelog, version, date));
+    const fragmentFiles = [...new Bun.Glob(`${FRAGMENT_DIR}/*.md`).scanSync({ cwd: root })]
+      .sort()
+      .map((path) => ({ path, text: readFileSync(join(root, path), "utf8") }));
+    if (fragmentFiles.length === 0) {
+      throw new ReleaseError(
+        `${FRAGMENT_DIR}/ has no fragments; a release needs at least one user-visible entry (AGENTS §10)`,
+      );
+    }
+    const fragments = parseFragments(fragmentFiles);
+    refuseUnreleasedEntries(changelog);
+    planned.set("CHANGELOG.md", assemble(changelog, version, date, fragments));
 
     // 4) The gate.
     write("running the gate (bun run check)…\n");
@@ -122,19 +135,33 @@ export async function runRelease(argv: readonly string[], deps: ReleaseDeps): Pr
     const summary = [
       ...files.map((f) => `  ${f}: ${current} → ${version}`),
       `  bun.lock: ${files.length - 1} workspace versions ${current} → ${version}`,
-      `  CHANGELOG.md: [Unreleased] → [${version}] - ${date} (+ a new empty [Unreleased])`,
+      `  CHANGELOG.md: ${fragments.length} fragment${fragments.length === 1 ? "" : "s"} → [${version}] - ${date} ([Unreleased] stays empty)`,
+      `  ${FRAGMENT_DIR}/: ${fragments.length} fragment${fragments.length === 1 ? "" : "s"} deleted`,
       `  commit: chore(release): ${tag}`,
       `  tag: ${tag} (annotated)`,
     ].join("\n");
     if (dryRun) {
-      write(`dry run: all checks passed; nothing written. Planned:\n${summary}\n`);
+      // The human preview that replaces reading [Unreleased] on main: the exact
+      // section the release would add, built by the same pure function.
+      const preview = assemble(changelog, version, date, fragments);
+      const from = preview.indexOf(`## [${version}]`);
+      const to = preview.slice(from).search(/\n## \[/);
+      const section = to < 0 ? preview.slice(from) : preview.slice(from, from + to);
+      write(
+        `dry run: all checks passed; nothing written. Planned:\n${summary}\n\nThe section it would add:\n\n${section}\n`,
+      );
       return 0;
     }
 
-    // 5) Write, commit, tag. A failed commit restores the originals.
+    // 5) Write, commit, tag. A failed commit restores the originals — including
+    // the fragments, whose DELETION is not a write and so needs its own restore.
     const originals = new Map([...texts, ["bun.lock", lock], ["CHANGELOG.md", changelog]]);
     for (const [f, text] of planned) {
       writeFileSync(join(root, f), text);
+    }
+    const deleted = fragments.map((f) => f.path);
+    for (const path of deleted) {
+      rmSync(join(root, path), { force: true });
     }
     // The tag CI checks (build.yml) is `v` + packages/cli/package.json version.
     const written = versionOf(readFileSync(join(root, "packages/cli/package.json"), "utf8"));
@@ -143,15 +170,41 @@ export async function runRelease(argv: readonly string[], deps: ReleaseDeps): Pr
         `internal: packages/cli/package.json reads ${written}, not ${version}`,
       );
     }
+    /**
+     * Stage the fragments' deletion (they are not in `planned`, which holds
+     * writes only) and confirm the index really records each one — a `git add`
+     * that silently staged nothing would leave the release commit adding an
+     * entry it also wrote into CHANGELOG.md.
+     */
+    const stageDeletions = (): { code: number; out: string; err: string } => {
+      const staged = git(root, "add", "-A", "--", FRAGMENT_DIR);
+      if (staged.code !== 0) {
+        return staged;
+      }
+      const index = git(root, "diff", "--cached", "--name-status", "--", FRAGMENT_DIR).out;
+      const missing = deleted.filter((path) => !index.split("\n").includes(`D\t${path}`));
+      return missing.length === 0
+        ? staged
+        : { code: 1, err: `the deletion of ${missing.join(", ")} was not staged`, out: "" };
+    };
     const commit = (() => {
       const add = git(root, "add", "--", ...planned.keys());
-      return add.code === 0 ? git(root, "commit", "--quiet", "-m", message) : add;
+      if (add.code !== 0) {
+        return add;
+      }
+      // A fragment still staged (not committed away) would leave the release
+      // commit adding an entry it also wrote into CHANGELOG.md: twice.
+      const st = stageDeletions();
+      return st.code === 0 ? git(root, "commit", "--quiet", "-m", message) : st;
     })();
     if (commit.code !== 0) {
       for (const [f, text] of originals) {
         writeFileSync(join(root, f), text);
       }
-      git(root, "reset", "--quiet", "--", ...planned.keys());
+      for (const { path, text } of fragmentFiles) {
+        writeFileSync(join(root, path), text);
+      }
+      git(root, "reset", "--quiet", "--", ...planned.keys(), FRAGMENT_DIR);
       throw new ReleaseError(`the commit failed, files restored: ${commit.err.trim()}`);
     }
     const tagged = git(root, "tag", "-a", tag, "-m", `tentacle ${tag}`);

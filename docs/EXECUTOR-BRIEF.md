@@ -43,6 +43,9 @@ report** — the task may be stale or wrong.
 - Run the task's own acceptance checks (grep-guards, specific tests it names)
   **and** `bun run check` (typecheck → lint → test). It must be **green**,
   compared to the lint baseline in AGENTS §6. If it is not, you are not done.
+- A task with user-visible impact writes **`changelog.d/<slug>.<category>.md`**
+  (one bullet) — never `CHANGELOG.md`, whose `[Unreleased]` must stay empty
+  (AGENTS §10); a missing or malformed fragment fails the gate.
 - Report per AGENTS §5: what changed (`file:line`), why in one sentence, the
   evidence. If something is unverified, say so in one line and how to verify it.
 

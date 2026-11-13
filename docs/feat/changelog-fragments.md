@@ -1,9 +1,9 @@
 # feat/changelog-fragments — per-task changelog fragments, so no task edits `CHANGELOG.md`
 
-> **Status:** context + implementation (owner approval pending — **not approved yet**)
+> **Status:** context + implementation (APPROVED) + execution done — Review pending
 > **Branch:** `feat/changelog-fragments`, cut from local `main` (`e9e7036`, 30 ahead of `origin/main` `5534668`)
 > **Type:** feat · **Size:** S–M · **Blast:** cross-module (process) · **Suited:** DeepSeek exec
-> **Owner questions:** 6, below — **not approved yet**
+> **Owner questions:** 6, all answered as recommended (below) — Implementation APPROVED
 
 ## Context
 
@@ -396,7 +396,136 @@ in the meantime. `TODO.md` needs only the convention (Q5), not a task.
 
 ## Execution
 
-*(empty — not approved yet.)*
+*— claude-opus-5-5, 2026-11-13*
+
+**Load-bearing check, re-run first: PASSED.** Two branches adding *different*
+fragments merge clean, and the merge touches no `CHANGELOG.md`
+(`.tentacle/tmp/changelog-fragments/lb`): `git merge task-c` →
+`changelog.d/task-c.fixed.md | 1 +`, `1 file changed, 1 insertion(+)`, no
+conflict, `git diff HEAD~1 -- CHANGELOG.md` empty. The collision story holds too:
+two tasks collide **only** by reusing a slug+category, i.e. one path.
+
+**Repro re-run: the bug is live.** `.tentacle/tmp/changelog-fragments/bug/run.ts`
+calls the old `releaseChangelog` on a changelog whose `[Unreleased]` holds two
+bullets (one of them a task's, mis-filed by a silent merge): it dates the whole
+body as `## [0.7.0] - 2026-11-13`, so the mis-filed bullet **ships** and
+`[Unreleased]` empties. `scripts/changelog.ts` did not exist. Both halves
+confirmed.
+
+**What was built, in dependency order.**
+
+1. `scripts/changelog.ts` (new, pure, no I/O) — `CATEGORY_ORDER` (Keep a
+   Changelog's six, Q1), `FRAGMENT_DIR`, `parseFragments` (filename
+   `^[a-z0-9][a-z0-9-]*\.(added|…|security)\.md$`, non-empty body, `- `
+   prefixed, no `#` heading, one bullet per file; sorted by category order →
+   slug → path, so the output cannot depend on readdir order) and `assemble`
+   (new `## [<version>] - <date>` section below an `[Unreleased]` that stays
+   empty; released sections untouched; compare links moved on).
+2. `scripts/release-plan.ts` — `releaseChangelog` **replaced** by
+   `refuseUnreleasedEntries` (the non-empty `[Unreleased]` refusal, same point in
+   the flow, same message the tests assert). The old "date `[Unreleased]`" path
+   and its empty-body check are gone.
+3. `scripts/release.ts` — reads `changelog.d/*.md` (Bun.Glob, sorted) and refuses
+   zero fragments before the gate; `parseFragments` + `refuseUnreleasedEntries`
+   before any write, so a bad fragment can never start a release; `assemble` into
+   `planned`; the write phase deletes the fragments **after** the gate and stages
+   the deletion separately (`git add -A -- changelog.d`), verified by reading
+   `git diff --cached --name-status` back (`stageDeletions`) so a silently-empty
+   stage fails loudly; a failed commit restores the fragments' *content* too and
+   resets both the writes and `changelog.d`; `--dry-run` prints the exact section
+   it would add.
+4. Tests: `scripts/test/changelog.test.ts` (pure matrix),
+   `scripts/test/changelog-guard.test.ts` (I1 + I2 on the real repo), and
+   `scripts/test/release.test.ts` (end-to-end; fixture changed, see drift).
+5. Migration: `changelog.d/{attachments-tui,attachments-prompt,attachments-upload,attachments-tui-detect}.added.md`
+   hold the four bullets of `CHANGELOG.md:13-16` **verbatim** (byte-for-byte; the
+   line numbers were confirmed with `awk` before cutting), and `[Unreleased]` is
+   now empty. Plus `changelog.d/changelog-fragments.added.md` for this task.
+6. Rule text: `AGENTS.md` §10 bullet after *Index & registries* ·
+   `docs/EXECUTOR-BRIEF.md` · `docs/TASK-TEMPLATE.md` (a **Changelog** line in the
+   front-matter block, next to Size/Blast) · `docs/RELEASING.md` (step 1, the
+   checks list, step 3, the restore sentence). `TODO.md` **not touched**, as
+   instructed (the plan's item 8 is therefore still open — see drift D5).
+
+**Red before green, per slice** (`§9`). Red was shown at the **assertion**, not at
+an import error: the module was first written with real signatures and stub
+bodies (`parseFragments → []`, `assemble → text`) so every test compiled and then
+failed on what it asserts — 14/15 red. The guard test was red on the *un-migrated*
+tree (4 bullets under `[Unreleased]`), then green after the migration. There is no
+way to make I2 red on the tree itself (an empty `changelog.d/` is the normal
+post-release state, as the plan says), so its red-first evidence is the
+`parseFragments` refusal matrix — stated here as the plan required.
+
+**Mutation checks (each re-run against the FINAL code; files restored after).**
+
+| # | Mutation | Result |
+| --- | --- | --- |
+| M1 | `assemble` stops calling `refuseUnreleasedEntries` (the "second way in" returns) | **red**: `assemble > refuses a non-empty [Unreleased]` (14 pass, 1 fail) |
+| M2 | one bullet hand-added under the real `CHANGELOG.md`'s `[Unreleased]` | **red**: `I1: [Unreleased] is empty in the tree` (3 pass, 1 fail) — the guard is non-vacuous on a hand edit, the case the Review must confirm |
+| M3 | the fragments' deletion is never staged | **red**: happy path + "a tag that fails…" (31 pass, 2 fail) |
+| M4 | no restore of deleted fragments on a failed commit | **red**: `a failing commit restores every file…` (32 pass, 1 fail) |
+| M5 | the zero-fragment refusal removed | **red**: `no fragments is refused before the gate` (32 pass, 1 fail) |
+
+The two assertions in `assemble`'s test that failed **against my own first
+implementation** (a stray blank line before the next version heading; and
+order-dependence — a reversed `fragments` array produced different bytes) are the
+determinism property the plan names, and were fixed in the code, not the test.
+
+**Drift from the Implementation (and why).**
+
+- **D1 — `docs/TASK-TEMPLATE.md`:** the plan said "a comment line in the
+  front-matter block". The front-matter block already has a comment *after* it
+  (lines 19–27) and the visible `>` metadata lines above; a third comment would
+  be buried. Wrote a visible `> **Changelog:**` metadata line beside
+  `Size/Blast/Suited` instead — it is read, not skipped, by an executor.
+- **D2 — `scripts/test/release.test.ts` fixture:** as the plan predicted, the
+  fixture's `[Unreleased]` was non-empty. Beyond the predicted one assertion, the
+  changes were: `CHANGELOG` loses its `### Added\n\n- Everything.` (now the
+  fragment `changelog.d/everything.added.md`), `snapshot()` includes the fragment
+  (and `read()` tolerates an absent file, since the no-fragment case deletes the
+  directory), and the old `releaseChangelog` unit tests were replaced by
+  `refuseUnreleasedEntries` tests (rewrite-a-section is `changelog.test.ts`'s
+  job now). The plan's "one assertion, plus the fixture" undercounted: the
+  *whole* describe block for `releaseChangelog` had to move. Also the plan's
+  "the existing empty-`[Unreleased]` refusal has no test today" was **wrong** —
+  `scripts/test/release.test.ts:280-289` tested it (`an empty [Unreleased] is
+  refused before the gate`); it is replaced by the two new refusals (no
+  fragments; a hand-written entry).
+- **D3 — a refused release leaves nothing behind, and the fragment scan is
+  tolerant:** `Bun.Glob.scanSync` on a **missing** `changelog.d/` returns `[]`
+  (verified) rather than throwing, so the plan's "nothing may assume the
+  directory exists" holds without a special case.
+- **D4 — `stageDeletions` verifies the index** (not in the plan): a `git add`
+  that staged nothing would leave the release commit *adding* an entry it also
+  wrote into `CHANGELOG.md`. The first version of this check (an "unstaged
+  leftovers" test) was dead code — `git add -A` stages everything — so it became
+  a read-back of `git diff --cached --name-status` for each deleted path, and M3
+  shows it bites.
+- **D5 — `TODO.md` untouched, deliberately** (the instruction here overrides the
+  plan's file 8). Its `eval/parallel-tasks` point (2) still reads as open; the
+  orchestrator should tick it on `main`.
+- **D6 — `[Unreleased]` has no `### Added` heading left** (`CHANGELOG.md:9-11`).
+  A heading with no bullets under it would be odd, so the migration removed it
+  along with the bullets; `assemble` re-creates whatever headings the fragments
+  need.
+
+**Not done here (deliberately, per the plan's Q3/Q4/Q6):** `PROTOCOL_VERSION` at
+merge time, `protocol.json` queue regeneration, the optional `.gitattributes`
+`-merge` line. **`protocol.json` was not regenerated because no schema changed** —
+`git status --porcelain -- packages/` is empty.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
+`bun run lint` clean (0 errors, 0 warnings — the §6 baseline) · `bun test`
+**7540 pass, 3 skip, 0 fail** across 539 files. The 3 skips are the opt-in ones
+(live-k8s, live-docker, real-socket keepalive), not failures.
+
+**A note on one mistake, for the reviewer:** while restoring a mutation I copied
+`changelog.final.bak` over `scripts/changelog.ts` — the scratch names
+`changelog.*.bak` and `CHANGELOG.*.bak` are the **same file** on macOS, so the
+`.md` backup I meant was never separate. It was caught immediately by a test
+run, `scripts/changelog.ts` was restored from the pre-refactor backup, and the
+refactor was re-applied and re-verified (52/52, then the full gate). Nothing
+outside `.tentacle/tmp/` was affected; the final code is the verified one.
 
 ## Review
 

@@ -15,6 +15,7 @@ and Review (the judgment); Notes/debt → Review (+ follow-ups).
 > **Status:** context · implementation · execution · review · done
 > **Branch:** `<type>/<slug>` — `feat`/`fix` only; an `eval` has **no branch** (committed directly to `main`, see AGENTS §10)
 > **Size:** S | M | L · **Blast:** contained | cross-module | load-bearing · **Suited:** <who executes + review level>
+> **Changelog:** `changelog.d/<slug>.<category>.md` — a user-visible task names its fragment here (one bullet, `added|changed|deprecated|removed|fixed|security`); an internal/dev/test-only task writes `none`. Never edit `CHANGELOG.md` itself: `bun run release` assembles it from the fragments and `[Unreleased]` stays empty (AGENTS §10).
 
 <!--
 Size (effort): S one file/module, known approach · M a few files, some design ·
