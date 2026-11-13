@@ -803,3 +803,39 @@ greps first, recorded drift with reasons, called equivalent and uncovered
 mutants (M10, M9c) by their names instead of hiding them, and committed no
 weakened tests. Finding 1 follows the approved plan, so it is a plan defect,
 not an execution one.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-12* (fresh context; reviewed `git diff HEAD~1`, commit 7ded972)
+
+**Verdict: PASS**
+
+- **Finding 1 (HIGH), fixed.** `client/src/image-input.ts:66-72` now returns
+  `off` when this client serves the model and the daemon says
+  `input:"upload"`. Mutation: removing the guard (`&& false`) turns 2 tests red,
+  the T5 row (`image-input.test.ts`) and the T8 zero-frame case
+  (`model-stream-attachments.test.ts`: `ImagesUnavailableError`, no frame
+  after `initialize`).
+- **Finding 2 (MEDIUM), fixed.** Each of the 3 hosts now has a test that runs
+  a turn with an injected recorder.
+  - Dropping `ctx.attachments` in `createServeAgent` (`serve.ts`) → the
+    `startDaemon` turn test goes red. It runs over a real WebSocket and goes
+    through `attachImage`, so it also pins the host's `images` policy.
+  - Dropping `attachments` in `podSessionHost`'s non-proxy factory → the
+    pod-turn test goes red.
+  - Dropping `images` in `workerSessionHost` (old M9c) → the worker-host turn
+    test goes red.
+  - Every file was restored from a scratch copy; `git status --porcelain` is
+    empty.
+- **Regressions.** I checked that the extractions keep behaviour.
+  - `workerSessionHost` keeps identity, `exposeTurnErrors`, `onTurnError`,
+    MCP registration (`onBuilt`) and `workerSessionBuild`.
+  - The factory now ignores its `cwd` argument. That is harmless: every
+    `createAgent` call passes `this.opts.defaultCwd`, which is `config.cwd`
+    (`session-host.ts:383,1018,1081`).
+  - `createServeAgent` keeps the same sinks.
+  - The only new option is `createProvider`, used only by tests.
+- **Gate.** `bun test packages/cli packages/client`: 2562 pass, 0 fail.
+  `bun run lint`: clean (946 files). `bun run typecheck`: clean. I did not
+  re-run the full `bun test`.
+- **No new HIGH or MEDIUM findings.**
