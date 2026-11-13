@@ -737,6 +737,25 @@ no `delivered()` call → **0 red** ✘ (finding 1).
 `drive` test), 13 mutations listed — but the list missed the one wiring seam above,
 and the executor identity is recorded inconsistently.
 
+### Round 2
+
+*— claude-opus-5-5, 2026-11-13*
+
+**Verdict: PASS** (diff `HEAD~1` = `c81a474`: one test file + this doc; no source change).
+
+- **Finding 1 — FIXED, non-vacuous.** Mutation re-run by the reviewer: `agent.ts:2498`
+  `delivered()` commented out → `subagent-background.test.ts` **9 pass / 2 fail**
+  (T16 start flush and the A mid-turn boundary test, both on the new
+  `jobs.ended("sa-1")?.delivered` assertion); reverted → 11 pass, tree clean.
+- **Finding 2 — RESOLVED as a record.** Header names the real branch and the
+  misnomer; Status updated; Execution now states honestly that claude-opus-5-5 ran
+  it and Q6 (DeepSeek executes) was not honoured. Residual, not blocking: the
+  branch name still breaks §10's slug 1:1 (owner rename at merge), the new commit
+  `c81a474` again says "(deepseek)", the task is missing from `TODO.md`, and this
+  review is the same model as the executor (fresh context only).
+- **Regressions:** only test assertions and Markdown changed; `bun run lint` clean
+  (962 files), `bun run typecheck` clean, touched test file 11/11.
+
 #### Owner answers (2026-11-13)
 
 Q1–Q6 all as recommended (Q6: DeepSeek executes, mandatory fresh Opus review). Implementation APPROVED.
