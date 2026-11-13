@@ -14,6 +14,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -36,6 +37,7 @@ import {
   deviceDir,
   deviceIdOf,
   findPairing,
+  hasLivePairing,
   loadOrCreateIdentity,
   openPairing,
   pairingCodeHash,
@@ -446,6 +448,68 @@ describe("pairing windows", () => {
     expect(names).not.toContain(`${stale.sid}.json`);
     expect(names.filter((n) => n.endsWith(".json"))).toHaveLength(1);
     expect(sweepPairings(configDir, { now: 2_000 })).toBe(0);
+  });
+});
+
+describe("hasLivePairing (what backs `authorize`: a pure read)", () => {
+  test("finds a live window without the code, and nothing when none is usable", () => {
+    const configDir = scratch();
+    createIdentity(configDir);
+    expect(hasLivePairing(configDir, { now: 1_000 })).toBeUndefined();
+    const session = openPairing(configDir, { code: CODE, now: 1_000, pid: process.pid });
+    if (!session.ok) throw new Error(session.reason);
+    expect(hasLivePairing(configDir, { now: 1_100 })?.sid).toBe(session.session.sid);
+    // Expired: not live (an expired window never admits an unknown key).
+    expect(hasLivePairing(configDir, { now: 1_000 + 6 * 60 * 1000 })).toBeUndefined();
+    // Its owner died (F2): not live either.
+    expect(hasLivePairing(configDir, { now: 1_100, alive: () => false })).toBeUndefined();
+  });
+
+  test("is SIDE-EFFECT FREE: it never sweeps, closes or throws (P2)", () => {
+    // The property `authorize` stands on: it runs on every replayed Noise
+    // message 1, so it may not write. Mutation: delegate to `findPairing`
+    // (which sweeps dead windows and throws on a malformed code) -> red.
+    //
+    // NOTHING LIVE here on purpose: with a live window in the dir, the read
+    // returns on it before it ever reaches a dead one, and readdir order would
+    // decide whether the sweep mutation is visible at all.
+    const configDir = scratch();
+    createIdentity(configDir);
+    const dir = join(deviceDir(configDir), "pairing");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const deadSid = "b".repeat(32);
+    const deadPath = join(dir, `${deadSid}.json`);
+    writeFileSync(
+      deadPath,
+      JSON.stringify({
+        v: 1,
+        sid: deadSid,
+        codeHash: pairingCodeHash(CODE),
+        expiresAt: 9_999_999,
+        pid: 999_999,
+      }),
+    );
+    // A malformed code in a well-formed window: `pairingCodeHash` throws on it.
+    const badSid = "c".repeat(32);
+    const badPath = join(dir, `${badSid}.json`);
+    writeFileSync(
+      badPath,
+      JSON.stringify({
+        v: 1,
+        sid: badSid,
+        codeHash: "not-a-digest",
+        expiresAt: 9_999_999,
+        pid: process.pid,
+      }),
+    );
+    const before = readFileSync(deadPath, "utf8");
+
+    expect(hasLivePairing(configDir, { now: 1_100, alive: () => false })).toBeUndefined();
+    expect(hasLivePairing(configDir, { now: 1_100 })).toBeUndefined();
+    // Nothing was swept, closed or rewritten.
+    expect(readFileSync(deadPath, "utf8")).toBe(before);
+    expect(existsSync(badPath)).toBe(true);
+    expect(readdirSync(dir).filter((n) => n.endsWith(".json"))).toHaveLength(2);
   });
 });
 

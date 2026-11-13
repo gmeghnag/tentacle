@@ -3,6 +3,7 @@
  * confined cwd and system prompt, and builds a fresh confined agent per session.
  * Binding is loopback-safe by default (a non-loopback bind requires a token).
  */
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { EMPTY_SKILL_LISTING, projectKey } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
@@ -13,6 +14,7 @@ import {
   DEFAULT_MAX_DETACHED_SESSIONS,
   DEFAULT_MAX_SESSIONS,
   DEFAULT_SESSION_TTL_MS,
+  DeviceAuthority,
   LogSessionStore,
   type ModelLink,
   ProxyModelProvider,
@@ -23,9 +25,13 @@ import {
   type SessionTtlControl,
   TombstoneFile,
   acquireStoreLock,
+  loadOrCreateIdentity,
+  readIdentity,
+  removeDaemonRecord,
   startReaper,
   startWsServer,
   sweepIntervalFor,
+  writeDaemonRecord,
 } from "@tentacle/daemon";
 import type { ModelPurpose, SessionSettings, SessionSettingsReport } from "@tentacle/protocol";
 import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@tentacle/transport";
@@ -87,6 +93,12 @@ export interface ServeOptions extends ServeLimits {
   readonly onNotice?: (line: string) => void;
   /** Reaper sweep period (ms); tests shorten it. */
   readonly sweepIntervalMs?: number;
+  /**
+   * The device route: default ON for a `serve` on the user's own host
+   * (docs/feat/device-pairing.md 9b). `false` keeps today's listener for a
+   * caller that must not expose it; a pod daemon never reaches `listen`.
+   */
+  readonly devices?: boolean;
   /**
    * How this daemon's agents build their providers (docs/feat/attachments-prompt.md
    * T10): a test injects a recorder so a turn's `ChatRequest` can be inspected
@@ -155,6 +167,10 @@ export async function startDaemon(
   options: ServeOptions,
 ): Promise<ServeHandle> {
   const dir = daemonStoreDir(config);
+  // The computer's identity comes FIRST: without one no device can be
+  // authenticated, and a non-loopback bind with the device route on must never
+  // start by accident on a store a human has to fix (F26, docs/feat/device-pairing.md).
+  const devices = deviceAuthority(config, options);
   const lock = acquireStoreLock(dir);
   let persister: SessionPersister | undefined;
   try {
@@ -188,15 +204,52 @@ export async function startDaemon(
       sameProject,
       tombstones,
     );
-    return listen(sessionHost, options, ttl, async () => {
-      await persister?.stop();
-      lock.release();
-    });
+    return listen(
+      sessionHost,
+      options,
+      ttl,
+      async () => {
+        await persister?.stop();
+        devices?.stop();
+        lock.release();
+      },
+      devices,
+      config.cwd,
+    );
   } catch (error) {
+    devices?.stop();
     await persister?.stop();
     lock.release();
     throw error;
   }
+}
+
+/**
+ * This daemon's device authority, over the shared `<configDir>/devices/` store
+ * (decision 7: one identity and one registry per computer). The identity is
+ * loaded or created here — the FIRST `serve` on a fresh computer creates it —
+ * and an UNREADABLE one is fatal, naming the file: serving a non-loopback bind
+ * with no usable identity would either admit nobody (pointless) or, worse,
+ * invite "fixing" it by trusting everyone (F26).
+ */
+function deviceAuthority(
+  config: TentacleConfig,
+  options: ServeOptions,
+): DeviceAuthority | undefined {
+  if (options.devices === false) {
+    return undefined;
+  }
+  const configDir = config.configDir;
+  const identity = loadOrCreateIdentity(configDir, { name: hostname() });
+  if (!identity.ok) {
+    throw new Error(
+      `cannot start serve: ${identity.path} is unusable (${identity.reason}) — fix it or run "tentacle devices reset"`,
+    );
+  }
+  return new DeviceAuthority({
+    configDir,
+    ...(options.onAudit ? { onAudit: options.onAudit } : {}),
+  });
 }
 
 /** The registry: every usable live record of `store` restored, every archived one indexed. */
@@ -354,6 +407,9 @@ function listen(
   options: ServeOptions,
   ttl: BoundSessionTtl,
   release: () => Promise<void>,
+  devices?: DeviceAuthority,
+  /** The project this daemon serves: what its record reports (`pair`'s hint). */
+  cwd = process.cwd(),
 ): ServeHandle {
   const server = startWsServer({
     host: options.host,
@@ -364,7 +420,25 @@ function listen(
     ...(options.wsIdleTimeoutSec !== undefined ? { idleTimeoutSec: options.wsIdleTimeoutSec } : {}),
     ...(options.onAudit ? { onAudit: options.onAudit } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
+    ...(devices ? { devices: { authority: devices } } : {}),
   });
+  // `<configDir>/daemons/<pid>.json`: what `pair` (9d) reads to build the QR's
+  // addresses, and what task 10 builds siblings on (owner Q6). Removed at stop;
+  // a crash leaves it, and its reader ignores a dead pid.
+  if (devices) {
+    const written = writeDaemonRecord(devices.configDir, {
+      pid: process.pid,
+      host: options.host,
+      port: server.port,
+      tls: options.tls !== undefined,
+      cwd,
+      startedAt: Date.now(),
+    });
+    if (!written.ok) {
+      // Not fatal: the daemon works, `pair` just has one fewer address to offer.
+      options.onError?.(new Error(`cannot write ${written.path}: ${written.reason}`));
+    }
+  }
   // The reaper's policy has ONE owner: this function. A runtime change
   // (`daemon/session_ttl`) swaps `policy` and re-arms the interval — nothing
   // else caches the TTL. `null` = never (`--session-ttl never`).
@@ -439,6 +513,7 @@ function listen(
       stopping ??= (async () => {
         stopped = true;
         stopReaper?.();
+        if (devices) removeDaemonRecord(devices.configDir);
         server.stop();
         await release();
       })();

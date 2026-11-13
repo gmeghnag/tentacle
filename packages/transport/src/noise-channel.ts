@@ -77,9 +77,27 @@ export interface InitiatorOptions extends NoiseChannelOptions {
   readonly remoteStatic: Uint8Array;
 }
 
+/**
+ * What `authorize` decided, when it allows: an unknown-but-admitted peer (a
+ * pairing window) gets a MUCH smaller reassembly cap than a paired device, and
+ * the cap has to be known before the channel exists — `Secured` fixes it at
+ * construction, and the responder reads its own default before the key is
+ * known (`docs/feat/device-pairing.md` P1).
+ */
+export interface AuthorizeAllow {
+  readonly allow: true;
+  /** Reassembled-frame cap for this peer, in bytes. Missing = the responder default. */
+  readonly maxMessageBytes: number;
+}
+
+export type AuthorizeVerdict = boolean | AuthorizeAllow;
+
 export interface ResponderOptions extends NoiseChannelOptions {
-  /** Is this initiator's static key allowed? A throw or a rejection fails closed. */
-  readonly authorize: (remoteStatic: Uint8Array) => boolean | Promise<boolean>;
+  /**
+   * Is this initiator's static key allowed? A throw or a rejection fails closed.
+   * `boolean` as before; an `AuthorizeAllow` allows AND caps this peer.
+   */
+  readonly authorize: (remoteStatic: Uint8Array) => AuthorizeVerdict | Promise<AuthorizeVerdict>;
 }
 
 /** A confirmed channel and the peer's authenticated static key. */
@@ -112,6 +130,28 @@ const asNoise = (error: unknown, kind: NoiseError["kind"] = "handshake-failed"):
   error instanceof NoiseError
     ? error
     : new NoiseError(kind, error instanceof Error ? error.message : String(error));
+
+/**
+ * What a verdict means: allowed or not, and the cap to build with. Anything the
+ * responder does not understand — `null`, a wrong shape, a cap that is not a
+ * positive integer — FAILS CLOSED: a caller's bug must never widen access.
+ */
+function readVerdict(
+  verdict: AuthorizeVerdict,
+  fallback: number,
+): { readonly allowed: boolean; readonly maxMessageBytes: number } {
+  if (typeof verdict === "boolean") {
+    return { allowed: verdict, maxMessageBytes: fallback };
+  }
+  if (typeof verdict === "object" && verdict !== null && verdict.allow === true) {
+    const cap = verdict.maxMessageBytes;
+    if (typeof cap !== "number" || !Number.isSafeInteger(cap) || cap <= 0) {
+      return { allowed: false, maxMessageBytes: fallback };
+    }
+    return { allowed: true, maxMessageBytes: cap };
+  }
+  return { allowed: false, maxMessageBytes: fallback };
+}
 
 /** The channel once the keys are split: sealing, chunking, reassembly, the pre-handler queue. */
 class Secured implements SecureChannel {
@@ -422,7 +462,7 @@ export function noiseResponder(
         }
         const remoteStatic = hs.remoteStatic;
         setPhase("authorizing");
-        let verdict: boolean | Promise<boolean>;
+        let verdict: AuthorizeVerdict | Promise<AuthorizeVerdict>;
         try {
           verdict = options.authorize(remoteStatic);
         } catch (error) {
@@ -435,8 +475,9 @@ export function noiseResponder(
         Promise.resolve(verdict).then(
           (ok) => {
             if (phase() !== "authorizing") return; // closed or failed meanwhile: build nothing
+            const decided = readVerdict(ok, max);
             try {
-              if (ok !== true) {
+              if (!decided.allowed) {
                 const message2 = hs.writeMessage2(Uint8Array.of(STATUS_DENY));
                 // Not closed here: the initiator closes on reading it (no send-then-close loss); the timer covers one that never does.
                 setPhase("denied");
@@ -445,7 +486,16 @@ export function noiseResponder(
               }
               const message2 = hs.writeMessage2(Uint8Array.of(STATUS_ALLOW));
               const t = hs.split();
-              secured = new Secured(raw, t.send, t.recv, remoteStatic, max, options.onViolation);
+              // The verdict's cap, when it gave one (P1): an admitted stranger is
+              // bounded far below a paired device's default.
+              secured = new Secured(
+                raw,
+                t.send,
+                t.recv,
+                remoteStatic,
+                decided.maxMessageBytes,
+                options.onViolation,
+              );
               setPhase("await-confirm");
               raw.send(encodeFrame(message2));
             } catch (error) {
