@@ -434,3 +434,25 @@ than implied. What was checked:
 
 
 
+
+## Review
+
+*— claude-opus-5-5, 2026-11-13* (fresh-context adversarial review; a different model family from the executor)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, small fix).
+
+1. **MEDIUM — `packages/cli/src/relay.ts:593-598` (`refreshJobs`) drops the refresh when a poll is in flight.** The comment ("a read in flight is already the freshest one") and Implementation's failure-mode row (`polling` already true → return) are false: a `session/list` read issued *before* the exit can answer with the pre-exit count. Scenario (older pod binary, `shellCounted` false): the 30 s loop poll starts at t0 → the job exits at t0+ε, `refreshJobs` sees `polling` and returns → the in-flight read resolves with `jobs: 1` → `ps` says `1 background job(s) running` until the next poll, ~30 s — exactly the symptom item 9d claims to remove ("as soon as the job exits" in the changelog fragment). Fix: on `polling`, set a `stale` flag, and have `pollJobs`' completion re-poll once when it is set; add a test that holds a `sessionJobs` read open across the exit.
+
+**Gate (touched files):** `bun test` of permission, permission-detail, tui-sessions, relay, main tests — 264 pass / 0 fail. `bun run lint` clean (963 files); `bun run typecheck` clean. Full suite not re-run by me.
+
+**Mutation (all applied together, then reverted; `git status` clean after):** drop `refreshJobs()` from the exit hook → the 9d test fails; pass `false` instead of `reopen !== undefined` in `main.ts` → the attach-plain-resume test fails; rename the `fs_multi_edit` case → 5 tests fail (permission + permission-detail); drop `implicit` from `silent` → both `implicit` tui-sessions tests fail. 9 fails total, each on its assertion. Non-vacuous.
+
+**Attacks tried:**
+- §7 compute/identity (pod not trusted): `describeToolCall`'s new `detail` is pod-computed but display-only — `title`/`detail` key no decision or lasting approval (grep: only `PermissionPrompt.tsx` and the relay's auto-accept log, already `untrustedText`). Holds.
+- `implicit` leaking to a person-chosen uid: `plainResumeUid` (`attach-plan.ts:144`) returns `undefined` whenever `--resume`/`--continue` is passed, so `implicit` is set only for the kept run's own uid; unreadable/fatal paths still print (tested). Holds.
+- H1 one-writer: `refreshJobs` is gated on `shellCounted`, and `pollJobs` re-checks it on resolve. Holds.
+- Un-gated `onExit` with `autoWake: false`: only the count refresh runs; no wake is emitted. Holds.
+- Teardown: `sessionJobs` never rejects (`local-runtime.ts:1138`, catch → null), so there is no unhandled rejection. A late poll landing after `leave()` was already possible before this change. Not a new finding.
+- Multi-edit malformed input (`edits` a string, empty, `null` input): no throw, falls back to path or `—`. Holds.
+
+**Executor behaviour:** the drift (un-gating the exit subscription) is recorded honestly, and the mutations claimed are real. The one miss is the in-flight coalescing, asserted as safe without a test.
