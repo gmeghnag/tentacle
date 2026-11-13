@@ -479,7 +479,15 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
     const reaperTimers = (): number[] => created.filter((ms) => ms === 1000 || ms === 60_000);
     let server: Awaited<ReturnType<typeof startDaemon>> | undefined;
     try {
-      server = await startDaemon(config, { host: "127.0.0.1", port: 0, sessionTtlMs: null });
+      // `devices: false`: this test counts 1 s timers and the device route's
+      // own poll shares that period — a different subsystem with a different
+      // owner, pinned by `serve-devices.test.ts` instead.
+      server = await startDaemon(config, {
+        host: "127.0.0.1",
+        port: 0,
+        sessionTtlMs: null,
+        devices: false,
+      });
       expect(reaperTimers()).toEqual([]); // no sweep timer on boot
       const b = await client(server.url);
       await b.request("daemon/session_ttl", { idleTtlMs: 1 }); // period = 1 s floor

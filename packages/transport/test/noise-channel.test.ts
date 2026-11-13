@@ -10,6 +10,7 @@ import { chacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { createChannelPair } from "../src/channel.ts";
 import type { DuplexChannel } from "../src/channel.ts";
 import {
+  type AuthorizeVerdict,
   E2E_CHANNEL_VERSION,
   type HandshakeTimer,
   PROLOGUE,
@@ -888,6 +889,76 @@ describe("nonce limit", () => {
     const nonce = Uint8Array.of(0, 0, 0, 0, 0x08, 0x07, 0x06, 0x05, 0x02, 0x01, 0, 0);
     const b = chacha20poly1305(k, nonce, new Uint8Array(0)).encrypt(Uint8Array.of(9));
     expect(same(a, b)).toBe(true);
+  });
+});
+
+describe("authorize's verdict carries the peer's cap (docs/feat/device-pairing.md P1)", () => {
+  // The cap has to be decided with the verdict: `Secured` fixes it at
+  // construction and the responder reads its own default BEFORE the key is
+  // known (`:410` vs `:427`), so an admitted stranger would otherwise get the
+  // full 32 MiB reassembly. Mutation: ignore the verdict's cap (build with
+  // `max`) -> the first two tests go red.
+  const PAIRING_CAP = 4096;
+
+  async function withVerdict(verdict: AuthorizeVerdict) {
+    const r = relayed();
+    const dViol: NoiseError[] = [];
+    const [c, d] = await Promise.all([
+      noiseInitiator(r.client, { staticKey: DEVICE, remoteStatic: DAEMON_PUB, random: rng() }),
+      noiseResponder(r.daemon, {
+        staticKey: DAEMON,
+        authorize: () => verdict,
+        random: rng(50),
+        onViolation: (e) => dViol.push(e),
+      }),
+    ]);
+    return { c, d, dIn: listen(d), dViol };
+  }
+
+  test("an allowed stranger is capped at the verdict's bytes, not the 32 MiB default", async () => {
+    const { c, d, dIn, dViol } = await withVerdict({
+      allow: true,
+      maxMessageBytes: PAIRING_CAP,
+    });
+    c.send("y".repeat(PAIRING_CAP));
+    c.send("y".repeat(PAIRING_CAP + 1));
+    await ticks();
+    expect(dIn.got).toEqual(["y".repeat(PAIRING_CAP)]);
+    expect(dViol.map((e) => e.kind)).toEqual(["bad-frame"]);
+    expect(dIn.closes()).toBe(1);
+  });
+
+  test("`true` keeps the responder default (a paired device is not shrunk)", async () => {
+    const { c, d, dIn, dViol } = await withVerdict(true);
+    c.send("y".repeat(PAIRING_CAP * 8));
+    await ticks();
+    expect(dIn.got).toEqual(["y".repeat(PAIRING_CAP * 8)]);
+    expect(dViol).toEqual([]);
+  });
+
+  test("a verdict it cannot read fails CLOSED (no channel, an authenticated deny)", async () => {
+    for (const bad of [
+      { allow: true, maxMessageBytes: 0 },
+      { allow: true, maxMessageBytes: Number.NaN },
+      { allow: false, maxMessageBytes: PAIRING_CAP },
+      {},
+      null,
+    ] as unknown as AuthorizeVerdict[]) {
+      const r = relayed();
+      const ini = track(
+        noiseInitiator(r.client, { staticKey: DEVICE, remoteStatic: DAEMON_PUB, random: rng() }),
+      );
+      const res = track(
+        noiseResponder(r.daemon, {
+          staticKey: DAEMON,
+          authorize: () => bad,
+          random: rng(51),
+        }),
+      );
+      await ticks();
+      expect(kindOf(ini)).toBe("denied");
+      expect(kindOf(res)).toBe("denied");
+    }
   });
 });
 

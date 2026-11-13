@@ -99,7 +99,26 @@ export interface ConnectionOptions {
    * call would fail obscurely) — the session itself stays for re-attach.
    */
   readonly servesModel?: boolean;
+  /**
+   * WHO this connection is (docs/feat/device-pairing.md 9b). Absent = a token
+   * client, today's behaviour: every method. A `device` has exactly the same
+   * rights (one user, many devices — decision 5): the socket's key already
+   * decided it, and revocation lives in the ws-server's per-device map, not
+   * here. A `pairing` connection may do ONE thing — `device/pair` (9c) — and
+   * `initialize`; everything else is `Unauthorized`, which is what makes an
+   * unregistered peer during a pairing window harmless (F16).
+   */
+  readonly principal?: ConnectionPrincipal;
 }
+
+/**
+ * A connection's authenticated role, decided once at the handshake — never
+ * upgraded in place (a privilege is a property of the socket, §7).
+ */
+export type ConnectionPrincipal =
+  | { readonly kind: "token" }
+  | { readonly kind: "device"; readonly id: string }
+  | { readonly kind: "pairing" };
 
 /** The two tunnel requests of a model-serving connection (the pod reverse-tunnel). */
 export type ModelLink = Pick<Connection, "requestModelStream" | "requestModelStreamChunked"> &
@@ -114,6 +133,7 @@ interface Attached {
 export class Connection {
   private readonly peer: RpcPeer;
   private readonly host: SessionHost;
+  private readonly principal: ConnectionPrincipal;
   private readonly attached = new Map<string, Attached>();
   private readonly servesModel: boolean;
   private initialized = false;
@@ -128,6 +148,7 @@ export class Connection {
   ) {
     this.host = host;
     this.servesModel = options.servesModel === true;
+    this.principal = options.principal ?? { kind: "token" };
     this.peer = new RpcPeer(channel, {
       onRequest: (method, params, context) => this.onRequest(method, params, context),
       onNotification: (method, params) => this.onNotification(method, params),
@@ -239,6 +260,16 @@ export class Connection {
     }
     if (!this.initialized) {
       throw new RpcError(DomainErrorCode.NotInitialized, "initialize before any other method");
+    }
+    // A pairing connection may do exactly nothing else (F16): its peer is an
+    // UNREGISTERED key, admitted only so it can prove the one-time code. The
+    // method gate is here, on the daemon's own side (never the pod's, never
+    // the client's), and `device/pair` itself lands in 9c.
+    if (this.principal.kind === "pairing") {
+      throw new RpcError(
+        DomainErrorCode.Unauthorized,
+        "a pairing connection may only call device/pair",
+      );
     }
     switch (method) {
       case Method.Open:
