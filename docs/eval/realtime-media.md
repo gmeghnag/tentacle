@@ -669,3 +669,4 @@ drifted (`serve.ts:634` → `:723`). The web facts were re-checked on 2026-11-13
 - Q2 front modality: **B+** (cascade: on-device VAD/STT → small front LLM → on-device TTS) is the realtime mode; C only if E4/E5 prove it worth it.
 - Q3 front model / who sees voice data: **(a)** same provider as the session (Haiku for Claude, small local model for local Qwen) called at the key holder; on-device front optional; a third-party faster front only opt-in with an explicit notice of what it receives.
 - Q4 who speaks a permission ask: **(a)** the broker's exact text via a deterministic template, local TTS + on screen, never through a model; answered only by key/tap bound to that ask; no voice approval in v1.
+- Q5 reasoning for voice turns: **(a)** off/minimal for every spoken reply (front and brain); delegated real work keeps the session reasoning setting, progress narrated by templates.
