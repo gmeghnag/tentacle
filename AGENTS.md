@@ -472,6 +472,19 @@ lifecycle. It is mandatory.
   task doc. `docs/library-bugs.md` is the cross-cutting upstream-bug registry (a
   reference, not a task). Docs under `docs/` predating this standard are legacy;
   new work uses this structure.
+- **Changelog fragments, not `[Unreleased]`.** A task with user-visible impact
+  adds `changelog.d/<slug>.<category>.md` on its own branch — one Keep a Changelog
+  bullet (`- **<headline>.** …`), its name the task slug plus one of
+  `added|changed|deprecated|removed|fixed|security` — and it **never edits
+  `CHANGELOG.md`**, which `bun run release` assembles from the fragments (in
+  Keep-a-Changelog order) and then deletes. `[Unreleased]` stays **empty** in the
+  tree: a test in `bun run check` fails on an entry there, so there is no shared
+  append point left to conflict in or to misfile into a released version. Two
+  tasks collide only by reusing one slug+category (the same filename ⇒ a real
+  conflict, never a silent overwrite). Internal/dev/test-only work adds no
+  fragment — the changelog is curated, not a commit mirror
+  (`docs/eval/changelog-discipline.md`). Rules and rationale:
+  `docs/feat/changelog-fragments.md`.
 - **Docs & index edits are not code tasks (carve-out).** A blast-nil Markdown
   file that carries no code — `TODO.md`, `docs/library-bugs.md`, a folder
   `README`, a standalone decision/notes doc, or **an `eval` doc

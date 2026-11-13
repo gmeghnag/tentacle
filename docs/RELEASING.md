@@ -5,9 +5,15 @@ step it leaves to you.
 
 ## 1. Write the release notes
 
-Put everything user-visible since the last release under `## [Unreleased]` in
-`CHANGELOG.md` ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)), and
-merge that to `main`. The script refuses an empty `[Unreleased]`.
+The release notes are the **fragments**: every user-visible task adds
+`changelog.d/<slug>.<category>.md` on its own branch — one
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) bullet, its name the
+task slug plus one of `added|changed|deprecated|removed|fixed|security`. Merge
+them to `main` with the task. `[Unreleased]` in `CHANGELOG.md` stays **empty**
+(do not write release notes there — a test refuses it); the release builds the
+version's section from the fragments, in Keep a Changelog order, and deletes
+them. The script refuses when `changelog.d/` has no fragments: a release needs
+at least one user-visible entry.
 
 ## 2. Check the release (changes nothing)
 
@@ -16,9 +22,10 @@ git checkout main && git pull
 bun run release 0.2.0 --dry-run
 ```
 
-The dry run makes every check of a real run, prints the planned changes, and
-writes nothing. The only side effect is that `git fetch` updates the
-remote-tracking refs and tags. The checks:
+The dry run makes every check of a real run, prints the planned changes **and
+the exact section it would add to `CHANGELOG.md`**, and writes nothing. The only
+side effect is that `git fetch` updates the remote-tracking refs and tags. The
+checks:
 
 - The version is strict semver **without** the `v` (the tag gets it), at least
   `0.1.0`, greater than the current version, and `v<version>` does not exist
@@ -27,7 +34,8 @@ remote-tracking refs and tags. The checks:
 - You are on `main`.
 - `main` is not behind `origin/main` (it runs `git fetch` first).
 - Every `package.json` is at the same current version.
-- `[Unreleased]` is not empty.
+- `[Unreleased]` is empty (release notes live in `changelog.d/`).
+- `changelog.d/` holds at least one fragment, and every fragment is well formed.
 - The full gate passes (`bun run check`).
 
 ## 3. Release
@@ -42,13 +50,14 @@ The script makes these changes locally:
   `packages/*`, not `stubs/`. It also updates the workspace versions in
   `bun.lock`. Without that, the first plain `bun install` after the release
   would rewrite the lock and dirty the tree.
-- In `CHANGELOG.md`, `## [Unreleased]` becomes `## [0.2.0] - <today>`, and a
-  new empty `## [Unreleased]` goes above it.
+- In `CHANGELOG.md`, a new `## [0.2.0] - <today>` section is assembled from the
+  fragments (categories in Keep a Changelog order, slugs alphabetical within a
+  category); `## [Unreleased]` stays empty above it. The fragments are deleted.
 - It commits `chore(release): v0.2.0` and creates the annotated tag `v0.2.0`.
 
 **It never pushes.** If the commit fails (for example because of a hook), the
-script restores the files and creates no tag. It also refuses when the gate
-changed the working tree.
+script restores the files — including the deleted fragments — and creates no
+tag. It also refuses when the gate changed the working tree.
 
 If the tag fails *after* the commit, the script prints `committed <sha>, tag
 failed: …`. The release commit then exists, but there is no tag. Either
