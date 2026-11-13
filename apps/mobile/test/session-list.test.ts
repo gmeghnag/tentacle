@@ -192,6 +192,25 @@ describe("reduce: failures and the link", () => {
     const failed = reduce(asking, { type: "fail", error: "boom", generation: asking.generation });
     expect(refresh(failed).error).toBeUndefined();
   });
+
+  test("a successful page clears stale (the screen stops saying Reconnecting…)", () => {
+    // Review round 1 finding 1: `fail` sets stale, and `page` spread it back in,
+    // so a recovered link kept the "Reconnecting…" notice forever (no `link(up)`
+    // ever arrives — the link never went down, only the request failed).
+    const first = loaded([entry({ sessionId: "a" })]);
+    const asking = refresh(first);
+    const failed = reduce(asking, { type: "fail", error: "boom", generation: asking.generation });
+    expect(failed.stale).toBe(true);
+    const again = refresh(failed);
+    const ok = reduce(again, {
+      type: "page",
+      page: { sessions: [entry({ sessionId: "a" })] },
+      generation: again.generation,
+    });
+    expect(ok.status).toBe("loaded");
+    expect(ok.stale).toBe(false);
+    expect(ok.error).toBeUndefined();
+  });
 });
 
 describe("rows", () => {

@@ -128,6 +128,11 @@ export function reduce(state: SessionListState, action: SessionListAction): Sess
         status: "loaded",
         entries: merge(state.entries, action.page.sessions, state.pending),
         error: undefined,
+        // A page arrived, so the link is up and the rows are the daemon's
+        // current truth: the "Reconnecting…" mark a failed refresh set is over.
+        // (Review round 1 finding 1: without this the notice never went away on
+        // a link that never dropped — no `link(up)` ever follows.)
+        stale: false,
         pending: null,
       };
       // Absent cursor = the end of the list: clear the old one so "load more"

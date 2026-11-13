@@ -11,21 +11,18 @@ import { NavigationContainer, useFocusEffect } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { type JSX, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppState, useColorScheme } from "react-native";
+import { type ComputerRow, computerRows, probeComputer } from "./src/computer-rows.ts";
 import { ComputerConfigError, type ComputerRecord, devComputerSource } from "./src/computers.ts";
 import { type ComputerLink, openComputer } from "./src/connection.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
+import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
 import { type RootStackParams, initialRoute } from "./src/routes.ts";
-import { type ComputerRow, ComputersScreen } from "./src/screens/ComputersScreen.tsx";
+import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
 import { PairScreen } from "./src/screens/PairScreen.tsx";
 import { SessionScreen } from "./src/screens/SessionScreen.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
 import { createSessionListController, viewModel } from "./src/session-list-controller.ts";
-import {
-  type SessionListState,
-  type SessionRow,
-  initialSessionList,
-  projectLabel,
-} from "./src/session-list.ts";
+import { type SessionListState, type SessionRow, initialSessionList } from "./src/session-list.ts";
 import { type Palette, paletteFor } from "./src/theme.ts";
 
 const Stack = createNativeStackNavigator<RootStackParams>();
@@ -112,29 +109,19 @@ function ComputersRoute({
         }
         return;
       }
-      const built = await Promise.all(
-        records.map(async (record): Promise<ComputerRow> => {
-          try {
+      const probes = await Promise.all(
+        records.map((record) =>
+          probeComputer(async () => {
             const link = await LINKS.get(record.id);
             const page = await link.client.sessionList({ limit: 1 });
-            return {
-              id: record.id,
-              name: record.name,
-              project: projectLabel(page.sessions, record.name),
-              status: "",
-            };
-          } catch (caught) {
-            // A computer that will not answer still gets a row: the reason is
-            // its status, and tapping it retries the dial.
-            return {
-              id: record.id,
-              name: record.name,
-              project: record.name,
-              status: errorText(caught),
-            };
-          }
-        }),
+            return page.sessions;
+          }),
+        ),
       );
+      // The wording (and the project label) are decided in `computer-rows.ts`,
+      // never here: a ChannelError's own text names a cause iOS cannot tell
+      // apart (review round 1 finding 5).
+      const built = computerRows(records, probes);
       if (live) {
         setRows(built);
       }
@@ -158,19 +145,35 @@ function SessionsRoute({
 }): JSX.Element {
   const [snapshot, setSnapshot] = useState<SessionListState>(initialSessionList);
   const [now, setNow] = useState(() => Date.now());
-  const controller = useMemo(
-    () =>
-      createSessionListController({
-        load: async (params) => {
-          const link = await LINKS.get(computerId);
-          return link.client.sessionList(
-            params.cursor === undefined ? { limit: 50 } : { limit: 50, cursor: params.cursor },
-          );
-        },
-        now: () => Date.now(),
-      }),
-    [computerId],
+  // One watcher for the screen: it follows the client the list actually reads
+  // through, replacing its subscription whenever a dial hands back a new one.
+  const controllerRef = useRef<ReturnType<typeof createSessionListController> | undefined>(
+    undefined,
   );
+  const watcher = useMemo(
+    () => createLinkStatusWatcher<ComputerLink>((up) => controllerRef.current?.link(up)),
+    [],
+  );
+  // The controller is created once per computer; the watcher reaches the current
+  // one through the ref, so it is never re-created (a re-created watcher would
+  // leak the previous client's subscription until a cleanup ran).
+  const controller = useMemo(() => {
+    const created = createSessionListController({
+      load: async (params) => {
+        const link = await LINKS.get(computerId);
+        // The client that answered is the one to follow from now on: the
+        // registry forgets a failed dial, so Retry's dial is a NEW client and a
+        // subscription made once at mount would go silent (finding 4).
+        watcher.watch(link);
+        return link.client.sessionList(
+          params.cursor === undefined ? { limit: 50 } : { limit: 50, cursor: params.cursor },
+        );
+      },
+      now: () => Date.now(),
+    });
+    controllerRef.current = created;
+    return created;
+  }, [computerId, watcher]);
 
   useEffect(() => {
     const unsubscribe = controller.subscribe((state) => {
@@ -181,27 +184,14 @@ function SessionsRoute({
     return () => {
       unsubscribe();
       controller.dispose();
+      watcher.stop();
     };
-  }, [controller]);
+  }, [controller, watcher]);
 
   // The link's own state: down marks the list stale, back up re-reads page one.
-  useEffect(() => {
-    let off: (() => void) | undefined;
-    let live = true;
-    void LINKS.get(computerId)
-      .then((link) => {
-        if (live) {
-          off = link.onStatus((status) => controller.link(status.state === "up"));
-        }
-      })
-      .catch(() => {
-        // The dial failure is already the screen's error (its refresh failed).
-      });
-    return () => {
-      live = false;
-      off?.();
-    };
-  }, [computerId, controller]);
+  // The subscription is made by the list's own read (above), because dialling
+  // to subscribe would be a second, speculative connection on mount — and the
+  // read is what has a client to follow.
 
   // Refresh triggers, no polling: screen focus, app foreground, pull-to-refresh
   // (below), and the link coming back up (above).

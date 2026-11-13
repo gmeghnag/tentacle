@@ -114,9 +114,13 @@ export function createSessionListController(deps: SessionListDeps): SessionListC
       }
       const before = state;
       dispatch({ type: "link", up });
-      // Coming back up with rows to re-read: refresh, so a list read before the
-      // drop converges instead of staying stale forever.
-      if (up && before.stale && state.entries.length > 0) {
+      // Coming back up: re-read page one, so a list read before the drop — or a
+      // read that failed while it was down — converges instead of staying stale
+      // (or failed) forever. No `entries.length` guard: an EMPTY list and a
+      // FAILED first read are exactly the cases that never converged otherwise
+      // (review round 1 finding 3). Only a list never read at all is left to
+      // the screen's own focus refresh.
+      if (up && before.stale && before.status !== "idle") {
         void run("refresh");
       }
     },

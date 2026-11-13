@@ -132,6 +132,41 @@ describe("createSessionListController", () => {
     expect(h.calls).toEqual([]); // nothing loaded yet: focus will refresh
     expect(h.controller.state().stale).toBe(false);
   });
+
+  test("link up re-reads an EMPTY loaded list too (review round 1 finding 3)", async () => {
+    // The guard needed `entries.length > 0`, so an empty list never converged:
+    // it stayed at whatever a refresh-while-down left behind.
+    const h = harness();
+    const first = h.controller.refresh();
+    h.waiting[0]?.resolve({ sessions: [] });
+    await first;
+    expect(h.controller.state().status).toBe("loaded");
+    expect(h.controller.state().entries).toEqual([]);
+    h.controller.link(false);
+    h.controller.link(true);
+    expect(h.calls).toHaveLength(2); // re-read, even with nothing to show
+    h.waiting[1]?.resolve({ sessions: [entry("late")] });
+    await Promise.resolve();
+    expect(h.controller.state().entries.map((e) => e.sessionId)).toEqual(["late"]);
+  });
+
+  test("link up retries a FAILED list that loaded nothing", async () => {
+    // The Failure-modes row "sessionList while down → refreshed on up" has no
+    // rows to keep when the very first read failed: it must retry, not stay
+    // failed until the user hits Retry.
+    const h = harness();
+    const first = h.controller.refresh();
+    h.waiting[0]?.reject(new Error("Can't connect — the computer is unreachable"));
+    await first;
+    expect(h.controller.state().status).toBe("failed");
+    h.controller.link(false);
+    h.controller.link(true);
+    expect(h.calls).toHaveLength(2);
+    h.waiting[1]?.resolve({ sessions: [entry("a")] });
+    await Promise.resolve();
+    expect(h.controller.state().status).toBe("loaded");
+    expect(h.controller.state().error).toBeUndefined();
+  });
 });
 
 describe("viewModel", () => {

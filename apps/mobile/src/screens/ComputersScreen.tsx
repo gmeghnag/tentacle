@@ -6,16 +6,10 @@
  */
 import type { JSX } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import type { ComputerRow } from "../computer-rows.ts";
 import type { Palette } from "../theme.ts";
 
-export interface ComputerRow {
-  readonly id: string;
-  readonly name: string;
-  /** The project row's label (`projectLabel`). */
-  readonly project: string;
-  /** The daemon's version once `initialize` answered; empty while dialling. */
-  readonly status: string;
-}
+export type { ComputerRow };
 
 export interface ComputersScreenProps {
   readonly palette: Palette;

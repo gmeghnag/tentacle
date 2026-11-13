@@ -383,7 +383,9 @@ the Step 0 shell (no list) fails, then passes. The green run's summary
 
 ## Execution
 
-*— claude-opus-5-5, 2026-11-13*
+*— deepseek (tentacle --profile deepseek), 2026-11-13* — signature corrected in
+Fix round 1: it read `claude-opus-5-5`, but DeepSeek executed (commit
+`3959be0`; Review round 1 caught it).
 
 ### Step 0 (blocking risk) — RETIRED, GREEN
 
@@ -605,3 +607,187 @@ Attacks tried: (a) the stale lifecycle across fail → success: found 1. (b) An 
 Holds: the protocol is untouched, `serve` binds 127.0.0.1, all scratch output stays under `.tentacle/tmp`, and the strip-origin proxy is test-only.
 
 How the executor behaved: the drift is recorded honestly (testID-only assertions, the guard mutation that could not be done, iOS 18 not covered). But the e2e gate's last assertion is vacuous, and the reducer's stale path has no test. Both are gaps in the evidence, so "green" here claimed more than it showed. Also, the Execution section is signed `claude-opus-5-5`, while the commit says DeepSeek executed. Fix the signature.
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-13*
+
+Review round 1 raised 5 findings (2 HIGH, 3 MEDIUM). All five are addressed;
+each fix has a test that was **red on the old code** and is green now, and each
+was mutation-checked (the fix reverted → the test fails again). Full-suite gate
+and the Maestro run are green; the iOS-18 leg is as unverified as before.
+
+**Repro first.** Findings 1 and 3 were reproduced on the shipped code before any
+edit, in `.tentacle/tmp/mobile-app-shell/repro-1-3.ts` (pure modules, no React,
+no daemon):
+
+```
+$ bun run .tentacle/tmp/mobile-app-shell/repro-1-3.ts
+F1 after a successful refresh: stale = true | error = undefined → BUG (stale survives, the screen shows Reconnecting… forever)
+F3 calls after link up: [{},{}] → BUG (nothing re-read on up)
+F3b state after link up: failed | calls = 1 → BUG (stays failed forever)
+```
+
+#### Finding 1 (HIGH) — a successful page never cleared `stale`
+
+Root cause: `fail` sets `stale: true` (`session-list.ts:152`) and `page` spread
+`rest` (which carried it), so only a `link(up)` event could ever clear the mark
+— and on a link that never dropped, no such event arrives. The screen then showed
+`sessions-stale` "Reconnecting…" forever (`SessionsScreen.tsx:121-125`).
+
+Fix: `page` sets `stale: false` (`apps/mobile/src/session-list.ts:135`) — a page
+arriving IS proof the link is up and the rows are current.
+
+Red before green: `apps/mobile/test/session-list.test.ts` — "a successful page
+clears stale (the screen stops saying Reconnecting…)":
+
+```
+(fail) … a successful page clears stale …   Expected: false / Received: true
+```
+
+#### Finding 2 (HIGH) — flow 05's recovery step could not fail
+
+Root cause: the post-restart tail asserted only `sessions-list` (the ScrollView,
+present in every state), so the flow reported a recovery it never checked.
+
+Fix: `apps/mobile/e2e/flows/05-daemon-down.yaml` now ends with a seeded row
+(`session-${ALPHA_ID}`) **and** `assertNotVisible: sessions-stale`, plus a
+regression guard `apps/mobile/test/e2e-flows.test.ts` that parses every flow and
+fails if a post-restart assertion is only the container (red on the old flow:
+3 of its 4 tests fail).
+
+**The end-to-end proof, and it is not ambiguous.** Flow 05 alone cannot isolate
+finding 1 (in that scenario the link really does drop, so `link(up)` also clears
+`stale` — verified: with only the page fix reverted, and separately with only the
+link fix reverted, flow 05 still passes). So both stale-clearing paths were
+broken at once and the **same** buggy build was run twice, once with the OLD
+tail and once with the NEW one:
+
+```
+$ # mutations: page no longer clears stale + link up no longer clears stale
+$ # (a) OLD tail — assert sessions-list only
+✓ 05-daemon-down (iOS 26)          PASS      <- the reviewer's finding, live
+$ # (b) NEW tail — assert session-<alpha> + assertNotVisible sessions-stale
+[Failed] 05-daemon-down (28s) (Assertion is false: id: sessions-stale is not visible)
+✗ 05-daemon-down (iOS 26) exit 1   FAIL      <- the new assertion catches it
+```
+
+The old tail is therefore vacuous on the exact bug, and the new one is not.
+
+#### Finding 3 (MEDIUM) — an empty or failed list never refreshed on link up
+
+Root cause: the guard was `up && before.stale && state.entries.length > 0`, so a
+list with no rows (empty, or a first read that failed) had nothing to converge.
+
+Fix: `up && before.stale && before.status !== "idle"`
+(`apps/mobile/src/session-list-controller.ts:119-123`). `idle` is the one state
+where nothing was ever read — the screen's own focus refresh covers that (the
+existing test "link up with no rows marks nothing to refresh" still passes, and
+now pins the intended scope).
+
+Red before green (`apps/mobile/test/session-list-controller.test.ts`):
+
+```
+(fail) link up re-reads an EMPTY loaded list too (review round 1 finding 3)
+        Expected length: 2 / Received length: 1
+(fail) link up retries a FAILED list that loaded nothing
+        Expected length: 2 / Received length: 1
+```
+
+#### Finding 4 (MEDIUM) — the link-status subscription was made once
+
+Root cause: the effect ran `LINKS.get(...)` once at mount and subscribed to that
+one client. The registry deliberately forgets a failed dial so Retry can dial
+again — a NEW client — and nothing ever subscribed to it, so later drops neither
+marked the list stale nor refreshed it on recovery.
+
+Fix: the rule is now a pure module, `apps/mobile/src/link-status-watcher.ts`
+(`createLinkStatusWatcher`; `watch` replaces the subscription, `stop` removes
+it), as AGENTS §7 requires. `App.tsx` `SessionsRoute` builds **one** watcher per
+screen (`useMemo`) reaching the current controller through a ref, and the list's
+own `load` calls `watcher.watch(link)` — so the client each successful read went
+through is exactly the one being followed. No speculative dial on mount.
+
+Red before green (`apps/mobile/test/link-status-watcher.test.ts`, written against
+a first-link-wins stub):
+
+```
+(fail) a NEW link replaces the old subscription (a retry dials a new client)
+        Expected: 1 / Received: 0        (the old subscription was never removed)
+```
+
+#### Finding 5 (MEDIUM) — `Computers` bypassed `describeError`
+
+Root cause: `App.tsx`'s `ComputersRoute` built rows in the component and showed
+the raw `errorText(caught)` — i.e. `ChannelError.message`, "the daemon answered
+401 to the token" / "cannot reach the daemon (close 1006)". On iOS those are two
+causes the app cannot tell apart (spike Review finding 3), so the app claimed
+what it did not know; and the row-building branch sat in a component (AGENTS §7).
+
+Fix: `apps/mobile/src/computer-rows.ts` — `computerRow` (wording through
+`describeError`, project label through `projectLabel`), `computerRows`, and
+`probeComputer` (the try/catch, out of the component). `App.tsx` now only maps
+the source to probes; the screen imports the one `ComputerRow` type instead of
+declaring a second one.
+
+Red before green (`apps/mobile/test/computer-rows.test.ts`, 8 tests) — the old
+behaviour injected as a mutation (`status: error.message`):
+
+```
+(fail) a ChannelError is worded by describeError, never by the channel's message
+        Expected: "Can't connect — the computer is unreachable or refused this app"
+        Received: "the daemon answered 401 to the token"
+(fail) every ChannelError kind gets the same honest wording
+        Received: "cannot reach the daemon (close 1006)"
+(fail) an old daemon is named, not retried        Received: "Method not found"
+(fail) computerRows keeps the source's order      Received: "nope"
+```
+
+#### Mutations (AGENTS §9) — each applied, narrow test run, reverted
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | Drop `stale: false` from `page` (`session-list.ts`) | **1 test fails** — "a successful page clears stale" |
+| 2 | Go back to `entries.length > 0` in `link(up)` | **2 tests fail** — "re-reads an EMPTY loaded list", "retries a FAILED list" |
+| 3 | `watch` ignores a new link (`current !== undefined`) | **1 test fails** — "a NEW link replaces the old subscription" |
+| 4 | Row wording `error.message` instead of `describeError` | **4 tests fail** — the 401 wording, every kind, old daemon, order |
+| 5 | Old flow-05 tail (`sessions-list` only) in place of the new one | **3 flow-guard tests fail** |
+| 6 | Old tail + both stale-clearing paths broken, on the simulator | old tail **PASSES**, new tail **FAILS** (`sessions-stale is not visible`) — the e2e non-vacuity proof above |
+
+All reverted; `git status` shows only the intended files.
+
+#### Files changed
+
+- `apps/mobile/src/session-list.ts` — `page` clears `stale` (finding 1).
+- `apps/mobile/src/session-list-controller.ts` — `link(up)` re-reads anything
+  ever read (finding 3).
+- `apps/mobile/src/link-status-watcher.ts` — **new**, pure (finding 4).
+- `apps/mobile/src/computer-rows.ts` — **new**, pure (finding 5).
+- `apps/mobile/App.tsx` — wiring: the watcher, and probes instead of inline rows.
+- `apps/mobile/src/screens/ComputersScreen.tsx` — imports the one `ComputerRow`.
+- `apps/mobile/e2e/flows/05-daemon-down.yaml` — the non-vacuous tail (finding 2).
+- Tests: 3 new files (`link-status-watcher`, `computer-rows`, `e2e-flows`) and 3
+  cases added to the two existing list suites.
+- The `Execution` signature (was `claude-opus-5-5`, corrected to the model that
+  actually executed).
+
+#### Gate
+
+```
+$ bunx tsc --noEmit        → clean
+$ bunx tsc -p apps/mobile  → clean
+$ bun run lint             → Checked 996 files. No fixes applied.  (0 errors, 0 warnings)
+$ bun test                 → 7707 pass, 3 skip (opt-in), 0 fail
+                             (apps/mobile: 96 pass in 12 files — was 77 in 9)
+$ bun run e2e:mobile --ios 26
+  ✓ 01-shell  ✓ 02-session-list  ✓ 03-refresh  ✓ 04-session-placeholder
+  ✓ 05-daemon-down                       PASS
+```
+
+#### Unverified / not done
+
+- **iOS 18** — still not installable with Xcode 27.1 (unchanged orchestrator
+  decision); only 26.5 ran. To verify: `bun run e2e:mobile` on a machine that has
+  it.
+- **`SessionsRoute`'s effect body** (`App.tsx`) is wiring and stays outside the
+  harness, as before: every decision it wires is now in a pure module
+  (`link-status-watcher.ts`, `session-list*.ts`).
