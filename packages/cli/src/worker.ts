@@ -58,6 +58,10 @@ export function workerAgentFactory(
       // The session's store: this host runs the laptop's own model in this
       // process, so it holds an image's bytes (docs/feat/attachments-prompt.md D4).
       ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
+      // A worker session may hop (docs/feat/session-hop.md D8/D9): this is one of
+      // the two kinds that offers the model `move_session`, and the laptop's TUI
+      // is right here to ask its owner about a proposal.
+      moveSession: true,
     },
   );
 }

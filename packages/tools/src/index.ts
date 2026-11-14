@@ -9,6 +9,7 @@ export * from "./agent-control.ts";
 export * from "./task.ts";
 export * from "./skill.ts";
 export * from "./context-reset.ts";
+export * from "./move-session.ts";
 export * from "./concurrency.ts";
 export * from "./search.ts";
 export * from "./search-tool.ts";

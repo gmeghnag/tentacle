@@ -610,6 +610,12 @@ export function tunnelledAgent(
     readonly skillScan?: SkillScan;
     /** A live session's broker, jobs and approvals: a settings sync rebuilds its agent on them. */
     readonly reuse?: AgentReuse;
+    /**
+     * Offer `move_session` (docs/feat/session-hop.md D9). Set by the pod DAEMON
+     * only, never by a plain `serve` (which builds through `createServeAgent`):
+     * the tool has no daemon-side effect, and the laptop's TUI asks the owner.
+     */
+    readonly moveSession?: true;
   } = {},
 ): WiredAgent & {
   readonly settingsReport?: SessionSettingsReport;
@@ -666,6 +672,8 @@ export function tunnelledAgent(
           ...(options.reuse.grants ? { grants: options.reuse.grants } : {}),
         }
       : {}),
+    // D9: only a pod daemon sets this (`podSessionHost`); a `serve` never does.
+    ...(options.moveSession === true ? { moveSession: true as const } : {}),
   });
   return { ...wired, ...(report ? { settingsReport: report } : {}), pinnedOver };
 }
@@ -742,6 +750,8 @@ export function podSessionHost(
             // A pod daemon without `--model-proxy` runs its OWN model, so it
             // holds the bytes (D4, Orchestrator decision 8).
             ...(attachments ? { attachments } : {}),
+            // D8/D9: a pod daemon may PROPOSE a move, like the worker.
+            moveSession: true,
           },
         );
       }
@@ -750,6 +760,9 @@ export function podSessionHost(
         ...(log ? { log } : {}),
         skillScan,
         ...(reuse ? { reuse } : {}),
+        // A pod daemon is the other hop-capable kind (D8/D9): it may PROPOSE, and
+        // the laptop's TUI is the one that asks the owner.
+        moveSession: true,
       });
       logPins(wired.pinnedOver);
       return wired;

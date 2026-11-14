@@ -400,6 +400,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `mount.hideExtra` | — | — | Extra paths to hide, ADDED to the default list. |
 | `packages.*` | — | — | Whether this installed package is enabled. |
 | `rm` | — | false | Whether `run` removes its pod/container when the run ends. |
+| `sessionHop.tool` | `TENTACLE_SESSION_HOP_TOOL` | true | Offer the agent `move_session`: it may propose moving this session to another target. |
 | `sessions.keepSuperseded` | — | — | Keep the history a compaction or a `context_reset` replaced in the session file. |
 | `subagents.agentTaskDescription` | — | — | Replaces the `agent_task` description (max 4096 bytes; the sub-agent types are appended). |
 | `subagents.agentTaskDescriptionFile` | — | — | The same description, read once at start from a file (config dir or absolute; not both). |

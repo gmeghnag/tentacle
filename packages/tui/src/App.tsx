@@ -97,7 +97,7 @@ import { useDock } from "./useDock.ts";
 import { useMouse } from "./useMouse.ts";
 import { usePanels } from "./usePanels.ts";
 import { useQuitClear } from "./useQuitClear.ts";
-import { useTurnDriver } from "./useTurnDriver.ts";
+import { type HopTurnPort, useTurnDriver } from "./useTurnDriver.ts";
 
 export type { AutoAcceptFeed };
 import { CLEARED_ELSEWHERE_NOTICE, CLEARED_NOTICE } from "./clear-command.ts";
@@ -532,6 +532,23 @@ export function App({
   const [hopQueued, setHopQueued] = useState<HopSpec | null>(null);
   const hopQueuedRef = useRef<HopSpec | null>(null);
   const startHopRef = useRef<((spec: HopSpec) => void) | null>(null);
+  /**
+   * The host's view of this TUI's own turns (docs/feat/session-hop.md D9, slice
+   * H5): it folds each event (`hop.turn`), asks the owner at the turn's end
+   * (`hop.turnEnd`), and hands back the line the next prompt must carry
+   * (`hop.takeLine`). Nothing is decided here — the fold, the prompt's text and
+   * the `once`-only rule all live in the cli's pure modules.
+   *
+   * A ref, not state: the driver reads it, the frame never renders it.
+   */
+  const hopTurnPort: HopTurnPort = {
+    event: (event, own) => hop?.turn?.(event, own),
+    end: async (own) => (await hop?.turnEnd?.(own)) ?? { kind: "none" },
+    takeLine: () => hop?.takeLine?.() ?? null,
+    // An approved proposal is an approved `/move`: the ONE place the view moves
+    // starts it (D3), through the ref so no dependency cycle is created.
+    approved: (spec) => startHopRef.current?.(spec),
+  };
   /** The queued-hop driver, read from the effect below (a ref: no dependency cycle). */
   const hopIfQueuedRef = useRef<(() => void) | null>(null);
   const [targetView, setTargetView] = useState<HopTargetView | null>(() =>
@@ -1452,6 +1469,9 @@ export function App({
       wakeIfPending,
       exit,
       runRef,
+      // The hop's view of this TUI's turns (D9/H5): absent where no `hop` prop is,
+      // i.e. exactly the origins where the model is not offered the tool (D8).
+      ...(hop ? { hopTurn: hopTurnPort } : {}),
     });
   // The forward reference the jobs subscription, the initial prompt and the
   // wake read (they are declared and run outside the driver).

@@ -1,3 +1,4 @@
+import { MOVE_SESSION_DECLINED_HINT } from "@tentacle/tools";
 /**
  * The move a TOOL proposed (docs/feat/session-hop.md D9), pure: watch our own
  * turn's events for a `move_session` call that succeeded, and turn its
@@ -10,7 +11,7 @@
  * out loud (`notice`), never silently dropped.
  */
 import type { SessionEvent } from "@tentacle/tui";
-import type { HopSpec } from "@tentacle/tui";
+import type { HopSpec, HopWorkload } from "@tentacle/tui";
 import { hopWorkload } from "@tentacle/tui";
 import { z } from "zod";
 import { untrustedText } from "./untrusted-text.ts";
@@ -191,3 +192,93 @@ export function proposalNotice(spec: HopSpec, reason?: string): string {
   const remove = spec.keep ? "" : " (and remove the workload this hop created)";
   return `_the model proposes moving this session to ${where}${remove}${why}_`;
 }
+
+/** The title of the prompt a proposed move raises (D9). The laptop's words only. */
+export function hopPromptTitle(): string {
+  return "Move this session?";
+}
+
+/** What D9's `session_hop` detail is built from — facts, never the model's prose. */
+export interface HopPromptFacts {
+  /** The container engine a `container` hop would build. Default `docker` (the local default). */
+  readonly engine?: HopPromptEngine;
+  /** The host folder `planWorkspace` would bind-mount. Absent: nothing is mounted. */
+  readonly mount?: string;
+  /** The workload this session LEAVES, when a hop back would decide its fate (`delete`/`kept`). */
+  readonly workload?: string;
+  /**
+   * D6's mount-gate `ask` text. Merged into THIS detail (review M6): the owner
+   * answers one question, not two, and the gate's warning cannot be missed
+   * because it arrived as a second prompt while this one was open.
+   */
+  readonly gate?: string;
+  /** The model's own reason (D9). POD-SUPPLIED: sanitized, and always LAST. */
+  readonly reason?: string;
+}
+
+/**
+ * The `session_hop` prompt's detail (D9, review M6): the FULL text the owner
+ * reads before a proposed move is built. The laptop writes every line that
+ * decides anything — the engine, the complete image reference, the host mount
+ * path (read-write), the inject, the delete intent — and the only daemon-supplied
+ * text (`reason`, a workload name, an image) reaches it through `untrustedText`,
+ * the reason last and labelled as the model's words. It is the SAME prompt the
+ * mount gate's `ask` uses, merged, so a hop never asks twice.
+ */
+export function hopPromptDetail(spec: HopSpec, facts: HopPromptFacts = {}): string {
+  const lines: string[] = [];
+  if (spec.target === "local") {
+    // The one thing a hop to local means, and the reason it needs a yes at all:
+    // after it, the agent's shell commands run on THIS machine, not in a box.
+    lines.push("local — the agent will run commands on this machine");
+  } else if (spec.target === "container") {
+    lines.push(`a ${facts.engine ?? "docker"} container`);
+    lines.push(
+      spec.image === undefined ? "image: the default image" : `image: ${untrustedText(spec.image)}`,
+    );
+    if (facts.mount !== undefined) {
+      // Read-write, and the HOST path: what becomes reachable from the image.
+      lines.push(`mount: ${untrustedText(facts.mount)} (read-write)`);
+    }
+  } else {
+    lines.push(`attach to ${workloadName(spec.workload)} — tentacle is injected into it`);
+    if (spec.workload.engine === "kubernetes") {
+      lines.push("your folder is NOT shared with this pod");
+    }
+  }
+  if (facts.gate !== undefined && facts.gate !== "") {
+    lines.push(untrustedText(facts.gate));
+  }
+  // The fate of what we leave: said OUT LOUD both ways, because silence reads as
+  // a delete — and a hop back is the only place a delete can happen (D5).
+  if (facts.workload !== undefined) {
+    lines.push(
+      spec.keep
+        ? `${untrustedText(facts.workload)} is kept (tentacle attach to return)`
+        : `${untrustedText(facts.workload)} will be DELETED`,
+    );
+  }
+  lines.push("background jobs, MCP servers and approvals are reset; auto-accept is turned off");
+  if (facts.reason !== undefined && facts.reason !== "") {
+    // LAST, and labelled: it is the model's own words, not a fact of the plan.
+    lines.push(`the model's reason: ${untrustedText(facts.reason)}`);
+  }
+  return lines.join("\n");
+}
+
+/** The container engine a hop would build (docker is the local default; `podman` a config's). */
+export type HopPromptEngine = "docker" | "podman";
+
+/** `<engine>:<name>[/<container>]`, sanitized: names may be pod-supplied. */
+function workloadName(workload: HopWorkload): string {
+  const name = untrustedText(workload.name);
+  const container = workload.container === undefined ? "" : `/${untrustedText(workload.container)}`;
+  return `${workload.engine}:${name}${container}`;
+}
+
+/**
+ * D9's "the model is told": the refused proposal's line, prepended to the NEXT
+ * prompt. It is conversation (saved with the message), so the model reads it in
+ * the history and does not propose the same move again as if unanswered.
+ */
+export const MOVE_DECLINED_LINE = MOVE_SESSION_DECLINED_HINT;

@@ -94,7 +94,7 @@ import { createHopFeed } from "./hop-feed.ts";
 import { createHopLeave } from "./hop-leave.ts";
 import type { HopPlace } from "./hop-plan.ts";
 import { createHopRuntime } from "./hop-runtime.ts";
-import { type HopEngineHost, createHopTargets } from "./hop-targets.ts";
+import { type HopEngineHost, createHopTargets, hopPromptFacts } from "./hop-targets.ts";
 import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
 import {
   forgetKept,
@@ -2113,6 +2113,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           notify: (text) => sessions.notices.notify(text),
           // D5: the ONE place that decides a leave, through the verified delete.
           leave: (before, keep) => hopLeave(before, keep),
+          // D9/H5: a proposed move is asked on the SAME broker the TUI installs its
+          // prompt on (AGENTS §7, single broker) — a second one would silently
+          // auto-approve it daemon-side. The prompt's facts come from the plan the
+          // target would use, so the owner reads the real image and mount.
+          permissions,
+          promptFacts: (spec) => hopPromptFacts(config, spec, place.current),
         });
         hopStatus = hopView.status;
         const offTarget = facade.onTarget((view) => {

@@ -25,6 +25,8 @@ import type { TentacleConfig } from "./config.ts";
 import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { attachEngineRuntime, startEngineRuntime } from "./engine-runtime.ts";
 import { engineNoun, laptopWorkspaceInput } from "./engine-select.ts";
+import type { HopPlace } from "./hop-plan.ts";
+import type { HopPromptFacts } from "./hop-proposal.ts";
 import type { HopShared } from "./hop-runtime.ts";
 import { removeVerifiedKept } from "./kept-cmd.ts";
 import { forgetKept, keptDir, recordKept } from "./kept-index.ts";
@@ -307,8 +309,52 @@ async function attachTarget(
   }
 }
 
-/** The engine a `/move container` builds on: docker or podman, never a pod. */
-function containerEngine(config: TentacleConfig): EngineKind | null {
+/**
+ * The facts a proposed move's prompt shows (docs/feat/session-hop.md D9/M6): the
+ * mount the plan would really use, the engine a container hop would build, and the
+ * workload this session LEAVES (so a `keep: false` is stated before it happens).
+ * PURE (a `planWorkspace` call is a decision, not IO), so `hopPromptDetail` — the
+ * text the owner reads — is built from facts and not from the engine's later word.
+ *
+ * It never throws: a plan that cannot even be made says nothing about a mount,
+ * which is exactly what the prompt must then show (never an invented path).
+ */
+export function hopPromptFacts(
+  config: TentacleConfig,
+  _spec: HopSpec,
+  current: HopPlace,
+): HopPromptFacts {
+  const facts: { engine?: "docker" | "podman"; mount?: string; workload?: string } = {};
+  const engine = containerEngine(config);
+  if (engine === "docker" || engine === "podman") {
+    facts.engine = engine;
+  }
+  if (current.kind === "workload") {
+    facts.workload = workloadLabel(current);
+  }
+  try {
+    const plan = planWorkspace(
+      laptopWorkspaceInput({
+        kind: "docker",
+        noMount: false,
+        cwd: config.cwd,
+        configDir: config.configDir,
+        binDir: "/usr/local/bin",
+        hide: [],
+      }),
+    );
+    if (plan.kind === "mount") {
+      facts.mount = plan.mount.target;
+    }
+  } catch {
+    // No plan (no engine host, an unresolvable path): the prompt says no mount.
+  }
+  return facts;
+}
+
+/** The engine a `/move container` builds on: docker or podman, never a pod. */ function containerEngine(
+  config: TentacleConfig,
+): EngineKind | null {
   const chosen = config.engine;
   if (chosen === "docker" || chosen === "podman") {
     return chosen;

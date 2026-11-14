@@ -1413,3 +1413,182 @@ file is touched by this round, and the re-run is green — runner contention, no
 **Gate:** `bun test packages/cli packages/tui`: 4825 pass, 0 fail. `bun run lint`: 1130 files, clean. `bun run typecheck`: 0. I did not re-run the full `bun test`; the executor reports it green.
 
 *— claude-opus-5-5, 2026-11-14*
+
+## Execution — H5
+
+### H5 — the agent's `move_session` proposal, and the prompt it becomes
+
+*— claude-sonnet-4-5-20250929, 2026-11-14*
+
+**Load-bearing check re-run FIRST** (as instructed, on this branch's tree). The
+plan's rig in `.tentacle/tmp/session-hop/hop-repro.ts` points at the OLD worktree
+(`../../worktrees/session-hop/...`), so it was re-run from a copy in this tree
+(`.tentacle/tmp/session-hop/h5/hop-repro.ts`, imports rewritten to `../../../../`):
+
+```
+$ bun .tentacle/tmp/session-hop/h5/hop-repro.ts
+B uid == A uid: true
+B model saw: sys | hello from local | reply-A
+after B: system:sys | user:hello from local | assistant:reply-A | user:hello from container | assistant:reply-B
+files: 1 one .jsonl: true
+```
+
+PASS: the same uid, the laptop record as the seed on a fresh daemon, one
+`<uid>.jsonl`, no aside file. The assumption H5 stands on is intact, so no STOP
+condition applied.
+
+**As built, in dependency order.**
+
+1. **`packages/config` — `sessionHop.tool` (the gate, D9/decision 6).**
+   `schema.ts` (a `.strict()` section like `contextReset`), `defaults.ts`
+   (`DEFAULT_SESSION_HOP_TOOL = true`), `resolve.ts` (`SessionHopConfig`, the
+   `sessionHopTool` provenance, `TENTACLE_SESSION_HOP_TOOL`), `load.ts`
+   (on `TentacleConfig`), `profile.ts` (per-key merge), `key-docs.ts` (the
+   section + leaf entries, whose `profiles.*` mirror `derive()` builds). The
+   README table was regenerated with `bun run docs:config`.
+2. **`packages/tools/src/move-session.ts` — the tool (D9).** `permission:
+   "none"` (there is no daemon-side effect to authorize, and an `ask` here would
+   ask the owner twice, the daemon's copy being the one a standing approval can
+   wave through), `concurrency: "exclusive"`, a zod schema that is the `HopSpec`
+   the typed `/move` produces, and an `execute` that re-validates its own input
+   and answers one sentence. `MOVE_SESSION_PROPOSED` says "Do not assume the move
+   happened". `reason` is capped at 500; a workload name must match
+   `^[A-Za-z0-9][A-Za-z0-9._-]*$` (253 max), the same grammar as the typed path.
+3. **`packages/cli/src/wiring.ts` — registration (review M5).**
+   `BuildAgentOptions.moveSession?: true` (a boolean because that site has no
+   daemon KIND), and the registration at the `contextReset` site:
+   `options.moveSession === true && config.sessionHop.tool`. Set by
+   `worker.ts` (its one `workerAgentFactory`) and the pod daemon
+   (`serve.ts`'s `podSessionHost`, both branches — tunnel and own-model) via
+   `tunnelledAgent`'s options. `serve`, in-process, one-shot and child builds
+   never set it.
+4. **`packages/agent/src/subagent.ts` — a child never gets it.** Added
+   `MOVE_SESSION_TOOL_NAME` to BOTH "never a child" lists (`childTools`' filter
+   and `readOnlyType`'s). This was a REAL leak, not a theoretical one: `general`
+   is `tools: "all"`, so the tool was inherited by every general child, whose
+   turn is not the one the laptop watches (`own: false`) — it would have been
+   told "Proposed" about a prompt nobody is ever asked.
+5. **`packages/cli/src/hop-proposal.ts` — the prompt's text (review M6).**
+   `hopPromptTitle`, `HopPromptFacts`, `hopPromptDetail(spec, facts)`: the
+   engine, the FULL image (or "the default image"), the host mount path
+   read-write, the inject + "your folder is NOT shared" for k8s, the
+   keep/DELETED intent for the workload being left, what gets reset — then the
+   model's `reason` LAST and labelled, everything daemon-supplied through
+   `untrustedText`. D6's mount-gate `ask` MERGES into this same text.
+6. **`packages/cli/src/hop-turn.ts` (new) — the turn-end decision (D9).** Pure:
+   `hopTurnStep`/`hopTurnEnd` (a per-turn watch on `hopProposalStep`, an
+   own-turn-only fold, ended state so a late result cannot re-open it),
+   `hopPromptRequest` (a `session_hop` request), `hopProposalOutcome`
+   (`allowed` is the only yes; `dismissed` is never one), `hopAskAtTurnEnd`
+   (asks through an INJECTED `ask`, so no broker is imported and a test's spy is
+   the single-broker proof), `moveGuideLine`/`MOVE_DECLINED_LINE` (review M7).
+7. **`packages/cli/src/hop-feed.ts` — the feed's half.** New deps `permissions`
+   (the ONE broker) and `promptFacts`; `turn`/`turnEnd`/`takeLine` on `HopFeed`.
+   A decline stores the line for the next prompt, a commit stores the moved
+   line, `takeLine` CONSUMES it. No broker → nothing can be approved (honest: a
+   proposal nobody can be asked about moves nothing).
+8. **`packages/cli/src/hop-targets.ts` — `hopPromptFacts`.** The mount the plan
+   would really use (`planWorkspace`), the engine a container hop would build,
+   the workload being left. Never throws.
+9. **`packages/tui` — the App's two facts, no new effect.** `HopFeed.turn/
+   turnEnd/takeLine` (`app-types.ts`), `HopTurnPort` (`useTurnDriver.ts`,
+   satisfying `useExhaustiveDependencies` by name, not by disabling it),
+   `hopWithLine` (the ONE concatenation, exported for its test). The driver
+   forwards each event (`own = opts.own !== undefined && !opts.foreign`) inside
+   `streamTurn`, asks once at the settle (`hopTurn.end`), and starts an approved
+   spec through the App's `startHopRef` — the ONE place the view moves (D3).
+   `App` supplies the port, absent exactly where `hop` is absent (D8).
+10. **`packages/cli/src/main.ts`** passes `permissions` (the same instance the
+    facade and the TUI share) and `promptFacts: hopPromptFacts(...)` to
+    `createHopFeed`.
+
+**Drift from the Implementation, and why.**
+
+- **The plan's H5 file list omits the TUI, but D9's prompt needs it.** The
+  broker lives with the facade and the turn's events live in the App, so two
+  small additive seams were required (`HopFeed.turn/turnEnd/takeLine`,
+  `HopTurnPort`). All the DECIDING stays in `hop-turn.ts` (pure), per §7.
+- **The declined/moved line is CONSUMED by `takeLine`, not read from a
+  `HopNextPromptLine` union.** The cli first had its own `withHopLine`; the
+  driver needs the same concatenation, and two implementations of "join one line
+  to a prompt" is exactly the duplication §7 forbids. The cli keeps the TEXT, the
+  driver keeps the join (`hopWithLine`), and the cli's copy was deleted.
+- **`hopPromptFacts` lives in `hop-targets.ts`, not `hop-proposal.ts`.** It
+  calls `planWorkspace`, which is a `cli` engine-side decision; `hop-proposal.ts`
+  stays IO-free and takes the facts as an argument.
+- **`MOVE_GUIDE_LINE` became `moveGuideLine(where)`** — it names the place, and a
+  constant could not.
+- **The tool duplicates the workload grammar** (`@tentacle/tools` may not depend
+  on the TUI). The laptop's `hopSpecOf` remains the authority and re-checks every
+  argument through `hopWorkload`, so the two cannot disagree (the stricter one
+  refuses first); the duplication is commented at the regex.
+
+**Red first.** Each new module's test file was written against a tree without it:
+`move-session.test.ts` failed to resolve `../src/move-session.ts`;
+`hop-prompt.test.ts` failed on `MOVE_GUIDE_LINE` not being exported;
+`hop-turn.test.ts` failed on the real property (`hopAskAtTurnEnd` dropped the
+proposal's `reason`, and `hopPromptDetail` said "DELETED" where the test expected
+"delete"). The durable proof is the mutation table (§9), not those first runs.
+
+**Mutation checks** (each broken in the final tree, the narrow file(s) run,
+restored; `md5` printed before and after every restore — the script is
+`.tentacle/tmp/session-hop/h5/mutate.sh`).
+
+| # | mutation | result |
+|---|---|---|
+| M1 | `autoApproves` answers `session_hop` (the plan's named mutation) | **1 fail** — "auto-accept can NEVER answer it" |
+| M2 | `hopAskAtTurnEnd` never asks (the `!ended` guard → `if (true)`) | **10 fail** across both turn files |
+| M3 | a refusal/`dismissed` read as a yes | **1 fail** — the declined-outcome row |
+| M4 | `hop-feed` asks about a FOREIGN turn (`!own` guard dropped) | **1 fail** — the guard row |
+| M5 | the declined line is never kept | **2 fail** — declined line + consumed-once |
+| M6 | `takeLine` never consumes | **2 fail** |
+| M7 | `move_session` registered for EVERY build (review M5) | **2 fail** — `serve`/in-process rows |
+| M8 | the `sessionHop.tool` gate ignored (decision 6) | **1 fail** — its off row |
+| M9 | `move_session` dropped from the child filter | **2 fail** — both child rows |
+| M10 | the proposal's `reason` dropped from the prompt | **1 fail** — reason-last row |
+| M11 | the mount dropped from the prompt | **1 fail** — read-write row |
+| M12 | the delete intent hidden | **1 fail** — keep/delete row |
+| M13 | the tool answers "Moved." instead of "Proposed…" | **3 fail** — the propose-only rows |
+
+All 13 reverted; `md5` identical before and after each, no `.mutbak` left.
+
+**M4 was VACUOUS at first, and the TEST was fixed (§9).** `hopTurnStep` already
+drops a foreign turn's events, so the `turnEnd` `!own` guard was unreachable from
+the "foreign turn" row (on its own: `0 fail`). `own` at the fold and `own` at the
+turn's end are two separate facts the driver reports separately, so a new row
+folds a proposal as OWN and ends the turn as FOREIGN: the guard is then what
+holds, and the mutation fails.
+
+**Tests.** `packages/tools/test/move-session.test.ts` (12) ·
+`packages/cli/test/move-session-wiring.test.ts` (4, the real `buildAgent`) ·
+`packages/agent/test/subagent-move-session.test.ts` (2, the real
+`createSubagentRunner` over a registry that HOLDS the tool) ·
+`packages/cli/test/hop-prompt.test.ts` (13) · `packages/cli/test/hop-turn.test.ts`
+(13) · `packages/cli/test/hop-feed-turn.test.ts` (12, the real `createHopFeed`
+over a spy broker). Existing rows moved: none.
+
+**Not in this slice (deliberately).** No attach flow beyond the factory (H6's D7
+checks), no live docker test (H7), no `protocol.d/` note and no schema
+regeneration (D10: no method, update kind or field changed — `session_hop` is a
+laptop-internal `PermissionRequest.kind` and `move_session` is a tool definition).
+
+**Changelog.** H1's `changelog.d/session-hop.added.md` already carries the
+feature's bullet including the tool and its prompt (it was written ahead for this
+slice), so H5 adds only what is NEW and user-visible beyond it:
+`changelog.d/session-hop.changed.md` for the `sessionHop.tool` setting.
+
+**Gate (final tree).** `bun run typecheck` (`tsc --noEmit && tsc -p apps/mobile`)
+→ 0 · `bun run lint` (`biome check .`) → `Checked 1245 files`, 0 errors / 0
+warnings (the baseline is clean) · `bun test` → **9192 pass, 3 skip** (the
+documented opt-ins: live-k8s, live-docker, the real-socket keepalive), **0 fail**
+across 664 files. No protocol file changed, so `packages/protocol/schema/protocol.json`
+was NOT regenerated and no `protocol.d/` note was written (D10). Formatting and
+import order are the repo's (`bunx biome check --write` on the touched files).
+
+**Not re-verified here:** the App-driven path end to end (a real `move_session`
+turn in `ink-testing-library` driving `hop.onApproved` into `startHop`) has no
+frame test of its own; its two halves are covered (`hop-feed-turn.test.ts` for
+the feed, `session-hop.test.tsx` for `startHop`). To verify: render the App with
+a `hop` feed whose `turnEnd` resolves `{kind:"approved"}`, after one
+`tool_start`/`tool_result` pair on `move_session`, and assert the status row
+starts with `moving to`.
