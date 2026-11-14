@@ -190,6 +190,17 @@ async function main(): Promise<number> {
   const { startMockModel } = await import("./mock-model.ts");
   const mock = startMockModel({ holdMs: 120_000 });
   const daemonPort = freePort();
+  // The MOBILE RELAY, locally (docs/feat/mobile-relay.md R6: "dev and tests run
+  // the relay locally"). In-process, on its own ephemeral port, no TLS — the
+  // daemon accepts `ws://` to a loopback host (`isRelayUrl`), and `serve` is
+  // pointed at it with `--relay`.
+  // Relative, not `@tentacle/relay`: the app does not (and must not) depend on
+  // the deployable service — the harness imports it across apps, like the
+  // daemon's own relay tests do (`packages/daemon/test/relay-link.test.ts`).
+  const { startRelay } = await import("../../relay/src/server.ts");
+  const relay = startRelay({ host: "127.0.0.1", port: 0, onLog: () => {} });
+  const relayUrl = relay.url;
+  console.log(`relay on ${relayUrl}`);
 
   // The real `serve`, from source, on a private config dir and the mock model.
   // Spawned through a function because flow 05 stops it and starts it again on
@@ -204,6 +215,11 @@ async function main(): Promise<number> {
         `${daemonPort}`,
         "--token",
         "e2e-token",
+        // The relay is ON for every flow, pointed at the LOCAL relay above: a
+        // harness must never reach relay.tentacle.so (no real infra), and flow
+        // 22's whole subject is the relay path.
+        "--relay",
+        relayUrl,
       ],
       {
         // The daemon's cwd IS its session cwd (each session's tools are confined
@@ -302,8 +318,18 @@ async function main(): Promise<number> {
         modelReplies: () => mock.replies,
         editCalls: () => mock.calls,
         pairStart: async (options) => {
-          const started = await pairing.start(options);
-          return { payload: started.payload, computerId: started.computerId };
+          // Flow 22 (`ttlMs=-1`, its flag for "the relay-only case") opens its
+          // window WITHOUT the harness's own `--address`: `serve` here binds
+          // LOOPBACK, which contributes no bind-derived address to a QR
+          // (`pair-addresses.ts`), so the record's relay address is the only one
+          // a phone can dial — the zero-configuration case the relay exists for,
+          // and the one R5b made pairable at all. Every other flow keeps the
+          // loopback address so it can be driven from the simulator directly.
+          const relayOnly = options.ttlMs === -1;
+          const started = relayOnly
+            ? await pairing.startRelayOnly()
+            : await pairing.start(options.ttlMs === undefined ? {} : { ttlMs: options.ttlMs });
+          return { payload: started.payload, computerId: started.computerId, relayOnly };
         },
         pairConfirm: () => pairing.confirm(),
         pairAnswer: (value) => pairing.answer(value),
@@ -311,6 +337,10 @@ async function main(): Promise<number> {
         pairReset: () => pairing.reset(),
         pairClaimed: () => pairing.claimed(),
         pairDeviceId: () => pairing.lastDeviceId(),
+        // Flow 22's daemon truth (docs/feat/mobile-relay.md R6): what the pairing
+        // payload ACTUALLY carried. The phone can only show "1 address"; whether
+        // that address is the relay is what the flow is about.
+        relayQr: async () => ({ payload: pairing.lastPayload() }),
         faceIdEnroll: async () => {
           // Two commits, as Step 0 found: the `-s` alone only SETS the default;
           // the `-p` post is what makes `isEnrolledAsync()` flip to true.
@@ -412,6 +442,9 @@ async function main(): Promise<number> {
     }
     children.clear();
     mock.stop();
+    // The local relay is in THIS process, so it needs an explicit stop (a live
+    // server keeps the event loop, and therefore the run, alive).
+    relay.stop();
   }
 }
 
@@ -610,6 +643,11 @@ export const FLOWS: readonly string[] = [
   "19-lock-unlock-button",
   "20-lock-immediately",
   "21-export-logs",
+  // docs/feat/mobile-relay.md R6: the relay-only pairing + session. LAST of all,
+  // because it is the only flow that pairs over a record with no direct address
+  // (the harness restarts `serve` for its window), and a failure there must not
+  // colour the flows whose daemon is the shared one.
+  "22-relay-only",
 ];
 
 /**

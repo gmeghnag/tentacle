@@ -29,10 +29,22 @@ export interface PairStarted {
 export interface PairingHooks {
   /** Open a pairing window; resolves as soon as `pair` printed its line. */
   start(options?: { readonly ttlMs?: number }): Promise<PairStarted>;
+  /**
+   * Open a window with NO injected `--address` (docs/feat/mobile-relay.md R6,
+   * flow 22). With `serve` bound to loopback and the relay on, the pairing record
+   * then carries the relay address and nothing else: the relay is the only path a
+   * phone can take, which is what that flow proves.
+   */
+  startRelayOnly(): Promise<PairStarted>;
   /** The compare code the terminal is showing (waits for the phone's claim). */
   confirm(): Promise<{ readonly sas: string }>;
   /** The device id `pair` reported for the LAST completed pairing (`undefined` before one). */
   lastDeviceId(): string | undefined;
+  /**
+   * The payload line the last `pair` printed — what its QR (and the pasted line)
+   * carried. Throws before any window has opened, so a flow cannot read stale text.
+   */
+  lastPayload(): string;
   /**
    * Answer the computer's `[y/N]` — AFTER the flow has compared the two codes.
    * That order is the whole point (P1): the human looks at both screens before
@@ -91,6 +103,13 @@ export function createPairingHooks(deps: PairingDeps): PairingHooks {
   /** The device id of the last COMPLETED pairing (`pair`'s success line). */
   let lastPaired: string | undefined;
   /**
+   * The payload line the last window printed (docs/feat/mobile-relay.md R6): the
+   * harness's answer for a flow that must know what the QR actually carried. Kept
+   * after the window closes — a flow reads it once `pair` has printed, which is
+   * before the phone even pastes.
+   */
+  let lastPayload: string | undefined;
+  /**
    * Bumped by `stop()`. A `pair` whose window is swept while it is still polling
    * exits on its own (the daemon's `pair` gives up when its window's files are
    * gone); one already parked in `ask` answers `n`. Either way it must not touch
@@ -99,7 +118,9 @@ export function createPairingHooks(deps: PairingDeps): PairingHooks {
    */
   let generation = 0;
 
-  async function start(options: { readonly ttlMs?: number } = {}): Promise<PairStarted> {
+  async function start(
+    options: { readonly ttlMs?: number; readonly relayOnly?: boolean } = {},
+  ): Promise<PairStarted> {
     if (open !== undefined) {
       // One window at a time (F-H3): a second would let a flow's paste land in
       // the PREVIOUS flow's window.
@@ -112,13 +133,19 @@ export function createPairingHooks(deps: PairingDeps): PairingHooks {
     open = window;
     const done = pairCommand({
       configDir: deps.configDir,
-      extraAddresses: [deps.address],
+      // `relayOnly` (docs/feat/mobile-relay.md R6, flow 22) hands `pair` NO
+      // `--address`: `serve` binds loopback here, which contributes no
+      // bind-derived address, so the record's own relay address is the only one
+      // the QR carries. Every other flow keeps the loopback address, so the
+      // simulator can drive the daemon directly (and never through the relay).
+      ...(options.relayOnly === true ? {} : { extraAddresses: [deps.address] }),
       interfaces: [],
       qr: false,
       pollMs: 20,
       ...(options.ttlMs === undefined ? {} : { ttlMs: options.ttlMs }),
       out: (line) => {
         window.payload = line.trim();
+        lastPayload = line.trim();
         // `pair`'s success line carries the DEVICE id it registered
         // (`Paired 'iPhone' (5cb71e…). …`): the flow needs it to revoke exactly
         // this phone, never a previous run's device of the same name.
@@ -166,6 +193,14 @@ export function createPairingHooks(deps: PairingDeps): PairingHooks {
 
   return {
     start,
+    startRelayOnly: () => start({ relayOnly: true }),
+    /** The line `pair` printed for the open (or last closed) window: flow 22's truth. */
+    lastPayload(): string {
+      if (lastPayload === undefined) {
+        throw new Error("no pairing window has printed a payload yet");
+      }
+      return lastPayload;
+    },
     async confirm() {
       const window = open;
       if (window === undefined) {
