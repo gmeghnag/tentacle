@@ -7,6 +7,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./noise": "./src/noise-channel.ts",
+    "./push": "./src/push-seal.ts",
     "./relay-id": "./src/relay-id.ts"
   },
   "dependencies": {

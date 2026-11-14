@@ -17,7 +17,6 @@ import {
   type DockOutcome,
   applyLateOutcome,
   clickDock,
-  downEntersList,
   downToDock,
   reconcile,
 } from "./background-focus.ts";
@@ -32,17 +31,16 @@ import {
 } from "./blink.ts";
 import { idleChord } from "./chord.ts";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
-import type { QuitConfirmFacts } from "./commands.ts";
+import { type QuitConfirmFacts, paletteStep } from "./commands.ts";
 import { dispatchCommand } from "./commands/dispatch.ts";
-import { recall } from "./history.ts";
 import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
 import type { HopSpec } from "./hop-command.ts";
 import { hopShownCwd, hopStatusRow } from "./hop-status.ts";
 import { startIdleWarm } from "./idle-warm.ts";
-import { resolveLineInput } from "./input-actions.ts";
 import { JOB_TAIL_SHOWN, exitOutcome, jobOutputEntry, refreshDue } from "./job-drawer.ts";
 import { type KeyHost, executeEffects } from "./keys/execute.ts";
 import { PURE_LAYERS } from "./keys/layers.ts";
+import { resolveLineEffects } from "./keys/line-layer.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
 import { type OpenPanel, panelClick } from "./panel.ts";
@@ -1604,13 +1602,45 @@ export function App({
     setDock,
     toggleAgents,
     toggleExpandAll: () => setExpandAll((v) => !v),
-    moveCommandSel: (step) =>
-      setCommandIndex((i) => {
-        const n = paletteCommands.length;
-        return step === -1 ? (Math.min(i, n - 1) - 1 + n) % n : (Math.min(i, n - 1) + 1) % n;
-      }),
+    moveCommandSel: (step) => setCommandIndex((i) => paletteStep(i, paletteCommands.length, step)),
     runCommand: (name) => handleCommand(name),
     pushNotice,
+    // --- the line-editing tail (S12): each one call, decided by `line-layer.ts`.
+    fieldInsert: (text) => field.insert(text),
+    fieldDeleteBack: () => field.deleteBack(),
+    fieldDeleteWord: (dir) => field.deleteWord(dir),
+    fieldMoveCursor: (delta, extend) => field.moveCursor(delta, extend),
+    fieldMoveWord: (dir, extend) => field.moveWord(dir, extend),
+    fieldMoveLine: (edge, extend) => field.moveLine(edge, extend),
+    fieldMoveVertical: (dir, extend) => field.moveVertical(dir, extend),
+    setHistoryCursor: (index, draft) => {
+      histIndexRef.current = index;
+      draftRef.current = draft;
+    },
+    dockDown: () => setDock((prev) => downToDock(prev, dockIds())),
+    scroll: (dir) => setScrollOffset((o) => applyScroll(o, dir, total, viewport)),
+    pasteClipboard: () => {
+      // Ctrl+V: read the OS clipboard and insert at the cursor. (The terminal's
+      // own paste — Cmd+V on macOS — never reaches us as a key; it arrives as a
+      // text chunk, routed to an "insert" action instead.)
+      void paste().then(
+        (text) => {
+          const clean = flattenPasted(text);
+          // `pasteTarget`'s rule again (S13), with no reply to consider: this
+          // path is the MAIN input's Ctrl+V — the dialog layer already turned a
+          // reply-field Ctrl+V into `pasteReply`, so only the panel can veto it.
+          if (
+            pasteTarget({ clean, replyOpen: false, panelOpen: panelRef.current !== null }) ===
+            "attach"
+          ) {
+            routeAttachRef.current(clean);
+          }
+        },
+        () => pushNotice("_Clipboard unavailable._"),
+      );
+    },
+    submit: (text) => submit(text),
+    removeLastChip: () => setAttach((draft) => removeLastChip(draft)),
   };
 
   useInput((char, key) => {
@@ -1691,116 +1721,29 @@ export function App({
       return;
     }
 
-    // Line editing works while idle AND while a turn runs (so a task can be
-    // typed and queued for steering). The routing decision is pure
-    // (`resolveLineInput`); here we only execute it. History recall is
-    // inherently stateful (session refs + the live draft), so it stays a local
-    // closure the "history" action calls into.
-    const historyStep = (dir: -1 | 1): void => {
-      // On the draft slot the live value IS the draft (saved by the first Up);
-      // inside history the saved draft is what a Down past the newest restores.
-      const onDraftSlot = histIndexRef.current >= historyRef.current.length;
-      const prevIndex = histIndexRef.current;
-      const res = recall(
-        { items: historyRef.current, index: prevIndex },
-        dir,
-        onDraftSlot ? field.value : draftRef.current,
-      );
-      histIndexRef.current = res.index;
-      draftRef.current = res.draft;
-      // A no-op recall (e.g. Up with an empty history) must not touch the
-      // field, or a mid-buffer cursor would jump to the end.
-      if (res.value === field.value && res.index === prevIndex) {
-        return;
-      }
-      // Shell convention: the cursor lands at the end of the recalled entry.
-      field.set(res.value);
-    };
-
-    const action = resolveLineInput(char, key, { value: field.value, cursor: field.cursor });
-    // DOWN's fourth meaning (mockup 02's table): on the draft slot, with nothing
-    // below to move to and no history walk left, it walks into the list. The
-    // decision is pure (`downEntersList`); this only executes it.
-    if (
-      key.downArrow &&
-      !key.shift &&
-      (action.kind === "history" || action.kind === "moveVertical") &&
-      downEntersList({
-        action: action.kind,
-        onDraftSlot: histIndexRef.current >= historyRef.current.length,
+    // The LINE-EDITING tail (S12): the terminal consumer, reached only when the
+    // 13 pure layers and the mouse layer all passed. Its decisions (history
+    // recall and its no-op guard, DOWN's walk into the dock, Backspace's chip
+    // rule) are `keys/line-layer.ts`'s, pure; here we only read the sources the
+    // inline tail read, at the same moment, and execute them through the port.
+    executeEffects(
+      resolveLineEffects({
+        char,
+        key,
+        value: field.value,
+        cursor: field.cursor,
+        history: {
+          items: historyRef.current,
+          index: histIndexRef.current,
+          draft: draftRef.current,
+        },
         paletteOpen,
-        visible: dockVisible(),
-        focus: dockRef.current.focus,
-      })
-    ) {
-      setDock((prev) => downToDock(prev, dockIds()));
-      return;
-    }
-    switch (action.kind) {
-      case "moveVertical":
-        field.moveVertical(action.dir, action.extend);
-        return;
-      case "history":
-        historyStep(action.dir);
-        return;
-      case "scroll":
-        setScrollOffset((o) => applyScroll(o, action.dir, total, viewport));
-        return;
-      case "pasteClipboard":
-        // Ctrl+V: read the OS clipboard and insert at the cursor. (The terminal's
-        // own paste — Cmd+V on macOS — never reaches us as a key; it arrives as a
-        // text chunk, routed to an "insert" action instead.)
-        void paste().then(
-          (text) => {
-            const clean = flattenPasted(text);
-            // `pasteTarget`'s rule again (S13), with no reply to consider: this
-            // path is the MAIN input's Ctrl+V — the dialog layer already turned a
-            // reply-field Ctrl+V into `pasteReply`, so only the panel can veto it.
-            if (
-              pasteTarget({ clean, replyOpen: false, panelOpen: panelRef.current !== null }) ===
-              "attach"
-            ) {
-              routeAttachRef.current(clean);
-            }
-          },
-          () => pushNotice("_Clipboard unavailable._"),
-        );
-        return;
-      case "newline":
-        // A trailing `\` before the cursor is a line continuation, not a submit.
-        field.deleteBack();
-        field.insert("\n");
-        return;
-      case "submit":
-        submit(field.value);
-        return;
-      case "moveWord":
-        field.moveWord(action.dir, action.extend);
-        return;
-      case "moveCursor":
-        field.moveCursor(action.delta, action.extend);
-        return;
-      case "moveLine":
-        field.moveLine(action.edge, action.extend);
-        return;
-      case "deleteBack":
-        // Backspace on an EMPTY input with chips removes the last one
-        // (docs/feat/attachments-tui.md decision 13): the smallest control.
-        if (field.value === "" && field.cursor === 0 && attachRef.current.chips.length > 0) {
-          setAttach((draft) => removeLastChip(draft));
-          return;
-        }
-        field.deleteBack();
-        return;
-      case "deleteWord":
-        field.deleteWord(action.dir);
-        return;
-      case "insert":
-        field.insert(action.text);
-        return;
-      case "none":
-        return;
-    }
+        dockVisible: dockVisible(),
+        dockFocus: dockRef.current.focus,
+        chipCount: attachRef.current.chips.length,
+      }),
+      keyHost,
+    );
   });
 
   // --- the frame (S10) ------------------------------------------------------

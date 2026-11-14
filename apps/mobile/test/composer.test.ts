@@ -10,6 +10,7 @@ import {
   REFUSED_NOTICE,
   composerAction,
   restoreAfterFailure,
+  returnKeyAction,
 } from "../src/composer.ts";
 import type { TurnRow } from "../src/transcript-rows.ts";
 
@@ -115,5 +116,39 @@ describe("restoreAfterFailure (F13: a refused send puts the text back)", () => {
   test("the two notices say what happened, without daemon text", () => {
     expect(REFUSED_NOTICE).toContain("another device");
     expect(FAILED_NOTICE).toContain("back in the field");
+  });
+});
+
+describe("returnKeyAction (B2: Return sends, owner Q1)", () => {
+  test("send / queue / send-later: Return does what the button does", () => {
+    for (const action of [
+      composerAction(input({ text: "hi" })),
+      composerAction(input({ text: "hi", turn: OWN })),
+      composerAction(input({ text: "hi", link: "down" })),
+    ]) {
+      expect(["send", "queue", "send-later"]).toContain(action.kind);
+      expect(returnKeyAction(action)).toEqual(action);
+    }
+  });
+
+  test("stop → null: Return on an empty field never cancels a running turn", () => {
+    for (const turn of [OWN, FOREIGN]) {
+      const action = composerAction(input({ turn }));
+      expect(action.kind).toBe("stop");
+      expect(returnKeyAction(action)).toBe(null);
+    }
+  });
+
+  test("none → null: blank, ended, dead link, photos-while-running", () => {
+    for (const over of [
+      { text: "   " },
+      { text: "hi", ended: "closed" as const },
+      { link: "down" as const },
+      { text: "hi", turn: OWN, photos: 1 },
+    ]) {
+      const action = composerAction(input(over));
+      expect(action.kind).toBe("none");
+      expect(returnKeyAction(action)).toBe(null);
+    }
   });
 });

@@ -25,6 +25,7 @@ import {
   FAILED_NOTICE,
   REFUSED_NOTICE,
   restoreAfterFailure,
+  returnKeyAction,
 } from "./composer.ts";
 import type { OutboxDriver } from "./outbox-driver.ts";
 import type { OutboxStore } from "./outbox-store.ts";
@@ -139,6 +140,11 @@ export interface SessionScreenController {
   setDraft(text: string): void;
   /** A tap on the composer's one button. */
   press(): void;
+  /**
+   * The keyboard's Return (B2): `press` only when `returnKeyAction` allows it on
+   * the CURRENT action — never a Stop, never a no-op clear.
+   */
+  pressReturn(): void;
   /** The link went up/down (the client's `onLinkStatus`): the banner's `reconnecting`. */
   link(up: boolean): void;
   /** The person's tap on a link: the sheet's confirmation is the screen's job. */
@@ -628,6 +634,13 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       emit();
     },
     press,
+    pressReturn() {
+      // The gate reads the action NOW, as `press` does: a second Return before
+      // the screen re-rendered must not see a stale `send` and then Stop.
+      if (returnKeyAction(view().composer.action) !== null) {
+        press();
+      }
+    },
     link(up) {
       feed.link(up);
     },

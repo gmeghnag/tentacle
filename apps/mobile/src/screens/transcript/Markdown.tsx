@@ -24,11 +24,18 @@ export interface MarkdownProps {
   readonly palette: Palette;
   /** A link tap, by its full href: the SCREEN confirms it (never opened here). */
   readonly onLink: (href: string) => void;
+  /**
+   * The fill behind code (inline and blocks): it must differ from the surface
+   * the text sits on (B4 — `card` inside the `card`-coloured user bubble was
+   * invisible). Default `card`, for text on the page background.
+   */
+  readonly codeBackground?: string;
 }
 
 interface Ctx {
   readonly palette: Palette;
   readonly onLink: (href: string) => void;
+  readonly codeBackground: string;
 }
 
 function inline(items: readonly MdInline[], ctx: Ctx, key: string): JSX.Element[] {
@@ -39,7 +46,7 @@ function inline(items: readonly MdInline[], ctx: Ctx, key: string): JSX.Element[
         return <Text key={id}>{item.text}</Text>;
       case "code":
         return (
-          <Text key={id} style={[styles.inlineCode, { backgroundColor: ctx.palette.card }]}>
+          <Text key={id} style={[styles.inlineCode, { backgroundColor: ctx.codeBackground }]}>
             {item.text}
           </Text>
         );
@@ -88,7 +95,7 @@ function codeBlock(
     <View
       key={`code-${index}`}
       testID={`code-${index}`}
-      style={[styles.codeBlock, { backgroundColor: ctx.palette.card }]}
+      style={[styles.codeBlock, { backgroundColor: ctx.codeBackground }]}
     >
       {/* One Text per span, on one line each: highlight.js preserves newlines in
           its spans, so the block reads exactly as written. */}
@@ -150,7 +157,10 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
     switch (block.kind) {
       case "paragraph":
         return (
-          <Text key={id} style={styles.paragraph}>
+          // An explicit colour (B4): RN's default text colour is black, so in dark
+          // mode an answer was black on black. List bodies and quotes are
+          // paragraphs too, and inline runs inherit it.
+          <Text key={id} style={[styles.paragraph, { color: ctx.palette.label }]}>
             {inline(block.children, ctx, id)}
           </Text>
         );
@@ -229,8 +239,8 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
  * Render a parsed row. A text over `PARSE_MAX_CHARS` arrives `chunked`: it is
  * shown as plain text with what was held back (plan F21).
  */
-export function Markdown({ parsed, palette, onLink }: MarkdownProps): JSX.Element {
-  const ctx: Ctx = { palette, onLink };
+export function Markdown({ parsed, palette, onLink, codeBackground }: MarkdownProps): JSX.Element {
+  const ctx: Ctx = { palette, onLink, codeBackground: codeBackground ?? palette.card };
   if (parsed.kind === "chunked") {
     return (
       <View testID="md-chunked">

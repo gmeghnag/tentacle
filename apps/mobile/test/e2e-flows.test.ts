@@ -42,19 +42,27 @@ const COMPOSE_FLOWS = [
   "16-offline-outbox",
   "17-outbox-changed",
   "18-photos",
+  // docs/feat/mobile-ui-polish.md Slice 0 (B1/B2): the same rules — its own
+  // session, an id inside the compose bar, the daemon's history last.
+  "23-composer-keyboard",
 ] as const;
 
 /**
  * The flows that end BEFORE a computer is paired: they pair through their own
  * steps rather than the shared prefix, and so have no `computer-<id>` to name.
  * 11b.1's three refusal/expiry/paste cases, and 11b.2's deep link (F-P17: the
- * link must stop at the review, so nothing is ever stored by it).
+ * link must stop at the review, so nothing is ever stored by it), and R6's relay-only flow.
  */
 const PAIRING_FLOWS = [
   "12-pair-declined",
   "13-pair-expired",
   "14-pair-bad-text",
   "19-deep-link",
+  // R6's relay-only flow (docs/feat/mobile-relay.md): it opens its own window
+  // (`pair-start-relay-only.js`, over a `--no-relay` record) rather than the
+  // shared `_pair` prefix — it must, or the QR it proves would carry a direct
+  // address too. Same "no `computer-<id>` from a shared prefix" consequence.
+  "22-relay-only",
 ] as const;
 
 /**
@@ -265,7 +273,7 @@ describe("13d's compose flows (docs/feat/mobile-compose.md)", () => {
         vars.add(match[1] as string);
       }
     }
-    // Seven flows, seven distinct ids, none of them the list's own rows.
+    // One distinct id per flow, none of them the list's own rows.
     expect(vars.size).toBe(COMPOSE_FLOWS.length);
     expect(vars.has("ALPHA_ID")).toBe(false);
     expect(vars.has("CHARLIE_ID")).toBe(false);
@@ -348,5 +356,75 @@ describe("the flows the task replaced are gone, and its ids exist", () => {
       expect(ids.has("session-view")).toBe(true);
       expect([...ids].some(inside)).toBe(true);
     }
+  });
+});
+
+describe("R6's relay-only flow (docs/feat/mobile-relay.md)", () => {
+  const RELAY_FLOW = "22-relay-only";
+  const body = readFileSync(join(FLOWS_DIR, `${RELAY_FLOW}.yaml`), "utf8");
+
+  test("it is run: in the harness's list, and its files exist", () => {
+    expect(FLOWS).toContain(RELAY_FLOW);
+    for (const file of scripts(RELAY_FLOW)) {
+      expect(() => scriptBody(file)).not.toThrow();
+    }
+  });
+
+  test("it pairs over the relay-only window, not the shared `_pair` prefix", () => {
+    // `_pair` opens its window against the shared daemon, whose record also has a
+    // direct address: reusing it would prove nothing about a relay-only QR.
+    expect(body).toContain('file: "pair-start-relay-only.js"');
+    expect(body).not.toContain("- runFlow: _pair.yaml");
+  });
+
+  test("it ends on DAEMON truth, and the LAST step is the relay-only QR", () => {
+    const files = scripts(RELAY_FLOW);
+    expect(files.length).toBeGreaterThan(1);
+    expect(files[files.length - 1]).toBe("22-relay-qr.js");
+    // Every step it ends on reads a hook and THROWS when the answer is wrong: an
+    // `output.x = …` with no check would be a vacuous last step.
+    for (const file of files) {
+      const script = scriptBody(file);
+      expect(script).toContain("http.get");
+      expect(script).toMatch(/throw new Error/);
+      expect(script).toMatch(/MAESTRO_HOOKS/);
+    }
+  });
+
+  test("the hooks it reads are the ones the harness serves", () => {
+    // The 12c/13d guard covers those flows' scripts; this flow's own are added
+    // here so a renamed hook is red rather than a flow that silently 404s.
+    const served = readFileSync(join(import.meta.dir, "..", "e2e", "hooks.ts"), "utf8");
+    for (const file of scripts(RELAY_FLOW)) {
+      for (const match of scriptBody(file).matchAll(/\$\{MAESTRO_HOOKS\}\/([a-z-]+)/g)) {
+        expect(served).toContain(`"${match[1]}"`);
+      }
+    }
+  });
+
+  test("`relay-qr` asserts exactly one address AND its relay shape", () => {
+    // The property, not a weaker correlate: "one address" alone would pass on a
+    // truncated QR, and "the relay shape" alone on a QR that also carries a
+    // direct address (the loopback bind's, which R5b must NOT contribute).
+    const script = scriptBody("22-relay-qr.js");
+    expect(script).toContain("addresses.length !== 1");
+    expect(script).toContain("/d/");
+    expect(script).toContain("/e2e");
+  });
+
+  test("the harness runs a LOCAL relay, points `serve` at it, and keeps its own loopback address", () => {
+    // Without the first two, the flow would pair over `relay.tentacle.so`: a test
+    // reaching real infra (forbidden), and a QR whose address no local daemon
+    // registers. The third is what makes the QR relay-ONLY: `pair` is given no
+    // `--address` for this flow, and a loopback bind contributes none by itself.
+    const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    expect(runner).toContain("relay/src/server.ts");
+    expect(runner).toContain("startRelay({");
+    expect(runner).toContain('"--relay"');
+    expect(runner).toContain("startRelayOnly");
+    const pairing = readFileSync(join(import.meta.dir, "..", "e2e", "pairing.ts"), "utf8");
+    // The design of `relayOnly` is the ABSENCE of the harness's own address: a
+    // future edit that always injects one again would quietly un-prove the flow.
+    expect(pairing).toContain("relayOnly === true ? {} : { extraAddresses: [deps.address] }");
   });
 });

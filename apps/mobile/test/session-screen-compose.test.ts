@@ -77,9 +77,13 @@ function harness(options: { readonly refuseSend?: unknown } = {}) {
         events: (async function* () {
           // never ends: the test drives the turn's end itself
         })() as never,
-        cancel: () => {},
+        cancel: () => {
+          session.cancels += 1;
+        },
       });
     },
+    /** How many times a running turn was cancelled (the Stop path). */
+    cancels: 0,
     activity: null as ((activity: unknown) => void) | null,
   };
   const handle: ComposeHandle = {
@@ -339,5 +343,78 @@ describe("the compose half on the screen", () => {
     expect(h.session.sent).toEqual([]);
     expect(h.session.steers.map((s) => s.text)).toEqual(["steer me"]);
     expect(screen.state().draft).toBe("");
+  });
+});
+
+describe("Return and double submits (B2)", () => {
+  test("two presses in one frame send ONCE (the field is read and cleared in one step)", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    screen.setDraft("only once");
+    screen.press();
+    screen.press();
+    await settle();
+    expect(h.session.sent).toEqual(["only once"]);
+  });
+
+  test("Return sends the field's text, as the button does", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    screen.setDraft("from the keyboard");
+    screen.pressReturn();
+    await settle();
+    expect(h.session.sent).toEqual(["from the keyboard"]);
+    expect(screen.state().draft).toBe("");
+  });
+
+  test("Return + a button tap in one frame send once", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    screen.setDraft("once");
+    screen.pressReturn();
+    screen.press();
+    await settle();
+    expect(h.session.sent).toEqual(["once"]);
+  });
+
+  test("Return on an empty field while a turn runs never stops it (the button would)", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    h.session.turn("t-run");
+    expect(screen.state().view.composer.button).toBe("stop");
+    // Synchronous on purpose: the harness's turn ends once its (empty) stream drains.
+    screen.pressReturn();
+    expect(h.session.cancels).toBe(0);
+    expect(screen.state().view.composer.button).toBe("stop");
+    // Control: the BUTTON in the same state does stop — the spy is live.
+    screen.press();
+    expect(h.session.cancels).toBe(1);
+  });
+
+  test("Return with text while a turn runs queues it as a steer", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    h.session.turn("t-run");
+    screen.setDraft("steer me");
+    screen.pressReturn();
+    await settle();
+    expect(h.session.steers.map((s) => s.text)).toEqual(["steer me"]);
+    expect(h.session.cancels).toBe(0);
+  });
+
+  test("Return on a blank field keeps the text (no silent clear)", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    screen.setDraft("   ");
+    screen.pressReturn();
+    await settle();
+    expect(h.session.sent).toEqual([]);
+    expect(screen.state().draft).toBe("   ");
   });
 });

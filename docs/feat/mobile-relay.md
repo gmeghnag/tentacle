@@ -3,7 +3,7 @@
 > **Status:** implementation APPROVED by the owner (2026-11-14)
 > **Branch:** `feat/mobile-relay` (this doc). Slices R0–R7 run **in order on this branch**, one commit per slice on the owner's OK, each gated by its narrow tests (AGENTS §4); the full gate before Review.
 > **Size:** L as a whole → split into S/M slices (table below) · **Blast:** load-bearing (device authentication path, a new network dial-out from every `serve`, a new persisted file) · **Suited:** per AGENTS §10 — R3, R4, R5a are `load-bearing` (strong executor + mandatory fresh-context Review red-teaming "a pod is not trusted", "one session path", "single broker"); R0, R1, R2, R5b, R6, R7 are `contained`/`cross-module` S–M. The owner assigns executors.
-> **Changelog:** `changelog.d/mobile-relay.added.md` (R5a) — `- **Phones reach \`serve\` through a relay, end-to-end encrypted.** A \`serve\` with paired devices dials out to \`relay.tentacle.so\` (or \`relay.url\` / \`serve --relay\`; \`--no-relay\` to opt out), so a phone reaches it from anywhere with no open port; the relay sees only ciphertext. The relay is a small self-hostable service in \`apps/relay\`.`
+> **Changelog:** `changelog.d/mobile-relay.added.md` (R5a) — `- **Phones reach \`serve\` through a relay, end-to-end encrypted.** A \`serve\` with paired devices dials out to \`relay.tentacle.so\` (or \`relay.url\` / \`serve --relay\`; \`--no-relay\` to opt out), so a phone reaches it from anywhere with no open port; the relay sees only ciphertext. The relay is a small self-hostable service in \`apps/relay\`.` · `changelog.d/mobile-relay.changed.md` (R6) · `changelog.d/mobile-relay-deploy.added.md` (R7 — a NEW slug: reusing `mobile-relay.added` is the one filename collision the discipline refuses)
 
 ## Context
 
@@ -2478,3 +2478,802 @@ if a direct URL shaped like `/d/<id>/e2e` is misread, the only effect is that it
 Mutations reverted; `git status` clean apart from this section.
 
 *— claude-opus-5-5, 2026-11-14*
+
+## Execution
+
+### R6 — the app's staggered race, the relay in the diagnosis, the "relay only" Maestro flow — *— claude-opus-5-5, 2026-11-14*
+
+**Load-bearing check: PASSED, before any edit.** R6's assumption is the APP half
+of §Load-bearing: *"the app dials a relay address exactly like any other"*.
+Re-executed on this branch's code, unchanged, in
+`.tentacle/tmp/mobile-relay/r6-loadcheck.ts` — a real R2 relay + a real R4 link +
+a real identity and a paired phone, with `openComputer`'s address list holding
+ONE entry, `ws://127.0.0.1:<port>/d/<id>/e2e`:
+
+```
+$ bun .tentacle/tmp/mobile-relay/r6-loadcheck.ts
+relay registered: 1 | address: ws://127.0.0.1:64175/d/fgkrQr2vTa2JTEe75Kl66v/e2e
+(1) openComputer over the RELAY only -> {"ok":true,"sessions":0,"address":"ws://127.0.0.1:64175/d/fgkrQr2vTa2JTEe75Kl66v/e2e"} in 9 ms
+(2) after 3000 ms: tried=["ws://127.0.0.1:64179/e2e"] settled=false
+```
+
+Line (1) is the assumption: the app reaches `session/list` through the ONE
+`RemoteClient` stack with a relay URL as its only address. Line (2) is the
+Preconditions gap, measured against a REAL half-open endpoint (`Bun.listen`
+accepting TCP and never upgrading — what a LAN address looks like off-LAN):
+after 3 s the SEQUENTIAL `firstAnswering` had started exactly one address and had
+not settled. **No STOP.**
+
+#### Red before green
+
+A new test file's first failure is `Cannot find module`, which is not the red
+§9 asks for. So the properties were first measured on the pre-slice tree by
+`.tentacle/tmp/mobile-relay/r6-red-baseline.ts` (also a real relay + link, so the
+"second address" is a real relay dial):
+
+```
+$ bun .tentacle/tmp/mobile-relay/r6-red-baseline.ts   # BEFORE the change
+(a) at 1500 ms: tried=1 settledIn=never result=pending
+(b) a healthy first address dials: ["direct"]
+(c) unreachable says: "Can't reach 'MacBook' — same network or Tailscale? `tentacle serve --host 0.0.0.0` running and up to date?"
+(c) names the relay: false
+```
+
+(a) is R6's bug: one hanging address starves the relay, and under the client's
+15 s dial deadline (`LINK_LIVENESS`) it never gets dialled. (c) is the text.
+(b) is the property that must SURVIVE the change and is green before and after.
+
+#### What landed
+
+1. **`apps/mobile/src/address-dial.ts`** — `firstAnswering` is now a staggered
+   race decided at SOCKET-OPEN. New shape: `DialSteps<TOpened, TAnswer>` =
+   `{open, abandon, confirm}`, so the winner alone is handshaked; `STAGGER_MS =
+   750` (Owner Q6); an injected `DialTimer` seam (the default is real
+   `setTimeout`, so the app passes nothing). Preserved deliberately: the ring
+   start at `memory.lastGood` (now recorded as the CALLER's array index),
+   `unauthorized` stops everything, the last error is rethrown unchanged, an
+   empty list is a failure rather than a hang. On a non-terminal handshake
+   failure the race resumes AFTER the winner (the remaining addresses, re-dialling
+   any leg it had abandoned — the same fresh dial a redial makes).
+2. **`apps/mobile/src/connection.ts`** — the caller split into those three steps:
+   `open` builds the raw socket and feeds `diagnosis.observe({opened:false})` on
+   a failure, `abandon` closes the loser, `confirm` runs the Noise initiator and
+   feeds `observe({opened:true})` on a handshake failure. An abandoned loser
+   records NOTHING: it is a path that was not needed, not a path that is down.
+3. **`apps/mobile/src/link-diagnosis.ts`** — the `unreachable` sentence names the
+   relay ("same network, Tailscale, or the relay?").
+4. **Maestro (R6's mandatory half)** — `apps/mobile/e2e/flows/22-relay-only.yaml`
+   plus `pair-start-relay-only.js`, `22-relay-history.js`, `22-relay-qr.js`; the
+   harness now starts a LOCAL relay in-process and gives `serve` `--relay <local>`
+   (`apps/mobile/e2e/run.ts`), `pairing.ts` gained `startRelayOnly()` (a window
+   with NO harness `--address`), and `hooks.ts` gained `relay-qr` (the payload the
+   last `pair` printed — the only way a flow can see what the QR carried).
+5. `changelog.d/mobile-relay.changed.md`.
+
+#### Drift from the Implementation, and why
+
+- **The plan says "the first socket to OPEN proceeds" and "the others are closed
+  before any handshake".** Implemented exactly, but it forced a shape the plan
+  does not spell out: the call to `attempt` had to become two steps, because only
+  the caller knows which half of a dial is "the socket" and which is "the
+  handshake". Hence `DialSteps` and the `connection.ts` split.
+- **Fall-through after a failed handshake resumes AFTER the winner, not from the
+  start.** The plan says "a non-terminal handshake failure on the winner
+  continues with the rest"; slices continuing *before* the winner too would
+  re-dial an address that already failed, and it would also mean a second round
+  could return to an address the ring had already passed. The abandoned legs are
+  re-dialled because they were never DECIDED (they lost a race, they did not
+  fail), which is what "the rest" means for a race.
+- **The diagnosis is fed per step, not per attempt.** Feeding it in `abandon`
+  (i.e. reporting an abandoned socket as `opened:false`) makes a successful race
+  end with `unreachable` in the diagnoser's last verdict — a lie about a link
+  that works. Pinned by the connection test's `expect(link.diagnosis.current())
+  .toBe("ok")` after a race with a black hole in it.
+- **The Maestro flow does not restart `serve`.** My first cut reopened the
+  daemon with `--no-relay` for flow 22's pairing window. That is wrong twice: with
+  `--no-relay` the daemon writes no relay address AND no `--address`, so the
+  record has no addresses at all and `pair` refuses (`pair-addresses.ts`). The
+  real property is simpler: `serve` in the harness binds LOOPBACK, which
+  contributes no bind-derived address, so a window opened WITHOUT the harness's
+  own `--address` carries the record's relay address and nothing else. Nothing is
+  restarted; `startRelayOnly()` is the absence of one argument.
+- **`22-relay-only` is in `PAIRING_FLOWS`** (`apps/mobile/test/e2e-flows.test.ts`).
+  That list is the existing guard's own row for "pairs through its own steps, not
+  `_pair`"; the guard went red on the new flow before the entry was added, which
+  is the guard doing its job rather than a workaround.
+- **The flow's last step order is fixed by the e2e guard, not by taste.** The
+  existing rule is "the last `runScript` is the daemon-truth one", so the two
+  truth steps are ordered history-then-QR, and the QR one (the flow's own
+  subject) is last.
+
+#### The tests, and what each pins
+
+`apps/mobile/test/address-dial.test.ts` (13, hand-driven timer — no test waits
+750 ms): a hanging first address does not hold the second past `STAGGER_MS`; the
+first socket to open wins and is the only one handshaked; a late loser is
+abandoned BEFORE any handshake (twice: after the race and mid-handshake); a
+non-terminal handshake failure resumes with the rest; every open failing throws
+the LAST error unchanged; `unauthorized` stops the race and leaves no armed
+timer; `lastGood` wins the ring start and is remembered by the caller's index;
+the ring wraps rather than restarting; a stale `lastGood` starts at 0; an empty
+list fails; `STAGGER_MS` is 750; `isTerminalDialError` unchanged.
+
+`apps/mobile/test/connection.test.ts` (18, +2): a REAL black-hole endpoint as the
+first address — the link still reaches the daemon, names the winner's address and
+ends `ok` (not `unreachable`); and a REAL "slow" daemon that upgrades only when
+the test says so — the late loser's socket is CLOSED (its `close` event fires),
+which is the limiter-slot/stream property `abandon` exists for.
+
+`apps/mobile/test/link-diagnosis.test.ts` (7, +1): the `unreachable` sentence
+names the relay, and the other verdicts do not.
+
+`apps/mobile/test/e2e-flows.test.ts` (22, +5): flow 22 is in `FLOWS`, its files
+exist, it pairs over its own opener (not `_pair`), it ENDS on a daemon-truth hook
+with the relay-QR step last, every hook it reads is served by `hooks.ts`, the QR
+assertion requires exactly one address AND the `/d/<id>/e2e` shape, and the
+harness really starts a local relay and really omits its own address for that
+window.
+
+#### Mutation checks (each reverted from a copy; no `git checkout`/`restore`/`stash`)
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | `armed = timer.schedule(startNext, stagger)` → `startNext()` (no stagger) | **red 7** of 13 in `address-dial.test.ts` (the hanging-first, first-open-wins, fall-through, last-error, unauthorized, lastGood and wrap tests) |
+| 2 | the late loser is `confirm`ed instead of `abandon`ed | **red 2** ("a loser that opens LATE is closed…", "the loser is abandoned while the winner is still handshaking") |
+| 3 | `round = []` after a failed handshake (no fall-through) | **red 1** ("a non-terminal handshake failure on the winner continues with the REST") |
+| 4 | `isTerminalDialError` check deleted (keep racing past `unauthorized`) | **red 1** ("STOPS on unauthorized…") |
+| 5 | `connection.ts` `abandon` → a no-op (`void channel`) | **red 1** ("a loser that opens LATE is CLOSED…", the real `close` event never fires) |
+| 6 | `connection.ts` `abandon` → `diagnosis.observe({opened:false,…})` + close | **red 1** ("a loser that opens LATE is CLOSED…": that close was SILENT) |
+| 6b | `connection.ts` `open`'s catch → swallow the observation of a genuine failed open | **red 1** ("the race dials the SECOND address…": the refused port is no longer counted) |
+| 7 | `link-diagnosis.ts` sentence back to "same network or Tailscale?" | **red 1** ("the unreachable sentence names the RELAY") |
+| 8 | `22-relay-qr.js`: `addresses.length !== 1` → `=== 0` | **red 1** (the exactly-one-address test) |
+
+Every file was restored from its copy and re-hashed to the same sha
+(`address-dial.ts dd964bc…`, `connection.ts e1c54a0…`, `link-diagnosis.ts 3e3192a…`,
+`22-relay-qr.js b9a0256…`), 13/13, 18/18, 7/7 and 22/22 green afterwards.
+
+**Mutation 6 took two attempts and is worth recording.** Its first run was GREEN,
+and the reason was a real weakness in the test I had written: it asserted
+`link.diagnosis.current() === "ok"` after a race, but `dial()` calls
+`diagnosis.ok()` as soon as a race succeeds, so `ok()` reset the verdict whatever
+`abandon` did — the assertion could not fail. I then found that mutation 6 anyway
+only produced a `ReferenceError` (an unimported `ChannelError`), which is red for
+the wrong reason. The fix was to stop observing the VERDICT and observe the CALLS:
+a SPY diagnoser in front of the real one, in the test whose loser really does open
+(slow daemon), asserting that the abandoned close was SILENT. Mutation 6 is now
+red on the assertion. Mutation 6b exists because the spy alone makes the `[]`
+assertion vacuously satisfiable — swallowing a GENUINE failed open would leave the
+array empty too — so the race test now carries a third address whose port is
+really closed, and asserts exactly one `opened: false` was reported. Both
+directions are pinned; neither is proven by a weaker correlate.
+
+#### Acceptance checks the plan names
+
+- **"a hanging first address does not block the second beyond 750 ms"** —
+  `address-dial.test.ts` with the injected timer, plus the real-endpoint
+  connection test (reached at all, which the old sequential loop did not manage
+  before the client's 15 s deadline).
+- **"losers are closed before any handshake"** — pinned twice (the fake steps in
+  `address-dial.test.ts`, and a REAL socket's `close` event in
+  `connection.test.ts`).
+- **"`unauthorized` still stops"**, **"`lastGood` honoured"**, and the plan's own
+  mutation ("start all at once → the direct-first test fails") — mutations 4, 1.
+- **grep-guard, no domain in the app**: `rg -n "relay\.tentacle\.so" apps/mobile/src`
+  → no match (the app still hard-codes no domain, decision 9).
+- **`git diff` scope**: only R6's files (see the list above) plus this doc and the
+  changelog fragment. `packages/protocol/schema/protocol.json` is unchanged (no
+  schema change), so no regeneration.
+
+#### Gate (R6): green, except the Maestro run (environmental — below)
+
+```
+$ bunx tsc --noEmit                 → clean (exit 0)
+$ bunx tsc -p apps/mobile --noEmit  → clean (exit 0)
+$ bunx tsc -p apps/relay --noEmit   → clean (exit 0)
+$ bun run lint                      → Checked 1318 files in 384ms. No fixes applied.
+$ bun test                          → 9521 pass, 3 skip, 0 fail across 681 files (384 s)
+                                      (77636 expect() calls)
+```
+
+The 3 skips are the documented opt-in ones (live-k8s, live-docker, the slow
+real-socket keepalive). Lint was clean before this slice and is clean after
+(the two errors it produced on the way — a formatter wrap in `22-relay-qr.js` and
+a `useConst` in the new test — were fixed, not suppressed).
+
+#### The Maestro flow: written, wired, and NOT green here — environmental
+
+`E2E_ONLY_FLOWS=22-relay-only bun run e2e:mobile --ios 26` (Xcode 27.1, iOS 26.5,
+`JAVA_HOME=/opt/homebrew/opt/openjdk@17`) **failed**, and so did a control run of
+a PRE-EXISTING flow on the same host:
+
+```
+✗ 22-relay-only (iOS 26) exit 1   <failure>Assertion is false: id: lock-screen is visible</failure>
+✗ 01-shell     (iOS 26) exit 1   <failure>Assertion is false: id: lock-screen is visible</failure>
+```
+
+Both die in `_unlock.yaml`, the shared prefix, before anything R6 added runs. The
+app IS up and IS showing the lock (`maestro hierarchy` on the booted simulator
+renders "Face ID" and the app's own log file was being written every second), but
+NO `testID` reaches the accessibility tree at all — not `lock-screen`, not
+`pair-paste-input`, not `computers-list`: the hierarchy dump contains only the
+status bar and "Face ID". So RN's testIDs are not exposed to XCUITest on this
+host/Xcode combination, which is the same class of environment drift
+`docs/feat/mobile-compose.md`'s Step 0 records for the simulator's Face ID.
+
+What the run DID prove, from the harness's own log, before Maestro's first
+assertion:
+
+```
+relay on ws://127.0.0.1:49488
+serve on 127.0.0.1:49487, phone address ws://127.0.0.1:49487/e2e
+[pair] tentacle://pair?v=1&k=…&c=9K07RKZ3F3&a=ws%3A%2F%2F127.0.0.1%3A49488%2Fd%2Fkhp_dfo6Hbhs-lL6QI-igY%2Fe2e
+```
+
+One `a=` parameter, and it is the local relay's `/d/<id>/e2e`: the relay-only QR
+that flow 22 asserts on is really produced by the real harness, in the real
+configuration (`serve` on loopback + the relay on + no harness `--address`).
+
+**So R6's Maestro half is PARTIAL**: the flow, its two truth scripts, the local
+relay, the hook and the guards are in place and the `bun test` half is green; the
+on-simulator pass is blocked by the environment, not by this slice, and it must be
+re-run (`E2E_ONLY_FLOWS=22-relay-only bun run e2e:mobile --ios 26`) on a host
+where an EXISTING flow passes first. That is the exact check: if `01-shell` is red
+for `lock-screen`, the host cannot run flows and 22's result says nothing.
+
+#### Not verified (one line each)
+
+- The real iPhone checks (cellular time-to-connect, Wi-Fi→cellular hand-off, a
+  killed app reopened over the relay) — device-only, the TestFlight checklist's.
+- `22-relay-only` end-to-end on a working simulator host: blocked above; verify
+  with `E2E_ONLY_FLOWS=01-shell bun run e2e:mobile --ios 26` passing first.
+- The winner's handshake can still be slow on a path that opened quickly (a
+  captive portal accepts TCP and drops the upgrade): the race does not bound a
+  handshake, only the OPEN. Bounding it would need a deadline the client does not
+  currently offer per attempt; out of this slice (the plan scopes the stagger to
+  socket-open).
+
+## Review
+
+### R6 — fresh-context adversarial review — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 1 MEDIUM). Scope: `git diff main...HEAD` (R6 only).
+
+**Gate (re-run):** the 4 touched test files 60 pass / 0 fail (542 expects);
+`bun run typecheck` clean (root + mobile + relay); `bun run lint` 1318 files, clean.
+Full `bun test` not re-run (Execution reports 9521 pass / 3 opt-in skip).
+
+**Findings**
+
+1. **HIGH — fall-through skips addresses after a second handshake failure.**
+   `apps/mobile/src/address-dial.ts:161` slices the CURRENT (already sliced)
+   round with `outcome.at`, which is the candidate's `position` in the FIRST
+   round (`roundOf` is never re-run, `Candidate.position` is fixed). After one
+   fall-through the two numberings diverge. Repro
+   (`.tentacle/tmp/mobile-relay/rev-r6-fallthrough{,-c}.ts`, opens resolve at once,
+   non-terminal `confirm` failures): `[A,B,C,D]` with only C healthy →
+   confirmed `[A,B,D]`, **throws**; C is never dialled. With the real list
+   `[LAN, tailnet, relay]`, two non-terminal handshake failures (LAN, tailnet)
+   give `slice(2)` of `[tailnet, relay]` = `[]` → the relay is silently never
+   tried — the exact fallback R6 exists for, and a regression vs. `main`'s
+   sequential loop, which reached every address. No test covers two consecutive
+   handshake failures. Fix shape: slice by the winner's index in the current
+   array (or renumber per round) + a test with ≥2 consecutive handshake failures.
+2. **MEDIUM — a late-failing loser overwrites the diagnosis, incl. `revoked`.**
+   `apps/mobile/src/connection.ts:254-261`: `open`'s catch calls
+   `diagnosis.observe({opened:false})` for EVERY failed open, also one that
+   fails after the race was decided (`address-dial.ts` ignores the rejection,
+   but the observation already happened). Repro
+   (`.tentacle/tmp/mobile-relay/rev-r6-late-loser.ts`, real `createLinkDiagnoser`
+   + `firstAnswering`, steps shaped as in `connection.ts`): LAN hangs, relay
+   starts at 750 ms, opens, handshake `denied` → `revoked`; then the LAN connect
+   errors (EHOSTUNREACH/TCP timeout) → diagnosis becomes **`unreachable`**. The
+   row then reads "Can't reach … the relay?" with Retry instead of the
+   authenticated `revoked` + Remove (`computer-rows.ts:74-95`). Same mechanism
+   turns an `ok` link's verdict into `unreachable` after a success. Sequential
+   code could not do this (no concurrent opens). The Execution's "abandoned loser
+   records NOTHING" holds only for a loser that OPENS late, not one that FAILS
+   late. Fix shape: observe an open failure only while its race is undecided
+   (e.g. let `firstAnswering` report failures, or a per-dial generation guard),
+   + a test where the loser rejects after the winner settled.
+
+**Mutation (mine):** removed the stagger re-arm (`arm()` in `startNext`) →
+`address-dial.test.ts` did not finish in 120 s (tests await a race that never
+progresses): red, but as a hang, not an assertion. Reverted by reverse edit;
+`git status` clean; 13/13 green after.
+
+**Attacks tried:** (a) fall-through numbering across rounds → finding 1;
+(b) late loser rejection vs. diagnoser → finding 2; (c) `unauthorized` mid-race
+leaves an armed timer / unclosed loser → holds (`winner` cancels, late opens
+`abandon`); (d) `link.address()` = last STARTED, not the winner
+(`connection.ts:255`) → wrong after a race, but only tests read it (no app
+consumer): nit; (e) a fast-refused open waits the full 750 ms before the next
+starts (RFC 8305 starts the next at once): latency regression vs. `main`'s
+immediate fall-through (3 refused addresses ≈ 1.5 s), nit; (f) no domain in
+`apps/mobile/src` → holds.
+
+**What holds:** first-open-wins with losers closed pre-handshake (the "one
+session path" invariant — one `RemoteClient`/`gate.dial` stack, no parallel
+loop); `unauthorized` stops; `lastGood` ring start; diagnosis text; Maestro
+wiring (on-simulator pass still pending, environmental — Execution's own note).
+
+**Executor behaviour:** careful and honest (recorded its own vacuous first
+mutation-6 test and fixed it); missed the multi-round case because every
+fall-through test has only ONE failed handshake. Reviewer is the same model
+family (Opus) as the Execution's signature: shared blind spots possible.
+
+## Execution
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-14*
+
+Scope: the R6 review's 1 HIGH + 1 MEDIUM. Both reviewer repros were re-run on
+this branch first and reproduce unchanged:
+`.tentacle/tmp/mobile-relay/rev-r6-fallthrough{,-c}.ts` →
+`confirmed: [ "A", "B", "D" ] -> answered D` / `-> threw hs-fail D` (C, the only
+healthy address, never dialled); `rev-r6-late-loser.ts` →
+`race threw: unauthorized | diagnosis: revoked`, then
+`after late LAN failure | diagnosis: unreachable`.
+
+**1 (HIGH) — fall-through numbering.** `Candidate.position` was fixed at the
+FIRST round's order and then used to slice a LATER, already-sliced round, so
+after one fall-through `slice(at + 1)` walked past the end.
+In `apps/mobile/src/address-dial.ts`: `Candidate.position` is gone (`:109`) and
+`roundOf` no longer computes it (`:178`); `raceOnce` captures `slot` (the
+candidate's index in the array it was actually raced in) at `startNext` (`:228`)
+and reports it as `RaceOutcome.failed.at`, passed through
+`onOpened(candidate, slot, opened)` (`:242`, `:257`, `:271`). `at`'s doc now says
+it is a position in the round passed to `raceOnce`, never in the caller's list
+(`:115-123`). The slice uses a number valid in the array being sliced.
+
+**2 (MEDIUM) — a late-failing loser overwrote the diagnosis, `revoked` included.**
+`connection.ts`'s `open` observed `{opened:false}` for EVERY failed open,
+including one that rejected after the race was decided (`firstAnswering` ignored
+the rejection, but the observation had already happened). New optional seam
+`DialSteps.failed?(failure: DialFailure)` (`address-dial.ts:81-89`) is called ONLY
+from a rejection arriving while the race is still undecided (`:245`, ahead of the
+existing `settled || winner` bail-out that drops a late one entirely); in
+`connection.ts` `open` no longer observes and `failed` does (`:253-266`), so the
+race decides whether a failed open may be reported at all. `abandon` and
+`confirm` are unchanged, and a genuinely offline address is still reported (the
+existing R6 connection test still counts exactly one `opened:false` for a refused
+port — red under mutation 2 below).
+
+**Tests added.** `apps/mobile/test/address-dial.test.ts`: (a) "TWO consecutive
+handshake failures still reach the LAST address" — the real
+`[lan, tailnet, relay]` shape, asserts `confirmed === [lan, tailnet, relay]` and
+that the relay answers; (b) "a loser whose OPEN fails LATE is not reported as a
+failure"; (c) "an open that fails while its race is UNDECIDED is reported" — the
+seam's non-vacuity guard, green before and after by design, red under mutation 2.
+`apps/mobile/test/connection.test.ts`: "a loser whose OPEN fails after the race
+was decided does NOT overwrite the verdict" — real daemon, real Noise handshake
+denied by a stranger device key (`revoked`), a real hanging TCP leg terminated
+after the race settles; asserts the verdict stays `revoked`.
+
+**Red before green** (source mutated back, narrow test run, restored by reverse
+edit — no `git checkout`; `diff` against the saved fixed copy confirms identical):
+finding 1, `position` + `at: candidate.position` back → 1 fail,
+`ChannelError: handshake closed at tailnet` (the relay is never confirmed);
+finding 2, `observe` back inside `open`'s catch → the `address-dial` late test
+fails and the connection test fails `Expected: "revoked" / Received:
+"unreachable"`; finding 2, `failed` never called → the UNDECIDED test fails and
+the pre-existing R6 connection test fails `Expected: 1 / Received: 0`.
+
+**Mutation checks (after green):**
+
+| # | mutation | result |
+|---|---|---|
+| 1 | `at: slot` → `at: candidate.index` (array index, not round slot) | red 1/16 in `address-dial.test.ts`: `handshake closed at tailnet` — the NUMBERING is what the test pins, not merely "a slice happens" |
+| 2 | delete the `steps.failed?.(…)` call | red 1/16 (`Expected [ "A" ] / Received []`); `connection.test.ts` also red (`Expected: 1 / Received: 0`) |
+| 3 | call `steps.failed?.()` BEFORE the settled-or-winner bail-out (report late failures too) | red both: `address-dial` late test, and `connection.test.ts` `revoked` → `unreachable` |
+
+Each mutation was reverted (`diff` against the saved copy: identical) before the
+next; `git status` shows only the four intended files.
+
+**Gate:** `bunx tsc --noEmit` clean (root and `tsc -p apps/mobile`); `bun run
+lint` 1318 files clean; `bun test` **9525 pass / 3 opt-in skip / 0 fail** (681
+files, 77646 expects — 9521 baseline + the 4 new tests).
+
+**Not verified:** the Maestro "relay only" flow on a simulator (environmental, as
+in R6's Execution). Nothing else is unverified.
+
+*— claude-opus-5-5, 2026-11-14*
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (fix for round 1's findings 1–2).
+
+- **Finding 1 — fixed.** `raceOnce` reports the winner's `slot` in the round it
+  raced (`address-dial.ts`, `at: slot`); `Candidate.position` is gone. My repros
+  now give `[A,B,C,D]` → confirmed A,B,C,D → answered D; only-C-healthy →
+  A,B,C → answered C. **Mutation** `at: slot` → `at: candidate.index`: red 1
+  ("TWO consecutive handshake failures still reach the LAST address"); reverted.
+- **Finding 2 — fixed.** `connection.ts` `open` no longer observes; the new
+  optional `DialSteps.failed` is called only while the race is undecided. Repro
+  (`rev-r6-late-loser2.ts`): `revoked` stays `revoked` after the late LAN failure.
+  **Mutation** report `failed` before the `settled || winner` guard: red 2 (the
+  pure "a loser whose OPEN fails LATE…" test and the real-socket connection
+  test); reverted.
+- **Regressions:** the only `firstAnswering` caller is `connection.ts:300`,
+  which wires `failed`; a genuine failed open during the race is still reported
+  (round 1's mutation-6b test still green). The tree is clean after the
+  reverts (`git status` empty).
+- **Gate:** the 4 touched files pass 64/64 (552 expects); `bun run typecheck`
+  and `bun run lint` (1318 files) are clean. Round 1's nits (`link.address()` =
+  last started; a refused open waits the full stagger) remain open as nits.
+
+## Execution
+
+### R7 — deploy artefacts + runbook (as built) — *— claude-opus-5-5, 2026-11-14*
+
+**Scope:** slice R7 only (`apps/relay/deploy/{build.ts,relay.service,Caddyfile.relay}`,
+`docs/ops/relay-deploy.md`, `apps/relay/test/deploy.test.ts`). Nothing applied to any
+server: slice **D** stays the owner's step. No wire, schema, `protocol.json`, daemon,
+cli, app or `TODO.md` change.
+
+**Load-bearing check first (the plan's, "R2's `main.ts` is a `bun build --compile`
+target and the binary serves `/healthz`") — PASSED, on the branch as it stood:**
+
+```
+$ bun build --compile apps/relay/src/main.ts --outfile .tentacle/tmp/mobile-relay/tentacle-relay
+[6ms]  bundle  32 modules
+  [86ms] compile  …/tentacle-relay bun-…-v1.4.3
+$ ./tentacle-relay --port 4977 &
+$ curl -sS -i http://127.0.0.1:4977/healthz
+HTTP/1.1 200 OK
+Content-Type: application/json;charset=utf-8
+Content-Length: 17
+
+{"ok":true,"v":1}
+```
+
+Cross-compile for the deploy host also works from this macOS machine:
+`--target=bun-linux-x64` → `ELF 64-bit LSB executable, x86-64 … for GNU/Linux 3.2.0`
+(90 MB). So the assumption the slice stands on — one entrypoint, no plugin, no
+runtime asset, a real `/healthz` — holds; nothing in R7 needed to change R2.
+
+**Red before green (AGENTS §9).** `apps/relay/test/deploy.test.ts` first, against
+the artefacts that did not exist yet:
+
+```
+$ bun test apps/relay/test/deploy.test.ts
+2 pass, 9 fail   # the 9: ENOENT on relay.service / Caddyfile.relay / relay-deploy.md
+```
+
+…then green (13 pass) once the four artefacts existed. Every assertion binds two
+things that must agree, and the mutation below shows it is on the property, not on
+a file's presence.
+
+**What was built.**
+
+- `apps/relay/deploy/build.ts` — `relayEntrypoint` / `relayOutfile` /
+  `relayBuildTarget` (pure, exported so the test can pin them) + `buildRelayBinary`
+  and a `import.meta.main` runner. Defaults to **`bun-linux-x64`**, not the host
+  triple: `bun build --compile` does not refuse a bare `linux-x64`, it quietly
+  builds the HOST's binary, so the default is the deploy host and `TARGET` must
+  match a Bun-triple regex. `bun run apps/relay/deploy/build.ts` →
+  `dist/tentacle-relay` (gitignored, as `scripts/build.ts`'s output). No plugin
+  needed, unlike the CLI: the relay pulls in no ink and no worker entrypoint.
+- `apps/relay/deploy/relay.service` — `relay` system user, `ExecStart` the
+  installed binary with `--host 127.0.0.1 --port 4100` (stated, not left implicit,
+  so the unit is where the deploy's bind address lives), `Restart=always` +
+  `RestartSec`, `StartLimitIntervalSec=30s`/`StartLimitBurst=5` **in `[Unit]`**,
+  the full sandbox (`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`,
+  `ProtectProc=invisible`, `RestrictAddressFamilies=AF_INET AF_INET6`,
+  `CapabilityBoundingSet=` empty), `MemoryMax=512M`, journal-only logging.
+- `apps/relay/deploy/Caddyfile.relay` — `relay.tentacle.so {
+  reverse_proxy 127.0.0.1:4100 { stream_close_delay 5m } }`, imported from the
+  host's Caddyfile. `stream_close_delay` is documented behaviour, not folklore
+  (verified against Caddy's `reverse_proxy` reference, *Streaming*: "delays
+  streaming requests such as WebSockets from being forcibly closed when the config
+  is unloaded … prevents streams from immediately closing when Caddy's config is
+  reloaded").
+- `docs/ops/relay-deploy.md` — 9 sections: preconditions · build · install (atomic
+  `mv` replace) · systemd · Caddy+DNS · smoke test (real phone on cellular) ·
+  upgrade (keeping `tentacle-relay.previous`) · rollback · diagnose table +
+  **Known limitations**.
+- `apps/relay/tsconfig.json` — `include` += `deploy/**/*.ts`, so the new build
+  script is type-checked by `tsc -p apps/relay` (mutation-checked: a wrong-typed
+  export makes it exit 2).
+- `changelog.d/mobile-relay-deploy.added.md` — ONE new fragment, under a NEW slug
+  (`mobile-relay-deploy`, not `mobile-relay`): the existing
+  `mobile-relay.added.md`/`.changed.md` are R5a's and R6's, and the same
+  slug+category is the same filename (`docs/feat/changelog-fragments.md`). The
+  doc's own line 6 is untouched.
+
+**Drift from the plan (Implementation said `apps/relay/deploy/{relay.service,
+Caddyfile.relay,build.ts}` + the runbook — that shape was kept):** three
+corrections, all found while verifying the artefacts against reality rather than
+by reading them.
+
+1. **`StartLimit*` moved to `[Unit]`.** My first unit put
+   `StartLimitIntervalSec`/`StartLimitBurst` in `[Service]`, where systemd ignores
+   them — a crash loop would spin forever while the file *looked* hardened. Found
+   with an independent key/section checker (`.tentacle/tmp/mobile-relay/unitcheck.ts`,
+   which flags it on the first draft and is clean on the final one), then pinned by
+   a test.
+2. **`MemoryDenyWriteExecute` and `SystemCallFilter=@system-service` removed.** Bun
+   *is* JavaScriptCore: it JITs, so it needs writable-then-executable memory and
+   (on some kernels) `membarrier`. Either hardening would kill the relay on the
+   host only — CI never runs the unit. Both are now pinned ABSENT with the reason.
+3. **The per-IP limits are one shared bucket behind Caddy.** `server.ts` keys its
+   limiter on Bun's `requestIP`, i.e. the direct peer, which behind the proxy is
+   always `127.0.0.1` — so `--max-streams-per-ip`'s default of 16 would cap the
+   whole world at 16 phones. This is R2 code, outside R7's scope to fix, so it is
+   stated in the unit (a commented, fleet-sized `ExecStart` override), in the
+   runbook's *Known limitations*, and here as an **open item for the owner before
+   deploy D**: either raise the three flags or have the relay read
+   `X-Forwarded-For` behind a trusted-local flag (a code change → its own task).
+   The per-id (64) and global (10 000 ids) limits are unaffected.
+
+Rejected alternative: naming the fragment `changelog.d/mobile-relay.added.md`
+(edit R5a's). That is the one changelog collision the discipline refuses, and R7
+is user-visible on its own (an operator can now deploy the relay).
+
+**Mutations (AGENTS §9 — each red on the property, then reverted; `git status`
+clean of every mutation):**
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | live `ExecStart` `--port 4000` | **red 2** (ExecStart-parses test + the continuation-reader test) |
+| M2 | `stream_close_delay 5m` deleted from the Caddy block | **red 1** ("a stream outlives a Caddy reload") |
+| M3 | `DEFAULT_RELAY_TARGET` → `bun-darwin-arm64` | **red 1** ("linux-x64 by default") |
+| M4 | `ExecStart` gains `--max-connections 1000` (a flag `main.ts` refuses) | **red 2** (a unit whose object exits 1 on every boot) |
+| M6 | runbook's `## 7. Rollback` renamed | **red 1** ("it carries a rollback") |
+| M7 | `Restart=always` deleted | **red 1** (sandbox/restart test) |
+| M8 | the test's own `serviceKeys` loses the `\`-continuation join | **red 1** (the reader's guard) |
+| M9 | `MemoryDenyWriteExecute=yes` added back | **red 1** ("no hardening blocks the JIT") |
+| M10 | `User=relay` → `User=root` | **red 1** (sandbox test) |
+| M11 | Caddy forwards `127.0.0.1:4000` | **red 1** ("the site forwards to the relay's bind address") |
+| M12 | runbook's install path → `/opt/relay/…` | **red 2** (unit↔runbook path test + the rollback/commands test) |
+
+Three of those were *false greens first*, and are recorded because they are the
+instructive part: M6's `perl -0pi 's/^## …/m'` was missing its `/m` and silently
+matched nothing; M1/M4's unanchored substitution hit the **commented-out**
+`ExecStart` example above the live line; and M8 v1 asserted
+`port === DEFAULT_RELAY_PORT`, which a *dropped* continuation also satisfies (it
+falls back to the default) — so the test could not tell "stated 4100" from "line
+lost". Fixed by anchoring on `\nExecStart=` (with `expect(live.length === 1)`), by
+using a non-default port in the continuation, and by re-running every mutation
+against the final artefacts. Independently, the unit's key/section placement was
+verified by `unitcheck.ts`, not only by the test that shares my own reader.
+
+**Gate** (this branch, after the last edit):
+
+- `bun run typecheck` — clean (`tsc --noEmit`, `tsc -p apps/mobile`, `tsc -p apps/relay`).
+- `bun run lint` — `biome check .`: **1363 files, 0 errors, 0 warnings**.
+- `bun test` — **9826 pass / 4 skip / 0 fail**, 712 files, 78 707 expects
+  (394 s). The 4 skips are the pre-existing opt-in ones (live-k8s, live-docker,
+  the slow socket test, `confinement`'s root-only cases), not new; the R7 files are
+  13/13 (`apps/relay/test/deploy.test.ts`) and the relay package 74/74.
+- `git status`: only the intended files (`apps/relay/deploy/`, `apps/relay/test/deploy.test.ts`,
+  `docs/ops/relay-deploy.md`, `apps/relay/tsconfig.json`, this doc, the fragment, `dist/` removed).
+
+**Not verified — one line each, with how to verify:**
+
+- `systemd-analyze verify` / `caddy validate` acceptance: needs those binaries
+  (neither is on this machine). Run them on the host, runbook §3/§4, before
+  enabling the unit.
+- The public cert, phone over cellular through Caddy, a reload not cutting live
+  streams, an idle stream surviving 30 min: deploy **D**, runbook §5, owner-run.
+- The relaying itself through a proxy hop (as opposed to Bun↔Bun on loopback,
+  which `bun test` covers): the same §5 smoke test.
+
+**Runbook accuracy pass (same slice, before Review).** Two commands and one log
+list in `docs/ops/relay-deploy.md` were checked against the code rather than
+against memory, and two of the three were wrong:
+
+- `tentacle devices list` → **`tentacle devices`** (the verbless form lists;
+  `main.ts:231` dispatches it, `:321-325` is the usage).
+- The log line names were invented in my first draft (`hello`/`open`/`close`); the
+  real set is `ready`, `dial-open`, `dial-held`, `dial-refused`, `accept` (plus the
+  `*-refused`/`*-oversize` refusal lines). Cross-checked mechanically
+  (`.tentacle/tmp/mobile-relay/lognames.ts` parses the runbook's `` `name <arg>` ``
+  tokens and `server.ts`'s `log(\`…`\` sites`: no name in the runbook is absent
+  from the code).
+- The startup line's exact text was taken from `main.ts:185`, and the `4404` /
+  `4429` close codes from `protocol/src/relay.ts:69` and `relay-core.ts:63`.
+
+These are prose, so no test can hold them (Markdown is not linted, §6); the check
+was a one-off script, and it is recorded here rather than pretended to be a guard.
+
+## Review
+
+### R7 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (2 MEDIUM, no HIGH). Scope: R7 only (`git diff main...HEAD`).
+
+**Gate:** `bun test apps/relay` 74 pass / 0 fail (4 files); `bun run lint` clean
+(1363 files); `bun run typecheck` clean (root + mobile + relay). Full `bun test` not
+re-run (scope: touched files). `buildRelayBinary` really compiles `main.ts` (built a
+`bun-darwin-arm64` binary into `.tentacle/tmp/mobile-relay/r7/`: `build true`); running
+the binary was not permitted in this session, so `/healthz` on the compiled artefact is
+unverified (runbook §3 covers it on the host).
+
+**Mutation (§9):** `relay.service` ExecStart `--port 4100→4101` ⇒ 2 tests red;
+`Caddyfile.relay` `stream_close_delay 5m→1s` ⇒ red. Reverted; `git diff` empty.
+
+**Findings**
+1. **MEDIUM — the shipped unit is a known-broken production config, and the Caddyfile
+   says otherwise.** `apps/relay/deploy/relay.service:39` runs the default limits;
+   behind Caddy every peer is `127.0.0.1`, so `relay-core.ts:44,46,52` become ONE
+   global bucket: 30 phone dials/min, 16 concurrent phone sockets and **10 daemon
+   `hello`s/min for the whole world**. Scenario: relay restart (F3) with 200
+   registered daemons → 10 re-register per minute, the rest are refused and back off
+   (up to 60 s), a ~20 min outage — the "no thundering herd" convergence F3 promises
+   does not hold. Worse, any one client sending 30 dials/min (or holding 16 sockets)
+   locks out every phone on the relay — a single-host DoS of the service. The runbook
+   (§9) defers this to the owner, but `Caddyfile.relay:31-32` asserts "`relay.service`
+   sets the limits to their one-shared-key values instead" — false, they are a comment
+   (`relay.service:36-38`). Fix in R7's scope: either ship the fleet-sized ExecStart
+   live (and pin it in `deploy.test.ts`), or make the unit refuse to be the default
+   (and correct the Caddyfile comment); the real fix (XFF behind a trusted-local flag)
+   is R2 code.
+2. **MEDIUM — `stream_close_delay` is documented as making reloads safe; it only
+   delays the cut by 5 min.** `Caddyfile.relay:19-22` claims "5m > the relay's 60 s
+   idle timeout, so a stream ends on its own before the delay can ever fire". False:
+   the relay sends pings (`server.ts:121-124`, `sendPings: true`), so a live phone
+   session and every daemon control socket never idle out; Caddy force-closes them
+   5 min after a reload. Scenario: owner runs `systemctl reload caddy` (runbook §4)
+   during a long turn → every relayed session drops at +5 min and every daemon
+   re-registers at once (which, with finding 1, hits the 10-hello/min bucket). The
+   runbook repeats the expectation (`docs/ops/relay-deploy.md:173-175`, `:284`,
+   `:305` "a Caddy reload not cutting live streams") and the test name
+   `deploy.test.ts:175` "a stream outlives a Caddy reload" pins the wrong claim. Fix:
+   state the real behaviour (a reload = staggered drop within 5 min; F1/F2 resync
+   handle it) and drop the "can never fire" reasoning.
+
+**Attacks tried (no finding):** ExecStart flags vs `parseRelayArgs` (pinned, mutation
+red); `StartLimit*` in `[Unit]` (correct, systemd ignores it in `[Service]`); JIT-hostile
+hardening absent (`MemoryDenyWriteExecute`, `@system-service`); secrets in argv (none);
+`TARGET=linux-x64` silent host build (refused by the regex); `tsconfig` include widened
+to `deploy/` so `build.ts` is typechecked (yes); changelog slug distinct from R5a's (yes);
+§7 "a pod is not trusted"/"model stays on laptop": R7 adds no secret, no wire change.
+Unverified (owner, slice D): `RestrictAddressFamilies=AF_INET AF_INET6` without `AF_UNIX`
+/`AF_NETLINK` under Bun on Linux — run `systemd-analyze verify` + a start on the host.
+
+**Executor behaviour:** careful and honest — the per-IP problem was found and written
+down, the test's own parser was guarded against a false red, and the limits of the guard
+are stated. The miss is shipping the unsafe default while another artefact claims the
+safe one is in place.
+
+*— claude-opus-5-5, 2026-11-14* (reviewer is the same model family as R7's executor,
+claude-opus-5-5; only the context is fresh — shared blind spots may survive.)
+
+## Execution
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-14*
+
+Scope: the R7 review's 2 MEDIUM, no HIGH. Both were **prose-versus-artefact**
+findings, so both arms were verified against the code rather than the review:
+`relay-core.ts:44,46,52` are indeed the per-client defaults, `server.ts:121-124`
+really sets `sendPings: true`, `server.ts:286` really keys on `requestIP` (the
+direct peer), and the Caddy reference page's own wording for `stream_close_delay`
+is "delays … instead, the stream will remain open until the delay is complete" —
+a delay, never a cancel.
+
+**1 (MEDIUM) — the shipped unit was the known-unsafe production config.**
+`relay.service` ran the per-client defaults behind Caddy — one global bucket — and
+`Caddyfile.relay` claimed in prose that the unit "sets the limits to their
+one-shared-key values instead". Fixed by **shipping the fleet sizes live**, not by
+softening the comment: the live `ExecStart` is now a `\`-continued two-line value
+carrying `--max-dials-per-minute 6000 --max-streams-per-ip 2000
+--max-hellos-per-minute 600` (`relay.service:50-51`), each with its arithmetic in
+the comment above (`relay.service:36-49`). Chosen over the review's
+"make-the-unit-refuse" alternative because the unit is the one artefact that ships
+the deploy's bind address; a unit that installs cleanly and then caps the world at
+16 phones is the failure mode this task exists to prevent. The Caddyfile comment
+(`Caddyfile.relay:37-45`) now names the three flags and warns against dropping them
+back; the runbook's *Known limitations* `§9` bullet states the numbers, the
+`MemoryMax` bound that replaces them as the flood ceiling, and the condition for
+reverting to the defaults (XFF lands). Pinned by two new tests.
+
+**2 (MEDIUM) — `stream_close_delay` was documented as making reloads safe.**
+It only defers the cut by 5 minutes, and the relay's own pings
+(`sendPings: true`) mean no leg ends on its own first. Fixed in all five places
+the false claim lived: `Caddyfile.relay:19-29` (the mechanism stated as a
+5-minute grace, plus the one case where a leg does end on its own — the relay's
+60 s idle close), the runbook `§4` (`:173-183`, a new paragraph: a reload is a
+staggered drop; schedule it off a long turn), `§7` (`:270-271`, "a reload with a
+live relay behind it is harmless" → it drops streams within the grace), `§8`'s
+symptom table (`:293`, "`stream_close_delay` missing" → expected, resync), `§9`
+(`:315-321`, a new limitation), and the changelog fragment (which had repeated
+"stops a config reload from cutting every live phone session").
+
+**Tests added** (`apps/relay/test/deploy.test.ts`, 13 → 17):
+(a) *"the live ExecStart sizes the three PER-IP limits for ONE shared key"* —
+parses the real live ExecStart and holds each of the three flags **above** its
+`RELAY_LIMITS` per-client default, so an omitted flag (the actual bug) and a
+flag left at its default both die; (b) *"the Caddyfile's account of the limits is
+true of the unit"* — the claim is two artefacts, so both are asserted (the site
+block names each flag AND the unit passes it); (c) *"a Caddy reload drops live
+streams after a 5m GRACE — and nothing says otherwise"* — keeps
+`stream_close_delay 5m` (the R7 guard), bans the old reasoning by regex, and
+requires the word "5 min" in both the block and the runbook; (d) *"it does not
+promise a Caddy reload is a no-op for live sessions"* + *"it says a reload with
+live streams behind it is not harmless"* — the runbook's two remaining repeats of
+the claim (for the record, the test file's `serviceKeys` `\`-continuation
+reader is now exercised by a **real** continuation, not only a synthetic one: the
+unit's own `ExecStart` is two lines).
+
+**Red before green** (against the unfixed artefacts, narrow file only):
+
+```
+$ bun test apps/relay/test/deploy.test.ts        # artefacts as R7 shipped them
+12 pass, 5 fail
+(fail) …the live ExecStart sizes the three PER-IP limits for ONE shared key
+(fail) …the Caddyfile's account of the limits is true of the unit
+(fail) …a Caddy reload drops live streams after a 5m GRACE
+(fail) …it does not promise a Caddy reload is a no-op for live sessions
+(fail) …it says a reload with live streams behind it is not harmless
+```
+
+One draft of test (a) was itself wrong — it compared a formatted string to
+itself-built expectation, so it passed only when the flag was *missing*; it was
+replaced by an explicit `value === undefined` throw that names the flag
+(`deploy.test.ts:168-175`), and mutation M1 below is what catches that class.
+
+**Mutation checks** (after green; each reverted from a saved copy in
+`.tentacle/tmp/mobile-relay/fix1/` and confirmed by `shasum -c`: all four files
+`OK` — no `git checkout`/`restore`/`stash`):
+
+| # | mutation | result |
+|---|---|---|
+| M1 | drop the three live limit flags (back to the per-client defaults — the original bug) | **red 3**: the limit test (`ExecStart does not pass --max-dials-per-minute: … falls back to the per-client default of 30, i.e. one global limit`), the Caddyfile-account test, AND the continuation-reader guard (a dropped continuation loses the flags) |
+| M2 | `--max-streams-per-ip 2000` → `16` (flag present, but at the per-client value) | **red 1**, `expect(received).toBeGreaterThan(expected)` — the test pins "above the default", not merely "the flag is there" |
+| M3 | restore the false Caddyfile sentence (`a stream ends on its own before the delay can ever fire`) | **red 1** ("a Caddy reload drops live streams after a 5m GRACE") |
+| M4 | runbook back to "a Caddy reload not cutting live streams" (§9) | **red 1** ("it does not promise a Caddy reload is a no-op…") |
+| M5 | restore "a reload with a live relay behind it is harmless" (§7) | **red 1** ("it says a reload with live streams behind it is not harmless") |
+
+**Drift from the review's suggested fix.** The review offered "ship the fleet-sized
+ExecStart **or** make the unit refuse the default". I shipped the values (M1/M2
+pin them) and ALSO corrected every prose claim the false default rested on, because
+the two findings interlock: the unit's unsafe numbers were only reachable because
+`Caddyfile.relay` said they were not. No `relay.service`-refuses idea was
+implemented — a unit that validates at start would need the flags in argv anyway,
+and `deploy.test.ts` covers the same ground without a host. The new numbers are
+this fix's OWN choice, not an owner decision: they are stated as reversible in
+`relay.service:47-49` and runbook `§9`, and are gated on the XFF code change.
+
+**Gate** (this branch, after the last edit): `bunx tsc --noEmit` clean;
+`bunx tsc -p apps/relay` and `bunx tsc -p apps/mobile` clean; `bun run lint`
+clean (1363 files, 0 errors, 0 warnings); `bun test` **9830 pass / 4 opt-in skip
+/ 0 fail** (712 files, 78 727 expects; +4 over R7's 9826 — the four new tests).
+`apps/relay` alone: 78/78 (74 + the 4 new). `git status`: only the five intended
+files (`relay.service`, `Caddyfile.relay`, `docs/ops/relay-deploy.md`,
+`deploy.test.ts`, the changelog fragment) plus this doc.
+
+**Not verified — one line each, with how to verify:**
+- `systemd-analyze verify` / `caddy validate` accepting the edited unit and site
+  block: needs those binaries (neither is here). Run both on the host, runbook
+  §3/§4, before enabling.
+- That the fleet numbers are not too low for real traffic: only the deploy shows
+  the real dial rate. Watch `journalctl -u relay.service | grep refused`, runbook
+  §8; the flags are tunable in `ExecStart` without a code change.
+
+*— claude-opus-5-5, 2026-11-14*
+
+### Round 2
+
+**Verdict: APPROVE.** I checked the fix commit against Round 1's two findings
+(`git diff HEAD~1`).
+
+- **Finding 1 (shared per-IP limits): FIXED.** `relay.service` now runs
+  `--max-dials-per-minute 6000 --max-streams-per-ip 2000 --max-hellos-per-minute 600`
+  in the live, continued `ExecStart`. The Caddyfile's claim about the unit is now true,
+  and a test pins it. Mutation: `600→10` made 2 tests fail (the limit test and the
+  parser's own continuation guard).
+- **Finding 2 (`stream_close_delay`): FIXED.** The Caddyfile, runbook §4/§7/§8/§9 and
+  the changelog now describe a reload as a staggered drop over a 5-minute grace.
+  Mutations: putting "before the delay can ever fire" back into the Caddyfile made a
+  test fail, and adding "reload not cutting live streams" to the runbook made a test
+  fail. All three mutations were reverted, and `git status` shows no changes.
+- **Regressions:** none found. `deploy.test.ts` 17/17 pass. `bun run lint` is clean
+  (1363 files) and `bun run typecheck` is clean (root, mobile, relay). The
+  `RELAY_LIMIT_FLAGS` type import resolves. The parser's guard still covers a
+  continued `ExecStart`.
+- **Remaining risk (accepted, and stated in runbook §9):** the limits are still one
+  bucket, so a single client can use up a large share, for example all 2000 sockets.
+  The real fix is X-Forwarded-For behind a trusted-local flag, an R2 code task. It is
+  out of R7's scope.
+
+*— claude-opus-5-5, 2026-11-14* (same model family as the executor; only the
+context is fresh.)

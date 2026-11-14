@@ -13,6 +13,7 @@ import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
 import type { Palette } from "../../theme.ts";
 import { type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
+import { toolSummary } from "../../tool-summary.ts";
 import { type Row, imageRowText } from "../../transcript-rows.ts";
 import { DiffView } from "./DiffView.tsx";
 import { Markdown } from "./Markdown.tsx";
@@ -62,7 +63,13 @@ function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
         {user.restart === true ? (
           <Text style={[styles.caption, { color: palette.secondaryLabel }]}>restart prompt</Text>
         ) : null}
-        <Markdown parsed={parsedOf(user.text)} palette={palette} onLink={onLink} />
+        {/* The bubble IS `card`: code inside it takes the page colour (B4). */}
+        <Markdown
+          parsed={parsedOf(user.text)}
+          palette={palette}
+          onLink={onLink}
+          codeBackground={palette.groupedBackground}
+        />
         {user.images.length > 0 ? (
           <View style={styles.images}>
             {user.images.map((image) => {
@@ -116,7 +123,8 @@ function ReasoningRowView({ row, palette, onLink }: RowProps): JSX.Element {
 function ToolRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Element {
   const tool = row as Extract<Row, { kind: "tool" }>;
   const [expanded, setExpanded] = useState(false);
-  const output = tool.output ?? "";
+  const summary = toolSummary(tool);
+  const output = summary.output;
   const lines = output === "" ? [] : output.split("\n");
   const hidden = Math.max(0, lines.length - OUTPUT_PREVIEW_LINES);
   const shown = expanded ? lines : lines.slice(0, OUTPUT_PREVIEW_LINES);
@@ -130,7 +138,7 @@ function ToolRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
             style={[styles.toolLabel, { color: palette.label }]}
             numberOfLines={1}
           >
-            {`${tool.label} · ${tool.status}`}
+            {`${summary.label} · ${tool.status}`}
           </Text>
           {tool.durationMs === undefined ? null : (
             <Text style={[styles.caption, { color: palette.secondaryLabel }]}>
@@ -138,9 +146,9 @@ function ToolRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
             </Text>
           )}
         </View>
-        {tool.args !== "" ? (
+        {summary.subtitle !== "" ? (
           <Text style={[styles.args, { color: palette.secondaryLabel }]} numberOfLines={2}>
-            {tool.args}
+            {summary.subtitle}
           </Text>
         ) : null}
         {tool.denialReply !== undefined ? (

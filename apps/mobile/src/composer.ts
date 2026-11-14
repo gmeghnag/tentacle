@@ -103,6 +103,24 @@ export function composerAction(input: ComposerInput): ComposerAction {
 }
 
 /**
+ * What the keyboard's Return key does (B2, owner Q1: Return SENDS): the same as
+ * the button for `send` / `queue` / `send-later`, and NOTHING otherwise. Never
+ * `stop` — an empty field + Return while a turn runs must not cancel the turn —
+ * and never `none` (a blank field stays as it is). It reuses `composerAction`'s
+ * decision; it never re-decides.
+ */
+export function returnKeyAction(action: ComposerAction): ComposerAction | null {
+  switch (action.kind) {
+    case "send":
+    case "queue":
+    case "send-later":
+      return action;
+    default:
+      return null;
+  }
+}
+
+/**
  * Whether **Send now** is offered (D1's secondary button): a turn runs on a live
  * link, and there is a row of mine to take or a text to take with it. A message
  * carrying photos never offers it (P4) unless the QUEUE (text only) does.

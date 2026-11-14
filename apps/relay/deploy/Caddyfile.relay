@@ -1,0 +1,46 @@
+# Caddy site block for the mobile relay — relay.tentacle.so
+# (docs/feat/mobile-relay.md R7; runbook: docs/ops/relay-deploy.md)
+#
+# NOT APPLIED by any executor. Include it from the host's main Caddyfile:
+#
+#   # /etc/caddy/Caddyfile
+#   import /etc/caddy/relay.tentacle.so.caddy
+#
+# Caddy gets the certificate on its own (ACME/Let's Encrypt); there is no key to
+# install. The relay itself speaks plain ws:// on loopback and knows nothing
+# about TLS, so this file is the only place the public name appears.
+
+relay.tentacle.so {
+	# Everything — the daemon's control socket (/v1/daemon), the accept legs
+	# (/v1/accept), the phones (/d/<id>/e2e) and /healthz — is one reverse proxy.
+	# WebSockets are proxied transparently: Caddy upgrades on its own, so there
+	# is no route to configure per kind of leg.
+	reverse_proxy 127.0.0.1:4100 {
+		# A config RELOAD does not cut live sockets AT ONCE: without this, `caddy
+		# reload` would close every relayed session immediately (a phone dropping
+		# mid-turn). With it the cut is DELAYED, not cancelled — the relay pings
+		# its legs (`server.ts` sets `sendPings: true`), so a live phone session
+		# and every daemon control socket never idle out on their own and Caddy
+		# force-closes them 5 minutes after the reload. So plan a reload as a
+		# STAGGERED drop spread over those 5 minutes, not as a no-op: F1/F2 resync
+		# the phones that drop, and F3's jittered re-registration covers the
+		# daemons. (The duration must stay ≥ the 60 s idle timeout: a leg with
+		# nothing left to say is closed by the relay itself, which is the only
+		# case where it ends "on its own".)
+		stream_close_delay 5m
+	}
+
+	# No CORS, no Origin check, no admin path: the app is a native client, the
+	# relay authorises nobody (AGENTS §7 "not trusted" — Noise authenticates
+	# both ends), and the only non-socket route is /healthz.
+	#
+	# Nor does the relay read X-Forwarded-For today: its per-IP limits key on the
+	# DIRECT peer, which behind this proxy is always 127.0.0.1. Sending the
+	# header would therefore change nothing, and the single bucket they collapse
+	# into is why `relay.service` passes the three per-IP flags at FLEET sizes
+	# (`--max-dials-per-minute` / `--max-streams-per-ip` /
+	# `--max-hellos-per-minute`, each pinned above its per-client default by
+	# `deploy.test.ts`). Do not drop those flags back to the defaults while this
+	# proxy is in front: they would become one global limit (runbook, "Known
+	# limitations").
+}

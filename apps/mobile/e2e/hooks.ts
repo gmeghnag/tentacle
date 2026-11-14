@@ -39,7 +39,14 @@ export type HookName =
   /** A NON-matching face (real device only: the simulator's promise hangs — Step 0). */
   | "faceid-nomatch"
   /** Read the app container's log file, so flow 09 asserts what was really written. */
-  | "log-file";
+  | "log-file"
+  /**
+   * The PAYLOAD the last `pair` printed (docs/feat/mobile-relay.md R6): flow 22's
+   * daemon-truth step. A flow cannot see inside a pasted QR, and "the app paired"
+   * is true for every path — so the harness answers what the `pair` line actually
+   * carried, and the flow throws unless the relay is its ONLY address.
+   */
+  | "relay-qr";
 
 /** The hooks that take a query parameter (`?session=…&prompt=…`). */
 export interface HookQuery {
@@ -117,6 +124,13 @@ export interface HookActions {
   readonly pairStart: (options: { readonly ttlMs?: number }) => Promise<{
     readonly payload: string;
     readonly computerId: string;
+    /**
+     * Set by the harness when this window is the RELAY-ONLY one (flow 22): `serve`
+     * is restarted with `--no-relay` for the flow's duration, so the record has the
+     * relay address and NO bind-derived one (`pair-addresses.ts`: a loopback bind
+     * contributes none). The flow can then prove the relay is the only path.
+     */
+    readonly relayOnly: boolean;
   }>;
   /** Wait for the phone's claim and return the compare code the terminal shows. */
   readonly pairConfirm: () => Promise<{ readonly sas: string }>;
@@ -138,6 +152,12 @@ export interface HookActions {
   readonly faceIdNoMatch: () => Promise<void>;
   /** The app's log file text from its container (`""` when there is none). */
   readonly logFile: () => Promise<string>;
+  /**
+   * The pairing PAYLOAD the last `pair` printed (flow 22): the harness knows what
+   * the QR carried, and a phone cannot show a URL. Throws when no window has
+   * printed one yet, so a flow cannot read a stale run's line.
+   */
+  readonly relayQr: () => Promise<{ readonly payload: string }>;
 }
 
 /** What a laptop requester answers: `allow` (once) or `deny`. */
@@ -170,6 +190,7 @@ export function hookFor(path: string): HookName | undefined {
     case "faceid-match":
     case "faceid-nomatch":
     case "log-file":
+    case "relay-qr":
       return name;
     default:
       return undefined;
@@ -338,6 +359,9 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
             return Response.json({ ok: true, hook });
           case "log-file":
             return Response.json({ ok: true, hook, text: await deps.actions.logFile() });
+          case "relay-qr": {
+            return Response.json({ ok: true, hook, ...(await deps.actions.relayQr()) });
+          }
         }
         return Response.json({ error: "unknown hook" }, { status: 404 });
       } catch (error) {

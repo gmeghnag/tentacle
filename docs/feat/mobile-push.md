@@ -607,4 +607,517 @@ Execution starts after task 15 (mobile-relay) is merged. *— claude-opus-5-5
 
 ## Execution
 
+### P0 — blocking probes (all four PASS; scratch only in `.tentacle/tmp/mobile-push/`)
+
+**Load-bearing check, re-run first.** Every `hosted-session.ts` citation the
+Implementation's "Load-bearing assumption" rests on still resolves, and the
+line numbers moved only slightly. **An ask becomes visible at exactly one
+mechanism, `registerAsk` → emit:** the ordinary path marks `ask.shown = true` and
+emits inside `persisted().then()` (`:933-935`), the background re-offer path marks
+it then emits directly (`:1044-1047`), and both are after the ask is durable and
+still pending. **Its end is one emit:** `settle` (`:1148`) looks up, deletes,
+emits `permission_resolved` for a *shown* ask (`:1162`) and wakes the gate in a
+`finally` — a valid answer and the turn's abort (`registerAsk`'s `onAbort`,
+`:988`) both go through it, first-wins. **The fallback counts only attachments:**
+`blockingUnsupported` returns `undefined` when `this.attachments.size === 0`
+(`:1084`), so `recheckAsks` (`:1100`) — called from `attach` (`:1581`) and
+`detach` (`:1604`) — cancels a pending ask only when an attached client *cannot*
+show it; with no attachment the ask simply waits. **The emit path is synchronous
+and already has a non-attachment observer slot:** `emit` (`:1960`) fans out to a
+**copy** of `attachments` and then calls `this.watchers.offer(params)` (`:1974`);
+`finishTurn` (`:2517`) sets state before the emit and reports a throwing sink
+(`reportTurnError`, `:2502`), which is the no-await steering window the hook must
+live in. **So the check passes:** a plain callback inserted after
+`watchers.offer` is outside `attachments` (it cannot enter the ask fallback, the
+reaper, `session/list` or the model link — `watchers.ts:5-11` records exactly
+this reason), is synchronous, and cannot reorder a client's stream. The plan's
+central assumption holds; P1 proceeds and no plan edit is needed. (The doc's
+citations were off by ~15 lines — `emit` at `:1948` is really `:1960`,
+`finishTurn`'s range `:2500-2545` really starts at `:2517` — the same code, so
+this is drift in the numbers, not in the plan.) Nothing else in P0/P1 depends on
+task 15.
+
+**(a) HPKE Auth single-shot on `@noble/*` reproduces RFC 9180 A.2.3 — PASS.**
+`.tentacle/tmp/mobile-push/probe-a-hpke.ts` re-derives the whole suite from the
+RFC algorithm text (`LabeledExtract`/`LabeledExpand` with the **KEM** suite id in
+`ExtractAndExpand`, AuthEncap's `DH(skE,pkR) ‖ DH(skS,pkR)`, the Auth key
+schedule). Output:
+
+```
+PASS enc (=pkEm): f7674cc8cd7baa5872d1f33dbaffe3314239f6197ddf5ded1746760bfc847e0e
+PASS pkSm (=x25519.getPublicKey(skSm)): f0f4f9e96c54aeed3f323de8534fffd7e0577e4ce269896716bcb95643c8712b
+PASS shared_secret: d2d67828c8bc9fa661cf15a31b3ebf1febe0cafef7abfaaca580aaf6d471e3eb
+PASS secret: 3022dfc0a81d6e09a2e6daeeb605bb1ebb9ac49535540d9a4c6560064a6c6da8
+PASS key: b071fd1136680600eb447a845a967d35e9db20749cdf9ce098bcc4deef4b1356
+PASS base_nonce: d20577dff16d7cea2c4bf780
+PASS ct seq0: ab1a13c9d4f01a87ec3440dbd756e2677bd2ecf9df0ce7ed73869b98e00c09be111cb9fdf077347aeb88e61bdf
+PASS shared_secret (receiver): d2d67828c8bc9fa661cf15a31b3ebf1febe0cafef7abfaaca580aaf6d471e3eb
+PASS wrong sender key -> different shared secret
+```
+
+The probe also matched A.2.3's published `key_schedule_context`
+(`probe-a2-kdf.ts`, PASS), which isolates the KDF from the KEM. Two bugs in my
+*probe* were found and fixed by these vectors before any repo code existed
+(noble's `hmac(hash, key, message)` argument order; the KEM's `"KEM"` suite-id
+separator; Auth mode's two-part `dh`) — evidence the vectors do the work.
+
+**(b) Bun `node:http2` TLS + ALPN `h2` to `api.sandbox.push.apple.com` — PASS.**
+`probe-b-apns-h2.ts`, a bogus bearer JWT, no secret:
+
+```
+alpn: h2
+status: 403 apns-id: 1B4A49C7-306F-6EAA-7E6C-42FF68D41D01
+body: {"reason":"InvalidProviderToken"}
+reason: InvalidProviderToken
+PASS 403 InvalidProviderToken
+```
+
+So TLS, ALPN `h2`, the `POST /3/device/<token>` path, the APNs headers and the
+`{"reason":…}` error framing all work from Bun — the exact 403 the plan predicted.
+
+**(c) WebCrypto ES256 JWT from a generated P-256 PKCS#8 key — PASS.**
+`probe-c-es256-jwt.ts`:
+
+```
+pkcs8 bytes: 138 import ok: true
+signature length: 64 PASS 64-byte r||s (raw)
+PASS verifies
+PASS tampered input rejected
+header: {"alg":"ES256","kid":"ABC123DEFG"} claims: {"iss":"TEAM123456","iat":1794685683}
+PASS header/claims shape
+```
+
+Bun's `crypto.subtle.sign` returns the raw 64-byte `r‖s` APNs wants (not DER), and
+a PKCS#8 `.p8` read off disk imports directly — so `--apns-key-file` needs no
+conversion (P4).
+
+**(d) `expo-notifications` for Expo SDK 58 + CryptoKit HPKE — PASS.** The app is
+on `expo@58.0.17`; `expo-notifications` is dist-tagged `sdk-56: 56.0.26`,
+`next: 58.1.4`, `latest: 58.1.9` and has **never** appeared in
+`apps/mobile/package.json`. Its `plugin/build/withNotificationsIOS.js:54-56` sets
+`config.modResults['aps-environment'] = mode` (mode defaults to `development`,
+so P9 must pass the right mode per build); its
+`src/getDevicePushTokenAsync.ts` returns `{type: Platform.OS, data}` where `data`
+is `PushTokenManager.getDevicePushTokenAsync()`'s string, and iOS's
+`ios/ExpoNotifications/Notifications/NotificationsAppDelegateSubscriber.swift:30-32`
+hex-encodes the raw token (`data.map { String(format: "%02hhx", $0) }.joined()`) —
+so `data` **is** the raw lowercase-hex APNs token, matching P2's `hex` schema,
+with no Expo push service (decision 19). CryptoKit `HPKE` is `iOS 17.0+` (Apple's
+own doc JSON: `introducedAt: 17.0`), so the app's iOS-18 minimum is covered and
+`HPKE.Recipient(…authenticatedBy:)` is available to task 17's NSE.
+
+The Context's repro re-ran unchanged: `rg -l 'apns|push_register|devicePushToken|expo-notifications' packages apps/mobile` → **no files**, i.e. the capability is
+still absent.
+
+### P1 — push crypto (DONE)
+
+**Files.** `packages/transport/src/push-seal.ts` (new); `packages/transport/package.json`
+(`"./push": "./src/push-seal.ts"`, beside `./noise` and `./relay-id`);
+`packages/transport/test/push-seal.test.ts` (new, 24 tests);
+`packages/transport/test/vectors/push-v1.json` (new);
+`packages/transport/test/vectors/README.md` (a section for it).
+
+**As built.** The module follows Design 2 exactly: `sealPush(plaintext, senderStatic,
+recipientPub, rng)` / `openPush(sealed, recipientStatic, senderPub)`, `info =
+"tentacle-push/1"`, `aad` = the key id, `u16` length prefix + zero padding to
+512/1024/2048, and `pushKeyId(computerPub) = b64url(SHA-256("tentacle-push-kid/1" ‖
+pk))[0..12]`. Pure and synchronous, randomness injected — the same shape as
+`noise.ts`, which is why a vector can fix the ephemeral and compare bytes.
+
+**Drift from the Implementation (one, deliberate, and additive).** The generic
+HPKE Auth primitive is exported as `hpkeAuthSeal` / `hpkeAuthOpen` beside the
+protocol-level `sealPush` / `openPush`. Reason: RFC 9180 A.2.3 addresses the bare
+HPKE layer — it has its own `info` (`"Ode on a Grecian Urn"`), its own `aad`
+(`"Count-0"`) and no tentacle padding — so driving it through `sealPush` would
+mean widening `sealPush`'s signature for a test's benefit. The two thin wrappers
+are then the only code that knows `PUSH_INFO`, the key-id `aad` and the padding,
+so the RFC vectors and the envelope vectors each test exactly one layer. The
+Design's public surface (`sealPush` / `openPush`) is unchanged.
+
+**Two small additions the tests needed.** `PUSH_AEAD_TAG_BYTES = 16` (the sealed
+`c` is the bucket **plus** the Poly1305 tag, i.e. 528/1040/2064 bytes — the
+Implementation says "padded to 512/1024/2048", which is the *plaintext* padding;
+the test asserts the exact wire sizes) and `maxPushPlaintextBytes()` (2046), so
+the "worst case fits" bound P2 needs is a named function, not an expression in an
+error string. `pushPaddedLength` and `publicKeyOf` are exported too.
+
+**Vectors are independently generated.** `vectors/push-v1.json`'s `hpke` block is
+RFC 9180 A.2.3 transcribed from `rfc-editor.org/rfc/rfc9180.txt`; its `tentacle`
+block was produced by a **Python** HPKE Auth implementation written from the RFC
+(`cryptography`: X25519 + HKDF-SHA256 + ChaCha20-Poly1305), which reproduces A.2.3
+first and then emits our envelopes over fixed keys and a fixed ephemeral —
+4 cases: empty, a 303-byte `ask`, a 197-byte `turn_done` (both 512), and a
+2046-byte max (2048). The TS code never generated its own expectations.
+
+**Red before green.** Every test was written against the module as it grew; the
+two that the code initially failed are the ones the plan named — the byte-exact
+envelopes (my `PUSH_PAD_BUCKETS`/tag assumption and a hex-vs-text helper mistake
+were caught by the *vectors*, not by reading the code) and the "opens with the
+pinned computer key" round-trip. The mutation table below is the non-vacuity
+evidence (AGENTS §9), run with `.tentacle/tmp/mobile-push/mutations-p1.sh` plus
+three follow-ups; each mutation is a one-line edit to `push-seal.ts`, restored
+from a scratch backup (**never** git), then the file was diffed against the
+backup to prove it came back identically.
+
+| # | Mutation (one line) | Result | Tests that failed |
+|---|---|---|---|
+| 1 | `ExtractAndExpand` uses `HPKE_SUITE_ID` instead of `KEM_SUITE_ID` | RED | 5: A.2.3 enc/ct + all 4 envelope vectors |
+| 2 | Auth → Base: drop `DH(skS,pkR)` from the sender's KEM `dh` | RED | 9 (A.2.3 secret, all envelopes, round-trips) |
+| 3 | Base mode in **full** (drop `pkS` from `kem_context` too, seal+open) | RED | 6, **including "a relay's own key cannot open or forge"** — this mutation is why that test exists |
+| 4 | `sealPush`'s `aad` → empty (key id no longer binds) | RED | 7 (all envelope bytes + round-trips) |
+| 5 | `PUSH_INFO` → `"tentacle-push/2"` | RED | 5 (the constants test + all 4 envelopes) |
+| 6 | `openPush` skips the key-id check | RED | 1: "an envelope naming another computer is refused" |
+| 7 | padding bucket boundary `+1` | RED | 3 (boundary test, max-2048 vector) |
+| 8 | `unpad` returns one byte short | RED | 6 (incl. "trailing zero bytes survive") |
+
+Mutation 3 exposed a real weakness in my own test: the first version of the
+forgery test passed under Base mode, because its throw came from the *key-id*
+mismatch rather than from sender authentication. It now seals a forged envelope
+with the relay's key over the exact `info`/`aad`/padding and asserts it does not
+open — and it is RED under mutation 3, which is the property Design 2 relies on
+("a relay or Apple cannot forge one").
+
+**Failure modes covered by this slice.** F6 (a relay's key cannot open or forge —
+mutation 3), F7's "replayed ask is inert" is P7's, F26's "an oversized plaintext
+is impossible" (thrown, plus the 2046-byte envelope vector), a flipped ciphertext
+byte → `bad-tag`, a flipped key id/`aad` → no open, an envelope naming another
+computer → refused before decryption, a low-order recipient key → refused, a
+wrong-size key → thrown. F12 (key rotation) is by construction: a re-registration
+replaces the recipient key and old ciphertexts simply fail to open (placeholder).
+**Corrected in fix round 1:** this paragraph originally listed "a flipped key
+id/`aad` → no open" among the covered cases, and implied the padding was fully
+pinned. The zero-tail case was in fact vacuous at the time (see Review round 1,
+finding 1, and `### Fix round 1`).
+
+**Gate (run in `.tentacle/worktrees/mobile-push`, this branch).**
+`bunx tsc --noEmit` → clean; `bun run typecheck` (all three projects, incl.
+`apps/mobile` + `apps/relay`) → clean; `bun run lint` → `Checked 1370 files … No
+fixes applied` (baseline: clean, 0 errors, 0 warnings); `bun test` → **9903 pass,
+4 skip, 0 fail** (9907 tests / 716 files). The 4 skips are the documented opt-in
+ones (`TENTACLE_K8S_SERVER`, `TENTACLE_DOCKER_TESTS`, `TENTACLE_SLOW_TESTS`) —
+this slice adds no skip. One full-suite run reported `1 fail` in
+`packages/exec/test/confinement.test.ts` ("F2: a hard link …"); it is unrelated to
+this slice (no touched file is imported there), it passed on the runs before and
+after, it passes 3/3 when run alone (`46 pass 0 fail`), and the suite's next full
+run was clean — a pre-existing flake in the confinement suite, recorded here
+rather than claimed away. No schema changed, so `packages/protocol/schema/protocol.json`
+is untouched. Changelog: one fragment, `changelog.d/mobile-push.added.md`;
+`CHANGELOG.md` and `TODO.md` untouched.
+
+**Not done, by instruction:** P2–P10 and D2a/D2 are untouched (P2's protocol
+schemas, P3's relay frames, P4's APNs client, P5–P9, P10's runbook). No
+`PROTOCOL_VERSION` change and no `protocol.d/` note — P1 adds no wire surface.
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor), 2026-11-14*
+
+### Fix round 1
+
+**Findings addressed: 2 of 2 (both MEDIUM).** No HIGH was raised.
+
+**Finding 1 (MEDIUM, vacuous padding test) — FIXED.**
+Reproduced the reviewer's mutation first, on the test as it stood:
+`padded[i] !== 0` → `=== 999` gave **24 pass / 0 fail**, i.e. the mutation
+survived and the zero-tail loop was unpinned. Cause, exactly as the Review said:
+the test sealed **510** bytes declaring 2, so `unpad` threw at the *bucket-length*
+guard (`push-seal.ts:273-275`) and never reached the tail loop (`:281-283`).
+The test now seals a **full 512-byte bucket** declaring 2 with the non-zero byte
+at **index 511** — the last byte the tail loop can reach, so it pins the loop
+bound as well as the comparison. Red before green, then green:
+
+| State | Result |
+|---|---|
+| old test, mutation M1 | 24 pass / **0 fail** → survived (the bug) |
+| new test, unmutated | 26 pass / 0 fail |
+| new test, mutation M1 (`!== 0` → `=== 999`) | **1 fail**: "a non-zero padding byte is refused" |
+| new test, mutation M4 (loop bound `− 1`) | **1 fail**: same test |
+
+**Two more unpinned guards in the same class — also FIXED.** Probing finding 1's
+class rather than its instance found both sibling `unpad` guards surviving:
+M2 (length-prefix guard `if (false)`) and M3 (bucket-length guard deleted) each
+left **26 pass / 0 fail**. Each now has one test that reaches exactly that guard
+and no earlier one: "a declared length past the end of the bucket is refused"
+(declared 511 in a 512 bucket, asserting `/length prefix exceeds the bucket/`)
+and "a padded plaintext that is not exactly one bucket is refused" (a valid
+envelope over a 4-byte padded body, asserting `/exactly one bucket/`). After the
+tests, M1/M2/M3/M4 each fail exactly one test and nothing else:
+
+| Mutation (one line) | Before these tests | After |
+|---|---|---|
+| M1 `padded[i] !== 0` → `=== 999` | survived (0 fail) | RED, 1 test |
+| M2 length-prefix guard → `if (false)` | survived (0 fail) | RED, 1 test |
+| M3 bucket-length guard deleted | survived (0 fail) | RED, 1 test |
+| M4 tail-loop bound `i < padded.length − 1` | survived | RED, 1 test |
+| M5 `PUSH_AEAD_TAG_BYTES` 16 → 12 | already RED | RED (unchanged) |
+| M6 length prefix `i2osp2(plaintext.length)` → `i2osp2(0)` | already RED (6 tests) | RED (unchanged) |
+
+Every mutation was applied to `push-seal.ts` in the worktree, run against only
+`packages/transport/test/push-seal.test.ts`, and restored from a scratch backup
+under `.tentacle/tmp/mobile-push/fix1/` (**never** git); each restore was
+`diff`ed against the backup and reported identical.
+
+**Finding 2 (MEDIUM, attribution) — FIXED.** The Execution was signed
+`claude-opus-5-5 (executor)`, but the executor is `ds()`
+(`.tentacle/tmp/orchestration/night-task.sh:17`), which runs
+`~/bin/tentacle --profile deepseek` → `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`
+(`~/.config/tentacle/config.jsonc:25-33`); only `opus()` uses `--model
+claude-opus-5-5` (`:13`). The executor's transcript shows how the wrong id got
+there: it grepped **the orchestrator's** Claude session jsonl
+(`~/.claude/projects/-Users-gmeghnag-tentacle/232c4c3e-….jsonl`, 2704 ×
+`claude-opus-5-5`) and signed itself with the answer. The signature now names the
+real model. **Drift from the Review's recommendation:** the Review said "the owner
+or orchestrator must correct one of the two"; I corrected the doc, because the
+commit message and the launch command already agree (`feat(mobile-push): exec
+(deepseek)`), so the signature was the one wrong artifact — and no rebase/amend
+was available to me (no git checkout/commit).
+
+**Nits taken (all four, none blocking).** (a) `push-seal.test.ts:68`'s "quick
+brown fox" comment corrected to "Ode on a Grecian Urn", and the `info` is now
+asserted as text rather than only as hex. (b) The test named "receiver derives the
+published shared secret" is renamed to "the envelope authenticates the sender's
+static key (Auth, not Base)", and its comment now states that `shared_secret` is
+pinned *indirectly* by the byte-exact `ct` — the honest claim. (c) The changelog
+fragment no longer credits the NSE (task 17) with opening pushes; it says the
+envelope is openable by CryptoKit and that the extension is the app-side task.
+(d) `SealedPush.ciphertext`'s comment now says `bucket + 16` = 528/1040/2064, not
+512/1024/2048.
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` → clean, exit 0;
+`bun run typecheck` (all three projects) → clean, exit 0; `bun run lint` →
+`Checked 1370 files in 399ms. No fixes applied.` (baseline clean, exit 0);
+`bun test` → **9905 pass, 4 skip, 0 fail, 716 files** on four of the six full
+runs I made, with `1 fail` on two. The 4 skips are the documented opt-ins; this
+round adds none. **Both failures named, not hidden — neither is this branch's:**
+
+1. `packages/daemon/test/session-log-store.test.ts` — "T4 the fork precedes the
+   source's next write" (captured: `gate3.log`). A timing test that gates on
+   `await Bun.sleep(60)` (`:857`). That file is **not** in
+   `git diff --name-only main...HEAD`, imports nothing from `@tentacle/transport`,
+   and passes **45/45 three times in a row** when run alone. Under full-suite
+   parallel load it loses the race.
+2. An earlier run reported only a 5000 ms timeout whose stdout was
+   `{"resident":false}` — the fixture of the cli engine tests
+   (`engine-runtime.test.ts:186`, `engine-docker.test.ts:225`). Those two files
+   then passed 144/144 three times running.
+
+My only non-test source change this round is a **doc comment**, which no daemon
+or cli test imports, so neither failure can be mine. **Unverified:** I did not run
+`bun test` on `main` at the same commit to prove both flakes pre-date this branch
+— the evidence is that they are outside the branch's diff and only fail under
+load. To verify, run `bun test` a few times on a clean `main` worktree.
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor, fix round 1), 2026-11-14*
+
+### P2 + P3 — protocol: push wire + relay frames (DONE)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor, P2 + P3), 2026-11-14*
+
+**Load-bearing check, re-run first: PASS.** Every `hosted-session.ts` citation
+still resolves, at the line numbers the P0 run recorded. `blockingUnsupported`
+returns `undefined` when `this.attachments.size === 0` (`:1084`); `recheckAsks`
+(`:1100`) is called from `attach` (`:1581`) and `detach` (`:1604`); `emit`
+(`:1960`) fans out to a copy of `attachments` and then calls
+`this.watchers.offer(params)` (`:1974`); `settle` (`:1148`) deletes, emits
+`permission_resolved` for a shown ask, and wakes the gate in a `finally`;
+`finishTurn` (`:2517`) sets state before its emit. Unchanged since P0, so the
+plan's central assumption holds and P2/P3 (pure protocol, which touch none of
+it) were implemented as written.
+
+**Files.** `packages/protocol/src/push.ts` (new, the whole P2 wire);
+`packages/protocol/src/methods.ts` (`Method.DevicePushRegister`,
+`Method.DevicePushUnregister` + their two registry entries);
+`packages/protocol/src/index.ts` (`export * from "./push.ts"`);
+`packages/protocol/schema/protocol.json` (regenerated, not hand-edited);
+`packages/protocol/test/push.test.ts` (new, 15 tests);
+`packages/protocol/test/json-schema.test.ts` (4 fixture entries — the export's
+"every method has a fixture" gate); `packages/protocol/src/relay.ts` (`push` /
+`push-result` frames + their schemas in all three unions, and the shared
+`RelayPushTokenSchema` / `RelayCollapseIdSchema`);
+`packages/protocol/test/relay.test.ts` (a new `describe("push frames")`, 9 tests);
+`changelog.d/mobile-push-protocol.added.md` (new).
+
+**P3 is smaller than planned, because R1 already stores what it needed.** The
+slice's own text allows this ("`ready.features` … skip `features` if R1 already
+has it"): task 15 shipped `features` on `ready` **and** `knownRelayFeatures` /
+`isRelayFeature` with `"push"` already in `RELAY_FEATURES`
+(`relay.ts:196-238`). So P3 adds only the two frames and the schemas that gate
+them. No `RELAY_PROTOCOL_VERSION` move: a `push` is gated by `features`, so an
+R2 relay never sees one.
+
+**Drift from the Implementation, and why.**
+1. **`fitPushMessage` is new, and it is the load-bearing addition of this
+   slice.** The plan said the schema's per-field caps plus "clip before
+   sealing" keep a push inside 4096 bytes; they do not — a worst-case message
+   with every field at its cap is ~14 KiB of UTF-8, which no 2048-byte bucket
+   can hold. So the wire gained one producer-side gate: `fitPushMessage`
+   returns the encoded plaintext, clipping through a 9-rung ladder (preview
+   first, ids last) until it fits `PUSH_PLAINTEXT_MAX_BYTES`. The plan's
+   worst-case test is therefore a property of the CODE, not of a comment.
+   `clipPushText` walks code points and drops lone surrogates and control
+   characters, so a clip can never produce something Swift's decoder refuses.
+2. **`PushEnvelope.c` is a regex alternation, not `.refine()`.** The exporter
+   rejects `ZodEffects` (`json-schema.ts`'s `SUPPORTED_KINDS`), and this
+   schema is on the exported wire, so the three-length bound had to be a plain
+   string constraint (`PUSH_CIPHERTEXT_RE`, pinned by
+   `PUSH_ENVELOPE_CIPHERTEXT_LENGTHS`).
+3. **`push-result.status` is a bounded FREE string, not the five-value enum.**
+   Same reason R1's review fixed `error.code` (`relay.ts:257-273`): a closed
+   enum makes a newer relay's new status a "malformed frame", which closes the
+   whole control socket — one unknown word would cost every push in flight and
+   the link's reachability with it. The daemon refuses the VALUE through P2's
+   `isPushDeliveryStatus`, so an unknown status drops one push. Pinned by a
+   dedicated test (mutation M7 below).
+4. **The token rule is written twice** (`PUSH_TOKEN_RE` in `push.ts`,
+   `RelayPushTokenSchema` in `relay.ts`) because the relay must not load the
+   RPC schemas. A test pins the two against one shared sample, so the
+   duplication cannot drift silently (mutation M9).
+5. **No `relayPushFrameOf` builder.** I drafted one, then dropped it: the
+   daemon's relay link (P8) owns `n`, the timeout and the `features` gate, and a
+   builder here would have been an unused second seam. The frames are plain
+   objects validated by their schemas.
+6. **`PUSH_PAD_BUCKETS` is declared in `push.ts`, not imported from
+   `push-seal.ts`** — the dependency runs transport → protocol, so importing it
+   would be a cycle. The duplication is pinned by a test
+   (`PUSH_PLAINTEXT_MAX_BYTES === maxPushPlaintextBytes()`), which is a stronger
+   guarantee than a comment.
+7. **The changelog is `changelog.d/mobile-push-protocol.added.md`, not
+   `mobile-push.added.md`.** One bullet per file is enforced by
+   `scripts/changelog.ts:120`; P1 already owns `mobile-push.added.md`, so a
+   second bullet there fails the guard (I hit exactly this in the first full
+   gate run, and split it).
+
+**Red before green.** `bun test packages/protocol/test/push.test.ts` on the
+unimplemented tree: `SyntaxError: Export named 'DEFAULT_PUSH_GRACE_SECONDS' not
+found` — 0 pass, 1 error. `bun test packages/protocol/test/relay.test.ts` after
+the P3 test and before the frames: `Export named 'RelayCollapseIdSchema' not
+found` — 0 pass, 1 error. Both are the assertion-bearing tests of the property
+(missing capability), not an incidental import typo: the exports are exactly the
+capability the slice adds.
+
+**Mutations (§9 non-vacuity — each applied to `src`, run, reverted; `git diff`
+empty afterwards, backups in `.tentacle/tmp/mobile-push/`):**
+
+| # | mutation | result |
+|---|---|---|
+| M1 | `clipPushText` cuts by UTF-16 `slice` instead of code points | **RED** "clipPushText cuts on code-point boundaries" (14 pass / 1 fail) |
+| M2 | `fitPushMessage` returns the message unclipped | **RED** (whole file fails: the thrown oversize error) |
+| M3 | `PushPayloadSchema` gains an `aps` field | **RED** "the payload is `{tp}`, and an `aps` … is STRIPPED" |
+| M4 | the register result's `graceSeconds` loses its 0..3600 bound | **RED** "the result says WHY, and the grace the daemon uses" |
+| M5 | `PUSH_TOKEN_RE` loosened to `/^.{64,200}$/` | **RED** "a bad token, env or key is InvalidParams" |
+| M6 | `push` dropped from `RelayControlFrameSchema` | **RED** "daemon → relay `push` round-trips through both unions" |
+| M7 | `push-result.status` becomes a closed 5-value enum | **RED** "an unknown `status` PARSES but is not a known one" |
+| M8 | `push`'s `payload` gains `aps` | **RED** "an unknown field is stripped; `aps` … NOT fields at all" (after M8 first SURVIVED — see below) |
+| M9 | `RelayPushTokenSchema` loosened to `/^.{64,200}$/` | **RED** "every field is validated" + "the token and collapse-id schemas agree" |
+| M10 | `pushCollapseIdOf` ignores its `key` | **RED** "a collapse id is opaque, header-safe and ≤ 64 bytes" |
+| M11 | `pushCollapseIdOf` does not truncate to 64 | **RED** same test + "every field is validated" |
+
+**M8 first SURVIVED, and that is the useful result: the test was weak.** It
+sent `aps` at the frame's top level only — the tempting place is
+*inside* `payload`, which is exactly where an APNs payload keeps its banner
+text. Strengthened to assert both levels; the mutation now goes RED. (M9's
+survival on its own was the same class: only a dedicated cross-layer test made
+it bite.)
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` → clean, exit 0.
+`bun run lint` → `Checked 1372 files in 397ms. No fixes applied.` (baseline
+clean, exit 0). `bun run schema:export` → regenerated `protocol.json` (never
+hand-edited). `bun test` → **9930 pass, 4 skip, 0 fail, 717 files**. The 4 skips
+are the documented opt-ins (live-k8s, live-docker, the ~12 s real-socket
+keepalive, and `confinement.test.ts`'s root-only case); this round adds none —
+checked with `rg 'test\.skip|\.skipIf'` and by running those three files alone
+(46 pass / 2 skip).
+
+**Unverified:** P8's end-to-end proof (a sealed envelope actually reaching a
+fake APNs through the relay link) and P4's `aps` template are other slices; the
+4096-byte joint bound here is pinned with the template inlined as a literal, so
+if P4's template differs in size that test must be re-derived against it.
+
 ## Review
+
+### P0 + P1 (scope: `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM test-vacuity finding, one MEDIUM process finding; the crypto itself holds).
+
+**Findings**
+1. **MEDIUM: the test "a non-zero padding byte is refused" is vacuous** (`packages/transport/test/push-seal.test.ts:343-369`). It seals a **510-byte** plaintext, so `unpad` throws `bad-padding` at the bucket-length check (`push-seal.ts:273-275`) and never reaches the zero-tail loop (`push-seal.ts:281-283`). Mutation `padded[i] !== 0` → `=== 999` (the tail check turned off): **24/24 still pass**. So the property is unpinned, and a sealer bug that leaves bytes after the declared length would open silently. Fix: seal exactly 512 bytes (declared length 2, non-zero tail), then confirm RED under the same mutation. This violates AGENTS §9, which is mandatory, and the Execution claims this case is covered.
+2. **MEDIUM (process): the executor attribution conflicts.** Commit `f33ef6d6` reads `feat(mobile-push): exec (deepseek)`, but the Execution section is signed `claude-opus-5-5 (executor)`. AGENTS §10 requires the signature to name the model that actually wrote the section (that is how routing and drift are tracked). The owner or orchestrator must correct one of the two.
+
+**Gate (narrow, as scoped):** `bun test packages/transport/test/push-seal.test.ts` gave 24 pass / 0 fail. `bun run lint` checked 1370 files with no fixes. `bun run typecheck` (all 3 projects) was clean. I did not re-run the full `bun test`, because it was out of the requested scope.
+
+**Premises:** all TRUE.
+- The RFC 9180 A.2.3 block in `push-v1.json` (skEm, pkEm, skRm, pkRm, skSm, pkSm, enc, shared_secret, key, base_nonce, pt, ct, info) appears verbatim in `rfc9180.txt`, checked with a scratch script.
+- The `tentacle` block's generator (`gen-vectors.py`) imports only `hashlib`/`hmac` and `cryptography`, with no TS and no subprocess, so the vectors really are independent.
+- `./push` is exported in `packages/transport/package.json`.
+
+**Mutations (reviewer, restored from a scratch backup, `git diff` empty afterwards):**
+- M-a: zero-tail check off → **survived** (finding 1).
+- M-c: explicit low-order `acc === 0` check off → survived. This is benign: noble's `getSharedSecret` already throws on that input, and `dh`'s catch maps it to `bad-key`, so the boundary behaviour is still pinned.
+- The executor's table (KEM suite id, Base mode, aad, info, key-id check, bucket boundary, unpad) is consistent with the tests as read.
+
+**Attacks tried**
+- (i) Forgery under Base mode: the forged-envelope test (`:239-264`) seals with a different static key over the exact info/aad/padding. It holds.
+- (ii) Moving a ciphertext to another computer: the key id is both the `aad` and a pre-decrypt check. It holds.
+- (iii) Bucket and length leakage: `c` is always bucket + 16 (528/1040/2064). It holds. `SealedPush.ciphertext`'s doc comment (`push-seal.ts:84`) still says 512/1024/2048 (nit).
+- (iv) Truncated or oversized input: oversized is thrown, never truncated. It holds.
+
+**§7:** "a relay is not trusted" is upheld for this layer: sender authentication comes from the Auth KEM and is proven by a test. No wire, persistence or terminal path is touched.
+
+**Nits (not blocking):**
+- `push-seal.test.ts:68`: the comment says the A.2.3 info is "The quick brown fox", but it is "Ode on a Grecian Urn".
+- The test named "receiver derives the published shared secret" never compares `shared_secret`. The `ct` match implies it.
+- The changelog fragment credits the NSE (task 17) with opening pushes.
+
+**Executor behaviour:** careful and honest about its own weak test (mutation 3), and it used independent oracles. However, it missed that its padding test fails for the wrong reason, which is the same class of mistake it caught in mutation 3.
+
+*Reviewed by the same model family named in the Execution signature (fresh context only). Shared blind spots are possible.*
+
+*— claude-opus-5-5, 2026-11-14*
+
+### Round 2
+
+**Verdict: PASS** (scope: `git diff HEAD~1`, commit `0e03b0f6`).
+
+1. **Finding 1 (vacuous padding test): fixed.** The test now seals a full 512-byte bucket that declares a length of 2 and ends in `0xff`, and the executor added one test per `unpad` guard. Reviewer mutations, each restored from a scratch backup:
+   - tail loop `!== 0` → `=== 999`: **RED** ("non-zero padding byte").
+   - tail-loop bound `padded.length - 1`: **RED** (same test, because the last byte is the one that is non-zero).
+   - length guard disabled (`+ 999`): **RED** ("declared length past the end").
+   - bucket guard disabled (`=== 999`): **RED** ("not exactly one bucket").
+   After the restores, `git diff` is empty.
+2. **Finding 2 (attribution): fixed.** The Execution and the fix round are now signed `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`. My round-1 footer ("same model family") is therefore wrong: this review is by a **different** model family from the executor, which is the routing AGENTS §10 wants for load-bearing work.
+3. **Nits:** all addressed.
+   - The A.2.3 `info` comment is corrected, and the test now asserts the decoded "Ode on a Grecian Urn" string.
+   - The shared-secret test is renamed to what it actually proves.
+   - `SealedPush.ciphertext`'s doc now says 528/1040/2064.
+   - The changelog no longer credits a not-yet-built extension.
+
+**Regressions:**
+- The only change in `src` is a comment.
+- `bun test packages/transport/test/push-seal.test.ts` gives 26 pass / 0 fail (24 before, plus 2 new tests).
+- `bun run lint` checked 1370 files with no fixes.
+- `bun run typecheck` (all 3 projects) is clean.
+
+*— claude-opus-5-5, 2026-11-14*
+
+
+### Review — P2 + P3 (fresh context)
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH/MEDIUM finding; scope `git diff main...HEAD`, slices P2 + P3 only).
+
+**Gate (narrow).** `bun test` push/relay/json-schema/version tests: 78 pass / 0 fail. `bun run lint`: clean (1372 files). `bun run typecheck` (root + mobile + relay): clean.
+
+**Attacks tried.**
+1. *Ladder truncates ids* — `fitPushMessage` rungs 7–9 clip `sessionId` (32/16 B), `requestId` (24 B) and `optionId` (16 B), which would point a push at a wrong session or ask without any error. Probe (`.tentacle/tmp/mobile-push/ladder.ts`: every field at its cap, as `"` (JSON doubles them) and as 4-byte emoji, 8 options, real UUIDs) never got past rung 6: max 2012 B, ids intact, output passes `PushMessageSchema`. Unreachable with daemon-made UUIDs → nit N1, not a finding.
+2. *A `push` reaching an R2 relay / a `push-result` reaching an R4 daemon* — `server.ts:395` still closes on `push` (`control-unexpected`). `relay-link.ts` ignores a parsed `push-result` (it falls through). Both are gated by `ready.features` (P8). No regression.
+3. *Frame size* — the worst push frame is about 3.1 Ki chars, far below `RELAY_CONTROL_LIMITS.maxFrameChars` (96 Ki). No oversize close.
+4. *Strict vs strip / forward compat* — every new payload is a strip object. `push-result.status` is a free bounded string, refused by value (`isPushDeliveryStatus`). Matches the v10 rule.
+5. *Mutation non-vacuity* — this session's permissions blocked my own mutation runs (the in-place edit script). Static check instead: tests pin the ciphertext length (`push.test.ts:238,242`, `relay.test.ts:564`), the ttl bounds (`relay.test.ts:554-557`) and control-char clipping (`push.test.ts:118`). The executor's M1–M10 table is accepted but **not re-run by me**. To verify: run `.tentacle/tmp/mobile-push/rv3-mut.sh` from the worktree root.
+
+**Nits (LOW).**
+- N1 `packages/protocol/src/push.ts:405-440` (rungs 8–9): clipping an id gives a *wrong* id, not a shorter one. Better to fail loud (throw, or drop `ask`) than to clip `requestId`/`sessionId`/`optionId`.
+- N2 `packages/protocol/src/relay.ts:295-300` gives a false reason for duplicating the token regex ("the relay must not load the RPC schemas"). `relay.ts` now imports `push.ts`, and `apps/relay` imports the whole `@tentacle/protocol` index (`server.ts:31`). The pin test holds, so the duplication is harmless, but the comment is wrong.
+- N3 `packages/protocol/test/push.test.ts:193`: `APS.slice(7)` keeps the outer `}`, so `body` is not valid JSON. It is one byte over, so the ≤ 4096 bound still holds, but the check would be stronger with `JSON.parse(body)`.
+
+**Executor behaviour.** The drift is documented honestly and justified (`fitPushMessage`, the regex instead of `.refine`, the free `status`). Red-first is recorded. No out-of-scope edits in P2/P3.
+
+*Same model family as some earlier reviews, but a different family from the executor (DeepSeek).*
+
+*— claude-opus-5-5, 2026-11-14*

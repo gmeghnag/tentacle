@@ -72,4 +72,15 @@ describe("createLinkDiagnoser", () => {
     // F23: an older tentacle has no `/e2e`, so the wording must offer "update".
     expect(unreachableText).toContain("up to date");
   });
+
+  test("R6: the unreachable sentence names the RELAY as a path (mutation: drop the word → red)", () => {
+    // "Nowhere to go" is not the only cause any more: with a phone paired, the
+    // relay is a path (docs/feat/mobile-relay.md R6), and a daemon whose relay is
+    // off (`serve --no-relay`, an unreadable `relay.json`) is the usual reason it
+    // was not taken. Naming it is what makes the sentence actionable.
+    expect(diagnosisMessage("unreachable", "MacBook").toLowerCase()).toContain("relay");
+    // The other verdicts are unchanged: a revoke or a reset is not about paths.
+    expect(diagnosisMessage("revoked", "MacBook")).not.toContain("relay");
+    expect(diagnosisMessage("maybe-reset", "MacBook")).not.toContain("relay");
+  });
 });

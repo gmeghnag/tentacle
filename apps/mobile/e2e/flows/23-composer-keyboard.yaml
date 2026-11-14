@@ -1,0 +1,51 @@
+appId: so.tentacle.app
+---
+# 23 (docs/feat/mobile-ui-polish.md Slice 0): the composer and the keyboard.
+# B1 — the composer sat under the keyboard (and in the home-indicator area):
+# flow 07 had to `hideKeyboard` before tapping Send because the tap landed on a
+# key. Here the keyboard stays UP and the tap must still reach `composer-send`.
+# B2 — Return did nothing but insert a newline: here `pressKey: Enter` must send
+# (the field empties and a turn runs). The last step is the daemon's history.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${KEYBOARD_ID}"
+- assertVisible:
+    id: "session-view"
+- assertVisible:
+    id: "turn-idle"
+- takeScreenshot: 23-keyboard-closed
+- tapOn:
+    id: "composer-input"
+- inputText: "SLOW keyboard button"
+- takeScreenshot: 23-keyboard-open
+# B1: NO hideKeyboard. With the composer under the keyboard this tap lands on a
+# key, nothing is sent and `turn-running` never shows.
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "turn-running"
+    timeout: 10000
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+# B2: Return sends.
+- tapOn:
+    id: "composer-input"
+- inputText: "SLOW keyboard return"
+- assertVisible:
+    id: "composer-filled"
+- pressKey: Enter
+- assertNotVisible:
+    id: "composer-filled"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+- runScript:
+    file: "23-history.js"

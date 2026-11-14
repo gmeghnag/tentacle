@@ -213,7 +213,10 @@ describe("S9a: the turn driver leaves App.tsx", () => {
     const app = readSrc("App.tsx");
     // The key host still calls `sendNow` and `submit` by those names.
     expect(app).toContain("sendNow();");
-    expect(app).toContain("submit(field.value);");
+    // S12: the line tail's Enter is the `submit` effect, whose text is the line
+    // snapshot's `value: field.value`; the port hands it to the hook's `submit`.
+    expect(app).toContain("submit: (text) => submit(text),");
+    expect(app).toContain("value: field.value,");
     // The command port still names `run` and `startCompaction`.
     expect(app).toContain("startCompaction,");
     expect(app).toContain("run,");
