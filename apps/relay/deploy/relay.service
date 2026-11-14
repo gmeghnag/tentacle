@@ -29,14 +29,26 @@ Group=relay
 # (deploy.test.ts asserts `main.ts` parses exactly these flags at exactly these
 # values, so the unit cannot drift into an ExecStart that exits 1 on every boot).
 #
-# OWNER DECISION before the first real deploy (runbook §9): behind Caddy the
-# relay sees every client as 127.0.0.1, so its three PER-IP limits are one shared
-# bucket — and `--max-streams-per-ip`'s default of 16 would cap the whole world at
-# 16 phones. Uncomment fleet-sized values, or fix the relay to read
-# X-Forwarded-For behind a trusted-local flag (a code change, not this unit):
-#   ExecStart=/opt/tentacle-relay/tentacle-relay --host 127.0.0.1 --port 4100 \
-#       --max-dials-per-minute 6000 --max-streams-per-ip 2000 --max-hellos-per-minute 600
-ExecStart=/opt/tentacle-relay/tentacle-relay --host 127.0.0.1 --port 4100
+# THE THREE PER-IP LIMITS ARE SIZED FOR ONE SHARED KEY, NOT FOR ONE CLIENT.
+# Behind Caddy (`deploy/Caddyfile.relay`) every peer is 127.0.0.1 — `server.ts`
+# keys its limiter on Bun's `requestIP`, the DIRECT peer — so
+# `--max-dials-per-minute`, `--max-streams-per-ip` and `--max-hellos-per-minute`
+# are ONE bucket for the whole world. Left at their per-client defaults (30 / 16
+# / 10) this unit would cap every phone on the relay at 16 sockets, let any single
+# client lock every phone out, and admit 10 daemon `hello`s/min globally — a
+# 200-daemon fleet after a restart would take ~20 minutes to re-register, which is
+# the thundering herd F3 promises the relay does NOT have. So the fleet sizes are
+# live here, not a commented-out example (`deploy.test.ts` holds each above its
+# per-client default and pins the values):
+#   6000/min dials = 100/s        (a phone dials on each reconnect; F1/F2 resync)
+#   2000 concurrent phone sockets (a fleet, with headroom)
+#   600/min hellos = 10/s         (200 daemons re-register in ~20 s, jittered F3)
+# A flood is bounded by MemoryMax below, i.e. it costs the relay's own memory and
+# never the host's. When the relay learns X-Forwarded-For behind a trusted-local
+# flag (a code change, its own task) these become per-client again and must drop
+# back to the per-client defaults of `relay-core.ts`.
+ExecStart=/opt/tentacle-relay/tentacle-relay --host 127.0.0.1 --port 4100 \
+    --max-dials-per-minute 6000 --max-streams-per-ip 2000 --max-hellos-per-minute 600
 
 Restart=always
 RestartSec=2s

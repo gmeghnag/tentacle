@@ -171,8 +171,16 @@ curl -sS -i https://relay.tentacle.so/healthz    # 200 {"ok":true,"v":1}, a vali
 ```
 
 `stream_close_delay 5m` in the site block is load-bearing: without it, every
-`caddy reload` closes every live relay socket, i.e. every phone session on the
-relay. Do not remove it to "tidy" the block.
+`caddy reload` closes every live relay socket at once, i.e. every phone session on
+the relay. Do not remove it to "tidy" the block.
+
+What it buys is a **5-minute grace, not immunity**. The relay pings its legs
+(`sendPings: true` in `apps/relay/src/server.ts`), so a live phone session and
+every daemon control socket never go idle — Caddy force-closes them 5 minutes
+after the reload. Treat a reload as a **staggered drop spread over those 5
+minutes**: phones resync on their next dial (F1/F2) and daemons re-register with
+jitter (F3), so it is a blip, but it is not a no-op. Schedule it off a long turn,
+exactly like a `systemctl restart`.
 
 ## 5. Smoke test (relay path end to end)
 
@@ -259,8 +267,9 @@ systemctl start relay.service
 
 To take the public name down entirely, remove the `import` line from
 `/etc/caddy/Caddyfile`, `caddy validate`, then `systemctl reload caddy`. Do this
-AFTER stopping the unit, never before — a reload with a live relay behind it is
-harmless, but a name pointing at nothing is a worse error message.
+AFTER stopping the unit, never before — the reload drops live streams within the
+5-minute grace (§4), and a name pointing at nothing is a worse error message than
+a stopped unit.
 
 ## 8. Diagnose
 
@@ -281,7 +290,7 @@ ss -lntp | grep 4100                          # loopback only, as it must be
 | Unit `failed`, "start-limit-hit" | crash loop; the bound is doing its job | read the journal, fix the cause, `systemctl reset-failed relay.service` |
 | Phone says unreachable, journal shows `4404` | daemon not registered (not running, or its control socket was replaced) | `tentacle devices`, restart `serve` |
 | Journal shows a `version` error | binary/daemon `RELAY_PROTOCOL_VERSION` skew | rebuild both from the same commit (step 6) |
-| Streams drop on every Caddy reload | `stream_close_delay` missing | restore it from `Caddyfile.relay` |
+| Streams drop on a Caddy reload | expected: `stream_close_delay` only delays the cut by 5 min | none — the phones resync (F1/F2); see §4 |
 | Memory near `MemoryMax` | a flood, or many concurrent streams | the per-IP/per-id limits in `relay.service`; check `journalctl` for the refused lines |
 
 ## 9. Known limitations (state these, do not discover them later)
@@ -290,17 +299,32 @@ ss -lntp | grep 4100                          # loopback only, as it must be
   `127.0.0.1`.** `apps/relay/src/server.ts` uses Bun's `requestIP`, and the proxy
   hop is the peer, so `--max-dials-per-minute` / `--max-streams-per-ip` /
   `--max-hellos-per-minute` are ONE shared bucket in this deployment rather than
-  per-phone: the 16-concurrent-streams-per-IP default would cap the whole world at
-  16 phones. Either raise those three flags in `ExecStart` to fleet-sized values,
-  or (the better fix, a code change, not this runbook) have the relay read
-  `X-Forwarded-For` behind a trusted-local flag. **The owner decides before the
-  first real deploy**; the per-id (64 streams) and global (10 000 ids) limits are
-  unaffected.
+  per-phone — at the per-client defaults the 16-concurrent-streams default would
+  cap the whole world at 16 phones. **This artefact resolves it by shipping the
+  three flags at fleet sizes in `ExecStart`** (6000 dials/min, 2000 sockets,
+  600 hellos/min — each pinned above its per-client default by
+  `apps/relay/test/deploy.test.ts`), so the unit is safe as installed and the
+  owner has nothing to decide before the first deploy. Two consequences worth
+  knowing: a flood is bounded by `MemoryMax=512M` rather than by these numbers,
+  and the numbers are a SINGLE bucket — one client can still consume a large
+  share. The real fix is the relay reading `X-Forwarded-For` behind a
+  trusted-local flag (a code change, its own task); when it lands, drop these
+  flags back to the `relay-core.ts` defaults, or the per-client limits become
+  meaningless. The per-id (64 streams) and global (10 000 ids) limits are
+  unaffected either way.
+- **A Caddy reload drops live streams within 5 minutes.** `stream_close_delay 5m`
+  in the site block delays the forced close of every WebSocket when Caddy's config
+  is unloaded; it does not cancel it. Because the relay pings every leg, neither a
+  phone session nor a daemon control socket goes idle, so nothing ends on its own
+  first. A reload is therefore a staggered drop over the grace window — F1/F2
+  resync the phones that drop and F3's jitter re-registers the daemons, but a long
+  relayed turn will not survive it. Schedule reloads like restarts (§6).
 - **The relay holds no secret today**, but task 16 (APNs, `docs/feat/mobile-push.md`
   P10) adds the `.p8` to this same host as a systemd credential — never a file
   next to the binary, never a flag in argv.
 - **The publish path is untested end to end until this runs.** Everything in
   `apps/relay` is covered by `bun test` against a real socket on
-  `127.0.0.1:0`; what only a deploy proves is the public cert (ATS), a Caddy
-  reload not cutting live streams, and an idle stream surviving 30 min of NAT/proxy
-  timeouts (the relay pings every 25 s against a 60 s idle timeout).
+  `127.0.0.1:0`; what only a deploy proves is the public cert (ATS), a relayed
+  session surviving a Caddy reload for its 5-minute grace (§4), and an idle stream
+  surviving 30 min of NAT/proxy timeouts (the relay pings every 25 s against a
+  60 s idle timeout).

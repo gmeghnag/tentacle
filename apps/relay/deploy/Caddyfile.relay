@@ -16,10 +16,17 @@ relay.tentacle.so {
 	# WebSockets are proxied transparently: Caddy upgrades on its own, so there
 	# is no route to configure per kind of leg.
 	reverse_proxy 127.0.0.1:4100 {
-		# The one thing to get right: a config RELOAD must not cut live sockets.
-		# Without this, `caddy reload` would close every relayed session (a phone
-		# would drop mid-turn). 5m > the relay's 60 s idle timeout, so a stream
-		# ends on its own before the delay can ever fire.
+		# A config RELOAD does not cut live sockets AT ONCE: without this, `caddy
+		# reload` would close every relayed session immediately (a phone dropping
+		# mid-turn). With it the cut is DELAYED, not cancelled — the relay pings
+		# its legs (`server.ts` sets `sendPings: true`), so a live phone session
+		# and every daemon control socket never idle out on their own and Caddy
+		# force-closes them 5 minutes after the reload. So plan a reload as a
+		# STAGGERED drop spread over those 5 minutes, not as a no-op: F1/F2 resync
+		# the phones that drop, and F3's jittered re-registration covers the
+		# daemons. (The duration must stay ≥ the 60 s idle timeout: a leg with
+		# nothing left to say is closed by the relay itself, which is the only
+		# case where it ends "on its own".)
 		stream_close_delay 5m
 	}
 
@@ -29,6 +36,11 @@ relay.tentacle.so {
 	#
 	# Nor does the relay read X-Forwarded-For today: its per-IP limits key on the
 	# DIRECT peer, which behind this proxy is always 127.0.0.1. Sending the
-	# header would therefore change nothing, and `relay.service` sets the limits
-	# to their one-shared-key values instead (runbook, "Known limitations").
+	# header would therefore change nothing, and the single bucket they collapse
+	# into is why `relay.service` passes the three per-IP flags at FLEET sizes
+	# (`--max-dials-per-minute` / `--max-streams-per-ip` /
+	# `--max-hellos-per-minute`, each pinned above its per-client default by
+	# `deploy.test.ts`). Do not drop those flags back to the defaults while this
+	# proxy is in front: they would become one global limit (runbook, "Known
+	# limitations").
 }

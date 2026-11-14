@@ -3137,3 +3137,116 @@ safe one is in place.
 
 *— claude-opus-5-5, 2026-11-14* (reviewer is the same model family as R7's executor,
 claude-opus-5-5; only the context is fresh — shared blind spots may survive.)
+
+## Execution
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-14*
+
+Scope: the R7 review's 2 MEDIUM, no HIGH. Both were **prose-versus-artefact**
+findings, so both arms were verified against the code rather than the review:
+`relay-core.ts:44,46,52` are indeed the per-client defaults, `server.ts:121-124`
+really sets `sendPings: true`, `server.ts:286` really keys on `requestIP` (the
+direct peer), and the Caddy reference page's own wording for `stream_close_delay`
+is "delays … instead, the stream will remain open until the delay is complete" —
+a delay, never a cancel.
+
+**1 (MEDIUM) — the shipped unit was the known-unsafe production config.**
+`relay.service` ran the per-client defaults behind Caddy — one global bucket — and
+`Caddyfile.relay` claimed in prose that the unit "sets the limits to their
+one-shared-key values instead". Fixed by **shipping the fleet sizes live**, not by
+softening the comment: the live `ExecStart` is now a `\`-continued two-line value
+carrying `--max-dials-per-minute 6000 --max-streams-per-ip 2000
+--max-hellos-per-minute 600` (`relay.service:50-51`), each with its arithmetic in
+the comment above (`relay.service:36-49`). Chosen over the review's
+"make-the-unit-refuse" alternative because the unit is the one artefact that ships
+the deploy's bind address; a unit that installs cleanly and then caps the world at
+16 phones is the failure mode this task exists to prevent. The Caddyfile comment
+(`Caddyfile.relay:37-45`) now names the three flags and warns against dropping them
+back; the runbook's *Known limitations* `§9` bullet states the numbers, the
+`MemoryMax` bound that replaces them as the flood ceiling, and the condition for
+reverting to the defaults (XFF lands). Pinned by two new tests.
+
+**2 (MEDIUM) — `stream_close_delay` was documented as making reloads safe.**
+It only defers the cut by 5 minutes, and the relay's own pings
+(`sendPings: true`) mean no leg ends on its own first. Fixed in all five places
+the false claim lived: `Caddyfile.relay:19-29` (the mechanism stated as a
+5-minute grace, plus the one case where a leg does end on its own — the relay's
+60 s idle close), the runbook `§4` (`:173-183`, a new paragraph: a reload is a
+staggered drop; schedule it off a long turn), `§7` (`:270-271`, "a reload with a
+live relay behind it is harmless" → it drops streams within the grace), `§8`'s
+symptom table (`:293`, "`stream_close_delay` missing" → expected, resync), `§9`
+(`:315-321`, a new limitation), and the changelog fragment (which had repeated
+"stops a config reload from cutting every live phone session").
+
+**Tests added** (`apps/relay/test/deploy.test.ts`, 13 → 17):
+(a) *"the live ExecStart sizes the three PER-IP limits for ONE shared key"* —
+parses the real live ExecStart and holds each of the three flags **above** its
+`RELAY_LIMITS` per-client default, so an omitted flag (the actual bug) and a
+flag left at its default both die; (b) *"the Caddyfile's account of the limits is
+true of the unit"* — the claim is two artefacts, so both are asserted (the site
+block names each flag AND the unit passes it); (c) *"a Caddy reload drops live
+streams after a 5m GRACE — and nothing says otherwise"* — keeps
+`stream_close_delay 5m` (the R7 guard), bans the old reasoning by regex, and
+requires the word "5 min" in both the block and the runbook; (d) *"it does not
+promise a Caddy reload is a no-op for live sessions"* + *"it says a reload with
+live streams behind it is not harmless"* — the runbook's two remaining repeats of
+the claim (for the record, the test file's `serviceKeys` `\`-continuation
+reader is now exercised by a **real** continuation, not only a synthetic one: the
+unit's own `ExecStart` is two lines).
+
+**Red before green** (against the unfixed artefacts, narrow file only):
+
+```
+$ bun test apps/relay/test/deploy.test.ts        # artefacts as R7 shipped them
+12 pass, 5 fail
+(fail) …the live ExecStart sizes the three PER-IP limits for ONE shared key
+(fail) …the Caddyfile's account of the limits is true of the unit
+(fail) …a Caddy reload drops live streams after a 5m GRACE
+(fail) …it does not promise a Caddy reload is a no-op for live sessions
+(fail) …it says a reload with live streams behind it is not harmless
+```
+
+One draft of test (a) was itself wrong — it compared a formatted string to
+itself-built expectation, so it passed only when the flag was *missing*; it was
+replaced by an explicit `value === undefined` throw that names the flag
+(`deploy.test.ts:168-175`), and mutation M1 below is what catches that class.
+
+**Mutation checks** (after green; each reverted from a saved copy in
+`.tentacle/tmp/mobile-relay/fix1/` and confirmed by `shasum -c`: all four files
+`OK` — no `git checkout`/`restore`/`stash`):
+
+| # | mutation | result |
+|---|---|---|
+| M1 | drop the three live limit flags (back to the per-client defaults — the original bug) | **red 3**: the limit test (`ExecStart does not pass --max-dials-per-minute: … falls back to the per-client default of 30, i.e. one global limit`), the Caddyfile-account test, AND the continuation-reader guard (a dropped continuation loses the flags) |
+| M2 | `--max-streams-per-ip 2000` → `16` (flag present, but at the per-client value) | **red 1**, `expect(received).toBeGreaterThan(expected)` — the test pins "above the default", not merely "the flag is there" |
+| M3 | restore the false Caddyfile sentence (`a stream ends on its own before the delay can ever fire`) | **red 1** ("a Caddy reload drops live streams after a 5m GRACE") |
+| M4 | runbook back to "a Caddy reload not cutting live streams" (§9) | **red 1** ("it does not promise a Caddy reload is a no-op…") |
+| M5 | restore "a reload with a live relay behind it is harmless" (§7) | **red 1** ("it says a reload with live streams behind it is not harmless") |
+
+**Drift from the review's suggested fix.** The review offered "ship the fleet-sized
+ExecStart **or** make the unit refuse the default". I shipped the values (M1/M2
+pin them) and ALSO corrected every prose claim the false default rested on, because
+the two findings interlock: the unit's unsafe numbers were only reachable because
+`Caddyfile.relay` said they were not. No `relay.service`-refuses idea was
+implemented — a unit that validates at start would need the flags in argv anyway,
+and `deploy.test.ts` covers the same ground without a host. The new numbers are
+this fix's OWN choice, not an owner decision: they are stated as reversible in
+`relay.service:47-49` and runbook `§9`, and are gated on the XFF code change.
+
+**Gate** (this branch, after the last edit): `bunx tsc --noEmit` clean;
+`bunx tsc -p apps/relay` and `bunx tsc -p apps/mobile` clean; `bun run lint`
+clean (1363 files, 0 errors, 0 warnings); `bun test` **9830 pass / 4 opt-in skip
+/ 0 fail** (712 files, 78 727 expects; +4 over R7's 9826 — the four new tests).
+`apps/relay` alone: 78/78 (74 + the 4 new). `git status`: only the five intended
+files (`relay.service`, `Caddyfile.relay`, `docs/ops/relay-deploy.md`,
+`deploy.test.ts`, the changelog fragment) plus this doc.
+
+**Not verified — one line each, with how to verify:**
+- `systemd-analyze verify` / `caddy validate` accepting the edited unit and site
+  block: needs those binaries (neither is here). Run both on the host, runbook
+  §3/§4, before enabling.
+- That the fleet numbers are not too low for real traffic: only the deploy shows
+  the real dial rate. Watch `journalctl -u relay.service | grep refused`, runbook
+  §8; the flags are tunable in `ExecStart` without a code change.
+
+*— claude-opus-5-5, 2026-11-14*
