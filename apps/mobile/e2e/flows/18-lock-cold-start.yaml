@@ -1,0 +1,38 @@
+appId: so.tentacle.app
+---
+# 18 (docs/feat/mobile-lock.md): the lock is UP at cold start and the content
+# under it is not reachable (F14, Owner Q1) — then a matching face lets the person
+# in, and the app is really the app behind the cover.
+#
+# The flow PAIRS first (so there is content worth hiding, and the end can assert a
+# daemon truth), then RELAUNCHES: a cold start is the case Owner Q1 decided.
+- runFlow: _pair.yaml
+- launchApp
+# The relaunch is a cold start: locked, with nothing reachable under the cover.
+- extendedWaitUntil:
+    visible:
+      id: "lock-screen"
+    timeout: 30000
+# F14: the content behind the lock is hidden from the accessibility tree, so
+# neither VoiceOver nor Maestro can see it. Both halves, deliberately: the list
+# AND the computer row a person would tap.
+- assertNotVisible:
+    id: "computers-list"
+- assertNotVisible:
+    id: "computer-${output.computerId}"
+- runScript:
+    file: "faceid-match.js"
+- extendedWaitUntil:
+    notVisible:
+      id: "lock-screen"
+    timeout: 15000
+# Unlocked: the SAME row is now visible, and it is the row for the computer the
+# pairing really registered (an id, then a daemon-truth check).
+- assertVisible:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "computers-list"
+# The end is a DAEMON-side truth: the app attached, and its own log records that
+# dial — which can only have happened after the unlock (20-log-dialled.js throws).
+- runScript:
+    file: "20-log-dialled.js"

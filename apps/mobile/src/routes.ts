@@ -47,6 +47,8 @@ export type RootStackParams = {
   Computers: undefined;
   Sessions: SessionsRoute;
   Session: SessionRoute;
+  /** The Settings screen (docs/feat/mobile-lock.md D6): app lock + Export logs. No params. */
+  Settings: undefined;
 };
 
 /**

@@ -62,10 +62,17 @@ describe("no build-time computer, no build-time token (F-H4)", () => {
     expect(all).not.toContain("ComputerConfigError");
   });
 
-  test("only the wiring file imports the Keychain (the store stays pure)", () => {
+  test("only the wiring files import the Keychain (every store stays pure)", () => {
     const importers = shippedSources().filter((path) =>
       /from "expo-secure-store"/.test(readFileSync(path, "utf8")),
     );
-    expect(importers.map((path) => path.slice(APP.length + 1))).toEqual(["src/secure-kv.ts"]);
+    // Two adapters, one per store: the computer store (11b.1) and the app-lock
+    // setting (docs/feat/mobile-lock.md D3). Both are five-line wiring files; the
+    // modules that DECIDE anything (`computer-store.ts`, `lock-settings-store.ts`)
+    // stay free of the native import, which is what this guard protects.
+    expect(importers.map((path) => path.slice(APP.length + 1))).toEqual([
+      "src/secure-kv.ts",
+      "src/lock-settings-expo.ts",
+    ]);
   });
 });
