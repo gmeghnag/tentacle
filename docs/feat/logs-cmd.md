@@ -346,3 +346,4 @@ sanitized.
 - Q3 overflow: **(a)** drop oldest droppable (text/progress) with `N events lost`; disconnect only when asks/turn ends would be lost.
 - Q4 `-f` with no reachable daemon: **(a)** follow the FILE (poll + re-parse by entry id; committed events only; said on stderr), in sub-task 1.
 - Q5 delivery: **(a)** pull (`watch_next` long-poll, 25 s).
+- Q6 daemon.log/relay.log: **(a)** not merged in v1; `--summary` prints their paths.
