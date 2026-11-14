@@ -622,4 +622,58 @@ tests, 702 files). No skip was added by this task (the new tests have none); the
 
 ## Review
 
-*— (pending)*
+*— claude-opus-5-5, 2026-11-14* (fresh context; same model family as the planner,
+and as the Execution's signature — see note 3)
+
+**Verdict: APPROVE** (no HIGH/MEDIUM finding in `git diff main...HEAD`), with
+open items that are scope, not defects (below).
+
+**Gate (re-run here):** the 11 touched test files → 279 pass, 0 fail ·
+`bun run typecheck` clean · `bun run lint` clean (1343 files). Full `bun test`
+not re-run by this review.
+
+**Premises (TRUE):** `endSession` sets `ownCloses` synchronously before the RPC,
+and the existing code already relies on `session_closed` preceding the close's
+response (`remote-client.ts:1533`); a claimed controller is still in
+`controllers` (`local-runtime.ts:1081`), so `dispose`/`quit`/`release` cover it;
+`facade.hop` has exactly one caller (`hop-feed.ts:126`), so dropping the facade
+`notify` silences no path; `probePod` is on both injection paths
+(`engine-runtime.ts:586,985`); the current session can't be deleted from
+`/sessions` (`sessions-panel.ts:256`), so F1 hides no needed `closed` there.
+
+**Mutations (each red, then reverted; `git status` clean, byte-identical):**
+F1 guard dropped → T1, T2 red · `claim:false` → T1b, T3, the D2-facade row red
+(T1 green: F1 alone suffices there) · feed back to `facade.createSession()` →
+T1, T1b, feed-D2 red · `probePod` ignores the engine → 3 D3 rows red · App
+failure line without `noticeText` → the TUI D2 row red.
+
+**Attacks tried:**
+1. Own close vs. response ordering (F1 relies on it): holds; same contract the
+   pre-existing `forget()` uses.
+2. F1 suppressing a `closed` the TUI needs (connect delete/`/close` of the
+   current session; hop step 4(a) `closeOwn`): none found; `closeOwn` is now
+   correctly an own close too.
+3. Pod-supplied `cwd` (D4) injecting terminal escapes into the footer / ask row
+   (renderers don't `oneLine` it): blocked at the wire —
+   `SessionListEntrySchema.cwd` is `line(4096)` (`NO_CONTROL`).
+4. D3 override on an emulated image (arm64 engine, amd64 image) when the probe
+   fails: the engine arch can now be wrong where x64 was right; still caught by
+   the `--version` check, a clean "not moved". Accepted by the plan.
+5. New `sessionCwd` read before the commit is unbounded on a stalled target:
+   same class as the existing `ownUse` read at step 4(a); not new risk.
+
+**Open items (not defects; for the orchestrator/owner):**
+1. **D3 root cause still unproven** (no engine); the fix is the plan's
+   "whatever step 1 shows" fallback. k8s `engineArch` not done. Run
+   `d3-fresh.ts podman` before calling D3 closed.
+2. **D5 not implemented** — a correct §8 STOP; needs the owner's OK on keying
+   on `APP_VERSION !== APP_RELEASE_VERSION`.
+3. **Signature mismatch:** Execution is signed `claude-opus-5-5`, but the commit
+   is `exec (deepseek)`, and the owner routed this load-bearing task to Opus. The
+   orchestrator should correct whichever is wrong (§10 routing record).
+4. The opt-in docker row was only adapted to F2, not extended with the
+   facade+feed+watcher drive the plan listed; it was not run.
+
+**Executor behaviour:** honest. It stopped on D5 instead of shipping a vacuous
+test, recorded each drift with a reason (the `ownCloses` map instead of
+`entry.closing`, `claim`), and did not claim D3 was proven.
