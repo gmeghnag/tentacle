@@ -810,3 +810,27 @@ own):
 #### Orchestrator decisions (owner night delegation 2026-11-14)
 
 Owner asleep, delegated: every Owner question above is decided with its RECOMMENDED option. Implementation APPROVED. Ordering (orchestrator): 11b.1 starts after 13c merges (both add native deps → package.json/bun.lock), 14 after 11b.1, 11b.2 after 11b.1.
+
+### Review — slice 11b.1 (`feat/mobile-pairing-core`, `git diff main...HEAD`)
+
+*— claude-opus-5-5, 2026-11-14 (fresh context; a different model family from the executor)*
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 1 MEDIUM).
+
+**Gate (re-run here):** `bun test apps/mobile` 557 pass · 0 fail (44 files); `bun run typecheck` clean; `bun run lint` 1185 files, 0/0. Full `bun test` not re-run (Execution's 8834/3 skip taken on record). Maestro not re-run (simulator).
+
+**Findings**
+
+1. **HIGH: "Pair again" after a live revoke keeps the stale link.** `apps/mobile/App.tsx:644-648` (`onDone`) only runs `reload()` + `navigation.reset`. It never calls `LINKS.release(id)` or `DIAGNOSES.delete(id)`, which `onRemove` does (`:668-671`). `link-registry.ts:44-47` returns an `open` entry forever: a failed `get` is forgotten, a link that opened and later stopped is not. Scenario F-L1: the app is linked → `tentacle devices revoke` → the link goes `stopped` (`unauthorized`) and stays in `LINKS`, with the OLD device key in its `openComputer` closure (`connection.ts:186`) → the row says `revoked` → "Pair again" succeeds and the store now holds the NEW key → `loadRows` → `LINKS.get(id)` hands back the stopped link → `sessionList` rejects, and the diagnoser still says `revoked`. Owner Q7's recovery path (re-pair after revoke) does not recover until the app is killed. The same applies to any re-pair of a computer whose link is open. No test covers re-pair through the registry. Fix: release the link and diagnoser for `result.computer.id` before `reload()`, plus a regression test.
+2. **MEDIUM: the "success resets the count" wiring is not pinned.** I deleted `diagnosis.ok()` in `connection.ts:225`. `connection.test.ts`, `pairing-e2e.test.ts`, `link-diagnosis.test.ts` and `address-dial.test.ts` all stayed **green**: only the reducer's `ok()` is tested, not that the link calls it. Without that call, a `revoked`/`maybe-reset` verdict outlives a successful redial, and streaks add up across healthy periods, giving a false "may have been reset" (F11 says "any success resets the count"). This is a §9 non-vacuity gap on a load-bearing path.
+
+**Mutations (mine; each reverted, `git status` clean afterwards):** `firstAnswering` ignores `memory.lastGood` → RED (`starts at the remembered good address`). `diagnosis.ok()` removed → GREEN, which is finding 2.
+
+**Attacks tried, no finding:**
+- §7 one session path: still the single `RemoteClient` + `channelFactory` decorator, so no second session code path. The gate wraps the one factory.
+- Single broker: still `createLinkBroker()` per link. Pairing opens no broker.
+- Key storage: the private key is only in the per-computer item. Every `set` carries the injected `AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`. Write order is item→index on add and index→item on remove. An index with an unknown `v` blocks `add`/`remove`, because both run `readIndex` first.
+- `unauthorized` stops the address loop (P5). A pairing `unauthorized` maps to `expired`, not `revoked` (P4). A late cancel is harmless, because `onCancel` unmounts the route.
+- The harness hooks bind to `127.0.0.1`. No `EXPO_PUBLIC_TENTACLE_*` is left in the app.
+
+**Executor behaviour:** a thorough and honest Execution. Drift is recorded with reasons, ME2's first vacuous test is admitted, and the blocked `15-revoked` flow is stated, not glossed. The `15-revoked` gap matters more after finding 1. That flow stops at `computer-state-<id>-revoked` and never exercises "Pair again", and `pairing-e2e` calls `openComputer` directly, bypassing `LINKS`. So the one path that breaks was covered by neither.
