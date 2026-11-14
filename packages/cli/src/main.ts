@@ -108,6 +108,8 @@ import {
   placeText,
 } from "./kept.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
+import { LOG_TAIL_DEFAULT, parseOnly } from "./log-events.ts";
+import { logsCommand } from "./logs-cmd.ts";
 import { packagesCommand, spawnGit } from "./packages-cmd.ts";
 import { pairCommand } from "./pair.ts";
 import { POD_DAEMON_MODES, lockHolder, runResidentMode } from "./pod-resident.ts";
@@ -288,6 +290,12 @@ Usage:
                                 list the pods/containers run kept, checked against
                                 their engine, with a detached run's state (-q names
                                 only, -v details: pid, session, log)
+  tentacle logs [<uid>] [--tail N] [--only <cats>] [--json] [--summary] [-f]
+                                read this folder's session log (the newest, or the
+                                uid given) without a TUI: one line per event, the
+                                last 20 by default; --summary counts tools, files
+                                and turns; -f follows the FILE (committed events
+                                only — a daemon's live stream is a later task)
   tentacle rm [--engine <e>] [-f] <name>
                                 remove a kept pod/container (only one tentacle kept;
                                 a running one asks y/N, -f skips the question). A
@@ -520,6 +528,10 @@ export interface CliIO {
    * asked) are terminals.
    */
   ask?: (prompt: string) => Promise<string>;
+  /** Test seam: `logs -f`'s poll sleep (a test drives the follow without waiting). */
+  logsSleep?: (ms: number) => Promise<void>;
+  /** Test seam: `logs -f` stops when this aborts (Ctrl+C in a real run). */
+  logsSignal?: AbortSignal;
 }
 
 /**
@@ -670,9 +682,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       // (docs/feat/config-explain.md, review O1). The words are the WHOLE argv
       // after `tentacle` as typed, flags aside (a flag was asked for, not said).
       // `config` joins it for the same reason: `tentacle config how do I …` now
-      // means the command, and the way back is one line, not a guess.
+      // means the command, and the way back is one line, not a guess. `logs`
+      // too: `tentacle logs the parser` used to be a prompt.
       const promptLine =
-        (mode === "explain" || mode === "config") && result.error.startsWith("unexpected argument")
+        (mode === "explain" || mode === "config" || mode === "logs") &&
+        result.error.startsWith("unexpected argument")
           ? `\n${promptHint(promptWords(args))}`
           : "";
       err(`[error] ${result.error}${promptLine}\nusage: ${USAGE[mode]}\n`);
@@ -893,6 +907,47 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ...(revoke !== undefined ? { revoke } : {}),
       },
       { out, err },
+    );
+  }
+
+  // `tentacle logs [<uid>] …` (docs/feat/logs-cmd.md): the session log files on
+  // this laptop, read-only. Like `ps` it needs no model and starts nothing — it
+  // reaches here only after `loadConfig` has resolved `configDir`/`cwd` (with
+  // `usesModel` false, so no `apiKeyCommand` runs).
+  if (mode === "logs") {
+    const only = parsed.flags.get("only");
+    const categories = only === undefined ? undefined : parseOnly(only);
+    if (categories !== undefined && !categories.ok) {
+      err(`[error] ${categories.error}\nusage: ${USAGE.logs}\n`);
+      return 1;
+    }
+    const tail = parsed.flags.get("tail");
+    const count =
+      tail === undefined ? LOG_TAIL_DEFAULT : /^[0-9]{1,9}$/.test(tail) ? Number(tail) : undefined;
+    if (count === undefined) {
+      err(
+        `[error] --tail must be a whole number, got ${JSON.stringify(tail)}\nusage: ${USAGE.logs}\n`,
+      );
+      return 1;
+    }
+    const uid = parsed.positional[0];
+    return logsCommand(
+      {
+        ...(uid !== undefined ? { uid } : {}),
+        tail: count,
+        ...(categories?.ok === true ? { only: categories.categories } : {}),
+        json: parsed.bools.has("json"),
+        summary: parsed.bools.has("summary"),
+        follow: parsed.bools.has("follow"),
+      },
+      {
+        configDir: config.configDir,
+        cwd: config.cwd,
+        out,
+        err,
+        ...(io.logsSignal !== undefined ? { signal: io.logsSignal } : {}),
+        ...(io.logsSleep !== undefined ? { sleep: io.logsSleep } : {}),
+      },
     );
   }
 

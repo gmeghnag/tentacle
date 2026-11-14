@@ -30,7 +30,8 @@ Run it locally, in Docker (also on a remote host over `ssh://`), in Podman, in
 Kubernetes, or as a remote daemon you reach with `connect`. The commands and the
 session are the same. In a container, your folder is mounted with secrets hidden
 (`~/.ssh`, tentacle's config, and anything in `.tentacle/hide`).
-`tentacle ps` and `tentacle rm` manage the workloads you kept.
+`tentacle ps` and `tentacle rm` manage the workloads you kept; `tentacle logs`
+reads a session's log without opening the TUI.
 
 **The TUI is decoupled from execution.**
 The agent loop and the tools run in a daemon; the TUI is an RPC client on the
@@ -262,6 +263,27 @@ others (exit 1 if any failed).
 ```sh
 tentacle ps [--engine <e>] [-a] [-q|-v]
 tentacle rm [--engine <e>] [-f] <name>...
+```
+
+**Reading a session without the TUI: `logs`.** Every session is already a typed
+log on your machine (`<configDir>/sessions/<folder>/<uid>.jsonl`), so
+`tentacle logs` prints it as one line per event — turn boundaries, messages, tool
+calls and results, the title, sub-agent markers — the newest session of the
+current folder by default, or the `<uid>` you name (looked up in this folder's
+store, then this folder's `serve` daemon's, then other folders; the file it read
+is named on stderr). `--tail N` keeps the last N events (default 20), `--only
+turn,tool,error,…` filters by category, `--json` prints NDJSON for scripts (a
+versioned `v` field), and `--summary` counts tools used and files touched and
+reports the turns and the last outcome. It is read-only: no lock, no write, and
+a corrupt log is refused with the parser's reason and the path, never
+half-shown. For a `serve` session it stops at the entry the daemon's state file
+marks, so a crash's uncommitted tail is not shown. `-f` follows the FILE
+(committed events only — a live ask or streaming text needs a daemon; following
+one is a later task), resuming by entry id and saying so when the log is
+rewritten.
+
+```sh
+tentacle logs [<uid>] [--tail N] [--only <categories>] [--json] [--summary] [-f]
 ```
 
 **Engines.** `--engine kubernetes|docker|podman` picks where it runs; the

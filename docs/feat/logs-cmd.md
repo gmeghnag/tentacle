@@ -1,6 +1,6 @@
 # feat/logs-cmd — `tentacle logs`: read and follow a session without shell redirects
 
-> **Status:** implementation (plan written, NOT approved — see Owner questions)
+> **Status:** implementation approved (owner 2026-11-14); `logs-tail` executed — see *Execution — logs-tail*; `logs-watch` and `logs-follow-detached` pending
 > **Branch:** `feat/logs-cmd` (umbrella; each sub-task below gets its own `feat/<slug>` branch + doc when it starts, AGENTS §10)
 > **Size:** L → split into 3 (`logs-tail` M · `logs-watch` M–L · `logs-follow-detached` M) · **Blast:** load-bearing (sub-task 2 touches the daemon fan-out, §7 "don't serialize the peer"; sub-task 3 the pod trust boundary) · **Suited:** sub-task 1 a weaker model + standard Review; sub-tasks 2–3 a strong model + mandatory fresh-context Review
 > **Changelog:** one fragment per sub-task: `changelog.d/logs-tail.added.md`, `changelog.d/logs-watch.added.md`, `changelog.d/logs-follow-detached.added.md`
@@ -351,3 +351,125 @@ sanitized.
 - Q8 limits: **(a)** constants in v1.
 
 Implementation APPROVED (owner 2026-11-14).
+
+### Execution — logs-tail
+
+*— claude-opus-5-5, 2026-11-14*
+
+**As built, in order.** (1) The Context's repro re-run first, on this branch
+before any edit: `["logs","--tail","5"] -> prompt`, `["logs","-f","abc"] ->
+prompt`, `["ps"] -> ps` — the capability is missing, as the doc says. (2)
+`packages/cli/src/log-events.ts` (new, pure): `LogEvent`, `eventsOf` (the
+entry→event map, folding the projection with the SAME rules as
+`projectEntry`), `categoriesOf`/`parseOnly`/`filterEvents`, `takeLast`,
+`formatEvent`, `jsonLine` (C1/DEL escaped), `filesTouched`, `summarize`,
+`formatSummary`. (3) `packages/cli/src/logs-cmd.ts` (new): the lookup
+(this project's laptop store → this project's `serve` store → other projects'
+both), an unlocked `readRaw` + strict `parseLogFile`, the `serve` cut at the
+sidecar's `logHead` (`entriesThrough`), the current segment only, and the `-f`
+file fallback (owner Q4). (4) `flags.ts`: `logs` in `SUBCOMMANDS`/`CliMode`,
+its `ARGS` spec, `USAGE.logs`, `modeUsesModel(...)` = false. (5) `main.ts`: the
+dispatch beside `ps`/`rm` (before any engine work), the `logs` prompt-hint arm,
+two test seams (`logsSleep`, `logsSignal`), and the HELP entry. (6) `README.md`
+— the command line, a short section, and one clause in the summary. (7)
+`changelog.d/logs-tail.added.md`.
+
+**Drift from the Implementation, and why.**
+
+1. *`LOG_CATEGORIES` is `ask, turn, error, text, thought, tool, subagent, job,
+   history, notice`* — exactly the plan's list. Sub-task 1 only ever produces
+   the subset its entry types can (`turn`, `error`, `text`, `tool`,
+   `subagent`, `history`, `notice`); `ask`/`thought`/`job` are accepted by
+   `--only` today so a script written now keeps working once sub-task 2's
+   watcher feeds them (refusing a name the doc publishes would be the drift).
+2. *`messages` in `--summary` counts the history's messages*, not the emitted
+   text events: an assistant turn with no text but two tool calls is ONE
+   message and three events. A test pins it.
+3. *`--only` accepts names no entry type of sub-task 1 can produce* (see 1) but
+   does NOT accept an unknown one, and the refusal names it and the choices.
+4. *A state file this build cannot read* (a newer `schemaVersion`) does not
+   refuse the whole read the way `load` would: the LOG parsed strictly, so it
+   is shown as its current segment, and the sidecar's reason is printed on
+   stderr. The plan only fixed "cut at the sidecar's head"; refusing a readable
+   log over a sidecar this build merely does not know would make the
+   forward-compat failure worse than the fact it guards (nothing is written,
+   nothing is hidden that the log itself does not say). Named here because it is
+   a judgement, not a reading of the plan.
+5. *`-f` is `--follow`'s one-letter alias* (as `tail -f`), plus `--follow` in
+   full; the plan wrote only `-f`.
+6. *The run's free-text log paths come from the laptop's kept index*
+   (`readKept` + `runDirFor`, `run-state.ts:129`) — the plan's Files list did
+   not name `kept-index.ts`/`run-state.ts` for sub-task 1, because owner Q6
+   (paths in `--summary`) is a sub-task-1 obligation.
+
+**Deliberately not done (sub-task 2/3).** No protocol, daemon, client or watcher
+change: `-f` follows the file only, says so on stderr, and a live ask/streaming
+delta is not shown. `logs -f <uid> --connect` is not accepted yet (a flag, not a
+behaviour change, so it lands with the watcher it drives). `-f`'s stop is the
+process's own default (Ctrl+C), through the `logsSignal` seam `main` passes; the
+graceful `unwatch`-then-exit-0 shape belongs to the watcher (the plan puts it
+there), and a file follow has nothing to release.
+
+**Verification (the gate, on the final tree).** `bunx tsc --noEmit` clean;
+`bun run lint` — 1068 files, 0 errors/0 warnings (the §6 baseline);
+`bun test` — 8309 pass, 3 skip (the three opt-in skips), 0 fail. Two earlier
+full runs each showed one or two timeouts in `packages/cli/test/attach-run.test.ts`
+(a `/quit` case and an "attach without re-injecting" case, at 5 s / 62 ms under
+suite load); that file passes alone (61/61) and the final whole-suite run is
+green, and nothing in this task touches the attach path or the engine runtime
+(the diff is `flags.ts`, `main.ts`'s `logs` branch, two new modules and their
+tests), so those are the suite's known timing flake, not this change.
+
+**Tests (red before green).** New: `packages/cli/test/log-events.test.ts` (12
+tests) and `packages/cli/test/logs-cmd.test.ts` (19). Each names the mutation
+that turns it red; the mutation check was RUN, not asserted (13 mutations, each
+applied to the source, the two test files run, the source restored). Pasted
+output (mutation → pass/fail → the test that went red):
+
+```
+M1  cliMode drops `logs`                                  → 14 fail
+M2  sidecar head ignored (whole segment shown)             → 1 fail  · a serve copy is cut at the sidecar's head
+M3  follow does not resume by entry id (reprints all)      → 1 fail  · -f prints the first batch, then only what is new
+M4  the file is parsed LAX (malformed entry half-loaded)   → 1 fail  · a malformed message is refused, not half-loaded
+M5  an unknown --only category is accepted                 → 2 fail  · an unknown name is refused / --only narrows
+M6  newest is taken as the OLDEST record                   → 1 fail  · the newest session of this project
+M7  JSON does not escape C1                                → 2 fail  · C1-escaped / JSON escapes DEL and C1
+M8  files touched counts every tool's path                 → 1 fail  · paths of fs_write/fs_edit/fs_multi_edit
+M9  no `segment` event for a base entry                    → 6 fail  · whole turn / title+sub-agent / serve cut
+M10 tool arguments are not sanitized to one line           → 1 fail  · a whole turn (args stay one line)
+M11 text mode prints raw text (no untrustedText)           → 1 fail  · text mode strips ESC and C1
+M12 media_message/media_replace folded as unknown          → 1 fail  · an image's prompt survives a replace
+M13 --summary names no run                                 → 1 fail  · a detached run's daemon/relay log paths
+```
+Plus `USES_MODEL.logs: true` → 3 fail in
+`packages/cli/test/model-free-commands.test.ts` (a failing `apiKeyCommand` must
+not stop `logs`).
+
+**Evidence (the capability, on the final tree).** A hand-built laptop log for the
+current folder, then the three modes (`.tentacle/tmp/logs-cmd/demo.ts`, gitignored
+— the script builds `base`, a turn, a message with an ESC-wrapped text and an
+`fs_write` call, the result, and `turn_end`):
+
+```
+$ TENTACLE_CONFIG_DIR=… bun packages/cli/src/main.ts logs --tail 6
+02:16:09 · you: add a parser
+02:16:09 · agent: [31mwriting [0m            ← the ESC is gone: untrustedText
+02:16:09 · tool fs_write {"path":"src/parse.ts","content":"…"}
+02:16:09 · call c1 started
+02:16:09 · result 29 chars: wrote src/parse.ts (42 lines)
+02:16:09 · turn end t1 — end_turn
+$ TENTACLE_CONFIG_DIR=… bun packages/cli/src/main.ts logs --json --tail 1
+{"v":1,"ts":…,"session":"025e6a9d-…","type":"turn_end","turnId":"t1","stopReason":"end_turn"}
+$ TENTACLE_CONFIG_DIR=… bun packages/cli/src/main.ts logs --summary
+session   025e6a9d-d332-4a45-9051-8a957fa31811
+file      …/sessions/logs-cmd-b14189bc618d/025e6a9d-….jsonl
+project   …/worktrees/logs-cmd
+model     claude-x
+messages  3
+turns     1 (last end_turn)
+tools     fs_write ×1
+files     src/parse.ts
+```
+
+**Gate line.** `tsc --noEmit` OK · `bun run lint` OK (0/0) · `bun test` 8309
+pass / 3 opt-in skips / 0 fail.
