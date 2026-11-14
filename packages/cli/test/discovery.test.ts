@@ -17,7 +17,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { type DaemonRecord, writeDaemonRecord } from "@tentacle/daemon";
 import type { DaemonDiscovery, DiscoveredDaemon } from "@tentacle/protocol";
@@ -252,6 +252,114 @@ describe("startDiscovery (driver)", () => {
     try {
       expect(driver.current().daemons[0]).toMatchObject({ cwd: "/work/self", self: true });
       expect(driver.current().rev).toBe(0);
+    } finally {
+      driver.stop();
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  test("the DEFAULT interfaces are this machine's, so a `0.0.0.0` serve announces an address", () => {
+    // `serve` passes NO `interfaces`, so the default is what a user gets: a
+    // `--host 0.0.0.0` daemon — the very setup REACHABLE_HINT recommends, and
+    // the one `pair`'s QR expands — must announce its LAN address. Mutation:
+    // default to `[]` → `addresses: []` for self and every sibling, so a DHCP
+    // or Wi-Fi change is never announced (decision 3, F6).
+    const v4 = Object.values(networkInterfaces())
+      .flat()
+      .filter((entry) => entry !== undefined && entry.family === "IPv4" && !entry.internal)
+      .map((entry) => entry?.address ?? "");
+    if (v4.length === 0) {
+      return; // a machine with no LAN address has nothing to expand
+    }
+    const configDir = scratch();
+    const clock = fakeTimers();
+    const driver = startDiscovery({
+      configDir,
+      self: record({ pid: process.pid, host: "0.0.0.0", cwd: "/work/self", port: 4100 }),
+      timers: clock.timers,
+      now: () => clock.timers.now(),
+    });
+    try {
+      driver.subscribe(() => {});
+      const addresses = driver.current().daemons[0]?.addresses ?? [];
+      expect(addresses.length).toBeGreaterThan(0);
+      expect(addresses.some((address) => v4.some((ip) => address.includes(ip)))).toBe(true);
+    } finally {
+      driver.stop();
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  test("the first subscriber after an idle spell still applies freshness (Repro 3: no phantom)", () => {
+    // A record whose pid IS alive (a reused pid: launchd's 1, or any stranger)
+    // but whose heartbeat stopped with the `serve` that wrote it — its mtime is
+    // an hour old, which is the ONLY signal that tells it from a live sibling
+    // (F2). The poller runs only while somebody is subscribed, so this daemon
+    // sat idle for a minute first; measuring the wake gap from the last POLL
+    // would switch freshness off for exactly that first poll.
+    const configDir = scratch();
+    const clock = fakeTimers();
+    writeDaemonRecord(configDir, record({ pid: 999_006, host: "127.0.0.1", cwd: "/work/phantom" }));
+    const old = new Date(Date.now() - 3_600_000);
+    utimesSync(join(configDir, "daemons", "999006.json"), old, old);
+    const driver = startDiscovery({
+      configDir,
+      self: record({ pid: process.pid, cwd: "/work/self" }),
+      interfaces,
+      timers: clock.timers,
+      now: () => clock.timers.now(),
+      alive: () => true,
+      touch: () => true,
+    });
+    try {
+      clock.advance(60_000);
+      // Nobody was looking: only the heartbeat ran.
+      expect(driver.polls()).toBe(0);
+      driver.subscribe(() => {});
+      // The heartbeat kept the wake gap honest, so freshness applies here.
+      expect(driver.current().daemons.map((d) => d.cwd)).toEqual(["/work/self"]);
+    } finally {
+      driver.stop();
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a daemon that SLEPT with no subscriber still skips freshness on the waking poll (F3)", () => {
+    // The poller was off across the sleep, so its own gap cannot say the host
+    // slept — but the HEARTBEAT's can: on wake its missed tick fires once,
+    // far later than its period. Without that signal the first poll after wake
+    // would apply freshness to records whose own heartbeats also just slept,
+    // so every sibling would flicker off until its beat landed (F3).
+    const configDir = scratch();
+    const clock = fakeTimers();
+    writeDaemonRecord(configDir, record({ pid: 999_007, host: "127.0.0.1", cwd: "/work/slow" }));
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(join(configDir, "daemons", "999007.json"), old, old);
+    const driver = startDiscovery({
+      configDir,
+      self: record({ pid: process.pid, cwd: "/work/self" }),
+      interfaces,
+      timers: clock.timers,
+      now: () => clock.timers.now(),
+      alive: () => true,
+      touch: () => true,
+    });
+    try {
+      // Asleep: the clock moves, nothing fires, and on wake the heartbeat's
+      // missed tick runs ONCE (rebased, not replayed — Node's behaviour too).
+      clock.jump(120_000);
+      clock.advance(10_000);
+      // Only now does the phone connect.
+      driver.subscribe(() => {});
+      // The waking poll kept the sibling: its record is old because the host
+      // slept, not because its daemon died.
+      expect(driver.current().daemons.map((d) => d.cwd)).toContain("/work/slow");
+      // A poll with an ordinary gap applies freshness again, so the sibling is
+      // no longer SEEN — kept one more by the hysteresis, gone after that.
+      clock.advance(2000);
+      expect(driver.current().daemons.map((d) => d.cwd)).toContain("/work/slow");
+      clock.advance(2000);
+      expect(driver.current().daemons.map((d) => d.cwd)).not.toContain("/work/slow");
     } finally {
       driver.stop();
       rmSync(configDir, { recursive: true, force: true });

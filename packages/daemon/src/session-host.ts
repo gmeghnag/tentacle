@@ -446,7 +446,6 @@ export class SessionHost {
   }
 
   /**
-  /**
    * Attach the sibling-discovery source AFTER construction: a `serve` only
    * knows its bound port (and so its own record) once the listener is up, while
    * the host must exist before the listener does. Called once, by `listen`.

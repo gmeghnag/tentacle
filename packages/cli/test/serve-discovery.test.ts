@@ -13,7 +13,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
 import { loadConfig } from "@tentacle/config";
@@ -136,6 +136,40 @@ describe("serve writes --address into its record", () => {
 });
 
 describe("a real client on A learns A and B", () => {
+  test("SELF announces this machine's address for a `0.0.0.0` bind (production default, F6)", async () => {
+    // `serve` passes NO `interfaces`, so a `--host 0.0.0.0` daemon — the setup
+    // REACHABLE_HINT recommends — must announce the machine's LAN address, not
+    // `[]`: otherwise a DHCP or Wi-Fi change is never announced (decision 3).
+    // Mutation: default the driver's `interfaces` to `[]` → this is empty.
+    const v4 = Object.values(networkInterfaces())
+      .flat()
+      .filter((entry) => entry !== undefined && entry.family === "IPv4" && !entry.internal)
+      .map((entry) => entry?.address ?? "");
+    if (v4.length === 0) {
+      return; // a machine with no LAN address has nothing to expand
+    }
+    const { root, configDir, a } = rig();
+    const config = await loadConfig({
+      configDir,
+      cwd: a,
+      scaffold: false,
+      env: { HOME: root, TENTACLE_MODEL_API_KEY: "k" },
+    });
+    const handle = await startDaemon(config, {
+      host: "0.0.0.0",
+      port: 0,
+      pollMs: 20,
+      heartbeatMs: 20,
+    });
+    handles.push(handle);
+    const driver = handle.discovery;
+    expect(driver).toBeDefined();
+    if (!driver) return;
+    driver.subscribe(() => {});
+    const self = driver.current().daemons.find((d) => d.self === true);
+    expect(self?.addresses.some((address) => v4.some((ip) => address.includes(ip)))).toBe(true);
+  });
+
   test("discover() returns both, self first, and a stop is announced", async () => {
     const { root, configDir, a, b } = rig();
     const aAddr = "wss://a.tailnet.ts.net/e2e";

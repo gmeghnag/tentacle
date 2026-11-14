@@ -527,6 +527,95 @@ The gate first failed with `ENOSPC` (117 MiB free). I reclaimed 415 MiB by remov
 cross-platform binary cache (`~/.bun/install/cache/bun-linux-*`, regenerable by `bun install`).
 No repository content was deleted.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14*
+
+Review round 1 raised 2 HIGH + 2 MEDIUM; all four are fixed here, each **red first**
+on the assertion of the property (the repro table below is the red run), each
+**mutation-checked** (mutation applied → the new test fails → reverted → green), and
+one review nit taken with them.
+
+**1 (HIGH, no addresses announced in production) — FIXED.** `cli/src/discovery.ts:212`
+defaulted `interfaces` to `() => []`, and `serve` passes none, so a
+`serve --host 0.0.0.0` announced `addresses: []` for itself and every sibling while
+`pair`'s QR listed them (decision 3, F6 dead). The default is now `machineInterfaces`
+(the same helper `pair` uses), re-read on **every** poll, so the two can no longer
+disagree and a DHCP/Wi-Fi change is announced within `pollMs`. The helper moved to
+`cli/src/pair-addresses.ts:55`, beside the rule that consumes it (`pair.ts` imports it
+from there): importing `pair.ts` from the daemon path would have made `serve.ts`'s module
+graph pull in the QR renderer and the pairing window. `serve` stays unpassed-`interfaces`
+on purpose: the machine's table is the production default, and only a test injects one.
+
+**2 (HIGH, F7: a change made while offline was swallowed) — FIXED.**
+`client/src/remote-client.ts:986` folded the post-reconnect `daemon/discover` result
+without calling the listener; the folded `rev` then became the guard, so no later frame
+re-delivered it either. `resubscribeDiscovery` now delivers when `foldDiscovery` says
+`changed` (and stays silent when it does not, so a reconnect causes no redraw), using a
+captured `listener` for the async callback.
+
+**3 (MEDIUM, Repro 3 returned on a cold subscribe) — FIXED.**
+`lastPollAt` was advanced only by polls, and the poller runs only while a client is
+subscribed, so the first subscriber after >`staleAfterMs` idle got a poll with freshness
+off — a pid-reuse phantom in the snapshot for ~2 polls. Two changes, one per cause:
+- the wake gap is now **reset when the poller arms** (`lastPollAt = now()` at the first
+  subscribe), because a gap across an unsubscribed spell is idleness, not a sleep;
+- the sleep signal a daemon with no subscriber actually has is the **heartbeat**: a beat
+  later than `staleAfterMs` sets `slept`, and the next poll skips freshness for it
+  (F3). That keeps a genuine suspend covered without re-introducing the phantom.
+
+**4 (MEDIUM, Q6 drift: one clock per project) — FIXED.** `KnownProject`/`MergedProject`
+gain `addressSeenAt` (address → when it was last ANNOUNCED); `mergeAddresses` stamps
+every announced address `now`, keeps a fallback only while **its own** stamp is inside
+`DISCOVERY_RETENTION_MS`, and carries the kept stamps forward. A store written before
+this field falls back to the project's `lastSeenAt`, so the shape stays additive. The
+owner's Q6 wording ("30 days after it was last seen") is now what the code does, so no
+owner question is needed.
+
+**Nit — FIXED.** `daemon/src/session-host.ts:448`'s doubled `/**`.
+
+**Red before green** (`.tentacle/tmp/sibling-discovery/review.test.ts` on the unfixed
+tree: `A self addresses: []`, `B first snapshot: ["/p/a","/p/phantom"]`,
+`C reconnected: true listener saw: []`). The four new tests, run on the pre-fix sources:
+
+| Test (new) | Red run |
+|---|---|
+| `the DEFAULT interfaces are this machine's…` (cli) | `Expected: > 0 · Received: 0` |
+| `the first subscriber after an idle spell still applies freshness` (cli) | got `["/work/self","/work/phantom"]` |
+| `a daemon that SLEPT with no subscriber still skips freshness` (cli) | sibling absent, wanted present |
+| `a change made WHILE THE LINK WAS DOWN reaches the listener` (client) | `seen` = `[]`, wanted `[2]` |
+| `a RESYNC that changes nothing does not wake the listener` (client) | (guards the fix's other side) |
+| `a fallback expires 30 days after IT was last seen…` (client) | address kept, wanted dropped |
+
+**Mutations (each applied → one fail → reverted → green; `git diff` back to the fixed tree
+after each).**
+
+| Mutation | Result |
+|---|---|
+| `interfaces` default back to `() => []` (fix 1) | fail: the cli DEFAULT test **and** the `serve`-level `0.0.0.0` test (`serve-discovery.test.ts`) |
+| drop `lastPollAt = now()` at the first subscribe (fix 3a) | fail: the idle-spell test (`/work/phantom` back) |
+| `afterSleep = gap > staleAfterMs` (drop the heartbeat signal, fix 3b) | fail: the SLEPT-with-no-subscriber test — **it survived the first version of my test**, which only proved 3a; the suspend case is what pins 3b |
+| `resyncDiscovery`: never call the listener (fix 2) | fail: the offline-change test |
+| `resyncDiscovery`: ALWAYS call the listener (fix 2's other side) | fail: the resync-changed-nothing test |
+| `seenAt = prior.lastSeenAt` (fold the per-address stamp back, fix 4) | fail: the 30-day chain test — **also survived my first one-shot version**, which could not tell the two clocks apart; the test is now a real fold CHAIN (day 10/20/40/50) |
+
+The two mutations marked "survived the first version" are the reason those two tests were
+rewritten: the first drafts were vacuous, and the mutation is what showed it (§9).
+
+**Gate** (worktree `feat/sibling-discovery`): `bunx tsc --noEmit` clean, `bun run lint`
+clean (1072 files, 0 fixes), `bun test` **8355 pass, 3 skip (the opt-ins), 0 fail**
+(601 files, 344 s).
+
+**One drift inside this round:** `machineInterfaces` moved from `cli/src/pair.ts` to
+`cli/src/pair-addresses.ts` (with `pair.ts` importing it). The direct import would have
+put `pair.ts` — the QR renderer, the pairing window, `uqr` — into `serve.ts`'s module
+graph, which `discovery.ts` now shares. `pair.ts` keeps its behaviour, so no test moved;
+`pair-addresses.ts` is where the interface RULE lives anyway.
+
+**Not verified here:** the phone side (task 11) still consumes nothing, so
+`addressSeenAt` is exercised only by the pure tests; and a real `SIGSTOP`/resume is still
+not driven (the sleep is simulated with the rebased fake timers).
+
 ## Review
 
 #### Owner answers (2026-11-13)

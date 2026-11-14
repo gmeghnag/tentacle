@@ -7,7 +7,7 @@
  * address is here, so it is testable without a channel, a timer or a screen.
  * The rules are the owner's (Q6): an announced address comes FIRST in announced
  * order, a previously known one (pairing-time or learned) is kept as a FALLBACK
- * for 30 days after it was last seen, and an announcement never erases one.
+ * for 30 days after IT was last seen, and an announcement never erases one.
  */
 import {
   type DaemonDiscovery,
@@ -28,6 +28,15 @@ export interface KnownProject {
   readonly addresses: readonly string[];
   /** When an announcement last confirmed this project (`Date.now()`). */
   readonly lastSeenAt: number;
+  /**
+   * When each address in `addresses` was last ANNOUNCED (`Date.now()`), keyed by
+   * the address. Owner Q6's window is per address, so an address nobody
+   * announces expires 30 days after IT was last seen — not 30 days after its
+   * project was (a project announced forever would otherwise keep an old
+   * address forever). Absent, an address falls back to `lastSeenAt`, which is
+   * what a store written before this field holds.
+   */
+  readonly addressSeenAt?: Readonly<Record<string, number>>;
   /** The daemon's process stamp, as last announced (`0` = never seen live). */
   readonly startedAt: number;
 }
@@ -47,6 +56,8 @@ export interface MergedProject extends KnownProject {
   readonly self: boolean;
   /** The daemon's process stamp: a change means it RESTARTED (its `rev` restarted too). */
   readonly startedAt: number;
+  /** Always set on what this merge returns: one stamp per address it kept. */
+  readonly addressSeenAt: Readonly<Record<string, number>>;
 }
 
 /** The client's discovery state: the last good snapshot plus when it arrived. */
@@ -125,7 +136,9 @@ function sameSnapshot(a: DaemonDiscovery, b: DaemonDiscovery): boolean {
  *   "not reachable from here right now", not "forget these" (F8: a key holder
  *   cannot make the phone drop a pairing address);
  * - a known address unannounced for longer than `DISCOVERY_RETENTION_MS` is
- *   dropped; an announcement of that project refreshes the clock;
+ *   dropped — the window is per ADDRESS (`addressSeenAt`), so a project that
+ *   stays live does not keep a dead address alive; announcing an address
+ *   refreshes that address's clock;
  * - a project the announcement omits is kept with `live: false`, never deleted
  *   (the app greys it out, decision 7);
  * - caps: `MAX_PAIRING_ADDRESSES` per project (announced first, so a fallback
@@ -165,22 +178,34 @@ export function mergeAddresses(
     // missing from it keeps its stamp, so the 30-day window starts where its
     // daemon was last SEEN, not where this merge happened to run.
     const lastSeenAt = live ? now : (prior?.lastSeenAt ?? now);
-    // One clock per project is what the app stores (not one per address), so
-    // the window is the project's: past it, its unannounced fallbacks go. An
-    // address announced again is not a fallback at all — that is how an
-    // announcement keeps an address alive (owner Q6).
-    const fallbacks =
-      now - lastSeenAt > DISCOVERY_RETENTION_MS
-        ? []
-        : (prior?.addresses ?? []).filter(
-            (address) => isPairingAddress(address) && !announcedNow.includes(address),
-          );
+    // Owner Q6's window is per ADDRESS, and the fold has to record it: a
+    // project that stays announced would otherwise refresh its own clock
+    // forever and keep an address nobody has announced for years ("30 days
+    // after it was last seen" is about the address). An address announced now
+    // is stamped `now`; a known one keeps its own stamp (or, from a store
+    // written before this, falls back to its project's).
+    const addressSeenAt: Record<string, number> = {};
+    for (const address of announcedNow) {
+      addressSeenAt[address] = now;
+    }
+    const fallbacks = (prior?.addresses ?? []).filter((address) => {
+      if (!isPairingAddress(address) || announcedNow.includes(address)) {
+        return false;
+      }
+      const seenAt = prior?.addressSeenAt?.[address] ?? prior?.lastSeenAt ?? now;
+      if (now - seenAt > DISCOVERY_RETENTION_MS) {
+        return false;
+      }
+      addressSeenAt[address] = seenAt;
+      return true;
+    });
     projects.push({
       cwd,
       // Announced first in the daemon's order, then the fallbacks: a cap cut
       // therefore always drops a fallback before an announced address.
       addresses: [...announcedNow, ...fallbacks].slice(0, MAX_PAIRING_ADDRESSES),
       lastSeenAt,
+      addressSeenAt,
       live,
       self: from?.self === true,
       startedAt: from?.startedAt ?? prior?.startedAt ?? 0,

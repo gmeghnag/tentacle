@@ -154,6 +154,42 @@ describe("mergeAddresses (announced first, known kept 30 days, owner Q6)", () =>
     );
     expect(merged.projects.map((p) => p.cwd).sort()).toEqual(["/work/a", "/work/b"]);
   });
+
+  test("a fallback expires 30 days after IT was last seen, even while its project stays LIVE (Q6)", () => {
+    // A project announced at every poll never stops being seen, so a single
+    // per-project clock would keep an address nobody has announced for years
+    // alive forever. Owner Q6's window is per ADDRESS: "a previously known one
+    // is kept as a fallback for 30 days after it was last seen". This folds a
+    // real CHAIN (each merge's output is the next one's input), which is what a
+    // phone's store does; a one-shot merge cannot tell the two clocks apart
+    // (mutation: fold the per-address stamp back onto the project's → the stale
+    // address survives every announcement, fail).
+    const old = known({ addresses: ["ws://old.local:4000/e2e"], lastSeenAt: 0 });
+    const day = 24 * 60 * 60 * 1000;
+    let projects: readonly KnownProject[] = [old];
+    // Announced every 10 days with a FRESH address: the project is seen each
+    // time (its clock moves), the old address is never announced again.
+    for (const at of [10, 20, 40, 50].map((d) => d * day)) {
+      const merged = mergeAddresses(
+        projects,
+        snapshot(1, [daemon({ addresses: ["ws://10.0.0.5:4000/e2e"] })]),
+        at,
+      );
+      expect(merged.projects[0]?.live).toBe(true);
+      expect(merged.projects[0]?.lastSeenAt).toBe(at);
+      projects = merged.projects;
+    }
+    // Day 50: the project is as live as ever, the address is 50 days unseen.
+    expect(projects[0]?.addresses).toEqual(["ws://10.0.0.5:4000/e2e"]);
+    // A fallback INSIDE the window is still kept (the clock is per address, not
+    // "drop every unannounced one").
+    const young = mergeAddresses(
+      [known({ addresses: ["ws://young.local:4000/e2e"], lastSeenAt: 0 })],
+      snapshot(1, [daemon({ addresses: [] })]),
+      DISCOVERY_RETENTION_MS - 1,
+    );
+    expect(young.projects[0]?.addresses).toEqual(["ws://young.local:4000/e2e"]);
+  });
 });
 
 // --- RemoteClient over a real Connection ------------------------------------
@@ -231,6 +267,72 @@ describe("RemoteClient.discover", () => {
     fake.push(snapshot(2, [daemon()]));
     await tick();
     expect({ first, second }).toEqual({ first: [], second: [2] });
+    client.close();
+  });
+
+  test("a change made WHILE THE LINK WAS DOWN reaches the listener after the reconnect (F7)", async () => {
+    // The subscription is per connection, so anything the daemon announced
+    // between the drop and the re-handshake arrives only as the re-issued
+    // `daemon/discover` RESULT. Folding it without telling the listener would
+    // swallow it for good (it also becomes the `rev` guard, so no later frame
+    // re-delivers it): the phone keeps a stale project list until the NEXT
+    // change. Mutation: drop the listener call on a changed resync → `seen`
+    // stays empty here.
+    const fake = fakeSource(snapshot(1, [daemon({ self: true })]));
+    const host = hostWith(fake.source);
+    const channels: DuplexChannel[] = [];
+    const makeChannel = (): DuplexChannel => {
+      const [d, c] = createChannelPair();
+      new Connection(d, host);
+      channels.push(c);
+      return c;
+    };
+    const first = makeChannel();
+    const client = new RemoteClient(first, new PermissionBroker(), undefined, {
+      channelFactory: async () => makeChannel(),
+      random: () => 0,
+    });
+    await client.initialize();
+    const seen: DaemonDiscovery[] = [];
+    await client.discover((s) => seen.push(s));
+    // The phone goes offline (a Wi-Fi blip)…
+    first.close();
+    // …and the daemon changes its answer before the client is back. The fake
+    // source's listeners are the OLD connection's, which are being torn down,
+    // so the new snapshot is visible only through the re-issued request.
+    fake.push(snapshot(2, [daemon({ cwd: "/work/offline" })]));
+    for (let i = 0; i < 200 && channels.length < 2; i++) await tick();
+    expect(channels.length).toBeGreaterThan(1);
+    for (let i = 0; i < 200 && seen.length === 0; i++) await tick();
+    // The listener learned about the change made while it was offline.
+    expect(seen.map((s) => s.rev)).toEqual([2]);
+    client.close();
+  });
+
+  test("a RESYNC that changes nothing does not wake the listener (no spurious redraw)", async () => {
+    const fake = fakeSource(snapshot(1, [daemon({ self: true })]));
+    const host = hostWith(fake.source);
+    const channels: DuplexChannel[] = [];
+    const makeChannel = (): DuplexChannel => {
+      const [d, c] = createChannelPair();
+      new Connection(d, host);
+      channels.push(c);
+      return c;
+    };
+    const first = makeChannel();
+    const client = new RemoteClient(first, new PermissionBroker(), undefined, {
+      channelFactory: async () => makeChannel(),
+      random: () => 0,
+    });
+    await client.initialize();
+    const seen: DaemonDiscovery[] = [];
+    await client.discover((s) => seen.push(s));
+    first.close();
+    for (let i = 0; i < 200 && channels.length < 2; i++) await tick();
+    expect(channels.length).toBeGreaterThan(1);
+    await tick();
+    await tick();
+    expect(seen).toEqual([]);
     client.close();
   });
 

@@ -980,20 +980,29 @@ export class RemoteClient {
   /**
    * Re-issue `daemon/discover` on the NEW connection after a re-dial: the
    * daemon's subscription is per connection, so nothing arrives until we ask
-   * again. Silent and non-fatal — a daemon without discovery, or one that
-   * answers a moment later, changes nothing here.
+   * again. Non-fatal — a daemon without discovery, or one that answers a moment
+   * later, changes nothing here. A result that CHANGED the snapshot IS
+   * delivered to the listener (a change made while the link was down is only
+   * visible here, F7); one that changed nothing is silent.
    */
   private resubscribeDiscovery(): void {
-    if (!this.discoveryListener || !this.up) {
+    const listener = this.discoveryListener;
+    if (!listener || !this.up) {
       return;
     }
     this.call(this.peer, Method.DaemonDiscover, {})
       .then((result) => {
-        this.discoveryState = foldDiscovery(
-          this.discoveryState,
-          result as DaemonDiscovery,
-          this.clock.now(),
-        );
+        const snapshot = result as DaemonDiscovery;
+        const next = foldDiscovery(this.discoveryState, snapshot, this.clock.now());
+        this.discoveryState = next;
+        // DELIVER it: a change made while the link was down arrives only as
+        // this result, and folding it silently would swallow it for good — the
+        // folded rev becomes the guard, so no later frame re-delivers it
+        // (F7: no re-pairing, the phone just learns). A resync that changed
+        // nothing stays silent (`changed`), so a reconnect causes no redraw.
+        if (next.changed) {
+          listener(snapshot);
+        }
       })
       .catch(() => {
         // An older daemon (MethodNotFound) or a link already gone: discovery

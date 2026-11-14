@@ -32,7 +32,7 @@ import {
   MAX_PAIRING_ADDRESSES,
   isPairingAddress,
 } from "@tentacle/protocol";
-import { type InterfaceEntry, pairAddresses } from "./pair-addresses.ts";
+import { type InterfaceEntry, machineInterfaces, pairAddresses } from "./pair-addresses.ts";
 
 /** The timers and clock the driver uses (injected: a test drives time by hand). */
 export interface DiscoveryTimers {
@@ -182,7 +182,13 @@ export interface DiscoveryDriver {
  * - **F2** a reused pid: the heartbeat stops with the process, so its record's
  *   mtime goes old and `freshWithinMs` ignores it;
  * - **F3** a suspended host: a poll whose own gap exceeded `staleAfterMs` does
- *   NOT apply freshness (every record looks ancient after a sleep);
+ *   NOT apply freshness (every record looks ancient after a sleep). The
+ *   heartbeat covers the same sleep when the poller was OFF during it, which is
+ *   the normal phone case (a beat the process MISSED is a suspended process);
+ * - **F2 again** the first poll after a long IDLE spell (no subscriber, no
+ *   sleep): the poller's own gap is not a sleep signal there, so it is reset
+ *   when the poller arms — otherwise that poll would switch freshness off and
+ *   announce a pid-reuse phantom (Repro 3) until two polls later;
  * - **F15** a poll error: the last snapshot is kept, one log line per distinct
  *   message;
  * - **F14** many subscribers: ONE poller, and none at all with zero.
@@ -209,7 +215,10 @@ export function startDiscovery(options: {
   const pollMs = options.pollMs ?? DEFAULT_POLL_MS;
   const heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   const staleAfterMs = options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
-  const interfacesOf = options.interfaces ?? (() => []);
+  // THIS machine's interfaces, re-read on every poll (a Wi-Fi or DHCP change is
+  // what F6 announces). `serve` passes none, and `pair`'s QR uses the same
+  // helper, so the QR and the announcement cannot disagree.
+  const interfacesOf = options.interfaces ?? machineInterfaces;
   const touch = options.touch ?? touchDaemonRecord;
   const read =
     options.readRecords ??
@@ -233,6 +242,9 @@ export function startDiscovery(options: {
   };
   let membership: MembershipState | undefined;
   let lastPollAt = now();
+  let lastBeatAt = lastPollAt;
+  /** A beat the process MISSED: the host slept, so the next poll skips freshness (F3). */
+  let slept = false;
   let polls = 0;
   /** The distinct log messages already emitted, so a repeating error says it once (F15). */
   const logged = new Set<string>();
@@ -256,16 +268,17 @@ export function startDiscovery(options: {
     // F3: the poll before this one may have been long ago (a suspended host).
     // Every record's mtime looks ancient right after a sleep, so freshness is
     // not applied for the one poll that notices the gap; the hysteresis covers
-    // a sibling whose own timer then fires a beat later.
+    // a sibling whose own timer then fires a beat later. A heartbeat that
+    // missed its own period says the same for a sleep the POLLER did not see
+    // (nobody was subscribed), which is why `slept` is consulted too.
     const gap = at - lastPollAt;
     lastPollAt = at;
+    const afterSleep = slept || gap > staleAfterMs;
+    slept = false;
     polls++;
     let records: readonly DaemonRecord[];
     try {
-      records = read(
-        options.configDir,
-        gap > staleAfterMs ? Number.MAX_SAFE_INTEGER : staleAfterMs,
-      );
+      records = read(options.configDir, afterSleep ? Number.MAX_SAFE_INTEGER : staleAfterMs);
     } catch (error) {
       // F15: a transient EACCES must not make the siblings vanish.
       say(`cannot read the sibling records: ${(error as Error).message}`);
@@ -311,6 +324,15 @@ export function startDiscovery(options: {
     if (stopped) {
       return;
     }
+    // A beat this late is a beat the process MISSED: the host was suspended
+    // (nothing ran, not even this timer). Recorded for the next poll, which is
+    // then the waking one and must not apply freshness (F3) — this is the only
+    // sleep signal a daemon with no subscriber has.
+    const beatAt = now();
+    if (beatAt - lastBeatAt > staleAfterMs) {
+      slept = true;
+    }
+    lastBeatAt = beatAt;
     if (!touch(options.configDir, options.self.pid)) {
       // F4: not fatal — this daemon works, its siblings just cannot see it now.
       say(`cannot refresh this daemon's record (its siblings may not list it until it restarts)`);
@@ -335,7 +357,11 @@ export function startDiscovery(options: {
       listeners.add(listener);
       if (listeners.size === 1) {
         // The first subscriber gets a build before returning, so `current()` is
-        // never empty of `self` on a cold start.
+        // never empty of `self` on a cold start. The poller was OFF until now,
+        // so its own gap says nothing about a sleep (the heartbeat's does):
+        // measuring it would switch freshness off for exactly the poll a phone
+        // waking a long-idle daemon triggers (Repro 3).
+        lastPollAt = now();
         poll();
         pollTimer = timers.setInterval(poll, pollMs);
       }
