@@ -2318,3 +2318,126 @@ the changelog rule (finding 2). Different model family from me (DeepSeek
 executor, Opus reviewer), so blind spots are less likely to be shared.
 
 *— claude-opus-5-5, 2026-11-14*
+
+### Fix round 1 — `feat/app-decomp-3-keyroute` (S3 review findings)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-15* (real id: this run was
+launched as `/Users/gmeghnag/bin/tentacle --profile deepseek`; that profile's
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`,
+`~/.config/tentacle/config.jsonc:29`.)
+
+Two MEDIUM findings, no HIGH. One re-sourced snapshot field (a `src/` fix, with a
+new regression test) and one changelog fragment (deleted). No other `src/`
+behaviour touched.
+
+**Finding 1 (MEDIUM) — `replyMaxChars` changed source: FIXED.**
+
+Verified against the code first, not the review's static claim.
+`git show 723b454^:packages/tui/src/App.tsx` (pre-S3) has exactly two readers:
+`:3519` `maxChars: replyMax` — the `stepPermissionKey` call, i.e. the handler's
+RENDER closure — and `:1092` `insertReply(mode, text, replyMaxRef.current)`,
+inside `insertIntoReply`, which is NOT on the key path. So the ref was never the
+key path's source and the review is right: S3 re-sourced the field.
+
+**Fix.** `keys/snapshot.ts`: `replyMaxChars(): number` → `readonly replyMaxChars:
+number`, and its table row rewritten to ``render `replyMax` (3519) | value``.
+`App.tsx:3589`: `replyMaxChars: replyMaxRef.current` getter → `replyMaxChars:
+replyMax` (the render value, the SAME frame as `pending`/`choices`/`selected`, so
+one decision can no longer mix two frames). `keys/layer-dialog.ts:56`:
+`snap.replyMaxChars()` → `snap.replyMaxChars`. The three test snapshot factories
+updated to `replyMaxChars: 0` / `: 100`.
+
+**Red before green (§9).** The new file
+`packages/tui/test/keys-snapshot-source.test.ts` makes the doc's prose table
+executable, and it was run RED on the unfixed code:
+```
+(fail) … > snapshot.ts declares each render value as a data member, never a call signature
+  + [ "replyMaxChars" ]
+(fail) … > App.tsx passes each render value straight from the frame (no getter, no ref)
+  + [ "replyMaxChars: () => replyMaxRef.current," ]
+ 1 pass / 2 fail
+```
+Both failures name the finding's own field, on the property (source), not an
+import/compile error. After the fix: **3 pass / 0 fail**.
+
+Two harness bugs of my own surfaced on the way and were fixed before the red was
+trusted, so the red is not a false one: a shorthand entry (`panel,`) was first
+read as "missing" (fixed by a shorthand branch in `appEntry`), and the
+getter-shape test was first a bare `=>` check, which flagged the legitimate
+render-derived `paletteCommands.map((c) => c.name)` (narrowed to `() => …` /
+`function` / `…Ref` / `.current`). A third test pins non-vacuity: the interface
+and the literal are found, `panel` reads as a value and `dock` as a getter — so a
+rename could not make the scans silently pass over nothing.
+
+**Mutation check (§9), 3/3 KILLED** (`rmut.sh`: byte-copy, one mutation, run the
+owning file, restore, sha256 compare; every row red on the ASSERTION, counts
+real, `RESTORED-OK` after each):
+| # | Mutation | Result |
+|---|---|---|
+| F1-a | `replyMaxChars: replyMax` → `() => replyMaxRef.current` (the bug itself) | **KILLED** 2/1 |
+| F1-b | `snapshot.ts` `readonly replyMaxChars: number` → `replyMaxChars(): number` | **KILLED** 2/1 |
+| F1-c | a DIFFERENT render value re-sourced (`panel,` → `() => panelRef.current`) | **KILLED** 1/2 |
+
+F1-c is the one that matters for the finding's *class*: the scan is general, not
+a hard-coded check on `replyMaxChars`.
+
+**Finding 2 (MEDIUM) — changelog fragment on a behaviour-unchanged refactor: FIXED.**
+
+`changelog.d/app-decomp-3-keyroute.changed.md` is deleted (AGENTS §10: internal
+work adds no fragment; S4 — the identical situation — added none). Its
+inaccuracy dies with it: it claimed `routeKey` runs "over 14 ordered layers"
+while it walks 13 (`PURE_LAYERS`), the mouse layer being the continuation
+(drift 1).
+
+The mutation here IS the file's presence, so its red was shown empirically with
+the release path's own code rather than argued. Probe
+`.tentacle/tmp/app-decomp-3-keyroute/frag-probe.ts` (`readFragmentDir` +
+`parseFragments` + `assemble`), reduced to a scratch root holding only the
+fragment under test (the worktree's `changelog.d/` was never re-polluted):
+```
+RED   fragments scanned: changelog.d/app-decomp-3-keyroute.changed.md, changelog.d/device-pairing-9b.added.md, changelog.d/mobile-session-view-12b.added.md
+      S3 internal bullet under a RELEASED heading: true
+        published as: - **TUI keys: one ordered router instead of one 389-line handler.** `App`'s single `useInput` now builds
+GREEN fragments scanned: changelog.d/device-pairing-9b.added.md, changelog.d/mobile-session-view-12b.added.md
+      S3 internal bullet under a RELEASED heading: false
+```
+`bun test scripts/test/changelog-guard.test.ts scripts/test/changelog.test.ts`
+→ **21 pass / 0 fail** after the deletion.
+
+**Drift from the Implementation (two, recorded).**
+1. **The review's suggested fix (`replyMaxChars: () => replyMax`) is NOT what I
+   built.** A getter closing over the render frame is observationally the same as
+   a value for correctness, but it is the wrong shape: it re-introduces the very
+   ambiguity the table exists to remove (a scan cannot tell `() => replyMax` from
+   `() => replyMaxRef.current`), and the review offered "or make the row a
+   value". I took the value branch, which is what the two scans can pin. This is
+   also why the new test pins only the VALUE half of the table (stated in its
+   header): the getter half stays pinned behaviourally by S0/S0b, because a
+   getter may legitimately close over the frame.
+2. **The previous Execution's "no field changed source" claim is left standing in
+   place and corrected HERE, not edited out** — the earlier round's record is a
+   historical statement, and the review's finding 1 is the correction. The
+   `snapshot.ts` table row is the living source of truth and is now right.
+
+**The two MEDIUMs were the whole set.** The review's other observations were
+explicitly below MEDIUM (attack (b): `stoppedAt` reads `null`/mouse for an action
+the sessions panel used to claim; same observable behaviour) and are left as
+noted, not changed — a fix there would move behaviour for no finding.
+
+**Unverified (§5).** The review could not re-run the previous round's 15-mutant
+table (no approval to write into `src/` non-interactively); I did not re-run it
+either, and this round's 3 mutants are new ones over my own fix, so that table
+still stands on the prior executor's word. To verify:
+`.tentacle/tmp/app-decomp-3-keyroute/rmut.sh` with the review's named probe
+(drop `stoppedHereRef.current = true` in `stopTurn`, run
+`packages/tui/test/app*.test.tsx`).
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` clean;
+`bun run lint` → 1065 files, **0 errors / 0 warnings**; `bun test` → **8227 pass
+/ 3 skip / 0 fail** across 592 files (the 3 skips are the documented opt-ins:
+live-k8s, live-docker, the real-socket keepalive). TUI package alone: **1876
+pass / 0 fail** across 127 files (the S0/S0b nets still green and UNEDITED).
+Negative-case probe: `layer-dialog.ts`'s `snap.replyMaxChars` is exercised
+(KILLED F1-a proves it), so no test silently holds the old shape.
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-15*

@@ -53,7 +53,7 @@ export const permissionLayer: KeyLayer = {
     const { state, action } = stepPermissionKey(mode, snap.char, snap.key, {
       choices: snap.permission.choices,
       selected: snap.permission.selected,
-      maxChars: snap.replyMaxChars(),
+      maxChars: snap.replyMaxChars,
     });
     const effects: KeyEffect[] = [];
     if (state !== mode) {

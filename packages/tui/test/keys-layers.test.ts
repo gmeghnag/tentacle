@@ -44,7 +44,7 @@ function snap(over: Partial<KeySnapshot> = {}, char = "", key: Partial<Key> = {}
     running: () => false,
     compacting: () => false,
     pasteBuffer: () => null,
-    replyMaxChars: () => 0,
+    replyMaxChars: 0,
     dockIds: () => [],
     othersOnSession: () => 0,
     sessionId: () => "s1",
@@ -228,7 +228,7 @@ describe("the permission dialog", () => {
         selected: 0,
         mode: () => ({ mode: "reply", editor: { value: "", cursor: 0, anchor: null } }),
       },
-      replyMaxChars: () => 100,
+      replyMaxChars: 100,
       pasteBuffer: () => null,
     });
     const r = routeKey({ ...s, char: "\u001b[200~why\u001b[201~" }, PURE_LAYERS);

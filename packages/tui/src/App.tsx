@@ -3586,7 +3586,7 @@ export function App({
         running: () => stateRef.current.running,
         compacting: () => compactingRef.current,
         pasteBuffer: () => pasteBufRef.current,
-        replyMaxChars: () => replyMaxRef.current,
+        replyMaxChars: replyMax,
         dockIds,
         othersOnSession: () => runQuit?.othersOnSession() ?? 0,
         sessionId: () => sessionRef.current?.sessionId ?? null,

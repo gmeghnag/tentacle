@@ -42,7 +42,7 @@ function snap(over: Partial<KeySnapshot> = {}, char = "", key: Partial<Key> = {}
     running: () => false,
     compacting: () => false,
     pasteBuffer: () => null,
-    replyMaxChars: () => 0,
+    replyMaxChars: 0,
     dockIds: () => [],
     othersOnSession: () => 0,
     sessionId: () => "s1",

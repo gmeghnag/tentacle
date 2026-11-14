@@ -37,6 +37,7 @@ import type { PermissionRequest } from "@tentacle/core";
  * | `paletteOpen` / `paletteNames` / `commandSel` | render (3757-3791) | value |
  * | `fieldValue` | render `field.value` (3705) | value |
  * | `permission.pending` / `.choices` / `.selected` | render (3870) | value |
+ * | `replyMaxChars` | render `replyMax` (3519) | value |
  * | `sessions` | render prop (3638) | value |
  * | `detachOnQuit` | prop closure (3565) | value |
  */
@@ -83,8 +84,8 @@ export interface KeySnapshot {
   abortable(): boolean;
   uploadInFlight(): boolean;
   exitPending(): boolean;
-  /** The request's `reply.maxChars` (0 when it takes none), read live. */
-  replyMaxChars(): number;
+  /** The request's `reply.maxChars` (0 when it takes none): a render value. */
+  readonly replyMaxChars: number;
   subagents(): readonly BackgroundAgentRow[];
   jobRows(): readonly DockJobRow[];
 
