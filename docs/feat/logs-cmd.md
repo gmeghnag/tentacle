@@ -348,3 +348,6 @@ sanitized.
 - Q5 delivery: **(a)** pull (`watch_next` long-poll, 25 s).
 - Q6 daemon.log/relay.log: **(a)** not merged in v1; `--summary` prints their paths.
 - Q7 selector: **(a)** newest by default, full uid, `<run-name>` in sub-task 3; prefixes/titles later.
+- Q8 limits: **(a)** constants in v1.
+
+Implementation APPROVED (owner 2026-11-14).
