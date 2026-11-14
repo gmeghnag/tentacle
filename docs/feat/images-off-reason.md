@@ -557,3 +557,38 @@ flake, not this change: `packages/daemon` is untouched by the diff, the file
 passes alone (22/0 in 14.7 s), and the re-run above is clean. Reported rather
 than hidden; the repo already tracks this class (TODO.md "Timing flake, not
 investigated").
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14 — fresh-context re-review of `git diff HEAD~1` (896c7d5)*
+
+**Verdict: PASS** (APPROVE-WITH-NITS).
+
+**Finding 1 (wrong machine named) — resolved.** `modelScope` defaults to
+`daemon` (`remote-client.ts` constructor); only the worker (`local-runtime.ts`
+`startWorkerRuntime`) and `run`/`attach` (`engine-runtime.ts` — premise verified:
+`podDaemonCommand` is `serve --bridge --model-proxy`, `engine-runtime.ts:95`, and
+the resident inherits the flag, `pod-resident.ts:105`) claim `laptop`. A daemon
+that reports its own model wins over a `laptop` claim. The `daemon`-scope wording
+now says "the daemon's config … on the daemon's host", which also fixes `connect`.
+My round-1 scenario (a pod without `--model-proxy`) is not reachable through
+`run`/`attach`; the default now covers a hand-started one anyway.
+
+**Finding 2 (wiring untested) — resolved.** Mutations, each red then reverted:
+- worker `modelScope: "laptop"` → `"daemon"`: worker test red;
+- `run`'s `modelScope` dropped: `startPodRuntime` images-off test red;
+- handshake protocol forced to `1`: W1, W3, W4, W4b, W5 + connect test red (6);
+- `daemonModel = undefined`: W1, W3, W4b, connect, runtime test red (5).
+
+**Gate.** Touched files (`image-input`, `images-off-wiring`, `images-off-runtime`,
+`engine-runtime`, `worker`, `connect`): 175 pass / 0 fail. `bun run lint` clean
+(1066 files); `bun run typecheck` clean. After all mutations `git status` was
+clean. Full suite not re-run by me.
+
+**Nits (not blocking).** (1) `attach`'s `modelScope: "laptop"` survives its
+mutation: no attach test covers it. It is nearly equivalent in practice, because
+a `--model-proxy` pod advertises `client`, so the absent-capability branch needs
+an old or hostile daemon. (2) A hostile proxy pod can report an `agentInfo.model`
+and flip the advice to "the daemon's host". That needs a misbehaving pod, the
+text is sanitized and display-only, so it is acceptable under §7.
+(3) Bidi/zero-width characters still pass `safeModel`.
