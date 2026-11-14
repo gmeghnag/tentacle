@@ -978,6 +978,60 @@ red, then green, or to mutate.
 **Gate (unchanged tree):** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean ·
 `bun run lint` 1394 files, 0 issues · `bun test` 10027 pass, 4 skip (opt-in), 0 fail.
 
+### Visual fix round 1
+
+*— claude-opus-5-5, 2026-11-15*
+
+Scope: `.tentacle/tmp/mobile-ui/slice-2/visual-review-1.md` (verdict REVISE).
+
+- **Blocking 1–2 (no slice-2 screenshots) — BLOCKED, not fixed.**
+  `bun run e2e:mobile --ios 26` was refused again with "This command requires
+  approval". I tried it twice: once with the output redirected to a log, which
+  was refused because of a variable check, and once bare. No PNGs exist and no
+  flows were written. To unblock, the owner approves that command (or
+  allowlists `Bash(bun run e2e:mobile:*)`), and then the executor follows the
+  screenshot recipe at the end of Review.
+- **Side note (Lock screen reads as a draft) — fixed in code, not yet seen on a
+  device.** This is the Slice 5 Lock item from Design 5, done early because the
+  visual review asked for it:
+  - `src/lock-screen.ts` (new, pure) holds the view-model:
+    - the copy from the mockup;
+    - the unlock label names only an **enrolled** sensor ("Unlock with Face
+      ID" / "Unlock with Touch ID" on an iPhone SE class device / a plain
+      "Unlock" when there is none or it is not known yet);
+    - "Use Passcode" shows only next to a biometric button. It runs the same
+      action, because `lock-auth.ts` already falls back to the passcode in the
+      same call (Design 5's rule);
+    - the footnote states the delay actually chosen (`immediately` / `5m` /
+      `1h`). There is none for `never` or while the setting is still loading.
+  - `src/lock-auth.ts`: `biometry()` reads `getEnrolledLevelAsync` +
+    `supportedAuthenticationTypesAsync` and maps them through `biometryFrom`.
+    Any failure gives `none`. It only sets the label and never takes part in a
+    lock decision.
+  - `src/screens/LockGate.tsx` renders the result:
+    - a 96 pt accent app mark (22 radius, `lock.shield.fill`; the repo has no
+      app-icon asset yet);
+    - the title in `lockTitle` 28/34, the subtitle 16/22 `sec`;
+    - at the bottom, a full-width 54 pt pill `accentFill` button with the
+      sensor glyph, then "Use Passcode", then the footnote, all inside the safe
+      areas;
+    - the `no-passcode` notice is now a `Banner`.
+    The Modal, the F14 hiding and every testID (`lock-screen`, `lock-unlock`,
+    `lock-notice`) are unchanged. A new testID is added: `lock-passcode`.
+  - `src/ui/Icon.tsx`: `touchid`, `lock.fill`, `lock.shield.fill`.
+  - `App.tsx`: passes `biometry` into `LockGate`.
+
+**Red/green, mutations:** `test/lock-screen.test.ts` (7 tests) was red before
+the fix because the module did not exist. As a mutation, I removed the
+enrolled-gate in `biometryFrom`: "sensor present but nothing enrolled" failed,
+and it passed again after the revert.
+
+**Gate:** `bunx tsc -p apps/mobile` clean · `bun run lint` 1396 files, 0 issues ·
+`bun test apps/mobile` 947 pass, 0 fail.
+
+**Unverified:** none of this has been seen on screen yet (the same block as
+above). That includes the Lock screen in light, dark and on a small device.
+
 ## Review
 
 ### Slice 0 — adversarial review (fresh context)

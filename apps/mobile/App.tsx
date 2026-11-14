@@ -64,7 +64,7 @@ import { createDraftScheduler } from "./src/drafts.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
-import { authenticate, capability } from "./src/lock-auth.ts";
+import { authenticate, biometry, capability } from "./src/lock-auth.ts";
 import { LOCK_SETTING_STORE } from "./src/lock-settings-expo.ts";
 import { createDraftStore } from "./src/outbox-drafts.ts";
 import { createOutboxDriver } from "./src/outbox-driver.ts";
@@ -1073,6 +1073,7 @@ function AppShell(): JSX.Element {
     lock: lockInstance,
     authenticate,
     capability,
+    biometry,
     setting: lockSetting,
     onEvent: (event: AppLockEvent, view: LockView) => {
       // Only the interesting transitions reach the ring: a tick every second
