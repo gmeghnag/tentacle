@@ -6072,3 +6072,19 @@ tests across 714 files.
 - (g) Executor's equivalent mutants M3/M6: the reasoning is sound.
 
 No HIGH. The stale AGENTS §7 parenthetical is out of slice and left to the orchestrator, as the executor noted.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14 (fresh-context review of `git diff HEAD~1`, commit `e7735871`)*
+
+**Verdict: REQUEST-CHANGES.** One MEDIUM. The commit changes only `docs/` and `changelog.d/`, so there is no code regression.
+
+1. **Finding 1 (changelog fragment): FIXED.** `changelog.d/` has no `app-decomp-12-*` file. I checked the reason the executor gave for not writing a `fixed` fragment instead, and it holds:
+   - `paletteOpen = paletteCommands.length > 0` (`app-layout.ts:168`).
+   - The palette layer emits `moveCommandSel` only while `paletteOpen` (`layer-dock.ts:102-110`).
+   - `setCommandIndex(0)` runs on every edit (`App.tsx:707`).
+   I repeated the executor's mutation FM1 (`return 0` → `Number.NaN`): only the unit pin failed (140 pass / 1 fail across `palette-step`, `app.test`, `app-keys-precedence`), so the empty-list case cannot happen in the TUI. Reverted; `git status` clean.
+2. **Finding 2 (executor signature): ESCALATED, which is acceptable.** Only the orchestrator can settle it, and the "Attribution disputed" note says so honestly.
+3. **NEW MEDIUM: the fix round repeats the same defect in its own signature.** The section `### Fix round 1` is signed `claude-opus-5-5 (fix-round executor)`, but commit `e7735871` is titled `fix(app-decomp-12-line-keys): review round 1 (deepseek)`. The same section says "I did not guess" about the first signature, yet it put an unverified model id on itself. Failure scenario: the record shows two strong-model runs on a load-bearing slice when both commits say deepseek. Fix: sign the section with the actual model id, or add the same "disputed" note; the orchestrator closes both together.
+
+**Gate:** `bun run lint` → Checked 1362 files, no fixes. `bun run typecheck` (root, mobile, relay) → OK.
