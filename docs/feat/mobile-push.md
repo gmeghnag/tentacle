@@ -1292,3 +1292,25 @@ pins ExecStart still passes, and correctly asserts no secret in argv).
 Apple. The transport facts it relies on are P0(b)'s sandbox probe and this
 slice's h2c fake; the `.p8` → WebCrypto import is proved with a generated key
 (`apnsSetupOf` test), not with an Apple-issued file.
+
+## Review
+
+### Review — P4 (fresh context, scope `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES.**
+
+1. **MEDIUM — the per-token cap is per (id, token) and resets on reconnect** (`apps/relay/src/relay-core.ts:514,521,720` scopes `tokenWindow` inside the id's `PushWindow`; `relay-core.ts:560` `this.pushes.delete(id)` on `controlClosed`). The design (Design 4, F10) and the code's own comment (`relay-core.ts:59`, "per DEVICE token — the one a third party could spray") mean a global per-token bound. Probe (`.tentacle/tmp/mobile-push/rev-p4-probe.ts`, `RelayCore` direct, same minute): 3 ids → **90** pushes accepted to one token (cap 30); the same id after close + re-`hello` → **30 more** in the same minute. F10's bound becomes `30 × ids` (with any secret being an id) and reconnecting launders both windows. Not recorded as drift. Fix: a relay-wide token map (bounded), keep per-id windows across a reconnect of the same id (or until the minute ends); add tests at N/N+1 across two ids and across a reconnect.
+2. **MEDIUM — JWT minting is not single-flight** (`apps/relay/src/apns.ts:169` `createApnsJwtSource.jwt()`: check `cached`, then `await mint()`). Probe: 5 concurrent cold `jwt()` → **5 distinct tokens**. Same at every 40-min boundary, and on an `ExpiredProviderToken` burst each in-flight push calls `invalidate()` + mints (`apps/relay/src/apns-client.ts` `attempt`). Apple answers frequent token changes with 429 `TooManyProviderTokenUpdates` → `throttled` for real pushes. F15 says "never a storm"; this is a small one. Fix: memoise the in-flight mint promise; make `invalidate` a no-op for a token already replaced (compare the JWT that failed). Test: concurrent `jwt()` → one `sign` call.
+3. **MEDIUM (plausible, not reproduced) — a timeout never retires the session** (`apps/relay/src/apns-client.ts:135`: `req.close()` only). A half-open connection (idle NAT drop, no GOAWAY/error) makes every push `unavailable/timeout` until the kernel gives up on the socket (minutes). Fix: retire the session on a timeout (or ping before reuse); test with an h2c fake that accepts streams and never answers, then answers on a fresh session.
+
+**Gate (this worktree).** `bun test apps/relay` → 148 pass, 0 fail (7 files). `bun run lint` → clean, 1377 files. `bun run typecheck` → exit 0. Full `bun test` not re-run (scope: P4 files).
+
+**Mutation (own).** `clipApnsReason` returns the raw reason → RED ("a reason is clipped to a header-safe, bounded word"); restored from a scratch copy, `git status` clean. Executor's M1–M22 table not re-run.
+
+**Attacks tried.** (a) push before `hello` → closed 1008, holds. (b) daemon-supplied `aps` → stripped by `PushPayloadSchema` re-parse, template constant, holds. (c) topic from config only, holds. (d) cross-id / reconnect cap bypass → finding 1. (e) concurrent JWT mint → finding 2. (f) dead-but-open session → finding 3. (g) logs: token prefix + Apple's clipped reason only; key-file error message names the path, never key bytes — holds. (h) `void client.send(...)` keeps the peer unserialized; `send` never throws — holds.
+
+**§7.** No protocol/persistence change; `protocol.json` untouched; "relay not trusted" boundary intact (content opaque, banner constant).
+
+**Executor behaviour.** Thorough, honest about M14's redundancy gap and the module-level red; findings 1–2 are spec drift not flagged in Drift.
+
+*— claude-opus-5-5, 2026-11-15* (different model family from the executor, DeepSeek)
