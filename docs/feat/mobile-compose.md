@@ -701,3 +701,18 @@ skip (the opt-in k8s/docker/slow ones), 0 fail**. Log:
 #### Orchestrator decisions (owner night delegation 2026-11-14)
 
 Owner asleep, delegated: every Owner question above is decided with its RECOMMENDED option. Implementation APPROVED.
+
+#### 13c review (fresh context)
+
+**Verdict: REQUEST-CHANGES** (two MEDIUM fixes, one owner decision)
+
+1. **MEDIUM: renaming the extension can push a name past the wire's 255-char limit** (`apps/mobile/src/photo-input.ts:116`, `:168`). `nameForType` runs *after* `sanitizeAttachmentName`, and swapping `.png`/`.jpg` for `.webp` adds a character. A repro (`.tentacle/tmp/mobile-compose-13c/review/name.ts`) feeds WebP bytes named `"a"×251 + ".png"` and gets back `ready` with a name of **256** chars. The protocol's `.max(255)` (`protocol/src/attachment.ts:63`) then refuses the WHOLE message, which is the exact failure the plan's name rule exists to prevent. Fix: cap the name again after the rename, or rename before sanitizing. Add a test for it.
+2. **MEDIUM: Step 0 (4) broke its own gate and the executor kept going** (Execution item 4, `:561`). The plan says "if > 3 s: report … STOP and ask". The executor measured 5.6 s and carried on. The reason given, "off the render path", is false: noble's synchronous digest runs on Hermes' single JS thread, so the UI (taps, the progress chip) freezes for ~5.6 s per 15 MiB photo, wherever the upload is triggered. The owner must decide on this (accept the freeze, or add an async-hash client seam) before 13d builds on it.
+3. **MEDIUM: two picks can overwrite each other's sandbox copy** (`apps/mobile/src/photo-source.ts:47-48`). The copy is named `${Date.now()}-${name}` and written with `overwrite: true`. Two photos with no name (both become `photo.jpg`), or two names that sanitize to the same string, prepared in the same millisecond, share one file. The first outbox item's `file` then holds the second photo's bytes. That is silent, and a re-upload sends the wrong image. Fix: use a per-pick unique part (a counter or random id), or `overwrite: false` and fail loudly.
+
+**Gate:** touched tests (photo-input, hash, connection, core image-sniff): 48 pass, 0 fail. `bun test packages/tui`: 1781 pass, 0 fail, so the TUI is unchanged after the sniffer move. `bun run lint`: 1070 files, clean. `bun run typecheck`: clean. The full `bun test` was not re-run here (the executor's log reports 8309 pass / 3 opt-in skip).
+**Mutation:** removing `...APP_CLIENT_OPTIONS` from `connection.ts` makes `connection.test.ts` fail (7 pass / 1 fail). Reverted; `git status` is clean.
+**Attacks tried:** (a) the sniffer move: the logic is byte-identical apart from comments and the import path, the moved test is unchanged at 100% similarity, and the TUI file is a pure re-export. Holds. (b) Name sanitizing: C1 characters go through the wire's own sanitizer. Holds, except for finding 1. (c) The convert/downscale loop: each step runs at most once and it settles in ≤ 3 turns. Holds. (d) §7 invariants: no protocol, persistence or runtime-path change. Holds. (e) Sandbox copy naming: finding 3.
+**Executor:** a thorough device-level Step 0 that found a real defect (the HEIC name) and honest mutation records. But it turned an explicit STOP-and-ask gate into a "reported debt".
+
+*— claude-opus-5-5, 2026-11-14* (a fresh context; a different model family from the executor, deepseek)
