@@ -97,9 +97,15 @@ seed path, not new machinery:
   (`:912-921`). Durable images are restored from the record (`:972-990`).
 - Every save goes to `deps.saver.write({ id: uid, … })` (`:933-939`). One
   saver means one `<uid>.jsonl`.
-- `openSeeded(record)` opens the seeded session eagerly and waits for its
-  first save to reach disk (`:1079-1093`, `written()` `:1017-1019`). A hop can
-  therefore fail BEFORE the TUI is switched.
+- `openSeeded(record)` opens the seeded session eagerly (`:1079-1093`). It
+  waits for its first save only with a time limit, and it ignores a failure:
+  `written()` throws away `drain()`'s list (`:1017-1019`), and `saveOnOpen`
+  says "the open itself never fails on it" (`:446-455`). So the hop itself
+  must check that the save landed (D1 step 4, design review M1).
+- **It holds only for a target daemon that does not already hold this uid.**
+  The daemon's `open` ATTACHES a live session with the same id and ignores the
+  seed (`daemon/src/session-host.ts:582-585`). D1 step 4 therefore checks the
+  target's `session/list` first (design review H1).
 - Proven empirically above (repro + race variant).
 
 ### Preconditions
@@ -160,27 +166,58 @@ reader, verified delete):
    switch is in flight; the target equals the current one; or the origin is
    not hop-capable (D8).
 2. **Prepare** (reversible): build the target runtime with the SAME
-   `permissions` and `saver` and `resume: null`. For a new container:
-   mount plan + gate (D6), then `provisionWorkload` (kept, D5), then
-   handshake (`createLocalRuntime` → `initialize`). For local: a fresh
-   worker (`startWorkerRuntime`). Any failure: dispose what was built and
-   remove what this hop created (D5). The old runtime is untouched.
-3. **Freeze** the old runtime (new `LocalRuntime.freeze()`, about 15 lines):
-   `saveNow()` on every controller, then `saver.drain()`, then require
-   `saveConfirmed()`. If it is not confirmed: roll back step 2 with "not
-   moved: the session could not be saved".
-4. **Open on target:** `store.load(uid)` gives the laptop record. Then
-   `target.openSeeded(record)`, which awaits the first save on disk. Failure
-   (VersionMismatch, open error): roll back step 2; the old runtime is still
-   live and was never sealed.
-5. **Commit:** seal the old controllers, then `old.dispose()` (which closes
-   the old daemon session: worker terminate, or the exec closed). Then apply
-   the hop-back delete decision (D5). Then swap the facade (D2), and the TUI
-   swaps to the target's controller (D3).
+   `permissions` and `saver` and `resume: null`, by calling the EXISTING
+   builders, never a copy of them (review M4). A new container uses
+   `startEngineRuntime` (`engine-runtime.ts:631-699`, which already provisions,
+   writes the daemon log, watches for faults and redials), with the kept
+   metadata (D5), `deferAnnounce` and `logTerm: {tty: false}`. An attach uses
+   `attachEngineRuntime`. Local uses a fresh worker (`startWorkerRuntime`). The
+   runtime's `log`/`info`/`notify` go to the hop's status and notice sinks for
+   its WHOLE life, not only while it provisions: its `disposeTransport` prints
+   `quitReport` (`:664-669`), and that can happen while Ink is mounted after a
+   hop back. `announce` (the kept line) is called only after unmount (D2). On
+   any failure, dispose what was built and remove what this hop created (D5).
+   The old runtime is not touched.
+3. **Freeze** the old runtime (new `LocalRuntime.freeze()`, about 20 lines,
+   the `quit` shape `:1100-1110` without the close). Run `saveNow()` on every
+   controller inside `withTimeout(FLUSH_ON_EXIT_TIMEOUT_MS)`, then
+   `saver.drain()`, then require that THIS uid is clean. That needs a new
+   `saver.cleanFor(id)` (`session-saver.ts:271`: `clean()` covers the whole
+   saver, so a failed save of another uid, such as a `/clear` fork, would
+   wrongly refuse the hop; review M1). If THIS uid is not clean, roll back
+   step 2 with "not moved: the session could not be saved". **Nothing
+   persisted yet** (review M2: the store writes no file for an empty history,
+   `session-log-store.ts:707-709`, and the uid is lazy until the first open):
+   skip the freeze and the load. The target gets `resume: null`, plus the uid
+   if one was already minted.
+4. **Open on target.**
+   (a) **For a target that existed before this hop (any attach), check for our
+   own uid first** (review H1). Read `session/list` after the handshake. If it
+   lists this uid, first `session/close` it and read the list again. Then seed.
+   If the close is not confirmed, or the uid is still listed, refuse: "<name>
+   still holds an older copy of this session". A fresh container or worker
+   cannot hold the uid, so it skips (a).
+   (b) `store.load(uid)` gives the laptop record, then
+   `target.openSeeded(record)`, then require `target.saveConfirmed()` for this
+   uid (M1). If any of these fails (VersionMismatch, an open error, a save that
+   was not confirmed), roll back step 2. The old runtime is still live and was
+   never sealed.
+5. **Commit** (review M3). **Once step 4 has succeeded, the hop never rolls
+   back.** The order: seal the old controllers, swap the facade (D2), let the
+   TUI swap to the target's controller (D3), turn auto-accept OFF (D9, review
+   H2), and only then run `old.dispose()` inside `withTimeout`. A dispose
+   error or timeout is reported as one notice. Then apply the delete decision
+   for the place we left (D5). If the old daemon could not be closed, the
+   container stays kept and still holds the uid; step 4(a) handles that the
+   next time someone attaches to it.
 
 The order "open new, then close old" keeps a live session on every failure
 path. The race "old saves after new wrote" was proven harmless
-(hop-race.ts) and is closed anyway by the seal in step 5.
+(hop-race.ts) and is closed anyway by the seal in step 5. On a hop, the
+segment is written again from the start (a "restating" write,
+`session-log-store.ts:895-899`), so typed facts in the old segment (turn
+markers, sub-agent reports) drop out of the log, exactly as they do on
+`--resume`. This is accepted (review, unverified item 2).
 
 **D2 — `HopRuntime` facade** (`cli/src/hop-runtime.ts`). This is what
 `startTui` gets instead of one runtime's members. It has stable `link`,
@@ -238,7 +275,10 @@ run's relay/TUIs own the session and lifecycle, `detached-runs.md`); and (b)
 after the handshake and BEFORE any open, `residentUse` reports **no other
 session attached, running or holding jobs** (`others === 0`, with
 `ownMayBeAbsent`). Otherwise: dispose, open nothing, and say "<name> is in use
-by another session". Why: the pod daemon is ONE resident per workload. Joining
+by another session". (c) If our OWN uid is live there (a hop whose close
+failed, or a TUI killed while inside the container), it is not joined. If it
+is running or holds jobs, refuse. Otherwise close it, then seed (D1 step
+4(a)). Why: the pod daemon is ONE resident per workload. Joining
 a busy one shares it with another client's conversation, and that client can
 already answer that pod's pod-side asks (`detached-runs.md`, AGENTS §7). A
 workload with someone already in it is "not ours to share". Check (b) reads
@@ -259,9 +299,11 @@ container?}, keep?: boolean, reason}`. It has NO daemon-side effect and needs
 no daemon-side ask. It returns "Proposed; the user will be asked when this
 turn ends. Do not assume the move happened." It is registered only in worker
 and pod-bridge daemons, behind config `sessionHop.tool` (default on), at the
-`contextReset` registration site (`wiring.ts:608-624`). The executor
-verifies the daemon-kind discriminator there first; if there is none, STOP and
-amend this plan. Laptop side, `cli/src/hop-proposal.ts` (pure) watches an OWN
+`contextReset` registration site (`wiring.ts:608-624`). `BuildAgentOptions`
+(`wiring.ts:321`) has no field that says which kind of daemon is building
+(review M5). So add `BuildAgentOptions.moveSession?: true`. Only the worker
+bootstrap and the pod-bridge daemon set it. `serve`, in-process, one-shot
+and child-agent builds never set it. Laptop side, `cli/src/hop-proposal.ts` (pure) watches an OWN
 turn's events for `tool_start{name: "move_session"}` followed by a successful
 `tool_result`, parses the arguments with a zod schema (invalid → ignored with
 a notice), and queues the proposal for the turn end. There it asks a
@@ -271,6 +313,32 @@ auto-accept (`autoApproves` excludes it, like `hooks_trust`) and never stored.
 The proposal is treated as pod-supplied text on every origin (one rule,
 stricter than needed for local). A `/move` the owner types needs no prompt
 (only D6's `ask`).
+
+- **What the `session_hop` prompt shows** (review M6). The laptop writes the
+  lines itself, from the resolved plan:
+  - the engine;
+  - the FULL image reference, or "the default image";
+  - the mount, as the host path, read-write;
+  - for an attach, "injects tentacle into <workload>";
+  - for a hop back, whether the container will be kept or deleted;
+  - for a hop to local, "the agent will run commands on this machine".
+  Pod-supplied text appears only through `untrustedText`. `reason` comes last,
+  labelled as the agent's words. On a proposal, D6's mount `ask` warnings are
+  merged into this SAME prompt, so the owner sees one prompt, not two.
+- **Auto-accept is reset by every hop** (review H2). Auto-accept is laptop/TUI
+  state (`AutoAcceptFeed`, `permission-ui.ts:224-229`; `app-types.ts:354`), not
+  daemon state, so the "Session-scoped approvals" failure row did not cover it. At commit
+  (D1 step 5) the hop calls `autoAccept.set(false)`, or resets the App's local
+  flag when there is no feed. The "moved" notice says "auto-accept is off".
+  This applies to every hop, not only hops to local: one rule, and approval
+  for the new place is never inherited.
+- **The model is told** (review M7). The first prompt sent after a commit
+  starts with one line the laptop writes: `[session moved to docker:X —
+  background jobs, MCP tools and approvals were reset]`. After a proposal the
+  owner refused, it starts with `[move declined]` instead. The line is part
+  of the user message, so it is saved as conversation. **An approved proposal
+  does NOT send a turn by itself.** The notice says "moved — send a message to
+  continue".
 
 **D10 — Protocol impact: none.** No method, update kind or field changes.
 `session_hop` is a laptop-internal `PermissionRequest.kind` (P5). The tool is
@@ -287,11 +355,11 @@ Dependency order (protocol untouched):
 | id | scope | files | Size | Blast | deps |
 |---|---|---|---|---|---|
 | H1 | Pure modules + their unit tests: `/move` parser; hop plan (refusals, D7 verdict from inputs, D5 delete decision, proposal schema) | `tui/src/hop-command.ts`, `cli/src/hop-plan.ts`, `cli/src/hop-proposal.ts` (+ tests) | S | contained | — |
-| H2 | `LocalRuntime.freeze()`; `session-hop.ts` orchestrator (D1); `hop-runtime.ts` facade (D2) | `cli/src/local-runtime.ts`, `cli/src/session-hop.ts`, `cli/src/hop-runtime.ts` (+ `test/session-hop.test.ts` on in-memory daemons) | M | load-bearing | H1 |
+| H2 | `LocalRuntime.freeze()`; `saver.cleanFor(id)`; `session-hop.ts` orchestrator (D1 incl. 4(a) own-uid close, the "nothing persisted" branch, commit order); `hop-runtime.ts` facade (D2); `hop-plan.ts` gains the own-uid verdict (see the design review response) | `cli/src/local-runtime.ts`, `cli/src/session-saver.ts`, `cli/src/session-hop.ts`, `cli/src/hop-runtime.ts`, `cli/src/hop-plan.ts` (+ `test/session-hop.test.ts` on in-memory daemons) | M | load-bearing | H1 |
 | H3 | TUI wiring: `hop`/`targetFeed` props, queue at turn end, switching latch, status row, swap with `keepTranscript` | `tui/src/app-types.ts`, `tui/src/App.tsx`, `tui/src/run.tsx`, `tui/src/status-view.ts`, `tui/src/commands/move.ts` + registry (+ `tui/test/session-hop.test.tsx` frame diffs) | M | cross-module | H1 |
 | H4 | MVP end to end: local worker TUI → new docker/podman container (kept, mount gate as prompt, provisioning routed off-terminal) and back to a fresh worker, verified delete on `--rm`; `main.ts` worker path uses `HopRuntime` | `cli/src/hop-targets.ts` (factories), `cli/src/main.ts`, `core/src/permission.ts` (`kind` += `"session_hop"`), `tui/src/permission-ui.ts` (choices + `autoApproves`) (+ tests with a fake `EngineHost`) | M | load-bearing | H2, H3 |
 | H5 | `move_session` tool + registration + laptop proposal → `session_hop` prompt at turn end | `tools/src/move-session.ts`, `tools/src/index.ts`, `cli/src/wiring.ts`, `cli/src/hop-runtime.ts` (+ tests) | M | load-bearing | H4 |
-| H6 | Attach-to-existing target (docker/podman/k8s) with the D7 rule; hop out never deletes | `cli/src/hop-targets.ts`, `cli/src/hop-plan.ts` (+ tests) | S | load-bearing | H4 |
+| H6 | Attach-to-existing target (docker/podman/k8s) with the D7 rule (incl. D7c); hop out never deletes. FIRST, a separate pure-move commit extracts `detachedRunOf` from inside `main()` (`main.ts:1505`, a closure over `config`/`laptopProc`) into a module (review M8) | `cli/src/detached-run-of.ts` (new), `cli/src/main.ts`, `cli/src/hop-targets.ts`, `cli/src/hop-plan.ts` (+ tests) | S | load-bearing | H4 |
 | H7 | Opt-in live docker test; changelog fragment; README/ARCHITECTURE line | `cli/test/session-hop.docker.test.ts`, `changelog.d/session-hop.added.md`, `README.md`, `ARCHITECTURE.md` | S | contained | H4 |
 
 **Branching: ONE branch `feat/session-hop`, one commit per slice, in table
@@ -313,7 +381,10 @@ stop at any commit boundary and still leave a shippable tree.
 | Daemon version mismatch in the image | Injection replaces it, or `initialize` refuses → step 2 failure. A live old resident in an attached workload: `StaleBuildError` refusal (`engine-runtime.ts:906-909`) → D7 refusal. |
 | Old session cannot be saved (step 3) | Hop refused before anything opens on the target. The target is disposed and deleted (it is ours). |
 | Open on target fails (step 4) | Roll back step 2. The old runtime was never sealed, so it keeps saving. Since the target's first write either never happened or holds the same messages, the file is unchanged in content (race repro). |
-| Crash mid-commit (after open, before old dispose) | The laptop log holds the full conversation (step 4 awaited its write). On restart, `--resume` reopens it locally. A hop container is in `ps` (kept). The worker died with the process. |
+| Crash mid-commit (after open, before old dispose) | The laptop log holds the full conversation (step 4(b) required `saveConfirmed`). On restart, `--resume` reopens it locally. A hop container is in `ps` (kept) and its resident daemon may still hold the uid live. A later `/move attach` to it closes that copy and seeds again (D1 4(a), D7c), and never attaches the stale copy. The worker died with the process. |
+| Old dispose fails or hangs (after commit) | It has a time limit, and the result is one notice. The hop is not rolled back (D1 step 5). A kept container still holding the uid → D7c the next time. |
+| Nothing saved yet (`/move` as the first action) | No freeze or load. The target opens unseeded with the minted uid, if there is one (D1 step 3). |
+| Auto-accept on before a hop | Turned off at commit, with a notice (D9). The first tool ask on the target reaches the prompt. |
 | Link drops while in a container | The existing reconnect (`execChannelFactory`, `engine-runtime.ts:299-311`) applies. A hop is refused while `link` is not `up` (plan). |
 | Pending permission asks | Impossible at a boundary: a turn waiting on an ask is running, so the hop stays queued. |
 | Queued messages / steers | Daemon queue non-empty → the hop waits for the next idle (D4). TUI-side queued rows → back to the input by `swapSession` (P3). Steers belong to the running turn. |
@@ -339,7 +410,17 @@ Red first, each shown failing before its slice's code (§9):
   target wrote drops nothing (race variant). (4) **Single broker:** a
   daemon-side broker spy on the target sees no ask while the TUI broker gets
   it. **Mutation:** the factory builds the target with `new
-  PermissionBroker()` → the test fails, then revert.
+  PermissionBroker()` → the test fails, then revert. (5) The store fails the
+  target's first write → the hop is rolled back and the old session is still
+  live (M1). (6) A save failure on ANOTHER uid does not refuse the hop (M1).
+  (7) `/move` before anything was saved → the target opens unseeded, with no
+  load error (M2). (8) The target daemon already holds our uid live with
+  STALE history → it is closed and then seeded, and the target model sees the
+  laptop's history (H1). A close that cannot be confirmed → refused. Mutation:
+  skip 4(a) → (8) fails. (9) `old.dispose()` throws or hangs after step 4 →
+  the TUI is still on the target, one notice, no rollback (M3). (10) The
+  reviewer's rollback rig (`.tentacle/tmp/session-hop/review-rollback.ts`)
+  as a test: one `.jsonl`, no `.aside`, both runtimes `saveConfirmed`.
 - **H3** (ink-testing-library, `app.test.tsx` pattern): frames before and
   after a fake hop. The exact property: **the transcript rows are identical
   and at the same positions**, only the badge/status row differ. The draft
@@ -351,13 +432,24 @@ Red first, each shown failing before its slice's code (§9):
   entry written at create; `--rm` on hop back calls `removeVerifiedKept`
   (spy), and a user-owned target is never deleted; the mount gate's `ask`
   becomes a `session_hop` broker request; and nothing is written to
-  `process.stderr`/`stdout` during the hop (spy). **Mutation:** drop `logTerm`
-  → the spy fires.
+  `process.stderr`/`stdout` during the hop (spy). The spy stays on through a
+  hop BACK, including the target's dispose, and through a faulted run, whose
+  `quitReport` must reach the notice sink (M4). **Mutation:** drop `logTerm`
+  → the spy fires. Auto-accept on → hop → the next tool ask reaches the
+  prompt (H2). **Mutation:** skip the reset → this test fails.
 - **H5:** the tool's events → one `session_hop` request at turn end, `once`
   only; No → nothing built. **Mutation:** let `autoApproves` answer
-  `session_hop` → the test that auto-accept leaves it pending fails.
+  `session_hop` → the test that auto-accept leaves it pending fails. The
+  prompt's detail holds the engine, the full image, the host mount path
+  (read-write), the delete intent, and `reason` last and sanitized; it is ONE
+  prompt even when the mount gate says `ask` (M6). `serve`, in-process and
+  sub-agent registries do not list `move_session`, and the laptop watcher
+  ignores a sub-agent's `tool_start` (M5). The next prompt after a commit
+  carries the moved line, and after a refusal the `[move declined]` line (M7).
 - **H6:** the D7 refusals reach dispose-before-open (no `session/open` frame
-  sent, checked on the fake channel).
+  sent, checked on the fake channel). Own uid live and idle on the target →
+  a `session/close` frame is sent before the seeded open; own uid running →
+  refused (D7c).
 - **H7:** `TENTACLE_DOCKER_TESTS=1` live test: local → container (a file
   written by the agent's shell at `cwd` exists on the host) → local with
   `--rm` → the container is gone, and the conversation is in one `<uid>.jsonl`.
@@ -400,6 +492,51 @@ v1 · 4 D7 as written · 5 keep by default · 6 yes (`sessionHop.tool`) · 7 no
 confirmation for a typed `/move` · 8 accept (always-approvals re-asked).
 Execution: one branch, H1 → H2 (review) → H3+H4 (review, merge = MVP on main)
 → H5 → H6+H7 (review, merge). *— claude-opus-5-5 (orchestrator), 2026-11-14*
+
+#### Design review response (Fable REVISE)
+
+Review: `.tentacle/tmp/session-hop/design-review.md` (claude-fable-5-2,
+REVISE). Each finding was checked against the code at `24ad40a`. **All 10 are
+accepted, and none is rebutted.** The fixes are written into the sections
+above. This section only records the evidence and what changes for H1 and H2.
+The owner decisions (1–8) are unchanged: none of these fixes needs a new
+owner answer.
+
+| # | verified at | resolution (where in the plan) |
+|---|---|---|
+| H1 | `daemon/src/session-host.ts:582-585`: `open` with a live `sessionId` → `live.attach(...)`, and the seed is ignored. `residentUseOf` leaves our own uid out of `others` (`relay-state.ts:287-291`). So D7(b) passed, and the stale copy was attached. | Load-bearing assumption (new bullet) · D1 step 4(a) · D7(c) · Failure modes (crash row + a new row) · Tests H2(8), H6 |
+| H2 | `AutoAcceptFeed` is laptop state (`tui/src/permission-ui.ts:224-229`, `app-types.ts:354`, `main.ts:1186`). `autoApproves` excludes only `hooks_trust` (`permission-ui.ts:56-58`). | D9 "Auto-accept is reset by every hop" · D1 step 5 · Failure modes · Tests H4 |
+| M1 | `written()` throws away `drain()`'s list (`local-runtime.ts:1017-1019`). `saveOnOpen` never fails the open (`:446-455`). `saveNow()` has no time limit (`:707-712`). `saveConfirmed` includes the saver-wide `clean()` (`:1134-1135`; `session-saver.ts:271-273`). `drain()` returns text lines, not ids (`:280-284`). | Load-bearing assumption (bullet fixed) · D1 steps 3 and 4(b) · new `saver.cleanFor(id)` · Tests H2(5)(6) |
+| M2 | `session-log-store.ts:707-709`: no file for an empty history. | D1 step 3 "nothing persisted" branch · Failure modes · Tests H2(7) |
+| M3 | `dispose` awaits `closeSessions()` with no time limit (`local-runtime.ts:1038-1044`). | D1 step 5, new order + "never rolls back" · Failure modes · Tests H2(9) |
+| M4 | `startEngineRuntime` (`engine-runtime.ts:631-699`) already does what `hop-targets.ts` would have copied. `disposeTransport` prints after unmount (`:664-669`). | D1 step 2 calls the existing builders, sinks live as long as the runtime · Tests H4 |
+| M5 | `BuildAgentOptions` (`wiring.ts:321`) has no daemon kind. The site at `:600-624` is shared by every kind of build. | D9 `moveSession?: true` · Tests H5 |
+| M6 | D9 said only "sanitized args". | D9 "What the `session_hop` prompt shows" (one merged prompt) · Tests H5 |
+| M7 | The seed is messages only (`local-runtime.ts:918-923`). | D9 "The model is told". An approved proposal does not send a turn by itself. · Tests H5 |
+| M8 | `detachedRunOf` is a closure inside `main()` (`main.ts:1505`). | Files H6: pure-move extraction commit first |
+| unverified 1 | rollback rig not run (by either side) | It becomes test H2(10). Still unverified until H2 runs it. |
+| unverified 2 | `session-log-store.ts:895-899` restates the segment | Accepted, same behaviour as `--resume` (note under D1) |
+
+**What this means for the executed H1 slice.** H1 stays as built. Nothing
+it ships is wrong, but two pure modules are now incomplete, and **H2 must
+extend them** (red first, §9):
+
+- `hop-plan.ts` `AttachVerdict` (`:139-171`) gains a third outcome,
+  `{kind: "close-own"}`. It needs a new input, `own: {running, jobs} | null`
+  (whether our uid is live on the target; computed from the same
+  `session/list` read, because `ResidentUse` has no "own present" field,
+  `relay-state.ts:284-292`). If own is live and idle → `close-own`. If own is
+  running or holds jobs → `refuse` "<name> still holds an older copy of this
+  session". This is checked after `detachedRun` and before `others`. New
+  table rows and a mutation (drop the `own` branch → the row fails).
+- `hop-proposal.ts` `proposalNotice` stays the one-line notice. The full
+  prompt detail (M6) is a NEW pure builder (`hopPromptDetail(plan,
+  mount)`) that H5 adds. The image/delete/sanitize properties that H1 already
+  pins are reused, not changed.
+- `hopPlan`'s refusals do not change: M2's "nothing persisted" branch is
+  handled in the orchestrator (D1 step 3), not in the plan.
+
+*— claude-opus-5-5, 2026-11-14*
 
 ## Execution
 
