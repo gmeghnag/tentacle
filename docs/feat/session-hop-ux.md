@@ -513,3 +513,9 @@ one summary.
 ## Execution
 
 ## Review
+
+#### Owner answers so far (2026-11-14)
+
+- Q1: **`kubernetes:<ns>/<pod>`** (namespace in the name, NOT `-n`); a rule to tell `<pod>/<container>` from `<ns>/<pod>` is still to be decided (owner wanted to clarify Q2).
+- Already decided before the plan: auto-accept SURVIVES a hop (reverses D9); hops toward local from a pod always confirmed.
+- Q2–Q6: pending (owner was clarifying Q2 when the orchestrator hit its usage limit).
