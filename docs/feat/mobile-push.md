@@ -1,6 +1,6 @@
 # feat/mobile-push — end-to-end encrypted push through the mobile relay (APNs) + the daemon's grace rule (mobile task 16)
 
-> **Status:** implementation (plan written, **not approved**; see Owner questions)
+> **Status:** implementation APPROVED by the owner (2026-11-14)
 > **Branch:** `feat/mobile-push` (this doc). Slices P0–P10 run **in order on this branch**, one commit per slice on the owner's OK, each gated by its narrow tests (AGENTS §4); the full gate before Review. **Starts only after task 15 (`feat/mobile-relay`) is merged**: P3, P4 and P8 build on its R1, R2 and R4/R5a.
 > **Size:** L as a whole, split into S/M slices (table below) · **Blast:** load-bearing (a new hook in the session's `emit` path, a new method on the device principal, a new persisted file family under `devices/`, a secret on the relay host) · **Suited:** per AGENTS §10, P7 and P8 are `load-bearing` (strong executor + mandatory fresh-context Review red-teaming "a pod/relay is not trusted", "one session path", "don't serialize the RPC peer" and the steering no-await window). P0, P1, P3, P5, P6, P10 are S `contained`/`cross-module`; P2, P4, P9 are S–M. The owner assigns executors.
 > **Changelog:** `changelog.d/mobile-push.added.md` (P8): `- **Push notifications for the mobile app, end-to-end encrypted.** When a permission request waits longer than \`push.graceSeconds\` (default 30 s) with nobody answering, or a turn ends while nobody is watching, \`serve\` pushes the paired phones through the mobile relay and APNs. Apple and the relay carry only an opaque blob, sealed to a per-device key and authenticated by the computer's key.`
@@ -597,6 +597,13 @@ Execution with dates):
    142.132.169.22. They happen after task 15's D and this task's merge, before
    the first TestFlight build. **Rec: yes.** No executor touches Apple's
    console or the server.
+
+#### Owner decisions (2026-11-14)
+
+All eight questions: the recommendation (owner: "Tutte come raccomandato").
+Q6's amendment is recorded in docs/feat/mobile-relay.md before R1 executes.
+Execution starts after task 15 (mobile-relay) is merged. *— claude-opus-5-5
+(orchestrator), 2026-11-14*
 
 ## Execution
 
