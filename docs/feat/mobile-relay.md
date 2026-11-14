@@ -2281,3 +2281,50 @@ untouched.
 - The `O_EXCL` race between two `serve`s is unreachable by construction (the store
   lock is taken before the file is created), so the `EEXIST` branch is exercised
   only by M9's analysis, not by a test.
+
+## Review
+
+### R5a + R5b — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (3 MEDIUM, no HIGH).
+
+Gate (touched files): `bun test` on relay-secret / serve-relay / pair-addresses /
+pair / devices-cmd / serve-discovery → 115 pass, 0 fail; `bun run lint` clean;
+`bun run typecheck` clean (root + mobile + relay). Full `bun test` not re-run.
+
+1. **MEDIUM — "relay last" holds only per record, not per QR.**
+   `packages/cli/src/pair-addresses.ts:152-155`: `recordAddressList` puts each
+   record's relay address right after that record's bind addresses, and `extra`
+   (`pair --address`) is appended after all records. Repro
+   (`.tentacle/tmp/mobile-relay/order.ts`): two `0.0.0.0` daemons →
+   `[LAN:4000, relay-a, LAN:4001, relay-b]`; one daemon + `pair --address
+   ws://my-tailnet:4000/e2e` → `[LAN, relay, tailnet]`. With R6's 750 ms stagger
+   the phone starts the relay before a direct tailnet/second-daemon path, which
+   contradicts Design §5 / R5b ("direct first, relay last"). Fix: partition relay
+   addresses (`/d/<id>/e2e` on a relay URL) to the end of the deduped list, and
+   add a test for both cases.
+2. **MEDIUM — `relay.json` 0600 test does not hold.**
+   `packages/cli/test/relay-secret.test.ts:62` asserts `mode & 0o777` equals
+   `RELAY_SECRET_MODE`, i.e. against the constant under test. Mutation
+   `RELAY_SECRET_MODE = 0o644` (`relay-secret.ts:34`) → 12/12 **green**: the
+   credential file can turn world-readable with no failing test. (M10 mutated only the
+   call-site literal.) Assert the literal `0o600`.
+3. **MEDIUM — stopping the relay link is untested.** Mutation: delete
+   `relayLink?.stop()` in `serve.ts` `stop` → serve-relay.test.ts 23/23
+   **green**. Design §4 "Stop" (no registration outliving the daemon) is unpinned.
+   `listen` hardwires `bunRelayDialer()` (`serve.ts` relayLink block), so no test
+   can watch the dial. Inject the dialer through `ServeOptions` and assert that
+   the socket closes and no redial happens after `handle.stop()`.
+
+Attacks that found nothing: a malicious repo setting `relay.url` (config is
+`<configDir>/config.jsonc` only, never a project file: `config/src/load.ts:67`);
+`relay.json` read as a session sidecar (the store lists only `*.state.json`,
+`session-log-store.ts:1242`); a refused URL leaking the authority (calls
+`devices?.stop()` before throwing); pod/`--stdio` daemons dialling (only
+`listen` with `devices` starts a link); a planted record address refusing `pair`
+(filtered by `isPairingAddress`). Single broker / one session path: the link gets
+the same `sessionHost` and the shared `server.limiter`. No parallel path.
+Mutations reverted, `git diff` empty.
+
+*— claude-opus-5-5, 2026-11-14* (same model family as the R5a/R5b executor
+(opus): the context is fresh, but blind spots can be shared.)
