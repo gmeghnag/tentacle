@@ -914,3 +914,36 @@ green shown, drift listed. Its one mistake is over-claiming what the R0(b)
 guard protects (finding 2).
 **Model note:** executor deepseek-v4, reviewer claude-opus-5-5. Different
 model families.
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (commit af849596).
+
+**Finding 1 (HIGH): fixed.**
+- `ready.features` now accepts any name of 1–64 characters, at most 16 names.
+  `knownRelayFeatures` keeps only the names this build knows and drops
+  duplicates. `error.code` is now any string of 1–32 characters, and
+  `isRelayErrorCode` checks it against the known codes.
+- Mutation A: I put both closed enums back. 2 tests went red (`ready.features
+  accepts a name…` and `error.code accepts a code…`).
+- Mutation B: I removed the duplicate check in `knownRelayFeatures`. 1 test went
+  red.
+- I reverted both mutations; `git status` is clean.
+- No regression: limits are still enforced. A list of 17 names, a non-string
+  code, an empty code and a 33-character code are all still refused, and these
+  cases are tested. `protocol.json` was regenerated, and the drift test in
+  `json-schema.test.ts` passes.
+
+**Finding 2 (MEDIUM): fixed.** The comments at `relay.ts:79-93` and `:359-362`
+and the test names now describe `isInboundFrameTooLarge` as a limit on parsing
+cost, not on memory. F7's unbounded allocation is explicitly left open for R4:
+the Bun client ignores `maxPayloadLength` (the executor's own probe; I did not
+re-run it). The fallback is to back off after a close caused by an oversized
+frame. This change is wording only, so there was nothing to mutate.
+
+**Nit fixed:** the comment at `relay-id.ts:13` now names the right
+`./relay-id` subpath.
+
+**Gate:** touched tests (relay, relay-id, json-schema): 50 pass / 0 fail.
+`bun run lint` is clean (1296 files). `bun run typecheck` is clean. I did not
+run the full suite.
