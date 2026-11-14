@@ -5702,6 +5702,89 @@ No schema changed (`packages/protocol/schema/protocol.json` untouched, no
 `changelog.d/app-decomp-11-hop.changed.md`; never `CHANGELOG.md`, whose
 `[Unreleased]` stays empty (§10). `TODO.md` untouched.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14 (executor, fix round 1 of
+`feat/app-decomp-11-hop`; the id is this session's own
+`~/.claude/projects/-Users-gmeghnag-tentacle/232c4c3e-….jsonl`, whose assistant
+records carry `"model":"claude-opus-5-5"`)*
+
+Round 1 raised exactly one finding (MEDIUM 1) and it was correct: no source
+defect, a TEST gap. `hopReady` was pinned as a pure function and both WIRINGS
+that feed it were not, so two mutations of the wiring — the thing the slice
+actually changed — survived the whole 4-file scope. The fix is test-only; **no
+production file changed** (`git status` at the end: one file,
+`packages/tui/test/use-hop.test.tsx`, `+72 −6`).
+
+**MEDIUM 1 — the queue half of the D4 boundary was unpinned where it is wired.
+FIXED.** Three cases added to `use-hop.test.tsx` (`:150`, a new `describe`), and
+the harness grew an options bag (`Boundary` `:42`) so `stateRef.running`,
+`rowsRef` and `daemonQueueRef` can be set — the defaults are unchanged (`running:
+true`, empty queue), so the three freshness cases above keep their exact
+semantics:
+
+1. `requestHop` while `running: false` and
+   `daemonQueue: {entries:[{id:"q1",…}]}` must QUEUE (notice, `started: []`).
+2. The queued path end to end: the same state → one queued `/move`, then
+   `hopIfQueuedRef.current()` must start NOTHING and stay queued; drain the daemon
+   queue (`daemonQueueRef.current = {entries: []}`) and the next call starts it
+   (`started: ["local"]`, `hopQueued: null`).
+3. The control: `running: false` with an EMPTY queue starts at once with no
+   notice — so case 1 cannot pass by "never starts".
+
+**Red before green (AGENTS §9).** The mutation is the red: the reviewer's two
+mutations were re-applied to the UNTOUCHED `useHop.ts`, first with the pre-fix
+test file (from `HEAD`, 3 cases) and then with the fixed one (6 cases). Same
+source, same scope (the reviewer's four files):
+
+```
+PRE-FIX  (use-hop 3 + hop-ready 5 + app-hop-structure 7 + session-hop 21 = 36)
+  mutation A: 36 pass  0 fail      ← survives, exactly as the reviewer found
+  mutation B: 36 pass  0 fail
+  mutation C: 36 pass  0 fail
+  unmutated : 36 pass  0 fail
+
+POST-FIX (39)
+  mutation A: 38 pass  1 fail  (`hopIfQueued` starts nothing while the queue is non-empty…)
+  mutation B: 37 pass  2 fail  (both new cases)
+  mutation C: 37 pass  2 fail  (both new cases)
+  unmutated : 39 pass  0 fail
+```
+
+The failures are on the PROPERTY (a started hop, a lost queued spec), not on an
+import. A third mutation was added beyond the reviewer's two, because A and B
+each cover half: **C** feeds `queued: 0` to `requestHop`'s `hopStep` only
+(`…boundary(…), running: stateRef.current.running, queued: 0`), which A does not
+reach and B reaches only by breaking both paths at once. It dies on both new
+cases, so each path has its own killer: A kills `hopIfQueued`, C kills
+`requestHop`, B kills the shared `boundary()` reader.
+
+**Where this leaves the Execution's W-table.** W2 ("`hopIfQueued` ignores
+`hopReady`") is honestly labelled — it pins *an* ignore, not the queue half; the
+reviewer's reading is right that it did not pin the wiring. It is not rewritten:
+the table records what was run at the time, and A/B/C above are the missing
+pins. The row's own wording ("the queue half … the bug the duplication was
+hiding") is what made the gap visible.
+
+**Gate, on the final tree (one file changed, tests only).**
+
+```
+$ bunx tsc --noEmit                    → OK (no output)
+$ bun run lint  (biome check .)        → Checked 1358 files … No fixes applied
+$ bun test                             → 9794 pass / 4 skip / 0 fail
+                                         13 snapshots, 78578 expect() calls
+                                         Ran 9798 tests across 711 files (393.57s)
+```
+
+The 4 skips are the same pre-existing opt-in gates the S11 section records
+(`TENTACLE_DOCKER_TESTS=1` ×2, `TENTACLE_K8S_SERVER`,
+`TENTACLE_SLOW_TESTS=1`); the pass count is the S11 figure +3, which is exactly
+the three added cases. Full-suite log:
+`.tentacle/tmp/app-decomp-11-hop/fix1-test.log`; mutation script and backups:
+`.tentacle/tmp/app-decomp-11-hop/{mutate.sh,backup/}`. After every mutation the
+source was restored from backup and confirmed **byte-identical** (`cmp`), and
+`git status` shows only the test file — no `checkout`/`restore`/`stash` was used.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-14 (fresh context; a different model family from the

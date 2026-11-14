@@ -30,22 +30,31 @@ import type { SessionController } from "../src/app-types.ts";
 import type { HopSpec } from "../src/hop-command.ts";
 import { HOP_QUEUED_NOTICE } from "../src/hop-command.ts";
 import type { PermissionController } from "../src/permission-ui.ts";
+import type { DaemonQueue, QueuedRows } from "../src/queued.ts";
 import type { DisplayState } from "../src/state.ts";
 import { type HopLayer, useHop } from "../src/useHop.ts";
 
 /**
- * A minimal host. The turn is RUNNING, so every `/move` is the boundary case:
- * queued, never started — which is the branch whose two writes must agree.
+ * The two facts the boundary reads, as the host holds them at the moment a
+ * command runs. Defaults: a turn in flight and an empty queue — the boundary
+ * case whose two writes must agree.
  */
-function harness() {
+interface Boundary {
+  readonly running?: boolean;
+  readonly rows?: QueuedRows;
+  readonly daemonQueue?: DaemonQueue;
+}
+
+/** A minimal host. */
+function harness(opts: Boundary = {}) {
   const notices: string[] = [];
   const started: string[] = [];
   const layer: { current: HopLayer | null } = { current: null };
   const host = {
     sessionRef: { current: null },
-    stateRef: { current: { running: true } as DisplayState },
-    rowsRef: { current: [] },
-    daemonQueueRef: { current: undefined },
+    stateRef: { current: { running: opts.running ?? true } as DisplayState },
+    rowsRef: { current: (opts.rows ?? []) as QueuedRows },
+    daemonQueueRef: { current: opts.daemonQueue },
     switchingRef: { current: false },
     startHopRef: { current: null },
     hop: {
@@ -122,6 +131,63 @@ describe("S11 freshness: two `/move`s with NO render between them", () => {
     h.hop.requestHop("/move local");
     expect(h.notices).toEqual([HOP_QUEUED_NOTICE]);
     expect(h.started).toEqual([]);
+    h.app.unmount();
+  });
+});
+
+/**
+ * The daemon-queue HALF of the boundary (review round 1, MEDIUM 1). `hopReady`
+ * calls a hop startable only when this TUI's turn is over AND the daemon's queue
+ * is empty: the messages already queued run before anything else does (D4). The
+ * pure function pins the rule, but the two WIRINGS that feed it were unpinned —
+ * `requestHop` and `hopIfQueued` could each pass `queued: 0` (or `hopReady({
+ * running })` without the queue at all) and every other test in the package
+ * stayed green while a queued `/move` ran AHEAD of the daemon's queued messages.
+ *
+ * So these drive the hook itself with `running: false` and a non-empty
+ * `daemonQueueRef`/`rowsRef`, the exact state the bug needs.
+ */
+describe("S11 boundary: the daemon's queue blocks a hop even with no turn running", () => {
+  test("`requestHop` QUEUES (never starts) while the daemon still holds messages", () => {
+    // Mutation: `requestHop` → `hopReady({ running: stateRef.current.running,
+    // queued: 0 })` (or `boundary` dropping the queue) → the notice becomes the
+    // moved/started path and `started` is non-empty.
+    const h = harness({ running: false, daemonQueue: { entries: [{ id: "q1", text: "next" }] } });
+    h.hop.requestHop("/move local");
+    expect(h.notices).toEqual([HOP_QUEUED_NOTICE]);
+    expect(h.started).toEqual([]);
+    h.app.unmount();
+  });
+
+  test("`hopIfQueued` starts nothing while the queue is non-empty, then starts once it drains", () => {
+    // The queued path, end to end: it must re-check the SAME two facts. Mutation:
+    // `hopIfQueued` → `hopReady({ running: stateRef.current.running, queued: 0 })`
+    // (or `boundary` dropping the queue) → the first call starts the hop while
+    // the daemon still has a message waiting.
+    const h = harness({ running: false, daemonQueue: { entries: [{ id: "q1", text: "next" }] } });
+    h.hop.requestHop("/move local");
+    expect(h.notices).toEqual([HOP_QUEUED_NOTICE]);
+
+    // Idle effect #1, daemon still busy: the hop stays queued.
+    const first = h.show();
+    first?.hopIfQueuedRef.current?.();
+    expect(h.started).toEqual([]);
+    expect(h.show()?.hopQueued).toEqual({ target: "local", keep: true });
+
+    // The daemon drained its queue and the effect asks again: now it starts.
+    h.host.daemonQueueRef.current = { entries: [] };
+    h.show()?.hopIfQueuedRef.current?.();
+    expect(h.started).toEqual(["local"]);
+    expect(h.show()?.hopQueued).toBeNull();
+    h.app.unmount();
+  });
+
+  test("the control: with no turn and an empty queue the queued hop starts at once", () => {
+    const h = harness({ running: false });
+    h.hop.requestHop("/move local");
+    // Nothing to wait for, so the typed path STARTS it (no queue at all).
+    expect(h.notices).toEqual([]);
+    expect(h.started).toEqual(["local"]);
     h.app.unmount();
   });
 });
