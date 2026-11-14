@@ -1392,3 +1392,24 @@ across 618 files. A first full run had ONE fail
 file is touched by this round, and the re-run is green — runner contention, not this diff.
 
 *— claude-opus-5-5, 2026-11-14*
+
+### Round 2
+
+**Verdict: PASS.** Scope `git diff HEAD~1` (`ac43458`). Each fix was checked by a mutation: break the fix, run its test, see it FAIL, then revert. `git status` was clean afterwards.
+
+| finding | mutation | result |
+|---|---|---|
+| 1 HIGH, `keep` on a hop back | `hop-feed.ts:68` set back to `spec.target !== "local" && spec.keep !== false` | `hop-feed.test.ts`: 1 fail ("a plain `/move local` KEEPS the container") |
+| 2 MEDIUM, ownership | `hop-leave.ts:102` `createdByHop: found !== undefined` | `hop-leave.test.ts`: 2 fail (a `run` entry, an older entry without `hop`) |
+| 2 MEDIUM, location | `hop-leave.ts:66` location key ignored | `hop-leave.test.ts`: 2 fail (another endpoint; k8s namespace/context) |
+| 3 MEDIUM, auto-accept reset test | `App.tsx` `permission.clearAutoApprove()` removed | `session-hop.test.tsx`: 1 fail (D9 "ON before the hop…") |
+
+**Regressions on the diff: none at HIGH or MEDIUM.**
+- `KeptEntry.hop` survives `recordKept`, which writes the whole entry, and `parseKeptEntry`, which keeps `hop === true`. An older build drops the field, so it refuses to delete (the safe direction).
+- `hostFor` now uses `buildEngineHost(entry.engine, hostOptionsFor(entry))`, so it dials where the ENTRY says, as `rm` does (§7: where to dial comes from the index).
+- `locators` is taken from `hopEngineHost`, the same `keptLocation` call that writes the entry, so a hop's own entry matches. A locator that throws ⇒ nothing is deleted.
+- `clearAutoApprove` also fixes a real bug in the old `autoAccept.set(false)`: it only published the flip to the OTHER terminals, so this TUI still said auto-accept was on.
+
+**Gate:** `bun test packages/cli packages/tui`: 4825 pass, 0 fail. `bun run lint`: 1130 files, clean. `bun run typecheck`: 0. I did not re-run the full `bun test`; the executor reports it green.
+
+*— claude-opus-5-5, 2026-11-14*
