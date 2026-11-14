@@ -2800,3 +2800,79 @@ wiring (on-simulator pass still pending, environmental — Execution's own note)
 mutation-6 test and fixed it); missed the multi-round case because every
 fall-through test has only ONE failed handshake. Reviewer is the same model
 family (Opus) as the Execution's signature: shared blind spots possible.
+
+## Execution
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-14*
+
+Scope: the R6 review's 1 HIGH + 1 MEDIUM. Both reviewer repros were re-run on
+this branch first and reproduce unchanged:
+`.tentacle/tmp/mobile-relay/rev-r6-fallthrough{,-c}.ts` →
+`confirmed: [ "A", "B", "D" ] -> answered D` / `-> threw hs-fail D` (C, the only
+healthy address, never dialled); `rev-r6-late-loser.ts` →
+`race threw: unauthorized | diagnosis: revoked`, then
+`after late LAN failure | diagnosis: unreachable`.
+
+**1 (HIGH) — fall-through numbering.** `Candidate.position` was fixed at the
+FIRST round's order and then used to slice a LATER, already-sliced round, so
+after one fall-through `slice(at + 1)` walked past the end.
+In `apps/mobile/src/address-dial.ts`: `Candidate.position` is gone (`:109`) and
+`roundOf` no longer computes it (`:178`); `raceOnce` captures `slot` (the
+candidate's index in the array it was actually raced in) at `startNext` (`:228`)
+and reports it as `RaceOutcome.failed.at`, passed through
+`onOpened(candidate, slot, opened)` (`:242`, `:257`, `:271`). `at`'s doc now says
+it is a position in the round passed to `raceOnce`, never in the caller's list
+(`:115-123`). The slice uses a number valid in the array being sliced.
+
+**2 (MEDIUM) — a late-failing loser overwrote the diagnosis, `revoked` included.**
+`connection.ts`'s `open` observed `{opened:false}` for EVERY failed open,
+including one that rejected after the race was decided (`firstAnswering` ignored
+the rejection, but the observation had already happened). New optional seam
+`DialSteps.failed?(failure: DialFailure)` (`address-dial.ts:81-89`) is called ONLY
+from a rejection arriving while the race is still undecided (`:245`, ahead of the
+existing `settled || winner` bail-out that drops a late one entirely); in
+`connection.ts` `open` no longer observes and `failed` does (`:253-266`), so the
+race decides whether a failed open may be reported at all. `abandon` and
+`confirm` are unchanged, and a genuinely offline address is still reported (the
+existing R6 connection test still counts exactly one `opened:false` for a refused
+port — red under mutation 2 below).
+
+**Tests added.** `apps/mobile/test/address-dial.test.ts`: (a) "TWO consecutive
+handshake failures still reach the LAST address" — the real
+`[lan, tailnet, relay]` shape, asserts `confirmed === [lan, tailnet, relay]` and
+that the relay answers; (b) "a loser whose OPEN fails LATE is not reported as a
+failure"; (c) "an open that fails while its race is UNDECIDED is reported" — the
+seam's non-vacuity guard, green before and after by design, red under mutation 2.
+`apps/mobile/test/connection.test.ts`: "a loser whose OPEN fails after the race
+was decided does NOT overwrite the verdict" — real daemon, real Noise handshake
+denied by a stranger device key (`revoked`), a real hanging TCP leg terminated
+after the race settles; asserts the verdict stays `revoked`.
+
+**Red before green** (source mutated back, narrow test run, restored by reverse
+edit — no `git checkout`; `diff` against the saved fixed copy confirms identical):
+finding 1, `position` + `at: candidate.position` back → 1 fail,
+`ChannelError: handshake closed at tailnet` (the relay is never confirmed);
+finding 2, `observe` back inside `open`'s catch → the `address-dial` late test
+fails and the connection test fails `Expected: "revoked" / Received:
+"unreachable"`; finding 2, `failed` never called → the UNDECIDED test fails and
+the pre-existing R6 connection test fails `Expected: 1 / Received: 0`.
+
+**Mutation checks (after green):**
+
+| # | mutation | result |
+|---|---|---|
+| 1 | `at: slot` → `at: candidate.index` (array index, not round slot) | red 1/16 in `address-dial.test.ts`: `handshake closed at tailnet` — the NUMBERING is what the test pins, not merely "a slice happens" |
+| 2 | delete the `steps.failed?.(…)` call | red 1/16 (`Expected [ "A" ] / Received []`); `connection.test.ts` also red (`Expected: 1 / Received: 0`) |
+| 3 | call `steps.failed?.()` BEFORE the settled-or-winner bail-out (report late failures too) | red both: `address-dial` late test, and `connection.test.ts` `revoked` → `unreachable` |
+
+Each mutation was reverted (`diff` against the saved copy: identical) before the
+next; `git status` shows only the four intended files.
+
+**Gate:** `bunx tsc --noEmit` clean (root and `tsc -p apps/mobile`); `bun run
+lint` 1318 files clean; `bun test` **9525 pass / 3 opt-in skip / 0 fail** (681
+files, 77646 expects — 9521 baseline + the 4 new tests).
+
+**Not verified:** the Maestro "relay only" flow on a simulator (environmental, as
+in R6's Execution). Nothing else is unverified.
+
+*— claude-opus-5-5, 2026-11-14*

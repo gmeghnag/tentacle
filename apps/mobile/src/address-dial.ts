@@ -78,6 +78,15 @@ export interface DialSteps<TOpened, TAnswer> {
   abandon(opened: TOpened): void;
   /** The handshake, on the one path whose socket opened first. */
   confirm(opened: TOpened): Promise<TAnswer>;
+  /**
+   * An `open` failed while its race was still UNDECIDED. The only place a failed
+   * dial may be reported as one (review round 1, finding 2): a loser whose open
+   * rejects AFTER the race is decided says nothing about this computer — its
+   * path was not needed — so it is dropped here rather than handed on, and it can
+   * no longer overwrite an authenticated verdict (`revoked`) or a success with
+   * `unreachable`.
+   */
+  failed?(failure: DialFailure): void;
 }
 
 export interface FirstAnsweringOptions {
@@ -100,17 +109,17 @@ export function isTerminalDialError(error: unknown): boolean {
 interface Candidate {
   readonly address: string;
   readonly index: number;
-  /** Where it sits in the current round's list (what a fall-through slices on). */
-  readonly position: number;
 }
 
 /** One round's verdict: something answered, or the winner failed (and where it was). */
 type RaceOutcome<TAnswer> =
   | { readonly kind: "answered"; readonly value: TAnswer; readonly index: number }
   /**
-   * No answer. `at` is the position of the round's winner when one OPENED and
-   * failed its handshake (the addresses after it are still worth trying); it is
-   * `undefined` when nothing opened at all, so nothing is left to try.
+   * No answer. `at` is the winner's index IN THE ROUND THAT WAS RACED when one
+   * OPENED and failed its handshake (the addresses after it are still worth
+   * trying); it is `undefined` when nothing opened at all, so nothing is left to
+   * try. It is a position in the array passed to `raceOnce`, never in the
+   * caller's address list — the two diverge as soon as a round is sliced.
    */
   | { readonly kind: "failed"; readonly error: unknown; readonly at: number | undefined };
 
@@ -135,9 +144,10 @@ export async function firstAnswering<TOpened, TAnswer>(
   const start =
     memory.lastGood !== undefined && memory.lastGood < addresses.length ? memory.lastGood : 0;
   // The ring: the remembered good address first, then the rest in list order.
-  // `index` is the caller's array position (what `lastGood` means); a round's
-  // `position` is where it stands in THIS order, which is what a fall-through
-  // slices on.
+  // `index` is the caller's array position (what `lastGood` means). A
+  // fall-through slices on a candidate's place in the round it was RACED in,
+  // which `raceOnce` reports as that round's slot — never a number kept on the
+  // candidate, which would survive a slice and point past the end (finding 1).
   const ring: number[] = addresses.map((_address, offset) => (start + offset) % addresses.length);
   let round = roundOf(ring, addresses);
   let last: unknown;
@@ -161,13 +171,12 @@ export async function firstAnswering<TOpened, TAnswer>(
 }
 
 /**
- * ONE round of the ring, numbered: `position` is where a candidate stands in this
- * round's order (what a fall-through slices on), `index` is its address's place
- * in the caller's array (what `memory.lastGood` means — the two differ once the
- * remembered good address moves the start).
+ * ONE round of the ring: `index` is a candidate's address's place in the caller's
+ * array (what `memory.lastGood` means). Its place in the round itself is its
+ * array position here, which is what `raceOnce` reports back for a fall-through.
  */
 function roundOf(ring: readonly number[], addresses: readonly string[]): Candidate[] {
-  return ring.map((index, position) => ({ address: addresses[index] ?? "", index, position }));
+  return ring.map((index) => ({ address: addresses[index] ?? "", index }));
 }
 
 /**
@@ -216,7 +225,8 @@ function raceOnce<TOpened, TAnswer>(
       if (settled || winner) {
         return;
       }
-      const candidate = round[next];
+      const slot = next;
+      const candidate = round[slot];
       if (candidate === undefined) {
         return;
       }
@@ -228,13 +238,14 @@ function raceOnce<TOpened, TAnswer>(
       steps.open(candidate.address).then(
         (opened) => {
           inFlight -= 1;
-          onOpened(candidate, opened);
+          onOpened(candidate, slot, opened);
         },
         (error: unknown) => {
           inFlight -= 1;
           if (settled || winner) {
             return; // late, and the round is already decided
           }
+          steps.failed?.({ address: candidate.address, error });
           lastError = error;
           if (next >= round.length && inFlight === 0) {
             finish({ kind: "failed", error: lastError, at: undefined });
@@ -243,7 +254,7 @@ function raceOnce<TOpened, TAnswer>(
       );
     };
 
-    const onOpened = (candidate: Candidate, opened: TOpened): void => {
+    const onOpened = (candidate: Candidate, slot: number, opened: TOpened): void => {
       if (settled || winner) {
         // A loser: closed BEFORE any handshake, so it leaves no daemon state.
         steps.abandon(opened);
@@ -254,7 +265,10 @@ function raceOnce<TOpened, TAnswer>(
       armed = undefined;
       steps.confirm(opened).then(
         (value) => finish({ kind: "answered", value, index: candidate.index }),
-        (error: unknown) => finish({ kind: "failed", error, at: candidate.position }),
+        // The slot in the round this candidate was RACED in, so the caller's
+        // `slice(at + 1)` resumes after it even after an earlier fall-through
+        // (finding 1).
+        (error: unknown) => finish({ kind: "failed", error, at: slot }),
       );
     };
 

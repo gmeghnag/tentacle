@@ -198,6 +198,83 @@ describe("firstAnswering: the staggered race (R6)", () => {
     await expect(answering).resolves.toBe("answer-C");
   });
 
+  test("TWO consecutive handshake failures still reach the LAST address (review round 1, finding 1)", async () => {
+    // The real list is [LAN, tailnet, relay] and the case R6 exists FOR is the
+    // one where both direct paths open and fail their handshake: the relay is
+    // the third. A fall-through that slices by a candidate's place in the FIRST
+    // round walks past it (`slice(2)` of `[tailnet, relay]` is `[]`), so the
+    // relay is silently never dialled — the bug this test pins.
+    //
+    // Every open resolves at once here, so each round's first candidate wins
+    // without the stagger (this is about ROUND numbering, not timing).
+    const confirmed: string[] = [];
+    const steps: DialSteps<string, string> = {
+      open: async (address) => address,
+      abandon: () => {},
+      confirm: async (address) => {
+        confirmed.push(address);
+        if (address === "relay") {
+          return "answered-relay";
+        }
+        // A wrong path, not an absent one: non-terminal, so the loop continues.
+        throw new ChannelError("unreachable", `handshake closed at ${address}`);
+      },
+    };
+    const answer = await firstAnswering(["lan", "tailnet", "relay"], steps, memory(), {
+      timer: manualTimer().timer,
+    });
+    expect(answer).toBe("answered-relay");
+    // Every address was handshaked, in order — none was skipped.
+    expect(confirmed).toEqual(["lan", "tailnet", "relay"]);
+  });
+
+  test("a loser whose OPEN fails LATE is not reported as a failure (review round 1, finding 2)", async () => {
+    const clock = manualTimer();
+    const h = harness();
+    const reported: string[] = [];
+    const steps: DialSteps<string, string> = {
+      ...h.steps,
+      failed: (failure) => reported.push(failure.address),
+    };
+    const answering = firstAnswering([A, B], steps, memory(), { timer: clock.timer });
+    await settle();
+    clock.fire(); // B starts, while A still hangs
+    await settle();
+    // B opens and wins; its handshake answers. The race is decided.
+    h.open(1, "raw-B");
+    await settle();
+    h.confirm(0, "answer-B");
+    await expect(answering).resolves.toBe("answer-B");
+    // NOW A's open rejects (a TCP timeout on a LAN address the phone is off).
+    // The verdict is already decided, so this path says nothing: reporting it
+    // would overwrite an authenticated verdict with `unreachable`.
+    h.fail(0, new ChannelError("unreachable", "EHOSTUNREACH"));
+    await settle();
+    expect(reported).toEqual([]);
+  });
+
+  test("an open that fails while its race is UNDECIDED is reported (the failed seam is not dead)", async () => {
+    const clock = manualTimer();
+    const h = harness();
+    const reported: string[] = [];
+    const steps: DialSteps<string, string> = {
+      ...h.steps,
+      failed: (failure) => reported.push(failure.address),
+    };
+    const answering = firstAnswering([A, B], steps, memory(), { timer: clock.timer });
+    await settle();
+    h.fail(0, new ChannelError("unreachable", "no route"));
+    await settle();
+    // Reported, and the ring carries on with the stagger.
+    expect(reported).toEqual([A]);
+    clock.fire();
+    await settle();
+    h.open(1, "raw-B");
+    await settle();
+    h.confirm(0, "answer-B");
+    await expect(answering).resolves.toBe("answer-B");
+  });
+
   test("every address failing its open throws the LAST error UNCHANGED", async () => {
     const clock = manualTimer();
     const h = harness();

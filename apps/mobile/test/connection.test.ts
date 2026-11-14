@@ -597,6 +597,54 @@ describe("openComputer over /e2e", () => {
     });
   }, 30_000);
 
+  test("R6/review 1: a loser whose OPEN fails after the race was decided does NOT overwrite the verdict (mutation: observe in `open`'s catch → red)", async () => {
+    await withDaemon(async (d) => {
+      // The winner is the computer's own address, but with a STRANGER's device
+      // key: the handshake is denied, which is authenticated → `revoked`, the one
+      // verdict that offers Remove. A LAN address the phone is off-network holds
+      // the first leg: it starts first and hangs, and its open rejects LATER, when
+      // the race is long decided (a real TCP timeout, driven here by hand).
+      const held: { terminate: () => void }[] = [];
+      const hole = Bun.listen({
+        hostname: "127.0.0.1",
+        port: 0,
+        socket: {
+          open(socket) {
+            held.push(socket as unknown as { terminate: () => void });
+          },
+          data() {},
+          close() {},
+        },
+      });
+      const diagnosis = createLinkDiagnoser();
+      const stranger: StoredComputer = {
+        ...d.computer,
+        deviceKey: encode(key(11)),
+        addresses: [`ws://127.0.0.1:${hole.port}/e2e`, d.computer.addresses[0] ?? ""],
+      };
+      try {
+        const caught = await openComputer(stranger, {
+          WebSocket: RNShapedWebSocket,
+          random: systemRandomBytes,
+          diagnosis,
+        }).catch((error: unknown) => error);
+        // The authenticated verdict: the daemon refused this phone's key.
+        expect((caught as { kind?: string }).kind).toBe("unauthorized");
+        expect(diagnosis.current()).toBe("revoked");
+        // The hanging leg's socket dies now — AFTER the race was decided. That is
+        // a path that was not needed, not a computer that is down: reporting it
+        // would turn an authenticated `revoked` into `unreachable`, and the row
+        // would lose its Remove action.
+        expect(held.length).toBe(1);
+        held[0]?.terminate();
+        await Bun.sleep(200);
+        expect(diagnosis.current()).toBe("revoked");
+      } finally {
+        hole.stop(true);
+      }
+    });
+  }, 30_000);
+
   test("the store the app reads is what openComputer dials: id, key and addresses come from it", async () => {
     await withDaemon(async (d) => {
       // The end-to-end shape of 11b.1's seam: a Keychain store → a link.

@@ -29,7 +29,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { type InitializeResult, decodeBase64Url } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import type { Random } from "@tentacle/transport/noise";
-import { type DialMemory, firstAnswering } from "./address-dial.ts";
+import { type DialFailure, type DialMemory, firstAnswering } from "./address-dial.ts";
 import { type AppLog, type AppLogField, createAppLog, errorShape } from "./app-log.ts";
 import type { StoredComputer } from "./computers.ts";
 import { createForegroundGate } from "./foreground-gate.ts";
@@ -246,20 +246,27 @@ export async function openComputer(
   /**
    * One address, in the two steps R6's race needs: OPEN the raw socket (that,
    * and only that, decides the race), then the Noise handshake on the winner.
-   * The diagnosis is fed per STEP, so an abandoned loser is never reported as a
-   * failure of this computer (`opened: false` there is a path that was not
-   * needed, not a path that is down — `abandon` records nothing).
+   * The diagnosis is fed per STEP, and only for steps the RACE still owned: an
+   * abandoned loser records nothing (`abandon` is silent), and a loser whose OPEN
+   * fails after the race was decided records nothing either — `firstAnswering`
+   * drops it (`steps.failed`, review round 1 finding 2). Otherwise a LAN connect
+   * error arriving behind an authenticated `denied` would overwrite `revoked`
+   * with `unreachable`, and the row would lose its Remove action.
    */
   const steps = {
     open: async (address: string): Promise<DuplexChannel> => {
       current = address;
-      try {
-        return await webSocketChannelFactory(address, {}, factoryDeps)();
-      } catch (error) {
-        // The socket never opened: this attempt proves nothing about identity.
-        diagnosis.observe({ opened: false, error });
-        throw error;
-      }
+      // No `observe` here: whether this failure may be reported at all is the
+      // race's call (`failed` below), because only the race knows if it had
+      // already been decided when the rejection arrived.
+      return await webSocketChannelFactory(address, {}, factoryDeps)();
+    },
+    /**
+     * An `open` that failed while its race was still undecided: a path that is
+     * down, which says nothing about identity.
+     */
+    failed: (failure: DialFailure): void => {
+      diagnosis.observe({ opened: false, error: failure.error });
     },
     /**
      * A loser of the race, closed BEFORE any handshake: the relay's stream closes
