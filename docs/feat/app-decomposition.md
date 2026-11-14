@@ -2045,3 +2045,382 @@ HEAD~1 -- packages` empty): one fragment deleted, the plan/Execution amended.
   pinned by M14 is "as the review itself noted". The S4 review never said that.
 
 *— claude-opus-5-5, 2026-11-14*
+
+## Execution
+
+### S2 — `feat/app-decomp-2-commands` (one file per command, a registry behind them)
+
+*— deepseek-v4.1-flash (real id; run via the `deepseek` profile), 2026-11-14*
+
+**What S2 is.** The 17 `handleCommand` `switch` cases (App.tsx `2816–3185`
+pre-move) become `commands/<name>.ts`, one file per command, each declaring a
+`Pick<>` of the command context it uses; `commands/registry.ts` is the ONE list,
+and `SLASH_COMMANDS` is derived from it. The shared guards stay in one
+`dispatchCommand`. App keeps only the context construction plus the two driver
+functions the Design response requires (M5). No user-visible behaviour changes:
+every S0 test passes **unmodified** — that is the behaviour-preservation proof.
+
+**Load-bearing check, re-run first (PASSED, not trusted).**
+`sh .tentacle/tmp/app-decomp-2-commands/lb-check.sh` on this branch (`e607c4b`):
+
+- *the 17 cases live in ONE `handleCommand`* — `const handleCommand =
+  useCallback(` at `App.tsx:2816`, `handleCommandRef.current = handleCommand;` at
+  `3185`, **18** `case "/…"` labels inside it (`/exit`+`/quit` share one,
+  `/help /clear /close /sessions /compact /settings /rename /model /mcp /skills
+  /agents /tokens /retry /attach /copy /save` + the `default` arm). **Holds.**
+- *nothing outside App.tsx calls the command bodies* — `rg handleCommand
+  packages/tui/src packages/cli/src` → App.tsx only (a ref, the caller and the
+  `submit`/palette sites). So the bodies are free to move. **Holds.**
+- *the vocabulary tests pin* — `SLASH_COMMANDS` (`commands.ts:26`) is asserted
+  literally and by identity in `app-commands.test.tsx:81`, `commands.test.ts:50,
+  241, 257`, `rename.test.tsx:24`; `index.ts:21` `export * from "./commands.ts"`
+  is the public boundary. So `SLASH_COMMANDS` had to keep existing **and** keep
+  its order. **Holds** — hence "derive, do not relocate".
+- *`/compact` + `/clear` are driver logic* (M5) — `compactionOwnedRef` 440,
+  `ownCompactionsRef` 567, `clearAfterTurnRef` 573, `setCompacting(` in the
+  `/compact` arm, `clearAfterTurnRef` also read by the turn at 2073.
+  **Holds** — so their bodies became App-level `startCompaction()` /
+  `requestClear()`, and the command files call them in one line.
+
+**The one thing the plan did not settle, and the experiment that decided it.**
+The plan says `commands.ts` derives the list. Taken literally that is an import
+**cycle** (`commands.ts` → `commands/registry.ts` → `commands/<name>.ts` →
+`commands.ts`). A cycle is fine only if no module reads a cyclic binding during
+its own initialization. Proven empirically in
+`.tentacle/tmp/app-decomp-2-commands/cyc2/`: the eager shape
+(`const BUILTIN_NAMES = new Set(SLASH_COMMANDS.map(…))` at module init) throws
+`ReferenceError: Cannot access 'SLASH_COMMANDS' before initialization` when the
+registry happens to load first (`bun run entry-registry.ts`), and passes when
+`commands.ts` loads first — a latent, order-dependent crash. The lazy shape
+(`cyc3/`) passes **both** entry orders (`bun run entry-commands-first.ts` and
+`entry-registry-first.ts` both print the full vocabulary and
+`builtin=true`). As built: `BUILTIN_NAMES` comes from the registry and is read
+through a lazy `builtins()`; a real end-to-end probe
+(`.tentacle/tmp/app-decomp-2-commands/cycle-probe.ts`, importing registry.ts
+first, then commands.ts) prints `17 17 builtin`. A `findCommand`-style lookup
+means dispatch order never matters.
+
+**Design, as built (dependency order).**
+
+1. **`commands/context.ts`** — `CommandContext`, one field per capability, plus
+   `Live<T>` (a ref read at command time). Two field kinds on purpose, per H3: a
+   callback/value keeps the identity rule it has in App today (deps moved with
+   it); a `Live<T>` is a ref, so two keys with no render between them behave as
+   before. `busyCompacting` is a **getter**, not `compactingRef` itself: the
+   command layer may ASK whether a compaction holds the session, but the
+   compaction's refs stay in App (M5).
+2. **`commands/<name>.ts`** × 17 — `{ name, description, run }`, each with its
+   own `Pick<CommandContext, …>`. The name/description moved out of
+   `commands.ts`'s literal, so the words the palette shows and the code that runs
+   a command have one source. `/quit` has no file: it is an alias of `/exit`
+   (`ALIASES`), which is what the old shared `case "/exit": case "/quit":` was.
+3. **`commands/registry.ts`** — `BUILT_INS` (ordered: `/help` first, as the docs
+   promise), `ALIASES`, `canonicalName`, `findCommand`, the derived
+   `SLASH_COMMANDS`, and `BUILT_IN_NAMES`.
+4. **`commands/dispatch.ts`** — the guards, in today's order: skill activation
+   (history push, mid-turn refusal, switch refusal) → switch refusal for a
+   command → the session-mutating mid-turn guard (with `/clear`'s in-place
+   exemption) → registry lookup → the unknown-command path with the once-only
+   skill re-ask. Guard message strings are byte-identical to the old ones.
+5. **`commands.ts`** — keeps every pure helper (`resolveSlash`, `slashCatalog`,
+   `helpText`, `matchCommands`, `retryPlan`, the transcript helpers, the quit
+   helpers, `isSessionMutating`) and now **derives + re-exports**
+   `SLASH_COMMANDS`; `BUILTIN_NAMES` is the registry's set, read lazily.
+6. **App.tsx** — `startCompaction()` and `requestClear()` extracted verbatim from
+   the two `case` bodies (M5), then `handleCommand` reduced to building the
+   context and calling `dispatchCommand`. Imports trimmed to what App still uses
+   (biome's organizer + `tsc` would have flagged the rest).
+
+**Failure-mode tests (all listed modes of the plan's table that S2 can move).**
+
+| Mode | Its S2 shape | Where it is pinned |
+|---|---|---|
+| Registry drift | a command file's words ≠ the palette's | `commands-registry.test.ts`: derivation equality, the literal 17, unique names, `findCommand` |
+| Alias drift | `/quit` becomes a second implementation | `commands-registry.test.ts`: `/quit` is not a row, resolves to `/exit`'s command, both are owned names |
+| Guard loss | a mid-turn/skill/switch refusal dropped in the move | `commands-registry.test.ts` (4 cases) + S0's unchanged `app-commands.test.tsx` (5 cases) |
+| Once-only re-ask | the unknown path loops on the skill list | `commands-registry.test.ts`: `again` never re-asks |
+| Empty input | `""` reaching the dispatcher | `commands-registry.test.ts` (same notice as the old `default` arm) |
+| Failure arms | `/save`, `/retry`-gone, `/copy`, a second `/compact` | `app-command-failure-arms.test.tsx` (new; 4 cases) |
+| Stale closure in a moved callback | a dep array narrowed while moving | `bunx biome check` → `useExhaustiveDependencies` **fires** on `handleCommand`/`startCompaction` (probed: removing `wakeIfPending` from the moved `startCompaction` deps is an error) |
+| Cycle / TDZ | the derived list read at init | the two-order experiment + `cycle-probe.ts` above |
+
+**Mutations (§9: each red on an assertion, each restored from a copy; probes
+pasted from the run):**
+
+| # | Target | Mutant | Result |
+|---|---|---|---|
+| M1 | the derivation | `SLASH_COMMANDS` = a frozen 1-row literal | **2 fail** (`derivation` + `/quit` ownership) → killed |
+| M2 | `/compact`'s mid-turn guard (**the S0 review's MEDIUM 1**) | `if (false && ctx.stateRef.current.running)` | `26 pass / 1 fail`, `Expected to contain: "Can't compact while a turn is running."` → killed |
+| M3 | `/clear`'s in-place exemption | `const clearsInPlace = true` | **2 fail** (legacy `/clear` mid-turn + the exemption case) → killed |
+| M4 | the once-only re-ask | `if (ctx.skillsSync.stale())` | `15 pass / 1 fail`, `again never loops` → killed |
+| M5 | a skill activation mid-turn | `if (false && ctx.stateRef.current.running)` | `15 pass / 1 fail` → killed |
+| M6 | `/clear` during a compaction (N1) | `false && step === "compacting"` (now in `requestClear`) | `26 pass / 1 fail`, `"Can't clear while a compaction is running."` → killed |
+| M7 | a second `/clear` (N2) | `false && step === "busy"` | `26 pass / 1 fail`, `"A /clear is already running."` → killed |
+| M8 | `/settings sync` under a compaction (N3) | `compacting: false` in `commands/settings.ts` | `26 pass / 1 fail` → killed |
+| M9 | stale-closure detection | drop `wakeIfPending` from `startCompaction`'s deps | `biome check` **error** (`useExhaustiveDependencies`) → killed |
+| M10 | `/save`'s reject arm | drop the reject callback | `1 fail` (a silent save failure) → killed |
+| M11 | `/retry`-gone notice | replace it with a placeholder | `1 fail` → killed |
+| M12 | `busyCompacting()` wiring | `busyCompacting: () => false` | `1 fail` (a second compaction starts) → killed |
+| M13 | `/copy`'s reject arm | empty the reject callback | `1 fail` → killed |
+
+N1/N2/N3 are S0 Fix round 3's three survivors, and they survive the MOVE too
+(M6–M8 re-kill them in the new place) — the coverage went with the code, not
+with the file.
+
+**Coverage of the moved lines** (`bun test --coverage packages/tui`, same command
+on both sides). `main` (`e607c4b`, 122 files, 1792 tests): `App.tsx` **94.30 %
+lines / 97.07 % functions**. This branch (124 files, 1828 tests): `App.tsx`
+**94.80 % lines / 96.94 % functions**, and the moved-out lines are counted in the
+command modules instead: **every one of them is at 100 % line coverage** (lcov
+`DA` scan across the whole `packages/tui` run: `commands.ts` keeps only its own
+already-uncovered helpers at 273/308–311/495–509, and `registry.ts`,
+`dispatch.ts` and all 17 command files report **zero** uncovered lines). App.tsx's
+line coverage went UP (the 370 moved-out lines were partly uncovered in place);
+its function coverage is 0.13 pt down, which is the two new driver functions'
+non-happy paths (`startCompaction`'s session-gone early return). Nothing that was
+covered before is uncovered now.
+
+**Drift from the Implementation (and why).**
+
+1. **`CommandContext` is a `Pick<>` *field set*, not one port per concern, and it
+   is bigger than "a command sees only what it uses" reads at first.** Each
+   command still declares its own narrow `Pick<>`; the context itself carries one
+   field per capability so those Picks have something to name. The instruction
+   the Design response gives (H4(3)) is met per command, which is the point: a
+   new command touching existing capabilities edits nothing shared.
+2. **`busyCompacting` is a `() => boolean` getter rather than `Live<boolean>`**
+   for `compactingRef`. Same freshness (a ref read at command time), but it keeps
+   the compaction refs in App, where M5 says they stay — a `Live<boolean>` would
+   have handed the command layer the latch itself, i.e. sharable write access the
+   plan explicitly denies ("S2 adds no compaction/clear state to
+   `CommandContext`").
+3. **The `/compact` and `/clear` *guards* stay in their command files, the
+   *machinery* moved to App.** M5 says only the machinery is driver logic, and
+   the guards read nothing a command may not: they need `stateRef.running`,
+   `canClear`, `busyCompacting()`. Keeping them next to the command is what keeps
+   S0's MEDIUM-1 test in the same place it always was (mutation M2 proves it is
+   still pinned there).
+4. **`/settings`'s notice writer stayed a local `lines()` in
+   `commands/settings.ts`** (it only needs `stateRef`, `setScrollOffset`,
+   `flushNow`, all in the context) rather than an App-side `settingsNoticeLines`
+   port I had sketched in the first draft of `context.ts`. Fewer ports, no
+   behaviour change; the draft's extra field was removed, not left unused.
+5. **`App.tsx`'s import block lost 15 names** (`helpText`, `isSessionMutating`,
+   `resolveSlash`, the transcript helpers, `mcpPanel`/`sessionsPanel`/
+   `skillsPanel`, `settingsCommand`/`SETTINGS_SYNCING`, `replaceWithNotices`, …)
+   because their last App-side user moved. Not a "cleanup while moving": `tsc`
+   and `biome` both refuse an unused import, so leaving them would have failed
+   the gate.
+6. **New test files**: `commands-registry.test.ts` (the pure registry +
+   dispatcher, 16 cases) and `app-command-failure-arms.test.tsx` (4 cases). S0's
+   `app-commands.test.tsx` is **unmodified** — the brief's rule, and the proof
+   the move preserved behaviour.
+
+**Gate (this branch, after every mutation was restored):** `bunx tsc --noEmit`
+clean · `bun run lint` (`biome check .`, 1072 files) clean · `bun test`, run
+three times end to end:
+- run 1: **8162 pass / 3 skip / 1 fail**
+- run 2: **8162 pass / 3 skip / 1 fail**
+- run 3: **8163 pass / 3 skip / 0 fail** (no fail line at all)
+
+The single intermittent failure is **not this slice's**: it is
+`packages/cli/test/engine-runtime.test.ts` "startPodRuntime > creates + readies a
+pod, runs a turn over exec, deletes on dispose" — the timing flake `TODO.md:447`
+already documents (`fix/engine-runtime-stderr-flake`: "failed once in the full
+`bun test packages`… then 3/3 green alone"). Evidence it is load, not S2: that
+file alone is **5/5 green** (104 pass each time), all of `packages/cli` alone is
+**2645 pass / 0 fail**, and S2's diff is `packages/tui` only (`git status` shows
+no `packages/cli` file). The three skips are the documented opt-in ones
+(live-k8s, live-docker, the real-socket keepalive — not failures). No protocol
+schema changed, so `packages/protocol/schema/protocol.json` was not regenerated
+and no `protocol.d/` note is needed (`SLASH_COMMANDS` is a TUI-internal list, not
+a wire type). Changelog: `changelog.d/app-decomp-2-commands.changed.md` (one
+bullet; `CHANGELOG.md` untouched; the fragment passes
+`scripts/test/changelog-guard.test.ts`).
+
+### Fix round 1 — `feat/app-decomp-2-commands` (S2 review findings)
+
+*— claude-opus-5-5, 2026-11-14* (real id: this run is Claude Code
+`2.1.323`, `~/.claude.json` `"model": "claude-opus-5-5"`; `AI_AGENT`
+`claude-code_2-1-323_agent`.)
+
+One finding, MEDIUM; there was no HIGH. **FIXED.** Two files changed:
+`packages/tui/src/commands/compact.ts` (the fix) and
+`packages/tui/test/app-command-failure-arms.test.tsx` (the pin). No other
+`src/` line moved.
+
+**Finding 1 (MEDIUM) — `/compact` printed "Compacting the conversation…"
+twice: FIXED.**
+
+*Reproduced before touching code*, on this branch, with the review's own
+observable (`COUNT 2`, main `1`). Probe
+`.tentacle/tmp/app-decomp-2-commands/fix1/count.ts` (mount the real `App` with a
+held `compact`, type `/compact`, count the line in `lastFrame()`):
+
+```
+$ bun run .tentacle/tmp/app-decomp-2-commands/fix1/count.ts
+COUNT 2
+```
+
+*Root cause*, one sentence: the move split the old `case "/compact"` body into
+its guards (`commands/compact.ts`) and its machinery (`App.tsx:startCompaction`)
+— and the notice sits in `startCompaction`, which was copied out of the old body
+verbatim, so leaving `pushNotice("_Compacting the conversation…_")` in the
+command file as well put the same side effect in both halves of the split
+(`commands/compact.ts:30` before the fix, `App.tsx:2807`).
+
+*Why the counter-intuitive half is the one that keeps it.* The notice is **not**
+a guard message: it reports that a compaction *began*, which only the machinery
+knows. `startCompaction`'s first statement reads the session and returns
+silently when it is gone (`App.tsx:2803–2806`), so it alone can decide
+whether the line is true. `commands/compact.ts` now only refuses and then calls
+`ctx.startCompaction()`; the comment on the call site records why. Nothing else
+about the command changed — the three guard strings, their order and the
+`busyCompacting()` read are byte-identical to main's `2920–2927`.
+
+*Red before green (§9), on the assertion of the property, not on an import.*
+The new case in `app-command-failure-arms.test.tsx` counts occurrences instead of
+`toContain` (which is exactly why the review found what S0 and
+`app-command-failure-arms.test.tsx:96` could not):
+
+```
+$ bun test packages/tui/test/app-command-failure-arms.test.tsx   # before the fix
+114 |       {},
+115 |       { compact: () => new Promise<{ before: number; after: number }>(() => {}) },
+...
+Expected: 1
+Received: 2
+(fail) S2 command failure arms (commands/<name>.ts) > /compact says it is compacting exactly once, not twice
+ 4 pass
+ 1 fail
+```
+After the fix, the same command: **5 pass / 0 fail**.
+
+*Mutation-check of both halves of the split (§9 non-vacuity), each restored from
+a byte copy taken first (`fix1/compact.good`, `fix1/App.good`):*
+
+- **M14 — put the push back in the command file** (re-introduces the review's
+  bug):
+  ```
+  Expected: 1
+  Received: 2
+   4 pass
+   1 fail
+  ```
+  → killed, on the new count assertion.
+- **M15 — drop the push from `startCompaction`** (the opposite mistake: the
+  command layer swallows the announcement):
+  ```
+  Expected to contain: "Compacting the conversation"
+  Received: "⏺ Tentacle ready. Type a task, or /help for commands.…"
+  Expected: 1
+  Received: 0
+   3 pass
+   2 fail
+  ```
+  → killed twice over (the new count case, plus the existing
+  "says one is already running" case, which read `toContain` and had been
+  passing on a line the *other* half emitted). So the one home is pinned from
+  both directions: neither a duplicate nor a missing line survives.
+
+`diff` against both copies after restoring is empty and `git diff --stat` is the
+two intended files only.
+
+*Same class, audited rather than assumed.* Grepped every notice string pushed by
+`commands/*.ts` against every literal pushed by `App.tsx`: the only string in
+both sets is `"_Clipboard unavailable._"`, and those are **not** a doubled path —
+`commands/copy.ts:18` is the `/copy` command's reject arm, while
+`App.tsx:3345`/`3668` and `useMouse.ts:137` are three *other* triggers of the
+same clipboard helper (the copy key, the palette action, the mouse drag), each
+reached without the slash command. No `/compact`-style double remains; not fixed
+blind, checked.
+
+**Drift from the Implementation.** None. The Implementation's M5 split is
+unchanged — the machinery stayed in App and the guards stayed in the command
+file; only the duplicated announcement moved to the half that owns it. Nothing
+in the Design's port set changed, so no doc above needed editing.
+
+**Gate** (this branch, every mutant reverted):
+
+```
+$ bunx tsc --noEmit
+(clean, exit 0)
+$ bun run lint
+Checked 1072 files in 324ms. No fixes applied.
+$ bun test
+ 8164 pass
+ 3 skip
+ 0 fail
+ 13 snapshots, 73210 expect() calls
+Ran 8167 tests across 589 files. [332.01s]
+```
+8164 = the executor run's best 8163 + this round's new case. The 3 skips are the
+documented opt-ins (live-k8s, live-docker, the real-socket keepalive — not
+failures, AGENTS §6), and the `engine-runtime` timing flake the executor run
+reported (`TODO.md:447`) did not fire this time. Touched files alone: 82 pass /
+0 fail across `app-command-failure-arms`, `commands-registry`, `app-commands`,
+`commands`, `rename`.
+
+## Review
+
+### S2 review — REQUEST-CHANGES
+
+1. **MEDIUM — `/compact` now prints its "Compacting…" notice twice.**
+   `commands/compact.ts:31` pushes `"_Compacting the conversation…_"` and then
+   calls `startCompaction()`, which pushes the same line again at
+   `App.tsx:2807` (copied out of the old `case` body together with the
+   machinery). On main the line appears once. Repro
+   (`.tentacle/tmp/app-decomp-2-commands/dup-compact.test.ts`: mount `App` with
+   a held `compact`, type `/compact`, count the line in `lastFrame()`): **COUNT 2
+   on this branch, COUNT 1 on main**. So the claim "no user-visible behaviour
+   changes; S0 passing unmodified proves it" is false here. The check the S0 tests
+   and `app-command-failure-arms.test.tsx:96` make is `toContain`, which cannot
+   see a doubled line. Fix: push the line in only one of the two places, and pin
+   it with an exact-count assertion that goes red on the current code.
+
+**Gate:** touched files (`commands-registry`, `app-command-failure-arms`,
+`app-commands`, `commands`, `rename`) **81 pass / 0 fail**; `bun run lint` clean
+(1072 files); `bun run typecheck` clean. The full `bun test` was not re-run by
+this review.
+
+**Mutation:** M2 (`/compact` mid-turn guard → `false &&`): `app-commands.test.tsx`
+**26 pass / 1 fail**, so the mutant is killed. Reverted from a byte copy, and
+`git status` is clean.
+
+**Attacks tried:** (a) diffed each of the 17 bodies against main's
+`handleCommand` (2816–3185). The guards, strings, ordering and the once-only
+re-ask are identical; `busyCompacting` reads `compactingRef.current`, as before.
+Found nothing except #1. (b) Ran the `/compact` end to end through the real `App`,
+which found #1. (c) Deps/identity (H2): `handleCommand`'s deps name fields, never
+`ctx`, and `reResolve` reads `handleCommandRef` lazily, so there is no stale
+re-entry. Holds. (d) §7 invariants: no protocol, persistence or terminal-IO path
+is touched, and the single broker is untouched. Holds.
+
+**Executor behaviour:** thorough and honest about drift, and the cycle/TDZ
+experiment was a good call. But the move put the same side effect in both halves of
+the guard/machinery split, and the coverage and mutation tables could not catch
+it, because no test asserts how many times the line appears.
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; a different model family from
+the executor, deepseek)
+
+### Round 2 — PASS
+
+Finding 1 is fixed (`a4a1d51`). The push is gone from `commands/compact.ts`, and
+the notice now comes only from `startCompaction()` (`App.tsx:2807`), after all
+three guards, which is the same order as on main. The new test
+`app-command-failure-arms.test.tsx` "/compact says it is compacting exactly once"
+counts the line.
+- **Mutation A** (put the push back in `compact.ts`): `Received: 2`, so 1 fail,
+  killed.
+- **Mutation B** (drop the push at `App.tsx:2807`): `Received: 0`, so 2 fail
+  (this test plus "/compact twice"), killed.
+- Both were reverted from byte copies, and `git status` is clean.
+- The round-1 repro `dup-compact.test.ts` now prints COUNT 1.
+
+**Regressions on the diff:** none. The diff is one deleted line plus a test.
+**Gate:** `app-command-failure-arms` + `app-commands` + `commands-registry`
+**48 pass / 0 fail**; `bun run lint` clean (1072 files); `bun run typecheck`
+clean. The full `bun test` was not re-run.
+
+*— claude-opus-5-5, 2026-11-14*

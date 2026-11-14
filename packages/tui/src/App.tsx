@@ -90,25 +90,13 @@ import { copyToClipboard, readClipboard } from "./clipboard.ts";
 import {
   type QuitConfirmFacts,
   ctrlCQuitStep,
-  helpText,
-  isSessionMutating,
-  lastAssistantText,
-  lastUserText,
   matchCommands,
-  mcpStatusError,
   paletteWindow,
-  parseRename,
-  quitAction,
   quitCommandStep,
   quitConfirmKey,
   quitConfirmText,
-  renameFailedNotice,
-  renamedNotice,
-  resolveSlash,
-  retryPlan,
-  skillsListError,
-  transcriptToMarkdown,
 } from "./commands.ts";
+import { dispatchCommand } from "./commands/dispatch.ts";
 import { BackgroundList, JobDrawer, SubagentDrawer } from "./components/BackgroundList.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
 import { LineInput } from "./components/LineInput.tsx";
@@ -126,15 +114,7 @@ import { inputRowCount } from "./input-view.ts";
 import { JOB_REFRESH_MS, JOB_TAIL_SHOWN, jobOutcome, refreshDue } from "./job-drawer.ts";
 import { stoppedNotice } from "./link-status.ts";
 import { modelErrorNotice } from "./model-error.ts";
-import {
-  type OpenPanel,
-  applyPanel,
-  mcpPanel,
-  panelClick,
-  panelView,
-  sessionsPanel,
-  skillsPanel,
-} from "./panel.ts";
+import { type OpenPanel, applyPanel, panelClick, panelView } from "./panel.ts";
 import { sanitizePasted, stepPaste } from "./paste.ts";
 import { insertReply, orphanNotice, replyView, stepPermissionKey } from "./permission-reply.ts";
 import {
@@ -213,7 +193,6 @@ import {
   switchRefusedNotice,
   switchingRefusal,
 } from "./sessions-panel.ts";
-import { SETTINGS_SYNCING, settingsCommand } from "./settings-command.ts";
 import { SkillsSync } from "./skills-sync.ts";
 import {
   type DisplayItem,
@@ -2813,373 +2792,187 @@ export function App({
   }, [pushNotice, wakeIfPending]);
   runClearRef.current = runClear;
 
+  /**
+   * `/compact`'s machinery (docs/feat/app-decomposition.md M5): the
+   * compaction's own refs, its one settle, and the compaction-time queue it
+   * ends live HERE, not in a command file — its guards do (`commands/compact.ts`).
+   * It moves with S9a (the turn driver), which is why it is an App-level
+   * function and not a command's body.
+   */
+  const startCompaction = useCallback((): void => {
+    const session = sessionRef.current;
+    if (!session) {
+      return;
+    }
+    pushNotice("_Compacting the conversation…_");
+    setCompacting(true);
+    compactionOwnedRef.current = false;
+    // Whether THIS handler raised its own-compaction count: only then may
+    // its settle lower it again (an open that failed raised none).
+    let armed = false;
+    armed = true;
+    // Its one settle (success or failure) ends the compaction-time queue
+    // (D3c): sent as one prompt unless a send-now took it. A `/clear`
+    // meanwhile already took the rows (a new session: ignore it).
+    const settled = (result: CompactionResult) => {
+      if (sessionRef.current !== session) {
+        return;
+      }
+      if (!result.ok && armed && ownCompactionsRef.current > 0) {
+        ownCompactionsRef.current -= 1; // it replaced nothing: no history of mine to come
+      }
+      setCompacting(false);
+      const out = onCompactionSettled({
+        result,
+        rows: rowsRef.current,
+        sendNowOwns: compactionOwnedRef.current,
+        turnRunning: stateRef.current.running,
+      });
+      pushNotice(out.notice);
+      if (out.send !== null) {
+        setRows(() => []);
+        wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start
+        // As a fallback send: restored if another client's prompt won the slot.
+        void run(out.send, { fallback: true });
+        return;
+      }
+      if (out.restore !== null) {
+        setRows(() => []);
+        restoreInput(out.restore, "_your queued messages are back in the input_");
+      }
+      wakeIfPending(); // a wake deferred during the compaction
+    };
+    // The open a reset needs comes FIRST, as `/clear`'s does (review
+    // M2): a resumed session nothing has opened yet holds its chat only
+    // as this client's seed, and counting the compaction before the open
+    // left the count armed for a compaction that never happened. The
+    // latch (`compacting`) is up meanwhile, so nothing starts a turn.
+    void Promise.resolve(session.openForReset?.()).then(
+      () => {
+        if (sessionRef.current !== session) {
+          return;
+        }
+        // Its history (if it compacts) is mine: no "on another device" (C6).
+        ownCompactionsRef.current += 1;
+        armed = true;
+        void session.compact?.().then(
+          (r) => {
+            settled({ ok: true, before: r.before, after: r.after });
+            // The history shrank: the open figure is stale until a turn measures.
+            askContext(session);
+          },
+          (error: unknown) => settled({ ok: false, error }),
+        );
+      },
+      (error: unknown) => settled({ ok: false, error }),
+    );
+  }, [askContext, pushNotice, restoreInput, run, setCompacting, setRows, wakeIfPending]);
+
+  /**
+   * `/clear`'s machinery (docs/feat/app-decomposition.md M5): the step's own
+   * refusals, the latch, the stop-then-clear hand-off and the legacy
+   * close-and-replace. Its refs are App's and it moves with S8; the command
+   * file (`commands/clear.ts`) only calls it.
+   */
+  const requestClear = useCallback((): void => {
+    const step = clearCommandStep({
+      canClear: typeof sessionRef.current?.clear === "function",
+      running: stateRef.current.running,
+      ownTurn: foreignRef.current === null,
+      compacting: compactingRef.current,
+      clearing: clearingRef.current,
+    });
+    if (step === "legacy") {
+      // A session without `clear` (the in-process fallback): the old
+      // session ends (with its jobs) before the fresh one starts
+      // (decision D3).
+      sessionRef.current?.close?.();
+      swapSession(makeSession());
+    } else if (step === "busy") {
+      pushNotice("_A /clear is already running._");
+    } else if (step === "compacting") {
+      pushNotice("_Can't clear while a compaction is running._");
+    } else if (step === "stop_then_clear" && abortRef.current) {
+      // Stop the own turn like Esc; the clear runs when it has settled.
+      clearAfterTurnRef.current = true;
+      stoppedHereRef.current = true;
+      abortRef.current.abort();
+    } else {
+      // Another device's running turn: the daemon answers TurnInProgress.
+      runClearRef.current?.();
+    }
+  }, [makeSession, pushNotice, swapSession]);
+
+  /**
+   * The ONE way typed `/…` text becomes an effect: `dispatchCommand`
+   * (commands/dispatch.ts) holds the shared guards and looks the command up in
+   * the registry, and `commands/<name>.ts` holds each command's body
+   * (docs/feat/app-decomposition.md S2). App only builds the context — the
+   * ports below, one per capability, read through refs where the old code read
+   * a ref, so two keys with no render between them behave as before (plan H3).
+   */
   const handleCommand = useCallback(
     (raw: string, again = false): void => {
-      const resolved = resolveSlash(raw, skills());
-      if (resolved.kind === "skill") {
-        // A skill activation is a prompt (it starts a turn): recallable with
-        // ↑, and refused mid-turn — it is a round, not a steering message.
-        historyRef.current = pushHistory(historyRef.current, resolved.text);
-        histIndexRef.current = historyRef.current.length;
-        draftRef.current = "";
-        if (stateRef.current.running) {
-          pushNotice(
-            `_Can't run /${resolved.name} while a turn is running — stop it first (esc)._`,
-          );
-          return;
-        }
-        const refusedSkill = switchingRefusal(switchingRef.current, { kind: "prompt" });
-        if (refusedSkill) {
-          restoreInput(raw, refusedSkill);
-          return;
-        }
-        void run(resolved.text, { skill: resolved.name });
-        return;
-      }
-      const cmd = raw.split(/\s+/)[0];
-      const refused = cmd
-        ? switchingRefusal(switchingRef.current, { kind: "command", name: cmd })
-        : null;
-      if (refused) {
-        pushNotice(refused);
-        return;
-      }
-      // Guard turn-starting / session-swapping commands while a turn runs: they
-      // would corrupt the session (concurrent send) or cancel-handle state.
-      // `/clear` on a session that can `clear` is exempt: it resets in place
-      // (it stops an own turn first, and the daemon refuses another device's);
-      // only the legacy close-and-replace would swap the session under a turn.
-      const clearsInPlace = cmd === "/clear" && typeof sessionRef.current?.clear === "function";
-      if (cmd && isSessionMutating(cmd) && stateRef.current.running && !clearsInPlace) {
-        pushNotice(`_Can't run ${cmd} while a turn is running — stop it first (esc)._`);
-        return;
-      }
-      switch (cmd) {
-        case "/exit":
-        case "/quit":
-          requestQuit(false);
-          return;
-        case "/help":
-          // The skills part is asked fresh (docs/feat/skills-hot-reload.md).
-          void skillsSync.settle().then(() => pushNotice(helpText(skills())));
-          return;
-        case "/clear": {
-          const step = clearCommandStep({
-            canClear: typeof sessionRef.current?.clear === "function",
-            running: stateRef.current.running,
-            ownTurn: foreignRef.current === null,
-            compacting: compactingRef.current,
-            clearing: clearingRef.current,
-          });
-          if (step === "legacy") {
-            // A session without `clear` (the in-process fallback): the old
-            // session ends (with its jobs) before the fresh one starts
-            // (decision D3).
-            sessionRef.current?.close?.();
-            swapSession(makeSession());
-          } else if (step === "busy") {
-            pushNotice("_A /clear is already running._");
-          } else if (step === "compacting") {
-            pushNotice("_Can't clear while a compaction is running._");
-          } else if (step === "stop_then_clear" && abortRef.current) {
-            // Stop the own turn like Esc; the clear runs when it has settled.
-            clearAfterTurnRef.current = true;
-            stoppedHereRef.current = true;
-            abortRef.current.abort();
-          } else {
-            // Another device's running turn: the daemon answers TurnInProgress.
-            runClearRef.current?.();
-          }
-          return;
-        }
-        case "/close":
-          // End this session (every device sees it closed) and quit; the
-          // runtime's exit path delivers the close before the socket goes.
-          sessionRef.current?.close?.();
-          exit();
-          return;
-        case "/sessions": {
-          if (!sessions) {
-            pushNotice("_Sessions aren't available on this runtime._");
-            return;
-          }
-          // No "current" captured here: it is read live when rendered and used (R3-1).
-          openPanel(
-            sessionsPanel(Date.now()),
-            () => sessions.list().then((view) => sessionsPanel(Date.now(), view)),
-            sessionsListError,
-          );
-          return;
-        }
-        case "/compact": {
-          const session = sessionRef.current;
-          if (!session?.compact) {
-            pushNotice("_Compaction isn't available for this session._");
-            return;
-          }
-          if (stateRef.current.running) {
-            pushNotice("_Can't compact while a turn is running._");
-            return;
-          }
-          if (compactingRef.current) {
-            pushNotice("_A compaction is already running._");
-            return;
-          }
-          pushNotice("_Compacting the conversation…_");
-          setCompacting(true);
-          compactionOwnedRef.current = false;
-          // Whether THIS handler raised its own-compaction count: only then may
-          // its settle lower it again (an open that failed raised none).
-          let armed = false;
-          armed = true;
-          // Its one settle (success or failure) ends the compaction-time queue
-          // (D3c): sent as one prompt unless a send-now took it. A `/clear`
-          // meanwhile already took the rows (a new session: ignore it).
-          const settled = (result: CompactionResult) => {
-            if (sessionRef.current !== session) {
-              return;
-            }
-            if (!result.ok && armed && ownCompactionsRef.current > 0) {
-              ownCompactionsRef.current -= 1; // it replaced nothing: no history of mine to come
-            }
-            setCompacting(false);
-            const out = onCompactionSettled({
-              result,
-              rows: rowsRef.current,
-              sendNowOwns: compactionOwnedRef.current,
-              turnRunning: stateRef.current.running,
-            });
-            pushNotice(out.notice);
-            if (out.send !== null) {
-              setRows(() => []);
-              wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start
-              // As a fallback send: restored if another client's prompt won the slot.
-              void run(out.send, { fallback: true });
-              return;
-            }
-            if (out.restore !== null) {
-              setRows(() => []);
-              restoreInput(out.restore, "_your queued messages are back in the input_");
-            }
-            wakeIfPending(); // a wake deferred during the compaction
-          };
-          // The open a reset needs comes FIRST, as `/clear`'s does (review
-          // M2): a resumed session nothing has opened yet holds its chat only
-          // as this client's seed, and counting the compaction before the open
-          // left the count armed for a compaction that never happened. The
-          // latch (`compacting`) is up meanwhile, so nothing starts a turn.
-          void Promise.resolve(session.openForReset?.()).then(
-            () => {
-              if (sessionRef.current !== session) {
-                return;
-              }
-              // Its history (if it compacts) is mine: no "on another device" (C6).
-              ownCompactionsRef.current += 1;
-              armed = true;
-              void session.compact?.().then(
-                (r) => {
-                  settled({ ok: true, before: r.before, after: r.after });
-                  // The history shrank: the open figure is stale until a turn measures.
-                  askContext(session);
-                },
-                (error: unknown) => settled({ ok: false, error }),
-              );
-            },
-            (error: unknown) => settled({ ok: false, error }),
-          );
-          return;
-        }
-        case "/settings": {
-          // docs/feat/session-settings-apply.md: the host builds the lines.
-          const session = sessionRef.current;
-          const lines = (shown: readonly SettingsNoticeLine[]) => {
-            for (const { text, hint } of shown) {
-              stateRef.current = appendNotice(stateRef.current, text, hint ? { hint } : {});
-            }
-            setScrollOffset(0);
-            flushNow();
-          };
-          const step = settingsCommand(raw, {
-            running: stateRef.current.running,
-            compacting: compactingRef.current,
-            available: session?.settings !== undefined && session.updateSettings !== undefined,
-            syncing: session !== null && syncingRef.current === session,
-          });
-          if (step.kind === "notice") {
-            lines([{ text: step.text }]);
-          } else if (step.kind === "show") {
-            lines(session?.settings?.() ?? []);
-          } else if (session?.updateSettings) {
-            // During an outage it waits for the link: never nothing on screen.
-            syncingRef.current = session;
-            lines([{ text: SETTINGS_SYNCING }]);
-            const pending = stateRef.current.items.at(-1);
-            const settled = (outcome: readonly SettingsNoticeLine[]) => {
-              if (syncingRef.current === session) {
-                syncingRef.current = null;
-              }
-              // Moved to another session meanwhile: not that session's news
-              // (`/settings` on this one tells the truth when you are back), so
-              // the pending line just goes, where a swap kept the transcript.
-              const moved = sessionRef.current !== session;
-              if (pending !== undefined) {
-                stateRef.current = replaceWithNotices(
-                  stateRef.current,
-                  pending,
-                  moved ? [] : outcome,
-                );
-              }
-              flushNow();
-              if (!moved) {
-                setScrollOffset(0);
-                // The prompt or tools may have changed: the open figure is stale.
-                askContext(session);
-              }
-            };
-            void session
-              .updateSettings()
-              .then(settled, () => settled([{ text: "Could not sync the settings." }]));
-          }
-          return;
-        }
-        case "/rename": {
-          const session = sessionRef.current;
-          if (!session?.rename) {
-            pushNotice("_Renaming isn't available on this runtime._");
-            return;
-          }
-          const parsed = parseRename(raw);
-          if ("usage" in parsed) {
-            pushNotice(parsed.usage);
-            return;
-          }
-          void session.rename(parsed.title).then(
-            (text) => pushNotice(renamedNotice(text)),
-            (error: unknown) => pushNotice(renameFailedNotice(error)),
-          );
-          return;
-        }
-        case "/model":
-          pushNotice(`Model: \`${shownModel}\``);
-          return;
-        case "/mcp": {
-          if (!mcpStatus) {
-            pushNotice("_MCP status isn't available on this runtime._");
-            return;
-          }
-          openPanel(
-            mcpPanel(),
-            () => mcpStatus().then((servers) => mcpPanel(servers)),
-            mcpStatusError,
-          );
-          return;
-        }
-        case "/skills": {
-          // The session's skills read again (docs/feat/skills-hot-reload.md).
-          openPanel(
-            skillsPanel(),
-            () => skillsSync.refresh().then((list) => skillsPanel(list)),
-            skillsListError,
-          );
-          return;
-        }
-        case "/agents":
-          // The dock's list (owner Q16 (b)): the same toggle Ctrl+T runs, so the
-          // key and the command can never disagree.
-          toggleAgents();
-          return;
-        case "/tokens": {
-          const t = stateRef.current.sessionTokens;
-          pushNotice(
-            `Tokens — prompt ${t.prompt}, completion ${t.completion}, total ${t.prompt + t.completion}`,
-          );
-          return;
-        }
-        case "/retry": {
-          const last = lastUserRef.current ?? lastUserText(stateRef.current.items);
-          if (!last) {
-            pushNotice("_Nothing to retry yet._");
-            return;
-          }
-          const plan = retryPlan(last, skills());
-          // Read BEFORE `run`: the retry's own turn resets it (it names no images).
-          const hadImages = lastHadImagesRef.current;
-          if (plan.kind === "gone") {
-            pushNotice(`_Can't retry: ${plan.command} is no longer available._`);
-          } else if (plan.kind === "skill") {
-            void run(plan.text, { skill: plan.name });
-          } else {
-            void run(plan.text);
-          }
-          if (hadImages) {
-            // Text only, said out loud (decision 8): the refs of the last prompt
-            // are not kept — 5×15 MB per prompt is too much for a rare key.
-            pushNotice("_retry sends the text only: attach the image again with /attach_");
-          }
-          return;
-        }
-        case "/attach":
-          attachCommand(raw);
-          return;
-        case "/copy": {
-          const text = lastAssistantText(stateRef.current.items);
-          if (!text) {
-            pushNotice("_No assistant reply to copy._");
-            return;
-          }
-          void clipboard(text).then(
-            () => pushNotice("_Copied last reply to the clipboard._"),
-            () => pushNotice("_Clipboard unavailable._"),
-          );
-          return;
-        }
-        case "/save": {
-          const path = `${cwd}/tentacle-transcript-${Date.now()}.md`;
-          const md = transcriptToMarkdown(stateRef.current.items);
-          void saveFile(path, md).then(
-            () => pushNotice(`_Saved transcript to ${path}_`),
-            (e) => pushNotice(`_Save failed: ${String(e)}_`),
-          );
-          return;
-        }
-        default:
-          // Maybe a skill made since the list was last asked: ask once more,
-          // then resolve the text AGAIN, once (docs/feat/skills-hot-reload.md).
-          if (!again && skillsSync.stale()) {
-            void skillsSync.settle().then((same) => {
-              if (same) {
-                handleCommandRef.current?.(raw, true); // not on a session switched meanwhile
-              }
-            });
-            return;
-          }
-          pushNotice(`_Unknown command: ${cmd}. Try /help._`);
-      }
+      dispatchCommand(
+        {
+          pushNotice,
+          restoreInput,
+          historyRef,
+          histIndexRef,
+          draftRef,
+          sessionRef,
+          stateRef,
+          busyCompacting: () => compactingRef.current,
+          syncingRef,
+          switchingRef,
+          lastUserRef,
+          lastHadImagesRef,
+          skills,
+          skillsSync,
+          run,
+          requestQuit,
+          startCompaction,
+          requestClear,
+          reResolve: (line: string) => handleCommandRef.current?.(line, true),
+          exit,
+          sessions,
+          openPanel,
+          mcpStatus,
+          toggleAgents,
+          attachCommand,
+          clipboard,
+          saveFile,
+          cwd,
+          shownModel,
+          flushNow,
+          setScrollOffset,
+          askContext,
+        },
+        raw,
+        again,
+      );
     },
     [
-      makeSession,
-      swapSession,
+      askContext,
+      attachCommand,
       clipboard,
-      openPanel,
       cwd,
       exit,
-      mcpStatus,
-      sessions,
-      skillsSync,
-      askContext,
       flushNow,
-      shownModel,
+      mcpStatus,
+      openPanel,
       pushNotice,
+      requestClear,
       requestQuit,
       restoreInput,
       run,
       saveFile,
-      setCompacting,
-      setRows,
+      sessions,
+      shownModel,
       skills,
+      skillsSync,
+      startCompaction,
       toggleAgents,
-      wakeIfPending,
-      attachCommand,
     ],
   );
   handleCommandRef.current = handleCommand;
