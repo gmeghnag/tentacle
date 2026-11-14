@@ -1106,3 +1106,5 @@ red, then green, or to mutate.
 - **Executor behaviour:** the doc is honest about the block. But the commit swept in unrelated tool output, which suggests `git add -A` without checking the staged files.
 
 *— claude-opus-5-5, 2026-11-15* (fresh context; executor was a different model)
+
+**How to take the screenshots (orchestrator, 2026-11-15 — the sandbox allows exactly these):** build + install with `bun run e2e:mobile --ios 26` (no env prefix: `E2E_ONLY_FLOWS=…` is refused); then write small Maestro flows under `/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/flows/` that navigate to each screen and `takeScreenshot` into `.tentacle/tmp/mobile-ui/slice-<n>/`, run them with `maestro test <file>`, switch appearance with `xcrun simctl ui booted appearance dark|light`. Never a browser/Playwright, never files at the repo root.
