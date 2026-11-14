@@ -2441,3 +2441,39 @@ Negative-case probe: `layer-dialog.ts`'s `snap.replyMaxChars` is exercised
 (KILLED F1-a proves it), so no test silently holds the old shape.
 
 *— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-15*
+
+### Round 2
+
+**Verdict: PASS.** Both round-1 MEDIUMs are fixed, and the fix diff (`git diff
+HEAD~1`) introduces no regression.
+
+- **Finding 1 (`replyMaxChars` re-sourced): FIXED.** `App.tsx:3589` now passes
+  `replyMaxChars: replyMax`, the render value, as the inline handler did before S3.
+  `snapshot.ts` declares it `readonly … : number`, and the table has the row.
+  Taking the value branch instead of my suggested `() => replyMax` is the better
+  shape. Mutations I ran myself (all restored, `git status` clean afterwards):
+  - (a) App passes `replyMaxRef.current` → `keys-snapshot-source.test.ts` **KILLED**
+    (2 pass / 1 fail, naming the entry).
+  - (b) `layer-dialog.ts` passes `maxChars: 0` → **KILLED** by 7 reply-field App
+    tests. So the field is pinned by behaviour, not only by the text scan.
+  - A getter mutant (`() => …`) no longer typechecks, so `tsc` pins it too.
+- **Finding 2 (changelog fragment): FIXED.** `changelog.d/app-decomp-3-keyroute.*`
+  is gone. No other fragment was touched.
+- **Round-1 unverified item, now closed.** I dropped `stoppedHereRef.current =
+  true` from the `stopTurn` port. `app*.test.tsx` alone stays green (204/0), but
+  the full TUI suite **KILLS** it: "this TUI pressed Esc on that turn: the plain
+  notice" fails (1875/1). Ctrl+C's `abortTurn` runs the same port body.
+- **Regressions.** I checked every remaining `replyMaxChars()` call site (none
+  left). The new test's scope is honest: a text scan of the value half only, with a
+  non-vacuity test. It is brittle to reformatting of the `routeKey(` literal, but it
+  fails loudly (it throws) rather than passing vacuously. Not a finding.
+- **Gate.** `bun test packages/tui/test/keys- …/permission` → 130 pass / 0 fail;
+  the full TUI suite I ran only with the `stopTurn` mutant in place (1875 / 1, the
+  one kill above), so a clean full-suite run this round is the executor's figure
+  (1876 / 0), not mine;
+  `bun run typecheck` clean; `bun run lint` → 1065 files, 0 errors / 0 warnings.
+- **Executor behaviour.** It fixed exactly the findings and recorded its deviation
+  from my suggested fix with a reason. It showed the new test red first and wrote
+  its own mutation table (3/3). Its F1-a/F1-b rows match my re-runs.
+
+*— claude-opus-5-5, 2026-11-14*
