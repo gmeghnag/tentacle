@@ -529,6 +529,173 @@ Red-before-green: flows 12–19 fail on 12c (no queue rows / photo button);
 
 ## Execution
 
+#### 13c — photo input (M · cross-module)
+
+*— deepseek-v4-flash-0731, 2026-11-14*
+
+**Step 0 (blocking) — PASSED, with two findings that changed code.** Probe: a
+temporary `apps/mobile/src/probe.tsx` registered as the app root by a one-line
+`index.ts` edit, built **Release** for the **iPhone 17 Pro / iOS 26.5**
+simulator under Hermes; every answer POSTed to a local harness
+(`.tentacle/tmp/mobile-compose-13c/probe-server.ts`) and recorded in
+`results-step0*.json` there. Maestro drove the taps.
+
+1. **PHPicker IS drivable, and the multi-select works** — so the plan's
+   `__DEV__` fixture source is **not needed** (not written). `simctl addmedia`
+   seeded `fixture-small.png` (1600×1600) and `fixture-48mp.heic`
+   (8064×6048); `tapOn id: probe-pick` → `tapOn id: PXGGridLayout-Info, index:
+   {0,1}` → `tapOn "Done"` returned both, `fileName`/`mimeType` intact.
+   ```
+   $ maestro --device 0FA4B51F… test pick2.yaml
+   Tap on id: PXGGridLayout-Info, Index: 0... COMPLETED
+   Tap on id: PXGGridLayout-Info, Index: 1... COMPLETED
+   Tap on "Done"... COMPLETED
+   ```
+2. **HEIC → JPEG conversion works and re-sniffs as `image/jpeg`**: 6 384 061 B
+   HEIC → **12 084 556 B** JPEG in **383 ms** (`expo-image-manipulator`,
+   `SaveFormat.JPEG`, compress 0.9), sniffed `image/jpeg` from its bytes. The
+   camera-roll PNG passed through unchanged (`image/png`, `bytes()` 3 ms).
+3. **The 48 MP-class HEIC's JPEG is over the cap** (12.1 MB of 15 MB — under,
+   but the 15 MiB check is what matters and it fits); the downscale path is the
+   one exercised by unit tests, not by this fixture.
+4. **`File.bytes()` + noble sha256 of 15 MiB under Hermes: 5.6 s — OVER the
+   plan's 3 s threshold.** Raw numbers: `bytesMs` **6 ms**, `hashMs` **5 612 ms**
+   (`report("big-hash")`), heap flat at 16 MB. Per the plan this is a REPORT, not
+   a silent pass: noble's synchronous JS digest is ~2.7 MB/s on this simulator.
+   **No fallback taken** — the plan's fallback (`expo-crypto`'s native digest)
+   would need a client seam (`sha256Bytes` is synchronous), i.e. a STOP-and-ask,
+   and 5.6 s happens ONCE per photo, off the render path in the upload-time
+   flow (Owner Q4: upload at pick), so it is reported as a number for the
+   reviewer rather than changed unilaterally. Recorded as debt at the end.
+5. **One 15 MiB `attachImage` to the real `serve`: 12.0 s**, 61 progress
+   samples, heap flat at 12 MB (1 MiB in 799 ms). `serve` needed two harness
+   facts: `TENTACLE_PROVIDER=anthropic` (its vision default is ON, so it
+   advertises `images: {input: "upload"}`) and `model.maxImageBytes` raised to
+   15 MiB in the harness's `config.jsonc` (anthropic's own cap is 3.75 MiB, and
+   `attachImage` compares against the DAEMON's advertised cap).
+   ```
+   {"kind":"upload-result","size":1048576,"ok":true,"uploadMs":799,"samples":5,…}
+   {"kind":"upload-result","size":15728640,"ok":true,"uploadMs":12001,"samples":61,…}
+   ```
+
+   Two harness bugs found and fixed here, worth recording because they cost the
+   most time: a hand-rolled strip-origin proxy sent a 1 MiB image as 3.5 MiB
+   with the daemon's `have` never advancing (`UploadProtocolError`), so the
+   probe ran the e2e harness's OWN tested `startStripOriginProxy` behind a
+   raw forwarder on the fixed port; and one simulator (`0FA4B51F…`) began
+   failing `simctl install`/`launch` with `containermanagerd` crash-looping, so
+   the run moved to `iPhone 17e` (`EF264127…`) — a device change, not a retry.
+
+6. **The shipped adapter was then driven on the device too** (a second probe,
+   importing `photo-source.ts` itself), and it found a REAL defect the plan did
+   not anticipate: a converted photo kept its HEIC name —
+   `{mimeType: "image/jpeg", name: "IMG_0111.heic"}` — so the transcript's own
+   `[image: IMG_0111.heic]` would have said the opposite of what was sent. Fixed
+   in `photo-input.ts` (`nameForType`, with 6 unit cases and a mutation) and in
+   the adapter's sandbox copy name (`photoNameForFile`), and re-proved on the
+   device: `name: IMG_0111.jpg`, `file: …-IMG_0111.jpg`.
+
+**As built, in the plan's dependency order.**
+
+1. **The sniffer move (`packages/core`)** — `git mv packages/tui/src/image-sniff.ts
+   packages/core/src/image-sniff.ts` and its test to `packages/core/test/`; the
+   one import became `./attachments.ts` (a self-referential `@tentacle/core`
+   import would resolve through the package entry point); `core/src/index.ts`
+   gained `export * from "./image-sniff.ts"`. `packages/tui/src/image-sniff.ts`
+   is now a six-line re-export of the four names, so **no TUI import changed** —
+   `git diff HEAD -- packages/tui/` is deletions only (the old file and its
+   moved test), and `bun test packages/tui/` is **1781 pass, 0 fail**.
+2. **`apps/mobile/src/hash.ts`** — `sha256Hex` = noble `sha256` + `bytesToHex`,
+   lowercase hex. 5 tests, incl. the published empty-input digest and lengths
+   0/1/64/1 MiB+1 against Bun's own `CryptoHasher` as the oracle.
+3. **`apps/mobile/src/photo-input.ts`** — pure. `nextPhotoStep(PhotoState)` is a
+   conversation (`convert-to-jpeg` / `downscale` / `ready` / `refuse`), each
+   effect at most once, so it settles in ≤ 3 calls; plus `photoName` (the wire's
+   own `sanitizeAttachmentName`) and `nameForType` (finding 6).
+4. **`apps/mobile/src/photo-source.ts`** — the adapter: the app's only import of
+   `expo-image-picker` / `expo-image-manipulator` / `expo-file-system`;
+   `pickFromLibrary(taken)` / `takePhoto(taken)` → `PickedPhoto[]`; the camera
+   permission is asked at first use, with the "allow it in Settings" sentence
+   when `canAskAgain` is false.
+5. **`apps/mobile/src/connection.ts`** — `APP_CLIENT_OPTIONS = { sha256Bytes:
+   sha256Hex }` spread into the ONE `new RemoteClient` (Repro 2).
+6. **`apps/mobile/package.json` / `bun.lock`** — `apps/mobile` only, exact pins
+   on the SDK-58 line: `expo-image-picker 58.0.10`, `expo-image-manipulator
+   58.0.15`, `expo-file-system 58.0.10`, `@noble/hashes 2.4.0` (= transport's).
+7. **`apps/mobile/app.json`** — `NSCameraUsageDescription`, and the
+   `expo-image-picker` plugin with `photosPermission` / `cameraPermission` and
+   `microphonePermission: false` (no mic is asked for a photo). Prebuild
+   confirms all three `NS*UsageDescription` keys land in `Info.plist`.
+
+**Drift from the Implementation, and why.**
+
+- **The plan lists no changelog fragment for 13c** ("13a, 13b, 13c: none"), but
+  the orchestrator's brief for this branch requires one, and the slice does
+  change what a user gets (see the fragment's own text; the composer is 13d's).
+  Written: `changelog.d/mobile-compose-13c.added.md`. If the reviewer prefers
+  the plan's rule, delete that one file — nothing depends on it.
+- **`nextPhotoStep`'s shape**: the plan says "`photo-input.ts`, pure: the type
+  comes from the BYTES … heic → convert … over the cap → one downscale step".
+  Implemented as an effect-returning conversation rather than a function that
+  takes already-converted bytes, because the conversion is an EFFECT the adapter
+  owns and a pure module cannot perform — and the "each at most once" rule then
+  lives in ONE place instead of in the adapter's loop.
+- **`nameForType` + `photoNameForFile`** are additions the plan did not have
+  (finding 6). They are the only behaviour beyond the plan's list.
+- **`pickFromLibrary(taken)` / `takePhoto(taken)` take the count already
+  attached**, so the 5-photo cap is enforced by the picker's own `selectionLimit`
+  AND by the pure check, rather than by a `Math.max(1, 5 − chips)` in a screen.
+
+**Mutations run, restored byte-identically each time** (AGENTS §9 non-vacuity;
+the tests were written after `photo-input.ts`, so these prove they are not
+green-on-both):
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | trust the picker's mime: a HEIC is `ready` as `image/jpeg` | 2 fail (`HEIC named .jpg`, `still HEIC after converting`) |
+| M2 | a `\u0000-\u001f`-only name filter (C1 survives) | 3 fail (C1 removal, only-controls, 255 cap) |
+| M3 | no downscale step: over cap → `too-large` at once | 1 fail |
+| M4 | no `converted` check: endless convert | 1 fail |
+| M5 | `sha256Hex` through UTF-8 text (the text seam's trap) | 2 fail |
+| M6 | name keeps its old extension (finding 6's bug) | 3 fail |
+| M7 | delete `...APP_CLIENT_OPTIONS` from the client | 1 fail |
+
+**M7's honest caveat.** The digests are IDENTICAL on Bun (the default
+`bunSha256Bytes()` and noble agree — that is what `hash.test.ts` proves), so no
+assertion on an upload's RESULT can distinguish them. The guard is therefore
+identity — `(link.client as …).sha256Bytes === sha256Hex` — which is the only
+observable of "this hasher is not the Bun-derived default" on a Bun host; on
+Hermes the default is `undefined` and the difference is a thrown `attachImage`.
+Both a real 15 MiB `attachImage` over the app's own link (ref id == the oracle's
+digest) and the identity assertion ship, and the second is the one that is red on
+M7.
+
+**Not done, deliberately:** no `composer.ts` / `SessionScreen.tsx` / outbox
+wiring (13d's), no `e2e/flows/18-photos.yaml` (13d's `run.ts` flow list and
+testIDs), no `protocol.d/` note (P11: no wire change), no `TODO.md` edit.
+
+**Debt, named for the reviewer (not fixed here):**
+
+- **Q4 = 5.6 s for a 15 MiB digest under Hermes**, over the plan's 3 s line. If
+  that must come down, the seam is `expo-crypto`'s `digest(SHA256, bytes)`
+  (native, async) — but `RemoteClientOptions.sha256Bytes` is SYNCHRONOUS, so it
+  needs a client-side change (compute first, pass the id) and therefore a plan
+  amendment, not a 13c edit. Owner Q4's "upload at pick" is what keeps this off
+  the send path meanwhile.
+- A picker asset's sandbox copy is written under `Paths.document/photos/`
+  WITHOUT the backup-exclusion and data-protection attributes Owner Q7 asks for:
+  `expo-file-system`'s JS API here exposes no such option, and the outbox store
+  (13b/13d, `outbox-fs-expo.ts`) is where that policy belongs — noted so it is
+  not lost between the slices.
+- `photo-source.ts` has no unit tests: it is the RN/Expo adapter (no Expo module
+  runs under `bun test`). Its behaviour is proved on the device (Step 0's second
+  probe), and its decisions live in `photo-input.ts`, which is unit-tested.
+
+**Gate** (this worktree, after the last edit): `bun run check` **green** —
+typecheck clean, `biome check .` 1070 files no fixes, `bun test` **8309 pass, 3
+skip (the opt-in k8s/docker/slow ones), 0 fail**. Log:
+`.tentacle/tmp/mobile-compose-13c/gate2.log`.
+
 ## Review
 
 #### Orchestrator decisions (owner night delegation 2026-11-14)

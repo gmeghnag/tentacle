@@ -24,3 +24,4 @@ export * from "./context.ts";
 export * from "./token-counter.ts";
 export * from "./tool-labels.ts";
 export * from "./hooks.ts";
+export * from "./image-sniff.ts";
