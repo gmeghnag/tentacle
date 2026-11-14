@@ -1,6 +1,6 @@
 # fix/session-hop-live — Live-test defects of session-hop (the conversation is lost on every hop)
 
-> **Status:** implementation (awaiting owner approval)
+> **Status:** implementation APPROVED by the owner (2026-11-14)
 > **Branch:** `fix/session-hop-live`
 > **Size:** M · **Blast:** load-bearing (the one session path + the client's close semantics, AGENTS §7) · **Suited:** strong model executes; mandatory fresh-context Review that red-teams "one session path" and the foreign-close rule (`connect` sessions use it)
 > **Changelog:** `changelog.d/session-hop-live.fixed.md` — "`/move` keeps the conversation: the model sees the history after a hop, on the same session file"
@@ -457,6 +457,12 @@ clean, §6).
 6. **D4 scope: hop targets only, or also a plain `tentacle attach` TUI (same
    footer)?** Recommendation: hop only in this fix (the facade has the view).
    Check `attach` in Review and file it separately if it shows the same.
+
+#### Owner decisions (2026-11-14)
+
+All six questions: the recommendation (owner: "Va bene le raccomandazioni").
+Executor: Opus (load-bearing); fresh-context Review. *— claude-opus-5-5
+(orchestrator), 2026-11-14*
 
 ## Execution
 
