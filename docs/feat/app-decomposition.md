@@ -6000,3 +6000,28 @@ diff, so `protocol.json` was not regenerated and no `protocol.d/` note is due.
 unchanged and pinned. Left for the orchestrator: `permissionStop`/`cancelUpload`
 (outside the row), the stale parenthetical in AGENTS §7, and keep or drop
 the fragment.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-14 (fresh-context adversarial review of S12, `git diff main...HEAD`; same model family as the signed executor)*
+
+**Verdict: REQUEST-CHANGES.** The code is right. Two process findings, both already seen in the S14 review, block the merge.
+
+**Findings**
+1. **MEDIUM: changelog fragment for internal work.** `changelog.d/app-decomp-12-line-keys.changed.md:11` itself says "No user-visible behaviour changes." AGENTS §10 says internal work adds no fragment, and S14 Review finding 2 set the precedent. Failure scenario: the release notes get a `Changed` entry about a refactor. Fix: delete the fragment. Or, if the `paletteStep` NaN fix (an empty palette then Up/Down poisons the index) counts as user-visible, rewrite it as a one-line `fixed` fragment about that alone.
+2. **MEDIUM: the executor signature may be wrong.** The S12 Execution is signed `claude-opus-5-5 (executor)`, but commit `703a2d14` is titled `exec (deepseek)`. AGENTS §10 requires the real model, and the routing for a load-bearing slice depends on knowing it. Failure scenario: a weak-model × load-bearing run is recorded as a strong-model run. Fix: the orchestrator confirms the model and corrects the signature.
+
+**Gate (reviewer-run):** the 10 touched/related test files (`keys-line-layer`, `palette-step`, `app-line-keys-structure`, `keys-execute`, `app-turn-driver-structure`, `app-keys-precedence`, `line-input`, `keys-app-seam`, `attach-app`, `dock-type-through-frames`) → 162 pass / 0 fail. `bun run lint` → Checked 1362 files, no fixes. `bun run typecheck` (root + mobile + relay) → OK. I did not re-run the full suite.
+
+**Mutations (each reverted; `git status` clean afterwards):** R1: `newline` effect order swapped in `line-layer.ts` → KILLED (`keys-line-layer` "delete the `\`, THEN insert"). R2: App port `setHistoryCursor` drops the `histIndexRef` write → KILLED (`app.test.tsx` ×2: "Down past the newest entry restores the live draft", "Up inside a multi-line draft…").
+
+**Attacks tried:**
+- (a) Precedence (§7 ONE `useInput`): line tail after `routeKey` → execute → mouse guard. Holds: the structure pin plus executor M8.
+- (b) Snapshot timing: `field.value`/`cursor` are render values, and the refs are read after the routed effects, the same moment as inline. Holds.
+- (c) History effect order: refs first, then `fieldSet` (the existing `field.set` host). Matches the inline code.
+- (d) `paletteStep` equals the old formula for every `n>0`, including a negative `i`. Holds.
+- (e) The `dockDown`/`scroll` updaters stay functional (no stale decided state). Holds.
+- (f) The `pasteClipboard` I/O stays in App, moved verbatim. Holds.
+- (g) Executor's equivalent mutants M3/M6: the reasoning is sound.
+
+No HIGH. The stale AGENTS §7 parenthetical is out of slice and left to the orchestrator, as the executor noted.
