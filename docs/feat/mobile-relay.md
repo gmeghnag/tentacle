@@ -2876,3 +2876,26 @@ files, 77646 expects — 9521 baseline + the 4 new tests).
 in R6's Execution). Nothing else is unverified.
 
 *— claude-opus-5-5, 2026-11-14*
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (fix for round 1's findings 1–2).
+
+- **Finding 1 — fixed.** `raceOnce` reports the winner's `slot` in the round it
+  raced (`address-dial.ts`, `at: slot`); `Candidate.position` is gone. My repros
+  now give `[A,B,C,D]` → confirmed A,B,C,D → answered D; only-C-healthy →
+  A,B,C → answered C. **Mutation** `at: slot` → `at: candidate.index`: red 1
+  ("TWO consecutive handshake failures still reach the LAST address"); reverted.
+- **Finding 2 — fixed.** `connection.ts` `open` no longer observes; the new
+  optional `DialSteps.failed` is called only while the race is undecided. Repro
+  (`rev-r6-late-loser2.ts`): `revoked` stays `revoked` after the late LAN failure.
+  **Mutation** report `failed` before the `settled || winner` guard: red 2 (the
+  pure "a loser whose OPEN fails LATE…" test and the real-socket connection
+  test); reverted.
+- **Regressions:** the only `firstAnswering` caller is `connection.ts:300`,
+  which wires `failed`; a genuine failed open during the race is still reported
+  (round 1's mutation-6b test still green). The tree is clean after the
+  reverts (`git status` empty).
+- **Gate:** the 4 touched files pass 64/64 (552 expects); `bun run typecheck`
+  and `bun run lint` (1318 files) are clean. Round 1's nits (`link.address()` =
+  last started; a refused open waits the full stagger) remain open as nits.
