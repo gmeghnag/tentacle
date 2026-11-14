@@ -27,6 +27,8 @@
         "expo-build-properties": "58.0.11",
         "expo-crypto": "58.0.7",
         "expo-dev-client": "58.0.14",
+        "highlight.js": "11.12.0",
+        "marked": "12.0.2",
         "react": "19.3.0",
         "react-native": "0.88.0",
         "react-native-safe-area-context": "5.10.1",
@@ -41,7 +43,7 @@
     },
     "packages/agent": {
       "name": "@tentacle/agent",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "@tentacle/core": "workspace:*",
         "@tentacle/tools": "workspace:*",
@@ -52,7 +54,7 @@
     },
     "packages/cli": {
       "name": "@tentacle/cli",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "bin": {
         "tentacle": "./src/main.ts",
       },
@@ -70,6 +72,7 @@
         "@tentacle/tools": "workspace:*",
         "@tentacle/transport": "workspace:*",
         "@tentacle/tui": "workspace:*",
+        "uqr": "0.1.3",
       },
       "devDependencies": {
         "@tentacle/protocol": "workspace:*",
@@ -81,7 +84,7 @@
     },
     "packages/client": {
       "name": "@tentacle/client",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "@tentacle/agent": "workspace:*",
         "@tentacle/core": "workspace:*",
@@ -97,7 +100,7 @@
     },
     "packages/config": {
       "name": "@tentacle/config",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "jsonc-parser": "3.3.1",
         "zod": "3.23.8",
@@ -105,7 +108,7 @@
     },
     "packages/core": {
       "name": "@tentacle/core",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "@tentacle/protocol": "workspace:*",
         "zod": "3.23.8",
@@ -113,7 +116,7 @@
     },
     "packages/daemon": {
       "name": "@tentacle/daemon",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "@tentacle/agent": "workspace:*",
         "@tentacle/core": "workspace:*",
@@ -128,7 +131,7 @@
     },
     "packages/docker": {
       "name": "@tentacle/docker",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "@tentacle/core": "workspace:*",
         "@tentacle/exec": "workspace:*",
@@ -137,14 +140,14 @@
     },
     "packages/exec": {
       "name": "@tentacle/exec",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "@tentacle/core": "workspace:*",
       },
     },
     "packages/k8s": {
       "name": "@tentacle/k8s",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "@tentacle/transport": "workspace:*",
         "yaml": "2.9.1",
@@ -152,7 +155,7 @@
     },
     "packages/mcp": {
       "name": "@tentacle/mcp",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "@tentacle/core": "workspace:*",
         "zod": "3.23.8",
@@ -160,7 +163,7 @@
     },
     "packages/protocol": {
       "name": "@tentacle/protocol",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "zod": "3.23.8",
       },
@@ -171,7 +174,7 @@
     },
     "packages/providers": {
       "name": "@tentacle/providers",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "@tentacle/core": "workspace:*",
         "@tentacle/protocol": "workspace:*",
@@ -179,7 +182,7 @@
     },
     "packages/tools": {
       "name": "@tentacle/tools",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "@tentacle/core": "workspace:*",
         "diff": "5.2.0",
@@ -192,7 +195,7 @@
     },
     "packages/transport": {
       "name": "@tentacle/transport",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "@noble/ciphers": "2.4.0",
         "@noble/curves": "2.4.0",
@@ -205,7 +208,7 @@
     },
     "packages/tui": {
       "name": "@tentacle/tui",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "@tentacle/agent": "workspace:*",
         "@tentacle/core": "workspace:*",
@@ -851,7 +854,7 @@
 
     "hermes-parser": ["hermes-parser@0.36.1", "", { "dependencies": { "hermes-estree": "0.36.1" } }, "sha512-GApNk4zLHi2UWoWZZkx7LNCOSzLSc5lB55pZ/PhK7ycFeg7u5LcF88p/WbpIi1XUDtE0MpHE3uRR3u3KB7TjSQ=="],
 
-    "highlight.js": ["highlight.js@10.7.3", "", {}, "sha512-tzcUFauisWKNHaRkN4Wjl/ZA07gENAjFl3J/c480dprkGTg5EQstgaNFqBfUqCq54kZRIEcreTsAgF/m2quD7A=="],
+    "highlight.js": ["highlight.js@11.12.0", "", {}, "sha512-nbfWpyRMcMrPMmDwJB+dhX/eiaPKtc2RB+0QZskqJ3WjRA/FDS0e9hZrx8EC/lbEv8gXy98FcDbNa/dspAaJMg=="],
 
     "hosted-git-info": ["hosted-git-info@7.0.2", "", { "dependencies": { "lru-cache": "^10.0.1" } }, "sha512-puUZAUKT5m8Zzvs72XWy3HtvVbTWljRE66cP60bxJzAqf2DgICo7lYTY2IHUmLnNpjYvw5bvmoHvPc0QO2a62w=="],
 
@@ -1235,6 +1238,8 @@
 
     "update-browserslist-db": ["update-browserslist-db@1.3.4", "", { "dependencies": { "escalade": "^3.2.0", "picocolors": "^1.1.1" }, "peerDependencies": { "browserslist": ">= 4.21.0" }, "bin": { "update-browserslist-db": "cli.js" } }, "sha512-t8wonIOdQyOjtPd2VktlBu6QjTVTks6v8bSi7kd0r2Vll8TK1JYDZtRRdbmCHOAMphkZgrzK+L+vXK4pyZ8t4A=="],
 
+    "uqr": ["uqr@0.1.3", "", {}, "sha512-0rjE8iEJe4YmT9TOhwsZtqCMRLc5DXZUI2UEYUUg63ikBkqqE5EYWaI0etFe/5KUcmcYwLih2RND1kq+hrUJXA=="],
+
     "use-latest-callback": ["use-latest-callback@0.2.6", "", { "peerDependencies": { "react": ">=16.8" } }, "sha512-FvRG9i1HSo0wagmX63Vrm8SnlUU3LMM3WyZkQ76RnslpBrX694AdG4A0zQBx2B3ZifFA0yv/BaEHGBnEax5rZg=="],
 
     "use-sync-external-store": ["use-sync-external-store@1.7.0", "", { "peerDependencies": { "react": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-6L+EeigHMQhdaIPNIFUKwfWJSwWFQ8gJbJ2DLOs5sDIegTwR9fRxvnM3uciHKjIZhFz+KAv2emhWMRvDmMcY8A=="],
@@ -1338,6 +1343,8 @@
     "babel-plugin-polyfill-corejs2/semver": ["semver@6.3.1", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="],
 
     "cli-highlight/chalk": ["chalk@4.1.2", "", { "dependencies": { "ansi-styles": "^4.1.0", "supports-color": "^7.1.0" } }, "sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA=="],
+
+    "cli-highlight/highlight.js": ["highlight.js@10.7.3", "", {}, "sha512-tzcUFauisWKNHaRkN4Wjl/ZA07gENAjFl3J/c480dprkGTg5EQstgaNFqBfUqCq54kZRIEcreTsAgF/m2quD7A=="],
 
     "cli-highlight/yargs": ["yargs@16.2.2", "", { "dependencies": { "cliui": "^7.0.2", "escalade": "^3.1.1", "get-caller-file": "^2.0.5", "require-directory": "^2.1.1", "string-width": "^4.2.0", "y18n": "^5.0.5", "yargs-parser": "^20.2.2" } }, "sha512-Nt9ZJjXTv5R8MHbqby/wXQ6Gi0Bb3TcYZkR1bzuL4yB2OxWPkXknz513gEF0GoA6tn00UpbPvERW8rzCuWCA6w=="],
 

@@ -1,0 +1,366 @@
+/**
+ * The transcript fold (docs/feat/mobile-session-view.md 12b "Tests" — its
+ * `transcript.test.ts` row), one case per behaviour the plan names:
+ * history → rows; own vs foreign turn produce identical rows; the tool
+ * lifecycle including `denied`; a diff attaching to its tool row; `history`
+ * replacing vs compaction keeping + notice; `unsupported` once per kind; and the
+ * notices for an error / a lost turn.
+ */
+import { describe, expect, test } from "bun:test";
+import type { ChatMessage } from "@tentacle/core";
+import {
+  FOREIGN_COMPACTED_NOTICE,
+  type State,
+  TURN_INTERRUPTED_NOTICE,
+  TURN_LOST_NOTICE,
+  type ToolRow,
+  apply,
+  initialState,
+  unsupportedNotice,
+} from "../src/transcript.ts";
+
+function fold(inputs: readonly Parameters<typeof apply>[1][]): State {
+  return inputs.reduce<State>((state, input) => apply(state, input), initialState);
+}
+
+const text = (delta: string) => ({ type: "text" as const, delta });
+const reasoning = (delta: string) => ({ type: "reasoning" as const, delta });
+
+describe("a history becomes rows", () => {
+  const history: readonly ChatMessage[] = [
+    { role: "system", content: "you are a helpful agent" },
+    { role: "user", content: "read the file" },
+    {
+      role: "assistant",
+      content: "Reading it.",
+      toolCalls: [{ id: "c1", name: "fs_read", arguments: '{"path":"a.txt"}' }],
+    },
+    { role: "tool", toolCallId: "c1", content: "hello", durationMs: 12 },
+    { role: "assistant", content: "It says hello." },
+  ];
+
+  test("every visible message, in order, with its tool result attached", () => {
+    const state = fold([{ type: "history", messages: history, reason: null }]);
+    expect(state.rows.map((row) => row.kind)).toEqual(["user", "assistant", "tool", "assistant"]);
+    const tool = state.rows[2] as ToolRow;
+    expect(tool.id).toBe("c1");
+    expect(tool.label).toBe("Read"); // `toolLabel`, not the raw name
+    expect(tool.status).toBe("ok");
+    expect(tool.output).toBe("hello");
+    expect(tool.durationMs).toBe(12);
+  });
+
+  test("the system prompt is not a row", () => {
+    const state = fold([{ type: "history", messages: history, reason: null }]);
+    expect(state.rows.some((row) => row.kind === "user" && row.text.includes("helpful"))).toBe(
+      false,
+    );
+  });
+
+  test("a history REPLACES what is shown, and its keys never repeat an old one", () => {
+    const first = fold([
+      { type: "history", messages: [{ role: "user", content: "one" }], reason: null },
+    ]);
+    const second = apply(first, {
+      type: "history",
+      messages: [{ role: "user", content: "two" }],
+      reason: null,
+    });
+    expect(second.rows).toHaveLength(1);
+    expect(second.rows[0]?.kind === "user" && second.rows[0].text).toBe("two");
+    expect(second.rows[0]?.key).not.toBe(first.rows[0]?.key);
+  });
+
+  test("a refused-with-a-reply tool is `denied`, not `error`/`ok`", () => {
+    const state = fold([
+      {
+        type: "history",
+        messages: [
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: "c2", name: "shell", arguments: "{}" }],
+          },
+          {
+            role: "tool",
+            toolCallId: "c2",
+            content: "Permission denied by the user",
+            denialReply: "use rm -rf instead",
+          },
+        ],
+        reason: null,
+      },
+    ]);
+    const tool = state.rows[0] as ToolRow;
+    expect(tool.status).toBe("denied");
+    expect(tool.denialReply).toBe("use rm -rf instead");
+  });
+});
+
+describe("a turn's stream", () => {
+  test("an OWN and a FOREIGN turn produce identical rows (no branching on `own`)", () => {
+    const events: readonly Parameters<typeof apply>[1][] = [
+      text("Look: "),
+      reasoning("thinking"),
+      text("done."),
+      { type: "tool_start", id: "c1", name: "fs_read", arguments: "{}" },
+      { type: "tool_result", id: "c1", name: "fs_read", result: { content: "ok" } },
+    ];
+    const own = fold([{ type: "turn_started", turnId: "t", own: true }, ...events]);
+    const foreign = fold([{ type: "turn_started", turnId: "t", own: false }, ...events]);
+    // The bracket records who started it; the ROWS must not differ.
+    const strip = (state: State): unknown => state.rows.map((row) => ({ ...row, key: undefined }));
+    expect(strip(own)).toEqual(strip(foreign));
+    expect(own.turn?.own).toBe(true);
+    expect(foreign.turn?.own).toBe(false);
+  });
+
+  test("text deltas extend one row; a reasoning chunk ends it", () => {
+    const state = fold([
+      { type: "turn_started", turnId: "t", own: true },
+      text("a"),
+      text("b"),
+      reasoning("think"),
+      text("c"),
+    ]);
+    expect(state.rows.map((row) => row.kind)).toEqual(["assistant", "reasoning", "assistant"]);
+    expect(state.rows[0]?.kind === "assistant" && state.rows[0].text).toBe("ab");
+  });
+
+  test("the tool lifecycle: running → queued → running → ok", () => {
+    const state = fold([
+      { type: "turn_started", turnId: "t", own: true },
+      { type: "tool_start", id: "c1", name: "shell", arguments: '{"command":"ls"}' },
+      { type: "tool_phase", id: "c1", phase: "queued" },
+      { type: "tool_phase", id: "c1", phase: "running" },
+      { type: "tool_result", id: "c1", name: "shell", result: { content: "a.txt" } },
+    ]);
+    const tool = state.rows[0] as ToolRow;
+    expect(tool.status).toBe("ok");
+    expect(tool.label).toBe("Bash");
+    expect(tool.output).toBe("a.txt");
+  });
+
+  test("a settled tool row never moves back to queued/running", () => {
+    const state = fold([
+      { type: "turn_started", turnId: "t", own: true },
+      { type: "tool_start", id: "c1", name: "shell", arguments: "{}" },
+      { type: "tool_result", id: "c1", name: "shell", result: { content: "x" } },
+      { type: "tool_phase", id: "c1", phase: "queued" },
+    ]);
+    expect((state.rows[0] as ToolRow).status).toBe("ok");
+  });
+
+  test("a refusal with a reply is `denied` live too, and its words are kept", () => {
+    const state = fold([
+      { type: "turn_started", turnId: "t", own: true },
+      { type: "tool_start", id: "c1", name: "fs_write", arguments: "{}" },
+      {
+        type: "tool_result",
+        id: "c1",
+        name: "fs_write",
+        result: {
+          content: "Permission denied by the user: `fs_write` was not run.",
+          isError: true,
+          denialReply: "not that file",
+        },
+      },
+    ]);
+    const tool = state.rows[0] as ToolRow;
+    expect(tool.status).toBe("denied");
+    expect(tool.denialReply).toBe("not that file");
+  });
+
+  test("a plain error is `error` (and still shows its output)", () => {
+    const state = fold([
+      { type: "turn_started", turnId: "t", own: true },
+      { type: "tool_start", id: "c1", name: "shell", arguments: "{}" },
+      { type: "tool_result", id: "c1", name: "shell", result: { content: "boom", isError: true } },
+    ]);
+    const tool = state.rows[0] as ToolRow;
+    expect(tool.status).toBe("error");
+    expect(tool.output).toBe("boom");
+  });
+
+  test("a result with no matching call still opens a row (never dropped)", () => {
+    const state = fold([
+      { type: "turn_started", turnId: "t", own: true },
+      { type: "tool_result", id: "ghost", name: "shell", result: { content: "x" } },
+    ]);
+    expect(state.rows).toHaveLength(1);
+    expect((state.rows[0] as ToolRow).id).toBe("ghost");
+  });
+
+  test("a diff attaches to its tool row, with the daemon's own counts", () => {
+    const state = fold([
+      { type: "turn_started", turnId: "t", own: true },
+      { type: "tool_start", id: "c1", name: "fs_write", arguments: "{}" },
+      {
+        type: "tool_result",
+        id: "c1",
+        name: "fs_write",
+        result: {
+          content: "wrote a.txt",
+          details: {
+            kind: "diff",
+            path: "a.txt",
+            patch: "@@ -1 +1 @@\n-a\n+b\n",
+            added: 1,
+            removed: 1,
+          },
+        },
+      },
+    ]);
+    const tool = state.rows[0] as ToolRow;
+    expect(tool.diff?.path).toBe("a.txt");
+    expect(tool.diff?.added).toBe(1);
+    expect(tool.diff?.removed).toBe(1);
+  });
+
+  test("the turn bracket: started → ended, and a lost turn says so", () => {
+    const running = fold([{ type: "turn_started", turnId: "t9", own: true }]);
+    expect(running.turn?.turnId).toBe("t9");
+    expect(running.rows).toHaveLength(0); // the bracket is NOT a row
+    const ended = apply(running, { type: "turn_ended", outcome: "ended" });
+    expect(ended.turn).toBe(null);
+    expect(ended.rows).toHaveLength(0); // a clean end needs no notice
+    const lost = apply(running, { type: "turn_ended", outcome: "lost" });
+    const lostNotice = lost.rows.at(-1);
+    expect(lostNotice?.kind === "notice" ? lostNotice.text : undefined).toBe(TURN_LOST_NOTICE);
+    const interrupted = apply(running, { type: "turn_ended", outcome: "interrupted" });
+    const stopped = interrupted.rows.at(-1);
+    expect(stopped?.kind === "notice" ? stopped.text : undefined).toBe(TURN_INTERRUPTED_NOTICE);
+  });
+
+  test("a failed turn surfaces the daemon's words as a notice", () => {
+    const state = fold([
+      { type: "turn_started", turnId: "t", own: true },
+      { type: "turn_ended", outcome: "failed", message: "the model refused" },
+    ]);
+    expect(state.rows.at(-1)).toEqual({
+      kind: "notice",
+      key: state.rows.at(-1)?.key as string,
+      text: "⚠ the model refused",
+    });
+  });
+
+  test("a cancelled turn is quiet (the transcript already says what happened)", () => {
+    const state = fold([
+      { type: "turn_started", turnId: "t", own: true },
+      text("half an ans"),
+      { type: "turn_ended", outcome: "cancelled" },
+    ]);
+    expect(state.rows.map((row) => row.kind)).toEqual(["assistant"]);
+  });
+});
+
+describe("history events", () => {
+  test("a compaction KEEPS the transcript and says so once (another device's)", () => {
+    const before = fold([
+      { type: "history", messages: [{ role: "user", content: "hi" }], reason: null },
+    ]);
+    const after = apply(before, { type: "history", messages: [], reason: "compact" });
+    expect(after.rows).toHaveLength(2);
+    expect(after.rows[1]?.kind === "notice" && after.rows[1].text).toBe(FOREIGN_COMPACTED_NOTICE);
+  });
+
+  test("this client's OWN compaction says nothing (the screen already showed it)", () => {
+    const before = fold([
+      { type: "history", messages: [{ role: "user", content: "hi" }], reason: null },
+    ]);
+    const after = apply(before, {
+      type: "history",
+      messages: [],
+      reason: "compact",
+      own: true,
+    });
+    expect(after).toBe(before);
+  });
+
+  test("a context reset APPENDS (the old transcript stays, decision 9)", () => {
+    const before = fold([
+      { type: "history", messages: [{ role: "user", content: "before" }], reason: null },
+    ]);
+    const reset: readonly ChatMessage[] = [
+      {
+        role: "user",
+        content:
+          "[context reset] You renewed your own context with context_reset.\nEverything before it was discarded. Your restart prompt:\n<restart_prompt>\ncarry on\n</restart_prompt>",
+      },
+    ];
+    const after = apply(before, { type: "history", messages: reset, reason: "context_reset" });
+    expect(after.rows.map((row) => row.kind)).toEqual(["user", "notice", "user"]);
+    expect(after.rows[1]?.kind === "notice" && after.rows[1].separator).toBe(true);
+    expect(after.rows[2]?.kind === "user" && after.rows[2].restart).toBe(true);
+  });
+
+  test("a /clear replaces it all", () => {
+    const before = fold([
+      { type: "history", messages: [{ role: "user", content: "one" }], reason: null },
+    ]);
+    const after = apply(before, { type: "history", messages: [], reason: "clear" });
+    expect(after.rows).toHaveLength(0);
+  });
+});
+
+test("`unsupported` is said once per kind", () => {
+  const once = fold([{ type: "unsupported", kind: "shiny_new_thing" }]);
+  expect(once.rows).toHaveLength(1);
+  expect(once.rows[0]?.kind === "notice" && once.rows[0].text).toBe(
+    unsupportedNotice("shiny_new_thing"),
+  );
+  const twice = apply(once, { type: "unsupported", kind: "shiny_new_thing" });
+  expect(twice).toBe(once);
+  const other = apply(once, { type: "unsupported", kind: "another_thing" });
+  expect(other.rows).toHaveLength(2);
+});
+
+test("a prompt's images are carried on its row (the owner's requirement)", () => {
+  const state = fold([
+    {
+      type: "user_message",
+      text: "what is this?",
+      attachments: [{ id: "a".repeat(64), mimeType: "image/png", size: 12, name: "shot.png" }],
+    },
+  ]);
+  const row = state.rows[0];
+  expect(row?.kind).toBe("user");
+  expect(row?.kind === "user" && row.images).toEqual([
+    { id: "a".repeat(64), mimeType: "image/png", size: 12, name: "shot.png" },
+  ]);
+});
+
+test("a closed session keeps the transcript and adds one notice", () => {
+  const before = fold([
+    { type: "history", messages: [{ role: "user", content: "hi" }], reason: null },
+  ]);
+  const after = apply(before, { type: "closed", reason: "deleted" });
+  expect(after.closed).toBe("deleted");
+  expect(after.rows).toHaveLength(2);
+  expect(after.rows[1]?.kind === "notice" && after.rows[1].text).toContain("deleted");
+});
+
+test("the link status is state, never a row (the screen draws its banner)", () => {
+  const down = fold([{ type: "link", status: "down" }]);
+  expect(down.link).toBe("down");
+  expect(down.rows).toHaveLength(0);
+  expect(apply(down, { type: "link", status: "down" })).toBe(down);
+});
+
+test("the daemon's explanations become notices, never silence", () => {
+  const cut = fold([{ type: "truncated_reply", reason: "length", retrying: false }]);
+  expect(cut.rows[0]?.kind).toBe("notice");
+  const empty = fold([{ type: "empty_turn" }]);
+  expect(empty.rows[0]?.kind).toBe("notice");
+  const repaired = fold([
+    { type: "history_repaired", invalidArguments: 1, unansweredCalls: 0, orphanResults: 0 },
+  ]);
+  expect(repaired.rows[0]?.kind).toBe("notice");
+  const leak = fold([{ type: "dsml_leak", text: "the model leaked a tool call" }]);
+  expect(leak.rows[0]?.kind).toBe("notice");
+  // A hook's note is shown; the loop's own nudge is not.
+  const hook = fold([{ type: "context_note", text: "hook said so", reason: "hook" }]);
+  expect(hook.rows).toHaveLength(1);
+  const nudge = fold([{ type: "context_note", text: "keep going", reason: "continue" }]);
+  expect(nudge.rows).toHaveLength(0);
+});

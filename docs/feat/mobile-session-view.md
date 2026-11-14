@@ -497,8 +497,670 @@ Red-before-green: flows 06–08 run against 11a's placeholder fail (no
 
 ## Execution
 
+#### 12b — the transcript model (M · contained)
+
+*— claude-opus-5-5, 2026-11-13*
+
+**Load-bearing check (re-run first).** 12b's own load-bearing items are the
+plan's Step 0 (the two libraries must run under Hermes in a Release build on the
+26.5 simulator) and P8 (`tui/src/state.ts` is pure enough to `import` test-only
+from `apps/mobile/test/`). Both PASSED, and both changed a decision:
+
+1. **P8 — the test-only TUI import works.** `bun test` resolves a relative
+   `../../../packages/tui/src/state.ts` from `apps/mobile/test/` (a bare
+   `@tentacle/tui` specifier does NOT: `apps/mobile` does not depend on it). So
+   the parity test imports the TUI's fold by path, and the app's SOURCE never
+   references `@tentacle/tui` or `@tentacle/agent` (grep-guarded below).
+
+2. **Step 0 — PASSED on the iPhone 17 Pro simulator, iOS 26.5, Release.**
+   `marked@12.0.2` + `highlight.js@11.12.0/lib/core` bundled into a Release
+   build; a temporary probe screen set one testID per question and Maestro
+   asserted them (testID-only, per P9):
+
+   ```
+   $ maestro --device 0FA4B51F… test probe.yaml
+   Launch app "so.tentacle.app" with clear state... COMPLETED
+   Assert that id: probe-marked-ok is visible... COMPLETED
+   Assert that id: probe-hljs-ok is visible... COMPLETED
+   Assert that id: probe-regex-ok is visible... COMPLETED
+   Assert that id: probe-bound-ok is visible... COMPLETED
+   ```
+
+   The probe found a real API fact the plan did not state, and the design
+   follows it: **`hljs.highlight()` THROWS on an unregistered language**
+   (`Unknown language: "nosuch"`; the first probe run was RED on exactly that
+   assertion). So `highlight.ts` gates on `languageOf` + `getLanguage` BEFORE
+   any parse — not on a `try`/`catch` around a parse that cannot finish.
+
+   Pins chosen: `marked` at the TUI's exact `12.0.2` (the plan's instruction);
+   `highlight.js` at `11.12.0` (latest 11.x — the first line that ships
+   `lib/core` with `exports` maps AND a `types/index.d.ts` covering it; the
+   in-tree `10.7.3` that `cli-highlight` drags in is not a direct dependency and
+   its `lib/core` has no typed surface). Both are `apps/mobile` entries; the
+   lockfile also gained a `cli-highlight/highlight.js@10.7.3` entry, because the
+   TUI's transitive pin is now nested rather than hoisted.
+
+   The probe file (`apps/mobile/probe-step0.tsx`) and the `index.ts` switch that
+   loaded it are **deleted / reverted**: no probe code is committed.
+
+**As built, in the plan's order.**
+
+- `apps/mobile/package.json` + `bun.lock` — `marked@12.0.2`,
+  `highlight.js@11.12.0` (dependencies; Step 0 above).
+- `apps/mobile/src/transcript-rows.ts` (new) — the row types and the two pure
+  helpers, split out so the history mapper and the fold share ONE definition
+  without an import cycle.
+- `apps/mobile/src/transcript-history.ts` (new) — the daemon's `ChatMessage[]`
+  → rows (the TUI's `messagesToItems` rules: system prompt hidden, a tentacle
+  note a notice, a context reset's separator + restart row, a tool result onto
+  its call's row, a refusal-with-a-reply `denied`).
+  **It duplicates the context-reset header string** — the plan's P8 constraint
+  (no `@tentacle/agent` in the app bundle) makes importing `restartPromptOf`
+  impossible, so the copy is pinned to the real function by a parity-test case.
+- `apps/mobile/src/transcript.ts` (new) — `State` + `apply`: `history` (replace /
+  append on a `context_reset` / keep + notice on a compaction), the turn bracket
+  (`turn_started`/`turn_ended` with `ended|cancelled|interrupted|lost|failed`),
+  `closed`, `link`, and every `SessionEvent` the client yields. Notices reuse
+  `@tentacle/core`'s own wording (`describeTruncation`/`describeEmptyTurn`/
+  `describeRepairs`), so the phone and the TUI say the same thing.
+- `apps/mobile/src/markdown.ts` (new) — `marked`'s **lexer** → an own token tree
+  (no HTML at all); a link token carries its `href` as DATA; raw HTML is a
+  `literal`; over `PARSE_MAX_CHARS` (20 000) nothing is parsed (a "chunked"
+  result with the count held back); `createParseCache` keyed by row key +
+  version.
+- `apps/mobile/src/highlight.ts` (new) — `highlight.js/lib/core` + a fixed
+  14-grammar set, → `{text, scope}` spans; unknown/absent/over-long → one plain
+  span, gated by `getLanguage` (Step 0).
+- `apps/mobile/src/diff-view.ts` (new) — a unified patch → hunks with both line
+  numbers and `add|del|ctx`; `countDiff` is the client's rule, rule for rule,
+  and the test proves it against the real `mapping.ts` on one patch; bounded at
+  400 lines / 200 000 chars.
+- `apps/mobile/src/stream-batch.ts` (new) — coalesces prose deltas into one
+  commit per ~50 ms window on an INJECTED clock; anything non-prose flushes
+  first; a reasoning→answer switch is a boundary, never a merge.
+- `apps/mobile/src/thumbnails.ts` (new) — the owner's added requirement's
+  DECISION half: only the rows a `FlatList` shows (plus `PREFETCH_ROWS` either
+  side) want bytes, one request per id, `MAX_IN_FLIGHT` 4, LRU cache 60, a
+  failure never retried. The transport is an injected `ThumbnailSource` port —
+  see Drift 1.
+- Tests (new, each named by the plan): `transcript.test.ts` (24),
+  `transcript-parity.test.ts` (4), `markdown.test.ts` (17), `highlight.test.ts`
+  (12), `diff-view.test.ts` (9), `stream-batch.test.ts` (10),
+  `thumbnails.test.ts` (15) — **91 cases, and 2 fixture files** under
+  `apps/mobile/test/fixtures/transcript/`.
+- `changelog.d/mobile-session-view-12b.added.md` — one bullet (the plan said
+  12a/12b add none, but the briefing requires a fragment and the transcript model
+  is user-visible work even before its screen renders; the fragment says so).
+
+**Drift from the Implementation (and why).**
+
+1. **Thumbnails: the requirement's transport does not exist.** The owner's
+   requirement says thumbnails are "fetched over the existing channel". They
+   cannot be: the protocol's only attachment method is `attachment/put`
+   (client → daemon), and `docs/feat/attachments-upload.md:174-177` states there
+   is deliberately "No `attachment/get` / `status` method … nothing reads bytes
+   back over the wire". A daemon also never emits an `image` content block
+   (`packages/protocol/src/content.ts:30-36` is prompt-only), so the bytes of a
+   `media_message` ref are not obtainable by ANY current client, web or phone.
+   So 12b ships what is decidable and honest:
+   - the refs ride the row (`UserRow.images`, `transcript.test.ts` proves it),
+     labelled `[image: name]` — the TUI's own `imageRowText`, pinned by a test;
+   - the visible-rows-only / no-duplicate / bounded-concurrency policy is
+     implemented and fully tested (`thumbnails.ts`), behind an injected
+     `ThumbnailSource` port.
+   **The one step this contradicts was not forced**: I did not invent a
+   read-back frame (that would break AGENTS §7 "one session path" and the
+   protocol rule), and I did not fetch bytes some other way. Adding
+   `attachment/get` is an ADDITIVE new method (no `PROTOCOL_VERSION` bump, §7
+   "Fields and methods are free") — a small follow-up task, and 12c then draws
+   the thumbnails by wiring the port. This needs an owner decision; recorded
+   rather than silently dropped.
+2. **`TurnRow` is not a row.** The plan lists `turn (running indicator)` among
+   the rows. It is `State.turn` instead: a virtualised list that gains and loses
+   an item at the end shifts every key's position twice per turn, and the
+   indicator is one element under the list. Same information, no key churn.
+3. **`version` is the text's length, not a counter.** The plan asks for "a
+   monotonically growing `version`" for the markdown cache; a counter makes the
+   batched and unbatched folds produce DIFFERENT rows (`version: 2` vs `1` for
+   the same text), which breaks the plan's own F23 equality test. Text length is
+   monotonic (deltas only append) and identical either way.
+4. **`ToolStatus` has `denied` as well as the plan's four.** The plan's row list
+   says `queued|running|ok|error|denied` and then names four; both are honoured —
+   `denied` is the refusal-with-a-reply state (`ToolResult.denialReply`), which
+   the TUI also distinguishes.
+5. **Reasoning is a row here, a spinner flag in the TUI.** So row-for-row parity
+   is impossible on that one kind; the parity test normalises it explicitly
+   (reasoning rows are skipped, and two assistant rows split AT a reasoning row
+   are joined) and still fails on any other divergence — proved by mutation M2.
+
+**Mutations (each run, red, then reverted).**
+
+| # | Target (the plan's own mutation) | Result |
+|---|---|---|
+| M1 | fold branches on `own` (`text` dropped for a foreign turn) | **RED** — `transcript.test.ts`: "an OWN and a FOREIGN turn produce identical rows" |
+| M2 | drop the reasoning→assistant boundary in the app's fold | **RED** — `transcript-parity.test.ts` (both fixtures) + `transcript.test.ts` "a reasoning chunk ends it" (2 fail) |
+| M3 | `PARSE_MAX_CHARS` = `Number.MAX_SAFE_INTEGER` (no size bound) | **RED** — `markdown.test.ts` size-bound block (3 fail) |
+| M4 | no `getLanguage` gate (parse-and-catch, unknown alias treated as registered) | **RED** — `highlight.test.ts` "a language whose name collides with no grammar" |
+| M5 | `countDiff` counts `+++`/`---` file headers as changes | **RED** — `diff-view.test.ts` counts block (2 fail, incl. the real `mapping.ts` case) |
+| M6a | no coalescing (every delta its own commit) | **RED** — `stream-batch.test.ts` window block (2 fail) |
+| M6b | merge across a reasoning→answer boundary | **RED** — `stream-batch.test.ts` equality + boundary (3 fail) |
+| M7 | fetch every image in the whole history (not only visible rows) | **RED** — `thumbnails.test.ts` visible-window block (2 fail) |
+| M8 | `drive` applies each outcome to the pre-`plan` state (a real bug the test caught) | **RED** — `thumbnails.test.ts` drive block (3 fail) |
+
+M8 is worth naming: it was not a hypothetical mutation — the first
+`thumbnails.test.ts` run found that two thumbnails landing in the same tick
+overwrote each other, because `drive` closed over the state `plan` returned.
+Fixed by settling each outcome onto the LATEST state, and the test that caught it
+is kept ("two answers landing together both land").
+
+**Gate.**
+
+```
+$ bunx tsc --noEmit                    # clean
+$ bunx tsc -p apps/mobile              # clean
+$ bun run lint                         # Checked 1030 files. No fixes applied.   (0 errors, 0 warnings — the §6 baseline)
+$ bun test                             # 8013 pass · 3 skip · 0 fail · 13 snapshots (573 files)
+$ bun test apps/mobile/test             # 187 pass, 0 fail (the 11a/12b files together;
+                                        #   the 12b files alone: 91)
+```
+
+No schema changed, so `packages/protocol/schema/protocol.json` was NOT
+regenerated (nothing in `packages/**` is touched — plan P11, re-verified: the
+diff is `apps/mobile/**`, `bun.lock` and the changelog fragment only).
+
+Gate honesty: one FULL run failed
+`packages/daemon/test/serve-log-store.test.ts` "S11 — a real SIGKILL at random
+points" (`loads` 0, expected > 100) — and it failed on TWO of the four full runs
+I did, always under the parallel load of the whole suite. It is a
+wall-clock/load-sensitive restart test, in a package this slice does not touch;
+it passes alone (3/3 runs) and the full suite passed twice (8013 pass · 3 skip ·
+0 fail). Not caused by, and not fixed by, 12b — but the reviewer should know it
+is load-flaky rather than watertight.
+
+**Unverified / left open.** The real thumbnail transport (Drift 1) — needs
+`attachment/get` and an owner decision. 12c renders these rows on the simulator;
+nothing in 12b is simulator-verified beyond Step 0's probe.
+*— claude-opus-5-5 (executor of slice 12a), 2026-11-13*
+
+**Slice 12a only.** 12b/12c untouched (no transcript model, no screen, no
+`marked`/`highlight.js`, no e2e flow, no `changelog.d/mobile-session-view.added.md`
+— 12c's). Nothing under `packages/**` changed: no protocol schema, no
+`protocol.json` regeneration, no `protocol.d/` note (P11 held).
+
+### Load-bearing check (re-run first, as required)
+
+The plan's assumption is the TUI's attach path unchanged, with ONE broker.
+Re-verified against this branch's code before any edit:
+
+- `SessionStreamListener` is "a session's consumer (`RemoteSession`, a mobile
+  view)" — `packages/client/src/remote-client.ts:211-214`; `newSession(…,
+  {attach})` → `RemoteSession` (`:954-969`); the eager `open()` is
+  `attachSession` = `session/open{sessionId, reopen?}`, never a create,
+  bounded by `ATTACH_TIMEOUT_MS` (`:983-1037`, `packages/client/src/constants.ts:12`).
+- `PermissionBroker` with `holdUntilSet` queues requests while no requester is
+  set and hands them, in order, to the next `setRequester`
+  (`packages/core/src/permission.ts:162-208`).
+- `RemoteSession.detach()` is `session/detach` (`packages/client/src/remote-session.ts:798`);
+  `RemoteSession.close()` is `session/close` (`:752-764`); `RemoteClient.drain()`
+  (`remote-client.ts:1444`) and `closeSessions()` (`:1478`) are as the plan says.
+
+Then re-ran the plan's own probe (`.tentacle/tmp/mobile-session-view-12a/`,
+this branch's copy of `deny-hazard.ts`) and added the two properties 12a needs
+that it does not cover:
+
+```
+$ bun deny-hazard.ts denyAll
+mode=denyAll turn=ended laptopAsked=1
+   {"type":"tool_result",… "Permission denied by the user: `ask` was not run." …}
+$ bun deny-hazard.ts hold
+mode=hold turn=still waiting (ask pending) laptopAsked=1
+```
+
+```
+$ bun link-probe.ts          # hold broker + detach + closeSessions
+phone attached: archived=false attached=2 running=false
+ask with the hold broker: turn=pending
+after phone detach(): archived=false attached=1 running=true
+phone re-attached: archived=false attached=2 running=true
+after closeSessions() (11a exit path): archived=false attached=1 running=true
+```
+
+The last line is why the harness had to change: `closeSessions` there was a
+no-op because the LAPTOP was still attached. The hazard is the phone as the
+LAST client, which `last-client.ts` isolates:
+
+```
+$ bun last-client.ts detach  # decision 4: detach
+phone attached:                sessions=[["2238",false,2,false]]
+laptop left; phone is last:    sessions=[["2238",false,1,false]]
+after the phone's detach():    sessions=[["2238",false,0,false]]   ← kept, live
+$ bun last-client.ts close   # 11a's exit path
+phone attached:                sessions=[["611e",false,2,false]]
+laptop left; phone is last:    sessions=[["611e",false,1,false]]
+after closeSessions()+close(): sessions=[]                          ← GONE (Hazard 3)
+```
+
+So the load-bearing assumption HOLDS (the attach path needs no new code), and
+both hazards are real. Check passed → implementation proceeded.
+
+### As-built, in dependency order
+
+1. **`apps/mobile/src/foreground-gate.ts` (new, pure).** `createForegroundGate(inner)`
+   → `{dial, suspend, resume, isSuspended}`. `suspend()` arms the hold *before*
+   closing the live channel (so a dial in flight waits instead of slipping
+   through), `resume()` releases every dial waiting on that one hold, both are
+   idempotent; a channel that arrives while suspended is closed and the dial
+   waits again. It wraps the factory; it is not a second transport.
+2. **`apps/mobile/src/session-controller.ts` (new, pure, injected).**
+   `createSessionController<S extends SessionHandle>({newSession})` →
+   `{open, leave, dispose, follows}`. `open` never creates (`{attach}`/
+   `{reopen}`, supplied by the app's seam) and never throws: it answers
+   `{ok:true, session}` or `{ok:false, reason}` with
+   `openFailureReason` = `timeout` (`AttachTimeoutError`), `archived`/
+   `deleted`/`gone`/`too-many` (`DomainErrorCode.SessionArchived/SessionDeleted/
+   UnknownSession/TooManySessions`), else `link` — by class then code, never
+   message text. `leave` is `detach()`, never `close()`. Both are serialised per
+   session id (one tail promise per id), so a back-then-forward cannot overlap
+   the client's id-keyed session table; a repeated `open` of an id already
+   followed reuses the handle; `dispose()` unsubscribes and detaches an attach
+   that lands afterwards.
+3. **`apps/mobile/src/connection.ts`.** `createLinkBroker()` — `new
+   PermissionBroker(undefined, {holdUntilSet: true})`, exported so the app's
+   *actual* broker is what the tests drive; `leaveComputer(client)` —
+   `drain()` + `close()`, the one exit path, exported for the same reason;
+   `openComputer` now dials through the gate (`createForegroundGate(…)`, first
+   dial included), passes `gate.dial` as the client's `channelFactory`, and its
+   `ComputerLink` exposes `permissions`, `suspend()`, `resume()`, and a
+   `close()` = `leaveComputer`. The failure path is `drain()` + `close()` too.
+4. **`apps/mobile/App.tsx` (wiring only).** A `LIVE_LINKS` set; the registry's
+   `open` suspends a link dialled while `AppState.currentState !== "active"` and
+   registers it; one `AppState` `change` effect suspends on leaving `active` and
+   resumes on `active`; `close` → `link.close()` (the link's own exit path).
+   The `Session` route stays 11a's placeholder (12c).
+5. **Tests** (`apps/mobile/test/`): `foreground-gate.test.ts` (new, 4),
+   `session-controller.test.ts` (new, 9), `session-link.test.ts` (new, 7 =
+   plan T1–T6 + the archived→reopen reason), `connection.test.ts` (broker test
+   inverted to hold-and-deliver, plus the leave-as-last-client test over a real
+   WebSocket). All 20 new tests, plus the 2 rewritten, were RED first: T1/T3/T4
+   ran red against 11a's `connection.ts` (denyAll answers at once, `close()`
+   sends `session/close`), and the pure modules' tests were red before their
+   implementations existed.
+6. **`changelog.d/mobile-session-view-12a.changed.md`** — one bullet (validated
+   with `scripts/changelog.ts`'s own parser). No `TODO.md` edit, no
+   `CHANGELOG.md` edit.
+
+### Mutations (each applied, run, reverted — pasted results)
+
+| Mutation | Red test(s) |
+|---|---|
+| `createLinkBroker` → `new PermissionBroker(denyAll)` | T1 (and `connection.test.ts`'s hold test) |
+| `leaveComputer` → `closeSessions()` + `close()` | T4 **and** `connection.test.ts` "link.close() leaves without a session/close" |
+| controller `leave` → `session.close()` | T3 + "leave calls detach, NEVER close" (and the serialisation test, which needs a real detach) |
+| `resume()` does not `releaseHold()` | T5, T6 + 3 of the 4 gate tests |
+| drop the per-id serialisation in the controller | "an open … AWAITS it" |
+
+Verbatim, e.g. the exit path:
+
+```
+=== MUTATION 2: closeSessions() in link.close ===
+(fail) openComputer over a real daemon > link.close() leaves without a session/close: … [107.47ms]
+ 11 pass  1 fail
+=== MUTATION 4: resume() does not release ===
+(fail) createForegroundGate > a dial while suspended WAITS … [2.88ms]
+(fail) createForegroundGate > a channel that arrives while suspending is CLOSED … [3.92ms]
+(fail) createForegroundGate > every dial waiting on one hold is released … [2.68ms]
+(fail) the phone's session link over a real daemon > T5 suspend → the daemon sees the detach … [3156.21ms]
+(fail) the phone's session link over a real daemon > T6 an answer given just before suspend … [5001.73ms]
+ 6 pass  5 fail
+```
+
+### Drift from the Implementation (and why)
+
+- **Two exported seams instead of inline construction** — `createLinkBroker()`
+  and `leaveComputer()`. Not cosmetic: with the broker built inline, mutation 1
+  left T1 GREEN (the test held a look-alike), and with the exit path inline,
+  mutation 2 only reddened the real-socket test. A mutation that does not
+  redden the test named for it is a vacuous test (§9), so the app's decision now
+  has exactly one implementation and the tests drive it.
+- **`openComputer`'s first dial goes through the gate** (the plan says "the
+  factory wrapped by the gate"). Same thing, taken literally: the initial
+  channel is `gate.dial()` too, so `suspend()` also closes the *first* socket
+  (otherwise a backgrounding between `openComputer` and the client's next dial
+  left the original socket live).
+- **`App.tsx` also suspends a link dialled while already backgrounded** — an
+  addition the plan does not name (F2/F3's cousin): a dial that completes while
+  iOS is not active would open the ghost attachment the gate exists to remove.
+- **The test harness closes the in-memory server `Connection`** when its channel
+  closes, mirroring `ws-server.ts:223-234`. Without it no test could observe a
+  detach: `createChannelPair` has no server side, so a closed client stayed
+  "attached". This is a harness fact, not a product one.
+- No other drift. Files changed are exactly the plan's 12a table.
+
+### Notes / unverified
+
+- **iOS/Maestro not run**: 12a adds no UI, and the plan's flows are 12c's. The
+  `AppState` wiring is exercised by the pure gate tests and by
+  `bunx tsc -p apps/mobile`; its on-device behaviour (foreground → detach →
+  re-attach) is unverified here and is flow `10-background-ask`'s job in 12c.
+- The owner's image-attachments requirement is 12b (model) + 12c (screen); it
+  has no 12a footprint and was not touched.
+
+### Gate
+
+```
+$ bunx tsc --noEmit          → clean
+$ bunx tsc -p apps/mobile    → clean
+$ bun run lint               → 1018 files checked, no fixes applied, 0 errors/warnings
+$ bun test                   → 7943 pass, 3 skip (the opt-in ones), 0 fail, 569 files, 341.84s
+```
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-13* (fix round 1 executor; same model as round 0
+and the Review — fresh context only, so shared blind spots remain possible)
+
+**Reproduction first (both findings, on the round-0 code, in
+`.tentacle/tmp/mobile-session-view-12a/fix1-repro.ts`):**
+
+```
+F1: dialled=["ch0","ch1","ch2","ch3","ch4"] closed-on-suspend=["ch0"]
+F2: follows=true detaches=0
+```
+
+F1 = finding 1: three callers (one stale attempt + two redials) released
+together made five inner dials, and `suspend()` closed `ch0` — not the socket a
+caller holds. F2 = finding 2: `leave` during an attach left the session
+followed (`follows=true`) with no detach.
+
+**Finding 1 (HIGH) — `apps/mobile/src/foreground-gate.ts`.** Root cause: the
+gate identified nothing, so every dial parked on the one hold was released
+together, each called `inner()`, and `current` was whichever connected *last*;
+the client's abandoned attempts (`dialChannel`'s `LIVENESS_MS` give-up,
+`remote-client.ts:2351-2380`) were indistinguishable from the awaited one. Fix:
+a generation counter (`generation`) claimed by each `dial()`; a dial whose
+generation is no longer newest fails with `ChannelError("unreachable", …)`
+*before* dialling, and a channel that arrives for it is closed and rejected —
+so an abandoned attempt never opens a socket and never becomes `current`, and
+`current` is only ever what the newest caller received (`foreground-gate.ts:36-43`
+for the reason, `:73,86-110` for the guard). Rejecting (not silently returning)
+is what makes the gate a faithful `channelFactory`: the client treats it as a
+failed dial and backs off, which is exactly a give-up. Double `close()` of an
+abandoned channel is safe — `DuplexChannel.close` is idempotent
+(`packages/transport/src/channel.ts:12`).
+
+```
+$ bun test apps/mobile/test/foreground-gate.test.ts
+  red (before the fix): 2 fail — Expected 1 / Received 2 (N dials on one
+  resume), Expected "ChannelError" / Received "resolved" (stale becomes current)
+  green (after):        5 pass, 0 fail
+$ bun run fix1-repro.ts  (after)
+F1a (2 redials, abandoned socket last): dialled=["ch0","ch1"]
+    results=["rejected:ChannelError","ch1"] closed-on-suspend=["ch0","ch1"]
+F1b (2 redials, live socket last):     dialled=["ch0","ch1"]
+    results=["rejected:ChannelError","ch1"] closed-on-suspend=["ch0","ch1"]
+```
+
+Two dials for three callers (the abandoned one never dials), and the channel
+closed on the second `suspend()` is the live one in both orderings.
+
+**Finding 2 (MEDIUM) — `apps/mobile/src/session-controller.ts`.** Root cause:
+`leave()` read `live` synchronously, before `serialise`, so an attach still in
+flight was not in `live` yet: the queued leave found no entry, detached
+nothing, and the open then registered the session + listener. Fix: a
+`left: Set<string>` marks an id when `leave` finds no handle, and the open's
+serialised run detaches instead of registering when the mark is set
+(`session-controller.ts:100-120,155-172`); the mark is cleared by the leave's own
+serialised run, which the per-id tail orders *after* that open, so it is
+per-leave and cannot poison the next open. The open answers
+`{ok:false, reason:"link"}`, the same answer the existing `dispose()`
+mid-attach path gives (the screen is gone either way).
+
+```
+$ bun test apps/mobile/test/session-controller.test.ts
+  red (before the fix): 1 fail — Expected {ok:false, reason:"link"} / Received ok:true
+  green (after):        11 pass, 0 fail
+$ bun run fix1-repro.ts  (after)
+F2: open="link" follows=false detaches=1
+```
+
+**Mutations (each applied, run, restored; `git status` shows only the 4 intended
+files after each):**
+
+1. Gate — both `if (abandoned())` guards deleted →
+   `2 fail`: `Expected: 1 / Received: 2` and `Expected: "ChannelError" /
+   Received: "resolved"`.
+2. Controller — `if (disposed || left.has(sessionId))` → `if (disposed)` →
+   `1 fail`: `Expected {ok:false,reason:"link"} / Received ok:true`.
+3. Controller — `left.delete(sessionId)` dropped (the mark is never cleared) →
+   the new poisoning test `1 fail`: the second open of the same id does not
+   attach. This is the risk the fix itself introduces, pinned shut.
+
+**Gate (fix round 1):**
+
+```
+$ bunx tsc --noEmit          → clean
+$ bunx tsc -p apps/mobile    → clean
+$ bun run lint               → 1018 files checked, no fixes applied
+$ bun test apps/mobile/test  → 119 pass, 0 fail
+$ bun test                   → 7946 pass, 3 skip (the opt-in ones), 0 fail, 569 files, 344.55s
+```
+
+7943 → 7946: this round adds four tests (two gate, two controller) and removes
+one (the old "every dial waiting on one hold is released by a single resume",
+whose premise the fix makes unreachable — a second parked dial is now a
+superseded one; its hold-arming half is covered by the first new gate test).
+Verified in this worktree.
+
+**Not re-touched, deliberately:** the Review's scope note (the plan header says
+12a adds no changelog fragment while Execution added
+`changelog.d/mobile-session-view-12a.changed.md`) is a docs bookkeeping point,
+not a code finding; left for the 12c/orchestrator pass rather than editing the
+plan's header here. **Unverified:** the gate's new behaviour is pinned by pure
+tests only — the on-device variant (background > 15 s, foreground, background
+again) is still flow `10-background-ask`'s job in 12c, as round 0 noted.
+
 ## Review
 
 #### Owner answers (2026-11-13)
 
 All questions answered as recommended. Implementation APPROVED. Added owner requirement: image attachments (media_message refs) are shown in the transcript (12b model + 12c screen; thumbnails fetched over the existing channel, never auto-downloaded beyond the visible rows).
+
+#### 12b review
+
+**Verdict: REQUEST-CHANGES** (two MEDIUM findings, both in `thumbnails.ts`, the module for the owner's image requirement).
+
+1. **MEDIUM: `MAX_IN_FLIGHT` and "abort off-window" don't hold** (`apps/mobile/src/thumbnails.ts:115-127`, `:189-191`). Every request gets the same shared `controller` signal, so the ids `plan` puts in `abort` can't be cancelled one by one. They are only dropped from `inFlight`, and their fetches keep running. Trace (`.tentacle/tmp/mobile-session-view-12b/drive.ts`): four window changes with nothing settled leave **16 fetches open, while `state.inFlight` says 4**. This breaks the bound, and it breaks "never downloaded beyond the visible rows". A stale fetch that lands later is also cached (`i0` ends up in `loaded` after the user has scrolled away).
+2. **MEDIUM: a stale `drive` overwrites newer state** (`thumbnails.ts:183-192`). The M8 fix only covers settles *within one* `drive` call. Each call has its own `current`, so a settle from an earlier window writes `loaded(current_old, …)` over everything later calls produced. Trace: window D's thumbnail `i142` loads, then a window-A fetch settles, and `loaded` becomes `["i0"]` (`i142` is lost) and `inFlight` becomes A's `["i1","i2","i3"]`. A visible thumbnail disappears and D's ids get requested again. No test calls `drive` twice with fetches still pending, which is why mutation M8 didn't catch this.
+   Fix direction for both: one AbortController per request, and settle through a state getter or reducer instead of a captured `current`. Add red tests for both cases.
+
+**Gate (re-run by the reviewer):** the seven 12b test files ran 91 pass / 0 fail; `bun run lint` clean (1030 files); `bun run typecheck` clean. I did not re-run the full `bun test`.
+
+**Premises checked:** Drift 1 is true: the only attachment method is `attachment/put` (`packages/protocol/src/methods.ts:112`), and `attachments-upload.md:175-176` says nothing reads bytes back. The diff touches no `packages/**` file, so no protocol, persistence or broker invariant is involved (P11 holds).
+
+**Attacks tried:**
+- (a) Own mutation `denied`→`error` in `transcript.ts:409-410`: red (1 fail in `transcript.test.ts`), reverted, tree clean.
+- (b) Thumbnail driver across several windows: found 1 and 2.
+- (c) `stream-batch.ts`: order kept (non-prose flushes first) and prose kinds never merged across each other. Nothing found.
+- (d) Owner image requirement: the refs ride `UserRow.images`. The missing transport is reported honestly as drift, not faked.
+
+**Executor:** disciplined and honest. The drift is documented, and the flaky full-suite test is disclosed. The gap: the M8 fix was tested inside one `drive` call only.
+
+*— claude-opus-5-5, 2026-11-13* (fresh context). The Execution section is signed claude-opus-5-5, but commit `b6de752` says "exec (deepseek)". The executor's real identity is unclear and should be corrected.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-13 (executor of this round; branch
+`feat/mobile-session-view-12b`, no checkout/restore/stash/commit)*
+
+> Note on the review's identity remark: the id above is this session's real
+> model id (read from `~/.claude/projects/…/<session>.jsonl`, every assistant
+> record `"model":"claude-opus-5-5"`). Round 1's "exec (deepseek)" commit
+> subject and the Execution signature above are left exactly as the executing
+> round wrote them — this round does not overwrite another model's claim.
+
+Both findings live in `apps/mobile/src/thumbnails.ts`, the owner's image
+requirement's decision module. They share one root cause: the module was shaped
+around a **one-shot `drive(state, …)` call** — one captured state, one shared
+signal — when a screen has **many** window changes on **one** lifetime. The fix
+is that shape, not two patches: a `createThumbnailDriver` object owns the state
+and the per-request controllers for the mounted screen, and `drive` (the API the
+review attacked) is gone.
+
+**Finding 1 (MEDIUM) — `MAX_IN_FLIGHT` and "abort off-window" did not hold.
+FIXED.**
+`thumbnails.ts:64` (`Request.controller`), `:119` (`plan`), `:244`.
+`plan` used to hand every request the caller's ONE shared `AbortSignal`, so the
+ids it listed in `abort` were only dropped from `inFlight`: their fetches kept
+running on a signal nobody aborted. Now `plan` creates **one `AbortController`
+per request**, keeps them in a `Map<id, AbortController>` across steps
+(`pending`), and the driver **actually aborts** each abandoned one
+(`:244`). A late arrival from an abandoned request is dropped by the identity
+check at `:253` (a settle only lands if its id still maps to *its own*
+controller), so it can never reach the cache. The driver installs ONE listener on
+the screen's unmount signal (`:235`), which reaches every request however the
+window moved in between; `plan` also aborts a request created after that signal
+already fired (`:152`).
+The review's trace, re-run against the fixed code
+(`.tentacle/tmp/mobile-session-view-12b/fix1-drive.ts`):
+
+```
+before: MAX_IN_FLIGHT 4 | fetches open: 16 | state.inFlight: 4
+        after D loaded: [ "i142" ] | after stale A settles: [ "i0" ] | inFlight [ "i1","i2","i3" ]
+after:  MAX_IN_FLIGHT 4 | fetches open: 4  | state.inFlight: 4
+        after D loaded: [ "i142" ] | after the stale A settle: [ "i142" ] | inFlight 3
+        after unmount, fetches open: 0
+```
+
+**Finding 2 (MEDIUM) — a stale `drive` overwrote newer state. FIXED.**
+`thumbnails.ts:214` (`createThumbnailDriver`). Each `drive` call had its own
+closed-over `current`, so a settle from an earlier window wrote that older state
+over everything later windows produced. The driver keeps ONE `state` for the
+mounted screen and every settle reads the **live** value at settle time
+(`loaded(state, …)` inside the callback, `state` read then, not captured), so a
+later window's `loaded`/`inFlight` survives an earlier window's settle, and the
+`:253` identity check drops an abandoned request's outcome entirely. `drive`
+was **removed** rather than kept as a thin per-window wrapper: leaving the
+one-call API exported would leave the exact trap that produced this finding
+reachable by the 12c screen. `drive`'s only callers were its own tests.
+
+**Tests (red before green, §9).** New block `the driver: one state and one
+controller table per screen` in `apps/mobile/test/thumbnails.test.ts` (`:269`,
+`:293`, `:303`, `:323`, `:332`), driven through the real driver against a
+deferred fake `ThumbnailSource` (the review's own scenario, not a toy):
+- `:269` three window changes, nothing settled → **4** unaborted fetches, **8**
+  aborted, `inFlight` 4, and the live ids are the LAST window's;
+- `:293` an abandoned fetch that arrives late is not cached (`loaded` stays `[]`);
+- `:303` window D's `i142` loads, then window A's `i0` settles → `loaded` is
+  still `["file://142"]` and `inFlight` is unchanged (the review's exact trace);
+- `:323` unmount aborts every request still running; `:332` a signal that had
+  already fired leaves nothing running.
+The three pre-existing `drive` tests were re-pointed at `mount()`/`driver.view`
+(no assertion weakened), so M8's regression case is still covered.
+
+**RED, on the buggy code.** Two forms, because this fix replaces the API the
+review attacked:
+
+1. *Against the pre-fix module* (`git show HEAD:apps/mobile/src/thumbnails.ts`),
+   through its own per-window `drive(state, …)` API re-called across windows —
+   exactly what the module invited and what the review's trace did
+   (`.tentacle/tmp/mobile-session-view-12b/fix1-red.log`): the three cases failed
+   **on their assertions**, not on a compile error:
+
+```
+(fail) drive > a window change ABANDONS the fetches it scrolled away from (one controller each)
+(fail) drive > an abandoned fetch that arrives late is NOT cached
+       - []  + [ { id: "…0", uri: "file://stale" } ]
+(fail) drive > a settle from an EARLIER window never rolls back a later one
+       - "file://142"  + "file://0"
+ 15 pass · 3 fail
+```
+
+2. *Against the fixed module*, the final driver-shaped cases cannot compile on
+   the pre-fix source (`drive` is gone, `Request` carries a controller), so their
+   red proof is the mutation form below: reintroducing each bug in the NEW driver
+   (N1, N2) turns exactly those cases red. That is the §9 non-vacuity check for a
+   redesign — the same property, proven twice: once on the code that had it
+   broken, once by breaking it again.
+
+**Mutations (each applied to `thumbnails.ts` alone, run on the file, reverted —
+`git diff` re-checked after every revert).**
+
+| # | Mutation | Result |
+|---|---|---|
+| N1 | abandoned ids are dropped, not aborted (`pending.get(id)?.abort()` → `void id`) | **RED** — "a window change ABANDONS…" (4 vs 12 live) |
+| N2 | no identity guard on settle (`pending.get(id) !== request.controller` → `false`) | **RED** — "an abandoned fetch that arrives late is NOT cached" + "a settle from an EARLIER window never rolls back" |
+| N3 | the unmount listener is never installed (`void close`) | **RED** — "unmount aborts every request still in flight" |
+| N4 | `plan` ignores an already-aborted signal (drop the `signal.aborted` branch) | **RED** — "a signal that already fired leaves nothing running" |
+
+N1/N2 are the two findings one-for-one; N3/N4 pin the unmount reach the design
+claim rests on (non-vacuity: each mutation fails ONLY its own case, so no case is
+riding on another's fix).
+
+**Drift from the Implementation (and why).** None beyond finding 2's fix shape:
+`drive` is deleted and `plan` gained a `pending` parameter (`thumbnails.ts:119`)
+carrying the live controller table. Both are within the plan's "pure decision
+module behind an injected port" — no `packages/**` file, no protocol, no wire
+change (P11 still holds: `git diff --name-only` is `apps/mobile/src/thumbnails.ts`
+and `apps/mobile/test/thumbnails.test.ts` only).
+
+**Gate (re-run by me, after the fix).**
+
+```
+$ bunx tsc --noEmit                    # clean
+$ bunx tsc --noEmit -p apps/mobile     # clean
+$ bun run lint                         # Checked 1030 files. No fixes applied. (0 errors, 0 warnings — §6 baseline)
+$ bun test apps/mobile/test            # 192 pass · 0 fail (19 files; the 12b files alone: 96)
+$ bun test                             # 8018 pass · 3 skip · 0 fail · 13 snapshots (573 files, 346s)
+```
+
+The three skips are the §6 opt-ins. The full run was green on this round's first
+attempt (`packages/daemon/test/serve-log-store.test.ts` S11, load-flaky on the
+previous round, passed here) — but it remains load-sensitive, as round 1 wrote.
+
+**Unverified / left open.** Unchanged from Execution: the thumbnail TRANSPORT
+still does not exist (Drift 1 — no `attachment/get` in the protocol), so the
+driver's port is exercised by a fake only. Nothing here is simulator-verified;
+12c wires `createThumbnailDriver` into the screen.
+
+### Round 2
+
+**Verdict: APPROVE.** Commit `7e0a7a1` fixes both round-1 findings.
+
+- **Finding 1 (in-flight limit and abort): fixed.** Each request now gets its own `AbortController` (`thumbnails.ts` `plan`), and `view()` aborts the ids that scrolled out. I re-ran my round-1 trace against the new driver (`.tentacle/tmp/mobile-session-view-12b/drive2.ts`, with a fake source that honours the abort signal). After 4 window changes, **4 fetches are open** (was 16), and `inFlight` holds only the current window's ids.
+  - Mutation M-A (remove the per-id `abort()`): RED, "a window change ABANDONS the fetches…".
+- **Finding 2 (stale settle overwrites newer state): fixed.** There is now one driver per screen, which holds one state, and a settle counts only if its controller is still the current one for that id. Trace: `i142` stays loaded after the stale `i0` settles. `i0` is neither cached nor marked failed, so scrolling back requests it again.
+  - Mutation M-B (remove the guard): RED, 2 tests fail.
+  - Mutation M-D (settle onto the initial state instead of the latest): RED, 2 tests fail.
+- **Mutation hygiene:** each mutation was restored from a byte copy, and `git status` was clean afterwards.
+- **Checks:** `bun test apps/mobile/test` 192 pass / 0 fail. `bun run lint` clean (1030 files). `bun run typecheck` clean. No callers of the removed `drive` are left. The diff touches only `thumbnails.ts`, its test and this doc.
+- **Nit (not blocking):** an `initial` state passed in with `inFlight` ids but no controllers would hold those slots forever. Today `initial` defaults to empty, so nothing triggers it. 12c should not seed `initial` with in-flight ids.
+
+*— claude-opus-5-5, 2026-11-13* (fresh context. The fix was executed by deepseek, per the commit message.)
+### Review — slice 12a (fresh context)
+
+*— claude-opus-5-5, 2026-11-13* (same model as the 12a executor: fresh context only, shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES.**
+
+1. **HIGH — `apps/mobile/src/foreground-gate.ts:71-73`: the gate can lose track of the live socket, so `suspend()` closes a dead one and the real one stays up.** While suspended the client keeps redialling; each `dialChannel` gives up after `LIVENESS_MS` (15 s, `remote-client.ts:2351-2380`) but the gate's held `dial()` stays pending. All held dials share one hold, so `resume()` releases N concurrent `inner()` dials; the abandoned ones' channels are closed by `dialChannel` (`late`), but `current` is whichever one connects LAST. Repro (`.tentacle/tmp/mobile-session-view-12a/review-repro.ts`): two held dials, the stale one connects after the live one → `A: client holds ch1; closed on suspend=["ch0"] (live closed? false)`. Scenario: background > ~15 s, foreground, background again → the live socket is never closed: the ghost attachment the gate exists to avoid, and on return a socket nobody told the client was dead (F2/F3/F9 do not converge). Also an N-socket burst on every resume. Fix direction: a held dial that its caller abandoned must not dial at all (e.g. one pending dial at a time / generation counter), and `current` only ever the channel the latest caller received; add a test for that ordering.
+2. **MEDIUM — `apps/mobile/src/session-controller.ts:155-168`: `leave()` during an in-flight `open()` is a no-op.** `leave` reads `live` synchronously before serialising; an attach still running (up to 30 s) is not in `live` yet, so the queued leave detaches nothing and the open then registers the session + listener. Repro: `B: after leave-during-open: follows=true detaches=0`. Scenario (F17 in reverse, the common one): tap a session, back before the attach answers → the phone stays attached with a listener into an unmounted screen; asks are re-offered to the phone's held broker. Fix: look up `live` inside the serialised run (or mark the id "left" so the pending open detaches). Test it.
+
+**Gate (touched files):** `bun test` of the 4 touched test files: 25 pass, 0 fail. `bun run lint`: 1018 files, clean. `bun run typecheck`: clean. Full suite not re-run here (Execution reports 7943 pass / 3 opt-in skip).
+
+**Mutations (applied, run, reverted; `git status` clean after):** `leaveComputer` → `closeSessions()`: connection.test + T4 red. Broker → a deny requester: connection.test + T1 red. Both tests are non-vacuous.
+
+**Attacks tried:** (a) single broker — one `createLinkBroker()` per `RemoteClient`, exposed as `permissions`, no second instance in the diff: holds. (b) leaving never closes — no `closeSessions`/`session/close` left in `apps/mobile` (also the `openComputer` failure path now `drain()`s): holds. (c) gate vs client give-up — `dialFailed` never stops on a timeout (`link-machine.ts:129-146`), so a long suspend does not kill the link: holds; but see finding 1. (d) controller per-id serialisation open-after-leave: holds; leave-during-open: finding 2. (e) error reasons by class/code, not message: holds.
+
+**Scope notes:** the image-attachments owner requirement has no 12a footprint (12b/12c), correctly untouched. The plan said 12a adds no changelog fragment; Execution added `changelog.d/mobile-session-view-12a.changed.md` — harmless, but the plan's header should be updated to match or the fragment folded into 12c's.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-13* (fresh-context reviewer; same model family as round 1)
+
+**Verdict: PASS** (round-1 findings 1 and 2 fixed; no new HIGH/MEDIUM).
+
+- **Finding 1 (gate, HIGH) — fixed.** A generation counter supersedes every parked dial (`foreground-gate.ts` `dial`): an abandoned caller never dials and a late channel is closed and never becomes `current`. Round-1 repro now: `A: client holds ch0; closed on suspend=["ch0"] (live closed? true)`. Regression check: the superseded rejection is `ChannelError("unreachable")`, which `terminalReason` (`link-machine.ts:85-97`) does not treat as terminal, and `dialChannel` ignores a rejection that arrives after its deadline (`late`), so the client's link is never stopped by it.
+- **Finding 2 (controller, MEDIUM) — fixed.** A `left` mark makes the still-attaching open detach instead of registering; the leave's serialised run clears it, so the next open of that id is not affected. Repro now: `follows=false detaches=1`.
+- **Mutations (applied, run, reverted; `git status` clean):** supersession check disabled → both new gate tests red; `left.has` dropped from the open's post-attach check → both new controller tests red.
+- **Gate:** `bun test apps/mobile/test` 120 pass / 0 fail; `bun run lint` clean (1018 files); `bun run typecheck` clean.
+- **Nit (not blocking):** the detach of an abandoned open is fire-and-forget inside the serialised run (`session-controller.ts` post-attach branch), so an immediate re-open of the same id does not wait for it. The client's `endSession` only forgets its own entry, so the table stays consistent; awaiting it (as `leave` does) would make F17's "awaits the pending detach" hold literally.

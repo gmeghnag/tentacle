@@ -9,7 +9,12 @@
  */
 import { timingSafeEqual } from "node:crypto";
 import type { DuplexChannel } from "@tentacle/transport";
-import { Connection } from "./connection.ts";
+import { type AuthorizeVerdict, noiseResponder, systemRandom } from "@tentacle/transport/noise";
+import { Connection, type ConnectionPrincipal } from "./connection.ts";
+import type { DeviceAllow, DeviceAuthority, DeviceClose } from "./device-authority.ts";
+import { hasLivePairing, touchSeen } from "./device-store.ts";
+import { type HandshakeLimitOptions, HandshakeLimiter } from "./handshake-limit.ts";
+import { PairHandler } from "./pairing-handler.ts";
 import type { SessionHost } from "./session-host.ts";
 
 export interface WsServerOptions {
@@ -46,6 +51,52 @@ export interface WsServerOptions {
    * automatically would loop (to revisit with `client-reattach`).
    */
   readonly backpressureLimit?: number;
+  /**
+   * The device side (docs/feat/device-pairing.md 9b). ABSENT on every daemon
+   * that is not a `serve` on the user's own host (a pod's stdio daemon, the
+   * in-process worker), and `/e2e` is then just another path on the plain
+   * route (F21). When present:
+   *
+   * - `/e2e` is the DEVICE route: the Noise handshake IS the authentication,
+   *   so it needs no token and accepts the `Origin` a phone always sends
+   *   (decision 2/3). An unregistered key reaches at most a pairing-only
+   *   connection, so the Origin exemption grants a web page nothing;
+   * - a non-loopback bind without a token is allowed (the plain route then
+   *   answers 401 to everyone: only paired devices get in, owner Q1);
+   * - the upgrade is rate limited before any crypto (F6).
+   */
+  readonly devices?: DeviceRouteOptions;
+}
+
+/** What the device route needs from the caller (a `serve` daemon). */
+export interface DeviceRouteOptions {
+  /**
+   * The store-backed authority — it also carries the config dir its store lives
+   * in (`authority.configDir`), so the two cannot be wired to disagree.
+   */
+  readonly authority: DeviceAuthority;
+  /** Overrides for the handshake limiter (tests shorten the burst). */
+  readonly handshakeLimit?: HandshakeLimitOptions;
+  /**
+   * How often a pairing-only connection checks that its window is still open
+   * (`PAIRING_CHECK_MS` by default). A pairing connection is closed at the
+   * window's expiry, and at once when `pair` cleans the window up (F16/F2).
+   */
+  readonly pairingCheckMs?: number;
+}
+
+/** The device route's path: a phone dials `<address>/e2e`. */
+export const DEVICE_ROUTE = "/e2e";
+/** How often a pairing-only connection checks its window is still open (a poll, not a deadline). */
+export const PAIRING_CHECK_MS = 1_000;
+/** The bits of Bun's server socket the route touches (its `data` is our `SocketData`). */
+interface WsSocket {
+  readonly data: SocketData;
+}
+
+/** Bun's `Server` as far as the route needs it (the peer address for the limiter). */
+interface PeerAddressable {
+  requestIP(req: Request): { readonly address: string } | null;
 }
 
 // Conservative per-connection defaults; a never-answering or abusive client is
@@ -87,6 +138,15 @@ export interface RunningServer {
 
 interface SocketData {
   channel: WsChannel | null;
+  /**
+   * Which route upgraded this socket. Set at the upgrade, never inferred in
+   * `open`: both routes reach the same Bun server, and a plain client must
+   * keep getting today's `Connection` (a device route on a loopback bind must
+   * not change how the local CLI connects).
+   */
+  route?: "plain" | "device";
+  /** The device route's teardown (unregister from the authority's live map). */
+  release?: () => void;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -160,6 +220,10 @@ class WsChannel implements DuplexChannel {
   deliver(data: string): void {
     this.onMessage?.(data);
   }
+  /** Was this socket closed by either side (a `Connection` built after it is an orphan)? */
+  isClosed(): boolean {
+    return this.closed;
+  }
   /** Signal close (called by the server's `close` handler). */
   fireClose(): void {
     if (this.closed) {
@@ -171,17 +235,72 @@ class WsChannel implements DuplexChannel {
 }
 
 /**
+ * A pairing connection lives only while a pairing window does (F16/F2): poll the
+ * store and close the connection when no usable window is left — the window
+ * expired, or `pair` cleaned it up (Ctrl+C, its exit handler). `hasLivePairing`
+ * is the side-effect-free read (9a Review N3); the OTHER window on a computer
+ * with two `pair` windows keeps the connection open, which is right: any live
+ * window may still be the one this peer scanned.
+ *
+ * It never closes a connection that is ANSWERING a claim it holds
+ * (`holdingClaim`): `pair` writes the registry and THEN removes its window, so
+ * the winning exchange's last moment is exactly a moment with no live window —
+ * closing there would report "the connection closed" for a device that IS
+ * registered, breaking F3. That connection is the handler's to end (registry
+ * first, then the decision, then the expiry), and the next tick closes the
+ * socket normally if nothing is left.
+ *
+ * Returns the stopper, called on every teardown path (so no timer outlives a
+ * socket).
+ */
+function watchPairingWindow(
+  configDir: string,
+  route: DeviceRouteOptions,
+  options: WsServerOptions,
+  handle: DeviceClose,
+  holdingClaim: () => boolean,
+): () => void {
+  const watcher = setInterval(() => {
+    if (hasLivePairing(configDir) !== undefined) {
+      return;
+    }
+    if (holdingClaim()) {
+      return;
+    }
+    options.onAudit?.("pairing-closed");
+    handle.close();
+  }, route.pairingCheckMs ?? PAIRING_CHECK_MS);
+  // Housekeeping, never a reason for the process to stay alive (`serve`'s
+  // listener decides that; `bun test` must be able to exit).
+  (watcher as { unref?: () => void }).unref?.();
+  return () => clearInterval(watcher);
+}
+
+/**
  * Start the WebSocket daemon. Refuses a non-loopback bind without a token.
  * Returns a handle with the resolved URL and a `stop()`.
  */
 export function startWsServer(options: WsServerOptions): RunningServer {
-  if (!isLoopbackHost(options.host) && !options.token) {
+  // A non-loopback bind is allowed when the device route is on: the plain route
+  // then admits nobody without the token (it is 401'd below), and a paired
+  // device authenticates by its own key. Without that route, today's rule stands.
+  if (!isLoopbackHost(options.host) && !options.token && !options.devices) {
     throw new Error(
       `refusing to bind ${options.host} without a token: a non-loopback listener requires --token (remote code execution risk)`,
     );
   }
 
   const authorize = (req: Request): boolean => {
+    // A NON-LOOPBACK listener with the device route on and no token admits
+    // nobody on the plain route: only a paired device gets in (owner Q1).
+    // Answering 401 (rather than 426) is also what tells an OLD app to update
+    // (F23: it has no `/e2e`). A loopback bind keeps today's rule exactly: the
+    // local CLI connects over it, and tightening that would break every
+    // existing local client for a gain it does not need (the loopback path is
+    // not reachable from the network).
+    if (devices && !options.token && !isLoopbackHost(options.host)) {
+      return false;
+    }
     if (options.token) {
       const provided = extractToken(req);
       if (!provided || !tokensMatch(provided, options.token)) {
@@ -198,17 +317,51 @@ export function startWsServer(options: WsServerOptions): RunningServer {
   };
 
   const connections = new WeakMap<object, Connection>();
+  // A pending device handshake, before it becomes a `Connection` (P2: nothing is
+  // built or recorded until the responder RESOLVES, so a replayed message 1
+  // leaves no trace).
+  const pending = new WeakMap<object, () => void>();
+  const devices = options.devices;
+  const limiter = devices ? new HandshakeLimiter(devices.handshakeLimit) : undefined;
+
+  /**
+   * The device route's upgrade: rate limit, then upgrade. No token, no Origin
+   * check — the Noise handshake authenticates, and an unregistered key gets at
+   * most a pairing-only connection, so a web page gains nothing by reaching here.
+   */
+  const deviceUpgrade = (
+    req: Request,
+    srv: PeerAddressable & { upgrade(req: Request, o: { data: SocketData }): boolean },
+  ): Response | undefined => {
+    if (!devices || !limiter) {
+      return undefined;
+    }
+    const address = srv.requestIP(req)?.address ?? "";
+    if (!limiter.begin(address)) {
+      options.onAudit?.(`e2e-rate-limited ${address}`);
+      return new Response("too many handshakes", { status: 429 });
+    }
+    if (srv.upgrade(req, { data: { channel: null, route: "device" } })) {
+      return undefined;
+    }
+    // Not a websocket after all: the handshake it was charged for never ran.
+    limiter.end();
+    return new Response("expected a websocket upgrade", { status: 426 });
+  };
 
   const server = Bun.serve<SocketData>({
     hostname: options.host,
     port: options.port,
     ...(options.tls ? { tls: { cert: options.tls.cert, key: options.tls.key } } : {}),
     fetch(req, srv) {
+      if (devices && new URL(req.url).pathname === DEVICE_ROUTE) {
+        return deviceUpgrade(req, srv);
+      }
       if (!authorize(req)) {
         options.onAudit?.(`auth-failure ${new URL(req.url).pathname}`);
         return new Response("unauthorized", { status: 401 });
       }
-      if (srv.upgrade(req, { data: { channel: null } })) {
+      if (srv.upgrade(req, { data: { channel: null, route: "plain" } })) {
         return undefined;
       }
       return new Response("expected a websocket upgrade", { status: 426 });
@@ -218,6 +371,10 @@ export function startWsServer(options: WsServerOptions): RunningServer {
       open(ws) {
         const channel = new WsChannel(ws);
         ws.data.channel = channel;
+        if (devices && ws.data.route === "device") {
+          openDevice(ws, channel, devices);
+          return;
+        }
         connections.set(
           ws,
           new Connection(channel, options.sessionHost, options.onError, {
@@ -230,12 +387,155 @@ export function startWsServer(options: WsServerOptions): RunningServer {
         ws.data.channel?.deliver(typeof message === "string" ? message : message.toString());
       },
       close(ws) {
+        // A pending handshake ends its limiter slot exactly once (a denied or
+        // timed-out responder never reaches a `Connection`).
+        pending.get(ws)?.();
+        pending.delete(ws);
+        ws.data.release?.();
         ws.data.channel?.fireClose();
         connections.get(ws)?.close();
         options.onAudit?.("connection-close");
       },
     },
   });
+
+  /**
+   * A `/e2e` socket: run the responder, and only once it RESOLVES build the
+   * (unchanged) `Connection` on the resolved channel. Registers it under the
+   * device id so a revoke can close it, and records "last seen" here — never in
+   * `authorize`, which a replay reaches (F4/P2).
+   */
+  function openDevice(ws: WsSocket, channel: WsChannel, route: DeviceRouteOptions): void {
+    const authority = route.authority;
+    const identity = authority.staticKey();
+    // The whole identity, not just its private key: the pairing result names
+    // the computer (`{ id, name }`), and the SAS is computed from its key.
+    const computer = authority.identity();
+    if (identity === undefined || computer === undefined) {
+      // No usable identity (an unreadable store, F14/F26): nothing can be
+      // authenticated, so the socket is closed rather than left half-open — and
+      // its limiter slot goes back HERE: `finish` is not registered yet, and
+      // this socket will never reach the `close` handler's `pending` lookup, so
+      // returning without `limiter.end()` would leak a slot per dial and 429
+      // every device until a restart (production `maxConcurrent` is 32).
+      options.onAudit?.("e2e-no-identity");
+      limiter?.end();
+      channel.close();
+      pending.get(ws)?.();
+      pending.delete(ws);
+      return;
+    }
+    let settled = false;
+    // Every outcome ends the limiter slot EXACTLY once: an unanswered socket
+    // must not hold the concurrent cap forever.
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      pending.delete(ws);
+      limiter?.end();
+    };
+    pending.set(ws, finish);
+    // The verdict of the handshake that actually completed: `authorize` runs on
+    // every message 1 and a revoke could land between the two calls, so the
+    // decision is captured rather than asked for again.
+    let admitted: DeviceAllow | undefined;
+    // Set only for a pairing connection: its window watcher's stopper.
+    let stopWatcher: (() => void) | undefined;
+    noiseResponder(channel, {
+      staticKey: identity,
+      random: systemRandom,
+      authorize: (remoteStatic) => {
+        const verdict = authority.authorize(remoteStatic);
+        if (verdict !== false) admitted = verdict;
+        return verdict as AuthorizeVerdict;
+      },
+      onViolation: (error) => options.onAudit?.(`e2e-violation ${error.kind}`),
+    }).then(
+      (secure) => {
+        finish();
+        const verdict = admitted;
+        if (verdict === undefined) {
+          // Resolved with no allow recorded: only a bug here could do that.
+          channel.close();
+          return;
+        }
+        const principal: ConnectionPrincipal =
+          verdict.kind === "device"
+            ? { kind: "device", id: verdict.id }
+            : {
+                kind: "pairing",
+                // The handler is per CONNECTION: its attempt cap (5 wrong
+                // codes) belongs to the socket, and the key it registers is
+                // the one THIS handshake authenticated (F18: `device/pair`'s
+                // params carry no key at all).
+                pair: new PairHandler({
+                  configDir: authority.configDir,
+                  identity: computer,
+                  remoteStatic: secure.remoteStatic,
+                  ...(options.onAudit ? { onAudit: options.onAudit } : {}),
+                  close: () => channel.close(),
+                }),
+              };
+        // Built on the RESOLVED secure channel, exactly as the plain route
+        // builds it on the raw socket: `Connection` is unchanged and never
+        // learns there was a handshake (§7 one session path).
+        const connection = new Connection(secure, options.sessionHost, options.onError, {
+          maxFrameBytes: options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES,
+          principal,
+        });
+        connections.set(ws, connection);
+        // ONE handle for this connection: the authority holds it for a revoke,
+        // and every teardown path unregisters this same object, so a revoke's
+        // later `unregister` can never touch a different socket.
+        const handle: DeviceClose = {
+          close: () => {
+            connection.close();
+            channel.close();
+          },
+        };
+        if (verdict.kind === "device") {
+          authority.register(verdict.id, handle);
+          touchSeen(authority.configDir, verdict.id);
+          options.onAudit?.(`device-open ${verdict.id.slice(0, 8)}`);
+        } else {
+          // A pairing connection lives only as long as a pairing window does
+          // (F16): the check is a poll, so an expiry that `pair` failed to
+          // clean up still closes it, and `pair`'s exit handler (which removes
+          // the window) closes it within a check. `hasLivePairing` is the
+          // side-effect-free read (9a Review N3), never `findPairing`.
+          stopWatcher = watchPairingWindow(
+            authority.configDir,
+            route,
+            options,
+            handle,
+            // A connection answering a claim it holds is never closed by the
+            // watcher (F3): see `watchPairingWindow`.
+            () => (principal.kind === "pairing" ? principal.pair.holdingClaim : false),
+          );
+          options.onAudit?.("pairing-open");
+        }
+        // The socket closed between the confirm and this point (F22): the
+        // wrapper's `close` already fired and will never call back, so the
+        // connection must be closed here or it would stay attached forever.
+        if (channel.isClosed()) {
+          handle.close();
+          stopWatcher?.();
+          if (verdict.kind === "device") authority.unregister(verdict.id, handle);
+          return;
+        }
+        ws.data.release = () => {
+          stopWatcher?.();
+          if (verdict.kind === "device") authority.unregister(verdict.id, handle);
+        };
+      },
+      (error: { kind?: string }) => {
+        finish();
+        options.onAudit?.(
+          error.kind === "denied" ? "device-denied" : `e2e-violation ${String(error.kind)}`,
+        );
+      },
+    );
+  }
 
   const scheme = options.tls ? "wss" : "ws";
   return {

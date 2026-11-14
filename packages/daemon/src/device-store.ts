@@ -862,6 +862,28 @@ export function findPairing(
   return undefined;
 }
 
+/**
+ * Is there ANY usable pairing window right now? A PURE READ: it never sweeps,
+ * never closes a file and never throws (a malformed code or a bad record is
+ * ignored, which can only deny). This is what backs `authorize`
+ * (`device-authority.ts`), which `findPairing` may NOT: that one sweeps dead
+ * windows as it goes and throws on a malformed code, and `authorize` runs on
+ * every replayed Noise message 1, so it must stay side-effect free (P2).
+ */
+export function hasLivePairing(
+  configDir: string,
+  options: LiveClock = {},
+): PairingSession | undefined {
+  const now = options.now ?? Date.now();
+  const alive = options.alive ?? processAlive;
+  for (const session of listSessions(configDir)) {
+    if (session.expiresAt > now && alive(session.pid)) {
+      return session;
+    }
+  }
+  return undefined;
+}
+
 export type ClaimResult =
   | { readonly ok: true; readonly claim: PairingClaim }
   | { readonly ok: false; readonly reason: "used" | "gone" | "no_identity" | "store_failed" };

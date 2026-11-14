@@ -43,6 +43,7 @@ import {
   withRunModel,
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
+import { devicesCommand, resetCommand, revokeCommand } from "./devices-cmd.ts";
 import { type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
 import {
   armSharedExitNet,
@@ -108,6 +109,7 @@ import {
 } from "./kept.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
 import { packagesCommand, spawnGit } from "./packages-cmd.ts";
+import { pairCommand } from "./pair.ts";
 import { POD_DAEMON_MODES, lockHolder, runResidentMode } from "./pod-resident.ts";
 import { failedLine, notListedLine } from "./pod-stderr-log.ts";
 import { launchRelay, relayMain, type spawnRelayProcess } from "./relay.ts";
@@ -148,6 +150,98 @@ import {
   mountGate,
   planWorkspace,
 } from "./workspace-mount.ts";
+
+/**
+ * `tentacle pair` / `tentacle devices …` — the dispatch only (docs/feat/
+ * device-pairing.md 9d). The deciding lives in `pair.ts` and `devices-cmd.ts`;
+ * this maps argv to one of them and owns nothing else, so `main` gains no branch
+ * that a test cannot reach.
+ */
+async function runDeviceCommands(
+  mode: "pair" | "devices",
+  parsed: ParsedFlags,
+  io: {
+    readonly configDir: string;
+    readonly out: (text: string) => void;
+    readonly err: (text: string) => void;
+    readonly now: () => number;
+    readonly terminal: { stdin: boolean; stdout: boolean };
+    readonly ask?: (prompt: string) => Promise<string>;
+  },
+): Promise<number> {
+  if (mode === "pair") {
+    const addresses = parsed.repeats?.get("address");
+    const name = parsed.flags.get("name");
+    return pairCommand({
+      configDir: io.configDir,
+      ...(addresses !== undefined ? { extraAddresses: addresses } : {}),
+      ...(name !== undefined ? { name } : {}),
+      // A QR needs a terminal to be read at all; a pipe gets the pasteable
+      // line, which is printed beside the code in either case.
+      qr: io.terminal.stdout,
+      out: io.out,
+      err: io.err,
+      ...(io.ask !== undefined ? { ask: io.ask } : {}),
+      // The window is deleted when `pair` is interrupted, not only on success
+      // (F2). Ctrl+C is a normal way to stop waiting, so both paths share it.
+      // The returned disposer detaches them when `pair` returns: a listener
+      // left behind would run a stale cleanup on the NEXT signal in this
+      // process — and, worse, re-raise it at a host that is no longer `pair`
+      // (the test suite's own in-process SIGINT did exactly that).
+      exitHooks: (cleanup) => {
+        const onExit = (): void => cleanup();
+        const onSignal = new Map<NodeJS.Signals, () => void>();
+        process.once("exit", onExit);
+        for (const signal of ["SIGINT", "SIGTERM"] as const) {
+          const handler = (): void => {
+            cleanup();
+            // Do not swallow the signal: drop only OUR handler (never
+            // `removeAllListeners` — the host may own others) and re-raise, so
+            // the process still dies with 128+signum.
+            process.removeListener(signal, handler);
+            process.kill(process.pid, signal);
+          };
+          onSignal.set(signal, handler);
+          process.once(signal, handler);
+        }
+        return () => {
+          process.removeListener("exit", onExit);
+          for (const [signal, handler] of onSignal) {
+            process.removeListener(signal, handler);
+          }
+        };
+      },
+    });
+  }
+  const [verb, subject] = parsed.positional;
+  if (verb === undefined) {
+    return devicesCommand({ configDir: io.configDir, out: io.out, err: io.err, now: io.now });
+  }
+  if (verb === "revoke") {
+    if (subject === undefined) {
+      io.err(`[error] missing argument\nusage: ${USAGE.devices}\n`);
+      return 1;
+    }
+    return revokeCommand(subject, {
+      configDir: io.configDir,
+      out: io.out,
+      err: io.err,
+      now: io.now,
+    });
+  }
+  if (verb === "reset") {
+    return resetCommand({
+      configDir: io.configDir,
+      out: io.out,
+      err: io.err,
+      now: io.now,
+      yes: parsed.bools.has("yes"),
+      ...(io.ask !== undefined ? { ask: io.ask } : {}),
+    });
+  }
+  io.err(`[error] unknown argument ${JSON.stringify(verb)}\nusage: ${USAGE.devices}\n`);
+  return 1;
+}
 
 const HELP = `tentacle — run an agent task
 
@@ -198,6 +292,20 @@ Usage:
                                 remove a kept pod/container (only one tentacle kept;
                                 a running one asks y/N, -f skips the question). A
                                 detached run is stopped first
+  tentacle pair [--address <url>]... [--name <name>]
+                           pair a phone: prints a QR code (and a text line to
+                           paste) carrying this computer's key, the reachable
+                           addresses and a one-time code (5 min, single use).
+                           You confirm on THIS terminal, comparing the 6-digit
+                           code the phone shows. One pairing covers every
+                           tentacle on this computer
+  tentacle devices         the phones paired with this computer: name, id,
+                           when paired, when last seen
+  tentacle devices revoke <name|id-prefix>
+                           remove one at once, on every daemon of this computer
+  tentacle devices reset [--yes]
+                           new identity key and an empty registry: every phone
+                           must pair again (the recovery from a leaked key)
   tentacle <prompt...>     run a single task and exit
   tentacle -- <prompt...>  the same, for a prompt that starts with '-' or
                            with a subcommand word (tentacle -- explain how
@@ -715,6 +823,22 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     if (result.out !== "") out(result.out);
     if (result.err !== "") err(`${result.err}${unknownHint}`);
     return result.code;
+  }
+
+  // `tentacle pair` / `tentacle devices …` (docs/feat/device-pairing.md 9d):
+  // plain stdout programs over `<configDir>/devices` — no model, no session, no
+  // Ink. They read the config DIR only, so like `update`/`explain` they run
+  // before `loadConfig`: pairing a phone must work on a broken config.jsonc.
+  if (mode === "pair" || mode === "devices") {
+    return runDeviceCommands(mode, parsed, {
+      configDir: configDirFromEnv(),
+      out,
+      err,
+      now: Date.now,
+      terminal,
+      ...(io.stdin !== undefined ? { stdin: io.stdin } : {}),
+      ...(io.ask !== undefined ? { ask: io.ask } : canAsk ? { ask: askStdin } : {}),
+    });
   }
 
   // Everything below needs configuration; load it once (scaffolds on first run).
