@@ -811,3 +811,16 @@ Owner asleep, delegated: every Owner question above is decided with its RECOMMEN
 **Executor:** a thorough device-level Step 0 that found a real defect (the HEIC name) and honest mutation records. But it turned an explicit STOP-and-ask gate into a "reported debt".
 
 *— claude-opus-5-5, 2026-11-14* (a fresh context; a different model family from the executor, deepseek)
+
+### Round 2
+
+**Verdict: PASS** for the code. Finding 2 is now an **owner decision that must be made before 13d** (see below).
+
+- **Finding 1 (name > 255): FIXED.** `nameForType` (`photo-input.ts:215`) now clips the stem with `clipToUnits`. Mutation (back to the uncapped rename) fails 2 tests: the 256-char case and the astral case. It checks the protocol's own `AttachmentRefSchema`, so it tests the real boundary.
+- **Finding 3 (copy collision): FIXED.** `photoCopyName` (`photo-input.ts:152`) is pure and builds the name from a stamp plus a per-process counter, and `copyInto` writes `overwrite: false`. Mutation (drop the `seq`) fails 5 tests, including the two-nameless-photos-in-one-millisecond collision. The executor also capped the whole copy name: the old code could build a 270-char file name, past APFS's 255-byte limit. The name is ASCII after the safe filter, so 255 units is also 255 bytes.
+- **Finding 2 (5.6 s sync hash): correctly escalated, not fixed.** The UI freeze is now acknowledged and proven (a timer can't fire until the digest returns), and the "off the render path" claim is withdrawn. A fix needs an async seam in `packages/client` (`sha256Bytes` is synchronous, `remote-client.ts:433`), which is a load-bearing plan amendment. Owner gate: accept the freeze, or amend the plan, BEFORE 13d.
+- **Regressions:** none in the diff. Nit, not a finding: if `create({overwrite:false})` ever throws, the error escapes `prepareAll` and loses the whole batch, not just that one pick as the comment says. The counter makes this practically unreachable.
+- **Nit (honesty):** the "Fix round 1" section is signed `claude-opus-5-5`, but the commit `b140671` says "(deepseek)". One of the two attributions is wrong.
+- **Gate:** touched tests 55 pass / 0 fail. `bun run lint`: 1070 files, clean. `bun run typecheck`: clean. Both mutations reverted; `git status` was clean before this note.
+
+*— claude-opus-5-5, 2026-11-14* (fresh context)
