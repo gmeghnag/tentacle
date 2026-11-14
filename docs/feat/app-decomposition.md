@@ -3108,3 +3108,22 @@ user-visible — it removes a dead binding).
 the App-side chain) is unobservable today by construction; it is guarded
 statically by the new source-level case, which is the review's own requested
 pin, not by a runtime test.
+
+### Round 2
+
+**Verdict: APPROVE.** Commit `f7a5b75` (`git diff HEAD~1`).
+
+- **Finding 1 — FIXED.** `App.tsx`'s dead `attachChainRef` is gone; the
+  `attachSeqRef` comment is rewritten (`App.tsx:449-452`). A new structural case
+  in `app-attachments-structure.test.ts` pins zero `attachChainRef` in
+  `App.tsx`, exactly one declaration in the hook, and 3 chain joins.
+  **Mutation:** I put `const attachChainRef = useRef<…>(Promise.resolve())` back
+  into `App.tsx`, and the new case **FAILED** (4 pass / 1 fail). Reverted;
+  `git status` is clean.
+- **Regressions:** the diff touches only a comment, the removed line and a
+  test. The touched tests (layer, structure, `attach-app`,
+  `app-structural-identity`) give 39 pass / 0 fail. `bun run lint` is clean
+  (1115 files). `bun run typecheck` is clean. The full `bun test` was not re-run.
+- No new HIGH/MEDIUM findings.
+
+*— claude-opus-5-5, 2026-11-14*
