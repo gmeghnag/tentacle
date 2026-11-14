@@ -2077,6 +2077,17 @@ reported as debt. One mutation claim was overstated (finding 1's test title).
 
 *— claude-opus-5-5, 2026-11-14* (fresh context, not the executor's model family)
 
+### Round 2
+
+**Verdict: PASS.** I checked both findings against `git diff HEAD~1` (`d019f903`), mutated each fix, and reverted each mutation; the tree is clean afterwards.
+
+- **Finding 1 (dispose on a D7(b) refusal): fixed.** `watchedChannel` records whether the exec channel was closed. Mutation: drop `await bounded(runtime.dispose(), …)` at `hop-targets.ts:418` → the "runtime disposed" row FAILS. The same watcher is in the join row, which is not refused, so that row is the counter-check (`closed: false`).
+- **Finding 2 (own copy with a client attached): fixed.** `OwnUse.own.attached` is now carried (`relay-state.ts:303-306`), and `ownUidVerdict` treats `attached > 0` as busy (`hop-plan.ts:173`). Mutation A: drop the `attached` clause → 2 FAIL (the `attachVerdict` row, and the frame-level row "an IDLE copy another client is ATTACHED to: refused, never closed under it"). Mutation B: `ownUseOf` drops `attached` → 2 FAIL (the `ownUseOf` row and the same frame-level row).
+- **Regressions:** `ownUseOf`/`ownUidVerdict` have one production consumer each, both on the hop path (`local-runtime.ts:1243`, `session-hop.ts:277`). No other path changes meaning. Between the read and the close, a client could still attach. That window remains, and it is accepted (D7: the check is UX, not security).
+- **Gate:** the touched files (`session-hop-targets`, `hop-plan`, `relay-state`, `session-hop`, `hop-leave`) give 144 pass, 0 fail. `bun run lint`: 1251 files, clean. `bun run typecheck`: no errors. I did not re-run the full suite.
+
+*— claude-opus-5-5, 2026-11-14*
+
 ### Fix round 1 — the H6+H7 review's MEDIUM findings
 
 *— deepseek-v4.1-flash-1017, 2026-11-14*
