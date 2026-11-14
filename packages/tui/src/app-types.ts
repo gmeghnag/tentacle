@@ -21,6 +21,15 @@ import type { ContextOpen } from "./status-view.ts";
 import type { SubagentNotifyView } from "./subagent-notify.ts";
 import type { TargetBadge } from "./target-view.ts";
 import type { SessionActivity } from "./turn-feed.ts";
+import type { RunQuit } from "./useQuitClear.ts";
+
+/**
+ * `RunQuit` left this file with S8: it is declared next to `useQuitClear`, the
+ * executor that reads it (plan H4(1): a hook slice takes its own type with it),
+ * and re-exported here so every `from "app-types.ts"` importer — including
+ * `AppProps` below — keeps working unchanged.
+ */
+export type { RunQuit } from "./useQuitClear.ts";
 
 /**
  * The conversation the App drives. Both the local agent `Session` and the
@@ -242,20 +251,6 @@ export interface SessionDirectory {
  */
 export interface NoticeFeed {
   onNotice(listener: (text: string, hint?: string) => void): () => void;
-}
-
-/**
- * A detached run's TUI (docs/fix/detach-live.md A2): `/quit` closes the
- * session for every TUI on it. The host counts the others and acts after Ink
- * unmounted; the App only reports what the user chose and what happened.
- */
-export interface RunQuit {
-  /** Other live TUIs on this same session (laptop presence). */
-  othersOnSession(): number;
-  /** The user confirmed: this TUI's quit closes the session for all. */
-  closeForAll(): void;
-  /** Another TUI closed the session: this one leaves, nothing to save or delete. */
-  closedElsewhere(reason: "closed" | "deleted" | "gone"): void;
 }
 
 export interface AppProps {

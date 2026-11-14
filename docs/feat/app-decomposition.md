@@ -3426,3 +3426,203 @@ pin, not by a runtime test.
 - No new HIGH/MEDIUM findings.
 
 *— claude-opus-5-5, 2026-11-14*
+
+## Execution
+
+### S8 — `feat/app-decomp-8-quitclear` (quit and clear leave `App.tsx`)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: the run's
+parent process is `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc:29`.)
+
+**Scope.** `packages/tui/src/useQuitClear.ts` (new, the hook + the moved
+`RunQuit`), `App.tsx` (`+35/−204`, net `−169` lines: `3260 → 3091`),
+`app-types.ts` (`RunQuit` out, re-export in), `index.ts` (re-export), two new
+test files, one changelog fragment. **No existing test edited** — `clear.test.tsx`,
+`clear-resume.test.tsx`, `clear-connect-unbound.test.tsx`, `run-quit.test.tsx`
+(41 cases) and `app-types.test.ts` all green and unmodified, which is the
+behaviour-preservation proof. `TODO.md` untouched; no `packages/protocol` change
+(so `protocol.json` was not regenerated).
+
+**Load-bearing check, re-run first (PASSED).** `.tentacle/tmp/app-decomp-8-quitclear/lb-check.sh`
+on this branch:
+- *Ink calls EVERY active `useInput` listener, so the handler is ONE* —
+  `packages/tui/node_modules/ink/build/hooks/use-input.js:89`
+  `internal_eventEmitter?.on('input', handleData)`; `rg "useInput\("` finds only
+  `App.tsx:2890` and the separate pre-mount `components/SessionPicker.tsx:85`.
+  **Holds** — S8 moves no key handling and adds no listener.
+- *The plan's premise, that these three bodies are an EXECUTOR over already-pure
+  decisions, is true*: `quitCommandStep`/`quitConfirmText` (`commands.ts:257,298`),
+  `clearCommandStep`/`clearErrorNotice`/`clearNoopNotice` (`clear-command.ts`),
+  `backgroundCount`/`backgroundNames` (`background-view.ts:43,56`) all exist and
+  hold every branch; the App bodies only read refs and make the calls. **Holds.**
+- *`requestQuit`/`requestClear`/`runClear` are frozen identifiers* (Fable M1):
+  outside `App.tsx` they appear only as `CommandContext` fields
+  (`commands/context.ts:63,67`), the two command files' `Pick<>`, and
+  `keys/execute.ts:40`'s `KeyHost` method — **no call site, no import**, so a
+  hook with the same three names edits zero use-sites. **Holds.**
+- *No hook owns an effect* (Fable H1): `App.tsx` has 20 `useEffect(` at two-space
+  indent; `useAttachments`/`useDock`/`useMouse` each declare 0, and this hook
+  declares 0 too, so the effect list is untouched. **Holds.**
+- *The capability is missing pre-slice*: `useQuitClear.ts` ABSENT, App 3260 lines,
+  the three bodies inline at 2167–2431. **Reproduced.**
+
+**Design, as built (dependency order).**
+1. **`useQuitClear.ts`** — the EXECUTOR, deciding nothing: `quitCommandStep`
+   (`requestQuit`), `clearCommandStep` (`requestClear`) and the clear's
+   three-way settle. It owns **no state and no ref**: every latch travels in as
+   a `QuitClearHost` field, because each one is ALSO written or read by a driver
+   this slice does not own — `exitPendingRef` (the turn's settle +
+   `keys/snapshot.ts`), `clearingRef`/`ownClearsRef` (the `watch` activity
+   effect, `swapSession`, the wake gate), `clearAfterTurnRef` (the settle),
+   `runClearRef` (the settle). Re-creating any of them would be a second latch
+   decoupled from its writers — the class of bug the plan's failure-mode table
+   calls "stale closure". The hook returns the same three identifiers
+   (`requestQuit`, `runClear`, `requestClear`), so the `KeyHost` port, the
+   command context and `/exit`'s alias are unchanged.
+2. **`RunQuit` moves with the hook** (plan H4(1), l. 382: "the slice that owns one
+   takes it with it"): declared in `useQuitClear.ts`, re-exported from
+   `App.tsx`, `index.ts` **and** `app-types.ts` — the last because `AppProps`
+   (resident there) has a `runQuit?: RunQuit` field, so that file needs the type
+   regardless. Three re-exports, one declaration: every importer (`run.tsx`,
+   `packages/cli/src/attach-run.ts`, 40 test files) resolves unchanged.
+3. **`App.tsx`** — the three bodies gone, one `useQuitClear({…})` call in their
+   place plus `runClearRef.current = runClear;` (the forward reference the turn's
+   settle reads, assigned where it was assigned before). Imports dropped to what
+   `App` still uses: `clearCommandStep`/`clearErrorNotice`/`clearNoopNotice`,
+   `quitCommandStep`, `backgroundCount`/`backgroundNames` all left the file;
+   `quitConfirmText` **stayed** (it formats the dialog's one line, and the dialog
+   is still App's to render).
+
+**What did NOT move, and why (stated, not discovered late).**
+- **`startCompaction`** (`/compact`'s machinery) sits BETWEEN the moved bodies on
+  `main` and is **S9a's**, not S8's (plan M5: "moving later with S9a / S8"). It
+  stayed verbatim in `App.tsx` at its old relative position, appending no line to
+  this slice's diff beyond the shift. Flagged here because the plan's range
+  ("3008–3161") reads as one contiguous block and is not.
+- **`quitConfirm` state + `quitConfirmRef` + `setQuitConfirm`** stay in `App`:
+  the render paints the dialog (`3111`), and the key snapshot and the `closed`
+  activity both write it. `setQuitConfirm` arrives as a port field exactly as it
+  did before.
+- **`CLEARED_NOTICE`/`CLEARED_ELSEWHERE_NOTICE`** stay: they are announced by the
+  `watch` activity effect, not by these bodies.
+
+**Drift from the Implementation (recorded, not silent).**
+1. **`requestClear` came with `requestQuit`/`runClear`.** The module map (l. 149)
+   lists only "`requestQuit`, `runClear` 3008–3160", but the *Slice* row (l. 176)
+   and M5 both put `/clear`'s machinery here ("`startCompaction()` /
+   `requestClear()` (moving later with S9a / S8)"), and `commands/clear.ts`'s own
+   docblock says "later moves with S8". Moving it is the only reading that
+   leaves one executor: leaving it behind would strand `clearingRef`,
+   `runClearRef` and `clearAfterTurnRef` in `App` while their siblings moved.
+2. **The hook's `useCallback` dep arrays name the port's REF fields, which the
+   verbatim arrays did not.** Same cause as S6's drift 1: a `useRef` arriving as
+   a PROP is a dep like any other, and Biome's `useExhaustiveDependencies` fails
+   otherwise (measured: the verbatim arrays gave `2 errors` on `biome check`, the
+   field-naming arrays give 0). Every such field is a stable `useRef` object, so
+   **no callback identity changed** — the H2 property is preserved by
+   construction, and `app-structural-identity.test.ts` (green, unedited) still
+   holds.
+3. **`app-types.ts` needed the `RunQuit` re-export too.** The plan named
+   `App.tsx` and `index.ts` (l. 1022); `AppProps` lives in `app-types.ts` and has
+   a `runQuit?: RunQuit` member, so that file re-exports it from the hook as
+   well. One declaration, three re-exports — pinned by a new structural case.
+
+**The move is verbatim, checked rather than asserted.** A line-by-line sweep of
+the three pre-slice bodies against the hook
+(`.tentacle/tmp/app-decomp-8-quitclear/`, the `python3` fragment in this
+slice's log) reports: `requestQuit` 36 non-blank lines, **1** not found
+verbatim; `runClear` 105, **1**; `requestClear` 26, **0**. The two exceptions are
+exactly drift 2 — `requestQuit`'s dep-array COMMENT (rewritten, because the array
+below it changed) and `runClear`'s dep array itself
+(`[pushNotice, wakeIfPending]` → the field-naming array). No statement, no
+comment inside a body, and no identifier changed: the same refs are read at the
+same points, so Fable H3's freshness rule holds per field.
+
+**Tests (new only).** `packages/tui/test/app-quit-clear-layer.test.tsx` (7
+App-seam cases) — the mid-turn quit (stop, notice, the SETTLE's exit via
+`exitPending`), `/quit` ≡ `/exit` with nothing at stake, a run TUI's
+`othersOnSession()` read LIVE, the clear asked once, `busy` from the live latch,
+`stop_then_clear` reaching the clear through `runClearRef`, and the `legacy`
+close-and-swap. `packages/tui/test/app-quit-clear-structure.test.ts` (7
+source-level cases) — no decision is imported or called in `App.tsx`, the hook
+really calls them, exactly ONE `useQuitClear` call with the three frozen
+identifiers, App still has its 20 effects and the hook none, the port is
+destructured (no `host.`, no ref/state created inside), and `RunQuit` is declared
+once in the hook with three resolving re-exports.
+
+**RED before GREEN (§4/§9).** `.tentacle/tmp/app-decomp-8-quitclear/redgreen.sh`
+copies `git show HEAD`'s three sources back in (no VCS command touches the tree),
+runs both new files, then restores and re-runs:
+- **pre-slice:** structure `1 pass / 6 fail` — on the assertions, not on imports
+  (`not.toContain` on `clearCommandStep(`, `useQuitClear(` count, the missing
+  `useQuitClear.ts` for the two tests that read it, the `RunQuit` declaration
+  site); layer `7 pass / 0 fail`, which is correct and expected: the *behaviour*
+  is unchanged by a move, so only the structural pins can be red before it.
+- **as built:** both `7 pass / 0 fail`; `md5` of `App.tsx` matches the pre-run
+  copy, so nothing was left mutated.
+
+**Mutation check (§9 non-vacuity) — 12/12 KILLED.**
+`.tentacle/tmp/app-decomp-8-quitclear/mutate.ts` (byte-copy, ONE textual
+mutation, the filtered owning test, restore, sha256 compare; a 0-test run is
+reported INVALID so a bad filter cannot look like a kill). Every row is a red on
+the ASSERTION with a real count, never an import/compile error, and every restore
+printed `MATCHES` (log: `mutations.log`).
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | App never assigns `runClearRef` (the settle's clear is a no-op) | **KILLED** (0/1) |
+| M2 | `clearing` in `clearCommandStep` read as a value, not the live ref | **KILLED** (0/1) |
+| M3 | `exitPendingRef` set to `false` (a mid-turn quit never exits) | **KILLED** (0/1) |
+| M4 | the quit's `running` read as a constant (no stop-first) | **KILLED** (0/1) |
+| M5 | `stop_then_clear` never aborts the turn | **KILLED** (0/1) |
+| M6 | the `legacy` branch swaps nothing (a clear-less session keeps serving) | **KILLED** (0/1) |
+| M7 | a decision body re-inlined in `App.tsx` | **KILLED** (0/1) |
+| M8 | `useQuitClear` called twice (two executors over one set of refs) | **KILLED** (0/1) |
+| M9 | `RunQuit` declared a second time in `app-types.ts` | **KILLED** (0/1) |
+| M10 | a ref re-created in the hook instead of taken from its writer | **SURVIVED (1/0)** first — my case only rejected `useRef(`; **KILLED** after adding the hand-rolled `{ current }` shape |
+| M11 | the port taken whole (`host.sessionRef`), so no dep can name a field | **KILLED** (0/1) |
+| M12 | an effect added to the hook (H1: an effect's index would shift) | **KILLED** (0/1) |
+
+M10 is the one real hole this pass found: "the hook must not create a ref" was
+written as "no `useRef(`", which a `const ownClears = { current: 0 }` walks
+straight past. The case now also rejects `useState(` and any `= { current:`
+initializer, and the mutant is killed — a legitimate finding, fixed, not a
+loosened assertion.
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` clean (both projects —
+`tsc -p apps/mobile` included by `bun run check`) · `bun run lint` →
+`biome check .` **1186 files, 0 errors 0 warnings** (the AGENTS §6 baseline) ·
+`bun test` → **8891 pass / 3 skip / 0 fail** across 638 files, exit 0 (the 3
+skips are the documented opt-ins: live-k8s, live-docker, the real-socket
+keepalive). `packages/tui` alone: **1916 pass / 0 fail** across 133 files. No
+schema change → `packages/protocol/schema/protocol.json` untouched.
+`changelog.d/app-decomp-8-quitclear.changed.md` added. `TODO.md` untouched (the
+orchestrator's line, §10).
+
+**Coverage (`bun test --coverage packages/tui`), the plan's per-slice check.**
+Measured BOTH sides (`.tentacle/tmp/app-decomp-8-quitclear/precov.sh` swaps
+`git show HEAD`'s sources in, runs the same command, restores, and the `md5`
+compare proves the tree came back byte-identical):
+
+| | % Funcs | % Lines |
+|---|---|---|
+| `App.tsx` **pre-slice** | 94.85 | 97.64 |
+| `App.tsx` **as built** | **95.09** | **98.11** |
+| `useQuitClear.ts` (new) | 93.33 | 90.00 |
+
+So nothing dropped: `App.tsx`'s percentages ROSE (169 fewer lines, the same
+covered ones) and the moved bodies are covered from their new home. The new
+file's uncovered lines (220, 240, 247, 308–316) are defensive arms that existed
+verbatim on `main` and were equally uncovered there: both early `return`s of the
+clear's settle (a settle landing after a session swap), the `catch` that
+swallows a throw in the notice path, and the `openForReset` REJECTION path. No
+branch this slice introduced is left unpinned.
+
+**Unverified (one line each).**
+- "Every ref these bodies read is ALSO read or written outside the hook" is
+  argued from the `rg` sweep above and stated per field in the hook's header, not
+  pinned by a test: a ref that became hook-private would still typecheck (a
+  `MutableRefObject` field is the same type either way). The structural case
+  rejects *creating* one; it cannot see a shared one being replaced.

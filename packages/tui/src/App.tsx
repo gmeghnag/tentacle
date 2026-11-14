@@ -43,7 +43,6 @@ import {
   jobDrawerView,
   listVisible,
 } from "./background-list.ts";
-import { backgroundCount, backgroundNames } from "./background-view.ts";
 import {
   BLINK_HALF_MS,
   BLINK_IDLE,
@@ -59,7 +58,6 @@ import {
   type QuitConfirmFacts,
   matchCommands,
   paletteWindow,
-  quitCommandStep,
   quitConfirmText,
 } from "./commands.ts";
 import { dispatchCommand } from "./commands/dispatch.ts";
@@ -98,15 +96,10 @@ import {
 import { useAttachments } from "./useAttachments.ts";
 import { useDock } from "./useDock.ts";
 import { useMouse } from "./useMouse.ts";
+import { useQuitClear } from "./useQuitClear.ts";
 
 export type { AutoAcceptFeed };
-import {
-  CLEARED_ELSEWHERE_NOTICE,
-  CLEARED_NOTICE,
-  clearCommandStep,
-  clearErrorNotice,
-  clearNoopNotice,
-} from "./clear-command.ts";
+import { CLEARED_ELSEWHERE_NOTICE, CLEARED_NOTICE } from "./clear-command.ts";
 import {
   type DaemonQueue,
   type QueuedRows,
@@ -210,11 +203,13 @@ import type { AppProps, SessionController, SettingsNoticeLine } from "./app-type
 export type {
   AppProps,
   NoticeFeed,
-  RunQuit,
   SessionController,
   SessionDirectory,
   SettingsNoticeLine,
 } from "./app-types.ts";
+// `RunQuit` moved with S8 to the hook that executes it; it is re-exported here
+// for every importer that names `../src/App.tsx` (the test boundary).
+export type { RunQuit } from "./useQuitClear.ts";
 
 // Rows reserved below the transcript viewport: a blank spacer, the input/thinking
 // line, the status bar, plus one slack row so the frame never overflows the
@@ -2158,165 +2153,36 @@ export function App({
     wakeIfPending,
   ]);
 
-  /**
-   * `/quit` and `/exit`: the decision is `quitCommandStep`'s (A1); `confirmed`
-   * is the `y` of its confirmation. Another device's turn is not mine to stop
-   * on the way out (C4), but a run TUI's quit ends the session, so it stops
-   * that one too. On `connect` (`detachOnQuit`) quitting only detaches.
-   */
-  const requestQuit = useCallback(
-    (confirmed: boolean): void => {
-      const agents = backgroundCount(subagentsRef.current);
-      // A running SHELL job dies with the session too (owner Q3 (a)) — but only a
-      // quit that CLOSES it loses one, so a `connect` detach passes none.
-      const jobs = detachOnQuit ? 0 : (jobRowsRef.current?.length ?? 0);
-      const step = quitCommandStep({
-        running: stateRef.current.running,
-        exitPending: exitPendingRef.current,
-        foreign: foreignRef.current !== null,
-        detaches: detachOnQuit,
-        endsSession: runQuit !== undefined,
-        others: confirmed ? 0 : (runQuit?.othersOnSession() ?? 0),
-        agents: confirmed ? 0 : agents,
-        jobs: confirmed ? 0 : jobs,
-        confirmed,
-      });
-      if (step === "confirm") {
-        setQuitConfirm({
-          others: runQuit?.othersOnSession() ?? 0,
-          agents,
-          jobs,
-          names: backgroundNames(subagentsRef.current),
-        });
-        return;
-      }
-      if (step === "exit") {
-        exit();
-        return;
-      }
-      exitPendingRef.current = true;
-      pushNotice(
-        "_Stopping the turn so it is saved before exiting — /exit or Ctrl+C again to quit now._",
-      );
-      abortRef.current?.abort();
-    },
-    // The dock's refs (S5) are STABLE `useRef` objects: naming them keeps the
-    // identity rule (Fable H2) and never re-creates this callback.
-    [detachOnQuit, exit, pushNotice, runQuit, setQuitConfirm, jobRowsRef, subagentsRef],
-  );
-
-  /**
-   * Ask the daemon to reset the conversation (docs/feat/clear-keeps-jobs.md).
-   * The transcript is replaced by the `history{clear}` activity, never here; a
-   * refusal changes nothing and says so. Nothing escapes: both settle paths are
-   * guarded (a throw in a void promise would be an unhandled rejection).
-   */
-  const runClear = useCallback((): void => {
-    const session = sessionRef.current;
-    if (!session?.clear) {
-      return;
-    }
-    // Called ON the session: under `connect` this is the `RemoteSession` CLASS
-    // instance, whose `clear` reads `this` (`this.openForReset()`) — a method
-    // taken off the object and called alone loses `this`
-    // (docs/fix/clear-connect-unbound.md).
-    const clear = session.clear.bind(session);
-    clearingRef.current = true;
-    // The open a reset needs comes FIRST (review M1): it can ATTACH a session
-    // another device keeps live, and that attach's snapshot is a
-    // `history{reason: null}` — which releases the latch and zeroes the
-    // own-clear count. Arming the count before it made my own `/clear` look like
-    // another device's ("cleared on another device"). The latch still goes up
-    // first: it also gates the wake a clear must delay.
-    const send = (): void => {
-      clearingRef.current = true;
-      ownClearsRef.current += 1;
-      let call: Promise<unknown>;
-      try {
-        call = clear();
-      } catch (error) {
-        call = Promise.reject(error);
-      }
-      void call.then(
-        (result) => {
-          try {
-            if (sessionRef.current !== session) {
-              return;
-            }
-            // The answer comes BEFORE the cleared history (the barrier makes the
-            // client read a snapshot): the latch stays up until the `history`
-            // activity applies it (review H2) — it wakes from there. Only a clear
-            // that did nothing (no session open yet: `{0, 0}`, no history coming)
-            // lets go here (review L6b) — and, with a chat on screen, says so
-            // (docs/fix/clear-silent-noop.md: a silent no-op is a §7 drop).
-            const r = result as { before?: number; after?: number } | undefined;
-            if (r?.before === 0 && r.after === 0) {
-              clearingRef.current = false;
-              if (ownClearsRef.current > 0) {
-                ownClearsRef.current -= 1;
-              }
-              const noop = clearNoopNotice({
-                before: 0,
-                after: 0,
-                // A conversation on screen: any prompt or tool row. A fresh
-                // session's welcome line is neither, so it stays quiet.
-                chatShown: stateRef.current.items.some(
-                  (i) => i.kind === "user" || i.kind === "tool",
-                ),
-              });
-              if (noop !== null) {
-                pushNotice(noop);
-              }
-              wakeIfPending();
-            }
-          } catch {
-            // Nothing to do: the cleared chat arrives through the history activity.
-          }
-        },
-        (error: unknown) => {
-          try {
-            if (sessionRef.current === session) {
-              const message = error instanceof Error ? error.message : String(error);
-              clearingRef.current = false;
-              // A dropped link ("not retried") may have landed: its history (a
-              // replay or a snapshot) is then still MINE — keep the count (L6a);
-              // a snapshot (`reason: null`) zeroes it. Any other error replaced nothing.
-              if (!/not retried/i.test(message) && ownClearsRef.current > 0) {
-                ownClearsRef.current -= 1;
-              }
-              pushNotice(clearErrorNotice(message));
-              // The gate held a wake back: nothing else would start it (review H2d).
-              wakeIfPending();
-            }
-          } catch {
-            // Nothing to do: the notice is a courtesy.
-          }
-        },
-      );
-    };
-    // Settles only once the attach snapshot (if any) has been applied: the
-    // bookkeeping above is armed after it, never before (review M1).
-    void Promise.resolve(session.openForReset?.()).then(
-      () => {
-        if (sessionRef.current === session) {
-          send();
-        }
-      },
-      (error: unknown) => {
-        try {
-          if (sessionRef.current === session) {
-            // Nothing was armed: the count was never raised here.
-            clearingRef.current = false;
-            pushNotice(clearErrorNotice(error instanceof Error ? error.message : String(error)));
-            // The gate held a wake back: nothing else would start it (H2d).
-            wakeIfPending();
-          }
-        } catch {
-          // Nothing to do: the notice is a courtesy.
-        }
-      },
-    );
-  }, [pushNotice, wakeIfPending]);
+  // --- quit and clear (S8) --------------------------------------------------
+  // The three executors live in `useQuitClear.ts`. The hook owns no state and no
+  // effect: every ref below is shared with a driver this slice does not own (the
+  // turn's settle, the `watch` activity effect, `swapSession`, the key
+  // snapshot), so they are PASSED IN — each use site keeps its identifier and its
+  // source (Fable M1/H3). `runClearRef` is assigned right below, because the
+  // turn's settle calls the clear this hook returns.
+  const { requestQuit, runClear, requestClear } = useQuitClear({
+    sessionRef,
+    stateRef,
+    abortRef,
+    foreignRef,
+    exitPendingRef,
+    clearingRef,
+    ownClearsRef,
+    clearAfterTurnRef,
+    stoppedHereRef,
+    compactingRef,
+    runClearRef,
+    subagentsRef,
+    jobRowsRef,
+    setQuitConfirm,
+    runQuit,
+    detachOnQuit,
+    makeSession,
+    swapSession,
+    pushNotice,
+    wakeIfPending,
+    exit,
+  });
   runClearRef.current = runClear;
 
   /**
@@ -2394,41 +2260,6 @@ export function App({
       (error: unknown) => settled({ ok: false, error }),
     );
   }, [askContext, pushNotice, restoreInput, run, setCompacting, setRows, wakeIfPending]);
-
-  /**
-   * `/clear`'s machinery (docs/feat/app-decomposition.md M5): the step's own
-   * refusals, the latch, the stop-then-clear hand-off and the legacy
-   * close-and-replace. Its refs are App's and it moves with S8; the command
-   * file (`commands/clear.ts`) only calls it.
-   */
-  const requestClear = useCallback((): void => {
-    const step = clearCommandStep({
-      canClear: typeof sessionRef.current?.clear === "function",
-      running: stateRef.current.running,
-      ownTurn: foreignRef.current === null,
-      compacting: compactingRef.current,
-      clearing: clearingRef.current,
-    });
-    if (step === "legacy") {
-      // A session without `clear` (the in-process fallback): the old
-      // session ends (with its jobs) before the fresh one starts
-      // (decision D3).
-      sessionRef.current?.close?.();
-      swapSession(makeSession());
-    } else if (step === "busy") {
-      pushNotice("_A /clear is already running._");
-    } else if (step === "compacting") {
-      pushNotice("_Can't clear while a compaction is running._");
-    } else if (step === "stop_then_clear" && abortRef.current) {
-      // Stop the own turn like Esc; the clear runs when it has settled.
-      clearAfterTurnRef.current = true;
-      stoppedHereRef.current = true;
-      abortRef.current.abort();
-    } else {
-      // Another device's running turn: the daemon answers TurnInProgress.
-      runClearRef.current?.();
-    }
-  }, [makeSession, pushNotice, swapSession]);
 
   /**
    * The ONE way typed `/…` text becomes an effect: `dispatchCommand`
