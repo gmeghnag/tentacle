@@ -958,3 +958,132 @@ source matched its pre-mutation backup).
 **Model note:** the reviewer is the same model as the one Execution is signed by (only the context is fresh), so blind spots they share may survive both passes.
 
 *— claude-opus-5-5, 2026-11-14*
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14*
+
+Scope: the four findings of `## Review — H2` above (1 HIGH, 3 MEDIUM). Each got a
+regression test written first and shown RED on the pre-fix code, then the fix, then
+a mutation that breaks the fix again and shows the test FAILING on the property
+(not on an import, not on a counter).
+
+**1 (HIGH) — an absent file read as "nothing to move" lost the conversation.
+FIXED.** Root cause: `hopSession` took `load → absent` to mean "never opened" and
+skipped the freeze, so a session whose writes failed (lock, EACCES, ENOSPC) moved
+unseeded and the conversation was gone from the live session AND the disk while the
+hop said `moved`.
+
+- `local-runtime.ts:186` — new `holdsSession(id)`: does THIS runtime hold a
+  controller for the uid? Synchronous and local (`:1203`), no daemon round trip.
+- `session-hop.ts:137` — `holdsIt = old.holdsSession(sessionId)`; `:153` the freeze
+  now runs when `stored.status === "ok" || holdsIt`, and `:167` the SEED is read
+  again after it. The pre-freeze read keeps exactly one job: refusing an
+  `unreadable` copy *before* a container is created.
+- That second read also fixes the neighbouring hole the first fix exposed: a
+  **stale** file (an earlier save landed, a later one failed) is as wrong a seed
+  as an absent one, and only a post-freeze read heals it (test 2 below).
+
+Tests (`session-hop.test.ts`, `describe("fix1 HIGH: …")`) — the store's directory
+is `chmod 0o500`d (as `relay.test.ts` does), which is what a lock or a full disk
+does: (a) a turn whose save failed is still the hop's history — the target's model
+sees `precious first turn`, `loads === ["absent","ok"]`; (b) a **stale** file is
+healed, not seeded — the target's model sees both local turns; (c) a runtime that
+holds NOTHING of the uid still takes the old "nothing persisted" path with
+`frozen === 0` (the guard must not turn a real empty session into a refusal).
+
+Mutations (`.tentacle/tmp/session-hop/fix1/mut-a.sh`, `mut-b.sh`):
+
+| # | mutation | result |
+|---|---|---|
+| F1a | `const holdsIt = false` (the pre-fix branch) | 1 fail — "a turn whose save failed is still the hop's history" |
+| F1b | `const again = stored` (seed from the pre-freeze read) | 2 fail — (a) and "a STALE file … is healed, not seeded" |
+
+**2 (MEDIUM) — a throw in step 4(a) skipped the rollback. FIXED (orchestrator).**
+Root cause: `closeOrRefuseOwn` was awaited bare, so a rejection escaped
+`hopSession`, `target.rollback()` never ran, and the caller got a rejection instead
+of `not moved: …` (in H4: a leaked container). `session-hop.ts:180` now wraps it:
+one `notMoved(... "not joining it (<reason>)")` with the target rolled back.
+
+Drift, recorded honestly: I first also wrapped `client.closeSession(id)` inside
+`local-runtime.ts`'s `closeOwn` — and **reverted it**. `RemoteClient.closeSession`
+is contracted never to reject (`remote-client.ts:1432-1440`: "Resolves when the
+daemon answered — or the request failed … never rejects"), so that catch was dead
+code no mutation could reach (attempted: a closed transport still resolved). The
+reachable failure is the `ownUse` read, which is what the orchestrator guard covers.
+
+Same finding, second half: `deps.afterLeave` throwing after the commit. `hopSession`'s
+own `try` (`:240-247`) turns it into a notice, and the facade passes `afterLeave`
+through unchanged (`hop-runtime.ts:203`) — I removed the duplicate catch I had first
+put in the facade, so there is ONE place that decides it (and `errorText` is no
+longer imported there).
+
+Tests — `describe("fix1 MEDIUM: 4(a)'s guard …")`: a target whose `ownUse` rejects
+(a dropped link) is refused, `rolledBack === 1`, the notice names the reason; and
+`describe("fix1 MEDIUM: a throw before the commit …")`: `afterLeave` rejecting gives
+`moved`, the badge on the target, `statuses.at(-1) === null` and the reason in the
+notices.
+
+Mutations (`mut-c.sh`, `mut-g.sh`):
+
+| # | mutation | result |
+|---|---|---|
+| F2a | 4(a)'s guard removed (`own = await closeOrRefuseOwn(…)` bare) | 2 fail — both rows, `hopSession` REJECTS |
+| F2b | `hopSession`'s `afterLeave` catch removed | 1 fail — "`afterLeave` throws after the commit" |
+
+**3 (MEDIUM) — the facade did not move job listeners. FIXED.**
+Root cause: `onStart`/`onExit` delegated straight to `current.jobs`, so the TUI's
+subscription stayed bound to the runtime it subscribed on; after a swap it never
+heard a target job exit (D2: "listeners are re-subscribed on swap").
+`hop-runtime.ts:114-133` adds the same indirection `link` already had — one set per
+feed, `rejobs()` re-binding to the new `current` at the commit (`:196`, after
+`relink()`), dropped on `dispose` (`:219-222`).
+
+Test — `describe("fix1 MEDIUM: the facade re-subscribes job listeners on a swap")`,
+with `handDriven(runtime)` giving each runtime a feed driven by hand: before the hop
+the facade is bound to the initial runtime, after it to the TARGET and no longer to
+the old one; a `fireExit`/`fireStart` on the target reaches the listener subscribed
+BEFORE the hop, and the old runtime's feed reaches nobody.
+
+Mutation (`mut-d.sh`): `onStart`/`onExit` delegating to `current.jobs` (the pre-fix
+shape) → 1 fail, "a job exit on the TARGET reaches the listener subscribed BEFORE
+the hop" (`first.bound()` showed `{starts:2}`: two live bindings, one to a dead
+runtime).
+
+**4 (MEDIUM) — the commit-time seal was untested. FIXED (test only, no code
+change: the seal was correct).** Mutation: comment out `old.sealSessions()`.
+
+Test — `describe("fix1 MEDIUM: the commit-time seal really seals (step 5)")`: the
+old runtime is deliberately NOT disposed (`dispose: async () => {}`, its session
+still open daemon-side, as a worker whose terminate failed), the hop commits, the
+target saves a turn, and then the old runtime is asked to save. Sealed, it starts no
+write at all (`saver.observe` counts 0 for the uid), the file keeps the target's
+history, and `seals === 1` is asserted LAST so the failure is the behaviour.
+
+This one needed two tries, and the first was vacuous (AGENTS §9): asserting only the
+`seals` counter proved the call, not the property; and with the old runtime disposed
+(`m.close()` → `client.close()`) its save was already a no-op, so the behavioural
+assertions passed on the mutated code too. The fix was the test — keep the runtime
+live — not the source.
+
+Mutation (`mut-e.sh`): `old.sealSessions()` commented out → 1 fail on
+`expect(writes).toBe(0)` (received 1), i.e. the old runtime DID start a save of the
+target's file.
+
+**Test count:** `packages/cli/test/session-hop.test.ts` 22 → 30 rows (+8). No other
+test file changed. The four fix-1 `describe`s are grouped at the end of the file
+under `// --- fix round 1 (H2 review): the four HIGH/MEDIUM findings, as tests ---`,
+each row naming its mutation in a comment above the assertion (the file's existing
+convention).
+
+**Gate (final tree):** `bunx tsc --noEmit` → 0 · `bun run lint` → `Checked 1121
+files`, 0 errors/warnings (2 formatting errors from my first pass, fixed with
+`biome check --write`) · `bun test` → **8604 pass, 3 skip (the documented
+opt-ins), 0 fail** across 614 files. One row failed the FIRST full run
+(`connect-model-error.test.ts:142`, "Invalid API Key" vs the mock server's
+"unauthorized"); it passes in isolation and passed on the re-run — a
+load-related flake in a file this task does not touch, not a regression. No protocol change, no
+`protocol.d/` note, no new changelog fragment (fix round of an unreleased slice;
+`changelog.d/session-hop.added.md` still carries the feature's one bullet).
+Every mutation reverted, `md5` of each touched source matched its pre-mutation
+value (printed by each script), `git status --porcelain` shows only the four
+intended files.

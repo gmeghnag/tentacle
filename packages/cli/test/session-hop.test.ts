@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { chmodSync } from "node:fs";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type SessionRecord } from "@tentacle/agent";
 import {
+  type BackgroundJob,
   type ChatMessage,
   type ChatRequest,
   type ExecutionEnvironment,
+  type JobController,
   type ModelProvider,
   PermissionBroker,
   type PermissionRequest,
@@ -1183,5 +1186,550 @@ describe("the typed command's spec drives the hop (H1 → H2)", () => {
     });
     const local = parseHopCommand("/move local --rm");
     expect(local.kind === "spec" ? local.spec : null).toEqual({ target: "local", keep: false });
+  });
+});
+
+// --- fix round 1 (H2 review): the four HIGH/MEDIUM findings, as tests ------
+
+/**
+ * A store whose directory refuses writes (`chmod`, as `relay.test.ts` does —
+ * what a lock or a full disk does too), so a save fails at the FS: the store's
+ * own writer state keeps the segment, and only a LATER successful save can put
+ * it on disk. That is the state `load` cannot classify by the file alone.
+ */
+async function blockedStore() {
+  const root = join(dir, "sessions");
+  await mkdir(root, { recursive: true });
+  const store = new LogSessionStore(root);
+  const notices: string[] = [];
+  const saver = new SessionSaver(store, (text) => notices.push(text));
+  const shared = { permissions: new PermissionBroker(), saver, notices };
+  const a = await runtimeOn(rig(new Reply("reply-A")), shared, null);
+  const ctl = a.createSession();
+  const uid = ctl.sessionId;
+  if (!uid) throw new Error("no uid");
+  return {
+    root,
+    store,
+    shared,
+    a,
+    ctl,
+    uid,
+    block: () => chmodSync(root, 0o500),
+    unblock: () => chmodSync(root, 0o700),
+  };
+}
+
+describe("fix1 HIGH: an absent file is not 'nothing to move' when a runtime holds the uid", () => {
+  test("a turn whose save failed is still the hop's history (absent file, held copy)", async () => {
+    // Mutation: take `absent` as "nothing persisted" from the file alone (the
+    // fix-1 code before this round) → the freeze never runs, the target opens
+    // unseeded and the turn is gone from the live session AND the disk, while
+    // the hop says "moved".
+    const rigged = await blockedStore();
+    rigged.block();
+    // Every write fails: nothing ever reaches the file (still absent afterwards).
+    await drain(rigged.ctl.send("precious first turn"));
+    await rigged.ctl.flushed();
+    await rigged.shared.saver.drain();
+    await rigged.store.drain();
+    rigged.unblock();
+    expect(rigged.a.holdsSession(rigged.uid)).toBe(true);
+    expect((await rigged.store.load(rigged.uid)).status).toBe("absent");
+
+    const targetModel = new Reply("reply-B");
+    const loads: string[] = [];
+    const outcome = await hopSession(
+      rigged.a,
+      { spec: CONTAINER, sessionId: rigged.uid },
+      {
+        build: async (_spec, id) => ({
+          kind: "built",
+          built: {
+            runtime: await runtimeOn(rig(targetModel), rigged.shared, null, id),
+            place: { kind: "workload", engine: "docker", name: "box" },
+            daemonInPod: true,
+            preexisting: false,
+            rollback: async () => {},
+          },
+        }),
+        load: async (id) => {
+          const result = await rigged.store.load(id);
+          loads.push(result.status);
+          return result;
+        },
+      },
+    );
+    expect(outcome.kind).toBe("moved");
+    if (outcome.kind !== "moved") return;
+    // The freeze put it on disk, and only the AFTER read is the seed.
+    expect(loads).toEqual(["absent", "ok"]);
+    const next = outcome.built.runtime.createSession();
+    expect(next.sessionId).toBe(rigged.uid);
+    await drain(next.send("from the target"));
+    await next.flushed();
+    await rigged.shared.saver.drain();
+    await rigged.store.drain();
+    expect(targetModel.seen.at(-1)).toEqual([
+      "system:sys",
+      "user:precious first turn",
+      "assistant:reply-A",
+      "user:from the target",
+    ]);
+    expect(await messagesOf(rigged.store, rigged.uid)).toContain("precious first turn");
+  });
+
+  test("a STALE file (an earlier save landed, a later one failed) is healed, not seeded", async () => {
+    // The same branch, one step further on: here the file exists but is
+    // behind, so a seed read BEFORE the freeze loses the newest turn. The
+    // re-read after it is what carries it.
+    const rigged = await blockedStore();
+    await drain(rigged.ctl.send("the saved turn"));
+    await rigged.ctl.flushed();
+    await rigged.shared.saver.drain();
+    await rigged.store.drain();
+    expect(await messagesOf(rigged.store, rigged.uid)).toContain("the saved turn");
+    rigged.block();
+    await drain(rigged.ctl.send("the unsaved turn"));
+    await rigged.ctl.flushed();
+    await rigged.shared.saver.drain();
+    await rigged.store.drain();
+    rigged.unblock();
+    // The file is there but STALE: the hop must not seed the target with it.
+    expect(await messagesOf(rigged.store, rigged.uid)).not.toContain("the unsaved turn");
+
+    const targetModel = new Reply("reply-B");
+    const outcome = await hopSession(
+      rigged.a,
+      { spec: CONTAINER, sessionId: rigged.uid },
+      {
+        build: async (_spec, id) => ({
+          kind: "built",
+          built: {
+            runtime: await runtimeOn(rig(targetModel), rigged.shared, null, id),
+            place: { kind: "workload", engine: "docker", name: "box" },
+            daemonInPod: true,
+            preexisting: false,
+            rollback: async () => {},
+          },
+        }),
+        load: (id) => rigged.store.load(id),
+      },
+    );
+    expect(outcome.kind).toBe("moved");
+    if (outcome.kind !== "moved") return;
+    const next = outcome.built.runtime.createSession();
+    await drain(next.send("from the target"));
+    await next.flushed();
+    await rigged.shared.saver.drain();
+    await rigged.store.drain();
+    // The target's model saw BOTH local turns: the seed was read after the freeze.
+    expect(targetModel.seen.at(-1)).toEqual([
+      "system:sys",
+      "user:the saved turn",
+      "assistant:reply-A",
+      "user:the unsaved turn",
+      "assistant:reply-A",
+      "user:from the target",
+    ]);
+  });
+
+  test("a runtime that holds NOTHING of the uid never freezes (the old path)", async () => {
+    // The other side of the same guard: `holdsSession` must not turn a
+    // genuinely empty session into a freeze-and-refuse.
+    const store = storeIn(dir);
+    const shared = sharedOn(store);
+    const uid = "33333333-3333-4333-8333-333333333333";
+    const fresh = await runtimeOn(rig(new Reply("reply-C")), shared, null, uid);
+    expect(fresh.holdsSession(uid)).toBe(false);
+    expect((await store.load(uid)).status).toBe("absent"); // nothing persisted
+    let frozen = 0;
+    const counted: LocalRuntime = {
+      ...fresh,
+      freeze: async (id) => {
+        frozen += 1;
+        return fresh.freeze(id);
+      },
+    };
+    const outcome = await hopSession(
+      counted,
+      { spec: CONTAINER, sessionId: uid },
+      {
+        build: async (_spec, id) => ({
+          kind: "built",
+          built: {
+            runtime: await runtimeOn(rig(new Reply("reply-B")), shared, null, id),
+            place: { kind: "workload", engine: "docker", name: "box" },
+            daemonInPod: true,
+            preexisting: false,
+            rollback: async () => {},
+          },
+        }),
+        load: (id) => store.load(id),
+      },
+    );
+    expect(outcome.kind).toBe("moved");
+    expect(frozen).toBe(0); // nothing to freeze: the file's absence IS the fact
+  });
+});
+
+describe("fix1 MEDIUM: a throw before the commit still rolls the target back", () => {
+  test("4(a)'s read throws (a dropped link): refused, one rollback, never a rejection", async () => {
+    // Mutation: let `closeOrRefuseOwn`'s throw escape (`session-hop.ts` before
+    // fix 1) → `hopSession` REJECTS, `target.rollback()` never runs and, in H4,
+    // the container this hop created leaks.
+    const store = storeIn(dir);
+    const shared = sharedOn(store);
+    const a = await runtimeOn(rig(new Reply("reply-A")), shared, null);
+    const ctl = a.createSession();
+    await drain(ctl.send("first"));
+    await ctl.flushed();
+    await shared.saver.drain();
+    await store.drain();
+    const uid = ctl.sessionId;
+    if (!uid) throw new Error("no uid");
+
+    const real = await runtimeOn(rig(new Reply("reply-B")), shared, null, uid);
+    const thrower: LocalRuntime = {
+      ...real,
+      ownUse: async () => ({ own: { running: false, jobs: 0 }, others: 0 }),
+      closeOwn: () => Promise.reject(new Error("link dropped")),
+    };
+    let rolledBack = 0;
+    const outcome = await hopSession(
+      a,
+      {
+        spec: { target: "attach", workload: { engine: "docker", name: "box" }, keep: true },
+        sessionId: uid,
+      },
+      {
+        build: async () => ({
+          kind: "built",
+          built: {
+            runtime: thrower,
+            place: { kind: "workload", engine: "docker", name: "box" },
+            daemonInPod: true,
+            preexisting: true,
+            rollback: async () => {
+              rolledBack += 1;
+            },
+          },
+        }),
+        load: (id) => store.load(id),
+        onCommit: () => {
+          throw new Error("must not commit");
+        },
+      },
+    );
+    expect(outcome.kind).toBe("failed");
+    expect(outcome.kind === "failed" ? outcome.notice : "").toContain("not joining it");
+    expect(rolledBack).toBe(1);
+    // The old runtime is where it was: it still saves the SAME controller.
+    await drain(ctl.send("after the refusal"));
+    await ctl.flushed();
+    await store.drain();
+    expect(await messagesOf(store, uid)).toContain("after the refusal");
+  });
+
+  test("`afterLeave` throws after the commit: moved, one notice, status cleared", async () => {
+    // Mutation: await `deps.afterLeave` bare → `hop()` rejects after the TUI
+    // already swapped, so `notify` and `status(null)` never run (`hop-runtime.ts`).
+    const store = storeIn(dir);
+    const shared = sharedOn(store);
+    const initial = await runtimeOn(rig(new Reply("reply-A")), shared, null);
+    const ctl = initial.createSession();
+    await drain(ctl.send("first"));
+    await ctl.flushed();
+    await shared.saver.drain();
+    await store.drain();
+    const uid = ctl.sessionId;
+    if (!uid) throw new Error("no uid");
+
+    const statuses: Array<string | null> = [];
+    const notices: string[] = [];
+    const hop = createHopRuntime({
+      initial,
+      startup: { place: { kind: "local" }, daemonInPod: false },
+      shared,
+      build: async (_spec, _shared, id): Promise<HopBuild> => {
+        const loaded = await store.load(id);
+        return {
+          kind: "built",
+          built: {
+            runtime: await runtimeOn(
+              rig(new Reply("reply-B")),
+              shared,
+              loaded.status === "ok" ? loaded.record : null,
+              id,
+            ),
+            place: { kind: "workload", engine: "docker", name: "box" },
+            daemonInPod: true,
+            preexisting: false,
+            rollback: async () => {},
+          },
+        };
+      },
+      load: (id) => store.load(id),
+      status: (line) => statuses.push(line),
+      notify: (text) => notices.push(text),
+      // The delete decision for the place we left fails (an unreachable engine).
+      afterLeave: () => Promise.reject(new Error("the engine did not answer")),
+    });
+    const outcome = await hop.hop(CONTAINER, uid);
+    expect(outcome.kind).toBe("moved");
+    expect(hop.target().place).toEqual({ kind: "workload", engine: "docker", name: "box" });
+    expect(statuses.at(-1)).toBeNull(); // the transient row was cleared
+    expect(notices.join("\n")).toContain("the engine did not answer");
+    await hop.dispose();
+  });
+});
+
+/** A runtime whose job feeds are driven by hand, plus the trigger for each. */
+function handDriven(runtime: LocalRuntime) {
+  let starts: Array<(job: BackgroundJob) => void> = [];
+  let exits: Array<(job: BackgroundJob) => void> = [];
+  const jobs: JobController = {
+    start: () => {
+      throw new Error("daemon-side");
+    },
+    read: () => undefined,
+    kill: () => false,
+    list: () => [],
+    dispose: () => {},
+    onStart: (listener) => {
+      starts = [...starts, listener];
+      return () => {
+        starts = starts.filter((l) => l !== listener);
+      };
+    },
+    onExit: (listener) => {
+      exits = [...exits, listener];
+      return () => {
+        exits = exits.filter((l) => l !== listener);
+      };
+    },
+  };
+  const job: BackgroundJob = {
+    id: "j1",
+    command: "sleep 1",
+    status: "exited",
+    exitCode: 0,
+    startedAt: 1,
+  };
+  return {
+    runtime: { ...runtime, jobs } as LocalRuntime,
+    /** Who is bound to THIS runtime's feeds right now (the facade binds once). */
+    bound: () => ({ starts: starts.length, exits: exits.length }),
+    fireExit: () => {
+      for (const listener of exits) listener(job);
+    },
+    fireStart: () => {
+      for (const listener of starts) listener(job);
+    },
+    job,
+  };
+}
+
+describe("fix1 MEDIUM: the facade re-subscribes job listeners on a swap", () => {
+  test("a job exit on the TARGET reaches the listener subscribed BEFORE the hop", async () => {
+    // Mutation: `onStart`/`onExit` delegating straight to `current.jobs` (the
+    // facade before fix 1) → the TUI's listener stays bound to the OLD runtime,
+    // so after a hop it never hears a job exit (D2: "listeners are
+    // re-subscribed on swap"). No test covered it.
+    const store = storeIn(dir);
+    const shared = sharedOn(store);
+    const base = await runtimeOn(rig(new Reply("reply-A")), shared, null);
+    const ctl = base.createSession();
+    await drain(ctl.send("first"));
+    await ctl.flushed();
+    await shared.saver.drain();
+    await store.drain();
+    const uid = ctl.sessionId;
+    if (!uid) throw new Error("no uid");
+
+    const first = handDriven(base);
+    const second = handDriven(await runtimeOn(rig(new Reply("reply-B")), shared, null, uid));
+    const hop = createHopRuntime({
+      initial: first.runtime,
+      startup: { place: { kind: "local" }, daemonInPod: false },
+      shared,
+      build: async (_spec, _shared, id): Promise<HopBuild> => {
+        const loaded = await store.load(id);
+        return {
+          kind: "built",
+          built: {
+            runtime: {
+              ...second.runtime,
+              openSeeded: async () => {
+                // The real one opens on its daemon; the feed is what this test reads.
+                await second.runtime.openSeeded(loaded.status === "ok" ? loaded.record : undefined);
+              },
+            } as LocalRuntime,
+            place: { kind: "workload", engine: "docker", name: "box" },
+            daemonInPod: true,
+            preexisting: false,
+            rollback: async () => {},
+          },
+        };
+      },
+      load: (id) => store.load(id),
+    });
+    const exited: string[] = [];
+    const started: string[] = [];
+    hop.jobs.onExit((job) => exited.push(job.id));
+    hop.jobs.onStart((job) => started.push(job.id));
+    // Before the hop: the facade is bound to the runtime the TUI started on.
+    expect(first.bound()).toEqual({ starts: 1, exits: 1 });
+
+    const outcome = await hop.hop(CONTAINER, uid);
+    expect(outcome.kind).toBe("moved");
+    // After it: bound to the TARGET, and no longer to the old runtime.
+    expect(second.bound()).toEqual({ starts: 1, exits: 1 });
+    expect(first.bound()).toEqual({ starts: 0, exits: 0 });
+
+    second.fireExit();
+    second.fireStart();
+    expect(exited).toEqual(["j1"]);
+    expect(started).toEqual(["j1"]);
+    // The old runtime is silent: its feeds reach nobody.
+    first.fireExit();
+    expect(exited).toEqual(["j1"]);
+    await hop.dispose();
+  });
+});
+
+describe("fix1 MEDIUM: the commit-time seal really seals (step 5)", () => {
+  test("an old runtime still open after the commit cannot re-write the file", async () => {
+    // Mutation: comment out `old.sealSessions()` in step 5 → this used to stay
+    // GREEN (M3/M8 cover sealing TOO EARLY, never sealing at all). The old
+    // runtime here is NOT disposed (its daemon link survives the hop, as a
+    // worker whose terminate failed), so a save started after the commit is
+    // live: only the seal stops it from writing its own copy over the
+    // target's.
+    const store = storeIn(dir);
+    const shared = sharedOn(store);
+    const a = await runtimeOn(rig(new Reply("reply-A")), shared, null);
+    const ctl = a.createSession();
+    await drain(ctl.send("first"));
+    await ctl.flushed();
+    await shared.saver.drain();
+    await store.drain();
+    const uid = ctl.sessionId;
+    if (!uid) throw new Error("no uid");
+    const before = await messagesOf(store, uid);
+
+    let seals = 0;
+    const old: LocalRuntime = {
+      ...a,
+      // The old runtime stays LIVE (its session open daemon-side, its client up).
+      dispose: async () => {},
+      sealSessions: () => {
+        seals += 1;
+        a.sealSessions();
+      },
+    };
+    const target = await runtimeOn(
+      rig(new Reply("reply-B")),
+      shared,
+      (await store.load(uid)).status === "ok"
+        ? ((await store.load(uid)) as { record: SessionRecord }).record
+        : null,
+      uid,
+    );
+    const outcome = await hopSession(
+      old,
+      { spec: CONTAINER, sessionId: uid },
+      {
+        build: async () => ({
+          kind: "built",
+          built: {
+            runtime: target,
+            place: { kind: "workload", engine: "docker", name: "box" },
+            daemonInPod: true,
+            preexisting: false,
+            rollback: async () => {},
+          },
+        }),
+        load: (id) => store.load(id),
+      },
+    );
+    expect(outcome.kind).toBe("moved");
+
+    // The target moves on...
+    const next = target.createSession();
+    await drain(next.send("on the target"));
+    await next.flushed();
+    await shared.saver.drain();
+    await store.drain();
+    expect(await messagesOf(store, uid)).toContain("on the target");
+
+    // ...and NOW the old runtime is asked for a save. Sealed, it starts no
+    // write at all (a write here would also be a "not saved" notice for a
+    // session that IS saved, and could refuse the next hop).
+    let writes = 0;
+    shared.saver.observe((saved) => {
+      if (saved.id === uid) writes += 1;
+    });
+    await drain(ctl.send("late, from the old place"));
+    await ctl.flushed();
+    await shared.saver.drain();
+    await store.drain();
+    expect(writes).toBe(0);
+    expect(await messagesOf(store, uid)).not.toContain("late, from the old place");
+    // And it was STEP 5's seal that did it (one call: the commit's own).
+    expect(seals).toBe(1);
+    expect(await messagesOf(store, uid)).toContain("on the target");
+  });
+});
+
+describe("fix1 MEDIUM: 4(a)'s guard is in the ORCHESTRATOR, not closeOwn", () => {
+  test("a dead link during the close refuses the hop and rolls the target back", async () => {
+    // The reachable shape of finding 2: `closeOwn` resolving false is not the
+    // only way 4(a) can fail — a `ownUse` read can reject on a dropped link,
+    // and before fix 1 that rejection escaped `hopSession`, skipping
+    // `target.rollback()` (mut-c mutation-verifies the same guard).
+    const store = storeIn(dir);
+    const shared = sharedOn(store);
+    const a = await runtimeOn(rig(new Reply("reply-A")), shared, null);
+    const ctl = a.createSession();
+    await drain(ctl.send("first"));
+    await ctl.flushed();
+    await shared.saver.drain();
+    await store.drain();
+    const uid = ctl.sessionId;
+    if (!uid) throw new Error("no uid");
+
+    const target = await runtimeOn(rig(new Reply("reply-B")), shared, null, uid);
+    const deadLink: LocalRuntime = {
+      ...target,
+      ownUse: () => Promise.reject(new Error("the link is down")),
+    };
+    let rolledBack = 0;
+    const outcome = await hopSession(
+      a,
+      {
+        spec: { target: "attach", workload: { engine: "docker", name: "box" }, keep: true },
+        sessionId: uid,
+      },
+      {
+        build: async () => ({
+          kind: "built",
+          built: {
+            runtime: deadLink,
+            place: { kind: "workload", engine: "docker", name: "box" },
+            daemonInPod: true,
+            preexisting: true,
+            rollback: async () => {
+              rolledBack += 1;
+            },
+          },
+        }),
+        load: (id) => store.load(id),
+      },
+    );
+    expect(outcome.kind).toBe("failed");
+    expect(outcome.kind === "failed" ? outcome.notice : "").toContain("not joining it");
+    expect(outcome.kind === "failed" ? outcome.notice : "").toContain("the link is down");
+    expect(rolledBack).toBe(1);
   });
 });

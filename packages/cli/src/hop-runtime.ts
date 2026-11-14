@@ -101,6 +101,35 @@ export function createHopRuntime(deps: HopRuntimeDeps): HopRuntime {
     });
   };
   relink();
+  /**
+   * The same indirection for the job feeds (D2: "listeners are re-subscribed on
+   * swap"). `onStart`/`onExit` bind to the runtime that was current when the
+   * TUI subscribed, so without this a hop silences every later job exit
+   * (review H2 round 2, MEDIUM).
+   */
+  type JobStartListener = Parameters<JobController["onStart"]>[0];
+  type JobExitListener = Parameters<JobController["onExit"]>[0];
+  const startListeners = new Set<JobStartListener>();
+  const exitListeners = new Set<JobExitListener>();
+  let detachJobs: Array<() => void> = [];
+  const rejobs = (): void => {
+    for (const off of detachJobs) {
+      off();
+    }
+    detachJobs = [
+      current.jobs.onStart((job) => {
+        for (const listener of startListeners) {
+          listener(job);
+        }
+      }),
+      current.jobs.onExit((job) => {
+        for (const listener of exitListeners) {
+          listener(job);
+        }
+      }),
+    ];
+  };
+  rejobs();
 
   const announce = (next: HopTargetView): void => {
     view = next;
@@ -119,8 +148,18 @@ export function createHopRuntime(deps: HopRuntimeDeps): HopRuntime {
       kill: (id) => current.jobs.kill(id),
       list: () => current.jobs.list(),
       dispose: () => current.jobs.dispose(),
-      onStart: (listener) => current.jobs.onStart(listener),
-      onExit: (listener) => current.jobs.onExit(listener),
+      onStart: (listener) => {
+        startListeners.add(listener);
+        return () => {
+          startListeners.delete(listener);
+        };
+      },
+      onExit: (listener) => {
+        exitListeners.add(listener);
+        return () => {
+          exitListeners.delete(listener);
+        };
+      },
     },
     link: {
       onLinkStatus: (listener) => {
@@ -155,6 +194,7 @@ export function createHopRuntime(deps: HopRuntimeDeps): HopRuntime {
             // paint a status from a runtime nobody is on any more.
             current = built.runtime;
             relink();
+            rejobs();
             const badge = badgeOf(built.place);
             announce({
               place: built.place,
@@ -163,6 +203,8 @@ export function createHopRuntime(deps: HopRuntimeDeps): HopRuntime {
             });
             await deps.onSwap?.(built);
           },
+          // `afterLeave` is passed through as it is: `hopSession` is the ONE
+          // place that turns its throw into a notice (step 5 never rejects).
           ...(deps.afterLeave ? { afterLeave: deps.afterLeave } : {}),
         },
       );
@@ -173,7 +215,13 @@ export function createHopRuntime(deps: HopRuntimeDeps): HopRuntime {
     },
     dispose: async () => {
       detachLink?.();
+      for (const off of detachJobs) {
+        off();
+      }
+      detachJobs = [];
       listeners.clear();
+      startListeners.clear();
+      exitListeners.clear();
       await current.dispose();
     },
   };

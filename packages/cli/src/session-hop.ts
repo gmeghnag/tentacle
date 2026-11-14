@@ -102,7 +102,13 @@ export type HopOutcome =
   | { readonly kind: "failed"; readonly notice: string };
 
 /** `not moved: …` — the one shape of a refusal (`hopPlan`'s is the pre-flight one). */
-const notMoved = (why: string): HopOutcome => ({ kind: "failed", notice: `not moved: ${why}` });
+export const notMoved = (why: string): HopOutcome => ({
+  kind: "failed",
+  notice: `not moved: ${why}`,
+});
+
+/** What `closeOrRefuseOwn` decided about our own uid on the target (D1 4(a)). */
+type OwnVerdict = "ok" | "busy" | "unknown";
 
 /**
  * D1: move `old`'s session to the target the factory builds. The caller has
@@ -120,16 +126,19 @@ export async function hopSession(
     return notMoved("this session has no id yet");
   }
   // ---- step 2: prepare (reversible; the old runtime is not touched) --------
-  // The record is read FIRST, so M2's "nothing persisted" branch is a FACT and
-  // not a guess: an absent file means the session was never opened (the store
-  // writes no file for an empty history), so there is nothing to freeze and
-  // nothing to seed — the target opens the SAME uid with no history.
+  // The record is read FIRST, so a copy that cannot be read refuses the hop
+  // before a container is created for it (moving now would lose the very
+  // conversation the hop exists to carry).
   const stored = await deps.load(sessionId);
   if (stored.status === "unreadable") {
-    // Before anything is built: a copy that cannot be read is no seed, and
-    // moving now would lose the conversation this hop exists to carry.
     return notMoved(`the laptop copy of this session could not be read (${stored.reason})`);
   }
+  // An ABSENT file means "nothing persisted" (M2) only when this runtime holds
+  // no controller for the uid. A session WITH turns whose save failed (a lock,
+  // EACCES, ENOSPC) has no file either, and a STALE file (an earlier save
+  // landed, a later one failed) is just as wrong a seed: the record is read
+  // again AFTER the freeze, which is what heals it (review H2 round 2, HIGH).
+  const holdsIt = old.holdsSession(sessionId);
   deps.status?.(`moving to ${targetText(spec)} — preparing the target`);
   const built = await deps.build(spec, sessionId);
   if (built.kind === "failed") {
@@ -142,20 +151,44 @@ export async function hopSession(
   };
 
   // ---- step 3: freeze (the old runtime stays live: nothing is sealed) ------
+  // The record read above only GUARDED this step (an unreadable copy must not
+  // create a container); the SEED below is read after it, because the freeze is
+  // what puts the latest history on disk.
   let seed: SessionRecord | null = null;
-  if (stored.status === "ok") {
+  if (stored.status === "ok" || holdsIt) {
     deps.status?.(`moving to ${targetText(spec)} — saving the session`);
     // THIS uid only (review M1): another session's failed save is not a reason
     // to refuse, and a hop never moves a session it could not put on disk.
     if (!(await old.freeze(sessionId))) {
       return failed("the session could not be saved");
     }
-    seed = stored.record;
+    // Only a read taken AFTER the freeze can say what the session holds: an
+    // absent file may exist now, and a stale one may have been healed. Still
+    // absent with a controller held means the save is what failed (refused
+    // above); still absent with none really is an empty session (M2), and the
+    // target opens the SAME uid unseeded.
+    const again = await deps.load(sessionId);
+    if (again.status === "unreadable") {
+      return failed(`the laptop copy of this session could not be read (${again.reason})`);
+    }
+    if (again.status === "ok") {
+      seed = again.record;
+    }
   }
 
   // ---- step 4(a): a pre-existing target may already hold our uid ----------
   if (target.preexisting) {
-    const own = await closeOrRefuseOwn(target, sessionId);
+    let own: OwnVerdict;
+    try {
+      own = await closeOrRefuseOwn(target, sessionId);
+    } catch (error) {
+      // A dropped link or a daemon error is still a refusal with the target
+      // rolled back: the caller must answer the TUI, never see a rejection
+      // that skips the rollback (review H2 round 2, MEDIUM).
+      return failed(
+        `can't tell whether ${targetText(spec)} holds this session — not joining it (${errorText(error, "no answer")})`,
+      );
+    }
     if (own === "busy") {
       return failed(`${targetText(spec)} still holds an older copy of this session`);
     }
@@ -181,7 +214,7 @@ export async function hopSession(
       await target.runtime.openSeeded(seed);
     }
   } catch (error) {
-    return failed(describe(error, "the session could not be opened there"));
+    return failed(errorText(error, "the session could not be opened there"));
   }
   if (!target.runtime.saveConfirmedFor(sessionId)) {
     // Review M1: the open's own save must have LANDED, or the target's copy is
@@ -197,15 +230,21 @@ export async function hopSession(
     old.sealSessions();
     await deps.onCommit?.(target);
   } catch (error) {
-    notice = `${notice} — ${describe(error, "the view could not be switched")}`;
+    notice = `${notice} — ${errorText(error, "the view could not be switched")}`;
   }
   // Bounded: a hung daemon must not freeze the TUI on a hop it already made.
   if (!(await closesWithin(old, HOP_DISPOSE_TIMEOUT_MS))) {
     notice = `${notice} — the old session did not close`;
   }
-  const left = await deps.afterLeave?.(spec);
-  if (left !== null && left !== undefined) {
-    notice = `${notice} — ${left}`;
+  try {
+    const left = await deps.afterLeave?.(spec);
+    if (left !== null && left !== undefined) {
+      notice = `${notice} — ${left}`;
+    }
+  } catch (error) {
+    // The session IS on the target: a cleanup that threw is one notice, not a
+    // `moved` hop turned into a rejection (review H2 round 2, MEDIUM).
+    notice = `${notice} — ${errorText(error, "the old place could not be tidied")}`;
   }
   return { kind: "moved", built: target, notice };
 }
@@ -222,10 +261,7 @@ function targetText(spec: HopSpec): string {
 }
 
 /** D1 step 4(a)/D7c: our own uid on the target — seed, close it first, or refuse. */
-async function closeOrRefuseOwn(
-  target: HopBuilt,
-  sessionId: string,
-): Promise<"ok" | "busy" | "unknown"> {
+async function closeOrRefuseOwn(target: HopBuilt, sessionId: string): Promise<OwnVerdict> {
   const verdict = ownUidVerdict(await target.runtime.ownUse(sessionId));
   switch (verdict.kind) {
     case "absent":
@@ -259,7 +295,7 @@ async function closesWithin(old: LocalRuntime, ms: number): Promise<boolean> {
 }
 
 /** One line, no raw daemon text: an error's message is container-supplied (AGENTS §7). */
-function describe(error: unknown, fallback: string): string {
+export function errorText(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message : String(error);
   return message === "" ? fallback : message;
 }

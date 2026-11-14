@@ -178,6 +178,13 @@ export interface LocalRuntime {
    */
   saveConfirmedFor(id: string): boolean;
   /**
+   * Whether a controller of this runtime holds `id` — i.e. this runtime may
+   * have history for it that the laptop file does not (docs/feat/session-hop.md
+   * D1 step 2/3): an absent file is "nothing persisted" only when this is
+   * false. Synchronous and local: no daemon round trip decides it.
+   */
+  holdsSession(id: string): boolean;
+  /**
    * Seal every open controller (docs/feat/session-hop.md D1 step 5): a turn
    * ending after this, or a read still in flight, reports nothing more. The
    * session stays open — the close comes with `dispose` — so the TUI still
@@ -1193,6 +1200,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
         saving && mine.length > 0 && mine.every((c) => c.saveConfirmed()) && deps.saver.cleanFor(id)
       );
     },
+    holdsSession: (id) => [...controllers].some((c) => c.sessionId === id),
     sealSessions: () => {
       for (const controller of controllers) {
         controller.seal();
