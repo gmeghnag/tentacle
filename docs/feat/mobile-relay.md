@@ -487,4 +487,180 @@ merge per step. *— claude-opus-5-5 (orchestrator), 2026-11-14*
 
 ## Execution
 
+### R0 + R1 (as built) — *— deepseek-v4 (deepseek-chat), 2026-11-14*
+
+**Load-bearing check: PASSED, before any edit.** Re-ran the Context Repro
+(`.tentacle/tmp/mobile-relay/probe.ts`) and the plan's cited seams:
+
+```
+$ bun .tentacle/tmp/mobile-relay/probe.ts
+wss://relay.tentacle.so/d/AbCdEfGhIjKlMnOpQrStUv/e2e true
+ws://127.0.0.1:4100/d/x/e2e true
+wss://relay.tentacle.so/d/x false
+$ rg -il relay packages/protocol/src packages/daemon/src/ws-server.ts packages/transport/src apps/mobile/src
+packages/protocol/src/pairing.ts        # only the :15 comment — unchanged
+$ ls apps
+mobile                                   # no apps/relay yet
+```
+
+`packages/transport/src/channel.ts:9-18` is still four methods only, and
+`openDevice` (`ws-server.ts:408`) still takes the channel for everything that
+authenticates — so "a relay stream enters the existing device path unchanged"
+holds, and the slice does not touch it. The one unproved piece (R0) is probed
+below.
+
+#### R0 — the three blocking probes (scratch only)
+
+Scripts: `.tentacle/tmp/mobile-relay/{r0a-splice.ts,r0b.ts,r0c.ts}`.
+
+**(a) Bun splice, frames 1:1, close cascades.** Two `/a` `/b` legs on one
+`Bun.serve`, a Bun WebSocket client on each, the server relaying `text` 1:1:
+
+```
+$ bun r0a-splice.ts
+received lengths: [ "5", "89088" ]
+87KiB intact: true
+frames 1:1: true
+b closed: true within ms: 0 | cascade latency ms: 0
+events: open /b | open /a | msg /a 5 | msg /a 89088 | close /a | close /b
+```
+
+Frames arrive whole and in order, an 89 088-char (87 KiB) frame included, and
+closing one leg closes the other in ~0 ms — far inside the 100 ms budget. **No
+drift**: step 3's splice needs no framing layer, as designed.
+
+**(b) A hostile server's 64 MiB frame to a Bun WebSocket CLIENT.**
+
+```
+$ bun r0b.ts
+received length: 67108864 expected: 67108864
+close/error: (none — socket still open)
+rss MiB before: 5 after: 135
+external MiB before: 0 after: 32
+```
+
+**The client caps NOTHING**: a 64 MiB frame is accepted and materialised as a JS
+string (+130 MiB RSS), and the socket stays open. So R4's accept leg and the
+daemon's control socket each need their own inbound guard. R1 therefore ships
+the guard's shared definition — `RELAY_CONTROL_LIMITS.maxInboundChars`
+(176 Ki chars = 2× the Noise cap, so a legitimate worst-case frame still passes)
+and the pure `isInboundFrameTooLarge(data)` — and R2/R4 call it before decoding.
+This is the plan's own "if Bun's client buffers unboundedly, R4 adds a cap", moved
+one slice earlier so the number and the predicate exist once, in the shared
+module, instead of being re-derived on both ends.
+
+**(c) A dead-but-open control socket — does the client notice?** A raw
+`Bun.listen` server completes the WS handshake with the right
+`Sec-WebSocket-Accept`, then never answers again while the TCP connection stays
+up:
+
+```
+$ bun r0c.ts
+client has .ping(): true
++10s state=open … +70s state=open
+VERDICT: client noticed a dead-but-open TCP path: false | state: open
+         | bytes the server received from the client: 233
+```
+
+**The client never notices** (70 s, `open` the whole time, nothing sent
+spontaneously: the 233 bytes are the handshake itself). **The app-level ping
+stays** — `{t:"ping"}`/`{t:"pong"}` on the control socket, the daemon
+reconnecting on a missed deadline, exactly as Design §2 kept provisionally. The
+decision is now evidence, not a guess.
+
+#### R1 — the relay wire + the relay id
+
+Red first (both files failed on the absent module, not on an assertion):
+
+```
+$ bun test packages/protocol/test/relay.test.ts packages/transport/test/relay-id.test.ts
+error: Cannot find module '../src/relay.ts' …
+SyntaxError: Export named 'RELAY_ID_LENGTH' not found in module '…/protocol/src/index.ts'
+ 0 pass  2 fail  2 errors
+```
+
+Green after (`packages/protocol/src/relay.ts`, `packages/transport/src/relay-id.ts`):
+
+```
+$ bun test packages/protocol/test/relay.test.ts packages/transport/test/relay-id.test.ts
+ 23 pass  0 fail
+```
+
+**What landed.** `packages/protocol/src/relay.ts` (new, exported from `index.ts`):
+`RELAY_PROTOCOL_VERSION = 1` (its own wire, not `PROTOCOL_VERSION`),
+`DEFAULT_RELAY_URL = "wss://relay.tentacle.so"` (the one place the domain appears
+in code, decision 9), the frame schemas (`RelayDaemonFrameSchema` hello/accept/
+ping, `RelayToDaemonFrameSchema` ready/error/open/replaced/pong,
+`RelayControlFrameSchema` both) as zod discriminated unions of STRIP objects,
+`RELAY_CONTROL_LIMITS` (one source for both ends' numbers),
+`RELAY_STREAM_HOLD_MS`/`RELAY_STREAM_EXPIRY_MS`/`RELAY_CLOSE_UNREGISTERED`,
+`relayAddress(url, id)`, `isRelayUrl`, `isRelayId`, `isRelaySecret`,
+`isInboundFrameTooLarge`. `packages/transport/src/relay-id.ts` (new, on its own
+`./relay-id` export in `packages/transport/package.json`): `relayIdOf(secret)` =
+`b64url(SHA-256("tentacle-relay-id/1" ‖ secret))[0..22]`, on `@noble/hashes`
+beside `pairingSas` and for the same reason (crypto only for a runtime that holds
+a secret — not on the `@tentacle/transport` root, which every RPC client loads).
+
+**`ready.features` is there from the start** (task 16's owner-approved
+amendment), defaulted to `[]`, with `push` the one name it may announce.
+
+`packages/protocol/schema/protocol.json` regenerated (`bun run schema:export`,
++241 lines: 14 new `$defs`). `PROTOCOL_VERSION` untouched — no RPC method or
+update changed, and the relay wire is versioned by `RELAY_PROTOCOL_VERSION`
+(R1's Preconditions) — so no `protocol.d/` note. `x-protocol-version` in the
+schema is unchanged, confirming it.
+
+**Drift from the Implementation, and why.**
+
+1. **R1 gained `isInboundFrameTooLarge` + `RELAY_CONTROL_LIMITS.maxInboundChars`
+   and the extra constants above.** Not scope creep: R0(b) is a *new* measured
+   fact (a Bun client has no inbound cap) that the plan text assigns to R4. Since
+   R4 runs on this same branch and the plan itself says the guard's presence
+   depends on R0(b), R1 is where the shared number and predicated belong — one
+   definition, both ends (step 2's rule: "every frame validated on both ends").
+   R4 only calls it.
+2. **`relayIdOf` lives in `packages/transport`, not `packages/protocol`.** The
+   plan's file list (R1 row) says exactly this; the Tests section's phrasing
+   ("R1 `relayIdOf`") is just the slice, not a location. Kept as the file list
+   says.
+3. **`packages/protocol/test/json-schema.test.ts:646` union count 7 → 10.** The
+   export test counts every exported tagged union; three relay unions are
+   exported `*Schema` values, so the pin moved with a comment naming them. This is
+   the test that makes an unjustified schema addition visible, so it is meant to
+   be edited by a schema change — not a sign the union shape is wrong.
+4. **`isRelayUrl` refuses a query/fragment and userinfo.** The plan says
+   `wss://`, or `ws://` loopback only. A `?`/`#` would break `relayAddress`
+   (which appends path segments) and userinfo would put a credential in an access
+   log, so both are refused rather than built on. The test pins the address it
+   builds is one `isPairingAddress` accepts, which is the property that matters
+   ("an installed app dials it, no update").
+5. **`relayIdOf` THROWS on a wrong-size secret** (as `pairingSas` does on a
+   wrong-size key). Silently hashing a truncated secret would map two secrets to
+   one id — the aliasing a self-certifying id must not have.
+
+**Mutation checks (each reverted; all re-run green afterwards).**
+
+| # | Target the Tests section names | Mutation | Result |
+|---|---|---|---|
+| 1 | `relayIdOf` vector | `"tentacle-relay-id/1"` → `…/2` | RED: `matches an independently computed vector` fails |
+| 2 | id input size | the `secret.length !== RELAY_SECRET_BYTES` guard deleted | RED: `refuses a wrong-size secret instead of aliasing…` fails |
+| 3 | `isRelayUrl` loopback rule | `return url` (any host over `ws://`) | RED: `refuses ws to anything that is not loopback` fails |
+| 4 | `relayAddress` shape | append `?x` (not a pairing address any more) | RED: 3 `relayAddress` tests fail, incl. `the address it builds is one the app already accepts` |
+| 5 | `ready.features` default | `.default([])` removed | RED: `` `ready` carries `features` from the start `` fails |
+| 6 | strip schemas (AGENTS §7) | `pongFrame` made `.strict()` | RED: `an unknown FIELD is dropped` fails |
+| 7 | the R0(b) guard's bound | `maxInboundChars` set to the 96 Ki splice cap | RED: `the inbound guard is ABOVE the Noise cap…` fails |
+
+**Not verified by this slice.** Everything that needs R2–R5 to exist: an
+end-to-end phone session through a real relay, the relay's own limits, `serve`'s
+`relay.json`, the app's race. R0(a) proved the splice *mechanism* only on a
+loopback `Bun.serve` with no relay in between; the R2 `server.test.ts` (frames
+1:1 through the real service, 87 KiB and 97 KiB) is where it becomes a claim
+about the relay. Nothing outside `bun test` was run — no relay exists to dial.
+
+**Gate (R0+R1): green** — `bunx tsc --noEmit` clean; `bun run lint` clean
+(0 errors, 0 warnings, 1 296 files); `bun test` 9 343 pass / 3 skip / 0 fail
+across 9 346 tests in 672 files (the three skips are AGENTS §6's opt-ins). Run
+twice, same result. Changelog: `changelog.d/mobile-relay.added.md` (one bullet).
+`TODO.md` untouched.
+
 ## Review
