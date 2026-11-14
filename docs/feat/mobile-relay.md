@@ -213,7 +213,11 @@ Text JSON frames, `t` discriminator; every frame validated on both ends.
 - daemon → relay on `/v1/daemon`: first frame `{t:"hello", v:1, secret}` (in the
   frame, never in the URL: URLs reach access logs). Relay answers
   `{t:"ready", v:1, id}` or `{t:"error", code:"version"|"invalid"|"busy",
-  supported:[1]}` then closes. The daemon checks `ready.id === relayIdOf(secret)`
+  supported:[1]}` then closes. Those three are the codes THIS build knows
+  (`RELAY_ERROR_CODES`); a `code` is a bounded string, not an enum, so a newer
+  relay's new code is still a clean refusal rather than a "malformed frame"
+  (Review R1 finding 1), and only `version` earns the 1 h backoff. The daemon
+  checks `ready.id === relayIdOf(secret)`
   and drops the link on a mismatch (a lying relay).
 - **Newest wins:** a second `hello` for a registered id replaces the old socket,
   which gets `{t:"replaced"}` and is closed (a restarted daemon must not wait
@@ -355,7 +359,7 @@ each step; no executor touches the server, DNS or Caddy.
 | F4 | **Relay hostile: reads** | Sees only Noise ciphertext + metadata (id, IP, sizes, timing) — accepted (decision 2). |
 | F5 | **Relay hostile: injects / modifies / reorders / replays frames** | AEAD with strict counters → the channel closes loudly (e2e M12). A replayed message 1 reaches `authorize` but no confirm → no `Connection`, no "last seen" (device-pairing F4). The phone redials. |
 | F6 | **Relay hostile: routes the phone to another daemon / to itself** | `rs` pinned in the app → handshake fails → not `unauthorized` (an unauthenticated failure) → next address; never a session with the wrong peer. |
-| F7 | **Relay hostile: lies on control** (wrong `ready.id`, bogus `open`, `open` floods, huge frames) | Wrong id → link dropped + notice. Bogus stream → accept fails → slot freed. Floods → `HandshakeLimiter` per `relay:<ip>` + `maxConcurrent` 32 shared with the direct route (a direct phone can still be starved by a flood — DoS is within the relay's power anyway, F4). Huge frames → bounded by R0(b)'s finding: if Bun's client buffers unboundedly, R4 adds a cap (closes the accept leg). |
+| F7 | **Relay hostile: lies on control** (wrong `ready.id`, bogus `open`, `open` floods, huge frames) | Wrong id → link dropped + notice. Bogus stream → accept fails → slot freed. Floods → `HandshakeLimiter` per `relay:<ip>` + `maxConcurrent` 32 shared with the direct route (a direct phone can still be starved by a flood — DoS is within the relay's power anyway, F4). Huge frames → the memory bound is **OPEN**: R0(b) showed Bun materialises the frame before any handler runs, and a client constructor ignores `maxPayloadLength` (probed 1.4.3), so `isInboundFrameTooLarge` bounds the DECODE cost (JSON/zod, the channel copy) only, never the allocation. R4's fallback: accept it and back off after an oversize close, so a hostile relay cannot reconnect-loop us into the same allocation. |
 | F8 | **Id squatting / hijack** by a third party | Needs a secret whose hash is the id — 132-bit preimage. Without it a `hello` for that id is impossible to craft. |
 | F9 | **Relay secret leaked** (file read on the laptop) | Attacker can register the id (newest wins) → phones' relay dials reach the attacker → Noise fails (F6) → DoS of the relay path only; the real daemon gets `replaced`, notices, backs off 5 min. Recovery: `devices reset` (or delete `relay.json` + restart): new id, phones re-pair. |
 | F10 | **Key rotation — computer identity** (`devices reset`) | Noise `denied`/fails for every phone → app says re-pair (existing 11b path); relay ids rotate too (Q5). |
@@ -393,7 +397,11 @@ Unit (`bun test`, in `bun run check`):
 - **R1** `relayIdOf`: fixed vector (secret → id) pinned; domain separator
   changed → vector fails (mutation). `isRelayUrl`: wss ok, `ws://127.0.0.1` ok,
   `ws://relay.example` refused, http refused. Every control frame round-trips;
-  extra fields stripped; unknown `t` rejected.
+  extra fields stripped; unknown `t` rejected. **Forward compat (Review R1
+  finding 1):** a `ready` with a feature name this build does not know parses,
+  and `knownRelayFeatures` drops it (mutation: enum restored → fails); an
+  `error` with an unknown `code` parses as a refusal (mutation: enum restored →
+  fails).
 - **R2** `relay-core` (pure, injected clock/random): register; newest wins
   (old gets `replaced`); `hello` with a secret not matching → refused (mutation:
   skip the hash check → test fails); stream token single-use and expires at
@@ -487,4 +495,455 @@ merge per step. *— claude-opus-5-5 (orchestrator), 2026-11-14*
 
 ## Execution
 
+### R0 + R1 (as built) — *— deepseek-v4 (deepseek-chat), 2026-11-14*
+
+**Load-bearing check: PASSED, before any edit.** Re-ran the Context Repro
+(`.tentacle/tmp/mobile-relay/probe.ts`) and the plan's cited seams:
+
+```
+$ bun .tentacle/tmp/mobile-relay/probe.ts
+wss://relay.tentacle.so/d/AbCdEfGhIjKlMnOpQrStUv/e2e true
+ws://127.0.0.1:4100/d/x/e2e true
+wss://relay.tentacle.so/d/x false
+$ rg -il relay packages/protocol/src packages/daemon/src/ws-server.ts packages/transport/src apps/mobile/src
+packages/protocol/src/pairing.ts        # only the :15 comment — unchanged
+$ ls apps
+mobile                                   # no apps/relay yet
+```
+
+`packages/transport/src/channel.ts:9-18` is still four methods only, and
+`openDevice` (`ws-server.ts:408`) still takes the channel for everything that
+authenticates — so "a relay stream enters the existing device path unchanged"
+holds, and the slice does not touch it. The one unproved piece (R0) is probed
+below.
+
+#### R0 — the three blocking probes (scratch only)
+
+Scripts: `.tentacle/tmp/mobile-relay/{r0a-splice.ts,r0b.ts,r0c.ts}`.
+
+**(a) Bun splice, frames 1:1, close cascades.** Two `/a` `/b` legs on one
+`Bun.serve`, a Bun WebSocket client on each, the server relaying `text` 1:1:
+
+```
+$ bun r0a-splice.ts
+received lengths: [ "5", "89088" ]
+87KiB intact: true
+frames 1:1: true
+b closed: true within ms: 0 | cascade latency ms: 0
+events: open /b | open /a | msg /a 5 | msg /a 89088 | close /a | close /b
+```
+
+Frames arrive whole and in order, an 89 088-char (87 KiB) frame included, and
+closing one leg closes the other in ~0 ms — far inside the 100 ms budget. **No
+drift**: step 3's splice needs no framing layer, as designed.
+
+**(b) A hostile server's 64 MiB frame to a Bun WebSocket CLIENT.**
+
+```
+$ bun r0b.ts
+received length: 67108864 expected: 67108864
+close/error: (none — socket still open)
+rss MiB before: 5 after: 135
+external MiB before: 0 after: 32
+```
+
+**The client caps NOTHING**: a 64 MiB frame is accepted and materialised as a JS
+string (+130 MiB RSS), and the socket stays open. So R4's accept leg and the
+daemon's control socket each need their own inbound guard. R1 therefore ships
+the guard's shared definition — `RELAY_CONTROL_LIMITS.maxInboundChars`
+(176 Ki chars = 2× the Noise cap, so a legitimate worst-case frame still passes)
+and the pure `isInboundFrameTooLarge(data)` — and R2/R4 call it before decoding.
+This is the plan's own "if Bun's client buffers unboundedly, R4 adds a cap", moved
+one slice earlier so the number and the predicate exist once, in the shared
+module, instead of being re-derived on both ends.
+
+**Correction after Review R1 finding 2 (what this guard is NOT).** The paragraph
+above, and the original comments, implied the guard stops R0(b)'s attack. It does
+not, and cannot: Bun has already built the string when a handler first sees it, so
+the 130 MiB is spent either way. What `isInboundFrameTooLarge` bounds is the cost
+of everything after the socket — the JSON/zod parse and the channel's copy — which
+is real but smaller. It is a **decode** guard, not a memory bound, and the
+comments, the test names, F7 and this section now say so. The memory gap is not
+fixed by any client option: probed on Bun 1.4.3
+(`.tentacle/tmp/mobile-relay/r0d-client-cap.ts`), a `WebSocket` client built as
+`new WebSocket(url, [], {maxPayloadLength: 1024})` still received a 4096-byte
+message — the constructor takes one argument and ignores the option
+(`maxPayloadLength` exists on the SERVER's `websocket` handler only,
+`bun-types` `bun.d.ts:2332`). It therefore stays an **open R4 item**: R4's fallback
+is to accept the allocation and back off after an oversize close, so a hostile
+relay cannot reconnect-loop the daemon into the same allocation repeatedly.
+
+**(c) A dead-but-open control socket — does the client notice?** A raw
+`Bun.listen` server completes the WS handshake with the right
+`Sec-WebSocket-Accept`, then never answers again while the TCP connection stays
+up:
+
+```
+$ bun r0c.ts
+client has .ping(): true
++10s state=open … +70s state=open
+VERDICT: client noticed a dead-but-open TCP path: false | state: open
+         | bytes the server received from the client: 233
+```
+
+**The client never notices** (70 s, `open` the whole time, nothing sent
+spontaneously: the 233 bytes are the handshake itself). **The app-level ping
+stays** — `{t:"ping"}`/`{t:"pong"}` on the control socket, the daemon
+reconnecting on a missed deadline, exactly as Design §2 kept provisionally. The
+decision is now evidence, not a guess.
+
+#### R1 — the relay wire + the relay id
+
+Red first (both files failed on the absent module, not on an assertion):
+
+```
+$ bun test packages/protocol/test/relay.test.ts packages/transport/test/relay-id.test.ts
+error: Cannot find module '../src/relay.ts' …
+SyntaxError: Export named 'RELAY_ID_LENGTH' not found in module '…/protocol/src/index.ts'
+ 0 pass  2 fail  2 errors
+```
+
+Green after (`packages/protocol/src/relay.ts`, `packages/transport/src/relay-id.ts`):
+
+```
+$ bun test packages/protocol/test/relay.test.ts packages/transport/test/relay-id.test.ts
+ 23 pass  0 fail
+```
+
+**What landed.** `packages/protocol/src/relay.ts` (new, exported from `index.ts`):
+`RELAY_PROTOCOL_VERSION = 1` (its own wire, not `PROTOCOL_VERSION`),
+`DEFAULT_RELAY_URL = "wss://relay.tentacle.so"` (the one place the domain appears
+in code, decision 9), the frame schemas (`RelayDaemonFrameSchema` hello/accept/
+ping, `RelayToDaemonFrameSchema` ready/error/open/replaced/pong,
+`RelayControlFrameSchema` both) as zod discriminated unions of STRIP objects,
+`RELAY_CONTROL_LIMITS` (one source for both ends' numbers),
+`RELAY_STREAM_HOLD_MS`/`RELAY_STREAM_EXPIRY_MS`/`RELAY_CLOSE_UNREGISTERED`,
+`relayAddress(url, id)`, `isRelayUrl`, `isRelayId`, `isRelaySecret`,
+`isInboundFrameTooLarge`. `packages/transport/src/relay-id.ts` (new, on its own
+`./relay-id` export in `packages/transport/package.json`): `relayIdOf(secret)` =
+`b64url(SHA-256("tentacle-relay-id/1" ‖ secret))[0..22]`, on `@noble/hashes`
+beside `pairingSas` and for the same reason (crypto only for a runtime that holds
+a secret — not on the `@tentacle/transport` root, which every RPC client loads).
+
+**`ready.features` is there from the start** (task 16's owner-approved
+amendment), defaulted to `[]`, with `push` the one name this build knows. The
+list is NOT a closed enum (Review R1 finding 1): the frame accepts any bounded
+name and `knownRelayFeatures(list)` filters it, because a closed enum would make
+a relay announcing a second feature fail the whole `ready` parse — the daemon
+then drops the link and retries forever, with no version error and no notice.
+`error.code` was freed for the same reason: it is a bounded string, name-checked
+with `isRelayErrorCode`; its known set (`RELAY_ERROR_CODES`) is a named constant.
+
+`packages/protocol/schema/protocol.json` regenerated (`bun run schema:export`,
++241 lines: 14 new `$defs`). `PROTOCOL_VERSION` untouched — no RPC method or
+update changed, and the relay wire is versioned by `RELAY_PROTOCOL_VERSION`
+(R1's Preconditions) — so no `protocol.d/` note. `x-protocol-version` in the
+schema is unchanged, confirming it.
+
+**Drift from the Implementation, and why.**
+
+1. **R1 gained `isInboundFrameTooLarge` + `RELAY_CONTROL_LIMITS.maxInboundChars`
+   and the extra constants above.** Not scope creep: R0(b) is a *new* measured
+   fact (a Bun client has no inbound cap) that the plan text assigns to R4. Since
+   R4 runs on this same branch and the plan itself says the guard's presence
+   depends on R0(b), R1 is where the shared number and predicated belong — one
+   definition, both ends (step 2's rule: "every frame validated on both ends").
+   R4 only calls it.
+2. **`relayIdOf` lives in `packages/transport`, not `packages/protocol`.** The
+   plan's file list (R1 row) says exactly this; the Tests section's phrasing
+   ("R1 `relayIdOf`") is just the slice, not a location. Kept as the file list
+   says.
+3. **`packages/protocol/test/json-schema.test.ts:646` union count 7 → 10.** The
+   export test counts every exported tagged union; three relay unions are
+   exported `*Schema` values, so the pin moved with a comment naming them. This is
+   the test that makes an unjustified schema addition visible, so it is meant to
+   be edited by a schema change — not a sign the union shape is wrong.
+4. **`isRelayUrl` refuses a query/fragment and userinfo.** The plan says
+   `wss://`, or `ws://` loopback only. A `?`/`#` would break `relayAddress`
+   (which appends path segments) and userinfo would put a credential in an access
+   log, so both are refused rather than built on. The test pins the address it
+   builds is one `isPairingAddress` accepts, which is the property that matters
+   ("an installed app dials it, no update").
+5. **`relayIdOf` THROWS on a wrong-size secret** (as `pairingSas` does on a
+   wrong-size key). Silently hashing a truncated secret would map two secrets to
+   one id — the aliasing a self-certifying id must not have.
+
+**Mutation checks (each reverted; all re-run green afterwards).**
+
+| # | Target the Tests section names | Mutation | Result |
+|---|---|---|---|
+| 1 | `relayIdOf` vector | `"tentacle-relay-id/1"` → `…/2` | RED: `matches an independently computed vector` fails |
+| 2 | id input size | the `secret.length !== RELAY_SECRET_BYTES` guard deleted | RED: `refuses a wrong-size secret instead of aliasing…` fails |
+| 3 | `isRelayUrl` loopback rule | `return url` (any host over `ws://`) | RED: `refuses ws to anything that is not loopback` fails |
+| 4 | `relayAddress` shape | append `?x` (not a pairing address any more) | RED: 3 `relayAddress` tests fail, incl. `the address it builds is one the app already accepts` |
+| 5 | `ready.features` default | `.default([])` removed | RED: `` `ready` carries `features` from the start `` fails |
+| 6 | strip schemas (AGENTS §7) | `pongFrame` made `.strict()` | RED: `an unknown FIELD is dropped` fails |
+| 7 | the decode guard's bound | `maxInboundChars` set to the 96 Ki splice cap | RED: `the decode guard is ABOVE the Noise cap…` fails |
+
+**Not verified by this slice.** Everything that needs R2–R5 to exist: an
+end-to-end phone session through a real relay, the relay's own limits, `serve`'s
+`relay.json`, the app's race. R0(a) proved the splice *mechanism* only on a
+loopback `Bun.serve` with no relay in between; the R2 `server.test.ts` (frames
+1:1 through the real service, 87 KiB and 97 KiB) is where it becomes a claim
+about the relay. Nothing outside `bun test` was run — no relay exists to dial.
+
+**Gate (R0+R1): green** — `bunx tsc --noEmit` clean; `bun run lint` clean
+(0 errors, 0 warnings, 1 296 files); `bun test` 9 343 pass / 3 skip / 0 fail
+across 9 346 tests in 672 files (the three skips are AGENTS §6's opt-ins). Run
+twice, same result. Changelog: `changelog.d/mobile-relay.added.md` (one bullet).
+`TODO.md` untouched.
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-14*
+
+Fixing Review R1's two findings (1 HIGH, 1 MEDIUM). Scope: `packages/protocol/src/relay.ts`,
+`packages/protocol/test/relay.test.ts`, the regenerated
+`packages/protocol/schema/protocol.json`, this doc, and one stale comment in
+`packages/transport/src/relay-id.ts`.
+
+**Evidence first (both findings reproduced on the unfixed code).** The reviewer
+gave a probe for finding 1; I ran it as the first step, before any edit
+(`.tentacle/tmp/mobile-relay/fix1-evidence.ts`):
+
+```
+$ bun .tentacle/tmp/mobile-relay/fix1-evidence.ts
+F1a ready with an unknown feature parses: false
+F1b error with an unknown code parses: false
+F2 guard type is string|Uint8Array (input already materialised): string | refused: true
+```
+
+Both halves of finding 1 confirmed: a single unknown feature name, or a single
+unknown error code, fails the WHOLE frame parse.
+
+#### Finding 1 (HIGH) — a closed enum on `ready.features` / `error.code`
+
+**Fix (as built).** Both fields became bounded free strings and the known-name
+check moved into pure typed predicates:
+
+- `featuresField` = `z.array(z.string().min(1).max(64)).max(16).default([])`
+  (`relay.ts:175`), plus `isRelayFeature` and `knownRelayFeatures` (`relay.ts:137-164`)
+  — the filter a reader of `ready` calls, which drops unknown names and
+  duplicates.
+- `error.code` = `z.string().min(1).max(32)` (`relay.ts:230`), with the known set
+  kept as the named `RELAY_ERROR_CODES` (+ `RelayErrorCode` type) and
+  `isRelayErrorCode` (`relay.ts:206-226`). Only `version` earns the 1 h notice
+  (F13), so an unknown code is an ordinary refusal — exactly what the reviewer
+  asked for ("a new code becomes 'malformed' instead of a refusal" is fixed).
+
+**Deliberate deviation from the reviewer's suggested shape:** the reviewer wrote
+"filter to the known names after the parse", which reads like a `.transform()`.
+I did **not** use `.transform()`: the JSON-schema exporter rejects `ZodEffects`
+by construction (`json-schema.ts:760` pins that, `SUPPORTED_KINDS` has no
+`ZodEffects`, `attachment.ts:68` states the rule), so a `.transform()` would have
+broken `bun run schema:export` and the drift gate — i.e. the wire contract would
+stop being exportable for a codegen consumer. The filter is therefore an exported
+pure function (`knownRelayFeatures`) that a consumer calls, which is also the
+AGENTS §7 shape: the schema states what is on the wire, the decision is in a
+tested module. The observable behaviour the reviewer required (unknown name
+parses; the unknown name is dropped by the reader) is what the new test asserts.
+
+**Red before green.** Both new tests were written first and failed on the
+property assertion, not on an import:
+
+```
+$ bun test packages/protocol/test/relay.test.ts    # before the fix
+(fail) control frames > `ready.features` accepts a name this build does not know…
+(fail) control frames > `error.code` accepts a code this build does not know…
+ 22 pass  2 fail
+$ bun test packages/protocol/test/relay.test.ts    # after the fix
+ 24 pass  0 fail
+```
+
+The stale `every frame validates its own fields` case that asserted
+`code:"nonsense"` is MALFORMED was corrected in place (it was asserting exactly
+the broken behaviour): it now asserts a missing `supported` and a `supported`
+value of `0` are still refused, and the unknown-name case moved to its own test.
+
+**Mutation checks (each reverted; suite re-run green afterwards).**
+
+| # | Target | Mutation | Result |
+|---|---|---|---|
+| M1 | `ready.features` forward compat | `z.array(z.string()…).max(16)` → `z.array(z.enum(RELAY_FEATURES))` | RED: `` `ready.features` accepts a name this build does not know, and the known filter DROPS it `` fails |
+| M2 | `error.code` forward compat | `z.string().min(1).max(32)` → `z.enum(["version","invalid","busy"])` | RED: `` `error.code` accepts a code this build does not know `` fails |
+| M3 | the filter's behaviour | `knownRelayFeatures` body → `return features as RelayFeature[]` | RED: same `ready.features` test fails (the unknown name survives the filter) |
+| M4 | the known-code check | `isRelayErrorCode` body → `return value.length > 0` | RED: same `error.code` test fails (`"overloaded"` reported known) |
+
+**`packages/protocol/schema/protocol.json` regenerated** (`bun run schema:export`)
+— the drift gate failed first, as it should: `protocol.json is stale`. Diff is
+exactly the two fields (`enum` → `minLength`/`maxLength` on `RelayControlFrameError.code`
+and `RelayControlFrameReady.features.items`), 4 lines.
+
+#### Finding 2 (MEDIUM) — the guard was described as stopping R0(b)'s attack
+
+**Fix (as built).** A documentation-and-naming fix, as the reviewer asked, not a
+behaviour change: the predicate is correct, its *claim* was not.
+
+- `RELAY_CONTROL_LIMITS`'s doc comment (`relay.ts:78-95`) now says DECODE guard,
+  states that the string/`Uint8Array` exists before any handler runs, and that a
+  check here cannot undo the allocation.
+- `isInboundFrameTooLarge`'s doc comment (`relay.ts:358-363`) drops "too large to
+  even decode … before handing a frame to a channel" for the same reason.
+- Test names: `(R0(b)'s guard)` → `(the decode cost guard)`; `the inbound guard
+  is ABOVE…` → `the decode guard is ABOVE…`; both bodies' comments now name what
+  is bounded (JSON/zod + the channel copy).
+- Doc: F7 rewritten to record the memory bound as **OPEN**, Execution R0(b) got a
+  "Correction after Review R1 finding 2" paragraph, and the earlier mutation-table
+  row 7 + Tests row for the guard were re-worded to "decode guard".
+
+**The reviewer's open question answered with a measurement.** R4 may adopt "a
+client-side max-payload option" or "accept it and back off after an oversize
+close". I probed the first (`.tentacle/tmp/mobile-relay/r0d-client-cap.ts`: a
+`Bun.serve` that sends 4096 bytes, a client built with
+`{maxPayloadLength: 1024}`):
+
+```
+$ bun .tentacle/tmp/mobile-relay/r0d-client-cap.ts
+client ctor arity: 1 | message chars received with maxPayloadLength:1024 -> 4096 (option IGNORED: no client-side cap)
+```
+
+So there is **no** client-side option to adopt on Bun 1.4.3 (`maxPayloadLength`
+exists on the SERVER's `websocket` handler only, `bun-types` `bun.d.ts:2332`;
+`WebSocket.length === 1`). That is written into the source comment and F7 as the
+reason R4's fallback must be the back-off one — a fact R4 would otherwise have
+gone looking for.
+
+**Regression test for finding 2?** There is none, and none is possible for the
+claim itself: the change is comments, test names and doc text — no behaviour
+changed, so a red-before-green test would be theatre. What I did instead is pin
+the one factual boundary the new wording implies and the old wording hid: a
+`Uint8Array` of exactly `maxInboundChars` passes and `+1` is refused (bytes are
+not code units). That case was added to the existing guard test; it is green on
+both sides of the wording change by design (it asserts the predicate, which did
+not move). The finding is closed by the wording, per the reviewer's instruction
+("rewrite the comments, the test name and Execution R0(b) to say what the guard
+really does").
+
+#### Small drift fixed in passing
+
+`packages/transport/src/relay-id.ts:13` said the function lives on the
+`/noise` subpath; it is exported as `./relay-id`. The reviewer's premise table
+flagged it as "small doc drift"; it is now correct. (Markdown prose and comments
+only — no code path.)
+
+#### Gate (fix round 1): green
+
+`bunx tsc --noEmit` clean. `bun run lint` clean (0 errors, 0 warnings,
+1 296 files — BIOME reformatted two long `expect(...)` lines I introduced; fixed
+with `--write`, re-run clean). `bun test`: **9 345 pass / 3 skip / 0 fail** across
+9 348 tests in 672 files — the three skips are AGENTS §6's opt-ins. Count moved
+9 343 → 9 345 for the two new tests. **Honest flake note:** five full runs total;
+one (the second) reported `1 fail` and I did not capture its name — it did not
+reproduce in the three logged runs after it (runs 3–5: `9345 pass / 0 fail`,
+logs in `.tentacle/tmp/mobile-relay/run{3,4,5}.log`), and this round touched only
+pure zod schemas and pure helpers (no timing, I/O, sockets or rendering), so I
+cannot attribute it to this change and cannot name it. To verify: re-run
+`bun test` and, on a fail, read the `(fail)` line — if it is
+`packages/exec/test/confinement.test.ts` R2-4 that is the known sandbox
+hard-link flake (`docs/feat/agent-message.md:457`).
+No changelog fragment change (the existing
+`changelog.d/mobile-relay.added.md` bullet still covers it; a forward-compat fix
+in a not-yet-shipped wire is not a separate user-visible entry). `PROTOCOL_VERSION`
+untouched, no `protocol.d/` note: the relay wire is versioned by
+`RELAY_PROTOCOL_VERSION`, and loosening a field is not a break.
+
 ## Review
+
+### R0 + R1 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 1 MEDIUM). Scope: `git diff main...HEAD`, slices R0+R1 only.
+
+**Gate (re-run here):** `bun test` on relay.test.ts + relay-id.test.ts + json-schema.test.ts → 48 pass / 0 fail; `bun run lint` clean (1296 files); `bun run typecheck` clean. I did not re-run the full suite.
+
+**Findings**
+
+1. **HIGH — `ready.features` is a closed enum, so it breaks forward compatibility.**
+   `packages/protocol/src/relay.ts:133` (`z.array(z.enum(RELAY_FEATURES))`). A
+   relay that announces a feature this build does not know fails the whole
+   `ready` parse. Probe:
+   `RelayToDaemonFrameSchema.safeParse({t:"ready",v:1,id,features:["push","future"]}).success === false`.
+   The plan says "a malformed frame is a close", so that daemon drops the link
+   and retries forever. Failure scenario: the hosted relay is deployed with a
+   second feature name, and every `serve` already installed loses relay
+   reachability at once, with no version error and no notice. This defeats the
+   point of the task-16 amendment (announce features without breaking old
+   daemons) and AGENTS §7 forward-compat ("fields are free"). Fix: accept
+   `z.array(z.string().max(…)).max(16)` and filter to the known names after the
+   parse. The test must show a `ready` with an unknown feature parsing and the
+   unknown name dropped. The same reasoning applies, less severely, to
+   `error.code` (`:167`): a new code becomes "malformed" instead of a refusal.
+2. **MEDIUM — `isInboundFrameTooLarge` is described as stopping R0(b)'s attack,
+   and it cannot.** The comments at `relay.ts:79-84` and `:296-300`, and the test
+   at `relay.test.ts:243` ("before it becomes a JS string"), say this. But R0(b)
+   showed the Bun client has already turned the 64 MiB frame into a JS string
+   (+130 MiB RSS) before any handler runs. A length check in the handler only
+   saves the JSON/zod cost. It does not bound memory. Failure scenario: R4
+   relies on this "guard", F7 is recorded as closed, and a hostile relay can
+   still force allocations as large as Bun allows on every reconnect. Fix:
+   rewrite the comments, the test name and Execution R0(b) to say what the guard
+   really does. Leave F7's memory bound as an open R4 item (look for a
+   client-side max-payload option, or accept it and back off after an
+   oversize close).
+
+**Premise table.** relay.ts:1 = the doc's id formula: TRUE. The vector
+`WSbKVXnUw63XiNj5KDcKsU` matches my own `node:crypto` computation: TRUE.
+`isPairingAddress` (`pairing.ts:122`) accepts what `relayAddress` builds: TRUE.
+There is one exception: a long base path exceeds `ADDRESS_MAX` and is refused
+later by encode. That is a refusal, not silent, so it is not a finding.
+`@noble/hashes` is already a transport dependency: TRUE. `PROTOCOL_VERSION`
+untouched and no `protocol.d/` note: TRUE (no RPC change). Small doc drift:
+`relay-id.ts:13` says the function lives on the `/noise` subpath, but it is
+exported as `./relay-id`.
+
+**Attacks tried.**
+- (a) Loopback spoofing (`127.0.0.1.evil`, `localhost.evil`): refused.
+  `ws://0x7f000001`, `ws://127.1` and `ws://[0:…:1]` are accepted, but the URL
+  parser normalises them to real loopback, so this is OK.
+- (b) Uppercase scheme or host (`WSS://Relay.Example`): accepted, and the app
+  accepts the address it builds.
+- (c) Unknown feature in `ready`: fails (finding 1).
+- (d) Strip vs strict: unknown fields are dropped (test at `:176`).
+
+**Mutation.** I did not mutate anything myself: the sandbox would not run my
+scripted mutate-then-revert command without approval. Instead I checked the
+executor's 7-row table against the test bodies. Each named test asserts the
+exact property its mutation breaks, and the vector is independent of the code,
+so I consider the tests non-vacuous. The tree is unchanged apart from this
+section.
+
+**Executor behaviour.** Honest and well evidenced: R0 probes pasted, red then
+green shown, drift listed. Its one mistake is over-claiming what the R0(b)
+guard protects (finding 2).
+**Model note:** executor deepseek-v4, reviewer claude-opus-5-5. Different
+model families.
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (commit af849596).
+
+**Finding 1 (HIGH): fixed.**
+- `ready.features` now accepts any name of 1–64 characters, at most 16 names.
+  `knownRelayFeatures` keeps only the names this build knows and drops
+  duplicates. `error.code` is now any string of 1–32 characters, and
+  `isRelayErrorCode` checks it against the known codes.
+- Mutation A: I put both closed enums back. 2 tests went red (`ready.features
+  accepts a name…` and `error.code accepts a code…`).
+- Mutation B: I removed the duplicate check in `knownRelayFeatures`. 1 test went
+  red.
+- I reverted both mutations; `git status` is clean.
+- No regression: limits are still enforced. A list of 17 names, a non-string
+  code, an empty code and a 33-character code are all still refused, and these
+  cases are tested. `protocol.json` was regenerated, and the drift test in
+  `json-schema.test.ts` passes.
+
+**Finding 2 (MEDIUM): fixed.** The comments at `relay.ts:79-93` and `:359-362`
+and the test names now describe `isInboundFrameTooLarge` as a limit on parsing
+cost, not on memory. F7's unbounded allocation is explicitly left open for R4:
+the Bun client ignores `maxPayloadLength` (the executor's own probe; I did not
+re-run it). The fallback is to back off after a close caused by an oversized
+frame. This change is wording only, so there was nothing to mutate.
+
+**Nit fixed:** the comment at `relay-id.ts:13` now names the right
+`./relay-id` subpath.
+
+**Gate:** touched tests (relay, relay-id, json-schema): 50 pass / 0 fail.
+`bun run lint` is clean (1296 files). `bun run typecheck` is clean. I did not
+run the full suite.

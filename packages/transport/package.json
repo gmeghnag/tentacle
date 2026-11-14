@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./noise": "./src/noise-channel.ts"
+    "./noise": "./src/noise-channel.ts",
+    "./relay-id": "./src/relay-id.ts"
   },
   "dependencies": {
     "@noble/ciphers": "2.4.0",
