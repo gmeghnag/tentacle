@@ -1391,3 +1391,37 @@ cases across 2 new files are this round's (11 + 5). Maestro: flow 20 green,
 above; the other flows are not re-run this round (11b.2's table stands, and no
 flow but 18 ever takes the camera path — 18 asserts the DENIED branch, which this
 round does not touch).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14 — review of `git diff HEAD~1` (`0c5fb025`), fresh context*
+
+**Verdict: REQUEST-CHANGES** (the code is fixed; one record defect is back).
+
+**Gate:** `bun test apps/mobile` 618 pass · 0 fail; `bun run lint` clean (1229
+files); `bun run typecheck` clean.
+
+1. **Finding 1 (camera outlived the intake, no Close) — FIXED.** `scan-session.ts`
+   (pure reducer + `scannerLive`), the stage handed in from `App.tsx`, `stopCamera()`
+   at the start of `submit`, `PairScreen.tsx` gated on `view.stage === "intake"` with
+   `pair-scan-close`. `stage = state.name` and `view.stage` cover the same set of
+   names (`pairing-flow.ts:313`). Mutations, each red then restored (`git status`
+   clean): `scannerLive` ignores the stage → red; `stopCamera()` removed from
+   `submit` → wiring test red; the `stage` rule never ends the session → 2 red;
+   `submit` no longer ends it → 2 red.
+2. **Finding 2 (signature) — NOT RESOLVED, MEDIUM.** The Execution header no longer
+   carries a wrong id, but the new `### Fix round 1` is signed `claude-opus-5-5`
+   while its commit says `fix(…): review round 1 (deepseek)`. That is the same
+   mismatch again. It is also the reviewer's own model id, which makes the
+   different-model check in §10 impossible to read off the doc. Fix: sign that
+   section with the model that actually wrote it (the commit and the signature
+   must agree). `buildReactNativeFromSource` is now recorded (Drift 2), so that
+   part is resolved.
+
+**Regressions / attacks:** a failed paste stays at `intake`, and the `submit` event
+still closes the camera (holds). "Try again" does not bring the camera back
+(holds). LOW, not blocking: if the OS permission prompt is granted only AFTER a
+deep link has already moved the stage to `review`, the late `open` sets
+`requested` again, and a later return to `intake` (fail → Try again) would turn the
+camera on without a new tap. A fix would ignore `open` unless the stage is still
+`intake`. The deep link (F-P17) is unchanged: it still dials nothing.
