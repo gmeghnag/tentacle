@@ -5466,3 +5466,20 @@ No schema changed, so `packages/protocol/schema/protocol.json` was not
 regenerated (and no `protocol.d/` note is needed: no wire change). One changelog
 fragment: `changelog.d/app-decomp-13-pure-residue.changed.md` — never
 `CHANGELOG.md`, whose `[Unreleased]` stays empty (§10). `TODO.md` untouched.
+
+## Review
+
+### S13 — `feat/app-decomp-13-pure-residue` (fresh-context adversarial review)
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH/MEDIUM finding).
+
+- **Gate (touched scope):** the 5 touched test files: 66 pass / 0 fail / 165 expects; `bun run lint` clean (1344 files); `bun run typecheck` clean (root + mobile + relay). The full `bun test` was NOT re-run by this reviewer (the scope I was given was the touched files plus lint and typecheck).
+- **Equivalence (read against `main`, line by line):** `anchorOffset` guard `total<=prev || (rendered<=0 && !selecting)` → null is the exact negation of the old `total>prev && (scrollOffset>0||selecting)`, and the updater still reads the commit offset (the H3 render/commit split is kept). `pasteTarget` + `readReplyMode().mode==="reply"` matches the old `insertIntoReply` short-circuit (`insertIntoReply` checks the same predicate first, `App.tsx:763`). `exitOutcome`, `jobOutputEntry` (absent fields stay absent) and `tryWake` (the model is always written back, and is unchanged when not due) match the inline code exactly. Effect order is untouched. No protocol, persistence or broker change, so no §7 invariant is touched beyond "logic in pure modules", which this slice advances.
+- **Mutations (each reverted, tree byte-identical, `git status` clean):** each mutation killed the pure-module tests: drop `selecting` (1 fail), anchor on `rendered` instead of the commit offset (1), reply checked only when no panel is open (1), `blocked:false` (2), consume `pending` on a non-wake (3), `truncated: undefined` leak (1), any stop reason = finished (1).
+- **Nit 1 (test strength, existed before this slice):** two App-side WIRING mutations survive both the structure pin AND the whole `packages/tui` suite: `App.tsx:1616` `replyOpen: false` (a bracketed-paste timeout with a reply open would become an attachment), and `App.tsx:856` never applying the anchor updater. `app-residue-structure.test.ts` pins "imported, called, no inline copy", not the arguments. `main` had no frame test for either path either, so coverage did not regress. A frame-level test for each would close the gap.
+- **Nit 2:** the changelog fragment says "no user-visible behaviour changes". §10 says internal work adds no fragment, but the S2–S10 slices set the precedent of adding one, so this is left to the owner.
+- **Attacks tried:** a batched scroll+growth tick (the render/commit split is kept: OK); an empty paste with a reply open (still a no-op: OK); a `readReplyMode` dependency that would leave the timeout callback stale (it is a stable `useCallback` and is added to the deps: OK); a third `jobOutputEntry` call site (pinned at exactly two: OK).
+- **Executor behaviour:** the plan's stale line numbers were corrected and its drift explained honestly (the `anchorOffset` signature). Claims match the code.
+- **Model note:** the executor was DeepSeek and the reviewer is a different model family, so blind spots are less likely to be shared.
+
+*— claude-opus-5-5, 2026-11-14*
