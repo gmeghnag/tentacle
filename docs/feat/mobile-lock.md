@@ -623,3 +623,30 @@ that drive the real wrapper.
 
 **Gate:** `bunx tsc --noEmit` clean · `bun run lint` clean (1237 files, 0
 warnings) · `bun test` **9055 pass, 3 opt-in skips, 0 fail** (653 files).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14* (fresh context, same model as round 1)
+
+**Verdict: APPROVE-WITH-NITS** (diff reviewed: `git diff HEAD~1`, commit `4b7e815`)
+
+- **Finding 1 — FIXED.** `app-lock.ts:165` ignores `loaded` once the setting is
+  known. The round-1 repro (`.tentacle/tmp/mobile-lock/relock.ts`) now ends
+  `loaded 1h → {"cover":"none","prompt":false,"locked":false}`. Mutation (guard
+  removed) → **2 new `app-lock.test.ts` tests RED**; reverted.
+- **Finding 2 — FIXED.** The `detail` free-text field is gone from `AppLog.log`.
+  `connection.ts` logs only the close code and `errorShape` (an identifier-shaped
+  class and a numeric code); `App.tsx`'s cover-failure log does the same.
+  Mutation (`clientErrorFields` adds `error.message`) → **client-error test RED**; reverted.
+- **Regressions:** none found. Later setting changes still reach the reducer
+  through `setSetting` (a stronger setting applies at once, a weaker one is held
+  for auth), so no path relied on a second `loaded`. A non-`Error` throw becomes
+  `"Error"`, and a non-finite code is dropped.
+- **Nit (LOW, non-blocking):** the socket canary test checks the FULL canary
+  strings. A regression that re-adds the close `reason` as a field (mutation tried:
+  `{ r: String(reason) }`) stays **GREEN**, because `fieldValue` truncates it to
+  `CANARY-PROMPT deploy th…`, which leaks 23 chars of prose. To catch this, assert
+  the `CANARY-` prefix or the exact entry shape.
+- **Gate:** `bun test apps/mobile/test` 642 pass / 0 fail; `bun run lint` clean;
+  `bun run typecheck` clean. Tree byte-identical after every mutation
+  (`git status --porcelain` empty).
