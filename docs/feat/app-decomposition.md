@@ -5701,3 +5701,47 @@ No schema changed (`packages/protocol/schema/protocol.json` untouched, no
 `protocol.d/` note — the wire is not touched at all). One changelog fragment:
 `changelog.d/app-decomp-11-hop.changed.md`; never `CHANGELOG.md`, whose
 `[Unreleased]` stays empty (§10). `TODO.md` untouched.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-14 (fresh context; a different model family from the
+DeepSeek executor)*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, test non-vacuity; no behaviour
+regression found).
+
+**Gate (scope: S11 files).** `bun run typecheck` clean; `bun run lint` →
+`Checked 1358 files … No fixes applied`; `hop-ready` + `use-hop` +
+`app-hop-structure` + `session-hop` + `app-structural-order` → 37 pass / 0 fail.
+
+**MEDIUM 1 — the queue half of the D4 boundary is unpinned where it is wired.**
+`packages/tui/src/useHop.ts:243` and `:268`. The slice's stated property is that
+both paths feed `hopReady` the same two facts, and its doc names the daemon-queue
+half as "the bug the duplication was hiding". Only the pure function pins it.
+Two mutations, each applied and then reverted (`cmp` byte-identical, `git status`
+clean):
+- A: `hopIfQueued` → `hopReady({ running: stateRef.current.running, queued: 0 })`
+  (it still calls `hopReady`, so the structure regex passes) → **36/36 pass**.
+- B: `boundary()` → `queued: 0 * shownRows(…).length` (both paths ignore the
+  daemon queue) → **36/36 pass** (hop-ready, use-hop, app-hop-structure,
+  session-hop).
+Failure scenario: a queued `/move` starts at "own turn over" while the daemon
+still holds queued messages, so the hop runs ahead of them (D4 broken), and no
+test fails. Fix: add `use-hop.test.tsx` cases with `running: false` and a
+non-empty `daemonQueueRef`/`rowsRef`: (i) `requestHop` must QUEUE, not start;
+(ii) after one queued `/move`, `hopIfQueuedRef.current()` must start nothing,
+and once the queue is emptied it must start the hop. Show both red under A and B.
+The Execution's mutation table (W2) reads as if this wiring were pinned; it pins
+only "busy because running".
+
+**Attacks tried that found nothing.** (1) TDZ/order: `hopRun`/`hopQueued`/
+`requestHop` are read only after `useHop(...)` (`App.tsx:1354` → `:1374`/`:1378`/
+`:1410`/`:1441`); `startHopRef` is assigned at render before the idle effect and
+read lazily by `hopTurnPort`. (2) No effect in the hook; 22 effects, and
+`body(19)` is still the idle effect with unchanged deps. (3) `hopReady`
+inversion (`!running && queued <= 0` vs `running || queued > 0`) is equivalent
+for every non-NaN count, and `length` is never NaN. (4) No leftover App reads of
+`hopRef`/`hopQueuedRef`/`setHop*` (grep on main vs HEAD). (5) Added deps
+(`sessionRef`, `switchingRef`, …) are stable refs, so callback identity is
+unchanged in practice. §7 "logic in pure modules" holds; no protocol/persistence
+surface is touched.
