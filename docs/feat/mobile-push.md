@@ -948,3 +948,28 @@ load. To verify, run `bun test` a few times on a clean `main` worktree.
 
 *— claude-opus-5-5, 2026-11-14*
 
+### Round 2
+
+**Verdict: PASS** (scope: `git diff HEAD~1`, commit `0e03b0f6`).
+
+1. **Finding 1 (vacuous padding test): fixed.** The test now seals a full 512-byte bucket that declares a length of 2 and ends in `0xff`, and the executor added one test per `unpad` guard. Reviewer mutations, each restored from a scratch backup:
+   - tail loop `!== 0` → `=== 999`: **RED** ("non-zero padding byte").
+   - tail-loop bound `padded.length - 1`: **RED** (same test, because the last byte is the one that is non-zero).
+   - length guard disabled (`+ 999`): **RED** ("declared length past the end").
+   - bucket guard disabled (`=== 999`): **RED** ("not exactly one bucket").
+   After the restores, `git diff` is empty.
+2. **Finding 2 (attribution): fixed.** The Execution and the fix round are now signed `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`. My round-1 footer ("same model family") is therefore wrong: this review is by a **different** model family from the executor, which is the routing AGENTS §10 wants for load-bearing work.
+3. **Nits:** all addressed.
+   - The A.2.3 `info` comment is corrected, and the test now asserts the decoded "Ode on a Grecian Urn" string.
+   - The shared-secret test is renamed to what it actually proves.
+   - `SealedPush.ciphertext`'s doc now says 528/1040/2064.
+   - The changelog no longer credits a not-yet-built extension.
+
+**Regressions:**
+- The only change in `src` is a comment.
+- `bun test packages/transport/test/push-seal.test.ts` gives 26 pass / 0 fail (24 before, plus 2 new tests).
+- `bun run lint` checked 1370 files with no fixes.
+- `bun run typecheck` (all 3 projects) is clean.
+
+*— claude-opus-5-5, 2026-11-14*
+
