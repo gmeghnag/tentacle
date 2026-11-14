@@ -5,19 +5,42 @@
  * testIDs a Maestro flow asserts (RN's new architecture exposes no text to
  * XCUITest, so every value a flow checks is in a testID).
  *
- * The compare code is the point of the screen: the 6 digits, grouped `123 456`,
- * shown large, with "check your computer shows the same code, then answer y
+ * The compare code is the point of the screen: the 6 digits, in two mono boxes
+ * (`sasGroups`), with "check your computer shows the same code, then answer y
  * there" — the human's `[y/N]` lives on the computer, never here.
  *
- * 11b.2 adds the Scan affordance above the paste card and the camera's own card.
- * Both are PURE VIEW-MODEL output (`camera-access.ts`): this file decides no
- * permission behaviour, it only draws the state it is handed.
+ * 11b.2 adds the Scan affordance and the camera's own card. Both are PURE
+ * VIEW-MODEL output (`camera-access.ts`): this file decides no permission
+ * behaviour, it only draws the state it is handed.
+ *
+ * The look is the approved `Pair` mockup (docs/feat/mobile-ui-polish.md Slice 2):
+ * the intake is a large-title screen (Scan as the primary action, paste as the
+ * alternative); the live camera covers the whole screen with its viewfinder and
+ * a glass Cancel; review → connecting → compare → done is a bottom sheet.
  */
 import type { JSX, ReactNode } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { CameraView } from "../camera-access.ts";
+import { sasGroups } from "../computer-status.ts";
 import type { PairingView } from "../pairing-flow.ts";
-import type { Palette } from "../theme.ts";
+import { MONO, type Palette, size as SIZE, radius, space, typography } from "../theme.ts";
+import { Banner } from "../ui/Banner.tsx";
+import { GlassButton } from "../ui/GlassButton.tsx";
+import { GroupedCard } from "../ui/GroupedCard.tsx";
+import { Icon } from "../ui/Icon.tsx";
+import { PillButton } from "../ui/PillButton.tsx";
+import { ScreenHeader } from "../ui/ScreenHeader.tsx";
+import { SectionHeader } from "../ui/SectionHeader.tsx";
+import { Sheet } from "../ui/Sheet.tsx";
 
 export interface PairScreenProps {
   readonly palette: Palette;
@@ -29,6 +52,8 @@ export interface PairScreenProps {
   readonly onCancel: () => void;
   /** The card's own button: `edit` clears the text, `retry` re-runs the pairing. */
   readonly onFailureAction: () => void;
+  /** Leave the screen (the header's Cancel) — absent when Pair is the root. */
+  readonly onBack?: () => void;
   /** The computer this pairing replaces ("Pair again" from a row), if any. */
   readonly againName?: string;
   /** The camera's state (11b.2), already decided by `camera-access.ts`. */
@@ -44,8 +69,7 @@ export interface PairScreenProps {
 
 /** `123456` → `123 456` (the mockups' grouped form). */
 export function groupSas(sas: string): string {
-  const digits = sas.replace(/\s/g, "");
-  return digits.length === 6 ? `${digits.slice(0, 3)} ${digits.slice(3)}` : digits;
+  return sasGroups(sas).join(" ");
 }
 
 export function PairScreen({
@@ -57,6 +81,7 @@ export function PairScreen({
   onConfirm,
   onCancel,
   onFailureAction,
+  onBack,
   againName,
   camera,
   onScan,
@@ -64,239 +89,355 @@ export function PairScreen({
   onOpenSettings,
   scanner,
 }: PairScreenProps): JSX.Element {
+  const insets = useSafeAreaInsets();
+  const inSheet = view.stage !== "intake";
+  const failure =
+    view.failure === undefined ? null : (
+      <Banner
+        palette={palette}
+        tone="error"
+        flush
+        testID={`pair-error-${view.failure.reason}`}
+        title="Pairing didn't work"
+        body={
+          view.failure.mayStillPrompt === true
+            ? `${view.failure.message} If the computer is asking, answer n there.`
+            : view.failure.message
+        }
+        {...(view.failure.mayStillPrompt === true ? { bodyTestID: "pair-may-still-ask" } : {})}
+      />
+    );
+  // The failure and its own button, as ONE block: in the intake's list, in the
+  // review sheet, or as the whole `failed` sheet.
+  const failureBlock =
+    view.failure === undefined ? null : (
+      <View style={styles.sheetBody}>
+        {failure}
+        {view.failure.retry === "no" ? null : (
+          <PillButton
+            testID="pair-error-action"
+            palette={palette}
+            label={view.failure.retry === "edit" ? "Try again" : "Retry"}
+            onPress={onFailureAction}
+          />
+        )}
+      </View>
+    );
+
   return (
-    <ScrollView
-      style={{ backgroundColor: palette.groupedBackground }}
-      contentContainerStyle={styles.content}
-      keyboardShouldPersistTaps="handled"
-    >
+    <KeyboardAvoidingView behavior="padding" style={[styles.root, { backgroundColor: palette.bg }]}>
+      <ScrollView
+        style={styles.root}
+        contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
+      >
+        <ScreenHeader
+          palette={palette}
+          title={againName === undefined ? "Pair a computer" : "Pair again"}
+          left={
+            onBack === undefined ? undefined : (
+              <GlassButton
+                testID="pair-back"
+                palette={palette}
+                label="Cancel"
+                accessibilityLabel="Cancel"
+                onPress={onBack}
+              />
+            )
+          }
+        />
+
+        {view.stage === "intake" ? (
+          <>
+            <View style={styles.block}>
+              <GroupedCard palette={palette}>
+                <View style={styles.hero}>
+                  <View style={[styles.heroTile, { backgroundColor: palette.tint }]}>
+                    <Icon name="qrcode.viewfinder" color={palette.accent} size={28} />
+                  </View>
+                  <Text style={[typography.headline, styles.center, { color: palette.label }]}>
+                    Scan the QR code
+                  </Text>
+                  <Text style={[typography.subhead, styles.center, { color: palette.sec }]}>
+                    Run <Text style={{ fontFamily: MONO }}>tentacle pair</Text> on the computer,
+                    then point this phone at the code it shows.
+                  </Text>
+                  {againName === undefined ? null : (
+                    <Text
+                      testID="pair-again-name"
+                      style={[typography.footnote, styles.center, { color: palette.sec }]}
+                    >
+                      Pairing again replaces this phone's entry for '{againName}'.
+                    </Text>
+                  )}
+                  {camera.scan !== "none" ? (
+                    <View style={styles.stretch}>
+                      <PillButton
+                        testID="pair-scan"
+                        palette={palette}
+                        icon="qrcode.viewfinder"
+                        label="Scan QR code"
+                        onPress={onScan}
+                      />
+                    </View>
+                  ) : null}
+                </View>
+              </GroupedCard>
+            </View>
+
+            {camera.card === undefined ? null : (
+              <View style={styles.block}>
+                <Banner
+                  palette={palette}
+                  testID={`pair-camera-${camera.card}`}
+                  tone="warn"
+                  icon="exclamationmark.triangle"
+                  title="Camera unavailable"
+                  body={camera.message ?? ""}
+                  {...(camera.settings
+                    ? {
+                        action: {
+                          label: "Open Settings",
+                          onPress: onOpenSettings,
+                          testID: "pair-camera-settings",
+                        },
+                      }
+                    : {})}
+                />
+              </View>
+            )}
+
+            {failureBlock === null ? null : (
+              <View style={[styles.block, styles.insetBlock]}>{failureBlock}</View>
+            )}
+
+            <View style={styles.block}>
+              <SectionHeader palette={palette} title="Or paste the line it prints" />
+              <GroupedCard palette={palette}>
+                <View style={styles.paste}>
+                  <TextInput
+                    testID="pair-paste-input"
+                    value={view.text}
+                    onChangeText={onText}
+                    placeholder="tentacle://pair?…"
+                    placeholderTextColor={palette.sec}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    multiline
+                    style={[
+                      typography.mono,
+                      styles.field,
+                      styles.pasteField,
+                      { color: palette.label, backgroundColor: palette.fill },
+                    ]}
+                  />
+                  <PillButton
+                    testID="pair-paste-submit"
+                    palette={palette}
+                    kind="secondary"
+                    label="Continue"
+                    onPress={onSubmit}
+                  />
+                </View>
+              </GroupedCard>
+            </View>
+          </>
+        ) : null}
+      </ScrollView>
+
+      {inSheet ? (
+        <Sheet palette={palette} {...sheetTitle(view)}>
+          {view.stage === "review" && view.review !== undefined ? (
+            <View testID="pair-review" style={styles.sheetBody}>
+              {view.review.existing === undefined ? null : (
+                <Text
+                  testID="pair-already-paired"
+                  style={[typography.subhead, { color: palette.orange }]}
+                >
+                  Already paired with '{view.review.existing.name}' — pairing again replaces this
+                  phone's key for it.
+                </Text>
+              )}
+              <Text style={[typography.footnote, styles.label, { color: palette.sec }]}>
+                NAME SHOWN ON THE COMPUTER
+              </Text>
+              <TextInput
+                testID="pair-device-name"
+                value={view.review.deviceName}
+                onChangeText={onDeviceName}
+                autoCapitalize="words"
+                autoCorrect={false}
+                returnKeyType="done"
+                style={[
+                  typography.body,
+                  styles.field,
+                  { color: palette.label, backgroundColor: palette.fill },
+                ]}
+              />
+              {view.review.deviceNameValid ? null : (
+                <Text
+                  testID="pair-device-name-invalid"
+                  style={[typography.footnote, { color: palette.red }]}
+                >
+                  A name is 1–64 characters, without control characters.
+                </Text>
+              )}
+              {failureBlock}
+              <PillButton
+                testID="pair-confirm"
+                palette={palette}
+                label="Pair"
+                disabled={!view.review.deviceNameValid}
+                onPress={onConfirm}
+              />
+            </View>
+          ) : null}
+
+          {view.stage === "connecting" ? (
+            <View style={styles.sheetBody}>
+              <View style={styles.waiting}>
+                <ActivityIndicator color={palette.sec} />
+                <Text testID="pair-connecting" style={[typography.subhead, { color: palette.sec }]}>
+                  Connecting…
+                </Text>
+              </View>
+              <PillButton
+                testID="pair-cancel"
+                palette={palette}
+                kind="neutral"
+                label="Cancel"
+                onPress={onCancel}
+              />
+            </View>
+          ) : null}
+
+          {view.stage === "compare" && view.sas !== undefined ? (
+            <View testID={`pair-sas-${view.sas}`} style={styles.sheetBody}>
+              <View style={styles.sasRow} accessibilityLabel={`Code ${groupSas(view.sas)}`}>
+                {sasGroups(view.sas).map((group, index) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: the groups are positional (first/second half)
+                  <View key={index} style={[styles.sasBox, { backgroundColor: palette.fill }]}>
+                    <Text
+                      allowFontScaling={false}
+                      style={[typography.sas, { color: palette.label }]}
+                    >
+                      {group}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+              <View style={styles.waiting}>
+                <ActivityIndicator color={palette.sec} />
+                <Text style={[typography.subhead, { color: palette.sec }]}>
+                  Waiting for your answer on the computer…
+                </Text>
+              </View>
+              <PillButton
+                testID="pair-cancel"
+                palette={palette}
+                kind="neutral"
+                label="Codes don't match"
+                onPress={onCancel}
+              />
+            </View>
+          ) : null}
+
+          {view.stage === "done" ? (
+            <View testID="pair-done" style={[styles.sheetBody, styles.doneBody]}>
+              <View style={[styles.heroTile, { backgroundColor: palette.tint }]}>
+                <Icon name="checkmark" color={palette.green} size={28} />
+              </View>
+              <Text style={[typography.subhead, styles.center, { color: palette.sec }]}>
+                You can now use this computer from this phone.
+              </Text>
+            </View>
+          ) : null}
+
+          {view.stage === "failed" ? failureBlock : null}
+        </Sheet>
+      ) : null}
+
       {/* The intake owns the live preview: any other stage ends it, so a paste
-          after a Scan tap cannot leave the camera running (fix round 1 finding 1). */}
+          after a Scan tap cannot leave the camera running (fix round 1 finding 1).
+          It covers the whole screen (mockup `Pair`), the camera's own dark chrome. */}
       {scanner === undefined || view.stage !== "intake" ? null : (
-        <View
-          testID="pair-scanner"
-          style={[styles.card, styles.scanner, { backgroundColor: palette.card }]}
-        >
+        <View testID="pair-scanner" style={[styles.scanner, { backgroundColor: palette.camera }]}>
           {scanner}
           {/* The preview's own way out, as the screen's chrome: `scanner.tsx`
               stays the native seam alone. A camera opened by a Scan tap must be
               closable without leaving the screen (fix round 1 finding 1). */}
-          <Pressable
-            testID="pair-scan-close"
-            accessibilityRole="button"
-            onPress={onScanClose}
-            style={[styles.close, { backgroundColor: palette.card }]}
-          >
-            <Text style={[styles.buttonText, { color: palette.accent }]}>Close camera</Text>
-          </Pressable>
+          <View style={[styles.scannerBar, { top: insets.top + 4 }]}>
+            <GlassButton
+              testID="pair-scan-close"
+              palette={palette}
+              onDark
+              label="Cancel"
+              accessibilityLabel="Close camera"
+              onPress={onScanClose}
+            />
+          </View>
         </View>
       )}
-
-      {view.stage === "intake" && camera.scan !== "none" ? (
-        <Pressable
-          testID="pair-scan"
-          accessibilityRole="button"
-          onPress={onScan}
-          style={[styles.button, { backgroundColor: palette.accent }]}
-        >
-          <Text style={[styles.buttonText, { color: palette.onAccent }]}>Scan QR code</Text>
-        </Pressable>
-      ) : null}
-
-      {view.stage !== "intake" || camera.card === undefined ? null : (
-        <View
-          testID={`pair-camera-${camera.card}`}
-          style={[styles.card, { backgroundColor: palette.card }]}
-        >
-          <Text style={[styles.body, { color: palette.danger }]}>{camera.message ?? ""}</Text>
-          {camera.settings ? (
-            <Pressable
-              testID="pair-camera-settings"
-              accessibilityRole="button"
-              onPress={onOpenSettings}
-              style={[styles.button, { backgroundColor: palette.separator }]}
-            >
-              <Text style={[styles.buttonText, { color: palette.label }]}>Open Settings</Text>
-            </Pressable>
-          ) : null}
-        </View>
-      )}
-
-      {view.stage === "intake" ? (
-        <View style={[styles.card, { backgroundColor: palette.card }]}>
-          <Text style={[styles.title, { color: palette.label }]}>Pair a computer</Text>
-          <Text style={[styles.body, { color: palette.secondaryLabel }]}>
-            Run `tentacle pair` on the computer and paste the line it prints.
-          </Text>
-          {againName === undefined ? null : (
-            <Text testID="pair-again-name" style={[styles.body, { color: palette.secondaryLabel }]}>
-              Pairing again replaces this phone's entry for '{againName}'.
-            </Text>
-          )}
-          <TextInput
-            testID="pair-paste-input"
-            value={view.text}
-            onChangeText={onText}
-            placeholder="tentacle://pair?…"
-            placeholderTextColor={palette.secondaryLabel}
-            autoCapitalize="none"
-            autoCorrect={false}
-            multiline
-            style={[styles.input, { color: palette.label, borderColor: palette.separator }]}
-          />
-          <Pressable
-            testID="pair-paste-submit"
-            accessibilityRole="button"
-            onPress={onSubmit}
-            style={[styles.button, { backgroundColor: palette.accent }]}
-          >
-            <Text style={[styles.buttonText, { color: palette.onAccent }]}>Continue</Text>
-          </Pressable>
-        </View>
-      ) : null}
-
-      {view.stage === "review" && view.review !== undefined ? (
-        <View testID="pair-review" style={[styles.card, { backgroundColor: palette.card }]}>
-          <Text style={[styles.title, { color: palette.label }]}>
-            Pair with '{view.review.computerName}'?
-          </Text>
-          <Text style={[styles.body, { color: palette.secondaryLabel }]}>
-            It answers on {view.review.addressCount}{" "}
-            {view.review.addressCount === 1 ? "address" : "addresses"}.
-          </Text>
-          {view.review.existing === undefined ? null : (
-            <Text testID="pair-already-paired" style={[styles.body, { color: palette.danger }]}>
-              Already paired with '{view.review.existing.name}' — pairing again replaces this
-              phone's key for it.
-            </Text>
-          )}
-          <Text style={[styles.body, { color: palette.secondaryLabel }]}>
-            The name this computer will show for this phone:
-          </Text>
-          <TextInput
-            testID="pair-device-name"
-            value={view.review.deviceName}
-            onChangeText={onDeviceName}
-            autoCapitalize="words"
-            autoCorrect={false}
-            style={[styles.input, { color: palette.label, borderColor: palette.separator }]}
-          />
-          {view.review.deviceNameValid ? null : (
-            <Text
-              testID="pair-device-name-invalid"
-              style={[styles.body, { color: palette.danger }]}
-            >
-              A name is 1–64 characters, without control characters.
-            </Text>
-          )}
-          <Pressable
-            testID="pair-confirm"
-            accessibilityRole="button"
-            onPress={onConfirm}
-            style={[
-              styles.button,
-              { backgroundColor: view.review.deviceNameValid ? palette.accent : palette.separator },
-            ]}
-          >
-            <Text style={[styles.buttonText, { color: palette.onAccent }]}>Pair</Text>
-          </Pressable>
-        </View>
-      ) : null}
-
-      {view.stage === "connecting" ? (
-        <View style={[styles.card, { backgroundColor: palette.card }]}>
-          <Text testID="pair-connecting" style={[styles.title, { color: palette.label }]}>
-            Connecting…
-          </Text>
-          <Pressable
-            testID="pair-cancel"
-            accessibilityRole="button"
-            onPress={onCancel}
-            style={[styles.button, { backgroundColor: palette.separator }]}
-          >
-            <Text style={[styles.buttonText, { color: palette.label }]}>Cancel</Text>
-          </Pressable>
-        </View>
-      ) : null}
-
-      {view.stage === "compare" && view.sas !== undefined ? (
-        <View
-          testID={`pair-sas-${view.sas}`}
-          style={[styles.card, { backgroundColor: palette.card }]}
-        >
-          <Text style={[styles.body, { color: palette.secondaryLabel }]}>
-            Check that your computer shows the same code, then answer y there.
-          </Text>
-          <Text style={[styles.sas, { color: palette.label }]}>{groupSas(view.sas)}</Text>
-          <Pressable
-            testID="pair-cancel"
-            accessibilityRole="button"
-            onPress={onCancel}
-            style={[styles.button, { backgroundColor: palette.separator }]}
-          >
-            <Text style={[styles.buttonText, { color: palette.label }]}>Cancel</Text>
-          </Pressable>
-        </View>
-      ) : null}
-
-      {view.stage === "done" ? (
-        <View testID="pair-done" style={[styles.card, { backgroundColor: palette.card }]}>
-          <Text style={[styles.title, { color: palette.label }]}>
-            Paired with '{view.computerName ?? ""}'
-          </Text>
-          <Text style={[styles.body, { color: palette.secondaryLabel }]}>
-            You can now use this computer from this phone.
-          </Text>
-        </View>
-      ) : null}
-
-      {view.failure === undefined ? null : (
-        <View
-          testID={`pair-error-${view.failure.reason}`}
-          style={[styles.card, { backgroundColor: palette.card }]}
-        >
-          <Text style={[styles.body, { color: palette.danger }]}>{view.failure.message}</Text>
-          {view.failure.mayStillPrompt === true ? (
-            <Text
-              testID="pair-may-still-ask"
-              style={[styles.body, { color: palette.secondaryLabel }]}
-            >
-              If the computer is asking, answer n there.
-            </Text>
-          ) : null}
-          {view.failure.retry === "no" ? null : (
-            <Pressable
-              testID="pair-error-action"
-              accessibilityRole="button"
-              onPress={onFailureAction}
-              style={[styles.button, { backgroundColor: palette.accent }]}
-            >
-              <Text style={[styles.buttonText, { color: palette.onAccent }]}>
-                {view.failure.retry === "edit" ? "Try again" : "Retry"}
-              </Text>
-            </Pressable>
-          )}
-        </View>
-      )}
-    </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
+/** The sheet's heading for each stage (the copy is presentation, the stage the model's). */
+function sheetTitle(view: PairingView): { title?: string; subtitle?: string } {
+  switch (view.stage) {
+    case "review":
+      return view.review === undefined
+        ? {}
+        : {
+            title: `Pair with '${view.review.computerName}'?`,
+            subtitle: `It answers on ${view.review.addressCount} ${
+              view.review.addressCount === 1 ? "address" : "addresses"
+            }.`,
+          };
+    case "connecting":
+      return { title: "Connecting" };
+    case "compare":
+      return {
+        title: "Compare the code",
+        subtitle: "Check that your computer shows the same code, then answer y there.",
+      };
+    case "done":
+      return { title: `Paired with '${view.computerName ?? ""}'` };
+    default:
+      return { title: "Pairing didn't work" };
+  }
+}
+
 const styles = StyleSheet.create({
-  content: { paddingHorizontal: 16, paddingTop: 24, gap: 16 },
-  card: { borderRadius: 12, padding: 16, gap: 12 },
-  title: { fontSize: 20, fontWeight: "600" },
-  body: { fontSize: 15, lineHeight: 21 },
-  input: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 15,
-    minHeight: 44,
+  root: { flex: 1 },
+  block: { marginTop: space.sectionSessions },
+  insetBlock: { paddingHorizontal: space.inset },
+  center: { textAlign: "center" },
+  stretch: { alignSelf: "stretch", marginTop: 6 },
+  hero: { alignItems: "center", gap: 8, padding: space.cardInner + 4 },
+  heroTile: {
+    width: SIZE.iconTileLarge + 12,
+    height: SIZE.iconTileLarge + 12,
+    borderRadius: radius.iconTileLarge + 2,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 4,
   },
-  button: { borderRadius: 10, paddingVertical: 12, alignItems: "center" },
-  scanner: { padding: 0, overflow: "hidden", gap: 0 },
-  close: { alignItems: "center", paddingVertical: 10 },
-  buttonText: { fontSize: 16, fontWeight: "600" },
-  sas: { fontSize: 40, fontWeight: "700", letterSpacing: 4, textAlign: "center" },
+  paste: { padding: space.cardInner, gap: 12 },
+  field: { borderRadius: radius.tile, paddingHorizontal: 14, minHeight: 48, paddingVertical: 13 },
+  pasteField: { minHeight: 72, textAlignVertical: "top" },
+  label: { marginTop: 4, letterSpacing: -0.08 },
+  sheetBody: { gap: 12, marginTop: 4 },
+  doneBody: { alignItems: "center" },
+  waiting: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10 },
+  sasRow: { flexDirection: "row", gap: 12, justifyContent: "center", marginVertical: 4 },
+  sasBox: {
+    flex: 1,
+    borderRadius: radius.tile,
+    paddingVertical: 14,
+    alignItems: "center",
+  },
+  scanner: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0 },
+  scannerBar: { position: "absolute", left: space.inset },
 });
