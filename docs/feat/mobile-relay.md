@@ -1301,3 +1301,32 @@ hostile daemon (the tests drive the pure core and a local socket; a 30/min×N
 saturation run against a deployed relay is R7's). The review's noted-but-not-
 raised `maxTrackedIps` eviction of an entry with `open > 0` is untouched (low
 severity, per-IP limits are weak against IPv6 ranges anyway).
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: PASS** (R2). Reviewed `git diff HEAD~1` (e3ed37f1). Same model
+family as the round-1 reviewer; the executor was a different model (deepseek).
+
+- **F1 fixed.** `sweep()` and `accept()`'s `expired` path now close the phone
+  `4404` (`relay-core.ts:380-388`, `:450`); `server.ts:442-446` applies the
+  accept effect. Scratch repro: `sweep()` now emits `close p1 4404`. Mutation:
+  drop the sweep close → 2 core tests fail; drop only the server's `apply` on
+  `expired` → the server's expired-accept test fails alone (non-vacuous).
+- **F2 fixed.** A second `hello` with a different secret on one control socket
+  is refused `invalid` and the socket is closed (`relay-core.ts:270-284`). The
+  repro: second hello refused; after the close, 0 leaked ids, and a dial to that
+  id is `held`. Mutation: guard disabled → the core test and the server test
+  both fail.
+- **F3 fixed.** New socket test "N+1 sequential dials at cap N". Mutation:
+  `core.phoneClosed(key)` removed (`server.ts:367`) → that test fails.
+- Regressions checked: closing the phone from the sweep → its `close` event →
+  `phoneClosed` is a no-op (the stream is already gone), so nothing is released
+  twice; an `accept` after the sweep → `unknown`, so the phone is not closed
+  twice; the same socket re-sending the same secret is still not treated as a
+  replacement (existing test passes). Refusing a second hello closes a daemon
+  that was registered: acceptable, since that client is misbehaving.
+- Gate: `bun test apps/relay` 61 pass / 0 fail; `bun run lint` clean;
+  `bun run typecheck` clean. Every mutation was reverted; `git status` clean.
+  Not re-run: the full `bun test`.
+- Still open, not raised (low): the `maxTrackedIps` eviction comment
+  (`relay-core.ts` "never a bypass") is still inaccurate.
