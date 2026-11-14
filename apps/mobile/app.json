@@ -7,9 +7,20 @@
       "supportsTablet": true,
       "infoPlist": {
         "NSLocalNetworkUsageDescription": "tentacle connects to your computers on the local network",
-        "NSAppTransportSecurity": { "NSAllowsLocalNetworking": true }
+        "NSAppTransportSecurity": { "NSAllowsLocalNetworking": true },
+        "NSCameraUsageDescription": "take a photo to send with your message"
       }
     },
-    "plugins": [["expo-build-properties", { "ios": { "deploymentTarget": "18.0" } }]]
+    "plugins": [
+      ["expo-build-properties", { "ios": { "deploymentTarget": "18.0" } }],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "choose a photo to send with your message",
+          "cameraPermission": "take a photo to send with your message",
+          "microphonePermission": false
+        }
+      ]
+    ]
   }
 }

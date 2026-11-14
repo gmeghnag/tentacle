@@ -1,0 +1,53 @@
+appId: so.tentacle.app
+---
+# 11 (docs/feat/mobile-session-view.md 12c): the daemon goes away mid-turn (F8).
+# The screen says so (`banner-reconnecting`) and keeps the rows it has; when the
+# daemon comes back the client re-attaches, the cut turn is shown as interrupted,
+# and the composer works again.
+- launchApp:
+    clearState: true
+- tapOn:
+    id: "computer-dev"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${ALPHA_ID}"
+- assertVisible:
+    id: "session-view"
+- runScript:
+    file: "11-laptop-hold.js"
+- extendedWaitUntil:
+    visible:
+      id: "turn-running"
+    timeout: 20000
+- runScript:
+    file: "05-stop-serve.js"
+- extendedWaitUntil:
+    visible:
+      id: "banner-reconnecting"
+    timeout: 40000
+# The rows the phone already had are still there: a drop never blanks a transcript.
+- assertVisible:
+    id: "row-r1"
+- runScript:
+    file: "05-start-serve.js"
+- extendedWaitUntil:
+    notVisible:
+      id: "banner-reconnecting"
+    timeout: 60000
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 40000
+# The composer is usable again: a fresh prompt is sendable (a disabled one would
+# silently swallow it).
+- tapOn:
+    id: "composer-input"
+- inputText: "after the reconnect"
+# The keyboard covers the composer's button: dismiss it before asserting the tap
+# target (found by the first iOS 26 run in the other flows).
+- hideKeyboard
+- assertVisible:
+    id: "composer-send"
+- runScript:
+    file: "11-history.js"

@@ -1,0 +1,363 @@
+/**
+ * The permission sheet (docs/feat/mobile-session-view.md 12c). The plan's own
+ * mutation is the age guard (`ARM_MS = 0` → red); the rest pin the failure
+ * modes F4–F7 and the owner's "options exactly as offered" rule.
+ *
+ * Every case drives the module's PUBLIC surface (the `PermissionRequester` it
+ * hands the broker, `view`, `answer`), because that is what the screen and the
+ * client's router actually call.
+ */
+import { describe, expect, test } from "bun:test";
+import type { PermissionRequest, PermissionResponse } from "@tentacle/core";
+import {
+  ARM_MS,
+  createPermissionSheet,
+  responseFor,
+  returnedNotice,
+  sheetOptions,
+} from "../src/permission-sheet.ts";
+
+/** The daemon's own ask for an `fs_write` (`packages/daemon/src/permission-map.ts`). */
+function ask(over: Partial<PermissionRequest> = {}): PermissionRequest {
+  return {
+    tool: "fs_write",
+    level: "ask",
+    title: "Write a file",
+    detail: "a.txt",
+    input: {},
+    reply: { maxChars: 2000 },
+    ...over,
+  };
+}
+
+/** A sheet with a controllable clock. */
+function sheetAt(clock = { at: 1000 }, armMs?: number) {
+  const seen: string[] = [];
+  const sheet = createPermissionSheet({
+    now: () => clock.at,
+    ...(armMs === undefined ? {} : { armMs }),
+    onChange: (state) => seen.push(state.kind),
+  });
+  return { sheet, clock, seen };
+}
+
+/**
+ * Ask through the requester, as the client's broker does: its own signal (the
+ * one the router's `AbortController` would own) unless the case supplies one.
+ */
+function request(
+  sheet: ReturnType<typeof sheetAt>["sheet"],
+  req: PermissionRequest = ask(),
+  options: { signal?: AbortSignal; agent?: { type: string; description: string } } = {},
+): { answer: Promise<PermissionResponse>; signal: AbortSignal } {
+  const own = new AbortController();
+  const signal = options.signal ?? own.signal;
+  const answer = sheet.requester(req, {
+    signal,
+    ...(options.agent === undefined ? {} : { agent: options.agent }),
+  });
+  return { answer, signal };
+}
+
+describe("the age guard (plan P10; mutation: ARM_MS = 0 → red)", () => {
+  test("a tap inside ARM_MS of the ask appearing is IGNORED, and the ask stays", async () => {
+    const { sheet, clock } = sheetAt();
+    const { answer } = request(sheet);
+    await Promise.resolve();
+    expect(sheet.view().kind).toBe("asking");
+    // 399 ms: inside the window.
+    clock.at += ARM_MS - 1;
+    expect(sheet.answer("allow_once")).toBe("ignored");
+    expect(sheet.view().kind).toBe("asking"); // still there: nothing was decided
+    // ARM_MS later the same tap works.
+    clock.at += 1;
+    expect(sheet.answer("allow_once")).toBe("sent");
+    expect(await answer).toEqual({ allowed: true, scope: "once" });
+  });
+
+  test("the window re-arms for the NEXT ask (a sheet that swaps is a new decision)", async () => {
+    const { sheet, clock } = sheetAt();
+    const first = request(sheet);
+    await Promise.resolve();
+    clock.at += ARM_MS;
+    expect(sheet.answer("allow_once")).toBe("sent");
+    first.answer.catch(() => {});
+
+    // The next ask appears at `clock.at`: its taps are guarded again, even though
+    // the previous one had been on screen for ages.
+    const second = request(sheet);
+    await Promise.resolve();
+    expect(sheet.view().kind).toBe("asking");
+    expect(sheet.answer("allow_once")).toBe("ignored");
+    clock.at += ARM_MS;
+    expect(sheet.answer("reject_once")).toBe("sent");
+    expect(await second.answer).toEqual({ allowed: false });
+  });
+
+  test("view() reports `armed` by the clock, so the screen can dim the options", async () => {
+    const { sheet, clock } = sheetAt();
+    request(sheet);
+    await Promise.resolve();
+    expect(sheet.view()).toMatchObject({ kind: "asking", armed: false });
+    clock.at += ARM_MS;
+    expect(sheet.view()).toMatchObject({ kind: "asking", armed: true });
+  });
+
+  test("the release is EMITTED as a state change, so the screen never polls a clock", async () => {
+    // The bug flow 08 found on the simulator: `armed` was computed from the clock
+    // at render time, so nothing woke the sheet up when the window ended and the
+    // options stayed dimmed and `disabled` for ever. The module now SCHEDULES the
+    // release and emits it through `onChange`, like every other change.
+    // Mutation: drop the `schedule(...)` call in `present` → `seen` never gets an
+    // armed:true state and this test is red.
+    const pending: (() => void)[] = [];
+    const seen: { readonly armed?: boolean }[] = [];
+    const clock = { at: 1000 };
+    const sheet = createPermissionSheet({
+      now: () => clock.at,
+      onChange: (state) => seen.push(state as { readonly armed?: boolean }),
+      schedule: (fn) => {
+        pending.push(fn);
+        return { cancel: () => undefined };
+      },
+    });
+    request(sheet);
+    await Promise.resolve();
+    expect(seen.at(-1)).toMatchObject({ kind: "asking", armed: false });
+    expect(pending).toHaveLength(1); // one scheduled release, not none
+    clock.at += ARM_MS;
+    for (const release of pending.splice(0)) {
+      release();
+    }
+    expect(seen.at(-1)).toMatchObject({ kind: "asking", armed: true, armedInMs: 0 });
+    // And the tap the person then makes lands.
+    expect(sheet.answer("allow_once")).toBe("sent");
+  });
+
+  test("a withdrawn ask CANCELS its scheduled release (no armed state for a gone ask)", async () => {
+    const pending: (() => void)[] = [];
+    let cancelled = 0;
+    const clock = { at: 1000 };
+    const sheet = createPermissionSheet({
+      now: () => clock.at,
+      schedule: (fn) => {
+        pending.push(fn);
+        return {
+          cancel: () => {
+            cancelled += 1;
+          },
+        };
+      },
+    });
+    const controller = new AbortController();
+    request(sheet, ask(), { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    expect(cancelled).toBe(1);
+    clock.at += ARM_MS;
+    for (const release of pending) {
+      release();
+    }
+    // The ask was withdrawn, so no "armed" state was ever presented for it.
+    expect(sheet.view().kind).toBe("idle");
+  });
+
+  test("`armedInMs` counts down to the release, so the SCREEN knows when to re-render", async () => {
+    // Without this the sheet has no clock event to wake on: the options stayed
+    // dimmed and `disabled` for ever on the simulator (found by flow 08).
+    const { sheet, clock } = sheetAt();
+    request(sheet);
+    await Promise.resolve();
+    expect(sheet.view()).toMatchObject({ armed: false, armedInMs: ARM_MS });
+    clock.at += ARM_MS - 100;
+    expect(sheet.view()).toMatchObject({ armed: false, armedInMs: 100 });
+    clock.at += 100;
+    expect(sheet.view()).toMatchObject({ armed: true, armedInMs: 0 });
+    // The next ask counts down again from its own arrival.
+    clock.at += 5000;
+    const second = request(sheet, ask({ title: "Next" }));
+    await Promise.resolve();
+    clock.at += ARM_MS;
+    sheet.answer("allow_once");
+    void second;
+  });
+
+  test("an injected armMs of 0 arms at once (the plan's own mutation, as a contract)", async () => {
+    // Keeping this case makes ARM_MS = 0 a RED mutation rather than a silent
+    // behaviour change: with 0 the first two cases above fail.
+    const { sheet } = sheetAt(undefined, 0);
+    request(sheet);
+    await Promise.resolve();
+    expect(sheet.view()).toMatchObject({ armed: true });
+    expect(sheet.answer("allow_once")).toBe("sent");
+  });
+});
+
+describe("the options are exactly what the daemon offered", () => {
+  test("all three wherever a reply is offered", () => {
+    expect(sheetOptions(ask()).map((o) => o.optionId)).toEqual([
+      "allow_once",
+      "allow_always",
+      "reject_once",
+      "reply",
+    ]);
+  });
+
+  test("no reply option when the asker takes no reply (an older daemon)", () => {
+    expect(sheetOptions(ask({ reply: undefined })).map((o) => o.optionId)).toEqual([
+      "allow_once",
+      "allow_always",
+      "reject_once",
+    ]);
+  });
+
+  test("the suggestion names the narrower rule (the daemon's own wording)", () => {
+    const options = sheetOptions(ask({ suggestion: { prefix: "git commit" } }));
+    expect(options.find((o) => o.optionId === "allow_always")?.label).toBe(
+      "Allow `git commit` commands for this session",
+    );
+  });
+
+  test("an answer maps onto the daemon's option ids, never a guessed one", () => {
+    // The bridge's vocabulary (`permission-map.ts`'s allow_once/allow_always/reject_once).
+    expect(responseFor("allow_once", "")).toEqual({ allowed: true, scope: "once" });
+    expect(responseFor("allow_always", "")).toEqual({ allowed: true, scope: "session" });
+    expect(responseFor("reject_once", "")).toEqual({ allowed: false });
+  });
+
+  test("reply needs words: an empty field sends nothing (a bare No would be a lie)", () => {
+    expect(responseFor("reply", "   ")).toBeNull();
+    expect(responseFor("reply", "do it another way")).toEqual({
+      allowed: false,
+      message: "do it another way",
+    });
+  });
+});
+
+describe("the reply path (F7)", () => {
+  test("the reply option opens the field and answers NOTHING yet", async () => {
+    const { sheet, clock } = sheetAt();
+    const { answer } = request(sheet);
+    await Promise.resolve();
+    clock.at += ARM_MS;
+    expect(sheet.answer("reply")).toBe("typing");
+    expect(sheet.view()).toMatchObject({ kind: "asking" });
+    sheet.setReplyText("use a different path");
+    expect(sheet.sendReply()).toBe("sent");
+    expect(await answer).toMatchObject({ allowed: false, message: "use a different path" });
+  });
+
+  test("the words come back when the answer never reached the agent (onAnswerLost)", async () => {
+    // The client's router calls this when the daemon says settled/failed.
+    const { sheet, clock } = sheetAt();
+    const { answer } = request(sheet);
+    await Promise.resolve();
+    clock.at += ARM_MS;
+    sheet.answer("reply");
+    sheet.setReplyText("please use /tmp instead");
+    sheet.sendReply();
+    const response = await answer;
+    expect(response.onAnswerLost).toBeDefined();
+    response.onAnswerLost?.("settled");
+    expect(sheet.view()).toMatchObject({
+      kind: "returned",
+      text: "please use /tmp instead",
+      cause: "settled",
+    });
+    // The notice says WHICH cause, in the TUI's words (`permission-reply.ts`).
+    expect(returnedNotice("settled")).toContain("already settled");
+    expect(returnedNotice("unreplyable")).toContain("does not take a reply");
+    sheet.clearReturned();
+    expect(sheet.view().kind).toBe("idle");
+  });
+
+  test("the field is only writable while the reply option is open", async () => {
+    const { sheet, clock } = sheetAt();
+    request(sheet);
+    await Promise.resolve();
+    clock.at += ARM_MS;
+    sheet.setReplyText("ignored: not opened yet");
+    expect(sheet.view()).toMatchObject({ kind: "asking", replyText: "" });
+    expect(sheet.sendReply()).toBe("ignored");
+  });
+});
+
+describe("a withdrawn ask sends nothing (F4, P3)", () => {
+  test("its signal → DISMISSED, the sheet closes, and no option is ever answered", async () => {
+    const { sheet, clock } = sheetAt();
+    const controller = new AbortController();
+    const { answer } = request(sheet, ask(), { signal: controller.signal });
+    await Promise.resolve();
+    clock.at += ARM_MS;
+    expect(sheet.view().kind).toBe("asking");
+    controller.abort(); // answered on another device
+    expect(await answer).toEqual({ allowed: false, dismissed: true });
+    expect(sheet.view().kind).toBe("idle");
+    // A tap that arrives after the withdrawal decides nothing.
+    expect(sheet.answer("allow_once")).toBe("ignored");
+  });
+
+  test("a signal already aborted before the ask shows it at all", async () => {
+    const { sheet } = sheetAt();
+    const controller = new AbortController();
+    controller.abort();
+    const response = await sheet.requester(ask(), { signal: controller.signal });
+    expect(response).toEqual({ allowed: false, dismissed: true });
+    expect(sheet.view().kind).toBe("idle");
+  });
+
+  test("dismiss (the screen unmounted) withdraws the ask and every queued one", async () => {
+    const { sheet } = sheetAt();
+    const first = request(sheet);
+    const second = request(sheet, ask({ title: "Second" }));
+    await Promise.resolve();
+    expect(sheet.view()).toMatchObject({ kind: "asking" });
+    sheet.dismiss();
+    expect(await first.answer).toEqual({ allowed: false, dismissed: true });
+    expect(await second.answer).toEqual({ allowed: false, dismissed: true });
+    expect(sheet.view().kind).toBe("idle");
+  });
+});
+
+describe("one ask at a time, FIFO", () => {
+  test("a second ask waits; answering the first presents it, armed again", async () => {
+    const { sheet, clock } = sheetAt();
+    const first = request(sheet, ask({ title: "First", detail: "a.txt" }));
+    const second = request(sheet, ask({ title: "Second", detail: "b.txt" }));
+    await Promise.resolve();
+    expect(sheet.view()).toMatchObject({ kind: "asking", request: { title: "First" } });
+    clock.at += ARM_MS;
+    sheet.answer("allow_once");
+    expect((await first.answer).allowed).toBe(true);
+    expect(sheet.view()).toMatchObject({ kind: "asking", request: { title: "Second" } });
+    // The next ask is a new decision: its sim window applies again.
+    expect(sheet.answer("allow_once")).toBe("ignored");
+    clock.at += ARM_MS;
+    sheet.answer("reject_once");
+    expect((await second.answer).allowed).toBe(false);
+  });
+
+  test("withdrawing the ask on screen lets the queued one through", async () => {
+    const { sheet, clock } = sheetAt();
+    const controller = new AbortController();
+    const first = request(sheet, ask({ title: "First" }), { signal: controller.signal });
+    const second = request(sheet, ask({ title: "Second" }));
+    await Promise.resolve();
+    controller.abort();
+    expect(await first.answer).toEqual({ allowed: false, dismissed: true });
+    expect(sheet.view()).toMatchObject({ kind: "asking", request: { title: "Second" } });
+    clock.at += ARM_MS;
+    sheet.answer("allow_once");
+    expect((await second.answer).allowed).toBe(true);
+  });
+
+  test("a sub-agent's ask carries its label for the sheet (display only)", async () => {
+    const { sheet } = sheetAt();
+    request(sheet, ask(), { agent: { type: "explore", description: "look around" } });
+    await Promise.resolve();
+    expect(sheet.view()).toMatchObject({
+      kind: "asking",
+      agent: { type: "explore", description: "look around" },
+    });
+  });
+});

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   PermissionBroker,
   type PermissionRequest,
+  type PermissionRequester,
   type PermissionResponse,
 } from "../src/permission.ts";
 
@@ -63,6 +64,42 @@ describe("PermissionBroker holdUntilSet (an RPC client's broker)", () => {
     broker.setRequester(async () => ({ allowed: false }));
     await tick();
     expect(settled).toBe(true);
+  });
+
+  test("reset(only) leaves a requester that SOMEONE ELSE set (two screens, one broker)", async () => {
+    // The mobile session screen's release: a screen whose detach settled late
+    // must withdraw only its OWN requester, never the one the screen that
+    // replaced it has just mounted (AGENTS §7 "single broker": a cleared
+    // requester holds every ask silently).
+    // Mutation: drop the identity check from `reset` → "still theirs" fails.
+    const broker = new PermissionBroker(undefined, { holdUntilSet: true });
+    const mine: PermissionRequester = async () => ({ allowed: true });
+    const theirs: PermissionRequester = async () => ({ allowed: false });
+    broker.setRequester(mine);
+    broker.setRequester(theirs); // the screen that replaced mine
+    broker.reset(mine); // the departed screen's late release
+    expect(await broker.request(req("after"))).toEqual({ allowed: false }); // still theirs
+    // Its own requester, released by the same call shape: held again.
+    broker.reset(theirs);
+    let settled = false;
+    void broker.request(req("held")).then(() => {
+      settled = true;
+    });
+    await tick();
+    expect(settled).toBe(false);
+  });
+
+  test("reset() with no argument is unconditional (the one TUI prompt's release)", async () => {
+    const broker = new PermissionBroker(undefined, { holdUntilSet: true });
+    const requester: PermissionRequester = async () => ({ allowed: true });
+    broker.setRequester(requester);
+    broker.reset();
+    let settled = false;
+    void broker.request(req("held")).then(() => {
+      settled = true;
+    });
+    await tick();
+    expect(settled).toBe(false);
   });
 
   test("a held request whose signal aborts is dropped (dismissed), never handed over", async () => {

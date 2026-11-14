@@ -24,8 +24,21 @@ import type { InitializeResult } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import type { ComputerRecord } from "./computers.ts";
 import { createForegroundGate } from "./foreground-gate.ts";
+import { sha256Hex } from "./hash.ts";
 import type { RNWebSocketCtor } from "./rn-websocket.ts";
 import { rnWebSocketCtor } from "./rn-websocket.ts";
+
+/**
+ * The client options EVERY link here is built with, apart from the channel.
+ *
+ * `sha256Bytes` is the load-bearing one (docs/feat/mobile-compose.md 13c, the
+ * plan's Repro 2): `RemoteClient` defaults it to Bun's `CryptoHasher`, which is
+ * `undefined` under Hermes, and then `attachImage` throws "needs a binary
+ * sha-256 hasher" before a single frame. Exported so the wiring is testable and
+ * so a second construction site cannot quietly forget it (AGENTS §7: one
+ * session path, one set of options).
+ */
+export const APP_CLIENT_OPTIONS = { sha256Bytes: sha256Hex } as const;
 
 export interface OpenComputerDeps {
   /** React Native's global `WebSocket` (injected: this module imports no RN). */
@@ -133,6 +146,7 @@ export async function openComputer(
   const channel = await gate.dial();
   const broker = createLinkBroker();
   const client = new RemoteClient(channel, broker, undefined, {
+    ...APP_CLIENT_OPTIONS,
     channelFactory: gate.dial,
     onError: (error) => {
       log(`client error: ${error.message}`);
