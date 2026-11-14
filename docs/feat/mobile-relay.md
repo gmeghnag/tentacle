@@ -3,7 +3,7 @@
 > **Status:** implementation APPROVED by the owner (2026-11-14)
 > **Branch:** `feat/mobile-relay` (this doc). Slices R0–R7 run **in order on this branch**, one commit per slice on the owner's OK, each gated by its narrow tests (AGENTS §4); the full gate before Review.
 > **Size:** L as a whole → split into S/M slices (table below) · **Blast:** load-bearing (device authentication path, a new network dial-out from every `serve`, a new persisted file) · **Suited:** per AGENTS §10 — R3, R4, R5a are `load-bearing` (strong executor + mandatory fresh-context Review red-teaming "a pod is not trusted", "one session path", "single broker"); R0, R1, R2, R5b, R6, R7 are `contained`/`cross-module` S–M. The owner assigns executors.
-> **Changelog:** `changelog.d/mobile-relay.added.md` (R5a) — `- **Phones reach \`serve\` through a relay, end-to-end encrypted.** A \`serve\` with paired devices dials out to \`relay.tentacle.so\` (or \`relay.url\` / \`serve --relay\`; \`--no-relay\` to opt out), so a phone reaches it from anywhere with no open port; the relay sees only ciphertext. The relay is a small self-hostable service in \`apps/relay\`.`
+> **Changelog:** `changelog.d/mobile-relay.added.md` (R5a) — `- **Phones reach \`serve\` through a relay, end-to-end encrypted.** A \`serve\` with paired devices dials out to \`relay.tentacle.so\` (or \`relay.url\` / \`serve --relay\`; \`--no-relay\` to opt out), so a phone reaches it from anywhere with no open port; the relay sees only ciphertext. The relay is a small self-hostable service in \`apps/relay\`.` · `changelog.d/mobile-relay.changed.md` (R6) · `changelog.d/mobile-relay-deploy.added.md` (R7 — a NEW slug: reusing `mobile-relay.added` is the one filename collision the discipline refuses)
 
 ## Context
 
@@ -2899,3 +2899,381 @@ in R6's Execution). Nothing else is unverified.
 - **Gate:** the 4 touched files pass 64/64 (552 expects); `bun run typecheck`
   and `bun run lint` (1318 files) are clean. Round 1's nits (`link.address()` =
   last started; a refused open waits the full stagger) remain open as nits.
+
+## Execution
+
+### R7 — deploy artefacts + runbook (as built) — *— claude-opus-5-5, 2026-11-14*
+
+**Scope:** slice R7 only (`apps/relay/deploy/{build.ts,relay.service,Caddyfile.relay}`,
+`docs/ops/relay-deploy.md`, `apps/relay/test/deploy.test.ts`). Nothing applied to any
+server: slice **D** stays the owner's step. No wire, schema, `protocol.json`, daemon,
+cli, app or `TODO.md` change.
+
+**Load-bearing check first (the plan's, "R2's `main.ts` is a `bun build --compile`
+target and the binary serves `/healthz`") — PASSED, on the branch as it stood:**
+
+```
+$ bun build --compile apps/relay/src/main.ts --outfile .tentacle/tmp/mobile-relay/tentacle-relay
+[6ms]  bundle  32 modules
+  [86ms] compile  …/tentacle-relay bun-…-v1.4.3
+$ ./tentacle-relay --port 4977 &
+$ curl -sS -i http://127.0.0.1:4977/healthz
+HTTP/1.1 200 OK
+Content-Type: application/json;charset=utf-8
+Content-Length: 17
+
+{"ok":true,"v":1}
+```
+
+Cross-compile for the deploy host also works from this macOS machine:
+`--target=bun-linux-x64` → `ELF 64-bit LSB executable, x86-64 … for GNU/Linux 3.2.0`
+(90 MB). So the assumption the slice stands on — one entrypoint, no plugin, no
+runtime asset, a real `/healthz` — holds; nothing in R7 needed to change R2.
+
+**Red before green (AGENTS §9).** `apps/relay/test/deploy.test.ts` first, against
+the artefacts that did not exist yet:
+
+```
+$ bun test apps/relay/test/deploy.test.ts
+2 pass, 9 fail   # the 9: ENOENT on relay.service / Caddyfile.relay / relay-deploy.md
+```
+
+…then green (13 pass) once the four artefacts existed. Every assertion binds two
+things that must agree, and the mutation below shows it is on the property, not on
+a file's presence.
+
+**What was built.**
+
+- `apps/relay/deploy/build.ts` — `relayEntrypoint` / `relayOutfile` /
+  `relayBuildTarget` (pure, exported so the test can pin them) + `buildRelayBinary`
+  and a `import.meta.main` runner. Defaults to **`bun-linux-x64`**, not the host
+  triple: `bun build --compile` does not refuse a bare `linux-x64`, it quietly
+  builds the HOST's binary, so the default is the deploy host and `TARGET` must
+  match a Bun-triple regex. `bun run apps/relay/deploy/build.ts` →
+  `dist/tentacle-relay` (gitignored, as `scripts/build.ts`'s output). No plugin
+  needed, unlike the CLI: the relay pulls in no ink and no worker entrypoint.
+- `apps/relay/deploy/relay.service` — `relay` system user, `ExecStart` the
+  installed binary with `--host 127.0.0.1 --port 4100` (stated, not left implicit,
+  so the unit is where the deploy's bind address lives), `Restart=always` +
+  `RestartSec`, `StartLimitIntervalSec=30s`/`StartLimitBurst=5` **in `[Unit]`**,
+  the full sandbox (`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`,
+  `ProtectProc=invisible`, `RestrictAddressFamilies=AF_INET AF_INET6`,
+  `CapabilityBoundingSet=` empty), `MemoryMax=512M`, journal-only logging.
+- `apps/relay/deploy/Caddyfile.relay` — `relay.tentacle.so {
+  reverse_proxy 127.0.0.1:4100 { stream_close_delay 5m } }`, imported from the
+  host's Caddyfile. `stream_close_delay` is documented behaviour, not folklore
+  (verified against Caddy's `reverse_proxy` reference, *Streaming*: "delays
+  streaming requests such as WebSockets from being forcibly closed when the config
+  is unloaded … prevents streams from immediately closing when Caddy's config is
+  reloaded").
+- `docs/ops/relay-deploy.md` — 9 sections: preconditions · build · install (atomic
+  `mv` replace) · systemd · Caddy+DNS · smoke test (real phone on cellular) ·
+  upgrade (keeping `tentacle-relay.previous`) · rollback · diagnose table +
+  **Known limitations**.
+- `apps/relay/tsconfig.json` — `include` += `deploy/**/*.ts`, so the new build
+  script is type-checked by `tsc -p apps/relay` (mutation-checked: a wrong-typed
+  export makes it exit 2).
+- `changelog.d/mobile-relay-deploy.added.md` — ONE new fragment, under a NEW slug
+  (`mobile-relay-deploy`, not `mobile-relay`): the existing
+  `mobile-relay.added.md`/`.changed.md` are R5a's and R6's, and the same
+  slug+category is the same filename (`docs/feat/changelog-fragments.md`). The
+  doc's own line 6 is untouched.
+
+**Drift from the plan (Implementation said `apps/relay/deploy/{relay.service,
+Caddyfile.relay,build.ts}` + the runbook — that shape was kept):** three
+corrections, all found while verifying the artefacts against reality rather than
+by reading them.
+
+1. **`StartLimit*` moved to `[Unit]`.** My first unit put
+   `StartLimitIntervalSec`/`StartLimitBurst` in `[Service]`, where systemd ignores
+   them — a crash loop would spin forever while the file *looked* hardened. Found
+   with an independent key/section checker (`.tentacle/tmp/mobile-relay/unitcheck.ts`,
+   which flags it on the first draft and is clean on the final one), then pinned by
+   a test.
+2. **`MemoryDenyWriteExecute` and `SystemCallFilter=@system-service` removed.** Bun
+   *is* JavaScriptCore: it JITs, so it needs writable-then-executable memory and
+   (on some kernels) `membarrier`. Either hardening would kill the relay on the
+   host only — CI never runs the unit. Both are now pinned ABSENT with the reason.
+3. **The per-IP limits are one shared bucket behind Caddy.** `server.ts` keys its
+   limiter on Bun's `requestIP`, i.e. the direct peer, which behind the proxy is
+   always `127.0.0.1` — so `--max-streams-per-ip`'s default of 16 would cap the
+   whole world at 16 phones. This is R2 code, outside R7's scope to fix, so it is
+   stated in the unit (a commented, fleet-sized `ExecStart` override), in the
+   runbook's *Known limitations*, and here as an **open item for the owner before
+   deploy D**: either raise the three flags or have the relay read
+   `X-Forwarded-For` behind a trusted-local flag (a code change → its own task).
+   The per-id (64) and global (10 000 ids) limits are unaffected.
+
+Rejected alternative: naming the fragment `changelog.d/mobile-relay.added.md`
+(edit R5a's). That is the one changelog collision the discipline refuses, and R7
+is user-visible on its own (an operator can now deploy the relay).
+
+**Mutations (AGENTS §9 — each red on the property, then reverted; `git status`
+clean of every mutation):**
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | live `ExecStart` `--port 4000` | **red 2** (ExecStart-parses test + the continuation-reader test) |
+| M2 | `stream_close_delay 5m` deleted from the Caddy block | **red 1** ("a stream outlives a Caddy reload") |
+| M3 | `DEFAULT_RELAY_TARGET` → `bun-darwin-arm64` | **red 1** ("linux-x64 by default") |
+| M4 | `ExecStart` gains `--max-connections 1000` (a flag `main.ts` refuses) | **red 2** (a unit whose object exits 1 on every boot) |
+| M6 | runbook's `## 7. Rollback` renamed | **red 1** ("it carries a rollback") |
+| M7 | `Restart=always` deleted | **red 1** (sandbox/restart test) |
+| M8 | the test's own `serviceKeys` loses the `\`-continuation join | **red 1** (the reader's guard) |
+| M9 | `MemoryDenyWriteExecute=yes` added back | **red 1** ("no hardening blocks the JIT") |
+| M10 | `User=relay` → `User=root` | **red 1** (sandbox test) |
+| M11 | Caddy forwards `127.0.0.1:4000` | **red 1** ("the site forwards to the relay's bind address") |
+| M12 | runbook's install path → `/opt/relay/…` | **red 2** (unit↔runbook path test + the rollback/commands test) |
+
+Three of those were *false greens first*, and are recorded because they are the
+instructive part: M6's `perl -0pi 's/^## …/m'` was missing its `/m` and silently
+matched nothing; M1/M4's unanchored substitution hit the **commented-out**
+`ExecStart` example above the live line; and M8 v1 asserted
+`port === DEFAULT_RELAY_PORT`, which a *dropped* continuation also satisfies (it
+falls back to the default) — so the test could not tell "stated 4100" from "line
+lost". Fixed by anchoring on `\nExecStart=` (with `expect(live.length === 1)`), by
+using a non-default port in the continuation, and by re-running every mutation
+against the final artefacts. Independently, the unit's key/section placement was
+verified by `unitcheck.ts`, not only by the test that shares my own reader.
+
+**Gate** (this branch, after the last edit):
+
+- `bun run typecheck` — clean (`tsc --noEmit`, `tsc -p apps/mobile`, `tsc -p apps/relay`).
+- `bun run lint` — `biome check .`: **1363 files, 0 errors, 0 warnings**.
+- `bun test` — **9826 pass / 4 skip / 0 fail**, 712 files, 78 707 expects
+  (394 s). The 4 skips are the pre-existing opt-in ones (live-k8s, live-docker,
+  the slow socket test, `confinement`'s root-only cases), not new; the R7 files are
+  13/13 (`apps/relay/test/deploy.test.ts`) and the relay package 74/74.
+- `git status`: only the intended files (`apps/relay/deploy/`, `apps/relay/test/deploy.test.ts`,
+  `docs/ops/relay-deploy.md`, `apps/relay/tsconfig.json`, this doc, the fragment, `dist/` removed).
+
+**Not verified — one line each, with how to verify:**
+
+- `systemd-analyze verify` / `caddy validate` acceptance: needs those binaries
+  (neither is on this machine). Run them on the host, runbook §3/§4, before
+  enabling the unit.
+- The public cert, phone over cellular through Caddy, a reload not cutting live
+  streams, an idle stream surviving 30 min: deploy **D**, runbook §5, owner-run.
+- The relaying itself through a proxy hop (as opposed to Bun↔Bun on loopback,
+  which `bun test` covers): the same §5 smoke test.
+
+**Runbook accuracy pass (same slice, before Review).** Two commands and one log
+list in `docs/ops/relay-deploy.md` were checked against the code rather than
+against memory, and two of the three were wrong:
+
+- `tentacle devices list` → **`tentacle devices`** (the verbless form lists;
+  `main.ts:231` dispatches it, `:321-325` is the usage).
+- The log line names were invented in my first draft (`hello`/`open`/`close`); the
+  real set is `ready`, `dial-open`, `dial-held`, `dial-refused`, `accept` (plus the
+  `*-refused`/`*-oversize` refusal lines). Cross-checked mechanically
+  (`.tentacle/tmp/mobile-relay/lognames.ts` parses the runbook's `` `name <arg>` ``
+  tokens and `server.ts`'s `log(\`…`\` sites`: no name in the runbook is absent
+  from the code).
+- The startup line's exact text was taken from `main.ts:185`, and the `4404` /
+  `4429` close codes from `protocol/src/relay.ts:69` and `relay-core.ts:63`.
+
+These are prose, so no test can hold them (Markdown is not linted, §6); the check
+was a one-off script, and it is recorded here rather than pretended to be a guard.
+
+## Review
+
+### R7 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (2 MEDIUM, no HIGH). Scope: R7 only (`git diff main...HEAD`).
+
+**Gate:** `bun test apps/relay` 74 pass / 0 fail (4 files); `bun run lint` clean
+(1363 files); `bun run typecheck` clean (root + mobile + relay). Full `bun test` not
+re-run (scope: touched files). `buildRelayBinary` really compiles `main.ts` (built a
+`bun-darwin-arm64` binary into `.tentacle/tmp/mobile-relay/r7/`: `build true`); running
+the binary was not permitted in this session, so `/healthz` on the compiled artefact is
+unverified (runbook §3 covers it on the host).
+
+**Mutation (§9):** `relay.service` ExecStart `--port 4100→4101` ⇒ 2 tests red;
+`Caddyfile.relay` `stream_close_delay 5m→1s` ⇒ red. Reverted; `git diff` empty.
+
+**Findings**
+1. **MEDIUM — the shipped unit is a known-broken production config, and the Caddyfile
+   says otherwise.** `apps/relay/deploy/relay.service:39` runs the default limits;
+   behind Caddy every peer is `127.0.0.1`, so `relay-core.ts:44,46,52` become ONE
+   global bucket: 30 phone dials/min, 16 concurrent phone sockets and **10 daemon
+   `hello`s/min for the whole world**. Scenario: relay restart (F3) with 200
+   registered daemons → 10 re-register per minute, the rest are refused and back off
+   (up to 60 s), a ~20 min outage — the "no thundering herd" convergence F3 promises
+   does not hold. Worse, any one client sending 30 dials/min (or holding 16 sockets)
+   locks out every phone on the relay — a single-host DoS of the service. The runbook
+   (§9) defers this to the owner, but `Caddyfile.relay:31-32` asserts "`relay.service`
+   sets the limits to their one-shared-key values instead" — false, they are a comment
+   (`relay.service:36-38`). Fix in R7's scope: either ship the fleet-sized ExecStart
+   live (and pin it in `deploy.test.ts`), or make the unit refuse to be the default
+   (and correct the Caddyfile comment); the real fix (XFF behind a trusted-local flag)
+   is R2 code.
+2. **MEDIUM — `stream_close_delay` is documented as making reloads safe; it only
+   delays the cut by 5 min.** `Caddyfile.relay:19-22` claims "5m > the relay's 60 s
+   idle timeout, so a stream ends on its own before the delay can ever fire". False:
+   the relay sends pings (`server.ts:121-124`, `sendPings: true`), so a live phone
+   session and every daemon control socket never idle out; Caddy force-closes them
+   5 min after a reload. Scenario: owner runs `systemctl reload caddy` (runbook §4)
+   during a long turn → every relayed session drops at +5 min and every daemon
+   re-registers at once (which, with finding 1, hits the 10-hello/min bucket). The
+   runbook repeats the expectation (`docs/ops/relay-deploy.md:173-175`, `:284`,
+   `:305` "a Caddy reload not cutting live streams") and the test name
+   `deploy.test.ts:175` "a stream outlives a Caddy reload" pins the wrong claim. Fix:
+   state the real behaviour (a reload = staggered drop within 5 min; F1/F2 resync
+   handle it) and drop the "can never fire" reasoning.
+
+**Attacks tried (no finding):** ExecStart flags vs `parseRelayArgs` (pinned, mutation
+red); `StartLimit*` in `[Unit]` (correct, systemd ignores it in `[Service]`); JIT-hostile
+hardening absent (`MemoryDenyWriteExecute`, `@system-service`); secrets in argv (none);
+`TARGET=linux-x64` silent host build (refused by the regex); `tsconfig` include widened
+to `deploy/` so `build.ts` is typechecked (yes); changelog slug distinct from R5a's (yes);
+§7 "a pod is not trusted"/"model stays on laptop": R7 adds no secret, no wire change.
+Unverified (owner, slice D): `RestrictAddressFamilies=AF_INET AF_INET6` without `AF_UNIX`
+/`AF_NETLINK` under Bun on Linux — run `systemd-analyze verify` + a start on the host.
+
+**Executor behaviour:** careful and honest — the per-IP problem was found and written
+down, the test's own parser was guarded against a false red, and the limits of the guard
+are stated. The miss is shipping the unsafe default while another artefact claims the
+safe one is in place.
+
+*— claude-opus-5-5, 2026-11-14* (reviewer is the same model family as R7's executor,
+claude-opus-5-5; only the context is fresh — shared blind spots may survive.)
+
+## Execution
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-14*
+
+Scope: the R7 review's 2 MEDIUM, no HIGH. Both were **prose-versus-artefact**
+findings, so both arms were verified against the code rather than the review:
+`relay-core.ts:44,46,52` are indeed the per-client defaults, `server.ts:121-124`
+really sets `sendPings: true`, `server.ts:286` really keys on `requestIP` (the
+direct peer), and the Caddy reference page's own wording for `stream_close_delay`
+is "delays … instead, the stream will remain open until the delay is complete" —
+a delay, never a cancel.
+
+**1 (MEDIUM) — the shipped unit was the known-unsafe production config.**
+`relay.service` ran the per-client defaults behind Caddy — one global bucket — and
+`Caddyfile.relay` claimed in prose that the unit "sets the limits to their
+one-shared-key values instead". Fixed by **shipping the fleet sizes live**, not by
+softening the comment: the live `ExecStart` is now a `\`-continued two-line value
+carrying `--max-dials-per-minute 6000 --max-streams-per-ip 2000
+--max-hellos-per-minute 600` (`relay.service:50-51`), each with its arithmetic in
+the comment above (`relay.service:36-49`). Chosen over the review's
+"make-the-unit-refuse" alternative because the unit is the one artefact that ships
+the deploy's bind address; a unit that installs cleanly and then caps the world at
+16 phones is the failure mode this task exists to prevent. The Caddyfile comment
+(`Caddyfile.relay:37-45`) now names the three flags and warns against dropping them
+back; the runbook's *Known limitations* `§9` bullet states the numbers, the
+`MemoryMax` bound that replaces them as the flood ceiling, and the condition for
+reverting to the defaults (XFF lands). Pinned by two new tests.
+
+**2 (MEDIUM) — `stream_close_delay` was documented as making reloads safe.**
+It only defers the cut by 5 minutes, and the relay's own pings
+(`sendPings: true`) mean no leg ends on its own first. Fixed in all five places
+the false claim lived: `Caddyfile.relay:19-29` (the mechanism stated as a
+5-minute grace, plus the one case where a leg does end on its own — the relay's
+60 s idle close), the runbook `§4` (`:173-183`, a new paragraph: a reload is a
+staggered drop; schedule it off a long turn), `§7` (`:270-271`, "a reload with a
+live relay behind it is harmless" → it drops streams within the grace), `§8`'s
+symptom table (`:293`, "`stream_close_delay` missing" → expected, resync), `§9`
+(`:315-321`, a new limitation), and the changelog fragment (which had repeated
+"stops a config reload from cutting every live phone session").
+
+**Tests added** (`apps/relay/test/deploy.test.ts`, 13 → 17):
+(a) *"the live ExecStart sizes the three PER-IP limits for ONE shared key"* —
+parses the real live ExecStart and holds each of the three flags **above** its
+`RELAY_LIMITS` per-client default, so an omitted flag (the actual bug) and a
+flag left at its default both die; (b) *"the Caddyfile's account of the limits is
+true of the unit"* — the claim is two artefacts, so both are asserted (the site
+block names each flag AND the unit passes it); (c) *"a Caddy reload drops live
+streams after a 5m GRACE — and nothing says otherwise"* — keeps
+`stream_close_delay 5m` (the R7 guard), bans the old reasoning by regex, and
+requires the word "5 min" in both the block and the runbook; (d) *"it does not
+promise a Caddy reload is a no-op for live sessions"* + *"it says a reload with
+live streams behind it is not harmless"* — the runbook's two remaining repeats of
+the claim (for the record, the test file's `serviceKeys` `\`-continuation
+reader is now exercised by a **real** continuation, not only a synthetic one: the
+unit's own `ExecStart` is two lines).
+
+**Red before green** (against the unfixed artefacts, narrow file only):
+
+```
+$ bun test apps/relay/test/deploy.test.ts        # artefacts as R7 shipped them
+12 pass, 5 fail
+(fail) …the live ExecStart sizes the three PER-IP limits for ONE shared key
+(fail) …the Caddyfile's account of the limits is true of the unit
+(fail) …a Caddy reload drops live streams after a 5m GRACE
+(fail) …it does not promise a Caddy reload is a no-op for live sessions
+(fail) …it says a reload with live streams behind it is not harmless
+```
+
+One draft of test (a) was itself wrong — it compared a formatted string to
+itself-built expectation, so it passed only when the flag was *missing*; it was
+replaced by an explicit `value === undefined` throw that names the flag
+(`deploy.test.ts:168-175`), and mutation M1 below is what catches that class.
+
+**Mutation checks** (after green; each reverted from a saved copy in
+`.tentacle/tmp/mobile-relay/fix1/` and confirmed by `shasum -c`: all four files
+`OK` — no `git checkout`/`restore`/`stash`):
+
+| # | mutation | result |
+|---|---|---|
+| M1 | drop the three live limit flags (back to the per-client defaults — the original bug) | **red 3**: the limit test (`ExecStart does not pass --max-dials-per-minute: … falls back to the per-client default of 30, i.e. one global limit`), the Caddyfile-account test, AND the continuation-reader guard (a dropped continuation loses the flags) |
+| M2 | `--max-streams-per-ip 2000` → `16` (flag present, but at the per-client value) | **red 1**, `expect(received).toBeGreaterThan(expected)` — the test pins "above the default", not merely "the flag is there" |
+| M3 | restore the false Caddyfile sentence (`a stream ends on its own before the delay can ever fire`) | **red 1** ("a Caddy reload drops live streams after a 5m GRACE") |
+| M4 | runbook back to "a Caddy reload not cutting live streams" (§9) | **red 1** ("it does not promise a Caddy reload is a no-op…") |
+| M5 | restore "a reload with a live relay behind it is harmless" (§7) | **red 1** ("it says a reload with live streams behind it is not harmless") |
+
+**Drift from the review's suggested fix.** The review offered "ship the fleet-sized
+ExecStart **or** make the unit refuse the default". I shipped the values (M1/M2
+pin them) and ALSO corrected every prose claim the false default rested on, because
+the two findings interlock: the unit's unsafe numbers were only reachable because
+`Caddyfile.relay` said they were not. No `relay.service`-refuses idea was
+implemented — a unit that validates at start would need the flags in argv anyway,
+and `deploy.test.ts` covers the same ground without a host. The new numbers are
+this fix's OWN choice, not an owner decision: they are stated as reversible in
+`relay.service:47-49` and runbook `§9`, and are gated on the XFF code change.
+
+**Gate** (this branch, after the last edit): `bunx tsc --noEmit` clean;
+`bunx tsc -p apps/relay` and `bunx tsc -p apps/mobile` clean; `bun run lint`
+clean (1363 files, 0 errors, 0 warnings); `bun test` **9830 pass / 4 opt-in skip
+/ 0 fail** (712 files, 78 727 expects; +4 over R7's 9826 — the four new tests).
+`apps/relay` alone: 78/78 (74 + the 4 new). `git status`: only the five intended
+files (`relay.service`, `Caddyfile.relay`, `docs/ops/relay-deploy.md`,
+`deploy.test.ts`, the changelog fragment) plus this doc.
+
+**Not verified — one line each, with how to verify:**
+- `systemd-analyze verify` / `caddy validate` accepting the edited unit and site
+  block: needs those binaries (neither is here). Run both on the host, runbook
+  §3/§4, before enabling.
+- That the fleet numbers are not too low for real traffic: only the deploy shows
+  the real dial rate. Watch `journalctl -u relay.service | grep refused`, runbook
+  §8; the flags are tunable in `ExecStart` without a code change.
+
+*— claude-opus-5-5, 2026-11-14*
+
+### Round 2
+
+**Verdict: APPROVE.** I checked the fix commit against Round 1's two findings
+(`git diff HEAD~1`).
+
+- **Finding 1 (shared per-IP limits): FIXED.** `relay.service` now runs
+  `--max-dials-per-minute 6000 --max-streams-per-ip 2000 --max-hellos-per-minute 600`
+  in the live, continued `ExecStart`. The Caddyfile's claim about the unit is now true,
+  and a test pins it. Mutation: `600→10` made 2 tests fail (the limit test and the
+  parser's own continuation guard).
+- **Finding 2 (`stream_close_delay`): FIXED.** The Caddyfile, runbook §4/§7/§8/§9 and
+  the changelog now describe a reload as a staggered drop over a 5-minute grace.
+  Mutations: putting "before the delay can ever fire" back into the Caddyfile made a
+  test fail, and adding "reload not cutting live streams" to the runbook made a test
+  fail. All three mutations were reverted, and `git status` shows no changes.
+- **Regressions:** none found. `deploy.test.ts` 17/17 pass. `bun run lint` is clean
+  (1363 files) and `bun run typecheck` is clean (root, mobile, relay). The
+  `RELAY_LIMIT_FLAGS` type import resolves. The parser's guard still covers a
+  continued `ExecStart`.
+- **Remaining risk (accepted, and stated in runbook §9):** the limits are still one
+  bucket, so a single client can use up a large share, for example all 2000 sockets.
+  The real fix is X-Forwarded-For behind a trusted-local flag, an R2 code task. It is
+  out of R7's scope.
+
+*— claude-opus-5-5, 2026-11-14* (same model family as the executor; only the
+context is fresh.)
