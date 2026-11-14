@@ -1312,7 +1312,7 @@ describe("N clients of one session (detached-handover)", () => {
       const c = await pod.connect({ shared: true, resume: record, sessionId: UID, model });
       if (!(await c.runtime.attachTo(UID, record))) {
         // What `joinRun` does on the seeded path (after the relay checks).
-        await (c.runtime as { openSeeded?: () => Promise<void> }).openSeeded?.();
+        await (c.runtime as { openSeeded?: () => Promise<unknown> }).openSeeded?.();
       }
       const session = c.runtime.createSession();
       const seen: string[] = [];

@@ -45,6 +45,7 @@ const MOVED: HopOutcome = {
     preexisting: false,
     rollback: async () => {},
   },
+  controller: proposingSession({ sends: [] }) as never,
   notice: "moved to docker:box",
 };
 

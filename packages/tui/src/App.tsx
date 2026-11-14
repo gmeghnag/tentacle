@@ -37,7 +37,14 @@ import { dispatchCommand } from "./commands/dispatch.ts";
 import { recall } from "./history.ts";
 import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
 import { HOP_QUEUED_NOTICE, type HopSpec, hopStep, parseHopCommand } from "./hop-command.ts";
-import { hopFailureText, hopMovedNotice, hopPlaceText, hopStatusRow } from "./hop-status.ts";
+import {
+  hopFailureText,
+  hopMovedNotice,
+  hopPlaceText,
+  hopShownCwd,
+  hopStatusRow,
+  noticeText,
+} from "./hop-status.ts";
 import { startIdleWarm } from "./idle-warm.ts";
 import { resolveLineInput } from "./input-actions.ts";
 import { JOB_TAIL_SHOWN, exitOutcome, jobOutputEntry, refreshDue } from "./job-drawer.ts";
@@ -448,6 +455,8 @@ export function App({
   const shownTarget = targetFeed ? (targetView?.badge ?? null) : (target ?? null);
   /** A fact of the place the session is at now: a spilled file lives in the pod. */
   const shownInPod = targetFeed ? (targetView?.daemonInPod ?? false) : daemonInPod;
+  /** The footer's and a tool ask's cwd: the hop target's own when it reports one (D4). */
+  const shownCwd = hopShownCwd(targetFeed ? targetView : null, cwd);
   // A long history is being warmed before it is committed (C8): activities wait.
   const warmingRef = useRef(false);
   const [loading, setLoading] = useState<{ done: number; total: number } | null>(null);
@@ -1388,18 +1397,18 @@ export function App({
             }
             swapSession(outcome.moved, { keepTranscript: true });
             settle();
-            pushNotice(hopMovedNotice(hopPlaceText(outcome.view.place), wasOn));
+            pushNotice(hopMovedNotice(hopPlaceText(outcome.view.place), wasOn, outcome.note));
             return;
           }
           // A failed hop changes nothing: same session, same badge, same rows.
           settle();
-          pushNotice(`_${outcome.failed}_`);
+          pushNotice(`_${noticeText(outcome.failed)}_`);
         },
         (error: unknown) => {
           // `HopRun.done` never rejects by contract; a host that does anyway is
           // still one notice, and the latch must not stay up.
           settle();
-          pushNotice(`_${hopFailureText(error)}_`);
+          pushNotice(`_${noticeText(hopFailureText(error))}_`);
         },
       );
     },
@@ -1920,7 +1929,7 @@ export function App({
         linkView,
         shownModel,
         shownTarget,
-        cwd,
+        cwd: shownCwd,
         contextWindow,
         expandAll,
         selection,

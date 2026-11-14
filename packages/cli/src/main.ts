@@ -2095,7 +2095,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           }),
           load: (uid) => sessions.store.load(uid),
           status: (line) => hopStatus(line),
-          notify: (text) => sessions.notices.notify(text),
+          // No `notify`: the TUI owns the hop's outcome line (docs/fix/session-hop-live.md D2).
         });
         const hopView = createHopFeed({
           facade,

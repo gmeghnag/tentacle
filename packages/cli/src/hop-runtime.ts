@@ -30,6 +30,8 @@ export interface HopTargetView {
   readonly place: HopPlace;
   readonly badge?: TargetBadge;
   readonly daemonInPod: boolean;
+  /** The daemon session's own cwd after a hop (D4 of docs/fix/session-hop-live.md). */
+  readonly cwd?: string;
 }
 
 export interface HopRuntimeDeps {
@@ -54,8 +56,6 @@ export interface HopRuntimeDeps {
   readonly load: (uid: string) => Promise<LoadResult>;
   /** A phase line while a hop runs; `null` clears it (the TUI's status row). */
   readonly status?: (line: string | null) => void;
-  /** One notice (never the terminal while Ink owns it, AGENTS §7). */
-  readonly notify?: (text: string) => void;
   /**
    * The TUI's half of the commit: swap to `built`'s controller with
    * `keepTranscript`, turn auto-accept off (D3, D9). Awaited, and its throw is
@@ -198,7 +198,7 @@ export function createHopRuntime(deps: HopRuntimeDeps): HopRuntime {
           build: (target, id, buildOpts) => deps.build(target, deps.shared, id, buildOpts),
           load: deps.load,
           ...(deps.status ? { status: deps.status } : {}),
-          onCommit: async (built) => {
+          onCommit: async (built, facts) => {
             // The facade moves FIRST: a listener swapped after the runtime would
             // paint a status from a runtime nobody is on any more.
             current = built.runtime;
@@ -209,6 +209,8 @@ export function createHopRuntime(deps: HopRuntimeDeps): HopRuntime {
               place: built.place,
               ...(badge ? { badge } : {}),
               daemonInPod: built.daemonInPod,
+              // D4: the session's own cwd on the target (absent → the laptop's).
+              ...(facts.cwd === undefined ? {} : { cwd: facts.cwd }),
             });
             await deps.onSwap?.(built);
           },
@@ -218,7 +220,8 @@ export function createHopRuntime(deps: HopRuntimeDeps): HopRuntime {
         },
       );
       deps.status?.(null);
-      deps.notify?.(outcome.notice);
+      // The outcome is NOT notified here: the TUI owns its one line, moved or
+      // failed (`hopMovedNotice` + the feed's `note`; docs/fix/session-hop-live.md D2).
       // A failed hop leaves the old runtime where it was: the badge does not move.
       return outcome;
     },

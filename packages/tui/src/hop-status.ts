@@ -7,7 +7,7 @@
  * to the terminal width here — an image ref can be long and a hop must never
  * widen the frame.
  */
-import type { HopPlaceView } from "./app-types.ts";
+import type { HopPlaceView, HopTargetView } from "./app-types.ts";
 import { truncateCells } from "./cells.ts";
 import { oneLine } from "./commands.ts";
 
@@ -32,6 +32,16 @@ export function hopStatusRow(
   return truncateCells(oneLine(text), Math.max(10, columns));
 }
 
+/**
+ * The cwd the footer and a tool ask show: the daemon session's OWN cwd after
+ * a hop (`/` in an attached pod whose folder is not shared), else the laptop's
+ * (docs/fix/session-hop-live.md D4). A relative `/attach` path still means the
+ * laptop's — that one never comes from here.
+ */
+export function hopShownCwd(view: HopTargetView | null, laptopCwd: string): string {
+  return view?.cwd ?? laptopCwd;
+}
+
 /** The place as one line (`local`, `docker:box`, `kubernetes:web-0/app`). */
 export function hopPlaceText(place: HopPlaceView): string {
   if (place.kind === "local") {
@@ -48,11 +58,22 @@ export function hopPlaceText(place: HopPlaceView): string {
  * words are the App's, never the engine's: `place` is the host's own text for
  * the resolved target.
  */
-export function hopMovedNotice(place: string, autoAcceptWasOn: boolean): string {
-  const where = oneLine(place);
+export function hopMovedNotice(place: string, autoAcceptWasOn: boolean, note?: string): string {
+  const where = noticeText(oneLine(place));
+  const after = note === undefined || note.trim() === "" ? "" : ` — ${noticeText(oneLine(note))}`;
   return autoAcceptWasOn
-    ? `_Moved to ${where} — auto-accept is off; send a message to continue._`
-    : `_Moved to ${where} — send a message to continue._`;
+    ? `_Moved to ${where}${after} — auto-accept is off; send a message to continue._`
+    : `_Moved to ${where}${after} — send a message to continue._`;
+}
+
+/**
+ * Text that goes inside the App's `_…_` notice, escaped so it renders
+ * literally: it may be an engine's (`Docker API GET /_ping failed`), and an
+ * unescaped `_`/`*`/`` ` ``/`[` would be read as markdown
+ * (docs/fix/session-hop-live.md D2). The identity on text without them.
+ */
+export function noticeText(raw: string): string {
+  return raw.replace(/[\\_*`[\]]/g, (c) => `\\${c}`);
 }
 
 /**

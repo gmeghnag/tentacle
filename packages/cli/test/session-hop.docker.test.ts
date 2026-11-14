@@ -294,7 +294,10 @@ describe(`live session hop (opt-in: TENTACLE_DOCKER_TESTS=1) — image ${IMAGE}`
 
       // The target's turn runs INSIDE the container, through the real daemon the
       // hop built (its model is the laptop's, over `model/stream`).
-      const inContainer = out.built.runtime.createSession();
+      // The hop's own seeded controller (session-hop-live F2): the target's
+      // `createSession` now mints a fresh session — the seed is claimed.
+      const inContainer = out.controller;
+      expect(inContainer.sessionId).toBe(uid);
       await drain(inContainer.send("use the shell"));
       await inContainer.flushed();
       await saver.drain();

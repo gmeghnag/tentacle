@@ -121,8 +121,14 @@ export interface LocalRuntime {
    * the open does; then nothing is kept and the next `createSession` is lazy.
    * `record` (given, `null` included) replaces the runtime's startup seed: the
    * laptop copy as read NOW, never one from before a slow dial (R8).
+   * Resolves the opened controller. `claim`: the caller takes it, so it is NOT
+   * kept for the next `createSession` (a racing one gets a fresh session and
+   * can never steal it — a hop's hand-over, docs/fix/session-hop-live.md F2).
    */
-  openSeeded(record?: SessionRecord | null): Promise<void>;
+  openSeeded(
+    record?: SessionRecord | null,
+    opts?: { readonly claim?: boolean },
+  ): Promise<PersistingController>;
   /**
    * The quit of a client of a shared session: one last read-back of every open
    * session (a foreign turn is saved only at its end), the pending saves, then
@@ -198,6 +204,12 @@ export interface LocalRuntime {
    * D7b); `null` when it is not the whole truth.
    */
   ownUse(id: string): Promise<OwnUse | null>;
+  /**
+   * The daemon session's OWN cwd (its `session/list` entry): where its tools
+   * run — `/` in an attached pod whose folder is not shared. `null` when it is
+   * not listed or the read fails (docs/fix/session-hop-live.md D4).
+   */
+  sessionCwd(id: string): Promise<string | null>;
   /**
    * End `id` on THIS daemon for good before it is reseeded elsewhere
    * (docs/feat/session-hop.md D1 step 4(a)). Resolves `true` only when the
@@ -1153,7 +1165,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
       await written();
       return true;
     },
-    openSeeded: async (record) => {
+    openSeeded: async (record, opts = {}) => {
       if (record !== undefined) {
         seed = record;
       }
@@ -1165,8 +1177,11 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
         controller.close?.();
         throw error;
       }
-      attached = controller;
+      if (opts.claim !== true) {
+        attached = controller;
+      }
       await written();
+      return controller;
     },
     quit: async (opts = {}) => {
       // A close that ends a running turn needs nothing more here: that turn has
@@ -1262,6 +1277,14 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
         const { sessions } = await client.sessionList();
         const entry = sessions.find((session) => session.sessionId === id);
         return entry ? (entry.jobs ?? 0) : null;
+      } catch {
+        return null;
+      }
+    },
+    sessionCwd: async (id) => {
+      try {
+        const { sessions } = await client.sessionList();
+        return sessions.find((session) => session.sessionId === id)?.cwd ?? null;
       } catch {
         return null;
       }
