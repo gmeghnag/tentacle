@@ -94,7 +94,12 @@ import {
 } from "@tentacle/transport";
 import { ATTACH_TIMEOUT_MS, UPLOAD_RECONNECT_MS } from "./constants.ts";
 import { type DiscoveryState, foldDiscovery } from "./discovery.ts";
-import { type ImageInput, imageInput } from "./image-input.ts";
+import {
+  type ImageInput,
+  type ImageModelScope,
+  OLD_DAEMON_IMAGES,
+  imageInput,
+} from "./image-input.ts";
 import { boundJobOutput, boundJobs, jobsFromSnapshot } from "./jobs.ts";
 import { type LaptopImageFallback, LaptopImages } from "./laptop-images.ts";
 import {
@@ -148,9 +153,8 @@ export const SUBAGENT_MESSAGE_OLD_DAEMON =
 /** A daemon that predates `session/job_output`: a typed refusal, shown as a notice. */
 export const JOB_OUTPUT_OLD_DAEMON = "this daemon cannot show a job's output (older version)";
 
-/** A daemon that predates `attachment/put`: a typed refusal, never a throw at a UI. */
-export const ATTACHMENTS_OLD_DAEMON =
-  "this daemon cannot receive images (older version) — update tentacle";
+/** A daemon that predates `attachment/put`: the ONE update advice (docs/feat/images-off-reason.md). */
+export const ATTACHMENTS_OLD_DAEMON = OLD_DAEMON_IMAGES;
 
 /** An `attachment/put` this daemon refuses outright: no retry (the bytes are not the problem). */
 export class AttachmentsUnsupportedError extends RpcError {
@@ -442,6 +446,24 @@ export interface RemoteClientOptions {
    */
   readonly localImages?: { readonly vision: boolean; readonly maxBytes: number };
   /**
+   * THIS laptop's model id (`config.model`), display-only: the name a "config
+   * has images off" reason repeats when the turns run on OUR model (a
+   * `modelScope: "laptop"` daemon — the worker, a `--model-proxy` pod,
+   * docs/feat/images-off-reason.md). Never used to name a daemon's own model.
+   */
+  readonly modelName?: string;
+  /**
+   * Whose model runs the turns on THIS daemon, and so whose config the "images
+   * are off" advice is about (docs/feat/images-off-reason.md, fix round 1
+   * finding 1): `laptop` for the in-process worker and a `--model-proxy` pod
+   * (this laptop's model, this laptop's `model.images`); `daemon` for a daemon
+   * that runs its OWN model from its OWN config — a `serve` host, and a pod
+   * daemon started without `--model-proxy`, where a `tentacle config set` on the
+   * laptop changes nothing. Default `daemon`: the honest answer when the caller
+   * did not say, because it never names another machine's model as its own.
+   */
+  readonly modelScope?: ImageModelScope;
+  /**
    * Where `images` (the pod's byte source) falls back on a miss: this laptop's
    * blob dir of a session this client built (`images.allowSession`;
    * docs/feat/attachments-durable.md D6). Absent → memory only.
@@ -502,6 +524,15 @@ function bunSha256Bytes(): ((bytes: Uint8Array) => string) | undefined {
 /** An older daemon's answer to a method it does not have (AGENTS §7: additive methods). */
 function isMethodNotFound(error: unknown): boolean {
   return error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound;
+}
+
+/**
+ * A model name from the wire (a pod's daemon is not trusted, AGENTS §7), or
+ * `undefined`: a bounded single display line, never an id used for a call. The
+ * pure reason builder sanitizes again — this only stops a non-string.
+ */
+function nameOfModel(raw: unknown): string | undefined {
+  return typeof raw === "string" && raw !== "" ? raw : undefined;
 }
 
 /** Restarts of one `readBack` (a rebase between pages, a refused read retried cold, a drifted checkpoint re-read cold). */
@@ -781,6 +812,10 @@ export class RemoteClient {
   private readonly sha256Bytes: ((bytes: Uint8Array) => string) | undefined;
   /** This laptop's own vision config (see the option): the `client`-mode gate. */
   private readonly localImages?: { readonly vision: boolean; readonly maxBytes: number };
+  /** This laptop's model id, for a display-only "images are off" reason. */
+  private readonly modelName?: string;
+  /** Whose model/config that reason is about (`"daemon"` unless told). */
+  private readonly modelScope: ImageModelScope;
   /**
    * The laptop's own image bytes (`docs/feat/attachments-prompt.md` D5/D6):
    * what a pod's refs resolve against. Always present, so a caller needs no
@@ -794,6 +829,12 @@ export class RemoteClient {
    * `undefined` until the first handshake answers.
    */
   private capabilities: AgentCapabilities | undefined;
+  /**
+   * The last handshake's `protocolVersion` and the model that runs the turns
+   * (`agentInfo.model`), kept ONLY to say WHY images are off (docs/feat/
+   * images-off-reason.md): a daemon of our own protocol is never "old".
+   */
+  private daemonImages: { readonly protocol?: number; readonly model?: string } = {};
 
   constructor(
     channel: DuplexChannel,
@@ -833,6 +874,10 @@ export class RemoteClient {
     if (options.localImages) {
       this.localImages = options.localImages;
     }
+    if (options.modelName) {
+      this.modelName = options.modelName;
+    }
+    this.modelScope = options.modelScope ?? "daemon";
     this.images = new LaptopImages(
       options.imageFallback ? { fallback: options.imageFallback } : {},
     );
@@ -1735,11 +1780,37 @@ export class RemoteClient {
    * it offers `/attach`. Pure — it reads the last handshake, nothing else.
    */
   imageInput(): ImageInput {
-    return imageInput(this.capabilities?.images, {
-      servesModel: this.modelProvider !== undefined,
-      ...(this.localImages?.vision !== undefined ? { vision: this.localImages.vision } : {}),
-      ...(this.localImages?.maxBytes !== undefined ? { maxBytes: this.localImages.maxBytes } : {}),
-    });
+    // WHOSE "config has images off" this is (docs/feat/images-off-reason.md):
+    // the caller's `modelScope` says which model runs the turns, and each side
+    // is named from its OWN fact — the daemon from `agentInfo.model`, this
+    // laptop from `modelName`. A pod daemon without `--model-proxy` runs its
+    // OWN model from its OWN config, so naming ours there would be confident,
+    // wrong, actionable advice (fix round 1, finding 1).
+    //
+    // A daemon that REPORTS a model is one that runs it (only `serve` passes
+    // `modelInfo`; a proxy pod and the worker pass none), so that fact wins over
+    // a caller's claim: the advice then points where the model really is.
+    const daemonModel = this.daemonImages.model;
+    const onLaptop = this.modelScope === "laptop" && daemonModel === undefined;
+    const laptopModel = nameOfModel(this.modelName);
+    return imageInput(
+      this.capabilities?.images,
+      {
+        servesModel: this.modelProvider !== undefined,
+        ...(this.localImages?.vision !== undefined ? { vision: this.localImages.vision } : {}),
+        ...(this.localImages?.maxBytes !== undefined
+          ? { maxBytes: this.localImages.maxBytes }
+          : {}),
+      },
+      {
+        ...(this.daemonImages.protocol !== undefined
+          ? { protocol: this.daemonImages.protocol }
+          : {}),
+        ...(daemonModel !== undefined ? { daemonModel } : {}),
+        ...(laptopModel !== undefined ? { laptopModel } : {}),
+        scope: onLaptop ? "laptop" : "daemon",
+      },
+    );
   }
 
   /**
@@ -2371,6 +2442,14 @@ export class RemoteClient {
         // Re-read on EVERY handshake: a replaced pod binary may take images
         // differently now, and the client must follow the daemon it has.
         this.capabilities = result.agentCapabilities;
+        this.daemonImages = {
+          ...(typeof result.protocolVersion === "number"
+            ? { protocol: result.protocolVersion }
+            : {}),
+          ...(nameOfModel(result.agentInfo?.model) !== undefined
+            ? { model: nameOfModel(result.agentInfo?.model) }
+            : {}),
+        };
         return result;
       },
       // A version skew says who must update — at start and on every reconnect.

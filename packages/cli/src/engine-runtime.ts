@@ -654,6 +654,14 @@ export async function startEngineRuntime(
     const redial = execChannelFactory(host, target, execOptions);
     const runtime = await createLocalRuntime({
       ...laptopModels(config),
+      // This daemon runs OUR model over the reverse tunnel (`podDaemonCommand`
+      // always passes `--model-proxy`), so an "images are off" reason names
+      // this laptop's model and points at THIS laptop's config — never at the
+      // pod's, where our key does not exist (docs/feat/images-off-reason.md,
+      // fix round 1 finding 1). A daemon that reports its OWN model still wins
+      // (`RemoteClient.imageInput`).
+      modelName: config.model,
+      modelScope: "laptop",
       sessionSettings: carriedSettings(config),
       channel,
       channelFactory: async () => {
@@ -1052,6 +1060,11 @@ export async function attachEngineRuntime(
     const fault = createFaultWatch();
     const runtime = await createLocalRuntime({
       ...laptopModels(config),
+      // The same `--model-proxy` daemon as `run`: the laptop's model and the
+      // laptop's config are what an "images are off" reason names
+      // (docs/feat/images-off-reason.md, fix round 1 finding 1).
+      modelName: config.model,
+      modelScope: "laptop",
       // This config: `attach`'s reload for the run's folder, the relay's profile.
       sessionSettings: carriedSettings(config),
       channel,
