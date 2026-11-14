@@ -26,6 +26,12 @@ import {
   ProgressParamsSchema,
 } from "./model.ts";
 import { ResolvePermissionParamsSchema, ResolvePermissionResultSchema } from "./permission.ts";
+import {
+  DevicePushRegisterParamsSchema,
+  DevicePushRegisterResultSchema,
+  DevicePushUnregisterParamsSchema,
+  DevicePushUnregisterResultSchema,
+} from "./push.ts";
 import { LogParamsSchema, LogResultSchema } from "./session-log.ts";
 import {
   AgentKillParamsSchema,
@@ -143,6 +149,15 @@ export const Method = {
    * (docs/feat/device-pairing.md 9c). Reachable only on a pairing connection.
    */
   DevicePair: "device/pair",
+  /**
+   * A paired device registers where to be PUSHED: its raw APNs token, its
+   * environment and its per-device push key (docs/feat/mobile-push.md Design 3).
+   * Device principal only; an older daemon answers `MethodNotFound`, which the
+   * app shows as "update tentacle on <computer>".
+   */
+  DevicePushRegister: "device/push_register",
+  /** Withdraw that registration (the app's Notifications toggle off). */
+  DevicePushUnregister: "device/push_unregister",
 } as const;
 export type MethodName = (typeof Method)[keyof typeof Method];
 
@@ -227,6 +242,14 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     result: AttachmentPutResultSchema,
   },
   [Method.DevicePair]: { params: DevicePairParamsSchema, result: DevicePairResultSchema },
+  [Method.DevicePushRegister]: {
+    params: DevicePushRegisterParamsSchema,
+    result: DevicePushRegisterResultSchema,
+  },
+  [Method.DevicePushUnregister]: {
+    params: DevicePushUnregisterParamsSchema,
+    result: DevicePushUnregisterResultSchema,
+  },
 };
 
 /** params schema for every notification method. */

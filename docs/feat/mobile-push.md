@@ -907,6 +907,130 @@ load. To verify, run `bun test` a few times on a clean `main` worktree.
 
 *— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor, fix round 1), 2026-11-14*
 
+### P2 + P3 — protocol: push wire + relay frames (DONE)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor, P2 + P3), 2026-11-14*
+
+**Load-bearing check, re-run first: PASS.** Every `hosted-session.ts` citation
+still resolves, at the line numbers the P0 run recorded. `blockingUnsupported`
+returns `undefined` when `this.attachments.size === 0` (`:1084`); `recheckAsks`
+(`:1100`) is called from `attach` (`:1581`) and `detach` (`:1604`); `emit`
+(`:1960`) fans out to a copy of `attachments` and then calls
+`this.watchers.offer(params)` (`:1974`); `settle` (`:1148`) deletes, emits
+`permission_resolved` for a shown ask, and wakes the gate in a `finally`;
+`finishTurn` (`:2517`) sets state before its emit. Unchanged since P0, so the
+plan's central assumption holds and P2/P3 (pure protocol, which touch none of
+it) were implemented as written.
+
+**Files.** `packages/protocol/src/push.ts` (new, the whole P2 wire);
+`packages/protocol/src/methods.ts` (`Method.DevicePushRegister`,
+`Method.DevicePushUnregister` + their two registry entries);
+`packages/protocol/src/index.ts` (`export * from "./push.ts"`);
+`packages/protocol/schema/protocol.json` (regenerated, not hand-edited);
+`packages/protocol/test/push.test.ts` (new, 15 tests);
+`packages/protocol/test/json-schema.test.ts` (4 fixture entries — the export's
+"every method has a fixture" gate); `packages/protocol/src/relay.ts` (`push` /
+`push-result` frames + their schemas in all three unions, and the shared
+`RelayPushTokenSchema` / `RelayCollapseIdSchema`);
+`packages/protocol/test/relay.test.ts` (a new `describe("push frames")`, 9 tests);
+`changelog.d/mobile-push-protocol.added.md` (new).
+
+**P3 is smaller than planned, because R1 already stores what it needed.** The
+slice's own text allows this ("`ready.features` … skip `features` if R1 already
+has it"): task 15 shipped `features` on `ready` **and** `knownRelayFeatures` /
+`isRelayFeature` with `"push"` already in `RELAY_FEATURES`
+(`relay.ts:196-238`). So P3 adds only the two frames and the schemas that gate
+them. No `RELAY_PROTOCOL_VERSION` move: a `push` is gated by `features`, so an
+R2 relay never sees one.
+
+**Drift from the Implementation, and why.**
+1. **`fitPushMessage` is new, and it is the load-bearing addition of this
+   slice.** The plan said the schema's per-field caps plus "clip before
+   sealing" keep a push inside 4096 bytes; they do not — a worst-case message
+   with every field at its cap is ~14 KiB of UTF-8, which no 2048-byte bucket
+   can hold. So the wire gained one producer-side gate: `fitPushMessage`
+   returns the encoded plaintext, clipping through a 9-rung ladder (preview
+   first, ids last) until it fits `PUSH_PLAINTEXT_MAX_BYTES`. The plan's
+   worst-case test is therefore a property of the CODE, not of a comment.
+   `clipPushText` walks code points and drops lone surrogates and control
+   characters, so a clip can never produce something Swift's decoder refuses.
+2. **`PushEnvelope.c` is a regex alternation, not `.refine()`.** The exporter
+   rejects `ZodEffects` (`json-schema.ts`'s `SUPPORTED_KINDS`), and this
+   schema is on the exported wire, so the three-length bound had to be a plain
+   string constraint (`PUSH_CIPHERTEXT_RE`, pinned by
+   `PUSH_ENVELOPE_CIPHERTEXT_LENGTHS`).
+3. **`push-result.status` is a bounded FREE string, not the five-value enum.**
+   Same reason R1's review fixed `error.code` (`relay.ts:257-273`): a closed
+   enum makes a newer relay's new status a "malformed frame", which closes the
+   whole control socket — one unknown word would cost every push in flight and
+   the link's reachability with it. The daemon refuses the VALUE through P2's
+   `isPushDeliveryStatus`, so an unknown status drops one push. Pinned by a
+   dedicated test (mutation M7 below).
+4. **The token rule is written twice** (`PUSH_TOKEN_RE` in `push.ts`,
+   `RelayPushTokenSchema` in `relay.ts`) because the relay must not load the
+   RPC schemas. A test pins the two against one shared sample, so the
+   duplication cannot drift silently (mutation M9).
+5. **No `relayPushFrameOf` builder.** I drafted one, then dropped it: the
+   daemon's relay link (P8) owns `n`, the timeout and the `features` gate, and a
+   builder here would have been an unused second seam. The frames are plain
+   objects validated by their schemas.
+6. **`PUSH_PAD_BUCKETS` is declared in `push.ts`, not imported from
+   `push-seal.ts`** — the dependency runs transport → protocol, so importing it
+   would be a cycle. The duplication is pinned by a test
+   (`PUSH_PLAINTEXT_MAX_BYTES === maxPushPlaintextBytes()`), which is a stronger
+   guarantee than a comment.
+7. **The changelog is `changelog.d/mobile-push-protocol.added.md`, not
+   `mobile-push.added.md`.** One bullet per file is enforced by
+   `scripts/changelog.ts:120`; P1 already owns `mobile-push.added.md`, so a
+   second bullet there fails the guard (I hit exactly this in the first full
+   gate run, and split it).
+
+**Red before green.** `bun test packages/protocol/test/push.test.ts` on the
+unimplemented tree: `SyntaxError: Export named 'DEFAULT_PUSH_GRACE_SECONDS' not
+found` — 0 pass, 1 error. `bun test packages/protocol/test/relay.test.ts` after
+the P3 test and before the frames: `Export named 'RelayCollapseIdSchema' not
+found` — 0 pass, 1 error. Both are the assertion-bearing tests of the property
+(missing capability), not an incidental import typo: the exports are exactly the
+capability the slice adds.
+
+**Mutations (§9 non-vacuity — each applied to `src`, run, reverted; `git diff`
+empty afterwards, backups in `.tentacle/tmp/mobile-push/`):**
+
+| # | mutation | result |
+|---|---|---|
+| M1 | `clipPushText` cuts by UTF-16 `slice` instead of code points | **RED** "clipPushText cuts on code-point boundaries" (14 pass / 1 fail) |
+| M2 | `fitPushMessage` returns the message unclipped | **RED** (whole file fails: the thrown oversize error) |
+| M3 | `PushPayloadSchema` gains an `aps` field | **RED** "the payload is `{tp}`, and an `aps` … is STRIPPED" |
+| M4 | the register result's `graceSeconds` loses its 0..3600 bound | **RED** "the result says WHY, and the grace the daemon uses" |
+| M5 | `PUSH_TOKEN_RE` loosened to `/^.{64,200}$/` | **RED** "a bad token, env or key is InvalidParams" |
+| M6 | `push` dropped from `RelayControlFrameSchema` | **RED** "daemon → relay `push` round-trips through both unions" |
+| M7 | `push-result.status` becomes a closed 5-value enum | **RED** "an unknown `status` PARSES but is not a known one" |
+| M8 | `push`'s `payload` gains `aps` | **RED** "an unknown field is stripped; `aps` … NOT fields at all" (after M8 first SURVIVED — see below) |
+| M9 | `RelayPushTokenSchema` loosened to `/^.{64,200}$/` | **RED** "every field is validated" + "the token and collapse-id schemas agree" |
+| M10 | `pushCollapseIdOf` ignores its `key` | **RED** "a collapse id is opaque, header-safe and ≤ 64 bytes" |
+| M11 | `pushCollapseIdOf` does not truncate to 64 | **RED** same test + "every field is validated" |
+
+**M8 first SURVIVED, and that is the useful result: the test was weak.** It
+sent `aps` at the frame's top level only — the tempting place is
+*inside* `payload`, which is exactly where an APNs payload keeps its banner
+text. Strengthened to assert both levels; the mutation now goes RED. (M9's
+survival on its own was the same class: only a dedicated cross-layer test made
+it bite.)
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` → clean, exit 0.
+`bun run lint` → `Checked 1372 files in 397ms. No fixes applied.` (baseline
+clean, exit 0). `bun run schema:export` → regenerated `protocol.json` (never
+hand-edited). `bun test` → **9930 pass, 4 skip, 0 fail, 717 files**. The 4 skips
+are the documented opt-ins (live-k8s, live-docker, the ~12 s real-socket
+keepalive, and `confinement.test.ts`'s root-only case); this round adds none —
+checked with `rg 'test\.skip|\.skipIf'` and by running those three files alone
+(46 pass / 2 skip).
+
+**Unverified:** P8's end-to-end proof (a sealed envelope actually reaching a
+fake APNs through the relay link) and P4's `aps` template are other slices; the
+4096-byte joint bound here is pinned with the template inlined as a literal, so
+if P4's template differs in size that test must be re-derived against it.
+
 ## Review
 
 ### P0 + P1 (scope: `git diff main...HEAD`)
@@ -973,3 +1097,27 @@ load. To verify, run `bun test` a few times on a clean `main` worktree.
 
 *— claude-opus-5-5, 2026-11-14*
 
+
+### Review — P2 + P3 (fresh context)
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH/MEDIUM finding; scope `git diff main...HEAD`, slices P2 + P3 only).
+
+**Gate (narrow).** `bun test` push/relay/json-schema/version tests: 78 pass / 0 fail. `bun run lint`: clean (1372 files). `bun run typecheck` (root + mobile + relay): clean.
+
+**Attacks tried.**
+1. *Ladder truncates ids* — `fitPushMessage` rungs 7–9 clip `sessionId` (32/16 B), `requestId` (24 B) and `optionId` (16 B), which would point a push at a wrong session or ask without any error. Probe (`.tentacle/tmp/mobile-push/ladder.ts`: every field at its cap, as `"` (JSON doubles them) and as 4-byte emoji, 8 options, real UUIDs) never got past rung 6: max 2012 B, ids intact, output passes `PushMessageSchema`. Unreachable with daemon-made UUIDs → nit N1, not a finding.
+2. *A `push` reaching an R2 relay / a `push-result` reaching an R4 daemon* — `server.ts:395` still closes on `push` (`control-unexpected`). `relay-link.ts` ignores a parsed `push-result` (it falls through). Both are gated by `ready.features` (P8). No regression.
+3. *Frame size* — the worst push frame is about 3.1 Ki chars, far below `RELAY_CONTROL_LIMITS.maxFrameChars` (96 Ki). No oversize close.
+4. *Strict vs strip / forward compat* — every new payload is a strip object. `push-result.status` is a free bounded string, refused by value (`isPushDeliveryStatus`). Matches the v10 rule.
+5. *Mutation non-vacuity* — this session's permissions blocked my own mutation runs (the in-place edit script). Static check instead: tests pin the ciphertext length (`push.test.ts:238,242`, `relay.test.ts:564`), the ttl bounds (`relay.test.ts:554-557`) and control-char clipping (`push.test.ts:118`). The executor's M1–M10 table is accepted but **not re-run by me**. To verify: run `.tentacle/tmp/mobile-push/rv3-mut.sh` from the worktree root.
+
+**Nits (LOW).**
+- N1 `packages/protocol/src/push.ts:405-440` (rungs 8–9): clipping an id gives a *wrong* id, not a shorter one. Better to fail loud (throw, or drop `ask`) than to clip `requestId`/`sessionId`/`optionId`.
+- N2 `packages/protocol/src/relay.ts:295-300` gives a false reason for duplicating the token regex ("the relay must not load the RPC schemas"). `relay.ts` now imports `push.ts`, and `apps/relay` imports the whole `@tentacle/protocol` index (`server.ts:31`). The pin test holds, so the duplication is harmless, but the comment is wrong.
+- N3 `packages/protocol/test/push.test.ts:193`: `APS.slice(7)` keeps the outer `}`, so `body` is not valid JSON. It is one byte over, so the ≤ 4096 bound still holds, but the check would be stronger with `JSON.parse(body)`.
+
+**Executor behaviour.** The drift is documented honestly and justified (`fitPushMessage`, the regex instead of `.refine`, the free `status`). Red-first is recorded. No out-of-scope edits in P2/P3.
+
+*Same model family as some earlier reviews, but a different family from the executor (DeepSeek).*
+
+*— claude-opus-5-5, 2026-11-14*

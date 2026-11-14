@@ -330,6 +330,18 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/device~1pair/result": [
     { deviceId: "0123456789abcdef", computer: { id: "fedcba9876543210", name: "gabriel-mac" } },
   ],
+  // Push registration (docs/feat/mobile-push.md Design 3, P2): the token is a
+  // raw APNs token in lowercase hex, the key a 32-byte X25519 public key.
+  "methods/device~1push_register/params": [
+    { token: "a".repeat(64), env: "sandbox", key: "k".repeat(43) },
+    { token: "b".repeat(200), env: "production", key: `${"-_".repeat(21)}-` },
+  ],
+  "methods/device~1push_register/result": [
+    { graceSeconds: 30, push: "on" },
+    { graceSeconds: 0, push: "relay-no-push" },
+  ],
+  "methods/device~1push_unregister/params": [{}],
+  "methods/device~1push_unregister/result": [{}],
   "methods/daemon~1session_ttl/params": [{}, { idleTtlMs: 3600000 }, { idleTtlMs: "never" }],
   "methods/daemon~1session_ttl/result": [
     { idleTtlMs: "never", persisted: false },
