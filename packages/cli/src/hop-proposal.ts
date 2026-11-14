@@ -11,6 +11,7 @@
  */
 import type { SessionEvent } from "@tentacle/tui";
 import type { HopSpec } from "@tentacle/tui";
+import { hopWorkload } from "@tentacle/tui";
 import { z } from "zod";
 import { untrustedText } from "./untrusted-text.ts";
 
@@ -135,15 +136,18 @@ export function hopSpecOf(
     if (input.workload === undefined) {
       return null;
     }
-    return out({
-      target: "attach",
-      workload: {
-        engine: input.workload.engine,
-        name: input.workload.name,
-        ...(input.workload.container !== undefined ? { container: input.workload.container } : {}),
-      },
-      keep,
-    });
+    // The SAME workload validator the typed `/move attach` uses, so the two
+    // paths cannot accept different grammars (and a pod-supplied `:`,`/` or
+    // control byte never reaches a badge or an engine call).
+    const checked = hopWorkload(
+      input.workload.engine,
+      input.workload.name,
+      input.workload.container,
+    );
+    if (checked.kind !== "ok") {
+      return null;
+    }
+    return out({ target: "attach", workload: checked.workload, keep });
   }
   // A workload is `attach`'s, and an image is `container`'s: a target that names
   // either where it has no meaning is a malformed call, not a defaulted one.
@@ -166,8 +170,11 @@ export function hopSpecOf(
 /**
  * The one line the owner reads before approving a proposal: what would move,
  * where to, and — `keep: false` — that the workload would be DELETED. Every
- * part of it that a daemon supplied (`reason`, a workload name) is sanitized
- * HERE (AGENTS §7: pod-supplied text is pod-supplied on every origin).
+ * part of it that a daemon supplied (`reason`, a workload name, an IMAGE) is
+ * sanitized HERE (AGENTS §7: pod-supplied text is pod-supplied on every
+ * origin). The image is always named: it is the argument that decides what code
+ * runs with the owner's folder mounted (D6), so hiding it would hide the only
+ * part of the prompt that matters.
  */
 export function proposalNotice(spec: HopSpec, reason?: string): string {
   const where =
@@ -176,7 +183,9 @@ export function proposalNotice(spec: HopSpec, reason?: string): string {
           spec.workload.container ? `/${untrustedText(spec.workload.container)}` : ""
         }`
       : spec.target === "container"
-        ? "a container"
+        ? spec.image === undefined
+          ? "a container (the default image)"
+          : `a container running ${untrustedText(spec.image)}`
         : "local";
   const why = reason === undefined || reason === "" ? "" : ` — ${untrustedText(reason)}`;
   const remove = spec.keep ? "" : " (and remove the workload this hop created)";

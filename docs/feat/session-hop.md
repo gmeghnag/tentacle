@@ -502,7 +502,83 @@ fragment must exist before the MVP lands.
 files. No protocol schema changed (`packages/protocol/schema/protocol.json`
 untouched — D10: no wire change, no `protocol.d/` note).
 
-*— claude-opus-5-5, 2026-11-14*
+*— deepseek-v4.1-flash-1017, 2026-11-14* (corrected in fix round 1: the H1 block
+was signed `claude-opus-5-5`, which was wrong — `night-task.sh` runs the step as
+`tentacle --profile deepseek`, whose model is
+`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`; Review finding 3.)
+
+### Fix round 1 — the H1 review's HIGH/MEDIUM findings
+
+*— deepseek-v4.1-flash-1017, 2026-11-14*
+
+**Finding 1 (HIGH) — the owner approves an image they never see.** FIXED.
+`proposalNotice` now always names the image for a `container` target, through
+`untrustedText`: `a container running <image>`, or `a container (the default
+image)` when none was given (`cli/src/hop-proposal.ts:180-186`). The reviewer's
+own repro (`.tentacle/tmp/session-hop/review/r.ts`) now prints
+`… to a container running attacker.io/x:latest — faster builds`.
+
+**Finding 2 (MEDIUM) — the tool path and `/move` accepted different grammars,
+and two notices interpolated a pod-supplied name raw.** FIXED.
+- ONE validator, `hopWorkload(engine, name, container)`
+  (`tui/src/hop-command.ts:38-84`), used by BOTH the typed grammar
+  (`parseWorkload`, `:168-196`) and the proposal (`hopSpecOf`,
+  `cli/src/hop-proposal.ts:132-146`): docker/podman refuse a container part,
+  k8s takes at most one, every part must be non-empty and match
+  `^[A-Za-z0-9][A-Za-z0-9._-]*$` (so `:`, `/`, whitespace, control and bidi
+  bytes are out) and be ≤ 253 chars. `{engine:"docker", container:"x"}` is now
+  `null` here exactly as it is an error there.
+- `workloadText` sanitizes both parts (`cli/src/hop-plan.ts:56-59`), so every
+  notice built on it — `attachVerdict`'s two refusals and the one `hopPlan`
+  prints for "already in …" — is clean; `hopDelete`'s "not ours" notice
+  sanitizes too (`:198`). `samePlace` compares a new structural `workloadKey`
+  (`:62-67`), not the display text, so sanitizing cannot make two different
+  workloads look equal.
+- Two new exports for H3's UI (`HOP_NAME_USAGE`, `HOP_WORKLOAD_PART_MAX`), and
+  `parseWorkload` no longer names an unknown engine as one that "has no
+  container part" (`/move attach aws:box/x` → the attach usage).
+
+**Finding 3 (MEDIUM, process) — the signature.** FIXED: the H1 block's closing
+signature is corrected above, with the evidence (finding 3 was right; the H1
+executor was the same DeepSeek run as this one, not Opus). The blocks' own
+opening signatures and the Review's signatures are left as their authors wrote
+them.
+
+**Red before green (§9).** Each fix's test was written first against the
+pre-fix code and run: 8 new/changed assertions failing on their own property,
+then green. `packages/cli/test/hop-proposal.test.ts` (+2 tests),
+`packages/cli/test/hop-plan.test.ts` (+1), `packages/tui/test/hop-command.test.ts`
+(+2 +1 row): 42 → 50 tests.
+
+**Mutations (each broken in the FINAL tree, narrow tests, restored, md5
+checked).** Script and inputs: `.tentacle/tmp/session-hop/fix1/mut.sh` +
+`m_*.{old,new}`.
+
+| # | mutation | result |
+|---|---|---|
+| F1 | `proposalNotice` back to `"a container"` (image dropped) | 2 fail — "the image is NAMED…" + "it names the target…" |
+| F2a | `hopSpecOf` skips `hopWorkload` (old grammar, raw workload) | 1 fail — "a proposed workload obeys the SAME grammar" |
+| F2b | `workloadText` interpolates the name/container raw | 1 fail — "a pod-supplied name is sanitized…" |
+| F2c | `hopDelete`'s notice interpolates the name raw | 1 fail — same test (its second half) |
+| F2d | the shared charset/length guard → `if (false)` | 3 fail — both charset tests + grammar parity |
+| F2e | the "docker/podman have no container part" guard dropped | 3 fail — both container-part tests + grammar parity |
+
+All restored byte-identical (`md5` before == after, printed per run); after each
+run `git status`/`git diff --stat` were unchanged and the narrow files green.
+
+**Not fixed here (deliberately).** Nothing in the review's HIGH/MEDIUM is left
+open. Two notes for H4, not findings: `hopProposalSchema` caps no length on
+`image`/`reason` (both are display-capped by `untrustedText` at 1000 chars,
+and the daemon-side value is validated where it is finally used), and
+`hopSpecOf` does not reject a whitespace-only `image` — the image is resolved
+and gated in H4 (D6), where it is consumed.
+
+**Gate (final tree):** `bunx tsc --noEmit` → 0 · `bun run typecheck` (incl.
+`apps/mobile`) → 0 · `bun run lint` → `Checked 1118 files`, 0 errors/warnings ·
+`bun test` → **8566 pass, 3 skip (the documented opt-ins), 0 fail** across 613
+files.
+
+*— deepseek-v4.1-flash-1017, 2026-11-14*
 
 ## Review
 

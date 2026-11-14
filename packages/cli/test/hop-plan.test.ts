@@ -206,6 +206,23 @@ describe("attachVerdict: D7", () => {
       text: "kubernetes:web-0/app is in use by another session",
     });
   });
+
+  test("a pod-supplied name is sanitized before it reaches the terminal (AGENTS §7)", () => {
+    // Finding 2 of the H1 review: these notices interpolated a proposed
+    // workload's name raw. Mutation: drop `untrustedText` from `workloadText`
+    // → the escape/newline survive in both rows.
+    const nasty = { engine: "docker", name: "box\u001b[31m\ninjected" } as const;
+    const worded = verdict({ workload: nasty, detachedRun: true });
+    const text = worded.kind === "refuse" ? worded.text : "";
+    expect(text).toContain("is in use by another session");
+    expect(text).not.toContain("\u001b");
+    expect(text).not.toContain("\n");
+    const kept = hopDelete({ workload: nasty, keep: false, createdByHop: false });
+    const notice = kept.kind === "keep" ? (kept.notice ?? "") : "";
+    expect(notice.endsWith("is not ours: left alone")).toBe(true);
+    expect(notice).not.toContain("\u001b");
+    expect(notice).not.toContain("\n");
+  });
 });
 
 describe("hopDelete: D5", () => {

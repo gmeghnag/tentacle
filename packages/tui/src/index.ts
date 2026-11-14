@@ -23,11 +23,16 @@ export * from "./link-status.ts";
 export {
   HOP_ATTACH_USAGE,
   HOP_ENGINES,
+  HOP_NAME_USAGE,
   HOP_USAGE,
+  HOP_WORKLOAD_PART_MAX,
   type HopEngine,
   type HopParse,
   type HopSpec,
   type HopWorkload,
+  type HopWorkloadCheck,
+  type HopWorkloadProblem,
+  hopWorkload,
   parseHopCommand,
 } from "./hop-command.ts";
 export { App, type AutoAcceptFeed } from "./App.tsx";

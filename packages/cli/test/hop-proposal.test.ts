@@ -97,6 +97,37 @@ describe("hopSpecOf: the proposal schema", () => {
       expect(hopSpecOf(args)).toBeNull();
     }
   });
+
+  test("a proposed workload obeys the SAME grammar as a typed /move attach", () => {
+    // Finding 2 of the H1 review: the tool path and `/move` accepted different
+    // things. One validator now, so these are refused here as they are there.
+    // Mutation: drop the `hopWorkload` call → the first four become specs.
+    for (const workload of [
+      { engine: "docker", name: "box", container: "x" },
+      { engine: "podman", name: "box", container: "x" },
+      { engine: "docker", name: "bo:x" },
+      { engine: "kubernetes", name: "web-0", container: "app/1" },
+      { engine: "docker", name: "b\u001bx" },
+      { engine: "kubernetes", name: "we b" },
+      { engine: "kubernetes", name: "web-0", container: "" },
+      { engine: "docker", name: "a".repeat(254) },
+    ]) {
+      expect(hopSpecOf(JSON.stringify({ target: "attach", workload }))).toBeNull();
+    }
+    // And the same input a typed `/move attach` takes is taken here, unchanged.
+    expect(
+      hopSpecOf(
+        JSON.stringify({
+          target: "attach",
+          workload: { engine: "kubernetes", name: "web-0", container: "guard" },
+        }),
+      )?.spec,
+    ).toEqual({
+      target: "attach",
+      workload: { engine: "kubernetes", name: "web-0", container: "guard" },
+      keep: true,
+    });
+  });
 });
 
 describe("hopProposalStep: watching a turn", () => {
@@ -159,11 +190,36 @@ describe("proposalNotice: what the owner reads before approving", () => {
       "_the model proposes moving this session to local — the build is done_",
     );
     expect(proposalNotice({ target: "container", keep: true })).toBe(
-      "_the model proposes moving this session to a container_",
+      "_the model proposes moving this session to a container (the default image)_",
     );
     expect(
       proposalNotice({ target: "attach", workload: { engine: "docker", name: "box" }, keep: true }),
     ).toBe("_the model proposes moving this session to docker:box_");
+  });
+
+  test("the image is NAMED, never hidden: it decides what runs with our folder mounted", () => {
+    // Finding 1 of the H1 review (HIGH): the prompt said only "a container", so
+    // the owner approved an image they never saw. D6 binds the cwd into it.
+    // Mutation: drop the `spec.image` term → both rows below show "a container".
+    expect(proposalNotice({ target: "container", image: "attacker.io/x:latest", keep: true })).toBe(
+      "_the model proposes moving this session to a container running attacker.io/x:latest_",
+    );
+    expect(
+      proposalNotice({ target: "container", image: "ghcr.io/ok/img:1", keep: true }, "faster"),
+    ).toBe(
+      "_the model proposes moving this session to a container running ghcr.io/ok/img:1 — faster_",
+    );
+  });
+
+  test("a pod-supplied image is sanitized too (AGENTS §7)", () => {
+    // Mutation: interpolate `spec.image` raw → the escape and the newline survive.
+    const text = proposalNotice({
+      target: "container",
+      image: "x\u001b[31mevil\nline",
+      keep: true,
+    });
+    expect(text).not.toContain("\u001b");
+    expect(text).not.toContain("\n");
   });
 
   test("a delete is said out loud, never hidden in a flag", () => {

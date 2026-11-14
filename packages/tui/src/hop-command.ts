@@ -39,6 +39,62 @@ export const HOP_USAGE =
 
 export const HOP_ENGINES: readonly HopEngine[] = ["docker", "podman", "kubernetes"];
 
+/** The longest name any engine takes (a k8s pod's DNS-1123 limit). */
+export const HOP_WORKLOAD_PART_MAX = 253;
+
+/**
+ * What one part of a workload may contain: the union of what the engines accept
+ * (docker/podman `[a-zA-Z0-9][a-zA-Z0-9_.-]*`, a k8s DNS-1123 label is a subset)
+ * and NOTHING else — no `:`, no `/`, no whitespace, no control or bidi byte. A
+ * name reaches a badge, a notice and an engine call, and it may come from a pod
+ * (AGENTS §7), so the grammar is fixed here, once, for both paths.
+ */
+const HOP_WORKLOAD_PART = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** What was wrong with a proposed workload, as the one fact the caller words. */
+export type HopWorkloadProblem = "engine" | "name" | "container" | "containerName" | "chars";
+
+export type HopWorkloadCheck =
+  | { readonly kind: "ok"; readonly workload: HopWorkload }
+  | { readonly kind: "bad"; readonly problem: HopWorkloadProblem };
+
+/**
+ * The ONE workload validator, shared by the typed `/move attach` grammar and the
+ * proposed `move_session` tool (D9) — so the two paths cannot accept different
+ * things: docker/podman have no container part, k8s at most one, every part is
+ * named and charset-clean. Pure; each caller words its own error line.
+ */
+export function hopWorkload(engine: string, name: string, container?: string): HopWorkloadCheck {
+  if (!HOP_ENGINES.includes(engine as HopEngine)) {
+    return { kind: "bad", problem: "engine" };
+  }
+  if (name === "") {
+    return { kind: "bad", problem: "name" };
+  }
+  if (container !== undefined && engine !== "kubernetes") {
+    return { kind: "bad", problem: "container" };
+  }
+  if (container === "") {
+    return { kind: "bad", problem: "containerName" };
+  }
+  for (const part of container === undefined ? [name] : [name, container]) {
+    if (part.length > HOP_WORKLOAD_PART_MAX || !HOP_WORKLOAD_PART.test(part)) {
+      return { kind: "bad", problem: "chars" };
+    }
+  }
+  return {
+    kind: "ok",
+    workload:
+      container === undefined
+        ? { engine: engine as HopEngine, name }
+        : { engine: "kubernetes", name, container },
+  };
+}
+
+/** What a workload part may hold, for a line about a name that does not. */
+export const HOP_NAME_USAGE =
+  "a workload name may hold only letters, digits, '.', '_' and '-' (no ':' or '/')";
+
 /** The one line an `attach` with no readable `<engine>:<name>` gets. */
 export const HOP_ATTACH_USAGE =
   "Use /move attach <engine>:<name> — the engine is one of docker, podman, kubernetes (for example docker:<name>)";
@@ -129,34 +185,33 @@ function readFlags(words: readonly string[]): FlagRead {
 /** `<engine>:<name>[/<container>]` → the workload, or the line explaining what was wrong. */
 function parseWorkload(word: string): HopWorkload | string {
   const colon = word.indexOf(":");
-  if (colon <= 0) {
-    return HOP_ATTACH_USAGE;
-  }
-  const engine = word.slice(0, colon);
-  if (!HOP_ENGINES.includes(engine as HopEngine)) {
-    return HOP_ATTACH_USAGE;
-  }
-  const parts = word.slice(colon + 1).split("/");
-  const name = parts[0] ?? "";
-  if (engine !== "kubernetes") {
-    if (parts.length > 1) {
-      return `${engine} has no container part — only kubernetes: names one: /move attach ${engine}:<name>`;
-    }
-    return name === ""
-      ? "a name is needed: /move attach <engine>:<name>"
-      : { engine: engine as HopEngine, name };
-  }
+  const engine = colon <= 0 ? "" : word.slice(0, colon);
+  const parts = colon <= 0 ? [""] : word.slice(colon + 1).split("/");
+  // A third `/part` is not a workload in ANY engine: name the rule it broke.
   if (parts.length > 2) {
-    return "one /container at most: /move attach kubernetes:<pod>/<container>";
+    if (engine === "kubernetes") {
+      return "one /container at most: /move attach kubernetes:<pod>/<container>";
+    }
+    return HOP_ENGINES.includes(engine as HopEngine)
+      ? `${engine} has no container part — only kubernetes: names one: /move attach ${engine}:<name>`
+      : HOP_ATTACH_USAGE;
   }
-  if (name === "") {
-    return "a name is needed: /move attach kubernetes:<pod>[/<container>]";
+  const checked = hopWorkload(engine, parts[0] ?? "", parts[1]);
+  if (checked.kind === "ok") {
+    return checked.workload;
   }
-  const container = parts[1];
-  if (container === undefined) {
-    return { engine: "kubernetes", name };
+  switch (checked.problem) {
+    case "engine":
+      return HOP_ATTACH_USAGE;
+    case "container":
+      return `${engine} has no container part — only kubernetes: names one: /move attach ${engine}:<name>`;
+    case "containerName":
+      return "a name is needed for the container: /move attach kubernetes:<pod>/<container>";
+    case "chars":
+      return HOP_NAME_USAGE;
+    case "name":
+      return engine === "kubernetes"
+        ? "a name is needed: /move attach kubernetes:<pod>[/<container>]"
+        : "a name is needed: /move attach <engine>:<name>";
   }
-  return container === ""
-    ? "a name is needed for the container: /move attach kubernetes:<pod>/<container>"
-    : { engine: "kubernetes", name, container };
 }

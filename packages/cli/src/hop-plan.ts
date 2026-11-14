@@ -6,6 +6,7 @@
  */
 import type { HopSpec, HopWorkload } from "@tentacle/tui";
 import type { ResidentUse } from "./relay-state.ts";
+import { untrustedText } from "./untrusted-text.ts";
 
 /** Where the session is now (the badge has no "local" word: this is the plan's). */
 export type HopPlace =
@@ -47,9 +48,22 @@ export type HopPlan =
   /** One line, and nothing happens. */
   | { readonly kind: "notice"; readonly text: string };
 
-/** `docker:box`, `kubernetes:web-0/app` — the workload as the badge and every notice say it. */
+/**
+ * `docker:box`, `kubernetes:web-0/app` — the workload as the badge and every
+ * notice say it. Names go through `untrustedText` by default: a proposed
+ * `move_session` supplies them, and a notice is a terminal (AGENTS §7).
+ */
 export function workloadText(workload: HopWorkload): string {
-  return `${workload.engine}:${workload.name}${workload.container ? `/${workload.container}` : ""}`;
+  const name = untrustedText(workload.name);
+  const container = workload.container === undefined ? "" : `/${untrustedText(workload.container)}`;
+  return `${workload.engine}:${name}${container}`;
+}
+
+/** Purely structural: is this the same workload, byte for byte? */
+function workloadKey(workload: HopWorkload): string {
+  return workload.container === undefined
+    ? `${workload.engine}:${workload.name}`
+    : `${workload.engine}:${workload.name}/${workload.container}`;
 }
 
 /** The same, for the place the session is at now (`local` has no badge). */
@@ -65,7 +79,7 @@ function samePlace(spec: HopSpec, current: HopPlace): boolean {
   if (spec.target !== "attach" || current.kind !== "workload") {
     return false;
   }
-  return workloadText(spec.workload) === workloadText(current);
+  return workloadKey(spec.workload) === workloadKey(current);
 }
 
 /**
@@ -179,7 +193,10 @@ export function hopDelete(input: HopDeleteInput): HopDelete {
     return { kind: "keep" };
   }
   if (!input.createdByHop) {
-    return { kind: "keep", notice: `${input.workload.name} is not ours: left alone` };
+    return {
+      kind: "keep",
+      notice: `${untrustedText(input.workload.name)} is not ours: left alone`,
+    };
   }
   return { kind: "delete" };
 }

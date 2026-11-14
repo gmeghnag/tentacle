@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { HOP_USAGE, type HopParse, type HopSpec, parseHopCommand } from "../src/hop-command.ts";
+import {
+  HOP_ATTACH_USAGE,
+  HOP_NAME_USAGE,
+  HOP_USAGE,
+  HOP_WORKLOAD_PART_MAX,
+  type HopParse,
+  type HopSpec,
+  hopWorkload,
+  parseHopCommand,
+} from "../src/hop-command.ts";
 
 // docs/feat/session-hop.md slice H1: the `/move` grammar, pure.
 
@@ -84,6 +93,7 @@ describe("parseHopCommand: refusals (one line, nothing built)", () => {
     // Mutation: accept a bare name as docker → both rows pass silently.
     expect(error("/move attach box")).toContain("docker:<name>");
     expect(error("/move attach aws:box")).toContain("docker:<name>");
+    expect(error("/move attach aws:box/x")).toBe(HOP_ATTACH_USAGE);
     expect(error("/move attach docker:")).toContain("a name");
     expect(error("/move attach kubernetes:web-0/")).toContain("a name");
   });
@@ -104,5 +114,50 @@ describe("parseHopCommand: refusals (one line, nothing built)", () => {
     for (const word of ["local", "container", "attach", "cancel"]) {
       expect(HOP_USAGE).toContain(word);
     }
+  });
+
+  test("a name that is not a plain engine name is refused, not passed on", () => {
+    // The SAME validator the proposed tool path uses (finding 2 of the H1
+    // review): a ':' or a control byte never reaches a badge or an engine call.
+    expect(error("/move attach docker:box:x")).toBe(HOP_NAME_USAGE);
+    expect(error("/move attach kubernetes:web-0/app:1")).toBe(HOP_NAME_USAGE);
+    expect(error("/move attach docker:b\u001bx")).toBe(HOP_NAME_USAGE);
+    expect(error(`/move attach docker:${"a".repeat(HOP_WORKLOAD_PART_MAX + 1)}`)).toBe(
+      HOP_NAME_USAGE,
+    );
+  });
+});
+
+describe("hopWorkload: the ONE validator both paths share", () => {
+  test("docker and podman have no container part; a k8s pod takes exactly one", () => {
+    expect(hopWorkload("docker", "box", "x")).toEqual({ kind: "bad", problem: "container" });
+    expect(hopWorkload("podman", "box", "x")).toEqual({ kind: "bad", problem: "container" });
+    expect(hopWorkload("kubernetes", "web-0", "app")).toEqual({
+      kind: "ok",
+      workload: { engine: "kubernetes", name: "web-0", container: "app" },
+    });
+  });
+
+  test("an unknown engine, an empty part and a stray character are all bad", () => {
+    expect(hopWorkload("aws", "box")).toEqual({ kind: "bad", problem: "engine" });
+    expect(hopWorkload("docker", "")).toEqual({ kind: "bad", problem: "name" });
+    expect(hopWorkload("kubernetes", "web-0", "")).toEqual({
+      kind: "bad",
+      problem: "containerName",
+    });
+    expect(hopWorkload("docker", "bo:x")).toEqual({ kind: "bad", problem: "chars" });
+    expect(hopWorkload("kubernetes", "we b")).toEqual({ kind: "bad", problem: "chars" });
+    expect(hopWorkload("docker", "-box")).toEqual({ kind: "bad", problem: "chars" });
+  });
+
+  test("a plain name resolves, with keep left to the caller", () => {
+    expect(hopWorkload("docker", "box")).toEqual({
+      kind: "ok",
+      workload: { engine: "docker", name: "box" },
+    });
+    expect(hopWorkload("docker", "box.v2_x-1")).toEqual({
+      kind: "ok",
+      workload: { engine: "docker", name: "box.v2_x-1" },
+    });
   });
 });
