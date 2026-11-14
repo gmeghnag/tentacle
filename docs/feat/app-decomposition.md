@@ -2237,3 +2237,46 @@ and no `protocol.d/` note is needed (`SLASH_COMMANDS` is a TUI-internal list, no
 a wire type). Changelog: `changelog.d/app-decomp-2-commands.changed.md` (one
 bullet; `CHANGELOG.md` untouched; the fragment passes
 `scripts/test/changelog-guard.test.ts`).
+
+## Review
+
+### S2 review — REQUEST-CHANGES
+
+1. **MEDIUM — `/compact` now prints its "Compacting…" notice twice.**
+   `commands/compact.ts:31` pushes `"_Compacting the conversation…_"` and then
+   calls `startCompaction()`, which pushes the same line again at
+   `App.tsx:2807` (copied out of the old `case` body together with the
+   machinery). On main the line appears once. Repro
+   (`.tentacle/tmp/app-decomp-2-commands/dup-compact.test.ts`: mount `App` with
+   a held `compact`, type `/compact`, count the line in `lastFrame()`): **COUNT 2
+   on this branch, COUNT 1 on main**. So the claim "no user-visible behaviour
+   changes; S0 passing unmodified proves it" is false here. The check the S0 tests
+   and `app-command-failure-arms.test.tsx:96` make is `toContain`, which cannot
+   see a doubled line. Fix: push the line in only one of the two places, and pin
+   it with an exact-count assertion that goes red on the current code.
+
+**Gate:** touched files (`commands-registry`, `app-command-failure-arms`,
+`app-commands`, `commands`, `rename`) **81 pass / 0 fail**; `bun run lint` clean
+(1072 files); `bun run typecheck` clean. The full `bun test` was not re-run by
+this review.
+
+**Mutation:** M2 (`/compact` mid-turn guard → `false &&`): `app-commands.test.tsx`
+**26 pass / 1 fail**, so the mutant is killed. Reverted from a byte copy, and
+`git status` is clean.
+
+**Attacks tried:** (a) diffed each of the 17 bodies against main's
+`handleCommand` (2816–3185). The guards, strings, ordering and the once-only
+re-ask are identical; `busyCompacting` reads `compactingRef.current`, as before.
+Found nothing except #1. (b) Ran the `/compact` end to end through the real `App`,
+which found #1. (c) Deps/identity (H2): `handleCommand`'s deps name fields, never
+`ctx`, and `reResolve` reads `handleCommandRef` lazily, so there is no stale
+re-entry. Holds. (d) §7 invariants: no protocol, persistence or terminal-IO path
+is touched, and the single broker is untouched. Holds.
+
+**Executor behaviour:** thorough and honest about drift, and the cycle/TDZ
+experiment was a good call. But the move put the same side effect in both halves of
+the guard/machinery split, and the coverage and mutation tables could not catch
+it, because no test asserts how many times the line appears.
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; a different model family from
+the executor, deepseek)
