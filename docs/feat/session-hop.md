@@ -1592,3 +1592,24 @@ the feed, `session-hop.test.tsx` for `startHop`). To verify: render the App with
 a `hop` feed whose `turnEnd` resolves `{kind:"approved"}`, after one
 `tool_start`/`tool_result` pair on `move_session`, and assert the status row
 starts with `moving to`.
+
+## Review — H5
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; a different model family from the H5 executor, claude-sonnet-4-5)
+
+**Verdict: REQUEST-CHANGES.**
+
+Gate: these 7 test files (tools/move-session, cli/move-session-wiring, agent/subagent-move-session, cli/hop-prompt, cli/hop-turn, cli/hop-feed-turn, tui/session-hop) → 75 pass / 0 fail. `bun run typecheck` → 0. `bun run lint` → 1245 files, clean. Full `bun test` was NOT re-run here.
+
+1. **HIGH — every `run`/`attach` pod is offered a tool that nobody answers.** `serve.ts:754,765` set `moveSession: true` inside `podSessionHost`. Every pod daemon goes through it: `run`, `attach`, detached and resident (`pod-resident.ts:803`). D8, though, gives those TUIs no `hop` prop. So on a plain `tentacle run` (k8s is the default engine), the model calls `move_session` and gets back "Proposed; the user will be asked when this turn ends". No prompt is ever raised. That is a silent drop plus a false statement to the model: the same class as the sub-agent leak this slice fixed. The laptop's TUI needs to be the one that tells the daemon whether a hop is possible (for example a hop target's spawn passes a flag or env, and a plain run does not). Otherwise `run`/`attach` must not register the tool.
+2. **MEDIUM — M6 ("ONE prompt even when the mount gate says ask") is not met in production.** `hopPromptFacts` (`hop-targets.ts:322`) never sets `gate`. The build then still raises its own `mountAsk` on the broker (`hop-targets.ts:182`). Scenario: cwd is a sensitive folder → the owner approves the proposal without seeing the gate warning, then gets a second prompt. The `hop-prompt.test.ts:97` row passes in a hand-made `gate` string, so it proves nothing about this path.
+3. **MEDIUM — the mount the prompt shows is not the mount the build uses.** `hopPromptFacts` calls `planWorkspace` without `endpoint` and with `noMount: false`. The real build passes `target.endpoint` and `deps.mount === false` (`hop-targets.ts:156-161`). So with a remote `tcp://` engine, or `mount: false`, the prompt claims "mount: <cwd> (read-write)" and that mount never happens. The owner is approving facts that are wrong.
+4. **MEDIUM — the production path from proposal to prompt has no test.** Mutation: I deleted `hopTurn?.event(...)` (`useTurnDriver.ts:571`), so no event ever reaches the fold and no proposal can ever be asked. Result: `bun test packages/tui` + `hop-feed-turn` + `hop-turn` → **2011 pass, 0 fail**. Reverted with an exact Edit; `git status` clean afterwards. The executor noted this gap as "not re-verified". §9 requires that the property hold on the real path, so it needs an App-level frame test (tool_start/tool_result → prompt → `moving to`).
+
+**Attacks tried:**
+- Could a broker grant auto-answer a `session_hop` request? No. `autoApproves` excludes it (`permission-ui.ts:60`), it has its own `hopChoices`, and `hopProposalOutcome` ignores `scope`.
+- Could a foreign turn or a sub-agent raise the prompt? No. Both the fold and `turnEnd` check `own`, and the child filters drop the tool. These hold.
+- The single-broker invariant: `main.ts` passes the same `permissions` instance to `createHopFeed` and `startTui`. Holds.
+- The turn-end ask runs in `finally`, so it also fires after an abort or an error. When a send-now succeeds, the watch carries over into the successor turn and is asked at that turn's end. That is acceptable.
+
+**How the executor behaved:** a thorough mutation table and an honest "not re-verified" note. But the M6 property was proven only on a pure string, not on the build that actually runs, and the scope of the pod-daemon registration was not checked against D8.
