@@ -2995,3 +2995,46 @@ covered from their new home.
 - A TUI-side `renderHook` unit test of the hook in isolation was not written
   (the package has no `renderHook` seam today); the hook is covered through 33
   App-seam cases instead.
+
+## Review
+
+### S6 — `feat/app-decomp-6-attach`
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, trivial fix).
+
+1. **MEDIUM — dead duplicate serialization chain left in `App.tsx`.**
+   `packages/tui/src/App.tsx:459` still declares
+   `const attachChainRef = useRef<Promise<void>>(Promise.resolve())`, now with
+   zero readers (`rg attachChainRef App.tsx` → that one line), while
+   `useAttachments.ts` creates its own at the hook's top. The Execution's claim
+   "It owns `attachChainRef` (the ONE thing that had to leave with the bodies)" is
+   therefore FALSE for the App side: it was copied, not moved. Failure scenario: a
+   later slice (S9a/S8 edit `App.tsx`) that adds an attach-adjacent async step
+   chains on the App's `attachChainRef` — same identifier, type-checks, lint-clean
+   (Biome does not flag an unused `useRef` binding) — and silently runs
+   concurrently with the hook's chain, so `existing` misses the first paste's chips
+   (the exact bug the chain exists to prevent). The comment above it
+   (`App.tsx:449`) also still names a non-existent `attachSeqRef`. Fix: delete
+   line 459, update the comment, and pin "no `attachChainRef` in `App.tsx`" in
+   `app-attachments-structure.test.ts` (red on the current tree).
+
+**Gate (re-run, this worktree):** touched tests
+`app-attachments-layer` + `app-attachments-structure` + `attach-app` +
+`app-structural-identity` → 38 pass / 0 fail; `bun run lint` → 1115 files, clean;
+`bun run typecheck` clean. Full `bun test` not re-run (scope: touched files).
+
+**Mutation (my own, reverted, tree clean per `git status`):** `routeAttach`'s
+chain replaced by `void Promise.resolve().then(…)` → layer test "two pastes of the
+same path … ONE chip" **FAILS** (2 pass / 1 fail). Non-vacuous.
+
+**Attacks tried.** (a) Hook moved bodies byte-for-byte? Diffed: identical except
+deps now naming the ref fields (identity-stable `useRef`s → no identity change).
+(b) Effect order: hook declares no effect; App's unmount effect unchanged.
+(c) `AttachRun` returns `void` but the body `await`s it — runtime unchanged (App's
+`run` still returns a promise; a rejection still lands in `upload().catch`).
+(d) Single `useInput` / no new listener: holds. (e) Leftover App state → finding 1.
+
+**Executor behaviour:** careful, drift recorded honestly; missed the left-behind
+ref and so over-claimed the move.
+
+*— claude-opus-5-5, 2026-11-14* (different model family from the executor.)
