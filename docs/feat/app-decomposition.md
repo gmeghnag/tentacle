@@ -3630,3 +3630,47 @@ TUI panel is added changes). `TODO.md` untouched (the orchestrator's line, §10)
   `connect-sessions.test.tsx`, not directly.
 - The plan's "target ≲800 lines for App.tsx after all slices" is still the SUM of
   slices: S7 takes it to **3202** (from 3260), leaving S8–S10.
+
+## Review
+
+### S7 — `feat/app-decomp-7-panels` (fresh-context, adversarial) — PASS
+
+**Verdict: APPROVE.** No HIGH/MEDIUM finding. The review covered only `git diff main...HEAD`.
+
+**Gate (this worktree).** `bun run typecheck` clean · `bun run lint` 1178 files, 0/0 ·
+touched suites (`panels-registry`, `app-panels-structure`, `connect-sessions`,
+`keys-route`) 52/52 · full `bun test` **8799 pass / 3 skip / 0 fail** on 2 of 3 runs.
+The first run had 1 fail (8798), and it did not come back on the next two. The
+failing test's name was not captured, so it is unattributed. S7 adds no timers.
+
+**Premises checked against the code.** H4(4) holds: no `kind ===` panel branch is
+left in `App.tsx`, `panel.ts` or `layer-panels.ts`. The only `kind === "sessions"`
+tests are the sessions kind's own rules in `panels/sessions.ts:131-151`. The old
+`treeLayer` sent every non-sessions panel to the tree layer, and mcp/skills
+`layer: "tree"` reproduces that. `NOTHING` matches the old `NONE`. The
+`sessionsKind.key` body matches the old `sessionsLayer` arm line for line.
+
+**Attacks tried.**
+1. *Declaration order / TDZ.* `closePanel`/`openPanel` moved from ~1185 to the
+   `usePanels` call at ~1316. tsc (TS2448) and the suite are clean, so nothing reads
+   them before they are declared. Holds.
+2. *Identity (H2).* The new deps are `[setPanel]`, `[closePanel, pushNotice, setPanel]`
+   and `[columns, setPanel]`. All are stable or match the old inline shape.
+   `swapSession` gained `touchPanel`, which has a stable identity. Holds.
+3. *Effects (H1).* `usePanels` imports no `useEffect`, and App still declares 20. Holds.
+4. *Alt-screen / broker.* No `process.std*` in the new modules, and the broker is
+   untouched. Holds.
+5. *Mutation, by hand, reverted and checked against `git status`.* Dropping the
+   layer gate in `panelStep` (`registry.ts:104`) is KILLED by `panels-registry`.
+   `panelApply` using a constant width instead of `columns` (`usePanels.ts`)
+   SURVIVES the whole `packages/tui/test` (1920/1920). This is LOW: the gap already
+   existed on `main` (the inline arrow was untested too), and the dep array is correct.
+6. *Fail-loud.* For an undescribed kind, `kindOf` throws and `panelStep` passes.
+   They are inconsistent, but no such kind can exist (`PanelKindName` is closed). LOW.
+
+**Executor behaviour.** All three drifts are stated in the doc with reasons. The
+mutation table is honest: it names the four rules that survive at the App seam and
+pins them at the unit. A changelog fragment for internal work follows the S2/S6
+precedent. Same model family caveat: none — the executor was DeepSeek, the reviewer Opus.
+
+*— claude-opus-5-5, 2026-11-14*
