@@ -588,3 +588,7 @@ other schemes/hosts ignored; the result enters `intake`, never `connecting` —
 ## Execution
 
 ## Review
+
+#### Orchestrator decisions (owner night delegation 2026-11-14)
+
+Owner asleep, delegated: every Owner question above is decided with its RECOMMENDED option. Implementation APPROVED. Ordering (orchestrator): 11b.1 starts after 13c merges (both add native deps → package.json/bun.lock), 14 after 11b.1, 11b.2 after 11b.1.
