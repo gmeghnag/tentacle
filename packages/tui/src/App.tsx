@@ -8,15 +8,15 @@ import {
   wakeDue,
   wakeStep,
 } from "@tentacle/core";
-import { Box, Text, useApp, useInput, useStdout } from "ink";
+import { useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
+import { AppView } from "./AppView.tsx";
+import { frameLayout } from "./app-layout.ts";
 import {
   type AttachDraft,
   EMPTY_DRAFT,
   NOT_AN_IMAGE_NOTICE,
   attachErrorText,
-  attachRowRows,
-  attachRowView,
   removeLastChip,
   uploadDone,
 } from "./attach-draft.ts";
@@ -31,14 +31,6 @@ import {
   reconcile,
 } from "./background-focus.ts";
 import {
-  backgroundListView,
-  dockRows,
-  drawerView,
-  inputTitle,
-  jobDrawerView,
-  listVisible,
-} from "./background-list.ts";
-import {
   BLINK_HALF_MS,
   BLINK_IDLE,
   type BlinkClock,
@@ -49,45 +41,27 @@ import {
 } from "./blink.ts";
 import { idleChord } from "./chord.ts";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
-import {
-  type QuitConfirmFacts,
-  matchCommands,
-  paletteWindow,
-  quitConfirmText,
-} from "./commands.ts";
+import type { QuitConfirmFacts } from "./commands.ts";
 import { dispatchCommand } from "./commands/dispatch.ts";
-import { BackgroundList, JobDrawer, SubagentDrawer } from "./components/BackgroundList.tsx";
-import { CommandPalette } from "./components/CommandPalette.tsx";
-import { LineInput } from "./components/LineInput.tsx";
-import { ListPanel } from "./components/ListPanel.tsx";
-import { PermissionPrompt, permissionPromptRows } from "./components/PermissionPrompt.tsx";
-import { QueuedMessages } from "./components/QueuedMessages.tsx";
-import { QUIT_CONFIRM_ROWS, QuitConfirm } from "./components/QuitConfirm.tsx";
-import { StatusBar } from "./components/StatusBar.tsx";
-import { Thinking } from "./components/Thinking.tsx";
 import { recall } from "./history.ts";
 import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
 import { HOP_QUEUED_NOTICE, type HopSpec, hopStep, parseHopCommand } from "./hop-command.ts";
 import { hopFailureText, hopMovedNotice, hopPlaceText, hopStatusRow } from "./hop-status.ts";
 import { startIdleWarm } from "./idle-warm.ts";
 import { resolveLineInput } from "./input-actions.ts";
-import { inputRowCount } from "./input-view.ts";
 import { JOB_REFRESH_MS, JOB_TAIL_SHOWN, jobOutcome, refreshDue } from "./job-drawer.ts";
 import { type KeyHost, executeEffects } from "./keys/execute.ts";
 import { PURE_LAYERS } from "./keys/layers.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
 import { modelErrorNotice } from "./model-error.ts";
-import { type OpenPanel, panelClick, panelView } from "./panel.ts";
+import { type OpenPanel, panelClick } from "./panel.ts";
 import { sanitizePasted } from "./paste.ts";
-import { insertReply, orphanNotice, replyView } from "./permission-reply.ts";
+import { insertReply, orphanNotice } from "./permission-reply.ts";
 import {
   type AutoAcceptFeed,
   type DraftBack,
   autoAcceptTest,
-  permissionAgentLine,
-  permissionDetailLines,
-  permissionShowsCwd,
   usePermissionBroker,
 } from "./permission-ui.ts";
 import { useAttachments } from "./useAttachments.ts";
@@ -108,25 +82,17 @@ import {
   markAcked,
   onReject,
   onSteer,
-  rowTexts,
   shownRows,
   takeForSendNow,
 } from "./queued.ts";
-import {
-  type RenderOptions,
-  layoutTranscript,
-  sliceLaid,
-  stripAnsi,
-  warmRowsChunk,
-} from "./render-lines.ts";
+import { type RenderOptions, layoutTranscript, sliceLaid, warmRowsChunk } from "./render-lines.ts";
 import { runChunked } from "./run-chunked.ts";
 import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
-import { type Selection, rowSelectionRange } from "./selection.ts";
+import type { Selection } from "./selection.ts";
 import {
   COMPACTING_NO_TURN,
   type CompactionResult,
   NOTHING_TO_SEND,
-  SEND_NOW_HINT,
   SendNowErrorCode,
   afterCompactionUnsupported,
   compactionWaitNotice,
@@ -153,16 +119,12 @@ import {
   startTurn,
   withdrawUserTurn,
 } from "./state.ts";
-import { inputRuleText } from "./status-line.ts";
-import { type ContextOpen, contextShown, pillView, statusTokens } from "./status-view.ts";
+import type { ContextOpen } from "./status-view.ts";
 
-import { dimProps, palette } from "./theme.ts";
-import { panelHeight, panelMaxBody } from "./tree-panel.ts";
 import {
   SLOT_LOST_NOTICE,
   type SessionActivity,
   commitWarmed,
-  loadingLabel,
   lostSlot,
   needsWarm,
   refusedBeforeStart,
@@ -198,26 +160,18 @@ export type {
 // for every importer that names `../src/App.tsx` (the test boundary).
 export type { RunQuit } from "./useQuitClear.ts";
 
-// Rows reserved below the transcript viewport: a blank spacer, the input/thinking
-// line, the status bar, plus one slack row so the frame never overflows the
-// terminal (which, on the alternate screen, has no scrollback to absorb it).
-const RESERVED_ROWS = 4;
 const FRAME_MS = 33; // ~30fps streaming throttle
 // If a bracketed paste's closing marker never arrives, recover this long after
 // the last paste chunk: flush what we captured and leave paste mode, so input
 // is never frozen. Real pastes stream their chunks within one pty read window,
 // far faster than this, so a legitimate paste never trips it.
 const PASTE_TIMEOUT_MS = 250;
-// Max content lines the input box shows before it windows around the cursor.
-const MAX_INPUT_ROWS = 10;
 
 const WELCOME = "Tentacle ready. Type a task, or `/help` for commands.";
 
 // Clipboard reads are trimmed: copied terminal output often has a trailing
 // newline that would otherwise land as a stray blank line.
 const flattenPasted = (text: string): string => sanitizePasted(text).trim();
-
-const INPUT_PLACEHOLDER = "Type a task or /command";
 
 /** The real file seam and the laptop's own paths (a test injects all three). */
 const defaultFileProbe: FileProbe = nodeFileProbe();
@@ -805,135 +759,48 @@ export function App({
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on field.value
   useEffect(() => setCommandIndex(0), [field.value]);
 
-  // --- derived layout (recomputed each render) -----------------------------
-  const st = stateRef.current;
-  const tokensShown = statusTokens(st);
-  const ctxShown = contextShown(tokensShown.context, contextOpen);
-  const columns = Math.max(20, size.columns);
-  const termRows = Math.max(8, size.rows);
-  // Slash-command autocomplete: open only while idle and typing a `/command`.
-  const paletteCommands =
-    !permission.pending && !st.running && !panel ? matchCommands(field.value, skills()) : [];
-  const paletteOpen = paletteCommands.length > 0;
-  const commandSel = paletteOpen
-    ? Math.min(Math.max(0, commandIndex), paletteCommands.length - 1)
-    : 0;
-  // With many skills a bare "/" lists them all: show a window around the selection.
-  const paletteWin = paletteWindow(paletteCommands.length, commandSel);
-  const paletteRows = paletteCommands.slice(paletteWin.start, paletteWin.end);
-  // The input box grows with a multi-line prompt (paste / `\`-continuation),
-  // (and with a soft-wrapped long line), capped at MAX_INPUT_ROWS content rows;
-  // +2 for its top/bottom borders.
-  const inputContentLines = inputRowCount(field.value, field.cursor, columns, MAX_INPUT_ROWS);
-  // One more row while the draft holds chips or an upload: the attach row sits
-  // INSIDE the input box and is counted HERE, once — so the viewport shrinks by
-  // one and the frame's height never changes (P8).
-  const attachRow = attachRowView(attach, Math.max(1, columns - 2));
-  const inputBoxRows = inputContentLines + 2 + attachRowRows(attach, Math.max(1, columns - 2));
-  const listView = panel
-    ? panelView(panel, columns, panelMaxBody(termRows), sessionRef.current?.sessionId ?? null)
-    : null;
-  // Rows above the input/panel while a turn runs: the thinking line + the
-  // queued-message lines (each one row: `wrap="truncate-end"`) + the send-now
-  // hint row under them + one blank row between the hint and the thinking line.
-  // The rows shown: the daemon's list (every writer's) + my rows not acked yet (C7).
-  const shown = shownRows(queued, daemonQueue);
-  const runningRows =
-    (st.running || loading ? 1 : 0) +
-    (st.running || compacting ? shown.length + (shown.length > 0 ? 1 : 0) : 0) +
-    (st.running && shown.length > 0 ? 1 : 0);
-  // Rows the bottom area occupies: the permission dialog; or the running rows,
-  // then the list panel or the input box (plus any open palette rows, which
-  // only open while idle).
-  //
-  // The dock's view-models (pure; the components only paint them) are computed
-  // HERE, before the layout, because their height feeds `activeRows` (Review H3:
-  // they used to be built after it, so the frame was taller than the terminal).
+  // --- the frame's view-model (S10 — docs/feat/app-decomposition.md) --------
+  // Every row derived below used to be inline here, from `activeRows` down to the
+  // status bar's position; they are `app-layout.ts`'s `frameLayout` now (AGENTS §7:
+  // computation and branching in a pure module, the component only paints the
+  // result). The ONE hook the rows need stays HERE — `useDockClock` owns an
+  // effect, and App's effect list keeps its order (Fable H1) — at its old place.
   const dockNow = useDockClock(dock.focus.kind !== "input" || dockVisible());
-  // The DROPDOWN is shown only when the focus reached it: DOWN focuses the pill,
-  // Enter opens the dropdown — at rest nothing is listed at all (the owner: "no
-  // permanent list anywhere"). A quit confirm owns the screen. A PERMISSION PROMPT
-  // does not take the dropdown away: the prompt may be a background child's ask,
-  // and its row says `⚠ needs your permission` — hiding the list there made that
-  // row unreachable (Review M1).
-  const dockListVisible =
-    dock.focus.kind === "list" && listVisible(subagents, jobRows) && quitConfirm === null;
-  const dockView = dockListVisible
-    ? backgroundListView({
-        rows: subagentsRef.current,
-        jobs: jobRowsRef.current,
-        askingId: permission.pendingAgent?.id ?? null,
-        focus: dock.focus,
-        width: columns,
-        now: dockNow,
-      })
-    : null;
-  // The drawer: a child's (its tools and messages), or a job's (its output tail).
-  const drawerOpen =
-    dock.focus.kind === "open" && quitConfirm === null && !permission.pending
-      ? { id: dock.focus.id, ended: dock.focus.ended }
-      : null;
-  const jobOutput = drawerOpen === null ? undefined : jobOutputRef.current[drawerOpen.id];
-  const drawer =
-    drawerOpen === null
-      ? null
-      : drawerJob !== null
-        ? jobDrawerView({
-            row: drawerJob,
-            output: jobOutput?.output,
-            ...(jobOutput?.truncated !== undefined ? { truncated: jobOutput.truncated } : {}),
-            ...(jobOutput?.exitCode !== undefined ? { exitCode: jobOutput.exitCode } : {}),
-            outcome: drawerOpen.ended,
-            width: columns,
-            now: dockNow,
-            // Review 4 (fix round 1): the drawer used to be a fixed 14 rows, so on
-            // a short terminal (80×20, 80×16) the frame was TALLER than the screen
-            // and Ink re-cleared it on every repaint. The budget is what the
-            // layout has left once the transcript's floor, the running rows and
-            // the input+status block are reserved — the same parts `activeRows`
-            // sums below, so `dockRows` can never reserve more than this.
-            maxRows: Math.max(1, termRows - (RESERVED_ROWS - 1) - inputBoxRows - runningRows - 3),
-          })
-        : drawerRow !== null
-          ? drawerView({
-              row: drawerRow,
-              sent: dock.sent[drawerOpen.id] ?? [],
-              outcome: drawerOpen.ended,
-              width: columns,
-              now: dockNow,
-            })
-          : null;
-  /** The rows the dock takes ABOVE the input: the dropdown's, or the drawer's. */
-  // A permission prompt REPLACES the whole bottom area (it is the input, as
-  // today), so nothing of the dock paints under it and it reserves no rows. The
-  // "who is asking" the dropdown's ⚠ row used to carry is now the PILL's job —
-  // the pill paints under the prompt (`▲ sa-1 asks`), which is strictly better:
-  // it is visible with the dock closed too (docs/feat/subagent-panel.md).
-  const dockHeight = permission.pending ? 0 : dockRows(dockView, drawer);
-  // The status bar's pill (docs/feat/subagent-panel.md, UI revision): ONE control
-  // for the background work, its words and state decided by the pure view-model.
-  const pill = pillView({
-    agents: subagents?.length ?? 0,
-    jobs: jobRows?.length ?? 0,
-    askingId: permission.pendingAgent?.id ?? null,
-    finished: dockFinishedRef.current,
-    now: dockNow,
-    focus:
-      dock.focus.kind === "pill"
-        ? "pill"
-        : dock.focus.kind === "list"
-          ? "dropdown"
-          : dock.focus.kind === "open"
-            ? "open"
-            : "input",
-    width: columns,
+  /** The transcript's state this frame paints (`stateRef` is the truth; this reads it). */
+  const st = stateRef.current;
+  const view = frameLayout({
+    state: st,
+    permission,
+    dock,
+    dockNow,
+    subagents,
+    subagentsRef,
+    jobRows,
+    jobRowsRef,
+    drawerRow,
+    drawerJob,
+    jobOutput: jobOutputRef.current,
+    dockFinished: dockFinishedRef.current,
+    quitConfirm,
+    panel,
+    sessionId: sessionRef.current?.sessionId ?? null,
+    field,
+    attach,
+    skills: skills(),
+    commandIndex,
+    sizeColumns: size.columns,
+    sizeRows: size.rows,
+    contextOpen,
+    queued,
+    daemonQueue,
+    loading,
+    compacting,
   });
-  // The reply field's view while it is open (its rows feed the viewport maths).
-  const replyMax = permission.pending?.reply?.maxChars ?? 0;
-  const replyShown =
-    permission.pending && permission.mode.mode === "reply"
-      ? replyView(permission.mode, columns, replyMax)
-      : undefined;
+  const frame = { ...view, st };
+  // The rows App itself still reads (the key path's snapshot, the mouse layer's
+  // snapshot, the effect deps, and the model it hands `AppView`).
+  const { columns, paletteCommands, paletteOpen, commandSel } = view;
+  const { listView, shown, viewport, panelBodyTop, dockTop, dockView, replyMax } = view;
   const replyMaxRef = useRef(0);
   replyMaxRef.current = replyMax;
   const { readMode: readReplyMode, setMode: setReplyMode } = permission;
@@ -949,43 +816,12 @@ export function App({
     },
     [readReplyMode, setReplyMode],
   );
-  const activeRows =
-    quitConfirm !== null
-      ? QUIT_CONFIRM_ROWS
-      : permission.pending
-        ? permissionPromptRows(
-            permission.choices.length,
-            permissionDetailLines(permission.pending).length,
-            permissionShowsCwd(permission.pending),
-            replyShown?.rows.length,
-            permission.pendingAgent !== null,
-          ) + dockHeight
-        : runningRows +
-          (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length) +
-          dockHeight;
-  const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
-  // Terminal row (1-based) of the panel's first body row: the transcript
-  // viewport, the bottom area's marginTop row, the running rows, the title rule.
-  const panelBodyTop = viewport + 1 + runningRows + 2;
-  /**
-   * Where the DOCK's first row sits on screen (1-based), or `null` when it paints
-   * nothing. Derived from the same parts `activeRows` sums, in the order the
-   * tree paints them: the transcript viewport, the `marginTop` spacer, the running
-   * rows, then the dock (the dropdown's rule + rows, or the drawer's block) — the
-   * input rule, the input and the status bar come after it.
-   *
-   * A panel, the palette, a quit confirm and a permission prompt each own that
-   * slot instead, and none of them paints the dock.
-   */
-  const dockTop =
-    dockHeight === 0 || listView || paletteOpen || quitConfirm !== null || permission.pending
-      ? null
-      : viewport + 1 + runningRows + 1;
   // Where the STATUS BAR's row is on screen, and the pill's cells on it, as the
   // last render reported them (docs/feat/subagent-panel.md: "a click on the
   // pill's cells opens the dropdown"). `StatusBar` computes the row's layout and
   // reports the range; the App must not re-derive either (AGENTS §7: one source
-  // of truth — the component paints and reports, it decides nothing).
+  // of truth — the component paints and reports, it decides nothing). The ROW is
+  // `frame.statusRowY` (the same arithmetic, in the view-model's one place).
   const statusRowRef = useRef<{
     readonly y: number;
     readonly pill: { readonly start: number; readonly end: number } | null;
@@ -1946,7 +1782,7 @@ export function App({
         jobRows: () => jobRowsRef.current ?? [],
         panel,
         paletteOpen,
-        paletteNames: paletteCommands.map((c) => c.name),
+        paletteNames: paletteCommands.map((c: { readonly name: string }) => c.name),
         commandSel,
         fieldValue: field.value,
         permission: {
@@ -2095,201 +1931,48 @@ export function App({
     }
   });
 
-  // --- the dock's other view-models (pure; the components only paint them) --
-  // `openTitle`: the input's rule says `→ sa-N` while a child is open (P2 (a)).
-  const openTitle = dock.focus.kind === "open" ? inputTitle(dock.focus) : null;
+  // --- the frame (S10) ------------------------------------------------------
+  // The tree itself left `App.tsx` for `AppView.tsx` — a verbatim move (the
+  // plan's M3: "no prop re-plumbing"), so `git diff --color-moved` shows an
+  // unchanged tree. Everything it paints is the view-model computed above; the
+  // App still owns the state, the effects and the one `useInput` behind it.
   // What Enter does while a child is open lives on the INPUT RULE
   // (`→ sa-1 · enter sends · esc back`), never in the status bar: the bar's
   // right slot is `auto-accept`'s, and a hint there replaced it (round 3 M1).
-
   return (
-    <Box flexDirection="column">
-      <Box flexDirection="column" height={viewport}>
-        {selection ? (
-          visible.map((row, i) => {
-            const absRow = win.start + i;
-            const plain = stripAnsi(row);
-            // Ink measures an empty <Text> as 0x0, so blank separator rows
-            // would collapse and shift the transcript up. A single space keeps
-            // every row at height 1 (the grid trimEnd()s it back to "").
-            const display = row === "" ? " " : row;
-            const line = row === "" ? " " : plain;
-            const range = rowSelectionRange(selection, absRow, plain.length);
-            if (!range) {
-              return <Text key={i}>{display}</Text>;
-            }
-            const [c0, c1] = range;
-            return (
-              <Text key={i}>
-                {line.slice(0, c0)}
-                <Text inverse>{line.slice(c0, c1)}</Text>
-                {line.slice(c1)}
-              </Text>
-            );
-          })
-        ) : (
-          <Text>{visible.join("\n")}</Text>
-        )}
-      </Box>
-
-      <Box marginTop={1}>
-        {quitConfirm !== null ? (
-          <QuitConfirm text={quitConfirmText(quitConfirm)} columns={columns} />
-        ) : permission.pending ? (
-          <PermissionPrompt
-            req={permission.pending}
-            options={permission.choices.map((c) => c.label)}
-            selected={permission.selected}
-            cwd={cwd}
-            columns={columns}
-            {...(replyShown ? { reply: replyShown } : {})}
-            replyable={permission.choices.some((c) => c.reply === true)}
-            {...(permission.pendingAgent
-              ? { agentLine: permissionAgentLine(permission.pendingAgent, columns) }
-              : {})}
-          />
-        ) : (
-          <Box flexDirection="column" width={columns}>
-            {/* Queued messages sit where a sent message would (right under the
-                conversation); the thinking/working line stays just above the
-                input, under them (owner, 2026-10-25). */}
-            {st.running || compacting ? (
-              <QueuedMessages queued={rowTexts(shown)} hint={SEND_NOW_HINT} columns={columns} />
-            ) : null}
-            {/* One blank row between the send-now hint and the thinking line. */}
-            {st.running && shown.length > 0 ? <Text> </Text> : null}
-            {loading ? (
-              <Text {...dimProps()}>{loadingLabel(loading.done, loading.total)}</Text>
-            ) : st.running ? (
-              <Thinking
-                since={
-                  st.reasoning && st.reasoningStartedAt !== null
-                    ? st.reasoningStartedAt
-                    : (st.turnStartedAt ?? Date.now())
-                }
-                label={st.reasoning ? "Thinking…" : "Working…"}
-              />
-            ) : null}
-            {listView ? (
-              <ListPanel view={listView} columns={columns} />
-            ) : (
-              <>
-                {paletteOpen ? (
-                  <CommandPalette
-                    commands={paletteRows}
-                    selected={commandSel - paletteWin.start}
-                    columns={columns}
-                  />
-                ) : null}
-                {/* The dock ABOVE the input (docs/feat/subagent-panel.md, UI
-                    revision): the dropdown, or the one child opened. Everything
-                    it shows is a precomputed view-model — these components only
-                    paint segments (AGENTS §7). Its rows are reserved in
-                    `activeRows`, so the input and the status bar never move. */}
-                {dockView !== null ? <BackgroundList view={dockView} columns={columns} /> : null}
-                {drawer !== null && drawerJob !== null ? (
-                  <JobDrawer
-                    head={drawer.head}
-                    hidden={drawer.hidden}
-                    tail={drawer.tail}
-                    columns={columns}
-                  />
-                ) : drawer !== null ? (
-                  <SubagentDrawer
-                    head={drawer.head}
-                    hidden={drawer.hidden}
-                    tail={drawer.tail}
-                    sent={drawer.sent}
-                    columns={columns}
-                  />
-                ) : null}
-                {/* The input's top edge, which says ONE thing depending on the
-                    dock: `── <model> ─` at rest, a PLAIN line under the
-                    dropdown (its bottom edge), or `─ → sa-N · enter sends ·
-                    esc back ───` while a child is open. Never two labelled
-                    rules stacked, and never the model while the dock shows
-                    anything (owner). */}
-                <Text color={palette().border}>
-                  {inputRuleText(
-                    // A JOB's drawer is read-only and the input stays on the main
-                    // agent: a PLAIN rule, no `→ bg-3` (owner Q1 (a)).
-                    dock.focus.kind === "open" && drawerJob === null
-                      ? { kind: "target", id: dock.focus.id, ended: dock.focus.ended !== null }
-                      : dock.focus.kind === "list" || dock.focus.kind === "open"
-                        ? { kind: "plain" }
-                        : { kind: "model" },
-                    shownModel,
-                    columns,
-                  )}
-                </Text>
-                <Box
-                  width={columns}
-                  borderStyle="round"
-                  borderColor={palette().border}
-                  borderTop={false}
-                  borderLeft={false}
-                  borderRight={false}
-                  flexDirection="column"
-                >
-                  {attachRow === null ? null : (
-                    // ONE row, above the input: the chips (`name size`, +N) or
-                    // the upload in flight. Colours and the glyph only — the
-                    // text is `attach-draft.ts`'s (docs/feat/attachments-tui.md D8).
-                    <Text color={palette().subtle} wrap="truncate-end">
-                      {attachRow.kind === "upload"
-                        ? `  ${attachRow.text}`
-                        : `  📎 ${attachRow.items.join("  ")}${attachRow.more > 0 ? `  +${attachRow.more}` : ""}`}
-                    </Text>
-                  )}
-                  <LineInput
-                    value={field.value}
-                    cursor={field.cursor}
-                    anchor={field.anchor}
-                    placeholder={st.running ? "Queue a task…" : INPUT_PLACEHOLDER}
-                    maxRows={MAX_INPUT_ROWS}
-                    width={columns}
-                  />
-                </Box>
-              </>
-            )}
-          </Box>
-        )}
-      </Box>
-
-      {hopRow === null ? (
-        <StatusBar
-          cwd={cwd}
-          target={shownTarget}
-          tokens={tokensShown.totals}
-          contextTokens={ctxShown.used}
-          contextApprox={ctxShown.approx}
-          contextWindow={contextWindow}
-          columns={columns}
-          scrolledUp={scrolledUp}
-          hiddenAbove={hiddenAbove}
-          expandAll={expandAll}
-          autoApprove={permission.autoApprove}
-          pill={pill}
-          onPillRange={(range) => {
-            // The row the bar paints on: the frame's own rows, derived exactly as
-            // the tree lays them out (the transcript viewport, the spacer, the
-            // running rows, the dock, the input box), plus the bar's own one.
-            statusRowRef.current = {
-              y: viewport + 1 + runningRows + dockHeight + inputBoxRows + 1,
-              pill: range,
-            };
-          }}
-          link={linkView}
-        />
-      ) : (
-        // A hop in flight owns the status row (D3): same ONE row, so the frame
-        // never changes height and the transcript keeps its position.
-        <Box width={columns}>
-          <Text color={palette().accent} wrap="truncate-end">
-            {hopRow}
-          </Text>
-        </Box>
-      )}
-    </Box>
+    <AppView
+      model={{
+        ...frame,
+        st,
+        field,
+        permission,
+        dock,
+        drawerJob,
+        linkView,
+        shownModel,
+        shownTarget,
+        cwd,
+        contextWindow,
+        expandAll,
+        selection,
+        quitConfirm,
+        hopRow,
+        loading,
+        compacting,
+        win,
+        visible,
+        scrolledUp,
+        hiddenAbove,
+        onPillRange: (range: { readonly start: number; readonly end: number } | null) => {
+          // The row the bar paints on: the frame's own rows, derived exactly as
+          // the tree lays them out (the transcript viewport, the spacer, the
+          // running rows, the dock, the input box), plus the bar's own one. The
+          // arithmetic is `app-layout.ts`'s (`statusRowY`), so the row a click
+          // is matched against and the rows the viewport reserved cannot drift
+          // apart (S0b's pill-click pins are the behavioural half).
+          statusRowRef.current = { y: frame.statusRowY, pill: range };
+        },
+      }}
+    />
   );
 }
