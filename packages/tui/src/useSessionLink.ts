@@ -19,7 +19,8 @@ import { type WakeModel, wakeStep } from "@tentacle/core";
  * Three constraints from the plan shape the file:
  *
  * 1. **Effects stay in `App`** (Fable H1): this hook declares NO `useEffect`.
- *    `App`'s 20 keep their order and every index; the two that DRIVE this code
+ *    `App`'s 22 keep their order and every index (the original 20 + session-hop's
+ *    2); the two that DRIVE this code
  *    (the `watchReturned` mount effect, the mount `watchSession` one) stay there
  *    and reach the hook through the returned identifiers.
  * 2. **A shared latch is passed in, never re-created** (Fable M1/H3). Every ref

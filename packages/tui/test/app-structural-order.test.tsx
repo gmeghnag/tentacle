@@ -1,8 +1,9 @@
 /**
  * docs/feat/app-decomposition.md S0b (Fable H1) — App's EFFECT ORDER at mount.
  *
- * React runs a component's `useEffect`s in declaration order. App keeps all 20
- * effects in the component, in today's order, precisely because one hook per
+ * React runs a component's `useEffect`s in declaration order. App keeps all 22
+ * effects in the component (the original 20 + session-hop's 2), in today's
+ * order, precisely because one hook per
  * concern cannot preserve an interleaved order (H1): a slice that moved the
  * session link's watch into `useSessionLink` would place it before the turn
  * driver's initial prompt.

@@ -14,10 +14,10 @@
  * 1. **No effect.** The four dock effects (`jobs.onExit`, the id-key reconcile,
  *    the output refresh, the last read at an exit) stay in `App` in today's
  *    order (Fable H1 / owner Q7 (a)): an effect may move into a hook only when
- *    its index among App's 20 is unchanged, and these are 4, 12, 13, 14. So the
- *    refs and the derived triggers (`dockIdKey`, `jobTargetId`,
- *    `jobEndedWhileOpen`, `refreshMs`) are returned for those effects to read,
- *    and this hook declares no `useEffect` at all.
+ *    its index among App's 22 is unchanged (the original 20 + session-hop's 2),
+ *    and these are 4, 12, 13, 14. So the refs and the derived triggers
+ *    (`dockIdKey`, `jobTargetId`, `jobEndedWhileOpen`, `refreshMs`) are returned
+ *    for those effects to read, and this hook declares no `useEffect` at all.
  * 2. **Frozen identifiers (Fable M1).** The hook destructures into the SAME
  *    names `App` already used (`dockRef`, `setDock`, `dockIds`, `killJob`, …),
  *    so every use site is untouched. A port FIELD keeps its current identity

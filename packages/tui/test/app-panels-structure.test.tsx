@@ -8,7 +8,8 @@
  *     in either, and the three App-side `/sessions` writes are the kind's own
  *     functions (`panels/sessions.ts`), not inline tests;
  *   - `usePanels.ts` is an EXECUTOR: it declares no `useEffect` (Fable H1 — the
- *     effect list stays App's), and `App` still has 20 effects;
+ *     effect list stays App's), and `App` still has 22 effects (the original 20
+ *     + session-hop's 2);
  *   - an open panel's answer that arrives after the panel CLOSED or was REPLACED
  *     is still dropped (the generation rule did not die in the move);
  *   - the `kind ===` that must now answer for a NEW panel is the registry's, and
@@ -99,7 +100,7 @@ describe("S7: the panel rules are the kinds', not App.tsx's", () => {
     expect(countOf(hook, "touchPanel(p)")).toBe(1);
   });
 
-  test("usePanels is an EXECUTOR: it declares no effect, and App keeps its 20", () => {
+  test("usePanels is an EXECUTOR: it declares no effect, and App keeps its 22", () => {
     const hook = readSrc("usePanels.ts");
     expect(hook).not.toContain("useEffect");
     expect(hook).toContain("useCallback");

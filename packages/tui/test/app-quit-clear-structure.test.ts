@@ -8,7 +8,7 @@
  *     `clearCommandStep`/`clearErrorNotice`/`clearNoopNotice`, `backgroundCount`/
  *     `backgroundNames`): they are CALLED by the hook, never re-implemented in
  *     `App.tsx` and never inlined into the hook;
- *   - the hook owns NO state and NO effect (H1: App's 20 effects stay App's, in
+ *   - the hook owns NO state and NO effect (H1: App's 22 effects stay App's, in
  *     today's order) — every ref is a port field, i.e. the App's own object;
  *   - the frozen identifiers survive (`requestQuit`, `runClear`, `requestClear`),
  *     so no use-site changed;
@@ -106,7 +106,7 @@ describe("S8: the quit and clear executors leave App.tsx", () => {
   });
 
   // H1: no hook owns an effect here, so an effect's index cannot shift.
-  test("App still declares its 20 effects, and the hook declares none", () => {
+  test("App still declares its 22 effects (the original 20 + session-hop's 2)", () => {
     expect(countOf(readSrc("App.tsx"), "\n  useEffect(")).toBe(22);
     expect(readSrc("useQuitClear.ts")).not.toContain("useEffect");
   });
