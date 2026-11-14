@@ -532,3 +532,31 @@ No repository content was deleted.
 #### Owner answers (2026-11-13)
 
 All questions answered as recommended. Implementation APPROVED.
+
+#### Adversarial review (fresh context)
+
+*— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES.** Scope `git diff main...HEAD`. Touched tests 122 pass / 0 fail (8 files); `bun run lint` clean; `bun run typecheck` clean. The full `bun run check` was not re-run here.
+
+**Findings** (each one reproduced with `.tentacle/tmp/sibling-discovery/review.test.ts`, which imports the worktree's sources):
+
+1. **HIGH: production never announces an interface address.** `cli/src/discovery.ts:212` defaults `interfaces` to `() => []` (the plan says `os.networkInterfaces`), and `serve.ts:496` passes none. A `serve --host 0.0.0.0` with no `--address` therefore announces `addresses: []` for itself and every sibling (repro A: `[]`), while `pair`'s QR (`pair.ts:195`, `machineInterfaces()`) does list them. This breaks decision 3 and F6 (a DHCP or Wi-Fi change is never announced), and it contradicts the module's own comment that "the QR and the announcement cannot disagree". The e2e binds loopback only, so no test sees it. Fix: default to `machineInterfaces()` (re-read every poll), plus a `0.0.0.0` driver test.
+2. **HIGH: F7 is not met.** `remote-client.ts:986-1000` `resubscribeDiscovery` folds the post-reconnect snapshot but never calls the listener. A change made while the phone was offline, or a daemon restart, is swallowed until the next change. It also becomes the `rev` guard, so it is never re-delivered (repro C: listener saw `[]` after the reconnect). The reconnect test only pushes a change after the reconnect, so it is green on this bug. Fix: deliver when `changed`, and add a test that changes the snapshot while the link is down.
+3. **MEDIUM: Repro 3 (the pid-reuse phantom) comes back on every cold subscribe.** `lastPollAt` (`cli/src/discovery.ts:235`) is only advanced by polls, and polls run only while a client is subscribed. So the first subscriber after more than 30 s with none, which is the normal phone case, gets a poll with freshness switched off. The stale pid-reuse record goes into the `daemon/discover` result (repro B: `["/p/a","/p/phantom"]`) and then flickers out about 2 polls later. Fix: measure the wake gap with the heartbeat, which always runs, or reset `lastPollAt` when the poller starts.
+4. **MEDIUM: drift from owner Q6 that Execution does not list.** `client/src/discovery.ts:167` refreshes ONE clock per project. While a project stays announced, its unannounced fallback addresses are therefore kept forever, not "30 days after last seen" for each address. Either keep a timestamp per address or have the owner accept the change.
+
+**Mutations** (each one reverted; the tree was byte-identical, `git status` clean): `nextMembership` ignoring `deadCwds` → 1 fail. `readDaemonRecords` ignoring `freshWithinMs` → 2 fail. Both properties are pinned.
+
+**What holds:**
+- Additivity: the notification is sent only to subscribers, and the daemon-side test exists.
+- Subscribe happens before the snapshot.
+- Unsubscribe runs in `close()`, and the handler awaits nothing (§7 "don't serialize").
+- A pairing principal is refused before the dispatch (`connection.ts:283`).
+- Pod and worker daemons get no source, so they answer `MethodNotFound` ("a pod is not trusted").
+- Strip schemas. `protocol.json` was regenerated, not hand-edited.
+- The heartbeat never creates a record (`touchDaemonRecord` uses utimes).
+
+**Nit:** `session-host.ts:447` has a doubled `/**`.
+
+**Executor:** Execution is signed `claude-opus-5-5`, but commit `4864cdc` says "exec (deepseek)". One of the two is wrong, and AGENTS §10 requires an honest signature. If the executor was really Opus, this review comes from the same model family (a fresh context only).
