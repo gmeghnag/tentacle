@@ -6,10 +6,9 @@ appId: so.tentacle.app
 # (the refusal-with-words state, distinct from 08b's plain `error`) with the
 # reply on it. The hook reads the mock model's own request, so "the words
 # reached the model" is asserted where they would actually be seen.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:

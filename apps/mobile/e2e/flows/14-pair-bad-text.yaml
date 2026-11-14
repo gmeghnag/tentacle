@@ -1,0 +1,27 @@
+appId: so.tentacle.app
+---
+# 14 (docs/feat/mobile-pairing-screen.md 11b.1, F-P1): garbage in the paste field.
+# The app must refuse it locally — `invalid-payload`, and NOTHING is dialled (a
+# code that never reached `pair` is the hook's own truth, so this is an assertion
+# about the daemon too, not just about the screen).
+- runScript:
+    file: "pair-start.js"
+- launchApp:
+    clearState: true
+- clearKeychain
+- extendedWaitUntil:
+    visible:
+      id: "pair-paste-input"
+    timeout: 30000
+- tapOn:
+    id: "pair-paste-input"
+- inputText: "tentacle://pair?nope=1"
+- tapOn:
+    id: "pair-paste-submit"
+- assertVisible:
+    id: "pair-error-invalid-payload"
+# Nothing was dialled: `pair` never saw a claim.
+- runScript:
+    file: "pair-claimed.js"
+- assertNotVisible:
+    id: "pair-review"

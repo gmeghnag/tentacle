@@ -4,10 +4,9 @@ appId: so.tentacle.app
 # The screen says so (`banner-reconnecting`) and keeps the rows it has; when the
 # daemon comes back the client re-attaches, the cut turn is shown as interrupted,
 # and the composer works again.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:

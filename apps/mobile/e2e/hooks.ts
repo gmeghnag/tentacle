@@ -24,7 +24,14 @@ export type HookName =
   | "file-exists"
   | "model-prompts"
   | "model-replies"
-  | "edit-calls";
+  | "edit-calls"
+  | "pair-start"
+  | "pair-confirm"
+  | "pair-answer"
+  | "pair-revoke"
+  | "pair-reset"
+  | "pair-claimed"
+  | "pair-device-id";
 
 /** The hooks that take a query parameter (`?session=…&prompt=…`). */
 export interface HookQuery {
@@ -32,6 +39,10 @@ export interface HookQuery {
   readonly prompt?: string;
   readonly answer?: string;
   readonly file?: string;
+  /** `pair-start`'s window length (flow 07 needs a short one). */
+  readonly ttlMs?: string;
+  /** `pair-revoke`'s device name (what `tentacle devices revoke` matches). */
+  readonly name?: string;
 }
 
 export interface Hooks {
@@ -79,6 +90,23 @@ export interface HookActions {
   readonly modelReplies: () => readonly string[];
   /** The tool-call ids the mock minted (a flow names `tool-<id>-ok`). */
   readonly editCalls: () => readonly string[];
+  /** Open a pairing window (11b.1's `_pair` subflow): the payload the flow pastes. */
+  readonly pairStart: (options: { readonly ttlMs?: number }) => Promise<{
+    readonly payload: string;
+    readonly computerId: string;
+  }>;
+  /** Wait for the phone's claim and return the compare code the terminal shows. */
+  readonly pairConfirm: () => Promise<{ readonly sas: string }>;
+  /** Answer the computer's `[y/N]` AFTER the two codes were compared. */
+  readonly pairAnswer: (value: "y" | "n") => Promise<{ readonly answered: "y" | "n" }>;
+  /** `tentacle devices revoke <name>`: the phone's next dial is denied. */
+  readonly pairRevoke: (name: string) => Promise<number>;
+  /** `tentacle devices reset`: the pinned key is wrong from now on. */
+  readonly pairReset: () => Promise<number>;
+  /** Did the phone claim the open window's code yet? (a negative assertion's truth) */
+  readonly pairClaimed: () => boolean;
+  /** The device id the last completed pairing registered (flow 15 revokes exactly it). */
+  readonly pairDeviceId: () => string | undefined;
 }
 
 /** What a laptop requester answers: `allow` (once) or `deny`. */
@@ -99,6 +127,13 @@ export function hookFor(path: string): HookName | undefined {
     case "model-prompts":
     case "model-replies":
     case "edit-calls":
+    case "pair-start":
+    case "pair-confirm":
+    case "pair-answer":
+    case "pair-revoke":
+    case "pair-reset":
+    case "pair-claimed":
+    case "pair-device-id":
       return name;
     default:
       return undefined;
@@ -120,6 +155,12 @@ export function queryOf(url: URL): HookQuery {
     ...(url.searchParams.get("file") === null
       ? {}
       : { file: url.searchParams.get("file") as string }),
+    ...(url.searchParams.get("ttlMs") === null
+      ? {}
+      : { ttlMs: url.searchParams.get("ttlMs") as string }),
+    ...(url.searchParams.get("name") === null
+      ? {}
+      : { name: url.searchParams.get("name") as string }),
   };
 }
 
@@ -205,6 +246,39 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
             return Response.json({ ok: true, hook, replies: deps.actions.modelReplies() });
           case "edit-calls":
             return Response.json({ ok: true, hook, calls: deps.actions.editCalls() });
+          case "pair-start": {
+            const ttlMs = query.ttlMs === undefined ? undefined : Number(query.ttlMs);
+            const started = await deps.actions.pairStart(ttlMs === undefined ? {} : { ttlMs });
+            return Response.json({ ok: true, hook, ...started });
+          }
+          case "pair-confirm": {
+            const confirmed = await deps.actions.pairConfirm();
+            return Response.json({ ok: true, hook, sas: confirmed.sas });
+          }
+          case "pair-answer": {
+            // `answer=y|n`; the flow answers ONLY after comparing both codes.
+            const value = query.answer === "y" ? "y" : query.answer === "n" ? "n" : undefined;
+            if (value === undefined) {
+              throw new Error("the answer parameter must be y or n");
+            }
+            const answered = await deps.actions.pairAnswer(value);
+            return Response.json({ ok: true, hook, answered: answered.answered });
+          }
+          case "pair-revoke": {
+            const name = required(query.name, "name");
+            return Response.json({ ok: true, hook, code: await deps.actions.pairRevoke(name) });
+          }
+          case "pair-reset":
+            return Response.json({ ok: true, hook, code: await deps.actions.pairReset() });
+          case "pair-claimed":
+            return Response.json({ ok: true, hook, claimed: deps.actions.pairClaimed() });
+          case "pair-device-id": {
+            const deviceId = deps.actions.pairDeviceId();
+            if (deviceId === undefined) {
+              throw new Error("no pairing has completed yet");
+            }
+            return Response.json({ ok: true, hook, deviceId });
+          }
         }
         return Response.json({ error: "unknown hook" }, { status: 404 });
       } catch (error) {

@@ -32,7 +32,13 @@ describe("computerRow", () => {
       ok: true,
       entries: [entry({ sessionId: "a", cwd: "/Users/me/tentacle/" })],
     });
-    expect(row).toEqual({ id: "dev", name: "my-mac", project: "tentacle", status: "" });
+    expect(row).toEqual({
+      id: "dev",
+      name: "my-mac",
+      project: "tentacle",
+      status: "",
+      state: "ok",
+    });
   });
 
   test("a computer with no sessions falls back to its own name", () => {
@@ -83,6 +89,69 @@ describe("computerRow", () => {
     );
     expect(rows.map((r) => r.id)).toEqual(["a", "b"]);
     expect(rows[1]?.status).toBe("Can't connect — the computer is unreachable or refused this app");
+  });
+});
+
+describe("the states a paired computer can be in (11b.1: F-K2, F-L1, F-L3)", () => {
+  test("revoked: the authenticated verdict is the row's wording, and Remove is offered", () => {
+    const row = computerRow(
+      RECORD,
+      { ok: false, error: new ChannelError("unauthorized", "denied") },
+      "revoked",
+    );
+    expect(row.state).toBe("revoked");
+    expect(row.status).toContain("removed from 'my-mac'");
+    expect(row.status).toContain("pair again");
+    expect(row.action).toBe("remove");
+  });
+
+  test("maybe-reset: the row hints at a reset and offers Pair again", () => {
+    const row = computerRow(
+      RECORD,
+      { ok: false, error: new ChannelError("unreachable", "closed") },
+      "maybe-reset",
+    );
+    expect(row.state).toBe("maybe-reset");
+    expect(row.status).toContain("reset");
+    expect(row.action).toBe("pair-again");
+  });
+
+  test("a plain outage stays unreachable and offers no action beyond Retry", () => {
+    const row = computerRow(
+      RECORD,
+      { ok: false, error: new ChannelError("unreachable", "closed") },
+      "unreachable",
+    );
+    expect(row.state).toBe("unreachable");
+    expect(row.action).toBeUndefined();
+  });
+
+  test("broken: the Keychain item is unreadable → pair again, never a dial", () => {
+    const row = computerRow({ ...RECORD, broken: true }, { ok: true, entries: [] });
+    expect(row.state).toBe("broken");
+    expect(row.action).toBe("pair-again");
+    expect(row.status).toContain("pair again");
+  });
+
+  test("a WORKING computer shows no state at all (mutation: always diagnose → red)", () => {
+    const row = computerRow(RECORD, { ok: true, entries: [] }, "revoked");
+    expect(row.state).toBe("ok");
+    expect(row.status).toBe("");
+  });
+
+  test("computerRows passes each computer its own diagnosis", () => {
+    const rows = computerRows(
+      [
+        { id: "a", name: "A" },
+        { id: "b", name: "B" },
+      ],
+      [
+        { ok: false, error: new ChannelError("unauthorized", "denied") },
+        { ok: true, entries: [] },
+      ],
+      ["revoked", "ok"],
+    );
+    expect(rows.map((row) => row.state)).toEqual(["revoked", "ok"]);
   });
 });
 

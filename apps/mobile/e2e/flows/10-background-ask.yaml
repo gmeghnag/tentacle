@@ -10,10 +10,9 @@ appId: so.tentacle.app
 # `launchApp` WITHOUT `clearState` comes back to the same screen: the app's
 # foreground gate resumes, the client re-attaches, the daemon re-offers the pending
 # ask, and the sheet is where it lands again.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:
@@ -44,10 +43,10 @@ appId: so.tentacle.app
 - launchApp
 - extendedWaitUntil:
     visible:
-      id: "computer-dev"
+      id: "computer-${output.computerId}"
     timeout: 30000
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:

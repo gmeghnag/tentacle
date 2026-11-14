@@ -8,10 +8,9 @@ appId: so.tentacle.app
 # `EDIT a.txt` makes the mock model emit a real streamed tool call (`fs_write`),
 # so this is the whole path: tool_call → permission_request → sheet → answer →
 # the tool runs → a diff on the row.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:

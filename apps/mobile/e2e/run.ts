@@ -1,8 +1,11 @@
 /**
- * `bun run e2e:mobile` (docs/feat/mobile-app-shell.md steps 1-9): the harness
- * every later mobile task merges through. It runs a REAL `serve` against a mock
- * model, boots a simulator, installs a Release build pointed at a strip-origin
- * proxy, drives the Maestro flows and tears everything down in `finally`.
+ * `bun run e2e:mobile` (docs/feat/mobile-app-shell.md steps 1-9; the `/e2e` dial
+ * is docs/feat/mobile-pairing-screen.md 11b.1): the harness every later mobile
+ * task merges through. It runs a REAL `serve` against a mock model and a real
+ * `tentacle pair` in-process, boots a simulator, installs a Release build (the
+ * SHIPPABLE one: no build-time computer, no token), drives the Maestro flows —
+ * every one of which PAIRS the phone over `/e2e` first — and tears everything
+ * down in `finally`.
  *
  * Nothing here touches real infra: an own `TENTACLE_CONFIG_DIR` under
  * `.tentacle/tmp/e2e-mobile/<runId>/`, every port ephemeral (read back),
@@ -15,6 +18,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { $, type Subprocess } from "bun";
 import { startHooks } from "./hooks.ts";
+import { createPairingHooks } from "./pairing.ts";
 import {
   type IosMajor,
   REQUIRED_IOS_MAJORS,
@@ -22,7 +26,6 @@ import {
   parseRuntimes,
   preflight,
 } from "./preflight.ts";
-import { startStripOriginProxy } from "./proxy.ts";
 
 const REPO = join(import.meta.dir, "..", "..", "..");
 const RUNS_DIR = join(REPO, ".tentacle", "tmp", "e2e-mobile");
@@ -183,12 +186,10 @@ async function main(): Promise<number> {
   await mkdir(join(runDir, "config"), { recursive: true });
   console.log(`e2e:mobile run ${runId} → ${runDir}`);
 
-  // The mock model and the proxy run in THIS process: no extra children to reap.
+  // The mock model runs in THIS process: no extra children to reap.
   const { startMockModel } = await import("./mock-model.ts");
   const mock = startMockModel({ holdMs: 120_000 });
   const daemonPort = freePort();
-  const proxy = startStripOriginProxy({ upstream: { host: "127.0.0.1", port: daemonPort } });
-  await proxy.ready;
 
   // The real `serve`, from source, on a private config dir and the mock model.
   // Spawned through a function because flow 05 stops it and starts it again on
@@ -226,11 +227,22 @@ async function main(): Promise<number> {
 
   try {
     await waitForPort(daemonPort);
-    console.log(`serve on 127.0.0.1:${daemonPort}, proxy at ws://${proxy.address}/`);
+    // The address the PHONE dials: the daemon's own `/e2e` route, no proxy in
+    // between (11b.1 step 5). Loopback contributes nothing to a QR (task 9), so
+    // `pair` is given it explicitly.
+    const deviceAddress = `ws://127.0.0.1:${daemonPort}/e2e`;
+    console.log(`serve on 127.0.0.1:${daemonPort}, phone address ${deviceAddress}`);
     await writeFile(
       join(runDir, "run.json"),
-      JSON.stringify({ runId, daemonPort, proxy: proxy.address, mock: mock.baseUrl }, null, 2),
+      JSON.stringify({ runId, daemonPort, deviceAddress, mock: mock.baseUrl }, null, 2),
     );
+    // `tentacle pair` in-process (P6): a pipe has no TTY, so the harness answers
+    // the `[y/N]`. One window at a time (F-H3).
+    const pairing = createPairingHooks({
+      configDir: join(runDir, "config"),
+      address: deviceAddress,
+      log: (line) => console.log(line),
+    });
 
     // Seed the sessions the flows assert on, through the client stack.
     const { addDelta, seedSessions, laptopLink, sessionStateOf, historyOf, fileExists } =
@@ -271,6 +283,16 @@ async function main(): Promise<number> {
         modelPrompts: () => mock.prompts,
         modelReplies: () => mock.replies,
         editCalls: () => mock.calls,
+        pairStart: async (options) => {
+          const started = await pairing.start(options);
+          return { payload: started.payload, computerId: started.computerId };
+        },
+        pairConfirm: () => pairing.confirm(),
+        pairAnswer: (value) => pairing.answer(value),
+        pairRevoke: (name) => pairing.revoke(name),
+        pairReset: () => pairing.reset(),
+        pairClaimed: () => pairing.claimed(),
+        pairDeviceId: () => pairing.lastDeviceId(),
       },
     });
     await hooks.ready;
@@ -286,12 +308,20 @@ async function main(): Promise<number> {
         return 2;
       }
       console.log(`\n=== iOS ${major} (${device}) ===`);
-      const buildCode = await buildAndInstall(device, proxy.address, runDir, major);
+      const buildCode = await buildAndInstall(device, runDir, major);
       if (buildCode !== 0) {
         console.error(`build/install failed for iOS ${major} (exit ${buildCode})`);
         return buildCode;
       }
       for (const flow of FLOWS) {
+        // Each flow gets its own pairing scope. "One window at a time" (F-H3) is
+        // a rule INSIDE a flow: a flow that failed between `pair-start` and its
+        // answer leaves a window open, and the next flow's `pair-start` would be
+        // refused — a red cascade with a single cause (found by the iOS 26 run:
+        // `14-pair-bad-text` leaves its window unclaimed, and 15–17 all failed
+        // before their first assertion). Teardown answers a waiting `ask` with
+        // `n`, so nothing is ever silently registered.
+        await pairing.stop();
         const outDir = join(runDir, `ios${major}`, flow);
         await mkdir(outDir, { recursive: true });
         const code = await spawnFlow(
@@ -310,6 +340,7 @@ async function main(): Promise<number> {
         }
       }
     }
+    await pairing.stop();
     await hooks.stop();
     await seeded.close();
     console.log(`\n${worst === 0 ? "PASS" : "FAIL"} — logs in ${runDir}`);
@@ -319,31 +350,23 @@ async function main(): Promise<number> {
       child.kill();
     }
     children.clear();
-    await proxy.stop();
     mock.stop();
   }
 }
 
 /**
- * Build the app Release and install it on `device`, with the dev computer's URL
- * baked in: `EXPO_PUBLIC_*` is inlined by Expo at BUILD time, so the proxy's
- * address is an input to the build, not a runtime setting.
+ * Build the app Release and install it on `device` — the SHIPPABLE build: no
+ * `EXPO_PUBLIC_TENTACLE_*` exists any more (11b.1 deleted the dev source, and a
+ * guard test pins that the app's sources never read one), so the phone is paired
+ * at RUN time by a flow, not baked in at build time.
  *
  * `--no-bundler` and the workspace's own `expo` binary: Release bundles the JS
  * itself, and `bunx expo` would fetch an out-of-tree copy (seen in Step 0).
  */
-async function buildAndInstall(
-  device: string,
-  proxyAddress: string,
-  runDir: string,
-  major: IosMajor,
-): Promise<number> {
+async function buildAndInstall(device: string, runDir: string, major: IosMajor): Promise<number> {
   const env: Record<string, string> = {
     ...maestroEnv(),
     CI: "1",
-    EXPO_PUBLIC_TENTACLE_URL: `ws://${proxyAddress}/`,
-    EXPO_PUBLIC_TENTACLE_TOKEN: "e2e-token",
-    EXPO_PUBLIC_TENTACLE_NAME: "e2e-mac",
   };
   // `ios/` is generated (CNG) and gitignored, so a fresh checkout has none, and
   // a stale one carries the OLD bundle id and deployment target: prebuild first,
@@ -393,10 +416,21 @@ async function buildAndInstall(
  * `clearState: true`, so their order carries no state.
  */
 export const FLOWS: readonly string[] = [
+  // Every flow PAIRS the phone first (`_pair`: 11b.1 — the app has no build-time
+  // computer, so nothing can be shown before a real pairing).
   "01-shell",
   "02-session-list",
   "03-refresh",
   "05-daemon-down",
+  // 11b.1's own, before 12c's: the pairing paths a person hits first (a refusal,
+  // an expired code, a refused paste, a revoke, a remove, a relaunch).
+  "12-pair-declined",
+  "13-pair-expired",
+  "14-pair-bad-text",
+  "15-revoked",
+  "16-remove-computer",
+  "17-persisted",
+  // 12c's session screens.
   "06-session-open",
   "07-prompt",
   "08-permission",

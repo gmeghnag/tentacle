@@ -1,0 +1,286 @@
+/**
+ * The paired computers, in this iPhone's Keychain (docs/feat/mobile-pairing-screen.md
+ * 11b.1, Design "Computer store"; Owner Q3/Q4, mobile decision 3).
+ *
+ * Two kinds of items, because SecureStore cannot enumerate: an index
+ * (`tentacle.computers`, the ids in the app's own order) and one item per
+ * computer (`tentacle.computer.<id>`), which is the ONLY place that computer's
+ * private key ever lives. Pure: the keychain is injected (`SecureKV`), so every
+ * rule below is tested without a simulator (AGENTS §7).
+ *
+ * Three properties are load-bearing and pinned by tests:
+ * - **this-device-only**: every write carries ONE accessibility class (Owner Q3:
+ *   `AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`) — no iCloud Keychain, no backup
+ *   migration (decision 3). The constant is injected so this module imports no
+ *   native code; `secure-kv.ts` is the one place that names it.
+ * - **crash-safe without a transaction**: add writes the ITEM then the index
+ *   (a crash leaves an unlisted orphan, never a listed computer with no key);
+ *   remove writes the INDEX then deletes the item (same asymmetry, mirrored).
+ * - **a failed read is never "empty"**: an unreadable/unknown-version index
+ *   REJECTS with `StoreUnreadable` and nothing is ever written while it stands
+ *   (a downgraded app must not erase a newer app's computers); a read error is
+ *   a rejection too. Only a missing index means "no computers".
+ */
+
+/** The Keychain surface, injected (`expo-secure-store` in the app). */
+export interface SecureKV {
+  get(key: string): Promise<string | null>;
+  /** `options` is a REQUIRED argument: a write with no class would use the OS default. */
+  set(key: string, value: string, options: SecureSetOptions): Promise<void>;
+  delete(key: string): Promise<void>;
+}
+
+/** What every `set` carries. The value is the platform's own constant. */
+export interface SecureSetOptions {
+  readonly keychainAccessible: number;
+}
+
+/** One paired computer, as the app shows and dials it. */
+export interface PairedComputer {
+  /** `result.computer.id` (P3): the id of the key this app pinned. */
+  readonly id: string;
+  /** The computer's own display name (`result.computer.name`). */
+  readonly name: string;
+  /** base64url of the PINNED static public key (what `/e2e` authenticates). */
+  readonly computerKey: string;
+  /** The payload's addresses, in its own order (decision 2: several, tried in order). */
+  readonly addresses: readonly string[];
+  /** The name this phone gave the computer ("revoke <deviceName>" names it). */
+  readonly deviceName: string;
+  readonly pairedAt: number;
+}
+
+/** A stored computer plus its private key: what `openComputer` needs, and nothing else reads. */
+export interface StoredComputer extends PairedComputer {
+  /** base64url of this phone's private static key FOR THIS computer (Owner Q2). */
+  readonly deviceKey: string;
+}
+
+/** What `list()` yields per index entry: a usable computer, or one whose item is unreadable. */
+export type ComputerEntry =
+  | { readonly id: string; readonly state: "paired"; readonly computer: PairedComputer }
+  /** The index names it but its item is missing or unreadable (F-K2): pair again / remove. */
+  | { readonly id: string; readonly state: "broken"; readonly name: string };
+
+/**
+ * The stored shape cannot be read (an unknown version, or bytes that are not
+ * the record). NEVER repaired: the newer app that wrote it must still find it
+ * intact (F-K3).
+ */
+export class StoreUnreadable extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StoreUnreadable";
+  }
+}
+
+/** The index's keychain key. */
+export const INDEX_KEY = "tentacle.computers";
+/** One computer's keychain key (its private key lives only here). */
+export function computerKeyOf(id: string): string {
+  return `tentacle.computer.${id}`;
+}
+
+/** The record version this build writes AND reads; anything else is `StoreUnreadable`. */
+export const STORE_VERSION = 1;
+
+interface IndexRecord {
+  readonly v: number;
+  readonly ids: readonly string[];
+}
+
+export interface ComputerStore {
+  /** Every listed computer, in the app's order. Rejects (`StoreUnreadable`, a read error), never `[]`. */
+  list(): Promise<readonly ComputerEntry[]>;
+  /** One computer WITH its key (the dial path). `undefined` = not listed or unreadable. */
+  get(id: string): Promise<StoredComputer | undefined>;
+  /** Add or REPLACE (a re-pair keeps the id — Owner Q7). */
+  add(computer: PairedComputer, deviceKey: string): Promise<void>;
+  /** Forget it on this phone (Owner Q5: local only). */
+  remove(id: string): Promise<void>;
+}
+
+export interface ComputerStoreDeps {
+  readonly kv: SecureKV;
+  /** `expo-secure-store`'s `AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`, injected (no native import here). */
+  readonly keychainAccessible: number;
+}
+
+/**
+ * Read one record, or `undefined` when it is absent. A parse that fails or an
+ * unknown `v` is `StoreUnreadable`: the caller decides whether that is the whole
+ * store (the index) or just one computer.
+ */
+function parseRecord<T>(raw: string | null, key: string): T | undefined {
+  if (raw === null) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new StoreUnreadable(`${key} is not readable JSON`);
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new StoreUnreadable(`${key} is not a record`);
+  }
+  const v = (parsed as { v?: unknown }).v;
+  if (v !== STORE_VERSION) {
+    throw new StoreUnreadable(`${key} has an unknown version (${JSON.stringify(v)})`);
+  }
+  return parsed as T;
+}
+
+/** A stored computer, from its parsed item; `undefined` when a field is not what this build wrote. */
+function storedComputerOf(id: string, item: unknown): StoredComputer | undefined {
+  const record = item as Partial<StoredComputer>;
+  if (
+    record.id !== id ||
+    typeof record.name !== "string" ||
+    typeof record.computerKey !== "string" ||
+    !Array.isArray(record.addresses) ||
+    !record.addresses.every((a) => typeof a === "string") ||
+    typeof record.deviceName !== "string" ||
+    typeof record.pairedAt !== "number" ||
+    typeof record.deviceKey !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    id: record.id,
+    name: record.name,
+    computerKey: record.computerKey,
+    addresses: record.addresses as readonly string[],
+    deviceName: record.deviceName,
+    pairedAt: record.pairedAt,
+    deviceKey: record.deviceKey,
+  };
+}
+
+/** The public half of a stored computer (never the key). */
+function publicOf(computer: StoredComputer): PairedComputer {
+  return {
+    id: computer.id,
+    name: computer.name,
+    computerKey: computer.computerKey,
+    addresses: computer.addresses,
+    deviceName: computer.deviceName,
+    pairedAt: computer.pairedAt,
+  };
+}
+
+export function createComputerStore(deps: ComputerStoreDeps): ComputerStore {
+  const { kv, keychainAccessible } = deps;
+  /** ONE write at a time: each SecureStore call yields, so two could interleave (F-K7). */
+  let writes: Promise<unknown> = Promise.resolve();
+  function serialise<T>(work: () => Promise<T>): Promise<T> {
+    const next = writes.then(work, work);
+    // The chain must never stay rejected: a failed write is the caller's, not the next write's.
+    writes = next.catch(() => {});
+    return next;
+  }
+  const write = (key: string, value: string): Promise<void> =>
+    kv.set(key, value, { keychainAccessible });
+
+  /** The index, or `[]` when the keychain has none. A read error/unknown `v` REJECTS. */
+  async function readIndex(): Promise<readonly string[]> {
+    const raw = await kv.get(INDEX_KEY);
+    const record = parseRecord<IndexRecord>(raw, INDEX_KEY);
+    if (record === undefined) {
+      return [];
+    }
+    const ids = (record as { ids?: unknown }).ids;
+    if (!Array.isArray(ids) || !ids.every((id) => typeof id === "string")) {
+      throw new StoreUnreadable(`${INDEX_KEY} has no id list`);
+    }
+    return ids as readonly string[];
+  }
+
+  async function read(id: string): Promise<StoredComputer | undefined> {
+    const raw = await kv.get(computerKeyOf(id));
+    const item = parseRecord<StoredComputer>(raw, computerKeyOf(id));
+    return item === undefined ? undefined : storedComputerOf(id, item);
+  }
+
+  return {
+    async list(): Promise<readonly ComputerEntry[]> {
+      // One failed read of the index fails the list: the app must say "can't
+      // read your computers", never show an empty list as if none were paired.
+      const ids = await readIndex();
+      const entries: ComputerEntry[] = [];
+      for (const id of ids) {
+        let stored: StoredComputer | undefined;
+        try {
+          stored = await read(id);
+        } catch (error) {
+          if (!(error instanceof StoreUnreadable)) {
+            throw error;
+          }
+          // ONE bad item is not the store: the rest still load and this one is
+          // listed as `broken` (F-K2). Its name is gone with it, so the id stands in.
+          entries.push({ id, state: "broken", name: id });
+          continue;
+        }
+        if (stored === undefined) {
+          entries.push({ id, state: "broken", name: id });
+          continue;
+        }
+        entries.push({ id, state: "paired", computer: publicOf(stored) });
+      }
+      return entries;
+    },
+
+    async get(id: string): Promise<StoredComputer | undefined> {
+      const ids = await readIndex();
+      if (!ids.includes(id)) {
+        return undefined;
+      }
+      try {
+        return await read(id);
+      } catch (error) {
+        if (error instanceof StoreUnreadable) {
+          return undefined;
+        }
+        throw error;
+      }
+    },
+
+    add(computer: PairedComputer, deviceKey: string): Promise<void> {
+      return serialise(async () => {
+        // Read the index FIRST: an unreadable one must stop the write (F-K3),
+        // and its current ids are what the write appends to.
+        const ids = await readIndex();
+        const record: StoredComputer = {
+          id: computer.id,
+          name: computer.name,
+          computerKey: computer.computerKey,
+          addresses: computer.addresses,
+          deviceName: computer.deviceName,
+          pairedAt: computer.pairedAt,
+          deviceKey,
+        };
+        // ITEM first: a crash between the two leaves an unlisted orphan (F-P13),
+        // which a later pairing of the same id overwrites. The reverse order
+        // would list a computer whose key was never written.
+        await write(computerKeyOf(computer.id), JSON.stringify({ v: STORE_VERSION, ...record }));
+        if (!ids.includes(computer.id)) {
+          const next: IndexRecord = { v: STORE_VERSION, ids: [...ids, computer.id] };
+          await write(INDEX_KEY, JSON.stringify(next));
+        }
+      });
+    },
+
+    remove(id: string): Promise<void> {
+      return serialise(async () => {
+        const ids = await readIndex();
+        // INDEX first: a crash between the two leaves an orphan item (F-P14),
+        // never a listed computer whose key is gone.
+        if (ids.includes(id)) {
+          const next: IndexRecord = { v: STORE_VERSION, ids: ids.filter((known) => known !== id) };
+          await write(INDEX_KEY, JSON.stringify(next));
+        }
+        await kv.delete(computerKeyOf(id));
+      });
+    },
+  };
+}
