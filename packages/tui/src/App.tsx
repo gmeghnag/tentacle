@@ -28,9 +28,7 @@ import {
   dockKindOf,
   downEntersList,
   downToDock,
-  noteSent,
   reconcile,
-  resetDock,
 } from "./background-focus.ts";
 import {
   backgroundListView,
@@ -97,10 +95,11 @@ import { useDock } from "./useDock.ts";
 import { useMouse } from "./useMouse.ts";
 import { usePanels } from "./usePanels.ts";
 import { useQuitClear } from "./useQuitClear.ts";
+import { useSessionLink } from "./useSessionLink.ts";
 import { useTurnDriver } from "./useTurnDriver.ts";
 
 export type { AutoAcceptFeed };
-import { CLEARED_ELSEWHERE_NOTICE, CLEARED_NOTICE } from "./clear-command.ts";
+
 import {
   type DaemonQueue,
   type QueuedRows,
@@ -111,7 +110,6 @@ import {
   onSteer,
   rowTexts,
   shownRows,
-  takeAll,
   takeForSendNow,
 } from "./queued.ts";
 import {
@@ -137,50 +135,36 @@ import {
   onSuccessorError,
   withRestored,
 } from "./send-now.ts";
-import {
-  openFailedNotice,
-  sessionsChoose,
-  stayingNotice,
-  switchRefusedNotice,
-  switchingRefusal,
-} from "./sessions-panel.ts";
+import { sessionsChoose, switchingRefusal } from "./sessions-panel.ts";
 import { SkillsSync } from "./skills-sync.ts";
 import {
   type DisplayItem,
   type DisplayState,
   type SessionEvent,
   appendBackgroundExit,
-  appendHistory,
   appendNotice,
   applySessionEvent,
   backgroundExitNotice,
   endWithoutOutcome,
   failTurn,
-  forgetContextFill,
   initialState,
   pushNoticeItem,
   replaceWithNotices,
-  resetHistory,
-  startContinuation,
   startTurn,
   withdrawUserTurn,
 } from "./state.ts";
 import { inputRuleText } from "./status-line.ts";
 import { type ContextOpen, contextShown, pillView, statusTokens } from "./status-view.ts";
-import { subagentNotifyNotice, userToSubagentNotice } from "./subagent-notify.ts";
+
 import { dimProps, palette } from "./theme.ts";
 import { panelHeight, panelMaxBody } from "./tree-panel.ts";
 import {
-  FOREIGN_COMPACTED_NOTICE,
   SLOT_LOST_NOTICE,
   type SessionActivity,
-  closedNotice,
   commitWarmed,
-  historyAction,
   loadingLabel,
   lostSlot,
   needsWarm,
-  nextStep,
   refusedBeforeStart,
   warmFailureNotice,
 } from "./turn-feed.ts";
@@ -548,10 +532,15 @@ export function App({
   const warmingRef = useRef(false);
   const [loading, setLoading] = useState<{ done: number; total: number } | null>(null);
   // The daemon's queue (every writer's waiting rows), as last reported (C7).
-  const [daemonQueue, setDaemonQueue] = useState<DaemonQueue | undefined>(undefined);
+  const [daemonQueue, setDaemonQueueState] = useState<DaemonQueue | undefined>(undefined);
   // The same list for the callbacks that must not re-create themselves on every
-  // frame (a `/move`'s turn-boundary read, D4): a ref, updated where it is set.
+  // frame (a `/move`'s turn-boundary read, D4): a ref, updated where it is set —
+  // here, the ONE setter `useSessionLink` (S9b) calls for every report and reset.
   const daemonQueueRef = useRef<DaemonQueue | undefined>(undefined);
+  const setDaemonQueue = useCallback((next: DaemonQueue | undefined) => {
+    daemonQueueRef.current = next;
+    setDaemonQueueState(next);
+  }, []);
   // ── the dock (S5 — docs/feat/app-decomposition.md) ─────────────────────────
   // The background rows, the dock's focus/drafts/`sent`, the per-job output
   // cache and the four dock actions live in `useDock`. Its EFFECTS stay here, in
@@ -1309,14 +1298,6 @@ export function App({
 
   // the held ones, and the handler starts streams (C2).
   const onActivityRef = useRef<((activity: SessionActivity) => void) | null>(null);
-  // `swapSession`, through a ref: the activity handler (closed elsewhere) is defined before it.
-  const swapRef = useRef<
-    | ((
-        next: SessionController,
-        opts?: { readonly keepTranscript?: boolean; readonly onOpened?: (ok: boolean) => void },
-      ) => void)
-    | null
-  >(null);
   // A `/sessions` switch is in flight (its detach, then the target's open):
   // `switchingRefusal` / `sessionsChoose` refuse what would act on the old
   // session until it settles (Review R1). Cleared on every outcome.
@@ -1364,12 +1345,6 @@ export function App({
     wakeIfPending();
   }, [wakeIfPending]);
 
-  /**
-   * One activity of the session that this TUI did not start (C1/C2/C6): the
-   * decision is `turn-feed.ts`'s; this executes it. A foreign turn streams
-   * through the SAME loop as an own one; its controller's abort cancels it
-   * (Esc / Ctrl+C stop what runs, whoever started it — owner Q2).
-   */
   /**
    * Ask the daemon for the session's context (never awaited by render). An
    * answer for a session the view has since left is dropped; a failure leaves
@@ -1456,204 +1431,78 @@ export function App({
   // The forward reference the jobs subscription, the initial prompt and the
   // wake read (they are declared and run outside the driver).
   runRef.current = run;
-  const onActivity = useCallback(
-    (activity: SessionActivity): void => {
-      const inFlight =
-        streamCtrlRef.current !== null || sendNowRef.current !== null || warmingRef.current;
-      const step = nextStep({ inFlight, activity });
-      if (step === "hold") {
-        heldRef.current.push(activity);
-        return;
-      }
-      if (activity.kind === "closed" && runQuit) {
-        // A run's session closed by another TUI's `/quit` (A2): this one
-        // leaves; never a fresh session in a resident being removed.
-        runQuit.closedElsewhere(activity.reason);
-        setQuitConfirm(null);
-        exit();
-        return;
-      }
-      if (activity.kind === "closed") {
-        // Ended on another device (live, or refused on reconnect): say so, and
-        // hand the next prompt to a fresh session — the transcript stays as
-        // scrollback (docs/feat/connect-sessions.md).
-        pushNotice(closedNotice(activity.reason, sessions !== undefined));
-        swapRef.current?.(makeSession(), { keepTranscript: true });
-        return;
-      }
-      if (activity.kind === "history") {
-        const own = ownCompactionsRef.current > 0;
-        const action = historyAction({ reason: activity.reason, ownCompaction: own });
-        if (activity.reason === "compact" && own) {
-          ownCompactionsRef.current -= 1;
-        }
-        // A cleared chat is a new one: nothing of the old is expanded. The
-        // wake state, the sub-agent list and queued rows are the SESSION's and
-        // stay (the same session goes on).
-        const cleared = activity.reason === "clear";
-        const ownClear = cleared && ownClearsRef.current > 0;
-        if (ownClear) {
-          ownClearsRef.current -= 1;
-        }
-        if (cleared) {
-          setExpandAll(false);
-          setExpandedIds([]);
-        }
-        // The history a `/clear` waits for (or a snapshot, which also stands in
-        // for one a dropped link lost): the latch lets go, so the stack cannot
-        // be left "clearing" (review H2c). A snapshot also settles the count of
-        // my clears whose history never came (L6a).
-        if (clearingRef.current && (cleared || activity.reason === null)) {
-          clearingRef.current = false;
-        }
-        if (activity.reason === null) {
-          ownClearsRef.current = 0;
-        }
-        if (action === "notice") {
-          pushNotice(FOREIGN_COMPACTED_NOTICE);
-        } else if (action === "replace" || action === "append") {
-          const apply = action === "append" ? appendHistory : resetHistory;
-          void commitHistory((s) => apply(s, activity.messages)).then(() => {
-            setScrollOffset(0);
-            if (cleared) {
-              // After the replace: it would wipe a notice pushed before it. This
-              // TUI's own `/clear` said nothing at all under `connect` — the
-              // cleared transcript just vanished (docs/fix/connect-functest-batch.md
-              // item E); another device's clear already has its own words.
-              pushNotice(ownClear ? CLEARED_NOTICE : CLEARED_ELSEWHERE_NOTICE);
-            }
-            flushNow();
-            drainHeld();
-            // The meter must follow a REPLACED history at once: its figure came
-            // from the chat this clear just dropped, and waiting for the next
-            // turn's usage left it stale on screen (docs/fix/connect-functest-batch.md
-            // item E). The measured fill is forgotten, then the daemon is asked
-            // to count what the session holds now.
-            if (cleared || action === "replace") {
-              stateRef.current = forgetContextFill(stateRef.current);
-              askContext(sessionRef.current);
-            }
-            // A wake the latch held back: the cleared chat is on screen now.
-            wakeIfPending();
-          });
-        }
-        return;
-      }
-      const controller = new AbortController();
-      controller.signal.addEventListener("abort", () => activity.cancel(), { once: true });
-      abortRef.current = controller;
-      stoppedHereRef.current = false;
-      // No local bubble: its `user_message` (the daemon's prompt) draws it.
-      stateRef.current = startContinuation(stateRef.current, Date.now());
-      setScrollOffset(0);
-      flushNow();
-      void streamTurn(() => activity.events, controller, { foreign: true });
-    },
-    [
-      commitHistory,
-      drainHeld,
-      exit,
-      flushNow,
-      makeSession,
-      pushNotice,
-      runQuit,
-      sessions,
-      setQuitConfirm,
-      streamTurn,
-      wakeIfPending,
-      askContext,
-    ],
-  );
+
+  // ── the session link (S9b — docs/feat/app-decomposition.md) ────────────────
+  // How this TUI follows a session — the activity feed it streams, the
+  // subscriptions a follow installs, the ONE way the view moves to another
+  // session, a `/sessions` switch — lives in `useSessionLink.ts`. The hook owns
+  // no state and no effect: every ref below is shared with a driver this slice
+  // does not own (the turn driver's, the clear's, the key snapshot's, the
+  // frame's), so they are PASSED IN and each use site keeps its identifier and
+  // its source (Fable M1/H3). It declares no effect, so the 20 below keep their
+  // indices (H1); it is called AFTER `useTurnDriver` because `onActivity` starts
+  // what that driver streams (`streamTurn`), and BEFORE the mount effect below,
+  // which calls `watchSession`. `armWake`/`wakeIfPending`/`askContext`/
+  // `watchReturned` stay here: each is read by an effect (or a port) declared
+  // before this point, so moving one would move an effect's index (drift 1).
+  const { onActivity, watchSession, swapSession, switchTo } = useSessionLink({
+    sessionRef,
+    stateRef,
+    rowsRef,
+    setRows,
+    setScrollOffset,
+    setExpandAll,
+    setExpandedIds,
+    activitySubRef,
+    queueSubRef,
+    agentsSubRef,
+    jobsSubRef,
+    notifySubRef,
+    dockMsgSubRef,
+    heldRef,
+    abortRef,
+    streamCtrlRef,
+    sendNowRef,
+    warmingRef,
+    stoppedHereRef,
+    clearingRef,
+    ownCompactionsRef,
+    ownClearsRef,
+    clearAfterTurnRef,
+    sendNowUnsupportedRef,
+    fallbackNoticedRef,
+    wakeRef,
+    handedWakeRef,
+    switchingRef,
+    onActivityRef,
+    watchReturned,
+    flushNow,
+    pushNotice,
+    restoreInput,
+    setCompacting,
+    skillsSync,
+    setContextOpen,
+    setDaemonQueue,
+    askContext,
+    streamTurn,
+    commitHistory,
+    drainHeld,
+    setAgents,
+    setJobs,
+    setDock,
+    jobOutputRef,
+    touchPanel,
+    setQuitConfirm,
+    runQuit,
+    sessions,
+    makeSession,
+    wakeIfPending,
+    armWake,
+    subagentsTwoWay,
+    exit,
+  });
   onActivityRef.current = onActivity;
 
-  /**
-   * Follow `session` (C9): its activities and the daemon's queue — watch
-   * FIRST, then the eager open (a fresh session's is a no-op), so its first
-   * history is never missed. The previous session's subscriptions end, and
-   * what was held for it is dropped.
-   */
-  const watchSession = useCallback(
-    (session: SessionController | null, onOpened?: (ok: boolean) => void) => {
-      activitySubRef.current?.();
-      queueSubRef.current?.();
-      agentsSubRef.current?.();
-      jobsSubRef.current?.();
-      notifySubRef.current?.();
-      dockMsgSubRef.current?.();
-      heldRef.current = [];
-      setDaemonQueue(undefined);
-      setAgents(undefined);
-      setJobs(undefined);
-      jobOutputRef.current = {};
-      // The dock belongs to a session: a switch starts it over (its drafts and
-      // its `sent` are per session, docs/feat/subagent-panel.md).
-      setDock(resetDock());
-      // Its own skills (a remote session waits for its eager open first).
-      skillsSync.use(session);
-      // The context at open (never awaited by render): an answer for a session
-      // the view has since left is dropped.
-      setContextOpen(null);
-      askContext(session);
-      activitySubRef.current = session?.watch?.((a) => onActivityRef.current?.(a)) ?? null;
-      queueSubRef.current =
-        session?.onQueued?.((q) => {
-          daemonQueueRef.current = q;
-          setDaemonQueue(q);
-        }) ?? null;
-      agentsSubRef.current = session?.onSubagents?.((rows) => setAgents(rows)) ?? null;
-      jobsSubRef.current = session?.onJobs?.((report) => setJobs(report.rows)) ?? null;
-      // A RUNNING background child's message to the agent
-      // (docs/feat/agent-message-two-way.md): the notice at once, and — when it
-      // asks for one and this laptop allows two-way — the same wake an exit arms.
-      notifySubRef.current =
-        session?.onSubagentNotify?.((n) => {
-          stateRef.current = appendNotice(stateRef.current, subagentNotifyNotice(n));
-          setScrollOffset(0);
-          flushNow();
-          if (n.wake && subagentsTwoWay) {
-            armWake();
-          }
-        }) ?? null;
-      // The USER's own message to a child (`session/subagent_message`): ONE live
-      // notice — the daemon broadcasts it, so the sender's own TUI and every
-      // other one agree — and the drawer keeps its last three as `you → sa-N`.
-      dockMsgSubRef.current =
-        session?.onSubagentMessage?.((m) => {
-          stateRef.current = appendNotice(stateRef.current, userToSubagentNotice(m));
-          setScrollOffset(0);
-          flushNow();
-          setDock((prev) => noteSent(prev, m.agentId, m.text, m.n));
-        }) ?? null;
-      const opening = session?.open?.();
-      if (!opening) {
-        onOpened?.(true); // nothing to open (a local session)
-        return;
-      }
-      opening.then(
-        () => onOpened?.(true),
-        (error: unknown) => {
-          if (sessionRef.current === session) {
-            pushNotice(openFailedNotice(error));
-          }
-          onOpened?.(false);
-        },
-      );
-    },
-    [
-      pushNotice,
-      skillsSync,
-      askContext,
-      setAgents,
-      setJobs,
-      flushNow,
-      armWake,
-      subagentsTwoWay,
-      setDock,
-      // The dock's own refs (S5): STABLE `useRef` objects, so naming them keeps
-      // the identity rule of Fable H2 ("deps name the fields") without a churn.
-      jobOutputRef,
-    ],
-  );
   useEffect(() => {
     watchSession(sessionRef.current);
     watchedRef.current = true;
@@ -1670,57 +1519,6 @@ export function App({
       notifySubRef.current = null;
     };
   }, [watchSession]);
-
-  /**
-   * The ONE way the view moves to another session (`/clear`, a `/sessions`
-   * switch, a session closed elsewhere; docs/feat/connect-sessions.md): follow
-   * `next` (returned rows, activities, then its eager open), drop the old
-   * session's per-session latches, put rows queued during a compaction back in
-   * the input. The transcript is reset unless `keepTranscript` (closed
-   * elsewhere: it stays as scrollback). What happens to the OLD session (close,
-   * detach, nothing) is the caller's.
-   */
-  const swapSession = useCallback(
-    (
-      next: SessionController,
-      opts: { readonly keepTranscript?: boolean; readonly onOpened?: (ok: boolean) => void } = {},
-    ): void => {
-      sessionRef.current = next;
-      // An open `/sessions` panel marks the live session as current, and must be
-      // re-read at the next render: its "current" row is read live (Review R2-1,
-      // R3-1). The rule is the `/sessions` kind's own (`panels/sessions.ts`).
-      touchPanel();
-      watchReturned(next);
-      watchSession(next, opts.onOpened);
-      ownCompactionsRef.current = 0;
-      clearingRef.current = false;
-      ownClearsRef.current = 0;
-      clearAfterTurnRef.current = false;
-      // The send-now latches are per session: the new one asks (and says) afresh.
-      sendNowUnsupportedRef.current = false;
-      fallbackNoticedRef.current = false;
-      // A wake deferred during the old session's compaction is that
-      // session's: it must not fire in the new one.
-      wakeRef.current = wakeStep(wakeRef.current, { type: "reset" });
-      handedWakeRef.current = false;
-      if (opts.keepTranscript !== true) {
-        stateRef.current = initialState;
-        setExpandAll(false);
-        setExpandedIds([]);
-      }
-      setScrollOffset(0);
-      // Rows queued during the old session's compaction never reach the
-      // new one: back to the input field, visibly (never sent by itself).
-      setCompacting(false);
-      if (rowsRef.current.length > 0) {
-        restoreInput(takeAll(rowsRef.current).text, "_your queued messages are back in the input_");
-        setRows(() => []);
-      }
-      flushNow();
-    },
-    [flushNow, restoreInput, setCompacting, setRows, touchPanel, watchReturned, watchSession],
-  );
-  swapRef.current = swapSession;
 
   // --- quit and clear (S8) --------------------------------------------------
   // The three executors live in `useQuitClear.ts`. The hook owns no state and no
@@ -1960,60 +1758,6 @@ export function App({
     ],
   );
   handleCommandRef.current = handleCommand;
-
-  /**
-   * Switch the view to session `id` (a `/sessions` row; the panel already
-   * decided it may): stop following the current one — detach FIRST, then open
-   * (the other order would hold two attachments and route prompts twice) — and
-   * swap to a NEW attach-only controller. A detach the daemon refuses (an
-   * older one) changes nothing: the current session is followed again. A
-   * target that fails to open hands the view to a fresh session.
-   */
-  const switchTo = useCallback(
-    (id: string, reopen: boolean): void => {
-      const old = sessionRef.current;
-      if (!sessions || !old?.detach) {
-        pushNotice(switchRefusedNotice(id));
-        return;
-      }
-      const staying = stayingNotice(old.stayingRows?.() ?? 0);
-      // Latched until the switch settles, whatever the outcome (Review R1).
-      switchingRef.current = true;
-      // In the same step: the old session's activities stop reaching the view.
-      watchSession(null);
-      watchReturned(null);
-      old.detach().then(
-        () => {
-          let target: SessionController;
-          try {
-            target = sessions.open(id, reopen);
-          } catch (error) {
-            pushNotice(openFailedNotice(error));
-            swapSession(makeSession(), { keepTranscript: true });
-            switchingRef.current = false;
-            return;
-          }
-          swapSession(target, {
-            onOpened: (ok) => {
-              if (!ok && sessionRef.current === target) {
-                swapSession(makeSession(), { keepTranscript: true });
-              }
-              switchingRef.current = false;
-            },
-          });
-          // After the swap (it resets the transcript): said in the new view.
-          if (staying) pushNotice(staying);
-        },
-        () => {
-          watchReturned(old);
-          watchSession(old);
-          pushNotice(switchRefusedNotice(id));
-          switchingRef.current = false;
-        },
-      );
-    },
-    [makeSession, pushNotice, sessions, swapSession, watchReturned, watchSession],
-  );
 
   // All line editing lives in `useLineEditor` (pure `editor.ts` ops), so no
   // control key — Ctrl+O, mouse reports, escapes — can ever be echoed into the
