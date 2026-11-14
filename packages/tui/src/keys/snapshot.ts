@@ -37,6 +37,7 @@ import type { PermissionRequest } from "@tentacle/core";
  * | `paletteOpen` / `paletteNames` / `commandSel` | render (3757-3791) | value |
  * | `fieldValue` | render `field.value` (3705) | value |
  * | `permission.pending` / `.choices` / `.selected` | render (3870) | value |
+ * | `permission.shownAt` | `permission.shownAt()` — a ref, the window is real time | getter |
  * | `replyMaxChars` | render `replyMax` (3519) | value |
  * | `sessions` | render prop (3638) | value |
  * | `detachOnQuit` | prop closure (3565) | value |
@@ -59,6 +60,11 @@ export interface KeyPermission {
   readonly selected: number;
   /** The mode AS OF NOW (a ref: keys between renders compose, as before). */
   mode(): ReplyMode;
+  /**
+   * When the dialog was first drawn (`Date.now()`, null if not committed yet):
+   * the arming window's stamp, read live (docs/fix/quit-enter-ask.md).
+   */
+  shownAt(): number | null;
 }
 
 /** Everything one chunk's decision may read. See the file header for SOURCES. */

@@ -1,7 +1,7 @@
 import { backgroundCount, backgroundNames } from "../background-view.ts";
 import { ctrlCQuitStep } from "../commands.ts";
 import { sanitizePasted, stepPaste } from "../paste.ts";
-import { stepPermissionKey } from "../permission-reply.ts";
+import { isArmed, stepPermissionKey } from "../permission-reply.ts";
 /**
  * The dialog layers (docs/feat/app-decomposition.md S3): the permission prompt,
  * Ctrl+C, and bracketed paste — in that precedence order, which is load-bearing:
@@ -54,6 +54,10 @@ export const permissionLayer: KeyLayer = {
       choices: snap.permission.choices,
       selected: snap.permission.selected,
       maxChars: snap.replyMaxChars,
+      // The arming window (docs/fix/quit-enter-ask.md): a key typed for the main
+      // input as the dialog appeared must not approve the call. Real time, read
+      // here (the router has no clock seam): the stamp is a live ref.
+      armed: isArmed(snap.permission.shownAt(), Date.now()),
     });
     const effects: KeyEffect[] = [];
     if (state !== mode) {

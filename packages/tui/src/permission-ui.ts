@@ -248,6 +248,13 @@ export interface PermissionController {
   /** The mode as of now (a ref: keys and pastes arriving between renders compose). */
   readMode(): ReplyMode;
   setMode(mode: ReplyMode): void;
+  /**
+   * When the dialog for `pending` was first DRAWN (`Date.now()`, null when no
+   * request is up or it has not committed yet): the arming window's stamp
+   * (docs/fix/quit-enter-ask.md). A ref read, not a render value — the window's
+   * length is real time, not frames.
+   */
+  shownAt(): number | null;
 }
 
 /**
@@ -305,6 +312,11 @@ export function usePermissionBroker(
   ownsTurnRef.current = ownsTurn;
   /** Mirrors `mode` for the callbacks (a withdrawal reads the draft at once). */
   const modeRef = useRef<ReplyMode>(MENU);
+  /**
+   * When the current request's dialog was first drawn, for the arming window
+   * (docs/fix/quit-enter-ask.md): `null` until the commit that draws it.
+   */
+  const shownAtRef = useRef<number | null>(null);
   const draftBackRef = useRef(onDraftBack);
   draftBackRef.current = onDraftBack;
 
@@ -313,6 +325,7 @@ export function usePermissionBroker(
     setModeState(next);
   }, []);
   const readMode = useCallback(() => modeRef.current, []);
+  const shownAt = useCallback(() => shownAtRef.current, []);
 
   /** The request closed: an unsent draft goes back (`cause`), the mode resets. */
   const closeDraft = useCallback(
@@ -431,6 +444,9 @@ export function usePermissionBroker(
         resolveRef.current = settle;
         pendingRef.current = req;
         pendingOwnRef.current = own;
+        // A NEW request: the window starts when its dialog commits (the effect
+        // below), never when the request arrived — a slow render must not eat it.
+        shownAtRef.current = null;
         setSelected(0);
         setMode(MENU);
         setPendingAgent(options?.agent ?? null);
@@ -446,6 +462,18 @@ export function usePermissionBroker(
     };
   }, [permissions, closeDraft, setMode]);
 
+  /**
+   * Stamp the arming window at the commit that DRAWS the dialog (post-render, so
+   * a slow frame does not shorten the window). Keyed on `pending`: each request
+   * restamps, so a second ask opening right after the first was answered is
+   * guarded too.
+   */
+  useEffect(() => {
+    if (pending !== null) {
+      shownAtRef.current = Date.now();
+    }
+  }, [pending]);
+
   const choices = pending ? buildPermissionChoices(pending) : [];
   return {
     pending,
@@ -460,5 +488,6 @@ export function usePermissionBroker(
     mode,
     readMode,
     setMode,
+    shownAt,
   };
 }

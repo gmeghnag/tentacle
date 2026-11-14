@@ -11,6 +11,7 @@ import { PermissionBroker, type PermissionRequest, type PermissionResponse } fro
 import { render } from "ink-testing-library";
 import { App, type AppProps, type SessionController, type SessionDirectory } from "../src/App.tsx";
 import type { DockJobRow } from "../src/background-list.ts";
+import { ARM_MS } from "../src/permission-reply.ts";
 import type { SessionActivity } from "../src/turn-feed.ts";
 import { BACKGROUND_ROW, type DockTestRow } from "./subagent-row.ts";
 
@@ -24,6 +25,12 @@ const CTRL_C = "\x03";
 const CTRL_T = "\x14";
 const CTRL_X = "\x18";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/**
+ * Past the arming window (docs/fix/quit-enter-ask.md): only then do `y`/`a`/
+ * Enter-on-an-allow-row answer an ask that just appeared. A test that means to
+ * APPROVE waits here first; a test that denies needs no wait.
+ */
+const armed = () => delay(ARM_MS + 100);
 
 const REQ: PermissionRequest = {
   tool: "shell",
@@ -163,7 +170,8 @@ describe("S0 key precedence: the first claiming layer wins, later ones never see
     await t.keys("n");
     expect(t.answers).toEqual([]);
     expect(t.frame()).not.toContain("(y/N)");
-    // The dialog is still up and now owns the next key.
+    // The dialog is still up and now owns the next key (past the arming window).
+    await armed();
     await t.keys("y");
     expect(t.answers).toEqual([{ allowed: true, scope: "once" }]);
     t.app.unmount();
@@ -486,6 +494,8 @@ describe("S0 uncovered key clusters (pinned before the move)", () => {
   test("permission dialog: Down selects the second choice, Enter answers it", async () => {
     const t = await mount(fake());
     await t.ask();
+    // Enter on an allow row is an APPROVAL: wait out the arming window.
+    await armed();
     await t.keys(DOWN, ENTER);
     expect(t.answers).toHaveLength(1);
     expect(t.answers[0]?.allowed).toBe(true);
