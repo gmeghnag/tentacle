@@ -1286,3 +1286,17 @@ part of this slice's surface) and the row passes. `changelog.d/session-hop.added
 (H1's fragment) already carries the feature's one bullet and states H3/H4's
 user-visible behaviour; no second fragment was added (AGENTS §10: curated, not a
 commit mirror).
+
+## Review — H3 + H4 (fresh-context adversarial; scope `git diff main...HEAD`, slices H3/H4)
+
+**Verdict: REQUEST-CHANGES.**
+
+1. **HIGH — a plain `/move local` deletes the hop container (D5, decision 5: keep is the default).** `packages/cli/src/hop-feed.ts:70` passes `spec.target !== "local" && spec.keep !== false` as `keep`. For a hop BACK to local this is always `false`, so `--keep`, and the default (`parseHopCommand` resolves `keep: true`, `hop-command.ts:124`), are ignored, and `hopLeave` (`main.ts`) runs `removeVerifiedKept` on the container. Repro (`.tentacle/tmp/session-hop/rev-h34/leave.ts`, fake facade): `/move local (keep:true) -> leave called with [{"b":{"kind":"workload","engine":"docker","name":"box"},"keep":false}]`. The fix is `spec.keep`.
+2. **MEDIUM — `hopLeave` decides "ours" from the kept index alone, and skips `hopDelete`'s `createdByHop` (D5: a user-owned workload is never deleted).** `main.ts` `hopLeave` deletes any index entry matching `name`+`engine`. A `tentacle run` container is in that index too (the `run` shape). The attach factory is live in H4: the parser accepts `/move attach`, and `attachTarget` builds it. So `/move attach docker:<run-kept>` followed by `/move local --rm` (or a plain `/move local`, because of finding 1) deletes a workload the user owns. The H1 decision `hopDelete` (`hop-plan.ts:244`) is never called. The match also ignores the endpoint/context.
+3. **MEDIUM — two required H4 tests are missing; the mutation shows it.** No test drives the leave path (`createHopFeed` → `hopLeave`): plan Tests H4 asks for "`--rm` on hop back calls `removeVerifiedKept` (spy), and a user-owned target is never deleted". Such a test would have caught 1 and 2. Nor does any test cover D9's auto-accept reset (review H2 of the design). Mutation run: `const wasOn = false && permission.autoApprove` in `App.tsx` `startHop` → `session-hop.test.tsx` + `app.test.tsx` still **132 pass, 0 fail**. Reverted; `git status` is clean.
+
+**Gate:** touched files (tui session-hop, app-commands, app-frames, commands-registry; cli session-hop, session-hop-targets, tui-sessions): 126 pass, 0 fail. `bun run lint`: 1127 files, clean. `bun run typecheck`: 0. Full `bun test` not re-run.
+**Attacks with no finding:** the single broker (the mount ask goes on `shared.permissions`, and the facade hands the same pair to every build); no raw terminal write (`HOP_TERM` tty false; `log`/`info` → notices); a failed create leaves no index entry; `/move` is unavailable on non-worker origins (no `hop` prop).
+**Same-family note:** this review is by an Anthropic model, as was the H2 review. The executor label is inconsistent: the commit says deepseek, the Execution section is signed sonnet.
+
+*— claude-opus-5-5, 2026-11-14*
