@@ -4673,3 +4673,60 @@ arithmetic in the view — the exact drift §7 forbids.
 - Real-terminal rendering of the moved tree is covered only by
   ink-testing-library frames (no SGR geometry); S0's review already accepted that
   gap and S0b's pins are the mitigation.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; a different model family from
+the executor, DeepSeek.) **Scope:** slice S10 only (`git diff main...HEAD`).
+
+**Verdict: PASS (APPROVE-WITH-NITS)** — one MEDIUM test-vacuity finding, which
+does not block the merge.
+
+**Gate (re-run here).** `bun test` **9368 pass · 3 skip (the opt-ins) · 0 fail**;
+the touched and pinning files (`app-layout`, `app-view-structure`,
+`app-quit-clear-structure`, `app-frames`, `app-structural-sgr`) 56/56;
+`bun run lint` clean (1299 files); `bun run typecheck` clean.
+
+**Findings.**
+1. **MEDIUM (test non-vacuity, §9)** — `packages/tui/test/app-layout.test.ts:330`
+   ("the palette also takes the dock's slot") cannot fail: its fixture has no dock
+   (`dockHeight === 0`), so `dockTop` is `null` whatever `paletteOpen` does.
+   Mutation: dropping `paletteOpen ||` from `dockTop` (`app-layout.ts`, the
+   `dockTop` expression) → **165/165 green** across app-layout, app-view-structure,
+   app-frames, app-structural-sgr and app.test (reverted; `cmp` byte-identical;
+   tree clean). Fix: build the fixture with `dock.focus.kind === "list"` and a row
+   (so that `dockHeight > 0`) **and** `field.value: "/"`. The code is a faithful
+   move, so this is a test fix only.
+
+**Attacks tried.**
+- *Did the move change a value?* I read the derived block line by line against
+  `frameLayout`. It is the same expressions in the same order. The refs
+  (`jobOutputRef`, `dockFinishedRef`, `subagentsRef`/`jobRowsRef`) are still read
+  in the same render. `statusRowY` is the old inline `onPillRange` expression, and
+  it is evaluated in the same render whose closure used to capture it. Nothing
+  found. One dead guard (`permission.pending === null ? 0 : …` inside the
+  truthy branch) changes no value.
+- *Hook order / §7 effects:* `useDockClock` is still in its old place. No hook
+  sits between `setCommandIndex` and it, and none in `AppView`. The single
+  `useInput` and the single `usePermissionBroker` are unchanged. Nothing found.
+- *Ink/terminal:* the blank-row `" "` rule is kept verbatim. No new module writes
+  to `process.stdout`. `AppView` is unmemoized, so it re-renders on every App
+  render, as the inline tree did. Nothing found.
+- *Mutation:* B above survived (finding 1). The executor's 9 structural and 15
+  unit mutants were not re-run here (approval for the scratch script was denied).
+  I accept them from the pasted table only.
+
+**Holds.** It is a verbatim move with one documented, justified drift
+(`statusRowY` lives in one place). The behavioural net (13 frames, plus the SGR
+and pill-click pins) is unchanged and green.
+
+**Nits (not blocking).** The `FrameInput` doc names a `blinkClock` input that does
+not exist. `app-layout.ts`, which claims to be "React-free", imports
+`permissionPromptRows`/`QUIT_CONFIRM_ROWS` from `.tsx` components (Ink is
+loaded transitively). `paletteCommands.map((c: { readonly name: string }) …)` in
+App is a type annotation the inferred return should make unnecessary.
+
+**Executor behaviour.** It was honest: it reported its red/green split as two red
+on the property and eight on ENOENT. It closed the mutants that survived its
+first run, and it disclosed the drift. One overclaim: the palette test is
+presented as pinning a slot property that it does not pin.
