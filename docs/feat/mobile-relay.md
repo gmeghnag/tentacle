@@ -947,3 +947,386 @@ frame. This change is wording only, so there was nothing to mutate.
 **Gate:** touched tests (relay, relay-id, json-schema): 50 pass / 0 fail.
 `bun run lint` is clean (1296 files). `bun run typecheck` is clean. I did not
 run the full suite.
+
+## Execution
+
+### R2 — the relay service (as built) — *— claude-opus-5-5, 2026-11-14*
+
+#### Load-bearing check: PASSED, before any edit
+
+R2's premise is R0(a): that a Bun splice carries frames 1:1 and a close
+cascades, so `server.ts` can be "one more transport" and nothing more. Re-ran it
+from `.tentacle/tmp/mobile-relay/`:
+
+```
+$ bun r0a-splice.ts
+received lengths: [ "5", "89088" ]
+87KiB intact: true
+frames 1:1: true
+b closed: true within ms: 0 | cascade latency ms: 0
+events: open /b | open /a | msg /a 5 | msg /a 89088 | close /a | close /b
+```
+
+R1's exports were re-checked to exist and to agree before a line of R2 was
+written (`.tentacle/tmp/mobile-relay/r2-loadcheck.ts`):
+
+```
+$ bun r2-loadcheck.ts
+{ RELAY_PROTOCOL_VERSION: 1, DEFAULT_RELAY_URL: "wss://relay.tentacle.so",
+  id: "fgkrQr2vTa2JTEe75Kl66v",
+  addr: "wss://relay.tentacle.so/d/fgkrQr2vTa2JTEe75Kl66v/e2e",
+  isRelayUrlOK: true, hold: 5000, exp: 10000, close: 4404,
+  limits: { maxFrameChars: 98304, maxInboundChars: 180224, preAcceptBytes: 65536,
+            backpressureBytes: 16777216, phoneHoldMs: 5000 },
+  isRelayId: true, tooLarge: true, ready: true, union: true }
+```
+
+Baseline before the slice: `bun test` **9 345 pass / 3 skip / 0 fail** across
+9 348 tests in 672 files (the three skips are AGENTS §6's opt-ins).
+
+#### What landed
+
+**`apps/relay/src/relay-core.ts`** (new, pure — no sockets, no timers, no
+logging; AGENTS §7). The whole state machine as one class with an injected clock
+and token source: `hello` (register the id the secret derives, newest-wins,
+release the holds) · `dial` (open / hold / refuse) · `accept` (single-use,
+expiry) · `controlClosed` / `phoneClosed` / `streamClosed` · `sweep`.
+Decisions are returned as **effects** (`{send, target, frame}` / `{close,
+target, code}`) rather than applied to a callback, so a test asserts the exact
+consequences in order instead of spying on a socket. `RELAY_LIMITS` holds the six
+abuse limits; `RELAY_CLOSE_REFUSED = 4429` is the door-refusal code.
+
+**`apps/relay/src/server.ts`** (new, thin). `Bun.serve` + the four routes
+(`relayRoute`, pure and pinned) + the splice. It parses, asks the core, applies
+the effects and forwards frames — it computes nothing. `relaySocketOptions` is
+`serve`'s policy verbatim (`closeOnBackpressureLimit` at
+`RELAY_CONTROL_LIMITS.backpressureBytes`, pings on, idle 60 s).
+`limitsFromFlags` / `RELAY_LIMIT_FLAGS` map the five deploy flags.
+
+**`apps/relay/src/main.ts`** (new). `parseRelayArgs` (pure: flags + env, a flag
+wins, an invalid value is a REFUSAL not a silently ignored limit) and the
+`import.meta.main` shell with SIGINT/SIGTERM shutdown.
+
+**`apps/relay/{package.json,tsconfig.json}`**, root `package.json`
+`typecheck` += `tsc -p apps/relay --noEmit`, `bun.lock` (the workspace entry —
+see drift 1), and AGENTS §6's app count (drift 2).
+
+#### Drift from the Implementation, and why
+
+1. **`bun.lock` gained the `apps/relay` workspace entry — not in the plan's file
+   list.** A new workspace package makes `bun install --frozen-lockfile`
+   (CI's and the build workflow's own command) fail with "lockfile had changes,
+   but lockfile is frozen". The entry is generated, not hand-written
+   (`bun install --filter '!@tentacle/mobile'`, +10 lines), and the frozen
+   install then passes. R2 cannot land without it.
+2. **AGENTS §6's count line, as the slice table says** ("one line, rides this
+   branch"): "**1 app**" → "**2 apps**", naming `apps/relay` and that it has its
+   own `tsc -p apps/relay`; the `typecheck` bullet follows. Prose only.
+3. **A `main.test.ts`, a third test file the slice row does not list.** The row
+   names `{relay-core.test.ts,server.test.ts}`; the design puts `--host/--port`
+   and five limit flags in `main.ts`, and AGENTS §9 wants the failure modes of a
+   parser tested (a bad value, a bad env var, a flag winning over env, an unknown
+   argument). Testing it through a real process would only let me assert a
+   substring of stdout; the plan's own "logic in pure modules" rule puts
+   `parseRelayArgs` on the pure side, so it is tested directly. Nothing else
+   changed by it.
+4. **The limit flags are FIVE, not the design's "flags override" in the
+   abstract.** The design names six limits; `maxTrackedIps` is deliberately NOT a
+   flag (it is a memory bound on the relay's own bookkeeping, not a policy an
+   operator tunes — an operator raising it gains nothing and can only make the
+   process bigger). The other five are flags and env vars.
+5. **`relay-core.ts` re-uses `decodeBase64Url` from `@tentacle/protocol`
+   rather than taking the secret as raw bytes.** The wire carries 43 chars, and a
+   LENIENT decoder would map two different strings onto one secret — exactly the
+   aliasing a self-certifying id must not have. So the relay decodes strictly,
+   refuses `undefined` (non-canonical) and refuses a wrong length, before
+   `relayIdOf` is ever called. Mutation 12b is the proof it matters.
+6. **A refused dial does NOT call `core.phoneClosed`.** The core charges a slot
+   only once a dial is admitted; returning one for a refused dial would free a
+   slot another phone holds. The server closes the socket at its own layer
+   (`RELAY_CLOSE_REFUSED`), which is why that constant lives in `relay-core.ts`
+   (named by the module that decides) and is applied by the module that owns the
+   socket.
+7. **`ready.features` is `[]` from this build.** R1 made the field present with a
+   default; the relay announces none because this build sends no `push` (task
+   16's). R7's deployed build is where a feature list would first be non-empty.
+8. **The core asserts on a malformed minted token** (`throw`) instead of
+   redrawing forever. The default source is `crypto.getRandomValues`, so this is
+   unreachable in production; a test that injects a bad source gets a loud
+   failure rather than a stream nobody could accept.
+
+**Not a drift, but worth stating:** `apps/relay` imports
+`@tentacle/transport/relay-id` in the core (the hash is a DECISION — which id a
+secret has) and nothing from transport in the server. The relay therefore loads
+no Noise code, only the one hash function it needs, which is what R1's subpath
+split was for.
+
+#### Red before green
+
+The two runnable files were written against the TESTS:
+
+```
+$ bun test apps/relay/test/relay-core.test.ts          # first run, before the
+ 12 pass  11 fail  47 expect()                       # token format was fixed
+  error: relay: the minted stream token is malformed or collides
+```
+
+Those 11 were **my test double's** fault (a token of the wrong length), not the
+code's, so they are not the proof. The proof that the tests bite is the mutation
+table below: each of the 20 mutations makes a named assertion go red. The
+`server.test.ts` first run was red for the same class of reason (a recorder that
+double-delivered frames), and its 25 tests went green once the recorder was
+right — no production line changed to make them pass.
+
+#### Mutation checks (each reverted; the tree was diffed back to identical)
+
+Script: `.tentacle/tmp/mobile-relay/mutate.sh` (backup → `sed` → run the named
+test → restore; no git, per the brief). Targets are the plan's Tests section for
+R2. `RED=n` is the count of `(fail)` lines.
+
+| # | Target | Mutation | Result |
+|---|---|---|---|
+| 1 | `hello` refuses a secret not matching | `relayIdOf(bytes)` → a constant | RED=1 `a hello with a secret not matching is refused` |
+| 2 | newest wins (old gets `replaced`) | drop the old socket's `close` | RED=1 `newest wins: … and TELLS it` |
+| 3 | stream token single-use | `if (stream.accepted)` → `if (false)` | RED=1 `accepts a minted stream once` |
+| 4 | stream token expires at 10 s | expiry check → `if (false)` | RED=1 `a token expires at 10 s` |
+| 5 | hold-for-registration `4404`s at 5 s | `at - hold.since >= HOLD` → `if (false)` | RED=1 `the hold sweep … closes 4404 at exactly 5 s` |
+| 6 | hold released on register | drop `releaseHolds` | RED=1 `… HELD, and released on the registration` |
+| 7 | per-ip dials/min | limit check → `if (false)` | RED=1 `dials per minute per ip` |
+| 8 | per-ip concurrent | limit check → `if (false)` | RED=1 `concurrent phone sockets per ip` |
+| 9 | per-id streams | limit check → `if (false)` | RED=1 `streams per id` |
+| 10 | registered ids | limit check → `if (false)` | RED=1 `registered ids (a NEW id is refused…)` |
+| 11 | per-ip hellos/min | limit check → `if (false)` | RED=1 `hellos per minute per ip` |
+| 12b | secret decode is STRICT | `bytes === undefined \|\| …` → `bytes !== undefined && …` | RED=1 `a non-canonical secret encoding is refused` |
+| 13 | version skew refused on hello | `input.v !== VERSION` → `if (false)` | RED=1 `an unknown protocol version is refused` |
+| 14 | 97 KiB frame closes both legs | splice cap → `if (false)` | RED=1 `a 97 KiB frame closes BOTH legs` |
+| 15 | pre-accept 64 KiB cap | cap check → `if (false)` | RED=1 `the pre-accept buffer is capped` |
+| 16 | one leg closing closes the other | drop the cascade `closeSocket(peer)` | RED=1 `one leg closing closes the other` |
+| 17 | `replaced` frame is SENT | drop the `replaced` effect | RED=1 `… replaces the first socket and TELLS it` |
+| 18 | logs hold no secret | log the raw `hello` text | RED=1 `the captured log has no secret…` |
+| 19 | early frames flushed on join | empty the flush loop | RED=1 `a held phone's early frames are delivered` |
+| 20 | `/healthz` carries no counters | add `ids: registeredIds` | RED=1 `/healthz … and NO counters` |
+
+Mutation 12's first form (removing only the `undefined` half of the condition)
+stayed GREEN, because `undefined.length` still tripped the length check — a
+vacuous mutation, replaced by 12b, which is the one that removes the property
+(the strict decode) and does go red. Recorded rather than hidden: it is the
+one case where my first attempt at a mutation proved nothing.
+
+Tree restored after every row (`diff` against the pre-mutation copies: identical,
+`TREE RESTORED`).
+
+#### Acceptance checks the plan names
+
+- `apps/relay` `server.test.ts` on `127.0.0.1:0` — frames 1:1 both ways incl.
+  87 KiB ✔ (`frames cross 1:1 both ways, an 87 KiB frame included`); a 97 KiB
+  frame closes both legs ✔; one leg closing closes the other ✔; pre-accept
+  buffer cap ✔; `/healthz` ✔; unknown route 404 ✔; **the captured log grepped for
+  the secret** ✔ (also asserted free of the stream token and of a frame payload,
+  and asserted to still contain the id's 8-char prefix, so the test is not
+  vacuously satisfied by an empty log).
+- `relay-core` — register, newest-wins, mismatch refused, single-use token,
+  10 s expiry, hold/release/`4404`, and **each limit at its boundary** (N ok,
+  N+1 refused) ✔. Each limit's test also re-asserts the boundary by showing a
+  freed slot admits again, so "refused" is not just "always refused".
+- `PROTOCOL_VERSION` untouched; `packages/protocol/schema/protocol.json`
+  unchanged (`git diff --stat` empty) — R2 adds no schema, so no regenerate and
+  no `protocol.d/` note.
+- Pod/worker (F20): nothing in R2 dials; no `relay.json`, no link. R4/R5a own
+  that and it stays their test.
+
+#### Gate (R2): green
+
+`bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
+`bunx tsc -p apps/relay --noEmit` clean · `bun run lint` clean (1 304 files, 0
+errors, 0 warnings — the pre-existing baseline, so nothing new) · `bun test`
+**9 401 pass / 3 skip / 0 fail** across 9 404 tests in 675 files (the three
+skips are AGENTS §6's opt-ins; the count moved 9 345 → 9 401 for R2's 56 tests in
+three new files). Log: `.tentacle/tmp/mobile-relay/gate-r2-final.log`. Run with
+nothing else touching the tree — an earlier gate run overlapped a `bun install`
+and was discarded rather than reported.
+
+**Changelog:** none added by this slice, deliberately. The branch's single
+fragment `changelog.d/mobile-relay.added.md` (R1) already carries the one
+user-visible bullet, and it already names this deliverable ("The relay is a small
+self-hostable service in `apps/relay`"). A second fragment with the same
+slug+category is the same filename — the one collision the changelog rule
+forbids — and a *service that is not yet deployed or wired up* is not a second
+user-visible change. R5a is where `serve` starts using it; if the reviewer wants
+R2's existence named separately, the correct edit is to extend that one bullet,
+not to add a file. `CHANGELOG.md` untouched. `TODO.md` untouched.
+
+**Not verified by this slice.** Everything that needs a peer: no daemon dials it,
+no phone connects through it, so the end-to-end proof (a phone reaching a session
+THROUGH the relay) is R4's test, which runs against this real server. Also
+unverified: a real `wss://` deployment behind Caddy (R7 + owner decision D), the
+`maxInboundChars` decode guard's effect on a hostile relay (R4's accept leg), and
+the client-side unbounded-allocation gap R0(b) recorded — F7 is still OPEN, and
+R2 does not close it (it bounds the relay's own inbound frames at 96 Ki chars,
+which is a different leg from the daemon's).
+
+## Review
+
+### R2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES.** Same model family as the R2 executor signature
+(fresh context only): shared blind spots may survive.
+
+Gate (scoped): `bun test apps/relay` 56 pass / 0 fail; `bun run lint` clean;
+`bun run typecheck` clean. Full `bun test` not re-run (scope: R2 files only).
+
+Findings:
+1. **MEDIUM — an expired unaccepted stream frees its slots but never closes
+   the phone** (`apps/relay/src/relay-core.ts:413-417`, also `:355-357`).
+   `sweep()` / `accept()`'s `expired` path call `forgetStream` (releases the
+   per-ip slot, drops the per-id count) and emit no `close` for `stream.phone`.
+   Scratch repro (`concurrentPerIp: 1`): dial p1 → t=11 s → `sweep()` returns
+   `[]` → a second dial from the same ip is admitted while p1 is still open.
+   Failure: a registered daemon that never accepts (crashed after `open`, or a
+   hostile one) lets one IP accumulate unbounded open phone sockets (30/min,
+   each pinned until Bun's idle timeout, which a ponging client never hits),
+   bypassing `concurrentPerIp` and `streamsPerId`; and a legit phone gets an
+   OPEN socket that never carries a handshake instead of a prompt close to try
+   the next address (F2/F7 convergence broken). Fix: emit
+   `{close, phone, RELAY_CLOSE_UNREGISTERED}` on both expiry paths + test.
+2. **MEDIUM — a second `hello` with a different secret on ONE control socket
+   registers a second id that is never unregistered**
+   (`relay-core.ts:226-294`, `controlClosed` `:364-371` returns after the first
+   match). Repro: two hellos on `c9` (secrets 2, 3) → `registeredCount` 3 →
+   `controlClosed("c9")` → 2; a phone dial to id(3) is `opened` with `open`
+   sent to the dead `c9` (dropped by `server.ts:185`) instead of held/4404.
+   Failure: stale registrations leak until relay restart (fills `registeredIds`
+   10 000 → new daemons refused `busy`), and phones for that id hang on a dead
+   route. Fix: refuse a second `hello` on an already-registered socket (or
+   delete every id of that socket) + test.
+3. **MEDIUM (test non-vacuity) — the server's phone-close slot release is
+   unpinned.** Mutation: comment out `core.phoneClosed(key)` in
+   `server.ts:367` → 56/56 still pass. A leak there exhausts every IP's
+   `concurrentPerIp` after 16 dials. Needs a socket-level test: dial/close
+   N+1 times at `concurrentPerIp: N`, the last dial admitted.
+
+Mutation outcomes: dropping the `replaced` send (`relay-core.ts:288`) → 2
+tests fail (core + server) — non-vacuous; finding 3 above — vacuous. Both
+reverted; `git status` clean afterwards.
+
+Attacks tried: newest-wins + old socket's late `close` (no wrong unregister:
+holds); double release of a phone slot via oversize-drop + `close` (idempotent:
+holds); accept after phone close (stream already forgotten → `unknown`: holds);
+log contents (key/8-char prefixes only, no secret: holds); expiry paths
+(finding 1); multi-hello per socket (finding 2). Noted, not raised: the
+`maxTrackedIps` eviction of an entry with `open > 0` resets its count, so the
+"never a bypass" comment (`relay-core.ts:497`) is inaccurate (low: per-IP
+limits are weak against IPv6 ranges anyway).
+
+§7: R2 holds no key and authorises nothing (relay untrusted — holds); no
+session path, broker, persistence or terminal I/O touched.
+
+## Execution
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-14*
+
+All three R2 findings fixed, in the pure core where the decision lives, with the
+server applying what it is told. Red before green per finding (each mutation
+below was run against the fix in place, then reverted; §9 requires the failure to
+be on the assertion, and it is — no import/compile error in any run).
+
+**F1 (MEDIUM) — an expired unaccepted stream now closes its phone.**
+`relay-core.ts:446-450` (`sweep`) pushes
+`{close, stream.phone, 4404}` after `forgetStream`; `relay-core.ts:378-390`
+(`accept`'s `expired` branch) does the same via a new
+`AcceptDecision` variant (`relay-core.ts:116-122`) that carries `effects`, applied
+at `server.ts:442-446`. The other three accept refusals keep their exact old shape
+(`{ok:false, reason}`) on purpose, so no unrelated assertion moved.
+Why: a daemon that registers but never accepts (crashed, or hostile) left one
+phone socket open per dial until Bun's idle timeout — a ponging client never hits
+it — so `concurrentPerIp` was bypassed and a legitimate phone hung on an OPEN
+socket that could never carry a handshake (F2/F7 convergence). Both expiry paths
+now close `4404`, which is exactly the "try my next address" signal a held dial
+already gets.
+Mutation A: drop the `effects.push` in `sweep` →
+`bun test apps/relay/test/relay-core.test.ts` = **23 pass / 2 fail** (`an
+unaccepted stream expiring in the sweep also CLOSES its phone`; `an unaccepted
+stream stops counting against its id after the expiry`). Mutation B: empty
+`effects` in `accept`'s `expired` branch → **24 pass / 1 fail** (`a token expires
+at 10 s, and the expiry frees the slot`). Mutation C: drop
+`apply(decision.effects)` at `server.ts` → **27 pass / 1 fail** (`an accept for an
+expired stream closes the phone too`, timed out waiting for the close — red on
+the property, not on a type error), which is why that socket-level test exists:
+C survived every core-level test.
+
+**F2 (MEDIUM) — one control socket registers one id.**
+`relay-core.ts:269-283`: `hello` refuses (and closes 1000) a secret whose id
+differs from the id already registered on the SAME socket, with `error
+"invalid"`. A re-hello with the SAME secret on the same socket is untouched (the
+existing `a re-hello on the SAME socket is not a replacement` test still passes),
+and newest-wins across sockets is untouched.
+Why: `controlClosed` unregisters only the FIRST id it finds on a socket, so a
+second hello registered an id nothing ever removed — it leaked until relay
+restart (filling `registeredIds`, then refusing new daemons `busy`) and phones for
+it were `opened` onto a dead control socket, hanging instead of being held/4404.
+Mutation: remove the guard → **58 pass / 2 fail** (core + socket-level
+`a second hello on one control socket, with a different secret, is refused`).
+
+**F3 (MEDIUM, test non-vacuity) — the server's phone-close slot release is
+pinned.** New socket-level test (`server.test.ts`): 3 sequential dial+close at
+`concurrentPerIp: 2`, each close awaited through `heldCount` back to 0; a leak
+exhausts the cap on the third dial (refused `4429`).
+Mutation (the review's exact one): comment out `core.phoneClosed(key)` at
+`server.ts:367` → **26 pass / 1 fail** (`a closed phone gives its per-ip slot back
+(N+1 sequential dials at cap N)`, "timed out waiting for the held dial to be
+released"). Previously 56/56 passed under that mutation; it now fails.
+
+**One existing test was corrected, not weakened**: `an unaccepted stream stops
+counting against its id after the expiry` asserted `sweep() === []` — the buggy
+behaviour itself — and now asserts the `4404` close it gets instead. Its original
+property (the id's slot is free again) is still asserted, plus the dial that
+proves it.
+
+**Drift from Implementation:** none — R2's Design did not name the expiry
+close-up, and this is the smallest change that satisfies its F2/F7 convergence
+argument. The `AcceptDecision` split (only `expired` carries `effects`) is a
+shape choice made to avoid touching the other refusals' assertions.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/relay` clean · `bun run
+lint` clean (1304 files, no fixes) · `bun test` **9406 pass / 3 skip / 0 fail**
+(9409 tests, 675 files) — the 3 skips are the pre-existing opt-ins (live-k8s,
+live-docker, real-socket keepalive), no new skip. `apps/relay` alone: 61 pass / 0
+fail. No `changelog.d` fragment: this is a fix to unshipped R2 code on the same
+branch, before any release, and `changelog.d/mobile-relay.added.md` already covers
+the user-visible relay. No `protocol.d` note: the wire is unchanged (the review's
+own `4404` close code already exists and is used by the held-dial path).
+
+**Not verified:** the concurrent-socket behaviour of finding 1 under a real
+hostile daemon (the tests drive the pure core and a local socket; a 30/min×N
+saturation run against a deployed relay is R7's). The review's noted-but-not-
+raised `maxTrackedIps` eviction of an entry with `open > 0` is untouched (low
+severity, per-IP limits are weak against IPv6 ranges anyway).
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: PASS** (R2). Reviewed `git diff HEAD~1` (e3ed37f1). Same model
+family as the round-1 reviewer; the executor was a different model (deepseek).
+
+- **F1 fixed.** `sweep()` and `accept()`'s `expired` path now close the phone
+  `4404` (`relay-core.ts:380-388`, `:450`); `server.ts:442-446` applies the
+  accept effect. Scratch repro: `sweep()` now emits `close p1 4404`. Mutation:
+  drop the sweep close → 2 core tests fail; drop only the server's `apply` on
+  `expired` → the server's expired-accept test fails alone (non-vacuous).
+- **F2 fixed.** A second `hello` with a different secret on one control socket
+  is refused `invalid` and the socket is closed (`relay-core.ts:270-284`). The
+  repro: second hello refused; after the close, 0 leaked ids, and a dial to that
+  id is `held`. Mutation: guard disabled → the core test and the server test
+  both fail.
+- **F3 fixed.** New socket test "N+1 sequential dials at cap N". Mutation:
+  `core.phoneClosed(key)` removed (`server.ts:367`) → that test fails.
+- Regressions checked: closing the phone from the sweep → its `close` event →
+  `phoneClosed` is a no-op (the stream is already gone), so nothing is released
+  twice; an `accept` after the sweep → `unknown`, so the phone is not closed
+  twice; the same socket re-sending the same secret is still not treated as a
+  replacement (existing test passes). Refusing a second hello closes a daemon
+  that was registered: acceptable, since that client is misbehaving.
+- Gate: `bun test apps/relay` 61 pass / 0 fail; `bun run lint` clean;
+  `bun run typecheck` clean. Every mutation was reverted; `git status` clean.
+  Not re-run: the full `bun test`.
+- Still open, not raised (low): the `maxTrackedIps` eviction comment
+  (`relay-core.ts` "never a bypass") is still inaccurate.

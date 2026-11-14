@@ -48,6 +48,14 @@
         "@types/react": "19.3.0",
       },
     },
+    "apps/relay": {
+      "name": "@tentacle/relay",
+      "version": "0.6.0",
+      "dependencies": {
+        "@tentacle/protocol": "workspace:*",
+        "@tentacle/transport": "workspace:*",
+      },
+    },
     "packages/agent": {
       "name": "@tentacle/agent",
       "version": "0.6.0",
@@ -569,6 +577,8 @@
     "@tentacle/protocol": ["@tentacle/protocol@workspace:packages/protocol"],
 
     "@tentacle/providers": ["@tentacle/providers@workspace:packages/providers"],
+
+    "@tentacle/relay": ["@tentacle/relay@workspace:apps/relay"],
 
     "@tentacle/tools": ["@tentacle/tools@workspace:packages/tools"],
 
