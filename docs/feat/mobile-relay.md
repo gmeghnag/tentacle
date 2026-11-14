@@ -1824,3 +1824,20 @@ run, not a regression from this slice.
   Bun client cannot cap a frame, so the link bounds the DECODE cost only and its
   fallback is the oversize backoff (mutations 5 and 10 pin the waits that carry
   it).
+
+## Review
+
+### R4 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES.** Fresh context, but a different model family from the executor (deepseek / sonnet).
+
+**Gate (touched files):** `relay-link-policy.test.ts` + `relay-link.test.ts` 30 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean.
+**Mutation:** I skipped the `ready.id` check (`relay-link.ts:286`), and "a wrong id drops the link" FAILED (14/15 passed). I reverted it, and `cmp` shows the file is byte-identical.
+
+Findings:
+1. **HIGH — F7's fallback is not implemented. A hostile relay can loop us into the allocation about once a second** (`relay-link.ts:279-283`, `:298`, `:583`). Bun's client never closes with 1009, because it has no `maxPayloadLength` (R0(d)). So the `"oversize"` reason is never reached. An oversize control frame goes through `parseFrame` → `undefined` → `schedule("closed")`. Then `ready` resets `attempt = 0` (`:298`). Repro (fake dialer, random 0.99): relay sends `ready` + a 2 MiB frame, five times. The retry delays are `[991, 991, 991, 991, 991]` ms, and every cycle logs `relay-ready` / `relay-down closed`. Fix: on an oversize inbound frame, use a backoff that a following `ready` does not reset. For example, keep a separate oversize counter or hold time.
+2. **MEDIUM — `open` is accepted before `ready`** (`:321-324`; `ready` is only `void ready`, `:326`). With the fake dialer, `open` sent with no `ready` at all dials `/v1/accept` and takes a limiter slot. So the `ready.id` check does not gate anything: a relay that never sends `ready` gets exactly what a lying one would. Noise still protects access, so this is not an auth bypass. But the plan's F7 says "wrong id → link dropped", and that claim does not hold. Fix: drop `open` (or close the link) until `ready` has been accepted. Add a test: open-before-ready → no accept dial.
+3. **MEDIUM — when the relay closes the control socket, the daemon kills every live phone session** (`:336-339`). This contradicts F2 and the relay's own semantics: `apps/relay/src/relay-core.ts:394` says "its streams live on, F2". The comment at `:337` ("every stream is already dead") is a false premise. It is also inconsistent within the file: the timeout, malformed, error and replaced paths go through `dropControl` first, so the guard at `:329` returns early and those streams survive. Failure: one control-socket blip (the relay recycles control, a NAT drop surfaced as a close) detaches every phone mid-turn, though their splice legs are healthy. Fix: do not `dropStreams` on control close (keep it for `stop()`), and add a test pinning it.
+
+Holds: one session path (the accept leg is a `DuplexChannel` into `acceptDevice`, with no second loop); no lock around `Connection`; the limiter slot is freed exactly once (`endSlot` is guarded); the secret goes only in the `hello` frame, never in the URL; `wantsReachability` is read-only, and a broken store → false; `stop()` clears timers and legs.
+Attacks tried: the three above (all confirmed by repro or code); duplicate stream token (dropped, ok); invalid URL (never dials, ok).
