@@ -1020,3 +1020,15 @@ iOS 26.5). The e2e runner was still refused.
 **Executor behaviour:** honest; blockers stated, no invented shims.
 
 *— claude-opus-5-5, 2026-11-15* (same model family as the planner/prior reviewers; executor was deepseek — fresh context only)
+
+### Round 2
+
+**Verdict: REQUEST-CHANGES (finding 1 fixed; finding 2 still open — executor blocked, not at fault).** Scope: `git diff HEAD~1` (`a4f82ce2`).
+
+- **Finding 1 (Unicode icons, no blur) — FIXED.** `Icon.tsx:50-62` renders `<SymbolView name={name} …>`; the `GLYPH` table is gone; `GlassButton.tsx:66-81` puts a clipped `BlurView` under the `glass` tint; `package.json` pins `expo-symbols ~58.0.5`, `expo-blur ~58.0.6` (both present in `apps/mobile/node_modules`). Mutations (each restored from a scratch copy; `git status` clean after): `IconName` member `trash` → `trashx` ⇒ `tsc -p apps/mobile` fails at `Icon.tsx:53` (the `SFSymbol` typing claim holds); `<BlurView` → `<View` ⇒ `icon-glass-wiring` "puts a `BlurView` behind its content" fails (4 pass / 1 fail) and tsc fails. The test is source-level only: it cannot prove the native views render.
+- **Finding 2 (no simulator evidence) — OPEN.** `.tentacle/tmp/mobile-ui/slice-2/` is empty and there is no `slice-1/`; flows 12/13/15/16/20 are unrun. This now matters more, because two new native modules need a dev-client/Release rebuild before `SymbolView`/`BlurView` can be seen at all.
+- **Regressions:** none found. Callers are unchanged (same `IconName`/`IconProps`); the shadow stays on the unclipped `Pressable`; the glyph regex (U+2190–U+2BFF, U+1F000+) does not catch `…`/`–`/curly quotes in the restyled files. Still Unicode on unrestyled screens (`SettingsScreen.tsx`, `ComposeBar.tsx`) — later slices, as the doc says.
+- **Gate:** `bun run typecheck` clean · `bun run lint` 1394 files, 0 issues · `icon-glass-wiring` + `theme` + `computer-status` 81 pass / 0 fail.
+- **Executor behaviour:** honest. It fixed what network access allowed, showed red→green plus two mutations, and stated plainly that the refused e2e/screenshot step is still owed.
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; executor was a different model)
