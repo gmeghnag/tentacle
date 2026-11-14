@@ -530,3 +530,7 @@ Red-before-green: flows 12–19 fail on 12c (no queue rows / photo button);
 ## Execution
 
 ## Review
+
+#### Orchestrator decisions (owner night delegation 2026-11-14)
+
+Owner asleep, delegated: every Owner question above is decided with its RECOMMENDED option. Implementation APPROVED.
