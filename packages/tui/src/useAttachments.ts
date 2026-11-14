@@ -14,9 +14,10 @@
  * - the refs other layers read: `probedTextRef` (the App's `submit`, R2-1),
  *   `uploadCtrlRef` (Esc's `cancelUpload` and the key snapshot's
  *   `uploadInFlight`) and `attachGenRef` (the unmount effect);
- * - the unmount effect itself, which is effect 1 of 20 in `App` and stays at
- *   that index; it aborts the upload and bumps the generation, and this hook
- *   only READS the generation it bumped.
+ * - the unmount effect itself, which is effect 1 of 22 in `App` and stays at
+ *   that index (the original 20; session-hop added `targetFeed`'s subscription
+ *   and the idle `hopIfQueued` after it); it aborts the upload and bumps the
+ *   generation, and this hook only READS the generation it bumped.
  * They arrive as port fields, the same way S4's `useMouse` takes `selectionRef`
  * and `panelRef`: a ref is passed in, never re-created here.
  */

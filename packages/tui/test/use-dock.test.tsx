@@ -8,7 +8,8 @@
  * unit test. So what is new here is only what the MOVE could break, and there
  * are exactly two things:
  *
- * 1. **No effect moved (Fable H1 / owner Q7 (a)).** App keeps its 20 effects, in
+ * 1. **No effect moved (Fable H1 / owner Q7 (a)).** App keeps its 22 effects (the
+ *    original 20 + session-hop's 2), in
  *    today's order; the dock's four (the `jobs.onExit` subscription, the id-key
  *    reconcile, the timed output read, the last read at an exit) stay where they
  *    were. `useDock` declares NONE. A hook that grew an effect would silently

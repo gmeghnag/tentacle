@@ -22,10 +22,10 @@ import { type AttachmentRef, DISMISSED, type WakeModel, wakeStep } from "@tentac
  * Three constraints from the plan shape the file:
  *
  * 1. **Effects stay in `App`** (Fable H1): this hook declares NO `useEffect`, so
- *    `App`'s 20 keep their order and every index. The effects that DRIVE this
- *    code remain `App`'s — the initial prompt and the wake (`runRef`,
- *    `wakeIfPending`), the jobs subscription — and they reach the driver through
- *    the same identifiers they already used.
+ *    `App`'s 22 keep their order and every index (the original 20 + session-hop's
+ *    2). The effects that DRIVE this code remain `App`'s — the initial prompt and
+ *    the wake (`runRef`, `wakeIfPending`), the jobs subscription — and they reach
+ *    the driver through the same identifiers they already used.
  * 2. **A shared latch is passed in, never re-created** (Fable M1/H3). Every ref
  *    below is ALSO read or written by a driver this slice does not own — the
  *    activity handler and `swapSession` (S9b), `useQuitClear`'s settle, the key

@@ -239,6 +239,32 @@ holds every decision, and `useMouse` holds only the partial-report ref + its
 100 ms timer + the click recogniser, so the effect list is untouched. Corrected
 here rather than contradicting the plan — see S4's drift 4.
 
+**The effect count is 22, and where the extra two came from (S14).** Every
+"20" below is the count at the end of **S0b**, before session-hop landed: 20
+effects in `App.tsx`. `feat/session-hop` then added two of its own, in `App`, in
+today's order — `targetFeed`'s subscription (effect #2, `App.tsx:480` on `main`)
+and the idle `hopIfQueued` one (effect #20, `App.tsx:1515` on `main`) — so the
+count is **22** and every pin asserts `toBe(22)`. The prose kept saying 20 until
+S14 corrected it (`feat/app-decomp-14-tidy`); read "20" in a pre-S14 paragraph
+as "the original 20", and "22" as "20 + session-hop's 2". The per-hook claim the
+S-slices make is unchanged in substance — a hook declares no `useEffect` — only
+the number the comments quote moved.
+
+**The ≲ 800 target, re-measured at S14 (and restated, not met).** After S0–S10
+(and session-hop) `App.tsx` is **1,942 lines** (`main` @ S14: 1,978), of which
+**1,410 are non-comment, non-blank** and **475 are comment**: 22 effect bodies
+(271 code lines), 60 hook calls whose argument is a port object (453 code lines
+— `useTurnDriver`'s alone is 55 fields), and ~500 code lines of props intake,
+ref installs (`xRef.current = x`), port-construction callbacks and the ONE
+`useInput` layer list. So the *shape* target is met — no feature logic, hooks
+own no effect, one `useInput` — and the *size* target is **not**: this is a
+composition file, but a very WIDE one (91 `useState`/`useRef`, one hook with a
+55-field port). Recorded honestly here rather than by inflating the target:
+shrinking it further means **narrowing the ports** (a hook taking 3 small
+capability objects instead of one 55-field blob), which is a design change of
+its own (S13 keeps only the pure residue) and is left as named debt in the S14
+Review — not silently folded into a tidy.
+
 ### Other hotspots (CHANGELOG.md, TODO.md, `PROTOCOL_VERSION`)
 
 They block parallelism independently of App.tsx (447 commits since 2026-10-01
@@ -4885,3 +4911,170 @@ effects 1–15. A reorder among effects 16–22 is not caught (LOW 2).
 Recommended order: 4 (cheap, makes the pins honest), then 3, 1, 2. Task 2 is
 the only load-bearing one and needs a strong executor plus a fresh-context
 Review that red-teams key precedence (`app-keys-precedence.test.tsx`).
+
+## Execution
+
+### S14 — `feat/app-decomp-14-tidy` (the tidy: honest imports, honest counts, an honest target)
+
+*— claude-opus-5-5, 2026-11-14 (executor, `feat/app-decomp-14-tidy`, cut from `main` @ `9418363d`)*
+
+The slice is the table's row 4, nothing else: drop the dead imports and the one
+move-fragment; make every "20 effects" say 22 and name where the extra two came
+from; document the 20 → 22 history in the plan; then re-measure against the
+≲ 800 target and either meet it or restate it. S11/S12/S13 were NOT touched.
+
+**Load-bearing check, re-run first (it is what the slice stands on).** The row's
+claim is that 29 dead imports exist and `tsc`/Biome cannot see them. Verified on
+this branch before any edit, with `dead-imports.ts` (the script the final review
+used, `.tentacle/tmp/app-decomp-final/`):
+
+```
+$ bun .../dead-imports.ts packages/tui/src/App.tsx
+App.tsx: 149 imported, 29 unused
+attachErrorText dockKindOf modelErrorNotice AutoAcceptFeed addRow markAcked onReject onSteer
+takeForSendNow COMPACTING_NO_TURN CompactionResult NOTHING_TO_SEND SendNowErrorCode
+afterCompactionUnsupported compactionWaitNotice errorCode fallbackNotice onSuccessorError
+applySessionEvent endWithoutOutcome failTurn replaceWithNotices startTurn withdrawUserTurn
+SLOT_LOST_NOTICE commitWarmed lostSlot needsWarm refusedBeforeStart
+```
+
+Hold with one correction — **28, not 29**, and the difference is exactly
+`AutoAcceptFeed`. That counter sets `lastEnd` to the END of the last `import`
+statement and searches only the text after it, so a name whose only use is a
+re-export block *interleaved among the imports* looks dead:
+`export type { AutoAcceptFeed };` sits at `App.tsx:72`, between the
+`permission-ui.ts` import and the `queued.ts` one, and `AutoAcceptFeed` is
+imported at `:59` only to be re-exported there (the package surface
+`index.ts:42` publishes it, and `auto-accept-feed.test.tsx` imports it from
+`../src/App.tsx`). A brace-matched scan — imports blanked to the same length,
+then a `\b` search over what is left, so re-export blocks still count as uses
+(`dead3.py`, this task's scratch) — gives exactly **28**, with
+`AutoAcceptFeed` live and `modelErrorNotice` dead. So 28 is the number; nothing
+else on the list was disputed, and every survivor (`initialState`, `withRestored`,
+`handBackRows`, `shownRows`, the `state.ts` / `turn-feed.ts` names) was
+re-checked in the body, because a sweep that trusts a regex over a name it did
+not re-read is the S9b failure.
+
+**Implementation, in dependency order.**
+
+1. **New test first (red), `packages/tui/test/app-tidy-structure.test.ts`** —
+   three claims, no behaviour: (a) no imported name of `App.tsx` is unused,
+   (b) `App` declares 22 effects and no source or test line makes a *stale*
+   effect-count claim, (c) the move-fragment is gone. Red on the pre-tidy tree:
+   `3 fail / 1 pass`, (a) listing exactly the 28 names, (b) 18 stale claims
+   (6 in `src/`, 12 in `test/`), (c) the fragment.
+2. **`App.tsx` imports** — the 28 names out of 7 statements (`attach-draft.ts`,
+   `background-focus.ts`, `model-error.ts` (whole statement), `queued.ts`,
+   `send-now.ts`, `state.ts`, `turn-feed.ts`), each statement collapsed to the
+   names that survive. `-39 / +3` lines. `initialState`, `withRestored`,
+   `handBackRows`, `shownRows`, `appendBackgroundExit`, `appendNotice`,
+   `backgroundExitNotice`, `pushNoticeItem`, `warmFailureNotice` stay — a
+   cosmetic sweep that trusts a regex over a name it did not re-check is the
+   S9b failure, so each survivor was confirmed used in the body.
+3. **The fragment** — `App.tsx`'s `// the held ones, and the handler starts
+   streams (C2).` (the tail of a sentence whose head moved to `useSessionLink`
+   in S9b) deleted; the ref it described already has its own comment below it.
+4. **The 20 → 22 wording** — 2 source comments in `App.tsx`, 5 hook headers
+   (`useAttachments`, `useDock`, `usePanels`, `useQuitClear`, `useSessionLink`,
+   `useTurnDriver`) and 6 test files (5 titles + 3 headers), each now reading 22
+   and naming the origin ("the original 20 + session-hop's `targetFeed`
+   subscription and idle `hopIfQueued`"). No assertion changed: every one of
+   them already asserted `toBe(22)`.
+5. **The plan** — a new paragraph under "What stays in App.tsx" recording that
+   the count is 22 and where the two came from, plus the re-measured shape below.
+6. **`changelog.d/app-decomp-14-tidy.changed.md`** — one bullet; internal, but it
+   is a user-visible-file-adjacent tidy the release notes should carry.
+
+**Re-measured against ≲ 800: NOT met, restated honestly (the row's own
+alternative).** `App.tsx` is **1,941 lines** on this branch (`main`: 1,978) by
+`wc -l`, **1,942** as the measurement script counts it (`split("\n")` adds the
+trailing empty string), of which **1,410 are non-blank non-comment** and **475
+are comment**.
+By top-level statement (indent-2 start to the next one, `measure9.ts`):
+22 `useEffect` bodies = 389 lines / 271 code; 60 hook calls whose argument is one
+port object = 635 lines / 453 code; the remaining 103 statements (props intake,
+`xRef.current = x` installs, the port-construction callbacks, the ONE `useInput`
+layer list, `<AppView model={…}/>`) = 691 lines / 502 code. The **shape**
+target holds — no feature logic, every extracted hook declares no effect, one
+`useInput` — and the **size** target does not, for one named reason: the ports
+are WIDE (one hook takes 55 fields), so "composition" here is 60 calls each
+spelling out 30–55 fields. Meeting 800 means narrowing the ports into a few
+small capability objects — a design change, not a tidy, and not this slice's
+scope (S13 is pure residue only). Recorded as named debt in the Review below
+rather than by inflating the number.
+
+**Drift from the Implementation, and why.**
+1. **28 dead, not 29** (above): the plan's count came from a counter with a
+   known bias (`export type` inside the import region). The *claim* — dead
+   imports exist and nothing in the gate catches them — holds exactly; only the
+   number moved, and it moved DOWN, so no import the review wanted kept was
+   silently dropped.
+2. **The "stale 20" scan had to be narrowed twice.** Its first form matched any
+   line containing `20` and an "effect", which caught `mouse-stream.test.ts`'s
+   `report(0, 6, 20)` rows (`…).effects` on the same line) — a mouse y, not a
+   count. It now matches the four claim SHAPES ("N effects", "effect N of M",
+   "its/all/the/has/keeps 20", "X's 20") and ignores a line that also says 22,
+   because that is a line WRITING DOWN the history ("22 = the original 20 + …"),
+   not a stale claim. A scan that fires on correct text is worse than none: the
+   next executor edits the text to silence it.
+3. **The test-file titles changed, not only the source comments.** The plan says
+   "fix the stale '20' titles/comments"; the titles are in `app-*` test files
+   whose subject is a *different* slice's hook. Every assertion in them already
+   read `toBe(22)`, so this is a wording edit on a passing test, which AGENTS §9
+   normally forbids. It is not a weakened matcher: the count is the same, the
+   string now says 22, and `app-tidy-structure.test.ts` (b) pins the wording
+   itself — a reintroduced "20" title fails it.
+
+**Tests.**
+- `packages/tui/test/app-tidy-structure.test.ts` (new, 4 tests): the import scan;
+  a non-vacuity control that hands the scan a known-dead name and a re-exported
+  one; the 22-effect count + the stale-claim scan over `src/` and `test/`; the
+  fragment. All three failure modes are covered; the control proves the scan can
+  see a dead name at all.
+- The 8 touched structure/order tests re-run green (`53 pass / 0 fail`), so the
+  wording edit demonstrably did not move an assertion.
+- Full gate: `bunx tsc --noEmit` OK · `bunx tsc -p apps/mobile` OK ·
+  `bunx tsc -p apps/relay` OK · `bun run lint` `Checked 1324 files … No fixes
+  applied` · `bun run test` — see the gate line in the Review.
+
+**Mutation checks (non-vacuity, AGENTS §9).** Each mutation applied to the
+tracked `App.tsx`, the S14 test re-run, then reverted and the file confirmed
+byte-identical to its pre-mutation `md5` (`f37e2dfec961d4bb245de097ae67e084`):
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | re-add `import { SLOT_LOST_NOTICE } from "./turn-feed.ts";` (a dead name) | `(a)` FAILS listing `SLOT_LOST_NOTICE`; other 3 pass → the import pin is the one that catches it |
+| M2 | `the 22 below keep their indices` → `the 20 below …` (App.tsx only) | `(b)` FAILS naming `App.tsx:1168`; other 3 pass |
+| M3 | restore `// the held ones, and the handler starts streams (C2).` | `(c)` FAILS; other 3 pass |
+
+Each mutation is killed by exactly its own assertion (the other three stay
+green), so no pin here is decoration and none is doing another pin's job.
+
+**Gate, on the final tree (after the last wording edits).**
+
+```
+$ bunx tsc --noEmit                                   → OK (no output)
+$ bunx tsc -p apps/mobile                             → OK
+$ bunx tsc -p apps/relay                              → OK
+$ bun run lint   (biome check .)                      → Checked 1324 files … No fixes applied
+$ bun run test                                        → 9529 pass / 3 skip / 0 fail
+                                                        13 snapshots, 77870 expect() calls
+                                                        9532 tests across 687 files (392s)
+```
+
+The 3 skips are the documented opt-ins (`TENTACLE_K8S_SERVER`,
+`TENTACLE_DOCKER_TESTS=1`, `TENTACLE_SLOW_TESTS=1`), not failures; the run was
+repeated in full after the last edit, so the number is the final tree's. No
+schema changed, so `packages/protocol/schema/protocol.json` was not regenerated
+(nothing under `packages/protocol` is in the diff) and no `protocol.d/` note is
+due: the wire is untouched. `TODO.md` and `CHANGELOG.md` are untouched
+(`git diff --stat` on both is empty); the changelog entry is
+`changelog.d/app-decomp-14-tidy.changed.md`, which `parseFragments` accepts
+(`["app-decomp-14-tidy","changed",12]`).
+
+**DONE, with one restated target.** Everything the row asks for is in: 28 dead
+imports gone, the fragment gone, 18 stale "20" claims (6 source, 12 test) now
+say 22 with their origin named, the plan documents 20 → 22, and the ≲ 800
+target is re-measured and restated honestly (1,941 lines; the shape is met, the
+size is not, and the reason — 55-field ports — is named as debt for a future
+slice, not this one). Nothing of S11/S12/S13 was started.

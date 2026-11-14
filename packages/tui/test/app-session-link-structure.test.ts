@@ -12,7 +12,7 @@
  *     (`queued.ts`), `resetDock`/`noteSent` (`background-focus.ts`), the notice
  *     builders, `state.ts`'s and `wakeStep` — they are CALLED by the hook, never
  *     re-implemented in `App.tsx`;
- *   - the hook owns NO effect (H1: App's 20 effects keep their order and index)
+ *   - the hook owns NO effect (H1: App's 22 effects keep their order and index)
  *     and creates ONLY the ref nothing outside it writes (M1/H3);
  *   - the frozen identifiers survive (`onActivity`, `watchSession`,
  *     `swapSession`, `switchTo`), so no use site changed;
@@ -135,7 +135,7 @@ describe("S9b: the session link leaves App.tsx", () => {
   });
 
   // H1 (M4): no hook owns an effect here, so an effect's index cannot shift.
-  test("App still declares its 20 effects, and the hook declares none", () => {
+  test("App still declares its 22 effects (the original 20 + session-hop's 2)", () => {
     expect(countOf(readSrc("App.tsx"), "\n  useEffect(")).toBe(22);
     // A real use, not the word: the hook's header explains WHY there is none.
     const hook = readSrc(HOOK);

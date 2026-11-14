@@ -16,7 +16,6 @@ import {
   type AttachDraft,
   EMPTY_DRAFT,
   NOT_AN_IMAGE_NOTICE,
-  attachErrorText,
   removeLastChip,
   uploadDone,
 } from "./attach-draft.ts";
@@ -25,7 +24,6 @@ import {
   type DockOutcome,
   applyLateOutcome,
   clickDock,
-  dockKindOf,
   downEntersList,
   downToDock,
   reconcile,
@@ -54,7 +52,6 @@ import { type KeyHost, executeEffects } from "./keys/execute.ts";
 import { PURE_LAYERS } from "./keys/layers.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
-import { modelErrorNotice } from "./model-error.ts";
 import { type OpenPanel, panelClick } from "./panel.ts";
 import { sanitizePasted } from "./paste.ts";
 import { insertReply, orphanNotice } from "./permission-reply.ts";
@@ -74,33 +71,12 @@ import { useTurnDriver } from "./useTurnDriver.ts";
 
 export type { AutoAcceptFeed };
 
-import {
-  type DaemonQueue,
-  type QueuedRows,
-  addRow,
-  handBackRows,
-  markAcked,
-  onReject,
-  onSteer,
-  shownRows,
-  takeForSendNow,
-} from "./queued.ts";
+import { type DaemonQueue, type QueuedRows, handBackRows, shownRows } from "./queued.ts";
 import { type RenderOptions, layoutTranscript, sliceLaid, warmRowsChunk } from "./render-lines.ts";
 import { runChunked } from "./run-chunked.ts";
 import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
 import type { Selection } from "./selection.ts";
-import {
-  COMPACTING_NO_TURN,
-  type CompactionResult,
-  NOTHING_TO_SEND,
-  SendNowErrorCode,
-  afterCompactionUnsupported,
-  compactionWaitNotice,
-  errorCode,
-  fallbackNotice,
-  onSuccessorError,
-  withRestored,
-} from "./send-now.ts";
+import { withRestored } from "./send-now.ts";
 import { sessionsChoose, switchingRefusal } from "./sessions-panel.ts";
 import { SkillsSync } from "./skills-sync.ts";
 import {
@@ -109,27 +85,13 @@ import {
   type SessionEvent,
   appendBackgroundExit,
   appendNotice,
-  applySessionEvent,
   backgroundExitNotice,
-  endWithoutOutcome,
-  failTurn,
   initialState,
   pushNoticeItem,
-  replaceWithNotices,
-  startTurn,
-  withdrawUserTurn,
 } from "./state.ts";
 import type { ContextOpen } from "./status-view.ts";
 
-import {
-  SLOT_LOST_NOTICE,
-  type SessionActivity,
-  commitWarmed,
-  lostSlot,
-  needsWarm,
-  refusedBeforeStart,
-  warmFailureNotice,
-} from "./turn-feed.ts";
+import { type SessionActivity, warmFailureNotice } from "./turn-feed.ts";
 
 // `AppProps`/`SessionController`/`SettingsNoticeLine` are used here; the rest are
 // re-exported so every existing importer (`../src/App.tsx`) keeps working.
@@ -1132,7 +1094,6 @@ export function App({
   }, [autoWakeOnJobExit]);
   wakeIfPendingRef.current = wakeIfPending;
 
-  // the held ones, and the handler starts streams (C2).
   const onActivityRef = useRef<((activity: SessionActivity) => void) | null>(null);
   // A `/sessions` switch is in flight (its detach, then the target's open):
   // `switchingRefusal` / `sessionsChoose` refuse what would act on the old
@@ -1204,7 +1165,8 @@ export function App({
   // ALSO read or written by a driver that stays here (the activity handler and
   // `swapSession`, the clear's arm, the key snapshot, the frame), so they are
   // PASSED IN and each use site keeps its identifier and its source (Fable
-  // M1/H3). It declares no effect, so the 20 below keep their indices (H1), and
+  // M1/H3). It declares no effect, so the 22 below keep their indices (H1) —
+  // the original 20 plus session-hop's `targetFeed` and idle `hopIfQueued` — and
   // it is called before `onActivity`/`watchSession` because they START what it
   // streams (`streamTurn`) — `onActivityRef` is how the driver reaches back.
   const { run, commitHistory, streamTurn, sendNow, submit, startCompaction, drainHeld } =
@@ -1275,9 +1237,10 @@ export function App({
   // no state and no effect: every ref below is shared with a driver this slice
   // does not own (the turn driver's, the clear's, the key snapshot's, the
   // frame's), so they are PASSED IN and each use site keeps its identifier and
-  // its source (Fable M1/H3). It declares no effect, so the 20 below keep their
-  // indices (H1); it is called AFTER `useTurnDriver` because `onActivity` starts
-  // what that driver streams (`streamTurn`), and BEFORE the mount effect below,
+  // its source (Fable M1/H3). It declares no effect, so the 22 below keep their
+  // indices (H1: the original 20 plus session-hop's two); it is called AFTER
+  // `useTurnDriver` because `onActivity` starts what that driver streams
+  // (`streamTurn`), and BEFORE the mount effect below,
   // which calls `watchSession`. `armWake`/`wakeIfPending`/`askContext`/
   // `watchReturned` stay here: each is read by an effect (or a port) declared
   // before this point, so moving one would move an effect's index (drift 1).
