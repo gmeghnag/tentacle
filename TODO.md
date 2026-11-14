@@ -14,7 +14,7 @@ the rest are "value-add" improvements layered on the harness.
     (11b) — plus `docs/feat/session-hop.md` (not mobile, same night).
   - **Approved by the owner "all as recommended"** (`#### Owner decisions`):
     `docs/feat/mobile-relay.md` (15), `docs/feat/mobile-push.md` (16),
-    `docs/feat/mobile-notifications.md` (17); task 18 (Live Activity) to follow.
+    `docs/feat/mobile-notifications.md` (17), `docs/feat/mobile-live-activity.md` (18).
   - Earlier owner answers: `docs/feat/mobile-session-view.md` (12, "all +
     images"), `docs/feat/sibling-discovery.md` (10, "all").
 
