@@ -99,6 +99,35 @@ describe("cold start (F10, Owner Q1)", () => {
   });
 });
 
+describe("`loaded` is a LAUNCH-time event (review round 1, finding 1)", () => {
+  test("a later setting change does not re-lock the app or ask Face ID again", () => {
+    // The wiring: Settings tap → `setSetting` (App.tsx), the write lands,
+    // `setLockSetting` updates App's state, and LockGate's effect re-dispatches
+    // `loaded` with it. Re-running launch's episode logic there locked an
+    // unlocked app under the person's finger (finding 1's repro).
+    const h = started("5m");
+    h.dispatch({ type: "authResult", result: "success" });
+    h.dispatch({ type: "setSetting", setting: "immediately" });
+    const view = h.dispatch({ type: "loaded", setting: "immediately" });
+    expect(view).toMatchObject({ cover: "none", prompt: false, locked: false });
+    expect(h.state().setting).toBe("immediately");
+  });
+
+  test("a weakening that already succeeded does not re-lock on the follow-up `loaded`", () => {
+    const h = started("immediately");
+    h.dispatch({ type: "authResult", result: "success" });
+    h.dispatch({ type: "setSetting", setting: "1h" });
+    h.dispatch({ type: "prompted" });
+    h.dispatch({ type: "authResult", result: "success" });
+    // App.tsx persists the applied delay and sets its own state: one more `loaded`.
+    expect(h.dispatch({ type: "loaded", setting: "1h" })).toMatchObject({
+      cover: "none",
+      prompt: false,
+    });
+    expect(h.state().setting).toBe("1h");
+  });
+});
+
 describe("inactive is not leaving the app (F6)", () => {
   test("Control Center / a call banner / the prompt itself never locks", () => {
     const h = started("immediately");

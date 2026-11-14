@@ -179,11 +179,13 @@ a notice row when D1 says the device cannot lock, "Export logs"
 `{t, level, kind, fields}` with `kind` from a closed union (`ws-open`,
 `ws-close`, `ws-error`, `link-status`, `dial`, `gate-suspend`,
 `gate-resume`, `client-error`, `lock`, `unlock`, `auth-fail`, `app-state`,
-`timing`) and `fields` limited to numbers, booleans and short enums. The one
-free-text field (`detail`, for an error message or close reason) passes
-`redact()`: URLs reduced to `scheme://host:port` (no userinfo / path / query /
-fragment), `Bearer …` and `token=…` removed, any run of ≥ 20 base64/hex/
-base64url characters → `[redacted]`, capped at 160 chars. Never logged:
+`timing`) and `fields` limited to numbers, booleans and short enums. **Every**
+field passes `fieldValue` → `redact()`: URLs reduced to `scheme://host:port` (no
+userinfo / path / query / fragment), `Bearer …` and `token=…` removed, any run of
+≥ 20 base64/hex/base64url characters → `[redacted]`, capped at `FIELD_MAX`. There
+is **no free-text field at all** (as amended in Fix round 1, finding 2): a
+failure logs its error CLASS and numeric code (`errorShape`), never its message,
+so daemon prose (P4) cannot reach the file even up to a cap. Never logged:
 session titles, prompts, transcript text, computer or device names, paths;
 session ids only as their first 8 characters (Owner Q8). Redaction happens
 before an entry exists, so a secret never reaches memory-for-export or disk.
@@ -566,3 +568,58 @@ The reducer, store and redaction-of-secrets (URL query, bearer, keys) are sound 
 honestly tested; Step 0 results and unverified items are reported candidly
 (backup exclusion, Maestro not run). The executor missed the interaction between
 `loaded` and later setting changes, and silently narrowed the plan's canary test.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14*
+
+Both findings reproduced on the branch before any edit
+(`.tentacle/tmp/mobile-lock/relock.ts`): the reducer was driven exactly as
+`App.tsx` + `LockGate` drive it, and the unfixed ring really did keep
+`CANARY-PROMPT`/`CANARY-TITLE` while `redact()` scrubbed only the computer name.
+
+**F1 (MEDIUM) — every Settings change re-locked the app.** Root cause: `loaded`
+was a launch-time event, but `LockGate`'s effect re-dispatches it on every
+`setting` prop change, so `onLoaded`'s `next.locked ? next : beginEpisode(next)`
+started a fresh lock episode on an unlocked app. Fix (`app-lock.ts` `onLoaded`):
+once the setting is known (`state.setting !== "loading"`) the event is a no-op —
+later changes arrive as `setSetting`, which the reducer already handled. Red
+tests first (`app-lock.test.ts`, new describe): "a later setting change does not
+re-lock …" and "a weakening that already succeeded does not re-lock on the
+follow-up `loaded`" — both failed on the buggy reducer with
+`{"cover":"lock","prompt":true,"locked":true}`.
+
+**F2 (MEDIUM) — daemon text reached the export unredacted.** Root cause: the
+ring had a free-text `detail` field, `redact()` cannot tell prose from prose, and
+`connection.ts` fed it `error.message` / the close `reason` / the ws error
+`message`, so a path, title or prompt fragment survived up to 160 chars.
+`app-log.test.ts` asserted only that the TAIL was truncated — the plan's canary
+property was silently narrowed. Fix, taking the Review's option A to its
+type-level conclusion: `AppLog.log` has **no** free-text parameter at all, and a
+failure is logged as its error CLASS plus numeric code (`errorShape`, new in
+`app-log.ts`). All three call sites now log machine-readable facts only — the ws
+close `code`, the error class, `clientErrorFields` for `onError` (the pod-
+controlled channel), and `errorShape` for the switcher-cover failure in
+`App.tsx`. Red tests first (`app-log.test.ts` daemon-prose + `errorShape`
+tests, `connection.test.ts` "a socket's canary close-reason and error text never
+reach the ring" + "a client error logs its class and code"): the connection test
+failed on the buggy wrapper with `CANARY-PROMPT`/`CANARY-TITLE` present and
+`CANARY-COMPUTER` redacted — the Review's finding, verbatim.
+
+Drift: the pre-existing canary tests that fed prose through `detail` were
+rewritten to assert `redact()` directly (the scrub still guards every field
+`fieldValue` touches) rather than deleted, and D7's "one free-text field"
+sentence above was amended. No call site now passes prose, so the E2E flow 09
+canaries (flow never run: it needs a Release build) are backed by unit tests
+that drive the real wrapper.
+
+**Mutations** (each applied, named test RED, reverted; suite green afterwards):
+
+| Mutation | Result |
+|---|---|
+| `onLoaded` guard deleted (the bug, restored) | **2 new tests RED** |
+| the whole F2 fix reverted: `detail` back in the sink + prose back at the ws call sites | **connection canary test RED** — `CANARY-PROMPT deploy the secret CANARY-TITLE refactor the auth layer [redacted]` in the entry, `CANARY-COMPUTER` scrubbed: exactly the asymmetry the Review described |
+| `clientErrorFields` returns `error.message` again | **client-error test RED** |
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run lint` clean (1237 files, 0
+warnings) · `bun test` **9055 pass, 3 opt-in skips, 0 fail** (653 files).

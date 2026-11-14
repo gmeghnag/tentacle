@@ -40,7 +40,7 @@ import {
 } from "./src/app-lock.ts";
 import { APP_LOG_FILES } from "./src/app-log-fs-expo.ts";
 import { createAppLogFile } from "./src/app-log-fs.ts";
-import { type AppLog, createAppLog } from "./src/app-log.ts";
+import { type AppLog, createAppLog, errorShape } from "./src/app-log.ts";
 import { exportFileName, exportText } from "./src/app-log.ts";
 import { type ComputerMemory, withForgottenRecord } from "./src/computer-memory.ts";
 import { type ComputerRow, computerRows, probeComputer } from "./src/computer-rows.ts";
@@ -125,7 +125,8 @@ const APP_LOG_FILE = createAppLogFile(APP_LOG_FILES);
  * gate; the cover is defence in depth).
  */
 const SWITCHER_COVER = createSwitcherCover((error) => {
-  APP_LOG.log("warn", "link-status", { cover: "failed" }, String(error));
+  // F16: the CLASS only — a native module's message can carry a path or a name.
+  APP_LOG.log("warn", "link-status", { cover: "failed", ...errorShape(error) });
 });
 
 /** How often the ring is drained to the file (D7). */

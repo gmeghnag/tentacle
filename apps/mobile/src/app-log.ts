@@ -14,14 +14,19 @@
  * - `Bearer …` and `token=…` are removed.
  * - any run of ≥ 20 base64 / base64url / hex characters becomes `[redacted]`
  *   (a device key, a pinned computer key, a pairing payload).
- * - `detail` is capped at 160 characters.
+ * - a field is capped (`FIELD_MAX`), and there is NO free-text field at all: a
+ *   failure is logged as its error CLASS and its numeric code (`errorShape`),
+ *   never its message (F16, review round 1 finding 2).
  * - never logged at all: titles, prompts, transcript text, computer and device
  *   names, paths. Session ids only as their first 8 characters.
  *
  * Daemon text is untrusted (P4): a ws close `reason` and a client error
- * `message` are exactly the `detail` field, and they pass `redact()` like any
- * other free text. Pure and React-free (AGENTS §7): storage and the file system
- * are injected, and the clock with them.
+ * `message` are precisely the prose that can carry a title, a prompt fragment or
+ * a path, so **neither reaches the ring** — the call sites log the close code and
+ * the error class instead (`connection.ts`). `redact()` stays for the values a
+ * caller does pass (`fieldValue`), so a secret that slips into a short field is
+ * still scrubbed before the entry exists. Pure and React-free (AGENTS §7):
+ * storage and the file system are injected, and the clock with them.
  */
 
 /** The closed set of what an entry may be about (D7). No free-text kind. */
@@ -132,16 +137,50 @@ export interface AppLogDeps {
   readonly capacity: number;
 }
 
+/** An error class name the log may carry: an identifier, at most `FIELD_MAX`. */
+const ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,23}$/;
+
+/** What a shared log may say about a failure: the CLASS, and a numeric code. */
+export interface ErrorShape {
+  readonly error: string;
+  readonly code?: number;
+}
+
+/**
+ * Classify a failure for the log: its error CLASS (and its numeric `code`, for an
+ * `RpcError`), and **never its message** (F16, review round 1 finding 2).
+ *
+ * A message is where daemon text lands: `RemoteClient.onError` carries endpoint
+ * bodies and frames, and an unknown mandatory update is even named by the
+ * DAEMON's own `type` string — so a pod can put a title, a prompt fragment or a
+ * path into it, and `redact()` cannot tell that prose from prose. The class is
+ * ours (`new Error` → `"Error"`, `RpcError` → `"RpcError"`) and the code is a
+ * number, so both are safe and the text stays out of the file altogether. A
+ * name that is not identifier-shaped (nothing in the repo builds one, but a
+ * non-`Error` throw is untrusted by definition) becomes `"Error"`.
+ */
+export function errorShape(error: unknown): ErrorShape {
+  const raw = error instanceof Error ? error.name : "";
+  const name = ERROR_NAME.test(raw) ? raw : "Error";
+  const code = (error as { readonly code?: unknown } | null | undefined)?.code;
+  return typeof code === "number" && Number.isFinite(code)
+    ? { error: name, code }
+    : { error: name };
+}
+
 /** A read-only view for export: entries in the order they were logged. */
 export interface AppLog {
-  /** One entry. `detail` (the only free text) is redacted here, not by the caller. */
+  /**
+   * One entry. Every field is a number, a boolean or a short enum-shaped string
+   * (`fieldValue`), and there is **no free-text field at all** — so a caller
+   * cannot pass daemon text even by mistake (F16; review round 1, finding 2).
+   */
   log(
     level: AppLogEntry["level"],
     kind: AppLogKind,
     fields?: Readonly<Record<string, AppLogField>>,
-    detail?: string,
   ): AppLogEntry;
-  /** `detail` → `redact()`, for a caller that has the text and wants it once. */
+  /** `redact()`, for a caller that has text and wants it scrubbed once (unused today). */
   readonly redact: typeof redact;
   /** The entries the ring still holds, oldest first. */
   entries(): readonly AppLogEntry[];
@@ -161,13 +200,10 @@ export function createAppLog(deps: AppLogDeps): AppLog {
   let dropped = 0;
   const capacity = Math.max(1, deps.capacity);
   return {
-    log(level, kind, fields, detail) {
+    log(level, kind, fields) {
       const clean: Record<string, AppLogField> = {};
       for (const [key, value] of Object.entries(fields ?? {})) {
         clean[key] = fieldValue(value);
-      }
-      if (detail !== undefined) {
-        clean.detail = redact(detail);
       }
       const entry: AppLogEntry = { t: deps.now(), level, kind, fields: clean };
       ring.push(entry);

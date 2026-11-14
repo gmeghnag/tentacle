@@ -9,10 +9,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   type AppLogEntry,
-  DETAIL_MAX,
   FIELD_MAX,
   createAppLog,
   entriesToText,
+  errorShape,
   exportFileName,
   exportText,
   fieldValue,
@@ -56,63 +56,74 @@ function sharedText(entries: readonly AppLogEntry[]): string {
 }
 
 describe("canaries — no secret survives into the export (F16)", () => {
+  // `redact()` is still the guard for every value a caller DOES pass: `fieldValue`
+  // runs it, so a secret in a field is scrubbed before the entry exists. (Since
+  // finding 2 the call sites pass no daemon prose at all — the tests below prove
+  // that — so these three keep the scrub itself pinned for the fields that remain.)
   test("a dialled URL keeps host:port and loses the token query (P3)", () => {
-    const h = harness();
     // Exactly what ws-channel.ts builds on iOS: the token IS the query.
-    h.log.log("info", "dial", {}, `ws://127.0.0.1:8787/e2e?token=${TOKEN}&device=phone`);
-    const text = sharedText(h.log.entries());
-    expect(text).not.toContain(TOKEN);
-    expect(text).not.toContain("token=");
+    const clean = redact(`ws://127.0.0.1:8787/e2e?token=${TOKEN}&device=phone`);
+    expect(clean).not.toContain(TOKEN);
+    expect(clean).not.toContain("token=");
     // The one thing the export MAY name (Owner Q8) is still there.
-    expect(text).toContain("ws://127.0.0.1:8787");
+    expect(clean).toContain("ws://127.0.0.1:8787");
   });
 
   test("a URL's userinfo, path, query and fragment all go", () => {
+    const clean = redact(`wss://user:pw@example.local:9000/secret/path?token=${TOKEN}#frag`);
+    expect(clean).not.toContain(TOKEN);
+    expect(clean).not.toContain("pw@");
+    expect(clean).not.toContain("/secret/path");
+    expect(clean).not.toContain("#frag");
+    expect(clean).toContain("wss://example.local:9000");
+  });
+
+  test("a Bearer header, a 32-hex key and a base64url key all go", () => {
+    expect(redact(`handshake failed: Authorization: Bearer ${BEARER}`)).not.toContain(BEARER);
+    expect(redact(`reason=${HEX_KEY}`)).not.toContain(HEX_KEY);
+    expect(redact(`reason ${B64URL_KEY}`)).not.toContain(B64URL_KEY);
+  });
+
+  test("daemon prose is not logged at all: an error is its CLASS and its code (F16)", () => {
     const h = harness();
-    h.log.log(
-      "info",
-      "dial",
-      {},
-      `wss://user:pw@example.local:9000/secret/path?token=${TOKEN}#frag`,
-    );
+    // The three shapes the app really logs. Each one used to be passed as free
+    // `detail` text, so redaction alone had to catch it — and could not: prose is
+    // prose, so a title or a prompt fragment survived up to 160 chars (review
+    // round 1, finding 2, where the plan's own canary test was weakened instead).
+    h.log.log("error", "client-error", {
+      ...errorShape(new Error(`${PROMPT} ${TITLE} ${COMPUTER}`)),
+    });
+    h.log.log("warn", "ws-close", { code: 1006 });
+    h.log.log("error", "ws-error", {
+      ...errorShape(
+        new TypeError(`WebSocket connection to 'wss://h:1/${TITLE}?token=${TOKEN}' failed`),
+      ),
+    });
+    h.log.log("warn", "link-status", {
+      cover: "failed",
+      ...errorShape(new Error(`${COMPUTER} could not enable the cover`)),
+    });
     const text = sharedText(h.log.entries());
-    expect(text).not.toContain(TOKEN);
-    expect(text).not.toContain("pw@");
-    expect(text).not.toContain("/secret/path");
-    expect(text).not.toContain("#frag");
-    expect(text).toContain("wss://example.local:9000");
+    for (const canary of [PROMPT, TITLE, COMPUTER, TOKEN]) {
+      expect(text).not.toContain(canary);
+    }
+    // Non-vacuity: the entries are there, carrying the CLASS and the close CODE
+    // (a shared file with no failure in it would pass the negatives trivially).
+    expect(text).toContain("client-error error=Error");
+    expect(text).toContain("ws-error error=TypeError");
+    expect(text).toContain("ws-close code=1006");
+    expect(text).toContain("cover=failed");
   });
 
-  test("a Bearer header echoed into a message goes", () => {
-    const h = harness();
-    h.log.log("error", "client-error", {}, `handshake failed: Authorization: Bearer ${BEARER}`);
-    expect(sharedText(h.log.entries())).not.toContain(BEARER);
-  });
-
-  test("a 32-hex device key goes", () => {
-    const h = harness();
-    h.log.log("warn", "ws-close", {}, `reason=${HEX_KEY}`);
-    expect(sharedText(h.log.entries())).not.toContain(HEX_KEY);
-  });
-
-  test("a base64url pinned key goes", () => {
-    const h = harness();
-    h.log.log("warn", "ws-close", {}, `reason ${B64URL_KEY}`);
-    expect(sharedText(h.log.entries())).not.toContain(B64URL_KEY);
-  });
-
-  test("long free text is CAPPED at 160 characters, with an ellipsis", () => {
-    const h = harness();
-    // P4: a ws close reason / client error message is daemon text. Redaction
-    // cannot tell prose from prose, so the cap is what bounds what a shared file
-    // may hold. (That titles and prompts are never passed at all is the CALL
-    // SITE's rule, pinned by connection.test.ts and E2E flow 09.)
-    h.log.log("error", "client-error", {}, `${PROMPT} ${TITLE} ${COMPUTER} `.repeat(4));
-    const detail = String(h.log.entries()[0]?.fields.detail);
-    expect(detail.length).toBeLessThanOrEqual(DETAIL_MAX);
-    expect(detail.endsWith("…")).toBe(true);
-    // The tail of the text — where a repeated prompt would still be — is gone.
-    expect(detail).not.toContain(COMPUTER);
+  test("`errorShape` names a class, never a message, and a non-Error throw is `Error`", () => {
+    expect(errorShape(new Error(PROMPT))).toEqual({ error: "Error" });
+    const rpc = Object.assign(new Error(TITLE), { name: "RpcError", code: -32000 });
+    expect(errorShape(rpc)).toEqual({ error: "RpcError", code: -32000 });
+    // A hostile name (a pod build some other way) is not identifier-shaped.
+    expect(errorShape(Object.assign(new Error("x"), { name: `${TITLE} ${COMPUTER}` }))).toEqual({
+      error: "Error",
+    });
+    expect(errorShape(`${PROMPT} ${TITLE}`)).toEqual({ error: "Error" });
   });
 
   test("a long title passed in `fields` is redacted and capped, not trusted", () => {

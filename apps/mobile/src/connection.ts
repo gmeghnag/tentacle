@@ -30,7 +30,7 @@ import { type InitializeResult, decodeBase64Url } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import type { Random } from "@tentacle/transport/noise";
 import { type DialMemory, firstAnswering } from "./address-dial.ts";
-import { type AppLog, createAppLog } from "./app-log.ts";
+import { type AppLog, type AppLogField, createAppLog, errorShape } from "./app-log.ts";
 import type { StoredComputer } from "./computers.ts";
 import { createForegroundGate } from "./foreground-gate.ts";
 import { sha256Hex } from "./hash.ts";
@@ -123,10 +123,16 @@ interface DiagnosticSocket {
  *
  * `url` itself is NEVER logged (P3: the query carries the token on iOS); only the
  * host it was dialling, which is what Owner Q8 allows. The `error` and `close`
- * payloads are daemon/toolchain text (P4), so they go in as `detail` and are
- * redacted by the sink.
+ * payloads are daemon/toolchain text (P4) and reach NO field at all: `redact()`
+ * cannot tell prose from prose, so a path, a title or a prompt fragment in one of
+ * them would survive into a shared export (F16; review round 1, finding 2). What
+ * is logged is machine-readable only — the close CODE, and the error's CLASS
+ * (`errorShape`), never its message.
+ *
+ * Exported for its own test, which drives a socket that really does hand it
+ * canary text: the app has ONE such wrapper and it must stay text-free.
  */
-function withDiagnostics(Ctor: WebSocketCtor, log: AppLog): WebSocketCtor {
+export function withDiagnostics(Ctor: WebSocketCtor, log: AppLog): WebSocketCtor {
   return class {
     constructor(url: string, init?: unknown) {
       const ws = new Ctor(url, init) as DiagnosticSocket;
@@ -138,22 +144,32 @@ function withDiagnostics(Ctor: WebSocketCtor, log: AppLog): WebSocketCtor {
       }
       log.log("info", "dial", host === "" ? {} : { host });
       ws.addEventListener("error", (event) => {
-        const message = (event as { message?: unknown }).message;
-        log.log("error", "ws-error", {}, `error event: message=${JSON.stringify(message)}`);
+        // The CLASS only. A socket error's `message` is toolchain text about a URL
+        // (`WebSocket connection to 'wss://…?token=…' failed`), so it would carry
+        // both a path and the query — `errorShape` keeps the identifier, not it.
+        log.log("error", "ws-error", { ...errorShape((event as { error?: unknown }).error) });
       });
       ws.addEventListener("close", (event) => {
-        const { code, reason } = event as { code?: unknown; reason?: unknown };
-        log.log(
-          "warn",
-          "ws-close",
-          typeof code === "number" ? { code } : {},
-          `close event: reason=${JSON.stringify(reason)}`,
-        );
+        const { code } = event as { code?: unknown };
+        // No `reason`: a close reason is the peer's prose (P4), and it is exactly
+        // where a title or a prompt fragment would arrive from a daemon.
+        log.log("warn", "ws-close", typeof code === "number" ? { code } : {});
       });
       // biome-ignore lint/correctness/noConstructorReturn: an adapter returns the socket itself
       return ws as object;
     }
   } as unknown as WebSocketCtor;
+}
+
+/**
+ * A client error, as the log may carry it (F16): the CLASS and the numeric code,
+ * nothing else. `RemoteClient.onError` carries endpoint bodies, malformed frames
+ * and an unknown mandatory update's daemon-supplied `type`, so its `message` is
+ * daemon text and never reaches the ring (review round 1, finding 2). Exported
+ * for its own test: this is the mapping `onError` logs, and it must stay text-free.
+ */
+export function clientErrorFields(error: Error): Record<string, AppLogField> {
+  return { ...errorShape(error) };
 }
 
 /**
@@ -281,8 +297,9 @@ export async function openComputer(
     ...APP_CLIENT_OPTIONS,
     channelFactory: gate.dial,
     onError: (error) => {
-      // P4: a client error message can carry daemon text — the sink redacts it.
-      log.log("error", "client-error", {}, error.message);
+      // P4/F16: a client error message is daemon text (an endpoint body, a frame,
+      // a pod's own model name) — the CLASS and the code go in, the text does not.
+      log.log("error", "client-error", clientErrorFields(error));
       deps.onError?.(error);
     },
   });

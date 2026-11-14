@@ -17,7 +17,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@tentacle/agent";
-import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
+import { RemoteClient, type WebSocketCtor, webSocketChannelFactory } from "@tentacle/client";
 import { ChannelError } from "@tentacle/client";
 import { type ModelProvider, PermissionBroker } from "@tentacle/core";
 import {
@@ -36,7 +36,12 @@ import { createAppLog } from "../src/app-log.ts";
 import type { SecureKV } from "../src/computer-store.ts";
 import { createComputerStore } from "../src/computer-store.ts";
 import type { StoredComputer } from "../src/computers.ts";
-import { APP_CLIENT_OPTIONS, openComputer } from "../src/connection.ts";
+import {
+  APP_CLIENT_OPTIONS,
+  clientErrorFields,
+  openComputer,
+  withDiagnostics,
+} from "../src/connection.ts";
 import { sha256Hex } from "../src/hash.ts";
 import { createLinkDiagnoser } from "../src/link-diagnosis.ts";
 import type { RNWebSocketCtor } from "../src/rn-websocket.ts";
@@ -44,6 +49,10 @@ import { rnWebSocketCtor } from "../src/rn-websocket.ts";
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const TOKEN = "e2e-token";
+/** Canaries for the export test (F16): daemon-shaped prose a socket can really deliver. */
+const PROMPT = "CANARY-PROMPT deploy the secret";
+const TITLE = "CANARY-TITLE refactor the auth layer";
+const COMPUTER = "CANARY-COMPUTER-MacBook";
 const IOS_ORIGIN = "http://192.168.1.8:4001";
 const CWD = tmpdir();
 
@@ -501,6 +510,57 @@ describe("the socket diagnostics reach the injected sink (docs/feat/mobile-lock.
         await link.close();
       }
     });
+  });
+
+  test("a socket's canary close-reason and error text never reach the ring (F16)", () => {
+    // The app's ONE wrapper, driven by a fake socket that hands it exactly the
+    // daemon text a real one can (P4). Before the fix these went in as free
+    // `detail` text, and `redact()` cannot tell prose from prose: a title or a
+    // prompt fragment survived into the export (review round 1, finding 2).
+    const log = createAppLog({ now: () => 1_700_000_000_000, capacity: 200 });
+    const fired: Record<string, ((event: unknown) => void)[]> = {};
+    class FakeSocket {
+      addEventListener(type: string, listener: (event: unknown) => void): void {
+        fired[type] = [...(fired[type] ?? []), listener];
+      }
+    }
+    const Ctor = withDiagnostics(FakeSocket as unknown as WebSocketCtor, log);
+    new (Ctor as unknown as new (url: string) => unknown)(
+      `wss://example.local:8787/e2e?token=${TOKEN}`,
+    );
+    // What RN really delivers: a close with the peer's prose reason, an error
+    // carrying the failing URL (a path, and the token query on iOS).
+    for (const listener of fired.close ?? []) {
+      listener({ code: 1006, reason: `${PROMPT} ${TITLE} ${COMPUTER}` });
+    }
+    for (const listener of fired.error ?? []) {
+      listener({
+        error: new Error(`WebSocket connection to 'wss://h:1/${TITLE}?token=${TOKEN}' failed`),
+      });
+    }
+    const text = JSON.stringify(log.entries());
+    for (const canary of [TOKEN, PROMPT, TITLE, COMPUTER, "token="]) {
+      expect(text).not.toContain(canary);
+    }
+    // Non-vacuity: the entries exist and carry what IS allowed — the close code,
+    // the error class, the dialled host (Owner Q8).
+    expect(text).toContain('"dial"');
+    expect(text).toContain('"code":1006');
+    expect(text).toContain('"error":"Error"');
+  });
+
+  test("a client error logs its class and code, never the daemon's message (F16)", () => {
+    // `RemoteClient.onError` carries an endpoint body, a malformed frame, or an
+    // unknown mandatory update's daemon-supplied `type` — the exact channel a pod
+    // controls. The fields must stay machine-readable (review round 1, finding 2).
+    const plain = clientErrorFields(new Error(`${PROMPT} ${TITLE} ${COMPUTER}`));
+    expect(plain).toEqual({ error: "Error" });
+    const rpc = Object.assign(new Error(TITLE), { name: "RpcError", code: -32001 });
+    expect(clientErrorFields(rpc)).toEqual({ error: "RpcError", code: -32001 });
+    const text = JSON.stringify([plain, clientErrorFields(rpc)]);
+    for (const canary of [PROMPT, TITLE, COMPUTER]) {
+      expect(text).not.toContain(canary);
+    }
   });
 
   test("no console.log is left on the link's path (mutation: restore it → red)", async () => {

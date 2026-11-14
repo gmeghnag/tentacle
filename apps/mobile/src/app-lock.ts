@@ -155,6 +155,16 @@ function onLaunch(state: AppLockState): AppLockState {
 }
 
 function onLoaded(state: AppLockState, setting: LockDelay): AppLockState {
+  // A LAUNCH-time event: it decides what the first frame shows, nothing more.
+  // `App.tsx` re-dispatches it whenever its own setting state changes (a write
+  // that landed, an Owner Q6 auth that applied a pending delay), and re-running
+  // the launch episode there locked an already-unlocked app — the app re-covered
+  // itself and asked Face ID again under the person's finger (review round 1,
+  // finding 1). Later changes come through `setSetting`, which the reducer
+  // already got; once the setting is known this event carries nothing new.
+  if (state.setting !== "loading") {
+    return state;
+  }
   const next: AppLockState = { ...state, setting };
   // `never` is the ONE setting that shows content at launch (Owner Q1).
   if (setting === "never") {
