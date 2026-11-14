@@ -9,5 +9,5 @@
       "@tentacle/transport/relay-id": ["../../packages/transport/src/relay-id.ts"]
     }
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "deploy/**/*.ts"]
 }

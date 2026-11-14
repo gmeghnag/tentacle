@@ -1,0 +1,34 @@
+# Caddy site block for the mobile relay — relay.tentacle.so
+# (docs/feat/mobile-relay.md R7; runbook: docs/ops/relay-deploy.md)
+#
+# NOT APPLIED by any executor. Include it from the host's main Caddyfile:
+#
+#   # /etc/caddy/Caddyfile
+#   import /etc/caddy/relay.tentacle.so.caddy
+#
+# Caddy gets the certificate on its own (ACME/Let's Encrypt); there is no key to
+# install. The relay itself speaks plain ws:// on loopback and knows nothing
+# about TLS, so this file is the only place the public name appears.
+
+relay.tentacle.so {
+	# Everything — the daemon's control socket (/v1/daemon), the accept legs
+	# (/v1/accept), the phones (/d/<id>/e2e) and /healthz — is one reverse proxy.
+	# WebSockets are proxied transparently: Caddy upgrades on its own, so there
+	# is no route to configure per kind of leg.
+	reverse_proxy 127.0.0.1:4100 {
+		# The one thing to get right: a config RELOAD must not cut live sockets.
+		# Without this, `caddy reload` would close every relayed session (a phone
+		# would drop mid-turn). 5m > the relay's 60 s idle timeout, so a stream
+		# ends on its own before the delay can ever fire.
+		stream_close_delay 5m
+	}
+
+	# No CORS, no Origin check, no admin path: the app is a native client, the
+	# relay authorises nobody (AGENTS §7 "not trusted" — Noise authenticates
+	# both ends), and the only non-socket route is /healthz.
+	#
+	# Nor does the relay read X-Forwarded-For today: its per-IP limits key on the
+	# DIRECT peer, which behind this proxy is always 127.0.0.1. Sending the
+	# header would therefore change nothing, and `relay.service` sets the limits
+	# to their one-shared-key values instead (runbook, "Known limitations").
+}
