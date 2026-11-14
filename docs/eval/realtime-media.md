@@ -850,6 +850,77 @@ technical words ("typecheck", "parser", "branch").
 | `say-en-short.wav` | `say` Samantha | 5.05 s |
 | `say-en-long.wav` | `say` Samantha | 5.98 s |
 
+### OmniVoice (owner request)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (tentacle profile `deepseek`), 2026-11-14. Owner: "so che anche OmniVoice è molto valido
+come modello TTS". Verified, installed and measured under
+`.tentacle/tmp/eval-realtime-media/v0/` only (venv `env/omnivoice-venv/`,
+weights in `models/hf/`); raw logs `logs/omni_run.jsonl`, `mem_probe.jsonl`,
+`asr_check.jsonl`.*
+
+**It exists and it runs locally on Apple Silicon — but its weights are
+CC-BY-NC, which is a blocker for shipping.** Verified against the model card
+and repo (2026-11-14):
+
+| Fact | Value | Source |
+|---|---|---|
+| Model / repo | `k2-fsa/OmniVoice` (CLI `omnivoice`, PyPI `omnivoice` 0.2.1) | HF model card, GitHub `k2-fsa/OmniVoice` |
+| Authors | Han Zhu … Daniel Povey (k2-fsa / Johns Hopkins) | paper arXiv **2604.00688**, "Towards Omnilingual Zero-Shot TTS with Diffusion Language Models" |
+| Code license | **Apache 2.0** | model card, "License" |
+| **Weights license** | **CC-BY-NC** (non-commercial — "constraints from its training data, e.g. Emilia") | model card, "License" |
+| Size | 2.45 GB LM + 0.81 GB audio tokenizer ≈ **3.3 GB** on disk; base `Qwen/Qwen3-0.6B-Base` | `models/hf/hub/models--k2-fsa--OmniVoice` |
+| Languages | 600+; Italian **is** in the map (`"italian": "it"`, 655 entries) | `omnivoice/utils/lang_map.py:285` |
+| Local on Apple Silicon | **yes**, PyTorch **MPS** (`device_map="mps"`, torch 2.8.0); no MLX or ONNX port | model card "Apple Silicon"; no `mlx` extra in the wheel |
+| Modes | voice cloning (stable), voice design, auto — **design is trained on zh/en only** | repo, "Note" under voice design |
+
+Measured the E4 way (same 6 sentences, MPS fp32, `instruct="female, moderate
+pitch"`, box at load 12.9 — a *loaded* box, so upper bounds):
+
+| TTS | first audio p50 (it / en) | whole-utterance p50 | RTF | peak RSS | load | license |
+|---|---|---|---|---|---|---|
+| **OmniVoice** (16 steps) | **2 089 / 1 528 ms** | 2 062 ms | **0.55** | **2.55 GB** (+3.3 GB MPS) | 1.4 s | ✗ CC-BY-NC |
+| OmniVoice (8 steps) | 820 / 871 ms (it-1/en-1); 928 ms p50 over 6 | 928 ms | 0.27 | same | 1.4 s | ✗ CC-BY-NC |
+| **Kokoro** (`if_sara`/`af_heart`, ≤4-word chunk) | **290 / 237 ms** | — | **0.18** | 0.64 GB | 0.25 s | ✅ Apache-2.0 |
+| **`say`** (Alice/Samantha) | 334 / 338 ms | — | 0.53 | 0.03 GB | 0 s | ✅ system |
+
+**OmniVoice does not stream.** `generate()` returns `list[np.ndarray]` of
+*complete* audio — no `stream`/`chunk`/`yield` API (checked the signature and
+`dir(OmniVoice)`), so its TTFA is the whole synthesis and grows with text
+length, exactly Kokoro's limitation. Even at 8 steps on a 4-word clause
+("Ciao," / "Hi,") it is **476–484 ms** — **1.6–2.0× Kokoro's 237–290 ms**
+≤4-word p50 — and a 4-word clause is the *policy* that brings Kokoro into band.
+At 32 steps it is slower than real time here (RTF 0.98–1.25).
+
+**Intelligibility (whisper-turbo WER vs the source sentence, same metric as
+`asr_check.py`)** — OmniVoice is *better* on Italian than both:
+
+| | it (mean WER) | en |
+|---|---|---|
+| OmniVoice (8/16/32 steps, auto) | **0.056–0.071** | 0.000 |
+| Kokoro | 0.144 | 0.000 |
+| `say` | 0.116 | 0.000 |
+
+Italian is intelligible despite design mode being zh/en-trained — the *language*
+comes from `language=`, so it generalises; but that is the one thing ASR cannot
+judge, and Italian prosody/accent is the owner's ear call.
+
+**Samples for the owner** (`samples/omnivoice-{it,en}-{1,2,3}-s16.wav`, 24 kHz
+mono, same sentences as the Kokoro/`say` files): listen next to
+`kokoro-it-1.wav` and `say-it-1.wav`. Note `omnivoice-it-2.wav` is the sentence
+the `say`/Kokoro pass mangled ("parser" → "parsere").
+
+**Recommendation: Kokoro stays the default on-device TTS; OmniVoice is not
+adopted.** Three independent reasons, in order: **(1) CC-BY-NC weights** — the
+repo is Apache-2.0 but shipping the model in tentacle would make the product
+non-commercial, and that is a legal decision, not a benchmark one; **(2) TTFA**
+— 1.5–2.1 s vs 237–290 ms, i.e. 5–9× outside the §5 on-device 50–300 ms band, and it cannot stream, so no policy fixes it; **(3) memory** — 2.4–2.6 GB RSS
++ 3.3 GB MPS vs 0.64 GB. Its genuine win is **Italian intelligibility**
+(0.056 vs Kokoro's 0.144), which is worth a config option *if* the license is
+ever resolved (a commercial license, or a non-Emilia retrain) — as a
+`tts.engine: omnivoice` opt-in it would need the MPS torch stack (~1.5 GB
+installed) on every user's machine, so not on by default. `say` remains the
+zero-install fallback.
+
 ### Conclusion vs the §8 decision rule
 
 **B+ stays the realtime mode; C remains unmeasured, so §8's rule cannot fire.**
