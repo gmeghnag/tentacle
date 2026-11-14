@@ -3,10 +3,11 @@
  * makes the decomposition's own pins honest. Three claims, each red on the
  * pre-tidy tree (AGENTS §9):
  *
- *   1. **No dead import.** Every name `App.tsx` imports is used in its body or
- *      re-exported by name; the slices that moved code out left 28 behind, and
- *      `tsc` cannot see them (`noUnusedLocals` is off, `biome.json` does not
- *      enable `noUnusedImports`), so the scan has to.
+ *   1. **No dead import.** Every name `App.tsx` imports is bound to a use in
+ *      its body or re-exported by name; the slices that moved code out left 32
+ *      behind, and `tsc` cannot see them (`noUnusedLocals` is off, `biome.json`
+ *      does not enable `noUnusedImports`), so the scan has to. A mention in a
+ *      COMMENT is not a use — four of the 32 were only that.
  *   2. **No stale effect count.** `App` declares 22 effects (the original 20 plus
  *      session-hop's two — `targetFeed`'s subscription and the idle
  *      `hopIfQueued`), while the source comments and the structure tests' titles
@@ -15,7 +16,9 @@
  *   3. **No orphaned move-fragment.** One sentence fragment survived a move.
  *
  * Non-vacuity: (1) re-add an unused import → red; (2) write "the 20 below" back
- * → red; (3) restore the fragment → red. Each was checked by mutation.
+ * → red; (3) restore the fragment → red. Each was checked by mutation. Plus the
+ * scan's own control cases (a dead name, a re-export, a comment-only name, a
+ * string-only name, an alias, a template expansion), each mutation-checked too.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
@@ -24,18 +27,35 @@ import { join } from "node:path";
 const SRC = join(import.meta.dir, "..", "src");
 const readSrc = (name: string): string => readFileSync(join(SRC, name), "utf8");
 
-/** The names an import statement brings in (`type` prefix dropped, `as` kept left). */
+/**
+ * The names an import statement BINDS: `type` prefix dropped, and for
+ * `x as y` only `y` (the local name; `x` is the module's, not ours).
+ */
 const namesOf = (spec: string): string[] =>
   spec
     .split(",")
-    .map((raw) => raw.trim().replace(/^type\s+/, ""))
+    .map((raw) =>
+      (
+        raw
+          .trim()
+          .replace(/^type\s+/, "")
+          .split(/\s+as\s+/)
+          .pop() ?? ""
+      ).trim(),
+    )
     .filter((name) => name !== "");
 
 /**
  * Imported name → used? The import statements are blanked out first (same
  * length, so positions survive), then the name is looked for in what is left.
  * A `export type { X }` / `export { X }` block counts as a use — it is one — and
- * blanking only the `import …` statements is what keeps them counted.
+ * blanking only the `import …` statements is what keeps them counted. A
+ * `export … { X } from "./m.ts"` does NOT (see `blankReexportFrom`).
+ *
+ * Comments and quoted strings are blanked too, because neither is a use: this
+ * file's comments name identifiers everywhere, so a name whose last mention is a
+ * comment ("`refreshMs`, `JOB_REFRESH_MS` unless a test shortens it") is dead.
+ * Review round 1 finding 1 was exactly that — four names passed only that way.
  */
 function unusedImports(src: string): string[] {
   const importRe =
@@ -54,7 +74,112 @@ function unusedImports(src: string): string[] {
     blanked =
       blanked.slice(0, m.index) + " ".repeat(m[0].length) + blanked.slice(m.index + m[0].length);
   }
-  return names.filter((name) => !new RegExp(`(?<![\\w$])${name}(?![\\w$])`).test(blanked));
+  const code = withoutCommentsAndStrings(blankReexportFrom(blanked));
+  return names.filter((name) => !new RegExp(`(?<![\\w$])${name}(?![\\w$])`).test(code));
+}
+
+/**
+ * A re-export WITHOUT `from` (`export { X }`, `export type { X }`) USES the
+ * local binding; one WITH `from` (`export { X } from "./m.ts"`) publishes the
+ * module's own export and leaves our `import` of `X` dead — Biome's
+ * `noUnusedImports` caught four of those (`HopFeed`, `HopPlaceView`,
+ * `SettingsNoticeLine`, `TargetFeed`) that this scan had cleared. So the
+ * `from` form's braces are blanked like an import statement's.
+ */
+function blankReexportFrom(src: string): string {
+  const re = /^export\s+(?:type\s+)?\{[^{}]*\}\s+from\s+"[^"]+";/gm;
+  let out = src;
+  for (const m of src.matchAll(re)) {
+    out = out.slice(0, m.index) + " ".repeat(m[0].length) + out.slice(m.index + m[0].length);
+  }
+  return out;
+}
+
+/**
+ * Blank comments and quoted literals (and a regex literal's pattern) to spaces,
+ * keeping the length and every newline, so the result can be searched by
+ * position. One pass, because a `//` inside a string and an apostrophe inside a
+ * comment each defeat doing the two with separate regexes.
+ *
+ * A template literal's `${…}` is CODE, not string: `\`_${hopFailureText(e)}_\``
+ * is a use of `hopFailureText` (blanking it reported a live import as dead —
+ * seen while fixing this). So a template's expansions are left uncut and the
+ * text between them is blanked.
+ */
+function withoutCommentsAndStrings(src: string): string {
+  const out = src.split("");
+  const blank = (from: number, to: number): void => {
+    for (let k = from; k < to && k < src.length; k += 1) {
+      if (src[k] !== "\n") out[k] = " ";
+    }
+  };
+  /** Index just past the quote closing the literal opened at `from`. */
+  const closeOf = (from: number, quote: string): number => {
+    let k = from + 1;
+    while (k < src.length && src[k] !== quote) k += src[k] === "\\" ? 2 : 1;
+    return k;
+  };
+  /** Blank a template's literal text up to its closing backtick, expansions kept. */
+  const template = (from: number): number => {
+    let k = from + 1;
+    while (k < src.length && src[k] !== "`") {
+      if (src[k] === "\\") {
+        blank(k, k + 2);
+        k += 2;
+      } else if (src[k] === "$" && src[k + 1] === "{") {
+        blank(k, k + 2);
+        k = expansion(k + 2);
+      } else {
+        blank(k, k + 1);
+        k += 1;
+      }
+    }
+    return k + 1;
+  };
+  /** Walk an expansion's code to its closing `}`; returns the index past it. */
+  const expansion = (from: number): number => {
+    let depth = 1;
+    let k = from;
+    while (k < src.length && depth > 0) {
+      const c = src[k];
+      if (c === "{") depth += 1;
+      else if (c === "}") depth -= 1;
+      else if (c === "`") {
+        k = template(k);
+        continue;
+      } else if (c === '"' || c === "'") {
+        k = closeOf(k, c) + 1;
+        continue;
+      }
+      k += 1;
+    }
+    return k;
+  };
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    const next = src[i + 1];
+    if (c === "/" && next === "/") {
+      const end = src.indexOf("\n", i);
+      const stop = end === -1 ? src.length : end;
+      blank(i, stop);
+      i = stop;
+    } else if (c === "/" && next === "*") {
+      const end = src.indexOf("*/", i + 2);
+      const stop = end === -1 ? src.length : end + 2;
+      blank(i, stop);
+      i = stop;
+    } else if (c === "`") {
+      i = template(i);
+    } else if (c === '"' || c === "'") {
+      const close = closeOf(i, c);
+      blank(i + 1, close);
+      i = close + 1;
+    } else {
+      i += 1;
+    }
+  }
+  return out.join("");
 }
 
 describe("S14: App.tsx imports nothing it does not use", () => {
@@ -77,6 +202,42 @@ describe("S14: App.tsx imports nothing it does not use", () => {
     ].join("\n");
     // `AlsoDead` is re-exported by name, so it counts as used — one dead name.
     expect(unusedImports(sample)).toEqual(["dead"]);
+  });
+
+  // The two ways this scan was fooled once (review round 1, finding 1): a name
+  // mentioned only in a COMMENT is dead (a comment is not a use — this file's
+  // comments name identifiers everywhere), and a name a `export … { X }` block
+  // publishes is used even when it sits among the imports.
+  test("the scan is not fooled by a comment-only name, and keeps a re-export", () => {
+    const sample = [
+      'import { reexported } from "./a.ts";',
+      'import { commentOnly } from "./b.ts";',
+      'import { reallyDead } from "./c.ts";',
+      'import { theirName as ourName } from "./d.ts";',
+      'import { inATemplate } from "./e.ts";',
+      'import { inAString } from "./f.ts";',
+      'import { reexportedFrom } from "./g.ts";',
+      "export type { reexported };",
+      "// `commentOnly` is named here, and nowhere else.",
+      "/* reallyDead is named here too. */",
+      "const x = ourName;",
+      "const t = `_" + "${inATemplate}" + "_`;",
+      'const s = "inAString";',
+      'export type { reexportedFrom } from "./g.ts";',
+      "",
+    ].join("\n");
+    // `theirName` is the module's name; only the local `ourName` is bound here,
+    // so the alias must not be reported dead (nor mask a dead real name). A
+    // template expansion is code, a string literal is not. And a re-export
+    // WITH `from` publishes the module's own export, not our import binding
+    // (`reexportedFrom` at :106 in App.tsx was dead for exactly that reason),
+    // while one WITHOUT `from` does use the local binding.
+    expect(unusedImports(sample)).toEqual([
+      "commentOnly",
+      "reallyDead",
+      "inAString",
+      "reexportedFrom",
+    ]);
   });
 });
 

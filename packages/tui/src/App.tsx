@@ -12,13 +12,7 @@ import { useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { AppView } from "./AppView.tsx";
 import { frameLayout } from "./app-layout.ts";
-import {
-  type AttachDraft,
-  EMPTY_DRAFT,
-  NOT_AN_IMAGE_NOTICE,
-  removeLastChip,
-  uploadDone,
-} from "./attach-draft.ts";
+import { type AttachDraft, EMPTY_DRAFT, removeLastChip, uploadDone } from "./attach-draft.ts";
 import { type AttachedImage, type FileProbe, nodeFileProbe } from "./attach-files.ts";
 import {
   type DockOutcome,
@@ -47,7 +41,7 @@ import { HOP_QUEUED_NOTICE, type HopSpec, hopStep, parseHopCommand } from "./hop
 import { hopFailureText, hopMovedNotice, hopPlaceText, hopStatusRow } from "./hop-status.ts";
 import { startIdleWarm } from "./idle-warm.ts";
 import { resolveLineInput } from "./input-actions.ts";
-import { JOB_REFRESH_MS, JOB_TAIL_SHOWN, jobOutcome, refreshDue } from "./job-drawer.ts";
+import { JOB_TAIL_SHOWN, jobOutcome, refreshDue } from "./job-drawer.ts";
 import { type KeyHost, executeEffects } from "./keys/execute.ts";
 import { PURE_LAYERS } from "./keys/layers.ts";
 import { routeKey } from "./keys/route.ts";
@@ -77,7 +71,6 @@ import { runChunked } from "./run-chunked.ts";
 import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
 import type { Selection } from "./selection.ts";
 import { withRestored } from "./send-now.ts";
-import { sessionsChoose, switchingRefusal } from "./sessions-panel.ts";
 import { SkillsSync } from "./skills-sync.ts";
 import {
   type DisplayItem,
@@ -93,18 +86,10 @@ import type { ContextOpen } from "./status-view.ts";
 
 import { type SessionActivity, warmFailureNotice } from "./turn-feed.ts";
 
-// `AppProps`/`SessionController`/`SettingsNoticeLine` are used here; the rest are
-// re-exported so every existing importer (`../src/App.tsx`) keeps working.
-import type {
-  AppProps,
-  HopFeed,
-  HopPlaceView,
-  HopRun,
-  HopTargetView,
-  SessionController,
-  SettingsNoticeLine,
-  TargetFeed,
-} from "./app-types.ts";
+// `AppProps`/`SessionController`/`HopRun`/`HopTargetView` are used here; the rest
+// are re-exported below so every existing importer (`../src/App.tsx`) keeps
+// working — a `from` re-export publishes the module's export, not this import.
+import type { AppProps, HopRun, HopTargetView, SessionController } from "./app-types.ts";
 
 export type {
   AppProps,

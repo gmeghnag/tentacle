@@ -252,7 +252,8 @@ the number the comments quote moved.
 
 **The ≲ 800 target, re-measured at S14 (and restated, not met).** After S0–S10
 (and session-hop) `App.tsx` is **1,942 lines** (`main` @ S14: 1,978), of which
-**1,410 are non-comment, non-blank** and **475 are comment**: 22 effect bodies
+**1,410 are non-comment, non-blank** and **475 are comment** (after Fix round 1:
+**1,937 / 1,404 / 476**): 22 effect bodies
 (271 code lines), 60 hook calls whose argument is a port object (453 code lines
 — `useTurnDriver`'s alone is 55 fields), and ~500 code lines of props intake,
 ref installs (`xRef.current = x`), port-construction callbacks and the ONE
@@ -4916,7 +4917,13 @@ Review that red-teams key precedence (`app-keys-precedence.test.tsx`).
 
 ### S14 — `feat/app-decomp-14-tidy` (the tidy: honest imports, honest counts, an honest target)
 
-*— claude-opus-5-5, 2026-11-14 (executor, `feat/app-decomp-14-tidy`, cut from `main` @ `9418363d`)*
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14 (executor, `feat/app-decomp-14-tidy`, cut from `main` @ `9418363d`)*
+
+> **Signature corrected in fix round 1.** This section was signed
+> `claude-opus-5-5` when it was written; the commit is `8c06436f` `exec
+> (deepseek)` and the orchestrator's `night-task.sh` runs an executor through
+> its `ds()` branch (`~/bin/tentacle --profile deepseek`) unless `EXEC=opus`,
+> which the chain script sets for S12 only. The real id is above.
 
 The slice is the table's row 4, nothing else: drop the dead imports and the one
 move-fragment; make every "20 effects" say 22 and name where the extra two came
@@ -4955,6 +4962,16 @@ else on the list was disputed, and every survivor (`initialState`, `withRestored
 re-checked in the body, because a sweep that trusts a regex over a name it did
 not re-read is the S9b failure.
 
+> **Fix round 1 correction: 32, not 28.** That "re-checked in the body" claim
+> was false for four names — `NOT_AN_IMAGE_NOTICE`, `JOB_REFRESH_MS`,
+> `sessionsChoose`, `switchingRefusal` — whose only remaining mention was a
+> COMMENT, which the scan counted as a use (review finding 1). Biome's
+> `noUnusedImports` then found a fifth class: `HopFeed`, `HopPlaceView`,
+> `SettingsNoticeLine`, `TargetFeed` were imported locally *and* re-exported
+> with `export … { X } from "./app-types.ts"`, which publishes the module's own
+> export and leaves the import dead. So the true count was **32**, and both
+> classes are gone now (see Fix round 1 below).
+
 **Implementation, in dependency order.**
 
 1. **New test first (red), `packages/tui/test/app-tidy-structure.test.ts`** —
@@ -4989,7 +5006,8 @@ not re-read is the S9b failure.
 alternative).** `App.tsx` is **1,941 lines** on this branch (`main`: 1,978) by
 `wc -l`, **1,942** as the measurement script counts it (`split("\n")` adds the
 trailing empty string), of which **1,410 are non-blank non-comment** and **475
-are comment**.
+are comment**. *(Fix round 1 dropped four more dead imports: 1,936 / 1,937 /
+1,404 / 476, and the shape tallies below are unchanged — see Fix round 1.)*
 By top-level statement (indent-2 start to the next one, `measure9.ts`):
 22 `useEffect` bodies = 389 lines / 271 code; 60 hook calls whose argument is one
 port object = 635 lines / 453 code; the remaining 103 statements (props intake,
@@ -5097,3 +5115,112 @@ slice, not this one). Nothing of S11/S12/S13 was started.
 **Mutation:** I did not repeat M1–M3 on the tracked file. The in-test control (`dead` is reported, a re-exported name is not) shows the scan is not vacuous for import-only cases. Finding 1 shows the opposite for comment-mentioned names.
 
 **Executor behaviour:** careful and honest about the 29→28 drift and the missed ≲800 target. But the "every survivor re-checked in the body" claim did not hold for 4 names.
+
+### Fix round 1
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14 (executor, fix round 1
+of `feat/app-decomp-14-tidy`; real id: this run's parent process is
+`/Users/gmeghnag/bin/tentacle --profile deepseek`, whose `model.model` is
+`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in `~/.config/tentacle/config.jsonc`)*
+
+All three findings fixed; no code behaviour touched.
+
+**Finding 1 (MEDIUM) — the "no dead import" scan was fooled by comments. FIXED.**
+Two blind spots, not one, and the second was found by using Biome as an
+independent oracle rather than trusting my own scan.
+
+1. *Comments and strings counted as uses.* Killed by blanking them before the
+   `\b` search (`withoutCommentsAndStrings`, one length-preserving pass; a `//`
+   inside a string and an apostrophe inside a comment each defeat doing it with
+   two separate regexes). `App.tsx` then reported the reviewer's four:
+   `NOT_AN_IMAGE_NOTICE`, `JOB_REFRESH_MS`, `sessionsChoose`, `switchingRefusal`.
+2. *A template's `${…}` is code.* The first version of the blanker over-blanked
+   and reported a **live** import, `hopFailureText` (used at `App.tsx:1410` in
+   `` `_${hopFailureText(error)}_` ``) as dead — a false positive caught by
+   reading the two extra names it produced instead of accepting the count (the
+   S9b discipline). The blanker now walks a template's expansions as code and
+   blanks only the literal text between them.
+3. *`export … { X } from "./mod.ts"` is not a use of our import of `X`.* Biome's
+   `noUnusedImports` flagged four more after the above (`HopFeed`,
+   `HopPlaceView`, `SettingsNoticeLine`, `TargetFeed` at `App.tsx:98,99,103,104`):
+   the file both imports them from `app-types.ts` and re-exports them **with
+   `from`**, which publishes the module's export and leaves the local binding
+   dead. `blankReexportFrom` blanks the `from` form's braces; the
+   `export type { AutoAcceptFeed }` form (no `from`) still counts, so the S14
+   re-export stays honoured. Also hardened per the reviewer's latent note:
+   `namesOf` now binds the LOCAL name of `x as y` (`x` was reported dead).
+
+So the count is **32, not 28** (the reviewer's 4 + Biome's 4), and all 32 are
+gone. The `App.tsx` diff is those names only — no reordering, no unrelated
+reformatting (Biome's own formatter collapsed two import statements it wants on
+one line).
+
+**Finding 2 (MEDIUM) — changelog fragment for internal-only work. FIXED.**
+`changelog.d/app-decomp-14-tidy.changed.md` deleted (untracked; `git status`
+shows it as `D`). AGENTS §10: dev/test-only work adds no fragment, and the
+fragment itself ended "No user-visible behaviour changes."
+
+**Finding 3 (MEDIUM) — the executor signature. FIXED (corrected).**
+The S14 section now reads `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`, with a
+note recording the correction. Evidence: `.tentacle/tmp/orchestration/night-task.sh`
+runs an executor through `ds()`, which invokes `~/bin/tentacle --profile
+deepseek` *unless* `EXEC=opus` — and `chain-app-decomp-followups.sh` sets
+`EXEC=opus` for S12 only. This round's own process tree (`ps`) shows the same
+`~/bin/tentacle --profile deepseek` parent. I could not recover the round-1
+session file to quote its `model` field (`~/.config/tentacle/sessions` holds no
+record of this slug; two search strategies, then stopped per §0), so the id is
+derived from the launcher, which is how this doc's other exec signatures are
+derived.
+
+**Red before green (AGENTS §9).** The new control case was red on the unfixed
+scan with `Expected ["commentOnly","reallyDead","inAString","reexportedFrom"] /
+Received []`, and the real-file pin was red listing the four names; then green.
+The `from`-re-export assertion was red on the comment-fixed scan alone
+(`- "reexportedFrom" / + Received + 0`) before `blankReexportFrom` existed.
+
+**Mutation checks.** Each applied to the tracked file, the S14 test re-run, then
+reverted with the file confirmed byte-identical by `md5`
+(`ac21dcc438ac2f6df088feaf0228e5ce` at mutation time; the final tree's is
+`aa54c4dff215349b2fdffadc2b27bf85` — Biome's formatter then collapsed two
+import statements to one line, which is formatting, not a name):
+
+| # | Mutation | Result |
+|---|---|---|
+| M4 | re-add `NOT_AN_IMAGE_NOTICE` (comment-only) | `(a)` FAILS listing it; other 4 pass |
+| M8 | re-add `HopFeed` to the local import (`from`-re-exported) | `(a)` FAILS listing it; other 4 pass |
+| M9 | re-add `JOB_REFRESH_MS` (comment-only) | `(a)` FAILS listing it; other 4 pass |
+| M5 | `namesOf`: alias kept left (pre-fix) | the control case FAILS; other 4 pass |
+| M6 | stop blanking quoted literals | the control case FAILS; other 4 pass |
+| M7 | treat `${…}` as string text | `(a)` FAILS (`hopFailureText`) **and** the control FAILS |
+
+So each blind spot has a pin that dies on it, and the template false positive is
+pinned in both directions. `bunx biome lint --only=correctness/noUnusedImports
+packages/tui/src/App.tsx` → clean, agreeing with the scan. The whole `tui/src`
+still shows 6 pre-existing `noUnusedImports` warnings (`background-focus.ts`
+×2, `useTurnDriver.ts`, `read-highlight.ts`, `useSessionLink.ts`,
+`terminal-background-probe.ts`) — all present on `main` (checked file by file),
+outside this row's `App.tsx` scope, left alone.
+
+**Gate, on the final tree.**
+
+```
+$ bunx tsc --noEmit                                   → OK (no output)
+$ bunx tsc -p apps/mobile && bunx tsc -p apps/relay   → OK
+$ bun run lint   (biome check .)                      → Checked 1324 files … No fixes applied
+$ bun test                                            → 9530 pass / 3 skip / 0 fail
+                                                        13 snapshots, 77871 expect() calls
+                                                        9533 tests across 687 files (392s)
+   (the 3 skips are the documented opt-ins, as on main; after the last two
+    doc/test-comment edits I re-ran the 9 touched files → 61 pass / 0 fail, and
+    `bun run lint` → 1324 files, no fixes; nothing else in the tree moved)
+```
+
+**Drift / notes.** The reviewer's "then the count is 32, not 28" was right in
+number but reached by one class only; the second class (Biome's) means the
+original 28 was blind twice over, so the S14 section's "every survivor
+re-checked in the body" claim is annotated where it stands rather than
+rewritten. The measurement numbers in the S14 section and in the plan are
+annotated with the post-fix values (1,937 as the script counts it / 1,936 by
+`wc -l`, 1,404 code, 476 comment); the shape tallies (22 effects, 60 hook calls,
+103 other statements) are unchanged, which re-proves the fix removed imports
+only.
