@@ -1,6 +1,6 @@
 # feat/mobile-live-activity — Live Activity / Dynamic Island: push-to-start, end-to-end encrypted updates, the 8 h cap (mobile task 18)
 
-> **Status:** implementation (plan written, **not approved**; see Owner questions)
+> **Status:** implementation APPROVED by the owner (2026-11-14)
 > **Branch:** `feat/mobile-live-activity` (this doc). Slices L0–L12 run **in order on this branch**, one commit per slice on the owner's OK, each gated by its narrow tests (AGENTS §4); full gate + `bun run e2e:mobile` before Review. **Starts only after task 17 (`feat/mobile-notifications`) is merged** (Owner Q9): it reuses task 16's push crypto, relay `push` frame, `PushNotifier` hook and push store, and task 17's NSE `PushCore` Swift, push-directory Keychain item, `gate.hold()` and answer coordinator.
 > **Size:** L as a whole, split into S/M slices (table below) · **Blast:** load-bearing for L7/L8 (they widen task 16's hook in the session's `emit` path and add device-principal methods); the rest is `contained`/`cross-module`. The eval row says "L · cross-module"; re-sized because of L7/L8. · **Suited:** L7, L8 → strong executor + mandatory fresh-context Review red-teaming "a relay/pod is not trusted", "one session path", "don't serialize the RPC peer", the steering no-await window and "a decision is only a person's". L10 (Swift widget + native module) and L11's action path are security-relevant → strong executor. L1, L2, L3, L5, L9, L12 are S and fit a weaker executor (DeepSeek); L4, L6 are M `contained`. The owner assigns executors.
 > **Changelog:** `changelog.d/mobile-live-activity.added.md` (L12): `- **Live Activity and Dynamic Island on iPhone.** A running turn shows on the lock screen and in the Dynamic Island (project, session, current tool, elapsed time), an approval waiting shows Approve / Deny, and a finished turn stays for a few minutes. Turns started on another device start it by themselves. Updates are end-to-end encrypted: Apple and the relay see only opaque bytes.`
@@ -476,6 +476,12 @@ model sleeping) rolls over without a gap; dismiss → no restart; airplane mode
    LA support to 142.132.169.22, owner-approved) and D5 (real-device
    checklist) are owner-only?** **Rec: yes** — no executor touches Apple's
    console or the server.
+
+#### Owner decisions (2026-11-14)
+
+All nine questions: the recommendation (owner: "Tutte come raccomandato").
+Execution starts after task 17 (mobile-notifications) is merged. *—
+claude-opus-5-5 (orchestrator), 2026-11-14*
 
 ## Execution
 
