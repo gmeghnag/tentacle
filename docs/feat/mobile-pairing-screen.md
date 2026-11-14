@@ -915,3 +915,19 @@ Owner asleep, delegated: every Owner question above is decided with its RECOMMEN
 - The harness hooks bind to `127.0.0.1`. No `EXPO_PUBLIC_TENTACLE_*` is left in the app.
 
 **Executor behaviour:** a thorough and honest Execution. Drift is recorded with reasons, ME2's first vacuous test is admitted, and the blocked `15-revoked` flow is stated, not glossed. The `15-revoked` gap matters more after finding 1. That flow stops at `computer-state-<id>-revoked` and never exercises "Pair again", and `pairing-e2e` calls `openComputer` directly, bypassing `LINKS`. So the one path that breaks was covered by neither.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14 (fresh context; reviewed `git diff HEAD~1` = c3728d6)*
+
+**Verdict: APPROVE.** Both round-1 findings are fixed, and each fix is shown not to be vacuous by mutation.
+
+**Gate:** `bun test apps/mobile` 566 pass · 0 fail (46 files); `bun run typecheck` clean; `bun run lint` 1188 files, 0/0.
+
+1. **Finding 1 (HIGH, stale link after a re-pair): FIXED.** `App.tsx` `onDone(computerId)` now calls `withForgottenRecord(MEMORY, id, reload)` (`src/computer-memory.ts`), which releases the link (a detach) and drops the diagnoser and the cached record before `reload()` dials again. `onRemove` now goes through the same step. The id comes from `PairingOutcome`, which is now a discriminated union, so a fresh pairing is covered too. The new `pairing-e2e` test "REVOKE → 'Pair again' recovers" runs against a real daemon: real `revokeCommand`, re-pair, then the app's own `link-registry`, and it checks that the link was dialled with the NEW key.
+   - *Mutation:* dropping `links.release` in `forgetComputer` → RED (`pairing-e2e` recovery test, `forgetComputer` stale-link test, `withForgottenRecord` order test).
+   - *Mutation:* `onDone` as a bare `reload()` → RED (`pairing-wiring-guards`). This guard is a text match on `App.tsx`, which is weak but acceptable: RN's Flow sources make `App.tsx` impossible to import into a test.
+2. **Finding 2 (MEDIUM, success reset not pinned): FIXED.** The new `connection.test.ts` case carries a two-attempt streak into `openComputer` and asserts both `ok` and the cleared streak.
+   - *Mutation:* deleting `diagnosis.ok()` → RED.
+
+**Regressions checked:** Remove still releases the link before `SOURCE.remove` (a detach, never `session/close`), and forgetting a computer with no state is a no-op that leaves other computers alone. No §7 seam changed: the session path, broker and store are untouched. All mutations reverted; `git status` clean.
