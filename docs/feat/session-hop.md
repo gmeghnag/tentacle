@@ -1777,3 +1777,90 @@ Gate: `bun run typecheck` → 0. `bun run lint` → 1248 files, clean. `bun test
 **Unverified:** a session created by a hop TUI (`hop: true`) and later joined by a plain `tentacle attach` TUI keeps the tool, and that TUI has no feed to ask through. This only matters if a hop container's daemon is resident (sessions outliving the exec). To verify: check whether `startEngineRuntime`'s container daemon is the resident one.
 
 **How the executor behaved:** it addressed all four findings with real tests (3 of 4 tests kill their mutation). It missed the one wiring line that carries fix 2 into the real `main`, which is the same "proven on a seam, not on the real path" pattern as round 1.
+
+### Fix round 2 — the H5 review round 2's MEDIUM findings
+
+*— claude-opus-5-5, 2026-11-14*
+
+Scope: the two MEDIUMs of `### Round 2` (H5) above, and nothing else. Both were
+"proven on a seam, not on the real path". Red before green (§9), one mutation
+per fix, each run on the final tree and restored with md5 printed.
+
+**Finding 1 (MEDIUM) — the production `build` dropped `opts`, so an approved
+proposal still re-asked the mount gate. FIXED.**
+
+*Reproduced first, empirically, before any edit* (`.tentacle/tmp/session-hop/rev2-f1.ts`,
+the two lambdas side by side over the real `createHopTargets`, a `SpyBroker`, and
+a `SYSTEM` cwd `/etc` whose gate asks):
+
+```
+main.ts lambda  → asks: 1 | not moved: no such image: nope
+opts forwarded  → asks: 0 | not moved: no such image: nope
+```
+
+The bug is exactly the review's: a lambda with FEWER parameters type-checks, so
+`main.ts`'s `(spec, sharedPair, sessionId) => createHopTargets({…})(spec, sessionId)`
+silently discarded the 4th argument, `gateAnswered` never reached
+`containerTarget`, and the owner answered the same gate twice.
+
+The fix is the review's "extract the build lambda so it can be tested":
+**`hopBuilder(deps)`** (`hop-targets.ts:105`) is the facade's `build`
+signature over deps that outlive it, and `main.ts:2099` now passes
+`build: hopBuilder({…})` — the forwarding exists in ONE named place instead of
+an untestable closure, so a change to it is a change to a tested function.
+
+*Red first:* two rows in `session-hop-targets.test.ts` — through `hopBuilder`,
+`gateAnswered: true` gives **0** broker asks, and a typed `/move` (no opts)
+still gives its **1** `session_hop` ask. *Mutation* (`hopBuilder` reduced to the
+pre-fix three-parameter shape): **1 fail**, `a build made through hopBuilder does
+not re-ask a gate the owner answered`; restored, md5 `13fe9b3c…` unchanged.
+
+*And the call site is pinned,* because that is what the review found missing and
+a seam test alone cannot see it — `grep-guard: main wires build: hopBuilder(…),
+never a lambda` (`session-hop-targets.test.ts`, the pattern
+`workspace-mount.test.ts` already uses for `hideList`). *Mutation:* `main.ts`
+back to `build: (spec, sharedPair, sessionId) => hopBuilder({` → **1 fail**;
+restored, md5 `37150c76…` unchanged.
+
+**Finding 2 (MEDIUM, §9) — the laptop half of the hop capability was not
+pinned. FIXED.**
+
+The review's mutation was real: dropping `hop: true` from both hop targets left
+`packages/cli` at 2355 pass / 0 fail. So a hop target could stop declaring the
+capability and the tool would silently vanish from every hop session — the
+inverse of finding 1 of round 1, and just as silent.
+
+Pinned through the **real chain** the review named
+(`engine-runtime` → `createLocalRuntime` → `initialize` → daemon): the H4 rig's
+fake host already binds `openExec` to an actual `SessionHost` + `Connection`, so
+`createAgent`'s `context.hop` is a genuine end-to-end observable. Three rows in
+`session-hop-targets.test.ts` (`log.hops` is that recorder):
+
+- a hop **container**'s session reaches its daemon with `hop` declared;
+- an **attach** target's does too;
+- non-vacuity: the same runtime built WITHOUT `hop` declares nothing (a `run`'s
+  shape), so the declaration provably comes from the hop target.
+
+*Red first:* these rows fail on the mutated code, not on a compile error — see
+the mutations. *Mutations:* drop both `hop: true` declarations in
+`hop-targets.ts` (the review's own) → **2 fail**; drop
+`engine-runtime.ts`'s forward → **1 fail**; make
+`local-runtime.ts` declare unconditionally (`hop: true`, the shape that would
+re-break round 1's finding 1 from the laptop side) → **1 fail**, the
+non-vacuity row. Each restored; md5 `13fe9b3c…` / `b94377af…` / `2cd9a046…` unchanged.
+
+**No drift from the Implementation.** Both fixes are additive: `hopBuilder` is a
+new export over the existing `createHopTargets`, and no wire, on-disk or
+`PROTOCOL_VERSION` surface moved (D10 untouched). No changelog fragment is added
+this round — the user-visible behaviour is the one `session-hop.changed.md`
+already states, and round 2 changed where the decision is carried, not what it is.
+
+**Nit left, deliberately:** the review's `gateWarnings`-is-dead note
+(`HopPromptFacts`) is cosmetic and outside both findings; it stays in Review's
+notes/debt for the next task that touches `hop-proposal.ts`.
+
+**Gate:** `bunx tsc --noEmit` → 0 · `bun run lint` → `Checked 1248 files`, 0
+errors / 0 warnings · `bun test` → **9211 pass, 3 skip (the documented opt-ins:
+live-k8s, live-docker, the real-socket keepalive), 0 fail** across 667 files.
+
+*— claude-opus-5-5, 2026-11-14*

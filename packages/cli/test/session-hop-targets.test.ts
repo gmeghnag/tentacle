@@ -45,9 +45,10 @@ import type {
   WorkloadState,
 } from "../src/engine-host.ts";
 import type { EngineRuntime } from "../src/engine-runtime.ts";
-import { type HopEngineHost, createHopTargets } from "../src/hop-targets.ts";
+import { type HopEngineHost, createHopTargets, hopBuilder } from "../src/hop-targets.ts";
 import { readKept } from "../src/kept-index.ts";
 import { KEPT_LABEL } from "../src/kept.ts";
+import { createLocalRuntime } from "../src/local-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 import { simulateSilentTerminal } from "./silent-terminal.ts";
 
@@ -93,6 +94,13 @@ afterEach(async () => {
 /** What a fake host recorded, and the switches a test turns. */
 interface FakeHostLog {
   readonly calls: string[];
+  /**
+   * The `hop` fact each agent build received, in order (H5 review round 2,
+   * finding 2). The daemon sees it only if this runtime's CLIENT declared
+   * `clientCapabilities.hop` in `initialize` — i.e. if the hop target really
+   * carries `hop: true` down to `createLocalRuntime`.
+   */
+  readonly hops?: boolean[];
   /** Fail `create` (a pull/engine failure): the hop must report, not crash. */
   failCreate?: Error;
   /** What `describe` says (the verified delete's pre-read); `null` = gone. */
@@ -144,10 +152,13 @@ function fakeHost(log: FakeHostLog): EngineHost {
       const [daemonCh, clientCh] = createChannelPair();
       const host = new SessionHost({
         defaultCwd: "/pod/work",
-        createAgent: () => ({
-          agent: new Agent({ model: new Reply(), tools: new ToolRegistry(), env }),
-          permissions: new PermissionBroker(),
-        }),
+        createAgent: (_cwd, context) => {
+          log.hops?.push(context.hop === true);
+          return {
+            agent: new Agent({ model: new Reply(), tools: new ToolRegistry(), env }),
+            permissions: new PermissionBroker(),
+          };
+        },
       });
       connection = new Connection(daemonCh, host);
       return clientCh;
@@ -379,6 +390,173 @@ describe("H4 the mount gate inside Ink (D6)", () => {
     expect(r.pair.broker.requests).toEqual([]);
     expect(log.calls).toContain("create");
     await built.built.rollback();
+  });
+});
+
+describe("H5 review round 2, finding 1: the PRODUCTION build carries `gateAnswered`", () => {
+  /**
+   * The seam `main.ts` really wires — `hopBuilder`, NOT a lambda at the call
+   * site. This is the bug's shape: a lambda with fewer parameters type-checks
+   * and silently drops the 4th argument, so an approved proposal re-asks a gate
+   * the owner already answered (two prompts, the thing M6 forbids).
+   *
+   * Mutation: `hopBuilder` returning `(spec, shared, id) => createHopTargets(...)(spec, id)
+   * (the pre-fix lambda's shape) → the ask reappears below.
+   */
+  test("a build made through `hopBuilder` does not re-ask a gate the owner answered", async () => {
+    const log: FakeHostLog = { calls: [] };
+    const r = rig(log, { cwd: "/etc" });
+    // The facade's own `build` signature, over the same deps `rig` uses.
+    const build = hopBuilder({
+      config: config("/etc"),
+      status: () => {},
+      notify: () => {},
+      host: (): HopEngineHost => ({
+        host: r.host,
+        endpoint: UNIX,
+        locators: { endpoint: "unix:///run/docker.sock" },
+      }),
+      defaultImage: () => "img:latest",
+    });
+    const built = await build(
+      { target: "container", keep: true },
+      r.pair as unknown as Parameters<typeof build>[1],
+      "uid-1",
+      { gateAnswered: true },
+    );
+    if (built.kind !== "built") {
+      throw new Error(`expected a build, got ${built.notice}`);
+    }
+    expect(r.pair.broker.requests).toEqual([]);
+    await built.built.rollback();
+  });
+
+  test("and a TYPED `/move` (no `gateAnswered`) still gets its one gate prompt", async () => {
+    // The other direction: forwarding `opts` must not swallow the ask for a
+    // command nobody proposed. Mutation: `{ gateAnswered: true }` hardcoded in
+    // `hopBuilder` → this row fails (no request reaches the broker) and the
+    // owner never confirms the mount.
+    const log: FakeHostLog = { calls: [] };
+    const r = rig(log, { cwd: "/etc" });
+    const build = hopBuilder({
+      config: config("/etc"),
+      status: () => {},
+      notify: () => {},
+      host: (): HopEngineHost => ({
+        host: r.host,
+        endpoint: UNIX,
+        locators: { endpoint: "unix:///run/docker.sock" },
+      }),
+      defaultImage: () => "img:latest",
+    });
+    const built = await build(
+      { target: "container", keep: true },
+      r.pair as unknown as Parameters<typeof build>[1],
+      "uid-1",
+      // A typed `/move` has no proposal: nothing was answered yet.
+      {},
+    );
+    if (built.kind !== "built") {
+      throw new Error(`expected a build, got ${built.notice}`);
+    }
+    expect(r.pair.broker.requests).toHaveLength(1);
+    expect(r.pair.broker.requests[0]?.kind).toBe("session_hop");
+    await built.built.rollback();
+  });
+
+  test("grep-guard: `main` wires `build: hopBuilder(…)`, never a lambda (`main.ts`)", async () => {
+    // The seam above is only reached if the real call site uses it. A lambda
+    // here is what shipped, and TypeScript cannot see the dropped argument
+    // (a lambda with fewer parameters type-checks), so the wiring is pinned by
+    // text — the same guard `workspace-mount.test.ts` keeps for `hideList`.
+    const main = await Bun.file(`${import.meta.dir}/../src/main.ts`).text();
+    expect(main).toContain("build: hopBuilder({");
+    // Non-vacuity: the facade the lambda was passed to is still built here.
+    expect(main).toContain("createHopRuntime({");
+    expect(main).not.toMatch(/build:\s*\(spec, sharedPair, sessionId\)\s*=>/);
+  });
+});
+
+describe("H5 review round 2, finding 2: a hop target's client really declares `hop` — the laptop half", () => {
+  /**
+   * The daemon offers `move_session` per SESSION, gated on
+   * `clientCapabilities.hop` (`move-session-pod-capability.test.ts` pins that
+   * half). This is the OTHER half: the hop target's runtime must actually
+   * SEND that declaration. If it stops, the tool silently disappears on every
+   * hop target — the session moves and the agent can no longer ask to move —
+   * and no test failed before this one (the review's mutation:
+   * `hop-targets.ts` stops passing `hop: true` → 0 fail).
+   *
+   * The observable is `createAgent`'s `context.hop` on a REAL `SessionHost` +
+   * `Connection` behind the fake host's in-memory exec channel: `true` only
+   * arrives there through `RemoteClient`'s `initialize`.
+   */
+  test("a hop container's session reaches its daemon with `hop` declared", async () => {
+    const log: FakeHostLog = { calls: [], hops: [] };
+    const r = rig(log, { mount: false });
+    const built = await r.build({ target: "container", keep: true }, "uid-1");
+    if (built.kind !== "built") {
+      throw new Error(`expected a build, got ${built.notice}`);
+    }
+    const ctl = built.built.runtime.createSession();
+    await ctl.openSeeded();
+    // Mutation: drop `hop: true` from `containerTarget`'s `startEngineRuntime`
+    // (or from `engine-runtime`/`local-runtime`'s forward) → `[false]`.
+    expect(log.hops).toEqual([true]);
+    await built.built.runtime.dispose();
+  });
+
+  test("an attach target's session does too (a joined workload can ask as well)", async () => {
+    const log: FakeHostLog = { calls: [], hops: [] };
+    const r = rig(log, { mount: false });
+    const built = await r.build(
+      { target: "attach", workload: { engine: "docker", name: "mine" }, keep: true },
+      "uid-1",
+    );
+    if (built.kind !== "built") {
+      throw new Error(`expected a build, got ${built.notice}`);
+    }
+    const ctl = built.built.runtime.createSession();
+    await ctl.openSeeded();
+    // Mutation: drop the `hop: true` `attachTarget` passes → `[false]`.
+    expect(log.hops).toEqual([true]);
+    await built.built.runtime.dispose();
+  });
+
+  test("non-vacuity: the SAME runtime without `hop` declares nothing (`run`'s shape)", async () => {
+    // The declaration has to come FROM the hop target, not from anything the
+    // rig always does. Mutation: pass `hop: true` unconditionally in
+    // `createLocalRuntime` (making every client hop-capable) → `[true]` here,
+    // and a plain `tentacle run` would offer a tool nobody can answer (H5
+    // review round 1, finding 1).
+    const log: FakeHostLog = { calls: [], hops: [] };
+    const host = fakeHost(log);
+    const [daemonCh, clientCh] = createChannelPair();
+    const server = new SessionHost({
+      defaultCwd: "/pod/work",
+      createAgent: (_cwd, context) => {
+        log.hops?.push(context.hop === true);
+        return {
+          agent: new Agent({ model: new Reply(), tools: new ToolRegistry(), env }),
+          permissions: new PermissionBroker(),
+        };
+      },
+    });
+    const connection = new Connection(daemonCh, server);
+    const pair = sharedPair();
+    const runtime = await createLocalRuntime({
+      channel: clientCh,
+      disposeTransport: () => connection.close(),
+      permissions: pair.permissions,
+      saver: pair.saver,
+      cwd: dir,
+      model: "qwen3",
+      resume: null,
+    });
+    const ctl = runtime.createSession();
+    await ctl.openSeeded();
+    expect(log.hops).toEqual([false]);
+    await runtime.dispose();
   });
 });
 

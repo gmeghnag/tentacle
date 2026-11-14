@@ -94,7 +94,7 @@ import { createHopFeed } from "./hop-feed.ts";
 import { createHopLeave } from "./hop-leave.ts";
 import type { HopPlace } from "./hop-plan.ts";
 import { createHopRuntime } from "./hop-runtime.ts";
-import { type HopEngineHost, createHopTargets, hopPromptFacts } from "./hop-targets.ts";
+import { type HopEngineHost, hopBuilder, hopPromptFacts } from "./hop-targets.ts";
 import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
 import {
   forgetKept,
@@ -2092,17 +2092,19 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           initial: runtime,
           startup: { place: { kind: "local" }, daemonInPod: false },
           shared: { permissions, saver },
-          build: (spec, sharedPair, sessionId) =>
-            createHopTargets({
-              config,
-              shared: sharedPair,
-              // D6: the engine's lines go to the hop's sinks — never a raw write
-              // while Ink owns the terminal (AGENTS §7, P8).
-              status: (line) => hopStatus(line),
-              notify: (text) => sessions.notices.notify(text),
-              host: (engine) => hopEngineHost(engine),
-              defaultImage: () => process.env.TENTACLE_POD_IMAGE,
-            })(spec, sessionId),
+          // `hopBuilder` (not a lambda): it is the ONE place the facade's
+          // `opts` — the owner's approval already answered the mount gate —
+          // reaches the factory. Dropping it is invisible to the compiler (H5
+          // review round 2, finding 1), and true here before that fix.
+          build: hopBuilder({
+            config,
+            // D6: the engine's lines go to the hop's sinks — never a raw write
+            // while Ink owns the terminal (AGENTS §7, P8).
+            status: (line) => hopStatus(line),
+            notify: (text) => sessions.notices.notify(text),
+            host: (engine) => hopEngineHost(engine),
+            defaultImage: () => process.env.TENTACLE_POD_IMAGE,
+          }),
           load: (uid) => sessions.store.load(uid),
           status: (line) => hopStatus(line),
           notify: (text) => sessions.notices.notify(text),

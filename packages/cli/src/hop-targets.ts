@@ -27,7 +27,7 @@ import { attachEngineRuntime, startEngineRuntime } from "./engine-runtime.ts";
 import { engineNoun, laptopWorkspaceInput } from "./engine-select.ts";
 import type { HopPlace } from "./hop-plan.ts";
 import type { HopPromptEngine, HopPromptFacts } from "./hop-proposal.ts";
-import type { HopShared } from "./hop-runtime.ts";
+import type { HopRuntimeDeps, HopShared } from "./hop-runtime.ts";
 import { removeVerifiedKept } from "./kept-cmd.ts";
 import { forgetKept, keptDir, recordKept } from "./kept-index.ts";
 import { KEPT_SCHEMA_VERSION, type KeptEntry, keptMetadata } from "./kept.ts";
@@ -92,6 +92,19 @@ export interface HopTargetDeps {
 export interface HopBuildOpts {
   /** The owner approved a prompt that already showed this gate's warning. */
   readonly gateAnswered?: true;
+}
+
+/**
+ * The facade's `build` (`HopRuntimeDeps.build`) over deps that outlive it: the
+ * ONE place the hop's `opts` is carried from the owner's answer to the factory
+ * (H5 review round 2, finding 1). Written here, not as a lambda at the call
+ * site, because this forwarding is INVISIBLE to the compiler — a lambda with
+ * fewer parameters type-checks and then silently drops `gateAnswered`, which
+ * costs the owner a second prompt for a gate they already answered.
+ */
+export function hopBuilder(deps: Omit<HopTargetDeps, "shared">): HopRuntimeDeps["build"] {
+  return (spec, shared, sessionId, opts) =>
+    createHopTargets({ ...deps, shared })(spec, sessionId, opts);
 }
 
 /**
