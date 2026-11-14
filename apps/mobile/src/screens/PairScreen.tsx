@@ -35,6 +35,8 @@ export interface PairScreenProps {
   readonly camera: CameraView;
   /** The Scan control (or the denied card's Settings action) was tapped. */
   readonly onScan: () => void;
+  /** The live preview's Close control (fix round 1 finding 1: it had none). */
+  readonly onScanClose: () => void;
   readonly onOpenSettings: () => void;
   /** The live scanner, mounted only while it is open (the screen owns no state). */
   readonly scanner?: ReactNode;
@@ -58,6 +60,7 @@ export function PairScreen({
   againName,
   camera,
   onScan,
+  onScanClose,
   onOpenSettings,
   scanner,
 }: PairScreenProps): JSX.Element {
@@ -67,12 +70,25 @@ export function PairScreen({
       contentContainerStyle={styles.content}
       keyboardShouldPersistTaps="handled"
     >
-      {scanner === undefined ? null : (
+      {/* The intake owns the live preview: any other stage ends it, so a paste
+          after a Scan tap cannot leave the camera running (fix round 1 finding 1). */}
+      {scanner === undefined || view.stage !== "intake" ? null : (
         <View
           testID="pair-scanner"
           style={[styles.card, styles.scanner, { backgroundColor: palette.card }]}
         >
           {scanner}
+          {/* The preview's own way out, as the screen's chrome: `scanner.tsx`
+              stays the native seam alone. A camera opened by a Scan tap must be
+              closable without leaving the screen (fix round 1 finding 1). */}
+          <Pressable
+            testID="pair-scan-close"
+            accessibilityRole="button"
+            onPress={onScanClose}
+            style={[styles.close, { backgroundColor: palette.card }]}
+          >
+            <Text style={[styles.buttonText, { color: palette.accent }]}>Close camera</Text>
+          </Pressable>
         </View>
       )}
 
@@ -279,7 +295,8 @@ const styles = StyleSheet.create({
     minHeight: 44,
   },
   button: { borderRadius: 10, paddingVertical: 12, alignItems: "center" },
-  scanner: { padding: 0, overflow: "hidden" },
+  scanner: { padding: 0, overflow: "hidden", gap: 0 },
+  close: { alignItems: "center", paddingVertical: 10 },
   buttonText: { fontSize: 16, fontWeight: "600" },
   sas: { fontSize: 40, fontWeight: "700", letterSpacing: 4, textAlign: "center" },
 });

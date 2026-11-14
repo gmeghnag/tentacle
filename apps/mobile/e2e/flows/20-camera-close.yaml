@@ -1,0 +1,64 @@
+appId: so.tentacle.app
+---
+# 20 (docs/feat/mobile-pairing-screen.md 11b.2, fix round 1 finding 1): a camera
+# the person opened can always be CLOSED, and it never outlives the intake.
+#
+# The simulator has no camera device and reports no mount error (Drift 6), so a
+# granted Scan tap mounts the live preview as a black frame — which is exactly the
+# state the finding describes ("a black 280-pt box that never goes away"). The
+# Close control is what this flow is for: tap Scan, see the preview, close it, and
+# then — the point — PASTE STILL PAIRS. A camera is an accelerator, never the path.
+- runScript:
+    file: "pair-start.js"
+- launchApp:
+    clearState: true
+    permissions:
+      camera: allow
+- clearKeychain
+- extendedWaitUntil:
+    visible:
+      id: "pair-paste-input"
+    timeout: 30000
+# Granted: the Scan control OPENS the preview on the tap (no OS prompt).
+- assertVisible:
+    id: "pair-scan"
+- tapOn:
+    id: "pair-scan"
+- extendedWaitUntil:
+    visible:
+      id: "pair-scanner"
+    timeout: 10000
+# Finding 1's missing control. Before the fix there was no way out of the preview
+# short of leaving the screen, and it stayed live over `review`/`connecting`.
+- assertVisible:
+    id: "pair-scan-close"
+- tapOn:
+    id: "pair-scan-close"
+- assertNotVisible:
+    id: "pair-scanner"
+# Closed means closed: the Scan control is offered again (a second tap re-opens),
+# and nothing was left half-scanned.
+- assertVisible:
+    id: "pair-scan"
+# And the paste path is untouched by any of it — this is the half that must work
+# on every device, including one with no camera at all.
+- tapOn:
+    id: "pair-paste-input"
+- inputText: ${output.payload}
+- hideKeyboard
+- tapOn:
+    id: "pair-paste-submit"
+- assertVisible:
+    id: "pair-review"
+- tapOn:
+    id: "pair-confirm"
+- runScript:
+    file: "pair-confirm.js"
+- assertVisible:
+    id: "pair-sas-${output.sas}"
+- runScript:
+    file: "pair-answer.js"
+- assertVisible:
+    id: "computers-list"
+- assertVisible:
+    id: "computer-${output.computerId}"

@@ -434,6 +434,9 @@ export const FLOWS: readonly string[] = [
   // assert a path a person can take instead of a paste.
   "18-camera-denied",
   "19-deep-link",
+  // Fix round 1 (finding 1): a granted Scan tap's preview can be CLOSED, and it
+  // never outlives the intake.
+  "20-camera-close",
   // 12c's session screens.
   "06-session-open",
   "07-prompt",

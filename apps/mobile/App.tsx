@@ -235,8 +235,11 @@ function PairRoute({
   }, []);
 
   // 11b.2: the camera's state and actions are the pure view-model's; this hook
-  // only performs the step it names (`ask` → request, `open` → mount).
-  const camera = usePairingCamera((text) => dispatch({ type: "text", text }));
+  // only performs the step it names (`ask` → request, `open` → mount), and the
+  // live session's lifetime is `scan-session.ts`'s — it is TOLD the stage, so a
+  // paste after a Scan tap cannot leave the camera running (fix round 1 f1).
+  const stage = state.name;
+  const camera = usePairingCamera((text) => dispatch({ type: "text", text }), stage);
 
   // A pairing that never finishes must not leave a socket: an unmount cancels
   // it exactly as the button does (F-P9's copy is the failed card's job).
@@ -246,8 +249,14 @@ function PairRoute({
     };
   }, []);
 
+  // `camera.stop` is stable (one `dispatch`), so it does not re-create `submit`
+  // on every render the way the `camera` object itself would.
+  const stopCamera = camera.stop;
   const submit = useCallback(
     (text?: string) => {
+      // A paste ends any live preview, whatever it parses to (finding 1: a submit
+      // that fails keeps the stage at `intake`, so the stage rule cannot see it).
+      stopCamera();
       // The review asks the store whether this computer is already known (Owner
       // Q7) — a READ only, and a store failure is not a reason to refuse pairing.
       void (async () => {
@@ -260,7 +269,7 @@ function PairRoute({
         dispatch({ type: "submit", ...(existing === undefined ? {} : { existing }) });
       })();
     },
-    [state, dispatch],
+    [state, dispatch, stopCamera],
   );
 
   // A `tentacle://pair?…` link enters the SAME intake as a paste (11b.2, Owner
@@ -344,6 +353,7 @@ function PairRoute({
       {...(againName === undefined ? {} : { againName })}
       camera={camera.view}
       onScan={camera.onScan}
+      onScanClose={camera.stop}
       onOpenSettings={() => {
         // The card's own action: `Linking.openSettings()` is this app's page, so
         // the person lands on the camera toggle (F-P15).

@@ -4,16 +4,17 @@
  * other module — and every test in `bun test` — stays free of a native import.
  *
  * It WIRES, it does not decide: the permission state → view-model mapping is
- * `camera-access.ts` (pure, tested), the texts are that module's constants, and
- * this hook only performs the step the view names (`ask` → request, `open` →
- * mount the scanner) and reports what the OS said.
+ * `camera-access.ts` (pure, tested), the live session's LIFETIME is
+ * `scan-session.ts` (pure, tested — fix round 1 finding 1), the texts are those
+ * modules' constants, and this hook only performs the step the view names
+ * (`ask` → request, `open` → mount the scanner) and reports what the OS said.
  *
  * What the scanner hands back is the RAW decoded string, which is exactly the
  * line `tentacle pair` prints (`deep-link`'s load-bearing check): the app feeds it
  * to the same intake as a paste, so a scan and a paste cannot diverge.
  */
 import { CameraView, type PermissionResponse, useCameraPermissions } from "expo-camera";
-import { type JSX, useCallback, useState } from "react";
+import { type JSX, useCallback, useEffect, useReducer, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import {
   type CameraView as CameraModel,
@@ -21,16 +22,24 @@ import {
   cameraStateOf,
   cameraViewFor,
 } from "./camera-access.ts";
+import type { PairingStage } from "./scan-session.ts";
+import { INITIAL_SCAN_SESSION, scanReduce, scannerLive } from "./scan-session.ts";
 import type { Palette } from "./theme.ts";
 
 /** What the `Pair` screen needs from the camera (no native type escapes this file). */
 export interface PairingCamera {
   /** The pure view-model to render (Scan control, card, copy). */
   readonly view: CameraModel;
-  /** Mount the live scanner (only while the person is scanning). */
+  /** Mount the live scanner: true ONLY at the intake (see `scan-session.ts`). */
   readonly scanning: boolean;
   /** The Scan control / denied-card action was tapped. */
   readonly onScan: () => void;
+  /**
+   * End the live session. The Close control calls it, and so does a paste SUBMIT:
+   * a submit that fails to parse keeps the stage at `intake`, so the stage rule
+   * alone would let the camera run on over the person's own failure card.
+   */
+  readonly stop: () => void;
   /** The live preview could not start (a restricted device, a failed session). */
   readonly onMountError: () => void;
   /** One decoded QR string; the screen stops scanning and feeds the intake. */
@@ -43,26 +52,40 @@ export interface PairingCamera {
  * `denied` is DELIBERATELY not re-requested: iOS resolves a second
  * `requestCameraPermissionsAsync` as `denied` at once, so the tap reveals the
  * card instead (`camera-access.ts` decides that; this hook obeys it).
+ *
+ * `stage` is the pairing screen's current stage. The session's lifetime is not
+ * this hook's to keep (fix round 1 finding 1: it was, and a camera opened by a
+ * Scan tap then outlived the intake through `review`/`connecting`/`compare` with
+ * no way to close it): the hook only FORWARDS the stage to `scan-session.ts` and
+ * mounts the preview while that module says it may be live.
  */
-export function usePairingCamera(onText: (text: string) => void): PairingCamera {
+export function usePairingCamera(
+  onText: (text: string) => void,
+  stage: PairingStage,
+): PairingCamera {
   const [permission, requestPermission] = useCameraPermissions();
-  const [scanning, setScanning] = useState(false);
-  const [tapped, setTapped] = useState(false);
+  const [session, dispatch] = useReducer(scanReduce, INITIAL_SCAN_SESSION);
   const [mountFailed, setMountFailed] = useState(false);
   const state: CameraState = cameraStateOf(permission ?? null, mountFailed);
-  const view = cameraViewFor(state, tapped);
+  const view = cameraViewFor(state, session.tapped);
+
+  // The one rule that keeps the PREVIEW inside the intake: a stage change ends
+  // the session, and a move back to `intake` does not revive it.
+  useEffect(() => {
+    dispatch({ type: "stage", stage });
+  }, [stage]);
 
   const onScan = useCallback(() => {
-    setTapped(true);
+    dispatch({ type: "tap" });
     switch (view.scan) {
       case "open":
-        setScanning(true);
+        dispatch({ type: "open" });
         return;
       case "ask":
         // Decision 10: the ONLY moment the OS prompt appears is this tap.
         void requestPermission().then((answer: PermissionResponse) => {
           if (answer.granted) {
-            setScanning(true);
+            dispatch({ type: "open" });
           }
         });
         return;
@@ -78,7 +101,7 @@ export function usePairingCamera(onText: (text: string) => void): PairingCamera 
     (text: string) => {
       // First hit wins and scanning stops (a QR stream repeats the same code
       // many times a second, and a second dispatch would re-parse it).
-      setScanning(false);
+      dispatch({ type: "scanned" });
       onText(text);
     },
     [onText],
@@ -86,17 +109,23 @@ export function usePairingCamera(onText: (text: string) => void): PairingCamera 
 
   return {
     view,
-    scanning,
+    scanning: scannerLive(session, stage),
     onScan,
+    stop: useCallback(() => dispatch({ type: "submit" }), []),
     onMountError: useCallback(() => {
       setMountFailed(true);
-      setScanning(false);
+      dispatch({ type: "mount-error" });
     }, []),
     onScanned,
   };
 }
 
-/** The live scanner. Mounted only while `scanning`, so the session never outlives the tap. */
+/**
+ * The live scanner. Mounted only while the stage permits it (the Close control is
+ * the screen's own chrome, `pair-scan-close`): the person who tapped Scan by
+ * mistake, or changed their mind and started pasting, must be able to stop the
+ * camera without leaving the app.
+ */
 export function QrScanner({
   palette,
   onScanned,

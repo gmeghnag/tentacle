@@ -934,7 +934,13 @@ Owner asleep, delegated: every Owner question above is decided with its RECOMMEN
 
 ## Execution — slice 11b.2 (`feat/mobile-pairing-camera`)
 
-*— claude-sonnet-4-5, 2026-11-14 — 11b.2 only: the camera, the deep link, `expo-camera`*
+*— **signature corrected after fix round 1**: this line read `claude-sonnet-4-5`,
+which conflicts with commit `f396ff9`'s "exec (deepseek)". The commit message is
+the only surviving record of how this section was produced (no tentacle session
+log for it remains), and this repo's deepseek executor signs
+`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` elsewhere (`device-pairing.md`), so
+the section is attributed to that executor and the wrong signature is kept here
+rather than quietly overwritten — see Drift 10*
 
 **Scope.** 11b.2 only. 11b.1 (the Keychain store, the paste+compare flow, the
 `/e2e` link, Remove/Pair-again, the harness without the proxy) and 14 are merged
@@ -1105,9 +1111,18 @@ excused** (§9 non-vacuity):
    Bumping core alone traded that for `_OBJC_CLASS_$_RCTStatusBarAppearance`
    (prebuilt core against prebuilt React). Building the Expo modules from source
    is the one switch that makes the ABI consistent by construction — a build
-   setting, no dependency change. Recorded because it is a `package.json`/config
-   change the plan did not name, and because a future upgrade should revisit it
-   (with both bumped together the prebuilt path is fine and much faster).
+   setting, no dependency change. **That switch is TWO keys, not one**, and the
+   first version of this note named only the first (corrected in fix round 1,
+   finding 2): `usePrecompiledModules: false` stops Expo from consuming its
+   prebuilt xcframeworks, and `buildReactNativeFromSource: true` (also added to
+   `app.json`, also not in the plan) stops the OTHER half — React Native itself
+   arriving prebuilt — which is what the `_OBJC_CLASS_$_RCTStatusBarAppearance`
+   failure was: prebuilt core against prebuilt React. Both are in
+   `expo-build-properties`'s `ios` block, and removing either reintroduces one
+   of the two launch crashes. Recorded because they are `package.json`/config
+   changes the plan did not name, and because a future upgrade should revisit
+   them (with `expo`/`expo-modules-core`/`expo-camera` bumped together the
+   prebuilt path is fine and much faster).
 3. **Flow numbers are 18/19, not the plan's 12/13.** 12–17 are already 11b.1's
    (`12-pair-declined` … `17-persisted`), so the plan's `12-camera-denied` and
    `13-deep-link` would have collided with two shipped flows.
@@ -1148,6 +1163,15 @@ excused** (§9 non-vacuity):
    and flows 01–17 do not touch the Scan affordance: `cameraViewFor` returns
    `scan: "ask"`/`"open"` and the button is ADDITIVE, so no existing flow broke
    (01/02/03/05/12–17 still pass, above).
+10. **This section's signature was wrong (fix round 1, finding 2).** It read
+    `claude-sonnet-4-5` while commit `f396ff9` says "exec (deepseek)". §10 exists
+    precisely so drift can be attributed, and the two records named different
+    models. The commit message is the later, harder record (it is what the
+    executor stamped when it finished), and the deepseek profile's model id in
+    this repo is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` (as
+    `device-pairing.md` signs it), so the section now carries that id and says
+    the old one was wrong. Nothing else in the section was re-signed under a
+    different model, and no claim in it was taken on trust because of it.
 
 ### Debt / unverified
 
@@ -1231,3 +1255,139 @@ broker or session-path change — contained, as sized.
 **Executor behaviour:** thorough, honest drift log (the Hermes `URL` defect is a
 real catch, pinned by test); self-reported one forbidden `git checkout`. Reviewer
 is Opus — a different family from either claimed executor.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14 — both Review findings (2 MEDIUM; finding 1 fixed in
+code, finding 2 in the record)*
+
+**Repro (finding 1), before any edit** — the review's own scenario, read off the
+source because the bug is a LIFETIME and the app cannot be imported (RN's sources
+are Flow): the live session was a `useState(false)` in `scanner.tsx`, cleared only
+by a decode or a mount error, and `PairScreen.tsx:70` rendered the element it was
+handed at ANY stage. So: granted → tap Scan → `pair-scanner` mounted → paste →
+`review` → **the preview is still mounted, and no control closes it.** The
+wiring test that names those two lines was RED on the pre-fix source (4 of 4
+cases failing: the stage gate, the Close control, the pure mount decision, the
+seam's own lifetime); flow 20's run after the fix shows both states on a device
+(see *Verification*): `pair-scanner` visible on the tap, gone on
+`pair-scan-close`.
+
+**1. MEDIUM — FIXED (the live camera outlived the intake and could not be closed).**
+The session's LIFETIME is now a pure reducer, `apps/mobile/src/scan-session.ts`
+(new): `scanReduce(session, event)` over `tap` / `open` / `scanned` / `submit` /
+`mount-error` / `close` / `stage`, plus `scannerLive(session, stage)` — the one
+place "may the preview be mounted right now" is answered. Two rules, both tested:
+- **The intake owns it.** Any stage but `intake` ends the session, and a return to
+  `intake` does NOT revive it (a failure's "Try again" is not a camera the person
+  asked for a second time).
+- **A paste submit ends it too**, which the stage rule alone cannot catch: a paste
+  that FAILS TO PARSE leaves the stage at `intake` (the failure rides on the
+  intake's own view-model, `pairing-flow.ts`'s `reduce`), so the stage never moves
+  and the camera would run on over the person's own "that code did not work" card.
+  That is finding 1's other shape, found while fixing it.
+
+Wired, minimal:
+- `src/scanner.tsx` — the hook takes the `stage` and keeps NO lifetime of its own:
+  `useReducer(scanReduce, …)`, one `useEffect` forwarding `{type:"stage", stage}`,
+  `scanning: scannerLive(session, stage)`, and a `stop()` for the Close control.
+  `mountFailed` stays sticky, so the `unavailable` card is not a button that
+  mounts a preview the device already refused.
+- `src/screens/PairScreen.tsx:75` — mounts the preview only at the intake
+  (`scanner === undefined || view.stage !== "intake"`), and `:85` adds the
+  **`pair-scan-close`** control ("Close camera") — the finding's other half. It is
+  the screen's chrome, so `scanner.tsx` stays the native seam alone (§7).
+- `App.tsx:241-242` — `const stage = state.name;` handed to the hook; `:259` —
+  `submit` stops a live preview before it parses anything; `:356` — the close
+  handler. `stopCamera` is hoisted out of the `camera` object so `submit`'s deps
+  stay stable (the object is rebuilt on every render).
+
+Tests: `test/scan-session.test.ts` (11 cases) pins the reducer — the finding's
+scenario (past the intake ⇒ not live), the no-revive rule, close, decode, the
+sticky mount error, and submit's separate path. `test/scan-session-wiring.test.ts`
+(5) pins what only the `.tsx` files can get wrong, from source (they cannot be
+imported): the stage gate, the `pair-scan-close` control, the pure mount decision
+(not a raw flag), `submit` stopping the preview, and "the seam keeps no lifetime
+of its own". `e2e/flows/20-camera-close.yaml` (new, listed in `FLOWS`) is the flow
+the finding says was missing: granted → tap Scan → `pair-scanner` → **tap
+`pair-scan-close` → `pair-scanner` GONE** → Scan offered again → paste still
+pairs to `computer-<id>`.
+
+**2. MEDIUM — FIXED (Execution's signature contradicted the commit; one drift
+unrecorded).** The section is re-attributed to the executor its commit message
+names — `f396ff9` "exec (deepseek)", and this repo's deepseek id is
+`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` (`device-pairing.md` signs it that
+way) — and says plainly that the old `claude-sonnet-4-5` line was wrong, rather
+than silently overwriting it: the wrong value is quoted in place, and Drift 10
+records the attribution and what it rests on (the commit, because no tentacle
+session log for that run survives — checked by searching
+`~/.config/tentacle/sessions`). Drift 2 now records **both** `app.json` keys the
+plan did not name: `usePrecompiledModules: false` AND
+`buildReactNativeFromSource: true`, and says which launch crash each one prevents
+(the second is the `_OBJC_CLASS_$_RCTStatusBarAppearance` half).
+
+**Mutations (finding 1; each applied, run, reverted — `diff` vs the scratch backup
+proves the revert):**
+
+| # | Mutation | Test that went RED |
+|---|---|---|
+| A | `scanReduce` ignores the `stage` event (the buggy lifetime) | `scan-session` — "moving PAST the intake ends the session" **and** "a return to the intake does NOT revive it" |
+| B | `scannerLive` drops `stage === "intake"` (the mount decision ignores the stage) | `scan-session` — "a Scan tap opens it; it is live only at the intake" |
+| C | `PairScreen` back to `scanner === undefined ? null : …` (the finding's own line) | `scan-session-wiring` — "mounts it ONLY at the intake" |
+| D | Remove the `pair-scan-close` block | `scan-session-wiring` — "there is a Close control for it" |
+| E | `App.tsx`'s `submit` without `stopCamera()` | `scan-session-wiring` — "a paste submit stops a live preview" |
+| F | `scanner.tsx` regains its own `useState`-based lifetime | `scan-session-wiring` — "keeps no lifetime of its own" |
+| G | `open` clears `mountFailed` | `scan-session` — "a mount error … is STICKY" |
+
+Every revert was `diff`ed against the scratch backup and is byte-identical. No
+production file other than the four named changed; `run.ts`'s diff is the +3-line
+flow entry only.
+
+**Verification (finding 1, on a real simulator).** Flow 20 ran alone on the
+already-booted iOS 26.5 simulator (`FLOWS` narrowed to it for the run, then
+restored), build+install from source included:
+
+```
+$ bun apps/mobile/e2e/run.ts --ios 26
+=== iOS 26 (0FA4B51F-A0E3-421B-BE66-CE29EF45213D) ===
+✓ 20-camera-close (iOS 26)
+PASS — logs in .tentacle/tmp/e2e-mobile/1794651752527
+EXIT=0
+```
+
+The Maestro command log shows the sequence executed, not just a container being on
+screen: `Tap on id: pair-scan-close` (and its wait) and `Assert that id:
+pair-scanner` ×4 (visible, then not, then the paste path). junit:
+`tests="1" failures="0" time="22.965"`.
+
+**Drift from the Review's fix (finding 1).** `scan-session.ts` is a module the
+plan did not name — added for the reason 11b.1's fix round 1 added
+`computer-memory.ts`: the decision must not live in a `.tsx` (§7 "logic in pure
+modules"), and a lifetime is exactly the kind of branch a `.tsx` makes untestable
+(Bun cannot parse RN's Flow sources). The separate `submit` event is because the
+review's "stop on any submit/stage ≠ intake" needs both: a submit that fails
+leaves the stage where it was, so a stage event alone never fires. The changelog
+fragment is amended in place ("closable again with one tap") rather than
+duplicated — the capability is this slice's, and this round makes that sentence
+true.
+
+**Not covered, stated:** the live camera DECODE is still on the real-iPhone
+checklist (the simulator has no camera device — Drift 6). The `unavailable` card
+is unit-tested only. Flow 20 exercises the Close control and the paste path, not a
+real QR scan.
+
+**Gate (this branch, after the fix):**
+
+```
+$ bunx tsc --noEmit                     # clean
+$ bunx tsc -p apps/mobile --noEmit      # clean
+$ bun run lint                          # Checked 1229 files. No fixes applied. (0/0 — the §6 baseline)
+$ bun test                              # 9050 pass · 3 skip · 0 fail (655 files)
+$ bun test apps/mobile                  # 618 pass · 0 fail (51 files)
+```
+
+The 3 skips are §6's opt-ins. The suite was 9034/653 at 11b.2's Execution; +16
+cases across 2 new files are this round's (11 + 5). Maestro: flow 20 green,
+above; the other flows are not re-run this round (11b.2's table stands, and no
+flow but 18 ever takes the camera path — 18 asserts the DENIED branch, which this
+round does not touch).
