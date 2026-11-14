@@ -811,3 +811,14 @@ errors/0 warnings — the §6 baseline) · `bun test` 8373 pass / 3 opt-in skips
 - Mutation of `dropStaleWatches` → survived (finding 2).
 
 **Executor behaviour.** The three Execution sections are honest and specific, with run mutation tables and drift named; the one gap is a helper whose stated purpose was never exercised by a test, which hid a key-confusion bug.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14* (same fresh-context reviewer; reviewed `cc38f4e`, `git diff HEAD~1`)
+
+**Verdict: PASS** (APPROVE)
+
+- **Finding 1 — fixed.** `connection.ts:656-661` now checks `this.host.get(watch.hosted.id) !== watch.hosted`, keyed by session id; it unwatches and deletes by `watchId`. My round-1 repro (`.tentacle/tmp/logs-cmd/two-watches.test.ts`) now returns `{"updates":[],"lost":0}` in both cases: after a second watch, and after a refused `session/log`.
+- **Finding 2 — fixed, and the tests are non-vacuous.** Two new tests in `watch-connection.test.ts`. Mutation M1 (put back `host.get(watchId)`) → `two watches on one connection both stay live` goes RED. Mutation M2 (stale check never true, i.e. a no-op) → `a session id closed and recreated under the same id drops its stale watch` goes RED: without the sweep, the old watch answers `ended: "closed"` and not `UnknownWatch`. Both reverted; `git status` clean.
+- **Regressions on the diff:** none. The only other code change is a field reordered in the test fixture's return object. The executor's `### Fix round 1` doc section is additive.
+- **Gate:** `bun run typecheck` clean · `bun run lint` 1078 files, 0/0 · touched test files 130 pass / 0 fail (128 + the 2 new). Full `bun test` not re-run by this review.
