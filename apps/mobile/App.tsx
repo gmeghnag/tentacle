@@ -24,12 +24,24 @@ import { type JSX, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import {
   ActivityIndicator,
   AppState,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
   View,
   useColorScheme,
 } from "react-native";
+import {
+  type AppLock,
+  type AppLockEvent,
+  type LockDelay,
+  type LockView,
+  createAppLock,
+} from "./src/app-lock.ts";
+import { APP_LOG_FILES } from "./src/app-log-fs-expo.ts";
+import { createAppLogFile } from "./src/app-log-fs.ts";
+import { type AppLog, createAppLog } from "./src/app-log.ts";
+import { exportFileName, exportText } from "./src/app-log.ts";
 import { type ComputerMemory, withForgottenRecord } from "./src/computer-memory.ts";
 import { type ComputerRow, computerRows, probeComputer } from "./src/computer-rows.ts";
 import {
@@ -42,6 +54,8 @@ import { type ComputerLink, openComputer } from "./src/connection.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
+import { authenticate, capability } from "./src/lock-auth.ts";
+import { LOCK_SETTING_STORE } from "./src/lock-settings-expo.ts";
 import {
   type PairingAction,
   type PairingState,
@@ -52,9 +66,11 @@ import {
 } from "./src/pairing-flow.ts";
 import { type RootStackParams, initialRoute } from "./src/routes.ts";
 import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
+import { LockGate } from "./src/screens/LockGate.tsx";
 import { PairScreen } from "./src/screens/PairScreen.tsx";
 import { SessionScreen } from "./src/screens/SessionScreen.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
+import { SettingsScreen } from "./src/screens/SettingsScreen.tsx";
 import { KEYCHAIN_STORE } from "./src/secure-kv.ts";
 import { createSessionController } from "./src/session-controller.ts";
 import { createSessionListController, viewModel } from "./src/session-list-controller.ts";
@@ -65,6 +81,7 @@ import {
   type SessionScreenController,
   createSessionScreen,
 } from "./src/session-screen-controller.ts";
+import { createSwitcherCover } from "./src/switcher-cover.ts";
 import { type Palette, paletteFor } from "./src/theme.ts";
 
 const Stack = createNativeStackNavigator<RootStackParams>();
@@ -92,6 +109,40 @@ function diagnoserFor(id: string): ReturnType<typeof createLinkDiagnoser> {
 
 /** Every link currently open: what the `AppState` effect suspends and resumes. */
 const LIVE_LINKS = new Set<ComputerLink>();
+
+/**
+ * The app's ONE log ring (docs/feat/mobile-lock.md D7): every link dials with it,
+ * Settings → Export logs reads it, and the file copy gets each entry. One sink,
+ * not one per link — a per-link ring would make "what happened" four partial
+ * answers (and four redaction policies).
+ */
+const APP_LOG: AppLog = createAppLog({ now: Date.now, capacity: 500 });
+const APP_LOG_FILE = createAppLogFile(APP_LOG_FILES);
+
+/**
+ * The app-switcher cover (D4, Owner Q2/Q3): the stock native blur Step 0 proved
+ * is present. A failure is reported to the ring, never thrown (the LOCK is the
+ * gate; the cover is defence in depth).
+ */
+const SWITCHER_COVER = createSwitcherCover((error) => {
+  APP_LOG.log("warn", "link-status", { cover: "failed" }, String(error));
+});
+
+/** How often the ring is drained to the file (D7). */
+const LOG_DRAIN_MS = 2000;
+
+/**
+ * What the export may say about the build (Owner Q8): a version, a build number
+ * and a device MODEL. No device name, no computer name, no path.
+ *
+ * `expo-application` would report these natively; it is not a dependency of this
+ * app, and the plan forbids adding one for a header line, so the constants come
+ * from `app.json` (`version`) and the Expo config baked at build time.
+ */
+const APP_VERSION = "1.0.0";
+const APP_BUILD = "1";
+/** `Platform.constants.Model` is the iOS machine id (`iPhone17,1`), not a name. */
+const DEVICE_MODEL = String((Platform.constants as { Model?: string }).Model ?? Platform.OS);
 
 /**
  * One session controller per LIVE client, shared by every screen mount
@@ -124,6 +175,7 @@ const LINKS = createLinkRegistry<ComputerLink>({
       WebSocket: WebSocket as never,
       random: phoneRandom,
       diagnosis: diagnoserFor(id),
+      log: APP_LOG,
     });
     // A link dialled while the app is already in the background starts held:
     // iOS would suspend it anyway, and a socket opened now would be a ghost
@@ -342,12 +394,14 @@ function ComputersRoute({
   onAdd,
   onPairAgain,
   onRemove,
+  onOpenSettings,
 }: {
   readonly palette: Palette;
   readonly onOpen: (row: ComputerRow) => void;
   readonly onAdd: () => void;
   readonly onPairAgain: (row: ComputerRow) => void;
   readonly onRemove: (row: ComputerRow) => Promise<void>;
+  readonly onOpenSettings: () => void;
 }): JSX.Element {
   const [rows, setRows] = useState<readonly ComputerRow[]>([]);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -389,6 +443,7 @@ function ComputersRoute({
       onRemove={setRemoving}
       onRemoveCancelled={() => setRemoving(undefined)}
       removing={removing}
+      onOpenSettings={onOpenSettings}
       onRemoveConfirmed={(row) => {
         setRemoving(undefined);
         void onRemove(row);
@@ -568,6 +623,28 @@ export default function App(): JSX.Element {
   const palette = paletteFor(useColorScheme());
   const [computers, setComputers] = useState<readonly ComputerEntry[] | null>(null);
   const [storeError, setStoreError] = useState<string | undefined>(undefined);
+  // The lock's setting, read once at launch (D3). `loading` until the Keychain
+  // answers: the lock screen covers the first frame in the meantime (F10).
+  const [lockSetting, setLockSetting] = useState<LockDelay | "loading">("loading");
+  /** The setting asked for that is weaker than the current one (Owner Q6). */
+  const [pendingLock, setPendingLock] = useState<LockDelay | undefined>(undefined);
+  const [settingsError, setSettingsError] = useState<string | undefined>(undefined);
+  const [exportError, setExportError] = useState<string | undefined>(undefined);
+  const [exporting, setExporting] = useState(false);
+  /** The lock's own instance: `LockGate` owns the state machine, this reaches it. */
+  const lock = useRef<ReturnType<typeof createAppLock> | undefined>(undefined);
+
+  useEffect(() => {
+    void LOCK_SETTING_STORE.read().then((read) => {
+      setLockSetting(read.delay);
+    });
+  }, []);
+
+  // The switcher cover follows the setting (Owner Q2): on for everything but
+  // `never`, and on while the setting is still loading (fail-closed).
+  useEffect(() => {
+    void SWITCHER_COVER.apply(lockSetting);
+  }, [lockSetting]);
 
   const reload = useCallback(async (): Promise<readonly ComputerEntry[] | undefined> => {
     try {
@@ -610,138 +687,298 @@ export default function App(): JSX.Element {
     return () => subscription.remove();
   }, []);
 
+  // The lock's ONE instance, created lazily on this render (a `useRef` initial
+  // value would run on every render — `createAppLock` is cheap but its state is
+  // not disposable).
+  if (lock.current === undefined) {
+    lock.current = createAppLock({ now: Date.now });
+  }
+  const lockInstance = lock.current;
+  const lockView = lockInstance.view();
+  const lockGateDeps = {
+    lock: lockInstance,
+    authenticate,
+    capability,
+    setting: lockSetting,
+    onEvent: (event: AppLockEvent, view: LockView) => {
+      // Only the interesting transitions reach the ring: a tick every second
+      // would fill it with noise (D7's closed `kind` union).
+      if (event.type === "appState" && event.state === "active") {
+        APP_LOG.log("info", "app-state", { state: event.state });
+      }
+      if (event.type === "authResult") {
+        APP_LOG.log(
+          event.result === "success" ? "info" : "warn",
+          event.result === "success" ? "unlock" : "auth-fail",
+          { result: event.result },
+        );
+        // Owner Q6's second half: a WEAKENING that was pending is applied by the
+        // reducer on a successful auth — and this is the only place that knows
+        // the auth happened, so the new delay is persisted here (the Settings
+        // screen's tap could not, because nothing had been proved yet).
+        if (event.result === "success") {
+          const applied = lockInstance.state().setting;
+          if (applied !== "loading") {
+            setPendingLock(undefined);
+            setLockSetting(applied);
+            void LOCK_SETTING_STORE.write(applied).catch((caught: unknown) => {
+              setSettingsError(`Could not save the lock delay — try again (${errorText(caught)})`);
+            });
+          }
+        }
+      }
+      if (view.cover === "lock") {
+        APP_LOG.log("info", "lock");
+      }
+    },
+  } as const;
+
+  /** Owner Q6: a weakening needs a successful auth, and the reducer owns that. */
+  const selectDelay = useCallback(
+    (delay: LockDelay) => {
+      setSettingsError(undefined);
+      lockInstance.dispatch({ type: "setSetting", setting: delay });
+      // What the reducer decided (Owner Q6): a WEAKER delay is pending until an
+      // auth succeeds, and that lives on the state, not in the view. Reading it
+      // after the dispatch is the whole point — before it, the value is the old
+      // one and a weakening would be written through un-authenticated.
+      const pending = lockInstance.state().pendingSetting;
+      setPendingLock(pending);
+      if (pending !== undefined) {
+        // Waiting for the person: nothing is written, and the old (stronger)
+        // setting stays in force until the auth succeeds.
+        return;
+      }
+      void LOCK_SETTING_STORE.write(delay).then(
+        () => {
+          setLockSetting(delay);
+        },
+        (caught: unknown) => {
+          setSettingsError(`Could not save the lock delay — try again (${errorText(caught)})`);
+        },
+      );
+    },
+    [lockInstance],
+  );
+
+  /** Settings → Export logs (D7): the header, the ring, and the previous run's file. */
+  const exportLogs = useCallback(() => {
+    if (exporting) {
+      return;
+    }
+    setExporting(true);
+    setExportError(undefined);
+    void (async () => {
+      try {
+        const previous = await APP_LOG_FILE.previousEntries();
+        const header = {
+          appVersion: APP_VERSION,
+          build: APP_BUILD,
+          osVersion: String(Platform.Version),
+          deviceModel: DEVICE_MODEL,
+          exportedAt: Date.now(),
+          droppedEntries: APP_LOG.dropped(),
+        };
+        // The previous run's lines are already redacted text (they were written
+        // through this ring); they are appended so a crash is visible in the file.
+        const text = exportText(header, APP_LOG.entries());
+        const name = exportFileName(header.exportedAt);
+        const uri = await APP_LOG_FILES.writeExport(
+          name,
+          previous === "" ? text : `${text}\n--- previous run ---\n${previous}`,
+        );
+        try {
+          await APP_LOG_FILES.share(uri);
+        } finally {
+          await APP_LOG_FILES.remove(uri).catch(() => {});
+        }
+      } catch (caught) {
+        setExportError(`Could not export logs — try again (${errorText(caught)})`);
+      } finally {
+        setExporting(false);
+      }
+    })();
+  }, [exporting]);
+
+  // The lock's own events also go to the FILE, so "it failed this morning"
+  // survives an app kill (Owner Q7): the ring is memory, the file is not. ONE
+  // interval drains whatever is new — an entry logged by a dial, a lock or an
+  // auth all land the same way, and no event needs its own append path.
+  const lastLogged = useRef(0);
+  useEffect(() => {
+    const drain = () => {
+      const fresh = APP_LOG.entries().filter((entry) => entry.t > lastLogged.current);
+      const newest = fresh[fresh.length - 1];
+      if (newest === undefined) {
+        return;
+      }
+      lastLogged.current = newest.t;
+      void (async () => {
+        for (const entry of fresh) {
+          await APP_LOG_FILE.append(entry);
+        }
+      })();
+    };
+    drain();
+    const id = setInterval(drain, LOG_DRAIN_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  // The lock wraps EVERYTHING (D5/D8): a loading spinner or a store error must
+  // not be the one thing visible above the lock. `LockGate` covers the first
+  // frame before the setting is known (F10).
   if (computers === null) {
     return (
-      <View style={[styles.connecting, { backgroundColor: palette.groupedBackground }]}>
-        <ActivityIndicator color={palette.accent} />
-      </View>
+      <LockGate {...lockGateDeps} palette={palette}>
+        <View style={[styles.connecting, { backgroundColor: palette.groupedBackground }]}>
+          <ActivityIndicator color={palette.accent} />
+        </View>
+      </LockGate>
     );
   }
 
   return (
-    <NavigationContainer>
-      <Stack.Navigator
-        initialRouteName={initialRoute(computers)}
-        screenOptions={{
-          headerLargeTitle: true,
-          headerTintColor: palette.accent,
-          // A TRANSLUCENT header overlays the screen, so the first row starts
-          // beneath the bar and a tap on it lands on the header instead (found
-          // by flow 02: the project row's bounds were under the large title).
-          // An opaque header lays the screen out below it.
-          headerTransparent: false,
-          contentStyle: { backgroundColor: palette.groupedBackground },
-        }}
-      >
-        <Stack.Screen
-          name="Pair"
-          options={({ navigation }) => ({
-            title: "tentacle",
-            headerLeft: () =>
-              navigation.canGoBack() ? (
-                <Pressable testID="pair-back" onPress={() => navigation.goBack()}>
-                  <Text style={{ color: palette.accent }}>Back</Text>
-                </Pressable>
-              ) : null,
-          })}
+    <LockGate {...lockGateDeps} palette={palette}>
+      <NavigationContainer>
+        <Stack.Navigator
+          initialRouteName={initialRoute(computers)}
+          screenOptions={{
+            headerLargeTitle: true,
+            headerTintColor: palette.accent,
+            // A TRANSLUCENT header overlays the screen, so the first row starts
+            // beneath the bar and a tap on it lands on the header instead (found
+            // by flow 02: the project row's bounds were under the large title).
+            // An opaque header lays the screen out below it.
+            headerTransparent: false,
+            contentStyle: { backgroundColor: palette.groupedBackground },
+          }}
         >
-          {({ navigation, route }) => (
-            <PairRoute
-              palette={palette}
-              {...(route.params?.again === undefined ? {} : { againId: route.params.again })}
-              {...(route.params?.againName === undefined
-                ? {}
-                : { againName: route.params.againName })}
-              onCancel={() => {
-                if (navigation.canGoBack()) {
-                  navigation.goBack();
+          <Stack.Screen
+            name="Pair"
+            options={({ navigation }) => ({
+              title: "tentacle",
+              headerLeft: () =>
+                navigation.canGoBack() ? (
+                  <Pressable testID="pair-back" onPress={() => navigation.goBack()}>
+                    <Text style={{ color: palette.accent }}>Back</Text>
+                  </Pressable>
+                ) : null,
+            })}
+          >
+            {({ navigation, route }) => (
+              <PairRoute
+                palette={palette}
+                {...(route.params?.again === undefined ? {} : { againId: route.params.again })}
+                {...(route.params?.againName === undefined
+                  ? {}
+                  : { againName: route.params.againName })}
+                onCancel={() => {
+                  if (navigation.canGoBack()) {
+                    navigation.goBack();
+                  }
+                }}
+                onDone={(computerId) => {
+                  // A re-pair keeps the id (Q7) and replaces the device key, so
+                  // the live link (sealed over the OLD key, likely `stopped` and
+                  // `revoked`) and its diagnosis are no longer about this record.
+                  // Without this, "Pair again" recovers nothing until the app is
+                  // killed: `LINKS.get` hands back the dead link forever
+                  // (fix round 1 finding 1). The forget happens BEFORE the
+                  // reload, which is what re-dials the computer.
+                  void withForgottenRecord(MEMORY, computerId, async () => {
+                    await reload();
+                    navigation.reset({ index: 0, routes: [{ name: "Computers" }] });
+                  });
+                }}
+              />
+            )}
+          </Stack.Screen>
+          <Stack.Screen name="Computers" options={{ title: "Computers" }}>
+            {({ navigation }) => (
+              <ComputersRoute
+                palette={palette}
+                onOpenSettings={() => navigation.navigate("Settings")}
+                onOpen={(row) =>
+                  navigation.navigate("Sessions", { computerId: row.id, name: row.name })
                 }
-              }}
-              onDone={(computerId) => {
-                // A re-pair keeps the id (Q7) and replaces the device key, so
-                // the live link (sealed over the OLD key, likely `stopped` and
-                // `revoked`) and its diagnosis are no longer about this record.
-                // Without this, "Pair again" recovers nothing until the app is
-                // killed: `LINKS.get` hands back the dead link forever
-                // (fix round 1 finding 1). The forget happens BEFORE the
-                // reload, which is what re-dials the computer.
-                void withForgottenRecord(MEMORY, computerId, async () => {
-                  await reload();
-                  navigation.reset({ index: 0, routes: [{ name: "Computers" }] });
-                });
-              }}
-            />
-          )}
-        </Stack.Screen>
-        <Stack.Screen name="Computers" options={{ title: "Computers" }}>
-          {({ navigation }) => (
-            <ComputersRoute
-              palette={palette}
-              onOpen={(row) =>
-                navigation.navigate("Sessions", { computerId: row.id, name: row.name })
-              }
-              onAdd={() => {
-                navigation.navigate("Pair", undefined);
-              }}
-              onPairAgain={(row) => {
-                navigation.navigate("Pair", { again: row.id, againName: row.name });
-              }}
-              onRemove={async (row) => {
-                // Every in-memory fact goes first: a socket to a computer being
-                // forgotten must not outlive the record (detach only, never
-                // `session/close`).
-                const left = await withForgottenRecord(MEMORY, row.id, async () => {
-                  await SOURCE.remove(row.id);
-                  return reload();
-                });
-                // The LAST removal resets the stack to `Pair` (nothing is left
-                // to show on `Computers`).
-                if (left !== undefined && left.length === 0) {
-                  navigation.reset({ index: 0, routes: [{ name: "Pair" }] });
+                onAdd={() => {
+                  navigation.navigate("Pair", undefined);
+                }}
+                onPairAgain={(row) => {
+                  navigation.navigate("Pair", { again: row.id, againName: row.name });
+                }}
+                onRemove={async (row) => {
+                  // Every in-memory fact goes first: a socket to a computer being
+                  // forgotten must not outlive the record (detach only, never
+                  // `session/close`).
+                  const left = await withForgottenRecord(MEMORY, row.id, async () => {
+                    await SOURCE.remove(row.id);
+                    return reload();
+                  });
+                  // The LAST removal resets the stack to `Pair` (nothing is left
+                  // to show on `Computers`).
+                  if (left !== undefined && left.length === 0) {
+                    navigation.reset({ index: 0, routes: [{ name: "Pair" }] });
+                  }
+                }}
+              />
+            )}
+          </Stack.Screen>
+          <Stack.Screen name="Settings" options={{ title: "Settings" }}>
+            {() => (
+              <SettingsScreen
+                palette={palette}
+                setting={lockSetting}
+                {...(lockView.notice === undefined ? {} : { notice: lockView.notice })}
+                {...(pendingLock === undefined ? {} : { pending: pendingLock })}
+                {...(settingsError === undefined ? {} : { error: settingsError })}
+                {...(exportError === undefined ? {} : { exportError })}
+                onSelectDelay={selectDelay}
+                onExportLogs={exportLogs}
+                canExport={!exporting}
+              />
+            )}
+          </Stack.Screen>
+          <Stack.Screen name="Sessions" options={({ route }) => ({ title: route.params.name })}>
+            {({ navigation, route }) => (
+              <SessionsRoute
+                palette={palette}
+                computerId={route.params.computerId}
+                onOpen={(row) =>
+                  navigation.navigate("Session", {
+                    computerId: route.params.computerId,
+                    sessionId: row.sessionId,
+                    title: row.title,
+                    // From the Archived section: the screen shows the archived
+                    // banner and a Reopen button, and taps open WITHOUT reopening
+                    // (Owner Q4: browsing never revives a session).
+                    archived: row.archived,
+                  })
                 }
-              }}
-            />
-          )}
-        </Stack.Screen>
-        <Stack.Screen name="Sessions" options={({ route }) => ({ title: route.params.name })}>
-          {({ navigation, route }) => (
-            <SessionsRoute
-              palette={palette}
-              computerId={route.params.computerId}
-              onOpen={(row) =>
-                navigation.navigate("Session", {
-                  computerId: route.params.computerId,
-                  sessionId: row.sessionId,
-                  title: row.title,
-                  // From the Archived section: the screen shows the archived
-                  // banner and a Reopen button, and taps open WITHOUT reopening
-                  // (Owner Q4: browsing never revives a session).
-                  archived: row.archived,
-                })
-              }
-            />
-          )}
-        </Stack.Screen>
-        <Stack.Screen name="Session" options={({ route }) => ({ title: route.params.title })}>
-          {({ route }) => (
-            <SessionRoute
-              palette={palette}
-              computerId={route.params.computerId}
-              sessionId={route.params.sessionId}
-              title={route.params.title}
-              archived={route.params.archived}
-            />
-          )}
-        </Stack.Screen>
-      </Stack.Navigator>
-      {storeError === undefined ? null : (
-        <View style={[styles.storeError, { backgroundColor: palette.card }]}>
-          <Text testID="store-error" style={{ color: palette.danger }}>
-            {storeError}
-          </Text>
-        </View>
-      )}
-    </NavigationContainer>
+              />
+            )}
+          </Stack.Screen>
+          <Stack.Screen name="Session" options={({ route }) => ({ title: route.params.title })}>
+            {({ route }) => (
+              <SessionRoute
+                palette={palette}
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                title={route.params.title}
+                archived={route.params.archived}
+              />
+            )}
+          </Stack.Screen>
+        </Stack.Navigator>
+        {storeError === undefined ? null : (
+          <View style={[styles.storeError, { backgroundColor: palette.card }]}>
+            <Text testID="store-error" style={{ color: palette.danger }}>
+              {storeError}
+            </Text>
+          </View>
+        )}
+      </NavigationContainer>
+    </LockGate>
   );
 }
 

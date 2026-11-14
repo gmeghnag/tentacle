@@ -14,7 +14,7 @@
  * Exit codes: 0 = every flow passed; 2 = a prerequisite is missing (named, with
  * its install command — never a silent skip); anything else = Maestro's own.
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { $, type Subprocess } from "bun";
 import { startHooks } from "./hooks.ts";
@@ -263,6 +263,12 @@ async function main(): Promise<number> {
 
     // The hooks flow 03/05 call: change the world mid-run (add a session, stop
     // and restart the daemon on the same port).
+    // The app lock's hooks (docs/feat/mobile-lock.md Step 0): the flows drive
+    // Face ID and read the app's OWN log file, so the assertions are about what
+    // the app really wrote — not about what the harness believes it wrote.
+    // `currentDevice` is what the flow is running on RIGHT NOW (the loop below
+    // boots one simulator per iOS major, and these hooks follow it).
+    const currentDevice = { udid: "" };
     const hooks = startHooks({
       actions: {
         addDelta: () => addDelta(endpoint),
@@ -293,6 +299,39 @@ async function main(): Promise<number> {
         pairReset: () => pairing.reset(),
         pairClaimed: () => pairing.claimed(),
         pairDeviceId: () => pairing.lastDeviceId(),
+        faceIdEnroll: async () => {
+          // Two commits, as Step 0 found: the `-s` alone only SETS the default;
+          // the `-p` post is what makes `isEnrolledAsync()` flip to true.
+          await simctl(currentDevice.udid, [
+            "notifyutil",
+            "-s",
+            "com.apple.BiometricKit.enrollmentChanged",
+            "1",
+          ]);
+          await simctl(currentDevice.udid, [
+            "notifyutil",
+            "-p",
+            "com.apple.BiometricKit.enrollmentChanged",
+          ]);
+        },
+        faceIdMatch: async () => {
+          await simctl(currentDevice.udid, [
+            "notifyutil",
+            "-p",
+            "com.apple.BiometricKit_Sim.pearl.match",
+          ]);
+        },
+        faceIdNoMatch: async () => {
+          // A REAL DEVICE item (Step 0: the simulator's nomatch leaves the
+          // promise unresolved, so no flow may depend on it). The hook exists so
+          // the checklist has one command, and it says so if it cannot run.
+          await simctl(currentDevice.udid, [
+            "notifyutil",
+            "-p",
+            "com.apple.BiometricKit_Sim.pearl.nomatch",
+          ]);
+        },
+        logFile: () => appLogFile(currentDevice.udid),
       },
     });
     await hooks.ready;
@@ -308,6 +347,7 @@ async function main(): Promise<number> {
         return 2;
       }
       console.log(`\n=== iOS ${major} (${device}) ===`);
+      currentDevice.udid = device;
       const buildCode = await buildAndInstall(device, runDir, major);
       if (buildCode !== 0) {
         console.error(`build/install failed for iOS ${major} (exit ${buildCode})`);
@@ -352,6 +392,60 @@ async function main(): Promise<number> {
     children.clear();
     mock.stop();
   }
+}
+
+/**
+ * `xcrun simctl` on the device the flows are running on, output discarded (the
+ * callers are fire-and-forget notifications). Rejects on a non-zero exit so a
+ * broken command shows up as a red flow, not a silent no-op.
+ */
+async function simctl(udid: string, args: readonly string[]): Promise<void> {
+  if (udid === "") {
+    throw new Error("no simulator selected yet");
+  }
+  const child = Bun.spawn(["xcrun", "simctl", "spawn", udid, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const code = await child.exited;
+  if (code !== 0) {
+    const err = await new Response(child.stderr).text();
+    throw new Error(`simctl ${args.join(" ")} failed (${code}): ${err.trim()}`);
+  }
+}
+
+/**
+ * The app's OWN log file, read out of its data container (docs/feat/mobile-lock.md
+ * D7). Flow 09 asserts on THIS text: the canaries are about what the app wrote,
+ * not about what the harness thinks it wrote.
+ *
+ * `Library/` under the data container is where `Paths.document` lands on iOS.
+ */
+async function appLogFile(udid: string): Promise<string> {
+  if (udid === "") {
+    return "";
+  }
+  const container = Bun.spawnSync(
+    ["xcrun", "simctl", "get_app_container", udid, "so.tentacle.app", "data"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const dir = container.stdout.toString().trim();
+  if (container.exitCode !== 0 || dir === "") {
+    return "";
+  }
+  // `Paths.document` on iOS is `<container>/Documents`; the app names the file
+  // `tentacle-log.txt` (`app-log-fs-expo.ts`).
+  for (const candidate of [
+    join(dir, "Documents", "tentacle-log.txt"),
+    join(dir, "Documents", "tentacle-log.1.txt"),
+  ]) {
+    try {
+      return await readFile(candidate, "utf8");
+    } catch {
+      // Try the next one; a missing file is "" (the flow asserts on its content).
+    }
+  }
+  return "";
 }
 
 /**
@@ -439,6 +533,13 @@ export const FLOWS: readonly string[] = [
   "09-foreign-turn",
   "10-background-ask",
   "11-disconnect-mid-turn",
+  // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
+  // are the only flows that CHANGE the lock setting (they leave `immediately`
+  // behind in the Keychain, which `clearKeychain` in `_pair` resets anyway).
+  "18-lock-cold-start",
+  "19-lock-unlock-button",
+  "20-lock-immediately",
+  "21-export-logs",
 ];
 
 /** Maestro's `-e K=V` flags, from a map (its `${VAR}` substitution reads these). */

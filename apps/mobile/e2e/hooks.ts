@@ -31,7 +31,15 @@ export type HookName =
   | "pair-revoke"
   | "pair-reset"
   | "pair-claimed"
-  | "pair-device-id";
+  | "pair-device-id"
+  /** docs/feat/mobile-lock.md Step 0: enroll a face on the simulator (idempotent). */
+  | "faceid-enroll"
+  /** A matching face while the system prompt is up (`notifyutil …pearl.match`). */
+  | "faceid-match"
+  /** A NON-matching face (real device only: the simulator's promise hangs — Step 0). */
+  | "faceid-nomatch"
+  /** Read the app container's log file, so flow 09 asserts what was really written. */
+  | "log-file";
 
 /** The hooks that take a query parameter (`?session=…&prompt=…`). */
 export interface HookQuery {
@@ -107,6 +115,14 @@ export interface HookActions {
   readonly pairClaimed: () => boolean;
   /** The device id the last completed pairing registered (flow 15 revokes exactly it). */
   readonly pairDeviceId: () => string | undefined;
+  /** Enrol a face on THIS simulator (`notifyutil …enrollmentChanged`). Idempotent. */
+  readonly faceIdEnroll: () => Promise<void>;
+  /** Present a matching face; the pending `authenticateAsync` resolves success. */
+  readonly faceIdMatch: () => Promise<void>;
+  /** Present a NON-matching face (a real device; the simulator hangs — Step 0). */
+  readonly faceIdNoMatch: () => Promise<void>;
+  /** The app's log file text from its container (`""` when there is none). */
+  readonly logFile: () => Promise<string>;
 }
 
 /** What a laptop requester answers: `allow` (once) or `deny`. */
@@ -134,6 +150,10 @@ export function hookFor(path: string): HookName | undefined {
     case "pair-reset":
     case "pair-claimed":
     case "pair-device-id":
+    case "faceid-enroll":
+    case "faceid-match":
+    case "faceid-nomatch":
+    case "log-file":
       return name;
     default:
       return undefined;
@@ -279,6 +299,17 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
             }
             return Response.json({ ok: true, hook, deviceId });
           }
+          case "faceid-enroll":
+            await deps.actions.faceIdEnroll();
+            return Response.json({ ok: true, hook });
+          case "faceid-match":
+            await deps.actions.faceIdMatch();
+            return Response.json({ ok: true, hook });
+          case "faceid-nomatch":
+            await deps.actions.faceIdNoMatch();
+            return Response.json({ ok: true, hook });
+          case "log-file":
+            return Response.json({ ok: true, hook, text: await deps.actions.logFile() });
         }
         return Response.json({ error: "unknown hook" }, { status: 404 });
       } catch (error) {

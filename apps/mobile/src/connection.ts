@@ -30,6 +30,7 @@ import { type InitializeResult, decodeBase64Url } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import type { Random } from "@tentacle/transport/noise";
 import { type DialMemory, firstAnswering } from "./address-dial.ts";
+import { type AppLog, createAppLog } from "./app-log.ts";
 import type { StoredComputer } from "./computers.ts";
 import { createForegroundGate } from "./foreground-gate.ts";
 import { sha256Hex } from "./hash.ts";
@@ -62,6 +63,13 @@ export interface OpenComputerDeps {
    */
   readonly diagnosis?: LinkDiagnoser;
   readonly onError?: (error: Error) => void;
+  /**
+   * Where the socket diagnostics go (docs/feat/mobile-lock.md D7). Omitted = a
+   * module-private ring, so a link built without one still has a log and no call
+   * site has to check. The sink redacts (it is the only place a URL or a
+   * daemon's `reason` text reaches a file a person may share).
+   */
+  readonly log?: AppLog;
 }
 
 /** A record this phone cannot dial: the stored key is not a 32-byte X25519 key. */
@@ -112,23 +120,49 @@ interface DiagnosticSocket {
  * Logs what RN reports on a failed/closed socket. On `/e2e` the handshake now
  * carries the verdict (a Noise `denied` is authenticated), so this stays what it
  * was: data for a bug report, never a classification.
+ *
+ * `url` itself is NEVER logged (P3: the query carries the token on iOS); only the
+ * host it was dialling, which is what Owner Q8 allows. The `error` and `close`
+ * payloads are daemon/toolchain text (P4), so they go in as `detail` and are
+ * redacted by the sink.
  */
-function withDiagnostics(Ctor: WebSocketCtor, log: (line: string) => void): WebSocketCtor {
+function withDiagnostics(Ctor: WebSocketCtor, log: AppLog): WebSocketCtor {
   return class {
     constructor(url: string, init?: unknown) {
       const ws = new Ctor(url, init) as DiagnosticSocket;
+      let host = "";
+      try {
+        host = new URL(url).host;
+      } catch {
+        host = ""; // an unparseable URL is not echoed at all
+      }
+      log.log("info", "dial", host === "" ? {} : { host });
       ws.addEventListener("error", (event) => {
         const message = (event as { message?: unknown }).message;
-        log(`ws error event: message=${JSON.stringify(message)}`);
+        log.log("error", "ws-error", {}, `error event: message=${JSON.stringify(message)}`);
       });
       ws.addEventListener("close", (event) => {
         const { code, reason } = event as { code?: unknown; reason?: unknown };
-        log(`ws close event: code=${String(code)} reason=${JSON.stringify(reason)}`);
+        log.log(
+          "warn",
+          "ws-close",
+          typeof code === "number" ? { code } : {},
+          `close event: reason=${JSON.stringify(reason)}`,
+        );
       });
       // biome-ignore lint/correctness/noConstructorReturn: an adapter returns the socket itself
       return ws as object;
     }
   } as unknown as WebSocketCtor;
+}
+
+/**
+ * The ring a link uses when its caller injects no sink. A link is a self-contained
+ * thing in the tests, and a `log` parameter that every test had to build would
+ * hide the fact that the app always passes ONE shared sink (`app-log.ts`).
+ */
+function fallbackLog(): AppLog {
+  return createAppLog({ now: Date.now, capacity: 500 });
 }
 
 /**
@@ -178,7 +212,7 @@ export async function openComputer(
   computer: StoredComputer,
   deps: OpenComputerDeps,
 ): Promise<ComputerLink> {
-  const log = (line: string) => console.log(`[tentacle] ${line}`);
+  const log = deps.log ?? fallbackLog();
   const deviceKey = decodeBase64Url(computer.deviceKey);
   if (deviceKey === undefined || deviceKey.length !== 32) {
     throw new ComputerRecordError(`'${computer.name}' has an unreadable device key — pair again`);
@@ -247,7 +281,8 @@ export async function openComputer(
     ...APP_CLIENT_OPTIONS,
     channelFactory: gate.dial,
     onError: (error) => {
-      log(`client error: ${error.message}`);
+      // P4: a client error message can carry daemon text — the sink redacts it.
+      log.log("error", "client-error", {}, error.message);
       deps.onError?.(error);
     },
   });

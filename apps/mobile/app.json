@@ -30,7 +30,13 @@
           "microphonePermission": false
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "tentacle uses Face ID to unlock the app"
+        }
+      ]
     ]
   }
 }

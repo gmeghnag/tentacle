@@ -32,6 +32,7 @@ import {
 import { encodeBase64Url as encode } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { publicKeyOf } from "@tentacle/transport/noise";
+import { createAppLog } from "../src/app-log.ts";
 import type { SecureKV } from "../src/computer-store.ts";
 import { createComputerStore } from "../src/computer-store.ts";
 import type { StoredComputer } from "../src/computers.ts";
@@ -165,8 +166,12 @@ function daemon(options: { readonly policy?: ImagePolicy } = {}): Daemon {
   };
 }
 
-const open = (d: Daemon): ReturnType<typeof openComputer> =>
-  openComputer(d.computer, { WebSocket: RNShapedWebSocket, random: systemRandomBytes });
+const open = (d: Daemon, log?: ReturnType<typeof createAppLog>): ReturnType<typeof openComputer> =>
+  openComputer(d.computer, {
+    WebSocket: RNShapedWebSocket,
+    random: systemRandomBytes,
+    ...(log === undefined ? {} : { log }),
+  });
 
 /** `expo-crypto`'s job on the phone; Bun's CSPRNG stands in here. */
 function systemRandomBytes(length: number): Uint8Array {
@@ -471,6 +476,67 @@ describe("openComputer over /e2e", () => {
         expect(Array.isArray(page.sessions)).toBe(true);
       } finally {
         await link.close();
+      }
+    });
+  });
+});
+
+describe("the socket diagnostics reach the injected sink (docs/feat/mobile-lock.md D7)", () => {
+  test("a dial logs its HOST only, never the URL (mutation: log the raw url → red)", async () => {
+    await withDaemon(async (d) => {
+      const log = createAppLog({ now: () => 1_700_000_000_000, capacity: 200 });
+      const link = await open(d, log);
+      try {
+        const dials = log.entries().filter((entry) => entry.kind === "dial");
+        expect(dials.length).toBeGreaterThan(0);
+        // The `/e2e` URL is host:port; the entry is typed, with the host as a field.
+        const host = new URL(d.computer.addresses[0] ?? "").host;
+        expect(dials[0]?.fields.host).toBe(host);
+        // Nothing in the whole ring holds a `?token=` (there is none on /e2e) or
+        // a full dialled URL: `url` is never a field.
+        const text = JSON.stringify(log.entries());
+        expect(text).not.toContain("?token=");
+        expect(text).not.toContain("ws://");
+      } finally {
+        await link.close();
+      }
+    });
+  });
+
+  test("no console.log is left on the link's path (mutation: restore it → red)", async () => {
+    // The app's one log line used to be `console.log('[tentacle] …')` and was
+    // lost. A spy proves nothing writes to the console any more.
+    const written: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      written.push(args.map(String).join(" "));
+    };
+    try {
+      await withDaemon(async (d) => {
+        const log = createAppLog({ now: () => 1_700_000_000_000, capacity: 200 });
+        const link = await open(d, log);
+        try {
+          await link.client.sessionList();
+        } finally {
+          await link.close();
+        }
+      });
+    } finally {
+      console.log = original;
+    }
+    expect(written.filter((line) => line.includes("[tentacle]"))).toEqual([]);
+  });
+
+  test("a link built with NO sink still works (the module-private ring), and never throws", async () => {
+    await withDaemon(async (d) => {
+      const seeder = await seeded(d.url);
+      const link = await open(d);
+      try {
+        expect(Array.isArray((await link.client.sessionList()).sessions)).toBe(true);
+      } finally {
+        await link.close();
+        await seeder.closeSessions();
+        seeder.close();
       }
     });
   });
