@@ -22,6 +22,10 @@
  *  - drop the `aad` (or use `info` as `aad`) → the envelope bytes change;
  *  - change the padding buckets or the length prefix → the byte-exact
  *    envelopes and the bucket test fail;
+ *  - turn off `unpad`'s zero-tail loop (or shorten its bound by one byte) → the
+ *    "non-zero padding byte" test fails. Each of `unpad`'s three guards has its
+ *    own test reaching exactly that guard and no earlier one, because a guard
+ *    only a wrong-shape input can reach is unpinned without it;
  *  - skip the key-id check in `openPush` → the "another computer's envelope"
  *    test fails.
  */
@@ -65,7 +69,8 @@ describe("HPKE Auth single-shot against RFC 9180 A.2.3", () => {
     expect(vectors.hpke.kdf_id).toBe(1);
     expect(vectors.hpke.aead_id).toBe(3);
     expect(vectors.hpke.info).toBe("4f6465206f6e2061204772656369616e2055726e");
-    // The published A.2.3 `info` is "The quick brown fox".
+    // The published A.2.3 `info` is "Ode on a Grecian Urn" (not a fox).
+    expect(Buffer.from(vectors.hpke.info, "hex").toString()).toBe("Ode on a Grecian Urn");
     expect(Buffer.from(v.aad, "hex").toString()).toBe(`Count-${v.sequence}`);
   });
 
@@ -92,10 +97,12 @@ describe("HPKE Auth single-shot against RFC 9180 A.2.3", () => {
     expect(hex(opened)).toBe(v.pt);
   });
 
-  test("the receiver derives the published shared secret (Auth, not Base)", () => {
-    // AuthDecap's `dh` is DH(skR,pkE) ‖ DH(skR,pkS). Recompute it here through
-    // publicKeyOf + the published keys, and check the secret the *tentacle*
-    // envelope path also uses. Base mode would omit the second half.
+  test("the envelope authenticates the sender's static key (Auth, not Base)", () => {
+    // AuthDecap's `dh` is DH(skR,pkE) ‖ DH(skR,pkS). Base mode would omit the
+    // second half, so a ciphertext sealed by one static key would open under
+    // any other. That is the property asserted here; the RFC's published
+    // `shared_secret` itself is pinned indirectly by `ct` matching byte for
+    // byte above (the secret is the only input to the key schedule).
     expect(hex(publicKeyOf(bytes(v.skRm)))).toBe(v.pkRm);
     expect(hex(publicKeyOf(bytes(v.skSm)))).toBe(v.pkSm);
     const sealed = hpkeAuthSeal({
@@ -342,10 +349,15 @@ describe("padding buckets", () => {
 
   test("a non-zero padding byte is refused (a sealing bug, not a silent truncation)", () => {
     const t = vectors.tentacle;
-    // Build a legitimate ciphertext over a plaintext whose declared length is
-    // SHORTER than the bytes present: the pad tail is then non-zero.
-    const declared = new Uint8Array(510);
-    declared.set(Uint8Array.of(0x00, 0x02, 0x41, 0x42, 0x43), 0);
+    // A FULL bucket (512) whose declared length is 2 and whose tail is non-zero:
+    // the bucket guard and the length-prefix guard both pass, so only the
+    // zero-tail loop can refuse this. Sealing 510 bytes instead refused one
+    // guard earlier and left the tail loop unpinned (mutation `padded[i] !== 0`
+    // → `=== 999` survived, AGENTS §9), so the length here matters.
+    const declared = new Uint8Array(512);
+    declared.set(Uint8Array.of(0x00, 0x02, 0x41, 0x42), 0);
+    // The LAST tail byte, as far from the prefix as the loop can reach.
+    declared[511] = 0xff;
     const sealed = hpkeAuthSeal({
       plaintext: declared,
       aad: utf8(t.key_id),
@@ -366,6 +378,56 @@ describe("padding buckets", () => {
     }
     expect(threw).toBeInstanceOf(PushSealError);
     expect((threw as PushSealError).kind).toBe("bad-padding");
+  });
+
+  // The other two `unpad` guards, each refused at its OWN check (same class as
+  // the test above: a guard only one wrong-shape input can reach is unpinned
+  // unless a test reaches exactly that one). Both were surviving mutations
+  // before these tests existed.
+  test("a declared length past the end of the bucket is refused", () => {
+    const t = vectors.tentacle;
+    // 512 bytes, declaring 511 of plaintext: 511 + the 2-byte prefix is 513 > 512.
+    // The bucket guard passes (512 IS a bucket) and the tail loop is never
+    // reached, because the length check throws first.
+    const declared = new Uint8Array(512);
+    declared.set(Uint8Array.of(0x01, 0xff, 0x41), 0);
+    const sealed = hpkeAuthSeal({
+      plaintext: declared,
+      aad: utf8(t.key_id),
+      info: utf8(PUSH_INFO),
+      senderStatic: bytes(t.computer.sk),
+      recipientPublicKey: bytes(t.device.pk),
+      rng: fixedRng(bytes(t.ephemeral.sk)),
+    });
+    expect(() =>
+      openPush(
+        { keyId: t.key_id, enc: sealed.enc, ciphertext: sealed.ciphertext },
+        bytes(t.device.sk),
+        bytes(t.computer.pk),
+      ),
+    ).toThrow(/length prefix exceeds the bucket/);
+  });
+
+  test("a padded plaintext that is not exactly one bucket is refused", () => {
+    const t = vectors.tentacle;
+    // A 4-byte padded body is not one of the three bucket sizes, so the
+    // envelope's size would leak the kind. Authenticated but wrongly framed:
+    // refuse it at the bucket guard, before the length prefix is even read.
+    const sealed = hpkeAuthSeal({
+      plaintext: Uint8Array.of(0x00, 0x02, 0x41, 0x42),
+      aad: utf8(t.key_id),
+      info: utf8(PUSH_INFO),
+      senderStatic: bytes(t.computer.sk),
+      recipientPublicKey: bytes(t.device.pk),
+      rng: fixedRng(bytes(t.ephemeral.sk)),
+    });
+    expect(() =>
+      openPush(
+        { keyId: t.key_id, enc: sealed.enc, ciphertext: sealed.ciphertext },
+        bytes(t.device.sk),
+        bytes(t.computer.pk),
+      ),
+    ).toThrow(/exactly one bucket/);
   });
 });
 

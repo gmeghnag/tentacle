@@ -8,9 +8,9 @@
   512/1024/2048 bucket behind an explicit `u16` length prefix, so the envelope's
   size says nothing about its kind, and the envelope's key id is the AEAD's
   associated data, so a ciphertext cannot be moved to another paired computer.
-  The app's Notification Service Extension opens these with CryptoKit's own
-  `HPKE.Recipient(…authenticatedBy:)`, with no hand-written Swift crypto. Pinned
+  The envelope is a plain HPKE Auth single-shot, so the app can open it with
+  CryptoKit's own `HPKE.Recipient(…authenticatedBy:)` and no hand-written Swift
+  crypto — the extension that does so is the app-side task, not this one. Pinned
   by RFC 9180 Appendix A.2.3's published vectors plus our own envelope vectors,
   both produced by an implementation independent of the code under test
-  (`packages/transport/test/vectors/push-v1.json`, which the app's Swift tests
-  read too).
+  (`packages/transport/test/vectors/push-v1.json`).

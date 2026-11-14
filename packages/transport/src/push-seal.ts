@@ -81,7 +81,7 @@ export interface SealedPush {
   readonly keyId: string;
   /** `enc` — the ephemeral (sender) public key, 32 bytes. */
   readonly enc: Uint8Array;
-  /** `c` — the ChaCha20-Poly1305 ciphertext of the padded plaintext, 512/1024/2048 bytes. */
+  /** `c` — the ChaCha20-Poly1305 ciphertext of the padded plaintext: bucket + 16 tag (528/1040/2064). */
   readonly ciphertext: Uint8Array;
 }
 

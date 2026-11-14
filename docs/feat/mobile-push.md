@@ -784,6 +784,10 @@ byte → `bad-tag`, a flipped key id/`aad` → no open, an envelope naming anoth
 computer → refused before decryption, a low-order recipient key → refused, a
 wrong-size key → thrown. F12 (key rotation) is by construction: a re-registration
 replaces the recipient key and old ciphertexts simply fail to open (placeholder).
+**Corrected in fix round 1:** this paragraph originally listed "a flipped key
+id/`aad` → no open" among the covered cases, and implied the padding was fully
+pinned. The zero-tail case was in fact vacuous at the time (see Review round 1,
+finding 1, and `### Fix round 1`).
 
 **Gate (run in `.tentacle/worktrees/mobile-push`, this branch).**
 `bunx tsc --noEmit` → clean; `bun run typecheck` (all three projects, incl.
@@ -804,7 +808,104 @@ is untouched. Changelog: one fragment, `changelog.d/mobile-push.added.md`;
 schemas, P3's relay frames, P4's APNs client, P5–P9, P10's runbook). No
 `PROTOCOL_VERSION` change and no `protocol.d/` note — P1 adds no wire surface.
 
-*— claude-opus-5-5 (executor), 2026-11-14*
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor), 2026-11-14*
+
+### Fix round 1
+
+**Findings addressed: 2 of 2 (both MEDIUM).** No HIGH was raised.
+
+**Finding 1 (MEDIUM, vacuous padding test) — FIXED.**
+Reproduced the reviewer's mutation first, on the test as it stood:
+`padded[i] !== 0` → `=== 999` gave **24 pass / 0 fail**, i.e. the mutation
+survived and the zero-tail loop was unpinned. Cause, exactly as the Review said:
+the test sealed **510** bytes declaring 2, so `unpad` threw at the *bucket-length*
+guard (`push-seal.ts:273-275`) and never reached the tail loop (`:281-283`).
+The test now seals a **full 512-byte bucket** declaring 2 with the non-zero byte
+at **index 511** — the last byte the tail loop can reach, so it pins the loop
+bound as well as the comparison. Red before green, then green:
+
+| State | Result |
+|---|---|
+| old test, mutation M1 | 24 pass / **0 fail** → survived (the bug) |
+| new test, unmutated | 26 pass / 0 fail |
+| new test, mutation M1 (`!== 0` → `=== 999`) | **1 fail**: "a non-zero padding byte is refused" |
+| new test, mutation M4 (loop bound `− 1`) | **1 fail**: same test |
+
+**Two more unpinned guards in the same class — also FIXED.** Probing finding 1's
+class rather than its instance found both sibling `unpad` guards surviving:
+M2 (length-prefix guard `if (false)`) and M3 (bucket-length guard deleted) each
+left **26 pass / 0 fail**. Each now has one test that reaches exactly that guard
+and no earlier one: "a declared length past the end of the bucket is refused"
+(declared 511 in a 512 bucket, asserting `/length prefix exceeds the bucket/`)
+and "a padded plaintext that is not exactly one bucket is refused" (a valid
+envelope over a 4-byte padded body, asserting `/exactly one bucket/`). After the
+tests, M1/M2/M3/M4 each fail exactly one test and nothing else:
+
+| Mutation (one line) | Before these tests | After |
+|---|---|---|
+| M1 `padded[i] !== 0` → `=== 999` | survived (0 fail) | RED, 1 test |
+| M2 length-prefix guard → `if (false)` | survived (0 fail) | RED, 1 test |
+| M3 bucket-length guard deleted | survived (0 fail) | RED, 1 test |
+| M4 tail-loop bound `i < padded.length − 1` | survived | RED, 1 test |
+| M5 `PUSH_AEAD_TAG_BYTES` 16 → 12 | already RED | RED (unchanged) |
+| M6 length prefix `i2osp2(plaintext.length)` → `i2osp2(0)` | already RED (6 tests) | RED (unchanged) |
+
+Every mutation was applied to `push-seal.ts` in the worktree, run against only
+`packages/transport/test/push-seal.test.ts`, and restored from a scratch backup
+under `.tentacle/tmp/mobile-push/fix1/` (**never** git); each restore was
+`diff`ed against the backup and reported identical.
+
+**Finding 2 (MEDIUM, attribution) — FIXED.** The Execution was signed
+`claude-opus-5-5 (executor)`, but the executor is `ds()`
+(`.tentacle/tmp/orchestration/night-task.sh:17`), which runs
+`~/bin/tentacle --profile deepseek` → `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`
+(`~/.config/tentacle/config.jsonc:25-33`); only `opus()` uses `--model
+claude-opus-5-5` (`:13`). The executor's transcript shows how the wrong id got
+there: it grepped **the orchestrator's** Claude session jsonl
+(`~/.claude/projects/-Users-gmeghnag-tentacle/232c4c3e-….jsonl`, 2704 ×
+`claude-opus-5-5`) and signed itself with the answer. The signature now names the
+real model. **Drift from the Review's recommendation:** the Review said "the owner
+or orchestrator must correct one of the two"; I corrected the doc, because the
+commit message and the launch command already agree (`feat(mobile-push): exec
+(deepseek)`), so the signature was the one wrong artifact — and no rebase/amend
+was available to me (no git checkout/commit).
+
+**Nits taken (all four, none blocking).** (a) `push-seal.test.ts:68`'s "quick
+brown fox" comment corrected to "Ode on a Grecian Urn", and the `info` is now
+asserted as text rather than only as hex. (b) The test named "receiver derives the
+published shared secret" is renamed to "the envelope authenticates the sender's
+static key (Auth, not Base)", and its comment now states that `shared_secret` is
+pinned *indirectly* by the byte-exact `ct` — the honest claim. (c) The changelog
+fragment no longer credits the NSE (task 17) with opening pushes; it says the
+envelope is openable by CryptoKit and that the extension is the app-side task.
+(d) `SealedPush.ciphertext`'s comment now says `bucket + 16` = 528/1040/2064, not
+512/1024/2048.
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` → clean, exit 0;
+`bun run typecheck` (all three projects) → clean, exit 0; `bun run lint` →
+`Checked 1370 files in 399ms. No fixes applied.` (baseline clean, exit 0);
+`bun test` → **9905 pass, 4 skip, 0 fail, 716 files** on four of the six full
+runs I made, with `1 fail` on two. The 4 skips are the documented opt-ins; this
+round adds none. **Both failures named, not hidden — neither is this branch's:**
+
+1. `packages/daemon/test/session-log-store.test.ts` — "T4 the fork precedes the
+   source's next write" (captured: `gate3.log`). A timing test that gates on
+   `await Bun.sleep(60)` (`:857`). That file is **not** in
+   `git diff --name-only main...HEAD`, imports nothing from `@tentacle/transport`,
+   and passes **45/45 three times in a row** when run alone. Under full-suite
+   parallel load it loses the race.
+2. An earlier run reported only a 5000 ms timeout whose stdout was
+   `{"resident":false}` — the fixture of the cli engine tests
+   (`engine-runtime.test.ts:186`, `engine-docker.test.ts:225`). Those two files
+   then passed 144/144 three times running.
+
+My only non-test source change this round is a **doc comment**, which no daemon
+or cli test imports, so neither failure can be mine. **Unverified:** I did not run
+`bun test` on `main` at the same commit to prove both flakes pre-date this branch
+— the evidence is that they are outside the branch's diff and only fail under
+load. To verify, run `bun test` a few times on a clean `main` worktree.
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor, fix round 1), 2026-11-14*
 
 ## Review
 
