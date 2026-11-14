@@ -1,0 +1,35 @@
+appId: so.tentacle.app
+---
+# 19 (docs/feat/mobile-pairing-screen.md 11b.2, Owner Q6 / F-P17): a
+# `tentacle://pair?…` link — the iOS Camera app's QR scan opens exactly this —
+# lands on the REVIEW card and dials NOTHING until the person taps Pair.
+#
+# The number is 19, not the plan's "13": 13 is 11b.1's `13-pair-expired`
+# (drift recorded in Execution).
+- runScript:
+    file: "pair-start.js"
+- launchApp:
+    clearState: true
+- clearKeychain
+# docs/feat/mobile-lock.md: locked at cold start (Owner Q1).
+- runFlow: _unlock.yaml
+- extendedWaitUntil:
+    visible:
+      id: "pair-paste-input"
+    timeout: 30000
+# The link itself: the SAME line the terminal printed, delivered by the OS.
+- openLink: "${output.payload}"
+# iOS asks before it hands a custom-scheme link to the app: `Open in "tentacle"?`
+# (found by OCR-ing the simulator's screen; the app had NOT received anything
+# yet). `launchApp` clears the "always allow" state each run (F-H2's clearState),
+# so the dialog is always there.
+- tapOn:
+    text: "Open"
+- extendedWaitUntil:
+    visible:
+      id: "pair-review"
+    timeout: 20000
+# F-P17: the link only reaches the review. The daemon-side truth is that no claim
+# ever arrived at `pair` — an id on screen can only say what the app drew.
+- runScript:
+    file: "pair-claimed.js"

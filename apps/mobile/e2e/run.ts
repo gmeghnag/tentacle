@@ -585,6 +585,13 @@ export const FLOWS: readonly string[] = [
   "15-revoked",
   "16-remove-computer",
   "17-persisted",
+  // 11b.2's own (camera + deep link): both need a real pairing window, and both
+  // assert a path a person can take instead of a paste.
+  "18-camera-denied",
+  "19-deep-link",
+  // Fix round 1 (finding 1): a granted Scan tap's preview can be CLOSED, and it
+  // never outlives the intake.
+  "20-camera-close",
   // 12c's session screens.
   "06-session-open",
   "07-prompt",

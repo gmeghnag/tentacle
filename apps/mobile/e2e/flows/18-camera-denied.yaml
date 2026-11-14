@@ -1,0 +1,64 @@
+appId: so.tentacle.app
+---
+# 18 (docs/feat/mobile-pairing-screen.md 11b.2, F-P15): the camera is DENIED. The
+# app must say so, offer Settings, and — the point of the flow — PASTE MUST STILL
+# PAIR. So this flow does the ordinary pairing after the denial and asserts the
+# computer row the store wrote: a scan is an accelerator, never the path.
+#
+# The number is 18, not the plan's "12": 12–17 are 11b.1's own flows
+# (`12-pair-declined` … `17-persisted`), recorded as drift in Execution.
+- runScript:
+    file: "pair-start.js"
+# `camera: deny` is a SYSTEM denial (simctl privacy), so the app sees `denied`
+# before it ever asks — exactly what a person who refused once sees.
+- launchApp:
+    clearState: true
+    permissions:
+      camera: deny
+- clearKeychain
+# docs/feat/mobile-lock.md: locked at cold start (Owner Q1).
+- runFlow: _unlock.yaml
+- extendedWaitUntil:
+    visible:
+      id: "pair-paste-input"
+    timeout: 30000
+# The Scan affordance is offered (decision 10: nobody is warned before a tap) ...
+- assertVisible:
+    id: "pair-scan"
+- tapOn:
+    id: "pair-scan"
+# ... and the tap reveals the denied card, with its way out, instead of a dead
+# permission prompt the OS will never show a second time.
+- extendedWaitUntil:
+    visible:
+      id: "pair-camera-denied"
+    timeout: 10000
+- assertVisible:
+    id: "pair-camera-settings"
+# F-P15's other half: the paste card is still there, and it still pairs.
+- assertVisible:
+    id: "pair-paste-input"
+- tapOn:
+    id: "pair-paste-input"
+- inputText: ${output.payload}
+# The denied card sits above the paste card, so the submit button is pushed down
+# INTO the keyboard's area ([32,570][370,613] measured): without dismissing it the
+# tap lands on the keyboard and the intake never sees the text. (Found on the
+# simulator; `_pair`'s plain paste has no card above it and needs no dismiss.)
+- hideKeyboard
+- tapOn:
+    id: "pair-paste-submit"
+- assertVisible:
+    id: "pair-review"
+- tapOn:
+    id: "pair-confirm"
+- runScript:
+    file: "pair-confirm.js"
+- assertVisible:
+    id: "pair-sas-${output.sas}"
+- runScript:
+    file: "pair-answer.js"
+- assertVisible:
+    id: "computers-list"
+- assertVisible:
+    id: "computer-${output.computerId}"
