@@ -644,3 +644,84 @@ reads its bytes through the injected port.
 #### Orchestrator decisions (owner night delegation 2026-11-14)
 
 Owner asleep, delegated: every Owner question above is decided with its RECOMMENDED option. Implementation APPROVED.
+
+#### Review — slice 13b `mobile-outbox` (fresh context)
+
+*— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES.** Executor: deepseek-v4-pro; reviewer is a different
+model family. Scope: `git diff main...HEAD` only.
+
+**Gate (re-run here):** the 5 touched test files 77 pass / 0 fail (240
+expects); `bun run lint` clean (1073 files); `bun run typecheck` clean. Full
+`bun test` not re-run in this pass.
+
+**Mutations (applied, run, reverted; `git status` clean after):** fresh
+`turnId` per attempt (`outbox-driver.ts:207`) → 2 red incl. link T1;
+`unchanged()` always true (`outbox.ts:209`) → 5 red incl. link T4; write in
+place, no tmp (`outbox-store.ts:260`) → store "kill between tmp and rename"
+red. The tests that exist are not vacuous.
+
+**Findings**
+
+1. **HIGH — a steer can vanish silently or steer a later turn.**
+   `OutboxSession.steer(text, id, turnId)` (`outbox-driver.ts:54`, called
+   `:199`) is meant to bind the steer to `steerTurnId`, but the only adapter
+   (`outbox-link.test.ts:296`, and the driver's own doc `:42-43`, "RemoteSession
+   satisfies it structurally") routes it to `RemoteSession.enqueue(text, id)`,
+   which ignores that turn, uses the client's current one, and **resolves without
+   sending** when it sees none (`client/src/remote-session.ts:958-963`). The
+   driver then `finish`es the item (`:216`). Repro
+   (`.tentacle/tmp/mobile-compose-13b/review-steer-race.test.ts`, T3 with the
+   facts read just before the turn ended): `items [] decisions [] drafts []
+   methods ["session/open","session/snapshot"] userTexts ["hi","hold please"]`.
+   The text is gone, with no banner, no sheet, no Enqueue frame. If a new turn
+   started in that window, the steer goes into that later turn. Both break F9 and
+   the plan's "never steers a later turn". Fix: route the port to
+   `RemoteClient.enqueue(sessionId, id, turnId, text)` (`remote-client.ts:2090`,
+   public), correct the doc comment, and add this race as a link test.
+2. **MEDIUM — the sheet's "Queue as steer" double tap sends two steers.**
+   `steerNow` (`outbox-driver.ts:349-359`) and `sendNow` (`:339`) skip both
+   `serialise` and `busy`, and they do not re-read the item. `asSteer` mints a
+   fresh `enqueueId` for each call on a prompt item (`outbox.ts:226`). Repro
+   (`review-steer-twice.test.ts`): two concurrent `steerNow(item)` produce steer
+   ids `["k4","k5"]`, so the text is injected twice. This contradicts F4. A
+   second tap after the first act finished also re-sends from the stale object.
+3. **MEDIUM — store writes are not serialised and share one tmp path**
+   (`outbox-store.ts:255-268`). The store is one file per computer, while the
+   driver serialises only per session, and drafts and ownIds write
+   independently. Repro (`review-store-race.test.ts`, the first write slower):
+   both writes answer `true`, memory holds `["a","b"]` and disk holds
+   `ownIds:["a"]`. That is a silent lost update: after a kill, an item, a ref or
+   an own id is gone, or a finished item comes back.
+4. **MEDIUM — the not-saved contract differs between the fake and the real
+   store.** The real store keeps a failed write in memory (`outbox-store.ts:256`),
+   so `enqueue` answers `null` (`outbox-driver.ts:337`) while the item is live and
+   the next `run` sends it. The driver test's fake drops it instead
+   (`outbox-driver.test.ts:101-105`), so this path is untested. A screen that
+   reads `null` as "not created, keep the text" gets a re-tap and a second item
+   with new keys. After a SUCCESSFUL set-aside of a corrupt file, the store also
+   stays read-only for the rest of the process (`:290`, pinned by the test at
+   `outbox-store.test.ts:209`), with no file left to protect. Every compose until
+   relaunch is then memory-only.
+5. **MEDIUM (process) — an unplanned changelog fragment.** The plan header says
+   13b gets none, and 13d writes `mobile-compose.added.md`. This branch adds
+   `changelog.d/mobile-compose-13b.added.md`, which itself says "No screen
+   changes yet". That is internal work, so the release would list the feature
+   twice (AGENTS §10). It is not listed under Drift.
+
+**Attacks that found nothing:** the keys are minted once at creation and
+persisted before any attempt (`createItem`, `enqueue`). `decide`'s ordering
+gives archived/deleted/gone priority, and no reopen is sent (T6). Refusals
+branch on class or code, never on message text. `not_uploaded` is re-uploaded
+once and then shown (`reuploaded` flag). An unknown `schemaVersion` leaves the
+file's bytes untouched. A `computerId` path cannot escape the root. No protocol
+or `packages/*` change (P11 holds). Low, not blocking:
+`refusalOf`'s `SessionLostError` / `UploadAbortedError` name checks are dead,
+because their `.name` values are `RpcError` / `AbortError`. Both land on
+`decide`, which is safe.
+
+**Executor:** a thorough slice with honest drift notes and real mutations. The
+blind spot is the port's adapter: the load-bearing property was proved for
+prompts end to end, but for steers only up to the client method, whose turn
+binding is not the item's.
