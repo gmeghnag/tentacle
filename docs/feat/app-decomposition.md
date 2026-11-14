@@ -5224,3 +5224,17 @@ annotated with the post-fix values (1,937 as the script counts it / 1,936 by
 `wc -l`, 1,404 code, 476 comment); the shape tallies (22 effects, 60 hook calls,
 103 other statements) are unchanged, which re-proves the fix removed imports
 only.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14 (fresh-context re-review of `git diff HEAD~1`, commit `1f2e6be7`)*
+
+**Verdict: PASS.** All three round-1 findings are fixed, and I found no regression.
+
+1. **Comment-blind scan: FIXED.** The 4 comment-only imports are gone, along with 4 imports Biome flagged (`HopFeed`, `HopPlaceView`, `SettingsNoticeLine`, `TargetFeed`). Those 4 are still published by the `export type {…} from "./app-types.ts"` at `App.tsx:94`, and typecheck stays green. The scan now ignores comments and strings, and re-exports written with `from`. Mutation: I re-added `JOB_REFRESH_MS` (mentioned only in a comment) and `HopFeed` (re-exported only via `from`). The test FAILED, listing exactly those two names. After reverting, `git status --porcelain` was empty.
+2. **Changelog fragment: FIXED** (deleted).
+3. **Signature: FIXED.** The S14 section is now signed `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`, with the evidence trail.
+
+**Gate:** the 10 touched/related test files (with `app.test.tsx`) → 177 pass / 0 fail. `bun run lint` → 1324 files, clean. `bun run typecheck` (root, mobile, relay) → OK. I did not re-run the full suite.
+
+**Note, not blocking:** the doc comment on `withoutCommentsAndStrings` says it also blanks "a regex literal's pattern", but the code does not handle regex literals. A quote character inside a regex in `App.tsx` could throw the scanner off. Today the test stays green, and it would most likely fail loudly rather than pass silently.
