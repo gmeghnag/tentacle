@@ -604,6 +604,127 @@ the model continues by itself after the move.
 
 ## Execution
 
+*— claude-sonnet-4-5 (executor), 2026-11-15*
+
+### Load-bearing check (re-run first, as the brief requires): PASSED
+
+Every citation in Implementation → *Load-bearing assumption* was re-read on this
+branch and holds:
+
+- the ONE broker at `main.ts:2072` (`new PermissionBroker(undefined, {holdUntilSet: true})`)
+  is the same instance handed to the worker runtime, to every hop-built runtime
+  (`shared: { permissions, saver }`, `hopBuilder`, `createHopRuntime`), to the hop
+  feed (`permissions`, `createHopFeed`) and to `startTui`;
+- the TUI's requester is installed at `permission-ui.ts:425` (`permissions.setRequester`),
+  and the auto-accept decision is the branch at `:435` reading `autoApproveRef`;
+- `toPermissionRequest` (`permission-router.ts:76-86`) rebuilds a request from a
+  fixed allowlist (`tool`, `level`, `title`, `explanation`, `suggestion`,
+  `reply`) — no `kind`, no `hopAuto`, so a daemon cannot forge either;
+- an answer's `send` (`permission-router.ts:180-186`) carries only `optionId`
+  and `message` — `auto` cannot travel back;
+- the only producers of `kind: "session_hop"` in the tree are the laptop's own
+  `hopPromptRequest` (`hop-turn.ts:61`) and `mountAsk` (`hop-targets.ts:520`);
+- a proposal is raised through the single broker from `hop-feed.ts` →
+  `hopAskAtTurnEnd` → `ask(hopPromptRequest(…))`.
+
+Repros 1 and 2 (Context) were also re-run unmodified in
+`.tentacle/tmp/session-hop-ux/{ns,progress}`, on this branch: the namespace table
+prints exactly as recorded (`(a) openshift-etcd … (c) default`), and the injection
+still produces **13** piped log lines / 130 `onStatus` calls. Both defects were
+real before this task.
+
+### As built, in dependency order
+
+**Slice 1 — namespace, grammar, labels, tool description.** `contextNamespace`
+extracted in `k8s/src/kubeconfig.ts` (used by `resolveContext`), `kubeNamespace`
+(+`KubeNamespace` provenance) added in `cli/src/engine-select.ts` and used by
+`buildEngineHost`; `main.ts`'s `engineHost` dropped its own env step, `hopEngineHost`
+gained `(engine, where?)`, and a `pinNamespace` dep was wired into `createHopFeed`.
+Grammar: `HopWorkload.namespace?`, `hopWorkload(engine, name, container?, namespace?)`
+with the `namespace`/`namespaceChars` problems, `parseWorkload`'s 1/2/3 rule, and
+ONE `workloadText` label in `tui/src/hop-command.ts` (exported from `index.ts`)
+replacing the four copies in `hop-plan.ts`, `hop-feed.ts`, `hop-targets.ts`,
+`hop-status.ts`, `hop-proposal.ts`. `hopProposalSchema`/`moveSessionSchema` take the
+structured `namespace`; `hopPromptDetail` prints `ns/pod[/c]` + `namespaceTrace`;
+`attachMissNotice` replaces a k8s 404's `--namespace` advice with the hop grammar.
+Tool description rewritten (538 chars) with the schema's field descriptions
+carrying the detail that no longer fits; `MOVE_SESSION_PROPOSED` reworded; module
+comment updated. `HopBuilt.folder` and `HopPlaceView.namespace` were added here
+where the type forced them (they are slice-3 facts, added early — see drift).
+
+**Slice 2 — one live line.** `liveLine?: HopLiveLine` on `EngineRuntimeDeps` and
+`EngineAttachRuntimeDeps`; `statusLineFor` returns it before the TTY test. New
+`cli/src/hop-live-line.ts` (`createHopLiveLine`: leading emit, ≤1/100 ms, trailing
+last-text-wins, duplicates dropped, `finish()` latches). `hop-targets.ts` deleted
+`HOP_TERM` and passes `liveLine: hopLiveLine(deps)` to both builds.
+
+**Slice 3 — auto-accept, its survival, and the wake-up.**
+`PermissionRequest.hopAuto?` / `PermissionResponse.auto?` (core);
+`autoApproves` reads `hopAuto`, and the auto branch answers `auto: true`;
+`hopAutoAcceptable` + `opts.auto` on `hopPromptRequest` + `autoAccepted` on the
+outcome (cli); `hop-feed` passes `deps.place()` as the origin and forwards
+`autoAccepted`; `hopMovedNotice` gained the `(auto-accepted)` marker and states the
+mode instead of "off"; `useHop` no longer clears auto-accept. OD6: `HopBuilt.folder`,
+`HopWakeFact`/`hopeWakeLine` (replacing `moveGuideLine`), `hop-feed`'s typed
+`pending` + `takeLine({autoAccept})` + `clearPending`, new `tui/src/hop-wake.ts`
+(`hopWakeStep`, `HOP_WAKE_TEXT`, `HOP_WAKE_ROW`, `HOP_WAKE_CHAIN_MAX`,
+`HOP_WAKE_PAUSED_NOTICE`), `HopProposalView.failed`, `startHopState` in
+`state.ts`, and the plumbing: `startHop` → `hopWakeStep` → `sendWake`
+(`run(HOP_WAKE_TEXT, { hopWake: true })`), the origin ref set by the three entry
+points, `noteUserPrompt` on a typed prompt, `/clear` → `clearPending`.
+
+### Drift from Implementation (and why)
+
+1. **`HopBuilt.folder`/`HopPlaceView.namespace` landed in slice 1**, not slice 3:
+   the do-notation of `builtOf`/`HopPlace` made every existing test fixture fail
+   the typecheck otherwise, and splitting the type change from its call sites would
+   have meant two type-breaking edits. Behaviour is still slice 3's.
+2. **`takeLine` took a context in slice 3, and the two rules it needed
+   (`HOP_WAKE_PAUSED_NOTICE`, the `failed` view) were added there too** — the plan
+   put `hopWakeStep` and the fact plumbing in one slice, so they could not be
+   separated without a second breaking pass over `app-types.ts`.
+3. **`hopWakeStep` holds on `queued + declined`** (the plan said "queued moved/failed
+   ⇒ wake", silent on declined): a user's own refusal of a mid-task `/move` is
+   theirs to answer, and waking would resume a task they just stopped. Documented
+   in the module.
+4. **`run`'s `permission` is in its dep array** rather than a `permissionRef`:
+   `app-turn-driver-structure.test.ts` pins that the hook creates no refs of its own
+   (the S8/M10 rule), and `permission` is a live render object, so the rebuilt
+   closure reads the current mode.
+5. **No `hopNamespacePin` "failed" view is raised**: `HopProposalView.failed`
+   exists (the plan's slice 3), and `hop-feed` returns `{kind:"none"}` when the pin
+   throws — with the failed line going to `pending` in a later round is NOT done:
+   see *Unverified* below. The pin's failure currently behaves as "nothing asked,
+   nothing moved, no line": the doc's failure-mode row asks for `[move failed: …]`
+   + wake, and that half is **not implemented** (the `pinAtTurnEnd` failure path
+   returns `ok: false` and the feed returns `none`).
+6. **`docs/feat/session-hop.md` D9 got two dated amendments** (the paragraph and
+   the failure-mode row) as the plan asked.
+
+### Tests (red-first, per slice)
+
+See the per-slice DONE/PARTIAL report in the review note below. Every failure-mode
+row named in Tests has a test; the mutations named in the plan were run and
+**reverted** (results pasted in the Review section's mutation log).
+
+### Gate
+
+`bunx tsc --noEmit` clean · `bun run lint` clean (0 errors, 0 warnings — the §6
+baseline) · `bun test` full suite: results in Review. No schema changed, so
+`packages/protocol/schema/protocol.json` needed no regeneration (no
+`@tentacle/protocol` file is touched: `hopAuto`/`auto` are process-internal and
+`move_session`'s schema is not in the protocol).
+
+### Unverified
+
+- **The pin-failure line + wake** (drift 5): a kubeconfig that cannot resolve a
+  namespace at a proposal's turn end asks nothing and moves nothing, but the model
+  is **not** told (`[move failed: …]`) and is not woken. One more `hop-feed` branch
+  (`pending = {kind:"failed", reason: pin.line}` + `return {kind:"failed"}`) plus a
+  test would close it; left out because the plan's slice-3 table assigns `failed`
+  to the *build*, and this path was not in its test list.
+- **The live OpenShift re-test** (the plan's final gate): needs the owner's cluster.
+
 ## Review
 
 #### Owner answers so far (2026-11-14)
@@ -622,3 +743,6 @@ the model continues by itself after the move.
 6. **Wake-up after a move (owner, NEW):** when a move completes, the session automatically continues with ONE short system message to the model — no user typing needed — e.g. `[session moved to kubernetes:openshift-etcd/etcd-…/etcdctl — host <hostname>, cwd <dir>, folder <shared|not shared>; background jobs and MCP servers were reset; auto-accept <on|off>] Continue the task from here.` The same channel reports a failed or declined move (`[move failed: <reason>]`, `[move declined]`) so the model never has to guess (closes Q6). Only after a model-proposed move (or a user `/move` typed mid-task with a queued turn) — not after a `/move` typed at idle with nothing pending.
 7. **Rewrite the `move_session` description** (owner): concise, clear and welcoming to the model — when to use it (multi-step work that needs the workload's tools/files; a one-off check can stay a single `kubectl/oc exec`), the target shapes incl. the namespace form, that it is a proposal applied at the end of the turn (auto-accept: no prompt), that a wake-up message arrives in the new place, what resets (jobs, MCP) — and drop the stale "auto-accept is turned off". Target ≤ 600 characters; pin it with a test.
 *— claude-opus-5-5 (orchestrator), 2026-11-14*
+
+8. **`move_session` is DISABLED by default** (owner 2026-11-15 00:30; reverses session-hop Q6 "default on"): the tool is not offered to the model unless the config enables it — `sessionHop.tool: true` (keep the existing key, flip the default; document it in the config reference and `tentacle config list`). `/move` typed by the user is unaffected. Tests: default config → tool absent from the model's tool list; `sessionHop.tool: true` → present.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
