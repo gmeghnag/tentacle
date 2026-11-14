@@ -1505,3 +1505,54 @@ intact).
 
 No schema changed, so `packages/protocol/schema/protocol.json` was NOT
 regenerated: nothing under `packages/**` is touched (P11 re-verified).
+
+## Review — slice 12c (fresh context)
+
+**Verdict: REQUEST-CHANGES**
+
+1. **HIGH — a departed screen's late `dispose()` clears the NEXT screen's
+   requester on the shared broker.** `SessionScreen.tsx:54` runs
+   `leave().then(() => controller.dispose())`, and `dispose()`
+   (`session-screen-controller.ts:348-353`) calls `deps.broker.reset()` with no
+   guard (the `disposed` flag set by `SessionRoute`'s own cleanup, `App.tsx`, is
+   not checked). The broker is the client's ONE broker (`connection.ts:146`), and
+   `reset()` sets `requester = null` unconditionally (`core/permission.ts:201`).
+   Scenario: open session A → back → open session B while A's `session/detach`
+   is still in flight (a slow link, or `reconnecting`): B attaches and sets its
+   sheet's requester, A's detach then settles, A's `dispose()` resets the broker,
+   and every ask on B is **held silently** — no sheet, the turn hangs, nothing
+   says why. Repro (temporary test in `apps/mobile/test/`, deleted afterwards):
+   A opened, its unmount done exactly as `App.tsx` and `SessionScreen.tsx` do it,
+   B opened, A's detach released, then `broker.request(…)` → B's sheet
+   `kind: "idle"` (expected `asking`) — **red**. Control run with the post-leave
+   `dispose()` removed → **green**. This is the "single broker" invariant's
+   failure mode: the per-id queue (F17) covers only the same id, and no test
+   covers two ids. Fix direction: release only a requester this screen set (a
+   compare-and-reset), or make `dispose` idempotent and stop resetting after
+   `leave`. Add a two-session regression test.
+2. **Not blocking:** `deps.archived` (`session-screen-controller.ts:66`) is never
+   read, but Execution item 7 says it "decides the banner". The archived banner
+   only shows once the daemon refuses the attach. Behaviour is safe (nothing is
+   revived), but the doc and code disagree.
+
+**Gate (re-run here):** `bun test apps/mobile/test` 308 pass / 0 fail (29
+files); `bun run lint` clean (1080 files); `bun run typecheck` clean. I did not
+re-run the full `bun test` or Maestro. The executor's 12/12 iOS 26.5 run is
+taken as reported, and flow 06 goes back to the list, not to a second session,
+so it cannot catch finding 1.
+
+**Mutation:** removed `mountRequester()` in `attach` →
+`session-screen.test.ts` 12 pass / 3 fail; reverted, `git status` clean.
+
+**Attacks tried:** (a) two-session broker race → finding 1; (b) an attach still
+in flight when the screen unmounts → safe (`disposed` checked before
+`mountRequester`, and `controller.leave` handles a leave with no handle);
+(c) first open of an archived row sends `reopen` → no (`open: () => attach(false)`,
+and `App.tsx` passes `reopen` only from the flag); (d) a `packages/**` or
+protocol change → none, P11 holds.
+
+**Executor:** thorough. The mutations were real, and the iOS findings are
+honestly recorded. It missed the cross-session lifecycle of the shared broker.
+Same model family as the executor (Opus), fresh context only.
+
+*— claude-opus-5-5, 2026-11-14*
