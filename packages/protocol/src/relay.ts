@@ -76,12 +76,21 @@ export const RELAY_CLOSE_UNREGISTERED = 4404;
  * (~87.4 Ki chars) so a legitimate frame is never cut (R0(a) proved an 87 KiB
  * frame splices intact).
  *
- * `maxInboundChars` is the receiver-side guard R0(b) earned: a Bun WebSocket
- * CLIENT has NO inbound frame limit of its own (it accepted a 64 MiB frame and
- * made it a JS string, ~135 MiB RSS), so a hostile relay could hand the daemon an
- * arbitrarily large frame. Anything above this on a daemon leg is refused by
- * `isInboundFrameTooLarge` BEFORE the frame is decoded — 2× the Noise cap, so a
- * legitimate worst-case frame still passes.
+ * `maxInboundChars` is the receiver-side DECODE guard: a Bun WebSocket CLIENT has
+ * NO inbound frame limit of its own (R0(b) measured it accepting a 64 MiB frame,
+ * ~135 MiB RSS), so a hostile relay can hand the daemon an arbitrarily large
+ * frame. This predicate does NOT bound that memory — the string (or `Uint8Array`)
+ * has already been materialised by Bun before any handler runs, which is exactly
+ * what R0(b) showed; a check here cannot undo it. What it does bound is the cost
+ * of everything AFTER the socket: the JSON/zod parse and the channel's own copy.
+ * Anything above it on a daemon leg is refused before that work — 2× the Noise
+ * cap, so a legitimate worst-case frame still passes.
+ *
+ * The unbounded-allocation gap itself stays OPEN (F7, R4): Bun exposes
+ * `maxPayloadLength` on a SERVER only — a client constructor ignores it (probed
+ * on 1.4.3: a `WebSocket` built with `{maxPayloadLength:1024}` still received
+ * 4096). R4's fallback is to accept it and back off after an oversize close, so
+ * a hostile relay cannot make us reconnect-loop into the same allocation.
  */
 export const RELAY_CONTROL_LIMITS = {
   /** A spliced/text frame larger than this (in characters) closes both legs. */
@@ -121,16 +130,49 @@ export function isRelaySecret(value: string): boolean {
   return SECRET_RE.test(value);
 }
 
-/** The features a `ready` frame may announce; `push` is task 16's (owner-approved amendment). */
+/** The features this build knows; `push` is task 16's (owner-approved amendment). */
 export const RELAY_FEATURES = ["push"] as const;
 export type RelayFeature = (typeof RELAY_FEATURES)[number];
+
+/** `true` iff `value` is a feature name this build knows. */
+export function isRelayFeature(value: string): value is RelayFeature {
+  return (RELAY_FEATURES as readonly string[]).includes(value);
+}
+
+/**
+ * The feature names in an announced list that this build knows, duplicates
+ * dropped — the filter `ready.features` is read through.
+ *
+ * Why the list is NOT a closed enum (review R1 finding 1): `features` exists
+ * (task 16 amendment) so a later `push` frame never hits "unknown frame closes
+ * the control socket". A closed enum defeats exactly that — a relay deployed
+ * with one name this build does not know would fail the WHOLE `ready` parse, and
+ * ("a malformed frame is a close") the daemon would drop the link and retry
+ * forever: every installed `serve` losing relay reachability at once, with no
+ * version error and no notice. Fields are free (AGENTS §7), so unknown names are
+ * accepted by the parse and filtered here.
+ */
+export function knownRelayFeatures(features: readonly string[]): RelayFeature[] {
+  const known: RelayFeature[] = [];
+  for (const name of features) {
+    if (isRelayFeature(name) && !known.includes(name)) {
+      known.push(name);
+    }
+  }
+  return known;
+}
 
 /**
  * `ready` carries `features` FROM THE START (task 16 amendment): a later `push`
  * frame must not be an "unknown frame" that closes the control socket. Today the
  * relay announces none, so the default is the honest value.
+ *
+ * Any bounded name parses ({@link knownRelayFeatures} is how a reader filters),
+ * for the forward-compat reason above. Not a `.transform()`: the JSON-schema
+ * export cannot represent a `ZodEffects`, and the wire contract must stay
+ * exportable.
  */
-const featuresField = z.array(z.enum(RELAY_FEATURES)).max(16).default([]);
+const featuresField = z.array(z.string().min(1).max(64)).max(16).default([]);
 
 /** daemon → relay: register this id (first frame on `/v1/daemon`). */
 const helloFrame = z.object({
@@ -161,10 +203,31 @@ const readyFrame = z.object({
   features: featuresField,
 });
 
-/** relay → daemon: registration refused. `supported` is the relay's versions, for the notice. */
+/** The refusal codes this build knows (relay → daemon `error`); a doc for the relay's author. */
+export const RELAY_ERROR_CODES = ["version", "invalid", "busy"] as const;
+export type RelayErrorCode = (typeof RELAY_ERROR_CODES)[number];
+
+/**
+ * `true` iff `value` is a refusal code this build knows.
+ *
+ * `code` is a free bounded string, not an enum, for the same reason as
+ * `ready.features` (review R1 finding 1, less severe): an error frame's job is to
+ * REFUSE cleanly, and a closed enum turned a newer relay's new code into
+ * "malformed frame" — a protocol violation the daemon answers by dropping the
+ * link, instead of a refusal. An unknown code is a refusal like any other; only
+ * `version` earns the 1 h notice (F13).
+ */
+export function isRelayErrorCode(value: string): value is RelayErrorCode {
+  return (RELAY_ERROR_CODES as readonly string[]).includes(value);
+}
+
+/**
+ * relay → daemon: registration refused. `supported` is the relay's versions, for
+ * the notice; `code` is name-checked with {@link isRelayErrorCode}, never by the schema.
+ */
 const errorFrame = z.object({
   t: z.literal("error"),
-  code: z.enum(["version", "invalid", "busy"]),
+  code: z.string().min(1).max(32),
   supported: z.array(z.number().int().min(1)).max(16),
 });
 
@@ -294,9 +357,9 @@ export function relayAddress(relayUrl: string, id: string): string {
 }
 
 /**
- * R0(b)'s guard: `true` iff an inbound frame is too large to even decode. A Bun
- * WebSocket client caps nothing on its own, so the daemon's legs check this
- * before handing a frame to a channel (an oversized one closes the leg).
+ * `true` iff an inbound frame's size is over the DECODE bound — the cost gate for
+ * the JSON/zod parse and the channel's copy, never a memory bound: the value is
+ * already in memory when this is asked (R0(b); see the limits' doc comment).
  */
 export function isInboundFrameTooLarge(data: string | Uint8Array): boolean {
   return data.length > RELAY_CONTROL_LIMITS.maxInboundChars;

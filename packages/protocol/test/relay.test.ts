@@ -30,9 +30,12 @@ import {
   type RelayToDaemonFrame,
   RelayToDaemonFrameSchema,
   isInboundFrameTooLarge,
+  isRelayErrorCode,
+  isRelayFeature,
   isRelayId,
   isRelaySecret,
   isRelayUrl,
+  knownRelayFeatures,
   relayAddress,
 } from "../src/relay.ts";
 
@@ -203,8 +206,88 @@ describe("control frames", () => {
       RelayToDaemonFrameSchema.safeParse({ t: "ready", v: 1, id: "too-short", features: [] })
         .success,
     ).toBe(false);
+    // `code` is bounded, not enumerated (review R1 finding 1): a non-string or an
+    // unbounded value is refused, while an unknown NAME parses (see the dedicated
+    // test above — a refusal, never "malformed frame").
+    expect(RelayToDaemonFrameSchema.safeParse({ t: "error", code: "nonsense" }).success).toBe(
+      false,
+    );
     expect(
-      RelayToDaemonFrameSchema.safeParse({ t: "error", code: "nonsense", supported: [1] }).success,
+      RelayToDaemonFrameSchema.safeParse({ t: "error", code: "busy", supported: [0] }).success,
+    ).toBe(false);
+  });
+
+  test("`ready.features` accepts a name this build does not know, and the known filter DROPS it", () => {
+    // Review R1 finding 1 (HIGH). `features` exists (task 16 amendment) so a
+    // later `push` frame never hits "unknown frame". A CLOSED enum defeats that:
+    // a relay announcing a second feature would fail the whole `ready` parse, the
+    // daemon drops the link and retries forever — every installed `serve` losing
+    // relay reachability at once, with no version error and no notice. Fields are
+    // free (AGENTS §7): unknown names are accepted by the parse, and a reader
+    // filters them with `knownRelayFeatures`.
+    const parsed = RelayToDaemonFrameSchema.parse({
+      t: "ready",
+      v: 1,
+      id: "WSbKVXnUw63XiNj5KDcKsU",
+      features: ["push", "future"],
+    });
+    expect(parsed).toEqual({
+      t: "ready",
+      v: 1,
+      id: "WSbKVXnUw63XiNj5KDcKsU",
+      features: ["push", "future"],
+    });
+    // An all-unknown list still parses: a newer relay must not be unreachable.
+    const newer = RelayToDaemonFrameSchema.parse({
+      t: "ready",
+      v: 1,
+      id: "WSbKVXnUw63XiNj5KDcKsU",
+      features: ["future", "later"],
+    });
+    if (newer.t !== "ready") throw new Error("expected ready");
+    expect(knownRelayFeatures(newer.features)).toEqual([]);
+    // …and the known one survives the filter, with duplicates collapsed.
+    if (parsed.t !== "ready") throw new Error("expected ready");
+    expect(knownRelayFeatures(parsed.features)).toEqual(["push"]);
+    expect(knownRelayFeatures(["push", "push", "future"])).toEqual(["push"]);
+    // The bound stays: a huge list is still refused (a close, not a guess).
+    expect(
+      RelayToDaemonFrameSchema.safeParse({
+        t: "ready",
+        v: 1,
+        id: "WSbKVXnUw63XiNj5KDcKsU",
+        features: Array.from({ length: 17 }, (_, i) => `f${i}`),
+      }).success,
+    ).toBe(false);
+  });
+
+  test("`error.code` accepts a code this build does not know (a refusal, not 'malformed')", () => {
+    // Review R1 finding 1, second half. An error frame's job is to REFUSE
+    // cleanly; a closed enum turned a newer relay's new code into "malformed
+    // frame", which the daemon treats as a protocol violation instead of a
+    // refusal. The known set stays a named constant for the notice and the doc.
+    expect(RelayToDaemonFrameSchema.parse({ t: "error", code: "version", supported: [1] })).toEqual(
+      {
+        t: "error",
+        code: "version",
+        supported: [1],
+      },
+    );
+    expect(
+      RelayToDaemonFrameSchema.parse({ t: "error", code: "overloaded", supported: [2] }),
+    ).toEqual({ t: "error", code: "overloaded", supported: [2] });
+    expect(isRelayErrorCode("version")).toBe(true);
+    expect(isRelayErrorCode("overloaded")).toBe(false);
+    // A non-string / empty / oversized code is still refused: the field stays bounded.
+    expect(
+      RelayToDaemonFrameSchema.safeParse({ t: "error", code: 7, supported: [1] }).success,
+    ).toBe(false);
+    expect(
+      RelayToDaemonFrameSchema.safeParse({ t: "error", code: "", supported: [1] }).success,
+    ).toBe(false);
+    expect(
+      RelayToDaemonFrameSchema.safeParse({ t: "error", code: "x".repeat(33), supported: [1] })
+        .success,
     ).toBe(false);
   });
 
@@ -227,7 +310,7 @@ describe("RELAY_CONTROL_LIMITS", () => {
   test("pins the numbers the relay and the daemon both enforce", () => {
     // One source for both ends: an 87.4 Ki-char Noise frame must pass, a hostile
     // 97 KiB one must not (R0(a) proved 87 KiB splices intact; R0(b) proved a
-    // Bun CLIENT has no inbound cap of its own).
+    // Bun CLIENT has no inbound cap of its own before any handler runs).
     expect(RELAY_CONTROL_LIMITS.maxFrameChars).toBe(96 * 1024);
     expect(RELAY_CONTROL_LIMITS.phoneHoldMs).toBe(RELAY_STREAM_HOLD_MS);
     expect(RELAY_STREAM_HOLD_MS).toBe(5_000);
@@ -239,10 +322,11 @@ describe("RELAY_CONTROL_LIMITS", () => {
     expect(RELAY_CLOSE_UNREGISTERED).toBe(4404);
   });
 
-  test("the inbound guard is ABOVE the Noise cap and below what R0(b) proved reachable", () => {
-    // The guard's job is to stop a hostile relay's huge frame before it becomes a
-    // JS string. It must not cut a legitimate one, so it sits above the Noise
-    // channel's own inbound cap (~87.4 Ki chars) — with room, since the cap is 2×.
+  test("the decode guard is ABOVE the Noise cap and below what R0(b) proved reachable", () => {
+    // The guard brackets the JSON/zod parse and the channel's copy — a legitimate
+    // worst-case frame must pass, so it sits above the Noise channel's own inbound
+    // cap (~87.4 Ki chars) with room (the cap is 2×). It bounds COST, not memory:
+    // see `isInboundFrameTooLarge`'s doc comment and F7.
     expect(RELAY_CONTROL_LIMITS.maxInboundChars).toBeGreaterThan(
       RELAY_CONTROL_LIMITS.maxFrameChars,
     );
@@ -250,16 +334,22 @@ describe("RELAY_CONTROL_LIMITS", () => {
   });
 });
 
-describe("isInboundFrameTooLarge (R0(b)'s guard)", () => {
+describe("isInboundFrameTooLarge (the decode cost guard)", () => {
   test("passes a legitimate worst-case frame and refuses a hostile one", () => {
-    // R0(b) measured it: a Bun WebSocket CLIENT accepted a 64 MiB frame and
-    // turned it into a JS string (~135 MiB RSS) — there is no client-side cap to
-    // rely on, so the daemon's legs ask this before decoding.
+    // R0(b) measured the gap this guard does NOT close: a Bun WebSocket CLIENT
+    // accepted a 64 MiB frame and turned it into a JS string (~135 MiB RSS) before
+    // any handler ran, so memory is spent before this is asked. It gates the work
+    // after the socket (JSON/zod, the channel copy) — hence "decode", not "allocate".
     expect(isInboundFrameTooLarge("x".repeat(87 * 1024))).toBe(false);
     expect(isInboundFrameTooLarge("x".repeat(RELAY_CONTROL_LIMITS.maxInboundChars))).toBe(false);
     expect(isInboundFrameTooLarge("x".repeat(RELAY_CONTROL_LIMITS.maxInboundChars + 1))).toBe(true);
     expect(isInboundFrameTooLarge(new Uint8Array(RELAY_CONTROL_LIMITS.maxInboundChars + 1))).toBe(
       true,
+    );
+    // A Uint8Array is measured in BYTES, a string in code units: both are what the
+    // socket hands over, and neither is re-encoded here.
+    expect(isInboundFrameTooLarge(new Uint8Array(RELAY_CONTROL_LIMITS.maxInboundChars))).toBe(
+      false,
     );
     expect(isInboundFrameTooLarge("")).toBe(false);
   });

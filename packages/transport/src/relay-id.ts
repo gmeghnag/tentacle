@@ -10,10 +10,11 @@
  * it registers an id only from a socket presenting a secret that hashes to it,
  * and nobody can squat an id without a 132-bit preimage.
  *
- * It lives on the `@tentacle/transport/noise` subpath beside `pairingSas` — the
- * same shape (one hash, one purpose, a domain separator, a fixed-size key) and
- * the same reason: a box that holds a secret needs the hash function anyway, and
- * no runtime that merely SPEAKS the protocol should load any crypto.
+ * It lives on its own `@tentacle/transport/relay-id` subpath beside
+ * `pairingSas` — the same shape (one hash, one purpose, a domain separator, a
+ * fixed-size key) and the same reason: a box that holds a secret needs the hash
+ * function anyway, and no runtime that merely SPEAKS the protocol should load
+ * any crypto.
  */
 import { sha256 } from "@noble/hashes/sha2.js";
 import { RELAY_ID_LENGTH, RELAY_SECRET_BYTES, encodeBase64Url } from "@tentacle/protocol";

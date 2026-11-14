@@ -2649,7 +2649,8 @@
       "additionalProperties": true,
       "properties": {
         "code": {
-          "enum": ["version", "invalid", "busy"],
+          "maxLength": 32,
+          "minLength": 1,
           "type": "string"
         },
         "supported": {
@@ -2733,7 +2734,8 @@
         "features": {
           "default": [],
           "items": {
-            "enum": ["push"],
+            "maxLength": 64,
+            "minLength": 1,
             "type": "string"
           },
           "maxItems": 16,
