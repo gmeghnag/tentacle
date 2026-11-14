@@ -383,7 +383,9 @@ describe("runSessionTui", () => {
         (t) => notices.notify(t),
       ),
       resume: null,
-    };
+      // The store is only a READER's seam for a hop (D1 step 4b): this rig's
+      // saver writes a fake target, so the store is never touched.
+    } as unknown as TuiSessions;
     const out: string[] = [];
     await runSessionTui(sessions, {
       start: async () => {

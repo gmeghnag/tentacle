@@ -4,10 +4,12 @@ import { render } from "ink";
 import {
   App,
   type AutoAcceptFeed,
+  type HopFeed,
   type NoticeFeed,
   type RunQuit,
   type SessionController,
   type SessionDirectory,
+  type TargetFeed,
 } from "./App.tsx";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
@@ -68,6 +70,10 @@ export interface TuiOptions {
   readonly runQuit?: RunQuit;
   /** A detached run's TUI: its session's shared auto-accept. */
   readonly autoAccept?: AutoAcceptFeed;
+  /** `/move` (docs/feat/session-hop.md D3): present only on a hop-capable origin (D8). */
+  readonly hop?: HopFeed;
+  /** Where the session is, live (the badge and `daemonInPod` follow a hop). */
+  readonly targetFeed?: TargetFeed;
   /** `run "<prompt>"`: sent once at mount as the first message, raw text (never a `/command`). */
   readonly initialPrompt?: string;
   /**
@@ -169,6 +175,8 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         {...(options.sessions ? { sessions: options.sessions } : {})}
         {...(options.runQuit ? { runQuit: options.runQuit } : {})}
         {...(options.autoAccept ? { autoAccept: options.autoAccept } : {})}
+        {...(options.hop ? { hop: options.hop } : {})}
+        {...(options.targetFeed ? { targetFeed: options.targetFeed } : {})}
         {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}
       />,
       { stdin, exitOnCtrlC: false },

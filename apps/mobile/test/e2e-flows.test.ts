@@ -33,6 +33,17 @@ const NEW_FLOWS = [
   "11-disconnect-mid-turn",
 ] as const;
 
+/** 13d's compose flows: the same daemon-truth rule, plus their own list. */
+const COMPOSE_FLOWS = [
+  "12-steer",
+  "13-send-now",
+  "14-returned-mine",
+  "15-returned-other",
+  "16-offline-outbox",
+  "17-outbox-changed",
+  "18-photos",
+] as const;
+
 /**
  * The flows that end BEFORE a computer is paired: they pair through their own
  * steps rather than the shared prefix, and so have no `computer-<id>` to name.
@@ -185,9 +196,21 @@ describe("every 12c flow ends on DAEMON truth (plan P9: an id only says what was
     }
   });
 
+  test("each 13d compose flow ends the same way (13d: its own last step is a hook)", () => {
+    for (const name of COMPOSE_FLOWS) {
+      const files = scripts(name);
+      expect(files.length).toBeGreaterThan(0);
+      const last = files[files.length - 1] as string;
+      const body = scriptBody(last);
+      expect(body).toContain("http.get");
+      expect(body).toMatch(/throw new Error/);
+      expect(body).toMatch(/MAESTRO_HOOKS/);
+    }
+  });
+
   test("the daemon-truth hooks the 12c flows read are the ones the harness serves", () => {
     const served = readFileSync(join(import.meta.dir, "..", "e2e", "hooks.ts"), "utf8");
-    for (const name of NEW_FLOWS) {
+    for (const name of [...NEW_FLOWS, ...COMPOSE_FLOWS]) {
       for (const file of scripts(name)) {
         const body = scriptBody(file);
         for (const match of body.matchAll(/\$\{MAESTRO_HOOKS\}\/([a-z-]+)/g)) {
@@ -196,6 +219,59 @@ describe("every 12c flow ends on DAEMON truth (plan P9: an id only says what was
           expect(served).toContain(`"${hook}"`);
         }
       }
+    }
+  });
+});
+
+describe("13d's compose flows (docs/feat/mobile-compose.md)", () => {
+  test("every one opens the session screen and asserts something INSIDE the compose bar", () => {
+    // `session-view` alone is on screen whatever happens (12c's round-1 finding).
+    const inside = (id: string): boolean =>
+      id.startsWith("composer-") ||
+      id.startsWith("chip-") ||
+      id.startsWith("queued-row-") ||
+      id.startsWith("returned-") ||
+      id.startsWith("take-") ||
+      id.startsWith("outbox-") ||
+      id.startsWith("waiting-network") ||
+      id.startsWith("banner-");
+    for (const name of COMPOSE_FLOWS) {
+      const ids = new Set(readFlow(name).map((a) => a.id));
+      expect(ids.has("session-view")).toBe(true);
+      expect([...ids].some(inside)).toBe(true);
+    }
+  });
+
+  test("flow 12 asserts the QUEUE cleared the field, not that it kept the text", () => {
+    // D1: the tap queues the text and clears the field in the same step (a double
+    // tap must not queue twice). The first run asserted `composer-filled` here and
+    // failed — correctly, because queueing empties the field. Mutation: flip this
+    // assertion back → red.
+    const ids = readFlow("12-steer").map((a) => `${a.kind}:${a.id}`);
+    expect(ids).toContain("assertVisible:composer-queue");
+    expect(ids).toContain("assertNotVisible:composer-filled");
+  });
+
+  test("each uses its OWN session, created for it just before it runs", () => {
+    // A shared session would leak a queued/returned row from one flow into the next
+    // one's screen (12c's permission-flow lesson). And they are NOT seeded up front:
+    // eight extra rows pushed the earlier flows' sessions off the visible list (the
+    // first iOS 26 run: flows 02/05/06/07/08 failed) — so `run.ts` creates each one
+    // lazily through `COMPOSE_SESSION_VARS`.
+    const vars = new Set<string>();
+    for (const name of COMPOSE_FLOWS) {
+      const body = readFileSync(join(FLOWS_DIR, `${name}.yaml`), "utf8");
+      for (const match of body.matchAll(/session-\$\{([A-Z0-9_]+)\}/g)) {
+        vars.add(match[1] as string);
+      }
+    }
+    // Seven flows, seven distinct ids, none of them the list's own rows.
+    expect(vars.size).toBe(COMPOSE_FLOWS.length);
+    expect(vars.has("ALPHA_ID")).toBe(false);
+    expect(vars.has("CHARLIE_ID")).toBe(false);
+    const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    for (const variable of vars) {
+      expect(runner).toContain(`"${variable}"`);
     }
   });
 });

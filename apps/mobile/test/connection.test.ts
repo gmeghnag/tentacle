@@ -17,7 +17,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@tentacle/agent";
-import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
+import { RemoteClient, type WebSocketCtor, webSocketChannelFactory } from "@tentacle/client";
 import { ChannelError } from "@tentacle/client";
 import { type ModelProvider, PermissionBroker } from "@tentacle/core";
 import {
@@ -32,10 +32,16 @@ import {
 import { encodeBase64Url as encode } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { publicKeyOf } from "@tentacle/transport/noise";
+import { createAppLog } from "../src/app-log.ts";
 import type { SecureKV } from "../src/computer-store.ts";
 import { createComputerStore } from "../src/computer-store.ts";
 import type { StoredComputer } from "../src/computers.ts";
-import { APP_CLIENT_OPTIONS, openComputer } from "../src/connection.ts";
+import {
+  APP_CLIENT_OPTIONS,
+  clientErrorFields,
+  openComputer,
+  withDiagnostics,
+} from "../src/connection.ts";
 import { sha256Hex } from "../src/hash.ts";
 import { createLinkDiagnoser } from "../src/link-diagnosis.ts";
 import type { RNWebSocketCtor } from "../src/rn-websocket.ts";
@@ -43,6 +49,10 @@ import { rnWebSocketCtor } from "../src/rn-websocket.ts";
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const TOKEN = "e2e-token";
+/** Canaries for the export test (F16): daemon-shaped prose a socket can really deliver. */
+const PROMPT = "CANARY-PROMPT deploy the secret";
+const TITLE = "CANARY-TITLE refactor the auth layer";
+const COMPUTER = "CANARY-COMPUTER-MacBook";
 const IOS_ORIGIN = "http://192.168.1.8:4001";
 const CWD = tmpdir();
 
@@ -165,8 +175,12 @@ function daemon(options: { readonly policy?: ImagePolicy } = {}): Daemon {
   };
 }
 
-const open = (d: Daemon): ReturnType<typeof openComputer> =>
-  openComputer(d.computer, { WebSocket: RNShapedWebSocket, random: systemRandomBytes });
+const open = (d: Daemon, log?: ReturnType<typeof createAppLog>): ReturnType<typeof openComputer> =>
+  openComputer(d.computer, {
+    WebSocket: RNShapedWebSocket,
+    random: systemRandomBytes,
+    ...(log === undefined ? {} : { log }),
+  });
 
 /** `expo-crypto`'s job on the phone; Bun's CSPRNG stands in here. */
 function systemRandomBytes(length: number): Uint8Array {
@@ -471,6 +485,118 @@ describe("openComputer over /e2e", () => {
         expect(Array.isArray(page.sessions)).toBe(true);
       } finally {
         await link.close();
+      }
+    });
+  });
+});
+
+describe("the socket diagnostics reach the injected sink (docs/feat/mobile-lock.md D7)", () => {
+  test("a dial logs its HOST only, never the URL (mutation: log the raw url → red)", async () => {
+    await withDaemon(async (d) => {
+      const log = createAppLog({ now: () => 1_700_000_000_000, capacity: 200 });
+      const link = await open(d, log);
+      try {
+        const dials = log.entries().filter((entry) => entry.kind === "dial");
+        expect(dials.length).toBeGreaterThan(0);
+        // The `/e2e` URL is host:port; the entry is typed, with the host as a field.
+        const host = new URL(d.computer.addresses[0] ?? "").host;
+        expect(dials[0]?.fields.host).toBe(host);
+        // Nothing in the whole ring holds a `?token=` (there is none on /e2e) or
+        // a full dialled URL: `url` is never a field.
+        const text = JSON.stringify(log.entries());
+        expect(text).not.toContain("?token=");
+        expect(text).not.toContain("ws://");
+      } finally {
+        await link.close();
+      }
+    });
+  });
+
+  test("a socket's canary close-reason and error text never reach the ring (F16)", () => {
+    // The app's ONE wrapper, driven by a fake socket that hands it exactly the
+    // daemon text a real one can (P4). Before the fix these went in as free
+    // `detail` text, and `redact()` cannot tell prose from prose: a title or a
+    // prompt fragment survived into the export (review round 1, finding 2).
+    const log = createAppLog({ now: () => 1_700_000_000_000, capacity: 200 });
+    const fired: Record<string, ((event: unknown) => void)[]> = {};
+    class FakeSocket {
+      addEventListener(type: string, listener: (event: unknown) => void): void {
+        fired[type] = [...(fired[type] ?? []), listener];
+      }
+    }
+    const Ctor = withDiagnostics(FakeSocket as unknown as WebSocketCtor, log);
+    new (Ctor as unknown as new (url: string) => unknown)(
+      `wss://example.local:8787/e2e?token=${TOKEN}`,
+    );
+    // What RN really delivers: a close with the peer's prose reason, an error
+    // carrying the failing URL (a path, and the token query on iOS).
+    for (const listener of fired.close ?? []) {
+      listener({ code: 1006, reason: `${PROMPT} ${TITLE} ${COMPUTER}` });
+    }
+    for (const listener of fired.error ?? []) {
+      listener({
+        error: new Error(`WebSocket connection to 'wss://h:1/${TITLE}?token=${TOKEN}' failed`),
+      });
+    }
+    const text = JSON.stringify(log.entries());
+    for (const canary of [TOKEN, PROMPT, TITLE, COMPUTER, "token="]) {
+      expect(text).not.toContain(canary);
+    }
+    // Non-vacuity: the entries exist and carry what IS allowed — the close code,
+    // the error class, the dialled host (Owner Q8).
+    expect(text).toContain('"dial"');
+    expect(text).toContain('"code":1006');
+    expect(text).toContain('"error":"Error"');
+  });
+
+  test("a client error logs its class and code, never the daemon's message (F16)", () => {
+    // `RemoteClient.onError` carries an endpoint body, a malformed frame, or an
+    // unknown mandatory update's daemon-supplied `type` — the exact channel a pod
+    // controls. The fields must stay machine-readable (review round 1, finding 2).
+    const plain = clientErrorFields(new Error(`${PROMPT} ${TITLE} ${COMPUTER}`));
+    expect(plain).toEqual({ error: "Error" });
+    const rpc = Object.assign(new Error(TITLE), { name: "RpcError", code: -32001 });
+    expect(clientErrorFields(rpc)).toEqual({ error: "RpcError", code: -32001 });
+    const text = JSON.stringify([plain, clientErrorFields(rpc)]);
+    for (const canary of [PROMPT, TITLE, COMPUTER]) {
+      expect(text).not.toContain(canary);
+    }
+  });
+
+  test("no console.log is left on the link's path (mutation: restore it → red)", async () => {
+    // The app's one log line used to be `console.log('[tentacle] …')` and was
+    // lost. A spy proves nothing writes to the console any more.
+    const written: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      written.push(args.map(String).join(" "));
+    };
+    try {
+      await withDaemon(async (d) => {
+        const log = createAppLog({ now: () => 1_700_000_000_000, capacity: 200 });
+        const link = await open(d, log);
+        try {
+          await link.client.sessionList();
+        } finally {
+          await link.close();
+        }
+      });
+    } finally {
+      console.log = original;
+    }
+    expect(written.filter((line) => line.includes("[tentacle]"))).toEqual([]);
+  });
+
+  test("a link built with NO sink still works (the module-private ring), and never throws", async () => {
+    await withDaemon(async (d) => {
+      const seeder = await seeded(d.url);
+      const link = await open(d);
+      try {
+        expect(Array.isArray((await link.client.sessionList()).sessions)).toBe(true);
+      } finally {
+        await link.close();
+        await seeder.closeSessions();
+        seeder.close();
       }
     });
   });

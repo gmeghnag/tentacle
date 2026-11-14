@@ -96,7 +96,14 @@ function snap(over: Partial<KeySnapshot> = {}, char = "", key: Partial<Key> = {}
     paletteNames: [],
     commandSel: 0,
     fieldValue: "",
-    permission: { pending: null, choices: [], selected: 0, mode: () => ({ mode: "menu" }) },
+    permission: {
+      pending: null,
+      choices: [],
+      selected: 0,
+      mode: () => ({ mode: "menu" }),
+      // `0` = the arming window has long passed (docs/fix/quit-enter-ask.md).
+      shownAt: () => 0,
+    },
     sessions: undefined,
     detachOnQuit: false,
     ...over,

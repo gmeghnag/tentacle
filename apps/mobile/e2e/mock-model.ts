@@ -58,7 +58,18 @@ const DELTAS = ["Hello", " from", " the", " mock", " model."];
 /** Chunk spacing of a `SLOW` stream (ms): long enough for a UI flow to observe it. */
 export const SLOW_MS = 900;
 
-/** The prompt text of an OpenAI chat request (the last user message). */
+/**
+ * Chunk spacing of a `STEADY` stream (ms): a turn that runs long enough for a flow
+ * to TYPE AND QUEUE a steer into it (13d's flow 12), and still ENDS, so the steer is
+ * injected at its next model-round boundary.
+ */
+export const STEADY_MS = 2500;
+
+/**
+ * The user text of an OpenAI chat request's last user message. The content may be
+ * a plain string, or (with images) the provider's content ARRAY
+ * (`[{type:"text"},{type:"image_url"}]`) — 13d's flow 18 needs both.
+ */
 export function lastUserText(body: unknown): string {
   const messages = (body as { messages?: unknown }).messages;
   if (!Array.isArray(messages)) {
@@ -66,11 +77,38 @@ export function lastUserText(body: unknown): string {
   }
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const m = messages[i] as { role?: unknown; content?: unknown };
-    if (m.role === "user" && typeof m.content === "string") {
+    if (m.role !== "user") {
+      continue;
+    }
+    if (typeof m.content === "string") {
       return m.content;
+    }
+    if (Array.isArray(m.content)) {
+      return m.content
+        .flatMap((part) => {
+          const p = part as { type?: unknown; text?: unknown };
+          return p.type === "text" && typeof p.text === "string" ? [p.text] : [];
+        })
+        .join("\n");
     }
   }
   return "";
+}
+
+/** How many image parts the request's last user message carries (13d's flow 18). */
+export function lastUserImages(body: unknown): number {
+  const messages = (body as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) {
+    return 0;
+  }
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i] as { role?: unknown; content?: unknown };
+    if (m.role !== "user" || !Array.isArray(m.content)) {
+      continue;
+    }
+    return m.content.filter((part) => (part as { type?: unknown }).type === "image_url").length;
+  }
+  return 0;
 }
 
 /**
@@ -236,12 +274,28 @@ function stream(
       // `SLOW`: a turn that streams for a few seconds and then ENDS — what a flow
       // needs to observe the running indicator (a `HOLD` turn never ends).
       const slow = !hold && prompt.includes("SLOW");
+      // `STEADY`: a turn that runs ~10 s and ends — long enough for a flow to type
+      // and queue a steer (13d's flow 12), and short enough that its next round
+      // boundary arrives inside the flow's wait.
+      const steady = !hold && !slow && prompt.includes("STEADY");
       if (hold) {
         ctx.setHeld(true);
       }
-      for (const delta of DELTAS) {
+      // 13d's flow 18: the images reached the MODEL (not just the daemon's store),
+      // so the answer says how many. `[context: …]` lines are the daemon's own.
+      const images = lastUserImages(body);
+      const deltas = images === 0 ? DELTAS : [`saw ${images} image${images === 1 ? "" : "s"}`];
+      for (const delta of deltas) {
         send(frame({ content: delta }));
-        await Bun.sleep(hold ? Math.max(20, ctx.holdMs / DELTAS.length) : slow ? SLOW_MS : 20);
+        await Bun.sleep(
+          hold
+            ? Math.max(20, ctx.holdMs / deltas.length)
+            : slow
+              ? SLOW_MS
+              : steady
+                ? STEADY_MS
+                : 20,
+        );
       }
       send(frame({}, "stop"));
       send(DONE_FRAME);

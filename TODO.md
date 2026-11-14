@@ -3,6 +3,21 @@
 Running backlog of planned work. The near-term roadmap is **skills support** next;
 the rest are "value-add" improvements layered on the harness.
 
+## Owner review queue
+
+- [ ] **review/mobile-decisions** — the owner wants to re-read every mobile
+  decision taken on 13–14/11 (owner 2026-11-14). Each doc has the questions with
+  the recommendation and the chosen answer:
+  - **Decided by the orchestrator** (night delegation, `#### Orchestrator
+    decisions (owner night delegation 2026-11-14)`): `docs/feat/mobile-compose.md`
+    (13), `docs/feat/mobile-lock.md` (14), `docs/feat/mobile-pairing-screen.md`
+    (11b) — plus `docs/feat/session-hop.md` (not mobile, same night).
+  - **Approved by the owner "all as recommended"** (`#### Owner decisions`):
+    `docs/feat/mobile-relay.md` (15), `docs/feat/mobile-push.md` (16),
+    `docs/feat/mobile-notifications.md` (17), `docs/feat/mobile-live-activity.md` (18).
+  - Earlier owner answers: `docs/feat/mobile-session-view.md` (12, "all +
+    images"), `docs/feat/sibling-discovery.md` (10, "all").
+
 ## v0.1.0 stabilization review (in progress)
 
 Full code review, hot-path → polish, to stabilize a v0.1.0. Findings recorded

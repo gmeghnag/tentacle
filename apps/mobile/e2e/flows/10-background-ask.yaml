@@ -41,6 +41,8 @@ appId: so.tentacle.app
 # step still proves is the property that matters: the daemon held the ask while no
 # client could answer it, and it is re-offered to the phone when it re-attaches.
 - launchApp
+# docs/feat/mobile-lock.md: locked at cold start (Owner Q1).
+- runFlow: _unlock.yaml
 - extendedWaitUntil:
     visible:
       id: "computer-${output.computerId}"

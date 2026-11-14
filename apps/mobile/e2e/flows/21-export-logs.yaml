@@ -1,0 +1,30 @@
+appId: so.tentacle.app
+---
+# 09 (docs/feat/mobile-lock.md F16, Owner Q8): Settings → Export logs writes a
+# file the harness can READ OUT OF THE APP'S CONTAINER, and that file must not
+# contain any secret from this run.
+#
+# The canaries come from THIS run's world: the harness's daemon token (a URL
+# query on the laptop route), the seeded session titles (Alpha/Bravo/Charlie),
+# the HOLD prompt's text and the computer's name. If any of them appears, a
+# person sharing the file would be sharing them.
+- runFlow: _pair.yaml
+# Visit the session list so a dial and a link status really happen (the log must
+# contain `ws-open`/`dial` — an empty ring would make the negative assertions
+# vacuously true).
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- back
+- tapOn:
+    id: "open-settings"
+- assertVisible:
+    id: "settings"
+- tapOn:
+    id: "export-logs"
+# The share sheet opens; close it without choosing anything (F18: a cancel still
+# deletes the temp file, and the ring is untouched).
+- pressKey: Home
+- runScript:
+    file: "21-log-canaries.js"

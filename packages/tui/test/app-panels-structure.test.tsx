@@ -87,11 +87,14 @@ describe("S7: the panel rules are the kinds', not App.tsx's", () => {
   });
 
   test("the `/sessions` repaint on a swap is the kind's rule, called once", () => {
-    const app = readSrc("App.tsx");
-    // `swapSession` repaints the open `/sessions` panel through the rule that owns
-    // it — never by rebuilding the panel inline (the pre-S7 shape).
-    expect(countOf(app, "touchPanel()")).toBe(1);
-    expect(app).not.toContain('(p) => (p?.kind === "sessions" ? { ...p } : p)');
+    // Since S9b, `swapSession` (the ONE caller of this repaint) lives in
+    // `useSessionLink.ts`: the locator follows the declaration (the plan's
+    // Preconditions rule), and the property is unchanged — the rule that owns
+    // the repaint is called exactly once, and never rebuilt inline.
+    const link = readSrc("useSessionLink.ts");
+    expect(countOf(link, "touchPanel()")).toBe(1);
+    expect(countOf(readSrc("App.tsx"), "touchPanel()")).toBe(0);
+    expect(link).not.toContain('(p) => (p?.kind === "sessions" ? { ...p } : p)');
     const hook = readSrc("usePanels.ts");
     expect(countOf(hook, "touchPanel(p)")).toBe(1);
   });
@@ -101,7 +104,7 @@ describe("S7: the panel rules are the kinds', not App.tsx's", () => {
     expect(hook).not.toContain("useEffect");
     expect(hook).toContain("useCallback");
     // Fable H1: the effect list is App's and its length is unchanged.
-    expect(effectCount(readSrc("App.tsx"))).toBe(20);
+    expect(effectCount(readSrc("App.tsx"))).toBe(22);
     // Exactly ONE `usePanels` call (two would be two generations over one panel).
     expect(countOf(readSrc("App.tsx"), "usePanels({")).toBe(1);
   });

@@ -122,16 +122,24 @@ describe("S9a: the turn driver leaves App.tsx", () => {
     expect(app).toMatch(
       /const \{ run, commitHistory, streamTurn, sendNow, submit, startCompaction, drainHeld \} =\s*\n?\s*useTurnDriver\(\{/,
     );
-    // The identifiers are still read at their old call sites, unchanged.
+    // The identifiers are still read at their call sites, unchanged. Since S9b
+    // moved `onActivity` (their only caller here) into `useSessionLink.ts`, the
+    // locator follows the code: the CALLS are there, and App still hands the
+    // same three to that hook by name. Same property, new location — the plan's
+    // Preconditions rule for a source-locator.
     expect(app).toContain("runRef.current = run;");
-    expect(countOf(app, "streamTurn(")).toBeGreaterThanOrEqual(1);
-    expect(countOf(app, "commitHistory(")).toBeGreaterThanOrEqual(1);
-    expect(countOf(app, "drainHeld(")).toBeGreaterThanOrEqual(1);
+    const link = readSrc("useSessionLink.ts");
+    expect(countOf(link, "streamTurn(")).toBeGreaterThanOrEqual(1);
+    expect(countOf(link, "commitHistory(")).toBeGreaterThanOrEqual(1);
+    expect(countOf(link, "drainHeld(")).toBeGreaterThanOrEqual(1);
+    expect(app).toContain("streamTurn,\n");
+    expect(app).toContain("commitHistory,\n");
+    expect(app).toContain("drainHeld,\n");
   });
 
   // H1: no hook owns an effect here, so an effect's index cannot shift.
   test("App still declares its 20 effects, and the hook declares none", () => {
-    expect(countOf(readSrc("App.tsx"), "\n  useEffect(")).toBe(20);
+    expect(countOf(readSrc("App.tsx"), "\n  useEffect(")).toBe(22);
     // A real use, not the word: the hook's header explains WHY there is none.
     const hook = readSrc("useTurnDriver.ts");
     expect(hook).not.toMatch(/^\s*useEffect(\(|<)/m);

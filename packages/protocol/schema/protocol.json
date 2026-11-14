@@ -2586,6 +2586,249 @@
       "properties": {},
       "type": "object"
     },
+    "RelayControlFrame": {
+      "discriminator": {
+        "mapping": {
+          "accept": "#/$defs/RelayControlFrameAccept",
+          "error": "#/$defs/RelayControlFrameError",
+          "hello": "#/$defs/RelayControlFrameHello",
+          "open": "#/$defs/RelayControlFrameOpen",
+          "ping": "#/$defs/RelayControlFramePing",
+          "pong": "#/$defs/RelayControlFramePong",
+          "ready": "#/$defs/RelayControlFrameReady",
+          "replaced": "#/$defs/RelayControlFrameReplaced"
+        },
+        "propertyName": "t"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RelayControlFrameHello"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameAccept"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFramePing"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameReady"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameError"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameOpen"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameReplaced"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFramePong"
+        }
+      ]
+    },
+    "RelayControlFrameAccept": {
+      "additionalProperties": true,
+      "properties": {
+        "stream": {
+          "$ref": "#/$defs/RelayStreamToken"
+        },
+        "t": {
+          "const": "accept",
+          "type": "string"
+        },
+        "v": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["stream", "t", "v"],
+      "type": "object"
+    },
+    "RelayControlFrameError": {
+      "additionalProperties": true,
+      "properties": {
+        "code": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "supported": {
+          "items": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "t": {
+          "const": "error",
+          "type": "string"
+        }
+      },
+      "required": ["code", "supported", "t"],
+      "type": "object"
+    },
+    "RelayControlFrameHello": {
+      "additionalProperties": true,
+      "properties": {
+        "secret": {
+          "$ref": "#/$defs/RelaySecretText"
+        },
+        "t": {
+          "const": "hello",
+          "type": "string"
+        },
+        "v": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["secret", "t", "v"],
+      "type": "object"
+    },
+    "RelayControlFrameOpen": {
+      "additionalProperties": true,
+      "properties": {
+        "ip": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "stream": {
+          "$ref": "#/$defs/RelayStreamToken"
+        },
+        "t": {
+          "const": "open",
+          "type": "string"
+        }
+      },
+      "required": ["ip", "stream", "t"],
+      "type": "object"
+    },
+    "RelayControlFramePing": {
+      "additionalProperties": true,
+      "properties": {
+        "t": {
+          "const": "ping",
+          "type": "string"
+        }
+      },
+      "required": ["t"],
+      "type": "object"
+    },
+    "RelayControlFramePong": {
+      "additionalProperties": true,
+      "properties": {
+        "t": {
+          "const": "pong",
+          "type": "string"
+        }
+      },
+      "required": ["t"],
+      "type": "object"
+    },
+    "RelayControlFrameReady": {
+      "additionalProperties": true,
+      "properties": {
+        "features": {
+          "default": [],
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/RelayId"
+        },
+        "t": {
+          "const": "ready",
+          "type": "string"
+        },
+        "v": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["id", "t", "v"],
+      "type": "object"
+    },
+    "RelayControlFrameReplaced": {
+      "additionalProperties": true,
+      "properties": {
+        "t": {
+          "const": "replaced",
+          "type": "string"
+        }
+      },
+      "required": ["t"],
+      "type": "object"
+    },
+    "RelayDaemonFrame": {
+      "discriminator": {
+        "mapping": {
+          "accept": "#/$defs/RelayControlFrameAccept",
+          "hello": "#/$defs/RelayControlFrameHello",
+          "ping": "#/$defs/RelayControlFramePing"
+        },
+        "propertyName": "t"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RelayControlFrameHello"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameAccept"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFramePing"
+        }
+      ]
+    },
+    "RelayId": {
+      "pattern": "^[A-Za-z0-9_-]{22}$",
+      "type": "string"
+    },
+    "RelaySecretText": {
+      "pattern": "^[A-Za-z0-9_-]{43}$",
+      "type": "string"
+    },
+    "RelayStreamToken": {
+      "pattern": "^[A-Za-z0-9_-]{22}$",
+      "type": "string"
+    },
+    "RelayToDaemonFrame": {
+      "discriminator": {
+        "mapping": {
+          "error": "#/$defs/RelayControlFrameError",
+          "open": "#/$defs/RelayControlFrameOpen",
+          "pong": "#/$defs/RelayControlFramePong",
+          "ready": "#/$defs/RelayControlFrameReady",
+          "replaced": "#/$defs/RelayControlFrameReplaced"
+        },
+        "propertyName": "t"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RelayControlFrameReady"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameError"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameOpen"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFrameReplaced"
+        },
+        {
+          "$ref": "#/$defs/RelayControlFramePong"
+        }
+      ]
+    },
     "RenameParams": {
       "additionalProperties": true,
       "properties": {

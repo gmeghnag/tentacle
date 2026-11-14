@@ -63,6 +63,37 @@ bun run e2e:mobile --ios 26 # just one
 | `15-revoked.yaml` | `/pair/revoke` → `computer-state-<id>-revoked` + Pair again |
 | `16-remove-computer.yaml` | Remove → `Pair`, and a relaunch still has nothing |
 | `17-persisted.yaml` | a relaunch (no clearState) re-reads the Keychain and the list loads |
+| `18-camera-denied.yaml` | camera denied → the card + Settings, and PASTE still pairs |
+| `19-deep-link.yaml` | a `tentacle://pair?…` link lands on the review and claims nothing |
+| `20-camera-close.yaml` | a granted Scan tap opens the preview, Close ends it, and paste still pairs |
+| `18-lock-cold-start.yaml` | the lock is up at cold start; no content is reachable under it (F14); a Face ID match lets the person in |
+| `19-lock-unlock-button.yaml` | `immediately` + background → the Unlock button is there and works (F5's reachable half) |
+| `20-lock-immediately.yaml` | `immediately` locks the return AND the person lands where they were |
+| `21-export-logs.yaml` | Settings → Export logs writes a file with no title/prompt/token in it (F16) |
+| `_unlock.yaml` | (sub-flow) the lock at cold start + the scripted Face ID match; run after every `launchApp` |
+
+11b.2's three flows (`18-camera-denied`, `19-deep-link`, `20-camera-close`) keep
+11b.1's numbers because they were written first; the lock's flows keep THEIR
+numbers (`18`–`21`) from `docs/feat/mobile-lock.md`. Two flows therefore share a
+prefix, which is why the names carry the subject (`-camera-`, `-lock-`, `-deep-link`).
+
+## The lock and Face ID (docs/feat/mobile-lock.md Step 0)
+
+The app locks at cold start (Owner Q1), so the harness drives the lock for real —
+there is no test-only branch in app code.
+
+| Hook | Does |
+|---|---|
+| `faceid-enroll` | enrols a face on the simulator (`notifyutil …enrollmentChanged`), idempotent |
+| `faceid-match` | a matching face; the pending `authenticateAsync` resolves success |
+| `faceid-nomatch` | **real device only** — the simulator's promise never resolves (Step 0) |
+| `log-file` | reads the app's own `Documents/tentacle-log.txt` out of its container (flows 20 and 21) |
+
+Two facts from Step 0 shape these flows: a `nomatch` cannot be scripted on the
+simulator (the evaluation hangs, so no flow depends on a failing prompt — that
+half of F5 is `app-lock.test.ts`'s), and JS timers keep running while the
+simulator is backgrounded, so the 5-minute/1-hour delays are unit-tested and
+device-checked, not flow-tested.
 
 12c's session-screen flows (`06-session-open` … `11-disconnect-mid-turn`) run
 last, each after `_pair`. Every flow that needs the world changed mid-run calls

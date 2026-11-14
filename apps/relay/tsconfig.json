@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@tentacle/protocol": ["../../packages/protocol/src/index.ts"],
+      "@tentacle/transport": ["../../packages/transport/src/index.ts"],
+      "@tentacle/transport/relay-id": ["../../packages/transport/src/relay-id.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

@@ -53,8 +53,15 @@ export interface OutboxData {
   /** Items still to do, oldest first. */
   readonly items: readonly OutboxItem[];
   readonly drafts: readonly Draft[];
-  /** Ids my client put on the wire (13a's hand-back set, D3: it outlives a kill). */
+  /**
+   * Ids my client put on the wire (13a's hand-back set, D3: it outlives a kill) and
+   * the text I typed for each. The TEXT matters: a row returned after the app was
+   * killed must come back with my words, and the daemon's copy is not trusted
+   * (AGENTS §7) — ids alone left nothing to give back (13d's flow 14).
+   */
   readonly ownIds: readonly string[];
+  /** `id → my text`, for the ids above that still have one (absent in a v1 file). */
+  readonly ownTexts?: Readonly<Record<string, string>>;
 }
 
 /** An empty store's content (a computer with nothing written yet). */
@@ -103,6 +110,8 @@ interface OutboxFileV1 {
   readonly items: readonly OutboxItem[];
   readonly drafts: readonly Draft[];
   readonly ownIds: readonly string[];
+  /** `id → my text` (added by 13d; a v1 file has none, which is not corrupt). */
+  readonly ownTexts?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -119,8 +128,8 @@ export interface OutboxStore {
   setItems(items: readonly OutboxItem[]): Promise<boolean>;
   /** Replace the drafts (and write). */
   setDrafts(drafts: readonly Draft[]): Promise<boolean>;
-  /** Replace the own-id set (and write). */
-  setOwnIds(ownIds: readonly string[]): Promise<boolean>;
+  /** Replace the own-id set (and the text each id carries, when known). */
+  setOwnIds(ownIds: readonly string[], texts?: Readonly<Record<string, string>>): Promise<boolean>;
   /** Delete one item and the photo copies it owns; `false` when the write did not land. */
   removeItem(itemId: string): Promise<boolean>;
 }
@@ -222,7 +231,19 @@ function parseFile(text: string): OutboxFileV1 | "corrupt" | { readonly version:
   ) {
     return "corrupt";
   }
-  return { schemaVersion: OUTBOX_SCHEMA_VERSION, items, drafts, ownIds };
+  const ownTexts = raw.ownTexts;
+  if (ownTexts !== undefined) {
+    if (!isObject(ownTexts) || !Object.values(ownTexts).every((text) => typeof text === "string")) {
+      return "corrupt";
+    }
+  }
+  return {
+    schemaVersion: OUTBOX_SCHEMA_VERSION,
+    items,
+    drafts,
+    ownIds,
+    ...(ownTexts === undefined ? {} : { ownTexts: ownTexts as Record<string, string> }),
+  };
 }
 
 /** The file's text for `data` (stable key order; one line so a diff of it reads). */
@@ -232,6 +253,7 @@ export const serializeOutbox = (data: OutboxData): string =>
     items: data.items,
     drafts: data.drafts,
     ownIds: data.ownIds,
+    ...(data.ownTexts === undefined ? {} : { ownTexts: data.ownTexts }),
   } satisfies OutboxFileV1);
 
 /**
@@ -329,7 +351,12 @@ export function createOutboxStore(
         loaded = { kind: "refused", version: parsed.version };
         return loaded;
       }
-      data = { items: parsed.items, drafts: parsed.drafts, ownIds: parsed.ownIds };
+      data = {
+        items: parsed.items,
+        drafts: parsed.drafts,
+        ownIds: parsed.ownIds,
+        ...(parsed.ownTexts === undefined ? {} : { ownTexts: parsed.ownTexts }),
+      };
       loaded = { kind: "loaded", data };
       return loaded;
     },
@@ -342,8 +369,12 @@ export function createOutboxStore(
     setDrafts(drafts) {
       return write({ ...data, drafts: [...drafts] });
     },
-    setOwnIds(ownIds) {
-      return write({ ...data, ownIds: [...ownIds] });
+    setOwnIds(ownIds, texts) {
+      return write({
+        ...data,
+        ownIds: [...ownIds],
+        ...(texts === undefined ? {} : { ownTexts: { ...texts } }),
+      });
     },
     async removeItem(itemId) {
       const item = data.items.find((entry) => entry.itemId === itemId);

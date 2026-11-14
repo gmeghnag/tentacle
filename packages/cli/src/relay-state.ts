@@ -265,6 +265,37 @@ export interface ResidentUse {
 }
 
 /**
+ * Our OWN uid on a daemon, and who else is there (`session/list`, read BEFORE
+ * any open: docs/feat/session-hop.md D1 step 4(a)/D7b). `own`: that session is
+ * live there — `null` when it is not — with its own running/jobs. One struct
+ * because it is ONE read: `ResidentUse` has no "own present" field.
+ */
+export interface OwnUse {
+  readonly own: { readonly running: boolean; readonly jobs: number } | null;
+  readonly others: number;
+}
+
+/**
+ * `ownUseOf`: `id`'s presence on the daemon and its use there, from one
+ * `session/list` read. `null` when the list is not the whole truth (a further
+ * page) — the caller then refuses to join, as `residentUseOf` makes it.
+ */
+export function ownUseOf(
+  list: Pick<SessionListResult, "sessions" | "cursor">,
+  id: string,
+): OwnUse | null {
+  const use = residentUseOf(list, id, { ownMayBeAbsent: true });
+  if (use === null) {
+    return null;
+  }
+  const own = list.sessions.find((session) => session.sessionId === id);
+  return {
+    own: own === undefined ? null : { running: own.running, jobs: own.jobs ?? 0 },
+    others: use.others,
+  };
+}
+
+/**
  * `session/list` read for `exitPlan`; `null` when it is not the whole truth (a
  * further page, or its own session missing). A session whose client left is
  * listed with `attached: 0`: it uses nothing, so it does not count.

@@ -12,6 +12,8 @@ appId: so.tentacle.app
 - launchApp:
     clearState: true
 - clearKeychain
+# docs/feat/mobile-lock.md: locked at cold start (Owner Q1).
+- runFlow: _unlock.yaml
 - extendedWaitUntil:
     visible:
       id: "pair-paste-input"

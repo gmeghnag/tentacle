@@ -26,6 +26,8 @@ appId: so.tentacle.app
     timeout: 20000
 # Persisted: a relaunch (no `clearState`) still has nothing paired.
 - launchApp
+# docs/feat/mobile-lock.md: the relaunch starts LOCKED (Owner Q1).
+- runFlow: _unlock.yaml
 - extendedWaitUntil:
     visible:
       id: "pair-paste-input"
