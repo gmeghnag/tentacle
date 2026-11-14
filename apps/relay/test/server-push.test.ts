@@ -18,6 +18,8 @@ import { type RunningRelay, startRelay } from "../src/server.ts";
 
 const SECRET_BYTE = 11;
 const SECRET = encodeBase64Url(new Uint8Array(32).fill(SECRET_BYTE));
+/** A second registered id (its own secret, so its own derived id). */
+const OTHER_SECRET = encodeBase64Url(new Uint8Array(32).fill(12));
 const ID = relayIdOf(new Uint8Array(32).fill(SECRET_BYTE));
 const TOKEN = "a".repeat(64);
 
@@ -360,16 +362,100 @@ describe("RelayCore.push — the decision, in isolation", () => {
     expect(instance.push(frame({ n: 3 })).ok).toBe(true);
   });
 
-  test("unregistering an id forgets its windows (a re-register starts clean)", () => {
-    const { core: instance } = core({ pushesPerMinutePerId: 1, pushesPerMinutePerToken: 1 });
+  test("a reconnect of the SAME id does not launder its per-ID window (F10)", () => {
+    // A `controlClosed` that also dropped the windows let a daemon bounce its
+    // control socket for a fresh 120/min per id (and a fresh 30/min per token)
+    // inside one minute. The windows are keyed by the ID and the TOKEN, and
+    // neither is a property of the socket. The token cap is set high here, so the
+    // refusal below can only be the per-ID one.
+    const { core: instance } = core({ pushesPerMinutePerId: 1, pushesPerMinutePerToken: 100 });
     hello(instance);
     expect(instance.push(frame({ n: 1 })).ok).toBe(true);
     expect(instance.push(frame({ n: 2 })).ok).toBe(false);
     instance.controlClosed("d1");
     hello(instance);
-    // Same id, fresh bookkeeping: without the delete the daemon would stay capped
-    // for the rest of the minute after every reconnect.
-    expect(instance.push(frame({ n: 3 })).ok).toBe(true);
+    // The same id, back on a NEW socket, is still capped for the rest of the
+    // minute: the per-id window survived the reconnect.
+    const decision = instance.push(frame({ n: 3 }));
+    expect(decision.ok).toBe(false);
+    if (!decision.ok) {
+      expect(decision.reason).toBe("capped");
+    }
+    // And the per-token budget is not double-charged by it either: the refused
+    // push charged nothing.
+    const { core: fresh } = core({ pushesPerMinutePerId: 100, pushesPerMinutePerToken: 1 });
+    hello(fresh);
+    expect(fresh.push(frame({ n: 1 })).ok).toBe(true);
+    fresh.controlClosed("d1");
+    hello(fresh);
+    expect(fresh.push(frame({ n: 2 })).ok).toBe(false);
+  });
+
+  test("the relay-wide token windows are bounded too (a token flood evicts the oldest)", () => {
+    // The per-token map is fed by anything a daemon names, so it needs the same
+    // bound the per-id map has. Past `maxTrackedPushTokens` the oldest entry is
+    // dropped and that token starts a fresh window: a fairness reset that bypasses
+    // nothing, because the per-ID window still bounds each daemon's total.
+    const { core: instance } = core({
+      pushesPerMinutePerId: 1_000,
+      pushesPerMinutePerToken: 1,
+      maxTrackedPushTokens: 2,
+    });
+    hello(instance);
+    expect(instance.push(frame({ n: 1, token: "a".repeat(64) })).ok).toBe(true);
+    expect(instance.push(frame({ n: 2, token: "b".repeat(64) })).ok).toBe(true);
+    expect(instance.push(frame({ n: 3, token: "c".repeat(64) })).ok).toBe(true);
+    // Three tokens through a two-entry map: the FIRST was evicted, so it is
+    // admitted again, while the newest is still capped.
+    expect(instance.push(frame({ n: 4, token: "a".repeat(64) })).ok).toBe(true);
+    expect(instance.push(frame({ n: 5, token: "c".repeat(64) })).ok).toBe(false);
+  });
+
+  test("the per-id push windows are bounded, so an id flood cannot grow them forever", () => {
+    // Keeping the windows across reconnects must not make the map an unbounded
+    // per-id store. Past `maxTrackedPushIds` the oldest entry is dropped and that
+    // id starts a fresh window — a fairness reset, since the relay-wide per-token
+    // window still bounds any real spray.
+    const { core: instance } = core({
+      pushesPerMinutePerId: 1,
+      pushesPerMinutePerToken: 1_000,
+      maxTrackedPushIds: 2,
+    });
+    const register = (socket: string, fill: number): void => {
+      instance.hello({
+        socket,
+        ip: "203.0.113.9",
+        v: 1,
+        secret: encodeBase64Url(new Uint8Array(32).fill(fill)),
+      });
+    };
+    register("d1", 11);
+    expect(instance.push(frame({ n: 1, socket: "d1" })).ok).toBe(true);
+    register("d2", 12);
+    expect(instance.push(frame({ n: 1, socket: "d2" })).ok).toBe(true);
+    register("d3", 13);
+    expect(instance.push(frame({ n: 1, socket: "d3" })).ok).toBe(true);
+    // Three windows through a two-entry map: the FIRST id's was evicted, so it is
+    // admitted again on a reconnect, while the newest is still capped.
+    register("d1b", 11);
+    expect(instance.push(frame({ n: 2, socket: "d1b" })).ok).toBe(true);
+    expect(instance.push(frame({ n: 2, socket: "d3" })).ok).toBe(false);
+  });
+
+  test("the per-TOKEN cap is relay-wide: a second id gets no extra token budget (F10)", () => {
+    // `pushesPerMinutePerToken` bounds what one DEVICE can be sprayed with. Scoping
+    // it inside one id's bookkeeping made the real bound `30 × ids`, and any
+    // secret is an id — the one bound F10 is about would have been unenforceable.
+    const { core: instance } = core({ pushesPerMinutePerId: 100, pushesPerMinutePerToken: 2 });
+    hello(instance);
+    expect(instance.push(frame({ n: 1 })).ok).toBe(true);
+    expect(instance.push(frame({ n: 2 })).ok).toBe(true);
+    instance.hello({ socket: "d2", ip: "203.0.113.10", v: 1, secret: OTHER_SECRET });
+    const decision = instance.push(frame({ n: 3, socket: "d2" }));
+    expect(decision.ok).toBe(false);
+    if (!decision.ok) {
+      expect(decision.reason).toBe("capped");
+    }
   });
 
   test("a refusal's `push-result` echoes `n`, so the daemon can correlate it", () => {
@@ -531,6 +617,34 @@ describe("a `push` frame — who may send one, and what it becomes", () => {
     other.send({ t: "hello", v: 1, secret: encodeBase64Url(new Uint8Array(32).fill(12)) });
     await other.next();
     other.send(pushFrame(1, "c".repeat(64)));
+    expect((JSON.parse(await other.next()) as { status: string }).status).toBe("sent");
+    first.close();
+    other.close();
+  });
+
+  test("a second ID does NOT get its own per-token budget (F10's bound is per device)", async () => {
+    // The end-to-end half of the core test: over real sockets, two registered ids
+    // pushing to the SAME device token share one 30/min budget. With the window
+    // scoped per id, a third party registered here could spray 30 × ids.
+    const { server } = pushRelay({
+      limits: { pushesPerMinutePerId: 100, pushesPerMinutePerToken: 1 },
+    });
+    const first = await control(server.url);
+    first.send(pushFrame(1, "a".repeat(64)));
+    expect((JSON.parse(await first.next()) as { status: string }).status).toBe("sent");
+    const other = await open(`${server.url}/v1/daemon`);
+    other.send({ t: "hello", v: 1, secret: encodeBase64Url(new Uint8Array(32).fill(12)) });
+    await other.next();
+    other.send(pushFrame(2, "a".repeat(64)));
+    expect(JSON.parse(await other.next())).toEqual({
+      t: "push-result",
+      n: 2,
+      status: "throttled",
+      reason: "capped",
+    });
+    // A different token from that same second id is still admitted: the cap is
+    // per DEVICE, not per relay.
+    other.send(pushFrame(3, "b".repeat(64)));
     expect((JSON.parse(await other.next()) as { status: string }).status).toBe("sent");
     first.close();
     other.close();

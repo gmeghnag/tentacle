@@ -20,6 +20,15 @@ interface FakeApns {
   next(status: number, reason?: string): void;
   /** Stop answering anything: the timeout path. */
   hang(): void;
+  /** Answer again (the connection is still open unless it was retired). */
+  resume(): void;
+  /**
+   * Make every session open RIGHT NOW deaf: it keeps accepting streams and never
+   * answers them, which is what a half-open connection (a NAT drop with no
+   * GOAWAY and no error) looks like. A NEW session still answers, so a client
+   * that retires the dead one recovers and one that reuses it times out again.
+   */
+  deafNow(): void;
   /** Retire the connection Apple-style (the client must dial again). */
   goaway(): void;
   readonly connections: number;
@@ -38,6 +47,8 @@ function fakeApns(): FakeApns {
   /** Explicit answers, in the order they were queued (a script for one test). */
   const queued: { status: number; reason?: string }[] = [];
   let hanging = false;
+  /** Sessions that accept streams and never answer (a half-open connection). */
+  const deaf = new WeakSet<http2.ServerHttp2Session>();
   let connections = 0;
   const sessions = new Set<http2.ServerHttp2Session>();
   server.on("session", (session) => {
@@ -55,6 +66,9 @@ function fakeApns(): FakeApns {
       seen.push({ path, headers, body });
       if (hanging) {
         return; // never answers: the client's deadline must fire
+      }
+      if (stream.session !== undefined && deaf.has(stream.session as http2.ServerHttp2Session)) {
+        return; // a half-open connection: this one is dead, a new session is not
       }
       const answer = queued.shift() ?? ruleFor(path);
       stream.respond({
@@ -89,6 +103,14 @@ function fakeApns(): FakeApns {
     hang() {
       hanging = true;
     },
+    resume() {
+      hanging = false;
+    },
+    deafNow() {
+      for (const session of sessions) {
+        deaf.add(session);
+      }
+    },
     goaway() {
       for (const session of sessions) {
         session.goaway(http2.constants.NGHTTP2_NO_ERROR);
@@ -112,16 +134,21 @@ afterEach(() => {
 });
 
 /** A JWT source that counts mints, so "retried once with a fresh token" is visible. */
-function fakeJwt(): ApnsJwtSource & { mints: number; invalidations: number } {
+function fakeJwt(
+  onMint?: () => void,
+): ApnsJwtSource & { mints: number; invalidations: number; invalidated: (string | undefined)[] } {
   const source = {
     mints: 0,
     invalidations: 0,
+    invalidated: [] as (string | undefined)[],
     jwt() {
       source.mints += 1;
+      onMint?.();
       return Promise.resolve(`jwt-${source.mints}`);
     },
-    invalidate() {
+    invalidate(jwt?: string) {
       source.invalidations += 1;
+      source.invalidated.push(jwt);
     },
   };
   return source;
@@ -283,6 +310,44 @@ describe("createApnsClient — the real HTTP/2 path", () => {
     const started = Date.now();
     expect(await apns.send(push())).toEqual({ status: "unavailable", reason: "timeout" });
     expect(Date.now() - started).toBeLessThan(2_000);
+    apns.close();
+  });
+
+  test("a timeout RETIRES the session, so a half-open connection costs one push", async () => {
+    // Finding 3 of the P4 review: `req.close()` alone leaves a session that never
+    // answered (an idle NAT drop sends no GOAWAY and no error) in the map, so
+    // every later push would be `unavailable/timeout` until the kernel gives up
+    // on the socket — minutes of silently dead pushes from a relay that looks
+    // healthy. The fake makes the session deaf AFTER it is dialed: a client that
+    // retires it dials a fresh, working one; a client that reuses it times out
+    // again.
+    const fake = fakeApns();
+    const apns = client(fake, fakeJwt(), 100);
+    // One working push first, so exactly ONE session exists and it can go deaf.
+    expect(await apns.send(push())).toEqual({ status: "sent" });
+    fake.deafNow();
+    expect(await apns.send(push())).toEqual({ status: "unavailable", reason: "timeout" });
+    expect(fake.connections).toBe(1);
+    // The property: the same client recovers with NO restart and NO second wait.
+    expect(await apns.send(push())).toEqual({ status: "sent" });
+    expect(fake.connections).toBe(2);
+    apns.close();
+  });
+
+  test("an ExpiredProviderToken retry names the FAILED token, so a sibling's fresh one survives", async () => {
+    // Finding 2's second half. Apple answers a token that changes too often with
+    // a 429 `TooManyProviderTokenUpdates`, throttling the real pushes: so an
+    // `ExpiredProviderToken` must invalidate the token THAT failed, not whatever
+    // a sibling push already replaced it with. The source (tested in
+    // `apns.test.ts`) ignores an invalidation of a token it no longer holds.
+    const fake = fakeApns();
+    fake.next(403, "ExpiredProviderToken");
+    const jwt = fakeJwt();
+    const apns = client(fake, jwt);
+    expect(await apns.send(push())).toEqual({ status: "sent" });
+    expect(jwt.invalidated).toEqual(["jwt-1"]);
+    // The retry really went out on the fresh token.
+    expect(String(fake.seen[1]?.headers.authorization)).toBe("bearer jwt-2");
     apns.close();
   });
 

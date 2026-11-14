@@ -329,7 +329,9 @@ suite DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20-Poly1305, single-shot:
   429 → `throttled`. Other 4xx → `rejected` + reason. 5xx/timeout →
   `unavailable`. 403 `ExpiredProviderToken` → refresh the JWT and retry once.
 - Abuse limits (pure, in `relay-core.ts`, defaults overridable): per relay id
-  120 pushes/min, per token 30/min, payload ≤ 4096 bytes after templating. A
+  120 pushes/min, **relay-wide** per device token 30/min (one token has one
+  budget, whatever id pushes to it or reconnects), payload ≤ 4096 bytes after
+  templating. A
   `push` from a socket that has not completed `hello` is refused (only a
   registered id may push, as only it may receive streams).
 
@@ -436,7 +438,7 @@ merges, if the owner wants overlap (one branch at a time still holds: they ride
 | F7 | **Relay hostile: replays an old push** | The plaintext `id` is deduped by the NSE (seen-set in the app group), and `at` older than 24 h is discarded (task 17). An `ask` replayed after it was answered: Approve hits `PermissionNotPending` (`hosted-session.ts:1112-1117`). No effect. |
 | F8 | **Relay hostile: drops / delays** | Undetectable by design (APNs gives no delivery receipt either). Bounded by `apns-expiration`. The pending ask is the source of truth. |
 | F9 | **Relay hostile: tampers with `aps`** (alert text, removes `mutable-content`) | Without `mutable-content` the NSE does not run and iOS shows the relay's text. A malicious relay can show arbitrary text under the app's name, which it could do anyway with the APNs key. **No action is possible**: actions come from the category the NSE sets after a successful open (task 17). Recorded as accepted metadata/UX risk. |
-| F10 | **Third party abuses the relay to spam a token** | It needs a registered relay id (any secret will do) AND the device token. The token only travels phone → paired daemon (inside Noise) → relay. Bounded by per-token 30/min and per-id 120/min, and content is only placeholders. Accepted. |
+| F10 | **Third party abuses the relay to spam a token** | It needs a registered relay id (any secret will do) AND the device token. The token only travels phone → paired daemon (inside Noise) → relay. Bounded by per-token 30/min (**relay-wide**: registering more ids or reconnecting one buys no extra budget) and per-id 120/min, and content is only placeholders. Accepted. |
 | F11 | **APNs token rotates / app reinstalled** | The app re-registers on the next connect (hash differs). A stale token → APNs 410 → `gone` → compare-and-delete. Converges on the current token. |
 | F12 | **Device push key rotation** | Re-register with the new key. The file is replaced atomically. Pushes sealed to the old key in flight fail to open (placeholder only). |
 | F13 | **Computer identity reset** (`devices reset`) | The registry is emptied and `push/` too. No pushes. Phones re-pair and re-register (and the relay id rotates, task 15 Q5). |
@@ -1314,3 +1316,100 @@ slice's h2c fake; the `.p8` → WebCrypto import is proved with a generated key
 **Executor behaviour.** Thorough, honest about M14's redundancy gap and the module-level red; findings 1–2 are spec drift not flagged in Drift.
 
 *— claude-opus-5-5, 2026-11-15* (different model family from the executor, DeepSeek)
+
+## Execution
+
+### Fix round 1
+
+**Scope.** The three HIGH/MEDIUM findings of the P4 review (scope `git diff
+main...HEAD`, slice P4). Nits were left alone; the review raised none that block.
+
+**Reproduced first, before any edit** (`.tentacle/tmp/mobile-push/fix1-probe.ts`,
+`RelayCore` direct + the real `createApnsJwtSource`, one injected clock):
+
+```
+F1a 3 ids -> 90 accepted to ONE token (cap 30)
+F1b close + re-hello -> 60 accepted to ONE token (cap 30)
+F2 4 concurrent cold jwt() -> 4 distinct token(s)
+```
+
+Finding 3 is not reproducible without a fake that can go half-open; it is pinned
+by a test instead (below), since the review itself marked it "plausible, not
+reproduced".
+
+**1. MEDIUM — the per-token cap was per (id, token) and reset on reconnect. FIXED.**
+`relay-core.ts`: the per-token window moved OUT of the id's bookkeeping into one
+**relay-wide** map (`pushTokens`), so one device token has one budget whatever id
+pushes to it. The per-id window is now keyed by the ID (not by the socket) and
+**kept** across `controlClosed`, so reconnecting the same id resumes its minute
+instead of laundering it. Both maps are bounded exactly as `ips` is — the oldest
+entry is evicted at `maxTrackedPushTokens` / `maxTrackedPushIds` (a fairness
+reset, not a bypass: the other bound still applies) — because "kept across
+reconnects" must not become "one entry per id forever". Design 4 and F10's
+wording now say "relay-wide", which is what they always meant (`relay-core.ts`'s
+own comment: "per DEVICE token — the one a third party could spray").
+Tests: `the per-TOKEN cap is relay-wide…` (core), `a second ID does NOT get its
+own per-token budget` (end-to-end over real sockets), `a reconnect of the SAME id
+does not launder its per-ID window`, and one bound test per map.
+
+*A first attempt expired an idle id's window after 2 minutes instead of bounding
+the map. The mutation run showed the difference is unobservable — a
+fixed one-minute window resets itself first — i.e. the test would have been
+vacuous, so it was replaced with the eviction the IP map already uses.*
+
+**2. MEDIUM — JWT minting was not single-flight. FIXED.** `apns.ts`:
+`createApnsJwtSource` memoises the **in-flight** mint promise, so N concurrent
+callers on a cold cache (or at a 40-minute boundary) share ONE signature; the
+promise is cleared in a `finally`, so a failed mint does not wedge the cache.
+`invalidate(jwt?)` now takes the token that failed and is a **no-op when the
+cache already holds a different one** — an `ExpiredProviderToken` burst reaches
+every in-flight push with the same stale JWT, and each was wiping the fresh token
+a sibling had just minted, minting once per push (`apns-client.ts` passes `jwt`).
+Tests: `concurrent calls mint ONE token`, `invalidate(staleJwt) does not drop a
+token a sibling already replaced`, `a mint that fails does not wedge the cache`,
+and the client-side `an ExpiredProviderToken retry names the FAILED token`.
+
+**3. MEDIUM — a timeout never retired the session. FIXED.** `apns-client.ts`: on
+the deadline the client now closes the stream, **drops the session from the map
+and destroys it**, so a half-open connection (an idle NAT drop sends no GOAWAY and
+no error) costs exactly one push and the next one dials fresh. In-flight siblings
+on that session settle on their own timers — they were dead anyway.
+Test: `a timeout RETIRES the session, so a half-open connection costs one push`
+(the fake makes the *existing* session deaf — it keeps accepting streams and
+never answers — while a new session still answers, which is the property: the same
+client recovers with no restart and no second timeout).
+
+**Mutations.** `sh .tentacle/tmp/mobile-push/fix1-mut.sh` — one edit at a time,
+each run against the three narrow test files, restored from a scratch backup under
+`.tentacle/tmp/mobile-push/fix1-backup/` (**never** git); the script ends with a
+`diff` against the backups (empty) and a green re-run. `R*` restore the ORIGINAL
+bug (red-first evidence, §9); `M*` break a line of the fix.
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| R1 | the per-token window scoped per id, again | **RED** 2 (core cross-id + the end-to-end cross-id test) |
+| R2 | `controlClosed` drops the per-id window, again | **RED** "a reconnect of the SAME id…" |
+| R3 | no single-flight mint | **RED** "concurrent calls mint ONE token" |
+| R4 | `invalidate()` drops the cache unconditionally | **RED** "invalidate(staleJwt) does not drop…" |
+| R5 | a timeout no longer retires the session | **RED** "a timeout RETIRES the session…" |
+| M1 | the per-token window is never charged | **RED** 5 |
+| M2 | the per-id map is unbounded | **RED** "the per-id push windows are bounded…" |
+| M3 | the relay-wide token map is unbounded | **RED** "the relay-wide token windows are bounded too…" |
+| M4 | `invalidate()` never drops anything | **RED** "invalidate(staleJwt)…" |
+| M5 | the in-flight promise is never cleared | **RED** 4 (incl. "a mint that fails does not wedge…") |
+| M6 | the timeout retires without settling the stream | survives — **stated, not hidden**: the property M6 would break (a timed-out stream that is never `close()`d) is subsumed by `session.destroy()`, which kills every stream on the session anyway; the explicit `req.close()` is defensive, so no single-line removal is observable |
+| M1–M3 first run | (as found) | R2 and M2 **survived** the first draft — that is what moved the reconnect test to a per-ID-only limit and the expiry into a bounded map. Recorded rather than quietly fixed. |
+
+**Drift from the Implementation.** One, deliberate: the review's "keep per-id
+windows across a reconnect *or until the minute ends*" is implemented as
+"keep them, bounded by `maxTrackedPushIds`" — an idle-expiry variant was tried
+first and could not be kept honest (see finding 1's note).
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` → exit 0.
+`bun run typecheck` (root + `apps/mobile` + `apps/relay`) → exit 0. `bun run lint`
+→ `Checked 1377 files in 471ms. No fixes applied.` (baseline clean, 0/0).
+`bun test` → **10009 pass, 4 skip, 0 fail** (10013 tests / 720 files; the 4
+skips are the documented opt-ins and this round adds none). No wire change, so no
+`protocol.d/` note and no `PROTOCOL_VERSION` move; `protocol.json` untouched.
+
+*— claude-opus-5-5 (executor, fix round 1), 2026-11-16*

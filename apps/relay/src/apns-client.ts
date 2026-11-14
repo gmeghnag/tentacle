@@ -131,8 +131,19 @@ export function createApnsClient(options: ApnsClientOptions): ApnsClient {
       }
       const timer = setTimeout(() => {
         // Apple did not answer within the ceiling: close the stream so it cannot
-        // deliver a banner after the daemon has already recorded a failure.
+        // deliver a banner after the daemon has already recorded a failure, and
+        // DROP the whole session. A half-open connection (an idle NAT drop sends
+        // no GOAWAY and no error) would otherwise make every later push
+        // `unavailable` until the kernel gives up on the socket — minutes of
+        // silently dead pushes from a relay that looks healthy. In-flight
+        // siblings on it are dead anyway: each settles on its own timer.
         req.close();
+        retire(origin, session);
+        try {
+          session.destroy();
+        } catch {
+          // Already gone: the outcome is the same either way.
+        }
         finish(APNS_TIMEOUT_OUTCOME);
       }, timeoutMs);
       if (typeof timer === "object" && timer !== null && "unref" in timer) {
@@ -194,7 +205,9 @@ export function createApnsClient(options: ApnsClientOptions): ApnsClient {
     }
     // `ExpiredProviderToken` (403): mint a new token and retry ONCE, as Apple
     // instructs. Not retried further — a bad key must not become a request storm.
-    options.jwtSource.invalidate();
+    // The FAILED token is named, so a sibling push that already replaced it does
+    // not make this one wipe the fresh token and mint again (F15: never a storm).
+    options.jwtSource.invalidate(jwt);
     const fresh = await options.jwtSource.jwt();
     const retried = apnsRequestOf({
       token: input.token,

@@ -123,8 +123,12 @@ export function apnsRequestOf(input: {
 export interface ApnsJwtSource {
   /** The token to send now (minted if there is none, or the cached one is stale). */
   jwt(): Promise<string>;
-  /** Mint a fresh one on the next call (a 403 `ExpiredProviderToken` says to). */
-  invalidate(): void;
+  /**
+   * Mint a fresh one on the next call (a 403 `ExpiredProviderToken` says to).
+   * With the token that failed, only THAT token is dropped: a token already
+   * replaced by another push's retry stays (F15: no minting storm).
+   */
+  invalidate(jwt?: string): void;
 }
 
 /**
@@ -133,6 +137,11 @@ export interface ApnsJwtSource {
  *
  * `now` is injected, which is the only way the 40-minute boundary can be a test
  * instead of a 40-minute wait.
+ *
+ * Minting is SINGLE-FLIGHT (F15: "never a storm"). `crypto.subtle.sign` is async,
+ * so a cache that only checks `cached` before awaiting would mint once per
+ * concurrent push — and Apple answers frequent token changes with a 429
+ * `TooManyProviderTokenUpdates`, throttling the pushes this cache exists to carry.
  */
 export function createApnsJwtSource(input: {
   readonly config: ApnsKeyConfig;
@@ -143,6 +152,8 @@ export function createApnsJwtSource(input: {
   const reuseMs = input.reuseMs ?? APNS_JWT_REUSE_MS;
   const encoder = new TextEncoder();
   let cached: { readonly jwt: string; readonly mintedAt: number } | undefined;
+  /** The mint in flight, shared by every caller that arrives while it runs. */
+  let inFlight: Promise<string> | undefined;
 
   const mint = async (): Promise<string> => {
     const at = Math.floor(input.now() / 1000);
@@ -166,11 +177,35 @@ export function createApnsJwtSource(input: {
       if (cached !== undefined && input.now() - cached.mintedAt < reuseMs) {
         return cached.jwt;
       }
-      const jwt = await mint();
-      cached = { jwt, mintedAt: input.now() };
-      return jwt;
+      if (inFlight !== undefined) {
+        return await inFlight;
+      }
+      const pending = mint().then((jwt) => {
+        cached = { jwt, mintedAt: input.now() };
+        return jwt;
+      });
+      inFlight = pending;
+      // Cleared in a `finally`, so a failed mint does not wedge the cache: the
+      // next caller tries again instead of awaiting a rejected promise forever.
+      try {
+        return await pending;
+      } finally {
+        if (inFlight === pending) {
+          inFlight = undefined;
+        }
+      }
     },
-    invalidate() {
+    /**
+     * A cached token Apple refused (`403 ExpiredProviderToken`). Only the token
+     * that FAILED is dropped: an `ExpiredProviderToken` burst reaches several
+     * in-flight pushes with the same stale JWT, and if each of them wiped the
+     * fresh one its sibling had already minted, the relay would mint once per
+     * push — exactly the storm this cache exists to prevent.
+     */
+    invalidate(jwt?: string) {
+      if (jwt !== undefined && cached !== undefined && cached.jwt !== jwt) {
+        return;
+      }
       cached = undefined;
     },
   };

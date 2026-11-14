@@ -54,9 +54,17 @@ export const RELAY_LIMITS = {
   hellosPerMinutePerIp: 10,
   /** Per-IP bookkeeping entries remembered. */
   maxTrackedIps: 4_096,
+  /** Device-token push windows remembered, relay-wide (bounded, as the IPs are). */
+  maxTrackedPushTokens: 4_096,
+  /** Per-id push windows remembered (bounded, as the IPs are). */
+  maxTrackedPushIds: 4_096,
   /** `push` frames per minute, per registered relay id (docs/feat/mobile-push.md F10). */
   pushesPerMinutePerId: 120,
-  /** `push` frames per minute, per DEVICE token — the one a third party could spray. */
+  /**
+   * `push` frames per minute, per DEVICE token, RELAY-WIDE: the one a third party
+   * could spray, so the bound cannot be multiplied by registering more ids nor
+   * laundered by reconnecting one (F10).
+   */
   pushesPerMinutePerToken: 30,
 } as const;
 
@@ -151,7 +159,6 @@ export interface RelayPushRequest {
 
 interface PushWindow {
   readonly id: Window;
-  readonly tokens: Map<string, Window>;
 }
 
 /** What `/v1/accept` concluded. */ export type AcceptDecision =
@@ -211,13 +218,6 @@ interface IpState {
 const MINUTE_MS = 60_000;
 
 /**
- * Per-id bookkeeping for push limits: how many tokens one relay id may have
- * pushed to inside the current minute's tracking. A daemon pushes to the devices
- * paired with it, so this only has to exceed a plausible fleet.
- */
-const MAX_TRACKED_PUSH_TOKENS = 1_024;
-
-/**
  * A fixed one-minute window: how many are charged now, and charge one more.
  * A fixed window (not a sliding log) is the honest cheap bound — a caller can
  * see up to 2× a limit across a boundary, which for a `30/min` abuse limit is
@@ -250,7 +250,16 @@ export class RelayCore {
   private readonly streams = new Map<string, Stream>();
   private readonly holds = new Map<string, Hold>();
   private readonly ips = new Map<string, IpState>();
-  /** Push bookkeeping, per registered id: the anti-spam windows (F10). */
+  /**
+   * Push bookkeeping: the RELAY-WIDE per-token windows (F10). One entry per device
+   * token, whatever id pushed to it — the bound a third party would try to mul-
+   * tiply by registering ids or by reconnecting one.
+   */
+  private readonly pushTokens = new Map<string, Window>();
+  /**
+   * Per-id push windows, keyed by id and NOT by socket: a reconnect of the same id
+   * resumes its minute instead of laundering it.
+   */
   private readonly pushes = new Map<string, PushWindow>();
 
   constructor(options: RelayCoreOptions = {}) {
@@ -464,7 +473,9 @@ export class RelayCore {
    *
    * Both windows are fixed one-minute ones, like the dial limiter: a caller can
    * see up to 2× a limit across a boundary, which for `30/min` is 60 pushes to
-   * one token, not a hole (F10 accepts that bound).
+   * one token, not a hole (F10 accepts that bound). The per-token window is the
+   * RELAY-WIDE one (`this.pushTokens`): F10 bounds what one device can be sprayed
+   * with, so registering a second id or reconnecting must not buy a second budget.
    */
   push(input: {
     socket: string;
@@ -508,17 +519,16 @@ export class RelayCore {
     if (input.payloadBytes > APNS_MAX_PAYLOAD_BYTES) {
       return refuse("rejected", "payload");
     }
-    const window = this.pushWindow(id, at);
+    const tokenWindow = this.tokenWindow(input.token, at);
     if (
-      usedInWindow(window.id, at) >= this.limits.pushesPerMinutePerId ||
-      usedInWindow(this.tokenWindow(window, input.token, at), at) >=
-        this.limits.pushesPerMinutePerToken
+      usedInWindow(this.pushWindow(id, at).id, at) >= this.limits.pushesPerMinutePerId ||
+      usedInWindow(tokenWindow, at) >= this.limits.pushesPerMinutePerToken
     ) {
       // Never silent: the daemon gets a status it audits (`push-capped`).
       return refuse("throttled", "capped");
     }
-    chargeWindow(window.id, at);
-    chargeWindow(this.tokenWindow(window, input.token, at), at);
+    chargeWindow(this.pushWindow(id, at).id, at);
+    chargeWindow(tokenWindow, at);
     return {
       ok: true,
       request: {
@@ -552,12 +562,15 @@ export class RelayCore {
 
   /**
    * A daemon's control socket closed: unregister it (its streams live on, F2).
+   *
+   * Its push windows are KEPT (F10): a reconnect of the same id continues the
+   * minute it was in — otherwise a daemon could launder both caps by bouncing its
+   * control socket.
    */
   controlClosed(socket: string): void {
     for (const [id, daemon] of this.daemons) {
       if (daemon.socket === socket) {
         this.daemons.delete(id);
-        this.pushes.delete(id);
         return;
       }
     }
@@ -701,33 +714,47 @@ export class RelayCore {
     return state;
   }
 
+  /**
+   * One id's push window, kept across its reconnects. Bounded, like the tracked
+   * IPs: past `maxTrackedPushIds` the oldest entry is forgotten and that id
+   * simply starts a fresh window — a fairness reset that bypasses nothing,
+   * because the relay-wide per-token window still bounds what one device can be
+   * sprayed with (and `registeredIds` already caps how many ids exist).
+   */
   private pushWindow(id: string, at: number): PushWindow {
     const existing = this.pushes.get(id);
     if (existing !== undefined) {
       return existing;
     }
-    const window: PushWindow = { id: { count: 0, since: at }, tokens: new Map() };
+    const window: PushWindow = { id: { count: 0, since: at } };
     this.pushes.set(id, window);
+    if (this.pushes.size > this.limits.maxTrackedPushIds) {
+      const oldest = this.pushes.keys().next();
+      if (!oldest.done) {
+        this.pushes.delete(oldest.value);
+      }
+    }
     return window;
   }
 
   /**
-   * The per-token window inside one id's bookkeeping. Bounded, like the tracked
-   * IPs: past `maxTrackedPushTokens` the oldest token is forgotten, and it simply
-   * starts a fresh window — a fairness reset that bypasses nothing, because the
-   * per-id limit still bounds the total.
+   * The RELAY-WIDE per-token window (F10): one device token has one budget, no
+   * matter how many ids push to it or how often an id reconnects. Bounded, like
+   * the tracked IPs: past `maxTrackedPushTokens` the stalest token is forgotten,
+   * and it simply starts a fresh window — a fairness reset that bypasses nothing,
+   * because the per-id limit still bounds each daemon's total.
    */
-  private tokenWindow(window: PushWindow, token: string, at: number): Window {
-    const existing = window.tokens.get(token);
+  private tokenWindow(token: string, at: number): Window {
+    const existing = this.pushTokens.get(token);
     if (existing !== undefined) {
       return existing;
     }
     const fresh: Window = { count: 0, since: at };
-    window.tokens.set(token, fresh);
-    if (window.tokens.size > MAX_TRACKED_PUSH_TOKENS) {
-      const oldest = window.tokens.keys().next();
+    this.pushTokens.set(token, fresh);
+    if (this.pushTokens.size > this.limits.maxTrackedPushTokens) {
+      const oldest = this.pushTokens.keys().next();
       if (!oldest.done) {
-        window.tokens.delete(oldest.value);
+        this.pushTokens.delete(oldest.value);
       }
     }
     return fresh;

@@ -184,6 +184,69 @@ describe("createApnsJwtSource — the provider token and its cache", () => {
     source.invalidate();
     expect(await source.jwt()).not.toBe(first);
   });
+
+  test("concurrent calls mint ONE token (finding 2: a cold cache is not a storm)", async () => {
+    // `crypto.subtle.sign` is async, so a cache checked only BEFORE the await
+    // minted once per concurrent push. Apple answers frequent token changes with
+    // a 429 `TooManyProviderTokenUpdates`, throttling the pushes this cache exists
+    // to carry (F15: never a storm). Four callers on a cold cache share ONE
+    // mint: one token, and the same token a later call returns.
+    const { privateKey } = await p256();
+    const source = createApnsJwtSource({
+      config: CONFIG,
+      key: privateKey,
+      now: () => 1_700_000_000_000,
+    });
+    const burst = await Promise.all([source.jwt(), source.jwt(), source.jwt(), source.jwt()]);
+    expect(new Set(burst).size).toBe(1);
+    expect(await source.jwt()).toBe(burst[0]);
+  });
+
+  test("invalidate(staleJwt) does not drop a token a sibling already replaced", async () => {
+    // The other half of finding 2: an `ExpiredProviderToken` burst reaches every
+    // in-flight push with the SAME stale JWT. If each wiped the cache on its way
+    // back, the fresh token a sibling minted would be thrown away and the relay
+    // would mint once per push. Only the token that failed may be dropped.
+    const { privateKey } = await p256();
+    const source = createApnsJwtSource({
+      config: CONFIG,
+      key: privateKey,
+      now: () => 1_700_000_000_000,
+    });
+    const stale = await source.jwt();
+    source.invalidate(stale);
+    const fresh = await source.jwt();
+    expect(fresh).not.toBe(stale);
+    // A laggard push, still holding `stale`, reports its own failure late.
+    source.invalidate(stale);
+    expect(await source.jwt()).toBe(fresh);
+    // The token that IS current is still droppable.
+    source.invalidate(fresh);
+    expect(await source.jwt()).not.toBe(fresh);
+  });
+
+  test("a mint that fails does not wedge the cache (the next call tries again)", async () => {
+    // The in-flight promise is cleared in a `finally`: a rejected mint must not
+    // leave every later caller awaiting the same dead promise. A clock that throws
+    // once is how a REAL key produces a failed mint (as a transient WebCrypto
+    // error would).
+    const { privateKey } = await p256();
+    let boom = true;
+    const source = createApnsJwtSource({
+      config: CONFIG,
+      key: privateKey,
+      now: () => {
+        if (boom) {
+          throw new Error("clock is down");
+        }
+        return 1_700_000_000_000;
+      },
+    });
+    await expect(source.jwt()).rejects.toThrow("clock is down");
+    boom = false;
+    // A real mint, not the dead promise: three JWT segments.
+    expect((await source.jwt()).split(".")).toHaveLength(3);
+  });
 });
 
 describe("apnsOutcomeOf — the status table", () => {
