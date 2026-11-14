@@ -26,7 +26,13 @@ import { DELETE_CONTAINER_SUBCOMMAND, deleteContainerFromEnv } from "@tentacle/d
 import { DELETE_POD_SUBCOMMAND, deletePodFromEnv, readKubeconfig } from "@tentacle/k8s";
 import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import type { DuplexChannel } from "@tentacle/transport";
-import { type AutoAcceptFeed, type SessionController, pickSession, startTui } from "@tentacle/tui";
+import {
+  type AutoAcceptFeed,
+  type HopWorkload,
+  type SessionController,
+  pickSession,
+  startTui,
+} from "@tentacle/tui";
 import { attachFailureNotice, unflushedExitsNotice } from "./attach-notice.ts";
 import { type AttachPlan, plainResumeUid, planAttach } from "./attach-plan.ts";
 import { type Joined, joinRun } from "./attach-run.ts";
@@ -44,6 +50,7 @@ import {
   withRunModel,
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
+import { detachedRunOf } from "./detached-run-of.ts";
 import { devicesCommand, resetCommand, revokeCommand } from "./devices-cmd.ts";
 import { type EngineHost, type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
 import {
@@ -102,7 +109,6 @@ import {
   keptFileName,
   keptSessionNotice,
   locationKey,
-  readKept,
   recordKept,
   trackKeptSession,
 } from "./kept-index.ts";
@@ -118,7 +124,7 @@ import { LOG_TAIL_DEFAULT, parseOnly } from "./log-events.ts";
 import { logsCommand } from "./logs-cmd.ts";
 import { packagesCommand, spawnGit } from "./packages-cmd.ts";
 import { pairCommand } from "./pair.ts";
-import { POD_DAEMON_MODES, lockHolder, runResidentMode } from "./pod-resident.ts";
+import { POD_DAEMON_MODES, runResidentMode } from "./pod-resident.ts";
 import { failedLine, notListedLine } from "./pod-stderr-log.ts";
 import { launchRelay, relayMain, type spawnRelayProcess } from "./relay.ts";
 import { AnswerSplit } from "./render.ts";
@@ -128,7 +134,6 @@ import {
   RUN_STATE_VERSION,
   elsewhereMessage,
   laptopProc,
-  readOwner,
   relayBlockingMessage,
   runDirFor,
   runStem,
@@ -1223,6 +1228,14 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     hostFor: (entry) => buildEngineHost(entry.engine, hostOptionsFor(entry)).host,
   });
 
+  /**
+   * D7(a): does a laptop detached run own this workload (`detached-run-of.ts`)?
+   * Asked of the index and this laptop's clock, before anything is dialled: a
+   * run's relay and TUIs own its session and lifecycle, so a hop never joins it.
+   */
+  const hopDetachedRun = (workload: HopWorkload): boolean =>
+    detachedRun(workload.name, workload.engine) !== null;
+
   const openSessions = (flags: Map<string, string>, bools: Set<string>, implicit = false) =>
     openTuiSessions(
       {
@@ -1609,49 +1622,22 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   }
 
   /**
-   * The kept entry named `name` that is a detached run: its run dir has a record
-   * or a live lock. `at`: the place explicit flags name, compared with the
-   * entry's, because a run's quit may delete its workload: another place's run
-   * is never this attach's. Only what `at` cannot rule out comes back as
-   * `elsewhere`: a live relay of that name, S2's refusal (nothing is dialled, so
-   * one workload reached by two addresses cannot be told from two workloads).
+   * The detached run named `name`, if any: `detached-run-of.ts`'s (H6 moved it
+   * out of this closure, review M8 — a hop's D7(a) asks the SAME question), over
+   * this process's config dir and clock.
    */
-  const detachedRunOf = (
-    name: string,
-    engine: EngineKind | undefined,
-    at?: () => string | null,
-  ) => {
-    type Run = {
-      entry: KeptEntry;
-      dir: string;
-      holder: ReturnType<typeof lockHolder>;
-      owner: ReturnType<typeof readOwner>;
-    };
-    let elsewhere: Run | null = null;
-    for (const { entry } of readKept(keptDir(config.configDir)).entries) {
-      if (entry.name !== name || (engine !== undefined && entry.engine !== engine)) {
-        continue;
-      }
-      const dir = runDirFor(config.configDir, entry);
-      const holder = lockHolder(dir, laptopProc);
-      const owner = readOwner(dir);
-      if (holder === null && owner.kind === "none") {
-        continue;
-      }
-      if (at === undefined || at() === locationKey(entry)) {
-        return { entry, dir, holder, owner, elsewhere: false };
-      }
-      if (holder !== null) {
-        elsewhere ??= { entry, dir, holder, owner };
-      }
-    }
-    return elsewhere === null ? null : { ...(elsewhere as Run), elsewhere: true };
-  };
+  const detachedRun = (name: string, engine: EngineKind | undefined, at?: () => string | null) =>
+    detachedRunOf(
+      { configDir: config.configDir, dir: keptDir(config.configDir), procOf: laptopProc },
+      name,
+      engine,
+      at,
+    );
   /** Why `attach` stops on a detached run (`planAttach`'s refusals). */
   const attachRefusal = (
     name: string,
     plan: AttachPlan,
-    run: NonNullable<ReturnType<typeof detachedRunOf>>,
+    run: NonNullable<ReturnType<typeof detachedRun>>,
     noun: string,
   ): string => {
     const shown = untrustedText(name);
@@ -1795,7 +1781,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     // its quit ends the run when it is the last client. With no `owner.json`
     // (a user's own pod, Q4) it is today's attach. Nothing is dialled first.
     for (let attempt = 0; ; attempt++) {
-      const run = detachedRunOf(name, asked, asked ? () => askedAt(asked) : undefined);
+      const run = detachedRun(name, asked, asked ? () => askedAt(asked) : undefined);
       if (run === null) {
         break;
       }
@@ -2104,6 +2090,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             notify: (text) => sessions.notices.notify(text),
             host: (engine) => hopEngineHost(engine),
             defaultImage: () => process.env.TENTACLE_POD_IMAGE,
+            // D7(a): a workload a laptop detached run owns is not a hop's to join.
+            detachedRun: (workload) => hopDetachedRun(workload),
           }),
           load: (uid) => sessions.store.load(uid),
           status: (line) => hopStatus(line),

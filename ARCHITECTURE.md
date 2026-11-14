@@ -126,6 +126,18 @@ Local models do not share OpenAI's tokenizer. A `TokenCounter` interface allows
 per-model strategies, with a heuristic fallback and optional delegation to a server
 `/tokenize` endpoint when available.
 
+### ADR-007 — A live session can change place: **one session path, a second runtime**
+`/move` (docs/feat/session-hop.md) builds the next runtime with the SAME
+`createLocalRuntime`, the SAME broker and the SAME saver, seeded from the laptop's
+own record of the SAME uid — it is the `--resume` path, not a second session loop.
+The ordered sequence (read the record, build the target, freeze, close our own
+stale copy on the target, open, then commit and only then dispose the old one)
+lives in a pure orchestrator (`cli/src/session-hop.ts`) with every effect injected,
+so "the session is never lost" is testable without an engine. Joining an EXISTING
+workload is a separate, stricter decision: a resident pod daemon is ONE per
+workload, so a workload with another live client, or one a detached run owns, is
+never joined (`cli/src/hop-plan.ts`), and that check runs before any open.
+
 ## 4. Testing philosophy (anti-regression)
 
 - **Schemas first, validated both ways**: every protocol/tool schema has tests for

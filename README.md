@@ -196,6 +196,24 @@ mount; `attach <name>` works from any folder, as if launched from the one it mou
 tentacle never creates, starts or deletes it: closing the TUI detaches and it
 stays up.
 
+**`/move`: the live session changes place (Docker/Podman).** In the interactive
+TUI, `/move container [<image>]` hands the running conversation to a NEW
+docker/podman container with your folder bind-mounted at the same path,
+`/move attach <engine>:<name>[/<container>]` joins a workload already running,
+and `/move local` brings it back. The session uid, its history and the
+scrollback stay the same, and the TUI keeps running. A move happens at the end
+of the turn, and only when the session is idle (a `/move` during a turn — or
+while messages are queued — waits for it); it is refused, with one line, while a
+background job, a sub-agent, a compaction or a broken link is in flight. An
+attach is refused, before anything is dialled, when a detached run of yours owns
+that workload, when another client is already in it, or when it still holds a
+running copy of the session being moved. The workload a move creates is kept
+and listed by `tentacle ps`; it is deleted only on `--rm` and only if that move
+created it, never a workload you joined. The model can propose the same move
+with `move_session`, which only ever asks you through the usual permission
+prompt at the end of the turn. Details:
+[`docs/feat/session-hop.md`](./docs/feat/session-hop.md).
+
 **What of your config reaches a pod or container (`run`, `attach`).** Each new
 session takes your resolved settings. `subagents.*`, `model.contextWindow` and
 `model.autoTitle` are always yours. `maxIterations`, `tools.*`, `contextAwareness`,

@@ -1884,3 +1884,145 @@ Gate: `bun run typecheck` → 0. `bun run lint` → 1248 files, clean. `bun test
 **Residual (not a blocker, carried from round 2 as unverified):** if a hop container's daemon is resident, a later plain `tentacle attach` TUI can join a session that keeps `move_session` and has no feed to answer it. This is worth checking in H6 (attach flow).
 
 **How the executor behaved:** a small, targeted fix. It turned the wiring lambda into a named, tested seam (`hopBuilder`), and the new tests kill both the surface mutation and the deeper one.
+
+## Execution — H6 + H7
+
+*— claude-sonnet-4-5-20250929, 2026-11-14* (executor, branch `feat/session-hop`, worktree
+`.tentacle/worktrees/session-hop`)
+
+**Load-bearing check re-run first, as instructed.** Both rigs PASS, unchanged from H5:
+`.tentacle/tmp/session-hop/hop-repro.ts` → `B uid: 19fc157a-… == A uid: true`,
+`files: 19fc157a-….jsonl`; `hop-race.ts` → a late A save after B wrote drops nothing,
+one `.jsonl`. No STOP condition applied.
+
+### H6 — attach to an existing workload (D7 incl. D7c), and hop out never deletes
+
+1. **The pure move first (review M8).** `packages/cli/src/detached-run-of.ts` (new) is the
+   closure `main.ts` had at `:1619`, lifted out: `detachedRunOf(deps, name, engine, at)`
+   over an injected `{configDir, dir, procOf, read}`. It returns `DetachedRun` (`elsewhere`
+   is a discriminant, not a bolted-on field). `main.ts` keeps a one-line `detachedRun`
+   wrapper over this process's config dir and `laptopProc`, and its two call sites now use
+   it. *Why:* D7(a) asks the same question `attach` asks, and a closure cannot be tested.
+2. **D7(a) in the factory, before anything is dialled.** `HopTargetDeps.detachedRun?`
+   (`hop-targets.ts`) → `attachTarget` refuses with `attachVerdict`'s own wording
+   (`docker:mine is in use by another session`) and touches no engine. `main.ts` passes
+   `detachedRun: (workload) => hopDetachedRun(workload)`.
+3. **D7(b) after the handshake, before any open.** `attachTarget` reads
+   `runtime.residentUse(sessionId, { ownMayBeAbsent: true })` — the runtime is built but
+   nothing is open yet — feeds it to `attachVerdict`, and on a refusal disposes the runtime
+   and returns the refusal. `null` (a paged list) is a doubt, and a doubt refuses.
+4. **D7(c)/D1 4(a) already existed** (`hopSession`'s `closeOrRefuseOwn`); H6's job was the
+   *frame-level* proof, which is the new H6 test block below.
+5. **"hop out never deletes"** needed no new code — `hopLeaveEntry` + `hopDelete` already
+   gate on the entry's `hop: true` mark — but H6 is the first slice where an `attach`
+   target is reachable end to end, so it is now pinned by a row through the real factory +
+   the real `createHopLeave`.
+
+**A real defect H6's own wiring exposed, found by H7's live test (drift, fixed):** the hop's
+container factory computed the mount plan, gated it, then called `startEngineRuntime`
+WITHOUT `workspace` — so `/move container` created a container with no bind mount at all
+and the agent worked on the image's filesystem, while the owner had approved exactly that
+mount. `run` passes `workspace: wsPlan.mount` (`main.ts:1504`); the hop now passes
+`...(plan.kind === "mount" ? { workspace: plan.mount } : {})`. Red before green on a real
+engine: with the line removed, the live row's `hop-live.txt` never appears
+(`(fail) … 0 pass 1 fail`); restored, green. This is H4's bug, not H6's, and no unit row
+could see it — the fake host records `create`'s labels, never the create body.
+
+### H7 — the live docker test, the changelog fragment, the docs line
+
+- `packages/cli/test/session-hop.docker.test.ts` (new): one row, `test.skipIf(!ENABLED)`
+  on `TENTACLE_DOCKER_TESTS=1`. Real docker/podman host (`buildEngineHost`), real
+  `createHopTargets`, real `hopSession`, real `createHopLeave`; a local OpenAI-compatible
+  mock model (the pod reaches it through the laptop), real pod-binary injection. It asserts:
+  the container's shell call writes a file that appears on the HOST at the same path (the
+  bind mount); the entry is in the laptop index with `hop: true`; ONE `<uid>.jsonl` holding
+  both places' turns; on `/move local --rm` the container is gone (`describe` → `null`) and
+  the index entry with it.
+- `changelog.d/session-hop.fixed.md` (new): one bullet, H6's rules + the mount fix. No
+  second `added` fragment: `session-hop.added.md` (H1) is the feature's bullet and
+  `session-hop.changed.md` (H5) the setting's; AGENTS §10 — curated, not a commit mirror.
+- `README.md`: a `/move` paragraph in *Ways to run*, after `attach`.
+- `ARCHITECTURE.md`: ADR-007 — one session path, a second runtime; D7's stricter join rule.
+
+**Drift from the Implementation, and why (each a contradiction with the code/doc):**
+
+- **`attachVerdict`'s `own` input is `null` in the factory's D7(b) call.** The factory
+  cannot know our own uid's state before the open without a second `session/list`, and
+  `hopSession`'s D1 step 4(a) reads it fresh right after — so the factory answers `own:
+  null` ("not live here") and the orchestrator owns that question. Recorded because the
+  H2 design note put D7 entirely in the factory and 4(a) in the orchestrator; this is that
+  split, made explicit in code.
+- **`detachedRunOf` is asked with NO `at`.** D7(a) wants "a run of that name+engine owns
+  it", so a run at ANOTHER place is treated as this place's — the strict side (refusing to
+  join is safe; joining someone's run is not). `attach`'s `at` behaviour is unchanged.
+- **H7's live row uses a fixed scratch dir under the repo** (`.tentacle/tmp/session-hop/`,
+  AGENTS §6), not `os.tmpdir()`: on a podman machine only `$HOME` is shared with the VM, so
+  a `/var/folders` mount is silently empty in the container (its `create` succeeds and the
+  folder does not exist there). Also `realpathSync` first, because macOS `/var` is a
+  symlink into `/private/var` and the plan mounts at the SAME path on both sides. And the
+  hop BACK to `local` is built with the in-memory origin shape, not `startWorkerRuntime`:
+  its `new Worker` does not run under a test runner. Neither is a product change.
+- **H7's default image is `debian:stable-slim`, not `busybox`.** The injected pod binary is
+  glibc-linked; `attachEngineRuntime`'s preflight refuses a musl image BY NAME (a good
+  message). A busybox default would report an engine constraint as a hop bug.
+
+**Red first.** `detached-run-of.test.ts` had no module to import (the extraction is what
+creates it) — the rows were written against the behaviour and run after the move; the
+mutations below are the durable proof (§9). The H6 rows in `session-hop-targets.test.ts`
+were run RED against `HEAD`'s `hop-targets.ts` before the D7 wiring (script
+`.tentacle/tmp/session-hop/h6/red.sh`): **4 fail** — both D7(a) rows and both D7(b) rows —
+then green. The H7 row was red on the mount regression on a REAL engine (above).
+
+**Mutation checks** (each broken in the final tree, the narrow file run, restored, md5
+printed before and after; scripts `.tentacle/tmp/session-hop/h6/run*.sh`).
+
+| # | mutation | result |
+|---|---|---|
+| M1 | D7(a) branch dropped from `attachTarget` | 2 fail — both D7(a) rows |
+| M2 | D7(b)'s `residentUse` check dropped | 2 fail — both D7(b) rows |
+| M3 | a `null` resident use read as "nobody there" | 1 fail — the unreadable-use row |
+| M4 | D1 step 4(a) skipped (`target.preexisting` never checked) | 2 fail — both D7(c) rows |
+| M5 | `ownUidVerdict` ignores `running`/`jobs` | 1 fail — the RUNNING-copy row |
+| M6 | `detachedRunOf`'s `at` ignored | 3 fail — the two `at` rows + the record-only row |
+| M7 | `elsewhere` never reported | 1 fail — the elsewhere row |
+| M8 | `createdByHop` taken as `true` (ignore the entry's mark) | 1 fail here + 3 in `hop-leave.test.ts` |
+| M9 | `main` stops passing `detachedRun` | 1 fail — the grep-guard |
+| H7 | `workspace` dropped from the container factory (LIVE engine) | 1 fail — the mount row |
+
+Each restored; md5 of every touched source matched its pre-mutation value
+(`hop-targets.ts` `fcb09391…`, `session-hop.ts` `f22dabc6…`, `hop-plan.ts` `dcbde8e1…`,
+`detached-run-of.ts` `344f9be4…`, `hop-leave.ts` `363d8b81…`, `main.ts` `44111eeb…`).
+
+**Tests.** `packages/cli/test/detached-run-of.test.ts` (new, 8 rows: no evidence, an owner
+record, a live lock, another engine, `at` this/other place, record-only elsewhere, no engine
+named) · `packages/cli/test/session-hop-targets.test.ts` (+9 rows: D7(a) with a
+non-vacuity partner, D7(b) refused + unreadable + non-vacuity, D7(c) idle-close with frame
+ORDER and running-refused, the user-owned leave, the production grep-guard) ·
+`packages/cli/test/session-hop.docker.test.ts` (new, 1 opt-in live row).
+
+**Not in this slice (deliberately).** No `protocol.d/` note and no schema change: D10 holds,
+nothing on the wire moved (the frames the tests read are the EXISTING `session/open`,
+`session/close`, `session/list`). No fix for the H5 round-3 residual — investigated below.
+
+**The H5 round-3 residual, investigated (not fixed, and why).** Confirmed empirically
+(`.tentacle/tmp/session-hop/h6/residual.ts`): `hosted.hop` is set from the attachment that
+CREATED the session, so a hop container's resident daemon keeps offering `move_session` to a
+later plain `tentacle attach` TUI that joined the same session (`created: false`,
+`hosted.hop: true`). That TUI has no `/move` feed, so the agent's proposal would raise no
+prompt: the tool is offered and the owner is never asked. It is a real hole, but fixing it
+means deciding whether `hop` follows the CREATING client (today) or the CURRENTLY attached
+set (a protocol-shaped change: a blocking/mandatory capability per attachment, and what to
+do when the creator leaves mid-turn) — an owner question the plan does not answer, and
+outside H6's file list. Recorded here as debt for its own task; it is not a regression from
+this slice.
+
+**Gate (final tree):** `bunx tsc --noEmit` → 0 · `bun run typecheck` (incl. `apps/mobile`)
+→ 0 · `bun run lint` → `Checked 1251 files`, 0 errors / 0 warnings (the baseline is clean) ·
+`bun test` → **9228 pass, 4 skip, 0 fail** across 669 files (the 4 skips are the documented
+opt-ins: live-k8s, live-docker's own client test, the real-socket keepalive, and H7's new
+live row). The live row was ALSO run green by hand against a real podman engine
+(`TENTACLE_DOCKER_TESTS=1 DOCKER_HOST=unix:///var/run/docker.sock bun test
+packages/cli/test/session-hop.docker.test.ts` → `1 pass, 0 fail`). No protocol schema
+changed, so `packages/protocol/schema/protocol.json` was not regenerated.
+
+*— claude-sonnet-4-5-20250929, 2026-11-14*

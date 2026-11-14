@@ -25,6 +25,7 @@ import type { TentacleConfig } from "./config.ts";
 import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { attachEngineRuntime, startEngineRuntime } from "./engine-runtime.ts";
 import { engineNoun, laptopWorkspaceInput } from "./engine-select.ts";
+import { type AttachVerdict, attachVerdict } from "./hop-plan.ts";
 import type { HopPlace } from "./hop-plan.ts";
 import type { HopPromptEngine, HopPromptFacts } from "./hop-proposal.ts";
 import type { HopRuntimeDeps, HopShared } from "./hop-runtime.ts";
@@ -81,6 +82,14 @@ export interface HopTargetDeps {
   readonly defaultImage?: () => string | undefined;
   /** Whether a mount may be planned at all (a test turns it off; `run --no-mount`). */
   readonly mount?: boolean;
+  /**
+   * D7(a): does a laptop DETACHED RUN own this workload? `detached-run-of.ts` in
+   * production (`detachedRunOf` ≠ null). That run's relay and TUIs own the
+   * session and the workload's whole lifecycle (docs/feat/detached-runs.md), so a
+   * hop that joined it would be a second owner. Absent: no run check is possible,
+   * and D7(a) then reads as "no run" — which is why `main.ts` always passes it.
+   */
+  readonly detachedRun?: (workload: HopWorkload) => boolean;
 }
 
 /**
@@ -263,6 +272,13 @@ async function containerTarget(
     runtime = await startEngineRuntime(config, {
       host: target.host,
       image: resolved,
+      // DECISION 1's bind mount: the SAME plan the gate above approved (`run`'s
+      // shape, `main.ts:1504`). Without this the container is created with no
+      // workspace at all — the owner approves a mount of their folder and the
+      // agent then works on the image's own filesystem. Found by the H7 live test
+      // (`session-hop.docker.test.ts`): the file a shell call wrote inside the
+      // container never appeared in the cwd.
+      ...(plan.kind === "mount" ? { workspace: plan.mount } : {}),
       // Kept (D5): `resumeHint` + `recordKept` are the two halves of the `run`
       // shape — the engine keeps it, and `tentacle ps` lists it.
       resumeHint: (name) => `tentacle attach ${name}`,
@@ -328,6 +344,20 @@ async function containerTarget(
 /**
  * An EXISTING workload (D1 step 2): `attachEngineRuntime` — it never creates,
  * starts or deletes. Nothing is ours to remove, so the undo is only the dispose.
+ *
+ * D7 is decided HERE and not in the orchestrator (H2's drift note): its check
+ * must run before ANY open on the target, and only the factory can place a check
+ * before its own runtime's open. Two calls, each with the facts it has:
+ *
+ *   - (a) a laptop DETACHED RUN owns the workload — before anything is dialled,
+ *     so nothing is injected into a workload that is not ours to touch;
+ *   - (b) `residentUse` after the handshake and BEFORE any open: a resident pod
+ *     daemon is ONE per workload, so a workload with another live client is not
+ *     ours to share (that client can already answer its pod-side asks).
+ *
+ * Our OWN uid on the target is D1 step 4(a)'s (`hopSession`), which reads it
+ * fresh right before the open and closes an idle copy — this factory never joins
+ * one, so it passes `own: null` ("not live here") and leaves it to that step.
  */
 async function attachTarget(
   deps: HopTargetDeps,
@@ -335,6 +365,16 @@ async function attachTarget(
   sessionId: string,
 ): Promise<HopBuild> {
   const { config } = deps;
+  // D7(a) BEFORE any dial (nothing is inspected, nothing injected into a
+  // workload another run owns). No `at`: a run of that name and engine is
+  // treated as this place's, which is the STRICT side — refusing to join is
+  // always safe, joining someone's run is not.
+  if (deps.detachedRun?.(workload) === true) {
+    const refused = d7Refusal(attachVerdict({ workload, detachedRun: true, own: null, use: null }));
+    if (refused !== null) {
+      return refused;
+    }
+  }
   let target: HopEngineHost;
   try {
     target = deps.host(workload.engine);
@@ -342,8 +382,9 @@ async function attachTarget(
     return { kind: "failed", notice: `not moved: ${errorText(error, "no engine")}` };
   }
   deps.status(`moving to ${workloadLabel(workload)} — attaching`);
+  let runtime: LocalRuntime | undefined;
   try {
-    const runtime = await attachEngineRuntime(config, {
+    runtime = await attachEngineRuntime(config, {
       host: target.host,
       name: workload.name,
       ...(workload.container === undefined ? {} : { container: workload.container }),
@@ -360,20 +401,6 @@ async function attachTarget(
       info: (line) => deps.notify(untrustedText(line)),
       notify: deps.notify,
     });
-    return {
-      kind: "built",
-      built: builtOf(
-        runtime,
-        {
-          kind: "workload",
-          engine: workload.engine,
-          name: workload.name,
-          ...(workload.container === undefined ? {} : { container: workload.container }),
-        },
-        // An existing daemon may already hold our uid: D1 step 4(a) applies.
-        { preexisting: true, daemonInPod: true },
-      ),
-    };
   } catch (error) {
     // A user-owned workload is never deleted, and nothing was created here.
     return {
@@ -381,6 +408,37 @@ async function attachTarget(
       notice: `not moved: ${errorText(error, "the workload could not be joined")}`,
     };
   }
+  // D7(b): the handshake is done and NOTHING is open yet (a runtime opens its
+  // session lazily), so this reads the resident before the hop can join it.
+  // `ownMayBeAbsent`: our own session may not be open yet — that is no use of it.
+  const use = await runtime.residentUse(sessionId, { ownMayBeAbsent: true }).catch(() => null);
+  const refused = d7Refusal(attachVerdict({ workload, detachedRun: false, own: null, use }));
+  if (refused !== null) {
+    // Dispose and open nothing (D7): the workload and its client are untouched.
+    await bounded(runtime.dispose(), HOP_ROLLBACK_TIMEOUT_MS);
+    return refused;
+  }
+  return {
+    kind: "built",
+    built: builtOf(
+      runtime,
+      {
+        kind: "workload",
+        engine: workload.engine,
+        name: workload.name,
+        ...(workload.container === undefined ? {} : { container: workload.container }),
+      },
+      // An existing daemon may already hold our uid: D1 step 4(a) applies.
+      { preexisting: true, daemonInPod: true },
+    ),
+  };
+}
+
+/** D7's refusal as a build failure: the ONE wording site is `attachVerdict`'s. */
+function d7Refusal(verdict: AttachVerdict): HopBuild | null {
+  return verdict.kind === "refuse"
+    ? { kind: "failed", notice: `not moved: ${verdict.text}` }
+    : null;
 }
 
 /**

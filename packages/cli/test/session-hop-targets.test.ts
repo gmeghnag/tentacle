@@ -45,10 +45,12 @@ import type {
   WorkloadState,
 } from "../src/engine-host.ts";
 import type { EngineRuntime } from "../src/engine-runtime.ts";
+import { type HopLeaveDeps, createHopLeave } from "../src/hop-leave.ts";
 import { type HopEngineHost, createHopTargets, hopBuilder } from "../src/hop-targets.ts";
-import { readKept } from "../src/kept-index.ts";
-import { KEPT_LABEL } from "../src/kept.ts";
-import { createLocalRuntime } from "../src/local-runtime.ts";
+import { readKept, recordKept } from "../src/kept-index.ts";
+import { KEPT_LABEL, KEPT_SCHEMA_VERSION } from "../src/kept.ts";
+import { type LocalRuntime, createLocalRuntime } from "../src/local-runtime.ts";
+import { hopSession } from "../src/session-hop.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 import { simulateSilentTerminal } from "./silent-terminal.ts";
 
@@ -107,6 +109,45 @@ interface FakeHostLog {
   describeFacts?: WorkloadFacts | null;
   /** `inspect`'s answer (the attach preflight). */
   inspect?: WorkloadState;
+  /**
+   * The frames the hop's CLIENT sent to the daemon, in order (H6): `session/open`
+   * must not appear when D7 refused, and `session/close` must precede the seeded
+   * open when our own copy had to go (D1 step 4(a), D7c).
+   */
+  readonly frames?: string[];
+  /**
+   * A RESIDENT daemon to hand every `openExec` (H6): a second runtime then joins
+   * the same host — the one-per-workload resident daemon D7(b) reads.
+   */
+  readonly server?: SessionHost;
+}
+
+/**
+ * A client channel that records what the hop's side SENDS, so a row can prove a
+ * frame was never written (H6: no `session/open` when D7 refused) and in which
+ * order (D7c: `session/close` before the seeded open).
+ */
+function recordingChannel(inner: DuplexChannel, frames: string[]): DuplexChannel {
+  return {
+    send(data) {
+      frames.push(data);
+      inner.send(data);
+    },
+    close: () => inner.close(),
+    setOnMessage: (handler) => inner.setOnMessage(handler),
+    setOnClose: (handler) => inner.setOnClose(handler),
+  };
+}
+
+/** The JSON-RPC `method` of a recorded frame, or `""` (a reply, or junk). */
+function frameMethod(frame: string): string {
+  try {
+    const value: unknown = JSON.parse(frame);
+    const method = (value as { method?: unknown } | null)?.method;
+    return typeof method === "string" ? method : "";
+  } catch {
+    return "";
+  }
 }
 
 /**
@@ -150,18 +191,20 @@ function fakeHost(log: FakeHostLog): EngineHost {
     openExec(_target: EngineExecTarget, _options?: EngineExecChannelOptions): DuplexChannel {
       log.calls.push("exec");
       const [daemonCh, clientCh] = createChannelPair();
-      const host = new SessionHost({
-        defaultCwd: "/pod/work",
-        createAgent: (_cwd, context) => {
-          log.hops?.push(context.hop === true);
-          return {
-            agent: new Agent({ model: new Reply(), tools: new ToolRegistry(), env }),
-            permissions: new PermissionBroker(),
-          };
-        },
-      });
+      const host =
+        log.server ??
+        new SessionHost({
+          defaultCwd: "/pod/work",
+          createAgent: (_cwd, context) => {
+            log.hops?.push(context.hop === true);
+            return {
+              agent: new Agent({ model: new Reply(), tools: new ToolRegistry(), env }),
+              permissions: new PermissionBroker(),
+            };
+          },
+        });
       connection = new Connection(daemonCh, host);
-      return clientCh;
+      return log.frames === undefined ? clientCh : recordingChannel(clientCh, log.frames);
     },
     async runExec(
       target: EngineExecTarget,
@@ -205,6 +248,13 @@ function config(cwd: string, over: Partial<TentacleConfig> = {}): TentacleConfig
   } as unknown as TentacleConfig;
 }
 
+/** Drain an event stream (a turn), so nothing is left in flight. */
+const drain = async (gen: AsyncIterable<unknown>): Promise<void> => {
+  for await (const _ of gen) {
+    // consume
+  }
+};
+
 const UNIX = {
   kind: "unix",
   path: "/run/docker.sock",
@@ -241,12 +291,17 @@ function sharedPair() {
 const SINK_JUNK = /[\u001b\r]|\[2K/;
 
 /** The factories over one fake host, with everything recorded. */
-function rig(log: FakeHostLog, opts: { mount?: boolean; cwd?: string } = {}) {
+function rig(
+  log: FakeHostLog,
+  opts: { mount?: boolean; cwd?: string; detachedRun?: boolean } = {},
+) {
   const host = fakeHost(log);
   const pair = sharedPair();
   const statuses: string[] = [];
   const notices: string[] = [];
   const images: Array<Record<string, string>> = [];
+  /** What D7(a) was asked, so a row can prove it was consulted before any dial. */
+  const detachedAsks: string[] = [];
   const create = host.create.bind(host);
   host.create = (n, i, o) => {
     images.push({ ...(o?.annotations ?? {}), ...(o?.labels ?? {}) });
@@ -258,6 +313,10 @@ function rig(log: FakeHostLog, opts: { mount?: boolean; cwd?: string } = {}) {
     status: (line) => statuses.push(line),
     notify: (text) => notices.push(text),
     ...(opts.mount === false ? { mount: false } : {}),
+    detachedRun: (workload) => {
+      detachedAsks.push(workload.name);
+      return opts.detachedRun === true;
+    },
     host: (): HopEngineHost => ({
       host,
       endpoint: UNIX,
@@ -265,7 +324,7 @@ function rig(log: FakeHostLog, opts: { mount?: boolean; cwd?: string } = {}) {
     }),
     defaultImage: () => "img:latest",
   });
-  return { build, host, pair, statuses, notices, images };
+  return { build, host, pair, statuses, notices, images, detachedAsks };
 }
 
 describe("H4 a hop container is created KEPT, and its rollback deletes only through the verified delete", () => {
@@ -627,5 +686,322 @@ describe("H4 nothing is written raw while Ink owns the terminal (D6, P8, M4)", (
     // `notices` (as `[2K…`) and this fails.
     expect(SINK_JUNK.test([...r.statuses, ...r.notices].join("\n"))).toBe(false);
     expect(r.notices.join("\n")).toContain("daemon stopped unexpectedly");
+  });
+});
+
+/**
+ * H6 — D7: joining an EXISTING workload (docs/feat/session-hop.md D7, incl. D7c).
+ *
+ * The property, stated once: a workload is not ours to share. A resident pod
+ * daemon is ONE per workload, so joining a busy one would hand our session to a
+ * client that can already answer that pod's pod-side asks (AGENTS §7, "a pod is
+ * not trusted"), and joining one that already holds OUR uid would silently keep
+ * the daemon's stale copy instead of the laptop's history.
+ *
+ * The check must ALSO precede every open: a refusal that arrived after the
+ * `session/open` frame would have already joined the very session it refused.
+ * That is what the recorded frames prove — not a spy on the factory's own call.
+ */
+describe("H6 D7(a): a laptop detached run's workload is refused BEFORE anything is dialled", () => {
+  test("no engine call at all: nothing is inspected, nothing injected, nothing opened", async () => {
+    // Mutation: drop the `deps.detachedRun` branch → `calls` gains inspect/exec,
+    // a `session/open` frame reaches the workload, and two owners share it (the
+    // run's relay deletes the workload under us on its own quit).
+    const log: FakeHostLog = { calls: [], frames: [] };
+    const r = rig(log, { mount: false, detachedRun: true });
+    const built = await r.build(
+      { target: "attach", workload: { engine: "docker", name: "mine" }, keep: true },
+      "uid-1",
+    );
+    expect(built.kind).toBe("failed");
+    // The ONE wording `attachVerdict` writes (never a second, drifting string).
+    expect(built.kind === "failed" ? built.notice : "").toBe(
+      "not moved: docker:mine is in use by another session",
+    );
+    expect(r.detachedAsks).toEqual(["mine"]);
+    expect(log.calls).toEqual([]);
+    expect(log.frames ?? []).toEqual([]);
+  });
+
+  test("non-vacuity: the SAME build with no detached run DOES dial and open", async () => {
+    // Without this row the one above would pass for a factory that never worked.
+    const log: FakeHostLog = { calls: [], frames: [] };
+    const r = rig(log, { mount: false, detachedRun: false });
+    const built = await r.build(
+      { target: "attach", workload: { engine: "docker", name: "mine" }, keep: true },
+      "uid-1",
+    );
+    if (built.kind !== "built") {
+      throw new Error(`expected a build, got ${built.notice}`);
+    }
+    expect(r.detachedAsks).toEqual(["mine"]);
+    expect(log.calls).toContain("exec");
+    await built.built.runtime.dispose();
+  });
+});
+
+describe("H6 D7(b): another live session on the resident is refused, before any open", () => {
+  /**
+   * A resident daemon already serving a session to ANOTHER client — opened
+   * directly on the host (no protocol), attached once, and left attached: that
+   * is what `session/list` reports as `others: 1`.
+   */
+  function occupied(): SessionHost {
+    const server = new SessionHost({
+      defaultCwd: "/pod/work",
+      createAgent: () => ({
+        agent: new Agent({ model: new Reply(), tools: new ToolRegistry(), env }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+    server.open({ create: true }, { send: () => {} });
+    return server;
+  }
+
+  test("refused with the D7 wording, the runtime disposed, and NO `session/open` ever sent", async () => {
+    // Mutation: drop the `residentUse` check → the hop joins the busy resident,
+    // and the frame record shows the open that did it.
+    const log: FakeHostLog = { calls: [], frames: [], server: occupied() };
+    const r = rig(log, { mount: false });
+    const built = await r.build(
+      { target: "attach", workload: { engine: "docker", name: "mine" }, keep: true },
+      "uid-1",
+    );
+    expect(built.kind).toBe("failed");
+    expect(built.kind === "failed" ? built.notice : "").toBe(
+      "not moved: docker:mine is in use by another session",
+    );
+    expect(log.calls).toContain("exec");
+    // The handshake ran (it must, or the check could not see anything)…
+    expect((log.frames ?? []).map(frameMethod)).toContain("initialize");
+    // …and nothing was opened on a workload that is not ours.
+    expect((log.frames ?? []).map(frameMethod)).not.toContain("session/open");
+    expect(log.server?.list({}).sessions).toHaveLength(1);
+  });
+
+  test("an UNREADABLE resident use is a doubt: refused, never joined", async () => {
+    // `residentUse` answers `null` when the page is not the whole truth; a doubt
+    // must refuse, because joining a busy resident is the one mistake D7 cannot
+    // undo. Mutation: treat `null` as "nobody there" → the hop joins it.
+    const log: FakeHostLog = { calls: [], frames: [], server: occupied() };
+    const r = rig(log, { mount: false });
+    // A paged list is not the whole truth (`residentUseOf`'s `null`).
+    const real = log.server as SessionHost;
+    real.list = () => ({
+      sessions: [],
+      cursor: "more",
+    });
+    const built = await r.build(
+      { target: "attach", workload: { engine: "docker", name: "mine" }, keep: true },
+      "uid-1",
+    );
+    expect(built.kind).toBe("failed");
+    expect(built.kind === "failed" ? built.notice : "").toContain(
+      "can't tell whether docker:mine is in use",
+    );
+    expect((log.frames ?? []).map(frameMethod)).not.toContain("session/open");
+  });
+
+  test("non-vacuity: the SAME occupied daemon with an EMPTY list is joined", async () => {
+    // The refusals above must come from what the list SAYS, not from the mere
+    // presence of a resident: an idle one with no live session is joinable.
+    const log: FakeHostLog = { calls: [], frames: [], server: occupied() };
+    const r = rig(log, { mount: false });
+    const real = log.server as SessionHost;
+    const list = real.list.bind(real);
+    real.list = (params) => ({ ...list(params), sessions: [] });
+    const built = await r.build(
+      { target: "attach", workload: { engine: "docker", name: "mine" }, keep: true },
+      "uid-1",
+    );
+    if (built.kind !== "built") {
+      throw new Error(`expected a build, got ${built.notice}`);
+    }
+    await built.built.runtime.dispose();
+  });
+});
+
+describe("H6 D7(c): our OWN uid live on the target is CLOSED before the seeded open", () => {
+  /**
+   * The whole hop, over the real factories and the real orchestrator — the plan's
+   * H6 requirement, on the frames the hop's client really sent:
+   *   - a resident holding OUR uid, idle → `session/close` BEFORE the seeded
+   *     `session/open` (otherwise the daemon attaches the stale copy and ignores
+   *     the seed: `session-host.ts`'s open, review H1);
+   *   - the same, RUNNING → refused, and nothing is opened or closed on it (D7c:
+   *     a live copy nobody may kill).
+   */
+  async function ownUidOnResident(running: boolean) {
+    const store = new LogSessionStore(join(dir, "sessions"));
+    const saver = new SessionSaver(store, () => {});
+    const broker = new SpyBroker();
+    // A resident daemon that already holds `uid` LIVE with a STALE history.
+    const server = new SessionHost({
+      defaultCwd: "/pod/work",
+      createAgent: () => ({
+        agent: new Agent({ model: new Reply(), tools: new ToolRegistry(), env }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+    const uid = "11111111-1111-4111-8111-111111111111";
+    // `running: true` is what a live turn looks like in `session/list`; the
+    // session itself is opened either way, with the stale history the daemon
+    // would hand a joiner.
+    const hosted = server.open(
+      { sessionId: uid, create: true, messages: [{ role: "user", content: "STALE" }] },
+      { send: () => {} },
+    ).hosted;
+    if (running) {
+      Object.defineProperty(hosted, "running", { get: () => true });
+    }
+    // Our laptop's own copy of the SAME uid: the history the hop must carry.
+    await saver.write({
+      id: uid,
+      meta: { cwd: dir, model: "qwen3", createdAt: Date.now() },
+      entries: [],
+      messages: [
+        { role: "user", content: "the laptop's truth" },
+        { role: "assistant", content: "reply-A" },
+      ] as never,
+      read: { entries: [], hashes: [] } as never,
+    });
+    await saver.drain();
+
+    const log: FakeHostLog = { calls: [], frames: [], server };
+    const r = rig(log, { mount: false });
+    // The orchestrator over this rig's factory: the ONE path a `/move attach` takes.
+    const old = await startWorker(null, broker, saver);
+    const outcome = await hopSession(
+      old,
+      {
+        spec: { target: "attach", workload: { engine: "docker", name: "mine" }, keep: true },
+        sessionId: uid,
+      },
+      { build: (spec, id) => r.build(spec, id), load: (id) => store.load(id) },
+    );
+    return { outcome, frames: log.frames ?? [], server, uid, store, saver };
+  }
+
+  /** A local runtime of our own for the thing being moved (a real in-memory daemon). */
+  async function startWorker(
+    _unused: null,
+    broker: PermissionBroker,
+    saver: SessionSaver,
+  ): Promise<LocalRuntime> {
+    const server = new SessionHost({
+      defaultCwd: dir,
+      createAgent: () => ({
+        agent: new Agent({ model: new Reply(), tools: new ToolRegistry(), env }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+    const [daemonCh, clientCh] = createChannelPair();
+    const connection = new Connection(daemonCh, server);
+    const runtime = await createLocalRuntime({
+      channel: clientCh,
+      disposeTransport: () => connection.close(),
+      permissions: broker,
+      saver,
+      cwd: dir,
+      model: "qwen3",
+      resume: null,
+    });
+    const ctl = runtime.createSession();
+    await drain(ctl.send("hello from local"));
+    await ctl.flushed();
+    await saver.drain();
+    return runtime;
+  }
+
+  test("an IDLE copy: `session/close` is sent, and the seeded `session/open` comes AFTER it", async () => {
+    // Mutation: skip D1 step 4(a) → no close frame, the daemon attaches the stale
+    // copy, and the move silently keeps the wrong history (review H1).
+    const { outcome, frames } = await ownUidOnResident(false);
+    expect(outcome.kind).toBe("moved");
+    const methods = frames.map(frameMethod);
+    const closeAt = methods.indexOf("session/close");
+    const openAt = methods.lastIndexOf("session/open");
+    expect(closeAt).toBeGreaterThanOrEqual(0);
+    expect(openAt).toBeGreaterThan(closeAt);
+  });
+
+  test("a RUNNING copy: refused with D7c's wording, and it is never closed or opened", async () => {
+    // Mutation: drop the `running`/`jobs` arm of `ownUidVerdict` → the idle path
+    // KILLS a live turn's session (the one thing D7c forbids).
+    const { outcome, frames } = await ownUidOnResident(true);
+    expect(outcome.kind).toBe("failed");
+    expect(outcome.kind === "failed" ? outcome.notice : "").toBe(
+      "not moved: docker:mine still holds an older copy of this session",
+    );
+    const methods = frames.map(frameMethod);
+    expect(methods).not.toContain("session/close");
+    expect(methods).not.toContain("session/open");
+  });
+});
+
+/**
+ * H6 — "hop out never deletes" (D5/decision 4, review finding 2's property, now
+ * reachable end to end): an `attach`ed workload is USER-OWNED, so a `/move local
+ * --rm` after `/move attach` must leave it running, with one notice. The index
+ * entry below is a `tentacle run`'s (no `hop` mark), which is exactly what the
+ * user's own workload looks like.
+ */
+describe("H6 an attach leaves a user-owned workload alone, even with `keep: false`", () => {
+  test("the real factory's attach, then the real leave: nothing is deleted", async () => {
+    // Mutation: `containerTarget`'s rollback/leave shape for an attach (or
+    // `createdByHop` guessed from the spec) → `describe`/`remove` fire and the
+    // user's container is gone.
+    const log: FakeHostLog = { calls: [], describeFacts: { status: "running", labels: {} } };
+    const r = rig(log, { mount: false, detachedRun: false });
+    // A `run`'s own entry for that workload: kept, user-owned, no hop mark.
+    const created = "2026-11-14T00:00:00.000Z";
+    recordKept(join(dir, "config", "kept"), {
+      schemaVersion: KEPT_SCHEMA_VERSION,
+      name: "mine",
+      engine: "docker",
+      endpoint: "unix:///run/docker.sock",
+      model: "qwen3",
+      created,
+    });
+    const built = await r.build(
+      { target: "attach", workload: { engine: "docker", name: "mine" }, keep: false },
+      "uid-1",
+    );
+    if (built.kind !== "built") {
+      throw new Error(`expected a build, got ${built.notice}`);
+    }
+    const removed: string[] = [];
+    const leave = createHopLeave({
+      dir: join(dir, "config", "kept"),
+      locators: () => ({ endpoint: "unix:///run/docker.sock" }),
+      hostFor: () => r.host,
+      remove: async (entry) => {
+        removed.push(entry.name);
+        return { kind: "removed" };
+      },
+    });
+    expect(await leave({ kind: "workload", engine: "docker", name: "mine" }, false)).toBe(
+      "mine is not ours: left alone",
+    );
+    expect(removed).toEqual([]);
+    expect(log.calls.filter((c) => c.startsWith("remove"))).toEqual([]);
+    expect(readKept(join(dir, "config", "kept")).entries).toHaveLength(1);
+    await built.built.runtime.dispose();
+  });
+});
+
+describe("H6 the D7(a) seam is wired in production, not only in this rig", () => {
+  test("grep-guard: `main` passes `detachedRun` to `hopBuilder`, from the extracted module", async () => {
+    // A factory check nobody passes is dead code, and `hopBuilder`'s deps are
+    // optional on purpose (H4's rigs build targets with no engine at all), so
+    // TypeScript cannot see the omission. Pinned by text, like `hideList`.
+    const main = await Bun.file(`${import.meta.dir}/../src/main.ts`).text();
+    expect(main).toContain("detachedRun: (workload) => hopDetachedRun(workload),");
+    // The seam itself comes from the extracted module (review M8), never a
+    // closure in `main()` again — that is the whole point of the move.
+    expect(main).toContain('from "./detached-run-of.ts"');
+    expect(main).not.toMatch(/const detachedRunOf\s*=\s*\(name: string/);
+    // Non-vacuity: the facade the lambda is passed to is still built here.
+    expect(main).toContain("createHopRuntime({");
   });
 });
