@@ -943,3 +943,18 @@ files. No protocol schema changed. All mutations reverted (md5 of every touched
 source matched its pre-mutation backup).
 
 *— claude-opus-5-5, 2026-11-14*
+
+## Review — H2 (fresh-context adversarial; scope `git diff main...HEAD`, slice H2)
+
+**Verdict: REQUEST-CHANGES.** (Note: H2's as-built notes sit under `## Review`, line ~810, not `## Execution`; move them.)
+
+1. **HIGH — "absent file" read as "nothing to move" loses the conversation** (`packages/cli/src/session-hop.ts:127-154`). The M2 branch is taken on `load → absent` *before* the freeze, so a session that HAS turns but whose writes failed (saver `failing` for this uid: lock held, EACCES, ENOSPC) skips `freeze`, opens the target unseeded, and, once the failure clears, commits. Repro `.tentacle/tmp/session-hop/rev-h2/repro.ts`: `load before hop: absent notices: 1` → `outcome: moved moved to docker:box` → `on disk after hop: system:sys`. The first turn is gone from the live session and the disk, and the hop said "moved". This breaks "a hop never moves a session it could not put on disk" (D1 step 3) and the plan's own M2 condition (the uid was minted *and opened*). Fix direction: freeze first whenever this runtime holds a controller for the uid, then load; take "nothing persisted" only when no controller has that uid.
+2. **MEDIUM — a throw in step 4(a) skips the rollback** (`local-runtime.ts` `closeOwn`: `await client.closeSession(id)` is not caught; `session-hop.ts:158` does not catch either). A dropped link or a daemon error makes `hopSession` reject. `target.rollback()` never runs, so the target runtime, and in H4 a container this hop created, leaks, and the caller gets a rejection instead of `not moved: …`. Repro output: `hopSession REJECTED: link dropped rollback calls: 0`. The same applies to `deps.afterLeave` throwing after the commit: the TUI has already swapped, but `hop()` rejects, so `notify` and `status(null)` never run (`hop-runtime.ts:169-170`).
+3. **MEDIUM — the facade does not move job listeners** (`hop-runtime.ts:122-123`). `onStart`/`onExit` bind to the runtime that is current when the TUI subscribes, and nothing re-binds them on a swap (only `link` is relinked). After a hop the TUI never hears about the target's job exits. D2 says "Listeners are re-subscribed on swap", and no test covers it.
+4. **MEDIUM — the commit-time seal is untested** (`session-hop.ts:197`). Mutation: comment out `old.sealSessions()` → `session-hop.test.ts` **22 pass, 0 fail**. That seal is how step 5 "closes" the old-save-after-new race. M3/M8 in Execution cover sealing *too early*, not sealing *never*. Reverted, `git status --porcelain` empty.
+
+**Gate:** 5 touched/new test files 124 pass, 0 fail, 376 expects; `bun run lint` clean (1121 files); `bun run typecheck` passes. Full `bun test` not re-run (scope: slice H2).
+**Attacks with no finding:** single broker (the facade hands `deps.shared` to every build; this matches Execution's M6); 4(a) close needs a fresh `session/list` with no cursor; `saveConfirmedFor` is per uid and false with no controller; dispose is bounded and its notice holds.
+**Model note:** the reviewer is the same model as the one Execution is signed by (only the context is fresh), so blind spots they share may survive both passes.
+
+*— claude-opus-5-5, 2026-11-14*
