@@ -310,7 +310,11 @@ Usage:
   tentacle -- <prompt...>  the same, for a prompt that starts with '-' or
                            with a subcommand word (tentacle -- explain how
                            config works: the first bare word IS the subcommand)
-  tentacle serve [opts]    host the remote-control daemon
+  tentacle serve [opts]    host the remote-control daemon. --address <url>
+                           (repeatable) adds a URL this host's interfaces
+                           cannot show (a tailnet name, a tunnel): paired
+                           phones and this computer's other daemons are told
+                           it. A serve also announces its live siblings
   tentacle connect <url> [--resume [id]|--continue]
                            drive a remote daemon with the TUI; quitting
                            detaches (the session keeps running there)
@@ -361,7 +365,7 @@ Usage:
 
 Remote control:
   tentacle serve [--host 127.0.0.1] [--port 4000] [--token T|--token-command CMD]
-                      [--tls-cert FILE --tls-key FILE]
+                      [--tls-cert FILE --tls-key FILE] [--address <url>]...
                       [--session-ttl 24h|never] [--session-admin-cap DUR] [--max-sessions 64]
                       [--max-detached-sessions 16] [--ws-idle-timeout 60s]
   tentacle connect ws(s)://host:port [--token T|--token-command CMD]

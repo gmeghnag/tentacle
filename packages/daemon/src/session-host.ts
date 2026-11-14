@@ -24,6 +24,7 @@ import type {
   PermissionBroker,
 } from "@tentacle/core";
 import {
+  type DaemonDiscovery,
   JsonRpcErrorCode,
   type McpServerStatus,
   type OpenParams,
@@ -160,6 +161,18 @@ export interface SessionTtlControl {
   set(idleTtlMs: number | null): void;
 }
 
+/**
+ * This computer's live sibling daemons (`daemon/discover`,
+ * docs/feat/sibling-discovery.md). Owned by the `serve` process (one poller and
+ * one heartbeat per process, never per connection): `current` is the snapshot
+ * as of now, `subscribe` adds a listener and returns its unsubscribe — called
+ * from `Connection.close()`.
+ */
+export interface DiscoverySource {
+  current(): DaemonDiscovery;
+  subscribe(listener: (discovery: DaemonDiscovery) => void): () => void;
+}
+
 export interface SessionHostOptions extends TurnErrorPolicy {
   readonly createAgent: AgentFactory;
   /** The confined working directory every hosted session runs against. */
@@ -193,6 +206,17 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * forgets the session.
    */
   readonly persister?: SessionPersister;
+  /**
+   * `serve` only: this computer's live sibling daemons and their addresses
+   * (`daemon/discover`, docs/feat/sibling-discovery.md). Absent (a pod daemon,
+   * the worker) → `MethodNotFound`: a pod learns nothing about the laptop's
+   * other daemons (AGENTS §7, "a pod is not trusted").
+   *
+   * NOT readonly: `listen` attaches it after construction, because a `serve`
+   * only knows its own record (the bound port) once the listener is up, while
+   * the host must exist before the listener does.
+   */
+  discovery?: DiscoverySource;
   /**
    * `serve` only: the handle on its idle reaper's TTL. Absent (a pod daemon,
    * the worker: no reaper) → `daemon/session_ttl` answers `MethodNotFound`.
@@ -421,6 +445,30 @@ export class SessionHost {
     return { idleTtlMs: control.get() ?? "never", persisted: false };
   }
 
+  /**
+   * Attach the sibling-discovery source AFTER construction: a `serve` only
+   * knows its bound port (and so its own record) once the listener is up, while
+   * the host must exist before the listener does. Called once, by `listen`.
+   */
+  setDiscoverySource(source: DiscoverySource): void {
+    this.opts.discovery = source;
+  }
+
+  /**
+   * This daemon's sibling-discovery source, or `MethodNotFound` when it has
+   * none (a pod daemon, the worker) — the `sessionTtl` pattern, so a client can
+   * tell "no discovery" from an empty computer.
+   */
+  discoverySource(): DiscoverySource {
+    const source = this.opts.discovery;
+    if (!source) {
+      throw new RpcError(
+        JsonRpcErrorCode.MethodNotFound,
+        "sibling discovery is not available on this daemon",
+      );
+    }
+    return source;
+  }
   /** This daemon's MCP servers and their live state; empty when it runs none. */
   mcpStatus(): Promise<readonly McpServerStatus[]> {
     return this.opts.mcpStatus?.() ?? Promise.resolve([]);

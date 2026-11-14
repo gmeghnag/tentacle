@@ -19,7 +19,7 @@
  * Plain stdout/stderr, never Ink (AGENTS §7: nothing writes raw to a terminal
  * Ink owns — there is no Ink here).
  */
-import { networkInterfaces, hostname as osHostname } from "node:os";
+import { hostname as osHostname } from "node:os";
 import {
   type AddDeviceResult,
   type DaemonRecord,
@@ -40,7 +40,12 @@ import {
 } from "@tentacle/protocol";
 import { type Random, formatPairingSas, systemRandom } from "@tentacle/transport/noise";
 import { renderUnicodeCompact } from "uqr";
-import { type InterfaceEntry, REACHABLE_HINT, pairAddresses } from "./pair-addresses.ts";
+import {
+  type InterfaceEntry,
+  REACHABLE_HINT,
+  machineInterfaces,
+  pairAddresses,
+} from "./pair-addresses.ts";
 import { untrustedText } from "./untrusted-text.ts";
 import { isYes } from "./workspace-mount.ts";
 
@@ -95,23 +100,6 @@ const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
-
-/**
- * This machine's addresses, flat — Node's `os.networkInterfaces()` is a map of
- * lists. `pairAddresses` needs them whenever a `serve` binds a WILDCARD
- * (`0.0.0.0`), which is the documented way to be reachable (REACHABLE_HINT); a
- * `pair` that defaulted to `[]` would refuse exactly the `serve` it recommends.
- * Only the rule's two fields are kept, so nothing else about the machine leaks.
- */
-export function machineInterfaces(): readonly InterfaceEntry[] {
-  const flat: InterfaceEntry[] = [];
-  for (const entries of Object.values(networkInterfaces())) {
-    for (const entry of entries ?? []) {
-      flat.push({ address: entry.address, family: entry.family, internal: entry.internal });
-    }
-  }
-  return flat;
-}
 
 /** A cancellable "later", so the human's window can bound the question. */
 export interface PairTimer {

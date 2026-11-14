@@ -19,6 +19,7 @@ import {
   type CloseResult,
   type CompactParams,
   type CompactResult,
+  type DaemonDiscovery,
   type DeleteParams,
   type DeleteResult,
   type DetachParams,
@@ -140,6 +141,8 @@ export class Connection {
   private readonly host: SessionHost;
   private readonly principal: ConnectionPrincipal;
   private readonly attached = new Map<string, Attached>();
+  /** The `daemon/discovery` subscription of THIS connection (at most one, F13). */
+  private discoveryUnsubscribe: (() => void) | undefined;
   private readonly servesModel: boolean;
   private initialized = false;
   /** The update types the client declared at `initialize`; undefined = the v10 base set. */
@@ -175,6 +178,10 @@ export class Connection {
       this.release(entry);
     }
     this.attached.clear();
+    // The ONE teardown (P3): the poller stops at zero subscribers, so nothing
+    // is left running for a connection that is gone (F11).
+    this.discoveryUnsubscribe?.();
+    this.discoveryUnsubscribe = undefined;
     this.peer.close();
   }
 
@@ -362,6 +369,13 @@ export class Connection {
       // Daemon-wide: reads/sets the reaper's TTL, attaches this connection to nothing.
       case Method.SessionTtl:
         return this.host.sessionTtl(params as SessionTtlParams);
+      // Daemon-wide: this computer's live siblings and their addresses. It also
+      // SUBSCRIBES this connection to `daemon/discovery` — the notification is
+      // never sent unsolicited (an unknown one reaches an older client's
+      // `onError`, docs/feat/sibling-discovery.md). Synchronous: subscribe,
+      // then snapshot, nothing awaited (AGENTS §7).
+      case Method.DaemonDiscover:
+        return this.discover();
       default:
         throw new RpcError(DomainErrorCode.NotInitialized, `unexpected method: ${method}`);
     }
@@ -371,6 +385,26 @@ export class Connection {
   // like all handlers here (AGENTS §7) — never awaited under a lock.
   private async mcpStatus(): Promise<McpStatusResult> {
     return { servers: [...(await this.host.mcpStatus())] };
+  }
+
+  /**
+   * `daemon/discover`: subscribe this connection to changes, THEN return the
+   * snapshot — in that order, so no change can fall between the two (F12; the
+   * client's `rev` guard covers a frame that overtakes the response). A second
+   * call REPLACES the subscription rather than adding one (F13). Synchronous:
+   * one listener registration plus a cached read, nothing awaited, so a long
+   * `session/prompt` on this connection never delays it (AGENTS §7).
+   */
+  private discover(): DaemonDiscovery {
+    const source = this.host.discoverySource();
+    this.discoveryUnsubscribe?.();
+    const unsubscribe = source.subscribe((discovery) => {
+      // Fire-and-forget: `notify` on a closed peer is a no-op (P4), so a change
+      // racing a disconnect cannot throw here.
+      this.peer.notify(Notification.DaemonDiscovery, discovery);
+    });
+    this.discoveryUnsubscribe = unsubscribe;
+    return source.current();
   }
 
   // The count may take up to its cap (a couple of seconds); like every request
