@@ -76,15 +76,17 @@ describe("the header and the banner per state", () => {
     expect(kind(view.banner)).toBe("reconnecting");
     expect(view.rows).toEqual(ROWS); // the last truth the daemon gave us
     expect(view.editable).toBe(true);
-    expect(view.composer).toMatchObject({ button: "disabled", blockedBy: "link", text: "kept" });
+    // 13d (D1): offline text is a Send later tap, not a dead button.
+    expect(view.composer).toMatchObject({ button: "send-later", blockedBy: null, text: "kept" });
   });
 
   test("a running turn shows the indicator and offers Stop on an empty field", () => {
     const running = sessionView(input({ turn: TURN }));
     expect(running.turn).toEqual(TURN);
     expect(running.composer).toMatchObject({ button: "stop", running: true });
+    // 13d (D1): text typed while a turn runs becomes a QUEUE (steer) tap.
     const typed = sessionView(input({ turn: TURN, draft: "typed" }));
-    expect(typed.composer).toMatchObject({ button: "disabled", blockedBy: "turn" });
+    expect(typed.composer).toMatchObject({ button: "queue", blockedBy: null });
   });
 });
 

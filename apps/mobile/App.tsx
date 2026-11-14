@@ -11,14 +11,24 @@
  */
 import { NavigationContainer, useFocusEffect } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import type { RemoteClient } from "@tentacle/client";
+import type { RemoteClient, RemoteSession } from "@tentacle/client";
+import type { AttachmentRef } from "@tentacle/protocol";
+import { File } from "expo-file-system";
 import { type JSX, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, AppState, StyleSheet, Text, View, useColorScheme } from "react-native";
+import type { ComposeHandle, PickedPhoto } from "./src/compose-controller.ts";
 import { type ComputerRow, computerRows, probeComputer } from "./src/computer-rows.ts";
 import { ComputerConfigError, type ComputerRecord, devComputerSource } from "./src/computers.ts";
 import { type ComputerLink, openComputer } from "./src/connection.ts";
+import { createDraftScheduler } from "./src/drafts.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
+import { createDraftStore } from "./src/outbox-drafts.ts";
+import { createOutboxDriver } from "./src/outbox-driver.ts";
+import { createExpoOutboxFs, outboxRoot } from "./src/outbox-fs-expo.ts";
+import { outboxSessionOf } from "./src/outbox-session.ts";
+import { type OutboxStore, createOutboxStore, outboxPaths } from "./src/outbox-store.ts";
+import { pickFromLibrary, takePhoto } from "./src/photo-source.ts";
 import { type RootStackParams, initialRoute } from "./src/routes.ts";
 import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
 import { PairScreen } from "./src/screens/PairScreen.tsx";
@@ -28,6 +38,7 @@ import { createSessionController } from "./src/session-controller.ts";
 import { createSessionListController, viewModel } from "./src/session-list-controller.ts";
 import { type SessionListState, type SessionRow, initialSessionList } from "./src/session-list.ts";
 import { createSessionRuntimes } from "./src/session-runtimes.ts";
+import type { ComposeWiring } from "./src/session-screen-controller.ts";
 import {
   type SendableHandle,
   type SessionScreenController,
@@ -50,6 +61,9 @@ const RECORDS = new Map<string, ComputerRecord>();
 /** Every link currently open: what the `AppState` effect suspends and resumes. */
 const LIVE_LINKS = new Set<ComputerLink>();
 
+/** The live client per computer id (13d's compose acts resolve their session on it). */
+const CLIENTS = new Map<string, RemoteClient>();
+
 /**
  * One session controller per LIVE client, shared by every screen mount
  * (`session-runtimes.ts`: a per-mount controller would lose the per-id queue
@@ -67,7 +81,195 @@ const RUNTIMES = createSessionRuntimes<RemoteClient, SendableHandle>({
     }),
 });
 
-/** One live client per computer, closed when the app unmounts (AGENTS §7). */
+/**
+ * One outbox per COMPUTER (13d): its file, its driver and its drafts, kept for
+ * the app's lifetime. A screen mount must NOT re-read the file — a second store
+ * for one file would race the first's writes (13b's own reason for one writer).
+ */
+/** The prompt a screen folds: what 13b's driver calls for a photo message. */
+type FoldingPrompt = {
+  readonly prompt: (text: string, turnId: string, refs: readonly AttachmentRef[]) => Promise<void>;
+};
+
+interface OutboxRuntime {
+  readonly store: OutboxStore;
+  /**
+   * 13b's driver for ONE screen, over a port whose `prompt` folds that screen's
+   * transcript: the outbox keeps the item and the key, and the turn it starts is
+   * shown (13d's flow 07/18 — a drained stream shows nothing).
+   */
+  readonly driver: (prompt: FoldingPrompt) => ReturnType<typeof createOutboxDriver>;
+  readonly drafts: ReturnType<typeof createDraftStore>;
+}
+const OUTBOXES = new Map<string, OutboxRuntime>();
+
+function outboxOf(computerId: string): OutboxRuntime {
+  const known = OUTBOXES.get(computerId);
+  if (known !== undefined) {
+    return known;
+  }
+  const store = createOutboxStore(createExpoOutboxFs(), outboxPaths(outboxRoot(), computerId));
+  const driver = (folding: FoldingPrompt) =>
+    createOutboxDriver(
+      // The port is built per run from the client's own session, so a redial's new
+      // handle is picked up (never a stale one — 13b's contract).
+      async (sessionId) => {
+        const client = CLIENTS.get(computerId);
+        if (client === undefined) {
+          return null;
+        }
+        const session = client.newSession(undefined, sessionId, undefined, { attach: {} });
+        try {
+          await session.open();
+        } catch {
+          return null;
+        }
+        // No live-turn accessor here: `facts()` reads the session's own `busy`,
+        // and a steer is turn-bound by its `steerTurnId` (13b's contract).
+        const port = outboxSessionOf(session, client, () => null as string | null);
+        return { ...port, prompt: folding.prompt };
+      },
+      {
+        persistence: {
+          items: () => store.data.items,
+          save: (items) => store.setItems(items),
+          finish: (itemId) => store.removeItem(itemId),
+        },
+        // The photo COPY in the app's sandbox (13c wrote it; the item keeps it).
+        readPhoto: async (file: string) => new Uint8Array(await new File(file).bytes()),
+        mint: () => crypto.randomUUID(),
+      },
+    );
+  const drafts = createDraftStore(store, () => Date.now(), {
+    schedule: (fn, ms) => {
+      const timer = setTimeout(fn, ms);
+      return { cancel: () => clearTimeout(timer) };
+    },
+  });
+  const runtime: OutboxRuntime = { store, driver, drafts };
+  OUTBOXES.set(computerId, runtime);
+  return runtime;
+}
+
+/**
+ * The compose half's wiring for one session (13d): the app's ports.
+ *
+ * Everything here is an ADAPTER over the client and the session the app already
+ * holds — `attachImage`, `send`, `enqueue`, `sendNow`, `onQueued`, `reclaim` —
+ * never a frame built in the app (AGENTS §7 "one session path"). What each act
+ * DOES is `compose-controller.ts`'s (or, for an offline item, 13b's driver's).
+ */
+function composeWiring(
+  computerId: string,
+  sessionId: string,
+  link: ComputerLink,
+  session: () => RemoteSession | null,
+): ComposeWiring {
+  const outbox = outboxOf(computerId);
+  /** The session the acts go through; `session()` is the screen's own handle. */
+  async function withSession<T>(run: (handle: RemoteSession) => Promise<T>): Promise<T> {
+    const handle = session();
+    if (handle !== null) {
+      return run(handle);
+    }
+    const created = link.client.newSession(undefined, sessionId, undefined, { attach: {} });
+    await created.open();
+    return run(created);
+  }
+  return {
+    computerId,
+    store: outbox.store,
+    driver: outbox.driver,
+    photos: {
+      pickFromLibrary: async (taken) => adaptPick(await pickFromLibrary(taken)),
+      takePhoto: async (taken) => adaptPick(await takePhoto(taken)),
+    },
+    handle: (): ComposeHandle | null => ({
+      sessionId,
+      attachImage: async (bytes, meta) => withSession((handle) => handle.attachImage(bytes, meta)),
+      // A photo prompt carries its refs and its key: the same method the TUI
+      // calls, so a retry is free at the daemon's ledger (13b's T1).
+      send: async (text, refs) => {
+        await withSession(async (handle) => {
+          for await (const _event of handle.send(text, undefined, {
+            turnId: crypto.randomUUID(),
+            attachments: refs,
+          })) {
+            // drain: the driver needs the daemon's ack only
+          }
+        });
+      },
+      steer: async (text, id, turnId) => {
+        await link.client.enqueue(sessionId, id, turnId, text);
+      },
+      sendNow: async (messages) => {
+        await withSession(async (handle) => {
+          for await (const _event of await handle.sendNow(messages, "turn", undefined)) {
+            // drain: the daemon's own turn runs; the screen follows it by its feed
+          }
+        });
+      },
+      onQueued: (listener) =>
+        link.client.onSessionQueued((notice) => {
+          if (notice.sessionId === sessionId) {
+            listener(notice.state);
+          }
+        }),
+      // The queue as the client holds it now (a relaunch's snapshot lands before
+      // the compose half subscribes — 13d's flow 14).
+      queued: () => link.client.queuedOf(sessionId),
+      reclaim: async (ids) => {
+        await link.client.reclaim(sessionId, ids);
+      },
+      port: outboxSessionOf(
+        {
+          get sessionId() {
+            return sessionId;
+          },
+        } as never,
+        link.client,
+        () => null,
+      ),
+    }),
+    draft: (text, photoFiles) => {
+      outbox.drafts.force(computerId, sessionId, { text, photos: photoFiles });
+    },
+    mint: () => crypto.randomUUID(),
+  };
+}
+
+/** 13c's picked photos, as the compose half's own shape (their bytes read once). */
+function adaptPick(
+  picked: readonly (
+    | { readonly kind: "refused"; readonly reason: string; readonly detail: string }
+    | {
+        readonly kind: "ready";
+        readonly photo: {
+          readonly mimeType: string;
+          readonly size: number;
+          readonly name?: string;
+        };
+        readonly bytes: Uint8Array;
+        readonly file: string;
+      }
+  )[],
+): Promise<readonly PickedPhoto[]> {
+  return Promise.all(
+    picked.map(async (photo): Promise<PickedPhoto> => {
+      if (photo.kind === "refused") {
+        return { kind: "refused", detail: photo.detail };
+      }
+      return {
+        kind: "ready",
+        file: photo.file,
+        mimeType: photo.photo.mimeType,
+        name: photo.photo.name ?? "photo.jpg",
+        bytes: photo.bytes,
+      };
+    }),
+  );
+}
+
 const LINKS = createLinkRegistry<ComputerLink>({
   open: async (id) => {
     const record = RECORDS.get(id);
@@ -82,10 +284,16 @@ const LINKS = createLinkRegistry<ComputerLink>({
       link.suspend();
     }
     LIVE_LINKS.add(link);
+    CLIENTS.set(id, link.client);
     return link;
   },
   close: (link) => {
     LIVE_LINKS.delete(link);
+    for (const [id, client] of CLIENTS) {
+      if (client === link.client) {
+        CLIENTS.delete(id);
+      }
+    }
     // The link's own exit path: `drain()` + `close()`, i.e. detach, never close.
     return link.close();
   },
@@ -290,6 +498,8 @@ function SessionRoute({
     let live = true;
     let created: SessionScreenController | null = null;
     let unsubscribe: (() => void) | null = null;
+    /** The screen's own attach handle (13c's): the compose acts reuse it. */
+    const sessionHandle: { current: RemoteSession | null } = { current: null };
     void (async () => {
       let link: ComputerLink;
       try {
@@ -311,6 +521,10 @@ function SessionRoute({
         controller: RUNTIMES.controller(link.client),
         broker: link.permissions,
         now: () => Date.now(),
+        // The compose half (13d): one outbox per computer (its store, driver and
+        // drafts shared for the app's lifetime), and the session's own client
+        // methods — no frame built here (AGENTS §7 "one session path").
+        compose: composeWiring(computerId, sessionId, link, () => sessionHandle.current),
       });
       // The link's own status: the banner's `reconnecting` (F8/F9).
       unsubscribe = link.onStatus((status) => created?.link(status.state === "up"));

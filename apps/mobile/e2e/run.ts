@@ -233,8 +233,16 @@ async function main(): Promise<number> {
     );
 
     // Seed the sessions the flows assert on, through the client stack.
-    const { addDelta, seedSessions, laptopLink, sessionStateOf, historyOf, fileExists } =
-      await import("./seed.ts");
+    const {
+      addDelta,
+      seedSessions,
+      laptopLink,
+      sessionStateOf,
+      historyOf,
+      queueStateOf,
+      composeSessionOf,
+      fileExists,
+    } = await import("./seed.ts");
     const endpoint = { url: `ws://127.0.0.1:${daemonPort}/`, token: "e2e-token" };
     const seeded = await seedSessions({
       ...endpoint,
@@ -267,6 +275,10 @@ async function main(): Promise<number> {
         laptopAnswer: (session, answer) => laptop.answer(session, answer),
         sessionState: (session) => sessionStateOf(endpoint, session),
         history: (session) => historyOf(endpoint, session),
+        queueState: (session) => queueStateOf(endpoint, session),
+        laptopEnqueue: (session, text) => laptop.enqueue(session, text),
+        laptopCancel: (session) => laptop.cancel(session),
+        laptopDetach: (session) => laptop.detach(session),
         fileExists: (file) => fileExists({ cwd: runDir }, file),
         modelPrompts: () => mock.prompts,
         modelReplies: () => mock.replies,
@@ -286,12 +298,20 @@ async function main(): Promise<number> {
         return 2;
       }
       console.log(`\n=== iOS ${major} (${device}) ===`);
+      // 13d's flow 18 needs photos in the simulator's library: `addmedia` seeds a
+      // PNG and a JPEG (fixtures, never real photos — the harness owns them under
+      // its own scratch dir).
+      const mediaCode = await addMedia(device, runDir);
+      if (mediaCode !== 0) {
+        console.error(`addmedia failed for iOS ${major} (exit ${mediaCode})`);
+        return mediaCode;
+      }
       const buildCode = await buildAndInstall(device, proxy.address, runDir, major);
       if (buildCode !== 0) {
         console.error(`build/install failed for iOS ${major} (exit ${buildCode})`);
         return buildCode;
       }
-      for (const flow of FLOWS) {
+      for (const flow of selectedFlows()) {
         const outDir = join(runDir, `ios${major}`, flow);
         await mkdir(outDir, { recursive: true });
         const code = await spawnFlow(
@@ -301,6 +321,7 @@ async function main(): Promise<number> {
           runDir,
           seeded,
           hooks.address,
+          () => composeSessionOf(endpoint),
         );
         worst = Math.max(worst, code);
         if (code !== 0) {
@@ -387,10 +408,50 @@ async function buildAndInstall(
 }
 
 /**
+ * Seed the simulator's photo library with the flow 18 fixtures (`PNG fixture`,
+ * `JPEG fixture` — the NAMES are what PHPicker shows, so a flow can tap them). The
+ * fixtures are generated per run under the harness's scratch dir: never real
+ * photos, and nothing under `/tmp` (AGENTS §6).
+ */
+async function addMedia(device: string, runDir: string): Promise<number> {
+  const dir = join(runDir, "media");
+  await mkdir(dir, { recursive: true });
+  // A minimal valid PNG (1×1) and JPEG (1×1): the types are what matters here — the
+  // daemon sniffs the BYTES, and `attachment/put` only carries them.
+  const png = join(dir, "PNG fixture.png");
+  const jpeg = join(dir, "JPEG fixture.jpg");
+  await Bun.write(
+    png,
+    Uint8Array.from(
+      atob(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      ),
+      (c) => c.charCodeAt(0),
+    ),
+  );
+  await Bun.write(
+    jpeg,
+    Uint8Array.from(
+      atob(
+        "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==",
+      ),
+      (c) => c.charCodeAt(0),
+    ),
+  );
+  // `addmedia` needs the device BOOTED and past its launch state: right after a
+  // reboot the import fails with LaunchdSimError 133 (how the first attempt died).
+  await $`xcrun simctl bootstatus ${device} -b`.quiet().nothrow();
+  const result = await $`xcrun simctl addmedia ${device} ${png} ${jpeg}`.quiet().nothrow();
+  return result.exitCode;
+}
+
+/** A session handle resolved through the client's own session table (for a subscription). */
+/**
  * Every flow, in order (docs/feat/mobile-session-view.md 12c supersedes 11a's
- * `04-session-placeholder`: the placeholder is gone, so its flow is deleted and
- * `06-session-open` asserts the real screen). Each one starts with
- * `clearState: true`, so their order carries no state.
+ * `04-session-placeholder`; docs/feat/mobile-compose.md 13d adds `12`–`18`). Each
+ * one starts with `clearState: true`, so their order carries no state — and each
+ * compose flow has its OWN seeded session, because a queued or returned row is
+ * daemon-side state that `clearState` cannot clear.
  */
 export const FLOWS: readonly string[] = [
   "01-shell",
@@ -405,12 +466,55 @@ export const FLOWS: readonly string[] = [
   "09-foreign-turn",
   "10-background-ask",
   "11-disconnect-mid-turn",
+  "12-steer",
+  "13-send-now",
+  "14-returned-mine",
+  "15-returned-other",
+  "16-offline-outbox",
+  "17-outbox-changed",
+  "18-photos",
 ];
 
-/** Maestro's `-e K=V` flags, from a map (its `${VAR}` substitution reads these). */
-export function envFlags(values: Record<string, string>): string[] {
+/**
+ * The flows this run drives. `E2E_ONLY_FLOWS` (comma-separated names) narrows them:
+ * a long run degrades the simulator (every flow starts its own XCTest driver), so a
+ * single flow is how one is debugged or re-proved in a bounded window. Empty or
+ * absent: every flow, which is the gate.
+ */
+export function selectedFlows(
+  only: string | undefined = process.env.E2E_ONLY_FLOWS,
+): readonly string[] {
+  const wanted = (only ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name !== "");
+  if (wanted.length === 0) {
+    return FLOWS;
+  }
+  for (const name of wanted) {
+    if (!FLOWS.includes(name)) {
+      throw new Error(`E2E_ONLY_FLOWS names an unknown flow: ${name}`);
+    }
+  }
+  return wanted;
+}
+
+/** Maestro's `-e K=V` flags, from a map (its `${VAR}` substitution reads these). */ export function envFlags(
+  values: Record<string, string>,
+): string[] {
   return Object.entries(values).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
 }
+
+/** The env var each 13d flow's own session id is passed as (one session per flow). */
+const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
+  "12-steer": "STEER_ID",
+  "13-send-now": "SENDNOW_ID",
+  "14-returned-mine": "RETURNED_ID",
+  "15-returned-other": "OTHER_ID",
+  "16-offline-outbox": "OUTBOX_ID",
+  "17-outbox-changed": "CHANGED_ID",
+  "18-photos": "PHOTO_ID",
+};
 
 /** Run one flow on one simulator with Maestro, returning its exit code. */
 async function spawnFlow(
@@ -425,7 +529,22 @@ async function spawnFlow(
     readonly askIds: readonly string[];
   },
   hooks: string,
+  /** Create one compose session on demand (the harness's own client). */
+  newComposeSession: () => Promise<string>,
 ): Promise<number> {
+  // A 13d compose flow gets a session of its OWN, created JUST BEFORE it runs: a
+  // queued or returned row is daemon-side state that outlives `clearState`, and
+  // seeding all of them up front pushed the earlier flows' rows off the visible
+  // list (found by the first iOS 26 run: flows 02/05/06/07/08 failed).
+  // `flow` is the yaml PATH: the map is keyed by the flow's name.
+  const compose =
+    COMPOSE_SESSION_VARS[
+      flow
+        .split("/")
+        .pop()
+        ?.replace(/\.yaml$/, "") ?? ""
+    ];
+  const fresh = compose === undefined ? {} : { [compose]: await newComposeSession() };
   const child = Bun.spawn(
     [
       "maestro",
@@ -446,6 +565,7 @@ async function spawnFlow(
         ASK3_ID: seeded.askIds[2] ?? "",
         ASK4_ID: seeded.askIds[3] ?? "",
         ASK5_ID: seeded.askIds[4] ?? "",
+        ...fresh,
         MAESTRO_HOOKS: hooks,
       }),
       flow,

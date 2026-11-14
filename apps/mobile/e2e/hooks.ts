@@ -1,16 +1,12 @@
 /**
- * The harness's control hooks (docs/feat/mobile-app-shell.md flows 03/05, plus
- * docs/feat/mobile-session-view.md 12c's six): a localhost HTTP server the
- * Maestro flows reach through `runScript`, so a flow can change the world
- * MID-run (start a turn from the LAPTOP, answer an ask from the laptop, stop and
- * start `serve`) without the harness guessing at timings.
+ * The harness's control hooks, extended by 13d (docs/feat/mobile-compose.md):
+ * `queue-state`, `laptop-enqueue`, `laptop-cancel`, `laptop-detach` and the
+ * per-message history a photo flow asserts on. Same purpose as 11a's and 12c's
+ * six: a flow changes the world MID-run, and the flow's last step asserts DAEMON
+ * truth (RN shows XCUITest no text, plan P9).
  *
- * The actions themselves are injected, so this module owns only the tiny HTTP
- * surface and stays testable without a simulator or a daemon. Every hook that
- * reports daemon-side truth (12c's `session-state`, `history`, `file-exists`,
- * `model-prompts`, `model-replies`) exists because RN's new architecture shows
- * NO text to XCUITest (plan P9): the flow asserts the ids on screen, and the
- * hook proves what the daemon actually did.
+ * The actions are injected, so this module stays the tiny HTTP surface and is
+ * testable without a simulator.
  */
 
 export type HookName =
@@ -24,7 +20,11 @@ export type HookName =
   | "file-exists"
   | "model-prompts"
   | "model-replies"
-  | "edit-calls";
+  | "edit-calls"
+  | "queue-state"
+  | "laptop-enqueue"
+  | "laptop-cancel"
+  | "laptop-detach";
 
 /** The hooks that take a query parameter (`?session=…&prompt=…`). */
 export interface HookQuery {
@@ -32,6 +32,8 @@ export interface HookQuery {
   readonly prompt?: string;
   readonly answer?: string;
   readonly file?: string;
+  /** `laptop-enqueue`: the text the LAPTOP queues into the running turn. */
+  readonly text?: string;
 }
 
 export interface Hooks {
@@ -42,43 +44,56 @@ export interface Hooks {
   stop(): Promise<void>;
 }
 
+/** One message of a session's history, as a `history` hook reports it. */
+export interface HistoryMessage {
+  readonly role: "user" | "assistant";
+  readonly text: string;
+  /** The image refs the message names (flow 18: two photos, png + jpeg). */
+  readonly images: readonly { readonly mimeType: string; readonly name?: string }[];
+}
+
 export interface HookActions {
   /** Creates a session with a finished turn; returns its id (flow 03). */
   readonly addDelta: () => Promise<string>;
-  /** Stop the daemon (flow 05/11). */
   readonly stopServe: () => Promise<void>;
-  /** Start it again on the SAME port and config (flow 05/11). */
   readonly startServe: () => Promise<void>;
-  /**
-   * A LAPTOP turn on an EXISTING session: the harness is a client that attaches
-   * and prompts, with its own requester (`answer` omitted → the ask waits, so
-   * the phone's sheet is the only one that can answer it).
-   */
   readonly laptopPrompt: (
     sessionId: string,
     prompt: string,
     answer: LaptopAnswer | null,
   ) => Promise<{ readonly turnId: string }>;
-  /** Answer a pending ask from the LAPTOP's side (the first answer wins). */
   readonly laptopAnswer: (sessionId: string, answer: LaptopAnswer) => Promise<void>;
-  /** `session/list`'s entry: `attached`, `running`, `archived` (F8/F15's truth). */
   readonly sessionState: (sessionId: string) => Promise<{
     readonly attached: number;
     readonly running: boolean;
     readonly archived: boolean;
   } | null>;
-  /** The daemon's last user and assistant text (by `snapshot`): flow 07/11's truth. */
-  readonly history: (
-    sessionId: string,
-  ) => Promise<{ readonly user: string | null; readonly assistant: string | null }>;
-  /** Whether `project/<file>` exists on the daemon's host (flow 08/10's truth). */
+  /** Every message of the session, oldest first, with the refs each one names. */
+  readonly history: (sessionId: string) => Promise<{
+    readonly messages: readonly HistoryMessage[];
+    /** The LAST user and assistant text (12c's flows: the shape they were written to). */
+    readonly user: string | null;
+    readonly assistant: string | null;
+  }>;
   readonly fileExists: (file: string) => Promise<boolean>;
-  /** Every prompt the MOCK MODEL was asked (flow 07's turn really reached it). */
   readonly modelPrompts: () => readonly string[];
-  /** Every refusal-with-a-reply the model saw (flow 08's reply variant). */
   readonly modelReplies: () => readonly string[];
-  /** The tool-call ids the mock minted (a flow names `tool-<id>-ok`). */
   readonly editCalls: () => readonly string[];
+  /** The daemon's queue for a session (flow 12/14/15): every writer's rows. */
+  readonly queueState: (sessionId: string) => Promise<{
+    readonly entries: readonly { readonly id: string; readonly text: string }[];
+    readonly returned: readonly {
+      readonly id: string;
+      readonly text: string;
+      readonly cause: string;
+    }[];
+  }>;
+  /** A LAPTOP steer into the session's RUNNING turn (flow 15's another-device row). */
+  readonly laptopEnqueue: (sessionId: string, text: string) => Promise<{ readonly id: string }>;
+  /** The LAPTOP stops the running turn (flow 14: my queued row comes back). */
+  readonly laptopCancel: (sessionId: string) => Promise<void>;
+  /** The LAPTOP detaches (flow 15: the writer goes away, its row stays returned). */
+  readonly laptopDetach: (sessionId: string) => Promise<void>;
 }
 
 /** What a laptop requester answers: `allow` (once) or `deny`. */
@@ -99,27 +114,26 @@ export function hookFor(path: string): HookName | undefined {
     case "model-prompts":
     case "model-replies":
     case "edit-calls":
+    case "queue-state":
+    case "laptop-enqueue":
+    case "laptop-cancel":
+    case "laptop-detach":
       return name;
     default:
       return undefined;
   }
 }
 
-/** The query parameters a hook reads (`?session=…&prompt=…`). */
+/** The query parameters a hook reads (`?session=…&prompt=…&text=…`). */
 export function queryOf(url: URL): HookQuery {
+  const read = (name: string): string | undefined =>
+    url.searchParams.get(name) === null ? undefined : (url.searchParams.get(name) as string);
   return {
-    ...(url.searchParams.get("session") === null
-      ? {}
-      : { session: url.searchParams.get("session") as string }),
-    ...(url.searchParams.get("prompt") === null
-      ? {}
-      : { prompt: url.searchParams.get("prompt") as string }),
-    ...(url.searchParams.get("answer") === null
-      ? {}
-      : { answer: url.searchParams.get("answer") as string }),
-    ...(url.searchParams.get("file") === null
-      ? {}
-      : { file: url.searchParams.get("file") as string }),
+    ...(read("session") === undefined ? {} : { session: read("session") }),
+    ...(read("prompt") === undefined ? {} : { prompt: read("prompt") }),
+    ...(read("answer") === undefined ? {} : { answer: read("answer") }),
+    ...(read("file") === undefined ? {} : { file: read("file") }),
+    ...(read("text") === undefined ? {} : { text: read("text") }),
   };
 }
 
@@ -197,7 +211,7 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
           }
           case "file-exists": {
             const file = required(query.file, "file");
-            return Response.json({ ok: true, hook, exists: await deps.actions.fileExists(file) });
+            return Response.json({ ok: true, exists: await deps.actions.fileExists(file) });
           }
           case "model-prompts":
             return Response.json({ ok: true, hook, prompts: deps.actions.modelPrompts() });
@@ -205,6 +219,27 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
             return Response.json({ ok: true, hook, replies: deps.actions.modelReplies() });
           case "edit-calls":
             return Response.json({ ok: true, hook, calls: deps.actions.editCalls() });
+          case "queue-state": {
+            const session = required(query.session, "session");
+            const state = await deps.actions.queueState(session);
+            return Response.json({ ok: true, hook, state });
+          }
+          case "laptop-enqueue": {
+            const session = required(query.session, "session");
+            const text = required(query.text, "text");
+            const queued = await deps.actions.laptopEnqueue(session, text);
+            return Response.json({ ok: true, hook, id: queued.id });
+          }
+          case "laptop-cancel": {
+            const session = required(query.session, "session");
+            await deps.actions.laptopCancel(session);
+            return Response.json({ ok: true, hook });
+          }
+          case "laptop-detach": {
+            const session = required(query.session, "session");
+            await deps.actions.laptopDetach(session);
+            return Response.json({ ok: true, hook });
+          }
         }
         return Response.json({ error: "unknown hook" }, { status: 404 });
       } catch (error) {

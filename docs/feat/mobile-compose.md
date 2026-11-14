@@ -1479,3 +1479,125 @@ places), with tests that name their mutations.
 - **Gate:** touched tests 55 pass / 0 fail. `bun run lint`: 1070 files, clean. `bun run typecheck`: clean. Both mutations reverted; `git status` was clean before this note.
 
 *— claude-opus-5-5, 2026-11-14* (fresh context)
+### 13d `mobile-compose-screen` — PARTIAL (contained): code DONE, Maestro gate NOT green
+
+*— deepseek-v4-pro, 2026-11-14*
+
+**Load-bearing check, re-run first (it PASSED).** `.tentacle/tmp/mobile-compose-13d/load-bearing.txt`:
+
+```
+== L1 turnId ledger key: hosted-session.ts ==
+455:  /** Every turn this session accepted, by client `turnId`, for its lifetime (retries). */
+635:      this.turns.set(key.turnId, key.end ? { end: key.end } : {});
+1993:    const known = this.turns.get(turnId);        (prompt(): the key FIRST)
+1997:    // Before the busy check: a rejected prompt starts and records nothing.
+== L2 enqueue id: checked before the running check, and persisted ==
+2701:    if (this.enqueued.has(id)) {
+637:    for (const enqueueId of restored?.enqueueIds ?? []) {    1264:  enqueueIds: [...this.enqueued],
+== L4 attachment/put: every answer carries `have` (a probe resumes and dedupes) ==
+packages/protocol/src/attachment-upload.ts:52 · remote-client.ts:1707 (upload), :1770 (UploadLinkLostError)
+```
+
+Every claim the plan's assumption rests on holds on this branch, so the phone's
+one job is to mint each key ONCE and persist it before the first attempt.
+
+**Step 0 (12c re-read as merged).** `.tentacle/tmp/mobile-compose-13d/step0.txt`:
+every one of the 12c names the plan uses exists (`composer.ts`, `session-view.ts`,
+`SessionScreen.tsx`, `session-screen-controller.ts`, `session-controller.ts`,
+`session-feed.ts`, `transcript*.ts`, `thumbnails.ts`, `permission-sheet.ts`,
+`foreground-gate.ts`), all nine 13a/13b/13c modules exist, and 13d's own modules
+(`outbox-fs-expo.ts`, `screens/compose/`) were absent — the capability was
+missing, as the plan says. Two 12c behaviours DID move (drift 1/2).
+
+**What was built, in dependency order.**
+
+1. `src/composer.ts` — **D1's truth table**: `send` (text and/or ready photos,
+   idle, link up) · `queue` (a turn runs, text) · `send-later` (link down,
+   anything to send) · `stop` · `none` with `photos`/`turn`/`blank`/`link`/`ended`;
+   plus `sendNowOffered` and `PHOTOS_NEXT_PROMPT`.
+2. `src/compose-state.ts` (new, pure) — **D2/D3**: `onQueued` answers the new state
+   AND what to do (reclaim these ids, put this text back). Mine comes from the
+   PERSISTED own-id set, never `onReturned` (P3). Another device's row is listed
+   and only `take` claims it.
+3. `src/compose-chips.ts` (new, pure) — **D5**: a pick → chips (a refusal is a
+   chip), `uploading → ready | refused`, the 5-photo cap, and `takeChips` (taken
+   and cleared in one call, so a double tap cannot send twice).
+4. `src/compose-controller.ts` (new) — the sequencing: link up = the session's own
+   `send`/`enqueue`/`send_now` with keys minted at the tap; offline = 13b's outbox;
+   a message WITH photos goes through 13b's driver either way.
+5. `src/outbox-fs-expo.ts` (new) — `OutboxFs` over `expo-file-system`, Application
+   Support root.
+6. `src/outbox-drafts.ts` (new) — 13b's debounce policy over the same store.
+7. `src/session-view.ts` — the compose half as values: queue rows,
+   `returnedOthers`, the ordered notices (`returned-banner`, `not-saved`,
+   `waiting-network`), outbox rows, chips, `sendNow`, `photosNotice`.
+8. `src/session-screen-controller.ts` — the compose half behind an optional
+   `ComposeWiring`, the new methods, and **`promptWithRefs`** (the screen's folding
+   prompt).
+9. `src/screens/SessionScreen.tsx` + `screens/compose/*.tsx` — photo button (native
+   action sheet), Send now, Send later, `composer-filled`, chips, queue rows, Take,
+   outbox rows, the decision sheet.
+10. `App.tsx` — one outbox runtime per computer, the client registry, the draft
+    write on `AppState`.
+11. The harness: five new hooks, `history` with per-message refs, the mock's
+    `saw N images`, lazy per-flow sessions, `addmedia` fixtures, flows 12–18.
+12. `changelog.d/mobile-compose-13d.added.md`.
+
+**Tests + 18 mutations (each red, then restored — python over saved copies, never
+`git`; scripts in `.tentacle/tmp/mobile-compose-13d/mutate*.py`).** 8 new test
+files (composer-compose 24, session-view-compose 16, compose-state 14,
+compose-chips 12, compose-controller 21, outbox-drafts 7, session-screen-compose
+7, e2e-flows +3). Mutations M1–M18, every one red: the queue allowed with photos;
+12c's two rows restored; a given-back id kept in `own`; Take on a row of mine;
+chips cleared on send; a refused chip taking a slot; the action's text read
+instead of the field; a refused send-now losing the texts; `shownRows` with no
+daemon queue; the draft cleared before `compose.press`; submit ignoring the queue;
+ids persisted without their texts; a subscription's held snapshot ignored; the
+banner cleared by the reclaim's echo; the held snapshot applied before the ids are
+read (M16, re-checked red after the test was tightened).
+
+**Drift from the Implementation, and why.**
+
+1. **D1's last row is not implemented**: a chip still uploading is NOT taken by
+   the send (it waits for the next prompt). A prompt naming a ref the daemon does
+   not hold would be refused — F5/F6 keep the chip instead. Debt.
+2. **`handedBack` is not persisted; the own-id set (now with the text) is.** The
+   plan offered exactly this alternative. 13a's carry-forward is closed.
+3. **`ownTexts` is a new OPTIONAL field in 13b's file** (same `schemaVersion` 1, a
+   v1 file still loads). A relaunch must give a returned row back with MY words,
+   and ids alone left the field empty (flow 14 found it).
+4. **`composeWiring`/`ComposeWiring` is optional** so 12c's tests keep their shape.
+5. **`sendNow` joins my queued rows + the field** as one `session/send_now`.
+6. **The changelog slug** follows the brief (`mobile-compose-13d.added.md`), not
+   the plan header's `mobile-compose.added.md`.
+7. **The photo fixtures are PNG + JPEG**, not HEIC: `addmedia` takes files we can
+   generate, and 13c's Step 0 proved the HEIC conversion on this simulator.
+8. **`E2E_ONLY_FLOWS`** was added to `run.ts`: a long run degrades the simulator,
+   so one flow can be re-proved in a bounded window.
+
+**The device gate — its state, honestly.** Six harness runs. They found and I
+fixed FIVE real defects, each now pinned by a test that is red on the buggy code:
+flows 02/05/06/07/08 (extra seeded sessions pushed Alpha off screen → lazy
+per-flow sessions); 07/08/08b/08c (a DRAINED prompt stream, so no turn and no
+asks → `promptWithRefs`); 12 (the flow asserted `composer-filled` after a queue,
+which clears the field → assertion fixed, guard test added); 14 (the banner was
+cleared by the reclaim's own echo; the queue snapshot at relaunch arrived before
+the store's ids → both fixed); 14 again (ids without texts → `ownTexts`).
+**What passes on iOS 26.5**: 01–03, 05–08b, 12-steer and 13-send-now.
+**What does NOT**: 08c, 09–11, 14–18 — and every one of those fails at
+`launchApp`/`tapOn computer-dev` with the app not drawing, after ~3 flows in one
+process. That is the simulator degrading mid-run (each flow spawns its own XCTest
+driver; `MAESTRO_DRIVER_STARTUP_TIMEOUT` raised to 240 s, several reboots), not an
+assertion about this slice. **So the plan's mandatory device gate is NOT green,
+and this slice is PARTIAL.** How to verify: boot ONE iPhone 17 Pro cleanly, then
+`JAVA_HOME=… bun run e2e:mobile --ios 26` with `E2E_ONLY_FLOWS` naming one flow at
+a time (logs: `.tentacle/tmp/mobile-compose-13d/maestro-*.log`).
+
+**Gate (code).** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit`
+clean · `bun run lint` `Checked 1201 files … No fixes applied` · `bun test`
+**8868 pass, 3 skip** (the opt-in k8s/docker/slow ones), **0 fail**, 635 files. No
+protocol change, so no `protocol.d/` note and `protocol.json` is untouched.
+
+**Not done**: `19-photo-kill-mid-upload` (13b's `outbox-link` T5 already proves the
+resume; the flow needs a 14 MiB fixture and a kill at a chip's exact state); the
+D1 uploading-chip row (drift 1); no `TODO.md`/`CHANGELOG.md` edit.

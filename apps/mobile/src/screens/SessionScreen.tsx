@@ -32,6 +32,8 @@ import type { SessionScreenController, SessionScreenState } from "../session-scr
 import type { Palette } from "../theme.ts";
 import type { Row } from "../transcript-rows.ts";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
+import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
+import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
 import { TranscriptRow } from "./transcript/TranscriptRow.tsx";
 
 export interface SessionScreenProps {
@@ -86,7 +88,11 @@ export function SessionScreen({ palette, controller }: SessionScreenProps): JSX.
 
   const banner = state.view.banner;
   const rows = state.view.rows;
-
+  const compose = state.compose;
+  // The decision sheet's own state (which item the person tapped, and why).
+  const [deciding, setDeciding] = useState<string | null>(null);
+  const decision =
+    deciding === null ? null : (compose.outbox.find((r) => r.itemId === deciding) ?? null);
   return (
     <KeyboardAvoidingView
       testID="session-view"
@@ -155,12 +161,44 @@ export function SessionScreen({ palette, controller }: SessionScreenProps): JSX.
           {state.notice}
         </Text>
       )}
+      {/* 13d: the notices the compose half owns (each with its own testID), then
+          the queue rows, another device's returned rows, the outbox's rows and
+          the chips — all values, no decisions (AGENTS §7). */}
+      {state.view.notices.map((notice) => (
+        <NoticeRow key={notice.testId} notice={notice} palette={palette} />
+      ))}
+      <QueueRows
+        view={{ queued: compose.queued, returnedOthers: compose.returnedOthers }}
+        palette={palette}
+        onTake={(id) => void controller.take(id)}
+      />{" "}
+      <OutboxRows rows={compose.outbox} palette={palette} onDecide={setDeciding} />
+      <Chips
+        chips={compose.chips}
+        palette={palette}
+        onRemove={(key) => void controller.removeChip(key)}
+      />
       <View
         style={[
           styles.composer,
           { backgroundColor: palette.card, borderTopColor: palette.separator },
         ]}
       >
+        <Pressable
+          testID="composer-photo"
+          accessibilityRole="button"
+          accessibilityLabel="Add a photo"
+          onPress={() =>
+            Alert.alert("Add a photo", undefined, [
+              { text: "Cancel", style: "cancel" },
+              { text: "Library", onPress: () => void controller.pickPhoto("library") },
+              { text: "Camera", onPress: () => void controller.pickPhoto("camera") },
+            ])
+          }
+          style={styles.sideButton}
+        >
+          <Text style={[styles.sideLabel, { color: palette.accent }]}>＋</Text>
+        </Pressable>
         <TextInput
           testID="composer-input"
           style={[styles.input, { color: palette.label }]}
@@ -171,8 +209,31 @@ export function SessionScreen({ palette, controller }: SessionScreenProps): JSX.
           editable={state.view.editable}
           multiline
         />
+        {/* Maestro cannot read the field's text (P9): this is how a flow proves
+            the field is NOT empty (a hand-back, a Take, an Edit). */}
+        {state.draft === "" ? null : (
+          <Text testID="composer-filled" style={styles.hidden}>
+            {""}
+          </Text>
+        )}
+        {compose.sendNow ? (
+          <Pressable
+            testID="composer-send-now"
+            accessibilityRole="button"
+            onPress={() => void controller.sendNow()}
+            style={styles.sideButton}
+          >
+            <Text style={[styles.sideLabel, { color: palette.accent }]}>⇥</Text>
+          </Pressable>
+        ) : null}
         <Pressable
-          testID={state.view.composer.button === "stop" ? "composer-stop" : "composer-send"}
+          testID={
+            state.view.composer.button === "stop"
+              ? "composer-stop"
+              : state.view.composer.button === "send-later"
+                ? "composer-send-later"
+                : "composer-send"
+          }
           accessibilityRole="button"
           disabled={state.view.composer.button === "disabled"}
           onPress={() => controller.press()}
@@ -183,11 +244,34 @@ export function SessionScreen({ palette, controller }: SessionScreenProps): JSX.
           ]}
         >
           <Text style={[styles.buttonLabel, { color: palette.onAccent }]}>
-            {state.view.composer.button === "stop" ? "■" : "↑"}
+            {state.view.composer.button === "stop"
+              ? "■"
+              : state.view.composer.button === "queue"
+                ? "↳"
+                : "↑"}
           </Text>
         </Pressable>
       </View>
+      {state.view.composer.photosNotice === null ? null : (
+        <Text
+          testID="composer-photos-notice"
+          style={[styles.notice, { color: palette.secondaryLabel }]}
+        >
+          {state.view.composer.photosNotice}
+        </Text>
+      )}
       <PermissionSheetView sheet={sheet} state={state.sheet} palette={palette} />
+      <OutboxDecisionSheet
+        item={decision === null ? null : { text: decision.text }}
+        palette={palette}
+        why="something changed since you wrote this — your message is still here"
+        steerable={state.view.composer.running}
+        onSend={() => void controller.outbox("send", deciding ?? "")}
+        onSteer={() => void controller.outbox("steer", deciding ?? "")}
+        onDiscard={() => void controller.outbox("discard", deciding ?? "")}
+        onEdit={() => void controller.outbox("edit", deciding ?? "")}
+        onClose={() => setDeciding(null)}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -225,4 +309,15 @@ const styles = StyleSheet.create({
   },
   dimmed: { opacity: 0.4 },
   buttonLabel: { fontSize: 18, fontWeight: "600" },
+  sideButton: {
+    width: 28,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  sideLabel: { fontSize: 20 },
+  // `composer-filled` is an OBSERVABLE, not decoration: zero-size keeps the row
+  // where it was (an empty <Text> would measure 0×0 and shift nothing, but a
+  // visible glyph would move the field — P9's contract needs the id only).
+  hidden: { width: 0, height: 0, fontSize: 0 },
 });

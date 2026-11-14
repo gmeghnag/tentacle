@@ -1,0 +1,49 @@
+appId: so.tentacle.app
+---
+# 13 (docs/feat/mobile-compose.md 13d): SEND NOW. A `HOLD` turn runs, two steers are
+# queued, and the second button takes them: the old turn is cancelled and the new
+# turn's prompt is both texts joined. The hook proves the daemon's own history.
+- launchApp:
+    clearState: true
+- tapOn:
+    id: "computer-dev"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${SENDNOW_ID}"
+- assertVisible:
+    id: "session-view"
+- runScript:
+    file: "13-laptop-hold.js"
+- extendedWaitUntil:
+    visible:
+      id: "turn-running"
+    timeout: 20000
+- tapOn:
+    id: "composer-input"
+- inputText: "SENDNOW one"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "composer-queue"
+    timeout: 20000
+- tapOn:
+    id: "composer-input"
+- inputText: "SENDNOW two"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "composer-send-now"
+    timeout: 20000
+- tapOn:
+    id: "composer-send-now"
+- extendedWaitUntil:
+    notVisible:
+      id: "composer-send-now"
+    timeout: 20000
+- runScript:
+    file: "13-send-now.js"

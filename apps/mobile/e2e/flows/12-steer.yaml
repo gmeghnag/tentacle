@@ -1,0 +1,43 @@
+appId: so.tentacle.app
+---
+# 12 (docs/feat/mobile-compose.md 13d): a STEER. A turn runs (a `HOLD` from the
+# laptop), the phone types into the field and the one button QUEUES it — the row
+# appears at once as mine, and the hook proves the daemon injected it into that
+# turn.
+- launchApp:
+    clearState: true
+- tapOn:
+    id: "computer-dev"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${STEER_ID}"
+- assertVisible:
+    id: "session-view"
+- assertVisible:
+    id: "turn-idle"
+- runScript:
+    file: "12-laptop-hold.js"
+- extendedWaitUntil:
+    visible:
+      id: "turn-running"
+    timeout: 20000
+- tapOn:
+    id: "composer-input"
+- inputText: "STEER twelve"
+- hideKeyboard
+# A turn runs with text in the field: the button QUEUES (D1), it does not send.
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "composer-queue"
+    timeout: 20000
+# The tap QUEUED it: the field is cleared in the same step (D1's synchronous
+# clear, so a double tap cannot queue twice) and the row is what carries the text.
+- assertNotVisible:
+    id: "composer-filled"
+# No id on the row itself (its id is a daemon-side key): the LAST step is the
+# daemon's own truth, which is what this flow actually asserts.
+- runScript:
+    file: "12-steer.js"

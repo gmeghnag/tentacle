@@ -1,0 +1,48 @@
+appId: so.tentacle.app
+---
+# 15 (docs/feat/mobile-compose.md 13d): ANOTHER DEVICE'S RETURNED ROW. The laptop
+# queues a steer into a `HOLD` turn and then stops it: the row is returned to ITS
+# writer, and the phone must show it as "returned to another device" — never claim
+# it by itself (QR2). Take is the one explicit act that brings it into the field.
+- launchApp:
+    clearState: true
+- tapOn:
+    id: "computer-dev"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${OTHER_ID}"
+- assertVisible:
+    id: "session-view"
+- runScript:
+    file: "15-laptop-hold.js"
+- extendedWaitUntil:
+    visible:
+      id: "turn-running"
+    timeout: 20000
+- runScript:
+    file: "15-laptop-enqueue.js"
+# The writer stops the turn: its queued row comes back to IT (the daemon returns a
+# row to its writer, and this peer is the writer). THEN it detaches — its row stays
+# `returned`, waiting for it, and the phone must not claim it by itself.
+- runScript:
+    file: "15-laptop-cancel.js"
+- runScript:
+    file: "15-laptop-detach.js"
+# The phone's field is UNTOUCHED by another device's row (never automatic).
+- extendedWaitUntil:
+    visible:
+      id: "composer-queue"
+    timeout: 30000
+- assertNotVisible:
+    id: "composer-filled"
+# `Take` on THAT row. Its id is minted by the hook at run time, so the flow cannot
+# name it: it taps the one `take-*` id (Maestro matches ids as regexes).
+- tapOn:
+    id: "take-.*"
+- extendedWaitUntil:
+    visible:
+      id: "composer-filled"
+    timeout: 20000
+- runScript:
+    file: "15-returned.js"

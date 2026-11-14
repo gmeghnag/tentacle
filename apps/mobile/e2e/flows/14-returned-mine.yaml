@@ -1,0 +1,50 @@
+appId: so.tentacle.app
+---
+# 14 (docs/feat/mobile-compose.md 13d): MY RETURNED ROW. A `HOLD` turn runs, I queue a
+# steer, and the LAPTOP stops that turn: my row comes back into the field with the
+# banner, and the daemon's queue no longer returns it (the reclaim ran).
+# The variant kills the app before the cancel: the ids are PERSISTED, so the row is
+# given back once after a relaunch too (F10).
+- launchApp:
+    clearState: true
+- tapOn:
+    id: "computer-dev"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${RETURNED_ID}"
+- assertVisible:
+    id: "session-view"
+- runScript:
+    file: "14-laptop-hold.js"
+- extendedWaitUntil:
+    visible:
+      id: "turn-running"
+    timeout: 20000
+- tapOn:
+    id: "composer-input"
+- inputText: "RETURN fourteen"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "composer-queue"
+    timeout: 20000
+# My app is GONE while the turn is stopped: the row must come back on relaunch.
+- stopApp
+- runScript:
+    file: "14-laptop-cancel.js"
+- launchApp
+- tapOn:
+    id: "computer-dev"
+- tapOn:
+    id: "session-${RETURNED_ID}"
+- extendedWaitUntil:
+    visible:
+      id: "returned-banner"
+    timeout: 30000
+- assertVisible:
+    id: "composer-filled"
+- runScript:
+    file: "14-returned.js"
