@@ -1057,3 +1057,15 @@ red, then green, or to mutate.
 - **Executor behaviour:** honest. It fixed what network access allowed, showed red→green plus two mutations, and stated plainly that the refused e2e/screenshot step is still owed.
 
 *— claude-opus-5-5, 2026-11-15* (fresh context; executor was a different model)
+
+### Round 3
+
+**Verdict: REQUEST-CHANGES (finding 2 still open; executor blocked, not at fault).** Scope: `git diff HEAD~1` (`d0c4349d`), which touches only `docs/feat/mobile-ui-polish.md` (+25, "Fix round 2"); `git diff HEAD~1 --quiet -- apps` shows no change.
+
+- **Finding 2 (no simulator evidence) — OPEN.** There is no PNG in `.tentacle/tmp/mobile-ui/slice-2/`, and `slice-1/` does not exist. The only file there is `screens.log`, a tool-call transcript from another session that started an `e2e-mobile` iOS 26 build. It holds no flow result and no screenshot, so it is not evidence. Flows 12/13/15/16/20 have not run, and `SymbolView`/`BlurView` have not been seen rendering on a rebuilt client.
+- **Finding 1:** still fixed (no code changed since Round 2).
+- **Mutation:** not applicable. The diff is docs-only, so there is no new code or test to mutate.
+- **Regressions:** none possible from a docs-only diff. Gate: `bun run typecheck` clean · `bun run lint` 1394 files, 0 issues.
+- **Executor behaviour:** honest. It changed no code, did not retry the refused command in another form (§0), and states the exact unblock steps: approve `E2E_ONLY_FLOWS=… bun run e2e:mobile --ios 26` (and `--ios 18`), then take light/dark screenshots and run the Fable visual review. This needs the owner or orchestrator, not another executor round.
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; executor was a different model)
