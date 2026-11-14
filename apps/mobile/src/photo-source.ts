@@ -20,7 +20,7 @@ import { Directory, File, Paths } from "expo-file-system";
 import { ImageManipulator, SaveFormat } from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
 import type { PhotoRefusal, PhotoStep, ReadyPhoto } from "./photo-input.ts";
-import { nameForType, nextPhotoStep, photoName } from "./photo-input.ts";
+import { nextPhotoStep, photoCopyName, photoName } from "./photo-input.ts";
 
 /** What one picked photo became: a sendable ref's ingredients, or a refusal. */
 export type PickedPhoto =
@@ -36,16 +36,38 @@ export type PickedPhoto =
 /** Where the picker/camera put things the app keeps (excluded from iCloud backup by the outbox). */
 const PHOTO_DIR = "photos";
 
+/**
+ * A per-process counter, part of every copy's name (`photoCopyName`): two picks
+ * in one millisecond must never resolve to one file. Never reset — a counter
+ * that restarts at 1 on relaunch only matters if the clock also went backwards,
+ * and a stale file with the same name is then caught by `overwrite: false`.
+ */
+let pickSeq = 0;
+
 function photoDir(): Directory {
   const dir = new Directory(Paths.document, PHOTO_DIR);
   dir.create({ intermediates: true, idempotent: true });
   return dir;
 }
 
-/** A copy of `bytes` in the app's own folder, under `name` (unique per pick). */
-function copyInto(bytes: Uint8Array, name: string): string {
-  const target = new File(photoDir(), `${Date.now()}-${name}`);
-  target.create({ overwrite: true });
+/**
+ * A copy of `bytes` in the app's own folder, under a name unique to this pick
+ * (`photoCopyName`: a stamp AND a counter, so neither a same-millisecond pick
+ * nor a clock that went backwards can collide).
+ */
+function copyInto(
+  bytes: Uint8Array,
+  photo: { readonly name: string | undefined; readonly mimeType: ImageMimeType },
+): string {
+  pickSeq += 1;
+  const target = new File(
+    photoDir(),
+    photoCopyName(photo.name, photo.mimeType, { stamp: Date.now(), seq: pickSeq }),
+  );
+  // NOT `overwrite: true`: a name collision would mean two outbox items share
+  // one file (the second pick's bytes replacing the first's), so it must throw
+  // here — where the pick is refused — rather than swap images silently.
+  target.create({ overwrite: false });
   target.write(bytes);
   return target.uri;
 }
@@ -84,7 +106,9 @@ export async function preparePickedPhoto(
         kind: "ready",
         photo: step.photo,
         bytes,
-        file: copyInto(bytes, photoNameForFile(name, step.photo.mimeType)),
+        // `photoCopyName` (pure, tested): a name unique to this pick, so two
+        // picks can never share one file (`copyInto` writes `overwrite: false`).
+        file: copyInto(bytes, { name, mimeType: step.photo.mimeType }),
       };
     }
     if (step.kind === "convert-to-jpeg") {
@@ -101,16 +125,6 @@ export async function preparePickedPhoto(
     reason: "not-an-image",
     detail: "the photo could not be converted into a sendable image",
   };
-}
-
-/** A file name safe for the sandbox, wearing the type's own extension. */
-function photoNameForFile(name: string | undefined, mimeType: ImageMimeType): string {
-  const safe =
-    name === undefined || name === "" ? undefined : name.replace(/[^A-Za-z0-9._-]/g, "_");
-  // `nameForType` again, not the raw name: a copy of converted bytes labelled
-  // `.heic` is the same contradiction the ref's name was just rid of (found on
-  // the simulator: the ref said `.jpg`, the file in the sandbox still `.heic`).
-  return nameForType(safe, mimeType) ?? "photo.jpg";
 }
 
 /**

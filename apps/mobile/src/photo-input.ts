@@ -16,6 +16,7 @@
  * than shrunk forever (Owner Q3: one step, then refuse visibly).
  */
 import {
+  ATTACHMENT_NAME_MAX_CHARS,
   type ImageMimeType,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_IMAGE_BYTES,
@@ -131,6 +132,46 @@ export function photoName(raw: string | null | undefined): string | undefined {
   return raw === null || raw === undefined ? undefined : sanitizeAttachmentName(raw);
 }
 
+/**
+ * The name of one photo's sandbox COPY, unique per pick.
+ *
+ * The copy used to be `${Date.now()}-${name}`, written with `overwrite: true`, so
+ * two picks landing in the same millisecond under the same name (two photos with
+ * no name both become `photo.jpg`; two names can sanitise to one string) shared
+ * ONE file: the first outbox item then sent the second photo's bytes — silently,
+ * and a re-upload sent the wrong image. The `seq` part (a per-process counter,
+ * the adapter's) makes that impossible, and the copy is created `overwrite:
+ * false`, so a collision would fail loudly instead of swapping bytes.
+ *
+ * It wears the type's extension (`nameForType`) for the reason found on the
+ * simulator: a copy of converted bytes labelled `.heic` contradicts itself.
+ *
+ * The WHOLE name is capped, not just the stem it inherits: a ref's name may be
+ * 255 characters and the copy prefixes it with `<stamp>-<seq>-`, so an
+ * inherited cap would still overflow the filesystem's own name limit and fail
+ * the write. The name is ASCII by then (the `safe` filter above is the only thing
+ * that reaches it), so a unit cap here is a byte cap too — and the EXTENSION
+ * still gets its room, so a truncated copy still says what it is.
+ */
+export function photoCopyName(
+  name: string | undefined,
+  mimeType: ImageMimeType,
+  pick: { readonly stamp: number; readonly seq: number },
+): string {
+  const safe =
+    name === undefined || name === "" ? undefined : name.replace(/[^A-Za-z0-9._-]/g, "_");
+  const named = nameForType(safe, mimeType) ?? `photo${EXTENSIONS[mimeType]}`;
+  const prefix = `${pick.stamp}-${pick.seq}-`;
+  const budget = ATTACHMENT_NAME_MAX_CHARS - prefix.length;
+  const at = named.lastIndexOf(".");
+  // No extension (a name like `photo` or `.hidden`): the whole string is the stem.
+  if (at <= 0) {
+    return `${prefix}${clipToUnits(named, budget)}`;
+  }
+  const extension = named.slice(at);
+  return `${prefix}${clipToUnits(named.slice(0, at), budget - extension.length)}${extension}`;
+}
+
 /** The extension each accepted type wears in a ref's name. */
 const EXTENSIONS: Record<ImageMimeType, string> = {
   "image/png": ".png",
@@ -165,5 +206,27 @@ export function nameForType(name: string | undefined, mimeType: ImageMimeType): 
   if (current === wanted || (wanted === ".jpg" && current === ".jpeg")) {
     return name;
   }
-  return `${name.slice(0, at)}${wanted}`;
+  // The rename can be WIDER than the extension it replaces (`.png` → `.webp`),
+  // and `sanitizeAttachmentName` has already spent the wire's whole 255-character
+  // budget on the OLD name — so renaming alone can push a legal name past it, and
+  // the wire then refuses the WHOLE message (`AttachmentRefSchema.name.max(255)`),
+  // which is the very failure the name rule exists to prevent. The STEM gives
+  // way, never the extension: the name must still say what the bytes are.
+  return `${clipToUnits(name.slice(0, at), ATTACHMENT_NAME_MAX_CHARS - wanted.length)}${wanted}`;
+}
+
+/**
+ * `text` cut to at most `max` UTF-16 units — the unit the wire's `.max(255)`
+ * counts — never splitting a surrogate pair, by the same rule (and for the same
+ * reason) as `sanitizeAttachmentName`'s own cap.
+ */
+function clipToUnits(text: string, max: number): string {
+  let kept = "";
+  for (const char of text) {
+    if (kept.length + char.length > max) {
+      break;
+    }
+    kept += char;
+  }
+  return kept;
 }

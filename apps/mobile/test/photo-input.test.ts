@@ -6,8 +6,13 @@
  * Each `describe` names the mutation it is red on (AGENTS §9).
  */
 import { describe, expect, test } from "bun:test";
-import { MAX_ATTACHMENTS_PER_MESSAGE, MAX_IMAGE_BYTES } from "@tentacle/core";
-import { type PhotoState, nextPhotoStep, photoName } from "../src/photo-input.ts";
+import {
+  ATTACHMENT_NAME_MAX_CHARS,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  MAX_IMAGE_BYTES,
+} from "@tentacle/core";
+import { AttachmentRefSchema } from "@tentacle/protocol";
+import { type PhotoState, nextPhotoStep, photoCopyName, photoName } from "../src/photo-input.ts";
 
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -207,6 +212,44 @@ describe("the ref's name never contradicts the type (found on the simulator)", (
     });
   });
 
+  test("a rename past the wire's 255 cap gives way in the STEM, never the extension (mutation: rename after sanitising, uncapped → 256 chars → red)", () => {
+    // The review's repro: `sanitizeAttachmentName` spends the wire's whole budget
+    // on the OLD name, and `.png` → `.webp` is one character WIDER, so the rename
+    // alone produced a 256-char name that `AttachmentRefSchema.name.max(255)`
+    // refuses — the whole message lost, the exact failure the name rule prevents.
+    const step = nextPhotoStep(state({ bytes: WEBP, name: `${"a".repeat(251)}.png` }));
+    expect(step.kind).toBe("ready");
+    if (step.kind !== "ready") {
+      return;
+    }
+    expect(step.photo.name?.length).toBe(255);
+    // The extension still says what the bytes are: the name is cut, not renamed away.
+    expect(step.photo.name?.endsWith(".webp")).toBe(true);
+    // One character of the STEM went, exactly what the wider extension needed.
+    expect(step.photo.name).toBe(`${"a".repeat(250)}.webp`);
+    // And the wire's own schema accepts it (the failure was at THIS boundary).
+    const ref = { id: "a".repeat(64), mimeType: "image/webp", size: 1, name: step.photo.name };
+    expect(AttachmentRefSchema.safeParse(ref).success).toBe(true);
+    // A rename that SHORTENS the extension is unaffected (`.webp` → `.gif`).
+    expect(nextPhotoStep(state({ bytes: GIF, name: `${"a".repeat(251)}.webp` }))).toMatchObject({
+      photo: { name: `${"a".repeat(251)}.gif` },
+    });
+  });
+
+  test("the widened rename never splits an astral character", () => {
+    // The stem is 249 ASCII chars + one emoji (2 UTF-16 units = 251) and `.webp`
+    // leaves 250 units, so a plain `slice(0, 250)` would cut BETWEEN the surrogate
+    // halves — leaving a lone high surrogate in a name the wire then accepts but
+    // no reader can show.
+    const step = nextPhotoStep(state({ bytes: WEBP, name: `${"a".repeat(249)}😀.png` }));
+    expect(step.kind).toBe("ready");
+    if (step.kind !== "ready") {
+      return;
+    }
+    expect(step.photo.name).toBe(`${"a".repeat(249)}.webp`);
+    expect(step.photo.name?.length).toBe(254);
+  });
+
   test("a name that already agrees is untouched (jpg/jpeg are the same type)", () => {
     expect(nextPhotoStep(state({ bytes: JPEG, name: "a.JPG" }))).toMatchObject({
       photo: { name: "a.JPG" },
@@ -232,5 +275,54 @@ describe("the ref's name never contradicts the type (found on the simulator)", (
   test("a nameless photo stays nameless", () => {
     const step = nextPhotoStep(state({ bytes: JPEG, converted: true }));
     expect(step.kind === "ready" ? step.photo.name : "unexpected").toBeUndefined();
+  });
+});
+
+describe("each pick's sandbox copy gets its OWN name (finding 3)", () => {
+  test("two nameless photos in the same millisecond do not collide (mutation: drop the seq → both `photo.jpg` → red)", () => {
+    // The copy used to be `${Date.now()}-${name}` with `overwrite: true`: two
+    // nameless picks (both `photo.jpg`) in one millisecond shared one file, so the
+    // first outbox item held the SECOND photo's bytes — silently, and a re-upload
+    // sent the wrong image.
+    const stamp = 1_700_000_000_000;
+    const first = photoCopyName(undefined, "image/jpeg", { stamp, seq: 1 });
+    const second = photoCopyName(undefined, "image/jpeg", { stamp, seq: 2 });
+    expect(first).not.toBe(second);
+    expect(first).toBe(`${stamp}-1-photo.jpg`);
+    expect(second).toBe(`${stamp}-2-photo.jpg`);
+  });
+
+  test("two names that sanitise alike still get distinct copies", () => {
+    const stamp = 1_700_000_000_000;
+    const a = photoCopyName("a/b.png", "image/png", { stamp, seq: 7 });
+    const b = photoCopyName("a:b.png", "image/png", { stamp, seq: 8 });
+    // Both stems become `a_b` (the sandbox-safe filter): the seq is what differs.
+    expect(a).toBe(`${stamp}-7-a_b.png`);
+    expect(b).toBe(`${stamp}-8-a_b.png`);
+    expect(a).not.toBe(b);
+  });
+
+  test("the copy wears the type's extension, never the name's claim", () => {
+    // A converted photo's copy labelled `.heic` is the contradiction Step 0 found.
+    expect(photoCopyName("IMG_0111.heic", "image/jpeg", { stamp: 1, seq: 1 })).toBe(
+      "1-1-IMG_0111.jpg",
+    );
+  });
+
+  test("a nameless photo still gets a copy name", () => {
+    expect(photoCopyName(undefined, "image/png", { stamp: 5, seq: 3 })).toBe("5-3-photo.png");
+    expect(photoCopyName("", "image/png", { stamp: 5, seq: 4 })).toBe("5-4-photo.png");
+  });
+
+  test("the whole copy name is capped, prefix included (mutation: cap only the inherited stem → an over-long filesystem name → red)", () => {
+    // `nameForType` allows a 255-char name; the copy prefixes `<stamp>-<seq>-`,
+    // so a 255-char inherited name would be a 270-char file name, past APFS's
+    // own 255-BYTE limit — the write would fail and the pick would be lost.
+    const long = `${"a".repeat(251)}.png`;
+    const copy = photoCopyName(long, "image/png", { stamp: 1_700_000_000_000, seq: 12 });
+    expect(copy.length).toBeLessThanOrEqual(ATTACHMENT_NAME_MAX_CHARS);
+    // The extension survives, so the file still says what it is.
+    expect(copy.endsWith(".png")).toBe(true);
+    expect(copy.startsWith("1700000000000-12-")).toBe(true);
   });
 });

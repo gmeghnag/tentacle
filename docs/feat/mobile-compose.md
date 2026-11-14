@@ -696,6 +696,101 @@ typecheck clean, `biome check .` 1070 files no fixes, `bun test` **8309 pass, 3
 skip (the opt-in k8s/docker/slow ones), 0 fail**. Log:
 `.tentacle/tmp/mobile-compose-13c/gate2.log`.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14 — fixes review round 1's findings 1 and 3;
+finding 2 escalated.* Signature: `claude-opus-5-5` is the id this harness is
+configured with (`~/.claude.json`; `CLAUDE_EFFORT=high`, claude-code 2.1.323) —
+the binary exposes no more specific build id to me, so it is not a finer
+distinction than that. Note for the next Review: that is the SAME family as
+round 1's reviewer (`:707`), so round 2 must again be a fresh context (or another
+family) for it to be an independent pass.
+
+Three review findings. Findings 1 and 3 fixed with red-before-green tests;
+finding 2 is the review's own STOP-and-ask, so it is corrected and escalated,
+not decided here.
+
+**Finding 1 — FIXED. The rename could push a name past the wire's 255 cap.**
+Confirmed the review's repro first (`.tentacle/tmp/mobile-compose-13c/review/name.ts`:
+`ready 256`). The plan's name rule had the rename running after
+`sanitizeAttachmentName`, which has already spent the whole 255-character budget
+on the OLD name, and `.png` → `.webp` is one character wider.
+`nameForType` (`apps/mobile/src/photo-input.ts:180`) now clips the STEM to
+`ATTACHMENT_NAME_MAX_CHARS - extension.length` through a new `clipToUnits`
+(`:196`) — the wire's own exported constant, so the two bounds cannot drift, and
+code-point clipping, so a widened rename cannot leave half a surrogate pair
+(the same trap `sanitizeAttachmentName` guards). The extension is what gives way
+LAST: a name must still say what the bytes are. Chose "cap after the rename"
+over "rename before sanitizing" because the second reshapes `nextPhotoStep`'s
+input contract for one character's worth of budget.
+Tests: `photo-input.test.ts` "a rename past the wire's 255 cap gives way in the
+STEM" (255 chars, ends `.webp`, and `AttachmentRefSchema.safeParse` — the wire's
+real schema, imported — accepts it) and "the widened rename never splits an
+astral character".
+
+**Finding 3 — FIXED. Two picks could overwrite each other's sandbox copy.**
+The copy name is now built by a new PURE `photoCopyName`
+(`apps/mobile/src/photo-input.ts:152`) from a stamp AND a per-process counter
+(`photo-source.ts`'s `pickSeq`), and `copyInto` writes `create({ overwrite:
+false })` — so a collision can no longer swap bytes silently: it throws at the
+pick. Verified against the SDK rather than assumed: `expo-file-system`'s
+`validateCanCreate` throws `FileAlreadyExistsException` when `!overwrite &&
+exists` (`node_modules/expo-file-system/ios/FileSystemPath.swift:26-29`). The
+naming moved out of the adapter into `photo-input.ts` because AGENTS §7 puts
+computation in a pure module — and that is what makes it testable at all (no
+Expo module runs under `bun test`). `photoNameForFile` is gone, absorbed by
+`photoCopyName`.
+While fixing it I found a second, unreviewed overflow: a copy name is
+`<stamp>-<seq>-<ref name>` and a ref name may be 255 characters, so the file
+name could reach 270 — past APFS's own limit, failing the write and losing the
+pick. The whole name is now capped with the extension still given its room.
+Tests: `photo-input.test.ts` "each pick's sandbox copy gets its OWN name" — two
+stamps in one millisecond differ, two names that sanitise alike differ, the copy
+wears the type's extension, a nameless photo still gets a name, the whole name
+is capped.
+
+**Finding 2 — PARTIAL, escalated (owner decision, as the review says).** Two
+things were wrong in my Execution record and both are now corrected, with the
+diagnosis PROVEN rather than argued. The review's claim — that a synchronous
+noble digest freezes the JS thread, so "off the render path" was false — is
+correct, and cheaply provable without a device: a 1 ms timer scheduled before
+`sha256Hex(15 MiB)` does not fire at all until the digest returns
+(`.tentacle/tmp/mobile-compose-13c/fix1-sync-blocks.ts` →
+`{"hashMs":70,"timerFiredAtMs":-1,"timerBlockedUntilDigestEnded":true}`; Bun's
+70 ms vs Hermes' 5 612 ms is the same one-thread blocking, only slower code).
+So the earlier "off the render path" sentence is struck: **the UI does freeze
+for ~5.6 s per 15 MiB photo, wherever the upload is triggered.**
+Not fixed here, deliberately, because it cannot be: `RemoteClientOptions.
+sha256Bytes` is synchronous (`packages/client/src/remote-client.ts:433`) and
+`attachImage` computes the id internally (`:1701`), so there is no way for the
+app to hand in a pre-computed async digest. The fix is a client seam
+(`packages/client` — load-bearing), which is a plan amendment under AGENTS §8,
+not a fix-round edit. Recorded for the owner as the one decision blocking 13d:
+accept ~5.6 s of frozen UI per large photo, or add the async-hash seam.
+
+**Mutations run (AGENTS §9 non-vacuity; each restored byte-identically, the
+suite re-run green after each, from a scratch copy — never `git`).**
+
+| # | Mutation | Red |
+|---|---|---|
+| M-U1 | `nameForType` returns `${stem}${wanted}`, uncapped (the bug) | 2 fail: 256 chars; the astral case |
+| M-U2 | `clipToUnits` → `text.slice(0, max)` | 1 fail: a lone high surrogate |
+| M-U3 | `photoCopyName` drops the `seq` (the old `${stamp}-${name}` shape) | 4 fail, incl. the two-nameless-in-one-ms collision |
+| M-U4 | the copy name is uncapped (prefix + full inherited name) | 1 fail: the over-long file name |
+
+M-U2's first attempt was vacuous — my first astral fixture put the emoji just
+outside the budget, so a naive `slice` never reached it and the suite stayed
+green. Moved the emoji to sit exactly across the cut (249 ASCII + emoji, budget
+250) and the mutation went red. That correction is the reason the fixture reads
+the way it does.
+
+**Gate after this round** (same worktree): `bunx tsc --noEmit` clean;
+`tsc -p apps/mobile --noEmit` clean; `bun run lint` 1070 files, no fixes;
+`bun test apps/mobile/test/photo-input.test.ts hash.test.ts connection.test.ts
+packages/core/test/image-sniff.test.ts` 55 pass / 0 fail; full `bun test`
+**8316 pass, 3 opt-in skip, 0 fail** (was 8309 — the 7 new tests).
+`git status` is exactly the three touched files.
+
 ## Review
 
 #### Orchestrator decisions (owner night delegation 2026-11-14)
