@@ -417,6 +417,48 @@ describe("a 'yes' that cannot be recorded", () => {
 });
 
 describe("the addresses of THIS machine (review round 1, finding 1)", () => {
+  test("a loopback serve with a relay address pairs at all — the zero-config case", async () => {
+    // docs/feat/mobile-relay.md R5b, the gap the plan's Preconditions names: the
+    // DEFAULT bind is `--host 127.0.0.1` (a loopback record contributes no
+    // bind-derived address), so with the relay's `/d/<id>/e2e` sitting in the
+    // record's `addresses` the QR must carry it. Red before R5b: `pair` refused
+    // with REACHABLE_HINT, i.e. the relay existed and no phone could pair.
+    const configDir = newDir();
+    const relay = "wss://relay.tentacle.so/d/AbCdEfGhIjKlMnOpQrStUv/e2e";
+    writeDaemonRecord(configDir, {
+      pid: process.pid,
+      host: "127.0.0.1",
+      port: 4000,
+      tls: false,
+      cwd: "/elsewhere",
+      startedAt: 1,
+      addresses: [relay],
+    });
+    // `ttlMs: 0`: the window expires at once (no phone claims it here); the
+    // payload is printed BEFORE that, which is where the addresses are.
+    const run = await runPair({ configDir, ttlMs: 0 });
+    expect(run.addresses).toEqual([relay]);
+    expect(run.err.join("")).not.toContain("serve --host 0.0.0.0");
+  });
+
+  test("direct addresses come first, the relay LAST (the order the phone tries)", async () => {
+    const configDir = newDir();
+    const relay = "wss://relay.tentacle.so/d/AbCdEfGhIjKlMnOpQrStUv/e2e";
+    writeDaemonRecord(configDir, {
+      pid: process.pid,
+      host: "0.0.0.0",
+      port: 4000,
+      tls: false,
+      cwd: "/elsewhere",
+      startedAt: 1,
+      addresses: [relay],
+    });
+    const run = await runPair({ configDir, ttlMs: 0 });
+    // The LAN address this machine's injected `LAN` interface implies, then the
+    // relay: R6's stagger prefers direct paths and falls back to the relay.
+    expect(run.addresses).toEqual(["ws://192.168.1.8:4000/e2e", relay]);
+  });
+
   test("a wildcard record expands to the real interfaces when none are injected", async () => {
     // `main` injects nothing, so the DEFAULT is what a user gets: a `0.0.0.0`
     // serve — the very configuration REACHABLE_HINT recommends — must yield

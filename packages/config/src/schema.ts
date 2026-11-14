@@ -413,6 +413,18 @@ const settingsShape = {
    */
   sessions: z.object({ keepSuperseded: z.boolean().optional() }).strict().optional(),
   /**
+   * The mobile relay (docs/feat/mobile-relay.md R5a): `enabled` (default true)
+   * lets a `serve` with paired devices dial OUT to the relay so a phone reaches
+   * it from anywhere; `url` names the relay (`DEFAULT_RELAY_URL` when unset) and
+   * must be `wss://` (or `ws://` to a loopback host) — the secret travels on that
+   * socket. `serve --relay <url>` / `serve --no-relay` override both. LAPTOP-ONLY:
+   * never carried to a pod (a pod daemon has no device route and never dials).
+   */
+  relay: z
+    .object({ enabled: z.boolean().optional(), url: z.string().optional() })
+    .strict()
+    .optional(),
+  /**
    * What a docker/podman workspace mount hides from the container
    * (docs/feat/docker-workspace-mount.md): `hide` REPLACES the default list
    * (`~/.ssh`, `~/.aws`, `~/.kube`, `~/.config/gcloud`, `~/.docker/config.json`,

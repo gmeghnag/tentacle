@@ -129,6 +129,13 @@ export function socketOptions(
 export interface RunningServer {
   readonly url: string;
   readonly port: number;
+  /**
+   * The `/e2e` route's handshake limiter — the SAME instance the device route
+   * charges (docs/feat/mobile-relay.md F7), so a relay stream and a direct
+   * handshake share one `maxConcurrent`. `undefined` when the device route is off
+   * (no relaying daemon then either).
+   */
+  readonly limiter?: HandshakeLimiter;
   stop(): void;
 }
 
@@ -400,6 +407,7 @@ export function startWsServer(options: WsServerOptions): RunningServer {
   return {
     url: `${scheme}://${options.host}:${server.port}`,
     port: server.port,
+    ...(limiter ? { limiter } : {}),
     stop: () => server.stop(true),
   };
 }

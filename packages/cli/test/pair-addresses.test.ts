@@ -172,6 +172,122 @@ describe("nothing reachable", () => {
   });
 });
 
+/**
+ * The record's OWN addresses (docs/feat/mobile-relay.md R5b): a `serve --address`
+ * tailnet name and, above all, the mobile relay's derived `/d/<id>/e2e`. Without
+ * this a loopback `serve` — the DEFAULT `--host 127.0.0.1` — publishes nothing, so
+ * `pair` refuses exactly the zero-configuration case the relay exists for.
+ *
+ * Mutation: drop the record's `addresses` → every test below is red (the QR is
+ * empty at best, so `pair` answers REACHABLE_HINT instead of a code).
+ */
+describe("a record's own addresses go in the QR, after the direct ones", () => {
+  const RELAY = "wss://relay.tentacle.so/d/AbCdEfGhIjKlMnOpQrStUv/e2e";
+  const RELAY_2 = "wss://relay.tentacle.so/d/ZyXwVuTsRqPoNmLkJiHgFe/e2e";
+
+  test("a LOOPBACK serve with a relay address pairs with a QR holding ONLY the relay", () => {
+    expect(
+      addresses({ records: [record({ host: "127.0.0.1", addresses: [RELAY] })], interfaces: LAN }),
+    ).toEqual([RELAY]);
+  });
+
+  test("direct first, relay last: the bind's addresses, then the record's own", () => {
+    expect(addresses({ records: [record({ addresses: [RELAY] })], interfaces: LAN })).toEqual([
+      "ws://192.168.1.8:4000/e2e",
+      "ws://100.101.7.6:4000/e2e",
+      RELAY,
+    ]);
+  });
+
+  test("a record's own DIRECT address comes before --address; a relay one goes last", () => {
+    // A record can carry both kinds (`serve --address` plus the derived relay
+    // address). Only the DIRECT one is "the daemon knows better": a relay one is
+    // a fallback by construction (Design §5), so it cannot precede --address.
+    expect(
+      addresses({
+        records: [
+          record({ host: "127.0.0.1", addresses: ["wss://mac.tailnet.ts.net/e2e", RELAY] }),
+        ],
+        interfaces: LAN,
+        extra: ["wss://other.tailnet.ts.net/e2e"],
+      }),
+    ).toEqual(["wss://mac.tailnet.ts.net/e2e", "wss://other.tailnet.ts.net/e2e", RELAY]);
+  });
+
+  test("the same address twice (bind-derived and record) appears ONCE, first wins", () => {
+    expect(
+      addresses({
+        records: [record({ host: "192.168.1.8", addresses: ["ws://192.168.1.8:4000/e2e"] })],
+        interfaces: LAN,
+      }),
+    ).toEqual(["ws://192.168.1.8:4000/e2e"]);
+  });
+
+  test("relay addresses go LAST for the whole QR, not just within one record", () => {
+    // Design §5 / R5b, "direct first, relay last": the phone's dial order IS this
+    // list, and R6's stagger starts the relay after the direct paths. Two daemons
+    // each carrying their relay address must not interleave it BEFORE the second
+    // daemon's LAN address. Mutation: append each record's list as it comes →
+    // `[LAN:4000, relay-a, LAN:4001, relay-b]`, and the relay is dialled before
+    // a direct path that is right there.
+    expect(
+      addresses({
+        records: [
+          record({ port: 4000, addresses: [RELAY] }),
+          record({ port: 4001, addresses: [RELAY_2] }),
+        ],
+        interfaces: LAN,
+      }),
+    ).toEqual([
+      "ws://192.168.1.8:4000/e2e",
+      "ws://100.101.7.6:4000/e2e",
+      "ws://192.168.1.8:4001/e2e",
+      "ws://100.101.7.6:4001/e2e",
+      RELAY,
+      RELAY_2,
+    ]);
+  });
+
+  test("a `pair --address` direct path still precedes the relay", () => {
+    // Mutation: append `--address` after everything, relays included → the phone
+    // dials the relay before the tailnet name the user just asked for.
+    expect(
+      addresses({
+        records: [record({ addresses: [RELAY] })],
+        interfaces: LAN,
+        extra: ["ws://my-tailnet:4000/e2e"],
+      }),
+    ).toEqual([
+      "ws://192.168.1.8:4000/e2e",
+      "ws://100.101.7.6:4000/e2e",
+      "ws://my-tailnet:4000/e2e",
+      RELAY,
+    ]);
+  });
+
+  test("a planted junk address in a record is FILTERED, never refused (a record is input)", () => {
+    // The store is a file a same-uid process can write: it must not be able to
+    // make a human's `pair` fail with "not an address a phone can dial".
+    expect(
+      addresses({
+        records: [record({ host: "127.0.0.1", addresses: ["https://evil.test/", RELAY] })],
+        interfaces: LAN,
+      }),
+    ).toEqual([RELAY]);
+  });
+
+  test("9 addresses (8 from records plus --address) is still the refusal, not a truncation", () => {
+    const own = Array.from({ length: 8 }, (_, i) => `ws://h${i}.test/e2e`);
+    const result = pairAddresses({
+      records: [record({ host: "127.0.0.1", addresses: own })],
+      interfaces: LAN,
+      extra: ["ws://h8.test/e2e"],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.ok ? 0 : result.reason === "too_many" ? result.count : 0).toBe(9);
+  });
+});
+
 describe("Tailscale", () => {
   test("100.64/10 is CGNAT (the tailnet range), 100.63 and 100.128 are not", () => {
     expect(isCarrierGradeNat("100.64.0.1")).toBe(true);

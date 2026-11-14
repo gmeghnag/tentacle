@@ -170,6 +170,12 @@ export interface ResolvedConfig {
   readonly tui?: { readonly theme?: "auto" | "dark" | "light" | undefined };
   /** The laptop's session-log settings (file or profile); absent = defaults (`keepSuperseded` false). */
   readonly sessions?: { readonly keepSuperseded?: boolean | undefined };
+  /**
+   * The mobile relay (docs/feat/mobile-relay.md R5a): `enabled` (default true)
+   * and `url` (`DEFAULT_RELAY_URL` when unset). Absent when the file omits the
+   * section — `serve` applies the defaults, and refuses an unusable `url`.
+   */
+  readonly relay?: { readonly enabled?: boolean | undefined; readonly url?: string | undefined };
   /** User hooks (file-only, no env form); empty when unset. */
   readonly hooks: readonly HookSpecConfig[];
   /** MCP servers to connect to (from the config file), keyed by name. */
@@ -646,6 +652,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     ...(fileConfig.detach !== undefined ? { detach: fileConfig.detach } : {}),
     ...(fileConfig.tui !== undefined ? { tui: fileConfig.tui } : {}),
     ...(fileConfig.sessions !== undefined ? { sessions: fileConfig.sessions } : {}),
+    ...(fileConfig.relay !== undefined ? { relay: fileConfig.relay } : {}),
     ...(fileConfig.mount !== undefined ? { mount: fileConfig.mount } : {}),
     hooks: fileConfig.hooks ?? [],
     // MCP servers are file-only (no env form); empty when unset.

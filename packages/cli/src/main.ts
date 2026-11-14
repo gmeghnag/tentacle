@@ -385,8 +385,12 @@ Usage:
 Remote control:
   tentacle serve [--host 127.0.0.1] [--port 4000] [--token T|--token-command CMD]
                       [--tls-cert FILE --tls-key FILE] [--address <url>]...
+                      [--relay <url> | --no-relay]
                       [--session-ttl 24h|never] [--session-admin-cap DUR] [--max-sessions 64]
                       [--max-detached-sessions 16] [--ws-idle-timeout 60s]
+  With paired devices, serve dials OUT to the mobile relay (relay.tentacle.so by
+  default, or relay.url / --relay <url>), so a phone reaches it from anywhere
+  with no open port; --no-relay keeps it off. The relay sees only ciphertext.
   tentacle connect ws(s)://host:port [--token T|--token-command CMD]
                       [--ca-cert FILE | --insecure-skip-tls-verify]
                       [--resume [id] | --continue]
@@ -1111,6 +1115,13 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ...limits,
         host,
         port,
+        // The mobile relay (docs/feat/mobile-relay.md R5a): the flags here, the
+        // `relay` section of the config file behind them. `serve` refuses an
+        // unusable URL with the reason (before binding).
+        relay: {
+          ...(flags.get("relay") !== undefined ? { flagUrl: flags.get("relay") } : {}),
+          ...(bools.has("no-relay") ? { noRelay: true } : {}),
+        },
         ...(token ? { token } : {}),
         ...(tls ? { tls } : {}),
         onAudit: (line) => err(`[daemon] ${line}\n`),

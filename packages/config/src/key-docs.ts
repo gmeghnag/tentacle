@@ -846,6 +846,36 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "Unset: off — a compaction or a `context_reset` rewrites `<uid>.jsonl`, so the history it replaced is not kept (`--resume` shows the current context either way). On, the replaced segments stay in the file. A LAPTOP-ONLY setting: never carried to a pod.",
     example: "true",
   },
+  relay: {
+    summary: "The mobile relay a `serve` with paired devices dials out to.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "relay.enabled": {
+    summary: "Whether `serve` dials the mobile relay at all.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    // `serve` applies the default (`relayChoice`), not `resolveConfig`, which
+    // passes the section through untouched (T2b's shape, as `engine`/`rm`).
+    defaultText: "`true`",
+    details:
+      "On, a `serve` with at least one paired device (or an open pairing window) dials OUT to the relay, so a phone reaches this computer from anywhere with no open port; a user who never pairs never contacts it. `serve --relay <url>` turns it on and names the relay, `serve --no-relay` turns it off, both beating this key. A LAPTOP-ONLY setting: never carried to a pod (a pod daemon has no device route and never dials).",
+    example: "false",
+  },
+  "relay.url": {
+    summary: "Which relay `serve` dials.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    defaultText: "`wss://relay.tentacle.so`",
+    details:
+      "`wss://`, or `ws://` to a loopback host only (dev and tests) — the daemon's relay secret travels on the socket, so anything else refuses to start with the reason. The hosted relay is the default: a self-hosted one (`apps/relay`) is named here or with `serve --relay <url>`.",
+    example: '"wss://relay.example"',
+  },
   mount: {
     summary: "What a docker/podman run hides from the container's workspace mount.",
     kind: "section",

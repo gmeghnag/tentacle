@@ -16,32 +16,40 @@ import {
   DEFAULT_SESSION_TTL_MS,
   type DaemonRecord,
   DeviceAuthority,
+  HandshakeLimiter,
   LogSessionStore,
   type ModelLink,
   ProxyModelProvider,
   type ReapPolicy,
   type Reapable,
+  type RunningRelayLink,
   SessionHost,
   SessionPersister,
   type SessionTtlControl,
   TombstoneFile,
   acquireStoreLock,
+  bunRelayDialer,
   isLoopbackHost,
   loadOrCreateIdentity,
   readIdentity,
   removeDaemonRecord,
   startReaper,
+  startRelayLink,
   startWsServer,
   sweepIntervalFor,
   writeDaemonRecord,
 } from "@tentacle/daemon";
 import type { ModelPurpose, SessionSettings, SessionSettingsReport } from "@tentacle/protocol";
+import { relayAddress } from "@tentacle/protocol";
 import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@tentacle/transport";
+import { relayIdOf } from "@tentacle/transport/relay-id";
 import { applyCarried } from "./carried-settings.ts";
 import { type DiscoveryDriver, startDiscovery } from "./discovery.ts";
 import type { ServeLimits } from "./flags.ts";
 import { daemonImagePolicy } from "./image-policy.ts";
 import type { ProviderFactory } from "./model-provider.ts";
+import { readRelaySecret } from "./relay-secret.ts";
+import { type RelayOptions, relayChoice } from "./serve-relay.ts";
 import { APP_VERSION } from "./version.ts";
 import {
   type SkillScan,
@@ -127,6 +135,14 @@ export interface ServeOptions extends ServeLimits {
   readonly pollMs?: number;
   /** This daemon's own heartbeat period (ms); tests shorten it. */
   readonly heartbeatMs?: number;
+  /**
+   * The mobile relay (docs/feat/mobile-relay.md R5a): `relay.enabled` / `relay.url`
+   * from the config file, plus `serve --relay <url>` / `serve --no-relay`. Resolved
+   * by the pure `relayChoice`; an unusable URL makes `startDaemon` THROW (before
+   * binding), never a silent "off". Absent = the built-in defaults (on,
+   * `DEFAULT_RELAY_URL`).
+   */
+  readonly relay?: RelayOptions;
 }
 
 /** A running `serve`: `stop` waits for every session write, then releases the store. */
@@ -139,6 +155,12 @@ export interface ServeHandle {
    * announces without a client channel.
    */
   readonly discovery?: DiscoveryDriver;
+  /**
+   * The mobile relay link this daemon owns (absent when the relay is off, or when
+   * there is no device route). Exposed so a test can read the id/address it
+   * announced, and whether it is registered.
+   */
+  readonly relay?: RunningRelayLink;
   stop(): Promise<void>;
 }
 
@@ -199,6 +221,18 @@ export async function startDaemon(
   // authenticated, and a non-loopback bind with the device route on must never
   // start by accident on a store a human has to fix (F26, docs/feat/device-pairing.md).
   const devices = deviceAuthority(config, options);
+  // The mobile relay's decision BEFORE any lock or file: an unusable URL refuses
+  // to start (with the reason), never a silent "off" — and nothing is written or
+  // dialled for a daemon that will not run (docs/feat/mobile-relay.md R5a).
+  const relay = relayChoice({
+    flagUrl: options.relay?.flagUrl,
+    noRelay: options.relay?.noRelay,
+    config: options.relay?.config ?? config.relay,
+  });
+  if (relay.kind === "refused") {
+    devices?.stop();
+    throw new Error(`cannot start serve: ${relay.reason}`);
+  }
   const lock = acquireStoreLock(dir);
   let persister: SessionPersister | undefined;
   try {
@@ -243,6 +277,7 @@ export async function startDaemon(
       },
       devices,
       config.cwd,
+      relay.kind === "on" ? { url: relay.url, storeDir: dir } : undefined,
     );
   } catch (error) {
     devices?.stop();
@@ -451,6 +486,11 @@ function listen(
   devices?: DeviceAuthority,
   /** The project this daemon serves: what its record reports (`pair`'s hint). */
   cwd = process.cwd(),
+  /**
+   * The mobile relay (docs/feat/mobile-relay.md R5a), when it is enabled: the URL
+   * to dial and the store whose `relay.json` holds this daemon's id. Absent = off.
+   */
+  relay?: { readonly url: string; readonly storeDir: string },
 ): ServeHandle {
   const server = startWsServer({
     host: options.host,
@@ -463,11 +503,34 @@ function listen(
     ...(options.onError ? { onError: options.onError } : {}),
     ...(devices ? { devices: { authority: devices } } : {}),
   });
+  // The mobile relay's identity, BEFORE the record so the address can go in it:
+  // `/d/<id>/e2e` is computed locally (`relayAddress`), so `pair` and the
+  // announcement know it before any connection (Design §1). A store that cannot
+  // give a secret turns the relay OFF with a notice and leaves the file alone
+  // (AGENTS §7 on-disk rule) — the daemon itself keeps serving.
+  const relaySecret = devices && relay ? readRelaySecret(relay.storeDir) : undefined;
+  const relayLinkUrl = relaySecret?.ok === true ? relay?.url : undefined;
+  if (relaySecret !== undefined && !relaySecret.ok) {
+    options.onNotice?.(
+      `mobile relay off: ${relaySecret.detail} (delete it, or run "tentacle devices reset", for a new id)`,
+    );
+  }
+  // The relay's own address joins the record's, LAST: the phone tries direct
+  // paths first and the relay after the stagger (R6), and discovery announces
+  // them in this order (docs/feat/mobile-relay.md Design §5).
+  const relayAddressOf =
+    relaySecret?.ok === true && relayLinkUrl !== undefined
+      ? relayAddress(relayLinkUrl, relayIdOf(relaySecret.secret))
+      : undefined;
   // `<configDir>/daemons/<pid>.json`: what `pair` (9d) reads to build the QR's
   // addresses, and what task 10 builds siblings on (owner Q6). Removed at stop;
   // a crash leaves it, and its reader ignores a dead pid.
   let record: DaemonRecord | undefined;
   if (devices) {
+    const own = [...(options.addresses ?? [])];
+    if (relayAddressOf !== undefined && !own.includes(relayAddressOf)) {
+      own.push(relayAddressOf);
+    }
     record = {
       pid: process.pid,
       host: options.host,
@@ -475,9 +538,7 @@ function listen(
       tls: options.tls !== undefined,
       cwd,
       startedAt: Date.now(),
-      ...(options.addresses && options.addresses.length > 0
-        ? { addresses: options.addresses }
-        : {}),
+      ...(own.length > 0 ? { addresses: own } : {}),
     };
     const written = writeDaemonRecord(devices.configDir, record);
     if (!written.ok) {
@@ -485,6 +546,24 @@ function listen(
       options.onError?.(new Error(`cannot write ${written.path}: ${written.reason}`));
     }
   }
+  // The dial-out itself (R4's link, wired here): it starts with the listener,
+  // AFTER the record (so `pair` can already offer the relay address) and stops
+  // with it, before the record is removed — a stopping daemon must not leave a
+  // registration pointing at a socket it is closing. It dials only while the
+  // authority says something wants this daemon reachable (Owner Q1).
+  const relayLink =
+    devices && server.limiter && relaySecret?.ok === true && relayLinkUrl !== undefined
+      ? startRelayLink({
+          url: relayLinkUrl,
+          secret: relaySecret.secret,
+          authority: devices,
+          sessionHost,
+          limiter: server.limiter,
+          dial: bunRelayDialer(),
+          ...(options.onAudit ? { onAudit: options.onAudit } : {}),
+          ...(options.onError ? { onError: options.onError } : {}),
+        })
+      : undefined;
   // Sibling discovery (docs/feat/sibling-discovery.md): ONE driver per process,
   // started with the listener (it needs the BOUND port) and stopped with it,
   // before the record is removed — a stopping daemon must not heartbeat a file
@@ -575,11 +654,15 @@ function listen(
     url: server.url,
     port: server.port,
     ...(discovery ? { discovery } : {}),
+    ...(relayLink ? { relay: relayLink } : {}),
     stop: () => {
       stopping ??= (async () => {
         stopped = true;
         stopReaper?.();
         discovery?.stop();
+        // Before the record goes: a registration pointing at a socket we are
+        // closing must not outlive the file that named it (Design §4 "Stop").
+        relayLink?.stop();
         if (devices) removeDaemonRecord(devices.configDir);
         server.stop();
         await release();

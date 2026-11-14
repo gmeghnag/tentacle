@@ -16,6 +16,8 @@
  * file say so — which is why it needs no daemon to be running and no socket of
  * its own (§7 "one session path").
  */
+import { existsSync, readdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import {
   type PairedDevice,
   deviceIdOf,
@@ -24,6 +26,7 @@ import {
   removeDevices,
   replaceIdentity,
 } from "@tentacle/daemon";
+import { RELAY_SECRET_FILE } from "./relay-secret.ts";
 import { untrustedText } from "./untrusted-text.ts";
 import { isYes } from "./workspace-mount.ts";
 
@@ -139,6 +142,38 @@ export function resolveDevice(devices: readonly PairedDevice[], word: string): R
     : { ok: false, reason: "unknown", matches: [] };
 }
 
+/**
+ * Delete every `<configDir>/daemon/<project>/relay.json` (docs/feat/mobile-relay.md
+ * Q5/R5b) and report how many went. Best effort by design: a file that cannot be
+ * removed is said once, and the reset itself still succeeded — the identity and
+ * the registry are what make a phone pair again, and a stale relay id is a
+ * denial of service at worst (the phone's Noise handshake still fails).
+ */
+function removeRelaySecrets(configDir: string): number {
+  const root = join(configDir, "daemon");
+  let projects: string[];
+  try {
+    projects = readdirSync(root);
+  } catch {
+    // No daemon has ever run on this machine: nothing to rotate.
+    return 0;
+  }
+  let removed = 0;
+  for (const project of projects) {
+    const path = join(root, project, RELAY_SECRET_FILE);
+    if (!existsSync(path)) {
+      continue;
+    }
+    try {
+      rmSync(path, { force: true });
+      removed += 1;
+    } catch {
+      // A file we cannot remove is not a reason to fail a reset.
+    }
+  }
+  return removed;
+}
+
 /** `tentacle devices` — the registry, or what is wrong with it. */
 export function devicesCommand(deps: DevicesDeps): number {
   const registry = readRegistry(deps.configDir);
@@ -234,7 +269,18 @@ export async function resetCommand(
       deps.err(`[error] cannot clear the device registry: ${cleared.path}: ${cleared.reason}\n`);
       return 1;
     }
+    // The mobile relay's ids rotate too (docs/feat/mobile-relay.md Q5): a leaked
+    // laptop must be recoverable with ONE verb, and phones must re-pair after a
+    // reset anyway — so a new relay address costs nothing extra. Every project
+    // store's `relay.json` goes; a running daemon picks a new id on its next
+    // start (the reset already says "restart serve").
+    const rotated = removeRelaySecrets(deps.configDir);
     deps.out("Reset. Every phone must pair again.\n");
+    if (rotated > 0) {
+      deps.err(
+        `The mobile relay address rotated for ${rotated} project${rotated === 1 ? "" : "s"}. Restart every \`tentacle serve\` to pick up the new one.\n`,
+      );
+    }
     return 0;
   };
 

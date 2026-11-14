@@ -1968,3 +1968,513 @@ Both are the reviewer's own framing and neither gates the fix.
 Every mutation was reverted from a backup; `git status` is clean.
 
 Nits (not blocking): `oversizeStrikes` never decays, so a benign relay that once sent one oversize frame keeps a larger first oversize wait (harmless, and that is the intent). `noteSent` (`relay-link.ts`) is dead. Pre-existing and out of scope: nothing on the daemon side pings an accept leg, so if the daemon's own network silently dies, a leg can stay half-open on the daemon's side (R0(c)). The relay's `sendPings` reaps only the relay side. Track it for R5a/R6.
+
+## Execution
+
+### R5a + R5b — `serve` wiring, the relay address in the record and the QR, `devices reset` — *— claude-opus-5-5, 2026-11-15*
+
+#### Load-bearing check: PASSED, before any edit
+
+The plan's own assumption, re-run rather than trusted: *a phone stream carried by
+the relay can enter the daemon's EXISTING device path unchanged — the Noise
+responder and `Connection` need only a closable `DuplexChannel`*. Both halves
+were re-executed against this branch's code before I touched anything —
+`.tentacle/tmp/mobile-relay/r4-loadcheck.ts` (R4's own script, unchanged):
+
+```
+$ bun .tentacle/tmp/mobile-relay/r4-loadcheck.ts
+ready: ready | id agrees: true (fgkrQr2vTa2JTEe75Kl66v)
+relay: accept LcPsXqSp fgkrQr2v
+initialize through the relay: 24 | session/list ok: true
+connections built: 1 | authority live: 1
+phone closed: 1000 | accept leg closed: true
+```
+
+So the seam R5a plugs into exists and works. **No STOP.**
+
+Two things this sweep found in the plan, fixed in the doc's own terms rather than
+worked around (see *Drift*): the record's ordering claim in the Preconditions was
+slightly wrong (the QR had no rule for a record's `addresses` AT ALL — that is
+exactly R5b's gap, and `discovery.ts` had to stop being a second opinion about the
+order), and `relay.enabled`/`relay.url` need `defaultText` rather than
+`default`+`resolved`, because `serve` applies them, not `resolveConfig` (T2b's
+category, like `engine` and `rm`).
+
+#### Red before green
+
+A new test file's first failure is `Cannot find module`, which is NOT the red
+AGENTS §9 asks for. So the properties were shown RED on the pre-slice tree first,
+by a probe that asserts them against the code that existed —
+`.tentacle/tmp/mobile-relay/r5a-red-baseline.ts`:
+
+```
+$ bun .tentacle/tmp/mobile-relay/r5a-red-baseline.ts
+1. config accepted a `relay` section: false — Error: ENOENT: ... config.jsonc
+2. record addresses: ["wss://relay.tentacle.so/d/TymdbUsYFdj-1KY775alyL/e2e"]
+3. handle.relay present: true
+4. pair's QR addresses for a loopback serve with a relay address: []
+```
+
+Line 4 is R5b's gap proven on the old code: a loopback `serve` (the DEFAULT
+`--host 127.0.0.1`) whose record carries a perfectly dialable
+`wss://relay…/d/<id>/e2e` produced an EMPTY QR, so `pair` refused — i.e. the relay
+existed and no phone could pair. (Lines 1–3 were taken with the R5a sources moved
+aside; the config line reads ENOENT because the scaffold was off, so 1–3 are
+indicative, and 1 is re-proven by the key-docs T1 red below.)
+
+The module-level red, per file, on the shipped tests:
+
+```
+packages/config/test/key-docs.test.ts, before the two entries:
++ "add an entry for "relay" in packages/config/src/key-docs.ts",
++ "add an entry for "relay.enabled" in packages/config/src/key-docs.ts",
++ "add an entry for "relay.url" in packages/config/src/key-docs.ts",
+(fail) T1 … the registry's paths equal the schema's leaf AND section paths
+```
+
+and the `pair-addresses` block went red on exactly one assertion, which was a real
+bug in my first cut of the source (the wildcard branch `continue`d past the
+record's own addresses), not a test mistake:
+
+```
+(fail) a record's own addresses go in the QR … direct first, relay last:
+  Expected: "ws://192.168.1.8:4000/e2e" / Received: (missing)
+```
+
+#### What landed
+
+**R5a — `serve` wiring (dependency order: config → secret → decision → serve → CLI).**
+
+1. `packages/config/src/schema.ts:415-426` — the `relay` section (`enabled`,
+   `url`), strip-free like its neighbours, plus `defaults.ts` (the commented
+   scaffold), `resolve.ts` (the resolved field + the pass-through),
+   `load.ts` (its non-enumerable twin), and two `key-docs.ts` entries. `defaultText`
+   rather than `default`, because `serve` applies these defaults (T2b's shape).
+2. `packages/cli/src/relay-secret.ts` (new, 168 lines) — `<store>/relay.json`:
+   `{ v: 1, secret }`, mode **0600**, created with `O_EXCL` under the store lock
+   `serve` already holds, `fsync`ed before it is trusted. An unknown `v` is
+   `unsupported-version`, a bad shape is `corrupt`, an unreadable one is
+   `unreadable` — all three REFUSE and leave the bytes alone (AGENTS §7's on-disk
+   rule), and a `random` seam pins the bytes for a test.
+3. `packages/cli/src/serve-relay.ts` (new, PURE) — `relayChoice`: `--no-relay` ›
+   `--relay <url>` › `relay.enabled`/`relay.url` › on at `DEFAULT_RELAY_URL`, and a
+   URL `isRelayUrl` refuses (a non-loopback `ws://`, `http(s)://`, an empty string)
+   comes back as `refused` with the reason, never as a silent `off`.
+4. `packages/cli/src/serve.ts` — `ServeOptions.relay`, resolution in `startDaemon`
+   BEFORE the store lock (so a refused URL writes nothing and binds nothing),
+   then in `listen`: read/create the secret, append the derived
+   `relayAddress(url, relayIdOf(secret))` **last** to the record's `addresses`
+   (deduped against `--address`), start `startRelayLink` with the SAME
+   `HandshakeLimiter` the direct route charges, and `relayLink.stop()` before the
+   record is removed. An unusable `relay.json` turns the relay off with ONE
+   `onNotice` line and the daemon keeps serving. `ServeHandle.relay` exposes the
+   link.
+5. `packages/daemon/src/ws-server.ts` — `RunningServer.limiter`, so the accept leg
+   shares the direct route's `maxConcurrent` (F7) instead of inventing a second cap.
+6. `packages/cli/src/flags.ts` + `main.ts` — `serve --relay <url>` (a value) and
+   `serve --no-relay` (a bool), declared `conflicts` (both is an error, not a
+   guess), passed through as `relay: { flagUrl, noRelay }`, and the usage text (the
+   `serve` summary line and the `Remote control:` block).
+
+**R5b — the QR and the reset.**
+
+7. `packages/cli/src/pair-addresses.ts` — `recordAddressList(record, interfaces)`
+   (new, exported): a record's bind-derived URLs, then its OWN `addresses`
+   (`serve --address` **and** the relay's `/d/<id>/e2e`), each filtered by
+   `isPairingAddress` because a record is a file a same-uid process can plant
+   — deduped keeping the FIRST. `pairAddresses` composes those lists per record
+   and then applies the 8-cap as a **refusal**.
+8. `packages/cli/src/discovery.ts` — `addressesOf` now uses the SAME
+   `recordAddressList` (capped, keeping the first) instead of re-merging the
+   record's own addresses on top of `pairAddresses`' output. That second merge
+   became a double-add the moment `pairAddresses` learned the rule, which is how
+   the "cap keeps the FIRST" test caught it.
+9. `packages/cli/src/devices-cmd.ts` — `removeRelaySecrets(configDir)`: every
+   `<configDir>/daemon/*/relay.json` goes on `devices reset`, counted, with one
+   stderr line naming the count and "restart every `tentacle serve`". A store with
+   no `relay.json` is not counted and not touched.
+
+#### Drift from the Implementation, and why
+
+- **`recordAddressList` is exported, and `discovery.ts` changed with it.** The
+  plan lists `pair-addresses.ts` and `discovery.ts` as separate readers of the
+  same rule, and the moment the record's own addresses entered that rule the
+  second reader had to stop re-deriving them: `pairAddresses`' output plus
+  `record.addresses` double-counts, and the 8-cap then dropped the FIRST address.
+  The cap difference is deliberate and now stated in one place: `pair` REFUSES
+  over the bound (a human's `--address` would be the one dropped), the
+  announcement TRUNCATES (a snapshot line must always be produced).
+- **A record's own addresses are FILTERED, `--address` values are REFUSED.** The
+  plan says "cap = refusal" for the QR and says nothing about a record's own
+  values. A record is a FILE (the same reasoning `discovery.ts` already wrote
+  down for F10), so a planted junk URL must not make a human's `pair` fail; a
+  planted *dialable* one is no worse than the LAN address beside it, because the
+  phone still has to complete Noise against this computer's key.
+- **`relayChoice` treats a config URL that nobody reads as not-a-URL.** With
+  `--relay <url>` in force the config's `relay.url` is replaced, so a stale
+  `ws://example.com` in the file does not refuse the start. Refusing on a value the
+  process will never dial would be a rule about a file, not about behaviour.
+- **`--relay` and `--no-relay` are a declared `conflict`.** The plan does not say
+  what both together mean; a usage error is the only answer that does not guess at
+  which one the user meant.
+- **`serve.ts` reads the secret BEFORE the record and starts the link AFTER it**
+  (the plan's order is "append the address, start the link"). Both are needed for
+  observable reasons: the address must be in the record at write time, and the
+  link must not register an id before `pair` can already offer that address.
+- **`RunningServer.limiter` is a one-field addition to `ws-server.ts`, a file the
+  slice table does not list.** R4's link takes a `HandshakeLimiter` it SHARES with
+  the direct route (F7); `listen` builds the server, which builds the limiter, so
+  without the field the only options were a second limiter (F7 lost) or reaching
+  into `ws-server`'s closure. Additive, no behaviour change, pinned by every
+  existing ws-server test.
+
+#### The tests, and what each pins
+
+`packages/cli/test/relay-secret.test.ts` (12): created 0600 once with a 32-byte
+secret; the SAME secret on a second read (the id survives a restart, F15); a pinned
+`random`; a wrong-sized `random` throwing; `v:2` → `unsupported-version` with the
+file's bytes unchanged; a missing `v` → `corrupt`; not-JSON → `corrupt`, file
+untouched; a 16-byte secret → `corrupt`; an unreadable file → `unreadable` (the
+property, not the privilege: CI as root legitimately succeeds); a DIRECTORY in the
+file's place → `unreadable`, never "missing" (so no new id is minted).
+
+`packages/cli/test/serve-relay.test.ts` (23): `relayChoice` — the hosted default,
+`relay.url`, `enabled: true/false`, `--no-relay` over everything, `--relay` over
+`enabled: false` and over `relay.url`, a config URL nobody reads not refusing, and
+the URL rule (`ws://example.com` / `https://` / `""` refused with the reason;
+`ws://127.0.0.1`, `ws://localhost`, `ws://[::1]` allowed). Integration, against
+R2's REAL relay on `127.0.0.1:0` — `relay.json` created and REUSED across a
+restart; the id is `relayIdOf` the file's secret and the address is
+`<url>/d/<id>/e2e`; two projects get different ids; the record's `addresses` end
+with the relay address (`--address` first), a relay-only loopback daemon still
+publishes one, and an `--address` equal to it is not duplicated; `--no-relay` and
+`relay.enabled: false` write no file, publish no address, dial nothing; the config
+URL is used when no flag says otherwise; a paired phone dials and registers (with
+`relay-ready` audited) while an unpaired store stays at ZERO registrations
+(Owner Q1); an unusable URL rejects the start; `devices: false` (pod-like) writes
+no file and dials nothing (F20); an unknown `v` leaves the daemon serving, the
+relay off, one notice, the bytes untouched, and no address published.
+
+`packages/cli/test/pair-addresses.test.ts` (+6, the R5b block): a loopback serve
+with a relay address → QR = [relay]; direct first, relay last; the record's own
+address before `--address`; the same URL twice appears once; a planted junk
+address FILTERED (not a refusal); 9 addresses still a refusal with the count.
+
+`packages/cli/test/pair.test.ts` (+3): the same two rules through `pairCommand`
+(the payload `pair` actually prints), plus the pre-existing wildcard/real-interface
+test untouched.
+
+`packages/cli/test/devices-cmd.test.ts` (+4): `devices reset` deletes every
+project's `relay.json` and says how many ("restart every `tentacle serve`"); a
+declined reset rotates nothing; a machine with no daemon store prints no relay
+line; a store with sessions but no `relay.json` counts as nothing rotated and its
+sessions survive.
+
+`packages/cli/test/serve-discovery.test.ts` (2 adjusted, not weakened): the
+record's `addresses` are now `[--address, relay]`, and the sibling snapshot
+asserts the same order for `self` while B stays a plain `--address` record. The
+`--relay`-off variant is the new "no `addresses` member at all" case, so the
+old-build file shape is still covered.
+
+#### Mutation checks (each reverted from a copy; no `git checkout`/`restore`/`stash`)
+
+Scripts: `.tentacle/tmp/mobile-relay/{mutate,mut2,mut3}.sh`, log
+`.tentacle/tmp/mobile-relay/mut.log`. Every mutation is an exact-string replace,
+the narrow test file is run, the file is restored from a byte copy, and the
+pristine run is the control at the end.
+
+| # | mutation | result |
+|---|---|---|
+| M1 | `if (false)` for `--no-relay` | **red** 2: "`--no-relay`: no relay.json, no link…", "…is off whatever the config says" |
+| M2 | drop the `enabled === false` branch | **red** 2: same two |
+| M3 | an unusable `--relay` URL → `{kind:"off"}` | **red** 3: the two URL refusals + `startDaemon` rejecting |
+| M4 | relay address `unshift`ed instead of appended | **red** 1: "direct addresses first, the relay's appended after them" |
+| M5 | read/create `relay.json` even when the relay is off | **red** 4: both off-cases, the pod case, and the unknown-`v` case |
+| M6 | drop BOTH `relaySecret?.ok === true` checks | **red** 1: "an unknown v … the relay is off" |
+| M7 | no notice on an unusable `relay.json` | **red** 1: same test (its notice half) |
+| M8 | `if (false)` for `record.v !== RELAY_SECRET_VERSION` | **red** 1: "v:2 → unsupported-version" |
+| M9 | drop the `present → parse` branch (always create) | **green** — EQUIVALENT: `O_EXCL` refuses the create and the `EEXIST` path re-reads the file, so the present file still wins. Proven by M9′ below |
+| M9′ | drop the `present → parse` branch AND make the create overwrite (`"w"`, 0644) | **red** 5: "reuses the same secret", both `v:2`/no-`v` refusals, not-JSON, 16-byte secret |
+| M10 | `openSync(path, "w", 0o644)` | **red** 1: "creates it at 0600" |
+| M11 | drop the record's own `addresses` (R5b's gap restored) | **red** 5: the whole R5b block |
+| M12 | a specific host contributes nothing (`else if (false)`) | **red** 4: the explicit-bind block + `--address` ordering |
+| M13 | keep a planted junk record address (`isPairingAddress` dropped) | **red** 1: "FILTERED, never refused" |
+| M14 | reverse the list (the dial order) | **red** 3: wildcard order ×2 + "direct first, relay last" |
+| M15 | `removeRelaySecrets` → `0` | **red** 1: "deletes every project's relay.json" |
+| M16 | drop the `existsSync` guard (counts missing files) | **red** 1: "a store with sessions but NO relay.json counts as nothing" |
+| M17 | reverse the announcement's addresses | **red** 2: "--address appended and deduped" + "the cap keeps the FIRST" |
+| M18 | the link gets a fresh random secret instead of the file's | **red** 5: the id/address identity tests and every record-ordering test |
+
+Two survivors are recorded honestly rather than papered over: **M9 is an
+equivalent mutation** (the `O_EXCL` + `EEXIST`-re-read path already makes the
+existing file win, so the branch it deletes is defence in depth — M9′ shows the
+property it protects is real and tested), and **M6 alone is equivalent** because
+the same guard exists twice on purpose (`relayLinkUrl`'s derivation and the link's
+condition), so deleting one leaves the other; the pair dropped together (M6′) is
+red.
+
+#### Acceptance checks the plan names (R5a + R5b's list)
+
+- `relay.json` created 0600 once, reused on restart (same id) ✔
+- unknown `v` → relay off + notice + file bytes unchanged ✔
+- `serve --no-relay` → no dial and no relay address in the record ✔
+- `--relay ws://example.com` refused ✔ (and at the CLI: `[serve error] cannot
+  start serve: --relay "ws://example.com" must be wss:// …`, exit 1)
+- the record's `addresses` ends with the relay address ✔
+- a `serve` without devices (pod-like options) never dials (F20) ✔
+- `pair` on a loopback record with a relay address → QR = [relay] ✔ (red before)
+- direct before relay ✔ · 9 addresses → refusal ✔
+- `devices reset` removes `relay.json` files ✔ and its message says so ✔ (the
+  plan's "restart serve" wording now reads: "The mobile relay address rotated for
+  N projects. Restart every `tentacle serve` to pick up the new one.")
+
+**End to end, after the wiring** — `.tentacle/tmp/mobile-relay/r5a-e2e.ts`: a real
+`serve` started as `main` starts it (config + `relay: { flagUrl }`), a real paired
+phone dialling the address the QR would carry, over R2's real relay:
+
+```
+1. handle.relay id: E7P7SVIIpxN2CXnXrqaUWr | connected: false
+2. record addresses: ["ws://127.0.0.1:58173/d/E7P7SVIIpxN2CXnXrqaUWr/e2e"]
+3. what pair's QR would carry: ["ws://127.0.0.1:58173/d/E7P7SVIIpxN2CXnXrqaUWr/e2e"]
+4. initialize through the relay: 24 | session/list ok: true
+5. audit: [ "relay-ready E7P7SVII", "relay-open", "device-open cfa570c6" ]
+```
+
+(`connected: false` on line 1 is the read's timing — the sample is taken before
+the first dial resolves; line 5's `relay-ready` is the same link registered.)
+
+#### Gate (R5a + R5b): green
+
+```
+$ bun run typecheck        # tsc --noEmit && tsc -p apps/mobile && tsc -p apps/relay
+(clean)
+
+$ bun run lint             # biome check .
+Checked 1315 files in 389ms. No fixes applied.
+
+$ bun test
+ 9498 pass  3 skip  0 fail   13 snapshots, 77534 expect() calls
+ Ran 9501 tests across 681 files
+```
+
+The three skips are AGENTS §6's pre-existing opt-ins (live-k8s, live-docker,
+real-socket keepalive); no new skip. **No `packages/protocol/schema/protocol.json`
+regeneration and no `protocol.d/` note**: `git status packages/protocol/` is empty
+— R5a/R5b add no RPC method, no `session/update` variant and no schema; the
+`relay` control wire's version (`RELAY_PROTOCOL_VERSION`) is R1's, unchanged.
+
+**Changelog:** no NEW fragment. `changelog.d/mobile-relay.added.md` already carries
+this task's one user-visible bullet (R1's, on this branch, per the plan's
+metadata block), and R2's Execution recorded the rule: a second file with the same
+slug+category is the same filename — the one collision the changelog discipline
+forbids — so the correct edit is to EXTEND that bullet. It now names what R5a/R5b
+add to the user's picture (`pair` puts the relay address in the QR after the
+direct ones; `devices reset` rotates it). `CHANGELOG.md` untouched. `TODO.md`
+untouched.
+
+#### Not verified (one line each)
+
+- The real `wss://relay.tentacle.so` through Caddy, and a real iPhone on cellular
+  — R7/D and R6's Maestro flow.
+- R6's staggered race: a relay-only QR is now produced, but that a phone on
+  cellular reaches it within its 15 s deadline is R6's test.
+- The `O_EXCL` race between two `serve`s is unreachable by construction (the store
+  lock is taken before the file is created), so the `EEXIST` branch is exercised
+  only by M9's analysis, not by a test.
+
+## Review
+
+### R5a + R5b — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (3 MEDIUM, no HIGH).
+
+Gate (touched files): `bun test` on relay-secret / serve-relay / pair-addresses /
+pair / devices-cmd / serve-discovery → 115 pass, 0 fail; `bun run lint` clean;
+`bun run typecheck` clean (root + mobile + relay). Full `bun test` not re-run.
+
+1. **MEDIUM — "relay last" holds only per record, not per QR.**
+   `packages/cli/src/pair-addresses.ts:152-155`: `recordAddressList` puts each
+   record's relay address right after that record's bind addresses, and `extra`
+   (`pair --address`) is appended after all records. Repro
+   (`.tentacle/tmp/mobile-relay/order.ts`): two `0.0.0.0` daemons →
+   `[LAN:4000, relay-a, LAN:4001, relay-b]`; one daemon + `pair --address
+   ws://my-tailnet:4000/e2e` → `[LAN, relay, tailnet]`. With R6's 750 ms stagger
+   the phone starts the relay before a direct tailnet/second-daemon path, which
+   contradicts Design §5 / R5b ("direct first, relay last"). Fix: partition relay
+   addresses (`/d/<id>/e2e` on a relay URL) to the end of the deduped list, and
+   add a test for both cases.
+2. **MEDIUM — `relay.json` 0600 test does not hold.**
+   `packages/cli/test/relay-secret.test.ts:62` asserts `mode & 0o777` equals
+   `RELAY_SECRET_MODE`, i.e. against the constant under test. Mutation
+   `RELAY_SECRET_MODE = 0o644` (`relay-secret.ts:34`) → 12/12 **green**: the
+   credential file can turn world-readable with no failing test. (M10 mutated only the
+   call-site literal.) Assert the literal `0o600`.
+3. **MEDIUM — stopping the relay link is untested.** Mutation: delete
+   `relayLink?.stop()` in `serve.ts` `stop` → serve-relay.test.ts 23/23
+   **green**. Design §4 "Stop" (no registration outliving the daemon) is unpinned.
+   `listen` hardwires `bunRelayDialer()` (`serve.ts` relayLink block), so no test
+   can watch the dial. Inject the dialer through `ServeOptions` and assert that
+   the socket closes and no redial happens after `handle.stop()`.
+
+Attacks that found nothing: a malicious repo setting `relay.url` (config is
+`<configDir>/config.jsonc` only, never a project file: `config/src/load.ts:67`);
+`relay.json` read as a session sidecar (the store lists only `*.state.json`,
+`session-log-store.ts:1242`); a refused URL leaking the authority (calls
+`devices?.stop()` before throwing); pod/`--stdio` daemons dialling (only
+`listen` with `devices` starts a link); a planted record address refusing `pair`
+(filtered by `isPairingAddress`). Single broker / one session path: the link gets
+the same `sessionHost` and the shared `server.limiter`. No parallel path.
+Mutations reverted, `git diff` empty.
+
+*— claude-opus-5-5, 2026-11-14* (same model family as the R5a/R5b executor
+(opus): the context is fresh, but blind spots can be shared.)
+
+### Fix round 1 — *— claude-sonnet-4-5, 2026-11-15*
+
+Scope: the three MEDIUMs in the R5a+R5b review (no HIGH). No `git checkout/
+restore/stash`, no commit; every mutation was applied by editing the file and
+restoring it from a copy under `.tentacle/tmp/mobile-relay/` (shasums below).
+
+#### Finding 1 — MEDIUM: "relay last" held per record, not per QR — FIXED
+
+**Root cause.** `pairAddresses` concatenated each record's `recordAddressList`
+(bind addresses, then that record's own addresses) and then appended `--address`,
+so a relay address sat between two records' direct ones
+(`[LAN:4000, relay-a, LAN:4001, relay-b]`) and ahead of a direct `--address`.
+
+**Repro** (`.tentacle/tmp/mobile-relay/order.ts`, run before any edit):
+```
+two daemons: [ "ws://192.168.1.5:4000/e2e", "ws://100.64.1.2:4000/e2e",
+  "ws://127.0.0.1:4100/d/aaa/e2e", "ws://192.168.1.5:4001/e2e",
+  "ws://100.64.1.2:4001/e2e", "ws://127.0.0.1:4100/d/bbb/e2e" ]
+one + extra: [ "ws://192.168.1.5:4000/e2e", "ws://100.64.1.2:4000/e2e",
+  "ws://127.0.0.1:4100/d/aaa/e2e", "ws://my-tailnet:4000/e2e" ]
+```
+
+**Fix.** A new protocol predicate names the one address kind that is a fallback,
+`isRelayDeviceAddress` (`packages/protocol/src/relay.ts:119-150`): a `ws(s)` URL
+whose last three path segments are `d/<isRelayId>/e2e` (a base path is kept, so
+the segments are read from the END). Deliberately stricter than
+`isPairingAddress`, which must accept both kinds because the app dials both.
+`pair-addresses.ts` gained `directFirstRelayLast` (`:127-132`), applied in
+`pairAddresses` (`:176`) over the WHOLE list and in `recordAddressList` (`:225`)
+over one record's — so the QR **and** the daemon's announcement obey it, while
+dedup stays FIRST-wins and each group keeps its input order.
+
+**Tests.** `pair-addresses.test.ts`: "relay addresses go LAST for the whole QR"
+(two records) and "a `pair --address` direct path still precedes the relay"; the
+old "a record's own address comes BEFORE `--address`" was **rewritten** — it
+asserted the very interleaving this finding is about. `discovery.test.ts`: "a
+sibling's relay address is announced LAST", which pins the second reader (see the
+second mutation). `protocol/test/relay.test.ts`: 4 tests for the predicate.
+
+**Red before green** (unfixed code, assertion failures only):
+```
+(fail) … > relay addresses go LAST for the whole QR, not just within one record
+(fail) … > a `pair --address` direct path still precedes the relay
+(fail) … > a record's own DIRECT address comes before --address; a relay one goes last
+ 22 pass  3 fail
+```
+
+**Mutations** (restored from a copy each time; `pair-addresses.ts` sha
+`f812a4bf…` before and after):
+- `directFirstRelayLast([...])` → `unique([...])` in `pairAddresses`: 3 red
+  (`pair-addresses.test.ts` 22 pass / 3 fail).
+- `directFirstRelayLast(list)` → `unique(list)` in `recordAddressList`: **green at
+  first** — the per-record partition was unpinned, which is why the
+  `discovery.test.ts` test was added; after it, 1 red:
+  `(fail) buildDiscovery (pure) > a sibling's relay address is announced LAST`.
+- `segments[len-3] === "d"` → `!== "d"` in the predicate: 6 red (4 in
+  `relay.test.ts`, plus the 3 `pair-addresses` ones).
+
+#### Finding 2 — MEDIUM: the 0600 test asserted the constant under test — FIXED
+
+**Root cause.** `relay-secret.test.ts:62` read
+`expect(statSync(read.path).mode & 0o777).toBe(RELAY_SECRET_MODE)` — the
+assertion moved with the constant, so `RELAY_SECRET_MODE = 0o644` stayed green.
+
+**Fix.** The on-file mode is asserted against the **literal** `0o600`, and the
+constant is pinned separately (`expect(RELAY_SECRET_MODE).toBe(0o600)`) so a
+failure cannot be "fixed" by lowering the constant to match a world-readable
+file (`packages/cli/test/relay-secret.test.ts:65-70`).
+
+**Mutation** (`RELAY_SECRET_MODE = 0o600` → `0o644`, `relay-secret.ts:34`): red —
+`(fail) relay.json: created once, reused afterwards > the first read creates it
+at 0600 with a 32-byte secret`, 11 pass / 1 fail. Restored from a copy
+(`relay-secret.ts` sha `4592210e…`), 12/12 green.
+
+#### Finding 3 — MEDIUM: stopping the relay link was untested — FIXED
+
+**Root cause.** No test observed the link's teardown, so deleting
+`relayLink?.stop()` in `serve.ts` `stop` left `serve-relay.test.ts` green.
+
+**Fix — drift from the review's suggested shape, deliberately.** The review asked
+to inject the dialer through `ServeOptions` "so a test can watch the dial". A real
+observer already exists and is stronger: the R2 relay's own registry.
+`registeredCount` falls when the control socket closes
+(`apps/relay/src/relay-core.ts:394-401`, reached from `server.ts` `close`), which
+IS the property ("no registration outlives the daemon"), and it also covers the
+redial arm — so no `RunningRelayLink`/`ServeOptions` seam was added, and the
+daemon package (shared with R4) is untouched. New test in `serve-relay.test.ts`:
+register, `stop()`, wait for `registeredCount() === 0`, check
+`isConnected()`/`openStreams()`, then sleep past `RELAY_BACKOFF_INITIAL_MS`
+(1 s) and check the registration has not come back.
+
+**Red before green — stated honestly.** I did not run this one red on
+pre-existing code: the defect was a MISSING guard-test, not broken code, so the
+red is the mutation below (the assertion fails exactly when the guard is removed).
+
+**Mutation** (`relayLink?.stop();` deleted from `serve.ts` `stop`):
+```
+error: timed out waiting for the unregistration
+(fail) serve: stop() takes the registration down with it (Design §4 "Stop")
+ 23 pass  1 fail
+```
+Restored from a copy (`serve.ts` sha `3abd6eed…`), 24/24 green.
+
+#### Gate
+
+`bunx tsc --noEmit` → clean (exit 0). `bun run lint` → `Checked 1315 files …
+No fixes applied` (0 errors, 0 warnings; two lines of mine failed first — a
+Biome quote style and `useTemplate` — fixed before the run above). `bun test` →
+**9506 pass, 3 skip, 0 fail** across 681 files (384 s); the 3 skips are the
+documented opt-in ones (live-k8s, live-docker, slow keepalive). `bun run
+typecheck` (root + mobile + relay) → clean.
+
+#### Not verified (one line each)
+
+- The iOS app's own ordering after R6's stagger is unchanged by this diff — only
+  the list we hand it is; confirming needs a device (R6's scope).
+- `isRelayDeviceAddress` does not recognise a relay-shaped URL whose id segment is
+  not `RELAY_ID_LENGTH` chars (`/d/short/e2e` is treated as DIRECT and keeps its
+  position); nothing produces one (`relayAddress` refuses), so it is a shape rule.
+
+#### Behaviour the review's other attacks did not reach (unchanged by this round)
+
+The five attacks it listed (a malicious repo setting `relay.url`, `relay.json`
+read as a sidecar, a refused URL leaking the authority, pod/`--stdio` daemons
+dialling, a planted record address refusing `pair`) all still hold: this round
+touched the ORDER of a list, one test's assertion, and one missing guard-test.
+
+### Round 2
+
+**Verdict: APPROVE.** All three round-1 findings are fixed (`git diff HEAD~1`), and each was confirmed by mutation:
+
+1. Relay last across the whole QR: `pairAddresses` back to `unique(...)` → **red** 3
+   (`pair-addresses.test.ts`: whole-QR, `pair --address`, record-direct-vs-relay);
+   `recordAddressList` back to `unique(list)` → **red** 1 (`discovery.test.ts`
+   sibling announcement).
+2. 0600: `RELAY_SECRET_MODE = 0o644` → **red** 1 (`relay-secret.test.ts`, literal assert).
+3. Stop: `relayLink?.stop()` deleted → **red** 1 (`serve-relay.test.ts`, the local
+   relay's `registeredCount` never drops to 0). It runs against a real local relay,
+   not an injected dialer, but it pins the exact property.
+
+Regressions: `bun test packages/cli/test/ packages/protocol/test/relay.test.ts`
+→ 2379 pass, 0 fail; `bun run lint` clean; `bun run typecheck` clean. Discovery's cap
+still keeps the FIRST addresses, and the relay was already last per record, so the
+announcement only changes when a record lists a relay address before a direct one
+(now fixed). `isRelayDeviceAddress` is only a sort key, never a filter or authority:
+if a direct URL shaped like `/d/<id>/e2e` is misread, the only effect is that it sorts last.
+Mutations reverted; `git status` clean apart from this section.
+
+*— claude-opus-5-5, 2026-11-14*

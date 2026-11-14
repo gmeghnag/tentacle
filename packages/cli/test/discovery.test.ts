@@ -109,6 +109,34 @@ describe("buildDiscovery (pure)", () => {
     ]);
   });
 
+  test("a sibling's relay address is announced LAST, behind every direct one", () => {
+    // The announcement must carry the same dial order the QR does (docs/feat/
+    // mobile-relay.md Design §5), and a sibling record can list its relay
+    // address BEFORE a direct one (`serve --address <relay> --address <tailnet>`,
+    // or a hand-edited record — a record is input). Mutation: `recordAddressList`
+    // returning `unique(list)` → the relay lands second and the phone dials it
+    // before the tailnet name beside it.
+    const built = buildDiscovery({
+      self: record({ pid: process.pid }),
+      records: [
+        record({
+          host: "0.0.0.0",
+          cwd: "/work/b",
+          addresses: [
+            "wss://relay.tentacle.so/d/AbCdEfGhIjKlMnOpQrStUv/e2e",
+            "wss://mac.tailnet.ts.net/e2e",
+          ],
+        }),
+      ],
+      interfaces: interfaces(),
+    });
+    expect(built[1]?.addresses).toEqual([
+      "ws://192.168.1.5:4001/e2e",
+      "wss://mac.tailnet.ts.net/e2e",
+      "wss://relay.tentacle.so/d/AbCdEfGhIjKlMnOpQrStUv/e2e",
+    ]);
+  });
+
   test("the cap keeps the FIRST addresses (the daemon's own order is the dial order)", () => {
     const extra = Array.from({ length: 12 }, (_, i) => `wss://h${i}.ts.net/e2e`);
     const built = buildDiscovery({
