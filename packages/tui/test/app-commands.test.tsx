@@ -86,6 +86,7 @@ describe("S0 command smoke: every built-in command answers", () => {
       "/sessions",
       "/close",
       "/model",
+      "/move",
       "/retry",
       "/attach",
       "/copy",
@@ -102,7 +103,9 @@ describe("S0 command smoke: every built-in command answers", () => {
   test("/help lists the commands", async () => {
     const t = await mount(fake());
     await t.line("/help");
-    expect(t.frame()).toContain("/compact");
+    // The frame is the visible window of the transcript: the LAST rows are what
+    // it can show, and `/move` is the newest built-in (the first ones scroll out).
+    expect(t.frame()).toContain("/move");
     expect(t.frame()).toContain("/tokens");
     t.app.unmount();
   });

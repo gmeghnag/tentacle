@@ -101,7 +101,7 @@ describe("S7: the panel rules are the kinds', not App.tsx's", () => {
     expect(hook).not.toContain("useEffect");
     expect(hook).toContain("useCallback");
     // Fable H1: the effect list is App's and its length is unchanged.
-    expect(effectCount(readSrc("App.tsx"))).toBe(20);
+    expect(effectCount(readSrc("App.tsx"))).toBe(22);
     // Exactly ONE `usePanels` call (two would be two generations over one panel).
     expect(countOf(readSrc("App.tsx"), "usePanels({")).toBe(1);
   });

@@ -69,6 +69,8 @@ import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
 import { recall } from "./history.ts";
 import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
+import { HOP_QUEUED_NOTICE, type HopSpec, hopStep, parseHopCommand } from "./hop-command.ts";
+import { hopFailureText, hopMovedNotice, hopPlaceText, hopStatusRow } from "./hop-status.ts";
 import { startIdleWarm } from "./idle-warm.ts";
 import { resolveLineInput } from "./input-actions.ts";
 import { inputRowCount } from "./input-view.ts";
@@ -185,14 +187,28 @@ import {
 
 // `AppProps`/`SessionController`/`SettingsNoticeLine` are used here; the rest are
 // re-exported so every existing importer (`../src/App.tsx`) keeps working.
-import type { AppProps, SessionController, SettingsNoticeLine } from "./app-types.ts";
+import type {
+  AppProps,
+  HopFeed,
+  HopPlaceView,
+  HopRun,
+  HopTargetView,
+  SessionController,
+  SettingsNoticeLine,
+  TargetFeed,
+} from "./app-types.ts";
 
 export type {
   AppProps,
+  HopFeed,
+  HopRun,
+  HopTargetView,
+  HopPlaceView,
   NoticeFeed,
   SessionController,
   SessionDirectory,
   SettingsNoticeLine,
+  TargetFeed,
 } from "./app-types.ts";
 // `RunQuit` moved with S8 to the hook that executes it; it is re-exported here
 // for every importer that names `../src/App.tsx` (the test boundary).
@@ -304,6 +320,8 @@ export function App({
   sessions,
   runQuit,
   autoAccept,
+  hop,
+  targetFeed,
   columns: fixedColumns,
   jobRefreshMs,
 }: AppProps): ReactElement {
@@ -503,11 +521,37 @@ export function App({
   const ownClearsRef = useRef(0);
   const clearAfterTurnRef = useRef(false);
   const runClearRef = useRef<(() => void) | null>(null);
+  // A `/move` (docs/feat/session-hop.md D3): the hop running NOW (its phase row
+  // is STATE, the handle is a ref so a queued hop can start it from the turn's
+  // end), the spec a `/move` typed mid-turn left for the first true idle (D4),
+  // and the live place (`targetFeed`) so the badge and `daemonInPod` follow a move.
+  const [hopRun, setHopRun] = useState<{ target: string; phase: string | null } | null>(null);
+  const hopRef = useRef<HopRun | null>(null);
+  // A `/move` that waits for the turn boundary (D4). It is STATE, so the effect
+  // below re-runs when it changes; the ref is what a command reads synchronously.
+  const [hopQueued, setHopQueued] = useState<HopSpec | null>(null);
+  const hopQueuedRef = useRef<HopSpec | null>(null);
+  const startHopRef = useRef<((spec: HopSpec) => void) | null>(null);
+  /** The queued-hop driver, read from the effect below (a ref: no dependency cycle). */
+  const hopIfQueuedRef = useRef<(() => void) | null>(null);
+  const [targetView, setTargetView] = useState<HopTargetView | null>(() =>
+    targetFeed ? targetFeed.current() : null,
+  );
+  // The badge and `daemonInPod` follow the place the session is at (D2's feed):
+  // a hop changes them, and nothing else about the frame.
+  useEffect(() => targetFeed?.onTarget((view) => setTargetView(view)), [targetFeed]);
+  /** What the badge paints now (`null`: local, no badge, as today). */
+  const shownTarget = targetFeed ? (targetView?.badge ?? null) : (target ?? null);
+  /** A fact of the place the session is at now: a spilled file lives in the pod. */
+  const shownInPod = targetFeed ? (targetView?.daemonInPod ?? false) : daemonInPod;
   // A long history is being warmed before it is committed (C8): activities wait.
   const warmingRef = useRef(false);
   const [loading, setLoading] = useState<{ done: number; total: number } | null>(null);
   // The daemon's queue (every writer's waiting rows), as last reported (C7).
   const [daemonQueue, setDaemonQueue] = useState<DaemonQueue | undefined>(undefined);
+  // The same list for the callbacks that must not re-create themselves on every
+  // frame (a `/move`'s turn-boundary read, D4): a ref, updated where it is set.
+  const daemonQueueRef = useRef<DaemonQueue | undefined>(undefined);
   // ── the dock (S5 — docs/feat/app-decomposition.md) ─────────────────────────
   // The background rows, the dock's focus/drafts/`sent`, the per-job output
   // cache and the four dock actions live in `useDock`. Its EFFECTS stay here, in
@@ -537,7 +581,7 @@ export function App({
   const layoutOptsRef = useRef<RenderOptions>({
     expandAll: false,
     width: 80,
-    spillInPod: daemonInPod,
+    spillInPod: shownInPod,
   });
   const lastUserRef = useRef<string | null>(null);
   const prevRowsRef = useRef(0);
@@ -754,7 +798,7 @@ export function App({
       const items = stateRef.current.items;
       // Including `expandedIds`: the warm must fill the slot the committing
       // render will ask for, a clicked call's expanded command too.
-      const opts = { expandAll, width: next.columns, spillInPod: daemonInPod, expandedIds };
+      const opts = { expandAll, width: next.columns, spillInPod: shownInPod, expandedIds };
       runChunked(items.length, (from, budgetMs) => warmRowsChunk(items, opts, from, budgetMs), {
         isStale: () => warmGenRef.current !== gen,
         onDone: () => setSize(next),
@@ -766,7 +810,7 @@ export function App({
       stdout.off?.("resize", onResize);
       warmGenRef.current += 1; // cancel any in-flight warm on unmount/resubscribe
     };
-  }, [stdout, size.columns, expandAll, daemonInPod, expandedIds]);
+  }, [stdout, size.columns, expandAll, shownInPod, expandedIds]);
 
   // Reset the palette selection whenever the typed text changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on field.value
@@ -965,7 +1009,7 @@ export function App({
   const layout = layoutTranscript(st.items, {
     expandAll,
     width: columns,
-    spillInPod: daemonInPod,
+    spillInPod: shownInPod,
     blinkPhase: blinkPhase(blinkClock, blink),
     expandedIds,
   });
@@ -989,7 +1033,7 @@ export function App({
     setBlinkClock((c) => syncBlink(c, { calls: blinkCalls, running: blinkRuns }));
   }, [blinkRuns, blinkCalls]);
   // The layout options a history warm uses (read off the render thread).
-  layoutOptsRef.current = { expandAll, width: columns, spillInPod: daemonInPod, expandedIds };
+  layoutOptsRef.current = { expandAll, width: columns, spillInPod: shownInPod, expandedIds };
   // Once the transcript is quiet, fill the cache for the OTHER Ctrl+O view in
   // small chunks (idle-warm.ts) so the first toggle is a hit. Any change to the
   // deps (new items, a turn starting, a resize commit, Ctrl+O) cleans up and
@@ -1001,14 +1045,14 @@ export function App({
     idleWarmCancelRef.current = startIdleWarm(
       {
         items: idleItems,
-        opts: { expandAll, width: columns, spillInPod: daemonInPod, expandedIds },
+        opts: { expandAll, width: columns, spillInPod: shownInPod, expandedIds },
         running: idleRunning,
         busy: idleBusy,
       },
       { onError: (error) => warmErrorRef.current(error) },
     );
     return idleWarmCancelRef.current;
-  }, [idleItems, idleRunning, idleBusy, expandAll, columns, daemonInPod, expandedIds]);
+  }, [idleItems, idleRunning, idleBusy, expandAll, columns, shownInPod, expandedIds]);
   const total = layout.total;
   const win = windowFor(total, viewport, scrollOffset);
   const visible = sliceLaid(layout.laid, win.start, win.end);
@@ -1551,7 +1595,11 @@ export function App({
       setContextOpen(null);
       askContext(session);
       activitySubRef.current = session?.watch?.((a) => onActivityRef.current?.(a)) ?? null;
-      queueSubRef.current = session?.onQueued?.((q) => setDaemonQueue(q)) ?? null;
+      queueSubRef.current =
+        session?.onQueued?.((q) => {
+          daemonQueueRef.current = q;
+          setDaemonQueue(q);
+        }) ?? null;
       agentsSubRef.current = session?.onSubagents?.((rows) => setAgents(rows)) ?? null;
       jobsSubRef.current = session?.onJobs?.((report) => setJobs(report.rows)) ?? null;
       // A RUNNING background child's message to the agent
@@ -1707,6 +1755,137 @@ export function App({
   runClearRef.current = runClear;
 
   /**
+   * Start one hop (docs/feat/session-hop.md D3/D4), and be the ONLY place the
+   * view moves for one: `switchingRef` goes up while it runs (a typed prompt
+   * goes back to the input, P3), the phase row is the host's own words, and the
+   * view swaps with `keepTranscript` — the transcript rows must land exactly
+   * where they were, only the badge and the one notice differ. Everything
+   * effectful is the host's (`HopFeed`): the App never builds a runtime.
+   */
+  const startHop = useCallback(
+    (spec: HopSpec): void => {
+      if (!hop) {
+        return;
+      }
+      const run = hop.start(spec, sessionRef.current?.sessionId ?? null);
+      hopRef.current = run;
+      setHopRun({ target: hop.label(spec), phase: null });
+      switchingRef.current = true;
+      const stopStatus = run.onStatus((line) => {
+        setHopRun({ target: hop.label(spec), phase: line });
+        flushNow();
+      });
+      const settle = (): void => {
+        stopStatus();
+        hopRef.current = null;
+        hopQueuedRef.current = null;
+        setHopQueued(null);
+        switchingRef.current = false;
+        setHopRun(null);
+        flushNow();
+      };
+      void run.done.then(
+        (outcome) => {
+          if ("moved" in outcome) {
+            // D9: a hop never inherits an approval — auto-accept goes off with
+            // the move, said in the same notice (the feed, or this TUI's own).
+            // `clearAutoApprove`, never `autoAccept.set`: the feed's `set` only
+            // publishes the flip for the OTHER terminals, so this one's state
+            // (and its status bar) would still say "auto-accept on" while the
+            // notice claims otherwise.
+            const wasOn = permission.autoApprove;
+            if (wasOn) {
+              permission.clearAutoApprove();
+            }
+            swapSession(outcome.moved, { keepTranscript: true });
+            settle();
+            pushNotice(hopMovedNotice(hopPlaceText(outcome.view.place), wasOn));
+            return;
+          }
+          // A failed hop changes nothing: same session, same badge, same rows.
+          settle();
+          pushNotice(`_${outcome.failed}_`);
+        },
+        (error: unknown) => {
+          // `HopRun.done` never rejects by contract; a host that does anyway is
+          // still one notice, and the latch must not stay up.
+          settle();
+          pushNotice(`_${hopFailureText(error)}_`);
+        },
+      );
+    },
+    [flushNow, hop, permission, pushNotice, swapSession],
+  );
+  startHopRef.current = startHop;
+
+  /**
+   * `/move`'s machinery (docs/feat/session-hop.md D3): the grammar, the turn
+   * boundary decision (`hopStep`, pure), then start it now or leave it for the
+   * first true idle. The draft field is never touched — a `/move` is a command,
+   * and a hop that fails leaves everything as it was.
+   */
+  const requestHop = useCallback(
+    (raw: string): void => {
+      const step = hopStep({
+        parse: parseHopCommand(raw),
+        available: hop !== undefined,
+        hopping: hopRef.current !== null,
+        hopQueued: hopQueuedRef.current !== null,
+        running: stateRef.current.running,
+        queued: shownRows(rowsRef.current, daemonQueueRef.current).length,
+      });
+      if (step.kind === "notice") {
+        pushNotice(`_${step.text}_`);
+        return;
+      }
+      if (step.kind === "cancel") {
+        hopQueuedRef.current = null;
+        setHopQueued(null);
+        hop?.cancel?.();
+        pushNotice("_Move cancelled._");
+        return;
+      }
+      if (step.kind === "queue") {
+        hopQueuedRef.current = step.spec;
+        setHopQueued(step.spec);
+        pushNotice(HOP_QUEUED_NOTICE);
+        return;
+      }
+      startHopRef.current?.(step.spec);
+    },
+    [hop, pushNotice],
+  );
+
+  /** Run a `/move` that waited for the turn boundary (D4): the first true idle. */
+  const hopIfQueued = useCallback((): void => {
+    const spec = hopQueued;
+    if (spec === null || hopRef.current !== null) {
+      return;
+    }
+    // Still busy: it stays queued, and the next idle asks again — never two
+    // hops, and never one forgotten.
+    if (stateRef.current.running || shownRows(rowsRef.current, daemonQueueRef.current).length > 0) {
+      return;
+    }
+    hopQueuedRef.current = null;
+    setHopQueued(null);
+    startHopRef.current?.(spec);
+  }, [hopQueued]);
+  hopIfQueuedRef.current = hopIfQueued;
+  // A `/move` that waited for a boundary (D4) starts at the first TRUE idle: the
+  // own turn over, the daemon's queue empty. This ONE effect is the whole
+  // mechanism — every fact D4 names is a dependency, so the render that makes
+  // the session idle is the render that starts the hop (no second path to
+  // disagree with it).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the BODY reads refs; these deps ARE the trigger
+  useEffect(() => {
+    hopIfQueuedRef.current?.();
+  }, [hopQueued, st.running, shown.length]);
+
+  // The hop's own status row (`null`: no hop runs — the normal bar paints).
+  const hopRow = hopRun === null ? null : hopStatusRow(hopRun.target, hopRun.phase, columns);
+
+  /**
    * The ONE way typed `/…` text becomes an effect: `dispatchCommand`
    * (commands/dispatch.ts) holds the shared guards and looks the command up in
    * the registry, and `commands/<name>.ts` holds each command's body
@@ -1736,6 +1915,7 @@ export function App({
           requestQuit,
           startCompaction,
           requestClear,
+          requestHop,
           reResolve: (line: string) => handleCommandRef.current?.(line, true),
           exit,
           sessions,
@@ -1766,6 +1946,7 @@ export function App({
       openPanel,
       pushNotice,
       requestClear,
+      requestHop,
       requestQuit,
       restoreInput,
       run,
@@ -2330,30 +2511,40 @@ export function App({
         )}
       </Box>
 
-      <StatusBar
-        cwd={cwd}
-        target={target ?? null}
-        tokens={tokensShown.totals}
-        contextTokens={ctxShown.used}
-        contextApprox={ctxShown.approx}
-        contextWindow={contextWindow}
-        columns={columns}
-        scrolledUp={scrolledUp}
-        hiddenAbove={hiddenAbove}
-        expandAll={expandAll}
-        autoApprove={permission.autoApprove}
-        pill={pill}
-        onPillRange={(range) => {
-          // The row the bar paints on: the frame's own rows, derived exactly as
-          // the tree lays them out (the transcript viewport, the spacer, the
-          // running rows, the dock, the input box), plus the bar's own one.
-          statusRowRef.current = {
-            y: viewport + 1 + runningRows + dockHeight + inputBoxRows + 1,
-            pill: range,
-          };
-        }}
-        link={linkView}
-      />
+      {hopRow === null ? (
+        <StatusBar
+          cwd={cwd}
+          target={shownTarget}
+          tokens={tokensShown.totals}
+          contextTokens={ctxShown.used}
+          contextApprox={ctxShown.approx}
+          contextWindow={contextWindow}
+          columns={columns}
+          scrolledUp={scrolledUp}
+          hiddenAbove={hiddenAbove}
+          expandAll={expandAll}
+          autoApprove={permission.autoApprove}
+          pill={pill}
+          onPillRange={(range) => {
+            // The row the bar paints on: the frame's own rows, derived exactly as
+            // the tree lays them out (the transcript viewport, the spacer, the
+            // running rows, the dock, the input box), plus the bar's own one.
+            statusRowRef.current = {
+              y: viewport + 1 + runningRows + dockHeight + inputBoxRows + 1,
+              pill: range,
+            };
+          }}
+          link={linkView}
+        />
+      ) : (
+        // A hop in flight owns the status row (D3): same ONE row, so the frame
+        // never changes height and the transcript keeps its position.
+        <Box width={columns}>
+          <Text color={palette().accent} wrap="truncate-end">
+            {hopRow}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 }
