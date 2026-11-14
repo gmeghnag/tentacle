@@ -808,3 +808,42 @@ schemas, P3's relay frames, P4's APNs client, P5–P9, P10's runbook). No
 
 ## Review
 
+### P0 + P1 (scope: `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM test-vacuity finding, one MEDIUM process finding; the crypto itself holds).
+
+**Findings**
+1. **MEDIUM: the test "a non-zero padding byte is refused" is vacuous** (`packages/transport/test/push-seal.test.ts:343-369`). It seals a **510-byte** plaintext, so `unpad` throws `bad-padding` at the bucket-length check (`push-seal.ts:273-275`) and never reaches the zero-tail loop (`push-seal.ts:281-283`). Mutation `padded[i] !== 0` → `=== 999` (the tail check turned off): **24/24 still pass**. So the property is unpinned, and a sealer bug that leaves bytes after the declared length would open silently. Fix: seal exactly 512 bytes (declared length 2, non-zero tail), then confirm RED under the same mutation. This violates AGENTS §9, which is mandatory, and the Execution claims this case is covered.
+2. **MEDIUM (process): the executor attribution conflicts.** Commit `f33ef6d6` reads `feat(mobile-push): exec (deepseek)`, but the Execution section is signed `claude-opus-5-5 (executor)`. AGENTS §10 requires the signature to name the model that actually wrote the section (that is how routing and drift are tracked). The owner or orchestrator must correct one of the two.
+
+**Gate (narrow, as scoped):** `bun test packages/transport/test/push-seal.test.ts` gave 24 pass / 0 fail. `bun run lint` checked 1370 files with no fixes. `bun run typecheck` (all 3 projects) was clean. I did not re-run the full `bun test`, because it was out of the requested scope.
+
+**Premises:** all TRUE.
+- The RFC 9180 A.2.3 block in `push-v1.json` (skEm, pkEm, skRm, pkRm, skSm, pkSm, enc, shared_secret, key, base_nonce, pt, ct, info) appears verbatim in `rfc9180.txt`, checked with a scratch script.
+- The `tentacle` block's generator (`gen-vectors.py`) imports only `hashlib`/`hmac` and `cryptography`, with no TS and no subprocess, so the vectors really are independent.
+- `./push` is exported in `packages/transport/package.json`.
+
+**Mutations (reviewer, restored from a scratch backup, `git diff` empty afterwards):**
+- M-a: zero-tail check off → **survived** (finding 1).
+- M-c: explicit low-order `acc === 0` check off → survived. This is benign: noble's `getSharedSecret` already throws on that input, and `dh`'s catch maps it to `bad-key`, so the boundary behaviour is still pinned.
+- The executor's table (KEM suite id, Base mode, aad, info, key-id check, bucket boundary, unpad) is consistent with the tests as read.
+
+**Attacks tried**
+- (i) Forgery under Base mode: the forged-envelope test (`:239-264`) seals with a different static key over the exact info/aad/padding. It holds.
+- (ii) Moving a ciphertext to another computer: the key id is both the `aad` and a pre-decrypt check. It holds.
+- (iii) Bucket and length leakage: `c` is always bucket + 16 (528/1040/2064). It holds. `SealedPush.ciphertext`'s doc comment (`push-seal.ts:84`) still says 512/1024/2048 (nit).
+- (iv) Truncated or oversized input: oversized is thrown, never truncated. It holds.
+
+**§7:** "a relay is not trusted" is upheld for this layer: sender authentication comes from the Auth KEM and is proven by a test. No wire, persistence or terminal path is touched.
+
+**Nits (not blocking):**
+- `push-seal.test.ts:68`: the comment says the A.2.3 info is "The quick brown fox", but it is "Ode on a Grecian Urn".
+- The test named "receiver derives the published shared secret" never compares `shared_secret`. The `ct` match implies it.
+- The changelog fragment credits the NSE (task 17) with opening pushes.
+
+**Executor behaviour:** careful and honest about its own weak test (mutation 3), and it used independent oracles. However, it missed that its padding test fails for the wrong reason, which is the same class of mistake it caught in mutation 3.
+
+*Reviewed by the same model family named in the Execution signature (fresh context only). Shared blind spots are possible.*
+
+*— claude-opus-5-5, 2026-11-14*
+
