@@ -1097,3 +1097,27 @@ if P4's template differs in size that test must be re-derived against it.
 
 *— claude-opus-5-5, 2026-11-14*
 
+
+### Review — P2 + P3 (fresh context)
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH/MEDIUM finding; scope `git diff main...HEAD`, slices P2 + P3 only).
+
+**Gate (narrow).** `bun test` push/relay/json-schema/version tests: 78 pass / 0 fail. `bun run lint`: clean (1372 files). `bun run typecheck` (root + mobile + relay): clean.
+
+**Attacks tried.**
+1. *Ladder truncates ids* — `fitPushMessage` rungs 7–9 clip `sessionId` (32/16 B), `requestId` (24 B) and `optionId` (16 B), which would point a push at a wrong session or ask without any error. Probe (`.tentacle/tmp/mobile-push/ladder.ts`: every field at its cap, as `"` (JSON doubles them) and as 4-byte emoji, 8 options, real UUIDs) never got past rung 6: max 2012 B, ids intact, output passes `PushMessageSchema`. Unreachable with daemon-made UUIDs → nit N1, not a finding.
+2. *A `push` reaching an R2 relay / a `push-result` reaching an R4 daemon* — `server.ts:395` still closes on `push` (`control-unexpected`). `relay-link.ts` ignores a parsed `push-result` (it falls through). Both are gated by `ready.features` (P8). No regression.
+3. *Frame size* — the worst push frame is about 3.1 Ki chars, far below `RELAY_CONTROL_LIMITS.maxFrameChars` (96 Ki). No oversize close.
+4. *Strict vs strip / forward compat* — every new payload is a strip object. `push-result.status` is a free bounded string, refused by value (`isPushDeliveryStatus`). Matches the v10 rule.
+5. *Mutation non-vacuity* — this session's permissions blocked my own mutation runs (the in-place edit script). Static check instead: tests pin the ciphertext length (`push.test.ts:238,242`, `relay.test.ts:564`), the ttl bounds (`relay.test.ts:554-557`) and control-char clipping (`push.test.ts:118`). The executor's M1–M10 table is accepted but **not re-run by me**. To verify: run `.tentacle/tmp/mobile-push/rv3-mut.sh` from the worktree root.
+
+**Nits (LOW).**
+- N1 `packages/protocol/src/push.ts:405-440` (rungs 8–9): clipping an id gives a *wrong* id, not a shorter one. Better to fail loud (throw, or drop `ask`) than to clip `requestId`/`sessionId`/`optionId`.
+- N2 `packages/protocol/src/relay.ts:295-300` gives a false reason for duplicating the token regex ("the relay must not load the RPC schemas"). `relay.ts` now imports `push.ts`, and `apps/relay` imports the whole `@tentacle/protocol` index (`server.ts:31`). The pin test holds, so the duplication is harmless, but the comment is wrong.
+- N3 `packages/protocol/test/push.test.ts:193`: `APS.slice(7)` keeps the outer `}`, so `body` is not valid JSON. It is one byte over, so the ≤ 4096 bound still holds, but the check would be stronger with `JSON.parse(body)`.
+
+**Executor behaviour.** The drift is documented honestly and justified (`fitPushMessage`, the regex instead of `.refine`, the free `status`). Red-first is recorded. No out-of-scope edits in P2/P3.
+
+*Same model family as some earlier reviews, but a different family from the executor (DeepSeek).*
+
+*— claude-opus-5-5, 2026-11-14*
