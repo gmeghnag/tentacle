@@ -2242,3 +2242,79 @@ S4, but S3 changes how a TUI binding is added, so it earns one bullet).
   **3937** (from 4102) — the remaining reduction is S2/S5–S10's, as planned.
 
 *— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14*
+
+## Review
+
+### S3 — `feat/app-decomp-3-keyroute` (fresh-context, adversarial)
+
+**Verdict: REQUEST-CHANGES** (two MEDIUM, no HIGH; both small fixes).
+
+**Gate (re-run by me on this branch).** `bun test packages/tui` → **1873 pass / 0
+fail** (126 files, S0/S0b nets included, unedited); `bun run typecheck` clean;
+`bun run lint` → 1064 files, 0 errors / 0 warnings. The full repo `bun test` was not
+re-run (TUI-only diff).
+
+**Findings.**
+1. **MEDIUM: one snapshot field changed source, so the slice's central claim is
+   false.** `packages/tui/src/App.tsx:3589` passes `replyMaxChars: () =>
+   replyMaxRef.current`. Before S3 the handler used the RENDER value `maxChars:
+   replyMax` (`main:App.tsx:3519`). The table in `keys/snapshot.ts` labels it a
+   "ref-read getter (3868)", and Execution says "no field changed source". Failure
+   scenario: `pending` and `choices` now come from the handler's frame while
+   `maxChars` comes from the latest render's ref. So, in the window between a render
+   and the `useInput` re-subscribe, one chunk decides a reply clip with a mix of two
+   frames. That window is practically unreachable under Ink's sync commit, but this
+   is exactly the "one field silently re-sourced" class that H3 asks the table to rule
+   out. Fix: `replyMaxChars: () => replyMax` (or make the row a value), and correct
+   the table row.
+2. **MEDIUM: a changelog fragment for a behaviour-unchanged internal refactor.**
+   `changelog.d/app-decomp-3-keyroute.changed.md` says itself that "Behaviour is
+   unchanged". AGENTS §10 says internal/dev work adds no fragment, and S4 added none.
+   The fragment is also inaccurate: it says `routeKey` runs "over 14 ordered layers",
+   but it walks 13 (`PURE_LAYERS`), and the mouse layer is a continuation (drift 1).
+   Fix: delete the fragment.
+
+**Premise checks.** Ink's `useInput` has no stop-propagation: TRUE (one `useInput`
+remains, so only its body moved). `paletteOpen` is false while a panel is open:
+TRUE (`App.tsx:957`). The mouse layer swallows every key behind a panel: TRUE
+(`mouse-stream.ts:132`). Every other snapshot row matches its pre-S3 source
+(`othersOnSession`, `sessionId`, `dockIds`, `permission.mode` are live calls;
+`panel`, `fieldValue`, `detachOnQuit`, `pending`/`choices`/`selected` are values),
+except row 1 above.
+
+**Attacks tried.**
+- (a) **Collect-then-execute ordering.** Inline, effects ran mid-walk, so a later
+  read could see an earlier write. I checked each write that passes: `setChord`,
+  the sessions disarm, and `setDock` on `pass`. No later pure layer reads the state
+  those write. The mouse layer reads `dockRef` only after `executeEffects`.
+  Nothing found.
+- (b) **The sessions panel used to consume every claimed action; it now passes**
+  `choose`/`delete` with no entry, or with no `sessions`. Those keys fall through to
+  `escUpload`/`escAbort`/`expandAll`/`palette`, which cannot claim them (Esc is
+  always `close`; the palette is closed under a panel), and then the mouse layer
+  swallows them. Same observable behaviour, but the panel is no longer the layer
+  that stops the walk (`stoppedAt` reads `null`/mouse). Below MEDIUM.
+- (c) **Truthiness drift.** `pending === null` vs `if (pending)`: the type is
+  `PermissionRequest | null`, so they are equal. `clean !== ""` vs `if (clean)`:
+  `sanitizePasted` returns a string, so they are equal. `subagents ?? []`: harmless.
+  Nothing found.
+- (d) **Chord reset under a dock-owned `ctrl+x` (drift 2).** It is pinned by
+  `keys-route.test.ts:182–184` (armed ⇒ `setChord` idle first) and `:176–178`
+  (idle ⇒ no write). Nothing found.
+
+**Mutation (§9).** I could NOT re-run mutants myself: writing into `src/` for a
+temporary mutation needed an approval this non-interactive run does not have. The
+executor's 15/15 table therefore stands unverified by me. Statically, M7/M10/M15's
+added tests exist and assert the property named. Unverified: the App-side port
+bodies (`permissionStop`, `stopTurn`, `cancelUpload`, `pasteReply`) are covered
+only by the S0 nets through `App`, not by the key tests, which use a fake host.
+To verify, drop `stoppedHereRef.current = true` in `stopTurn` and run
+`packages/tui/test/app*.test.tsx`.
+
+**How the executor behaved.** Disciplined and transparent. It recorded four drifts
+with reasons, recorded the clean-tree resume, and closed three surviving mutants
+with tests. It overclaimed once ("no field changed source", finding 1) and misread
+the changelog rule (finding 2). Different model family from me (DeepSeek
+executor, Opus reviewer), so blind spots are less likely to be shared.
+
+*— claude-opus-5-5, 2026-11-14*
