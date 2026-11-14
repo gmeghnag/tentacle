@@ -2861,7 +2861,8 @@ profile S3 and S4 ran under.)
 
 **Scope.** `packages/tui/src/useDock.ts` (new, 478 lines: the hook, its two
 port types), `App.tsx` (−328/+55 → **3457** lines from 3730), one new test file
-(`packages/tui/test/use-dock.test.tsx`, 8 tests), one changelog fragment.
+(`packages/tui/test/use-dock.test.tsx`, 8 tests). **No changelog fragment** —
+written and then deleted (Review finding 1); see Fix round 1.
 **No existing test edited**, no `packages/protocol` change (so `schema/protocol.json`
 was NOT regenerated — no schema changed), no other slice touched, `TODO.md`
 untouched.
@@ -3009,8 +3010,8 @@ not by weakening the mutant.
 warnings** (the AGENTS §6 baseline: clean), `bun test` **8524 pass / 3 skip / 0
 fail** (the 3 skips are the documented opt-ins: live-k8s, live-docker, the
 ~12 s real-socket keepalive). No schema change → `packages/protocol/schema/protocol.json`
-not regenerated. One changelog fragment,
-`changelog.d/app-decomp-5-dock.changed.md`. `TODO.md` untouched (the
+not regenerated. **No changelog fragment** (written, then deleted in Fix round 1
+on Review finding 1). `TODO.md` untouched (the
 orchestrator's line, §10).
 
 **Unverified (one line each).**
@@ -3062,3 +3063,76 @@ with sha restore, survivors closed with real tests. One slip: repeated a
 process defect an earlier slice was already corrected for.
 
 *— claude-opus-5-5, 2026-11-14* (different model family from the executor, DeepSeek.)
+
+### Fix round 1 — `feat/app-decomp-5-dock` (S5 review findings)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: this run's
+`ps` command line is `/Users/gmeghnag/bin/tentacle --profile deepseek`, and that
+profile's `model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` at
+`~/.config/tentacle/config.jsonc:29`.)
+
+One MEDIUM, no HIGH. **No `src/` and no `test/` file changed in this round** —
+`git diff --stat -- packages/tui/src packages/tui/test` is empty. One fragment
+deleted, this doc corrected in two places, one section appended.
+
+**Finding 1 (MEDIUM) — `changelog.d/app-decomp-5-dock.changed.md` must not
+exist: FIXED (deleted).** The review's failure scenario was "`bun run release`
+publishes a user-facing `### Changed` bullet for a slice whose own text says no
+user-visible behaviour changes". I reproduced it through the release path's own
+code instead of taking it on trust, and re-ran the same probe twice to get the
+mutation for free — the probe's ONLY input that differs is the file's presence.
+
+Probe `.tentacle/tmp/app-decomp-5-dock/fix1/frag-check.ts` — the real
+`readFragmentDir` + `parseFragments` + `assemble` over this worktree's real
+`CHANGELOG.md` and `changelog.d/`, checked at a fictional `0.0.0-check`; it
+asserts the two properties that make the finding real, that the file exists and
+that the assembled release body contains the dock bullet.
+
+RED, fragment restored from `HEAD` (`git show HEAD:changelog.d/app-decomp-5-dock.changed.md`):
+```
+this slice's fragment: changelog.d/app-decomp-5-dock.changed.md
+ship-ability: the assembled "### Changed" DOES carry the dock bullet
+RED: changelog.d/app-decomp-5-dock.changed.md exists (an internal refactor adds no fragment); assemble() puts "background dock is a module of its own" in the release's ### Changed section
+exit=1
+```
+GREEN, after `rm` (mutation: put the file back → RED again → `rm` → GREEN):
+```
+this slice's fragment: (absent)
+ship-ability: the assembled "### Changed" does not carry the dock bullet
+GREEN: no user-facing entry ships for this slice
+exit=0
+```
+The remaining `### Changed` bullet in that section is S2's
+(`app-decomp-2-commands.changed.md`, on `main`), which the review explicitly put
+out of scope; this round deletes only this slice's.
+
+The fragment's ship-ability is also why the two stale claims in the S5 Execution
+are wrong, so both are corrected (drift, recorded not silent): the Scope line
+(~2863) and the Gate line (~3012) now say **no changelog fragment**, written and
+then deleted here. The S5 Review's quote of "Other hotspots" (l. 249) and
+AGENTS §10 stand unchanged.
+
+**Regression-teeth note.** This is a process finding, not a behaviour one, so no
+unit test can pin it — the guard that *would* catch it (`scripts/test/
+changelog-guard.test.ts` I1/I2) checks `[Unreleased]` emptiness and fragment
+well-formedness, not "no fragment for an internal refactor", and that distinction
+is not machine-checkable (it is a judgement about the task's nature). So the
+teeth here are the probe above plus §10's rule, exactly as S1 and S4 closed their
+identical finding. `bun test scripts/test/changelog-guard.test.ts
+scripts/test/changelog.test.ts scripts/test/release.test.ts` → **57 pass / 0
+fail** (unchanged: the deleted file was this slug only, and an empty-of-it dir
+still parses).
+
+**Gate (this worktree, this branch, after the deletion).**
+`bunx tsc --noEmit` → clean (exit 0). `bun run lint` → `Checked 1114 files in
+344ms. No fixes applied.` **0 errors, 0 warnings** (the AGENTS §6 baseline:
+clean). `bun test` → **8524 pass / 3 skip / 0 fail**, 13 snapshots, 74052
+`expect()` calls, 8527 tests across 611 files (the 3 skips are the documented
+opt-ins: live-k8s, live-docker, the ~12 s real-socket keepalive) — the same
+totals as the S5 Execution, as expected for a round that touches no code.
+`git status --short` → `D changelog.d/app-decomp-5-dock.changed.md`,
+`M docs/feat/app-decomposition.md` and nothing else.
+
+**Unverified.** None new. The S5 Execution's two standing caveats (the
+`--coverage` pair not run; `App.tsx` at 3457 lines, not the plan's ≲800, since
+S7–S10 are open) still hold and are untouched by this round.
