@@ -1,6 +1,6 @@
 # feat/mobile-relay — relay service (`relay.tentacle.so`, configurable), daemon dial-out, deploy (mobile task 15)
 
-> **Status:** implementation (plan written, **not approved** — see Owner questions)
+> **Status:** implementation APPROVED by the owner (2026-11-14)
 > **Branch:** `feat/mobile-relay` (this doc). Slices R0–R7 run **in order on this branch**, one commit per slice on the owner's OK, each gated by its narrow tests (AGENTS §4); the full gate before Review.
 > **Size:** L as a whole → split into S/M slices (table below) · **Blast:** load-bearing (device authentication path, a new network dial-out from every `serve`, a new persisted file) · **Suited:** per AGENTS §10 — R3, R4, R5a are `load-bearing` (strong executor + mandatory fresh-context Review red-teaming "a pod is not trusted", "one session path", "single broker"); R0, R1, R2, R5b, R6, R7 are `contained`/`cross-module` S–M. The owner assigns executors.
 > **Changelog:** `changelog.d/mobile-relay.added.md` (R5a) — `- **Phones reach \`serve\` through a relay, end-to-end encrypted.** A \`serve\` with paired devices dials out to \`relay.tentacle.so\` (or \`relay.url\` / \`serve --relay\`; \`--no-relay\` to opt out), so a phone reaches it from anywhere with no open port; the relay sees only ciphertext. The relay is a small self-hostable service in \`apps/relay\`.`
@@ -473,6 +473,17 @@ with dates):
 8. **Deploy (D): the owner runs R7's runbook (or explicitly authorises each
    step) after R0–R7 merge, before the first TestFlight build?** **Rec: yes** —
    no executor touches the server, DNS or Caddy.
+
+#### Owner decisions (2026-11-14)
+
+All eight questions: the recommendation (owner: "Tutte come raccomandato").
+**Amendment from task 16 (owner-approved, docs/feat/mobile-push.md Q6):** R1's
+control `ready` frame carries a `features` field from the start (so a later
+`push` frame never hits "unknown frame closes the control socket"), and R2/R7's
+"the relay holds no secret" becomes "no secret except the APNs `.p8`, given to
+the service via systemd credentials" (installed by the owner, task 16 D2).
+Execution order: R0+R1 → R2 → R3 → R4 → R5a+R5b → R6 → R7, one review and a
+merge per step. *— claude-opus-5-5 (orchestrator), 2026-11-14*
 
 ## Execution
 
