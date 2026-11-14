@@ -1864,3 +1864,23 @@ errors / 0 warnings · `bun test` → **9211 pass, 3 skip (the documented opt-in
 live-k8s, live-docker, the real-socket keepalive), 0 fail** across 667 files.
 
 *— claude-opus-5-5, 2026-11-14*
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; reviewing commit `cd8c3acf`, `git diff HEAD~1`)
+
+**Verdict: APPROVE (H5).**
+
+Gate: `bun run typecheck` → 0. `bun run lint` → 1248 files, clean. `bun test packages/cli/test` → 2361 pass / 0 fail (2359 + the 2 killed rows, unmutated). tui + daemon + client → 3663 pass / 1 skip / 0 fail. Every mutation was reverted, and `git status` was clean after each.
+
+| R2 finding | mutation | result |
+|---|---|---|
+| 1 `main` dropped `opts` | `hopBuilder` passes `{}` instead of `opts` | 1 fail (`session-hop-targets`: "the PRODUCTION build carries `gateAnswered`") |
+| 2 laptop half of `hop` not pinned | drop `hop: true` at `hop-targets.ts:283,355` | 2 fail (container + attach rows) |
+| 2 (deeper) | drop the `deps.hop` forward at `engine-runtime.ts:695,1109` | 2 fail: the rows reach the real `initialize`, not just a spy on the deps |
+
+**Regressions:** `main.ts` now calls `hopBuilder` with the same deps as before (`config`, `status`, `notify`, `host`, `defaultImage`). `shared` is still injected per call by the facade. No behaviour changed for a typed `/move`.
+
+**Residual (not a blocker, carried from round 2 as unverified):** if a hop container's daemon is resident, a later plain `tentacle attach` TUI can join a session that keeps `move_session` and has no feed to answer it. This is worth checking in H6 (attach flow).
+
+**How the executor behaved:** a small, targeted fix. It turned the wiring lambda into a named, tested seam (`hopBuilder`), and the new tests kill both the surface mutation and the deeper one.
