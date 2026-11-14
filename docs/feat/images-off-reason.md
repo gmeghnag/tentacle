@@ -421,3 +421,139 @@ added; `.slice` can split a surrogate pair.
 module; drift honestly logged. But its self-review was same-context and missed
 that its own "pod reports no model ⇒ laptop's model" premise is false without
 `--model-proxy`, and tested only the pure layer.
+
+### Fix round 1
+
+*— claude-sonnet-4-5 (Claude Sonnet 4.5), 2026-11-14 — executor, fix round 1*
+
+Round-1 review (claude-opus-5-5) raised two MEDIUMs and three nits; all are
+addressed. Nothing from the earlier rounds was reverted.
+
+**Finding 1 (MEDIUM) — the advice pointed at the wrong machine. FIXED.**
+
+Root cause: the *scope* of the advice was never modelled. `imageInput` took one
+`model` fact, and `createLocalRuntime` fed it `modelName: deps.model`
+unconditionally, with `remote-client.ts` falling back to it whenever the daemon
+reported none. That premise — "a daemon reporting no model runs the laptop's" —
+holds for the in-process worker and a `--model-proxy` pod, and is false for a
+`serve` host's neighbour case and for a pod daemon started without
+`--model-proxy`, which runs its OWN model from its OWN config
+(`serve.ts:656-663`, `daemonImagePolicy` → `store`/absent). The user was then
+told a model name that was not the one in play and a command that, run on the
+laptop, changes nothing — the same defect class this task exists to remove.
+
+The fix makes the fact explicit rather than inferred:
+
+- `ImageModelScope = "laptop" | "daemon"` in `image-input.ts`.
+  `imagesOffReason(model, scope)` has two tails: `… in your config …` (laptop)
+  and `… in the daemon's config … (…, on the daemon's host)` (daemon). Default
+  `daemon` — never name a machine the evidence does not point at.
+- `DaemonImageFacts` now carries `daemonModel` (from `agentInfo.model`) and
+  `laptopModel` (this laptop's `config.model`) SEPARATELY, instead of one
+  merged `model`. Each side is named from its own fact, so a laptop name can no
+  longer stand in for a daemon's.
+- `RemoteClientOptions.modelScope`. `RemoteClient.imageInput` treats the scope
+  as `laptop` only when the caller claimed it AND the daemon reported no model
+  of its own — a daemon that reports a model is one that runs it (`serve` is the
+  only host that passes `modelInfo`), so that fact outranks the claim.
+- Call sites, each stating its scope: `startWorkerRuntime` → `laptop`;
+  `startEngineRuntime`'s run and `attachEngineRuntime` → `laptop` (both exec
+  `podDaemonCommand`, i.e. `serve --bridge --model-proxy`, so the pod runs this
+  laptop's model); `connect` passes nothing (a `serve` host runs its own).
+
+**Finding 2 (MEDIUM) — the wiring was unpinned. FIXED.**
+
+The reviewer's mutations (drop the `protocolVersion` capture; force it to `1`;
+drop `modelName`) left 2518 tests green: only the pure table was tested. Four
+new test files/sites now pin the layer between the wire and the table, each
+with its own named mutation:
+
+- `packages/client/test/images-off-wiring.test.ts` (new, 7 tests) — real
+  `RemoteClient` over `createChannelPair`, exactly the Context repro's link.
+  W1 the daemon's own model is named and the key is the daemon's; W2 an old
+  protocol yields `OLD_DAEMON_IMAGES` exactly; W3 the boundary (`protocol ===
+  IMAGES_PROTOCOL_VERSION` is current, not old); W4 a daemon on its own model
+  never names the laptop's; W4b a reported model outranks a caller's `laptop`
+  claim; W5 a laptop-scoped daemon names our model and our config; W6 `client`
+  mode with the laptop's vision off names our model.
+- `packages/cli/test/images-off-runtime.test.ts` (new, 3 tests) — the
+  `createLocalRuntime` plumbing: laptop scope, the default scope, and a
+  daemon-reported name arriving through the runtime.
+- `packages/cli/test/worker.test.ts` — one test over the REAL worker spawn:
+  the reason says `your config`, not `the daemon's config`, and names
+  `config.model`.
+- `packages/cli/test/engine-runtime.test.ts` — the reviewer's exact scenario: a
+  `--model-proxy` pod's reason is about THIS laptop's config.
+- `packages/cli/test/connect.test.ts` — a `serve` host (which reports its own
+  model, `serve.ts:305`) gets "serve-model … the daemon's config".
+
+**Nits — FIXED.** `MAX_REASON_MODEL_CHARS` is now actually enforced (it caps
+`imagesOffReason`'s room and is `safeModel`'s default); the promised ellipsis is
+now added; and the cut walks code points, so an astral character is whole or
+absent instead of a split surrogate (new T5c proves it through a UTF-8 round
+trip).
+
+**Drift from the Implementation/earlier Execution.** The wording changed for the
+daemon side — the earlier single tail baked in "your config", which was the
+finding-1 defect stated as text. `createLocalRuntime`'s `modelName` is still
+`deps.model` (it is only ever this laptop's id) and the *scope* travels beside
+it rather than the name being dropped. The `laptopModels` helper was briefly
+given a `modelScope` field and that was reverted: it is about providers, and
+`...rest` is spread straight into a `RemoteClient` in `models-pod.test.ts`, so a
+scope there would have been an implicit claim. Both engine sites state it
+explicitly instead.
+
+**Mutations (all reverted; §9 non-vacuity).** Each ran against the named tests:
+
+| Mutation | Result |
+| --- | --- |
+| `remote-client.ts` `onLaptop = daemonModel === undefined` (every daemon laptop-scoped) | W4 + default-scope runtime test **red**, 8 pass |
+| `handshake` no longer keeps `protocolVersion` | W2 **red**, 6 pass |
+| `{ protocol: 1 }` forced (every daemon "old") | W1/W3/W4/W4b/W5 **red**, 2 pass |
+| `handshake` no longer keeps `agentInfo.model` | W1/W3/W4b + the runtime's daemon-model test **red**, 6 pass |
+| worker's `modelScope: "laptop"` dropped | worker test **red** (`your config` missing) |
+| both engine `modelScope: "laptop"` dropped | engine test **red** (`qwen3` missing) |
+| `image-input.ts` `onLaptop = true` (the pre-round-1 wording, always "your config") | connect + W1/W3/W4/W4b + T1/T4/T5/T5c/T7 **red** (9 tests) |
+
+**Raw evidence** (`.tentacle/tmp/images-off-reason/fix1.ts`, worktree sources,
+the four cases end to end):
+
+```
+serve (own model):
+   serve-model is configured without images — set model.images true in the daemon's config if that model takes images (tentacle config set model.images true, on the daemon's host)
+
+pod without --model-proxy (no model reported):
+   the daemon's model is configured without images — set model.images true in the daemon's config if that model takes images (tentacle config set model.images true, on the daemon's host)
+
+worker / --model-proxy (scope laptop):
+   qwen3-27b is configured without images — set model.images true in your config if this model takes images (tentacle config set model.images true)
+
+old daemon (protocol 22):
+   this daemon predates images — update it
+```
+
+The rendered TUI row (`routeDecision`, `fix2.ts`) stays one bounded line:
+`_images are off: …_`, 201 / 194 / 162 chars for the three causes — under
+`MAX_REASON_CHARS` (220) including the notice's own prefix.
+
+**Still not proven.** The `serve` and non-proxy-pod cases are pinned at the
+`RemoteClient`/`connect` boundary, not by a live daemon on another host (that
+needs a second machine). `connect` does not load a config at all, so its
+`modelName` is absent by construction rather than by a test of its absence.
+
+**Gate.**
+
+| Check | Result |
+| --- | --- |
+| `bunx tsc --noEmit` | clean (exit 0) |
+| `bun run lint` | clean: `Checked 1066 files … No fixes applied`, 0 errors / 0 warnings (= baseline) |
+| `bun test` | **8299 pass, 3 skip, 0 fail** (8302 tests, 597 files, 357 s) — the 3 documented opt-in skips |
+| `packages/client` + `packages/cli` + `packages/tui` | 4550 pass / 0 fail |
+
+One earlier full run of the same tree reported **1 fail** —
+`daemon/test/serve-log-store.test.ts` "S11 — a real SIGKILL at random points"
+(`expect(loads).toBeGreaterThan(ITERATIONS / 2)` saw `0`). It is a load-timing
+flake, not this change: `packages/daemon` is untouched by the diff, the file
+passes alone (22/0 in 14.7 s), and the re-run above is clean. Reported rather
+than hidden; the repo already tracks this class (TODO.md "Timing flake, not
+investigated").

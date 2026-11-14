@@ -38,7 +38,7 @@ const reasonOf = (got: ImageInput): string => {
 describe("no capability: WHY (docs/feat/images-off-reason.md)", () => {
   test("T1 a CURRENT daemon: the model's config is off — name the model and the key", () => {
     const reason = reasonOf(
-      imageInput(undefined, { servesModel: false }, { protocol: CURRENT, model: "llama3.2" }),
+      imageInput(undefined, { servesModel: false }, { protocol: CURRENT, daemonModel: "llama3.2" }),
     );
     expect(reason).toContain("llama3.2");
     expect(reason).toContain("model.images");
@@ -63,11 +63,21 @@ describe("no capability: WHY (docs/feat/images-off-reason.md)", () => {
     expect(reason).not.toContain("update");
   });
 
-  test("T4 the daemon reports no model (worker/pod): still name the key, invent no name", () => {
+  test("T4 the daemon reports no model: still name the key and the place, invent no name", () => {
     const reason = reasonOf(imageInput(undefined, { servesModel: false }, { protocol: CURRENT }));
     expect(reason).toContain("model.images");
-    expect(reason).toContain("this model");
+    expect(reason).toContain("the daemon's model");
+    expect(reason).toContain("the daemon's config");
     expect(reason).not.toContain("predates");
+  });
+
+  test("T4b a LAPTOP-scoped daemon reporting nothing says 'this model', in YOUR config", () => {
+    const reason = reasonOf(
+      imageInput(undefined, { servesModel: false }, { protocol: CURRENT, scope: "laptop" }),
+    );
+    expect(reason).toContain("this model");
+    expect(reason).toContain("your config");
+    expect(reason).not.toContain("the daemon's");
   });
 
   test("T5 a hostile/over-long model name is sanitized and bounded before a line renders it", () => {
@@ -75,7 +85,7 @@ describe("no capability: WHY (docs/feat/images-off-reason.md)", () => {
       imageInput(
         undefined,
         { servesModel: false },
-        { protocol: CURRENT, model: `ev\u001b[31mil\u0007\n${"x".repeat(500)}` },
+        { protocol: CURRENT, daemonModel: `ev\u001b[31mil\u0007\n${"x".repeat(500)}` },
       ),
     );
     // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them is the point
@@ -92,15 +102,49 @@ describe("no capability: WHY (docs/feat/images-off-reason.md)", () => {
 
   test("T5b an over-long plain name is shortened, never wrapped", () => {
     const reason = reasonOf(
-      imageInput(undefined, { servesModel: false }, { protocol: CURRENT, model: "m".repeat(400) }),
+      imageInput(
+        undefined,
+        { servesModel: false },
+        { protocol: CURRENT, daemonModel: "m".repeat(400) },
+      ),
     );
     expect(reason.length).toBeLessThanOrEqual(MAX_REASON_CHARS);
     expect(reason).toContain("model.images");
     expect(reason).not.toContain("m".repeat(MAX_REASON_CHARS));
   });
 
+  test("T5c a name cut for room ends on a code point, never a split surrogate", () => {
+    const reason = reasonOf(
+      imageInput(
+        undefined,
+        { servesModel: false },
+        { protocol: CURRENT, daemonModel: "\u{1F600}".repeat(200) },
+      ),
+    );
+    expect(reason.length).toBeLessThanOrEqual(MAX_REASON_CHARS);
+    // A lone surrogate would make this false (it cannot be encoded as UTF-8).
+    expect(Buffer.from(reason, "utf8").toString("utf8")).toBe(reason);
+    expect(reason).toContain("…");
+  });
+
   test("T6 one source for the update advice: the attachment/put refusal shares it", () => {
     expect(ATTACHMENTS_OLD_DAEMON).toBe(OLD_DAEMON_IMAGES);
+  });
+
+  // Fix round 1, finding 1: the key and the command live wherever the model
+  // does, so a daemon-scoped reason never tells a user to change THIS laptop.
+  test("T7 a daemon-scoped reason never points at this laptop's config", () => {
+    const reason = reasonOf(
+      imageInput(
+        undefined,
+        { servesModel: false },
+        { protocol: CURRENT, daemonModel: "pod-model", scope: "daemon" },
+      ),
+    );
+    expect(reason).toContain("pod-model");
+    expect(reason).toContain("the daemon's config");
+    expect(reason).not.toContain("your config");
+    expect(reason).not.toContain("this model");
   });
 });
 

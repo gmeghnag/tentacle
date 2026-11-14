@@ -39,7 +39,25 @@ export const MAX_REASON_MODEL_CHARS = 80;
 /** Bound on a whole `reason` sentence: a notice row, not a paragraph. */
 export const MAX_REASON_CHARS = 220;
 
-/** The name a daemon reports for its model, made safe for a rendered line. */
+/**
+ * Whose model — and whose config — a "configured without images" reason is
+ * about. A fact only the CALLER holds: `laptop` is the local worker and a
+ * `--model-proxy` pod (this laptop runs the model, so the key and the command
+ * are here); `daemon` is a daemon that runs its OWN model from its OWN config (a
+ * `serve` host, a pod daemon started without `--model-proxy`), where running
+ * `tentacle config set` on the laptop would change nothing.
+ */
+export type ImageModelScope = "laptop" | "daemon";
+
+/**
+ * The name a daemon reports for its model, made safe for a rendered line.
+ *
+ * Stripped of control characters (a pod-supplied `agentInfo.model` reaches a
+ * terminal — AGENTS §7, a pod is not trusted) and cut at `max` — the SAME unit
+ * `MAX_REASON_CHARS` counts (string length), but never mid-character: the cut
+ * walks CODE POINTS, so an emoji or other astral character is either whole or
+ * absent, never a lone surrogate a terminal cannot draw.
+ */
 function safeModel(
   raw: string | undefined,
   max: number = MAX_REASON_MODEL_CHARS,
@@ -47,38 +65,76 @@ function safeModel(
   if (raw === undefined) {
     return undefined;
   }
-  // A pod-supplied `agentInfo.model` reaches a terminal (AGENTS §7: a pod is
-  // not trusted), so control characters go and the line is bounded.
   const clean = raw
     // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
     .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
-    .trim()
-    .slice(0, Math.max(1, max));
-  return clean === "" ? undefined : clean;
+    .trim();
+  if (clean === "") {
+    return undefined;
+  }
+  const room = Math.max(1, max);
+  if (clean.length <= room) {
+    return clean;
+  }
+  // Whole code points only, and one unit kept for the ellipsis.
+  let kept = "";
+  for (const point of clean) {
+    if (kept.length + point.length > room - 1) {
+      break;
+    }
+    kept += point;
+  }
+  const short = kept === "" ? "…" : `${kept}…`;
+  return short.trim() === "" ? undefined : short;
 }
 
 /**
- * Cause (a): this daemon is current, and its model's config has images off.
+ * Cause (a): this daemon is current, and a model's config has images off.
  * Names the model and the key, with the command that flips it — the fact the
- * old sentence hid behind "update it".
+ * old sentence hid behind "update it" — and says WHOSE config it is, because
+ * the key lives wherever the model runs (fix round 1, finding 1).
  */
-export function imagesOffReason(model: string | undefined): string {
-  const tail =
-    "is configured without images — set model.images true in your config if this model takes images (tentacle config set model.images true)";
+export function imagesOffReason(
+  model: string | undefined,
+  scope: ImageModelScope = "daemon",
+): string {
+  const [unnamed, tail] =
+    scope === "laptop"
+      ? [
+          "this model",
+          "is configured without images — set model.images true in your config if this model takes images (tentacle config set model.images true)",
+        ]
+      : [
+          "the daemon's model",
+          "is configured without images — set model.images true in the daemon's config if that model takes images (tentacle config set model.images true, on the daemon's host)",
+        ];
   // The model name is what varies, and the SENTENCE is what a notice row holds:
-  // give the name whatever `MAX_REASON_CHARS` leaves, shortened with an ellipsis
-  // rather than letting a row wrap.
-  const room = Math.max(1, MAX_REASON_CHARS - tail.length - 2);
+  // give the name whatever `MAX_REASON_CHARS` leaves (never more than
+  // `MAX_REASON_MODEL_CHARS`), shortened with an ellipsis rather than letting a
+  // row wrap.
+  const room = Math.max(1, Math.min(MAX_REASON_MODEL_CHARS, MAX_REASON_CHARS - tail.length - 2));
   const name = safeModel(model, room);
-  return `${name === undefined ? "this model" : name} ${tail}`;
+  return `${name === undefined ? unnamed : name} ${tail}`;
 }
 
 /** The facts about the daemon that decide WHICH cause applies (all display-only). */
 export interface DaemonImageFacts {
   /** `initialize.protocolVersion` of the daemon we talk to; absent = unknown. */
   readonly protocol?: number;
-  /** The model that runs the turns: `agentInfo.model`, else this laptop's own. */
-  readonly model?: string;
+  /**
+   * The model the DAEMON reports for itself (`agentInfo.model`). Never used to
+   * name another machine's model as ours: a pod-supplied name is not evidence
+   * of what the laptop runs (AGENTS §7, a pod is not trusted).
+   */
+  readonly daemonModel?: string;
+  /** THIS laptop's model id (`config.model`), when the caller knows it. */
+  readonly laptopModel?: string;
+  /**
+   * Whose config an ABSENT capability is about (fix round 1, finding 1).
+   * Default `daemon`: never tell a user to run a command on a machine the
+   * evidence does not point at.
+   */
+  readonly scope?: ImageModelScope;
 }
 
 /** What THIS client can do: whether it serves the model, and its vision config. */
@@ -121,7 +177,17 @@ export function imageInput(
     if (daemon.protocol !== undefined && daemon.protocol < IMAGES_PROTOCOL_VERSION) {
       return { kind: "off", reason: OLD_DAEMON_IMAGES };
     }
-    return { kind: "off", reason: imagesOffReason(daemon.model) };
+    // Whose config is off: the caller's `scope` says, and its own machine's
+    // model names it. Naming the LAPTOP's model for a daemon that runs its own
+    // is the confident, wrong advice this round removes.
+    const onLaptop = daemon.scope === "laptop";
+    return {
+      kind: "off",
+      reason: imagesOffReason(
+        onLaptop ? daemon.laptopModel : daemon.daemonModel,
+        onLaptop ? "laptop" : "daemon",
+      ),
+    };
   }
   if (capability.input === "upload") {
     // A client that serves a model is a `--model-proxy` pod's laptop, so the
@@ -148,8 +214,11 @@ export function imageInput(
       };
     }
     if (local.vision !== true) {
-      // The SAME cause as (a), on the laptop's side: a config, not a build.
-      return { kind: "off", reason: imagesOffReason(daemon.model) };
+      // The SAME cause as (a), on the laptop's side: a config, not a build —
+      // and always the LAPTOP's (a `client`-mode daemon tunnels this laptop's
+      // model, so `imageLimits()` here is the gate that failed). A name the
+      // daemon reports for itself is not ours, so it is never used here.
+      return { kind: "off", reason: imagesOffReason(daemon.laptopModel, "laptop") };
     }
     return { kind: "laptop", maxBytes: clamp(local.maxBytes) };
   }
