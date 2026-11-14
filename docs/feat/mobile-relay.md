@@ -3250,3 +3250,30 @@ files (`relay.service`, `Caddyfile.relay`, `docs/ops/relay-deploy.md`,
   §8; the flags are tunable in `ExecStart` without a code change.
 
 *— claude-opus-5-5, 2026-11-14*
+
+### Round 2
+
+**Verdict: APPROVE.** I checked the fix commit against Round 1's two findings
+(`git diff HEAD~1`).
+
+- **Finding 1 (shared per-IP limits): FIXED.** `relay.service` now runs
+  `--max-dials-per-minute 6000 --max-streams-per-ip 2000 --max-hellos-per-minute 600`
+  in the live, continued `ExecStart`. The Caddyfile's claim about the unit is now true,
+  and a test pins it. Mutation: `600→10` made 2 tests fail (the limit test and the
+  parser's own continuation guard).
+- **Finding 2 (`stream_close_delay`): FIXED.** The Caddyfile, runbook §4/§7/§8/§9 and
+  the changelog now describe a reload as a staggered drop over a 5-minute grace.
+  Mutations: putting "before the delay can ever fire" back into the Caddyfile made a
+  test fail, and adding "reload not cutting live streams" to the runbook made a test
+  fail. All three mutations were reverted, and `git status` shows no changes.
+- **Regressions:** none found. `deploy.test.ts` 17/17 pass. `bun run lint` is clean
+  (1363 files) and `bun run typecheck` is clean (root, mobile, relay). The
+  `RELAY_LIMIT_FLAGS` type import resolves. The parser's guard still covers a
+  continued `ExecStart`.
+- **Remaining risk (accepted, and stated in runbook §9):** the limits are still one
+  bucket, so a single client can use up a large share, for example all 2000 sockets.
+  The real fix is X-Forwarded-For behind a trusted-local flag, an R2 code task. It is
+  out of R7's scope.
+
+*— claude-opus-5-5, 2026-11-14* (same model family as the executor; only the
+context is fresh.)
