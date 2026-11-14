@@ -28,6 +28,7 @@ import { createOutboxDriver } from "./src/outbox-driver.ts";
 import { createExpoOutboxFs, outboxRoot } from "./src/outbox-fs-expo.ts";
 import { outboxSessionOf } from "./src/outbox-session.ts";
 import { type OutboxStore, createOutboxStore, outboxPaths } from "./src/outbox-store.ts";
+import type { OutboxItem } from "./src/outbox.ts";
 import { pickFromLibrary, takePhoto } from "./src/photo-source.ts";
 import { type RootStackParams, initialRoute } from "./src/routes.ts";
 import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
@@ -89,6 +90,8 @@ const RUNTIMES = createSessionRuntimes<RemoteClient, SendableHandle>({
 /** The prompt a screen folds: what 13b's driver calls for a photo message. */
 type FoldingPrompt = {
   readonly prompt: (text: string, turnId: string, refs: readonly AttachmentRef[]) => Promise<void>;
+  /** 13b's hand-back (F7/F20): the item's text is the field's again. */
+  readonly onDraft?: (item: OutboxItem, why: "archived" | "deleted" | "gone" | "busy") => void;
 };
 
 interface OutboxRuntime {
@@ -138,6 +141,9 @@ function outboxOf(computerId: string): OutboxRuntime {
         // The photo COPY in the app's sandbox (13c wrote it; the item keeps it).
         readPhoto: async (file: string) => new Uint8Array(await new File(file).bytes()),
         mint: () => crypto.randomUUID(),
+        // The screen owning the field receives the hand-back (`onDraft`), which is
+        // the only place the text may go (13d: a driver-side write would race it).
+        ...(folding.onDraft === undefined ? {} : { onDraft: folding.onDraft }),
       },
     );
   const drafts = createDraftStore(store, () => Date.now(), {

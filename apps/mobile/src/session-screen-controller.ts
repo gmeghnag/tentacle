@@ -90,6 +90,8 @@ export interface ComposeWiring {
       turnId: string,
       refs: readonly AttachmentRef[],
     ) => Promise<void>;
+    /** 13b's hand-back: an item whose text belongs in the field (F7/F20). */
+    readonly onDraft: (item: OutboxItem, why: "archived" | "deleted" | "gone" | "busy") => void;
   }) => OutboxDriver;
   readonly photos: PhotoPort;
   /** The chat handle's compose side, once the attach answered. */
@@ -252,6 +254,13 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           // nothing — 13d's flow 07/18). The app passes a factory, not a driver.
           driver: deps.compose.driver({
             prompt: (text, turnId, refs) => promptWithRefs(text, turnId, refs),
+            // 13b's own hand-back (F7/F20): the item is gone and its text is the
+            // field's again — APPENDED, never overwriting what the person typed.
+            onDraft: (item) => {
+              draft = restoreAfterFailure(draft, item.text);
+              deps.compose?.draft(draft, []);
+              emit();
+            },
           }),
           photos: deps.compose.photos,
           // The handle exists only once the attach answered: a compose act on a
@@ -490,7 +499,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         throw error;
       }
     })();
-    await feed.ownTurn(turnId, events);
+    await feed.ownTurn(turnId, events).catch(() => {
+      // The stream threw: the feed folded it as LOST (F8/F19), and `failure` below
+      // is what decides whether the person's words come back (F13).
+    });
     ownControl = null;
     if (failure === undefined) {
       emit();
@@ -530,15 +542,35 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     ownControl = control;
     notice = null;
     emit();
-    await feed.ownTurn(
-      turnId,
-      session.send(text, control.signal, {
-        turnId,
-        attachments: refs,
-      }) as AsyncIterable<SessionEvent>,
-    );
+    let streamed = false;
+    let failure: unknown;
+    const events = (async function* guarded(): AsyncIterable<SessionEvent> {
+      try {
+        for await (const event of session.send(text, control.signal, {
+          turnId,
+          attachments: refs,
+        })) {
+          streamed = true;
+          yield event;
+        }
+      } catch (error) {
+        failure = error;
+        throw error;
+      }
+    })();
+    await feed.ownTurn(turnId, events).catch(() => {
+      // Folded as LOST by the feed; what the CALLER does about it is decided below.
+    });
     ownControl = null;
     emit();
+    // Nothing streamed: the daemon refused this prompt before its ack (a foreign
+    // turn, a busy door, a dead link), so the caller must give the person's words
+    // back — this is the seam 12c's `send` reads and the compose half relies on
+    // (F7). Once a turn DID stream, its loss is the transcript's to say: restoring
+    // the text would send the same words twice.
+    if (failure !== undefined && !streamed) {
+      throw failure;
+    }
   }
 
   function press(): void {

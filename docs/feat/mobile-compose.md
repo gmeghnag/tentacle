@@ -1602,6 +1602,110 @@ protocol change, so no `protocol.d/` note and `protocol.json` is untouched.
 resume; the flow needs a 14 MiB fixture and a kill at a chip's exact state); the
 D1 uploading-chip row (drift 1); no `TODO.md`/`CHANGELOG.md` edit.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14*
+
+All three review-round-1 findings are fixed, each with its red-first test and its
+mutation (below). Nothing else in the tree was touched: no protocol change, so no
+`protocol.d/` note and `protocol.json` untouched.
+
+**#1 (HIGH) — a refused send lost the text. FIXED, at the seam the review named.**
+
+- `session-feed.ts:91-125`: `foldStream` now folds LOST and **re-throws** the
+  stream's error instead of returning; a FOREIGN turn's caller ignores it
+  (`:150`), so nothing of ours is involved there. This is the root cause: the
+  catch swallowed the refusal, so no caller above it ever saw it.
+- `session-screen-controller.ts:502` (`send`) and `:532-574` (`promptWithRefs`):
+  both now catch the rejection, and `promptWithRefs` re-throws **only when
+  nothing streamed** (`:571`) — the same discipline 12c's `send` already had
+  (`refusedBeforeStart`). A turn that DID stream and then died stays the
+  transcript's business: restoring its text would send the same words twice.
+- `compose-controller.ts:399-432` (`sendNowHere`): the restore goes through 13b's
+  own refusal mapping (`driver.settle`) instead of a private `catch`, and the
+  restore now APPENDS (`restoreAfterFailure`) so a keystroke typed during the
+  attempt is not overwritten.
+- The round-1 repro (`.tentacle/tmp/mobile-compose-13d/rev/f7.test.ts`) now prints
+  `false "my words"` / `true "my words"` and passes both cases.
+- **Red first:** `session-feed.test.ts` "an OWN stream that throws folds LOST and
+  REJECTS", `session-screen-compose.test.ts` "a REFUSED send gives the words back
+  through the REAL seam". **Mutation:** `throw error` → `return` in `foldStream`
+  → both fail (2 fail / 18 pass). A second, narrower mutation (drop the
+  `!streamed` throw in `promptWithRefs`) fails the screen test alone (1 fail / 7
+  pass).
+
+**#2 (MEDIUM) — a refused Send now duplicated queued rows. FIXED to F12.**
+
+- `compose-controller.ts:683-700`: the restore is `restoredByRefusal(error,
+  messages)` (13a's pure function, the TUI's `afterRefusal` rule) — only the
+  texts the daemon does NOT report in `held` come back. The held ones keep their
+  rows (their `returned` settles them) and stay `own`, so they cannot be given
+  back twice.
+- `compose-controller.test.ts:377`'s pinned wrong behaviour is replaced by two
+  tests: "only the texts the daemon does not hold" and "the daemon holds NOTHING
+  of gives every text back".
+- **Red first:** with the old `messages.map(() => ...)` restore in place the first
+  test fails (`and this` vs `steer one`). **Mutation:** `restoredByRefusal(...)`
+  → `messages.map((m) => m.id)` → that test fails (1 fail / 25 pass).
+
+**#3 (MEDIUM) — online sends/steers were not persisted before the first attempt.
+FIXED; the drift is closed, not recorded.**
+
+- Both acts now create 13b's item first, so the key is on disk before the first
+  frame (F3, D1's "one synchronous step"):
+  - `compose-controller.ts:633-647` (text-only send) and `:569-596` (steer), both
+    `driver.enqueue(...)` → `driver.claim(itemId)` → the act → `driver.settle`.
+    The FIELD is cleared in the same synchronous step as the read, before any
+    `await` (F4): the one ordering slip this round introduced — `await basis()`
+    before the clear let a double tap create two items — is fixed and pinned by
+    two new tests.
+- `outbox-driver.ts:139-156, 485-522`: the new `claim`/`settle` seam.
+  `claim` deliberately does NOT go through `exclusive`: that holds the session's
+  write/run tail for as long as its body runs, and this body is the caller's ACT
+  — a whole turn for a prompt, so a steer typed during that turn would wait for
+  the very turn it steers (AGENTS §7 "don't serialize the RPC peer", applied to
+  the driver's own queue). `busy` reserves the id against a concurrent `run`
+  instead. `settle` reuses 13b's `refusalOf`/`refuse`, so an online and an
+  offline refusal have ONE behaviour; `restore`/`draft` hand the text to the
+  CALLER (which owns the field) rather than firing `onDraft` into a second write.
+  Its private decide-setter is now `settleDecision` (the public `settle` took the
+  old name); a `release` seam for re-parking an item was written and then dropped
+  — nothing in this slice needs it, and a public method with no caller is dead
+  code.
+- The photo path is unchanged (it already went through `driver.run`).
+- **Red first:** `compose-controller.test.ts` "F3 … the key is on disk BEFORE the
+  first attempt" (3 tests: the send's item is `sending` at the moment the prompt
+  runs, the steer's item carries its `steerTurnId` and the wire id equals its
+  `enqueueId`, and a dropped frame leaves a `waiting` item with the same key).
+  **Mutation:** put the review's in-memory-key send back → 2 of them fail;
+  removing the `save` inside `enqueue` fails 18 tests across the file; replacing
+  `claim`'s `sending` write with the bare item fails the first two F3 tests.
+
+**Two things this round had to wire that the review implied but did not name.**
+
+- `13b`'s `onDraft` callback was never connected to a real caller
+  (`session-screen-controller.ts:255-262`, `App.tsx:93,147`), so F7/F20's
+  hand-back — the item is gone and its text belongs in the field — silently went
+  nowhere. Now wired, appended via `restoreAfterFailure`, and pinned by
+  `session-screen-compose.test.ts` "an item whose session is GONE hands its text
+  back into the field (F20)". **Mutation:** remove the wiring → that test fails.
+- A refused STEER now settles through the item (`needs-decision` for a refusal a
+  person must settle, `waiting` for a link drop) instead of being dumped into the
+  field, which is F9's answer and cannot duplicate the text. The two tests that
+  pinned the old behaviour are rewritten to the plan's own rows.
+
+**Gate.** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
+`bun run lint` `Checked 1201 files … No fixes applied` · `bun test` **8878 pass,
+3 skip** (the three opt-in ones), **0 fail**, 635 files, 8881 tests. The 3 skips are
+the k8s, docker and real-socket keepalive opt-ins AGENTS §6 names.
+
+**Not done / unverified.** The device gate is unchanged by this round: the
+executor's Maestro result (08c, 09–11, 14–18 failing at `launchApp` after ~3
+flows in one process) stands, so the slice is still PARTIAL on its mandatory
+device gate, and this round claims nothing about it. `19-photo-kill-mid-upload`
+still is not written. D1's last row (a chip still uploading is taken by the send)
+is still drift 1.
+
 ## Review
 
 ### 13d `mobile-compose-screen` — Review round 1: **REQUEST-CHANGES**

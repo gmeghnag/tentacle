@@ -10,12 +10,14 @@
 import { describe, expect, test } from "bun:test";
 import { PermissionBroker } from "@tentacle/core";
 import type { AttachmentRef, QueueState } from "@tentacle/protocol";
+import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import type { ComposeHandle, PickedPhoto } from "../src/compose-controller.ts";
 import { createOutboxDriver } from "../src/outbox-driver.ts";
 import type { OutboxFs } from "../src/outbox-store.ts";
 import { createOutboxStore, outboxPaths } from "../src/outbox-store.ts";
 import { createSessionController } from "../src/session-controller.ts";
 import {
+  type ComposeWiring,
   type SendableHandle,
   type SessionScreenState,
   createSessionScreen,
@@ -57,7 +59,7 @@ interface FakeSession extends SendableHandle {
   readonly queueListener: (state: QueueState) => void;
 }
 
-function harness() {
+function harness(options: { readonly refuseSend?: unknown } = {}) {
   const states: SessionScreenState[] = [];
   const brokers: PermissionBroker[] = [];
   const store = createOutboxStore(memoryFs(), outboxPaths("file:///o", "c1"), () => 1);
@@ -118,9 +120,7 @@ function harness() {
    * 13b's driver, built the way the app builds it: over a port whose `prompt` is the
    * SCREEN's folding one (a drained stream would show no turn — 13d's flow 07/18).
    */
-  const driver = (folding: {
-    prompt: (text: string, turnId: string, refs: readonly AttachmentRef[]) => Promise<void>;
-  }) =>
+  const driver = (folding: Parameters<ComposeWiring["driver"]>[0]) =>
     createOutboxDriver(async () => ({ ...handle.port, prompt: folding.prompt }), {
       persistence: {
         items: () => store.data.items,
@@ -129,7 +129,11 @@ function harness() {
       },
       readPhoto: async () => new Uint8Array([1]),
       mint: () => "k",
+      // 13b's hand-back (F7/F20): the words are the field's again.
+      onDraft: folding.onDraft,
     });
+  // The one driver the screen built, for a test that runs the outbox itself.
+  let built: ReturnType<typeof driver> | null = null;
   const screen = () => {
     const broker = new PermissionBroker(undefined, { holdUntilSet: true });
     brokers.push(broker);
@@ -152,6 +156,11 @@ function harness() {
             // The screen's OWN stream: the compose half hands its turn here, so the
             // events must fold into the transcript (13d's flow 07).
             session.sent.push(prompt);
+            if (options.refuseSend !== undefined) {
+              // A refusal before any event (`TurnInProgress`): the real seam throws
+              // here, and `foldStream` is what used to swallow it.
+              throw options.refuseSend;
+            }
             yield { type: "user_message", text: prompt } as never;
             yield { type: "text", delta: "echo" } as never;
             yield { type: "turn_end", reason: "end_turn" } as never;
@@ -164,7 +173,10 @@ function harness() {
       compose: {
         computerId: "c1",
         store,
-        driver,
+        driver: (folding) => {
+          built = driver(folding);
+          return built;
+        },
         photos: { pickFromLibrary: async () => [PICK], takePhoto: async () => [PICK] },
         handle: () => handle,
         draft: () => {},
@@ -172,7 +184,7 @@ function harness() {
       },
     });
   };
-  return { screen, states, session, store };
+  return { screen, states, session, store, handle, composeDriver: () => built };
 }
 
 async function settle(): Promise<void> {
@@ -224,6 +236,60 @@ describe("the compose half on the screen", () => {
     await settle();
     expect(h.session.sent).toEqual(["hello there"]);
     expect(screen.state().draft).toBe("");
+  });
+
+  test("a REFUSED send gives the words back through the REAL seam (12c F13 / F7)", async () => {
+    // 12c's `send` and 13d's `promptWithRefs` both await `feed.ownTurn`, which used
+    // to SWALLOW the stream's throw: so the refusal never reached the caller, the
+    // field stayed cleared, and the person's words were gone (review round 1,
+    // finding 1). The fake prompt in `compose-controller.test.ts` throws directly,
+    // which is why only this seam shows it.
+    // Mutation: `return` instead of `throw` in `session-feed.ts` `foldStream` → red.
+    const h = harness({ refuseSend: new RpcError(DomainErrorCode.TurnInProgress, "busy") });
+    const screen = h.screen();
+    await screen.open();
+    screen.setDraft("my words");
+    expect(screen.state().view.composer.button).toBe("send");
+    screen.press();
+    for (let i = 0; i < 20; i += 1) {
+      await settle();
+    }
+    expect(screen.state().draft).toBe("my words");
+    // And it is SAID, not just restored (a silent restore looks like a lost send).
+    expect(screen.state().notice).not.toBeNull();
+  });
+
+  test("an item whose session is GONE hands its text back into the field (F20)", async () => {
+    // 13b's `refuse`draft` removes the item and asks the FIELD for its text
+    // (`onDraft`). The screen owning the field is the only place that may write it;
+    // before this wiring the callback was never connected, so the words vanished
+    // with the item. The link is down at the run, so 13b's port reports `gone`.
+    // Mutation: drop `onDraft` from the driver wiring → red (the field stays empty).
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    screen.link(false);
+    screen.setDraft("gone words");
+    screen.press(); // Send later: 13b's outbox owns the item
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    expect(h.store.data.items.map((item) => item.state)).toEqual(["waiting"]);
+    // The session is gone when the item's chance comes: the run hands it back.
+    Object.assign(h.handle.port, {
+      facts: () => Promise.resolve({ availability: "gone", historyLength: 0, runningTurnId: null }),
+    });
+    screen.setDraft("");
+    const built = h.composeDriver();
+    if (built === null) {
+      throw new Error("no driver");
+    }
+    await built.run("s1");
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    expect(screen.state().draft).toBe("gone words");
+    expect(h.store.data.items).toEqual([]);
   });
 
   test("a prompt with PHOTOS folds into the transcript too (13d's flow 18)", async () => {

@@ -37,6 +37,7 @@ import {
   pickRoom,
   takeChips,
 } from "./compose-chips.ts";
+import { restoredByRefusal } from "./compose-queue.ts";
 import {
   type ComposeState,
   enqueueAcked,
@@ -50,11 +51,18 @@ import {
   reclaimed,
   take,
 } from "./compose-state.ts";
-import { type ComposerAction, sendNowOffered } from "./composer.ts";
+import { type ComposerAction, restoreAfterFailure, sendNowOffered } from "./composer.ts";
 import type { OutboxDriver, OutboxSession } from "./outbox-driver.ts";
 import { unavailableSessionPort } from "./outbox-session.ts";
 import type { OutboxStore } from "./outbox-store.ts";
-import { type OutboxItem, type OutboxPhoto, type SessionFacts, refusalOf } from "./outbox.ts";
+import {
+  type OutboxItem,
+  type OutboxPhoto,
+  type Refusal,
+  type SessionFacts,
+  refusalOf,
+} from "./outbox.ts";
+import { refsOf as itemRefsOf } from "./outbox.ts";
 
 /** The chat handle the compose acts use (a seam: tests pass a fake). */
 export interface ComposeHandle {
@@ -378,29 +386,72 @@ export function createCompose(deps: ComposeDeps): Compose {
     return { text, taken: taken.taken, uploading: taken.uploading };
   };
 
-  /** A send with the link up: straight through the handle's own `send`. */
-  const sendNowHere = async (
-    text: string,
-    taken: ReturnType<typeof takeChips>["taken"],
-  ): Promise<void> => {
+  /**
+   * A send with the link up: straight through the handle's own `send`, with the
+   * item's key — the item is on disk BEFORE the first frame (F3, the plan's
+   * load-bearing assumption: D1's "the tap creates the outbox item in ONE
+   * synchronous step"). A kill (or a dropped frame) before the daemon has it
+   * therefore loses nothing: a relaunch's `run` finds it `sending` and `decide`s
+   * it. The act goes through `deps.prompt` (the SCREEN's folding prompt), never a
+   * driver `run`: the turn has to stream into this transcript, and a run would
+   * hold this session's queue for the turn's whole length.
+   */
+  const sendNowHere = async (text: string, item: OutboxItem): Promise<void> => {
     if (deps.handle() === null) {
       return;
     }
     try {
-      // The key is minted ONCE, at the tap (the load-bearing assumption), and the
-      // prompt folds into this screen's transcript as this phone's own turn.
-      await deps.prompt(
-        text,
-        deps.mint(),
-        photosOf(taken).flatMap((photo) => refsOf(photo)),
-      );
+      await deps.prompt(text, item.turnId, itemRefsOf(item));
     } catch (error) {
-      // Refused before the ack (`TurnInProgress`, a drop): the words come back,
-      // and never as a steer by themselves (F7, decision 15).
-      deps.setDraft(text);
-      saveDraft(text);
-      deps.notify(refusalText(error));
+      // A refusal before the ack (`TurnInProgress`, a drop, a dead link): 13b's
+      // own mapping decides the item, and the words come back to the field —
+      // never as a steer by themselves (F7, decision 15).
+      const refusal = await deps.driver.settle(item.itemId, error);
+      if (refusal === "sent" || refusal.kind === "offline" || refusal.kind === "decide") {
+        // `offline`: the item stays `waiting`, its key minted — one tap is not lost
+        // (F1). `decide`: the sheet owns it. Neither is the field's.
+        deps.notify(refusal === "sent" ? null : refusalText(error));
+      } else {
+        deps.setDraft(restoreAfterFailure(deps.draft(), text));
+        saveDraft(deps.draft());
+        deps.notify(refusalText(error));
+      }
       refresh();
+      return;
+    }
+    await deps.driver.settle(item.itemId);
+    refresh();
+  };
+
+  /** A steered item's refusal, as the ROW is settled (13b settled the item). */
+  const steerRefused = async (
+    id: string,
+    text: string,
+    refusal: Refusal | "sent",
+  ): Promise<void> => {
+    if (refusal === "sent") {
+      // The daemon took it after all: the row is acked, and waits for its echo.
+      state = enqueueAcked(state, id);
+      return;
+    }
+    const refused = enqueueRejected(state, id, new Set());
+    state = refused.state;
+    if (refusal.kind === "offline") {
+      // No answer from the daemon: the item is `waiting` with its key, so it goes
+      // again at the next `up` — the person does not retype its words (F1).
+      deps.notify("no connection — it will be queued when the phone is back online");
+      return;
+    }
+    if (refusal.kind === "decide") {
+      // Its own row now carries the sheet's "Decide".
+      return;
+    }
+    if (refused.notify) {
+      // The steer never landed, and no item is left to carry it: the words are the
+      // field's again, and a person decides what happens next.
+      deps.setDraft(restoreAfterFailure(deps.draft(), text));
+      saveDraft(deps.draft());
+      deps.notify("that message was not queued — it is back in the field");
     }
   };
 
@@ -515,42 +566,63 @@ export function createCompose(deps: ComposeDeps): Compose {
         if (turnId === null) {
           return;
         }
-        const id = deps.mint();
-        state = enqueueStarted(state, id, text);
+        // The steer is an OUTBOX ITEM too (F3): its key is minted once and written
+        // before the first frame, so a kill or a dropped frame cannot lose it — a
+        // relaunch's `run` decides it (13b's `decide`: bound to its own turn → one
+        // injection under one key, or the sheet). The ACT itself is the handle's
+        // own turn-bound `steer` (`RemoteClient.enqueue`), unchanged.
+        // The field is cleared in the SAME synchronous step as the read above
+        // (F4, D1): a second tap finds it empty, so no `await` may come first.
         deps.setDraft("");
         saveDraft("");
         refresh();
+        const basisNow = await basis();
+        const item = await deps.driver.enqueue(handle.port, {
+          computerId: deps.computerId,
+          sessionId: deps.sessionId,
+          kind: "steer",
+          steerTurnId: turnId,
+          text,
+          basis: basisNow,
+        });
+        state = enqueueStarted(state, item.enqueueId, text);
         await persistOwn();
+        refresh();
+        const claimed = await deps.driver.claim(item.itemId);
+        if (claimed === null) {
+          return;
+        }
         try {
-          await handle.steer(text, id, turnId);
-          state = enqueueAcked(state, id);
-        } catch {
-          const refused = enqueueRejected(state, id, new Set());
-          state = refused.state;
-          if (refused.notify) {
-            // The steer never landed: the words are the field's again, and a
-            // person decides what happens next.
-            deps.setDraft(text);
-            saveDraft(text);
-            deps.notify("that message was not queued — it is back in the field");
-          }
+          await handle.steer(text, item.enqueueId, turnId);
+          await deps.driver.settle(item.itemId);
+          state = enqueueAcked(state, item.enqueueId);
+        } catch (error) {
+          // The item is settled by 13b's own mapping (never here), and the ROW is
+          // dropped: a row the daemon never accepted would otherwise sit on screen
+          // for ever (`own` holds its id, so no `returned` can settle it).
+          const refusal = await deps.driver.settle(item.itemId, error);
+          await steerRefused(item.enqueueId, text, refusal);
         }
         await persistOwn();
         refresh();
         return;
       }
-      // A send. With ready chips it goes through the outbox (its uploads are the
-      // driver's own, persisted before the first frame); text alone goes straight
-      // out, which keeps its turn streaming into THIS transcript.
+      // A send. With ready chips it goes through the outbox's RUN (its uploads are
+      // the driver's own, persisted before the first frame); text alone also
+      // becomes an item first (F3) but performs the act here, through the SCREEN's
+      // folding prompt — a driver `run` would hold this session's queue for the
+      // turn's whole length, and a steer typed during it would wait for the very
+      // turn it steers.
       if (ready) {
         const taken = takeField();
+        const basisNow = await basis();
         await deps.driver.enqueue(handle.port, {
           computerId: deps.computerId,
           sessionId: deps.sessionId,
           kind: "prompt",
           text: taken.text,
           photos: photosOf(taken.taken),
-          basis: await basis(),
+          basis: basisNow,
         });
         await deps.driver.run(deps.sessionId);
         refresh();
@@ -559,7 +631,19 @@ export function createCompose(deps: ComposeDeps): Compose {
       deps.setDraft("");
       saveDraft("");
       refresh();
-      await sendNowHere(text, []);
+      const basisNow = await basis();
+      const item = await deps.driver.enqueue(handle.port, {
+        computerId: deps.computerId,
+        sessionId: deps.sessionId,
+        kind: "prompt",
+        text,
+        basis: basisNow,
+      });
+      const claimed = await deps.driver.claim(item.itemId);
+      if (claimed === null) {
+        return;
+      }
+      await sendNowHere(text, item);
     },
     async sendNow() {
       const handle = deps.handle();
@@ -588,14 +672,29 @@ export function createCompose(deps: ComposeDeps): Compose {
       deps.setDraft("");
       saveDraft("");
       refresh();
+      await persistOwn();
       try {
         await handle.sendNow(messages, turnId);
-      } catch {
-        // Refused (`TurnInProgress`, `CompactInProgress`, an older daemon): every
-        // text comes back — the daemon reports which it holds, but on the phone
-        // the safe side is the field, and the keys make a retry a no-op (F12).
-        deps.setDraft(messages.map((message) => message.text).join("\n\n"));
-        saveDraft(deps.draft());
+      } catch (error) {
+        // F12, exactly as the TUI (`afterRefusal`): a text the daemon REPORTS it
+        // still holds is queued — it will be delivered as a steer — so it is NOT
+        // the field's, and putting it there as well would send it twice on the
+        // next tap. Only the messages it does not hold come back.
+        const back = restoredByRefusal(error, messages);
+        const backIds = new Set(back);
+        const texts = messages.filter((m) => backIds.has(m.id)).map((m) => m.text);
+        // The ones it holds stay rows of mine (its `returned` will settle them);
+        // a restored text is the field's, so its row goes now.
+        for (const id of back) {
+          state = enqueueRejected(state, id, new Set()).state;
+        }
+        if (texts.length > 0) {
+          // Joined like the TUI (`afterRefusal` over `join`), then merged into
+          // whatever the person typed meanwhile (never overwriting it).
+          deps.setDraft(restoreAfterFailure(deps.draft(), texts.join("\n\n")));
+          saveDraft(deps.draft());
+        }
+        deps.notify(refusalText(error));
       } finally {
         carried = new Set();
         await persistOwn();

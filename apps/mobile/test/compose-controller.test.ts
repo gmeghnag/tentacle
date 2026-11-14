@@ -8,6 +8,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { AttachmentRef, QueueState } from "@tentacle/protocol";
+import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import { type ComposeHandle, type PickedPhoto, createCompose } from "../src/compose-controller.ts";
 import { createOutboxDriver } from "../src/outbox-driver.ts";
 import { createOutboxStore, outboxPaths } from "../src/outbox-store.ts";
@@ -56,7 +57,7 @@ function fakeHandle(
   options: {
     readonly refuseSend?: unknown;
     readonly refuseEnqueue?: unknown;
-    readonly refuseSendNow?: unknown;
+    readonly refuseSendNow?: unknown | ((messages: readonly { id: string }[]) => unknown);
     readonly refuseUpload?: unknown;
     readonly facts?: { historyLength: number; runningTurnId: string | null };
   } = {},
@@ -102,8 +103,12 @@ function fakeHandle(
     },
     async sendNow(messages, turnId) {
       acts.push(`sendnow:${messages.map((m) => m.id).join(",")}:${turnId}`);
-      if (options.refuseSendNow !== undefined) {
-        throw options.refuseSendNow;
+      const refusal =
+        typeof options.refuseSendNow === "function"
+          ? options.refuseSendNow(messages)
+          : options.refuseSendNow;
+      if (refusal !== undefined) {
+        throw refusal;
       }
     },
     onQueued(listener) {
@@ -153,8 +158,11 @@ async function harness(
     readonly draft?: string;
     /** The screen's folding prompt refuses (a `TurnInProgress` before the ack). */
     readonly refusePrompt?: unknown;
+    /** Called when the folding prompt runs (the store is read at that moment). */
     /** The queue the client ALREADY holds when the compose half subscribes. */
     readonly heldQueue?: QueueState;
+    /** What the store holds at the moment the folding prompt is called. */
+    readonly onPrompt?: () => void;
     /** What the store's file already holds (a relaunch: the ids AND their texts). */
     readonly persisted?: {
       readonly ownIds: readonly string[];
@@ -221,6 +229,7 @@ async function harness(
     // turn to it, so a prompt is never drained here (13d's flow 07 bug).
     prompt: async (text, turnId, refs) => {
       acts.push(`prompt:${text}:${refs.length}`);
+      options.onPrompt?.();
       if (options.refusePrompt !== undefined) {
         throw options.refusePrompt;
       }
@@ -283,17 +292,36 @@ describe("a steer while a turn runs (D1, F8)", () => {
     expect(h.compose.view().queued.map((row) => row.mine)).toEqual([true]);
   });
 
-  test("a refused enqueue gives the words back and never converts them to a prompt (F9)", async () => {
-    // Mutation: send a prompt instead → red (`acts` would hold `send:`).
+  test("a REFUSED enqueue never turns into a prompt, and its row carries the text (F9)", async () => {
+    // Mutation: send a prompt instead → red (`acts` would hold `send:`). F9's own
+    // answer for a refusal only a person can settle: the item is `needs-decision`
+    // (its row offers Decide) — the text is NOT also dumped into the field, which
+    // would send the same words twice on the next tap.
     const h = await harness({
       draft: "steer me",
       handle: fakeHandle({ refuseEnqueue: new Error("no turn") }),
     });
     h.setTurn("t-run");
     await h.compose.press({ kind: "queue", text: "steer me" });
-    expect(h.field()).toBe("steer me");
     expect(h.handle.acts.some((act) => act.startsWith("send:"))).toBe(false);
     expect(h.compose.view().queued).toEqual([]);
+    expect(h.items().map((item) => item.state)).toEqual(["needs-decision"]);
+    expect(h.field()).toBe("");
+  });
+
+  test("a steer whose link dropped keeps its item WAITING, so nothing is retyped (F1)", async () => {
+    // A transport failure is not a refusal: the item stays `waiting` with the key
+    // it was written with, and a relaunch's `run` decides it (F3).
+    const dropped = Object.assign(new Error("the socket died"), { name: "ChannelError" });
+    const h = await harness({
+      draft: "steer me",
+      handle: fakeHandle({ refuseEnqueue: dropped }),
+    });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "steer me" });
+    expect(h.items().map((item) => item.state)).toEqual(["waiting"]);
+    expect(h.compose.view().queued).toEqual([]);
+    expect(h.field()).toBe("");
   });
 });
 
@@ -310,16 +338,41 @@ describe("a send on a live link (D1)", () => {
     expect(h.items()).toEqual([]);
   });
 
+  test("a double tap on Send sends ONCE and creates ONE item (F4)", async () => {
+    // D1: the field is cleared in the same synchronous step as the tap, so the
+    // second tap reads an empty field. Mutation: `await basis()` before the clear
+    // → two prompts and two turns.
+    const h = await harness({ draft: "once" });
+    const first = h.compose.press({ kind: "send", text: "once" });
+    const second = h.compose.press({ kind: "send", text: h.field() });
+    await Promise.all([first, second]);
+    expect(h.acts).toEqual(["prompt:once:0"]);
+    expect(h.items()).toEqual([]);
+  });
+
+  test("a double tap on Queue steers ONCE (F4, the same synchronous clear)", async () => {
+    const h = await harness({ draft: "once" });
+    h.setTurn("t-run");
+    const first = h.compose.press({ kind: "queue", text: "once" });
+    const second = h.compose.press({ kind: "queue", text: h.field() });
+    await Promise.all([first, second]);
+    expect(h.handle.enqueued).toHaveLength(1);
+  });
+
   test("a refused send puts the words back and says so (F7)", async () => {
     // The refusal comes from the SCREEN's folding prompt (its `send`), which is
     // where a `TurnInProgress` arrives: the compose half must restore the field.
+    // A `TurnInProgress` is `refusalOf`'s `restore` for a prompt, so 13b's own
+    // mapping decides it (`settle`), not this file's catch.
     const h = await harness({
       draft: "hello",
-      refusePrompt: new Error("turn in progress"),
+      refusePrompt: new RpcError(DomainErrorCode.TurnInProgress, "turn in progress"),
     });
     await h.compose.press({ kind: "send", text: "hello" });
     expect(h.field()).toBe("hello");
     expect(h.notices.at(-1)).not.toBeNull();
+    // The item is done with: the words are the field's, not an outbox row's.
+    expect(h.items()).toEqual([]);
   });
 
   test("with a READY photo the send goes through the outbox, so it survives a kill", async () => {
@@ -334,6 +387,66 @@ describe("a send on a live link (D1)", () => {
     expect(h.handle.acts.some((act) => act.startsWith("port-prompt:look"))).toBe(true);
     expect(h.compose.view().chips).toEqual([]);
     expect(h.field()).toBe("");
+  });
+});
+
+describe("F3, the load-bearing assumption: the key is on disk BEFORE the first attempt", () => {
+  test("a text-only send's item is `sending` on disk while the turn runs (a kill is recoverable)", async () => {
+    // Review round 1, finding 3: the send used to mint its key in MEMORY and write
+    // nothing, so a kill (or a dropped frame) before the daemon had it lost the
+    // message for good. D1: "the tap creates the outbox item in ONE synchronous
+    // step". Mutation: send with `deps.mint()` and no item → red (no item).
+    let itemDuringTurn: readonly OutboxItem[] = [];
+    let fileDuringTurn = "";
+    const h = await harness({
+      draft: "hello",
+      // Read the store AND its file AT THE MOMENT the prompt is on its way.
+      onPrompt: () => {
+        itemDuringTurn = h.items();
+        fileDuringTurn = h.fs.files.get(PATHS.state) ?? "";
+      },
+    });
+    await h.compose.press({ kind: "send", text: "hello" });
+    expect(itemDuringTurn.map((item) => item.state)).toEqual(["sending"]);
+    expect(itemDuringTurn[0]?.text).toBe("hello");
+    // …and on DISK, with its turn key (a relaunch's `decide` needs it).
+    expect(fileDuringTurn).toContain(itemDuringTurn[0]?.turnId ?? "missing");
+    // Accepted: the item is gone again (the daemon's ledger owns the key now).
+    expect(h.items()).toEqual([]);
+  });
+
+  test("a steer's item is on disk before the enqueue, bound to the turn it was typed for", async () => {
+    // Same rule for a steer: minted once, written once, and bound to ITS turn —
+    // the `enqueueId` and `steerTurnId` a relaunch's `decide` resends under.
+    let during: readonly OutboxItem[] = [];
+    const h = await harness({ draft: "steer me" });
+    h.setTurn("t-run");
+    const spy = h.handle; // the enqueue is the spy's own act log
+    const original = spy.steer.bind(spy);
+    spy.steer = async (text, id, turnId) => {
+      during = h.items();
+      await original(text, id, turnId);
+    };
+    await h.compose.press({ kind: "queue", text: "steer me" });
+    expect(during.map((item) => item.state)).toEqual(["sending"]);
+    expect(during[0]?.kind).toBe("steer");
+    expect(during[0]?.steerTurnId).toBe("t-run");
+    // The id the wire saw is the item's own `enqueueId` (one key, not two).
+    expect(h.handle.enqueued[0]?.id).toBe(during[0]?.enqueueId ?? "missing");
+    expect(h.items()).toEqual([]);
+  });
+
+  test("a kill between the tap and the ack leaves a recoverable item, not a lost message", async () => {
+    // The kill is a DROPPED FRAME here: the daemon never answers, so the act fails
+    // as a link loss. F3: the item is on disk in `sending`/`waiting` with its key.
+    const dropped = Object.assign(new Error("the socket died"), { name: "ChannelError" });
+    const h = await harness({ draft: "hello", refusePrompt: dropped });
+    await h.compose.press({ kind: "send", text: "hello" });
+    expect(h.items().map((item) => item.state)).toEqual(["waiting"]);
+    expect(h.items()[0]?.text).toBe("hello");
+    // …and the same key is still there for the next attempt (never re-minted).
+    const key = h.items()[0]?.turnId ?? "missing";
+    expect(h.fs.files.get(PATHS.state)).toContain(key);
   });
 });
 
@@ -374,16 +487,48 @@ describe("Send now (D1's secondary button)", () => {
     expect(h.field()).toBe("");
   });
 
-  test("a refused send-now gives every text back (F12)", async () => {
+  test("a refused send-now gives back ONLY the texts the daemon does not hold (F12)", async () => {
+    // F12 and the TUI's `afterRefusal`: a text the daemon reports in `held` is
+    // queued — it will be delivered as a steer — so it is NOT the field's, and
+    // putting it there as well sends it twice on the next tap (review round 1,
+    // finding 2). Mutation: restore every text → red.
+    let queuedId = "";
     const h = await harness({
       draft: "steer one",
-      handle: fakeHandle({ refuseSendNow: new Error("TurnInProgress") }),
+      handle: fakeHandle({
+        refuseSendNow: (messages: readonly { id: string }[]) =>
+          new RpcError(DomainErrorCode.TurnInProgress, "busy", {
+            held: [queuedId.length === 0 ? messages[0]?.id : queuedId],
+          }),
+      }),
+    });
+    h.setTurn("t-run");
+    await h.compose.press({ kind: "queue", text: "steer one" });
+    const queuedText = h.compose.view().queued[0]?.text ?? "";
+    queuedId = h.compose.view().queued[0]?.id ?? "";
+    expect(queuedText).toBe("steer one");
+    h.setField("and this");
+    await h.compose.sendNow();
+    // The held text stays a row (the daemon will steer it); only the other is back.
+    expect(h.field()).toBe("and this");
+    expect(h.compose.view().queued.map((row) => row.text)).toEqual(["steer one"]);
+  });
+
+  test("a refused send-now the daemon holds NOTHING of gives every text back (F12)", async () => {
+    // The other half of the same rule: no `held` report (or an empty one) means no
+    // text reached the daemon, so all of them are the person's again.
+    const h = await harness({
+      draft: "steer one",
+      handle: fakeHandle({
+        refuseSendNow: new RpcError(DomainErrorCode.TurnInProgress, "busy", { held: [] }),
+      }),
     });
     h.setTurn("t-run");
     await h.compose.press({ kind: "queue", text: "steer one" });
     h.setField("and this");
     await h.compose.sendNow();
     expect(h.field()).toBe("steer one\n\nand this");
+    expect(h.compose.view().queued).toEqual([]);
   });
 
   test("not offered while idle, or with nothing of mine to take", async () => {
