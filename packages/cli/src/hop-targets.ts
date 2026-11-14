@@ -25,7 +25,10 @@ import type { TentacleConfig } from "./config.ts";
 import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { attachEngineRuntime, startEngineRuntime } from "./engine-runtime.ts";
 import { engineNoun, laptopWorkspaceInput } from "./engine-select.ts";
-import type { HopShared } from "./hop-runtime.ts";
+import { type AttachVerdict, attachVerdict } from "./hop-plan.ts";
+import type { HopPlace } from "./hop-plan.ts";
+import type { HopPromptEngine, HopPromptFacts } from "./hop-proposal.ts";
+import type { HopRuntimeDeps, HopShared } from "./hop-runtime.ts";
 import { removeVerifiedKept } from "./kept-cmd.ts";
 import { forgetKept, keptDir, recordKept } from "./kept-index.ts";
 import { KEPT_SCHEMA_VERSION, type KeptEntry, keptMetadata } from "./kept.ts";
@@ -79,6 +82,38 @@ export interface HopTargetDeps {
   readonly defaultImage?: () => string | undefined;
   /** Whether a mount may be planned at all (a test turns it off; `run --no-mount`). */
   readonly mount?: boolean;
+  /**
+   * D7(a): does a laptop DETACHED RUN own this workload? `detached-run-of.ts` in
+   * production (`detachedRunOf` ≠ null). That run's relay and TUIs own the
+   * session and the workload's whole lifecycle (docs/feat/detached-runs.md), so a
+   * hop that joined it would be a second owner. Absent: no run check is possible,
+   * and D7(a) then reads as "no run" — which is why `main.ts` always passes it.
+   */
+  readonly detachedRun?: (workload: HopWorkload) => boolean;
+}
+
+/**
+ * What a build may be TOLD, not what it may invent (D9/M6: ONE prompt). When the
+ * owner's approval of a PROPOSAL already carried the mount gate's warning
+ * (`hopPromptFacts` → `gate`), that Yes answered the gate too: asking again at
+ * build time is the second prompt the review found (H5 finding 2).
+ */
+export interface HopBuildOpts {
+  /** The owner approved a prompt that already showed this gate's warning. */
+  readonly gateAnswered?: true;
+}
+
+/**
+ * The facade's `build` (`HopRuntimeDeps.build`) over deps that outlive it: the
+ * ONE place the hop's `opts` is carried from the owner's answer to the factory
+ * (H5 review round 2, finding 1). Written here, not as a lambda at the call
+ * site, because this forwarding is INVISIBLE to the compiler — a lambda with
+ * fewer parameters type-checks and then silently drops `gateAnswered`, which
+ * costs the owner a second prompt for a gate they already answered.
+ */
+export function hopBuilder(deps: Omit<HopTargetDeps, "shared">): HopRuntimeDeps["build"] {
+  return (spec, shared, sessionId, opts) =>
+    createHopTargets({ ...deps, shared })(spec, sessionId, opts);
 }
 
 /**
@@ -87,14 +122,14 @@ export interface HopTargetDeps {
  * left behind.
  */
 export function createHopTargets(deps: HopTargetDeps) {
-  return async (spec: HopSpec, sessionId: string): Promise<HopBuild> => {
+  return async (spec: HopSpec, sessionId: string, opts: HopBuildOpts = {}): Promise<HopBuild> => {
     if (spec.target === "local") {
       return workerTarget(deps, sessionId);
     }
     if (spec.target === "attach") {
       return attachTarget(deps, spec.workload, sessionId);
     }
-    return containerTarget(deps, spec.image, sessionId);
+    return containerTarget(deps, spec.image, sessionId, opts);
   };
 }
 
@@ -123,6 +158,48 @@ async function workerTarget(deps: HopTargetDeps, _sessionId: string): Promise<Ho
 }
 
 /**
+ * The workspace plan and its gate for a container hop — the ONE computation, so
+ * the prompt the owner approves (`hopPromptFacts`) cannot state a mount, an engine
+ * or a warning that the BUILD would not use, and the build cannot raise a second
+ * prompt for something the proposal already asked about (H5 review findings 2, 3).
+ * `null` when no container engine is configured at all (the build then refuses).
+ */
+function containerPlan(deps: {
+  readonly config: TentacleConfig;
+  readonly host: (engine: EngineKind) => HopEngineHost;
+  readonly mount?: boolean;
+  readonly engine: EngineKind;
+  readonly target: HopEngineHost;
+}): {
+  readonly engine: "docker" | "podman";
+  readonly plan: ReturnType<typeof planWorkspace>;
+  readonly gate: ReturnType<typeof mountGate>;
+} | null {
+  const { config } = deps;
+  if (deps.engine !== "docker" && deps.engine !== "podman") {
+    return null;
+  }
+  const plan = planWorkspace(
+    laptopWorkspaceInput({
+      kind: deps.engine,
+      ...(deps.target.endpoint === undefined ? {} : { endpoint: deps.target.endpoint }),
+      noMount: deps.mount === false,
+      cwd: config.cwd,
+      configDir: config.configDir,
+      binDir: "/usr/local/bin",
+      // A key file in the cwd is the dangerous thing to expose (D6's warnings);
+      // the hop has no `run` flags to mask anything else.
+      hide: [],
+    }),
+  );
+  return {
+    engine: deps.engine,
+    plan,
+    gate: mountGate(plan, { interactive: true, confirmed: false }),
+  };
+}
+
+/**
  * A NEW docker/podman container (D1 step 2, D5, D6): the mount plan and its gate
  * first (nothing is created for a refusal), then `startEngineRuntime` — kept.
  * A pod is attach-only (decision 1), so it is refused here rather than built.
@@ -131,6 +208,7 @@ async function containerTarget(
   deps: HopTargetDeps,
   image: string | undefined,
   _sessionId: string,
+  opts: HopBuildOpts = {},
 ): Promise<HopBuild> {
   const { config } = deps;
   const engine = containerEngine(config);
@@ -151,31 +229,32 @@ async function containerTarget(
     return { kind: "failed", notice: `not moved: ${errorText(error, "no engine")}` };
   }
   const noun = engineNoun(engine);
-  const plan = planWorkspace(
-    laptopWorkspaceInput({
-      kind: engine,
-      ...(target.endpoint === undefined ? {} : { endpoint: target.endpoint }),
-      noMount: deps.mount === false,
-      cwd: config.cwd,
-      configDir: config.configDir,
-      binDir: "/usr/local/bin",
-      // A key file in the cwd is the dangerous thing to expose (D6's warnings);
-      // the hop has no `run` flags to mask anything else.
-      hide: [],
-    }),
-  );
+  const computed = containerPlan({
+    config,
+    host: deps.host,
+    ...(deps.mount === false ? { mount: false } : {}),
+    engine,
+    target,
+  });
+  if (computed === null) {
+    return { kind: "failed", notice: "not moved: no docker or podman engine is set" };
+  }
+  const { plan, gate } = computed;
   if (plan.kind === "refuse") {
     return { kind: "failed", notice: `not moved: ${untrustedText(plan.message)}` };
   }
   if (plan.kind === "none" && plan.warning !== undefined) {
     deps.notify(untrustedText(plan.warning));
   }
-  const gate = mountGate(plan, { interactive: true, confirmed: false });
   if (gate.action === "refuse") {
     return { kind: "failed", notice: `not moved: ${untrustedText(gate.message)}` };
   }
-  if (gate.action === "ask") {
+  if (gate.action === "ask" && opts.gateAnswered !== true) {
     // D6: ONE laptop prompt, through the SAME broker the target's daemon asks on.
+    // `gateAnswered`: the owner's approval of the PROPOSAL already showed this
+    // very text (`hopPromptFacts`), so that Yes answered it — a second prompt here
+    // is the bug H5 review found (finding 2). A typed `/move` has no proposal and
+    // reaches this ask as before.
     const mountPath = plan.kind === "mount" ? plan.mount.target : config.cwd;
     const answer = await deps.shared.permissions.request(mountAsk(engine, mountPath, gate.prompt));
     if (!answer.allowed) {
@@ -193,6 +272,13 @@ async function containerTarget(
     runtime = await startEngineRuntime(config, {
       host: target.host,
       image: resolved,
+      // DECISION 1's bind mount: the SAME plan the gate above approved (`run`'s
+      // shape, `main.ts:1504`). Without this the container is created with no
+      // workspace at all — the owner approves a mount of their folder and the
+      // agent then works on the image's own filesystem. Found by the H7 live test
+      // (`session-hop.docker.test.ts`): the file a shell call wrote inside the
+      // container never appeared in the cwd.
+      ...(plan.kind === "mount" ? { workspace: plan.mount } : {}),
       // Kept (D5): `resumeHint` + `recordKept` are the two halves of the `run`
       // shape — the engine keeps it, and `tentacle ps` lists it.
       resumeHint: (name) => `tentacle attach ${name}`,
@@ -207,6 +293,10 @@ async function containerTarget(
       permissions: deps.shared.permissions,
       saver: deps.shared.saver,
       resume: null,
+      // D8/D9: this runtime's client IS the hop TUI (it has the `/move` feed and
+      // the one broker prompt), so it declares `hop` in `initialize` and the pod
+      // daemon keeps offering the model `move_session` on this target.
+      hop: true,
       // Everything the engine says goes to the hop's sinks: no spinner, no raw
       // line while Ink owns the terminal (§7, P8, D6).
       logTerm: HOP_TERM,
@@ -254,6 +344,20 @@ async function containerTarget(
 /**
  * An EXISTING workload (D1 step 2): `attachEngineRuntime` — it never creates,
  * starts or deletes. Nothing is ours to remove, so the undo is only the dispose.
+ *
+ * D7 is decided HERE and not in the orchestrator (H2's drift note): its check
+ * must run before ANY open on the target, and only the factory can place a check
+ * before its own runtime's open. Two calls, each with the facts it has:
+ *
+ *   - (a) a laptop DETACHED RUN owns the workload — before anything is dialled,
+ *     so nothing is injected into a workload that is not ours to touch;
+ *   - (b) `residentUse` after the handshake and BEFORE any open: a resident pod
+ *     daemon is ONE per workload, so a workload with another live client is not
+ *     ours to share (that client can already answer its pod-side asks).
+ *
+ * Our OWN uid on the target is D1 step 4(a)'s (`hopSession`), which reads it
+ * fresh right before the open and closes an idle copy — this factory never joins
+ * one, so it passes `own: null` ("not live here") and leaves it to that step.
  */
 async function attachTarget(
   deps: HopTargetDeps,
@@ -261,6 +365,16 @@ async function attachTarget(
   sessionId: string,
 ): Promise<HopBuild> {
   const { config } = deps;
+  // D7(a) BEFORE any dial (nothing is inspected, nothing injected into a
+  // workload another run owns). No `at`: a run of that name and engine is
+  // treated as this place's, which is the STRICT side — refusing to join is
+  // always safe, joining someone's run is not.
+  if (deps.detachedRun?.(workload) === true) {
+    const refused = d7Refusal(attachVerdict({ workload, detachedRun: true, own: null, use: null }));
+    if (refused !== null) {
+      return refused;
+    }
+  }
   let target: HopEngineHost;
   try {
     target = deps.host(workload.engine);
@@ -268,8 +382,9 @@ async function attachTarget(
     return { kind: "failed", notice: `not moved: ${errorText(error, "no engine")}` };
   }
   deps.status(`moving to ${workloadLabel(workload)} — attaching`);
+  let runtime: LocalRuntime | undefined;
   try {
-    const runtime = await attachEngineRuntime(config, {
+    runtime = await attachEngineRuntime(config, {
       host: target.host,
       name: workload.name,
       ...(workload.container === undefined ? {} : { container: workload.container }),
@@ -277,6 +392,8 @@ async function attachTarget(
       saver: deps.shared.saver,
       resume: null,
       sessionId,
+      // The same declarative as a new container: this client can ask its owner.
+      hop: true,
       logTerm: HOP_TERM,
       log: (line) => deps.notify(untrustedText(line)),
       // The same rule as the container: `info` is the NOTICE sink (D6's spirit,
@@ -284,20 +401,6 @@ async function attachTarget(
       info: (line) => deps.notify(untrustedText(line)),
       notify: deps.notify,
     });
-    return {
-      kind: "built",
-      built: builtOf(
-        runtime,
-        {
-          kind: "workload",
-          engine: workload.engine,
-          name: workload.name,
-          ...(workload.container === undefined ? {} : { container: workload.container }),
-        },
-        // An existing daemon may already hold our uid: D1 step 4(a) applies.
-        { preexisting: true, daemonInPod: true },
-      ),
-    };
   } catch (error) {
     // A user-owned workload is never deleted, and nothing was created here.
     return {
@@ -305,10 +408,103 @@ async function attachTarget(
       notice: `not moved: ${errorText(error, "the workload could not be joined")}`,
     };
   }
+  // D7(b): the handshake is done and NOTHING is open yet (a runtime opens its
+  // session lazily), so this reads the resident before the hop can join it.
+  // `ownMayBeAbsent`: our own session may not be open yet — that is no use of it.
+  const use = await runtime.residentUse(sessionId, { ownMayBeAbsent: true }).catch(() => null);
+  const refused = d7Refusal(attachVerdict({ workload, detachedRun: false, own: null, use }));
+  if (refused !== null) {
+    // Dispose and open nothing (D7): the workload and its client are untouched.
+    await bounded(runtime.dispose(), HOP_ROLLBACK_TIMEOUT_MS);
+    return refused;
+  }
+  return {
+    kind: "built",
+    built: builtOf(
+      runtime,
+      {
+        kind: "workload",
+        engine: workload.engine,
+        name: workload.name,
+        ...(workload.container === undefined ? {} : { container: workload.container }),
+      },
+      // An existing daemon may already hold our uid: D1 step 4(a) applies.
+      { preexisting: true, daemonInPod: true },
+    ),
+  };
 }
 
-/** The engine a `/move container` builds on: docker or podman, never a pod. */
-function containerEngine(config: TentacleConfig): EngineKind | null {
+/** D7's refusal as a build failure: the ONE wording site is `attachVerdict`'s. */
+function d7Refusal(verdict: AttachVerdict): HopBuild | null {
+  return verdict.kind === "refuse"
+    ? { kind: "failed", notice: `not moved: ${verdict.text}` }
+    : null;
+}
+
+/**
+ * The facts a proposed move's prompt shows (docs/feat/session-hop.md D9/M6): the
+ * mount the plan would really use, the engine a container hop would build, and the
+ * workload this session LEAVES (so a `keep: false` is stated before it happens).
+ * PURE (a `planWorkspace` call is a decision, not IO), so `hopPromptDetail` — the
+ * text the owner reads — is built from facts and not from the engine's later word.
+ *
+ * It never throws: a plan that cannot even be made says nothing about a mount,
+ * which is exactly what the prompt must then show (never an invented path).
+ */
+export function hopPromptFacts(
+  deps: Pick<HopTargetDeps, "config" | "host" | "mount">,
+  spec: HopSpec,
+  current: HopPlace,
+): HopPromptFacts {
+  const { config } = deps;
+  const facts: { engine?: HopPromptEngine; mount?: string; workload?: string; gate?: string } = {};
+  const engine = containerEngine(config);
+  if (current.kind === "workload") {
+    facts.workload = workloadLabel(current);
+  }
+  if (spec.target !== "container" || engine === null) {
+    return facts;
+  }
+  if (engine !== "docker" && engine !== "podman") {
+    return facts;
+  }
+  facts.engine = engine;
+  // The SAME plan and gate the BUILD would use (`containerPlan`) — a prompt that
+  // states its own mount is a prompt the owner approves blind (H5 review 3), and
+  // a gate kept out of it asks the owner twice (finding 2).
+  try {
+    const computed = containerPlan({
+      config,
+      host: deps.host,
+      ...(deps.mount === false ? { mount: false } : {}),
+      engine,
+      target: deps.host(engine),
+    });
+    if (computed === null) {
+      return facts;
+    }
+    const { plan, gate } = computed;
+    if (plan.kind === "mount") {
+      facts.mount = plan.mount.target;
+    }
+    // `ask`: the gate's own text, merged into THIS detail (`hopPromptDetail`) so
+    // the owner answers one question. `refuse` needs no line here: the build
+    // refuses with that message and nothing is created.
+    if (gate.action === "ask") {
+      facts.gate = gate.prompt;
+    } else if (gate.action === "proceed" && gate.warnings !== undefined) {
+      facts.gate = gate.warnings.join("\n");
+    }
+  } catch {
+    // No plan (no engine host, an unresolvable path): the prompt says no mount,
+    // which is exactly what the build would then do.
+  }
+  return facts;
+}
+
+/** The engine a `/move container` builds on: docker or podman, never a pod. */ function containerEngine(
+  config: TentacleConfig,
+): EngineKind | null {
   const chosen = config.engine;
   if (chosen === "docker" || chosen === "podman") {
     return chosen;

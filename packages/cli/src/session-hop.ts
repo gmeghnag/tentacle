@@ -61,6 +61,12 @@ export interface HopRequest {
    * laptop's `<uid>.jsonl` continues (never a new session).
    */
   readonly sessionId: string | null;
+  /**
+   * The owner's approval already carried the mount gate's warning (a PROPOSED
+   * move's prompt merged it, D9/M6): the build must not ask a second time
+   * (H5 review finding 2). A typed `/move` never sets it.
+   */
+  readonly gateAnswered?: true;
 }
 
 export interface HopDeps {
@@ -70,7 +76,11 @@ export interface HopDeps {
    * carries it when something was persisted, and it must still be the SAME uid
    * when nothing was (D1 step 3: `resume: null` PLUS the minted uid).
    */
-  readonly build: (spec: HopSpec, sessionId: string) => Promise<HopBuild>;
+  readonly build: (
+    spec: HopSpec,
+    sessionId: string,
+    opts: { readonly gateAnswered?: true },
+  ) => Promise<HopBuild>;
   /** The laptop record of a uid — the seed (`LogSessionStore.load`). */
   readonly load: (uid: string) => Promise<LoadResult>;
   /** A phase line (`moving to docker:box — saving the session`). Never the terminal (D6). */
@@ -140,7 +150,9 @@ export async function hopSession(
   // again AFTER the freeze, which is what heals it (review H2 round 2, HIGH).
   const holdsIt = old.holdsSession(sessionId);
   deps.status?.(`moving to ${targetText(spec)} — preparing the target`);
-  const built = await deps.build(spec, sessionId);
+  const built = await deps.build(spec, sessionId, {
+    ...(request.gateAnswered === true ? { gateAnswered: true as const } : {}),
+  });
   if (built.kind === "failed") {
     return { kind: "failed", notice: built.notice };
   }

@@ -842,6 +842,14 @@ export interface LocalRuntimeDeps {
   /** `container` for `run`/`attach`: picks the advice for a daemon too old to give its own. */
   readonly daemonKind?: DaemonKind;
   /**
+   * This client can put a `move_session` proposal to its owner (docs/feat/session-hop.md
+   * D8/D9): declared in `initialize` as `clientCapabilities.hop`, so a POD daemon
+   * offers the tool to the sessions it creates. Set by a hop target's own runtime
+   * only — a `run`/`attach` TUI has no `/move` feed, and its model must never be
+   * told to propose a move nobody is asked about (H5 review finding 1).
+   */
+  readonly hop?: true;
+  /**
    * The name a "model's config has images off" reason repeats
    * (docs/feat/images-off-reason.md): always THIS laptop's `config.model`.
    */
@@ -902,6 +910,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     hooksTrust,
     clientInfo: CLIENT_INFO,
     ...(deps.daemonKind ? { daemonKind: deps.daemonKind } : {}),
+    ...(deps.hop ? { hop: true as const } : {}),
     ...(deps.titleModelProvider ? { titleModelProvider: deps.titleModelProvider } : {}),
     ...(deps.namedModels ? { namedModels: deps.namedModels } : {}),
     ...(deps.sessionSettings ? { sessionSettings: deps.sessionSettings } : {}),

@@ -26,7 +26,13 @@ import { DELETE_CONTAINER_SUBCOMMAND, deleteContainerFromEnv } from "@tentacle/d
 import { DELETE_POD_SUBCOMMAND, deletePodFromEnv, readKubeconfig } from "@tentacle/k8s";
 import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import type { DuplexChannel } from "@tentacle/transport";
-import { type AutoAcceptFeed, type SessionController, pickSession, startTui } from "@tentacle/tui";
+import {
+  type AutoAcceptFeed,
+  type HopWorkload,
+  type SessionController,
+  pickSession,
+  startTui,
+} from "@tentacle/tui";
 import { attachFailureNotice, unflushedExitsNotice } from "./attach-notice.ts";
 import { type AttachPlan, plainResumeUid, planAttach } from "./attach-plan.ts";
 import { type Joined, joinRun } from "./attach-run.ts";
@@ -44,6 +50,7 @@ import {
   withRunModel,
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
+import { detachedRunOf } from "./detached-run-of.ts";
 import { devicesCommand, resetCommand, revokeCommand } from "./devices-cmd.ts";
 import { type EngineHost, type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
 import {
@@ -94,7 +101,7 @@ import { createHopFeed } from "./hop-feed.ts";
 import { createHopLeave } from "./hop-leave.ts";
 import type { HopPlace } from "./hop-plan.ts";
 import { createHopRuntime } from "./hop-runtime.ts";
-import { type HopEngineHost, createHopTargets } from "./hop-targets.ts";
+import { type HopEngineHost, hopBuilder, hopPromptFacts } from "./hop-targets.ts";
 import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
 import {
   forgetKept,
@@ -102,7 +109,6 @@ import {
   keptFileName,
   keptSessionNotice,
   locationKey,
-  readKept,
   recordKept,
   trackKeptSession,
 } from "./kept-index.ts";
@@ -118,7 +124,7 @@ import { LOG_TAIL_DEFAULT, parseOnly } from "./log-events.ts";
 import { logsCommand } from "./logs-cmd.ts";
 import { packagesCommand, spawnGit } from "./packages-cmd.ts";
 import { pairCommand } from "./pair.ts";
-import { POD_DAEMON_MODES, lockHolder, runResidentMode } from "./pod-resident.ts";
+import { POD_DAEMON_MODES, runResidentMode } from "./pod-resident.ts";
 import { failedLine, notListedLine } from "./pod-stderr-log.ts";
 import { launchRelay, relayMain, type spawnRelayProcess } from "./relay.ts";
 import { AnswerSplit } from "./render.ts";
@@ -128,7 +134,6 @@ import {
   RUN_STATE_VERSION,
   elsewhereMessage,
   laptopProc,
-  readOwner,
   relayBlockingMessage,
   runDirFor,
   runStem,
@@ -1223,6 +1228,14 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     hostFor: (entry) => buildEngineHost(entry.engine, hostOptionsFor(entry)).host,
   });
 
+  /**
+   * D7(a): does a laptop detached run own this workload (`detached-run-of.ts`)?
+   * Asked of the index and this laptop's clock, before anything is dialled: a
+   * run's relay and TUIs own its session and lifecycle, so a hop never joins it.
+   */
+  const hopDetachedRun = (workload: HopWorkload): boolean =>
+    detachedRun(workload.name, workload.engine) !== null;
+
   const openSessions = (flags: Map<string, string>, bools: Set<string>, implicit = false) =>
     openTuiSessions(
       {
@@ -1609,49 +1622,22 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   }
 
   /**
-   * The kept entry named `name` that is a detached run: its run dir has a record
-   * or a live lock. `at`: the place explicit flags name, compared with the
-   * entry's, because a run's quit may delete its workload: another place's run
-   * is never this attach's. Only what `at` cannot rule out comes back as
-   * `elsewhere`: a live relay of that name, S2's refusal (nothing is dialled, so
-   * one workload reached by two addresses cannot be told from two workloads).
+   * The detached run named `name`, if any: `detached-run-of.ts`'s (H6 moved it
+   * out of this closure, review M8 — a hop's D7(a) asks the SAME question), over
+   * this process's config dir and clock.
    */
-  const detachedRunOf = (
-    name: string,
-    engine: EngineKind | undefined,
-    at?: () => string | null,
-  ) => {
-    type Run = {
-      entry: KeptEntry;
-      dir: string;
-      holder: ReturnType<typeof lockHolder>;
-      owner: ReturnType<typeof readOwner>;
-    };
-    let elsewhere: Run | null = null;
-    for (const { entry } of readKept(keptDir(config.configDir)).entries) {
-      if (entry.name !== name || (engine !== undefined && entry.engine !== engine)) {
-        continue;
-      }
-      const dir = runDirFor(config.configDir, entry);
-      const holder = lockHolder(dir, laptopProc);
-      const owner = readOwner(dir);
-      if (holder === null && owner.kind === "none") {
-        continue;
-      }
-      if (at === undefined || at() === locationKey(entry)) {
-        return { entry, dir, holder, owner, elsewhere: false };
-      }
-      if (holder !== null) {
-        elsewhere ??= { entry, dir, holder, owner };
-      }
-    }
-    return elsewhere === null ? null : { ...(elsewhere as Run), elsewhere: true };
-  };
+  const detachedRun = (name: string, engine: EngineKind | undefined, at?: () => string | null) =>
+    detachedRunOf(
+      { configDir: config.configDir, dir: keptDir(config.configDir), procOf: laptopProc },
+      name,
+      engine,
+      at,
+    );
   /** Why `attach` stops on a detached run (`planAttach`'s refusals). */
   const attachRefusal = (
     name: string,
     plan: AttachPlan,
-    run: NonNullable<ReturnType<typeof detachedRunOf>>,
+    run: NonNullable<ReturnType<typeof detachedRun>>,
     noun: string,
   ): string => {
     const shown = untrustedText(name);
@@ -1795,7 +1781,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     // its quit ends the run when it is the last client. With no `owner.json`
     // (a user's own pod, Q4) it is today's attach. Nothing is dialled first.
     for (let attempt = 0; ; attempt++) {
-      const run = detachedRunOf(name, asked, asked ? () => askedAt(asked) : undefined);
+      const run = detachedRun(name, asked, asked ? () => askedAt(asked) : undefined);
       if (run === null) {
         break;
       }
@@ -2092,17 +2078,21 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           initial: runtime,
           startup: { place: { kind: "local" }, daemonInPod: false },
           shared: { permissions, saver },
-          build: (spec, sharedPair, sessionId) =>
-            createHopTargets({
-              config,
-              shared: sharedPair,
-              // D6: the engine's lines go to the hop's sinks — never a raw write
-              // while Ink owns the terminal (AGENTS §7, P8).
-              status: (line) => hopStatus(line),
-              notify: (text) => sessions.notices.notify(text),
-              host: (engine) => hopEngineHost(engine),
-              defaultImage: () => process.env.TENTACLE_POD_IMAGE,
-            })(spec, sessionId),
+          // `hopBuilder` (not a lambda): it is the ONE place the facade's
+          // `opts` — the owner's approval already answered the mount gate —
+          // reaches the factory. Dropping it is invisible to the compiler (H5
+          // review round 2, finding 1), and true here before that fix.
+          build: hopBuilder({
+            config,
+            // D6: the engine's lines go to the hop's sinks — never a raw write
+            // while Ink owns the terminal (AGENTS §7, P8).
+            status: (line) => hopStatus(line),
+            notify: (text) => sessions.notices.notify(text),
+            host: (engine) => hopEngineHost(engine),
+            defaultImage: () => process.env.TENTACLE_POD_IMAGE,
+            // D7(a): a workload a laptop detached run owns is not a hop's to join.
+            detachedRun: (workload) => hopDetachedRun(workload),
+          }),
           load: (uid) => sessions.store.load(uid),
           status: (line) => hopStatus(line),
           notify: (text) => sessions.notices.notify(text),
@@ -2113,6 +2103,17 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           notify: (text) => sessions.notices.notify(text),
           // D5: the ONE place that decides a leave, through the verified delete.
           leave: (before, keep) => hopLeave(before, keep),
+          // D9/H5: a proposed move is asked on the SAME broker the TUI installs its
+          // prompt on (AGENTS §7, single broker) — a second one would silently
+          // auto-approve it daemon-side. The prompt's facts come from the plan the
+          // target would use, so the owner reads the real image and mount.
+          permissions,
+          promptFacts: (spec) =>
+            hopPromptFacts(
+              { config, host: (engine) => hopEngineHost(engine) },
+              spec,
+              place.current,
+            ),
         });
         hopStatus = hopView.status;
         const offTarget = facade.onTarget((view) => {

@@ -32,6 +32,7 @@ import {
   AGENT_NOTIFY_TOOL_NAME,
   AGENT_STATUS_TOOL_NAME,
   CONTEXT_RESET_TOOL_NAME,
+  MOVE_SESSION_TOOL_NAME,
   ToolRegistry,
   createAgentNotifyTool,
 } from "@tentacle/tools";
@@ -380,9 +381,14 @@ export function createSubagentRunner(deps: SubagentDeps): {
       // ids) — `docs/feat/agent-status.md`. Its three old names stay listed: an
       // old `agents/*.md` may name one, and an old session's replay must not
       // hand it to a child either.
+      // `move_session` is the PARENT's: its proposal is answered by the laptop's
+      // TUI at the end of the turn it watches, and a child's turn is not that one
+      // (docs/feat/session-hop.md D9), so a child would be told "Proposed" about a
+      // prompt nobody sees.
       if (
         tool.name === spawnToolName ||
         tool.name === CONTEXT_RESET_TOOL_NAME ||
+        tool.name === MOVE_SESSION_TOOL_NAME ||
         tool.name === AGENT_CONTROL_TOOL_NAME ||
         tool.name === AGENT_KILL_TOOL_NAME ||
         tool.name === AGENT_MESSAGE_TOOL_NAME ||
@@ -610,6 +616,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
       if (
         toolName === spawnToolName ||
         toolName === CONTEXT_RESET_TOOL_NAME ||
+        toolName === MOVE_SESSION_TOOL_NAME ||
         toolName === AGENT_CONTROL_TOOL_NAME ||
         toolName === AGENT_KILL_TOOL_NAME ||
         toolName === AGENT_MESSAGE_TOOL_NAME ||

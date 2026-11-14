@@ -315,16 +315,51 @@ export interface HopFeed {
   /**
    * Start the hop. `sessionId` is the uid of the session being moved — the App
    * knows it (its controller's `sessionId`), and the host cannot guess it without
-   * minting a second one (D1 step 3 seeds the SAME uid).
+   * minting a second one (D1 step 3 seeds the SAME uid). `opts.gateAnswered`: the
+   * owner approved a PROPOSAL whose prompt already carried the mount gate's
+   * warning (D9/M6), so the build must not ask a second time.
    */
-  start(spec: HopSpec, sessionId: string | null): HopRun;
+  start(spec: HopSpec, sessionId: string | null, opts?: { gateAnswered?: true }): HopRun;
   /**
    * Abort the hop in flight (D3's `/move cancel`). Optional: a host that cannot
    * stop a build half-way leaves it to its own failure path, and the App then
    * only clears a QUEUED hop.
    */
   cancel?(): void;
+  /**
+   * One event of a turn, forwarded as it streams (docs/feat/session-hop.md D9,
+   * slice H5). The host folds it (`cli/src/hop-turn.ts`, pure) to see a
+   * `move_session` call finish; the App decides NOTHING here and keeps no state —
+   * it only reports what its own stream saw, `own` being its own-turn fact.
+   * Present only where the host offers the tool at all (D8's other origins have
+   * no proposal to watch).
+   */
+  turn?(event: SessionEvent, own: boolean): void;
+  /**
+   * The turn is over: ask the owner, if the model proposed a move (D9). The host
+   * puts ONE `session_hop` request through the single broker — never auto-accept —
+   * and resolves with what its answer means for the App: an approved spec to move
+   * (the App starts it as if it had been typed), or nothing. It never rejects: an
+   * unaskable prompt is a refusal, and the model is told.
+   */
+  turnEnd?(own: boolean): Promise<HopProposalView>;
+  /**
+   * The line the next REAL prompt must carry, CONSUMED by this read (review M7):
+   * `[move declined]` after a refusal, `[session moved to …]` after a commit. It
+   * belongs to exactly one prompt, so it can neither be lost nor repeated.
+   */
+  takeLine?(): string | null;
 }
+
+/**
+ * What a turn's end decided about a proposal, as the App needs it (structurally
+ * the cli's `HopProposalOutcome`, which is where the decision is made).
+ */
+export type HopProposalView =
+  | { readonly kind: "none" }
+  /** `gateAnswered`: the prompt this Yes answered already carried the mount gate's warning. */
+  | { readonly kind: "approved"; readonly spec: HopSpec; readonly gateAnswered?: true }
+  | { readonly kind: "declined" };
 
 export interface AppProps {
   /** A local agent; used to build sessions unless `createSession` is given. */

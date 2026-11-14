@@ -195,8 +195,11 @@ reader, verified delete):
    own uid first** (review H1). Read `session/list` after the handshake. If it
    lists this uid, first `session/close` it and read the list again. Then seed.
    If the close is not confirmed, or the uid is still listed, refuse: "<name>
-   still holds an older copy of this session". A fresh container or worker
-   cannot hold the uid, so it skips (a).
+   still holds an older copy of this session". A copy with another client
+   ATTACHED to it is not closed at all — it is refused like a running one (H6
+   review fix round 1, finding 2: `attached` is the only field that says a
+   plain `tentacle attach` TUI is sitting in an idle-looking session). A fresh
+   container or worker cannot hold the uid, so it skips (a).
    (b) `store.load(uid)` gives the laptop record, then
    `target.openSeeded(record)`, then require `target.saveConfirmed()` for this
    uid (M1). If any of these fails (VersionMismatch, an open error, a save that
@@ -277,8 +280,10 @@ session attached, running or holding jobs** (`others === 0`, with
 `ownMayBeAbsent`). Otherwise: dispose, open nothing, and say "<name> is in use
 by another session". (c) If our OWN uid is live there (a hop whose close
 failed, or a TUI killed while inside the container), it is not joined. If it
-is running or holds jobs, refuse. Otherwise close it, then seed (D1 step
-4(a)). Why: the pod daemon is ONE resident per workload. Joining
+is running, holds jobs, or has a client ATTACHED (`running || jobs > 0 ||
+attached > 0`), refuse — closing an idle copy under an attached TUI ends that
+client's session just as surely as killing a turn. Otherwise close it, then
+seed (D1 step 4(a)). Why: the pod daemon is ONE resident per workload. Joining
 a busy one shares it with another client's conversation, and that client can
 already answer that pod's pod-side asks (`detached-runs.md`, AGENTS §7). A
 workload with someone already in it is "not ours to share". Check (b) reads
@@ -522,13 +527,15 @@ it ships is wrong, but two pure modules are now incomplete, and **H2 must
 extend them** (red first, §9):
 
 - `hop-plan.ts` `AttachVerdict` (`:139-171`) gains a third outcome,
-  `{kind: "close-own"}`. It needs a new input, `own: {running, jobs} | null`
-  (whether our uid is live on the target; computed from the same
+  `{kind: "close-own"}`. It needs a new input, `own: {running, jobs, attached} |
+  null` (whether our uid is live on the target; computed from the same
   `session/list` read, because `ResidentUse` has no "own present" field,
-  `relay-state.ts:284-292`). If own is live and idle → `close-own`. If own is
-  running or holds jobs → `refuse` "<name> still holds an older copy of this
-  session". This is checked after `detachedRun` and before `others`. New
-  table rows and a mutation (drop the `own` branch → the row fails).
+  `relay-state.ts:284-292`). If own is live and idle and nobody is attached →
+  `close-own`. If own is running, holds jobs, or has a client attached →
+  `refuse` "<name> still holds an older copy of this session". This is checked
+  after `detachedRun` and before `others`. New table rows and a mutation (drop
+  the `own` branch → the row fails; drop `attached` from the verdict → the
+  attached-client row fails).
 - `hop-proposal.ts` `proposalNotice` stays the one-line notice. The full
   prompt detail (M6) is a NEW pure builder (`hopPromptDetail(plan,
   mount)`) that H5 adds. The image/delete/sanitize properties that H1 already
@@ -1413,3 +1420,802 @@ file is touched by this round, and the re-run is green — runner contention, no
 **Gate:** `bun test packages/cli packages/tui`: 4825 pass, 0 fail. `bun run lint`: 1130 files, clean. `bun run typecheck`: 0. I did not re-run the full `bun test`; the executor reports it green.
 
 *— claude-opus-5-5, 2026-11-14*
+
+## Execution — H5
+
+### H5 — the agent's `move_session` proposal, and the prompt it becomes
+
+*— claude-sonnet-4-5-20250929, 2026-11-14*
+
+**Load-bearing check re-run FIRST** (as instructed, on this branch's tree). The
+plan's rig in `.tentacle/tmp/session-hop/hop-repro.ts` points at the OLD worktree
+(`../../worktrees/session-hop/...`), so it was re-run from a copy in this tree
+(`.tentacle/tmp/session-hop/h5/hop-repro.ts`, imports rewritten to `../../../../`):
+
+```
+$ bun .tentacle/tmp/session-hop/h5/hop-repro.ts
+B uid == A uid: true
+B model saw: sys | hello from local | reply-A
+after B: system:sys | user:hello from local | assistant:reply-A | user:hello from container | assistant:reply-B
+files: 1 one .jsonl: true
+```
+
+PASS: the same uid, the laptop record as the seed on a fresh daemon, one
+`<uid>.jsonl`, no aside file. The assumption H5 stands on is intact, so no STOP
+condition applied.
+
+**As built, in dependency order.**
+
+1. **`packages/config` — `sessionHop.tool` (the gate, D9/decision 6).**
+   `schema.ts` (a `.strict()` section like `contextReset`), `defaults.ts`
+   (`DEFAULT_SESSION_HOP_TOOL = true`), `resolve.ts` (`SessionHopConfig`, the
+   `sessionHopTool` provenance, `TENTACLE_SESSION_HOP_TOOL`), `load.ts`
+   (on `TentacleConfig`), `profile.ts` (per-key merge), `key-docs.ts` (the
+   section + leaf entries, whose `profiles.*` mirror `derive()` builds). The
+   README table was regenerated with `bun run docs:config`.
+2. **`packages/tools/src/move-session.ts` — the tool (D9).** `permission:
+   "none"` (there is no daemon-side effect to authorize, and an `ask` here would
+   ask the owner twice, the daemon's copy being the one a standing approval can
+   wave through), `concurrency: "exclusive"`, a zod schema that is the `HopSpec`
+   the typed `/move` produces, and an `execute` that re-validates its own input
+   and answers one sentence. `MOVE_SESSION_PROPOSED` says "Do not assume the move
+   happened". `reason` is capped at 500; a workload name must match
+   `^[A-Za-z0-9][A-Za-z0-9._-]*$` (253 max), the same grammar as the typed path.
+3. **`packages/cli/src/wiring.ts` — registration (review M5).**
+   `BuildAgentOptions.moveSession?: true` (a boolean because that site has no
+   daemon KIND), and the registration at the `contextReset` site:
+   `options.moveSession === true && config.sessionHop.tool`. Set by
+   `worker.ts` (its one `workerAgentFactory`) and the pod daemon
+   (`serve.ts`'s `podSessionHost`, both branches — tunnel and own-model) via
+   `tunnelledAgent`'s options. `serve`, in-process, one-shot and child builds
+   never set it.
+4. **`packages/agent/src/subagent.ts` — a child never gets it.** Added
+   `MOVE_SESSION_TOOL_NAME` to BOTH "never a child" lists (`childTools`' filter
+   and `readOnlyType`'s). This was a REAL leak, not a theoretical one: `general`
+   is `tools: "all"`, so the tool was inherited by every general child, whose
+   turn is not the one the laptop watches (`own: false`) — it would have been
+   told "Proposed" about a prompt nobody is ever asked.
+5. **`packages/cli/src/hop-proposal.ts` — the prompt's text (review M6).**
+   `hopPromptTitle`, `HopPromptFacts`, `hopPromptDetail(spec, facts)`: the
+   engine, the FULL image (or "the default image"), the host mount path
+   read-write, the inject + "your folder is NOT shared" for k8s, the
+   keep/DELETED intent for the workload being left, what gets reset — then the
+   model's `reason` LAST and labelled, everything daemon-supplied through
+   `untrustedText`. D6's mount-gate `ask` MERGES into this same text.
+6. **`packages/cli/src/hop-turn.ts` (new) — the turn-end decision (D9).** Pure:
+   `hopTurnStep`/`hopTurnEnd` (a per-turn watch on `hopProposalStep`, an
+   own-turn-only fold, ended state so a late result cannot re-open it),
+   `hopPromptRequest` (a `session_hop` request), `hopProposalOutcome`
+   (`allowed` is the only yes; `dismissed` is never one), `hopAskAtTurnEnd`
+   (asks through an INJECTED `ask`, so no broker is imported and a test's spy is
+   the single-broker proof), `moveGuideLine`/`MOVE_DECLINED_LINE` (review M7).
+7. **`packages/cli/src/hop-feed.ts` — the feed's half.** New deps `permissions`
+   (the ONE broker) and `promptFacts`; `turn`/`turnEnd`/`takeLine` on `HopFeed`.
+   A decline stores the line for the next prompt, a commit stores the moved
+   line, `takeLine` CONSUMES it. No broker → nothing can be approved (honest: a
+   proposal nobody can be asked about moves nothing).
+8. **`packages/cli/src/hop-targets.ts` — `hopPromptFacts`.** The mount the plan
+   would really use (`planWorkspace`), the engine a container hop would build,
+   the workload being left. Never throws.
+9. **`packages/tui` — the App's two facts, no new effect.** `HopFeed.turn/
+   turnEnd/takeLine` (`app-types.ts`), `HopTurnPort` (`useTurnDriver.ts`,
+   satisfying `useExhaustiveDependencies` by name, not by disabling it),
+   `hopWithLine` (the ONE concatenation, exported for its test). The driver
+   forwards each event (`own = opts.own !== undefined && !opts.foreign`) inside
+   `streamTurn`, asks once at the settle (`hopTurn.end`), and starts an approved
+   spec through the App's `startHopRef` — the ONE place the view moves (D3).
+   `App` supplies the port, absent exactly where `hop` is absent (D8).
+10. **`packages/cli/src/main.ts`** passes `permissions` (the same instance the
+    facade and the TUI share) and `promptFacts: hopPromptFacts(...)` to
+    `createHopFeed`.
+
+**Drift from the Implementation, and why.**
+
+- **The plan's H5 file list omits the TUI, but D9's prompt needs it.** The
+  broker lives with the facade and the turn's events live in the App, so two
+  small additive seams were required (`HopFeed.turn/turnEnd/takeLine`,
+  `HopTurnPort`). All the DECIDING stays in `hop-turn.ts` (pure), per §7.
+- **The declined/moved line is CONSUMED by `takeLine`, not read from a
+  `HopNextPromptLine` union.** The cli first had its own `withHopLine`; the
+  driver needs the same concatenation, and two implementations of "join one line
+  to a prompt" is exactly the duplication §7 forbids. The cli keeps the TEXT, the
+  driver keeps the join (`hopWithLine`), and the cli's copy was deleted.
+- **`hopPromptFacts` lives in `hop-targets.ts`, not `hop-proposal.ts`.** It
+  calls `planWorkspace`, which is a `cli` engine-side decision; `hop-proposal.ts`
+  stays IO-free and takes the facts as an argument.
+- **`MOVE_GUIDE_LINE` became `moveGuideLine(where)`** — it names the place, and a
+  constant could not.
+- **The tool duplicates the workload grammar** (`@tentacle/tools` may not depend
+  on the TUI). The laptop's `hopSpecOf` remains the authority and re-checks every
+  argument through `hopWorkload`, so the two cannot disagree (the stricter one
+  refuses first); the duplication is commented at the regex.
+
+**Red first.** Each new module's test file was written against a tree without it:
+`move-session.test.ts` failed to resolve `../src/move-session.ts`;
+`hop-prompt.test.ts` failed on `MOVE_GUIDE_LINE` not being exported;
+`hop-turn.test.ts` failed on the real property (`hopAskAtTurnEnd` dropped the
+proposal's `reason`, and `hopPromptDetail` said "DELETED" where the test expected
+"delete"). The durable proof is the mutation table (§9), not those first runs.
+
+**Mutation checks** (each broken in the final tree, the narrow file(s) run,
+restored; `md5` printed before and after every restore — the script is
+`.tentacle/tmp/session-hop/h5/mutate.sh`).
+
+| # | mutation | result |
+|---|---|---|
+| M1 | `autoApproves` answers `session_hop` (the plan's named mutation) | **1 fail** — "auto-accept can NEVER answer it" |
+| M2 | `hopAskAtTurnEnd` never asks (the `!ended` guard → `if (true)`) | **10 fail** across both turn files |
+| M3 | a refusal/`dismissed` read as a yes | **1 fail** — the declined-outcome row |
+| M4 | `hop-feed` asks about a FOREIGN turn (`!own` guard dropped) | **1 fail** — the guard row |
+| M5 | the declined line is never kept | **2 fail** — declined line + consumed-once |
+| M6 | `takeLine` never consumes | **2 fail** |
+| M7 | `move_session` registered for EVERY build (review M5) | **2 fail** — `serve`/in-process rows |
+| M8 | the `sessionHop.tool` gate ignored (decision 6) | **1 fail** — its off row |
+| M9 | `move_session` dropped from the child filter | **2 fail** — both child rows |
+| M10 | the proposal's `reason` dropped from the prompt | **1 fail** — reason-last row |
+| M11 | the mount dropped from the prompt | **1 fail** — read-write row |
+| M12 | the delete intent hidden | **1 fail** — keep/delete row |
+| M13 | the tool answers "Moved." instead of "Proposed…" | **3 fail** — the propose-only rows |
+
+All 13 reverted; `md5` identical before and after each, no `.mutbak` left.
+
+**M4 was VACUOUS at first, and the TEST was fixed (§9).** `hopTurnStep` already
+drops a foreign turn's events, so the `turnEnd` `!own` guard was unreachable from
+the "foreign turn" row (on its own: `0 fail`). `own` at the fold and `own` at the
+turn's end are two separate facts the driver reports separately, so a new row
+folds a proposal as OWN and ends the turn as FOREIGN: the guard is then what
+holds, and the mutation fails.
+
+**Tests.** `packages/tools/test/move-session.test.ts` (12) ·
+`packages/cli/test/move-session-wiring.test.ts` (4, the real `buildAgent`) ·
+`packages/agent/test/subagent-move-session.test.ts` (2, the real
+`createSubagentRunner` over a registry that HOLDS the tool) ·
+`packages/cli/test/hop-prompt.test.ts` (13) · `packages/cli/test/hop-turn.test.ts`
+(13) · `packages/cli/test/hop-feed-turn.test.ts` (12, the real `createHopFeed`
+over a spy broker). Existing rows moved: none.
+
+**Not in this slice (deliberately).** No attach flow beyond the factory (H6's D7
+checks), no live docker test (H7), no `protocol.d/` note and no schema
+regeneration (D10: no method, update kind or field changed — `session_hop` is a
+laptop-internal `PermissionRequest.kind` and `move_session` is a tool definition).
+
+**Changelog.** H1's `changelog.d/session-hop.added.md` already carries the
+feature's bullet including the tool and its prompt (it was written ahead for this
+slice), so H5 adds only what is NEW and user-visible beyond it:
+`changelog.d/session-hop.changed.md` for the `sessionHop.tool` setting.
+
+**Gate (final tree).** `bun run typecheck` (`tsc --noEmit && tsc -p apps/mobile`)
+→ 0 · `bun run lint` (`biome check .`) → `Checked 1245 files`, 0 errors / 0
+warnings (the baseline is clean) · `bun test` → **9192 pass, 3 skip** (the
+documented opt-ins: live-k8s, live-docker, the real-socket keepalive), **0 fail**
+across 664 files. No protocol file changed, so `packages/protocol/schema/protocol.json`
+was NOT regenerated and no `protocol.d/` note was written (D10). Formatting and
+import order are the repo's (`bunx biome check --write` on the touched files).
+
+**Not re-verified here:** the App-driven path end to end (a real `move_session`
+turn in `ink-testing-library` driving `hop.onApproved` into `startHop`) has no
+frame test of its own; its two halves are covered (`hop-feed-turn.test.ts` for
+the feed, `session-hop.test.tsx` for `startHop`). To verify: render the App with
+a `hop` feed whose `turnEnd` resolves `{kind:"approved"}`, after one
+`tool_start`/`tool_result` pair on `move_session`, and assert the status row
+starts with `moving to`.
+
+## Review — H5
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; a different model family from the H5 executor, claude-sonnet-4-5)
+
+**Verdict: REQUEST-CHANGES.**
+
+Gate: these 7 test files (tools/move-session, cli/move-session-wiring, agent/subagent-move-session, cli/hop-prompt, cli/hop-turn, cli/hop-feed-turn, tui/session-hop) → 75 pass / 0 fail. `bun run typecheck` → 0. `bun run lint` → 1245 files, clean. Full `bun test` was NOT re-run here.
+
+1. **HIGH — every `run`/`attach` pod is offered a tool that nobody answers.** `serve.ts:754,765` set `moveSession: true` inside `podSessionHost`. Every pod daemon goes through it: `run`, `attach`, detached and resident (`pod-resident.ts:803`). D8, though, gives those TUIs no `hop` prop. So on a plain `tentacle run` (k8s is the default engine), the model calls `move_session` and gets back "Proposed; the user will be asked when this turn ends". No prompt is ever raised. That is a silent drop plus a false statement to the model: the same class as the sub-agent leak this slice fixed. The laptop's TUI needs to be the one that tells the daemon whether a hop is possible (for example a hop target's spawn passes a flag or env, and a plain run does not). Otherwise `run`/`attach` must not register the tool.
+2. **MEDIUM — M6 ("ONE prompt even when the mount gate says ask") is not met in production.** `hopPromptFacts` (`hop-targets.ts:322`) never sets `gate`. The build then still raises its own `mountAsk` on the broker (`hop-targets.ts:182`). Scenario: cwd is a sensitive folder → the owner approves the proposal without seeing the gate warning, then gets a second prompt. The `hop-prompt.test.ts:97` row passes in a hand-made `gate` string, so it proves nothing about this path.
+3. **MEDIUM — the mount the prompt shows is not the mount the build uses.** `hopPromptFacts` calls `planWorkspace` without `endpoint` and with `noMount: false`. The real build passes `target.endpoint` and `deps.mount === false` (`hop-targets.ts:156-161`). So with a remote `tcp://` engine, or `mount: false`, the prompt claims "mount: <cwd> (read-write)" and that mount never happens. The owner is approving facts that are wrong.
+4. **MEDIUM — the production path from proposal to prompt has no test.** Mutation: I deleted `hopTurn?.event(...)` (`useTurnDriver.ts:571`), so no event ever reaches the fold and no proposal can ever be asked. Result: `bun test packages/tui` + `hop-feed-turn` + `hop-turn` → **2011 pass, 0 fail**. Reverted with an exact Edit; `git status` clean afterwards. The executor noted this gap as "not re-verified". §9 requires that the property hold on the real path, so it needs an App-level frame test (tool_start/tool_result → prompt → `moving to`).
+
+**Attacks tried:**
+- Could a broker grant auto-answer a `session_hop` request? No. `autoApproves` excludes it (`permission-ui.ts:60`), it has its own `hopChoices`, and `hopProposalOutcome` ignores `scope`.
+- Could a foreign turn or a sub-agent raise the prompt? No. Both the fold and `turnEnd` check `own`, and the child filters drop the tool. These hold.
+- The single-broker invariant: `main.ts` passes the same `permissions` instance to `createHopFeed` and `startTui`. Holds.
+- The turn-end ask runs in `finally`, so it also fires after an abort or an error. When a send-now succeeds, the watch carries over into the successor turn and is asked at that turn's end. That is acceptable.
+
+**How the executor behaved:** a thorough mutation table and an honest "not re-verified" note. But the M6 property was proven only on a pure string, not on the build that actually runs, and the scope of the pod-daemon registration was not checked against D8.
+
+### Fix round 1 — the H5 review's HIGH/MEDIUM findings
+
+*— claude-opus-5-5, 2026-11-14*
+
+Scope: the four findings of `## Review — H5` above, and nothing else. Red before
+green (§9) for each, plus a mutation per fix (each broken in this tree, its
+narrow file(s) run, restored, `md5` printed before and after — no `.bak` left).
+
+**Finding 1 (HIGH) — every `run`/`attach` pod was offered a tool nobody answers. FIXED.**
+
+`podSessionHost` set `moveSession: true` for every session of a pod daemon, but
+D8 gives a `run`/`attach` TUI no `hop` prop: the model was told to propose a move
+no prompt could raise, and its `tool_result` said so. The tool is now offered
+**per SESSION, to the client that can actually ask** — a new capability, threaded
+the whole wire:
+
+- `protocol/src/session.ts`: `ClientCapabilitiesSchema.hop?: boolean` (optional,
+  additive: an older daemon drops it, so it fails closed).
+- `client/src/remote-client.ts`: `RemoteClientOptions.hop` → `initialize` sends
+  `clientCapabilities.hop`; read once per handshake (a reconnect re-declares).
+- `daemon/src/connection.ts`: `initialize` stores it per CONNECTION; `open` puts
+  it on the `Attachment` that creates the session.
+- `daemon/src/hosted-session.ts` / `session-host.ts`: `Attachment.hop`,
+  `HostedSession.hop`, and `build` hands it to `createAgent` as
+  `AgentContext.hop` — the CREATING client's fact, kept across a settings sync
+  (`updateSettings` passes `hosted.hop`).
+- `cli/src/serve.ts`: `podSessionHost`'s two branches pass
+  `hop ? { moveSession: true } : {}` instead of unconditionally.
+- `cli/src/local-runtime.ts` + `engine-runtime.ts` (`EngineRuntimeDeps.hop`,
+  `EngineAttachRuntimeDeps.hop`) and `hop-targets.ts`: a HOP target's own runtime
+  declares `hop: true` (it has the `/move` feed and the one broker prompt), so a
+  moved session keeps proposing; `run`/`attach` never do. The worker's
+  unconditional `moveSession` stays: a worker runtime exists only for the local
+  TUI, which is hop-capable.
+
+*Red first:* `packages/cli/test/move-session-pod-capability.test.ts` (new) drives
+the REAL stack — `podSessionHost` → `Connection` → `RemoteClient` → a turn — and
+asserts the tool list on the provider's `ChatRequest`: a client that declares no
+`hop` is never offered `move_session`, a hop-capable one is. *Mutation:* the
+pre-fix shape (`moveSession: true` in both `podSessionHost` branches) → **1 fail**
+("a client that declares NO hop capability (`run`/`attach`) is never offered it"),
+with the received list naming `move_session`; restored, md5 `7bd05367…` unchanged.
+
+**Finding 2 (MEDIUM) — M6's "ONE prompt" was not met in production. FIXED, in two halves.**
+
+(a) **The gate's warning now reaches the prompt.** `hopPromptFacts` never set
+`gate`, so a dangerous cwd produced the proposal prompt AND a second gate ask at
+build time. The facts now carry `gate` (the gate's `ask` text) or
+`gateWarnings` (a `proceed` with warnings), merged into the SAME detail by
+`hopPromptDetail` — D9's wording, finally true.
+
+(b) **A Yes to that detail answers the gate.** The decision is a pure-module
+fact, not a branch in the component: `hopProposalOutcome` gains the `shown` facts
+and returns `gateAnswered: true` when the prompt it accepted carried one. It
+travels `HopProposalOutcome` → `HopProposalView` → `HopTurnPort.approved` → the
+App's `startHop` → `HopFeed.start` → `HopRuntime.hop` → `hopSession` →
+`deps.build(…, {gateAnswered})` → `containerTarget`, which skips its own ask. A
+typed `/move` never sets it, so D6's ask is unchanged for a typed move.
+
+*Red first:* `packages/cli/test/hop-prompt-facts.test.ts` (new, 6 rows) — the
+`/etc` gate row red; `packages/cli/test/session-hop-targets.test.ts` gains "an
+APPROVED proposal (`gateAnswered`) is ONE prompt"; `hop-turn.test.ts` gains the
+turn-end half (`gateAnswered` present with a gate, absent without).
+*Mutations:* `facts.gate` never set → **1 fail**; `hopAskAtTurnEnd` dropping
+`shown` → **1 fail**; `containerTarget` ignoring `opts.gateAnswered` → **1 fail**.
+Each restored, md5 `7de06973…` / `eacb8002…` unchanged.
+
+**Finding 3 (MEDIUM) — the prompt showed a mount the build would not use. FIXED.**
+
+`hopPromptFacts` built its own plan (`kind: "docker"`, `noMount: false`, no
+endpoint) while `containerTarget` passes the real engine, the real endpoint and
+`deps.mount === false`. Both now call ONE new helper, `containerPlan` — the same
+plan and the same `mountGate`, so the prompt cannot state a mount, an engine or a
+warning the build would not act on. `hopPromptFacts`'s inputs are the build's own
+deps (`Pick<HopTargetDeps, "config" | "host" | "mount">`), which is what makes the
+divergence unrepresentable; `main.ts` passes them.
+
+*Red first:* `hop-prompt-facts.test.ts`'s `mount: false`, remote `tcp://` and
+`podman` rows — all three red on the pre-fix function.
+*Mutations:* `noMount: false` hard-coded → **1 fail**; `kind: "docker"` hard-coded
+→ **1 fail**; `facts.engine = "docker"` → **1 fail**. Restored, md5 unchanged.
+
+**Finding 4 (MEDIUM) — the production proposal→prompt path had no test. FIXED.**
+
+The review's own mutation (deleting `hopTurn?.event(...)` in `useTurnDriver.ts`)
+passing 2011 tests is the proof it was needed. `packages/cli/test/hop-proposal-app.test.tsx`
+(new) renders the REAL `App` with the REAL `createHopFeed` over a controller that
+streams a `move_session` `tool_start`/`tool_result`, and asserts the whole chain at
+the frame: ONE `session_hop` request carrying the image, a Yes starting the ONE
+move path, and the moved notice — plus a No asking once and moving nothing. The
+spy is a `PermissionBroker` SUBCLASS (the App installs its own interactive
+requester with `setRequester`, which replaces an initial one).
+*Mutation (the review's):* `hopTurn?.event(...)` deleted → **2 fail**. Restored,
+md5 `67fb324e…` unchanged.
+
+**Drift from the Implementation, and why.** D9 says the tool is registered "in
+worker and pod-bridge daemons" and D8 says a `run`/`attach` TUI gets no `hop`.
+Those two cannot both hold with a registration that is daemon-wide: a pod daemon
+IS `run`/`attach`. So the registration is per SESSION, keyed on a new optional
+`clientCapabilities.hop` — the only fact that distinguishes a hop target's spawn
+from a plain run. It is an additive, optional protocol field (an older daemon
+drops it and offers no tool, the safe direction), so no `PROTOCOL_VERSION` bump
+and no `protocol.d/` note; `packages/protocol/schema/protocol.json` was regenerated
+with `bun run schema:export` (the drift gate). No method, update kind or required
+field changed (D10). The changelog bullet for `sessionHop.tool` says the new scope.
+
+**Files:** `protocol/src/session.ts` · `protocol/schema/protocol.json` ·
+`client/src/remote-client.ts` · `daemon/src/connection.ts` ·
+`daemon/src/session-host.ts` · `daemon/src/hosted-session.ts` ·
+`cli/src/serve.ts` · `cli/src/local-runtime.ts` · `cli/src/engine-runtime.ts` ·
+`cli/src/hop-targets.ts` · `cli/src/hop-proposal.ts` · `cli/src/hop-turn.ts` ·
+`cli/src/hop-feed.ts` · `cli/src/hop-runtime.ts` · `cli/src/session-hop.ts` ·
+`cli/src/main.ts` · `cli/src/wiring.ts` · `tui/src/app-types.ts` ·
+`tui/src/useTurnDriver.ts` · `tui/src/App.tsx` · `changelog.d/session-hop.changed.md`
+· tests: `cli/test/move-session-pod-capability.test.ts` +
+`cli/test/hop-prompt-facts.test.ts` + `cli/test/hop-proposal-app.test.tsx` (new),
+`cli/test/hop-turn.test.ts`, `cli/test/session-hop-targets.test.ts`.
+
+**Gate (final tree).** `bunx tsc --noEmit` → 0 · `bun run typecheck` (`tsc
+--noEmit && tsc -p apps/mobile --noEmit`) → 0 · `bun run lint` → `Checked 1248
+files`, 0 errors / 0 warnings (the baseline is clean) · `bun test` → **9205 pass,
+3 skip (the documented opt-ins: live-k8s, live-docker, the real-socket keepalive),
+0 fail** across 667 files.
+
+**Not done here (deliberate).** The `hop` capability is per CONNECTION, so a
+session CREATED by a hop-capable client and later re-attached by a `run` TUI keeps
+the tool (the session's own fact). That is the right unit — the prompt belongs to
+the session's owner, not to whoever re-attached — but it means a second client on
+the same session does not change the offer. No test covers the case "created by a
+run, re-attached by a hop target" (the tool is then absent for the session's
+life), which would need a host-level re-open to change; noted, not fixed.
+
+*— claude-opus-5-5, 2026-11-14*
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; reviewing commit `52995b84`, `git diff HEAD~1`)
+
+**Verdict: REQUEST-CHANGES.**
+
+Gate: `bun run typecheck` → 0. `bun run lint` → 1248 files, clean. `bun test packages/cli/test` → 2355 pass / 0 fail. `bun test` on daemon + client + protocol + tui → 3993 pass / 1 skip / 0 fail. Every mutation was reverted, and `git status` was clean afterwards.
+
+| R1 finding | mutation | result | verdict |
+|---|---|---|---|
+| 1 pod offers the tool to `run`/`attach` | `serve.ts:757,768` → always `moveSession` | 1 fail (`move-session-pod-capability`) | fixed (daemon side) |
+| 1 | `connection.ts:603` `this.hop = false` | 1 fail | fixed |
+| 1 | drop `hop: true` from both hop targets (`hop-targets.ts`, container + attach) | **0 fail** (cli 2355 pass) | laptop side not pinned |
+| 2 two prompts | `hop-targets.ts:230` re-ask ignoring `gateAnswered` | 1 fail (`session-hop-targets`) | **not fixed in production** (below) |
+| 3 prompt mount ≠ build mount | `hopPromptFacts` endpoint dropped | 2 fail (`hop-prompt-facts`) | fixed: one `containerPlan` |
+| 4 App path not tested | drop `hopTurn?.event` (`useTurnDriver.ts:571`) | 2 fail (`hop-proposal-app`) | fixed |
+
+1. **MEDIUM: finding 2 is still live in the real binary.** The production `build` in `main.ts:2096-2105` is `(spec, sharedPair, sessionId) => createHopTargets({...})(spec, sessionId)`. It never forwards the new 4th argument `opts`. TypeScript accepts a lambda with fewer parameters, so this compiles silently. As a result `gateAnswered` never reaches `containerTarget`, and an approved proposal with a gate `ask` still raises the second `mountAsk` prompt. The test calls `createHopTargets` directly, so it does not cover this path. Fix: forward `opts`, and pin it through `main`'s wiring, or extract the build lambda so it can be tested.
+2. **MEDIUM (test coverage, §9): the laptop half of the hop capability is not pinned.** If the hop targets stop passing `hop: true`, no test fails. The `engine-runtime` → `createLocalRuntime` → `initialize` chain has no test either. The tool would silently disappear on every hop target, so the fix is unprotected against a regression.
+
+**Regressions checked:**
+- `clientCapabilities.hop` is an optional field on a strip schema. That is additive, so no `protocol.d/` note is needed (§7: fields are free). An older daemon drops it, which is the safe direction.
+- A settings sync keeps `hosted.hop`.
+- `gateWarnings` in `HopPromptFacts` is dead (never set). That is a nit.
+- One more pass: proceed-warnings also set `gate`, so `gateAnswered` becomes true. That is harmless: a `proceed` gate never asks.
+
+**Unverified:** a session created by a hop TUI (`hop: true`) and later joined by a plain `tentacle attach` TUI keeps the tool, and that TUI has no feed to ask through. This only matters if a hop container's daemon is resident (sessions outliving the exec). To verify: check whether `startEngineRuntime`'s container daemon is the resident one.
+
+**How the executor behaved:** it addressed all four findings with real tests (3 of 4 tests kill their mutation). It missed the one wiring line that carries fix 2 into the real `main`, which is the same "proven on a seam, not on the real path" pattern as round 1.
+
+### Fix round 2 — the H5 review round 2's MEDIUM findings
+
+*— claude-opus-5-5, 2026-11-14*
+
+Scope: the two MEDIUMs of `### Round 2` (H5) above, and nothing else. Both were
+"proven on a seam, not on the real path". Red before green (§9), one mutation
+per fix, each run on the final tree and restored with md5 printed.
+
+**Finding 1 (MEDIUM) — the production `build` dropped `opts`, so an approved
+proposal still re-asked the mount gate. FIXED.**
+
+*Reproduced first, empirically, before any edit* (`.tentacle/tmp/session-hop/rev2-f1.ts`,
+the two lambdas side by side over the real `createHopTargets`, a `SpyBroker`, and
+a `SYSTEM` cwd `/etc` whose gate asks):
+
+```
+main.ts lambda  → asks: 1 | not moved: no such image: nope
+opts forwarded  → asks: 0 | not moved: no such image: nope
+```
+
+The bug is exactly the review's: a lambda with FEWER parameters type-checks, so
+`main.ts`'s `(spec, sharedPair, sessionId) => createHopTargets({…})(spec, sessionId)`
+silently discarded the 4th argument, `gateAnswered` never reached
+`containerTarget`, and the owner answered the same gate twice.
+
+The fix is the review's "extract the build lambda so it can be tested":
+**`hopBuilder(deps)`** (`hop-targets.ts:105`) is the facade's `build`
+signature over deps that outlive it, and `main.ts:2099` now passes
+`build: hopBuilder({…})` — the forwarding exists in ONE named place instead of
+an untestable closure, so a change to it is a change to a tested function.
+
+*Red first:* two rows in `session-hop-targets.test.ts` — through `hopBuilder`,
+`gateAnswered: true` gives **0** broker asks, and a typed `/move` (no opts)
+still gives its **1** `session_hop` ask. *Mutation* (`hopBuilder` reduced to the
+pre-fix three-parameter shape): **1 fail**, `a build made through hopBuilder does
+not re-ask a gate the owner answered`; restored, md5 `13fe9b3c…` unchanged.
+
+*And the call site is pinned,* because that is what the review found missing and
+a seam test alone cannot see it — `grep-guard: main wires build: hopBuilder(…),
+never a lambda` (`session-hop-targets.test.ts`, the pattern
+`workspace-mount.test.ts` already uses for `hideList`). *Mutation:* `main.ts`
+back to `build: (spec, sharedPair, sessionId) => hopBuilder({` → **1 fail**;
+restored, md5 `37150c76…` unchanged.
+
+**Finding 2 (MEDIUM, §9) — the laptop half of the hop capability was not
+pinned. FIXED.**
+
+The review's mutation was real: dropping `hop: true` from both hop targets left
+`packages/cli` at 2355 pass / 0 fail. So a hop target could stop declaring the
+capability and the tool would silently vanish from every hop session — the
+inverse of finding 1 of round 1, and just as silent.
+
+Pinned through the **real chain** the review named
+(`engine-runtime` → `createLocalRuntime` → `initialize` → daemon): the H4 rig's
+fake host already binds `openExec` to an actual `SessionHost` + `Connection`, so
+`createAgent`'s `context.hop` is a genuine end-to-end observable. Three rows in
+`session-hop-targets.test.ts` (`log.hops` is that recorder):
+
+- a hop **container**'s session reaches its daemon with `hop` declared;
+- an **attach** target's does too;
+- non-vacuity: the same runtime built WITHOUT `hop` declares nothing (a `run`'s
+  shape), so the declaration provably comes from the hop target.
+
+*Red first:* these rows fail on the mutated code, not on a compile error — see
+the mutations. *Mutations:* drop both `hop: true` declarations in
+`hop-targets.ts` (the review's own) → **2 fail**; drop
+`engine-runtime.ts`'s forward → **1 fail**; make
+`local-runtime.ts` declare unconditionally (`hop: true`, the shape that would
+re-break round 1's finding 1 from the laptop side) → **1 fail**, the
+non-vacuity row. Each restored; md5 `13fe9b3c…` / `b94377af…` / `2cd9a046…` unchanged.
+
+**No drift from the Implementation.** Both fixes are additive: `hopBuilder` is a
+new export over the existing `createHopTargets`, and no wire, on-disk or
+`PROTOCOL_VERSION` surface moved (D10 untouched). No changelog fragment is added
+this round — the user-visible behaviour is the one `session-hop.changed.md`
+already states, and round 2 changed where the decision is carried, not what it is.
+
+**Nit left, deliberately:** the review's `gateWarnings`-is-dead note
+(`HopPromptFacts`) is cosmetic and outside both findings; it stays in Review's
+notes/debt for the next task that touches `hop-proposal.ts`.
+
+**Gate:** `bunx tsc --noEmit` → 0 · `bun run lint` → `Checked 1248 files`, 0
+errors / 0 warnings · `bun test` → **9211 pass, 3 skip (the documented opt-ins:
+live-k8s, live-docker, the real-socket keepalive), 0 fail** across 667 files.
+
+*— claude-opus-5-5, 2026-11-14*
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; reviewing commit `cd8c3acf`, `git diff HEAD~1`)
+
+**Verdict: APPROVE (H5).**
+
+Gate: `bun run typecheck` → 0. `bun run lint` → 1248 files, clean. `bun test packages/cli/test` → 2361 pass / 0 fail (2359 + the 2 killed rows, unmutated). tui + daemon + client → 3663 pass / 1 skip / 0 fail. Every mutation was reverted, and `git status` was clean after each.
+
+| R2 finding | mutation | result |
+|---|---|---|
+| 1 `main` dropped `opts` | `hopBuilder` passes `{}` instead of `opts` | 1 fail (`session-hop-targets`: "the PRODUCTION build carries `gateAnswered`") |
+| 2 laptop half of `hop` not pinned | drop `hop: true` at `hop-targets.ts:283,355` | 2 fail (container + attach rows) |
+| 2 (deeper) | drop the `deps.hop` forward at `engine-runtime.ts:695,1109` | 2 fail: the rows reach the real `initialize`, not just a spy on the deps |
+
+**Regressions:** `main.ts` now calls `hopBuilder` with the same deps as before (`config`, `status`, `notify`, `host`, `defaultImage`). `shared` is still injected per call by the facade. No behaviour changed for a typed `/move`.
+
+**Residual (not a blocker, carried from round 2 as unverified):** if a hop container's daemon is resident, a later plain `tentacle attach` TUI can join a session that keeps `move_session` and has no feed to answer it. This is worth checking in H6 (attach flow).
+
+**How the executor behaved:** a small, targeted fix. It turned the wiring lambda into a named, tested seam (`hopBuilder`), and the new tests kill both the surface mutation and the deeper one.
+
+## Execution — H6 + H7
+
+*— claude-sonnet-4-5-20250929, 2026-11-14* (executor, branch `feat/session-hop`, worktree
+`.tentacle/worktrees/session-hop`)
+
+**Load-bearing check re-run first, as instructed.** Both rigs PASS, unchanged from H5:
+`.tentacle/tmp/session-hop/hop-repro.ts` → `B uid: 19fc157a-… == A uid: true`,
+`files: 19fc157a-….jsonl`; `hop-race.ts` → a late A save after B wrote drops nothing,
+one `.jsonl`. No STOP condition applied.
+
+### H6 — attach to an existing workload (D7 incl. D7c), and hop out never deletes
+
+1. **The pure move first (review M8).** `packages/cli/src/detached-run-of.ts` (new) is the
+   closure `main.ts` had at `:1619`, lifted out: `detachedRunOf(deps, name, engine, at)`
+   over an injected `{configDir, dir, procOf, read}`. It returns `DetachedRun` (`elsewhere`
+   is a discriminant, not a bolted-on field). `main.ts` keeps a one-line `detachedRun`
+   wrapper over this process's config dir and `laptopProc`, and its two call sites now use
+   it. *Why:* D7(a) asks the same question `attach` asks, and a closure cannot be tested.
+2. **D7(a) in the factory, before anything is dialled.** `HopTargetDeps.detachedRun?`
+   (`hop-targets.ts`) → `attachTarget` refuses with `attachVerdict`'s own wording
+   (`docker:mine is in use by another session`) and touches no engine. `main.ts` passes
+   `detachedRun: (workload) => hopDetachedRun(workload)`.
+3. **D7(b) after the handshake, before any open.** `attachTarget` reads
+   `runtime.residentUse(sessionId, { ownMayBeAbsent: true })` — the runtime is built but
+   nothing is open yet — feeds it to `attachVerdict`, and on a refusal disposes the runtime
+   and returns the refusal. `null` (a paged list) is a doubt, and a doubt refuses.
+4. **D7(c)/D1 4(a) already existed** (`hopSession`'s `closeOrRefuseOwn`); H6's job was the
+   *frame-level* proof, which is the new H6 test block below.
+5. **"hop out never deletes"** needed no new code — `hopLeaveEntry` + `hopDelete` already
+   gate on the entry's `hop: true` mark — but H6 is the first slice where an `attach`
+   target is reachable end to end, so it is now pinned by a row through the real factory +
+   the real `createHopLeave`.
+
+**A real defect H6's own wiring exposed, found by H7's live test (drift, fixed):** the hop's
+container factory computed the mount plan, gated it, then called `startEngineRuntime`
+WITHOUT `workspace` — so `/move container` created a container with no bind mount at all
+and the agent worked on the image's filesystem, while the owner had approved exactly that
+mount. `run` passes `workspace: wsPlan.mount` (`main.ts:1504`); the hop now passes
+`...(plan.kind === "mount" ? { workspace: plan.mount } : {})`. Red before green on a real
+engine: with the line removed, the live row's `hop-live.txt` never appears
+(`(fail) … 0 pass 1 fail`); restored, green. This is H4's bug, not H6's, and no unit row
+could see it — the fake host records `create`'s labels, never the create body.
+
+### H7 — the live docker test, the changelog fragment, the docs line
+
+- `packages/cli/test/session-hop.docker.test.ts` (new): one row, `test.skipIf(!ENABLED)`
+  on `TENTACLE_DOCKER_TESTS=1`. Real docker/podman host (`buildEngineHost`), real
+  `createHopTargets`, real `hopSession`, real `createHopLeave`; a local OpenAI-compatible
+  mock model (the pod reaches it through the laptop), real pod-binary injection. It asserts:
+  the container's shell call writes a file that appears on the HOST at the same path (the
+  bind mount); the entry is in the laptop index with `hop: true`; ONE `<uid>.jsonl` holding
+  both places' turns; on `/move local --rm` the container is gone (`describe` → `null`) and
+  the index entry with it.
+- `changelog.d/session-hop.fixed.md` (new): one bullet, H6's rules + the mount fix. No
+  second `added` fragment: `session-hop.added.md` (H1) is the feature's bullet and
+  `session-hop.changed.md` (H5) the setting's; AGENTS §10 — curated, not a commit mirror.
+- `README.md`: a `/move` paragraph in *Ways to run*, after `attach`.
+- `ARCHITECTURE.md`: ADR-007 — one session path, a second runtime; D7's stricter join rule.
+
+**Drift from the Implementation, and why (each a contradiction with the code/doc):**
+
+- **`attachVerdict`'s `own` input is `null` in the factory's D7(b) call.** The factory
+  cannot know our own uid's state before the open without a second `session/list`, and
+  `hopSession`'s D1 step 4(a) reads it fresh right after — so the factory answers `own:
+  null` ("not live here") and the orchestrator owns that question. Recorded because the
+  H2 design note put D7 entirely in the factory and 4(a) in the orchestrator; this is that
+  split, made explicit in code.
+- **`detachedRunOf` is asked with NO `at`.** D7(a) wants "a run of that name+engine owns
+  it", so a run at ANOTHER place is treated as this place's — the strict side (refusing to
+  join is safe; joining someone's run is not). `attach`'s `at` behaviour is unchanged.
+- **H7's live row uses a fixed scratch dir under the repo** (`.tentacle/tmp/session-hop/`,
+  AGENTS §6), not `os.tmpdir()`: on a podman machine only `$HOME` is shared with the VM, so
+  a `/var/folders` mount is silently empty in the container (its `create` succeeds and the
+  folder does not exist there). Also `realpathSync` first, because macOS `/var` is a
+  symlink into `/private/var` and the plan mounts at the SAME path on both sides. And the
+  hop BACK to `local` is built with the in-memory origin shape, not `startWorkerRuntime`:
+  its `new Worker` does not run under a test runner. Neither is a product change.
+- **H7's default image is `debian:stable-slim`, not `busybox`.** The injected pod binary is
+  glibc-linked; `attachEngineRuntime`'s preflight refuses a musl image BY NAME (a good
+  message). A busybox default would report an engine constraint as a hop bug.
+
+**Red first.** `detached-run-of.test.ts` had no module to import (the extraction is what
+creates it) — the rows were written against the behaviour and run after the move; the
+mutations below are the durable proof (§9). The H6 rows in `session-hop-targets.test.ts`
+were run RED against `HEAD`'s `hop-targets.ts` before the D7 wiring (script
+`.tentacle/tmp/session-hop/h6/red.sh`): **4 fail** — both D7(a) rows and both D7(b) rows —
+then green. The H7 row was red on the mount regression on a REAL engine (above).
+
+**Mutation checks** (each broken in the final tree, the narrow file run, restored, md5
+printed before and after; scripts `.tentacle/tmp/session-hop/h6/run*.sh`).
+
+| # | mutation | result |
+|---|---|---|
+| M1 | D7(a) branch dropped from `attachTarget` | 2 fail — both D7(a) rows |
+| M2 | D7(b)'s `residentUse` check dropped | 2 fail — both D7(b) rows |
+| M3 | a `null` resident use read as "nobody there" | 1 fail — the unreadable-use row |
+| M4 | D1 step 4(a) skipped (`target.preexisting` never checked) | 2 fail — both D7(c) rows |
+| M5 | `ownUidVerdict` ignores `running`/`jobs` | 1 fail — the RUNNING-copy row |
+| M6 | `detachedRunOf`'s `at` ignored | 3 fail — the two `at` rows + the record-only row |
+| M7 | `elsewhere` never reported | 1 fail — the elsewhere row |
+| M8 | `createdByHop` taken as `true` (ignore the entry's mark) | 1 fail here + 3 in `hop-leave.test.ts` |
+| M9 | `main` stops passing `detachedRun` | 1 fail — the grep-guard |
+| H7 | `workspace` dropped from the container factory (LIVE engine) | 1 fail — the mount row |
+
+Each restored; md5 of every touched source matched its pre-mutation value
+(`hop-targets.ts` `fcb09391…`, `session-hop.ts` `f22dabc6…`, `hop-plan.ts` `dcbde8e1…`,
+`detached-run-of.ts` `344f9be4…`, `hop-leave.ts` `363d8b81…`, `main.ts` `44111eeb…`).
+
+**Tests.** `packages/cli/test/detached-run-of.test.ts` (new, 8 rows: no evidence, an owner
+record, a live lock, another engine, `at` this/other place, record-only elsewhere, no engine
+named) · `packages/cli/test/session-hop-targets.test.ts` (+9 rows: D7(a) with a
+non-vacuity partner, D7(b) refused + unreadable + non-vacuity, D7(c) idle-close with frame
+ORDER and running-refused, the user-owned leave, the production grep-guard) ·
+`packages/cli/test/session-hop.docker.test.ts` (new, 1 opt-in live row).
+
+**Not in this slice (deliberately).** No `protocol.d/` note and no schema change: D10 holds,
+nothing on the wire moved (the frames the tests read are the EXISTING `session/open`,
+`session/close`, `session/list`). No fix for the H5 round-3 residual — investigated below.
+
+**The H5 round-3 residual, investigated (not fixed, and why).** Confirmed empirically
+(`.tentacle/tmp/session-hop/h6/residual.ts`): `hosted.hop` is set from the attachment that
+CREATED the session, so a hop container's resident daemon keeps offering `move_session` to a
+later plain `tentacle attach` TUI that joined the same session (`created: false`,
+`hosted.hop: true`). That TUI has no `/move` feed, so the agent's proposal would raise no
+prompt: the tool is offered and the owner is never asked. It is a real hole, but fixing it
+means deciding whether `hop` follows the CREATING client (today) or the CURRENTLY attached
+set (a protocol-shaped change: a blocking/mandatory capability per attachment, and what to
+do when the creator leaves mid-turn) — an owner question the plan does not answer, and
+outside H6's file list. Recorded here as debt for its own task; it is not a regression from
+this slice.
+
+**Gate (final tree):** `bunx tsc --noEmit` → 0 · `bun run typecheck` (incl. `apps/mobile`)
+→ 0 · `bun run lint` → `Checked 1251 files`, 0 errors / 0 warnings (the baseline is clean) ·
+`bun test` → **9228 pass, 4 skip, 0 fail** across 669 files (the 4 skips are the documented
+opt-ins: live-k8s, live-docker's own client test, the real-socket keepalive, and H7's new
+live row). The live row was ALSO run green by hand against a real podman engine
+(`TENTACLE_DOCKER_TESTS=1 DOCKER_HOST=unix:///var/run/docker.sock bun test
+packages/cli/test/session-hop.docker.test.ts` → `1 pass, 0 fail`). No protocol schema
+changed, so `packages/protocol/schema/protocol.json` was not regenerated.
+
+*— claude-sonnet-4-5-20250929, 2026-11-14*
+
+## Review — H6 + H7
+
+**Verdict: REQUEST-CHANGES** (2 MEDIUM, no HIGH). Scope: `git diff main...HEAD`, slices H6/H7 only.
+
+**Findings**
+
+1. **MEDIUM: the dispose on a D7(b) refusal is not tested** (`packages/cli/src/hop-targets.ts:418`). The row at
+   `packages/cli/test/session-hop-targets.test.ts:761` is titled "the runtime disposed", but it never checks that.
+   Mutation: delete `await bounded(runtime.dispose(), …)` → `23 pass, 0 fail`. Failure scenario: every refused
+   `/move attach` leaks a live `RemoteClient` and its exec stream into a workload that is "not ours", and no test catches it.
+   Fix: assert the dispose (the exec channel is closed, or a dispose spy).
+2. **MEDIUM: D7(c) closes our own idle copy even when another client is attached to it.** The path:
+   `session-hop.ts:277,288` → `ownUidVerdict` (`hop-plan.ts:168`) → `ownUseOf` (`relay-state.ts:292-295`). `ownUseOf` keeps only
+   `running`/`jobs` and drops `attached`. Scenario: this is the H5 round-3 residual, confirmed by the executor. A plain
+   `tentacle attach` TUI has joined the session on a hop container's resident. The origin TUI then runs `/move attach` to
+   that container again. The copy is idle, so `session/close` is sent under the attached TUI. That breaks the changelog's
+   "the workload's current client is never disturbed" and D7's "not ours to share". Fix: an own copy with `attached > 0`
+   should be `busy` (refuse), plus a row for that case.
+
+**Gate:** touched files (`session-hop-targets`, `detached-run-of`, `hop-leave`, `session-hop.docker`): 47 pass,
+1 skip (the opt-in live row), 0 fail. `bun run lint`: 1251 files, clean. `bun run typecheck`: 0. I did not re-run the full
+suite. I did not run the live docker row here (opt-in, needs an engine).
+
+**Attacks tried**
+- Dropped the D7(b) dispose → no test failed (finding 1).
+- Own uid live, idle, with another client attached → closed (finding 2, read from the code; no row covers it).
+- Ordering: D7(a) runs before `deps.host`, and D7(b) runs after the handshake and before any `session/open`. Both hold:
+  the runtime opens lazily, and the frame-level rows check it.
+- Hop out with `keep:false` on a workload joined by attach: the delete is gated on the index entry's `hop:true`
+  (`hop-leave.ts:102`) and matched by location key. Holds.
+- `detachedRun` asked with no `at` (the strict side): refuses a same-name run at another place. Acceptable, as documented.
+- `residentUse` is not bounded in time (`hop-targets.ts:414`): a hung pod hangs the hop. Same as the existing
+  `closeOrRefuseOwn` read, so not raised.
+
+**Process:** the plan asked for a SEPARATE pure-move commit for `detachedRunOf` (M8). It landed in the same commit
+`ca16037a`. Not blocking. The Execution section is signed `claude-sonnet-4-5-20250929`, but the commit says "deepseek".
+Fix the signature so it names the model that actually ran.
+
+**Executor behaviour:** careful and honest. The live test found a real mount bug, and the residual was investigated and
+reported as debt. One mutation claim was overstated (finding 1's test title).
+
+*— claude-opus-5-5, 2026-11-14* (fresh context, not the executor's model family)
+
+### Round 2
+
+**Verdict: PASS.** I checked both findings against `git diff HEAD~1` (`d019f903`), mutated each fix, and reverted each mutation; the tree is clean afterwards.
+
+- **Finding 1 (dispose on a D7(b) refusal): fixed.** `watchedChannel` records whether the exec channel was closed. Mutation: drop `await bounded(runtime.dispose(), …)` at `hop-targets.ts:418` → the "runtime disposed" row FAILS. The same watcher is in the join row, which is not refused, so that row is the counter-check (`closed: false`).
+- **Finding 2 (own copy with a client attached): fixed.** `OwnUse.own.attached` is now carried (`relay-state.ts:303-306`), and `ownUidVerdict` treats `attached > 0` as busy (`hop-plan.ts:173`). Mutation A: drop the `attached` clause → 2 FAIL (the `attachVerdict` row, and the frame-level row "an IDLE copy another client is ATTACHED to: refused, never closed under it"). Mutation B: `ownUseOf` drops `attached` → 2 FAIL (the `ownUseOf` row and the same frame-level row).
+- **Regressions:** `ownUseOf`/`ownUidVerdict` have one production consumer each, both on the hop path (`local-runtime.ts:1243`, `session-hop.ts:277`). No other path changes meaning. Between the read and the close, a client could still attach. That window remains, and it is accepted (D7: the check is UX, not security).
+- **Gate:** the touched files (`session-hop-targets`, `hop-plan`, `relay-state`, `session-hop`, `hop-leave`) give 144 pass, 0 fail. `bun run lint`: 1251 files, clean. `bun run typecheck`: no errors. I did not re-run the full suite.
+
+*— claude-opus-5-5, 2026-11-14*
+
+### Fix round 1 — the H6+H7 review's MEDIUM findings
+
+*— deepseek-v4.1-flash-1017, 2026-11-14*
+
+Scope: the two MEDIUM findings of `## Review — H6 + H7` above, and the process
+note. No other behaviour touched. Both findings were reproduced before either
+was fixed; every fix carries the mutation that proves it non-vacuous (each
+broken in this tree, its narrow file(s) run, restored, `md5` printed before and
+after — no `.bak` left, nothing checked out or stashed).
+
+**Finding 1 (MEDIUM) — the dispose on a D7(b) refusal was not tested. FIXED
+(production code already right; the ASSERTION was missing, and that was the
+bug in the test).**
+
+`hop-targets.ts:415-419` did dispose *and* open nothing; the row
+`"refused with the D7 wording, the runtime disposed, and NO `session/open` ever
+sent"` asserted only the frames and the list, so its own title's central claim
+(the dispose) was unproven — exactly what the reviewer's mutation showed.
+
+- The rig gained the one observable a `dispose` has: `FakeHostLog.closes`
+  (`session-hop-targets.test.ts:124-129`) and `watchedChannel`
+  (`:150-166`), a client channel that records whether it was **closed** and is
+  handed to every `openExec` (`:234`). `dispose` → `client.close()` →
+  `Peer.close()` → `channel.close()`, so a leaked `RemoteClient` and its exec
+  stream are now distinguishable from a released one.
+- The row asserts it (`:813-815`): `log.closes` has the one dialled runtime and
+  it is closed.
+- Its own non-vacuity is now explicit in the neighbouring row
+  (`"non-vacuity: the SAME occupied daemon with an EMPTY list is joined"`,
+  `:841-862`): the SAME watcher reads `closed: false` for a build that was NOT
+  refused, then `closed: true` after the caller's own `dispose`.
+
+*Red first / mutation:* delete `await bounded(runtime.dispose(),
+HOP_ROLLBACK_TIMEOUT_MS)` (`hop-targets.ts:418`, md5 `9a961223…` →
+`f4e7fda6…`) → **1 fail**, on the new assertion and nothing else
+(`expect(log.closes?.every((c) => c.closed)).toBe(true)` → received `false`),
+`22 pass / 1 fail`. Restored → md5 `9a9612237a4e129f0c24ad97bf60aa40`,
+`23 pass / 0 fail`. This is the reviewer's mutation, now caught.
+
+**Finding 2 (MEDIUM) — D7(c) closed our own idle copy even with another client
+attached to it. FIXED.**
+
+The chain was `session-hop.ts:277` → `ownUidVerdict` (`hop-plan.ts:161`) →
+`ownUseOf` (`relay-state.ts:283`), and the loss happened in **two** places, not
+one: `ownUseOf` did not carry `attached` at all, and the verdict would not have
+looked at it. `attached` is the only field that separates a copy nobody uses
+from one a plain `tentacle attach` TUI is sitting in (`running: false, jobs: 0,
+attached: 1` — verified on a real `SessionHost` in
+`.tentacle/tmp/session-hop/attached.ts`: `after open: [{…,"attached":1,
+"running":false}]`, which also proved the pre-existing rows' `open` left the
+copy attached — see the drift note below).
+
+- `relay-state.ts:279-286` (+ `ownUseOf`, `:293-309`): `OwnUse.own` is
+  `{running, jobs, attached}`, and
+  `ownUseOf` carries `own.attached` from the same single `session/list` read
+  (no second read, so the two can never disagree).
+- `hop-plan.ts:166-176`: `ownUidVerdict` treats `attached > 0` as `busy`
+  (`running || jobs > 0 || attached > 0`), with the reason stated:
+  `session/close` under an attached TUI ends that client's session just as
+  surely as killing a turn. `busy` keeps its existing wording (`<name> still
+  holds an older copy of this session`) — one wording site, no new string.
+- `AttachVerdictInput.own` (`hop-plan.ts:178-196`) widened to match; the
+  `attachTarget` callers already pass `own: null`, so nothing else changed.
+- Doc: D1 step 4(a) (`docs/feat/session-hop.md:194-201`), D7(c)
+  (`:276-282`) and the H1 design note (`:525-535`) now state the `attached`
+  arm, so the plan stays the source of truth (§8).
+- Changelog: `changelog.d/session-hop.fixed.md` — the refusal list now says
+  "…or has another terminal attached to it", which is what the fragment's
+  "the workload's current client is never disturbed" always claimed.
+
+*Red first (three layers, each failing on its own property):*
+- `relay-state.test.ts:396-408` (new) `own ATTACHED to by someone: the fact is
+  carried, never dropped` → RED: `{"own":{"jobs":0,"running":false}}` vs the
+  expected `attached: 2`; and the two neighbouring rows updated for the shape.
+- `hop-plan.test.ts:231-249` (new) `our OWN uid with a client ATTACHED is
+  refused too` → RED: received `{"kind":"close-own"}` where the refusal was
+  required; includes the non-vacuity row (`attached: 0` → still `close-own`).
+- `session-hop-targets.test.ts:992-1009` (new) `an IDLE copy another client is
+  ATTACHED to: refused, never closed under it` — the whole hop over the real
+  factories, the real orchestrator and a REAL `session/list` (the stale copy is
+  seeded and its creating attachment left in place, `:904-908`) → RED:
+  received `"moved"`, i.e. the hop went through and closed the copy.
+
+*Mutations (each restored; md5s printed):*
+1. `hop-plan.ts` verdict drops the `attached` arm (back to
+   `running || jobs > 0`, md5 `ef99ee41…` → `23c5c070…`) → **2 fail**: the new
+   `hop-plan` row and the new end-to-end row; `47 pass / 2 fail`. Restored →
+   `ef99ee413c95349a6787ab761654322b`.
+2. `relay-state.ts` `ownUseOf` zeroes `attached` instead of carrying it (md5
+   `c8b7a6e0…` → `3dc401ef…`) → **2 fail**: the new `relay-state` row and the
+   end-to-end row (the verdict cannot see what the read dropped); `71 pass /
+   2 fail`. Restored → `c8b7a6e046b041c2f3438430ea160849`.
+
+**Drift from the Implementation (and why).**
+
+1. **The pre-existing D7(c) rows opened the stale copy and left it ATTACHED.**
+   The shared rig `ownUidOnResident` (`session-hop-targets.test.ts:878-920`)
+   called `server.open(...)` and never detached the creating attachment, so that
+   "idle copy" was really `attached: 1`. Harmless before (nothing read
+   `attached`); with the fix, the IDLE row would have been refused like the new
+   one and stopped proving the close-then-seed path. It now detaches the
+   creating attachment (`:906`) — the honest shape of a stale copy, "the
+   client that made it has LEFT" — and only the new row keeps it attached. Found
+   because the fix made the fixture's lie visible; `attached.ts` is the repro.
+2. **`OwnUse` widened rather than a second field added.** `ResidentUse` has no
+   "own present" field by design, and adding `ownAttached` beside `own` would
+   let the two halves come from different reads. One struct, one read.
+3. **The reviewer's process note (not a finding): the H6+H7 Execution
+   signature.** The reviewer reports the commit says "deepseek" while that
+   section is signed `claude-sonnet-4-5-20250929`, and asks for the real model.
+   I cannot honestly sign another agent's run: I did not execute H6/H7, and I
+   found no record of which model did (no tentacle session log names
+   `session-hop`; the Claude transcripts I can read are all `claude-opus-5-5`).
+   **This is left to the orchestrator**, which launched it and knows the
+   profile. My own signature above is my real id, by two independent signals:
+   the launcher argv (`ps` → `tentacle --profile deepseek`, and that profile is
+   `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`, `~/.config/tentacle/config.jsonc`)
+   and this context's 393k window, which is exactly that profile's
+   `contextWindow`.
+
+**Gate (full, this tree):** `bunx tsc --noEmit` → 0 ·
+`bun run lint` → `Checked 1251 files`, 0 errors/warnings ·
+`bun test` → **9231 pass, 4 skip, 0 fail** across 669 files. The 4 skips are the
+documented opt-ins (live-k8s, live-docker, the real-socket keepalive) plus the
+opt-in live docker row of `session-hop.docker.test.ts`; none is a non-opt-in
+skip and none is new. No protocol change (`packages/protocol/schema/protocol.json`
+untouched — the fix is laptop-side only).
+
+**What I did not verify:** the live docker row (`session-hop.docker.test.ts`,
+opt-in, needs an engine); and the H6+H7 Execution signature, which is the
+orchestrator's to correct (drift note 3).

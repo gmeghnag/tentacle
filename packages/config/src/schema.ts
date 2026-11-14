@@ -364,6 +364,18 @@ const settingsShape = {
     .strict()
     .optional(),
   /**
+   * Session hop (docs/feat/session-hop.md D9): the agent may PROPOSE moving this
+   * session with `move_session`. It never moves anything itself — the owner is
+   * asked, in the laptop's TUI, when the turn ends.
+   */
+  sessionHop: z
+    .object({
+      /** Default: enabled. */
+      tool: z.boolean().optional(),
+    })
+    .strict()
+    .optional(),
+  /**
    * Auto-wake: when a background job exits while the agent is idle, start a
    * continuation turn so it reacts without a user prompt. Default: enabled.
    */

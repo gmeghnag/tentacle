@@ -39,10 +39,13 @@ export {
   parseHopCommand,
 } from "./hop-command.ts";
 export { hopStatusRow } from "./hop-status.ts";
+/** The one place the hop line joins a prompt (review M7): exported so a test pins it. */
+export { hopWithLine } from "./useTurnDriver.ts";
 export { App, type AutoAcceptFeed } from "./App.tsx";
 export type {
   AppProps,
   HopFeed,
+  HopProposalView,
   HopPlaceView,
   HopRun,
   HopTargetView,

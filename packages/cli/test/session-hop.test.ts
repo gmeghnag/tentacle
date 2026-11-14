@@ -799,7 +799,7 @@ describe("D1 step 4(a): our own uid live on an existing target is closed, then s
     // A target that HOLDS our uid live but whose close never confirms.
     const stubborn: LocalRuntime = {
       ...real,
-      ownUse: async () => ({ own: { running: false, jobs: 0 }, others: 0 }),
+      ownUse: async () => ({ own: { running: false, jobs: 0, attached: 0 }, others: 0 }),
       closeOwn: async () => false,
     };
     let disposed = 0;
@@ -1392,7 +1392,7 @@ describe("fix1 MEDIUM: a throw before the commit still rolls the target back", (
     const real = await runtimeOn(rig(new Reply("reply-B")), shared, null, uid);
     const thrower: LocalRuntime = {
       ...real,
-      ownUse: async () => ({ own: { running: false, jobs: 0 }, others: 0 }),
+      ownUse: async () => ({ own: { running: false, jobs: 0, attached: 0 }, others: 0 }),
       closeOwn: () => Promise.reject(new Error("link dropped")),
     };
     let rolledBack = 0;

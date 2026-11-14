@@ -44,7 +44,12 @@ export interface HopRuntimeDeps {
    * returns the runtime plus how to undo it (D1 step 2, D5). `sessionId` is the
    * uid the target must take (D1 step 3: `resume: null` plus the minted uid).
    */
-  readonly build: (spec: HopSpec, shared: HopShared, sessionId: string) => Promise<HopBuild>;
+  readonly build: (
+    spec: HopSpec,
+    shared: HopShared,
+    sessionId: string,
+    opts: { readonly gateAnswered?: true },
+  ) => Promise<HopBuild>;
   /** The laptop's record of a uid (`LogSessionStore.load`): the seed (D1 step 3/4b). */
   readonly load: (uid: string) => Promise<LoadResult>;
   /** A phase line while a hop runs; `null` clears it (the TUI's status row). */
@@ -76,7 +81,11 @@ export interface HopRuntime {
    * Move this session to `spec`'s target (D1). One at a time: the caller holds
    * the `hopping` latch (`hopPlan`), so a second call would be a second build.
    */
-  hop(spec: HopSpec, sessionId: string | null): Promise<HopOutcome>;
+  hop(
+    spec: HopSpec,
+    sessionId: string | null,
+    opts?: { readonly gateAnswered?: true },
+  ): Promise<HopOutcome>;
   /** Dispose the current runtime: after the TUI has unmounted. */
   dispose(): Promise<void>;
 }
@@ -178,15 +187,15 @@ export function createHopRuntime(deps: HopRuntimeDeps): HopRuntime {
         listeners.delete(listener);
       };
     },
-    hop: async (spec, sessionId) => {
+    hop: async (spec, sessionId, opts) => {
       // ONE at a time: the caller holds the `hopping` latch (`hopPlan`), so a
       // second `/move` while this runs is refused before it reaches here.
       const old = current;
       const outcome = await hopSession(
         old,
-        { spec, sessionId },
+        { spec, sessionId, ...(opts?.gateAnswered ? { gateAnswered: true as const } : {}) },
         {
-          build: (target, id) => deps.build(target, deps.shared, id),
+          build: (target, id, buildOpts) => deps.build(target, deps.shared, id, buildOpts),
           load: deps.load,
           ...(deps.status ? { status: deps.status } : {}),
           onCommit: async (built) => {

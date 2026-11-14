@@ -44,12 +44,13 @@ import { type AttachmentRef, DISMISSED, type WakeModel, wakeStep } from "@tentac
  *    watch effect does not re-subscribe (S0b's identity test still holds).
  */
 import { type MutableRefObject, useCallback, useRef } from "react";
-import type { SessionController } from "./app-types.ts";
+import type { HopProposalView, SessionController } from "./app-types.ts";
 import type { AttachDraft, AttachMode } from "./attach-draft.ts";
 import { attachErrorText, enterConvertsToChips, imageRowText, submitPlan } from "./attach-draft.ts";
 import type { AttachedImage } from "./attach-files.ts";
 import { pushHistory } from "./history.ts";
 import type { LineEditor } from "./hooks.ts";
+import type { HopSpec } from "./hop-command.ts";
 import { modelErrorNotice } from "./model-error.ts";
 import type { PermissionController } from "./permission-ui.ts";
 import {
@@ -104,11 +105,38 @@ import {
 } from "./turn-feed.ts";
 
 /**
+ * `text` with the hop's pending line in front (review M7). The line is the laptop's
+ * own (`[move declined]`, `[session moved to …]`) and becomes part of the USER
+ * message, so the model reads it in the history rather than as a passing notice.
+ */
+export function hopWithLine(line: string, text: string): string {
+  return line === "" ? text : `${line}\n\n${text}`;
+}
+
+/** A hop's view of one turn (docs/feat/session-hop.md D9, slice H5): report events, ask at the end. */
+export interface HopTurnPort {
+  /** One event of the turn, `own` telling an own turn from another device's. */
+  event(event: SessionEvent, own: boolean): void;
+  /** The turn is over: the host asks the owner and says what it means. */
+  end(own: boolean): Promise<HopProposalView>;
+  /**
+   * The owner APPROVED a proposed move: the host hands the spec over, and the
+   * App starts it exactly as a typed `/move` (one path to the view's move, D3).
+   */
+  approved(spec: HopSpec, opts?: { readonly gateAnswered?: true }): void;
+  /**
+   * The line the model must read at the start of its next REAL prompt — `[move
+   * declined]` after a refusal, `[session moved to …]` after a commit (review M7)
+   * — CONSUMED by this read: it belongs to exactly one prompt, so it can neither
+   * be lost nor repeated. `null` when there is nothing to say.   */
+  takeLine(): string | null;
+}
+
+/**
  * What a streamed turn is (`streamTurn`).
  */
 export interface StreamOpts {
-  /** A send-now's new turn: the rows hand off on its first event. */
-  readonly successor?: boolean;
+  /** A send-now's new turn: the rows hand off on its first event. */ readonly successor?: boolean;
   /** Another device's turn (or one running when this TUI attached). */
   readonly foreign?: boolean;
   /**
@@ -262,6 +290,12 @@ export interface TurnHost {
   readonly sendWithImages: (text: string, chips: readonly AttachedImage[]) => void;
   readonly submitToTarget: (value: string) => boolean;
   readonly restoreChips: (chips: readonly AttachedImage[] | undefined) => void;
+  /**
+   * A hop's view of this TUI's turns (docs/feat/session-hop.md D9, slice H5): the
+   * host folds each OWN turn's events for a `move_session` proposal and asks the
+   * owner at the turn's end. Absent where no `hop` prop is (D8's other origins).
+   */
+  readonly hopTurn?: HopTurnPort;
   /** The model name the error hint reads (`remote` means the daemon's model). */
   readonly model: string;
   /** A `context_reset` re-reads the skills (`skills-sync.ts`'s one settle). */
@@ -359,6 +393,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
     wakeIfPending,
     exit,
     runRef,
+    hopTurn,
   } = host;
 
   // The ids a send-now ever took: a late enqueue refusal of one says nothing.
@@ -529,6 +564,11 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
           if (event.type === "context_reset") {
             reset = true;
           }
+          // A hop's proposal is watched HERE (docs/feat/session-hop.md D9, slice
+          // H5): the host folds the events of THIS TUI's own turn (`own`, never a
+          // foreign one — its owner is asked on their own terminal) and asks at the
+          // turn's end. Nothing is decided in this component.
+          hopTurn?.event(event, opts.own !== undefined && opts.foreign !== true);
           if (!handedOff && event.type !== "unsupported") {
             handedOff = true;
             setRows(handOff); // the sent texts are its prompt now
@@ -637,6 +677,29 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         } else if (!(pending && settleSendNow(pending))) {
           setRows(onTurnEnd); // the turn is over; nothing stays queued
           flushNow();
+          // The model proposed a move and this turn is now over: the owner is
+          // asked, ONCE, through the single broker (D9/H5). A yes arrives as an
+          // approved spec; the App starts it exactly as a typed `/move` (one path
+          // to the view's move, D3). Never awaited by the frame: the ask can wait
+          // on a human. A refusal keeps the `[move declined]` line for the next
+          // prompt (M7), which `takeLine` hands over.
+          if (opts.own !== undefined && opts.foreign !== true) {
+            void hopTurn?.end(true).then(
+              (outcome) => {
+                if (outcome.kind === "approved") {
+                  hopTurn.approved(
+                    outcome.spec,
+                    outcome.gateAnswered === true ? { gateAnswered: true } : undefined,
+                  );
+                }
+              },
+              () => {
+                // A host that rejected is a host bug: the turn is over either
+                // way, and nothing moved (the broker's own refusal path is the
+                // one that answers a human).
+              },
+            );
+          }
           // A foreign turn (or history) held while this ran comes now (C2).
           drainHeld();
           if (clearNow) {
@@ -680,6 +743,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       streamCtrlRef,
       wakeIfPending,
       wakeRef,
+      hopTurn,
     ],
   );
   streamTurnRef.current = streamTurn;
@@ -733,6 +797,9 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       // The bubble `startTurn` appended (none for a continuation): withdrawn by
       // identity if the prompt loses the slot (C3).
       const item = continuation ? undefined : stateRef.current.items.at(-1);
+      // The one line the model reads at the start of a real prompt (M7): CONSUMED,
+      // so it is neither lost nor repeated. A continuation prompt takes none.
+      const line = continuation ? "" : (hopTurn?.takeLine() ?? "");
       const sendOpts = {
         ...(opts?.skill !== undefined ? { skill: opts.skill } : {}),
         ...(opts?.attachments !== undefined && opts.attachments.length > 0
@@ -742,7 +809,10 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       await streamTurn(
         () =>
           session.send(
-            continuation ? "" : text,
+            // A REAL prompt (not a continuation) carries the pending hop line:
+            // `[move declined]`, or `[session moved to …]` (review M7). It is part
+            // of the user message, so it is saved as conversation. Taken ONCE.
+            continuation ? "" : hopWithLine(line, text),
             controller.signal,
             Object.keys(sendOpts).length > 0 ? sendOpts : undefined,
           ),
@@ -772,6 +842,7 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       stoppedHereRef,
       streamTurn,
       wakeRef,
+      hopTurn,
     ],
   );
   // NOTE: `App` installs this into its own `runRef` right after the hook returns
