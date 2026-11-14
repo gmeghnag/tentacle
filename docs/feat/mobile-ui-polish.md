@@ -943,3 +943,21 @@ red and then green, or to mutation-check.
 - **Executor behaviour:** honest. It changed no code and did not invent shims; it states the refused commands and the exact unblock steps. Unblocking needs the owner/orchestrator: network access for `bunx expo install …`, plus simulator approval for e2e and screenshots.
 
 *— claude-opus-5-5, 2026-11-14* (same model family as the executor's doc author, fresh context only)
+
+### Slices 1–2 — adversarial review, round 3 (fresh context)
+
+**Verdict: REQUEST-CHANGES (merge-gating; no new code defect).** Scope: `git diff main...HEAD`, Slices 1–2.
+
+**Gate (re-run):** touched tests (`theme`, `computer-status`, `scan-session-wiring`, `e2e-flows`) 103 pass / 0 fail · `bun run typecheck` clean · `bun run lint` 1393 files, 0 issues.
+
+**Findings (HIGH/MEDIUM):**
+1. **MEDIUM — still open: Owner decision 4 (SF Symbols) not met.** `apps/mobile/src/ui/Icon.tsx:48-50` still maps `slider.horizontal.3`/`folder`/`laptopcomputer` to `☰ ▭ ⌨`, shown on every Computers view (`ComputersScreen.tsx:99,147,193,224`); `apps/mobile/package.json` has no `expo-symbols`/`expo-blur`. Scenario: the owner sees the "strange characters" class they reported. Needs network for `bunx expo install …` + dev-client rebuild.
+2. **MEDIUM — still open: no executed evidence.** `.tentacle/tmp/mobile-ui/slice-2/` (and `slice-0/`) exist but are empty; flows 12/13/15/16/20 unrun on the new layout (16 now goes through an in-app `Modal`, `ActionSheet.tsx:46`). Scenario: a Modal/XCUITest or keyboard-over-review-sheet (`PairScreen.tsx:249`, non-scroll `Sheet` with `pair-device-name`) problem ships behind a green unit suite.
+
+**Mutation (restored from scratch copy; `git status` clean):** `computerStatus.pairAgain` → `tone !== "online"` ⇒ caught by "an unreachable one is Offline (ring)…".
+
+**Attacks tried:** menu→Remove/Pair-again state handoff (`App.tsx:732-745`, one Modal stays mounted; Pair-again is a stack push and Pair's `Sheet` is not a Modal, so no present-while-dismissing) — holds; bad/duplicate QR decode under the full-screen scanner (`scanner.tsx:100-107` dispatches `scanned` → camera ends before the intake shows the failure) — holds; header safe-area with `headerShown: false` (`ScreenHeader.tsx:38-61`) — holds; §7: no protocol/persistence/daemon touch, decisions in `computer-status.ts` — holds.
+
+**Executor behaviour:** honest; blockers stated, no invented shims.
+
+*— claude-opus-5-5, 2026-11-15* (same model family as the planner/prior reviewers; executor was deepseek — fresh context only)
