@@ -352,3 +352,7 @@ lock.
 9. **Size and slot:** M, one branch, started after 12c and 13c merge (both
    touch `App.tsx`; 13c owns `package.json`/`bun.lock`/`expo-file-system`).
    **Rec: yes**; no split (the export part is ~1 day of the same files).
+
+#### Orchestrator decisions (owner night delegation 2026-11-14)
+
+Owner asleep, delegated: every Owner question above is decided with its RECOMMENDED option. Implementation APPROVED.
