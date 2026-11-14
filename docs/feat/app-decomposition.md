@@ -3924,3 +3924,267 @@ pins them at the unit. A changelog fragment for internal work follows the S2/S6
 precedent. Same model family caveat: none — the executor was DeepSeek, the reviewer Opus.
 
 *— claude-opus-5-5, 2026-11-14*
+
+## Execution
+
+### S9a — `feat/app-decomp-9a-turn` (the turn driver leaves `App.tsx`)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: the run's
+parent process is `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc`.)
+
+**Scope.** `packages/tui/src/useTurnDriver.ts` (new, the hook + the three types
+that ride with it), `App.tsx` (**`+73 / −747`, net −674 lines: `3033 → 2359`**),
+two new test files, one changelog fragment. **No existing test edited** — and that
+is the behaviour-preservation proof: the whole `packages/tui` suite is green,
+unmodified, at 1934 pass / 0 fail (its pre-slice baseline on this branch,
+measured first), plus `app.test.tsx` 116/116 on its own. `TODO.md` untouched; no
+`packages/protocol` change, so `protocol.json` was not regenerated.
+
+**Load-bearing check, re-run first (PASSED).**
+`.tentacle/tmp/app-decomp-9a-turn/lb-check.sh` on this branch:
+- *Ink calls EVERY active `useInput` listener, so the handler stays ONE* —
+  `packages/tui/node_modules/ink/build/hooks/use-input.js:89`
+  `internal_eventEmitter?.on('input', handleData)`, no stop-propagation;
+  `rg "useInput\("` finds only `App.tsx:2663` and the separate pre-mount
+  `components/SessionPicker.tsx:85`. **Holds** — S9a moves no key handling and
+  adds no listener, so the plan's central assumption is untouched by this slice.
+- *App has exactly 20 `useEffect(`*: measured `20` before, `20` after; the hook's
+  `react` import is `{ type MutableRefObject, useCallback, useRef }` — no
+  `useEffect`. **Holds.**
+- *The plan's premise — these bodies are an EXECUTOR over already-pure decisions
+  — is true*: `planTurnStart`/`planSendNow`/`planRefusal`/`afterOldTurn`/
+  `afterCompactionUnsupported`/`onCompactionSettled`/`onSuccessorError`/
+  `compactionWaitNotice`/`fallbackNotice` (`send-now.ts`), `submitPlan`/
+  `enterConvertsToChips`/`imageRowText`/`attachErrorText` (`attach-draft.ts`),
+  `switchingRefusal` (`sessions-panel.ts`), the queue's (`handOff`/`onTurnEnd`/
+  `addRow`/`markAcked`/`onReject`/`onSteer`/`takeForSendNow`/`takeAll`),
+  `turn-feed.ts`'s (`needsWarm`/`lostSlot`/`refusedBeforeStart`/`commitWarmed`),
+  `state.ts`'s and `pushHistory` (`history.ts`) all exist and hold every branch.
+  **Holds** — and it is now pinned by a structural case (M14) rather than
+  asserted, which is the difference that matters.
+- *The seven identifiers are frozen* (Fable M1): outside the moved bodies they
+  appear only as `CommandContext`/`KeyHost` fields plus one call site each
+  (`runRef.current = run`, `submit(field.value)`, `sendNow()`), and the phrase
+  `const <name> = useCallback` appears nowhere in `App.tsx` for any of them after
+  the move. **Holds.**
+- *The capability is missing pre-slice*: `useTurnDriver.ts` **ABSENT**, App 3033
+  lines, the bodies inline at 1336–2509. **Reproduced** — and this is the same
+  state the red half of the red/green run below uses.
+
+**Design, as built (dependency order).**
+1. **`useTurnDriver.ts` — the EXECUTOR, deciding nothing.** It carries
+   `drainHeld`, `commitHistory`, `settleSendNow`, `streamTurn`, `run`, `sendNow`,
+   `startCompaction`, `submit`, plus the two one-liners that have no caller
+   outside those bodies (`showIdle`, `noticeFallback`). The plan's module map
+   names six and M5 adds `startCompaction`; `drainHeld` is the settle's other
+   half (`streamTurn`'s `finally` is its only caller).
+2. **The port (`TurnHost`, 54 fields) is the shape the code forced.** Every ref
+   whose OTHER writer/reader stays in `App` is a field: the settle/drain reads
+   (`sendNowRef`, `streamCtrlRef`, `warmingRef`, `heldRef`, `onActivityRef`), the
+   wake (`wakeRef`, `handedWakeRef`), the quit/clear latches (`exitPendingRef`,
+   `clearingRef`, `clearAfterTurnRef`, `runClearRef`), the rows
+   (`rowsRef`/`setRows`, `restoredRef`, `stoppedHereRef`), the compaction pair
+   (`compactingRef`, `ownCompactionsRef`, `setCompacting`), the prompt history
+   (`historyRef`/`histIndexRef`/`draftRef`, `lastUserRef`, `lastHadImagesRef`,
+   `switchingRef`, `attachRef`, `probedTextRef`), the neighbours' executors
+   (`attachMode`/`convertToChips`/`sendWithImages`/`restoreChips` from S6,
+   `submitToTarget` from S5), the broker, and `exit`.
+   **The refs it CREATES are exactly the ones nothing outside touches**:
+   `streamTurnRef` (the `settleSendNow` ↔ `streamTurn` cycle), `ownedIdsRef` (the
+   ids a send-now ever took) and `compactionOwnedRef` (`/compact`'s "a send-now
+   took my rows"). A structural case pins that exact set (M10), so a later
+   "convenience" ref in the hook is red.
+3. **`runRef` stays `App`'s.** The hook only READS it (`settleSendNow`'s fallback
+   send); `App` writes it once, right after the hook returns — one writer, as on
+   `main`. My first build assigned it in the hook TOO; the mutation check caught
+   that (M1 survived, because `App`'s own assignment still ran). The duplicate was
+   the bug, so it was deleted — not the assertion loosened.
+4. **`handleCommand` arrives through `handleCommandRef`, not by value.** The
+   command layer needs this driver's `run`/`startCompaction`, and `submit` needs
+   the router: a cycle. `App` already kept the ref for it (`reResolve`), so the
+   port takes the ref and the late binding is the one the file already used.
+5. **`App.tsx`** — the eight bodies gone, one `useTurnDriver({…})` call in their
+   place (placed **after `askContext`**, which is a port field, and **before
+   `onActivity`/`watchSession`**, which start what it streams), plus
+   `runRef.current = run;`. The imports the move emptied left the file
+   (`planSendNow`, `planRefusal`, `afterOldTurn`, `onCompactionSettled`,
+   `planTurnStart`; `submitPlan`, `enterConvertsToChips`, `imageRowText`;
+   `handOff`, `onTurnEnd`; `pushHistory`).
+
+**The move is verbatim, checked rather than asserted.**
+`.tentacle/tmp/app-decomp-9a-turn/verbatim.py` sweeps every non-blank line of the
+ten pre-slice bodies (`git show HEAD:…/App.tsx`, read-only) against the hook:
+**582 non-blank lines, 11 not found verbatim** — every one in the two documented
+classes, no statement/identifier/comment INSIDE a body:
+1. **Ten dep arrays.** A ref arriving as a prop is a dep like any other, and
+   Biome's `useExhaustiveDependencies` fails otherwise (measured: verbatim arrays
+   gave **23 errors** on `biome check`, field-naming arrays 0). Every such field
+   is identity-stable, so **no callback identity changed** — H2 holds by
+   construction, and `app-structural-identity.test.ts` (green, unedited) still
+   pins it. Same drift S6/S8 recorded, for the same reason.
+   **One was a real regression I introduced and fixed:** `submit`'s array first
+   took `field` where `main` took `field.reset`; the line-editor object is
+   re-made every render while `reset` is stable, so the faithful dep is
+   `field.reset` (restored, with a comment saying why).
+2. **`handleCommand(text)` → `handleCommandRef.current?.(text)`** (design 4)
+   and `runRef.current = run;`, which is `App`'s line, not the hook's.
+
+**What did NOT move, and why (stated, not discovered late).**
+- **`runRef`, `wakeIfPending`, the two effects that drive the driver** (the
+  initial prompt, the wake) and the **jobs subscription**: `App`'s by H1; they
+  reach the driver through the same identifiers as before. That is why the hook
+  is called before them.
+- **`onActivity`, `watchSession`, `swapSession`, `askContext`**: S9b's, per the
+  plan's order. They stay, and they READ the driver's refs — which is precisely
+  why those refs are port fields rather than hook-private.
+- **`submitToTarget` (S5) and `sendWithImages` (S6)**: still their slices'
+  executors; the driver only calls them.
+
+**Drift from the Implementation (recorded, not silent).**
+1. **`drainHeld`, `showIdle` and `noticeFallback` moved too.** The module map
+   lists six bodies; `drainHeld` is the settle's other half, and `showIdle` /
+   `noticeFallback` have **no use site outside the moved blocks** — leaving them
+   behind would have stranded three `useCallback`s with zero callers, i.e. dead
+   code. The latter two are not exported (nothing outside needs them).
+2. **App.tsx's delta is −674, not the ~900 the Context band suggests.** That
+   band (2106–3008) covers the whole "session/turn driver", including
+   `onActivity`/`watchSession`/`swapSession`/`askContext`, which are **S9b's**.
+   Within S9a's stated scope the move is 582 non-blank statements / 900 source
+   lines, and 674 is what the stated scope predicts.
+3. **The port is 54 fields, wider than S8's 22.** Correct, not avoidable: these
+   bodies share refs with nearly every other driver. That is exactly why the plan
+   made S9a serial and load-bearing, and why "a shared latch is a field, never a
+   local ref" matters most here.
+4. **The plan's line range for `run`/`streamTurn` ("2214–2546") is stale** after
+   S2–S8 landed (it is 1336–2509 on this branch). The section boundaries were
+   re-derived from the code; the Design itself is unchanged and no step
+   contradicted it, so nothing in the Implementation needed correcting.
+
+**Tests (new only, 19 cases).**
+- `test/app-turn-driver-structure.test.ts` (10, source-level): no turn decision is
+  imported or CALLED in `App.tsx`; the hook really imports and calls them (a
+  same-named local is red — M14); exactly ONE `useTurnDriver` call with the seven
+  frozen identifiers; App still declares 20 effects and the hook imports none
+  (M13); the port is destructured and no alias of it survives (M11); the created
+  refs are exactly the three driver-owned ones and none is also a port field
+  (M10); `runRef`/`streamTurnRef` keep their forward binding; the broker is a
+  field while `usePermissionBroker` is still called once (§7 single-broker); the
+  layer's return list; no second driver body left in `App.tsx` (M9).
+- `test/app-turn-driver-layer.test.tsx` (9, App-seam through the real `App`): a
+  prompt streams and its settle ends it; a mid-turn `/exit` is carried out by the
+  SETTLE (proved by the unmount, not a guess); Esc stops the turn through the
+  live controller ref; the chord names exactly the rows queued at that moment
+  (freshness, H3); the successor turn streams through `streamTurnRef`; the
+  initial prompt goes through `runRef`; a held history is drained at the settle;
+  `/compact` asks once, starts no turn and releases its latch; a prompt during a
+  compaction is queued and visible, never sent.
+
+**RED before GREEN (§4/§9).** `.tentacle/tmp/app-decomp-9a-turn/redgreen.sh` puts
+`git show HEAD`'s `App.tsx` back and hides `useTurnDriver.ts` (no VCS command
+writes the tree), runs both files, then restores and re-runs:
+- **pre-slice:** structure **0 pass / 10 fail**, layer **9 pass / 0 fail**. The
+  reds are on the ASSERTIONS (the missing module, the `useTurnDriver(` count, the
+  `not.toContain` on `planSendNow(`, the ref set), never an import error. The
+  layer file passing pre-slice is **correct and expected**: this is a MOVE, so the
+  behaviour is unchanged by it and only the structural pins can be red before it
+  (S8 recorded the identical split).
+- **as built:** both **19 pass / 0 fail**; `md5` of `App.tsx` matches the pre-run
+  copy (`App.tsx RESTORE MATCHES`) — nothing was left mutated.
+
+**Mutation check (§9 non-vacuity) — 14/14 KILLED.**
+`.tentacle/tmp/app-decomp-9a-turn/mutate.ts` (byte-copy, ONE textual mutation,
+the filtered owning test, restore, sha256 compare; a **0-test run is reported
+INVALID**, so a bad filter can never look like a kill — that guard immediately
+caught a real `Ran 1 test` vs `Ran 1 tests` regex bug in my own harness). Every
+row is a red on the ASSERTION with a real count, never an import/compile error,
+and every restore printed `MATCHES`.
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | App never installs `run` into `runRef` (the initial prompt never sends) | **KILLED** (0/1) |
+| M2 | the send-now's successor started through a no-op (the cycle cut) | **KILLED** (0/1) |
+| M3 | the settle ignores `exitPendingRef` (a mid-turn quit never exits) | **KILLED** (0/1) |
+| M4 | `drainHeld()` dropped from the settle (a held activity is lost) | **KILLED** (0/1) |
+| M5 | `run` never records its controller (Esc aborts nothing) | **KILLED** (0/1) |
+| M6 | the send-now's `hasQueued` read as a constant, not the live rows | **KILLED** (0/1) |
+| M7 | the compaction's settle drops `setCompacting(false)` (the latch sticks) | **KILLED** (0/1) |
+| M8 | a prompt during a compaction is unrecognised (a refused turn) | **KILLED** (0/1) |
+| M9 | a second turn driver declared in `App.tsx` | **KILLED** (0/1) |
+| M10 | a hand-rolled `{ current }` latch where a ref belongs | **KILLED** (0/1) |
+| M11 | the port taken whole (`const wholePort = host`) | **KILLED** (0/1) |
+| M12 | the returned identifiers drift from the pre-slice ones | **KILLED** (0/1) |
+| M13 | an effect added to the hook (H1: App's indices would shift) | **KILLED** (0/1) |
+| M14 | a decision re-implemented in the hook instead of imported | **KILLED** (0/1) |
+
+Five rows were HOLES first and were closed by strengthening the TEST (never by
+loosening an assertion):
+- **M1 SURVIVED** — `runRef.current = run;` was written by BOTH the hook and
+  `App`, so deleting `App`'s copy still left it assigned. The duplicate was the
+  defect (design 3); removed, and the mutant died on the assertion.
+- **M4, M8 SURVIVED** — the layer cases asserted "nothing is stuck" and "no turn
+  was sent", which the broken drain/latch still satisfies. Both now assert the
+  positive property the mutation kills: the held history REACHES the frame; the
+  queued prompt's row is VISIBLE while the compaction holds the session.
+- **M9, M11, M13, M14 SURVIVED** — each structural case matched a weaker
+  correlate (a comment naming the module, `host.` alone, `useEffect(` alone, a
+  call to a same-named local). Each now checks the exact property: a second
+  `const X = useCallback` in `App.tsx`; no SURVIVING alias of the port; the
+  `react` import list plus a real `useEffect(` call; the import itself.
+
+**Coverage (`bun test --coverage packages/tui`), the plan's per-slice check.**
+Both sides measured (`.tentacle/tmp/app-decomp-9a-turn/precov.sh` swaps the
+pre-slice sources in, runs the same command, restores, `md5` compare proves the
+tree came back byte-identical):
+
+| | % Funcs | % Lines |
+|---|---|---|
+| `App.tsx` **pre-slice** | 95.19 | 98.17 |
+| `App.tsx` **as built** | 94.58 | **99.21** |
+| `useTurnDriver.ts` (new) | **97.67** | **96.37** |
+
+Lines ROSE (674 fewer lines, the same covered ones). Functions fell 0.61 on
+`App.tsx` **because the moved arrow functions are now counted where they live** —
+and the new file's 97.67 % is above `App.tsx`'s pre-slice figure, so the combined
+total rose; nothing was left unpinned. The new file's uncovered lines (490–496,
+548, 702, 814, 844, 854, 875–876, 909–915, 954, 1002, 1074–1075) are arms that
+existed verbatim on `main` and were equally uncovered there (a successor whose
+first step rejects, the "a send-now took my rows" notice, the `compactionOwned`
+refusal arms, the `catch` mapping an unknown throw). No branch this slice
+introduced is left unpinned.
+
+**A harness bug I hit and fixed (recorded because it is the kind that forges
+evidence).** My first coverage script ran `bun test --coverage` TWICE per phase
+with the outputs interleaved, so the second run's failures read as if they
+belonged to the first run's clean summary — the log *looked* like "4 fails as
+built". The script now runs the suite once per phase and keeps the whole log; the
+clean `1953 pass / 0 fail` above is that re-run. No test was touched to make it
+go away.
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` → clean (root project;
+`bun run check` additionally runs `tsc -p apps/mobile`) · `bun run lint` →
+`biome check .` **1196 files, 0 errors 0 warnings** (the AGENTS §6 baseline) ·
+`bun test` → **8928 pass / 3 skip / 0 fail** across 642 files, exit 0 (the 3
+skips are the documented opt-ins: live-k8s, live-docker, the real-socket
+keepalive — not failures). `packages/tui` alone: **1934 pass / 0 fail**
+before the slice, **1953 pass / 0 fail** after (135 files, the 19 new cases; no
+existing test edited). No schema change → `packages/protocol/schema/protocol.json`
+untouched. `changelog.d/app-decomp-9a-turn.changed.md` added. `TODO.md` untouched
+(the orchestrator's line, §10).
+
+**Unverified (one line each).**
+- *"Every ref a moved body reads is ALSO read or written outside the hook"* is
+  argued from the ownership sweep (`.tentacle/tmp/app-decomp-9a-turn/ownership.txt`)
+  and stated per field in the port's comments, but not pinned by a test: a shared
+  ref replaced by a hook-private one of the SAME type would still typecheck. The
+  structural case rejects *creating* one of the shared ones; it cannot see a
+  shared one being substituted.
+- *The plan's render-count check* ("spy on `usePaintScheduler` during a streamed
+  turn, vs `main`") is **not** implemented as a test: `usePaintScheduler` exposes
+  no injectable seam, and spying on an ES module export needs `mock.module`, which
+  no test in this package uses. What is pinned instead is the property the check
+  protects — every callback the port hands over is identity-stable, so no port
+  field can churn a render (`app-structural-identity.test.ts`, green, unedited,
+  counts subscribes across forced re-renders). To verify the raw number: run a
+  streamed turn under a `flushNow` counter on this branch and on `main`.
