@@ -334,4 +334,25 @@ No schema change, so `packages/protocol/schema/protocol.json` is untouched
 
 ## Review
 
-*— pending*
+*— claude-opus-5-5, 2026-11-14*
+
+**Verdict: APPROVE.** No HIGH or MEDIUM findings. I checked only `git diff main...HEAD`.
+
+**Gate (re-run here).** The 10 touched test files: 290 pass, 0 fail. `bun run lint`: clean. `bun run typecheck`: clean. I did not re-run the full `bun test`; the Execution reports 9349 pass / 3 skip.
+
+**Premises (TRUE).** `stepPermissionKey` has one call site (`keys/layer-dialog.ts:53`). Every answer path for Enter/`y`/`a` goes through the local `answer()` (`permission-reply.ts:139-142`). The reply field (`stepField`) only sends `allowed: false`. The other `permission.answer` callers (`App.tsx:1864`, `useTurnDriver.ts:814,906`) send `DISMISSED`, never an approval. No mouse path answers a dialog.
+
+**Mutation.** I changed `layer-dialog.ts` to pass `armed: true` (the buggy decision). `quit-enter-ask.test.tsx` then failed 5 of 8 tests. I reverted it and `git status` is clean.
+
+**Attacks tried.**
+1. Key between the commit and the stamping effect: `shownAt` is still `null`, so the dialog is disarmed. Safe.
+2. Back-to-back asks: `pending` gets a new identity, so the effect stamps again. This is pinned by a test.
+3. A refusal inside the window, Ctrl+C, and `a` on a store-less hooks-trust ask (that `a` means "Don't trust"): all answer at once, because the guard checks the response, not the key.
+4. Backwards clock jump: the dialog stays disarmed. This fails safe.
+5. §7: no protocol, broker, persistence or daemon change. The single broker is untouched. Logic sits in the pure `isArmed`/`stepPermissionKey`; the component only stamps a ref.
+
+**Notes (LOW, not blocking).**
+- (a) If the requester gets the *same* request object again while `pending` never leaves it within one React batch, the reset sets `shownAt` to `null` and the effect (keyed on `pending`) never stamps again. That dialog could then never be approved, only refused. Every runtime goes over RPC, so each request is a freshly parsed object and this should not happen. The Execution's M4 note covers the same area.
+- (b) The Execution is signed `claude-sonnet-4-5-20250929`, but commit `feb732ea` says "exec (deepseek)". The orchestrator should correct whichever is wrong.
+
+**Executor behaviour.** Disciplined. It reported the drift (D1 fixture list, D2 guard checks the response) honestly, ran mutations, and recorded the surviving M4 instead of hiding it. This reviewer is a different model family from the stated executor.
