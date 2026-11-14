@@ -1583,3 +1583,12 @@ surface. No `protocol.d` note: no wire or schema change.
 between the confirm and the resolve) is driven here by the harness's
 `setOnMessage` hook and by the scratch repro, not by a live socket closing at that
 instant; `ws-device-route` passes unchanged, which is the closest existing proof.
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: APPROVE.** Same model as the executor's reviewer chain (fresh context only).
+
+- **Finding 1 (HIGH, F22 latch): fixed.** `teardown()` no longer has a once-latch (`device-accept.ts`). Its work is idempotent: `stopWatcher` is cleared once, and `unregister` of the same handle object leaves an absent entry absent. A `release()` that arrives early therefore no longer swallows the F22 close-up. The round-1 scratch repro (`.tentacle/tmp/mobile-relay/f22-release.test.ts`) now gives `liveCount 0`.
+- **Finding 2 (MEDIUM, vacuous test): fixed.** Two new tests call `release()` in the gap between the last handshake message and the build, which is the caller's real order: one for a device (`liveCount`) and one for pairing (no `pairing-closed` after the window closes). **Mutation:** I put the latch back → both new tests failed (7 pass / 2 fail). Reverted; `git status` is clean.
+- **Regressions:** `ws-server`'s close handler now calls `release()` twice (`pending` + `ws.data.release`), which is harmless because the work is idempotent. `release()` only ever unregisters this connection's own handle object, so it cannot touch another socket.
+- **Gate:** the six touched daemon test files give **83 pass / 1 skip / 0 fail**. `bun run lint`: clean (1307 files). `bun run typecheck`: clean. I did not re-run the full suite.
