@@ -21,6 +21,7 @@ import * as format from "../src/format.ts";
 import * as idleWarm from "../src/idle-warm.ts";
 import { IDLE_WARM_DELAY_MS, type IdleWarmState } from "../src/idle-warm.ts";
 import type { LinkStatusView } from "../src/link-status.ts";
+import { ARM_MS } from "../src/permission-reply.ts";
 import * as renderLines from "../src/render-lines.ts";
 import { messagesToItems } from "../src/resume.ts";
 import type { SessionActivity } from "../src/turn-feed.ts";
@@ -1082,6 +1083,9 @@ describe("App", () => {
     stdin.write("\r");
     await delay(150);
 
+    // Past the arming window (docs/fix/quit-enter-ask.md): `y` approves an ask
+    // that just appeared only once the dialog has been up for `ARM_MS`.
+    await delay(ARM_MS);
     stdin.write("y"); // allow once
     await delay(150);
 

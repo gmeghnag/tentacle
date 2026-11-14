@@ -1,0 +1,27 @@
+appId: so.tentacle.app
+---
+# `_unlock` (docs/feat/mobile-lock.md, Tests): the shipped default LOCKS AT COLD
+# START (Owner Q1), so every flow that wants to see the app must get past the lock
+# first. There is deliberately NO test-only branch in app code for this — the
+# flows drive the real lock, which is the only way the lock is ever exercised.
+#
+# Step 0: `notifyutil …pearl.match` makes the pending `authenticateAsync` resolve
+# success on the simulator, so no tap on the system sheet is needed.
+#
+# The two assertions are the point of the subflow: the lock screen is UP and the
+# content behind it is NOT REACHABLE (F14: `computers-list` is hidden from the
+# accessibility tree, so Maestro cannot see it either).
+- runScript:
+    file: "faceid-enroll.js"
+- extendedWaitUntil:
+    visible:
+      id: "lock-screen"
+    timeout: 15000
+- assertNotVisible:
+    id: "computers-list"
+- runScript:
+    file: "faceid-match.js"
+- extendedWaitUntil:
+    notVisible:
+      id: "lock-screen"
+    timeout: 15000

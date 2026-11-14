@@ -34,9 +34,11 @@ describe("composerAction", () => {
     expect(composerAction(input({ text: "   \n\t" }))).toEqual({ kind: "none", why: "blank" });
   });
 
-  test("link down → nothing, and the text is KEPT (F12: the field is never cleared)", () => {
+  test("link down → Send later, and the text is KEPT (F12/13d: the field is never cleared)", () => {
+    // 13d (D1) replaces 12c's "nothing": offline text becomes an outbox item, so
+    // the person's tap does something instead of leaving the words in the field.
     const action = composerAction(input({ link: "down", text: "keep me" }));
-    expect(action).toEqual({ kind: "none", why: "link" });
+    expect(action).toEqual({ kind: "send-later", text: "keep me" });
   });
 
   test("own turn + empty field → Stop for THAT turn (it is the phone's own abort)", () => {
@@ -55,14 +57,16 @@ describe("composerAction", () => {
     });
   });
 
-  test("a turn runs and something is typed → neither send nor stop: the text waits (steer is task 13)", () => {
+  test("a turn runs and something is typed → QUEUE that text as a steer (13d, decision 15)", () => {
+    // 12c kept the text in the field ("steer is task 13"); D1 makes it a steer.
+    // Mutation: return `none`/`turn` here → red (and the queue row never appears).
     expect(composerAction(input({ turn: OWN, text: "typed" }))).toEqual({
-      kind: "none",
-      why: "turn",
+      kind: "queue",
+      text: "typed",
     });
     expect(composerAction(input({ turn: FOREIGN, text: "typed" }))).toEqual({
-      kind: "none",
-      why: "turn",
+      kind: "queue",
+      text: "typed",
     });
   });
 

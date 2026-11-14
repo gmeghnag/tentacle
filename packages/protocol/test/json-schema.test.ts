@@ -643,7 +643,11 @@ describe("tagged-union shape (what codegen needs)", () => {
     }
     // +1: `KnownLogEntry` (session/log, protocol 17).
     // +1: `PromptContentBlock` (prompt-only attachment block, attachments-prompt).
-    expect(unions).toBe(7);
+    // +3: the mobile relay's control frames — `RelayDaemonFrame`,
+    //     `RelayToDaemonFrame`, `RelayControlFrame` (docs/feat/mobile-relay.md
+    //     R1). Not RPC (they have their own `RELAY_PROTOCOL_VERSION`), but the
+    //     same `*Schema`/tagged-union shape, so codegen sees them too.
+    expect(unions).toBe(10);
   });
 
   test("every $ref names a $def", () => {

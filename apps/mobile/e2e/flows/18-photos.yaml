@@ -1,0 +1,42 @@
+appId: so.tentacle.app
+---
+# 18 (docs/feat/mobile-compose.md 13d): PHOTOS from the library. Two fixtures are in the
+# simulator's library (`simctl addmedia`: a PNG and a JPEG — the HEIC leg is proved by
+# 13c's Step 0, where PHPicker returned a real HEIC and the phone converted it), both
+# chips become ready, and the daemon's history names both refs with their types.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${PHOTO_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "PHOTO eighteen"
+- hideKeyboard
+- tapOn:
+    id: "composer-photo"
+- tapOn:
+    text: "Library"
+# PHPicker: the two fixtures, then Add.
+- tapOn:
+    text: "PNG fixture"
+- tapOn:
+    text: "JPEG fixture"
+- tapOn:
+    text: "Add"
+- extendedWaitUntil:
+    visible:
+      id: "chip-0-ready"
+    timeout: 40000
+- extendedWaitUntil:
+    visible:
+      id: "chip-1-ready"
+    timeout: 40000
+- tapOn:
+    id: "composer-send"
+- runScript:
+    file: "18-photos.js"

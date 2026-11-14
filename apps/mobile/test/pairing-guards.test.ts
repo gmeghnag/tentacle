@@ -62,10 +62,73 @@ describe("no build-time computer, no build-time token (F-H4)", () => {
     expect(all).not.toContain("ComputerConfigError");
   });
 
-  test("only the wiring file imports the Keychain (the store stays pure)", () => {
+  test("only the wiring files import the Keychain (every store stays pure)", () => {
     const importers = shippedSources().filter((path) =>
       /from "expo-secure-store"/.test(readFileSync(path, "utf8")),
     );
-    expect(importers.map((path) => path.slice(APP.length + 1))).toEqual(["src/secure-kv.ts"]);
+    // Two adapters, one per store: the computer store (11b.1) and the app-lock
+    // setting (docs/feat/mobile-lock.md D3). Both are five-line wiring files; the
+    // modules that DECIDE anything (`computer-store.ts`, `lock-settings-store.ts`)
+    // stay free of the native import, which is what this guard protects.
+    expect(importers.map((path) => path.slice(APP.length + 1))).toEqual([
+      "src/secure-kv.ts",
+      "src/lock-settings-expo.ts",
+    ]);
+  });
+});
+
+/**
+ * 11b.2's own seams, guarded the same way (a native import and a plist entry are
+ * both invisible to the unit tests that would otherwise cover them).
+ */
+describe("the camera stays behind ONE seam, and the scheme is registered (11b.2)", () => {
+  test("only the wiring file imports expo-camera (every other module stays testable)", () => {
+    const importers = shippedSources().filter((path) =>
+      /from "expo-camera"/.test(readFileSync(path, "utf8")),
+    );
+    expect(importers.map((path) => path.slice(APP.length + 1))).toEqual(["src/scanner.tsx"]);
+  });
+
+  test("the 11b.2 DECISION modules import no native module (they stay pure)", () => {
+    // `deep-link.ts` and `camera-access.ts` are pure by design (AGENTS §7): a
+    // `Linking`/`expo-camera`/`react-native` import there would make the branch
+    // they decide untestable. (`SessionScreen.tsx` does import `Linking` for
+    // `openURL` — pre-existing, and a screen, not a decision.)
+    for (const name of ["src/deep-link.ts", "src/camera-access.ts", "src/pairing-flow.ts"]) {
+      const source = readFileSync(join(APP, name), "utf8");
+      expect({ name, native: /from "(expo-camera|react-native)"/.test(source) }).toEqual({
+        name,
+        native: false,
+      });
+    }
+  });
+
+  test("app.json registers the `tentacle` scheme and a camera purpose that names pairing", () => {
+    // Owner Q6: the scheme is what makes `tentacle://pair?…` reach the app at
+    // all — an unregistered scheme makes the deep link a no-op, silently.
+    const config = JSON.parse(readFileSync(join(APP, "app.json"), "utf8")) as {
+      expo?: {
+        scheme?: unknown;
+        plugins?: readonly unknown[];
+      };
+    };
+    expect(config.expo?.scheme).toBe("tentacle");
+    // Decision 10: the prompt explains what the camera is for. The string lives
+    // in the expo-camera plugin, which is the entry that writes the plist key.
+    const camera = (config.expo?.plugins ?? []).find(
+      (plugin) => Array.isArray(plugin) && plugin[0] === "expo-camera",
+    ) as readonly [string, { readonly cameraPermission?: string }] | undefined;
+    expect(camera?.[1].cameraPermission ?? "").toContain("pairing code");
+  });
+
+  test("the camera never brings a microphone permission with it (pairing records no audio)", () => {
+    const config = JSON.parse(readFileSync(join(APP, "app.json"), "utf8")) as {
+      expo?: { plugins?: readonly unknown[] };
+    };
+    const camera = (config.expo?.plugins ?? []).find(
+      (plugin) => Array.isArray(plugin) && plugin[0] === "expo-camera",
+    ) as readonly [string, { readonly microphonePermission?: unknown }] | undefined;
+    // `false` is expo-camera's "delete the key" (not "leave the default text").
+    expect(camera?.[1].microphonePermission).toBe(false);
   });
 });

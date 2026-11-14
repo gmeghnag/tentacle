@@ -1,0 +1,343 @@
+/**
+ * The session screen's compose wiring (docs/feat/mobile-compose.md 13d): what the
+ * screen's own controller hands the compose half — the queue rows, the hand-back,
+ * the chips and the outbox — and what a tap on the new buttons does.
+ *
+ * The seam is a fake handle (as `session-screen.test.ts`) plus a fake photo port;
+ * the store and 13b's driver are real (over a memory fs), because the sequencing
+ * between them is exactly what this slice adds.
+ */
+import { describe, expect, test } from "bun:test";
+import { PermissionBroker } from "@tentacle/core";
+import type { AttachmentRef, QueueState } from "@tentacle/protocol";
+import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import type { ComposeHandle, PickedPhoto } from "../src/compose-controller.ts";
+import { createOutboxDriver } from "../src/outbox-driver.ts";
+import type { OutboxFs } from "../src/outbox-store.ts";
+import { createOutboxStore, outboxPaths } from "../src/outbox-store.ts";
+import { createSessionController } from "../src/session-controller.ts";
+import {
+  type ComposeWiring,
+  type SendableHandle,
+  type SessionScreenState,
+  createSessionScreen,
+} from "../src/session-screen-controller.ts";
+
+function memoryFs(): OutboxFs {
+  const files = new Map<string, string>();
+  return {
+    read: async (path) => files.get(path) ?? null,
+    write: async (path, text) => {
+      files.set(path, text);
+    },
+    rename: async (from, to) => {
+      const text = files.get(from);
+      if (text === undefined) {
+        throw new Error("missing");
+      }
+      files.delete(from);
+      files.set(to, text);
+    },
+    remove: async (path) => {
+      files.delete(path);
+    },
+    list: async (dir) => [...files.keys()].filter((path) => path.startsWith(`${dir}/`)),
+  };
+}
+
+const PICK: PickedPhoto = {
+  kind: "ready",
+  file: "file:///o/photos/a.jpg",
+  mimeType: "image/jpeg",
+  name: "a.jpg",
+  bytes: new Uint8Array([1, 2, 3]),
+};
+
+interface FakeSession extends SendableHandle {
+  emitActivity(activity: never): void;
+  readonly sent: () => readonly string[];
+  readonly queueListener: (state: QueueState) => void;
+}
+
+function harness(options: { readonly refuseSend?: unknown } = {}) {
+  const states: SessionScreenState[] = [];
+  const brokers: PermissionBroker[] = [];
+  const store = createOutboxStore(memoryFs(), outboxPaths("file:///o", "c1"), () => 1);
+  const session = {
+    queue: null as QueueState | null,
+    queueListener: (_state: QueueState) => {},
+    sent: [] as string[],
+    steers: [] as { readonly text: string; readonly id: string; readonly turnId: string }[],
+    /** A turn starts running: fed as the session's own `turn` activity (what the
+     * one button reads as `turn`, and what a steer binds to). */
+    turn(_turnId: string) {
+      session.activity?.({
+        kind: "turn",
+        turnId: _turnId,
+        events: (async function* () {
+          // never ends: the test drives the turn's end itself
+        })() as never,
+        cancel: () => {},
+      });
+    },
+    activity: null as ((activity: unknown) => void) | null,
+  };
+  const handle: ComposeHandle = {
+    sessionId: "s1",
+    attachImage: async (_bytes, meta) =>
+      ({ id: "blob", mimeType: meta.mimeType, size: 3 }) as AttachmentRef,
+    send: async (text) => {
+      session.sent.push(text);
+    },
+    steer: async (text, id, turnId) => {
+      session.steers.push({ text, id, turnId });
+    },
+    sendNow: async () => {},
+    // The client REPLAYS what it holds at subscribe (a real one does): the first
+    // queue report is its snapshot, not a live change.
+    onQueued: (listener) => {
+      session.queueListener = listener;
+      if (session.queue !== null) {
+        listener(session.queue);
+      }
+      return () => {};
+    },
+    queued: () => session.queue ?? undefined,
+    reclaim: async () => {},
+    port: {
+      upload: async (_bytes, meta) =>
+        ({ id: "port", mimeType: meta.mimeType, size: 3 }) as AttachmentRef,
+      prompt: async (text) => {
+        session.sent.push(text);
+      },
+      steer: async (text, id, turnId) => {
+        session.steers.push({ text, id, turnId });
+      },
+      facts: () => Promise.resolve({ availability: "open", historyLength: 0, runningTurnId: null }),
+    },
+  };
+  /**
+   * 13b's driver, built the way the app builds it: over a port whose `prompt` is the
+   * SCREEN's folding one (a drained stream would show no turn — 13d's flow 07/18).
+   */
+  const driver = (folding: Parameters<ComposeWiring["driver"]>[0]) =>
+    createOutboxDriver(async () => ({ ...handle.port, prompt: folding.prompt }), {
+      persistence: {
+        items: () => store.data.items,
+        save: (items) => store.setItems(items),
+        finish: (itemId) => store.removeItem(itemId),
+      },
+      readPhoto: async () => new Uint8Array([1]),
+      mint: () => "k",
+      // 13b's hand-back (F7/F20): the words are the field's again.
+      onDraft: folding.onDraft,
+    });
+  // The one driver the screen built, for a test that runs the outbox itself.
+  let built: ReturnType<typeof driver> | null = null;
+  const screen = () => {
+    const broker = new PermissionBroker(undefined, { holdUntilSet: true });
+    brokers.push(broker);
+    return createSessionScreen({
+      sessionId: "s1",
+      archived: false,
+      title: "Alpha",
+      project: "e2e-mac",
+      controller: createSessionController<SendableHandle>({
+        newSession: () => ({
+          open: () => Promise.resolve(),
+          detach: () => Promise.resolve(),
+          watch: (listener) => {
+            session.activity = listener as (activity: unknown) => void;
+            return () => {
+              session.activity = null;
+            };
+          },
+          async *send(prompt: string) {
+            // The screen's OWN stream: the compose half hands its turn here, so the
+            // events must fold into the transcript (13d's flow 07).
+            session.sent.push(prompt);
+            if (options.refuseSend !== undefined) {
+              // A refusal before any event (`TurnInProgress`): the real seam throws
+              // here, and `foldStream` is what used to swallow it.
+              throw options.refuseSend;
+            }
+            yield { type: "user_message", text: prompt } as never;
+            yield { type: "text", delta: "echo" } as never;
+            yield { type: "turn_end", reason: "end_turn" } as never;
+          },
+        }),
+      }),
+      broker,
+      now: () => 1,
+      onChange: (state) => states.push(state),
+      compose: {
+        computerId: "c1",
+        store,
+        driver: (folding) => {
+          built = driver(folding);
+          return built;
+        },
+        photos: { pickFromLibrary: async () => [PICK], takePhoto: async () => [PICK] },
+        handle: () => handle,
+        draft: () => {},
+        mint: () => "m",
+      },
+    });
+  };
+  return { screen, states, session, store, handle, composeDriver: () => built };
+}
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 40; i += 1) {
+    await Promise.resolve();
+  }
+}
+
+describe("the compose half on the screen", () => {
+  test("the view carries the queue rows the daemon reports, after the attach", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    // The compose half subscribes once the attach answered (`start` is async, since
+    // it reads the store first): settle before the broadcast.
+    await settle();
+    h.session.queueListener({ entries: [{ id: "theirs", text: "waiting" }], returned: [] });
+    expect(screen.state().view.queued.map((row) => row.id)).toEqual(["theirs"]);
+  });
+
+  test("the photo button picks and the chip reaches the view (13c's pipeline)", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    await screen.pickPhoto("library");
+    expect(screen.state().view.photos.map((chip) => chip.state)).toEqual(["ready"]);
+  });
+
+  test("a field with text offers Send later once the link drops (D1)", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    screen.setDraft("kept");
+    screen.link(false);
+    expect(screen.state().view.composer.button).toBe("send-later");
+  });
+
+  test("a tap on Send actually SENDS the field's text (the first iOS 26 run's bug)", async () => {
+    // The controller cleared the draft BEFORE handing the action to the compose
+    // half, which reads the field itself — so the send went out empty and the
+    // screen looked like nothing happened. Mutation: clear `draft` in `press` →
+    // red (the fake handle sees an empty prompt).
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    screen.setDraft("hello there");
+    expect(screen.state().view.composer.button).toBe("send");
+    screen.press();
+    await settle();
+    expect(h.session.sent).toEqual(["hello there"]);
+    expect(screen.state().draft).toBe("");
+  });
+
+  test("a REFUSED send gives the words back through the REAL seam (12c F13 / F7)", async () => {
+    // 12c's `send` and 13d's `promptWithRefs` both await `feed.ownTurn`, which used
+    // to SWALLOW the stream's throw: so the refusal never reached the caller, the
+    // field stayed cleared, and the person's words were gone (review round 1,
+    // finding 1). The fake prompt in `compose-controller.test.ts` throws directly,
+    // which is why only this seam shows it.
+    // Mutation: `return` instead of `throw` in `session-feed.ts` `foldStream` → red.
+    const h = harness({ refuseSend: new RpcError(DomainErrorCode.TurnInProgress, "busy") });
+    const screen = h.screen();
+    await screen.open();
+    screen.setDraft("my words");
+    expect(screen.state().view.composer.button).toBe("send");
+    screen.press();
+    for (let i = 0; i < 20; i += 1) {
+      await settle();
+    }
+    expect(screen.state().draft).toBe("my words");
+    // And it is SAID, not just restored (a silent restore looks like a lost send).
+    expect(screen.state().notice).not.toBeNull();
+  });
+
+  test("an item whose session is GONE hands its text back into the field (F20)", async () => {
+    // 13b's `refuse`draft` removes the item and asks the FIELD for its text
+    // (`onDraft`). The screen owning the field is the only place that may write it;
+    // before this wiring the callback was never connected, so the words vanished
+    // with the item. The link is down at the run, so 13b's port reports `gone`.
+    // Mutation: drop `onDraft` from the driver wiring → red (the field stays empty).
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    screen.link(false);
+    screen.setDraft("gone words");
+    screen.press(); // Send later: 13b's outbox owns the item
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    expect(h.store.data.items.map((item) => item.state)).toEqual(["waiting"]);
+    // The session is gone when the item's chance comes: the run hands it back.
+    Object.assign(h.handle.port, {
+      facts: () => Promise.resolve({ availability: "gone", historyLength: 0, runningTurnId: null }),
+    });
+    screen.setDraft("");
+    const built = h.composeDriver();
+    if (built === null) {
+      throw new Error("no driver");
+    }
+    await built.run("s1");
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    expect(screen.state().draft).toBe("gone words");
+    expect(h.store.data.items).toEqual([]);
+  });
+
+  test("a prompt with PHOTOS folds into the transcript too (13d's flow 18)", async () => {
+    // The compose half hands the outbox driver's port the SCREEN's folding prompt:
+    // a drained stream would show no turn and no answer for a photo message either.
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    await screen.pickPhoto("library");
+    screen.setDraft("look at this");
+    screen.press();
+    for (let i = 0; i < 5; i += 1) {
+      await settle();
+    }
+    expect(h.session.sent).toEqual(["look at this"]);
+    // The turn's own rows are in the transcript (`user_message` + the answer).
+    const rows = screen.state().transcript.rows;
+    expect(rows.some((row) => row.kind === "user")).toBe(true);
+    expect(rows.some((row) => row.kind === "assistant")).toBe(true);
+  });
+
+  test("an offline tap shows the waiting-network notice (F1)", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    screen.link(false);
+    screen.setDraft("offline words");
+    expect(screen.state().view.composer.button).toBe("send-later");
+    screen.press();
+    for (let i = 0; i < 20; i += 1) {
+      await settle();
+    }
+    expect(screen.state().compose.outbox.map((row) => row.state)).toEqual(["waiting"]);
+    expect(screen.state().view.notices.map((n) => n.testId)).toContain("waiting-network");
+  });
+
+  test("a tap on Queue sends the text as a steer, not as a prompt (D1)", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    // A running turn makes the one button a Queue.
+    h.session.turn("t-run");
+    screen.setDraft("steer me");
+    expect(screen.state().view.composer.button).toBe("queue");
+    screen.press();
+    await settle();
+    expect(h.session.sent).toEqual([]);
+    expect(h.session.steers.map((s) => s.text)).toEqual(["steer me"]);
+    expect(screen.state().draft).toBe("");
+  });
+});

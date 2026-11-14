@@ -1,0 +1,46 @@
+appId: so.tentacle.app
+---
+# 20 (docs/feat/mobile-lock.md, Owner Q2): with `immediately` chosen, leaving the
+# app locks it at ONCE — and the person comes back to where they were. The launch
+# below deliberately does NOT use `_unlock`: this flow asserts the lock is up and
+# the content hidden BEFORE matching, which `_unlock` would skip past.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "open-settings"
+- assertVisible:
+    id: "settings"
+- tapOn:
+    id: "lock-delay-immediately"
+- tapOn:
+    id: "lock-delay-immediately"
+- back
+# The row for the computer the pairing registered is on screen before we leave:
+# the flow then proves the SAME content comes back after the unlock.
+- assertVisible:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "computers-list"
+- pressKey: Home
+# `launchApp` WITHOUT `clearState`: the record must survive (flow 08's whole
+# point is the locked-return, not a fresh install).
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: "lock-screen"
+    timeout: 15000
+- assertNotVisible:
+    id: "computers-list"
+- runScript:
+    file: "faceid-match.js"
+- extendedWaitUntil:
+    notVisible:
+      id: "lock-screen"
+    timeout: 15000
+# Back where the person was: the navigator stayed mounted behind the cover.
+- assertVisible:
+    id: "computers-list"
+# The end is a DAEMON-side truth, not the container above: the app's own log
+# records the dial that only happens after a successful unlock (and throws if
+# it does not).
+- runScript:
+    file: "20-log-dialled.js"

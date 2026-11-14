@@ -3,6 +3,7 @@ import type { PermissionRequest } from "@tentacle/core";
 import type { Key } from "ink";
 import { EMPTY_EDITOR, setValue } from "../src/editor.ts";
 import {
+  ARM_MS,
   DENIED_LABEL,
   type DialogContext,
   type DialogStep,
@@ -11,6 +12,7 @@ import {
   denialReplyLines,
   draftOf,
   insertReply,
+  isArmed,
   orphanNotice,
   replyView,
   stepPermissionKey,
@@ -19,6 +21,8 @@ import { buildPermissionChoices } from "../src/permission-ui.ts";
 
 // docs/feat/permission-reply.md: the dialog's fourth answer "No, let's talk
 // about it" — every key decision here, pure; `App` only executes the action.
+// docs/fix/quit-enter-ask.md: the ARMING WINDOW — an approving key typed for
+// the main input as the dialog appears must not answer it.
 
 const key = (over: Partial<Key> = {}): Key => ({
   upArrow: false,
@@ -46,10 +50,17 @@ const shell: PermissionRequest = {
   input: {},
 };
 const replyable: PermissionRequest = { ...shell, reply: { maxChars: 2000 } };
-const ctx = (req: PermissionRequest, selected = 0, maxChars = 2000): DialogContext => ({
+/** `armed` defaults to true: the window has passed (every pre-existing case here). */
+const ctx = (
+  req: PermissionRequest,
+  selected = 0,
+  maxChars = 2000,
+  armed = true,
+): DialogContext => ({
   choices: buildPermissionChoices(req),
   selected,
   maxChars,
+  armed,
 });
 const step = (state: ReplyMode, char: string, k: Partial<Key>, c: DialogContext): DialogStep =>
   stepPermissionKey(state, char, key(k), c);
@@ -75,6 +86,94 @@ describe("the choices", () => {
     expect(buildPermissionChoices({ ...replyable, kind: "hooks_trust" }).some((c) => c.reply)).toBe(
       false,
     );
+  });
+});
+
+describe("the arming window (docs/fix/quit-enter-ask.md)", () => {
+  const disarmed = (req: PermissionRequest = replyable, selected = 0) =>
+    ctx(req, selected, 2000, false);
+
+  test("isArmed: null is disarmed, the boundary is exactly ARM_MS, a backwards clock never grants", () => {
+    expect(ARM_MS).toBe(500);
+    expect(isArmed(null, 1_000)).toBe(false);
+    const t0 = 10_000;
+    expect(isArmed(t0, t0)).toBe(false);
+    expect(isArmed(t0, t0 + ARM_MS - 1)).toBe(false);
+    expect(isArmed(t0, t0 + ARM_MS)).toBe(true);
+    expect(isArmed(t0, t0 + ARM_MS * 10)).toBe(true);
+    // A clock that jumped BACKWARDS must not grant: still disarmed.
+    expect(isArmed(t0, t0 - 5_000)).toBe(false);
+  });
+
+  test("disarmed: every approving key is swallowed — the dialog stays, nothing answers", () => {
+    // Enter on "Yes", y, a, and Enter on any other allow row ("Always allow").
+    expect(step(MENU, "", { return: true }, disarmed())).toEqual({
+      state: MENU,
+      action: { kind: "none" },
+    });
+    expect(step(MENU, "y", {}, disarmed())).toEqual({ state: MENU, action: { kind: "none" } });
+    expect(step(MENU, "a", {}, disarmed())).toEqual({ state: MENU, action: { kind: "none" } });
+    expect(step(MENU, "", { return: true }, disarmed(replyable, 1))).toEqual({
+      state: MENU,
+      action: { kind: "none" },
+    });
+    // Every kind of request that asks: a hooks trust allow row, `y` on it, and a
+    // session-hop "Yes, move it".
+    const trust = { ...shell, kind: "hooks_trust" as const };
+    expect(step(MENU, "", { return: true }, disarmed(trust)).action).toEqual({ kind: "none" });
+    expect(step(MENU, "y", {}, disarmed(trust)).action).toEqual({ kind: "none" });
+    const hop = { ...shell, kind: "session_hop" as const };
+    expect(step(MENU, "", { return: true }, disarmed(hop)).action).toEqual({ kind: "none" });
+  });
+
+  test("disarmed: refusals, arrows, t and Ctrl+C stay immediate (owner Q2)", () => {
+    // An accidental refusal is recoverable, an accidental approval is not.
+    expect(step(MENU, "n", {}, disarmed()).action).toEqual({
+      kind: "answer",
+      response: { allowed: false },
+    });
+    expect(step(MENU, "", { escape: true }, disarmed()).action).toEqual({
+      kind: "answer",
+      response: { allowed: false },
+    });
+    // Enter on "No", and `a` on a hooks trust ask with no store (a refusal row).
+    expect(step(MENU, "", { return: true }, disarmed(replyable, 2)).action).toEqual({
+      kind: "answer",
+      response: { allowed: false },
+    });
+    const trust = { ...shell, kind: "hooks_trust" as const };
+    expect(step(MENU, "a", {}, disarmed(trust)).action).toEqual({
+      kind: "answer",
+      response: { allowed: false },
+    });
+    expect(step(MENU, "", { downArrow: true }, disarmed()).action).toEqual({
+      kind: "select",
+      index: 1,
+    });
+    expect(step(MENU, "", { upArrow: true }, disarmed()).action).toEqual({
+      kind: "select",
+      index: 3,
+    });
+    // The reply row / `t` open the field: its Enter can only refuse or send.
+    expect(step(MENU, "t", {}, disarmed()).state.mode).toBe("reply");
+    expect(step(MENU, "", { return: true }, disarmed(replyable, 3)).state.mode).toBe("reply");
+    expect(step(MENU, "c", { ctrl: true }, disarmed()).action).toEqual({ kind: "stop" });
+  });
+
+  test("armed: today's behaviour — the same keys do answer", () => {
+    const c = ctx(replyable, 0, 2000, true);
+    expect(step(MENU, "", { return: true }, c).action).toEqual({
+      kind: "answer",
+      response: { allowed: true, scope: "once" },
+    });
+    expect(step(MENU, "y", {}, c).action).toEqual({
+      kind: "answer",
+      response: { allowed: true, scope: "once" },
+    });
+    expect(step(MENU, "a", {}, c).action).toEqual({
+      kind: "answer",
+      response: { allowed: true, scope: "session" },
+    });
   });
 });
 

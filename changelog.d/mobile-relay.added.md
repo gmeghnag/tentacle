@@ -1,0 +1,1 @@
+- **Phones reach `serve` through a relay, end-to-end encrypted.** A `serve` with paired devices dials out to `relay.tentacle.so` (or `relay.url` / `serve --relay`; `--no-relay` to opt out), so a phone reaches it from anywhere with no open port; the relay sees only ciphertext. The relay is a small self-hostable service in `apps/relay`. Design: `docs/feat/mobile-relay.md`.
