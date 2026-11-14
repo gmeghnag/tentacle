@@ -4490,3 +4490,243 @@ orchestrator's line, §10). `CHANGELOG.md` untouched;
 - **Mutation (my own):** dropping `watchSession(null)` before `old.detach()` in `switchTo` **survives** the new layer file (9/0), but is **killed** by the existing `connect-sessions.test.tsx` "(b) … detach THEN open". Reverted; `git status` clean.
 - **Nits (not blocking):** `onActivityRef.current = onActivity` is assigned twice (`useSessionLink.ts:398` and `App.tsx:1455`). It does no harm, but Execution says "plus the two ref installs" in App when only one is there. The layer file's "detach before open" case does not pin the watch release by itself; the older test does.
 - **Executor behaviour:** honest about its scope. It corrected the module map instead of forcing the code to match it, disclosed the flaky run and the skipped coverage check, and fixed its own surviving mutants by strengthening the tests.
+
+### S10 — `feat/app-decomp-10-view` (the view-model and the tree leave `App.tsx`)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-15* (real id: the run's
+parent process is `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc`.)
+
+**Scope.** `packages/tui/src/app-layout.ts` (new, the pure view-model),
+`packages/tui/src/AppView.tsx` (new, the dumb renderer), `App.tsx`
+(**`+91 / −408`: `2294 → 1977` lines**), two new test files
+(`app-layout.test.ts`, `app-view-structure.test.ts`), **one source-locator
+repoint** in an existing test (stated below, with the reason), one changelog
+fragment. No schema change → `protocol.json` untouched; `TODO.md` untouched.
+
+**Load-bearing check, re-run first (PASSED).**
+`.tentacle/tmp/app-decomp-10-view/lb-check.sh` on this branch:
+- *Ink calls EVERY active `useInput`, so the handler stays ONE* —
+  `packages/tui/node_modules/ink/build/hooks/use-input.js:89`
+  `internal_eventEmitter?.on('input', handleData)`, no stop-propagation;
+  `rg "useInput\("` finds only `App.tsx` and the separate pre-mount
+  `components/SessionPicker.tsx:85`. **Holds** — S10 moves no key handling.
+- *App has exactly 22 `useEffect(`*: measured `22` before, `22` after. **Holds.**
+- *The capability is missing pre-slice*: `app-layout.ts` **ABSENT**,
+  `AppView.tsx` **ABSENT**, App **2294** lines, the tree inline at
+  `App.tsx:2104` (the `return (`), 16 component mounts in it. **Reproduced** —
+  and it is the same state the red half of the red/green run uses.
+- *The rows are an EXECUTOR over already-pure decisions*: the block called 26
+  distinct pure functions (`statusTokens`, `contextShown`, `matchCommands`,
+  `paletteWindow`, `inputRowCount`, `attachRowView`/`attachRowRows`, `panelView`,
+  `shownRows`, `backgroundListView`, `jobDrawerView`/`drawerView`, `dockRows`,
+  `pillView`, `replyView`, `permissionPromptRows`, `panelHeight`/`panelMaxBody`,
+  `layoutTranscript`, `windowFor`, `sliceLaid`, `isScrolledUp`,
+  `rowSelectionRange`, `stripAnsi`, `inputTitle`, `useDockClock`). **Holds.**
+- *§7 single broker*: untouched — `usePermissionBroker(` still appears once.
+- *`process.stdout`*: no new module imports or writes it (the pre-existing hits
+  are `terminal-background-probe.ts`, `run.tsx`, `session-picker-run.tsx`, none
+  of them App's or the new modules').
+
+**Design, as built (dependency order).**
+1. **`app-layout.ts` — the pure view-model, deciding nothing new.** One
+   `frameLayout(input)` returns every derived row the App used to compute inline
+   (`tokensShown`, `ctxShown`, `columns`, `termRows`, `paletteCommands`,
+   `paletteOpen`, `commandSel`, `paletteWin`, `paletteRows`,
+   `inputContentLines`, `attachRow`, `inputBoxRows`, `listView`, `shown`,
+   `runningRows`, `dockListVisible`, `dockView`, `drawerOpen`, `jobOutput`,
+   `drawer`, `dockHeight`, `pill`, `replyMax`, `replyShown`, `activeRows`,
+   `viewport`, `panelBodyTop`, `dockTop`, `statusRowY`). React-free, no hook, no
+   ref of its own, no effect, no stdout, no element. `MAX_INPUT_ROWS` and
+   `RESERVED_ROWS` moved here (they are the frame's geometry); the model's TYPE
+   `AppViewModel` lives beside it (`FrameLayout &` the render values the tree
+   paints).
+2. **`AppView.tsx` — the tree, moved verbatim.** It destructures the model back
+   to the pre-move identifiers (Fable M1: no use-site edits inside the tree), so
+   the tree is character-for-character what the App returned. It owns no state,
+   no ref, no effect, no key handling and no geometry.
+3. **`App.tsx`** — one `frameLayout({…})` call in place of the derived block, the
+   rows App still reads destructured back to their old names, and one
+   `<AppView model={{…}} />` in place of the tree. 44 now-dead imports left the
+   file (measured against `HEAD`'s `App.tsx`: the slice's own 44, plus the three
+   constants that moved; its **32 pre-existing** dead imports are untouched — a
+   move slice cleans nothing, Owner Q5).
+
+**What deliberately did NOT move, and why (the plan's H1 wins over the map).**
+- **`useDockClock`** stays in `App`: it owns an EFFECT, and App's effect list is
+  frozen in today's order. Its tick arrives as `dockNow` (a value).
+- **The transcript layout** (`layoutTranscript`, `blink`, `windowFor`,
+  `sliceLaid`, `isScrolledUp`, `total`/`win`/`visible`) stays in `App`: its
+  consumers are three `useEffect`s (the blink clock, the idle warm, the scroll
+  anchor) plus the mouse snapshot and the hop's idle effect, none of which may
+  move. Those rows are `AppViewModel` fields and `frameLayout` inputs.
+- **`statusRowRef`** stays `App`'s (a ref), and `statusRowY` — the same
+  arithmetic — moved to the module, so the row a click is matched against and
+  the rows the viewport reserved cannot drift apart. **This is the one place the
+  tree did not move byte-for-byte:** `onPillRange`'s inline row computation became
+  `y: frame.statusRowY` (9 lines of the 189-line JSX block).
+
+**The move is a move, checked rather than asserted.**
+`.tentacle/tmp/app-decomp-10-view/verbatim.py` sweeps every non-blank line:
+- **The JSX block: 189 non-blank lines, 180 found verbatim in `AppView.tsx`.** All
+  9 misses are the ONE documented drift class (`onPillRange`'s row arithmetic and
+  its 6-line comment, moved to `app-layout.ts` as `statusRowY`).
+- **The derived block: 242 non-blank lines, 235 found verbatim** in the module or
+  in `App.tsx` (the parts that stayed). The 7 misses are the section header
+  comment and **six field renames** forced by the input shape — `size.columns` →
+  `sizeColumns`, `skills()` → `skills`, `sessionRef.current?.sessionId` →
+  `sessionId`, `jobOutputRef.current` → `jobOutput`, `dockFinishedRef.current` →
+  `dockFinished` (each is a ref read at the SAME point, passed in; the freshness
+  rule is pinned by a unit case that makes the ref and the render value
+  disagree), and the `panelView` call's last argument. **No expression changed
+  value**, and no dep array was edited (the module declares no callback).
+- **`git diff` shows the deletion cleanly:** `App.tsx` `+91 / −408`.
+
+**Failures the tests actually decide (red-first, and what that red proves).**
+- `app-view-structure.test.ts` — 10 structural cases, **RED before the modules
+  existed**. Honest split: **2 were red on the PROPERTY** ("no derived row is
+  computed in App.tsx any more" — `statusTokens(` still called there; "the JSX
+  tree is AppView's" — `<StatusBar` still mounted there), and the other 8 were
+  red on a missing module (ENOENT), which proves the capability was absent but
+  **not** the property. So the property's non-vacuity rests on the mutation table
+  below, not on the pre-implementation run — §9's rule, stated rather than
+  glossed. 10/10 green after.
+- `app-layout.test.ts` — 21 unit cases over the pure function: the column/row
+  floors, the transcript's floor (`Math.max(3, …)`), the reserved rows, a prompt
+  zeroing the dock **with the dropdown focused** (the only decisive fixture), a
+  panel taking the bottom slot and `dockTop`'s null, the palette's open/close/
+  clamp rules, the running rows (thinking + queued + separator + spacer), a
+  compacting turn, the attach row INSIDE the box (`statusRowY` invariant — P8),
+  the multi-line cap, the drawer's terminal-dependent budget, the dock reading
+  the **ref** (H3 freshness), and the reply view's mode gate. A unit test against
+  a module that did not exist could not run at all, so non-vacuity here is the
+  15/15 mutant table.
+
+**Mutation tables (pasted results).** Two scripts, both restoring byte-for-byte
+by sha256 (`RESTORED CLEAN` printed at the end of each run).
+
+*Structural — 9/9 killed* (`.tentacle/tmp/app-decomp-10-view/mut.sh`):
+```
+RED ok M1 modules deleted | M2 derived row re-inlined in App | M3 JSX left in App
+RED ok M4 decision re-implemented in module | M5 blank-row rule dropped
+RED ok M6 hook in the pure module | M7 view owns a ref
+RED ok M8 useInput added to the view | M9 onPillRange attribute dropped
+```
+M9 **survived** on the first run: the test asserted `toContain("onPillRange")`,
+which the destructuring still satisfies after the attribute is deleted. Fixed by
+pinning the attribute pass-through (`<StatusBar … onPillRange={onPillRange}`),
+the module's exact `statusRowY` expression, the view NOT deriving it, and App's
+`statusRowRef` write — then M9 went red.
+
+*Unit — 15/15 killed* (`.tentacle/tmp/app-decomp-10-view/mut-layout.sh`):
+```
+RED ok U1 RESERVED_ROWS | U2 viewport floor 3->1 | U3 column floor 20->10
+RED ok U4 dock reads state not ref | U5 dock keeps rows under a prompt
+RED ok U6 statusRowY loses the spacer | U7 attach row not counted (P8)
+RED ok U8 palette opens mid-turn | U9 selection unclamped
+RED ok U10 blank spacer dropped | U11 quit rows off by one
+RED ok U12 panel body row off | U13 dockTop ignores the panel
+RED ok U14 reply view ungated | U15 drawer budget fixed 14
+```
+Three **survived** the first run (U5, U13, U14) because no fixture built a
+panel, a focused dropdown under a prompt, or a menu-mode request with a draft
+limit. Each was closed by adding that exact fixture; all 15 are now red.
+
+**The one existing test I edited, and why it is not a weakened assertion.**
+`test/app-quit-clear-structure.test.ts` asserted
+`importSpecs(App.tsx, "./commands.ts")` contains `quitConfirmText`, with the
+comment "the dialog is still App's to render". The property is that
+`quitConfirmText` formats the dialog's one line from an already-made view-model —
+and the call followed the JSX into `AppView.tsx`. The locator was repointed **and
+strengthened**: it now pins the import in `AppView.tsx`, exactly one call there,
+**zero** calls in `App.tsx` (the move itself), and that `commands.ts` still
+exports the function, so the two scans cannot pass vacuously.
+
+**Gate (per the brief).**
+- `bunx tsc --noEmit` → clean (`tsc --noEmit && tsc -p apps/mobile`: clean).
+- `bun run lint` → **clean, 1299 files** (the AGENTS §6 baseline is clean, so
+  this is "no new issues").
+- `bun test` → **9368 pass, 3 skip, 0 fail** across 674 files. The 3 skips are
+  the documented opt-ins (live-k8s, live-docker, real-socket keepalive).
+- **The behavioural half of the proof:** `app-frames.test.tsx` (13 pinned
+  frames) and `app-structural-sgr.test.tsx` (SGR + the 5 pill-click pins) are
+  **unchanged and green** — 18/18. So the frame, its colours and every click row
+  are what they were.
+- No schema change → `packages/protocol/schema/protocol.json` **not**
+  regenerated (nothing under `packages/protocol/` was touched).
+
+**Drift from the Implementation, stated.** The module map's "derived rows
+1300–1555" has moved three times since (S5/S7/S9a/S9b took parts of that span),
+so S10's block was **808–1049 today** plus the transcript window, which stays.
+The map's `app-layout.ts` took the frame's rows and not the transcript's; the
+reason is H1 (three effects consume the latter) and it is recorded here rather
+than forced. The plan's "verbatim JSX move" holds for 180 of 189 lines; the 9 are
+`onPillRange`, where a verbatim copy would have duplicated `statusRowY`'s
+arithmetic in the view — the exact drift §7 forbids.
+
+**Not verified (one line each).**
+- The tail of the drawer's short-terminal budget is asserted only as
+  `tight.tail < roomy.tail` with both present; a narrower floor (3 rows of
+  terminal) could make the drawer unpaintable — verify by mounting `App` at
+  `rows: 6` with a job drawer open and confirming the frame never exceeds it.
+- Real-terminal rendering of the moved tree is covered only by
+  ink-testing-library frames (no SGR geometry); S0's review already accepted that
+  gap and S0b's pins are the mitigation.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; a different model family from
+the executor, DeepSeek.) **Scope:** slice S10 only (`git diff main...HEAD`).
+
+**Verdict: PASS (APPROVE-WITH-NITS)** — one MEDIUM test-vacuity finding, which
+does not block the merge.
+
+**Gate (re-run here).** `bun test` **9368 pass · 3 skip (the opt-ins) · 0 fail**;
+the touched and pinning files (`app-layout`, `app-view-structure`,
+`app-quit-clear-structure`, `app-frames`, `app-structural-sgr`) 56/56;
+`bun run lint` clean (1299 files); `bun run typecheck` clean.
+
+**Findings.**
+1. **MEDIUM (test non-vacuity, §9)** — `packages/tui/test/app-layout.test.ts:330`
+   ("the palette also takes the dock's slot") cannot fail: its fixture has no dock
+   (`dockHeight === 0`), so `dockTop` is `null` whatever `paletteOpen` does.
+   Mutation: dropping `paletteOpen ||` from `dockTop` (`app-layout.ts`, the
+   `dockTop` expression) → **165/165 green** across app-layout, app-view-structure,
+   app-frames, app-structural-sgr and app.test (reverted; `cmp` byte-identical;
+   tree clean). Fix: build the fixture with `dock.focus.kind === "list"` and a row
+   (so that `dockHeight > 0`) **and** `field.value: "/"`. The code is a faithful
+   move, so this is a test fix only.
+
+**Attacks tried.**
+- *Did the move change a value?* I read the derived block line by line against
+  `frameLayout`. It is the same expressions in the same order. The refs
+  (`jobOutputRef`, `dockFinishedRef`, `subagentsRef`/`jobRowsRef`) are still read
+  in the same render. `statusRowY` is the old inline `onPillRange` expression, and
+  it is evaluated in the same render whose closure used to capture it. Nothing
+  found. One dead guard (`permission.pending === null ? 0 : …` inside the
+  truthy branch) changes no value.
+- *Hook order / §7 effects:* `useDockClock` is still in its old place. No hook
+  sits between `setCommandIndex` and it, and none in `AppView`. The single
+  `useInput` and the single `usePermissionBroker` are unchanged. Nothing found.
+- *Ink/terminal:* the blank-row `" "` rule is kept verbatim. No new module writes
+  to `process.stdout`. `AppView` is unmemoized, so it re-renders on every App
+  render, as the inline tree did. Nothing found.
+- *Mutation:* B above survived (finding 1). The executor's 9 structural and 15
+  unit mutants were not re-run here (approval for the scratch script was denied).
+  I accept them from the pasted table only.
+
+**Holds.** It is a verbatim move with one documented, justified drift
+(`statusRowY` lives in one place). The behavioural net (13 frames, plus the SGR
+and pill-click pins) is unchanged and green.
+
+**Nits (not blocking).** The `FrameInput` doc names a `blinkClock` input that does
+not exist. `app-layout.ts`, which claims to be "React-free", imports
+`permissionPromptRows`/`QUIT_CONFIRM_ROWS` from `.tsx` components (Ink is
+loaded transitively). `paletteCommands.map((c: { readonly name: string }) …)` in
+App is a type annotation the inferred return should make unnecessary.
+
+**Executor behaviour.** It was honest: it reported its red/green split as two red
+on the property and eight on ENOENT. It closed the mutants that survived its
+first run, and it disclosed the drift. One overclaim: the palette test is
+presented as pinning a slot property that it does not pin.
