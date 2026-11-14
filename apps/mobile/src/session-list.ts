@@ -15,6 +15,7 @@
 import { ChannelError } from "@tentacle/client";
 import { DomainErrorCode, JsonRpcErrorCode, type SessionListEntry } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
+import { type LinkDiagnosis, diagnosisMessage } from "./link-diagnosis.ts";
 
 /** One page as the network layer hands it back (the reducer never awaits). */
 export interface SessionPage {
@@ -266,19 +267,25 @@ export interface ErrorDescription {
   readonly retry: boolean;
 }
 
-/** "Can't connect" — the one wording for every dial/upgrade failure (see below). */
+/** "Can't connect" — the fallback for a dial/upgrade failure with no diagnosis (11a's wording). */
 const UNREACHABLE = "Can't connect — the computer is unreachable or refused this app";
 
 /**
  * What to show for a failed `session/list`.
  *
- * iOS reports BOTH a bad token and an Origin rejection as close 1006 (spike
- * Review finding 3), so a `ChannelError` is never classified by kind or by its
- * close code: every kind gets the same honest wording, and the 401/origin split
- * waits for task 9. The message is never inspected for "401" either — a close
- * reason we do not trust must not become a claim we make.
+ * On `/e2e` (11b.1) a `ChannelError` now has an AUTHENTICATED verdict to show
+ * (`revoked`: this phone was removed; `maybe-reset`: three opened-but-unconfirmed
+ * handshakes), so a caller that has the link's diagnosis passes it in and this
+ * function words it (`link-diagnosis.ts`'s `diagnosisMessage`). Without one,
+ * the 11a rule still holds exactly: iOS reported a bad token and an Origin
+ * rejection as the same close 1006, so no kind is classified from the error
+ * itself and the message is never inspected for "401" — a close reason we do not
+ * trust must not become a claim we make.
  */
-export function describeError(error: unknown): ErrorDescription {
+export function describeError(
+  error: unknown,
+  options: { readonly computerName?: string; readonly diagnosis?: LinkDiagnosis } = {},
+): ErrorDescription {
   if (error instanceof RpcError) {
     if (error.code === JsonRpcErrorCode.MethodNotFound) {
       return {
@@ -295,6 +302,15 @@ export function describeError(error: unknown): ErrorDescription {
     };
   }
   if (error instanceof ChannelError) {
+    const diagnosis = options.diagnosis;
+    if (diagnosis !== undefined && diagnosis !== "ok" && options.computerName !== undefined) {
+      // `revoked` is the daemon's authenticated answer about OUR key, so it is
+      // not a retry: the person must pair again or remove the computer.
+      return {
+        message: diagnosisMessage(diagnosis, options.computerName),
+        retry: diagnosis !== "revoked",
+      };
+    }
     return { message: UNREACHABLE, retry: true };
   }
   const message = error instanceof Error ? error.message : String(error);

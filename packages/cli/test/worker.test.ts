@@ -82,6 +82,43 @@ describe("startWorkerRuntime (real worker spawn)", () => {
     }
   });
 
+  // Fix round 1, finding 1 (docs/feat/images-off-reason.md): the worker runs
+  // THIS laptop's model from THIS laptop's config, and reports no model of its
+  // own — so the "images are off" reason must name our model and point at our
+  // config. Mutation: drop `modelScope: "laptop"` at the worker's
+  // `createLocalRuntime` call → red.
+  test("images off: the reason names THIS laptop's model and config (the worker is ours)", async () => {
+    const runtime = await startWorkerRuntime(
+      // A model whose provider default has no vision (`images` unset): the
+      // daemon then advertises no image input at all (`daemonImagePolicy`).
+      { ...config, provider: "openai", images: false },
+      {
+        permissions: new PermissionBroker(),
+        saver: new SessionSaver(new LogSessionStore(join(dir, "sessions-images")), () => {}),
+        resume: null,
+      },
+      () => {},
+    );
+    expect(runtime).not.toBeNull();
+    if (!runtime) {
+      return;
+    }
+    try {
+      const mode = runtime.createSession().imageInput();
+      expect(mode.kind).toBe("off");
+      if (mode.kind !== "off") {
+        return;
+      }
+      expect(mode.reason).toContain("your config");
+      expect(mode.reason).not.toContain("the daemon's config");
+      // The model is the laptop's own (`config.model`), named through the
+      // display-only option rather than an `agentInfo` the worker never sends.
+      expect(mode.reason).toContain(config.model);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
   test("/mcp: the worker reports each configured MCP server's live state", async () => {
     const server = join(import.meta.dir, "fixtures", "mcp-stdio-server.ts");
     const runtime = await startWorkerRuntime(

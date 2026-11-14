@@ -186,6 +186,47 @@ describe("connect: buffered peer-error sink (never a raw write while Ink owns th
     expect(written).toEqual(["[connect] error: invalid params for notification session/update\n"]);
   });
 
+  // Fix round 1, finding 1 (docs/feat/images-off-reason.md): `connect` reaches a
+  // `serve` host that runs ITS OWN model from ITS OWN config, so an images-off
+  // reason must name that model and send the user to the daemon's config — never
+  // this laptop's `config.model` (which `connect` does not even load).
+  // Mutation: pass a `modelName`/`modelScope: "laptop"` in `connect.ts` → red
+  // (the startTui check is what catches it: no model name means "the daemon's").
+  test("connect: an images-off reason is about the DAEMON's model and config", async () => {
+    const host = new SessionHost({
+      defaultCwd: "/srv",
+      identity: { tentacle: APP_VERSION, kind: "serve" },
+      // A `serve` host reports its own model (`serve.ts:305`).
+      modelInfo: { name: "serve-model", contextWindow: 200_000 },
+      createAgent: () => ({
+        agent: new Agent({
+          model: {
+            id: "m",
+            async *stream() {
+              yield { type: "done" as const };
+            },
+          },
+          tools: new ToolRegistry(),
+          env: { id: "noop" } as never,
+        }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, host);
+    let reason = "";
+    await connectTui({ url: "ws://fake" }, () => {}, {
+      dial: () => async () => clientCh,
+      startTui: async (_agent, options) => {
+        const mode = options.createSession?.().imageInput?.();
+        reason = mode?.kind === "off" ? mode.reason : `kind=${mode?.kind}`;
+      },
+    });
+    expect(reason).toContain("serve-model");
+    expect(reason).toContain("the daemon's config");
+    expect(reason).not.toContain("your config");
+  });
+
   test("connect never sends `settings`: the serve host's config rules (docs/feat/config-carry.md)", async () => {
     // Mutation: pass `sessionSettings` in `connect.ts` → the frames carry it.
     const host = new SessionHost({

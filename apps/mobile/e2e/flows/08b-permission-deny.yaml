@@ -1,0 +1,44 @@
+appId: so.tentacle.app
+---
+# 08b (docs/feat/mobile-session-view.md 12c): the DENY variant of flow 08 — the
+# same ask, refused from the sheet. The tool does not run, the row says the call
+# errored, and the daemon's file proves the refusal reached it (the opposite
+# assertion to 08's, so neither flow can pass by accident).
+#
+# A different file name from flow 08's `a.txt`: the two flows share one daemon.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${ASK2_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "EDIT denied.txt"
+# The keyboard covers the composer's button: dismiss it, so the tap lands
+# on the button and not on a key (found by the first iOS 26 run).
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- tapOn:
+    id: "perm-reject_once"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+- runScript:
+    file: "08-call-id.js"
+# A PLAIN refuse is the daemon's `error` status on the row; `denied` is reserved
+# for a refusal WITH the person's words (08c, and 12b's Execution Drift 4 — the
+# row statuses follow the TUI's, which distinguishes the two the same way).
+- assertVisible:
+    id: "tool-${output.callId}-error"
+- runScript:
+    file: "08b-denied-file.js"

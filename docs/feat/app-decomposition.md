@@ -2851,3 +2851,1384 @@ counts the line.
 clean. The full `bun test` was not re-run.
 
 *— claude-opus-5-5, 2026-11-14*
+
+### S5 — `feat/app-decomp-5-dock` (the dock leaves `App.tsx`)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: `ps` shows
+this run launched as `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is that id in `~/.config/tentacle/config.jsonc:29` — the same
+profile S3 and S4 ran under.)
+
+**Scope.** `packages/tui/src/useDock.ts` (new, 478 lines: the hook, its two
+port types), `App.tsx` (−328/+55 → **3457** lines from 3730), one new test file
+(`packages/tui/test/use-dock.test.tsx`, 8 tests). **No changelog fragment** —
+written and then deleted (Review finding 1); see Fix round 1.
+**No existing test edited**, no `packages/protocol` change (so `schema/protocol.json`
+was NOT regenerated — no schema changed), no other slice touched, `TODO.md`
+untouched.
+
+**Load-bearing check, re-run first (PASSED).** The plan's claim for every slice
+is that Ink calls EVERY active `useInput` listener, so the router cannot be
+split — re-verified on this branch, not trusted:
+`packages/tui/node_modules/ink/build/hooks/use-input.js:89` registers
+`internal_eventEmitter?.on('input', handleData)`; `handleData` (`:80–87`) returns
+nothing anyone consumes and has no stop-propagation; the emitter is per-App
+(`components/StdinContext.js:11`). `rg 'useInput\(' packages/tui/src` →
+`App.tsx:3360` (the one handler) and the separate pre-mount
+`components/SessionPicker.tsx:85`. **Holds** — so `App` keeps ONE `useInput`, and
+S5 moves no key handler (S3 already moved its body). The check that matters HERE
+is the H1 effect-order rule, and it also holds: **20 `useEffect`s before and
+after**, in the same order, with the dock's four at indices 3, 12, 13, 14 both
+times (pin: `use-dock.test.tsx` "App keeps 20 effects").
+
+**Design, as built (dependency order).**
+1. **`useDock.ts` — `DockHost` (input) and `DockLayer` (output).** `DockHost` is
+   five fields: `sessionRef`, `field`, `fieldValueRef`, `pushNoticeRef`,
+   `jobRefreshMs`. `DockLayer` returns every identifier `App` already used —
+   the rows and their refs, the dock's state/ref/setter, `dockIds`,
+   `dockVisible`, the two drawer subjects, the reconcile memory and its trigger,
+   the job-read trigger and cadence, and the four actions — so every use site is
+   untouched (Fable M1).
+2. **The refs, state and actions move verbatim.** `setAgents`/`setJobs` keep
+   their `sameIds`/`sameReads`/`sameJobIds` gates and their
+   `dockLast*RowsRef` freeze writes; `setDock` keeps its EAGER ref write;
+   `dockIds`/`dockVisible` stay `useCallback` with `[]`; `drawerSubject` →
+   `drawerRow`/`drawerJob` stays a render computation; `killChild`, `killJob`,
+   `toggleAgents`, `submitToTarget` move body-for-body with their doc comments.
+   **No decision was re-derived** — each already lived in
+   `background-focus.ts` / `background-list.ts` / `job-drawer.ts`.
+3. **`App.tsx`** — one `useDock({…})` call where the refs used to be, one
+   destructuring block in the pre-S5 names, the four effects and their bodies
+   left exactly where they were, and the now-unused imports trimmed
+   (`DockState`, `INPUT_DOCK`, `DockJobRow`, `BackgroundAgentRow`, `frozenAgent`,
+   `frozenJob`, `sameIds`, `sameJobIds`, `sameReads`, `refusalPlacement`,
+   `restoreRefused`, `sendTarget`, `toggleList`, `listVisible`).
+
+**Drift from the Implementation (three, all recorded, none silent).**
+
+1. **`pushNotice` travels as a REF, not a port value.** The plan's S5 row says
+   "own types; same identifiers; effects stay in App" and does not say how the
+   notice sink crosses into the hook. It cannot cross by value: `pushNotice` is
+   declared BELOW the dock's refs in `App` (it needs `flushNow`), while an
+   effect at index 3 (the `jobs.onExit` subscription, ABOVE it) reads
+   `dockStoppedRef`. Moving `pushNotice` up would move that effect's position
+   (H1); passing it by value from below would keep the hook's four callbacks
+   re-creating whenever `flushNow` did. A ref is the late binding the file
+   already uses four times (`routeAttachRef`, `runRef`, `handleCommandRef`,
+   `warmErrorRef`), and it keeps BOTH properties: the effect indices and the
+   callbacks' identities. `App` writes `pushNoticeRef.current = pushNotice`
+   immediately after `pushNotice` is created (the earliest moment it exists).
+2. **`DockLayer` exposes MORE than the plan's "same identifiers" list: the
+   effects' derived triggers too** (`dockIdKey`, `jobTargetId`,
+   `jobEndedWhileOpen`, `refreshMs`) **and the reconcile memory** (`dockSeenRef`).
+   Those four were `const`s computed from `dock`, and the memory was a `useRef`,
+   inside the block the plan hands to the hook — so they had to go somewhere. The
+   plan's H1 rule decides where: an effect stays in `App`, so the values it
+   closes over must be reachable from `App`, which means the hook returns them.
+   They are triggers/memory, not decisions.
+3. **The deps arrays NAME the ref fields (Fable H2), which is what the rule
+   asks — but three of them had to be ADDED to existing arrays.** Biome's
+   `useExhaustiveDependencies` reads a destructured `const { dockOutcomeRef } =
+   hook` as a plain value, so the four effects and the two callbacks that write
+   those refs now name them (`[jobs, flushNow, armWake, setDock, dockFinishedRef,
+   dockOutcomeRef, dockStoppedRef]`, and the same pattern in the id-key
+   reconcile, both job-read effects, `watchSession`, `requestQuit`). This is
+   SAFE and is the plan's own rule — a `useRef` object's identity never changes,
+   so naming it cannot cause a re-run — and it is strictly better than a
+   `biome-ignore`, which would have hidden the next real missing dep on those
+   same effects.
+
+**Effects: none moved (H1 / owner Q7 (a)).** Indices before → after, unchanged:
+`1` 478→479 (attach unmount), `2` 761→650 (skills sync), `3` 810→699
+(**`jobs.onExit`**), `4` 854→746 (host notices), `5` 870→762 (link stop), `6`
+889→781 (resize), `7` 927→819 (palette reset), `8` 1132→1024 (blink arm), `9`
+1142→1034 (blink sync), `10` 1154→1046 (idle warm), `11` 1175→1067 (scroll
+anchor), `12` 1347→1092 (**id-key reconcile**), `13` 1381→1119 (**job output
+read**), `14` 1445→1183 (**job's last read at exit**), `15` 1756→1494
+(returned), `16` 2179→1917 (initial prompt), `17` 2188→1926 (handed wake), `18`
+2404→2145 (session watch), `19` 3199→2942 (mouse hold), `20` 3225→2968 (paste
+timer). **20 = 20, same order, nothing added or removed**; the S0b mount-order
+test and the S0b identity test both stay green, unedited.
+
+**Identity (H2), per field.** Stable setters stay `useCallback` with their dep
+arrays moved verbatim (`setAgents`, `setJobs` `[]`; `setDock` `[]`;
+`dockIds`/`dockVisible` `[]`). The four actions keep their pre-S5 deps, plus the
+refs they write: `killChild` `[sessionRef, pushNotice]`, `killJob`
+`[sessionRef, pushNotice]`, `toggleAgents` `[dockIds, dockVisible, pushNotice,
+setDock]` (unchanged), `submitToTarget` `[field, fieldValueRef, sessionRef,
+pushNotice, setDock]`.
+
+**Tests (new only).** `packages/tui/test/use-dock.test.tsx` — 8 tests, all
+through real Ink (`renderAt`, 100×24):
+- *structure* — `useDock.ts` makes no `useEffect` call and does not import it;
+  `App` still has 20 effects with the dock's four at their pre-S5 indices, and
+  the hook call sits above the first of them.
+- *freshness (H3)* — DOWN then ENTER with NO render between them opens the
+  dropdown the first key focused (`dockRef` is eager), plus the control with a
+  render between them.
+- *the guards only an open drawer shows* — a CHILD's drawer never calls
+  `jobOutput` (with the job's drawer reading as the non-vacuity control); a job
+  appearing AFTER mount reaches the frame (the state gate, not the ref); a late
+  refusal asks the field as it is NOW, so text typed since is not overwritten.
+**All S0 (39/40), S0b, S3 and S4 nets stay green, unedited** — the suite that
+pins this behaviour was not touched, which is the behaviour-preservation proof.
+
+**Mutation check (§9 non-vacuity) — 13/14 KILLED, 1 deliberate survivor.**
+Harness `.tentacle/tmp/app-decomp-5-dock/mutate.ts` (byte-copy, ONE mutation,
+ONE filtered `bun test -t`, restore, sha256 compare; a 0-test run is reported
+INVALID so a bad filter cannot look like a kill — M10 was INVALID twice on a
+`+` in the filter and once on the wrong file, and was fixed both times).
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | no-op control (`void dockRef;` added to `setDock`) | **SURVIVED** (intended: proves the filters are not trivially red) |
+| M2 | `setDock` routes the functional update through `setDockState` (ref at render time) | **KILLED** |
+| M3 | the hook imports `useEffect` | **KILLED** |
+| M4 | the hook CALLS an effect | **KILLED** |
+| M5 | `setAgents` drops the `sameReads` check (the `✓ read` never repaints) | **KILLED** |
+| M6 | `setAgents` stops keeping the last rows an ended drawer freezes on | **KILLED** |
+| M7 | `dockIds` puts the jobs above the children (the paint order) | **KILLED** |
+| M8 | `setJobs` drops every report after the first (the pill freezes) | **KILLED** |
+| M9 | `killChild` checks the JOB seam | **KILLED** |
+| M10 | `toggleAgents` inverts its empty-list guard | **KILLED** |
+| M11 | `submitToTarget` re-routes a refusal to the main agent | **KILLED** |
+| M12 | a late refusal reads a STALE field | **KILLED** |
+| M13 | `killJob` stops recording the user's own stop | **KILLED** |
+| M14 | `jobTargetId` also matches a CHILD's open drawer | **KILLED** |
+
+Every KILLED row is a red on the ASSERTION with a real count (never an
+import/compile error), and after each the mutated file's sha256 `MATCHES` its
+pre-run value; `git status --short packages/tui/src` lists only `App.tsx`
+(modified) and `useDock.ts` (new) — no mutation survived into the tree. M8 and
+M14 SURVIVED the first run and M12 survived the first two: each was a real
+coverage gap in the moved code, closed by a test written for it (the pill's
+state path, the child-drawer read guard, and the live-field refusal placement),
+not by weakening the mutant.
+
+**Gate (this worktree, this branch).** `bun run check` → `tsc --noEmit` clean,
+`tsc -p apps/mobile --noEmit` clean, `biome check .` **1114 files, 0 errors, 0
+warnings** (the AGENTS §6 baseline: clean), `bun test` **8524 pass / 3 skip / 0
+fail** (the 3 skips are the documented opt-ins: live-k8s, live-docker, the
+~12 s real-socket keepalive). No schema change → `packages/protocol/schema/protocol.json`
+not regenerated. **No changelog fragment** (written, then deleted in Fix round 1
+on Review finding 1). `TODO.md` untouched (the
+orchestrator's line, §10).
+
+**Unverified (one line each).**
+- The plan's coverage check (`bun test --coverage packages/tui`, App.tsx +
+  new-files line total not dropping) was **not** run, as in S4; the moved lines
+  are pinned by the S0/S0b/S3/S4 nets plus 8 new tests, but the percentage is
+  unmeasured.
+- `App.tsx` is 3457 lines, not the plan's ≲800 target: that is the SUM of all
+  slices (S7–S10 are still open), and this slice's own reduction is 273 lines.
+
+## Review
+
+### S5 review — REQUEST-CHANGES
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM, no HIGH).
+
+1. **MEDIUM — `changelog.d/app-decomp-5-dock.changed.md:1` must not exist.**
+   This doc's "Other hotspots" (l. 249: "slices add no CHANGELOG line (internal
+   refactor; one entry when the last slice merges)") and AGENTS §10
+   ("Internal/dev/test-only work adds no fragment") both forbid it, and S1 got
+   the same finding (Finding 2, l. 1074). *Failure scenario:* `bun run release`
+   assembles it into `CHANGELOG.md` under `### Changed` as a user-facing entry
+   for a change whose own text says "no user-visible behaviour changes".
+   Fix: delete the fragment (the S2 one on `main` is the same defect, out of scope here).
+
+**Gate (re-run here).** `bun test packages/tui/test/use-dock.test.tsx
+packages/tui/test/app.test.tsx` → 124 pass / 0 fail; `bun run typecheck` clean;
+`bun run lint` 1114 files, 0 errors/warnings. Full suite not re-run (scoped to touched files).
+
+**Mutation (independent of the executor's 14).** Removed
+`pushNoticeRef.current = pushNotice` (`App.tsx:1070`, the one NEW mechanism S5
+introduces): **KILLED** — 6 fails across `app.test.tsx` (ctrl+t, dock stop on
+child/job, `/agents`, F11 late refusal) and `use-dock.test.tsx` (late refusal).
+Reverted; `git status` clean.
+
+**Attacks tried.** (a) H1 effect order: 20 effects, dock's four unmoved — holds
+(the diff only appends ref names to deps). (b) Late binding of `pushNotice`: the
+ref is written in render right after `pushNotice` is created, before any
+callback can fire; the hook's wrapper reads `.current` at call time, so no stale
+sink — holds, and pinned (mutation above). (c) Identity: the four actions now
+depend on a stable wrapper instead of `pushNotice`, so they re-create LESS than
+before; the deps added to App's effects/callbacks are `useRef` objects (never
+re-run) — holds. (d) TDZ/ordering of `sessionRef`/`field`/`fieldValueRef`/
+`jobRefreshMs` before the `useDock` call — `tsc` clean, holds. (e) §7 invariants
+(single broker, raw-terminal writes, RPC peer): untouched by the diff.
+
+**Executor behaviour.** Thorough and honest: drift recorded, mutation harness
+with sha restore, survivors closed with real tests. One slip: repeated a
+process defect an earlier slice was already corrected for.
+
+*— claude-opus-5-5, 2026-11-14* (different model family from the executor, DeepSeek.)
+
+### Fix round 1 — `feat/app-decomp-5-dock` (S5 review findings)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: this run's
+`ps` command line is `/Users/gmeghnag/bin/tentacle --profile deepseek`, and that
+profile's `model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` at
+`~/.config/tentacle/config.jsonc:29`.)
+
+One MEDIUM, no HIGH. **No `src/` and no `test/` file changed in this round** —
+`git diff --stat -- packages/tui/src packages/tui/test` is empty. One fragment
+deleted, this doc corrected in two places, one section appended.
+
+**Finding 1 (MEDIUM) — `changelog.d/app-decomp-5-dock.changed.md` must not
+exist: FIXED (deleted).** The review's failure scenario was "`bun run release`
+publishes a user-facing `### Changed` bullet for a slice whose own text says no
+user-visible behaviour changes". I reproduced it through the release path's own
+code instead of taking it on trust, and re-ran the same probe twice to get the
+mutation for free — the probe's ONLY input that differs is the file's presence.
+
+Probe `.tentacle/tmp/app-decomp-5-dock/fix1/frag-check.ts` — the real
+`readFragmentDir` + `parseFragments` + `assemble` over this worktree's real
+`CHANGELOG.md` and `changelog.d/`, checked at a fictional `0.0.0-check`; it
+asserts the two properties that make the finding real, that the file exists and
+that the assembled release body contains the dock bullet.
+
+RED, fragment restored from `HEAD` (`git show HEAD:changelog.d/app-decomp-5-dock.changed.md`):
+```
+this slice's fragment: changelog.d/app-decomp-5-dock.changed.md
+ship-ability: the assembled "### Changed" DOES carry the dock bullet
+RED: changelog.d/app-decomp-5-dock.changed.md exists (an internal refactor adds no fragment); assemble() puts "background dock is a module of its own" in the release's ### Changed section
+exit=1
+```
+GREEN, after `rm` (mutation: put the file back → RED again → `rm` → GREEN):
+```
+this slice's fragment: (absent)
+ship-ability: the assembled "### Changed" does not carry the dock bullet
+GREEN: no user-facing entry ships for this slice
+exit=0
+```
+The remaining `### Changed` bullet in that section is S2's
+(`app-decomp-2-commands.changed.md`, on `main`), which the review explicitly put
+out of scope; this round deletes only this slice's.
+
+The fragment's ship-ability is also why the two stale claims in the S5 Execution
+are wrong, so both are corrected (drift, recorded not silent): the Scope line
+(~2863) and the Gate line (~3012) now say **no changelog fragment**, written and
+then deleted here. The S5 Review's quote of "Other hotspots" (l. 249) and
+AGENTS §10 stand unchanged.
+
+**Regression-teeth note.** This is a process finding, not a behaviour one, so no
+unit test can pin it — the guard that *would* catch it (`scripts/test/
+changelog-guard.test.ts` I1/I2) checks `[Unreleased]` emptiness and fragment
+well-formedness, not "no fragment for an internal refactor", and that distinction
+is not machine-checkable (it is a judgement about the task's nature). So the
+teeth here are the probe above plus §10's rule, exactly as S1 and S4 closed their
+identical finding. `bun test scripts/test/changelog-guard.test.ts
+scripts/test/changelog.test.ts scripts/test/release.test.ts` → **57 pass / 0
+fail** (unchanged: the deleted file was this slug only, and an empty-of-it dir
+still parses).
+
+**Gate (this worktree, this branch, after the deletion).**
+`bunx tsc --noEmit` → clean (exit 0). `bun run lint` → `Checked 1114 files in
+344ms. No fixes applied.` **0 errors, 0 warnings** (the AGENTS §6 baseline:
+clean). `bun test` → **8524 pass / 3 skip / 0 fail**, 13 snapshots, 74052
+`expect()` calls, 8527 tests across 611 files (the 3 skips are the documented
+opt-ins: live-k8s, live-docker, the ~12 s real-socket keepalive) — the same
+totals as the S5 Execution, as expected for a round that touches no code.
+`git status --short` → `D changelog.d/app-decomp-5-dock.changed.md`,
+`M docs/feat/app-decomposition.md` and nothing else.
+
+**Unverified.** None new. The S5 Execution's two standing caveats (the
+`--coverage` pair not run; `App.tsx` at 3457 lines, not the plan's ≲800, since
+S7–S10 are open) still hold and are untouched by this round.
+
+### Round 2 — PASS
+
+**Finding 1 (MEDIUM, changelog fragment): FIXED.** `git diff HEAD~1` deletes
+`changelog.d/app-decomp-5-dock.changed.md` and changes only this doc; no change
+under `packages/` or `scripts/`, so no code regression is possible from this
+round. Mutation: I put the fragment back from `HEAD~1` and removed it again; tree
+clean afterwards. I could not run the executor's probe (`frag-check.ts`) here
+because this sandbox needs approval to run scratch scripts. The fix is checkable
+without it: the release path reads `changelog.d/` files, and this slug's file is
+gone (`ls changelog.d` → only S2's fragment, on `main`, out of scope). The
+Execution's Scope and Gate lines are corrected to match.
+
+**Gate.** `bun run typecheck` clean; `bun run lint` 1114 files, 0 errors/warnings;
+changelog-guard + changelog + release tests 57 pass / 0 fail.
+### S6 — `feat/app-decomp-6-attach` (the attachments' executor leaves `App.tsx`)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: the run's
+parent process is `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc:29`.)
+
+**Scope.** `packages/tui/src/useAttachments.ts` (new, the hook),
+`packages/tui/src/App.tsx` (−221/+24 lines), two new test files, one changelog
+fragment. **No existing test edited** (`attach-app.test.tsx`'s 30 cases ran green
+and unmodified — the behaviour-preservation proof), no `packages/protocol`
+change (so `protocol.json` was not regenerated), no other slice touched,
+`TODO.md` untouched.
+
+**Load-bearing check, re-run first (PASSED).**
+`.tentacle/tmp/app-decomp-6-attach/lb-check.sh` on this branch:
+- *Ink calls EVERY active `useInput` listener, so the handler is ONE* —
+  `packages/tui/node_modules/ink/build/hooks/use-input.js:89`
+  `internal_eventEmitter?.on('input', handleData)`, no return value anyone
+  consumes, no stop-propagation; `rg "useInput\(" packages/tui/src` → `App.tsx`
+  and the separate pre-mount `components/SessionPicker.tsx:85`. **Holds** — so no
+  second listener is introduced here (S6 adds none; it moves no key handling).
+- *Every attach identifier's use-site is inside `App.tsx`* (Fable M1's frozen
+  names): `rg` over `packages/tui/src` minus `App.tsx` finds `attachCommand` only
+  as a `CommandContext` field + `commands/attach.ts`'s `Pick<>`, `routeAttach`
+  only as the S3 effect kind + `KeyHost` method, and `uploadInFlight` only as the
+  S4 snapshot getter — **no call site, no import**, so a hooked executor with the
+  same identifiers edits zero use-sites. `packages/cli/src`'s `attachCommand` is
+  an unrelated engine function (`engine-select.ts:149`). **Holds.**
+- *the 20 effects are App's and stay in order* (Fable H1) — the attach unmount
+  effect is **index 1 of 20** on `main` and still index 1 of 20 after the move
+  (`useAttachments.ts` declares NO effect: it imports only
+  `useCallback`/`useRef`). **Holds.**
+
+**Design, as built (dependency order).**
+1. **`useAttachments.ts`** — the EXECUTOR, no decisions of its own: the candidate
+   classification (`attach-candidates.ts`), the disk read (`attach-files.ts`) and
+   the draft transition (`attach-draft.ts`) are called, never re-derived. It owns
+   `attachChainRef` (the ONE thing that had to leave with the bodies: the
+   one-decision-at-a-time chain, so a second paste's `existing` sees the first
+   one's chips) and returns
+   `{attachMode, restoreChips, routeAttach, attachCommand, convertToChips,
+   sendWithImages}` — the same six identifiers `App` had, so the `submit` body,
+   the `KeyHost` port, the command context and `/retry`'s `restoreChips` are
+   unchanged. Its port is `AttachHost`; every callback destructures the fields
+   and names them in deps, never `host` (Fable H2 (2)).
+2. **`App.tsx`** — the six bodies gone, one `useAttachments({…})` call in their
+   place plus `routeAttachRef.current = routeAttach` (the ref itself stays: it is
+   read ABOVE the hook, by the paste layer). Imports dropped to what `App` still
+   uses. −221/+24, `3730 → 3533` lines. *(Fix round 1: that `App.tsx` line
+   still carried a copy of the chain — it is now `3532`, and the copy is gone;
+   see Fix round 1, finding 1.)*
+
+**What did NOT move, and why (stated, not discovered late).**
+- **The draft STATE** (`attach`, `attachRef`, `setAttach`): the render reads it
+  (`attachRowView`/`attachRowRows` for the input box's row count), and `submit`,
+  Backspace and `cancelUpload` edit it — the same split S4 gave `selection`. It
+  goes in as a port field.
+- **`probedTextRef`** (read by `submit`, R2-1), **`uploadCtrlRef`** (read by the
+  S3 key snapshot's `uploadInFlight` and by `cancelUpload`) and **`attachGenRef`**
+  (read by the App's unmount effect): three refs shared with layers this slice
+  does not own. Passing them as fields keeps every read site's identifier and the
+  ref-count identical; `useAttachments` only ever reads/bumps the same objects.
+- **The unmount effect** stays effect 1 of 20 (`App.tsx:465`), unchanged, and
+  `app-attachments-structure.test.ts` pins its index, its body (`attachGenRef`
+  bump + `uploadCtrlRef…abort()`) and the effect count 20. No effect was added,
+  removed or reordered.
+
+**Drift from the Implementation (both recorded, neither silent).**
+1. **`AttachHost.uploadCtrlRef`/`attachGenRef`/`probedTextRef`/`attachRef` are
+   `MutableRefObject`, and each hook callback's dep array names ALL the port refs
+   it closes over — not the verbatim array App had.** The plan's
+   "move dep arrays verbatim" (Failure modes → stale closure) assumed a `useRef`
+   local, which Biome's `useExhaustiveDependencies` ignores. Once a ref arrives as
+   a PROP it is a dep like any other, so the verbatim arrays (which named only
+   values) are incomplete and `biome check` fails with 14
+   `useExhaustiveDependencies` errors — measured, not guessed: the first build
+   with verbatim arrays was `14 errors`, restored arrays `0`. Since every one of
+   these refs is identity-stable (the App's own `useRef`), adding them changes NO
+   callback identity — the H2 property is preserved exactly, and
+   `attach-gen`-style churn is impossible. This is the H2 (2) rule applied as
+   written (deps name the fields), and it is what makes the "field, never `ctx`"
+   review blocker checkable here.
+2. **`AttachRun` is a NARROW type, not `App`'s `runRef` type.** The turn driver's
+   options are wider (`continuation`, `skill`, `fallback`) and `runRef` stays in
+   `App` (S9a owns it); the hook needs only `attachments`/`images`. Declaring that
+   two-field signature makes the App's existing `runRef` assignable to the port
+   field (a wider parameter is assignable) with no cast and no `as`, so the port
+   does not force `App` to export the driver's option type one slice early.
+
+**Tests (new only).** `packages/tui/test/app-attachments-layer.test.tsx` (3 App-seam
+cases) — the chain (two same-path pastes in one tick → ONE chip + the duplicate
+sentence), the LIVE draft/mode (a session that gains its seam is obeyed on the next
+paste), and a result landing AFTER the unmount starts no turn.
+`packages/tui/test/app-attachments-structure.test.ts` (4 source-level cases) — the
+decisions are no longer imported or called in `App.tsx`; exactly ONE
+`useAttachments` call, with the six frozen identifiers; dep arrays name fields,
+never the port; the unmount effect is still effect 1 of 20 and still aborts+bumps.
+**All 30 `attach-app.test.tsx` cases green, unedited.**
+
+**Mutation check (§9 non-vacuity) — 10/10 KILLED.** Harness
+`.tentacle/tmp/app-decomp-6-attach/mutate.ts` (byte-copy, one textual mutation,
+one filtered `bun test -t`, restore, sha256 compare; a 0-test run is reported
+INVALID so a bad filter cannot look like a kill — M5's first filter did exactly
+that and was corrected). Every row is a red on the ASSERTION with a real count,
+never an import/compile error, and every restore printed `MATCHES`.
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | a decision reads `EMPTY_DRAFT` instead of `attachRef.current` | **KILLED** (0 pass / 1 fail) |
+| M2 | the serialization chain dropped (each paste decides concurrently) | **KILLED** |
+| M3 | `attachMode` captured once instead of asked at decision time | **KILLED** |
+| M4 | a decision body re-inlined in `App.tsx` | **KILLED** |
+| M5 | the unmount effect's generation bump deleted | **KILLED** |
+| M6 | `useAttachments` called twice (two executors, one draft) | **KILLED** |
+| M7 | the post-unmount generation guard removed (a late upload starts a turn) | **KILLED** |
+| M8 | the upload controller not cleared before `run` (Esc swallows the next stop) | **KILLED** |
+| M9 | an upload failure says why but drops the text restore | **KILLED** |
+| M10 | `routeAttach` stops inserting the paste's own text (the 3a rule) | **KILLED** |
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` clean · `bun run lint`
+→ `biome check .` **1115 files, 0 errors 0 warnings** (the AGENTS §6 baseline) ·
+`bun test` → **8523 pass / 3 skip / 0 fail** across 612 files (the 3 skips are
+the documented opt-ins: live-k8s, live-docker, the real-socket keepalive). No
+schema change → `packages/protocol/schema/protocol.json` untouched.
+`changelog.d/app-decomp-6-attach.changed.md` added. `TODO.md` untouched (the
+orchestrator's line, §10).
+
+**Coverage (`bun test --coverage packages/tui`), the plan's per-slice check.**
+`useAttachments.ts` **100.00 % lines / 91.26 % funcs** (the uncovered lines are
+the multi-chip `uploadProgress` progress-callback closures and the `too-many`
+refusal path, both pinned in `attach-app.test.tsx` through the App);
+`App.tsx` moved `94.96 % / 97.41 %` and lost no coverage — the moved lines are
+covered from their new home.
+
+**Unverified (one line each).**
+- The identity rule is proved per callback by CONSTRUCTION (every dep is a
+  stable `useCallback`/`useRef` field) and by the S0b identity net
+  (`app-structural-identity.test.ts`, green, unedited), not by a new
+  subscribe-count test for these six callbacks specifically; the App-seam tests
+  above would not catch a fresh-identity regression in `restoreChips` alone,
+  because it is called only from `streamTurn`'s already-created closure.
+- A TUI-side `renderHook` unit test of the hook in isolation was not written
+  (the package has no `renderHook` seam today); the hook is covered through 33
+  App-seam cases instead.
+
+## Review
+
+### S6 — `feat/app-decomp-6-attach`
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, trivial fix).
+
+1. **MEDIUM — dead duplicate serialization chain left in `App.tsx`.**
+   `packages/tui/src/App.tsx:459` still declares
+   `const attachChainRef = useRef<Promise<void>>(Promise.resolve())`, now with
+   zero readers (`rg attachChainRef App.tsx` → that one line), while
+   `useAttachments.ts` creates its own at the hook's top. The Execution's claim
+   "It owns `attachChainRef` (the ONE thing that had to leave with the bodies)" is
+   therefore FALSE for the App side: it was copied, not moved. Failure scenario: a
+   later slice (S9a/S8 edit `App.tsx`) that adds an attach-adjacent async step
+   chains on the App's `attachChainRef` — same identifier, type-checks, lint-clean
+   (Biome does not flag an unused `useRef` binding) — and silently runs
+   concurrently with the hook's chain, so `existing` misses the first paste's chips
+   (the exact bug the chain exists to prevent). The comment above it
+   (`App.tsx:449`) also still names a non-existent `attachSeqRef`. Fix: delete
+   line 459, update the comment, and pin "no `attachChainRef` in `App.tsx`" in
+   `app-attachments-structure.test.ts` (red on the current tree).
+
+**Gate (re-run, this worktree):** touched tests
+`app-attachments-layer` + `app-attachments-structure` + `attach-app` +
+`app-structural-identity` → 38 pass / 0 fail; `bun run lint` → 1115 files, clean;
+`bun run typecheck` clean. Full `bun test` not re-run (scope: touched files).
+
+**Mutation (my own, reverted, tree clean per `git status`):** `routeAttach`'s
+chain replaced by `void Promise.resolve().then(…)` → layer test "two pastes of the
+same path … ONE chip" **FAILS** (2 pass / 1 fail). Non-vacuous.
+
+**Attacks tried.** (a) Hook moved bodies byte-for-byte? Diffed: identical except
+deps now naming the ref fields (identity-stable `useRef`s → no identity change).
+(b) Effect order: hook declares no effect; App's unmount effect unchanged.
+(c) `AttachRun` returns `void` but the body `await`s it — runtime unchanged (App's
+`run` still returns a promise; a rejection still lands in `upload().catch`).
+(d) Single `useInput` / no new listener: holds. (e) Leftover App state → finding 1.
+
+**Executor behaviour:** careful, drift recorded honestly; missed the left-behind
+ref and so over-claimed the move.
+
+*— claude-opus-5-5, 2026-11-14* (different model family from the executor.)
+
+### Fix round 1 — `feat/app-decomp-6-attach` (S6 review finding 1)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: the run's
+parent process is `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc:29`.)
+
+Scope: the review's ONE finding (MEDIUM). Nothing else touched.
+
+**Finding 1 (MEDIUM) — dead duplicate serialization chain in `App.tsx`: FIXED.**
+
+- **Reproduced first** (before any edit): `rg -n attachChainRef
+  packages/tui/src/App.tsx` → `App.tsx:459` only, i.e. ONE occurrence: the
+  declaration, so zero readers, while `useAttachments.ts:122` creates the chain
+  the three decisions actually join (`:174`, `:208`, `:246`). The Execution's
+  "it owns `attachChainRef` (… had to leave with the bodies)" was false on the
+  App side: copied, not moved, exactly as the review said.
+- **Red before green** — new structural case in
+  `packages/tui/test/app-attachments-structure.test.ts:115`
+  (`the serialization chain lives in the hook ONLY, never duplicated in
+  App.tsx`). On the unmodified tree: **FAILS** `{"chains": 1}` vs expected `0`
+  (4 pass / 1 fail, 34 expect() calls) — an assertion red, not a compile error.
+  It also pins the positive side (so it cannot go green by deleting the chain
+  everywhere): the hook declares the chain exactly once and joins it **3** times,
+  and App keeps exactly ONE each of the two refs it legitimately holds as port
+  fields (`attachGenRef`, `attachRef`).
+- **Fix** — `packages/tui/src/App.tsx:453-460`: the `attachChainRef` declaration
+  deleted, and the comment above the draft state rewritten: it named a
+  non-existent `attachSeqRef` and described a chain App no longer owns; it now
+  points the reader at `useAttachments.ts` and says in words that a second one
+  must not live here (the comment deliberately does not spell the identifier —
+  the new test counts it, and a comment mention would make the guard lie).
+  `App.tsx` 3533 → 3532 lines. No behaviour change: the deleted ref had no
+  reader, and the hook's own chain is untouched.
+
+**Mutation checks (§9 non-vacuity), both byte-verified, both reverted.**
+Scripts in `.tentacle/tmp/app-decomp-6-attach/` (`fix1-mutate.sh`,
+`fix1-mutate2.sh`; copy → one textual mutation → filtered `bun test` → restore →
+`shasum -a 256` compare).
+
+| # | Mutation | Result |
+|---|---|---|
+| F1-M1 | the duplicate chain put BACK in `App.tsx` (same identifier, zero readers) — the review's exact scenario | **KILLED** — new case fails at `App.tsx:117` (`chains: 1` vs `0`); 4 pass / 1 fail; restore `MATCHES` (`7e38ab03…` both sides), then 5 pass / 0 fail |
+| F1-M2 | one of the hook's three join sites replaced by `void Promise.resolve().then(…)` (that decision de-serialized) | **KILLED twice** — new case fails (`join sites left: 2`) AND the layer test's *"two pastes of the same path in one tick ship ONE chip"* fails; restore `MATCHES` |
+
+F1-M2 is what proves the new case's *hook* half is not vacuous: it is the same
+property M2 killed, now guarded from the source side too.
+
+**Same-class sweep** (not a finding, cheap): every `const … = useRef` in
+`App.tsx` checked for readers across `App.tsx` + `useAttachments.ts` → no other
+orphan (`ORPHAN:` printed nothing). So finding 1 was the only instance of the
+"copied, not moved" class in this slice.
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` **clean** ·
+`bun run lint` → `biome check .` **1115 files, 0 errors 0 warnings** (the §6
+baseline) · `bun test` → **8524 pass / 3 skip / 0 fail** across 612 files (the 3
+skips are the documented opt-ins: live-k8s, live-docker, the real-socket
+keepalive; 8523 → 8524 is the one new structural case). The touched set alone:
+`app-attachments-structure` + `app-attachments-layer` + `attach-app` +
+`app-structural-identity` → **39 pass / 0 fail**. No `packages/protocol` change, so
+`protocol.json` not regenerated; no changelog fragment change (the fix is not
+user-visible — it removes a dead binding).
+
+**Unverified.** The finding's *future* failure scenario (a later slice joining
+the App-side chain) is unobservable today by construction; it is guarded
+statically by the new source-level case, which is the review's own requested
+pin, not by a runtime test.
+
+### Round 2
+
+**Verdict: APPROVE.** Commit `f7a5b75` (`git diff HEAD~1`).
+
+- **Finding 1 — FIXED.** `App.tsx`'s dead `attachChainRef` is gone; the
+  `attachSeqRef` comment is rewritten (`App.tsx:449-452`). A new structural case
+  in `app-attachments-structure.test.ts` pins zero `attachChainRef` in
+  `App.tsx`, exactly one declaration in the hook, and 3 chain joins.
+  **Mutation:** I put `const attachChainRef = useRef<…>(Promise.resolve())` back
+  into `App.tsx`, and the new case **FAILED** (4 pass / 1 fail). Reverted;
+  `git status` is clean.
+- **Regressions:** the diff touches only a comment, the removed line and a
+  test. The touched tests (layer, structure, `attach-app`,
+  `app-structural-identity`) give 39 pass / 0 fail. `bun run lint` is clean
+  (1115 files). `bun run typecheck` is clean. The full `bun test` was not re-run.
+- No new HIGH/MEDIUM findings.
+
+*— claude-opus-5-5, 2026-11-14*
+
+## Execution
+
+### S8 — `feat/app-decomp-8-quitclear` (quit and clear leave `App.tsx`)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: the run's
+parent process is `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc:29`.)
+
+**Scope.** `packages/tui/src/useQuitClear.ts` (new, the hook + the moved
+`RunQuit`), `App.tsx` (`+35/−204`, net `−169` lines: `3260 → 3091`),
+`app-types.ts` (`RunQuit` out, re-export in), `index.ts` (re-export), two new
+test files, one changelog fragment. **No existing test edited** — `clear.test.tsx`,
+`clear-resume.test.tsx`, `clear-connect-unbound.test.tsx`, `run-quit.test.tsx`
+(41 cases) and `app-types.test.ts` all green and unmodified, which is the
+behaviour-preservation proof. `TODO.md` untouched; no `packages/protocol` change
+(so `protocol.json` was not regenerated).
+
+**Load-bearing check, re-run first (PASSED).** `.tentacle/tmp/app-decomp-8-quitclear/lb-check.sh`
+on this branch:
+- *Ink calls EVERY active `useInput` listener, so the handler is ONE* —
+  `packages/tui/node_modules/ink/build/hooks/use-input.js:89`
+  `internal_eventEmitter?.on('input', handleData)`; `rg "useInput\("` finds only
+  `App.tsx:2890` and the separate pre-mount `components/SessionPicker.tsx:85`.
+  **Holds** — S8 moves no key handling and adds no listener.
+- *The plan's premise, that these three bodies are an EXECUTOR over already-pure
+  decisions, is true*: `quitCommandStep`/`quitConfirmText` (`commands.ts:257,298`),
+  `clearCommandStep`/`clearErrorNotice`/`clearNoopNotice` (`clear-command.ts`),
+  `backgroundCount`/`backgroundNames` (`background-view.ts:43,56`) all exist and
+  hold every branch; the App bodies only read refs and make the calls. **Holds.**
+- *`requestQuit`/`requestClear`/`runClear` are frozen identifiers* (Fable M1):
+  outside `App.tsx` they appear only as `CommandContext` fields
+  (`commands/context.ts:63,67`), the two command files' `Pick<>`, and
+  `keys/execute.ts:40`'s `KeyHost` method — **no call site, no import**, so a
+  hook with the same three names edits zero use-sites. **Holds.**
+- *No hook owns an effect* (Fable H1): `App.tsx` has 20 `useEffect(` at two-space
+  indent; `useAttachments`/`useDock`/`useMouse` each declare 0, and this hook
+  declares 0 too, so the effect list is untouched. **Holds.**
+- *The capability is missing pre-slice*: `useQuitClear.ts` ABSENT, App 3260 lines,
+  the three bodies inline at 2167–2431. **Reproduced.**
+
+**Design, as built (dependency order).**
+1. **`useQuitClear.ts`** — the EXECUTOR, deciding nothing: `quitCommandStep`
+   (`requestQuit`), `clearCommandStep` (`requestClear`) and the clear's
+   three-way settle. It owns **no state and no ref**: every latch travels in as
+   a `QuitClearHost` field, because each one is ALSO written or read by a driver
+   this slice does not own — `exitPendingRef` (the turn's settle +
+   `keys/snapshot.ts`), `clearingRef`/`ownClearsRef` (the `watch` activity
+   effect, `swapSession`, the wake gate), `clearAfterTurnRef` (the settle),
+   `runClearRef` (the settle). Re-creating any of them would be a second latch
+   decoupled from its writers — the class of bug the plan's failure-mode table
+   calls "stale closure". The hook returns the same three identifiers
+   (`requestQuit`, `runClear`, `requestClear`), so the `KeyHost` port, the
+   command context and `/exit`'s alias are unchanged.
+2. **`RunQuit` moves with the hook** (plan H4(1), l. 382: "the slice that owns one
+   takes it with it"): declared in `useQuitClear.ts`, re-exported from
+   `App.tsx`, `index.ts` **and** `app-types.ts` — the last because `AppProps`
+   (resident there) has a `runQuit?: RunQuit` field, so that file needs the type
+   regardless. Three re-exports, one declaration: every importer (`run.tsx`,
+   `packages/cli/src/attach-run.ts`, 40 test files) resolves unchanged.
+3. **`App.tsx`** — the three bodies gone, one `useQuitClear({…})` call in their
+   place plus `runClearRef.current = runClear;` (the forward reference the turn's
+   settle reads, assigned where it was assigned before). Imports dropped to what
+   `App` still uses: `clearCommandStep`/`clearErrorNotice`/`clearNoopNotice`,
+   `quitCommandStep`, `backgroundCount`/`backgroundNames` all left the file;
+   `quitConfirmText` **stayed** (it formats the dialog's one line, and the dialog
+   is still App's to render).
+
+**What did NOT move, and why (stated, not discovered late).**
+- **`startCompaction`** (`/compact`'s machinery) sits BETWEEN the moved bodies on
+  `main` and is **S9a's**, not S8's (plan M5: "moving later with S9a / S8"). It
+  stayed verbatim in `App.tsx` at its old relative position, appending no line to
+  this slice's diff beyond the shift. Flagged here because the plan's range
+  ("3008–3161") reads as one contiguous block and is not.
+- **`quitConfirm` state + `quitConfirmRef` + `setQuitConfirm`** stay in `App`:
+  the render paints the dialog (`3111`), and the key snapshot and the `closed`
+  activity both write it. `setQuitConfirm` arrives as a port field exactly as it
+  did before.
+- **`CLEARED_NOTICE`/`CLEARED_ELSEWHERE_NOTICE`** stay: they are announced by the
+  `watch` activity effect, not by these bodies.
+
+**Drift from the Implementation (recorded, not silent).**
+1. **`requestClear` came with `requestQuit`/`runClear`.** The module map (l. 149)
+   lists only "`requestQuit`, `runClear` 3008–3160", but the *Slice* row (l. 176)
+   and M5 both put `/clear`'s machinery here ("`startCompaction()` /
+   `requestClear()` (moving later with S9a / S8)"), and `commands/clear.ts`'s own
+   docblock says "later moves with S8". Moving it is the only reading that
+   leaves one executor: leaving it behind would strand `clearingRef`,
+   `runClearRef` and `clearAfterTurnRef` in `App` while their siblings moved.
+2. **The hook's `useCallback` dep arrays name the port's REF fields, which the
+   verbatim arrays did not.** Same cause as S6's drift 1: a `useRef` arriving as
+   a PROP is a dep like any other, and Biome's `useExhaustiveDependencies` fails
+   otherwise (measured: the verbatim arrays gave `2 errors` on `biome check`, the
+   field-naming arrays give 0). Every such field is a stable `useRef` object, so
+   **no callback identity changed** — the H2 property is preserved by
+   construction, and `app-structural-identity.test.ts` (green, unedited) still
+   holds.
+3. **`app-types.ts` needed the `RunQuit` re-export too.** The plan named
+   `App.tsx` and `index.ts` (l. 1022); `AppProps` lives in `app-types.ts` and has
+   a `runQuit?: RunQuit` member, so that file re-exports it from the hook as
+   well. One declaration, three re-exports — pinned by a new structural case.
+
+**The move is verbatim, checked rather than asserted.** A line-by-line sweep of
+the three pre-slice bodies against the hook
+(`.tentacle/tmp/app-decomp-8-quitclear/`, the `python3` fragment in this
+slice's log) reports: `requestQuit` 36 non-blank lines, **1** not found
+verbatim; `runClear` 105, **1**; `requestClear` 26, **0**. The two exceptions are
+exactly drift 2 — `requestQuit`'s dep-array COMMENT (rewritten, because the array
+below it changed) and `runClear`'s dep array itself
+(`[pushNotice, wakeIfPending]` → the field-naming array). No statement, no
+comment inside a body, and no identifier changed: the same refs are read at the
+same points, so Fable H3's freshness rule holds per field.
+
+**Tests (new only).** `packages/tui/test/app-quit-clear-layer.test.tsx` (7
+App-seam cases) — the mid-turn quit (stop, notice, the SETTLE's exit via
+`exitPending`), `/quit` ≡ `/exit` with nothing at stake, a run TUI's
+`othersOnSession()` read LIVE, the clear asked once, `busy` from the live latch,
+`stop_then_clear` reaching the clear through `runClearRef`, and the `legacy`
+close-and-swap. `packages/tui/test/app-quit-clear-structure.test.ts` (7
+source-level cases) — no decision is imported or called in `App.tsx`, the hook
+really calls them, exactly ONE `useQuitClear` call with the three frozen
+identifiers, App still has its 20 effects and the hook none, the port is
+destructured (no `host.`, no ref/state created inside), and `RunQuit` is declared
+once in the hook with three resolving re-exports.
+
+**RED before GREEN (§4/§9).** `.tentacle/tmp/app-decomp-8-quitclear/redgreen.sh`
+copies `git show HEAD`'s three sources back in (no VCS command touches the tree),
+runs both new files, then restores and re-runs:
+- **pre-slice:** structure `1 pass / 6 fail` — on the assertions, not on imports
+  (`not.toContain` on `clearCommandStep(`, `useQuitClear(` count, the missing
+  `useQuitClear.ts` for the two tests that read it, the `RunQuit` declaration
+  site); layer `7 pass / 0 fail`, which is correct and expected: the *behaviour*
+  is unchanged by a move, so only the structural pins can be red before it.
+- **as built:** both `7 pass / 0 fail`; `md5` of `App.tsx` matches the pre-run
+  copy, so nothing was left mutated.
+
+**Mutation check (§9 non-vacuity) — 12/12 KILLED.**
+`.tentacle/tmp/app-decomp-8-quitclear/mutate.ts` (byte-copy, ONE textual
+mutation, the filtered owning test, restore, sha256 compare; a 0-test run is
+reported INVALID so a bad filter cannot look like a kill). Every row is a red on
+the ASSERTION with a real count, never an import/compile error, and every restore
+printed `MATCHES` (log: `mutations.log`).
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | App never assigns `runClearRef` (the settle's clear is a no-op) | **KILLED** (0/1) |
+| M2 | `clearing` in `clearCommandStep` read as a value, not the live ref | **KILLED** (0/1) |
+| M3 | `exitPendingRef` set to `false` (a mid-turn quit never exits) | **KILLED** (0/1) |
+| M4 | the quit's `running` read as a constant (no stop-first) | **KILLED** (0/1) |
+| M5 | `stop_then_clear` never aborts the turn | **KILLED** (0/1) |
+| M6 | the `legacy` branch swaps nothing (a clear-less session keeps serving) | **KILLED** (0/1) |
+| M7 | a decision body re-inlined in `App.tsx` | **KILLED** (0/1) |
+| M8 | `useQuitClear` called twice (two executors over one set of refs) | **KILLED** (0/1) |
+| M9 | `RunQuit` declared a second time in `app-types.ts` | **KILLED** (0/1) |
+| M10 | a ref re-created in the hook instead of taken from its writer | **SURVIVED (1/0)** first — my case only rejected `useRef(`; **KILLED** after adding the hand-rolled `{ current }` shape |
+| M11 | the port taken whole (`host.sessionRef`), so no dep can name a field | **KILLED** (0/1) |
+| M12 | an effect added to the hook (H1: an effect's index would shift) | **KILLED** (0/1) |
+
+M10 is the one real hole this pass found: "the hook must not create a ref" was
+written as "no `useRef(`", which a `const ownClears = { current: 0 }` walks
+straight past. The case now also rejects `useState(` and any `= { current:`
+initializer, and the mutant is killed — a legitimate finding, fixed, not a
+loosened assertion.
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` clean (both projects —
+`tsc -p apps/mobile` included by `bun run check`) · `bun run lint` →
+`biome check .` **1186 files, 0 errors 0 warnings** (the AGENTS §6 baseline) ·
+`bun test` → **8891 pass / 3 skip / 0 fail** across 638 files, exit 0 (the 3
+skips are the documented opt-ins: live-k8s, live-docker, the real-socket
+keepalive). `packages/tui` alone: **1916 pass / 0 fail** across 133 files. No
+schema change → `packages/protocol/schema/protocol.json` untouched.
+`changelog.d/app-decomp-8-quitclear.changed.md` added. `TODO.md` untouched (the
+orchestrator's line, §10).
+
+**Coverage (`bun test --coverage packages/tui`), the plan's per-slice check.**
+Measured BOTH sides (`.tentacle/tmp/app-decomp-8-quitclear/precov.sh` swaps
+`git show HEAD`'s sources in, runs the same command, restores, and the `md5`
+compare proves the tree came back byte-identical):
+
+| | % Funcs | % Lines |
+|---|---|---|
+| `App.tsx` **pre-slice** | 94.85 | 97.64 |
+| `App.tsx` **as built** | **95.09** | **98.11** |
+| `useQuitClear.ts` (new) | 93.33 | 90.00 |
+
+So nothing dropped: `App.tsx`'s percentages ROSE (169 fewer lines, the same
+covered ones) and the moved bodies are covered from their new home. The new
+file's uncovered lines (220, 240, 247, 308–316) are defensive arms that existed
+verbatim on `main` and were equally uncovered there: both early `return`s of the
+clear's settle (a settle landing after a session swap), the `catch` that
+swallows a throw in the notice path, and the `openForReset` REJECTION path. No
+branch this slice introduced is left unpinned.
+
+**Unverified (one line each).**
+- "Every ref these bodies read is ALSO read or written outside the hook" is
+  argued from the `rg` sweep above and stated per field in the hook's header, not
+  pinned by a test: a ref that became hook-private would still typecheck (a
+  `MutableRefObject` field is the same type either way). The structural case
+  rejects *creating* one; it cannot see a shared one being replaced.
+
+## Review
+
+### S8 review — fresh context
+
+*— claude-opus-5-5, 2026-11-14* (a different model family from the executor,
+DeepSeek)
+
+**Verdict: APPROVE** (no HIGH or MEDIUM finding).
+
+**Gate, re-run here.** `bun test` → **8891 pass / 3 skip / 0 fail** (8894 tests
+across 638 files; the 3 skips are the documented opt-ins) · `bun run lint` →
+1186 files, clean · `bun run typecheck` → clean · the touched and adjacent files
+(the two new ones, `clear`, `clear-resume`, `clear-connect-unbound`,
+`run-quit`, `app-types`, `app-structural-identity`) → 56 pass / 0 fail.
+
+**Attacks tried.**
+1. *Is the move really verbatim?* I diffed every removed `App.tsx` line
+   (whitespace-normalised) against `useQuitClear.ts`. The only lines missing
+   from the hook are the dropped imports, the `RunQuit` re-export line, the
+   three old dep arrays plus their comment, and `requestClear`'s old docblock.
+   No statement changed. **Holds.**
+2. *TDZ / declaration order:* `requestClear` now runs at the hook call
+   (`App.tsx:2163`), which is earlier than its old position after
+   `startCompaction`. Every closure input is declared before that line:
+   `exit` 323, `setQuitConfirm` 488, `makeSession` 590, `pushNotice` 1044,
+   `wakeIfPending` 1300, `swapSession` 1953. `useCallback` order changed, but it
+   is still static from one render to the next. **Holds.**
+3. *Single-latch (stale closure) and §7 lifecycle:* every ref comes in as a port
+   field. The hook creates no state, ref or effect. `runClearRef.current = runClear`
+   is still assigned right after the call, and `exitPendingRef`, `clearAfterTurnRef`
+   and `stoppedHereRef` are the same objects App's settle reads. The quit path is
+   unchanged: `quitCommandStep` → `exit` / `setQuitConfirm` / stop-first. So
+   `detachOnQuit` and `runQuit.othersOnSession()` stay live reads. **Holds.**
+4. *Circular import:* `app-types.ts` imports from `useQuitClear.ts`, and back.
+   Both imports are type-only, so they are erased at runtime, and tsc is clean.
+   **Holds.**
+5. *Mutation by the reviewer (both reverted; `git status` clean afterwards):*
+   (a) drop `stoppedHereRef.current = true` in `requestClear`'s
+   stop-then-clear branch; (b) drop `wakeIfPending()` in `runClear`'s `{0,0}`
+   no-op branch. Both mutations were applied together, and the whole
+   `packages/tui` suite stayed green: **1916 pass, so both SURVIVED**. These
+   lines are verbatim from `main`, so this is an **existing coverage gap that the
+   slice did not introduce**. It does not block, but it is worth a follow-up test:
+   a held wake after a no-op clear would never start, which is a silent stall.
+   The executor's own mutations M1–M12 were not re-run here.
+
+**Unverified:** the executor's red-before-green run and its coverage numbers were
+taken from Execution as written. I did not reproduce them.
+
+**Executor behaviour.** It disclosed its drift (the `requestClear` scope, the
+dep arrays, the `app-types` re-export) and its single surviving mutant (M10).
+Its claims matched the code wherever I checked them.
+### S7 — `feat/app-decomp-7-panels` (panels become per-kind descriptors)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: `ps` shows this
+run launched as `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc:29`.)
+
+**Load-bearing check, re-run first (PASSED).** `.tentacle/tmp/app-decomp-7-panels/lb-check.sh`
+on this branch, not trusted from the plan:
+1. *Ink calls EVERY active `useInput` listener* — `packages/tui/node_modules/ink/build/hooks/use-input.js:89`
+   `internal_eventEmitter?.on('input', handleData)`, no return anyone consumes.
+   `rg "useInput\(" packages/tui/src` → `App.tsx:2890` (the ONE handler, pre-S7;
+   `:2832` after this slice's deletions) and the separate pre-mount
+   `components/SessionPicker.tsx:85`. **Holds** — S7 moves no
+   key handler; it re-points the two panel layers at the registry (`keys/layers.ts`
+   order untouched: `keys-route.test.ts`'s `LAYER_ORDER` pin is green, unedited).
+2. *the capability is actually missing* — `rg "PANEL_KINDS|panels/registry|usePanels"`
+   over `packages/tui/src` → **no match**; `panel.ts` carries 6 `kind ===`
+   branches (76, 89, 92, 120, 149). So the plan's H4(4) premise held.
+3. *Fable M1 (frozen names)* — the identifiers S7 must keep are used OUTSIDE
+   `App.tsx` by `commands/{mcp,sessions,skills}.ts` (`openPanel`), `keys/execute.ts`
+   (`applyPanel`, `OpenPanel`), `useMouse.ts` (`panelClick`, `setPanel`,
+   `panelRef`), `keys/snapshot.ts` (`panelGen`) — all re-exported or preserved, so
+   **zero use-site edits**, as the frozen-name rule requires.
+
+**Scope.** `packages/tui/src/panels/` (new: `registry.ts` 108, `types.ts` 57,
+`tree.ts` 56, `sessions.ts` 153, `mcp.ts` 35, `skills.ts` 43), `usePanels.ts`
+(new, 174), `panel.ts` (159 → 80, the façade), `keys/layer-panels.ts` (120 → 37),
+`App.tsx` (−58 net: 39 added / 97 deleted → **3202** lines from 3260), two new test
+files, one changelog fragment. **No existing test edited** — all 133
+`packages/tui/test/*` files ran green and unmodified (the behaviour-preservation
+proof). No `packages/protocol` change, so `schema/protocol.json` was not
+regenerated. No other slice touched, `TODO.md` untouched.
+
+**Design, as built (dependency order).**
+1. **`panels/types.ts`** — the panel MODEL (`TreePanel`, `SessionsPanel`,
+   `OpenPanel`) and the three constructors, moved VERBATIM out of `panel.ts`.
+   They had to move: `registry.ts` → `panels/<kind>.ts` → the model, and
+   `panel.ts` → `registry.ts`, so keeping them in `panel.ts` would be a value
+   cycle. `panel.ts` re-exports every one of them, so no importer changed.
+2. **`panels/registry.ts`** — `PanelKind<P>` (a kind's `layer` + its own
+   `view`/`apply`/`click`/`key`), `PANEL_KINDS` (**ONE line per kind**:
+   `[sessionsKind, mcpKind, skillsKind]`), `kindOf(panel, kinds = PANEL_KINDS)`
+   and `panelStep(snap, layer, kinds = PANEL_KINDS)`. Fragment is plan H4(4).
+3. **`panels/tree.ts`** — the tree panels' shared mechanic (`withTree`,
+   `applyTreeAction`, `clickTreeBody`, `treeStep`), body-for-body from the old
+   `treeLayer` arm; `panels/mcp.ts` and `panels/skills.ts` supply only what
+   differs (their groups, title, notes — skills' groups wrap to `width`, MCP's
+   do not, exactly as `groupsOf` decided).
+4. **`panels/sessions.ts`** — the kind descriptor (its `key` is the old
+   `sessionsLayer` body verbatim, including both act-and-pass rules) **plus the
+   three App-side `/sessions` state rules** `App.tsx` carried inline:
+   `isSessionsOpen`, `withSessionsState`, `withSessionsRefresh`, and `touchPanel`.
+   Those are the `kind === "sessions"` writes; they are this kind's, not a
+   switch's.
+5. **`panel.ts`** — now a FAÇADE: three overloaded functions, each ONE
+   `kindOf(panel)` lookup and a delegate. The overloads are the pre-S7 signatures
+   kept verbatim (`TreePanel → TreePanel`), so the MCP/skills suites' callers did
+   not widen.
+6. **`usePanels.ts`** — the EXECUTOR: `closePanel`, `openPanel` (the
+   generation-guarded open→load), `panelApply`, `setSessionsState`, `touchPanel`,
+   `sessionsDelete` (the delete→re-list chain, still gated by
+   `sessionsRefreshApplies`), returning `panelGenRef`. It declares **NO effect**
+   (Fable H1) and takes the STATE as port fields (below).
+7. **`App.tsx`** — the six bodies gone, one `usePanels({…})` call plus a
+   destructuring block in the pre-S7 names (`panelGenRef`, `panelApply`,
+   `setSessionsState`, `touchPanel`, `closePanel`, `openPanel`, `sessionsDelete`),
+   so the `KeyHost` port, the command context and the snapshot literal are
+   untouched. `keys/layer-panels.ts` became two `panelStep(snap, …)` calls.
+
+**What did NOT move, and why (stated, not discovered late).**
+- **The panel STATE (`panel`, `setPanel`) and the `panelRef` mirror stay in
+  `App`.** The frame reads them (the palette gate at `:797`, `listView` at
+  `:815`) and `panelRef` is **assigned in render** (`:413`), above every executor — a
+  paste, a timer-flushed paste and a held `[` read it (`:2740`, `:2971`, the mouse
+  hold). This is the S4/S6 split (render state stays; the executor takes it as a
+  port field), and it is why `usePanels` has no `useState` of its own.
+- **All 20 effects stay in `App`, in today's order.** `usePanels` imports only
+  `useCallback`/`useRef`; nothing was added, removed or reordered
+  (`effectCount(App.tsx) === 20`, pinned in `app-panels-structure.test.tsx`).
+- **`keys/layers.ts`'s 14-name order is untouched**: S7 only changed what the two
+  panel layers CALL.
+
+**Drift from the Implementation (three, none silent).**
+
+1. **S7's row said `panels/*`, `usePanels.ts`, `keys/panel*.ts`. As built the
+   per-kind files are `panels/{mcp,skills,sessions}.ts` plus a shared
+   `panels/tree.ts`, and the layer file stays `keys/layer-panels.ts`** (no new
+   `keys/panel*.ts`): the layers no longer decide anything, so splitting them by
+   kind would create two files that each make one call. This follows the Design's
+   row (`panels/registry.ts` + `usePanels.ts` + the panel key layers) and keeps
+   the "new panel = file + registry line" target exactly.
+2. **The model types and constructors moved to `panels/types.ts`.** The plan's
+   module map put them under `(+ existing panel.ts)`; a value cycle
+   (`panel.ts` → registry → kinds → `panel.ts`) made that impossible without
+   `import type` gymnastics, and `panel.ts` re-exports them so no importer
+   changed. Recorded here because it is a file the plan did not name.
+3. **`App.tsx`'s `swapSession` dep array gained `touchPanel`** (Biome
+   `useExhaustiveDependencies`, measured — not guessed: the first build without it
+   was `1 error`). Safe and required: `touchPanel` is a `useCallback` over
+   `[setPanel]`, and `setPanel` is React's own stable setter, so its identity
+   never changes and the callback cannot churn (Fable H2 preserved).
+
+**Tests (new only).**
+- `packages/tui/test/panels-registry.test.ts` (11 cases, pure): one descriptor per
+  real kind, each claiming its own `kind` and layer; **a SYNTHETIC fourth kind**
+  (`fakeKind`) wired in by ONE array entry, proving the delegation is a lookup and
+  the facades answer through it (`view`/`apply`/`click`/`key`), and that an
+  undescribed kind THROWS rather than falling into another kind's arm; the two
+  façade overloads per real kind; and the four `/sessions` state rules
+  (`withSessionsState`/`touchPanel`/`withSessionsRefresh`/`isSessionsOpen`) on the
+  boundary the move created, **including that each returns another kind's panel by
+  IDENTITY** (a rule must never reshape a panel it does not own).
+- `packages/tui/test/app-panels-structure.test.tsx` (7 cases): structural (no
+  `kind ===` panel branch left in `App.tsx`/`panel.ts`; three `kindOf` lookups;
+  the ONE `PANEL_KINDS` line; `layer-panels.ts` makes two `panelStep` calls and
+  no key decision; `usePanels` declares no `useEffect`; App keeps 20; exactly one
+  `usePanels({`; `touchPanel()` called once) and three App-seam behaviours through
+  real Ink (a load answering after the panel CLOSED is dropped; after ANOTHER
+  panel was opened it cannot resurrect the first; a claimed panel key expands the
+  OPEN panel).
+
+**Mutation check (§9 non-vacuity) — 15/16 KILLED + 1 intended survivor.**
+Harness `.tentacle/tmp/app-decomp-7-panels/mutate.ts` (byte-copy, ONE textual
+mutation, ONE filtered `bun test`, restore, sha256 compare; a run matching 0
+tests is reported INVALID so a bad filter cannot look like a kill — M1–M4, M6,
+M8–M15 each came back INVALID once on a mistyped `-t` filter or the wrong suite,
+and every one was corrected to a real run before it counted).
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `panelStep` drops the LAYER gate (a kind gets keys on both layers) | **KILLED** (0/1) |
+| M2 | `PANEL_KINDS` loses `skillsKind` | **KILLED** (0/1) |
+| M3 | `applyPanel` re-adds a `kind === "sessions"` arm in the façade | **KILLED** (0/1) |
+| M4 | `withSessionsState` returns the panel unchanged | **KILLED** (0/1) |
+| M5 | `touchPanel` returns the panel unchanged (no repaint) | **KILLED** (0/1) |
+| M6 | `isSessionsOpen` always true (any panel counts as `/sessions`) | **KILLED** (0/1) |
+| M7 | `withSessionsRefresh` keeps the stale `state` (the cursor/armed rule dies) | **KILLED** (0/1) |
+| M8 | the load's generation guard removed (a replaced panel is resurrected) | **KILLED** (0/1) |
+| M9 | `closePanel` stops bumping the generation (a closed panel is resurrected) | **KILLED** (0/1) |
+| M10 | `usePanels` declares an effect (Fable H1 broken) | **KILLED** (0/1) |
+| M11 | `App`'s `swapSession` stops repainting the `/sessions` panel | **KILLED** (0/1) |
+| M12 | the sessions layer is wired to the `tree` layer | **KILLED** (0/1) |
+| M13 | `/sessions` Esc stops consuming (it would reach Esc-abort) | **KILLED** (0/1) |
+| M14 | the armed row's disarm-and-pass rule deleted | **KILLED** (0/1) |
+| M15 | a tree key it does not claim stops passing (behind-panel keys die) | **KILLED** (0/1) |
+| M16 | no-op control (`void sessionsAt;` added) | **SURVIVED** — intended: proves the filters are not trivially red |
+
+Every KILLED row is a red on the ASSERTION with a real count (never an
+import/compile error) and after each the file's sha256 `MATCHES` its pre-run
+value. **A correction this run produced, stated rather than hidden:** four of
+these rules (`withSessionsState`, `touchPanel`, `withSessionsRefresh`,
+`isSessionsOpen`) first SURVIVED every App-seam suite — measured, by running each
+mutation against the WHOLE `connect-sessions.test.tsx` (23/23 pass with the rule
+broken). They are genuinely REDUNDANT at the App seam today (the generation gate
+and React's own re-render cover the same cases), so a frame test cannot see them.
+Rather than weaken the mutant or claim a kill, their contract is now pinned on the
+unit the move created (`panels-registry.test.ts`'s "the `/sessions` kind's own
+state rules"), which is what makes them rules instead of ceremony; M4–M7 are the
+proof that those cases are not vacuous.
+
+**Red-before-green (§9).** The structural half of `app-panels-structure.test.tsx`
+is red against the PRE-S7 shape, shown by restoring `panel.ts`'s `kind ===`
+version byte-for-byte in a scratch copy and re-running: **2 pass / 2 fail**, both
+failures on the RATIONALE assertions ("no `kind ===` panel branch is left", "the
+façade delegates by KIND LOOKUP"), never on an import or compile error
+(`.tentacle/tmp/app-decomp-7-panels/red-news-green.ts`). `panels-registry.test.ts`
+imports the new module, so on its own it is green on both trees — that is stated
+in the file's header, and the red for its clauses comes from the mutation table
+(M1–M7), not from a re-run of the old code.
+
+**Coverage (`bun test --coverage packages/tui`), the plan's per-slice check.**
+`panels/{registry,tree,mcp,skills,types}.ts` and `panel.ts` and
+`keys/layer-panels.ts` are **100.00 % lines / 100.00 % funcs**;
+`panels/sessions.ts` **96.55 % / 100 %** (85, 87, 107 — the refused/arm/
+sessions-present delete branches, pinned through the App in
+`connect-sessions.test.tsx`); `usePanels.ts` **98.61 % / 95.24 %** (line 136, the
+`!sessions` guard). `App.tsx` **97.69 % lines / 94.93 % funcs**, up from 97.4 /
+94.9 on `main` — the moved lines are covered from their new home, so nothing was
+lost.
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` clean · `bun run
+typecheck` clean (`tsc --noEmit && tsc -p apps/mobile --noEmit`) · `bun run lint`
+→ `biome check .` **1178 files, 0 errors, 0 warnings** (the AGENTS §6 baseline:
+clean) · `bun test` → **8799 pass / 3 skip / 0 fail** across 631 files (the 3
+skips are the documented opt-ins: live-k8s, live-docker, the ~12 s real-socket
+keepalive). No schema change → `packages/protocol/schema/protocol.json`
+untouched. `changelog.d/app-decomp-7-panels.changed.md` added (user-visible: how a
+TUI panel is added changes). `TODO.md` untouched (the orchestrator's line, §10).
+
+**Unverified (one line each).**
+- The identity rule is proved by CONSTRUCTION (every hook callback's deps name
+  stable `useCallback`s / React's own `setPanel`, plus the refs passed in) and by
+  the S0b identity net, green and unedited — not by a new subscribe-count test for
+  these six callbacks specifically.
+- A `renderHook` unit test of `usePanels` in isolation was not written (the
+  package has no such seam; S6 recorded the same), so its uncovered `!sessions`
+  guard and the delete chain are covered through the 23 App-seam cases in
+  `connect-sessions.test.tsx`, not directly.
+- The plan's "target ≲800 lines for App.tsx after all slices" is still the SUM of
+  slices: S7 takes it to **3202** (from 3260), leaving S8–S10.
+
+## Review
+
+### S7 — `feat/app-decomp-7-panels` (fresh-context, adversarial) — PASS
+
+**Verdict: APPROVE.** No HIGH/MEDIUM finding. The review covered only `git diff main...HEAD`.
+
+**Gate (this worktree).** `bun run typecheck` clean · `bun run lint` 1178 files, 0/0 ·
+touched suites (`panels-registry`, `app-panels-structure`, `connect-sessions`,
+`keys-route`) 52/52 · full `bun test` **8799 pass / 3 skip / 0 fail** on 2 of 3 runs.
+The first run had 1 fail (8798), and it did not come back on the next two. The
+failing test's name was not captured, so it is unattributed. S7 adds no timers.
+
+**Premises checked against the code.** H4(4) holds: no `kind ===` panel branch is
+left in `App.tsx`, `panel.ts` or `layer-panels.ts`. The only `kind === "sessions"`
+tests are the sessions kind's own rules in `panels/sessions.ts:131-151`. The old
+`treeLayer` sent every non-sessions panel to the tree layer, and mcp/skills
+`layer: "tree"` reproduces that. `NOTHING` matches the old `NONE`. The
+`sessionsKind.key` body matches the old `sessionsLayer` arm line for line.
+
+**Attacks tried.**
+1. *Declaration order / TDZ.* `closePanel`/`openPanel` moved from ~1185 to the
+   `usePanels` call at ~1316. tsc (TS2448) and the suite are clean, so nothing reads
+   them before they are declared. Holds.
+2. *Identity (H2).* The new deps are `[setPanel]`, `[closePanel, pushNotice, setPanel]`
+   and `[columns, setPanel]`. All are stable or match the old inline shape.
+   `swapSession` gained `touchPanel`, which has a stable identity. Holds.
+3. *Effects (H1).* `usePanels` imports no `useEffect`, and App still declares 20. Holds.
+4. *Alt-screen / broker.* No `process.std*` in the new modules, and the broker is
+   untouched. Holds.
+5. *Mutation, by hand, reverted and checked against `git status`.* Dropping the
+   layer gate in `panelStep` (`registry.ts:104`) is KILLED by `panels-registry`.
+   `panelApply` using a constant width instead of `columns` (`usePanels.ts`)
+   SURVIVES the whole `packages/tui/test` (1920/1920). This is LOW: the gap already
+   existed on `main` (the inline arrow was untested too), and the dep array is correct.
+6. *Fail-loud.* For an undescribed kind, `kindOf` throws and `panelStep` passes.
+   They are inconsistent, but no such kind can exist (`PanelKindName` is closed). LOW.
+
+**Executor behaviour.** All three drifts are stated in the doc with reasons. The
+mutation table is honest: it names the four rules that survive at the App seam and
+pins them at the unit. A changelog fragment for internal work follows the S2/S6
+precedent. Same model family caveat: none — the executor was DeepSeek, the reviewer Opus.
+
+*— claude-opus-5-5, 2026-11-14*
+
+## Execution
+
+### S9a — `feat/app-decomp-9a-turn` (the turn driver leaves `App.tsx`)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: the run's
+parent process is `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc`.)
+
+**Scope.** `packages/tui/src/useTurnDriver.ts` (new, the hook + the three types
+that ride with it), `App.tsx` (**`+73 / −747`, net −674 lines: `3033 → 2359`**),
+two new test files, one changelog fragment. **No existing test edited** — and that
+is the behaviour-preservation proof: the whole `packages/tui` suite is green,
+unmodified, at 1934 pass / 0 fail (its pre-slice baseline on this branch,
+measured first), plus `app.test.tsx` 116/116 on its own. `TODO.md` untouched; no
+`packages/protocol` change, so `protocol.json` was not regenerated.
+
+**Load-bearing check, re-run first (PASSED).**
+`.tentacle/tmp/app-decomp-9a-turn/lb-check.sh` on this branch:
+- *Ink calls EVERY active `useInput` listener, so the handler stays ONE* —
+  `packages/tui/node_modules/ink/build/hooks/use-input.js:89`
+  `internal_eventEmitter?.on('input', handleData)`, no stop-propagation;
+  `rg "useInput\("` finds only `App.tsx:2663` and the separate pre-mount
+  `components/SessionPicker.tsx:85`. **Holds** — S9a moves no key handling and
+  adds no listener, so the plan's central assumption is untouched by this slice.
+- *App has exactly 20 `useEffect(`*: measured `20` before, `20` after; the hook's
+  `react` import is `{ type MutableRefObject, useCallback, useRef }` — no
+  `useEffect`. **Holds.**
+- *The plan's premise — these bodies are an EXECUTOR over already-pure decisions
+  — is true*: `planTurnStart`/`planSendNow`/`planRefusal`/`afterOldTurn`/
+  `afterCompactionUnsupported`/`onCompactionSettled`/`onSuccessorError`/
+  `compactionWaitNotice`/`fallbackNotice` (`send-now.ts`), `submitPlan`/
+  `enterConvertsToChips`/`imageRowText`/`attachErrorText` (`attach-draft.ts`),
+  `switchingRefusal` (`sessions-panel.ts`), the queue's (`handOff`/`onTurnEnd`/
+  `addRow`/`markAcked`/`onReject`/`onSteer`/`takeForSendNow`/`takeAll`),
+  `turn-feed.ts`'s (`needsWarm`/`lostSlot`/`refusedBeforeStart`/`commitWarmed`),
+  `state.ts`'s and `pushHistory` (`history.ts`) all exist and hold every branch.
+  **Holds** — and it is now pinned by a structural case (M14) rather than
+  asserted, which is the difference that matters.
+- *The seven identifiers are frozen* (Fable M1): outside the moved bodies they
+  appear only as `CommandContext`/`KeyHost` fields plus one call site each
+  (`runRef.current = run`, `submit(field.value)`, `sendNow()`), and the phrase
+  `const <name> = useCallback` appears nowhere in `App.tsx` for any of them after
+  the move. **Holds.**
+- *The capability is missing pre-slice*: `useTurnDriver.ts` **ABSENT**, App 3033
+  lines, the bodies inline at 1336–2509. **Reproduced** — and this is the same
+  state the red half of the red/green run below uses.
+
+**Design, as built (dependency order).**
+1. **`useTurnDriver.ts` — the EXECUTOR, deciding nothing.** It carries
+   `drainHeld`, `commitHistory`, `settleSendNow`, `streamTurn`, `run`, `sendNow`,
+   `startCompaction`, `submit`, plus the two one-liners that have no caller
+   outside those bodies (`showIdle`, `noticeFallback`). The plan's module map
+   names six and M5 adds `startCompaction`; `drainHeld` is the settle's other
+   half (`streamTurn`'s `finally` is its only caller).
+2. **The port (`TurnHost`, 54 fields) is the shape the code forced.** Every ref
+   whose OTHER writer/reader stays in `App` is a field: the settle/drain reads
+   (`sendNowRef`, `streamCtrlRef`, `warmingRef`, `heldRef`, `onActivityRef`), the
+   wake (`wakeRef`, `handedWakeRef`), the quit/clear latches (`exitPendingRef`,
+   `clearingRef`, `clearAfterTurnRef`, `runClearRef`), the rows
+   (`rowsRef`/`setRows`, `restoredRef`, `stoppedHereRef`), the compaction pair
+   (`compactingRef`, `ownCompactionsRef`, `setCompacting`), the prompt history
+   (`historyRef`/`histIndexRef`/`draftRef`, `lastUserRef`, `lastHadImagesRef`,
+   `switchingRef`, `attachRef`, `probedTextRef`), the neighbours' executors
+   (`attachMode`/`convertToChips`/`sendWithImages`/`restoreChips` from S6,
+   `submitToTarget` from S5), the broker, and `exit`.
+   **The refs it CREATES are exactly the ones nothing outside touches**:
+   `streamTurnRef` (the `settleSendNow` ↔ `streamTurn` cycle), `ownedIdsRef` (the
+   ids a send-now ever took) and `compactionOwnedRef` (`/compact`'s "a send-now
+   took my rows"). A structural case pins that exact set (M10), so a later
+   "convenience" ref in the hook is red.
+3. **`runRef` stays `App`'s.** The hook only READS it (`settleSendNow`'s fallback
+   send); `App` writes it once, right after the hook returns — one writer, as on
+   `main`. My first build assigned it in the hook TOO; the mutation check caught
+   that (M1 survived, because `App`'s own assignment still ran). The duplicate was
+   the bug, so it was deleted — not the assertion loosened.
+4. **`handleCommand` arrives through `handleCommandRef`, not by value.** The
+   command layer needs this driver's `run`/`startCompaction`, and `submit` needs
+   the router: a cycle. `App` already kept the ref for it (`reResolve`), so the
+   port takes the ref and the late binding is the one the file already used.
+5. **`App.tsx`** — the eight bodies gone, one `useTurnDriver({…})` call in their
+   place (placed **after `askContext`**, which is a port field, and **before
+   `onActivity`/`watchSession`**, which start what it streams), plus
+   `runRef.current = run;`. The imports the move emptied left the file
+   (`planSendNow`, `planRefusal`, `afterOldTurn`, `onCompactionSettled`,
+   `planTurnStart`; `submitPlan`, `enterConvertsToChips`, `imageRowText`;
+   `handOff`, `onTurnEnd`; `pushHistory`).
+
+**The move is verbatim, checked rather than asserted.**
+`.tentacle/tmp/app-decomp-9a-turn/verbatim.py` sweeps every non-blank line of the
+ten pre-slice bodies (`git show HEAD:…/App.tsx`, read-only) against the hook:
+**582 non-blank lines, 11 not found verbatim** — every one in the two documented
+classes, no statement/identifier/comment INSIDE a body:
+1. **Ten dep arrays.** A ref arriving as a prop is a dep like any other, and
+   Biome's `useExhaustiveDependencies` fails otherwise (measured: verbatim arrays
+   gave **23 errors** on `biome check`, field-naming arrays 0). Every such field
+   is identity-stable, so **no callback identity changed** — H2 holds by
+   construction, and `app-structural-identity.test.ts` (green, unedited) still
+   pins it. Same drift S6/S8 recorded, for the same reason.
+   **One was a real regression I introduced and fixed:** `submit`'s array first
+   took `field` where `main` took `field.reset`; the line-editor object is
+   re-made every render while `reset` is stable, so the faithful dep is
+   `field.reset` (restored, with a comment saying why).
+2. **`handleCommand(text)` → `handleCommandRef.current?.(text)`** (design 4)
+   and `runRef.current = run;`, which is `App`'s line, not the hook's.
+
+**What did NOT move, and why (stated, not discovered late).**
+- **`runRef`, `wakeIfPending`, the two effects that drive the driver** (the
+  initial prompt, the wake) and the **jobs subscription**: `App`'s by H1; they
+  reach the driver through the same identifiers as before. That is why the hook
+  is called before them.
+- **`onActivity`, `watchSession`, `swapSession`, `askContext`**: S9b's, per the
+  plan's order. They stay, and they READ the driver's refs — which is precisely
+  why those refs are port fields rather than hook-private.
+- **`submitToTarget` (S5) and `sendWithImages` (S6)**: still their slices'
+  executors; the driver only calls them.
+
+**Drift from the Implementation (recorded, not silent).**
+1. **`drainHeld`, `showIdle` and `noticeFallback` moved too.** The module map
+   lists six bodies; `drainHeld` is the settle's other half, and `showIdle` /
+   `noticeFallback` have **no use site outside the moved blocks** — leaving them
+   behind would have stranded three `useCallback`s with zero callers, i.e. dead
+   code. The latter two are not exported (nothing outside needs them).
+2. **App.tsx's delta is −674, not the ~900 the Context band suggests.** That
+   band (2106–3008) covers the whole "session/turn driver", including
+   `onActivity`/`watchSession`/`swapSession`/`askContext`, which are **S9b's**.
+   Within S9a's stated scope the move is 582 non-blank statements / 900 source
+   lines, and 674 is what the stated scope predicts.
+3. **The port is 54 fields, wider than S8's 22.** Correct, not avoidable: these
+   bodies share refs with nearly every other driver. That is exactly why the plan
+   made S9a serial and load-bearing, and why "a shared latch is a field, never a
+   local ref" matters most here.
+4. **The plan's line range for `run`/`streamTurn` ("2214–2546") is stale** after
+   S2–S8 landed (it is 1336–2509 on this branch). The section boundaries were
+   re-derived from the code; the Design itself is unchanged and no step
+   contradicted it, so nothing in the Implementation needed correcting.
+
+**Tests (new only, 19 cases).**
+- `test/app-turn-driver-structure.test.ts` (10, source-level): no turn decision is
+  imported or CALLED in `App.tsx`; the hook really imports and calls them (a
+  same-named local is red — M14); exactly ONE `useTurnDriver` call with the seven
+  frozen identifiers; App still declares 20 effects and the hook imports none
+  (M13); the port is destructured and no alias of it survives (M11); the created
+  refs are exactly the three driver-owned ones and none is also a port field
+  (M10); `runRef`/`streamTurnRef` keep their forward binding; the broker is a
+  field while `usePermissionBroker` is still called once (§7 single-broker); the
+  layer's return list; no second driver body left in `App.tsx` (M9).
+- `test/app-turn-driver-layer.test.tsx` (9, App-seam through the real `App`): a
+  prompt streams and its settle ends it; a mid-turn `/exit` is carried out by the
+  SETTLE (proved by the unmount, not a guess); Esc stops the turn through the
+  live controller ref; the chord names exactly the rows queued at that moment
+  (freshness, H3); the successor turn streams through `streamTurnRef`; the
+  initial prompt goes through `runRef`; a held history is drained at the settle;
+  `/compact` asks once, starts no turn and releases its latch; a prompt during a
+  compaction is queued and visible, never sent.
+
+**RED before GREEN (§4/§9).** `.tentacle/tmp/app-decomp-9a-turn/redgreen.sh` puts
+`git show HEAD`'s `App.tsx` back and hides `useTurnDriver.ts` (no VCS command
+writes the tree), runs both files, then restores and re-runs:
+- **pre-slice:** structure **0 pass / 10 fail**, layer **9 pass / 0 fail**. The
+  reds are on the ASSERTIONS (the missing module, the `useTurnDriver(` count, the
+  `not.toContain` on `planSendNow(`, the ref set), never an import error. The
+  layer file passing pre-slice is **correct and expected**: this is a MOVE, so the
+  behaviour is unchanged by it and only the structural pins can be red before it
+  (S8 recorded the identical split).
+- **as built:** both **19 pass / 0 fail**; `md5` of `App.tsx` matches the pre-run
+  copy (`App.tsx RESTORE MATCHES`) — nothing was left mutated.
+
+**Mutation check (§9 non-vacuity) — 14/14 KILLED.**
+`.tentacle/tmp/app-decomp-9a-turn/mutate.ts` (byte-copy, ONE textual mutation,
+the filtered owning test, restore, sha256 compare; a **0-test run is reported
+INVALID**, so a bad filter can never look like a kill — that guard immediately
+caught a real `Ran 1 test` vs `Ran 1 tests` regex bug in my own harness). Every
+row is a red on the ASSERTION with a real count, never an import/compile error,
+and every restore printed `MATCHES`.
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | App never installs `run` into `runRef` (the initial prompt never sends) | **KILLED** (0/1) |
+| M2 | the send-now's successor started through a no-op (the cycle cut) | **KILLED** (0/1) |
+| M3 | the settle ignores `exitPendingRef` (a mid-turn quit never exits) | **KILLED** (0/1) |
+| M4 | `drainHeld()` dropped from the settle (a held activity is lost) | **KILLED** (0/1) |
+| M5 | `run` never records its controller (Esc aborts nothing) | **KILLED** (0/1) |
+| M6 | the send-now's `hasQueued` read as a constant, not the live rows | **KILLED** (0/1) |
+| M7 | the compaction's settle drops `setCompacting(false)` (the latch sticks) | **KILLED** (0/1) |
+| M8 | a prompt during a compaction is unrecognised (a refused turn) | **KILLED** (0/1) |
+| M9 | a second turn driver declared in `App.tsx` | **KILLED** (0/1) |
+| M10 | a hand-rolled `{ current }` latch where a ref belongs | **KILLED** (0/1) |
+| M11 | the port taken whole (`const wholePort = host`) | **KILLED** (0/1) |
+| M12 | the returned identifiers drift from the pre-slice ones | **KILLED** (0/1) |
+| M13 | an effect added to the hook (H1: App's indices would shift) | **KILLED** (0/1) |
+| M14 | a decision re-implemented in the hook instead of imported | **KILLED** (0/1) |
+
+Five rows were HOLES first and were closed by strengthening the TEST (never by
+loosening an assertion):
+- **M1 SURVIVED** — `runRef.current = run;` was written by BOTH the hook and
+  `App`, so deleting `App`'s copy still left it assigned. The duplicate was the
+  defect (design 3); removed, and the mutant died on the assertion.
+- **M4, M8 SURVIVED** — the layer cases asserted "nothing is stuck" and "no turn
+  was sent", which the broken drain/latch still satisfies. Both now assert the
+  positive property the mutation kills: the held history REACHES the frame; the
+  queued prompt's row is VISIBLE while the compaction holds the session.
+- **M9, M11, M13, M14 SURVIVED** — each structural case matched a weaker
+  correlate (a comment naming the module, `host.` alone, `useEffect(` alone, a
+  call to a same-named local). Each now checks the exact property: a second
+  `const X = useCallback` in `App.tsx`; no SURVIVING alias of the port; the
+  `react` import list plus a real `useEffect(` call; the import itself.
+
+**Coverage (`bun test --coverage packages/tui`), the plan's per-slice check.**
+Both sides measured (`.tentacle/tmp/app-decomp-9a-turn/precov.sh` swaps the
+pre-slice sources in, runs the same command, restores, `md5` compare proves the
+tree came back byte-identical):
+
+| | % Funcs | % Lines |
+|---|---|---|
+| `App.tsx` **pre-slice** | 95.19 | 98.17 |
+| `App.tsx` **as built** | 94.58 | **99.21** |
+| `useTurnDriver.ts` (new) | **97.67** | **96.37** |
+
+Lines ROSE (674 fewer lines, the same covered ones). Functions fell 0.61 on
+`App.tsx` **because the moved arrow functions are now counted where they live** —
+and the new file's 97.67 % is above `App.tsx`'s pre-slice figure, so the combined
+total rose; nothing was left unpinned. The new file's uncovered lines (490–496,
+548, 702, 814, 844, 854, 875–876, 909–915, 954, 1002, 1074–1075) are arms that
+existed verbatim on `main` and were equally uncovered there (a successor whose
+first step rejects, the "a send-now took my rows" notice, the `compactionOwned`
+refusal arms, the `catch` mapping an unknown throw). No branch this slice
+introduced is left unpinned.
+
+**A harness bug I hit and fixed (recorded because it is the kind that forges
+evidence).** My first coverage script ran `bun test --coverage` TWICE per phase
+with the outputs interleaved, so the second run's failures read as if they
+belonged to the first run's clean summary — the log *looked* like "4 fails as
+built". The script now runs the suite once per phase and keeps the whole log; the
+clean `1953 pass / 0 fail` above is that re-run. No test was touched to make it
+go away.
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` → clean (root project;
+`bun run check` additionally runs `tsc -p apps/mobile`) · `bun run lint` →
+`biome check .` **1196 files, 0 errors 0 warnings** (the AGENTS §6 baseline) ·
+`bun test` → **8928 pass / 3 skip / 0 fail** across 642 files, exit 0 (the 3
+skips are the documented opt-ins: live-k8s, live-docker, the real-socket
+keepalive — not failures). `packages/tui` alone: **1934 pass / 0 fail**
+before the slice, **1953 pass / 0 fail** after (135 files, the 19 new cases; no
+existing test edited). No schema change → `packages/protocol/schema/protocol.json`
+untouched. `changelog.d/app-decomp-9a-turn.changed.md` added. `TODO.md` untouched
+(the orchestrator's line, §10).
+
+**Unverified (one line each).**
+- *"Every ref a moved body reads is ALSO read or written outside the hook"* is
+  argued from the ownership sweep (`.tentacle/tmp/app-decomp-9a-turn/ownership.txt`)
+  and stated per field in the port's comments, but not pinned by a test: a shared
+  ref replaced by a hook-private one of the SAME type would still typecheck. The
+  structural case rejects *creating* one of the shared ones; it cannot see a
+  shared one being substituted.
+- *The plan's render-count check* ("spy on `usePaintScheduler` during a streamed
+  turn, vs `main`") is **not** implemented as a test: `usePaintScheduler` exposes
+  no injectable seam, and spying on an ES module export needs `mock.module`, which
+  no test in this package uses. What is pinned instead is the property the check
+  protects — every callback the port hands over is identity-stable, so no port
+  field can churn a render (`app-structural-identity.test.ts`, green, unedited,
+  counts subscribes across forced re-renders). To verify the raw number: run a
+  streamed turn under a `flushNow` counter on this branch and on `main`.
+
+## Review
+
+### S9a — `feat/app-decomp-9a-turn`
+
+**Verdict: APPROVE** (no HIGH/MEDIUM findings). Scope: `git diff main...HEAD` only.
+
+**Gate (re-run by me).** The four touched/neighbouring files (`app-turn-driver-layer`,
+`app-turn-driver-structure`, `app.test`, `app-structural-identity`): **136 pass / 0
+fail**. Full `packages/tui/test/`: 1953 cases (seen during the mutation run below).
+`bun run lint`: 1198 files, clean. `bun run typecheck` (root + mobile): clean.
+
+**Attacks tried.**
+1. *Verbatim move.* I bracket-matched all ten moved `useCallback`s in `main`'s
+   `App.tsx` and in `useTurnDriver.ts` and diffed the bodies with whitespace
+   normalised. The only non-dep-array difference is `handleCommand(text)` →
+   `handleCommandRef.current?.(text)`. **Holds.** The ref is written during render
+   (`App.tsx:1781`), and it is only read from event handlers, so it is never stale
+   and never null when used.
+2. *Callback identity (H2).* I diffed the dep arrays per callback. Every dep the hook
+   adds is a ref, a `useState` setter (`setLoading` `App.tsx:508`, `setScrollOffset`
+   `:321`) or `handleCommandRef`. The one dep removed is `handleCommand`, from
+   `submit`. So no identity got less stable. `submit` is now *more* stable, which
+   is harmless because it reads the ref at call time. `field.reset` was kept.
+   **Holds.**
+3. *Mutation outside the executor's list.* I dropped `runClearRef.current?.()`
+   from the settle (`useTurnDriver.ts:643`). Result: **KILLED**, with 4 failures
+   (T19e/g/i plus the S8 settle case). I reverted it and `git status` came back
+   clean.
+4. *§7 single broker / one session path.* `permission` is passed through the
+   port, and the hook creates no broker and no second stream loop (the structural
+   test pins this, and I confirmed it against the source). **Holds.**
+5. *TDZ / ordering.* `askContext` and `wakeIfPending` are declared before the
+   hook call, and tsc would reject a use before declaration. **Holds.**
+
+**Residual (not blocking, already disclosed by the executor).** No test pins
+the case where a shared ref is swapped for a hook-private ref of the same type.
+The render-count spy is also not implemented.
+
+**Executor behaviour.** Accurate and candid. I checked the verbatim claim, the
+dep drift and the mutation discipline against the code, and all three match it.
+Different model family from the executor (DeepSeek vs Opus).
+
+*— claude-opus-5-5, 2026-11-14*

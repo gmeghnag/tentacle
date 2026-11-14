@@ -215,6 +215,22 @@ export const ARGS = {
   // sub-command and its subject, so a permissions-shifted value is refused here
   // rather than guessed at in `devices-cmd.ts`.
   devices: { bools: { yes: { short: "y" } }, positional: { min: 0, max: 2 } },
+  // `tentacle logs [<uid>] [--tail N] [--only …] [--json] [--summary] [-f]`
+  // (docs/feat/logs-cmd.md). `-f` is `--follow`'s alias, as in `tail -f`; the
+  // uid is the only word, so a second one is refused here, not guessed at.
+  // `--connect` (sub-task 2) takes `connect`'s own token/TLS flags, so a
+  // `logs -f --connect` reaches a `serve` daemon exactly the way `connect` does
+  // — one token resolution, one TLS trust, no second dialect.
+  logs: {
+    values: { tail: {}, only: {}, connect: {}, ...TOKEN, "ca-cert": {} },
+    bools: {
+      json: {},
+      summary: {},
+      follow: { short: "f" },
+      "insecure-skip-tls-verify": {},
+    },
+    positional: { min: 0, max: 1 },
+  },
 } as const satisfies Record<string, ArgSpec>;
 
 /**
@@ -594,6 +610,7 @@ const SUBCOMMANDS = new Set([
   "install",
   "pair",
   "devices",
+  "logs",
 ]);
 /** The subcommands that start a session, so take `--model`/`--profile` after them. */
 const SESSION_COMMANDS = new Set(["serve", "run", "attach"]);
@@ -705,6 +722,7 @@ export type CliMode =
   | "update"
   | "pair"
   | "devices"
+  | "logs"
   | "plain"
   | "tui"
   | "prompt"
@@ -737,6 +755,8 @@ const USES_MODEL: Readonly<Record<CliMode, boolean>> = {
   // from pairing (or revoking) a phone.
   pair: false,
   devices: false,
+  // `logs` reads the session log files: no daemon, no model, no session.
+  logs: false,
   // Everything that builds an agent or proxies to a model.
   serve: true,
   run: true,
@@ -777,7 +797,8 @@ export function cliMode(args: readonly string[]): CliMode {
     first === "config" ||
     first === "update" ||
     first === "pair" ||
-    first === "devices"
+    first === "devices" ||
+    first === "logs"
   ) {
     return first;
   }
@@ -809,5 +830,6 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   update: "tentacle update [--check] [--version vX.Y.Z]",
   pair: "tentacle pair [--address ws(s)://host:port/e2e]... [--name <name>]",
   devices: "tentacle devices | revoke <name|id-prefix> | reset [--yes]",
+  logs: "tentacle logs [<uid>|<run-name>] [--tail N] [--only ask,error,tool] [--json] [--summary] [-f|--follow] [--connect ws(s)://host:port [--token T] [--ca-cert FILE|--insecure-skip-tls-verify]]",
   tui: "tentacle [-i] [--resume [uid]|--continue] [--in-process] [--model <id>] [--profile <name>]",
 };

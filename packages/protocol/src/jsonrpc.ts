@@ -62,6 +62,12 @@ export const DomainErrorCode = {
    * unknown reason reads as a generic refusal, so adding one is additive.
    */
   PairingRefused: -32017,
+  /**
+   * A `session/watch_next` / `session/unwatch` for a watch this daemon no longer
+   * holds (its connection went away, the session closed, or the client stopped
+   * polling for `WATCH_IDLE_DROP_MS`, docs/feat/logs-cmd.md sub-task 2).
+   */
+  UnknownWatch: -32018,
 } as const;
 
 /**

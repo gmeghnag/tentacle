@@ -1,0 +1,65 @@
+appId: so.tentacle.app
+---
+# 10 (docs/feat/mobile-session-view.md 12c): the phone leaves the FOREGROUND while
+# a turn is running (F2/F3/F9). The daemon keeps the turn (decision 4) and the ask
+# it raises WAITS for a client that can answer it (P2) — no answer is invented for
+# the phone while it is away. (The plan also expected the daemon to see the detach
+# at once; it does not on iOS 26 — see `10-detached.js` and the task doc's
+# Execution finding 4.)
+#
+# `launchApp` WITHOUT `clearState` comes back to the same screen: the app's
+# foreground gate resumes, the client re-attaches, the daemon re-offers the pending
+# ask, and the sheet is where it lands again.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${ASK5_ID}"
+- assertVisible:
+    id: "session-view"
+- runScript:
+    file: "10-laptop-edit.js"
+# The ask is what the turn blocks ON: waiting for `perm-sheet` is waiting for the
+# turn to have started and suspended itself (an `EDIT` turn goes straight to the
+# ask, so `turn-running` is far too brief to be an observable here).
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- pressKey: home
+# The ask is still PENDING: the phone being away did not answer it for anyone.
+- runScript:
+    file: "10-detached.js"
+# Foreground again. `launchApp` RE-LAUNCHES the process (even without
+# `clearState`), so the app comes back on `Computers` with its navigation state
+# gone — a real person tapping the icon comes back to the same screen, but Maestro
+# has no "activate without relaunch" step that avoids iOS's own "Open in
+# tentacle?" system dialog (`openLink` raises it, and its stray sheet then broke
+# the NEXT flow — found by the iOS 26 run). So the flow walks back in. What the
+# step still proves is the property that matters: the daemon held the ask while no
+# client could answer it, and it is re-offered to the phone when it re-attaches.
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: "computer-${output.computerId}"
+    timeout: 30000
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${ASK5_ID}"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 30000
+- tapOn:
+    id: "perm-allow_once"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 30000
+- runScript:
+    file: "10-file.js"

@@ -1,5 +1,4 @@
 import { homedir } from "node:os";
-import { resolve } from "node:path";
 import { Session } from "@tentacle/agent";
 import {
   type AttachmentRef,
@@ -11,37 +10,19 @@ import {
 } from "@tentacle/core";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
-import { attachmentCandidateText, parseAttachCommand } from "./attach-candidates.ts";
 import {
   type AttachDraft,
-  type AttachMode,
   EMPTY_DRAFT,
   NOT_AN_IMAGE_NOTICE,
-  NO_IMAGE_SEAM,
   attachErrorText,
   attachRowRows,
   attachRowView,
-  draftRefs,
-  enterConvertsToChips,
-  imageRowText,
-  looksLikeCommand,
   removeLastChip,
-  routeDecision,
-  submitPlan,
   uploadDone,
-  uploadProgress,
-  withChips,
 } from "./attach-draft.ts";
-import {
-  type AttachedImage,
-  type FileProbe,
-  decideAttachment,
-  nodeFileProbe,
-} from "./attach-files.ts";
+import { type AttachedImage, type FileProbe, nodeFileProbe } from "./attach-files.ts";
 import {
   type DockOutcome,
-  type DockState,
-  INPUT_DOCK,
   applyLateOutcome,
   clickDock,
   dockKindOf,
@@ -49,31 +30,16 @@ import {
   downToDock,
   noteSent,
   reconcile,
-  refusalPlacement,
   resetDock,
-  restoreRefused,
-  sendTarget,
-  toggleList,
 } from "./background-focus.ts";
 import {
-  type DockJobRow,
   backgroundListView,
   dockRows,
   drawerView,
-  frozenAgent,
-  frozenJob,
   inputTitle,
   jobDrawerView,
   listVisible,
 } from "./background-list.ts";
-import {
-  type BackgroundAgentRow,
-  backgroundCount,
-  backgroundNames,
-  sameIds,
-  sameJobIds,
-  sameReads,
-} from "./background-view.ts";
 import {
   BLINK_HALF_MS,
   BLINK_IDLE,
@@ -89,7 +55,6 @@ import {
   type QuitConfirmFacts,
   matchCommands,
   paletteWindow,
-  quitCommandStep,
   quitConfirmText,
 } from "./commands.ts";
 import { dispatchCommand } from "./commands/dispatch.ts";
@@ -102,7 +67,7 @@ import { QueuedMessages } from "./components/QueuedMessages.tsx";
 import { QUIT_CONFIRM_ROWS, QuitConfirm } from "./components/QuitConfirm.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
-import { pushHistory, recall } from "./history.ts";
+import { recall } from "./history.ts";
 import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
 import { HOP_QUEUED_NOTICE, type HopSpec, hopStep, parseHopCommand } from "./hop-command.ts";
 import { hopFailureText, hopMovedNotice, hopPlaceText, hopStatusRow } from "./hop-status.ts";
@@ -115,7 +80,7 @@ import { PURE_LAYERS } from "./keys/layers.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
 import { modelErrorNotice } from "./model-error.ts";
-import { type OpenPanel, applyPanel, panelClick, panelView } from "./panel.ts";
+import { type OpenPanel, panelClick, panelView } from "./panel.ts";
 import { sanitizePasted } from "./paste.ts";
 import { insertReply, orphanNotice, replyView } from "./permission-reply.ts";
 import {
@@ -127,26 +92,23 @@ import {
   permissionShowsCwd,
   usePermissionBroker,
 } from "./permission-ui.ts";
+import { useAttachments } from "./useAttachments.ts";
+import { useDock } from "./useDock.ts";
 import { useMouse } from "./useMouse.ts";
+import { usePanels } from "./usePanels.ts";
+import { useQuitClear } from "./useQuitClear.ts";
+import { useTurnDriver } from "./useTurnDriver.ts";
 
 export type { AutoAcceptFeed };
-import {
-  CLEARED_ELSEWHERE_NOTICE,
-  CLEARED_NOTICE,
-  clearCommandStep,
-  clearErrorNotice,
-  clearNoopNotice,
-} from "./clear-command.ts";
+import { CLEARED_ELSEWHERE_NOTICE, CLEARED_NOTICE } from "./clear-command.ts";
 import {
   type DaemonQueue,
   type QueuedRows,
   addRow,
   handBackRows,
-  handOff,
   markAcked,
   onReject,
   onSteer,
-  onTurnEnd,
   rowTexts,
   shownRows,
   takeAll,
@@ -169,25 +131,15 @@ import {
   SEND_NOW_HINT,
   SendNowErrorCode,
   afterCompactionUnsupported,
-  afterOldTurn,
   compactionWaitNotice,
   errorCode,
   fallbackNotice,
-  onCompactionSettled,
   onSuccessorError,
-  planRefusal,
-  planSendNow,
-  planTurnStart,
   withRestored,
 } from "./send-now.ts";
 import {
-  deleteFailedNotice,
   openFailedNotice,
-  refreshedSessions,
   sessionsChoose,
-  sessionsDelete,
-  sessionsListError,
-  sessionsRefreshApplies,
   stayingNotice,
   switchRefusedNotice,
   switchingRefusal,
@@ -253,12 +205,14 @@ export type {
   HopTargetView,
   HopPlaceView,
   NoticeFeed,
-  RunQuit,
   SessionController,
   SessionDirectory,
   SettingsNoticeLine,
   TargetFeed,
 } from "./app-types.ts";
+// `RunQuit` moved with S8 to the hook that executes it; it is re-exported here
+// for every importer that names `../src/App.tsx` (the test boundary).
+export type { RunQuit } from "./useQuitClear.ts";
 
 // Rows reserved below the transcript viewport: a blank spacer, the input/thinking
 // line, the status bar, plus one slack row so the frame never overflows the
@@ -450,11 +404,12 @@ export function App({
     autoAccept,
     (text, cause) => draftBackRef.current?.(text, cause),
   );
-  // The open list panel (`/mcp`, `/skills`; docs/feat/skills-panel.md) or null.
-  // Each open and close bumps the generation, so a request answering after its
-  // panel closed (or another opened) is dropped instead of landing on screen.
+  // The open list panel (`/mcp`, `/skills`, `/sessions`; docs/feat/skills-panel.md)
+  // or null. The panel's own state and its generation live in `usePanels` (S7);
+  // the STATE stays here because the frame reads it (the palette's gate, the
+  // list view) and `panelRef` is assigned in render, above every executor that
+  // inserts text outside the key path.
   const [panel, setPanel] = useState<OpenPanel | null>(null);
-  const panelGenRef = useRef(0);
   // The panel as of the last render, for text inserted outside the key path
   // (a paste, a timer-flushed paste or held "["): behind a panel the hidden
   // input takes none of it.
@@ -477,9 +432,10 @@ export function App({
   const draftRef = useRef("");
   // The input's image chips + the upload in flight (docs/feat/attachments-tui.md
   // D6). The REF is the truth an async handler reads; the state renders and
-  // feeds `inputBoxRows`. `attachSeqRef` keeps one decision in flight at a time
-  // (two pastes are serialized, so `existing` is always the current chips), and
-  // `attachGenRef` drops a late result after an unmount.
+  // feeds `inputBoxRows`. The one-decision-at-a-time chain (two pastes are
+  // serialized, so `existing` is always the current chips) lives with the
+  // executor, in `useAttachments.ts` — never a second one here; `attachGenRef`
+  // stays, and drops a late result after an unmount.
   const [attach, setAttachState] = useState<AttachDraft>(EMPTY_DRAFT);
   const attachRef = useRef<AttachDraft>(EMPTY_DRAFT);
   const setAttach = useCallback((next: AttachDraft | ((prev: AttachDraft) => AttachDraft)) => {
@@ -487,7 +443,6 @@ export function App({
     attachRef.current = value;
     setAttachState(value);
   }, []);
-  const attachChainRef = useRef<Promise<void>>(Promise.resolve());
   const attachGenRef = useRef(0);
   // The text a `convert` already probed and put back with `NOT_AN_IMAGE_NOTICE`:
   // the next Enter on that same text sends it as a message instead of probing
@@ -597,144 +552,32 @@ export function App({
   // The same list for the callbacks that must not re-create themselves on every
   // frame (a `/move`'s turn-boundary read, D4): a ref, updated where it is set.
   const daemonQueueRef = useRef<DaemonQueue | undefined>(undefined);
-  // The session's background sub-agents, as last reported (undefined: not reported).
-  const [subagents, setSubagents] = useState<readonly BackgroundAgentRow[] | undefined>(undefined);
-  // The same list for the callbacks that must not re-create themselves on every
-  // frame (`requestQuit`, the key handler): a ref, updated where it is set.
-  const subagentsRef = useRef<readonly BackgroundAgentRow[] | undefined>(undefined);
-  const setAgents = useCallback((rows: readonly BackgroundAgentRow[] | undefined) => {
-    // The ref always tracks the daemon's report (the key handler and
-    // `requestQuit` read it); the STATE only changes when the count or the ids
-    // do — the frame carries up to 4 full states a second, and re-rendering the
-    // whole App for an unchanged list is pure waste (LOW-4).
-    const previous = subagentsRef.current;
-    // Keep the last rows the dock could paint BEFORE they are replaced: an open
-    // child that this report drops freezes its drawer on them (`reconcile`).
-    if (previous !== undefined && previous.length > 0) {
-      dockLastRowsRef.current = previous;
-    }
-    subagentsRef.current = rows;
-    // A read count alone must still reach the frame: the drawer's `✓ read`
-    // reads it (docs/fix/autoaccept-wake-turns.md part B). `sameIds` alone would
-    // swallow it, exactly as the daemon's `sameRows` would.
-    if (!sameIds(previous, rows) || !sameReads(previous, rows)) {
-      setSubagents(rows);
-    }
-  }, []);
-  /** The last non-empty rows the dock could paint: what an ended drawer freezes on. */
-  const dockLastRowsRef = useRef<readonly BackgroundAgentRow[]>([]);
-  // The session's running shell jobs, as last reported (undefined: not reported).
-  const [jobRows, setJobRowsState] = useState<readonly DockJobRow[] | undefined>(undefined);
-  /** The same list for the callbacks that must not re-create on every frame. */
-  const jobRowsRef = useRef<readonly DockJobRow[] | undefined>(undefined);
-  const setJobs = useCallback((rows: readonly DockJobRow[] | undefined) => {
-    const previous = jobRowsRef.current;
-    // Keep the last rows the dock could paint BEFORE they are replaced: an open
-    // job that this report drops freezes its drawer on them (`reconcile`).
-    if (previous !== undefined && previous.length > 0) {
-      dockLastJobRowsRef.current = previous;
-    }
-    jobRowsRef.current = rows;
-    if (!sameJobIds(previous, rows)) {
-      setJobRowsState(rows);
-    }
-  }, []);
-  /** The last non-empty rows a job's drawer can freeze on. */
-  const dockLastJobRowsRef = useRef<readonly DockJobRow[]>([]);
-  /**
-   * A child's exit as the transcript's notice already learns it, by id: the
-   * `end_turn` that means "finished" (what a frozen drawer says).
-   */
-  const dockOutcomeRef = useRef<Record<string, DockOutcome>>({});
-  /**
-   * The child that just ENDED and when, for the pill's `✓ sa-1 done` (~5 s; the
-   * window and the wording are `status-view.ts`'s `PILL_DONE_MS`). Written by the
-   * same `jobs.onExit` feed that records the outcome, so the pill and the
-   * transcript's notice can never disagree about who ended.
-   */
-  const dockFinishedRef = useRef<{ readonly id: string; readonly at: number } | null>(null);
-  /**
-   * The jobs THIS dock asked to stop (`x` then `y`). A job's exit record only
-   * says `killed` — it cannot tell the user's own stop (`✗ stopped`) from a
-   * signal nobody here sent (`✗ killed`), which owner B wants apart (fix round 1).
-   */
-  const dockStoppedRef = useRef<Set<string>>(new Set());
-  /**
-   * Each open job's last read, by wire id: what its drawer paints. A REF, never
-   * state the refresh effect depends on — a fresh read must not re-arm the timer
-   * (that is what would break the ≤ 1/s rule); the `jobOutputGen` state beside it
-   * is only a render trigger.
-   */
-  const jobOutputRef = useRef<
-    Record<
-      string,
-      {
-        readonly output: readonly string[];
-        readonly truncated?: boolean;
-        readonly exitCode?: number | null;
-      }
-    >
-  >({});
-  const [, setJobOutputGen] = useState(0);
-  /** When the last read was issued (ms), and for which job: the `refreshDue` input. */
-  const jobReadAtRef = useRef<{ readonly id: string; readonly at: number } | null>(null);
-  // The dock (docs/feat/subagent-panel.md): its focus, the drafts per target and
-  // the messages sent to each child. `dockRef` is the truth for the key handler
-  // (a keypress must read what the last one wrote); the state renders.
-  const [dock, setDockState] = useState<DockState>(INPUT_DOCK);
-  const dockRef = useRef<DockState>(INPUT_DOCK);
-  const setDock = useCallback((next: DockState | ((prev: DockState) => DockState)) => {
-    // The ref is written EAGERLY, from itself: a keypress handled later in the
-    // same tick (or before React commits) must read what the last one decided.
-    // (A ref written inside the state updater lands at render time — too late,
-    // which would let an ended child's Enter send.)
-    const value = typeof next === "function" ? next(dockRef.current) : next;
-    dockRef.current = value;
-    setDockState(value);
-  }, []);
-  /**
-   * The dock's item ids in paint order: the children, then the jobs — the order
-   * `backgroundListView` paints (a job never jumps above a child that started
-   * later). Both kinds' ids are wire ids (`sa-N` / `bg-N`), so they never collide.
-   */
-  const dockIds = useCallback(
-    (): readonly string[] => [
-      ...(subagentsRef.current ?? []).map((r) => r.id),
-      ...(jobRowsRef.current ?? []).map((r) => r.id),
-    ],
-    [],
-  );
-  /** Whether the list has anything to show (the dock's `listVisible`). */
-  const dockVisible = useCallback(
-    (): boolean => listVisible(subagentsRef.current, jobRowsRef.current),
-    [],
-  );
-  /** The item an open drawer paints: its live row (child or job), or the frozen one. */
-  const drawerSubject:
-    | { kind: "agent"; row: BackgroundAgentRow }
-    | { kind: "job"; row: DockJobRow }
-    | null =
-    dock.focus.kind !== "open"
-      ? null
-      : (() => {
-          const id = (dock.focus as { id: string }).id;
-          const live = subagentsRef.current?.find((r) => r.id === id);
-          if (live !== undefined) {
-            return { kind: "agent" as const, row: live };
-          }
-          const liveJob = jobRowsRef.current?.find((r) => r.id === id);
-          if (liveJob !== undefined) {
-            return { kind: "job" as const, row: liveJob };
-          }
-          const frozen = frozenAgent(dock.focus.frozen);
-          if (frozen !== null) {
-            return { kind: "agent" as const, row: frozen };
-          }
-          const frozenJ = frozenJob(dock.focus.frozen);
-          return frozenJ === null ? null : { kind: "job" as const, row: frozenJ };
-        })();
-  const drawerRow = drawerSubject?.kind === "agent" ? drawerSubject.row : null;
-  const drawerJob = drawerSubject?.kind === "job" ? drawerSubject.row : null;
+  // ── the dock (S5 — docs/feat/app-decomposition.md) ─────────────────────────
+  // The background rows, the dock's focus/drafts/`sent`, the per-job output
+  // cache and the four dock actions live in `useDock`. Its EFFECTS stay here, in
+  // today's order (Fable H1 / owner Q7 (a)): the hook declares none, and returns
+  // the refs and derived triggers they read. The destructuring keeps every
+  // pre-S5 identifier (Fable M1), so no use site below changes.
+  //
+  // `pushNotice` is declared BELOW this hook (it needs `flushNow`, and this
+  // block's refs are needed by an effect declared above it): it travels as a ref,
+  // the same late binding `routeAttachRef`/`runRef`/`warmErrorRef` already use.
+  const pushNoticeRef = useRef<(text: string) => void>(() => {});
+  const dockLayer = useDock({
+    sessionRef,
+    field,
+    fieldValueRef,
+    pushNoticeRef,
+    jobRefreshMs,
+  });
+  const { subagents, subagentsRef, setAgents, dockLastRowsRef } = dockLayer;
+  const { jobRows, jobRowsRef, setJobs, dockLastJobRowsRef } = dockLayer;
+  const { dockOutcomeRef, dockFinishedRef, dockStoppedRef } = dockLayer;
+  const { jobOutputRef, setJobOutputGen, jobReadAtRef } = dockLayer;
+  const { dock, dockRef, setDock, dockIds, dockVisible } = dockLayer;
+  const { drawerRow, drawerJob } = dockLayer;
+  const { dockSeenRef, dockIdKey, jobTargetId, jobEndedWhileOpen, refreshMs } = dockLayer;
+  const { killChild, killJob, toggleAgents, submitToTarget } = dockLayer;
   const layoutOptsRef = useRef<RenderOptions>({
     expandAll: false,
     width: 80,
@@ -892,7 +735,10 @@ export function App({
       // Autonomous wake: react to the exit without a user prompt.
       armWake();
     });
-  }, [jobs, flushNow, armWake, setDock]);
+    // The dock's refs are STABLE objects (`useDock`'s `useRef`s), so naming them
+    // here satisfies the rule without re-subscribing on a render (Fable H2: deps
+    // name the fields, never the port).
+  }, [jobs, flushNow, armWake, setDock, dockFinishedRef, dockOutcomeRef, dockStoppedRef]);
 
   // --- host notices ----------------------------------------------------------
   useEffect(() => {
@@ -1235,159 +1081,12 @@ export function App({
     },
     [flushNow],
   );
+  pushNoticeRef.current = pushNotice;
 
-  /**
-   * Stop one child (`session/agent_kill`) — the `ctrl+x` then `ctrl+x` arm's second step
-   * (docs/feat/subagent-panel.md, owner P4 (a)). A refusal is a notice, never a
-   * throw; the row leaves on the daemon's next list update, and the transcript
-   * gets the existing exit notice (`backgroundExitNotice`, unchanged).
-   */
-  const killChild = useCallback(
-    (id: string): void => {
-      const session = sessionRef.current;
-      if (!session?.killSubagent) {
-        pushNotice("_this session cannot stop background sub-agents: no agent kill here_");
-        return;
-      }
-      void session.killSubagent(id).then(
-        (result) => {
-          if (!result.killed) {
-            pushNotice(`_${id} was not running any more: nothing was stopped_`);
-          }
-        },
-        (error: unknown) =>
-          pushNotice(
-            `_${id} was not stopped: ${error instanceof Error ? error.message : String(error)}_`,
-          ),
-      );
-    },
-    [pushNotice],
-  );
-
-  /**
-   * Stop one background SHELL job (`session/job_kill`, docs/feat/shell-jobs-panel.md):
-   * the same decision the model's `shell_kill` tool makes. A refusal is a typed
-   * result, never a throw: the row is still there, and the exit frame (or the
-   * notice) says what happened.
-   */
-  const killJob = useCallback(
-    (id: string): void => {
-      const session = sessionRef.current;
-      if (!session?.killJob) {
-        pushNotice("_this session cannot stop background jobs: no job kill here_");
-        return;
-      }
-      void session.killJob(id).then(
-        (result) => {
-          if (result.killed) {
-            // Recorded BEFORE the exit can arrive, so `onExit` reads it: this is
-            // the user's own stop (`✗ stopped`, owner B).
-            dockStoppedRef.current.add(id);
-          } else {
-            pushNotice(`_${id} was not running any more: nothing was stopped_`);
-          }
-        },
-        (error: unknown) =>
-          pushNotice(
-            `_${id} was not stopped: ${error instanceof Error ? error.message : String(error)}_`,
-          ),
-      );
-    },
-    [pushNotice],
-  );
-
-  /**
-   * `/agents` and Ctrl+T (docs/feat/subagent-panel.md, owner Q16 (b)): move the
-   * focus into the list from anywhere (a multi-line draft, mid-history), or
-   * back. An empty list says so instead of opening an empty box.
-   */
-  const toggleAgents = useCallback((): void => {
-    if (dockRef.current.focus.kind === "list") {
-      setDock((prev) => toggleList(prev, dockIds()));
-      return;
-    }
-    if (!dockVisible()) {
-      pushNotice("_Nothing is running in the background._");
-      return;
-    }
-    setDock((prev) => toggleList(prev, dockIds()));
-  }, [dockIds, dockVisible, pushNotice, setDock]);
-
-  /**
-   * Send the dock's draft to whoever owns it (docs/feat/subagent-panel.md): the
-   * main agent (as today), one child (`session/subagent_message`), or a refusal
-   * with the reason as a notice and the text put back. The decision is pure
-   * (`sendTarget`), so an ended child is never silently re-routed to the agent.
-   * `true` means the dock handled the text; the caller's own path must not run.
-   */
-  const submitToTarget = useCallback(
-    (value: string): boolean => {
-      const target = sendTarget(dockRef.current, value);
-      if (target.kind === "main") {
-        return false; // the caller's normal path (a task, a command, a blank draft)
-      }
-      if (target.kind === "refused") {
-        field.set(value);
-        pushNotice(`_${target.text}_`);
-        return true;
-      }
-      const id = target.id;
-      const text = value.trim();
-      const session = sessionRef.current;
-      if (!session?.messageSubagent) {
-        field.set(value);
-        // NOT "older daemon": that would be a typed refusal from
-        // `messageSubagent` (`RemoteClient`), never a missing member. A missing
-        // one means THIS runtime's session has no sub-agent panel at all (e.g.
-        // `--in-process`), which is what the notice says.
-        pushNotice("_this session's runtime cannot write to sub-agents_");
-        return true;
-      }
-      field.reset();
-      // A LATE refusal must never land in the main input (Review H2): by the time
-      // it arrives the user may have closed the child, so the placement decision
-      // is `refusalPlacement`'s — the field only if they are still on that child
-      // and have typed nothing since; otherwise the notice quotes the text.
-      const refused = (reason: string): void => {
-        const placement = refusalPlacement(dockRef.current, id, fieldValueRef.current);
-        if (placement === "field") {
-          field.set(value);
-          pushNotice(`_not sent to ${id}: ${reason}_`);
-          return;
-        }
-        setDock((prev) => restoreRefused(prev, id, value));
-        pushNotice(`_not sent to ${id}: ${reason} — kept as a draft: ${value}_`);
-      };
-      void session.messageSubagent(id, text).then(
-        (result) => {
-          if (!result.ok) {
-            refused(result.reason ?? "refused");
-          }
-        },
-        (error: unknown) => {
-          refused(error instanceof Error ? error.message : String(error));
-        },
-      );
-      return true;
-    },
-    [field, pushNotice, setDock],
-  );
-
-  /**
-   * Rows changed: the dock keeps its selection BY ID, follows it when the row
-   * leaves, and returns to the input when the list empties — `reconcile`'s
-   * decision, pure (P5 (a): a finished item leaves at once). A departure freezes
-   * an open drawer and KEEPS the input's target, so a draft is never silently
-   * re-routed to the main agent behind the user.
-   */
-  const dockSeenRef = useRef<readonly string[]>([]);
-  // The trigger, as a VALUE (not read from a ref): a fresh identity only when a
-  // report actually changed the ids (`sameIds` gates `setSubagents`), so this
-  // effect runs on a real change and never on a frame (LOW-4).
-  const dockIdKey = [
-    ...(subagents ?? []).map((r) => r.id),
-    ...(jobRows ?? []).map((r) => r.id),
-  ].join(" ");
+  // Rows changed: the dock keeps its selection BY ID, follows it when the row
+  // leaves, and returns to the input when the list empties — `reconcile`'s
+  // decision, pure (P5 (a): a finished item leaves at once), with the dock's own
+  // memory and trigger now in `useDock` (S5).
   useEffect(() => {
     const ids = dockIdKey === "" ? [] : dockIdKey.split(" ");
     const previous = dockSeenRef.current;
@@ -1405,23 +1104,16 @@ export function App({
         ...dockLastJobRowsRef.current.map((row) => ({ kind: "job" as const, row })),
       ]),
     );
-  }, [dockIdKey, setDock]);
+  }, [dockIdKey, setDock, dockLastJobRowsRef, dockLastRowsRef, dockOutcomeRef, dockSeenRef]);
 
-  /**
-   * A job's drawer READS its output: at once on open, then at most once a second
-   * (`JOB_REFRESH_MS`), and only while that job's drawer is open — never for a
-   * child, the dropdown, or a job nobody opened (docs/feat/shell-jobs-panel.md).
-   *
-   * The interval is created ONCE per open job target, keyed by its WIRE id, so a
-   * re-render (or a fresh read) cannot re-arm it: the dependency list names only
-   * the focus kind, the target id and the test seam — never the output state
-   * (AGENTS §9, M4). A read writes a ref plus a render-only counter.
-   */
-  const jobTargetId =
-    dock.focus.kind === "open" && dockKindOf(dock.focus.id) === "job" ? dock.focus.id : null;
-  const jobEndedWhileOpen = dock.focus.kind === "open" ? dock.focus.ended : null;
-  // The real cadence, or a test's shortened one (AGENTS §9, M4: ONE seam).
-  const refreshMs = jobRefreshMs ?? JOB_REFRESH_MS;
+  // A job's drawer READS its output: at once on open, then at most once a second
+  // (`refreshMs`, `JOB_REFRESH_MS` unless a test shortens it), and only while
+  // that job's drawer is open — never for a child, the dropdown, or a job nobody
+  // opened (docs/feat/shell-jobs-panel.md). The interval is created ONCE per open
+  // job target, keyed by its WIRE id, so a re-render (or a fresh read) cannot
+  // re-arm it: the deps name only the target id and the cadence — never the
+  // output state (AGENTS §9, M4). The target, the cadence and the refs are
+  // `useDock`'s (S5); the effect stays HERE in App's order (Fable H1).
   useEffect(() => {
     if (jobTargetId === null) {
       jobReadAtRef.current = null;
@@ -1478,7 +1170,7 @@ export function App({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [jobTargetId, refreshMs, pushNotice]);
+  }, [jobTargetId, refreshMs, pushNotice, jobOutputRef, jobReadAtRef, setJobOutputGen]);
 
   /**
    * One LAST read when the open job's exit is seen: the registry keeps an exited
@@ -1516,41 +1208,9 @@ export function App({
     return () => {
       cancelled = true;
     };
-  }, [jobTargetId, jobEndedWhileOpen]);
+  }, [jobTargetId, jobEndedWhileOpen, jobOutputRef, setJobOutputGen]);
 
   warmErrorRef.current = (error: unknown) => pushNotice(warmFailureNotice(error));
-
-  const closePanel = useCallback(() => {
-    panelGenRef.current += 1;
-    setPanel(null);
-  }, []);
-
-  /**
-   * Open `initial` (its loading state) at once, then whatever `load` resolves
-   * to — only if this panel is still the open one; a failure closes it and
-   * says why.
-   */
-  const openPanel = useCallback(
-    (initial: OpenPanel, load: () => Promise<OpenPanel>, describe: (e: unknown) => string) => {
-      panelGenRef.current += 1;
-      const gen = panelGenRef.current;
-      setPanel(initial);
-      void load().then(
-        (loaded) => {
-          if (panelGenRef.current === gen) {
-            setPanel(loaded);
-          }
-        },
-        (e) => {
-          if (panelGenRef.current === gen) {
-            closePanel();
-            pushNotice(describe(e));
-          }
-        },
-      );
-    },
-    [closePanel, pushNotice],
-  );
 
   /** Put texts a send-now did not deliver back in the input field (after any draft), and say why. */
   const restoreInput = useCallback(
@@ -1565,213 +1225,29 @@ export function App({
   draftBackRef.current = (text, cause) => restoreInput(text, orphanNotice(cause));
 
   // --- images in the input (docs/feat/attachments-tui.md D8) ----------------
-  /** What the CURRENT session takes: its own answer, or the reason a session with no seam gives. */
-  const attachMode = useCallback((): AttachMode => {
-    const session = sessionRef.current;
-    const answered = session?.imageInput?.();
-    if (answered !== undefined) {
-      return answered;
-    }
-    return session?.attachImage === undefined ? NO_IMAGE_SEAM : NO_IMAGE_SEAM;
-  }, []);
-  /**
-   * Put a refused prompt's chips back (docs/feat/attachments-tui.md D8): the
-   * bytes are still in them, so Enter uploads them again. Appended, never
-   * replacing what the user attached meanwhile.
-   */
-  const restoreChips = useCallback(
-    (chips: readonly AttachedImage[] | undefined) => {
-      if (chips === undefined || chips.length === 0) {
-        return;
-      }
-      setAttach((draft) => ({ ...withChips(draft, chips).draft, upload: null }));
-    },
-    [setAttach],
-  );
-  /** Say each notice as its own row (never joined: one refusal per line). */
-  const showNotices = useCallback(
-    (notices: readonly string[]) => {
-      for (const notice of notices) {
-        pushNotice(notice);
-      }
-    },
-    [pushNotice],
-  );
-  /**
-   * Decide what a pasted/dropped text is and act: prose is inserted as it always
-   * was, image paths become chips, a refusal is SAID. One decision at a time
-   * (a promise chain, so `existing` sees the previous paste's chips), and a
-   * result that lands after an unmount is dropped.
-   */
-  const routeAttach = useCallback(
-    (text: string): void => {
-      // A `/command` is always text: `/compact` alone is a legal path candidate
-      // to `tokenizePaths`, and a paste must never stat one.
-      const candidate = looksLikeCommand(text)
-        ? ({ kind: "text" } as const)
-        : attachmentCandidateText(text, home !== undefined ? { home } : {});
-      if (candidate.kind === "text") {
-        field.insert(text); // prose never touches the disk
-        return;
-      }
-      const gen = attachGenRef.current;
-      attachChainRef.current = attachChainRef.current.then(async () => {
-        const decision = await decideAttachment(fileProbe, candidate, {
-          existing: draftRefs(attachRef.current),
-        });
-        if (gen !== attachGenRef.current) {
-          return; // unmounted while the disk was read
-        }
-        // The paste's own text comes back when the decision is `text` (a missing
-        // path, a directory, a source file): the 3a rule is that the WHOLE paste
-        // stays text, and dropping it silently would lose what was pasted
-        // (review round 1, finding 1).
-        const routed = routeDecision(attachRef.current, decision, attachMode(), text);
-        setAttach(routed.draft);
-        if (routed.insert !== undefined) {
-          field.insert(routed.insert);
-        }
-        showNotices(routed.notices);
-      });
-    },
-    [attachMode, field, fileProbe, home, setAttach, showNotices],
-  );
+  // The decisions are `attach-candidates.ts`/`attach-files.ts`/`attach-draft.ts`'s
+  // and their executor is `useAttachments` (S6). The DRAFT STATE stays here: the
+  // render reads it (the attach row, the input box's row count) and `submit` /
+  // Backspace edit it — the same shape S4 gave `selection`. The refs other layers
+  // read (`probedTextRef`, `uploadCtrlRef`, `attachGenRef`) stay here too, so
+  // effect 1 below keeps its index and every use-site keeps its identifier.
+  const { attachMode, restoreChips, routeAttach, attachCommand, convertToChips, sendWithImages } =
+    useAttachments({
+      field,
+      attachRef,
+      setAttach,
+      attachGenRef,
+      probedTextRef,
+      uploadCtrlRef,
+      sessionRef,
+      runRef,
+      pushNotice,
+      restoreInput,
+      fileProbe,
+      home,
+      localCwd,
+    });
   routeAttachRef.current = routeAttach;
-  /**
-   * `/attach <path…>`: the explicit form (every failure a refusal). A relative
-   * path resolves against the LAPTOP's cwd, never the `cwd` prop (P15).
-   */ const attachCommand = useCallback(
-    (raw: string): void => {
-      const parsed = parseAttachCommand(raw, home !== undefined ? { home } : {});
-      if (parsed === null) {
-        pushNotice("_Usage: `/attach <path>` (a path may be dragged into the terminal)_");
-        return;
-      }
-      const paths = parsed.paths.map((path) => resolve(localCwd, path));
-      const gen = attachGenRef.current;
-      attachChainRef.current = attachChainRef.current.then(async () => {
-        const decision = await decideAttachment(
-          fileProbe,
-          { kind: "paths", paths },
-          { existing: draftRefs(attachRef.current), explicit: true },
-        );
-        if (gen !== attachGenRef.current) {
-          return;
-        }
-        const routed = routeDecision(attachRef.current, decision, attachMode());
-        setAttach(routed.draft);
-        if (routed.insert !== undefined) {
-          field.insert(routed.insert);
-        }
-        showNotices(routed.notices);
-      });
-    },
-    [attachMode, field, fileProbe, home, localCwd, pushNotice, setAttach, showNotices],
-  );
-  /** An unbracketed drop + Enter: the paths become chips and NOTHING is sent (decision 5). */
-  const convertToChips = useCallback(
-    (text: string): void => {
-      const candidate = attachmentCandidateText(text, home !== undefined ? { home } : {});
-      if (candidate.kind !== "paths") {
-        return;
-      }
-      const gen = attachGenRef.current;
-      attachChainRef.current = attachChainRef.current.then(async () => {
-        const decision = await decideAttachment(fileProbe, candidate, {
-          existing: draftRefs(attachRef.current),
-        });
-        if (gen !== attachGenRef.current) {
-          return;
-        }
-        const routed = routeDecision(attachRef.current, decision, attachMode());
-        setAttach(routed.draft);
-        showNotices(routed.notices);
-        // A typed drag whose bytes are NOT an image: the text goes back and says
-        // why, instead of a cleared field that sent nothing (review round 1,
-        // finding 1).
-        if (decision.kind === "text") {
-          // Recorded BEFORE the restore: the next Enter on this same text is a
-          // message, not another probe (round 2, R2-1).
-          probedTextRef.current = text;
-          restoreInput(text, NOT_AN_IMAGE_NOTICE);
-          return;
-        }
-        // Said only when something WAS attached: a refusal already spoke.
-        if (routed.draft.chips.length > attachRef.current.chips.length) {
-          pushNotice(
-            `_attached ${routed.draft.chips.length} image${routed.draft.chips.length === 1 ? "" : "s"} — type your message and press Enter_`,
-          );
-        }
-      });
-    },
-    [attachMode, fileProbe, home, pushNotice, restoreInput, setAttach, showNotices],
-  );
-  /**
-   * Send the prompt with the draft's chips: every chip goes through the
-   * SESSION's own `attachImage` (one upload at a time, progress on the chip
-   * row), then the prompt names the refs. A failure restores the text, keeps
-   * the chips and says why — Enter retries, and the store's put is idempotent.
-   */
-  const sendWithImages = useCallback(
-    (text: string, chips: readonly AttachedImage[]): void => {
-      const session = sessionRef.current;
-      const seam = session?.attachImage;
-      if (seam === undefined) {
-        restoreInput(text, "_images are off: this session does not take images_");
-        return;
-      }
-      const gen = attachGenRef.current;
-      const controller = new AbortController();
-      uploadCtrlRef.current = controller;
-      const upload = async (): Promise<void> => {
-        const refs: AttachmentRef[] = [];
-        for (const [index, chip] of chips.entries()) {
-          const name =
-            chip.ref.name !== undefined && chip.ref.name !== "" ? chip.ref.name : chip.ref.mimeType;
-          setAttach((draft) => uploadProgress(draft, index, chips.length, name, 0, chip.ref.size));
-          refs.push(
-            await seam.call(
-              session,
-              chip.bytes,
-              {
-                mimeType: chip.ref.mimeType,
-                ...(chip.ref.name !== undefined ? { name: chip.ref.name } : {}),
-              },
-              {
-                signal: controller.signal,
-                onProgress: (sent, size) =>
-                  setAttach((draft) =>
-                    uploadProgress(draft, index, chips.length, name, sent, size),
-                  ),
-              },
-            ),
-          );
-        }
-        if (gen !== attachGenRef.current) {
-          return;
-        }
-        // The upload is over: Esc must go back to stopping the TURN, not abort a
-        // finished controller (review round 1, finding 3).
-        if (uploadCtrlRef.current === controller) {
-          uploadCtrlRef.current = null;
-        }
-        setAttach((draft) => uploadDone({ ...draft, chips: [] }));
-        await runRef.current?.(text, { attachments: refs, images: chips });
-      };
-      upload().catch((error: unknown) => {
-        if (gen !== attachGenRef.current) {
-          return;
-        }
-        if (uploadCtrlRef.current === controller) {
-          uploadCtrlRef.current = null;
-        }
-        // The chips stay (bytes included): Enter uploads them again.
-        setAttach((draft) => uploadDone(draft));
-        restoreInput(text, attachErrorText(error));
-      });
-    },
-    [restoreInput, setAttach],
-  );
 
   /**
    * Watch `session` for my rows coming back (docs/feat/queued-broadcast.md):
@@ -1805,17 +1281,6 @@ export function App({
     };
   }, [watchReturned]);
 
-  /** No turn streams any more: show the TUI idle (a send-now kept it running). */
-  const showIdle = useCallback(() => {
-    if (stateRef.current.running && !streamCtrlRef.current) {
-      stateRef.current = applySessionEvent(
-        stateRef.current,
-        { type: "turn_end", reason: "cancelled" },
-        Date.now(),
-      );
-    }
-  }, []);
-
   /**
    * A background job that exited mid-turn could not be seen by the turn that
    * was running (the agent flushes exits at turn start). Now idle, fire a
@@ -1842,16 +1307,6 @@ export function App({
   }, [autoWakeOnJobExit]);
   wakeIfPendingRef.current = wakeIfPending;
 
-  // `streamTurn`, through a ref: it and `settleSendNow` call each other.
-  const streamTurnRef = useRef<
-    | ((
-        open: () => AsyncIterable<SessionEvent>,
-        controller: AbortController,
-        opts: StreamOpts,
-      ) => Promise<void>)
-    | null
-  >(null);
-  // The session-activity handler, through a ref: `streamTurn`'s settle drains
   // the held ones, and the handler starts streams (C2).
   const onActivityRef = useRef<((activity: SessionActivity) => void) | null>(null);
   // `swapSession`, through a ref: the activity handler (closed elsewhere) is defined before it.
@@ -1867,354 +1322,30 @@ export function App({
   // session until it settles (Review R1). Cleared on every outcome.
   const switchingRef = useRef(false);
 
-  /** Activities held while a run of mine streamed: handled in order once nothing is in flight. */
-  const drainHeld = useCallback(() => {
-    while (
-      heldRef.current.length > 0 &&
-      !streamCtrlRef.current &&
-      !sendNowRef.current &&
-      !warmingRef.current
-    ) {
-      const next = heldRef.current.shift();
-      if (next) onActivityRef.current?.(next);
-    }
-  }, []);
-
-  /**
-   * Commit `compute(state)` — a history replacing the transcript — after
-   * warming its rows in time-budgeted chunks when it is long (C8, the resize
-   * pattern): input stays live, the running line says how far it is. Items
-   * appended meanwhile (a notice) are kept after it.
-   */
-  const commitHistory = useCallback(
-    async (compute: (state: DisplayState) => DisplayState): Promise<void> => {
-      const before = stateRef.current.items;
-      const next = compute(stateRef.current);
-      if (needsWarm(next.items.length)) {
-        warmingRef.current = true;
-        const total = next.items.length;
-        let shownAt = 0;
-        setLoading({ done: 0, total });
-        // `main` yielded once after the last chunk too, so the commit always landed
-        // one macrotask later — a queued input/timer ran first. Keep that hop
-        // (docs/feat/tui-run-chunked.md, Review F2). `done` only settles `true`
-        // here: a throw leaves this function at the `await` (Review R3).
-        await runChunked(
-          total,
-          (from, budgetMs) => warmRowsChunk(next.items, layoutOptsRef.current, from, budgetMs),
-          {
-            onProgress: (done) => {
-              const now = Date.now();
-              if (now - shownAt > 50) {
-                shownAt = now;
-                setLoading({ done, total });
-              }
-            },
-          },
-        ).done;
-        await new Promise((r) => setTimeout(r, 0));
-        setLoading(null);
-        warmingRef.current = false;
-      }
-      stateRef.current = {
-        ...next,
-        items: commitWarmed(before, stateRef.current.items, next.items),
-        running: stateRef.current.running,
-      };
-    },
-    [],
-  );
-
-  /**
-   * The old turn is over (or was found over): settle the send-now waiting on
-   * it. `atomic`: its new turn starts, or, with the ack still on its way, the
-   * TUI keeps showing a running turn (the rows stay up). `fallback` (an older
-   * daemon: no facts to ask for): what is left of the rows is sent as a
-   * prompt, or restored after a resync.
-   * True when a turn goes on (do not end the TUI's turn).
-   */
-  const settleSendNow = useCallback(
-    (p: PendingSendNow): boolean => {
-      if (p.mode === "atomic") {
-        stateRef.current = startContinuation(stateRef.current, Date.now());
-        const events = p.successor;
-        if (events && p.next) {
-          sendNowRef.current = null;
-          wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // the new turn flushes the job exits at its start
-          void streamTurnRef.current?.(() => events, p.next, { successor: true });
-        }
-        return true;
-      }
-      sendNowRef.current = null;
-      const { text } = takeAll(rowsRef.current);
-      setRows(() => []);
-      const step = afterOldTurn({ text, resetSeen: p.resetSeen });
-      if (step === "send") {
-        wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" });
-        runRef.current?.(text, { fallback: true });
-        return true;
-      }
-      if (step === "restore") {
-        restoreInput(
-          text,
-          "_send-now (older daemon): the transcript was resynced — your queued messages are back in the input; check them before sending_",
-        );
-      }
-      return false;
-    },
-    [restoreInput, setRows],
-  );
-
-  /**
-   * Stream one turn's events into the transcript — ONE loop for every turn of
-   * the session: a prompt's (`run`, `own`), a send-now's new turn
-   * (`successor`, its rows hand off on its first event), another device's
-   * (`foreign`, docs/feat/tui-foreign-turns.md C1).
-   */
-  const streamTurn = useCallback(
-    async (
-      open: () => AsyncIterable<SessionEvent>,
-      controller: AbortController,
-      opts: StreamOpts,
-    ) => {
-      streamCtrlRef.current = controller;
-      if (opts.foreign) {
-        foreignRef.current = controller;
-      }
-      let handedOff = !opts.successor;
-      // Anything but an `unsupported` notice streamed: the daemon ran this turn.
-      let streamed = false;
-      // The model renewed its context: its skill set changed with it.
-      let reset = false;
-      try {
-        for await (const event of open()) {
-          if (event.type !== "unsupported") {
-            streamed = true;
-            handedWakeRef.current = false; // a turn ran: any later refusal is an ordinary one
-          }
-          if (event.type === "context_reset") {
-            reset = true;
-          }
-          if (!handedOff && event.type !== "unsupported") {
-            handedOff = true;
-            setRows(handOff); // the sent texts are its prompt now
-          }
-          if (event.type === "history_reset" && needsWarm(event.messages.length)) {
-            await commitHistory((s) => applySessionEvent(s, event, Date.now()));
-          } else {
-            stateRef.current = applySessionEvent(stateRef.current, event, Date.now());
-          }
-          // A queued message was just injected — drop it from the pending list.
-          if (event.type === "steer") {
-            const { id } = event;
-            setRows((rows) => onSteer(rows, id));
-          }
-          const pending = sendNowRef.current;
-          if (event.type === "history_reset" && pending) {
-            pending.resetSeen = true;
-          }
-          // The cleared history of a `/clear` in flight reached this turn as its
-          // snapshot (the client hands a turn started after the barrier the
-          // snapshot in-turn, review H2): nothing else will release the latch.
-          if (event.type === "history_reset" && clearingRef.current) {
-            clearingRef.current = false;
-          }
-          if (event.type === "text") {
-            scheduleFlush();
-          } else {
-            flushNow();
-          }
-        }
-        // A foreign stream that closed with no end: it ended behind a resync's
-        // cut — idle, with no stop reason (never a guessed one).
-        if (opts.foreign && stateRef.current.running) {
-          stateRef.current = endWithoutOutcome(stateRef.current);
-        }
-      } catch (error) {
-        const failed = opts.successor
-          ? onSuccessorError(error, rowsRef.current)
-          : ({ kind: "fail" } as const);
-        if (opts.own && lostSlot(error, streamed)) {
-          // Another device's turn took the slot first: my prompt never ran.
-          // Its bubble goes and its text is back in the input — never lost
-          // (decision 15); the held foreign turn renders once this settles.
-          stateRef.current = withdrawUserTurn(stateRef.current, opts.own.item);
-          // An image-only prompt has no text but IS a prompt, not a wake (P10).
-          if (opts.own.text !== "" || (opts.own.images?.length ?? 0) > 0) {
-            restoreInput(opts.own.text, SLOT_LOST_NOTICE);
-            restoreChips(opts.own.restoreChips);
-          } else if (handedWakeRef.current) {
-            // Once: `wakeIfPending` below fires it when the turn that won ends.
-            handedWakeRef.current = false;
-            wakeRef.current = wakeStep(wakeRef.current, { type: "refused" });
-          }
-        } else if (opts.own && refusedBeforeStart(error, streamed)) {
-          // The daemon refused these images BEFORE the turn started
-          // (docs/feat/attachments-tui.md D8): the bubble goes, the text is back
-          // in the input and the chips with it, and the reason is said —
-          // Enter uploads and tries again (the put is idempotent).
-          stateRef.current = withdrawUserTurn(stateRef.current, opts.own.item);
-          abortRef.current = null;
-          restoreInput(opts.own.text, attachErrorText(error));
-          restoreChips(opts.own.restoreChips);
-        } else if (failed.kind === "restore") {
-          for (const id of failed.ids) restoredRef.current.add(id);
-          setRows(() => []);
-          stateRef.current = applySessionEvent(
-            stateRef.current,
-            { type: "turn_end", reason: "cancelled" },
-            Date.now(),
-          );
-          restoreInput(failed.text, failed.notice);
-        } else {
-          stateRef.current = failTurn(
-            stateRef.current,
-            modelErrorNotice(error, model === "remote"),
-            Date.now(),
-          );
-        }
-      } finally {
-        if (reset) {
-          void skillsSync.settle(); // the `model` marks flip (docs/feat/skills-hot-reload.md)
-        }
-        if (streamCtrlRef.current === controller) {
-          streamCtrlRef.current = null;
-        }
-        if (foreignRef.current === controller) {
-          foreignRef.current = null;
-        }
-        // Only this turn's: a send-now's new turn installed its own.
-        if (abortRef.current === controller) {
-          abortRef.current = null;
-        }
-        const pending = sendNowRef.current;
-        // A `/clear` that stopped this turn: it runs once the turn has settled,
-        // and only here (taken now, so no path leaves it armed).
-        const clearNow = clearAfterTurnRef.current;
-        clearAfterTurnRef.current = false;
-        // A quit asked for mid-turn: the turn has settled (and was saved by the
-        // session's own `finally`), so exit now — and wake nothing. A send-now's
-        // new turn then runs daemon-side unobserved, as any turn after a quit.
-        if (exitPendingRef.current) {
-          sendNowRef.current = null;
-          setRows(onTurnEnd);
-          flushNow();
-          exit();
-        } else if (!(pending && settleSendNow(pending))) {
-          setRows(onTurnEnd); // the turn is over; nothing stays queued
-          flushNow();
-          // A foreign turn (or history) held while this ran comes now (C2).
-          drainHeld();
-          if (clearNow) {
-            runClearRef.current?.();
-          }
-          wakeIfPending();
-        } else {
-          flushNow();
-          // A send-now took over and started a new turn: the `/clear` that
-          // stopped this one is not run — said, never dropped silently (M3).
-          if (clearNow) {
-            pushNotice("_/clear not run: a send-now started a new turn — run /clear again_");
-          }
-        }
-      }
-    },
-    [
-      flushNow,
-      scheduleFlush,
-      exit,
-      restoreInput,
-      setRows,
-      settleSendNow,
-      pushNotice,
-      wakeIfPending,
-      commitHistory,
-      drainHeld,
-      skillsSync,
-      model,
-      restoreChips,
-    ],
-  );
-  streamTurnRef.current = streamTurn;
-
-  const run = useCallback(
-    async (
-      text: string,
-      opts?: {
-        continuation?: boolean;
-        skill?: string;
-        fallback?: boolean;
-        /** The prompt's image refs (already uploaded: docs/feat/attachments-tui.md D8). */
-        attachments?: readonly AttachmentRef[];
-        /** The chips whose refs those are: their `[image: …]` rows and a restore. */
-        images?: readonly AttachedImage[];
-      },
-    ) => {
-      const session = sessionRef.current;
-      if (!session) {
-        return;
-      }
-      // A continuation turn has no user input (an autonomous wake reacting to a
-      // background-job exit): no user bubble, and an empty prompt to `send` so
-      // the session runs over existing history without appending a user message.
-      const continuation = opts?.continuation ?? false;
-      // No turn of ours during our own `/compact` (docs/feat/send-now-d.md
-      // follow-up 1): the daemon would refuse it, and its end would clear the
-      // compaction-time rows. A wake waits for the compaction's end.
-      const start = planTurnStart({ compacting: compactingRef.current, continuation });
-      if (start === "defer") {
-        wakeRef.current = wakeStep(wakeRef.current, { type: "refused" });
-        return;
-      }
-      if (start === "refuse") {
-        pushNotice(COMPACTING_NO_TURN);
-        return;
-      }
-      if (!continuation) {
-        lastUserRef.current = text;
-        lastHadImagesRef.current = (opts?.images?.length ?? 0) > 0;
-      }
-      const images = (opts?.images ?? []).map((chip) => imageRowText(chip.ref));
-      const controller = new AbortController();
-      abortRef.current = controller;
-      stoppedHereRef.current = false;
-      stateRef.current = continuation
-        ? startContinuation(stateRef.current, Date.now())
-        : startTurn(stateRef.current, text, Date.now(), images.length > 0 ? images : undefined);
-      setScrollOffset(0);
-      flushNow();
-      // The bubble `startTurn` appended (none for a continuation): withdrawn by
-      // identity if the prompt loses the slot (C3).
-      const item = continuation ? undefined : stateRef.current.items.at(-1);
-      const sendOpts = {
-        ...(opts?.skill !== undefined ? { skill: opts.skill } : {}),
-        ...(opts?.attachments !== undefined && opts.attachments.length > 0
-          ? { attachments: opts.attachments }
-          : {}),
-      };
-      await streamTurn(
-        () =>
-          session.send(
-            continuation ? "" : text,
-            controller.signal,
-            Object.keys(sendOpts).length > 0 ? sendOpts : undefined,
-          ),
-        controller,
-        {
-          own: {
-            item,
-            text: continuation ? "" : text,
-            ...(images.length > 0 ? { images } : {}),
-            ...(opts?.images !== undefined && opts.images.length > 0
-              ? { restoreChips: opts.images }
-              : {}),
-          },
-        },
-      );
-    },
-    [flushNow, pushNotice, streamTurn],
-  );
-  runRef.current = run;
+  // ── the panels (S7 — docs/feat/app-decomposition.md) ──────────────────────
+  // The panel's state, its generation, and the open/close/delete executors live
+  // in `usePanels`; the panel's OWN projections and key answers live per kind in
+  // `panels/<kind>.ts`, reached through `panels/registry.ts` — a new panel is a
+  // file plus one registry line, zero lines here. The STATE (`panel`) and
+  // `panelRef` stay above, because the frame reads them and the ref is assigned
+  // in render. The destructuring keeps every pre-S7 identifier (Fable M1), so no
+  // use site below changes. The hook declares NO effect (Fable H1).
+  const {
+    panelGenRef,
+    panelApply,
+    setSessionsState,
+    touchPanel,
+    closePanel,
+    openPanel,
+    sessionsDelete,
+  } = usePanels({
+    panelRef,
+    setPanel,
+    sessions,
+    switchingRef,
+    columns,
+    pushNotice,
+  });
 
   // `run "<prompt>"`: the first message, sent once at mount, like a typed one: a
   // failed send leaves it in the conversation with the error under it (it is
@@ -2254,6 +1385,77 @@ export function App({
       () => {},
     );
   }, []);
+
+  // ── the turn driver (S9a — docs/feat/app-decomposition.md) ────────────────
+  // The turn itself — `run`, the ONE `streamTurn` loop, its settle, the
+  // send-now, Enter's `submit`, the history commit and `/compact` — lives in
+  // `useTurnDriver.ts`. The hook owns only its own latches: every ref below is
+  // ALSO read or written by a driver that stays here (the activity handler and
+  // `swapSession`, the clear's arm, the key snapshot, the frame), so they are
+  // PASSED IN and each use site keeps its identifier and its source (Fable
+  // M1/H3). It declares no effect, so the 20 below keep their indices (H1), and
+  // it is called before `onActivity`/`watchSession` because they START what it
+  // streams (`streamTurn`) — `onActivityRef` is how the driver reaches back.
+  const { run, commitHistory, streamTurn, sendNow, submit, startCompaction, drainHeld } =
+    useTurnDriver({
+      sessionRef,
+      stateRef,
+      rowsRef,
+      setRows,
+      setLoading,
+      warmingRef,
+      layoutOptsRef,
+      abortRef,
+      streamCtrlRef,
+      foreignRef,
+      sendNowRef,
+      sendNowUnsupportedRef,
+      fallbackNoticedRef,
+      wakeRef,
+      handedWakeRef,
+      stoppedHereRef,
+      restoredRef,
+      heldRef,
+      onActivityRef,
+      exitPendingRef,
+      clearingRef,
+      clearAfterTurnRef,
+      runClearRef,
+      compactingRef,
+      ownCompactionsRef,
+      setCompacting,
+      field,
+      historyRef,
+      histIndexRef,
+      draftRef,
+      lastUserRef,
+      lastHadImagesRef,
+      switchingRef,
+      attachRef,
+      probedTextRef,
+      home,
+      flushNow,
+      setScrollOffset,
+      scheduleFlush,
+      pushNotice,
+      restoreInput,
+      handleCommandRef,
+      permission,
+      attachMode,
+      convertToChips,
+      sendWithImages,
+      submitToTarget,
+      restoreChips,
+      model,
+      skillsSync,
+      askContext,
+      wakeIfPending,
+      exit,
+      runRef,
+    });
+  // The forward reference the jobs subscription, the initial prompt and the
+  // wake read (they are declared and run outside the driver).
+  runRef.current = run;
   const onActivity = useCallback(
     (activity: SessionActivity): void => {
       const inFlight =
@@ -2447,6 +1649,9 @@ export function App({
       armWake,
       subagentsTwoWay,
       setDock,
+      // The dock's own refs (S5): STABLE `useRef` objects, so naming them keeps
+      // the identity rule of Fable H2 ("deps name the fields") without a churn.
+      jobOutputRef,
     ],
   );
   useEffect(() => {
@@ -2481,9 +1686,10 @@ export function App({
       opts: { readonly keepTranscript?: boolean; readonly onOpened?: (ok: boolean) => void } = {},
     ): void => {
       sessionRef.current = next;
-      // An open `/sessions` panel marks the live session as current (Review R2-1).
-      // An open `/sessions` panel re-renders: its "current" row is read live (Review R3-1).
-      setPanel((p) => (p?.kind === "sessions" ? { ...p } : p));
+      // An open `/sessions` panel marks the live session as current, and must be
+      // re-read at the next render: its "current" row is read live (Review R2-1,
+      // R3-1). The rule is the `/sessions` kind's own (`panels/sessions.ts`).
+      touchPanel();
       watchReturned(next);
       watchSession(next, opts.onOpened);
       ownCompactionsRef.current = 0;
@@ -2512,441 +1718,41 @@ export function App({
       }
       flushNow();
     },
-    [flushNow, restoreInput, setCompacting, setRows, watchReturned, watchSession],
+    [flushNow, restoreInput, setCompacting, setRows, touchPanel, watchReturned, watchSession],
   );
   swapRef.current = swapSession;
 
-  /** The fallback's notice, once per App (it does not repeat on later chords). */
-  const noticeFallback = useCallback(
-    (who: "daemon" | "session") => {
-      if (!fallbackNoticedRef.current) {
-        fallbackNoticedRef.current = true;
-        pushNotice(fallbackNotice(who));
-      }
-    },
-    [pushNotice],
-  );
-
-  /**
-   * `Ctrl+X Ctrl+S`: send my queued rows now (docs/feat/send-now-c.md). The
-   * decisions are `send-now.ts`'s; this executes them. False: nothing to do
-   * (the key changes nothing, e.g. the permission dialog stays).
-   */
-  const sendNow = useCallback((): boolean => {
-    const ctrl = sessionRef.current;
-    const plan = planSendNow({
-      hasQueued: rowsRef.current.some((r) => r.state === "queued"),
-      running: stateRef.current.running && streamCtrlRef.current !== null,
-      compacting: compactingRef.current,
-      pending: sendNowRef.current !== null,
-      canSendNow: ctrl?.sendNow !== undefined,
-      latchedUnsupported: sendNowUnsupportedRef.current,
-    });
-    if (plan.kind === "none" || !ctrl) {
-      return false;
-    }
-    if (plan.kind === "wait") {
-      // No way to cancel the compaction: the rows stay, its end sends them.
-      pushNotice(compactionWaitNotice(ctrl.sendNow ? "daemon" : "session"));
-      return true;
-    }
-    const taken = takeForSendNow(rowsRef.current);
-    setRows(() => taken.rows);
-    for (const m of taken.messages) {
-      ownedIdsRef.current.add(m.id);
-    }
-    if (plan.kind === "fallback" || !ctrl.sendNow) {
-      // The fallback stops the turn itself, for sure: like Ctrl+C, dismissed
-      // (not denied) — the turn's cancel settles the ask.
-      if (permission.pending) {
-        permission.answer(DISMISSED);
-      }
-      sendNowRef.current = { mode: "fallback", next: null, successor: null, resetSeen: false };
-      noticeFallback(ctrl.sendNow ? "daemon" : "session");
-      streamCtrlRef.current?.abort();
-      return true;
-    }
-    // An open permission dialog stays: an accepted send-now aborts the turn
-    // daemon-side, which withdraws the ask (the dialog closes, nothing is
-    // sent); a refused one leaves the turn — and its ask — to the user.
-    // The new turn's controller from now on: Esc in the window cancels it (the
-    // daemon already cancels the old one; a second abort of it sends nothing).
-    const next = new AbortController();
-    const pending: PendingSendNow = { mode: "atomic", next, successor: null, resetSeen: false };
-    sendNowRef.current = pending;
-    abortRef.current = next;
-    // A new turn of ours: whoever stops it from here on is not known yet.
-    stoppedHereRef.current = false;
-    const onCompaction = plan.target === "compaction";
-    if (onCompaction) {
-      // The rows are the send-now's now (the compaction's end sends nothing),
-      // and the TUI shows its turn at once — the client installs it at once
-      // (no live turn to wait for), so Enter enqueues to it from here on.
-      compactionOwnedRef.current = true;
-      stateRef.current = startContinuation(stateRef.current, Date.now());
-      flushNow();
-    }
-    ctrl.sendNow(taken.messages, plan.target, next.signal).then(
-      (events) => {
-        if (sendNowRef.current !== pending) {
-          return; // settled otherwise (a quit)
-        }
-        pending.successor = events;
-        if (!streamCtrlRef.current) {
-          settleSendNow(pending); // the old turn is already over
-          flushNow();
-        }
-      },
-      (error: unknown) => {
-        if (sendNowRef.current !== pending) {
-          return;
-        }
-        const old = streamCtrlRef.current;
-        if (abortRef.current === next) {
-          abortRef.current = old;
-        }
-        const step = planRefusal(error, rowsRef.current, old !== null);
-        if (onCompaction) {
-          compactionOwnedRef.current = false; // the rows are not the send-now's any more
-        }
-        if (step.kind === "fallback" && onCompaction) {
-          // An older daemon: it cannot cancel the compaction, so the rows
-          // wait for its end — or go now if it already ended meanwhile.
-          sendNowRef.current = null;
-          sendNowUnsupportedRef.current = true;
-          const after = afterCompactionUnsupported(rowsRef.current, compactingRef.current);
-          setRows(() => after.rows);
-          showIdle();
-          drainHeld();
-          pushNotice(compactionWaitNotice("daemon"));
-          if (after.send !== null) {
-            wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start
-            void runRef.current?.(after.send, { fallback: true });
-          } else {
-            wakeIfPending(); // while still compacting, `run` defers it again
-          }
-          flushNow();
-          return;
-        }
-        if (step.kind !== "fallback") {
-          sendNowRef.current = null;
-          setRows(() => step.rows);
-          if (!old) {
-            showIdle();
-            drainHeld();
-            wakeIfPending();
-          }
-          if (step.kind === "restore") {
-            restoreInput(step.text, step.notice);
-          } else {
-            pushNotice(NOTHING_TO_SEND);
-          }
-          return;
-        }
-        pending.mode = "fallback";
-        sendNowUnsupportedRef.current = true;
-        noticeFallback("daemon");
-        if (old) {
-          // As the latched fallback: it stops the turn itself, so an open
-          // dialog (that turn's ask) is dismissed — not denied — at once; an
-          // older daemon may never withdraw it. `answer` acts on whatever is
-          // pending NOW (a no-op when nothing is), never on a stale render.
-          permission.answer(DISMISSED);
-          old.abort();
-          return; // its end settles the send-now
-        }
-        if (!settleSendNow(pending)) {
-          showIdle();
-          drainHeld();
-          wakeIfPending();
-        }
-        flushNow();
-      },
-    );
-    return true;
-  }, [
-    drainHeld,
-    flushNow,
-    noticeFallback,
-    permission.answer,
-    permission.pending,
+  // --- quit and clear (S8) --------------------------------------------------
+  // The three executors live in `useQuitClear.ts`. The hook owns no state and no
+  // effect: every ref below is shared with a driver this slice does not own (the
+  // turn's settle, the `watch` activity effect, `swapSession`, the key
+  // snapshot), so they are PASSED IN — each use site keeps its identifier and its
+  // source (Fable M1/H3). `runClearRef` is assigned right below, because the
+  // turn's settle calls the clear this hook returns.
+  const { requestQuit, runClear, requestClear } = useQuitClear({
+    sessionRef,
+    stateRef,
+    abortRef,
+    foreignRef,
+    exitPendingRef,
+    clearingRef,
+    ownClearsRef,
+    clearAfterTurnRef,
+    stoppedHereRef,
+    compactingRef,
+    runClearRef,
+    subagentsRef,
+    jobRowsRef,
+    setQuitConfirm,
+    runQuit,
+    detachOnQuit,
+    makeSession,
+    swapSession,
     pushNotice,
-    restoreInput,
-    setRows,
-    settleSendNow,
-    showIdle,
     wakeIfPending,
-  ]);
-
-  /**
-   * `/quit` and `/exit`: the decision is `quitCommandStep`'s (A1); `confirmed`
-   * is the `y` of its confirmation. Another device's turn is not mine to stop
-   * on the way out (C4), but a run TUI's quit ends the session, so it stops
-   * that one too. On `connect` (`detachOnQuit`) quitting only detaches.
-   */
-  const requestQuit = useCallback(
-    (confirmed: boolean): void => {
-      const agents = backgroundCount(subagentsRef.current);
-      // A running SHELL job dies with the session too (owner Q3 (a)) — but only a
-      // quit that CLOSES it loses one, so a `connect` detach passes none.
-      const jobs = detachOnQuit ? 0 : (jobRowsRef.current?.length ?? 0);
-      const step = quitCommandStep({
-        running: stateRef.current.running,
-        exitPending: exitPendingRef.current,
-        foreign: foreignRef.current !== null,
-        detaches: detachOnQuit,
-        endsSession: runQuit !== undefined,
-        others: confirmed ? 0 : (runQuit?.othersOnSession() ?? 0),
-        agents: confirmed ? 0 : agents,
-        jobs: confirmed ? 0 : jobs,
-        confirmed,
-      });
-      if (step === "confirm") {
-        setQuitConfirm({
-          others: runQuit?.othersOnSession() ?? 0,
-          agents,
-          jobs,
-          names: backgroundNames(subagentsRef.current),
-        });
-        return;
-      }
-      if (step === "exit") {
-        exit();
-        return;
-      }
-      exitPendingRef.current = true;
-      pushNotice(
-        "_Stopping the turn so it is saved before exiting — /exit or Ctrl+C again to quit now._",
-      );
-      abortRef.current?.abort();
-    },
-    [detachOnQuit, exit, pushNotice, runQuit, setQuitConfirm],
-  );
-
-  /**
-   * Ask the daemon to reset the conversation (docs/feat/clear-keeps-jobs.md).
-   * The transcript is replaced by the `history{clear}` activity, never here; a
-   * refusal changes nothing and says so. Nothing escapes: both settle paths are
-   * guarded (a throw in a void promise would be an unhandled rejection).
-   */
-  const runClear = useCallback((): void => {
-    const session = sessionRef.current;
-    if (!session?.clear) {
-      return;
-    }
-    // Called ON the session: under `connect` this is the `RemoteSession` CLASS
-    // instance, whose `clear` reads `this` (`this.openForReset()`) — a method
-    // taken off the object and called alone loses `this`
-    // (docs/fix/clear-connect-unbound.md).
-    const clear = session.clear.bind(session);
-    clearingRef.current = true;
-    // The open a reset needs comes FIRST (review M1): it can ATTACH a session
-    // another device keeps live, and that attach's snapshot is a
-    // `history{reason: null}` — which releases the latch and zeroes the
-    // own-clear count. Arming the count before it made my own `/clear` look like
-    // another device's ("cleared on another device"). The latch still goes up
-    // first: it also gates the wake a clear must delay.
-    const send = (): void => {
-      clearingRef.current = true;
-      ownClearsRef.current += 1;
-      let call: Promise<unknown>;
-      try {
-        call = clear();
-      } catch (error) {
-        call = Promise.reject(error);
-      }
-      void call.then(
-        (result) => {
-          try {
-            if (sessionRef.current !== session) {
-              return;
-            }
-            // The answer comes BEFORE the cleared history (the barrier makes the
-            // client read a snapshot): the latch stays up until the `history`
-            // activity applies it (review H2) — it wakes from there. Only a clear
-            // that did nothing (no session open yet: `{0, 0}`, no history coming)
-            // lets go here (review L6b) — and, with a chat on screen, says so
-            // (docs/fix/clear-silent-noop.md: a silent no-op is a §7 drop).
-            const r = result as { before?: number; after?: number } | undefined;
-            if (r?.before === 0 && r.after === 0) {
-              clearingRef.current = false;
-              if (ownClearsRef.current > 0) {
-                ownClearsRef.current -= 1;
-              }
-              const noop = clearNoopNotice({
-                before: 0,
-                after: 0,
-                // A conversation on screen: any prompt or tool row. A fresh
-                // session's welcome line is neither, so it stays quiet.
-                chatShown: stateRef.current.items.some(
-                  (i) => i.kind === "user" || i.kind === "tool",
-                ),
-              });
-              if (noop !== null) {
-                pushNotice(noop);
-              }
-              wakeIfPending();
-            }
-          } catch {
-            // Nothing to do: the cleared chat arrives through the history activity.
-          }
-        },
-        (error: unknown) => {
-          try {
-            if (sessionRef.current === session) {
-              const message = error instanceof Error ? error.message : String(error);
-              clearingRef.current = false;
-              // A dropped link ("not retried") may have landed: its history (a
-              // replay or a snapshot) is then still MINE — keep the count (L6a);
-              // a snapshot (`reason: null`) zeroes it. Any other error replaced nothing.
-              if (!/not retried/i.test(message) && ownClearsRef.current > 0) {
-                ownClearsRef.current -= 1;
-              }
-              pushNotice(clearErrorNotice(message));
-              // The gate held a wake back: nothing else would start it (review H2d).
-              wakeIfPending();
-            }
-          } catch {
-            // Nothing to do: the notice is a courtesy.
-          }
-        },
-      );
-    };
-    // Settles only once the attach snapshot (if any) has been applied: the
-    // bookkeeping above is armed after it, never before (review M1).
-    void Promise.resolve(session.openForReset?.()).then(
-      () => {
-        if (sessionRef.current === session) {
-          send();
-        }
-      },
-      (error: unknown) => {
-        try {
-          if (sessionRef.current === session) {
-            // Nothing was armed: the count was never raised here.
-            clearingRef.current = false;
-            pushNotice(clearErrorNotice(error instanceof Error ? error.message : String(error)));
-            // The gate held a wake back: nothing else would start it (H2d).
-            wakeIfPending();
-          }
-        } catch {
-          // Nothing to do: the notice is a courtesy.
-        }
-      },
-    );
-  }, [pushNotice, wakeIfPending]);
+    exit,
+  });
   runClearRef.current = runClear;
-
-  /**
-   * `/compact`'s machinery (docs/feat/app-decomposition.md M5): the
-   * compaction's own refs, its one settle, and the compaction-time queue it
-   * ends live HERE, not in a command file — its guards do (`commands/compact.ts`).
-   * It moves with S9a (the turn driver), which is why it is an App-level
-   * function and not a command's body.
-   */
-  const startCompaction = useCallback((): void => {
-    const session = sessionRef.current;
-    if (!session) {
-      return;
-    }
-    pushNotice("_Compacting the conversation…_");
-    setCompacting(true);
-    compactionOwnedRef.current = false;
-    // Whether THIS handler raised its own-compaction count: only then may
-    // its settle lower it again (an open that failed raised none).
-    let armed = false;
-    armed = true;
-    // Its one settle (success or failure) ends the compaction-time queue
-    // (D3c): sent as one prompt unless a send-now took it. A `/clear`
-    // meanwhile already took the rows (a new session: ignore it).
-    const settled = (result: CompactionResult) => {
-      if (sessionRef.current !== session) {
-        return;
-      }
-      if (!result.ok && armed && ownCompactionsRef.current > 0) {
-        ownCompactionsRef.current -= 1; // it replaced nothing: no history of mine to come
-      }
-      setCompacting(false);
-      const out = onCompactionSettled({
-        result,
-        rows: rowsRef.current,
-        sendNowOwns: compactionOwnedRef.current,
-        turnRunning: stateRef.current.running,
-      });
-      pushNotice(out.notice);
-      if (out.send !== null) {
-        setRows(() => []);
-        wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start
-        // As a fallback send: restored if another client's prompt won the slot.
-        void run(out.send, { fallback: true });
-        return;
-      }
-      if (out.restore !== null) {
-        setRows(() => []);
-        restoreInput(out.restore, "_your queued messages are back in the input_");
-      }
-      wakeIfPending(); // a wake deferred during the compaction
-    };
-    // The open a reset needs comes FIRST, as `/clear`'s does (review
-    // M2): a resumed session nothing has opened yet holds its chat only
-    // as this client's seed, and counting the compaction before the open
-    // left the count armed for a compaction that never happened. The
-    // latch (`compacting`) is up meanwhile, so nothing starts a turn.
-    void Promise.resolve(session.openForReset?.()).then(
-      () => {
-        if (sessionRef.current !== session) {
-          return;
-        }
-        // Its history (if it compacts) is mine: no "on another device" (C6).
-        ownCompactionsRef.current += 1;
-        armed = true;
-        void session.compact?.().then(
-          (r) => {
-            settled({ ok: true, before: r.before, after: r.after });
-            // The history shrank: the open figure is stale until a turn measures.
-            askContext(session);
-          },
-          (error: unknown) => settled({ ok: false, error }),
-        );
-      },
-      (error: unknown) => settled({ ok: false, error }),
-    );
-  }, [askContext, pushNotice, restoreInput, run, setCompacting, setRows, wakeIfPending]);
-
-  /**
-   * `/clear`'s machinery (docs/feat/app-decomposition.md M5): the step's own
-   * refusals, the latch, the stop-then-clear hand-off and the legacy
-   * close-and-replace. Its refs are App's and it moves with S8; the command
-   * file (`commands/clear.ts`) only calls it.
-   */
-  const requestClear = useCallback((): void => {
-    const step = clearCommandStep({
-      canClear: typeof sessionRef.current?.clear === "function",
-      running: stateRef.current.running,
-      ownTurn: foreignRef.current === null,
-      compacting: compactingRef.current,
-      clearing: clearingRef.current,
-    });
-    if (step === "legacy") {
-      // A session without `clear` (the in-process fallback): the old
-      // session ends (with its jobs) before the fresh one starts
-      // (decision D3).
-      sessionRef.current?.close?.();
-      swapSession(makeSession());
-    } else if (step === "busy") {
-      pushNotice("_A /clear is already running._");
-    } else if (step === "compacting") {
-      pushNotice("_Can't clear while a compaction is running._");
-    } else if (step === "stop_then_clear" && abortRef.current) {
-      // Stop the own turn like Esc; the clear runs when it has settled.
-      clearAfterTurnRef.current = true;
-      stoppedHereRef.current = true;
-      abortRef.current.abort();
-    } else {
-      // Another device's running turn: the daemon answers TurnInProgress.
-      runClearRef.current?.();
-    }
-  }, [makeSession, pushNotice, swapSession]);
 
   /**
    * Start one hop (docs/feat/session-hop.md D3/D4), and be the ONLY place the
@@ -3209,134 +2015,6 @@ export function App({
     [makeSession, pushNotice, sessions, swapSession, watchReturned, watchSession],
   );
 
-  const submit = useCallback(
-    (value: string) => {
-      // The dock may own this text (a child open): it decides, we execute.
-      if (submitToTarget(value)) {
-        return;
-      }
-      const text = value.trim();
-      // A probed drop is a PATH, never a command: `looksLikeCommand` already said
-      // so before the disk was read, so the coarse `/`-prefix branch below must
-      // not turn it into "Unknown command" (round 2, R2-1).
-      const probedText = probedTextRef.current;
-      const isProbedDrop = probedText !== null && probedText === text;
-      if (probedText !== text) {
-        probedTextRef.current = null; // an edited (or cleared) drop is a new drop
-      }
-      // Enter WITH images is decided before the field is reset: a refusal must
-      // leave the text where it is (docs/feat/attachments-tui.md D8), and an
-      // image-only prompt ("") is a real submit.
-      const plan = submitPlan({
-        text,
-        draft: attachRef.current,
-        running: stateRef.current.running,
-        compacting: compactingRef.current,
-        dockOpen: false, // `submitToTarget` already took a child-owned text
-        mode: attachMode(),
-        onlyPaths: enterConvertsToChips(text, probedText, home !== undefined ? { home } : {}),
-      });
-      if (plan.kind === "refuse") {
-        pushNotice(plan.notice);
-        return;
-      }
-      // The notice promised exactly ONE Enter; this is it (a refusal above keeps
-      // it, since the text stayed put). Round 2, R2-1.
-      probedTextRef.current = null;
-      if (plan.kind === "send") {
-        field.reset();
-        historyRef.current = pushHistory(historyRef.current, plan.text);
-        histIndexRef.current = historyRef.current.length;
-        draftRef.current = "";
-        const refusedPrompt = switchingRefusal(switchingRef.current, { kind: "prompt" });
-        if (refusedPrompt) {
-          restoreInput(plan.text, refusedPrompt);
-          return;
-        }
-        sendWithImages(plan.text, plan.images);
-        return;
-      }
-      if (plan.kind === "convert") {
-        // An unbracketed drop: the paths become chips and NOTHING is sent (decision 5).
-        field.reset();
-        convertToChips(text);
-        return;
-      }
-      field.reset();
-      if (text === "") {
-        return;
-      }
-      if (text.startsWith("/") && !isProbedDrop) {
-        handleCommand(text);
-        return;
-      }
-      // Record the prompt in history (dedup is inside `pushHistory`) and return
-      // to the live-draft slot: the next Up starts a fresh walk from the newest
-      // entry. Done before the running branch so a steering prompt is recalled
-      // too.
-      historyRef.current = pushHistory(historyRef.current, text);
-      histIndexRef.current = historyRef.current.length;
-      draftRef.current = "";
-      // A switch in flight: the old session is detaching and the new one not
-      // yet followed — the text goes back to the input, never lost (Review R1).
-      const refusedPrompt = switchingRefusal(switchingRef.current, { kind: "prompt" });
-      if (refusedPrompt) {
-        restoreInput(text, refusedPrompt);
-        return;
-      }
-      // Mid-turn: queue the task (steering) so it is handed to the agent before
-      // its next round, instead of starting a new turn. Call through the session
-      // (not a detached reference) so `this` is preserved.
-      if (stateRef.current.running) {
-        const ctrl = sessionRef.current;
-        if (ctrl?.enqueue) {
-          // The row's id is the enqueue key: a send-now names exactly this row.
-          const id = crypto.randomUUID();
-          setRows((rows) => addRow(rows, text, id)); // optimistic (responsive UX)
-          // enqueue is sync (local) or a Promise (worker/pod/remote). On a
-          // reject (e.g. MethodNotFound from an older remote daemon, or a
-          // transport drop) the entry will never get a `steer` echo, so drop
-          // it — otherwise it masks a send that never happened. `Promise.resolve`
-          // normalises the sync case (it never rejects → no local behaviour change).
-          Promise.resolve(ctrl.enqueue(text, id)).then(
-            // Accepted: from now on the daemon's list says where the row is (C7).
-            () => setRows((rows) => markAcked(rows, id)),
-            (error: unknown) => {
-              const res = onReject(rowsRef.current, id, ownedIdsRef.current);
-              if (!res.notify) {
-                return; // a send-now took it: its text travels with the send-now
-              }
-              setRows(() => res.rows);
-              const reason = error instanceof Error ? error.message : String(error);
-              pushNotice(`_message not queued: ${reason}_`);
-            },
-          );
-        }
-        return;
-      }
-      // During this TUI's `/compact` no turn runs, so nothing to enqueue to:
-      // a local row, sent when the compaction ends or by the chord (D3c).
-      if (compactingRef.current) {
-        setRows((rows) => addRow(rows, text, crypto.randomUUID()));
-        return;
-      }
-      void run(text);
-    },
-    [
-      handleCommand,
-      pushNotice,
-      restoreInput,
-      run,
-      field.reset,
-      setRows,
-      submitToTarget,
-      attachMode,
-      convertToChips,
-      home,
-      sendWithImages,
-    ],
-  );
-
   // All line editing lives in `useLineEditor` (pure `editor.ts` ops), so no
   // control key — Ctrl+O, mouse reports, escapes — can ever be echoed into the
   // buffer, independent of input-handler ordering.
@@ -3407,55 +2085,6 @@ export function App({
     return () => clearPasteTimeout();
   }, [clearPasteTimeout]);
 
-  /**
-   * Delete a `/sessions` row, then refresh the panel — but only if it is still
-   * THE SAME panel: the generation the key landed in is compared at every async
-   * step (`sessionsRefreshApplies`), so a request answering after the panel
-   * closed (or another opened) is dropped instead of landing on screen. Moved out
-   * of the key handler verbatim by S3; the decisions are still
-   * `sessions-panel.ts`'s.
-   */
-  const sessionsDelete = useCallback(
-    (id: string, startedGen: number): void => {
-      if (!sessions) {
-        return;
-      }
-      const applies = (): boolean =>
-        sessionsRefreshApplies({
-          startedGen,
-          gen: panelGenRef.current,
-          open: panelRef.current?.kind === "sessions",
-          switching: switchingRef.current,
-        });
-      void sessions.remove(id).then(
-        () => {
-          if (!applies()) return;
-          void sessions.list().then(
-            (view) => {
-              if (!applies()) return;
-              setPanel((p) =>
-                p?.kind === "sessions"
-                  ? {
-                      ...p,
-                      data: view,
-                      now: Date.now(),
-                      state: refreshedSessions(p.state, view),
-                    }
-                  : p,
-              );
-            },
-            (e: unknown) => {
-              // The panel closed meanwhile: its refresh no longer matters (R4-1).
-              if (applies()) pushNotice(sessionsListError(e));
-            },
-          );
-        },
-        (e: unknown) => pushNotice(deleteFailedNotice(e)),
-      );
-    },
-    [sessions, pushNotice],
-  );
-
   // --- the key router's executor port (S3) ---------------------------------
   // The ONE place a routing decision becomes a call into the App. Every field is
   // an existing stable callback (the App's own `useCallback`s) or a decision
@@ -3520,8 +2149,8 @@ export function App({
       ctrl?.abort();
     },
     closePanel,
-    panelApply: (action) => setPanel((p) => (p ? applyPanel(p, action, columns) : p)),
-    setSessionsState: (state) => setPanel((p) => (p?.kind === "sessions" ? { ...p, state } : p)),
+    panelApply,
+    setSessionsState,
     switchTo,
     sessionsDelete,
     killJob,

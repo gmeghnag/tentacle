@@ -200,7 +200,18 @@ export class PermissionBroker {
     }
   }
 
-  reset(): void {
+  /**
+   * Withdraw the requester. With `only`, withdraw ONLY that requester: a caller
+   * whose release arrives late (a screen whose `session/detach` settled after a
+   * NEWER screen mounted its own) must not clear the one that replaced it —
+   * that is the "single broker" invariant's silent failure (every ask is held,
+   * no prompt, the turn hangs). With no argument: unconditional, as the single
+   * TUI prompt's unmount needs.
+   */
+  reset(only?: PermissionRequester): void {
+    if (only !== undefined && this.requester !== only) {
+      return;
+    }
     this.requester = this.holdUntilSet ? null : allowAll;
   }
 

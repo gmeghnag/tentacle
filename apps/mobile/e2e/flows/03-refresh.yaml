@@ -3,10 +3,9 @@ appId: so.tentacle.app
 # 03 (docs/feat/mobile-app-shell.md): pull-to-refresh picks up a session created
 # AFTER the list was first read. The hook adds "Delta"; its row's id is the
 # observable (ids only — see 01).
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - runScript:

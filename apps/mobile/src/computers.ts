@@ -1,88 +1,46 @@
 /**
- * Where the app's computers come from (docs/feat/mobile-app-shell.md). 11a ships
- * only the DEV source: a computer read from the build environment, no persisted
- * token, no "add computer" form. Task 9 deletes it for a Keychain-backed paired
- * source behind this same interface, so no screen changes then.
+ * Where the app's computers come from (docs/feat/mobile-app-shell.md 11a; the
+ * Keychain source is docs/feat/mobile-pairing-screen.md 11b.1).
  *
- * Pure: no React, no React Native, no I/O — the env is injected.
+ * 11a shipped only a DEV source (an env URL + build-time token) and said task 9
+ * would delete it for a Keychain-backed paired source behind this SAME
+ * interface. That is this file: 11b.1 removes the dev half entirely — there is
+ * no build-time computer and no build-time token left to bake into a shipped
+ * build (F-H4).
+ *
+ * Pure: no React, no React Native, no I/O — the store is injected.
  */
+import type {
+  ComputerEntry,
+  ComputerStore,
+  PairedComputer,
+  StoredComputer,
+} from "./computer-store.ts";
 
-/** One computer the app can dial. `token` is build-time only in 11a (debt: task 9). */
-export interface ComputerRecord {
-  readonly id: string;
-  readonly name: string;
-  readonly url: string;
-  readonly token?: string;
-}
+export type { ComputerEntry, PairedComputer, StoredComputer };
 
+/**
+ * The computers this app can dial: one paired record per computer (the id is
+ * the pinned key's id, P3), plus reads/writes for the pairing flow and the
+ * Remove action.
+ */
 export interface ComputerSource {
-  list(): Promise<readonly ComputerRecord[]>;
+  /** Every listed computer (a `broken` one is listed as such, never hidden). */
+  list(): Promise<readonly ComputerEntry[]>;
+  /** One computer WITH its device key — the dial path, and nothing else. */
+  get(id: string): Promise<StoredComputer | undefined>;
+  /** Add or replace a computer (a re-pair keeps the id: Owner Q7). */
+  add(computer: PairedComputer, deviceKey: string): Promise<void>;
+  /** Forget it on THIS phone (Owner Q5: local only; the computer keeps its entry). */
+  remove(id: string): Promise<void>;
 }
 
-/** The build env named a URL the app cannot dial: shown on `Pair`, naming the variable. */
-export class ComputerConfigError extends Error {
-  readonly variable: string;
-  constructor(variable: string, message: string) {
-    super(message);
-    this.name = "ComputerConfigError";
-    this.variable = variable;
-  }
-}
-
-/** Where the dev computer is configured (exported: the error messages name them). */
-const URL_VAR = "EXPO_PUBLIC_TENTACLE_URL";
-const TOKEN_VAR = "EXPO_PUBLIC_TENTACLE_TOKEN";
-const NAME_VAR = "EXPO_PUBLIC_TENTACLE_NAME";
-
-/** The one computer a dev build is pointed at. */
-const DEV_COMPUTER_ID = "dev";
-
-/**
- * `ws:`/`wss:` only: the client's channel factory speaks WebSocket, so an
- * `http:` URL would fail at the dial with a far worse message.
- */
-function parseWsUrl(raw: string): URL {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new ComputerConfigError(URL_VAR, `${URL_VAR} is not a valid URL: ${JSON.stringify(raw)}`);
-  }
-  if (url.protocol !== "ws:" && url.protocol !== "wss:") {
-    throw new ComputerConfigError(
-      URL_VAR,
-      `${URL_VAR} must start with ws:// or wss:// (got ${JSON.stringify(url.protocol)})`,
-    );
-  }
-  return url;
-}
-
-/**
- * A computer from `EXPO_PUBLIC_TENTACLE_URL` / `_TOKEN` / `_NAME` (inlined at
- * build time: a shipped build bakes them in — task 9 deletes this source).
- *
- * No URL → `[]`, so the app shows the pairing placeholder rather than crashing.
- * A URL that is not `ws:`/`wss:` → `list()` rejects with
- * `ComputerConfigError`; the caller shows it on `Pair` and names the variable.
- */
-export function devComputerSource(env: Record<string, string | undefined>): ComputerSource {
+/** The source over the Keychain store: the app has no other kind. */
+export function computerSource(store: ComputerStore): ComputerSource {
   return {
-    async list(): Promise<readonly ComputerRecord[]> {
-      const rawUrl = env[URL_VAR];
-      if (rawUrl === undefined || rawUrl === "") {
-        return [];
-      }
-      const url = parseWsUrl(rawUrl);
-      const token = env[TOKEN_VAR];
-      const name = env[NAME_VAR];
-      return [
-        {
-          id: DEV_COMPUTER_ID,
-          name: name === undefined || name === "" ? url.host : name,
-          url: url.toString(),
-          ...(token === undefined || token === "" ? {} : { token }),
-        },
-      ];
-    },
+    list: () => store.list(),
+    get: (id) => store.get(id),
+    add: (computer, deviceKey) => store.add(computer, deviceKey),
+    remove: (id) => store.remove(id),
   };
 }

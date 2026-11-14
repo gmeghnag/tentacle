@@ -47,11 +47,13 @@ export type {
   HopRun,
   HopTargetView,
   NoticeFeed,
-  RunQuit,
   SessionController,
   SessionDirectory,
   TargetFeed,
 } from "./app-types.ts";
+// S8 moved `RunQuit` next to `useQuitClear` (the executor that reads it); the
+// package surface is unchanged, only the file it resolves through.
+export type { RunQuit } from "./useQuitClear.ts";
 export { autoAcceptTest, autoApproves, ownRequest } from "./permission-ui.ts";
 export type { SessionsEntry, SessionsView } from "./sessions-panel.ts";
 export { startTui, type TuiOptions } from "./run.tsx";

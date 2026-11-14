@@ -21,6 +21,7 @@ import {
   AttachTimeoutError,
   type Clock,
   type DaemonKind,
+  type ImageModelScope,
   LAPTOP_IMAGE_BYTES,
   type LinkStatus,
   type NamedModels,
@@ -841,6 +842,21 @@ export interface LocalRuntimeDeps {
   /** `container` for `run`/`attach`: picks the advice for a daemon too old to give its own. */
   readonly daemonKind?: DaemonKind;
   /**
+   * The name a "model's config has images off" reason repeats
+   * (docs/feat/images-off-reason.md): always THIS laptop's `config.model`.
+   */
+  readonly modelName?: string;
+  /**
+   * Which model runs the turns on this daemon, and so whose config the "images
+   * are off" advice is about (docs/feat/images-off-reason.md, fix round 1
+   * finding 1): `laptop` for the in-process worker and a `--model-proxy` pod
+   * (this laptop's model and key); `daemon` for a daemon running its OWN model
+   * from its OWN config — a `serve` host, and a pod daemon started without
+   * `--model-proxy`, where `tentacle config set` on the laptop changes nothing.
+   * Default `daemon`: never name a machine the evidence does not point at.
+   */
+  readonly modelScope?: ImageModelScope;
+  /**
    * Where the laptop stores project-hooks trust decisions — the local worker
    * ONLY (docs/feat/hooks-project-trust.md, D4). Ignored when the daemon
    * proxies the model through us (a pod, D5: asked every session, never stored).
@@ -892,6 +908,13 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     // Only beside a model provider: a client that serves no model cannot hold a
     // pod's image bytes (docs/feat/attachments-prompt.md D5's table).
     ...(deps.modelProvider && deps.localImages ? { localImages: deps.localImages } : {}),
+    // The name a "model's config has images off" reason repeats, and the PLACE
+    // it points at (docs/feat/images-off-reason.md): `modelName` is only ever
+    // this laptop's own model id, and `modelScope` says whether the daemon runs
+    // it (`laptop`: the worker) or its own (default: `daemon`, and a pod daemon
+    // started without `--model-proxy`, where our key would change nothing).
+    modelName: deps.model,
+    ...(deps.modelScope !== undefined ? { modelScope: deps.modelScope } : {}),
     // D6: a laptop model link that never attached reads THIS laptop's blob dir
     // for the sessions this client built (a 2nd TUI on the pod, a pod turn the
     // daemon re-runs before any send). Scoped by `allowSession` at the one build
@@ -1330,8 +1353,11 @@ export async function startWorkerRuntime(
         saver: deps.saver,
         cwd: config.cwd,
         model: config.model,
+        // The worker runs THIS laptop's model in-process: an images-off reason
+        // names our model and points at our config (docs/feat/
+        // images-off-reason.md).
+        modelScope: "laptop" as const,
         resume: deps.resume,
-        // The local worker is the one runtime whose trust decisions persist (D4).
         hooksTrustStore: fileTrustStore(config.configDir, (message) => {
           logDaemonError(config.configDir, new Error(message));
         }),

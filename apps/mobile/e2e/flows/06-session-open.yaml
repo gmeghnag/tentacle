@@ -1,0 +1,36 @@
+appId: so.tentacle.app
+---
+# 06 (docs/feat/mobile-session-view.md 12c): tapping a session OPENS it — the
+# screen attaches (`session/open`, never a create), the daemon's history arrives
+# as rows, and going back DETACHES without ending the session.
+#
+# Assertions are by testID only: RN's new architecture exposes no text to
+# XCUITest (plan P9). The daemon-side truth is a hook (`session-state`), which is
+# what makes "back detaches, never closes" a real assertion: `attached` drops to
+# the laptop's count and `archived` stays false.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${ALPHA_ID}"
+- assertVisible:
+    id: "session-view"
+# Alpha's seeded turn is two rows (the prompt and the mock's answer): a history
+# row proves the attach fetched the daemon's transcript, not just the frame.
+- assertVisible:
+    id: "row-r1"
+- assertVisible:
+    id: "row-r2"
+- assertVisible:
+    id: "turn-idle"
+- tapOn:
+    id: "BackButton"
+- waitForAnimationToEnd
+- assertVisible:
+    id: "sessions-list"
+# The laptop is still attached (the seeder keeps it), so the phone leaving must
+# take `attached` back to 1 — a `session/close` instead would set archived: true.
+- runScript:
+    file: "06-session-left.js"
