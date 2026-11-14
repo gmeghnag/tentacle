@@ -1164,3 +1164,59 @@ unverified: a real `wss://` deployment behind Caddy (R7 + owner decision D), the
 the client-side unbounded-allocation gap R0(b) recorded — F7 is still OPEN, and
 R2 does not close it (it bounds the relay's own inbound frames at 96 Ki chars,
 which is a different leg from the daemon's).
+
+## Review
+
+### R2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES.** Same model family as the R2 executor signature
+(fresh context only): shared blind spots may survive.
+
+Gate (scoped): `bun test apps/relay` 56 pass / 0 fail; `bun run lint` clean;
+`bun run typecheck` clean. Full `bun test` not re-run (scope: R2 files only).
+
+Findings:
+1. **MEDIUM — an expired unaccepted stream frees its slots but never closes
+   the phone** (`apps/relay/src/relay-core.ts:413-417`, also `:355-357`).
+   `sweep()` / `accept()`'s `expired` path call `forgetStream` (releases the
+   per-ip slot, drops the per-id count) and emit no `close` for `stream.phone`.
+   Scratch repro (`concurrentPerIp: 1`): dial p1 → t=11 s → `sweep()` returns
+   `[]` → a second dial from the same ip is admitted while p1 is still open.
+   Failure: a registered daemon that never accepts (crashed after `open`, or a
+   hostile one) lets one IP accumulate unbounded open phone sockets (30/min,
+   each pinned until Bun's idle timeout, which a ponging client never hits),
+   bypassing `concurrentPerIp` and `streamsPerId`; and a legit phone gets an
+   OPEN socket that never carries a handshake instead of a prompt close to try
+   the next address (F2/F7 convergence broken). Fix: emit
+   `{close, phone, RELAY_CLOSE_UNREGISTERED}` on both expiry paths + test.
+2. **MEDIUM — a second `hello` with a different secret on ONE control socket
+   registers a second id that is never unregistered**
+   (`relay-core.ts:226-294`, `controlClosed` `:364-371` returns after the first
+   match). Repro: two hellos on `c9` (secrets 2, 3) → `registeredCount` 3 →
+   `controlClosed("c9")` → 2; a phone dial to id(3) is `opened` with `open`
+   sent to the dead `c9` (dropped by `server.ts:185`) instead of held/4404.
+   Failure: stale registrations leak until relay restart (fills `registeredIds`
+   10 000 → new daemons refused `busy`), and phones for that id hang on a dead
+   route. Fix: refuse a second `hello` on an already-registered socket (or
+   delete every id of that socket) + test.
+3. **MEDIUM (test non-vacuity) — the server's phone-close slot release is
+   unpinned.** Mutation: comment out `core.phoneClosed(key)` in
+   `server.ts:367` → 56/56 still pass. A leak there exhausts every IP's
+   `concurrentPerIp` after 16 dials. Needs a socket-level test: dial/close
+   N+1 times at `concurrentPerIp: N`, the last dial admitted.
+
+Mutation outcomes: dropping the `replaced` send (`relay-core.ts:288`) → 2
+tests fail (core + server) — non-vacuous; finding 3 above — vacuous. Both
+reverted; `git status` clean afterwards.
+
+Attacks tried: newest-wins + old socket's late `close` (no wrong unregister:
+holds); double release of a phone slot via oversize-drop + `close` (idempotent:
+holds); accept after phone close (stream already forgotten → `unknown`: holds);
+log contents (key/8-char prefixes only, no secret: holds); expiry paths
+(finding 1); multi-hello per socket (finding 2). Noted, not raised: the
+`maxTrackedIps` eviction of an entry with `open > 0` resets its count, so the
+"never a bypass" comment (`relay-core.ts:497`) is inaccurate (low: per-IP
+limits are weak against IPv6 ranges anyway).
+
+§7: R2 holds no key and authorises nothing (relay untrusted — holds); no
+session path, broker, persistence or terminal I/O touched.
