@@ -857,3 +857,47 @@ because their `.name` values are `RpcError` / `AbortError`. Both land on
 blind spot is the port's adapter: the load-bearing property was proved for
 prompts end to end, but for steers only up to the client method, whose turn
 binding is not the item's.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14* · scope `git diff HEAD~1` (7f98779)
+
+**Verdict: REQUEST-CHANGES**, for one small new finding. All five round-1 findings are fixed.
+
+**Gate:** the 5 touched files pass 87/87 (274 expects). `bun run lint` is clean
+(1074 files) and `bun run typecheck` is clean.
+
+**Round-1 findings, each checked by mutation.** Four mutations were applied
+together, the tests run, then reverted; `git status` was clean afterwards.
+- **#1 (HIGH), fixed.** `outbox-session.ts` sends the steer through
+  `RemoteClient.enqueue(sessionId, id, turnId, text)`. Mutation: route it to
+  `session.enqueue(text, id)` → link T9 (turn ended) and T10 (new turn) fail.
+- **#2, fixed.** `exclusive` (serialise + busy + re-read of the item) wraps the
+  sheet's acts. Mutation: no `exclusive` in `steerNow` → "DOUBLE tap … ONE id"
+  and "second tap after the first finished" fail.
+- **#3, fixed.** The store writes through one queue (`writeTail`). Mutation: no
+  queue → both "two writers at once" tests fail.
+- **#4, fixed.** `enqueue` always returns the item. A corrupt file that was moved
+  aside is writable again (`readOnly = !moved`). Mutation: stay read-only → the
+  "SET ASIDE … works again" test fails.
+- **#5, fixed.** The changelog fragment is deleted.
+
+**New finding**
+
+1. **MEDIUM — `SessionNotOpenError` is not read as offline.** Its doc says
+   `refusalOf` reads it as "no answer from the daemon", so the item stays
+   `waiting` (`outbox-session.ts:24-26`). But `refusalOf`'s offline list
+   (`outbox.ts:301-307`) does not name it, so it falls through to
+   `decide/refused`. Repro (`.tentacle/tmp/mobile-compose-13b/review-r2-notopen.test.ts`):
+   the sheet's Send while the link is down gives `getSession` →
+   `unavailableSessionPort("link")` → `perform` → state `needs-decision`, why
+   `refused`. The plan (F1) says it should be `waiting`. Before this commit,
+   `getSession` returning `null` gave `waiting`. Nothing is duplicated or lost:
+   the item stays on disk. But a link drop is shown as a refusal. Fix: add
+   `"SessionNotOpenError"` to the offline names, plus a test.
+
+**Regressions checked with no finding:** `exclusive` runs inside the session's
+`serialise` chain and no act calls `serialise` again, so it cannot deadlock.
+`busy` is clear between serialised runs. The write queue recovers after a
+failed write (it has its own test). `discard` and `backToDraft` on an item that
+is already gone are no-ops.
