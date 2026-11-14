@@ -3020,3 +3020,45 @@ orchestrator's line, §10).
   unmeasured.
 - `App.tsx` is 3457 lines, not the plan's ≲800 target: that is the SUM of all
   slices (S7–S10 are still open), and this slice's own reduction is 273 lines.
+
+## Review
+
+### S5 review — REQUEST-CHANGES
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM, no HIGH).
+
+1. **MEDIUM — `changelog.d/app-decomp-5-dock.changed.md:1` must not exist.**
+   This doc's "Other hotspots" (l. 249: "slices add no CHANGELOG line (internal
+   refactor; one entry when the last slice merges)") and AGENTS §10
+   ("Internal/dev/test-only work adds no fragment") both forbid it, and S1 got
+   the same finding (Finding 2, l. 1074). *Failure scenario:* `bun run release`
+   assembles it into `CHANGELOG.md` under `### Changed` as a user-facing entry
+   for a change whose own text says "no user-visible behaviour changes".
+   Fix: delete the fragment (the S2 one on `main` is the same defect, out of scope here).
+
+**Gate (re-run here).** `bun test packages/tui/test/use-dock.test.tsx
+packages/tui/test/app.test.tsx` → 124 pass / 0 fail; `bun run typecheck` clean;
+`bun run lint` 1114 files, 0 errors/warnings. Full suite not re-run (scoped to touched files).
+
+**Mutation (independent of the executor's 14).** Removed
+`pushNoticeRef.current = pushNotice` (`App.tsx:1070`, the one NEW mechanism S5
+introduces): **KILLED** — 6 fails across `app.test.tsx` (ctrl+t, dock stop on
+child/job, `/agents`, F11 late refusal) and `use-dock.test.tsx` (late refusal).
+Reverted; `git status` clean.
+
+**Attacks tried.** (a) H1 effect order: 20 effects, dock's four unmoved — holds
+(the diff only appends ref names to deps). (b) Late binding of `pushNotice`: the
+ref is written in render right after `pushNotice` is created, before any
+callback can fire; the hook's wrapper reads `.current` at call time, so no stale
+sink — holds, and pinned (mutation above). (c) Identity: the four actions now
+depend on a stable wrapper instead of `pushNotice`, so they re-create LESS than
+before; the deps added to App's effects/callbacks are `useRef` objects (never
+re-run) — holds. (d) TDZ/ordering of `sessionRef`/`field`/`fieldValueRef`/
+`jobRefreshMs` before the `useDock` call — `tsc` clean, holds. (e) §7 invariants
+(single broker, raw-terminal writes, RPC peer): untouched by the diff.
+
+**Executor behaviour.** Thorough and honest: drift recorded, mutation harness
+with sha restore, survivors closed with real tests. One slip: repeated a
+process defect an earlier slice was already corrected for.
+
+*— claude-opus-5-5, 2026-11-14* (different model family from the executor, DeepSeek.)
