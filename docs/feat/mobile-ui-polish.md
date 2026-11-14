@@ -929,6 +929,31 @@ iOS 26.5). The e2e runner was still refused.
 **Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean · `bun run lint` 1394 files,
 0 issues · `bun test` 10027 pass, 4 skip (opt-in), 0 fail.
 
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-15*
+
+Scope: the latest Review ("Round 2", after review round 3). Finding 1 was FIXED
+there. Its only open item is MEDIUM finding 2. **No code was changed.**
+
+- **Finding 2 (no simulator evidence) — BLOCKED, not fixed.** A simulator is
+  booted (`xcrun simctl list devices booted` → iPhone 17 Pro, iOS 26.5).
+  `E2E_ONLY_FLOWS=15-revoked,16-remove-computer,12-pair-declined,13-pair-expired,20-camera-close bun run e2e:mobile --ios 26`
+  → "This command requires approval" (refused). The command was not retried in
+  another form (§0). No screenshots were taken. The installed build predates
+  `expo-symbols`/`expo-blur`, and only the runner rebuilds it, so screenshots
+  now would show the old app and prove nothing. `.tentacle/tmp/mobile-ui/slice-2/`
+  is still empty, and `slice-1/` does not exist.
+  - Still needed (owner/orchestrator): approve that command, plus `--ios 18`.
+    Then take light/dark screenshots into `.tentacle/tmp/mobile-ui/slice-1|slice-2/`
+    and run the Fable visual review.
+
+**Red/green, mutations:** none. No fix was made, so there was nothing to turn
+red, then green, or to mutate.
+
+**Gate (unchanged tree):** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean ·
+`bun run lint` 1394 files, 0 issues · `bun test` 10027 pass, 4 skip (opt-in), 0 fail.
+
 ## Review
 
 ### Slice 0 — adversarial review (fresh context)
