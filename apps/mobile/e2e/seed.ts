@@ -12,6 +12,7 @@ import { join } from "node:path";
  */
 import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
 import { PermissionBroker, type PermissionResponse } from "@tentacle/core";
+import type { HistoryMessage } from "./hooks.ts";
 
 export interface SeedDeps {
   /** `serve`'s `ws:` URL (main thread, direct: the harness runs on Bun). */
@@ -128,8 +129,28 @@ export async function seedSessions(deps: SeedDeps): Promise<Seeded> {
   };
 }
 
-/** Flow 03's hook: create one more session with a finished turn; return its id. */
-export async function addDelta(deps: {
+/**
+ * One session for one 13d compose flow, created JUST BEFORE that flow runs (its own
+ * finished turn, nothing pending). It is created lazily so the seeded list the earlier
+ * flows assert on keeps its own three rows: eight more sessions pushed them off the
+ * visible list and broke flows 02/05/06/07/08 (the first iOS 26 run's failure).
+ */
+export async function composeSessionOf(deps: {
+  readonly url: string;
+  readonly token: string;
+}): Promise<string> {
+  const live = await attach(deps);
+  const id = crypto.randomUUID();
+  try {
+    await finishTurn(live.newSession(undefined, id), "compose");
+  } finally {
+    await live.drain().catch(() => {});
+    live.close();
+  }
+  return id;
+}
+
+/** Flow 03's hook: create one more session with a finished turn; return its id. */ export async function addDelta(deps: {
   readonly url: string;
   readonly token: string;
 }): Promise<string> {
@@ -164,6 +185,12 @@ export interface LaptopLink {
   ): Promise<{ turnId: string }>;
   /** Answer the pending ask if this peer was offered one (the first answer wins). */
   answer(sessionId: string, answer: LaptopAnswer): Promise<void>;
+  /** Steer the RUNNING turn of `sessionId` (13d's flow 15: another device's row). */
+  enqueue(sessionId: string, text: string): Promise<{ id: string }>;
+  /** Stop the running turn (`session/cancel{turnId}`): 13d's flow 14. */
+  cancel(sessionId: string): Promise<void>;
+  /** Attach a session and leave it again: 13d's flow 15 needs the writer GONE. */
+  detach(sessionId: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -188,6 +215,12 @@ export async function laptopLink(deps: {
       }),
   );
   const sessions = new Map<string, ReturnType<RemoteClient["newSession"]>>();
+  /**
+   * The turn running on each session, as this peer SEES it (its own `turn`
+   * activity): an enqueue must name the turn it binds to, and a cancel the turn it
+   * stops — a guess would steer the next turn or cancel nothing.
+   */
+  const runningTurnOf = new Map<string, string>();
 
   /** This peer's handle for `sessionId`: attached once, reused afterwards. */
   async function handle(sessionId: string): Promise<ReturnType<RemoteClient["newSession"]>> {
@@ -197,6 +230,21 @@ export async function laptopLink(deps: {
     }
     const created = client.newSession(undefined, sessionId, undefined, { attach: {} });
     await created.open();
+    // Every turn this peer is shown, foreign or its own, is recorded as running
+    // until its end (`13d`: the hooks act on the turn that runs NOW).
+    created.watch((activity) => {
+      if (activity.kind === "turn") {
+        runningTurnOf.set(sessionId, activity.turnId);
+        void (async () => {
+          for await (const _event of activity.events) {
+            // drain: the end of the stream is the turn's end
+          }
+          if (runningTurnOf.get(sessionId) === activity.turnId) {
+            runningTurnOf.delete(sessionId);
+          }
+        })();
+      }
+    });
     sessions.set(sessionId, created);
     return created;
   }
@@ -206,6 +254,10 @@ export async function laptopLink(deps: {
     async prompt(sessionId, prompt, answer) {
       const session = await handle(sessionId);
       const turnId = crypto.randomUUID();
+      // This peer's OWN turn: `watch` reports FOREIGN ones, so the id is recorded
+      // here — otherwise a later `laptop-enqueue`/`laptop-cancel` on this session
+      // would answer "no turn is running" (the first flow-15 run's failure).
+      runningTurnOf.set(sessionId, turnId);
       // Started, NOT awaited: the turn must still be running when a flow asserts.
       void (async () => {
         try {
@@ -214,6 +266,10 @@ export async function laptopLink(deps: {
           }
         } catch {
           // the flow's own stop: nothing to report
+        } finally {
+          if (runningTurnOf.get(sessionId) === turnId) {
+            runningTurnOf.delete(sessionId);
+          }
         }
       })();
       if (answer !== null) {
@@ -231,6 +287,40 @@ export async function laptopLink(deps: {
     },
     async answer(_sessionId, answer) {
       await answerAll(answer);
+    },
+    async enqueue(sessionId, text) {
+      // A steer must name the TURN it binds to (`hosted-session.ts`'s check):
+      // this peer sees the running turn through its own session's activity, so the
+      // id is read from the session's own state rather than guessed.
+      const session = await handle(sessionId);
+      const turnId = runningTurnOf.get(sessionId);
+      if (turnId === undefined) {
+        throw new Error("no turn is running on that session");
+      }
+      const id = crypto.randomUUID();
+      await client.enqueue(sessionId, id, turnId, text);
+      void session;
+      return { id };
+    },
+    async cancel(sessionId) {
+      const turnId = runningTurnOf.get(sessionId);
+      if (turnId === undefined) {
+        throw new Error("no turn is running on that session");
+      }
+      client.cancel(sessionId, turnId);
+    },
+    async detach(sessionId) {
+      // The WRITER goes away (13d's flow 15): its row stays `returned` and only an
+      // explicit Take on the phone may claim it. A detach keeps the session — and
+      // `runningTurnOf` keeps what the DAEMON says runs, so a later hook still names
+      // the turn correctly (the first flow-15 run lost it here and its enqueue
+      // answered "no turn is running").
+      const known = sessions.get(sessionId);
+      if (known === undefined) {
+        return;
+      }
+      sessions.delete(sessionId);
+      await known.detach().catch(() => {});
     },
     async close() {
       // A detach (the socket's close), never `closeSessions`: the flows' sessions
@@ -268,15 +358,20 @@ export async function sessionStateOf(
 }
 
 /**
- * The daemon's last user and assistant text of a session, by `snapshot`. Read
- * through a client that ATTACHES (a snapshot needs an open session) and then
- * detaches: the phone's own attachment is never disturbed, and the flow's
- * assertion is the daemon's history, not the screen.
+ * The daemon's messages of a session, oldest first — with the image refs each one
+ * names (13d's flow 18: two photos, `image/png` + `image/jpeg`). Read through a
+ * client that ATTACHES (a snapshot needs an open session) and then detaches: the
+ * phone's own attachment is never disturbed, and the flow's assertion is the
+ * daemon's history, not the screen.
  */
 export async function historyOf(
   deps: { readonly url: string; readonly token: string },
   sessionId: string,
-): Promise<{ user: string | null; assistant: string | null }> {
+): Promise<{
+  messages: readonly HistoryMessage[];
+  user: string | null;
+  assistant: string | null;
+}> {
   const live = await attach(deps);
   const session = live.newSession(undefined, sessionId, undefined, { attach: {} });
   try {
@@ -286,20 +381,67 @@ export async function historyOf(
       // Archived or unreadable: the snapshot below answers what it can.
     }
     const messages = (await session.snapshot()) ?? [];
+    const all: HistoryMessage[] = [];
     let user: string | null = null;
     let assistant: string | null = null;
     for (const message of messages) {
-      if (message.role === "user" && !message.content.startsWith("[context")) {
-        user = message.content;
+      const images = (message.attachments ?? []).map((ref) => ({
+        mimeType: ref.mimeType,
+        ...(ref.name === undefined ? {} : { name: ref.name }),
+      }));
+      if (message.role === "user") {
+        all.push({ role: "user", text: message.content, images });
+        if (!message.content.startsWith("[context")) {
+          user = message.content;
+        }
       }
-      if (message.role === "assistant" && message.content.trim() !== "") {
-        assistant = message.content;
+      if (message.role === "assistant") {
+        all.push({ role: "assistant", text: message.content, images: [] });
+        if (message.content.trim() !== "") {
+          assistant = message.content;
+        }
       }
     }
-    return { user, assistant };
+    return { messages: all, user, assistant };
   } finally {
     // Detach THIS harness attachment: an attached harness client would be
     // re-offered a pending ask, and a session must never be closed by reading it.
+    await session.detach().catch(() => {});
+    await live.drain().catch(() => {});
+    live.close();
+  }
+}
+
+/**
+ * The daemon's queue for a session (13d's flows 12/14/15): every writer's waiting
+ * rows and the rows returned to their writers, read through a client that attaches
+ * and detaches (a resync answers the queue; an attached harness would count).
+ */
+export async function queueStateOf(
+  deps: { readonly url: string; readonly token: string },
+  sessionId: string,
+): Promise<{
+  entries: readonly { readonly id: string; readonly text: string }[];
+  returned: readonly { readonly id: string; readonly text: string; readonly cause: string }[];
+}> {
+  const live = await attach(deps);
+  const session = live.newSession(undefined, sessionId, undefined, { attach: {} });
+  try {
+    try {
+      await session.open();
+    } catch {
+      // A session that cannot be opened has no queue this harness can see.
+    }
+    const state = session.queued;
+    return {
+      entries: (state?.entries ?? []).map((row) => ({ id: row.id, text: row.text })),
+      returned: (state?.returned ?? []).map((row) => ({
+        id: row.id,
+        text: row.text,
+        cause: row.cause,
+      })),
+    };
+  } finally {
     await session.detach().catch(() => {});
     await live.drain().catch(() => {});
     live.close();

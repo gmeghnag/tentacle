@@ -456,14 +456,15 @@ describe("sending and stopping (decision 15, F12, F13)", () => {
     expect(screen.state().notice).toBe(FAILED_NOTICE);
   });
 
-  test("a link down keeps the draft and disables Send (F12)", async () => {
+  test("a link down keeps the draft and offers Send later instead (F12, 13d D1)", async () => {
     const h = harness();
     const { screen } = h.make();
     await screen.open();
     screen.setDraft("kept");
     screen.link(false);
     expect(screen.state().view.banner?.kind).toBe("reconnecting");
-    expect(screen.state().view.composer.button).toBe("disabled");
+    // 13d (D1): offline text is a Send later tap — 12c's dead button.
+    expect(screen.state().view.composer.button).toBe("send-later");
     expect(screen.state().draft).toBe("kept");
     screen.link(true);
     expect(screen.state().view.banner).toBeNull();

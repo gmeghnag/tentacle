@@ -156,6 +156,21 @@ describe("createSessionFeed", () => {
     expect(h.foreign()).toBeNull();
   });
 
+  test("an OWN stream that throws folds LOST and REJECTS with its error", async () => {
+    // The caller owns this turn: a refusal before the ack (`TurnInProgress`) must
+    // reach it, so the person's text can come back (12c F13 / 13d F7). Swallowing
+    // it here is what made a refused send vanish (review round 1, finding 1).
+    // Mutation: `return` instead of `throw` in `foldStream`'s catch → red.
+    const h = harness();
+    const refusal = new Error("turn in progress");
+    const broken: AsyncIterable<SessionEvent> = {
+      [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(refusal) }),
+    };
+    await expect(h.feed.ownTurn("t1", broken)).rejects.toBe(refusal);
+    // The transcript still says LOST (the fold happened before the rejection).
+    expect(h.states().rows.some((r) => r.kind === "notice")).toBe(true);
+  });
+
   test("closed folds the end and clears the stoppable turn (F14)", async () => {
     const h = harness();
     h.feed.activity(turnActivity("t1", [{ type: "text", delta: "x" }]));

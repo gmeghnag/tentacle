@@ -72,13 +72,22 @@ export interface SessionFeedDeps {
 export interface SessionFeed {
   /** Fold one session-level activity (`history`, `turn`, `closed`). */
   activity(activity: SessionActivity): void;
-  /** Open an OWN bracket, feed `events`, and close the bracket with its outcome. */
+  /** Open an OWN bracket, feed `events`, and close the bracket with its outcome.
+   * Rejects with the stream's error once its LOST outcome is folded: a caller
+   * that owns the turn must see a refusal (12c F13 / 13d F7). */
   ownTurn(turnId: string, events: AsyncIterable<SessionEvent>): Promise<void>;
   /** A stream this feed already folded ended (`link` drops flush nothing: events are immediate). */
   link(up: boolean): void;
 }
 
-/** One delta of a stream, folded in arrival order. */
+/**
+ * One delta of a stream, folded in arrival order. The returned promise REJECTS
+ * with the stream's own error (after the outcome is folded): a caller that owns
+ * the turn has to see a refusal (`TurnInProgress` before the ack) to give the
+ * person's text back (12c F13 / 13d F7), and swallowing it here is what made a
+ * refused send vanish. A foreign turn's caller ignores it (`activity`): nothing
+ * of ours is at stake there.
+ */
 function foldStream(
   deps: SessionFeedDeps,
   turnId: string,
@@ -103,11 +112,13 @@ function foldStream(
         }
         deps.put(apply(deps.state(), event as TranscriptInput));
       }
-    } catch {
+    } catch (error) {
       // The stream threw: its outcome can never arrive (`remote-session.ts`
-      // `fail`). Said as LOST, never as a silent stop (F8/F19).
+      // `fail`). Said as LOST, never as a silent stop (F8/F19) — and the error
+      // still reaches whoever awaited this, which is how a refusal gets its
+      // text back.
       finish({ ended: false, threw: true });
-      return;
+      throw error;
     }
     finish(ended ? { ended, ...(reason === undefined ? {} : { reason }) } : { ended: false });
   })();
@@ -134,7 +145,9 @@ export function createSessionFeed(deps: SessionFeedDeps): SessionFeed {
         case "turn": {
           const turn: ForeignTurn = { turnId: activity.turnId, cancel: activity.cancel };
           deps.setForeign(turn);
-          void foldStream(deps, activity.turnId, false, activity.events);
+          // Its failure is folded as LOST inside `foldStream`; nothing of OURS
+          // comes back to the field, so the rejection is not for a caller here.
+          void foldStream(deps, activity.turnId, false, activity.events).catch(() => {});
           return;
         }
       }
