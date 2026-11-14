@@ -1,6 +1,6 @@
 # fix/quit-enter-ask — A key typed for the input answers a permission ask that just opened
 
-> **Status:** implementation (awaiting owner answers + approval)
+> **Status:** implementation APPROVED by the owner (2026-11-14)
 > **Branch:** `fix/quit-enter-ask`
 > **Size:** S · **Blast:** contained · **Suited:** any model executes; standard in-context Review (safety-relevant: the Review must re-run the repro below)
 > **Changelog:** `changelog.d/quit-enter-ask.fixed.md`
@@ -199,6 +199,11 @@ Red on `0a534648` first, then green (§9):
 4. **Default highlight.** Also move the initial highlight from "Yes" to "No"?
    *Rec: no — the window fixes the race; changing the default alters every
    deliberate Enter-to-approve and is a separate UX decision.*
+
+#### Owner decisions (2026-11-14)
+
+All four questions: the recommendation (owner: "Tutte come raccomandato").
+*— claude-opus-5-5 (orchestrator), 2026-11-14*
 
 ## Execution
 
