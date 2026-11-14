@@ -706,3 +706,19 @@ verify: 13d's `session-view.test.ts` + Maestro `12-steer` / `14-returned-mine`
 #### Orchestrator decisions (owner night delegation 2026-11-14)
 
 Owner asleep, delegated: every Owner question above is decided with its RECOMMENDED option. Implementation APPROVED.
+
+### 13a `mobile-compose-queue` — Review
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH/MEDIUM finding against 13a's own scope).
+
+- **Gate (scope = `git diff main...HEAD`):** `compose-queue.test.ts` + `compose-queue-parity.test.ts` 55 pass / 0 fail; `bun run lint` clean (1067 files); `bun run typecheck` clean. The full `bun test` was not re-run (the diff adds only app-local files and tests).
+- **Mutations (9, each reverted, tree byte-clean per `git status`):** drop `handedBack` 2 fail; auto-reclaim others' rows 3 fail; `settleOwn` ignores `keep` 1 fail; `settleOwn` drops returned 1 fail; no `reclaiming` filter 1 fail; Take allowed on a row of mine 1 fail; `carried` ignored 2 fail; daemon text shown for a row of mine 1 fail; text given back from the daemon instead of `own` 5 fail. Every one goes red.
+- **Parity:** `shownRows`, `takeForSendNow`, `handOff`, `afterRefusal`, `onReject`, `returnedNotice`, `restoredByRefusal`, `planHandBack` are line-for-line the TUI's `queued.ts` / the client's `hand-back.ts`. The parity file imports them for real (test-only relative imports), and it fails under M1, M2 and M9 too.
+- **§7 checks:** pure, with no React and no I/O. The text given back always comes from `own`, never from the daemon (the untrusted-pod rule; pinned by M9). Another writer's text reaches the field only through `takeReturned`, which is an explicit act. No protocol change, and no `packages/*` edits.
+- **Attacks that found nothing:** a duplicate id in `returned` is given back only once (`seen`). A reclaim that fails is retried without a second hand-back (`settleReclaim` + `handedBack`). Take on a row of mine, or on an unknown id, is a no-op. An empty `held` or a malformed one restores everything, which matches the client.
+- **Carry-forward (13b/13d, not 13a):** the store D4 plans (`{items, drafts, ownIds}`) does not persist `handedBack`. Failure case: a row is given back into the field, the draft is saved, and the app is killed before the reclaim lands. On relaunch, `own` still has the id and `handedBack` is empty, so `handBackStep` gives the row back a second time. 13b/13d must persist `handedBack` (or drop the id from the given set) to keep F10's "once" across a kill.
+- **Nits:** `shownRows` marks `mine` only from `own`. A local row whose id 13d forgot to add to `own` would show as "from another device", so 13d must add the id to `own` before calling `addRow` (D4 already says this). The `changelog.d/mobile-compose-13a.added.md` fragment goes against the plan header ("13a: none") and duplicates 13d's planned fragment. The 12b precedent exists, so this is the orchestrator's call; the executor flagged it openly (Drift 2).
+- **Executor behaviour:** stayed in scope, gave an honest drift list, and ran the named mutations red. Execution's claims held up when checked.
+- **Same-family note:** the reviewer (Opus) is a different model family from the executor (DeepSeek).
+
+*— claude-opus-5-5, 2026-11-14*
