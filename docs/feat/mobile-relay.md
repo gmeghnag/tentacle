@@ -3074,3 +3074,66 @@ against memory, and two of the three were wrong:
 
 These are prose, so no test can hold them (Markdown is not linted, §6); the check
 was a one-off script, and it is recorded here rather than pretended to be a guard.
+
+## Review
+
+### R7 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (2 MEDIUM, no HIGH). Scope: R7 only (`git diff main...HEAD`).
+
+**Gate:** `bun test apps/relay` 74 pass / 0 fail (4 files); `bun run lint` clean
+(1363 files); `bun run typecheck` clean (root + mobile + relay). Full `bun test` not
+re-run (scope: touched files). `buildRelayBinary` really compiles `main.ts` (built a
+`bun-darwin-arm64` binary into `.tentacle/tmp/mobile-relay/r7/`: `build true`); running
+the binary was not permitted in this session, so `/healthz` on the compiled artefact is
+unverified (runbook §3 covers it on the host).
+
+**Mutation (§9):** `relay.service` ExecStart `--port 4100→4101` ⇒ 2 tests red;
+`Caddyfile.relay` `stream_close_delay 5m→1s` ⇒ red. Reverted; `git diff` empty.
+
+**Findings**
+1. **MEDIUM — the shipped unit is a known-broken production config, and the Caddyfile
+   says otherwise.** `apps/relay/deploy/relay.service:39` runs the default limits;
+   behind Caddy every peer is `127.0.0.1`, so `relay-core.ts:44,46,52` become ONE
+   global bucket: 30 phone dials/min, 16 concurrent phone sockets and **10 daemon
+   `hello`s/min for the whole world**. Scenario: relay restart (F3) with 200
+   registered daemons → 10 re-register per minute, the rest are refused and back off
+   (up to 60 s), a ~20 min outage — the "no thundering herd" convergence F3 promises
+   does not hold. Worse, any one client sending 30 dials/min (or holding 16 sockets)
+   locks out every phone on the relay — a single-host DoS of the service. The runbook
+   (§9) defers this to the owner, but `Caddyfile.relay:31-32` asserts "`relay.service`
+   sets the limits to their one-shared-key values instead" — false, they are a comment
+   (`relay.service:36-38`). Fix in R7's scope: either ship the fleet-sized ExecStart
+   live (and pin it in `deploy.test.ts`), or make the unit refuse to be the default
+   (and correct the Caddyfile comment); the real fix (XFF behind a trusted-local flag)
+   is R2 code.
+2. **MEDIUM — `stream_close_delay` is documented as making reloads safe; it only
+   delays the cut by 5 min.** `Caddyfile.relay:19-22` claims "5m > the relay's 60 s
+   idle timeout, so a stream ends on its own before the delay can ever fire". False:
+   the relay sends pings (`server.ts:121-124`, `sendPings: true`), so a live phone
+   session and every daemon control socket never idle out; Caddy force-closes them
+   5 min after a reload. Scenario: owner runs `systemctl reload caddy` (runbook §4)
+   during a long turn → every relayed session drops at +5 min and every daemon
+   re-registers at once (which, with finding 1, hits the 10-hello/min bucket). The
+   runbook repeats the expectation (`docs/ops/relay-deploy.md:173-175`, `:284`,
+   `:305` "a Caddy reload not cutting live streams") and the test name
+   `deploy.test.ts:175` "a stream outlives a Caddy reload" pins the wrong claim. Fix:
+   state the real behaviour (a reload = staggered drop within 5 min; F1/F2 resync
+   handle it) and drop the "can never fire" reasoning.
+
+**Attacks tried (no finding):** ExecStart flags vs `parseRelayArgs` (pinned, mutation
+red); `StartLimit*` in `[Unit]` (correct, systemd ignores it in `[Service]`); JIT-hostile
+hardening absent (`MemoryDenyWriteExecute`, `@system-service`); secrets in argv (none);
+`TARGET=linux-x64` silent host build (refused by the regex); `tsconfig` include widened
+to `deploy/` so `build.ts` is typechecked (yes); changelog slug distinct from R5a's (yes);
+§7 "a pod is not trusted"/"model stays on laptop": R7 adds no secret, no wire change.
+Unverified (owner, slice D): `RestrictAddressFamilies=AF_INET AF_INET6` without `AF_UNIX`
+/`AF_NETLINK` under Bun on Linux — run `systemd-analyze verify` + a start on the host.
+
+**Executor behaviour:** careful and honest — the per-IP problem was found and written
+down, the test's own parser was guarded against a false red, and the limits of the guard
+are stated. The miss is shipping the unsafe default while another artefact claims the
+safe one is in place.
+
+*— claude-opus-5-5, 2026-11-14* (reviewer is the same model family as R7's executor,
+claude-opus-5-5; only the context is fresh — shared blind spots may survive.)
