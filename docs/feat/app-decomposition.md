@@ -6012,6 +6012,14 @@ the fragment.
 
 *— claude-opus-5-5, 2026-11-14 (fix-round executor, `feat/app-decomp-12-line-keys` @ `6da26be8`)*
 
+> **Attribution disputed (Fix round 2, Review round 2 finding 3):** the commit
+> that landed this section, `e7735871`, is titled
+> `fix(app-decomp-12-line-keys): review round 1 (deepseek)`, which contradicts
+> the `claude-opus-5-5` signature above. Nothing in the tree settles which model
+> wrote it. **Orchestrator: confirm the model and correct this signature together
+> with the S12 Execution's.** Until then, treat this round as a weak-model run
+> on a load-bearing slice (AGENTS §10).
+
 Review round 1 had two MEDIUMs and no HIGH. No code changed in this round.
 
 1. **MEDIUM 1 (changelog fragment for internal work): FIXED.** Deleted
@@ -6043,6 +6051,35 @@ unit pin `paletteStep > an empty list never yields NaN` failed, and no App
 behaviour test noticed. That fits the branch being unreachable from the TUI.
 Reverted with the inverse `sed`; `git status` showed only the two intended
 changes.
+
+**Gate (final tree):** `bunx tsc --noEmit` → OK · `bun run lint` → Checked 1362
+files, no fixes · `bun test` → 9843 pass / 4 skip (opt-in) / 0 fail, 9847
+tests across 714 files.
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-14 (fix-round executor, `feat/app-decomp-12-line-keys` @ `57d7341a`)*
+
+Review round 2 found no HIGH and one new MEDIUM. Findings 1–2 were already
+closed or escalated. No code changed in this round.
+
+1. **MEDIUM 3 (Fix round 1 signature unverified): PARTIAL (escalated).** I
+   added an "Attribution disputed" note under the `### Fix round 1` signature.
+   It names commit `e7735871` (`… review round 1 (deepseek)`) and asks the
+   orchestrator to correct this signature together with the S12 Execution's.
+   I did not rewrite the signature: I did not write that round, and its author
+   cannot be verified from the tree. This round's own signature is accurate:
+   the model running it is `claude-opus-5-5`. Only the orchestrator can close
+   the finding.
+
+**Red/green:** does not apply. The change is prose and adds no code property.
+The document-level check is that the count of `^> **Attribution disputed`
+notes goes from 1 at `HEAD` (`git show HEAD:…`) to 2 in the tree, one for each
+signature whose commit says `deepseek`.
+
+**Mutation:** none is meaningful, because no code was touched. The
+`palette-step` NaN mutation FM1 from Fix round 1 still stands. Review round 2
+reproduced it, so I did not run it again.
 
 **Gate (final tree):** `bunx tsc --noEmit` → OK · `bun run lint` → Checked 1362
 files, no fixes · `bun test` → 9843 pass / 4 skip (opt-in) / 0 fail, 9847
