@@ -722,3 +722,26 @@ mutation (the same shutdown of the new dispatch).
 **Gate line.** `bunx tsc --noEmit` OK · `bun run lint` OK (1078 files, 0
 errors/0 warnings — the §6 baseline) · `bun test` 8371 pass / 3 opt-in skips /
 0 fail (8358 + the 13 new tests of this sub-task).
+
+## Review
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; same model family as the logs-tail executor — shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES**
+
+**Findings (HIGH/MEDIUM only).**
+
+1. **MEDIUM — `packages/daemon/src/connection.ts:655-662` `dropStaleWatches` compares a watchId as a sessionId.** `this.watches` is keyed by `watchId`, but the loop calls `this.host.get(id)` with that key: always `undefined`, so EVERY watch already held by the connection is unwatched. It runs on every `session/watch` (`:626`) and on every refused `session/log` (`:686`). Repro (`.tentacle/tmp/logs-cmd/two-watches.test.ts`, real `Connection`+`SessionHost`): watch A, then watch B on the same connection → `watch_next(A)` = `unknown watch … (not on this connection)`; watch A again, then `session/log{sessionId:"nope"}` → `watch_next(A)` = `UnknownWatch`. A protocol client following two sessions over one connection (an orchestrator, a future TUI pane) silently loses the first follow; the close-and-recreate identity check the method exists for only "works" because it drops everything. Fix: compare `this.host.get(watch.hosted.id) !== watch.hosted`.
+2. **MEDIUM (test non-vacuity, §9) — `dropStaleWatches` is untested.** Mutation `dropStaleWatches(){ return; }` → `watch-connection`, `watch-hosted`, `logs-watch`, `logs-follow-detached`: 47 pass / 0 fail. Neither the close-then-recreate case (the doc's failure-mode row "Session id recreated after a close") at the connection layer nor two watches on one connection is pinned. Needs a red-first test for both.
+
+**Gate.** `bun run typecheck` clean · `bun run lint` 1078 files, 0/0 · touched test files (10, incl. protocol `json-schema`/`version`): 128 pass / 0 fail. Full `bun test` not re-run by this review (scope: touched files, per the reviewer's instructions).
+
+**Attacks tried.**
+- §7 "don't serialize the peer": `watch_next` returns the hold's promise, no lock/await chain in `Connection`; `watch`/`unwatch` synchronous — holds.
+- Watcher counted as attached: separate `SessionWatchers` set, `emit` offers after the attachment loop in per-watcher try/catch; relay's in-use read (`relay-state.ts:290`) uses `session/list.attached` — holds. Note (below MEDIUM): the pod resident's own idle exit counts open sockets (`pod-resident.ts:349`), so a running `logs -f <run>` keeps the resident alive; benign (it only lasts while the user follows), but the doc's "invisible to in-use" is true for the relay, not the resident.
+- Pod trust boundary (sub-task 3): WHERE from the kept index, container from `host.defaultContainer`, a daemon→follower request is refused (`onRequest` throws), no `open`/broker/save/exit net, all pod strings through `untrustedText`/C1-escaped JSON — holds.
+- Archived/unknown session on `session/watch` → `UnknownSession` via `host.get`, never `open` — holds.
+- `session/log` via a watch: identity-checked like `lookup` — holds (apart from finding 1's side effect on the failure path).
+- Mutation of `dropStaleWatches` → survived (finding 2).
+
+**Executor behaviour.** The three Execution sections are honest and specific, with run mutation tables and drift named; the one gap is a helper whose stated purpose was never exercised by a test, which hid a key-confusion bug.
