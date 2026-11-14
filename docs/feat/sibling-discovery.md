@@ -649,3 +649,30 @@ All questions answered as recommended. Implementation APPROVED.
 **Nit:** `session-host.ts:447` has a doubled `/**`.
 
 **Executor:** Execution is signed `claude-opus-5-5`, but commit `4864cdc` says "exec (deepseek)". One of the two is wrong, and AGENTS §10 requires an honest signature. If the executor was really Opus, this review comes from the same model family (a fresh context only).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; the same model family as the round-1 reviewer, while the executor is DeepSeek per the commit trailers)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM).
+
+Scope: `git diff HEAD~1` (`59f89b3`). `bun run typecheck` and `bun run lint` are clean. 116 touched tests pass, 0 fail (cli discovery and serve-discovery, client discovery, pair*, daemon-discover). Re-running round 1's repros: A now announces the LAN and tailnet IPs, B has no phantom, and C delivers rev 2 after the reconnect.
+
+**Round-1 findings: each one is fixed, and each has a test that fails under mutation (all reverted, `git status` clean):**
+
+| # | Fix | Mutation → result |
+|---|---|---|
+| 1 | `interfaces` defaults to `machineInterfaces` (moved to `pair-addresses.ts`, shared with `pair`) | default `[]` → 2 fail (driver and the `0.0.0.0` serve e2e) |
+| 2 | `resubscribeDiscovery` delivers the snapshot when `changed` | delivery removed → 1 fail ("change made WHILE THE LINK WAS DOWN") |
+| 3 | `lastPollAt` is reset when the poller arms; the heartbeat detects a sleep (`slept`) | no reset → 1 fail; `slept` never set → 1 fail (F3 with no subscriber) |
+| 4 | a per-address `addressSeenAt` | per-project clock → 1 fail (expiry while the project stays LIVE) |
+| nit | the doubled `/**` is gone | n/a |
+
+**New finding:**
+
+5. **MEDIUM: `slept` never expires** (`cli/src/discovery.ts:247,277,333`). One late beat sets it, and only a poll clears it. With no subscriber, nothing polls, so the flag stays set. Repro D (`.tentacle/tmp/sibling-discovery/r2.test.ts`) is the normal laptop case: the lid is closed overnight with no client, the laptop is then awake for an hour with on-time beats, and only then does a phone subscribe. The first snapshot is `["/p/a","/p/phantom"]`, so the round-1 #3 / Repro-3 phantom comes back. The skip only has to cover the window before the siblings' next beat. Fix: record when the late beat happened, and treat `slept` as expired once `now - sleptAt > staleAfterMs`. Add Repro D as the regression test.
+
+**What holds:**
+- Moving `machineInterfaces` is a pure move: `pair` behaves the same, and typecheck is clean.
+- `addressSeenAt` is optional on `KnownProject`; a store written before it falls back to `lastSeenAt`.
+- A resync that changed nothing stays silent (`changed`).
