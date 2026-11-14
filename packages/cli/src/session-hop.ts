@@ -18,6 +18,7 @@
 import type { LoadResult, SessionRecord } from "@tentacle/agent";
 import type { HopSpec } from "@tentacle/tui";
 import { type HopPlace, ownUidVerdict, placeText } from "./hop-plan.ts";
+import type { HopFolderFate } from "./hop-turn.ts";
 import type { LocalRuntime, PersistingController } from "./local-runtime.ts";
 
 /** How long the commit lets the old runtime close before it gives up (D1 step 5). */
@@ -33,6 +34,14 @@ export interface HopBuilt {
   readonly runtime: LocalRuntime;
   /** The badge's facts after the hop (`local` has no badge: D3). */
   readonly place: HopPlace;
+  /**
+   * Whether the laptop's folder is visible in the new place (docs/feat/session-hop-ux
+   * OD6): `shared` (a container built WITH the mount), `not shared` (a pod, or an
+   * existing workload nobody mounted for), `local` (it IS the laptop's). The one
+   * fact the wake-up message could not otherwise state, since it comes from the
+   * container build's plan (`plan.kind === "mount"`), which is not on `HopPlace`.
+   */
+  readonly folder: HopFolderFate;
   /** The daemon runs in a pod: spilled output is "saved in the pod". */
   readonly daemonInPod: boolean;
   /**

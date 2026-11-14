@@ -29,6 +29,40 @@ const show = (actions: readonly RouterAction[]): string[] =>
       : `${a.kind} ${a.sessionId}/${a.requestId}`,
   );
 
+// docs/feat/session-hop-ux: the load-bearing wire property. `kind` and `hopAuto`
+// are LAPTOP-INTERNAL — a daemon cannot forge either, and `auto` never travels
+// back — which is what lets auto-accept answer a move from facts only the laptop
+// holds (AGENTS §7, single broker + "a pod is not trusted").
+describe("the hop's laptop-internal fields never cross the wire", () => {
+  test("toPermissionRequest yields no `kind` and no `hopAuto`, whatever the update says", () => {
+    const r = new PermissionRouter();
+    // A hostile update that TRIES to carry them (an unknown field is stripped).
+    const [action] = r.request(
+      "S",
+      req("r1", { kind: "session_hop", hopAuto: true } as Partial<PermissionRequestUpdate>),
+    );
+    const request = action?.kind === "prompt" ? action.request : undefined;
+    expect(request).toBeDefined();
+    expect(request?.kind).toBeUndefined();
+    expect(request?.hopAuto).toBeUndefined();
+  });
+
+  test("an answer's `send` carries only optionId and message — `auto` never leaves", () => {
+    const r = new PermissionRouter();
+    r.request("S", req("r1"));
+    const sent = r
+      .answered("S", "r1", { allowed: true, scope: "once", auto: true })
+      .filter((a) => a.kind === "send");
+    expect(sent).toHaveLength(1);
+    const action = sent[0];
+    if (action?.kind !== "send") {
+      throw new Error("expected a send");
+    }
+    // The WHOLE shape: a new field here would be a wire (and protocol) change.
+    expect(Object.keys(action).sort()).toEqual(["kind", "optionId", "requestId", "sessionId"]);
+  });
+});
+
 describe("a background child's ask names its spawning turn (T34)", () => {
   test("the update's turnId wins over the stream's; the agent id rides through", () => {
     const r = new PermissionRouter();

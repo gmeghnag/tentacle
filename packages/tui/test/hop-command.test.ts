@@ -6,8 +6,10 @@ import {
   HOP_WORKLOAD_PART_MAX,
   type HopParse,
   type HopSpec,
+  type HopWorkload,
   hopWorkload,
   parseHopCommand,
+  workloadText,
 } from "../src/hop-command.ts";
 
 // docs/feat/session-hop.md slice H1: the `/move` grammar, pure.
@@ -55,7 +57,25 @@ describe("parseHopCommand: targets", () => {
     });
     expect(spec("/move attach kubernetes:web-0/guard")).toEqual({
       target: "attach",
-      workload: { engine: "kubernetes", name: "web-0", container: "guard" },
+      workload: { engine: "kubernetes", namespace: "web-0", name: "guard" },
+      keep: true,
+    });
+    // OD1's 1/2/3 rule: one segment = the pod (namespace from the OD2 rule), two =
+    // `<ns>/<pod>`, three = `<ns>/<pod>/<container>`. The old `pod/container`
+    // reading is GONE on purpose (pre-public, owner's decision).
+    expect(spec("/move attach kubernetes:web-0")).toEqual({
+      target: "attach",
+      workload: { engine: "kubernetes", name: "web-0" },
+      keep: true,
+    });
+    expect(spec("/move attach kubernetes:openshift-etcd/etcd-0/etcdctl")).toEqual({
+      target: "attach",
+      workload: {
+        engine: "kubernetes",
+        namespace: "openshift-etcd",
+        name: "etcd-0",
+        container: "etcdctl",
+      },
       keep: true,
     });
   });
@@ -98,9 +118,9 @@ describe("parseHopCommand: refusals (one line, nothing built)", () => {
     expect(error("/move attach kubernetes:web-0/")).toContain("a name");
   });
 
-  test("docker and podman have no /container part; k8s allows at most one", () => {
+  test("docker and podman have no /container part; k8s takes at most three segments", () => {
     expect(error("/move attach docker:box/sidecar")).toContain("no container");
-    expect(error("/move attach kubernetes:a/b/c")).toContain("one /container");
+    expect(error("/move attach kubernetes:a/b/c/d")).toBe(HOP_USAGE);
   });
 
   test("extra arguments and unknown flags are refused, not ignored", () => {
@@ -110,10 +130,12 @@ describe("parseHopCommand: refusals (one line, nothing built)", () => {
     expect(error("/move local extra")).toBe(HOP_USAGE);
   });
 
-  test("the usage line names every target it accepts", () => {
+  test("the usage line names every target it accepts, and the k8s namespace form", () => {
     for (const word of ["local", "container", "attach", "cancel"]) {
       expect(HOP_USAGE).toContain(word);
     }
+    // No message may still teach `kubernetes:<pod>/<container>` (OD1).
+    expect(HOP_USAGE).toContain("kubernetes:<namespace>/<pod>[/<container>]");
   });
 
   test("a name that is not a plain engine name is refused, not passed on", () => {
@@ -135,6 +157,37 @@ describe("hopWorkload: the ONE validator both paths share", () => {
     expect(hopWorkload("kubernetes", "web-0", "app")).toEqual({
       kind: "ok",
       workload: { engine: "kubernetes", name: "web-0", container: "app" },
+    });
+    expect(hopWorkload("kubernetes", "web-0", "app", "ns1")).toEqual({
+      kind: "ok",
+      workload: { engine: "kubernetes", namespace: "ns1", name: "web-0", container: "app" },
+    });
+    // OD1/OD2: a namespace belongs to kubernetes alone, and is a DNS-1123 LABEL
+    // (a pod name may hold '.', a namespace may not).
+    expect(hopWorkload("docker", "box", undefined, "ns1")).toEqual({
+      kind: "bad",
+      problem: "namespace",
+    });
+    expect(hopWorkload("podman", "box", undefined, "ns1")).toEqual({
+      kind: "bad",
+      problem: "namespace",
+    });
+    expect(hopWorkload("kubernetes", "web-0", undefined, "Bad_NS")).toEqual({
+      kind: "bad",
+      problem: "namespaceChars",
+    });
+    expect(hopWorkload("kubernetes", "web-0", undefined, "a".repeat(64))).toEqual({
+      kind: "bad",
+      problem: "namespaceChars",
+    });
+    expect(hopWorkload("kubernetes", "web-0", undefined, "a".repeat(63)).kind).toBe("ok");
+    expect(hopWorkload("kubernetes", "web-0", undefined, "")).toEqual({
+      kind: "bad",
+      problem: "namespaceChars",
+    });
+    expect(hopWorkload("kubernetes", "web-0", undefined, "ns-1.2")).toEqual({
+      kind: "bad",
+      problem: "namespaceChars",
     });
   });
 
@@ -159,5 +212,35 @@ describe("hopWorkload: the ONE validator both paths share", () => {
       kind: "ok",
       workload: { engine: "docker", name: "box.v2_x-1" },
     });
+  });
+});
+
+// OD1: ONE label function, so the prompt, the live row, the outcome, the wake-up
+// line and the badge cannot print a workload differently — and so a k8s pod is
+// NEVER printed as `kubernetes:<pod>/<container>`, which now reads as ns/pod.
+describe("workloadText", () => {
+  test("docker/podman: engine:name", () => {
+    expect(workloadText({ engine: "docker", name: "box" })).toBe("docker:box");
+    expect(workloadText({ engine: "podman", name: "box" })).toBe("podman:box");
+  });
+
+  test("kubernetes: ns/pod[/container] once the namespace is known, pod[/c] before", () => {
+    expect(workloadText({ engine: "kubernetes", name: "web-0" })).toBe("kubernetes:web-0");
+    expect(workloadText({ engine: "kubernetes", namespace: "ns1", name: "web-0" })).toBe(
+      "kubernetes:ns1/web-0",
+    );
+    expect(
+      workloadText({ engine: "kubernetes", namespace: "ns1", name: "web-0", container: "app" }),
+    ).toBe("kubernetes:ns1/web-0/app");
+    // Before the namespace is pinned, the container is the only `/part`: shown,
+    // never hidden (a hop's row says what was asked for).
+    expect(workloadText({ engine: "kubernetes", name: "web-0", container: "app" })).toBe(
+      "kubernetes:web-0/app",
+    );
+  });
+
+  test("a pod-supplied name is one line and control/bidi-clean (AGENTS §7)", () => {
+    const hostile: HopWorkload = { engine: "kubernetes", namespace: "ns1", name: "web\u001b0" };
+    expect(workloadText(hostile)).toBe("kubernetes:ns1/web 0");
   });
 });

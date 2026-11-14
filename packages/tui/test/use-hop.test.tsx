@@ -57,6 +57,7 @@ function harness(opts: Boundary = {}) {
     daemonQueueRef: { current: opts.daemonQueue },
     switchingRef: { current: false },
     startHopRef: { current: null },
+    wakeAfterHopRef: { current: null },
     hop: {
       label: (spec: HopSpec) => (spec.target === "local" ? "local" : "docker:box"),
       start(spec: HopSpec) {

@@ -21,20 +21,23 @@
 import type { PermissionBroker } from "@tentacle/core";
 import type { EngineEndpoint } from "@tentacle/docker";
 import type { HopSpec, HopWorkload } from "@tentacle/tui";
+import { workloadText } from "@tentacle/tui";
 import type { TentacleConfig } from "./config.ts";
+import { WorkloadNotFoundError } from "./engine-host.ts";
 import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { attachEngineRuntime, startEngineRuntime } from "./engine-runtime.ts";
 import { engineNoun, laptopWorkspaceInput } from "./engine-select.ts";
+import { type HopLiveLine, createHopLiveLine } from "./hop-live-line.ts";
 import { type AttachVerdict, attachVerdict } from "./hop-plan.ts";
 import type { HopPlace } from "./hop-plan.ts";
 import type { HopPromptEngine, HopPromptFacts } from "./hop-proposal.ts";
 import type { HopRuntimeDeps, HopShared } from "./hop-runtime.ts";
+import type { HopFolderFate } from "./hop-turn.ts";
 import { removeVerifiedKept } from "./kept-cmd.ts";
 import { forgetKept, keptDir, recordKept } from "./kept-index.ts";
 import { KEPT_SCHEMA_VERSION, type KeptEntry, keptMetadata } from "./kept.ts";
 import { type LocalRuntime, startWorkerRuntime } from "./local-runtime.ts";
 import { type HopBuild, type HopBuilt, errorText } from "./session-hop.ts";
-import type { StreamTerm } from "./streams.ts";
 import { untrustedText } from "./untrusted-text.ts";
 import { mountGate, planWorkspace } from "./workspace-mount.ts";
 
@@ -42,11 +45,15 @@ import { mountGate, planWorkspace } from "./workspace-mount.ts";
 export const HOP_ROLLBACK_TIMEOUT_MS = 3_000;
 
 /**
- * Never a terminal (D6/P8): the engine's spinner and its per-phase lines are
- * switched OFF at the source, so provisioning cannot write a raw byte while Ink
- * owns the screen. What it would have printed goes to the hop's sinks instead.
+ * Never a terminal (D6/P8), but ONE line (docs/feat/session-hop-ux slice 2): the
+ * engine is handed a `liveLine` instead of `logTerm.tty`, so provisioning paints
+ * the hop's own status row — one text updated in place — and never writes a raw
+ * byte while Ink owns the screen. Its `log`/`info` keep only what is really a
+ * notice (a warning, an error, the dispose's `quitReport`).
  */
-const HOP_TERM: StreamTerm = { tty: false, colour: false, columns: () => undefined };
+function hopLiveLine(deps: HopTargetDeps): HopLiveLine {
+  return createHopLiveLine({ emit: (text) => deps.status(text) });
+}
 
 /** The engine-facing half a factory needs from a host (`buildEngineHost`'s result). */
 export interface HopEngineHost {
@@ -77,7 +84,7 @@ export interface HopTargetDeps {
   /** One notice (a warning, a kept line); never the terminal (D6). */
   readonly notify: (text: string) => void;
   /** The engine host for `engine`, built by the caller (a test injects a fake). */
-  readonly host: (engine: EngineKind) => HopEngineHost;
+  readonly host: (engine: EngineKind, where?: HopHostWhere) => HopEngineHost;
   /** The image `/move container` uses when none was named (`run`'s own default). */
   readonly defaultImage?: () => string | undefined;
   /** Whether a mount may be planned at all (a test turns it off; `run --no-mount`). */
@@ -90,6 +97,12 @@ export interface HopTargetDeps {
    * and D7(a) then reads as "no run" — which is why `main.ts` always passes it.
    */
   readonly detachedRun?: (workload: HopWorkload) => boolean;
+}
+
+/** What a build NAMES about the place it dials, so the host is built WHERE it was shown (OD1). */
+export interface HopHostWhere {
+  /** k8s only: the namespace a `pinNamespace`/typed `/move` resolved and the owner saw. */
+  readonly namespace?: string;
 }
 
 /**
@@ -299,7 +312,7 @@ async function containerTarget(
       hop: true,
       // Everything the engine says goes to the hop's sinks: no spinner, no raw
       // line while Ink owns the terminal (§7, P8, D6).
-      logTerm: HOP_TERM,
+      liveLine: hopLiveLine(deps),
       log: (line) => deps.notify(untrustedText(line)),
       // DRIFT from D6's wording ("log/info → the hop status feed"): `info` goes to
       // the NOTICE sink. `quitReport` — the ONE line a faulted run must not lose
@@ -328,6 +341,9 @@ async function containerTarget(
     kind: "built",
     built: {
       ...built,
+      // OD6: the plan BUILT it, so this is the authoritative answer — a mount
+      // planned and used is `shared`, `none`/`refuse`-free `none` is not.
+      folder: plan.kind === "mount" ? "shared" : "not shared",
       rollback: async () => {
         await bounded(runtime?.dispose(), HOP_ROLLBACK_TIMEOUT_MS);
         // Only what THIS hop created, and only through the verified delete (D5).
@@ -377,11 +393,16 @@ async function attachTarget(
   }
   let target: HopEngineHost;
   try {
-    target = deps.host(workload.engine);
+    // OD1: dial the namespace that was SHOWN, never a fresh resolution — a
+    // kubeconfig that changed since the prompt approved a place cannot move it.
+    target = deps.host(
+      workload.engine,
+      workload.namespace === undefined ? {} : { namespace: workload.namespace },
+    );
   } catch (error) {
     return { kind: "failed", notice: `not moved: ${errorText(error, "no engine")}` };
   }
-  deps.status(`moving to ${workloadLabel(workload)} — attaching`);
+  deps.status(`moving to ${workloadText(workload)} — attaching`);
   let runtime: LocalRuntime | undefined;
   try {
     runtime = await attachEngineRuntime(config, {
@@ -394,7 +415,7 @@ async function attachTarget(
       sessionId,
       // The same declarative as a new container: this client can ask its owner.
       hop: true,
-      logTerm: HOP_TERM,
+      liveLine: hopLiveLine(deps),
       log: (line) => deps.notify(untrustedText(line)),
       // The same rule as the container: `info` is the NOTICE sink (D6's spirit,
       // see `containerTarget`'s note — `quitReport` rides it at dispose time).
@@ -405,7 +426,7 @@ async function attachTarget(
     // A user-owned workload is never deleted, and nothing was created here.
     return {
       kind: "failed",
-      notice: `not moved: ${errorText(error, "the workload could not be joined")}`,
+      notice: attachMissNotice(workload, target, error),
     };
   }
   // D7(b): the handshake is done and NOTHING is open yet (a runtime opens its
@@ -426,6 +447,7 @@ async function attachTarget(
         kind: "workload",
         engine: workload.engine,
         name: workload.name,
+        ...(workload.namespace === undefined ? {} : { namespace: workload.namespace }),
         ...(workload.container === undefined ? {} : { container: workload.container }),
       },
       // An existing daemon may already hold our uid: D1 step 4(a) applies.
@@ -439,6 +461,21 @@ function d7Refusal(verdict: AttachVerdict): HopBuild | null {
   return verdict.kind === "refuse"
     ? { kind: "failed", notice: `not moved: ${verdict.text}` }
     : null;
+}
+
+/**
+ * What an attach that could not join says (docs/feat/session-hop-ux design 7). A
+ * k8s 404 keeps the engine's diagnosis but replaces its CLI advice, which is a
+ * DEAD END in a hop (`pass --namespace <ns>` — a hop has no such flag): the hop's
+ * own grammar is the fix, `kubernetes:<namespace>/<pod>`, and the namespace is
+ * named so a wrong default is obvious. Everything else keeps its own message.
+ */
+function attachMissNotice(workload: HopWorkload, target: HopEngineHost, error: unknown): string {
+  if (workload.engine === "kubernetes" && error instanceof WorkloadNotFoundError) {
+    const namespace = workload.namespace ?? target.locators.namespace ?? "default";
+    return `not moved: no pod "${untrustedText(workload.name)}" in namespace "${untrustedText(namespace)}" — name its namespace: /move attach kubernetes:<namespace>/${untrustedText(workload.name)}`;
+  }
+  return `not moved: ${errorText(error, "the workload could not be joined")}`;
 }
 
 /**
@@ -540,6 +577,10 @@ function builtOf(
   return {
     runtime,
     place,
+    // OD6: whether the laptop's folder is visible there — `local` is the laptop,
+    // a pod/attached workload was not mounted for, and a CONTAINER hop carries
+    // its own answer from the plan it built with.
+    folder: folderFate(place),
     daemonInPod: facts.daemonInPod,
     preexisting: facts.preexisting,
     rollback: async () => {
@@ -548,11 +589,19 @@ function builtOf(
   };
 }
 
-/** `docker:box` / `kubernetes:web-0/app` — the workload as the status row says it. */
+/**
+ * The default folder fate of a place, from the place alone: `local` is the
+ * laptop's own folder, and a workload (a pod, or an attached container nobody
+ * mounted for) is `not shared`. A container hop overrides this from its OWN plan
+ * (`containerTarget`), because only the build knows whether it mounted.
+ */
+function folderFate(place: HopBuilt["place"]): HopFolderFate {
+  return place.kind === "local" ? "local" : "not shared";
+}
+
+/** `docker:box` / `kubernetes:<ns>/web-0/app` — the ONE label (OD1, `workloadText`). */
 function workloadLabel(workload: HopWorkload): string {
-  const name = untrustedText(workload.name);
-  const container = workload.container === undefined ? "" : `/${untrustedText(workload.container)}`;
-  return `${workload.engine}:${name}${container}`;
+  return workloadText(workload);
 }
 
 /** `promise` inside a bound: a hung dispose must not freeze a hop (D1 step 2). */

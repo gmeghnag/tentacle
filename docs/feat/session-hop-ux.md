@@ -691,14 +691,17 @@ points, `noteUserPrompt` on a typed prompt, `/clear` → `clearPending`.
    `app-turn-driver-structure.test.ts` pins that the hook creates no refs of its own
    (the S8/M10 rule), and `permission` is a live render object, so the rebuilt
    closure reads the current mode.
-5. **No `hopNamespacePin` "failed" view is raised**: `HopProposalView.failed`
-   exists (the plan's slice 3), and `hop-feed` returns `{kind:"none"}` when the pin
-   throws — with the failed line going to `pending` in a later round is NOT done:
-   see *Unverified* below. The pin's failure currently behaves as "nothing asked,
-   nothing moved, no line": the doc's failure-mode row asks for `[move failed: …]`
-   + wake, and that half is **not implemented** (the `pinAtTurnEnd` failure path
-   returns `ok: false` and the feed returns `none`).
-6. **`docs/feat/session-hop.md` D9 got two dated amendments** (the paragraph and
+5. **The pin-failure line IS raised** (failure mode 1): `pinAtTurnEnd` returns
+   `{ok:false, line}`, `hop-feed` puts it in `pending` and returns
+   `{kind:"failed"}`, and the App's `wake` fires — so the model reads
+   `[move failed: <reason>]`. `main.ts`'s `pinNamespace` passes the REASON only
+   (no brackets): `hopWakeLine` wraps it, which avoids `[move failed: [move
+   failed: …]]` (found by the test).
+6. **`PermissionResponse.auto` is set for a `session_hop` answer only**, not for
+   every auto-approved tool: three pre-existing tests (`foreign-turns`,
+   `auto-accept-feed`, `autoaccept-wake`) compare an auto-approved answer whole,
+   and widening every tool's shape was not the plan's intent (OD4 is about moves).
+7. **`docs/feat/session-hop.md` D9 got two dated amendments** (the paragraph and
    the failure-mode row) as the plan asked.
 
 ### Tests (red-first, per slice)
@@ -717,15 +720,39 @@ baseline) · `bun test` full suite: results in Review. No schema changed, so
 
 ### Unverified
 
-- **The pin-failure line + wake** (drift 5): a kubeconfig that cannot resolve a
-  namespace at a proposal's turn end asks nothing and moves nothing, but the model
-  is **not** told (`[move failed: …]`) and is not woken. One more `hop-feed` branch
-  (`pending = {kind:"failed", reason: pin.line}` + `return {kind:"failed"}`) plus a
-  test would close it; left out because the plan's slice-3 table assigns `failed`
-  to the *build*, and this path was not in its test list.
-- **The live OpenShift re-test** (the plan's final gate): needs the owner's cluster.
+- **The live OpenShift re-test** (the plan's final gate): needs the owner's
+  cluster. Everything it asks for is covered by a fake-host test (namespace
+  default + trace, `kubernetes:<ns>/<pod>/<c>`, one live line, one summary,
+  auto-accept ON ⇒ no prompt and stays ON, the model continues by itself), but
+  none of it has run against a real API server.
+- **A real pod's cwd in the wake line**: `HopTargetView.cwd` is the daemon's own
+  report and is exercised only through the fake; whether a pod reports `/` or its
+  real working dir is the daemon's behaviour, unchanged by this task.
 
 ## Review
+
+### Mutation log (each run, then reverted — the tests are green again)
+
+| Target (plan's Tests section) | Mutation applied | Result |
+|---|---|---|
+| `kubeNamespace` (slice 1) | dropped the `TENTACLE_POD_NAMESPACE` step | the `env` row resolved to the context's ns ⇒ FAIL |
+| attach host `where` | `deps.host(workload.engine)` (no `where`) | both "dials the namespace it was TOLD" rows ⇒ FAIL |
+| k8s 404 wording | restored `errorText(…)` (the engine's `--namespace` advice) | "says the hop's own fix" ⇒ FAIL (`--namespace` present) |
+| hop live line, throttle | emit every call / no leading edge | 4 of 7 `hop-live-line` rows ⇒ FAIL |
+| hop live line, latch | drop `closed` in `set` | "finish() latches" ⇒ FAIL |
+| `statusLineFor` | ignored `liveLine` (the old `logTerm: tty:false`) | the engine `liveLine` row AND the hop's zero-notice row ⇒ FAIL |
+| hop target `liveLine` | `logTerm: {tty:false}` instead | "an injecting attach: zero notices" ⇒ FAIL |
+| `autoApproves` | `return true` unconditionally | `turn-feed`'s `hopAuto` row ⇒ FAIL |
+| `hopAutoAcceptable` | `return true` always | the workload→local row ⇒ FAIL |
+| `hopAuto` on the request | passed no origin (`hop-feed`) | `hop-feed-turn`'s OD4 row ⇒ FAIL |
+| `hopWakeStep` | wake on `idle` | `hop-wake.test`'s idle row, the TUI's OD5 notice row AND the TUI's OD6 idl-typed row ⇒ FAIL (3 layers) |
+| wake chain cap | dropped the `chain >= MAX` test | "the chain cap" ⇒ FAIL |
+| proposal origin | dropped `hopOriginRef.current = "proposal"` in App's port | "OD6: after a PROPOSED move the session continues" ⇒ FAIL |
+| pin failure line | returned `{kind:"none"}` on a failed pin | "a pin that FAILS … TELLS the model" ⇒ FAIL |
+| `hopWakeLine` sanitizing | (asserted directly, not mutated) | bidi/control bytes and newlines are stripped |
+| pin BEFORE the ask | (asserted by order: `pinNamespace` called once, before `asked[0]`) | the request and the approved spec both carry `ns-A` |
+
+---
 
 #### Owner answers so far (2026-11-14)
 

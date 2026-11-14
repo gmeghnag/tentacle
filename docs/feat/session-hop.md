@@ -298,6 +298,16 @@ hop target. `run`, `attach`, detached-run, `connect` and in-process TUIs get
 no `hop` prop: `/move` → "not available here" (Q3). This keeps D5's ownership
 table to two rows.
 
+> **Amended 2026-11-14** (`docs/feat/session-hop-ux.md`, owner decisions OD4/OD5/OD6):
+> (a) auto-accept MAY answer a `session_hop` prompt, when the laptop's own rule
+> marks it `hopAuto` — every model-proposed move except one toward local from a
+> workload (which is still always confirmed, AGENTS §7); a typed hop's mount gate
+> still asks. It is LOGGED allow-once (`(auto-accepted)` on the outcome line).
+> (b) It SURVIVES a hop: the D9 rule "a move turns auto-accept off" is REVERSED.
+> (c) After a settled move the session CONTINUES by itself with one short message
+> (`hopWakeLine`), except a `/move` typed at rest — capped at 3 consecutive wakes.
+> The paragraphs below describe the pre-amendment shape where they differ.
+
 **D9 — The agent tool `move_session`** (`tools/src/move-session.ts`). Input:
 `{target: "local" | "container" | "attach", image?, workload?: {engine, name,
 container?}, keep?: boolean, reason}`. It has NO daemon-side effect and needs
@@ -389,7 +399,7 @@ stop at any commit boundary and still leave a shippable tree.
 | Crash mid-commit (after open, before old dispose) | The laptop log holds the full conversation (step 4(b) required `saveConfirmed`). On restart, `--resume` reopens it locally. A hop container is in `ps` (kept) and its resident daemon may still hold the uid live. A later `/move attach` to it closes that copy and seeds again (D1 4(a), D7c), and never attaches the stale copy. The worker died with the process. |
 | Old dispose fails or hangs (after commit) | It has a time limit, and the result is one notice. The hop is not rolled back (D1 step 5). A kept container still holding the uid → D7c the next time. |
 | Nothing saved yet (`/move` as the first action) | No freeze or load. The target opens unseeded with the minted uid, if there is one (D1 step 3). |
-| Auto-accept on before a hop | Turned off at commit, with a notice (D9). The first tool ask on the target reaches the prompt. |
+| Auto-accept on before a hop | **Amended 2026-11-14** (`docs/feat/session-hop-ux.md`, OD5): it STAYS on across the move, and the moved notice states the mode. Superseded words: "turned off at commit, with a notice (D9)". |
 | Link drops while in a container | The existing reconnect (`execChannelFactory`, `engine-runtime.ts:299-311`) applies. A hop is refused while `link` is not `up` (plan). |
 | Pending permission asks | Impossible at a boundary: a turn waiting on an ask is running, so the hop stays queued. |
 | Queued messages / steers | Daemon queue non-empty → the hop waits for the next idle (D4). TUI-side queued rows → back to the input by `swapSession` (P3). Steers belong to the running turn. |

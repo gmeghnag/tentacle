@@ -44,6 +44,7 @@ import type {
   WorkloadFacts,
   WorkloadState,
 } from "../src/engine-host.ts";
+import { WorkloadNotFoundError } from "../src/engine-host.ts";
 import type { EngineRuntime } from "../src/engine-runtime.ts";
 import { type HopLeaveDeps, createHopLeave } from "../src/hop-leave.ts";
 import { type HopEngineHost, createHopTargets, hopBuilder } from "../src/hop-targets.ts";
@@ -1055,6 +1056,105 @@ describe("H6 an attach leaves a user-owned workload alone, even with `keep: fals
     expect(log.calls.filter((c) => c.startsWith("remove"))).toEqual([]);
     expect(readKept(join(dir, "config", "kept")).entries).toHaveLength(1);
     await built.built.runtime.dispose();
+  });
+});
+
+describe("OD1 a hop dials the namespace it was TOLD, and a miss names the hop's own grammar", () => {
+  /** A host fake that records WHAT it was built for (the `where` a build passes). */
+  function whereRig(error?: Error) {
+    const host = fakeHost({ calls: [], ...(error === undefined ? {} : {}) });
+    const asked: Array<{ engine: string; where: unknown }> = [];
+    const statuses: string[] = [];
+    const pair = sharedPair();
+    host.inspect = async () => {
+      throw error ?? new Error("unused");
+    };
+    const build = createHopTargets({
+      config: config(dir),
+      shared: pair,
+      status: (line) => statuses.push(line),
+      notify: () => {},
+      host: (engine, where) => {
+        asked.push({ engine, where });
+        return { host, locators: {} };
+      },
+    });
+    return { build, asked, statuses };
+  }
+
+  test("an attach passes the workload's namespace to the host builder", async () => {
+    // Mutation: `deps.host(workload.engine)` → the recorded `where` is `{}`, and the
+    // build dials today's kubeconfig instead of what the owner approved.
+    const { build, asked } = whereRig();
+    await build(
+      {
+        target: "attach",
+        workload: { engine: "kubernetes", namespace: "ns-A", name: "web-0" },
+        keep: true,
+      },
+      "uid-1",
+    );
+    expect(asked[0]).toEqual({ engine: "kubernetes", where: { namespace: "ns-A" } });
+  });
+
+  test("a docker attach names no namespace (nothing to override)", async () => {
+    const { build, asked } = whereRig();
+    await build({ target: "attach", workload: { engine: "docker", name: "box" }, keep: true }, "u");
+    expect(asked[0]).toEqual({ engine: "docker", where: {} });
+  });
+
+  test("a k8s 404 says the hop's own fix, never `--namespace` (a hop has no such flag)", async () => {
+    const log: FakeHostLog = { calls: [] };
+    const r = rig(log, { mount: false });
+    r.host.inspect = async () => {
+      throw new WorkloadNotFoundError(
+        `pod "etcd-0" not found in namespace "default" — check the name (kubectl get pods -n default) or pass --namespace <ns>; use \`run\` to create one`,
+        "pod",
+        "in namespace default",
+      );
+    };
+    const built = await r.build(
+      {
+        target: "attach",
+        workload: { engine: "kubernetes", namespace: "openshift-etcd", name: "etcd-0" },
+        keep: true,
+      },
+      "uid-1",
+    );
+    // The engine's `WorkloadNotFoundError` is replaced by the hop's wording: the
+    // attach's own error path is what runs (a `built` here would be a vacuous pass).
+    expect(built.kind).toBe("failed");
+    if (built.kind !== "failed") {
+      throw new Error("expected the attach to fail");
+    }
+    expect(built.notice).toContain("no pod");
+    expect(built.notice).toContain("openshift-etcd");
+    expect(built.notice).toContain("/move attach kubernetes:<namespace>/etcd-0");
+    expect(built.notice).not.toContain("--namespace");
+  });
+});
+
+describe("slice 2: a hop paints ONE live line, never a phase per notice", () => {
+  test("an injecting attach: zero notices, and the phases reached `status`", async () => {
+    // The defect (Repro 2): with `logTerm.tty:false` every phase, every 10% of the
+    // transfer and the resolver's path became its own notice — ~13 of them. With
+    // `liveLine` the engine takes its interactive contract instead.
+    // Mutation: `liveLine: undefined` (the old `logTerm: HOP_TERM`) → notices ≥ 10.
+    const log: FakeHostLog = { calls: [] };
+    const r = rig(log, { mount: false });
+    const built = await r.build(
+      { target: "attach", workload: { engine: "docker", name: "mine" }, keep: true },
+      "uid-1",
+    );
+    expect(built.kind).toBe("built");
+    // One summary at most in the transcript: nothing a clean attach says is a notice.
+    expect(r.notices.filter((n) => /attaching|injecting|transfer|verifying/.test(n))).toEqual([]);
+    // The row DID see them: the line is updated in place, not dropped.
+    expect(r.statuses.join("\n")).toContain("attaching");
+    expect(r.statuses.some((s) => s.includes("[container]"))).toBe(true);
+    if (built.kind === "built") {
+      await built.built.runtime.dispose();
+    }
   });
 });
 

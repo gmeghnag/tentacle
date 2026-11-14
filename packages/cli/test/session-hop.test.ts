@@ -221,6 +221,7 @@ describe("D1: a hop moves the SAME session (the load-bearing repro as a test)", 
               id,
             ),
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {},
@@ -283,6 +284,7 @@ describe("session-hop-live T3: the outcome carries the seeded controller (F2)", 
               id,
             ),
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {},
@@ -400,6 +402,7 @@ describe("D1: a failure at steps 2, 3 or 4 leaves the old runtime live (never se
           built: {
             runtime: await runtimeOn(rig(new Reply("reply-B")), shared, null, uid),
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {
@@ -455,6 +458,7 @@ describe("D1: a failure at steps 2, 3 or 4 leaves the old runtime live (never se
           built: {
             runtime: broken,
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {
@@ -575,6 +579,7 @@ describe("D2: ONE broker — the facade passes the shared instance, never a copy
           built: {
             runtime: built,
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {},
@@ -643,6 +648,7 @@ describe("D1 step 3/4(b): cleanFor(id) — one uid's failure decides only its ow
                 uid,
               ),
               place: { kind: "workload", engine: "docker", name: "box" },
+              folder: "not shared",
               daemonInPod: true,
               preexisting: false,
               rollback: async () => {
@@ -708,6 +714,7 @@ describe("D1 step 3/4(b): cleanFor(id) — one uid's failure decides only its ow
               uid,
             ),
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {},
@@ -750,6 +757,7 @@ describe("D1 step 3: nothing persisted yet — the target opens unseeded, with n
               // `resume: null` PLUS the uid: what the factory is told to build.
               runtime: await runtimeOn(targetDaemon, shared, null, id),
               place: { kind: "workload", engine: "docker", name: "box" },
+              folder: "not shared",
               daemonInPod: true,
               preexisting: false,
               rollback: async () => {},
@@ -826,6 +834,7 @@ describe("D1 step 4(a): our own uid live on an existing target is closed, then s
           built: {
             runtime: target,
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: true, // an attach: this daemon existed before the hop
             rollback: async () => {},
@@ -881,6 +890,7 @@ describe("D1 step 4(a): our own uid live on an existing target is closed, then s
           built: {
             runtime: stubborn,
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: true,
             rollback: async () => {
@@ -933,6 +943,7 @@ describe("D1 step 5: the commit never rolls back — a dispose that throws or ha
           built: {
             runtime: target,
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {
@@ -1057,6 +1068,7 @@ describe("D2: the facade delegates to the CURRENT runtime and never re-mounts th
               id,
             ),
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {},
@@ -1120,6 +1132,7 @@ describe("D2: the facade delegates to the CURRENT runtime and never re-mounts th
               id,
             ),
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {},
@@ -1319,6 +1332,7 @@ describe("fix1 HIGH: an absent file is not 'nothing to move' when a runtime hold
           built: {
             runtime: await runtimeOn(rig(targetModel), rigged.shared, null, id),
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {},
@@ -1379,6 +1393,7 @@ describe("fix1 HIGH: an absent file is not 'nothing to move' when a runtime hold
           built: {
             runtime: await runtimeOn(rig(targetModel), rigged.shared, null, id),
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {},
@@ -1431,6 +1446,7 @@ describe("fix1 HIGH: an absent file is not 'nothing to move' when a runtime hold
           built: {
             runtime: await runtimeOn(rig(new Reply("reply-B")), shared, null, id),
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {},
@@ -1479,6 +1495,7 @@ describe("fix1 MEDIUM: a throw before the commit still rolls the target back", (
           built: {
             runtime: thrower,
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: true,
             rollback: async () => {
@@ -1533,6 +1550,7 @@ describe("fix1 MEDIUM: a throw before the commit still rolls the target back", (
               id,
             ),
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {},
@@ -1637,6 +1655,7 @@ describe("fix1 MEDIUM: the facade re-subscribes job listeners on a swap", () => 
                 second.runtime.openSeeded(loaded.status === "ok" ? loaded.record : undefined, opts),
             } as LocalRuntime,
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {},
@@ -1716,6 +1735,7 @@ describe("fix1 MEDIUM: the commit-time seal really seals (step 5)", () => {
           built: {
             runtime: target,
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: false,
             rollback: async () => {},
@@ -1788,6 +1808,7 @@ describe("fix1 MEDIUM: 4(a)'s guard is in the ORCHESTRATOR, not closeOwn", () =>
           built: {
             runtime: deadLink,
             place: { kind: "workload", engine: "docker", name: "box" },
+            folder: "not shared",
             daemonInPod: true,
             preexisting: true,
             rollback: async () => {

@@ -28,10 +28,24 @@ export interface PermissionRequest {
    * What is asked (laptop-internal, never on the wire): a tool call (absent =
    * `"tool"`), whether to trust a project's hooks (`"hooks_trust"`,
    * docs/feat/hooks-project-trust.md) — or whether to move this session to
-   * another target (`"session_hop"`, docs/feat/session-hop.md D6/D9). Neither of
-   * those two is ever answered by auto-accept.
+   * another target (`"session_hop"`, docs/feat/session-hop.md D6/D9). A
+   * `hooks_trust` is never answered by auto-accept. A `session_hop` is answered
+   * ONLY when `hopAuto` is set (docs/feat/session-hop-ux OD4).
    */
   readonly kind?: "tool" | "hooks_trust" | "session_hop";
+  /**
+   * Slack (laptop-internal, never on the wire): this `session_hop` is one
+   * auto-accept MAY answer, because the LAPTOP's own rule said so
+   * (`hopAutoAcceptable`: anything but a move toward local proposed from a
+   * workload). Set by `hopPromptRequest` and by nothing else — the mount gate's
+   * `ask` (`mountAsk`) never sets it, so a typed hop still asks.
+   *
+   * It is the whole reason the single-broker invariant carries this feature: a
+   * daemon cannot set it (`toPermissionRequest` rebuilds a request from an
+   * allowlist), so whether a pod-originated move is waved through is decided by
+   * facts only the laptop holds (AGENTS §7, "a pod is not trusted").
+   */
+  readonly hopAuto?: true;
   readonly tool: string;
   readonly level: PermissionLevel;
   /** Human-readable action, e.g. "Run a shell command". */
@@ -91,6 +105,13 @@ export interface PermissionResponse {
    * `cause` says why, so the person is told the truth (`AnswerLostCause`).
    */
   readonly onAnswerLost?: (cause: AnswerLostCause) => void;
+  /**
+   * Answered by AUTO-ACCEPT, not by a human (process-internal, never on the wire):
+   * no prompt was shown, so the outcome line must say so — that is OD4's "logged
+   * allow-once". Only the TUI's own requester sets it
+   * (`permission-ui.ts`), and only on the branch that skipped the dialog.
+   */
+  readonly auto?: true;
 }
 
 /**

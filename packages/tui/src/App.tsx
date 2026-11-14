@@ -36,6 +36,7 @@ import { dispatchCommand } from "./commands/dispatch.ts";
 import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
 import type { HopSpec } from "./hop-command.ts";
 import { hopShownCwd, hopStatusRow } from "./hop-status.ts";
+import { HOP_WAKE_TEXT } from "./hop-wake.ts";
 import { startIdleWarm } from "./idle-warm.ts";
 import { JOB_TAIL_SHOWN, exitOutcome, jobOutputEntry, refreshDue } from "./job-drawer.ts";
 import { type KeyHost, executeEffects } from "./keys/execute.ts";
@@ -413,6 +414,9 @@ export function App({
   const startHopRef = useRef<((spec: HopSpec, opts?: { gateAnswered?: true }) => void) | null>(
     null,
   );
+  // OD6: the same late binding for a proposal that ended with nothing to build
+  // (`useHop` assigns it; the port above reads it).
+  const wakeAfterHopRef = useRef<((outcome: "declined" | "failed") => void) | null>(null);
   /**
    * The host's view of this TUI's own turns (docs/feat/session-hop.md D9, slice
    * H5): it folds each event (`hop.turn`), asks the owner at the turn's end
@@ -425,10 +429,24 @@ export function App({
   const hopTurnPort: HopTurnPort = {
     event: (event, own) => hop?.turn?.(event, own),
     end: async (own) => (await hop?.turnEnd?.(own)) ?? { kind: "none" },
-    takeLine: () => hop?.takeLine?.() ?? null,
+    // OD6: the line is rendered from the TUI's LIVE auto-accept mode, so a moved
+    // line never states a stale `on|off`.
+    takeLine: (ctx) => hop?.takeLine?.(ctx) ?? null,
     // An approved proposal is an approved `/move`: the ONE place the view moves
-    // starts it (D3), through the ref so no dependency cycle is created.
-    approved: (spec, opts) => startHopRef.current?.(spec, opts),
+    // starts it (D3), through the ref so no dependency cycle is created. OD6: the
+    // origin is a MODEL's proposal, which is what lets the session wake afterwards.
+    approved: (spec, opts) => {
+      hopOriginRef.current = "proposal";
+      startHopRef.current?.(spec, opts);
+    },
+    // OD6: a fact about the OLD session must not ride the new one's first prompt.
+    clearPending: () => hop?.clearPending?.(),
+    // OD6: one user word restarts the consecutive-wake count.
+    onUserPrompt: () => noteUserPrompt(),
+    // OD6: a proposal that ended without a spec to build (refused, or unaskable)
+    // wakes the model to read the line — when the rule allows it (the App's own
+    // `hopWake` firing below is the ONE send path).
+    wake: (outcome) => wakeAfterHopRef.current?.(outcome),
   };
   const [targetView, setTargetView] = useState<HopTargetView | null>(() =>
     targetFeed ? targetFeed.current() : null,
@@ -517,6 +535,8 @@ export function App({
           skill?: string;
           attachments?: readonly AttachmentRef[];
           images?: readonly AttachedImage[];
+          /** OD6: a hop's own wake — the pending hop line, and the dim continuing row. */
+          hopWake?: boolean;
         },
       ) => void)
     | null
@@ -1334,6 +1354,9 @@ export function App({
     pushNotice,
     wakeIfPending,
     exit,
+    // OD6: a `/clear` drops the pending hop fact with the conversation it belonged
+    // to (`hop?.clearPending`, a ref read at call time — no dep cycle).
+    clearHopPending: () => hopTurnPort.clearPending?.(),
   });
   runClearRef.current = runClear;
 
@@ -1349,7 +1372,7 @@ export function App({
   // (`hopQueued`, `st.running`, `shown.length`) — that is the whole mechanism
   // (D4), and moving it into the hook would make its trigger a callback's
   // identity instead of the render that made the session idle.
-  const { hopRun, hopQueued, hopIfQueuedRef, requestHop } = useHop({
+  const { hopRun, hopQueued, hopIfQueuedRef, requestHop, hopOriginRef, noteUserPrompt } = useHop({
     sessionRef,
     stateRef,
     rowsRef,
@@ -1361,6 +1384,12 @@ export function App({
     swapSession,
     pushNotice,
     flushNow,
+    // OD6: the ONE way a turn starts without typing (the driver's `run`), so a
+    // settled hop can continue the session by itself. `runRef` (not `run`) because
+    // `useHop` is declared ABOVE the driver that assigns it. The driver prepends the
+    // laptop's wake line and paints its own dim row (`hopWake`).
+    sendWake: () => runRef.current?.(HOP_WAKE_TEXT, { hopWake: true }),
+    wakeAfterHopRef,
   });
   // A `/move` that waited for a boundary (D4) starts at the first TRUE idle: the
   // own turn over, the daemon's queue empty. This ONE effect is the whole

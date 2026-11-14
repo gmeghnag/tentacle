@@ -322,6 +322,7 @@ describe(`live session hop (opt-in: TENTACLE_DOCKER_TESTS=1) — image ${IMAGE}`
                   built: {
                     runtime,
                     place: { kind: "local" as const },
+                    folder: "shared",
                     daemonInPod: false,
                     preexisting: false,
                     rollback: () => runtime.dispose(),

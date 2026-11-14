@@ -68,6 +68,9 @@ function fakeHop(opts: { fail?: string } = {}) {
   const cancelled: number[] = [];
   const status: Array<(line: string | null) => void> = [];
   let settle: ((outcome: Awaited<HopRun["done"]>) => void) | null = null;
+  // OD6's pending line, as the cli feed keeps it: set by a settled hop, CONSUMED by
+  // the next real prompt (the App takes it in `run`).
+  let pending: string | null = null;
   const feed: HopFeed = {
     label: (spec) => (spec.target === "local" ? "local" : "docker:box"),
     start(spec) {
@@ -95,9 +98,21 @@ function fakeHop(opts: { fail?: string } = {}) {
     cancel() {
       cancelled.push(1);
     },
+    takeLine(ctx) {
+      const line = pending;
+      pending = null;
+      return line === null ? null : `${line} [auto-accept ${ctx.autoAccept ? "on" : "off"}]`;
+    },
+    clearPending() {
+      pending = null;
+    },
   };
   return {
     feed,
+    /** What the next prompt will carry (a settled hop sets it, as the feed does). */
+    setPending: (line: string | null) => {
+      pending = line;
+    },
     started,
     cancelled,
     status,
@@ -516,7 +531,7 @@ describe("H3 the App: the transcript rows keep their position across a hop", () 
   });
 });
 
-describe("D9 a hop never inherits an approval: auto-accept goes OFF with the move", () => {
+describe("OD5 (reversing D9) a hop KEEPS auto-accept, and says which mode it is in", () => {
   /** A shared auto-accept feed, as a detached run's TUI gets one (B3). */
   function autoFeedOf(initial: boolean) {
     let on = initial;
@@ -532,10 +547,11 @@ describe("D9 a hop never inherits an approval: auto-accept goes OFF with the mov
     return { feed, sets };
   }
 
-  test("ON before the hop: the move turns it off, and the notice says so", async () => {
-    // Mutation: drop the `if (wasOn) …` block in `App.startHop` → auto-accept
-    // stays on into the NEW runtime, which is the danger D9 exists for: the
-    // target's daemon inherits approvals it never asked this user for.
+  test("ON before the hop: it is STILL on after it, and the notice agrees", async () => {
+    // docs/feat/session-hop-ux OD5, the owner's decision, which REVERSES D9: a
+    // move does not touch the mode. RED on the pre-OD5 code (which cleared it).
+    // Mutation: restore `permission.clearAutoApprove()` in `useHop` → both the
+    // feed write and the notice flip.
     const log = { sends: [] as string[] };
     const hop = fakeHop();
     const auto = autoFeedOf(true);
@@ -557,11 +573,14 @@ describe("D9 a hop never inherits an approval: auto-accept goes OFF with the mov
       view: { place: { kind: "workload", engine: "docker", name: "box" }, daemonInPod: true },
     });
     await delay(120);
-    expect(auto.sets).toEqual([false]);
+    // Nothing flipped it, in this TUI or in the shared feed.
+    expect(auto.sets).toEqual([]);
     const frame = strip(app.lastFrame());
-    expect(frame).toContain("auto-accept off");
-    // The one notice says it too: the user must not learn it from a prompt.
-    expect(frame).toContain("auto-accept is off");
+    expect(frame).toContain("auto-accept on");
+    // The one notice states the mode, so the transcript and the status bar cannot
+    // disagree; OD6's "send a message" is the idle-typed variant.
+    expect(frame).toContain("auto-accept on");
+    expect(frame).toContain("send a message to continue");
     app.unmount();
   });
 
@@ -589,7 +608,6 @@ describe("D9 a hop never inherits an approval: auto-accept goes OFF with the mov
     expect(auto.sets).toEqual([]);
     const frame = strip(app.lastFrame());
     expect(frame).toContain("auto-accept off");
-    expect(frame).not.toContain("auto-accept is off");
     app.unmount();
   });
 
@@ -611,6 +629,43 @@ describe("D9 a hop never inherits an approval: auto-accept goes OFF with the mov
     await type(app.stdin, "/move container", 120);
     expect(auto.sets).toEqual([]);
     expect(strip(app.lastFrame())).toContain("auto-accept on");
+    app.unmount();
+  });
+});
+
+// docs/feat/session-hop-ux OD6, at the frame: a typed `/move` at rest does NOT
+// start a turn by itself; the line waits for the user's next prompt (and is
+// consumed exactly once).
+describe("OD6 a /move typed at rest waits for the user; the line rides their next prompt", () => {
+  test("no send after an idle `/move`, and the next typed prompt carries the line", async () => {
+    // Mutation: wake on `idle` (`hopWakeStep`) → `sends` has two entries, the first
+    // one starting the session's own turn with nobody having asked for it.
+    const log = { sends: [] as string[] };
+    const hop = fakeHop();
+    const app = render(
+      <App
+        createSession={() => session([], log)}
+        model="m"
+        cwd="/tmp/work"
+        hop={hop.feed}
+        columns={80}
+      />,
+    );
+    await delay(40);
+    await type(app.stdin, "/move container", 80);
+    hop.setPending("[session moved to docker:box");
+    hop.settle({
+      moved: session([], log),
+      view: { place: { kind: "workload", engine: "docker", name: "box" }, daemonInPod: true },
+    });
+    await delay(150);
+    expect(log.sends).toEqual([]);
+    expect(strip(app.lastFrame())).toContain("send a message to continue");
+    // The user types: ONE prompt, and it begins with the moved line.
+    await type(app.stdin, "hello there", 150);
+    expect(log.sends).toHaveLength(1);
+    expect(log.sends[0]?.startsWith("[session moved to docker:box")).toBe(true);
+    expect(log.sends[0]?.endsWith("hello there")).toBe(true);
     app.unmount();
   });
 });

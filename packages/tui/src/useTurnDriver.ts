@@ -92,6 +92,7 @@ import {
   endWithoutOutcome,
   failTurn,
   startContinuation,
+  startHopWake,
   startTurn,
   withdrawUserTurn,
 } from "./state.ts";
@@ -123,13 +124,30 @@ export interface HopTurnPort {
    * The owner APPROVED a proposed move: the host hands the spec over, and the
    * App starts it exactly as a typed `/move` (one path to the view's move, D3).
    */
-  approved(spec: HopSpec, opts?: { readonly gateAnswered?: true }): void;
+  approved(
+    spec: HopSpec,
+    opts?: { readonly gateAnswered?: true; readonly autoAccepted?: true },
+  ): void;
+  /**
+   * Forget the pending fact: a `/clear` swaps the session, so a fact about the OLD
+   * one (its place, its cwd) must not ride the new one's first prompt (OD6).
+   */
+  clearPending?(): void;
   /**
    * The line the model must read at the start of its next REAL prompt — `[move
    * declined]` after a refusal, `[session moved to …]` after a commit (review M7)
    * — CONSUMED by this read: it belongs to exactly one prompt, so it can neither
-   * be lost nor repeated. `null` when there is nothing to say.   */
-  takeLine(): string | null;
+   * be lost nor repeated. `null` when there is nothing to say. `ctx.autoAccept` is
+   * the TUI's LIVE mode, which a moved line states (docs/feat/session-hop-ux OD6).
+   */
+  takeLine(ctx: { readonly autoAccept: boolean }): string | null;
+  /** OD6: a real user prompt breaks the consecutive-wake chain. */
+  onUserPrompt?(): void;
+  /**
+   * OD6: a MODEL's proposal settled without a spec to build (refused, or unaskable):
+   * continue the session so the model reads the line, if the rule allows it.
+   */
+  wake?(outcome: "declined" | "failed"): void;
 }
 
 /**
@@ -689,8 +707,21 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
                 if (outcome.kind === "approved") {
                   hopTurn.approved(
                     outcome.spec,
-                    outcome.gateAnswered === true ? { gateAnswered: true } : undefined,
+                    outcome.gateAnswered === true || outcome.autoAccepted === true
+                      ? {
+                          ...(outcome.gateAnswered === true ? { gateAnswered: true as const } : {}),
+                          ...(outcome.autoAccepted === true ? { autoAccepted: true as const } : {}),
+                        }
+                      : undefined,
                   );
+                  return;
+                }
+                // OD6: a refusal, or a move that could not even be asked about,
+                // leaves a line for the model — and a MODEL's proposal is one of
+                // the origins allowed to continue the session by itself, so it is
+                // woken to read it (`hopWakeStep` decides; the App fires).
+                if (outcome.kind === "declined" || outcome.kind === "failed") {
+                  hopTurn.wake?.(outcome.kind);
                 }
               },
               () => {
@@ -759,6 +790,12 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         attachments?: readonly AttachmentRef[];
         /** The chips whose refs those are: their `[image: …]` rows and a restore. */
         images?: readonly AttachedImage[];
+        /**
+         * docs/feat/session-hop-ux OD6: the turn is a hop's OWN wake — it carries
+         * the pending hop line and paints the dim `↻ continuing after the move` row
+         * instead of a user bubble, so the frame says why a turn started by itself.
+         */
+        hopWake?: boolean;
       },
     ) => {
       const session = sessionRef.current;
@@ -781,9 +818,18 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
         pushNotice(COMPACTING_NO_TURN);
         return;
       }
-      if (!continuation) {
+      // OD6: a hop's wake is a REAL prompt (it carries the hop line, and it is saved
+      // as conversation) that shows NO user bubble — the dim row below says why a
+      // turn started by itself. It is not a continuation: a continuation takes no
+      // hop line at all, and this one exists to carry one.
+      const hopWake = opts?.hopWake === true;
+      const noBubble = continuation || hopWake;
+      if (!noBubble) {
         lastUserRef.current = text;
         lastHadImagesRef.current = (opts?.images?.length ?? 0) > 0;
+        // OD6: a typed prompt breaks the wake chain (HOP_WAKE_CHAIN_MAX counts
+        // CONSECUTIVE self-continues, so one user word starts the count over).
+        hopTurn?.onUserPrompt?.();
       }
       const images = (opts?.images ?? []).map((chip) => imageRowText(chip.ref));
       const controller = new AbortController();
@@ -791,15 +837,21 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       stoppedHereRef.current = false;
       stateRef.current = continuation
         ? startContinuation(stateRef.current, Date.now())
-        : startTurn(stateRef.current, text, Date.now(), images.length > 0 ? images : undefined);
+        : hopWake
+          ? startHopWake(stateRef.current, Date.now())
+          : startTurn(stateRef.current, text, Date.now(), images.length > 0 ? images : undefined);
       setScrollOffset(0);
       flushNow();
       // The bubble `startTurn` appended (none for a continuation): withdrawn by
       // identity if the prompt loses the slot (C3).
-      const item = continuation ? undefined : stateRef.current.items.at(-1);
+      const item = noBubble ? undefined : stateRef.current.items.at(-1);
       // The one line the model reads at the start of a real prompt (M7): CONSUMED,
-      // so it is neither lost nor repeated. A continuation prompt takes none.
-      const line = continuation ? "" : (hopTurn?.takeLine() ?? "");
+      // so it is neither lost nor repeated. A continuation prompt takes none. The
+      // mode is the TUI's LIVE one (OD6), so a moved line never states a stale
+      // `auto-accept on|off`.
+      const line = continuation
+        ? ""
+        : (hopTurn?.takeLine({ autoAccept: permission.autoApprove }) ?? "");
       const sendOpts = {
         ...(opts?.skill !== undefined ? { skill: opts.skill } : {}),
         ...(opts?.attachments !== undefined && opts.attachments.length > 0
@@ -843,6 +895,9 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
       streamTurn,
       wakeRef,
       hopTurn,
+      // OD6: the hop's wake line states the auto-accept mode, so `run` must be
+      // rebuilt when the mode changes (`permission` is the render's live object).
+      permission,
     ],
   );
   // NOTE: `App` installs this into its own `runRef` right after the hook returns
