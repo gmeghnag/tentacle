@@ -664,3 +664,71 @@ twice, same result. Changelog: `changelog.d/mobile-relay.added.md` (one bullet).
 `TODO.md` untouched.
 
 ## Review
+
+### R0 + R1 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 1 MEDIUM). Scope: `git diff main...HEAD`, slices R0+R1 only.
+
+**Gate (re-run here):** `bun test` on relay.test.ts + relay-id.test.ts + json-schema.test.ts → 48 pass / 0 fail; `bun run lint` clean (1296 files); `bun run typecheck` clean. I did not re-run the full suite.
+
+**Findings**
+
+1. **HIGH — `ready.features` is a closed enum, so it breaks forward compatibility.**
+   `packages/protocol/src/relay.ts:133` (`z.array(z.enum(RELAY_FEATURES))`). A
+   relay that announces a feature this build does not know fails the whole
+   `ready` parse. Probe:
+   `RelayToDaemonFrameSchema.safeParse({t:"ready",v:1,id,features:["push","future"]}).success === false`.
+   The plan says "a malformed frame is a close", so that daemon drops the link
+   and retries forever. Failure scenario: the hosted relay is deployed with a
+   second feature name, and every `serve` already installed loses relay
+   reachability at once, with no version error and no notice. This defeats the
+   point of the task-16 amendment (announce features without breaking old
+   daemons) and AGENTS §7 forward-compat ("fields are free"). Fix: accept
+   `z.array(z.string().max(…)).max(16)` and filter to the known names after the
+   parse. The test must show a `ready` with an unknown feature parsing and the
+   unknown name dropped. The same reasoning applies, less severely, to
+   `error.code` (`:167`): a new code becomes "malformed" instead of a refusal.
+2. **MEDIUM — `isInboundFrameTooLarge` is described as stopping R0(b)'s attack,
+   and it cannot.** The comments at `relay.ts:79-84` and `:296-300`, and the test
+   at `relay.test.ts:243` ("before it becomes a JS string"), say this. But R0(b)
+   showed the Bun client has already turned the 64 MiB frame into a JS string
+   (+130 MiB RSS) before any handler runs. A length check in the handler only
+   saves the JSON/zod cost. It does not bound memory. Failure scenario: R4
+   relies on this "guard", F7 is recorded as closed, and a hostile relay can
+   still force allocations as large as Bun allows on every reconnect. Fix:
+   rewrite the comments, the test name and Execution R0(b) to say what the guard
+   really does. Leave F7's memory bound as an open R4 item (look for a
+   client-side max-payload option, or accept it and back off after an
+   oversize close).
+
+**Premise table.** relay.ts:1 = the doc's id formula: TRUE. The vector
+`WSbKVXnUw63XiNj5KDcKsU` matches my own `node:crypto` computation: TRUE.
+`isPairingAddress` (`pairing.ts:122`) accepts what `relayAddress` builds: TRUE.
+There is one exception: a long base path exceeds `ADDRESS_MAX` and is refused
+later by encode. That is a refusal, not silent, so it is not a finding.
+`@noble/hashes` is already a transport dependency: TRUE. `PROTOCOL_VERSION`
+untouched and no `protocol.d/` note: TRUE (no RPC change). Small doc drift:
+`relay-id.ts:13` says the function lives on the `/noise` subpath, but it is
+exported as `./relay-id`.
+
+**Attacks tried.**
+- (a) Loopback spoofing (`127.0.0.1.evil`, `localhost.evil`): refused.
+  `ws://0x7f000001`, `ws://127.1` and `ws://[0:…:1]` are accepted, but the URL
+  parser normalises them to real loopback, so this is OK.
+- (b) Uppercase scheme or host (`WSS://Relay.Example`): accepted, and the app
+  accepts the address it builds.
+- (c) Unknown feature in `ready`: fails (finding 1).
+- (d) Strip vs strict: unknown fields are dropped (test at `:176`).
+
+**Mutation.** I did not mutate anything myself: the sandbox would not run my
+scripted mutate-then-revert command without approval. Instead I checked the
+executor's 7-row table against the test bodies. Each named test asserts the
+exact property its mutation breaks, and the vector is independent of the code,
+so I consider the tests non-vacuous. The tree is unchanged apart from this
+section.
+
+**Executor behaviour.** Honest and well evidenced: R0 probes pasted, red then
+green shown, drift listed. Its one mistake is over-claiming what the R0(b)
+guard protects (finding 2).
+**Model note:** executor deepseek-v4, reviewer claude-opus-5-5. Different
+model families.
