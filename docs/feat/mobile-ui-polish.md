@@ -954,6 +954,30 @@ red, then green, or to mutate.
 **Gate (unchanged tree):** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean ·
 `bun run lint` 1394 files, 0 issues · `bun test` 10027 pass, 4 skip (opt-in), 0 fail.
 
+### Fix round 3
+
+*— claude-opus-5-5, 2026-11-15*
+
+Scope: Review "Round 3". It has one open item, MEDIUM finding 2. It has no
+HIGH item. **No code was changed.**
+
+- **Finding 2 (no simulator evidence) — BLOCKED, not fixed.** A simulator is
+  still booted (iPhone 17 Pro, iOS 26.5). I ran
+  `E2E_ONLY_FLOWS=15-revoked,16-remove-computer,12-pair-declined,13-pair-expired,20-camera-close bun run e2e:mobile --ios 26`
+  once. The harness answered "This command requires approval" (refused). I did
+  not retry it in another form (§0). There are no screenshots and no flow
+  results, for the same reason as Fix round 2: only the runner rebuilds the
+  client with `expo-symbols`/`expo-blur`.
+  - Unblock (owner/orchestrator): approve that command and its `--ios 18` twin.
+    Then take light/dark screenshots and run the Fable visual review. Another
+    executor round cannot close this.
+
+**Red/green, mutations:** none. No fix was made, so there was nothing to make
+red, then green, or to mutate.
+
+**Gate (unchanged tree):** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean ·
+`bun run lint` 1394 files, 0 issues · `bun test` 10027 pass, 4 skip (opt-in), 0 fail.
+
 ## Review
 
 ### Slice 0 — adversarial review (fresh context)
@@ -1067,5 +1091,18 @@ red, then green, or to mutate.
 - **Mutation:** not applicable. The diff is docs-only, so there is no new code or test to mutate.
 - **Regressions:** none possible from a docs-only diff. Gate: `bun run typecheck` clean · `bun run lint` 1394 files, 0 issues.
 - **Executor behaviour:** honest. It changed no code, did not retry the refused command in another form (§0), and states the exact unblock steps: approve `E2E_ONLY_FLOWS=… bun run e2e:mobile --ios 26` (and `--ios 18`), then take light/dark screenshots and run the Fable visual review. This needs the owner or orchestrator, not another executor round.
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; executor was a different model)
+
+### Round 4
+
+**Verdict: REQUEST-CHANGES.** Scope: `git diff HEAD~1` (`0dc925e9`). It changes no code (`git diff HEAD~1 --quiet -- apps packages` reports nothing). It adds "Fix round 3" to this doc and 12 untracked-tool artefacts.
+
+1. **MEDIUM (new regression) — stray Playwright artefacts committed at the repo root.** `.playwright-mcp/` holds `p1.png` (2.8 MB), `now.png`, `p2.png`, `probe-*.png`, `v1.png` and five `page-*.yml` snapshots. One snapshot is an HTTP 404 page; the others are empty. That is about 3.8 MB of binaries unrelated to the task, and `.gitignore` has no `playwright` entry. Failure scenario: merging puts them permanently into `main`'s history (a later delete does not shrink the repo), and they look like task evidence when they are not. Fix: remove `.playwright-mcp/` from the branch, and add it to `.gitignore` (or keep such output under `.tentacle/tmp/`, §6).
+2. **MEDIUM — finding 2 (no simulator evidence) still OPEN.** No PNG under `.tentacle/tmp/mobile-ui/slice-1|slice-2/` (only another session's `screens.log`). The committed `.playwright-mcp` images are browser probes, not simulator screenshots of the app or e2e flow results. Owner/orchestrator approval of the e2e run is still required.
+
+- **Mutation:** not applicable. No code or test changed.
+- **Gate:** `bun run typecheck` clean · `bun run lint` 1394 files, 0 issues.
+- **Executor behaviour:** the doc is honest about the block. But the commit swept in unrelated tool output, which suggests `git add -A` without checking the staged files.
 
 *— claude-opus-5-5, 2026-11-15* (fresh context; executor was a different model)
