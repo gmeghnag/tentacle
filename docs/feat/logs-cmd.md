@@ -347,3 +347,4 @@ sanitized.
 - Q4 `-f` with no reachable daemon: **(a)** follow the FILE (poll + re-parse by entry id; committed events only; said on stderr), in sub-task 1.
 - Q5 delivery: **(a)** pull (`watch_next` long-poll, 25 s).
 - Q6 daemon.log/relay.log: **(a)** not merged in v1; `--summary` prints their paths.
+- Q7 selector: **(a)** newest by default, full uid, `<run-name>` in sub-task 3; prefixes/titles later.
