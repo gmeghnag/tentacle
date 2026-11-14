@@ -968,3 +968,40 @@ together, the tests run, then reverted; `git status` was clean afterwards.
 `busy` is clear between serialised runs. The write queue recovers after a
 failed write (it has its own test). `discard` and `backToDraft` on an item that
 is already gone are no-ops.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-14* · scope `git diff HEAD~1` (35f7355)
+
+**Verdict: PASS.**
+
+**Gate:** the 5 touched files pass 90/90 (286 expects). `bun run lint` is clean
+(1074 files) and `bun run typecheck` is clean.
+
+**Round-2 finding, fixed and checked by mutation.** The mutations were applied,
+run and reverted; `git status` was clean afterwards.
+- **What changed:** `refusalOf` now handles `SessionNotOpenError` through
+  `notOpenRefusal`. A link that is down maps to `offline`; an archived, deleted
+  or gone session maps to the new `draft` refusal, which `refuse` hands back to
+  the field.
+  - Mutation A: drop the branch → "Send with the link DOWN keeps it waiting",
+    "Send on an ARCHIVED session", and the `refusalOf` offline-names test fail.
+  - Mutation C: `notOpenRefusal` always answers `offline` → the ARCHIVED test
+    fails.
+- **What changed:** `steerNow` checks `facts.availability` before the running
+  turn. Mutation B: skip that check → "Queue as steer with the link DOWN" fails.
+- **The round-2 repro now ends `waiting`, with no decision**
+  (`.tentacle/tmp/mobile-compose-13b/review-r2-notopen.test.ts`).
+
+**Regressions checked, none found:**
+- `refuse` handles every `Refusal` kind; the compiler checks the switch.
+- A `draft` refusal from inside an upload hands the item back and never reopens
+  the session (F20).
+- The link test now uses the app's own `unavailableSessionPort`, not a
+  test-only copy that threw a bare `Error`.
+- The steer is still turn-bound (`client.enqueue`).
+- The name check is safe: wire errors arrive as `RpcError`, so a daemon cannot
+  forge the `SessionNotOpenError` name.
+
+**Executor:** fixed exactly the finding, at its root (one mapping used in three
+places), with tests that name their mutations.
