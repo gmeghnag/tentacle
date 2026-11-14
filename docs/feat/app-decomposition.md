@@ -5078,3 +5078,22 @@ say 22 with their origin named, the plan documents 20 → 22, and the ≲ 800
 target is re-measured and restated honestly (1,941 lines; the shape is met, the
 size is not, and the reason — 55-field ports — is named as debt for a future
 slice, not this one). Nothing of S11/S12/S13 was started.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-14 (fresh-context adversarial review of S14, `git diff main...HEAD`)*
+
+**Verdict: REQUEST-CHANGES.** The tidy works and introduces no behaviour change (only imports and comments). But its main new check misses exactly what it claims to catch.
+
+**Findings**
+1. **MEDIUM: the "no dead import" check is fooled by comments; 4 dead imports remain.** `app-tidy-structure.test.ts:57` looks for each name in the file body with its import lines removed, but comments and strings are still there. So a name that is only *mentioned* in a comment counts as used. Four imports in `App.tsx` are used ONLY in comments: `NOT_AN_IMAGE_NOTICE` (`:18`, its only mention is a comment at `:347`), `JOB_REFRESH_MS` (`:50` / comment `:897`), and `sessionsChoose` and `switchingRefusal` (`:80` / comment `:1099`). Failure scenario: the test is green and the doc says "every survivor re-checked in the body", yet 4 dead imports remain. Any later dead import whose name appears in a nearby comment will also pass (the comments in this file name identifiers everywhere). Fix: remove `//` and `/* */` comments before the search, add a comment-only case to the control test, and drop the 4 names. Then the count is 32, not 28. Evidence: `.tentacle/tmp/app-decomp-14-tidy/nc.ts` → `comment-only: [NOT_AN_IMAGE_NOTICE, JOB_REFRESH_MS, sessionsChoose, switchingRefusal]`.
+2. **MEDIUM: changelog fragment for internal-only work** (`changelog.d/app-decomp-14-tidy.changed.md`). AGENTS §10 says: "Internal/dev/test-only work adds no fragment". The fragment itself ends "No user-visible behaviour changes." It would ship as a `Changed` entry in the release notes. Delete it.
+3. **MEDIUM: the executor signature may be wrong.** The S14 section is signed `claude-opus-5-5 (executor)`, but commit `8c06436f` is titled `exec (deepseek)`. AGENTS §10 requires each section to be signed by the model that actually wrote it. The orchestrator should confirm which model wrote it and correct the signature.
+
+**Gate (reviewer-run):** the 9 touched/related test files → 60 pass / 0 fail. `bun run lint` → Checked 1324 files, no fixes. `bun run typecheck` (root, mobile, relay) → OK. I did not re-run the full suite; the executor reports 9529 pass / 3 skip / 0 fail.
+
+**Attacks tried:** (a) Comment-only imports: FOUND (finding 1). (b) Stale "20" count claims anywhere in `packages/` and `apps/`: none left (rg). The scan only covers the top level of `src/`, but no subdirectory has such a claim today. (c) Namespace or aliased imports that would trip `namesOf`: `App.tsx` has none. The `as` handling described in the doc comment ("`as` kept left") is not implemented: `x as y` would be reported dead. This is a latent false positive, not a finding today. (d) `AutoAcceptFeed` re-export kept: holds (`auto-accept-feed.test.tsx` green). (e) Effect count 22 vs. `toBe(22)` assertions: unchanged, so the edits were wording only.
+
+**Mutation:** I did not repeat M1–M3 on the tracked file. The in-test control (`dead` is reported, a re-exported name is not) shows the scan is not vacuous for import-only cases. Finding 1 shows the opposite for comment-mentioned names.
+
+**Executor behaviour:** careful and honest about the 29→28 drift and the missed ≲800 target. But the "every survivor re-checked in the body" claim did not hold for 4 names.
