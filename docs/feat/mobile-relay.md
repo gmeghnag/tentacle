@@ -2731,3 +2731,72 @@ for `lock-screen`, the host cannot run flows and 22's result says nothing.
   handshake, only the OPEN. Bounding it would need a deadline the client does not
   currently offer per attempt; out of this slice (the plan scopes the stagger to
   socket-open).
+
+## Review
+
+### R6 — fresh-context adversarial review — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 1 MEDIUM). Scope: `git diff main...HEAD` (R6 only).
+
+**Gate (re-run):** the 4 touched test files 60 pass / 0 fail (542 expects);
+`bun run typecheck` clean (root + mobile + relay); `bun run lint` 1318 files, clean.
+Full `bun test` not re-run (Execution reports 9521 pass / 3 opt-in skip).
+
+**Findings**
+
+1. **HIGH — fall-through skips addresses after a second handshake failure.**
+   `apps/mobile/src/address-dial.ts:161` slices the CURRENT (already sliced)
+   round with `outcome.at`, which is the candidate's `position` in the FIRST
+   round (`roundOf` is never re-run, `Candidate.position` is fixed). After one
+   fall-through the two numberings diverge. Repro
+   (`.tentacle/tmp/mobile-relay/rev-r6-fallthrough{,-c}.ts`, opens resolve at once,
+   non-terminal `confirm` failures): `[A,B,C,D]` with only C healthy →
+   confirmed `[A,B,D]`, **throws**; C is never dialled. With the real list
+   `[LAN, tailnet, relay]`, two non-terminal handshake failures (LAN, tailnet)
+   give `slice(2)` of `[tailnet, relay]` = `[]` → the relay is silently never
+   tried — the exact fallback R6 exists for, and a regression vs. `main`'s
+   sequential loop, which reached every address. No test covers two consecutive
+   handshake failures. Fix shape: slice by the winner's index in the current
+   array (or renumber per round) + a test with ≥2 consecutive handshake failures.
+2. **MEDIUM — a late-failing loser overwrites the diagnosis, incl. `revoked`.**
+   `apps/mobile/src/connection.ts:254-261`: `open`'s catch calls
+   `diagnosis.observe({opened:false})` for EVERY failed open, also one that
+   fails after the race was decided (`address-dial.ts` ignores the rejection,
+   but the observation already happened). Repro
+   (`.tentacle/tmp/mobile-relay/rev-r6-late-loser.ts`, real `createLinkDiagnoser`
+   + `firstAnswering`, steps shaped as in `connection.ts`): LAN hangs, relay
+   starts at 750 ms, opens, handshake `denied` → `revoked`; then the LAN connect
+   errors (EHOSTUNREACH/TCP timeout) → diagnosis becomes **`unreachable`**. The
+   row then reads "Can't reach … the relay?" with Retry instead of the
+   authenticated `revoked` + Remove (`computer-rows.ts:74-95`). Same mechanism
+   turns an `ok` link's verdict into `unreachable` after a success. Sequential
+   code could not do this (no concurrent opens). The Execution's "abandoned loser
+   records NOTHING" holds only for a loser that OPENS late, not one that FAILS
+   late. Fix shape: observe an open failure only while its race is undecided
+   (e.g. let `firstAnswering` report failures, or a per-dial generation guard),
+   + a test where the loser rejects after the winner settled.
+
+**Mutation (mine):** removed the stagger re-arm (`arm()` in `startNext`) →
+`address-dial.test.ts` did not finish in 120 s (tests await a race that never
+progresses): red, but as a hang, not an assertion. Reverted by reverse edit;
+`git status` clean; 13/13 green after.
+
+**Attacks tried:** (a) fall-through numbering across rounds → finding 1;
+(b) late loser rejection vs. diagnoser → finding 2; (c) `unauthorized` mid-race
+leaves an armed timer / unclosed loser → holds (`winner` cancels, late opens
+`abandon`); (d) `link.address()` = last STARTED, not the winner
+(`connection.ts:255`) → wrong after a race, but only tests read it (no app
+consumer): nit; (e) a fast-refused open waits the full 750 ms before the next
+starts (RFC 8305 starts the next at once): latency regression vs. `main`'s
+immediate fall-through (3 refused addresses ≈ 1.5 s), nit; (f) no domain in
+`apps/mobile/src` → holds.
+
+**What holds:** first-open-wins with losers closed pre-handshake (the "one
+session path" invariant — one `RemoteClient`/`gate.dial` stack, no parallel
+loop); `unauthorized` stops; `lastGood` ring start; diagnosis text; Maestro
+wiring (on-simulator pass still pending, environmental — Execution's own note).
+
+**Executor behaviour:** careful and honest (recorded its own vacuous first
+mutation-6 test and fixed it); missed the multi-round case because every
+fall-through test has only ONE failed handshake. Reviewer is the same model
+family (Opus) as the Execution's signature: shared blind spots possible.
