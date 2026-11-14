@@ -1,11 +1,13 @@
 /**
  * The mockups' round glass button (docs/feat/mobile-ui-polish.md Design 2): 44 pt
  * (56 pt `fab`), the `glass` fill with a 1 px `glassBorder` and a soft shadow.
- * The translucent colour is the blur fallback the owner named (Q4) — `expo-blur`
- * is a native add-on not installed yet (see `Icon.tsx`). Render only.
+ * Under the content: an `expo-blur` material (Owner Q4), then the translucent
+ * `glass` tint over it, both clipped to the circle while the shadow stays on the
+ * unclipped outer view. Render only.
  */
+import { BlurView } from "expo-blur";
 import type { JSX } from "react";
-import { Pressable, StyleSheet, Text } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { type Palette, size as SIZE, typography } from "../theme.ts";
 import { Icon, type IconName } from "./Icon.tsx";
 
@@ -55,13 +57,28 @@ export function GlassButton({
           minWidth: diameter,
           borderRadius: diameter / 2,
           paddingHorizontal: label === undefined ? 0 : 16,
-          backgroundColor: onDark ? "rgba(44,44,46,0.72)" : palette.glass,
           borderColor: onDark ? "rgba(255,255,255,0.16)" : palette.glassBorder,
           shadowOpacity: onDark ? 0 : palette.shadowOpacity,
           opacity: pressed ? 0.6 : 1,
         },
       ]}
     >
+      <BlurView
+        pointerEvents="none"
+        intensity={60}
+        tint={onDark ? "systemUltraThinMaterialDark" : "systemUltraThinMaterial"}
+        style={[StyleSheet.absoluteFill, { borderRadius: diameter / 2, overflow: "hidden" }]}
+      />
+      <View
+        pointerEvents="none"
+        style={[
+          StyleSheet.absoluteFill,
+          {
+            borderRadius: diameter / 2,
+            backgroundColor: onDark ? "rgba(44,44,46,0.72)" : palette.glass,
+          },
+        ]}
+      />
       {label === undefined ? (
         <Icon name={icon ?? "ellipsis"} color={color} size={variant === "fab" ? 24 : 20} />
       ) : (

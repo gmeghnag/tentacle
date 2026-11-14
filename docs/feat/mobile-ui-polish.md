@@ -870,6 +870,65 @@ red and then green, or to mutation-check.
 **Gate (unchanged tree, re-run):** `bunx tsc --noEmit` clean · `bun run lint`
 1393 files, 0 issues · `bun test` 10022 pass, 4 skip (opt-in), 0 fail.
 
+### Fix round 1 (after review round 3)
+
+*— claude-opus-5-5, 2026-11-15*
+
+Scope: the two MEDIUMs of "Slices 1–2 — adversarial review, round 3". This
+session had registry access (`npm view expo-symbols@58 version` → 58.0.0–58.0.5)
+and a booted simulator (`xcrun simctl list devices booted` → iPhone 17 Pro,
+iOS 26.5). The e2e runner was still refused.
+
+- **Finding 1 (Unicode icons, no blur) — FIXED (code); not seen on a device yet.**
+  - `apps/mobile/package.json` + `bun.lock`: `bunx expo install expo-symbols expo-blur`
+    → `expo-symbols ~58.0.5`, `expo-blur ~58.0.6` (SDK 58 pins).
+  - `apps/mobile/src/ui/Icon.tsx`: the whole stroke/glyph renderer (with the
+    `GLYPH` table `☰ ▭ ⌨ …`) is replaced by `<SymbolView name={name} tintColor size weight>`.
+    The `IconName` union and `IconProps` are unchanged, so no caller changed. `IconName`
+    now has to fit `SFSymbol`, so a misspelt name fails `tsc -p apps/mobile` (it passes).
+    The fallback for non-iOS platforms is an empty box of the same size, not a glyph.
+  - `apps/mobile/src/ui/GlassButton.tsx`: a `BlurView` (`systemUltraThinMaterial`,
+    or `…Dark` with `onDark`, intensity 60) clipped to the circle, then the `glass`
+    tint as an overlay above it. The shadow stays on the unclipped `Pressable`.
+  - `expo-haptics` / `expo-clipboard` are not installed. No code uses them yet;
+    they belong to the slice that adds Copy/haptics (Owner Q4).
+  - Still Unicode, but on screens that are not restyled yet (later slices):
+    `SettingsScreen.tsx:86` `✓` and `ComposeBar.tsx:137,172,177` `⏳ 🖼 ⚠ ◷`.
+  - **Regression test** `apps/mobile/test/icon-glass-wiring.test.ts`, which pins
+    the wiring from the source (the `.tsx` files cannot be imported by Bun). It checks:
+    both packages are dependencies; `Icon` imports `SymbolView` and passes
+    `name={name}`; `GlassButton` imports and renders `BlurView`; and no
+    non-comment line of `Icon`/`GlassButton`/`ScreenHeader`/`ComputersScreen`/`PairScreen`
+    contains a pictograph (U+2190–U+2BFF, U+1F000–U+1FAFF).
+    - **RED** on the pre-fix tree: `0 pass · 5 fail`, every failure on its property
+      assertion (`expo-symbols`/`expo-blur` undefined, no `SymbolView`/`BlurView`,
+      glyph hits such as `"checkmark.circle": "✓"`).
+    - **GREEN** after the fix: `5 pass · 0 fail`.
+    - One test bug was found and fixed: the glyph scan flagged a `/** 123456 → 123 456 */`
+      doc comment in `PairScreen.tsx`. The comment filter now also skips `/*` lines.
+  - **Mutations** (the original files were copied to `.tentacle/tmp/mobile-ui-polish/`
+    and put back for each run; afterwards each restored file was `cmp`-identical to the fix):
+
+    | Mutation | Result |
+    |---|---|
+    | M1: the old glyph `Icon.tsx` | `3 pass · 2 fail`: "`Icon` renders a `SymbolView`…", "no restyled surface draws a Unicode glyph…" |
+    | M2: the old `GlassButton.tsx` (no blur) | `4 pass · 1 fail`: "`GlassButton` puts a `BlurView` behind its content" |
+
+- **Finding 2 (no simulator evidence) — BLOCKED, not fixed.**
+  `E2E_ONLY_FLOWS=15-revoked,16-remove-computer,12-pair-declined,13-pair-expired,20-camera-close bun run e2e:mobile --ios 26`
+  → "This command requires approval" (refused, both with and without output
+  redirection). Screenshots of the build currently installed on the simulator would
+  show the pre-fix app: the new native modules need a rebuild, and the runner does
+  that rebuild (a Release build). So no PNGs were taken.
+  - Still needed: that command (plus `--ios 18`) approved, then light/dark
+    screenshots into `.tentacle/tmp/mobile-ui/slice-1|slice-2/`, then the Fable
+    visual review.
+  - On device this run also proves that `SymbolView`/`BlurView` render at all
+    (the source-level test cannot).
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile` clean · `bun run lint` 1394 files,
+0 issues · `bun test` 10027 pass, 4 skip (opt-in), 0 fail.
+
 ## Review
 
 ### Slice 0 — adversarial review (fresh context)
