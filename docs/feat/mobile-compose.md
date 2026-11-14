@@ -529,6 +529,116 @@ Red-before-green: flows 12–19 fail on 12c (no queue rows / photo button);
 
 ## Execution
 
+*— deepseek-v4-pro (via tentacle), 2026-11-14 — slice **13b `mobile-outbox`** only*
+
+**Load-bearing check (re-run first, as briefed) — PASSES.** Static: `turns` is a
+lifetime ledger, checked before anything runs (`hosted-session.ts:452-456`,
+`:1993-1996`, `:1997` "a rejected prompt starts and records nothing"), restored on
+reload (`:634-636`, `:1245-1248`, `:1264`); `enqueue`'s id is checked before the
+running check and binds to the exact turn (`:2694-2703`, `:2715-2721`), ids
+restored (`:637-640`). Empirical (`.tentacle/tmp/mobile-compose-13b/probe.test.ts`,
+2 pass): the SAME `turnId` sent twice by two clients → ONE user message; the SAME
+enqueue id twice → ONE queued row. No step contradicted the plan; nothing was
+stopped.
+
+**As-built, in dependency order.**
+
+1. `apps/mobile/src/outbox.ts` (new, pure) — the item model, `createItem` (both
+   keys minted ONCE at creation), `decide` (D4's table), `unchanged`, `asSteer`,
+   `refusalOf` (class/code → `offline` / `restore` / `decide` / `reupload`),
+   `withRef`/`refsOf`/`pendingUploads`, `reuploaded`, `addOwnIds`/`pruneOwnIds`,
+   `restoredOf`.
+2. `apps/mobile/src/drafts.ts` (new, pure) — `draftKey` (the `(computer,
+   session)` PAIR), `createDraftScheduler` (debounce 400 ms, injected clock,
+   `touch`/`take`/`force`/`dueIn`/`clear`), `draftOf`/`contentOf`.
+3. `apps/mobile/src/outbox-store.ts` (new) — versioned JSON (`schemaVersion: 1`)
+   over an injected `OutboxFs`; tmp + rename; unknown version refused and left
+   untouched (read-only thereafter); unparsable set aside `.corrupt-<ts>`, never
+   deleted; a failed write answers `false` (the `not-saved` banner) with the
+   memory state kept; `removeItem` deletes the photo copies; `outboxPaths`
+   escapes the computer id (a path segment never escapes the root).
+4. `apps/mobile/src/outbox-driver.ts` (new) — per-session serialised `run` over
+   an injected `OutboxSession`; `enqueue` (persist BEFORE any attempt);
+   `sendNow`/`steerNow`/`discard`/`backToDraft`; one photo at a time, each ref
+   persisted before the next.
+5. Tests (new): `outbox.test.ts` (21), `drafts.test.ts` (11),
+   `outbox-store.test.ts` (13), `outbox-driver.test.ts` (24),
+   `outbox-link.test.ts` (8, real `SessionHost` + `Connection` + real
+   `RemoteClient`s).
+6. `changelog.d/mobile-compose-13b.added.md` (one bullet).
+   No protocol change; `packages/protocol/schema/protocol.json` untouched (P11).
+
+**Drift from the Implementation (and why).**
+
+- **D4's `basis`** is `{historyLength, runningTurnId}`, not the plan's
+  `{history length, last turn id, turn running?, compaction epoch}`. Verified:
+  `RemoteSession` exposes no ended-turn id and no compaction epoch publicly
+  (`remote-session.ts:219-221` `busy`, `:286` `ownsTurn`); a compaction, a
+  `/clear` and any new message all change `historyLength`, so the property D4
+  needs ("nothing the person could see changed") is preserved by the two fields
+  that ARE observable. `decide`'s "our key IS the running turn" row still uses
+  the key, so F3 is unchanged.
+- **The running turn's id** is taken from `SessionActivity{kind:"turn"}` (the
+  `watch` the app already subscribes, `remote-session.ts:1424`), not from a
+  snapshot field — `SnapshotTurnSchema` exists on the wire but
+  `RemoteSession.snapshot()` returns messages only (`:945-947`). 13d's
+  `session-view.ts` receives exactly this activity; the driver's port keeps it
+  as one injected fact.
+- **`Decision` gained `wait`** (and `Refusal` `offline`): a `link` availability
+  is a "no answer yet, keep it", never a decision on stale facts. Additive to the
+  plan's table (F1/F6 converge the same way).
+- **One re-upload (F18) is marked on the item** (`reuploaded?: true`) rather than
+  inferred from "refs are empty": the driver's first attempt records refs as it
+  uploads, so an empty-ref check misread a `not_uploaded` refusal for a fresh
+  item (an actual bug the F18 test caught — fixed before the test went green).
+- **`outbox-driver.test.ts` is an extra file** beyond the plan's list: the plan's
+  13b row names `outbox.test.ts`/`drafts.test.ts`/`outbox-store.test.ts`/
+  `outbox-link.test.ts`; the sequencing and every refusal's landing spot are
+  driver behaviour, and testing them through the real daemon would need one
+  daemon per case. `outbox-link.test.ts` still proves the load-bearing property
+  end to end.
+- **The harness detail worth recording**: a second `newSession` of one id on the
+  SAME client replaces that client's stream listener, which silently makes an
+  "observer" client steal the turn under test. Every probe in
+  `outbox-link.test.ts` therefore uses a scratch client.
+
+**Mutations (run red, then reverted — `mutate.py`, no `git`).**
+
+| # | Mutation | Test that went red |
+|---|---|---|
+| M1 | a fresh `turnId` per attempt (`outbox-driver.ts`) | link T1 |
+| M2 | ignore `basis` → always `send` (`outbox.ts`) | link T4 |
+| M3 | treat `archived` as openable (`outbox.ts`) | link T6 |
+| M4 | re-mint `enqueueId` per attempt (`outbox-driver.ts`) | link T2 |
+| M5 | in-memory own ids, not the persisted set (test arg) | link T8 |
+| M6 | a refusal routed to `decide` instead of `restore` | link T7 |
+| M7 | loop on `not_uploaded` (drop the `reuploaded` guard) | driver "second `not_uploaded`" |
+| M8 | write in place, no tmp+rename | store "kill between tmp and rename" |
+| M9 | overwrite an unknown-version file | store "unknown schemaVersion" |
+| M10 | delete a corrupt file instead of setting it aside | store "SET ASIDE" |
+| M11 | ignore "the running turn IS our key" | outbox "already ran" |
+| M12 | compare the history length only | outbox "unchanged compares BOTH" |
+| M13 | reuse the prompt key for a steer | outbox "Queue as steer" |
+| M14 | `handedBack` forgotten (give twice) | link T8 |
+| M15 | attempt before persisting the item | driver "BEFORE any attempt" |
+| M16 | prune own ids with no live-queue guard | outbox "own ids added once" |
+
+Every mutation was applied to a saved copy and reverted immediately; the tree
+holds only the intended files (`git status` shows the 9 new source/test files
+plus the changelog fragment).
+
+**Gate (as run on this branch).** `bun run typecheck` — clean. `bun run lint` —
+`Checked 1073 files … No fixes applied` (the baseline in AGENTS §6). `bun test` —
+see the gate line in the branch report; the slice's own five files are 77 pass /
+0 fail.
+
+**Not verified here (13d's job, one line each).** The `expo-file-system`
+implementation of `OutboxFs` and the `AppState`/draft wiring are 13d's
+(`outbox-fs-expo.ts`, `App.tsx`); the photo pipeline (`readPhoto`'s bytes, HEIC,
+size, names) is 13c's — this slice takes a photo as `{file, mimeType, name}` and
+reads its bytes through the injected port.
+
+
 ## Review
 
 #### Orchestrator decisions (owner night delegation 2026-11-14)
