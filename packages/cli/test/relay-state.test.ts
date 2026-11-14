@@ -11,6 +11,7 @@ import {
   initialRelay,
   needsUse,
   notifyWakes,
+  ownUseOf,
   relayExits,
   relayStep,
   relayView,
@@ -368,6 +369,44 @@ describe("residentUseOf: `session/list`, as `exitPlan` needs it (L10)", () => {
     expect(residentUseOf({ sessions: [], cursor: "next" }, ME, opt)).toBeNull();
     // Off (the relay's read): unchanged.
     expect(residentUseOf({ sessions: [row("other", { attached: 1 })] }, ME)).toBeNull();
+  });
+});
+
+describe("ownUseOf: our own uid and the others, from ONE read (hop D1 4(a))", () => {
+  const ME = "11111111-1111-4111-8111-111111111111";
+  const row = (sessionId: string, over: Partial<SessionListEntry> = {}): SessionListEntry => ({
+    sessionId,
+    title: "t",
+    cwd: "/w",
+    createdAt: 1,
+    updatedAt: 1,
+    running: false,
+    attached: 0,
+    archived: false,
+    ...over,
+  });
+
+  test("own present: its own running/jobs, and who else is there", () => {
+    // Mutation: read `own` from a second `session/list` → the two can disagree.
+    expect(
+      ownUseOf({ sessions: [row(ME, { running: true, jobs: 2 }), row("a", { attached: 1 })] }, ME),
+    ).toEqual({ own: { running: true, jobs: 2 }, others: 1 });
+  });
+
+  test("own absent is `null` own (not a doubt): the uid is simply not live there", () => {
+    expect(ownUseOf({ sessions: [row("a")] }, ME)).toEqual({ own: null, others: 0 });
+    expect(ownUseOf({ sessions: [] }, ME)).toEqual({ own: null, others: 0 });
+  });
+
+  test("a list that cannot be trusted whole is no answer at all", () => {
+    expect(ownUseOf({ sessions: [row(ME)], cursor: "next" }, ME)).toBeNull();
+  });
+
+  test("a session whose client left is nobody, as `residentUseOf` has it", () => {
+    expect(ownUseOf({ sessions: [row(ME), row("gone")] }, ME)).toEqual({
+      own: { running: false, jobs: 0 },
+      others: 0,
+    });
   });
 });
 

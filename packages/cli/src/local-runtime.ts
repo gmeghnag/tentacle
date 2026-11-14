@@ -61,7 +61,7 @@ import {
   restoreImages,
   restoreNotice,
 } from "./laptop-blobs.ts";
-import { type ResidentUse, residentUseOf } from "./relay-state.ts";
+import { type OwnUse, type ResidentUse, ownUseOf, residentUseOf } from "./relay-state.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import {
   type SettingsLine,
@@ -148,6 +148,16 @@ export interface LocalRuntime {
     readonly ending?: boolean;
   }): Promise<{ readonly sessionsKept: number; readonly saved: boolean }>;
   /**
+   * Put `id`'s conversation on the laptop's disk NOW, without sealing or
+   * closing anything (docs/feat/session-hop.md D1 step 3): one last read-back
+   * of every open session (a foreign turn is saved only at its end), bounded,
+   * then the pending saves. `true` only when the daemon answered AND `id`'s
+   * own copy is clean (`SessionSaver.cleanFor`) — a failed save of ANOTHER uid
+   * is not this session's business (review M1). The runtime stays live either
+   * way: a hop that fails after this rolls back onto it.
+   */
+  freeze(id: string): Promise<boolean>;
+  /**
    * The relay handing its session over (docs/feat/detached-handover.md): from
    * now on nothing is saved (the TUIs save it), so its last write precedes the
    * ack and none follows it.
@@ -161,6 +171,41 @@ export interface LocalRuntime {
    * state. False once saving stopped (a hand-over: the TUIs save it).
    */
   saveConfirmed(): boolean;
+  /**
+   * `saveConfirmed` for ONE uid (docs/feat/session-hop.md D1 step 4(b)): that
+   * session's own read-back answered and no write of it is pending or failed.
+   * A hop requires this of the TARGET before it commits — another uid's
+   * failure must not decide it (review M1).
+   */
+  saveConfirmedFor(id: string): boolean;
+  /**
+   * Whether a controller of this runtime holds `id` — i.e. this runtime may
+   * have history for it that the laptop file does not (docs/feat/session-hop.md
+   * D1 step 2/3): an absent file is "nothing persisted" only when this is
+   * false. Synchronous and local: no daemon round trip decides it.
+   */
+  holdsSession(id: string): boolean;
+  /**
+   * Seal every open controller (docs/feat/session-hop.md D1 step 5): a turn
+   * ending after this, or a read still in flight, reports nothing more. The
+   * session stays open — the close comes with `dispose` — so the TUI still
+   * holds a live session if the commit path itself throws.
+   */
+  sealSessions(): void;
+  /**
+   * Our OWN `id` on this daemon and who else is there, from ONE fresh
+   * `session/list` read before any open (docs/feat/session-hop.md D1 step 4(a),
+   * D7b); `null` when it is not the whole truth.
+   */
+  ownUse(id: string): Promise<OwnUse | null>;
+  /**
+   * End `id` on THIS daemon for good before it is reseeded elsewhere
+   * (docs/feat/session-hop.md D1 step 4(a)). Resolves `true` only when the
+   * daemon confirmed the close (a `session/list` read right after no longer
+   * lists it): anything else means the old copy may still be there, and the
+   * hop must refuse rather than attach it.
+   */
+  closeOwn(id: string): Promise<boolean>;
   /** `RemoteClient.modelIdle`: the model calls this runtime serves are over, or `ms` passed. */
   modelIdle(ms: number): Promise<void>;
   /**
@@ -1153,9 +1198,54 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     stopSaving: () => {
       saving = false;
     },
+    freeze: async (id) => {
+      // The `quit` shape without the close (docs/feat/session-hop.md D1 step 3):
+      // the old runtime stays live, so a hop that fails later rolls back onto it.
+      const answered = await withTimeout(
+        Promise.all([...controllers].map((c) => c.saveNow())),
+        FLUSH_ON_EXIT_TIMEOUT_MS,
+        "the last read-back",
+      ).then(
+        () => true,
+        () => false,
+      );
+      // The writes reach disk before the caller opens the session elsewhere.
+      await deps.saver.drain({ timeoutMs: FLUSH_ON_EXIT_TIMEOUT_MS });
+      // THIS uid only: another session's failed save is not a reason to refuse (M1).
+      return answered && deps.saver.cleanFor(id);
+    },
     flushed: () => allFlushed(),
     saveConfirmed: () =>
       saving && [...controllers].every((c) => c.saveConfirmed()) && deps.saver.clean(),
+    saveConfirmedFor: (id) => {
+      const mine = [...controllers].filter((c) => c.sessionId === id);
+      return (
+        saving && mine.length > 0 && mine.every((c) => c.saveConfirmed()) && deps.saver.cleanFor(id)
+      );
+    },
+    holdsSession: (id) => [...controllers].some((c) => c.sessionId === id),
+    sealSessions: () => {
+      for (const controller of controllers) {
+        controller.seal();
+      }
+    },
+    ownUse: async (id) => {
+      try {
+        return ownUseOf(await client.sessionList(), id);
+      } catch {
+        return null;
+      }
+    },
+    closeOwn: async (id) => {
+      await client.closeSession(id);
+      // The daemon ANSWERED; only a fresh read says the old copy is gone.
+      try {
+        const { sessions, cursor } = await client.sessionList();
+        return cursor === undefined && !sessions.some((s) => s.sessionId === id);
+      } catch {
+        return false;
+      }
+    },
     modelIdle: (ms) => client.modelIdle(ms),
     unflushedExits: () => client.unflushedExits(),
     sessionJobs: async (id) => {

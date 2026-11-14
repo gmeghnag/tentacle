@@ -20,6 +20,7 @@ import { command as exit } from "./exit.ts";
 import { command as help } from "./help.ts";
 import { command as mcp } from "./mcp.ts";
 import { command as model } from "./model.ts";
+import { command as move } from "./move.ts";
 import { command as rename } from "./rename.ts";
 import { command as retry } from "./retry.ts";
 import { command as save } from "./save.ts";
@@ -52,6 +53,7 @@ export const BUILT_INS: readonly Command[] = [
   sessions,
   close,
   model,
+  move,
   retry,
   attach,
   copy,

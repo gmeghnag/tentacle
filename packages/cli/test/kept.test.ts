@@ -72,6 +72,20 @@ describe("parseKeptEntry", () => {
     expect(parseKeptEntry(JSON.stringify(good))).toEqual({ ok: true, entry: good });
   });
 
+  test("the hop owner mark round-trips, and an absent one stays absent (D5)", () => {
+    // `hop: true` is what makes a workload deletable by a hop back with `--rm`
+    // (docs/feat/session-hop.md D5, review finding 2). Losing it on parse would
+    // make a hop's own container undeletable; inventing it would make a `run`
+    // container deletable. Mutation: drop the parse clause → this row fails.
+    const hopped = { ...good, hop: true as const };
+    expect(parseKeptEntry(JSON.stringify(hopped))).toEqual({ ok: true, entry: hopped });
+    const plain = parseKeptEntry(JSON.stringify(good));
+    expect(plain.ok && plain.entry.hop).toBeUndefined();
+    // A pod-supplied `"hop": "true"` (a string) is not an owner mark.
+    const forged = parseKeptEntry(JSON.stringify({ ...good, hop: "true" }));
+    expect(forged.ok && forged.entry.hop).toBeUndefined();
+  });
+
   test("refuses, never half-loads: corrupt, another schemaVersion, missing fields", () => {
     expect(parseKeptEntry("{oops")).toEqual({ ok: false, problem: "not valid JSON" });
     const newer = parseKeptEntry(JSON.stringify({ ...good, schemaVersion: 2 }));

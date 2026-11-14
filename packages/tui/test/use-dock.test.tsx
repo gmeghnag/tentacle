@@ -48,21 +48,21 @@ describe("S5 structure: the dock owns no effect, so App's order cannot move", ()
     expect(src).not.toMatch(/import \{[^}]*\buseEffect\b[^}]*\} from "react";/);
   });
 
-  test("App keeps 20 effects, and the dock's four are at their pre-S5 indices", () => {
+  test("App keeps 22 effects (20 + session-hop's 2), and the dock's four keep their order", () => {
     const src = readSrc("App.tsx");
     const at = [...src.matchAll(/^\s*useEffect\(/gm)].map((m) => m.index ?? 0);
-    expect(at.length).toBe(20);
+    expect(at.length).toBe(22);
     // 1-based positions of the four effects this slice left in place: the
     // `jobs.onExit` subscription, the id-key reconcile, the timed output read,
     // and the one last read when the open job's exit is seen.
     const body = (i: number): string => src.slice(at[i] ?? 0, (at[i] ?? 0) + 400);
-    expect(body(2)).toContain("jobs.onExit");
-    expect(body(11)).toContain("dockIdKey");
-    expect(body(12)).toContain("jobTargetId === null");
-    expect(body(13)).toContain("jobEndedWhileOpen === null");
+    expect(body(3)).toContain("jobs.onExit");
+    expect(body(12)).toContain("dockIdKey");
+    expect(body(13)).toContain("jobTargetId === null");
+    expect(body(14)).toContain("jobEndedWhileOpen === null");
     // …and the hook call sits ABOVE all of them, so the order it was written in
     // is the order React sees.
-    expect(src.indexOf("useDock({")).toBeLessThan(at[2] ?? 0);
+    expect(src.indexOf("useDock({")).toBeLessThan(at[3] ?? 0);
   });
 });
 

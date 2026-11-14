@@ -17,10 +17,7 @@ import {
   attachErrorText,
   attachRowRows,
   attachRowView,
-  enterConvertsToChips,
-  imageRowText,
   removeLastChip,
-  submitPlan,
   uploadDone,
 } from "./attach-draft.ts";
 import { type AttachedImage, type FileProbe, nodeFileProbe } from "./attach-files.ts";
@@ -70,8 +67,10 @@ import { QueuedMessages } from "./components/QueuedMessages.tsx";
 import { QUIT_CONFIRM_ROWS, QuitConfirm } from "./components/QuitConfirm.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
-import { pushHistory, recall } from "./history.ts";
+import { recall } from "./history.ts";
 import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
+import { HOP_QUEUED_NOTICE, type HopSpec, hopStep, parseHopCommand } from "./hop-command.ts";
+import { hopFailureText, hopMovedNotice, hopPlaceText, hopStatusRow } from "./hop-status.ts";
 import { startIdleWarm } from "./idle-warm.ts";
 import { resolveLineInput } from "./input-actions.ts";
 import { inputRowCount } from "./input-view.ts";
@@ -98,6 +97,7 @@ import { useDock } from "./useDock.ts";
 import { useMouse } from "./useMouse.ts";
 import { usePanels } from "./usePanels.ts";
 import { useQuitClear } from "./useQuitClear.ts";
+import { useTurnDriver } from "./useTurnDriver.ts";
 
 export type { AutoAcceptFeed };
 import { CLEARED_ELSEWHERE_NOTICE, CLEARED_NOTICE } from "./clear-command.ts";
@@ -106,11 +106,9 @@ import {
   type QueuedRows,
   addRow,
   handBackRows,
-  handOff,
   markAcked,
   onReject,
   onSteer,
-  onTurnEnd,
   rowTexts,
   shownRows,
   takeAll,
@@ -133,15 +131,10 @@ import {
   SEND_NOW_HINT,
   SendNowErrorCode,
   afterCompactionUnsupported,
-  afterOldTurn,
   compactionWaitNotice,
   errorCode,
   fallbackNotice,
-  onCompactionSettled,
   onSuccessorError,
-  planRefusal,
-  planSendNow,
-  planTurnStart,
   withRestored,
 } from "./send-now.ts";
 import {
@@ -194,14 +187,28 @@ import {
 
 // `AppProps`/`SessionController`/`SettingsNoticeLine` are used here; the rest are
 // re-exported so every existing importer (`../src/App.tsx`) keeps working.
-import type { AppProps, SessionController, SettingsNoticeLine } from "./app-types.ts";
+import type {
+  AppProps,
+  HopFeed,
+  HopPlaceView,
+  HopRun,
+  HopTargetView,
+  SessionController,
+  SettingsNoticeLine,
+  TargetFeed,
+} from "./app-types.ts";
 
 export type {
   AppProps,
+  HopFeed,
+  HopRun,
+  HopTargetView,
+  HopPlaceView,
   NoticeFeed,
   SessionController,
   SessionDirectory,
   SettingsNoticeLine,
+  TargetFeed,
 } from "./app-types.ts";
 // `RunQuit` moved with S8 to the hook that executes it; it is re-exported here
 // for every importer that names `../src/App.tsx` (the test boundary).
@@ -313,6 +320,8 @@ export function App({
   sessions,
   runQuit,
   autoAccept,
+  hop,
+  targetFeed,
   columns: fixedColumns,
   jobRefreshMs,
 }: AppProps): ReactElement {
@@ -512,11 +521,37 @@ export function App({
   const ownClearsRef = useRef(0);
   const clearAfterTurnRef = useRef(false);
   const runClearRef = useRef<(() => void) | null>(null);
+  // A `/move` (docs/feat/session-hop.md D3): the hop running NOW (its phase row
+  // is STATE, the handle is a ref so a queued hop can start it from the turn's
+  // end), the spec a `/move` typed mid-turn left for the first true idle (D4),
+  // and the live place (`targetFeed`) so the badge and `daemonInPod` follow a move.
+  const [hopRun, setHopRun] = useState<{ target: string; phase: string | null } | null>(null);
+  const hopRef = useRef<HopRun | null>(null);
+  // A `/move` that waits for the turn boundary (D4). It is STATE, so the effect
+  // below re-runs when it changes; the ref is what a command reads synchronously.
+  const [hopQueued, setHopQueued] = useState<HopSpec | null>(null);
+  const hopQueuedRef = useRef<HopSpec | null>(null);
+  const startHopRef = useRef<((spec: HopSpec) => void) | null>(null);
+  /** The queued-hop driver, read from the effect below (a ref: no dependency cycle). */
+  const hopIfQueuedRef = useRef<(() => void) | null>(null);
+  const [targetView, setTargetView] = useState<HopTargetView | null>(() =>
+    targetFeed ? targetFeed.current() : null,
+  );
+  // The badge and `daemonInPod` follow the place the session is at (D2's feed):
+  // a hop changes them, and nothing else about the frame.
+  useEffect(() => targetFeed?.onTarget((view) => setTargetView(view)), [targetFeed]);
+  /** What the badge paints now (`null`: local, no badge, as today). */
+  const shownTarget = targetFeed ? (targetView?.badge ?? null) : (target ?? null);
+  /** A fact of the place the session is at now: a spilled file lives in the pod. */
+  const shownInPod = targetFeed ? (targetView?.daemonInPod ?? false) : daemonInPod;
   // A long history is being warmed before it is committed (C8): activities wait.
   const warmingRef = useRef(false);
   const [loading, setLoading] = useState<{ done: number; total: number } | null>(null);
   // The daemon's queue (every writer's waiting rows), as last reported (C7).
   const [daemonQueue, setDaemonQueue] = useState<DaemonQueue | undefined>(undefined);
+  // The same list for the callbacks that must not re-create themselves on every
+  // frame (a `/move`'s turn-boundary read, D4): a ref, updated where it is set.
+  const daemonQueueRef = useRef<DaemonQueue | undefined>(undefined);
   // ── the dock (S5 — docs/feat/app-decomposition.md) ─────────────────────────
   // The background rows, the dock's focus/drafts/`sent`, the per-job output
   // cache and the four dock actions live in `useDock`. Its EFFECTS stay here, in
@@ -546,7 +581,7 @@ export function App({
   const layoutOptsRef = useRef<RenderOptions>({
     expandAll: false,
     width: 80,
-    spillInPod: daemonInPod,
+    spillInPod: shownInPod,
   });
   const lastUserRef = useRef<string | null>(null);
   const prevRowsRef = useRef(0);
@@ -763,7 +798,7 @@ export function App({
       const items = stateRef.current.items;
       // Including `expandedIds`: the warm must fill the slot the committing
       // render will ask for, a clicked call's expanded command too.
-      const opts = { expandAll, width: next.columns, spillInPod: daemonInPod, expandedIds };
+      const opts = { expandAll, width: next.columns, spillInPod: shownInPod, expandedIds };
       runChunked(items.length, (from, budgetMs) => warmRowsChunk(items, opts, from, budgetMs), {
         isStale: () => warmGenRef.current !== gen,
         onDone: () => setSize(next),
@@ -775,7 +810,7 @@ export function App({
       stdout.off?.("resize", onResize);
       warmGenRef.current += 1; // cancel any in-flight warm on unmount/resubscribe
     };
-  }, [stdout, size.columns, expandAll, daemonInPod, expandedIds]);
+  }, [stdout, size.columns, expandAll, shownInPod, expandedIds]);
 
   // Reset the palette selection whenever the typed text changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on field.value
@@ -974,7 +1009,7 @@ export function App({
   const layout = layoutTranscript(st.items, {
     expandAll,
     width: columns,
-    spillInPod: daemonInPod,
+    spillInPod: shownInPod,
     blinkPhase: blinkPhase(blinkClock, blink),
     expandedIds,
   });
@@ -998,7 +1033,7 @@ export function App({
     setBlinkClock((c) => syncBlink(c, { calls: blinkCalls, running: blinkRuns }));
   }, [blinkRuns, blinkCalls]);
   // The layout options a history warm uses (read off the render thread).
-  layoutOptsRef.current = { expandAll, width: columns, spillInPod: daemonInPod, expandedIds };
+  layoutOptsRef.current = { expandAll, width: columns, spillInPod: shownInPod, expandedIds };
   // Once the transcript is quiet, fill the cache for the OTHER Ctrl+O view in
   // small chunks (idle-warm.ts) so the first toggle is a hit. Any change to the
   // deps (new items, a turn starting, a resize commit, Ctrl+O) cleans up and
@@ -1010,14 +1045,14 @@ export function App({
     idleWarmCancelRef.current = startIdleWarm(
       {
         items: idleItems,
-        opts: { expandAll, width: columns, spillInPod: daemonInPod, expandedIds },
+        opts: { expandAll, width: columns, spillInPod: shownInPod, expandedIds },
         running: idleRunning,
         busy: idleBusy,
       },
       { onError: (error) => warmErrorRef.current(error) },
     );
     return idleWarmCancelRef.current;
-  }, [idleItems, idleRunning, idleBusy, expandAll, columns, daemonInPod, expandedIds]);
+  }, [idleItems, idleRunning, idleBusy, expandAll, columns, shownInPod, expandedIds]);
   const total = layout.total;
   const win = windowFor(total, viewport, scrollOffset);
   const visible = sliceLaid(layout.laid, win.start, win.end);
@@ -1246,17 +1281,6 @@ export function App({
     };
   }, [watchReturned]);
 
-  /** No turn streams any more: show the TUI idle (a send-now kept it running). */
-  const showIdle = useCallback(() => {
-    if (stateRef.current.running && !streamCtrlRef.current) {
-      stateRef.current = applySessionEvent(
-        stateRef.current,
-        { type: "turn_end", reason: "cancelled" },
-        Date.now(),
-      );
-    }
-  }, []);
-
   /**
    * A background job that exited mid-turn could not be seen by the turn that
    * was running (the agent flushes exits at turn start). Now idle, fire a
@@ -1283,16 +1307,6 @@ export function App({
   }, [autoWakeOnJobExit]);
   wakeIfPendingRef.current = wakeIfPending;
 
-  // `streamTurn`, through a ref: it and `settleSendNow` call each other.
-  const streamTurnRef = useRef<
-    | ((
-        open: () => AsyncIterable<SessionEvent>,
-        controller: AbortController,
-        opts: StreamOpts,
-      ) => Promise<void>)
-    | null
-  >(null);
-  // The session-activity handler, through a ref: `streamTurn`'s settle drains
   // the held ones, and the handler starts streams (C2).
   const onActivityRef = useRef<((activity: SessionActivity) => void) | null>(null);
   // `swapSession`, through a ref: the activity handler (closed elsewhere) is defined before it.
@@ -1333,355 +1347,6 @@ export function App({
     pushNotice,
   });
 
-  /** Activities held while a run of mine streamed: handled in order once nothing is in flight. */
-  const drainHeld = useCallback(() => {
-    while (
-      heldRef.current.length > 0 &&
-      !streamCtrlRef.current &&
-      !sendNowRef.current &&
-      !warmingRef.current
-    ) {
-      const next = heldRef.current.shift();
-      if (next) onActivityRef.current?.(next);
-    }
-  }, []);
-
-  /**
-   * Commit `compute(state)` — a history replacing the transcript — after
-   * warming its rows in time-budgeted chunks when it is long (C8, the resize
-   * pattern): input stays live, the running line says how far it is. Items
-   * appended meanwhile (a notice) are kept after it.
-   */
-  const commitHistory = useCallback(
-    async (compute: (state: DisplayState) => DisplayState): Promise<void> => {
-      const before = stateRef.current.items;
-      const next = compute(stateRef.current);
-      if (needsWarm(next.items.length)) {
-        warmingRef.current = true;
-        const total = next.items.length;
-        let shownAt = 0;
-        setLoading({ done: 0, total });
-        // `main` yielded once after the last chunk too, so the commit always landed
-        // one macrotask later — a queued input/timer ran first. Keep that hop
-        // (docs/feat/tui-run-chunked.md, Review F2). `done` only settles `true`
-        // here: a throw leaves this function at the `await` (Review R3).
-        await runChunked(
-          total,
-          (from, budgetMs) => warmRowsChunk(next.items, layoutOptsRef.current, from, budgetMs),
-          {
-            onProgress: (done) => {
-              const now = Date.now();
-              if (now - shownAt > 50) {
-                shownAt = now;
-                setLoading({ done, total });
-              }
-            },
-          },
-        ).done;
-        await new Promise((r) => setTimeout(r, 0));
-        setLoading(null);
-        warmingRef.current = false;
-      }
-      stateRef.current = {
-        ...next,
-        items: commitWarmed(before, stateRef.current.items, next.items),
-        running: stateRef.current.running,
-      };
-    },
-    [],
-  );
-
-  /**
-   * The old turn is over (or was found over): settle the send-now waiting on
-   * it. `atomic`: its new turn starts, or, with the ack still on its way, the
-   * TUI keeps showing a running turn (the rows stay up). `fallback` (an older
-   * daemon: no facts to ask for): what is left of the rows is sent as a
-   * prompt, or restored after a resync.
-   * True when a turn goes on (do not end the TUI's turn).
-   */
-  const settleSendNow = useCallback(
-    (p: PendingSendNow): boolean => {
-      if (p.mode === "atomic") {
-        stateRef.current = startContinuation(stateRef.current, Date.now());
-        const events = p.successor;
-        if (events && p.next) {
-          sendNowRef.current = null;
-          wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // the new turn flushes the job exits at its start
-          void streamTurnRef.current?.(() => events, p.next, { successor: true });
-        }
-        return true;
-      }
-      sendNowRef.current = null;
-      const { text } = takeAll(rowsRef.current);
-      setRows(() => []);
-      const step = afterOldTurn({ text, resetSeen: p.resetSeen });
-      if (step === "send") {
-        wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" });
-        runRef.current?.(text, { fallback: true });
-        return true;
-      }
-      if (step === "restore") {
-        restoreInput(
-          text,
-          "_send-now (older daemon): the transcript was resynced — your queued messages are back in the input; check them before sending_",
-        );
-      }
-      return false;
-    },
-    [restoreInput, setRows],
-  );
-
-  /**
-   * Stream one turn's events into the transcript — ONE loop for every turn of
-   * the session: a prompt's (`run`, `own`), a send-now's new turn
-   * (`successor`, its rows hand off on its first event), another device's
-   * (`foreign`, docs/feat/tui-foreign-turns.md C1).
-   */
-  const streamTurn = useCallback(
-    async (
-      open: () => AsyncIterable<SessionEvent>,
-      controller: AbortController,
-      opts: StreamOpts,
-    ) => {
-      streamCtrlRef.current = controller;
-      if (opts.foreign) {
-        foreignRef.current = controller;
-      }
-      let handedOff = !opts.successor;
-      // Anything but an `unsupported` notice streamed: the daemon ran this turn.
-      let streamed = false;
-      // The model renewed its context: its skill set changed with it.
-      let reset = false;
-      try {
-        for await (const event of open()) {
-          if (event.type !== "unsupported") {
-            streamed = true;
-            handedWakeRef.current = false; // a turn ran: any later refusal is an ordinary one
-          }
-          if (event.type === "context_reset") {
-            reset = true;
-          }
-          if (!handedOff && event.type !== "unsupported") {
-            handedOff = true;
-            setRows(handOff); // the sent texts are its prompt now
-          }
-          if (event.type === "history_reset" && needsWarm(event.messages.length)) {
-            await commitHistory((s) => applySessionEvent(s, event, Date.now()));
-          } else {
-            stateRef.current = applySessionEvent(stateRef.current, event, Date.now());
-          }
-          // A queued message was just injected — drop it from the pending list.
-          if (event.type === "steer") {
-            const { id } = event;
-            setRows((rows) => onSteer(rows, id));
-          }
-          const pending = sendNowRef.current;
-          if (event.type === "history_reset" && pending) {
-            pending.resetSeen = true;
-          }
-          // The cleared history of a `/clear` in flight reached this turn as its
-          // snapshot (the client hands a turn started after the barrier the
-          // snapshot in-turn, review H2): nothing else will release the latch.
-          if (event.type === "history_reset" && clearingRef.current) {
-            clearingRef.current = false;
-          }
-          if (event.type === "text") {
-            scheduleFlush();
-          } else {
-            flushNow();
-          }
-        }
-        // A foreign stream that closed with no end: it ended behind a resync's
-        // cut — idle, with no stop reason (never a guessed one).
-        if (opts.foreign && stateRef.current.running) {
-          stateRef.current = endWithoutOutcome(stateRef.current);
-        }
-      } catch (error) {
-        const failed = opts.successor
-          ? onSuccessorError(error, rowsRef.current)
-          : ({ kind: "fail" } as const);
-        if (opts.own && lostSlot(error, streamed)) {
-          // Another device's turn took the slot first: my prompt never ran.
-          // Its bubble goes and its text is back in the input — never lost
-          // (decision 15); the held foreign turn renders once this settles.
-          stateRef.current = withdrawUserTurn(stateRef.current, opts.own.item);
-          // An image-only prompt has no text but IS a prompt, not a wake (P10).
-          if (opts.own.text !== "" || (opts.own.images?.length ?? 0) > 0) {
-            restoreInput(opts.own.text, SLOT_LOST_NOTICE);
-            restoreChips(opts.own.restoreChips);
-          } else if (handedWakeRef.current) {
-            // Once: `wakeIfPending` below fires it when the turn that won ends.
-            handedWakeRef.current = false;
-            wakeRef.current = wakeStep(wakeRef.current, { type: "refused" });
-          }
-        } else if (opts.own && refusedBeforeStart(error, streamed)) {
-          // The daemon refused these images BEFORE the turn started
-          // (docs/feat/attachments-tui.md D8): the bubble goes, the text is back
-          // in the input and the chips with it, and the reason is said —
-          // Enter uploads and tries again (the put is idempotent).
-          stateRef.current = withdrawUserTurn(stateRef.current, opts.own.item);
-          abortRef.current = null;
-          restoreInput(opts.own.text, attachErrorText(error));
-          restoreChips(opts.own.restoreChips);
-        } else if (failed.kind === "restore") {
-          for (const id of failed.ids) restoredRef.current.add(id);
-          setRows(() => []);
-          stateRef.current = applySessionEvent(
-            stateRef.current,
-            { type: "turn_end", reason: "cancelled" },
-            Date.now(),
-          );
-          restoreInput(failed.text, failed.notice);
-        } else {
-          stateRef.current = failTurn(
-            stateRef.current,
-            modelErrorNotice(error, model === "remote"),
-            Date.now(),
-          );
-        }
-      } finally {
-        if (reset) {
-          void skillsSync.settle(); // the `model` marks flip (docs/feat/skills-hot-reload.md)
-        }
-        if (streamCtrlRef.current === controller) {
-          streamCtrlRef.current = null;
-        }
-        if (foreignRef.current === controller) {
-          foreignRef.current = null;
-        }
-        // Only this turn's: a send-now's new turn installed its own.
-        if (abortRef.current === controller) {
-          abortRef.current = null;
-        }
-        const pending = sendNowRef.current;
-        // A `/clear` that stopped this turn: it runs once the turn has settled,
-        // and only here (taken now, so no path leaves it armed).
-        const clearNow = clearAfterTurnRef.current;
-        clearAfterTurnRef.current = false;
-        // A quit asked for mid-turn: the turn has settled (and was saved by the
-        // session's own `finally`), so exit now — and wake nothing. A send-now's
-        // new turn then runs daemon-side unobserved, as any turn after a quit.
-        if (exitPendingRef.current) {
-          sendNowRef.current = null;
-          setRows(onTurnEnd);
-          flushNow();
-          exit();
-        } else if (!(pending && settleSendNow(pending))) {
-          setRows(onTurnEnd); // the turn is over; nothing stays queued
-          flushNow();
-          // A foreign turn (or history) held while this ran comes now (C2).
-          drainHeld();
-          if (clearNow) {
-            runClearRef.current?.();
-          }
-          wakeIfPending();
-        } else {
-          flushNow();
-          // A send-now took over and started a new turn: the `/clear` that
-          // stopped this one is not run — said, never dropped silently (M3).
-          if (clearNow) {
-            pushNotice("_/clear not run: a send-now started a new turn — run /clear again_");
-          }
-        }
-      }
-    },
-    [
-      flushNow,
-      scheduleFlush,
-      exit,
-      restoreInput,
-      setRows,
-      settleSendNow,
-      pushNotice,
-      wakeIfPending,
-      commitHistory,
-      drainHeld,
-      skillsSync,
-      model,
-      restoreChips,
-    ],
-  );
-  streamTurnRef.current = streamTurn;
-
-  const run = useCallback(
-    async (
-      text: string,
-      opts?: {
-        continuation?: boolean;
-        skill?: string;
-        fallback?: boolean;
-        /** The prompt's image refs (already uploaded: docs/feat/attachments-tui.md D8). */
-        attachments?: readonly AttachmentRef[];
-        /** The chips whose refs those are: their `[image: …]` rows and a restore. */
-        images?: readonly AttachedImage[];
-      },
-    ) => {
-      const session = sessionRef.current;
-      if (!session) {
-        return;
-      }
-      // A continuation turn has no user input (an autonomous wake reacting to a
-      // background-job exit): no user bubble, and an empty prompt to `send` so
-      // the session runs over existing history without appending a user message.
-      const continuation = opts?.continuation ?? false;
-      // No turn of ours during our own `/compact` (docs/feat/send-now-d.md
-      // follow-up 1): the daemon would refuse it, and its end would clear the
-      // compaction-time rows. A wake waits for the compaction's end.
-      const start = planTurnStart({ compacting: compactingRef.current, continuation });
-      if (start === "defer") {
-        wakeRef.current = wakeStep(wakeRef.current, { type: "refused" });
-        return;
-      }
-      if (start === "refuse") {
-        pushNotice(COMPACTING_NO_TURN);
-        return;
-      }
-      if (!continuation) {
-        lastUserRef.current = text;
-        lastHadImagesRef.current = (opts?.images?.length ?? 0) > 0;
-      }
-      const images = (opts?.images ?? []).map((chip) => imageRowText(chip.ref));
-      const controller = new AbortController();
-      abortRef.current = controller;
-      stoppedHereRef.current = false;
-      stateRef.current = continuation
-        ? startContinuation(stateRef.current, Date.now())
-        : startTurn(stateRef.current, text, Date.now(), images.length > 0 ? images : undefined);
-      setScrollOffset(0);
-      flushNow();
-      // The bubble `startTurn` appended (none for a continuation): withdrawn by
-      // identity if the prompt loses the slot (C3).
-      const item = continuation ? undefined : stateRef.current.items.at(-1);
-      const sendOpts = {
-        ...(opts?.skill !== undefined ? { skill: opts.skill } : {}),
-        ...(opts?.attachments !== undefined && opts.attachments.length > 0
-          ? { attachments: opts.attachments }
-          : {}),
-      };
-      await streamTurn(
-        () =>
-          session.send(
-            continuation ? "" : text,
-            controller.signal,
-            Object.keys(sendOpts).length > 0 ? sendOpts : undefined,
-          ),
-        controller,
-        {
-          own: {
-            item,
-            text: continuation ? "" : text,
-            ...(images.length > 0 ? { images } : {}),
-            ...(opts?.images !== undefined && opts.images.length > 0
-              ? { restoreChips: opts.images }
-              : {}),
-          },
-        },
-      );
-    },
-    [flushNow, pushNotice, streamTurn],
-  );
-  runRef.current = run;
-
   // `run "<prompt>"`: the first message, sent once at mount, like a typed one: a
   // failed send leaves it in the conversation with the error under it (it is
   // not put back in the input).
@@ -1720,6 +1385,77 @@ export function App({
       () => {},
     );
   }, []);
+
+  // ── the turn driver (S9a — docs/feat/app-decomposition.md) ────────────────
+  // The turn itself — `run`, the ONE `streamTurn` loop, its settle, the
+  // send-now, Enter's `submit`, the history commit and `/compact` — lives in
+  // `useTurnDriver.ts`. The hook owns only its own latches: every ref below is
+  // ALSO read or written by a driver that stays here (the activity handler and
+  // `swapSession`, the clear's arm, the key snapshot, the frame), so they are
+  // PASSED IN and each use site keeps its identifier and its source (Fable
+  // M1/H3). It declares no effect, so the 20 below keep their indices (H1), and
+  // it is called before `onActivity`/`watchSession` because they START what it
+  // streams (`streamTurn`) — `onActivityRef` is how the driver reaches back.
+  const { run, commitHistory, streamTurn, sendNow, submit, startCompaction, drainHeld } =
+    useTurnDriver({
+      sessionRef,
+      stateRef,
+      rowsRef,
+      setRows,
+      setLoading,
+      warmingRef,
+      layoutOptsRef,
+      abortRef,
+      streamCtrlRef,
+      foreignRef,
+      sendNowRef,
+      sendNowUnsupportedRef,
+      fallbackNoticedRef,
+      wakeRef,
+      handedWakeRef,
+      stoppedHereRef,
+      restoredRef,
+      heldRef,
+      onActivityRef,
+      exitPendingRef,
+      clearingRef,
+      clearAfterTurnRef,
+      runClearRef,
+      compactingRef,
+      ownCompactionsRef,
+      setCompacting,
+      field,
+      historyRef,
+      histIndexRef,
+      draftRef,
+      lastUserRef,
+      lastHadImagesRef,
+      switchingRef,
+      attachRef,
+      probedTextRef,
+      home,
+      flushNow,
+      setScrollOffset,
+      scheduleFlush,
+      pushNotice,
+      restoreInput,
+      handleCommandRef,
+      permission,
+      attachMode,
+      convertToChips,
+      sendWithImages,
+      submitToTarget,
+      restoreChips,
+      model,
+      skillsSync,
+      askContext,
+      wakeIfPending,
+      exit,
+      runRef,
+    });
+  // The forward reference the jobs subscription, the initial prompt and the
+  // wake read (they are declared and run outside the driver).
+  runRef.current = run;
   const onActivity = useCallback(
     (activity: SessionActivity): void => {
       const inFlight =
@@ -1859,7 +1595,11 @@ export function App({
       setContextOpen(null);
       askContext(session);
       activitySubRef.current = session?.watch?.((a) => onActivityRef.current?.(a)) ?? null;
-      queueSubRef.current = session?.onQueued?.((q) => setDaemonQueue(q)) ?? null;
+      queueSubRef.current =
+        session?.onQueued?.((q) => {
+          daemonQueueRef.current = q;
+          setDaemonQueue(q);
+        }) ?? null;
       agentsSubRef.current = session?.onSubagents?.((rows) => setAgents(rows)) ?? null;
       jobsSubRef.current = session?.onJobs?.((report) => setJobs(report.rows)) ?? null;
       // A RUNNING background child's message to the agent
@@ -1982,168 +1722,6 @@ export function App({
   );
   swapRef.current = swapSession;
 
-  /** The fallback's notice, once per App (it does not repeat on later chords). */
-  const noticeFallback = useCallback(
-    (who: "daemon" | "session") => {
-      if (!fallbackNoticedRef.current) {
-        fallbackNoticedRef.current = true;
-        pushNotice(fallbackNotice(who));
-      }
-    },
-    [pushNotice],
-  );
-
-  /**
-   * `Ctrl+X Ctrl+S`: send my queued rows now (docs/feat/send-now-c.md). The
-   * decisions are `send-now.ts`'s; this executes them. False: nothing to do
-   * (the key changes nothing, e.g. the permission dialog stays).
-   */
-  const sendNow = useCallback((): boolean => {
-    const ctrl = sessionRef.current;
-    const plan = planSendNow({
-      hasQueued: rowsRef.current.some((r) => r.state === "queued"),
-      running: stateRef.current.running && streamCtrlRef.current !== null,
-      compacting: compactingRef.current,
-      pending: sendNowRef.current !== null,
-      canSendNow: ctrl?.sendNow !== undefined,
-      latchedUnsupported: sendNowUnsupportedRef.current,
-    });
-    if (plan.kind === "none" || !ctrl) {
-      return false;
-    }
-    if (plan.kind === "wait") {
-      // No way to cancel the compaction: the rows stay, its end sends them.
-      pushNotice(compactionWaitNotice(ctrl.sendNow ? "daemon" : "session"));
-      return true;
-    }
-    const taken = takeForSendNow(rowsRef.current);
-    setRows(() => taken.rows);
-    for (const m of taken.messages) {
-      ownedIdsRef.current.add(m.id);
-    }
-    if (plan.kind === "fallback" || !ctrl.sendNow) {
-      // The fallback stops the turn itself, for sure: like Ctrl+C, dismissed
-      // (not denied) — the turn's cancel settles the ask.
-      if (permission.pending) {
-        permission.answer(DISMISSED);
-      }
-      sendNowRef.current = { mode: "fallback", next: null, successor: null, resetSeen: false };
-      noticeFallback(ctrl.sendNow ? "daemon" : "session");
-      streamCtrlRef.current?.abort();
-      return true;
-    }
-    // An open permission dialog stays: an accepted send-now aborts the turn
-    // daemon-side, which withdraws the ask (the dialog closes, nothing is
-    // sent); a refused one leaves the turn — and its ask — to the user.
-    // The new turn's controller from now on: Esc in the window cancels it (the
-    // daemon already cancels the old one; a second abort of it sends nothing).
-    const next = new AbortController();
-    const pending: PendingSendNow = { mode: "atomic", next, successor: null, resetSeen: false };
-    sendNowRef.current = pending;
-    abortRef.current = next;
-    // A new turn of ours: whoever stops it from here on is not known yet.
-    stoppedHereRef.current = false;
-    const onCompaction = plan.target === "compaction";
-    if (onCompaction) {
-      // The rows are the send-now's now (the compaction's end sends nothing),
-      // and the TUI shows its turn at once — the client installs it at once
-      // (no live turn to wait for), so Enter enqueues to it from here on.
-      compactionOwnedRef.current = true;
-      stateRef.current = startContinuation(stateRef.current, Date.now());
-      flushNow();
-    }
-    ctrl.sendNow(taken.messages, plan.target, next.signal).then(
-      (events) => {
-        if (sendNowRef.current !== pending) {
-          return; // settled otherwise (a quit)
-        }
-        pending.successor = events;
-        if (!streamCtrlRef.current) {
-          settleSendNow(pending); // the old turn is already over
-          flushNow();
-        }
-      },
-      (error: unknown) => {
-        if (sendNowRef.current !== pending) {
-          return;
-        }
-        const old = streamCtrlRef.current;
-        if (abortRef.current === next) {
-          abortRef.current = old;
-        }
-        const step = planRefusal(error, rowsRef.current, old !== null);
-        if (onCompaction) {
-          compactionOwnedRef.current = false; // the rows are not the send-now's any more
-        }
-        if (step.kind === "fallback" && onCompaction) {
-          // An older daemon: it cannot cancel the compaction, so the rows
-          // wait for its end — or go now if it already ended meanwhile.
-          sendNowRef.current = null;
-          sendNowUnsupportedRef.current = true;
-          const after = afterCompactionUnsupported(rowsRef.current, compactingRef.current);
-          setRows(() => after.rows);
-          showIdle();
-          drainHeld();
-          pushNotice(compactionWaitNotice("daemon"));
-          if (after.send !== null) {
-            wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start
-            void runRef.current?.(after.send, { fallback: true });
-          } else {
-            wakeIfPending(); // while still compacting, `run` defers it again
-          }
-          flushNow();
-          return;
-        }
-        if (step.kind !== "fallback") {
-          sendNowRef.current = null;
-          setRows(() => step.rows);
-          if (!old) {
-            showIdle();
-            drainHeld();
-            wakeIfPending();
-          }
-          if (step.kind === "restore") {
-            restoreInput(step.text, step.notice);
-          } else {
-            pushNotice(NOTHING_TO_SEND);
-          }
-          return;
-        }
-        pending.mode = "fallback";
-        sendNowUnsupportedRef.current = true;
-        noticeFallback("daemon");
-        if (old) {
-          // As the latched fallback: it stops the turn itself, so an open
-          // dialog (that turn's ask) is dismissed — not denied — at once; an
-          // older daemon may never withdraw it. `answer` acts on whatever is
-          // pending NOW (a no-op when nothing is), never on a stale render.
-          permission.answer(DISMISSED);
-          old.abort();
-          return; // its end settles the send-now
-        }
-        if (!settleSendNow(pending)) {
-          showIdle();
-          drainHeld();
-          wakeIfPending();
-        }
-        flushNow();
-      },
-    );
-    return true;
-  }, [
-    drainHeld,
-    flushNow,
-    noticeFallback,
-    permission.answer,
-    permission.pending,
-    pushNotice,
-    restoreInput,
-    setRows,
-    settleSendNow,
-    showIdle,
-    wakeIfPending,
-  ]);
-
   // --- quit and clear (S8) --------------------------------------------------
   // The three executors live in `useQuitClear.ts`. The hook owns no state and no
   // effect: every ref below is shared with a driver this slice does not own (the
@@ -2177,80 +1755,135 @@ export function App({
   runClearRef.current = runClear;
 
   /**
-   * `/compact`'s machinery (docs/feat/app-decomposition.md M5): the
-   * compaction's own refs, its one settle, and the compaction-time queue it
-   * ends live HERE, not in a command file — its guards do (`commands/compact.ts`).
-   * It moves with S9a (the turn driver), which is why it is an App-level
-   * function and not a command's body.
+   * Start one hop (docs/feat/session-hop.md D3/D4), and be the ONLY place the
+   * view moves for one: `switchingRef` goes up while it runs (a typed prompt
+   * goes back to the input, P3), the phase row is the host's own words, and the
+   * view swaps with `keepTranscript` — the transcript rows must land exactly
+   * where they were, only the badge and the one notice differ. Everything
+   * effectful is the host's (`HopFeed`): the App never builds a runtime.
    */
-  const startCompaction = useCallback((): void => {
-    const session = sessionRef.current;
-    if (!session) {
+  const startHop = useCallback(
+    (spec: HopSpec): void => {
+      if (!hop) {
+        return;
+      }
+      const run = hop.start(spec, sessionRef.current?.sessionId ?? null);
+      hopRef.current = run;
+      setHopRun({ target: hop.label(spec), phase: null });
+      switchingRef.current = true;
+      const stopStatus = run.onStatus((line) => {
+        setHopRun({ target: hop.label(spec), phase: line });
+        flushNow();
+      });
+      const settle = (): void => {
+        stopStatus();
+        hopRef.current = null;
+        hopQueuedRef.current = null;
+        setHopQueued(null);
+        switchingRef.current = false;
+        setHopRun(null);
+        flushNow();
+      };
+      void run.done.then(
+        (outcome) => {
+          if ("moved" in outcome) {
+            // D9: a hop never inherits an approval — auto-accept goes off with
+            // the move, said in the same notice (the feed, or this TUI's own).
+            // `clearAutoApprove`, never `autoAccept.set`: the feed's `set` only
+            // publishes the flip for the OTHER terminals, so this one's state
+            // (and its status bar) would still say "auto-accept on" while the
+            // notice claims otherwise.
+            const wasOn = permission.autoApprove;
+            if (wasOn) {
+              permission.clearAutoApprove();
+            }
+            swapSession(outcome.moved, { keepTranscript: true });
+            settle();
+            pushNotice(hopMovedNotice(hopPlaceText(outcome.view.place), wasOn));
+            return;
+          }
+          // A failed hop changes nothing: same session, same badge, same rows.
+          settle();
+          pushNotice(`_${outcome.failed}_`);
+        },
+        (error: unknown) => {
+          // `HopRun.done` never rejects by contract; a host that does anyway is
+          // still one notice, and the latch must not stay up.
+          settle();
+          pushNotice(`_${hopFailureText(error)}_`);
+        },
+      );
+    },
+    [flushNow, hop, permission, pushNotice, swapSession],
+  );
+  startHopRef.current = startHop;
+
+  /**
+   * `/move`'s machinery (docs/feat/session-hop.md D3): the grammar, the turn
+   * boundary decision (`hopStep`, pure), then start it now or leave it for the
+   * first true idle. The draft field is never touched — a `/move` is a command,
+   * and a hop that fails leaves everything as it was.
+   */
+  const requestHop = useCallback(
+    (raw: string): void => {
+      const step = hopStep({
+        parse: parseHopCommand(raw),
+        available: hop !== undefined,
+        hopping: hopRef.current !== null,
+        hopQueued: hopQueuedRef.current !== null,
+        running: stateRef.current.running,
+        queued: shownRows(rowsRef.current, daemonQueueRef.current).length,
+      });
+      if (step.kind === "notice") {
+        pushNotice(`_${step.text}_`);
+        return;
+      }
+      if (step.kind === "cancel") {
+        hopQueuedRef.current = null;
+        setHopQueued(null);
+        hop?.cancel?.();
+        pushNotice("_Move cancelled._");
+        return;
+      }
+      if (step.kind === "queue") {
+        hopQueuedRef.current = step.spec;
+        setHopQueued(step.spec);
+        pushNotice(HOP_QUEUED_NOTICE);
+        return;
+      }
+      startHopRef.current?.(step.spec);
+    },
+    [hop, pushNotice],
+  );
+
+  /** Run a `/move` that waited for the turn boundary (D4): the first true idle. */
+  const hopIfQueued = useCallback((): void => {
+    const spec = hopQueued;
+    if (spec === null || hopRef.current !== null) {
       return;
     }
-    pushNotice("_Compacting the conversation…_");
-    setCompacting(true);
-    compactionOwnedRef.current = false;
-    // Whether THIS handler raised its own-compaction count: only then may
-    // its settle lower it again (an open that failed raised none).
-    let armed = false;
-    armed = true;
-    // Its one settle (success or failure) ends the compaction-time queue
-    // (D3c): sent as one prompt unless a send-now took it. A `/clear`
-    // meanwhile already took the rows (a new session: ignore it).
-    const settled = (result: CompactionResult) => {
-      if (sessionRef.current !== session) {
-        return;
-      }
-      if (!result.ok && armed && ownCompactionsRef.current > 0) {
-        ownCompactionsRef.current -= 1; // it replaced nothing: no history of mine to come
-      }
-      setCompacting(false);
-      const out = onCompactionSettled({
-        result,
-        rows: rowsRef.current,
-        sendNowOwns: compactionOwnedRef.current,
-        turnRunning: stateRef.current.running,
-      });
-      pushNotice(out.notice);
-      if (out.send !== null) {
-        setRows(() => []);
-        wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start
-        // As a fallback send: restored if another client's prompt won the slot.
-        void run(out.send, { fallback: true });
-        return;
-      }
-      if (out.restore !== null) {
-        setRows(() => []);
-        restoreInput(out.restore, "_your queued messages are back in the input_");
-      }
-      wakeIfPending(); // a wake deferred during the compaction
-    };
-    // The open a reset needs comes FIRST, as `/clear`'s does (review
-    // M2): a resumed session nothing has opened yet holds its chat only
-    // as this client's seed, and counting the compaction before the open
-    // left the count armed for a compaction that never happened. The
-    // latch (`compacting`) is up meanwhile, so nothing starts a turn.
-    void Promise.resolve(session.openForReset?.()).then(
-      () => {
-        if (sessionRef.current !== session) {
-          return;
-        }
-        // Its history (if it compacts) is mine: no "on another device" (C6).
-        ownCompactionsRef.current += 1;
-        armed = true;
-        void session.compact?.().then(
-          (r) => {
-            settled({ ok: true, before: r.before, after: r.after });
-            // The history shrank: the open figure is stale until a turn measures.
-            askContext(session);
-          },
-          (error: unknown) => settled({ ok: false, error }),
-        );
-      },
-      (error: unknown) => settled({ ok: false, error }),
-    );
-  }, [askContext, pushNotice, restoreInput, run, setCompacting, setRows, wakeIfPending]);
+    // Still busy: it stays queued, and the next idle asks again — never two
+    // hops, and never one forgotten.
+    if (stateRef.current.running || shownRows(rowsRef.current, daemonQueueRef.current).length > 0) {
+      return;
+    }
+    hopQueuedRef.current = null;
+    setHopQueued(null);
+    startHopRef.current?.(spec);
+  }, [hopQueued]);
+  hopIfQueuedRef.current = hopIfQueued;
+  // A `/move` that waited for a boundary (D4) starts at the first TRUE idle: the
+  // own turn over, the daemon's queue empty. This ONE effect is the whole
+  // mechanism — every fact D4 names is a dependency, so the render that makes
+  // the session idle is the render that starts the hop (no second path to
+  // disagree with it).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the BODY reads refs; these deps ARE the trigger
+  useEffect(() => {
+    hopIfQueuedRef.current?.();
+  }, [hopQueued, st.running, shown.length]);
+
+  // The hop's own status row (`null`: no hop runs — the normal bar paints).
+  const hopRow = hopRun === null ? null : hopStatusRow(hopRun.target, hopRun.phase, columns);
 
   /**
    * The ONE way typed `/…` text becomes an effect: `dispatchCommand`
@@ -2282,6 +1915,7 @@ export function App({
           requestQuit,
           startCompaction,
           requestClear,
+          requestHop,
           reResolve: (line: string) => handleCommandRef.current?.(line, true),
           exit,
           sessions,
@@ -2312,6 +1946,7 @@ export function App({
       openPanel,
       pushNotice,
       requestClear,
+      requestHop,
       requestQuit,
       restoreInput,
       run,
@@ -2378,134 +2013,6 @@ export function App({
       );
     },
     [makeSession, pushNotice, sessions, swapSession, watchReturned, watchSession],
-  );
-
-  const submit = useCallback(
-    (value: string) => {
-      // The dock may own this text (a child open): it decides, we execute.
-      if (submitToTarget(value)) {
-        return;
-      }
-      const text = value.trim();
-      // A probed drop is a PATH, never a command: `looksLikeCommand` already said
-      // so before the disk was read, so the coarse `/`-prefix branch below must
-      // not turn it into "Unknown command" (round 2, R2-1).
-      const probedText = probedTextRef.current;
-      const isProbedDrop = probedText !== null && probedText === text;
-      if (probedText !== text) {
-        probedTextRef.current = null; // an edited (or cleared) drop is a new drop
-      }
-      // Enter WITH images is decided before the field is reset: a refusal must
-      // leave the text where it is (docs/feat/attachments-tui.md D8), and an
-      // image-only prompt ("") is a real submit.
-      const plan = submitPlan({
-        text,
-        draft: attachRef.current,
-        running: stateRef.current.running,
-        compacting: compactingRef.current,
-        dockOpen: false, // `submitToTarget` already took a child-owned text
-        mode: attachMode(),
-        onlyPaths: enterConvertsToChips(text, probedText, home !== undefined ? { home } : {}),
-      });
-      if (plan.kind === "refuse") {
-        pushNotice(plan.notice);
-        return;
-      }
-      // The notice promised exactly ONE Enter; this is it (a refusal above keeps
-      // it, since the text stayed put). Round 2, R2-1.
-      probedTextRef.current = null;
-      if (plan.kind === "send") {
-        field.reset();
-        historyRef.current = pushHistory(historyRef.current, plan.text);
-        histIndexRef.current = historyRef.current.length;
-        draftRef.current = "";
-        const refusedPrompt = switchingRefusal(switchingRef.current, { kind: "prompt" });
-        if (refusedPrompt) {
-          restoreInput(plan.text, refusedPrompt);
-          return;
-        }
-        sendWithImages(plan.text, plan.images);
-        return;
-      }
-      if (plan.kind === "convert") {
-        // An unbracketed drop: the paths become chips and NOTHING is sent (decision 5).
-        field.reset();
-        convertToChips(text);
-        return;
-      }
-      field.reset();
-      if (text === "") {
-        return;
-      }
-      if (text.startsWith("/") && !isProbedDrop) {
-        handleCommand(text);
-        return;
-      }
-      // Record the prompt in history (dedup is inside `pushHistory`) and return
-      // to the live-draft slot: the next Up starts a fresh walk from the newest
-      // entry. Done before the running branch so a steering prompt is recalled
-      // too.
-      historyRef.current = pushHistory(historyRef.current, text);
-      histIndexRef.current = historyRef.current.length;
-      draftRef.current = "";
-      // A switch in flight: the old session is detaching and the new one not
-      // yet followed — the text goes back to the input, never lost (Review R1).
-      const refusedPrompt = switchingRefusal(switchingRef.current, { kind: "prompt" });
-      if (refusedPrompt) {
-        restoreInput(text, refusedPrompt);
-        return;
-      }
-      // Mid-turn: queue the task (steering) so it is handed to the agent before
-      // its next round, instead of starting a new turn. Call through the session
-      // (not a detached reference) so `this` is preserved.
-      if (stateRef.current.running) {
-        const ctrl = sessionRef.current;
-        if (ctrl?.enqueue) {
-          // The row's id is the enqueue key: a send-now names exactly this row.
-          const id = crypto.randomUUID();
-          setRows((rows) => addRow(rows, text, id)); // optimistic (responsive UX)
-          // enqueue is sync (local) or a Promise (worker/pod/remote). On a
-          // reject (e.g. MethodNotFound from an older remote daemon, or a
-          // transport drop) the entry will never get a `steer` echo, so drop
-          // it — otherwise it masks a send that never happened. `Promise.resolve`
-          // normalises the sync case (it never rejects → no local behaviour change).
-          Promise.resolve(ctrl.enqueue(text, id)).then(
-            // Accepted: from now on the daemon's list says where the row is (C7).
-            () => setRows((rows) => markAcked(rows, id)),
-            (error: unknown) => {
-              const res = onReject(rowsRef.current, id, ownedIdsRef.current);
-              if (!res.notify) {
-                return; // a send-now took it: its text travels with the send-now
-              }
-              setRows(() => res.rows);
-              const reason = error instanceof Error ? error.message : String(error);
-              pushNotice(`_message not queued: ${reason}_`);
-            },
-          );
-        }
-        return;
-      }
-      // During this TUI's `/compact` no turn runs, so nothing to enqueue to:
-      // a local row, sent when the compaction ends or by the chord (D3c).
-      if (compactingRef.current) {
-        setRows((rows) => addRow(rows, text, crypto.randomUUID()));
-        return;
-      }
-      void run(text);
-    },
-    [
-      handleCommand,
-      pushNotice,
-      restoreInput,
-      run,
-      field.reset,
-      setRows,
-      submitToTarget,
-      attachMode,
-      convertToChips,
-      home,
-      sendWithImages,
-    ],
   );
 
   // All line editing lives in `useLineEditor` (pure `editor.ts` ops), so no
@@ -3004,30 +2511,40 @@ export function App({
         )}
       </Box>
 
-      <StatusBar
-        cwd={cwd}
-        target={target ?? null}
-        tokens={tokensShown.totals}
-        contextTokens={ctxShown.used}
-        contextApprox={ctxShown.approx}
-        contextWindow={contextWindow}
-        columns={columns}
-        scrolledUp={scrolledUp}
-        hiddenAbove={hiddenAbove}
-        expandAll={expandAll}
-        autoApprove={permission.autoApprove}
-        pill={pill}
-        onPillRange={(range) => {
-          // The row the bar paints on: the frame's own rows, derived exactly as
-          // the tree lays them out (the transcript viewport, the spacer, the
-          // running rows, the dock, the input box), plus the bar's own one.
-          statusRowRef.current = {
-            y: viewport + 1 + runningRows + dockHeight + inputBoxRows + 1,
-            pill: range,
-          };
-        }}
-        link={linkView}
-      />
+      {hopRow === null ? (
+        <StatusBar
+          cwd={cwd}
+          target={shownTarget}
+          tokens={tokensShown.totals}
+          contextTokens={ctxShown.used}
+          contextApprox={ctxShown.approx}
+          contextWindow={contextWindow}
+          columns={columns}
+          scrolledUp={scrolledUp}
+          hiddenAbove={hiddenAbove}
+          expandAll={expandAll}
+          autoApprove={permission.autoApprove}
+          pill={pill}
+          onPillRange={(range) => {
+            // The row the bar paints on: the frame's own rows, derived exactly as
+            // the tree lays them out (the transcript viewport, the spacer, the
+            // running rows, the dock, the input box), plus the bar's own one.
+            statusRowRef.current = {
+              y: viewport + 1 + runningRows + dockHeight + inputBoxRows + 1,
+              pill: range,
+            };
+          }}
+          link={linkView}
+        />
+      ) : (
+        // A hop in flight owns the status row (D3): same ONE row, so the frame
+        // never changes height and the transcript keeps its position.
+        <Box width={columns}>
+          <Text color={palette().accent} wrap="truncate-end">
+            {hopRow}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 }
