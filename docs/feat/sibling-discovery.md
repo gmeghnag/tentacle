@@ -389,8 +389,376 @@ or a named mutation). Fakes: `createChannelPair`, injected timers/clock/`interfa
 
 ## Execution
 
+*— claude-opus-5-5, 2026-11-14*
+
+### Load-bearing check (re-run first, as instructed)
+
+PASSES. `.tentacle/tmp/sibling-discovery/load-bearing.ts` (in the worktree) imported the
+branch's `configDirFromEnv` and printed:
+
+```
+default: /Users/gmeghnag/.config/tentacle (stable: true)
+override: /explicit/dir (stable: true)
+xdg: /xdg/tentacle (stable: true)
+mentions cwd/process.cwd inside resolveConfigDir: false
+```
+
+`resolveConfigDir` (`packages/config/src/load.ts:497-508`) never reads `cwd`, and the
+derivation is stable across calls — so one `daemons/` and one identity per computer, which
+is what makes a sibling both findable and dialable. The second assumption (Repro 1:
+an unknown inbound notification reaches an older client's `onError`) was re-proved
+structurally at `peer.ts:386-389` and is pinned by the "a connection that never asked gets
+ZERO frames" test.
+
+### As built, in the plan's order
+
+**1. Protocol** (`daemon.ts`, `methods.ts`, `schema/protocol.json`, + its tests).
+`DaemonDiscoverParamsSchema` (`{}`), `DiscoveredDaemonSchema`, `DaemonDiscoverySchema`,
+`MAX_DISCOVERED_DAEMONS = 32`; `Method.DaemonDiscover` / `Notification.DaemonDiscovery` and
+both registry entries. `cwd` is `line(4096)` (no control chars); each address `.max(512)` and
+a plain regex — NOT `isPairingAddress` itself: the JSON-Schema export does not map a
+`.refine()`, so the wire uses a regex and a fixed-sample agreement test pins the two together
+(11 protocol tests, incl. bounds, strip-not-strict, rev/stamp shapes, empty `addresses`
+allowed for a loopback sibling). `protocol.json` regenerated with `bun run schema:export`
+(*not* hand-merged) and fixtures added to the drift test.
+
+**2. `device-store`.** `DaemonRecord.addresses?` (validated, deduped, capped on WRITE and on
+READ — an invalid one is dropped singly, so a hand-edited record cannot hide its daemon);
+`readDaemonRecords` gains `freshWithinMs`/`now` (the heartbeat signal; absent = the old
+pid-only behaviour, which `pair` keeps); `touchDaemonRecord` (utimes, never creates — a
+heartbeat racing the stop must not resurrect a record); `sweepDeadDaemonRecords` (dead pid
+only); `processAlive` exported.
+
+**3. `session-host` + `connection`.** `SessionHostOptions.discovery?`, `discoverySource()`
+(`MethodNotFound` when absent, the `sessionTtl` shape) and `setDiscoverySource` — the last
+one is **drift** from the plan's `SessionHostOptions.discovery`-at-construction: `listen`
+only learns its own record (the bound port) *after* the host exists, so the seam is attached
+there. `opts.discovery` is therefore mutable. `Connection` case `Method.DaemonDiscover`:
+`subscribe` first, then `current()` (F12), one subscription per connection (F13), unsubscribe
+in `close()` (F11), synchronous — nothing awaited, so a pending `session/prompt` does not delay
+it (proved by a gated-prompt test).
+
+**4. Client.** `client/src/discovery.ts` (pure): `foldDiscovery` (returns `changed` so the
+caller stays silent on a stale/duplicate frame; resets the guard on a new `self.startedAt`) and
+`mergeAddresses` (announced first, known kept as fallbacks on ONE per-project `lastSeenAt`
+clock for 30 days, empty announcement erases nothing, invalid dropped, 8/32 caps, a missing
+project is `live: false`). `RemoteClient.discover(listener)`, the `daemon/discovery` branch in
+`makePeer`, `resubscribeDiscovery()` on every `linkUp`, `MethodNotFound → undefined`.
+
+**5. `cli/src/discovery.ts`.** `buildDiscovery` (pure, `self` first from the process's own
+options, per-project dedupe, `pairAddresses` + the record's `--address`, re-filtered by
+`isPairingAddress`), `nextMembership` (pure two-strike hysteresis keyed by `cwd`, dead pid
+drops at once), `startDiscovery` (heartbeat always on, poll only while ≥1 subscriber, one
+synchronous build at the first subscribe, sweep each poll, `fs`-free except via the injected
+reader, wake-gap freshness skip, F15 keep-last-snapshot + log once).
+
+**6. `serve` / `flags` / `main`.** `ServeOptions.addresses|discovery|pollMs|heartbeatMs`;
+`listen` writes `addresses` into the record (omitted entirely when empty), starts the driver
+and stops it in `stop()` BEFORE `removeDaemonRecord`; `ServeHandle.discovery` exposes it.
+`serve --address` is a `repeated` flag validated at parse time (`isPairingAddress`, cap 8), so
+`serve` fails before binding; help text updated.
+
+### Mutations (all caught, then reverted; suite green after each revert)
+
+| Mutation | Result |
+|---|---|
+| `discover()` snapshots FIRST, then subscribes (F12) | 1 fail (the raced-subscribe test: result was the pre-change rev) |
+| notify unsolicited / broadcast (additivity) | 4 fail (bystander gets frames; F13 doubling) |
+| `MISSES_BEFORE_DROP = 1` (no hysteresis) | 3 fail |
+| heartbeat armed only at the first subscriber | 2 fail ("the poller runs only while subscribed…"; the F4 log test) |
+| always apply freshness (ignore the wake gap) | 1 fail (the suspend test) |
+| drop `resubscribeDiscovery()` on `linkUp` | 1 fail (reconnect test) |
+
+### Red-before-green
+
+Every slice was red first on the property, not on an import: protocol
+(`Export named 'DaemonDiscoverParamsSchema' not found`), device-store
+(`sweepDeadDaemonRecords not found`), connection (`RpcError: unexpected method:
+daemon/discover` — the dispatch, not a compile error), client
+(`Cannot find module '../src/discovery.ts'`), cli discovery (same), e2e (the client got a
+one-daemon snapshot). Reconnects/notifications were then forced to pass by the real code.
+
+### Drift from the Implementation, and why
+
+1. **`setDiscoverySource` instead of construction-time `discovery`** (above): the plan's own
+   ordering requirement ("builds the source after the listener is up … and passes it to the
+   `SessionHost`") is only satisfiable this way, since the host must exist before `listen`.
+2. **`cli/test/.../sibling-discovery-e2e.test.ts` is `serve-discovery.test.ts`** and a
+   "sibling" there is a real child process plus the record a `serve` in it would have written,
+   not a second `startDaemon`: the record's filename IS the pid, so two `startDaemon` calls in
+   one process collide (and one process can only be one daemon in production either). The
+   record half, the over-the-wire half and the stop-announcement are all real.
+3. **`daemon/discover`'s result is `DaemonDiscovery[]`-shaped by the builder, `{rev,daemons}`
+   on the wire**: `rev` is the driver's, so `buildDiscovery` stays clock-free/pure and the
+   driver owns monotonicity.
+4. **`nextMembership` keys by `cwd`**, not pid (the plan said "per sibling"; the phone's rows
+   are projects, and P8 makes `cwd` the project key) — a restart under a new pid keeps the row
+   and moves `startedAt`.
+5. **`fs.watch` on `daemons/` was NOT added** (the plan listed it as an accelerator only, "the
+   poll is the truth"). Deliberate: it is unobservable behaviour that would need its own
+   timing test on three platforms, and the poll already meets decision 7's "within seconds".
+   Recorded as debt, not silently skipped.
+6. **The F18 pairing-principal test is a unit test on `Connection`** (the plan said "once 9b is
+   merged"; it is merged, but `ws-device-route.test.ts` already covers the route-level gate, so
+   duplicating the harness here would test 9b, not this task).
+7. `serve`'s driver logs through `options.onError`, not a new sink (reuses the existing
+   `[daemon] error:` line the cli already prints).
+
+### Not verified here
+
+- **F3 on a genuinely suspended host**: the wake rule is driven with fake timers
+  (`jump` + rebased intervals, as Node does not replay missed ticks). A real
+  `SIGSTOP`/resume of the daemon process is not exercised.
+- **The phone side** (task 11): `mergeAddresses` is tested pure, but no app consumes it yet.
+- **`fs.watch` accelerator**: not implemented (see drift 5) — the ≤ `pollMs` latency is
+  verified, the ~100 ms one is not, because it does not exist.
+- **Full-suite flakiness (pre-existing, NOT this task)**: of five full `bun test` runs,
+  three were fully green and two each had ONE unrelated timing failure —
+  `worker-path exit net > a job spawned in the worker dies with tentacle` and
+  `serve (D2): every line is a log, on stderr > listening, audit, notice and error lines`.
+  Both are untouched by this branch (`git status` names neither) and pass 5/5 and 6/6 in
+  isolation; they fail only under full-suite load. The `serve` one injects a FAKE
+  `startDaemon` and asserts only on stdout/stderr routing, so it cannot be affected by the
+  discovery code. Last recorded full run: **8348 pass, 3 skip (the opt-ins), 0 fail**.
+
+### Disk note (environment, not the task)
+
+The gate first failed with `ENOSPC` (117 MiB free). I reclaimed 415 MiB by removing Bun's
+cross-platform binary cache (`~/.bun/install/cache/bun-linux-*`, regenerable by `bun install`).
+No repository content was deleted.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14*
+
+Review round 1 raised 2 HIGH + 2 MEDIUM; all four are fixed here, each **red first**
+on the assertion of the property (the repro table below is the red run), each
+**mutation-checked** (mutation applied → the new test fails → reverted → green), and
+one review nit taken with them.
+
+**1 (HIGH, no addresses announced in production) — FIXED.** `cli/src/discovery.ts:212`
+defaulted `interfaces` to `() => []`, and `serve` passes none, so a
+`serve --host 0.0.0.0` announced `addresses: []` for itself and every sibling while
+`pair`'s QR listed them (decision 3, F6 dead). The default is now `machineInterfaces`
+(the same helper `pair` uses), re-read on **every** poll, so the two can no longer
+disagree and a DHCP/Wi-Fi change is announced within `pollMs`. The helper moved to
+`cli/src/pair-addresses.ts:55`, beside the rule that consumes it (`pair.ts` imports it
+from there): importing `pair.ts` from the daemon path would have made `serve.ts`'s module
+graph pull in the QR renderer and the pairing window. `serve` stays unpassed-`interfaces`
+on purpose: the machine's table is the production default, and only a test injects one.
+
+**2 (HIGH, F7: a change made while offline was swallowed) — FIXED.**
+`client/src/remote-client.ts:986` folded the post-reconnect `daemon/discover` result
+without calling the listener; the folded `rev` then became the guard, so no later frame
+re-delivered it either. `resubscribeDiscovery` now delivers when `foldDiscovery` says
+`changed` (and stays silent when it does not, so a reconnect causes no redraw), using a
+captured `listener` for the async callback.
+
+**3 (MEDIUM, Repro 3 returned on a cold subscribe) — FIXED.**
+`lastPollAt` was advanced only by polls, and the poller runs only while a client is
+subscribed, so the first subscriber after >`staleAfterMs` idle got a poll with freshness
+off — a pid-reuse phantom in the snapshot for ~2 polls. Two changes, one per cause:
+- the wake gap is now **reset when the poller arms** (`lastPollAt = now()` at the first
+  subscribe), because a gap across an unsubscribed spell is idleness, not a sleep;
+- the sleep signal a daemon with no subscriber actually has is the **heartbeat**: a beat
+  later than `staleAfterMs` sets `slept`, and the next poll skips freshness for it
+  (F3). That keeps a genuine suspend covered without re-introducing the phantom.
+
+**4 (MEDIUM, Q6 drift: one clock per project) — FIXED.** `KnownProject`/`MergedProject`
+gain `addressSeenAt` (address → when it was last ANNOUNCED); `mergeAddresses` stamps
+every announced address `now`, keeps a fallback only while **its own** stamp is inside
+`DISCOVERY_RETENTION_MS`, and carries the kept stamps forward. A store written before
+this field falls back to the project's `lastSeenAt`, so the shape stays additive. The
+owner's Q6 wording ("30 days after it was last seen") is now what the code does, so no
+owner question is needed.
+
+**Nit — FIXED.** `daemon/src/session-host.ts:448`'s doubled `/**`.
+
+**Red before green** (`.tentacle/tmp/sibling-discovery/review.test.ts` on the unfixed
+tree: `A self addresses: []`, `B first snapshot: ["/p/a","/p/phantom"]`,
+`C reconnected: true listener saw: []`). The four new tests, run on the pre-fix sources:
+
+| Test (new) | Red run |
+|---|---|
+| `the DEFAULT interfaces are this machine's…` (cli) | `Expected: > 0 · Received: 0` |
+| `the first subscriber after an idle spell still applies freshness` (cli) | got `["/work/self","/work/phantom"]` |
+| `a daemon that SLEPT with no subscriber still skips freshness` (cli) | sibling absent, wanted present |
+| `a change made WHILE THE LINK WAS DOWN reaches the listener` (client) | `seen` = `[]`, wanted `[2]` |
+| `a RESYNC that changes nothing does not wake the listener` (client) | (guards the fix's other side) |
+| `a fallback expires 30 days after IT was last seen…` (client) | address kept, wanted dropped |
+
+**Mutations (each applied → one fail → reverted → green; `git diff` back to the fixed tree
+after each).**
+
+| Mutation | Result |
+|---|---|
+| `interfaces` default back to `() => []` (fix 1) | fail: the cli DEFAULT test **and** the `serve`-level `0.0.0.0` test (`serve-discovery.test.ts`) |
+| drop `lastPollAt = now()` at the first subscribe (fix 3a) | fail: the idle-spell test (`/work/phantom` back) |
+| `afterSleep = gap > staleAfterMs` (drop the heartbeat signal, fix 3b) | fail: the SLEPT-with-no-subscriber test — **it survived the first version of my test**, which only proved 3a; the suspend case is what pins 3b |
+| `resyncDiscovery`: never call the listener (fix 2) | fail: the offline-change test |
+| `resyncDiscovery`: ALWAYS call the listener (fix 2's other side) | fail: the resync-changed-nothing test |
+| `seenAt = prior.lastSeenAt` (fold the per-address stamp back, fix 4) | fail: the 30-day chain test — **also survived my first one-shot version**, which could not tell the two clocks apart; the test is now a real fold CHAIN (day 10/20/40/50) |
+
+The two mutations marked "survived the first version" are the reason those two tests were
+rewritten: the first drafts were vacuous, and the mutation is what showed it (§9).
+
+**Gate** (worktree `feat/sibling-discovery`): `bunx tsc --noEmit` clean, `bun run lint`
+clean (1072 files, 0 fixes), `bun test` **8355 pass, 3 skip (the opt-ins), 0 fail**
+(601 files, 344 s).
+
+**One drift inside this round:** `machineInterfaces` moved from `cli/src/pair.ts` to
+`cli/src/pair-addresses.ts` (with `pair.ts` importing it). The direct import would have
+put `pair.ts` — the QR renderer, the pairing window, `uqr` — into `serve.ts`'s module
+graph, which `discovery.ts` now shares. `pair.ts` keeps its behaviour, so no test moved;
+`pair-addresses.ts` is where the interface RULE lives anyway.
+
+**Not verified here:** the phone side (task 11) still consumes nothing, so
+`addressSeenAt` is exercised only by the pure tests; and a real `SIGSTOP`/resume is still
+not driven (the sleep is simulated with the rebased fake timers).
+
 ## Review
 
 #### Owner answers (2026-11-13)
 
 All questions answered as recommended. Implementation APPROVED.
+
+#### Adversarial review (fresh context)
+
+*— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES.** Scope `git diff main...HEAD`. Touched tests 122 pass / 0 fail (8 files); `bun run lint` clean; `bun run typecheck` clean. The full `bun run check` was not re-run here.
+
+**Findings** (each one reproduced with `.tentacle/tmp/sibling-discovery/review.test.ts`, which imports the worktree's sources):
+
+1. **HIGH: production never announces an interface address.** `cli/src/discovery.ts:212` defaults `interfaces` to `() => []` (the plan says `os.networkInterfaces`), and `serve.ts:496` passes none. A `serve --host 0.0.0.0` with no `--address` therefore announces `addresses: []` for itself and every sibling (repro A: `[]`), while `pair`'s QR (`pair.ts:195`, `machineInterfaces()`) does list them. This breaks decision 3 and F6 (a DHCP or Wi-Fi change is never announced), and it contradicts the module's own comment that "the QR and the announcement cannot disagree". The e2e binds loopback only, so no test sees it. Fix: default to `machineInterfaces()` (re-read every poll), plus a `0.0.0.0` driver test.
+2. **HIGH: F7 is not met.** `remote-client.ts:986-1000` `resubscribeDiscovery` folds the post-reconnect snapshot but never calls the listener. A change made while the phone was offline, or a daemon restart, is swallowed until the next change. It also becomes the `rev` guard, so it is never re-delivered (repro C: listener saw `[]` after the reconnect). The reconnect test only pushes a change after the reconnect, so it is green on this bug. Fix: deliver when `changed`, and add a test that changes the snapshot while the link is down.
+3. **MEDIUM: Repro 3 (the pid-reuse phantom) comes back on every cold subscribe.** `lastPollAt` (`cli/src/discovery.ts:235`) is only advanced by polls, and polls run only while a client is subscribed. So the first subscriber after more than 30 s with none, which is the normal phone case, gets a poll with freshness switched off. The stale pid-reuse record goes into the `daemon/discover` result (repro B: `["/p/a","/p/phantom"]`) and then flickers out about 2 polls later. Fix: measure the wake gap with the heartbeat, which always runs, or reset `lastPollAt` when the poller starts.
+4. **MEDIUM: drift from owner Q6 that Execution does not list.** `client/src/discovery.ts:167` refreshes ONE clock per project. While a project stays announced, its unannounced fallback addresses are therefore kept forever, not "30 days after last seen" for each address. Either keep a timestamp per address or have the owner accept the change.
+
+**Mutations** (each one reverted; the tree was byte-identical, `git status` clean): `nextMembership` ignoring `deadCwds` → 1 fail. `readDaemonRecords` ignoring `freshWithinMs` → 2 fail. Both properties are pinned.
+
+**What holds:**
+- Additivity: the notification is sent only to subscribers, and the daemon-side test exists.
+- Subscribe happens before the snapshot.
+- Unsubscribe runs in `close()`, and the handler awaits nothing (§7 "don't serialize").
+- A pairing principal is refused before the dispatch (`connection.ts:283`).
+- Pod and worker daemons get no source, so they answer `MethodNotFound` ("a pod is not trusted").
+- Strip schemas. `protocol.json` was regenerated, not hand-edited.
+- The heartbeat never creates a record (`touchDaemonRecord` uses utimes).
+
+**Nit:** `session-host.ts:447` has a doubled `/**`.
+
+**Executor:** Execution is signed `claude-opus-5-5`, but commit `4864cdc` says "exec (deepseek)". One of the two is wrong, and AGENTS §10 requires an honest signature. If the executor was really Opus, this review comes from the same model family (a fresh context only).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; the same model family as the round-1 reviewer, while the executor is DeepSeek per the commit trailers)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM).
+
+Scope: `git diff HEAD~1` (`59f89b3`). `bun run typecheck` and `bun run lint` are clean. 116 touched tests pass, 0 fail (cli discovery and serve-discovery, client discovery, pair*, daemon-discover). Re-running round 1's repros: A now announces the LAN and tailnet IPs, B has no phantom, and C delivers rev 2 after the reconnect.
+
+**Round-1 findings: each one is fixed, and each has a test that fails under mutation (all reverted, `git status` clean):**
+
+| # | Fix | Mutation → result |
+|---|---|---|
+| 1 | `interfaces` defaults to `machineInterfaces` (moved to `pair-addresses.ts`, shared with `pair`) | default `[]` → 2 fail (driver and the `0.0.0.0` serve e2e) |
+| 2 | `resubscribeDiscovery` delivers the snapshot when `changed` | delivery removed → 1 fail ("change made WHILE THE LINK WAS DOWN") |
+| 3 | `lastPollAt` is reset when the poller arms; the heartbeat detects a sleep (`slept`) | no reset → 1 fail; `slept` never set → 1 fail (F3 with no subscriber) |
+| 4 | a per-address `addressSeenAt` | per-project clock → 1 fail (expiry while the project stays LIVE) |
+| nit | the doubled `/**` is gone | n/a |
+
+**New finding:**
+
+5. **MEDIUM: `slept` never expires** (`cli/src/discovery.ts:247,277,333`). One late beat sets it, and only a poll clears it. With no subscriber, nothing polls, so the flag stays set. Repro D (`.tentacle/tmp/sibling-discovery/r2.test.ts`) is the normal laptop case: the lid is closed overnight with no client, the laptop is then awake for an hour with on-time beats, and only then does a phone subscribe. The first snapshot is `["/p/a","/p/phantom"]`, so the round-1 #3 / Repro-3 phantom comes back. The skip only has to cover the window before the siblings' next beat. Fix: record when the late beat happened, and treat `slept` as expired once `now - sleptAt > staleAfterMs`. Add Repro D as the regression test.
+
+**What holds:**
+- Moving `machineInterfaces` is a pure move: `pair` behaves the same, and typecheck is clean.
+- `addressSeenAt` is optional on `KnownProject`; a store written before it falls back to `lastSeenAt`.
+- A resync that changed nothing stays silent (`changed`).
+
+### Fix round 2
+
+*— deepseek-v4-pro, 2026-11-14*
+
+Round 2 carried one finding (MEDIUM #5, `slept` never expires). Reproduced,
+fixed, mutation-checked. Round 1's four findings were spot-checked in the code
+(not re-reviewed): `interfaces` defaults to `machineInterfaces`
+(`cli/src/discovery.ts:221`), `resubscribeDiscovery` delivers when `changed`
+(`client/src/remote-client.ts:1003`), `addressSeenAt` is per address
+(`client/src/discovery.ts:187`), the doubled `/**` is gone.
+
+**Repro D, RED before the fix** (`.tentacle/tmp/sibling-discovery/r2d.test.ts`,
+fake timers, a pid-alive/mtime-ancient phantom record):
+
+```
+Repro D first snapshot: ["/p/a","/p/phantom"]
+(fail) Repro D > a sleep long past does not disable freshness for a later subscriber
+```
+
+**Root cause, one sentence:** `slept` was a boolean cleared only by a poll, so
+with no subscriber (the normal laptop case) a single late beat from any past
+sleep disabled freshness for the *next* poll, however long after — which
+re-admitted exactly the pid-reuse phantom (F2/Repro 3) that finding 3 fixed
+for the `lastPollAt` half of the same rule.
+
+**Fix** (`packages/cli/src/discovery.ts`): `slept: boolean` →
+`sleptAt: number | undefined` (the moment the missed beat was noticed, set at
+`:342`); the poll at `:282-284` now takes the sleep path only while the wake is
+still near — `gap > staleAfterMs || (sleptAt !== undefined && at - sleptAt <=
+staleAfterMs)` — and clears it. A "skip freshness" is only ever owed to the
+window before the siblings' own next beat (≤ `heartbeatMs`), so it expires; the
+F3 case (a real sleep, subscriber appearing on wake) is inside that window and
+still skips. No behaviour change on the path that round 1 pinned.
+
+**Regression test** (`packages/cli/test/discovery.test.ts:369`, "a sleep long
+past EXPIRES, so a later subscriber still applies freshness (Repro D)"): asleep
+8 h with no subscriber → one rebased beat on wake → **1 h awake with on-time
+beats and still zero polls** (`expect(driver.polls()).toBe(0)` twice, so the
+test would be vacuous if a poll had cleared anything) → subscribe → snapshot is
+`["/work/self"]`. RED before the fix, GREEN after.
+
+**Mutations** (each applied, run, reverted; `discovery.ts` byte-identical to the
+committed fix afterwards, `diff` empty):
+
+| Mutation | Result |
+|---|---|
+| `afterSleep = gap > staleAfterMs \|\| sleptAt !== undefined` (a never-expiring flag, i.e. the round-2 bug) | **1 fail** — the new Repro-D test |
+| `afterSleep = gap > staleAfterMs` (drop the heartbeat signal entirely) | **1 fail** — the existing F3 SLEPT-with-no-subscriber test (`:356`) |
+
+The first mutation is the round-2 bug itself, so the new test is pinned to the
+exact property; the second shows the fix did not swallow the F3 rule it must
+keep.
+
+**Gate** (worktree `feat/sibling-discovery`, HEAD `aaa126c` + these edits):
+`bunx tsc --noEmit` clean · `bun run lint` — `Checked 1072 files. No fixes
+applied.` (baseline clean) · `bun test` — **8356 pass, 3 skip (the three opt-in
+skips: live-k8s, live-docker, real-socket keepalive), 0 fail**, 601 files,
+13 snapshots. Narrow runs per §4 first: `cli/test/discovery.test.ts` 23 pass,
+then the 5 discovery-related files 59 pass.
+
+**Not verified here:** nothing on the native/mobile side (no code touched
+there); the fix is inside the pure-ish driver and its own fake-timer tests.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; the same model family as the earlier review rounds, while the executor is DeepSeek per the commit trailers)
+
+**Verdict: PASS.**
+
+Scope: `git diff HEAD~1` (`3e2e35c`, only `cli/src/discovery.ts` and its test). `bun run typecheck` and `bun run lint` are clean. 49 tests pass, 0 fail (cli discovery, serve-discovery, client discovery). Every scratch repro from rounds 1 and 2 now behaves correctly:
+- A: the LAN and tailnet addresses are announced.
+- B: no phantom on a cold subscribe.
+- C: rev 2 is delivered after the reconnect.
+- D: the first snapshot after an overnight sleep is `["/p/a"]`, with no phantom.
+
+**Finding 5 is fixed.** `slept` is now `sleptAt`, a timestamp set by the late beat. It is honoured only while `at - sleptAt <= staleAfterMs`, and the poll clears it. Mutations (each reverted, `git status` clean):
+- never expire the sleep → 1 fail ("a sleep long past EXPIRES…", Repro D);
+- never honour the sleep → 1 fail ("a daemon that SLEPT with no subscriber… (F3)").
+
+So both sides of the window are pinned.
+
+**Regression check:**
+- A client subscribed across a sleep is still covered by the poll gap (`gap > staleAfterMs`).
+- A first subscribe more than 30 s after waking comes after every sibling's next beat (10 s), so freshness is correct, and the hysteresis absorbs a sibling that beats late.
+- No other source file changed.

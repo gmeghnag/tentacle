@@ -36,6 +36,7 @@ import {
   type ClearResult,
   type ClientInfo,
   type CompactResult,
+  type DaemonDiscovery,
   DomainErrorCode,
   type HistoryCut,
   type HooksTrustParams,
@@ -92,6 +93,7 @@ import {
   encodeBase64,
 } from "@tentacle/transport";
 import { ATTACH_TIMEOUT_MS, UPLOAD_RECONNECT_MS } from "./constants.ts";
+import { type DiscoveryState, foldDiscovery } from "./discovery.ts";
 import {
   type ImageInput,
   type ImageModelScope,
@@ -753,6 +755,15 @@ export class RemoteClient {
     (notice: SessionSubagentMessageNotice) => void
   >();
   private readonly statusListeners = new Set<(status: LinkStatus) => void>();
+  /**
+   * The sibling-discovery listener (`daemon/discover`), if one was set. Kept
+   * across reconnects: the subscription is PER CONNECTION, so `linkUp` asks
+   * again after every re-dial — else a Wi-Fi blip would silently end discovery
+   * (docs/feat/sibling-discovery.md F7).
+   */
+  private discoveryListener: ((discovery: DaemonDiscovery) => void) | undefined;
+  /** The highest `rev` delivered for the CURRENT daemon process (the F12 guard). */
+  private discoveryState: DiscoveryState | undefined;
   private readonly historyLostListeners = new Set<(notice: HistoryLostNotice) => void>();
   private readonly sessionDeletedListeners = new Set<(notice: SessionDeletedNotice) => void>();
   /** Conditions re-checked after every state change (session live, link stopped, …). */
@@ -966,6 +977,83 @@ export class RemoteClient {
     );
   }
 
+  /**
+   * `daemon/discover` (docs/feat/sibling-discovery.md): this computer's live
+   * sibling daemons and the addresses each is reachable on. Resolves the
+   * current snapshot AND subscribes `listener` to later changes; set `listener`
+   * once (a second call replaces it, and the daemon keeps one subscription per
+   * connection). It is re-issued automatically after a reconnect — the
+   * subscription is per connection, so a link drop would otherwise end
+   * discovery for good.
+   *
+   * Resolves `undefined` when the daemon cannot answer: an older build or a pod
+   * daemon answers `MethodNotFound` = "no discovery", and a client keeps what
+   * pairing gave it. Any other error is rethrown.
+   */
+  discover(listener: (discovery: DaemonDiscovery) => void): Promise<DaemonDiscovery | undefined> {
+    this.discoveryListener = listener;
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(this.peer, Method.DaemonDiscover, {})
+      .then((result) => {
+        const snapshot = result as DaemonDiscovery;
+        this.discoveryState = foldDiscovery(this.discoveryState, snapshot, this.clock.now());
+        return snapshot;
+      })
+      .catch((error: unknown) => {
+        if (isMethodNotFound(error)) {
+          return undefined;
+        }
+        throw error;
+      });
+  }
+
+  /**
+   * A `daemon/discovery` frame: the daemon's siblings changed. Routed through
+   * `foldDiscovery`, so a frame that overtook the subscribing response is
+   * dropped (F12) and a restarted daemon's `rev` restart is honoured (F7).
+   */
+  private onDiscovery(params: DaemonDiscovery): void {
+    const next = foldDiscovery(this.discoveryState, params, this.clock.now());
+    this.discoveryState = next;
+    if (next.changed) {
+      this.discoveryListener?.(params);
+    }
+  }
+
+  /**
+   * Re-issue `daemon/discover` on the NEW connection after a re-dial: the
+   * daemon's subscription is per connection, so nothing arrives until we ask
+   * again. Non-fatal — a daemon without discovery, or one that answers a moment
+   * later, changes nothing here. A result that CHANGED the snapshot IS
+   * delivered to the listener (a change made while the link was down is only
+   * visible here, F7); one that changed nothing is silent.
+   */
+  private resubscribeDiscovery(): void {
+    const listener = this.discoveryListener;
+    if (!listener || !this.up) {
+      return;
+    }
+    this.call(this.peer, Method.DaemonDiscover, {})
+      .then((result) => {
+        const snapshot = result as DaemonDiscovery;
+        const next = foldDiscovery(this.discoveryState, snapshot, this.clock.now());
+        this.discoveryState = next;
+        // DELIVER it: a change made while the link was down arrives only as
+        // this result, and folding it silently would swallow it for good — the
+        // folded rev becomes the guard, so no later frame re-delivers it
+        // (F7: no re-pairing, the phone just learns). A resync that changed
+        // nothing stays silent (`changed`), so a reconnect causes no redraw.
+        if (next.changed) {
+          listener(snapshot);
+        }
+      })
+      .catch(() => {
+        // An older daemon (MethodNotFound) or a link already gone: discovery
+        // stays off; `discover` is the caller's explicit retry.
+      });
+  }
   /**
    * Rename a session (`session/rename`): resolves with the title the daemon
    * stored (one line, its rules). Not re-sent after a drop (the user asks
@@ -2279,8 +2367,13 @@ export class RemoteClient {
       : raw;
     const peer: RpcPeer = new RpcPeer(channel, {
       onNotification: (method, params) => {
-        if (current() && method === Notification.SessionUpdate) {
+        if (!current()) return;
+        if (method === Notification.SessionUpdate) {
           this.onUpdate(params as SessionUpdateParams);
+        } else if (method === Notification.DaemonDiscovery) {
+          // Only ever sent because THIS connection asked (daemon/discover), so
+          // the TUI — which never asks — never sees one (docs/feat/sibling-discovery.md).
+          this.onDiscovery(params as DaemonDiscovery);
         }
       },
       onRequest: async (method, params, context) => {
@@ -2552,6 +2645,9 @@ export class RemoteClient {
     for (const entry of [...this.sessions.values()]) {
       void this.recover(entry, gen);
     }
+    // The discovery subscription belongs to the OLD connection: ask again, or a
+    // link drop would silently end discovery (F7).
+    this.resubscribeDiscovery();
     this.kick();
   }
 
