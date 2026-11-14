@@ -33,8 +33,18 @@ const NEW_FLOWS = [
   "11-disconnect-mid-turn",
 ] as const;
 
-/** The flows 11b.1 owns: they pair through their own steps, not the shared prefix. */
-const PAIRING_FLOWS = ["12-pair-declined", "13-pair-expired", "14-pair-bad-text"] as const;
+/**
+ * The flows that end BEFORE a computer is paired: they pair through their own
+ * steps rather than the shared prefix, and so have no `computer-<id>` to name.
+ * 11b.1's three refusal/expiry/paste cases, and 11b.2's deep link (F-P17: the
+ * link must stop at the review, so nothing is ever stored by it).
+ */
+const PAIRING_FLOWS = [
+  "12-pair-declined",
+  "13-pair-expired",
+  "14-pair-bad-text",
+  "19-deep-link",
+] as const;
 
 /**
  * One assertion: `- assertVisible:` / `- assertNotVisible:`, or the `visible:` /

@@ -1,0 +1,1 @@
+- **Scan the pairing QR, or open a `tentacle://pair` link.** The app scans `tentacle pair`'s QR with the camera — asked only when you tap Scan, and the paste field still works when camera access is off — and a `tentacle://pair` link opens the app on a confirmation card, never pairing by itself. Design: `docs/feat/mobile-pairing-screen.md`.

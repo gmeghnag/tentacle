@@ -8,9 +8,14 @@
  * The compare code is the point of the screen: the 6 digits, grouped `123 456`,
  * shown large, with "check your computer shows the same code, then answer y
  * there" — the human's `[y/N]` lives on the computer, never here.
+ *
+ * 11b.2 adds the Scan affordance above the paste card and the camera's own card.
+ * Both are PURE VIEW-MODEL output (`camera-access.ts`): this file decides no
+ * permission behaviour, it only draws the state it is handed.
  */
-import type { JSX } from "react";
+import type { JSX, ReactNode } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import type { CameraView } from "../camera-access.ts";
 import type { PairingView } from "../pairing-flow.ts";
 import type { Palette } from "../theme.ts";
 
@@ -26,6 +31,13 @@ export interface PairScreenProps {
   readonly onFailureAction: () => void;
   /** The computer this pairing replaces ("Pair again" from a row), if any. */
   readonly againName?: string;
+  /** The camera's state (11b.2), already decided by `camera-access.ts`. */
+  readonly camera: CameraView;
+  /** The Scan control (or the denied card's Settings action) was tapped. */
+  readonly onScan: () => void;
+  readonly onOpenSettings: () => void;
+  /** The live scanner, mounted only while it is open (the screen owns no state). */
+  readonly scanner?: ReactNode;
 }
 
 /** `123456` → `123 456` (the mockups' grouped form). */
@@ -44,6 +56,10 @@ export function PairScreen({
   onCancel,
   onFailureAction,
   againName,
+  camera,
+  onScan,
+  onOpenSettings,
+  scanner,
 }: PairScreenProps): JSX.Element {
   return (
     <ScrollView
@@ -51,6 +67,45 @@ export function PairScreen({
       contentContainerStyle={styles.content}
       keyboardShouldPersistTaps="handled"
     >
+      {scanner === undefined ? null : (
+        <View
+          testID="pair-scanner"
+          style={[styles.card, styles.scanner, { backgroundColor: palette.card }]}
+        >
+          {scanner}
+        </View>
+      )}
+
+      {view.stage === "intake" && camera.scan !== "none" ? (
+        <Pressable
+          testID="pair-scan"
+          accessibilityRole="button"
+          onPress={onScan}
+          style={[styles.button, { backgroundColor: palette.accent }]}
+        >
+          <Text style={[styles.buttonText, { color: palette.onAccent }]}>Scan QR code</Text>
+        </Pressable>
+      ) : null}
+
+      {view.stage !== "intake" || camera.card === undefined ? null : (
+        <View
+          testID={`pair-camera-${camera.card}`}
+          style={[styles.card, { backgroundColor: palette.card }]}
+        >
+          <Text style={[styles.body, { color: palette.danger }]}>{camera.message ?? ""}</Text>
+          {camera.settings ? (
+            <Pressable
+              testID="pair-camera-settings"
+              accessibilityRole="button"
+              onPress={onOpenSettings}
+              style={[styles.button, { backgroundColor: palette.separator }]}
+            >
+              <Text style={[styles.buttonText, { color: palette.label }]}>Open Settings</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      )}
+
       {view.stage === "intake" ? (
         <View style={[styles.card, { backgroundColor: palette.card }]}>
           <Text style={[styles.title, { color: palette.label }]}>Pair a computer</Text>
@@ -224,6 +279,7 @@ const styles = StyleSheet.create({
     minHeight: 44,
   },
   button: { borderRadius: 10, paddingVertical: 12, alignItems: "center" },
+  scanner: { padding: 0, overflow: "hidden" },
   buttonText: { fontSize: 16, fontWeight: "600" },
   sas: { fontSize: 40, fontWeight: "700", letterSpacing: 4, textAlign: "center" },
 });
