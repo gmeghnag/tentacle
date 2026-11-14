@@ -403,7 +403,106 @@ Execution: one branch, H1 → H2 (review) → H3+H4 (review, merge = MVP on main
 
 ## Execution
 
-*— (pending)*
+### H1 — pure modules and their unit tests (`feat/session-hop`, slice H1 only)
+
+*— claude-opus-5-5, 2026-11-14*
+
+**Load-bearing check re-run first (as instructed).** `.tentacle/tmp/session-hop/hop-repro.ts`
+on this branch (`9b4ca46`, worktree `.tentacle/worktrees/session-hop`) — PASSES,
+unchanged from the plan:
+
+```
+after A: system:sys | user:hello from local | assistant:reply-A
+B uid: 44b724e0-… == A uid: true
+B model saw: sys | hello from local | reply-A | hello from container
+after B: system:sys | user:hello from local | assistant:reply-A | user:hello from container | assistant:reply-B
+files: 44b724e0-….jsonl
+```
+
+The capability is still missing (`rg -n '"/move"|move_session' packages` → no
+match before this slice). Proceeded.
+
+**As built, in order.**
+
+1. **`packages/tui/src/hop-command.ts`** (+ its export in `tui/src/index.ts`) —
+   `parseHopCommand(raw)` → `HopParse`: `spec` / `cancel` / `error`.
+   `HopSpec` is a DISCRIMINATED union (`local` | `container`(+`image?`) |
+   `attach`(+`workload`)) rather than the plan's single optional-field shape:
+   the parser already knows which target it read, and every consumer (H2's
+   orchestrator, H3's feed) then branches on `target` with no impossible state.
+   `keep` defaults to true (decision 5) on all three.
+2. **`packages/cli/src/hop-plan.ts`** — `hopPlan` (D1 step 1 + D4's queue),
+   `hopCancelPlan`, `attachVerdict` (D7), `hopDelete` (D5), plus `workloadText`
+   / `placeText` (the `engine:name[/container]` form every notice and the badge
+   share). Refusal order: capable (D8) → hopping → link → switching →
+   compacting → same place → jobs → sub-agents → queue (`running || queued`).
+   A refusal always beats a queue: background work is never deferred behind a
+   turn that may run it again.
+3. **`packages/cli/src/hop-proposal.ts`** — `hopProposalSchema` (zod),
+   `hopSpecOf`, `hopProposalStep` (D9's own-turn watch), `proposalNotice`
+   (the owner's line before approving, with pod-supplied name/reason through
+   `untrustedText`).
+
+**Red first.** All three test files were run against stubs whose bodies
+returned a constant (`parseHopCommand` → an error row, `hopPlan`/`attachVerdict`
+/`hopDelete` → their permissive answer, `hopSpecOf` → `null`,
+`hopProposalStep` → `none`): **28 of 39 failing**, each on its own property
+(e.g. `expected {kind:"delete"}, received {kind:"keep"}`), never on an import or
+compile error. Then implemented → green.
+
+**Mutation checks (each broken, narrow test run, reverted).**
+
+| # | mutation | result |
+|---|---|---|
+| M1 | `/move --rm` never sets `keep=false` | 1 fail — "--rm asks for a delete…" |
+| M2 | `capable` checked AFTER the queue rows (D8) | 1 fail — "not hop-capable says so…" |
+| M3 | daemon queue ignored (D4) | 1 fail — "queued messages run first" |
+| M4 | `detachedRun` branch dropped (D7a) | 2 fail — detached-run + "names the workload" |
+| M5 | a `null` `residentUse` allowed to join (D7) | 1 fail — "a doubt does not join" |
+| M6 | `createdByHop` ignored (D5) | 1 fail — "--rm deletes ONLY what this hop created" |
+| M7 | a failed `move_session` still proposes | 1 fail — "a failed or refused call proposes nothing" |
+| M8 | `own` ignored (a foreign turn proposes) | 1 fail — "a FOREIGN turn never proposes here" |
+| M9 | `keep` defaults to false | 3 fail — schema + step tests |
+| M10 | the delete term dropped from `proposalNotice` | 1 fail — "a delete is said out loud" |
+| M11 | `reason` not through `untrustedText` | 1 fail — "sanitized (AGENTS §7)" |
+
+All reverted; the narrow files are green (42 tests).
+
+**Drift from the Implementation, and why.**
+
+- **`packages/cli/package.json` + `bun.lock`: `zod: 3.23.8` added to `cli`'s
+  dependencies.** The plan puts the proposal schema in `cli/src/hop-proposal.ts`,
+  and `zod` was not resolvable from `packages/cli` (probe: `Cannot find package
+  'zod'`); every other schema-owning package already depends on it at the same
+  pin. Additive, no version change.
+- **`HopSpec` is a discriminated union** (above), not one optional-field object.
+- **`HopParse`/`HopCancelPlan` are separate unions** — a `cancel` is not a hop.
+- **New pure exports H2/H3 will need** and the plan implies but does not name:
+  `workloadText`, `placeText`, `hopCancelPlan`, `proposalNotice`,
+  `MOVE_SESSION_TOOL`, `HOP_PROPOSAL_INVALID`, `NO_HOP_PROPOSAL`,
+  `HOP_USAGE`, `HOP_ATTACH_USAGE`, `HOP_ENGINES`. All are decisions, so they
+  live in the pure modules (§7), not in a component.
+- The plan's `/move attach <engine>:<name>[/<container>]` grammar is enforced as
+  written, including the two asymmetries it implies: docker/podman REFUSE a
+  `/container` part (they have none) instead of ignoring it, and k8s allows at
+  most one.
+- **`bash`-level scratch only** (`/Users/gmeghnag/tentacle/.tentacle/tmp/session-hop/`:
+  the repro, the mutation scripts, backups). Nothing else was touched; no other
+  slice started.
+
+**Not in this slice (H2+ owns it):** nothing reads these modules yet, so no
+user-visible behaviour changes at H1 — the changelog fragment is written now
+because the plan pins `changelog.d/session-hop.added.md` to the task and a
+fragment must exist before the MVP lands.
+
+**Gate (on the tree as left):**
+`bunx tsc --noEmit` → 0 · `bun run typecheck` (incl. `apps/mobile`) → 0 ·
+`bun run lint` → `Checked 1118 files`, 0 errors/warnings ·
+`bun test` → **8558 pass, 3 skip (the documented opt-ins), 0 fail** across 613
+files. No protocol schema changed (`packages/protocol/schema/protocol.json`
+untouched — D10: no wire change, no `protocol.d/` note).
+
+*— claude-opus-5-5, 2026-11-14*
 
 ## Review
 

@@ -20,6 +20,16 @@ export {
 export * from "./scroll.ts";
 export * from "./commands.ts";
 export * from "./link-status.ts";
+export {
+  HOP_ATTACH_USAGE,
+  HOP_ENGINES,
+  HOP_USAGE,
+  type HopEngine,
+  type HopParse,
+  type HopSpec,
+  type HopWorkload,
+  parseHopCommand,
+} from "./hop-command.ts";
 export { App, type AutoAcceptFeed } from "./App.tsx";
 export type {
   AppProps,
