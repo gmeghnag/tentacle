@@ -39,8 +39,15 @@ import {
 
 /**
  * The session as the driver sees it: the four acts it performs, and the facts
- * `decide` needs. `RemoteSession` satisfies it structurally — no adapter, and
- * no app module imports `@tentacle/client`'s class to say so.
+ * `decide` needs.
+ *
+ * NOT `RemoteSession`'s own shape: `steer` takes the turn the act is bound to,
+ * and `RemoteSession.enqueue(text, id?)` binds to the turn the CLIENT believes
+ * runs — resolving without sending when it sees none (`remote-session.ts:958`).
+ * A steer must therefore go through `RemoteClient.enqueue(sessionId, id,
+ * turnId, text)` (`remote-client.ts:2090`), which the daemon checks against its
+ * `activeTurnId` (`hosted-session.ts:2700`); `outbox-session.ts` is that
+ * adapter, and the ONLY one the app uses.
  */
 export interface OutboxSession {
   /** Decided from the daemon's mode before any frame (`RemoteSession.imageInput`). */
@@ -60,7 +67,14 @@ export interface OutboxSession {
 export interface OutboxPersistence {
   /** The items now (a copy; the driver never mutates the caller's array). */
   items(): readonly OutboxItem[];
-  /** Persist the whole item list; `false` = not saved (the banner). */
+  /**
+   * Persist the whole item list. The state is IN MEMORY afterwards either way
+   * (that is the store's own contract: a failed write keeps it and only tells
+   * the person), so `false` means "not on disk" — never "it did not happen".
+   * The driver shows the `not-saved` banner for it and never drops the item: a
+   * caller that read `false` as "nothing was created" would re-create the same
+   * text under fresh keys and send it twice.
+   */
   save(items: readonly OutboxItem[]): Promise<boolean>;
   /** An item is finished: gone from disk, its photo copies with it. */
   finish(itemId: string): Promise<boolean>;
@@ -100,11 +114,17 @@ export interface OutboxDriver {
    * handled (`0` when the link is down: they stay `waiting`).
    */
   run(sessionId: string): Promise<number>;
-  /** The compose tap with the link DOWN (or the app being killed): the item, already on disk. */
-  enqueue(
-    session: OutboxSession,
-    input: Parameters<typeof createItem>[0],
-  ): Promise<OutboxItem | null>;
+  /**
+   * The compose tap with the link DOWN (or the app being killed): the item, in
+   * memory AT ONCE and on disk as soon as the write lands.
+   *
+   * It never answers null: the store keeps a failed write in memory (its own
+   * contract), so the item EXISTS — only its durability is in doubt, which is
+   * what the `not-saved` banner says. A caller reading "null" as "not created"
+   * would keep the field's text, the person would tap again, and the same words
+   * would go out twice under two keys (F4).
+   */
+  enqueue(session: OutboxSession, input: Parameters<typeof createItem>[0]): Promise<OutboxItem>;
   /** The sheet's Send: the same key, whatever `decide` says now. */
   sendNow(item: OutboxItem): Promise<void>;
   /** The sheet's "Queue as steer", bound to the turn running now. */
@@ -301,6 +321,36 @@ export function createOutboxDriver(
     }
   };
 
+  /**
+   * The person's tap on the sheet: ONE act per item at a time, and it acts on
+   * the item AS IT IS NOW, never on the copy the sheet was rendered from.
+   *
+   * A double tap (two `steerNow`s on the same prompt row) is the sheet's own
+   * F4 case: the second call waits for the first (`serialise`, the same queue a
+   * run uses), then finds the item either GONE (the first act finished it — a
+   * no-op) or already converted into the steer the first made, whose
+   * `enqueueId` `asSteer` KEEPS for the same turn (`outbox.ts:226`), so the
+   * daemon sees one key and does one injection. `busy` covers the same guard
+   * from a run in flight.
+   */
+  const exclusive = (
+    sessionId: string,
+    itemId: string,
+    body: (item: OutboxItem) => Promise<void>,
+  ): Promise<void> =>
+    serialise(sessionId, async () => {
+      const item = itemOf(itemId);
+      if (item === undefined || busy.has(itemId)) {
+        return;
+      }
+      busy.add(itemId);
+      try {
+        await body(item);
+      } finally {
+        busy.delete(itemId);
+      }
+    });
+
   return {
     run(sessionId) {
       return serialise(sessionId, async () => {
@@ -328,50 +378,66 @@ export function createOutboxDriver(
     async enqueue(session, input) {
       // Keys minted once, and on disk BEFORE the first attempt (the
       // load-bearing assumption): the compose tap that is offline, or whose app
-      // dies a moment later, still has its key.
+      // dies a moment later, still has its key. A write that does not land is
+      // the `not-saved` banner, not a lost item: the store keeps it in memory
+      // (F21), and `run` will send it.
       const item = createItem(input, deps.mint);
-      const saved = await deps.persistence.save([...deps.persistence.items(), item]);
-      if (!saved) {
-        deps.onNotice?.({ kind: "not-saved" });
-      }
-      return saved ? item : null;
+      await save([...deps.persistence.items(), item]);
+      return item;
     },
     async sendNow(item) {
       // The person's Send: the SAME key, whatever changed (decision 16) — so a
-      // duplicate is impossible even if the first attempt did go out.
-      const session = await getSession(item.sessionId);
-      if (session === null) {
-        await save(replace(deps.persistence.items(), withState(item, "waiting")));
-        return;
-      }
-      await perform(session, item);
+      // duplicate is impossible even if the first attempt did go out. `exclusive`
+      // makes a second tap act on the item as the first left it, and a run in
+      // flight finishes before this one starts.
+      await exclusive(item.sessionId, item.itemId, async (current) => {
+        const session = await getSession(current.sessionId);
+        if (session === null) {
+          await save(replace(deps.persistence.items(), withState(current, "waiting")));
+          return;
+        }
+        await perform(session, current);
+      });
     },
     async steerNow(item, session) {
-      const facts = await session.facts();
-      const turnId = facts.runningTurnId;
-      if (turnId === null) {
-        await settle(item, { kind: "decide", why: "no-turn" });
-        return;
-      }
-      const steer = asSteer(item, turnId, deps.mint);
-      await save(replace(deps.persistence.items(), steer));
-      await perform(session, steer);
+      await exclusive(item.sessionId, item.itemId, async (current) => {
+        const facts = await session.facts();
+        const turnId = facts.runningTurnId;
+        if (turnId === null) {
+          await settle(current, { kind: "decide", why: "no-turn" });
+          return;
+        }
+        // `asSteer` keeps the id when this item is ALREADY bound to this turn:
+        // a second tap of the same sheet is one key, hence one injection (F4).
+        const steer = asSteer(current, turnId, deps.mint);
+        await save(replace(deps.persistence.items(), steer));
+        await perform(session, steer);
+      });
     },
     async discard(itemId) {
-      if (!(await deps.persistence.finish(itemId))) {
-        deps.onNotice?.({ kind: "not-saved" });
+      const item = itemOf(itemId);
+      if (item === undefined) {
+        return;
       }
+      await exclusive(item.sessionId, itemId, async () => {
+        if (!(await deps.persistence.finish(itemId))) {
+          deps.onNotice?.({ kind: "not-saved" });
+        }
+      });
     },
     async backToDraft(itemId) {
       const item = itemOf(itemId);
       if (item === undefined) {
         return null;
       }
-      const gone = await deps.persistence.finish(itemId);
-      if (!gone) {
-        deps.onNotice?.({ kind: "not-saved" });
-      }
-      return item;
+      let taken: OutboxItem | null = null;
+      await exclusive(item.sessionId, itemId, async (current) => {
+        if (!(await deps.persistence.finish(itemId))) {
+          deps.onNotice?.({ kind: "not-saved" });
+        }
+        taken = current;
+      });
+      return taken;
     },
   };
 }

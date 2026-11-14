@@ -246,17 +246,26 @@ export function createOutboxStore(
   let data: OutboxData = EMPTY_OUTBOX;
   let loaded: LoadResult | null = null;
   /**
-   * Set when the file must not be written: a newer build's (refused) or an
-   * unparsable one. Writing would destroy what this build cannot read, so the
-   * memory state is kept and the person is told instead (F21).
+   * Set when the file must not be written: a newer build's (refused), or an
+   * unparsable one that could NOT be moved aside. Writing would destroy what
+   * this build cannot read, so the memory state is kept and the person is told
+   * instead (F21). A corrupt file that WAS set aside leaves nothing to protect
+   * (its bytes live on under `.corrupt-<ts>`), so the store is writable again —
+   * otherwise every compose until relaunch would be memory-only.
    */
   let readOnly = false;
+  /**
+   * The tail of the last disk write.
+   *
+   * ONE store is one file per computer, while the driver serialises per SESSION
+   * and drafts and own ids write independently: two writes could otherwise
+   * interleave, the slower one landing last and persisting the OLDER state — a
+   * silently lost item, ref or own id after a kill. So every write goes through
+   * one queue (which is also what makes one `<state>.tmp` name safe).
+   */
+  let writeTail: Promise<unknown> = Promise.resolve();
 
-  const write = async (next: OutboxData): Promise<boolean> => {
-    data = next;
-    if (readOnly) {
-      return false;
-    }
+  const persist = async (next: OutboxData): Promise<boolean> => {
     const tmp = `${paths.state}.tmp`;
     try {
       await fs.write(tmp, serializeOutbox(next));
@@ -266,6 +275,24 @@ export function createOutboxStore(
     } catch {
       return false;
     }
+  };
+
+  const write = (next: OutboxData): Promise<boolean> => {
+    // In memory at once (the person's tap must never be re-done because a
+    // write is slow), on disk strictly in order.
+    data = next;
+    if (readOnly) {
+      return Promise.resolve(false);
+    }
+    const mine = writeTail.then(
+      () => persist(next),
+      () => persist(next),
+    );
+    writeTail = mine.then(
+      () => undefined,
+      () => undefined,
+    );
+    return mine;
   };
 
   return {
@@ -281,13 +308,19 @@ export function createOutboxStore(
       const parsed = parseFile(text);
       if (parsed === "corrupt") {
         const asideTo = `${paths.state}.corrupt-${now()}`;
+        let moved = false;
         try {
           await fs.rename(paths.state, asideTo);
+          // Moved aside, so the bytes are safe under `asideTo`: nothing is left
+          // to protect, and a store that stayed read-only would make every
+          // compose until relaunch memory-only — the person would be told
+          // `not-saved` for text that has nowhere to go but RAM.
+          moved = true;
         } catch {
-          // Could not move it: the file stays, and it stays read-only — the
-          // next load sets it aside again rather than overwriting it.
+          // Could not move it: the file stays, and the store stays read-only —
+          // the next load sets it aside again rather than overwriting it.
         }
-        readOnly = true;
+        readOnly = !moved;
         loaded = { kind: "corrupt", asideTo };
         return loaded;
       }

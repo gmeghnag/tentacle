@@ -197,7 +197,7 @@ describe("what it refuses", () => {
     expect(fs.files.get(paths.state)).toBe(newer);
   });
 
-  test("an unparsable file is SET ASIDE, never deleted (mutation: delete it → red)", async () => {
+  test("an unparsable file is SET ASIDE, never deleted, and the store then works again (mutations: delete it → red; stay read-only for the process → red)", async () => {
     const fs = memoryFs({ [paths.state]: "{ this is not json" });
     let stamp = 1_700_000_000_000;
     const store = createOutboxStore(fs, paths, () => stamp);
@@ -206,9 +206,24 @@ describe("what it refuses", () => {
     expect(fs.files.get(`${paths.state}.corrupt-${stamp}`)).toBe("{ this is not json");
     // And the store starts empty rather than half-loading the broken file.
     expect(store.data).toEqual({ items: [], drafts: [], ownIds: [] });
-    // But it will not write over what it could not read either.
-    expect(await store.setItems([item("a")])).toBe(false);
+    // Its bytes are safe under `asideTo`, so there is nothing left to protect:
+    // a store that stayed read-only would make every compose until relaunch
+    // memory-only (`not-saved` for text with nowhere to go but RAM).
     stamp += 1;
+    expect(await store.setItems([item("a")])).toBe(true);
+    const reloaded = createOutboxStore(fs, paths, () => stamp);
+    const loaded = await reloaded.load();
+    expect(loaded.kind === "loaded" ? loaded.data.items.map((e) => e.itemId) : []).toEqual(["a"]);
+  });
+
+  test("a corrupt file that could NOT be moved aside leaves the store read-only (its bytes are still the only copy)", async () => {
+    const fs = memoryFs({ [paths.state]: "{ this is not json" });
+    fs.failRename = true;
+    const store = createOutboxStore(fs, paths, () => 7);
+    expect(await store.load()).toEqual({ kind: "corrupt", asideTo: `${paths.state}.corrupt-7` });
+    // Never written over: the unread file is the person's only copy.
+    expect(await store.setItems([item("a")])).toBe(false);
+    expect(fs.files.get(paths.state)).toBe("{ this is not json");
     expect(store.data.items).toHaveLength(1); // memory only
   });
 
@@ -267,6 +282,78 @@ describe("finishing an item", () => {
     expect(await store.removeItem("a")).toBe(true);
     fs.remove = reallyRemove;
     expect(store.data.items).toEqual([]);
+  });
+});
+
+describe("two writers at once (one file per computer, one store)", () => {
+  /**
+   * An fs whose writes finish in the REVERSE of the order they started — a
+   * real device's fs promises no order at all, so this is the ordinary case,
+   * not an exotic one. Without a write queue the slower (older) write lands
+   * last and the file regresses; with two writers sharing `<state>.tmp`, one
+   * even renames the other's bytes.
+   */
+  const racingFs = (): FakeFs => {
+    const fs = memoryFs();
+    const started: { path: string; text: string }[] = [];
+    let writes = 0;
+    return Object.assign(fs, {
+      async write(path: string, text: string) {
+        const index = writes++;
+        started.push({ path, text });
+        await new Promise((resolve) => setTimeout(resolve, index === 0 ? 25 : 1));
+        fs.files.set(path, text);
+      },
+    });
+  };
+
+  test("overlapping writes land in order: the NEWEST state is on disk (mutation: no write queue → the older one wins)", async () => {
+    const fs = racingFs();
+    const store = createOutboxStore(fs, paths);
+    await store.load();
+    const older = store.setOwnIds(["a"]);
+    const newer = store.setOwnIds(["a", "b"]);
+    expect(await Promise.all([older, newer])).toEqual([true, true]);
+    expect(JSON.parse(fs.files.get(paths.state) ?? "{}").ownIds).toEqual(["a", "b"]);
+    expect(store.data.ownIds).toEqual(["a", "b"]);
+  });
+
+  test("two writers that both change the file (items + own ids) do not overwrite each other (mutation: shared tmp path → one write's bytes are lost)", async () => {
+    const fs = racingFs();
+    const store = createOutboxStore(fs, paths);
+    await store.load();
+    const ids = store.setOwnIds(["i1"]);
+    // The SECOND write starts while the first is still in its fs: its own tmp
+    // name is what keeps the first write's bytes from being renamed away.
+    const items = store.setItems([item("a")]);
+    expect(await Promise.all([ids, items])).toEqual([true, true]);
+    const onDisk = JSON.parse(fs.files.get(paths.state) ?? "{}");
+    expect(onDisk.ownIds).toEqual(["i1"]);
+    expect(onDisk.items.map((entry: OutboxItem) => entry.itemId)).toEqual(["a"]);
+    // Both collections survive a relaunch: no lost update.
+    const reloaded = createOutboxStore(fs, paths);
+    const loaded = await reloaded.load();
+    expect(loaded.kind === "loaded" ? loaded.data : null).toEqual({
+      items: [item("a")],
+      drafts: [],
+      ownIds: ["i1"],
+    });
+  });
+
+  test("a write that fails leaves the queue usable: the NEXT write still lands (mutation: a rejected tail poisons it → every later write fails)", async () => {
+    const fs = memoryFs();
+    const store = createOutboxStore(fs, paths);
+    await store.load();
+    fs.failWrite = true;
+    expect(await store.setItems([item("a")])).toBe(false);
+    fs.failWrite = false;
+    expect(await store.setItems([item("a"), item("b")])).toBe(true);
+    const reloaded = createOutboxStore(fs, paths);
+    const loaded = await reloaded.load();
+    expect(loaded.kind === "loaded" ? loaded.data.items.map((e) => e.itemId) : []).toEqual([
+      "a",
+      "b",
+    ]);
   });
 });
 

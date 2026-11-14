@@ -45,6 +45,7 @@ import {
   type OutboxSession,
   createOutboxDriver,
 } from "../src/outbox-driver.ts";
+import { outboxSessionOf } from "../src/outbox-session.ts";
 import type { ComposeInput, OutboxItem, SessionFacts } from "../src/outbox.ts";
 import { addOwnIds, pruneOwnIds } from "../src/outbox.ts";
 import { createSessionController } from "../src/session-controller.ts";
@@ -287,24 +288,11 @@ async function phoneOn(d: Daemon, o: PhoneOptions = {}) {
   let minted = 0;
 
   const portOf = (sessionId: string, session: RemoteSession): OutboxSession => {
-    const port: OutboxSession = {
-      upload: (bytes, meta) => session.attachImage(bytes, meta),
-      prompt: async (text: string, turnId: string, attachments: readonly AttachmentRef[]) => {
-        for await (const _event of session.send(text, undefined, { turnId, attachments })) {
-          // drain: the ack is all the driver needs
-        }
-      },
-      steer: (text, id) => session.enqueue(text, id),
-      facts: async () => {
-        const snapshot = (await session.snapshot()) ?? [];
-        return {
-          availability: "open",
-          historyLength: snapshot.length,
-          // `busy` says a turn runs; `watch` says WHICH (its own, or a foreign one).
-          runningTurnId: session.busy ? (turns.get(sessionId) ?? null) : null,
-        };
-      },
-    };
+    // The app's OWN port (`outbox-session.ts`): `attachImage` / `send` for the
+    // acts, and `RemoteClient.enqueue(sessionId, id, turnId, text)` for a steer
+    // — bound to the turn the item names, never to whatever turn the client
+    // believes runs (that silent no-op is what T9 pins).
+    const port = outboxSessionOf(session, app.client, () => turns.get(sessionId) ?? null);
     return o.wrapPort === undefined ? port : o.wrapPort(port, session);
   };
 
@@ -387,11 +375,11 @@ async function seeded(laptop: App): Promise<string> {
 }
 
 /** The laptop's own long turn (a FOREIGN turn from the phone's point of view). */
-function laptopHold(laptop: App, sid: string): { done: Promise<void> } {
+function laptopHold(laptop: App, sid: string, text = "hold please"): { done: Promise<void> } {
   const session = laptop.client.newSession(undefined, sid);
   const done = (async () => {
     try {
-      for await (const _event of session.send("hold please")) {
+      for await (const _event of session.send(text)) {
         // drain
       }
     } catch {
@@ -753,6 +741,112 @@ describe("the outbox over a real daemon", () => {
     // And the id set stays bounded by the session's LIVE queue.
     expect(pruneOwnIds(saved, await queueOf(d, sid))).toEqual([]);
     await after.close();
+    laptop.close();
+  }, 20000);
+
+  test("T9 the facts said its turn runs and it ended before the enqueue: the daemon's NoTurnRunning is SEEN, never a silent drop (mutation: `RemoteSession.enqueue` in the port → the item is finished with no frame and no decision)", async () => {
+    const d = daemon();
+    const laptop = await dial(d);
+    const sid = await seeded(laptop);
+    const hold = laptopHold(laptop, sid);
+    await until(() => d.model.held === 1);
+    const turnId = (await runningTurn(d, sid)) as string;
+
+    const phone = await phoneOn(d);
+    const steer = (await phone.driver.enqueue(
+      offlinePort,
+      compose(sid, {
+        kind: "steer",
+        text: "steer me",
+        steerTurnId: turnId,
+        basis: { historyLength: 2, runningTurnId: turnId },
+      }),
+    )) as OutboxItem;
+    // The turn ends in the window between the facts and the enqueue.
+    d.model.open();
+    await hold.done;
+    await sleep(150);
+    await phone.close();
+
+    const stale = await phoneOn(d, {
+      initial: phone.persistence.items(),
+      // What the app had just read: its own turn still running. This is the
+      // race no client-side guard can close, so the daemon must answer.
+      wrapPort: (port) => ({
+        ...port,
+        facts: async () => ({ availability: "open", historyLength: 2, runningTurnId: turnId }),
+      }),
+    });
+    const before = stale.app.frames.length;
+    await stale.driver.run(sid);
+    await sleep(200);
+
+    // The steer LEFT (it was decided `send`), the daemon refused it by its own
+    // `activeTurnId`, and the item is a person's decision — not deleted, and not
+    // in the transcript.
+    expect(methods(stale.app.frames.slice(before))).toContain(Method.Enqueue);
+    const enqueue = stale.app.frames.slice(before).find((frame) => frame.method === Method.Enqueue);
+    expect(enqueue?.params?.turnId).toBe(turnId); // bound to ITS turn, not one that runs now
+    expect(enqueue?.params?.id).toBe(steer.enqueueId);
+    expect(stale.decisions.map((entry) => entry.why)).toEqual(["no-turn"]);
+    expect(stale.persistence.items().map((entry) => entry.state)).toEqual(["needs-decision"]);
+    expect(await userTexts(d, sid)).toEqual(["hi", "hold please"]); // never injected
+    await stale.close();
+    laptop.close();
+  }, 20000);
+
+  test("T10 the same race with a NEW turn running: the stale steer never lands in the later turn (mutation: `RemoteSession.enqueue` in the port → bound to whatever turn runs now → the text steers the WRONG turn)", async () => {
+    const d = daemon();
+    const laptop = await dial(d);
+    const sid = await seeded(laptop);
+    const first = laptopHold(laptop, sid);
+    await until(() => d.model.held === 1);
+    const turnId = (await runningTurn(d, sid)) as string;
+
+    const phone = await phoneOn(d);
+    const steer = (await phone.driver.enqueue(
+      offlinePort,
+      compose(sid, {
+        kind: "steer",
+        text: "steer me",
+        steerTurnId: turnId,
+        basis: { historyLength: 2, runningTurnId: turnId },
+      }),
+    )) as OutboxItem;
+    // Turn 1 ends, and the laptop starts ANOTHER turn before the phone's next
+    // sync: the daemon now runs a turn that is NOT this steer's (F9's
+    // "never steers a later turn").
+    d.model.open();
+    await first.done;
+    await sleep(150);
+    const second = laptopHold(laptop, sid, "hold second");
+    await until(() => d.model.held === 2);
+    await phone.close();
+
+    const stale = await phoneOn(d, {
+      initial: phone.persistence.items(),
+      wrapPort: (port) => ({
+        ...port,
+        facts: async () => ({ availability: "open", historyLength: 2, runningTurnId: turnId }),
+      }),
+    });
+    const before = stale.app.frames.length;
+    await stale.driver.run(sid);
+    await sleep(200);
+
+    const enqueue = stale.app.frames.slice(before).find((frame) => frame.method === Method.Enqueue);
+    expect(enqueue?.params?.turnId).toBe(turnId); // the turn it was typed for, not the one running
+    expect(enqueue?.params?.id).toBe(steer.enqueueId);
+    expect(stale.decisions.map((entry) => entry.why)).toEqual(["no-turn"]);
+    expect(stale.persistence.items().map((entry) => entry.state)).toEqual(["needs-decision"]);
+
+    // The later turn runs to its end and never saw the text.
+    d.model.open();
+    await second.done;
+    await sleep(200);
+    const texts = await userTexts(d, sid);
+    expect(texts).toEqual(["hi", "hold please", "hold second"]);
+    await stale.close();
     laptop.close();
   }, 20000);
 });

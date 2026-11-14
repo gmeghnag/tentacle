@@ -96,22 +96,22 @@ function memoryPersistence(initial: readonly OutboxItem[] = []) {
     saves: 0,
     finished: [] as string[],
     items: () => items,
+    /**
+     * `outbox-store.ts`'s own contract: the state is in MEMORY either way and
+     * `false` means only "not on disk". A fake that dropped it instead would
+     * hide the difference between the two — which is how the `null` from
+     * `enqueue` looked safe while the real store kept a live item.
+     */
     async save(next: readonly OutboxItem[]) {
       persistence.saves += 1;
-      if (persistence.failSave) {
-        return false;
-      }
       items = [...next];
-      return true;
+      return !persistence.failSave;
     },
     async finish(itemId: string) {
       persistence.saves += 1;
       persistence.finished.push(itemId);
-      if (persistence.failSave) {
-        return false;
-      }
       items = items.filter((entry) => entry.itemId !== itemId);
-      return true;
+      return !persistence.failSave;
     },
   };
   return persistence;
@@ -201,11 +201,24 @@ describe("creating an item", () => {
     expect(item?.turnId.startsWith("mint-")).toBe(true);
   });
 
-  test("a disk that will not write answers null and the not-saved banner (never a silent drop)", async () => {
+  test("a disk that will not write keeps the item and says not-saved — never answers 'not created' (mutation: return null when the write failed → the screen keeps the text and a re-tap sends a SECOND item)", async () => {
     const h = harness();
     h.persistence.failSave = true;
-    expect(await h.driver.enqueue(portOf(h.session), compose())).toBeNull();
+    const item = await h.driver.enqueue(portOf(h.session), compose());
+    // The state is in memory either way (the store's own contract), so the item
+    // EXISTS; only its durability is in doubt.
+    expect(item.itemId).toBeTruthy();
     expect(h.notices).toEqual(["not-saved"]);
+    expect(h.persistence.items()).toHaveLength(1);
+  });
+
+  test("an item created while the write failed still goes out on the next run (mutation: drop it from memory → never sent)", async () => {
+    const h = harness();
+    h.persistence.failSave = true;
+    await h.driver.enqueue(portOf(h.session), compose());
+    h.persistence.failSave = false;
+    await h.driver.run("s1");
+    expect(h.session.prompts).toHaveLength(1);
   });
 });
 
@@ -439,6 +452,55 @@ describe("the sheet's acts", () => {
     await h.driver.steerNow(item, portOf(h.session));
     expect(h.session.steers).toEqual([]);
     expect(h.decisions[0]?.why).toBe("no-turn");
+  });
+
+  test("a DOUBLE tap of Queue as steer is ONE enqueue with ONE id (mutation: no serialise/busy in steerNow → two ids, the text injected twice)", async () => {
+    const h = harness();
+    const item = (await h.driver.enqueue(portOf(h.session), compose())) as OutboxItem;
+    h.session.facts = { availability: "open", historyLength: 5, runningTurnId: "turn-7" };
+    const port = portOf(h.session);
+    const slow: typeof port = {
+      ...port,
+      steer: async (text, id, turnId) => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        await port.steer(text, id, turnId);
+      },
+    };
+    // The sheet's double tap: both calls carry the SAME stale item copy.
+    await Promise.all([h.driver.steerNow(item, slow), h.driver.steerNow(item, slow)]);
+    expect(h.session.steers).toHaveLength(1);
+    // ONE id for the act (a fresh one, `asSteer` kept it for the second tap),
+    // so the daemon's `enqueued` set makes it one injection.
+    expect(h.session.steers[0]?.turnId).toBe("turn-7");
+    expect(h.session.steers[0]?.id).not.toBe(item.enqueueId);
+  });
+
+  test("a second tap after the first act finished finds nothing to do (mutation: act on the sheet's stale copy → a second send)", async () => {
+    const h = harness();
+    const item = (await h.driver.enqueue(portOf(h.session), compose())) as OutboxItem;
+    h.session.facts = { availability: "open", historyLength: 5, runningTurnId: "turn-7" };
+    await h.driver.steerNow(item, portOf(h.session));
+    expect(h.session.steers).toHaveLength(1);
+    // The row is gone (accepted), and the sheet's stale copy is tapped again.
+    await h.driver.steerNow(item, portOf(h.session));
+    expect(h.session.steers).toHaveLength(1);
+  });
+
+  test("a double tap of Send is ONE prompt (mutation: skip the busy guard → two)", async () => {
+    const h = harness();
+    const item = (await h.driver.enqueue(portOf(h.session), compose())) as OutboxItem;
+    h.session.facts = { availability: "open", historyLength: 9, runningTurnId: null };
+    const port = portOf(h.session);
+    const slow: typeof port = {
+      ...port,
+      prompt: async (text, turnId, refs) => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        await port.prompt(text, turnId, refs);
+      },
+    };
+    await Promise.all([h.driver.sendNow(item), h.driver.sendNow(item)]);
+    expect(h.session.prompts).toHaveLength(1);
+    expect(h.session.prompts[0]?.turnId).toBe(item.turnId);
   });
 
   test("Discard removes it with its copies; Edit hands the content back", async () => {
