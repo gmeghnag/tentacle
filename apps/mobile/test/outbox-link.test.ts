@@ -45,7 +45,7 @@ import {
   type OutboxSession,
   createOutboxDriver,
 } from "../src/outbox-driver.ts";
-import { outboxSessionOf } from "../src/outbox-session.ts";
+import { outboxSessionOf, unavailableSessionPort } from "../src/outbox-session.ts";
 import type { ComposeInput, OutboxItem, SessionFacts } from "../src/outbox.ts";
 import { addOwnIds, pruneOwnIds } from "../src/outbox.ts";
 import { createSessionController } from "../src/session-controller.ts";
@@ -243,20 +243,14 @@ function persistenceOf(initial: readonly OutboxItem[] = []) {
 }
 
 /**
- * A port for a session that could not be opened: its acts cannot run, but its
- * FACTS still carry the reason, so the item goes back to the field (F20).
+ * A port for a session that could not be opened. The APP's own
+ * (`unavailableSessionPort`), not a test-only copy: its acts throw
+ * `SessionNotOpenError`, which is the only thing `refusalOf` can read as "no
+ * answer from the daemon" — a bare `Error` here would make every offline case
+ * prove a refusal path the app never takes (round-1 finding 1's lesson).
  */
-function unopenedPort(availability: SessionFacts["availability"]): OutboxSession {
-  const refuse = (): never => {
-    throw new Error(`the session is ${availability}`);
-  };
-  return {
-    upload: refuse,
-    prompt: refuse,
-    steer: refuse,
-    facts: () => Promise.resolve({ availability, historyLength: 0, runningTurnId: null }),
-  };
-}
+const unopenedPort = (availability: Exclude<SessionFacts["availability"], "open">) =>
+  unavailableSessionPort(availability);
 
 interface PhoneOptions {
   readonly initial?: readonly OutboxItem[];

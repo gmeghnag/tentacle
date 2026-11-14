@@ -29,6 +29,7 @@ import {
   asSteer,
   createItem,
   decide,
+  notOpenRefusal,
   pendingUploads,
   refsOf,
   refusalOf,
@@ -268,6 +269,11 @@ export function createOutboxDriver(
         // to the field, never converted into a steer by itself (F7).
         await removeAndHand(item, "busy");
         return;
+      case "draft":
+        // The session is archived / deleted / gone: its text is the field's
+        // again, and nothing reopens it (F20).
+        await removeAndHand(item, refusal.why);
+        return;
       default: {
         // `decide`/`reupload`/… — only a person settles it.
         const why = refusal.kind === "decide" ? refusal.why : "refused";
@@ -402,6 +408,14 @@ export function createOutboxDriver(
     async steerNow(item, session) {
       await exclusive(item.sessionId, item.itemId, async (current) => {
         const facts = await session.facts();
+        if (facts.availability !== "open") {
+          // No turn can be named on a session that is not open: this is a LINK
+          // problem, not "the turn moved" (F1) — or the item's text is the
+          // field's again (F20). Asking `runningTurnId` FIRST would settle a
+          // dropped link as `no-turn`, a decision sheet for a network blip.
+          await refuse(current, notOpenRefusal(facts.availability));
+          return;
+        }
         const turnId = facts.runningTurnId;
         if (turnId === null) {
           await settle(current, { kind: "decide", why: "no-turn" });

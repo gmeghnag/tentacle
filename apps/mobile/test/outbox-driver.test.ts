@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AttachmentRef } from "@tentacle/protocol";
 import { type OutboxDriver, createOutboxDriver } from "../src/outbox-driver.ts";
+import { unavailableSessionPort } from "../src/outbox-session.ts";
 import type { ComposeInput, OutboxItem, OutboxPhoto, SessionFacts } from "../src/outbox.ts";
 
 /** A session port that records every act and answers what the test says. */
@@ -159,6 +160,12 @@ function harness(
     readonly initial?: readonly OutboxItem[];
     readonly facts?: Partial<SessionFacts>;
     readonly noSession?: boolean;
+    /**
+     * The app's OWN port for a session it could not open
+     * (`unavailableSessionPort`, `outbox-session.ts`): its acts throw
+     * `SessionNotOpenError`, its facts carry the reason.
+     */
+    readonly unavailable?: Exclude<SessionFacts["availability"], "open">;
     readonly reads?: Record<string, number>;
   } = {},
 ): Harness {
@@ -169,17 +176,26 @@ function harness(
   const drafts: { item: OutboxItem; why: string }[] = [];
   const reads: Record<string, number> = o.reads ?? {};
   let minted = 0;
-  const driver = createOutboxDriver(async () => (o.noSession === true ? null : portOf(session)), {
-    persistence,
-    readPhoto: async (file) => {
-      reads[file] = (reads[file] ?? 0) + 1;
-      return new TextEncoder().encode(file);
+  const unavailable = o.unavailable;
+  const driver = createOutboxDriver(
+    async () => {
+      if (unavailable !== undefined) {
+        return unavailableSessionPort(unavailable);
+      }
+      return o.noSession === true ? null : portOf(session);
     },
-    mint: () => `mint-${++minted}`,
-    onNotice: (notice) => notices.push(notice.kind),
-    onDecision: (item, why) => decisions.push({ item, why }),
-    onDraft: (item, why) => drafts.push({ item, why }),
-  });
+    {
+      persistence,
+      readPhoto: async (file) => {
+        reads[file] = (reads[file] ?? 0) + 1;
+        return new TextEncoder().encode(file);
+      },
+      mint: () => `mint-${++minted}`,
+      onNotice: (notice) => notices.push(notice.kind),
+      onDecision: (item, why) => decisions.push({ item, why }),
+      onDraft: (item, why) => drafts.push({ item, why }),
+    },
+  );
   return {
     driver,
     session,
@@ -501,6 +517,37 @@ describe("the sheet's acts", () => {
     await Promise.all([h.driver.sendNow(item), h.driver.sendNow(item)]);
     expect(h.session.prompts).toHaveLength(1);
     expect(h.session.prompts[0]?.turnId).toBe(item.turnId);
+  });
+
+  test("the sheet's Send with the link DOWN keeps it waiting, never a refusal (F1; mutation: drop SessionNotOpenError from the offline names → needs-decision 'refused')", async () => {
+    const h = harness({ unavailable: "link" });
+    const item = (await h.driver.enqueue(portOf(h.session), compose())) as OutboxItem;
+    await h.driver.sendNow(item);
+    // A link that is down is not an answer from the daemon: nothing to settle,
+    // the item stays and goes again at the next `up` (its key makes it safe).
+    expect(h.decisions).toEqual([]);
+    expect(h.drafts).toEqual([]);
+    expect(h.persistence.items()[0]?.itemId).toBe(item.itemId);
+    expect(h.persistence.items()[0]?.state).toBe("waiting");
+  });
+
+  test("Queue as steer with the link DOWN keeps it waiting too (mutation: read the missing turn before the availability → needs-decision 'no-turn')", async () => {
+    const h = harness({ unavailable: "link" });
+    const item = (await h.driver.enqueue(portOf(h.session), compose())) as OutboxItem;
+    await h.driver.steerNow(item, unavailableSessionPort("link"));
+    expect(h.decisions).toEqual([]);
+    expect(h.persistence.items()[0]?.state).toBe("waiting");
+  });
+
+  test("the sheet's Send on an ARCHIVED session hands the text back, never a refusal (F20; mutation: read every unavailable session as offline → it stays waiting, never back in the field)", async () => {
+    const h = harness({ unavailable: "archived" });
+    await h.driver.enqueue(portOf(h.session), compose());
+    const item = h.persistence.items()[0] as OutboxItem;
+    await h.driver.sendNow(item);
+    expect(h.decisions).toEqual([]);
+    expect(h.drafts.map((entry) => entry.why)).toEqual(["archived"]);
+    expect(h.drafts[0]?.item.text).toBe("hello");
+    expect(h.persistence.items()).toEqual([]);
   });
 
   test("Discard removes it with its copies; Edit hands the content back", async () => {

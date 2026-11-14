@@ -217,6 +217,9 @@ describe("refusals, by class/code, never by text", () => {
       named("AttachTimeoutError"),
       named("SessionLostError"),
       named("UploadAbortedError"),
+      // The app's own port for a session it could not open (`outbox-session.ts`):
+      // a link that is down, never a refusal to show as one (F1).
+      named("SessionNotOpenError"),
     ]) {
       expect(refusalOf(error, "prompt")).toEqual({ kind: "offline" });
       expect(refusalOf(error, "steer")).toEqual({ kind: "offline" });

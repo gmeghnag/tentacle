@@ -20,14 +20,26 @@ import type { OutboxSession } from "./outbox-driver.ts";
 import type { SessionFacts } from "./outbox.ts";
 
 /**
- * The session handle is not open yet (no id): the act cannot be addressed.
- * Named so `refusalOf` reads it as "no answer from the daemon" and the item
- * stays `waiting` instead of being finished or dropped.
+ * The act could not be addressed to a live session: there is no id to name, or
+ * the session is archived / deleted / gone. An act that never reached the wire
+ * is NOT a refusal to show as one — `refusalOf` reads this as "no answer from
+ * the daemon" (the item stays `waiting`, F1) or, when the error names an
+ * unopenable state, as the draft it belongs in (F20). `RemoteSession` throwing
+ * a bare `Error` here would read as `decide/refused`, which shows a link drop
+ * as the daemon's refusal.
  */
 export class SessionNotOpenError extends Error {
-  constructor() {
-    super("the session is not open");
+  /**
+   * Which session state the act ran into: `"link"` for a session that could not
+   * be opened, and the reason itself for one the daemon says is gone. The
+   * offline port serves both, so the error has to say which (`refusalOf`).
+   */
+  readonly availability: Exclude<SessionFacts["availability"], "open">;
+
+  constructor(availability: Exclude<SessionFacts["availability"], "open"> = "link") {
+    super(`the session is not open (${availability})`);
     this.name = "SessionNotOpenError";
+    this.availability = availability;
   }
 }
 
@@ -79,7 +91,7 @@ export function unavailableSessionPort(
   availability: Exclude<SessionFacts["availability"], "open">,
 ): OutboxSession {
   const refuse = (): never => {
-    throw new SessionNotOpenError();
+    throw new SessionNotOpenError(availability);
   };
   return {
     upload: refuse,

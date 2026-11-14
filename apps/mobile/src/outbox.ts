@@ -270,13 +270,37 @@ export type Refusal =
   /** A person must settle it: the sheet, with the reason. */
   | { readonly kind: "decide"; readonly why: DecideReason }
   /** The daemon holds no complete blob for a ref (`not_uploaded`): upload once, then refuse (F18). */
-  | { readonly kind: "reupload" };
+  | { readonly kind: "reupload" }
+  /** Its session is archived / deleted / gone: its text goes back to the field (F20). */
+  | { readonly kind: "draft"; readonly why: "archived" | "deleted" | "gone" };
+
+/**
+ * The refusal a session that is not `open` gives, before any act: a link that
+ * is down keeps the item `waiting` (F1 — the act never reached the wire, so
+ * there is nothing to settle), one the daemon says is archived / deleted / gone
+ * hands its text back to the field (F20).
+ *
+ * One mapping, because three places ask it: an error raised by the port
+ * (`SessionNotOpenError`), a run's `facts()` and the sheet's `steerNow`.
+ */
+export const notOpenRefusal = (
+  availability: Exclude<SessionFacts["availability"], "open">,
+): Refusal =>
+  availability === "link" ? { kind: "offline" } : { kind: "draft", why: availability };
+
+/** The session state an error names, defaulting to `link` (the only one that retries). */
+const notOpenOf = (availability: unknown): Exclude<SessionFacts["availability"], "open"> =>
+  availability === "archived" || availability === "deleted" || availability === "gone"
+    ? availability
+    : "link";
 
 /** The shape of what the client throws, read structurally (no import cycle, no text). */
 interface Errorish {
   readonly name?: unknown;
   readonly code?: unknown;
   readonly data?: { readonly reason?: unknown } | null;
+  /** `SessionNotOpenError`'s own: which session state the act ran into. */
+  readonly availability?: unknown;
 }
 
 /** Domain codes this module branches on (the wire's, `protocol/src/jsonrpc.ts`). */
@@ -296,6 +320,14 @@ const UNKNOWN_SESSION = -32003;
 export function refusalOf(error: unknown, kind: OutboxKind): Refusal {
   const e = (error ?? {}) as Errorish;
   const name = typeof e.name === "string" ? e.name : "";
+  // The app's own port for a session it could not open (`outbox-session.ts`,
+  // `SessionNotOpenError`): the act never reached the wire, so this is NOT a
+  // refusal to show as one. A link that is down keeps the item `waiting` (F1);
+  // a session that is archived / deleted / gone hands its text back (F20) —
+  // the error carries which, because one port serves both.
+  if (name === "SessionNotOpenError") {
+    return notOpenRefusal(notOpenOf(e.availability));
+  }
   // A drop, a redial that timed out, a session lost with a restarted pod: no
   // answer to read, so keep the item and try again (F1/F6).
   if (

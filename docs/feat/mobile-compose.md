@@ -770,6 +770,73 @@ next full run was clean.
 values are `RpcError`/`AbortError`); both land on `decide`, which is safe. The
 13a carry-forward (`handedBack` not persisted) is 13d's.
 
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-14 — fixes the one MEDIUM finding of Review round 2.*
+
+**Reproduced first, on the pre-fix tree** (`.tentacle/tmp/mobile-compose-13b/`,
+the reviewer's own `review-r2-notopen.test.ts`, unchanged):
+
+```
+RESULT state ["needs-decision"] decisions ["refused"]      # a link drop shown as a refusal
+```
+
+After the fix, the same file, unchanged: `RESULT state ["waiting"] decisions []`
+— the item stays, and there is nothing for a person to settle.
+
+**1. MEDIUM — a link drop was shown as the daemon's refusal.** Root cause:
+`SessionNotOpenError` was the app's own marker for "this act never reached the
+wire", and its doc said `refusalOf` read it as offline
+(`outbox-session.ts:24-26`), but `refusalOf`'s name list did not contain it, so
+it fell through to the `default:` arm → `decide/refused` — a decision sheet for
+a network blip. The same miss cut the other way too: `unavailableSessionPort`
+serves BOTH a session that could not be opened (`link`) and one the daemon says
+is archived/deleted/gone, and the error carried no reason, so the archive case
+could only be reached through `facts()` — the sheet's Send ran into the error
+first and showed a refusal instead of handing the text back (F20).
+
+Fix, in three places that must not drift apart:
+- `outbox.ts:268-292` + `:319-330`: a new pure `notOpenRefusal(availability)`
+  (`outbox.ts:286`) is the ONE mapping — `link` → `offline` (item stays
+  `waiting`, F1), anything else → `draft` with its why (text back in the field,
+  F20) — plus a `draft` member on `Refusal`; `refusalOf` reads
+  `SessionNotOpenError` through it.
+- `outbox-session.ts:23-48`: the error carries `availability` (default `link`),
+  and `unavailableSessionPort` passes its own reason into it, so one port can
+  say which state it is in.
+- `outbox-driver.ts:272-276` (`refuse`: a `draft` hands the content back through
+  `removeAndHand`) and `:411-418` (`steerNow` reads the availability BEFORE the
+  running turn: a session that is not open has no turn to name, so asking
+  `runningTurnId` first settled a dropped link as `no-turn`).
+
+Tests: outbox "a dropped link is 'offline' for every act" now includes
+`SessionNotOpenError`; driver "the sheet's Send with the link DOWN keeps it
+waiting, never a refusal", "Queue as steer with the link DOWN keeps it waiting
+too", "the sheet's Send on an ARCHIVED session hands the text back, never a
+refusal". `outbox-link.test.ts` also stops keeping its own `unopenedPort` (a
+bare `Error`) and uses the APP's `unavailableSessionPort` — the same test-only
+copy that hid round-1 finding 1; all 10 link tests stay green with the real one.
+
+**Mutations (run red, then reverted — `mutate.py`, no `git`).**
+
+| # | Mutation | Test that went red |
+|---|---|---|
+| M-A | drop the `SessionNotOpenError` arm from `refusalOf` | outbox "a dropped link is 'offline'"; driver "Send with the link DOWN" |
+| M-B | `steerNow` asks `runningTurnId` before the availability | driver "Queue as steer with the link DOWN" |
+| M-C | `notOpenRefusal` answers `offline` for every state | driver "Send on an ARCHIVED session hands the text back" |
+
+`git status` after each held only this round's six files (no `.backup`).
+
+**Gate (as run on this branch).** `bunx tsc --noEmit` — clean; `bunx tsc -p
+apps/mobile` — clean. `bun run lint` — `Checked 1074 files … No fixes applied`.
+`bun test` — 8367 pass, 3 skip (the opt-in live-k8s / live-docker / slow-keepalive
+ones), 0 fail, 600 files.
+
+**Not verified here.** `unavailableSessionPort`'s `upload`/`prompt` arms are
+reached in the app only through 13d's compose wiring; this round proves the
+`steer`/`prompt` refusal mapping and the facts path (the three driver tests and
+the 10 link tests), not 13d's screen code, which does not exist yet.
+
 
 ## Review
 
