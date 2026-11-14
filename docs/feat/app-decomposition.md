@@ -5483,3 +5483,366 @@ fragment: `changelog.d/app-decomp-13-pure-residue.changed.md` — never
 - **Model note:** the executor was DeepSeek and the reviewer is a different model family, so blind spots are less likely to be shared.
 
 *— claude-opus-5-5, 2026-11-14*
+## Execution
+
+### S11 — `feat/app-decomp-11-hop` (the hop's executor leaves `App.tsx`, and the boundary is one rule)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14*
+
+The slice is the follow-up table's row 1, nothing else: `startHop`/`requestHop`/
+`hopIfQueued` and the state they own move into `useHop.ts` (no effect), the
+turn-boundary rule becomes ONE pure `hopReady`, and the idle effect stays App's
+own at 0-based 19. S12/S13/S14's scopes were not entered, and `TODO.md` was not
+touched.
+
+**Load-bearing check, re-run first (it is what the slice stands on).** The row
+claims three things: the three callbacks and their state are in `App.tsx`, the
+boundary predicate is written TWICE, and neither `hopReady` nor `useHop.ts`
+exists. Verified on this branch before any edit with `check.sh`
+(`.tentacle/tmp/app-decomp-11-hop/`):
+
+```
+== 1. the three callbacks live in App.tsx
+1363:  const startHop = useCallback(
+1425:  const requestHop = useCallback(
+1458:  const hopIfQueued = useCallback((): void => {
+== 2. their state: hopRun/hopRef + hopQueued/hopQueuedRef + the two forward refs
+420:  const [hopRun, setHopRun] = useState<{ target: string; phase: string | null } | null>(null);
+421:  const hopRef = useRef<HopRun | null>(null);
+424:  const [hopQueued, setHopQueued] = useState<HopSpec | null>(null);
+425:  const hopQueuedRef = useRef<HopSpec | null>(null);
+426:  const startHopRef = useRef<((spec: HopSpec, opts?: { gateAnswered?: true }) => void) | null>(
+447:  const hopIfQueuedRef = useRef<(() => void) | null>(null);
+== 3. the boundary predicate, written twice
+1433:        queued: shownRows(rowsRef.current, daemonQueueRef.current).length,
+1465:    if (stateRef.current.running || shownRows(rowsRef.current, daemonQueueRef.current).length > 0) {
+== 4. the same rule inside hopStep (pure)
+234:      return input.running || input.queued > 0
+== 5. absence: hopReady / useHop do not exist
+hopReady hits in src: 0
+useHop.ts exists: no
+== 6. effect count + the idle hop effect's index
+effects: 22
+hopIfQueued effect at 0-based 19 = 1-based 20
+```
+
+All six hold, so the slice proceeded. **The plan's claim was exact; only its
+line numbers are stale** (the row says `App.tsx:1391-1520` and `:1515`; this tree
+has the three callbacks at `:1363`/`:1425`/`:1458` and the idle effect at
+`:1472` — S14 dropped 29 import lines above them). Same three callbacks, same
+duplication, same effect index.
+
+### As built, in dependency order
+
+1. **`hopReady`, the one rule** — `packages/tui/src/hop-command.ts:215`, next to
+   `hopStep` (same file, same concern, the way S13 put `anchorOffset` beside
+   `anchorOnGrowth`). `hopStep`'s `spec` arm now calls it (`:253`) instead of
+   spelling `input.running || input.queued > 0`. Signature as the plan asked:
+   `hopReady({running, queued})`, one flat object, `queued` a COUNT compared to
+   zero (`queued <= 0`, not `!queued`: equivalent for every input the type allows
+   today, and the count form cannot silently read a number as a boolean if a
+   caller ever passes a delta).
+2. **`useHop.ts`** — new, `packages/tui/src/useHop.ts` (273 lines). Holds
+   `startHop`, `requestHop`, `hopIfQueued`, the state (`hopRun`, `hopQueued`), the
+   refs it owns (`hopRef` `:127`, `hopQueuedRef`) and the reader both boundary
+   callers feed to `hopReady` (`boundary()` `:261`). `HopHost` (`:68`) takes each
+   ref PASSED IN, never re-created (Fable M1/H3: a ref read stays a ref read, so
+   two commands with no render between them behave as today); `HopLayer` (`:93`)
+   returns the four names App needs. It declares no `useEffect` — its header says
+   why (`:21`), and the structure pin proves it.
+3. **`App.tsx` wiring** — the three callbacks, the moved state and the
+   `hopIfQueuedRef` declaration are gone (`−106` net lines: 1956 → 1850), and one
+   `useHop({…})` call sits where the first callback was (`:1354`) — after
+   `useQuitClear`/`useSessionLink` (it needs `swapSession`) and before the idle
+   effect. `startHopRef` STAYS App's (`:415`): `hopTurnPort` — the D9 adapter the
+   turn driver takes by value — is declared above the hook (`:419`) and forwards
+   an approved proposal through that ref; the hook ASSIGNS it at render time,
+   exactly as `useSessionLink` assigns `swapRef` and as App did inline before.
+4. **Imports** — `HOP_QUEUED_NOTICE`/`hopStep`/`parseHopCommand`/`hopFailureText`/
+   `hopMovedNotice`/`hopPlaceText`/`noticeText`/`shownRows`/`HopRun` left
+   `App.tsx` with the code that used them; `hopShownCwd`/`hopStatusRow`/`HopSpec`
+   stay (the badge and the phase row are still App's). `HopRun` is still
+   re-exported from `App.tsx` (the re-export publishes `./app-types.ts`'s own
+   export), so `session-hop.test.tsx`'s `type HopRun` is untouched.
+
+**Structure pin** — `packages/tui/test/app-hop-structure.test.ts`: a moved body
+proves nothing by itself (a copy left behind, a hook that grew an effect, an
+effect that shifted). So the file scans the SOURCE for the three claims: (a) the
+three callbacks live in `useHop.ts` and NOT in `App.tsx`, and App calls the hook;
+(b) `useHop.ts` declares no `useEffect`, App still has 22 effects,
+`hopIfQueuedRef` is in `body(19)`, and the hook call is above it; (c) `hopReady`
+exists and both paths call it, no inline copy survives in any of the three files,
+and App no longer reads `shownRows(rowsRef…)` at all.
+
+### Tests, and the failure modes each pins
+
+The plan named "the new pure module gets its own unit test" and "pin `body(19)`".
+These are the cases, chosen for what could actually go wrong (AGENTS §9):
+
+- `hop-ready.test.ts` (6): idle+empty ⇒ may start; a running turn defers; **the
+  daemon's queue is full even with no turn running** (the half a naive
+  `if (running)` drops — the bug the duplication was hiding); both busy; and
+  `queued` is a COUNT, so `0` ⇒ idle in both directions (a truthiness reading is
+  the same bug in a different disguise).
+- `use-hop.test.tsx` (3): two `/move`s with NO render between them — the second
+  must see the FIRST's queued spec and refuse (`hopQueuedRef` eager); `/move
+  cancel` must clear state AND ref, or no replacement can be queued without a
+  render; and the control (one `/move` on a running turn queues, never starts).
+- `app-hop-structure.test.ts` (7): the three source claims above.
+
+**Why the freshness case is a hook test, not a frame test** (drift 1): the frames
+cannot express the window. `/move` text reaches `requestHop` through the line
+editor, and the key snapshot reads the field's RENDER value, so an Enter with no
+render between the typing and itself sees an empty field and dispatches nothing.
+A frame test for "two commands in one tick" is unwritable — measured, not
+assumed: four probe scripts in `.tentacle/tmp/app-decomp-11-hop/`
+(`probe4`/`probe6`: two command lines in one chunk; `probe7`: same, with waits)
+each left the second command sitting in the input, never dispatched.
+
+### Red before green
+
+Every new test file was written against the unimplemented shape first:
+
+```
+hop-ready.test.ts + app-hop-structure.test.ts, before src changed:
+  1 pass  7 fail  1 error
+  SyntaxError: Export named 'hopReady' not found in hop-command.ts
+  (the 7 failures are the PROPERTY assertions, not the import: no useHop.ts,
+   three callbacks still in App, two inline copies, App still reads the queue)
+```
+
+`use-hop.test.tsx` came later (it pins the hook's freshness rule, so it could only
+be written once the hook existed) and was mutation-checked instead: W6/W7 below
+were each shown failing on it.
+
+**Mutation results (each applied, run, reverted; every file restored
+byte-for-byte from `.tentacle/tmp/app-decomp-11-hop/backup/`, confirmed by
+`cmp`):**
+
+```
+Pure rule + structure (hop-ready 6, app-hop-structure 7, session-hop 21)
+ M1 hopReady drops the queue half (`!running` only)       → 2 FAIL (hop-ready ×2: queued 2 and 1)
+ M2 hopReady reads the count as a flag (`!input.queued`)   → 1 FAIL (queued: -1)
+ M3 hopStep re-inlines its own copy (hopReady un-called)   → 2 FAIL (structure: both-call-it, no-inline-copy)
+ M4 useHop re-inlines the boundary (hopReady un-called)    → 1 FAIL (structure: no-inline-copy)
+ M5 the idle effect deleted (App keeps 21)                 → 1 FAIL (structure: 22 effects + body(19))
+ M6 a copy of startHop left behind in App                  → 1 FAIL (structure: not-defined-in-App)
+ M7 App reads the queue again (`shownRows(…)` re-added)    → 1 FAIL (structure: App-does-not-read)
+
+App-level wiring (session-hop 21) — the move still RUNS, not merely compiles
+ W1 hopIfQueued never starts the queued hop               → 1 FAIL (D4: a `/move` mid-turn starts at its end)
+ W2 hopIfQueued ignores hopReady (starts while busy)       → 1 FAIL (same test, its other half)
+ W3 the D9 auto-accept clear dropped from startHop         → 1 FAIL (ON before the hop: the move turns it off)
+ W4 the switching latch never raised                       → 1 FAIL (a prompt typed MID-HOP goes to the input)
+ W5 the swap loses `keepTranscript`                        → 1 FAIL (transcript rows keep their position)
+
+Hook freshness (use-hop 3)
+ W6 the queue branch writes the state but not the ref      → 2 FAIL (both no-render-between tests)
+ W7 `/move cancel` clears the state but not the ref        → 1 FAIL (cancel → queue again, one window)
+```
+
+Two attempts were rewritten rather than counted, since an equivalent mutation
+proves nothing (the S13 precedent): the first **W6** was run against
+`session-hop.test.tsx` alone and SURVIVED — the honest finding that produced
+`use-hop.test.tsx` (a frame suite cannot see the pre-commit window); and **W8**
+(`hopIfQueued` reads `hopQueuedRef.current` instead of `hopQueued`) is
+EQUIVALENT — both are always written together and `hopIfQueued` only runs after a
+commit (App's idle effect is its only caller) — so it is recorded as equivalent,
+not as a survivor.
+
+### Drift from the Implementation
+
+1. **The freshness test is a hook test, not a frame test.** The Implementation
+   asks for the structure pin plus `hopReady`'s unit test, and the failure-mode
+   table wants a no-render-between case; it does not say at which level. A frame
+   test cannot express it (measured, above), so `use-hop.test.tsx` drives `useHop`
+   through a two-line probe. Nothing was contradicted — this fills in a level the
+   plan left open.
+2. **`hopReady`'s predicate is `!running && queued <= 0`**, where the inline code
+   said `running || queued > 0`. Same truth table for every input the type allows;
+   the positive form is what both callers need and reads as the rule ("a hop may
+   start only at a true idle") rather than its refusal.
+3. **A shared `boundary()` reader** (`useHop.ts:261`) was added, which the plan
+   did not name: `requestHop` and `hopIfQueued` fed `hopReady` the same two facts
+   from the same three refs, and writing that out twice would have re-created the
+   duplication the slice exists to remove, one level down.
+4. **The plan's line numbers for the hop are stale** (`:1391-1520`, `:1515` →
+   `:1363`/`:1425`/`:1458`, `:1472`), noted above; the claim is unaffected.
+5. **`startHopRef` stayed in `App`** rather than moving with the state. The row
+   says "state into `useHop.ts`"; this one is not state — `hopTurnPort` reads it,
+   and `hopTurnPort` is App's (above the hook) because the turn driver takes it by
+   value. Moving it would have meant moving the port, which is S9a's scope.
+6. **`App.tsx` ended at 1850 lines** against 1956: `−106` net.
+   The plan predicted ~150 for the block; the comments that explained each
+   decision moved with them, and the three callbacks' two doc-comments became one
+   hook header.
+
+### Gate
+
+`bunx tsc --noEmit` → clean. `bun run lint` → `Checked 1358 files … No fixes
+applied` (matches the §6 clean baseline: 0 errors, 0 warnings).
+
+**Full gate: `bun run check` → exit 0.** `bun test` → **9791 pass / 4 skip / 0
+fail**, 13 snapshots, 78569 expect() calls, across 711 files (398 s), logged at
+`.tentacle/tmp/app-decomp-11-hop/check.log`.
+
+The **4 skips are the pre-existing opt-in gates, none mine** — the same four S13
+recorded (`session-hop.docker.test.ts:248` and `docker/integration.live.test.ts:125`
+under `TENTACLE_DOCKER_TESTS=1`, `k8s/integration.live.test.ts` under
+`TENTACLE_K8S_SERVER`, `daemon/ws-server.test.ts:280` under
+`TENTACLE_SLOW_TESTS=1`). `packages/tui` alone → **2107 pass / 0 skip / 0 fail**
+(148 files), including `app-structural-order`, `app-structural-identity`,
+`app-structural-freshness`, `app-tidy-structure` (the dead-import scan),
+`use-dock`, `auto-wake`, `autoaccept-wake` and the whole `session-hop` set — so
+the effect-order/freshness/identity pins the decomposition rests on are untouched
+and green, and nothing was skipped by this slice.
+
+No schema changed (`packages/protocol/schema/protocol.json` untouched, no
+`protocol.d/` note — the wire is not touched at all). One changelog fragment:
+`changelog.d/app-decomp-11-hop.changed.md`; never `CHANGELOG.md`, whose
+`[Unreleased]` stays empty (§10). `TODO.md` untouched.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14 (executor, fix round 1 of
+`feat/app-decomp-11-hop`; the id is this session's own
+`~/.claude/projects/-Users-gmeghnag-tentacle/232c4c3e-….jsonl`, whose assistant
+records carry `"model":"claude-opus-5-5"`)*
+
+Round 1 raised exactly one finding (MEDIUM 1) and it was correct: no source
+defect, a TEST gap. `hopReady` was pinned as a pure function and both WIRINGS
+that feed it were not, so two mutations of the wiring — the thing the slice
+actually changed — survived the whole 4-file scope. The fix is test-only; **no
+production file changed** (`git status` at the end: one file,
+`packages/tui/test/use-hop.test.tsx`, `+72 −6`).
+
+**MEDIUM 1 — the queue half of the D4 boundary was unpinned where it is wired.
+FIXED.** Three cases added to `use-hop.test.tsx` (`:150`, a new `describe`), and
+the harness grew an options bag (`Boundary` `:42`) so `stateRef.running`,
+`rowsRef` and `daemonQueueRef` can be set — the defaults are unchanged (`running:
+true`, empty queue), so the three freshness cases above keep their exact
+semantics:
+
+1. `requestHop` while `running: false` and
+   `daemonQueue: {entries:[{id:"q1",…}]}` must QUEUE (notice, `started: []`).
+2. The queued path end to end: the same state → one queued `/move`, then
+   `hopIfQueuedRef.current()` must start NOTHING and stay queued; drain the daemon
+   queue (`daemonQueueRef.current = {entries: []}`) and the next call starts it
+   (`started: ["local"]`, `hopQueued: null`).
+3. The control: `running: false` with an EMPTY queue starts at once with no
+   notice — so case 1 cannot pass by "never starts".
+
+**Red before green (AGENTS §9).** The mutation is the red: the reviewer's two
+mutations were re-applied to the UNTOUCHED `useHop.ts`, first with the pre-fix
+test file (from `HEAD`, 3 cases) and then with the fixed one (6 cases). Same
+source, same scope (the reviewer's four files):
+
+```
+PRE-FIX  (use-hop 3 + hop-ready 5 + app-hop-structure 7 + session-hop 21 = 36)
+  mutation A: 36 pass  0 fail      ← survives, exactly as the reviewer found
+  mutation B: 36 pass  0 fail
+  mutation C: 36 pass  0 fail
+  unmutated : 36 pass  0 fail
+
+POST-FIX (39)
+  mutation A: 38 pass  1 fail  (`hopIfQueued` starts nothing while the queue is non-empty…)
+  mutation B: 37 pass  2 fail  (both new cases)
+  mutation C: 37 pass  2 fail  (both new cases)
+  unmutated : 39 pass  0 fail
+```
+
+The failures are on the PROPERTY (a started hop, a lost queued spec), not on an
+import. A third mutation was added beyond the reviewer's two, because A and B
+each cover half: **C** feeds `queued: 0` to `requestHop`'s `hopStep` only
+(`…boundary(…), running: stateRef.current.running, queued: 0`), which A does not
+reach and B reaches only by breaking both paths at once. It dies on both new
+cases, so each path has its own killer: A kills `hopIfQueued`, C kills
+`requestHop`, B kills the shared `boundary()` reader.
+
+**Where this leaves the Execution's W-table.** W2 ("`hopIfQueued` ignores
+`hopReady`") is honestly labelled — it pins *an* ignore, not the queue half; the
+reviewer's reading is right that it did not pin the wiring. It is not rewritten:
+the table records what was run at the time, and A/B/C above are the missing
+pins. The row's own wording ("the queue half … the bug the duplication was
+hiding") is what made the gap visible.
+
+**Gate, on the final tree (one file changed, tests only).**
+
+```
+$ bunx tsc --noEmit                    → OK (no output)
+$ bun run lint  (biome check .)        → Checked 1358 files … No fixes applied
+$ bun test                             → 9794 pass / 4 skip / 0 fail
+                                         13 snapshots, 78578 expect() calls
+                                         Ran 9798 tests across 711 files (393.57s)
+```
+
+The 4 skips are the same pre-existing opt-in gates the S11 section records
+(`TENTACLE_DOCKER_TESTS=1` ×2, `TENTACLE_K8S_SERVER`,
+`TENTACLE_SLOW_TESTS=1`); the pass count is the S11 figure +3, which is exactly
+the three added cases. Full-suite log:
+`.tentacle/tmp/app-decomp-11-hop/fix1-test.log`; mutation script and backups:
+`.tentacle/tmp/app-decomp-11-hop/{mutate.sh,backup/}`. After every mutation the
+source was restored from backup and confirmed **byte-identical** (`cmp`), and
+`git status` shows only the test file — no `checkout`/`restore`/`stash` was used.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-14 (fresh context; a different model family from the
+DeepSeek executor)*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, test non-vacuity; no behaviour
+regression found).
+
+**Gate (scope: S11 files).** `bun run typecheck` clean; `bun run lint` →
+`Checked 1358 files … No fixes applied`; `hop-ready` + `use-hop` +
+`app-hop-structure` + `session-hop` + `app-structural-order` → 37 pass / 0 fail.
+
+**MEDIUM 1 — the queue half of the D4 boundary is unpinned where it is wired.**
+`packages/tui/src/useHop.ts:243` and `:268`. The slice's stated property is that
+both paths feed `hopReady` the same two facts, and its doc names the daemon-queue
+half as "the bug the duplication was hiding". Only the pure function pins it.
+Two mutations, each applied and then reverted (`cmp` byte-identical, `git status`
+clean):
+- A: `hopIfQueued` → `hopReady({ running: stateRef.current.running, queued: 0 })`
+  (it still calls `hopReady`, so the structure regex passes) → **36/36 pass**.
+- B: `boundary()` → `queued: 0 * shownRows(…).length` (both paths ignore the
+  daemon queue) → **36/36 pass** (hop-ready, use-hop, app-hop-structure,
+  session-hop).
+Failure scenario: a queued `/move` starts at "own turn over" while the daemon
+still holds queued messages, so the hop runs ahead of them (D4 broken), and no
+test fails. Fix: add `use-hop.test.tsx` cases with `running: false` and a
+non-empty `daemonQueueRef`/`rowsRef`: (i) `requestHop` must QUEUE, not start;
+(ii) after one queued `/move`, `hopIfQueuedRef.current()` must start nothing,
+and once the queue is emptied it must start the hop. Show both red under A and B.
+The Execution's mutation table (W2) reads as if this wiring were pinned; it pins
+only "busy because running".
+
+**Attacks tried that found nothing.** (1) TDZ/order: `hopRun`/`hopQueued`/
+`requestHop` are read only after `useHop(...)` (`App.tsx:1354` → `:1374`/`:1378`/
+`:1410`/`:1441`); `startHopRef` is assigned at render before the idle effect and
+read lazily by `hopTurnPort`. (2) No effect in the hook; 22 effects, and
+`body(19)` is still the idle effect with unchanged deps. (3) `hopReady`
+inversion (`!running && queued <= 0` vs `running || queued > 0`) is equivalent
+for every non-NaN count, and `length` is never NaN. (4) No leftover App reads of
+`hopRef`/`hopQueuedRef`/`setHop*` (grep on main vs HEAD). (5) Added deps
+(`sessionRef`, `switchingRef`, …) are stable refs, so callback identity is
+unchanged in practice. §7 "logic in pure modules" holds; no protocol/persistence
+surface is touched.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14 (fresh context; reviewing `git diff HEAD~1`, tests only, no `src/` change)*
+
+**Verdict: PASS.** MEDIUM 1 is fixed: `use-hop.test.tsx` now drives `useHop`
+with `running: false` and a non-empty `daemonQueueRef`. Every mutation below was
+applied, run, then reverted (`cmp` byte-identical, `git status` clean):
+- A: `hopIfQueued` → `hopReady({ running, queued: 0 })` → **1 FAIL** (the
+  "starts nothing while the queue is non-empty" test).
+- C: `requestHop` alone drops the queue (`queued: 0`) → **2 FAIL** (both
+  daemon-queue tests).
+- B: `boundary()` → `queued: 0 * …` → **2 FAIL** (same two).
+Unmutated: hop-ready + use-hop + app-hop-structure + session-hop → 39 pass /
+0 fail. `bun run typecheck` clean; `bun run lint` → `Checked 1358 files … No
+fixes applied`. No regressions: the diff touches only the test file and this doc,
+and the existing freshness tests keep their defaults (`running: true`, empty
+queue).

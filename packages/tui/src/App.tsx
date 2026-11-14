@@ -36,15 +36,8 @@ import type { QuitConfirmFacts } from "./commands.ts";
 import { dispatchCommand } from "./commands/dispatch.ts";
 import { recall } from "./history.ts";
 import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
-import { HOP_QUEUED_NOTICE, type HopSpec, hopStep, parseHopCommand } from "./hop-command.ts";
-import {
-  hopFailureText,
-  hopMovedNotice,
-  hopPlaceText,
-  hopShownCwd,
-  hopStatusRow,
-  noticeText,
-} from "./hop-status.ts";
+import type { HopSpec } from "./hop-command.ts";
+import { hopShownCwd, hopStatusRow } from "./hop-status.ts";
 import { startIdleWarm } from "./idle-warm.ts";
 import { resolveLineInput } from "./input-actions.ts";
 import { JOB_TAIL_SHOWN, exitOutcome, jobOutputEntry, refreshDue } from "./job-drawer.ts";
@@ -63,6 +56,7 @@ import {
 } from "./permission-ui.ts";
 import { useAttachments } from "./useAttachments.ts";
 import { useDock } from "./useDock.ts";
+import { useHop } from "./useHop.ts";
 import { useMouse } from "./useMouse.ts";
 import { usePanels } from "./usePanels.ts";
 import { useQuitClear } from "./useQuitClear.ts";
@@ -72,7 +66,7 @@ import { tryWake } from "./wake-gate.ts";
 
 export type { AutoAcceptFeed };
 
-import { type DaemonQueue, type QueuedRows, handBackRows, shownRows } from "./queued.ts";
+import { type DaemonQueue, type QueuedRows, handBackRows } from "./queued.ts";
 import { type RenderOptions, layoutTranscript, sliceLaid, warmRowsChunk } from "./render-lines.ts";
 import { runChunked } from "./run-chunked.ts";
 import { anchorOffset, applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
@@ -93,10 +87,10 @@ import type { ContextOpen } from "./status-view.ts";
 
 import { type SessionActivity, warmFailureNotice } from "./turn-feed.ts";
 
-// `AppProps`/`SessionController`/`HopRun`/`HopTargetView` are used here; the rest
-// are re-exported below so every existing importer (`../src/App.tsx`) keeps
-// working — a `from` re-export publishes the module's export, not this import.
-import type { AppProps, HopRun, HopTargetView, SessionController } from "./app-types.ts";
+// `AppProps`/`SessionController`/`HopTargetView` are used here; the rest are
+// re-exported below so every existing importer (`../src/App.tsx`) keeps working —
+// a `from` re-export publishes the module's export, not this import.
+import type { AppProps, HopTargetView, SessionController } from "./app-types.ts";
 
 export type {
   AppProps,
@@ -413,16 +407,11 @@ export function App({
   const ownClearsRef = useRef(0);
   const clearAfterTurnRef = useRef(false);
   const runClearRef = useRef<(() => void) | null>(null);
-  // A `/move` (docs/feat/session-hop.md D3): the hop running NOW (its phase row
-  // is STATE, the handle is a ref so a queued hop can start it from the turn's
-  // end), the spec a `/move` typed mid-turn left for the first true idle (D4),
-  // and the live place (`targetFeed`) so the badge and `daemonInPod` follow a move.
-  const [hopRun, setHopRun] = useState<{ target: string; phase: string | null } | null>(null);
-  const hopRef = useRef<HopRun | null>(null);
-  // A `/move` that waits for the turn boundary (D4). It is STATE, so the effect
-  // below re-runs when it changes; the ref is what a command reads synchronously.
-  const [hopQueued, setHopQueued] = useState<HopSpec | null>(null);
-  const hopQueuedRef = useRef<HopSpec | null>(null);
+  // A `/move` (docs/feat/session-hop.md D3): its state and its three drivers
+  // (`startHop`/`requestHop`/`hopIfQueued`) live in `useHop.ts` (S11), called
+  // below. Two things stay here, because App declares them ABOVE that hook: the
+  // forward ref an approved proposal starts through (assigned by the hook), and
+  // the live place (`targetFeed`), so the badge and `daemonInPod` follow a move.
   const startHopRef = useRef<((spec: HopSpec, opts?: { gateAnswered?: true }) => void) | null>(
     null,
   );
@@ -443,8 +432,6 @@ export function App({
     // starts it (D3), through the ref so no dependency cycle is created.
     approved: (spec, opts) => startHopRef.current?.(spec, opts),
   };
-  /** The queued-hop driver, read from the effect below (a ref: no dependency cycle). */
-  const hopIfQueuedRef = useRef<(() => void) | null>(null);
   const [targetView, setTargetView] = useState<HopTargetView | null>(() =>
     targetFeed ? targetFeed.current() : null,
   );
@@ -1352,124 +1339,31 @@ export function App({
   });
   runClearRef.current = runClear;
 
-  /**
-   * Start one hop (docs/feat/session-hop.md D3/D4), and be the ONLY place the
-   * view moves for one: `switchingRef` goes up while it runs (a typed prompt
-   * goes back to the input, P3), the phase row is the host's own words, and the
-   * view swaps with `keepTranscript` — the transcript rows must land exactly
-   * where they were, only the badge and the one notice differ. Everything
-   * effectful is the host's (`HopFeed`): the App never builds a runtime.
-   */
-  const startHop = useCallback(
-    (spec: HopSpec, opts?: { gateAnswered?: true }): void => {
-      if (!hop) {
-        return;
-      }
-      const run = hop.start(spec, sessionRef.current?.sessionId ?? null, opts);
-      hopRef.current = run;
-      setHopRun({ target: hop.label(spec), phase: null });
-      switchingRef.current = true;
-      const stopStatus = run.onStatus((line) => {
-        setHopRun({ target: hop.label(spec), phase: line });
-        flushNow();
-      });
-      const settle = (): void => {
-        stopStatus();
-        hopRef.current = null;
-        hopQueuedRef.current = null;
-        setHopQueued(null);
-        switchingRef.current = false;
-        setHopRun(null);
-        flushNow();
-      };
-      void run.done.then(
-        (outcome) => {
-          if ("moved" in outcome) {
-            // D9: a hop never inherits an approval — auto-accept goes off with
-            // the move, said in the same notice (the feed, or this TUI's own).
-            // `clearAutoApprove`, never `autoAccept.set`: the feed's `set` only
-            // publishes the flip for the OTHER terminals, so this one's state
-            // (and its status bar) would still say "auto-accept on" while the
-            // notice claims otherwise.
-            const wasOn = permission.autoApprove;
-            if (wasOn) {
-              permission.clearAutoApprove();
-            }
-            swapSession(outcome.moved, { keepTranscript: true });
-            settle();
-            pushNotice(hopMovedNotice(hopPlaceText(outcome.view.place), wasOn, outcome.note));
-            return;
-          }
-          // A failed hop changes nothing: same session, same badge, same rows.
-          settle();
-          pushNotice(`_${noticeText(outcome.failed)}_`);
-        },
-        (error: unknown) => {
-          // `HopRun.done` never rejects by contract; a host that does anyway is
-          // still one notice, and the latch must not stay up.
-          settle();
-          pushNotice(`_${noticeText(hopFailureText(error))}_`);
-        },
-      );
-    },
-    [flushNow, hop, permission, pushNotice, swapSession],
-  );
-  startHopRef.current = startHop;
-
-  /**
-   * `/move`'s machinery (docs/feat/session-hop.md D3): the grammar, the turn
-   * boundary decision (`hopStep`, pure), then start it now or leave it for the
-   * first true idle. The draft field is never touched — a `/move` is a command,
-   * and a hop that fails leaves everything as it was.
-   */
-  const requestHop = useCallback(
-    (raw: string): void => {
-      const step = hopStep({
-        parse: parseHopCommand(raw),
-        available: hop !== undefined,
-        hopping: hopRef.current !== null,
-        hopQueued: hopQueuedRef.current !== null,
-        running: stateRef.current.running,
-        queued: shownRows(rowsRef.current, daemonQueueRef.current).length,
-      });
-      if (step.kind === "notice") {
-        pushNotice(`_${step.text}_`);
-        return;
-      }
-      if (step.kind === "cancel") {
-        hopQueuedRef.current = null;
-        setHopQueued(null);
-        hop?.cancel?.();
-        pushNotice("_Move cancelled._");
-        return;
-      }
-      if (step.kind === "queue") {
-        hopQueuedRef.current = step.spec;
-        setHopQueued(step.spec);
-        pushNotice(HOP_QUEUED_NOTICE);
-        return;
-      }
-      startHopRef.current?.(step.spec);
-    },
-    [hop, pushNotice],
-  );
-
-  /** Run a `/move` that waited for the turn boundary (D4): the first true idle. */
-  const hopIfQueued = useCallback((): void => {
-    const spec = hopQueued;
-    if (spec === null || hopRef.current !== null) {
-      return;
-    }
-    // Still busy: it stays queued, and the next idle asks again — never two
-    // hops, and never one forgotten.
-    if (stateRef.current.running || shownRows(rowsRef.current, daemonQueueRef.current).length > 0) {
-      return;
-    }
-    hopQueuedRef.current = null;
-    setHopQueued(null);
-    startHopRef.current?.(spec);
-  }, [hopQueued]);
-  hopIfQueuedRef.current = hopIfQueued;
+  // ── the hop (S11 — docs/feat/app-decomposition.md) ────────────────────────
+  // `/move`'s three drivers — `startHop` (the ONE place the view moves), the
+  // typed `/move` (`requestHop`) and the queued hop's start (`hopIfQueued`) —
+  // live in `useHop.ts`, with the state they own (`hopRun`, `hopQueued`) and
+  // their refs. Every decision they execute is still a pure module's
+  // (`parseHopCommand`/`hopStep`/`hopReady`, `hopStatusRow`/`hopMovedNotice`/
+  // `hopFailureText`). It declares no effect, so the 22 below keep their indices
+  // (H1: the original 20 plus session-hop's `targetFeed` and idle `hopIfQueued`);
+  // the idle effect itself stays HERE, because its deps are this render's values
+  // (`hopQueued`, `st.running`, `shown.length`) — that is the whole mechanism
+  // (D4), and moving it into the hook would make its trigger a callback's
+  // identity instead of the render that made the session idle.
+  const { hopRun, hopQueued, hopIfQueuedRef, requestHop } = useHop({
+    sessionRef,
+    stateRef,
+    rowsRef,
+    daemonQueueRef,
+    switchingRef,
+    startHopRef,
+    hop,
+    permission,
+    swapSession,
+    pushNotice,
+    flushNow,
+  });
   // A `/move` that waited for a boundary (D4) starts at the first TRUE idle: the
   // own turn over, the daemon's queue empty. This ONE effect is the whole
   // mechanism — every fact D4 names is a dependency, so the render that makes
