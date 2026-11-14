@@ -723,6 +723,72 @@ mutation (the same shutdown of the new dispatch).
 errors/0 warnings — the §6 baseline) · `bun test` 8371 pass / 3 opt-in skips /
 0 fail (8358 + the 13 new tests of this sub-task).
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14*
+
+Fixing the two MEDIUM findings of the Review above; no other code touched.
+
+**Repro first.** Re-ran the review's repro (`.tentacle/tmp/logs-cmd/two-watches.test.ts`,
+real `Connection` + `SessionHost`) on the unmodified branch — both symptoms
+reproduced:
+
+```
+first watch after a second watch: "ERR unknown watch: dd7d2b27-… (not on this connection)"
+watch after a failed session/log: "ERR unknown watch: 9a86fe3d-… (not on this connection)"
+```
+
+**Finding 1 — FIXED.** `packages/daemon/src/connection.ts:653-661`
+`dropStaleWatches` iterated `this.watches` (keyed by **watchId**) and passed the
+key to `this.host.get(id)` as a **session id** — always `undefined`, so every
+watch the connection held was unwatched on each `session/watch` and on each
+refused `session/log`. The sweep now compares the watch's own session id and
+unwatches by the map key:
+
+```ts
+for (const [watchId, watch] of this.watches) {
+  // The map key is a WATCH id; the identity check is per SESSION id.
+  if (this.host.get(watch.hosted.id) !== watch.hosted) { watch.hosted.unwatch(watchId); this.watches.delete(watchId); }
+}
+```
+
+The identity check it exists for (a session closed and recreated under the same
+id) is unchanged — and now actually what it drops.
+
+**Finding 2 — FIXED (non-vacuity).** Two red-first tests in
+`packages/daemon/test/watch-connection.test.ts` (`daemon()` now also returns the
+`connection`, which the repo had only exposed as `watchedSessionIds` for
+diagnostics):
+
+- `two watches on one connection both stay live (a watchId is not a sessionId)` —
+  watch A, then B on one connection: A still polls, `watchedSessionIds` is
+  `[A, B]`, and a refused `session/log` (the sweep's other trigger) drops
+  neither.
+- `a session id closed and recreated under the same id drops its stale watch` —
+  the failure-mode row that had no connection-level test: the old watchId is
+  `UnknownWatch` after the recreate, the fresh watch polls, one id held.
+
+**Red before green** (unmodified source, tests added): `9 pass / 1 fail` — the
+two-watches test failed on the property (`RpcError: unknown watch: b8929199-…
+(not on this connection)`), not on a compile/import error. After the source fix:
+`10 pass / 0 fail`.
+
+**Mutations** (source edited in place, run, restored from
+`.tentacle/tmp/logs-cmd/connection.fixed.bak`):
+
+```
+M1  dropStaleWatches(){ return; }                     → 1 · … drops its stale watch (UnknownWatch expected, got a live poll)
+M2  host.get(watchId) !== watch.hosted  (the bug)      → 1 · two watches on one connection both stay live
+```
+
+M1 shows finding 1's fix did not make the identity check vacuous, M2 shows the
+key-confusion is what the first test pins — so the pair covers both the "drop
+too much" and the "drop nothing" side.
+
+**Gate line.** `bunx tsc --noEmit` OK · `bun run lint` OK (1078 files, 0
+errors/0 warnings — the §6 baseline) · `bun test` 8373 pass / 3 opt-in skips /
+0 fail (8371 + the 2 new tests).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-14* (fresh context; same model family as the logs-tail executor — shared blind spots possible)

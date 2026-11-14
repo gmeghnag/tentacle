@@ -653,10 +653,11 @@ export class Connection {
 
   /** Forget every watcher whose session is no longer the live one under its id (a close, then a recreate). */
   private dropStaleWatches(): void {
-    for (const [id, watch] of this.watches) {
-      if (this.host.get(id) !== watch.hosted) {
-        watch.hosted.unwatch(watch.watchId);
-        this.watches.delete(id);
+    for (const [watchId, watch] of this.watches) {
+      // The map key is a WATCH id; the identity check is per SESSION id.
+      if (this.host.get(watch.hosted.id) !== watch.hosted) {
+        watch.hosted.unwatch(watchId);
+        this.watches.delete(watchId);
       }
     }
   }

@@ -83,7 +83,7 @@ function daemon(model: ModelProvider = new Quiet()) {
       sessionId,
       ...(only !== undefined ? { only } : {}),
     })) as WatchResult;
-  return { host, connection, client, ready, updates, watch };
+  return { connection, host, client, ready, updates, watch };
 }
 
 async function flush(rounds = 400): Promise<void> {
@@ -264,6 +264,71 @@ describe("session/watch on a connection", () => {
       otherCode = (error as { code?: number }).code;
     }
     expect(otherCode).toBe(DomainErrorCode.UnknownWatch);
+  });
+
+  test("two watches on one connection both stay live (a watchId is not a sessionId)", async () => {
+    // Mutation: `dropStaleWatches` compares the map KEY, which is a watchId, as
+    // a session id (`host.get(watchId)` is always undefined) → the second watch
+    // silently drops the first, and so does any refused `session/log`.
+    const d = daemon();
+    await d.ready;
+    await d.client.request("session/open", { sessionId: "A", create: true });
+    await d.client.request("session/open", { sessionId: "B", create: true });
+    const a = await d.watch("A");
+    const b = await d.watch("B");
+    // Both are still pollable: watching B did not unwatch A.
+    const pollA = (await d.client.request("session/watch_next", {
+      watchId: a.watchId,
+      timeoutMs: 10,
+    })) as WatchNextResult;
+    expect(pollA.updates).toEqual([]);
+    expect(d.connection.watchedSessionIds.slice().sort()).toEqual(["A", "B"]);
+    // A refused `session/log` (a stale sweep's other trigger) drops nothing live.
+    let code: number | undefined;
+    try {
+      await d.client.request("session/log", { sessionId: "nope" });
+    } catch (error) {
+      code = (error as { code?: number }).code;
+    }
+    expect(code).toBe(DomainErrorCode.UnknownSession);
+    const b2 = (await d.client.request("session/watch_next", {
+      watchId: b.watchId,
+      timeoutMs: 10,
+    })) as WatchNextResult;
+    expect(b2.updates).toEqual([]);
+    expect(d.connection.watchedSessionIds.slice().sort()).toEqual(["A", "B"]);
+  });
+
+  test("a session id closed and recreated under the same id drops its stale watch", async () => {
+    // Mutation: `dropStaleWatches() { return; }` → the connection keeps the
+    // watch of the DEAD session, so its poll still answers on a closed session
+    // and the follower attaches to a session nobody else has.
+    const d = daemon();
+    await d.ready;
+    await d.client.request("session/open", { sessionId: "S", create: true });
+    const first = d.host.get("S");
+    const { watchId } = await d.watch("S");
+    d.host.close("S");
+    await d.client.request("session/open", { sessionId: "S", create: true });
+    const recreated = d.host.get("S");
+    expect(recreated).not.toBe(first as never); // really a different session
+    // Any watch operation sweeps the stale one: the old id is gone for good.
+    const fresh = await d.watch("S");
+    expect(fresh.watchId).not.toBe(watchId);
+    let code: number | undefined;
+    try {
+      await d.client.request("session/watch_next", { watchId, timeoutMs: 10 });
+    } catch (error) {
+      code = (error as { code?: number }).code;
+    }
+    expect(code).toBe(DomainErrorCode.UnknownWatch);
+    // The fresh watch is live on the session that replaced it.
+    const poll = (await d.client.request("session/watch_next", {
+      watchId: fresh.watchId,
+      timeoutMs: 10,
+    })) as WatchNextResult;
+    expect(poll.updates).toEqual([]);
+    expect(d.connection.watchedSessionIds).toEqual(["S"]);
   });
 
   test("the client's poll loop surfaces `lost` and `ended`, and unwatch is idempotent", async () => {
