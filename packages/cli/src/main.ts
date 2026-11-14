@@ -20,11 +20,12 @@ import { createInterface } from "node:readline";
  * in F4. Until then, point the CLI at a trusted model and workspace.
  */
 import { BUILTIN_AGENT_TYPES, Session, mergeAgentTypes, recordFromSnapshot } from "@tentacle/agent";
-import { webSocketChannelFactory } from "@tentacle/client";
+import { type ConnectOptions, type TlsOptions, webSocketChannelFactory } from "@tentacle/client";
 import { type ChatMessage, PermissionBroker } from "@tentacle/core";
 import { DELETE_CONTAINER_SUBCOMMAND, deleteContainerFromEnv } from "@tentacle/docker";
 import { DELETE_POD_SUBCOMMAND, deletePodFromEnv, readKubeconfig } from "@tentacle/k8s";
 import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
+import type { DuplexChannel } from "@tentacle/transport";
 import { type AutoAcceptFeed, type SessionController, pickSession, startTui } from "@tentacle/tui";
 import { attachFailureNotice, unflushedExitsNotice } from "./attach-notice.ts";
 import { type AttachPlan, plainResumeUid, planAttach } from "./attach-plan.ts";
@@ -44,7 +45,7 @@ import {
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import { devicesCommand, resetCommand, revokeCommand } from "./devices-cmd.ts";
-import { type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
+import { type EngineHost, type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
 import {
   armSharedExitNet,
   attachEngineRuntime,
@@ -89,6 +90,11 @@ import {
 } from "./flags.ts";
 import { readHiddenLine } from "./hidden-input.ts";
 import { fileTrustStore, hooksTrustCommand, projectHooksWireProblem } from "./hooks-trust.ts";
+import { createHopFeed } from "./hop-feed.ts";
+import { createHopLeave } from "./hop-leave.ts";
+import type { HopPlace } from "./hop-plan.ts";
+import { createHopRuntime } from "./hop-runtime.ts";
+import { type HopEngineHost, createHopTargets } from "./hop-targets.ts";
 import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
 import {
   forgetKept,
@@ -108,6 +114,8 @@ import {
   placeText,
 } from "./kept.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
+import { LOG_TAIL_DEFAULT, parseOnly } from "./log-events.ts";
+import { logsCommand } from "./logs-cmd.ts";
 import { packagesCommand, spawnGit } from "./packages-cmd.ts";
 import { pairCommand } from "./pair.ts";
 import { POD_DAEMON_MODES, lockHolder, runResidentMode } from "./pod-resident.ts";
@@ -288,6 +296,12 @@ Usage:
                                 list the pods/containers run kept, checked against
                                 their engine, with a detached run's state (-q names
                                 only, -v details: pid, session, log)
+  tentacle logs [<uid>|<run-name>] [--tail N] [--only <cats>] [--json] [--summary] [-f]
+                                read this folder's session log (the newest, or the
+                                uid given) without a TUI: one line per event, the
+                                last 20 by default; --summary counts tools, files
+                                and turns; -f follows the FILE (committed events
+                                only — a daemon's live stream is a later task)
   tentacle rm [--engine <e>] [-f] <name>
                                 remove a kept pod/container (only one tentacle kept;
                                 a running one asks y/N, -f skips the question). A
@@ -524,6 +538,14 @@ export interface CliIO {
    * asked) are terminals.
    */
   ask?: (prompt: string) => Promise<string>;
+  /** Test seam: `logs -f`'s poll sleep (a test drives the follow without waiting). */
+  logsSleep?: (ms: number) => Promise<void>;
+  /** Test seam: `logs -f` stops when this aborts (Ctrl+C in a real run). */
+  logsSignal?: AbortSignal;
+  /** Test seam: `logs --connect`'s dial (a test hands it a channel pair, never a socket). */
+  logsDial?: (url: string, options: ConnectOptions) => () => Promise<DuplexChannel>;
+  /** Test seam: `logs -f <run-name>`'s engine host (a fake, never a real engine). */
+  logsHostFor?: (entry: KeptEntry) => EngineHost;
 }
 
 /**
@@ -674,9 +696,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       // (docs/feat/config-explain.md, review O1). The words are the WHOLE argv
       // after `tentacle` as typed, flags aside (a flag was asked for, not said).
       // `config` joins it for the same reason: `tentacle config how do I …` now
-      // means the command, and the way back is one line, not a guess.
+      // means the command, and the way back is one line, not a guess. `logs`
+      // too: `tentacle logs the parser` used to be a prompt.
       const promptLine =
-        (mode === "explain" || mode === "config") && result.error.startsWith("unexpected argument")
+        (mode === "explain" || mode === "config" || mode === "logs") &&
+        result.error.startsWith("unexpected argument")
           ? `\n${promptHint(promptWords(args))}`
           : "";
       err(`[error] ${result.error}${promptLine}\nusage: ${USAGE[mode]}\n`);
@@ -900,6 +924,70 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     );
   }
 
+  // `tentacle logs [<uid>] …` (docs/feat/logs-cmd.md): the session log files on
+  // this laptop, read-only. Like `ps` it needs no model and starts nothing — it
+  // reaches here only after `loadConfig` has resolved `configDir`/`cwd` (with
+  // `usesModel` false, so no `apiKeyCommand` runs).
+  if (mode === "logs") {
+    const only = parsed.flags.get("only");
+    const categories = only === undefined ? undefined : parseOnly(only);
+    if (categories !== undefined && !categories.ok) {
+      err(`[error] ${categories.error}\nusage: ${USAGE.logs}\n`);
+      return 1;
+    }
+    const tail = parsed.flags.get("tail");
+    const count =
+      tail === undefined ? LOG_TAIL_DEFAULT : /^[0-9]{1,9}$/.test(tail) ? Number(tail) : undefined;
+    if (count === undefined) {
+      err(
+        `[error] --tail must be a whole number, got ${JSON.stringify(tail)}\nusage: ${USAGE.logs}\n`,
+      );
+      return 1;
+    }
+    const uid = parsed.positional[0];
+    const connect = parsed.flags.get("connect");
+    let token: string | undefined;
+    let tls: TlsOptions | undefined;
+    try {
+      token = connect !== undefined ? await resolveToken(parsed.flags) : undefined;
+      tls =
+        connect !== undefined ? await resolveTls(connect, parsed.flags, parsed.bools) : undefined;
+    } catch (error) {
+      err(
+        `[error] ${untrustedText(error instanceof Error ? error.message : String(error))}\nusage: ${USAGE.logs}\n`,
+      );
+      return 1;
+    }
+    return logsCommand(
+      {
+        ...(uid !== undefined ? { uid } : {}),
+        tail: count,
+        ...(categories?.ok === true ? { only: categories.categories } : {}),
+        json: parsed.bools.has("json"),
+        summary: parsed.bools.has("summary"),
+        follow: parsed.bools.has("follow"),
+        ...(connect !== undefined ? { connect } : {}),
+        ...(token !== undefined ? { token } : {}),
+        ...(tls !== undefined ? { tls } : {}),
+      },
+      {
+        configDir: config.configDir,
+        cwd: config.cwd,
+        out,
+        err,
+        ...(io.logsSignal !== undefined ? { signal: io.logsSignal } : {}),
+        ...(io.logsSleep !== undefined ? { sleep: io.logsSleep } : {}),
+        ...(io.logsDial !== undefined ? { dial: io.logsDial } : {}),
+        ...(io.logsHostFor !== undefined
+          ? { hostFor: io.logsHostFor }
+          : {
+              hostFor: (entry: KeptEntry) =>
+                buildEngineHost(entry.engine, hostOptionsFor(entry)).host,
+            }),
+      },
+    );
+  }
+
   // `tentacle ps` / `rm <name>` (docs/feat/engine-ps-rm.md): the laptop's kept
   // index, verified against each engine. No TUI, plain output, no model.
   if (mode === "ps" || mode === "rm") {
@@ -1109,6 +1197,32 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // THIS folder's sessions). `{ exit }` = don't start (reason written). The
   // picker (docs/feat/resume-picker.md) runs only on a terminal, before any
   // runtime or pod starts, so the chosen session seeds it like `--resume <uid>`.
+  /**
+   * The engine host a hop builds its target on: the ONE builder `run` uses
+   * (`buildEngineHost`, no flag overrides — a hop has no `--engine`), with the
+   * locators its kept entry records (D5).
+   */
+  const hopEngineHost = (engine: EngineKind): HopEngineHost => {
+    const built = buildEngineHost(engine, {});
+    return {
+      host: built.host,
+      ...(built.endpoint === undefined ? {} : { endpoint: built.endpoint }),
+      locators: keptLocation(engine, built, { context: undefined, insecureTcp: false }),
+    };
+  };
+
+  /**
+   * D5: what a hop does with the workload it LEAVES (`hop-leave.ts`: the
+   * decision is `hopDelete`'s, the delete is `removeVerifiedKept`, and only an
+   * entry THIS laptop recorded as a hop's creation is ever touched). Here: the
+   * two seams only, because both need the config and the ONE host builder.
+   */
+  const hopLeave = createHopLeave({
+    dir: keptDir(config.configDir),
+    locators: (engine) => hopEngineHost(engine).locators,
+    hostFor: (entry) => buildEngineHost(entry.engine, hostOptionsFor(entry)).host,
+  });
+
   const openSessions = (flags: Map<string, string>, bools: Set<string>, implicit = false) =>
     openTuiSessions(
       {
@@ -1965,6 +2079,45 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         err,
       );
       if (runtime) {
+        // `/move` (docs/feat/session-hop.md H4): the worker TUI is the ONE
+        // hop-capable origin in v1 (D8). The facade keeps ONE stable identity for
+        // every member `startTui` asks for, and the SAME broker and saver go to
+        // every runtime a hop builds (AGENTS §7, P2); `hop-feed.ts` bridges it to
+        // the TUI's two props (D3).
+        const place: { current: HopPlace } = { current: { kind: "local" } };
+        // The facade's `status` sink is fixed at build time; the feed's per-run
+        // listener set is not. One mutable indirection, set right below.
+        let hopStatus: (line: string | null) => void = () => {};
+        const facade = createHopRuntime({
+          initial: runtime,
+          startup: { place: { kind: "local" }, daemonInPod: false },
+          shared: { permissions, saver },
+          build: (spec, sharedPair, sessionId) =>
+            createHopTargets({
+              config,
+              shared: sharedPair,
+              // D6: the engine's lines go to the hop's sinks — never a raw write
+              // while Ink owns the terminal (AGENTS §7, P8).
+              status: (line) => hopStatus(line),
+              notify: (text) => sessions.notices.notify(text),
+              host: (engine) => hopEngineHost(engine),
+              defaultImage: () => process.env.TENTACLE_POD_IMAGE,
+            })(spec, sessionId),
+          load: (uid) => sessions.store.load(uid),
+          status: (line) => hopStatus(line),
+          notify: (text) => sessions.notices.notify(text),
+        });
+        const hopView = createHopFeed({
+          facade,
+          place: () => place.current,
+          notify: (text) => sessions.notices.notify(text),
+          // D5: the ONE place that decides a leave, through the verified delete.
+          leave: (before, keep) => hopLeave(before, keep),
+        });
+        hopStatus = hopView.status;
+        const offTarget = facade.onTarget((view) => {
+          place.current = view.place;
+        });
         await runSessionTui(sessions, {
           start: (sessionOptions) =>
             startTui(null, {
@@ -1973,15 +2126,20 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
               cwd: config.cwd,
               contextWindow: config.contextWindow,
               permissions,
-              jobs: runtime.jobs,
+              jobs: facade.jobs,
               autoWakeOnJobExit: config.autoWake,
               subagentsTwoWay: config.subagentsTwoWay,
-              createSession: runtime.createSession,
-              link: runtime.link,
-              mcpStatus: runtime.mcpStatus,
+              createSession: facade.createSession,
+              link: facade.link,
+              mcpStatus: facade.mcpStatus,
+              hop: hopView.hop,
+              targetFeed: hopView.targetFeed,
               ...sessionOptions,
             }),
-          teardown: () => runtime.dispose(),
+          teardown: async () => {
+            offTarget();
+            await facade.dispose();
+          },
           write: err,
         });
         return 0;

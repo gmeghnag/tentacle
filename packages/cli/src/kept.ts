@@ -65,6 +65,14 @@ export interface KeptEntry {
    * plain `attach` reopens. Written by this laptop only (`setKeptSession`).
    */
   readonly sessionId?: string;
+  /**
+   * A HOP created this workload (`/move container`, docs/feat/session-hop.md D5):
+   * the one mark that makes it deletable by a hop back with `keep: false`. A
+   * `run` never writes it, so a user's own workload is never a hop's to delete.
+   * Absent = not a hop's (an older build drops the field and refuses to delete —
+   * the safe direction).
+   */
+  readonly hop?: true;
 }
 
 /** Labels + annotations a kept `run` writes (k8s label values cannot hold a model id with `/`). */
@@ -186,6 +194,7 @@ export function parseKeptEntry(text: string): ParsedEntry {
       created: r.created,
       // A bad id is dropped, never a reason to refuse the entry (it only names a session file).
       ...(str(r.sessionId) && isValidSessionId(r.sessionId) ? { sessionId: r.sessionId } : {}),
+      ...(r.hop === true ? { hop: true as const } : {}),
     },
   };
 }

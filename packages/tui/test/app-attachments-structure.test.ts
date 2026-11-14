@@ -150,7 +150,7 @@ describe("S6: the unmount effect stays in App, at its index, doing its job", () 
   // lands after an unmount then sets state on a dead component.
   test("the attachments' unmount effect is STILL effect 1 of 20 and still aborts + bumps", () => {
     const app = readSrc("App.tsx");
-    expect(countOf(app, "\n  useEffect(")).toBe(20);
+    expect(countOf(app, "\n  useEffect(")).toBe(22);
     const first = effectBody(app, 0);
     expect(first).not.toBeNull();
     const body = first ?? "";
@@ -159,6 +159,6 @@ describe("S6: the unmount effect stays in App, at its index, doing its job", () 
     // …and it is the ATTACHMENTS' own effect, not some other one that drifted first.
     expect(body).toContain("attachGenRef");
     expect(effectBody(app, 1)).not.toBeNull();
-    expect(effectBody(app, 20)).toBeNull();
+    expect(effectBody(app, 22)).toBeNull();
   });
 });

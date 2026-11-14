@@ -1,0 +1,26 @@
+appId: so.tentacle.app
+---
+# 15 (docs/feat/mobile-pairing-screen.md 11b.1, F-L1/F-L2): the phone is paired, then
+# REVOKED on the computer. Its next dial is denied at the handshake — an
+# AUTHENTICATED verdict (only the daemon's static key can deny), so the app may say
+# what it is: the row shows `computer-state-<id>-revoked` with "Pair again".
+#
+# The flow relaunches WITHOUT `clearState` (iOS keeps the Keychain anyway, but this
+# is also the F-L2 case): the app opens on `Computers`, re-reads its stored
+# computers and re-dials, and the denied handshake is what the row reports.
+- runFlow: _pair.yaml
+- runScript:
+    file: "pair-revoke.js"
+- launchApp
+# docs/feat/mobile-lock.md: locked at cold start (Owner Q1).
+- runFlow: _unlock.yaml
+- extendedWaitUntil:
+    visible:
+      id: "computers-list"
+    timeout: 30000
+- extendedWaitUntil:
+    visible:
+      id: "computer-state-${output.computerId}-revoked"
+    timeout: 30000
+- assertVisible:
+    id: "computer-pair-again-${output.computerId}"

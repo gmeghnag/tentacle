@@ -3,10 +3,9 @@ appId: so.tentacle.app
 # 13 (docs/feat/mobile-compose.md 13d): SEND NOW. A `HOLD` turn runs, two steers are
 # queued, and the second button takes them: the old turn is cancelled and the new
 # turn's prompt is both texts joined. The hook proves the daemon's own history.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:

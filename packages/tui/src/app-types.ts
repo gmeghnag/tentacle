@@ -10,6 +10,7 @@ import type { JobOutputResult, JobRow } from "@tentacle/protocol";
 import type { AttachMode } from "./attach-draft.ts";
 import type { FileProbe } from "./attach-files.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
+import type { HopSpec } from "./hop-command.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import type { AutoAcceptFeed } from "./permission-ui.ts";
@@ -21,6 +22,15 @@ import type { ContextOpen } from "./status-view.ts";
 import type { SubagentNotifyView } from "./subagent-notify.ts";
 import type { TargetBadge } from "./target-view.ts";
 import type { SessionActivity } from "./turn-feed.ts";
+import type { RunQuit } from "./useQuitClear.ts";
+
+/**
+ * `RunQuit` left this file with S8: it is declared next to `useQuitClear`, the
+ * executor that reads it (plan H4(1): a hook slice takes its own type with it),
+ * and re-exported here so every `from "app-types.ts"` importer — including
+ * `AppProps` below — keeps working unchanged.
+ */
+export type { RunQuit } from "./useQuitClear.ts";
 
 /**
  * The conversation the App drives. Both the local agent `Session` and the
@@ -244,18 +254,76 @@ export interface NoticeFeed {
   onNotice(listener: (text: string, hint?: string) => void): () => void;
 }
 
+/** Where the session is, as the badge paints it (`local`: no badge, today's rule). */
+export interface HopTargetView {
+  /** `local`, or the workload as the badge and every notice say it. */
+  readonly place: HopPlaceView;
+  /** The status bar's accent badge; absent for `local` (as a plain TUI has none). */
+  readonly badge?: TargetBadge;
+  /** The daemon now runs in a pod: a spilled result's file is "saved in the pod". */
+  readonly daemonInPod: boolean;
+}
+
 /**
- * A detached run's TUI (docs/fix/detach-live.md A2): `/quit` closes the
- * session for every TUI on it. The host counts the others and acts after Ink
- * unmounted; the App only reports what the user chose and what happened.
+ * A place, structurally the cli's `HopPlace` (the TUI does not depend on the
+ * cli): `local`, or an engine + workload name (+ the k8s container).
  */
-export interface RunQuit {
-  /** Other live TUIs on this same session (laptop presence). */
-  othersOnSession(): number;
-  /** The user confirmed: this TUI's quit closes the session for all. */
-  closeForAll(): void;
-  /** Another TUI closed the session: this one leaves, nothing to save or delete. */
-  closedElsewhere(reason: "closed" | "deleted" | "gone"): void;
+export type HopPlaceView =
+  | { readonly kind: "local" }
+  | {
+      readonly kind: "workload";
+      readonly engine: "kubernetes" | "docker" | "podman";
+      readonly name: string;
+      readonly container?: string;
+    };
+
+/** The place the session is at NOW, and every later move (`AppProps.targetFeed`). */
+export interface TargetFeed {
+  current(): HopTargetView;
+  /** Told of every move; returns the unsubscribe. */
+  onTarget(listener: (view: HopTargetView) => void): () => void;
+}
+
+/** What one started hop reports while it runs. */
+export interface HopRun {
+  /**
+   * The phase lines the hop reports (the orchestrator's own words, D6), until it
+   * settles. A feed, like every other one here (`onLinkStatus`, `onTarget`): the
+   * host emits, the App paints; returns the unsubscribe.
+   */
+  onStatus(listener: (line: string | null) => void): () => void;
+  /**
+   * Settles when the hop is over: the target's controller on success (the App
+   * swaps to it with `keepTranscript`), or the one line saying why it did not
+   * move. Never rejects — a hop always answers the view.
+   */
+  readonly done: Promise<
+    | { readonly moved: SessionController; readonly view: HopTargetView }
+    | { readonly failed: string }
+  >;
+}
+
+/**
+ * `/move` (docs/feat/session-hop.md D3): present only where a session MAY move
+ * — the local worker TUI and a TUI already on a hop target (D8). Every effect
+ * (building the target, the plan's refusals, the commit) is the host's; the App
+ * only decides WHEN, from its own turn state (D4), and moves the view.
+ */
+export interface HopFeed {
+  /** Where the session is going, for the status row before the first phase. */
+  label(spec: HopSpec): string;
+  /**
+   * Start the hop. `sessionId` is the uid of the session being moved — the App
+   * knows it (its controller's `sessionId`), and the host cannot guess it without
+   * minting a second one (D1 step 3 seeds the SAME uid).
+   */
+  start(spec: HopSpec, sessionId: string | null): HopRun;
+  /**
+   * Abort the hop in flight (D3's `/move cancel`). Optional: a host that cannot
+   * stop a build half-way leaves it to its own failure path, and the App then
+   * only clears a QUEUED hop.
+   */
+  cancel?(): void;
 }
 
 export interface AppProps {
@@ -352,6 +420,16 @@ export interface AppProps {
   readonly runQuit?: RunQuit;
   /** A detached run's TUI: auto-accept is its session's, shared by its TUIs (B3). */
   readonly autoAccept?: AutoAcceptFeed;
+  /**
+   * `/move` (docs/feat/session-hop.md D3): this session may move to another
+   * target. Absent → `/move` says it is not available here (D8).
+   */
+  readonly hop?: HopFeed;
+  /**
+   * Where the session is, live (`docs/feat/session-hop.md` D2/D3): the badge and
+   * `daemonInPod` follow a hop. Absent → the static `target`/`daemonInPod` props.
+   */
+  readonly targetFeed?: TargetFeed;
   /**
    * The width to render at, overriding the terminal's (`ink-testing-library`
    * reports 100). Never set by a runtime: it exists so a frame test can pin a

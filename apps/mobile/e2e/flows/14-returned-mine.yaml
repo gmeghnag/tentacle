@@ -5,10 +5,9 @@ appId: so.tentacle.app
 # banner, and the daemon's queue no longer returns it (the reclaim ran).
 # The variant kills the app before the cancel: the ids are PERSISTED, so the row is
 # given back once after a relaunch too (F10).
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:
@@ -36,8 +35,11 @@ appId: so.tentacle.app
 - runScript:
     file: "14-laptop-cancel.js"
 - launchApp
+# The relaunch starts LOCKED (docs/feat/mobile-lock.md Owner Q1); the record and
+# the device key survive it (11b.1), so the row is the one `_pair` created.
+- runFlow: _unlock.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - tapOn:
     id: "session-${RETURNED_ID}"
 - extendedWaitUntil:

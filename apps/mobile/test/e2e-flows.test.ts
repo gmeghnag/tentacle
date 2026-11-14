@@ -44,6 +44,9 @@ const COMPOSE_FLOWS = [
   "18-photos",
 ] as const;
 
+/** The flows 11b.1 owns: they pair through their own steps, not the shared prefix. */
+const PAIRING_FLOWS = ["12-pair-declined", "13-pair-expired", "14-pair-bad-text"] as const;
+
 /**
  * One assertion: `- assertVisible:` / `- assertNotVisible:`, or the `visible:` /
  * `notVisible:` block of an `extendedWaitUntil` (a WAIT is an assertion too — a
@@ -270,6 +273,44 @@ describe("the flows the task replaced are gone, and its ids exist", () => {
     for (const name of FLOWS) {
       expect(readFlow(name).some((a) => a.id === "session-placeholder")).toBe(false);
     }
+  });
+
+  test("11b.1: every flow pairs through `_pair`, and no flow names the dev computer", () => {
+    // The app has no build-time computer any more: a flow that still expected
+    // `computer-dev` would pass only against a build that cannot be shipped.
+    for (const name of FLOWS) {
+      const body = readFileSync(join(FLOWS_DIR, `${name}.yaml`), "utf8");
+      expect(body).not.toContain("computer-dev");
+      // The pairing prefix, or the pairing path the flow itself asserts.
+      const pairs =
+        body.includes("- runFlow: _pair.yaml") ||
+        (PAIRING_FLOWS as readonly string[]).includes(name) ||
+        body.includes("pair-start.js");
+      expect({ name, pairs }).toEqual({ name, pairs: true });
+      // A flow that ends BEFORE a computer is paired (the refusal/expiry/paste
+      // flows, and `_pair` itself) has no id to name — the rest must.
+      const pairsFirst = (PAIRING_FLOWS as readonly string[]).includes(name);
+      if (!pairsFirst) {
+        expect(body).toContain("${output.computerId}");
+      }
+    }
+  });
+
+  test("11b.1: `_pair` asserts BOTH ends' compare code (the security property)", () => {
+    const body = readFileSync(join(FLOWS_DIR, "_pair.yaml"), "utf8");
+    // The code the terminal shows comes from the hook; the phone's own testID
+    // must be asserted against exactly it.
+    expect(body).toContain('file: "pair-confirm.js"');
+    expect(body).toContain("pair-sas-${output.sas}");
+    // `y` is answered only after that comparison: the order is the property.
+    const confirmAt = body.indexOf("pair-confirm.js");
+    const sasAt = body.indexOf("pair-sas-${output.sas}");
+    const answerAt = body.indexOf("pair-answer.js");
+    expect(confirmAt).toBeGreaterThan(-1);
+    expect(sasAt).toBeGreaterThan(confirmAt);
+    expect(answerAt).toBeGreaterThan(sasAt);
+    // F-H2: `clearState` does not wipe the Keychain on iOS, so the flow clears it.
+    expect(body).toContain("- clearKeychain");
   });
 
   test("the flow list is the files that exist: no flow is silently not run", () => {

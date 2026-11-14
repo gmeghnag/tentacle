@@ -4,10 +4,9 @@ appId: so.tentacle.app
 # laptop), the phone types into the field and the one button QUEUES it — the row
 # appears at once as mine, and the hook proves the daemon injected it into that
 # turn.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:

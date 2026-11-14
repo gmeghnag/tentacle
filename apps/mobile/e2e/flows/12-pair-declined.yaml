@@ -1,0 +1,48 @@
+appId: so.tentacle.app
+---
+# 12 (docs/feat/mobile-pairing-screen.md 11b.1, F-P7): the human answers `n` on the
+# computer. The phone must say the pairing was declined, and NOTHING may be stored
+# (a stale record would be a computer the phone cannot dial).
+#
+# The flow does NOT reuse `_pair`: the refusal is the step it asserts. It opens its
+# own window, pastes, compares the two codes, then answers `n` — the same order a
+# person follows, with the same consequence.
+- runScript:
+    file: "pair-start.js"
+- launchApp:
+    clearState: true
+- clearKeychain
+# docs/feat/mobile-lock.md: locked at cold start (Owner Q1).
+- runFlow: _unlock.yaml
+- extendedWaitUntil:
+    visible:
+      id: "pair-paste-input"
+    timeout: 30000
+- tapOn:
+    id: "pair-paste-input"
+- inputText: ${output.payload}
+- tapOn:
+    id: "pair-paste-submit"
+- assertVisible:
+    id: "pair-review"
+- tapOn:
+    id: "pair-confirm"
+- runScript:
+    file: "pair-confirm.js"
+# The phone shows the terminal's code, then the human says `n` there.
+- assertVisible:
+    id: "pair-sas-${output.sas}"
+- runScript:
+    file: "pair-decline.js"
+# The refusal reaches the phone as a card, and no computer is listed. WHICH reason
+# it carries is task 9's race, not the app's: `pairCommand` DELETES the window's
+# files on exit, so the daemon's poll may find the claim gone (`timeout`) before it
+# reads the `declined` decision it wrote. Both are the same outcome for a person
+# (this code is dead, run `tentacle pair` again), so the flow accepts exactly that
+# family — the app's own mapping of each is pinned in `pairing-flow.test.ts`.
+- extendedWaitUntil:
+    visible:
+      id: "pair-error-(declined|timeout)"
+    timeout: 20000
+- assertNotVisible:
+    id: "computer-${output.computerId}"

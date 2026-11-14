@@ -1,0 +1,62 @@
+appId: so.tentacle.app
+---
+# `_pair` (docs/feat/mobile-pairing-screen.md 11b.1): the shared prefix every flow
+# runs before it can see a computer at all. It pairs THIS simulator with the
+# harness's real `serve` over `/e2e`, through the real `tentacle pair`:
+#
+#   1. `/pair/start` opens a window in-process and returns the line to paste;
+#   2. the flow pastes it, reviews the computer's name, and confirms;
+#   3. the phone shows its compare code — `/pair/confirm` returns the code the
+#      TERMINAL is showing, and the flow asserts the phone drew THAT one. Both
+#      ends displaying one code is the mockups' whole point (and the reason a
+#      human answers `y` on the computer);
+#   4. `/pair/answer?answer=y` answers the terminal's `[y/N]`;
+#   5. the app resets the stack to `Computers`, where the row is
+#      `computer-<id>` — the id `pair` reported, i.e. the key the phone pinned.
+#
+# `clearState` does NOT wipe the Keychain (Apple keeps items across an app
+# delete), so every flow ALSO clears it: a leftover record from a previous run
+# would make the app open on `Computers` and this subflow's ids would collide
+# with the older computer's (F-H2).
+- runScript:
+    file: "pair-start.js"
+- launchApp:
+    clearState: true
+- clearKeychain
+# docs/feat/mobile-lock.md: the shipped default LOCKS AT COLD START (Owner Q1),
+# so the lock comes first here — `_unlock` asserts it and gets past it with a
+# scripted Face ID match (Step 0). Every flow that pairs therefore runs the real
+# lock; there is no test-only branch in the app.
+- runFlow: _unlock.yaml
+# A fresh install has nothing paired: the app opens on the pairing screen. A WAIT,
+# not an assert: the first launch reads the store before it routes, and on a
+# freshly erased simulator that start is slow (a plain `assertVisible` failed
+# here on the iOS 26 run, with the app still on its spinner).
+- extendedWaitUntil:
+    visible:
+      id: "pair-paste-input"
+    timeout: 30000
+- tapOn:
+    id: "pair-paste-input"
+- inputText: ${output.payload}
+- tapOn:
+    id: "pair-paste-submit"
+# The review: which computer, how many addresses, and the name it will show.
+- assertVisible:
+    id: "pair-review"
+- tapOn:
+    id: "pair-confirm"
+- runScript:
+    file: "pair-confirm.js"
+# The phone's compare code is the terminal's: `pair-sas-<digits>` is the testID,
+# so a mismatch fails here rather than in the human's head.
+- assertVisible:
+    id: "pair-sas-${output.sas}"
+- runScript:
+    file: "pair-answer.js"
+# `done` resets the stack to `Computers`, where the new row proves the record and
+# its key were written BEFORE the app said so (F-P12).
+- assertVisible:
+    id: "computers-list"
+- assertVisible:
+    id: "computer-${output.computerId}"

@@ -10,10 +10,9 @@ appId: so.tentacle.app
 # `launchApp` WITHOUT `clearState` comes back to the same screen: the app's
 # foreground gate resumes, the client re-attaches, the daemon re-offers the pending
 # ask, and the sheet is where it lands again.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:
@@ -42,12 +41,14 @@ appId: so.tentacle.app
 # step still proves is the property that matters: the daemon held the ask while no
 # client could answer it, and it is re-offered to the phone when it re-attaches.
 - launchApp
+# docs/feat/mobile-lock.md: locked at cold start (Owner Q1).
+- runFlow: _unlock.yaml
 - extendedWaitUntil:
     visible:
-      id: "computer-dev"
+      id: "computer-${output.computerId}"
     timeout: 30000
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:

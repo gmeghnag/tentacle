@@ -3,10 +3,9 @@ appId: so.tentacle.app
 # 16 (docs/feat/mobile-compose.md 13d): the OFFLINE OUTBOX. The daemon is stopped, the
 # phone composes anyway (Send later), the app is killed and relaunched — the row is
 # still there — and when the daemon comes back the item goes out EXACTLY ONCE.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:
@@ -32,8 +31,11 @@ appId: so.tentacle.app
 # A kill must not lose it: the item's keys are on disk before the first attempt.
 - stopApp
 - launchApp
+# The relaunch starts LOCKED (docs/feat/mobile-lock.md Owner Q1); the Keychain
+# record made by `_pair` survives, so the offline item is reachable again.
+- runFlow: _unlock.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - tapOn:
     id: "session-${OUTBOX_ID}"
 - extendedWaitUntil:

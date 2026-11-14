@@ -24,7 +24,22 @@ export type HookName =
   | "queue-state"
   | "laptop-enqueue"
   | "laptop-cancel"
-  | "laptop-detach";
+  | "laptop-detach"
+  | "pair-start"
+  | "pair-confirm"
+  | "pair-answer"
+  | "pair-revoke"
+  | "pair-reset"
+  | "pair-claimed"
+  | "pair-device-id"
+  /** docs/feat/mobile-lock.md Step 0: enroll a face on the simulator (idempotent). */
+  | "faceid-enroll"
+  /** A matching face while the system prompt is up (`notifyutil …pearl.match`). */
+  | "faceid-match"
+  /** A NON-matching face (real device only: the simulator's promise hangs — Step 0). */
+  | "faceid-nomatch"
+  /** Read the app container's log file, so flow 09 asserts what was really written. */
+  | "log-file";
 
 /** The hooks that take a query parameter (`?session=…&prompt=…`). */
 export interface HookQuery {
@@ -34,6 +49,10 @@ export interface HookQuery {
   readonly file?: string;
   /** `laptop-enqueue`: the text the LAPTOP queues into the running turn. */
   readonly text?: string;
+  /** `pair-start`'s window length (flow 07 needs a short one). */
+  readonly ttlMs?: string;
+  /** `pair-revoke`'s device name (what `tentacle devices revoke` matches). */
+  readonly name?: string;
 }
 
 export interface Hooks {
@@ -94,6 +113,31 @@ export interface HookActions {
   readonly laptopCancel: (sessionId: string) => Promise<void>;
   /** The LAPTOP detaches (flow 15: the writer goes away, its row stays returned). */
   readonly laptopDetach: (sessionId: string) => Promise<void>;
+  /** Open a pairing window (11b.1's `_pair` subflow): the payload the flow pastes. */
+  readonly pairStart: (options: { readonly ttlMs?: number }) => Promise<{
+    readonly payload: string;
+    readonly computerId: string;
+  }>;
+  /** Wait for the phone's claim and return the compare code the terminal shows. */
+  readonly pairConfirm: () => Promise<{ readonly sas: string }>;
+  /** Answer the computer's `[y/N]` AFTER the two codes were compared. */
+  readonly pairAnswer: (value: "y" | "n") => Promise<{ readonly answered: "y" | "n" }>;
+  /** `tentacle devices revoke <name>`: the phone's next dial is denied. */
+  readonly pairRevoke: (name: string) => Promise<number>;
+  /** `tentacle devices reset`: the pinned key is wrong from now on. */
+  readonly pairReset: () => Promise<number>;
+  /** Did the phone claim the open window's code yet? (a negative assertion's truth) */
+  readonly pairClaimed: () => boolean;
+  /** The device id the last completed pairing registered (flow 15 revokes exactly it). */
+  readonly pairDeviceId: () => string | undefined;
+  /** Enrol a face on THIS simulator (`notifyutil …enrollmentChanged`). Idempotent. */
+  readonly faceIdEnroll: () => Promise<void>;
+  /** Present a matching face; the pending `authenticateAsync` resolves success. */
+  readonly faceIdMatch: () => Promise<void>;
+  /** Present a NON-matching face (a real device; the simulator hangs — Step 0). */
+  readonly faceIdNoMatch: () => Promise<void>;
+  /** The app's log file text from its container (`""` when there is none). */
+  readonly logFile: () => Promise<string>;
 }
 
 /** What a laptop requester answers: `allow` (once) or `deny`. */
@@ -114,10 +158,18 @@ export function hookFor(path: string): HookName | undefined {
     case "model-prompts":
     case "model-replies":
     case "edit-calls":
-    case "queue-state":
-    case "laptop-enqueue":
-    case "laptop-cancel":
     case "laptop-detach":
+    case "pair-start":
+    case "pair-confirm":
+    case "pair-answer":
+    case "pair-revoke":
+    case "pair-reset":
+    case "pair-claimed":
+    case "pair-device-id":
+    case "faceid-enroll":
+    case "faceid-match":
+    case "faceid-nomatch":
+    case "log-file":
       return name;
     default:
       return undefined;
@@ -134,6 +186,8 @@ export function queryOf(url: URL): HookQuery {
     ...(read("answer") === undefined ? {} : { answer: read("answer") }),
     ...(read("file") === undefined ? {} : { file: read("file") }),
     ...(read("text") === undefined ? {} : { text: read("text") }),
+    ...(read("ttlMs") === undefined ? {} : { ttlMs: read("ttlMs") }),
+    ...(read("name") === undefined ? {} : { name: read("name") }),
   };
 }
 
@@ -240,6 +294,50 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
             await deps.actions.laptopDetach(session);
             return Response.json({ ok: true, hook });
           }
+          case "pair-start": {
+            const ttlMs = query.ttlMs === undefined ? undefined : Number(query.ttlMs);
+            const started = await deps.actions.pairStart(ttlMs === undefined ? {} : { ttlMs });
+            return Response.json({ ok: true, hook, ...started });
+          }
+          case "pair-confirm": {
+            const confirmed = await deps.actions.pairConfirm();
+            return Response.json({ ok: true, hook, sas: confirmed.sas });
+          }
+          case "pair-answer": {
+            // `answer=y|n`; the flow answers ONLY after comparing both codes.
+            const value = query.answer === "y" ? "y" : query.answer === "n" ? "n" : undefined;
+            if (value === undefined) {
+              throw new Error("the answer parameter must be y or n");
+            }
+            const answered = await deps.actions.pairAnswer(value);
+            return Response.json({ ok: true, hook, answered: answered.answered });
+          }
+          case "pair-revoke": {
+            const name = required(query.name, "name");
+            return Response.json({ ok: true, hook, code: await deps.actions.pairRevoke(name) });
+          }
+          case "pair-reset":
+            return Response.json({ ok: true, hook, code: await deps.actions.pairReset() });
+          case "pair-claimed":
+            return Response.json({ ok: true, hook, claimed: deps.actions.pairClaimed() });
+          case "pair-device-id": {
+            const deviceId = deps.actions.pairDeviceId();
+            if (deviceId === undefined) {
+              throw new Error("no pairing has completed yet");
+            }
+            return Response.json({ ok: true, hook, deviceId });
+          }
+          case "faceid-enroll":
+            await deps.actions.faceIdEnroll();
+            return Response.json({ ok: true, hook });
+          case "faceid-match":
+            await deps.actions.faceIdMatch();
+            return Response.json({ ok: true, hook });
+          case "faceid-nomatch":
+            await deps.actions.faceIdNoMatch();
+            return Response.json({ ok: true, hook });
+          case "log-file":
+            return Response.json({ ok: true, hook, text: await deps.actions.logFile() });
         }
         return Response.json({ error: "unknown hook" }, { status: 404 });
       } catch (error) {

@@ -1,0 +1,36 @@
+appId: so.tentacle.app
+---
+# 16 (docs/feat/mobile-pairing-screen.md 11b.1, Owner Q5): Remove forgets the
+# computer on THIS phone — the key is deleted and the computer's entry stays (the
+# dialog names `tentacle devices revoke`). The last removal resets the stack to
+# `Pair`.
+#
+# The relaunch does NOT clear state: the property is that the removal PERSISTED —
+# the Keychain item is gone, not merely hidden by a re-render.
+#
+# The confirmation is an in-app card (drift from the plan's "native confirmation":
+# RN's new architecture gives XCUITest no alert text, so its wording and its effect
+# could never be asserted — see the task doc's Execution).
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-remove-${output.computerId}"
+# The confirmation (an in-app card: an `Alert` would expose no text to XCUITest,
+# so a flow could not prove Remove's wording or its effect), then its Remove.
+- assertVisible:
+    id: "computer-remove-confirm-${output.computerId}"
+- tapOn:
+    id: "computer-remove-yes-${output.computerId}"
+- extendedWaitUntil:
+    visible:
+      id: "pair-paste-input"
+    timeout: 20000
+# Persisted: a relaunch (no `clearState`) still has nothing paired.
+- launchApp
+# docs/feat/mobile-lock.md: the relaunch starts LOCKED (Owner Q1).
+- runFlow: _unlock.yaml
+- extendedWaitUntil:
+    visible:
+      id: "pair-paste-input"
+    timeout: 30000
+- assertNotVisible:
+    id: "computer-${output.computerId}"

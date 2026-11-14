@@ -4,10 +4,9 @@ appId: so.tentacle.app
 # queues a steer into a `HOLD` turn and then stops it: the row is returned to ITS
 # writer, and the phone must show it as "returned to another device" — never claim
 # it by itself (QR2). Take is the one explicit act that brings it into the field.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:

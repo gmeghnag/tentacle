@@ -272,6 +272,16 @@ export class SessionSaver {
     return this.pending.size === 0 && ![...this.states.values()].some((state) => state.failing);
   }
 
+  /**
+   * The same for ONE uid — what a session hop needs before it opens the
+   * session elsewhere (docs/feat/session-hop.md D1 step 3): a failed save of
+   * ANOTHER uid (a `/clear` fork, a session of the same store) is not this
+   * session's business, so `clean()` would refuse a hop for no reason (review M1).
+   */
+  cleanFor(id: string): boolean {
+    return !this.pendingIds().includes(id) && this.states.get(id)?.failing !== true;
+  }
+
   private pendingIds(): string[] {
     return [...new Set(this.pending.values())];
   }

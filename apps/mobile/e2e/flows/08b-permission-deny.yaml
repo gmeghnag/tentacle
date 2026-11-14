@@ -6,10 +6,9 @@ appId: so.tentacle.app
 # assertion to 08's, so neither flow can pass by accident).
 #
 # A different file name from flow 08's `a.txt`: the two flows share one daemon.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:

@@ -3,10 +3,9 @@ appId: so.tentacle.app
 # 17 (docs/feat/mobile-compose.md 13d): an offline item whose conversation CHANGED under
 # it (the laptop ran a turn meanwhile). `decide` must not auto-send: the person gets
 # the decision sheet, and its Send reuses the ORIGINAL key, so the text goes out once.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:

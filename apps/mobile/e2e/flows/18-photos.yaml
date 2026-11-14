@@ -4,10 +4,9 @@ appId: so.tentacle.app
 # simulator's library (`simctl addmedia`: a PNG and a JPEG — the HEIC leg is proved by
 # 13c's Step 0, where PHPicker returned a real HEIC and the phone converted it), both
 # chips become ready, and the daemon's history names both refs with their types.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:

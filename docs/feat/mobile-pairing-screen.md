@@ -587,8 +587,347 @@ other schemes/hosts ignored; the result enters `intake`, never `connecting` —
 
 ## Execution
 
+*— claude-sonnet-4-5, 2026-11-14 — slice 11b.1 only (`feat/mobile-pairing-core`)*
+
+**Scope.** 11b.1 only: the Keychain store, the paste+compare pairing flow, the
+`/e2e` link, Remove/Pair-again, and the harness without the proxy. 11b.2 (camera,
+deep link, `expo-camera`) is untouched.
+
+### Step 0 — Hermes over `/e2e` (BLOCKING): PASSED
+
+A throwaway probe (`.tentacle/tmp/mobile-pairing-core/step0/`, `apps/mobile/
+step0-probe.tsx` + a temporary `index.step0.ts`, both reverted) replaced `App`
+for one Release build on the iOS 26.5 simulator, against a real `serve` with 200
+seeded sessions and an in-process `pairCommand` answering `y`:
+
+```
+{"parseMs":20,"keypairMs":86,"compareAtMs":59,"pairDeviceMs":371,
+ "sas":"907869","deviceId":"34953038a1071263",
+ "computerId":"27ed48215d916376","computerName":"gmeghnag-mac",
+ "handshakeMs":99,"protocolVersion":24,"sessionListMs":111,"sessions":50}
+```
+
+- `generateStaticKeypair(expoRandom)`, `pairDevice`'s Noise initiator, the SAS
+  (`@noble`) and `secureChannelFactory` over `/e2e` all run under **Hermes** in a
+  Release build: no `BigInt`/`TextEncoder`/`@noble` gap.
+- The phone's SAS `907869` equals the terminal's `must show 907 869` — the
+  two-screens property holds on the real platform, not only in Bun.
+- `pairDevice` 371 ms, `/e2e` handshake 99 ms, `session/list` (50 of 200) 111 ms.
+  Recorded for the binary-frames debt (`TODO.md:1215`): the phone's whole path is
+  far from the 1 MiB ≈ 0.8 s measurement that motivated it.
+- Harness detail (not a product finding): `/confirm` cannot wait for `pair`'s
+  prompt — `pair` prints the compare code only AFTER the claim, and the claim is
+  the phone's next request. The probe's first two attempts deadlocked on exactly
+  that; recorded so the harness's `pairing.ts` orders `confirm` → `answer`.
+
+### As built, in dependency order
+
+1. **`apps/mobile/package.json` + `bun.lock` + `app.json`** — `expo-secure-store`
+   `58.0.3` (pinned exactly; `npx expo install` chose `~58.0.3`, which Expo 58
+   matches), and its config plugin registered by the installer.
+2. **`src/computer-store.ts`** (new) — the index + one item per computer, the
+   injected `SecureKV`/accessibility class, add/replace/remove ordering, and
+   `StoreUnreadable` for an unknown `v` or unparseable bytes (never overwritten).
+3. **`src/computers.ts`** — `PairedComputer`/`ComputerSource` over the store; the
+   dev source, its env names and `ComputerConfigError` deleted.
+4. **`src/address-dial.ts`**, **`src/link-diagnosis.ts`** (new) — the address
+   order/memory (`unauthorized` stops the loop) and the `ok|unreachable|revoked|
+   maybe-reset` diagnosis fed by error OBJECTS.
+5. **`src/connection.ts`** — `openComputer(StoredComputer, {WebSocket, random,
+   diagnosis?})` dials `/e2e` with `secureChannelFactory` (no token), keeps the
+   foreground gate, the one broker, `initialize` and `leaveComputer`.
+6. **`src/pairing-flow.ts`** (new) — the reducer, `pairingView`, `failureFor`/
+   `describePairingError` (exhaustive `Record`), and `runPairing` (fresh key,
+   `onCompare` → `compare`, store write BEFORE `done`, Cancel closes the channel).
+7. **`src/session-list.ts`**, **`src/computer-rows.ts`** — a caller-supplied
+   diagnosis worded through `diagnosisMessage`; row states `ok|unreachable|
+   revoked|maybe-reset|broken` with their actions.
+8. **`src/routes.ts`** — `Pair` gains `{again?, againName?}`; `routeForStoreError`.
+9. **`src/secure-kv.ts`** (new, the one native import), **`PairScreen.tsx`**,
+   **`ComputersScreen.tsx`**, **`App.tsx`**.
+10. Tests (see Gate): 6 new files, 5 updated, `e2e-strip-origin.test.ts` deleted.
+11. Harness: `run.ts` (no proxy, no `EXPO_PUBLIC_*`), `hooks.ts` (+6 pairing
+    hooks), `e2e/pairing.ts` and `e2e/pair-cli.ts` (new), `flows/_pair.yaml`,
+    `pair-*.js`, flows 01–11 re-pointed, flows 12–17 new, `proxy.ts`/
+    `strip-origin.ts` deleted, `e2e/README.md`.
+12. `changelog.d/mobile-pairing-core.added.md`; this section.
+
+### Gate (final, this branch)
+
+```
+$ bunx tsc --noEmit                        # clean
+$ bunx tsc -p apps/mobile --noEmit         # clean
+$ bun run lint                             # Checked 1185 files. No fixes applied. (0/0 — the §6 baseline)
+$ bun test                                 # 8834 pass · 3 skip · 0 fail · 13 snapshots (634 files, 374s)
+```
+
+The 3 skips are the §6 opt-ins (live-k8s, live-docker, the real-socket keepalive).
+`bun test apps/mobile` alone: **557 pass, 0 fail (44 files)**.
+
+Mutation checks run (each pasted here as red-then-restored, §9 non-vacuity):
+
+| # | Mutation | Test that went RED |
+|---|---|---|
+| M1 | private key also written into the index | `computer-store` "the private key lives ONLY in its computer's item" |
+| M2 | `set` without `keychainAccessible` | "every set carries AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY" |
+| M3 | add writes the index BEFORE the item | "add writes the ITEM before the index" |
+| M4 | remove deletes the item BEFORE the index | "remove deletes the INDEX entry before the item" |
+| M5 | an unknown `v` reads as empty | "an unknown version is StoreUnreadable and NOTHING is ever written" |
+| M6 | a failed index read caught → `[]` | "a failed READ rejects, it is never an empty list" |
+| M7 | `firstAnswering` continues past `unauthorized` | "STOPS on unauthorized without dialling the next" |
+| M8 | the diagnosis counts a dial that never opened | "a dial that never opened does not count" |
+| ME1 | the diagnosis fed a wrapped error (not the `ChannelError`) | `pairing-e2e` "a revoke while linked → … `revoked`" |
+| ME2 | `done` dispatched BEFORE the store write | `pairing-e2e` "the Keychain write fails → `store`, `done` NEVER dispatched" |
+| ME3 | `unauthorized` mapped to another pairing reason | `pairing-flow` "ChannelError{unauthorized} → expired, NOT revoked" |
+| ME4 | Cancel only flips UI state (no channel close) | `pairing-flow` "Cancel closes the channel in flight" |
+| ME5 | device-name validation not the protocol schema | "the device name is validated by the PROTOCOL schema" |
+| ME6 | a shipped source reads `EXPO_PUBLIC_TENTACLE_*` | `pairing-guards` "no shipped source reads an EXPO_PUBLIC_TENTACLE_*" |
+
+ME2 was VACUOUS on the first wording of its test (the happy path never reached the
+store), so the test was rewritten to drive a store that refuses the write, and the
+mutation then went red — recorded because a green test is not a proof (§9).
+
+### Drift from the Implementation (and why)
+
+1. **`e2e/pair-cli.ts` instead of static `packages/cli` imports.** The plan's
+   tests and harness call `pairCommand`/`revokeCommand`/`resetCommand` directly.
+   A static import from `apps/mobile/test/**` makes `tsc -p apps/mobile` compile
+   `packages/cli` — which reaches `@tentacle/tui`, whose graph (`@tentacle/
+   protocol` undeclared, JS-only `marked-terminal`) is not part of that project,
+   so the app's own typecheck failed on code this task does not own. The loader
+   uses COMPUTED specifiers (`new URL(...)`), which Bun resolves at run time and
+   `tsc` does not follow. Verified: with a static import `tsc -p apps/mobile`
+   fails; with the loader it is clean, and the same real CLI runs.
+2. **`devices reset` needs a name.** `resetCommand` refuses without one ("name is
+   missing or not printable"), so `pairing.reset()` passes `harness-mac`. (P6/P7
+   said nothing about it; the plan's "`resetCommand` answering `y`" is not
+   enough.)
+3. **The `n` path reaches the app as `timeout`, not `declined`.** `pairCommand`
+   DELETES the window's files on exit (`closePairing` in `finally`), so the
+   daemon's poll usually finds the claim gone and answers `timeout` before it
+   reads the `declined` decision. Both are refusals with "new code" copy and the
+   same `pair-error-<reason>` shape, so 11b.1's `12-pair-declined` asserts the
+   card/`no device` outcome, and `pairing-e2e` accepts either reason (it asserts
+   the properties that matter: never `ok`, never stored). This is task 9's
+   behaviour, not a 11b.1 change — recorded here because the plan's F-P7/Tests
+   text says "`declined`".
+4. **`firstAnswering` rethrows the LAST error unchanged** instead of an
+   `AllAddressesFailed` wrapper: `link-machine.ts` classifies by `ChannelError`
+   kind, and a wrapper hid the kind, so a dead address made the link report
+   `unreachable` even when the real failure was a handshake violation (found by
+   `pairing-e2e`'s reset case, which needs `unreachable` + the diagnosis streak,
+   not a wrapper).
+5. **`openComputer` takes an optional `diagnosis`.** The reset hint is "three
+   failed attempts in a row", which a per-`openComputer` diagnoser can never
+   reach (each failing `openComputer` throws, so no link survives to hold it).
+   The app keeps ONE per computer (`App.tsx` `DIAGNOSES`).
+6. **A reset is `unreachable`, confirmed empirically.** The plan (F-L3/P5) says
+   the pinned-key mismatch arrives as a `closed`/`timeout` handshake failure, and
+   the probe in `.tentacle/tmp/mobile-pairing-core/` (`zz-dbg3`) showed exactly
+   `ChannelError{unreachable}` every time — `devices reset` also EMPTIES the
+   registry, so the daemon's new key answers a handshake it cannot complete
+   rather than a deny. The `maybe-reset` streak therefore works as designed.
+7. **`e2e/pairing.ts` answers the prompt through `answer()`, after the SAS
+   comparison.** The plan's `/pair/confirm` "answers per `answer`" in one step;
+   splitting them (confirm → assert `pair-sas-${sas}` → answer) makes the ORDER
+   the mockups' security property rather than a timing coincidence.
+8. **Remove's confirmation is an in-app card, not `Alert.alert`.** The plan says
+   "a native confirmation". RN's new architecture exposes no alert text or button
+   to XCUITest, so a flow could never assert Remove's wording (which Owner Q5
+   makes load-bearing: it names `tentacle devices revoke <name>`) or its effect —
+   the same P9 reason every other value here is a testID. An in-app card with
+   `computer-remove-confirm-<id>` / `-yes-` / `-cancel-` keeps the copy in the pure
+   module (`removeMessage`) and the flow able to prove it. Verified on the
+   simulator (`16-remove-computer` green).
+9. **`removeMessage`, `brokenRow` and the row `action` field** are extra exports
+   the plan did not name, so Remove's copy and a `broken` row's wording are
+   decided in the pure module (`computer-rows.ts`/`ComputersScreen.tsx`), not in
+   `App.tsx` (AGENTS §7).
+
+### Maestro (iOS 26.5): PARTIAL — 5 of 6 new flows green, `15-revoked` blocked
+
+Run as `bun run e2e:mobile --ios 26` (whole harness), then per-flow on a freshly
+erased+booted simulator (the documented workaround for the driver wedge):
+
+| Flow | Result |
+|---|---|
+| `01-shell` (through `_pair`) | **PASS** — a real pairing, both ends' compare code equal |
+| `02-session-list`, `03-refresh` (through `_pair`) | **PASS** |
+| `12-pair-declined` | **PASS** |
+| `13-pair-expired` | **PASS** |
+| `14-pair-bad-text` | **PASS** |
+| `16-remove-computer` | **PASS** (Remove's card → `Pair`; relaunch still unpaired) |
+| `17-persisted` | **PASS** (relaunch → `computer-<id>` and the list loads) |
+| `15-revoked` | **BLOCKED, never asserted** — 5 attempts, 3 fresh boots |
+| `05-daemon-down`, 12c's `06-…`–`11-…` | not reached in a whole-harness run (below) |
+
+`_pair` green on the simulator is the load-bearing result: the phone generated
+its key with `expo-crypto`, dialled `/e2e`, showed the SAS the terminal showed,
+and the record survived into the list.
+
+**Blocked by the simulator, not by the app.** `15-revoked` died with
+`maestro.DeviceUnreachableException: Device became unreachable during inputText`
+on every attempt — Maestro's XCUITest driver loses the simulator, which 12c
+already documented (`mobile-session-view.md`, Execution: "A long Maestro session
+degrades the simulator … recovering needs a shutdown + `simctl erase` + boot";
+"every flow then fails identically"). In each attempt 15 got as far as
+`pair-paste-input` being tappable and then the DRIVER died mid-`inputText`; the
+step it never reached (`computer-state-<id>-revoked`) is driven end-to-end in the
+gate by `pairing-e2e.test.ts` ("a revoke while linked → the link stops and the
+diagnosis says `revoked`"), against a real daemon, a real `revokeCommand` and a
+real socket.
+
+The same wedge ended the whole-harness run after its first three flows, so
+`05-daemon-down` and 12c's flows have no fresh green line in THIS run. They are
+unmodified except for `_pair` replacing the dev-computer tap, and 12c's own
+Execution records them green on the same commit's ancestor.
+
+A CI leg should boot a simulator per run (12c's own note) — that is what would
+make this table complete, and it is not something a task branch can fix.
+
+Two harness defects the Maestro runs did surface (both fixed, both `pairing.ts`'s
+own):
+- **One window leaked between flows.** A flow that failed between `pair-start`
+  and its answer left a window open; the next flow's `pair-start` was refused
+  (F-H3's one-at-a-time is a rule *inside* a flow). `run.ts` now `stop()`s before
+  each flow, and `stop()` reaches a `pair` this module no longer holds (a
+  generation counter), so an abandoned `ask` answers `n` instead of blocking.
+- **`devices revoke <name>` was ambiguous** across a config dir that accumulates
+  a device per run (`iPhone`, `iPhone (2)`, …): the first attempt revoked a
+  PREVIOUS run's phone and the phone under test stayed valid. Flow 15 now revokes
+  the id `pair` reported for its own pairing (`/pair-device-id`).
+- `changelog.d/mobile-pairing-core.added.md` uses the *plan's* 11b.1 text — the
+  plan named the file `mobile-pairing-screen.added.md`; the slug rule (AGENTS §10,
+  `docs/feat/changelog-fragments.md`) ties it to THIS branch/slice.
+- **`devices reset` has no Maestro flow** (the plan gave it none; `maybe-reset`
+  is `pairing-e2e`'s, as the plan's debt note says). Nothing changed there.
+- The 13c `erased` simulator needed one rebuild after the screens changed
+  (`expo prebuild` + `run:ios --configuration Release`); the harness does that
+  itself per run, so no product impact.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14 — both Review findings (1 HIGH, 1 MEDIUM)*
+
+**Repro (finding 1), `.tentacle/tmp/mobile-pairing-core/repro-f1.ts`** — the real
+registry + diagnoser, the app's own `LINKS.open` re-reading a mutable record:
+
+```
+linked with: OLD-KEY diagnosis: ok
+after revoke: revoked
+row dials with: OLD-KEY | same stale link: true
+row shows diagnosis: revoked
+after release+forget: NEW-KEY | diagnosis: ok
+closed so far: ["OLD-KEY"]
+```
+
+That is F-L1 exactly: after a successful "Pair again" the row still dials the OLD
+key and still reads `revoked`. `link-registry.ts` only forgets a **failed** dial,
+and a link that opened and later stopped is `open` forever.
+
+**1. HIGH — FIXED.** The in-memory facts about a computer now die with the
+record. New pure module `apps/mobile/src/computer-memory.ts`:
+`forgetComputer({links, diagnoses, records}, id)` = `links.release(id)` (detach,
+never `session/close`) + the diagnosis delete + the cached-record delete, and
+`withForgottenRecord(memory, id, then)` = that, then the caller's re-read — the
+**order** is the fix, so it is one exported step rather than two lines in
+`App.tsx`. Wired:
+- `App.tsx:143-155` — `MEMORY` (the app's one `LINKS`/`DIAGNOSES`/`RECORDS`).
+- `App.tsx:271` + `:216` — `PairRoute`'s `onDone(computerId)`: the id comes from
+  the pairing OUTCOME, not from the `again` route param (a first pairing must be
+  forgotten too). `PairingOutcome` is now a discriminated union
+  (`pairing-flow.ts:382-384`) so `ok: true` always carries a `computerId` — no
+  `computerId?` a caller can forget to check.
+- `App.tsx:657-671` — `onDone` → `withForgottenRecord(MEMORY, computerId, reload)`,
+  so the forget runs **before** the reload that re-dials.
+- `App.tsx:689-696` — `onRemove` goes through the same one step (it hand-rolled
+  the same three deletes; now there is one place that decides).
+
+Tests: `test/computer-memory.test.ts` (4) proves the stale link is closed and the
+next dial uses the NEW key, that the `revoked` verdict is dropped, the ordering,
+and that another computer is untouched. `test/pairing-e2e.test.ts` (new, the last
+test) is the scenario the Review named uncovered: real sockets, real pairing, real
+`devices revoke`, then **"Pair again" through the app's own registry and diagnosis
+map** — it now reaches `sessionList` and reads `ok` on the new key, and the old
+link is closed. `test/pairing-wiring-guards.test.ts` pins the `App.tsx` wiring
+itself (it cannot be imported — RN's sources are Flow), which is the only layer
+those pure tests cannot reach.
+
+**2. MEDIUM — FIXED.** `test/connection.test.ts` "a dial that SUCCEEDS resets the
+diagnosis the link was given" now pins `diagnosis.ok()` at `connection.ts:235`: a
+diagnoser arrives with a two-attempt streak, `openComputer` is given it, and after
+the dial it must be `ok` **and** its streak must be gone (one later failure is
+`unreachable`, not a false `maybe-reset`). It also asserts `link.diagnosis` **is**
+that diagnoser, so a silently re-created one cannot pass.
+
+**Mutations (each applied, run, reverted; `diff` vs a backup proves the revert):**
+
+| # | Mutation | Red test |
+|---|---|---|
+| A | `forgetComputer`: drop `links.release` | `computer-memory.test.ts` — "stops handing back the stale link" **and** the ordering test |
+| B | `forgetComputer`: drop `diagnoses.delete` | "forgets the `revoked` verdict" **and** the ordering test |
+| C | `withForgottenRecord`: call `then` FIRST | ordering test — `{OLD-KEY, revoked}` vs `{NEW-KEY, ok}` |
+| D | `App.tsx onDone`: back to a bare `reload()` (the buggy shape) | `pairing-wiring-guards.test.ts` — "forgets … BEFORE reloading" |
+| E | `App.tsx onDone`: forget AFTER the reload | same guard (the `<` on the offset) |
+| F | `App.tsx onRemove`: back to hand-rolled `LINKS.release`/`DIAGNOSES.delete` | "Remove goes through the same one step" |
+| G | `pairing-e2e`: `onDone` without the forget | the new REVOKE→"Pair again" test — `not connected to the daemon` (the stopped link) |
+| H | `connection.ts:235`: delete `diagnosis.ok()` (the Review's own mutation) | `connection.test.ts` — `"unreachable"` instead of `"ok"`; the other three suites it named stay green |
+
+**Drift from the Implementation.** None of substance: `computer-memory.ts` is a
+new pure module the plan did not name, added because a fix must not live in
+`App.tsx` (§7 "logic in pure modules") and because that is what makes the
+ordering testable. No changelog fragment: the finding's user-visible effect is
+already covered by `changelog.d/mobile-pairing-core.added.md`'s "a revoked or
+reset computer says so" — this round makes that sentence TRUE after a re-pair,
+which is a fix to an unreleased branch, not a new capability.
+
+**Gate (this branch, after the fix):** `bun run check` — `tsc --noEmit` clean,
+`tsc -p apps/mobile` clean, `biome check .` 1188 files 0/0, `bun test`
+**8843 pass · 3 skip (the opt-in ones) · 0 fail**, 636 files. Maestro not re-run
+(a simulator; the fix is covered by the loopback-socket test above).
+
 ## Review
 
 #### Orchestrator decisions (owner night delegation 2026-11-14)
 
 Owner asleep, delegated: every Owner question above is decided with its RECOMMENDED option. Implementation APPROVED. Ordering (orchestrator): 11b.1 starts after 13c merges (both add native deps → package.json/bun.lock), 14 after 11b.1, 11b.2 after 11b.1.
+
+### Review — slice 11b.1 (`feat/mobile-pairing-core`, `git diff main...HEAD`)
+
+*— claude-opus-5-5, 2026-11-14 (fresh context; a different model family from the executor)*
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 1 MEDIUM).
+
+**Gate (re-run here):** `bun test apps/mobile` 557 pass · 0 fail (44 files); `bun run typecheck` clean; `bun run lint` 1185 files, 0/0. Full `bun test` not re-run (Execution's 8834/3 skip taken on record). Maestro not re-run (simulator).
+
+**Findings**
+
+1. **HIGH: "Pair again" after a live revoke keeps the stale link.** `apps/mobile/App.tsx:644-648` (`onDone`) only runs `reload()` + `navigation.reset`. It never calls `LINKS.release(id)` or `DIAGNOSES.delete(id)`, which `onRemove` does (`:668-671`). `link-registry.ts:44-47` returns an `open` entry forever: a failed `get` is forgotten, a link that opened and later stopped is not. Scenario F-L1: the app is linked → `tentacle devices revoke` → the link goes `stopped` (`unauthorized`) and stays in `LINKS`, with the OLD device key in its `openComputer` closure (`connection.ts:186`) → the row says `revoked` → "Pair again" succeeds and the store now holds the NEW key → `loadRows` → `LINKS.get(id)` hands back the stopped link → `sessionList` rejects, and the diagnoser still says `revoked`. Owner Q7's recovery path (re-pair after revoke) does not recover until the app is killed. The same applies to any re-pair of a computer whose link is open. No test covers re-pair through the registry. Fix: release the link and diagnoser for `result.computer.id` before `reload()`, plus a regression test.
+2. **MEDIUM: the "success resets the count" wiring is not pinned.** I deleted `diagnosis.ok()` in `connection.ts:225`. `connection.test.ts`, `pairing-e2e.test.ts`, `link-diagnosis.test.ts` and `address-dial.test.ts` all stayed **green**: only the reducer's `ok()` is tested, not that the link calls it. Without that call, a `revoked`/`maybe-reset` verdict outlives a successful redial, and streaks add up across healthy periods, giving a false "may have been reset" (F11 says "any success resets the count"). This is a §9 non-vacuity gap on a load-bearing path.
+
+**Mutations (mine; each reverted, `git status` clean afterwards):** `firstAnswering` ignores `memory.lastGood` → RED (`starts at the remembered good address`). `diagnosis.ok()` removed → GREEN, which is finding 2.
+
+**Attacks tried, no finding:**
+- §7 one session path: still the single `RemoteClient` + `channelFactory` decorator, so no second session code path. The gate wraps the one factory.
+- Single broker: still `createLinkBroker()` per link. Pairing opens no broker.
+- Key storage: the private key is only in the per-computer item. Every `set` carries the injected `AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`. Write order is item→index on add and index→item on remove. An index with an unknown `v` blocks `add`/`remove`, because both run `readIndex` first.
+- `unauthorized` stops the address loop (P5). A pairing `unauthorized` maps to `expired`, not `revoked` (P4). A late cancel is harmless, because `onCancel` unmounts the route.
+- The harness hooks bind to `127.0.0.1`. No `EXPO_PUBLIC_TENTACLE_*` is left in the app.
+
+**Executor behaviour:** a thorough and honest Execution. Drift is recorded with reasons, ME2's first vacuous test is admitted, and the blocked `15-revoked` flow is stated, not glossed. The `15-revoked` gap matters more after finding 1. That flow stops at `computer-state-<id>-revoked` and never exercises "Pair again", and `pairing-e2e` calls `openComputer` directly, bypassing `LINKS`. So the one path that breaks was covered by neither.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14 (fresh context; reviewed `git diff HEAD~1` = c3728d6)*
+
+**Verdict: APPROVE.** Both round-1 findings are fixed, and each fix is shown not to be vacuous by mutation.
+
+**Gate:** `bun test apps/mobile` 566 pass · 0 fail (46 files); `bun run typecheck` clean; `bun run lint` 1188 files, 0/0.
+
+1. **Finding 1 (HIGH, stale link after a re-pair): FIXED.** `App.tsx` `onDone(computerId)` now calls `withForgottenRecord(MEMORY, id, reload)` (`src/computer-memory.ts`), which releases the link (a detach) and drops the diagnoser and the cached record before `reload()` dials again. `onRemove` now goes through the same step. The id comes from `PairingOutcome`, which is now a discriminated union, so a fresh pairing is covered too. The new `pairing-e2e` test "REVOKE → 'Pair again' recovers" runs against a real daemon: real `revokeCommand`, re-pair, then the app's own `link-registry`, and it checks that the link was dialled with the NEW key.
+   - *Mutation:* dropping `links.release` in `forgetComputer` → RED (`pairing-e2e` recovery test, `forgetComputer` stale-link test, `withForgottenRecord` order test).
+   - *Mutation:* `onDone` as a bare `reload()` → RED (`pairing-wiring-guards`). This guard is a text match on `App.tsx`, which is weak but acceptable: RN's Flow sources make `App.tsx` impossible to import into a test.
+2. **Finding 2 (MEDIUM, success reset not pinned): FIXED.** The new `connection.test.ts` case carries a two-attempt streak into `openComputer` and asserts both `ok` and the cleared streak.
+   - *Mutation:* deleting `diagnosis.ok()` → RED.
+
+**Regressions checked:** Remove still releases the link before `SOURCE.remove` (a detach, never `session/close`), and forgetting a computer with no state is a no-op that leaves other computers alone. No §7 seam changed: the session path, broker and store are untouched. All mutations reverted; `git status` clean.
