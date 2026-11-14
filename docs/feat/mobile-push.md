@@ -1413,3 +1413,19 @@ skips are the documented opt-ins and this round adds none). No wire change, so n
 `protocol.d/` note and no `PROTOCOL_VERSION` move; `protocol.json` untouched.
 
 *— claude-opus-5-5 (executor, fix round 1), 2026-11-16*
+
+### Round 2 (scope `git diff HEAD~1`, commit `ecb2a50e`)
+
+**Verdict: APPROVE.** All three findings fixed; each fix pinned by a test shown RED under mutation (applied to `src`, restored from a scratch copy, `git status` clean after each).
+
+| Finding | Fix | Mutation → result |
+|---|---|---|
+| 1 per-token cap per id / reset on reconnect | relay-wide `pushTokens` (`relay-core.ts:522`, `tokenWindow`); `controlClosed` keeps windows (`relay-core.ts:573`) | key token window by `${id}:token` → **RED** 2 (core + server); re-add `pushes.delete` + `pushTokens.clear()` on close → **RED** 1 |
+| 2 JWT not single-flight | `inFlight` promise (`apns.ts:181`); `invalidate(failedJwt)` compare (`apns.ts:206`) | drop `return await inFlight` → **RED** "concurrent calls mint ONE token"; make invalidate unconditional → **RED** "invalidate(staleJwt) does not drop…" |
+| 3 timeout keeps a dead session | `retire` + `session.destroy()` on timeout (`apns-client.ts:141-143`) | both removed → **RED** "a timeout RETIRES the session" |
+
+**Regression attacks (nothing at MEDIUM+).** Mint rejection clears `inFlight` in `finally` (no wedge); concurrent `invalidate(old)` after a sibling's mint is a no-op. A timeout now also errors sibling streams on that session → `unavailable/stream` (accepted: 10 s with no answer means the session is suspect). Nit: `tokenWindow`'s eviction is insertion-order, not "stalest" as its comment says; harmless (per-id cap bounds a flush). A relay-wide token cap lets a holder of the victim's token spend that device's budget — it already needs the token (F10), accepted.
+
+**Gate.** `bun test apps/relay` → 157 pass, 0 fail. `bun run lint` → clean (1377 files). `bun run typecheck` → exit 0. Full `bun test` not re-run.
+
+*— claude-opus-5-5, 2026-11-15* (different model family from the executor, DeepSeek)
