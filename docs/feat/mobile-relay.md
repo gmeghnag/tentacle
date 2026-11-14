@@ -1954,3 +1954,17 @@ so the frame path proved here is the fake relay's (the close-code-1009 path,
 `oversizeHint`, is unchanged and still covered by `schedule`); and finding 3's
 "streams live on" against a real NAT blip rather than a fake `setOnClose` call.
 Both are the reviewer's own framing and neither gates the fix.
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: PASS** (APPROVE-WITH-NITS). Diff reviewed: `git diff HEAD~1` (b05d538f).
+
+**Gate:** `relay-link-policy.test.ts` + `relay-link.test.ts` 35 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean.
+
+1. **Finding 1 (oversize loop): fixed.** An oversize frame is now caught before parsing (`relay-link.ts`, `isInboundFrameTooLarge` → `schedule("oversize")`). It has its own `oversizeStrikes` counter, which `ready` does not reset. The round-1 repro (`ready` + 2 MiB, ×5) now waits `[991, 1981, 3961, 7921, 15841]` ms; before the fix it was `991` ×5. **Mutation:** I made `counter = attempt`, and both "oversize backoff outlives `ready`" tests FAILED.
+2. **Finding 2 (`open` before `ready`): fixed.** It is refused and audited `relay-accept-failed`; the repro now makes no `/v1/accept` dial. **Mutation:** I disabled the `!ready` guard, and "no `ready` at all means no accept dial" FAILED.
+3. **Finding 3 (control close kills streams): fixed.** `dropStreams` is removed from the control `onClose`, and `stop()` still closes the legs. **Mutation:** I re-added `dropStreams()`, and "the relay dropping control does not detach a phone" FAILED.
+
+Every mutation was reverted from a backup; `git status` is clean.
+
+Nits (not blocking): `oversizeStrikes` never decays, so a benign relay that once sent one oversize frame keeps a larger first oversize wait (harmless, and that is the intent). `noteSent` (`relay-link.ts`) is dead. Pre-existing and out of scope: nothing on the daemon side pings an accept leg, so if the daemon's own network silently dies, a leg can stay half-open on the daemon's side (R0(c)). The relay's `sendPings` reaps only the relay side. Track it for R5a/R6.
