@@ -1,9 +1,9 @@
 # feat/session-hop-ux — Hop UX from the OpenShift live test: k8s namespace, one live progress line, auto-accept
 
-> **Status:** implementation (awaiting owner answers — NOT approved)
+> **Status:** approved (Implementation revised to the owner's complete decisions, 2026-11-14 23:40)
 > **Branch:** `feat/session-hop-ux`
-> **Size:** M (three S–M slices) · **Blast:** load-bearing (slice 3 changes what auto-accept may answer on the single broker, AGENTS §7 "a pod is not trusted"; slice 1 changes what a pod-supplied proposal can target) · **Suited:** slices 1–2 DeepSeek; slice 3 a strong model or DeepSeek + **mandatory fresh-context Opus review** red-teaming §7 (single broker, pod not trusted)
-> **Changelog:** `changelog.d/session-hop-ux.fixed.md` (namespace + one progress line) and `changelog.d/session-hop-ux.changed.md` (auto-accept answers a move toward a workload; survives the hop — per Q4/Q5)
+> **Size:** M (slices M · S · M) · **Blast:** load-bearing (slice 3 changes what auto-accept may answer on the single broker and adds an automatic prompt after a move, AGENTS §7 "a pod is not trusted"; slice 1 changes the `kubernetes:` grammar and what a pod-supplied proposal can target) · **Suited:** slices 1–2 DeepSeek; slice 3 a strong model + **mandatory fresh-context Opus review** red-teaming §7 (single broker, pod not trusted)
+> **Changelog:** `changelog.d/session-hop-ux.fixed.md` (namespace default + one progress line) and `changelog.d/session-hop-ux.changed.md` (`kubernetes:<ns>/<pod>[/<container>]`; auto-accept answers model moves except toward local from a workload, and survives a hop; the session continues by itself after a move; new `move_session` description)
 
 ## Context
 
@@ -157,14 +157,18 @@ TUI, so that line is its confirmation.
 
 ## Implementation
 
-*— claude-opus-5-5, 2026-11-14*
+*— claude-opus-5-5, 2026-11-14* (revised to the owner's complete decisions of
+2026-11-14 23:40, Review below; they supersede the earlier open questions, which
+are removed, and every design that contradicted them)
 
 ### Load-bearing assumption
 
 **Every auto-accept decision for a laptop-side prompt is taken in ONE place: the
 requester the TUI installs on the single `PermissionBroker`. A daemon (a pod)
-cannot raise a `session_hop` request or set any field that predicate reads.** All
-of slice 3 depends on this. Slices 1–2 depend only on facts cited in Preconditions.
+cannot raise a `session_hop` request or set any field that predicate reads.**
+Slice 3 depends on it: auto-accept now answers most `session_hop` prompts, and
+the one exception (toward local, from a workload) must be decided by facts only
+the laptop holds. Slices 1–2 depend only on facts cited in Preconditions.
 
 Proof:
 - The ONE broker for a hop-capable TUI is built at `main.ts:2072`
@@ -176,186 +180,280 @@ Proof:
   `hopAskAtTurnEnd(…, (request) => broker.request(request))` →
   `hop-turn.ts:162` `ask(hopPromptRequest(spec, shown))`.
 - The TUI's requester is installed with `permissions.setRequester`
-  (`permission-ui.ts:417`). The auto-accept decision is
-  **`permission-ui.ts:424`**: `if (autoApproveRef.current && autoApproves(req, own))
-  return { allowed: true, scope: "once" }`. The predicate is **`autoApproves`,
-  `permission-ui.ts:59-61`**, and today it excludes `session_hop` outright.
+  (`permission-ui.ts:417`). The auto-accept decision is `permission-ui.ts:424`:
+  `if (autoApproveRef.current && autoApproves(req, own)) return { allowed: true,
+  scope: "once" }`. The predicate is `autoApproves` (`permission-ui.ts:59-61`);
+  today it excludes `session_hop` outright.
 - A daemon's ask never carries `kind` or any laptop-internal field.
   `toPermissionRequest` rebuilds it from an allowlist (`tool`, `title`,
   `explanation`, `suggestion`, `reply`; `permission-router.ts:76-86`), and
-  `PermissionRequest.kind` is documented as laptop-internal and never on the wire
+  `PermissionRequest.kind` is laptop-internal, never on the wire
   (`core/permission.ts:27-34`). The only producers of `session_hop` are the
-  laptop's `hopPromptRequest` (`hop-turn.ts:58-69`) and `mountAsk`
+  laptop's `hopPromptRequest` (`hop-turn.ts:59-69`) and `mountAsk`
   (`hop-targets.ts:517-531`).
-- An answer's extra fields never reach the wire. The router's `send` carries
+- An answer's extra fields never reach the wire: the router's `send` carries
   only `optionId` and `message` (`permission-router.ts:180-186`).
+- The origin of a proposal is a laptop fact: the hop feed's `deps.place()`
+  (`hop-feed.ts:38`, wired at `main.ts:2113`). A `workload` place means the
+  turn ran in a pod/container daemon, so its `move_session` arguments are
+  pod-supplied (§7).
 
 ### Preconditions
 
-- **Namespace rule.** Context namespace, else `"default"`: `kubeconfig.ts:123`.
-  The server override gives `"default"`: `engine-select.ts:509`.
-  `TENTACLE_POD_NAMESPACE` is applied only by the CLI's `engineHost`
-  (`main.ts:1201`), not by `hopEngineHost` (`main.ts:1222`).
-- **Grammar.** `HopWorkload` is `{engine, name, container?}` (`hop-command.ts:12-17`).
-  The two-part form `kubernetes:<pod>/<container>` already has a meaning
-  (`hop-command.ts:264-277`). `readFlags` refuses every `--` word except
-  `--keep`/`--rm` (`:164-183`). The tool's `workloadSchema`
-  (`move-session.ts:44-53`) and the laptop's `hopProposalSchema`
-  (`hop-proposal.ts:22-41`) both strip unknown fields. `hopSpecOf` re-checks the
-  workload through the SAME `hopWorkload` the typed path uses
-  (`hop-proposal.ts:143-150`).
+- **Namespace rule today.** Context namespace, else `"default"`:
+  `kubeconfig.ts:123`. The server override gives `"default"`:
+  `engine-select.ts:509`. `TENTACLE_POD_NAMESPACE` is applied only by the CLI's
+  `engineHost` (`main.ts:1199-1202`), not by `hopEngineHost`
+  (`main.ts:1221-1228`, passes `{}`). The kubeconfig is re-read per call
+  (`kube-auth.ts:116-121`): no cache.
+- **Grammar today.** `HopWorkload` is `{engine, name, container?}`
+  (`hop-command.ts:12-17`). `parseWorkload` splits `kubernetes:` on `/`, takes
+  two segments as `<pod>/<container>` and refuses a third
+  (`hop-command.ts:264-277`). The ONE validator is `hopWorkload`
+  (`hop-command.ts:67-80`), reused by the laptop's `hopSpecOf`
+  (`hop-proposal.ts:143-150`). The tool's `workloadSchema` mirrors it
+  (`move-session.ts:39-53`) and strips unknown fields, as does
+  `hopProposalSchema` (`hop-proposal.ts:22-41`).
+- **Labels today.** A workload is written `engine:name[/container]` in four
+  places: `hopLabel` (`hop-feed.ts:193-202`), `hopPlaceLabel`
+  (`hop-feed.ts:205-212`), `workloadLabel` (`hop-targets.ts:551-556`) and the
+  TUI's `hopPlaceText`/badge (`hop-status.ts`). `HopPlaceView` has no namespace
+  (`app-types.ts:277-283`).
 - **Not-found wording.** `WorkloadNotFoundError` is typed and carries `noun` and
-  `place` (`engine-host.ts:89-97`). Its k8s text advises `--namespace`
+  `place` (`engine-host.ts:89-97`); its k8s text advises `--namespace`
   (`engine-k8s.ts:179-182`).
-- **Status row.** `deps.status` feeds the hop row (`main.ts:2100,2108`, then
-  `hop-feed.ts:71`, `useHop.ts:150-153`, `hopStatusRow` `hop-status.ts:23-33`).
-  The row is truncated to the terminal width, and its listener is unsubscribed
-  at settle (`useHop.ts:154-156`). So a line that arrives after the run settled
-  reaches nobody.
+- **Status row.** `deps.status` feeds the hop row (`main.ts:2100,2108` →
+  `hop-feed.ts:71` → `useHop.ts:150-153` → `hopStatusRow`,
+  `hop-status.ts:23-33`). Its listener is unsubscribed at settle
+  (`useHop.ts:154-156`), so a line after settle reaches nobody.
 - **D6 drift note** (`hop-targets.ts:304-310`): `info` stays the NOTICE sink
-  because `quitReport` rides it at dispose (`engine-runtime.ts:1099`). That stays
-  as is. Only the phases move.
-- **Origin of a proposal.** The hop feed knows the current place
-  (`hop-feed.ts:38`, `main.ts:2113`). A `workload` place means the turn ran in
-  a pod/container daemon, so its `move_session` arguments are pod-supplied (§7).
-- **D9 today.** `useHop.ts:168-176` clears auto-accept on every committed hop.
-  `hop-proposal.ts:271` and `move-session.ts:109` say so to the owner and the
-  model.
-- **No protocol change.** The tool input schema is not in `@tentacle/protocol`.
-  `PermissionRequest`/`PermissionResponse` are process-internal (above). So there
-  is no `protocol.d/` note.
+  (dispose's `quitReport`, `engine-runtime.ts:1099`). Only the phases move.
+- **D9 today.** `useHop.ts:166-178` clears auto-accept on every committed hop and
+  `hopMovedNotice` says so (`hop-status.ts:61-67`); `hopPromptDetail`
+  (`hop-proposal.ts:271`) and the tool description (`move-session.ts:109`) say
+  so too.
+- **The model's next-prompt line today.** `hop-feed.ts` keeps ONE `pendingLine`
+  (`:82`): `[move declined]` after a refusal (`:108-111`), `moveGuideLine(place)`
+  after a commit (`:150`, `hop-turn.ts:167-169`). A failed run sets nothing
+  (`:129-131`). `takeLine` consumes it (`:115-120`), and the turn driver puts it
+  in front of the NEXT REAL prompt only (`useTurnDriver.ts:800-816`,
+  `hopWithLine` `:112`). Nothing sends a prompt by itself after a hop: the moved
+  notice asks the user to "send a message to continue" (`hop-status.ts:65-66`).
+- **Turn-end seam.** At the end of an own turn the driver calls
+  `hopTurn.end(true)` and starts an `approved` spec through `hopTurn.approved`
+  (`useTurnDriver.ts:686-702`); `declined` is not acted on.
+  `HopProposalView` is `none | approved | declined` (`app-types.ts:366-370`).
+  The approved path enters `startHop` (`App.tsx:425-432` → `useHop.ts:141`),
+  the queued typed `/move` enters it from `hopIfQueued` (`useHop.ts:235-249`),
+  and an idle typed `/move` from `requestHop` (`useHop.ts:229`). So the three
+  origins are distinguishable at the one entry point.
+- **A real prompt can be sent without typing.** `run(text, opts)`
+  (`useTurnDriver.ts:751-830`) is the one send path; `continuation: true`
+  sends `""` with no user bubble (`:768-771`, used by the job wake
+  `App.tsx:594,1060-1074`). A continuation takes NO hop line (`:802`), so the
+  wake-up must be a real prompt, not a continuation. `planTurnStart` defers or
+  refuses during a compaction (`send-now.ts:129-133`, `useTurnDriver.ts:775-783`).
+- **Facts for the wake-up message.** After commit the TUI has the place and the
+  daemon session's cwd (`HopTargetView.place`, `.cwd`, `app-types.ts:258-271`).
+  Whether the folder is shared is decided by the container build's plan
+  (`hop-targets.ts:281`, `plan.kind === "mount"`) but is not on `HopBuilt`
+  (`session-hop.ts:32-50`). The daemon's **hostname is not known on the laptop**
+  (no field in `HopBuilt`, the view, or the protocol).
+- **No protocol change.** The tool input schema is not in `@tentacle/protocol`;
+  `PermissionRequest`/`PermissionResponse` are process-internal; the wake-up is
+  an ordinary `session/prompt`. No `protocol.d/` note.
 
 ### Design
 
-**Slice 1 — namespace (one rule, named, shown, pinned).**
+Owner decisions 1–7 (Review) are cited as **OD1…OD7**.
 
-1. **One rule, one function.** Add `kubeNamespace(options, io)` in
-   `engine-select.ts`. It returns `options.namespace ??
-   io.env.TENTACLE_POD_NAMESPACE ?? (server ? "default" : contextNamespace(kubeconfig,
-   options.kubeContext))`. `contextNamespace` is extracted from
-   `resolveContext`, which then uses it (`kubeconfig.ts:123`), so the k8s package
-   keeps one copy of “context ns, else default”. `buildEngineHost` uses it
-   (`:500-517`), so `engineHost` (`main.ts:1201`) stops applying the env itself,
-   and `hopEngineHost` inherits the env step it lacks today. Kept-entry dials pass
-   `entry.namespace` explicitly (`hostOptionsFor`, `:290-298`), so the env never
-   overrides them. The rule is **explicit > `TENTACLE_POD_NAMESPACE` > kubeconfig
-   current context's namespace > `"default"`**, for `run`, `attach` and every hop
-   (Q2). It is resolved per call (no cache), as today.
-2. **Naming it (Q1).** `HopWorkload.namespace?: string`, kubernetes only.
-   Typed: `/move attach kubernetes:<pod>[/<container>] -n <ns>` (also
-   `--namespace <ns>`), the same spelling as `tentacle attach -n` and kubectl.
-   Tool: `workload.namespace`. One validator: `hopWorkload(engine, name,
-   container, namespace)` gains the problems `namespace` (not kubernetes) and
-   `namespaceChars` (a DNS-1123 label `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, ≤ 63).
-   The tool's regex mirrors it, exactly as `WORKLOAD_PART` mirrors
-   `HOP_WORKLOAD_PART` today. A second `-n`, `-n` with no value, or `-n` on
-   docker/podman gives the usage line, never a silently ignored word.
-   *Rejected:* `kubernetes:<ns>/<pod>[/<container>]`. `a/b` already means
-   pod/container (`hop-command.ts:264-277`), so this would silently re-target a
-   command typed the old way. It would also need a 3-part form `a/b/c` that the
-   grammar deliberately refuses today, and a model fills a named field more
-   reliably than positional slashes.
-3. **Pinned, then shown (the approved place is the built place).** For a
-   PROPOSAL, `hop-feed` resolves the namespace at turn end, before asking. A new
-   dep `pinNamespace(spec)` is injected from `main.ts` and calls `kubeNamespace`
-   with the spec's explicit value. The resolved value is written into
-   `spec.workload.namespace`, and THAT spec is both shown and returned as
-   `approved`. A kubeconfig that changes between the prompt and the build (the
-   repro (d) mechanism) can no longer move the target the owner approved.
-   `hopPromptDetail` gains `namespace: <ns>` under the attach line, and
-   `proposalNotice` shows `kubernetes:<pod>/<c> in <ns>`. For a typed `/move`
-   (no prompt), the build resolves once. The engine's own phase
-   `[pod] attaching to X in namespace Y…` (now on the live row, slice 2) and the
-   summary line name it.
-4. **Built where named.** `HopTargetDeps.host` becomes `(engine, where?: {
-   namespace?: string })`. `attachTarget` passes `workload.namespace`, and
-   `hopEngineHost(engine, where)` forwards it to `buildEngineHost`. The place
-   (`HopPlace` and its view) carries `namespace?`. The moved notice and the model's
-   guide line (`moveGuideLine`) name it (`kubernetes:etcd-…/etcdctl in
-   openshift-etcd`). The badge stays `kubernetes:<pod>/<c>`, because width is
-   scarce there.
-5. **Hop wording for a miss.** In `attachTarget`'s catch, a
-   `WorkloadNotFoundError` from k8s becomes: `not moved: no pod "<name>" in
-   namespace "<ns>" — name its namespace: /move attach kubernetes:<name> -n <ns>`.
-   It is built from the typed error's fields. The CLI's `--namespace` advice is
-   never shown inside a hop. The same applies to the multi-container exec hint
-   (`engine-k8s.ts:85`): in a hop it reads `kubernetes:<pod>/<container>`.
-6. **The model learns why (Q6).** A PROPOSED move that FAILED leaves
-   `[move failed: <the not-moved text>]` for the next prompt. It takes the same
-   `pendingLine` slot as `[move declined]` (`hop-feed.ts:110-118`) and is
-   sanitized. Then the model can retry with `workload.namespace` instead of
-   needing the owner to say “ritenta”.
+**Slice 1 — namespace (OD1, OD2, OD3) and the tool description (OD7).**
 
-**Slice 2 — one live progress line.**
+1. **Trace first (OD3).** Before the rule changes, the k8s resolution returns its
+   provenance: `kubeNamespace` (below) returns `{ namespace, source:
+   "explicit" | "env" | "context" | "default" | "server", kubeconfig: <path>,
+   context: <name> }`. The hop's FIRST phase on the live row and the prompt
+   detail carry `namespace <ns> (from <source>; context <ctx>, <path>)`, and the
+   `not moved:` text of a k8s attach repeats it, so the next live test answers
+   Q3 from the transcript. (Before slice 2 lands, phases are notices, so the
+   trace is visible either way.)
+2. **One rule, one function (OD2).** `kubeNamespace(options, io)` in
+   `engine-select.ts`: `options.namespace ?? io.env.TENTACLE_POD_NAMESPACE ??
+   (server ? "default" : contextNamespace(kubeconfig, options.kubeContext))`.
+   `contextNamespace` is extracted from `resolveContext` (`kubeconfig.ts:123`),
+   which then uses it — one copy of "context ns, else default". `buildEngineHost`
+   (`engine-select.ts:500-517`) uses it, so `engineHost` (`main.ts:1201`) drops
+   its own env step and `hopEngineHost` gains it. Kept-entry dials pass
+   `entry.namespace` explicitly (`hostOptionsFor`, `engine-select.ts:290-298`),
+   so the env never overrides a kept workload's place. Resolved per call, as
+   today. The rule is the SAME for `run`, `attach` and every hop.
+3. **Syntax (OD1): `kubernetes:<ns>/<pod>[/<container>]` with the 1/2/3 rule.**
+   In `parseWorkload` (`hop-command.ts:264-295`), for `kubernetes:` only:
+   one segment = `<pod>` (namespace from OD2), two = `<ns>/<pod>`, three =
+   `<ns>/<pod>/<container>`, four or more = the usage line. docker/podman keep
+   one segment (a second is the existing "no container part" line).
+   `HopWorkload.namespace?: string` (kubernetes only). `hopWorkload(engine, name,
+   container, namespace)` gains problems `namespace` (set on docker/podman) and
+   `namespaceChars` (DNS-1123 label `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, ≤ 63).
+   **Consequence, accepted by the owner (pre-public):** a container can be named
+   only together with a namespace — `kubernetes:p/c` now means namespace `p`,
+   pod `c`. `HOP_USAGE` and every hint (`hop-command.ts:37-38,271,287,292`) are
+   rewritten to the new shape so no message teaches the old one.
+4. **The tool has the same shape (OD1 "pick one").** Chosen: the structured
+   field `workload.namespace`, not a string. The model already passes a
+   structured `workload`; the identity OD1 asks for holds where it matters —
+   both paths produce the same `HopWorkload` through the same `hopWorkload`
+   validator (`hopSpecOf`, `hop-proposal.ts:143-150`), and every label prints
+   the same `kubernetes:<ns>/<pod>[/<container>]`. The tool regex mirrors
+   `namespaceChars` exactly as `WORKLOAD_PART` mirrors `HOP_WORKLOAD_PART`; a
+   `namespace` on docker/podman is a refine error the model sees.
+5. **Pinned and shown — ns/pod[/container] always (OD1).** For a PROPOSAL,
+   `hop-feed` resolves the namespace at turn end, before deciding/asking, via a
+   new dep `pinNamespace(spec)` injected from `main.ts` (calls `kubeNamespace`
+   with the spec's explicit value). The resolved value is written into
+   `spec.workload.namespace`; THAT spec is shown, auto-accepted or asked, and
+   returned as `approved`. A kubeconfig that changes between turn end and build
+   (repro (d)) can no longer move the target. For a typed `/move` the build
+   resolves once and writes it into the built place. ONE label function,
+   `workloadText(w)` in `@tentacle/tui` (`hop-command.ts`), replaces the four
+   copies (`hopLabel`, `hopPlaceLabel`, `workloadLabel`, `hopPlaceText`): for
+   k8s it always prints `kubernetes:<ns>/<pod>[/<container>]` once the
+   namespace is known (prompt detail, live row, moved/failed notice, wake-up
+   line, badge — the badge too, because `kubernetes:<pod>/<c>` would now READ as
+   ns/pod; it is truncated to width as today). `HopPlace`/`HopPlaceView` carry
+   `namespace?`.
+6. **Built where named.** `HopTargetDeps.host` becomes `(engine, where?: {
+   namespace?: string })`; `attachTarget` passes `workload.namespace`;
+   `hopEngineHost(engine, where)` forwards it to `buildEngineHost`.
+7. **Hop wording for a miss.** In `attachTarget`'s catch, a k8s
+   `WorkloadNotFoundError` becomes `not moved: no pod "<pod>" in namespace
+   "<ns>" (from <source>) — name its namespace: /move attach
+   kubernetes:<namespace>/<pod>`, built from the typed error's fields. The
+   CLI's `--namespace` advice never appears in a hop; the multi-container hint
+   (`engine-k8s.ts:85`) reads `kubernetes:<ns>/<pod>/<container>` in a hop.
+8. **Tool description rewritten (OD7), ≤ 600 chars, pinned.**
+   `MOVE_SESSION_DESCRIPTION` (`move-session.ts:105-109`) becomes (538 chars as
+   drafted; the executor may polish, the test pins ≤ 600 and the key facts):
+   > Move this session to another place; the move is applied when this turn
+   > ends. Use it for multi-step work that needs a workload's tools or files; a
+   > one-off check can stay a single kubectl/oc exec. Targets: "attach" an
+   > existing workload (kubernetes: namespace, pod, optional container;
+   > docker/podman: name), "container" (a new container with your folder
+   > mounted), "local" (the user's machine). The user confirms it unless
+   > auto-accept is on. A message in the new place tells you where you are;
+   > background jobs and MCP servers are reset there.
+   The stale "auto-accept is turned off" goes. Field-level detail (`keep`,
+   `image`, `namespace`) moves to the schema's `.describe()` strings, which do
+   not count toward the 600. `MOVE_SESSION_PROPOSED` (`:93-94`) is reworded to
+   match: "Proposed; it is applied when this turn ends. Do not assume it
+   happened: a message at the start of the next turn tells you the result."
+   The module comment (`:1-17`) is updated: auto-accept may now answer it
+   (slice 3), still only through the laptop's broker.
 
-7. **A live-line seam in the engine runtimes.** Add
-   `liveLine?: { set(text: string): void; finish(): void }` to `EngineRuntimeDeps`
-   and `EngineAttachRuntimeDeps`. `statusLineFor` returns it when present, before
-   the TTY test (`engine-runtime.ts:207-210`). Everything already keyed on
-   `status` then takes the interactive contract with no further edit:
-   - phases go to `set`;
-   - the injection's `onStatus` gets the bar;
-   - the resolver's verbose log is dropped;
-   - no `attached…`/`ready in…` line;
-   - warnings go to `notify` only.
-   `run`/`attach` (no `liveLine`) are unchanged.
-8. **The hop wires it to its row.** In `hop-targets.ts` both builds drop
-   `logTerm: HOP_TERM` and pass `liveLine: createHopLiveLine({ emit: deps.status })`
-   from a new pure module `cli/src/hop-live-line.ts`:
-   - it emits the first text at once, then at most one text per 100 ms, and the
-     latest text always lands (trailing timer);
-   - an identical text is dropped;
-   - `finish()` clears the timer and latches closed, so every later `set` is
-     ignored.
-   Timers and the clock are injected. This bounds the ~1 400 `onProgress` calls of
-   an 89 MB transfer to ≤ ~10/s of React renders (`useHop.ts:150-153` renders
-   and flushes per line). `HOP_TERM` is deleted: the new seam is the only way a
-   hop's runtime knows it has a row. `log`/`info` stay `notify`, for errors,
-   warnings and dispose's `quitReport` (D6 drift note unchanged).
-9. **Transcript budget for a hop:**
-   - the warnings the engine already sends to `notify` (cwd moved, binary
-     replaced, resident skew; they are warnings, not progress);
-   - the outcome line, `Moved to <place>[ in <ns>] …` or `not moved: …`.
-   No phase and no progress tick reaches the transcript. Nothing is written to
-   the terminal raw: the row is an Ink element, so the §7 Ink invariant holds as
-   before.
+**Slice 2 — one live progress line** (unchanged by the owner decisions).
 
-**Slice 3 — auto-accept answers a move toward a workload (owner addendum).**
+9. **A live-line seam in the engine runtimes.** `liveLine?: { set(text): void;
+   finish(): void }` on `EngineRuntimeDeps` and `EngineAttachRuntimeDeps`.
+   `statusLineFor` returns it when present, before the TTY test
+   (`engine-runtime.ts:207-210`). Everything keyed on `status` then takes the
+   interactive contract with no further edit: phases → `set`; the injection's
+   `onStatus` gets the bar; the resolver's verbose log is dropped; no
+   `attached…`/`ready in…` line; warnings → `notify` only. `run`/`attach` (no
+   `liveLine`) are unchanged.
+10. **The hop wires it to its row.** In `hop-targets.ts` both builds drop
+    `logTerm: HOP_TERM` (`:49,302,397`) and pass `liveLine:
+    createHopLiveLine({ emit: deps.status })` from a new pure module
+    `cli/src/hop-live-line.ts`: first text at once, then ≤ 1 per 100 ms, the
+    latest always lands (trailing timer), identical text dropped, `finish()`
+    clears the timer and latches closed. Clock and timers injected. `HOP_TERM`
+    is deleted. `log`/`info` stay `notify` (errors, warnings, `quitReport`).
+11. **Transcript budget for a hop:** the engine's warnings (cwd moved, binary
+    replaced, resident skew) and ONE outcome line (`Moved to …` / `not moved:
+    …`). No phase, no progress tick. The row is an Ink element (§7 Ink
+    invariant holds).
 
-10. **The decision stays at the one gate.** `autoApproves` (`permission-ui.ts:59-61`)
-    becomes `own && req.kind !== "hooks_trust" && (req.kind !== "session_hop" ||
-    req.hopAuto === true)`. `PermissionRequest.hopAuto?: true` is laptop-internal
-    and set ONLY by `hopPromptRequest`. A daemon cannot set it (load-bearing
-    assumption). `mountAsk` never sets it. The auto branch at `:424-425` returns
-    `{ allowed: true, scope: "once", auto: true }`. `PermissionResponse.auto?:
-    true` is process-internal like `onAnswerLost`, and is never on the wire
-    (`permission-router.ts:180-186`).
-11. **Eligibility is a pure rule** in `hop-turn.ts`:
-    `hopAutoAcceptable(spec, origin, facts)`.
-    - **Never** for `target: "local"`, on any origin. This is the §7 line: a
-      pod-side request to bring the agent onto the laptop is always confirmed by
-      a human.
-    - **Never** when the prompt merges a mount-gate `ask` (`facts.gate` from an
-      `ask`). That is a safety warning about the owner's folder, and `run`
-      requires an explicit `--confirm-mount` for it.
-    - `attach` → eligible from any origin.
-    - `container` → eligible from a **local** origin, and **not** from a workload
-      origin (Q4).
-    `hopAskAtTurnEnd` receives the origin (`deps.place()`), and
-    `hopPromptRequest` sets `hopAuto` from the rule. Scope stays `once`, and
-    `hopProposalOutcome` still coerces any answer to a one-time yes. Nothing is
-    remembered.
-12. **Logged.** An approved outcome whose response has `auto` carries
-    `autoAccepted: true`. The moved notice says `Moved to … (auto-accepted) …`,
-    and a failure says `not moved (auto-accepted): …`. The owner sees in the
-    transcript that no prompt was shown.
-13. **D9 revisited (Q5).** Recommended: auto-accept **survives** a hop into a
-    workload, and goes **off** when a hop lands on local. In that case
-    `useHop.ts:168-176` clears only on `place.kind === "local"`;
-    `hopPromptDetail`'s reset line (`hop-proposal.ts:271`), the tool description
-    (`move-session.ts:109`) and `hopMovedNotice` say exactly that; and D9's text
-    in `docs/feat/session-hop.md` gets a dated amendment. Session-scoped
-    approvals are still reset: they live daemon-side and the daemon changes.
+**Slice 3 — auto-accept (OD4, OD5) and the wake-up (OD6).**
+
+12. **The decision stays at the one gate (OD4).** `autoApproves`
+    (`permission-ui.ts:59-61`) becomes `own && req.kind !== "hooks_trust" &&
+    (req.kind !== "session_hop" || req.hopAuto === true)`.
+    `PermissionRequest.hopAuto?: true` is laptop-internal, set ONLY by
+    `hopPromptRequest`; `mountAsk` (typed `/move`'s gate) never sets it. The
+    auto branch (`:424-425`) returns `{ allowed: true, scope: "once", auto: true
+    }`; `PermissionResponse.auto?: true` is process-internal (never on the wire,
+    `permission-router.ts:180-186`).
+13. **Eligibility is one pure rule** in `hop-turn.ts`:
+    `hopAutoAcceptable(spec, origin) = !(spec.target === "local" &&
+    origin.kind === "workload")`. That is OD4 literally: every model-proposed
+    move is auto-acceptable EXCEPT a move toward local proposed from a
+    pod/container. (A `local` proposal from a local origin is eligible: OD4
+    excepts only a workload origin, and such a move brings nothing onto the
+    laptop that is not already there.) This
+    supersedes the earlier recommendations to exclude a pod-originated
+    `container` proposal and a prompt carrying a mount-gate `ask`: under OD4
+    those are auto-accepted too (the merged prompt is answered as one, so
+    `gateAnswered` holds as today, `hop-turn.ts:86-88`). `hopAskAtTurnEnd`
+    receives the origin (`deps.place()`) and `hopPromptRequest` sets `hopAuto`
+    from the rule. Scope stays `once`; `hopProposalOutcome` still coerces any
+    yes to one-time. Nothing is remembered.
+14. **Logged allow-once (OD4).** An approved outcome whose response has `auto`
+    carries `autoAccepted: true`; the outcome line reads `Moved to … 
+    (auto-accepted) …` or `not moved (auto-accepted): …`, so the transcript
+    shows that no prompt was shown.
+15. **Auto-accept survives every hop (OD5, D9 reversed).** `useHop.ts:166-175`
+    stops calling `clearAutoApprove`; `hopMovedNotice` drops the
+    "auto-accept is off" variant; `hopPromptDetail`'s reset line
+    (`hop-proposal.ts:271`) becomes "background jobs, MCP servers and
+    session approvals are reset". Session "always" approvals are still re-asked
+    (they live daemon-side, and the daemon changes). D9 in
+    `docs/feat/session-hop.md` gets a dated amendment.
+16. **The wake-up channel (OD6).** The pending line becomes a typed fact,
+    rendered late:
+    - `hop-feed.ts` keeps `pending: HopWakeFact | null` instead of
+      `pendingLine`: `{ kind: "moved", place, cwd?, folder: "shared" |
+      "not shared" | "local" }`, `{ kind: "failed", reason }` (a proposed
+      move whose pin, build or commit failed — closes the old Q6),
+      `{ kind: "declined" }`. `folder` comes from a new `HopBuilt.folder`
+      set by the builds (`hop-targets.ts:281` mount ⇒ `shared`; attach ⇒
+      `not shared`; local ⇒ `local`).
+    - `takeLine(ctx: { autoAccept: boolean })` renders it through ONE pure
+      function `hopWakeLine(fact, ctx)` in `hop-turn.ts` (replacing
+      `moveGuideLine`): `[session moved to kubernetes:openshift-etcd/etcd-…/etcdctl
+      — cwd <dir>, folder <shared|not shared>; background jobs and MCP servers
+      were reset; auto-accept <on|off>]`, `[move failed: <reason>]`,
+      `[move declined] …` (the existing hint). Every pod-reachable text goes
+      through `untrustedText`, as `moveGuideLine` does today. Auto-accept is
+      read at render time (the TUI's live value), so the line never states a
+      stale mode. **Host:** not included — the laptop does not know the
+      daemon's hostname (Preconditions) and adding it needs a protocol field;
+      the place names the workload, which is enough (Notes).
+    - **When to wake: one pure rule** `hopWakeStep` in a new
+      `tui/src/hop-wake.ts`: input `{ origin: "proposal" | "queued" | "idle",
+      outcome: "moved" | "failed" | "declined", chain: number }` → `wake` |
+      `hold`. `proposal` (moved/failed/declined) ⇒ wake; `queued` (a `/move`
+      typed mid-task, D4) moved/failed ⇒ wake; `idle` ⇒ hold (the line waits
+      for the user's next prompt, today's behaviour). `chain ≥
+      HOP_WAKE_CHAIN_MAX` (3 consecutive wake turns with no user prompt
+      between) ⇒ hold, with one notice `_auto-continue paused after 3 moves —
+      send a message to continue_`; a real user prompt resets `chain`.
+    - **Origin plumbing.** `startHop(spec, opts)` gains `origin`
+      (`hopTurnPort.approved` ⇒ `proposal`, `hopIfQueued` ⇒ `queued`,
+      `requestHop` ⇒ `idle`). The driver's turn-end handler
+      (`useTurnDriver.ts:686-702`) also handles `declined` and the new
+      `HopProposalView` kind `failed` (pin failed, no prompt) by asking
+      `hopWakeStep`.
+    - **Firing.** A wake is a REAL prompt: `run(HOP_WAKE_TEXT, { hopWake: true
+      })` with `HOP_WAKE_TEXT = "Continue the task from here."`; `run` sends
+      `hopWithLine(takeLine({autoAccept}), HOP_WAKE_TEXT)` and renders one dim
+      row (`↻ continuing after the move`) instead of a user bubble; it is
+      saved as conversation like today's line. It fires only at a true idle
+      (`hopReady`, `hop-command.ts:215-217`) after the hop settled and the view
+      swapped; if not idle (a foreign turn, queued rows, a compaction), it
+      holds and the line rides the next real prompt — converges, never lost,
+      never doubled (`takeLine` consumes). A pending job wake
+      (`App.tsx:1060-1074`) runs after it through the existing wake gate.
+    - **Notices.** `hopMovedNotice` says `— continuing` when a wake fires, `—
+      send a message to continue` when it holds.
 
 ### Files
 
@@ -364,151 +462,145 @@ In dependency order:
 | Slice | File | Change |
 |---|---|---|
 | 1 | `packages/k8s/src/kubeconfig.ts` | export `contextNamespace`, used by `resolveContext` |
-| 1 | `packages/tools/src/move-session.ts` | `workload.namespace` (k8s only, DNS-1123 label); description |
-| 1 | `packages/tui/src/hop-command.ts` | `HopWorkload.namespace`, `hopWorkload(…, namespace)`, `-n/--namespace` in `readFlags`/`parseHopCommand`, `HOP_USAGE` |
-| 1 | `packages/tui/src/hop-status.ts`, `app-types.ts` | place view `namespace?`; moved notice names it |
-| 1 | `packages/cli/src/engine-select.ts` | `kubeNamespace`; `buildEngineHost` uses it |
+| 1 | `packages/tools/src/move-session.ts` | `workload.namespace` (k8s, DNS-1123); OD7 description + `PROPOSED` + module comment |
+| 1 | `packages/tui/src/hop-command.ts` | `HopWorkload.namespace`; `hopWorkload(…, namespace)`; 1/2/3-segment `parseWorkload`; `workloadText`; `HOP_USAGE`/hints |
+| 1 | `packages/tui/src/hop-status.ts`, `app-types.ts` | `HopPlaceView.namespace?`; labels via `workloadText` |
+| 1 | `packages/cli/src/engine-select.ts` | `kubeNamespace` (+ provenance); `buildEngineHost` uses it |
 | 1 | `packages/cli/src/hop-plan.ts` | `HopPlace.namespace?` |
-| 1 | `packages/cli/src/hop-proposal.ts` | schema field; `hopSpecOf`; `proposalNotice`/`hopPromptDetail` namespace line |
-| 1 | `packages/cli/src/hop-targets.ts` | `host(engine, where)`; attach passes ns; not-found / exec hop wording |
-| 1 | `packages/cli/src/hop-feed.ts`, `hop-turn.ts` | `pinNamespace` before asking; `[move failed: …]` (Q6) |
-| 1 | `packages/cli/src/main.ts` | `engineHost` drops its own env step; `hopEngineHost(engine, where)`; `pinNamespace` dep |
+| 1 | `packages/cli/src/hop-proposal.ts` | schema field; `hopSpecOf`; prompt detail `ns/pod[/c]` + trace |
+| 1 | `packages/cli/src/hop-targets.ts` | `host(engine, where)`; built place ns; not-found / exec hop wording; `workloadText` |
+| 1 | `packages/cli/src/hop-feed.ts` | `pinNamespace` before asking; labels via `workloadText` |
+| 1 | `packages/cli/src/main.ts` | `engineHost` drops its env step; `hopEngineHost(engine, where)`; `pinNamespace` dep |
 | 2 | `packages/cli/src/engine-runtime.ts` | `liveLine` dep; `statusLineFor` prefers it |
-| 2 | `packages/cli/src/hop-live-line.ts` (new) | throttled, latching live line (pure, injected clock/timers) |
+| 2 | `packages/cli/src/hop-live-line.ts` (new) | throttled, latching live line |
 | 2 | `packages/cli/src/hop-targets.ts` | `liveLine` instead of `HOP_TERM` (deleted) |
-| 3 | `packages/core/src/permission.ts` | `PermissionRequest.hopAuto?`, `PermissionResponse.auto?` (process-internal) |
+| 3 | `packages/core/src/permission.ts` | `PermissionRequest.hopAuto?`, `PermissionResponse.auto?` |
 | 3 | `packages/tui/src/permission-ui.ts` | `autoApproves` reads `hopAuto`; auto branch returns `auto: true` |
-| 3 | `packages/cli/src/hop-turn.ts`, `hop-feed.ts` | `hopAutoAcceptable`; origin in; `autoAccepted` out |
-| 3 | `packages/tui/src/useHop.ts`, `hop-status.ts` | D9 per Q5; `(auto-accepted)` in the notices |
-| 3 | `packages/cli/src/hop-proposal.ts`, `packages/tools/src/move-session.ts` | reset wording per Q5 |
-| all | `docs/feat/session-hop.md` | dated D9 amendment; `changelog.d/session-hop-ux.{fixed,changed}.md` |
+| 3 | `packages/cli/src/session-hop.ts`, `hop-targets.ts` | `HopBuilt.folder` |
+| 3 | `packages/cli/src/hop-turn.ts` | `hopAutoAcceptable`; `hopWakeLine` (replaces `moveGuideLine`); origin in; `autoAccepted` out |
+| 3 | `packages/cli/src/hop-feed.ts`, `hop-proposal.ts` | `HopWakeFact` pending; `takeLine(ctx)`; `failed` on proposal; reset wording |
+| 3 | `packages/tui/src/hop-wake.ts` (new) | `hopWakeStep`, `HOP_WAKE_TEXT`, `HOP_WAKE_CHAIN_MAX` |
+| 3 | `packages/tui/src/app-types.ts`, `useTurnDriver.ts`, `useHop.ts`, `App.tsx`, `hop-status.ts` | `HopProposalView.failed`; `takeLine(ctx)`; origin; wake firing; no D9 clear; notices |
+| all | `docs/feat/session-hop.md`, `changelog.d/session-hop-ux.{fixed,changed}.md` | dated D9 amendment; fragments |
+
+### Slices (S/M, dependency order)
+
+| # | Slice | Size | Blast | Suited |
+|---|---|---|---|---|
+| 1 | namespace: trace, rule, 1/2/3 syntax, pin, wording, labels, tool description | M | cross-module (grammar change is user-visible; no wire/persistence change) | DeepSeek; standard review |
+| 2 | one live progress line | S | contained (hop path only; `run`/`attach` pinned unchanged) | DeepSeek |
+| 3 | auto-accept answers moves, survives hops; wake-up channel | M | load-bearing (single broker, "a pod is not trusted") | strong model; **mandatory fresh-context Opus review** red-teaming §7 |
 
 ### Failure modes
 
 | Case | What happens / how it converges |
 |---|---|
-| **No current context** (kubeconfig without `current-context`, unreadable, or no kubeconfig and no server override) | `kubeNamespace`/`buildEngineHost` throw the existing message (`kubeconfig.ts:102-104`). Proposal: `pinNamespace` fails at turn end, so there is **no prompt** (nothing locatable to approve): `not moved: kubeconfig has no current-context…`, plus `[move failed: …]` for the model. Typed `/move`: the build fails the same way (`hop-targets.ts:381-383`). Nothing is dialled. Session unchanged. |
-| **Namespace does not exist** | A GET of a pod in a missing namespace is a 404, so it is the same as “pod not found” below. Nothing is created (attach never creates). |
-| **Pod not found in the resolved ns** | `WorkloadNotFoundError` gives the hop wording with `-n <ns>` (design 5). The model is told (Q6). The status row clears at settle, and no progress line is left behind. |
-| **RBAC forbidden** (403 on get/exec) | The API's message (it names the namespace and verb) is passed through as `not moved: …` (`engine-k8s.ts:174-186` rewrites only a 404; a 403 keeps its text). Nothing was injected: the 403 comes on `getPod`, before any exec. |
-| **Pod in another ns than the one assumed** (the same pod name in two namespaces; the model names the pod and container but not the namespace) | The default namespace is resolved ONCE, pinned and shown: in the prompt (`namespace: X`), in the live row (`attaching to … in namespace X`) and in the summary (`in X`). Under auto-accept (slice 3) there is no prompt, so the row and the summary are the record, and the badge plus `/move local` undo it. The container name implies no namespace, so nothing is inferred from it. |
-| **Kubeconfig changes between prompt and build** | Design 3: the approved spec carries the pinned namespace, so the build dials what was shown. |
-| **Invalid namespace** (uppercase, `/`, > 63, on docker) | Typed: a usage line, nothing built. Tool: a schema error the model sees. Laptop `hopSpecOf`: `null`, which raises the existing `HOP_PROPOSAL_INVALID` notice. |
-| **Version skew**: an older resident pod daemon offers the tool without `namespace` | The model cannot name one, so the laptop default applies, pinned and shown. An older laptop with a newer pod: the laptop injects its own build, and a resident of another build is replaced or flagged (`residentSkewWarning`). If skew happened anyway, the old laptop's strip drops `namespace`. Accepted, and noted. |
-| **Progress after failure** | Every exit path of the runtimes already calls `status?.finish()` (`engine-runtime.ts:817,823,852,913,1061,1134`). With `liveLine`, finish latches it closed, so a late `onProgress` is ignored and its pending timer is cleared. Even a leaked call reaches no listener after settle (`useHop.ts:154-156`). The transcript gets only `not moved: …`. |
-| **Progress after `/move cancel`** | The cancel settles the run at its next boundary. Until then ticks only update the row, and after settle they reach nobody. Today they become transcript notices after the cancel, so this row is fixed by slice 2. |
-| **Flood** (1 400 ticks) | Throttled to ≤ 1/100 ms with the latest text guaranteed (design 8). |
-| **Auto-accept ON, proposal toward local from a pod** | `hopAutoAcceptable` gives false, so the dialog is shown. A mutation test pins this (Tests). |
-| **Auto-accept ON, proposal whose prompt carries a mount-gate `ask`** | Not eligible: asked. |
-| **Auto-accept ON, foreign turn** | `own` is false, so the proposal is never asked here at all (`hop-feed.ts:89-94`), unchanged. |
-| **Auto-accept toggled between proposal and turn end** | The gate reads `autoApproveRef` at request time (`permission-ui.ts:424`). That is the same rule every tool has. |
-| **A forged `session_hop`/`hopAuto` from a daemon** | Impossible: `toPermissionRequest` allowlist (load-bearing assumption). The test asserts it. |
+| **No current context** (no `current-context`, unreadable, no kubeconfig and no server override) | `kubeNamespace` throws the existing message (`kubeconfig.ts:102-104`). Proposal: `pinNamespace` fails at turn end ⇒ no prompt, no auto-accept; outcome `failed`, line `[move failed: kubeconfig has no current-context…]`, wake (OD6). Typed: the build fails the same way (`hop-targets.ts:381-383`). Nothing dialled. |
+| **Namespace missing / pod not found** | 404 ⇒ `WorkloadNotFoundError` ⇒ hop wording with `kubernetes:<ns>/<pod>` and the ns provenance (design 7). Proposal: `[move failed: …]` + wake, so the model retries with `namespace` itself. Row cleared at settle. |
+| **RBAC forbidden** (403) | The API's text is passed through (`engine-k8s.ts:174-186` rewrites only 404). Nothing injected (403 is on `getPod`). Proposal: failed line + wake. |
+| **Old 2-segment habit** (`kubernetes:pod/container` typed the old way) | Now read as ns=`pod`, pod=`container` ⇒ almost always a 404 whose text names namespace `pod` and shows the right shape. Never a silent wrong success unless a namespace literally named like the pod holds a pod named like the container; accepted (pre-public, OD1). |
+| **Same pod name in two namespaces** | The resolved namespace is pinned and shown everywhere as `ns/pod[/c]` (prompt, row, outcome, wake line). Under auto-accept there is no prompt, so outcome + wake line are the record; `/move local` undoes it (always asked from a workload). |
+| **Kubeconfig changes between turn end and build** | Pinned spec (design 5): the build dials what was resolved and shown. |
+| **Invalid namespace** (uppercase, > 63, on docker) | Typed: usage line. Tool: schema error the model sees. `hopSpecOf`: `null` ⇒ existing `HOP_PROPOSAL_INVALID`. |
+| **Version skew** (older resident pod daemon offers the tool without `namespace`) | The model cannot name one ⇒ OD2 default, pinned and shown. Older laptop drops `namespace` by strip. Accepted. |
+| **Progress after failure / cancel / flood** | Every runtime exit calls `status?.finish()` (`engine-runtime.ts:817,823,852,913,1061,1134`); `liveLine.finish` latches. Late ticks reach no listener after settle (`useHop.ts:154-156`). Throttle ≤ 1/100 ms, last text guaranteed. |
+| **Auto-accept ON, proposal toward local from a workload** | `hopAutoAcceptable` false ⇒ `hopAuto` unset ⇒ dialog. Mutation-tested. |
+| **Auto-accept ON, pod-originated `container` proposal / mount-gate warning** | Auto-accepted per OD4 (residual risk: a pod-chosen image on the laptop engine with the folder mounted; logged `(auto-accepted)`). Recorded in Notes, not designed out — owner's call. |
+| **Auto-accept ON, foreign turn** | `own` false ⇒ never asked here (`hop-feed.ts:93-94`); `autoApproves(…, false)` false. |
+| **Auto-accept toggled between proposal and turn end** | The gate reads `autoApproveRef` at request time (`permission-ui.ts:424`), like every tool. |
+| **Forged `session_hop`/`hopAuto` from a daemon** | Impossible: `toPermissionRequest` allowlist; test asserts it. |
+| **Wake loop** (model proposes → fails/declined → wake → proposes again …) | `HOP_WAKE_CHAIN_MAX = 3` consecutive wakes without a user prompt ⇒ hold + one notice; the line rides the next real prompt. The declined hint still says not to repeat. |
+| **Wake when not idle** (foreign turn, queued rows, compaction, user prompt sent during the hop) | `hopReady` false ⇒ hold; the line is consumed by the next real prompt. Never two copies (`takeLine` consumes once). |
+| **Wake after quit / during `/clear`** | `exitPendingRef` path wakes nothing (`useTurnDriver.ts:672-676`); a `/clear` drops the session view ⇒ the pending fact is cleared with it (`takeLine` on the new session would carry a stale place — the executor clears `pending` on swap-by-clear; test). |
+| **Wake prompt fails to send** (link down) | Same as any prompt: an error row; the line was consumed into that failed prompt's text — the executor must restore it on a send failure, as `restoreChips` does for images (test). |
 
 ### Tests
 
-Each test is red-first on today's code. **Slice 1:**
-- `cli/test/engine-select.test.ts` — `buildEngineHost("kubernetes", {}, io{env:
-  TENTACLE_POD_NAMESPACE=ns1})` gives `namespace === "ns1"`. **Red today:** the
-  hop path ignores the env and gives the context's namespace. Add a precedence
-  table: explicit > env > server ⇒ `default` > context > `default`.
-  **Mutation:** drop the env step from `kubeNamespace` and this test fails.
-- `tui/test/hop-command.test.ts` — `/move attach kubernetes:p/c -n openshift-etcd`
-  gives `workload.namespace`. Errors: `-n` alone, `-n` twice, `-n` on
-  `docker:x`, `-n Bad_NS`, a 64-character label. `kubernetes:a/b` still means
-  pod/container.
-- `tools/test/move-session.test.ts` and `cli/test/hop-proposal.test.ts` —
-  namespace accepted for k8s only. `hopSpecOf` carries it. The prompt detail
-  shows `namespace: openshift-etcd`.
-- `cli/test/hop-feed-turn.test.ts` — **the pin property:** a proposal without
-  namespace, with `pinNamespace` returning `ns-A` at turn end. The request
-  detail shows `ns-A` AND the approved spec has `ns-A`. Then make the resolver
-  answer `ns-B`: the built spec is still `ns-A`. A resolver that throws gives no
-  broker request, plus a `failed` outcome and a `[move failed: …]` line.
-- `cli/test/session-hop-targets.test.ts` — the attach build calls
-  `host("kubernetes", { namespace: "ns-A" })`. A `WorkloadNotFoundError` gives
-  `/move attach … -n`, never `--namespace`.
+Each red-first on today's code; **mutation** named where it proves non-vacuity.
+
+**Slice 1:**
+- `cli/test/engine-select.test.ts` — env `TENTACLE_POD_NAMESPACE=ns1` with `{}`
+  ⇒ `ns1` (**red**: hop path ignores env). Precedence table explicit > env >
+  server⇒`default` > context > `default`, and `source` per row. **Mutation:**
+  drop the env step ⇒ fails.
+- `tui/test/hop-command.test.ts` — `kubernetes:p` ⇒ pod p, no ns;
+  `kubernetes:n/p` ⇒ ns n, pod p (**red**: today pod/container);
+  `kubernetes:n/p/c` ⇒ all three (**red**: refused today); 4 segments, `Bad_NS`,
+  64-char ns, `docker:n/p` ⇒ usage lines; `workloadText` round-trips.
+- `tools/test/move-session.test.ts` — `namespace` accepted for k8s only;
+  description ≤ 600 chars and contains `kubectl`, `namespace`, `auto-accept`,
+  `end of`/`ends`, `reset`, NOT `turned off` (**red**: today 1 100+ chars and says
+  "turned off"). **Mutation:** append the old paragraph ⇒ fails.
+- `cli/test/hop-proposal.test.ts` — `hopSpecOf` carries ns; detail shows
+  `kubernetes:openshift-etcd/etcd-0/etcdctl` and the provenance.
+- `cli/test/hop-feed-turn.test.ts` — **pin property:** `pinNamespace` returns
+  `ns-A` at turn end ⇒ request detail AND approved spec have `ns-A`; resolver
+  then says `ns-B` ⇒ built spec still `ns-A`. Throwing resolver ⇒ no broker
+  request.
+- `cli/test/session-hop-targets.test.ts` — attach calls `host("kubernetes",
+  { namespace: "ns-A" })`; a `WorkloadNotFoundError` ⇒ `kubernetes:<ns>/<pod>`
+  advice, never `--namespace`.
 
 **Slice 2:**
-- `cli/test/hop-live-line.test.ts` (pure, fake clock and timers):
-  - the leading emit;
-  - ≤ 1 emit per 100 ms;
-  - the last text lands via the trailing timer;
-  - duplicates dropped;
-  - after `finish()`, `set` emits nothing and no timer is left.
-- `cli/test/session-hop-targets.test.ts` — an attach that injects (the
-  engine-runtime `:1566` preflight-fail pattern) gives **zero `notify` calls on
-  a clean attach**, while `statuses` saw `attaching…`, `injecting tentacle
-  ▓…` and `verifying…`. **Red today:** ≥ 13 notices. **Mutation:** pass
-  `liveLine: undefined` and the test fails.
-- `cli/test/engine-runtime.test.ts` — with `liveLine`, `log`/`info` stay empty
-  on success, and `finish()` is called on success AND on the 404 path. Without
-  `liveLine` and with `tty:false`, the piped lines are unchanged (no regression
-  for `run`/`attach`).
+- `cli/test/hop-live-line.test.ts` (fake clock/timers): leading emit; ≤ 1 per
+  100 ms; trailing last text; duplicates dropped; after `finish()` nothing and
+  no timer.
+- `cli/test/session-hop-targets.test.ts` — an injecting attach ⇒ zero `notify`
+  on a clean attach while `statuses` saw `attaching…`, `injecting…▓`,
+  `verifying…` (**red**: ≥ 13 notices). **Mutation:** `liveLine: undefined` ⇒
+  fails.
+- `cli/test/engine-runtime.test.ts` — with `liveLine`, `log`/`info` empty on
+  success; `finish()` on success and on 404. Without it and `tty:false`, piped
+  lines unchanged.
 
 **Slice 3:**
-- `tui/test/permission-*.test.ts` — `autoApproves({kind:"session_hop"})` stays
-  false (the existing H4-M8 row). With `hopAuto: true` it is true. With a
-  foreign turn it is false. `hooks_trust` is unchanged.
-- `cli/test/hop-turn.test.ts` — the `hopAutoAcceptable` table:
-  - local→attach ✓;
-  - local→container ✓, ✗ with a gate ask;
-  - workload→attach ✓;
-  - workload→container ✗ (Q4);
-  - any→local ✗.
-  **Mutation:** return true for `target: "local"`, and the “toward local is
-  always asked” row fails.
-- `cli/test/hop-feed-turn.test.ts` — with a broker whose requester applies the
-  real `autoApproves` plus an auto flag ON:
-  - a local-origin attach proposal is approved with no dialog and
-    `autoAccepted`;
-  - a workload-origin `local` proposal reaches the dialog (a `SpyBroker` sees
-    it).
-- `client/test/permission-router.test.ts` — the `send` action has only
-  `optionId`/`message`, so `auto` never reaches the wire. `toPermissionRequest`
-  never yields `kind` or `hopAuto`.
-- `tui/test/session-hop.test.tsx` — per Q5: ON before a hop into a workload
-  stays ON (the status bar and the notice say so). It goes OFF after landing
-  local. The existing D9 row flips on purpose and is shown red first.
+- `tui/test/permission-*.test.ts` — `autoApproves({kind:"session_hop"})` false
+  (existing H4-M8 row); with `hopAuto: true` true (**red**); foreign ⇒ false;
+  `hooks_trust` unchanged.
+- `cli/test/hop-turn.test.ts` — `hopAutoAcceptable` table: local→attach ✓,
+  local→container ✓, workload→attach ✓, workload→container ✓ (OD4),
+  workload→local ✗. **Mutation:** return `true` always ⇒ the workload→local row
+  fails. `hopWakeLine` renders the three facts, sanitizes a bidi/control byte in
+  place and cwd, and states `auto-accept on|off` from `ctx`.
+- `tui/test/hop-wake.test.ts` — `hopWakeStep` table: proposal×{moved, failed,
+  declined} ⇒ wake; queued×{moved, failed} ⇒ wake; idle×any ⇒ hold; chain 3 ⇒
+  hold. **Mutation:** wake on `idle` ⇒ fails.
+- `cli/test/hop-feed-turn.test.ts` — broker whose requester applies the real
+  `autoApproves` with auto ON: a local-origin attach proposal ⇒ approved, no
+  dialog, `autoAccepted`; a workload-origin `local` proposal ⇒ reaches the
+  dialog (`SpyBroker` sees it). A failed proposed run ⇒ `takeLine` yields
+  `[move failed: …]` (**red**: today null).
+- `client/test/permission-router.test.ts` — `send` has only
+  `optionId`/`message` (`auto` never on the wire); `toPermissionRequest` never
+  yields `kind`/`hopAuto`.
+- `tui/test/session-hop.test.tsx` (ink-testing-library):
+  - auto-accept ON before a hop stays ON after it, status bar and notice agree
+    (the existing D9 row flips on purpose, shown red first);
+  - after an approved proposal moves, the session's `send` is called ONCE with
+    text starting `[session moved to kubernetes:` and ending `Continue the task
+    from here.`, with no user typing and no user bubble (**red**: no send today);
+  - an idle typed `/move` ⇒ no send; the line rides the next typed prompt;
+  - declined proposal ⇒ one wake send starting `[move declined]`;
+  - a wake whose send fails ⇒ the line is carried by the next prompt.
 
 Gate before done: the narrow files per slice, then `bun run check`. Then a live
-re-test by the owner on OpenShift, which is the only real cluster:
-`move_session` without ns lands in `openshift-etcd`; `-n` works; one live line;
-one summary.
+re-test by the owner on OpenShift: `move_session` without ns lands in the
+context's namespace and the trace says why; `kubernetes:openshift-etcd/etcd-…/etcdctl`
+works; one live line; one summary; auto-accept ON ⇒ no prompt and it stays ON;
+the model continues by itself after the move.
 
-### Owner questions
+### Notes / debt
 
-1. **Namespace syntax.** `/move attach kubernetes:<pod>[/<container>] -n <ns>`
-   plus the tool field `workload.namespace`, or `kubernetes:<ns>/<pod>[/<container>]`?
-   **Rec:** `-n` plus the field. `a/b` already means pod/container, `-n` is
-   `tentacle attach`'s and kubectl's spelling, and a named field is what a model
-   fills reliably.
-2. **Default rule.** One rule for `run`/`attach`/hop: explicit >
-   `TENTACLE_POD_NAMESPACE` > the kubeconfig current context's namespace >
-   `default`. The hop gains the env step it lacks. **Rec:** yes. Keep
-   `tentacle attach <name>`'s kept-index lookup for `attach` only: a hop names
-   its place, and the prompt shows it.
-3. **Confirm the cause.** Between the failed try and the retry, did `oc login`
-   or `oc project openshift-etcd` (or a `KUBECONFIG` switch) run? The code
-   re-reads the kubeconfig per hop and has one path (repro (d)). **Rec:** if
-   nothing changed, tell me, and the executor adds a one-line debug trace of the
-   kubeconfig path and context before slice 1.
-4. **Auto-accept scope for a proposal made FROM a workload.** **Rec:**
-   auto-accept `attach` from any origin, and `container` only from a local
-   origin. Always ask for a hop to local, and for any proposal whose prompt
-   carries a mount-gate warning. Reason: a pod-originated `container` proposal
-   would create a container on the laptop's engine with the laptop folder
-   mounted read-write and a pod-chosen image. That is a laptop effect requested
-   by an untrusted pod (§7). Your literal wording (“workload → another
-   workload”) would include it, so I need your call.
-5. **D9 — does auto-accept survive a hop?** **Rec:** it survives a hop into a
-   workload you approved or auto-approved. Turning it off there contradicts your
-   intent, and the gate stays laptop-side. It turns off when a hop lands on
-   **local**, which is always human-confirmed, and from then on commands hit your
-   machine. One Shift+Tab re-enables it. Alternative: it always survives.
-6. **Tell the model when a proposed move fails** (`[move failed: <reason>]` in
-   the next prompt, like `[move declined]`)? **Rec:** yes. With it, the model
-   would have retried with `workload.namespace` itself instead of needing your
-   “ritenta”.
+- **Host in the wake line** (OD6 example) is omitted: the laptop has no source
+  for the daemon's hostname without a protocol field. If wanted, a follow-up
+  adds it to `session/open`'s result (a `protocol.d/` note) — not worth a
+  breaking change in this task.
+- **OD4 residual risk**: with auto-accept ON a pod-originated `container`
+  proposal (pod-chosen image, laptop engine, folder mounted read-write) and a
+  mount-gate warning are answered without a human. Owner's explicit decision;
+  logged `(auto-accepted)`; revisit if the threat model tightens.
+- **Breaking grammar** (`kubernetes:a/b` = ns/pod) is user-visible: the
+  `changed` fragment states it.
 
 ## Execution
 
