@@ -42,6 +42,9 @@ const COMPOSE_FLOWS = [
   "16-offline-outbox",
   "17-outbox-changed",
   "18-photos",
+  // docs/feat/mobile-ui-polish.md Slice 0 (B1/B2): the same rules — its own
+  // session, an id inside the compose bar, the daemon's history last.
+  "23-composer-keyboard",
 ] as const;
 
 /**
@@ -270,7 +273,7 @@ describe("13d's compose flows (docs/feat/mobile-compose.md)", () => {
         vars.add(match[1] as string);
       }
     }
-    // Seven flows, seven distinct ids, none of them the list's own rows.
+    // One distinct id per flow, none of them the list's own rows.
     expect(vars.size).toBe(COMPOSE_FLOWS.length);
     expect(vars.has("ALPHA_ID")).toBe(false);
     expect(vars.has("CHARLIE_ID")).toBe(false);

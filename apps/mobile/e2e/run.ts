@@ -643,6 +643,9 @@ export const FLOWS: readonly string[] = [
   "16-offline-outbox",
   "17-outbox-changed",
   "18-photos",
+  // docs/feat/mobile-ui-polish.md Slice 0: the composer above the keyboard (B1)
+  // and Return sends (B2), on a session of its own.
+  "23-composer-keyboard",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`
   // behind in the Keychain, which `clearKeychain` in `_pair` resets anyway).
@@ -696,6 +699,7 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "16-offline-outbox": "OUTBOX_ID",
   "17-outbox-changed": "CHANGED_ID",
   "18-photos": "PHOTO_ID",
+  "23-composer-keyboard": "KEYBOARD_ID",
 };
 
 /** Run one flow on one simulator with Maestro, returning its exit code. */

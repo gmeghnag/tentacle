@@ -404,12 +404,16 @@ Dependency order; every slice is S or M and keeps the suite green on its own.
 6. `apps/mobile/App.tsx` — `SafeAreaProvider`; Session screen
    `headerLargeTitle: false`. (B1)
 7. `apps/mobile/src/screens/SessionScreen.tsx` — `keyboardVerticalOffset` =
-   `useHeaderHeight()` (until Slice 3 removes the native header), bottom
-   padding, remove the stray `{" "}` (`:174`), `submitBehavior="submit"`,
-   `returnKeyType="send"`, `onSubmitEditing` → `returnKeyAction` →
-   `controller.press()`. (B1, B2)
+   the screen's own window `y` (`measureInWindow`; *amended in Execution*:
+   `useHeaderHeight()` is in `@react-navigation/elements`, not a dependency of
+   `apps/mobile`), bottom padding, remove the stray `{" "}` (`:174`),
+   `submitBehavior="submit"`, `returnKeyType="send"`, `onSubmitEditing` →
+   `controller.pressReturn()` (*amended*: the `returnKeyAction` gate runs in the
+   controller on the CURRENT action, not on the rendered one) → `press()`. (B1, B2)
 8. `apps/mobile/src/screens/transcript/Markdown.tsx` — explicit `label` colour
-   on paragraphs/list bodies; inline code on `code` token. (B4)
+   on paragraphs/list bodies; inline code and code blocks on a `codeBackground`
+   that differs from the surface (*amended*: there is no `code` token before
+   Slice 1, and its planned values equal today's surfaces). (B4)
 9. Tests (below) + `apps/mobile/e2e/flows/23-composer-keyboard.yaml` (new; B1,
    B2) + `changelog.d/mobile-ui-polish.fixed.md`.
 
@@ -575,8 +579,162 @@ fail; for `returnKeyAction`, map `stop` to press and see the test fail.
 
 ## Execution
 
-*— (pending)*
+### Slice 0 — bugs
+
+*— claude-opus-5-5, 2026-11-14*
+
+**Load-bearing check, re-run first (holds).** The B3 repro reproduces unchanged
+on this branch (same four lines as *Context*). `rg` for `SafeAreaProvider |
+useSafeAreaInsets | onSubmitEditing | submitBehavior | returnKeyType |
+useHeaderHeight` in `apps/mobile/App.tsx` and `src/`: 0 hits. The screens still
+render values from the controllers, so the Slice 0 fixes are the pure helpers
+plus the `.tsx` wiring. RN's KAV math (`KeyboardAvoidingView.js:107-119`:
+`frame.y + frame.height − (screenY − keyboardVerticalOffset)`, `frame` from
+`onLayout` = parent-relative) confirms B1(b).
+
+**As built, in dependency order** (each step red → green):
+1. `src/markdown.ts` — `decodeEntities()` (`&lt; &gt; &quot; &#39;`, then `&amp;`
+   last), applied to `text`/`escape`, `codespan`, image alt text; table cells go
+   through the same `inline()`. Tests: `test/markdown.test.ts` + 6 cases (prose,
+   code span, table cell, literal `&amp;`, `&amp;lt;` → `&lt;`, link/alt text).
+2. `src/ansi.ts` (new) — `stripAnsi()`: CSI `ESC [ params intermediates final`
+   and OSC `ESC ] … BEL|ESC \`; a lone ESC is kept. `test/ansi.test.ts` (5).
+3. `src/tool-summary.ts` (new) — `toolSummary(row)` → `{ label, subtitle,
+   output }`: the TUI's `toolSubtitle` rule case for case, subtitle and output
+   through `stripAnsi`. `TranscriptRow.tsx` draws `summary.subtitle` instead of
+   `tool.args` and `summary.output` instead of `tool.output`.
+   `test/tool-summary.test.ts` (17): rows through the app's OWN fold
+   (`transcript.ts` `apply`), 11 parity cases against the TUI's `toolTitle`
+   (label and subtitle), non-JSON fallback, escapes stripped.
+4. `src/composer.ts` — `returnKeyAction(action)`: the action for `send` / `queue`
+   / `send-later`, `null` for `stop` and `none`. `test/composer.test.ts` + 3.
+5. `src/composer-layout.ts` (new) — `composerBottomPadding({insetBottom,
+   keyboard})` = `keyboard ? 8 : max(insetBottom, 8)`.
+   `test/composer-layout.test.ts` (4).
+6. `src/session-screen-controller.ts` — `pressReturn()`: `press()` only when
+   `returnKeyAction(view().composer.action) !== null`.
+   `test/session-screen-compose.test.ts` + 6 (two presses send once; Return
+   sends; Return + tap send once; Return on an empty field with a running turn
+   does not cancel, with a control showing the button DOES; Return with text
+   during a turn steers; Return on a blank field keeps it). The harness's fake
+   turn now counts `cancel()` calls.
+7. `App.tsx` — the default export wraps the shell (renamed `AppShell`) in
+   `SafeAreaProvider`; the `Session` route sets `headerLargeTitle: false`.
+8. `src/screens/SessionScreen.tsx` — an outer `View` measured with
+   `measureInWindow` gives KAV its `keyboardVerticalOffset`; the composer's
+   `paddingBottom` = `composerBottomPadding(insets.bottom, keyboard)` (keyboard
+   from `keyboardWillShow/Hide`, `Did*` on Android); stray `{" "}` removed;
+   `submitBehavior="submit"`, `returnKeyType="send"`, `onSubmitEditing` →
+   `controller.pressReturn()`.
+9. `src/screens/transcript/Markdown.tsx` — paragraphs (so list bodies and quotes
+   too) get `color: palette.label`; code (inline and block) uses a new optional
+   `codeBackground` prop (default `card`); the user bubble passes
+   `groupedBackground`.
+10. `e2e/flows/23-composer-keyboard.yaml` + `23-history.js` (new); `e2e/run.ts`
+    (`FLOWS` + `KEYBOARD_ID` fresh session); `test/e2e-flows.test.ts` lists it
+    with the compose flows (own session, a `composer-*` id, daemon truth last).
+11. `changelog.d/mobile-ui-polish.fixed.md`.
+
+**Red before green (pasted).** For the new modules the red was taken against a
+stub that reproduces TODAY's behaviour (so it fails on the property, not on an
+import):
+```
+markdown (before decodeEntities)       Expected: "It's "x" & <y>"   Received: "It&#39;s &quot;x&quot; &amp; <y>"
+                                       Expected: "Tom & Jerry"      Received: "Tom &amp; Jerry"   … 6 fail
+tool-summary (stub: subtitle = args)   Expected: "bun test"         Received: "{"command":"bun test"}"   … every case fail
+                                       Expected: "red"              Received: "\x1b[31mred\x1b[0m"
+returnKeyAction (stub: null = today)   (fail) send / queue / send-later: Return does what the button does
+pressReturn (stub: naive → press())    (fail) Return on an empty field while a turn runs never stops it — Expected: 0  Received: 1
+composerBottomPadding (stub: always 8) (fail) Face ID iPhone, keyboard closed — Expected: 34  Received: 8
+```
+`two presses in one frame send ONCE` was green before the change — it PINS the
+existing read-and-clear (the plan's failure mode), it does not fix anything.
+
+**Mutations (each run, then reverted):**
+| Mutation | Caught by |
+|---|---|
+| `decodeEntities`: `&amp;` decoded FIRST | `&amp;lt;` → `&lt;` case |
+| `stripAnsi` returns its input | 3 `ansi` cases + 2 `tool-summary` cases |
+| `returnKeyAction` maps `stop` → the action (the plan's named one) | `stop → null` |
+| `pressReturn` ignores the gate (`|| true`) | "never stops it" |
+| `composerBottomPadding` ignores `keyboard` | "keyboard open: the minimum" |
+
+**Drift from Implementation (and why).**
+- **`useHeaderHeight()` → `measureInWindow`.** The hook lives in
+  `@react-navigation/elements`, which is only a transitive dependency
+  (`native-stack` re-exports `useAnimatedHeaderHeight`, an `Animated.Value`).
+  Adding a dependency and a lockfile change for a value Slice 3 sets to 0 was
+  not worth it; the screen's own window `y` is EXACTLY the quantity KAV's
+  parent-relative frame misses, it is right on iPad/rotation too, and it becomes
+  0 by itself when Slice 3 removes the header. Plan step 7 amended.
+- **The Return gate is in the controller (`pressReturn`), not the screen.** The
+  plan had the screen call `returnKeyAction` on the rendered action and then
+  `press()`, but `press()` re-reads the action: a second Return before a
+  re-render (field already cleared, the turn now running) would pass a stale
+  `send` through the gate and `press()` would STOP the turn — the exact thing
+  owner Q1 forbids. The gate now reads the same current action `press()` uses.
+- **`toolSummary` returns `{label, subtitle, output}`** — `trailing` and `tone`
+  are Slice 3's (the row that draws them); adding them unused now would be
+  untested surface. Subtitle "one line" is left to `numberOfLines={2}` (as
+  today) so the string stays exactly the TUI's (parity).
+- **B4 inline code: `codeBackground` prop, not a `code` token.** There is no
+  token before Slice 1, and the planned light `code` (`#F2F2F7`) equals today's
+  page background (assistant rows) and the dark one (`#1C1C1E`) today's `card`
+  (user bubble) — either would re-hide it until Slice 3 changes the surfaces.
+  Code blocks had the same `card`-in-`card` problem and get the same fix.
+- **The parity test loads `render-lines.ts` by a computed path.** A static
+  import pulls the TUI's terminal modules (`marked-terminal`, …) into
+  `tsc -p apps/mobile`, which fails; `transcript-parity.test.ts` imports only
+  `state.ts`, which does not.
+- **Flow 23's B1 observable** is the tap reaching `composer-send` with the
+  keyboard UP (flow 07 needed `hideKeyboard` because the tap hit a key), plus a
+  `takeScreenshot` of both states — not a `maestro hierarchy` bounds check
+  (Maestro's JS has no hierarchy access).
+
+**NOT verified (simulator).** `bun run e2e:mobile` and `xcrun simctl` need an
+approval this non-interactive session cannot give, so: flow 23 was neither shown
+red on the old build nor green on the new one; the `<bug>-before/-after.png` and
+light/dark screenshots under `.tentacle/tmp/mobile-ui/slice-0/` were not taken;
+the Japanese-keyboard IME check and `submitBehavior` on RN 0.88/iOS were not
+observed. To verify: `E2E_ONLY_FLOWS=23-composer-keyboard bun run e2e:mobile
+--ios 18` (and `--ios 26`) on this branch (green expected) and on `fcd9138f`
+with only the flow added (red expected at the `turn-running` wait), then the
+full e2e run for the other flows (flow 07's `hideKeyboard` is still valid).
+
+**Gate:** `bun run typecheck` clean · `bun run lint` 0 errors/0 warnings
+(1377 files) · `bun test` 9946 pass, 4 skip (all opt-in: k8s, docker ×2,
+slow socket), 0 fail.
 
 ## Review
 
-*— (pending)*
+### Slice 0 — adversarial review (fresh context)
+
+**Verdict: APPROVE (code), merge gated on finding 1.** Scope: `git diff main...HEAD`, Slice 0 only.
+
+**Gate (re-run):** `bun test` 9946 pass · 4 skip (opt-in) · 0 fail · `bun run typecheck` clean · `bun run lint` 1377 files, 0 issues. Touched files: 102 pass / 0 fail.
+
+**Findings (HIGH/MEDIUM):**
+1. **MEDIUM — B1/B2 have no executed evidence.** `apps/mobile/e2e/flows/23-composer-keyboard.yaml` was never run red (on `fcd9138f`) or green, and no `slice-0/*-before/after.png` exist. The B1 fix (`SessionScreen.tsx` `measureInWindow` → `keyboardVerticalOffset`, `composerBottomPadding`) and B2 (`submitBehavior="submit"` on a `multiline` input, RN 0.88/iOS) are correct by reading but unobserved. Failure scenario: if the onLayout-time `measureInWindow` y or `submitBehavior` behaves differently on device, the owner's two reported bugs ship unfixed with a green unit suite. Precondition for merge: `E2E_ONLY_FLOWS=23-composer-keyboard bun run e2e:mobile --ios 18` (+ `--ios 26`) green on HEAD and red on `fcd9138f`, plus the screenshots (§9, the orchestrator's screenshot rule).
+
+**Mutations (each run, then reverted; tree byte-identical via `cmp` to a scratch copy, `git status` clean):**
+| Mutation | Caught by |
+|---|---|
+| `markdown.ts` codespan without `decodeEntities` | "a code span shows the characters" |
+| `pressReturn` gate → `kind !== "none"` (lets `stop` through) | "Return on an empty field while a turn runs never stops it" |
+| `ansi.ts` OSC: drop the `ESC \` terminator | "OSC hyperlinks are removed, BEL- and ST-terminated" |
+
+**Attacks tried:**
+- *Parity drift*: `tool-summary.ts` `subtitleOf` vs `render-lines.ts:562-610` — identical case for case; every built-in tool name in `packages/tools/src` is covered (unknown/MCP tools show raw args, same as the TUI — by design).
+- *Entity decoding end-to-end* (scratch `md.ts`): link text, link href with `&` (href stays raw, not double-escaped), heading, table cell with code span, quote, list, `\*`/`\<` escapes, bold/em/del — all show the literal characters.
+- *Return races*: gate reads `view()` at call time like `press()` (`session-screen-controller.ts:637-643`), so a stale rendered `send` cannot become a Stop — holds; pinned by the mutation above.
+- *B4 coverage*: every `Text` in `Markdown.tsx` has a colour either directly or inherited from a coloured paragraph/heading/code/table parent; inline code in the user bubble uses `groupedBackground` ≠ `card`.
+- *§7*: no protocol/persistence/daemon touch; decisions in pure modules (`returnKeyAction`, `composerBottomPadding`, `toolSummary`, `decodeEntities`, `stripAnsi`); the screen holds only keyboard/measure presentation state. Holds.
+- *e2e wiring*: `KEYBOARD_ID` is created by `spawnFlow`'s `COMPOSE_SESSION_VARS` path (`e2e/run.ts:726-733`); `e2e-flows.test.ts` passes.
+
+**Below threshold (not blocking):** `SafeAreaProvider` without `initialMetrics={initialWindowMetrics}` renders nothing for the first frame (`SafeAreaContext.tsx:105-111`); `TranscriptRow`/`SessionScreen` wiring has no render test (repo convention: no RN component harness), so only the pure helpers are pinned.
+
+**Executor behaviour:** honest — the drift (measureInWindow, controller-side gate, `codeBackground`) is justified and the controller-side gate is a real improvement over the plan; the unrun simulator work is stated plainly rather than claimed.
+
+*— claude-opus-5-5, 2026-11-14* (same model as the executor/planner, fresh context only — shared blind spots possible)
+
+**Screenshots (orchestrator, binding):** every slice ends by saving simulator screenshots of each screen it touched, light AND dark, as PNG under `/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/slice-<n>/` (`<screen>-light.png`, `<screen>-dark.png`; Slice 0 also `<bug>-before.png`/`-after.png`). A fresh Fable visual review gates the merge of every slice against the mockups and the quality bar.
