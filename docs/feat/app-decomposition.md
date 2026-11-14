@@ -4188,3 +4188,47 @@ untouched. `changelog.d/app-decomp-9a-turn.changed.md` added. `TODO.md` untouche
   field can churn a render (`app-structural-identity.test.ts`, green, unedited,
   counts subscribes across forced re-renders). To verify the raw number: run a
   streamed turn under a `flushNow` counter on this branch and on `main`.
+
+## Review
+
+### S9a — `feat/app-decomp-9a-turn`
+
+**Verdict: APPROVE** (no HIGH/MEDIUM findings). Scope: `git diff main...HEAD` only.
+
+**Gate (re-run by me).** The four touched/neighbouring files (`app-turn-driver-layer`,
+`app-turn-driver-structure`, `app.test`, `app-structural-identity`): **136 pass / 0
+fail**. Full `packages/tui/test/`: 1953 cases (seen during the mutation run below).
+`bun run lint`: 1198 files, clean. `bun run typecheck` (root + mobile): clean.
+
+**Attacks tried.**
+1. *Verbatim move.* I bracket-matched all ten moved `useCallback`s in `main`'s
+   `App.tsx` and in `useTurnDriver.ts` and diffed the bodies with whitespace
+   normalised. The only non-dep-array difference is `handleCommand(text)` →
+   `handleCommandRef.current?.(text)`. **Holds.** The ref is written during render
+   (`App.tsx:1781`), and it is only read from event handlers, so it is never stale
+   and never null when used.
+2. *Callback identity (H2).* I diffed the dep arrays per callback. Every dep the hook
+   adds is a ref, a `useState` setter (`setLoading` `App.tsx:508`, `setScrollOffset`
+   `:321`) or `handleCommandRef`. The one dep removed is `handleCommand`, from
+   `submit`. So no identity got less stable. `submit` is now *more* stable, which
+   is harmless because it reads the ref at call time. `field.reset` was kept.
+   **Holds.**
+3. *Mutation outside the executor's list.* I dropped `runClearRef.current?.()`
+   from the settle (`useTurnDriver.ts:643`). Result: **KILLED**, with 4 failures
+   (T19e/g/i plus the S8 settle case). I reverted it and `git status` came back
+   clean.
+4. *§7 single broker / one session path.* `permission` is passed through the
+   port, and the hook creates no broker and no second stream loop (the structural
+   test pins this, and I confirmed it against the source). **Holds.**
+5. *TDZ / ordering.* `askContext` and `wakeIfPending` are declared before the
+   hook call, and tsc would reject a use before declaration. **Holds.**
+
+**Residual (not blocking, already disclosed by the executor).** No test pins
+the case where a shared ref is swapped for a hook-private ref of the same type.
+The render-count spy is also not implemented.
+
+**Executor behaviour.** Accurate and candid. I checked the verbatim claim, the
+dep drift and the mutation discipline against the code, and all three match it.
+Different model family from the executor (DeepSeek vs Opus).
+
+*— claude-opus-5-5, 2026-11-14*
