@@ -195,8 +195,11 @@ reader, verified delete):
    own uid first** (review H1). Read `session/list` after the handshake. If it
    lists this uid, first `session/close` it and read the list again. Then seed.
    If the close is not confirmed, or the uid is still listed, refuse: "<name>
-   still holds an older copy of this session". A fresh container or worker
-   cannot hold the uid, so it skips (a).
+   still holds an older copy of this session". A copy with another client
+   ATTACHED to it is not closed at all — it is refused like a running one (H6
+   review fix round 1, finding 2: `attached` is the only field that says a
+   plain `tentacle attach` TUI is sitting in an idle-looking session). A fresh
+   container or worker cannot hold the uid, so it skips (a).
    (b) `store.load(uid)` gives the laptop record, then
    `target.openSeeded(record)`, then require `target.saveConfirmed()` for this
    uid (M1). If any of these fails (VersionMismatch, an open error, a save that
@@ -277,8 +280,10 @@ session attached, running or holding jobs** (`others === 0`, with
 `ownMayBeAbsent`). Otherwise: dispose, open nothing, and say "<name> is in use
 by another session". (c) If our OWN uid is live there (a hop whose close
 failed, or a TUI killed while inside the container), it is not joined. If it
-is running or holds jobs, refuse. Otherwise close it, then seed (D1 step
-4(a)). Why: the pod daemon is ONE resident per workload. Joining
+is running, holds jobs, or has a client ATTACHED (`running || jobs > 0 ||
+attached > 0`), refuse — closing an idle copy under an attached TUI ends that
+client's session just as surely as killing a turn. Otherwise close it, then
+seed (D1 step 4(a)). Why: the pod daemon is ONE resident per workload. Joining
 a busy one shares it with another client's conversation, and that client can
 already answer that pod's pod-side asks (`detached-runs.md`, AGENTS §7). A
 workload with someone already in it is "not ours to share". Check (b) reads
@@ -522,13 +527,15 @@ it ships is wrong, but two pure modules are now incomplete, and **H2 must
 extend them** (red first, §9):
 
 - `hop-plan.ts` `AttachVerdict` (`:139-171`) gains a third outcome,
-  `{kind: "close-own"}`. It needs a new input, `own: {running, jobs} | null`
-  (whether our uid is live on the target; computed from the same
+  `{kind: "close-own"}`. It needs a new input, `own: {running, jobs, attached} |
+  null` (whether our uid is live on the target; computed from the same
   `session/list` read, because `ResidentUse` has no "own present" field,
-  `relay-state.ts:284-292`). If own is live and idle → `close-own`. If own is
-  running or holds jobs → `refuse` "<name> still holds an older copy of this
-  session". This is checked after `detachedRun` and before `others`. New
-  table rows and a mutation (drop the `own` branch → the row fails).
+  `relay-state.ts:284-292`). If own is live and idle and nobody is attached →
+  `close-own`. If own is running, holds jobs, or has a client attached →
+  `refuse` "<name> still holds an older copy of this session". This is checked
+  after `detachedRun` and before `others`. New table rows and a mutation (drop
+  the `own` branch → the row fails; drop `attached` from the verdict → the
+  attached-client row fails).
 - `hop-proposal.ts` `proposalNotice` stays the one-line notice. The full
   prompt detail (M6) is a NEW pure builder (`hopPromptDetail(plan,
   mount)`) that H5 adds. The image/delete/sanitize properties that H1 already
@@ -2069,3 +2076,135 @@ Fix the signature so it names the model that actually ran.
 reported as debt. One mutation claim was overstated (finding 1's test title).
 
 *— claude-opus-5-5, 2026-11-14* (fresh context, not the executor's model family)
+
+### Fix round 1 — the H6+H7 review's MEDIUM findings
+
+*— deepseek-v4.1-flash-1017, 2026-11-14*
+
+Scope: the two MEDIUM findings of `## Review — H6 + H7` above, and the process
+note. No other behaviour touched. Both findings were reproduced before either
+was fixed; every fix carries the mutation that proves it non-vacuous (each
+broken in this tree, its narrow file(s) run, restored, `md5` printed before and
+after — no `.bak` left, nothing checked out or stashed).
+
+**Finding 1 (MEDIUM) — the dispose on a D7(b) refusal was not tested. FIXED
+(production code already right; the ASSERTION was missing, and that was the
+bug in the test).**
+
+`hop-targets.ts:415-419` did dispose *and* open nothing; the row
+`"refused with the D7 wording, the runtime disposed, and NO `session/open` ever
+sent"` asserted only the frames and the list, so its own title's central claim
+(the dispose) was unproven — exactly what the reviewer's mutation showed.
+
+- The rig gained the one observable a `dispose` has: `FakeHostLog.closes`
+  (`session-hop-targets.test.ts:124-129`) and `watchedChannel`
+  (`:150-166`), a client channel that records whether it was **closed** and is
+  handed to every `openExec` (`:234`). `dispose` → `client.close()` →
+  `Peer.close()` → `channel.close()`, so a leaked `RemoteClient` and its exec
+  stream are now distinguishable from a released one.
+- The row asserts it (`:813-815`): `log.closes` has the one dialled runtime and
+  it is closed.
+- Its own non-vacuity is now explicit in the neighbouring row
+  (`"non-vacuity: the SAME occupied daemon with an EMPTY list is joined"`,
+  `:841-862`): the SAME watcher reads `closed: false` for a build that was NOT
+  refused, then `closed: true` after the caller's own `dispose`.
+
+*Red first / mutation:* delete `await bounded(runtime.dispose(),
+HOP_ROLLBACK_TIMEOUT_MS)` (`hop-targets.ts:418`, md5 `9a961223…` →
+`f4e7fda6…`) → **1 fail**, on the new assertion and nothing else
+(`expect(log.closes?.every((c) => c.closed)).toBe(true)` → received `false`),
+`22 pass / 1 fail`. Restored → md5 `9a9612237a4e129f0c24ad97bf60aa40`,
+`23 pass / 0 fail`. This is the reviewer's mutation, now caught.
+
+**Finding 2 (MEDIUM) — D7(c) closed our own idle copy even with another client
+attached to it. FIXED.**
+
+The chain was `session-hop.ts:277` → `ownUidVerdict` (`hop-plan.ts:161`) →
+`ownUseOf` (`relay-state.ts:283`), and the loss happened in **two** places, not
+one: `ownUseOf` did not carry `attached` at all, and the verdict would not have
+looked at it. `attached` is the only field that separates a copy nobody uses
+from one a plain `tentacle attach` TUI is sitting in (`running: false, jobs: 0,
+attached: 1` — verified on a real `SessionHost` in
+`.tentacle/tmp/session-hop/attached.ts`: `after open: [{…,"attached":1,
+"running":false}]`, which also proved the pre-existing rows' `open` left the
+copy attached — see the drift note below).
+
+- `relay-state.ts:279-286` (+ `ownUseOf`, `:293-309`): `OwnUse.own` is
+  `{running, jobs, attached}`, and
+  `ownUseOf` carries `own.attached` from the same single `session/list` read
+  (no second read, so the two can never disagree).
+- `hop-plan.ts:166-176`: `ownUidVerdict` treats `attached > 0` as `busy`
+  (`running || jobs > 0 || attached > 0`), with the reason stated:
+  `session/close` under an attached TUI ends that client's session just as
+  surely as killing a turn. `busy` keeps its existing wording (`<name> still
+  holds an older copy of this session`) — one wording site, no new string.
+- `AttachVerdictInput.own` (`hop-plan.ts:178-196`) widened to match; the
+  `attachTarget` callers already pass `own: null`, so nothing else changed.
+- Doc: D1 step 4(a) (`docs/feat/session-hop.md:194-201`), D7(c)
+  (`:276-282`) and the H1 design note (`:525-535`) now state the `attached`
+  arm, so the plan stays the source of truth (§8).
+- Changelog: `changelog.d/session-hop.fixed.md` — the refusal list now says
+  "…or has another terminal attached to it", which is what the fragment's
+  "the workload's current client is never disturbed" always claimed.
+
+*Red first (three layers, each failing on its own property):*
+- `relay-state.test.ts:396-408` (new) `own ATTACHED to by someone: the fact is
+  carried, never dropped` → RED: `{"own":{"jobs":0,"running":false}}` vs the
+  expected `attached: 2`; and the two neighbouring rows updated for the shape.
+- `hop-plan.test.ts:231-249` (new) `our OWN uid with a client ATTACHED is
+  refused too` → RED: received `{"kind":"close-own"}` where the refusal was
+  required; includes the non-vacuity row (`attached: 0` → still `close-own`).
+- `session-hop-targets.test.ts:992-1009` (new) `an IDLE copy another client is
+  ATTACHED to: refused, never closed under it` — the whole hop over the real
+  factories, the real orchestrator and a REAL `session/list` (the stale copy is
+  seeded and its creating attachment left in place, `:904-908`) → RED:
+  received `"moved"`, i.e. the hop went through and closed the copy.
+
+*Mutations (each restored; md5s printed):*
+1. `hop-plan.ts` verdict drops the `attached` arm (back to
+   `running || jobs > 0`, md5 `ef99ee41…` → `23c5c070…`) → **2 fail**: the new
+   `hop-plan` row and the new end-to-end row; `47 pass / 2 fail`. Restored →
+   `ef99ee413c95349a6787ab761654322b`.
+2. `relay-state.ts` `ownUseOf` zeroes `attached` instead of carrying it (md5
+   `c8b7a6e0…` → `3dc401ef…`) → **2 fail**: the new `relay-state` row and the
+   end-to-end row (the verdict cannot see what the read dropped); `71 pass /
+   2 fail`. Restored → `c8b7a6e046b041c2f3438430ea160849`.
+
+**Drift from the Implementation (and why).**
+
+1. **The pre-existing D7(c) rows opened the stale copy and left it ATTACHED.**
+   The shared rig `ownUidOnResident` (`session-hop-targets.test.ts:878-920`)
+   called `server.open(...)` and never detached the creating attachment, so that
+   "idle copy" was really `attached: 1`. Harmless before (nothing read
+   `attached`); with the fix, the IDLE row would have been refused like the new
+   one and stopped proving the close-then-seed path. It now detaches the
+   creating attachment (`:906`) — the honest shape of a stale copy, "the
+   client that made it has LEFT" — and only the new row keeps it attached. Found
+   because the fix made the fixture's lie visible; `attached.ts` is the repro.
+2. **`OwnUse` widened rather than a second field added.** `ResidentUse` has no
+   "own present" field by design, and adding `ownAttached` beside `own` would
+   let the two halves come from different reads. One struct, one read.
+3. **The reviewer's process note (not a finding): the H6+H7 Execution
+   signature.** The reviewer reports the commit says "deepseek" while that
+   section is signed `claude-sonnet-4-5-20250929`, and asks for the real model.
+   I cannot honestly sign another agent's run: I did not execute H6/H7, and I
+   found no record of which model did (no tentacle session log names
+   `session-hop`; the Claude transcripts I can read are all `claude-opus-5-5`).
+   **This is left to the orchestrator**, which launched it and knows the
+   profile. My own signature above is my real id, by two independent signals:
+   the launcher argv (`ps` → `tentacle --profile deepseek`, and that profile is
+   `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`, `~/.config/tentacle/config.jsonc`)
+   and this context's 393k window, which is exactly that profile's
+   `contextWindow`.
+
+**Gate (full, this tree):** `bunx tsc --noEmit` → 0 ·
+`bun run lint` → `Checked 1251 files`, 0 errors/warnings ·
+`bun test` → **9231 pass, 4 skip, 0 fail** across 669 files. The 4 skips are the
+documented opt-ins (live-k8s, live-docker, the real-socket keepalive) plus the
+opt-in live docker row of `session-hop.docker.test.ts`; none is a non-opt-in
+skip and none is new. No protocol change (`packages/protocol/schema/protocol.json`
+untouched — the fix is laptop-side only).
+
+**What I did not verify:** the live docker row (`session-hop.docker.test.ts`,
+opt-in, needs an engine); and the H6+H7 Execution signature, which is the
+orchestrator's to correct (drift note 3).

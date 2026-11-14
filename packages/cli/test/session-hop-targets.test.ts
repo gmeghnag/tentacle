@@ -120,6 +120,13 @@ interface FakeHostLog {
    * the same host — the one-per-workload resident daemon D7(b) reads.
    */
   readonly server?: SessionHost;
+  /**
+   * One entry per `openExec`, flipped when that runtime's exec channel is
+   * CLOSED — the only observable a `dispose` has (`Peer.close` → `channel.close`).
+   * A refusal that does not dispose leaves it `false` (H6 review fix round 1,
+   * finding 1: the leaked-runtime row).
+   */
+  readonly closes?: Array<{ closed: boolean }>;
 }
 
 /**
@@ -134,6 +141,26 @@ function recordingChannel(inner: DuplexChannel, frames: string[]): DuplexChannel
       inner.send(data);
     },
     close: () => inner.close(),
+    setOnMessage: (handler) => inner.setOnMessage(handler),
+    setOnClose: (handler) => inner.setOnClose(handler),
+  };
+}
+
+/**
+ * A client channel that records whether it was CLOSED, so a row can prove a
+ * refused target DISPOSED its runtime (`dispose` → `client.close` → `Peer.close`
+ * → `channel.close`). Without it, a leaked `RemoteClient` and its exec stream
+ * look exactly like a disposed one.
+ */
+function watchedChannel(inner: DuplexChannel, closes: Array<{ closed: boolean }>): DuplexChannel {
+  const state = { closed: false };
+  closes.push(state);
+  return {
+    send: (data) => inner.send(data),
+    close: () => {
+      state.closed = true;
+      inner.close();
+    },
     setOnMessage: (handler) => inner.setOnMessage(handler),
     setOnClose: (handler) => inner.setOnClose(handler),
   };
@@ -204,7 +231,8 @@ function fakeHost(log: FakeHostLog): EngineHost {
           },
         });
       connection = new Connection(daemonCh, host);
-      return log.frames === undefined ? clientCh : recordingChannel(clientCh, log.frames);
+      const watched = log.closes === undefined ? clientCh : watchedChannel(clientCh, log.closes);
+      return log.frames === undefined ? watched : recordingChannel(watched, log.frames);
     },
     async runExec(
       target: EngineExecTarget,
@@ -761,7 +789,11 @@ describe("H6 D7(b): another live session on the resident is refused, before any 
   test("refused with the D7 wording, the runtime disposed, and NO `session/open` ever sent", async () => {
     // Mutation: drop the `residentUse` check → the hop joins the busy resident,
     // and the frame record shows the open that did it.
-    const log: FakeHostLog = { calls: [], frames: [], server: occupied() };
+    // Mutation 2 (review fix round 1, finding 1): drop
+    // `await bounded(runtime.dispose(), …)` → the last two expects fail: the
+    // refused `/move attach` leaks a live `RemoteClient` and its exec stream
+    // into a workload that is not ours.
+    const log: FakeHostLog = { calls: [], frames: [], server: occupied(), closes: [] };
     const r = rig(log, { mount: false });
     const built = await r.build(
       { target: "attach", workload: { engine: "docker", name: "mine" }, keep: true },
@@ -777,6 +809,10 @@ describe("H6 D7(b): another live session on the resident is refused, before any 
     // …and nothing was opened on a workload that is not ours.
     expect((log.frames ?? []).map(frameMethod)).not.toContain("session/open");
     expect(log.server?.list({}).sessions).toHaveLength(1);
+    // The one runtime this did dial is GONE: its exec channel is closed, so no
+    // client and no stream stay alive on the other session's daemon.
+    expect(log.closes).toHaveLength(1);
+    expect(log.closes?.every((c) => c.closed)).toBe(true);
   });
 
   test("an UNREADABLE resident use is a doubt: refused, never joined", async () => {
@@ -805,7 +841,9 @@ describe("H6 D7(b): another live session on the resident is refused, before any 
   test("non-vacuity: the SAME occupied daemon with an EMPTY list is joined", async () => {
     // The refusals above must come from what the list SAYS, not from the mere
     // presence of a resident: an idle one with no live session is joinable.
-    const log: FakeHostLog = { calls: [], frames: [], server: occupied() };
+    // This is also the non-vacuity of the dispose row: the SAME watcher reports
+    // `closed: false` for a build that was NOT refused.
+    const log: FakeHostLog = { calls: [], frames: [], server: occupied(), closes: [] };
     const r = rig(log, { mount: false });
     const real = log.server as SessionHost;
     const list = real.list.bind(real);
@@ -817,7 +855,11 @@ describe("H6 D7(b): another live session on the resident is refused, before any 
     if (built.kind !== "built") {
       throw new Error(`expected a build, got ${built.notice}`);
     }
+    expect(log.closes).toHaveLength(1);
+    expect(log.closes?.every((c) => !c.closed)).toBe(true);
     await built.built.runtime.dispose();
+    // …and the dispose the caller owns does close it.
+    expect(log.closes?.every((c) => c.closed)).toBe(true);
   });
 });
 
@@ -829,9 +871,11 @@ describe("H6 D7(c): our OWN uid live on the target is CLOSED before the seeded o
    *     `session/open` (otherwise the daemon attaches the stale copy and ignores
    *     the seed: `session-host.ts`'s open, review H1);
    *   - the same, RUNNING → refused, and nothing is opened or closed on it (D7c:
-   *     a live copy nobody may kill).
+   *     a live copy nobody may kill);
+   *   - the same, IDLE but with another client ATTACHED → refused (the H6
+   *     review's finding 2: the copy is idle but it is not nobody's).
    */
-  async function ownUidOnResident(running: boolean) {
+  async function ownUidOnResident(running: boolean, opts: { anotherClient?: boolean } = {}) {
     const store = new LogSessionStore(join(dir, "sessions"));
     const saver = new SessionSaver(store, () => {});
     const broker = new SpyBroker();
@@ -847,12 +891,19 @@ describe("H6 D7(c): our OWN uid live on the target is CLOSED before the seeded o
     // `running: true` is what a live turn looks like in `session/list`; the
     // session itself is opened either way, with the stale history the daemon
     // would hand a joiner.
+    const attachment = { send: () => {} };
     const hosted = server.open(
       { sessionId: uid, create: true, messages: [{ role: "user", content: "STALE" }] },
-      { send: () => {} },
+      attachment,
     ).hosted;
     if (running) {
       Object.defineProperty(hosted, "running", { get: () => true });
+    }
+    if (opts.anotherClient !== true) {
+      // The ordinary stale copy: the client that made it has LEFT (`attached: 0`,
+      // the daemon keeps the session loaded). That is what makes it closeable;
+      // leaving it attached would be the H6 review's finding 2 instead.
+      hosted.detach(attachment);
     }
     // Our laptop's own copy of the SAME uid: the history the hop must carry.
     await saver.write({
@@ -929,6 +980,23 @@ describe("H6 D7(c): our OWN uid live on the target is CLOSED before the seeded o
     // Mutation: drop the `running`/`jobs` arm of `ownUidVerdict` → the idle path
     // KILLS a live turn's session (the one thing D7c forbids).
     const { outcome, frames } = await ownUidOnResident(true);
+    expect(outcome.kind).toBe("failed");
+    expect(outcome.kind === "failed" ? outcome.notice : "").toBe(
+      "not moved: docker:mine still holds an older copy of this session",
+    );
+    const methods = frames.map(frameMethod);
+    expect(methods).not.toContain("session/close");
+    expect(methods).not.toContain("session/open");
+  });
+
+  test("an IDLE copy another client is ATTACHED to: refused, never closed under it", async () => {
+    // The H6 review's finding 2, end to end on a REAL `session/list`: our uid on
+    // the hop container's resident, no turn and no job (`running`/`jobs` both
+    // quiet), but a plain `tentacle attach` TUI has joined it. `attached` is the
+    // only field that says so. Mutation: `ownUidVerdict` reading only
+    // `running`/`jobs` → `session/close` is sent and that TUI's session ends
+    // beneath it ("the workload's current client is never disturbed", D7).
+    const { outcome, frames } = await ownUidOnResident(false, { anotherClient: true });
     expect(outcome.kind).toBe("failed");
     expect(outcome.kind === "failed" ? outcome.notice : "").toBe(
       "not moved: docker:mine still holds an older copy of this session",

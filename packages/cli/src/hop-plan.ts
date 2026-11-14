@@ -151,9 +151,14 @@ export type AttachVerdict =
 export type OwnUidVerdict =
   /** Not live there: seed normally. */
   | { readonly kind: "absent" }
-  /** Live and idle: close it, then seed (the daemon's open would attach it). */
+  /** Live, idle and nobody attached: close it, then seed (the daemon's open would attach it). */
   | { readonly kind: "close" }
-  /** Live and running or holding jobs: ours, but someone's work — never killed. */
+  /**
+   * Ours, but in use: a turn is running, it holds jobs, or another client is
+   * ATTACHED to it. Never killed — and never closed, which would end it under
+   * that client just the same (H6 review fix round 1, finding 2: `attached`
+   * alone is a client sitting in an otherwise idle session).
+   */
   | { readonly kind: "busy" }
   /** The list is not the whole truth: a doubt is a refusal. */
   | { readonly kind: "unknown" };
@@ -165,7 +170,9 @@ export function ownUidVerdict(own: OwnUse | null): OwnUidVerdict {
   if (own.own === null) {
     return { kind: "absent" };
   }
-  return own.own.running || own.own.jobs > 0 ? { kind: "busy" } : { kind: "close" };
+  return own.own.running || own.own.jobs > 0 || own.own.attached > 0
+    ? { kind: "busy" }
+    : { kind: "close" };
 }
 
 export interface AttachVerdictInput {
@@ -176,9 +183,14 @@ export interface AttachVerdictInput {
    * Our OWN uid on the target, from the same `session/list` read that gives
    * `use` (docs/feat/session-hop.md D1 step 4(a), review H1): `null` = not
    * live there. A live copy is NEVER joined — the daemon's `open` would attach
-   * it and ignore the seed — so it is closed first when idle.
+   * it and ignore the seed — so it is closed first when idle AND nobody is
+   * attached; a copy another client sits in is someone's (D7, H6 fix round 1).
    */
-  readonly own: { readonly running: boolean; readonly jobs: number } | null;
+  readonly own: {
+    readonly running: boolean;
+    readonly jobs: number;
+    readonly attached: number;
+  } | null;
   /** `residentUse` after the handshake, BEFORE any open; `null`: not the whole truth. */
   readonly use: ResidentUse | null;
 }
@@ -210,8 +222,11 @@ export function attachVerdict(input: AttachVerdictInput): AttachVerdict {
     input.own === null ? { own: null, others: 0 } : { own: input.own, others: 0 },
   );
   if (own.kind === "busy") {
-    // A copy nobody runs can be closed and reseeded; one that is running (or
-    // holds jobs) is someone's live work — refuse, never kill it (D7c).
+    // A copy nobody runs AND nobody sits in can be closed and reseeded; one that
+    // is running, holds jobs, or has a client ATTACHED is someone's live work —
+    // refuse, never kill it (D7c/D7). `attached` counts here for the same reason
+    // `running` does: closing an idle copy under an attached TUI ends its
+    // session just as surely as killing a turn (H6 review fix round 1, finding 2).
     return { kind: "refuse", text: `${shown} still holds an older copy of this session` };
   }
   if (own.kind === "close") {

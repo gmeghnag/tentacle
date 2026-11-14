@@ -210,11 +210,13 @@ describe("attachVerdict: D7", () => {
   test("our OWN uid live and idle: close it, then seed (D1 step 4(a), review H1)", () => {
     // Mutation: drop the `own` branch → this row returns `allowed` and the
     // daemon's stale copy is attached instead of the laptop's history.
-    expect(verdict({ own: { running: false, jobs: 0 } })).toEqual({ kind: "close-own" });
-    // Our own copy is not "another session", so `others` is not what decides it.
-    expect(verdict({ own: { running: false, jobs: 0 }, use: use({ others: 1 }) })).toEqual({
+    expect(verdict({ own: { running: false, jobs: 0, attached: 0 } })).toEqual({
       kind: "close-own",
     });
+    // Our own copy is not "another session", so `others` is not what decides it.
+    expect(
+      verdict({ own: { running: false, jobs: 0, attached: 0 }, use: use({ others: 1 }) }),
+    ).toEqual({ kind: "close-own" });
   });
 
   test("our OWN uid running or holding jobs: refused, never killed (D7c)", () => {
@@ -222,19 +224,38 @@ describe("attachVerdict: D7", () => {
       kind: "refuse" as const,
       text: "docker:box still holds an older copy of this session",
     };
-    expect(verdict({ own: { running: true, jobs: 0 } })).toEqual(refuse);
-    expect(verdict({ own: { running: false, jobs: 2 } })).toEqual(refuse);
+    expect(verdict({ own: { running: true, jobs: 0, attached: 0 } })).toEqual(refuse);
+    expect(verdict({ own: { running: false, jobs: 2, attached: 0 } })).toEqual(refuse);
+  });
+
+  test("our OWN uid with a client ATTACHED is refused too (H6 fix round 1, finding 2)", () => {
+    // The H5 round-3 residual, confirmed by the H6 review: an idle copy is NOT
+    // nobody's copy. A plain `tentacle attach` TUI has joined the hop
+    // container's resident, and closing that copy under it breaks the
+    // changelog's "the workload's current client is never disturbed" and D7's
+    // "not ours to share". Mutation: read `attached` as nothing → `close-own`,
+    // and the TUI's session is ended underneath it.
+    const refuse = {
+      kind: "refuse" as const,
+      text: "docker:box still holds an older copy of this session",
+    };
+    expect(verdict({ own: { running: false, jobs: 0, attached: 1 } })).toEqual(refuse);
+    expect(verdict({ own: { running: true, jobs: 0, attached: 3 } })).toEqual(refuse);
+    // Non-vacuity: the SAME idle copy with nobody attached is still closed.
+    expect(verdict({ own: { running: false, jobs: 0, attached: 0 } })).toEqual({
+      kind: "close-own",
+    });
   });
 
   test("a detached run is refused even when the live copy is our own (the run owns it)", () => {
-    expect(verdict({ detachedRun: true, own: { running: false, jobs: 0 } })).toEqual({
+    expect(verdict({ detachedRun: true, own: { running: false, jobs: 0, attached: 0 } })).toEqual({
       kind: "refuse",
       text: "docker:box is in use by another session",
     });
   });
 
   test("our own copy is never joined while the list is not the whole truth", () => {
-    expect(verdict({ own: { running: false, jobs: 0 }, use: null })).toEqual({
+    expect(verdict({ own: { running: false, jobs: 0, attached: 0 }, use: null })).toEqual({
       kind: "refuse",
       text: "can't tell whether docker:box is in use — not joining it",
     });
