@@ -315,9 +315,11 @@ export interface HopFeed {
   /**
    * Start the hop. `sessionId` is the uid of the session being moved — the App
    * knows it (its controller's `sessionId`), and the host cannot guess it without
-   * minting a second one (D1 step 3 seeds the SAME uid).
+   * minting a second one (D1 step 3 seeds the SAME uid). `opts.gateAnswered`: the
+   * owner approved a PROPOSAL whose prompt already carried the mount gate's
+   * warning (D9/M6), so the build must not ask a second time.
    */
-  start(spec: HopSpec, sessionId: string | null): HopRun;
+  start(spec: HopSpec, sessionId: string | null, opts?: { gateAnswered?: true }): HopRun;
   /**
    * Abort the hop in flight (D3's `/move cancel`). Optional: a host that cannot
    * stop a build half-way leaves it to its own failure path, and the App then
@@ -355,7 +357,8 @@ export interface HopFeed {
  */
 export type HopProposalView =
   | { readonly kind: "none" }
-  | { readonly kind: "approved"; readonly spec: HopSpec }
+  /** `gateAnswered`: the prompt this Yes answered already carried the mount gate's warning. */
+  | { readonly kind: "approved"; readonly spec: HopSpec; readonly gateAnswered?: true }
   | { readonly kind: "declined" };
 
 export interface AppProps {

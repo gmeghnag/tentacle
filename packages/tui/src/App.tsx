@@ -531,7 +531,9 @@ export function App({
   // below re-runs when it changes; the ref is what a command reads synchronously.
   const [hopQueued, setHopQueued] = useState<HopSpec | null>(null);
   const hopQueuedRef = useRef<HopSpec | null>(null);
-  const startHopRef = useRef<((spec: HopSpec) => void) | null>(null);
+  const startHopRef = useRef<((spec: HopSpec, opts?: { gateAnswered?: true }) => void) | null>(
+    null,
+  );
   /**
    * The host's view of this TUI's own turns (docs/feat/session-hop.md D9, slice
    * H5): it folds each event (`hop.turn`), asks the owner at the turn's end
@@ -547,7 +549,7 @@ export function App({
     takeLine: () => hop?.takeLine?.() ?? null,
     // An approved proposal is an approved `/move`: the ONE place the view moves
     // starts it (D3), through the ref so no dependency cycle is created.
-    approved: (spec) => startHopRef.current?.(spec),
+    approved: (spec, opts) => startHopRef.current?.(spec, opts),
   };
   /** The queued-hop driver, read from the effect below (a ref: no dependency cycle). */
   const hopIfQueuedRef = useRef<(() => void) | null>(null);
@@ -1783,11 +1785,11 @@ export function App({
    * effectful is the host's (`HopFeed`): the App never builds a runtime.
    */
   const startHop = useCallback(
-    (spec: HopSpec): void => {
+    (spec: HopSpec, opts?: { gateAnswered?: true }): void => {
       if (!hop) {
         return;
       }
-      const run = hop.start(spec, sessionRef.current?.sessionId ?? null);
+      const run = hop.start(spec, sessionRef.current?.sessionId ?? null, opts);
       hopRef.current = run;
       setHopRun({ target: hop.label(spec), phase: null });
       switchingRef.current = true;

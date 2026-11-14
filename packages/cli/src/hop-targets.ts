@@ -26,7 +26,7 @@ import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { attachEngineRuntime, startEngineRuntime } from "./engine-runtime.ts";
 import { engineNoun, laptopWorkspaceInput } from "./engine-select.ts";
 import type { HopPlace } from "./hop-plan.ts";
-import type { HopPromptFacts } from "./hop-proposal.ts";
+import type { HopPromptEngine, HopPromptFacts } from "./hop-proposal.ts";
 import type { HopShared } from "./hop-runtime.ts";
 import { removeVerifiedKept } from "./kept-cmd.ts";
 import { forgetKept, keptDir, recordKept } from "./kept-index.ts";
@@ -84,19 +84,30 @@ export interface HopTargetDeps {
 }
 
 /**
+ * What a build may be TOLD, not what it may invent (D9/M6: ONE prompt). When the
+ * owner's approval of a PROPOSAL already carried the mount gate's warning
+ * (`hopPromptFacts` → `gate`), that Yes answered the gate too: asking again at
+ * build time is the second prompt the review found (H5 finding 2).
+ */
+export interface HopBuildOpts {
+  /** The owner approved a prompt that already showed this gate's warning. */
+  readonly gateAnswered?: true;
+}
+
+/**
  * The ONE build a hop calls (D1 step 2). Every failure is `{kind: "failed"}` with
  * one short line: the old session is untouched, and nothing this hop created is
  * left behind.
  */
 export function createHopTargets(deps: HopTargetDeps) {
-  return async (spec: HopSpec, sessionId: string): Promise<HopBuild> => {
+  return async (spec: HopSpec, sessionId: string, opts: HopBuildOpts = {}): Promise<HopBuild> => {
     if (spec.target === "local") {
       return workerTarget(deps, sessionId);
     }
     if (spec.target === "attach") {
       return attachTarget(deps, spec.workload, sessionId);
     }
-    return containerTarget(deps, spec.image, sessionId);
+    return containerTarget(deps, spec.image, sessionId, opts);
   };
 }
 
@@ -125,6 +136,48 @@ async function workerTarget(deps: HopTargetDeps, _sessionId: string): Promise<Ho
 }
 
 /**
+ * The workspace plan and its gate for a container hop — the ONE computation, so
+ * the prompt the owner approves (`hopPromptFacts`) cannot state a mount, an engine
+ * or a warning that the BUILD would not use, and the build cannot raise a second
+ * prompt for something the proposal already asked about (H5 review findings 2, 3).
+ * `null` when no container engine is configured at all (the build then refuses).
+ */
+function containerPlan(deps: {
+  readonly config: TentacleConfig;
+  readonly host: (engine: EngineKind) => HopEngineHost;
+  readonly mount?: boolean;
+  readonly engine: EngineKind;
+  readonly target: HopEngineHost;
+}): {
+  readonly engine: "docker" | "podman";
+  readonly plan: ReturnType<typeof planWorkspace>;
+  readonly gate: ReturnType<typeof mountGate>;
+} | null {
+  const { config } = deps;
+  if (deps.engine !== "docker" && deps.engine !== "podman") {
+    return null;
+  }
+  const plan = planWorkspace(
+    laptopWorkspaceInput({
+      kind: deps.engine,
+      ...(deps.target.endpoint === undefined ? {} : { endpoint: deps.target.endpoint }),
+      noMount: deps.mount === false,
+      cwd: config.cwd,
+      configDir: config.configDir,
+      binDir: "/usr/local/bin",
+      // A key file in the cwd is the dangerous thing to expose (D6's warnings);
+      // the hop has no `run` flags to mask anything else.
+      hide: [],
+    }),
+  );
+  return {
+    engine: deps.engine,
+    plan,
+    gate: mountGate(plan, { interactive: true, confirmed: false }),
+  };
+}
+
+/**
  * A NEW docker/podman container (D1 step 2, D5, D6): the mount plan and its gate
  * first (nothing is created for a refusal), then `startEngineRuntime` — kept.
  * A pod is attach-only (decision 1), so it is refused here rather than built.
@@ -133,6 +186,7 @@ async function containerTarget(
   deps: HopTargetDeps,
   image: string | undefined,
   _sessionId: string,
+  opts: HopBuildOpts = {},
 ): Promise<HopBuild> {
   const { config } = deps;
   const engine = containerEngine(config);
@@ -153,31 +207,32 @@ async function containerTarget(
     return { kind: "failed", notice: `not moved: ${errorText(error, "no engine")}` };
   }
   const noun = engineNoun(engine);
-  const plan = planWorkspace(
-    laptopWorkspaceInput({
-      kind: engine,
-      ...(target.endpoint === undefined ? {} : { endpoint: target.endpoint }),
-      noMount: deps.mount === false,
-      cwd: config.cwd,
-      configDir: config.configDir,
-      binDir: "/usr/local/bin",
-      // A key file in the cwd is the dangerous thing to expose (D6's warnings);
-      // the hop has no `run` flags to mask anything else.
-      hide: [],
-    }),
-  );
+  const computed = containerPlan({
+    config,
+    host: deps.host,
+    ...(deps.mount === false ? { mount: false } : {}),
+    engine,
+    target,
+  });
+  if (computed === null) {
+    return { kind: "failed", notice: "not moved: no docker or podman engine is set" };
+  }
+  const { plan, gate } = computed;
   if (plan.kind === "refuse") {
     return { kind: "failed", notice: `not moved: ${untrustedText(plan.message)}` };
   }
   if (plan.kind === "none" && plan.warning !== undefined) {
     deps.notify(untrustedText(plan.warning));
   }
-  const gate = mountGate(plan, { interactive: true, confirmed: false });
   if (gate.action === "refuse") {
     return { kind: "failed", notice: `not moved: ${untrustedText(gate.message)}` };
   }
-  if (gate.action === "ask") {
+  if (gate.action === "ask" && opts.gateAnswered !== true) {
     // D6: ONE laptop prompt, through the SAME broker the target's daemon asks on.
+    // `gateAnswered`: the owner's approval of the PROPOSAL already showed this
+    // very text (`hopPromptFacts`), so that Yes answered it — a second prompt here
+    // is the bug H5 review found (finding 2). A typed `/move` has no proposal and
+    // reaches this ask as before.
     const mountPath = plan.kind === "mount" ? plan.mount.target : config.cwd;
     const answer = await deps.shared.permissions.request(mountAsk(engine, mountPath, gate.prompt));
     if (!answer.allowed) {
@@ -209,6 +264,10 @@ async function containerTarget(
       permissions: deps.shared.permissions,
       saver: deps.shared.saver,
       resume: null,
+      // D8/D9: this runtime's client IS the hop TUI (it has the `/move` feed and
+      // the one broker prompt), so it declares `hop` in `initialize` and the pod
+      // daemon keeps offering the model `move_session` on this target.
+      hop: true,
       // Everything the engine says goes to the hop's sinks: no spinner, no raw
       // line while Ink owns the terminal (§7, P8, D6).
       logTerm: HOP_TERM,
@@ -279,6 +338,8 @@ async function attachTarget(
       saver: deps.shared.saver,
       resume: null,
       sessionId,
+      // The same declarative as a new container: this client can ask its owner.
+      hop: true,
       logTerm: HOP_TERM,
       log: (line) => deps.notify(untrustedText(line)),
       // The same rule as the container: `info` is the NOTICE sink (D6's spirit,
@@ -320,34 +381,52 @@ async function attachTarget(
  * which is exactly what the prompt must then show (never an invented path).
  */
 export function hopPromptFacts(
-  config: TentacleConfig,
-  _spec: HopSpec,
+  deps: Pick<HopTargetDeps, "config" | "host" | "mount">,
+  spec: HopSpec,
   current: HopPlace,
 ): HopPromptFacts {
-  const facts: { engine?: "docker" | "podman"; mount?: string; workload?: string } = {};
+  const { config } = deps;
+  const facts: { engine?: HopPromptEngine; mount?: string; workload?: string; gate?: string } = {};
   const engine = containerEngine(config);
-  if (engine === "docker" || engine === "podman") {
-    facts.engine = engine;
-  }
   if (current.kind === "workload") {
     facts.workload = workloadLabel(current);
   }
+  if (spec.target !== "container" || engine === null) {
+    return facts;
+  }
+  if (engine !== "docker" && engine !== "podman") {
+    return facts;
+  }
+  facts.engine = engine;
+  // The SAME plan and gate the BUILD would use (`containerPlan`) — a prompt that
+  // states its own mount is a prompt the owner approves blind (H5 review 3), and
+  // a gate kept out of it asks the owner twice (finding 2).
   try {
-    const plan = planWorkspace(
-      laptopWorkspaceInput({
-        kind: "docker",
-        noMount: false,
-        cwd: config.cwd,
-        configDir: config.configDir,
-        binDir: "/usr/local/bin",
-        hide: [],
-      }),
-    );
+    const computed = containerPlan({
+      config,
+      host: deps.host,
+      ...(deps.mount === false ? { mount: false } : {}),
+      engine,
+      target: deps.host(engine),
+    });
+    if (computed === null) {
+      return facts;
+    }
+    const { plan, gate } = computed;
     if (plan.kind === "mount") {
       facts.mount = plan.mount.target;
     }
+    // `ask`: the gate's own text, merged into THIS detail (`hopPromptDetail`) so
+    // the owner answers one question. `refuse` needs no line here: the build
+    // refuses with that message and nothing is created.
+    if (gate.action === "ask") {
+      facts.gate = gate.prompt;
+    } else if (gate.action === "proceed" && gate.warnings !== undefined) {
+      facts.gate = gate.warnings.join("\n");
+    }
   } catch {
-    // No plan (no engine host, an unresolvable path): the prompt says no mount.
+    // No plan (no engine host, an unresolvable path): the prompt says no mount,
+    // which is exactly what the build would then do.
   }
   return facts;
 }

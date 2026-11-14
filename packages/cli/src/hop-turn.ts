@@ -38,7 +38,15 @@ export type HopProposalOutcome =
   /** Nothing was proposed (or it was not this TUI's turn): the turn ends as it would. */
   | { readonly kind: "none" }
   /** A proposal the owner approved — as `once`. `spec` is what to build. */
-  | { readonly kind: "approved"; readonly spec: HopSpec }
+  | {
+      readonly kind: "approved";
+      readonly spec: HopSpec;
+      /**
+       * The prompt this Yes answered already showed the mount gate's warning
+       * (D9/M6): the build must not ask again (H5 review finding 2).
+       */
+      readonly gateAnswered?: true;
+    }
   /** Refused, dismissed or unaskable: nothing is built, and the model is told. */
   | { readonly kind: "declined"; readonly line: string };
 
@@ -68,11 +76,16 @@ export function hopPromptRequest(spec: HopSpec, facts: HopPromptFacts = {}): Per
 export function hopProposalOutcome(
   spec: HopSpec,
   response: PermissionResponse,
+  shown: { readonly gate?: string } = {},
 ): HopProposalOutcome {
   if (response.allowed !== true || response.dismissed === true) {
     return { kind: "declined", line: MOVE_DECLINED_LINE };
   }
-  return { kind: "approved", spec };
+  // ONE prompt: a Yes to a detail that CARRIED the gate's warning answered the
+  // gate too, so the build does not raise a second ask (H5 review finding 2).
+  return shown.gate !== undefined && shown.gate !== ""
+    ? { kind: "approved", spec, gateAnswered: true }
+    : { kind: "approved", spec };
 }
 
 /** One turn, watched: the open `move_session` calls, and the last proposal made. */
@@ -147,7 +160,7 @@ export async function hopAskAtTurnEnd(
     ...(proposed.reason !== undefined ? { reason: proposed.reason } : {}),
   };
   const response = await ask(hopPromptRequest(proposed.spec, shown));
-  return hopProposalOutcome(proposed.spec, response);
+  return hopProposalOutcome(proposed.spec, response, shown);
 }
 
 /** The line a COMMITTED move leaves for the next prompt: where, and what was reset. */

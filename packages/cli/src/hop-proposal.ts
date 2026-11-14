@@ -209,9 +209,16 @@ export interface HopPromptFacts {
   /**
    * D6's mount-gate `ask` text. Merged into THIS detail (review M6): the owner
    * answers one question, not two, and the gate's warning cannot be missed
-   * because it arrived as a second prompt while this one was open.
+   * because it arrived as a second prompt while this one was open. Set ONLY for
+   * an `ask`: a Yes here also answers the gate, so the build does not re-ask
+   * (`mountConfirmed`, H5 review finding 2).
    */
   readonly gate?: string;
+  /**
+   * The gate's `proceed` WARNINGS (a case-reachable mask). Shown here so the owner
+   * is not surprised later; nothing to answer, so no build-time prompt follows.
+   */
+  readonly gateWarnings?: string;
   /** The model's own reason (D9). POD-SUPPLIED: sanitized, and always LAST. */
   readonly reason?: string;
 }
@@ -248,6 +255,9 @@ export function hopPromptDetail(spec: HopSpec, facts: HopPromptFacts = {}): stri
   }
   if (facts.gate !== undefined && facts.gate !== "") {
     lines.push(untrustedText(facts.gate));
+  }
+  if (facts.gateWarnings !== undefined && facts.gateWarnings !== "") {
+    lines.push(untrustedText(facts.gateWarnings));
   }
   // The fate of what we leave: said OUT LOUD both ways, because silence reads as
   // a delete — and a hop back is the only place a delete can happen (D5).

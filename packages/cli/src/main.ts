@@ -2118,7 +2118,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           // auto-approve it daemon-side. The prompt's facts come from the plan the
           // target would use, so the owner reads the real image and mount.
           permissions,
-          promptFacts: (spec) => hopPromptFacts(config, spec, place.current),
+          promptFacts: (spec) =>
+            hopPromptFacts(
+              { config, host: (engine) => hopEngineHost(engine) },
+              spec,
+              place.current,
+            ),
         });
         hopStatus = hopView.status;
         const offTarget = facade.onTarget((view) => {

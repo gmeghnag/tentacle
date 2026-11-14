@@ -123,7 +123,7 @@ export interface HopTurnPort {
    * The owner APPROVED a proposed move: the host hands the spec over, and the
    * App starts it exactly as a typed `/move` (one path to the view's move, D3).
    */
-  approved(spec: HopSpec): void;
+  approved(spec: HopSpec, opts?: { readonly gateAnswered?: true }): void;
   /**
    * The line the model must read at the start of its next REAL prompt — `[move
    * declined]` after a refusal, `[session moved to …]` after a commit (review M7)
@@ -687,7 +687,10 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
             void hopTurn?.end(true).then(
               (outcome) => {
                 if (outcome.kind === "approved") {
-                  hopTurn.approved(outcome.spec);
+                  hopTurn.approved(
+                    outcome.spec,
+                    outcome.gateAnswered === true ? { gateAnswered: true } : undefined,
+                  );
                 }
               },
               () => {

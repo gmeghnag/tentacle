@@ -109,6 +109,13 @@ export interface AgentContext {
    * streamed from them) and its approvals. Absent at a create. Opaque here.
    */
   readonly reuse?: AgentReuse;
+  /**
+   * The creating CLIENT can put a `move_session` proposal to its owner (D8/D9):
+   * `Attachment.hop`, which a pod daemon sees per connection. A factory that offers
+   * the tool must gate it on this — a pod serves `run`, `attach` and a hop target
+   * alike, and only a hop-capable TUI has a feed and a broker prompt for it.
+   */
+  readonly hop?: true;
 }
 
 /** What a rebuilt agent takes over from the session it replaces the agent of. */
@@ -618,7 +625,7 @@ export class SessionHost {
     const id = params.sessionId ?? crypto.randomUUID();
     // `title` and `settings` count only for a session this open creates (a live
     // or archived id never got here).
-    const hosted = this.build(
+    const host = this.build(
       id,
       params.messages,
       undefined,
@@ -629,11 +636,13 @@ export class SessionHost {
       seeded
         ? { reason: "seed", ...(params.logBase ? { base: params.logBase } : {}) }
         : { reason: "create" },
+      // D8/D9: the tool is offered to a session whose CREATING client declared
+      // it can put the proposal to its owner — never to every session of a pod.
+      attachment.hop === true ? (true as const) : undefined,
     );
-    // Registered BEFORE attaching: nothing can observe the id half-built.
-    this.sessions.set(id, hosted);
-    const { epoch } = hosted.attach(attachment);
-    return { hosted, created: true, resync: false, epoch };
+    this.sessions.set(id, host);
+    const { epoch } = host.attach(attachment);
+    return { hosted: host, created: true, resync: false, epoch };
   }
 
   /**
@@ -1055,6 +1064,7 @@ export class SessionHost {
     seed?: TitleState,
     settings?: SessionSettings,
     log?: SessionLogOptions,
+    hop?: true,
   ): HostedSession {
     // The agent exists before its session (P4): its link is bound late, and a
     // session is only reachable (hence prompted) once built.
@@ -1071,6 +1081,10 @@ export class SessionHost {
         modelLink: () => bound.hosted?.modelLink() ?? null,
         ...(settings ? { settings } : {}),
         ...(this.opts.images?.source === "store" ? { attachments: uploads } : {}),
+        // D8/D9: the client that CREATED this session can ask its owner about a
+        // `move_session` proposal, so this factory may offer the tool. Unset →
+        // never offered (a `run`/`attach` TUI has no `/move` feed).
+        ...(hop ? { hop: true as const } : {}),
       });
     // core `ChatMessage` is structurally the wire schema.
     const session = new Session(agent, id, messages && messages.length > 0 ? { messages } : {});
@@ -1110,6 +1124,7 @@ export class SessionHost {
     hosted.settingsReport = settingsReport;
     hosted.imagesPolicy = this.opts.images;
     hosted.grants = grants;
+    hosted.hop = hop === true;
     return hosted;
   }
 
@@ -1136,6 +1151,10 @@ export class SessionHost {
       reuse,
       // A settings sync must not silently turn every image into a placeholder.
       ...(this.opts.images?.source === "store" ? { attachments: hosted.uploads } : {}),
+      // A settings sync rebuilds the agent: the session's `hop` fact is its own
+      // (the CREATING client's), so the rebuilt agent offers the tool exactly when
+      // the first one did (D8/D9).
+      ...(hosted.hop ? { hop: true as const } : {}),
     });
     const foreign =
       next.permissions !== reuse.permissions ||

@@ -738,7 +738,7 @@ export function podSessionHost(
     // than it needs, and stays symmetric with `serve`); the real one goes to
     // the daemon's stderr log (piped + routed by the laptop, never inherited).
     ...(log ? { onTurnError: (error: Error) => log(`error: ${error.message}`) } : {}),
-    createAgent: (cwd, { modelLink, settings, reuse, attachments }) => {
+    createAgent: (cwd, { modelLink, settings, reuse, attachments, hop }) => {
       if (!options.modelProxy) {
         // It reports nothing: a settings sync answers `applied: false`.
         return buildAgent(
@@ -750,8 +750,11 @@ export function podSessionHost(
             // A pod daemon without `--model-proxy` runs its OWN model, so it
             // holds the bytes (D4, Orchestrator decision 8).
             ...(attachments ? { attachments } : {}),
-            // D8/D9: a pod daemon may PROPOSE a move, like the worker.
-            moveSession: true,
+            // D8/D9: a pod daemon may PROPOSE a move — but only for a session
+            // whose client declared it can ASK the owner (H5 review finding 1).
+            // `run`/`attach` have no `/move` feed, so their model must never be
+            // told to propose one: it would claim a prompt nobody raises.
+            ...(hop ? { moveSession: true as const } : {}),
           },
         );
       }
@@ -760,9 +763,9 @@ export function podSessionHost(
         ...(log ? { log } : {}),
         skillScan,
         ...(reuse ? { reuse } : {}),
-        // A pod daemon is the other hop-capable kind (D8/D9): it may PROPOSE, and
-        // the laptop's TUI is the one that asks the owner.
-        moveSession: true,
+        // The same rule as above: the pod daemon is hop-capable, this SESSION is
+        // only if its client can put the proposal to its owner (D8/D9).
+        ...(hop ? { moveSession: true as const } : {}),
       });
       logPins(wired.pinnedOver);
       return wired;

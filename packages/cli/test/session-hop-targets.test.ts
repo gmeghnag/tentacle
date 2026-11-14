@@ -362,6 +362,24 @@ describe("H4 the mount gate inside Ink (D6)", () => {
     expect(r.pair.permissions).toBe(r.pair.broker as unknown as PermissionBroker);
     await built.built.rollback();
   });
+
+  test("an APPROVED proposal (`gateAnswered`) is ONE prompt: the build does not re-ask", async () => {
+    // H5 review finding 2, the second half: the proposal's detail already carried
+    // this gate's warning (`hopPromptFacts` → `gate`), so the owner's Yes answered
+    // it. Without `gateAnswered` the owner sees the SAME warning twice.
+    const log: FakeHostLog = { calls: [] };
+    const r = rig(log, { cwd: "/etc" });
+    const built = await r.build({ target: "container", keep: true }, "uid-1", {
+      gateAnswered: true,
+    });
+    if (built.kind !== "built") {
+      throw new Error(`expected a build, got ${built.notice}`);
+    }
+    // Mutation: ignore `opts.gateAnswered` → ONE request, the second prompt.
+    expect(r.pair.broker.requests).toEqual([]);
+    expect(log.calls).toContain("create");
+    await built.built.rollback();
+  });
 });
 
 describe("H4 nothing is written raw while Ink owns the terminal (D6, P8, M4)", () => {

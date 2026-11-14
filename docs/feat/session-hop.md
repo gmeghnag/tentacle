@@ -1613,3 +1613,137 @@ Gate: these 7 test files (tools/move-session, cli/move-session-wiring, agent/sub
 - The turn-end ask runs in `finally`, so it also fires after an abort or an error. When a send-now succeeds, the watch carries over into the successor turn and is asked at that turn's end. That is acceptable.
 
 **How the executor behaved:** a thorough mutation table and an honest "not re-verified" note. But the M6 property was proven only on a pure string, not on the build that actually runs, and the scope of the pod-daemon registration was not checked against D8.
+
+### Fix round 1 — the H5 review's HIGH/MEDIUM findings
+
+*— claude-opus-5-5, 2026-11-14*
+
+Scope: the four findings of `## Review — H5` above, and nothing else. Red before
+green (§9) for each, plus a mutation per fix (each broken in this tree, its
+narrow file(s) run, restored, `md5` printed before and after — no `.bak` left).
+
+**Finding 1 (HIGH) — every `run`/`attach` pod was offered a tool nobody answers. FIXED.**
+
+`podSessionHost` set `moveSession: true` for every session of a pod daemon, but
+D8 gives a `run`/`attach` TUI no `hop` prop: the model was told to propose a move
+no prompt could raise, and its `tool_result` said so. The tool is now offered
+**per SESSION, to the client that can actually ask** — a new capability, threaded
+the whole wire:
+
+- `protocol/src/session.ts`: `ClientCapabilitiesSchema.hop?: boolean` (optional,
+  additive: an older daemon drops it, so it fails closed).
+- `client/src/remote-client.ts`: `RemoteClientOptions.hop` → `initialize` sends
+  `clientCapabilities.hop`; read once per handshake (a reconnect re-declares).
+- `daemon/src/connection.ts`: `initialize` stores it per CONNECTION; `open` puts
+  it on the `Attachment` that creates the session.
+- `daemon/src/hosted-session.ts` / `session-host.ts`: `Attachment.hop`,
+  `HostedSession.hop`, and `build` hands it to `createAgent` as
+  `AgentContext.hop` — the CREATING client's fact, kept across a settings sync
+  (`updateSettings` passes `hosted.hop`).
+- `cli/src/serve.ts`: `podSessionHost`'s two branches pass
+  `hop ? { moveSession: true } : {}` instead of unconditionally.
+- `cli/src/local-runtime.ts` + `engine-runtime.ts` (`EngineRuntimeDeps.hop`,
+  `EngineAttachRuntimeDeps.hop`) and `hop-targets.ts`: a HOP target's own runtime
+  declares `hop: true` (it has the `/move` feed and the one broker prompt), so a
+  moved session keeps proposing; `run`/`attach` never do. The worker's
+  unconditional `moveSession` stays: a worker runtime exists only for the local
+  TUI, which is hop-capable.
+
+*Red first:* `packages/cli/test/move-session-pod-capability.test.ts` (new) drives
+the REAL stack — `podSessionHost` → `Connection` → `RemoteClient` → a turn — and
+asserts the tool list on the provider's `ChatRequest`: a client that declares no
+`hop` is never offered `move_session`, a hop-capable one is. *Mutation:* the
+pre-fix shape (`moveSession: true` in both `podSessionHost` branches) → **1 fail**
+("a client that declares NO hop capability (`run`/`attach`) is never offered it"),
+with the received list naming `move_session`; restored, md5 `7bd05367…` unchanged.
+
+**Finding 2 (MEDIUM) — M6's "ONE prompt" was not met in production. FIXED, in two halves.**
+
+(a) **The gate's warning now reaches the prompt.** `hopPromptFacts` never set
+`gate`, so a dangerous cwd produced the proposal prompt AND a second gate ask at
+build time. The facts now carry `gate` (the gate's `ask` text) or
+`gateWarnings` (a `proceed` with warnings), merged into the SAME detail by
+`hopPromptDetail` — D9's wording, finally true.
+
+(b) **A Yes to that detail answers the gate.** The decision is a pure-module
+fact, not a branch in the component: `hopProposalOutcome` gains the `shown` facts
+and returns `gateAnswered: true` when the prompt it accepted carried one. It
+travels `HopProposalOutcome` → `HopProposalView` → `HopTurnPort.approved` → the
+App's `startHop` → `HopFeed.start` → `HopRuntime.hop` → `hopSession` →
+`deps.build(…, {gateAnswered})` → `containerTarget`, which skips its own ask. A
+typed `/move` never sets it, so D6's ask is unchanged for a typed move.
+
+*Red first:* `packages/cli/test/hop-prompt-facts.test.ts` (new, 6 rows) — the
+`/etc` gate row red; `packages/cli/test/session-hop-targets.test.ts` gains "an
+APPROVED proposal (`gateAnswered`) is ONE prompt"; `hop-turn.test.ts` gains the
+turn-end half (`gateAnswered` present with a gate, absent without).
+*Mutations:* `facts.gate` never set → **1 fail**; `hopAskAtTurnEnd` dropping
+`shown` → **1 fail**; `containerTarget` ignoring `opts.gateAnswered` → **1 fail**.
+Each restored, md5 `7de06973…` / `eacb8002…` unchanged.
+
+**Finding 3 (MEDIUM) — the prompt showed a mount the build would not use. FIXED.**
+
+`hopPromptFacts` built its own plan (`kind: "docker"`, `noMount: false`, no
+endpoint) while `containerTarget` passes the real engine, the real endpoint and
+`deps.mount === false`. Both now call ONE new helper, `containerPlan` — the same
+plan and the same `mountGate`, so the prompt cannot state a mount, an engine or a
+warning the build would not act on. `hopPromptFacts`'s inputs are the build's own
+deps (`Pick<HopTargetDeps, "config" | "host" | "mount">`), which is what makes the
+divergence unrepresentable; `main.ts` passes them.
+
+*Red first:* `hop-prompt-facts.test.ts`'s `mount: false`, remote `tcp://` and
+`podman` rows — all three red on the pre-fix function.
+*Mutations:* `noMount: false` hard-coded → **1 fail**; `kind: "docker"` hard-coded
+→ **1 fail**; `facts.engine = "docker"` → **1 fail**. Restored, md5 unchanged.
+
+**Finding 4 (MEDIUM) — the production proposal→prompt path had no test. FIXED.**
+
+The review's own mutation (deleting `hopTurn?.event(...)` in `useTurnDriver.ts`)
+passing 2011 tests is the proof it was needed. `packages/cli/test/hop-proposal-app.test.tsx`
+(new) renders the REAL `App` with the REAL `createHopFeed` over a controller that
+streams a `move_session` `tool_start`/`tool_result`, and asserts the whole chain at
+the frame: ONE `session_hop` request carrying the image, a Yes starting the ONE
+move path, and the moved notice — plus a No asking once and moving nothing. The
+spy is a `PermissionBroker` SUBCLASS (the App installs its own interactive
+requester with `setRequester`, which replaces an initial one).
+*Mutation (the review's):* `hopTurn?.event(...)` deleted → **2 fail**. Restored,
+md5 `67fb324e…` unchanged.
+
+**Drift from the Implementation, and why.** D9 says the tool is registered "in
+worker and pod-bridge daemons" and D8 says a `run`/`attach` TUI gets no `hop`.
+Those two cannot both hold with a registration that is daemon-wide: a pod daemon
+IS `run`/`attach`. So the registration is per SESSION, keyed on a new optional
+`clientCapabilities.hop` — the only fact that distinguishes a hop target's spawn
+from a plain run. It is an additive, optional protocol field (an older daemon
+drops it and offers no tool, the safe direction), so no `PROTOCOL_VERSION` bump
+and no `protocol.d/` note; `packages/protocol/schema/protocol.json` was regenerated
+with `bun run schema:export` (the drift gate). No method, update kind or required
+field changed (D10). The changelog bullet for `sessionHop.tool` says the new scope.
+
+**Files:** `protocol/src/session.ts` · `protocol/schema/protocol.json` ·
+`client/src/remote-client.ts` · `daemon/src/connection.ts` ·
+`daemon/src/session-host.ts` · `daemon/src/hosted-session.ts` ·
+`cli/src/serve.ts` · `cli/src/local-runtime.ts` · `cli/src/engine-runtime.ts` ·
+`cli/src/hop-targets.ts` · `cli/src/hop-proposal.ts` · `cli/src/hop-turn.ts` ·
+`cli/src/hop-feed.ts` · `cli/src/hop-runtime.ts` · `cli/src/session-hop.ts` ·
+`cli/src/main.ts` · `cli/src/wiring.ts` · `tui/src/app-types.ts` ·
+`tui/src/useTurnDriver.ts` · `tui/src/App.tsx` · `changelog.d/session-hop.changed.md`
+· tests: `cli/test/move-session-pod-capability.test.ts` +
+`cli/test/hop-prompt-facts.test.ts` + `cli/test/hop-proposal-app.test.tsx` (new),
+`cli/test/hop-turn.test.ts`, `cli/test/session-hop-targets.test.ts`.
+
+**Gate (final tree).** `bunx tsc --noEmit` → 0 · `bun run typecheck` (`tsc
+--noEmit && tsc -p apps/mobile --noEmit`) → 0 · `bun run lint` → `Checked 1248
+files`, 0 errors / 0 warnings (the baseline is clean) · `bun test` → **9205 pass,
+3 skip (the documented opt-ins: live-k8s, live-docker, the real-socket keepalive),
+0 fail** across 667 files.
+
+**Not done here (deliberate).** The `hop` capability is per CONNECTION, so a
+session CREATED by a hop-capable client and later re-attached by a `run` TUI keeps
+the tool (the session's own fact). That is the right unit — the prompt belongs to
+the session's owner, not to whoever re-attached — but it means a second client on
+the same session does not change the offer. No test covers the case "created by a
+run, re-attached by a hop target" (the tool is then absent for the session's
+life), which would need a host-level re-open to change; noted, not fixed.
+
+*— claude-opus-5-5, 2026-11-14*

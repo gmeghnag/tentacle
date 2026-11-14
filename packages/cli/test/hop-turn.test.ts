@@ -172,6 +172,33 @@ describe("H5: a proposal becomes ONE session_hop prompt at the turn's end", () =
     expect(detail.split("\n").at(-1)).toContain("the model");
   });
 
+  test("a gate shown in the detail and accepted answers it too (ONE prompt, H5 review 2)", async () => {
+    // The gate's warning is a paragraph of THIS detail (M6), so a Yes answered the
+    // gate as well: the build must not raise a second ask (`gateAnswered`).
+    const watch = turn([start("c1", { target: "container", image: "img:1" }), done("c1")]);
+    const broker = spyBroker({ allowed: true, scope: "once" });
+    const outcome = await hopAskAtTurnEnd(watch, () => ({ gate: "⚠ mount /etc" }), broker.ask);
+    expect(broker.asked).toHaveLength(1);
+    expect(broker.asked[0]?.detail ?? "").toContain("⚠ mount /etc");
+    // Mutation: `hopProposalOutcome` ignoring `shown.gate` → `gateAnswered` gone,
+    // and the build asks the owner the same question a second time.
+    expect(outcome).toEqual({
+      kind: "approved",
+      spec: { target: "container", image: "img:1", keep: true },
+      gateAnswered: true,
+    });
+  });
+
+  test("no gate in the detail → no `gateAnswered` (nothing extra was answered)", async () => {
+    const watch = turn([start("c1", { target: "container", image: "img:1" }), done("c1")]);
+    const broker = spyBroker({ allowed: true, scope: "once" });
+    const outcome = await hopAskAtTurnEnd(watch, () => ({}), broker.ask);
+    expect(outcome).toEqual({
+      kind: "approved",
+      spec: { target: "container", image: "img:1", keep: true },
+    });
+  });
+
   test("an event AFTER the turn's end changes nothing (a late result is not a proposal)", async () => {
     const ended = turn([start("c1", { target: "local" })]);
     const late = hopTurnStep(ended, done("c1"), true);

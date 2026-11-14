@@ -394,6 +394,11 @@ export interface BuildAgentOptions {
    * It is a flag of its own because `BuildAgentOptions` has no daemon KIND
    * (review M5), and this site is shared by every kind of build: a boolean is
    * what keeps the rule "only these two kinds" readable at each call site.
+   *
+   * A POD daemon sets it only from `AgentContext.hop` — the fact that the client
+   * which created the session declared it can put the proposal to its owner
+   * (H5 review finding 1): one pod serves `run`, `attach` and a hop target alike,
+   * and only the last has a `/move` feed to ask through.
    */
   readonly moveSession?: true;
 }

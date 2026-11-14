@@ -99,7 +99,11 @@ export function createHopFeed(deps: HopFeedDeps): HopFeedView {
         (request) => broker.request(request),
       ).catch(() => ({ kind: "declined", line: MOVE_DECLINED_LINE }) as HopProposalOutcome);
       if (outcome.kind === "approved") {
-        return { kind: "approved", spec: outcome.spec };
+        return {
+          kind: "approved",
+          spec: outcome.spec,
+          ...(outcome.gateAnswered ? { gateAnswered: true as const } : {}),
+        };
       }
       if (outcome.kind === "declined") {
         // The model is told in the NEXT prompt, as part of the user message (M7).
@@ -114,12 +118,14 @@ export function createHopFeed(deps: HopFeedDeps): HopFeedView {
       pendingLine = null;
       return line;
     },
-    start: (spec, sessionId) => {
+    start: (spec, sessionId, opts) => {
       const mine = listeners;
       const before = deps.place();
       const done = (async (): Promise<Awaited<HopRun["done"]>> => {
         try {
-          const outcome = await deps.facade.hop(spec, sessionId);
+          const outcome = await deps.facade.hop(spec, sessionId, {
+            ...(opts?.gateAnswered === true ? { gateAnswered: true as const } : {}),
+          });
           if (outcome.kind === "failed") {
             return { failed: outcome.notice };
           }
