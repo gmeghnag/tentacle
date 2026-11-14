@@ -1661,3 +1661,40 @@ $ bun test                             # 8216 pass · 3 skip · 0 fail (EXIT=0; 
 to the LIST, not to a second session, so no Maestro flow exercises finding 1 in
 this round's fix (the regression is the unit test above). The thumbnail
 transport remains absent (12b Drift 1), unchanged.
+
+### Round 2
+
+*Reviewed: the fix commit `a3e3082` (`git diff HEAD~1`).*
+
+**Verdict: APPROVE**
+
+- **Finding 1 (HIGH, the broker race) — fixed.** `PermissionBroker.reset(only?)`
+  (`packages/core/src/permission.ts:209`) now withdraws only the requester it is
+  given. The screen sets and releases its own per-screen requester (`mounted`,
+  `session-screen-controller.ts`) in both `leave` and `dispose`. With no argument
+  `reset()` behaves as before, and its one caller outside this task
+  (`tui/src/permission-ui.ts:402`) is unchanged.
+  - **Mutation, app:** `reset(mounted)` → `reset()` makes "a departed screen's
+    late dispose() does NOT clear the NEXT screen's requester" fail
+    (17 pass / 1 fail).
+  - **Mutation, core:** removing the identity check makes
+    `permission.test.ts` "reset(only) leaves a requester…" fail, and the screen
+    test above fails too.
+- **Finding 2 (`deps.archived` unused) — fixed.** `sessionView` takes
+  `archived` and shows the banner and Reopen while the first attach is still
+  running. A Reopen tapped during that attach is queued, not dropped (it runs
+  only if the plain attach fails, and is cleared on success or dispose). The
+  first attach still never sends `reopen`, so Owner Q4 holds.
+  - **Mutation:** removing the `archived` branch fails two tests; removing the
+    queue fails "a Reopen tapped while the first attach is still in flight is
+    HONOURED".
+- Every mutation was reverted; `git status` is clean.
+- **Gate:** `bun test apps/mobile/test packages/core/test` 503 pass / 0 fail;
+  `bun run lint` clean (1080 files); `bun run typecheck` clean. I did not
+  re-run the full suite or Maestro.
+- **Nit (not blocking):** the fix touches `packages/core`, which the plan said
+  stays untouched ("Not touched: `packages/**`"). The change is additive (an
+  optional parameter, no wire or persisted format), but the plan's file list and
+  P11 statement should say so.
+
+*— claude-opus-5-5, 2026-11-14*
