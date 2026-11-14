@@ -163,7 +163,7 @@ describe("attachVerdict: D7", () => {
     ...over,
   });
   const verdict = (over: Partial<AttachVerdictInput>) =>
-    attachVerdict({ workload, detachedRun: false, use: use({}), ...over });
+    attachVerdict({ workload, detachedRun: false, own: null, use: use({}), ...over });
 
   test("an idle workload nobody else is in is joinable", () => {
     expect(verdict({})).toEqual({ kind: "allowed" });
@@ -201,9 +201,42 @@ describe("attachVerdict: D7", () => {
 
   test("the refusal names the workload as an engine:name", () => {
     const pod = { engine: "kubernetes", name: "web-0", container: "app" } as const;
-    expect(attachVerdict({ workload: pod, detachedRun: true, use: null })).toEqual({
+    expect(attachVerdict({ workload: pod, detachedRun: true, own: null, use: null })).toEqual({
       kind: "refuse",
       text: "kubernetes:web-0/app is in use by another session",
+    });
+  });
+
+  test("our OWN uid live and idle: close it, then seed (D1 step 4(a), review H1)", () => {
+    // Mutation: drop the `own` branch → this row returns `allowed` and the
+    // daemon's stale copy is attached instead of the laptop's history.
+    expect(verdict({ own: { running: false, jobs: 0 } })).toEqual({ kind: "close-own" });
+    // Our own copy is not "another session", so `others` is not what decides it.
+    expect(verdict({ own: { running: false, jobs: 0 }, use: use({ others: 1 }) })).toEqual({
+      kind: "close-own",
+    });
+  });
+
+  test("our OWN uid running or holding jobs: refused, never killed (D7c)", () => {
+    const refuse = {
+      kind: "refuse" as const,
+      text: "docker:box still holds an older copy of this session",
+    };
+    expect(verdict({ own: { running: true, jobs: 0 } })).toEqual(refuse);
+    expect(verdict({ own: { running: false, jobs: 2 } })).toEqual(refuse);
+  });
+
+  test("a detached run is refused even when the live copy is our own (the run owns it)", () => {
+    expect(verdict({ detachedRun: true, own: { running: false, jobs: 0 } })).toEqual({
+      kind: "refuse",
+      text: "docker:box is in use by another session",
+    });
+  });
+
+  test("our own copy is never joined while the list is not the whole truth", () => {
+    expect(verdict({ own: { running: false, jobs: 0 }, use: null })).toEqual({
+      kind: "refuse",
+      text: "can't tell whether docker:box is in use — not joining it",
     });
   });
 

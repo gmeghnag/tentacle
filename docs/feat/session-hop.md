@@ -806,3 +806,140 @@ this is a different model family, which is good for blind spots.
   mutations were reverted, and `git status --porcelain` is empty.
 
 *— claude-opus-5-5, 2026-11-14*
+
+### H2 — `freeze`/`cleanFor`, the orchestrator (D1), the facade (D2)
+
+*— claude-opus-5-5, 2026-11-14*
+
+**Load-bearing check re-run first (as instructed).** On this branch
+(`51753d0`, worktree `.tentacle/worktrees/session-hop`), both rigs PASS:
+
+```
+$ bun .tentacle/tmp/session-hop/hop-repro.ts
+after A: system:sys | user:hello from local | assistant:reply-A
+same uid before open: 3a60c0d9-…
+B uid: 3a60c0d9-… == A uid: true
+B model saw: sys | hello from local | reply-A | hello from container
+after B: … | user:hello from container | assistant:reply-B
+files: 3a60c0d9-….jsonl
+
+$ bun .tentacle/tmp/session-hop/hop-race.ts
+… after LATE A save: … | user:hello from container | assistant:reply-B
+files2: 963d2584-….jsonl
+```
+
+The third rig the plan names — `review-rollback.ts` ("unverified 1") — also
+passes, and became test H2(10): a rollback AFTER the target's first save leaves
+one `.jsonl`, no `.aside`, both runtimes `saveConfirmed`.
+
+**As built, in dependency order.**
+
+1. **`packages/cli/src/session-saver.ts`** — `cleanFor(id)`: one uid's
+   pending/failed state, so a failed save of ANOTHER session (a `/clear` fork,
+   a second TUI) does not refuse a hop (review M1).
+2. **`packages/cli/src/relay-state.ts`** — `OwnUse` + `ownUseOf(list, id)`:
+   our own uid's presence/use AND the others from the ONE `session/list` read
+   D1 4(a) needs (`ResidentUse` has no "own present" field, so a second read
+   could disagree with itself), plus `residentUseFrom` for its `ResidentUse`
+   view.
+3. **`packages/cli/src/local-runtime.ts`** — five additive members, all on the
+   existing seams: `freeze(id)` (the `quit` shape WITHOUT the seal/close, then
+   `saver.cleanFor(id)`), `saveConfirmedFor(id)` (that uid's own read-back —
+   not the runtime-wide `clean()`), `sealSessions()` (the `quit` seal loop,
+   without closing), `ownUse(id)` (one `sessionList` read → `ownUseOf`), and
+   `closeOwn(id)` (close, then a FRESH `session/list` must no longer list it).
+4. **`packages/cli/src/hop-plan.ts`** — `OwnUidVerdict`/`ownUidVerdict`
+   (`absent`/`close`/`busy`/`unknown`) as its OWN pure decision, and
+   `attachVerdict` gains the `own` input and the `close-own` outcome, checked
+   after `detachedRun` and before `others` (design-review H1).
+5. **`packages/cli/src/session-hop.ts`** (new) — `hopSession(old, {spec,
+   sessionId}, deps)`: the ordered D1 sequence with every effect injected.
+   `not moved: …` is the one failure shape.
+6. **`packages/cli/src/hop-runtime.ts`** (new) — `createHopRuntime`: stable
+   `createSession`/`jobs`/`link`/`mcpStatus` over a swappable current runtime,
+   `current()`/`target()`/`onTarget`, and the only holder of the shared broker
+   + saver it hands every factory.
+
+**Drift from the Implementation, and why (each was a contradiction with the
+code, fixed in this doc rather than forced):**
+
+- **`onTarget`/`target()` are feeds on the facade, not `HopFeed`/`TargetFeed`
+  props.** D2 pins the facade's shape; the TUI's props are H3's slice. Nothing
+  in H3's design changes: `hop-runtime.ts` exposes exactly the
+  `current()`-plus-listener pair D2 describes.
+- **`build` takes the `sessionId` too** (`build(spec, shared, sessionId)` /
+  `build(spec, sessionId)` inside `hopSession`). D1 step 3 requires the
+  "nothing persisted" branch to open the SAME uid with `resume: null`; passing
+  only the spec left the factory unable to know the uid, and the alternative
+  (a fabricated empty record) would mint a different one.
+- **`openSeeded()` is called with NO argument in the nothing-persisted case.**
+  `LocalRuntime.openSeeded(record?)` treats a present-but-`null` argument as
+  "replace the seed with nothing" (`local-runtime.ts:1207-1211`), so the
+  M2 branch must pass nothing at all.
+- **The record is read (`deps.load`) BEFORE the build**, not between the build
+  and the freeze. An `unreadable` copy is a refusal that must not create (and
+  then have to delete) a container, and it makes M2's branch a measured fact
+  rather than a guess. The freeze still runs before any open.
+- **D7's "someone else is there" stays the FACTORY's check, not the
+  orchestrator's.** It must precede every open, and `hopSession` cannot make a
+  check that runs before its own `openSeeded` be the factory's. H6 wires
+  `attachVerdict` into the factory; H2's orchestrator does only D1 4(a) (our
+  OWN uid), which the plan also puts before the open.
+- **`onCommit` is awaited after the seal, and a throw is the NOTICE, not a
+  rollback** — the plan's step 5 order (seal → swap → auto-accept off) with M3's
+  "never rolls back" made literal.
+
+**Red first.** The pre-execution stage had no `session-hop.ts`/`hop-runtime.ts`
+and no `own` input at all, so the first run of `test/session-hop.test.ts` was
+RED on the property itself (not on an import): `attachVerdict`'s new rows failed
+with `expected {kind:"close-own"}, received {kind:"allowed"}`, and the
+orchestrator's first draft failed 6 of 17 rows (record not seeded → the target's
+model saw only its own turn; `badge` carrying `kind`). Each was fixed at the
+place the failure named, then green.
+
+**Mutation checks (each broken in the final tree, the narrow file run, restored,
+md5 verified — script `.tentacle/tmp/session-hop/h2/{mut-plan,mut-orch,mut2}.sh`).**
+
+| # | mutation | result |
+|---|---|---|
+| P1 | `attachVerdict`'s `own` branch dropped (D1 4(a)) | 2 fail — "our OWN uid live and idle…", "…running or holding jobs…" |
+| P2 | `own.running`/`own.jobs` ignored (D7c) | 2 fail — same pair |
+| P3 | `ownUseOf` reports no own row | 4 fail — the two above + both `ownUseOf` read rows |
+| M1 | `saveConfirmedFor` check skipped (target's save not required) | 1 fail — "the target's first write fails…" |
+| M2 | `freeze`'s answer ignored | 1 fail — "step 3 (the old session cannot be saved)…" |
+| M3 | seal BEFORE the open (the forbidden order) | 1 fail — "step 4 (the open fails)… still sends + saves" |
+| M4 | D1 step 4(a) skipped (review H1) | 2 fail — both stale-copy rows |
+| M5 | bare unbounded `old.dispose()` (M3) | 2 fail — dispose throws / hangs |
+| M6 | facade hands the factory a FRESH `PermissionBroker` (D2) | 1 fail — "the ask after a hop reaches the TUI's broker…" |
+| M7 | the "nothing persisted" case treated as a load error (M2) | 1 fail — "a session with no turn and no file hops…" |
+| M8 | `freeze` also seals (the `quit` shape with the seal) | 2 fail — "freeze … leaves the runtime live" + step-4 rollback |
+| M9 | `freeze` answers the saver-wide `clean()` (M1) | 1 fail — "a save failure on ANOTHER uid does not refuse the hop" |
+| M10 | the unreadable copy checked AFTER the build | 1 fail — "refuses the hop BEFORE anything is built" |
+
+**One mutation was VACUOUS at first and the test was fixed, not the code** (§9's
+non-vacuity rule): M3 (seal before the open) passed because my rollback helper
+took a FRESH controller (`createSession()`) after the failed hop — a sealed
+controller is invisible to a new one. `stillLive` now reuses the SAME controller
+the hop met and asserts its own file holds the next turn; M3 then fails as it
+must. That is the exact "prove the correlated property" trap §2 names.
+
+**Tests** (17 → 22 in `packages/cli/test/session-hop.test.ts`; +4 rows in
+`hop-plan.test.ts`, +4 in `relay-state.test.ts`): the plan's H2 list, all ten
+items, plus the two `freeze`/`saveConfirmedFor` facts and the unreadable-copy
+and no-uid refusals.
+
+**Not in this slice (deliberately).** Nothing calls the facade yet: `main.ts`
+still hands `startTui` the worker runtime's members (H4). No engine is dialled,
+no kept entry written, no delete run (H4's factories are the `build`), and
+`attachVerdict`'s `detachedRun` input is H6's. No protocol change, no
+`protocol.d/` note, no new changelog fragment: H2 is internal plumbing behind
+`changelog.d/session-hop.added.md` (H1), which already carries the feature's one
+bullet (AGENTS §10 — the changelog is curated, not a commit mirror).
+
+**Gate (final tree):** `bunx tsc --noEmit` → 0 · `bun run typecheck` (incl.
+`apps/mobile`) → 0 · `bun run lint` → `Checked 1121 files`, 0 errors/warnings ·
+`bun test` → **8596 pass, 3 skip (the documented opt-ins), 0 fail** across 614
+files. No protocol schema changed. All mutations reverted (md5 of every touched
+source matched its pre-mutation backup).
+
+*— claude-opus-5-5, 2026-11-14*

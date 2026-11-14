@@ -5,7 +5,7 @@
  * engine: the orchestrator (`session-hop.ts`) only executes what is decided here.
  */
 import type { HopSpec, HopWorkload } from "@tentacle/tui";
-import type { ResidentUse } from "./relay-state.ts";
+import type { OwnUse, ResidentUse } from "./relay-state.ts";
 import { untrustedText } from "./untrusted-text.ts";
 
 /** Where the session is now (the badge has no "local" word: this is the plan's). */
@@ -138,12 +138,47 @@ export function hopCancelPlan(input: { readonly hopping: boolean }): HopCancelPl
 
 export type AttachVerdict =
   | { readonly kind: "allowed" }
+  /** Our own uid is live there and idle: close it, then seed (D1 step 4(a)). */
+  | { readonly kind: "close-own" }
   | { readonly kind: "refuse"; readonly text: string };
+
+/**
+ * D1 step 4(a)/D7c: what to do about OUR OWN uid on a target, as its own
+ * decision — the outcome the orchestrator needs (close it, refuse, or go on),
+ * distinct from D7's "someone else is there". Pure, from one `session/list`
+ * read (`OwnUse`).
+ */
+export type OwnUidVerdict =
+  /** Not live there: seed normally. */
+  | { readonly kind: "absent" }
+  /** Live and idle: close it, then seed (the daemon's open would attach it). */
+  | { readonly kind: "close" }
+  /** Live and running or holding jobs: ours, but someone's work — never killed. */
+  | { readonly kind: "busy" }
+  /** The list is not the whole truth: a doubt is a refusal. */
+  | { readonly kind: "unknown" };
+
+export function ownUidVerdict(own: OwnUse | null): OwnUidVerdict {
+  if (own === null) {
+    return { kind: "unknown" };
+  }
+  if (own.own === null) {
+    return { kind: "absent" };
+  }
+  return own.own.running || own.own.jobs > 0 ? { kind: "busy" } : { kind: "close" };
+}
 
 export interface AttachVerdictInput {
   readonly workload: HopWorkload;
   /** A laptop detached run owns this workload (`detachedRunOf` ≠ null). */
   readonly detachedRun: boolean;
+  /**
+   * Our OWN uid on the target, from the same `session/list` read that gives
+   * `use` (docs/feat/session-hop.md D1 step 4(a), review H1): `null` = not
+   * live there. A live copy is NEVER joined — the daemon's `open` would attach
+   * it and ignore the seed — so it is closed first when idle.
+   */
+  readonly own: { readonly running: boolean; readonly jobs: number } | null;
   /** `residentUse` after the handshake, BEFORE any open; `null`: not the whole truth. */
   readonly use: ResidentUse | null;
 }
@@ -155,6 +190,10 @@ export interface AttachVerdictInput {
  * data, so it is UX, never security — the model key, the approvals and the
  * history all stay laptop-gated (P2, D9). A doubt is a refusal: joining a busy
  * resident is the one mistake this cannot undo.
+ *
+ * Our OWN uid comes before `others` (review H1): it is not "another session",
+ * and attaching it would silently keep the daemon's stale copy instead of the
+ * laptop's — so an idle one is closed and the session seeded again.
  */
 export function attachVerdict(input: AttachVerdictInput): AttachVerdict {
   const shown = workloadText(input.workload);
@@ -163,6 +202,20 @@ export function attachVerdict(input: AttachVerdictInput): AttachVerdict {
   }
   if (input.use === null) {
     return { kind: "refuse", text: `can't tell whether ${shown} is in use — not joining it` };
+  }
+  // Our OWN uid comes before `others` (review H1): it is not "another session",
+  // and attaching it would silently keep the daemon's stale copy instead of the
+  // laptop's — so an idle one is closed and the session seeded again.
+  const own = ownUidVerdict(
+    input.own === null ? { own: null, others: 0 } : { own: input.own, others: 0 },
+  );
+  if (own.kind === "busy") {
+    // A copy nobody runs can be closed and reseeded; one that is running (or
+    // holds jobs) is someone's live work — refuse, never kill it (D7c).
+    return { kind: "refuse", text: `${shown} still holds an older copy of this session` };
+  }
+  if (own.kind === "close") {
+    return { kind: "close-own" };
   }
   if (input.use.others > 0) {
     return { kind: "refuse", text: `${shown} is in use by another session` };
