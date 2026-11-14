@@ -468,3 +468,102 @@ describe("H3 the App: the transcript rows keep their position across a hop", () 
     app.unmount();
   });
 });
+
+describe("D9 a hop never inherits an approval: auto-accept goes OFF with the move", () => {
+  /** A shared auto-accept feed, as a detached run's TUI gets one (B3). */
+  function autoFeedOf(initial: boolean) {
+    let on = initial;
+    const sets: boolean[] = [];
+    const feed = {
+      current: () => on,
+      set: (next: boolean) => {
+        on = next;
+        sets.push(next);
+      },
+      onChange: () => () => {},
+    };
+    return { feed, sets };
+  }
+
+  test("ON before the hop: the move turns it off, and the notice says so", async () => {
+    // Mutation: drop the `if (wasOn) …` block in `App.startHop` → auto-accept
+    // stays on into the NEW runtime, which is the danger D9 exists for: the
+    // target's daemon inherits approvals it never asked this user for.
+    const log = { sends: [] as string[] };
+    const hop = fakeHop();
+    const auto = autoFeedOf(true);
+    const app = render(
+      <App
+        createSession={() => session([], log)}
+        model="m"
+        cwd="/tmp/work"
+        hop={hop.feed}
+        autoAccept={auto.feed}
+        columns={80}
+      />,
+    );
+    await delay(40);
+    expect(strip(app.lastFrame())).toContain("auto-accept on");
+    await type(app.stdin, "/move container", 60);
+    hop.settle({
+      moved: session([], log),
+      view: { place: { kind: "workload", engine: "docker", name: "box" }, daemonInPod: true },
+    });
+    await delay(120);
+    expect(auto.sets).toEqual([false]);
+    const frame = strip(app.lastFrame());
+    expect(frame).toContain("auto-accept off");
+    // The one notice says it too: the user must not learn it from a prompt.
+    expect(frame).toContain("auto-accept is off");
+    app.unmount();
+  });
+
+  test("OFF before the hop: nothing is flipped (no needless write, no notice)", async () => {
+    const log = { sends: [] as string[] };
+    const hop = fakeHop();
+    const auto = autoFeedOf(false);
+    const app = render(
+      <App
+        createSession={() => session([], log)}
+        model="m"
+        cwd="/tmp/work"
+        hop={hop.feed}
+        autoAccept={auto.feed}
+        columns={80}
+      />,
+    );
+    await delay(40);
+    await type(app.stdin, "/move container", 60);
+    hop.settle({
+      moved: session([], log),
+      view: { place: { kind: "workload", engine: "docker", name: "box" }, daemonInPod: true },
+    });
+    await delay(120);
+    expect(auto.sets).toEqual([]);
+    const frame = strip(app.lastFrame());
+    expect(frame).toContain("auto-accept off");
+    expect(frame).not.toContain("auto-accept is off");
+    app.unmount();
+  });
+
+  test("a FAILED hop leaves auto-accept exactly as it was", async () => {
+    const log = { sends: [] as string[] };
+    const hop = fakeHop({ fail: "not moved: the container could not start" });
+    const auto = autoFeedOf(true);
+    const app = render(
+      <App
+        createSession={() => session([], log)}
+        model="m"
+        cwd="/tmp/work"
+        hop={hop.feed}
+        autoAccept={auto.feed}
+        columns={80}
+      />,
+    );
+    await delay(40);
+    await type(app.stdin, "/move container", 120);
+    expect(auto.sets).toEqual([]);
+    expect(strip(app.lastFrame())).toContain("auto-accept on");
+    app.unmount();
+  });
+});

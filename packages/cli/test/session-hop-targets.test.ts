@@ -275,6 +275,11 @@ describe("H4 a hop container is created KEPT, and its rollback deletes only thro
     expect(entries[0]?.entry.engine).toBe("docker");
     expect(entries[0]?.entry.model).toBe("qwen3");
     expect(entries[0]?.entry.endpoint).toBe("unix:///run/docker.sock");
+    // The owner mark that lets a hop back with `keep: false` delete it — and
+    // that a `run` entry never carries (D5, review finding 2). Mutation: drop
+    // `hop: true` → a `/move local --rm` would refuse to delete its own
+    // container ("not ours"), so the hop could never clean up after itself.
+    expect(entries[0]?.entry.hop).toBe(true);
     // Kept: no exit net armed for it (D5 — nothing is ever deleted blind).
     expect(log.calls.some((c) => c.startsWith("besteffort:"))).toBe(false);
     // The rollback goes through the VERIFIED delete: it re-reads the engine first.

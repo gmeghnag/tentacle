@@ -90,11 +90,11 @@ import {
 import { readHiddenLine } from "./hidden-input.ts";
 import { fileTrustStore, hooksTrustCommand, projectHooksWireProblem } from "./hooks-trust.ts";
 import { createHopFeed } from "./hop-feed.ts";
+import { createHopLeave } from "./hop-leave.ts";
 import type { HopPlace } from "./hop-plan.ts";
 import { createHopRuntime } from "./hop-runtime.ts";
 import { type HopEngineHost, createHopTargets } from "./hop-targets.ts";
 import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
-import { type KeptRemoval, removalFate, removeVerifiedKept } from "./kept-cmd.ts";
 import {
   forgetKept,
   keptDir,
@@ -1129,29 +1129,16 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   };
 
   /**
-   * D5: what a hop does with the workload it LEAVES. Only an entry THIS laptop
-   * recorded is deleted, and only through the verified delete; a user-owned
-   * (`attach`ed) workload is not in the index, so it is left alone silently.
+   * D5: what a hop does with the workload it LEAVES (`hop-leave.ts`: the
+   * decision is `hopDelete`'s, the delete is `removeVerifiedKept`, and only an
+   * entry THIS laptop recorded as a hop's creation is ever touched). Here: the
+   * two seams only, because both need the config and the ONE host builder.
    */
-  const hopLeave = async (place: HopPlace, keep: boolean): Promise<string | null> => {
-    if (place.kind === "local" || keep) {
-      return null;
-    }
-    const dir = keptDir(config.configDir);
-    const found = readKept(dir).entries.find(
-      (file) => file.entry.name === place.name && file.entry.engine === place.engine,
-    );
-    if (found === undefined) {
-      return null;
-    }
-    const removal = await removeVerifiedKept(found.entry, found.file, {
-      hostFor: (entry) => hopEngineHost(entry.engine).host,
-    }).catch((): KeptRemoval => ({ kind: "failed", reason: "the engine did not answer" }));
-    const name = `${place.engine}:${place.name}`;
-    return removal.kind === "unreachable" || removal.kind === "failed"
-      ? `left ${name} in place (${removal.reason}) — tentacle rm ${place.name}`
-      : `${name} ${removalFate(removal.kind)}`;
-  };
+  const hopLeave = createHopLeave({
+    dir: keptDir(config.configDir),
+    locators: (engine) => hopEngineHost(engine).locators,
+    hostFor: (entry) => buildEngineHost(entry.engine, hostOptionsFor(entry)).host,
+  });
 
   const openSessions = (flags: Map<string, string>, bools: Set<string>, implicit = false) =>
     openTuiSessions(

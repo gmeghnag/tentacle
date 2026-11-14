@@ -2983,13 +2983,13 @@ export function App({
           if ("moved" in outcome) {
             // D9: a hop never inherits an approval — auto-accept goes off with
             // the move, said in the same notice (the feed, or this TUI's own).
+            // `clearAutoApprove`, never `autoAccept.set`: the feed's `set` only
+            // publishes the flip for the OTHER terminals, so this one's state
+            // (and its status bar) would still say "auto-accept on" while the
+            // notice claims otherwise.
             const wasOn = permission.autoApprove;
             if (wasOn) {
-              if (autoAccept) {
-                autoAccept.set(false);
-              } else {
-                permission.toggleAutoApprove();
-              }
+              permission.clearAutoApprove();
             }
             swapSession(outcome.moved, { keepTranscript: true });
             settle();
@@ -3008,7 +3008,7 @@ export function App({
         },
       );
     },
-    [autoAccept, flushNow, hop, permission, pushNotice, swapSession],
+    [flushNow, hop, permission, pushNotice, swapSession],
   );
   startHopRef.current = startHop;
 

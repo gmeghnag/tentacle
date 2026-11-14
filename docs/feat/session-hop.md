@@ -1300,3 +1300,95 @@ commit mirror).
 **Same-family note:** this review is by an Anthropic model, as was the H2 review. The executor label is inconsistent: the commit says deepseek, the Execution section is signed sonnet.
 
 *— claude-opus-5-5, 2026-11-14*
+### Fix round 1 — the H3+H4 review's HIGH/MEDIUM findings
+
+*— claude-opus-5-5, 2026-11-14*
+
+Scope: the three findings of the `## Review — H3 + H4` round above, and nothing
+else. Red before green (§9) for every finding, plus a mutation per fix, each run
+on the final tree, restored, md5 printed twice.
+
+**Finding 1 (HIGH) — a plain `/move local` deleted the hop container. FIXED.**
+`hop-feed.ts:70` computed `keep` from `spec.target`, which is always `local` on a
+hop back, so the parser's default (`keep: true`, `hop-command.ts:124`) and
+`--keep` both reached the leave as `false`. It is now `spec.keep` — the parser's
+own resolved decision. *Red first:* `packages/cli/test/hop-feed.test.ts` (new, 7
+rows: the real `createHopFeed` over a fake facade) — the property row red on the
+old expression. *Mutation:* restore
+`spec.target !== "local" && spec.keep !== false` → **1 fail**
+(`a plain /move local KEEPS the container`); restored, md5 `1d0f08c0…` unchanged.
+
+**Finding 2 (MEDIUM) — the leave deleted a workload the user owns. FIXED, in
+three parts.**
+
+(a) **The leave moved out of `main.ts`** into `packages/cli/src/hop-leave.ts`. A
+closure inside `main.ts` cannot be tested, which is exactly how the review found
+this. `main.ts` now only supplies the two seams — `locators` from `hopEngineHost`,
+`hostFor` from `buildEngineHost` + `hostOptionsFor` (the same host builder `rm`
+uses, so a hop re-dials the entry's own place).
+
+(b) **The decision is `hopDelete`'s** (H1, `hop-plan.ts:244`), finally called, and
+its `createdByHop` comes from the index entry's **new `hop: true` mark**, never
+from the spec: `containerTarget` writes it (`hop-targets.ts:400`), a `run` never
+does, and an entry an older build wrote carries none. So a `tentacle run`
+container, an `attach`ed workload, and a pod-supplied `keep: false` can never
+reach a delete.
+
+(c) **The match adds the location** — `name` + `engine` + `locationKey` (endpoint
+/ context / server / namespace). A `locators` that throws (no kubeconfig) means
+nothing can be confirmed, so no entry is returned, never a name-only fallback.
+
+*Red first:* `packages/cli/test/hop-leave.test.ts` (new, 16 rows) — the
+another-endpoint, k8s namespace/context, `not ours` and unresolvable-location rows
+all red on the behaviour-preserving stage-1 extraction.
+*Mutations:* `createdByHop: true` (ignore the mark) → **3 fail**; drop the
+location clause → **2 fail**; fall back to a name match when `locators` throws →
+**1 fail**; drop the delete's `try`/`catch` → **1 fail**; drop `hop: true` from the
+entry → **1 fail** (`session-hop-targets.test.ts`, kept labels + index entry);
+drop the parse clause → **1 fail** (`kept.test.ts`, the mark round-trips). Each
+restored, md5 `5b39fff0…` / `95c949d9…` / `b1ced75e…` unchanged.
+
+**Finding 3 (MEDIUM) — the two missing H4/D9 tests. FIXED.**
+
+- **The leave path:** `hop-feed.test.ts` + `hop-leave.test.ts` above. These would
+  have caught 1 and 2; finding 1's mutation is the proof.
+- **D9's auto-accept reset:** three rows in `session-hop.test.tsx` (ON → flipped
+  off and said in the same notice; OFF → no needless write; a FAILED hop leaves it
+  exactly as it was). **The review's own mutation**
+  (`const wasOn = false && permission.autoApprove`) now gives **1 fail**; before
+  these rows it was 132 pass / 0 fail.
+- **A real defect the new row found, beyond the review:** the pre-fix reset used
+  `autoAccept.set(false)` on a detached-run feed, which only *publishes* a flip for
+  other terminals — this TUI's own state came back only through `onChange`, which a
+  no-op feed never calls. The status bar therefore still read `auto-accept on`
+  while the notice said off, and approvals stayed live: precisely what D9 exists to
+  prevent. Fixed as a pure-module seam, not a branch in the component:
+  `PermissionController.clearAutoApprove()` (`permission-ui.ts`) applies the flip
+  locally (`applyAuto(false)`) *and* writes the feed; `App.startHop` calls it.
+  *Mutation:* `clearAutoApprove` reduced to `feedRef.current?.set(false)` (the
+  pre-fix shape) → **1 fail**, the same row.
+
+**Drift from the Implementation, and why.** D5's "a workload THIS laptop recorded
+as hop-created (D5 entry)" was signalled but never built: the entry carried no such
+mark, so "ours" had to be inferred — and the only inference available (name+engine
+in the index) *is* the bug. `KeptEntry.hop?: true` (`kept.ts`, parsed in
+`parseKeptEntry`) is that mark: laptop-written, absent from every `run` entry, and
+absence is the safe direction (an older build refuses to delete). It is an additive
+field of an on-disk record, so no `schemaVersion` bump, no `protocol.d/` note, and
+the wire is untouched (D10).
+
+**Files:** `cli/src/hop-feed.ts` · `cli/src/hop-leave.ts` (new) ·
+`cli/src/hop-targets.ts` · `cli/src/kept.ts` · `cli/src/main.ts` ·
+`tui/src/App.tsx` · `tui/src/permission-ui.ts` · `cli/test/hop-feed.test.ts` +
+`cli/test/hop-leave.test.ts` (new) · `cli/test/kept.test.ts` ·
+`cli/test/session-hop-targets.test.ts` · `tui/test/session-hop.test.tsx`.
+
+**Gate:** `bunx tsc --noEmit` → 0 · `bun run lint` → `Checked 1130 files`, 0
+errors / 0 warnings (the baseline is clean) · `bun test` → **8654 pass, 3 skip
+(the documented opt-ins: live-k8s, live-docker, the real-socket keepalive), 0 fail**
+across 618 files. A first full run had ONE fail
+(`packages/daemon/test/serve-log-store.test.ts`'s 200×SIGKILL stress row, a random
+5–125 ms kill point): it passes alone and under 8 spinning cores, no `packages/daemon`
+file is touched by this round, and the re-run is green — runner contention, not this diff.
+
+*— claude-opus-5-5, 2026-11-14*

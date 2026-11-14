@@ -60,8 +60,12 @@ export function createHopFeed(deps: HopFeedDeps): HopFeedView {
           // `createSession` delegates to the runtime the commit swapped (D2).
           const moved: SessionController = deps.facade.createSession();
           // D5: the workload we left, once the session is safely on the target.
+          // `spec.keep` IS the decision (`/move` resolves the default to `true`,
+          // `hop-command.ts:124`): for a hop BACK to local the target is `local`,
+          // so any expression over `spec.target` would turn a plain `/move local`
+          // into `keep: false` and delete the container the hop created.
           if (deps.leave && before.kind !== "local") {
-            const notice = await deps.leave(before, spec.target !== "local" && spec.keep !== false);
+            const notice = await deps.leave(before, spec.keep);
             if (notice !== null) {
               deps.notify?.(notice);
             }

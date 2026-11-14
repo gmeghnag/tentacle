@@ -395,5 +395,9 @@ function keptEntry(
     model: config.model,
     ...(config.profile === undefined ? {} : { profile: config.profile }),
     created,
+    // D5's owner mark: this laptop wrote this entry because a HOP created the
+    // workload, which is what makes a hop back with `keep: false` allowed to
+    // delete it (`hop-leave.ts`). A `run` never sets it.
+    hop: true,
   };
 }

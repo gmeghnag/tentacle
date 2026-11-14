@@ -236,6 +236,13 @@ export interface PermissionController {
   readonly autoApprove: boolean;
   /** Toggle auto-accept; granting a prompt already on screen when turning on. */
   toggleAutoApprove(): void;
+  /**
+   * Turn auto-accept OFF in THIS TUI *and* in the shared feed — what a hop does
+   * (D9: a move never inherits an approval). Turning it off from outside the
+   * toggle needs this: `feed.set` alone publishes the flip for other terminals
+   * and leaves this one's state (and status bar) saying "on".
+   */
+  clearAutoApprove(): void;
   /** The dialog's mode: the menu, or the reply field open (`permission-reply.ts`). */
   readonly mode: ReplyMode;
   /** The mode as of now (a ref: keys and pastes arriving between renders compose). */
@@ -371,6 +378,15 @@ export function usePermissionBroker(
     applyAuto(next);
     feedRef.current?.set(next);
   }, [applyAuto]);
+  /**
+   * D9's reset (a hop moved the session): this TUI's state AND the shared feed.
+   * `applyAuto` is the half `feed.set` cannot do — the flip from elsewhere
+   * arrives only through `onChange`, which a no-op feed never calls.
+   */
+  const clearAutoApprove = useCallback(() => {
+    applyAuto(false);
+    feedRef.current?.set(false);
+  }, [applyAuto]);
 
   useEffect(() => {
     const off = feed?.onChange(applyAuto);
@@ -440,6 +456,7 @@ export function usePermissionBroker(
     answer,
     autoApprove,
     toggleAutoApprove,
+    clearAutoApprove,
     mode,
     readMode,
     setMode,
