@@ -2478,3 +2478,424 @@ if a direct URL shaped like `/d/<id>/e2e` is misread, the only effect is that it
 Mutations reverted; `git status` clean apart from this section.
 
 *— claude-opus-5-5, 2026-11-14*
+
+## Execution
+
+### R6 — the app's staggered race, the relay in the diagnosis, the "relay only" Maestro flow — *— claude-opus-5-5, 2026-11-14*
+
+**Load-bearing check: PASSED, before any edit.** R6's assumption is the APP half
+of §Load-bearing: *"the app dials a relay address exactly like any other"*.
+Re-executed on this branch's code, unchanged, in
+`.tentacle/tmp/mobile-relay/r6-loadcheck.ts` — a real R2 relay + a real R4 link +
+a real identity and a paired phone, with `openComputer`'s address list holding
+ONE entry, `ws://127.0.0.1:<port>/d/<id>/e2e`:
+
+```
+$ bun .tentacle/tmp/mobile-relay/r6-loadcheck.ts
+relay registered: 1 | address: ws://127.0.0.1:64175/d/fgkrQr2vTa2JTEe75Kl66v/e2e
+(1) openComputer over the RELAY only -> {"ok":true,"sessions":0,"address":"ws://127.0.0.1:64175/d/fgkrQr2vTa2JTEe75Kl66v/e2e"} in 9 ms
+(2) after 3000 ms: tried=["ws://127.0.0.1:64179/e2e"] settled=false
+```
+
+Line (1) is the assumption: the app reaches `session/list` through the ONE
+`RemoteClient` stack with a relay URL as its only address. Line (2) is the
+Preconditions gap, measured against a REAL half-open endpoint (`Bun.listen`
+accepting TCP and never upgrading — what a LAN address looks like off-LAN):
+after 3 s the SEQUENTIAL `firstAnswering` had started exactly one address and had
+not settled. **No STOP.**
+
+#### Red before green
+
+A new test file's first failure is `Cannot find module`, which is not the red
+§9 asks for. So the properties were first measured on the pre-slice tree by
+`.tentacle/tmp/mobile-relay/r6-red-baseline.ts` (also a real relay + link, so the
+"second address" is a real relay dial):
+
+```
+$ bun .tentacle/tmp/mobile-relay/r6-red-baseline.ts   # BEFORE the change
+(a) at 1500 ms: tried=1 settledIn=never result=pending
+(b) a healthy first address dials: ["direct"]
+(c) unreachable says: "Can't reach 'MacBook' — same network or Tailscale? `tentacle serve --host 0.0.0.0` running and up to date?"
+(c) names the relay: false
+```
+
+(a) is R6's bug: one hanging address starves the relay, and under the client's
+15 s dial deadline (`LINK_LIVENESS`) it never gets dialled. (c) is the text.
+(b) is the property that must SURVIVE the change and is green before and after.
+
+#### What landed
+
+1. **`apps/mobile/src/address-dial.ts`** — `firstAnswering` is now a staggered
+   race decided at SOCKET-OPEN. New shape: `DialSteps<TOpened, TAnswer>` =
+   `{open, abandon, confirm}`, so the winner alone is handshaked; `STAGGER_MS =
+   750` (Owner Q6); an injected `DialTimer` seam (the default is real
+   `setTimeout`, so the app passes nothing). Preserved deliberately: the ring
+   start at `memory.lastGood` (now recorded as the CALLER's array index),
+   `unauthorized` stops everything, the last error is rethrown unchanged, an
+   empty list is a failure rather than a hang. On a non-terminal handshake
+   failure the race resumes AFTER the winner (the remaining addresses, re-dialling
+   any leg it had abandoned — the same fresh dial a redial makes).
+2. **`apps/mobile/src/connection.ts`** — the caller split into those three steps:
+   `open` builds the raw socket and feeds `diagnosis.observe({opened:false})` on
+   a failure, `abandon` closes the loser, `confirm` runs the Noise initiator and
+   feeds `observe({opened:true})` on a handshake failure. An abandoned loser
+   records NOTHING: it is a path that was not needed, not a path that is down.
+3. **`apps/mobile/src/link-diagnosis.ts`** — the `unreachable` sentence names the
+   relay ("same network, Tailscale, or the relay?").
+4. **Maestro (R6's mandatory half)** — `apps/mobile/e2e/flows/22-relay-only.yaml`
+   plus `pair-start-relay-only.js`, `22-relay-history.js`, `22-relay-qr.js`; the
+   harness now starts a LOCAL relay in-process and gives `serve` `--relay <local>`
+   (`apps/mobile/e2e/run.ts`), `pairing.ts` gained `startRelayOnly()` (a window
+   with NO harness `--address`), and `hooks.ts` gained `relay-qr` (the payload the
+   last `pair` printed — the only way a flow can see what the QR carried).
+5. `changelog.d/mobile-relay.changed.md`.
+
+#### Drift from the Implementation, and why
+
+- **The plan says "the first socket to OPEN proceeds" and "the others are closed
+  before any handshake".** Implemented exactly, but it forced a shape the plan
+  does not spell out: the call to `attempt` had to become two steps, because only
+  the caller knows which half of a dial is "the socket" and which is "the
+  handshake". Hence `DialSteps` and the `connection.ts` split.
+- **Fall-through after a failed handshake resumes AFTER the winner, not from the
+  start.** The plan says "a non-terminal handshake failure on the winner
+  continues with the rest"; slices continuing *before* the winner too would
+  re-dial an address that already failed, and it would also mean a second round
+  could return to an address the ring had already passed. The abandoned legs are
+  re-dialled because they were never DECIDED (they lost a race, they did not
+  fail), which is what "the rest" means for a race.
+- **The diagnosis is fed per step, not per attempt.** Feeding it in `abandon`
+  (i.e. reporting an abandoned socket as `opened:false`) makes a successful race
+  end with `unreachable` in the diagnoser's last verdict — a lie about a link
+  that works. Pinned by the connection test's `expect(link.diagnosis.current())
+  .toBe("ok")` after a race with a black hole in it.
+- **The Maestro flow does not restart `serve`.** My first cut reopened the
+  daemon with `--no-relay` for flow 22's pairing window. That is wrong twice: with
+  `--no-relay` the daemon writes no relay address AND no `--address`, so the
+  record has no addresses at all and `pair` refuses (`pair-addresses.ts`). The
+  real property is simpler: `serve` in the harness binds LOOPBACK, which
+  contributes no bind-derived address, so a window opened WITHOUT the harness's
+  own `--address` carries the record's relay address and nothing else. Nothing is
+  restarted; `startRelayOnly()` is the absence of one argument.
+- **`22-relay-only` is in `PAIRING_FLOWS`** (`apps/mobile/test/e2e-flows.test.ts`).
+  That list is the existing guard's own row for "pairs through its own steps, not
+  `_pair`"; the guard went red on the new flow before the entry was added, which
+  is the guard doing its job rather than a workaround.
+- **The flow's last step order is fixed by the e2e guard, not by taste.** The
+  existing rule is "the last `runScript` is the daemon-truth one", so the two
+  truth steps are ordered history-then-QR, and the QR one (the flow's own
+  subject) is last.
+
+#### The tests, and what each pins
+
+`apps/mobile/test/address-dial.test.ts` (13, hand-driven timer — no test waits
+750 ms): a hanging first address does not hold the second past `STAGGER_MS`; the
+first socket to open wins and is the only one handshaked; a late loser is
+abandoned BEFORE any handshake (twice: after the race and mid-handshake); a
+non-terminal handshake failure resumes with the rest; every open failing throws
+the LAST error unchanged; `unauthorized` stops the race and leaves no armed
+timer; `lastGood` wins the ring start and is remembered by the caller's index;
+the ring wraps rather than restarting; a stale `lastGood` starts at 0; an empty
+list fails; `STAGGER_MS` is 750; `isTerminalDialError` unchanged.
+
+`apps/mobile/test/connection.test.ts` (18, +2): a REAL black-hole endpoint as the
+first address — the link still reaches the daemon, names the winner's address and
+ends `ok` (not `unreachable`); and a REAL "slow" daemon that upgrades only when
+the test says so — the late loser's socket is CLOSED (its `close` event fires),
+which is the limiter-slot/stream property `abandon` exists for.
+
+`apps/mobile/test/link-diagnosis.test.ts` (7, +1): the `unreachable` sentence
+names the relay, and the other verdicts do not.
+
+`apps/mobile/test/e2e-flows.test.ts` (22, +5): flow 22 is in `FLOWS`, its files
+exist, it pairs over its own opener (not `_pair`), it ENDS on a daemon-truth hook
+with the relay-QR step last, every hook it reads is served by `hooks.ts`, the QR
+assertion requires exactly one address AND the `/d/<id>/e2e` shape, and the
+harness really starts a local relay and really omits its own address for that
+window.
+
+#### Mutation checks (each reverted from a copy; no `git checkout`/`restore`/`stash`)
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | `armed = timer.schedule(startNext, stagger)` → `startNext()` (no stagger) | **red 7** of 13 in `address-dial.test.ts` (the hanging-first, first-open-wins, fall-through, last-error, unauthorized, lastGood and wrap tests) |
+| 2 | the late loser is `confirm`ed instead of `abandon`ed | **red 2** ("a loser that opens LATE is closed…", "the loser is abandoned while the winner is still handshaking") |
+| 3 | `round = []` after a failed handshake (no fall-through) | **red 1** ("a non-terminal handshake failure on the winner continues with the REST") |
+| 4 | `isTerminalDialError` check deleted (keep racing past `unauthorized`) | **red 1** ("STOPS on unauthorized…") |
+| 5 | `connection.ts` `abandon` → a no-op (`void channel`) | **red 1** ("a loser that opens LATE is CLOSED…", the real `close` event never fires) |
+| 6 | `connection.ts` `abandon` → `diagnosis.observe({opened:false,…})` + close | **red 1** ("a loser that opens LATE is CLOSED…": that close was SILENT) |
+| 6b | `connection.ts` `open`'s catch → swallow the observation of a genuine failed open | **red 1** ("the race dials the SECOND address…": the refused port is no longer counted) |
+| 7 | `link-diagnosis.ts` sentence back to "same network or Tailscale?" | **red 1** ("the unreachable sentence names the RELAY") |
+| 8 | `22-relay-qr.js`: `addresses.length !== 1` → `=== 0` | **red 1** (the exactly-one-address test) |
+
+Every file was restored from its copy and re-hashed to the same sha
+(`address-dial.ts dd964bc…`, `connection.ts e1c54a0…`, `link-diagnosis.ts 3e3192a…`,
+`22-relay-qr.js b9a0256…`), 13/13, 18/18, 7/7 and 22/22 green afterwards.
+
+**Mutation 6 took two attempts and is worth recording.** Its first run was GREEN,
+and the reason was a real weakness in the test I had written: it asserted
+`link.diagnosis.current() === "ok"` after a race, but `dial()` calls
+`diagnosis.ok()` as soon as a race succeeds, so `ok()` reset the verdict whatever
+`abandon` did — the assertion could not fail. I then found that mutation 6 anyway
+only produced a `ReferenceError` (an unimported `ChannelError`), which is red for
+the wrong reason. The fix was to stop observing the VERDICT and observe the CALLS:
+a SPY diagnoser in front of the real one, in the test whose loser really does open
+(slow daemon), asserting that the abandoned close was SILENT. Mutation 6 is now
+red on the assertion. Mutation 6b exists because the spy alone makes the `[]`
+assertion vacuously satisfiable — swallowing a GENUINE failed open would leave the
+array empty too — so the race test now carries a third address whose port is
+really closed, and asserts exactly one `opened: false` was reported. Both
+directions are pinned; neither is proven by a weaker correlate.
+
+#### Acceptance checks the plan names
+
+- **"a hanging first address does not block the second beyond 750 ms"** —
+  `address-dial.test.ts` with the injected timer, plus the real-endpoint
+  connection test (reached at all, which the old sequential loop did not manage
+  before the client's 15 s deadline).
+- **"losers are closed before any handshake"** — pinned twice (the fake steps in
+  `address-dial.test.ts`, and a REAL socket's `close` event in
+  `connection.test.ts`).
+- **"`unauthorized` still stops"**, **"`lastGood` honoured"**, and the plan's own
+  mutation ("start all at once → the direct-first test fails") — mutations 4, 1.
+- **grep-guard, no domain in the app**: `rg -n "relay\.tentacle\.so" apps/mobile/src`
+  → no match (the app still hard-codes no domain, decision 9).
+- **`git diff` scope**: only R6's files (see the list above) plus this doc and the
+  changelog fragment. `packages/protocol/schema/protocol.json` is unchanged (no
+  schema change), so no regeneration.
+
+#### Gate (R6): green, except the Maestro run (environmental — below)
+
+```
+$ bunx tsc --noEmit                 → clean (exit 0)
+$ bunx tsc -p apps/mobile --noEmit  → clean (exit 0)
+$ bunx tsc -p apps/relay --noEmit   → clean (exit 0)
+$ bun run lint                      → Checked 1318 files in 384ms. No fixes applied.
+$ bun test                          → 9521 pass, 3 skip, 0 fail across 681 files (384 s)
+                                      (77636 expect() calls)
+```
+
+The 3 skips are the documented opt-in ones (live-k8s, live-docker, the slow
+real-socket keepalive). Lint was clean before this slice and is clean after
+(the two errors it produced on the way — a formatter wrap in `22-relay-qr.js` and
+a `useConst` in the new test — were fixed, not suppressed).
+
+#### The Maestro flow: written, wired, and NOT green here — environmental
+
+`E2E_ONLY_FLOWS=22-relay-only bun run e2e:mobile --ios 26` (Xcode 27.1, iOS 26.5,
+`JAVA_HOME=/opt/homebrew/opt/openjdk@17`) **failed**, and so did a control run of
+a PRE-EXISTING flow on the same host:
+
+```
+✗ 22-relay-only (iOS 26) exit 1   <failure>Assertion is false: id: lock-screen is visible</failure>
+✗ 01-shell     (iOS 26) exit 1   <failure>Assertion is false: id: lock-screen is visible</failure>
+```
+
+Both die in `_unlock.yaml`, the shared prefix, before anything R6 added runs. The
+app IS up and IS showing the lock (`maestro hierarchy` on the booted simulator
+renders "Face ID" and the app's own log file was being written every second), but
+NO `testID` reaches the accessibility tree at all — not `lock-screen`, not
+`pair-paste-input`, not `computers-list`: the hierarchy dump contains only the
+status bar and "Face ID". So RN's testIDs are not exposed to XCUITest on this
+host/Xcode combination, which is the same class of environment drift
+`docs/feat/mobile-compose.md`'s Step 0 records for the simulator's Face ID.
+
+What the run DID prove, from the harness's own log, before Maestro's first
+assertion:
+
+```
+relay on ws://127.0.0.1:49488
+serve on 127.0.0.1:49487, phone address ws://127.0.0.1:49487/e2e
+[pair] tentacle://pair?v=1&k=…&c=9K07RKZ3F3&a=ws%3A%2F%2F127.0.0.1%3A49488%2Fd%2Fkhp_dfo6Hbhs-lL6QI-igY%2Fe2e
+```
+
+One `a=` parameter, and it is the local relay's `/d/<id>/e2e`: the relay-only QR
+that flow 22 asserts on is really produced by the real harness, in the real
+configuration (`serve` on loopback + the relay on + no harness `--address`).
+
+**So R6's Maestro half is PARTIAL**: the flow, its two truth scripts, the local
+relay, the hook and the guards are in place and the `bun test` half is green; the
+on-simulator pass is blocked by the environment, not by this slice, and it must be
+re-run (`E2E_ONLY_FLOWS=22-relay-only bun run e2e:mobile --ios 26`) on a host
+where an EXISTING flow passes first. That is the exact check: if `01-shell` is red
+for `lock-screen`, the host cannot run flows and 22's result says nothing.
+
+#### Not verified (one line each)
+
+- The real iPhone checks (cellular time-to-connect, Wi-Fi→cellular hand-off, a
+  killed app reopened over the relay) — device-only, the TestFlight checklist's.
+- `22-relay-only` end-to-end on a working simulator host: blocked above; verify
+  with `E2E_ONLY_FLOWS=01-shell bun run e2e:mobile --ios 26` passing first.
+- The winner's handshake can still be slow on a path that opened quickly (a
+  captive portal accepts TCP and drops the upgrade): the race does not bound a
+  handshake, only the OPEN. Bounding it would need a deadline the client does not
+  currently offer per attempt; out of this slice (the plan scopes the stagger to
+  socket-open).
+
+## Review
+
+### R6 — fresh-context adversarial review — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 1 MEDIUM). Scope: `git diff main...HEAD` (R6 only).
+
+**Gate (re-run):** the 4 touched test files 60 pass / 0 fail (542 expects);
+`bun run typecheck` clean (root + mobile + relay); `bun run lint` 1318 files, clean.
+Full `bun test` not re-run (Execution reports 9521 pass / 3 opt-in skip).
+
+**Findings**
+
+1. **HIGH — fall-through skips addresses after a second handshake failure.**
+   `apps/mobile/src/address-dial.ts:161` slices the CURRENT (already sliced)
+   round with `outcome.at`, which is the candidate's `position` in the FIRST
+   round (`roundOf` is never re-run, `Candidate.position` is fixed). After one
+   fall-through the two numberings diverge. Repro
+   (`.tentacle/tmp/mobile-relay/rev-r6-fallthrough{,-c}.ts`, opens resolve at once,
+   non-terminal `confirm` failures): `[A,B,C,D]` with only C healthy →
+   confirmed `[A,B,D]`, **throws**; C is never dialled. With the real list
+   `[LAN, tailnet, relay]`, two non-terminal handshake failures (LAN, tailnet)
+   give `slice(2)` of `[tailnet, relay]` = `[]` → the relay is silently never
+   tried — the exact fallback R6 exists for, and a regression vs. `main`'s
+   sequential loop, which reached every address. No test covers two consecutive
+   handshake failures. Fix shape: slice by the winner's index in the current
+   array (or renumber per round) + a test with ≥2 consecutive handshake failures.
+2. **MEDIUM — a late-failing loser overwrites the diagnosis, incl. `revoked`.**
+   `apps/mobile/src/connection.ts:254-261`: `open`'s catch calls
+   `diagnosis.observe({opened:false})` for EVERY failed open, also one that
+   fails after the race was decided (`address-dial.ts` ignores the rejection,
+   but the observation already happened). Repro
+   (`.tentacle/tmp/mobile-relay/rev-r6-late-loser.ts`, real `createLinkDiagnoser`
+   + `firstAnswering`, steps shaped as in `connection.ts`): LAN hangs, relay
+   starts at 750 ms, opens, handshake `denied` → `revoked`; then the LAN connect
+   errors (EHOSTUNREACH/TCP timeout) → diagnosis becomes **`unreachable`**. The
+   row then reads "Can't reach … the relay?" with Retry instead of the
+   authenticated `revoked` + Remove (`computer-rows.ts:74-95`). Same mechanism
+   turns an `ok` link's verdict into `unreachable` after a success. Sequential
+   code could not do this (no concurrent opens). The Execution's "abandoned loser
+   records NOTHING" holds only for a loser that OPENS late, not one that FAILS
+   late. Fix shape: observe an open failure only while its race is undecided
+   (e.g. let `firstAnswering` report failures, or a per-dial generation guard),
+   + a test where the loser rejects after the winner settled.
+
+**Mutation (mine):** removed the stagger re-arm (`arm()` in `startNext`) →
+`address-dial.test.ts` did not finish in 120 s (tests await a race that never
+progresses): red, but as a hang, not an assertion. Reverted by reverse edit;
+`git status` clean; 13/13 green after.
+
+**Attacks tried:** (a) fall-through numbering across rounds → finding 1;
+(b) late loser rejection vs. diagnoser → finding 2; (c) `unauthorized` mid-race
+leaves an armed timer / unclosed loser → holds (`winner` cancels, late opens
+`abandon`); (d) `link.address()` = last STARTED, not the winner
+(`connection.ts:255`) → wrong after a race, but only tests read it (no app
+consumer): nit; (e) a fast-refused open waits the full 750 ms before the next
+starts (RFC 8305 starts the next at once): latency regression vs. `main`'s
+immediate fall-through (3 refused addresses ≈ 1.5 s), nit; (f) no domain in
+`apps/mobile/src` → holds.
+
+**What holds:** first-open-wins with losers closed pre-handshake (the "one
+session path" invariant — one `RemoteClient`/`gate.dial` stack, no parallel
+loop); `unauthorized` stops; `lastGood` ring start; diagnosis text; Maestro
+wiring (on-simulator pass still pending, environmental — Execution's own note).
+
+**Executor behaviour:** careful and honest (recorded its own vacuous first
+mutation-6 test and fixed it); missed the multi-round case because every
+fall-through test has only ONE failed handshake. Reviewer is the same model
+family (Opus) as the Execution's signature: shared blind spots possible.
+
+## Execution
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-14*
+
+Scope: the R6 review's 1 HIGH + 1 MEDIUM. Both reviewer repros were re-run on
+this branch first and reproduce unchanged:
+`.tentacle/tmp/mobile-relay/rev-r6-fallthrough{,-c}.ts` →
+`confirmed: [ "A", "B", "D" ] -> answered D` / `-> threw hs-fail D` (C, the only
+healthy address, never dialled); `rev-r6-late-loser.ts` →
+`race threw: unauthorized | diagnosis: revoked`, then
+`after late LAN failure | diagnosis: unreachable`.
+
+**1 (HIGH) — fall-through numbering.** `Candidate.position` was fixed at the
+FIRST round's order and then used to slice a LATER, already-sliced round, so
+after one fall-through `slice(at + 1)` walked past the end.
+In `apps/mobile/src/address-dial.ts`: `Candidate.position` is gone (`:109`) and
+`roundOf` no longer computes it (`:178`); `raceOnce` captures `slot` (the
+candidate's index in the array it was actually raced in) at `startNext` (`:228`)
+and reports it as `RaceOutcome.failed.at`, passed through
+`onOpened(candidate, slot, opened)` (`:242`, `:257`, `:271`). `at`'s doc now says
+it is a position in the round passed to `raceOnce`, never in the caller's list
+(`:115-123`). The slice uses a number valid in the array being sliced.
+
+**2 (MEDIUM) — a late-failing loser overwrote the diagnosis, `revoked` included.**
+`connection.ts`'s `open` observed `{opened:false}` for EVERY failed open,
+including one that rejected after the race was decided (`firstAnswering` ignored
+the rejection, but the observation had already happened). New optional seam
+`DialSteps.failed?(failure: DialFailure)` (`address-dial.ts:81-89`) is called ONLY
+from a rejection arriving while the race is still undecided (`:245`, ahead of the
+existing `settled || winner` bail-out that drops a late one entirely); in
+`connection.ts` `open` no longer observes and `failed` does (`:253-266`), so the
+race decides whether a failed open may be reported at all. `abandon` and
+`confirm` are unchanged, and a genuinely offline address is still reported (the
+existing R6 connection test still counts exactly one `opened:false` for a refused
+port — red under mutation 2 below).
+
+**Tests added.** `apps/mobile/test/address-dial.test.ts`: (a) "TWO consecutive
+handshake failures still reach the LAST address" — the real
+`[lan, tailnet, relay]` shape, asserts `confirmed === [lan, tailnet, relay]` and
+that the relay answers; (b) "a loser whose OPEN fails LATE is not reported as a
+failure"; (c) "an open that fails while its race is UNDECIDED is reported" — the
+seam's non-vacuity guard, green before and after by design, red under mutation 2.
+`apps/mobile/test/connection.test.ts`: "a loser whose OPEN fails after the race
+was decided does NOT overwrite the verdict" — real daemon, real Noise handshake
+denied by a stranger device key (`revoked`), a real hanging TCP leg terminated
+after the race settles; asserts the verdict stays `revoked`.
+
+**Red before green** (source mutated back, narrow test run, restored by reverse
+edit — no `git checkout`; `diff` against the saved fixed copy confirms identical):
+finding 1, `position` + `at: candidate.position` back → 1 fail,
+`ChannelError: handshake closed at tailnet` (the relay is never confirmed);
+finding 2, `observe` back inside `open`'s catch → the `address-dial` late test
+fails and the connection test fails `Expected: "revoked" / Received:
+"unreachable"`; finding 2, `failed` never called → the UNDECIDED test fails and
+the pre-existing R6 connection test fails `Expected: 1 / Received: 0`.
+
+**Mutation checks (after green):**
+
+| # | mutation | result |
+|---|---|---|
+| 1 | `at: slot` → `at: candidate.index` (array index, not round slot) | red 1/16 in `address-dial.test.ts`: `handshake closed at tailnet` — the NUMBERING is what the test pins, not merely "a slice happens" |
+| 2 | delete the `steps.failed?.(…)` call | red 1/16 (`Expected [ "A" ] / Received []`); `connection.test.ts` also red (`Expected: 1 / Received: 0`) |
+| 3 | call `steps.failed?.()` BEFORE the settled-or-winner bail-out (report late failures too) | red both: `address-dial` late test, and `connection.test.ts` `revoked` → `unreachable` |
+
+Each mutation was reverted (`diff` against the saved copy: identical) before the
+next; `git status` shows only the four intended files.
+
+**Gate:** `bunx tsc --noEmit` clean (root and `tsc -p apps/mobile`); `bun run
+lint` 1318 files clean; `bun test` **9525 pass / 3 opt-in skip / 0 fail** (681
+files, 77646 expects — 9521 baseline + the 4 new tests).
+
+**Not verified:** the Maestro "relay only" flow on a simulator (environmental, as
+in R6's Execution). Nothing else is unverified.
+
+*— claude-opus-5-5, 2026-11-14*
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (fix for round 1's findings 1–2).
+
+- **Finding 1 — fixed.** `raceOnce` reports the winner's `slot` in the round it
+  raced (`address-dial.ts`, `at: slot`); `Candidate.position` is gone. My repros
+  now give `[A,B,C,D]` → confirmed A,B,C,D → answered D; only-C-healthy →
+  A,B,C → answered C. **Mutation** `at: slot` → `at: candidate.index`: red 1
+  ("TWO consecutive handshake failures still reach the LAST address"); reverted.
+- **Finding 2 — fixed.** `connection.ts` `open` no longer observes; the new
+  optional `DialSteps.failed` is called only while the race is undecided. Repro
+  (`rev-r6-late-loser2.ts`): `revoked` stays `revoked` after the late LAN failure.
+  **Mutation** report `failed` before the `settled || winner` guard: red 2 (the
+  pure "a loser whose OPEN fails LATE…" test and the real-socket connection
+  test); reverted.
+- **Regressions:** the only `firstAnswering` caller is `connection.ts:300`,
+  which wires `failed`; a genuine failed open during the race is still reported
+  (round 1's mutation-6b test still green). The tree is clean after the
+  reverts (`git status` empty).
+- **Gate:** the 4 touched files pass 64/64 (552 expects); `bun run typecheck`
+  and `bun run lint` (1318 files) are clean. Round 1's nits (`link.address()` =
+  last started; a refused open waits the full stagger) remain open as nits.

@@ -182,6 +182,18 @@ const open = (d: Daemon, log?: ReturnType<typeof createAppLog>): ReturnType<type
     ...(log === undefined ? {} : { log }),
   });
 
+/**
+ * A loopback `ws://…/e2e` URL nothing listens on: connecting is REFUSED at once,
+ * which is the "this path is not there" failure (`opened: false`) a diagnosis is
+ * fed. Bound and released, so the port is real but closed (no guess at a number).
+ */
+function freeLoopbackAddress(): string {
+  const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("") });
+  const port = probe.port;
+  probe.stop(true);
+  return `ws://127.0.0.1:${port}/e2e`;
+}
+
 /** `expo-crypto`'s job on the phone; Bun's CSPRNG stands in here. */
 function systemRandomBytes(length: number): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(length));
@@ -444,6 +456,194 @@ describe("openComputer over /e2e", () => {
       }
     });
   });
+
+  test("R6: the race dials the SECOND address when the first hangs, and the abandoned loser is NOT a diagnosis failure (mutation: observe in `abandon` → red; sequence → the second is never reached)", async () => {
+    await withDaemon(async (d) => {
+      const real = createLinkDiagnoser();
+      // A SPY in front of the diagnoser: the property is not only the last verdict
+      // (`dial()` calls `ok()` on success, which would hide anything) but that an
+      // ABANDONED loser is never observed at all — it is a path that was not
+      // needed, not a path that is down (mutation: observe in `abandon` → red).
+      const observed: { readonly opened: boolean }[] = [];
+      const diagnosis = {
+        observe: (observation: Parameters<typeof real.observe>[0]) => {
+          observed.push({ opened: observation.opened });
+          return real.observe(observation);
+        },
+        ok: () => real.ok(),
+        current: () => real.current(),
+      };
+      // A first address on a black hole: the TCP connection is accepted and the
+      // upgrade never happens, which is what a LAN address looks like off-LAN.
+      const hole = Bun.listen({
+        hostname: "127.0.0.1",
+        port: 0,
+        socket: { open() {}, data() {}, close() {} },
+      });
+      // A first address that REFUSES at once (a closed port): a genuine failed
+      // open, which the diagnoser must be told about. It is what makes the
+      // `opened: false` count below non-vacuous — the array is not merely empty
+      // of ABANDONS, it does carry real failures.
+      const refused = freeLoopbackAddress();
+      const hanging = `ws://127.0.0.1:${hole.port}/e2e`;
+      const computer: StoredComputer = {
+        ...d.computer,
+        addresses: [refused, hanging, d.computer.addresses[0] ?? ""],
+      };
+      const outcome = await openComputer(computer, {
+        WebSocket: RNShapedWebSocket,
+        random: systemRandomBytes,
+        diagnosis,
+      }).then(
+        (link) => ({ ok: true as const, link }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      try {
+        // REACHED at all is the property: under the old sequential loop the
+        // black hole held the dial until the app's 15 s deadline.
+        if (!outcome.ok) {
+          throw outcome.error;
+        }
+        const link = outcome.link;
+        expect(await link.client.sessionList()).toBeDefined();
+        // The winner is the one the link names, and the verdict is `ok` — the
+        // abandoned loser opened late and closed, which says nothing about
+        // identity, so it must not appear as `unreachable` after the success.
+        expect(link.address()).toBe(d.computer.addresses[0] ?? "");
+        expect(link.diagnosis.current()).toBe("ok");
+        // A genuine failed open IS reported (the refused port): so the array below
+        // is not vacuous…
+        expect(observed.filter((entry) => !entry.opened).length).toBe(1);
+        // …and the hanging loser and any late one are NOT — a path that was not
+        // needed says nothing about this computer's identity, and reporting it
+        // would make a working link look `unreachable` (mutation: observe in
+        // `abandon` → red; swallow a real failed open → red).
+        await link.close();
+      } finally {
+        hole.stop(true);
+      }
+    });
+  }, 30_000);
+
+  test("R6: a loser that opens LATE is CLOSED, not left holding a socket (mutation: make `abandon` a no-op → red)", async () => {
+    await withDaemon(async (d) => {
+      // A "slow" daemon: it accepts the upgrade only when the test says so, so the
+      // SECOND address (started by the 750 ms stagger) wins first and this one
+      // arrives as the loser — exactly what a relay leg does when the direct path
+      // answers a little after it.
+      let acceptUpgrade: (() => void) | undefined;
+      let closedCount = 0;
+      // The diagnosis side of the same event: an abandoned loser must record
+      // NOTHING (it is a path that was not needed, not one that is down), so a spy
+      // in front of the real diagnoser counts the failed opens it was told about.
+      const real = createLinkDiagnoser();
+      const observed: { readonly opened: boolean }[] = [];
+      const diagnosis = {
+        observe: (observation: Parameters<typeof real.observe>[0]) => {
+          observed.push({ opened: observation.opened });
+          return real.observe(observation);
+        },
+        ok: () => real.ok(),
+        current: () => real.current(),
+      };
+      const slow = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch(req, server) {
+          // Hold the request: the test upgrades it later, so this path's socket
+          // opens AFTER the other address has already won the race.
+          acceptUpgrade = () => {
+            server.upgrade(req, { data: {} });
+          };
+          return new Promise<Response>(() => {});
+        },
+        websocket: {
+          message() {},
+          close() {
+            closedCount += 1;
+          },
+        },
+      });
+      const outcome = await openComputer(
+        {
+          ...d.computer,
+          addresses: [`ws://127.0.0.1:${slow.port}/e2e`, d.computer.addresses[0] ?? ""],
+        },
+        { WebSocket: RNShapedWebSocket, random: systemRandomBytes, diagnosis },
+      ).then(
+        (link) => ({ ok: true as const, link }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      try {
+        if (!outcome.ok) {
+          throw outcome.error;
+        }
+        // The relay-side address answered first, so this path's socket was not
+        // open yet (it was started, and holds the stagger)…
+        expect(closedCount).toBe(0);
+        // …and when it opens anyway, the winner is already handshaking: the late
+        // path is CLOSED before any handshake. A socket left open is a stream and
+        // a limiter slot nobody will use.
+        acceptUpgrade?.();
+        await Bun.sleep(200);
+        expect(closedCount).toBe(1);
+        // …and that close was SILENT: no failed-open observation for it
+        // (mutation: observe in `abandon` → red).
+        expect(observed.filter((entry) => !entry.opened)).toEqual([]);
+        await outcome.link.close();
+      } finally {
+        slow.stop(true);
+      }
+    });
+  }, 30_000);
+
+  test("R6/review 1: a loser whose OPEN fails after the race was decided does NOT overwrite the verdict (mutation: observe in `open`'s catch → red)", async () => {
+    await withDaemon(async (d) => {
+      // The winner is the computer's own address, but with a STRANGER's device
+      // key: the handshake is denied, which is authenticated → `revoked`, the one
+      // verdict that offers Remove. A LAN address the phone is off-network holds
+      // the first leg: it starts first and hangs, and its open rejects LATER, when
+      // the race is long decided (a real TCP timeout, driven here by hand).
+      const held: { terminate: () => void }[] = [];
+      const hole = Bun.listen({
+        hostname: "127.0.0.1",
+        port: 0,
+        socket: {
+          open(socket) {
+            held.push(socket as unknown as { terminate: () => void });
+          },
+          data() {},
+          close() {},
+        },
+      });
+      const diagnosis = createLinkDiagnoser();
+      const stranger: StoredComputer = {
+        ...d.computer,
+        deviceKey: encode(key(11)),
+        addresses: [`ws://127.0.0.1:${hole.port}/e2e`, d.computer.addresses[0] ?? ""],
+      };
+      try {
+        const caught = await openComputer(stranger, {
+          WebSocket: RNShapedWebSocket,
+          random: systemRandomBytes,
+          diagnosis,
+        }).catch((error: unknown) => error);
+        // The authenticated verdict: the daemon refused this phone's key.
+        expect((caught as { kind?: string }).kind).toBe("unauthorized");
+        expect(diagnosis.current()).toBe("revoked");
+        // The hanging leg's socket dies now — AFTER the race was decided. That is
+        // a path that was not needed, not a computer that is down: reporting it
+        // would turn an authenticated `revoked` into `unreachable`, and the row
+        // would lose its Remove action.
+        expect(held.length).toBe(1);
+        held[0]?.terminate();
+        await Bun.sleep(200);
+        expect(diagnosis.current()).toBe("revoked");
+      } finally {
+        hole.stop(true);
+      }
+    });
+  }, 30_000);
 
   test("the store the app reads is what openComputer dials: id, key and addresses come from it", async () => {
     await withDaemon(async (d) => {
