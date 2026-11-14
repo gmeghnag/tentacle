@@ -3626,3 +3626,56 @@ branch this slice introduced is left unpinned.
   pinned by a test: a ref that became hook-private would still typecheck (a
   `MutableRefObject` field is the same type either way). The structural case
   rejects *creating* one; it cannot see a shared one being replaced.
+
+## Review
+
+### S8 review — fresh context
+
+*— claude-opus-5-5, 2026-11-14* (a different model family from the executor,
+DeepSeek)
+
+**Verdict: APPROVE** (no HIGH or MEDIUM finding).
+
+**Gate, re-run here.** `bun test` → **8891 pass / 3 skip / 0 fail** (8894 tests
+across 638 files; the 3 skips are the documented opt-ins) · `bun run lint` →
+1186 files, clean · `bun run typecheck` → clean · the touched and adjacent files
+(the two new ones, `clear`, `clear-resume`, `clear-connect-unbound`,
+`run-quit`, `app-types`, `app-structural-identity`) → 56 pass / 0 fail.
+
+**Attacks tried.**
+1. *Is the move really verbatim?* I diffed every removed `App.tsx` line
+   (whitespace-normalised) against `useQuitClear.ts`. The only lines missing
+   from the hook are the dropped imports, the `RunQuit` re-export line, the
+   three old dep arrays plus their comment, and `requestClear`'s old docblock.
+   No statement changed. **Holds.**
+2. *TDZ / declaration order:* `requestClear` now runs at the hook call
+   (`App.tsx:2163`), which is earlier than its old position after
+   `startCompaction`. Every closure input is declared before that line:
+   `exit` 323, `setQuitConfirm` 488, `makeSession` 590, `pushNotice` 1044,
+   `wakeIfPending` 1300, `swapSession` 1953. `useCallback` order changed, but it
+   is still static from one render to the next. **Holds.**
+3. *Single-latch (stale closure) and §7 lifecycle:* every ref comes in as a port
+   field. The hook creates no state, ref or effect. `runClearRef.current = runClear`
+   is still assigned right after the call, and `exitPendingRef`, `clearAfterTurnRef`
+   and `stoppedHereRef` are the same objects App's settle reads. The quit path is
+   unchanged: `quitCommandStep` → `exit` / `setQuitConfirm` / stop-first. So
+   `detachOnQuit` and `runQuit.othersOnSession()` stay live reads. **Holds.**
+4. *Circular import:* `app-types.ts` imports from `useQuitClear.ts`, and back.
+   Both imports are type-only, so they are erased at runtime, and tsc is clean.
+   **Holds.**
+5. *Mutation by the reviewer (both reverted; `git status` clean afterwards):*
+   (a) drop `stoppedHereRef.current = true` in `requestClear`'s
+   stop-then-clear branch; (b) drop `wakeIfPending()` in `runClear`'s `{0,0}`
+   no-op branch. Both mutations were applied together, and the whole
+   `packages/tui` suite stayed green: **1916 pass, so both SURVIVED**. These
+   lines are verbatim from `main`, so this is an **existing coverage gap that the
+   slice did not introduce**. It does not block, but it is worth a follow-up test:
+   a held wake after a no-op clear would never start, which is a silent stall.
+   The executor's own mutations M1–M12 were not re-run here.
+
+**Unverified:** the executor's red-before-green run and its coverage numbers were
+taken from Execution as written. I did not reproduce them.
+
+**Executor behaviour.** It disclosed its drift (the `requestClear` scope, the
+dep arrays, the `app-types` re-export) and its single surviving mutant (M10).
+Its claims matched the code wherever I checked them.
