@@ -4730,3 +4730,158 @@ App is a type annotation the inferred return should make unnecessary.
 on the property and eight on ENOENT. It closed the mutants that survived its
 first run, and it disclosed the drift. One overclaim: the palette test is
 presented as pinning a slot property that it does not pin.
+
+
+## Final review and follow-up slices (S11–S14)
+
+The owner approved the four follow-ups "in order" (2026-11-14): **S14 tidy → S13
+pure residue → S11 hop (after session-hop H6+H7 merge) → S12 line keys** (S12
+is load-bearing: strong executor + fresh-context Review on key precedence).
+Each slice's scope is the matching row of the table below ("Proposed follow-up
+tasks"); slugs `app-decomp-14-tidy`, `app-decomp-13-pure-residue`,
+`app-decomp-11-hop`, `app-decomp-12-line-keys`. *— claude-opus-5-5
+(orchestrator), 2026-11-14*
+
+Verdict: FOLLOW-UP NEEDED
+
+### Final adversarial review — app-decomposition S0–S10 (main @ 6305dcd3)
+
+*— claude-opus-5-5, 2026-11-14 (fresh context, read-only; no tracked file edited)*
+
+## Gate
+
+- `bun run typecheck` — OK (after `bun install --frozen-lockfile`: the snapshot
+  worktree had no `node_modules`; the first run's ~400 TS2307 were missing deps
+  only, not code).
+- `bun run lint` — OK, `Checked 1303 files … No fixes applied` (baseline clean).
+- `bun test packages/tui` — **2037 pass / 0 fail**, 143 files (205 s).
+- Logs: `tc.log`, `lint.log`, `test.log` beside this file.
+
+## Summary
+
+The decomposition did what it said for the slices it moved: commands, keys
+(pure layers), mouse, panels, dock, attachments, quit/clear, turn driver, session
+link and view are out, every extracted hook declares no effect, and the gate is
+green. But **App.tsx is 1977 lines, not "≲ 800, no feature logic"**
+(plan `docs/feat/app-decomposition.md:233-235`), and it is **not yet only
+composition**: about 450 lines of branching logic remain, and ~130 of them were
+added back by session-hop *after* the decomposition, which breaks the plan's own
+contract for a new stateful feature ("a hook file plus ≤ 4 append-only App.tsx
+lines", `:355-356`). No regression found; the pins work but their wording is stale.
+
+## HIGH
+
+None. No behaviour regression found: the effect order matches the pins, the
+late-bound refs are all assigned during render before any effect or event reads
+them (`warmErrorRef` :1038, `wakeIfPendingRef` :1133, `routeAttachRef` :1075,
+`runRef` :1269, `onActivityRef` :1340, `runClearRef` :1389, `startHopRef` :1453,
+`hopIfQueuedRef` :1508), and the full TUI suite is green.
+
+## MEDIUM
+
+1. **session-hop put feature logic back in App (the decomposition's contract,
+   broken on its first test).** `packages/tui/src/App.tsx:1391-1520`:
+   `startHop` (outcome branching: moved/failed/rejected, the auto-approve clear,
+   the latch), `requestHop` (dispatch over `hopStep`'s 4 kinds), `hopIfQueued`
+   (its busy check repeats `hopStep`'s `running`/`queued` inputs at :1501 vs
+   :1468-1469), plus its state and refs. That is ~130 lines and 75 `hop`
+   references. Plan `:355-356` allows ≤ 4. → `useHop.ts` (executor hook, NO
+   effect, the same pattern as `useQuitClear`), with the boundary check as one
+   pure `hopReady({running, queued, hopping, queued})` in `hop-command.ts`, used
+   by both `hopStep` and `hopIfQueued`. The idle effect at :1515 stays in App
+   at index 20.
+2. **The line-editing tail of the key handler is still inline (the known debt
+   `AGENTS.md §7` names).** `App.tsx:1827-1930` (~105 lines): `historyStep`
+   (`recall` + the no-op guard), the `downEntersList` dispatch, the 14-arm
+   `switch (action.kind)` including a real decision (Backspace on an empty
+   field removes the last chip, :1916). Plus decisions inside the `keyHost`
+   port (:1673-1748, ~75 lines): `moveCommandSel`'s wrap arithmetic (:1741-1745,
+   which gives `NaN` if `n === 0`; today a layer guards it, but nothing in the
+   function does), `permissionStop` (:1693-1704) and `cancelUpload` ordering
+   (:1725-1730). → a pure `keys/line-layer.ts` that turns the line action into
+   effects (a 15th layer after the mouse, or a `resolveLineEffects`) run through
+   the existing `executeEffects`/`KeyHost`. The wrap → `paletteStep(i, n, dir)`
+   in the palette module, with an `n === 0` case.
+3. **Branching left inside effects and callbacks that could be pure** (each one
+   can be tested on its own once extracted):
+   - `App.tsx:647-663` — a nested ternary turning an exit into a `DockOutcome`.
+     → `exitOutcome(job, byDock, now)` in `job-drawer.ts`.
+   - `App.tsx:968-975` and `:1021-1028` — the same `JobOutput` record built
+     twice from a read result (copy-paste). → `jobOutputEntry(result)`.
+   - `App.tsx:624-634` and `:1120-1130` — the wake gate written out twice
+     (`enabled/idle/blocked` then `wakeDue` then `wakeStep`). → one local
+     `tryWake()` or a pure `wakeGate(...)`.
+   - `App.tsx:890-899` — the scroll-anchor rule (grow while scrolled up or
+     selecting). → `anchorOffset(prev, total, offset, selecting, viewport)` in
+     `scroll.ts`.
+   - `App.tsx:726-749` — resize: a height-only change commits now, a width
+     change warms first. Small; worth extracting only along with item 4.
+   - `App.tsx:1649-1663` — the paste-timeout target rule (reply, then panel,
+     then attach), the same rule as `pasteReply`/`pasteClipboard`. → one pure
+     `pasteTarget`.
+4. **App.tsx is 1977 lines against a ≲ 800 target** (`:233-235`). The rest is
+   composition, but very wide composition: about 91 `useState`/`useRef`
+   declarations, and hook calls with 30–55 port fields (`useTurnDriver`
+   :1210-1266, 55 fields). The plan's "what stays" list (`:229-232`) is met in
+   *shape* but not in *size*. The 29 dead imports carried on purpose (Owner
+   Q5) are still there (`attachErrorText`, `startTurn`, `failTurn`,
+   `applySessionEvent`, … measured with `dead-imports.ts`). So is a sentence
+   fragment left by a move at `App.tsx:1135` ("// the held ones, and the
+   handler starts streams (C2).").
+
+## LOW
+
+1. **Stale "20" next to every "22" pin.** The assertions are consistent (all
+   `toBe(22)`), but the wording is not: test titles still say 20 at
+   `app-attachments-structure.test.ts:150` ("effect 1 of 20"),
+   `app-panels-structure.test.tsx:103`, `app-session-link-structure.test.ts:138`,
+   `app-turn-driver-structure.test.ts:141`, `app-quit-clear-structure.test.ts:109`;
+   so do the source comment `App.tsx:1207` ("so the 20 below keep their
+   indices") and the plan at `docs/feat/app-decomposition.md:234,279,303`. Only
+   `use-dock.test.tsx:51` says where the bump came from ("20 + session-hop's 2").
+   `docs/feat/session-hop.md` does not mention it, and the plan names 22 only
+   at `:4515` with no origin. → one doc line in the plan's "What stays" (22 =
+   20 + session-hop's `targetFeed` effect #2 at `:480` and its idle effect #20
+   at `:1515`), and fix the titles and the comment.
+2. **The index pins cover only effects 1, 4, 13, 14 and 15 (1-based).**
+   `use-dock.test.tsx:57-60` checks positions 3/12/13/14 (0-based) and
+   attachments checks 0. Nothing pins where session-hop's idle effect sits
+   (#20), or the order of #17/#18 (initial prompt, then handed wake) and
+   #21/#22. Today none of these is order-sensitive on mount (`hopQueued` starts
+   `null`, and the wake defers through `setTimeout 0`), so this is LOW. Pinning
+   `body(19)` ⊇ `hopIfQueuedRef` costs one line.
+3. **The count pin counts only literal `\n  useEffect(`.** An effect added
+   through a custom hook called in App (`usePaintScheduler` :597,
+   `useLinkIndicator` :598 and `useDockClock` :768 already own effects in
+   `hooks.ts`) changes React's effect order without failing any count. The
+   per-hook "declares no useEffect" tests cover the S-hooks only. Accepted:
+   the real order is guarded by the structural-order behaviour tests.
+
+## Pin non-vacuity (mutation, in memory)
+
+`mutate.ts` applies the exact predicates of `use-dock.test.tsx:51-63` and the
+`countOf("\n  useEffect(") === 22` pin to App.tsx text mutated in memory
+(no tracked file was touched):
+
+```
+M0 baseline         dock: PASS  count: PASS
+M1 drop hop effect  dock: FAIL(length=21)  count: FAIL(21)
+M2 reorder hop up   dock: FAIL(body(3),body(12),body(13),body(14))  count: PASS
+M3 move targetFeed  dock: FAIL(body(3))  count: PASS
+```
+
+The pins are non-vacuous for count changes and for any reorder that crosses
+effects 1–15. A reorder among effects 16–22 is not caught (LOW 2).
+
+## Proposed follow-up tasks
+
+| # | Slug | What | Size | Blast |
+|---|------|------|------|-------|
+| 1 | `feat/app-decomp-11-hop` | Move `startHop`/`requestHop`/`hopIfQueued` + state into `useHop.ts` (no effect); one shared pure `hopReady`; the idle effect stays at #20. Pin `body(19)`. | M | cross-module |
+| 2 | `feat/app-decomp-12-line-keys` | The line-editing tail + `historyStep` + `downEntersList` dispatch + the chip-Backspace rule → pure `keys/line-layer.ts` run through `executeEffects`; `paletteStep` with an `n === 0` case. This removes the last of the "known debt" named in AGENTS §7. | M | load-bearing (the ONE `useInput` precedence; fresh-context Review) |
+| 3 | `feat/app-decomp-13-pure-residue` | `exitOutcome`, `jobOutputEntry` (dedupe), one `tryWake`, `anchorOffset`, `pasteTarget` → pure modules with unit tests; the effects stay in place. | S | contained |
+| 4 | `feat/app-decomp-14-tidy` | Drop the 29 dead imports and the :1135 fragment; fix the stale "20" titles/comments; document 20 → 22 in the plan; then re-measure against the ≲ 800 target and either meet it or restate it honestly. | S | contained |
+
+Recommended order: 4 (cheap, makes the pins honest), then 3, 1, 2. Task 2 is
+the only load-bearing one and needs a strong executor plus a fresh-context
+Review that red-teams key precedence (`app-keys-precedence.test.tsx`).
