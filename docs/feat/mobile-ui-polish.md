@@ -840,6 +840,36 @@ bun run e2e:mobile --ios 18`, then the screenshot pass.
 (1393 files) · `bun test` 10022 pass, 4 skip (opt-in), 0 fail. No schema change
 (no `protocol.json` regen, no `protocol.d/` note).
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14*
+
+Scope: the two MEDIUM findings of "Slices 1–2 — adversarial review". Neither is
+a code defect: both need access this session does not have. **No code was
+changed.**
+
+- **Finding 1 (Unicode icons, no `expo-blur`) — BLOCKED, not fixed.**
+  `npm view expo-symbols@58 version` → "This command requires approval" (refused).
+  None of `expo-{symbols,blur,haptics,clipboard}` is in
+  `~/.bun/install/cache`, so no offline install is possible. Wiring `SymbolView`
+  / `BlurView` without the packages cannot typecheck, and a guessed-API shim
+  would be invented code (EXECUTOR-BRIEF). To unblock, someone with network
+  access runs: `cd apps/mobile && bunx expo install expo-symbols expo-haptics
+  expo-clipboard expo-blur`, then the `Icon.tsx` / `GlassButton.tsx` swap
+  (both behind their existing APIs), then a dev-client rebuild.
+- **Finding 2 (no screenshots / e2e on the new layout) — BLOCKED, not fixed.**
+  `xcrun simctl list devices booted` → "This command requires approval"
+  (refused). `.tentacle/tmp/mobile-ui/` has no PNGs. Still needed:
+  `E2E_ONLY_FLOWS=15-revoked,16-remove-computer,12-pair-declined,13-pair-expired,20-camera-close
+  bun run e2e:mobile --ios 18`, then light/dark screenshots into
+  `.tentacle/tmp/mobile-ui/slice-1|slice-2/` and the Fable visual review.
+
+**Red/green, mutations:** none. No fix was made, so there was nothing to turn
+red and then green, or to mutation-check.
+
+**Gate (unchanged tree, re-run):** `bunx tsc --noEmit` clean · `bun run lint`
+1393 files, 0 issues · `bun test` 10022 pass, 4 skip (opt-in), 0 fail.
+
 ## Review
 
 ### Slice 0 — adversarial review (fresh context)
