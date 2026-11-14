@@ -1,0 +1,58 @@
+appId: so.tentacle.app
+---
+# 09 (docs/feat/mobile-session-view.md 12c): a turn the LAPTOP starts while the
+# phone has the session open (F10). The rows stream in identically, the composer
+# offers Stop for a turn this device did not start, and Stop cancels THAT turn id
+# on the daemon (`session/cancel`), which the hook then proves.
+#
+# The second half is the other device's ASK: the laptop starts an `EDIT` turn with
+# its own requester held, the phone's sheet shows it, and the LAPTOP's answer wins
+# first — the phone's sheet must then close by itself (a `permission_resolved`
+# arrives; it never sends).
+- launchApp:
+    clearState: true
+- tapOn:
+    id: "computer-dev"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${ASK4_ID}"
+- assertVisible:
+    id: "session-view"
+- assertVisible:
+    id: "turn-idle"
+- runScript:
+    file: "09-laptop-hold.js"
+# A foreign turn is running: Stop is offered on an empty field (decision 15).
+- extendedWaitUntil:
+    visible:
+      id: "turn-running"
+    timeout: 20000
+- assertVisible:
+    id: "composer-stop"
+- assertVisible:
+    id: "row-r5"
+- tapOn:
+    id: "composer-stop"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+- runScript:
+    file: "09-cancelled.js"
+# --- the other device's ask ---------------------------------------------------
+- runScript:
+    file: "09-laptop-edit.js"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+# The LAPTOP answers first: the sheet closes itself and nothing was sent from here.
+- runScript:
+    file: "09-laptop-answer.js"
+- extendedWaitUntil:
+    notVisible:
+      id: "perm-sheet"
+    timeout: 20000
+- runScript:
+    file: "09-file.js"

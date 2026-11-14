@@ -1,0 +1,58 @@
+appId: so.tentacle.app
+---
+# 08 (docs/feat/mobile-session-view.md 12c): an `ask` tool suspends the turn on a
+# permission request, which reaches the PHONE's sheet (the seeder and the laptop
+# hold theirs, so only the phone can answer). Approving runs the tool exactly
+# once, and the daemon's own file proves it.
+#
+# `EDIT a.txt` makes the mock model emit a real streamed tool call (`fs_write`),
+# so this is the whole path: tool_call → permission_request → sheet → answer →
+# the tool runs → a diff on the row.
+- launchApp:
+    clearState: true
+- tapOn:
+    id: "computer-dev"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${ASK1_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "EDIT a.txt"
+# The keyboard covers the composer's button: dismiss it, so the tap lands
+# on the button and not on a key (found by the first iOS 26 run).
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+# What the daemon offered, drawn by the sheet: the three options and the reply one
+# (this daemon takes a reply with a refusal).
+- assertVisible:
+    id: "perm-allow_once"
+- assertVisible:
+    id: "perm-allow_always"
+- assertVisible:
+    id: "perm-reject_once"
+- assertVisible:
+    id: "perm-reply"
+- tapOn:
+    id: "perm-allow_once"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+# The row's status id is `<callId>-ok`, so the flow first reads the id the mock
+# actually minted: no guessing at the daemon's call id.
+- runScript:
+    file: "08-call-id.js"
+- assertVisible:
+    id: "tool-${output.callId}-ok"
+- assertVisible:
+    id: "diff-${output.callId}"
+- runScript:
+    file: "08-file.js"

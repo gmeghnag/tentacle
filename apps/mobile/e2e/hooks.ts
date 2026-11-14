@@ -1,14 +1,38 @@
 /**
- * The harness's control hooks (docs/feat/mobile-app-shell.md flow 03/05): a
- * localhost HTTP server the Maestro flows reach through `runScript`, so a flow
- * can change the world MID-run (create a session, stop/start `serve`) without
- * the harness guessing timings.
+ * The harness's control hooks (docs/feat/mobile-app-shell.md flows 03/05, plus
+ * docs/feat/mobile-session-view.md 12c's six): a localhost HTTP server the
+ * Maestro flows reach through `runScript`, so a flow can change the world
+ * MID-run (start a turn from the LAPTOP, answer an ask from the laptop, stop and
+ * start `serve`) without the harness guessing at timings.
  *
  * The actions themselves are injected, so this module owns only the tiny HTTP
- * surface and stays testable without a simulator or a daemon.
+ * surface and stays testable without a simulator or a daemon. Every hook that
+ * reports daemon-side truth (12c's `session-state`, `history`, `file-exists`,
+ * `model-prompts`, `model-replies`) exists because RN's new architecture shows
+ * NO text to XCUITest (plan P9): the flow asserts the ids on screen, and the
+ * hook proves what the daemon actually did.
  */
 
-export type HookName = "add-delta" | "stop-serve" | "start-serve";
+export type HookName =
+  | "add-delta"
+  | "stop-serve"
+  | "start-serve"
+  | "laptop-prompt"
+  | "laptop-answer"
+  | "session-state"
+  | "history"
+  | "file-exists"
+  | "model-prompts"
+  | "model-replies"
+  | "edit-calls";
+
+/** The hooks that take a query parameter (`?session=…&prompt=…`). */
+export interface HookQuery {
+  readonly session?: string;
+  readonly prompt?: string;
+  readonly answer?: string;
+  readonly file?: string;
+}
 
 export interface Hooks {
   /** Bind on an ephemeral 127.0.0.1 port; resolves once the port is real. */
@@ -18,35 +42,110 @@ export interface Hooks {
   stop(): Promise<void>;
 }
 
-export interface HookDeps {
-  readonly actions: {
-    /** Create a new session with a finished turn (flow 03's `Delta`). */
-    /** Creates a session and returns its id (the flow asserts on the row). */
-    readonly addDelta: () => Promise<string>;
-    /** Stop the daemon (flow 05). */
-    readonly stopServe: () => Promise<void>;
-    /** Start it again on the SAME port and config (flow 05's reconnect). */
-    readonly startServe: () => Promise<void>;
-  };
+export interface HookActions {
+  /** Creates a session with a finished turn; returns its id (flow 03). */
+  readonly addDelta: () => Promise<string>;
+  /** Stop the daemon (flow 05/11). */
+  readonly stopServe: () => Promise<void>;
+  /** Start it again on the SAME port and config (flow 05/11). */
+  readonly startServe: () => Promise<void>;
+  /**
+   * A LAPTOP turn on an EXISTING session: the harness is a client that attaches
+   * and prompts, with its own requester (`answer` omitted → the ask waits, so
+   * the phone's sheet is the only one that can answer it).
+   */
+  readonly laptopPrompt: (
+    sessionId: string,
+    prompt: string,
+    answer: LaptopAnswer | null,
+  ) => Promise<{ readonly turnId: string }>;
+  /** Answer a pending ask from the LAPTOP's side (the first answer wins). */
+  readonly laptopAnswer: (sessionId: string, answer: LaptopAnswer) => Promise<void>;
+  /** `session/list`'s entry: `attached`, `running`, `archived` (F8/F15's truth). */
+  readonly sessionState: (sessionId: string) => Promise<{
+    readonly attached: number;
+    readonly running: boolean;
+    readonly archived: boolean;
+  } | null>;
+  /** The daemon's last user and assistant text (by `snapshot`): flow 07/11's truth. */
+  readonly history: (
+    sessionId: string,
+  ) => Promise<{ readonly user: string | null; readonly assistant: string | null }>;
+  /** Whether `project/<file>` exists on the daemon's host (flow 08/10's truth). */
+  readonly fileExists: (file: string) => Promise<boolean>;
+  /** Every prompt the MOCK MODEL was asked (flow 07's turn really reached it). */
+  readonly modelPrompts: () => readonly string[];
+  /** Every refusal-with-a-reply the model saw (flow 08's reply variant). */
+  readonly modelReplies: () => readonly string[];
+  /** The tool-call ids the mock minted (a flow names `tool-<id>-ok`). */
+  readonly editCalls: () => readonly string[];
 }
+
+/** What a laptop requester answers: `allow` (once) or `deny`. */
+export type LaptopAnswer = "allow" | "deny";
 
 /** The action a request's path names, or undefined for anything unknown. */
 export function hookFor(path: string): HookName | undefined {
   const name = path.replace(/^\/+/, "").replace(/\/+$/, "");
-  if (name === "add-delta" || name === "stop-serve" || name === "start-serve") {
-    return name;
+  switch (name) {
+    case "add-delta":
+    case "stop-serve":
+    case "start-serve":
+    case "laptop-prompt":
+    case "laptop-answer":
+    case "session-state":
+    case "history":
+    case "file-exists":
+    case "model-prompts":
+    case "model-replies":
+    case "edit-calls":
+      return name;
+    default:
+      return undefined;
   }
-  return undefined;
 }
 
-export function startHooks(deps: HookDeps): Hooks {
-  let port = 0;
+/** The query parameters a hook reads (`?session=…&prompt=…`). */
+export function queryOf(url: URL): HookQuery {
+  return {
+    ...(url.searchParams.get("session") === null
+      ? {}
+      : { session: url.searchParams.get("session") as string }),
+    ...(url.searchParams.get("prompt") === null
+      ? {}
+      : { prompt: url.searchParams.get("prompt") as string }),
+    ...(url.searchParams.get("answer") === null
+      ? {}
+      : { answer: url.searchParams.get("answer") as string }),
+    ...(url.searchParams.get("file") === null
+      ? {}
+      : { file: url.searchParams.get("file") as string }),
+  };
+}
+
+/** A required parameter, or a 400 the flow's script surfaces. */
+function required<T>(value: T | undefined, name: string): T {
+  if (value === undefined || value === "") {
+    throw new Error(`the ${name} parameter is required`);
+  }
+  return value;
+}
+
+/** The answer a `laptop-answer`/`laptop-prompt` query names, or null for "wait". */
+export function answerOf(value: string | undefined): LaptopAnswer | null {
+  if (value === "allow") {
+    return "allow";
+  }
+  return value === "deny" ? "deny" : null;
+}
+
+export function startHooks(deps: { readonly actions: HookActions }): Hooks {
   let ready: () => void = () => {};
   const bound = new Promise<void>((resolve) => {
     ready = resolve;
   });
   const server = Bun.serve({
-    port,
+    port: 0,
     hostname: "127.0.0.1",
     async fetch(req) {
       const url = new URL(req.url);
@@ -54,17 +153,60 @@ export function startHooks(deps: HookDeps): Hooks {
       if (hook === undefined) {
         return Response.json({ error: "unknown hook" }, { status: 404 });
       }
+      const query = queryOf(url);
       try {
-        if (hook === "add-delta") {
-          const sessionId = await deps.actions.addDelta();
-          return Response.json({ ok: true, hook, sessionId });
+        switch (hook) {
+          case "add-delta": {
+            const sessionId = await deps.actions.addDelta();
+            return Response.json({ ok: true, hook, sessionId });
+          }
+          case "stop-serve":
+            await deps.actions.stopServe();
+            return Response.json({ ok: true, hook });
+          case "start-serve":
+            await deps.actions.startServe();
+            return Response.json({ ok: true, hook });
+          case "laptop-prompt": {
+            const session = required(query.session, "session");
+            const prompt = required(query.prompt, "prompt");
+            const started = await deps.actions.laptopPrompt(
+              session,
+              prompt,
+              answerOf(query.answer),
+            );
+            return Response.json({ ok: true, hook, turnId: started.turnId });
+          }
+          case "laptop-answer": {
+            const session = required(query.session, "session");
+            const answer = answerOf(query.answer);
+            if (answer === null) {
+              throw new Error("the answer parameter must be allow or deny");
+            }
+            await deps.actions.laptopAnswer(session, answer);
+            return Response.json({ ok: true, hook });
+          }
+          case "session-state": {
+            const session = required(query.session, "session");
+            const state = await deps.actions.sessionState(session);
+            return Response.json({ ok: true, hook, state });
+          }
+          case "history": {
+            const session = required(query.session, "session");
+            const history = await deps.actions.history(session);
+            return Response.json({ ok: true, hook, history });
+          }
+          case "file-exists": {
+            const file = required(query.file, "file");
+            return Response.json({ ok: true, hook, exists: await deps.actions.fileExists(file) });
+          }
+          case "model-prompts":
+            return Response.json({ ok: true, hook, prompts: deps.actions.modelPrompts() });
+          case "model-replies":
+            return Response.json({ ok: true, hook, replies: deps.actions.modelReplies() });
+          case "edit-calls":
+            return Response.json({ ok: true, hook, calls: deps.actions.editCalls() });
         }
-        if (hook === "stop-serve") {
-          await deps.actions.stopServe();
-        } else {
-          await deps.actions.startServe();
-        }
-        return Response.json({ ok: true, hook });
+        return Response.json({ error: "unknown hook" }, { status: 404 });
       } catch (error) {
         return Response.json(
           { ok: false, error: error instanceof Error ? error.message : String(error) },
@@ -73,10 +215,9 @@ export function startHooks(deps: HookDeps): Hooks {
       }
     },
   });
-  port = server.port;
   ready();
   return {
-    address: `127.0.0.1:${port}`,
+    address: `127.0.0.1:${server.port}`,
     ready: bound,
     stop: async () => {
       await server.stop();
