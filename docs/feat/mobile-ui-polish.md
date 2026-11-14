@@ -931,3 +931,15 @@ red and then green, or to mutation-check.
 **Executor behaviour:** honest — the blocked add-ons and unrun simulator work are stated plainly; the `revoked` → inline "Pair again" drift is justified by `computer-rows.ts` and flow 15.
 
 *— claude-opus-5-5, 2026-11-14* (same model as the executor, fresh context only — shared blind spots possible)
+
+### Round 2
+
+**Verdict: REQUEST-CHANGES (both findings still open; executor blocked, not at fault).** Scope: `git diff HEAD~1` = `docs/feat/mobile-ui-polish.md` only (+30 lines, "Fix round 1"); no file under `apps/` changed (`git diff HEAD~1 --quiet -- apps` ⇒ empty).
+
+- **Finding 1 (Unicode icons, no `expo-blur`) — OPEN.** `Icon.tsx` still has the glyph table (`☰ ▭ ⌨` present); `apps/mobile/package.json` has none of `expo-{symbols,blur,haptics,clipboard}`. The doc's BLOCKED claim is consistent with the tree.
+- **Finding 2 (no simulator evidence) — OPEN.** No PNG under `.tentacle/tmp/mobile-ui/`; flows 12/13/15/16/20 still unrun on the new layout.
+- **Mutation:** not applicable. There is no new code or test to mutate; the round-1 mutations (computer-status, dark accent) still apply to an unchanged tree.
+- **Regressions:** none possible from a docs-only diff. Gate: `bun run typecheck` clean · `bun run lint` 1393 files, 0 issues.
+- **Executor behaviour:** honest. It changed no code and did not invent shims; it states the refused commands and the exact unblock steps. Unblocking needs the owner/orchestrator: network access for `bunx expo install …`, plus simulator approval for e2e and screenshots.
+
+*— claude-opus-5-5, 2026-11-14* (same model family as the executor's doc author, fresh context only)
