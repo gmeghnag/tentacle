@@ -406,3 +406,7 @@ Gate before promoting to `feat/`:
 *Owner: GO / NO-GO / GO-with-changes, date, and any decision on approval scoping.*
 
 -
+
+## Review — owner verdict (2026-11-14 00:10)
+
+**GO for the small v1** (`workload_shell` on k8s + docker/podman, ~3 slices, no protocol change). **`job_write`: NO-GO for now.** "Always" approvals of the tool are **scoped to the single workload** (recommended). Promoted to `docs/feat/workload-shell.md` (branch `feat/workload-shell`).
