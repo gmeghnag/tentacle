@@ -2851,3 +2851,147 @@ counts the line.
 clean. The full `bun test` was not re-run.
 
 *— claude-opus-5-5, 2026-11-14*
+
+### S6 — `feat/app-decomp-6-attach` (the attachments' executor leaves `App.tsx`)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: the run's
+parent process is `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc:29`.)
+
+**Scope.** `packages/tui/src/useAttachments.ts` (new, the hook),
+`packages/tui/src/App.tsx` (−221/+24 lines), two new test files, one changelog
+fragment. **No existing test edited** (`attach-app.test.tsx`'s 30 cases ran green
+and unmodified — the behaviour-preservation proof), no `packages/protocol`
+change (so `protocol.json` was not regenerated), no other slice touched,
+`TODO.md` untouched.
+
+**Load-bearing check, re-run first (PASSED).**
+`.tentacle/tmp/app-decomp-6-attach/lb-check.sh` on this branch:
+- *Ink calls EVERY active `useInput` listener, so the handler is ONE* —
+  `packages/tui/node_modules/ink/build/hooks/use-input.js:89`
+  `internal_eventEmitter?.on('input', handleData)`, no return value anyone
+  consumes, no stop-propagation; `rg "useInput\(" packages/tui/src` → `App.tsx`
+  and the separate pre-mount `components/SessionPicker.tsx:85`. **Holds** — so no
+  second listener is introduced here (S6 adds none; it moves no key handling).
+- *Every attach identifier's use-site is inside `App.tsx`* (Fable M1's frozen
+  names): `rg` over `packages/tui/src` minus `App.tsx` finds `attachCommand` only
+  as a `CommandContext` field + `commands/attach.ts`'s `Pick<>`, `routeAttach`
+  only as the S3 effect kind + `KeyHost` method, and `uploadInFlight` only as the
+  S4 snapshot getter — **no call site, no import**, so a hooked executor with the
+  same identifiers edits zero use-sites. `packages/cli/src`'s `attachCommand` is
+  an unrelated engine function (`engine-select.ts:149`). **Holds.**
+- *the 20 effects are App's and stay in order* (Fable H1) — the attach unmount
+  effect is **index 1 of 20** on `main` and still index 1 of 20 after the move
+  (`useAttachments.ts` declares NO effect: it imports only
+  `useCallback`/`useRef`). **Holds.**
+
+**Design, as built (dependency order).**
+1. **`useAttachments.ts`** — the EXECUTOR, no decisions of its own: the candidate
+   classification (`attach-candidates.ts`), the disk read (`attach-files.ts`) and
+   the draft transition (`attach-draft.ts`) are called, never re-derived. It owns
+   `attachChainRef` (the ONE thing that had to leave with the bodies: the
+   one-decision-at-a-time chain, so a second paste's `existing` sees the first
+   one's chips) and returns
+   `{attachMode, restoreChips, routeAttach, attachCommand, convertToChips,
+   sendWithImages}` — the same six identifiers `App` had, so the `submit` body,
+   the `KeyHost` port, the command context and `/retry`'s `restoreChips` are
+   unchanged. Its port is `AttachHost`; every callback destructures the fields
+   and names them in deps, never `host` (Fable H2 (2)).
+2. **`App.tsx`** — the six bodies gone, one `useAttachments({…})` call in their
+   place plus `routeAttachRef.current = routeAttach` (the ref itself stays: it is
+   read ABOVE the hook, by the paste layer). Imports dropped to what `App` still
+   uses. −221/+24, `3730 → 3533` lines.
+
+**What did NOT move, and why (stated, not discovered late).**
+- **The draft STATE** (`attach`, `attachRef`, `setAttach`): the render reads it
+  (`attachRowView`/`attachRowRows` for the input box's row count), and `submit`,
+  Backspace and `cancelUpload` edit it — the same split S4 gave `selection`. It
+  goes in as a port field.
+- **`probedTextRef`** (read by `submit`, R2-1), **`uploadCtrlRef`** (read by the
+  S3 key snapshot's `uploadInFlight` and by `cancelUpload`) and **`attachGenRef`**
+  (read by the App's unmount effect): three refs shared with layers this slice
+  does not own. Passing them as fields keeps every read site's identifier and the
+  ref-count identical; `useAttachments` only ever reads/bumps the same objects.
+- **The unmount effect** stays effect 1 of 20 (`App.tsx:465`), unchanged, and
+  `app-attachments-structure.test.ts` pins its index, its body (`attachGenRef`
+  bump + `uploadCtrlRef…abort()`) and the effect count 20. No effect was added,
+  removed or reordered.
+
+**Drift from the Implementation (both recorded, neither silent).**
+1. **`AttachHost.uploadCtrlRef`/`attachGenRef`/`probedTextRef`/`attachRef` are
+   `MutableRefObject`, and each hook callback's dep array names ALL the port refs
+   it closes over — not the verbatim array App had.** The plan's
+   "move dep arrays verbatim" (Failure modes → stale closure) assumed a `useRef`
+   local, which Biome's `useExhaustiveDependencies` ignores. Once a ref arrives as
+   a PROP it is a dep like any other, so the verbatim arrays (which named only
+   values) are incomplete and `biome check` fails with 14
+   `useExhaustiveDependencies` errors — measured, not guessed: the first build
+   with verbatim arrays was `14 errors`, restored arrays `0`. Since every one of
+   these refs is identity-stable (the App's own `useRef`), adding them changes NO
+   callback identity — the H2 property is preserved exactly, and
+   `attach-gen`-style churn is impossible. This is the H2 (2) rule applied as
+   written (deps name the fields), and it is what makes the "field, never `ctx`"
+   review blocker checkable here.
+2. **`AttachRun` is a NARROW type, not `App`'s `runRef` type.** The turn driver's
+   options are wider (`continuation`, `skill`, `fallback`) and `runRef` stays in
+   `App` (S9a owns it); the hook needs only `attachments`/`images`. Declaring that
+   two-field signature makes the App's existing `runRef` assignable to the port
+   field (a wider parameter is assignable) with no cast and no `as`, so the port
+   does not force `App` to export the driver's option type one slice early.
+
+**Tests (new only).** `packages/tui/test/app-attachments-layer.test.tsx` (3 App-seam
+cases) — the chain (two same-path pastes in one tick → ONE chip + the duplicate
+sentence), the LIVE draft/mode (a session that gains its seam is obeyed on the next
+paste), and a result landing AFTER the unmount starts no turn.
+`packages/tui/test/app-attachments-structure.test.ts` (4 source-level cases) — the
+decisions are no longer imported or called in `App.tsx`; exactly ONE
+`useAttachments` call, with the six frozen identifiers; dep arrays name fields,
+never the port; the unmount effect is still effect 1 of 20 and still aborts+bumps.
+**All 30 `attach-app.test.tsx` cases green, unedited.**
+
+**Mutation check (§9 non-vacuity) — 10/10 KILLED.** Harness
+`.tentacle/tmp/app-decomp-6-attach/mutate.ts` (byte-copy, one textual mutation,
+one filtered `bun test -t`, restore, sha256 compare; a 0-test run is reported
+INVALID so a bad filter cannot look like a kill — M5's first filter did exactly
+that and was corrected). Every row is a red on the ASSERTION with a real count,
+never an import/compile error, and every restore printed `MATCHES`.
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | a decision reads `EMPTY_DRAFT` instead of `attachRef.current` | **KILLED** (0 pass / 1 fail) |
+| M2 | the serialization chain dropped (each paste decides concurrently) | **KILLED** |
+| M3 | `attachMode` captured once instead of asked at decision time | **KILLED** |
+| M4 | a decision body re-inlined in `App.tsx` | **KILLED** |
+| M5 | the unmount effect's generation bump deleted | **KILLED** |
+| M6 | `useAttachments` called twice (two executors, one draft) | **KILLED** |
+| M7 | the post-unmount generation guard removed (a late upload starts a turn) | **KILLED** |
+| M8 | the upload controller not cleared before `run` (Esc swallows the next stop) | **KILLED** |
+| M9 | an upload failure says why but drops the text restore | **KILLED** |
+| M10 | `routeAttach` stops inserting the paste's own text (the 3a rule) | **KILLED** |
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` clean · `bun run lint`
+→ `biome check .` **1115 files, 0 errors 0 warnings** (the AGENTS §6 baseline) ·
+`bun test` → **8523 pass / 3 skip / 0 fail** across 612 files (the 3 skips are
+the documented opt-ins: live-k8s, live-docker, the real-socket keepalive). No
+schema change → `packages/protocol/schema/protocol.json` untouched.
+`changelog.d/app-decomp-6-attach.changed.md` added. `TODO.md` untouched (the
+orchestrator's line, §10).
+
+**Coverage (`bun test --coverage packages/tui`), the plan's per-slice check.**
+`useAttachments.ts` **100.00 % lines / 91.26 % funcs** (the uncovered lines are
+the multi-chip `uploadProgress` progress-callback closures and the `too-many`
+refusal path, both pinned in `attach-app.test.tsx` through the App);
+`App.tsx` moved `94.96 % / 97.41 %` and lost no coverage — the moved lines are
+covered from their new home.
+
+**Unverified (one line each).**
+- The identity rule is proved per callback by CONSTRUCTION (every dep is a
+  stable `useCallback`/`useRef` field) and by the S0b identity net
+  (`app-structural-identity.test.ts`, green, unedited), not by a new
+  subscribe-count test for these six callbacks specifically; the App-seam tests
+  above would not catch a fresh-identity regression in `restoreChips` alone,
+  because it is called only from `streamTurn`'s already-created closure.
+- A TUI-side `renderHook` unit test of the hook in isolation was not written
+  (the package has no `renderHook` seam today); the hook is covered through 33
+  App-seam cases instead.
