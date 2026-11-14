@@ -5828,3 +5828,21 @@ for every non-NaN count, and `length` is never NaN. (4) No leftover App reads of
 (`sessionRef`, `switchingRef`, …) are stable refs, so callback identity is
 unchanged in practice. §7 "logic in pure modules" holds; no protocol/persistence
 surface is touched.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14 (fresh context; reviewing `git diff HEAD~1`, tests only, no `src/` change)*
+
+**Verdict: PASS.** MEDIUM 1 is fixed: `use-hop.test.tsx` now drives `useHop`
+with `running: false` and a non-empty `daemonQueueRef`. Every mutation below was
+applied, run, then reverted (`cmp` byte-identical, `git status` clean):
+- A: `hopIfQueued` → `hopReady({ running, queued: 0 })` → **1 FAIL** (the
+  "starts nothing while the queue is non-empty" test).
+- C: `requestHop` alone drops the queue (`queued: 0`) → **2 FAIL** (both
+  daemon-queue tests).
+- B: `boundary()` → `queued: 0 * …` → **2 FAIL** (same two).
+Unmutated: hop-ready + use-hop + app-hop-structure + session-hop → 39 pass /
+0 fail. `bun run typecheck` clean; `bun run lint` → `Checked 1358 files … No
+fixes applied`. No regressions: the diff touches only the test file and this doc,
+and the existing freshness tests keep their defaults (`running: true`, empty
+queue).
