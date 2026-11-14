@@ -10,6 +10,8 @@ export * from "./device-store.ts";
 export * from "./handshake-limit.ts";
 export * from "./device-authority.ts";
 export * from "./device-accept.ts";
+export * from "./relay-link-policy.ts";
+export * from "./relay-link.ts";
 export * from "./pairing-handler.ts";
 export * from "./permission-map.ts";
 export * from "./hosted-session.ts";

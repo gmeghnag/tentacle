@@ -1592,3 +1592,379 @@ instant; `ws-device-route` passes unchanged, which is the closest existing proof
 - **Finding 2 (MEDIUM, vacuous test): fixed.** Two new tests call `release()` in the gap between the last handshake message and the build, which is the caller's real order: one for a device (`liveCount`) and one for pairing (no `pairing-closed` after the window closes). **Mutation:** I put the latch back → both new tests failed (7 pass / 2 fail). Reverted; `git status` is clean.
 - **Regressions:** `ws-server`'s close handler now calls `release()` twice (`pending` + `ws.data.release`), which is harmless because the work is idempotent. `release()` only ever unregisters this connection's own handle object, so it cannot touch another socket.
 - **Gate:** the six touched daemon test files give **83 pass / 1 skip / 0 fail**. `bun run lint`: clean (1307 files). `bun run typecheck`: clean. I did not re-run the full suite.
+
+## Execution
+
+### R4 — the daemon dial-out (as built) — *— claude-sonnet-4-5, 2026-11-15*
+
+#### Load-bearing check: PASSED, before any edit
+
+R4 stands on the plan's own assumption: *a phone stream carried by the relay can
+enter the daemon's EXISTING device path unchanged — the Noise responder and
+`Connection` need only a closable `DuplexChannel`*. R3 proved the in-memory half
+(`createChannelPair`); what was NOT yet proved is the SOCKET half, and that is
+what decides whether R4 is plumbing or a new path.
+
+Script: `.tentacle/tmp/mobile-relay/r4-loadcheck.ts` (scratch, gitignored). It
+runs R2's REAL relay (`startRelay` on `127.0.0.1:0`), a real daemon control
+socket (`hello` → `ready`), a real phone `WebSocket` at `<relay>/d/<id>/e2e`, a
+real accept leg at `/v1/accept`, and hands that leg to `acceptDevice` unchanged:
+
+```
+$ bun .tentacle/tmp/mobile-relay/r4-loadcheck.ts
+relay: ready fgkrQr2v
+daemon control frame: {"t":"ready","v":1,"id":"fgkrQr2vTa2JTEe75Kl66v","features":[]}
+ready: ready | id agrees: true (fgkrQr2vTa2JTEe75Kl66v)
+relay: dial-open fgkrQr2v W4fYxo-X
+daemon control frame: {"t":"open","stream":"W4fYxo-XC9zi4ycY3Gz6zw","ip":"127.0.0.1"}
+accept leg open
+relay: accept W4fYxo-X fgkrQr2v
+initialize through the relay: 24 | session/list ok: true
+connections built: 1 | authority live: 1
+audit: [ "device-open cfa570c6" ]
+phone closed: 1000 | accept leg closed: true
+```
+
+So: `ready.id` agrees with `relayIdOf(secret)`; a full Noise handshake completes
+over the splice; `initialize` (24) and `session/list` are served by a real
+`Connection` built by `acceptDevice`; the authority holds ONE live handle; and
+closing the phone leg closes the daemon's accept leg. **The assumption holds**,
+so R4 is the control socket + policy + plumbing, exactly as the plan says. No
+STOP.
+
+Baseline before the slice (this branch, code untouched):
+`bun test packages/daemon/test/{relay-link-policy,relay-link}.test.ts` → both
+files absent (see "Red before green").
+
+#### What landed
+
+1. **`packages/daemon/src/relay-link-policy.ts`** (new, 218 lines, PURE: no
+   sockets, no timers, no fs — AGENTS §7). Every decision about WHEN lives here,
+   with the clock and randomness injected: `relayRetryAfter(reason, attempt,
+   seeds)` (1 s → 60 s cap, FULL jitter `min(nominal, 1 + floor(random·nominal))`
+   so a wait is never 0 ms), the two decided holds (`version` → 1 h with a
+   notice, `replaced` → 5 min with the "copied config dir?" notice), the
+   never-retry case (`unsupported-url` → `Infinity`), `nextAttempt`,
+   `reasonForErrorCode` (`version` its own; `busy`/`invalid`/**any unknown code**
+   an ordinary retry, per review R1 finding 1), `relayWanted` (Owner Q1), and
+   `createRelayLiveness` (25 s ping / 10 s pong deadline, intervals injectable).
+2. **`packages/daemon/src/relay-link.ts`** (new, ~590 lines): the socket
+   plumbing. One control socket to `<relay>/v1/daemon` (`hello` in the FRAME, never
+   the URL), `ready` validated with `RelayToDaemonFrameSchema` + **`ready.id ===
+   relayIdOf(secret)`**, then `open` → dial `<relay>/v1/accept` → send the token →
+   wrap the Bun WebSocket in a `DuplexChannel` → `acceptDevice` (R3's own code:
+   Noise, device registry, `Connection`, revoke handle — nothing duplicated).
+   Plus the limiter key
+   `relay:<open.ip>` on the SAME `HandshakeLimiter` the direct route uses
+   (`begin` before the accept dial, `end` exactly once), `isInboundFrameTooLarge`
+   as the decode guard on both legs, `relaySocketOptions`-style close handling
+   (an oversize close is an ordinary jittered backoff — F7's fallback), audit
+   lines `relay-ready <id8>` / `relay-down <reason>` / `relay-open` /
+   `relay-accept-failed` / `relay-replaced <id8>`, and `stop()` closing control +
+   every accept leg + all timers (idempotent). Also `bunRelayDialer()`, the real
+   dialer (with the `readyState` replay a socket that opens before its handlers
+   are attached needs), injected through `dial` so a test drives a fake relay.
+3. **`packages/daemon/src/device-authority.ts`**: `wantsReachability()` — a
+   READ-ONLY, side-effect-free sibling of `authorize`: re-reads the store
+   (a device paired a second ago counts at once), `false` on a broken store,
+   otherwise `devices.size > 0 || hasWindow()`.
+4. **`packages/daemon/src/index.ts`**: exports both new modules.
+5. **Tests**: `packages/daemon/test/relay-link-policy.test.ts` (15 tests) and
+   `packages/daemon/test/relay-link.test.ts` (15 tests, against R2's real relay
+   on `127.0.0.1:0`, plus two hand-written fake relays: a lying one and a
+   byte-flipping one).
+
+#### Drift from the Implementation, and why
+
+- **`acceptDevice` is called on the accept leg's `open`, not before the dial.**
+  The plan says "dial `/v1/accept`, wrap the Bun WebSocket in a closable
+  `DuplexChannel`, call `acceptDevice`". Doing it in that exact order is a bug for
+  a real client: `acceptDevice` installs the channel's `setOnMessage`, and a Bun
+  client socket can deliver the phone's buffered message 1 before our handlers
+  are attached (the relay flushes it on `join`). The accept leg therefore
+  registers `setOnMessage`/`setOnClose` FIRST, then sends its `accept` frame, then
+  calls `acceptDevice`. Same seam, same code, correct ordering.
+- **One `relay-down <reason>` line per cause, not one per retry.** A 60 s backoff
+  would otherwise write the same line every minute forever. The set clears on a
+  successful `ready`.
+- **`relay-link.ts` owns the limiter slot's once-guard**, mirroring `ws-server`'s
+  `endSlot` (R3's drift) rather than relying on `acceptDevice`'s settle alone:
+  the leg's close and the responder's settle are two paths to one slot.
+  **This is the one place I found a vacuity trap** — see the mutation table.
+- **`unsupported-url` stops the link** instead of retrying: R5a refuses to START
+  on such a URL, so the link's own check is defence in depth and can never be
+  fixed by waiting.
+
+#### Red before green
+
+Both test files were run against the module ABSENT (moved aside, then restored —
+no `git checkout`):
+
+```
+$ mv packages/daemon/src/relay-link-policy.ts …
+$ bun test packages/daemon/test/relay-link-policy.test.ts
+error: Cannot find module '../src/relay-link-policy.ts' …   0 pass  1 fail  1 error
+
+$ mv packages/daemon/src/relay-link.ts …
+$ bun test packages/daemon/test/relay-link.test.ts
+error: Cannot find module '../src/relay-link.ts' …           0 pass  1 fail  1 error
+```
+
+Green after (the narrow files):
+
+```
+$ bun test packages/daemon/test/relay-link.test.ts packages/daemon/test/relay-link-policy.test.ts
+ 30 pass  0 fail   84 expect() calls
+```
+
+Neighbouring device files, untouched and still green (R3's contract intact):
+
+```
+$ bun test packages/daemon/test/{relay-link,relay-link-policy,device-accept,device-authority,ws-device-route,ws-server}.test.ts
+ 88 pass  1 skip  0 fail
+```
+
+#### The tests, and what each pins
+
+`relay-link-policy.test.ts` (15): the backoff ceiling doubling 1→2→4→…→**60 s
+cap**; FULL jitter (different `random()` → different, smaller wait; never 0 ms);
+two daemons jittering apart (F3's herd); no notice on an ordinary retry; the
+`version` 1 h hold (not jittered, not attempt-dependent) and its one notice; the
+`replaced` 5 min hold and its "copied config dir" notice; `unsupported-url` →
+`Infinity`; an unknown refusal code behaving like `invalid` (forward compat);
+`nextAttempt` growing on ordinary failures and resetting on the decided holds;
+`relayWanted`'s four cases; and liveness — a ping due at the interval, a missed
+pong expiring the link, a pong clearing it, no deadline before the first ping,
+and injectable intervals.
+
+`relay-link.test.ts` (15): **the end-to-end proof** (a paired phone completes
+Noise over R2's real relay, runs `initialize` + `session/list`, and the audit
+carries `relay-ready`, `relay-open`, `device-open`); **revoke closes the relay
+stream within one poll** (F11, via the same handle); the reachability gate (no
+device and no window ⇒ the relay's registry stays EMPTY, no socket opened) and a
+pairing window alone being enough (F17); a lying relay's wrong `ready.id` dropped
+(F7); an abandoned stream freeing its slot exactly ONCE (counting limiter) and a
+completed one ending it once too; an unknown key denied over the relay (F5/F6);
+`stop()` closing control + legs, idempotently; an `open` flood refused past the
+shared cap with the link still healthy (F7); a **flipped byte in a spliced frame**
+closing the channel with no `Connection` and nothing recorded (F5); a
+**dead-but-open** control path dropped on the missed pong and dialled again
+(F2/R0(c)); an unusable URL never dialling; and `error:version` scheduled at
+exactly 3 600 000 ms with ONE line (F13).
+
+#### Mutation checks (each run on the edited file, then reverted — shasum matched)
+
+| # | mutation | test that caught it | result |
+|---|---|---|---|
+| 1 | `if (false)` instead of `frame.id !== id` (trust a lying relay's id) | "a wrong id drops the link" | **red**: timed out waiting for `relay-down wrong-id` |
+| 2 | `if (false)` instead of the `relayWanted(...)` gate | "no device and no pairing window opens NO socket" | **red**: `Expected: false / Received: true` (`isConnected`) |
+| 3 | `limiter.begin(...) && false` (no admission check on an `open`) | "an `open` flood …" | **red**: timed out waiting for any `relay-accept-failed` |
+| 4 | `endSlot` without its once-guard (double `limiter.end()`) | "an abandoned stream calls end() once" — **the FIRST version of this test PASSED under the mutation**, because `HandshakeLimiter.end` clamps at 0, so a double call is invisible through `inFlight`. Added a counting limiter to assert the exact property (AGENTS §9, non-vacuity by mutation) | **red**: `Expected: 1 / Received: 2`, both tests |
+| 5 | drop `Math.min(RELAY_BACKOFF_CAP_MS, …)` | "the ceiling doubles per attempt and stops at the cap" | **red**: `Expected: 60000 / Received: 64000` |
+| 6 | `reason === "version" && false` (no 1 h hold) | policy test **and** the F13 link test | **red**: `Expected: 3600000 / Received: 501` (both) |
+| 7 | `pingSent` never arms the deadline | "a ping is due … and a missed pong expires the link" | **red**: `Expected: true / Received: false` |
+| 8 | `wantsReachability()` → `return true` | "no device and no pairing window …" | **red**: `Expected: false / Received: true` |
+| 9 | `wantsReachability()` → `return devices.size > 0` (drop the window) | "a pairing window alone is enough to dial" | **red**: timed out waiting for registration |
+| 10 | `if (false)` instead of `live.expired(at)` (never drop a dead path) | "a dead-but-open control path reconnects" | **red**: timed out waiting for `relay-down timeout` |
+
+Each mutation was reverted and the file's `shasum` compared against a pristine
+copy (all matched). The tree contains no leftover mutation.
+
+#### Acceptance checks the plan names
+
+- **End-to-end through R2's real relay, serving a session**: yes, the first test
+  (`initialize` 24 + `session/list`) — this is the plan's "the end-to-end proof".
+- **Revoke closes the relay stream within one authority poll**: yes.
+- **`ready` with a wrong id → link dropped**: yes, plus mutation 1.
+- **`wantsReachability() === false` → no socket opened**: yes (the relay's own
+  registry is asserted empty), plus mutations 2 and 8/9.
+- **Fake hostile relay: flips a byte in a spliced frame → channel closes, no
+  `Connection` survives**: yes.
+- **`open` flood → limiter refusals, daemon healthy**: yes, plus mutation 3.
+- **Missed pong → reconnect**: yes (a new test beyond the plan's list, because
+  R0(c) is the evidence that makes it load-bearing).
+
+#### Gate (R4): green
+
+```
+$ bun run typecheck   # tsc --noEmit && tsc -p apps/mobile && tsc -p apps/relay
+(clean)
+
+$ bun run lint        # biome check .
+Checked 1311 files in 400ms. No fixes applied.
+
+$ bun test
+ 9446 pass  3 skip  0 fail   13 snapshots, 77387 expect() calls
+ Ran 9449 tests across 679 files
+```
+
+The three skips are AGENTS §6's pre-existing opt-ins (live-k8s, live-docker,
+real-socket keepalive) — no new skip. **No `protocol.json` regeneration and no
+`protocol.d/` note**: R4 adds no RPC method, no `session/update` variant and no
+schema (`PROTOCOL_VERSION` stays 24; R4 only READS `@tentacle/protocol`'s relay
+frames). **No new `changelog.d` fragment**: R4 is internal plumbing with no
+user-visible effect until R5a wires `serve`, and
+`changelog.d/mobile-relay.added.md` (already on this branch, R5a's) covers the
+relay's whole user-visible surface.
+
+**One flake observed, not mine.** A first full-suite run reported 2 failures in
+`packages/daemon/test/serve-log-store.test.ts` ("S2 — the overlay …"), files with
+**zero diff vs HEAD** (`git diff --stat HEAD` empty) and untouched by R4. That
+file passes 22/22 in isolation (three consecutive runs), and the re-run of the
+full suite above is clean (9 446 / 3 / 0), so it is a timing flake in a parallel
+run, not a regression from this slice.
+
+**Not verified (one line each).**
+- The real `wss://relay.tentacle.so` through Caddy, and a real iPhone on cellular
+  — that is R7/D and R6's Maestro flow, both out of R4's scope.
+- `relay.json` creation, `serve` wiring, `--relay`/`--no-relay` and the record's
+  address ordering are R5a's; R4 takes the secret as an option and never touches
+  disk.
+- F7's memory bound remains OPEN exactly as the plan records it: R0(b)/(d) show a
+  Bun client cannot cap a frame, so the link bounds the DECODE cost only and its
+  fallback is the oversize backoff (mutations 5 and 10 pin the waits that carry
+  it).
+
+## Review
+
+### R4 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES.** Fresh context, but a different model family from the executor (deepseek / sonnet).
+
+**Gate (touched files):** `relay-link-policy.test.ts` + `relay-link.test.ts` 30 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean.
+**Mutation:** I skipped the `ready.id` check (`relay-link.ts:286`), and "a wrong id drops the link" FAILED (14/15 passed). I reverted it, and `cmp` shows the file is byte-identical.
+
+Findings:
+1. **HIGH — F7's fallback is not implemented. A hostile relay can loop us into the allocation about once a second** (`relay-link.ts:279-283`, `:298`, `:583`). Bun's client never closes with 1009, because it has no `maxPayloadLength` (R0(d)). So the `"oversize"` reason is never reached. An oversize control frame goes through `parseFrame` → `undefined` → `schedule("closed")`. Then `ready` resets `attempt = 0` (`:298`). Repro (fake dialer, random 0.99): relay sends `ready` + a 2 MiB frame, five times. The retry delays are `[991, 991, 991, 991, 991]` ms, and every cycle logs `relay-ready` / `relay-down closed`. Fix: on an oversize inbound frame, use a backoff that a following `ready` does not reset. For example, keep a separate oversize counter or hold time.
+2. **MEDIUM — `open` is accepted before `ready`** (`:321-324`; `ready` is only `void ready`, `:326`). With the fake dialer, `open` sent with no `ready` at all dials `/v1/accept` and takes a limiter slot. So the `ready.id` check does not gate anything: a relay that never sends `ready` gets exactly what a lying one would. Noise still protects access, so this is not an auth bypass. But the plan's F7 says "wrong id → link dropped", and that claim does not hold. Fix: drop `open` (or close the link) until `ready` has been accepted. Add a test: open-before-ready → no accept dial.
+3. **MEDIUM — when the relay closes the control socket, the daemon kills every live phone session** (`:336-339`). This contradicts F2 and the relay's own semantics: `apps/relay/src/relay-core.ts:394` says "its streams live on, F2". The comment at `:337` ("every stream is already dead") is a false premise. It is also inconsistent within the file: the timeout, malformed, error and replaced paths go through `dropControl` first, so the guard at `:329` returns early and those streams survive. Failure: one control-socket blip (the relay recycles control, a NAT drop surfaced as a close) detaches every phone mid-turn, though their splice legs are healthy. Fix: do not `dropStreams` on control close (keep it for `stop()`), and add a test pinning it.
+
+Holds: one session path (the accept leg is a `DuplexChannel` into `acceptDevice`, with no second loop); no lock around `Connection`; the limiter slot is freed exactly once (`endSlot` is guarded); the secret goes only in the `hello` frame, never in the URL; `wantsReachability` is read-only, and a broken store → false; `stop()` clears timers and legs.
+Attacks tried: the three above (all confirmed by repro or code); duplicate stream token (dropped, ok); invalid URL (never dials, ok).
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-15*
+
+All three R4 findings fixed, each with its test **RED on the unfixed code first**
+and each mutation-checked by reverting the fix (`shasum` of both source files
+identical before the mutations and after: `relay-link.ts`
+`9d28c9a2…`, `relay-link-policy.ts` `1db19ae7…`).
+
+**Reproduced first** (scratch `.tentacle/tmp/mobile-relay/{fix1,fix3}-repro.ts`, a
+fake dialer so every frame is delivered by hand — the reviewer's own setup):
+
+```
+before fix: finding1: delays=[991,991,991,991,991] down=["relay-down closed" ×5]
+            finding2: acceptDials=1 openStreams=1 audit=[]
+            finding3: streamsBefore=1 legClosed=true streamsAfter=0
+after  fix: finding1: delays=[991,1981,3961,7921,15841] down=["relay-down oversize" ×5]
+            finding2: acceptDials=0 openStreams=0 audit=["relay-accept-failed"]
+            finding3: streamsBefore=1 legClosed=false streamsAfter=1
+```
+
+**F1 (HIGH) — an oversize control frame has its own backoff counter.** Two
+defects made the review's loop: `"oversize"` was **unreachable** on the frame
+path (`relay-link.ts:279-283`: an oversize frame went `parseFrame` → `undefined`
+→ `schedule("closed")`), and even when reached the wait read the shared `attempt`
+counter, which an accepted `ready` deliberately resets. Fix at `relay-link.ts:292-300`
+(an explicit `isInboundFrameTooLarge(data)` branch → `schedule("oversize")`,
+before the malformed branch) plus `relay-link-policy.ts:129-150`
+(`backoffCounterFor(reason, attempt, oversizeStrikes)`, the decision in the pure
+module per §7) and `relay-link.ts:161-167,219-225` (a separate `oversizeStrikes`
+that grows per strike and is **not** reset by `ready`, `:317-322`).
+A benign relay never sends an oversize control frame, so it never consults it.
+
+**F2 (MEDIUM) — `open` needs an accepted `ready`.** `relay-link.ts:347-356`: an
+`open` before the accepted `ready` is refused with `relay-accept-failed`, so no
+accept dial and no limiter slot. That is what makes the `ready.id` check above it
+mean something: a relay that never registers now gets what a lying one gets.
+Noise still protects access either way (unchanged) — this closes the plan's F7
+"wrong id → link dropped" claim, which `open`-first had been bypassing.
+
+**F3 (MEDIUM) — a control close no longer kills live streams.** `relay-link.ts:366-374`:
+`dropStreams()` removed from the control socket's `setOnClose`; the false-premise
+comment ("every stream is already dead") replaced with the relay's own semantics
+(`apps/relay/src/relay-core.ts:394`, "its streams live on, F2"). `stop()` still
+closes every leg, and a leg still closes itself when its phone or the relay drops
+it. The timeout/malformed/error/replaced paths were already consistent with
+this (`dropControl` first, so the `control !== host` guard returned early).
+
+**Red before green (the exact run, no fix applied — 15 pass / 4 fail):**
+
+```
+error: no retry was scheduled        (fail) … a `ready` after an oversize frame does not reset the oversize backoff
+error: no second retry was scheduled (fail) … the oversize backoff outlives the `ready` that follows it
+Expected length: 0 / Received length: 1  (fail) … no `ready` at all means no accept dial and no limiter slot
+Expected: false / Received: true         (fail) … the relay dropping control does not detach a phone mid-session
+```
+
+(The first two failed on `no retry was scheduled` because an oversize frame took
+the malformed path and closed *without* arming a retry — the fix's own new
+branch is what schedules one; after it, both read `Expected: > 991 / Received:
+991`, which is the review's `[991, …]` exactly. The second oversize test
+originally asserted `>=` and was **vacuous** — mutation A proved it: it stayed
+green when the reason was folded back into `"closed"`. It now asserts a strict
+`>` and `relay-down oversize`, and fails.)
+
+**Mutations (each run against the fix in place, then reverted to the shasum above):**
+
+- **A — fold oversize back into `"closed"`** (delete the new
+  `isInboundFrameTooLarge` branch): both oversize tests fail
+  (`Expected: > 991 / Received: 991`), the other 17 pass. This is F1's first
+  defect.
+- **B — the shared counter** (`backoffCounterFor` returns `attempt`): the same
+  two oversize tests fail (`Expected: > 991 / Received: 991`) — F1's second
+  defect, i.e. a fix that only names the reason would still loop.
+- **C — `if (false)` for the `ready` guard on `open`**: the F2 test fails
+  (`Expected length: 0 / Received length: 1`), 18 pass.
+- **D — put `dropStreams()` back in the control close handler**: the F3 test
+  fails (`Expected: false / Received: true`), 18 pass.
+- **E — mutation on the pure policy test** (`backoffCounterFor` → `attempt`):
+  "an oversize strike reads a counter a `ready` cannot reset" fails
+  (`Expected: 3 / Received: 0`).
+
+**Drift from the review's suggested fix, and why:** none in substance.
+F1: the review offered "a separate oversize counter or hold time" — I took the
+counter (a hold time would need a clock read in the socket file for a decision
+the pure module already owns). F3: "do not `dropStreams` on control close (keep
+it for `stop()`)" — exactly as written.
+
+**Test-harness fix found in passing (not a product bug):** the new
+`fakeHarness().control()` first returned `hosts[0]`; after a retry the link dials
+a **new** control socket, so delivering the next cycle's frames to the dead one
+made both oversize tests fail on a harness mistake rather than a product one. It
+now picks the newest `/v1/daemon` host (`relay-link.test.ts:399-407`). Worth
+naming because the first failure looked like a product failure.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/relay --noEmit` clean ·
+`bun run lint` clean (1311 files, no fixes) · **`bun test` 9451 pass / 3 skip / 0
+fail** (9454 tests, 679 files) — the 3 skips are the pre-existing opt-ins
+(live-k8s, live-docker, real-socket keepalive), no new skip. The touched files:
+`relay-link-policy.test.ts` (16 pass) + `relay-link.test.ts` (19 pass) = 35 pass /
+0 fail; `bun test packages/daemon/test/` = 1046 pass / 1 skip / 0 fail.
+`git diff --stat`: `relay-link-policy.ts` +24, `relay-link.ts` +49/−7,
+`relay-link-policy.test.ts` +28, `relay-link.test.ts` +226 — no other file, so
+no wire, schema, `protocol.json`, `apps/relay` or `changelog.d` change is due
+(this is a fix to unshipped R4 code on the same branch, and
+`changelog.d/mobile-relay.added.md` already covers the relay's user-visible
+surface; no `protocol.d` note because nothing on the wire changed).
+
+**Not verified:** the real-relay shape of an oversize control FRAME — R2's relay
+closes a control socket that exceeds `maxFrameChars` rather than forwarding it,
+so the frame path proved here is the fake relay's (the close-code-1009 path,
+`oversizeHint`, is unchanged and still covered by `schedule`); and finding 3's
+"streams live on" against a real NAT blip rather than a fake `setOnClose` call.
+Both are the reviewer's own framing and neither gates the fix.
+
+### Round 2 — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: PASS** (APPROVE-WITH-NITS). Diff reviewed: `git diff HEAD~1` (b05d538f).
+
+**Gate:** `relay-link-policy.test.ts` + `relay-link.test.ts` 35 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean.
+
+1. **Finding 1 (oversize loop): fixed.** An oversize frame is now caught before parsing (`relay-link.ts`, `isInboundFrameTooLarge` → `schedule("oversize")`). It has its own `oversizeStrikes` counter, which `ready` does not reset. The round-1 repro (`ready` + 2 MiB, ×5) now waits `[991, 1981, 3961, 7921, 15841]` ms; before the fix it was `991` ×5. **Mutation:** I made `counter = attempt`, and both "oversize backoff outlives `ready`" tests FAILED.
+2. **Finding 2 (`open` before `ready`): fixed.** It is refused and audited `relay-accept-failed`; the repro now makes no `/v1/accept` dial. **Mutation:** I disabled the `!ready` guard, and "no `ready` at all means no accept dial" FAILED.
+3. **Finding 3 (control close kills streams): fixed.** `dropStreams` is removed from the control `onClose`, and `stop()` still closes the legs. **Mutation:** I re-added `dropStreams()`, and "the relay dropping control does not detach a phone" FAILED.
+
+Every mutation was reverted from a backup; `git status` is clean.
+
+Nits (not blocking): `oversizeStrikes` never decays, so a benign relay that once sent one oversize frame keeps a larger first oversize wait (harmless, and that is the intent). `noteSent` (`relay-link.ts`) is dead. Pre-existing and out of scope: nothing on the daemon side pings an accept leg, so if the daemon's own network silently dies, a leg can stay half-open on the daemon's side (R0(c)). The relay's `sendPings` reaps only the relay side. Track it for R5a/R6.
