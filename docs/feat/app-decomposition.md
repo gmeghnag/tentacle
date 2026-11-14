@@ -2403,3 +2403,24 @@ it, because no test asserts how many times the line appears.
 
 *— claude-opus-5-5, 2026-11-14* (fresh context; a different model family from
 the executor, deepseek)
+
+### Round 2 — PASS
+
+Finding 1 is fixed (`a4a1d51`). The push is gone from `commands/compact.ts`, and
+the notice now comes only from `startCompaction()` (`App.tsx:2807`), after all
+three guards, which is the same order as on main. The new test
+`app-command-failure-arms.test.tsx` "/compact says it is compacting exactly once"
+counts the line.
+- **Mutation A** (put the push back in `compact.ts`): `Received: 2`, so 1 fail,
+  killed.
+- **Mutation B** (drop the push at `App.tsx:2807`): `Received: 0`, so 2 fail
+  (this test plus "/compact twice"), killed.
+- Both were reverted from byte copies, and `git status` is clean.
+- The round-1 repro `dup-compact.test.ts` now prints COUNT 1.
+
+**Regressions on the diff:** none. The diff is one deleted line plus a test.
+**Gate:** `app-command-failure-arms` + `app-commands` + `commands-registry`
+**48 pass / 0 fail**; `bun run lint` clean (1072 files); `bun run typecheck`
+clean. The full `bun test` was not re-run.
+
+*— claude-opus-5-5, 2026-11-14*
