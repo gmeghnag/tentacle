@@ -1185,3 +1185,49 @@ excused** (§9 non-vacuity):
 - **The `15-revoked`-onward wedge and the `DeviceUnreachableException` cascade
   are 11b.1's documented simulator problem**, not new: they reproduced here on
   an unerased simulator and disappeared after `simctl shutdown/erase/boot`.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-14 — slice 11b.2 (`git diff main...HEAD`), fresh context*
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM code finding, 1 MEDIUM doc-honesty finding; F-P17 holds).
+
+**Gate (re-run):** touched tests (`camera-access`, `deep-link`, `pending-link`,
+`pairing-guards`, `e2e-flows`) 52 pass · 0 fail; `bun run lint` clean (1226 files);
+`bun run typecheck` clean. Maestro flows not re-run (no simulator in this pass).
+
+**Findings**
+1. **MEDIUM — the live camera cannot be closed and outlives the intake.**
+   `App.tsx` (PairRoute, `camera.scanning ? { scanner: … }`) and
+   `src/screens/PairScreen.tsx` (`scanner === undefined ? null : …`, not gated on
+   `view.stage`); `src/scanner.tsx` sets `scanning` false only on a decode or a
+   mount error. There is no Close/Cancel for the scanner. Scenario: granted → tap
+   Scan → the person pastes instead and taps Next → `review`/`connecting`/`compare`
+   render with the camera still live (iOS camera indicator on) until the route
+   unmounts; on the simulator (no device, no mount error — Drift 6) it is a black
+   280-pt box that never goes away. Contradicts Design 6 / scanner.tsx's own doc
+   ("the session never outlives the tap"). Fix: a Close control + stop scanning on
+   any `submit`/stage ≠ intake, decided in `camera-access.ts` (pure) and tested.
+2. **MEDIUM — Execution's signature does not match the commit.** The section is
+   signed `claude-sonnet-4-5`, the commit is `exec (deepseek)`; §10 requires the
+   writing model's signature (it is how drift is attributed). Also unrecorded drift:
+   `app.json` adds `buildReactNativeFromSource: true` (required by
+   `usePrecompiledModules: false`, but Drift 2 names only the latter).
+
+**Mutations (each red, reverted, `git status` clean):** drop the `?` rule in
+`deep-link.ts` → 4 red; `cameraStateOf` treats `undetermined` as granted → red;
+drop the `handledLink` once-guard in `App.tsx` → red.
+
+**Attacks tried:** (a) hostile/look-alike links (`pair.evil`, path, port, userinfo,
+other scheme, empty query) — rejected; text only reaches `text`+`submit`, which
+dial nothing (F-P17 holds; `confirm` remains the person's tap). (b) A link arriving
+mid-pairing (`review`/`connecting`/`compare`): the reducer ignores `text`/`submit`
+there, so it is dropped without disturbing the run — safe, silent (low). (c) Duplicate
+`onBarcodeScanned` before the unmount re-render: a second `submit` is ignored by
+the reducer outside intake/failed — harmless. (d) Single-native-import and scheme /
+microphone guards in `pairing-guards.test.ts` — hold. (e) §7: no protocol, persistence,
+broker or session-path change — contained, as sized.
+
+**Executor behaviour:** thorough, honest drift log (the Hermes `URL` defect is a
+real catch, pinned by test); self-reported one forbidden `git checkout`. Reviewer
+is Opus — a different family from either claimed executor.
