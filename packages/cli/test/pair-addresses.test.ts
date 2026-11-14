@@ -183,6 +183,7 @@ describe("nothing reachable", () => {
  */
 describe("a record's own addresses go in the QR, after the direct ones", () => {
   const RELAY = "wss://relay.tentacle.so/d/AbCdEfGhIjKlMnOpQrStUv/e2e";
+  const RELAY_2 = "wss://relay.tentacle.so/d/ZyXwVuTsRqPoNmLkJiHgFe/e2e";
 
   test("a LOOPBACK serve with a relay address pairs with a QR holding ONLY the relay", () => {
     expect(
@@ -198,14 +199,19 @@ describe("a record's own addresses go in the QR, after the direct ones", () => {
     ]);
   });
 
-  test("a record's own address comes BEFORE --address (the daemon knows better)", () => {
+  test("a record's own DIRECT address comes before --address; a relay one goes last", () => {
+    // A record can carry both kinds (`serve --address` plus the derived relay
+    // address). Only the DIRECT one is "the daemon knows better": a relay one is
+    // a fallback by construction (Design §5), so it cannot precede --address.
     expect(
       addresses({
-        records: [record({ host: "127.0.0.1", addresses: [RELAY] })],
+        records: [
+          record({ host: "127.0.0.1", addresses: ["wss://mac.tailnet.ts.net/e2e", RELAY] }),
+        ],
         interfaces: LAN,
-        extra: ["wss://mac.tailnet.ts.net/e2e"],
+        extra: ["wss://other.tailnet.ts.net/e2e"],
       }),
-    ).toEqual([RELAY, "wss://mac.tailnet.ts.net/e2e"]);
+    ).toEqual(["wss://mac.tailnet.ts.net/e2e", "wss://other.tailnet.ts.net/e2e", RELAY]);
   });
 
   test("the same address twice (bind-derived and record) appears ONCE, first wins", () => {
@@ -215,6 +221,48 @@ describe("a record's own addresses go in the QR, after the direct ones", () => {
         interfaces: LAN,
       }),
     ).toEqual(["ws://192.168.1.8:4000/e2e"]);
+  });
+
+  test("relay addresses go LAST for the whole QR, not just within one record", () => {
+    // Design §5 / R5b, "direct first, relay last": the phone's dial order IS this
+    // list, and R6's stagger starts the relay after the direct paths. Two daemons
+    // each carrying their relay address must not interleave it BEFORE the second
+    // daemon's LAN address. Mutation: append each record's list as it comes →
+    // `[LAN:4000, relay-a, LAN:4001, relay-b]`, and the relay is dialled before
+    // a direct path that is right there.
+    expect(
+      addresses({
+        records: [
+          record({ port: 4000, addresses: [RELAY] }),
+          record({ port: 4001, addresses: [RELAY_2] }),
+        ],
+        interfaces: LAN,
+      }),
+    ).toEqual([
+      "ws://192.168.1.8:4000/e2e",
+      "ws://100.101.7.6:4000/e2e",
+      "ws://192.168.1.8:4001/e2e",
+      "ws://100.101.7.6:4001/e2e",
+      RELAY,
+      RELAY_2,
+    ]);
+  });
+
+  test("a `pair --address` direct path still precedes the relay", () => {
+    // Mutation: append `--address` after everything, relays included → the phone
+    // dials the relay before the tailnet name the user just asked for.
+    expect(
+      addresses({
+        records: [record({ addresses: [RELAY] })],
+        interfaces: LAN,
+        extra: ["ws://my-tailnet:4000/e2e"],
+      }),
+    ).toEqual([
+      "ws://192.168.1.8:4000/e2e",
+      "ws://100.101.7.6:4000/e2e",
+      "ws://my-tailnet:4000/e2e",
+      RELAY,
+    ]);
   });
 
   test("a planted junk address in a record is FILTERED, never refused (a record is input)", () => {

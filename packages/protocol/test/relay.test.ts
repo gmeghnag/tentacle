@@ -30,6 +30,7 @@ import {
   type RelayToDaemonFrame,
   RelayToDaemonFrameSchema,
   isInboundFrameTooLarge,
+  isRelayDeviceAddress,
   isRelayErrorCode,
   isRelayFeature,
   isRelayId,
@@ -138,6 +139,49 @@ describe("isRelayId", () => {
     expect(isRelayId("WSbKVXnUw63XiNj5KDcK+U")).toBe(false);
     expect(isRelayId("WSbKVXnUw63XiNj5KDcK.U")).toBe(false);
     expect(isRelayId("WSbKVXnUw63XiNj5KDcK=U")).toBe(false);
+  });
+});
+
+describe("isRelayDeviceAddress", () => {
+  const id = "WSbKVXnUw63XiNj5KDcKsU";
+
+  test("tells a relay address from a DIRECT one (why it exists)", () => {
+    // The whole point: `isPairingAddress` accepts both (the app dials both), so
+    // only this predicate can order them "direct first, relay last".
+    for (const direct of [
+      "ws://192.168.1.8:4000/e2e",
+      "wss://mac.tailnet.ts.net/e2e",
+      "ws://[fd00::1]:4000/e2e",
+    ]) {
+      expect(isPairingAddress(direct)).toBe(true);
+      expect(isRelayDeviceAddress(direct)).toBe(false);
+    }
+    expect(isRelayDeviceAddress(`wss://relay.tentacle.so/d/${id}/e2e`)).toBe(true);
+  });
+
+  test("what relayAddress builds is always one — including a base path", () => {
+    for (const url of ["wss://relay.tentacle.so", "ws://127.0.0.1:4100"]) {
+      expect(isRelayDeviceAddress(relayAddress(url, id))).toBe(true);
+    }
+    expect(isRelayDeviceAddress(`wss://example.com/relay/d/${id}/e2e`)).toBe(true);
+  });
+
+  test("a trailing slash or a query does not hide it", () => {
+    expect(isRelayDeviceAddress(`wss://relay.tentacle.so/d/${id}/e2e/`)).toBe(true);
+    expect(isRelayDeviceAddress(`wss://relay.tentacle.so/d/${id}/e2e?x=1`)).toBe(true);
+  });
+
+  test("a malformed id, a missing segment or a non-ws scheme is NOT one", () => {
+    // `/d/notanid/e2e`, `/d/<id>/`, `/e2e` alone: a phone-shaped path is not enough.
+    for (const bad of [
+      "wss://relay.tentacle.so/d/short/e2e",
+      `wss://relay.tentacle.so/d/${id}/`,
+      `wss://relay.tentacle.so/${id}/e2e`,
+      `https://relay.tentacle.so/d/${id}/e2e`,
+      "",
+    ]) {
+      expect(isRelayDeviceAddress(bad)).toBe(false);
+    }
   });
 });
 

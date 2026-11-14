@@ -120,6 +120,37 @@ export function isRelayId(value: string): boolean {
 }
 
 /**
+ * `true` iff `value` is a phone's address THROUGH a relay — `<relay>[/prefix]/d/<id>/e2e`
+ * (what {@link relayAddress} builds).
+ *
+ * It exists to be told apart from the DIRECT kind (`ws://192.168.1.8:4000/e2e`),
+ * because the two are not worth the same to the phone: a relay address is a
+ * fallback by construction (docs/feat/mobile-relay.md Design §5, "direct first,
+ * relay last"), so anything ordering addresses — `pair`'s QR, the daemon's
+ * announcement — must put one AFTER every direct address, not merely after the
+ * ones that came from the same record.
+ *
+ * Deliberately stricter than `isPairingAddress`: that one only needs the path to
+ * END in `/e2e`, which every direct address does too, so it cannot tell the two
+ * apart (and must not — an installed app dials both).
+ */
+export function isRelayDeviceAddress(value: string): boolean {
+  const url = parseUrl(value);
+  if (url === undefined || (url.protocol !== "ws:" && url.protocol !== "wss:")) {
+    return false;
+  }
+  // A base path is kept (`wss://example.com/relay/d/<id>/e2e`), so the three
+  // segments are read from the END, never assumed to start at the root.
+  const segments = url.pathname.split("/").filter((segment) => segment.length > 0);
+  return (
+    segments.length >= 3 &&
+    segments[segments.length - 3] === "d" &&
+    isRelayId(segments[segments.length - 2] ?? "") &&
+    segments[segments.length - 1] === "e2e"
+  );
+}
+
+/**
  * `true` iff `value` is a well-formed relay secret (43 base64url chars).
  *
  * Note it does NOT verify a secret against an id — that hash lives in

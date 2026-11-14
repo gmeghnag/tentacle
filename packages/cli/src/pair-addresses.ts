@@ -27,6 +27,13 @@ import type { DaemonRecord } from "@tentacle/daemon";
  * ones its bind implies and before `--address`, so "direct first, relay last"
  * holds for the zero-configuration case the relay exists for.
  *
+ * "Relay last" is a property of the WHOLE LIST, not of each record: a relay
+ * address is a fallback by construction (Design §5, and R6's stagger starts it
+ * after the direct paths), so every one of them is partitioned to the END —
+ * after every direct address of every record AND after `--address`. Per record it
+ * would interleave (`LAN:4000, relay-a, LAN:4001, relay-b`, or a relay before the
+ * tailnet name a human just typed), and the phone dials in list order.
+ *
  * Pure and React-free (AGENTS §7) with the interface table injected: the
  * addresses of this machine are the only thing not derivable from the config
  * dir, and a test cannot fabricate them.
@@ -35,6 +42,7 @@ import {
   MAX_PAIRING_ADDRESSES,
   PAIRING_ADDRESS_SUFFIX,
   isPairingAddress,
+  isRelayDeviceAddress,
 } from "@tentacle/protocol";
 
 /** One `os.networkInterfaces()` entry, as much of it as the rule uses. */
@@ -111,6 +119,19 @@ function unique(addresses: readonly string[]): string[] {
 }
 
 /**
+ * Deduped, then partitioned so every RELAY address comes last while each group
+ * keeps the order it was given (dedup stays FIRST-wins, and so does `--address`).
+ * Stable on both sides: within the direct addresses and within the relay ones the
+ * input order is preserved, so only the one property this exists for changes.
+ */
+function directFirstRelayLast(addresses: readonly string[]): string[] {
+  const deduped = unique(addresses);
+  const direct = deduped.filter((address) => !isRelayDeviceAddress(address));
+  const relay = deduped.filter(isRelayDeviceAddress);
+  return [...direct, ...relay];
+}
+
+/**
  * The addresses to publish: every reachable one a live `serve` listens on, plus
  * each record's OWN `addresses` (a `serve --address` tailnet name, a tunnel, and
  * — since docs/feat/mobile-relay.md R5b — the daemon's mobile-relay address),
@@ -152,7 +173,7 @@ export function pairAddresses(input: {
   for (const record of input.records) {
     fromRecords.push(...recordAddressList(record, input.interfaces));
   }
-  const addresses = unique([...fromRecords, ...extra]);
+  const addresses = directFirstRelayLast([...fromRecords, ...extra]);
   // Distinct addresses after dedup are what the QR holds: more than a QR may
   // carry is a refusal (the one it would drop could be the reachable one) —
   // never a silent truncation.
@@ -174,6 +195,12 @@ export function pairAddresses(input: {
  * one a human asked for), while the daemon's announcement truncates keeping the
  * FIRST (a snapshot line must always be produced). Splitting the list out keeps
  * the order — which IS the dial order — in one place for both.
+ *
+ * ONE record's own list is deduped and partitioned too (bind-derived, then its
+ * own direct, then its own relay ones), so the daemon's announcement obeys the
+ * same rule as the QR; `pairAddresses` partitions AGAIN over the whole list,
+ * because a record's relay address must also fall behind the NEXT record's
+ * direct one. Idempotent, and the rule is applied in one place.
  */
 export function recordAddressList(
   record: DaemonRecord,
@@ -195,7 +222,7 @@ export function recordAddressList(
       list.push(own);
     }
   }
-  return unique(list);
+  return directFirstRelayLast(list);
 }
 
 /** The refusal when nothing a phone can dial exists: the two ways to make one. */

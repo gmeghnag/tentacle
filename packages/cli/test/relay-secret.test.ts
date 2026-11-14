@@ -58,8 +58,14 @@ describe("relay.json: created once, reused afterwards", () => {
     expect(read.path).toBe(relaySecretPath(dir));
     expect(read.secret.length).toBe(RELAY_SECRET_BYTES);
     // The MODE is the point: this file is a credential (an address one, but a
-    // credential). 0600 on the file, never 0644.
-    expect(statSync(read.path).mode & 0o777).toBe(RELAY_SECRET_MODE);
+    // credential). 0600 on the file, never 0644. The LITERAL, not
+    // `RELAY_SECRET_MODE`: asserting against the constant under test proved
+    // nothing — `RELAY_SECRET_MODE = 0o644` left this file fully green
+    // (R5 review, finding 2).
+    expect(statSync(read.path).mode & 0o777).toBe(0o600);
+    // And the constant itself is pinned, so a failure cannot be "fixed" by
+    // moving the constant to match a world-readable file.
+    expect(RELAY_SECRET_MODE).toBe(0o600);
     const onDisk = JSON.parse(readFileSync(read.path, "utf8"));
     expect(onDisk.v).toBe(1);
     expect(onDisk.secret).toBe(encodeBase64Url(read.secret));

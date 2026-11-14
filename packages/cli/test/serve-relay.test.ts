@@ -335,6 +335,31 @@ describe("serve: the relay is off when it is not wanted", () => {
   });
 });
 
+describe('serve: stop() takes the registration down with it (Design §4 "Stop")', () => {
+  test("after stop() the relay holds no registration and the dialer is not called again", async () => {
+    // The property: NO registration outlives the daemon. Mutation: delete
+    // `relayLink?.stop()` in `serve.ts` `stop` → the control socket stays open,
+    // `registeredCount` stays 1, and a live socket outlives the record naming it.
+    const where = rig();
+    const relay = localRelay();
+    pairPhone(where.configDir);
+    const started = await serve(where, { relay: { flagUrl: relay.url } });
+    await waitFor(() => started.handle.relay?.isConnected() === true, "the registration");
+    expect(relay.registeredCount()).toBe(1);
+
+    await started.handle.stop();
+    handles.length = 0;
+    // The relay's own registry is the observable: its control socket closed.
+    await waitFor(() => relay.registeredCount() === 0, "the unregistration");
+    expect(started.handle.relay?.isConnected()).toBe(false);
+    expect(started.handle.relay?.openStreams()).toBe(0);
+    // And it never comes back: a stopped link does not redial (a later dial would
+    // re-register, which is the "registration outliving the daemon" bug).
+    await Bun.sleep(120);
+    expect(relay.registeredCount()).toBe(0);
+  });
+});
+
 describe("serve: an unusable URL refuses to start (F19)", () => {
   test("serve --relay ws://example.com throws, and nothing is bound", async () => {
     const where = rig();
