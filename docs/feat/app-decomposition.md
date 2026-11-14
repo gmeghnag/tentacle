@@ -2048,6 +2048,433 @@ HEAD~1 -- packages` empty): one fragment deleted, the plan/Execution amended.
 
 ## Execution
 
+### S3 — `feat/app-decomp-3-keyroute` (the key router leaves `App.tsx`)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: `ps` shows this
+run launched as `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is that id in `~/.config/tentacle/config.jsonc:32`.)
+
+**Scope.** `packages/tui/src/keys/` (new: `contract.ts`, `effects.ts`,
+`snapshot.ts`, `route.ts`, `layers.ts`, `layer-precedence.ts`, `layer-dialog.ts`,
+`layer-panels.ts`, `layer-dock.ts`, `execute.ts` — 1082 lines), `App.tsx`
+(−348/+183: the 369-line handler body and its 389 inline layer lines replaced by
+a snapshot build + `routeKey` + `executeEffects` + the mouse continuation), four
+new test files, one changelog fragment. **No existing test edited**, no
+`packages/protocol` change (so `protocol.json` was NOT regenerated), no other
+slice touched (`TODO.md` untouched).
+
+**Resume note (the working tree was NOT partial).** This run resumed a step cut
+by a connection reset. `git status --short` in this worktree was **clean** — the
+previous attempt left nothing behind, so nothing was "finished"; the slice was
+implemented from scratch here. Recorded because the brief asserted partial edits.
+
+**Load-bearing check, re-run first (PASSED).** Re-verified on this branch, not
+trusted: `packages/tui/node_modules/ink/build/hooks/use-input.js:89` registers
+`internal_eventEmitter?.on('input', handleData)`; `handleData` (`:80–87`) returns
+nothing anyone consumes and there is no stop-propagation, and the emitter is
+per-App (`components/StdinContext.js`). `rg 'useInput\(' packages/tui/src` →
+`App.tsx` (the one handler) and the separate pre-mount
+`components/SessionPicker.tsx:85`. **Holds** — so `App` keeps ONE `useInput` and
+S3 moves only its BODY, which is exactly the H3 revision.
+
+**Design, as built (dependency order).**
+1. **`contract.ts`** — `{effects, verdict, carry}`, `NOTHING`/`consumed`/
+   `passThrough`, the 14 `KeyLayerName`s, and the `LayerStep`/`KeyRoute` types.
+2. **`effects.ts`** — the effect vocabulary, **data only** (no closures), so a
+   layer is a pure function of the snapshot and the whole order is testable.
+3. **`snapshot.ts`** — `KeySnapshot` **with the plan's source table written into
+   the file**: a field that was a ref read at key time is a GETTER, a field that
+   was a render closure is a VALUE. This is the slice's central artifact (H3).
+4. **the four layer modules** — `layer-precedence.ts` (shiftTab, quitConfirm,
+   chord), `layer-dialog.ts` (permission, ctrlC, paste), `layer-panels.ts`
+   (sessions, tree), `layer-dock.ts` (dock, escUpload, escAbort, expandAll,
+   palette). Each is 2–5 lines of wiring around a decision the repo already
+   owned (`stepChord`, `quitConfirmKey`, `stepPermissionKey`, `stepPaste`,
+   `sessionsKey`/`sessionsChoose`/`sessionsDelete`, `treeKey`, `dockKey`,
+   `dockClaimsCtrlX`, `ctrlCQuitStep`). **No decision was re-derived.**
+5. **`route.ts`** — `routeKey`: walk in order, accumulate every passing layer's
+   effects, stop at the first `consumed`, carry the last non-empty `carry`,
+   report `stoppedAt` (so a precedence bug reads as a name in a test).
+6. **`layers.ts`** — `PURE_LAYERS` (the walkable 13) + `LAYER_ORDER` (all 14, the
+   documented precedence). A test asserts the two never drift.
+7. **`execute.ts`** — `KeyHost` (a narrow port of the App's own stable callbacks)
+   and `executeEffect(s)`. The only place a decision becomes an App call.
+8. **`App.tsx`** — the handler body is now: build the snapshot at the event →
+   `routeKey(…, PURE_LAYERS)` → `executeEffects(routed.effects, keyHost)` → stop
+   if consumed → the mouse continuation. The line-editing tail (history/`recall`
+   /`resolveLineInput`/the terminal `switch`) is untouched, as designed.
+
+**Drift from the Implementation (four, all recorded, none silent).**
+
+1. **The mouse layer is the router's CONTINUATION, not the 14th entry of the
+   walked list.** The plan's H3 says "14 layers" and `routeKey` runs their
+   effects. That cannot hold for the mouse layer *as an entry in the walk*:
+   `useMouse.handleChunk` **applies its own effects** as it decides (S4's hook
+   owns refs + timer), so walking it inside `routeKey` would run the mouse's
+   effects BEFORE `executeEffects` applied the earlier layers' collected ones —
+   a report could then read a `dockRef`/`panel` the key path had already changed
+   inline today, i.e. an effect-order inversion (the plan's own `Effect order`
+   failure mode). So `routeKey` walks the **13 pure layers** and the mouse layer
+   runs after `executeEffects`, exactly where the inline handler had its mouse
+   block. `LAYER_ORDER` still names all 14 and a test pins
+   `PURE_LAYERS === LAYER_ORDER.slice(0, -1)`; the contract, the order and the
+   count the plan asks for are all intact — only the *execution seam* differs,
+   and for a load-bearing reason. `layers.ts` states this in its header.
+2. **The chord emits a `setChord` only when the state would CHANGE.** The inline
+   handler assigned `chordRef.current = chord.state` unconditionally;
+   `stepChord` returns the *same object* when nothing changes, so writing it is a
+   no-op. Emitting the write unconditionally made three tests (and any reader of
+   `effects`) see a no-op effect on every key. Behaviour is identical — a write
+   of idle over idle changes nothing — and the effect list stays legible. The
+   one place this is observable is `dockClaimsCtrlX`'s reset, where the layer now
+   writes only when the chord was actually armed.
+3. **`sessionsDelete`'s async refresh moved out of the handler into an App-level
+   `useCallback`.** The plan's file list for S3 has no App-level helper, but the
+   delete's `.then` chain (remove → list → refresh-if-still-the-same-panel) is a
+   driver, not a key decision: it stays in App, is called by ONE effect
+   (`sessionsDelete{id, startedGen}`), and keeps `sessionsRefreshApplies`'s
+   generation checks verbatim. Its deps are `[sessions, pushNotice]`.
+4. **`permissionStop` and `pasteReply` body live in the App's port, not in the
+   pure layer.** Both read the App's live `abortRef` / clipboard seam and mutate
+   `stoppedHereRef`, so the layer decides only *that* the key is a stop / a
+   clipboard read (`permissionStop` / `pasteReply` effects) and the App executes
+   it — the same split the plan asks for, just with the branchless part on the
+   App side because it touches refs the snapshot does not carry.
+
+**Snapshot-source table (as implemented; the plan's H3 requirement).** Written
+into `keys/snapshot.ts` as a per-field table with the pre-S3 line numbers:
+ref-read getters — `quitConfirm` (3814), `dock` (3841/4062), `chord`
+(3842–3860), `running` (4107), `compacting` (3634), `permission.mode` (3861),
+`pasteBuffer` (3863/3909), `replyMaxChars` (3868), `dockIds` (3701),
+`othersOnSession` (3547/3562), `sessionId` (3627), `switching` (3708/3755),
+`panelGen` (3700), `abortable` (3907/3548), `uploadInFlight` (3900),
+`exitPending` (3564), `subagents`/`jobRows` (3563/3565); render values — `panel`
+(3612/3682/3698), `paletteOpen`/`paletteNames`/`commandSel` (3757–3791),
+`fieldValue` (3705), `permission.pending`/`.choices`/`.selected` (3870),
+`sessions` (3638), `detachOnQuit` (3565). **No field was "cleaned up" to one
+source**, and no field changed source.
+
+**Tests (new only, 81 assertions-bearing tests across 4 files).**
+- `packages/tui/test/keys-route.test.ts` (11) — the layer ORDER as data, the
+  walk's first-claimer semantics, act-and-pass, effect ORDER, and `carry`.
+- `packages/tui/test/keys-layers.test.ts` (30) — every layer's effects AND
+  verdict, including the failure modes the plan lists: quit-confirm's `y` vs an
+  ask, Ctrl+C's four outcomes, a `connect` detach losing no job, a paste behind a
+  panel, the reply-field paste, the dock's Esc chain vs the turn's, Esc-upload
+  before Esc-abort, the palette, and the ordering invariants (shift+tab over
+  everything; sessions-Esc over Esc-abort).
+- `packages/tui/test/keys-execute.test.ts` (35) — each effect reaches the RIGHT
+  host method (a table), the `quit` order (closeForAll then requestQuit), and
+  that no effects means no calls.
+- `packages/tui/test/keys-app-seam.test.tsx` (5) — through real Ink: the
+  snapshot's getters are live (two Ctrl+C in ONE tick, then the "never a trap"
+  re-ask), a passing layer's effects do not swallow the key (ctrl+x then typing
+  then Enter still sends), and line editing still submits.
+**S0/S0b nets stay green and UNEDITED** (82 tests, run before AND after), which
+is this slice's behaviour-preservation proof; the full TUI package was run at
++0 fail (1792) as an additional check with the handler already replaced.
+
+**Red before green (§9).** Every new test file was written against the
+implemented module and run immediately; the three failures that surfaced were
+**my test expectations, not the code**, and each was resolved by reading the
+owning pure module rather than bending the code: (a) `dockKey` in `list` focus
+moves Esc one step up the chain to the **pill**, not straight to `input`
+(`background-focus.ts:452`, verified) — the test was rewritten to the real
+chain; (b) a `connect` (`detaches: true`) Ctrl+C with a running turn yields
+`stop` → `abortTurn`, not `exit` (`ctrlCQuitStep`'s second `quitAction` branch,
+verified) — the test's expectation was corrected; (c) a no-op `setChord` is not
+emitted (drift 2) — the test now asserts both the idle case (no write) and the
+armed case (a write). **The slice's own "red" proof is the mutation table below**:
+15/15 mutants are killed by the new tests, which is what shows they pin the
+property rather than merely passing.
+
+**Mutation check (§9 non-vacuity) — 15/15 KILLED.** Harness
+`.tentacle/tmp/app-decomp-3-keyroute/mutate.ts` (byte-copy, ONE mutation, run the
+owning test file, restore, sha256 compare; a 0-test run is reported INVALID so a
+bad filter cannot look like a kill). Three mutants **SURVIVED the first pass** —
+each a real hole, closed by adding the test named beside it:
+
+| # | Mutation | First pass | Now |
+|---|---|---|---|
+| M1 | quit-confirm and the chord swapped in the list | KILLED (9/2) | KILLED |
+| M2 | quit-confirm read as a render value, not the ref | KILLED (9/2) | KILLED |
+| M3 | a passing layer's effects dropped | KILLED (8/3) | KILLED |
+| M4 | effects collected with `unshift` (reverse order) | KILLED (10/1) | KILLED |
+| M5 | `carry` never propagates | KILLED (8/3) | KILLED |
+| M6 | the sessions disarm CONSUMES instead of passing | KILLED (9/2) | KILLED |
+| M7 | a printable key on the pill is swallowed | **SURVIVED (28/0)** | **KILLED** — added "a printable key on the FOCUSED PILL is typed, not swallowed" |
+| M8 | Ctrl+C on the dialog denies instead of stopping | KILLED (27/1) | KILLED |
+| M9 | Esc no longer cancels an upload in flight | KILLED (27/1) | KILLED |
+| M10 | the dock is offered keys behind a panel | **SURVIVED (28/0)** | **KILLED** — added "a key the panel does not claim never reaches the dock" |
+| M11 | a paste behind a panel edits the hidden input | KILLED (27/1) | KILLED |
+| M12 | a dock-owned `ctrl+x` taken by the chord | KILLED (10/1) | KILLED |
+| M13 | Esc-abort ordered before Esc-upload | KILLED (27/1) | KILLED |
+| M14 | the two panel layers swapped | KILLED (9/2) | KILLED |
+| M15 | the executor wires `abortTurn` to `sendNow` | **SURVIVED (5/0)** — the seam test never ran the executor table | **KILLED** — added `keys-execute.test.ts` |
+
+Every row is a red on the ASSERTION with a real pass/fail count (never an
+import/compile error); after each the mutated file's sha256 `MATCHES` its
+pre-run value, and `git status --short packages/tui/src` lists only `App.tsx`
+(modified) and the new `keys/` directory — **no mutation survived into the tree**.
+
+**Gate (this worktree, this branch).** `bun run check` → `tsc --noEmit` clean
+(`tsc -p apps/mobile` included by the script, clean), `biome check .` **1064
+files, 0 errors 0 warnings** (the AGENTS §6 baseline — clean), `bun test`
+**8224 pass / 3 skip / 0 fail** across 591 files (the 3 skips are the documented
+opt-ins: live-k8s, live-docker, the real-socket keepalive). No schema change →
+`packages/protocol/schema/protocol.json` not regenerated. One changelog fragment
+added: `changelog.d/app-decomp-3-keyroute.changed.md` (user-visible: new key
+bindings are now new files; the rule for "internal refactor adds none" applies to
+S4, but S3 changes how a TUI binding is added, so it earns one bullet).
+`TODO.md` untouched.
+
+**Drift left open (for the reviewer, not hidden).**
+- The plan's per-slice coverage check (`bun test --coverage packages/tui`,
+  App.tsx + new-files line total not dropping) was **not** run; the moved lines
+  are pinned by 81 new assertions plus the untouched S0/S0b nets, but the
+  percentage is unmeasured.
+- `keys/layer-panels.ts` re-exports four `sessions-panel.ts` helpers
+  (`sessionsListError`, `deleteFailedNotice`, `sessionsRefreshApplies`,
+  `refreshedSessions`) so App keeps one import for the delete driver. That is
+  convenience, not necessity, and a reviewer may prefer App to import them
+  directly; it changes no behaviour either way.
+- "What stays in App.tsx" targets ≲800 lines after all slices; S3 leaves App at
+  **3937** (from 4102) — the remaining reduction is S2/S5–S10's, as planned.
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14*
+
+## Review
+
+### S3 — `feat/app-decomp-3-keyroute` (fresh-context, adversarial)
+
+**Verdict: REQUEST-CHANGES** (two MEDIUM, no HIGH; both small fixes).
+
+**Gate (re-run by me on this branch).** `bun test packages/tui` → **1873 pass / 0
+fail** (126 files, S0/S0b nets included, unedited); `bun run typecheck` clean;
+`bun run lint` → 1064 files, 0 errors / 0 warnings. The full repo `bun test` was not
+re-run (TUI-only diff).
+
+**Findings.**
+1. **MEDIUM: one snapshot field changed source, so the slice's central claim is
+   false.** `packages/tui/src/App.tsx:3589` passes `replyMaxChars: () =>
+   replyMaxRef.current`. Before S3 the handler used the RENDER value `maxChars:
+   replyMax` (`main:App.tsx:3519`). The table in `keys/snapshot.ts` labels it a
+   "ref-read getter (3868)", and Execution says "no field changed source". Failure
+   scenario: `pending` and `choices` now come from the handler's frame while
+   `maxChars` comes from the latest render's ref. So, in the window between a render
+   and the `useInput` re-subscribe, one chunk decides a reply clip with a mix of two
+   frames. That window is practically unreachable under Ink's sync commit, but this
+   is exactly the "one field silently re-sourced" class that H3 asks the table to rule
+   out. Fix: `replyMaxChars: () => replyMax` (or make the row a value), and correct
+   the table row.
+2. **MEDIUM: a changelog fragment for a behaviour-unchanged internal refactor.**
+   `changelog.d/app-decomp-3-keyroute.changed.md` says itself that "Behaviour is
+   unchanged". AGENTS §10 says internal/dev work adds no fragment, and S4 added none.
+   The fragment is also inaccurate: it says `routeKey` runs "over 14 ordered layers",
+   but it walks 13 (`PURE_LAYERS`), and the mouse layer is a continuation (drift 1).
+   Fix: delete the fragment.
+
+**Premise checks.** Ink's `useInput` has no stop-propagation: TRUE (one `useInput`
+remains, so only its body moved). `paletteOpen` is false while a panel is open:
+TRUE (`App.tsx:957`). The mouse layer swallows every key behind a panel: TRUE
+(`mouse-stream.ts:132`). Every other snapshot row matches its pre-S3 source
+(`othersOnSession`, `sessionId`, `dockIds`, `permission.mode` are live calls;
+`panel`, `fieldValue`, `detachOnQuit`, `pending`/`choices`/`selected` are values),
+except row 1 above.
+
+**Attacks tried.**
+- (a) **Collect-then-execute ordering.** Inline, effects ran mid-walk, so a later
+  read could see an earlier write. I checked each write that passes: `setChord`,
+  the sessions disarm, and `setDock` on `pass`. No later pure layer reads the state
+  those write. The mouse layer reads `dockRef` only after `executeEffects`.
+  Nothing found.
+- (b) **The sessions panel used to consume every claimed action; it now passes**
+  `choose`/`delete` with no entry, or with no `sessions`. Those keys fall through to
+  `escUpload`/`escAbort`/`expandAll`/`palette`, which cannot claim them (Esc is
+  always `close`; the palette is closed under a panel), and then the mouse layer
+  swallows them. Same observable behaviour, but the panel is no longer the layer
+  that stops the walk (`stoppedAt` reads `null`/mouse). Below MEDIUM.
+- (c) **Truthiness drift.** `pending === null` vs `if (pending)`: the type is
+  `PermissionRequest | null`, so they are equal. `clean !== ""` vs `if (clean)`:
+  `sanitizePasted` returns a string, so they are equal. `subagents ?? []`: harmless.
+  Nothing found.
+- (d) **Chord reset under a dock-owned `ctrl+x` (drift 2).** It is pinned by
+  `keys-route.test.ts:182–184` (armed ⇒ `setChord` idle first) and `:176–178`
+  (idle ⇒ no write). Nothing found.
+
+**Mutation (§9).** I could NOT re-run mutants myself: writing into `src/` for a
+temporary mutation needed an approval this non-interactive run does not have. The
+executor's 15/15 table therefore stands unverified by me. Statically, M7/M10/M15's
+added tests exist and assert the property named. Unverified: the App-side port
+bodies (`permissionStop`, `stopTurn`, `cancelUpload`, `pasteReply`) are covered
+only by the S0 nets through `App`, not by the key tests, which use a fake host.
+To verify, drop `stoppedHereRef.current = true` in `stopTurn` and run
+`packages/tui/test/app*.test.tsx`.
+
+**How the executor behaved.** Disciplined and transparent. It recorded four drifts
+with reasons, recorded the clean-tree resume, and closed three surviving mutants
+with tests. It overclaimed once ("no field changed source", finding 1) and misread
+the changelog rule (finding 2). Different model family from me (DeepSeek
+executor, Opus reviewer), so blind spots are less likely to be shared.
+
+*— claude-opus-5-5, 2026-11-14*
+
+### Fix round 1 — `feat/app-decomp-3-keyroute` (S3 review findings)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-15* (real id: this run was
+launched as `/Users/gmeghnag/bin/tentacle --profile deepseek`; that profile's
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`,
+`~/.config/tentacle/config.jsonc:29`.)
+
+Two MEDIUM findings, no HIGH. One re-sourced snapshot field (a `src/` fix, with a
+new regression test) and one changelog fragment (deleted). No other `src/`
+behaviour touched.
+
+**Finding 1 (MEDIUM) — `replyMaxChars` changed source: FIXED.**
+
+Verified against the code first, not the review's static claim.
+`git show 723b454^:packages/tui/src/App.tsx` (pre-S3) has exactly two readers:
+`:3519` `maxChars: replyMax` — the `stepPermissionKey` call, i.e. the handler's
+RENDER closure — and `:1092` `insertReply(mode, text, replyMaxRef.current)`,
+inside `insertIntoReply`, which is NOT on the key path. So the ref was never the
+key path's source and the review is right: S3 re-sourced the field.
+
+**Fix.** `keys/snapshot.ts`: `replyMaxChars(): number` → `readonly replyMaxChars:
+number`, and its table row rewritten to ``render `replyMax` (3519) | value``.
+`App.tsx:3589`: `replyMaxChars: replyMaxRef.current` getter → `replyMaxChars:
+replyMax` (the render value, the SAME frame as `pending`/`choices`/`selected`, so
+one decision can no longer mix two frames). `keys/layer-dialog.ts:56`:
+`snap.replyMaxChars()` → `snap.replyMaxChars`. The three test snapshot factories
+updated to `replyMaxChars: 0` / `: 100`.
+
+**Red before green (§9).** The new file
+`packages/tui/test/keys-snapshot-source.test.ts` makes the doc's prose table
+executable, and it was run RED on the unfixed code:
+```
+(fail) … > snapshot.ts declares each render value as a data member, never a call signature
+  + [ "replyMaxChars" ]
+(fail) … > App.tsx passes each render value straight from the frame (no getter, no ref)
+  + [ "replyMaxChars: () => replyMaxRef.current," ]
+ 1 pass / 2 fail
+```
+Both failures name the finding's own field, on the property (source), not an
+import/compile error. After the fix: **3 pass / 0 fail**.
+
+Two harness bugs of my own surfaced on the way and were fixed before the red was
+trusted, so the red is not a false one: a shorthand entry (`panel,`) was first
+read as "missing" (fixed by a shorthand branch in `appEntry`), and the
+getter-shape test was first a bare `=>` check, which flagged the legitimate
+render-derived `paletteCommands.map((c) => c.name)` (narrowed to `() => …` /
+`function` / `…Ref` / `.current`). A third test pins non-vacuity: the interface
+and the literal are found, `panel` reads as a value and `dock` as a getter — so a
+rename could not make the scans silently pass over nothing.
+
+**Mutation check (§9), 3/3 KILLED** (`rmut.sh`: byte-copy, one mutation, run the
+owning file, restore, sha256 compare; every row red on the ASSERTION, counts
+real, `RESTORED-OK` after each):
+| # | Mutation | Result |
+|---|---|---|
+| F1-a | `replyMaxChars: replyMax` → `() => replyMaxRef.current` (the bug itself) | **KILLED** 2/1 |
+| F1-b | `snapshot.ts` `readonly replyMaxChars: number` → `replyMaxChars(): number` | **KILLED** 2/1 |
+| F1-c | a DIFFERENT render value re-sourced (`panel,` → `() => panelRef.current`) | **KILLED** 1/2 |
+
+F1-c is the one that matters for the finding's *class*: the scan is general, not
+a hard-coded check on `replyMaxChars`.
+
+**Finding 2 (MEDIUM) — changelog fragment on a behaviour-unchanged refactor: FIXED.**
+
+`changelog.d/app-decomp-3-keyroute.changed.md` is deleted (AGENTS §10: internal
+work adds no fragment; S4 — the identical situation — added none). Its
+inaccuracy dies with it: it claimed `routeKey` runs "over 14 ordered layers"
+while it walks 13 (`PURE_LAYERS`), the mouse layer being the continuation
+(drift 1).
+
+The mutation here IS the file's presence, so its red was shown empirically with
+the release path's own code rather than argued. Probe
+`.tentacle/tmp/app-decomp-3-keyroute/frag-probe.ts` (`readFragmentDir` +
+`parseFragments` + `assemble`), reduced to a scratch root holding only the
+fragment under test (the worktree's `changelog.d/` was never re-polluted):
+```
+RED   fragments scanned: changelog.d/app-decomp-3-keyroute.changed.md, changelog.d/device-pairing-9b.added.md, changelog.d/mobile-session-view-12b.added.md
+      S3 internal bullet under a RELEASED heading: true
+        published as: - **TUI keys: one ordered router instead of one 389-line handler.** `App`'s single `useInput` now builds
+GREEN fragments scanned: changelog.d/device-pairing-9b.added.md, changelog.d/mobile-session-view-12b.added.md
+      S3 internal bullet under a RELEASED heading: false
+```
+`bun test scripts/test/changelog-guard.test.ts scripts/test/changelog.test.ts`
+→ **21 pass / 0 fail** after the deletion.
+
+**Drift from the Implementation (two, recorded).**
+1. **The review's suggested fix (`replyMaxChars: () => replyMax`) is NOT what I
+   built.** A getter closing over the render frame is observationally the same as
+   a value for correctness, but it is the wrong shape: it re-introduces the very
+   ambiguity the table exists to remove (a scan cannot tell `() => replyMax` from
+   `() => replyMaxRef.current`), and the review offered "or make the row a
+   value". I took the value branch, which is what the two scans can pin. This is
+   also why the new test pins only the VALUE half of the table (stated in its
+   header): the getter half stays pinned behaviourally by S0/S0b, because a
+   getter may legitimately close over the frame.
+2. **The previous Execution's "no field changed source" claim is left standing in
+   place and corrected HERE, not edited out** — the earlier round's record is a
+   historical statement, and the review's finding 1 is the correction. The
+   `snapshot.ts` table row is the living source of truth and is now right.
+
+**The two MEDIUMs were the whole set.** The review's other observations were
+explicitly below MEDIUM (attack (b): `stoppedAt` reads `null`/mouse for an action
+the sessions panel used to claim; same observable behaviour) and are left as
+noted, not changed — a fix there would move behaviour for no finding.
+
+**Unverified (§5).** The review could not re-run the previous round's 15-mutant
+table (no approval to write into `src/` non-interactively); I did not re-run it
+either, and this round's 3 mutants are new ones over my own fix, so that table
+still stands on the prior executor's word. To verify:
+`.tentacle/tmp/app-decomp-3-keyroute/rmut.sh` with the review's named probe
+(drop `stoppedHereRef.current = true` in `stopTurn`, run
+`packages/tui/test/app*.test.tsx`).
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` clean;
+`bun run lint` → 1065 files, **0 errors / 0 warnings**; `bun test` → **8227 pass
+/ 3 skip / 0 fail** across 592 files (the 3 skips are the documented opt-ins:
+live-k8s, live-docker, the real-socket keepalive). TUI package alone: **1876
+pass / 0 fail** across 127 files (the S0/S0b nets still green and UNEDITED).
+Negative-case probe: `layer-dialog.ts`'s `snap.replyMaxChars` is exercised
+(KILLED F1-a proves it), so no test silently holds the old shape.
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-15*
+
+### Round 2
+
+**Verdict: PASS.** Both round-1 MEDIUMs are fixed, and the fix diff (`git diff
+HEAD~1`) introduces no regression.
+
+- **Finding 1 (`replyMaxChars` re-sourced): FIXED.** `App.tsx:3589` now passes
+  `replyMaxChars: replyMax`, the render value, as the inline handler did before S3.
+  `snapshot.ts` declares it `readonly … : number`, and the table has the row.
+  Taking the value branch instead of my suggested `() => replyMax` is the better
+  shape. Mutations I ran myself (all restored, `git status` clean afterwards):
+  - (a) App passes `replyMaxRef.current` → `keys-snapshot-source.test.ts` **KILLED**
+    (2 pass / 1 fail, naming the entry).
+  - (b) `layer-dialog.ts` passes `maxChars: 0` → **KILLED** by 7 reply-field App
+    tests. So the field is pinned by behaviour, not only by the text scan.
+  - A getter mutant (`() => …`) no longer typechecks, so `tsc` pins it too.
+- **Finding 2 (changelog fragment): FIXED.** `changelog.d/app-decomp-3-keyroute.*`
+  is gone. No other fragment was touched.
+- **Round-1 unverified item, now closed.** I dropped `stoppedHereRef.current =
+  true` from the `stopTurn` port. `app*.test.tsx` alone stays green (204/0), but
+  the full TUI suite **KILLS** it: "this TUI pressed Esc on that turn: the plain
+  notice" fails (1875/1). Ctrl+C's `abortTurn` runs the same port body.
+- **Regressions.** I checked every remaining `replyMaxChars()` call site (none
+  left). The new test's scope is honest: a text scan of the value half only, with a
+  non-vacuity test. It is brittle to reformatting of the `routeKey(` literal, but it
+  fails loudly (it throws) rather than passing vacuously. Not a finding.
+- **Gate.** `bun test packages/tui/test/keys- …/permission` → 130 pass / 0 fail;
+  the full TUI suite I ran only with the `stopTurn` mutant in place (1875 / 1, the
+  one kill above), so a clean full-suite run this round is the executor's figure
+  (1876 / 0), not mine;
+  `bun run typecheck` clean; `bun run lint` → 1065 files, 0 errors / 0 warnings.
+- **Executor behaviour.** It fixed exactly the findings and recorded its deviation
+  from my suggested fix with a reason. It showed the new test red first and wrote
+  its own mutation table (3/3). Its F1-a/F1-b rows match my re-runs.
 ### S2 — `feat/app-decomp-2-commands` (one file per command, a registry behind them)
 
 *— deepseek-v4.1-flash (real id; run via the `deepseek` profile), 2026-11-14*
