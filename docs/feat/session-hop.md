@@ -638,3 +638,34 @@ true on both paths.
 this is a different model family, which is good for blind spots.
 
 *— claude-opus-5-5, 2026-11-14*
+
+### Round 2
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (`4c07fc0`).
+
+- **Finding 1 (HIGH) — fixed.** `proposalNotice` names the image, passed through
+  `untrustedText` (`hop-proposal.ts:186-188`), or says "the default image". The
+  repro now prints `… a container running attacker.io/x:latest — faster builds`.
+  Mutations: hiding the image again → "the image is NAMED" FAILS; using the
+  image raw → "a pod-supplied image is sanitized" FAILS.
+- **Finding 2 (MEDIUM) — fixed.** Both paths share one validator,
+  `hopWorkload` (`hop-command.ts:68-95`). The proposal path now refuses
+  `docker` with a container part (repro → `null`). `workloadText` and the
+  `hopDelete` notice sanitize names. `samePlace` compares raw keys, so the
+  comparison is not affected by sanitizing. Mutations: skipping `hopWorkload`
+  in `hopSpecOf` → the grammar test FAILS; dropping the charset regex → 2
+  tests FAIL; dropping `untrustedText` from `workloadText` → the attachVerdict
+  sanitize test FAILS.
+- **Finding 3 (process) — fixed.** The H1 Execution signature is corrected to
+  `deepseek-v4.1-flash-1017`, and the reason is stated. So the reviewer
+  (Claude Opus) and the executor are different model families.
+- **Regressions checked:** the charset `[A-Za-z0-9][A-Za-z0-9._-]*` covers
+  docker and podman names and IDs. k8s DNS-1123 is a subset of it, so a
+  k8s-invalid name such as `a_b` reaches the engine and fails there, loudly.
+  An image keeps its free form (no validator), but a bad reference fails at
+  the engine, before anything is opened. Nothing new at HIGH/MEDIUM.
+- **Gate:** the 3 touched test files pass (50 tests, 0 fail, 132 expects).
+  `bun run lint` is clean (1118 files) and `bun run typecheck` passes. All
+  mutations were reverted, and `git status --porcelain` is empty.
+
+*— claude-opus-5-5, 2026-11-14*
