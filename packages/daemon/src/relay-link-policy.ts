@@ -127,6 +127,30 @@ export function relayRetryAfter(
 }
 
 /**
+ * The backoff counter a wait is computed from (F7's fallback, R4 review 1).
+ *
+ * `oversize` deliberately keeps its OWN counter (`oversizeStrikes`) instead of
+ * the shared `attempt`: the shared one is reset by an accepted `ready`, because
+ * an hour of service must not earn a 60 s first retry — and a hostile relay
+ * exploits exactly that by alternating `ready` (which proves the id) with one
+ * oversize frame. Every cycle then looks like "a good connection that dropped",
+ * the wait never grows past its first step, and Bun has already materialised the
+ * frame (R0(b)/(d): no client-side cap), about once a second, forever. With its
+ * own counter the oversize waits progress 1 s → 2 s → … → the 60 s cap, so the
+ * worst case for a hostile relay is one allocation a minute.
+ *
+ * A benign relay never sends an oversize control frame, so it never consults
+ * this counter and pays nothing for it.
+ */
+export function backoffCounterFor(
+  reason: RelayDownReason,
+  attempt: number,
+  oversizeStrikes: number,
+): number {
+  return reason === "oversize" ? oversizeStrikes : attempt;
+}
+
+/**
  * The `attempt` counter after a retry: grows on every ordinary failure, and
  * RESETS to 0 after a connection that actually became usable (`ready` accepted),
  * so an hour of flap-free service does not earn a 60 s first retry next time.

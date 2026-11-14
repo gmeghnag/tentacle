@@ -1841,3 +1841,116 @@ Findings:
 
 Holds: one session path (the accept leg is a `DuplexChannel` into `acceptDevice`, with no second loop); no lock around `Connection`; the limiter slot is freed exactly once (`endSlot` is guarded); the secret goes only in the `hello` frame, never in the URL; `wantsReachability` is read-only, and a broken store → false; `stop()` clears timers and legs.
 Attacks tried: the three above (all confirmed by repro or code); duplicate stream token (dropped, ok); invalid URL (never dials, ok).
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-15*
+
+All three R4 findings fixed, each with its test **RED on the unfixed code first**
+and each mutation-checked by reverting the fix (`shasum` of both source files
+identical before the mutations and after: `relay-link.ts`
+`9d28c9a2…`, `relay-link-policy.ts` `1db19ae7…`).
+
+**Reproduced first** (scratch `.tentacle/tmp/mobile-relay/{fix1,fix3}-repro.ts`, a
+fake dialer so every frame is delivered by hand — the reviewer's own setup):
+
+```
+before fix: finding1: delays=[991,991,991,991,991] down=["relay-down closed" ×5]
+            finding2: acceptDials=1 openStreams=1 audit=[]
+            finding3: streamsBefore=1 legClosed=true streamsAfter=0
+after  fix: finding1: delays=[991,1981,3961,7921,15841] down=["relay-down oversize" ×5]
+            finding2: acceptDials=0 openStreams=0 audit=["relay-accept-failed"]
+            finding3: streamsBefore=1 legClosed=false streamsAfter=1
+```
+
+**F1 (HIGH) — an oversize control frame has its own backoff counter.** Two
+defects made the review's loop: `"oversize"` was **unreachable** on the frame
+path (`relay-link.ts:279-283`: an oversize frame went `parseFrame` → `undefined`
+→ `schedule("closed")`), and even when reached the wait read the shared `attempt`
+counter, which an accepted `ready` deliberately resets. Fix at `relay-link.ts:292-300`
+(an explicit `isInboundFrameTooLarge(data)` branch → `schedule("oversize")`,
+before the malformed branch) plus `relay-link-policy.ts:129-150`
+(`backoffCounterFor(reason, attempt, oversizeStrikes)`, the decision in the pure
+module per §7) and `relay-link.ts:161-167,219-225` (a separate `oversizeStrikes`
+that grows per strike and is **not** reset by `ready`, `:317-322`).
+A benign relay never sends an oversize control frame, so it never consults it.
+
+**F2 (MEDIUM) — `open` needs an accepted `ready`.** `relay-link.ts:347-356`: an
+`open` before the accepted `ready` is refused with `relay-accept-failed`, so no
+accept dial and no limiter slot. That is what makes the `ready.id` check above it
+mean something: a relay that never registers now gets what a lying one gets.
+Noise still protects access either way (unchanged) — this closes the plan's F7
+"wrong id → link dropped" claim, which `open`-first had been bypassing.
+
+**F3 (MEDIUM) — a control close no longer kills live streams.** `relay-link.ts:366-374`:
+`dropStreams()` removed from the control socket's `setOnClose`; the false-premise
+comment ("every stream is already dead") replaced with the relay's own semantics
+(`apps/relay/src/relay-core.ts:394`, "its streams live on, F2"). `stop()` still
+closes every leg, and a leg still closes itself when its phone or the relay drops
+it. The timeout/malformed/error/replaced paths were already consistent with
+this (`dropControl` first, so the `control !== host` guard returned early).
+
+**Red before green (the exact run, no fix applied — 15 pass / 4 fail):**
+
+```
+error: no retry was scheduled        (fail) … a `ready` after an oversize frame does not reset the oversize backoff
+error: no second retry was scheduled (fail) … the oversize backoff outlives the `ready` that follows it
+Expected length: 0 / Received length: 1  (fail) … no `ready` at all means no accept dial and no limiter slot
+Expected: false / Received: true         (fail) … the relay dropping control does not detach a phone mid-session
+```
+
+(The first two failed on `no retry was scheduled` because an oversize frame took
+the malformed path and closed *without* arming a retry — the fix's own new
+branch is what schedules one; after it, both read `Expected: > 991 / Received:
+991`, which is the review's `[991, …]` exactly. The second oversize test
+originally asserted `>=` and was **vacuous** — mutation A proved it: it stayed
+green when the reason was folded back into `"closed"`. It now asserts a strict
+`>` and `relay-down oversize`, and fails.)
+
+**Mutations (each run against the fix in place, then reverted to the shasum above):**
+
+- **A — fold oversize back into `"closed"`** (delete the new
+  `isInboundFrameTooLarge` branch): both oversize tests fail
+  (`Expected: > 991 / Received: 991`), the other 17 pass. This is F1's first
+  defect.
+- **B — the shared counter** (`backoffCounterFor` returns `attempt`): the same
+  two oversize tests fail (`Expected: > 991 / Received: 991`) — F1's second
+  defect, i.e. a fix that only names the reason would still loop.
+- **C — `if (false)` for the `ready` guard on `open`**: the F2 test fails
+  (`Expected length: 0 / Received length: 1`), 18 pass.
+- **D — put `dropStreams()` back in the control close handler**: the F3 test
+  fails (`Expected: false / Received: true`), 18 pass.
+- **E — mutation on the pure policy test** (`backoffCounterFor` → `attempt`):
+  "an oversize strike reads a counter a `ready` cannot reset" fails
+  (`Expected: 3 / Received: 0`).
+
+**Drift from the review's suggested fix, and why:** none in substance.
+F1: the review offered "a separate oversize counter or hold time" — I took the
+counter (a hold time would need a clock read in the socket file for a decision
+the pure module already owns). F3: "do not `dropStreams` on control close (keep
+it for `stop()`)" — exactly as written.
+
+**Test-harness fix found in passing (not a product bug):** the new
+`fakeHarness().control()` first returned `hosts[0]`; after a retry the link dials
+a **new** control socket, so delivering the next cycle's frames to the dead one
+made both oversize tests fail on a harness mistake rather than a product one. It
+now picks the newest `/v1/daemon` host (`relay-link.test.ts:399-407`). Worth
+naming because the first failure looked like a product failure.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/relay --noEmit` clean ·
+`bun run lint` clean (1311 files, no fixes) · **`bun test` 9451 pass / 3 skip / 0
+fail** (9454 tests, 679 files) — the 3 skips are the pre-existing opt-ins
+(live-k8s, live-docker, real-socket keepalive), no new skip. The touched files:
+`relay-link-policy.test.ts` (16 pass) + `relay-link.test.ts` (19 pass) = 35 pass /
+0 fail; `bun test packages/daemon/test/` = 1046 pass / 1 skip / 0 fail.
+`git diff --stat`: `relay-link-policy.ts` +24, `relay-link.ts` +49/−7,
+`relay-link-policy.test.ts` +28, `relay-link.test.ts` +226 — no other file, so
+no wire, schema, `protocol.json`, `apps/relay` or `changelog.d` change is due
+(this is a fix to unshipped R4 code on the same branch, and
+`changelog.d/mobile-relay.added.md` already covers the relay's user-visible
+surface; no `protocol.d` note because nothing on the wire changed).
+
+**Not verified:** the real-relay shape of an oversize control FRAME — R2's relay
+closes a control socket that exceeds `maxFrameChars` rather than forwarding it,
+so the frame path proved here is the fake relay's (the close-code-1009 path,
+`oversizeHint`, is unchanged and still covered by `schedule`); and finding 3's
+"streams live on" against a real NAT blip rather than a fake `setOnClose` call.
+Both are the reviewer's own framing and neither gates the fix.

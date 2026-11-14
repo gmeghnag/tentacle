@@ -13,6 +13,7 @@ import {
   RELAY_PONG_DEADLINE_MS,
   RELAY_REPLACED_HOLD_MS,
   RELAY_VERSION_HOLD_MS,
+  backoffCounterFor,
   createRelayLiveness,
   nextAttempt,
   reasonForErrorCode,
@@ -100,6 +101,33 @@ describe("the two holds that are not backoff", () => {
     expect(relayRetryAfter(reasonForErrorCode("future-code"), 0, fixed(0.5)).delayMs).toBeLessThan(
       RELAY_BACKOFF_CAP_MS + 1,
     );
+  });
+});
+
+describe("the oversize counter is its own (F7's fallback, R4 review 1)", () => {
+  test("an oversize strike reads a counter a `ready` cannot reset", () => {
+    // The finding: `ready` resets the shared counter (correctly — an hour of
+    // service must not earn a 60 s first retry), so a relay alternating `ready`
+    // with one oversize frame kept every cycle at the FIRST step: the review
+    // measured [991, 991, 991, 991, 991] ms, one allocation a second, forever.
+    // Mutation: return `attempt` for every reason -> the second wait collapses
+    // to the first step and the loop test in relay-link.test.ts fails.
+    expect(backoffCounterFor("oversize", 0, 3)).toBe(3);
+    expect(backoffCounterFor("closed", 2, 3)).toBe(2);
+    expect(backoffCounterFor("timeout", 1, 9)).toBe(1);
+    // The consequence, in the policy's own terms: the third strike waits longer
+    // than the first, with `attempt` reset to 0 all along (every cycle's `ready`).
+    const first = relayRetryAfter(
+      "oversize",
+      backoffCounterFor("oversize", 0, 0),
+      fixed(0.999_999),
+    );
+    const third = relayRetryAfter(
+      "oversize",
+      backoffCounterFor("oversize", 0, 2),
+      fixed(0.999_999),
+    );
+    expect(third.delayMs).toBeGreaterThan(first.delayMs);
   });
 });
 

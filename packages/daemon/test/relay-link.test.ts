@@ -29,7 +29,9 @@ import {
 } from "../src/device-store.ts";
 import { HandshakeLimiter } from "../src/handshake-limit.ts";
 import {
+  type RelayDialer,
   type RelayLinkTimers,
+  type RelaySocketHost,
   type RunningRelayLink,
   bunRelayDialer,
   startRelayLink,
@@ -312,6 +314,102 @@ function harness(
 /** The production dialer (a real Bun client WebSocket per leg). */
 function bunDialerForTest() {
   return bunRelayDialer();
+}
+
+/**
+ * A relay with NO socket at all: every frame is delivered by hand, so a test can
+ * put an `open` where the relay could never legally put one, or send a 2 MiB
+ * frame, and read the consequence exactly (R4 review round 1).
+ */
+interface FakeHost {
+  readonly url: string;
+  readonly sent: string[];
+  closed: boolean;
+  onOpen?: () => void;
+  onMessage?: (data: string) => void;
+  onClose?: (info: { readonly code?: number; readonly reason?: string }) => void;
+}
+
+function fakeRelay(): { dial: RelayDialer; hosts: FakeHost[] } {
+  const hosts: FakeHost[] = [];
+  const dial: RelayDialer = (url) => {
+    const host: FakeHost = { url, sent: [], closed: false };
+    hosts.push(host);
+    const socketHost: RelaySocketHost = {
+      socket: {
+        send: (data) => {
+          host.sent.push(data);
+        },
+        close: () => {
+          host.closed = true;
+        },
+      },
+      setOnOpen: (handler) => {
+        host.onOpen = handler;
+      },
+      setOnMessage: (handler) => {
+        host.onMessage = handler;
+      },
+      setOnClose: (handler) => {
+        host.onClose = handler;
+      },
+    };
+    return socketHost;
+  };
+  return { dial, hosts };
+}
+
+/** Timers that RECORD a delay and fire only when the test says so. */
+function recordingTimers(): RelayLinkTimers & { pending: { fn: () => void; ms: number }[] } {
+  const pending: { fn: () => void; ms: number }[] = [];
+  return {
+    pending,
+    setTimeout: (fn, ms) => {
+      pending.push({ fn, ms });
+      return pending.length;
+    },
+    clearTimeout: () => {},
+    setInterval: () => 1,
+    clearInterval: () => {},
+  };
+}
+
+/** A paired device, a fake relay and a link on RECORDING timers: frames by hand. */
+function fakeHarness(over: { random?: () => number; limiter?: HandshakeLimiter } = {}) {
+  const configDir = store();
+  pairPhone(configDir);
+  const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+  cleanups.push(() => authority.stop());
+  const relay = fakeRelay();
+  const timers = recordingTimers();
+  const audit: string[] = [];
+  const link = startRelayLink({
+    url: "ws://127.0.0.1:4100",
+    secret: SECRET,
+    authority,
+    sessionHost: dummyHost,
+    limiter: over.limiter ?? new HandshakeLimiter({ burst: 100 }),
+    dial: relay.dial,
+    onAudit: (line) => audit.push(line),
+    timers,
+    seeds: { now: () => 0, random: over.random ?? (() => 0.5) },
+  });
+  cleanups.push(() => link.stop());
+  const control = (): FakeHost => {
+    // The NEWEST control socket: after a retry the link dials a fresh one, and a
+    // frame delivered to the dead one is (correctly) ignored.
+    const host = [...relay.hosts].reverse().find((s) => s.url.endsWith("/v1/daemon"));
+    if (host?.onOpen === undefined || host.onMessage === undefined || host.onClose === undefined) {
+      throw new Error("the link did not dial a control socket");
+    }
+    return host;
+  };
+  return { configDir, authority, relay, timers, audit, link, control };
+}
+
+/** The relay's own `ready` frame, with the id our secret derives. */
+function readyFrame(): string {
+  return JSON.stringify({ t: "ready", v: RELAY_PROTOCOL_VERSION, id: ID, features: [] });
 }
 
 describe("hostile relay: a flipped byte in a spliced frame (F5)", () => {
@@ -833,5 +931,133 @@ describe("version skew (F13)", () => {
     await waitFor(() => delay.length > 0, "the version hold to be scheduled");
     expect(delay[0]).toBe(3_600_000);
     expect(audit.filter((l) => l === "relay-down version")).toHaveLength(1);
+  });
+});
+
+describe("an oversize control frame cannot be looped into a memory allocation (F7, R4 review 1)", () => {
+  test("a `ready` after an oversize frame does not reset the oversize backoff", () => {
+    // R0(b)/(d): Bun materialises the frame before any handler runs and a client
+    // constructor ignores `maxPayloadLength`, so an oversize frame has already
+    // been allocated by the time we see it. What we CAN refuse is being dialled
+    // into the same allocation in a tight loop: a hostile relay sends `ready`
+    // (which normally resets the backoff) and then a 200 KiB frame, over and over.
+    // Mutation: let `ready` reset the counter the oversize wait reads (i.e. use
+    // `attempt` for `oversize` too) -> every cycle waits the same ~1 s, the
+    // review's [991, 991, 991, 991, 991], and the allocation happens about once
+    // a second, forever.
+    const h = fakeHarness({ random: () => 0.99 });
+    const delays: number[] = [];
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      const host = h.control();
+      host.onOpen?.();
+      host.onMessage?.(readyFrame()); // the relay proves it knows our id…
+      host.onMessage?.(`{"t":"ping"}${"x".repeat(200 * 1024)}`); // …then 200 KiB
+      const next = h.timers.pending.pop();
+      if (next === undefined) throw new Error("no retry was scheduled");
+      delays.push(next.ms);
+      next.fn();
+    }
+    // The waits GROW, cycle after cycle, even though EVERY cycle had a `ready`:
+    // that is the whole finding. (The pre-fix run was [991, 991, 991, 991, 991]
+    // with `relay-down closed`, precisely because `ready` reset the counter.)
+    expect(delays).toHaveLength(5);
+    for (let i = 1; i < delays.length; i += 1) {
+      expect(delays[i]).toBeGreaterThan(delays[i - 1] ?? 0);
+    }
+    // …and it is the OVERSIZE reason we are on, not a generic close.
+    expect(h.audit).toContain("relay-down oversize");
+    expect(h.audit).not.toContain("relay-down closed");
+  });
+
+  test("the oversize backoff outlives the `ready` that follows it", () => {
+    // The same loop seen one step at a time: after a retry the relay registers
+    // again and immediately oversizes again. The second wait must be strictly
+    // longer — with the shared counter it is the same first step again.
+    // Mutation: `backoffCounterFor` returns `attempt` for `oversize`.
+    const h = fakeHarness({ random: () => 0.99 });
+    const first = h.control();
+    first.onOpen?.();
+    first.onMessage?.(readyFrame());
+    first.onMessage?.(`{"t":"ping"}${"x".repeat(200 * 1024)}`);
+    expect(h.link.isConnected()).toBe(false);
+    const retry = h.timers.pending.pop();
+    if (retry === undefined) throw new Error("no retry was scheduled");
+    retry.fn();
+    const second = h.control();
+    second.onOpen?.();
+    second.onMessage?.(readyFrame());
+    second.onMessage?.(`{"t":"ping"}${"x".repeat(200 * 1024)}`);
+    const again = h.timers.pending.pop();
+    if (again === undefined) throw new Error("no second retry was scheduled");
+    expect(again.ms).toBeGreaterThan(retry.ms);
+  });
+});
+
+describe("`open` before an accepted `ready` is refused (F7, R4 review 1)", () => {
+  test("no `ready` at all means no accept dial and no limiter slot", () => {
+    // The `ready.id` check is only worth anything if `open` NEEDS a `ready`: a
+    // relay that never registers gets exactly what a lying one would — an accept
+    // leg and a limiter slot — otherwise. Mutation: drop the `ready` guard in
+    // the `open` branch -> one `/v1/accept` dial and `openStreams() === 1`.
+    const limiter = new CountingLimiter();
+    const h = fakeHarness({ limiter });
+    const host = h.control();
+    host.onOpen?.();
+    host.onMessage?.(
+      JSON.stringify({
+        t: "open",
+        stream: encodeBase64Url(new Uint8Array(16).fill(3)),
+        ip: "1.2.3.4",
+      }),
+    );
+    expect(h.relay.hosts.filter((s) => s.url.endsWith("/v1/accept"))).toHaveLength(0);
+    expect(h.link.openStreams()).toBe(0);
+    expect(limiter.begins).toBe(0);
+    // …and a stream announced AFTER an accepted `ready` still works, so the
+    // guard is on the handshake and not on `open` itself.
+    host.onMessage?.(readyFrame());
+    host.onMessage?.(
+      JSON.stringify({
+        t: "open",
+        stream: encodeBase64Url(new Uint8Array(16).fill(4)),
+        ip: "1.2.3.4",
+      }),
+    );
+    expect(h.relay.hosts.filter((s) => s.url.endsWith("/v1/accept"))).toHaveLength(1);
+    expect(limiter.begins).toBe(1);
+  });
+});
+
+describe("a control-socket close leaves live streams alone (F2, R4 review 1)", () => {
+  test("the relay dropping control does not detach a phone mid-session", () => {
+    // The relay's own semantics (`apps/relay/src/relay-core.ts`: "its streams
+    // live on, F2"): a control socket is per-registration, and a stream is a
+    // separate splice of two sockets. One control blip must not kill every live
+    // phone. Mutation: `dropStreams()` in the control `setOnClose` handler ->
+    // the leg is closed and `openStreams()` is 0 below.
+    const h = fakeHarness();
+    const host = h.control();
+    host.onOpen?.();
+    host.onMessage?.(readyFrame());
+    host.onMessage?.(
+      JSON.stringify({
+        t: "open",
+        stream: encodeBase64Url(new Uint8Array(16).fill(5)),
+        ip: "1.2.3.4",
+      }),
+    );
+    const leg = h.relay.hosts.find((s) => s.url.endsWith("/v1/accept"));
+    if (leg === undefined) throw new Error("the accept leg was not dialled");
+    leg.onOpen?.();
+    expect(h.link.openStreams()).toBe(1);
+    // The relay drops ONLY the control socket.
+    host.onClose?.({});
+    expect(leg.closed).toBe(false);
+    expect(h.link.openStreams()).toBe(1);
+    expect(h.link.isConnected()).toBe(false);
+    // `stop()` is still what closes every leg.
+    h.link.stop();
+    expect(leg.closed).toBe(true);
+    expect(h.link.openStreams()).toBe(0);
   });
 });

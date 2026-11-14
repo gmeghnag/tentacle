@@ -40,6 +40,7 @@ import {
   type RelayDownReason,
   type RelayLiveness,
   type RelayPolicySeeds,
+  backoffCounterFor,
   createRelayLiveness,
   nextAttempt,
   reasonForErrorCode,
@@ -157,6 +158,13 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
 
   let stopped = false;
   let attempt = 0;
+  /**
+   * Oversize strikes have their OWN counter (F7's fallback, R4 review 1): the
+   * shared `attempt` is reset by an accepted `ready`, and alternating `ready`
+   * with one oversize frame is exactly how a hostile relay would keep every
+   * cycle looking like a fresh, well-behaved connection.
+   */
+  let oversizeStrikes = 0;
   let connected = false;
   const noteSent = new Set<RelayDownReason>();
   /** The live control socket and its stream legs, newest last. */
@@ -208,8 +216,14 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
     if (stopped) {
       return;
     }
-    const retry = relayRetryAfter(reason, attempt, seeds);
+    const counter = backoffCounterFor(reason, attempt, oversizeStrikes);
+    const retry = relayRetryAfter(reason, counter, seeds);
     attempt = nextAttempt(reason, attempt);
+    if (reason === "oversize" && Number.isFinite(retry.delayMs)) {
+      // Its own progression, so a following `ready` cannot reset it (see
+      // `backoffCounterFor`).
+      oversizeStrikes += 1;
+    }
     // ONE line per cause, never one per retry: a version skew held an hour, and
     // a replaced id held five minutes, would otherwise repeat the same sentence
     // forever (F13, F16). A cause already told is silently retried.
@@ -275,6 +289,15 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
       if (control !== host) {
         return;
       }
+      if (isInboundFrameTooLarge(data)) {
+        // The frame is over the DECODE bound (F7). It must NOT be treated as
+        // "malformed": an oversize strike has its own backoff counter, or a
+        // relay alternating `ready` with one huge frame keeps the link in a ~1 s
+        // allocation loop (R0(b)/(d): the 2 MiB already exists by now).
+        dropControl();
+        schedule("oversize");
+        return;
+      }
       const frame = parseFrame(data);
       if (frame === undefined) {
         // A malformed control frame is a close, never a guess (F19).
@@ -294,7 +317,10 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
         ready = true;
         connected = true;
         // A usable registration resets the backoff: an hour of service must not
-        // earn a 60 s first retry (relay-link-policy's `nextAttempt`).
+        // earn a 60 s first retry (relay-link-policy's `nextAttempt`). The
+        // OVERSIZE counter is deliberately not reset here — a hostile relay
+        // alternates `ready` with one oversize frame precisely to keep this
+        // reset firing (F7's fallback, R4 review 1).
         attempt = 0;
         noticed = new Set();
         audit(`relay-ready ${id.slice(0, 8)}`);
@@ -319,11 +345,18 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
         return;
       }
       if (frame.t === "open") {
+        if (!ready) {
+          // F7 (R4 review 1): `open` needs an ACCEPTED `ready`, or the
+          // `ready.id` check above gates nothing — a relay that never registers
+          // would get an accept dial and a limiter slot anyway, exactly what a
+          // lying one gets. Refusing is the only order that makes the handshake
+          // mean something. (Noise still protects access either way.)
+          audit("relay-accept-failed");
+          return;
+        }
         openStream(host, frame.stream, frame.ip);
         return;
       }
-      // `ping` is a daemon→relay frame; receiving one is nonsense but harmless.
-      void ready;
     });
     host.setOnClose((info) => {
       if (control !== host) {
@@ -333,10 +366,12 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
       // is an ordinary (jittered) backoff, never an immediate redial into the
       // same allocation.
       schedule(oversizeHint(info) ? "oversize" : "closed");
+      // ONLY the control socket goes. A stream is its own splice of two sockets
+      // and the relay keeps it after a control close ("its streams live on, F2"
+      // — `apps/relay/src/relay-core.ts`), so closing the legs here would detach
+      // every live phone mid-turn on one control blip. `stop()` is what closes
+      // them; a leg also closes itself when its own phone or the relay drops it.
       dropControl();
-      // The relay unregisters the id when the control socket goes, so every
-      // stream is already dead on its phone's side (F2); our legs follow.
-      dropStreams();
     });
   };
 
