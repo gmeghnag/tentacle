@@ -14,10 +14,12 @@ import { Agent } from "@tentacle/agent";
 import { webSocketChannelFactory } from "@tentacle/client";
 import { RemoteClient } from "@tentacle/client";
 import { type ModelProvider, PermissionBroker } from "@tentacle/core";
+import type { ImagePolicy } from "@tentacle/daemon";
 import { SessionHost, startWsServer } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
 import type { ComputerRecord } from "../src/computers.ts";
-import { openComputer } from "../src/connection.ts";
+import { APP_CLIENT_OPTIONS, openComputer } from "../src/connection.ts";
+import { sha256Hex } from "../src/hash.ts";
 import type { RNWebSocketCtor } from "../src/rn-websocket.ts";
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
@@ -59,9 +61,10 @@ const RNShapedWebSocket = class {
   }
 } as unknown as RNWebSocketCtor;
 
-function host(): SessionHost {
+function host(policy?: ImagePolicy): SessionHost {
   return new SessionHost({
     defaultCwd: CWD,
+    ...(policy === undefined ? {} : { images: policy }),
     createAgent: () => ({
       agent: new Agent({ model: new Echo(), tools: new ToolRegistry(), env: env as never }),
       permissions: new PermissionBroker(),
@@ -72,8 +75,9 @@ function host(): SessionHost {
 async function withDaemon(
   token: string,
   run: (url: string, h: SessionHost) => Promise<void>,
+  images?: ImagePolicy,
 ): Promise<void> {
-  const h = host();
+  const h = host(images);
   const server = startWsServer({ host: "127.0.0.1", port: 0, sessionHost: h, token });
   try {
     await run(server.url, h);
@@ -221,6 +225,77 @@ describe("openComputer over a real daemon", () => {
       await link.close();
       const after = await link.client.sessionList().catch((error: unknown) => error);
       expect(after).toBeInstanceOf(Error);
+    });
+  });
+
+  /**
+   * 13c's Repro 2, at the app's own boundary: the client `openComputer` builds
+   * must carry a sha-256 that works where Bun is absent, or its first
+   * `attachImage` throws before any frame.
+   *
+   * The assertion is the EXACT property (§2): an image goes out and its ref id
+   * is the digest of its bytes. A link missing the option throws instead —
+   * `remote-client.ts:1691-1702` — which is red here, not a weaker "a hasher is
+   * configured somewhere".
+   */
+  test("attachImage over the app's own link: the ref id is the sha-256 of the bytes (mutation: drop APP_CLIENT_OPTIONS → red)", async () => {
+    await withDaemon(
+      "good",
+      async (url) => {
+        const link = await openComputer(record(url, "good"), { WebSocket: RNShapedWebSocket });
+        try {
+          const session = link.client.newSession(undefined, SESSION_ID);
+          const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+          const ref = await session.attachImage(bytes, {
+            mimeType: "image/png",
+            name: "probe.png",
+          });
+          const oracle = new Bun.CryptoHasher("sha256");
+          oracle.update(bytes);
+          expect(ref).toEqual({
+            id: oracle.digest("hex"),
+            mimeType: "image/png",
+            size: bytes.length,
+            name: "probe.png",
+          });
+        } finally {
+          await link.close();
+        }
+      },
+      // The daemon must take image UPLOADS, exactly as `serve` does: images
+      // off means the client refuses before the hasher is ever reached.
+      { source: "store", maxBytes: 15 * 1024 * 1024 },
+    );
+  });
+
+  test("the app's hasher IS the noble one, on every link (mutation: delete the option → red)", () => {
+    // Beside the end-to-end proof above: ONE construction site, so a second
+    // `new RemoteClient` in the app cannot ship without it. `APP_CLIENT_OPTIONS`
+    // is what `openComputer` spreads into its options.
+    expect(APP_CLIENT_OPTIONS.sha256Bytes).toBe(sha256Hex);
+    expect(APP_CLIENT_OPTIONS.sha256Bytes(new Uint8Array([1, 2, 3]))).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  /**
+   * The mutation-proof half of the test above (AGENTS §9 non-vacuity).
+   *
+   * The digests are IDENTICAL on Bun — the default `bunSha256Bytes()` and this
+   * app's noble one agree byte for byte (that is what `hash.test.ts` proves) —
+   * so no assertion on an upload's result can tell the two apart. The property
+   * that actually matters is "this hasher does not come from `globalThis.Bun`",
+   * and on Bun identity is the only way to observe it. On Hermes the default is
+   * `undefined` and the difference is a thrown `attachImage`, so this pins the
+   * one code path where that default would be taken.
+   */
+  test("the client the app builds carries the noble hasher, NOT Bun's default (mutation: delete `...APP_CLIENT_OPTIONS` → red)", async () => {
+    await withDaemon("good", async (url) => {
+      const link = await openComputer(record(url, "good"), { WebSocket: RNShapedWebSocket });
+      try {
+        const wired = (link.client as unknown as { sha256Bytes?: unknown }).sha256Bytes;
+        expect(wired).toBe(sha256Hex);
+      } finally {
+        await link.close();
+      }
     });
   });
 });
