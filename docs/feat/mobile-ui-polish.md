@@ -873,3 +873,31 @@ bun run e2e:mobile --ios 18`, then the screenshot pass.
 *— claude-opus-5-5, 2026-11-14* (same model as the executor/planner, fresh context only — shared blind spots possible)
 
 **Screenshots (orchestrator, binding):** every slice ends by saving simulator screenshots of each screen it touched, light AND dark, as PNG under `/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/slice-<n>/` (`<screen>-light.png`, `<screen>-dark.png`; Slice 0 also `<bug>-before.png`/`-after.png`). A fresh Fable visual review gates the merge of every slice against the mockups and the quality bar.
+
+### Slices 1–2 — adversarial review (fresh context)
+
+**Verdict: REQUEST-CHANGES (merge-gating, no code defect found in the logic).** Scope: `git diff main...HEAD`, Slices 1–2 only.
+
+**Gate (re-run):** touched tests (`theme`, `computer-status`, `scan-session-wiring`, `e2e-flows`) 103 pass / 0 fail · `bun run typecheck` clean · `bun run lint` 1393 files, 0 issues. Full `bun test` not re-run (Execution reports 10022 pass / 4 opt-in skip).
+
+**Findings (HIGH/MEDIUM):**
+1. **MEDIUM — Owner decision 4 not met: icons are still Unicode glyphs.** `apps/mobile/src/ui/Icon.tsx:48-66` draws `☰ ▭ ⌨ ⌗ ☺ ⊘ ◷ ⚡︎ ⌫ …` for every non-chrome icon; the Computers screen uses three of them on every view (`slider.horizontal.3`, `laptopcomputer`, `folder`, `qrcode.viewfinder`: `ComputersScreen.tsx`). Failure scenario: the owner opens the app and sees the same "strange characters" class they reported (B3, Context) and the Design's "replaces every emoji/Unicode glyph" is false; no `expo-blur` either. Executor flagged it as BLOCKED (network); merge needs `expo install expo-symbols expo-haptics expo-clipboard expo-blur` + `SymbolView`/`BlurView` wiring + dev-client rebuild.
+2. **MEDIUM — no executed evidence for the restyle or the changed flow.** No screenshots in `.tentacle/tmp/mobile-ui/slice-1|slice-2/`, no Fable visual review (orchestrator's binding gate), and flow `16-remove-computer.yaml` (now taps `computer-menu-<id>` → in-app `Modal`) plus pairing flows 12/13/20 were never run on the new layout. Failure scenario: a Modal/XCUITest visibility or layout problem (e.g. Pair's sheet under the keyboard, `pair-back` in a scroll view) ships behind a green unit suite. Precondition: `E2E_ONLY_FLOWS=15-revoked,16-remove-computer,12-pair-declined,13-pair-expired,20-camera-close bun run e2e:mobile --ios 18` green, then the light/dark screenshot pass.
+
+**Mutations (each run, then restored from a scratch copy; `git status` clean):**
+| Mutation | Caught by |
+|---|---|
+| `computerStatus`: `unreachable` → `attention` tone | "an unreachable one is Offline (ring)…" |
+| dark `accent` → `#0E7490` | 7 dark `accent on … ≥ 4.5:1` cases |
+
+**Attacks tried:**
+- *testID contract*: every `pair-*`/`computer-*`/`open-settings` id referenced by `e2e/flows` exists in the new screens; `pair-may-still-ask` moved to the Banner body (no flow asserts it). Holds.
+- *Menu → confirmation*: `ComputersRoute` sets `menu=undefined` + `removing=row` in one batch, so the single `ActionSheet` `Modal` stays visible (no dismiss/present race); Pair again from the menu is a stack push, not a modal presentation. Holds.
+- *`computer-state-<id>-<state>` render gate* now `status.detail !== undefined`: every non-ok row has a non-empty `status` (`computer-rows.ts:58,88`). Holds.
+- *Alias regression on unrestyled screens*: aliases are built from the new tokens; `running`/`badgeText` = `accent`/`onAccent` (dark `#22D3EE` on `#00191F`, high contrast); Slice 0's B4 (`groupedBackground` ≠ `card`) still holds. Holds.
+- *Failure dead end*: a `retry: "no"` failure on a root Pair screen has no button — same as `main`, not a regression.
+- *§7*: no protocol/persistence/daemon touch; decisions (`computerStatus`, `menuActions`, `sasGroups`) in a pure tested module; screens render. Holds.
+
+**Executor behaviour:** honest — the blocked add-ons and unrun simulator work are stated plainly; the `revoked` → inline "Pair again" drift is justified by `computer-rows.ts` and flow 15.
+
+*— claude-opus-5-5, 2026-11-14* (same model as the executor, fresh context only — shared blind spots possible)
