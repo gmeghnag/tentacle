@@ -1445,3 +1445,16 @@ this branch) covers the relay's user-visible surface.
 `relay-link.test.ts` against R2's server, which needs this slice merged first.
 What is proved here is the property R4 depends on: the device path runs on any
 `DuplexChannel` and every outcome frees the caller's slot exactly once.
+
+## Review
+
+### R3 — adversarial review — *— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES.** Same model as R3's executor (fresh context only): shared blind spots may survive both passes.
+
+1. **HIGH — F22 regression on the direct `/e2e` route** (`packages/daemon/src/device-accept.ts:125-133`, `packages/daemon/src/ws-server.ts:379-396`). `ws-server` now wires `release()` into `pending` and `ws.data.release` *before* the handshake resolves. The socket's `close` handler (`ws-server.ts:346-348`) calls both, which latches `released = true` in `teardown()` while `built` is still undefined. When the responder then resolves (the F22 gap), the build registers the handle, `isClosed()` is true, `handle.close()` runs, and `teardown()` is a **no-op**. The authority keeps a dead handle forever. For a pairing peer, `stopWatcher` is never cleared: an unref'd interval logs `pairing-closed` and calls `handle.close()` every second for the process's life. The old code unregistered explicitly on this path, so the slice's "no behaviour change" claim is false. Repro (`.tentacle/tmp/mobile-relay/f22-release.test.ts`): the branch's F22 harness plus one `release()` at the confirm, which is the close handler's order → `Expected: 0 / Received: 1` (`authority.liveCount()`). Without that `release()` → 0.
+2. **MEDIUM — the F22 test is vacuous for the real caller** (`packages/daemon/test/device-accept.test.ts:317-333`). It never calls `release()` before the resolve, so it cannot catch finding 1. Fix: `teardown` latches only once something is built (or the F22 path unregisters unconditionally). The test must call `release()` in the gap, with a pairing variant that asserts the watcher stopped. Show it red on the current code.
+
+**Gate:** touched files (`device-accept`, `ws-device-slot-once`, `ws-device-route`, `ws-server`, `device-authority`, `pairing-handler`) **81 pass / 1 skip / 0 fail**. `bun run lint`: clean (1307 files). `bun run typecheck`: clean. I did not re-run the full suite.
+**Attacks tried:** (a) release-before-resolve ordering → finding 1. (b) The limiter slot ending twice under close + reject: `endSlot` guards it, and the executor recorded mutation 6. My own re-mutation was blocked by tool permissions and was not repeated. (c) The no-identity path: `onSettled` runs synchronously, and the pending entry is deleted through `endSlot`. Holds. (d) §7 one session path / single broker: `Connection` is built unchanged on the resolved channel, with no second auth path and no broker touched. Holds. (e) Protocol: no schema touched. Holds.
+**Executor behaviour:** careful and honest about its drift (the slot once-guard). But its F22 test models the channel, not the caller's teardown order, which is exactly where the extraction changed behaviour.
