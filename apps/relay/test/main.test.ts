@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { parseRelayArgs, relayUsage } from "../src/main.ts";
+import { apnsSetupOf, parseRelayArgs, relayUsage } from "../src/main.ts";
 import { RELAY_LIMITS } from "../src/relay-core.ts";
-import { DEFAULT_RELAY_HOST, DEFAULT_RELAY_PORT } from "../src/server.ts";
+import { DEFAULT_RELAY_HOST, DEFAULT_RELAY_PORT, limitsFromFlags } from "../src/server.ts";
 
 describe("parseRelayArgs — flags", () => {
   test("no arguments: the deploy defaults (loopback, the R7 port)", () => {
@@ -12,6 +12,7 @@ describe("parseRelayArgs — flags", () => {
         host: DEFAULT_RELAY_HOST,
         port: DEFAULT_RELAY_PORT,
         limits: {},
+        apns: {},
         help: false,
       },
     });
@@ -48,6 +49,7 @@ describe("parseRelayArgs — flags", () => {
           "max-ids": 8,
           "max-hellos-per-minute": 9,
         },
+        apns: {},
         help: false,
       },
     });
@@ -95,6 +97,7 @@ describe("parseRelayArgs — env (a flag wins)", () => {
         host: "10.0.0.1",
         port: 9999,
         limits: { "max-streams-per-id": 3 },
+        apns: {},
         help: false,
       },
     });
@@ -124,6 +127,174 @@ describe("parseRelayArgs — env (a flag wins)", () => {
   });
 });
 
+describe("parseRelayArgs — the APNs key (push is off without it)", () => {
+  test("all four --apns-* flags parse into `args.apns`", () => {
+    const parsed = parseRelayArgs([
+      "--apns-key-file",
+      "/etc/tentacle/AuthKey.p8",
+      "--apns-key-id",
+      "ABC123DEFG",
+      "--apns-team-id",
+      "TEAM123456",
+      "--apns-topic",
+      "so.tentacle.app",
+    ]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.args.apns).toEqual({
+        keyFile: "/etc/tentacle/AuthKey.p8",
+        keyId: "ABC123DEFG",
+        teamId: "TEAM123456",
+        topic: "so.tentacle.app",
+      });
+    }
+  });
+
+  test("no APNs value at all: push is simply off, and that is not an error", () => {
+    const parsed = parseRelayArgs([]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.args.apns).toEqual({});
+    }
+  });
+
+  test("the environment is read, and a flag wins over it", () => {
+    const fromEnv = parseRelayArgs([], {
+      TENTACLE_RELAY_APNS_KEY_FILE: "/env.p8",
+      TENTACLE_RELAY_APNS_TOPIC: "so.env.app",
+    });
+    expect(fromEnv.ok).toBe(true);
+    if (fromEnv.ok) {
+      expect(fromEnv.args.apns).toEqual({ keyFile: "/env.p8", topic: "so.env.app" });
+    }
+    const overridden = parseRelayArgs(["--apns-topic", "so.flag.app"], {
+      TENTACLE_RELAY_APNS_TOPIC: "so.env.app",
+    });
+    expect(overridden.ok).toBe(true);
+    if (overridden.ok) {
+      expect(overridden.args.apns.topic).toBe("so.flag.app");
+    }
+  });
+
+  test("an --apns-* flag with no value is a refusal, naming it", () => {
+    // A silently ignored key path is a relay that thinks it has push and does not.
+    for (const flag of ["--apns-key-file", "--apns-key-id", "--apns-team-id", "--apns-topic"]) {
+      expect(parseRelayArgs([flag])).toEqual({ ok: false, error: `${flag} needs a value` });
+      expect(parseRelayArgs([flag, " "])).toEqual({ ok: false, error: `${flag} needs a value` });
+    }
+  });
+
+  test("the new push limit flags parse like the others", () => {
+    const parsed = parseRelayArgs([
+      "--max-pushes-per-minute",
+      "11",
+      "--max-pushes-per-token-per-minute",
+      "12",
+    ]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.args.limits).toEqual({
+        "max-pushes-per-minute": 11,
+        "max-pushes-per-token-per-minute": 12,
+      });
+      expect(limitsFromFlags(parsed.args.limits)).toEqual({
+        pushesPerMinutePerId: 11,
+        pushesPerMinutePerToken: 12,
+      });
+    }
+    expect(parseRelayArgs(["--max-pushes-per-minute", "0"]).ok).toBe(false);
+  });
+});
+
+describe("apnsSetupOf — a key decides whether the relay carries push", () => {
+  /** A real P-256 PKCS#8 private key in PEM armour, as a `.p8` file holds it. */
+  async function pem(): Promise<string> {
+    const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
+      "sign",
+    ]);
+    const der = new Uint8Array(await crypto.subtle.exportKey("pkcs8", pair.privateKey));
+    const lines =
+      Buffer.from(der)
+        .toString("base64")
+        .match(/.{1,64}/g) ?? [];
+    return `-----BEGIN PRIVATE KEY-----\n${lines.join("\n")}\n-----END PRIVATE KEY-----\n`;
+  }
+
+  const CONFIG = {
+    keyFile: "/etc/tentacle/AuthKey.p8",
+    keyId: "ABC123DEFG",
+    teamId: "TEAM123456",
+    topic: "so.tentacle.app",
+  };
+
+  test("no key → no push, and the line says so without failing the relay", async () => {
+    const lines: string[] = [];
+    expect(await apnsSetupOf({}, (line) => lines.push(line))).toBeUndefined();
+    expect(lines.join("\n")).toContain("push off");
+    // The relay still starts: phone reachability must not depend on Apple's key.
+    expect(lines.join("\n")).toContain("no --apns-key-file");
+  });
+
+  test("an unreadable key → no push, one line, and the message names the FILE problem", async () => {
+    const lines: string[] = [];
+    const setup = await apnsSetupOf(
+      { ...CONFIG },
+      (line) => lines.push(line),
+      () => {
+        throw new Error("EACCES: permission denied");
+      },
+    );
+    expect(setup).toBeUndefined();
+    expect(lines.join("\n")).toContain("push off");
+    expect(lines.join("\n")).toContain("unreadable");
+    // Nothing from the key's contents is ever logged.
+    expect(lines.join("\n")).not.toContain("PRIVATE KEY");
+  });
+
+  test("a readable key → the delivery path, one line that names no key material", async () => {
+    const lines: string[] = [];
+    const text = await pem();
+    const setup = await apnsSetupOf(
+      { ...CONFIG },
+      (line) => lines.push(line),
+      () => text,
+    );
+    expect(setup).toBeDefined();
+    expect(setup?.topic).toBe(CONFIG.topic);
+    expect(setup?.client.send).toBeFunction();
+    const joined = lines.join("\n");
+    expect(joined).toContain("push on");
+    expect(joined).toContain(CONFIG.keyId);
+    expect(joined).not.toContain("PRIVATE KEY");
+    expect(joined).not.toContain(text.slice(30, 60));
+    setup?.client.close();
+  });
+
+  test("a PEM that is not a P-256 PKCS#8 key → no push (never a relay that crashes)", async () => {
+    const lines: string[] = [];
+    const notAKey = `-----BEGIN PRIVATE KEY-----\n${Buffer.from("not a key").toString("base64")}\n-----END PRIVATE KEY-----\n`;
+    const setup = await apnsSetupOf(
+      { ...CONFIG },
+      (line) => lines.push(line),
+      () => notAKey,
+    );
+    expect(setup).toBeUndefined();
+    expect(lines.join("\n")).toContain("push off");
+  });
+
+  test("a half-configured key (no topic) → no push, naming the rule", async () => {
+    const lines: string[] = [];
+    const text = await pem();
+    const setup = await apnsSetupOf(
+      { keyFile: CONFIG.keyFile, keyId: CONFIG.keyId, teamId: CONFIG.teamId },
+      (line) => lines.push(line),
+      () => text,
+    );
+    expect(setup).toBeUndefined();
+    expect(lines.join("\n")).toContain("apns-topic");
+  });
+});
+
 describe("relayUsage", () => {
   test("the help text names every flag and the real defaults (no stale numbers)", () => {
     const usage = relayUsage();
@@ -137,8 +308,23 @@ describe("relayUsage", () => {
       String(RELAY_LIMITS.streamsPerId),
       String(RELAY_LIMITS.registeredIds),
       String(RELAY_LIMITS.hellosPerMinutePerIp),
+      String(RELAY_LIMITS.pushesPerMinutePerId),
+      String(RELAY_LIMITS.pushesPerMinutePerToken),
     ]) {
       expect(usage).toContain(value);
+    }
+    // Every APNs flag this build parses is documented, and the env names too.
+    for (const flag of [
+      "--apns-key-file",
+      "--apns-key-id",
+      "--apns-team-id",
+      "--apns-topic",
+      "--max-pushes-per-minute",
+      "--max-pushes-per-token-per-minute",
+      "TENTACLE_RELAY_APNS_KEY_FILE",
+      "TENTACLE_RELAY_APNS_TOPIC",
+    ]) {
+      expect(usage).toContain(flag);
     }
   });
 });

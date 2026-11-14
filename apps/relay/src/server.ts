@@ -25,10 +25,13 @@ import {
   RELAY_CONTROL_LIMITS,
   RELAY_PROTOCOL_VERSION,
   RelayDaemonFrameSchema,
+  type RelayPushFrame,
   type RelayToDaemonFrame,
   isInboundFrameTooLarge,
   isRelayId,
 } from "@tentacle/protocol";
+import type { ApnsClient } from "./apns-client.ts";
+import { type ApnsJwtSource, apnsPayloadBytesOf } from "./apns.ts";
 import {
   RELAY_CLOSE_REFUSED,
   RelayCore,
@@ -57,6 +60,19 @@ export interface RelayServerOptions {
   readonly onLog?: (line: string) => void;
   readonly sweepMs?: number;
   readonly idleTimeoutSec?: number;
+  /**
+   * The APNs delivery path, present only when the relay started with a readable
+   * APNs key (docs/feat/mobile-push.md Design 4, C1). Absent = the relay announces
+   * no `"push"` feature and refuses a `push` frame, so an unconfigured relay can
+   * never accept a push it would silently drop (F4).
+   */
+  readonly apns?:
+    | {
+        readonly client: ApnsClient;
+        readonly jwtSource: ApnsJwtSource;
+        readonly topic: string;
+      }
+    | undefined;
 }
 
 export interface RunningRelay {
@@ -171,6 +187,9 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
     ...(options.now ? { now: options.now } : {}),
     ...(options.mintToken ? { mintToken: options.mintToken } : {}),
     ...(options.limits ? { limits: options.limits } : {}),
+    // `"push"` is announced only when the delivery path exists: a daemon sends a
+    // `push` frame only to a relay that said so (C1).
+    features: options.apns === undefined ? [] : ["push"],
   });
 
   let counter = 0;
@@ -392,6 +411,10 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
       send(key, { t: "pong" });
       return;
     }
+    if (parsed.t === "push") {
+      onPush(ws, parsed);
+      return;
+    }
     if (parsed.t !== "hello") {
       // `accept` belongs on `/v1/accept` (which carries no other frame): a frame
       // on the wrong socket is a client bug, and closing names it.
@@ -412,6 +435,59 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
     }
     log(`ready ${logPrefix(decision.id ?? "")}`);
     apply(decision.effects);
+  }
+
+  /**
+   * A daemon's `push`: the core decides whether this socket may push (it must be
+   * registered) and whether the caps allow it; this delivers it through the APNs
+   * client and answers `push-result` with the same `n`.
+   *
+   * The answer goes to the socket that asked, always — including after a
+   * delivery that outlived the socket (a send on a closed socket is dropped by
+   * `send`, which is why a late answer cannot resurrect it). Pushes run
+   * CONCURRENTLY: one slow APNs request must not delay the next, and several are
+   * in flight at once by design (`n` correlates them).
+   */
+  function onPush(ws: RelaySocket, frame: RelayPushFrame): void {
+    const key = ws.data.key;
+    let payloadBytes: number;
+    try {
+      // The body is built HERE so the 4096-byte bound is checked before the core
+      // records anything: an oversized push is refused, never truncated.
+      payloadBytes = apnsPayloadBytesOf(frame.payload);
+    } catch {
+      log(`push-rejected ${logPrefix(key)} payload`);
+      apply([core.pushResult(key, { n: frame.n, status: "rejected", reason: "payload" })]);
+      return;
+    }
+    const decision = core.push({ socket: key, ...frame, payloadBytes });
+    if (!decision.ok) {
+      log(`push-refused ${logPrefix(key)} ${decision.status} ${decision.reason}`);
+      apply(decision.effects);
+      return;
+    }
+    const apns = options.apns;
+    if (apns === undefined) {
+      // Unreachable (the core refuses a push without the feature), kept honest.
+      apply([core.pushResult(key, { n: frame.n, status: "unavailable", reason: "no-push" })]);
+      return;
+    }
+    void apns.client.send(decision.request).then((outcome) => {
+      // No key, no JWT and no payload in this line: the token is an 8-char prefix,
+      // and the reason is Apple's own bounded word (Design 4).
+      log(
+        `push ${logPrefix(decision.request.token)} ${outcome.status}${
+          outcome.reason === undefined ? "" : ` ${outcome.reason}`
+        }`,
+      );
+      apply([
+        core.pushResult(key, {
+          n: decision.request.n,
+          status: outcome.status,
+          ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+        }),
+      ]);
+    });
   }
 
   /** The accept leg's first frame is the token; after that the socket is raw. */
@@ -472,6 +548,7 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
     },
     stop() {
       clearInterval(timer);
+      options.apns?.client.close();
       server.stop(true);
     },
   };
@@ -496,6 +573,8 @@ export const RELAY_LIMIT_FLAGS = [
   "max-streams-per-id",
   "max-ids",
   "max-hellos-per-minute",
+  "max-pushes-per-minute",
+  "max-pushes-per-token-per-minute",
 ] as const;
 
 export type RelayLimitFlag = (typeof RELAY_LIMIT_FLAGS)[number];
@@ -519,6 +598,12 @@ export function limitsFromFlags(
   }
   if (flags["max-hellos-per-minute"] !== undefined) {
     limits.hellosPerMinutePerIp = flags["max-hellos-per-minute"];
+  }
+  if (flags["max-pushes-per-minute"] !== undefined) {
+    limits.pushesPerMinutePerId = flags["max-pushes-per-minute"];
+  }
+  if (flags["max-pushes-per-token-per-minute"] !== undefined) {
+    limits.pushesPerMinutePerToken = flags["max-pushes-per-token-per-minute"];
   }
   return limits;
 }

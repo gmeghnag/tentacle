@@ -1121,3 +1121,174 @@ if P4's template differs in size that test must be re-derived against it.
 *Same model family as some earlier reviews, but a different family from the executor (DeepSeek).*
 
 *— claude-opus-5-5, 2026-11-14*
+
+## Execution
+
+### P4 — relay APNs (`apns.ts` + `apns-client.ts` + core limits + `push` handling) — DONE
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor, P4), 2026-11-14*
+
+**Load-bearing check, re-run first: PASS.** `.tentacle/tmp/mobile-push/p4-load-bearing.ts`
+(scratch, in this worktree) answers the three questions this slice stands on,
+before any edit:
+
+```
+Q1 push parses: true | push-result parses: true | RELAY_FEATURES: ["push"]
+Q2 ready: {"t":"ready","v":1,"id":"9TZTY3XSDgiwBf8BTxauNJ","features":[]} | after a push frame: closed 1008 | log: ["ready 9TZTY3XS","control-unexpected s1 push"]
+Q3 concurrent on one session: [200,200,200] sessions: 1
+Q3 410: 410 | 403: 403
+Q3 timeout: timeout
+Q3 request on a GOAWAY'd session: threw: New streams cannot be created after receiving a GOAWAY
+Q3 fresh session works: 200 | connects: 2
+```
+
+1. **P3 is really in the tree**: both frames parse, `RelayFeature` already
+   includes `"push"`. So P4 needed no protocol change at all — and
+   `packages/protocol/schema/protocol.json` is untouched (verified: `git diff`
+   on it is empty), so no `schema:export` was needed.
+2. **The capability is missing, as the plan says**: today's relay closes the
+   control socket on a `push` (`control-unexpected … push`, 1008) and announces
+   `features: []`. That close is this slice's red baseline: the new tests fail
+   on the old code by never seeing a `push-result`.
+3. **Bun's HTTP/2 client covers Design 4's needs**: concurrent streams on one
+   session, real `GOAWAY` (after which `request()` throws, so recovery must be
+   explicit), `410`/`403` bodies, and a working per-request deadline. This is
+   what makes `apns-client.ts` testable against a local h2c fake, with no TLS
+   and no secret.
+
+**Files (P4's list, nothing else).** `apps/relay/src/apns.ts` (new, pure);
+`apps/relay/src/apns-client.ts` (new, sockets); `apps/relay/src/relay-core.ts`
+(push limits + the `push` decision + `features`); `apps/relay/src/server.ts`
+(`apns` option, `features`, `push` handling, two limit flags);
+`apps/relay/src/main.ts` (four `--apns-*` flags + env, `apnsSetupOf`);
+`apps/relay/test/{apns,apns-client,server-push}.test.ts` (new, 63 tests);
+`apps/relay/test/main.test.ts` (extended: the flags, `apnsSetupOf`, the help
+text); `changelog.d/mobile-push-relay-apns.added.md` (new).
+
+**As built, in Design 4's order.**
+- `apns.ts` is pure and holds every decision: `APNS_APS_TEMPLATE` (the one
+  banner), `apnsPayloadOf` (which re-parses through P2's STRIP payload schema, so
+  a daemon's `aps` cannot reach a banner — belt *and* braces with the frame
+  schema), `apnsRequestOf`, `createApnsJwtSource` (ES256 via WebCrypto, 40-minute
+  cache, injected clock), `apnsOutcomeOf` (the whole status table),
+  `readApnsKeySource` / `decodeApnsKeyPem` (all four `--apns-*` values or none).
+- `apns-client.ts` is sockets only: one session per environment, lazily dialed,
+  retired on `goaway`/`close`/`error`, a 10 s deadline per request, `ExpiredProviderToken`
+  → invalidate + retry exactly once. `send` never throws.
+- `relay-core.ts`: `pushesPerMinutePerId: 120` / `pushesPerMinutePerToken: 30`
+  in `RELAY_LIMITS` (so a flag can override them), `push()` returning a
+  `PushDecision`, `pushResult()` building the frame, and per-id windows dropped in
+  `controlClosed`. A `push` from a socket with no `hello` is refused **and**
+  closed.
+- `server.ts`: the `apns` option is the *only* thing that puts `"push"` in
+  `ready.features`; a `push` frame measures its body (`apnsPayloadBytesOf`)
+  before the core's caps, delivers through the client, and answers on the socket
+  that asked. Delivery is `void`-dispatched, so pushes are concurrent and can
+  answer out of order.
+- `main.ts`: the four flags/env values, `--max-pushes-per-minute` /
+  `--max-pushes-per-token-per-minute`, and `apnsSetupOf`, which turns a key into
+  a delivery path or logs one `push off: …` line and starts **without** push.
+
+**Drift from the Implementation, and why.**
+1. **A refusal is a `push-result`, not a close — except before `hello`.** The
+   design says limits "refuse"; it does not say how. A cap refusal that closed
+   the socket would cost the daemon its reachability (and every other push in
+   flight) over one over-eager minute, so caps answer `throttled`, an
+   unconfigured relay answers `rejected`/`no-push`, and only the
+   pre-registration case closes (a socket that is not a daemon has no business
+   on the route).
+2. **`payloadBytes` is passed into the core.** The 4096-byte bound is the
+   relay's own ceiling on what it hands Apple, and it cannot be checked by a strip
+   schema (which bounds `c`'s length, not the assembled body). `server.ts`
+   measures and the core refuses, so the bound is one pure decision rather than
+   an `if` in the socket code.
+3. **Two extra pure helpers beyond the plan's list**: `apnsPayloadBytesOf`
+   (the measurement `server.ts` and the tests share) and `apnsSetupOf` in
+   `main.ts` (the key → path decision, async because importing the key is, and
+   injectable so "no key" and "unreadable key" are tests, not process spawns).
+4. **`readApnsKeySource` requires a reader to be injected.** A source built with
+   four values and no reader is an `error`, not a silent "pem with empty string":
+   the process passes `readFileSync`, a test passes a function.
+5. **`features` is an option on `RelayCore`, not a constant.** The relay build
+   announces `"push"` *iff* `startRelay` was given an `apns` path; a test can
+   build a core with `[]` to pin the "hand-written frame" refusal.
+
+**Red before green.** The new behaviour's red baseline is the load-bearing
+probe's Q2 (above): on the old code a `push` frame is closed 1008 and no
+`push-result` ever exists. Test-file-level red is recorded honestly as what it
+was: running the new `server-push.test.ts` against the old sources fails at the
+module boundary (`Cannot find module '../src/apns-client.ts'`), which §9 says is
+not a property-bearing red — so the property evidence is the mutation table
+below, each mutation applied to `src`, run against the narrow files, and restored
+from a scratch backup under `.tentacle/tmp/mobile-push/p4-mut-backup/` (**never**
+git). The restore check is the script's last step: `diff` against the backup is
+empty and the suite is green again.
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| M1 | JWT cache never expires (`&& true`) | **RED** "reused at 39 minutes…" |
+| M2 | JWT cache never reused (`if (false)`) | **RED** same |
+| M3 | `APNS_JWT_REUSE_MS` 60 min instead of 40 | **RED** same |
+| M4 | 410 → `rejected` instead of `gone` | **RED** "410 and a 400 BadDeviceToken… → gone" |
+| M5 | `ExpiredProviderToken` no longer asks for a retry | **RED** 3 (table + both client retry tests) |
+| M6 | the retry loops (a second request ignores `retry`) | **RED** "does not retry a third time" |
+| M7 | `aps` taken from the daemon's payload (no template) | **RED** 4 (incl. the `rm -rf` body test) |
+| M8 | topic hard-coded instead of from config | **RED** "the topic is the config's" |
+| M9 | a `push` before `hello` is allowed | **RED** 2 (refusal + close) |
+| M10 | per-token cap off by one | **RED** 2 |
+| M11 | per-id cap off by one | **RED** 2 |
+| M12 | the payload byte bound is not enforced | **RED** "the body's byte bound…" |
+| M13 | `features` always announce `"push"` | **RED** 2 (bare relay's `ready`, `no-push`) |
+| M14 | GOAWAY'd/closed/errored sessions are all reused **and** the state check is off (4 one-line edits together) | **RED** "GOAWAY → the next push dials a fresh session" |
+| M15 | timeout ignores the injected `timeoutMs` | **RED** "a hung request times out" |
+| M16 | the response body is read at header time | **RED** 4 (every reason-carrying outcome) |
+| M17 | the log line carries the whole token | **RED** "no log line carries…" |
+| M18 | the log line carries the sealed payload | **RED** same |
+| M19 | an unregistered socket's push is refused but not closed | **RED** 2 |
+| M20 | the push window is not dropped on unregister | **RED** "unregistering an id forgets its windows" |
+| M21 | half-configured APNs keys are accepted | **RED** 2 (pure + `apnsSetupOf`) |
+| M22 | an unreadable key file falls through | **RED** 2 |
+
+**M14 is the one honest gap, and it is stated rather than hidden.** The
+retirement is deliberately redundant (`goaway`, `close`, `error` handlers *and*
+`sessionFor`'s `closed`/`destroyed` re-check), so no SINGLE layer's removal makes
+the test red — I verified each in isolation (M14a: `goaway` handler off → 15/15
+survive; M14b: the state check off → 15/15 survive). Removing all of them
+together is RED. So the test pins "a GOAWAY'd client recovers", not "this
+particular line does it", which is the property Design 4 asks for; a reviewer
+wanting line-level pinning would have to accept a redundancy being tested by
+behaviour instead.
+
+**Failure modes covered by this slice.** F2/F3 (a hung or unreachable APNs →
+`unavailable`, never a throw into the frame loop), F4/C1 (`features` empty
+without a key, the frame refused), F5 (only the token prefix, Apple's own reason
+word and the three sizes reach a log — M17/M18), F10 (per-id + per-token caps,
+each with a status; a second id and a second token each have their own budget),
+F11 (`gone` on 410 / `BadDeviceToken` / `DeviceTokenNotForTopic`), F15 (JWT
+refreshed at 40 min and forced once on `ExpiredProviderToken`, never a storm),
+F19 (out-of-order `push-result`s), F25's analogue (an unreadable key is a relay
+that starts without push, not one that fails), a malformed frame or an
+out-of-range ttl is a close (the schema), and a `push` on a `/v1/accept` leg is
+still malformed there. F1/F8/F9's content boundary is pinned by M7: the banner
+is a constant.
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` → clean, exit 0.
+`bun run typecheck` (root + `apps/mobile` + `apps/relay`) → exit 0.
+`bun run lint` → `Checked 1377 files in 393ms. No fixes applied.` (baseline:
+clean, 0 errors / 0 warnings). `bun test` → **10000 pass, 4 skip, 0 fail**
+(10004 tests / 720 files); the 4 skips are the documented opt-ins, and this slice
+adds none. No wire change, so no `protocol.d/` note and no `PROTOCOL_VERSION`
+move; `protocol.json` untouched.
+
+**Not done, by instruction:** P5–P10 (`push-store.ts`, `push-rules.ts`,
+`push-notifier.ts`, the `HostedSession` hook, `relayLink.push`, `serve`'s config,
+the app, the Maestro flow and the runbook) are untouched. In particular the
+daemon side that *sends* `push` frames, and the end-to-end test that proves a
+sealed envelope reaches this fake APNs through the relay link, are P7/P8's.
+`--apns-*` in `apps/relay/deploy/relay.service` is P10's (the deploy test that
+pins ExecStart still passes, and correctly asserts no secret in argv).
+
+**Unverified:** real APNs (D2a + D2, owner-approved) — nothing here has talked to
+Apple. The transport facts it relies on are P0(b)'s sandbox probe and this
+slice's h2c fake; the `.p8` → WebCrypto import is proved with a generated key
+(`apnsSetupOf` test), not with an Apple-issued file.
