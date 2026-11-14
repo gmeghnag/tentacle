@@ -77,4 +77,25 @@ export type KeyEffect =
   | { readonly kind: "moveCommandSel"; readonly step: -1 | 1 }
   /** Run the highlighted palette command by NAME (the App resolves it). */
   | { readonly kind: "runCommand"; readonly name: string }
-  | { readonly kind: "pushNotice"; readonly text: string };
+  | { readonly kind: "pushNotice"; readonly text: string }
+  // --- the line-editing tail (S12, `line-layer.ts`): what a chunk every layer
+  // above passed does to the input line. Each is one call on the line editor
+  // or one App setter; the decision (which one, with what) is already taken.
+  | { readonly kind: "fieldInsert"; readonly text: string }
+  | { readonly kind: "fieldDeleteBack" }
+  | { readonly kind: "fieldDeleteWord"; readonly dir: -1 | 1 }
+  | { readonly kind: "fieldMoveCursor"; readonly delta: -1 | 1; readonly extend: boolean }
+  | { readonly kind: "fieldMoveWord"; readonly dir: -1 | 1; readonly extend: boolean }
+  | { readonly kind: "fieldMoveLine"; readonly edge: "start" | "end"; readonly extend: boolean }
+  | { readonly kind: "fieldMoveVertical"; readonly dir: -1 | 1; readonly extend: boolean }
+  /** Write the history walk's position and saved draft (the App's refs). */
+  | { readonly kind: "setHistoryCursor"; readonly index: number; readonly draft: string }
+  /** DOWN at the draft slot: onto the pill / back into the list (`downToDock`). */
+  | { readonly kind: "dockDown" }
+  /** PgUp / PgDn: scroll the transcript (`applyScroll` on the live offset). */
+  | { readonly kind: "scroll"; readonly dir: "pageUp" | "pageDown" }
+  /** Ctrl+V in the main input: read the clipboard, route it as an attachment. */
+  | { readonly kind: "pasteClipboard" }
+  | { readonly kind: "submit"; readonly text: string }
+  /** Backspace on an empty input with chips: drop the last chip. */
+  | { readonly kind: "removeLastChip" };
