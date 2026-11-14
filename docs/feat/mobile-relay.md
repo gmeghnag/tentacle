@@ -1458,3 +1458,128 @@ What is proved here is the property R4 depends on: the device path runs on any
 **Gate:** touched files (`device-accept`, `ws-device-slot-once`, `ws-device-route`, `ws-server`, `device-authority`, `pairing-handler`) **81 pass / 1 skip / 0 fail**. `bun run lint`: clean (1307 files). `bun run typecheck`: clean. I did not re-run the full suite.
 **Attacks tried:** (a) release-before-resolve ordering → finding 1. (b) The limiter slot ending twice under close + reject: `endSlot` guards it, and the executor recorded mutation 6. My own re-mutation was blocked by tool permissions and was not repeated. (c) The no-identity path: `onSettled` runs synchronously, and the pending entry is deleted through `endSlot`. Holds. (d) §7 one session path / single broker: `Connection` is built unchanged on the resolved channel, with no second auth path and no broker touched. Holds. (e) Protocol: no schema touched. Holds.
 **Executor behaviour:** careful and honest about its drift (the slot once-guard). But its F22 test models the channel, not the caller's teardown order, which is exactly where the extraction changed behaviour.
+
+## Execution
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-15*
+
+Both R3 findings fixed, at the one place the decision belongs (`device-accept`'s
+teardown), with the tests modelling the **caller's** order this time. Red before
+green per finding; both mutations pasted below, each run against the fix in place
+and then reverted (`shasum` back to `f01dddee…`).
+
+**Reproduced first** (scratch `.tentacle/tmp/mobile-relay/f22-release.ts` — the
+branch's F22 harness plus one `release()` at the confirm, which is
+`ws-server.ts:346-348`'s order, for a device peer AND a pairing peer):
+
+```
+before fix: {"scenario":"device","built":1,"settled":1,"liveAfterBuild":1,"pairingClosedLines80ms":0}
+            {"scenario":"pairing","built":1,"settled":1,"liveAfterBuild":0,"pairingClosedLines80ms":6}
+after  fix: {"scenario":"device","built":1,"settled":1,"liveAfterBuild":0,"pairingClosedLines80ms":0}
+            {"scenario":"pairing","built":1,"settled":1,"liveAfterBuild":0,"pairingClosedLines80ms":0}
+```
+
+The device line is the HIGH finding exactly (`authority.liveCount()` = 1 after the
+build closed a channel nobody could reach). The pairing line is its second half:
+the six `pairing-closed` audit lines in 80 ms at a 10 ms `pairingCheckMs` are the
+leaked interval still ticking after the window was gone.
+
+**F1 (HIGH) — `teardown` is idempotent, not latched.** `device-accept.ts:126-133`:
+the `released` flag (and my own first attempt, `releasedHandle`) is gone;
+`teardown` does its two pieces of work directly — clear the watcher stopper,
+`authority.unregister(built.id, built.handle)` — and both are naturally
+idempotent (`clearInterval` twice, `unregister` on a handle the set no longer
+holds, `device-authority.ts:193-202`), so a second call is a no-op with no flag.
+A latch cannot be repaired by latching later: `built` is `undefined` when the
+caller's early `release()` arrives, so *any* once-guard turns the F22 close-up
+into a no-op and leaves the handle registered. Dropping the guard is what
+restores the pre-extraction behaviour, which was exactly this shape (the old
+`openDevice` unregistered unconditionally on both paths and on the F22 path,
+`.tentacle/tmp/mobile-relay/openDevice-block.txt:118-129`). The `release()`
+doc-comment (`device-accept.ts:72-79`) no longer claims "before the handshake
+resolves it is a no-op" — it says what is true: the call does what exists at that
+moment and the build's F22 close-up does the rest.
+
+Why nothing else was needed: `stopWatcher` is assigned only at the build
+(`:201-209`), so an early `release()` finds nothing to stop, and the F22 branch
+runs `teardown()` right after registering — one call order in which the latch bit
+was the caller's (`release` first, resolve second), which is *every* real socket
+close in that gap.
+
+**F2 (MEDIUM) — the F22 test now models the caller.** `device-accept.test.ts`:
+the harness gained `releaseInGap` (it runs `release()` inside the wrapped
+`setOnMessage` at the confirm, the socket close handler's order) and
+`pairingCheckMs`; two tests were added beside the existing F22 one
+(`device-accept.test.ts:353`, `:370`):
+
+- `release() in the confirm→build gap still drops the handle the build registers
+  (R3 review 1)` — `releaseInGap + closeAfterConfirm`, asserts `built() === 1`
+  and `authority.liveCount() === 0`.
+- `a release() in the gap also stops the pairing watcher (R3 review 1)` — the
+  pairing peer (`key(7)` with an open window), then `closePairing` and 60 ms at
+  `pairingCheckMs: 5`; asserts **zero** `pairing-closed` audit lines. Without the
+  fix it records 10–11, so the assertion is on the watcher's survival, not on a
+  type or an import.
+
+Both were RED on the unfixed code before the edit (**9 pass / 2 fail**, pasted
+below), and the pairing one fails on `Expected length: 0 / Received length: 11`.
+
+**Red before green (the exact run, fix not yet applied):**
+
+```
+(fail) … release() in the confirm→build gap still drops the handle the build registers (R3 review 1)
+       Expected: 0 / Received: 1        (device-accept.test.ts:367)
+(fail) … a release() in the gap also stops the pairing watcher (R3 review 1)
+       Expected length: 0 / Received length: 11   (device-accept.test.ts:387)
+ 7 pass / 2 fail
+```
+
+**Mutation A — put the old latch back** (`if (latch) return; latch = true;` at the
+top of `teardown`): both new tests fail on their property, the pre-existing ones
+stay green — i.e. the new tests are exactly the ones that pin finding 1.
+
+```
+Expected: 0 / Received: 1
+(fail) … release() in the confirm→build gap still drops the handle the build registers (R3 review 1)
+Expected length: 0 / Received length: 10
+(fail) … a release() in the gap also stops the pairing watcher (R3 review 1)
+ 7 pass / 2 fail
+```
+
+**Mutation B — keep the F22 branch's `handle.close()` but drop its `teardown()`**
+(`void teardown;`): THREE fail — the pre-existing F22 test *and* both new ones —
+which proves the new tests are not redundant with the old one and that the gap
+close-up is what they ride on.
+
+```
+Expected: 0 / Received: 1   (fail) … a channel closed between the confirm and the build leaves no attached connection (F22)
+Expected: 0 / Received: 1   (fail) … release() in the confirm→build gap still drops the handle …
+Expected length: 0 / Received length: 10  (fail) … a release() in the gap also stops the pairing watcher …
+ 6 pass / 3 fail
+```
+
+Each mutation was reverted; `shasum packages/daemon/src/device-accept.ts` =
+`f01dddee5a1ddd826eee114fc7c91efe5c348244` before mutation A, after A, and after
+B. `git diff --stat` at the end: `device-accept.ts` +11/−10, `device-accept.test.ts`
++58/−1 — no other file touched, so `apps/relay`, the wire, and
+`protocol.json` are untouched (no `protocol.d` note needed).
+
+**Drift from the review's suggested fix:** none in substance. The review offered
+"`teardown` latches only once something is built (or the F22 path unregisters
+unconditionally)"; I took the second (strictly simpler, and the shape the
+pre-extraction code had). The first would also hold, but it keeps a flag whose
+only job is to skip an idempotent two-line body.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/relay --noEmit` clean ·
+`bun run lint` clean (1307 files, no fixes) · `bun test` **9416 pass / 3 skip / 0
+fail** (9419 tests, 677 files) — the 3 skips are the pre-existing opt-ins
+(live-k8s, live-docker, real-socket keepalive), no new skip. The six touched
+daemon test files: 83 pass / 1 skip / 0 fail. No `changelog.d` fragment: this is
+a fix to unshipped R3 code on the same branch, before any release, and
+`changelog.d/mobile-relay.added.md` already covers the relay's user-visible
+surface. No `protocol.d` note: no wire or schema change.
+
+**Not verified:** the real Bun-socket shape of the gap (a `close` event landing
+between the confirm and the resolve) is driven here by the harness's
+`setOnMessage` hook and by the scratch repro, not by a live socket closing at that
+instant; `ws-device-route` passes unchanged, which is the closest existing proof.

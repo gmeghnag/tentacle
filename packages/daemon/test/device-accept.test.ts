@@ -20,7 +20,14 @@ import {
 } from "@tentacle/transport/noise";
 import { acceptDevice } from "../src/device-accept.ts";
 import { DeviceAuthority } from "../src/device-authority.ts";
-import { addDevice, loadOrCreateIdentity, readIdentity, readSeen } from "../src/device-store.ts";
+import {
+  addDevice,
+  closePairing,
+  loadOrCreateIdentity,
+  openPairing,
+  readIdentity,
+  readSeen,
+} from "../src/device-store.ts";
 import { SessionHost } from "../src/session-host.ts";
 
 const dirs: string[] = [];
@@ -78,7 +85,10 @@ interface Harness {
   readonly release: () => void;
 }
 
-function acceptOn(configDir: string, options: { closeAfterConfirm?: boolean } = {}): Harness {
+function acceptOn(
+  configDir: string,
+  options: { closeAfterConfirm?: boolean; releaseInGap?: boolean; pairingCheckMs?: number } = {},
+): Harness {
   const audit: string[] = [];
   const authority = authorityFor(configDir, audit);
   const [daemon, phone] = createChannelPair();
@@ -86,6 +96,9 @@ function acceptOn(configDir: string, options: { closeAfterConfirm?: boolean } = 
   let built = 0;
   let closed = false;
   let inbound = 0;
+  // `release()` as the CALLER holds it: the socket's `close` handler runs it
+  // (ws-server.ts:346-348), which is before the responder's resolve.
+  let release: () => void = () => {};
   const pair = phone;
   // The daemon end's close must be observable to the F22 check, exactly as the
   // socket wrapper's `isClosed()` is.
@@ -105,6 +118,9 @@ function acceptOn(configDir: string, options: { closeAfterConfirm?: boolean } = 
         if (options.closeAfterConfirm === true && inbound === 2) {
           closed = true;
         }
+        if (options.releaseInGap === true && inbound === 2) {
+          release();
+        }
       }),
     setOnClose: (h) =>
       daemon.setOnClose(() => {
@@ -123,7 +139,9 @@ function acceptOn(configDir: string, options: { closeAfterConfirm?: boolean } = 
     onConnection: () => {
       built += 1;
     },
+    ...(options.pairingCheckMs !== undefined ? { pairingCheckMs: options.pairingCheckMs } : {}),
   });
+  release = accepted.release;
   return {
     phone: pair,
     settled: () => settled,
@@ -330,5 +348,50 @@ describe("every outcome settles exactly once (the caller's slot)", () => {
     await tick(60);
     expect(h.built()).toBe(1);
     expect(h.authority.liveCount()).toBe(0);
+  });
+
+  test("release() in the confirm→build gap still drops the handle the build registers (R3 review 1)", async () => {
+    // The CALLER's order, which is what the extraction changed: the socket's
+    // close handler runs `release()` (ws-server.ts) BEFORE the responder
+    // resolves. Latching the teardown on that first call makes the F22 path a
+    // no-op, and the authority then keeps a dead handle forever.
+    const configDir = store();
+    const identity = readIdentity(configDir);
+    if (!identity.ok) throw new Error(identity.reason);
+    addDevice(configDir, { publicKey: publicKeyOf(key(2)), name: "iPhone", now: 2_000 });
+    const h = acceptOn(configDir, { releaseInGap: true, closeAfterConfirm: true });
+    const peer = await connect(h.phone, key(2), identity.identity.publicKey);
+    peer.close();
+    await tick(60);
+    expect(h.built()).toBe(1);
+    expect(h.authority.liveCount()).toBe(0);
+  });
+
+  test("a release() in the gap also stops the pairing watcher (R3 review 1)", async () => {
+    // The pairing variant of the same order, on its own property: a leaked
+    // watcher keeps an interval that audits `pairing-closed` and calls
+    // `handle.close()` every tick for the process's life.
+    const configDir = store();
+    const identity = readIdentity(configDir);
+    if (!identity.ok) throw new Error(identity.reason);
+    const opened = openPairing(configDir, {
+      code: "K7M2QX9AB3",
+      now: Date.now(),
+      pid: process.pid,
+    });
+    if (!opened.ok) throw new Error(opened.reason);
+    const h = acceptOn(configDir, {
+      releaseInGap: true,
+      closeAfterConfirm: true,
+      pairingCheckMs: 5,
+    });
+    const peer = await connect(h.phone, key(7), identity.identity.publicKey);
+    peer.close();
+    await tick(60);
+    expect(h.built()).toBe(1);
+    // The window goes away (pair's exit handler): only a live watcher reacts.
+    closePairing(configDir, opened.session.sid);
+    await tick(60);
+    expect(h.audit.filter((line) => line === "pairing-closed")).toHaveLength(0);
   });
 });

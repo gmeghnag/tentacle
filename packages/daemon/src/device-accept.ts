@@ -71,9 +71,11 @@ export interface AcceptDeviceDeps {
 export interface DeviceAccept {
   /**
    * Teardown once the transport is gone: stop the pairing watcher and drop the
-   * authority's handle, so a later revoke cannot touch this connection. Safe to
-   * call at any time and more than once (before the handshake resolves it is a
-   * no-op; `onSettled` is what ends the slot then).
+   * authority's handle, so a later revoke cannot touch this connection, and so
+   * nothing (a timer included) outlives the transport. Safe to call at any time
+   * and more than once: the work is idempotent, but it is not a latch — a call
+   * made BEFORE the handshake resolves only does what exists at that moment,
+   * and the F22 close-up at the build does the rest (R3 review 1).
    */
   release(): void;
 }
@@ -113,13 +115,16 @@ export function acceptDevice(channel: DuplexChannel, deps: AcceptDeviceDeps): De
   let admitted: DeviceAllow | undefined;
   // Set only for a pairing connection: its window watcher's stopper.
   let stopWatcher: (() => void) | undefined;
-  // Set once the teardown ran (the F22 path or a `release()`): both are the
-  // same work, and neither may run twice.
-  let released = false;
+  // The teardown's work is IDEMPOTENT (clearing an already-cleared stopper,
+  // unregistering a handle the authority's set no longer holds), so it needs no
+  // once-latch: a latch would be wrong here, because a `release()` that arrives
+  // BEFORE the handshake resolves (the caller's socket `close` handler does
+  // exactly that) would then swallow the later F22 close-up, and the handle the
+  // build registers would be unregistered by nobody — the authority would keep
+  // a dead handle for the process's life, and a pairing watcher would keep
+  // auditing `pairing-closed` every tick (R3 review 1).
   let built: { connection: Connection; handle: DeviceClose; id?: string } | undefined;
   const teardown = (): void => {
-    if (released) return;
-    released = true;
     stopWatcher?.();
     stopWatcher = undefined;
     if (built?.id !== undefined) {
