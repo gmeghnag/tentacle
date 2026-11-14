@@ -1747,3 +1747,33 @@ run, re-attached by a hop target" (the tool is then absent for the session's
 life), which would need a host-level re-open to change; noted, not fixed.
 
 *— claude-opus-5-5, 2026-11-14*
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; reviewing commit `52995b84`, `git diff HEAD~1`)
+
+**Verdict: REQUEST-CHANGES.**
+
+Gate: `bun run typecheck` → 0. `bun run lint` → 1248 files, clean. `bun test packages/cli/test` → 2355 pass / 0 fail. `bun test` on daemon + client + protocol + tui → 3993 pass / 1 skip / 0 fail. Every mutation was reverted, and `git status` was clean afterwards.
+
+| R1 finding | mutation | result | verdict |
+|---|---|---|---|
+| 1 pod offers the tool to `run`/`attach` | `serve.ts:757,768` → always `moveSession` | 1 fail (`move-session-pod-capability`) | fixed (daemon side) |
+| 1 | `connection.ts:603` `this.hop = false` | 1 fail | fixed |
+| 1 | drop `hop: true` from both hop targets (`hop-targets.ts`, container + attach) | **0 fail** (cli 2355 pass) | laptop side not pinned |
+| 2 two prompts | `hop-targets.ts:230` re-ask ignoring `gateAnswered` | 1 fail (`session-hop-targets`) | **not fixed in production** (below) |
+| 3 prompt mount ≠ build mount | `hopPromptFacts` endpoint dropped | 2 fail (`hop-prompt-facts`) | fixed: one `containerPlan` |
+| 4 App path not tested | drop `hopTurn?.event` (`useTurnDriver.ts:571`) | 2 fail (`hop-proposal-app`) | fixed |
+
+1. **MEDIUM: finding 2 is still live in the real binary.** The production `build` in `main.ts:2096-2105` is `(spec, sharedPair, sessionId) => createHopTargets({...})(spec, sessionId)`. It never forwards the new 4th argument `opts`. TypeScript accepts a lambda with fewer parameters, so this compiles silently. As a result `gateAnswered` never reaches `containerTarget`, and an approved proposal with a gate `ask` still raises the second `mountAsk` prompt. The test calls `createHopTargets` directly, so it does not cover this path. Fix: forward `opts`, and pin it through `main`'s wiring, or extract the build lambda so it can be tested.
+2. **MEDIUM (test coverage, §9): the laptop half of the hop capability is not pinned.** If the hop targets stop passing `hop: true`, no test fails. The `engine-runtime` → `createLocalRuntime` → `initialize` chain has no test either. The tool would silently disappear on every hop target, so the fix is unprotected against a regression.
+
+**Regressions checked:**
+- `clientCapabilities.hop` is an optional field on a strip schema. That is additive, so no `protocol.d/` note is needed (§7: fields are free). An older daemon drops it, which is the safe direction.
+- A settings sync keeps `hosted.hop`.
+- `gateWarnings` in `HopPromptFacts` is dead (never set). That is a nit.
+- One more pass: proceed-warnings also set `gate`, so `gateAnswered` becomes true. That is harmless: a `proceed` gate never asks.
+
+**Unverified:** a session created by a hop TUI (`hop: true`) and later joined by a plain `tentacle attach` TUI keeps the tool, and that TUI has no feed to ask through. This only matters if a hop container's daemon is resident (sessions outliving the exec). To verify: check whether `startEngineRuntime`'s container daemon is the resident one.
+
+**How the executor behaved:** it addressed all four findings with real tests (3 of 4 tests kill their mutation). It missed the one wiring line that carries fix 2 into the real `main`, which is the same "proven on a seam, not on the real path" pattern as round 1.
