@@ -707,6 +707,34 @@ slow socket), 0 fail.
 
 ## Review
 
-*— (pending)*
+### Slice 0 — adversarial review (fresh context)
+
+**Verdict: APPROVE (code), merge gated on finding 1.** Scope: `git diff main...HEAD`, Slice 0 only.
+
+**Gate (re-run):** `bun test` 9946 pass · 4 skip (opt-in) · 0 fail · `bun run typecheck` clean · `bun run lint` 1377 files, 0 issues. Touched files: 102 pass / 0 fail.
+
+**Findings (HIGH/MEDIUM):**
+1. **MEDIUM — B1/B2 have no executed evidence.** `apps/mobile/e2e/flows/23-composer-keyboard.yaml` was never run red (on `fcd9138f`) or green, and no `slice-0/*-before/after.png` exist. The B1 fix (`SessionScreen.tsx` `measureInWindow` → `keyboardVerticalOffset`, `composerBottomPadding`) and B2 (`submitBehavior="submit"` on a `multiline` input, RN 0.88/iOS) are correct by reading but unobserved. Failure scenario: if the onLayout-time `measureInWindow` y or `submitBehavior` behaves differently on device, the owner's two reported bugs ship unfixed with a green unit suite. Precondition for merge: `E2E_ONLY_FLOWS=23-composer-keyboard bun run e2e:mobile --ios 18` (+ `--ios 26`) green on HEAD and red on `fcd9138f`, plus the screenshots (§9, the orchestrator's screenshot rule).
+
+**Mutations (each run, then reverted; tree byte-identical via `cmp` to a scratch copy, `git status` clean):**
+| Mutation | Caught by |
+|---|---|
+| `markdown.ts` codespan without `decodeEntities` | "a code span shows the characters" |
+| `pressReturn` gate → `kind !== "none"` (lets `stop` through) | "Return on an empty field while a turn runs never stops it" |
+| `ansi.ts` OSC: drop the `ESC \` terminator | "OSC hyperlinks are removed, BEL- and ST-terminated" |
+
+**Attacks tried:**
+- *Parity drift*: `tool-summary.ts` `subtitleOf` vs `render-lines.ts:562-610` — identical case for case; every built-in tool name in `packages/tools/src` is covered (unknown/MCP tools show raw args, same as the TUI — by design).
+- *Entity decoding end-to-end* (scratch `md.ts`): link text, link href with `&` (href stays raw, not double-escaped), heading, table cell with code span, quote, list, `\*`/`\<` escapes, bold/em/del — all show the literal characters.
+- *Return races*: gate reads `view()` at call time like `press()` (`session-screen-controller.ts:637-643`), so a stale rendered `send` cannot become a Stop — holds; pinned by the mutation above.
+- *B4 coverage*: every `Text` in `Markdown.tsx` has a colour either directly or inherited from a coloured paragraph/heading/code/table parent; inline code in the user bubble uses `groupedBackground` ≠ `card`.
+- *§7*: no protocol/persistence/daemon touch; decisions in pure modules (`returnKeyAction`, `composerBottomPadding`, `toolSummary`, `decodeEntities`, `stripAnsi`); the screen holds only keyboard/measure presentation state. Holds.
+- *e2e wiring*: `KEYBOARD_ID` is created by `spawnFlow`'s `COMPOSE_SESSION_VARS` path (`e2e/run.ts:726-733`); `e2e-flows.test.ts` passes.
+
+**Below threshold (not blocking):** `SafeAreaProvider` without `initialMetrics={initialWindowMetrics}` renders nothing for the first frame (`SafeAreaContext.tsx:105-111`); `TranscriptRow`/`SessionScreen` wiring has no render test (repo convention: no RN component harness), so only the pure helpers are pinned.
+
+**Executor behaviour:** honest — the drift (measureInWindow, controller-side gate, `codeBackground`) is justified and the controller-side gate is a real improvement over the plan; the unrun simulator work is stated plainly rather than claimed.
+
+*— claude-opus-5-5, 2026-11-14* (same model as the executor/planner, fresh context only — shared blind spots possible)
 
 **Screenshots (orchestrator, binding):** every slice ends by saving simulator screenshots of each screen it touched, light AND dark, as PNG under `/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/slice-<n>/` (`<screen>-light.png`, `<screen>-dark.png`; Slice 0 also `<bug>-before.png`/`-after.png`). A fresh Fable visual review gates the merge of every slice against the mockups and the quality bar.
