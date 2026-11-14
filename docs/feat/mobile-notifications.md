@@ -1,6 +1,6 @@
 # feat/mobile-notifications — app notifications: NSE decrypt, Approve (Face ID) / Deny / Reply / Open (mobile task 17)
 
-> **Status:** implementation (plan written, **not approved**; see Owner questions)
+> **Status:** implementation APPROVED by the owner (2026-11-14)
 > **Branch:** `feat/mobile-notifications` (this doc). Slices N0–N8 run **in order on this branch**, one commit per slice on the owner's OK, each gated by its narrow tests (AGENTS §4); the full gate + `bun run e2e:mobile` before Review. **Starts only after task 16 (`feat/mobile-push`) is merged**: N1 is independent, but N2–N8 build on its P1 (`@tentacle/transport/push`), P2 (`PushMessage`), P9 (push key, `expo-notifications`, entitlements).
 > **Size:** M–L as a whole, split into S/M slices (table below) · **Blast:** cross-module (one change in the client's permission routing, which the TUI shares; the rest is `apps/mobile` + a native extension) · **Suited:** N1 is `load-bearing` (it touches the client side of the permission path every frontend uses: strong executor + mandatory fresh-context Review red-teaming "single broker", "one session path", "a decision is only ever a person's"). N5 (Swift + Xcode target) and N6 (the answer coordinator) want a strong executor too: they are security-relevant even though contained. N2, N3, N4, N7, N8 are S–M `contained` and fit a weaker executor. The owner assigns executors.
 > **Changelog:** `changelog.d/mobile-notifications.added.md` (N8): `- **Answer from the notification.** On iPhone, a permission request now shows its project, session and command in the notification itself (decrypted on the phone; Apple and the relay still see only an opaque blob). Approve asks Face ID, Deny and Reply work from the lock screen's notification, and Open jumps to the session. A finished or failed turn is grouped per session.`
@@ -550,6 +550,12 @@ Real device (D3, owner, after task 16's D2; recorded in Execution with date):
    Sensitive, profiles) before N5's device build, and D3 (real-device
    checklist) after task 16's D2; nothing in this task touches the relay host?**
    **Rec: yes.**
+
+#### Owner decisions (2026-11-14)
+
+All eight questions: the recommendation (owner: "Tutte come raccomandato").
+Execution starts after task 16 (mobile-push) is merged. *— claude-opus-5-5
+(orchestrator), 2026-11-14*
 
 ## Execution
 
