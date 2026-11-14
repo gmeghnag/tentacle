@@ -42,7 +42,10 @@ import {
   type WatchCategory,
 } from "@tentacle/protocol";
 import { type DuplexChannel, RpcPeer } from "@tentacle/transport";
-import { readKept } from "./kept-index.ts";
+import type { EngineHost } from "./engine-host.ts";
+import { podDaemonCommand } from "./engine-runtime.ts";
+import { keptDir, readKept } from "./kept-index.ts";
+import type { KeptEntry } from "./kept.ts";
 import {
   LOG_FOLLOW_INTERVAL_MS,
   type LogCategory,
@@ -57,6 +60,9 @@ import {
   takeLast,
   updateEvents,
 } from "./log-events.ts";
+import { type RunCandidate, type RunPick, pickRun } from "./logs-run.ts";
+import { lockHolder } from "./pod-resident.ts";
+import { laptopProc, readOwner } from "./run-state.ts";
 import { relayLogPath, runDirFor } from "./run-state.ts";
 import { untrustedText } from "./untrusted-text.ts";
 import { CLIENT_INFO } from "./version.ts";
@@ -97,6 +103,11 @@ export interface LogsDeps {
    * real run). A test hands it a channel pair and never opens a socket.
    */
   readonly dial?: (url: string, options: ConnectOptions) => () => Promise<DuplexChannel>;
+  /**
+   * Test seam: the engine host of a detached run (`logs -f <run-name>`), built
+   * in a real run from the kept index's locator.
+   */
+  readonly hostFor?: (entry: KeptEntry) => EngineHost;
 }
 
 /** One readable log: where it is and what it holds. */
@@ -442,6 +453,22 @@ async function followDaemon(
     deps.err(`[logs] cannot reach ${url}: ${untrustedText(errorText(error))}\n`);
     return 1;
   }
+  return watchChannel(deps, uid, opts, channel, `on ${url}`);
+}
+
+/**
+ * The follower over an ALREADY dialled channel — a `serve` daemon's WebSocket
+ * (`followDaemon`) or a detached run's pod, over the exec bridge an `attach`
+ * opens (`followRun`). One code path: what differs between the two is only how
+ * the bytes get there.
+ */
+async function watchChannel(
+  deps: LogsDeps,
+  uid: string,
+  opts: LogsOptions,
+  channel: DuplexChannel,
+  where: string,
+): Promise<number> {
   const peer = new RpcPeer(channel, {
     onNotification: () => {},
     onRequest: async (method) => {
@@ -462,7 +489,7 @@ async function followDaemon(
     });
     const opened = await openWatch(peer, uid, opts.only as readonly WatchCategory[] | undefined);
     watching = opened.watchId;
-    deps.err(`[logs] watching ${uid} on ${url} (live: asks, streaming text, turn ends)\n`);
+    deps.err(`[logs] watching ${uid} ${where} (live: asks, streaming text, turn ends)\n`);
     // The state the watch began at: a running turn, and every ask already
     // pending — printed BEFORE anything else, so an ask raised just before the
     // follower arrived is never missed (owner Q3's whole point).
@@ -653,7 +680,6 @@ async function readDaemon(
 
 /** How many pages of `session/log` a `--tail` read follows before it stops (a bound, not a limit). */
 const LOG_PAGES_MAX = 200;
-
 /** Every entry of a session's committed log, page by page (the current segment). */
 async function readLog(peer: RpcPeer, uid: string): Promise<readonly KnownLogEntry[]> {
   const entries: KnownLogEntry[] = [];
@@ -689,7 +715,131 @@ async function readLog(peer: RpcPeer, uid: string): Promise<readonly KnownLogEnt
   return entries;
 }
 
-/** `tentacle logs [<uid>] [--tail N] [--only …] [--json] [--summary] [-f]`. */
+/** The picked RUN of `pickRun` (a kept entry, a session, and whether it is live). */
+type RunFound = Extract<RunPick, { kind: "run" }>;
+
+/**
+ * `-f <run-name>` for a detached run (docs/feat/logs-cmd.md sub-task 3): a
+ * RELAY or a TUI of the run holds its lock, so its pod's resident daemon is
+ * live and can be dialled through the SAME engine exec bridge a joining
+ * `attach` opens (`engine-runtime.ts`'s `openExec(podDaemonCommand)`).
+ *
+ * Deliberately not a client: this opens NO session, attaches nothing, takes no
+ * model link, asks no broker anything, saves nothing and arms no exit net — the
+ * workload is not ours to touch. A watcher on that connection is invisible to
+ * `session/list.attached` and to the relay's "in use" read (the plan's
+ * precondition 1), which is what lets a follower run beside the run's TUIs.
+ */
+async function followRun(deps: LogsDeps, run: RunFound, opts: LogsOptions): Promise<number> {
+  if (!run.live) {
+    // Nothing holds the run: its pod daemon went with the relay, so there is
+    // no live stream to dial. The laptop copy the relay kept IS the session.
+    deps.err(
+      `[logs] run ${untrustedText(run.entry.name)} has ended (no relay or terminal of it is alive): following its saved log instead\n`,
+    );
+    return followFile(deps, run.sessionId, opts);
+  }
+  const uid = run.sessionId;
+  deps.err(`[logs] run ${untrustedText(run.entry.name)} (${run.entry.engine}) session ${uid}\n`);
+  const hostFor = deps.hostFor;
+  if (hostFor === undefined) {
+    deps.err("[logs] cannot dial a detached run: no engine access in this build\n");
+    return 1;
+  }
+  let host: EngineHost;
+  try {
+    host = hostFor(run.entry);
+  } catch (error) {
+    deps.err(`[logs] cannot reach ${run.entry.name}: ${untrustedText(errorText(error))}\n`);
+    return 1;
+  }
+  // The reconnect preflight (`attach`'s): a gone/unauthorized workload is said
+  // in the engine's own words, never an exec storm against a dead pod.
+  const verdict = await host.dialVerdict(run.entry.name).catch((error: unknown) => {
+    deps.err(`[logs] cannot reach ${run.entry.name}: ${untrustedText(errorText(error))}\n`);
+    return null;
+  });
+  if (verdict !== null) {
+    deps.err(`[logs] cannot reach ${run.entry.name}: ${untrustedText(verdict.message)}\n`);
+    return 1;
+  }
+  // The bridge the resident lives behind, exactly as `attach` opens it
+  // (`podDaemonCommand`: `serve --bridge --model-proxy` in the pod). The
+  // binary's path inside the pod is the attach's, not a guess of ours.
+  const binPath = `${run.entry.binDir ?? "/usr/local/bin"}/tentacle`;
+  let channel: DuplexChannel;
+  try {
+    channel = host.openExec({
+      name: run.entry.name,
+      // The container `run` targeted in this workload (k8s: the agent one;
+      // docker: none), never a name read off pod-supplied metadata.
+      ...(host.defaultContainer !== undefined ? { container: host.defaultContainer } : {}),
+      command: podDaemonCommand(binPath),
+    });
+  } catch (error) {
+    deps.err(`[logs] cannot exec into ${run.entry.name}: ${untrustedText(errorText(error))}\n`);
+    return 1;
+  }
+  return watchChannel(deps, uid, opts, channel, `in ${untrustedText(run.entry.name)}`);
+}
+
+/** `-f` on the laptop copy of a session (the file half), looking the session up by uid. */
+async function followFile(deps: LogsDeps, uid: string, opts: LogsOptions): Promise<number> {
+  const found = await resolve(deps, uid);
+  if (!found.ok) {
+    deps.err(found.message);
+    return 1;
+  }
+  deps.err(`[logs] ${found.read.file}\n`);
+  return follow(deps, found.read, found.uid, opts);
+}
+
+/** The kept-index candidates of `name`, each with its run dir's record and lock (read, never taken). */
+function runCandidates(configDir: string, name: string): RunCandidate[] {
+  return readKept(keptDir(configDir))
+    .entries.filter(({ entry }) => entry.name === name)
+    .map(({ entry }) => {
+      const dir = runDirFor(configDir, entry);
+      return {
+        entry,
+        owner: readOwner(dir),
+        holderAlive: lockHolder(dir, laptopProc) !== null,
+      };
+    });
+}
+
+/**
+ * What a `logs` WORD names: a detached run of this laptop's kept index, or a
+ * session id. A word is tried as a run first (a run name is what a person
+ * types, and it cannot collide with a uid: `isValidSessionId` admits one, but a
+ * run is matched only against the index's own names).
+ */
+function resolveWord(
+  deps: LogsDeps,
+  word: string,
+):
+  | { readonly kind: "run"; readonly run: RunFound }
+  | { readonly kind: "session"; readonly uid: string }
+  | { readonly kind: "refuse"; readonly message: string } {
+  const picked = pickRun(word, runCandidates(deps.configDir, word));
+  switch (picked.kind) {
+    case "run":
+      return { kind: "run", run: picked };
+    case "ambiguous":
+      return {
+        kind: "refuse",
+        message: `[logs] ${untrustedText(word)} names a run at ${picked.places.map((place) => untrustedText(place)).join(", ")} and none of them is live — say which with \`attach\` or read its log by session id (\`ps\` lists the sessions)\n`,
+      };
+    case "no-session":
+      return {
+        kind: "refuse",
+        message: `[logs] run ${untrustedText(word)} has no session yet (nothing was saved): \`ps\` shows its state\n`,
+      };
+    case "absent":
+      return { kind: "session", uid: word };
+  }
+}
+
 export async function logsCommand(opts: LogsOptions, deps: LogsDeps): Promise<number> {
   // `--connect`: the daemon side (sub-task 2). It needs a uid — a remote
   // `newest` would be another project's newest, a guess — and never touches this
@@ -717,7 +867,25 @@ export async function logsCommand(opts: LogsOptions, deps: LogsDeps): Promise<nu
       ? followDaemon(deps, opts.uid, opts, opts.connect)
       : readDaemon(deps, opts.uid, opts, opts.connect);
   }
-  const found = await resolve(deps, opts.uid);
+  // A WORD may be a detached RUN's name (sub-task 3) or a session id. A run is
+  // tried first: it is what a person types, and `--tail` for a detached run IS
+  // its laptop copy (the relay keeps it saved), so one selector serves both
+  // halves — `-f` dials the run's pod, `--tail` reads the file it saved.
+  let uid = opts.uid;
+  if (uid !== undefined) {
+    const word = resolveWord(deps, uid);
+    if (word.kind === "refuse") {
+      deps.err(word.message);
+      return 1;
+    }
+    if (word.kind === "run") {
+      if (opts.follow) {
+        return followRun(deps, word.run, opts);
+      }
+      uid = word.run.sessionId;
+    }
+  }
+  const found = await resolve(deps, uid);
   if (!found.ok) {
     deps.err(found.message);
     return 1;

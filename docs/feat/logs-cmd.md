@@ -1,6 +1,6 @@
 # feat/logs-cmd — `tentacle logs`: read and follow a session without shell redirects
 
-> **Status:** implementation approved (owner 2026-11-14); `logs-tail` and `logs-watch` executed — see *Execution — logs-tail* / *Execution — logs-watch*; `logs-follow-detached` pending
+> **Status:** implementation approved (owner 2026-11-14); all three sub-tasks executed — see *Execution — logs-tail* / *Execution — logs-watch* / *Execution — logs-follow-detached*; one fresh-context review due for the three together (owner)
 > **Branch:** `feat/logs-cmd` (umbrella; each sub-task below gets its own `feat/<slug>` branch + doc when it starts, AGENTS §10)
 > **Size:** L → split into 3 (`logs-tail` M · `logs-watch` M–L · `logs-follow-detached` M) · **Blast:** load-bearing (sub-task 2 touches the daemon fan-out, §7 "don't serialize the peer"; sub-task 3 the pod trust boundary) · **Suited:** sub-task 1 a weaker model + standard Review; sub-tasks 2–3 a strong model + mandatory fresh-context Review
 > **Changelog:** one fragment per sub-task: `changelog.d/logs-tail.added.md`, `changelog.d/logs-watch.added.md`, `changelog.d/logs-follow-detached.added.md`
@@ -622,3 +622,103 @@ then RED on their mutation — the loop §9 warns about, caught by mutating.
 **Gate line.** `bunx tsc --noEmit` OK · `bun run lint` OK (1076 files, 0
 errors/0 warnings — the §6 baseline) · `bun test` 8358 pass / 3 opt-in skips /
 0 fail (8309 + the 49 new tests of this sub-task).
+
+### Execution — logs-follow-detached
+
+*— claude-sonnet-4-6 (tentacle executor), 2026-11-15*
+
+**Repro (red, before any edit).** The capability is missing by construction on
+this branch: `logs -f <run-name>` never looked at the kept index, so the word
+went straight to `resolve()` as a session id and answered
+`[error] no session box in …` for a run `ps` lists (and the same for
+`--tail <run-name>`). The missing seam is `logsHostFor` on `main`'s IO: without
+it a detached run's pod cannot be reached at all. Proven as the first RED below.
+
+**As built, in order** (the Implementation's dependency order).
+
+1. `packages/cli/src/logs-run.ts` (new, pure): `pickRun` — WHICH kept entry and
+   WHICH session a word names. One place wins; a name at several places takes the
+   ONE that is live, and is `ambiguous` with none (or two) live; a run dir's
+   `owner.json` counts only when its `created` matches the entry's (a run dir
+   outlives a reused name); no record and no `entry.sessionId` is `no-session`;
+   no entry at all is `absent`. `live` is the run dir's lock (`lockHolder`).
+2. `packages/cli/src/logs-cmd.ts`: `followDaemon` split so the WATCHER takes an
+   already-dialled channel (`watchChannel(…, where)`) — one follower for a
+   `serve` URL and for a pod, none of sub-task 2's loop duplicated; `followRun`
+   (`hostFor` → `dialVerdict` → `openExec(podDaemonCommand(binPath))` →
+   `watchChannel`); `followFile` (an ended run's saved copy); `resolveWord` (a
+   word is a run first, else a session id — a run is matched only against the
+   index's own names); `logsCommand` routes `-f` to `followRun` and `--tail` to
+   the run's SESSION, so it reads the relay's saved laptop copy.
+3. `packages/cli/src/main.ts`: the `logsHostFor` seam, and in a real run
+   `buildEngineHost(entry.engine, hostOptionsFor(entry))` — WHERE comes from the
+   kept index, never a label. `flags.ts`/`main.ts`: the usage line.
+4. `README.md` (the detached-run paragraph + the usage line),
+   `changelog.d/logs-follow-detached.added.md`.
+
+**Drift from the Implementation, and why.**
+
+1. *The dial is composed here, not imported from `attach-run.ts`.* The plan said
+   "the exact laptop-side dial to reuse is verified in that sub-task's own
+   plan". Verified: `attach`'s dial is three `EngineHost` calls inside
+   `attachEngineRuntime` (`engine-runtime.ts:1046-1050`) with no state of their
+   own — there is no helper to import. The PARTS are reused (`podDaemonCommand`,
+   `dialVerdict`'s preflight, `hostOptionsFor`), so the seam is the same, while
+   `attachEngineRuntime` (broker, saver, model link, exit net) does not run for
+   a follower. `watchChannel` is the extracted shared follower: no send/stream
+   logic is copied.
+2. *A run whose lock is released is NOT dialled.* The plan's sub-task-3 text has
+   only the live path. An ended run's resident is gone with its relay, so
+   dialling would exec into a dead workload: `-f` says so once and follows the
+   laptop copy (owner Q4's fallback, sub-task 1's code), which is also what
+   makes the ended case honest rather than silent.
+3. *`--tail <run-name>` resolves the run but never dials* — the plan's own rule
+   ("`--tail` for a detached run = the laptop copy"), implemented as one
+   selector so a word means the same thing in both halves.
+4. *`--connect` still needs an explicit uid.* Only a bare `-f` word is a run
+   name: a remote daemon's kept index is not this laptop's.
+5. *`container` comes from `host.defaultContainer`, not the kept entry.* k8s
+   execs into the agent container; a name read off the workload would let
+   pod-supplied input choose where we run.
+
+**Deliberately not done.** No auto-reconnect (v1, unchanged from sub-task 2). No
+`--summary` of a pod's live state (a summary is a FILE's facts). The relay's
+`daemon.log`/`relay.log` are still not merged (owner Q6). Nothing is published to
+`session/list` for a follower — staying invisible is the point.
+
+**Tests (red before green).** New: `packages/cli/test/logs-follow-detached.test.ts`
+(13: 5 pure `pickRun`, 7 `-f` over a fake engine whose `openExec` returns a real
+`SessionHost`+`Connection` — the pod daemon —, 1 `--tail`). RED was demonstrated
+by disabling the new dispatch (`resolveWord` → the word as a session id), which
+failed 6 of the 13 on the property each names (not on an import). The
+load-bearing pair: `attachedCount` is unchanged across a whole follow (a
+follower is not an attachment, so the relay's "in use" read and `ps` never see
+it), and no `create`/`remove`/`removeBestEffort` is called — no exit net, no
+lifecycle of any kind.
+
+**Mutation checks — RUN, not asserted.** Each mutation was applied to the source,
+the test file run, and the source restored from a copy under
+`.tentacle/tmp/logs-cmd/`. Mutation → red test(s):
+
+```
+M1  pickRun: live is always true                     → 2 · one entry, live … / an ended run is NOT dialled
+M2  pickRun: the first entry wins (never ambiguous)   → 3 · … two places, one live … / ambiguous … / the CLI's ambiguous refusal
+M3  pickRun: any owner.json is trusted                → 1 · another workload's record is not this run's
+M4  an ended run is dialled anyway                    → 1 · an ended run is NOT dialled
+M5  no dialVerdict preflight                          → 1 · a gone workload is refused in the engine's words
+M6  the run name printed raw (no untrustedText)       → 1 · pod text cannot reach the terminal raw
+M7  host.removeBestEffort() on the way out            → 1 · … follows live, unattached (the no-lifecycle claim)
+M8  no-session falls through to a session id          → 1 · a kept run with no session yet is refused
+M9  the follower calls `session/open` before watching → 1 · … follows live, unattached (attachedCount)
+M10 the exec runs `serve --stdio`, not the bridge     → 1 · … follows live, unattached (the command)
+M11 `--tail` ignores the run word                     → 1 · --tail <run-name> reads the run's session FILE
+M12 no run resolution at all                          → 6 · the whole run-selection path
+M13 MethodNotFound not worded as "too old"            → 1 · a pod's older tentacle says so
+```
+
+Every one was RED on the assertion of its property; M12 is the REPRO re-run as a
+mutation (the same shutdown of the new dispatch).
+
+**Gate line.** `bunx tsc --noEmit` OK · `bun run lint` OK (1078 files, 0
+errors/0 warnings — the §6 baseline) · `bun test` 8371 pass / 3 opt-in skips /
+0 fail (8358 + the 13 new tests of this sub-task).

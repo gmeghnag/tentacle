@@ -286,11 +286,19 @@ answers, and the turn's end — `--only ask,error,turn` narrows the stream, and 
 queue that overflows says how many events it lost. The follower is never a
 client of the session: it takes no model call, answers no ask, and never shows
 up in `ps`. Ctrl+C stops it cleanly. `--tail --connect` reads that daemon's
-committed log the same way, without opening anything.
+committed log the same way, without opening anything. A **detached run** is
+reached by its name instead of a uid: `tentacle logs -f <run-name>` finds the
+run in your kept index, dials its pod's resident daemon through the engine's
+exec bridge (the same one `attach` uses — no model link, no broker, no saved
+session, no exit net) and runs the same read-only watch; `tentacle logs --tail
+<run-name>` reads the copy the relay saved on this laptop. A run that has ended
+is not dialled at all: `-f` says so and follows that saved copy. A name used at
+more than one place with none of them live is refused, never guessed.
 
 ```sh
-tentacle logs [<uid>] [--tail N] [--only <categories>] [--json] [--summary] [-f]
+tentacle logs [<uid>|<run-name>] [--tail N] [--only <categories>] [--json] [--summary] [-f]
 tentacle logs -f <uid> --connect ws://host:port [--token T|--token-command CMD] [--ca-cert FILE]
+tentacle logs -f <run-name>
 ```
 
 **Engines.** `--engine kubernetes|docker|podman` picks where it runs; the

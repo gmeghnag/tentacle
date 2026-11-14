@@ -45,7 +45,7 @@ import {
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import { devicesCommand, resetCommand, revokeCommand } from "./devices-cmd.ts";
-import { type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
+import { type EngineHost, type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
 import {
   armSharedExitNet,
   attachEngineRuntime,
@@ -291,7 +291,7 @@ Usage:
                                 list the pods/containers run kept, checked against
                                 their engine, with a detached run's state (-q names
                                 only, -v details: pid, session, log)
-  tentacle logs [<uid>] [--tail N] [--only <cats>] [--json] [--summary] [-f]
+  tentacle logs [<uid>|<run-name>] [--tail N] [--only <cats>] [--json] [--summary] [-f]
                                 read this folder's session log (the newest, or the
                                 uid given) without a TUI: one line per event, the
                                 last 20 by default; --summary counts tools, files
@@ -535,6 +535,8 @@ export interface CliIO {
   logsSignal?: AbortSignal;
   /** Test seam: `logs --connect`'s dial (a test hands it a channel pair, never a socket). */
   logsDial?: (url: string, options: ConnectOptions) => () => Promise<DuplexChannel>;
+  /** Test seam: `logs -f <run-name>`'s engine host (a fake, never a real engine). */
+  logsHostFor?: (entry: KeptEntry) => EngineHost;
 }
 
 /**
@@ -967,6 +969,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ...(io.logsSignal !== undefined ? { signal: io.logsSignal } : {}),
         ...(io.logsSleep !== undefined ? { sleep: io.logsSleep } : {}),
         ...(io.logsDial !== undefined ? { dial: io.logsDial } : {}),
+        ...(io.logsHostFor !== undefined
+          ? { hostFor: io.logsHostFor }
+          : {
+              hostFor: (entry: KeptEntry) =>
+                buildEngineHost(entry.engine, hostOptionsFor(entry)).host,
+            }),
       },
     );
   }
