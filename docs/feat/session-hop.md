@@ -1087,3 +1087,17 @@ load-related flake in a file this task does not touch, not a regression. No prot
 Every mutation reverted, `md5` of each touched source matched its pre-mutation
 value (printed by each script), `git status --porcelain` shows only the four
 intended files.
+
+### Round 2
+
+**Verdict: APPROVE** (H2, scope `git diff HEAD~1`).
+
+- **Round 1 finding 1 (HIGH) is fixed.** `session-hop.ts` now freezes whenever `old.holdsSession(uid)`, and reads the seed again *after* the freeze. The round-1 repro (`.tentacle/tmp/session-hop/rev-h2/repro.ts`) now gives `not moved: the session could not be saved` and loses nothing (before: `moved`, and only `system:sys` on disk). A session that is open but empty (no file after the freeze) still opens unseeded (M2).
+- **Round 1 finding 2 is fixed.** If `closeOrRefuseOwn` throws, the hop is refused and the target rolled back (repro: `can't tell whether docker:box holds this session — not joining it (link dropped)`). If `afterLeave` throws, the hop still counts as moved, with one notice.
+- **Round 1 finding 3 is fixed.** `rejobs()` re-subscribes `onStart`/`onExit` on every swap, and `dispose` detaches them.
+- **Round 1 finding 4 is fixed.** A test now pins the commit-time seal.
+- **Mutations: 6 of 6 caught**, each by its own test. Dropped `|| holdsIt`; stale `stored.record` used as the seed; the 4(a) catch rethrown; the `afterLeave` catch rethrown; `rejobs()` skipped on commit; `sealSessions()` skipped. All reverted, and `git status --porcelain` is empty.
+- **Gate:** 6 test files (session-hop, hop-plan, relay-state, local-runtime, hop-proposal, hop-command): 211 pass, 0 fail. `bun run lint` is clean (1121 files) and `bun run typecheck` passes. Full `bun test` not re-run.
+- **Regressions:** none at HIGH or MEDIUM. The new code only adds a guard and catches; the commit order and the single-broker hand-off are unchanged.
+
+*— claude-opus-5-5, 2026-11-14*
