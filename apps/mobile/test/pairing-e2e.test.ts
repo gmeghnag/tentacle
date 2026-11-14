@@ -16,6 +16,9 @@
  *   `expired`; Cancel closes the socket the server sees;
  * - a revoke while linked → the link stops and the diagnosis says `revoked`
  *   (from the ERROR OBJECT, never the link's `stopped.reason` prose);
+ * - the RECOVERY path of that revoke: "Pair again" through the app's own link
+ *   registry and diagnosis map dials the NEW device key and works again
+ *   (fix round 1 finding 1);
  * - a `devices reset` → three redials → `maybe-reset`.
  */
 import { afterEach, describe, expect, test } from "bun:test";
@@ -44,9 +47,11 @@ import {
   loadDeviceCommands,
   loadPairCommand,
 } from "../e2e/pair-cli.ts";
+import { withForgottenRecord } from "../src/computer-memory.ts";
 import { type ComputerStore, type SecureKV, createComputerStore } from "../src/computer-store.ts";
 import { openComputer } from "../src/connection.ts";
 import { createLinkDiagnoser, diagnosisMessage } from "../src/link-diagnosis.ts";
+import { createLinkRegistry } from "../src/link-registry.ts";
 import { type PairingState, pairingView, reduce, runPairing } from "../src/pairing-flow.ts";
 import type { RNWebSocketCtor } from "../src/rn-websocket.ts";
 import { rnWebSocketCtor } from "../src/rn-websocket.ts";
@@ -592,4 +597,107 @@ describe("pairing over /e2e, as the phone does it", () => {
     expect(verdicts).toEqual(["unreachable", "unreachable", "maybe-reset"]);
     expect(diagnosisMessage(diagnosis.current(), computer.name)).toContain("reset");
   }, 40_000);
+
+  test("REVOKE → 'Pair again' recovers on the app's own registry (mutation: drop `withForgottenRecord` → red)", async () => {
+    const dir = computerConfigDir();
+    const { url } = serve(dir);
+    const store = createComputerStore({ kv: memoryKV().kv, keychainAccessible: 1 });
+    /** One whole pairing through the reducer + runner, as the screen drives it. */
+    const pair = async (): Promise<void> => {
+      const pairing = await startPair({ dir, address: url });
+      const via = await pairThroughFlow({ state: reviewed(pairing.text), store });
+      expect(via.ok).toBe(true);
+      await pairing.done;
+    };
+    await pair();
+    const identity = readIdentity(dir);
+    if (!identity.ok) {
+      throw new Error(identity.reason);
+    }
+    const id = deviceIdOf(identity.identity.publicKey);
+    const computer = await store.get(id);
+    if (computer === undefined) {
+      throw new Error("stored computer missing");
+    }
+    // The app's OWN wiring, minus React (`App.tsx` cannot be imported: RN is Flow).
+    const records = new Map([[id, computer]]);
+    const diagnoses = new Map<string, ReturnType<typeof createLinkDiagnoser>>();
+    const diagnoserFor = (key: string): ReturnType<typeof createLinkDiagnoser> => {
+      const known = diagnoses.get(key);
+      if (known !== undefined) {
+        return known;
+      }
+      const created = createLinkDiagnoser();
+      diagnoses.set(key, created);
+      return created;
+    };
+    const closed: string[] = [];
+    const links = createLinkRegistry<{ readonly client: RemoteClient; close(): Promise<void> }>({
+      // `LINKS.open` re-reads the record every dial, so a re-pair's new device
+      // key is what the NEXT dial would use — if a next dial ever came.
+      open: async (key) => {
+        const record = await store.get(key);
+        if (record === undefined) {
+          throw new Error(`unknown computer ${key}`);
+        }
+        records.set(key, record);
+        const link = await openComputer(record, {
+          WebSocket: PhoneWebSocket,
+          random: systemRandom,
+          diagnosis: diagnoserFor(key),
+        });
+        return {
+          client: link.client,
+          close: async () => {
+            closed.push(record.deviceKey);
+            await link.close();
+          },
+        };
+      },
+      close: (link) => link.close(),
+    });
+    const memory = { links, diagnoses, records };
+    /** What `loadRows()` does for one computer: dial, read, report its verdict. */
+    const row = async (): Promise<string> => {
+      const link = await links.get(id);
+      await link.client.sessionList({ limit: 1 });
+      return diagnoserFor(id).current();
+    };
+
+    // 1. Linked and healthy.
+    expect(await row()).toBe("ok");
+    // 2. `tentacle devices revoke`: the live link's redial is denied, and its
+    //    own diagnoser reads that as `revoked` (the ERROR OBJECT, F-L1).
+    const { revokeCommand } = await loadDeviceCommands();
+    expect(
+      revokeCommand("iPhone", {
+        configDir: dir,
+        out: () => {},
+        err: () => {},
+        now: () => Date.now(),
+      }),
+    ).toBe(0);
+    await until(() => diagnoserFor(id).current() === "revoked", 20_000);
+    expect(diagnoserFor(id).current()).toBe("revoked");
+
+    // 3. "Pair again" (Owner Q7's recovery): a FRESH device key, the SAME id.
+    await pair();
+    // 4. `onDone` → forget → reload, which re-dials the computer.
+    await withForgottenRecord(memory, id, async () => {
+      // The recovered computer works, and says nothing (no stale `revoked`).
+      expect(await row()).toBe("ok");
+    });
+    // The old link really was closed (a detach, never leaked) …
+    expect(closed).toEqual([computer.deviceKey]);
+    // … it was the OLD device key's link …
+    const replaced = await store.get(id);
+    expect(replaced?.deviceKey).not.toBe(computer.deviceKey);
+    // … and the read really used the NEW key: the daemon accepted this device.
+    const reread = records.get(id);
+    if (replaced === undefined || reread === undefined) {
+      throw new Error("the store lost the re-paired computer");
+    }
+    expect(reread.deviceKey).toBe(replaced.deviceKey);
+    await links.closeAll();
+  }, 60_000);
 });

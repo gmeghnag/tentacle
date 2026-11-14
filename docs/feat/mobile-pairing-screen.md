@@ -805,6 +805,87 @@ own):
   (`expo prebuild` + `run:ios --configuration Release`); the harness does that
   itself per run, so no product impact.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14 — both Review findings (1 HIGH, 1 MEDIUM)*
+
+**Repro (finding 1), `.tentacle/tmp/mobile-pairing-core/repro-f1.ts`** — the real
+registry + diagnoser, the app's own `LINKS.open` re-reading a mutable record:
+
+```
+linked with: OLD-KEY diagnosis: ok
+after revoke: revoked
+row dials with: OLD-KEY | same stale link: true
+row shows diagnosis: revoked
+after release+forget: NEW-KEY | diagnosis: ok
+closed so far: ["OLD-KEY"]
+```
+
+That is F-L1 exactly: after a successful "Pair again" the row still dials the OLD
+key and still reads `revoked`. `link-registry.ts` only forgets a **failed** dial,
+and a link that opened and later stopped is `open` forever.
+
+**1. HIGH — FIXED.** The in-memory facts about a computer now die with the
+record. New pure module `apps/mobile/src/computer-memory.ts`:
+`forgetComputer({links, diagnoses, records}, id)` = `links.release(id)` (detach,
+never `session/close`) + the diagnosis delete + the cached-record delete, and
+`withForgottenRecord(memory, id, then)` = that, then the caller's re-read — the
+**order** is the fix, so it is one exported step rather than two lines in
+`App.tsx`. Wired:
+- `App.tsx:143-155` — `MEMORY` (the app's one `LINKS`/`DIAGNOSES`/`RECORDS`).
+- `App.tsx:271` + `:216` — `PairRoute`'s `onDone(computerId)`: the id comes from
+  the pairing OUTCOME, not from the `again` route param (a first pairing must be
+  forgotten too). `PairingOutcome` is now a discriminated union
+  (`pairing-flow.ts:382-384`) so `ok: true` always carries a `computerId` — no
+  `computerId?` a caller can forget to check.
+- `App.tsx:657-671` — `onDone` → `withForgottenRecord(MEMORY, computerId, reload)`,
+  so the forget runs **before** the reload that re-dials.
+- `App.tsx:689-696` — `onRemove` goes through the same one step (it hand-rolled
+  the same three deletes; now there is one place that decides).
+
+Tests: `test/computer-memory.test.ts` (4) proves the stale link is closed and the
+next dial uses the NEW key, that the `revoked` verdict is dropped, the ordering,
+and that another computer is untouched. `test/pairing-e2e.test.ts` (new, the last
+test) is the scenario the Review named uncovered: real sockets, real pairing, real
+`devices revoke`, then **"Pair again" through the app's own registry and diagnosis
+map** — it now reaches `sessionList` and reads `ok` on the new key, and the old
+link is closed. `test/pairing-wiring-guards.test.ts` pins the `App.tsx` wiring
+itself (it cannot be imported — RN's sources are Flow), which is the only layer
+those pure tests cannot reach.
+
+**2. MEDIUM — FIXED.** `test/connection.test.ts` "a dial that SUCCEEDS resets the
+diagnosis the link was given" now pins `diagnosis.ok()` at `connection.ts:235`: a
+diagnoser arrives with a two-attempt streak, `openComputer` is given it, and after
+the dial it must be `ok` **and** its streak must be gone (one later failure is
+`unreachable`, not a false `maybe-reset`). It also asserts `link.diagnosis` **is**
+that diagnoser, so a silently re-created one cannot pass.
+
+**Mutations (each applied, run, reverted; `diff` vs a backup proves the revert):**
+
+| # | Mutation | Red test |
+|---|---|---|
+| A | `forgetComputer`: drop `links.release` | `computer-memory.test.ts` — "stops handing back the stale link" **and** the ordering test |
+| B | `forgetComputer`: drop `diagnoses.delete` | "forgets the `revoked` verdict" **and** the ordering test |
+| C | `withForgottenRecord`: call `then` FIRST | ordering test — `{OLD-KEY, revoked}` vs `{NEW-KEY, ok}` |
+| D | `App.tsx onDone`: back to a bare `reload()` (the buggy shape) | `pairing-wiring-guards.test.ts` — "forgets … BEFORE reloading" |
+| E | `App.tsx onDone`: forget AFTER the reload | same guard (the `<` on the offset) |
+| F | `App.tsx onRemove`: back to hand-rolled `LINKS.release`/`DIAGNOSES.delete` | "Remove goes through the same one step" |
+| G | `pairing-e2e`: `onDone` without the forget | the new REVOKE→"Pair again" test — `not connected to the daemon` (the stopped link) |
+| H | `connection.ts:235`: delete `diagnosis.ok()` (the Review's own mutation) | `connection.test.ts` — `"unreachable"` instead of `"ok"`; the other three suites it named stay green |
+
+**Drift from the Implementation.** None of substance: `computer-memory.ts` is a
+new pure module the plan did not name, added because a fix must not live in
+`App.tsx` (§7 "logic in pure modules") and because that is what makes the
+ordering testable. No changelog fragment: the finding's user-visible effect is
+already covered by `changelog.d/mobile-pairing-core.added.md`'s "a revoked or
+reset computer says so" — this round makes that sentence TRUE after a re-pair,
+which is a fix to an unreleased branch, not a new capability.
+
+**Gate (this branch, after the fix):** `bun run check` — `tsc --noEmit` clean,
+`tsc -p apps/mobile` clean, `biome check .` 1188 files 0/0, `bun test`
+**8843 pass · 3 skip (the opt-in ones) · 0 fail**, 636 files. Maestro not re-run
+(a simulator; the fix is covered by the loopback-socket test above).
+
 ## Review
 
 #### Orchestrator decisions (owner night delegation 2026-11-14)

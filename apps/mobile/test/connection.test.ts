@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@tentacle/agent";
 import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
+import { ChannelError } from "@tentacle/client";
 import { type ModelProvider, PermissionBroker } from "@tentacle/core";
 import {
   DeviceAuthority,
@@ -36,6 +37,7 @@ import { createComputerStore } from "../src/computer-store.ts";
 import type { StoredComputer } from "../src/computers.ts";
 import { APP_CLIENT_OPTIONS, openComputer } from "../src/connection.ts";
 import { sha256Hex } from "../src/hash.ts";
+import { createLinkDiagnoser } from "../src/link-diagnosis.ts";
 import type { RNWebSocketCtor } from "../src/rn-websocket.ts";
 import { rnWebSocketCtor } from "../src/rn-websocket.ts";
 
@@ -213,6 +215,35 @@ describe("openComputer over /e2e", () => {
         await link.close();
         await seeder.closeSessions();
         seeder.close();
+      }
+    });
+  });
+
+  test("a dial that SUCCEEDS resets the diagnosis the link was given (mutation: delete `diagnosis.ok()` → red)", async () => {
+    await withDaemon(async (d) => {
+      // ONE diagnoser per computer, carried across mounts (what `App.tsx` keeps):
+      // it arrives with a two-attempt streak from earlier failures.
+      const diagnosis = createLinkDiagnoser();
+      diagnosis.observe({ opened: true, error: new ChannelError("unreachable", "closed") });
+      diagnosis.observe({ opened: true, error: new ChannelError("unreachable", "closed") });
+      expect(diagnosis.current()).toBe("unreachable");
+      const link = await openComputer(d.computer, {
+        WebSocket: RNShapedWebSocket,
+        random: systemRandomBytes,
+        diagnosis,
+      });
+      try {
+        // The link IS that diagnoser (no second one silently decoupled from it),
+        // and reaching the daemon is the success F11 says resets the count.
+        expect(link.diagnosis).toBe(diagnosis);
+        expect(link.diagnosis.current()).toBe("ok");
+        // Not just the verdict: the STREAK is gone, so one later failure is not
+        // a false "may have been reset" (the third attempt in a row).
+        expect(
+          diagnosis.observe({ opened: true, error: new ChannelError("unreachable", "closed") }),
+        ).toBe("unreachable");
+      } finally {
+        await link.close();
       }
     });
   });

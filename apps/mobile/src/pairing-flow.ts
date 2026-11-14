@@ -379,10 +379,9 @@ export interface RunPairingOptions {
   readonly signal?: AbortSignal;
 }
 
-export interface PairingOutcome {
-  readonly ok: boolean;
-  readonly computerId?: string;
-}
+export type PairingOutcome =
+  | { readonly ok: true; readonly computerId: string }
+  | { readonly ok: false };
 
 /**
  * Run the pairing the person confirmed: a FRESH device key (Owner Q2), the

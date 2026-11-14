@@ -30,6 +30,7 @@ import {
   View,
   useColorScheme,
 } from "react-native";
+import { type ComputerMemory, withForgottenRecord } from "./src/computer-memory.ts";
 import { type ComputerRow, computerRows, probeComputer } from "./src/computer-rows.ts";
 import {
   type ComputerEntry,
@@ -140,6 +141,18 @@ const LINKS = createLinkRegistry<ComputerLink>({
   },
 });
 
+/**
+ * What the app remembers about a computer besides its record: its live link
+ * (sealed over the device key it dialled with), its diagnosis, and its cached
+ * record. All three are only true of the record they were built from, so they
+ * go together (`computer-memory.ts`).
+ */
+const MEMORY: ComputerMemory<ComputerLink> = {
+  links: LINKS,
+  diagnoses: DIAGNOSES,
+  records: RECORDS,
+};
+
 /** The phone's randomness for the Noise handshake (`expo-crypto`: Hermes has no WebCrypto). */
 function phoneRandom(length: number): Uint8Array {
   return getRandomBytes(length);
@@ -199,7 +212,7 @@ function PairRoute({
   readonly palette: Palette;
   readonly againId?: string;
   readonly againName?: string;
-  readonly onDone: () => void;
+  readonly onDone: (computerId: string) => void;
   readonly onCancel: () => void;
 }): JSX.Element {
   const [state, setState] = useState<PairingState>(initialState);
@@ -255,7 +268,10 @@ function PairRoute({
       running.current = false;
       abort.current = null;
       if (outcome.ok) {
-        onDone();
+        // The id the record was just written under: a re-pair keeps it (Q7), so
+        // anything the app remembered about it is now about the OLD device key
+        // (fix round 1 finding 1).
+        onDone(outcome.computerId);
       }
     });
   }, [state, dispatch, onDone]);
@@ -641,8 +657,16 @@ export default function App(): JSX.Element {
                   navigation.goBack();
                 }
               }}
-              onDone={() => {
-                void reload().then(() => {
+              onDone={(computerId) => {
+                // A re-pair keeps the id (Q7) and replaces the device key, so
+                // the live link (sealed over the OLD key, likely `stopped` and
+                // `revoked`) and its diagnosis are no longer about this record.
+                // Without this, "Pair again" recovers nothing until the app is
+                // killed: `LINKS.get` hands back the dead link forever
+                // (fix round 1 finding 1). The forget happens BEFORE the
+                // reload, which is what re-dials the computer.
+                void withForgottenRecord(MEMORY, computerId, async () => {
+                  await reload();
                   navigation.reset({ index: 0, routes: [{ name: "Computers" }] });
                 });
               }}
@@ -663,13 +687,13 @@ export default function App(): JSX.Element {
                 navigation.navigate("Pair", { again: row.id, againName: row.name });
               }}
               onRemove={async (row) => {
-                // The link goes first: a socket to a computer being forgotten
-                // must not outlive the record (detach only, never `session/close`).
-                await LINKS.release(row.id);
-                await SOURCE.remove(row.id);
-                RECORDS.delete(row.id);
-                DIAGNOSES.delete(row.id);
-                const left = await reload();
+                // Every in-memory fact goes first: a socket to a computer being
+                // forgotten must not outlive the record (detach only, never
+                // `session/close`).
+                const left = await withForgottenRecord(MEMORY, row.id, async () => {
+                  await SOURCE.remove(row.id);
+                  return reload();
+                });
                 // The LAST removal resets the stack to `Pair` (nothing is left
                 // to show on `Computers`).
                 if (left !== undefined && left.length === 0) {
