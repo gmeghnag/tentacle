@@ -934,13 +934,12 @@ Owner asleep, delegated: every Owner question above is decided with its RECOMMEN
 
 ## Execution — slice 11b.2 (`feat/mobile-pairing-camera`)
 
-*— **signature corrected after fix round 1**: this line read `claude-sonnet-4-5`,
-which conflicts with commit `f396ff9`'s "exec (deepseek)". The commit message is
-the only surviving record of how this section was produced (no tentacle session
-log for it remains), and this repo's deepseek executor signs
-`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` elsewhere (`device-pairing.md`), so
-the section is attributed to that executor and the wrong signature is kept here
-rather than quietly overwritten — see Drift 10*
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (signature corrected in
+fix round 1 and again in fix round 2: this line first read `claude-sonnet-4-5`,
+which conflicts with commit `f396ff9`'s "exec (deepseek)"; fix round 1 replaced
+the id with a prose note, which left the header naming NO model at all, so the id
+is restored here as an id and the wrong value is quoted rather than overwritten —
+see Drift 10)
 
 **Scope.** 11b.2 only. 11b.1 (the Keychain store, the paste+compare flow, the
 `/e2e` link, Remove/Pair-again, the harness without the proxy) and 14 are merged
@@ -1172,8 +1171,33 @@ excused** (§9 non-vacuity):
     `device-pairing.md` signs it), so the section now carries that id and says
     the old one was wrong. Nothing else in the section was re-signed under a
     different model, and no claim in it was taken on trust because of it.
+    **Fix round 2 (Review round 2's second half): the repair itself was wrong.**
+    It replaced the id with a prose note starting `*— **signature corrected after
+    fix round 1**`, which left the header naming NO model — worse for §10 than the
+    wrong one, because a wrong id can at least be compared. The line is now
+    `*— rits/…, 2026-11-14*` with the correction as its trailing note, and the old
+    `claude-sonnet-4-5` is still quoted in place.
+11. **11b.1's `## Execution` carries the same defect, and is NOT fixed here.**
+    It reads `*— claude-sonnet-4-5, … — slice 11b.1 only*` (doc:590) while its
+    commit `4d56e62a` says "exec (deepseek)", and this chain's `opus()` path is
+    hardcoded to `--model claude-opus-5-5`, so it cannot produce
+    `claude-sonnet-4-5` at all — the id names no model that ran. It is **on
+    `main`** (`785b49ce`, merged with 11b.1, before this slice branched), so
+    correcting it here would edit another slice's merged record on this branch;
+    it is left for 11b.1's owner (or the repo-wide task below) and is named in
+    Debt. Fix round 2 did correct the ONE more instance in this slice's own
+    sections (`### Fix round 1`, below).
 
 ### Debt / unverified
+
+- **A permission prompt granted LATE can re-arm the camera without a tap** (Review
+  round 2's LOW, not blocking). If the OS prompt is granted only AFTER a deep link
+  has already moved the stage to `review`, the late `open` sets `requested` again,
+  and a later return to `intake` (fail → Try again) turns the camera on without a
+  new tap. The fix is one rule in `scan-session.ts` — ignore `open` unless the
+  stage is still `intake` — but it changes the reducer's contract, so it wants its
+  own round rather than a drive-by at the end of a record-only fix. Not claimed
+  fixed anywhere above.
 
 - **The live camera decode is not covered** (the simulator has no camera): what
   is proven is the permission view-model and the *intake* path a scan feeds
@@ -1258,8 +1282,10 @@ is Opus — a different family from either claimed executor.
 
 ### Fix round 1
 
-*— claude-opus-5-5, 2026-11-14 — both Review findings (2 MEDIUM; finding 1 fixed in
-code, finding 2 in the record)*
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (signed `claude-opus-5-5`
+until fix round 2: that is the REVIEWER's id, and commit `0c5fb025` says "review
+round 1 (deepseek)", so the signature made §10's different-model check unreadable
+off the doc — the same defect Review round 2 named, corrected here)
 
 **Repro (finding 1), before any edit** — the review's own scenario, read off the
 source because the bug is a LIFETIME and the app cannot be imported (RN's sources
@@ -1425,3 +1451,126 @@ deep link has already moved the stage to `review`, the late `open` sets
 `requested` again, and a later return to `intake` (fail → Try again) would turn the
 camera on without a new tap. A fix would ignore `open` unless the stage is still
 `intake`. The deep link (F-P17) is unchanged: it still dials nothing.
+
+### Fix round 2
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id; launched by my
+invoker as `tentacle --profile deepseek`, whose `model.model` in
+`~/.config/tentacle/config.jsonc` is that string — read from the invoker's own
+command line, PID visible in `ps`, and from the profile it names)
+
+**Which finding this answers.** Review round 2 reported **one** MEDIUM: finding 2
+of the previous round was *not* resolved — `### Fix round 1` is signed
+`claude-opus-5-5` while its commit says `review round 1 (deepseek)`, the same
+mismatch the previous round was asked to fix, and the reviewer's own id, which
+makes §10's different-model check unreadable. Round 2 re-verified finding 1 (the
+camera's lifetime) as **FIXED** with four mutations, so nothing was owed there.
+Its LOW (a late-granted permission prompt re-arming `open` after a deep link) is
+explicitly "LOW, not blocking" and is carried in Debt, not claimed fixed.
+
+**RED before green, on the assertion (§9).** Two checks, one new file,
+`scripts/test/task-doc-signatures.test.ts` — the repo already guards records this
+way (`scripts/test/changelog-guard.test.ts`). Before any doc edit:
+
+```
+$ bun test scripts/test/task-doc-signatures.test.ts
+(fail) WRITTEN: … each one names a model id, not a placeholder
+   + "line 935 "Execution — slice 11b.2 (`feat/mobile-pairing-camera`)": no signature"
+(fail) AGREES: … 11b.2's Execution and its Fix round 1 carry the deepseek id, not the reviewer's
+   Expected: "rits/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+   Received: undefined
+ 2 pass · 2 fail
+```
+
+Both are red on the property, not on an import or compile error (the file loads
+and its two non-vacuity cases pass). The first found a defect round 2 did **not**
+name: fix round 1's "correction" had replaced the id with a prose note beginning
+`*— **signature corrected after fix round 1**`, so the header named **no model at
+all** — the placeholder word `signature` sitting where an id belongs. A wrong id
+can at least be compared; none cannot. That is recorded in Drift 10.
+
+**1. MEDIUM — FIXED (Fix round 1 signed with the reviewer's id).** The section is
+now `*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14*`, with the wrong
+value quoted in its trailing note rather than silently overwritten. The
+attribution is not inferred from the signature it replaced: that section's commit
+is `0c5fb025 fix(mobile-pairing-camera): review round 1 (deepseek)`, and the step
+ran through `night-task.sh`'s `ds()` path, which is the tentacle/deepseek executor
+— the run left `runs/night-mobile-pairing-camera-fix1.log` (that path's artifact
+shape) and **no** `.json`/`.acct` (what its `opus()` path writes, as
+`…-review1.json` shows for the reviewer steps). The deepseek profile's id is
+`rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`.
+
+**2. Also FIXED (same class, not named by the round): the 11b.2 Execution header
+named no model.** Restored to `*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017,
+2026-11-14*` with the correction kept as a note; the old `claude-sonnet-4-5` is
+still quoted. Same evidence: commit `f396ff99 … exec (deepseek)`, `ds()` artifact
+shape, and — decisively — this chain's `opus()` path is hardcoded to
+`--model claude-opus-5-5`, so **no step of it could ever emit `claude-sonnet-4-5`**.
+
+**The guard, and what it pins.** `WRITTEN` requires every Execution / Fix round /
+Review / Round section that has prose to carry a real model id (a heading whose
+next non-blank line is another heading is a grouping and takes none); `AGREES`
+pins the two sections above to the deepseek id and asserts it is not the
+reviewer's. The two ids are stated as expectations with their commit subjects
+rather than re-derived from `git log` at test time: over this doc a
+heading-ordinal map mis-attributes a heading that was RENAMED (`6e577a37` added a
+bare `## Execution`, which then "owns" 11b.1's executed section). The cross-check
+was done by hand with exactly that tool and is in *Mutations* below.
+
+**Mutations (each applied, run, reverted; `shasum` vs the scratch backup proves
+the revert).** Mutation D's first draft was discarded: dropping `"signature"` from
+the placeholder list changed nothing on this doc, so it proved nothing (§9).
+
+| # | Mutation | Test that went RED |
+|---|---|---|
+| A | restore fix round 1's pre-fix header (the note, no id) | `WRITTEN` ("line 935 … no signature") **and** `AGREES` (Execution `undefined`) |
+| B | re-sign 11b.2's Fix round 1 to `claude-opus-5-5` | `AGREES` — expected the deepseek id, received `claude-opus-5-5` |
+| C | the section scan matches no heading (`WANT = /NEVER/`) | the non-vacuity case — `recorded.length` 0, so the scan cannot pass blind |
+| D | drop the container rule (groupings must be signed too) | `WRITTEN` — `line 889 "Review": no signature` |
+
+Every revert re-`shasum`ed identical to its backup (`1a01c99…` doc, `5ed0b67…`
+test, then `0e57cc8…` after the typecheck fix); `git status` shows only the doc
+plus the one new test file.
+
+**Drift from the Implementation.** None: this round changes no production file.
+It adds one test file (`scripts/test/task-doc-signatures.test.ts`) and edits two
+signature lines plus Drift 10/11 of this doc. No changelog fragment: §10 curates
+the changelog and this is record-and-test-only work.
+
+**Scope decision (stated, not silently dropped).** The same defect exists one
+section up — 11b.1's `## Execution` reads `claude-sonnet-4-5` while its commit
+`4d56e62a` says "exec (deepseek)", an id this chain cannot produce. It is **on
+`main`** (merged with 11b.1 before this slice branched), so it is another slice's
+merged record; correcting it on this branch would put an unrelated edit in this
+diff. Recorded as Drift 11 and left to 11b.1's owner. The class is repo-wide:
+measured across `docs/feat` + `docs/fix` (220 docs, 391 Execution/Fix sections),
+**162** exec+review section pairs name one model, so a repo-wide guard would be
+red on `main` — that needs its own `fix/` task, which is why the guard is scoped
+to this task's doc.
+
+**Gate (this branch, after the fix).**
+
+```bash
+$ bunx tsc --noEmit                     # clean
+$ bunx tsc -p apps/mobile --noEmit      # clean
+$ bun run lint                          # Checked 1230 files in 376ms. No fixes applied. (0/0 — the §6 baseline)
+$ bun test                              # run 1: 9053 pass · 3 skip · 1 fail (656 files, 352.81s)
+                                        # run 2: 9054 pass · 3 skip · 0 fail  ← GREEN
+```
+
+The 3 skips are §6's opt-ins. The one failure in run 1 is **not mine and not this
+branch's**: `packages/daemon/test/session-log-store.test.ts:865`, "T4 the fork
+precedes the source's next write" — a `Bun.sleep(60)` timing case in a file
+**byte-identical to `main`** (`git diff main -- packages/daemon` is empty; this
+branch changes no daemon file). Attribution, measured: 45 pass · 0 fail three
+times alone; 45/45 under a parallel load of four TUI suites; 49/49 alongside the
+new test file; and the immediate second full run above is **0 fail**. So it is a
+pre-existing flake under full-suite parallel load that wants its own `fix/` task —
+the tree is green, and **no new failure** is attributable to this round.
+Narrow files: `bun test scripts/test/task-doc-signatures.test.ts` → 4 pass · 0
+fail; `bun test apps/mobile` → 618 pass · 0 fail. Total went 9050 (11b.2) → 9054
+(+4: this round's new file).
+
+**Unverified, one line:** Maestro was not re-run — this round changes no app code,
+so no flow can differ — and the `packages/daemon` flake in run 1 was not fixed
+(its file is outside this slice), only attributed and then shown absent in run 2.
