@@ -4473,3 +4473,20 @@ orchestrator's line, §10). `CHANGELOG.md` untouched;
   which is the H2 proof for this slice (the mount effect still subscribes once).
   That is an assertion that the port's fields kept their identities, not a proof
   of each one; a field swapped for a same-identity-rule replacement would pass.
+
+## Review
+
+### S9b — `feat/app-decomp-9b-session` (fresh-context, adversarial) — PASS
+
+*— claude-opus-5-5, 2026-11-14* (different model family from the executor, DeepSeek.)
+
+**Verdict: PASS (no HIGH/MEDIUM).**
+
+- **Gate (narrow, per brief):** the 5 touched/adjacent test files 38/0; `bun test packages/tui` **1973 pass / 0 fail** (139 files); `bun run lint` 1222 files clean; `bun run typecheck` clean. Full `bun test` not re-run here; the executor's one unreproduced `118 fail` run stays open as it disclosed.
+- **Verbatim move:** every line removed from `App.tsx` is in `useSessionLink.ts` except imports, two old dep arrays and one comment (a line-set diff). The only body-adjacent drift is the dep arrays.
+- **Identity (H2):** every dep added beyond `main`'s arrays is a `useRef` object or a raw `useState` setter (`setScrollOffset`/`setExpandAll`/`setExpandedIds` `App.tsx:305-311`, `setDaemonQueue` :494, `setContextOpen` :582) → no callback identity changes; `app-structural-identity.test.ts` is green and unedited.
+- **H1:** App still declares 20 effects; the hook imports no `useEffect`. Its one `useRef` (`swapRef`) adds a hook slot, which is stable across renders.
+- **§7:** no broker, no terminal IO, no persistence/protocol touched; single-broker holds.
+- **Mutation (my own):** dropping `watchSession(null)` before `old.detach()` in `switchTo` **survives** the new layer file (9/0), but is **killed** by the existing `connect-sessions.test.tsx` "(b) … detach THEN open". Reverted; `git status` clean.
+- **Nits (not blocking):** `onActivityRef.current = onActivity` is assigned twice (`useSessionLink.ts:398` and `App.tsx:1455`). It does no harm, but Execution says "plus the two ref installs" in App when only one is there. The layer file's "detach before open" case does not pin the watch release by itself; the older test does.
+- **Executor behaviour:** honest about its scope. It corrected the module map instead of forcing the code to match it, disclosed the flaky run and the skipped coverage check, and fixed its own surviving mutants by strengthening the tests.
