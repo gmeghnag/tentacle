@@ -1574,3 +1574,31 @@ fail; `bun test apps/mobile` → 618 pass · 0 fail. Total went 9050 (11b.2) →
 **Unverified, one line:** Maestro was not re-run — this round changes no app code,
 so no flow can differ — and the `packages/daemon` flake in run 1 was not fixed
 (its file is outside this slice), only attributed and then shown absent in run 2.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-14 — review of `git diff HEAD~1` (`22c48956`), fresh context*
+
+**Verdict: PASS** (APPROVE-WITH-NITS).
+
+**Gate:** `scripts/test/task-doc-signatures.test.ts` 4 pass · 0 fail; `bun run lint`
+clean (1230 files); `bun run typecheck` clean. No app code changed in this round
+(`docs/` + one test file only), so round 2's `bun test apps/mobile` count (618/0) still applies.
+
+1. **Round 2 finding 2 (signature) — FIXED.** 11b.2's Execution header and its
+   `### Fix round 1` now read `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`, which matches
+   the `(deepseek)` in commits `f396ff99` and `0c5fb025`. Fix round 2 is signed the
+   same way and matches `22c48956`. The wrong ids are kept as trailing notes, not
+   silently erased. **Mutation:** Fix round 1 re-signed `claude-opus-5-5` → the
+   AGREES test went red. Restored from a backup; `git status` clean.
+
+**Nits (not blocking):**
+- The test's 3rd case ("the reason is quoted from the commits") compares a constant
+  with itself. It can't fail, so §9 counts it as a test that proves nothing.
+  Delete it, or derive the expected ids from `git log`.
+- `expect(fixRounds.length).toBe(2)` ties a permanent repo test to this doc's
+  heading count: a later `### Fix round 1` added to the doc breaks it for no
+  real reason. A floor (`>= 2`), or finding the section by its position after
+  the 11b.2 Execution, would hold.
+- Round 2's LOW (a late camera grant after a deep link brings the camera back on
+  "Try again") is left as is: accepted, not blocking.
