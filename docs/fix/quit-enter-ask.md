@@ -207,7 +207,130 @@ All four questions: the recommendation (owner: "Tutte come raccomandato").
 
 ## Execution
 
-*— pending*
+*— claude-sonnet-4-5-20250929, 2026-11-14*
+
+**Load-bearing check, re-run first (PASS).** `rg stepPermissionKey packages/tui/src`
+returns the definition plus EXACTLY one call site, `keys/layer-dialog.ts:53`
+(now `:57`), and `App.tsx` has exactly one `useInput` (`:1914`). `permissionLayer`
+is 4th of the 13 pure layers (`keys/layers.ts:45`), before every input layer. So
+one guard inside `stepPermissionKey` reaches Enter/`y`/`a` for every request kind
+(tool, hooks trust, session hop). No step contradicted the code.
+
+**Repro on the branch, before any edit** (`.tentacle/tmp/fix-quit-enter-ask/repro.ts`,
+copied into the worktree so it imports the branch's sources; the doc's copy
+imports the main checkout):
+
+```
+A '/quit' typed, ask opens, Enter 30ms later: dialog=gone answer={"allowed":true,"scope":"once"}
+B same, ask takes a reply: dialog=gone answer={"allowed":true,"scope":"once"}
+C ask opens after '/qui'; then 't' Enter: dialog=gone answer={"allowed":true,"scope":"once"}
+D ask opens after '/qui'; then 't' Enter (reply ask): dialog=gone answer={"allowed":false}
+E typing 'say' as the ask opens after 's': dialog=gone answer={"allowed":true,"scope":"session"}
+```
+
+Matches the doc row for row (I added `dialog=up|gone` to each line, from
+`lastFrame()`).
+
+**As built, in dependency order.**
+
+1. `packages/tui/src/permission-reply.ts` — `ARM_MS = 500` (`:68`), pure
+   `isArmed(shownAt, now)` (`:76`, `shownAt === null` ⇒ false, `>=` boundary, a
+   backwards clock ⇒ false), `DialogContext.armed` (`:58`), and ONE local
+   `answer()` in `stepPermissionKey`'s menu branch (`:133-142`) that returns
+   `{ state, action: NONE }` for an approval while `!ctx.armed`, and today's
+   `answer` for a refusal or once armed. Enter-on-a-choice, `y` and `a` all route
+   through it (`:154`, `:157`, `:160`); Ctrl+C (`:127`), arrows, `t`, the reply
+   row and `n`/Esc are untouched above/below it. This also fixes a latent detail
+   the plan did not name: `a` on a hooks-trust ask with no store resolves to
+   "Don't trust" (`allowed: false`), so the refusal test is on the RESPONSE, not
+   on the key — `a` denies immediately there, and the test pins it.
+2. `packages/tui/src/permission-ui.ts` — `shownAtRef` (`:319`), `shownAt()` on
+   the controller (`:257`, `:328`), reset to `null` when a request is set
+   (`:449`), stamped `Date.now()` in a `useEffect` keyed on `pending` (`:465-476`)
+   — post-commit, so the window starts when Ink DREW the dialog.
+3. `packages/tui/src/keys/snapshot.ts` — `KeyPermission.shownAt(): number | null`
+   (`:67`) + its SOURCES row (`:40`, getter).
+4. `packages/tui/src/keys/layer-dialog.ts` — `armed: isArmed(snap.permission.shownAt(), Date.now())`
+   (`:60`).
+5. `packages/tui/src/App.tsx` — one literal line, `shownAt: () => permission.shownAt()`
+   (`:1957`).
+6. New test `packages/tui/test/quit-enter-ask.test.tsx` (8 cases: A, C, E,
+   window expiry, denial immediate, Ctrl+C, back-to-back asks, silence) and the
+   pure cases added to `packages/tui/test/permission-reply.test.ts`.
+7. `changelog.d/quit-enter-ask.fixed.md`.
+
+**Drift from the Implementation (and why).** Two, both reconciled here:
+
+- **D1 — the fixture list was incomplete (Files item 6).** Adding a required
+  `KeyPermission.shownAt` broke FOUR more App suites the plan did not list:
+  `app-keys-precedence.test.tsx`, `app-structural-freshness.test.tsx`,
+  `subagent-panel-frames.test.tsx`, `send-now-app.test.tsx`, plus
+  `app.test.tsx`'s "runs the shell command when approved". These are not fixture
+  edits: each sends an APPROVING key (`y`, or Enter on the highlighted "Yes")
+  within milliseconds of the ask appearing, i.e. exactly the gesture the fix
+  forbids. They now wait `ARM_MS + margin` (a local `armed()` helper) before
+  approving, with a comment saying why. That is the honest change: the old
+  expectation *was* the bug. `keys-layers.test.ts`, `keys-route.test.ts` and
+  `panels-registry.test.ts` got `shownAt: () => 0` (epoch 0 ⇒ long armed) as the
+  plan said, so their expectations hold unchanged. One file the plan listed
+  needed NOTHING: `keys-snapshot-source.test.ts` only scans source TEXT (the
+  table's value half) and builds no `KeyPermission`, so a new getter there
+  changes nothing — it passes untouched.
+- **D2 — the guard is classified by the RESPONSE, not by the key.** The plan
+  said "Enter on a choice whose `response.allowed === true`, `y` and `a`". Since
+  `a` is not always an approval (`hooks_trust` without a store: "Don't trust"),
+  the guard tests `response.allowed === true` for all three keys uniformly. That
+  is strictly what owner Q2 asked ("deny keys stay immediate") and is simpler
+  than keying on the key.
+
+Otherwise as planned: no protocol, persistence, broker or daemon change, and
+auto-accept untouched (it answers in the requester, before any dialog).
+
+**Red before green.** The pure test went red on the assertion
+(`disarmed: every approving key is swallowed` — 5 received answers against `NONE`)
+after I added `ARM_MS`/`isArmed`/`armed` WITHOUT the guard, precisely so the red
+was not an import error; then the guard made it green. The App-level test file
+was written after the fix (it is the regression net for the repro, and its
+red-ness is proven by mutation M1 below, which is the same experiment run
+against the buggy decision).
+
+**Mutations (§9 non-vacuity), each applied, run, and reverted:**
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `layer-dialog.ts`: `armed: isArmed(...)` → `armed: true` (the buggy decision) | 5 red: cases A, C, E, back-to-back, silence |
+| M2 | `permission-reply.ts`: drop `\|\| response.allowed === false` from `answer()` (guard swallows denials too) | 1 red: `disarmed: refusals, arrows, t and Ctrl+C stay immediate (owner Q2)` |
+| M3 | `permission-ui.ts`: remove the stamp (`shownAtRef.current = Date.now()`) | 2 red: `the window expires`, `back-to-back asks` |
+| M4 | `permission-ui.ts`: remove the reset (`shownAtRef.current = null`) | **0 red — SURVIVES.** See Review note (R1); it is redundant with M3's stamp, not with anything else: the stamp effect is keyed on `pending`, so a new request always restamps after commit. The reset only prevents a pre-commit read from seeing the PREVIOUS request's stamp — a window that lands between `setPending` and the commit, which no test in this repo can produce deterministically through `ink-testing-library` (the ask helper always awaits ≥30 ms). Kept (it is the fail-safe direction) and recorded as a known-unpinned line rather than claimed as tested. |
+
+**Repro after the fix** (same script, same command):
+
+```
+A '/quit' typed, ask opens, Enter 30ms later: dialog=up answer="PENDING"
+B same, ask takes a reply: dialog=up answer="PENDING"
+C ask opens after '/qui'; then 't' Enter: dialog=up answer="PENDING"
+D ask opens after '/qui'; then 't' Enter (reply ask): dialog=gone answer={"allowed":false}
+E typing 'say' as the ask opens after 's': dialog=up answer="PENDING"
+```
+
+A, B, C, E are the doc's expected `PENDING` with the dialog still up; D is
+unchanged (`t` opened the reply field, Enter sent an empty field = a plain No).
+
+**Gate** (in the worktree, after `bun install`; the branch worktree shipped with
+no `node_modules`, so the mobile app's deps were installed too — CI excludes the
+mobile app, and without it `bun test` reports 34 unrelated
+`Cannot find module` errors from `apps/mobile`):
+
+```
+bunx tsc --noEmit          → clean
+bunx tsc -p apps/mobile    → clean
+bun run lint               → clean (0 errors, 0 warnings; baseline §6)
+bun test                   → 9349 pass, 3 skip (the three opt-in skips), 0 fail
+```
+
+No schema change, so `packages/protocol/schema/protocol.json` is untouched
+(`git status` shows only the files above plus the new test and fragment). No
+`protocol.d/` note (no wire change). `TODO.md` not touched.
 
 ## Review
 

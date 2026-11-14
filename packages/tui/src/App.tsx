@@ -1954,6 +1954,7 @@ export function App({
           choices: permission.choices,
           selected: permission.selected,
           mode: () => permission.readMode(),
+          shownAt: () => permission.shownAt(),
         },
         sessions,
         detachOnQuit,

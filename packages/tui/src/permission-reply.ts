@@ -54,6 +54,27 @@ export interface DialogContext {
   readonly selected: number;
   /** The request's `reply.maxChars` (0 when it takes none). */
   readonly maxChars: number;
+  /** The arming window has passed: approving keys answer (see `ARM_MS`). */
+  readonly armed: boolean;
+}
+
+/**
+ * How long after its dialog first appears a request's approving keys are
+ * swallowed (docs/fix/quit-enter-ask.md): a key typed for the main input in the
+ * human reaction window after the dialog appears must not approve the call.
+ * Short enough to be invisible to a deliberate answer, long enough to cover a
+ * reaction-time keystroke. Not configurable (owner Q1).
+ */
+export const ARM_MS = 500;
+
+/**
+ * Has a dialog shown since `shownAt` been up for `ARM_MS`? `null` (never
+ * shown) is disarmed. A backwards clock jump keeps it disarmed until real time
+ * passes `ARM_MS` beyond the stamp — fail safe: it can block an approval, never
+ * grant one.
+ */
+export function isArmed(shownAt: number | null, now: number): boolean {
+  return shownAt !== null && now - shownAt >= ARM_MS;
 }
 
 /** The field's prompt row, footer and visible rows. */
@@ -109,6 +130,16 @@ export function stepPermissionKey(
   const { choices, selected } = ctx;
   const n = choices.length;
   const replyable = choices.some((c) => c.reply === true);
+  /**
+   * Answer, unless this is an APPROVAL and the arming window is still open
+   * (docs/fix/quit-enter-ask.md): the key was typed for the input underneath.
+   * A refusal always goes through (owner Q2 — an accidental refusal is
+   * recoverable, an accidental approval is not).
+   */
+  const answer = (response: PermissionResponse): DialogStep =>
+    ctx.armed || response.allowed === false
+      ? { state, action: { kind: "answer", response } }
+      : { state, action: NONE };
   if (key.upArrow) {
     return { state, action: { kind: "select", index: (selected - 1 + n) % n } };
   }
@@ -120,14 +151,13 @@ export function stepPermissionKey(
     if (choice?.reply) {
       return { state: open(state), action: NONE };
     }
-    return { state, action: { kind: "answer", response: choice?.response ?? { allowed: false } } };
+    return answer(choice?.response ?? { allowed: false });
   }
   if (char === "y") {
-    return { state, action: { kind: "answer", response: { allowed: true, scope: "once" } } };
+    return answer({ allowed: true, scope: "once" });
   }
   if (char === "a") {
-    const response = choices[1]?.response ?? { allowed: true, scope: "session" };
-    return { state, action: { kind: "answer", response } };
+    return answer(choices[1]?.response ?? { allowed: true, scope: "session" });
   }
   if (char === "t" && replyable) {
     return { state: open(state), action: NONE };
