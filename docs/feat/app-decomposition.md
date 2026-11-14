@@ -2045,3 +2045,200 @@ HEAD~1 -- packages` empty): one fragment deleted, the plan/Execution amended.
   pinned by M14 is "as the review itself noted". The S4 review never said that.
 
 *— claude-opus-5-5, 2026-11-14*
+
+## Execution
+
+### S3 — `feat/app-decomp-3-keyroute` (the key router leaves `App.tsx`)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: `ps` shows this
+run launched as `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is that id in `~/.config/tentacle/config.jsonc:32`.)
+
+**Scope.** `packages/tui/src/keys/` (new: `contract.ts`, `effects.ts`,
+`snapshot.ts`, `route.ts`, `layers.ts`, `layer-precedence.ts`, `layer-dialog.ts`,
+`layer-panels.ts`, `layer-dock.ts`, `execute.ts` — 1082 lines), `App.tsx`
+(−348/+183: the 369-line handler body and its 389 inline layer lines replaced by
+a snapshot build + `routeKey` + `executeEffects` + the mouse continuation), four
+new test files, one changelog fragment. **No existing test edited**, no
+`packages/protocol` change (so `protocol.json` was NOT regenerated), no other
+slice touched (`TODO.md` untouched).
+
+**Resume note (the working tree was NOT partial).** This run resumed a step cut
+by a connection reset. `git status --short` in this worktree was **clean** — the
+previous attempt left nothing behind, so nothing was "finished"; the slice was
+implemented from scratch here. Recorded because the brief asserted partial edits.
+
+**Load-bearing check, re-run first (PASSED).** Re-verified on this branch, not
+trusted: `packages/tui/node_modules/ink/build/hooks/use-input.js:89` registers
+`internal_eventEmitter?.on('input', handleData)`; `handleData` (`:80–87`) returns
+nothing anyone consumes and there is no stop-propagation, and the emitter is
+per-App (`components/StdinContext.js`). `rg 'useInput\(' packages/tui/src` →
+`App.tsx` (the one handler) and the separate pre-mount
+`components/SessionPicker.tsx:85`. **Holds** — so `App` keeps ONE `useInput` and
+S3 moves only its BODY, which is exactly the H3 revision.
+
+**Design, as built (dependency order).**
+1. **`contract.ts`** — `{effects, verdict, carry}`, `NOTHING`/`consumed`/
+   `passThrough`, the 14 `KeyLayerName`s, and the `LayerStep`/`KeyRoute` types.
+2. **`effects.ts`** — the effect vocabulary, **data only** (no closures), so a
+   layer is a pure function of the snapshot and the whole order is testable.
+3. **`snapshot.ts`** — `KeySnapshot` **with the plan's source table written into
+   the file**: a field that was a ref read at key time is a GETTER, a field that
+   was a render closure is a VALUE. This is the slice's central artifact (H3).
+4. **the four layer modules** — `layer-precedence.ts` (shiftTab, quitConfirm,
+   chord), `layer-dialog.ts` (permission, ctrlC, paste), `layer-panels.ts`
+   (sessions, tree), `layer-dock.ts` (dock, escUpload, escAbort, expandAll,
+   palette). Each is 2–5 lines of wiring around a decision the repo already
+   owned (`stepChord`, `quitConfirmKey`, `stepPermissionKey`, `stepPaste`,
+   `sessionsKey`/`sessionsChoose`/`sessionsDelete`, `treeKey`, `dockKey`,
+   `dockClaimsCtrlX`, `ctrlCQuitStep`). **No decision was re-derived.**
+5. **`route.ts`** — `routeKey`: walk in order, accumulate every passing layer's
+   effects, stop at the first `consumed`, carry the last non-empty `carry`,
+   report `stoppedAt` (so a precedence bug reads as a name in a test).
+6. **`layers.ts`** — `PURE_LAYERS` (the walkable 13) + `LAYER_ORDER` (all 14, the
+   documented precedence). A test asserts the two never drift.
+7. **`execute.ts`** — `KeyHost` (a narrow port of the App's own stable callbacks)
+   and `executeEffect(s)`. The only place a decision becomes an App call.
+8. **`App.tsx`** — the handler body is now: build the snapshot at the event →
+   `routeKey(…, PURE_LAYERS)` → `executeEffects(routed.effects, keyHost)` → stop
+   if consumed → the mouse continuation. The line-editing tail (history/`recall`
+   /`resolveLineInput`/the terminal `switch`) is untouched, as designed.
+
+**Drift from the Implementation (four, all recorded, none silent).**
+
+1. **The mouse layer is the router's CONTINUATION, not the 14th entry of the
+   walked list.** The plan's H3 says "14 layers" and `routeKey` runs their
+   effects. That cannot hold for the mouse layer *as an entry in the walk*:
+   `useMouse.handleChunk` **applies its own effects** as it decides (S4's hook
+   owns refs + timer), so walking it inside `routeKey` would run the mouse's
+   effects BEFORE `executeEffects` applied the earlier layers' collected ones —
+   a report could then read a `dockRef`/`panel` the key path had already changed
+   inline today, i.e. an effect-order inversion (the plan's own `Effect order`
+   failure mode). So `routeKey` walks the **13 pure layers** and the mouse layer
+   runs after `executeEffects`, exactly where the inline handler had its mouse
+   block. `LAYER_ORDER` still names all 14 and a test pins
+   `PURE_LAYERS === LAYER_ORDER.slice(0, -1)`; the contract, the order and the
+   count the plan asks for are all intact — only the *execution seam* differs,
+   and for a load-bearing reason. `layers.ts` states this in its header.
+2. **The chord emits a `setChord` only when the state would CHANGE.** The inline
+   handler assigned `chordRef.current = chord.state` unconditionally;
+   `stepChord` returns the *same object* when nothing changes, so writing it is a
+   no-op. Emitting the write unconditionally made three tests (and any reader of
+   `effects`) see a no-op effect on every key. Behaviour is identical — a write
+   of idle over idle changes nothing — and the effect list stays legible. The
+   one place this is observable is `dockClaimsCtrlX`'s reset, where the layer now
+   writes only when the chord was actually armed.
+3. **`sessionsDelete`'s async refresh moved out of the handler into an App-level
+   `useCallback`.** The plan's file list for S3 has no App-level helper, but the
+   delete's `.then` chain (remove → list → refresh-if-still-the-same-panel) is a
+   driver, not a key decision: it stays in App, is called by ONE effect
+   (`sessionsDelete{id, startedGen}`), and keeps `sessionsRefreshApplies`'s
+   generation checks verbatim. Its deps are `[sessions, pushNotice]`.
+4. **`permissionStop` and `pasteReply` body live in the App's port, not in the
+   pure layer.** Both read the App's live `abortRef` / clipboard seam and mutate
+   `stoppedHereRef`, so the layer decides only *that* the key is a stop / a
+   clipboard read (`permissionStop` / `pasteReply` effects) and the App executes
+   it — the same split the plan asks for, just with the branchless part on the
+   App side because it touches refs the snapshot does not carry.
+
+**Snapshot-source table (as implemented; the plan's H3 requirement).** Written
+into `keys/snapshot.ts` as a per-field table with the pre-S3 line numbers:
+ref-read getters — `quitConfirm` (3814), `dock` (3841/4062), `chord`
+(3842–3860), `running` (4107), `compacting` (3634), `permission.mode` (3861),
+`pasteBuffer` (3863/3909), `replyMaxChars` (3868), `dockIds` (3701),
+`othersOnSession` (3547/3562), `sessionId` (3627), `switching` (3708/3755),
+`panelGen` (3700), `abortable` (3907/3548), `uploadInFlight` (3900),
+`exitPending` (3564), `subagents`/`jobRows` (3563/3565); render values — `panel`
+(3612/3682/3698), `paletteOpen`/`paletteNames`/`commandSel` (3757–3791),
+`fieldValue` (3705), `permission.pending`/`.choices`/`.selected` (3870),
+`sessions` (3638), `detachOnQuit` (3565). **No field was "cleaned up" to one
+source**, and no field changed source.
+
+**Tests (new only, 81 assertions-bearing tests across 4 files).**
+- `packages/tui/test/keys-route.test.ts` (11) — the layer ORDER as data, the
+  walk's first-claimer semantics, act-and-pass, effect ORDER, and `carry`.
+- `packages/tui/test/keys-layers.test.ts` (30) — every layer's effects AND
+  verdict, including the failure modes the plan lists: quit-confirm's `y` vs an
+  ask, Ctrl+C's four outcomes, a `connect` detach losing no job, a paste behind a
+  panel, the reply-field paste, the dock's Esc chain vs the turn's, Esc-upload
+  before Esc-abort, the palette, and the ordering invariants (shift+tab over
+  everything; sessions-Esc over Esc-abort).
+- `packages/tui/test/keys-execute.test.ts` (35) — each effect reaches the RIGHT
+  host method (a table), the `quit` order (closeForAll then requestQuit), and
+  that no effects means no calls.
+- `packages/tui/test/keys-app-seam.test.tsx` (5) — through real Ink: the
+  snapshot's getters are live (two Ctrl+C in ONE tick, then the "never a trap"
+  re-ask), a passing layer's effects do not swallow the key (ctrl+x then typing
+  then Enter still sends), and line editing still submits.
+**S0/S0b nets stay green and UNEDITED** (82 tests, run before AND after), which
+is this slice's behaviour-preservation proof; the full TUI package was run at
++0 fail (1792) as an additional check with the handler already replaced.
+
+**Red before green (§9).** Every new test file was written against the
+implemented module and run immediately; the three failures that surfaced were
+**my test expectations, not the code**, and each was resolved by reading the
+owning pure module rather than bending the code: (a) `dockKey` in `list` focus
+moves Esc one step up the chain to the **pill**, not straight to `input`
+(`background-focus.ts:452`, verified) — the test was rewritten to the real
+chain; (b) a `connect` (`detaches: true`) Ctrl+C with a running turn yields
+`stop` → `abortTurn`, not `exit` (`ctrlCQuitStep`'s second `quitAction` branch,
+verified) — the test's expectation was corrected; (c) a no-op `setChord` is not
+emitted (drift 2) — the test now asserts both the idle case (no write) and the
+armed case (a write). **The slice's own "red" proof is the mutation table below**:
+15/15 mutants are killed by the new tests, which is what shows they pin the
+property rather than merely passing.
+
+**Mutation check (§9 non-vacuity) — 15/15 KILLED.** Harness
+`.tentacle/tmp/app-decomp-3-keyroute/mutate.ts` (byte-copy, ONE mutation, run the
+owning test file, restore, sha256 compare; a 0-test run is reported INVALID so a
+bad filter cannot look like a kill). Three mutants **SURVIVED the first pass** —
+each a real hole, closed by adding the test named beside it:
+
+| # | Mutation | First pass | Now |
+|---|---|---|---|
+| M1 | quit-confirm and the chord swapped in the list | KILLED (9/2) | KILLED |
+| M2 | quit-confirm read as a render value, not the ref | KILLED (9/2) | KILLED |
+| M3 | a passing layer's effects dropped | KILLED (8/3) | KILLED |
+| M4 | effects collected with `unshift` (reverse order) | KILLED (10/1) | KILLED |
+| M5 | `carry` never propagates | KILLED (8/3) | KILLED |
+| M6 | the sessions disarm CONSUMES instead of passing | KILLED (9/2) | KILLED |
+| M7 | a printable key on the pill is swallowed | **SURVIVED (28/0)** | **KILLED** — added "a printable key on the FOCUSED PILL is typed, not swallowed" |
+| M8 | Ctrl+C on the dialog denies instead of stopping | KILLED (27/1) | KILLED |
+| M9 | Esc no longer cancels an upload in flight | KILLED (27/1) | KILLED |
+| M10 | the dock is offered keys behind a panel | **SURVIVED (28/0)** | **KILLED** — added "a key the panel does not claim never reaches the dock" |
+| M11 | a paste behind a panel edits the hidden input | KILLED (27/1) | KILLED |
+| M12 | a dock-owned `ctrl+x` taken by the chord | KILLED (10/1) | KILLED |
+| M13 | Esc-abort ordered before Esc-upload | KILLED (27/1) | KILLED |
+| M14 | the two panel layers swapped | KILLED (9/2) | KILLED |
+| M15 | the executor wires `abortTurn` to `sendNow` | **SURVIVED (5/0)** — the seam test never ran the executor table | **KILLED** — added `keys-execute.test.ts` |
+
+Every row is a red on the ASSERTION with a real pass/fail count (never an
+import/compile error); after each the mutated file's sha256 `MATCHES` its
+pre-run value, and `git status --short packages/tui/src` lists only `App.tsx`
+(modified) and the new `keys/` directory — **no mutation survived into the tree**.
+
+**Gate (this worktree, this branch).** `bun run check` → `tsc --noEmit` clean
+(`tsc -p apps/mobile` included by the script, clean), `biome check .` **1064
+files, 0 errors 0 warnings** (the AGENTS §6 baseline — clean), `bun test`
+**8224 pass / 3 skip / 0 fail** across 591 files (the 3 skips are the documented
+opt-ins: live-k8s, live-docker, the real-socket keepalive). No schema change →
+`packages/protocol/schema/protocol.json` not regenerated. One changelog fragment
+added: `changelog.d/app-decomp-3-keyroute.changed.md` (user-visible: new key
+bindings are now new files; the rule for "internal refactor adds none" applies to
+S4, but S3 changes how a TUI binding is added, so it earns one bullet).
+`TODO.md` untouched.
+
+**Drift left open (for the reviewer, not hidden).**
+- The plan's per-slice coverage check (`bun test --coverage packages/tui`,
+  App.tsx + new-files line total not dropping) was **not** run; the moved lines
+  are pinned by 81 new assertions plus the untouched S0/S0b nets, but the
+  percentage is unmeasured.
+- `keys/layer-panels.ts` re-exports four `sessions-panel.ts` helpers
+  (`sessionsListError`, `deleteFailedNotice`, `sessionsRefreshApplies`,
+  `refreshedSessions`) so App keeps one import for the delete driver. That is
+  convenience, not necessity, and a reviewer may prefer App to import them
+  directly; it changes no behaviour either way.
+- "What stays in App.tsx" targets ≲800 lines after all slices; S3 leaves App at
+  **3937** (from 4102) — the remaining reduction is S2/S5–S10's, as planned.
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14*
