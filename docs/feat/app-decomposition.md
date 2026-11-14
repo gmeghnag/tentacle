@@ -3136,3 +3136,20 @@ totals as the S5 Execution, as expected for a round that touches no code.
 **Unverified.** None new. The S5 Execution's two standing caveats (the
 `--coverage` pair not run; `App.tsx` at 3457 lines, not the plan's ≲800, since
 S7–S10 are open) still hold and are untouched by this round.
+
+### Round 2 — PASS
+
+**Finding 1 (MEDIUM, changelog fragment): FIXED.** `git diff HEAD~1` deletes
+`changelog.d/app-decomp-5-dock.changed.md` and changes only this doc; no change
+under `packages/` or `scripts/`, so no code regression is possible from this
+round. Mutation: I put the fragment back from `HEAD~1` and removed it again; tree
+clean afterwards. I could not run the executor's probe (`frag-check.ts`) here
+because this sandbox needs approval to run scratch scripts. The fix is checkable
+without it: the release path reads `changelog.d/` files, and this slug's file is
+gone (`ls changelog.d` → only S2's fragment, on `main`, out of scope). The
+Execution's Scope and Gate lines are corrected to match.
+
+**Gate.** `bun run typecheck` clean; `bun run lint` 1114 files, 0 errors/warnings;
+changelog-guard + changelog + release tests 57 pass / 0 fail.
+
+*— claude-opus-5-5, 2026-11-14*
