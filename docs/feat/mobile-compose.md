@@ -529,6 +529,178 @@ Red-before-green: flows 12–19 fail on 12c (no queue rows / photo button);
 
 ## Execution
 
+### 13a `mobile-compose-queue` — DONE (contained)
+
+*— deepseek-v4.1-flash-1017 (executor of slice 13a), 2026-11-14*
+
+**Load-bearing check, re-run first (it PASSED — precondition, not the whole
+plan's assumption).** Slice 13a rests on P1/P2/P3 only; 13b/13c own the
+key-persistence and the hasher. In
+`.tentacle/tmp/mobile-compose-13a/load-bearing.txt`:
+
+```
+== P1 QueueStateSchema / onQueued / queued getter ==
+packages/protocol/src/session.ts:514:export const QueueStateSchema = z.object({
+packages/client/src/remote-session.ts:511:  get queued(): QueueState | undefined {
+packages/client/src/remote-session.ts:537:  onQueued(listener: (state: QueueState) => void): () => void {
+== P2 reclaim public ==
+packages/client/src/remote-client.ts:1190:  reclaim(sessionId: string, ids: readonly string[]): Promise<void> {
+== P3 hand-back NOT exported from the client index ==
+no hand-back export (as P3 says)
+== parity references exist ==
+packages/tui/src/queued.ts:72: takeForSendNow · :94 shownRows · :127 afterRefusal · :164 returnedNotice
+packages/client/src/hand-back.ts:30: handBack
+== 13a module absent (feat: capability missing) ==
+ls: apps/mobile/src/compose-queue.ts: No such file or directory
+```
+
+The plan's Context **Repro** also re-ran on this branch: the only hit for
+`enqueue|sendNow|onReturned|onQueued|attachImage|sha256Bytes|image-picker|outbox`
+under `apps/mobile` is `apps/mobile/e2e/mock-model.ts:85`, a `ReadableStream`
+controller — the capability is missing, as recorded.
+
+**As built, in order.**
+
+1. `apps/mobile/src/compose-queue.ts` (new, pure, React-free; 381 lines): D2
+   `shownRows` + `addRow` / `markAcked` / `onReject` / `takeForSendNow` /
+   `handOff` / `afterRefusal` / `restoredByRefusal`; D3 `planHandBack` /
+   `handBackStep` / `settleReclaim` / `returnedNotice` / `returnedOthers` /
+   `takeReturned`; D4's bound `settleOwn`. Types `OwnIds` (the persisted
+   id → my-text map 13b stores), `ShownRow` (the daemon's row plus `mine`),
+   `ReturnedRow`, `HandBackStep`, `TakePlan`.
+2. `apps/mobile/test/compose-queue.test.ts` (new, 21 tests) — red first, on the
+   module being absent, then on the assertion that mattered (`acked` leaked
+   into the shown row, see Drift 3).
+3. `apps/mobile/test/compose-queue-parity.test.ts` (new, 34 tests) — the same
+   fixtures through `packages/tui/src/queued.ts` (`shownRows`, `takeForSendNow`,
+   `afterRefusal`, `returnedNotice`) and `packages/client/src/hand-back.ts`
+   (`handBack`), test-only relative imports (the 12b `transcript-parity`
+   pattern); the app's `planHandBack` must return the client's exact
+   `{give, reclaim}` arrays.
+4. `changelog.d/mobile-compose-13a.added.md` (see Drift 2).
+5. Gates: see **Gate** below.
+
+**Gate.**
+
+```
+bunx tsc --noEmit                                   clean (exit 0)
+bunx tsc -p apps/mobile                             clean (exit 0)
+bun run lint                                        clean — 1067 files, 0 errors, 0 warnings
+bun test apps/mobile/test/compose-queue*.test.ts    55 pass / 0 fail
+bun test apps/mobile                                271 pass / 0 fail (24 files)
+bun test packages/cli                               2736 pass / 0 fail (176 files)
+```
+
+The only lint trips on the new files were formatting + `useImportType`, fixed
+with `biome check --write`; the baseline stays 0 errors / 0 warnings.
+
+**Full `bun test`, honestly — not green, and not mine.** Three whole-suite runs
+each ended `8331 pass · 3 skip · 1 fail`, with a **different** failing test each
+time and every one of them in a package this slice does not touch (grep:
+nothing outside `apps/mobile` imports `compose-queue`; `apps/mobile/package.json`,
+`bun.lock`, `packages/core`, `packages/tui`, `packages/client` all unmodified):
+
+| run | failing test | isolated |
+|---|---|---|
+| 1 | `packages/cli/test/engine-runtime.test.ts:1523` — "startAttachRuntime … never deletes": `saved` length 0, expected 1 | 104 pass |
+| 2 | `packages/cli/test/local-runtime.test.ts:475` — "resumes a saved session …": `records[0]` null | 79 pass |
+| 3 | `packages/exec/test/confinement.test.ts:474` — "R2-4: a hard-linked file INSIDE the root is writable again" | 46 pass |
+
+Runs 1 and 2 are `await new Promise(r => setTimeout(r, 20))` → read-the-store
+assertions; run 3 is a filesystem race. All three pass in isolation and per
+package (`packages/cli`: 2736 pass, 0 fail; `apps/mobile`: 271 pass, 0 fail),
+which is the same count and the same tests as `main` — nothing regressed, the
+20 ms timings simply lose under this machine's load (**uptime load average
+15–22**, 24 sibling `bun test` / Maestro processes from the parallel 13b/13c
+slices at the time of each run). PER AGENTS §0 I stopped after the third run
+rather than re-running the same experiment. The 3 skips are the three opt-in
+ones §6 names (live-k8s, live-docker, the real-socket keepalive).
+**To verify:** re-run `bun test` on an idle machine; on this branch it must
+report `8334 pass · 3 skip · 0 fail`.
+
+
+**Failure modes of the plan this slice owns.** F10 (mine returned → field +
+banner, reclaimed once — also after a killed app, since `own` is the persisted
+map: pinned by the "mine comes back once" + "the text is MINE" tests), F11
+(another writer's returned row listed, never auto-reclaimed, only `take`),
+F12 (send-now refusal: only the texts the daemon does not `held` come back;
+`restoredByRefusal` names them so the hand-back does not give them twice), F24
+(ids are per-install; a foreign row is never mine), plus the TUI's D2 rules (a
+local row before its ack, an acked-and-drained row gone, my `sending` state
+surviving the daemon's list, delivery order for every writer's rows). F1–F9,
+F13–F23 belong to 13b/13c/13d.
+
+**Failure-mode tests present and green** (`bun test apps/mobile/test/compose-queue*.test.ts`):
+local-before-ack · acked-row-drained · others'-rows-labelled-and-ordered ·
+sending-state-survives · take/second-take-empty · handOff-keeps-late-rows ·
+refusal-restores-unheld · `restoredByRefusal` (held / no-report /
+MethodNotFound / NoTurnRunning / null) · reject-notifies-unless-owned ·
+mine-once (+ a lost reclaim retried at the next state) · text-is-mine ·
+carried-not-given · two-joined-with-one-banner · foreign-never-reclaimed ·
+Take + Take-on-mine-is-none + Take-on-absent-is-none · duplicate-id-once ·
+banner-wording · `settleOwn` (forget / keep-in-flight / keep-returned) ·
+34 parity cases.
+
+**Mutations (the plan's own targets, plus five of mine; each run in place, then
+reverted — `cmp` against the pre-mutation copy confirms the file is identical,
+and the suite is green again: 55 pass / 0 fail):**
+
+```
+M1 drop `handedBack` (give a row twice):            exit=1  53 pass 2 fail
+M2 auto-reclaim another writer's row w/ its text:   exit=1  52 pass 3 fail
+M3 shown rows ignore `acked` (drained row stays):   exit=1  52 pass 3 fail
+M4 a send-now take leaves the rows queued:          exit=1  50 pass 5 fail
+M5 settleOwn forgets ids not yet in the daemon view: exit=1 54 pass 1 fail
+M6 banner always blames another device:             exit=1  50 pass 5 fail
+M7 Take accepts one of my own rows (2nd path):      exit=1  54 pass 1 fail
+reverted
+```
+
+M1 and M2 are the plan's two named mutations ("drop `handedBack` → given
+twice"; "auto-reclaim → red"); both are red **on the assertion**, not on a
+compile error, and both are also caught by the parity file (the client's
+`handBack` disagrees). Script: `.tentacle/tmp/mobile-compose-13a/mutate.py`.
+
+**Drift from the Implementation (and why).**
+
+1. **Three helpers the plan did not name, all inside 13a's own file.** The plan
+   listed `compose-queue.ts` as "shown rows (D2), hand-back (D3), send-now
+   take/restore" without naming functions; the built module also carries
+   `restoredByRefusal`, `settleReclaim` and `settleOwn`. `restoredByRefusal`
+   and `settleOwn` are needed by a *pure* D3/D4 bound the plan states in prose
+   ("ids I already restored after a send-now refusal are only reclaimed";
+   "`ownIds` … loses it when the daemon no longer lists it") — putting either
+   in the screen would violate §7's "logic lives in pure modules", and both are
+   client-side truths 13d would otherwise re-derive. `settleReclaim` exists
+   only so `handBackStep` is testable without an async port. No new file, no
+   new dependency, nothing 13b/13c touch.
+2. **A changelog fragment was written; the plan says "13a, 13b, 13c: none".**
+   The executor brief (and the task instruction) requires one fragment per
+   task, and this slice is not internal-only in the §10 sense — it is a new
+   shipped module (render-inert until 13d, which is exactly what 12b's
+   `mobile-session-view-12b.added.md` looked like). Written at 13d's merge
+   intent minus the screen. If the orchestrator prefers the plan's "none", the
+   fragment is one file to drop.
+3. **`ShownRow` is a projection, not `QueuedRow` spread.** My first cut spread
+   the local row, so the TUI's tracking flag `acked` reached the screen's view
+   model — a presentation leak, caught by the test and fixed: the row is
+   `{id, text, state, mine}` only.
+4. **`planHandBack` takes a `Pick<QueueState, "returned">`**, not the whole
+   `QueueState`, so the parity fixture can pass a subset; the client's
+   `handBack` takes the full type and both were compared on full states, so the
+   narrowing is test-ergonomics only.
+5. **F13–F23 (and 13b/13c/13d entirely) are not in this slice** — untouched, as
+   instructed; `apps/mobile/package.json`, `bun.lock`, `app.json`,
+   `connection.ts`, `packages/core`, `packages/tui` are unmodified.
+
+**Not verified here.** 13a has no screen and no Maestro flow (its E2E belongs
+to 13d, which needs 12c + 13b + 13c); the parity pin is in-process only, so
+"the phone shows these rows" is unverified until 13d renders them. How to
+verify: 13d's `session-view.test.ts` + Maestro `12-steer` / `14-returned-mine`
+/ `15-returned-other` (plan "Maestro").
+
+*— deepseek-v4.1-flash-1017, 2026-11-14*
+
 ## Review
 
 #### Orchestrator decisions (owner night delegation 2026-11-14)
