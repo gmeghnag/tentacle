@@ -366,6 +366,46 @@ describe("startDiscovery (driver)", () => {
     }
   });
 
+  test("a sleep long past EXPIRES, so a later subscriber still applies freshness (Repro D)", () => {
+    // The normal laptop case: the lid is closed overnight with NO client (so
+    // nothing polls), then the machine is awake for an hour with on-time beats
+    // — every sibling's record is fresh again by then — and only then does a
+    // phone subscribe. A `slept` FLAG would survive all of that (only a poll
+    // could clear it, and there was none), switching freshness off for that
+    // first poll and re-admitting the pid-reuse phantom (Repro 3, F2).
+    // Mutation: `slept` as a flag, or `sleptAt` never expiring → it fails.
+    const configDir = scratch();
+    const clock = fakeTimers();
+    writeDaemonRecord(configDir, record({ pid: 999_008, host: "127.0.0.1", cwd: "/work/phantom" }));
+    const old = new Date(Date.now() - 3_600_000);
+    utimesSync(join(configDir, "daemons", "999008.json"), old, old);
+    const driver = startDiscovery({
+      configDir,
+      self: record({ pid: process.pid, cwd: "/work/self" }),
+      interfaces,
+      timers: clock.timers,
+      now: () => clock.timers.now(),
+      alive: () => true,
+      touch: () => true,
+    });
+    try {
+      // Overnight with no subscriber: the heartbeat's missed tick runs once on
+      // wake (rebased, not replayed) and records when the missed beat happened.
+      clock.jump(8 * 3_600_000);
+      clock.advance(10_000);
+      expect(driver.polls()).toBe(0);
+      // An hour awake, still no client: on-time beats only, no poll to clear it.
+      clock.advance(3_600_000);
+      expect(driver.polls()).toBe(0);
+      driver.subscribe(() => {});
+      // The sleep is long past, so freshness applies and the phantom is gone.
+      expect(driver.current().daemons.map((d) => d.cwd)).toEqual(["/work/self"]);
+    } finally {
+      driver.stop();
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
   test("the poller runs only while subscribed; the heartbeat always (owner Q5)", () => {
     const configDir = scratch();
     const clock = fakeTimers();

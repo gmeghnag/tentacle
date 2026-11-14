@@ -676,3 +676,66 @@ Scope: `git diff HEAD~1` (`59f89b3`). `bun run typecheck` and `bun run lint` are
 - Moving `machineInterfaces` is a pure move: `pair` behaves the same, and typecheck is clean.
 - `addressSeenAt` is optional on `KnownProject`; a store written before it falls back to `lastSeenAt`.
 - A resync that changed nothing stays silent (`changed`).
+
+### Fix round 2
+
+*— deepseek-v4-pro, 2026-11-14*
+
+Round 2 carried one finding (MEDIUM #5, `slept` never expires). Reproduced,
+fixed, mutation-checked. Round 1's four findings were spot-checked in the code
+(not re-reviewed): `interfaces` defaults to `machineInterfaces`
+(`cli/src/discovery.ts:221`), `resubscribeDiscovery` delivers when `changed`
+(`client/src/remote-client.ts:1003`), `addressSeenAt` is per address
+(`client/src/discovery.ts:187`), the doubled `/**` is gone.
+
+**Repro D, RED before the fix** (`.tentacle/tmp/sibling-discovery/r2d.test.ts`,
+fake timers, a pid-alive/mtime-ancient phantom record):
+
+```
+Repro D first snapshot: ["/p/a","/p/phantom"]
+(fail) Repro D > a sleep long past does not disable freshness for a later subscriber
+```
+
+**Root cause, one sentence:** `slept` was a boolean cleared only by a poll, so
+with no subscriber (the normal laptop case) a single late beat from any past
+sleep disabled freshness for the *next* poll, however long after — which
+re-admitted exactly the pid-reuse phantom (F2/Repro 3) that finding 3 fixed
+for the `lastPollAt` half of the same rule.
+
+**Fix** (`packages/cli/src/discovery.ts`): `slept: boolean` →
+`sleptAt: number | undefined` (the moment the missed beat was noticed, set at
+`:342`); the poll at `:282-284` now takes the sleep path only while the wake is
+still near — `gap > staleAfterMs || (sleptAt !== undefined && at - sleptAt <=
+staleAfterMs)` — and clears it. A "skip freshness" is only ever owed to the
+window before the siblings' own next beat (≤ `heartbeatMs`), so it expires; the
+F3 case (a real sleep, subscriber appearing on wake) is inside that window and
+still skips. No behaviour change on the path that round 1 pinned.
+
+**Regression test** (`packages/cli/test/discovery.test.ts:369`, "a sleep long
+past EXPIRES, so a later subscriber still applies freshness (Repro D)"): asleep
+8 h with no subscriber → one rebased beat on wake → **1 h awake with on-time
+beats and still zero polls** (`expect(driver.polls()).toBe(0)` twice, so the
+test would be vacuous if a poll had cleared anything) → subscribe → snapshot is
+`["/work/self"]`. RED before the fix, GREEN after.
+
+**Mutations** (each applied, run, reverted; `discovery.ts` byte-identical to the
+committed fix afterwards, `diff` empty):
+
+| Mutation | Result |
+|---|---|
+| `afterSleep = gap > staleAfterMs \|\| sleptAt !== undefined` (a never-expiring flag, i.e. the round-2 bug) | **1 fail** — the new Repro-D test |
+| `afterSleep = gap > staleAfterMs` (drop the heartbeat signal entirely) | **1 fail** — the existing F3 SLEPT-with-no-subscriber test (`:356`) |
+
+The first mutation is the round-2 bug itself, so the new test is pinned to the
+exact property; the second shows the fix did not swallow the F3 rule it must
+keep.
+
+**Gate** (worktree `feat/sibling-discovery`, HEAD `aaa126c` + these edits):
+`bunx tsc --noEmit` clean · `bun run lint` — `Checked 1072 files. No fixes
+applied.` (baseline clean) · `bun test` — **8356 pass, 3 skip (the three opt-in
+skips: live-k8s, live-docker, real-socket keepalive), 0 fail**, 601 files,
+13 snapshots. Narrow runs per §4 first: `cli/test/discovery.test.ts` 23 pass,
+then the 5 discovery-related files 59 pass.
+
+**Not verified here:** nothing on the native/mobile side (no code touched
+there); the fix is inside the pure-ish driver and its own fake-timer tests.

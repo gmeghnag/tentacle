@@ -243,8 +243,15 @@ export function startDiscovery(options: {
   let membership: MembershipState | undefined;
   let lastPollAt = now();
   let lastBeatAt = lastPollAt;
-  /** A beat the process MISSED: the host slept, so the next poll skips freshness (F3). */
-  let slept = false;
+  /**
+   * When the beat the process MISSED happened (the host slept), so the next
+   * poll skips freshness (F3). A TIMESTAMP, not a flag: with no subscriber the
+   * poller is off, so nothing would clear a flag. The skip only has to cover
+   * the window before the siblings' own next beat (≤ `heartbeatMs`), so it
+   * expires — a sleep an hour ago says nothing about a record now, and letting
+   * it stand would re-admit the pid-reuse phantom (Repro 3).
+   */
+  let sleptAt: number | undefined;
   let polls = 0;
   /** The distinct log messages already emitted, so a repeating error says it once (F15). */
   const logged = new Set<string>();
@@ -270,11 +277,13 @@ export function startDiscovery(options: {
     // not applied for the one poll that notices the gap; the hysteresis covers
     // a sibling whose own timer then fires a beat later. A heartbeat that
     // missed its own period says the same for a sleep the POLLER did not see
-    // (nobody was subscribed), which is why `slept` is consulted too.
+    // (nobody was subscribed), which is why `sleptAt` is consulted too — but
+    // only while the waking poll is still near the wake.
     const gap = at - lastPollAt;
     lastPollAt = at;
-    const afterSleep = slept || gap > staleAfterMs;
-    slept = false;
+    const afterSleep =
+      gap > staleAfterMs || (sleptAt !== undefined && at - sleptAt <= staleAfterMs);
+    sleptAt = undefined;
     polls++;
     let records: readonly DaemonRecord[];
     try {
@@ -330,7 +339,7 @@ export function startDiscovery(options: {
     // sleep signal a daemon with no subscriber has.
     const beatAt = now();
     if (beatAt - lastBeatAt > staleAfterMs) {
-      slept = true;
+      sleptAt = beatAt;
     }
     lastBeatAt = beatAt;
     if (!touch(options.configDir, options.self.pid)) {
