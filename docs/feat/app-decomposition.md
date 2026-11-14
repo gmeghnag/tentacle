@@ -2238,6 +2238,129 @@ a wire type). Changelog: `changelog.d/app-decomp-2-commands.changed.md` (one
 bullet; `CHANGELOG.md` untouched; the fragment passes
 `scripts/test/changelog-guard.test.ts`).
 
+### Fix round 1 — `feat/app-decomp-2-commands` (S2 review findings)
+
+*— claude-opus-5-5, 2026-11-14* (real id: this run is Claude Code
+`2.1.323`, `~/.claude.json` `"model": "claude-opus-5-5"`; `AI_AGENT`
+`claude-code_2-1-323_agent`.)
+
+One finding, MEDIUM; there was no HIGH. **FIXED.** Two files changed:
+`packages/tui/src/commands/compact.ts` (the fix) and
+`packages/tui/test/app-command-failure-arms.test.tsx` (the pin). No other
+`src/` line moved.
+
+**Finding 1 (MEDIUM) — `/compact` printed "Compacting the conversation…"
+twice: FIXED.**
+
+*Reproduced before touching code*, on this branch, with the review's own
+observable (`COUNT 2`, main `1`). Probe
+`.tentacle/tmp/app-decomp-2-commands/fix1/count.ts` (mount the real `App` with a
+held `compact`, type `/compact`, count the line in `lastFrame()`):
+
+```
+$ bun run .tentacle/tmp/app-decomp-2-commands/fix1/count.ts
+COUNT 2
+```
+
+*Root cause*, one sentence: the move split the old `case "/compact"` body into
+its guards (`commands/compact.ts`) and its machinery (`App.tsx:startCompaction`)
+— and the notice sits in `startCompaction`, which was copied out of the old body
+verbatim, so leaving `pushNotice("_Compacting the conversation…_")` in the
+command file as well put the same side effect in both halves of the split
+(`commands/compact.ts:30` before the fix, `App.tsx:2807`).
+
+*Why the counter-intuitive half is the one that keeps it.* The notice is **not**
+a guard message: it reports that a compaction *began*, which only the machinery
+knows. `startCompaction`'s first statement reads the session and returns
+silently when it is gone (`App.tsx:2803–2806`), so it alone can decide
+whether the line is true. `commands/compact.ts` now only refuses and then calls
+`ctx.startCompaction()`; the comment on the call site records why. Nothing else
+about the command changed — the three guard strings, their order and the
+`busyCompacting()` read are byte-identical to main's `2920–2927`.
+
+*Red before green (§9), on the assertion of the property, not on an import.*
+The new case in `app-command-failure-arms.test.tsx` counts occurrences instead of
+`toContain` (which is exactly why the review found what S0 and
+`app-command-failure-arms.test.tsx:96` could not):
+
+```
+$ bun test packages/tui/test/app-command-failure-arms.test.tsx   # before the fix
+114 |       {},
+115 |       { compact: () => new Promise<{ before: number; after: number }>(() => {}) },
+...
+Expected: 1
+Received: 2
+(fail) S2 command failure arms (commands/<name>.ts) > /compact says it is compacting exactly once, not twice
+ 4 pass
+ 1 fail
+```
+After the fix, the same command: **5 pass / 0 fail**.
+
+*Mutation-check of both halves of the split (§9 non-vacuity), each restored from
+a byte copy taken first (`fix1/compact.good`, `fix1/App.good`):*
+
+- **M14 — put the push back in the command file** (re-introduces the review's
+  bug):
+  ```
+  Expected: 1
+  Received: 2
+   4 pass
+   1 fail
+  ```
+  → killed, on the new count assertion.
+- **M15 — drop the push from `startCompaction`** (the opposite mistake: the
+  command layer swallows the announcement):
+  ```
+  Expected to contain: "Compacting the conversation"
+  Received: "⏺ Tentacle ready. Type a task, or /help for commands.…"
+  Expected: 1
+  Received: 0
+   3 pass
+   2 fail
+  ```
+  → killed twice over (the new count case, plus the existing
+  "says one is already running" case, which read `toContain` and had been
+  passing on a line the *other* half emitted). So the one home is pinned from
+  both directions: neither a duplicate nor a missing line survives.
+
+`diff` against both copies after restoring is empty and `git diff --stat` is the
+two intended files only.
+
+*Same class, audited rather than assumed.* Grepped every notice string pushed by
+`commands/*.ts` against every literal pushed by `App.tsx`: the only string in
+both sets is `"_Clipboard unavailable._"`, and those are **not** a doubled path —
+`commands/copy.ts:18` is the `/copy` command's reject arm, while
+`App.tsx:3345`/`3668` and `useMouse.ts:137` are three *other* triggers of the
+same clipboard helper (the copy key, the palette action, the mouse drag), each
+reached without the slash command. No `/compact`-style double remains; not fixed
+blind, checked.
+
+**Drift from the Implementation.** None. The Implementation's M5 split is
+unchanged — the machinery stayed in App and the guards stayed in the command
+file; only the duplicated announcement moved to the half that owns it. Nothing
+in the Design's port set changed, so no doc above needed editing.
+
+**Gate** (this branch, every mutant reverted):
+
+```
+$ bunx tsc --noEmit
+(clean, exit 0)
+$ bun run lint
+Checked 1072 files in 324ms. No fixes applied.
+$ bun test
+ 8164 pass
+ 3 skip
+ 0 fail
+ 13 snapshots, 73210 expect() calls
+Ran 8167 tests across 589 files. [332.01s]
+```
+8164 = the executor run's best 8163 + this round's new case. The 3 skips are the
+documented opt-ins (live-k8s, live-docker, the real-socket keepalive — not
+failures, AGENTS §6), and the `engine-runtime` timing flake the executor run
+reported (`TODO.md:447`) did not fire this time. Touched files alone: 82 pass /
+0 fail across `app-command-failure-arms`, `commands-registry`, `app-commands`,
+`commands`, `rename`.
+
 ## Review
 
 ### S2 review — REQUEST-CHANGES

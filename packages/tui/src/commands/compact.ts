@@ -29,7 +29,10 @@ export const command = {
       ctx.pushNotice("_A compaction is already running._");
       return;
     }
-    ctx.pushNotice("_Compacting the conversation…_");
+    // The notice is NOT pushed here: `startCompaction()` owns it, because it is
+    // the half that knows the compaction actually began (its session-gone early
+    // return must stay silent). Pushing it here too printed the line twice —
+    // the review's MEDIUM 1, pinned by app-command-failure-arms.test.tsx.
     ctx.startCompaction();
   },
 };

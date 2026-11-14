@@ -100,6 +100,26 @@ describe("S2 command failure arms (commands/<name>.ts)", () => {
     u.app.unmount();
   });
 
+  test("/compact says it is compacting exactly once, not twice", async () => {
+    // The review's MEDIUM 1: the move left the same notice in BOTH halves of
+    // the guard/machinery split — `commands/compact.ts` pushed it and then
+    // `startCompaction()` pushed it again (it was copied out of the old `case`
+    // body together with the machinery), so the line appeared twice where main
+    // shows it once. `toContain` cannot see a doubled line, so this counts it.
+    // Mutations: put the push back in `commands/compact.ts` → 2 (red); drop the
+    // one in `startCompaction` → 0 (red). Only the machinery announces the
+    // start it owns: it is the one place that knows the compaction really began
+    // (its early return on a gone session must stay silent).
+    const u = await mount(
+      {},
+      { compact: () => new Promise<{ before: number; after: number }>(() => {}) },
+    );
+    await u.line("/compact");
+    const count = u.frame().split("Compacting the conversation").length - 1;
+    expect(count).toBe(1);
+    u.app.unmount();
+  });
+
   test("/copy failing because the clipboard is missing is said out loud", async () => {
     // The reject arm of `commands/copy.ts` (the success arm is S0's).
     const t = await mount({ clipboard: () => Promise.reject(new Error("nope")) });
