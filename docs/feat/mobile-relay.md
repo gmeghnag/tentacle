@@ -2455,3 +2455,26 @@ The five attacks it listed (a malicious repo setting `relay.url`, `relay.json`
 read as a sidecar, a refused URL leaking the authority, pod/`--stdio` daemons
 dialling, a planted record address refusing `pair`) all still hold: this round
 touched the ORDER of a list, one test's assertion, and one missing guard-test.
+
+### Round 2
+
+**Verdict: APPROVE.** All three round-1 findings are fixed (`git diff HEAD~1`), and each was confirmed by mutation:
+
+1. Relay last across the whole QR: `pairAddresses` back to `unique(...)` → **red** 3
+   (`pair-addresses.test.ts`: whole-QR, `pair --address`, record-direct-vs-relay);
+   `recordAddressList` back to `unique(list)` → **red** 1 (`discovery.test.ts`
+   sibling announcement).
+2. 0600: `RELAY_SECRET_MODE = 0o644` → **red** 1 (`relay-secret.test.ts`, literal assert).
+3. Stop: `relayLink?.stop()` deleted → **red** 1 (`serve-relay.test.ts`, the local
+   relay's `registeredCount` never drops to 0). It runs against a real local relay,
+   not an injected dialer, but it pins the exact property.
+
+Regressions: `bun test packages/cli/test/ packages/protocol/test/relay.test.ts`
+→ 2379 pass, 0 fail; `bun run lint` clean; `bun run typecheck` clean. Discovery's cap
+still keeps the FIRST addresses, and the relay was already last per record, so the
+announcement only changes when a record lists a relay address before a direct one
+(now fixed). `isRelayDeviceAddress` is only a sort key, never a filter or authority:
+if a direct URL shaped like `/d/<id>/e2e` is misread, the only effect is that it sorts last.
+Mutations reverted; `git status` clean apart from this section.
+
+*— claude-opus-5-5, 2026-11-14*
