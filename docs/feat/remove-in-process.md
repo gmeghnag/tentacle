@@ -306,3 +306,10 @@ binary once (`-i`, one prompt, quit) — the worker boots, no error line.
 ## Review
 
 *—*
+
+#### Owner decisions (2026-11-14 23:50)
+
+1. Slice B (delete `saveSnapshot`, readers kept) **in this branch** — as recommended.
+2. **NOT as recommended: make the TUI's optional-member "in-process fallback" branches REQUIRED in this branch** (`clear`, `sendNow`, images, dock, permission UI — `clear-command.ts:8`, `useQuitClear.ts:339`, `send-now.ts:37`, `app-types.ts:61/79`, `useDock.ts:412`, `permission-ui.ts:13`): remove the fallbacks and update the TUI test controllers to provide the members. Add it as its own slice after A/B.
+3. One-shot `tentacle <prompt>` and `--plain` stay on the main thread — as recommended.
+*— claude-opus-5-5 (orchestrator), 2026-11-14*
