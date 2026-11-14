@@ -1330,3 +1330,118 @@ family as the round-1 reviewer; the executor was a different model (deepseek).
   Not re-run: the full `bun test`.
 - Still open, not raised (low): the `maxTrackedIps` eviction comment
   (`relay-core.ts` "never a bypass") is still inaccurate.
+
+## Execution
+
+### R3 — extract the device path (as built) — *— claude-opus-5-5, 2026-11-14*
+
+**Load-bearing check: PASSED, before any edit.** The assumption R3 stands on is
+the plan's: `openDevice` used the Bun socket ONLY as an identity key, so the body
+extracts over a plain `DuplexChannel` with no behaviour change. Baseline first,
+with the code untouched:
+
+```
+$ bun test packages/daemon/test/{ws-device-route,ws-server,device-authority,pairing-handler}.test.ts
+ 73 pass / 1 skip / 0 fail    (186 expect() calls, 74 tests, 4 files)
+```
+
+That is the refactor's proof (AGENTS §9): those tests must pass UNCHANGED after
+it, and they do (same 73/1/0, re-run below).
+
+**As built, in the Implementation's order.**
+
+1. `packages/daemon/src/device-accept.ts` (new, 264 lines) — the whole of the old
+   `openDevice` body: the no-identity guard (`e2e-no-identity` + settle +
+   `channel.close()`), the responder with the captured `admitted` verdict,
+   the `ConnectionPrincipal` build (`PairHandler` for a pairing peer), the
+   `Connection` on the RESOLVED secure channel, the ONE `DeviceClose` handle, the
+   `device-open`/`touchSeen` pair, the pairing-window watcher, and the F22
+   `isClosed()` check. `watchPairingWindow` moved here with it (it only ever
+   touched `onAudit`, `pairingCheckMs` and the handle), as did
+   `PAIRING_CHECK_MS` and `DEFAULT_MAX_FRAME_BYTES`.
+   The two things the old body reached through its closure became
+   caller-supplied hooks, because they are the caller's own bookkeeping:
+   `onSettled()` (the `pending`/limiter slot, replacing the private `finish()`)
+   and `onConnection(connection)` (the `connections` map). `isClosed()` is a
+   REQUIRED dep, not optional: a caller that cannot answer would silently keep
+   the F22 orphan this guards against. The signature is
+   `acceptDevice(channel, deps) → { release }`.
+2. `packages/daemon/src/ws-server.ts` — `openDevice` (141 lines) becomes a 33-line
+   delegation; `PAIRING_CHECK_MS`, `DEFAULT_MAX_FRAME_BYTES`,
+   `watchPairingWindow` and six now-unused imports leave. `ws.data.release` is
+   `accepted.release()` (same work as the old closure: stop the watcher,
+   unregister the device handle).
+3. `packages/daemon/src/index.ts` — `export * from "./device-accept.ts"`.
+
+**One drift from the Implementation, deliberately.** The plan's signature is
+`acceptDevice(channel, deps) → { release }` with "no behaviour change". Wiring it
+that way introduced a bug the plan's design did not anticipate: the old code had
+ONE `finish()` (the limiter slot), reached from every outcome; the split gives
+two paths to the same slot — the socket's `close` handler (via `pending`) and
+`onSettled`. A phone that walks away mid-handshake fires BOTH, so
+`HandshakeLimiter.end()` ran twice for one dial and the counter fell below the
+handshakes really in flight, admitting more than `maxConcurrent` (32 in
+production). Fix: a once-guard in `ws-server`'s `openDevice` (`endSlot`), so the
+slot ends exactly once whichever path arrives first. This is caller-side
+bookkeeping, which is where the slot lives — not a change to `acceptDevice`'s
+contract. It is pinned by a new test (below) that is RED without the guard.
+`device-accept.ts` keeps its own once-guard on `settle()`/`teardown()` for the
+same reason (`release()` and the F22 path both tear down).
+
+**Tests.** Red-first, then mutation-checked with the real mutations (each pasted
+below from this branch; every mutation reverted, `shasum` matches the pristine
+copy).
+
+- `packages/daemon/test/device-accept.test.ts` (new, 7 tests) — on a
+  `createChannelPair` channel: a registered key is admitted and `initialize` is
+  served (the relay's accept leg, no socket); an unknown key is denied and
+  nothing is built (F15); a replayed message 1 builds nothing and records nothing
+  (F4/P2); a channel closed mid-handshake settles exactly once; no identity
+  settles at once and closes (F14); `release()` drops the authority's handle (F11,
+  idempotent); a channel closed between the confirm and the build leaves no
+  attached connection (F22).
+- `packages/daemon/test/ws-device-slot-once.test.ts` (new, 1 test) — the drift
+  above: cap 2, two mid-handshake dials, one abandons, a third takes its slot, and
+  the fourth must be REFUSED. Under a double `end()` the abandoned dial's second
+  decrement steals the live one's slot and the fourth is wrongly admitted.
+- Existing `ws-device-route` / `ws-server` / `device-authority` /
+  `pairing-handler` tests: **unchanged, all pass** (73 pass / 1 skip / 0 fail,
+  the skip the pre-existing opt-in keepalive).
+
+**Mutations (the plan's targets, each run on the edited file).**
+
+1. `touchSeen` inside `authorize` (the side effect a replay reaches) →
+   `(fail) … a replayed message 1 builds nothing and records nothing (F4/P2)`
+   — `Expected: 1794658127463 / Received: 1794658127484` (6 pass, 1 fail).
+2. F22 branch removed (`if (false && deps.isClosed())`) →
+   `(fail) … a channel closed between the confirm and the build leaves no
+   attached connection (F22)` (6 pass, 1 fail).
+3. `onSettled` dropped on the no-identity path →
+   `(fail) … no identity: settles at once and closes the channel (F14 — no leaked
+   slot per dial)` (6 pass, 1 fail).
+4. `settle()` dropped on the responder's reject path →
+   3 fail: `an unknown key is denied, and nothing is built (F15)`, `a replayed
+   message 1 builds nothing …`, `a channel closed mid-handshake still settles,
+   once` (4 pass, 3 fail).
+5. `release()` no longer unregisters the authority's handle →
+   2 fail: `release() drops the authority's handle … (F11)` and the F22 test
+   (5 pass, 2 fail).
+6. **The drift's own mutation**: `ws-server`'s once-guard removed →
+   `(fail) a mid-handshake close ends the limiter slot once, not twice (R3) >
+   an abandoned dial's extra end() cannot steal a live handshake's slot` —
+   `Expected: false / Received: true` (0 pass, 1 fail).
+
+**Gate.** `bunx tsc --noEmit` clean · `bun run lint` clean (1307 files, no fixes)
+· `bun test` **9414 pass / 3 skip / 0 fail** (9417 tests, 677 files) — the 3
+skips are the pre-existing opt-ins (live-k8s, live-docker, real-socket
+keepalive), no new skip. No `protocol.json` regeneration: **no schema changed**
+(R3 touches no `@tentacle/protocol` file; `PROTOCOL_VERSION` stays 24, no
+`protocol.d/` note — the plan's Preconditions say so and it holds). No new
+`changelog.d` fragment: R3 is behaviour-preserving internals with no
+user-visible effect, and `changelog.d/mobile-relay.added.md` (R5a's, already on
+this branch) covers the relay's user-visible surface.
+
+**Not verified.** The relay's accept leg on a REAL relay socket — that is R4's
+`relay-link.test.ts` against R2's server, which needs this slice merged first.
+What is proved here is the property R4 depends on: the device path runs on any
+`DuplexChannel` and every outcome frees the caller's slot exactly once.
