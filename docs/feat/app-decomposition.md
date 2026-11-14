@@ -3426,3 +3426,207 @@ pin, not by a runtime test.
 - No new HIGH/MEDIUM findings.
 
 *— claude-opus-5-5, 2026-11-14*
+
+## Execution
+
+### S7 — `feat/app-decomp-7-panels` (panels become per-kind descriptors)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: `ps` shows this
+run launched as `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc:29`.)
+
+**Load-bearing check, re-run first (PASSED).** `.tentacle/tmp/app-decomp-7-panels/lb-check.sh`
+on this branch, not trusted from the plan:
+1. *Ink calls EVERY active `useInput` listener* — `packages/tui/node_modules/ink/build/hooks/use-input.js:89`
+   `internal_eventEmitter?.on('input', handleData)`, no return anyone consumes.
+   `rg "useInput\(" packages/tui/src` → `App.tsx:2890` (the ONE handler, pre-S7;
+   `:2832` after this slice's deletions) and the separate pre-mount
+   `components/SessionPicker.tsx:85`. **Holds** — S7 moves no
+   key handler; it re-points the two panel layers at the registry (`keys/layers.ts`
+   order untouched: `keys-route.test.ts`'s `LAYER_ORDER` pin is green, unedited).
+2. *the capability is actually missing* — `rg "PANEL_KINDS|panels/registry|usePanels"`
+   over `packages/tui/src` → **no match**; `panel.ts` carries 6 `kind ===`
+   branches (76, 89, 92, 120, 149). So the plan's H4(4) premise held.
+3. *Fable M1 (frozen names)* — the identifiers S7 must keep are used OUTSIDE
+   `App.tsx` by `commands/{mcp,sessions,skills}.ts` (`openPanel`), `keys/execute.ts`
+   (`applyPanel`, `OpenPanel`), `useMouse.ts` (`panelClick`, `setPanel`,
+   `panelRef`), `keys/snapshot.ts` (`panelGen`) — all re-exported or preserved, so
+   **zero use-site edits**, as the frozen-name rule requires.
+
+**Scope.** `packages/tui/src/panels/` (new: `registry.ts` 108, `types.ts` 57,
+`tree.ts` 56, `sessions.ts` 153, `mcp.ts` 35, `skills.ts` 43), `usePanels.ts`
+(new, 174), `panel.ts` (159 → 80, the façade), `keys/layer-panels.ts` (120 → 37),
+`App.tsx` (−58 net: 39 added / 97 deleted → **3202** lines from 3260), two new test
+files, one changelog fragment. **No existing test edited** — all 133
+`packages/tui/test/*` files ran green and unmodified (the behaviour-preservation
+proof). No `packages/protocol` change, so `schema/protocol.json` was not
+regenerated. No other slice touched, `TODO.md` untouched.
+
+**Design, as built (dependency order).**
+1. **`panels/types.ts`** — the panel MODEL (`TreePanel`, `SessionsPanel`,
+   `OpenPanel`) and the three constructors, moved VERBATIM out of `panel.ts`.
+   They had to move: `registry.ts` → `panels/<kind>.ts` → the model, and
+   `panel.ts` → `registry.ts`, so keeping them in `panel.ts` would be a value
+   cycle. `panel.ts` re-exports every one of them, so no importer changed.
+2. **`panels/registry.ts`** — `PanelKind<P>` (a kind's `layer` + its own
+   `view`/`apply`/`click`/`key`), `PANEL_KINDS` (**ONE line per kind**:
+   `[sessionsKind, mcpKind, skillsKind]`), `kindOf(panel, kinds = PANEL_KINDS)`
+   and `panelStep(snap, layer, kinds = PANEL_KINDS)`. Fragment is plan H4(4).
+3. **`panels/tree.ts`** — the tree panels' shared mechanic (`withTree`,
+   `applyTreeAction`, `clickTreeBody`, `treeStep`), body-for-body from the old
+   `treeLayer` arm; `panels/mcp.ts` and `panels/skills.ts` supply only what
+   differs (their groups, title, notes — skills' groups wrap to `width`, MCP's
+   do not, exactly as `groupsOf` decided).
+4. **`panels/sessions.ts`** — the kind descriptor (its `key` is the old
+   `sessionsLayer` body verbatim, including both act-and-pass rules) **plus the
+   three App-side `/sessions` state rules** `App.tsx` carried inline:
+   `isSessionsOpen`, `withSessionsState`, `withSessionsRefresh`, and `touchPanel`.
+   Those are the `kind === "sessions"` writes; they are this kind's, not a
+   switch's.
+5. **`panel.ts`** — now a FAÇADE: three overloaded functions, each ONE
+   `kindOf(panel)` lookup and a delegate. The overloads are the pre-S7 signatures
+   kept verbatim (`TreePanel → TreePanel`), so the MCP/skills suites' callers did
+   not widen.
+6. **`usePanels.ts`** — the EXECUTOR: `closePanel`, `openPanel` (the
+   generation-guarded open→load), `panelApply`, `setSessionsState`, `touchPanel`,
+   `sessionsDelete` (the delete→re-list chain, still gated by
+   `sessionsRefreshApplies`), returning `panelGenRef`. It declares **NO effect**
+   (Fable H1) and takes the STATE as port fields (below).
+7. **`App.tsx`** — the six bodies gone, one `usePanels({…})` call plus a
+   destructuring block in the pre-S7 names (`panelGenRef`, `panelApply`,
+   `setSessionsState`, `touchPanel`, `closePanel`, `openPanel`, `sessionsDelete`),
+   so the `KeyHost` port, the command context and the snapshot literal are
+   untouched. `keys/layer-panels.ts` became two `panelStep(snap, …)` calls.
+
+**What did NOT move, and why (stated, not discovered late).**
+- **The panel STATE (`panel`, `setPanel`) and the `panelRef` mirror stay in
+  `App`.** The frame reads them (the palette gate at `:797`, `listView` at
+  `:815`) and `panelRef` is **assigned in render** (`:413`), above every executor — a
+  paste, a timer-flushed paste and a held `[` read it (`:2740`, `:2971`, the mouse
+  hold). This is the S4/S6 split (render state stays; the executor takes it as a
+  port field), and it is why `usePanels` has no `useState` of its own.
+- **All 20 effects stay in `App`, in today's order.** `usePanels` imports only
+  `useCallback`/`useRef`; nothing was added, removed or reordered
+  (`effectCount(App.tsx) === 20`, pinned in `app-panels-structure.test.tsx`).
+- **`keys/layers.ts`'s 14-name order is untouched**: S7 only changed what the two
+  panel layers CALL.
+
+**Drift from the Implementation (three, none silent).**
+
+1. **S7's row said `panels/*`, `usePanels.ts`, `keys/panel*.ts`. As built the
+   per-kind files are `panels/{mcp,skills,sessions}.ts` plus a shared
+   `panels/tree.ts`, and the layer file stays `keys/layer-panels.ts`** (no new
+   `keys/panel*.ts`): the layers no longer decide anything, so splitting them by
+   kind would create two files that each make one call. This follows the Design's
+   row (`panels/registry.ts` + `usePanels.ts` + the panel key layers) and keeps
+   the "new panel = file + registry line" target exactly.
+2. **The model types and constructors moved to `panels/types.ts`.** The plan's
+   module map put them under `(+ existing panel.ts)`; a value cycle
+   (`panel.ts` → registry → kinds → `panel.ts`) made that impossible without
+   `import type` gymnastics, and `panel.ts` re-exports them so no importer
+   changed. Recorded here because it is a file the plan did not name.
+3. **`App.tsx`'s `swapSession` dep array gained `touchPanel`** (Biome
+   `useExhaustiveDependencies`, measured — not guessed: the first build without it
+   was `1 error`). Safe and required: `touchPanel` is a `useCallback` over
+   `[setPanel]`, and `setPanel` is React's own stable setter, so its identity
+   never changes and the callback cannot churn (Fable H2 preserved).
+
+**Tests (new only).**
+- `packages/tui/test/panels-registry.test.ts` (11 cases, pure): one descriptor per
+  real kind, each claiming its own `kind` and layer; **a SYNTHETIC fourth kind**
+  (`fakeKind`) wired in by ONE array entry, proving the delegation is a lookup and
+  the facades answer through it (`view`/`apply`/`click`/`key`), and that an
+  undescribed kind THROWS rather than falling into another kind's arm; the two
+  façade overloads per real kind; and the four `/sessions` state rules
+  (`withSessionsState`/`touchPanel`/`withSessionsRefresh`/`isSessionsOpen`) on the
+  boundary the move created, **including that each returns another kind's panel by
+  IDENTITY** (a rule must never reshape a panel it does not own).
+- `packages/tui/test/app-panels-structure.test.tsx` (7 cases): structural (no
+  `kind ===` panel branch left in `App.tsx`/`panel.ts`; three `kindOf` lookups;
+  the ONE `PANEL_KINDS` line; `layer-panels.ts` makes two `panelStep` calls and
+  no key decision; `usePanels` declares no `useEffect`; App keeps 20; exactly one
+  `usePanels({`; `touchPanel()` called once) and three App-seam behaviours through
+  real Ink (a load answering after the panel CLOSED is dropped; after ANOTHER
+  panel was opened it cannot resurrect the first; a claimed panel key expands the
+  OPEN panel).
+
+**Mutation check (§9 non-vacuity) — 15/16 KILLED + 1 intended survivor.**
+Harness `.tentacle/tmp/app-decomp-7-panels/mutate.ts` (byte-copy, ONE textual
+mutation, ONE filtered `bun test`, restore, sha256 compare; a run matching 0
+tests is reported INVALID so a bad filter cannot look like a kill — M1–M4, M6,
+M8–M15 each came back INVALID once on a mistyped `-t` filter or the wrong suite,
+and every one was corrected to a real run before it counted).
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `panelStep` drops the LAYER gate (a kind gets keys on both layers) | **KILLED** (0/1) |
+| M2 | `PANEL_KINDS` loses `skillsKind` | **KILLED** (0/1) |
+| M3 | `applyPanel` re-adds a `kind === "sessions"` arm in the façade | **KILLED** (0/1) |
+| M4 | `withSessionsState` returns the panel unchanged | **KILLED** (0/1) |
+| M5 | `touchPanel` returns the panel unchanged (no repaint) | **KILLED** (0/1) |
+| M6 | `isSessionsOpen` always true (any panel counts as `/sessions`) | **KILLED** (0/1) |
+| M7 | `withSessionsRefresh` keeps the stale `state` (the cursor/armed rule dies) | **KILLED** (0/1) |
+| M8 | the load's generation guard removed (a replaced panel is resurrected) | **KILLED** (0/1) |
+| M9 | `closePanel` stops bumping the generation (a closed panel is resurrected) | **KILLED** (0/1) |
+| M10 | `usePanels` declares an effect (Fable H1 broken) | **KILLED** (0/1) |
+| M11 | `App`'s `swapSession` stops repainting the `/sessions` panel | **KILLED** (0/1) |
+| M12 | the sessions layer is wired to the `tree` layer | **KILLED** (0/1) |
+| M13 | `/sessions` Esc stops consuming (it would reach Esc-abort) | **KILLED** (0/1) |
+| M14 | the armed row's disarm-and-pass rule deleted | **KILLED** (0/1) |
+| M15 | a tree key it does not claim stops passing (behind-panel keys die) | **KILLED** (0/1) |
+| M16 | no-op control (`void sessionsAt;` added) | **SURVIVED** — intended: proves the filters are not trivially red |
+
+Every KILLED row is a red on the ASSERTION with a real count (never an
+import/compile error) and after each the file's sha256 `MATCHES` its pre-run
+value. **A correction this run produced, stated rather than hidden:** four of
+these rules (`withSessionsState`, `touchPanel`, `withSessionsRefresh`,
+`isSessionsOpen`) first SURVIVED every App-seam suite — measured, by running each
+mutation against the WHOLE `connect-sessions.test.tsx` (23/23 pass with the rule
+broken). They are genuinely REDUNDANT at the App seam today (the generation gate
+and React's own re-render cover the same cases), so a frame test cannot see them.
+Rather than weaken the mutant or claim a kill, their contract is now pinned on the
+unit the move created (`panels-registry.test.ts`'s "the `/sessions` kind's own
+state rules"), which is what makes them rules instead of ceremony; M4–M7 are the
+proof that those cases are not vacuous.
+
+**Red-before-green (§9).** The structural half of `app-panels-structure.test.tsx`
+is red against the PRE-S7 shape, shown by restoring `panel.ts`'s `kind ===`
+version byte-for-byte in a scratch copy and re-running: **2 pass / 2 fail**, both
+failures on the RATIONALE assertions ("no `kind ===` panel branch is left", "the
+façade delegates by KIND LOOKUP"), never on an import or compile error
+(`.tentacle/tmp/app-decomp-7-panels/red-news-green.ts`). `panels-registry.test.ts`
+imports the new module, so on its own it is green on both trees — that is stated
+in the file's header, and the red for its clauses comes from the mutation table
+(M1–M7), not from a re-run of the old code.
+
+**Coverage (`bun test --coverage packages/tui`), the plan's per-slice check.**
+`panels/{registry,tree,mcp,skills,types}.ts` and `panel.ts` and
+`keys/layer-panels.ts` are **100.00 % lines / 100.00 % funcs**;
+`panels/sessions.ts` **96.55 % / 100 %** (85, 87, 107 — the refused/arm/
+sessions-present delete branches, pinned through the App in
+`connect-sessions.test.tsx`); `usePanels.ts` **98.61 % / 95.24 %** (line 136, the
+`!sessions` guard). `App.tsx` **97.69 % lines / 94.93 % funcs**, up from 97.4 /
+94.9 on `main` — the moved lines are covered from their new home, so nothing was
+lost.
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` clean · `bun run
+typecheck` clean (`tsc --noEmit && tsc -p apps/mobile --noEmit`) · `bun run lint`
+→ `biome check .` **1178 files, 0 errors, 0 warnings** (the AGENTS §6 baseline:
+clean) · `bun test` → **8799 pass / 3 skip / 0 fail** across 631 files (the 3
+skips are the documented opt-ins: live-k8s, live-docker, the ~12 s real-socket
+keepalive). No schema change → `packages/protocol/schema/protocol.json`
+untouched. `changelog.d/app-decomp-7-panels.changed.md` added (user-visible: how a
+TUI panel is added changes). `TODO.md` untouched (the orchestrator's line, §10).
+
+**Unverified (one line each).**
+- The identity rule is proved by CONSTRUCTION (every hook callback's deps name
+  stable `useCallback`s / React's own `setPanel`, plus the refs passed in) and by
+  the S0b identity net, green and unedited — not by a new subscribe-count test for
+  these six callbacks specifically.
+- A `renderHook` unit test of `usePanels` in isolation was not written (the
+  package has no such seam; S6 recorded the same), so its uncovered `!sessions`
+  guard and the delete chain are covered through the 23 App-seam cases in
+  `connect-sessions.test.tsx`, not directly.
+- The plan's "target ≲800 lines for App.tsx after all slices" is still the SUM of
+  slices: S7 takes it to **3202** (from 3260), leaving S8–S10.

@@ -83,7 +83,7 @@ import { PURE_LAYERS } from "./keys/layers.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
 import { modelErrorNotice } from "./model-error.ts";
-import { type OpenPanel, applyPanel, panelClick, panelView } from "./panel.ts";
+import { type OpenPanel, panelClick, panelView } from "./panel.ts";
 import { sanitizePasted } from "./paste.ts";
 import { insertReply, orphanNotice, replyView } from "./permission-reply.ts";
 import {
@@ -98,6 +98,7 @@ import {
 import { useAttachments } from "./useAttachments.ts";
 import { useDock } from "./useDock.ts";
 import { useMouse } from "./useMouse.ts";
+import { usePanels } from "./usePanels.ts";
 
 export type { AutoAcceptFeed };
 import {
@@ -151,13 +152,8 @@ import {
   withRestored,
 } from "./send-now.ts";
 import {
-  deleteFailedNotice,
   openFailedNotice,
-  refreshedSessions,
   sessionsChoose,
-  sessionsDelete,
-  sessionsListError,
-  sessionsRefreshApplies,
   stayingNotice,
   switchRefusedNotice,
   switchingRefusal,
@@ -404,11 +400,12 @@ export function App({
     autoAccept,
     (text, cause) => draftBackRef.current?.(text, cause),
   );
-  // The open list panel (`/mcp`, `/skills`; docs/feat/skills-panel.md) or null.
-  // Each open and close bumps the generation, so a request answering after its
-  // panel closed (or another opened) is dropped instead of landing on screen.
+  // The open list panel (`/mcp`, `/skills`, `/sessions`; docs/feat/skills-panel.md)
+  // or null. The panel's own state and its generation live in `usePanels` (S7);
+  // the STATE stays here because the frame reads it (the palette's gate, the
+  // list view) and `panelRef` is assigned in render, above every executor that
+  // inserts text outside the key path.
   const [panel, setPanel] = useState<OpenPanel | null>(null);
-  const panelGenRef = useRef(0);
   // The panel as of the last render, for text inserted outside the key path
   // (a paste, a timer-flushed paste or held "["): behind a panel the hidden
   // input takes none of it.
@@ -1185,38 +1182,6 @@ export function App({
 
   warmErrorRef.current = (error: unknown) => pushNotice(warmFailureNotice(error));
 
-  const closePanel = useCallback(() => {
-    panelGenRef.current += 1;
-    setPanel(null);
-  }, []);
-
-  /**
-   * Open `initial` (its loading state) at once, then whatever `load` resolves
-   * to — only if this panel is still the open one; a failure closes it and
-   * says why.
-   */
-  const openPanel = useCallback(
-    (initial: OpenPanel, load: () => Promise<OpenPanel>, describe: (e: unknown) => string) => {
-      panelGenRef.current += 1;
-      const gen = panelGenRef.current;
-      setPanel(initial);
-      void load().then(
-        (loaded) => {
-          if (panelGenRef.current === gen) {
-            setPanel(loaded);
-          }
-        },
-        (e) => {
-          if (panelGenRef.current === gen) {
-            closePanel();
-            pushNotice(describe(e));
-          }
-        },
-      );
-    },
-    [closePanel, pushNotice],
-  );
-
   /** Put texts a send-now did not deliver back in the input field (after any draft), and say why. */
   const restoreInput = useCallback(
     (text: string, why: string) => {
@@ -1347,6 +1312,31 @@ export function App({
   // `switchingRefusal` / `sessionsChoose` refuse what would act on the old
   // session until it settles (Review R1). Cleared on every outcome.
   const switchingRef = useRef(false);
+
+  // ── the panels (S7 — docs/feat/app-decomposition.md) ──────────────────────
+  // The panel's state, its generation, and the open/close/delete executors live
+  // in `usePanels`; the panel's OWN projections and key answers live per kind in
+  // `panels/<kind>.ts`, reached through `panels/registry.ts` — a new panel is a
+  // file plus one registry line, zero lines here. The STATE (`panel`) and
+  // `panelRef` stay above, because the frame reads them and the ref is assigned
+  // in render. The destructuring keeps every pre-S7 identifier (Fable M1), so no
+  // use site below changes. The hook declares NO effect (Fable H1).
+  const {
+    panelGenRef,
+    panelApply,
+    setSessionsState,
+    touchPanel,
+    closePanel,
+    openPanel,
+    sessionsDelete,
+  } = usePanels({
+    panelRef,
+    setPanel,
+    sessions,
+    switchingRef,
+    columns,
+    pushNotice,
+  });
 
   /** Activities held while a run of mine streamed: handled in order once nothing is in flight. */
   const drainHeld = useCallback(() => {
@@ -1961,9 +1951,10 @@ export function App({
       opts: { readonly keepTranscript?: boolean; readonly onOpened?: (ok: boolean) => void } = {},
     ): void => {
       sessionRef.current = next;
-      // An open `/sessions` panel marks the live session as current (Review R2-1).
-      // An open `/sessions` panel re-renders: its "current" row is read live (Review R3-1).
-      setPanel((p) => (p?.kind === "sessions" ? { ...p } : p));
+      // An open `/sessions` panel marks the live session as current, and must be
+      // re-read at the next render: its "current" row is read live (Review R2-1,
+      // R3-1). The rule is the `/sessions` kind's own (`panels/sessions.ts`).
+      touchPanel();
       watchReturned(next);
       watchSession(next, opts.onOpened);
       ownCompactionsRef.current = 0;
@@ -1992,7 +1983,7 @@ export function App({
       }
       flushNow();
     },
-    [flushNow, restoreInput, setCompacting, setRows, watchReturned, watchSession],
+    [flushNow, restoreInput, setCompacting, setRows, touchPanel, watchReturned, watchSession],
   );
   swapRef.current = swapSession;
 
@@ -2756,55 +2747,6 @@ export function App({
     return () => clearPasteTimeout();
   }, [clearPasteTimeout]);
 
-  /**
-   * Delete a `/sessions` row, then refresh the panel — but only if it is still
-   * THE SAME panel: the generation the key landed in is compared at every async
-   * step (`sessionsRefreshApplies`), so a request answering after the panel
-   * closed (or another opened) is dropped instead of landing on screen. Moved out
-   * of the key handler verbatim by S3; the decisions are still
-   * `sessions-panel.ts`'s.
-   */
-  const sessionsDelete = useCallback(
-    (id: string, startedGen: number): void => {
-      if (!sessions) {
-        return;
-      }
-      const applies = (): boolean =>
-        sessionsRefreshApplies({
-          startedGen,
-          gen: panelGenRef.current,
-          open: panelRef.current?.kind === "sessions",
-          switching: switchingRef.current,
-        });
-      void sessions.remove(id).then(
-        () => {
-          if (!applies()) return;
-          void sessions.list().then(
-            (view) => {
-              if (!applies()) return;
-              setPanel((p) =>
-                p?.kind === "sessions"
-                  ? {
-                      ...p,
-                      data: view,
-                      now: Date.now(),
-                      state: refreshedSessions(p.state, view),
-                    }
-                  : p,
-              );
-            },
-            (e: unknown) => {
-              // The panel closed meanwhile: its refresh no longer matters (R4-1).
-              if (applies()) pushNotice(sessionsListError(e));
-            },
-          );
-        },
-        (e: unknown) => pushNotice(deleteFailedNotice(e)),
-      );
-    },
-    [sessions, pushNotice],
-  );
-
   // --- the key router's executor port (S3) ---------------------------------
   // The ONE place a routing decision becomes a call into the App. Every field is
   // an existing stable callback (the App's own `useCallback`s) or a decision
@@ -2869,8 +2811,8 @@ export function App({
       ctrl?.abort();
     },
     closePanel,
-    panelApply: (action) => setPanel((p) => (p ? applyPanel(p, action, columns) : p)),
-    setSessionsState: (state) => setPanel((p) => (p?.kind === "sessions" ? { ...p, state } : p)),
+    panelApply,
+    setSessionsState,
     switchTo,
     sessionsDelete,
     killJob,
