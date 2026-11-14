@@ -2852,6 +2852,305 @@ clean. The full `bun test` was not re-run.
 
 *— claude-opus-5-5, 2026-11-14*
 
+### S5 — `feat/app-decomp-5-dock` (the dock leaves `App.tsx`)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: `ps` shows
+this run launched as `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is that id in `~/.config/tentacle/config.jsonc:29` — the same
+profile S3 and S4 ran under.)
+
+**Scope.** `packages/tui/src/useDock.ts` (new, 478 lines: the hook, its two
+port types), `App.tsx` (−328/+55 → **3457** lines from 3730), one new test file
+(`packages/tui/test/use-dock.test.tsx`, 8 tests). **No changelog fragment** —
+written and then deleted (Review finding 1); see Fix round 1.
+**No existing test edited**, no `packages/protocol` change (so `schema/protocol.json`
+was NOT regenerated — no schema changed), no other slice touched, `TODO.md`
+untouched.
+
+**Load-bearing check, re-run first (PASSED).** The plan's claim for every slice
+is that Ink calls EVERY active `useInput` listener, so the router cannot be
+split — re-verified on this branch, not trusted:
+`packages/tui/node_modules/ink/build/hooks/use-input.js:89` registers
+`internal_eventEmitter?.on('input', handleData)`; `handleData` (`:80–87`) returns
+nothing anyone consumes and has no stop-propagation; the emitter is per-App
+(`components/StdinContext.js:11`). `rg 'useInput\(' packages/tui/src` →
+`App.tsx:3360` (the one handler) and the separate pre-mount
+`components/SessionPicker.tsx:85`. **Holds** — so `App` keeps ONE `useInput`, and
+S5 moves no key handler (S3 already moved its body). The check that matters HERE
+is the H1 effect-order rule, and it also holds: **20 `useEffect`s before and
+after**, in the same order, with the dock's four at indices 3, 12, 13, 14 both
+times (pin: `use-dock.test.tsx` "App keeps 20 effects").
+
+**Design, as built (dependency order).**
+1. **`useDock.ts` — `DockHost` (input) and `DockLayer` (output).** `DockHost` is
+   five fields: `sessionRef`, `field`, `fieldValueRef`, `pushNoticeRef`,
+   `jobRefreshMs`. `DockLayer` returns every identifier `App` already used —
+   the rows and their refs, the dock's state/ref/setter, `dockIds`,
+   `dockVisible`, the two drawer subjects, the reconcile memory and its trigger,
+   the job-read trigger and cadence, and the four actions — so every use site is
+   untouched (Fable M1).
+2. **The refs, state and actions move verbatim.** `setAgents`/`setJobs` keep
+   their `sameIds`/`sameReads`/`sameJobIds` gates and their
+   `dockLast*RowsRef` freeze writes; `setDock` keeps its EAGER ref write;
+   `dockIds`/`dockVisible` stay `useCallback` with `[]`; `drawerSubject` →
+   `drawerRow`/`drawerJob` stays a render computation; `killChild`, `killJob`,
+   `toggleAgents`, `submitToTarget` move body-for-body with their doc comments.
+   **No decision was re-derived** — each already lived in
+   `background-focus.ts` / `background-list.ts` / `job-drawer.ts`.
+3. **`App.tsx`** — one `useDock({…})` call where the refs used to be, one
+   destructuring block in the pre-S5 names, the four effects and their bodies
+   left exactly where they were, and the now-unused imports trimmed
+   (`DockState`, `INPUT_DOCK`, `DockJobRow`, `BackgroundAgentRow`, `frozenAgent`,
+   `frozenJob`, `sameIds`, `sameJobIds`, `sameReads`, `refusalPlacement`,
+   `restoreRefused`, `sendTarget`, `toggleList`, `listVisible`).
+
+**Drift from the Implementation (three, all recorded, none silent).**
+
+1. **`pushNotice` travels as a REF, not a port value.** The plan's S5 row says
+   "own types; same identifiers; effects stay in App" and does not say how the
+   notice sink crosses into the hook. It cannot cross by value: `pushNotice` is
+   declared BELOW the dock's refs in `App` (it needs `flushNow`), while an
+   effect at index 3 (the `jobs.onExit` subscription, ABOVE it) reads
+   `dockStoppedRef`. Moving `pushNotice` up would move that effect's position
+   (H1); passing it by value from below would keep the hook's four callbacks
+   re-creating whenever `flushNow` did. A ref is the late binding the file
+   already uses four times (`routeAttachRef`, `runRef`, `handleCommandRef`,
+   `warmErrorRef`), and it keeps BOTH properties: the effect indices and the
+   callbacks' identities. `App` writes `pushNoticeRef.current = pushNotice`
+   immediately after `pushNotice` is created (the earliest moment it exists).
+2. **`DockLayer` exposes MORE than the plan's "same identifiers" list: the
+   effects' derived triggers too** (`dockIdKey`, `jobTargetId`,
+   `jobEndedWhileOpen`, `refreshMs`) **and the reconcile memory** (`dockSeenRef`).
+   Those four were `const`s computed from `dock`, and the memory was a `useRef`,
+   inside the block the plan hands to the hook — so they had to go somewhere. The
+   plan's H1 rule decides where: an effect stays in `App`, so the values it
+   closes over must be reachable from `App`, which means the hook returns them.
+   They are triggers/memory, not decisions.
+3. **The deps arrays NAME the ref fields (Fable H2), which is what the rule
+   asks — but three of them had to be ADDED to existing arrays.** Biome's
+   `useExhaustiveDependencies` reads a destructured `const { dockOutcomeRef } =
+   hook` as a plain value, so the four effects and the two callbacks that write
+   those refs now name them (`[jobs, flushNow, armWake, setDock, dockFinishedRef,
+   dockOutcomeRef, dockStoppedRef]`, and the same pattern in the id-key
+   reconcile, both job-read effects, `watchSession`, `requestQuit`). This is
+   SAFE and is the plan's own rule — a `useRef` object's identity never changes,
+   so naming it cannot cause a re-run — and it is strictly better than a
+   `biome-ignore`, which would have hidden the next real missing dep on those
+   same effects.
+
+**Effects: none moved (H1 / owner Q7 (a)).** Indices before → after, unchanged:
+`1` 478→479 (attach unmount), `2` 761→650 (skills sync), `3` 810→699
+(**`jobs.onExit`**), `4` 854→746 (host notices), `5` 870→762 (link stop), `6`
+889→781 (resize), `7` 927→819 (palette reset), `8` 1132→1024 (blink arm), `9`
+1142→1034 (blink sync), `10` 1154→1046 (idle warm), `11` 1175→1067 (scroll
+anchor), `12` 1347→1092 (**id-key reconcile**), `13` 1381→1119 (**job output
+read**), `14` 1445→1183 (**job's last read at exit**), `15` 1756→1494
+(returned), `16` 2179→1917 (initial prompt), `17` 2188→1926 (handed wake), `18`
+2404→2145 (session watch), `19` 3199→2942 (mouse hold), `20` 3225→2968 (paste
+timer). **20 = 20, same order, nothing added or removed**; the S0b mount-order
+test and the S0b identity test both stay green, unedited.
+
+**Identity (H2), per field.** Stable setters stay `useCallback` with their dep
+arrays moved verbatim (`setAgents`, `setJobs` `[]`; `setDock` `[]`;
+`dockIds`/`dockVisible` `[]`). The four actions keep their pre-S5 deps, plus the
+refs they write: `killChild` `[sessionRef, pushNotice]`, `killJob`
+`[sessionRef, pushNotice]`, `toggleAgents` `[dockIds, dockVisible, pushNotice,
+setDock]` (unchanged), `submitToTarget` `[field, fieldValueRef, sessionRef,
+pushNotice, setDock]`.
+
+**Tests (new only).** `packages/tui/test/use-dock.test.tsx` — 8 tests, all
+through real Ink (`renderAt`, 100×24):
+- *structure* — `useDock.ts` makes no `useEffect` call and does not import it;
+  `App` still has 20 effects with the dock's four at their pre-S5 indices, and
+  the hook call sits above the first of them.
+- *freshness (H3)* — DOWN then ENTER with NO render between them opens the
+  dropdown the first key focused (`dockRef` is eager), plus the control with a
+  render between them.
+- *the guards only an open drawer shows* — a CHILD's drawer never calls
+  `jobOutput` (with the job's drawer reading as the non-vacuity control); a job
+  appearing AFTER mount reaches the frame (the state gate, not the ref); a late
+  refusal asks the field as it is NOW, so text typed since is not overwritten.
+**All S0 (39/40), S0b, S3 and S4 nets stay green, unedited** — the suite that
+pins this behaviour was not touched, which is the behaviour-preservation proof.
+
+**Mutation check (§9 non-vacuity) — 13/14 KILLED, 1 deliberate survivor.**
+Harness `.tentacle/tmp/app-decomp-5-dock/mutate.ts` (byte-copy, ONE mutation,
+ONE filtered `bun test -t`, restore, sha256 compare; a 0-test run is reported
+INVALID so a bad filter cannot look like a kill — M10 was INVALID twice on a
+`+` in the filter and once on the wrong file, and was fixed both times).
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | no-op control (`void dockRef;` added to `setDock`) | **SURVIVED** (intended: proves the filters are not trivially red) |
+| M2 | `setDock` routes the functional update through `setDockState` (ref at render time) | **KILLED** |
+| M3 | the hook imports `useEffect` | **KILLED** |
+| M4 | the hook CALLS an effect | **KILLED** |
+| M5 | `setAgents` drops the `sameReads` check (the `✓ read` never repaints) | **KILLED** |
+| M6 | `setAgents` stops keeping the last rows an ended drawer freezes on | **KILLED** |
+| M7 | `dockIds` puts the jobs above the children (the paint order) | **KILLED** |
+| M8 | `setJobs` drops every report after the first (the pill freezes) | **KILLED** |
+| M9 | `killChild` checks the JOB seam | **KILLED** |
+| M10 | `toggleAgents` inverts its empty-list guard | **KILLED** |
+| M11 | `submitToTarget` re-routes a refusal to the main agent | **KILLED** |
+| M12 | a late refusal reads a STALE field | **KILLED** |
+| M13 | `killJob` stops recording the user's own stop | **KILLED** |
+| M14 | `jobTargetId` also matches a CHILD's open drawer | **KILLED** |
+
+Every KILLED row is a red on the ASSERTION with a real count (never an
+import/compile error), and after each the mutated file's sha256 `MATCHES` its
+pre-run value; `git status --short packages/tui/src` lists only `App.tsx`
+(modified) and `useDock.ts` (new) — no mutation survived into the tree. M8 and
+M14 SURVIVED the first run and M12 survived the first two: each was a real
+coverage gap in the moved code, closed by a test written for it (the pill's
+state path, the child-drawer read guard, and the live-field refusal placement),
+not by weakening the mutant.
+
+**Gate (this worktree, this branch).** `bun run check` → `tsc --noEmit` clean,
+`tsc -p apps/mobile --noEmit` clean, `biome check .` **1114 files, 0 errors, 0
+warnings** (the AGENTS §6 baseline: clean), `bun test` **8524 pass / 3 skip / 0
+fail** (the 3 skips are the documented opt-ins: live-k8s, live-docker, the
+~12 s real-socket keepalive). No schema change → `packages/protocol/schema/protocol.json`
+not regenerated. **No changelog fragment** (written, then deleted in Fix round 1
+on Review finding 1). `TODO.md` untouched (the
+orchestrator's line, §10).
+
+**Unverified (one line each).**
+- The plan's coverage check (`bun test --coverage packages/tui`, App.tsx +
+  new-files line total not dropping) was **not** run, as in S4; the moved lines
+  are pinned by the S0/S0b/S3/S4 nets plus 8 new tests, but the percentage is
+  unmeasured.
+- `App.tsx` is 3457 lines, not the plan's ≲800 target: that is the SUM of all
+  slices (S7–S10 are still open), and this slice's own reduction is 273 lines.
+
+## Review
+
+### S5 review — REQUEST-CHANGES
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM, no HIGH).
+
+1. **MEDIUM — `changelog.d/app-decomp-5-dock.changed.md:1` must not exist.**
+   This doc's "Other hotspots" (l. 249: "slices add no CHANGELOG line (internal
+   refactor; one entry when the last slice merges)") and AGENTS §10
+   ("Internal/dev/test-only work adds no fragment") both forbid it, and S1 got
+   the same finding (Finding 2, l. 1074). *Failure scenario:* `bun run release`
+   assembles it into `CHANGELOG.md` under `### Changed` as a user-facing entry
+   for a change whose own text says "no user-visible behaviour changes".
+   Fix: delete the fragment (the S2 one on `main` is the same defect, out of scope here).
+
+**Gate (re-run here).** `bun test packages/tui/test/use-dock.test.tsx
+packages/tui/test/app.test.tsx` → 124 pass / 0 fail; `bun run typecheck` clean;
+`bun run lint` 1114 files, 0 errors/warnings. Full suite not re-run (scoped to touched files).
+
+**Mutation (independent of the executor's 14).** Removed
+`pushNoticeRef.current = pushNotice` (`App.tsx:1070`, the one NEW mechanism S5
+introduces): **KILLED** — 6 fails across `app.test.tsx` (ctrl+t, dock stop on
+child/job, `/agents`, F11 late refusal) and `use-dock.test.tsx` (late refusal).
+Reverted; `git status` clean.
+
+**Attacks tried.** (a) H1 effect order: 20 effects, dock's four unmoved — holds
+(the diff only appends ref names to deps). (b) Late binding of `pushNotice`: the
+ref is written in render right after `pushNotice` is created, before any
+callback can fire; the hook's wrapper reads `.current` at call time, so no stale
+sink — holds, and pinned (mutation above). (c) Identity: the four actions now
+depend on a stable wrapper instead of `pushNotice`, so they re-create LESS than
+before; the deps added to App's effects/callbacks are `useRef` objects (never
+re-run) — holds. (d) TDZ/ordering of `sessionRef`/`field`/`fieldValueRef`/
+`jobRefreshMs` before the `useDock` call — `tsc` clean, holds. (e) §7 invariants
+(single broker, raw-terminal writes, RPC peer): untouched by the diff.
+
+**Executor behaviour.** Thorough and honest: drift recorded, mutation harness
+with sha restore, survivors closed with real tests. One slip: repeated a
+process defect an earlier slice was already corrected for.
+
+*— claude-opus-5-5, 2026-11-14* (different model family from the executor, DeepSeek.)
+
+### Fix round 1 — `feat/app-decomp-5-dock` (S5 review findings)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: this run's
+`ps` command line is `/Users/gmeghnag/bin/tentacle --profile deepseek`, and that
+profile's `model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` at
+`~/.config/tentacle/config.jsonc:29`.)
+
+One MEDIUM, no HIGH. **No `src/` and no `test/` file changed in this round** —
+`git diff --stat -- packages/tui/src packages/tui/test` is empty. One fragment
+deleted, this doc corrected in two places, one section appended.
+
+**Finding 1 (MEDIUM) — `changelog.d/app-decomp-5-dock.changed.md` must not
+exist: FIXED (deleted).** The review's failure scenario was "`bun run release`
+publishes a user-facing `### Changed` bullet for a slice whose own text says no
+user-visible behaviour changes". I reproduced it through the release path's own
+code instead of taking it on trust, and re-ran the same probe twice to get the
+mutation for free — the probe's ONLY input that differs is the file's presence.
+
+Probe `.tentacle/tmp/app-decomp-5-dock/fix1/frag-check.ts` — the real
+`readFragmentDir` + `parseFragments` + `assemble` over this worktree's real
+`CHANGELOG.md` and `changelog.d/`, checked at a fictional `0.0.0-check`; it
+asserts the two properties that make the finding real, that the file exists and
+that the assembled release body contains the dock bullet.
+
+RED, fragment restored from `HEAD` (`git show HEAD:changelog.d/app-decomp-5-dock.changed.md`):
+```
+this slice's fragment: changelog.d/app-decomp-5-dock.changed.md
+ship-ability: the assembled "### Changed" DOES carry the dock bullet
+RED: changelog.d/app-decomp-5-dock.changed.md exists (an internal refactor adds no fragment); assemble() puts "background dock is a module of its own" in the release's ### Changed section
+exit=1
+```
+GREEN, after `rm` (mutation: put the file back → RED again → `rm` → GREEN):
+```
+this slice's fragment: (absent)
+ship-ability: the assembled "### Changed" does not carry the dock bullet
+GREEN: no user-facing entry ships for this slice
+exit=0
+```
+The remaining `### Changed` bullet in that section is S2's
+(`app-decomp-2-commands.changed.md`, on `main`), which the review explicitly put
+out of scope; this round deletes only this slice's.
+
+The fragment's ship-ability is also why the two stale claims in the S5 Execution
+are wrong, so both are corrected (drift, recorded not silent): the Scope line
+(~2863) and the Gate line (~3012) now say **no changelog fragment**, written and
+then deleted here. The S5 Review's quote of "Other hotspots" (l. 249) and
+AGENTS §10 stand unchanged.
+
+**Regression-teeth note.** This is a process finding, not a behaviour one, so no
+unit test can pin it — the guard that *would* catch it (`scripts/test/
+changelog-guard.test.ts` I1/I2) checks `[Unreleased]` emptiness and fragment
+well-formedness, not "no fragment for an internal refactor", and that distinction
+is not machine-checkable (it is a judgement about the task's nature). So the
+teeth here are the probe above plus §10's rule, exactly as S1 and S4 closed their
+identical finding. `bun test scripts/test/changelog-guard.test.ts
+scripts/test/changelog.test.ts scripts/test/release.test.ts` → **57 pass / 0
+fail** (unchanged: the deleted file was this slug only, and an empty-of-it dir
+still parses).
+
+**Gate (this worktree, this branch, after the deletion).**
+`bunx tsc --noEmit` → clean (exit 0). `bun run lint` → `Checked 1114 files in
+344ms. No fixes applied.` **0 errors, 0 warnings** (the AGENTS §6 baseline:
+clean). `bun test` → **8524 pass / 3 skip / 0 fail**, 13 snapshots, 74052
+`expect()` calls, 8527 tests across 611 files (the 3 skips are the documented
+opt-ins: live-k8s, live-docker, the ~12 s real-socket keepalive) — the same
+totals as the S5 Execution, as expected for a round that touches no code.
+`git status --short` → `D changelog.d/app-decomp-5-dock.changed.md`,
+`M docs/feat/app-decomposition.md` and nothing else.
+
+**Unverified.** None new. The S5 Execution's two standing caveats (the
+`--coverage` pair not run; `App.tsx` at 3457 lines, not the plan's ≲800, since
+S7–S10 are open) still hold and are untouched by this round.
+
+### Round 2 — PASS
+
+**Finding 1 (MEDIUM, changelog fragment): FIXED.** `git diff HEAD~1` deletes
+`changelog.d/app-decomp-5-dock.changed.md` and changes only this doc; no change
+under `packages/` or `scripts/`, so no code regression is possible from this
+round. Mutation: I put the fragment back from `HEAD~1` and removed it again; tree
+clean afterwards. I could not run the executor's probe (`frag-check.ts`) here
+because this sandbox needs approval to run scratch scripts. The fix is checkable
+without it: the release path reads `changelog.d/` files, and this slug's file is
+gone (`ls changelog.d` → only S2's fragment, on `main`, out of scope). The
+Execution's Scope and Gate lines are corrected to match.
+
+**Gate.** `bun run typecheck` clean; `bun run lint` 1114 files, 0 errors/warnings;
+changelog-guard + changelog + release tests 57 pass / 0 fail.
 ### S6 — `feat/app-decomp-6-attach` (the attachments' executor leaves `App.tsx`)
 
 *— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: the run's
