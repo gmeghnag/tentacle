@@ -12,6 +12,12 @@ export interface ParsedFlags {
   readonly positional: string[];
   readonly flags: Map<string, string>;
   readonly bools: Set<string>;
+  /**
+   * The values of the spec's `repeated` flags, in the order given (`--address
+   * a --address b`). They are NOT in `flags`: one value per name stays the
+   * only thing that map can hold, so a repeatable flag cannot be half-read.
+   */
+  readonly repeats?: ReadonlyMap<string, readonly string[]>;
 }
 
 /** One flag's alias. */
@@ -34,6 +40,12 @@ export interface ArgSpec {
    * it (else the flag is a bool); `--k=v` is always explicit.
    */
   readonly optional?: Readonly<Record<string, { readonly accepts: (word: string) => boolean }>>;
+  /**
+   * Flags that take a value AND may be given more than once (`pair --address
+   * a --address b`): a list, not an override. Their values land in
+   * `ParsedFlags.repeats`, never in `flags`.
+   */
+  readonly repeated?: readonly string[];
   /** Pairs of flags that cannot be given together (either form: bool or with a value). */
   readonly conflicts?: readonly (readonly [string, string])[];
   readonly positional: { readonly min: number; readonly max: number };
@@ -187,6 +199,18 @@ export const ARGS = {
     positional: { min: 0, max: 3 },
   },
   update: { values: { version: {} }, bools: { check: {} }, positional: { min: 0, max: 0 } },
+  // `tentacle pair [--address URL]… [--name NAME]` (docs/feat/device-pairing.md
+  // 9d): --address is a LIST (a laptop has several, and a relay one day), so it
+  // is `repeated` — one value per name in `flags` would silently keep the last.
+  pair: {
+    values: { name: {} },
+    repeated: ["address"],
+    positional: { min: 0, max: 0 },
+  },
+  // `tentacle devices [revoke <name|id-prefix> | reset]`. The words are the
+  // sub-command and its subject, so a permissions-shifted value is refused here
+  // rather than guessed at in `devices-cmd.ts`.
+  devices: { bools: { yes: { short: "y" } }, positional: { min: 0, max: 2 } },
 } as const satisfies Record<string, ArgSpec>;
 
 /**
@@ -247,14 +271,20 @@ export function parseArgs(args: readonly string[], spec: ArgSpec): ParsedArgs {
   const positional: string[] = [];
   const flags = new Map<string, string>();
   const bools = new Set<string>();
+  const repeats = new Map<string, string[]>();
+  const isRepeated = (name: string): boolean => spec.repeated?.includes(name) === true;
   const kind = (name: string): "value" | "bool" | "optional" | undefined =>
     spec.values && Object.hasOwn(spec.values, name)
       ? "value"
-      : spec.bools && Object.hasOwn(spec.bools, name)
-        ? "bool"
-        : spec.optional && Object.hasOwn(spec.optional, name)
-          ? "optional"
-          : undefined;
+      : spec.repeated?.includes(name) === true
+        ? // A repeated flag IS a value flag: it takes one value per occurrence,
+          // which is the only difference from `values`.
+          "value"
+        : spec.bools && Object.hasOwn(spec.bools, name)
+          ? "bool"
+          : spec.optional && Object.hasOwn(spec.optional, name)
+            ? "optional"
+            : undefined;
   const longOf = (short: string): string | undefined => {
     for (const group of [spec.values, spec.bools]) {
       for (const [name, def] of Object.entries(group ?? {})) {
@@ -281,7 +311,7 @@ export function parseArgs(args: readonly string[], spec: ArgSpec): ParsedArgs {
     if (name === undefined || type === undefined) {
       return { ok: false, error: `unknown option ${written}` };
     }
-    if (flags.has(name) || bools.has(name)) {
+    if ((flags.has(name) || bools.has(name)) && !isRepeated(name)) {
       return { ok: false, error: `--${name} given more than once` };
     }
     if (type === "bool") {
@@ -310,9 +340,13 @@ export function parseArgs(args: readonly string[], spec: ArgSpec): ParsedArgs {
     if (value === undefined || value === "") {
       return { ok: false, error: `${written} needs a value` };
     }
-    flags.set(name, value);
+    if (isRepeated(name)) {
+      repeats.set(name, [...(repeats.get(name) ?? []), value]);
+    } else {
+      flags.set(name, value);
+    }
   }
-  const given = (name: string): boolean => flags.has(name) || bools.has(name);
+  const given = (name: string): boolean => flags.has(name) || bools.has(name) || repeats.has(name);
   for (const [a, b] of spec.conflicts ?? []) {
     if (given(a) && given(b)) {
       return { ok: false, error: `--${a} and --${b} cannot be used together` };
@@ -327,7 +361,7 @@ export function parseArgs(args: readonly string[], spec: ArgSpec): ParsedArgs {
   if (positional.length < spec.positional.min) {
     return { ok: false, error: "missing argument" };
   }
-  return { ok: true, positional, flags, bools };
+  return { ok: true, positional, flags, bools, repeats };
 }
 
 const DURATION_UNITS: Readonly<Record<string, number>> = {
@@ -535,6 +569,8 @@ const SUBCOMMANDS = new Set([
   "config",
   "update",
   "install",
+  "pair",
+  "devices",
 ]);
 /** The subcommands that start a session, so take `--model`/`--profile` after them. */
 const SESSION_COMMANDS = new Set(["serve", "run", "attach"]);
@@ -644,6 +680,8 @@ export type CliMode =
   | "explain"
   | "config"
   | "update"
+  | "pair"
+  | "devices"
   | "plain"
   | "tui"
   | "prompt"
@@ -671,6 +709,11 @@ const USES_MODEL: Readonly<Record<CliMode, boolean>> = {
   update: false,
   explain: false,
   config: false,
+  // `pair`/`devices` read and write `<configDir>/devices` and print plain lines:
+  // they call no model, and one broken `apiKeyCommand` must not stop a user
+  // from pairing (or revoking) a phone.
+  pair: false,
+  devices: false,
   // Everything that builds an agent or proxies to a model.
   serve: true,
   run: true,
@@ -709,7 +752,9 @@ export function cliMode(args: readonly string[]): CliMode {
     first === "package" ||
     first === "explain" ||
     first === "config" ||
-    first === "update"
+    first === "update" ||
+    first === "pair" ||
+    first === "devices"
   ) {
     return first;
   }
@@ -739,5 +784,7 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   config:
     "tentacle config set <key> <value> | <key>=<value> | unset <key> | get <key> | list [--set] | path [--profile <name>] [--json] [--yes]",
   update: "tentacle update [--check] [--version vX.Y.Z]",
+  pair: "tentacle pair [--address ws(s)://host:port/e2e]... [--name <name>]",
+  devices: "tentacle devices | revoke <name|id-prefix> | reset [--yes]",
   tui: "tentacle [-i] [--resume [uid]|--continue] [--in-process] [--model <id>] [--profile <name>]",
 };

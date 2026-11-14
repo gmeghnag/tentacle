@@ -23,7 +23,8 @@
     "@tentacle/providers": "workspace:*",
     "@tentacle/tools": "workspace:*",
     "@tentacle/transport": "workspace:*",
-    "@tentacle/tui": "workspace:*"
+    "@tentacle/tui": "workspace:*",
+    "uqr": "0.1.3"
   },
   "devDependencies": {
     "@tentacle/protocol": "workspace:*",

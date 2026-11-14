@@ -12,8 +12,9 @@ import type { DuplexChannel } from "@tentacle/transport";
 import { type AuthorizeVerdict, noiseResponder, systemRandom } from "@tentacle/transport/noise";
 import { Connection, type ConnectionPrincipal } from "./connection.ts";
 import type { DeviceAllow, DeviceAuthority, DeviceClose } from "./device-authority.ts";
-import { touchSeen } from "./device-store.ts";
+import { hasLivePairing, touchSeen } from "./device-store.ts";
 import { type HandshakeLimitOptions, HandshakeLimiter } from "./handshake-limit.ts";
+import { PairHandler } from "./pairing-handler.ts";
 import type { SessionHost } from "./session-host.ts";
 
 export interface WsServerOptions {
@@ -76,10 +77,18 @@ export interface DeviceRouteOptions {
   readonly authority: DeviceAuthority;
   /** Overrides for the handshake limiter (tests shorten the burst). */
   readonly handshakeLimit?: HandshakeLimitOptions;
+  /**
+   * How often a pairing-only connection checks that its window is still open
+   * (`PAIRING_CHECK_MS` by default). A pairing connection is closed at the
+   * window's expiry, and at once when `pair` cleans the window up (F16/F2).
+   */
+  readonly pairingCheckMs?: number;
 }
 
 /** The device route's path: a phone dials `<address>/e2e`. */
 export const DEVICE_ROUTE = "/e2e";
+/** How often a pairing-only connection checks its window is still open (a poll, not a deadline). */
+export const PAIRING_CHECK_MS = 1_000;
 /** The bits of Bun's server socket the route touches (its `data` is our `SocketData`). */
 interface WsSocket {
   readonly data: SocketData;
@@ -226,6 +235,48 @@ class WsChannel implements DuplexChannel {
 }
 
 /**
+ * A pairing connection lives only while a pairing window does (F16/F2): poll the
+ * store and close the connection when no usable window is left — the window
+ * expired, or `pair` cleaned it up (Ctrl+C, its exit handler). `hasLivePairing`
+ * is the side-effect-free read (9a Review N3); the OTHER window on a computer
+ * with two `pair` windows keeps the connection open, which is right: any live
+ * window may still be the one this peer scanned.
+ *
+ * It never closes a connection that is ANSWERING a claim it holds
+ * (`holdingClaim`): `pair` writes the registry and THEN removes its window, so
+ * the winning exchange's last moment is exactly a moment with no live window —
+ * closing there would report "the connection closed" for a device that IS
+ * registered, breaking F3. That connection is the handler's to end (registry
+ * first, then the decision, then the expiry), and the next tick closes the
+ * socket normally if nothing is left.
+ *
+ * Returns the stopper, called on every teardown path (so no timer outlives a
+ * socket).
+ */
+function watchPairingWindow(
+  configDir: string,
+  route: DeviceRouteOptions,
+  options: WsServerOptions,
+  handle: DeviceClose,
+  holdingClaim: () => boolean,
+): () => void {
+  const watcher = setInterval(() => {
+    if (hasLivePairing(configDir) !== undefined) {
+      return;
+    }
+    if (holdingClaim()) {
+      return;
+    }
+    options.onAudit?.("pairing-closed");
+    handle.close();
+  }, route.pairingCheckMs ?? PAIRING_CHECK_MS);
+  // Housekeeping, never a reason for the process to stay alive (`serve`'s
+  // listener decides that; `bun test` must be able to exit).
+  (watcher as { unref?: () => void }).unref?.();
+  return () => clearInterval(watcher);
+}
+
+/**
  * Start the WebSocket daemon. Refuses a non-loopback bind without a token.
  * Returns a handle with the resolved URL and a `stop()`.
  */
@@ -357,7 +408,10 @@ export function startWsServer(options: WsServerOptions): RunningServer {
   function openDevice(ws: WsSocket, channel: WsChannel, route: DeviceRouteOptions): void {
     const authority = route.authority;
     const identity = authority.staticKey();
-    if (identity === undefined) {
+    // The whole identity, not just its private key: the pairing result names
+    // the computer (`{ id, name }`), and the SAS is computed from its key.
+    const computer = authority.identity();
+    if (identity === undefined || computer === undefined) {
       // No usable identity (an unreadable store, F14/F26): nothing can be
       // authenticated, so the socket is closed rather than left half-open — and
       // its limiter slot goes back HERE: `finish` is not registered yet, and
@@ -385,6 +439,8 @@ export function startWsServer(options: WsServerOptions): RunningServer {
     // every message 1 and a revoke could land between the two calls, so the
     // decision is captured rather than asked for again.
     let admitted: DeviceAllow | undefined;
+    // Set only for a pairing connection: its window watcher's stopper.
+    let stopWatcher: (() => void) | undefined;
     noiseResponder(channel, {
       staticKey: identity,
       random: systemRandom,
@@ -404,7 +460,22 @@ export function startWsServer(options: WsServerOptions): RunningServer {
           return;
         }
         const principal: ConnectionPrincipal =
-          verdict.kind === "device" ? { kind: "device", id: verdict.id } : { kind: "pairing" };
+          verdict.kind === "device"
+            ? { kind: "device", id: verdict.id }
+            : {
+                kind: "pairing",
+                // The handler is per CONNECTION: its attempt cap (5 wrong
+                // codes) belongs to the socket, and the key it registers is
+                // the one THIS handshake authenticated (F18: `device/pair`'s
+                // params carry no key at all).
+                pair: new PairHandler({
+                  configDir: authority.configDir,
+                  identity: computer,
+                  remoteStatic: secure.remoteStatic,
+                  ...(options.onAudit ? { onAudit: options.onAudit } : {}),
+                  close: () => channel.close(),
+                }),
+              };
         // Built on the RESOLVED secure channel, exactly as the plain route
         // builds it on the raw socket: `Connection` is unchanged and never
         // learns there was a handshake (§7 one session path).
@@ -427,6 +498,20 @@ export function startWsServer(options: WsServerOptions): RunningServer {
           touchSeen(authority.configDir, verdict.id);
           options.onAudit?.(`device-open ${verdict.id.slice(0, 8)}`);
         } else {
+          // A pairing connection lives only as long as a pairing window does
+          // (F16): the check is a poll, so an expiry that `pair` failed to
+          // clean up still closes it, and `pair`'s exit handler (which removes
+          // the window) closes it within a check. `hasLivePairing` is the
+          // side-effect-free read (9a Review N3), never `findPairing`.
+          stopWatcher = watchPairingWindow(
+            authority.configDir,
+            route,
+            options,
+            handle,
+            // A connection answering a claim it holds is never closed by the
+            // watcher (F3): see `watchPairingWindow`.
+            () => (principal.kind === "pairing" ? principal.pair.holdingClaim : false),
+          );
           options.onAudit?.("pairing-open");
         }
         // The socket closed between the confirm and this point (F22): the
@@ -434,10 +519,12 @@ export function startWsServer(options: WsServerOptions): RunningServer {
         // connection must be closed here or it would stay attached forever.
         if (channel.isClosed()) {
           handle.close();
+          stopWatcher?.();
           if (verdict.kind === "device") authority.unregister(verdict.id, handle);
           return;
         }
         ws.data.release = () => {
+          stopWatcher?.();
           if (verdict.kind === "device") authority.unregister(verdict.id, handle);
         };
       },

@@ -321,6 +321,15 @@ const FIXTURES: Record<string, Json[]> = {
     { have: 0, complete: false },
     { have: 4, complete: true },
   ],
+  // Pairing over the secure channel (docs/feat/device-pairing.md 9c): the code
+  // and a display name; back, a device id and the computer that took it.
+  "methods/device~1pair/params": [
+    { code: "K7M2QX9AB3", name: "iPhone di Gabriel" },
+    { code: "0012345678", name: "x" },
+  ],
+  "methods/device~1pair/result": [
+    { deviceId: "0123456789abcdef", computer: { id: "fedcba9876543210", name: "gabriel-mac" } },
+  ],
   "methods/daemon~1session_ttl/params": [{}, { idleTtlMs: 3600000 }, { idleTtlMs: "never" }],
   "methods/daemon~1session_ttl/result": [
     { idleTtlMs: "never", persisted: false },

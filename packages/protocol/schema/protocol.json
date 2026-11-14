@@ -496,6 +496,55 @@
       "properties": {},
       "type": "object"
     },
+    "DeviceComputer": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "pattern": "^[0-9a-f]{16}$",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["id", "name"],
+      "type": "object"
+    },
+    "DevicePairParams": {
+      "additionalProperties": true,
+      "properties": {
+        "code": {
+          "maxLength": 10,
+          "minLength": 10,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["code", "name"],
+      "type": "object"
+    },
+    "DevicePairResult": {
+      "additionalProperties": true,
+      "properties": {
+        "computer": {
+          "$ref": "#/$defs/DeviceComputer"
+        },
+        "deviceId": {
+          "pattern": "^[0-9a-f]{16}$",
+          "type": "string"
+        }
+      },
+      "required": ["computer", "deviceId"],
+      "type": "object"
+    },
     "DsmlLeakUpdate": {
       "additionalProperties": true,
       "properties": {
@@ -2041,6 +2090,18 @@
         }
       },
       "required": ["created", "epoch", "resync", "sessionId"],
+      "type": "object"
+    },
+    "PairingRefusedData": {
+      "additionalProperties": true,
+      "properties": {
+        "reason": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["reason"],
       "type": "object"
     },
     "PermissionOption": {
@@ -4104,6 +4165,7 @@
     "MethodNotFound": -32601,
     "NoTurnRunning": -32008,
     "NotInitialized": -32005,
+    "PairingRefused": -32017,
     "ParseError": -32700,
     "PermissionNotPending": -32013,
     "SessionArchived": -32014,
@@ -4130,6 +4192,14 @@
       },
       "result": {
         "$ref": "#/$defs/SessionTtlResult"
+      }
+    },
+    "device/pair": {
+      "params": {
+        "$ref": "#/$defs/DevicePairParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DevicePairResult"
       }
     },
     "hooks/trust": {

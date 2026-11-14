@@ -7,6 +7,7 @@
 import type { z } from "zod";
 import { AttachmentPutParamsSchema, AttachmentPutResultSchema } from "./attachment-upload.ts";
 import { SessionTtlParamsSchema, SessionTtlResultSchema } from "./daemon.ts";
+import { DevicePairParamsSchema, DevicePairResultSchema } from "./device.ts";
 import { HooksTrustParamsSchema, HooksTrustResultSchema } from "./hooks.ts";
 import { McpStatusParamsSchema, McpStatusResultSchema } from "./mcp.ts";
 import {
@@ -110,6 +111,11 @@ export const Method = {
   HooksTrust: "hooks/trust",
   /** Client → daemon: one chunk of an image's bytes into the session's store (docs/feat/attachments-upload.md). */
   AttachmentPut: "attachment/put",
+  /**
+   * A NEW device proves a one-time pairing code inside the secure channel
+   * (docs/feat/device-pairing.md 9c). Reachable only on a pairing connection.
+   */
+  DevicePair: "device/pair",
 } as const;
 export type MethodName = (typeof Method)[keyof typeof Method];
 
@@ -180,6 +186,7 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     params: AttachmentPutParamsSchema,
     result: AttachmentPutResultSchema,
   },
+  [Method.DevicePair]: { params: DevicePairParamsSchema, result: DevicePairResultSchema },
 };
 
 /** params schema for every notification method. */

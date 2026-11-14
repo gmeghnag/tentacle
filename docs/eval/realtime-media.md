@@ -662,3 +662,17 @@ drifted (`serve.ts:634` → `:723`). The web facts were re-checked on 2026-11-13
 - Upper ranges marked [E] in §5.
 
 *(pending the owner's verdict on the questions above)*
+
+#### Owner answers (2026-11-14, one at a time)
+
+- Q1 supervisor split: **yes (a)** — owner asked how the front is configured/placed: not a hook; a `VoiceFront` client component at the audio edge, its model called at the key holder, route-first constrained output executed by deterministic client code (verbatim transcript delegation).
+- Q2 front modality: **B+** (cascade: on-device VAD/STT → small front LLM → on-device TTS) is the realtime mode; C only if E4/E5 prove it worth it.
+- Q3 front model / who sees voice data: **(a)** same provider as the session (Haiku for Claude, small local model for local Qwen) called at the key holder; on-device front optional; a third-party faster front only opt-in with an explicit notice of what it receives.
+- Q4 who speaks a permission ask: **(a)** the broker's exact text via a deterministic template, local TTS + on screen, never through a model; answered only by key/tap bound to that ask; no voice approval in v1.
+- Q5 reasoning for voice turns: **(a)** off/minimal for every spoken reply (front and brain); delegated real work keeps the session reasoning setting, progress narrated by templates.
+- Q6 remote-terminal topology: **(a)** laptop voice = local terminal only via a native Swift helper (AEC, VAD, on-device STT), Bluetooth headsets supported (option: Mac mic + headphone output to avoid the HFP profile drop); over SSH/remote tmux voice is off with a notice and the phone is the voice edge (V4: iOS voice processing + SpeechAnalyzer, front at serve or on-device Foundation Models, text only over the E2E channel; background/lock-screen audio to be verified by E10).
+- Q7 if C is built — credential and spend: **(a)** no provider token on any device; the key holder opens each call (OpenAI unified interface) with its own key/config and a sideband; per-call duration cap + daily spend cap, defaults 30 min/call and $3/day, configurable.
+- Q8 persistence: **(a)** the verbatim transcript is the user message with an optional non-critical `via: "voice"` field (older builds ignore it; no new critical entry); front chit-chat display-only; audio never kept; in C a paraphrase is an attributed `voice-front` entry, never the user's message.
+- Q9 phase order: **(a)** voice first — V0 experiments (E4, E5, E6, E9) → V1 dictation → V2 hands-free → V3 B+ fast front → V4 phone; binary blobs after, only on the hops that carry bytes (B1 Noise outer base64, B2 `blob/*` on connect), gated on E1/E2; live video by pull (`look`) after B2.
+
+**Architecture APPROVED by the owner (2026-11-14). Next: V0 experiments.**
