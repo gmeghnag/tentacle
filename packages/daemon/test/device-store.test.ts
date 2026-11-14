@@ -21,10 +21,12 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { MAX_PAIRING_ADDRESSES } from "@tentacle/protocol";
 import {
   DEVICE_DIR,
   DEVICE_ID_HEX,
@@ -49,7 +51,9 @@ import {
   readSeen,
   removeDevices,
   replaceIdentity,
+  sweepDeadDaemonRecords,
   sweepPairings,
+  touchDaemonRecord,
   touchSeen,
   writeDaemonRecord,
   writePairingDecision,
@@ -544,6 +548,98 @@ describe("daemon records", () => {
     // A malformed record is skipped, not fatal.
     writeFileSync(join(configDir, "daemons", `${process.pid + 1}.json`), "{}");
     expect(readDaemonRecords(configDir, { alive: () => true }).length).toBe(2);
+  });
+});
+
+// docs/feat/sibling-discovery.md: the record's liveness is a HEARTBEAT (mtime),
+// not just a pid answer — a crashed `serve` whose pid was reused by any process
+// is a phantom sibling otherwise (Repro 3). Mutations: ignore the mtime → the
+// pid-reuse test fails; never delete a dead pid's record → the sweep test fails.
+describe("daemon records: liveness, sweep, addresses (sibling discovery)", () => {
+  const record = (over: Partial<Parameters<typeof writeDaemonRecord>[1]> = {}) => ({
+    pid: process.pid,
+    host: "0.0.0.0",
+    port: 4001,
+    tls: false,
+    cwd: "/work",
+    startedAt: 7,
+    ...over,
+  });
+
+  test("a live pid with an OLD mtime is excluded once freshness is demanded (Repro 3)", () => {
+    const configDir = scratch();
+    writeDaemonRecord(configDir, record());
+    const path = join(configDir, "daemons", `${process.pid}.json`);
+    // A crashed serve whose pid is reused: the file is old, the pid answers.
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(path, old, old);
+    // Absent option = today's behaviour (the pid is the whole liveness signal).
+    expect(readDaemonRecords(configDir).map((r) => r.port)).toEqual([4001]);
+    expect(readDaemonRecords(configDir, { freshWithinMs: 30_000 }).map((r) => r.port)).toEqual([]);
+    // And with the clock moved forward, not by rewriting the file.
+    expect(
+      readDaemonRecords(configDir, { freshWithinMs: 30_000, now: Date.now() + 60_000 }).map(
+        (r) => r.port,
+      ),
+    ).toEqual([]);
+    expect(
+      readDaemonRecords(configDir, { freshWithinMs: 5 * 60_000, now: Date.now() + 60_000 }).map(
+        (r) => r.port,
+      ),
+    ).toEqual([4001]);
+  });
+
+  test("touchDaemonRecord refreshes the mtime a heartbeat relies on", () => {
+    const configDir = scratch();
+    writeDaemonRecord(configDir, record());
+    const path = join(configDir, "daemons", `${process.pid}.json`);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(path, old, old);
+    expect(readDaemonRecords(configDir, { freshWithinMs: 30_000 })).toHaveLength(0);
+    expect(touchDaemonRecord(configDir, process.pid)).toBe(true);
+    expect(readDaemonRecords(configDir, { freshWithinMs: 30_000 }).map((r) => r.port)).toEqual([
+      4001,
+    ]);
+    // Touching a record that is gone is `false`, never a create: a removed
+    // record must not be resurrected by a heartbeat racing the stop.
+    expect(touchDaemonRecord(configDir, 999_999)).toBe(false);
+    expect(readDaemonRecords(configDir, { alive: () => true })).toHaveLength(1);
+  });
+
+  test("sweepDeadDaemonRecords deletes a dead pid's record and keeps a live-but-stale one", () => {
+    const configDir = scratch();
+    writeDaemonRecord(configDir, record());
+    writeDaemonRecord(configDir, record({ pid: 999_998, port: 4002 }));
+    const stalePath = join(configDir, "daemons", `${process.pid}.json`);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(stalePath, old, old);
+    const alive = (pid: number): boolean => pid === process.pid;
+    expect(sweepDeadDaemonRecords(configDir, { alive })).toBe(1);
+    expect(existsSync(join(configDir, "daemons", "999998.json"))).toBe(false);
+    // A live-but-stale record may be a slow sibling: ignored, NEVER deleted.
+    expect(existsSync(stalePath)).toBe(true);
+  });
+
+  test("`addresses` round-trips, and invalid ones are refused (never truncated silently)", () => {
+    const configDir = scratch();
+    const addresses = ["ws://192.168.1.5:4001/e2e", "wss://mac.tailnet.ts.net/e2e"];
+    expect(writeDaemonRecord(configDir, record({ addresses }))).toEqual({ ok: true });
+    expect(readDaemonRecords(configDir)[0]?.addresses).toEqual(addresses);
+    // A record WITHOUT the field still reads (an older writer): no `addresses`.
+    const older = scratch();
+    writeDaemonRecord(older, record());
+    expect(readDaemonRecords(older)[0]?.addresses).toBeUndefined();
+    // Invalid values are dropped one by one, not refused with the whole record:
+    // a hand-edited record must not make its daemon invisible.
+    const mixed = scratch();
+    writeDaemonRecord(mixed, record({ addresses: [...addresses, "http://nope/e2e"] }));
+    expect(readDaemonRecords(mixed)[0]?.addresses).toEqual(addresses);
+    const capped = scratch();
+    writeDaemonRecord(
+      capped,
+      record({ addresses: Array.from({ length: 12 }, (_, i) => `ws://10.0.0.${i}:4001/e2e`) }),
+    );
+    expect(readDaemonRecords(capped)[0]?.addresses?.length).toBe(MAX_PAIRING_ADDRESSES);
   });
 });
 

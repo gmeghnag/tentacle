@@ -7,6 +7,7 @@
  */
 import { X509Certificate } from "node:crypto";
 import type { TlsOptions } from "@tentacle/client";
+import { MAX_PAIRING_ADDRESSES, isPairingAddress } from "@tentacle/protocol";
 
 export interface ParsedFlags {
   readonly positional: string[];
@@ -110,6 +111,9 @@ export const ARGS = {
       socket: {},
       ...SESSION_MODEL,
     },
+    // `serve --address <url>`, repeatable: a LIST, as `pair`'s is (one value
+    // per name in `flags` would silently keep the last).
+    repeated: ["address"],
     // `--bridge` / `--resident` / `--resident-status` / `--resident-stop`: the
     // pod's resident daemon (`pod-resident.ts`), run by `run`/`attach` execs.
     bools: {
@@ -390,6 +394,8 @@ export interface ServeLimits {
   readonly maxSessions?: number;
   readonly maxDetachedSessions?: number;
   readonly wsIdleTimeoutSec?: number;
+  /** `serve --address <url>` (repeatable): the daemon's own public URLs, validated. */
+  readonly addresses?: readonly string[];
 }
 
 /** Bun's ceiling for a WebSocket `idleTimeout` (it throws above it). */
@@ -400,7 +406,9 @@ const MAX_WS_IDLE_TIMEOUT_SEC = 960;
  * `--max-detached-sessions <n>`, `--ws-idle-timeout <dur>`. Throws on an
  * invalid value — or a flag given without one — so `serve` fails before binding.
  */
-export function parseServeLimits(parsed: Pick<ParsedFlags, "flags" | "bools">): ServeLimits {
+export function parseServeLimits(
+  parsed: Pick<ParsedFlags, "flags" | "bools" | "repeats">,
+): ServeLimits {
   const value = (key: string): string | undefined => {
     if (parsed.bools.has(key)) {
       throw new Error(`--${key} needs a value`);
@@ -432,12 +440,27 @@ export function parseServeLimits(parsed: Pick<ParsedFlags, "flags" | "bools">): 
   if (idleMs !== undefined && (idleMs % 1000 !== 0 || idleMs / 1000 > MAX_WS_IDLE_TIMEOUT_SEC)) {
     throw new Error(`--ws-idle-timeout must be whole seconds, at most ${MAX_WS_IDLE_TIMEOUT_SEC}s`);
   }
+  const addresses = parsed.repeats?.get("address");
+  // `serve --address`: a phone must be able to dial it, so it is validated HERE
+  // (before binding) as `pair`'s is — a typo silently missing from the
+  // announcement is a project the phone can never reach (docs/feat/sibling-discovery.md).
+  for (const address of addresses ?? []) {
+    if (!isPairingAddress(address)) {
+      throw new Error(
+        `--address must be a ws(s) URL ending in /e2e (a phone dials it), got "${address}"`,
+      );
+    }
+  }
+  if ((addresses?.length ?? 0) > MAX_PAIRING_ADDRESSES) {
+    throw new Error(`--address at most ${MAX_PAIRING_ADDRESSES} times (one QR holds that many)`);
+  }
   const limits = {
     sessionTtlMs: parsed.flags.get("session-ttl") === "never" ? null : duration("session-ttl"),
     adminCapMs: duration("session-admin-cap"),
     maxSessions: count("max-sessions"),
     maxDetachedSessions: count("max-detached-sessions"),
     wsIdleTimeoutSec: idleMs !== undefined ? idleMs / 1000 : undefined,
+    ...(addresses !== undefined ? { addresses } : {}),
   };
   return Object.fromEntries(
     Object.entries(limits).filter(([, v]) => v !== undefined),

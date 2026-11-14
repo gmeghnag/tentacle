@@ -14,6 +14,7 @@ import {
   DEFAULT_MAX_DETACHED_SESSIONS,
   DEFAULT_MAX_SESSIONS,
   DEFAULT_SESSION_TTL_MS,
+  type DaemonRecord,
   DeviceAuthority,
   LogSessionStore,
   type ModelLink,
@@ -37,6 +38,7 @@ import {
 import type { ModelPurpose, SessionSettings, SessionSettingsReport } from "@tentacle/protocol";
 import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@tentacle/transport";
 import { applyCarried } from "./carried-settings.ts";
+import { type DiscoveryDriver, startDiscovery } from "./discovery.ts";
 import type { ServeLimits } from "./flags.ts";
 import { daemonImagePolicy } from "./image-policy.ts";
 import type { ProviderFactory } from "./model-provider.ts";
@@ -106,12 +108,37 @@ export interface ServeOptions extends ServeLimits {
    * without leaving the machine. Default `createModelProvider`.
    */
   readonly createProvider?: ProviderFactory;
+  /**
+   * The daemon's own public URLs (`serve --address`, repeatable): a tailnet
+   * name, a tunnel, the user's own domain — addresses its bind cannot show
+   * (docs/feat/sibling-discovery.md owner Q3). Each is a `ws(s)://…/e2e` URL
+   * (`isPairingAddress`); they go into the daemon's record (so `pair`'s QR and
+   * its siblings see them) and into its own announcement.
+   */
+  readonly addresses?: readonly string[];
+  /**
+   * Sibling discovery (`daemon/discover`) for this daemon. Default ON: a `serve`
+   * on the user's own host is the only kind that has siblings (a pod daemon
+   * never reaches `listen`, AGENTS §7). `false` keeps a listener with no
+   * discovery at all — a test's, or a host that must announce nothing.
+   */
+  readonly discovery?: boolean;
+  /** Sibling-discovery poll period (ms); tests shorten it. */
+  readonly pollMs?: number;
+  /** This daemon's own heartbeat period (ms); tests shorten it. */
+  readonly heartbeatMs?: number;
 }
 
 /** A running `serve`: `stop` waits for every session write, then releases the store. */
 export interface ServeHandle {
   readonly url: string;
   readonly port: number;
+  /**
+   * The sibling-discovery driver this daemon owns (`undefined` when
+   * `options.discovery === false`). Exposed so a caller can read the snapshot it
+   * announces without a client channel.
+   */
+  readonly discovery?: DiscoveryDriver;
   stop(): Promise<void>;
 }
 
@@ -439,19 +466,43 @@ function listen(
   // `<configDir>/daemons/<pid>.json`: what `pair` (9d) reads to build the QR's
   // addresses, and what task 10 builds siblings on (owner Q6). Removed at stop;
   // a crash leaves it, and its reader ignores a dead pid.
+  let record: DaemonRecord | undefined;
   if (devices) {
-    const written = writeDaemonRecord(devices.configDir, {
+    record = {
       pid: process.pid,
       host: options.host,
       port: server.port,
       tls: options.tls !== undefined,
       cwd,
       startedAt: Date.now(),
-    });
+      ...(options.addresses && options.addresses.length > 0
+        ? { addresses: options.addresses }
+        : {}),
+    };
+    const written = writeDaemonRecord(devices.configDir, record);
     if (!written.ok) {
       // Not fatal: the daemon works, `pair` just has one fewer address to offer.
       options.onError?.(new Error(`cannot write ${written.path}: ${written.reason}`));
     }
+  }
+  // Sibling discovery (docs/feat/sibling-discovery.md): ONE driver per process,
+  // started with the listener (it needs the BOUND port) and stopped with it,
+  // before the record is removed — a stopping daemon must not heartbeat a file
+  // it is about to delete. `self` comes from this process's options, never from
+  // the file: a failed write must not make a daemon invisible to its own
+  // clients (F4).
+  const discovery =
+    devices && record && options.discovery !== false
+      ? startDiscovery({
+          configDir: devices.configDir,
+          self: record,
+          ...(options.pollMs !== undefined ? { pollMs: options.pollMs } : {}),
+          ...(options.heartbeatMs !== undefined ? { heartbeatMs: options.heartbeatMs } : {}),
+          log: (line) => options.onError?.(new Error(line)),
+        })
+      : undefined;
+  if (discovery) {
+    sessionHost.setDiscoverySource(discovery);
   }
   // The reaper's policy has ONE owner: this function. A runtime change
   // (`daemon/session_ttl`) swaps `policy` and re-arms the interval — nothing
@@ -523,10 +574,12 @@ function listen(
   return {
     url: server.url,
     port: server.port,
+    ...(discovery ? { discovery } : {}),
     stop: () => {
       stopping ??= (async () => {
         stopped = true;
         stopReaper?.();
+        discovery?.stop();
         if (devices) removeDaemonRecord(devices.configDir);
         server.stop();
         await release();

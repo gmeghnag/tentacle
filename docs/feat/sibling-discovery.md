@@ -389,6 +389,144 @@ or a named mutation). Fakes: `createChannelPair`, injected timers/clock/`interfa
 
 ## Execution
 
+*— claude-opus-5-5, 2026-11-14*
+
+### Load-bearing check (re-run first, as instructed)
+
+PASSES. `.tentacle/tmp/sibling-discovery/load-bearing.ts` (in the worktree) imported the
+branch's `configDirFromEnv` and printed:
+
+```
+default: /Users/gmeghnag/.config/tentacle (stable: true)
+override: /explicit/dir (stable: true)
+xdg: /xdg/tentacle (stable: true)
+mentions cwd/process.cwd inside resolveConfigDir: false
+```
+
+`resolveConfigDir` (`packages/config/src/load.ts:497-508`) never reads `cwd`, and the
+derivation is stable across calls — so one `daemons/` and one identity per computer, which
+is what makes a sibling both findable and dialable. The second assumption (Repro 1:
+an unknown inbound notification reaches an older client's `onError`) was re-proved
+structurally at `peer.ts:386-389` and is pinned by the "a connection that never asked gets
+ZERO frames" test.
+
+### As built, in the plan's order
+
+**1. Protocol** (`daemon.ts`, `methods.ts`, `schema/protocol.json`, + its tests).
+`DaemonDiscoverParamsSchema` (`{}`), `DiscoveredDaemonSchema`, `DaemonDiscoverySchema`,
+`MAX_DISCOVERED_DAEMONS = 32`; `Method.DaemonDiscover` / `Notification.DaemonDiscovery` and
+both registry entries. `cwd` is `line(4096)` (no control chars); each address `.max(512)` and
+a plain regex — NOT `isPairingAddress` itself: the JSON-Schema export does not map a
+`.refine()`, so the wire uses a regex and a fixed-sample agreement test pins the two together
+(11 protocol tests, incl. bounds, strip-not-strict, rev/stamp shapes, empty `addresses`
+allowed for a loopback sibling). `protocol.json` regenerated with `bun run schema:export`
+(*not* hand-merged) and fixtures added to the drift test.
+
+**2. `device-store`.** `DaemonRecord.addresses?` (validated, deduped, capped on WRITE and on
+READ — an invalid one is dropped singly, so a hand-edited record cannot hide its daemon);
+`readDaemonRecords` gains `freshWithinMs`/`now` (the heartbeat signal; absent = the old
+pid-only behaviour, which `pair` keeps); `touchDaemonRecord` (utimes, never creates — a
+heartbeat racing the stop must not resurrect a record); `sweepDeadDaemonRecords` (dead pid
+only); `processAlive` exported.
+
+**3. `session-host` + `connection`.** `SessionHostOptions.discovery?`, `discoverySource()`
+(`MethodNotFound` when absent, the `sessionTtl` shape) and `setDiscoverySource` — the last
+one is **drift** from the plan's `SessionHostOptions.discovery`-at-construction: `listen`
+only learns its own record (the bound port) *after* the host exists, so the seam is attached
+there. `opts.discovery` is therefore mutable. `Connection` case `Method.DaemonDiscover`:
+`subscribe` first, then `current()` (F12), one subscription per connection (F13), unsubscribe
+in `close()` (F11), synchronous — nothing awaited, so a pending `session/prompt` does not delay
+it (proved by a gated-prompt test).
+
+**4. Client.** `client/src/discovery.ts` (pure): `foldDiscovery` (returns `changed` so the
+caller stays silent on a stale/duplicate frame; resets the guard on a new `self.startedAt`) and
+`mergeAddresses` (announced first, known kept as fallbacks on ONE per-project `lastSeenAt`
+clock for 30 days, empty announcement erases nothing, invalid dropped, 8/32 caps, a missing
+project is `live: false`). `RemoteClient.discover(listener)`, the `daemon/discovery` branch in
+`makePeer`, `resubscribeDiscovery()` on every `linkUp`, `MethodNotFound → undefined`.
+
+**5. `cli/src/discovery.ts`.** `buildDiscovery` (pure, `self` first from the process's own
+options, per-project dedupe, `pairAddresses` + the record's `--address`, re-filtered by
+`isPairingAddress`), `nextMembership` (pure two-strike hysteresis keyed by `cwd`, dead pid
+drops at once), `startDiscovery` (heartbeat always on, poll only while ≥1 subscriber, one
+synchronous build at the first subscribe, sweep each poll, `fs`-free except via the injected
+reader, wake-gap freshness skip, F15 keep-last-snapshot + log once).
+
+**6. `serve` / `flags` / `main`.** `ServeOptions.addresses|discovery|pollMs|heartbeatMs`;
+`listen` writes `addresses` into the record (omitted entirely when empty), starts the driver
+and stops it in `stop()` BEFORE `removeDaemonRecord`; `ServeHandle.discovery` exposes it.
+`serve --address` is a `repeated` flag validated at parse time (`isPairingAddress`, cap 8), so
+`serve` fails before binding; help text updated.
+
+### Mutations (all caught, then reverted; suite green after each revert)
+
+| Mutation | Result |
+|---|---|
+| `discover()` snapshots FIRST, then subscribes (F12) | 1 fail (the raced-subscribe test: result was the pre-change rev) |
+| notify unsolicited / broadcast (additivity) | 4 fail (bystander gets frames; F13 doubling) |
+| `MISSES_BEFORE_DROP = 1` (no hysteresis) | 3 fail |
+| heartbeat armed only at the first subscriber | 2 fail ("the poller runs only while subscribed…"; the F4 log test) |
+| always apply freshness (ignore the wake gap) | 1 fail (the suspend test) |
+| drop `resubscribeDiscovery()` on `linkUp` | 1 fail (reconnect test) |
+
+### Red-before-green
+
+Every slice was red first on the property, not on an import: protocol
+(`Export named 'DaemonDiscoverParamsSchema' not found`), device-store
+(`sweepDeadDaemonRecords not found`), connection (`RpcError: unexpected method:
+daemon/discover` — the dispatch, not a compile error), client
+(`Cannot find module '../src/discovery.ts'`), cli discovery (same), e2e (the client got a
+one-daemon snapshot). Reconnects/notifications were then forced to pass by the real code.
+
+### Drift from the Implementation, and why
+
+1. **`setDiscoverySource` instead of construction-time `discovery`** (above): the plan's own
+   ordering requirement ("builds the source after the listener is up … and passes it to the
+   `SessionHost`") is only satisfiable this way, since the host must exist before `listen`.
+2. **`cli/test/.../sibling-discovery-e2e.test.ts` is `serve-discovery.test.ts`** and a
+   "sibling" there is a real child process plus the record a `serve` in it would have written,
+   not a second `startDaemon`: the record's filename IS the pid, so two `startDaemon` calls in
+   one process collide (and one process can only be one daemon in production either). The
+   record half, the over-the-wire half and the stop-announcement are all real.
+3. **`daemon/discover`'s result is `DaemonDiscovery[]`-shaped by the builder, `{rev,daemons}`
+   on the wire**: `rev` is the driver's, so `buildDiscovery` stays clock-free/pure and the
+   driver owns monotonicity.
+4. **`nextMembership` keys by `cwd`**, not pid (the plan said "per sibling"; the phone's rows
+   are projects, and P8 makes `cwd` the project key) — a restart under a new pid keeps the row
+   and moves `startedAt`.
+5. **`fs.watch` on `daemons/` was NOT added** (the plan listed it as an accelerator only, "the
+   poll is the truth"). Deliberate: it is unobservable behaviour that would need its own
+   timing test on three platforms, and the poll already meets decision 7's "within seconds".
+   Recorded as debt, not silently skipped.
+6. **The F18 pairing-principal test is a unit test on `Connection`** (the plan said "once 9b is
+   merged"; it is merged, but `ws-device-route.test.ts` already covers the route-level gate, so
+   duplicating the harness here would test 9b, not this task).
+7. `serve`'s driver logs through `options.onError`, not a new sink (reuses the existing
+   `[daemon] error:` line the cli already prints).
+
+### Not verified here
+
+- **F3 on a genuinely suspended host**: the wake rule is driven with fake timers
+  (`jump` + rebased intervals, as Node does not replay missed ticks). A real
+  `SIGSTOP`/resume of the daemon process is not exercised.
+- **The phone side** (task 11): `mergeAddresses` is tested pure, but no app consumes it yet.
+- **`fs.watch` accelerator**: not implemented (see drift 5) — the ≤ `pollMs` latency is
+  verified, the ~100 ms one is not, because it does not exist.
+- **Full-suite flakiness (pre-existing, NOT this task)**: of five full `bun test` runs,
+  three were fully green and two each had ONE unrelated timing failure —
+  `worker-path exit net > a job spawned in the worker dies with tentacle` and
+  `serve (D2): every line is a log, on stderr > listening, audit, notice and error lines`.
+  Both are untouched by this branch (`git status` names neither) and pass 5/5 and 6/6 in
+  isolation; they fail only under full-suite load. The `serve` one injects a FAKE
+  `startDaemon` and asserts only on stdout/stderr routing, so it cannot be affected by the
+  discovery code. Last recorded full run: **8348 pass, 3 skip (the opt-ins), 0 fail**.
+
+### Disk note (environment, not the task)
+
+The gate first failed with `ENOSPC` (117 MiB free). I reclaimed 415 MiB by removing Bun's
+cross-platform binary cache (`~/.bun/install/cache/bun-linux-*`, regenerable by `bun install`).
+No repository content was deleted.
+
 ## Review
 
 #### Owner answers (2026-11-13)
