@@ -2219,3 +2219,16 @@ untouched — the fix is laptop-side only).
 **What I did not verify:** the live docker row (`session-hop.docker.test.ts`,
 opt-in, needs an engine); and the H6+H7 Execution signature, which is the
 orchestrator's to correct (drift note 3).
+
+### Post-merge note — the TUI swap is after `old.dispose()` (D1 step 5 drift)
+
+D1 step 5 says "let the TUI swap … and only then run `old.dispose()`". As built,
+the App swaps when `HopRun.done` resolves (`App.tsx`, the hop's `done` handler),
+i.e. AFTER the whole hop, dispose included — so the TUI still watched the OLD
+controller when `dispose` closed it. With the client then reporting that close
+as foreign, this lost the conversation on every live hop
+(`docs/fix/session-hop-live.md` D1). That fix does not move the swap (owner Q3):
+a close this client issued is no longer "closed on another device" (F1), and the
+hand-over controller travels in the outcome, so no `createSession` can steal it
+(F2). The order is now harmless; it is recorded here so nobody relies on step 5
+as written. *— claude-opus-5-5, 2026-11-14*

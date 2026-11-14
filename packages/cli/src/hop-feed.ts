@@ -129,9 +129,10 @@ export function createHopFeed(deps: HopFeedDeps): HopFeedView {
           if (outcome.kind === "failed") {
             return { failed: outcome.notice };
           }
-          // The target's controller, as the facade hands it out: its
-          // `createSession` delegates to the runtime the commit swapped (D2).
-          const moved: SessionController = deps.facade.createSession();
+          // The target's seeded controller, exactly as the hop opened it — never
+          // a `createSession`, whose one-shot a racing caller could have taken
+          // (docs/fix/session-hop-live.md F2).
+          const moved: SessionController = outcome.controller;
           // D5: the workload we left, once the session is safely on the target.
           // `spec.keep` IS the decision (`/move` resolves the default to `true`,
           // `hop-command.ts:124`): for a hop BACK to local the target is `local`,
@@ -147,7 +148,13 @@ export function createHopFeed(deps: HopFeedDeps): HopFeedView {
           // session moved and what was reset. The place is the facade's own text
           // for where it now is (`local`, `docker:box`), never an engine's.
           pendingLine = moveGuideLine(hopPlaceLabel(deps.facade.target()));
-          return { moved, view: deps.facade.target() };
+          // D2 (docs/fix/session-hop-live.md): the outcome's suffixes ride the
+          // TUI's own moved line — the facade no longer notifies the outcome.
+          return {
+            moved,
+            view: deps.facade.target(),
+            ...(outcome.note === undefined ? {} : { note: outcome.note }),
+          };
         } finally {
           if (listeners === mine) {
             listeners = new Set();

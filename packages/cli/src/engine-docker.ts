@@ -33,6 +33,7 @@ import {
   WorkloadRemovedError,
   type WorkloadState,
 } from "./engine-host.ts";
+import { engineArchOf } from "./pod-binary.ts";
 import {
   WORKSPACE_LABELS,
   type WorkspaceMount,
@@ -372,6 +373,11 @@ export function dockerEngineHost(options: DockerEngineHostOptions): EngineHost {
       // `@tentacle/docker` already explains a refused exec from the container's
       // state (not found / not running); nothing engine-specific to add.
       return toError(error);
+    },
+    // D3 (docs/fix/session-hop-live.md): the probe's fallback asks the engine,
+    // never guesses x64 — podman/docker report `Architecture` in `GET /info`.
+    async engineArch() {
+      return engineArchOf((await client.info()).Architecture);
     },
   };
 }

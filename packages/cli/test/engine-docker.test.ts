@@ -726,6 +726,20 @@ describe("dockerEngineHost", () => {
     expect(host.where).toBe('unix:///var/run/docker.sock (context "default")');
   });
 
+  test("engineArch (session-hop-live D3): GET /info Architecture; unknown → null; a failed info rejects", async () => {
+    // Mutation: return null from the host's `engineArch` → the aarch64 row fails.
+    const client = new FakeDockerClient(new ScriptedProvider([]));
+    const host = hostFor(client);
+    client.infoResult = { Architecture: "aarch64" };
+    expect(await host.engineArch?.()).toBe("arm64");
+    client.infoResult = { Architecture: "x86_64" };
+    expect(await host.engineArch?.()).toBe("x64");
+    client.infoResult = {};
+    expect(await host.engineArch?.()).toBeNull();
+    client.infoResult = new Error("GET /info failed");
+    await expect(host.engineArch?.() ?? Promise.resolve(null)).rejects.toThrow("GET /info failed");
+  });
+
   test("removeBestEffort never throws, even if the spawner does", () => {
     const host = dockerEngineHost({
       client: new FakeDockerClient(new ScriptedProvider([])),

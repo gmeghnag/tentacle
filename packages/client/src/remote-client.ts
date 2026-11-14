@@ -779,6 +779,8 @@ export class RemoteClient {
   private readonly waiters = new Set<() => boolean>();
   /** Closes / deletes / detaches in flight (settled, never rejecting): what `drain` awaits. */
   private readonly ending = new Set<Promise<void>>();
+  /** Session id → how many of this client's own ends of it are in flight (`closingByMe`). */
+  private readonly ownCloses = new Map<string, number>();
   /** Served model calls in flight (`modelIdle`). */
   private modelCalls = 0;
   private readonly modelIdleWaiters = new Set<() => void>();
@@ -1549,6 +1551,8 @@ export class RemoteClient {
       return Promise.resolve(false);
     }
     const params = ifLast ? { sessionId, ifLast } : { sessionId };
+    // In flight until the daemon answers — its `session_closed` precedes the answer.
+    this.ownCloses.set(sessionId, (this.ownCloses.get(sessionId) ?? 0) + 1);
     const ending = this.call(this.peer, method, params).then(
       (result) => {
         forget();
@@ -1575,8 +1579,23 @@ export class RemoteClient {
       () => {},
     );
     this.ending.add(tracked);
-    void tracked.then(() => this.ending.delete(tracked));
+    void tracked.then(() => {
+      this.ending.delete(tracked);
+      const left = (this.ownCloses.get(sessionId) ?? 1) - 1;
+      if (left > 0) this.ownCloses.set(sessionId, left);
+      else this.ownCloses.delete(sessionId);
+    });
     return ending;
+  }
+
+  /**
+   * True while THIS client's own close / delete / detach of `sessionId` is in
+   * flight (`closeSession`, `deleteSession`, `closeSessions` — a runtime's
+   * `dispose`/quit). The `session_closed` it causes is no news from another
+   * device (docs/fix/session-hop-live.md F1).
+   */
+  closingByMe(sessionId: string): boolean {
+    return this.ownCloses.has(sessionId);
   }
 
   /**

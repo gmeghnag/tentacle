@@ -328,6 +328,11 @@ and both ship, because each closes a different hole).**
   compile`, then put it at `<configDir>/bin/tentacle-bun-linux-<arch>` (or set
   `TENTACLE_POD_BIN`)", the same text as the dev-build error at
   `pod-binary-build.ts:367-369`.
+  > **STOPPED at execution (§8), 2026-11-14:** production passes
+  > `APP_RELEASE_VERSION` (no `+<id>`) as `appVersion` (`main.ts:772`,
+  > `engine-runtime.ts:882`), so this condition never fires. Proposed: key on
+  > `APP_VERSION !== APP_RELEASE_VERSION` inside `podBinaryProblem`. Awaiting
+  > approval; see Execution. *— claude-opus-5-5*
 
 ### Files
 
@@ -466,7 +471,154 @@ Executor: Opus (load-bearing); fresh-context Review. *— claude-opus-5-5
 
 ## Execution
 
-*— (pending)*
+*— claude-opus-5-5, 2026-11-14*
+
+**Load-bearing check, re-run first (worktree code, `d1-wt.ts` = the Context's
+script with absolute worktree imports):** reproduced exactly — `watch=true` →
+`closed on another device` → `makeSession() → the SEEDED uid`, hand-over `a NEW
+uid`, target model saw `["system:sys","user:what is the keyword?"]`, two files;
+`nowatch` control green. After slice 1 the same script prints no `closed` line
+and no `facade.notify` (its last step still calls `facade.createSession()` as the
+OLD feed did, so it still shows a new uid; the real feed path is T1).
+
+### Slice 1 — D1 (F1 + F2): DONE
+
+- **F1.** `packages/client/src/remote-client.ts`: `ownCloses` (id → in-flight
+  count), incremented in `endSession` right before the RPC, decremented when the
+  tracked end settles; `closingByMe(id)`. `packages/client/src/remote-session.ts`
+  `onClosed`: `closedByMe = client.closingByMe(id)`; `closed` raised only when
+  `!this.closed && !this.closedByMe`; a later send after an own close is refused
+  as `this session was closed` (not "on another device").
+  - *Drift (plan said "`entry.closing`"):* the client DELETES the entry on
+    `session_closed` before the listener's `output` runs
+    (`remote-client.ts`, the `session_closed` branch), so a lookup of
+    `entry.closing` from `RemoteSession` would always miss. Hence the separate
+    in-flight map, bounded by closes in flight (`session_closed` precedes the
+    close's answer, so the id is still in it).
+- **F2.** `local-runtime.ts`: `openSeeded(record?, {claim?})` resolves the
+  controller; `claim: true` does NOT keep it as the one-shot `attached`.
+  `session-hop.ts` step 4(b) calls `openSeeded(seed ?? undefined, {claim: true})`
+  and the moved outcome carries `controller`. `hop-feed.ts` hands over
+  `outcome.controller`.
+  - *Drift:* `claim` is required, not just returning the controller — without
+    it the seeded controller stays the target's one-shot, so the first
+    `createSession` after the hop (a `/clear`) would get the SAME session. The
+    `attached` one-shot stays for `attachTo`/`attach-run` (unchanged).
+  - *Drift (tests):* 8 existing `session-hop.test.ts` rows and the opt-in docker
+    row took the hand-over from `outcome.built.runtime.createSession()` /
+    `target.createSession()` — the very pattern F2 removes. They now take
+    `outcome.controller` (helper `handedOver`); the D2-facade row now asserts a
+    later `createSession` is a FRESH uid. Fakes typed against `HopOutcome` /
+    `openSeeded` got `controller` / a `Promise<unknown>` return.
+- `docs/feat/session-hop.md`: post-merge note on the step-5 drift.
+
+### Slice 2 — D2: DONE · D3: PARTIAL
+
+- **D2.** `session-hop.ts` builds the suffixes as `notes[]` → `notice` (all) +
+  `note` (suffixes only, absent when clean). `hop-runtime.ts`: the outcome is no
+  longer notified, and the facade's `notify` dep is REMOVED (it had no other
+  use; `main.ts` stops passing it) — so "the facade notifies the outcome" is now
+  impossible by type, and the plan's mutation "restore the facade notify" is
+  replaced by the feed row below. `hop-feed.ts` passes `note` in `done`;
+  `HopRun.done` (`tui/app-types.ts`) gains `note?`. `tui/hop-status.ts`:
+  `noticeText` (escapes `\ _ * \` [ ]`), `hopMovedNotice(place, wasOn, note?)`
+  (place and note escaped). `App.tsx`: the moved line carries `outcome.note`;
+  both failure lines go through `noticeText` (plan's `:1421` is `:1417`).
+- **D3, step 1 BLOCKED (no engine):** `d3-fresh.ts` (create `ubuntu:24.04` →
+  `waitForReady` → raw probe exec → `probePod` → remove) could not run: podman
+  has no socket (`no Podman socket found … start it with podman machine start`)
+  and docker's `GET /_ping` timed out after 60 s. I did not start the user's
+  podman VM. **H-D3 is therefore unproven.** The fix the plan prescribes
+  "whatever step 1 shows" is in: `EngineHost.engineArch?()`
+  (`engine-host.ts`), docker/podman `GET /info` → `Architecture`
+  (`engine-docker.ts`), pure `engineArchOf` + `probePod` asking the engine on
+  `probe-failed`/`unknown` (`pod-binary.ts`). `engine-runtime.ts` needed no
+  change (it already passes the whole host to `probePod`).
+  - *Not done:* the k8s host's `engineArch` (node `nodeInfo.architecture`) —
+    the k8s attach chose arm64 correctly live, and Q5 limits k8s work; k8s keeps
+    today's x64 fallback. *To verify:* `podman machine start`, then
+    `bun .tentacle/tmp/fix-session-hop-live/d3-fresh.ts podman` (script below);
+    if it prints a POSITIVE but wrong arch, the fix does not cover D3 (§8 STOP).
+
+### Slice 3 — D4: DONE · D5: STOPPED (plan contradicts the code)
+
+- **D4.** `LocalRuntime.sessionCwd(id)` (the `session/list` entry's `cwd`, null
+  on a miss). `session-hop.ts` reads it after the save check (step 4(b)) and
+  passes `onCommit(built, {cwd?})`; `hop-runtime.ts` announces it in the view
+  (`HopTargetView.cwd?`, cli and tui). Pure `hopShownCwd(view, laptopCwd)`
+  (`tui/hop-status.ts`); `App.tsx` feeds it as the frame's `cwd` — which
+  `AppView` uses for BOTH the status bar and `PermissionPrompt`'s cwd row
+  (confirmed: `AppView.tsx` `cwd={cwd}` at both). The commands' `cwd` (relative
+  `/attach` paths) is untouched.
+- **D5 — STOP (§8).** The plan keys the local recipe on "`appVersion` carries
+  `+<id>`", but production never passes that: `main.ts:772` and
+  `engine-runtime.ts:882/921` pass `APP_RELEASE_VERSION` (the plain version),
+  precisely so a dev build matches plain-marker pod binaries
+  (`pod-binary-build.test.ts`, "a COMPILED DEV BUILD finds its own pod
+  binaries"). A `podBinaryProblem` test on `"0.6.0+abc"` would pass and fix
+  nothing. *Proposed plan fix (needs approval):* decide "local build" from
+  `APP_VERSION !== APP_RELEASE_VERSION` (`version.ts`, `devBuildVersion`) inside
+  `podBinaryProblem`, not from its `appVersion` argument. Nothing of D5 is
+  implemented.
+
+### Tests and red/green evidence (§9)
+
+New: `cli/test/session-hop-e2e.test.ts` (T1, T1b, D4-cli),
+`tui/test/hop-status.test.ts` (noticeText, hopMovedNotice, hopShownCwd);
+rows in `client/test/foreign-turns.test.ts` (T2), `cli/test/session-hop.test.ts`
+(T3), `cli/test/hop-feed.test.ts` (D2 feed), `tui/test/session-hop.test.tsx`
+(D2 ×2), `cli/test/pod-binary.test.ts` (D3 ×5 + `engineArchOf`),
+`cli/test/engine-docker.test.ts` (D3 host).
+
+| Target | Mutation / red | Result |
+|---|---|---|
+| T2 | on the unfixed client (written first) | red: `closed` raised on b |
+| T1 + T1b | F1 AND F2 reverted (= base) | red: hand-over uid ≠ original (T1); racer took the seed (T1b) |
+| T1 assert 4 | F1 reverted only | red: `["this session was closed on another device"]`; T2 red too |
+| T1b | F2 reverted (feed `createSession` + `claim:false`) | red; T1 green (F1 alone keeps it) |
+| T1b | `claim:false` only | red: racer's uid = original |
+| T3 | `claim:false` | red: early `createSession` got the seeded uid |
+| D2 pure | `noticeText` stub = identity | red, and the render shows the live bug: `_not moved: Docker API GET /ping failed: boom [x]` |
+| D2 TUI | no `noticeText` at failure; no `note` at moved | both red (0 literal matches; note missing) |
+| D2 feed | feed drops `note` | red |
+| D3 probe | `engineArchOf` stub null, `probePod` ignores engine | 4 red |
+| D3 host | host `engineArch` → null | red |
+| D4 pure | `hopShownCwd` returns laptop | red |
+| D4 cli | `onCommit` gets no `cwd` | red |
+
+Opt-in live row: `session-hop.docker.test.ts` updated to the F2 hand-over
+(`out.controller`, + uid assert) but NOT extended with the facade+feed+watcher
+drive, and not run (no engine).
+
+`d3-fresh.ts` (the blocked D3 step 1, for whoever has an engine up):
+
+```ts
+import { buildEngineHost } from "<worktree>/packages/cli/src/engine-select.ts";
+import { probePod } from "<worktree>/packages/cli/src/pod-binary.ts";
+const engine = (process.argv[2] ?? "podman") as "podman";
+const name = `hop-d3-${Math.random().toString(36).slice(2, 8)}`;
+const { host } = buildEngineHost(engine, {});
+const SCRIPT = 'echo tentacle-probe; uname -m; for f in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-aarch64.so.1; do [ -e "$f" ] && echo "glibc $f"; done; true';
+try {
+  await host.create(name, "ubuntu:24.04", {});
+  await host.waitForReady(name);
+  console.log("raw:", JSON.stringify(await host.runExec({ name, command: ["sh", "-c", SCRIPT] }).catch((e: unknown) => ({ error: String(e) }))));
+  console.log("probePod:", JSON.stringify(await probePod(host, name)));
+} finally {
+  await host.remove(name).catch(() => {});
+}
+process.exit(0);
+```
+
+Output here: podman `no Podman socket found …`; docker `FAILED: Error: Docker API
+GET /_ping timed out after 60000ms`.
+
+Gate (2026-11-14): `bun run typecheck` clean · `bun run lint` clean (1343 files,
+after `biome check --write` on 4 of my files + one `biome-ignore` for the SGR
+regex, the repo's pattern) · `bun test` **9656 pass, 4 skip, 0 fail** (9660
+tests, 702 files). No skip was added by this task (the new tests have none); the
+4th opt-in is not identified here. No protocol schema changed → no
+`protocol.json` regen, no `protocol.d/` note.
 
 ## Review
 

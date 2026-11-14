@@ -22,7 +22,7 @@ import { createChannelPair } from "@tentacle/transport";
 import { type HopSpec, parseHopCommand } from "@tentacle/tui";
 import { createHopRuntime } from "../src/hop-runtime.ts";
 import { type LocalRuntime, createLocalRuntime } from "../src/local-runtime.ts";
-import { type HopBuild, type HopBuilt, hopSession } from "../src/session-hop.ts";
+import { type HopBuild, type HopBuilt, type HopOutcome, hopSession } from "../src/session-hop.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 
 // docs/feat/session-hop.md slice H2: the orchestrator (D1) and the facade (D2),
@@ -165,6 +165,16 @@ const filesOf = async (store: LogSessionStore): Promise<string[]> => {
     .sort();
 };
 
+/**
+ * The controller a moved hop hands over (docs/fix/session-hop-live.md F2): the
+ * seeded one, carried in the outcome — never the target runtime's
+ * `createSession`, which now mints a fresh session (the seed is claimed).
+ */
+const handedOver = (outcome: HopOutcome) => {
+  if (outcome.kind !== "moved") throw new Error(`not moved: ${outcome.notice}`);
+  return outcome.controller;
+};
+
 const LOCAL: HopSpec = { target: "local", keep: true };
 const CONTAINER: HopSpec = { target: "container", keep: true };
 
@@ -222,7 +232,7 @@ describe("D1: a hop moves the SAME session (the load-bearing repro as a test)", 
     expect(outcome.kind).toBe("moved");
     if (outcome.kind !== "moved") return;
 
-    const next = outcome.built.runtime.createSession();
+    const next = handedOver(outcome);
     expect(next.sessionId).toBe(uid);
     await drain(next.send("hello from container"));
     await next.flushed();
@@ -239,6 +249,62 @@ describe("D1: a hop moves the SAME session (the load-bearing repro as a test)", 
       "system:sys | user:hello from local | assistant:reply-A | user:hello from container | assistant:reply-B",
     );
     expect(await filesOf(store)).toEqual([`${uid}.jsonl`]); // ONE file, no `.aside`
+  });
+});
+
+describe("session-hop-live T3: the outcome carries the seeded controller (F2)", () => {
+  test("a target createSession called FIRST (at the commit) gets a fresh session; the outcome's controller keeps the seeded uid and history", async () => {
+    // Mutation: `openSeeded` without `claim` in step 4(b) → the early
+    // `createSession` takes the seed (its uid is ours).
+    const store = storeIn(dir);
+    const shared = sharedOn(store);
+    const a = await runtimeOn(rig(new Reply("reply-A")), shared, null);
+    const oldCtl = a.createSession();
+    await drain(oldCtl.send("before the hop"));
+    await oldCtl.flushed();
+    await shared.saver.drain();
+    await store.drain();
+    const uid = oldCtl.sessionId;
+    if (!uid) throw new Error("no uid");
+    const targetModel = new Reply("reply-B");
+    const loaded = await store.load(uid);
+    const early: Array<string | null> = [];
+    const outcome = await hopSession(
+      a,
+      { spec: CONTAINER, sessionId: uid },
+      {
+        build: async (_spec, id) => ({
+          kind: "built",
+          built: {
+            runtime: await runtimeOn(
+              rig(targetModel),
+              shared,
+              loaded.status === "ok" ? loaded.record : null,
+              id,
+            ),
+            place: { kind: "workload", engine: "docker", name: "box" },
+            daemonInPod: true,
+            preexisting: false,
+            rollback: async () => {},
+          },
+        }),
+        load: (id) => store.load(id),
+        onCommit: (built) => {
+          early.push(built.runtime.createSession().sessionId);
+        },
+      },
+    );
+    const next = handedOver(outcome);
+    expect(early).toHaveLength(1);
+    expect(early[0]).not.toBe(uid);
+    expect(next.sessionId).toBe(uid);
+    await drain(next.send("after the hop"));
+    expect(targetModel.seen.at(-1)).toEqual([
+      "system:sys",
+      "user:before the hop",
+      "assistant:reply-A",
+      "user:after the hop",
+    ]);
   });
 });
 
@@ -697,7 +763,7 @@ describe("D1 step 3: nothing persisted yet — the target opens unseeded, with n
     if (outcome.kind !== "moved") return;
     expect(seenUids).toEqual([uid]);
     expect(outcome.notice).not.toContain("could not be read");
-    const next = outcome.built.runtime.createSession();
+    const next = handedOver(outcome);
     expect(next.sessionId).toBe(uid);
     await drain(next.send("first ever"));
     await next.flushed();
@@ -769,7 +835,7 @@ describe("D1 step 4(a): our own uid live on an existing target is closed, then s
       },
     );
     expect(outcome.kind).toBe("moved");
-    const next = target.createSession();
+    const next = handedOver(outcome);
     await drain(next.send("after the hop"));
     await next.flushed();
     await shared.saver.drain();
@@ -894,7 +960,7 @@ describe("D1 step 5: the commit never rolls back — a dispose that throws or ha
     expect(outcome.notice).toContain("moved to docker:box");
     expect(outcome.notice).toContain("the old session did not close");
     // The session is genuinely on the target and still saves.
-    const ctl = target.createSession();
+    const ctl = handedOver(outcome);
     expect(ctl.sessionId).toBe(uid);
     await target.dispose();
   });
@@ -1014,7 +1080,12 @@ describe("D2: the facade delegates to the CURRENT runtime and never re-mounts th
     // The SAME members, now on the target (a re-mount would give new ones).
     expect(hop.link).toBe(linkBefore);
     expect(hop.current()).not.toBe(initial);
-    expect(hop.createSession().sessionId).toBe(uid);
+    // The hop hands over the seeded session itself (F2); a later `createSession`
+    // (a `/clear`) is the TARGET's next, fresh one — never the seed a second time.
+    expect(handedOver(outcome).sessionId).toBe(uid);
+    const fresh = hop.createSession().sessionId;
+    expect(fresh).toBeTruthy();
+    expect(fresh).not.toBe(uid);
 
     // A failed hop leaves the target (and the badge) where it was.
     const before = hop.target();
@@ -1264,7 +1335,7 @@ describe("fix1 HIGH: an absent file is not 'nothing to move' when a runtime hold
     if (outcome.kind !== "moved") return;
     // The freeze put it on disk, and only the AFTER read is the seed.
     expect(loads).toEqual(["absent", "ok"]);
-    const next = outcome.built.runtime.createSession();
+    const next = handedOver(outcome);
     expect(next.sessionId).toBe(rigged.uid);
     await drain(next.send("from the target"));
     await next.flushed();
@@ -1318,7 +1389,7 @@ describe("fix1 HIGH: an absent file is not 'nothing to move' when a runtime hold
     );
     expect(outcome.kind).toBe("moved");
     if (outcome.kind !== "moved") return;
-    const next = outcome.built.runtime.createSession();
+    const next = handedOver(outcome);
     await drain(next.send("from the target"));
     await next.flushed();
     await rigged.shared.saver.drain();
@@ -1446,7 +1517,6 @@ describe("fix1 MEDIUM: a throw before the commit still rolls the target back", (
     if (!uid) throw new Error("no uid");
 
     const statuses: Array<string | null> = [];
-    const notices: string[] = [];
     const hop = createHopRuntime({
       initial,
       startup: { place: { kind: "local" }, daemonInPod: false },
@@ -1471,7 +1541,6 @@ describe("fix1 MEDIUM: a throw before the commit still rolls the target back", (
       },
       load: (id) => store.load(id),
       status: (line) => statuses.push(line),
-      notify: (text) => notices.push(text),
       // The delete decision for the place we left fails (an unreachable engine).
       afterLeave: () => Promise.reject(new Error("the engine did not answer")),
     });
@@ -1479,7 +1548,10 @@ describe("fix1 MEDIUM: a throw before the commit still rolls the target back", (
     expect(outcome.kind).toBe("moved");
     expect(hop.target().place).toEqual({ kind: "workload", engine: "docker", name: "box" });
     expect(statuses.at(-1)).toBeNull(); // the transient row was cleared
-    expect(notices.join("\n")).toContain("the engine did not answer");
+    // The TUI's moved line carries it (session-hop-live D2): the outcome's `note`.
+    expect(outcome.kind === "moved" ? outcome.note : undefined).toContain(
+      "the engine did not answer",
+    );
     await hop.dispose();
   });
 });
@@ -1560,10 +1632,9 @@ describe("fix1 MEDIUM: the facade re-subscribes job listeners on a swap", () => 
           built: {
             runtime: {
               ...second.runtime,
-              openSeeded: async () => {
-                // The real one opens on its daemon; the feed is what this test reads.
-                await second.runtime.openSeeded(loaded.status === "ok" ? loaded.record : undefined);
-              },
+              // The real one opens on its daemon; the feed is what this test reads.
+              openSeeded: (_record, opts) =>
+                second.runtime.openSeeded(loaded.status === "ok" ? loaded.record : undefined, opts),
             } as LocalRuntime,
             place: { kind: "workload", engine: "docker", name: "box" },
             daemonInPod: true,
@@ -1656,7 +1727,7 @@ describe("fix1 MEDIUM: the commit-time seal really seals (step 5)", () => {
     expect(outcome.kind).toBe("moved");
 
     // The target moves on...
-    const next = target.createSession();
+    const next = handedOver(outcome);
     await drain(next.send("on the target"));
     await next.flushed();
     await shared.saver.drain();

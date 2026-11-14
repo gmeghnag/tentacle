@@ -562,6 +562,25 @@ describe("foreign turns over the real daemon", () => {
     r.b.client.close();
   });
 
+  test("T2 (session-hop-live F1): a runtime-level close by THIS client (closeSessions) raises no 'closed'; the other device still hears it", async () => {
+    // Mutation: drop the `closingByMe` check in `RemoteSession.onClosed` → `closed` is raised on b.
+    const r = await twoDevices();
+    const w = watched(r.sb);
+    const other = watched(r.sa);
+    // `ifLast: false`: really ended daemon-side (a is still attached), so `session_closed` reaches b too.
+    expect(await r.b.client.closeSessions(1000, { ifLast: false })).toBe(0);
+    await until(() => other.activities.some((a) => a.kind === "closed"));
+    expect(other.activities.at(-1)).toEqual({ kind: "closed", reason: "closed" });
+    await sleep(30);
+    expect(w.activities.filter((a) => a.kind === "closed")).toEqual([]);
+    // Still refused, and the refusal does not blame another device.
+    const refused = await drain(r.sb.send("again"), []);
+    expect(refused).toMatchObject({ code: DomainErrorCode.UnknownSession });
+    expect(String((refused as Error).message)).not.toContain("another device");
+    r.a.client.close();
+    r.b.client.close();
+  });
+
   test("T15 (clear-keeps-jobs): an idle `/clear` → history{reason: clear} on the OTHER device too", async () => {
     // Mutation: hard-code `"compact"` where the activity's reason is built.
     const r = await twoDevices();

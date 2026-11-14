@@ -22,6 +22,7 @@ import type { HopOutcome } from "../src/session-hop.ts";
 const MOVED_LOCAL: HopOutcome = {
   kind: "moved",
   built: { runtime: {}, place: { kind: "local" }, daemonInPod: false, preexisting: false } as never,
+  controller: {} as never,
   notice: "moved to local",
 };
 

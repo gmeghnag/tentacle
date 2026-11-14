@@ -262,6 +262,12 @@ export interface HopTargetView {
   readonly badge?: TargetBadge;
   /** The daemon now runs in a pod: a spilled result's file is "saved in the pod". */
   readonly daemonInPod: boolean;
+  /**
+   * The daemon session's own cwd after a hop (its `session/list` entry) — what
+   * the footer and a tool ask show; absent → the laptop's
+   * (docs/fix/session-hop-live.md D4).
+   */
+  readonly cwd?: string;
 }
 
 /**
@@ -295,10 +301,12 @@ export interface HopRun {
   /**
    * Settles when the hop is over: the target's controller on success (the App
    * swaps to it with `keepTranscript`), or the one line saying why it did not
-   * move. Never rejects — a hop always answers the view.
+   * move. Never rejects — a hop always answers the view. `note`: what went
+   * wrong AFTER the move (`the old session did not close`, a leave notice) —
+   * the App's one moved line carries it; nobody else says the outcome.
    */
   readonly done: Promise<
-    | { readonly moved: SessionController; readonly view: HopTargetView }
+    | { readonly moved: SessionController; readonly view: HopTargetView; readonly note?: string }
     | { readonly failed: string }
   >;
 }

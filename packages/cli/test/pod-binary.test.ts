@@ -8,6 +8,7 @@ import {
   type PodProbe,
   archToTarget,
   classifyImage,
+  engineArchOf,
   injectAgentBinary,
   libcMismatchHint,
   mapUnameOutput,
@@ -214,6 +215,53 @@ describe("probePod", () => {
   test("an exec throw (timeout / close) → probe-failed, never rejects", async () => {
     const kube = { runExec: () => Promise.reject(new Error("exec timed out")) };
     expect(await probePod(kube, "p", "agent")).toEqual({ arch: "x64", status: "probe-failed" });
+  });
+  // docs/fix/session-hop-live.md D3: a failed probe asks the ENGINE before guessing x64.
+  // Mutation: ignore `engineArch` in `probePod` → arm64 rows come out x64.
+  test("D3: an exec throw on an arm64 engine → arm64 (from the engine), still probe-failed", async () => {
+    const host = {
+      runExec: () => Promise.reject(new Error("container is not running")),
+      engineArch: async () => "arm64" as const,
+    };
+    expect(await probePod(host, "c")).toEqual({ arch: "arm64", status: "probe-failed" });
+  });
+  test("D3: a non-zero exit on an arm64 engine → arm64", async () => {
+    const kube = Object.assign(new FakeKube([fail("OCI runtime exec failed")]), {
+      engineArch: async () => "arm64" as const,
+    });
+    expect((await probePod(kube, "c")).arch).toBe("arm64");
+  });
+  test("D3: an empty probe reply (`unknown`) on an arm64 engine → arm64", async () => {
+    const kube = Object.assign(new FakeKube([ok("")]), {
+      engineArch: async () => "arm64" as const,
+    });
+    expect(await probePod(kube, "c")).toEqual({ arch: "arm64", status: "unknown" });
+  });
+  test("D3: the engine cannot tell either (null, or it throws) → the pinned x64 fallback", async () => {
+    const none = { runExec: () => Promise.reject(new Error("x")), engineArch: async () => null };
+    expect(await probePod(none, "c")).toEqual({ arch: "x64", status: "probe-failed" });
+    const broken = {
+      runExec: () => Promise.reject(new Error("x")),
+      engineArch: () => Promise.reject(new Error("GET /info failed")),
+    };
+    expect(await probePod(broken, "c")).toEqual({ arch: "x64", status: "probe-failed" });
+  });
+  test("D3: a positive probe answer wins over the engine's", async () => {
+    const kube = Object.assign(new FakeKube([ok(GLIBC_ARM64)]), {
+      engineArch: async () => "x64" as const,
+    });
+    expect(await probePod(kube, "c")).toEqual({ arch: "arm64", status: "ok" });
+  });
+});
+
+describe("engineArchOf (D3)", () => {
+  test("maps the engine's Architecture strings", () => {
+    expect(engineArchOf("aarch64")).toBe("arm64");
+    expect(engineArchOf("arm64")).toBe("arm64");
+    expect(engineArchOf("x86_64")).toBe("x64");
+    expect(engineArchOf("amd64")).toBe("x64");
+    expect(engineArchOf("s390x")).toBeNull();
+    expect(engineArchOf(undefined)).toBeNull();
   });
 });
 

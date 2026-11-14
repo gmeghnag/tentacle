@@ -167,4 +167,11 @@ export interface EngineHost {
   ): Promise<EngineRunExecResult>;
   /** Translate an exec failure (a wrong container, a stopped one) into an actionable error. */
   execError(error: unknown, target: { readonly name: string; readonly container?: string }): Error;
+  /**
+   * The engine's own CPU arch (docker/podman `GET /info` → `Architecture`):
+   * what `probePod` falls back to when the in-workload probe gave no answer,
+   * instead of guessing x64 (docs/fix/session-hop-live.md D3). `null` when the
+   * engine cannot tell; may reject (the caller treats it as `null`).
+   */
+  engineArch?(): Promise<"x64" | "arm64" | null>;
 }
