@@ -700,6 +700,314 @@ verify: 13d's `session-view.test.ts` + Maestro `12-steer` / `14-returned-mine`
 / `15-returned-other` (plan "Maestro").
 
 *— deepseek-v4.1-flash-1017, 2026-11-14*
+*— deepseek-v4-pro (via tentacle), 2026-11-14 — slice **13b `mobile-outbox`** only*
+
+**Load-bearing check (re-run first, as briefed) — PASSES.** Static: `turns` is a
+lifetime ledger, checked before anything runs (`hosted-session.ts:452-456`,
+`:1993-1996`, `:1997` "a rejected prompt starts and records nothing"), restored on
+reload (`:634-636`, `:1245-1248`, `:1264`); `enqueue`'s id is checked before the
+running check and binds to the exact turn (`:2694-2703`, `:2715-2721`), ids
+restored (`:637-640`). Empirical (`.tentacle/tmp/mobile-compose-13b/probe.test.ts`,
+2 pass): the SAME `turnId` sent twice by two clients → ONE user message; the SAME
+enqueue id twice → ONE queued row. No step contradicted the plan; nothing was
+stopped.
+
+**As-built, in dependency order.**
+
+1. `apps/mobile/src/outbox.ts` (new, pure) — the item model, `createItem` (both
+   keys minted ONCE at creation), `decide` (D4's table), `unchanged`, `asSteer`,
+   `refusalOf` (class/code → `offline` / `restore` / `decide` / `reupload`),
+   `withRef`/`refsOf`/`pendingUploads`, `reuploaded`, `addOwnIds`/`pruneOwnIds`,
+   `restoredOf`.
+2. `apps/mobile/src/drafts.ts` (new, pure) — `draftKey` (the `(computer,
+   session)` PAIR), `createDraftScheduler` (debounce 400 ms, injected clock,
+   `touch`/`take`/`force`/`dueIn`/`clear`), `draftOf`/`contentOf`.
+3. `apps/mobile/src/outbox-store.ts` (new) — versioned JSON (`schemaVersion: 1`)
+   over an injected `OutboxFs`; tmp + rename; unknown version refused and left
+   untouched (read-only thereafter); unparsable set aside `.corrupt-<ts>`, never
+   deleted; a failed write answers `false` (the `not-saved` banner) with the
+   memory state kept; `removeItem` deletes the photo copies; `outboxPaths`
+   escapes the computer id (a path segment never escapes the root). *(Fix round
+   1 serialised writes and made a set-aside file writable again.)*
+4. `apps/mobile/src/outbox-driver.ts` (new) — per-session serialised `run` over
+   an injected `OutboxSession`; `enqueue` (persist BEFORE any attempt);
+   `sendNow`/`steerNow`/`discard`/`backToDraft`; one photo at a time, each ref
+   persisted before the next. *(Fix round 1 added `outbox-session.ts`, the real
+   port — the steer's turn binding — and put every sheet act behind `exclusive`.)*
+5. Tests (new): `outbox.test.ts` (21), `drafts.test.ts` (11),
+   `outbox-store.test.ts` (13), `outbox-driver.test.ts` (24),
+   `outbox-link.test.ts` (8, real `SessionHost` + `Connection` + real
+   `RemoteClient`s). *(Counts are as first built; Fix round 1 adds T9/T10 and
+   five driver/store cases — see below.)*
+6. No changelog fragment (13b is app-internal; 13d's branch writes
+   `mobile-compose.added.md`). The first executor DID add
+   `changelog.d/mobile-compose-13b.added.md`; Fix round 1 removed it (Review
+   finding 5).
+   No protocol change; `packages/protocol/schema/protocol.json` untouched (P11).
+
+**Drift from the Implementation (and why).**
+
+- **D4's `basis`** is `{historyLength, runningTurnId}`, not the plan's
+  `{history length, last turn id, turn running?, compaction epoch}`. Verified:
+  `RemoteSession` exposes no ended-turn id and no compaction epoch publicly
+  (`remote-session.ts:219-221` `busy`, `:286` `ownsTurn`); a compaction, a
+  `/clear` and any new message all change `historyLength`, so the property D4
+  needs ("nothing the person could see changed") is preserved by the two fields
+  that ARE observable. `decide`'s "our key IS the running turn" row still uses
+  the key, so F3 is unchanged.
+- **The running turn's id** is taken from `SessionActivity{kind:"turn"}` (the
+  `watch` the app already subscribes, `remote-session.ts:1424`), not from a
+  snapshot field — `SnapshotTurnSchema` exists on the wire but
+  `RemoteSession.snapshot()` returns messages only (`:945-947`). 13d's
+  `session-view.ts` receives exactly this activity; the driver's port keeps it
+  as one injected fact.
+- **`Decision` gained `wait`** (and `Refusal` `offline`): a `link` availability
+  is a "no answer yet, keep it", never a decision on stale facts. Additive to the
+  plan's table (F1/F6 converge the same way).
+- **One re-upload (F18) is marked on the item** (`reuploaded?: true`) rather than
+  inferred from "refs are empty": the driver's first attempt records refs as it
+  uploads, so an empty-ref check misread a `not_uploaded` refusal for a fresh
+  item (an actual bug the F18 test caught — fixed before the test went green).
+- **`outbox-driver.test.ts` is an extra file** beyond the plan's list: the plan's
+  13b row names `outbox.test.ts`/`drafts.test.ts`/`outbox-store.test.ts`/
+  `outbox-link.test.ts`; the sequencing and every refusal's landing spot are
+  driver behaviour, and testing them through the real daemon would need one
+  daemon per case. `outbox-link.test.ts` still proves the load-bearing property
+  end to end.
+- **The harness detail worth recording**: a second `newSession` of one id on the
+  SAME client replaces that client's stream listener, which silently makes an
+  "observer" client steal the turn under test. Every probe in
+  `outbox-link.test.ts` therefore uses a scratch client.
+
+**Mutations (run red, then reverted — `mutate.py`, no `git`).**
+
+| # | Mutation | Test that went red |
+|---|---|---|
+| M1 | a fresh `turnId` per attempt (`outbox-driver.ts`) | link T1 |
+| M2 | ignore `basis` → always `send` (`outbox.ts`) | link T4 |
+| M3 | treat `archived` as openable (`outbox.ts`) | link T6 |
+| M4 | re-mint `enqueueId` per attempt (`outbox-driver.ts`) | link T2 |
+| M5 | in-memory own ids, not the persisted set (test arg) | link T8 |
+| M6 | a refusal routed to `decide` instead of `restore` | link T7 |
+| M7 | loop on `not_uploaded` (drop the `reuploaded` guard) | driver "second `not_uploaded`" |
+| M8 | write in place, no tmp+rename | store "kill between tmp and rename" |
+| M9 | overwrite an unknown-version file | store "unknown schemaVersion" |
+| M10 | delete a corrupt file instead of setting it aside | store "SET ASIDE" |
+| M11 | ignore "the running turn IS our key" | outbox "already ran" |
+| M12 | compare the history length only | outbox "unchanged compares BOTH" |
+| M13 | reuse the prompt key for a steer | outbox "Queue as steer" |
+| M14 | `handedBack` forgotten (give twice) | link T8 |
+| M15 | attempt before persisting the item | driver "BEFORE any attempt" |
+| M16 | prune own ids with no live-queue guard | outbox "own ids added once" |
+
+Every mutation was applied to a saved copy and reverted immediately; the tree
+holds only the intended files (`git status` showed the 9 new source/test files
+plus the changelog fragment, which Fix round 1 removed — Review finding 5).
+
+**Gate (as run on this branch).** `bun run typecheck` — clean. `bun run lint` —
+`Checked 1073 files … No fixes applied` (the baseline in AGENTS §6). `bun test` —
+see the gate line in the branch report; the slice's own five files are 77 pass /
+0 fail.
+
+**Not verified here (13d's job, one line each).** The `expo-file-system`
+implementation of `OutboxFs` and the `AppState`/draft wiring are 13d's
+(`outbox-fs-expo.ts`, `App.tsx`); the photo pipeline (`readPhoto`'s bytes, HEIC,
+size, names) is 13c's — this slice takes a photo as `{file, mimeType, name}` and
+reads its bytes through the injected port.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14 — fixes the five findings of Review round 1.*
+
+**Reproduced first, on the pre-fix tree** (`bun test` in
+`.tentacle/tmp/mobile-compose-13b/`, the reviewer's three repro files unchanged):
+
+```
+RESULT steer ids ["k4","k5"]                       # finding 2: two enqueue ids
+RESULT [true,true] memory ["a","b"] disk {... "ownIds":["a"]}   # finding 3: lost update
+RESULT items [] decisions [] drafts [] methods ["session/open","session/snapshot"]
+       userTexts ["hi","hold please"]              # finding 1: text gone, no frame
+```
+
+All three reproduce. Each is now fixed, with the repro's own numbers as the
+assertion, and each fix was mutation-checked (§9) — details per finding.
+
+Re-run after the fixes (same three files, unchanged): `steer ids ["k4"]` (one),
+disk `ownIds:["a","b"]` (the newest state), and — for R1 — the same
+`items [] … methods ["session/open","session/snapshot"]`, because **that file
+builds its own port with the buggy `steer: (text, id) => session.enqueue(text,
+id)` inline** (`review-steer-race.test.ts:297`): it reproduces the OLD adapter,
+not the app. The equivalent assertion against the app's real wiring is T9/T10,
+which are red under exactly that mutation (see finding 1).
+
+**1. HIGH — a steer vanished, or steered a later turn.** Root cause: the port's
+`steer` had no adapter, and `RemoteSession.enqueue(text, id)` (its two
+parameters are assignable to the three-parameter shape, so the compiler was
+silent) binds to whatever turn the CLIENT believes runs and resolves without
+sending when it sees none (`remote-session.ts:958-963`). New
+`apps/mobile/src/outbox-session.ts`: `outboxSessionOf(session, client,
+runningTurn)` routes a steer to `RemoteClient.enqueue(sessionId, id, turnId,
+text)` (`remote-client.ts:2090`), which the daemon checks against its own
+`activeTurnId` (`hosted-session.ts:2700-2720`) and refuses `NoTurnRunning` — a
+refusal the app SEES (`refusalOf` → `{decide, "no-turn"}` → `needs-decision`).
+`unavailableSessionPort` is the same module's port for an unopenable session, so
+the adapter is one place, not an inline closure in a test. The port's doc
+comment (`outbox-driver.ts:41-50`) no longer claims `RemoteSession` satisfies it
+structurally, and `outbox-link.test.ts` now builds its port from
+`outboxSessionOf` — the real app wiring, not a test-only copy.
+Tests: link **T9** (turn ended before the enqueue: the `session/enqueue` frame
+carries the ITEM's `turnId` and id, the decision is `no-turn`, the text is never
+in the transcript) and **T10** (a NEW turn runs: the frame still names the old
+turn, the item survives, and the later turn's history never gains the text).
+Mutation: `steer` back to `session.enqueue(text, id)` → T10 red with the
+repro's own evidence — `enqueue turnId` = the LATER turn, the item's list empty
+(finished): `PROBE enqueue {"id":"mint-3","turnId":"0d70c305…","text":"steer
+me"}` vs the item's `mint-3` turn; plus `expect(items state)` received `[]`.
+
+**2. MEDIUM — a double tap of "Queue as steer" sent two steers.** Root cause:
+`steerNow`/`sendNow` skipped both `serialise` and `busy`, re-read nothing, and
+`asSteer` mints a fresh `enqueueId` per call on a prompt item. Now both (and
+`discard`/`backToDraft`) go through one helper, `exclusive(sessionId, itemId,
+body)` (`outbox-driver.ts:336-352`): it queues on the same per-session tail a
+`run` uses, then RE-READS the item from persistence inside the queue and marks
+it `busy`, so the second tap finds it either gone (the first finished it — a
+no-op) or already the steer the first made, whose `enqueueId` `asSteer` keeps
+when `steerTurnId` matches. Tests: driver "a DOUBLE tap of Queue as steer is ONE
+enqueue with ONE id", "a second tap after the first act finished finds nothing
+to do", "a double tap of Send is ONE prompt". Mutation: `steerNow` back to the
+unserialised body → the first two red (two ids `["k4","k5"]`, and a second send
+from the stale copy); reverting `exclusive` to drop `busy` → the Send double tap
+red. The reviewer's own repro now answers `steer ids ["k4"]`.
+
+**3. MEDIUM — store writes were not serialised and shared one tmp path.** Root
+cause: one store is one file per computer, but the driver serialises per
+SESSION and drafts / own ids write independently, so two writes could interleave
+with the slower (older) one landing last. `outbox-store.ts:258-300`: every write
+now goes through one queue (`writeTail`; the memory state is set at once, so a
+slow disk never makes a person re-tap), and the queue is also what makes the
+single `<state>.tmp` name safe — the per-write tmp name I first added was
+unreachable once writes were queued, so it was removed (one mechanism, not two).
+Tests: store "overlapping writes land in order: the NEWEST state is on disk",
+"two writers that both change the file (items + own ids) do not overwrite each
+other" (both collections survive a relaunch), "a write that fails leaves the
+queue usable". Mutation: `write` straight to `persist` (no queue) → the first
+two red `[true,true]` with disk `ownIds:["a"]` — the reviewer's exact repro;
+a rejected tail that poisons the queue was covered by the third.
+
+**4. MEDIUM — the not-saved contract differed between the fake and the real
+store.** Root cause: the real store keeps a failed write in memory
+(`outbox-store.ts:256`), while the driver's fake dropped it and `enqueue`
+answered `null` for it — so `.null` could only ever mean "in memory, not on
+disk", which a screen reading it as "not created" answers by keeping the text
+and having the person send it again under fresh keys (F4). Fixes: `enqueue`
+answers `OutboxItem` (never null; the `not-saved` banner carries the durability
+news) with its contract spelled out on `OutboxPersistence.save` and on the
+method; the driver test's fake now mirrors the real store (keeps the state,
+answers `false`). Second half: after a SUCCESSFUL set-aside the store stayed
+read-only for the process, with no file left to protect — `readOnly = !moved`,
+so only a corrupt file that could NOT be moved keeps it read-only (its bytes are
+then still the only copy). Tests: driver "a disk that will not write keeps the
+item and says not-saved — never answers 'not created'", "an item created while
+the write failed still goes out on the next run", store "an unparsable file is
+SET ASIDE, never deleted, and the store then works again", "a corrupt file that
+could NOT be moved aside leaves the store read-only". Mutations: `enqueue`
+returning null on a failed write → the first red; `readOnly = true` after a
+successful set-aside → the store test red.
+
+**5. MEDIUM (process) — an unplanned changelog fragment.** Removed
+`changelog.d/mobile-compose-13b.added.md`: the plan's header says 13b gets none
+(13d writes `mobile-compose.added.md`, the first user-visible slice), and 13b is
+app-internal with no screen yet (AGENTS §10). `git status` shows it deleted on
+this branch.
+
+**Gate (as run).** `bunx tsc --noEmit` — clean; `bunx tsc -p apps/mobile
+--noEmit` — clean. `bun run lint` — `Checked 1074 files … No fixes applied`
+(baseline, AGENTS §6). `bun test` — **8364 pass / 3 skip / 0 fail** across 600
+files (the three skips are the opt-in live-k8s, live-docker and real-socket
+ones). The slice's five files are 87 pass / 0 fail (was 77: +T9, +T10, +4 driver,
++4 store, and one store test rewritten).
+
+**Two load-flakes seen on the way, not mine and not new** (recorded here because
+the gate was not green on the first four full runs): three runs each failed one
+*different* test outside this diff — `packages/exec/test/confinement.test.ts` F2
+and R2-4 (a hard-link race under load) and
+`packages/cli/test/context-reset-e2e.test.ts` — and each was 3/3 green alone
+right after. That is the timing-flake-under-load class already logged in
+`TODO.md:447`. `git status` at every failure held only this slice's files; the
+next full run was clean.
+
+**Kept from Review as debt, not fixed here.** `refusalOf`'s
+`SessionLostError`/`UploadAbortedError` name checks are dead (their `.name`
+values are `RpcError`/`AbortError`); both land on `decide`, which is safe. The
+13a carry-forward (`handedBack` not persisted) is 13d's.
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-14 — fixes the one MEDIUM finding of Review round 2.*
+
+**Reproduced first, on the pre-fix tree** (`.tentacle/tmp/mobile-compose-13b/`,
+the reviewer's own `review-r2-notopen.test.ts`, unchanged):
+
+```
+RESULT state ["needs-decision"] decisions ["refused"]      # a link drop shown as a refusal
+```
+
+After the fix, the same file, unchanged: `RESULT state ["waiting"] decisions []`
+— the item stays, and there is nothing for a person to settle.
+
+**1. MEDIUM — a link drop was shown as the daemon's refusal.** Root cause:
+`SessionNotOpenError` was the app's own marker for "this act never reached the
+wire", and its doc said `refusalOf` read it as offline
+(`outbox-session.ts:24-26`), but `refusalOf`'s name list did not contain it, so
+it fell through to the `default:` arm → `decide/refused` — a decision sheet for
+a network blip. The same miss cut the other way too: `unavailableSessionPort`
+serves BOTH a session that could not be opened (`link`) and one the daemon says
+is archived/deleted/gone, and the error carried no reason, so the archive case
+could only be reached through `facts()` — the sheet's Send ran into the error
+first and showed a refusal instead of handing the text back (F20).
+
+Fix, in three places that must not drift apart:
+- `outbox.ts:268-292` + `:319-330`: a new pure `notOpenRefusal(availability)`
+  (`outbox.ts:286`) is the ONE mapping — `link` → `offline` (item stays
+  `waiting`, F1), anything else → `draft` with its why (text back in the field,
+  F20) — plus a `draft` member on `Refusal`; `refusalOf` reads
+  `SessionNotOpenError` through it.
+- `outbox-session.ts:23-48`: the error carries `availability` (default `link`),
+  and `unavailableSessionPort` passes its own reason into it, so one port can
+  say which state it is in.
+- `outbox-driver.ts:272-276` (`refuse`: a `draft` hands the content back through
+  `removeAndHand`) and `:411-418` (`steerNow` reads the availability BEFORE the
+  running turn: a session that is not open has no turn to name, so asking
+  `runningTurnId` first settled a dropped link as `no-turn`).
+
+Tests: outbox "a dropped link is 'offline' for every act" now includes
+`SessionNotOpenError`; driver "the sheet's Send with the link DOWN keeps it
+waiting, never a refusal", "Queue as steer with the link DOWN keeps it waiting
+too", "the sheet's Send on an ARCHIVED session hands the text back, never a
+refusal". `outbox-link.test.ts` also stops keeping its own `unopenedPort` (a
+bare `Error`) and uses the APP's `unavailableSessionPort` — the same test-only
+copy that hid round-1 finding 1; all 10 link tests stay green with the real one.
+
+**Mutations (run red, then reverted — `mutate.py`, no `git`).**
+
+| # | Mutation | Test that went red |
+|---|---|---|
+| M-A | drop the `SessionNotOpenError` arm from `refusalOf` | outbox "a dropped link is 'offline'"; driver "Send with the link DOWN" |
+| M-B | `steerNow` asks `runningTurnId` before the availability | driver "Queue as steer with the link DOWN" |
+| M-C | `notOpenRefusal` answers `offline` for every state | driver "Send on an ARCHIVED session hands the text back" |
+
+`git status` after each held only this round's six files (no `.backup`).
+
+**Gate (as run on this branch).** `bunx tsc --noEmit` — clean; `bunx tsc -p
+apps/mobile` — clean. `bun run lint` — `Checked 1074 files … No fixes applied`.
+`bun test` — 8367 pass, 3 skip (the opt-in live-k8s / live-docker / slow-keepalive
+ones), 0 fail, 600 files.
+
+**Not verified here.** `unavailableSessionPort`'s `upload`/`prompt` arms are
+reached in the app only through 13d's compose wiring; this round proves the
+`steer`/`prompt` refusal mapping and the facts path (the three driver tests and
+the 10 link tests), not 13d's screen code, which does not exist yet.
+
 
 ## Review
 
@@ -722,3 +1030,164 @@ Owner asleep, delegated: every Owner question above is decided with its RECOMMEN
 - **Same-family note:** the reviewer (Opus) is a different model family from the executor (DeepSeek).
 
 *— claude-opus-5-5, 2026-11-14*
+#### Review — slice 13b `mobile-outbox` (fresh context)
+
+*— claude-opus-5-5, 2026-11-14*
+
+**Verdict: REQUEST-CHANGES.** Executor: deepseek-v4-pro; reviewer is a different
+model family. Scope: `git diff main...HEAD` only.
+
+**Gate (re-run here):** the 5 touched test files 77 pass / 0 fail (240
+expects); `bun run lint` clean (1073 files); `bun run typecheck` clean. Full
+`bun test` not re-run in this pass.
+
+**Mutations (applied, run, reverted; `git status` clean after):** fresh
+`turnId` per attempt (`outbox-driver.ts:207`) → 2 red incl. link T1;
+`unchanged()` always true (`outbox.ts:209`) → 5 red incl. link T4; write in
+place, no tmp (`outbox-store.ts:260`) → store "kill between tmp and rename"
+red. The tests that exist are not vacuous.
+
+**Findings**
+
+1. **HIGH — a steer can vanish silently or steer a later turn.**
+   `OutboxSession.steer(text, id, turnId)` (`outbox-driver.ts:54`, called
+   `:199`) is meant to bind the steer to `steerTurnId`, but the only adapter
+   (`outbox-link.test.ts:296`, and the driver's own doc `:42-43`, "RemoteSession
+   satisfies it structurally") routes it to `RemoteSession.enqueue(text, id)`,
+   which ignores that turn, uses the client's current one, and **resolves without
+   sending** when it sees none (`client/src/remote-session.ts:958-963`). The
+   driver then `finish`es the item (`:216`). Repro
+   (`.tentacle/tmp/mobile-compose-13b/review-steer-race.test.ts`, T3 with the
+   facts read just before the turn ended): `items [] decisions [] drafts []
+   methods ["session/open","session/snapshot"] userTexts ["hi","hold please"]`.
+   The text is gone, with no banner, no sheet, no Enqueue frame. If a new turn
+   started in that window, the steer goes into that later turn. Both break F9 and
+   the plan's "never steers a later turn". Fix: route the port to
+   `RemoteClient.enqueue(sessionId, id, turnId, text)` (`remote-client.ts:2090`,
+   public), correct the doc comment, and add this race as a link test.
+2. **MEDIUM — the sheet's "Queue as steer" double tap sends two steers.**
+   `steerNow` (`outbox-driver.ts:349-359`) and `sendNow` (`:339`) skip both
+   `serialise` and `busy`, and they do not re-read the item. `asSteer` mints a
+   fresh `enqueueId` for each call on a prompt item (`outbox.ts:226`). Repro
+   (`review-steer-twice.test.ts`): two concurrent `steerNow(item)` produce steer
+   ids `["k4","k5"]`, so the text is injected twice. This contradicts F4. A
+   second tap after the first act finished also re-sends from the stale object.
+3. **MEDIUM — store writes are not serialised and share one tmp path**
+   (`outbox-store.ts:255-268`). The store is one file per computer, while the
+   driver serialises only per session, and drafts and ownIds write
+   independently. Repro (`review-store-race.test.ts`, the first write slower):
+   both writes answer `true`, memory holds `["a","b"]` and disk holds
+   `ownIds:["a"]`. That is a silent lost update: after a kill, an item, a ref or
+   an own id is gone, or a finished item comes back.
+4. **MEDIUM — the not-saved contract differs between the fake and the real
+   store.** The real store keeps a failed write in memory (`outbox-store.ts:256`),
+   so `enqueue` answers `null` (`outbox-driver.ts:337`) while the item is live and
+   the next `run` sends it. The driver test's fake drops it instead
+   (`outbox-driver.test.ts:101-105`), so this path is untested. A screen that
+   reads `null` as "not created, keep the text" gets a re-tap and a second item
+   with new keys. After a SUCCESSFUL set-aside of a corrupt file, the store also
+   stays read-only for the rest of the process (`:290`, pinned by the test at
+   `outbox-store.test.ts:209`), with no file left to protect. Every compose until
+   relaunch is then memory-only.
+5. **MEDIUM (process) — an unplanned changelog fragment.** The plan header says
+   13b gets none, and 13d writes `mobile-compose.added.md`. This branch adds
+   `changelog.d/mobile-compose-13b.added.md`, which itself says "No screen
+   changes yet". That is internal work, so the release would list the feature
+   twice (AGENTS §10). It is not listed under Drift.
+
+**Attacks that found nothing:** the keys are minted once at creation and
+persisted before any attempt (`createItem`, `enqueue`). `decide`'s ordering
+gives archived/deleted/gone priority, and no reopen is sent (T6). Refusals
+branch on class or code, never on message text. `not_uploaded` is re-uploaded
+once and then shown (`reuploaded` flag). An unknown `schemaVersion` leaves the
+file's bytes untouched. A `computerId` path cannot escape the root. No protocol
+or `packages/*` change (P11 holds). Low, not blocking:
+`refusalOf`'s `SessionLostError` / `UploadAbortedError` name checks are dead,
+because their `.name` values are `RpcError` / `AbortError`. Both land on
+`decide`, which is safe.
+
+**Executor:** a thorough slice with honest drift notes and real mutations. The
+blind spot is the port's adapter: the load-bearing property was proved for
+prompts end to end, but for steers only up to the client method, whose turn
+binding is not the item's.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-14* · scope `git diff HEAD~1` (7f98779)
+
+**Verdict: REQUEST-CHANGES**, for one small new finding. All five round-1 findings are fixed.
+
+**Gate:** the 5 touched files pass 87/87 (274 expects). `bun run lint` is clean
+(1074 files) and `bun run typecheck` is clean.
+
+**Round-1 findings, each checked by mutation.** Four mutations were applied
+together, the tests run, then reverted; `git status` was clean afterwards.
+- **#1 (HIGH), fixed.** `outbox-session.ts` sends the steer through
+  `RemoteClient.enqueue(sessionId, id, turnId, text)`. Mutation: route it to
+  `session.enqueue(text, id)` → link T9 (turn ended) and T10 (new turn) fail.
+- **#2, fixed.** `exclusive` (serialise + busy + re-read of the item) wraps the
+  sheet's acts. Mutation: no `exclusive` in `steerNow` → "DOUBLE tap … ONE id"
+  and "second tap after the first finished" fail.
+- **#3, fixed.** The store writes through one queue (`writeTail`). Mutation: no
+  queue → both "two writers at once" tests fail.
+- **#4, fixed.** `enqueue` always returns the item. A corrupt file that was moved
+  aside is writable again (`readOnly = !moved`). Mutation: stay read-only → the
+  "SET ASIDE … works again" test fails.
+- **#5, fixed.** The changelog fragment is deleted.
+
+**New finding**
+
+1. **MEDIUM — `SessionNotOpenError` is not read as offline.** Its doc says
+   `refusalOf` reads it as "no answer from the daemon", so the item stays
+   `waiting` (`outbox-session.ts:24-26`). But `refusalOf`'s offline list
+   (`outbox.ts:301-307`) does not name it, so it falls through to
+   `decide/refused`. Repro (`.tentacle/tmp/mobile-compose-13b/review-r2-notopen.test.ts`):
+   the sheet's Send while the link is down gives `getSession` →
+   `unavailableSessionPort("link")` → `perform` → state `needs-decision`, why
+   `refused`. The plan (F1) says it should be `waiting`. Before this commit,
+   `getSession` returning `null` gave `waiting`. Nothing is duplicated or lost:
+   the item stays on disk. But a link drop is shown as a refusal. Fix: add
+   `"SessionNotOpenError"` to the offline names, plus a test.
+
+**Regressions checked with no finding:** `exclusive` runs inside the session's
+`serialise` chain and no act calls `serialise` again, so it cannot deadlock.
+`busy` is clear between serialised runs. The write queue recovers after a
+failed write (it has its own test). `discard` and `backToDraft` on an item that
+is already gone are no-ops.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-14* · scope `git diff HEAD~1` (35f7355)
+
+**Verdict: PASS.**
+
+**Gate:** the 5 touched files pass 90/90 (286 expects). `bun run lint` is clean
+(1074 files) and `bun run typecheck` is clean.
+
+**Round-2 finding, fixed and checked by mutation.** The mutations were applied,
+run and reverted; `git status` was clean afterwards.
+- **What changed:** `refusalOf` now handles `SessionNotOpenError` through
+  `notOpenRefusal`. A link that is down maps to `offline`; an archived, deleted
+  or gone session maps to the new `draft` refusal, which `refuse` hands back to
+  the field.
+  - Mutation A: drop the branch → "Send with the link DOWN keeps it waiting",
+    "Send on an ARCHIVED session", and the `refusalOf` offline-names test fail.
+  - Mutation C: `notOpenRefusal` always answers `offline` → the ARCHIVED test
+    fails.
+- **What changed:** `steerNow` checks `facts.availability` before the running
+  turn. Mutation B: skip that check → "Queue as steer with the link DOWN" fails.
+- **The round-2 repro now ends `waiting`, with no decision**
+  (`.tentacle/tmp/mobile-compose-13b/review-r2-notopen.test.ts`).
+
+**Regressions checked, none found:**
+- `refuse` handles every `Refusal` kind; the compiler checks the switch.
+- A `draft` refusal from inside an upload hands the item back and never reopens
+  the session (F20).
+- The link test now uses the app's own `unavailableSessionPort`, not a
+  test-only copy that threw a bare `Error`.
+- The steer is still turn-bound (`client.enqueue`).
+- The name check is safe: wire errors arrive as `RpcError`, so a daemon cannot
+  forge the `SessionNotOpenError` name.
+
+**Executor:** fixed exactly the finding, at its root (one mapping used in three
+places), with tests that name their mutations.
