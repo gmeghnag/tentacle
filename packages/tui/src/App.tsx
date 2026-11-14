@@ -1,5 +1,4 @@
 import { homedir } from "node:os";
-import { resolve } from "node:path";
 import { Session } from "@tentacle/agent";
 import {
   type AttachmentRef,
@@ -11,33 +10,20 @@ import {
 } from "@tentacle/core";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
-import { attachmentCandidateText, parseAttachCommand } from "./attach-candidates.ts";
 import {
   type AttachDraft,
-  type AttachMode,
   EMPTY_DRAFT,
   NOT_AN_IMAGE_NOTICE,
-  NO_IMAGE_SEAM,
   attachErrorText,
   attachRowRows,
   attachRowView,
-  draftRefs,
   enterConvertsToChips,
   imageRowText,
-  looksLikeCommand,
   removeLastChip,
-  routeDecision,
   submitPlan,
   uploadDone,
-  uploadProgress,
-  withChips,
 } from "./attach-draft.ts";
-import {
-  type AttachedImage,
-  type FileProbe,
-  decideAttachment,
-  nodeFileProbe,
-} from "./attach-files.ts";
+import { type AttachedImage, type FileProbe, nodeFileProbe } from "./attach-files.ts";
 import {
   type DockOutcome,
   type DockState,
@@ -125,6 +111,7 @@ import {
   permissionShowsCwd,
   usePermissionBroker,
 } from "./permission-ui.ts";
+import { useAttachments } from "./useAttachments.ts";
 import { useMouse } from "./useMouse.ts";
 
 export type { AutoAcceptFeed };
@@ -459,9 +446,10 @@ export function App({
   const draftRef = useRef("");
   // The input's image chips + the upload in flight (docs/feat/attachments-tui.md
   // D6). The REF is the truth an async handler reads; the state renders and
-  // feeds `inputBoxRows`. `attachSeqRef` keeps one decision in flight at a time
-  // (two pastes are serialized, so `existing` is always the current chips), and
-  // `attachGenRef` drops a late result after an unmount.
+  // feeds `inputBoxRows`. The one-decision-at-a-time chain (two pastes are
+  // serialized, so `existing` is always the current chips) lives with the
+  // executor, in `useAttachments.ts` — never a second one here; `attachGenRef`
+  // stays, and drops a late result after an unmount.
   const [attach, setAttachState] = useState<AttachDraft>(EMPTY_DRAFT);
   const attachRef = useRef<AttachDraft>(EMPTY_DRAFT);
   const setAttach = useCallback((next: AttachDraft | ((prev: AttachDraft) => AttachDraft)) => {
@@ -469,7 +457,6 @@ export function App({
     attachRef.current = value;
     setAttachState(value);
   }, []);
-  const attachChainRef = useRef<Promise<void>>(Promise.resolve());
   const attachGenRef = useRef(0);
   // The text a `convert` already probed and put back with `NOT_AN_IMAGE_NOTICE`:
   // the next Enter on that same text sends it as a message instead of probing
@@ -1521,213 +1508,29 @@ export function App({
   draftBackRef.current = (text, cause) => restoreInput(text, orphanNotice(cause));
 
   // --- images in the input (docs/feat/attachments-tui.md D8) ----------------
-  /** What the CURRENT session takes: its own answer, or the reason a session with no seam gives. */
-  const attachMode = useCallback((): AttachMode => {
-    const session = sessionRef.current;
-    const answered = session?.imageInput?.();
-    if (answered !== undefined) {
-      return answered;
-    }
-    return session?.attachImage === undefined ? NO_IMAGE_SEAM : NO_IMAGE_SEAM;
-  }, []);
-  /**
-   * Put a refused prompt's chips back (docs/feat/attachments-tui.md D8): the
-   * bytes are still in them, so Enter uploads them again. Appended, never
-   * replacing what the user attached meanwhile.
-   */
-  const restoreChips = useCallback(
-    (chips: readonly AttachedImage[] | undefined) => {
-      if (chips === undefined || chips.length === 0) {
-        return;
-      }
-      setAttach((draft) => ({ ...withChips(draft, chips).draft, upload: null }));
-    },
-    [setAttach],
-  );
-  /** Say each notice as its own row (never joined: one refusal per line). */
-  const showNotices = useCallback(
-    (notices: readonly string[]) => {
-      for (const notice of notices) {
-        pushNotice(notice);
-      }
-    },
-    [pushNotice],
-  );
-  /**
-   * Decide what a pasted/dropped text is and act: prose is inserted as it always
-   * was, image paths become chips, a refusal is SAID. One decision at a time
-   * (a promise chain, so `existing` sees the previous paste's chips), and a
-   * result that lands after an unmount is dropped.
-   */
-  const routeAttach = useCallback(
-    (text: string): void => {
-      // A `/command` is always text: `/compact` alone is a legal path candidate
-      // to `tokenizePaths`, and a paste must never stat one.
-      const candidate = looksLikeCommand(text)
-        ? ({ kind: "text" } as const)
-        : attachmentCandidateText(text, home !== undefined ? { home } : {});
-      if (candidate.kind === "text") {
-        field.insert(text); // prose never touches the disk
-        return;
-      }
-      const gen = attachGenRef.current;
-      attachChainRef.current = attachChainRef.current.then(async () => {
-        const decision = await decideAttachment(fileProbe, candidate, {
-          existing: draftRefs(attachRef.current),
-        });
-        if (gen !== attachGenRef.current) {
-          return; // unmounted while the disk was read
-        }
-        // The paste's own text comes back when the decision is `text` (a missing
-        // path, a directory, a source file): the 3a rule is that the WHOLE paste
-        // stays text, and dropping it silently would lose what was pasted
-        // (review round 1, finding 1).
-        const routed = routeDecision(attachRef.current, decision, attachMode(), text);
-        setAttach(routed.draft);
-        if (routed.insert !== undefined) {
-          field.insert(routed.insert);
-        }
-        showNotices(routed.notices);
-      });
-    },
-    [attachMode, field, fileProbe, home, setAttach, showNotices],
-  );
+  // The decisions are `attach-candidates.ts`/`attach-files.ts`/`attach-draft.ts`'s
+  // and their executor is `useAttachments` (S6). The DRAFT STATE stays here: the
+  // render reads it (the attach row, the input box's row count) and `submit` /
+  // Backspace edit it — the same shape S4 gave `selection`. The refs other layers
+  // read (`probedTextRef`, `uploadCtrlRef`, `attachGenRef`) stay here too, so
+  // effect 1 below keeps its index and every use-site keeps its identifier.
+  const { attachMode, restoreChips, routeAttach, attachCommand, convertToChips, sendWithImages } =
+    useAttachments({
+      field,
+      attachRef,
+      setAttach,
+      attachGenRef,
+      probedTextRef,
+      uploadCtrlRef,
+      sessionRef,
+      runRef,
+      pushNotice,
+      restoreInput,
+      fileProbe,
+      home,
+      localCwd,
+    });
   routeAttachRef.current = routeAttach;
-  /**
-   * `/attach <path…>`: the explicit form (every failure a refusal). A relative
-   * path resolves against the LAPTOP's cwd, never the `cwd` prop (P15).
-   */ const attachCommand = useCallback(
-    (raw: string): void => {
-      const parsed = parseAttachCommand(raw, home !== undefined ? { home } : {});
-      if (parsed === null) {
-        pushNotice("_Usage: `/attach <path>` (a path may be dragged into the terminal)_");
-        return;
-      }
-      const paths = parsed.paths.map((path) => resolve(localCwd, path));
-      const gen = attachGenRef.current;
-      attachChainRef.current = attachChainRef.current.then(async () => {
-        const decision = await decideAttachment(
-          fileProbe,
-          { kind: "paths", paths },
-          { existing: draftRefs(attachRef.current), explicit: true },
-        );
-        if (gen !== attachGenRef.current) {
-          return;
-        }
-        const routed = routeDecision(attachRef.current, decision, attachMode());
-        setAttach(routed.draft);
-        if (routed.insert !== undefined) {
-          field.insert(routed.insert);
-        }
-        showNotices(routed.notices);
-      });
-    },
-    [attachMode, field, fileProbe, home, localCwd, pushNotice, setAttach, showNotices],
-  );
-  /** An unbracketed drop + Enter: the paths become chips and NOTHING is sent (decision 5). */
-  const convertToChips = useCallback(
-    (text: string): void => {
-      const candidate = attachmentCandidateText(text, home !== undefined ? { home } : {});
-      if (candidate.kind !== "paths") {
-        return;
-      }
-      const gen = attachGenRef.current;
-      attachChainRef.current = attachChainRef.current.then(async () => {
-        const decision = await decideAttachment(fileProbe, candidate, {
-          existing: draftRefs(attachRef.current),
-        });
-        if (gen !== attachGenRef.current) {
-          return;
-        }
-        const routed = routeDecision(attachRef.current, decision, attachMode());
-        setAttach(routed.draft);
-        showNotices(routed.notices);
-        // A typed drag whose bytes are NOT an image: the text goes back and says
-        // why, instead of a cleared field that sent nothing (review round 1,
-        // finding 1).
-        if (decision.kind === "text") {
-          // Recorded BEFORE the restore: the next Enter on this same text is a
-          // message, not another probe (round 2, R2-1).
-          probedTextRef.current = text;
-          restoreInput(text, NOT_AN_IMAGE_NOTICE);
-          return;
-        }
-        // Said only when something WAS attached: a refusal already spoke.
-        if (routed.draft.chips.length > attachRef.current.chips.length) {
-          pushNotice(
-            `_attached ${routed.draft.chips.length} image${routed.draft.chips.length === 1 ? "" : "s"} — type your message and press Enter_`,
-          );
-        }
-      });
-    },
-    [attachMode, fileProbe, home, pushNotice, restoreInput, setAttach, showNotices],
-  );
-  /**
-   * Send the prompt with the draft's chips: every chip goes through the
-   * SESSION's own `attachImage` (one upload at a time, progress on the chip
-   * row), then the prompt names the refs. A failure restores the text, keeps
-   * the chips and says why — Enter retries, and the store's put is idempotent.
-   */
-  const sendWithImages = useCallback(
-    (text: string, chips: readonly AttachedImage[]): void => {
-      const session = sessionRef.current;
-      const seam = session?.attachImage;
-      if (seam === undefined) {
-        restoreInput(text, "_images are off: this session does not take images_");
-        return;
-      }
-      const gen = attachGenRef.current;
-      const controller = new AbortController();
-      uploadCtrlRef.current = controller;
-      const upload = async (): Promise<void> => {
-        const refs: AttachmentRef[] = [];
-        for (const [index, chip] of chips.entries()) {
-          const name =
-            chip.ref.name !== undefined && chip.ref.name !== "" ? chip.ref.name : chip.ref.mimeType;
-          setAttach((draft) => uploadProgress(draft, index, chips.length, name, 0, chip.ref.size));
-          refs.push(
-            await seam.call(
-              session,
-              chip.bytes,
-              {
-                mimeType: chip.ref.mimeType,
-                ...(chip.ref.name !== undefined ? { name: chip.ref.name } : {}),
-              },
-              {
-                signal: controller.signal,
-                onProgress: (sent, size) =>
-                  setAttach((draft) =>
-                    uploadProgress(draft, index, chips.length, name, sent, size),
-                  ),
-              },
-            ),
-          );
-        }
-        if (gen !== attachGenRef.current) {
-          return;
-        }
-        // The upload is over: Esc must go back to stopping the TURN, not abort a
-        // finished controller (review round 1, finding 3).
-        if (uploadCtrlRef.current === controller) {
-          uploadCtrlRef.current = null;
-        }
-        setAttach((draft) => uploadDone({ ...draft, chips: [] }));
-        await runRef.current?.(text, { attachments: refs, images: chips });
-      };
-      upload().catch((error: unknown) => {
-        if (gen !== attachGenRef.current) {
-          return;
-        }
-        if (uploadCtrlRef.current === controller) {
-          uploadCtrlRef.current = null;
-        }
-        // The chips stay (bytes included): Enter uploads them again.
-        setAttach((draft) => uploadDone(draft));
-        restoreInput(text, attachErrorText(error));
-      });
-    },
-    [restoreInput, setAttach],
-  );
 
   /**
    * Watch `session` for my rows coming back (docs/feat/queued-broadcast.md):
