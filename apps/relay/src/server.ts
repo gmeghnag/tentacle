@@ -439,6 +439,11 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
     const decision = core.accept({ socket: key, token: parsed.stream, v: parsed.v });
     if (!decision.ok) {
       log(`accept-refused ${decision.reason} ${logPrefix(parsed.stream)}`);
+      if (decision.reason === "expired") {
+        // The stream expired unaccepted: its phone is closed `4404` too, so the
+        // app retries another address instead of waiting out its idle timeout.
+        apply(decision.effects);
+      }
       closeSocket(key, RELAY_CLOSE_UNREGISTERED);
       return;
     }

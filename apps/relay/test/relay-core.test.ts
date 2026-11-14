@@ -134,6 +134,21 @@ describe("RelayCore.hello — registration", () => {
     expect(core.registeredCount).toBe(0);
   });
 
+  test("a second hello on ONE control socket, with a different secret, is refused", () => {
+    const { core } = makeCore();
+    const first = core.hello({ socket: "d1", ip: "203.0.113.5", v: 1, secret: secret(7) });
+    expect(first.ok).toBe(true);
+    // One control socket serves ONE daemon: a second registration on it would
+    // leak its id until the relay restarts (the socket's close only ever
+    // unregistered the first), and phones for it would hang on a dead route.
+    const second = core.hello({ socket: "d1", ip: "203.0.113.5", v: 1, secret: secret(8) });
+    expect(second.ok).toBe(false);
+    expect(sent(second.effects)).toEqual([{ t: "error", code: "invalid", supported: [1] }]);
+    expect(closes(second.effects)).toEqual([["d1", 1000]]);
+    expect(core.registeredCount).toBe(1);
+    expect(core.idOfControl("d1")).toBe("fgkrQr2vTa2JTEe75Kl66v");
+  });
+
   test("a control socket closing unregisters its id", () => {
     const { core } = makeCore();
     core.hello({ socket: "d1", ip: "203.0.113.5", v: 1, secret: secret(7) });
@@ -209,6 +224,22 @@ describe("RelayCore.dial — open, hold, expiry", () => {
     expect(third.ok).toBe(true);
   });
 
+  test("an unaccepted stream expiring in the sweep also CLOSES its phone (fx round 1 F1)", () => {
+    const clock = makeCore({ limits: { concurrentPerIp: 1 } });
+    clock.core.hello({ socket: "d1", ip: "203.0.113.5", v: 1, secret: secret(7) });
+    const ip = "198.51.100.9";
+    expect(clock.core.dial({ socket: "p1", ip, id: "fgkrQr2vTa2JTEe75Kl66v" }).ok).toBe(true);
+    clock.advance(RELAY_STREAM_EXPIRY_MS + 1);
+    // A daemon that never accepts must not leave a phone socket pinned open for
+    // its whole idle timeout: the expiry closes it, so the app tries its next
+    // address (F2/F7 convergence) — and the per-ip slot is really back.
+    expect(clock.core.sweep()).toEqual([
+      { kind: "close", target: "p1", code: RELAY_CLOSE_UNREGISTERED },
+    ]);
+    expect(clock.core.streamCount).toBe(0);
+    expect(clock.core.dial({ socket: "p2", ip, id: "fgkrQr2vTa2JTEe75Kl66v" }).ok).toBe(true);
+  });
+
   test("an unaccepted stream stops counting against its id after the expiry", () => {
     const clock = makeCore({ limits: { streamsPerId: 1 } });
     clock.core.hello({ socket: "d1", ip: "203.0.113.5", v: 1, secret: secret(7) });
@@ -226,7 +257,11 @@ describe("RelayCore.dial — open, hold, expiry", () => {
     });
     expect(blocked.ok).toBe(false);
     clock.advance(RELAY_STREAM_EXPIRY_MS + 1);
-    expect(clock.core.sweep()).toEqual([]);
+    // Expiry closes the phone it can no longer serve (fix round 1 F1) and frees
+    // the id's slot.
+    expect(clock.core.sweep()).toEqual([
+      { kind: "close", target: "p1", code: RELAY_CLOSE_UNREGISTERED },
+    ]);
     expect(clock.core.streamCount).toBe(0);
     const allowed = clock.core.dial({
       socket: "p3",
@@ -286,6 +321,10 @@ describe("RelayCore.accept — the stream token is single-use and expires", () =
     expect(clock.core.accept({ socket: "a1", token: dial.stream, v: 1 })).toEqual({
       ok: false,
       reason: "expired",
+      // Expiry on the ACCEPT path closes the phone too (fix round 1 F1): the
+      // sweep has not ticked yet, and a phone left open here would wait out its
+      // idle timeout instead of retrying another address.
+      effects: [{ kind: "close", target: SOCKET, code: RELAY_CLOSE_UNREGISTERED }],
     });
     expect(clock.core.streamCount).toBe(0);
   });

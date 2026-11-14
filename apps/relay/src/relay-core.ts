@@ -113,7 +113,16 @@ export type AcceptDecision =
       /** The waiting phone socket to splice this leg to. */
       readonly phone: string;
     }
-  | { readonly ok: false; readonly reason: "version" | "unknown" | "expired" | "used" };
+  | {
+      readonly ok: false;
+      readonly reason: "version" | "unknown" | "used";
+    }
+  | {
+      readonly ok: false;
+      readonly reason: "expired";
+      /** The phone whose stream expired: it can never be served now, so it is closed. */
+      readonly effects: readonly RelayEffect[];
+    };
 
 interface Daemon {
   readonly socket: string;
@@ -258,6 +267,21 @@ export class RelayCore {
       };
     }
     const id = relayIdOf(bytes);
+    const onThisSocket = this.idOfControl(input.socket);
+    if (onThisSocket !== undefined && onThisSocket !== id) {
+      // One control socket is one daemon. A second `hello` with a different
+      // secret here would register a second id that nothing ever unregisters
+      // (`controlClosed` drops only the first), so it is refused and the socket
+      // closed — the daemon was already registered, and a client that wants
+      // another identity opens another socket.
+      return {
+        ok: false,
+        effects: [
+          this.error(input.socket, "invalid"),
+          { kind: "close", target: input.socket, code: 1000 },
+        ],
+      };
+    }
     const existing = this.daemons.get(id);
     if (existing === undefined && this.daemons.size >= this.limits.registeredIds) {
       // At the cap a NEW id is refused; an existing one may always come back
@@ -353,8 +377,15 @@ export class RelayCore {
       return { ok: false, reason: "used" };
     }
     if (this.now() - stream.mintedAt > RELAY_STREAM_EXPIRY_MS) {
+      // The sweep has not reached it yet: forget it (its per-ip slot goes back
+      // at once) AND close its phone, so a never-accepted dial does not sit open
+      // until Bun's idle timeout — the app retries another address instead.
       this.forgetStream(stream);
-      return { ok: false, reason: "expired" };
+      return {
+        ok: false,
+        reason: "expired",
+        effects: [{ kind: "close", target: stream.phone, code: RELAY_CLOSE_UNREGISTERED }],
+      };
     }
     stream.accepted = true;
     return { ok: true, token: stream.token, id: stream.id, phone: stream.phone };
@@ -397,8 +428,11 @@ export class RelayCore {
   /**
    * Expire what has waited too long: a held dial past
    * {@link RELAY_STREAM_HOLD_MS} is closed `4404` (the app then tries another
-   * address, or says unreachable), and a stream nobody accepted stops counting
-   * against its id. Called on a timer by `server.ts`; pure here.
+   * address, or says unreachable), and a stream nobody accepted is dropped and
+   * its phone closed `4404` too — past {@link RELAY_STREAM_EXPIRY_MS} that dial
+   * can never be served, and leaving the socket open would pin a per-ip
+   * `concurrentPerIp` slot until Bun's idle timeout. Called on a timer by
+   * `server.ts`; pure here.
    */
   sweep(): readonly RelayEffect[] {
     const at = this.now();
@@ -413,6 +447,7 @@ export class RelayCore {
     for (const stream of [...this.streams.values()]) {
       if (!stream.accepted && at - stream.mintedAt > RELAY_STREAM_EXPIRY_MS) {
         this.forgetStream(stream);
+        effects.push({ kind: "close", target: stream.phone, code: RELAY_CLOSE_UNREGISTERED });
       }
     }
     return effects;

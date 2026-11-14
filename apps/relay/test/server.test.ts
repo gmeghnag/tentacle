@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   RELAY_CLOSE_UNREGISTERED,
   RELAY_CONTROL_LIMITS,
+  RELAY_STREAM_EXPIRY_MS,
   RELAY_STREAM_TEXT_LENGTH,
   encodeBase64Url,
 } from "@tentacle/protocol";
@@ -146,6 +147,18 @@ async function register(base: string, secret = SECRET): Promise<TestSocket> {
   return control;
 }
 
+/** Poll until `check()` is true (the server applies a close on its own turn). */
+async function waitFor(check: () => boolean, what: string, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (check()) {
+      return;
+    }
+    await Bun.sleep(5);
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
 describe("relayRoute — the routing table", () => {
   test("the three wire routes and healthz", () => {
     expect(relayRoute("/healthz")).toEqual({ kind: "health" });
@@ -263,6 +276,24 @@ describe("startRelay — control socket", () => {
     control.close();
   });
 
+  test("a second hello on one control socket, with a different secret, is refused", async () => {
+    const { server } = relay();
+    const control = await open(`${server.url}/v1/daemon`);
+    control.send({ t: "hello", v: 1, secret: SECRET });
+    expect((JSON.parse(await control.next()) as { t: string }).t).toBe("ready");
+    // A second registration on the same socket would register a second id that
+    // nothing ever unregisters (close only removes the first): the relay says no
+    // rather than leak it until a restart.
+    control.send({ t: "hello", v: 1, secret: encodeBase64Url(new Uint8Array(32).fill(8)) });
+    expect(JSON.parse(await control.next())).toEqual({
+      t: "error",
+      code: "invalid",
+      supported: [1],
+    });
+    expect((await control.closed()).code).toBe(1000);
+    await waitFor(() => server.core.registeredCount === 0, "the first id to be unregistered");
+  });
+
   test("a second hello for one id replaces the first socket and TELLS it", async () => {
     const { server } = relay();
     const first = await register(server.url);
@@ -355,6 +386,25 @@ describe("startRelay — splice (R0(a) made a claim about the real service)", ()
 });
 
 describe("startRelay — phone dial, hold and pre-accept buffering", () => {
+  test("an accept for an expired stream closes the phone too (not just the accept leg)", async () => {
+    // A long sweep tick, so the accept is what discovers the expiry — the path
+    // `sweep()` would otherwise cover first.
+    const { server, lines } = relay({ sweepMs: 60_000 });
+    const control = await register(server.url);
+    const phone = await open(`${server.url}/d/${ID}/e2e`);
+    const openFrame = JSON.parse(await control.next()) as { stream: string };
+    // The token expires at 10 s; the daemon accepts late (or its open is replayed).
+    await Bun.sleep(RELAY_STREAM_EXPIRY_MS + 200);
+    const daemon = await open(`${server.url}/v1/accept`);
+    daemon.send({ t: "accept", v: 1, stream: openFrame.stream });
+    expect((await daemon.closed()).code).toBe(RELAY_CLOSE_UNREGISTERED);
+    // The phone is closed 4404 rather than left waiting on a stream nobody can
+    // serve: the app then tries its next address (F2/F7).
+    expect((await phone.closed()).code).toBe(RELAY_CLOSE_UNREGISTERED);
+    expect(lines.some((line) => line.startsWith("accept-refused expired"))).toBe(true);
+    control.close();
+  }, 20_000);
+
   // 5 s of real hold + the close: this test owns its timeout, not Bun's 5 s default.
   test("a dial for an unregistered id is held, then closed 4404 at 5 s", async () => {
     const { server } = relay();
@@ -433,6 +483,19 @@ describe("startRelay — phone dial, hold and pre-accept buffering", () => {
     // A refused dial keeps nothing: the first phone still holds its slot.
     expect(server.core.heldCount).toBe(1);
     first.close();
+  });
+
+  test("a closed phone gives its per-ip slot back (N+1 sequential dials at cap N)", async () => {
+    const { server } = relay({ limits: { concurrentPerIp: 2, dialsPerMinutePerIp: 99 } });
+    // Each phone dials, is held and leaves. Without the close releasing the slot
+    // the third dial meets an exhausted per-ip cap and is refused `4429` — a
+    // leak that after 16 dials locks the address out entirely.
+    for (let i = 0; i < 3; i++) {
+      const phone = await open(`${server.url}/d/${ID}/e2e`);
+      expect(server.core.heldCount).toBe(1);
+      phone.close();
+      await waitFor(() => server.core.heldCount === 0, "the held dial to be released");
+    }
   });
 
   test("every stream token the relay mints is well-formed and unguessable-looking", async () => {

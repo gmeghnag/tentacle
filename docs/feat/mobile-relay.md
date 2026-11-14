@@ -1220,3 +1220,84 @@ limits are weak against IPv6 ranges anyway).
 
 §7: R2 holds no key and authorises nothing (relay untrusted — holds); no
 session path, broker, persistence or terminal I/O touched.
+
+## Execution
+
+### Fix round 1 — *— claude-opus-5-5, 2026-11-14*
+
+All three R2 findings fixed, in the pure core where the decision lives, with the
+server applying what it is told. Red before green per finding (each mutation
+below was run against the fix in place, then reverted; §9 requires the failure to
+be on the assertion, and it is — no import/compile error in any run).
+
+**F1 (MEDIUM) — an expired unaccepted stream now closes its phone.**
+`relay-core.ts:446-450` (`sweep`) pushes
+`{close, stream.phone, 4404}` after `forgetStream`; `relay-core.ts:378-390`
+(`accept`'s `expired` branch) does the same via a new
+`AcceptDecision` variant (`relay-core.ts:116-122`) that carries `effects`, applied
+at `server.ts:442-446`. The other three accept refusals keep their exact old shape
+(`{ok:false, reason}`) on purpose, so no unrelated assertion moved.
+Why: a daemon that registers but never accepts (crashed, or hostile) left one
+phone socket open per dial until Bun's idle timeout — a ponging client never hits
+it — so `concurrentPerIp` was bypassed and a legitimate phone hung on an OPEN
+socket that could never carry a handshake (F2/F7 convergence). Both expiry paths
+now close `4404`, which is exactly the "try my next address" signal a held dial
+already gets.
+Mutation A: drop the `effects.push` in `sweep` →
+`bun test apps/relay/test/relay-core.test.ts` = **23 pass / 2 fail** (`an
+unaccepted stream expiring in the sweep also CLOSES its phone`; `an unaccepted
+stream stops counting against its id after the expiry`). Mutation B: empty
+`effects` in `accept`'s `expired` branch → **24 pass / 1 fail** (`a token expires
+at 10 s, and the expiry frees the slot`). Mutation C: drop
+`apply(decision.effects)` at `server.ts` → **27 pass / 1 fail** (`an accept for an
+expired stream closes the phone too`, timed out waiting for the close — red on
+the property, not on a type error), which is why that socket-level test exists:
+C survived every core-level test.
+
+**F2 (MEDIUM) — one control socket registers one id.**
+`relay-core.ts:269-283`: `hello` refuses (and closes 1000) a secret whose id
+differs from the id already registered on the SAME socket, with `error
+"invalid"`. A re-hello with the SAME secret on the same socket is untouched (the
+existing `a re-hello on the SAME socket is not a replacement` test still passes),
+and newest-wins across sockets is untouched.
+Why: `controlClosed` unregisters only the FIRST id it finds on a socket, so a
+second hello registered an id nothing ever removed — it leaked until relay
+restart (filling `registeredIds`, then refusing new daemons `busy`) and phones for
+it were `opened` onto a dead control socket, hanging instead of being held/4404.
+Mutation: remove the guard → **58 pass / 2 fail** (core + socket-level
+`a second hello on one control socket, with a different secret, is refused`).
+
+**F3 (MEDIUM, test non-vacuity) — the server's phone-close slot release is
+pinned.** New socket-level test (`server.test.ts`): 3 sequential dial+close at
+`concurrentPerIp: 2`, each close awaited through `heldCount` back to 0; a leak
+exhausts the cap on the third dial (refused `4429`).
+Mutation (the review's exact one): comment out `core.phoneClosed(key)` at
+`server.ts:367` → **26 pass / 1 fail** (`a closed phone gives its per-ip slot back
+(N+1 sequential dials at cap N)`, "timed out waiting for the held dial to be
+released"). Previously 56/56 passed under that mutation; it now fails.
+
+**One existing test was corrected, not weakened**: `an unaccepted stream stops
+counting against its id after the expiry` asserted `sweep() === []` — the buggy
+behaviour itself — and now asserts the `4404` close it gets instead. Its original
+property (the id's slot is free again) is still asserted, plus the dial that
+proves it.
+
+**Drift from Implementation:** none — R2's Design did not name the expiry
+close-up, and this is the smallest change that satisfies its F2/F7 convergence
+argument. The `AcceptDecision` split (only `expired` carries `effects`) is a
+shape choice made to avoid touching the other refusals' assertions.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/relay` clean · `bun run
+lint` clean (1304 files, no fixes) · `bun test` **9406 pass / 3 skip / 0 fail**
+(9409 tests, 675 files) — the 3 skips are the pre-existing opt-ins (live-k8s,
+live-docker, real-socket keepalive), no new skip. `apps/relay` alone: 61 pass / 0
+fail. No `changelog.d` fragment: this is a fix to unshipped R2 code on the same
+branch, before any release, and `changelog.d/mobile-relay.added.md` already covers
+the user-visible relay. No `protocol.d` note: the wire is unchanged (the review's
+own `4404` close code already exists and is used by the held-dial path).
+
+**Not verified:** the concurrent-socket behaviour of finding 1 under a real
+hostile daemon (the tests drive the pure core and a local socket; a 30/min×N
+saturation run against a deployed relay is R7's). The review's noted-but-not-
+raised `maxTrackedIps` eviction of an entry with `open > 0` is untouched (low
+severity, per-IP limits are weak against IPv6 ranges anyway).
