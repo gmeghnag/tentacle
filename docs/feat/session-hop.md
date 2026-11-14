@@ -1,6 +1,6 @@
 # feat/session-hop — Move a live session between local and a container
 
-> **Status:** implementation (awaiting owner approval)
+> **Status:** implementation approved (orchestrator, owner night delegation 2026-11-14)
 > **Branch:** `feat/session-hop`
 > **Size:** L (split into slices H1–H7, each S/M) · **Blast:** load-bearing (§7: one session path, single broker, pod not trusted, persistence, pod/container lifecycle) · **Suited:** owner-assigned executor; every load-bearing slice (H2, H4, H5, H6) gets a mandatory fresh-context Review before the next starts
 > **Changelog:** `changelog.d/session-hop.added.md`
@@ -388,6 +388,18 @@ Red first, each shown failing before its slice's code (§9):
 8. **Session-scoped "always" approvals are lost on a hop (re-asked on the
    new target). Is that acceptable?** Recommendation: accept. Carrying them
    pod→laptop would break the pod-not-trusted invariant.
+
+#### Orchestrator decisions (owner night delegation 2026-11-14)
+
+All eight questions take the planner's recommendation. The owner's own answers
+of 2026-11-14 (02:15) are already folded into the design: `/move` plus a
+proposing tool gated by an OK, hops at turn end only, docker/podman bind mount,
+no k8s workspace sync, model chooses image / existing workload and keep vs delete.
+1 keep (listed in `ps`) · 2 refuse with a notice · 3 local-worker origin only in
+v1 · 4 D7 as written · 5 keep by default · 6 yes (`sessionHop.tool`) · 7 no
+confirmation for a typed `/move` · 8 accept (always-approvals re-asked).
+Execution: one branch, H1 → H2 (review) → H3+H4 (review, merge = MVP on main)
+→ H5 → H6+H7 (review, merge). *— claude-opus-5-5 (orchestrator), 2026-11-14*
 
 ## Execution
 
