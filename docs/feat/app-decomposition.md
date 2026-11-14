@@ -5238,3 +5238,248 @@ only.
 **Gate:** the 10 touched/related test files (with `app.test.tsx`) → 177 pass / 0 fail. `bun run lint` → 1324 files, clean. `bun run typecheck` (root, mobile, relay) → OK. I did not re-run the full suite.
 
 **Note, not blocking:** the doc comment on `withoutCommentsAndStrings` says it also blanks "a regex literal's pattern", but the code does not handle regex literals. A quote character inside a regex in `App.tsx` could throw the scanner off. Today the test stays green, and it would most likely fail loudly rather than pass silently.
+
+## Execution
+
+### S13 — `feat/app-decomp-13-pure-residue` (the pure residue: five inline rules become named functions)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14 (executor, `feat/app-decomp-13-pure-residue`, cut from `main` @ `da254d3c`)*
+
+The slice is the table's row 3, nothing else: five decisions `App.tsx` made
+inline become pure functions with their own unit tests, and **the effects and
+callbacks stay where they were** — the effect list keeps its order (all 22 pins
+untouched), and S11/S12/S14's scopes were not entered.
+
+**Load-bearing check, re-run first (it is what the slice stands on).** The row
+claims five specific inline decisions exist, and that none of the five helper
+names exists yet. Verified on this branch before any edit, with `check.sh`
+(`.tentacle/tmp/app-decomp-13-pure-residue/`):
+
+```
+== 1. exitOutcome: the nested exit ternary, inline in the onExit effect
+614:        job.agent !== undefined
+-- byDock/endedAt stamp (the same record's inputs)
+624:              byDock: dockStoppedRef.current.has(job.id),
+== 2. jobOutputEntry: the SAME 6-line record built twice
+2
+937:              output: result.output ?? [],
+990:            output: result.output ?? [],
+== 3. tryWake: the wake gate written twice (enabled/idle/blocked)
+2
+591:      enabled: autoWakeOnJobExit,
+1087:        enabled: autoWakeOnJobExit,
+== 4. anchorOffset: the scroll-anchor rule, inline in an effect
+860:      if (total > prev && (scrollOffset > 0 || selecting)) {
+== 5. pasteTarget: the paste target rule (reply, then panel, then attach)
+1628:        if (clean && !insertIntoReply(clean) && !panelRef.current) {
+1860:            if (clean && !panelRef.current) {
+== absence: none of the five pure helpers exists today
+exitOutcome      0 hits in src/
+jobOutputEntry   0 hits in src/
+tryWake          0 hits in src/
+anchorOffset     0 hits in src/
+pasteTarget       0 hits in src/
+```
+
+All five hold, including the two duplications (2 sites each for the record and
+for the gate), so the slice proceeded. **One correction to the plan's wording:**
+item 3 calls the wake duplication `App.tsx:624-634` and `:1120-1130`; on this
+tree the two sites are `:591` and `:1087` (S14 dropped 29 import lines above
+them). Same two copies, moved line numbers — the plan's *claim* is exact even
+though its line numbers are stale.
+
+### As built, in dependency order
+
+1. **`anchorOffset`** — `packages/tui/src/scroll.ts:114`, `AnchorOffsetInput` at
+   `:90`. Next to `anchorOnGrowth` (same file, same concern), not replacing it.
+   **The signature is the one drift from the plan's one-line `anchorOffset(prev,
+   total, offset, selecting, viewport)`:** the inline rule read the offset
+   **twice from two different sources** — the guard read the RENDER value
+   (`scrollOffset`) and the state updater's arithmetic read the COMMIT value
+   (`o`), and those two disagree exactly inside one batched tick (a scroll key
+   and a row growth with no render between them — the window H3 exists for).
+   A single `offset` parameter would have silently merged them and changed
+   behaviour. So the input carries `rendered` (the guard's) and the function
+   returns the UPDATER (or `null` for "do not touch the offset"), which is what
+   preserves both sources: `App.tsx:849`.
+2. **`pasteTarget`** — `packages/tui/src/paste.ts:76`, wired at both call sites:
+   the bracketed-paste timeout (`App.tsx:1614`) and the main input's Ctrl+V
+   (`App.tsx:1857`). The reply check moved from "call `insertIntoReply` and see
+   if it took" to `readReplyMode().mode === "reply"` — the same predicate
+   `insertIntoReply` itself starts with — so the decision is a value before any
+   side effect, and `readReplyMode` joins that `useCallback`'s deps (it is a
+   stable `useCallback` in `permission-ui.ts:327`).
+3. **`exitOutcome`** — `packages/tui/src/job-drawer.ts:220`, wired at
+   `App.tsx:616`; `jobOutcome` stays exported (the module's own tests and
+   `jobEndView` use it) and `App.tsx` no longer imports it.
+4. **`jobOutputEntry`** — `packages/tui/src/job-drawer.ts:252`, replacing BOTH
+   copies of the record (`App.tsx:929`, `:976`). `App` now calls it exactly
+   twice (pinned), so the dedupe cannot quietly become three.
+5. **`tryWake`** — new `packages/tui/src/wake-gate.ts` (`sessionWakeGate` `:34`,
+   `tryWake` `:55`), replacing both gate derivations (`App.tsx:593`, `:1073`).
+   The MODEL and the RULE stay in `@tentacle/core` (`wakeStep`/`wakeDue`, shared
+   with the daemon and a detached run's relay); what moved here is the TUI's
+   derivation of the three gate fields plus the store-and-execute step, because
+   *that* is what existed twice. `wakeDue` leaves `App.tsx`'s imports; `wakeStep`
+   stays (the `exit` event at `:580` is not the duplicated part).
+
+**Structure pin** — `packages/tui/test/app-residue-structure.test.ts`: a pure
+module with unit tests proves the rule is right, never that the App calls it, so
+that file scans `App.tsx` for (a) each helper imported *and* called, (b) no
+surviving inline copy of the five literal shapes, (c) exactly two
+`jobOutputEntry(` calls. Without it, re-inlining a rule would be invisible to
+every render test until one copy was edited.
+
+**Size.** `App.tsx` 1948 → 1947 lines (`+64 −65`): the five decisions left, and
+the comments explaining them followed them into the modules. The residue is now
+`scroll.ts` +41, `paste.ts` +32, `job-drawer.ts` +71, `wake-gate.ts` +60.
+
+### Tests, and the failure modes each pins
+
+The plan named only "pure modules with unit tests"; these are the cases, chosen
+for what could actually go wrong (AGENTS §9 — the bug lives in the cases a
+happy-path suite skips):
+
+- `anchorOffset` (5): grows by the new rows; a SELECTION anchors even at offset
+  0; `null` when nothing anchors (the offset must not be *touched*, not merely
+  returned unchanged); `null` when rows shrank **or** were unchanged; the
+  updater reads the COMMIT offset (a batched scroll key still counts), clamps to
+  the new total, and never goes negative.
+- `pasteTarget` (5): reply wins; reply wins *over an open panel* (the order
+  claim); no reply + panel ⇒ `null` (text must not become an attachment behind
+  a panel); no reply + no panel ⇒ `attach`; empty text ⇒ `null` everywhere.
+- `exitOutcome` (4): a child's `end_turn` ⇒ `finished`, any other reason ⇒
+  `stopped`; a child's record never consults the shell code; a shell job's code
+  and the dock's own stop (`stopped` over the wire's `killed`, a null code ⇒
+  `killed`); the ended instant is the caller's one stamp — **and** a child's
+  outcome carries none, pinned explicitly so a later "fix" cannot start
+  measuring a child's duration.
+- `jobOutputEntry` (4): a refusal is `null`, never an empty tail; a found read
+  with no output is `{output: []}`; absent fields stay absent (`"truncated" in
+  entry === false`); a `false`/`0` is a real answer and survives (truthiness
+  would drop both).
+- `tryWake` (8): `idle` is the NEGATION of `running` (and `blocked` is not
+  inverted); pending+enabled+idle+no-clear ⇒ wake and `pending` consumed; a
+  running turn defers and `pending` SURVIVES; a `/clear` in flight blocks and
+  `pending` survives; the setting off never wakes; nothing pending never wakes.
+- `app-residue-structure` (3): the structure pin above.
+
+### Red before green
+
+Each module's tests were written against the new function **before** the App was
+wired, and each was mutation-checked rather than trusted (AGENTS §9 — a test
+green on both old and new code proves nothing). Full results below.
+
+**Mutation results (each applied, run, reverted; the file restored byte-for-byte
+from `.tentacle/tmp/app-decomp-13-pure-residue/`):**
+
+```
+anchorOffset (scroll.test.ts: 17 tests)
+ M1 guard drops the scrolled-up half        → 2 FAIL (grows-by-rows, commit-offset)
+ M2 updater ignores the commit offset       → 2 FAIL (grows-by-rows, commit-offset)
+ M3 no anchor test (always an updater)      → 1 FAIL (null when nothing anchors)
+
+pasteTarget (paste.test.ts: 11 tests)
+ M1 panel checked BEFORE reply              → 1 FAIL (reply wins over a panel)
+ M2 empty text still placed                 → 1 FAIL (empty text is nothing)
+ M3 panel ignored                           → 1 FAIL (a panel swallows it)
+
+exitOutcome / jobOutputEntry (job-drawer.test.ts: 27 tests)
+ M1 any child exit reads `finished`         → 1 FAIL (only `end_turn` is clean)
+ M2 child path gated on the shell code      → 1 FAIL (never consults the code)
+ M3b the `found` guard removed              → 1 FAIL (a refusal caches an empty tail)
+ M4 absent fields become `undefined` values → 1 FAIL (they must stay absent)
+ M5 truthiness (`truncated ? …`)            → 1 FAIL (drops `false` / `0`)
+
+tryWake (wake-gate.test.ts: 8 tests)
+ M1 `idle` not negated                      → 3 FAIL
+ M2 the `/clear` latch dropped              → 2 FAIL
+ M3 a deferred check loses `pending`        → 3 FAIL
+ M4 wakes but keeps `pending`               → 1 FAIL
+
+app-residue-structure (3 tests)
+ MUT-1 the anchor rule inlined back         → 1 FAIL (inlined copy found)
+ MUT-2b the on-exit read rebuilds the entry → 1 FAIL (exactly 2 calls expected)
+ MUT-3 the wake gate re-inlined in armWake  → 1 FAIL (inlined copy found)
+```
+
+Two mutation attempts survived and were **rewritten rather than counted**, since
+an equivalent mutation proves nothing: an early `jobOutputEntry` M3 that only
+narrowed the `found` guard (`result.found !== true && result.output ===
+undefined`) is equivalent for every input the type allows — replaced by M3b,
+which removes the guard; and an early structure MUT-2 that added an inline
+record *beside* a surviving helper call — replaced by MUT-2b, which drops the
+helper call.
+
+### Drift from the Implementation
+
+1. **`anchorOffset`'s signature** (above): the plan's five flat arguments merged
+   the two offset sources. It takes one input object and returns the state
+   updater (or `null`). This is a fix to the plan, recorded here rather than
+   forced into the code (AGENTS §8).
+2. **Two extra pure modules were not separate files.** `exitOutcome` and
+   `jobOutputEntry` went into the existing `job-drawer.ts` (where `jobOutcome`
+   and the drawer's other rules already live), not a new file — the plan says
+   "→ `job-drawer.ts`" for the first and only "→ `jobOutputEntry(result)`" for
+   the second, so this matches.
+3. **`wake-gate.ts` is a new file** where the plan offered "one local
+   `tryWake()` **or** a pure `wakeGate(...)`". A local closure would have left
+   the gate derivation testable only through a render; the pure function is what
+   makes `idle = !running` provable directly, so the pure option was taken.
+4. **The plan's line numbers for the wake duplication are stale** (`:624-634`,
+   `:1120-1130` → `:591`, `:1087`), noted above; the claim is unaffected.
+5. **A stale comment was corrected, not moved.** The old paste-timeout comment
+   said "An open reply field takes it, never the hidden main field" — the new
+   text names all three outcomes, because the rule it describes now has three.
+
+Nothing in the plan contradicted the code in a way that needed a step to stop.
+
+### Gate
+
+`bunx tsc --noEmit` → clean. `bun run typecheck` (root + `apps/mobile` +
+`apps/relay`) → clean. `bun run lint` → 1344 files, 0 errors / 0 warnings
+(matches the §6 clean baseline).
+
+**Full gate: `bun run check` → exit 0.** `bun test` → **9665 pass / 4 skip / 0
+fail**, 13 snapshots, 78218 assertions, across 702 files (396 s).
+
+The **4 skips are the pre-existing opt-in gates, none mine** (AGENTS §6 says
+"three"; that sentence is stale by one — the docker opt-in exists in two
+packages, which is the extra). Located per package, because "not a failure" has
+to be checked, not assumed:
+
+```
+packages/cli/    -> 1 skip   session-hop.docker.test.ts:248  (TENTACLE_DOCKER_TESTS=1)
+packages/docker/ -> 1 skip   integration.live.test.ts:125    (TENTACLE_DOCKER_TESTS=1)
+packages/k8s/    -> 1 skip   integration.live.test.ts:30     (TENTACLE_K8S_SERVER)
+packages/daemon/ -> 1 skip   ws-server.test.ts:280           (TENTACLE_SLOW_TESTS=1)
+```
+
+`packages/tui` → **2084 pass / 0 skip / 0 fail** across 147 files — every
+App-level behaviour test, including `app-structural-order`,
+`app-structural-identity`, `app-tidy-structure` (the dead-import scan),
+`auto-wake`, `autoaccept-wake`, `use-dock` and `dock-type-through-frames`. So no
+test was skipped by this slice, and the effect-order/freshness/identity pins the
+whole decomposition rests on are untouched and green.
+
+No schema changed, so `packages/protocol/schema/protocol.json` was not
+regenerated (and no `protocol.d/` note is needed: no wire change). One changelog
+fragment: `changelog.d/app-decomp-13-pure-residue.changed.md` — never
+`CHANGELOG.md`, whose `[Unreleased]` stays empty (§10). `TODO.md` untouched.
+
+## Review
+
+### S13 — `feat/app-decomp-13-pure-residue` (fresh-context adversarial review)
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH/MEDIUM finding).
+
+- **Gate (touched scope):** the 5 touched test files: 66 pass / 0 fail / 165 expects; `bun run lint` clean (1344 files); `bun run typecheck` clean (root + mobile + relay). The full `bun test` was NOT re-run by this reviewer (the scope I was given was the touched files plus lint and typecheck).
+- **Equivalence (read against `main`, line by line):** `anchorOffset` guard `total<=prev || (rendered<=0 && !selecting)` → null is the exact negation of the old `total>prev && (scrollOffset>0||selecting)`, and the updater still reads the commit offset (the H3 render/commit split is kept). `pasteTarget` + `readReplyMode().mode==="reply"` matches the old `insertIntoReply` short-circuit (`insertIntoReply` checks the same predicate first, `App.tsx:763`). `exitOutcome`, `jobOutputEntry` (absent fields stay absent) and `tryWake` (the model is always written back, and is unchanged when not due) match the inline code exactly. Effect order is untouched. No protocol, persistence or broker change, so no §7 invariant is touched beyond "logic in pure modules", which this slice advances.
+- **Mutations (each reverted, tree byte-identical, `git status` clean):** each mutation killed the pure-module tests: drop `selecting` (1 fail), anchor on `rendered` instead of the commit offset (1), reply checked only when no panel is open (1), `blocked:false` (2), consume `pending` on a non-wake (3), `truncated: undefined` leak (1), any stop reason = finished (1).
+- **Nit 1 (test strength, existed before this slice):** two App-side WIRING mutations survive both the structure pin AND the whole `packages/tui` suite: `App.tsx:1616` `replyOpen: false` (a bracketed-paste timeout with a reply open would become an attachment), and `App.tsx:856` never applying the anchor updater. `app-residue-structure.test.ts` pins "imported, called, no inline copy", not the arguments. `main` had no frame test for either path either, so coverage did not regress. A frame-level test for each would close the gap.
+- **Nit 2:** the changelog fragment says "no user-visible behaviour changes". §10 says internal work adds no fragment, but the S2–S10 slices set the precedent of adding one, so this is left to the owner.
+- **Attacks tried:** a batched scroll+growth tick (the render/commit split is kept: OK); an empty paste with a reply open (still a no-op: OK); a `readReplyMode` dependency that would leave the timeout callback stale (it is a stable `useCallback` and is added to the deps: OK); a third `jobOutputEntry` call site (pinned at exactly two: OK).
+- **Executor behaviour:** the plan's stale line numbers were corrected and its drift explained honestly (the `anchorOffset` signature). Claims match the code.
+- **Model note:** the executor was DeepSeek and the reviewer is a different model family, so blind spots are less likely to be shared.
+
+*— claude-opus-5-5, 2026-11-14*

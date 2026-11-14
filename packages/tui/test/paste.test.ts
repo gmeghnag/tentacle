@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { stepPaste, stripPasteMarkers } from "../src/paste.ts";
+import { pasteTarget, stepPaste, stripPasteMarkers } from "../src/paste.ts";
 
 describe("bracketed paste", () => {
   test("captures a whole paste in one chunk (ESC + markers stripped)", () => {
@@ -56,5 +56,34 @@ describe("bracketed paste", () => {
     expect(step.text).toBe("0123456789abcdefgh");
     // And the machine is back to idle: ordinary input is no longer consumed.
     expect(stepPaste(step.buffer, "x", maxBuffer).consumed).toBe(false);
+  });
+});
+
+/**
+ * S13 (`feat/app-decomp-13-pure-residue`): where a paste lands when it arrives
+ * with no key to route it (the bracketed-paste timeout, `App.tsx`). The ORDER is
+ * the rule — reply first, then the panel swallows it, then an attachment — so
+ * each case is pinned by value.
+ */
+describe("pasteTarget (the timeout's destination rule)", () => {
+  test("an open reply field takes it, never the hidden main field", () => {
+    expect(pasteTarget({ clean: "hi", replyOpen: true, panelOpen: false })).toBe("reply");
+  });
+
+  test("the reply wins even over an open panel", () => {
+    expect(pasteTarget({ clean: "hi", replyOpen: true, panelOpen: true })).toBe("reply");
+  });
+
+  test("no reply, a panel open: nothing lands (text must not become an attachment behind it)", () => {
+    expect(pasteTarget({ clean: "hi", replyOpen: false, panelOpen: true })).toBeNull();
+  });
+
+  test("no reply, no panel: an attachment on the main input", () => {
+    expect(pasteTarget({ clean: "hi", replyOpen: false, panelOpen: false })).toBe("attach");
+  });
+
+  test("empty text is nothing to place, wherever it would have gone", () => {
+    expect(pasteTarget({ clean: "", replyOpen: false, panelOpen: false })).toBeNull();
+    expect(pasteTarget({ clean: "", replyOpen: true, panelOpen: false })).toBeNull();
   });
 });

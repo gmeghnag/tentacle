@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  anchorOffset,
   anchorOnGrowth,
   applyScroll,
   clampOffset,
@@ -72,5 +73,72 @@ describe("anchorOnGrowth", () => {
   test("does nothing when content shrinks or is unchanged", () => {
     expect(anchorOnGrowth(30, 100, 100, 20)).toBe(30);
     expect(anchorOnGrowth(30, 100, 90, 20)).toBe(30);
+  });
+});
+
+/**
+ * S13 (`feat/app-decomp-13-pure-residue`): the App's rows-changed anchor rule,
+ * out of the effect and into `scroll.ts`. The property is the pair — an updater
+ * ONLY when the reader is anchored (else `null`: the offset is never touched),
+ * and the arithmetic read at COMMIT time, not at render time.
+ */
+describe("anchorOffset (the App's rows-changed rule)", () => {
+  const apply = (updater: ((offset: number) => number) | null, commitOffset: number) =>
+    updater === null ? null : updater(commitOffset);
+
+  test("scrolled up and rows grew: the offset grows by the new rows", () => {
+    // 30 from the bottom of 100, 10 rows appended => 40 from the bottom of 110.
+    const updater = anchorOffset({
+      prevTotal: 100,
+      total: 110,
+      rendered: 30,
+      selecting: false,
+      viewport: 20,
+    });
+    expect(apply(updater, 30)).toBe(40);
+  });
+
+  test("a selection anchors too, even in follow mode (offset 0)", () => {
+    // The content being selected (e.g. during a running turn) must not move.
+    const updater = anchorOffset({
+      prevTotal: 100,
+      total: 110,
+      rendered: 0,
+      selecting: true,
+      viewport: 20,
+    });
+    expect(apply(updater, 0)).toBe(10);
+  });
+
+  test("nothing anchors the reader => null: the App does not touch the offset", () => {
+    expect(
+      anchorOffset({ prevTotal: 100, total: 110, rendered: 0, selecting: false, viewport: 20 }),
+    ).toBeNull();
+  });
+
+  test("rows did not grow (shrunk or unchanged) => null, whatever the offset", () => {
+    expect(
+      anchorOffset({ prevTotal: 100, total: 100, rendered: 30, selecting: true, viewport: 20 }),
+    ).toBeNull();
+    expect(
+      anchorOffset({ prevTotal: 100, total: 90, rendered: 30, selecting: true, viewport: 20 }),
+    ).toBeNull();
+  });
+
+  test("the updater reads the COMMIT offset and clamps to the new total", () => {
+    const updater = anchorOffset({
+      prevTotal: 90,
+      total: 100,
+      rendered: 5,
+      selecting: false,
+      viewport: 8,
+    });
+    // A scroll key batched in the same tick: the guard saw 5, the arithmetic gets 9.
+    expect(apply(updater, 9)).toBe(19);
+    // Clamped: 100 rows, an 8-row viewport => 92 is the maximum offset.
+    expect(apply(updater, 90)).toBe(92);
+    // A commit offset back at the tail in the same tick still grows by the rows
+    // (the guard, not the arithmetic, is what reads `rendered`).
+    expect(apply(updater, 0)).toBe(10);
   });
 });
