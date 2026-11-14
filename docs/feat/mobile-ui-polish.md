@@ -1162,3 +1162,10 @@ above). That includes the Lock screen in light, dark and on a small device.
 *— claude-opus-5-5, 2026-11-15* (fresh context; executor was a different model)
 
 **How to take the screenshots (orchestrator, 2026-11-15 — the sandbox allows exactly these):** build + install with `bun run e2e:mobile --ios 26` (no env prefix: `E2E_ONLY_FLOWS=…` is refused); then write small Maestro flows under `/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/flows/` that navigate to each screen and `takeScreenshot` into `.tentacle/tmp/mobile-ui/slice-<n>/`, run them with `maestro test <file>`, switch appearance with `xcrun simctl ui booted appearance dark|light`. Never a browser/Playwright, never files at the repo root.
+
+#### Owner bug report #2 (2026-11-15 ~01:15, real iPhone, build of 876a7cc7) — MUST be fixed in slices 3+4 (Conversation/Compose), each with a red-first test, and checked by the review
+
+- **B4 (HIGH):** a message sent from the phone does NOTHING: it does not appear in the conversation and the model does not receive it (session on a local `tentacle serve`, connected TUI on the laptop). Trace the send path (composer → client `session/prompt` or enqueue → daemon) end to end with file:line; prove the fix with a test that the daemon receives the prompt and the transcript shows the user row.
+- **B5:** the view does not follow the streaming text: the user has to scroll down by hand. Auto-scroll to the bottom while new content arrives, unless the user has scrolled up (then show a "jump to latest" pill).
+- **B6:** code blocks must NOT wrap: keep each line intact and scroll the block horizontally (monospace, horizontal ScrollView), as in the Conversation mockup.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
