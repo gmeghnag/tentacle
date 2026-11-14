@@ -559,6 +559,20 @@ fail; for `returnKeyAction`, map `stop` to press and see the test fail.
    visible buttons. *Recommendation:* yes, long-press + action sheet, with a
    confirmation alert for Remove; the tests are updated to open the menu first.
 
+#### Owner decisions (2026-11-14)
+
+1. Return **sends** (key labelled Send; queues while a turn runs; never stops a turn) — as recommended.
+2. Sessions: **search now**; "New session" and the "…" menu are a separate task — as recommended.
+3. **NOT as recommended: the permission sheet gets the "Auto-accept" switch and the "Also asked on <computer>" note NOW.** Wire the switch to the session's EXISTING shared auto-accept (the same flag the TUIs share and Shift+Tab flips; find its protocol method and cite it), visible state on every client; laptop-side gating unchanged (AGENTS §7: a phone toggle sets the policy the laptop enforces, never a lasting approval). If a protocol/daemon change is needed, name it and keep it minimal; a `protocol.d/` note if breaking.
+4. **SF Symbols + haptics + copy-on-code AND real iOS blur** (`expo-blur` for the glass buttons/bars/sheets, with the mockups' translucent colours as the fallback where blur is off, e.g. Reduce Transparency).
+5. Computers: long-press + iOS action sheet ("…" button too); Remove asks for confirmation — as recommended.
+
+> Owner quality bar (2026-11-14 22:45), binding for plan, execution and review of feat/mobile-ui-polish:
+> "Oltre a quei bugs rivedi bene tutto. Deve essere un'app fruibile e bella esteticamente fin da subito. Così sembra una bozza minimale fatta da copia-incolla su StackOverflow."
+> => Production quality on EVERY screen, not a minimal pass: native iOS feel (large titles, grouped insets, glass round buttons, sheets, swipe-back, haptics, smooth keyboard), the approved mockups as the floor, light+dark, empty/loading/error/offline states designed, no default RN look, no placeholder text, consistent spacing/typography from one token module. Each slice ends with simulator screenshots (light+dark) side by side with the mockup, and a fresh-context VISUAL review (Fable) that rejects anything that still looks like a draft.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-14*
+
 ## Execution
 
 *— (pending)*
