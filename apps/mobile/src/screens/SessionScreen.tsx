@@ -14,10 +14,11 @@
  * `composer-input`, `composer-send`, `composer-stop`, `banner-<kind>`,
  * `perm-sheet`, `perm-<optionId>`, `perm-reply-input`, `reopen`.
  */
-import { type JSX, useCallback, useEffect, useRef, useState } from "react";
+import { type ComponentRef, type JSX, useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   Linking,
   Platform,
@@ -27,6 +28,8 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { composerBottomPadding } from "../composer-layout.ts";
 import { linkPrompt } from "../links.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
 import type { Palette } from "../theme.ts";
@@ -86,6 +89,30 @@ export function SessionScreen({ palette, controller }: SessionScreenProps): JSX.
     },
   ).current;
 
+  // B1(b): `KeyboardAvoidingView` measures its frame relative to its PARENT, so
+  // under the native header it under-pads by the screen's distance from the
+  // window top. That distance is its `keyboardVerticalOffset`, measured here
+  // (it is 0 once the screen starts at the window top).
+  const frame = useRef<ComponentRef<typeof View>>(null);
+  const [offsetTop, setOffsetTop] = useState(0);
+  const measureTop = useCallback(() => {
+    frame.current?.measureInWindow((_x, y) => setOffsetTop(y));
+  }, []);
+  // B1(a): clear the home indicator when the keyboard is closed.
+  const insets = useSafeAreaInsets();
+  const [keyboard, setKeyboard] = useState(false);
+  useEffect(() => {
+    const show = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hide = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const shown = Keyboard.addListener(show, () => setKeyboard(true));
+    const hidden = Keyboard.addListener(hide, () => setKeyboard(false));
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, []);
+  const bottomPadding = composerBottomPadding({ insetBottom: insets.bottom, keyboard });
+
   const banner = state.view.banner;
   const rows = state.view.rows;
   const compose = state.compose;
@@ -94,185 +121,202 @@ export function SessionScreen({ palette, controller }: SessionScreenProps): JSX.
   const decision =
     deciding === null ? null : (compose.outbox.find((r) => r.itemId === deciding) ?? null);
   return (
-    <KeyboardAvoidingView
-      testID="session-view"
-      style={[styles.screen, { backgroundColor: palette.groupedBackground }]}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
-      {banner === null ? null : (
-        <View
-          testID={`banner-${banner.kind}`}
-          style={[styles.banner, { backgroundColor: palette.card }]}
-        >
-          <Text style={[styles.bannerText, { color: palette.secondaryLabel }]}>{banner.text}</Text>
-          {state.view.retry ? (
-            <Pressable
-              testID="banner-retry"
-              accessibilityRole="button"
-              onPress={() => controller.retry()}
-            >
-              <Text style={[styles.bannerAction, { color: palette.accent }]}>Retry</Text>
-            </Pressable>
-          ) : null}
-          {state.view.reopen ? (
-            <Pressable
-              testID="reopen"
-              accessibilityRole="button"
-              onPress={() => controller.reopen()}
-            >
-              <Text style={[styles.bannerAction, { color: palette.accent }]}>Reopen</Text>
-            </Pressable>
-          ) : null}
-        </View>
-      )}
-      <FlatList
-        testID="transcript"
-        data={rows}
-        keyExtractor={(row: Row) => row.key}
-        renderItem={({ item }) => (
-          <TranscriptRow
-            row={item}
-            palette={palette}
-            onLink={onLink}
-            thumbnails={state.thumbnails}
-          />
+    <View ref={frame} style={styles.screen} onLayout={measureTop}>
+      <KeyboardAvoidingView
+        testID="session-view"
+        style={[styles.screen, { backgroundColor: palette.groupedBackground }]}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={offsetTop}
+      >
+        {banner === null ? null : (
+          <View
+            testID={`banner-${banner.kind}`}
+            style={[styles.banner, { backgroundColor: palette.card }]}
+          >
+            <Text style={[styles.bannerText, { color: palette.secondaryLabel }]}>
+              {banner.text}
+            </Text>
+            {state.view.retry ? (
+              <Pressable
+                testID="banner-retry"
+                accessibilityRole="button"
+                onPress={() => controller.retry()}
+              >
+                <Text style={[styles.bannerAction, { color: palette.accent }]}>Retry</Text>
+              </Pressable>
+            ) : null}
+            {state.view.reopen ? (
+              <Pressable
+                testID="reopen"
+                accessibilityRole="button"
+                onPress={() => controller.reopen()}
+              >
+                <Text style={[styles.bannerAction, { color: palette.accent }]}>Reopen</Text>
+              </Pressable>
+            ) : null}
+          </View>
         )}
-        onViewableItemsChanged={onViewable}
-        viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
-        contentContainerStyle={styles.list}
-        ListEmptyComponent={
-          <Text testID="transcript-empty" style={[styles.empty, { color: palette.secondaryLabel }]}>
-            {state.status.phase === "open" ? "Nothing here yet — say something below." : ""}
-          </Text>
-        }
-      />
-      {/* ONE element, two ids: `turn-running` while a turn streams (own or
+        <FlatList
+          testID="transcript"
+          data={rows}
+          keyExtractor={(row: Row) => row.key}
+          renderItem={({ item }) => (
+            <TranscriptRow
+              row={item}
+              palette={palette}
+              onLink={onLink}
+              thumbnails={state.thumbnails}
+            />
+          )}
+          onViewableItemsChanged={onViewable}
+          viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
+          contentContainerStyle={styles.list}
+          ListEmptyComponent={
+            <Text
+              testID="transcript-empty"
+              style={[styles.empty, { color: palette.secondaryLabel }]}
+            >
+              {state.status.phase === "open" ? "Nothing here yet — say something below." : ""}
+            </Text>
+          }
+        />
+        {/* ONE element, two ids: `turn-running` while a turn streams (own or
           another device's) and `turn-idle` otherwise. It is always on screen —
           `display: none` would make it invisible to XCUITest and the flows could
           not use the flip as an observable (plan P9). */}
-      <Text
-        testID={state.view.composer.running ? "turn-running" : "turn-idle"}
-        style={[styles.indicator, { color: palette.running }]}
-      >
-        {state.view.composer.running ? "working…" : " "}
-      </Text>
-      {state.notice === null ? null : (
-        <Text testID="composer-notice" style={[styles.notice, { color: palette.danger }]}>
-          {state.notice}
-        </Text>
-      )}
-      {/* 13d: the notices the compose half owns (each with its own testID), then
-          the queue rows, another device's returned rows, the outbox's rows and
-          the chips — all values, no decisions (AGENTS §7). */}
-      {state.view.notices.map((notice) => (
-        <NoticeRow key={notice.testId} notice={notice} palette={palette} />
-      ))}
-      <QueueRows
-        view={{ queued: compose.queued, returnedOthers: compose.returnedOthers }}
-        palette={palette}
-        onTake={(id) => void controller.take(id)}
-      />{" "}
-      <OutboxRows rows={compose.outbox} palette={palette} onDecide={setDeciding} />
-      <Chips
-        chips={compose.chips}
-        palette={palette}
-        onRemove={(key) => void controller.removeChip(key)}
-      />
-      <View
-        style={[
-          styles.composer,
-          { backgroundColor: palette.card, borderTopColor: palette.separator },
-        ]}
-      >
-        <Pressable
-          testID="composer-photo"
-          accessibilityRole="button"
-          accessibilityLabel="Add a photo"
-          onPress={() =>
-            Alert.alert("Add a photo", undefined, [
-              { text: "Cancel", style: "cancel" },
-              { text: "Library", onPress: () => void controller.pickPhoto("library") },
-              { text: "Camera", onPress: () => void controller.pickPhoto("camera") },
-            ])
-          }
-          style={styles.sideButton}
+        <Text
+          testID={state.view.composer.running ? "turn-running" : "turn-idle"}
+          style={[styles.indicator, { color: palette.running }]}
         >
-          <Text style={[styles.sideLabel, { color: palette.accent }]}>＋</Text>
-        </Pressable>
-        <TextInput
-          testID="composer-input"
-          style={[styles.input, { color: palette.label }]}
-          value={state.draft}
-          onChangeText={(text) => controller.setDraft(text)}
-          placeholder={state.view.editable ? "Message tentacle" : "This session has ended"}
-          placeholderTextColor={palette.secondaryLabel}
-          editable={state.view.editable}
-          multiline
-        />
-        {/* Maestro cannot read the field's text (P9): this is how a flow proves
-            the field is NOT empty (a hand-back, a Take, an Edit). */}
-        {state.draft === "" ? null : (
-          <Text testID="composer-filled" style={styles.hidden}>
-            {""}
+          {state.view.composer.running ? "working…" : " "}
+        </Text>
+        {state.notice === null ? null : (
+          <Text testID="composer-notice" style={[styles.notice, { color: palette.danger }]}>
+            {state.notice}
           </Text>
         )}
-        {compose.sendNow ? (
-          <Pressable
-            testID="composer-send-now"
-            accessibilityRole="button"
-            onPress={() => void controller.sendNow()}
-            style={styles.sideButton}
-          >
-            <Text style={[styles.sideLabel, { color: palette.accent }]}>⇥</Text>
-          </Pressable>
-        ) : null}
-        <Pressable
-          testID={
-            state.view.composer.button === "stop"
-              ? "composer-stop"
-              : state.view.composer.button === "send-later"
-                ? "composer-send-later"
-                : "composer-send"
-          }
-          accessibilityRole="button"
-          disabled={state.view.composer.button === "disabled"}
-          onPress={() => controller.press()}
+        {/* 13d: the notices the compose half owns (each with its own testID), then
+          the queue rows, another device's returned rows, the outbox's rows and
+          the chips — all values, no decisions (AGENTS §7). */}
+        {state.view.notices.map((notice) => (
+          <NoticeRow key={notice.testId} notice={notice} palette={palette} />
+        ))}
+        <QueueRows
+          view={{ queued: compose.queued, returnedOthers: compose.returnedOthers }}
+          palette={palette}
+          onTake={(id) => void controller.take(id)}
+        />
+        <OutboxRows rows={compose.outbox} palette={palette} onDecide={setDeciding} />
+        <Chips
+          chips={compose.chips}
+          palette={palette}
+          onRemove={(key) => void controller.removeChip(key)}
+        />
+        <View
           style={[
-            styles.button,
-            { backgroundColor: palette.accent },
-            state.view.composer.button === "disabled" ? styles.dimmed : undefined,
+            styles.composer,
+            {
+              backgroundColor: palette.card,
+              borderTopColor: palette.separator,
+              paddingBottom: bottomPadding,
+            },
           ]}
         >
-          <Text style={[styles.buttonLabel, { color: palette.onAccent }]}>
-            {state.view.composer.button === "stop"
-              ? "■"
-              : state.view.composer.button === "queue"
-                ? "↳"
-                : "↑"}
+          <Pressable
+            testID="composer-photo"
+            accessibilityRole="button"
+            accessibilityLabel="Add a photo"
+            onPress={() =>
+              Alert.alert("Add a photo", undefined, [
+                { text: "Cancel", style: "cancel" },
+                { text: "Library", onPress: () => void controller.pickPhoto("library") },
+                { text: "Camera", onPress: () => void controller.pickPhoto("camera") },
+              ])
+            }
+            style={styles.sideButton}
+          >
+            <Text style={[styles.sideLabel, { color: palette.accent }]}>＋</Text>
+          </Pressable>
+          <TextInput
+            testID="composer-input"
+            style={[styles.input, { color: palette.label }]}
+            value={state.draft}
+            onChangeText={(text) => controller.setDraft(text)}
+            placeholder={state.view.editable ? "Message tentacle" : "This session has ended"}
+            placeholderTextColor={palette.secondaryLabel}
+            editable={state.view.editable}
+            multiline
+            // B2 (owner Q1): Return SENDS — the key reads "Send"; a newline only by
+            // pasting. What it does is `returnKeyAction`'s (never a Stop).
+            submitBehavior="submit"
+            returnKeyType="send"
+            onSubmitEditing={() => controller.pressReturn()}
+          />
+          {/* Maestro cannot read the field's text (P9): this is how a flow proves
+            the field is NOT empty (a hand-back, a Take, an Edit). */}
+          {state.draft === "" ? null : (
+            <Text testID="composer-filled" style={styles.hidden}>
+              {""}
+            </Text>
+          )}
+          {compose.sendNow ? (
+            <Pressable
+              testID="composer-send-now"
+              accessibilityRole="button"
+              onPress={() => void controller.sendNow()}
+              style={styles.sideButton}
+            >
+              <Text style={[styles.sideLabel, { color: palette.accent }]}>⇥</Text>
+            </Pressable>
+          ) : null}
+          <Pressable
+            testID={
+              state.view.composer.button === "stop"
+                ? "composer-stop"
+                : state.view.composer.button === "send-later"
+                  ? "composer-send-later"
+                  : "composer-send"
+            }
+            accessibilityRole="button"
+            disabled={state.view.composer.button === "disabled"}
+            onPress={() => controller.press()}
+            style={[
+              styles.button,
+              { backgroundColor: palette.accent },
+              state.view.composer.button === "disabled" ? styles.dimmed : undefined,
+            ]}
+          >
+            <Text style={[styles.buttonLabel, { color: palette.onAccent }]}>
+              {state.view.composer.button === "stop"
+                ? "■"
+                : state.view.composer.button === "queue"
+                  ? "↳"
+                  : "↑"}
+            </Text>
+          </Pressable>
+        </View>
+        {state.view.composer.photosNotice === null ? null : (
+          <Text
+            testID="composer-photos-notice"
+            style={[styles.notice, { color: palette.secondaryLabel }]}
+          >
+            {state.view.composer.photosNotice}
           </Text>
-        </Pressable>
-      </View>
-      {state.view.composer.photosNotice === null ? null : (
-        <Text
-          testID="composer-photos-notice"
-          style={[styles.notice, { color: palette.secondaryLabel }]}
-        >
-          {state.view.composer.photosNotice}
-        </Text>
-      )}
-      <PermissionSheetView sheet={sheet} state={state.sheet} palette={palette} />
-      <OutboxDecisionSheet
-        item={decision === null ? null : { text: decision.text }}
-        palette={palette}
-        why="something changed since you wrote this — your message is still here"
-        steerable={state.view.composer.running}
-        onSend={() => void controller.outbox("send", deciding ?? "")}
-        onSteer={() => void controller.outbox("steer", deciding ?? "")}
-        onDiscard={() => void controller.outbox("discard", deciding ?? "")}
-        onEdit={() => void controller.outbox("edit", deciding ?? "")}
-        onClose={() => setDeciding(null)}
-      />
-    </KeyboardAvoidingView>
+        )}
+        <PermissionSheetView sheet={sheet} state={state.sheet} palette={palette} />
+        <OutboxDecisionSheet
+          item={decision === null ? null : { text: decision.text }}
+          palette={palette}
+          why="something changed since you wrote this — your message is still here"
+          steerable={state.view.composer.running}
+          onSend={() => void controller.outbox("send", deciding ?? "")}
+          onSteer={() => void controller.outbox("steer", deciding ?? "")}
+          onDiscard={() => void controller.outbox("discard", deciding ?? "")}
+          onEdit={() => void controller.outbox("edit", deciding ?? "")}
+          onClose={() => setDeciding(null)}
+        />
+      </KeyboardAvoidingView>
+    </View>
   );
 }
 

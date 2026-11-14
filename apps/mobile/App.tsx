@@ -37,6 +37,7 @@ import {
   View,
   useColorScheme,
 } from "react-native";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import {
   type AppLock,
   type AppLockEvent,
@@ -908,7 +909,19 @@ function SessionRoute({
   return <SessionScreen palette={palette} controller={controller} />;
 }
 
+/**
+ * The root: the safe-area insets for every screen (B1 — without a provider the
+ * composer sat inside the home-indicator area), around the shell.
+ */
 export default function App(): JSX.Element {
+  return (
+    <SafeAreaProvider>
+      <AppShell />
+    </SafeAreaProvider>
+  );
+}
+
+function AppShell(): JSX.Element {
   const palette = paletteFor(useColorScheme());
   const [computers, setComputers] = useState<readonly ComputerEntry[] | null>(null);
   const [storeError, setStoreError] = useState<string | undefined>(undefined);
@@ -1306,7 +1319,12 @@ export default function App(): JSX.Element {
               />
             )}
           </Stack.Screen>
-          <Stack.Screen name="Session" options={({ route }) => ({ title: route.params.title })}>
+          {/* A compact bar on the chat (B1c): the inherited large title made the
+              header ~96 pt, wasting chat space and enlarging the keyboard offset. */}
+          <Stack.Screen
+            name="Session"
+            options={({ route }) => ({ title: route.params.title, headerLargeTitle: false })}
+          >
             {({ route }) => (
               <SessionRoute
                 palette={palette}
