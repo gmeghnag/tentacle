@@ -5846,3 +5846,157 @@ Unmutated: hop-ready + use-hop + app-hop-structure + session-hop → 39 pass /
 fixes applied`. No regressions: the diff touches only the test file and this doc,
 and the existing freshness tests keep their defaults (`running: true`, empty
 queue).
+
+## Execution
+
+### S12 — `feat/app-decomp-12-line-keys` (the line-editing tail leaves `App.tsx`)
+
+*— claude-opus-5-5, 2026-11-14 (executor, `feat/app-decomp-12-line-keys`, cut
+from `main` @ `f5a5c76c`)*
+
+Scope is the follow-up table's row 2 and nothing else: the line-editing tail +
+`historyStep` + the `downEntersList` dispatch + the chip-Backspace rule → a pure
+`keys/line-layer.ts` run through `executeEffects`; `paletteStep` with an
+`n === 0` case. S11/S13/S14 were not touched.
+
+**Load-bearing check, re-run first (HOLDS).** The row is load-bearing on "the
+ONE `useInput` precedence": line editing must stay the terminal consumer, run
+only after the 13 pure layers' effects were applied and the mouse layer passed.
+On this branch before any edit: `App.tsx` has exactly one `useInput(` (`:1616`;
+the only other one in `src/` is `components/SessionPicker.tsx:85`, the pre-TUI
+picker, never mounted with `App`); inside it the order is `routeKey` →
+`executeEffects(routed.effects, keyHost)` → `if (routed.verdict === "consumed")
+return` → `mouse.handleChunk` → `if (mouseStep === "consumed") return` → the
+inline tail (`:1695-1835`). The mouse layer applies its own restored-`[` carry
+(`useMouse.ts:266-268`), so the tail needs no carry. Baseline of the key net:
+`app-keys-precedence`, `line-input`, `keys-app-seam`, `dock-type-through-frames`,
+`keys-execute`, `keys-route` → 84 pass / 0 fail.
+
+**Implementation, in dependency order.**
+
+1. **Red first.** `test/palette-step.test.ts` (5 tests) and
+   `test/app-line-keys-structure.test.ts` (4 tests) written against the
+   untouched tree, with `paletteStep` first added to `commands.ts` as the
+   inline formula *verbatim*, so the red is on an assertion, not an import:
+   `4 fail / 5 pass` — `paletteStep(0, 0, 1)` → `Expected 0, Received NaN`;
+   structure: "no line-editing decision is left inline" (5 inline needles
+   found), the route → execute → mouse → line order (no `resolveLineEffects(`),
+   and "the palette wrap is `paletteStep`'s" (`% n` still in App).
+2. **`commands.ts` `paletteStep(i, n, dir)`** — `n <= 0` → 0; else clamp
+   `min(i, n - 1)` then `(at + dir + n) % n`, the same values as the inline
+   formula for every `n > 0` (both branches, including a negative `i`).
+3. **`keys/effects.ts`** — 13 new `KeyEffect` kinds, data only:
+   `fieldInsert`, `fieldDeleteBack`, `fieldDeleteWord`, `fieldMoveCursor`,
+   `fieldMoveWord`, `fieldMoveLine`, `fieldMoveVertical`, `setHistoryCursor`,
+   `dockDown`, `scroll`, `pasteClipboard`, `submit`, `removeLastChip`.
+4. **`keys/execute.ts`** — 13 `KeyHost` fields + 13 one-call `case`s; no
+   branching added.
+5. **`keys/line-layer.ts` (new, pure)** — `LineSnapshot`, `historyStep(history,
+   dir, value)` (`recall` + the no-op guard: `set: null` iff the text AND the
+   index are unchanged), and `resolveLineEffects(snap)`: `resolveLineInput` →
+   DOWN's dock walk (`downEntersList`, the inline condition verbatim) →
+   the 14-arm switch, each arm returning its effects; `newline` is
+   `[fieldDeleteBack, fieldInsert "\n"]` in that order; `history` is
+   `[setHistoryCursor, fieldSet?]` (refs first, field only when due, as
+   inline); the chip rule returns `[removeLastChip]` alone.
+6. **`App.tsx`** — the inline tail (historyStep closure, the dock check, the
+   switch; `:1695-1835`) replaced by ONE
+   `executeEffects(resolveLineEffects({...}), keyHost)` at the same place,
+   after the mouse guard. The snapshot reads exactly the sources the inline
+   tail read, at the same moment: `field.value`/`field.cursor` are the render
+   values (so a `[` the mouse layer just restored is still not in them, as
+   before), `historyRef`/`histIndexRef`/`draftRef`/`dockRef.current.focus`/
+   `attachRef.current.chips.length`/`dockVisible()` are read live. The port
+   gains 13 fields, each the ONE call the inline arm made:
+   `dockDown` keeps the functional `setDock((prev) => downToDock(prev,
+   dockIds()))` (not a decided state: the updater still reads the dock it
+   lands on), `scroll` keeps `setScrollOffset((o) => applyScroll(o, dir,
+   total, viewport))`, `pasteClipboard` is the inline async block moved
+   verbatim (I/O stays in App), `moveCommandSel` is now
+   `setCommandIndex((i) => paletteStep(i, paletteCommands.length, step))`.
+   Imports: `downEntersList`, `recall`, `resolveLineInput` dropped (now
+   `line-layer.ts`'s); `paletteStep`, `resolveLineEffects` added.
+   `App.tsx` 1,850 → 1,793 lines (`+61 / −118`).
+7. **`test/keys-execute.test.ts`** — the spy host and the wiring table gain the
+   13 kinds (each effect → its host method with its arguments, in order).
+8. **`test/keys-line-layer.test.ts` (new, 27 tests)** — every action → its
+   effects; the chip rule's four cases (chips + empty + cursor 0; no chip; text
+   in the field; text after a cursor at 0); `historyStep`'s no-op guard both
+   ways (empty history, oldest entry → `set: null`; same text but a MOVED index
+   → still sets); the effect order; DOWN's walk: draft slot + visible + input
+   focus → `[dockDown]` only; pinned list+typing; Shift; no dock; inside
+   history; multi-line buffer; palette open; pill already focused.
+
+**Drift from the plan, and why.**
+1. **The line tail is not a 15th entry in `PURE_LAYERS`**, it is the plan's
+   other named shape, a `resolveLineEffects` run through `executeEffects`. A
+   `KeyLayer` returns a verdict and is walked by `routeKey` BEFORE the mouse
+   layer; the line tail must run AFTER it (the mouse is the router's stateful
+   continuation, `layers.ts:8-17`), and it never passes — so making it a layer
+   would either move it before the mouse (a precedence change) or need a second
+   walk. `LAYER_ORDER`/`KeyLayerName` are unchanged.
+2. **`permissionStop` and `cancelUpload`** (named in the review's MEDIUM 2 as
+   decisions inside the port) were NOT moved: the slice's scope is the table
+   row, which does not list them. Both are still in the `keyHost` literal.
+3. **`app-turn-driver-structure.test.ts:216`** (S9a's pin) asserted the inline
+   spelling `submit(field.value);`. Its property — "the key host still calls
+   the hook's `submit` by that name" — holds; the call is now the port's
+   `submit: (text) => submit(text),` fed by the snapshot's `value: field.value,`.
+   The assertion was re-spelled to those two strings (a wording change on a
+   pin whose subject moved, not a weaker matcher: dropping either still fails
+   it). It was the only failure the full suite showed after step 6.
+4. **The changelog fragment** (`changelog.d/app-decomp-12-line-keys.changed.md`)
+   was written because the task prompt asks for one and every sibling slice
+   has one; it ends "No user-visible behaviour changes." (AGENTS §10 says
+   internal work adds none — the S14 review flagged that; the orchestrator
+   decides whether to keep it.)
+5. **AGENTS.md §7 not edited.** Its "(… the `App.tsx` key handler is known debt
+   to extract.)" is now stale; editing the rules file is outside this slice's
+   file set, so it is left for the orchestrator (one parenthetical).
+
+**Mutation checks (non-vacuity, AGENTS §9).** Each applied to the tracked
+(or new) source, the named tests run, then reverted by the inverse edit; after
+all ten, `git diff --stat` was identical to the pre-mutation one and a grep for
+every mutated spelling came back empty.
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | chip rule `chipCount > 0` → `>= 0` | KILLED — `keys-line-layer` "with no chip it is a plain Backspace" |
+| M2 | chip rule drops `value === ""` | KILLED — "text after a cursor at 0 still protects the chips" |
+| M3 | chip rule drops `cursor === 0` | SURVIVES — **equivalent**: `value === ""` forces `cursor === 0` (the cursor never exceeds the length); kept for parity with the inline rule |
+| M4 | no-op guard `&&` → `||` | KILLED — "a recall whose text equals the field but MOVES the index still sets it" |
+| M5 | no-op guard removed (always set) | KILLED — 6 tests (`historyStep` ×3, DOWN's walk ×3) |
+| M6 | DOWN's walk drops `!key.shift` | SURVIVES — **equivalent**: Shift+DOWN always resolves to `moveVertical`, and `downEntersList` accepts only `history`; the guard is inherited verbatim and redundant with its callee |
+| M7 | `paletteStep` `n <= 0` → `n < 0` | KILLED — `palette-step` "an empty list never yields NaN" |
+| M8 | App: the line tail runs even when the mouse consumed (`&& Math.random() > 2` on the guard) | KILLED — 8 App behaviour tests (`app.test.tsx` mouse-leak ×4, `/mcp` panel ×2, tool-expand click, S0 half-report) + the structural pin |
+| M9 | App port: `removeLastChip` a no-op | KILLED — `attach-app` "Backspace on an empty input removes the last chip" |
+| M10 | App port: `setHistoryCursor` drops the draft write | KILLED — `app.test.tsx` "Down past the newest entry restores the live draft" |
+
+So each decision the slice moved has a pure pin that dies on it, the two
+App-port wirings that carry state have an App-level pin, and the precedence
+property (line tail only after a mouse pass) is pinned twice — by behaviour and
+by structure. The two survivors are equivalent mutants, explained.
+
+**Gate, on the final tree (after the last edit).**
+
+```
+$ bun run typecheck   (tsc --noEmit; -p apps/mobile; -p apps/relay) → OK
+$ bun run lint        (biome check .)  → Checked 1362 files … No fixes applied
+$ bun test                             → 9843 pass / 4 skip / 0 fail
+                                         9847 tests across 714 files (414 s)
+```
+
+The 4 skips are all opt-in: the three AGENTS §6 names, plus
+`packages/cli/test/session-hop.docker.test.ts` (`skipIf(!ENABLED)`, the same
+`TENTACLE_DOCKER_TESTS=1` opt-in), which session-hop added on `main`. None is
+from this slice. No schema changed: nothing under `packages/protocol` is in the
+diff, so `protocol.json` was not regenerated and no `protocol.d/` note is due.
+`TODO.md` and `CHANGELOG.md` are untouched.
+
+**DONE.** Everything in the row is in: the line tail, `historyStep`, the
+`downEntersList` dispatch and the chip-Backspace rule are in the pure
+`keys/line-layer.ts`, which runs through `executeEffects`/`KeyHost`.
+`paletteStep` has its `n === 0` case. The ONE `useInput` precedence is
+unchanged and pinned. Left for the orchestrator: `permissionStop`/`cancelUpload`
+(outside the row), the stale parenthetical in AGENTS §7, and keep or drop
+the fragment.
