@@ -47,14 +47,17 @@ export interface PermissionChoice {
 /**
  * Whether auto-accept (Shift+Tab) may answer `req`. Never a project-hooks
  * trust request (docs/feat/hooks-project-trust.md): trusting a repo's code is
- * a human decision, not a tool call to wave through. Never a request of a
+ * a human decision, not a tool call to wave through. Never a session-hop
+ * request either (docs/feat/session-hop.md D9/H2): a move is the owner's
+ * decision, and its whole point is that no standing approval carries across it.
+ * Never a request of a
  * turn that is not `own` — another device's turn (owner Q3,
  * docs/feat/tui-foreign-turns.md C5), or, on a trusted `serve` daemon, one of
  * the session's own wake turns, which `autoAcceptsTurn` accepts
  * (docs/fix/autoaccept-wake-turns.md).
  */
 export function autoApproves(req: PermissionRequest, own = true): boolean {
-  return own && req.kind !== "hooks_trust";
+  return own && req.kind !== "hooks_trust" && req.kind !== "session_hop";
 }
 
 /**
@@ -103,9 +106,9 @@ export function autoAcceptTest(
   return undefined;
 }
 
-/** Whether the dialog shows the cwd row (`permissionCwdLine`): tool calls only, not a trust request. */
+/** Whether the dialog shows the cwd row (`permissionCwdLine`): tool calls only, not a trust or a hop request. */
 export function permissionShowsCwd(req: PermissionRequest): boolean {
-  return req.kind !== "hooks_trust";
+  return req.kind !== "hooks_trust" && req.kind !== "session_hop";
 }
 
 /**
@@ -141,12 +144,13 @@ export function permissionAgentLine(agent: PermissionAgent, columns: number): st
 export const MAX_DETAIL_ROWS = 10;
 
 /**
- * The dialog's detail rows: one for a tool (its subject, or "—"); for a hooks
- * trust request, each line of `detail`, capped at `MAX_DETAIL_ROWS` (the last
- * row then says how many were left out). The component truncates each row.
+ * The dialog's detail rows: one for a tool (its subject, or "—"); the asker's
+ * own lines for a hooks trust or a session-hop request (each a laptop-written
+ * fact, or an already-sanitized one), capped at `MAX_DETAIL_ROWS` (the last row
+ * then says how many were left out). The component truncates each row.
  */
 export function permissionDetailLines(req: PermissionRequest): string[] {
-  if (req.kind !== "hooks_trust") {
+  if (req.kind === undefined || req.kind === "tool") {
     return [req.detail ? req.detail : "—"];
   }
   const lines = (req.detail ?? "—").split("\n");
@@ -174,10 +178,33 @@ function hooksTrustChoices(req: PermissionRequest): PermissionChoice[] {
       ];
 }
 
+/** The session-hop menu (D9): yes ONCE, or no — never a standing approval. */
+function hopChoices(req: PermissionRequest): PermissionChoice[] {
+  // A refusal may carry the owner's own words (D9's `[move declined]` line is
+  // the laptop's, but a typed reply is the model's to read). Offered only when
+  // the asker takes one (`req.reply`), exactly as a tool refusal does.
+  return [
+    { label: "Yes, move it", response: { allowed: true, scope: "once" } },
+    { label: "No", response: { allowed: false } },
+    ...(req.reply
+      ? [
+          {
+            label: "No, let's talk about it",
+            response: { allowed: false },
+            reply: true as const,
+          },
+        ]
+      : []),
+  ];
+}
+
 /** The arrow-menu options for a request: once / always (scoped) / deny. */
 export function buildPermissionChoices(req: PermissionRequest): PermissionChoice[] {
   if (req.kind === "hooks_trust") {
     return hooksTrustChoices(req);
+  }
+  if (req.kind === "session_hop") {
+    return hopChoices(req);
   }
   const always = req.suggestion
     ? `Yes, and don't ask again for \`${req.suggestion.prefix}\` commands`

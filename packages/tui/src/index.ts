@@ -24,24 +24,33 @@ export {
   HOP_ATTACH_USAGE,
   HOP_ENGINES,
   HOP_NAME_USAGE,
+  HOP_QUEUED_NOTICE,
   HOP_USAGE,
   HOP_WORKLOAD_PART_MAX,
   type HopEngine,
   type HopParse,
   type HopSpec,
+  type HopStep,
   type HopWorkload,
   type HopWorkloadCheck,
   type HopWorkloadProblem,
+  hopStep,
   hopWorkload,
   parseHopCommand,
 } from "./hop-command.ts";
+export { hopStatusRow } from "./hop-status.ts";
 export { App, type AutoAcceptFeed } from "./App.tsx";
 export type {
   AppProps,
+  HopFeed,
+  HopPlaceView,
+  HopRun,
+  HopTargetView,
   NoticeFeed,
   RunQuit,
   SessionController,
   SessionDirectory,
+  TargetFeed,
 } from "./app-types.ts";
 export { autoAcceptTest, autoApproves, ownRequest } from "./permission-ui.ts";
 export type { SessionsEntry, SessionsView } from "./sessions-panel.ts";

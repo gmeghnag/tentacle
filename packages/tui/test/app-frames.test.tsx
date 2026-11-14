@@ -241,7 +241,7 @@ describe("S0 frame set", () => {
         /sessions  list this daemon's sessions and switch
         /close     end this session and quit
         /model     show the active model
-        /retry     re-send the last prompt
+        /move      move this session to a container, or back to local
       … m ─
       ❯ /
       …

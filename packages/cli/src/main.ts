@@ -89,7 +89,12 @@ import {
 } from "./flags.ts";
 import { readHiddenLine } from "./hidden-input.ts";
 import { fileTrustStore, hooksTrustCommand, projectHooksWireProblem } from "./hooks-trust.ts";
+import { createHopFeed } from "./hop-feed.ts";
+import type { HopPlace } from "./hop-plan.ts";
+import { createHopRuntime } from "./hop-runtime.ts";
+import { type HopEngineHost, createHopTargets } from "./hop-targets.ts";
 import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
+import { type KeptRemoval, removalFate, removeVerifiedKept } from "./kept-cmd.ts";
 import {
   forgetKept,
   keptDir,
@@ -1109,6 +1114,45 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // THIS folder's sessions). `{ exit }` = don't start (reason written). The
   // picker (docs/feat/resume-picker.md) runs only on a terminal, before any
   // runtime or pod starts, so the chosen session seeds it like `--resume <uid>`.
+  /**
+   * The engine host a hop builds its target on: the ONE builder `run` uses
+   * (`buildEngineHost`, no flag overrides — a hop has no `--engine`), with the
+   * locators its kept entry records (D5).
+   */
+  const hopEngineHost = (engine: EngineKind): HopEngineHost => {
+    const built = buildEngineHost(engine, {});
+    return {
+      host: built.host,
+      ...(built.endpoint === undefined ? {} : { endpoint: built.endpoint }),
+      locators: keptLocation(engine, built, { context: undefined, insecureTcp: false }),
+    };
+  };
+
+  /**
+   * D5: what a hop does with the workload it LEAVES. Only an entry THIS laptop
+   * recorded is deleted, and only through the verified delete; a user-owned
+   * (`attach`ed) workload is not in the index, so it is left alone silently.
+   */
+  const hopLeave = async (place: HopPlace, keep: boolean): Promise<string | null> => {
+    if (place.kind === "local" || keep) {
+      return null;
+    }
+    const dir = keptDir(config.configDir);
+    const found = readKept(dir).entries.find(
+      (file) => file.entry.name === place.name && file.entry.engine === place.engine,
+    );
+    if (found === undefined) {
+      return null;
+    }
+    const removal = await removeVerifiedKept(found.entry, found.file, {
+      hostFor: (entry) => hopEngineHost(entry.engine).host,
+    }).catch((): KeptRemoval => ({ kind: "failed", reason: "the engine did not answer" }));
+    const name = `${place.engine}:${place.name}`;
+    return removal.kind === "unreachable" || removal.kind === "failed"
+      ? `left ${name} in place (${removal.reason}) — tentacle rm ${place.name}`
+      : `${name} ${removalFate(removal.kind)}`;
+  };
+
   const openSessions = (flags: Map<string, string>, bools: Set<string>, implicit = false) =>
     openTuiSessions(
       {
@@ -1965,6 +2009,45 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         err,
       );
       if (runtime) {
+        // `/move` (docs/feat/session-hop.md H4): the worker TUI is the ONE
+        // hop-capable origin in v1 (D8). The facade keeps ONE stable identity for
+        // every member `startTui` asks for, and the SAME broker and saver go to
+        // every runtime a hop builds (AGENTS §7, P2); `hop-feed.ts` bridges it to
+        // the TUI's two props (D3).
+        const place: { current: HopPlace } = { current: { kind: "local" } };
+        // The facade's `status` sink is fixed at build time; the feed's per-run
+        // listener set is not. One mutable indirection, set right below.
+        let hopStatus: (line: string | null) => void = () => {};
+        const facade = createHopRuntime({
+          initial: runtime,
+          startup: { place: { kind: "local" }, daemonInPod: false },
+          shared: { permissions, saver },
+          build: (spec, sharedPair, sessionId) =>
+            createHopTargets({
+              config,
+              shared: sharedPair,
+              // D6: the engine's lines go to the hop's sinks — never a raw write
+              // while Ink owns the terminal (AGENTS §7, P8).
+              status: (line) => hopStatus(line),
+              notify: (text) => sessions.notices.notify(text),
+              host: (engine) => hopEngineHost(engine),
+              defaultImage: () => process.env.TENTACLE_POD_IMAGE,
+            })(spec, sessionId),
+          load: (uid) => sessions.store.load(uid),
+          status: (line) => hopStatus(line),
+          notify: (text) => sessions.notices.notify(text),
+        });
+        const hopView = createHopFeed({
+          facade,
+          place: () => place.current,
+          notify: (text) => sessions.notices.notify(text),
+          // D5: the ONE place that decides a leave, through the verified delete.
+          leave: (before, keep) => hopLeave(before, keep),
+        });
+        hopStatus = hopView.status;
+        const offTarget = facade.onTarget((view) => {
+          place.current = view.place;
+        });
         await runSessionTui(sessions, {
           start: (sessionOptions) =>
             startTui(null, {
@@ -1973,15 +2056,20 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
               cwd: config.cwd,
               contextWindow: config.contextWindow,
               permissions,
-              jobs: runtime.jobs,
+              jobs: facade.jobs,
               autoWakeOnJobExit: config.autoWake,
               subagentsTwoWay: config.subagentsTwoWay,
-              createSession: runtime.createSession,
-              link: runtime.link,
-              mcpStatus: runtime.mcpStatus,
+              createSession: facade.createSession,
+              link: facade.link,
+              mcpStatus: facade.mcpStatus,
+              hop: hopView.hop,
+              targetFeed: hopView.targetFeed,
               ...sessionOptions,
             }),
-          teardown: () => runtime.dispose(),
+          teardown: async () => {
+            offTarget();
+            await facade.dispose();
+          },
           write: err,
         });
         return 0;

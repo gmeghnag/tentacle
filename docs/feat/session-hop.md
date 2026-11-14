@@ -1101,3 +1101,188 @@ intended files.
 - **Regressions:** none at HIGH or MEDIUM. The new code only adds a guard and catches; the commit order and the single-broker hand-off are unchanged.
 
 *— claude-opus-5-5, 2026-11-14*
+
+### H3 + H4 — the TUI's half and the MVP end to end
+
+*— claude-sonnet-4-5-20250929, 2026-11-14*
+
+**Load-bearing check re-run first** (as instructed, on this branch at `228a3ca`,
+worktree `.tentacle/worktrees/session-hop`). Both rigs PASS, unchanged from H2:
+
+```
+$ bun .tentacle/tmp/session-hop/hop-repro.ts
+B uid: 9751027a-… == A uid: true
+B model saw: sys | hello from local | reply-A | hello from container
+files: 9751027a-….jsonl
+
+$ bun .tentacle/tmp/session-hop/hop-race.ts
+after LATE A save: … | assistant:reply-B   files2: one .jsonl
+```
+
+So the assumption H3/H4 stand on is intact and no STOP condition applied.
+
+**As built, in dependency order.**
+
+*H3 — the TUI (D3, D4).*
+
+1. `packages/tui/src/hop-command.ts` — `hopStep` (pure): the TURN BOUNDARY, from
+   facts the TUI owns. `available=false` → "not available here" (D8); a malformed
+   line → its own line; `/move cancel` is a cancel only when something waits or
+   runs; a spec during a running turn or a non-empty daemon queue is `queue` (D4),
+   else `start`. Plus `HOP_QUEUED_NOTICE`.
+2. `packages/tui/src/hop-status.ts` (new) — the transient row (`hopStatusRow`:
+   the orchestrator's own phase, one line, cut to the terminal width), the place
+   as one string (`hopPlaceText`), the "moved" notice (`hopMovedNotice`, which
+   says auto-accept is off when it was on — D9) and `hopFailureText`.
+3. `packages/tui/src/app-types.ts` — `HopFeed`/`HopRun`/`TargetFeed`/`HopTargetView`
+   /`HopPlaceView` and the two new `AppProps` (`hop?`, `targetFeed?`). `HopRun` is
+   a feed (`onStatus(listener)`) plus `done`, which never rejects; `start` takes
+   the uid, because the host cannot guess it without minting a second one (D1
+   step 3 seeds the SAME uid).
+4. `packages/tui/src/App.tsx` — `startHop` (the ONE place the view moves for a
+   hop: `switchingRef` up, the phase row, `swapSession(…, {keepTranscript: true})`,
+   auto-accept off with the feed or the local toggle, one notice); `requestHop`
+   (`hopStep`, then start / queue / cancel / one line); `hopIfQueued` plus ONE
+   effect whose deps are exactly D4's facts (`hopQueued`, `st.running`, the queue
+   length); `shownTarget`/`shownInPod` follow `targetFeed` (falling back to the
+   static props); the status row paints the hop's line INSTEAD of the bar — the
+   same one row, so the frame height never changes.
+5. `packages/tui/src/commands/move.ts` + `registry.ts` + `context.ts` — `/move` is
+   a built-in whose body is `requestHop` (an App-level driver, like `/clear`).
+6. `packages/tui/src/run.tsx` + `index.ts` — the props threaded and exported.
+
+*H4 — the MVP end to end.*
+
+7. `packages/core/src/permission.ts` — `PermissionRequest.kind += "session_hop"`
+   (laptop-internal, never on the wire: D10).
+8. `packages/tui/src/permission-ui.ts` — `autoApproves` excludes `session_hop`
+   (D9/H2), `buildPermissionChoices` gives it its OWN two-way menu (Yes-once / No,
+   never `always`), and `permissionShowsCwd`/`permissionDetailLines` treat it like
+   the trust prompt (asker-written lines, no cwd row).
+9. `packages/cli/src/hop-targets.ts` (new) — `createHopTargets`: the three
+   factories, each calling the EXISTING builder. A container is created KEPT
+   (`resumeHint` + `recordKept` + `labels`/`annotations` from `keptMetadata`, no
+   exit net), provisioned with `logTerm.tty: false` and every line on the hop's
+   sinks; its rollback disposes and then `removeVerifiedKept`s ONLY its own entry.
+   An attach never creates or deletes. The mount gate's `ask` is one
+   `session_hop` request on the SAME broker instance. A pod is refused
+   (attach-only, decision 1).
+10. `packages/cli/src/hop-feed.ts` (new) — the bridge from the `HopRuntime` facade
+    (D2/H2) to the TUI's props: a per-run status feed, a `done` that never
+    rejects, and the leave hook run after the commit.
+11. `packages/cli/src/main.ts` — the worker TUI now starts on `createHopRuntime`
+    over its runtime (D2), with `createHopTargets` as its `build`, the laptop
+    store's `load` as its seed reader, and `hopEngineHost`/`hopLeave` as the two
+    `run`-shaped aliases (`buildEngineHost`; `readKept` → `removeVerifiedKept`).
+    Every other origin (`run`, `attach`, `connect`, in-process) passes no `hop`
+    prop — "not available here" (D8).
+12. `packages/cli/src/tui-sessions.ts` — `TuiSessions.store`, a READER seam for
+    `load(uid)` (the saver stays the only writer).
+
+**Drift from the Implementation, and why (each was a contradiction with the code,
+fixed here rather than forced):**
+
+- **`info` goes to the NOTICE sink, not the status feed** (D6 says "`log`/`info` →
+  the hop status feed"). `quitReport` — the ONE line a faulted run must not lose
+  (M4) — is emitted through `info` at DISPOSE time, when the transient row is
+  already gone, so routing it to `status` would silently drop it. The phases land
+  in the transcript as a piped `run` prints them; the status row carries the hop's
+  own phases (`hopSession`'s sink). Tested: a faulted run's line reaches `notify`,
+  and no control sequence reaches either sink.
+- **`HopRun.onStatus` is a feed, not a sink.** A `start`-returned sink would be a
+  listener set fed while the build is already emitting (it starts on the same
+  tick), losing its first phases. As a feed, the App subscribes before it watches
+  `done`.
+- **`HopFeed.start(spec, sessionId)` takes the uid.** The plan's `start(spec)` left
+  the host unable to name the session being moved; the "nothing persisted" branch
+  (D1 step 3) must open the SAME uid, so the App passes its controller's
+  `sessionId`.
+- **`HopFeed.cancel` is optional**, and the facade-backed one is a no-op. A hop's
+  build is already bounded and rolled back by its own failure path (D1 step 2),
+  and there is no abort seam that would not be a second, disagreeing cancellation
+  path. `/move cancel` still clears a QUEUED hop (the App's own state), which is
+  the case that matters before anything is built.
+- **`main.ts` gets two small helpers (`hopEngineHost`, `hopLeave`) rather than a
+  new module.** They are `run`-shaped aliases over existing seams; the delete's
+  decision is `hopDelete`'s (H1) and the verified delete is `kept-cmd.ts`'s, so a
+  third module would only have moved lines.
+
+**Red first.** The H3 App rows and the H4 target rows were written against the
+pre-execution tree (`packages/tui/src/App.tsx` had no `hop` prop at all and
+`packages/cli/src/hop-targets.ts` did not exist), so their first runs were RED on
+the property, not on an import: the transcript-swap row failed on `hop.started`
+being empty (no `/move` existed) and the H4 file could not resolve its module.
+The mutations below are the durable proof (§9), not that first run.
+
+**Mutation checks** (each broken in the final tree, the narrow file run, restored,
+md5 printed twice by the script — `.tentacle/tmp/session-hop/h3h4/mut-h3.sh`,
+`mut-h4.sh`).
+
+| # | mutation | result |
+|---|---|---|
+| H3-M1 | `swapSession` drops `keepTranscript` | 1 fail — the rows/positions row |
+| H3-M2 | the `switchingRef` latch is not raised | 1 fail — "a prompt typed MID-HOP" |
+| H3-M3 | `hopStep` starts instead of queueing behind a turn | 3 fail — the D4 rows |
+| H3-M4 | the queued-hop effect never starts it | 1 fail — "starts only after its end" |
+| H3-M5 | the status row ignores the phase | 2 fail — both `hopStatusRow` rows |
+| H3-M6 | the badge does not follow `targetFeed` | 1 fail — the transcript row |
+| H3-M7 | a failed hop is not reported | 1 fail — "one notice appears" |
+
+| # | mutation | result |
+|---|---|---|
+| H4-M1 | the container is built without `resumeHint`/`recordKept` | 1 fail — kept labels + index entry |
+| H4-M2 | the rollback skips the verified delete | 1 fail — the entry stays |
+| H4-M3 | an attach is served by the CONTAINER factory | 1 fail — "an attach never deletes" |
+| H4-M4 | the mount gate is skipped | 2 fail — both gate rows |
+| H4-M5 | the mount ask goes to a FRESH broker | 2 fail — the single-broker rows |
+| H4-M6 | `logTerm` dropped (the engine paints on a terminal) | 2 fail — both sinks rows |
+| H4-M7 | `info` goes back to the transient row (the `quitReport` is lost) | 1 fail — the faulted-run row |
+| H4-M8 | `autoApproves` answers a `session_hop` request | 1 fail — "auto-accept NEVER answers it" |
+
+**Two mutations were VACUOUS at first, and the TEST was fixed (§9's non-vacuity
+rule) — never the source globbed over:**
+
+- **H3-M4** (the queued hop is never started) passed because there were TWO start
+  paths: the effect AND a call in the turn's `finally`. That is a real smell, so
+  the `finally` call was REMOVED and the effect's deps are now exactly D4's facts;
+  the mutation then fails as it must.
+- **H3-M6** (the badge does not follow the feed) passed because the notice says
+  "Moved to docker:box", so a `toContain("docker:")` over the whole frame proved
+  the NOTICE, not the badge. The assertion now reads the status row alone and
+  requires it to start with `docker:box · `.
+
+**Tests.** `packages/tui/test/session-hop.test.tsx` (16 rows: `hopStep`'s table,
+the status row, the transcript-rows-identical property with the draft intact, the
+mid-hop prompt, D4's deferral, a failed hop, D8's refusal, and the `session_hop`
+dialog's menu/auto-accept/detail facts) and
+`packages/cli/test/session-hop-targets.test.ts` (7 rows over a fake `EngineHost`
+bound to real in-memory daemons: kept labels + index entry, the verified delete, a
+create failure, the attach, both mount-gate rows, and nothing raw on stdout /
+stderr / the sinks — through a hop's whole life and a faulted run's dispose). Four
+existing rows moved because `/move` is a built-in: `app-frames.test.tsx`'s palette
+snapshot, the literal name lists in `commands-registry.test.ts` and
+`app-commands.test.tsx` (17 → 18), and `/help`'s own row (which now asserts
+`/move`, the newest built-in, because the visible window scrolls the first entries
+out).
+
+**Not in this slice (deliberately).** No `move_session` tool, no laptop proposal
+watcher, no `session_hop` prompt for a proposal (H5): a TYPED `/move` needs no
+confirmation (decision 7), which is why H4's prompt is only the mount gate's ask.
+No attach flow beyond the factory: D7's `detachedRun`/`residentUse`/own-uid checks
+are H6 (`attachTarget` builds; nothing refuses for "someone else is there" yet).
+No `/move` from `run`/`attach`/`connect` (D8). No protocol change and no
+`protocol.d/` note (D10).
+
+**Gate (final tree):** `bunx tsc --noEmit` → 0 · `bun run typecheck` (incl.
+`apps/mobile`) → 0 · `bun run lint` → `Checked 1127 files`, 0 errors/warnings
+(the baseline is clean) · `bun test` → **8627 pass, 3 skip (the documented
+opt-ins: live-k8s, live-docker, the real-socket keepalive), 0 fail** across 616
+files. No protocol schema changed, so `packages/protocol/schema/protocol.json`
+was not regenerated and no `protocol.d/` note was written (D10). One row failed
+the FIRST full run (`app-types.test.ts`'s "index.ts exports no more than the five
+public moved types"): `SettingsNoticeLine` had been added to `index.ts`'s
+re-export block, which that test forbids; the extra name was removed (it is not
+part of this slice's surface) and the row passes. `changelog.d/session-hop.added.md`
+(H1's fragment) already carries the feature's one bullet and states H3/H4's
+user-visible behaviour; no second fragment was added (AGENTS §10: curated, not a
+commit mirror).

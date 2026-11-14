@@ -182,6 +182,65 @@ function readFlags(words: readonly string[]): FlagRead {
     : { kind: "ok", words: positional, keep };
 }
 
+/**
+ * What the TUI does with a typed `/move` RIGHT NOW (docs/feat/session-hop.md
+ * D3/D4). The TURN BOUNDARY is decided here, from facts the TUI owns (its turn,
+ * its queued rows); every other refusal — a job, a sub-agent, a compaction, the
+ * link, the target itself — is the plan's (`cli/src/hop-plan.ts`), measured when
+ * the hop actually starts, so the two layers never disagree: this one only ever
+ * defers or refuses what it can see.
+ */
+export type HopStep =
+  | { readonly kind: "start"; readonly spec: HopSpec }
+  /** D4: the turn in flight (or its queued messages) first; the hop waits. */
+  | { readonly kind: "queue"; readonly spec: HopSpec }
+  | { readonly kind: "cancel" }
+  /** One line, and nothing happens. */
+  | { readonly kind: "notice"; readonly text: string };
+
+/**
+ * `/move …` → what to do now. `available`: this TUI got a `hop` feed (D8: only a
+ * local worker or a hop target; `run`/`attach`/`connect` say so).
+ */
+export function hopStep(input: {
+  readonly parse: HopParse;
+  readonly available: boolean;
+  readonly hopping: boolean;
+  /** A `/move` already waits for the turn boundary (D4): the last one typed does not silently win. */
+  readonly hopQueued: boolean;
+  readonly running: boolean;
+  readonly queued: number;
+}): HopStep {
+  if (!input.available) {
+    return { kind: "notice", text: "not available here" };
+  }
+  switch (input.parse.kind) {
+    case "error":
+      return { kind: "notice", text: input.parse.text };
+    case "cancel":
+      // A cancel is about whatever waits or runs: both are the App's to stop.
+      return input.hopping || input.hopQueued
+        ? { kind: "cancel" }
+        : { kind: "notice", text: "no move is running" };
+    case "spec":
+      if (input.hopping) {
+        return { kind: "notice", text: "a move is already running" };
+      }
+      if (input.hopQueued) {
+        return { kind: "notice", text: "a move is already queued" };
+      }
+      // A turn in flight ends first, and the messages the daemon already queued
+      // run before it: the hop takes the first idle nobody is using (D4).
+      return input.running || input.queued > 0
+        ? { kind: "queue", spec: input.parse.spec }
+        : { kind: "start", spec: input.parse.spec };
+  }
+}
+
+/** The one line a queued `/move` gets (it is not forgotten, and not started). */
+export const HOP_QUEUED_NOTICE =
+  "_Move queued: it starts when the turn ends and the queued messages have run._";
+
 /** `<engine>:<name>[/<container>]` → the workload, or the line explaining what was wrong. */
 function parseWorkload(word: string): HopWorkload | string {
   const colon = word.indexOf(":");

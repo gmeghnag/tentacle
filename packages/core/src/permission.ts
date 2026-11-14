@@ -26,10 +26,12 @@ export function isPermissionReplyText(value: unknown): value is string {
 export interface PermissionRequest {
   /**
    * What is asked (laptop-internal, never on the wire): a tool call (absent =
-   * `"tool"`) or whether to trust a project's hooks (`"hooks_trust"`,
-   * docs/feat/hooks-project-trust.md) — which auto-approve never answers.
+   * `"tool"`), whether to trust a project's hooks (`"hooks_trust"`,
+   * docs/feat/hooks-project-trust.md) — or whether to move this session to
+   * another target (`"session_hop"`, docs/feat/session-hop.md D6/D9). Neither of
+   * those two is ever answered by auto-accept.
    */
-  readonly kind?: "tool" | "hooks_trust";
+  readonly kind?: "tool" | "hooks_trust" | "session_hop";
   readonly tool: string;
   readonly level: PermissionLevel;
   /** Human-readable action, e.g. "Run a shell command". */
