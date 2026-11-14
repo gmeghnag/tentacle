@@ -92,7 +92,7 @@ import {
   encodeBase64,
 } from "@tentacle/transport";
 import { ATTACH_TIMEOUT_MS, UPLOAD_RECONNECT_MS } from "./constants.ts";
-import { type ImageInput, imageInput } from "./image-input.ts";
+import { type ImageInput, OLD_DAEMON_IMAGES, imageInput } from "./image-input.ts";
 import { boundJobOutput, boundJobs, jobsFromSnapshot } from "./jobs.ts";
 import { type LaptopImageFallback, LaptopImages } from "./laptop-images.ts";
 import {
@@ -146,9 +146,8 @@ export const SUBAGENT_MESSAGE_OLD_DAEMON =
 /** A daemon that predates `session/job_output`: a typed refusal, shown as a notice. */
 export const JOB_OUTPUT_OLD_DAEMON = "this daemon cannot show a job's output (older version)";
 
-/** A daemon that predates `attachment/put`: a typed refusal, never a throw at a UI. */
-export const ATTACHMENTS_OLD_DAEMON =
-  "this daemon cannot receive images (older version) — update tentacle";
+/** A daemon that predates `attachment/put`: the ONE update advice (docs/feat/images-off-reason.md). */
+export const ATTACHMENTS_OLD_DAEMON = OLD_DAEMON_IMAGES;
 
 /** An `attachment/put` this daemon refuses outright: no retry (the bytes are not the problem). */
 export class AttachmentsUnsupportedError extends RpcError {
@@ -440,6 +439,12 @@ export interface RemoteClientOptions {
    */
   readonly localImages?: { readonly vision: boolean; readonly maxBytes: number };
   /**
+   * THIS laptop's model id (`config.model`), display-only: the name a "config
+   * has images off" reason repeats when the daemon reports none of its own (a
+   * worker/pod daemon runs the LAPTOP's model, docs/feat/images-off-reason.md).
+   */
+  readonly modelName?: string;
+  /**
    * Where `images` (the pod's byte source) falls back on a miss: this laptop's
    * blob dir of a session this client built (`images.allowSession`;
    * docs/feat/attachments-durable.md D6). Absent → memory only.
@@ -500,6 +505,15 @@ function bunSha256Bytes(): ((bytes: Uint8Array) => string) | undefined {
 /** An older daemon's answer to a method it does not have (AGENTS §7: additive methods). */
 function isMethodNotFound(error: unknown): boolean {
   return error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound;
+}
+
+/**
+ * A model name from the wire (a pod's daemon is not trusted, AGENTS §7), or
+ * `undefined`: a bounded single display line, never an id used for a call. The
+ * pure reason builder sanitizes again — this only stops a non-string.
+ */
+function nameOfModel(raw: unknown): string | undefined {
+  return typeof raw === "string" && raw !== "" ? raw : undefined;
 }
 
 /** Restarts of one `readBack` (a rebase between pages, a refused read retried cold, a drifted checkpoint re-read cold). */
@@ -770,6 +784,8 @@ export class RemoteClient {
   private readonly sha256Bytes: ((bytes: Uint8Array) => string) | undefined;
   /** This laptop's own vision config (see the option): the `client`-mode gate. */
   private readonly localImages?: { readonly vision: boolean; readonly maxBytes: number };
+  /** This laptop's model id, for a display-only "images are off" reason. */
+  private readonly modelName?: string;
   /**
    * The laptop's own image bytes (`docs/feat/attachments-prompt.md` D5/D6):
    * what a pod's refs resolve against. Always present, so a caller needs no
@@ -783,6 +799,12 @@ export class RemoteClient {
    * `undefined` until the first handshake answers.
    */
   private capabilities: AgentCapabilities | undefined;
+  /**
+   * The last handshake's `protocolVersion` and the model that runs the turns
+   * (`agentInfo.model`), kept ONLY to say WHY images are off (docs/feat/
+   * images-off-reason.md): a daemon of our own protocol is never "old".
+   */
+  private daemonImages: { readonly protocol?: number; readonly model?: string } = {};
 
   constructor(
     channel: DuplexChannel,
@@ -821,6 +843,9 @@ export class RemoteClient {
     this.sha256Bytes = options.sha256Bytes ?? bunSha256Bytes();
     if (options.localImages) {
       this.localImages = options.localImages;
+    }
+    if (options.modelName) {
+      this.modelName = options.modelName;
     }
     this.images = new LaptopImages(
       options.imageFallback ? { fallback: options.imageFallback } : {},
@@ -1647,11 +1672,26 @@ export class RemoteClient {
    * it offers `/attach`. Pure — it reads the last handshake, nothing else.
    */
   imageInput(): ImageInput {
-    return imageInput(this.capabilities?.images, {
-      servesModel: this.modelProvider !== undefined,
-      ...(this.localImages?.vision !== undefined ? { vision: this.localImages.vision } : {}),
-      ...(this.localImages?.maxBytes !== undefined ? { maxBytes: this.localImages.maxBytes } : {}),
-    });
+    // The model to NAME in a "config has images off" reason (docs/feat/
+    // images-off-reason.md): what the daemon reports for itself, else THIS
+    // laptop's model — a worker/pod daemon runs the laptop's, not its own.
+    const model = this.daemonImages.model ?? nameOfModel(this.modelName);
+    return imageInput(
+      this.capabilities?.images,
+      {
+        servesModel: this.modelProvider !== undefined,
+        ...(this.localImages?.vision !== undefined ? { vision: this.localImages.vision } : {}),
+        ...(this.localImages?.maxBytes !== undefined
+          ? { maxBytes: this.localImages.maxBytes }
+          : {}),
+      },
+      {
+        ...(this.daemonImages.protocol !== undefined
+          ? { protocol: this.daemonImages.protocol }
+          : {}),
+        ...(model !== undefined ? { model } : {}),
+      },
+    );
   }
 
   /**
@@ -2278,6 +2318,14 @@ export class RemoteClient {
         // Re-read on EVERY handshake: a replaced pod binary may take images
         // differently now, and the client must follow the daemon it has.
         this.capabilities = result.agentCapabilities;
+        this.daemonImages = {
+          ...(typeof result.protocolVersion === "number"
+            ? { protocol: result.protocolVersion }
+            : {}),
+          ...(nameOfModel(result.agentInfo?.model) !== undefined
+            ? { model: nameOfModel(result.agentInfo?.model) }
+            : {}),
+        };
         return result;
       },
       // A version skew says who must update — at start and on every reconnect.

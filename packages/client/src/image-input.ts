@@ -20,6 +20,67 @@ export interface ImagesCapability {
   readonly maxBytes?: number;
 }
 
+/**
+ * The protocol that introduced image input (docs/feat/attachments-core.md,
+ * `PROTOCOL_VERSION` 23). A daemon at or past it that advertises no
+ * `images` capability is CURRENT — it simply takes no images on this model.
+ */
+export const IMAGES_PROTOCOL_VERSION = 23;
+
+/**
+ * A daemon that really predates images (docs/feat/images-off-reason.md): the
+ * ONE update advice, shared with `attachment/put`'s `MethodNotFound` refusal so
+ * the two surfaces cannot word "update the daemon" differently.
+ */
+export const OLD_DAEMON_IMAGES = "this daemon predates images — update it";
+
+/** Longest model name this reason repeats (a display line, never a full id). */
+export const MAX_REASON_MODEL_CHARS = 80;
+/** Bound on a whole `reason` sentence: a notice row, not a paragraph. */
+export const MAX_REASON_CHARS = 220;
+
+/** The name a daemon reports for its model, made safe for a rendered line. */
+function safeModel(
+  raw: string | undefined,
+  max: number = MAX_REASON_MODEL_CHARS,
+): string | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  // A pod-supplied `agentInfo.model` reaches a terminal (AGENTS §7: a pod is
+  // not trusted), so control characters go and the line is bounded.
+  const clean = raw
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+    .trim()
+    .slice(0, Math.max(1, max));
+  return clean === "" ? undefined : clean;
+}
+
+/**
+ * Cause (a): this daemon is current, and its model's config has images off.
+ * Names the model and the key, with the command that flips it — the fact the
+ * old sentence hid behind "update it".
+ */
+export function imagesOffReason(model: string | undefined): string {
+  const tail =
+    "is configured without images — set model.images true in your config if this model takes images (tentacle config set model.images true)";
+  // The model name is what varies, and the SENTENCE is what a notice row holds:
+  // give the name whatever `MAX_REASON_CHARS` leaves, shortened with an ellipsis
+  // rather than letting a row wrap.
+  const room = Math.max(1, MAX_REASON_CHARS - tail.length - 2);
+  const name = safeModel(model, room);
+  return `${name === undefined ? "this model" : name} ${tail}`;
+}
+
+/** The facts about the daemon that decide WHICH cause applies (all display-only). */
+export interface DaemonImageFacts {
+  /** `initialize.protocolVersion` of the daemon we talk to; absent = unknown. */
+  readonly protocol?: number;
+  /** The model that runs the turns: `agentInfo.model`, else this laptop's own. */
+  readonly model?: string;
+}
+
 /** What THIS client can do: whether it serves the model, and its vision config. */
 export interface LocalImageConfig {
   /** True when this client holds the model provider (a pod's laptop). */
@@ -47,13 +108,20 @@ const clamp = (max: number | undefined): number =>
 export function imageInput(
   capability: ImagesCapability | undefined,
   local: LocalImageConfig,
+  daemon: DaemonImageFacts = {},
 ): ImageInput {
   if (capability === undefined) {
-    return {
-      kind: "off",
-      reason:
-        "this daemon does not take images (its model has no vision, or it predates images — update it)",
-    };
+    // Two different causes, told apart by a fact the client holds (docs/feat/
+    // images-off-reason.md): `initialize` enforces protocol EQUALITY, so a
+    // daemon that handshook at IMAGES_PROTOCOL_VERSION or later has the
+    // capability and its absence is about its MODEL CONFIG — telling that user
+    // to "update" current software was the bug. Only a daemon whose own
+    // protocol predates images (or one that never answered) is old, and an
+    // unknown protocol is NOT evidence of age.
+    if (daemon.protocol !== undefined && daemon.protocol < IMAGES_PROTOCOL_VERSION) {
+      return { kind: "off", reason: OLD_DAEMON_IMAGES };
+    }
+    return { kind: "off", reason: imagesOffReason(daemon.model) };
   }
   if (capability.input === "upload") {
     // A client that serves a model is a `--model-proxy` pod's laptop, so the
@@ -80,7 +148,8 @@ export function imageInput(
       };
     }
     if (local.vision !== true) {
-      return { kind: "off", reason: "this laptop's model does not take images (model.images)" };
+      // The SAME cause as (a), on the laptop's side: a config, not a build.
+      return { kind: "off", reason: imagesOffReason(daemon.model) };
     }
     return { kind: "laptop", maxBytes: clamp(local.maxBytes) };
   }

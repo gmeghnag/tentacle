@@ -1,0 +1,362 @@
+# feat/images-off-reason — say WHY images are off, not "the daemon is old"
+
+> **Status:** done
+> **Branch:** `feat/images-off-reason`
+> **Type:** fix · **Size:** S · **Blast:** contained · **Suited:** DeepSeek (executor) + standard in-context review
+> **Changelog:** `changelog.d/images-off-reason.fixed.md` (user-visible wording)
+
+## Context
+
+*— deepseek-v4, 2026-11-13*
+
+Live report (owner, 2026-11-13): in a plain `tentacle` session on a local
+OpenAI-compatible model with `model.images` unset, pasting an image path says
+
+```
+images are off: this daemon does not take images (its model has no vision, or it predates images — update it)
+```
+
+That one sentence merges **two unrelated causes** and always advises an update —
+even when the daemon is the *same build* the client just handshook with and the
+only fact is `model.images` being unset (`packages/config/src/key-docs.ts:294`
+"Unset: the provider default (anthropic true, an OpenAI-compatible endpoint
+false)"). The user is told to update software that is already current, and is
+never told the one key that would fix it.
+
+The client *does* know which cause applies:
+
+- the daemon advertises `agentCapabilities.images` only when its model takes
+  images (`packages/daemon/src/connection.ts:518-536`, fed by
+  `daemonImagePolicy`/`imageLimits`), so **absent capability from a daemon of
+  our own protocol = its model's config is off**;
+- a daemon too old for images either cannot get past `initialize`
+  (`connection.ts:496-499`, protocol equality) or answers `MethodNotFound` to
+  `attachment/put` (`packages/client/src/remote-client.ts:1625-1627`), which is
+  the only genuine "update the daemon" case.
+
+**Repro** (`.tentacle/tmp/images-off-reason/repro.ts`, run 2026-11-13 from
+`.tentacle/tmp/images-off-reason/`; a fake daemon answering `initialize` exactly
+like the local worker does — same protocol, capabilities without `images`):
+
+```ts
+import { PermissionBroker } from "@tentacle/core";
+import { RemoteClient } from "@tentacle/client";
+import { Method, PROTOCOL_VERSION } from "@tentacle/protocol";
+import { createChannelPair, RpcPeer } from "@tentacle/transport";
+import { routeDecision } from "../../../packages/tui/src/attach-draft.ts";
+
+const [a, b] = createChannelPair();
+new RpcPeer(b, {
+  onRequest: async (method) => {
+    if (method === Method.Initialize) {
+      return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: { tools: true, permissions: true } };
+    }
+    return {};
+  },
+});
+const client = new RemoteClient(a, new PermissionBroker());
+const init = await client.initialize();
+console.log("handshake: protocol", init.protocolVersion, "| caps", JSON.stringify(init.agentCapabilities));
+const mode = client.imageInput();
+console.log("imageInput:", JSON.stringify(mode));
+if (mode.kind === "off") {
+  const routed = routeDecision({ chips: [], upload: null }, { kind: "attachments", images: [], refusals: [] }, mode);
+  console.log("notice shown:", routed.notices[0]);
+}
+client.close();
+```
+
+Observed (before):
+
+```
+handshake: protocol 24 | caps {"tools":true,"permissions":true}
+imageInput: {"kind":"off","reason":"this daemon does not take images (its model has no vision, or it predates images — update it)"}
+notice shown: _images are off: this daemon does not take images (its model has no vision, or it predates images — update it)_
+```
+
+The handshake says protocol **24** — the daemon is current. The advice is wrong.
+
+Decision this task serves: an off image must tell the user the *actual* cause in
+one line — (a) the model's config has images off: name the model and the key,
+with the command that sets it; (b) the daemon really predates images: say
+update the daemon. No merged sentence, no wrong advice.
+
+## Implementation
+
+*— deepseek-v4, 2026-11-13*
+
+### Load-bearing assumption
+
+**A daemon whose handshake succeeded cannot be one that predates images.** The
+client sends its own `PROTOCOL_VERSION` and the daemon refuses any other with
+`VersionMismatch` (`packages/daemon/src/connection.ts:496-513`); images entered
+the protocol at 23 (`packages/protocol/src/version.ts:23-26`) and the constant
+is 24 today (`:32`). So an absent `agentCapabilities.images` *after* a
+successful handshake is a statement about the daemon's **model config**, not
+about its build — which is exactly what the current sentence gets wrong (the
+repro above: protocol 24, and it still says "update it").
+
+Consequence for the discriminator: the honest facts the client holds are the
+daemon's reported `protocolVersion` (`InitializeResultSchema`, keeps its value
+on every handshake) and the error shape of a failed `attachment/put`. An absent
+capability from a daemon at or past `IMAGES_PROTOCOL_VERSION` → cause (a); a
+daemon reporting an *older* protocol, or `MethodNotFound` from
+`attachment/put` → cause (b). Unknown protocol (no handshake yet) is treated as
+**not old**: claiming "update the daemon" without evidence is the very bug.
+
+### Preconditions
+
+- `initialize` advertises `images` only when the daemon's model takes images —
+  `connection.ts:518-536` spreads it from `this.host.images`, which is
+  `daemonImagePolicy(config)` (`packages/cli/src/image-policy.ts:33-46`, absent
+  when `imageLimits().vision` is false).
+- `imageInput()` is called after a successful handshake on every runtime that
+  reaches a TUI (`local-runtime.ts:858` `await client.initialize()`; `connect.ts:198`).
+- The daemon reports its own model name for display only: `agentInfo.model`
+  (`packages/protocol/src/session.ts:251-274`), set by `serve`
+  (`packages/cli/src/serve.ts:305`) and absent from a worker/pod daemon (whose
+  model is the laptop's, over the tunnel).
+- The off `reason` is rendered by the TUI as `_images are off: <reason>_`
+  (`packages/tui/src/attach-draft.ts:97`), so the reason must NOT repeat the
+  verdict — and `attachImage` throws it as an error whose message the TUI shows
+  verbatim (`attach-draft.ts:376-379`), so it must also read as a full sentence.
+- AGENTS §7: the decision is pure — `packages/client/src/image-input.ts` already
+  is the one pure table this feature turns on; no component gains logic.
+
+### Design
+
+Keep the decision where it is (`image-input.ts`, pure) and give it the two facts
+it was missing. Signature grows additively:
+
+```ts
+export interface DaemonImageFacts {
+  /** `initialize.protocolVersion` of the daemon we talk to; absent = unknown. */
+  readonly protocol?: number;
+  /** The model that runs the turns: `agentInfo.model`, else the laptop's own. */
+  readonly model?: string;
+}
+export function imageInput(capability, local, daemon: DaemonImageFacts = {}): ImageInput
+```
+
+- `IMAGES_PROTOCOL_VERSION = 23` (the version that introduced the capability).
+- `capability === undefined` and `daemon.protocol` unknown or `>= 23` → **cause
+  (a)**, `imagesOffReason(...)`: `<model> is configured without images — set
+  model.images true in your config if this model takes images (tentacle config set
+  model.images true)`, the model named from `daemon.model` (or "this model"
+  when nothing reports a name).
+- `capability === undefined` and `daemon.protocol < 23` → **cause (b)**,
+  `OLD_DAEMON_IMAGES`: `this daemon predates images — update it`.
+- The `client`-mode branch where the LAPTOP's vision is off becomes the same
+  cause (a), naming the laptop's model.
+- `ATTACHMENTS_OLD_DAEMON` (the `attachment/put` `MethodNotFound` case) becomes
+  `OLD_DAEMON_IMAGES` — one constant, one truth for "update the daemon".
+- `RemoteClient` keeps the last handshake's `protocolVersion` and
+  `agentInfo.model` beside `capabilities` (re-read on every reconnect, like
+  `capabilities`), and passes `{ protocol, model }`; the model falls back to a
+  new display-only option `modelName` (the laptop's `config.model`, passed by
+  `createLocalRuntime`), because a worker/pod daemon reports no model — the
+  owner's own case. A model name is display text: clamped and control-character
+  free before it can reach a terminal.
+
+Note the wording does not repeat the verdict: the TUI already prefixes
+`images are off: `, and the thrown `ImagesUnavailableError` message reads as a
+complete sentence on its own.
+
+### Files
+
+1. `packages/client/src/image-input.ts` — `IMAGES_PROTOCOL_VERSION`,
+   `OLD_DAEMON_IMAGES`, `imagesOffReason`, `DaemonImageFacts`, the new table.
+2. `packages/client/src/remote-client.ts` — keep `protocol`/`model` from the
+   handshake, the `modelName` option, pass the facts; `ATTACHMENTS_OLD_DAEMON`
+   re-exported from the pure module.
+3. `packages/cli/src/local-runtime.ts` — pass `modelName: deps.model`.
+4. `packages/client/test/image-input.test.ts` — both causes, plus the wording.
+5. `changelog.d/images-off-reason.fixed.md`.
+
+No daemon, protocol, or on-disk change; no `PROTOCOL_VERSION` bump (the
+capability field already exists and only its *interpretation* by the client
+changes).
+
+### Failure modes
+
+- **Daemon reports an older protocol** (today impossible past `initialize`, a
+  durable branch): cause (b), update advice — the honest answer.
+- **No handshake yet** (`capabilities` undefined): cause (a) is claimed only
+  when a protocol is unknown → treated as current. Never "update the daemon"
+  without evidence (the reported bug).
+- **Model name absent** (`worker`/pod daemon, `connect` to a daemon reporting
+  nothing): the message still names `model.images` and the command, and says
+  "this daemon's model" instead of inventing a name.
+- **Model name hostile** (a pod-supplied `agentInfo.model`): stripped of control
+  characters and clamped before it enters a rendered line (AGENTS §7, a pod is
+  not trusted).
+- **Client mode with the laptop's vision off**: same cause (a), name = the
+  laptop's model; unchanged verdict, no wrong "update" advice.
+- **`attachment/put` `MethodNotFound`** (a same-protocol daemon without the
+  method — a replaced binary): cause (b) via the shared constant.
+- Compaction/upload paths untouched: only the *off* reasons change.
+
+### Tests
+
+- `packages/client/test/image-input.test.ts`
+  - T1 (a): no capability, protocol 24 (= current) → off, reason names the model
+    *and* `model.images` and the `config set` command; must NOT contain
+    "predates"/"update".
+  - T2 (b): no capability, protocol 22 (before images) → off, reason says
+    predates/update; must NOT advise setting `model.images`.
+  - T3 unknown protocol, no capability → cause (a), never the update advice.
+  - T4 no model name → still names `model.images`, no invented name.
+  - T5 a hostile/long model name → sanitized, no control characters, bounded.
+  - T6 `OLD_DAEMON_IMAGES` is the single constant both surfaces use (the
+    `attachment/put` path keeps its instance/behaviour).
+- **Red before green** (§9): all of T1–T5 fail on the current code. **Mutation**
+  (§9): flip the discriminator (`protocol < IMAGES_PROTOCOL_VERSION` → `true`)
+  and confirm T1 goes red.
+
+## Execution
+
+*— DeepSeek-V4-Pro (deepseek-v4-pro), 2026-11-13*
+
+**As built, in order.**
+
+1. Repro first (AGENTS §1): `.tentacle/tmp/images-off-reason/repro.ts` showed
+   `protocol 24` (a CURRENT daemon) plus the merged sentence — the evidence the
+   Context section quotes.
+2. Tests first (red): `packages/client/test/image-input.test.ts` gained the
+   `no capability: WHY` block (T1–T6). First red run: `SyntaxError: Export named
+   'ATTACHMENTS_OLD_DAEMON' not found in module image-input.ts` — the symbols did
+   not exist yet.
+3. `packages/client/src/image-input.ts` (pure): added `IMAGES_PROTOCOL_VERSION`
+   (23), `OLD_DAEMON_IMAGES`, `imagesOffReason(model)`,
+   `MAX_REASON_MODEL_CHARS`/`MAX_REASON_CHARS`, `DaemonImageFacts`, and the third
+   (optional) parameter of `imageInput`. The absent-capability branch decides:
+   protocol unknown or `>= 23` → cause (a) naming the model; protocol `< 23` →
+   cause (b). The `client`-mode laptop-vision-off branch moved to the same
+   cause-(a) wording (same cause, the laptop's side).
+4. `packages/client/src/remote-client.ts`: `handshake` also keeps the last
+   `protocolVersion` and `agentInfo.model` (re-read every reconnect, like
+   `capabilities`) in `daemonImages`; `imageInput()` passes `{protocol, model}`
+   with the model falling back to the new display-only option `modelName`;
+   `ATTACHMENTS_OLD_DAEMON = OLD_DAEMON_IMAGES` so "update the daemon" has one
+   source; a local `nameOfModel` guard keeps a non-string off the reason.
+5. `packages/cli/src/local-runtime.ts`: passes `modelName: deps.model`.
+6. `changelog.d/images-off-reason.fixed.md`.
+
+**Drift from Implementation.** Two, both recorded rather than hidden:
+
+- **Final wording** is `<model> is configured without images — set model.images
+  true in your config if this model takes images (tentacle config set model.images
+  true)`. The Implementation draft said `<model> takes no images per its config:`;
+  that repeated the verdict the caller already prints (`_images are off: …`,
+  `attach-draft.ts:97`) and read awkwardly with a model name in front. The final
+  shape is the one the owner asked for.
+- **Cause (b) is unreachable over today's wire.** Protocol equality at
+  `initialize` (`connection.ts:496-499`) refuses a daemon older than images before
+  `imageInput()` can run, so the `< 23` branch is defensive only; the real
+  user-facing "update the daemon" surface is `attachment/put` → `MethodNotFound`,
+  which now shares the constant (T6). Kept because it is the honest answer if a
+  future client ever tolerates an older protocol, and it is what T2 pins.
+
+**Not touched:** `packages/tui/src/App.tsx` — the notice is built in the pure
+`attach-draft.ts` from the client's reason, and that module needed no change at
+all; only the client's `reason` string changed. No daemon/protocol/on-disk change,
+no `PROTOCOL_VERSION` bump (the capability already exists; only the client's
+interpretation of its absence changed).
+
+**Mutation (§9).** Flipped the discriminator to `if (true)` in `image-input.ts`
+(every absent capability taken as an old daemon): T1, T3, T4, T5 went **red**
+(11 pass / 4 fail) — the tests prove the branch, not a correlate. Reverted: 15
+pass / 0 fail, and `git status` showed no stray backup file.
+
+**End-to-end re-run of the repro** after the change (worktree sources):
+
+```
+imageInput: {"kind":"off","reason":"qwen3-27b is configured without images — set model.images true in your config if this model takes images (tentacle config set model.images true)"}
+notice shown: _images are off: qwen3-27b is configured without images — set model.images true in your config if this model takes images (tentacle config set model.images true)_
+```
+
+**Gate.**
+
+| Check | Result |
+| --- | --- |
+| `bunx tsc --noEmit` | clean (exit 0) |
+| `bun run lint` | clean: `Checked 1064 files … No fixes applied`, 0 errors / 0 warnings (= baseline) |
+| `bun test` | **8282 pass, 3 skip, 0 fail** (595 files, 382 s) — the 3 skips are the documented opt-in ones (live k8s, live docker, real-socket keepalive) |
+| `packages/client` alone | 646 pass / 0 fail |
+| `packages/tui` alone | 1792 pass / 0 fail |
+
+## Review
+
+*— DeepSeek-V4-Pro (deepseek-v4-pro), 2026-11-13 — adversarial pass*
+
+**Gate re-run after the review edits** (the review found two real defects and
+changed code, so the gate was re-run, not carried over):
+
+| Check | Result |
+| --- | --- |
+| `bunx tsc --noEmit` | clean (exit 0) |
+| `bun run lint` | clean: `Checked 1064 files … No fixes applied`, 0 errors / 0 warnings (= baseline) |
+| `bun test` | **8283 pass, 3 skip, 0 fail** (595 files, 359 s) — 3 documented opt-in skips |
+
+**What holds.**
+
+- *The property the task needed, exactly.* T1 pins the reported case: absent
+  capability + a current protocol ⇒ a reason naming the model, `model.images`
+  and the command, and **no** "predates"/"update". T2 pins the opposite cause.
+  Non-vacuity by mutation: `if (true)` (treat every absent capability as old)
+  turned T1/T3/T4/T5 **red** (11 pass / 4 fail), reverted to 16/0.
+- *No component gained logic.* `App.tsx` untouched; `attach-draft.ts` untouched
+  (it already renders `_images are off: <reason>_` and needed nothing).
+- *A pod's name is not trusted.* `agentInfo.model` is stripped of control
+  characters, trimmed and bounded in the pure module, and T5 proves it with an
+  escape/`BEL`/newline name; `protocolVersion` is type-checked before being kept,
+  so a hostile daemon cannot make the "old protocol" branch fire with a string.
+- *One source for the update advice.* `ATTACHMENTS_OLD_DAEMON === OLD_DAEMON_IMAGES`
+  (T6), so the `attachment/put` refusal and the capability reason cannot drift.
+
+**Two defects the review found and fixed (both would have shipped).**
+
+1. **`MAX_REASON_CHARS` was asserted but not enforced.** The first cut bounded
+   the *model name* (80 chars) and claimed the sentence was bounded, so a
+   60-char name could push the reason past 220 — T5 passed only by accident of
+   the fixture. Fixed: `imagesOffReason` computes the room the sentence leaves
+   and shortens the name to fit; T5 and a new T5b assert the sentence bound with
+   a 400-char plain name. Mutation: `room = 1000` → T5 **and** T5b red.
+2. **`result.protocolVersion` was trusted as a number.** The wire schema says
+   `int`, but this module explicitly does not trust a daemon (AGENTS §7) and a
+   string protocol would have compared as `"22" < 23` → false, silently taking
+   the *config* branch. Now kept only when it is a number.
+
+**What does not hold (stated, not hidden).**
+
+- **Cause (b) is unreachable today.** Protocol equality at `initialize` refuses
+  an older daemon, so the `< 23` branch is defensive; its user-facing reality is
+  the `attachment/put` `MethodNotFound` refusal, which shares the constant. T2
+  pins the branch as a unit, not as a live path — a reader should not mistake it
+  for one.
+- **A worker/pod daemon reports no model**, so the reason names the laptop's
+  `config.model` (`modelName`), which for a `--model-proxy` pod is *the* model in
+  play — correct — but for a pod whose daemon runs its own model it could name
+  the wrong one. That is the pre-existing `agentInfo` gap (a pod daemon passes no
+  `modelInfo`), not this change; the message still names the right KEY, so the
+  advice remains actionable.
+- **`connect` does not pass `modelName`**, so a `serve` daemon that reports no
+  model gets "this model" instead of a name. Acceptable (that daemon does report
+  one, `serve.ts:305`), and no branch was added for it.
+- **The daemon's own `AttachmentRefused` text still merges the causes**
+  (`hosted-session.ts:1942`). Deliberately left: that refusal is only reached by
+  a client that ignored the advertised capability, and no TUI shows its message
+  — `attach-draft.ts:366-368` renders a fixed line for `data.reason ===
+  "images_off"`, matching on the structured reason, never the text. Changing it
+  would widen the blast radius past `contained` for text nothing displays.
+
+**How the implementing model behaved.** It reproduced before reading code
+(repro pasted in Context, protocol 24 = current, the wrong advice), wrote the
+tests red first, and kept the change inside the existing pure module. It
+self-corrected twice mid-task: the first notice draft repeated the verdict the
+caller already prints, and the first bound claim was not enforced — both caught
+and fixed here rather than reported as done. Drift is logged, the unreachable
+branch is labelled as such, and nothing was silently dropped.
+
+**Verdict:** holds. Contained blast, S size, standard in-context review per
+AGENTS §10 — a fresh-context pass is not required for `contained`/`S`.

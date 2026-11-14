@@ -847,6 +847,10 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     // Only beside a model provider: a client that serves no model cannot hold a
     // pod's image bytes (docs/feat/attachments-prompt.md D5's table).
     ...(deps.modelProvider && deps.localImages ? { localImages: deps.localImages } : {}),
+    // The name a "model's config has images off" reason repeats
+    // (docs/feat/images-off-reason.md): a worker/pod daemon runs THIS laptop's
+    // model and reports none of its own.
+    modelName: deps.model,
     // D6: a laptop model link that never attached reads THIS laptop's blob dir
     // for the sessions this client built (a 2nd TUI on the pod, a pod turn the
     // daemon re-runs before any send). Scoped by `allowSession` at the one build
