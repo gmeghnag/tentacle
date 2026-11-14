@@ -6,9 +6,11 @@ import type { DaemonRecord } from "@tentacle/daemon";
  * tells us which of them exist, and nothing here decides whether one works.
  *
  * The rules, one per record from `<configDir>/daemons/*.json` (9a):
- * - a LOOPBACK bind (`127.0.0.0/8`, `::1`, `localhost`) contributes nothing — a
- *   phone on the LAN cannot reach it, and putting it in the QR would make the
- *   app try an address that can never answer;
+ * - a LOOPBACK bind (`127.0.0.0/8`, `::1`, `localhost`) contributes no
+ *   bind-derived address — a phone on the LAN cannot reach it, and putting it in
+ *   the QR would make the app try an address that can never answer. It still
+ *   contributes the record's OWN `addresses` (below): that is how a loopback
+ *   `serve` with a mobile relay pairs at all;
  * - `0.0.0.0` / `::` (every interface) → each non-internal IPv4 of this
  *   machine: the LAN address and a Tailscale `100.64/10` one are what a phone
  *   actually reaches. IPv6 is deliberately left out: a link-local or
@@ -18,9 +20,12 @@ import type { DaemonRecord } from "@tentacle/daemon";
  * - `ws`/`wss` follows the daemon's TLS (`tls: true` = `wss`), and every URL
  *   ends in the device route's `/e2e` (9b).
  *
- * Every `--address` is appended as given (it may be a relay URL one day, task
- * 15), then duplicates are removed keeping the FIRST occurrence: the order is
- * the order the phone tries, so it must be ours and stable.
+ * Every `--address` is appended as given, then duplicates are removed keeping
+ * the FIRST occurrence: the order is the order the phone tries, so it must be
+ * ours and stable. A record's own `addresses` (`serve --address`, and the mobile
+ * relay's derived `/d/<id>/e2e` — docs/feat/mobile-relay.md R5b) come after the
+ * ones its bind implies and before `--address`, so "direct first, relay last"
+ * holds for the zero-configuration case the relay exists for.
  *
  * Pure and React-free (AGENTS §7) with the interface table injected: the
  * addresses of this machine are the only thing not derivable from the config
@@ -106,9 +111,20 @@ function unique(addresses: readonly string[]): string[] {
 }
 
 /**
- * The addresses to publish: every reachable one a live `serve` listens on, then
- * the `--address` ones. Unusable `--address` values are REFUSED, not dropped —
+ * The addresses to publish: every reachable one a live `serve` listens on, plus
+ * each record's OWN `addresses` (a `serve --address` tailnet name, a tunnel, and
+ * — since docs/feat/mobile-relay.md R5b — the daemon's mobile-relay address),
+ * plus `--address` ones. Unusable `--address` values are REFUSED, not dropped —
  * a typo silently missing from the QR is a pairing that fails with no reason.
+ *
+ * A record's own addresses are FILTERED by `isPairingAddress` instead (a record is
+ * a file a same-uid process can plant, so it is input, never authority — the same
+ * rule `discovery.ts` applies): a planted junk URL must not become an invalid
+ * entry that refuses a human's `pair`, while a planted DIALABLE one is no worse
+ * than the LAN address beside it (the phone still has to complete Noise against
+ * this computer's key). Omitted entirely, a loopback `serve` with a relay address
+ * publishes nothing at all, so `pair` refuses exactly the zero-configuration case
+ * the relay exists for.
  */
 export type PairAddressResult =
   | { readonly ok: true; readonly addresses: readonly string[] }
@@ -132,23 +148,9 @@ export function pairAddresses(input: {
   if (extra.length > MAX_PAIRING_ADDRESSES) {
     return { ok: false, reason: "too_many", count: extra.length };
   }
-  // The machine's own reachable IPv4 addresses, once: two daemons on `0.0.0.0`
-  // (different ports) both use them.
-  const reachable = input.interfaces
-    .filter((entry) => entry.family === "IPv4" && !entry.internal)
-    .map((entry) => entry.address);
   const fromRecords: string[] = [];
   for (const record of input.records) {
-    if (WILDCARD.has(record.host)) {
-      for (const address of reachable) {
-        fromRecords.push(urlFor(record, address));
-      }
-      continue;
-    }
-    if (isLoopbackHost(record.host)) {
-      continue;
-    }
-    fromRecords.push(urlFor(record, record.host));
+    fromRecords.push(...recordAddressList(record, input.interfaces));
   }
   const addresses = unique([...fromRecords, ...extra]);
   // Distinct addresses after dedup are what the QR holds: more than a QR may
@@ -157,6 +159,43 @@ export function pairAddresses(input: {
   return addresses.length <= MAX_PAIRING_ADDRESSES
     ? { ok: true, addresses }
     : { ok: false, reason: "too_many", count: addresses.length };
+}
+
+/**
+ * ONE record's addresses, in the phone's dial order and deduped, UNCAPPED: the
+ * bind's own (a wildcard expands to this machine's reachable IPv4s, a loopback
+ * bind contributes none, a specific host is itself), then the record's OWN
+ * `addresses` — `serve --address` and the mobile relay's `/d/<id>/e2e`
+ * (docs/feat/mobile-relay.md R5b) — filtered by `isPairingAddress` because a
+ * record is a FILE a same-uid process can plant.
+ *
+ * Exported because the two readers of the rule differ on ONE point and only
+ * that: `pair` REFUSES a list over the QR's bound (the address it would drop is
+ * one a human asked for), while the daemon's announcement truncates keeping the
+ * FIRST (a snapshot line must always be produced). Splitting the list out keeps
+ * the order — which IS the dial order — in one place for both.
+ */
+export function recordAddressList(
+  record: DaemonRecord,
+  interfaces: readonly InterfaceEntry[],
+): string[] {
+  const reachable = interfaces
+    .filter((entry) => entry.family === "IPv4" && !entry.internal)
+    .map((entry) => entry.address);
+  const list: string[] = [];
+  if (WILDCARD.has(record.host)) {
+    for (const address of reachable) {
+      list.push(urlFor(record, address));
+    }
+  } else if (!isLoopbackHost(record.host)) {
+    list.push(urlFor(record, record.host));
+  }
+  for (const own of record.addresses ?? []) {
+    if (isPairingAddress(own)) {
+      list.push(own);
+    }
+  }
+  return unique(list);
 }
 
 /** The refusal when nothing a phone can dial exists: the two ways to make one. */

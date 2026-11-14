@@ -30,9 +30,13 @@ import {
   type DiscoveredDaemon,
   MAX_DISCOVERED_DAEMONS,
   MAX_PAIRING_ADDRESSES,
-  isPairingAddress,
 } from "@tentacle/protocol";
-import { type InterfaceEntry, machineInterfaces, pairAddresses } from "./pair-addresses.ts";
+import {
+  type InterfaceEntry,
+  machineInterfaces,
+  pairAddresses,
+  recordAddressList,
+} from "./pair-addresses.ts";
 
 /** The timers and clock the driver uses (injected: a test drives time by hand). */
 export interface DiscoveryTimers {
@@ -57,19 +61,22 @@ export const DEFAULT_STALE_AFTER_MS = 30_000;
 export const MISSES_BEFORE_DROP = 2;
 
 /**
- * The addresses ONE record offers a phone: `pairAddresses`' derivation (a
- * loopback bind contributes nothing, a wildcard expands to this machine's
- * reachable IPv4s, a specific host is itself, `ws`/`wss` from `tls`) PLUS the
- * record's own `--address` values (owner Q3: a tailnet name, a tunnel — URLs a
- * bind cannot show), deduped keeping the FIRST occurrence and capped.
+ * The addresses ONE record offers a phone: `pairAddresses`' derivation — a
+ * loopback bind contributes no BIND-derived address, a wildcard expands to this
+ * machine's reachable IPv4s, a specific host is itself, `ws`/`wss` from `tls`,
+ * then the record's own `addresses` (`--address`: a tailnet name, a tunnel, and
+ * the mobile relay's derived `/d/<id>/e2e` — docs/feat/mobile-relay.md R5a/R5b),
+ * deduped keeping the FIRST occurrence and capped.
+ *
+ * ONE rule for both readers (the QR and this announcement), which is the whole
+ * point of sharing it: the daemon's own order is the phone's dial order, and two
+ * derivations would eventually disagree about it.
  */
 function addressesOf(record: DaemonRecord, interfaces: readonly InterfaceEntry[]): string[] {
-  const derived = pairAddresses({ records: [record], interfaces });
-  const own = derived.ok ? derived.addresses : [];
-  // `isPairingAddress` again: a record is a FILE (a same-uid process can plant
-  // one, F10), so its `--address` values are re-validated before the wire.
-  const merged = [...own, ...(record.addresses ?? [])].filter(isPairingAddress);
-  return [...new Set(merged)].slice(0, MAX_PAIRING_ADDRESSES);
+  // The SAME list `pair` builds (one order: the phone's), CAPPED here: a
+  // snapshot line must always be produced, and the cap keeps the first — which
+  // is where `pair` would have refused a human's `--address`.
+  return recordAddressList(record, interfaces).slice(0, MAX_PAIRING_ADDRESSES);
 }
 
 /**

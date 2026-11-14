@@ -204,6 +204,14 @@ export const DEFAULT_CONFIG_JSONC = `{
   // shows the current context). Default false: superseded history is not kept.
   // "sessions": { "keepSuperseded": false },
 
+  // The mobile relay (docs/feat/mobile-relay.md): a \`serve\` with paired devices
+  // dials OUT to it, so a phone reaches this computer from anywhere with no open
+  // port (the relay carries Noise ciphertext only). "enabled": false, or
+  // \`serve --no-relay\`, turns it off; \`serve --relay <url>\` names another
+  // instance. "url" must be wss:// — or ws:// to a loopback host (dev/tests),
+  // because the daemon's relay secret travels on that socket.
+  // "relay": { "enabled": true, "url": "wss://relay.tentacle.so" },
+
   // \`tentacle run --engine docker|podman\` mounts the current folder into the
   // container; these paths (dirs or files, "~/…" or absolute) are hidden when
   // inside it. "hide" REPLACES the default list (~/.ssh, ~/.aws, ~/.kube,

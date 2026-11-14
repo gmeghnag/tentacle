@@ -15,7 +15,7 @@
  *   EMPTY list (mutation: replace the identity but keep the devices).
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -256,6 +256,68 @@ describe("revoke", () => {
 });
 
 describe("reset", () => {
+  /**
+   * The mobile relay's ids rotate with the identity (docs/feat/mobile-relay.md
+   * Q5): ONE recovery verb for a leaked laptop, and the phones must re-pair
+   * after a reset anyway — so a new relay address costs nothing extra.
+   *
+   * Mutation: skip `removeRelaySecrets` → every `relay.json` survives, and a
+   * leaked relay address keeps routing phones at the machine it was leaked for.
+   */
+  test("deletes every project's relay.json, and says so", async () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone"]);
+    const storeA = join(configDir, "daemon", "proj-a");
+    const storeB = join(configDir, "daemon", "proj-b");
+    mkdirSync(storeA, { recursive: true });
+    mkdirSync(storeB, { recursive: true });
+    writeFileSync(join(storeA, "relay.json"), `{ "v": 1, "secret": "a" }\n`);
+    writeFileSync(join(storeB, "relay.json"), `{ "v": 1, "secret": "b" }\n`);
+    const result = await run(configDir, resetCommand, { yes: true });
+    expect(result.code).toBe(0);
+    expect(existsSync(join(storeA, "relay.json"))).toBe(false);
+    expect(existsSync(join(storeB, "relay.json"))).toBe(false);
+    expect(result.err.join("")).toContain("relay address rotated for 2 projects");
+    expect(result.err.join("")).toContain("Restart every");
+  });
+
+  test("a declined or unconfirmed reset rotates NOTHING", async () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone"]);
+    const store = join(configDir, "daemon", "proj-a");
+    mkdirSync(store, { recursive: true });
+    writeFileSync(join(store, "relay.json"), `{ "v": 1, "secret": "a" }\n`);
+    const result = await run(configDir, resetCommand, { answer: "n" });
+    expect(result.code).toBe(1);
+    expect(existsSync(join(store, "relay.json"))).toBe(true);
+  });
+
+  test("a machine whose daemons never ran needs no relay line", async () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone"]);
+    const result = await run(configDir, resetCommand, { yes: true });
+    expect(result.code).toBe(0);
+    expect(result.err.join("")).not.toContain("relay address rotated");
+  });
+
+  test("a store with sessions but NO relay.json counts as nothing rotated", async () => {
+    // A project store exists from the moment a daemon ran — but a daemon that
+    // never had the relay on wrote no `relay.json`. Counting it would tell the
+    // user an address changed when none did (mutation: no `existsSync` guard →
+    // `rmSync` on a missing file is a silent success, so it is counted).
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone"]);
+    const store = join(configDir, "daemon", "proj-a");
+    mkdirSync(store, { recursive: true });
+    writeFileSync(join(store, "some-session.jsonl"), "{}\n");
+    const result = await run(configDir, resetCommand, { yes: true });
+    expect(result.code).toBe(0);
+    expect(result.err.join("")).not.toContain("relay address rotated");
+    // And the store's own files are untouched: a reset rotates identities, it
+    // does not delete sessions.
+    expect(existsSync(join(store, "some-session.jsonl"))).toBe(true);
+  });
+
   test("needs a y: 'n' changes nothing", async () => {
     const configDir = newDir();
     pairDevices(configDir, ["iPhone"]);

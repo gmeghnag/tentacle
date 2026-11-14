@@ -218,6 +218,8 @@ export interface TentacleConfig {
   readonly tui?: ResolvedConfig["tui"];
   /** The laptop's session-log settings (file or profile); absent = defaults (`keepSuperseded` false). */
   readonly sessions?: ResolvedConfig["sessions"];
+  /** The mobile relay's settings (file or profile); absent = enabled, `DEFAULT_RELAY_URL`. */
+  readonly relay?: ResolvedConfig["relay"];
   /**
    * The configured `apiKeyCommand` (the command, never its output): the CLI
    * hides the key FILE it reads from a workspace mount.
@@ -893,6 +895,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     ...(resolved.mount !== undefined ? { mount: resolved.mount } : {}),
     ...(resolved.tui !== undefined ? { tui: resolved.tui } : {}),
     ...(resolved.sessions !== undefined ? { sessions: resolved.sessions } : {}),
+    ...(resolved.relay !== undefined ? { relay: resolved.relay } : {}),
     ...(resolved.apiKeyCommand !== undefined ? { apiKeyCommand: resolved.apiKeyCommand } : {}),
     hooks: contributed.hooks,
     mcpServers: contributed.mcpServers,

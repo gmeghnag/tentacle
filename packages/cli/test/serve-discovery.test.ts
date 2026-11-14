@@ -27,8 +27,7 @@ import {
 import { Connection, SessionHost } from "@tentacle/daemon";
 import type { DaemonDiscovery } from "@tentacle/protocol";
 import { createChannelPair } from "@tentacle/transport";
-import { startDaemon } from "../src/serve.ts";
-
+import { type ServeOptions, startDaemon } from "../src/serve.ts";
 const dirs: string[] = [];
 const handles: { stop(): Promise<void> }[] = [];
 const clients: RemoteClient[] = [];
@@ -41,6 +40,8 @@ afterEach(async () => {
 type Over = {
   readonly addresses?: readonly string[];
   readonly discovery?: boolean;
+  /** The mobile relay (docs/feat/mobile-relay.md R5a): the real local one, or off. */
+  readonly relay?: ServeOptions["relay"];
 };
 
 /**
@@ -68,6 +69,7 @@ async function serve(root: string, configDir: string, cwd: string, over: Over = 
     heartbeatMs: 20,
     // Discovery OFF: the `serve`-writes-the-record half only.
     ...(over.discovery === false ? { discovery: false } : {}),
+    ...(over.relay !== undefined ? { relay: over.relay } : {}),
   });
   handles.push(handle);
   return { config, handle };
@@ -115,19 +117,25 @@ describe("serve writes --address into its record", () => {
   test("the record carries the addresses, on disk and through the reader", async () => {
     const { root, configDir, a } = rig();
     const address = "wss://mac.tailnet.ts.net/e2e";
-    const { config } = await serve(root, configDir, a, { addresses: [address] });
+    const { config, handle } = await serve(root, configDir, a, { addresses: [address] });
     const records = readDaemonRecords(config.configDir);
     expect(records).toHaveLength(1);
-    expect(records[0]?.addresses).toEqual([address]);
+    // `--address` FIRST, then the mobile relay's (docs/feat/mobile-relay.md R5a:
+    // a phone tries direct paths first, the relay last).
+    const relayAddress = handle.relay?.address ?? "";
+    expect(relayAddress).toContain("/d/");
+    expect(records[0]?.addresses).toEqual([address, relayAddress]);
     const raw = JSON.parse(
       readFileSync(join(config.configDir, "daemons", `${process.pid}.json`), "utf8"),
     ) as DaemonRecord;
-    expect(raw.addresses).toEqual([address]);
+    expect(raw.addresses).toEqual([address, relayAddress]);
   });
 
-  test("without --address the record has no `addresses` member at all (an older build's file)", async () => {
+  test("with the relay off and no --address, the record has no `addresses` member at all", async () => {
+    // The old shape (an older build's file) still exists: a daemon that publishes
+    // nothing writes no member, rather than an empty array.
     const { root, configDir, a } = await rig();
-    const { config } = await serve(root, configDir, a);
+    const { config } = await serve(root, configDir, a, { relay: { noRelay: true } });
     const raw = JSON.parse(
       readFileSync(join(config.configDir, "daemons", `${process.pid}.json`), "utf8"),
     ) as Record<string, unknown>;
@@ -185,7 +193,12 @@ describe("a real client on A learns A and B", () => {
     driver.subscribe((d) => seen.push(d));
     // A subscription polls at once, so the sibling is in from the start.
     expect(driver.current().daemons.map((d) => d.cwd)).toEqual([a, b]);
-    expect(driver.current().daemons[0]).toMatchObject({ cwd: a, self: true, addresses: [aAddr] });
+    // A's own addresses are `--address` then the mobile relay's (R5a); B is a
+    // plain sibling with only its `--address`.
+    const selfAddresses = driver.current().daemons[0]?.addresses ?? [];
+    expect(driver.current().daemons[0]).toMatchObject({ cwd: a, self: true });
+    expect(selfAddresses[0]).toBe(aAddr);
+    expect(selfAddresses.at(-1)).toContain("/d/");
     expect(driver.current().daemons[1]).toMatchObject({ cwd: b, addresses: [bAddr] });
 
     await two.stop();

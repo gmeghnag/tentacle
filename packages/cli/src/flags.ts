@@ -109,6 +109,9 @@ export const ARGS = {
       "ws-idle-timeout": {},
       // The pod's resident daemon socket (docs/feat/detached-runs.md S1); default in TMPDIR.
       socket: {},
+      // `serve --relay <url>`: the mobile relay this daemon dials out to
+      // (docs/feat/mobile-relay.md R5a).
+      relay: {},
       ...SESSION_MODEL,
     },
     // `serve --address <url>`, repeatable: a LIST, as `pair`'s is (one value
@@ -117,6 +120,8 @@ export const ARGS = {
     // `--bridge` / `--resident` / `--resident-status` / `--resident-stop`: the
     // pod's resident daemon (`pod-resident.ts`), run by `run`/`attach` execs.
     bools: {
+      // `serve --no-relay`: never dial the mobile relay, whatever the config says.
+      "no-relay": {},
       stdio: {},
       "model-proxy": {},
       bridge: {},
@@ -124,6 +129,9 @@ export const ARGS = {
       "resident-status": {},
       "resident-stop": {},
     },
+    // `--relay` and `--no-relay` say opposite things: refuse both rather than
+    // pick one (a script that sets one and a user who opts out).
+    conflicts: [["relay", "no-relay"]],
     positional: { min: 0, max: 0 },
   },
   run: {
