@@ -1556,3 +1556,108 @@ honestly recorded. It missed the cross-session lifecycle of the shared broker.
 Same model family as the executor (Opus), fresh context only.
 
 *— claude-opus-5-5, 2026-11-14*
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14 (executor of this round; branch
+`feat/mobile-session-view-12c`, no checkout/restore/stash/commit)*
+
+**Reproduced first, on the branch as it stood** (`.tentacle/tmp/mobile-session-view-12c/`):
+
+```
+$ bun run repro2.ts   # finding 1, PRODUCTION shape: one SessionController + one broker
+B's sheet on an ask after A's late dispose: idle (expected "asking")
+$ bun run repro3.ts   # finding 2
+archived route, attach in flight → banner: null (expected "archived")
+  state: Loading… · reopen offered: false (expected true)
+```
+
+The finding-1 control (same script, `leave()` without the `.then(dispose)`):
+`B's sheet … asking`. So the control is green and the finding is real.
+
+**Finding 1 (HIGH) — a departed screen's late `dispose()` clears the NEXT
+screen's requester. FIXED.**
+Root cause: `SessionScreen.tsx:54` releases in two steps
+(`leave().then(() => dispose())`), and BOTH released unconditionally
+(`session-screen-controller.ts:344`/`:352` → `broker.reset()`, which set
+`requester = null` with no identity check). The app has ONE link, hence ONE
+broker (`connection.ts:146`), shared by every screen ever mounted on it, so a
+release that landed after the next screen mounted its own cleared THAT one.
+Fix, in the two places the invariant is expressible:
+- `packages/core/src/permission.ts:201` — `reset(only?)`: with an argument it
+  withdraws **only** if the current requester **is** that one
+  (compare-and-reset); with no argument it stays unconditional, so the single
+  TUI prompt's unmount (`tui/permission-ui.ts:402`) is unchanged.
+- `session-screen-controller.ts:134`/`:220` — the screen mounts ONE `mounted`
+  requester of its own (created once, so no other screen's can equal it) via
+  `mountRequester()`, and every release goes through `releaseRequester()` →
+  `broker.reset(mounted)`. `dispose()` is therefore idempotent AND
+  identity-scoped: a late dispose withdraws nothing.
+Regression test `session-screen.test.ts` (`a departed screen's late dispose()
+does NOT clear the NEXT screen's requester`) — the review's own scenario, two
+ids, one shared broker and one shared controller.
+
+**Finding 2 (the doc/code disagreement; the review did not block on it, but the
+plan's "Archived sessions" subsection is a promised behaviour). FIXED.**
+`deps.archived` was genuinely dead (`grep -rn "deps.archived"` → its own
+declaration only). The plan says tapping an archived row opens the screen *with
+the archived banner and a Reopen button*; waiting for the daemon's
+`SessionArchived` refusal meant a slow or `reconnecting` link sat on `Loading…`
+with no Reopen at all.
+- `session-view.ts` — `SessionViewInput.archived` (the route's flag) and, in the
+  `opening` branch, the archived banner + Reopen from the first render
+  (`reopen` still withheld once a reopen is itself in flight).
+- `session-screen-controller.ts:185` — passes `deps.archived` into the view.
+- Because that banner's button now exists while the FIRST attach is still
+  running, a tap there would have been a no-op: `attach()` records it
+  (`queuedReopen`) and runs the reopen when the attach settles
+  (`session-screen-controller.ts:243`/`:265`). The first attach still NEVER
+  passes `reopen` — Owner Q4 is untouched, and the existing test pinning that
+  still passes.
+
+**RED before green.** Both findings' tests were written first and run against the
+unfixed branch — failing **on their assertions**, not on a compile error:
+`expect(b.state().sheet.kind).toBe("asking")` → received `"idle"`;
+`expect(screen.state().view.banner?.kind).toBe("archived")` → received
+`undefined`; `expect(kind(opening.banner)).toBe("archived")` → received `null`;
+`reset(only)` timed out because the ask was answered by the departed requester.
+
+**Mutations (each applied to ONE source file, run, restored from a byte copy,
+`cmp` re-checked — pasted).**
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `releaseRequester()` → `deps.broker.reset()` (unconditional again) | **RED** — "a departed screen's late dispose() does NOT clear the NEXT screen's requester" (16 pass / 1 fail) |
+| M2 | core `reset` loses its identity check | **RED** — that test **and** "reset(only) leaves a requester that SOMEONE ELSE set" (24 pass / 2 fail) |
+| M3 | the `input.archived` branch dropped (`if (false)`) | **RED** — 3 finding-2 tests (32 pass / 3 fail) |
+| M4 | opening branch's `reopen` hardcoded `true` | **RED** — "an archived row is announced WHILE the attach runs…" (16 pass / 1 fail) |
+| M5 | `queuedReopen` dropped (early return) | **RED** — "a Reopen tapped while the first attach is still in flight is HONOURED" (17 pass / 1 fail) |
+
+Each mutation reddens only its own cases, so no case rides on another's fix.
+`cmp` against the byte copies after every restore: all three source files
+identical.
+
+**Drift from the Implementation (and why).** Finding 2's fix is a small
+addition to the DESIGN's 12c view-model: `SessionViewInput.archived` (the plan
+had the flag only on the screen deps) and a `queuedReopen` in `attach`. Both
+keep the plan's shape — the decision stays in the pure module, the screen stays
+a dumb renderer. No `packages/**` protocol or wire change; the only `core`
+change is an optional parameter on a non-wire API (`git diff --name-only`:
+`apps/mobile/src/session-screen-controller.ts`, `apps/mobile/src/session-view.ts`,
+their two tests, `packages/core/src/permission.ts`, its test). P11 holds.
+
+**Gate (re-run by me, after the fix).**
+
+```
+$ bunx tsc --noEmit                    # clean
+$ bunx tsc --noEmit -p apps/mobile     # clean
+$ bun run lint                         # Checked 1080 files. No fixes applied. (0 errors, 0 warnings — §6 baseline)
+$ bun test apps/mobile/test packages/core/test/permission.test.ts
+                                       # 321 pass · 0 fail (30 files, 1.4 s)
+$ bun test                             # 8216 pass · 3 skip · 0 fail (EXIT=0; the 3 skips are the §6 opt-ins)
+```
+
+**Unverified / left open.** Nothing here is simulator-verified: flow 06 goes back
+to the LIST, not to a second session, so no Maestro flow exercises finding 1 in
+this round's fix (the regression is the unit test above). The thumbnail
+transport remains absent (12b Drift 1), unchanged.

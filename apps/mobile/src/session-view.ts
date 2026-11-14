@@ -43,7 +43,7 @@ export interface SessionStatus {
   readonly phase: "opening" | "open" | "failed";
   /** The typed reason, when `phase` is `failed`. */
   readonly failure?: SessionOpenFailure;
-  /** The person asked to reopen an archived session (the Reopen button). */
+  /** Whether the person asked to reopen an archived session (the Reopen button). */
   readonly reopenRequested?: boolean;
 }
 
@@ -60,6 +60,14 @@ export interface SessionViewInput {
   readonly ended: EndReason | null;
   /** What the person typed into the composer. */
   readonly draft: string;
+  /**
+   * The route said this session is in the Archived section (Owner Q4). Its
+   * banner and Reopen show from the FIRST render — before the daemon has
+   * answered the plain attach: on a slow or `reconnecting` link that answer can
+   * be a while, and the person tapped a row they SAW listed as archived. It
+   * never makes the first attach pass `reopen`.
+   */
+  readonly archived: boolean;
 }
 
 /** The composer as the screen draws it. */
@@ -153,6 +161,19 @@ export function sessionView(input: SessionViewInput): SessionView {
     composer,
   };
   if (input.status.phase === "opening") {
+    // An archived row shows its banner (and Reopen) at once: the flag is what
+    // the person tapped, and waiting for the daemon's refusal would leave a
+    // slow link on `Loading…` with no way to reopen (12c, Owner Q4).
+    if (input.archived === true) {
+      return {
+        ...base,
+        state: "Loading…",
+        banner: { kind: "archived", text: FAILURE_TEXT.archived },
+        retry: false,
+        reopen: input.status.reopenRequested !== true,
+        editable: false,
+      };
+    }
     return {
       ...base,
       state: "Loading…",

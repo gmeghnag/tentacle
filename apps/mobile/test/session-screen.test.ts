@@ -131,10 +131,39 @@ describe("opening the screen", () => {
     void asked;
   });
 
+  test("a route flagged `archived` shows its banner and Reopen while the attach is in flight (review round 1)", async () => {
+    // The plan (12c, "Archived sessions"): tapping an archived row opens the
+    // screen WITH the archived banner and a Reopen button. Waiting for the
+    // daemon to refuse the plain attach makes `deps.archived` dead code — a
+    // slow or `reconnecting` link shows `Loading…` and no Reopen at all, which
+    // contradicts what the doc claims this flag decides.
+    // Mutation: drop `archived` from the `sessionView` call's input → this is red.
+    const screen = createSessionScreen({
+      sessionId: "old",
+      archived: true,
+      title: "Old",
+      project: "e2e-mac",
+      controller: {
+        // Still attaching: the daemon has not answered yet.
+        open: () => new Promise(() => {}),
+        leave: async () => {},
+        dispose: () => {},
+        follows: () => false,
+      },
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    void screen.open();
+    expect(screen.state().view.banner?.kind).toBe("archived");
+    expect(screen.state().view.reopen).toBe(true);
+    expect(screen.state().view.editable).toBe(false);
+  });
+
   test("a route flagged `archived` still attaches WITHOUT reopen (browsing never revives — Owner Q4)", async () => {
-    // The flag only decides the BANNER when the daemon refuses the plain attach;
-    // it must never be a reason to pass `reopen`. Mutation: pass `reopen:
-    // deps.archived` → `opens` becomes `[true]` and this test is red.
+    // The flag never makes an attach pass `reopen` (it only decides the banner,
+    // announced from the first render and kept once the daemon answers).
+    // Mutation: pass `reopen: deps.archived` → `opens` becomes `[true]` and
+    // this test is red.
     const opens: boolean[] = [];
     const screen = createSessionScreen({
       sessionId: "s1",
@@ -155,6 +184,48 @@ describe("opening the screen", () => {
     });
     await screen.open();
     expect(opens).toEqual([false]);
+  });
+
+  test("a Reopen tapped while the first attach is still in flight is HONOURED, not swallowed (round-1 finding 2)", async () => {
+    // The archived banner (with Reopen) shows from the first render, so the
+    // button exists before the plain attach has answered. A tap there must
+    // reopen once that attach says `archived` — not become a dead button the
+    // person has to press twice.
+    // Mutation: drop `queuedReopen` (return early) → `opens` stays [false] and
+    // the phase stays "failed" → this is red.
+    const opens: boolean[] = [];
+    let releaseFirst: (r: { ok: false; reason: "archived" }) => void = () => {};
+    const screen = createSessionScreen({
+      sessionId: "old",
+      archived: true,
+      title: "Old",
+      project: "e2e-mac",
+      controller: {
+        open: async (_id, options) => {
+          opens.push(options?.reopen === true);
+          if (options?.reopen === true) {
+            return { ok: true, session: fakeSession([], "old") } as const;
+          }
+          return new Promise((resolve) => {
+            releaseFirst = resolve;
+          });
+        },
+        leave: async () => {},
+        dispose: () => {},
+        follows: () => false,
+      },
+      broker: new PermissionBroker(undefined, { holdUntilSet: true }),
+      now: () => 1000,
+    });
+    void screen.open();
+    expect(screen.state().view.reopen).toBe(true); // offered at once
+    screen.reopen(); // tapped while the plain attach runs
+    await settle();
+    expect(opens).toEqual([false]); // the tap did not run a second attach yet
+    releaseFirst({ ok: false, reason: "archived" });
+    await settle();
+    expect(opens).toEqual([false, true]); // honoured as soon as it settled
+    expect(screen.state().status.phase).toBe("open");
   });
 
   test("an attach that failed as archived offers Reopen, and Reopen attaches", async () => {
@@ -449,6 +520,66 @@ describe("an ask reaches the person through the sheet (F1, F2)", () => {
     await settle();
     expect(settled).toBe(false);
     expect(screen.state().sheet.kind).toBe("idle");
+  });
+
+  test("a departed screen's late dispose() does NOT clear the NEXT screen's requester (review round 1, HIGH)", async () => {
+    // The app has ONE link, therefore ONE broker (`connection.ts`), shared by
+    // every session screen ever mounted on it. A's unmount is
+    // `leave().then(() => dispose())` (`SessionScreen.tsx:54`), so A's
+    // `dispose()` runs whenever A's `session/detach` settles — possibly AFTER B
+    // has mounted its sheet's requester. If `dispose()` resets the broker
+    // unconditionally, every ask on B is held silently: no sheet, the turn
+    // hangs, nothing says why (AGENTS §7 "single broker"'s failure mode).
+    // Mutation: `deps.broker.reset()` (unconditional) in `dispose()` → B's
+    // `sheet.kind` is "idle" and this test is red; the same mutation in
+    // `leave()` reddens it too (a late leave must not clear B's requester).
+    const broker = new PermissionBroker(undefined, { holdUntilSet: true });
+    const sessions: FakeSession[] = [];
+    let releaseA: () => void = () => {};
+    const shared = createSessionController<SendableHandle>({
+      newSession: (id) => fakeSession(sessions, id),
+    });
+    const screenFor = (sessionId: string) =>
+      createSessionScreen({
+        sessionId,
+        archived: false,
+        title: sessionId,
+        project: "e2e-mac",
+        controller: shared,
+        broker,
+        now: () => 1000,
+      });
+    const a = screenFor("a");
+    await a.open();
+    // A's detach is slow (a reconnecting link): the promise settles later.
+    const slow: FakeSession = sessions[0] as FakeSession;
+    const realDetach = slow.detach;
+    (slow as unknown as { detach: () => Promise<void> }).detach = () =>
+      new Promise((resolve) => {
+        releaseA = () => {
+          void realDetach();
+          resolve();
+        };
+      });
+    const leaving = a.leave().then(() => a.dispose());
+
+    // B opens while A's detach is still in flight and mounts its requester.
+    const b = screenFor("b");
+    await b.open();
+
+    // A's detach settles now: A's `dispose()` runs after B is live.
+    releaseA();
+    await leaving;
+
+    const asked = broker.request({
+      tool: "fs_write",
+      level: "ask",
+      title: "Write a file",
+      input: {},
+    });
+    await settle();
+    expect(b.state().sheet.kind).toBe("asking"); // B still owns the broker
+    void asked;
   });
 });
 

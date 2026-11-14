@@ -22,6 +22,7 @@ const input = (over: Partial<SessionViewInput> = {}): SessionViewInput => ({
   link: "up",
   ended: null,
   draft: "",
+  archived: false,
   ...over,
 });
 
@@ -34,6 +35,28 @@ describe("the header and the banner per state", () => {
     expect(view.banner).toBeNull();
     expect(view.editable).toBe(false);
     expect(view.composer.button).toBe("disabled");
+  });
+
+  test("an archived row is announced WHILE the attach runs (round-1 finding 2), and a reopen in flight offers no second button", () => {
+    // The plan: tapping an archived row opens the screen with its banner and a
+    // Reopen button. BEFORE the daemon answers, that is the route's flag
+    // (`deps.archived`) alone — on a slow or reconnecting link there is no
+    // answer to wait for.
+    // Mutations: drop the `input.archived` branch → banner null; make `reopen`
+    // unconditional → the second expectation fails.
+    const opening = sessionView(input({ archived: true, status: { phase: "opening" } }));
+    expect(kind(opening.banner)).toBe("archived");
+    expect(opening.reopen).toBe(true); // only this button reopens (Owner Q4)
+    expect(opening.state).toBe("Loading…");
+    expect(opening.retry).toBe(false);
+    expect(opening.editable).toBe(false);
+    const reopening = sessionView(
+      input({ archived: true, status: { phase: "opening", reopenRequested: true } }),
+    );
+    expect(kind(reopening.banner)).toBe("archived");
+    expect(reopening.reopen).toBe(false); // tapping Reopen twice must not loop
+    // A live session's route never carries the flag, so this changes nothing there.
+    expect(sessionView(input({ status: { phase: "opening" } })).banner).toBeNull();
   });
 
   test("open + link up: Live, no banner, rows shown, send offered for a draft", () => {

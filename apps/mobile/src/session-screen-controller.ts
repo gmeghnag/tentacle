@@ -67,7 +67,13 @@ export interface SessionScreenDeps {
   readonly title: string;
   readonly project: string;
   readonly controller: SessionController<SendableHandle>;
-  /** The client's ONE broker: the sheet is set on it, and cleared on leave. */
+  /**
+   * The client's ONE broker: the sheet's requester is set on it on open and
+   * withdrawn on leave. `reset(requester)` withdraws ONLY the requester named,
+   * so a release that arrives after a newer screen mounted its own leaves that
+   * one in place (AGENTS §7 "single broker": a cleared requester holds asks
+   * silently).
+   */
   readonly broker: Pick<PermissionBroker, "setRequester" | "reset">;
   readonly now: () => number;
   /** Injectable for tests: the sheet's clock/arm window and the thumbnail port. */
@@ -127,6 +133,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   let ownControl: AbortController | null = null;
   let disposed = false;
   const unmount = new AbortController();
+  /** THIS screen's requester: the identity `releaseRequester` withdraws by. */
+  const mounted: PermissionRequester = (req, options) => sheet.requester(req, options);
 
   const sheet =
     deps.sheet === undefined
@@ -174,6 +182,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       link: transcript.link,
       ended: transcript.closed,
       draft,
+      archived: deps.archived,
     });
   }
 
@@ -202,10 +211,26 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     }
   }
 
-  /** Take the sheet's requester on the client's ONE broker (never a second one). */
+  /**
+   * Take the sheet's requester on the client's ONE broker (never a second one).
+   * The requester itself is the identity the release compares against: it is
+   * created once, with this screen, so no other screen's can equal it.
+   */
   function mountRequester(): void {
-    deps.broker.setRequester(sheet.requester as PermissionRequester);
+    deps.broker.setRequester(mounted);
   }
+
+  /** Withdraw the requester IF it is still this screen's (a newer screen keeps its own). */
+  function releaseRequester(): void {
+    deps.broker.reset(mounted);
+  }
+
+  /**
+   * An archived row shows its banner and Reopen from the first render, so a tap
+   * can arrive while the FIRST attach is still in flight: remember it and run
+   * it when that attach settles, instead of swallowing the tap.
+   */
+  let queuedReopen = false;
 
   /**
    * Attach. `reopen` is the person's explicit Reopen button (Owner Q4) — the
@@ -214,6 +239,9 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
    */
   async function attach(reopen: boolean): Promise<void> {
     if (attaching) {
+      if (reopen) {
+        queuedReopen = true;
+      }
       return;
     }
     attaching = true;
@@ -234,8 +262,15 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         ...(reopen ? { reopenRequested: true as const } : {}),
       };
       emit();
+      if (queuedReopen) {
+        // The person tapped Reopen while this attach was still running: honour
+        // it now rather than making them tap the same button twice.
+        queuedReopen = false;
+        void attach(true);
+      }
       return;
     }
+    queuedReopen = false;
     handle = result.session;
     status = { phase: "open" };
     // Asks reach the person from now on. Set AFTER the attach, so a replayed ask
@@ -341,7 +376,9 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     sheet: () => sheet,
     async leave() {
       sheet.dismiss();
-      deps.broker.reset();
+      // Withdraw only THIS screen's requester (never a newer screen's: the app
+      // has one link, hence one broker, shared by every screen on it).
+      releaseRequester();
       await deps.controller.leave(deps.sessionId);
       emit();
     },
@@ -349,7 +386,9 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       disposed = true;
       listeners.clear();
       unmount.abort();
-      deps.broker.reset();
+      // Idempotent and identity-scoped: a dispose that lands AFTER the next
+      // screen mounted its requester withdraws nothing.
+      releaseRequester();
     },
   };
 }
