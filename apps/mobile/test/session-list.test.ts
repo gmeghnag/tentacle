@@ -314,6 +314,33 @@ describe("describeError", () => {
     expect(described.message.toLowerCase()).not.toContain("token");
   });
 
+  test("a diagnosis over /e2e IS the wording (11b.1), never the channel's guess", () => {
+    // The mutation: keep classifying `ChannelError` by its own text/kind and a
+    // revoked phone reads "Can't connect" — a retry loop that can never work.
+    const revoked = describeError(new ChannelError("unauthorized", "denied"), {
+      computerName: "MacBook",
+      diagnosis: "revoked",
+    });
+    expect(revoked.message).toContain("removed from 'MacBook'");
+    expect(revoked.retry).toBe(false);
+    const reset = describeError(new ChannelError("unreachable", "closed"), {
+      computerName: "MacBook",
+      diagnosis: "maybe-reset",
+    });
+    expect(reset.message).toContain("reset");
+    expect(reset.retry).toBe(true);
+    // `ok`/absent diagnosis → 11a's wording, unchanged.
+    expect(
+      describeError(new ChannelError("unreachable", "x"), { computerName: "MacBook" }).message,
+    ).toBe("Can't connect — the computer is unreachable or refused this app");
+    expect(
+      describeError(new ChannelError("unreachable", "x"), {
+        computerName: "MacBook",
+        diagnosis: "ok",
+      }).message,
+    ).toBe("Can't connect — the computer is unreachable or refused this app");
+  });
+
   test("an unauthorized RPC is terminal; anything else keeps its message and retries", () => {
     expect(describeError(new RpcError(DomainErrorCode.Unauthorized, "no")).retry).toBe(false);
     expect(describeError(new RpcError(-32000, "weird")).message).toBe("weird");

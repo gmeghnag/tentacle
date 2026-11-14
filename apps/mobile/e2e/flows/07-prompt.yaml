@@ -4,10 +4,9 @@ appId: so.tentacle.app
 # turn on the daemon and streams back. Three observables, none of them the
 # screen's word alone: the running indicator (`turn-running` → `turn-idle`), the
 # assistant's row, and the daemon's own history through a hook.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:

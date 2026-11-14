@@ -9,10 +9,9 @@ appId: so.tentacle.app
 # its own requester held, the phone's sheet shows it, and the LAPTOP's answer wins
 # first — the phone's sheet must then close by itself (a `permission_resolved`
 # arrives; it never sends).
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:

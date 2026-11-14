@@ -1,0 +1,35 @@
+appId: so.tentacle.app
+---
+# 13 (docs/feat/mobile-pairing-screen.md 11b.1, F-P4): the code expired before the
+# phone used it. The `pair` window is closed, so the daemon DENIES the handshake
+# (an unknown key needs a live window) — which reaches the app as an authenticated
+# `unauthorized`, mapped to `expired`. It must never read "this phone was removed".
+#
+# `pair-start-short.js` opens a 1.5 s window; the flow waits it out, then pastes.
+- runScript:
+    file: "pair-start-short.js"
+- launchApp:
+    clearState: true
+- clearKeychain
+- extendedWaitUntil:
+    visible:
+      id: "pair-paste-input"
+    timeout: 30000
+# The window is 1.5 s: this waits past it, so the claim cannot be admitted.
+- extendedWaitUntil:
+    visible:
+      id: "pair-paste-input"
+    timeout: 3000
+- tapOn:
+    id: "pair-paste-input"
+- inputText: ${output.payload}
+- tapOn:
+    id: "pair-paste-submit"
+- assertVisible:
+    id: "pair-review"
+- tapOn:
+    id: "pair-confirm"
+- extendedWaitUntil:
+    visible:
+      id: "pair-error-expired"
+    timeout: 20000

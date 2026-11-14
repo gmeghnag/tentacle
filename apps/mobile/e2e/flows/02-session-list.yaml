@@ -5,10 +5,9 @@ appId: so.tentacle.app
 # new architecture exposes NO text to XCUITest (established empirically — a plain
 # `Text` reads as an empty string), so a visible-text assertion is permanently
 # red. The harness passes the seeded ids with `-e`.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - assertVisible:

@@ -1,0 +1,28 @@
+appId: so.tentacle.app
+---
+# 17 (docs/feat/mobile-pairing-screen.md 11b.1, Owner Q4/decision 3): the pairing
+# SURVIVES a relaunch. The record and the device key live in the Keychain
+# (this-device-only), so a fresh launch reads them back, opens on `Computers` and
+# the computer answers — its session list loads through the stored key, which is
+# the proof that the KEY survived too (a record without a working key would show
+# the row and fail to dial).
+#
+# No `clearState` on the relaunch, and no `clearKeychain` after it: that is the
+# whole property. F-H2 is why `_pair` clears the Keychain at its start.
+- runFlow: _pair.yaml
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: "computers-list"
+    timeout: 30000
+- assertVisible:
+    id: "computer-${output.computerId}"
+- tapOn:
+    id: "computer-${output.computerId}"
+- extendedWaitUntil:
+    visible:
+      id: "sessions-list"
+    timeout: 30000
+# A seeded row proves the list was READ (not an empty screen that merely drew).
+- assertVisible:
+    id: "session-${ALPHA_ID}"

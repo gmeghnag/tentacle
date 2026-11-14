@@ -8,10 +8,9 @@ appId: so.tentacle.app
 # XCUITest (plan P9). The daemon-side truth is a hook (`session-state`), which is
 # what makes "back detaches, never closes" a real assertion: `attached` drops to
 # the laptop's count and `archived` stays false.
-- launchApp:
-    clearState: true
+- runFlow: _pair.yaml
 - tapOn:
-    id: "computer-dev"
+    id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
 - tapOn:

@@ -1,47 +1,63 @@
 /**
- * The dev computer source (docs/feat/mobile-app-shell.md, Owner Q2): env →
- * records, absent URL → `[]`, a non-ws URL → a typed config error naming the
- * variable, token optional.
+ * The computer source (docs/feat/mobile-pairing-screen.md 11b.1, Files 3): the
+ * Keychain store behind 11a's `ComputerSource` seam, and NOTHING from 11a's dev
+ * source left in it — no env URL, no build-time token, no `ComputerConfigError`
+ * (F-H4 pins that).
  */
-import { describe, expect, test } from "bun:test";
-import { ComputerConfigError, devComputerSource } from "../src/computers.ts";
+import { beforeEach, describe, expect, test } from "bun:test";
+import {
+  type ComputerStore,
+  type PairedComputer,
+  createComputerStore,
+} from "../src/computer-store.ts";
+import type { SecureKV } from "../src/computer-store.ts";
+import { computerSource } from "../src/computers.ts";
 
-describe("devComputerSource", () => {
-  test("url + token + name → one computer", async () => {
-    const source = devComputerSource({
-      EXPO_PUBLIC_TENTACLE_URL: "ws://127.0.0.1:4001/",
-      EXPO_PUBLIC_TENTACLE_TOKEN: "abc",
-      EXPO_PUBLIC_TENTACLE_NAME: "e2e-mac",
-    });
-    expect(await source.list()).toEqual([
-      { id: "dev", name: "e2e-mac", url: "ws://127.0.0.1:4001/", token: "abc" },
-    ]);
+function memoryKV(): SecureKV {
+  const items = new Map<string, string>();
+  return {
+    async get(key) {
+      return items.get(key) ?? null;
+    },
+    async set(key, value) {
+      items.set(key, value);
+    },
+    async delete(key) {
+      items.delete(key);
+    },
+  };
+}
+
+const computer: PairedComputer = {
+  id: "0123456789abcdef",
+  name: "MacBook",
+  computerKey: "k".repeat(43),
+  addresses: ["ws://127.0.0.1:4000/e2e"],
+  deviceName: "iPhone",
+  pairedAt: 1,
+};
+
+describe("computerSource", () => {
+  let store: ComputerStore;
+  beforeEach(() => {
+    store = createComputerStore({ kv: memoryKV(), keychainAccessible: 1 });
   });
 
-  test("no URL → [] (the app shows the pairing placeholder, never a crash)", async () => {
-    expect(await devComputerSource({}).list()).toEqual([]);
-    expect(await devComputerSource({ EXPO_PUBLIC_TENTACLE_URL: "" }).list()).toEqual([]);
+  test("it IS the store: add → list → get → remove", async () => {
+    const source = computerSource(store);
+    expect(await source.list()).toEqual([]);
+    await source.add(computer, "priv");
+    expect((await source.list()).map((entry) => entry.state)).toEqual(["paired"]);
+    expect((await source.get(computer.id))?.deviceKey).toBe("priv");
+    await source.remove(computer.id);
+    expect(await source.list()).toEqual([]);
+    expect(await source.get(computer.id)).toBeUndefined();
   });
 
-  test("no token → the record has none (not an empty one)", async () => {
-    const source = devComputerSource({ EXPO_PUBLIC_TENTACLE_URL: "wss://mac.local:4001/" });
-    const [computer] = await source.list();
-    expect(computer?.token).toBeUndefined();
-    // No name → the host, so the computer row is never blank.
-    expect(computer?.name).toBe("mac.local:4001");
-  });
-
-  test("an http: URL is a config error naming the variable", async () => {
-    const source = devComputerSource({ EXPO_PUBLIC_TENTACLE_URL: "http://127.0.0.1:4001" });
-    const caught = await source.list().catch((error: unknown) => error);
-    expect(caught).toBeInstanceOf(ComputerConfigError);
-    expect((caught as ComputerConfigError).variable).toBe("EXPO_PUBLIC_TENTACLE_URL");
-    expect((caught as ComputerConfigError).message).toContain("ws://");
-  });
-
-  test("garbage is a config error too, not a crash", async () => {
-    const source = devComputerSource({ EXPO_PUBLIC_TENTACLE_URL: "not a url" });
-    const caught = await source.list().catch((error: unknown) => error);
-    expect(caught).toBeInstanceOf(ComputerConfigError);
+  test("the record carries no token (a device key authenticates; F-H4)", () => {
+    // The type, not a runtime check: a `token` field would have to be added to
+    // `PairedComputer`, which the guard test in pairing-guards.test.ts forbids.
+    const fields = Object.keys(computer).sort();
+    expect(fields).toEqual(["addresses", "computerKey", "deviceName", "id", "name", "pairedAt"]);
   });
 });
