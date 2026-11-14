@@ -41,8 +41,10 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import {
+  MAX_PAIRING_ADDRESSES,
   decodeBase64Url,
   encodeBase64Url,
+  isPairingAddress,
   isPairingName,
   normalizePairingCode,
 } from "@tentacle/protocol";
@@ -423,7 +425,7 @@ function serializeRegistry(registry: DeviceRegistry): string {
   });
 }
 
-function processAlive(pid: number): boolean {
+export function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -1043,6 +1045,13 @@ export interface DaemonRecord {
   readonly tls: boolean;
   readonly cwd: string;
   readonly startedAt: number;
+  /**
+   * The daemon's own public URLs — a tailnet name, a tunnel, its own domain
+   * (`serve --address`, docs/feat/sibling-discovery.md owner Q3): addresses its
+   * bind cannot show. Optional so an older writer's record still reads; each
+   * value is a `ws(s)://…/e2e` URL (`isPairingAddress`), bounded and deduped.
+   */
+  readonly addresses?: readonly string[];
 }
 
 export const DAEMON_RECORD_VERSION = 1;
@@ -1057,13 +1066,37 @@ export function writeDaemonRecord(
 ): DeviceStoreFailure | { readonly ok: true } {
   const dir = daemonsDir(configDir);
   const path = join(dir, `${record.pid}.json`);
+  // Kept in the record only when there is something to keep: a record with no
+  // `--address` must stay byte-identical to an older build's (`JSON.stringify`
+  // drops an `undefined` member).
+  const addresses = recordAddresses(record.addresses);
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    writeAtomic(path, JSON.stringify({ v: DAEMON_RECORD_VERSION, ...record }));
+    writeAtomic(
+      path,
+      JSON.stringify({
+        v: DAEMON_RECORD_VERSION,
+        ...record,
+        addresses: addresses.length > 0 ? addresses : undefined,
+      }),
+    );
   } catch (error) {
     return failure(path, (error as Error).message);
   }
   return { ok: true };
+}
+
+/**
+ * The subset of `addresses` this store keeps: valid pairing addresses, deduped,
+ * capped. Invalid values are DROPPED, not refused with the whole record — a
+ * hand-edited record must not make its daemon invisible to discovery (`serve`
+ * validates the flag before it gets here, so a drop is not the normal path).
+ */
+function recordAddresses(addresses: readonly string[] | undefined): string[] {
+  if (addresses === undefined) {
+    return [];
+  }
+  return [...new Set(addresses.filter(isPairingAddress))].slice(0, MAX_PAIRING_ADDRESSES);
 }
 
 export function removeDaemonRecord(configDir: string, pid: number = process.pid): void {
@@ -1075,12 +1108,25 @@ export function removeDaemonRecord(configDir: string, pid: number = process.pid)
  * DEFINED order — oldest listener first, ties by pid: `readdir` order is not
  * specified, and `pair` puts these addresses in a QR where the order is what a
  * phone tries first.
+ *
+ * `freshWithinMs` adds the HEARTBEAT signal beside the pid (owner Q5,
+ * docs/feat/sibling-discovery.md): a record whose mtime is older than that is
+ * skipped. The pid alone cannot tell a live `serve` from a crashed one whose
+ * pid a stranger now holds (Repro 3). Absent = the pid is the whole signal, as
+ * before 10 (`pair` keeps that, so a stale-but-real daemon is not lost from a
+ * QR). `now` pins the clock (tests; the driver also uses it to skip freshness
+ * on the poll after a suspend).
  */
 export function readDaemonRecords(
   configDir: string,
-  options: { readonly alive?: (pid: number) => boolean } = {},
+  options: {
+    readonly alive?: (pid: number) => boolean;
+    readonly freshWithinMs?: number;
+    readonly now?: number;
+  } = {},
 ): DaemonRecord[] {
   const alive = options.alive ?? processAlive;
+  const now = options.now ?? Date.now();
   const dir = daemonsDir(configDir);
   let names: string[];
   try {
@@ -1098,7 +1144,11 @@ export function readDaemonRecords(
     if (!alive(pid)) {
       continue;
     }
-    const read = readJson(join(dir, name));
+    const path = join(dir, name);
+    if (options.freshWithinMs !== undefined && !fresh(path, now, options.freshWithinMs)) {
+      continue;
+    }
+    const read = readJson(path);
     if (read.kind !== "value" || !isObject(read.value)) {
       continue;
     }
@@ -1115,6 +1165,9 @@ export function readDaemonRecords(
     ) {
       continue;
     }
+    const addresses = recordAddresses(
+      Array.isArray(value.addresses) ? value.addresses.filter((a) => typeof a === "string") : [],
+    );
     records.push({
       pid,
       host: value.host,
@@ -1122,7 +1175,75 @@ export function readDaemonRecords(
       tls: value.tls,
       cwd: value.cwd,
       startedAt: value.startedAt,
+      ...(addresses.length > 0 ? { addresses } : {}),
     });
   }
   return records.sort((a, b) => a.startedAt - b.startedAt || a.pid - b.pid);
+}
+
+/** Is `path`'s mtime within `withinMs` of `now`? An unreadable file is NOT fresh (it is skipped). */
+function fresh(path: string, now: number, withinMs: number): boolean {
+  try {
+    const { mtimeMs } = statSync(path);
+    return now - mtimeMs <= withinMs;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The HEARTBEAT: mark this daemon's record alive now (`serve` calls it every
+ * `heartbeatMs`, docs/feat/sibling-discovery.md). `false` when the record is
+ * gone — a heartbeat racing the stop must never CREATE one, so `rm` is the
+ * final word. Utimensat on the path, not a rewrite: the record's bytes do not
+ * change, so a concurrent reader sees no half-file and `pair`'s addresses stay
+ * put.
+ */
+export function touchDaemonRecord(configDir: string, pid: number = process.pid): boolean {
+  const path = join(daemonsDir(configDir), `${pid}.json`);
+  try {
+    const now = new Date();
+    utimesSync(path, now, now);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove the records of daemons that are provably GONE (a dead pid, F1): the
+ * sweep every polling daemon runs. A live-but-stale record is NOT touched — it
+ * may be a sibling whose heartbeat is late (a suspended host, a busy process),
+ * and deleting it would drop a real daemon from the phone's list (F2/F3).
+ * Returns how many were removed.
+ */
+export function sweepDeadDaemonRecords(
+  configDir: string,
+  options: { readonly alive?: (pid: number) => boolean } = {},
+): number {
+  const alive = options.alive ?? processAlive;
+  const dir = daemonsDir(configDir);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names) {
+    const match = /^(\d+)\.json$/.exec(name);
+    if (match === null) {
+      continue;
+    }
+    if (alive(Number(match[1]))) {
+      continue;
+    }
+    try {
+      rmSync(join(dir, name), { force: true });
+      removed++;
+    } catch {
+      // Someone else's directory, or it went away first: next poll.
+    }
+  }
+  return removed;
 }

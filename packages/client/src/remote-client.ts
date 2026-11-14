@@ -36,6 +36,7 @@ import {
   type ClearResult,
   type ClientInfo,
   type CompactResult,
+  type DaemonDiscovery,
   DomainErrorCode,
   type HistoryCut,
   type HooksTrustParams,
@@ -92,7 +93,13 @@ import {
   encodeBase64,
 } from "@tentacle/transport";
 import { ATTACH_TIMEOUT_MS, UPLOAD_RECONNECT_MS } from "./constants.ts";
-import { type ImageInput, imageInput } from "./image-input.ts";
+import { type DiscoveryState, foldDiscovery } from "./discovery.ts";
+import {
+  type ImageInput,
+  type ImageModelScope,
+  OLD_DAEMON_IMAGES,
+  imageInput,
+} from "./image-input.ts";
 import { boundJobOutput, boundJobs, jobsFromSnapshot } from "./jobs.ts";
 import { type LaptopImageFallback, LaptopImages } from "./laptop-images.ts";
 import {
@@ -146,9 +153,8 @@ export const SUBAGENT_MESSAGE_OLD_DAEMON =
 /** A daemon that predates `session/job_output`: a typed refusal, shown as a notice. */
 export const JOB_OUTPUT_OLD_DAEMON = "this daemon cannot show a job's output (older version)";
 
-/** A daemon that predates `attachment/put`: a typed refusal, never a throw at a UI. */
-export const ATTACHMENTS_OLD_DAEMON =
-  "this daemon cannot receive images (older version) — update tentacle";
+/** A daemon that predates `attachment/put`: the ONE update advice (docs/feat/images-off-reason.md). */
+export const ATTACHMENTS_OLD_DAEMON = OLD_DAEMON_IMAGES;
 
 /** An `attachment/put` this daemon refuses outright: no retry (the bytes are not the problem). */
 export class AttachmentsUnsupportedError extends RpcError {
@@ -440,6 +446,24 @@ export interface RemoteClientOptions {
    */
   readonly localImages?: { readonly vision: boolean; readonly maxBytes: number };
   /**
+   * THIS laptop's model id (`config.model`), display-only: the name a "config
+   * has images off" reason repeats when the turns run on OUR model (a
+   * `modelScope: "laptop"` daemon — the worker, a `--model-proxy` pod,
+   * docs/feat/images-off-reason.md). Never used to name a daemon's own model.
+   */
+  readonly modelName?: string;
+  /**
+   * Whose model runs the turns on THIS daemon, and so whose config the "images
+   * are off" advice is about (docs/feat/images-off-reason.md, fix round 1
+   * finding 1): `laptop` for the in-process worker and a `--model-proxy` pod
+   * (this laptop's model, this laptop's `model.images`); `daemon` for a daemon
+   * that runs its OWN model from its OWN config — a `serve` host, and a pod
+   * daemon started without `--model-proxy`, where a `tentacle config set` on the
+   * laptop changes nothing. Default `daemon`: the honest answer when the caller
+   * did not say, because it never names another machine's model as its own.
+   */
+  readonly modelScope?: ImageModelScope;
+  /**
    * Where `images` (the pod's byte source) falls back on a miss: this laptop's
    * blob dir of a session this client built (`images.allowSession`;
    * docs/feat/attachments-durable.md D6). Absent → memory only.
@@ -500,6 +524,15 @@ function bunSha256Bytes(): ((bytes: Uint8Array) => string) | undefined {
 /** An older daemon's answer to a method it does not have (AGENTS §7: additive methods). */
 function isMethodNotFound(error: unknown): boolean {
   return error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound;
+}
+
+/**
+ * A model name from the wire (a pod's daemon is not trusted, AGENTS §7), or
+ * `undefined`: a bounded single display line, never an id used for a call. The
+ * pure reason builder sanitizes again — this only stops a non-string.
+ */
+function nameOfModel(raw: unknown): string | undefined {
+  return typeof raw === "string" && raw !== "" ? raw : undefined;
 }
 
 /** Restarts of one `readBack` (a rebase between pages, a refused read retried cold, a drifted checkpoint re-read cold). */
@@ -722,6 +755,15 @@ export class RemoteClient {
     (notice: SessionSubagentMessageNotice) => void
   >();
   private readonly statusListeners = new Set<(status: LinkStatus) => void>();
+  /**
+   * The sibling-discovery listener (`daemon/discover`), if one was set. Kept
+   * across reconnects: the subscription is PER CONNECTION, so `linkUp` asks
+   * again after every re-dial — else a Wi-Fi blip would silently end discovery
+   * (docs/feat/sibling-discovery.md F7).
+   */
+  private discoveryListener: ((discovery: DaemonDiscovery) => void) | undefined;
+  /** The highest `rev` delivered for the CURRENT daemon process (the F12 guard). */
+  private discoveryState: DiscoveryState | undefined;
   private readonly historyLostListeners = new Set<(notice: HistoryLostNotice) => void>();
   private readonly sessionDeletedListeners = new Set<(notice: SessionDeletedNotice) => void>();
   /** Conditions re-checked after every state change (session live, link stopped, …). */
@@ -770,6 +812,10 @@ export class RemoteClient {
   private readonly sha256Bytes: ((bytes: Uint8Array) => string) | undefined;
   /** This laptop's own vision config (see the option): the `client`-mode gate. */
   private readonly localImages?: { readonly vision: boolean; readonly maxBytes: number };
+  /** This laptop's model id, for a display-only "images are off" reason. */
+  private readonly modelName?: string;
+  /** Whose model/config that reason is about (`"daemon"` unless told). */
+  private readonly modelScope: ImageModelScope;
   /**
    * The laptop's own image bytes (`docs/feat/attachments-prompt.md` D5/D6):
    * what a pod's refs resolve against. Always present, so a caller needs no
@@ -783,6 +829,12 @@ export class RemoteClient {
    * `undefined` until the first handshake answers.
    */
   private capabilities: AgentCapabilities | undefined;
+  /**
+   * The last handshake's `protocolVersion` and the model that runs the turns
+   * (`agentInfo.model`), kept ONLY to say WHY images are off (docs/feat/
+   * images-off-reason.md): a daemon of our own protocol is never "old".
+   */
+  private daemonImages: { readonly protocol?: number; readonly model?: string } = {};
 
   constructor(
     channel: DuplexChannel,
@@ -822,6 +874,10 @@ export class RemoteClient {
     if (options.localImages) {
       this.localImages = options.localImages;
     }
+    if (options.modelName) {
+      this.modelName = options.modelName;
+    }
+    this.modelScope = options.modelScope ?? "daemon";
     this.images = new LaptopImages(
       options.imageFallback ? { fallback: options.imageFallback } : {},
     );
@@ -921,6 +977,83 @@ export class RemoteClient {
     );
   }
 
+  /**
+   * `daemon/discover` (docs/feat/sibling-discovery.md): this computer's live
+   * sibling daemons and the addresses each is reachable on. Resolves the
+   * current snapshot AND subscribes `listener` to later changes; set `listener`
+   * once (a second call replaces it, and the daemon keeps one subscription per
+   * connection). It is re-issued automatically after a reconnect — the
+   * subscription is per connection, so a link drop would otherwise end
+   * discovery for good.
+   *
+   * Resolves `undefined` when the daemon cannot answer: an older build or a pod
+   * daemon answers `MethodNotFound` = "no discovery", and a client keeps what
+   * pairing gave it. Any other error is rethrown.
+   */
+  discover(listener: (discovery: DaemonDiscovery) => void): Promise<DaemonDiscovery | undefined> {
+    this.discoveryListener = listener;
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(this.peer, Method.DaemonDiscover, {})
+      .then((result) => {
+        const snapshot = result as DaemonDiscovery;
+        this.discoveryState = foldDiscovery(this.discoveryState, snapshot, this.clock.now());
+        return snapshot;
+      })
+      .catch((error: unknown) => {
+        if (isMethodNotFound(error)) {
+          return undefined;
+        }
+        throw error;
+      });
+  }
+
+  /**
+   * A `daemon/discovery` frame: the daemon's siblings changed. Routed through
+   * `foldDiscovery`, so a frame that overtook the subscribing response is
+   * dropped (F12) and a restarted daemon's `rev` restart is honoured (F7).
+   */
+  private onDiscovery(params: DaemonDiscovery): void {
+    const next = foldDiscovery(this.discoveryState, params, this.clock.now());
+    this.discoveryState = next;
+    if (next.changed) {
+      this.discoveryListener?.(params);
+    }
+  }
+
+  /**
+   * Re-issue `daemon/discover` on the NEW connection after a re-dial: the
+   * daemon's subscription is per connection, so nothing arrives until we ask
+   * again. Non-fatal — a daemon without discovery, or one that answers a moment
+   * later, changes nothing here. A result that CHANGED the snapshot IS
+   * delivered to the listener (a change made while the link was down is only
+   * visible here, F7); one that changed nothing is silent.
+   */
+  private resubscribeDiscovery(): void {
+    const listener = this.discoveryListener;
+    if (!listener || !this.up) {
+      return;
+    }
+    this.call(this.peer, Method.DaemonDiscover, {})
+      .then((result) => {
+        const snapshot = result as DaemonDiscovery;
+        const next = foldDiscovery(this.discoveryState, snapshot, this.clock.now());
+        this.discoveryState = next;
+        // DELIVER it: a change made while the link was down arrives only as
+        // this result, and folding it silently would swallow it for good — the
+        // folded rev becomes the guard, so no later frame re-delivers it
+        // (F7: no re-pairing, the phone just learns). A resync that changed
+        // nothing stays silent (`changed`), so a reconnect causes no redraw.
+        if (next.changed) {
+          listener(snapshot);
+        }
+      })
+      .catch(() => {
+        // An older daemon (MethodNotFound) or a link already gone: discovery
+        // stays off; `discover` is the caller's explicit retry.
+      });
+  }
   /**
    * Rename a session (`session/rename`): resolves with the title the daemon
    * stored (one line, its rules). Not re-sent after a drop (the user asks
@@ -1647,11 +1780,37 @@ export class RemoteClient {
    * it offers `/attach`. Pure — it reads the last handshake, nothing else.
    */
   imageInput(): ImageInput {
-    return imageInput(this.capabilities?.images, {
-      servesModel: this.modelProvider !== undefined,
-      ...(this.localImages?.vision !== undefined ? { vision: this.localImages.vision } : {}),
-      ...(this.localImages?.maxBytes !== undefined ? { maxBytes: this.localImages.maxBytes } : {}),
-    });
+    // WHOSE "config has images off" this is (docs/feat/images-off-reason.md):
+    // the caller's `modelScope` says which model runs the turns, and each side
+    // is named from its OWN fact — the daemon from `agentInfo.model`, this
+    // laptop from `modelName`. A pod daemon without `--model-proxy` runs its
+    // OWN model from its OWN config, so naming ours there would be confident,
+    // wrong, actionable advice (fix round 1, finding 1).
+    //
+    // A daemon that REPORTS a model is one that runs it (only `serve` passes
+    // `modelInfo`; a proxy pod and the worker pass none), so that fact wins over
+    // a caller's claim: the advice then points where the model really is.
+    const daemonModel = this.daemonImages.model;
+    const onLaptop = this.modelScope === "laptop" && daemonModel === undefined;
+    const laptopModel = nameOfModel(this.modelName);
+    return imageInput(
+      this.capabilities?.images,
+      {
+        servesModel: this.modelProvider !== undefined,
+        ...(this.localImages?.vision !== undefined ? { vision: this.localImages.vision } : {}),
+        ...(this.localImages?.maxBytes !== undefined
+          ? { maxBytes: this.localImages.maxBytes }
+          : {}),
+      },
+      {
+        ...(this.daemonImages.protocol !== undefined
+          ? { protocol: this.daemonImages.protocol }
+          : {}),
+        ...(daemonModel !== undefined ? { daemonModel } : {}),
+        ...(laptopModel !== undefined ? { laptopModel } : {}),
+        scope: onLaptop ? "laptop" : "daemon",
+      },
+    );
   }
 
   /**
@@ -2208,8 +2367,13 @@ export class RemoteClient {
       : raw;
     const peer: RpcPeer = new RpcPeer(channel, {
       onNotification: (method, params) => {
-        if (current() && method === Notification.SessionUpdate) {
+        if (!current()) return;
+        if (method === Notification.SessionUpdate) {
           this.onUpdate(params as SessionUpdateParams);
+        } else if (method === Notification.DaemonDiscovery) {
+          // Only ever sent because THIS connection asked (daemon/discover), so
+          // the TUI — which never asks — never sees one (docs/feat/sibling-discovery.md).
+          this.onDiscovery(params as DaemonDiscovery);
         }
       },
       onRequest: async (method, params, context) => {
@@ -2278,6 +2442,14 @@ export class RemoteClient {
         // Re-read on EVERY handshake: a replaced pod binary may take images
         // differently now, and the client must follow the daemon it has.
         this.capabilities = result.agentCapabilities;
+        this.daemonImages = {
+          ...(typeof result.protocolVersion === "number"
+            ? { protocol: result.protocolVersion }
+            : {}),
+          ...(nameOfModel(result.agentInfo?.model) !== undefined
+            ? { model: nameOfModel(result.agentInfo?.model) }
+            : {}),
+        };
         return result;
       },
       // A version skew says who must update — at start and on every reconnect.
@@ -2473,6 +2645,9 @@ export class RemoteClient {
     for (const entry of [...this.sessions.values()]) {
       void this.recover(entry, gen);
     }
+    // The discovery subscription belongs to the OLD connection: ask again, or a
+    // link drop would silently end discovery (F7).
+    this.resubscribeDiscovery();
     this.kick();
   }
 

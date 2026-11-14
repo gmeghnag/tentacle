@@ -384,6 +384,26 @@ const FIXTURES: Record<string, Json[]> = {
   ],
   "methods/session~1unwatch/params": [{ watchId: "w1" }],
   "methods/session~1unwatch/result": [{}],
+  "methods/daemon~1discover/params": [{}],
+  "methods/daemon~1discover/result": [
+    { rev: 0, daemons: [] },
+    {
+      rev: 3,
+      daemons: [
+        {
+          cwd: "/Users/me/project",
+          addresses: ["ws://192.168.1.5:4000/e2e", "wss://mac.tailnet.ts.net/e2e"],
+          startedAt: 1,
+          self: true,
+        },
+        { cwd: "/Users/me/other", addresses: [], startedAt: 2 },
+      ],
+    },
+  ],
+  "notifications/daemon~1discovery/params": [
+    { rev: 1, daemons: [] },
+    { rev: 2, daemons: [{ cwd: "/Users/me/project", addresses: [], startedAt: 9, self: true }] },
+  ],
   "methods/session~1context/params": [
     {},
     { sessionId: "s" },

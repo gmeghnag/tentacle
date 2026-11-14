@@ -20,6 +20,123 @@ export interface ImagesCapability {
   readonly maxBytes?: number;
 }
 
+/**
+ * The protocol that introduced image input (docs/feat/attachments-core.md,
+ * `PROTOCOL_VERSION` 23). A daemon at or past it that advertises no
+ * `images` capability is CURRENT — it simply takes no images on this model.
+ */
+export const IMAGES_PROTOCOL_VERSION = 23;
+
+/**
+ * A daemon that really predates images (docs/feat/images-off-reason.md): the
+ * ONE update advice, shared with `attachment/put`'s `MethodNotFound` refusal so
+ * the two surfaces cannot word "update the daemon" differently.
+ */
+export const OLD_DAEMON_IMAGES = "this daemon predates images — update it";
+
+/** Longest model name this reason repeats (a display line, never a full id). */
+export const MAX_REASON_MODEL_CHARS = 80;
+/** Bound on a whole `reason` sentence: a notice row, not a paragraph. */
+export const MAX_REASON_CHARS = 220;
+
+/**
+ * Whose model — and whose config — a "configured without images" reason is
+ * about. A fact only the CALLER holds: `laptop` is the local worker and a
+ * `--model-proxy` pod (this laptop runs the model, so the key and the command
+ * are here); `daemon` is a daemon that runs its OWN model from its OWN config (a
+ * `serve` host, a pod daemon started without `--model-proxy`), where running
+ * `tentacle config set` on the laptop would change nothing.
+ */
+export type ImageModelScope = "laptop" | "daemon";
+
+/**
+ * The name a daemon reports for its model, made safe for a rendered line.
+ *
+ * Stripped of control characters (a pod-supplied `agentInfo.model` reaches a
+ * terminal — AGENTS §7, a pod is not trusted) and cut at `max` — the SAME unit
+ * `MAX_REASON_CHARS` counts (string length), but never mid-character: the cut
+ * walks CODE POINTS, so an emoji or other astral character is either whole or
+ * absent, never a lone surrogate a terminal cannot draw.
+ */
+function safeModel(
+  raw: string | undefined,
+  max: number = MAX_REASON_MODEL_CHARS,
+): string | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const clean = raw
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+    .trim();
+  if (clean === "") {
+    return undefined;
+  }
+  const room = Math.max(1, max);
+  if (clean.length <= room) {
+    return clean;
+  }
+  // Whole code points only, and one unit kept for the ellipsis.
+  let kept = "";
+  for (const point of clean) {
+    if (kept.length + point.length > room - 1) {
+      break;
+    }
+    kept += point;
+  }
+  const short = kept === "" ? "…" : `${kept}…`;
+  return short.trim() === "" ? undefined : short;
+}
+
+/**
+ * Cause (a): this daemon is current, and a model's config has images off.
+ * Names the model and the key, with the command that flips it — the fact the
+ * old sentence hid behind "update it" — and says WHOSE config it is, because
+ * the key lives wherever the model runs (fix round 1, finding 1).
+ */
+export function imagesOffReason(
+  model: string | undefined,
+  scope: ImageModelScope = "daemon",
+): string {
+  const [unnamed, tail] =
+    scope === "laptop"
+      ? [
+          "this model",
+          "is configured without images — set model.images true in your config if this model takes images (tentacle config set model.images true)",
+        ]
+      : [
+          "the daemon's model",
+          "is configured without images — set model.images true in the daemon's config if that model takes images (tentacle config set model.images true, on the daemon's host)",
+        ];
+  // The model name is what varies, and the SENTENCE is what a notice row holds:
+  // give the name whatever `MAX_REASON_CHARS` leaves (never more than
+  // `MAX_REASON_MODEL_CHARS`), shortened with an ellipsis rather than letting a
+  // row wrap.
+  const room = Math.max(1, Math.min(MAX_REASON_MODEL_CHARS, MAX_REASON_CHARS - tail.length - 2));
+  const name = safeModel(model, room);
+  return `${name === undefined ? unnamed : name} ${tail}`;
+}
+
+/** The facts about the daemon that decide WHICH cause applies (all display-only). */
+export interface DaemonImageFacts {
+  /** `initialize.protocolVersion` of the daemon we talk to; absent = unknown. */
+  readonly protocol?: number;
+  /**
+   * The model the DAEMON reports for itself (`agentInfo.model`). Never used to
+   * name another machine's model as ours: a pod-supplied name is not evidence
+   * of what the laptop runs (AGENTS §7, a pod is not trusted).
+   */
+  readonly daemonModel?: string;
+  /** THIS laptop's model id (`config.model`), when the caller knows it. */
+  readonly laptopModel?: string;
+  /**
+   * Whose config an ABSENT capability is about (fix round 1, finding 1).
+   * Default `daemon`: never tell a user to run a command on a machine the
+   * evidence does not point at.
+   */
+  readonly scope?: ImageModelScope;
+}
+
 /** What THIS client can do: whether it serves the model, and its vision config. */
 export interface LocalImageConfig {
   /** True when this client holds the model provider (a pod's laptop). */
@@ -47,12 +164,29 @@ const clamp = (max: number | undefined): number =>
 export function imageInput(
   capability: ImagesCapability | undefined,
   local: LocalImageConfig,
+  daemon: DaemonImageFacts = {},
 ): ImageInput {
   if (capability === undefined) {
+    // Two different causes, told apart by a fact the client holds (docs/feat/
+    // images-off-reason.md): `initialize` enforces protocol EQUALITY, so a
+    // daemon that handshook at IMAGES_PROTOCOL_VERSION or later has the
+    // capability and its absence is about its MODEL CONFIG — telling that user
+    // to "update" current software was the bug. Only a daemon whose own
+    // protocol predates images (or one that never answered) is old, and an
+    // unknown protocol is NOT evidence of age.
+    if (daemon.protocol !== undefined && daemon.protocol < IMAGES_PROTOCOL_VERSION) {
+      return { kind: "off", reason: OLD_DAEMON_IMAGES };
+    }
+    // Whose config is off: the caller's `scope` says, and its own machine's
+    // model names it. Naming the LAPTOP's model for a daemon that runs its own
+    // is the confident, wrong advice this round removes.
+    const onLaptop = daemon.scope === "laptop";
     return {
       kind: "off",
-      reason:
-        "this daemon does not take images (its model has no vision, or it predates images — update it)",
+      reason: imagesOffReason(
+        onLaptop ? daemon.laptopModel : daemon.daemonModel,
+        onLaptop ? "laptop" : "daemon",
+      ),
     };
   }
   if (capability.input === "upload") {
@@ -80,7 +214,11 @@ export function imageInput(
       };
     }
     if (local.vision !== true) {
-      return { kind: "off", reason: "this laptop's model does not take images (model.images)" };
+      // The SAME cause as (a), on the laptop's side: a config, not a build —
+      // and always the LAPTOP's (a `client`-mode daemon tunnels this laptop's
+      // model, so `imageLimits()` here is the gate that failed). A name the
+      // daemon reports for itself is not ours, so it is never used here.
+      return { kind: "off", reason: imagesOffReason(daemon.laptopModel, "laptop") };
     }
     return { kind: "laptop", maxBytes: clamp(local.maxBytes) };
   }

@@ -1,5 +1,4 @@
 import { homedir } from "node:os";
-import { resolve } from "node:path";
 import { Session } from "@tentacle/agent";
 import {
   type AttachmentRef,
@@ -11,71 +10,40 @@ import {
 } from "@tentacle/core";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
-import { attachmentCandidateText, parseAttachCommand } from "./attach-candidates.ts";
 import {
   type AttachDraft,
-  type AttachMode,
   EMPTY_DRAFT,
   NOT_AN_IMAGE_NOTICE,
-  NO_IMAGE_SEAM,
   attachErrorText,
   attachRowRows,
   attachRowView,
-  draftRefs,
   enterConvertsToChips,
   imageRowText,
-  looksLikeCommand,
   removeLastChip,
-  routeDecision,
   submitPlan,
   uploadDone,
-  uploadProgress,
-  withChips,
 } from "./attach-draft.ts";
-import {
-  type AttachedImage,
-  type FileProbe,
-  decideAttachment,
-  nodeFileProbe,
-} from "./attach-files.ts";
+import { type AttachedImage, type FileProbe, nodeFileProbe } from "./attach-files.ts";
 import {
   type DockOutcome,
-  type DockState,
-  INPUT_DOCK,
   applyLateOutcome,
   clickDock,
-  dockClaimsCtrlX,
-  dockKey,
   dockKindOf,
   downEntersList,
   downToDock,
   noteSent,
   reconcile,
-  refusalPlacement,
   resetDock,
-  restoreRefused,
-  sendTarget,
-  toggleList,
 } from "./background-focus.ts";
 import {
-  type DockJobRow,
   backgroundListView,
   dockRows,
   drawerView,
-  frozenAgent,
-  frozenJob,
   inputTitle,
   jobDrawerView,
   listVisible,
 } from "./background-list.ts";
-import {
-  type BackgroundAgentRow,
-  backgroundCount,
-  backgroundNames,
-  sameIds,
-  sameJobIds,
-  sameReads,
-} from "./background-view.ts";
+import { backgroundCount, backgroundNames } from "./background-view.ts";
 import {
   BLINK_HALF_MS,
   BLINK_IDLE,
@@ -85,30 +53,16 @@ import {
   blinkState,
   syncBlink,
 } from "./blink.ts";
-import { idleChord, stepChord } from "./chord.ts";
+import { idleChord } from "./chord.ts";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
 import {
   type QuitConfirmFacts,
-  ctrlCQuitStep,
-  helpText,
-  isSessionMutating,
-  lastAssistantText,
-  lastUserText,
   matchCommands,
-  mcpStatusError,
   paletteWindow,
-  parseRename,
-  quitAction,
   quitCommandStep,
-  quitConfirmKey,
   quitConfirmText,
-  renameFailedNotice,
-  renamedNotice,
-  resolveSlash,
-  retryPlan,
-  skillsListError,
-  transcriptToMarkdown,
 } from "./commands.ts";
+import { dispatchCommand } from "./commands/dispatch.ts";
 import { BackgroundList, JobDrawer, SubagentDrawer } from "./components/BackgroundList.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
 import { LineInput } from "./components/LineInput.tsx";
@@ -124,19 +78,14 @@ import { startIdleWarm } from "./idle-warm.ts";
 import { resolveLineInput } from "./input-actions.ts";
 import { inputRowCount } from "./input-view.ts";
 import { JOB_REFRESH_MS, JOB_TAIL_SHOWN, jobOutcome, refreshDue } from "./job-drawer.ts";
+import { type KeyHost, executeEffects } from "./keys/execute.ts";
+import { PURE_LAYERS } from "./keys/layers.ts";
+import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
 import { modelErrorNotice } from "./model-error.ts";
-import {
-  type OpenPanel,
-  applyPanel,
-  mcpPanel,
-  panelClick,
-  panelView,
-  sessionsPanel,
-  skillsPanel,
-} from "./panel.ts";
-import { sanitizePasted, stepPaste } from "./paste.ts";
-import { insertReply, orphanNotice, replyView, stepPermissionKey } from "./permission-reply.ts";
+import { type OpenPanel, applyPanel, panelClick, panelView } from "./panel.ts";
+import { sanitizePasted } from "./paste.ts";
+import { insertReply, orphanNotice, replyView } from "./permission-reply.ts";
 import {
   type AutoAcceptFeed,
   type DraftBack,
@@ -146,6 +95,8 @@ import {
   permissionShowsCwd,
   usePermissionBroker,
 } from "./permission-ui.ts";
+import { useAttachments } from "./useAttachments.ts";
+import { useDock } from "./useDock.ts";
 import { useMouse } from "./useMouse.ts";
 
 export type { AutoAcceptFeed };
@@ -203,17 +154,14 @@ import {
   deleteFailedNotice,
   openFailedNotice,
   refreshedSessions,
-  sessionsAt,
   sessionsChoose,
   sessionsDelete,
-  sessionsKey,
   sessionsListError,
   sessionsRefreshApplies,
   stayingNotice,
   switchRefusedNotice,
   switchingRefusal,
 } from "./sessions-panel.ts";
-import { SETTINGS_SYNCING, settingsCommand } from "./settings-command.ts";
 import { SkillsSync } from "./skills-sync.ts";
 import {
   type DisplayItem,
@@ -239,7 +187,7 @@ import { inputRuleText } from "./status-line.ts";
 import { type ContextOpen, contextShown, pillView, statusTokens } from "./status-view.ts";
 import { subagentNotifyNotice, userToSubagentNotice } from "./subagent-notify.ts";
 import { dimProps, palette } from "./theme.ts";
-import { panelHeight, panelMaxBody, treeKey } from "./tree-panel.ts";
+import { panelHeight, panelMaxBody } from "./tree-panel.ts";
 import {
   FOREIGN_COMPACTED_NOTICE,
   SLOT_LOST_NOTICE,
@@ -483,9 +431,10 @@ export function App({
   const draftRef = useRef("");
   // The input's image chips + the upload in flight (docs/feat/attachments-tui.md
   // D6). The REF is the truth an async handler reads; the state renders and
-  // feeds `inputBoxRows`. `attachSeqRef` keeps one decision in flight at a time
-  // (two pastes are serialized, so `existing` is always the current chips), and
-  // `attachGenRef` drops a late result after an unmount.
+  // feeds `inputBoxRows`. The one-decision-at-a-time chain (two pastes are
+  // serialized, so `existing` is always the current chips) lives with the
+  // executor, in `useAttachments.ts` — never a second one here; `attachGenRef`
+  // stays, and drops a late result after an unmount.
   const [attach, setAttachState] = useState<AttachDraft>(EMPTY_DRAFT);
   const attachRef = useRef<AttachDraft>(EMPTY_DRAFT);
   const setAttach = useCallback((next: AttachDraft | ((prev: AttachDraft) => AttachDraft)) => {
@@ -493,7 +442,6 @@ export function App({
     attachRef.current = value;
     setAttachState(value);
   }, []);
-  const attachChainRef = useRef<Promise<void>>(Promise.resolve());
   const attachGenRef = useRef(0);
   // The text a `convert` already probed and put back with `NOT_AN_IMAGE_NOTICE`:
   // the next Enter on that same text sends it as a message instead of probing
@@ -577,144 +525,32 @@ export function App({
   const [loading, setLoading] = useState<{ done: number; total: number } | null>(null);
   // The daemon's queue (every writer's waiting rows), as last reported (C7).
   const [daemonQueue, setDaemonQueue] = useState<DaemonQueue | undefined>(undefined);
-  // The session's background sub-agents, as last reported (undefined: not reported).
-  const [subagents, setSubagents] = useState<readonly BackgroundAgentRow[] | undefined>(undefined);
-  // The same list for the callbacks that must not re-create themselves on every
-  // frame (`requestQuit`, the key handler): a ref, updated where it is set.
-  const subagentsRef = useRef<readonly BackgroundAgentRow[] | undefined>(undefined);
-  const setAgents = useCallback((rows: readonly BackgroundAgentRow[] | undefined) => {
-    // The ref always tracks the daemon's report (the key handler and
-    // `requestQuit` read it); the STATE only changes when the count or the ids
-    // do — the frame carries up to 4 full states a second, and re-rendering the
-    // whole App for an unchanged list is pure waste (LOW-4).
-    const previous = subagentsRef.current;
-    // Keep the last rows the dock could paint BEFORE they are replaced: an open
-    // child that this report drops freezes its drawer on them (`reconcile`).
-    if (previous !== undefined && previous.length > 0) {
-      dockLastRowsRef.current = previous;
-    }
-    subagentsRef.current = rows;
-    // A read count alone must still reach the frame: the drawer's `✓ read`
-    // reads it (docs/fix/autoaccept-wake-turns.md part B). `sameIds` alone would
-    // swallow it, exactly as the daemon's `sameRows` would.
-    if (!sameIds(previous, rows) || !sameReads(previous, rows)) {
-      setSubagents(rows);
-    }
-  }, []);
-  /** The last non-empty rows the dock could paint: what an ended drawer freezes on. */
-  const dockLastRowsRef = useRef<readonly BackgroundAgentRow[]>([]);
-  // The session's running shell jobs, as last reported (undefined: not reported).
-  const [jobRows, setJobRowsState] = useState<readonly DockJobRow[] | undefined>(undefined);
-  /** The same list for the callbacks that must not re-create on every frame. */
-  const jobRowsRef = useRef<readonly DockJobRow[] | undefined>(undefined);
-  const setJobs = useCallback((rows: readonly DockJobRow[] | undefined) => {
-    const previous = jobRowsRef.current;
-    // Keep the last rows the dock could paint BEFORE they are replaced: an open
-    // job that this report drops freezes its drawer on them (`reconcile`).
-    if (previous !== undefined && previous.length > 0) {
-      dockLastJobRowsRef.current = previous;
-    }
-    jobRowsRef.current = rows;
-    if (!sameJobIds(previous, rows)) {
-      setJobRowsState(rows);
-    }
-  }, []);
-  /** The last non-empty rows a job's drawer can freeze on. */
-  const dockLastJobRowsRef = useRef<readonly DockJobRow[]>([]);
-  /**
-   * A child's exit as the transcript's notice already learns it, by id: the
-   * `end_turn` that means "finished" (what a frozen drawer says).
-   */
-  const dockOutcomeRef = useRef<Record<string, DockOutcome>>({});
-  /**
-   * The child that just ENDED and when, for the pill's `✓ sa-1 done` (~5 s; the
-   * window and the wording are `status-view.ts`'s `PILL_DONE_MS`). Written by the
-   * same `jobs.onExit` feed that records the outcome, so the pill and the
-   * transcript's notice can never disagree about who ended.
-   */
-  const dockFinishedRef = useRef<{ readonly id: string; readonly at: number } | null>(null);
-  /**
-   * The jobs THIS dock asked to stop (`x` then `y`). A job's exit record only
-   * says `killed` — it cannot tell the user's own stop (`✗ stopped`) from a
-   * signal nobody here sent (`✗ killed`), which owner B wants apart (fix round 1).
-   */
-  const dockStoppedRef = useRef<Set<string>>(new Set());
-  /**
-   * Each open job's last read, by wire id: what its drawer paints. A REF, never
-   * state the refresh effect depends on — a fresh read must not re-arm the timer
-   * (that is what would break the ≤ 1/s rule); the `jobOutputGen` state beside it
-   * is only a render trigger.
-   */
-  const jobOutputRef = useRef<
-    Record<
-      string,
-      {
-        readonly output: readonly string[];
-        readonly truncated?: boolean;
-        readonly exitCode?: number | null;
-      }
-    >
-  >({});
-  const [, setJobOutputGen] = useState(0);
-  /** When the last read was issued (ms), and for which job: the `refreshDue` input. */
-  const jobReadAtRef = useRef<{ readonly id: string; readonly at: number } | null>(null);
-  // The dock (docs/feat/subagent-panel.md): its focus, the drafts per target and
-  // the messages sent to each child. `dockRef` is the truth for the key handler
-  // (a keypress must read what the last one wrote); the state renders.
-  const [dock, setDockState] = useState<DockState>(INPUT_DOCK);
-  const dockRef = useRef<DockState>(INPUT_DOCK);
-  const setDock = useCallback((next: DockState | ((prev: DockState) => DockState)) => {
-    // The ref is written EAGERLY, from itself: a keypress handled later in the
-    // same tick (or before React commits) must read what the last one decided.
-    // (A ref written inside the state updater lands at render time — too late,
-    // which would let an ended child's Enter send.)
-    const value = typeof next === "function" ? next(dockRef.current) : next;
-    dockRef.current = value;
-    setDockState(value);
-  }, []);
-  /**
-   * The dock's item ids in paint order: the children, then the jobs — the order
-   * `backgroundListView` paints (a job never jumps above a child that started
-   * later). Both kinds' ids are wire ids (`sa-N` / `bg-N`), so they never collide.
-   */
-  const dockIds = useCallback(
-    (): readonly string[] => [
-      ...(subagentsRef.current ?? []).map((r) => r.id),
-      ...(jobRowsRef.current ?? []).map((r) => r.id),
-    ],
-    [],
-  );
-  /** Whether the list has anything to show (the dock's `listVisible`). */
-  const dockVisible = useCallback(
-    (): boolean => listVisible(subagentsRef.current, jobRowsRef.current),
-    [],
-  );
-  /** The item an open drawer paints: its live row (child or job), or the frozen one. */
-  const drawerSubject:
-    | { kind: "agent"; row: BackgroundAgentRow }
-    | { kind: "job"; row: DockJobRow }
-    | null =
-    dock.focus.kind !== "open"
-      ? null
-      : (() => {
-          const id = (dock.focus as { id: string }).id;
-          const live = subagentsRef.current?.find((r) => r.id === id);
-          if (live !== undefined) {
-            return { kind: "agent" as const, row: live };
-          }
-          const liveJob = jobRowsRef.current?.find((r) => r.id === id);
-          if (liveJob !== undefined) {
-            return { kind: "job" as const, row: liveJob };
-          }
-          const frozen = frozenAgent(dock.focus.frozen);
-          if (frozen !== null) {
-            return { kind: "agent" as const, row: frozen };
-          }
-          const frozenJ = frozenJob(dock.focus.frozen);
-          return frozenJ === null ? null : { kind: "job" as const, row: frozenJ };
-        })();
-  const drawerRow = drawerSubject?.kind === "agent" ? drawerSubject.row : null;
-  const drawerJob = drawerSubject?.kind === "job" ? drawerSubject.row : null;
+  // ── the dock (S5 — docs/feat/app-decomposition.md) ─────────────────────────
+  // The background rows, the dock's focus/drafts/`sent`, the per-job output
+  // cache and the four dock actions live in `useDock`. Its EFFECTS stay here, in
+  // today's order (Fable H1 / owner Q7 (a)): the hook declares none, and returns
+  // the refs and derived triggers they read. The destructuring keeps every
+  // pre-S5 identifier (Fable M1), so no use site below changes.
+  //
+  // `pushNotice` is declared BELOW this hook (it needs `flushNow`, and this
+  // block's refs are needed by an effect declared above it): it travels as a ref,
+  // the same late binding `routeAttachRef`/`runRef`/`warmErrorRef` already use.
+  const pushNoticeRef = useRef<(text: string) => void>(() => {});
+  const dockLayer = useDock({
+    sessionRef,
+    field,
+    fieldValueRef,
+    pushNoticeRef,
+    jobRefreshMs,
+  });
+  const { subagents, subagentsRef, setAgents, dockLastRowsRef } = dockLayer;
+  const { jobRows, jobRowsRef, setJobs, dockLastJobRowsRef } = dockLayer;
+  const { dockOutcomeRef, dockFinishedRef, dockStoppedRef } = dockLayer;
+  const { jobOutputRef, setJobOutputGen, jobReadAtRef } = dockLayer;
+  const { dock, dockRef, setDock, dockIds, dockVisible } = dockLayer;
+  const { drawerRow, drawerJob } = dockLayer;
+  const { dockSeenRef, dockIdKey, jobTargetId, jobEndedWhileOpen, refreshMs } = dockLayer;
+  const { killChild, killJob, toggleAgents, submitToTarget } = dockLayer;
   const layoutOptsRef = useRef<RenderOptions>({
     expandAll: false,
     width: 80,
@@ -872,7 +708,10 @@ export function App({
       // Autonomous wake: react to the exit without a user prompt.
       armWake();
     });
-  }, [jobs, flushNow, armWake, setDock]);
+    // The dock's refs are STABLE objects (`useDock`'s `useRef`s), so naming them
+    // here satisfies the rule without re-subscribing on a render (Fable H2: deps
+    // name the fields, never the port).
+  }, [jobs, flushNow, armWake, setDock, dockFinishedRef, dockOutcomeRef, dockStoppedRef]);
 
   // --- host notices ----------------------------------------------------------
   useEffect(() => {
@@ -1215,159 +1054,12 @@ export function App({
     },
     [flushNow],
   );
+  pushNoticeRef.current = pushNotice;
 
-  /**
-   * Stop one child (`session/agent_kill`) — the `ctrl+x` then `ctrl+x` arm's second step
-   * (docs/feat/subagent-panel.md, owner P4 (a)). A refusal is a notice, never a
-   * throw; the row leaves on the daemon's next list update, and the transcript
-   * gets the existing exit notice (`backgroundExitNotice`, unchanged).
-   */
-  const killChild = useCallback(
-    (id: string): void => {
-      const session = sessionRef.current;
-      if (!session?.killSubagent) {
-        pushNotice("_this session cannot stop background sub-agents: no agent kill here_");
-        return;
-      }
-      void session.killSubagent(id).then(
-        (result) => {
-          if (!result.killed) {
-            pushNotice(`_${id} was not running any more: nothing was stopped_`);
-          }
-        },
-        (error: unknown) =>
-          pushNotice(
-            `_${id} was not stopped: ${error instanceof Error ? error.message : String(error)}_`,
-          ),
-      );
-    },
-    [pushNotice],
-  );
-
-  /**
-   * Stop one background SHELL job (`session/job_kill`, docs/feat/shell-jobs-panel.md):
-   * the same decision the model's `shell_kill` tool makes. A refusal is a typed
-   * result, never a throw: the row is still there, and the exit frame (or the
-   * notice) says what happened.
-   */
-  const killJob = useCallback(
-    (id: string): void => {
-      const session = sessionRef.current;
-      if (!session?.killJob) {
-        pushNotice("_this session cannot stop background jobs: no job kill here_");
-        return;
-      }
-      void session.killJob(id).then(
-        (result) => {
-          if (result.killed) {
-            // Recorded BEFORE the exit can arrive, so `onExit` reads it: this is
-            // the user's own stop (`✗ stopped`, owner B).
-            dockStoppedRef.current.add(id);
-          } else {
-            pushNotice(`_${id} was not running any more: nothing was stopped_`);
-          }
-        },
-        (error: unknown) =>
-          pushNotice(
-            `_${id} was not stopped: ${error instanceof Error ? error.message : String(error)}_`,
-          ),
-      );
-    },
-    [pushNotice],
-  );
-
-  /**
-   * `/agents` and Ctrl+T (docs/feat/subagent-panel.md, owner Q16 (b)): move the
-   * focus into the list from anywhere (a multi-line draft, mid-history), or
-   * back. An empty list says so instead of opening an empty box.
-   */
-  const toggleAgents = useCallback((): void => {
-    if (dockRef.current.focus.kind === "list") {
-      setDock((prev) => toggleList(prev, dockIds()));
-      return;
-    }
-    if (!dockVisible()) {
-      pushNotice("_Nothing is running in the background._");
-      return;
-    }
-    setDock((prev) => toggleList(prev, dockIds()));
-  }, [dockIds, dockVisible, pushNotice, setDock]);
-
-  /**
-   * Send the dock's draft to whoever owns it (docs/feat/subagent-panel.md): the
-   * main agent (as today), one child (`session/subagent_message`), or a refusal
-   * with the reason as a notice and the text put back. The decision is pure
-   * (`sendTarget`), so an ended child is never silently re-routed to the agent.
-   * `true` means the dock handled the text; the caller's own path must not run.
-   */
-  const submitToTarget = useCallback(
-    (value: string): boolean => {
-      const target = sendTarget(dockRef.current, value);
-      if (target.kind === "main") {
-        return false; // the caller's normal path (a task, a command, a blank draft)
-      }
-      if (target.kind === "refused") {
-        field.set(value);
-        pushNotice(`_${target.text}_`);
-        return true;
-      }
-      const id = target.id;
-      const text = value.trim();
-      const session = sessionRef.current;
-      if (!session?.messageSubagent) {
-        field.set(value);
-        // NOT "older daemon": that would be a typed refusal from
-        // `messageSubagent` (`RemoteClient`), never a missing member. A missing
-        // one means THIS runtime's session has no sub-agent panel at all (e.g.
-        // `--in-process`), which is what the notice says.
-        pushNotice("_this session's runtime cannot write to sub-agents_");
-        return true;
-      }
-      field.reset();
-      // A LATE refusal must never land in the main input (Review H2): by the time
-      // it arrives the user may have closed the child, so the placement decision
-      // is `refusalPlacement`'s — the field only if they are still on that child
-      // and have typed nothing since; otherwise the notice quotes the text.
-      const refused = (reason: string): void => {
-        const placement = refusalPlacement(dockRef.current, id, fieldValueRef.current);
-        if (placement === "field") {
-          field.set(value);
-          pushNotice(`_not sent to ${id}: ${reason}_`);
-          return;
-        }
-        setDock((prev) => restoreRefused(prev, id, value));
-        pushNotice(`_not sent to ${id}: ${reason} — kept as a draft: ${value}_`);
-      };
-      void session.messageSubagent(id, text).then(
-        (result) => {
-          if (!result.ok) {
-            refused(result.reason ?? "refused");
-          }
-        },
-        (error: unknown) => {
-          refused(error instanceof Error ? error.message : String(error));
-        },
-      );
-      return true;
-    },
-    [field, pushNotice, setDock],
-  );
-
-  /**
-   * Rows changed: the dock keeps its selection BY ID, follows it when the row
-   * leaves, and returns to the input when the list empties — `reconcile`'s
-   * decision, pure (P5 (a): a finished item leaves at once). A departure freezes
-   * an open drawer and KEEPS the input's target, so a draft is never silently
-   * re-routed to the main agent behind the user.
-   */
-  const dockSeenRef = useRef<readonly string[]>([]);
-  // The trigger, as a VALUE (not read from a ref): a fresh identity only when a
-  // report actually changed the ids (`sameIds` gates `setSubagents`), so this
-  // effect runs on a real change and never on a frame (LOW-4).
-  const dockIdKey = [
-    ...(subagents ?? []).map((r) => r.id),
-    ...(jobRows ?? []).map((r) => r.id),
-  ].join(" ");
+  // Rows changed: the dock keeps its selection BY ID, follows it when the row
+  // leaves, and returns to the input when the list empties — `reconcile`'s
+  // decision, pure (P5 (a): a finished item leaves at once), with the dock's own
+  // memory and trigger now in `useDock` (S5).
   useEffect(() => {
     const ids = dockIdKey === "" ? [] : dockIdKey.split(" ");
     const previous = dockSeenRef.current;
@@ -1385,23 +1077,16 @@ export function App({
         ...dockLastJobRowsRef.current.map((row) => ({ kind: "job" as const, row })),
       ]),
     );
-  }, [dockIdKey, setDock]);
+  }, [dockIdKey, setDock, dockLastJobRowsRef, dockLastRowsRef, dockOutcomeRef, dockSeenRef]);
 
-  /**
-   * A job's drawer READS its output: at once on open, then at most once a second
-   * (`JOB_REFRESH_MS`), and only while that job's drawer is open — never for a
-   * child, the dropdown, or a job nobody opened (docs/feat/shell-jobs-panel.md).
-   *
-   * The interval is created ONCE per open job target, keyed by its WIRE id, so a
-   * re-render (or a fresh read) cannot re-arm it: the dependency list names only
-   * the focus kind, the target id and the test seam — never the output state
-   * (AGENTS §9, M4). A read writes a ref plus a render-only counter.
-   */
-  const jobTargetId =
-    dock.focus.kind === "open" && dockKindOf(dock.focus.id) === "job" ? dock.focus.id : null;
-  const jobEndedWhileOpen = dock.focus.kind === "open" ? dock.focus.ended : null;
-  // The real cadence, or a test's shortened one (AGENTS §9, M4: ONE seam).
-  const refreshMs = jobRefreshMs ?? JOB_REFRESH_MS;
+  // A job's drawer READS its output: at once on open, then at most once a second
+  // (`refreshMs`, `JOB_REFRESH_MS` unless a test shortens it), and only while
+  // that job's drawer is open — never for a child, the dropdown, or a job nobody
+  // opened (docs/feat/shell-jobs-panel.md). The interval is created ONCE per open
+  // job target, keyed by its WIRE id, so a re-render (or a fresh read) cannot
+  // re-arm it: the deps name only the target id and the cadence — never the
+  // output state (AGENTS §9, M4). The target, the cadence and the refs are
+  // `useDock`'s (S5); the effect stays HERE in App's order (Fable H1).
   useEffect(() => {
     if (jobTargetId === null) {
       jobReadAtRef.current = null;
@@ -1458,7 +1143,7 @@ export function App({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [jobTargetId, refreshMs, pushNotice]);
+  }, [jobTargetId, refreshMs, pushNotice, jobOutputRef, jobReadAtRef, setJobOutputGen]);
 
   /**
    * One LAST read when the open job's exit is seen: the registry keeps an exited
@@ -1496,7 +1181,7 @@ export function App({
     return () => {
       cancelled = true;
     };
-  }, [jobTargetId, jobEndedWhileOpen]);
+  }, [jobTargetId, jobEndedWhileOpen, jobOutputRef, setJobOutputGen]);
 
   warmErrorRef.current = (error: unknown) => pushNotice(warmFailureNotice(error));
 
@@ -1545,213 +1230,29 @@ export function App({
   draftBackRef.current = (text, cause) => restoreInput(text, orphanNotice(cause));
 
   // --- images in the input (docs/feat/attachments-tui.md D8) ----------------
-  /** What the CURRENT session takes: its own answer, or the reason a session with no seam gives. */
-  const attachMode = useCallback((): AttachMode => {
-    const session = sessionRef.current;
-    const answered = session?.imageInput?.();
-    if (answered !== undefined) {
-      return answered;
-    }
-    return session?.attachImage === undefined ? NO_IMAGE_SEAM : NO_IMAGE_SEAM;
-  }, []);
-  /**
-   * Put a refused prompt's chips back (docs/feat/attachments-tui.md D8): the
-   * bytes are still in them, so Enter uploads them again. Appended, never
-   * replacing what the user attached meanwhile.
-   */
-  const restoreChips = useCallback(
-    (chips: readonly AttachedImage[] | undefined) => {
-      if (chips === undefined || chips.length === 0) {
-        return;
-      }
-      setAttach((draft) => ({ ...withChips(draft, chips).draft, upload: null }));
-    },
-    [setAttach],
-  );
-  /** Say each notice as its own row (never joined: one refusal per line). */
-  const showNotices = useCallback(
-    (notices: readonly string[]) => {
-      for (const notice of notices) {
-        pushNotice(notice);
-      }
-    },
-    [pushNotice],
-  );
-  /**
-   * Decide what a pasted/dropped text is and act: prose is inserted as it always
-   * was, image paths become chips, a refusal is SAID. One decision at a time
-   * (a promise chain, so `existing` sees the previous paste's chips), and a
-   * result that lands after an unmount is dropped.
-   */
-  const routeAttach = useCallback(
-    (text: string): void => {
-      // A `/command` is always text: `/compact` alone is a legal path candidate
-      // to `tokenizePaths`, and a paste must never stat one.
-      const candidate = looksLikeCommand(text)
-        ? ({ kind: "text" } as const)
-        : attachmentCandidateText(text, home !== undefined ? { home } : {});
-      if (candidate.kind === "text") {
-        field.insert(text); // prose never touches the disk
-        return;
-      }
-      const gen = attachGenRef.current;
-      attachChainRef.current = attachChainRef.current.then(async () => {
-        const decision = await decideAttachment(fileProbe, candidate, {
-          existing: draftRefs(attachRef.current),
-        });
-        if (gen !== attachGenRef.current) {
-          return; // unmounted while the disk was read
-        }
-        // The paste's own text comes back when the decision is `text` (a missing
-        // path, a directory, a source file): the 3a rule is that the WHOLE paste
-        // stays text, and dropping it silently would lose what was pasted
-        // (review round 1, finding 1).
-        const routed = routeDecision(attachRef.current, decision, attachMode(), text);
-        setAttach(routed.draft);
-        if (routed.insert !== undefined) {
-          field.insert(routed.insert);
-        }
-        showNotices(routed.notices);
-      });
-    },
-    [attachMode, field, fileProbe, home, setAttach, showNotices],
-  );
+  // The decisions are `attach-candidates.ts`/`attach-files.ts`/`attach-draft.ts`'s
+  // and their executor is `useAttachments` (S6). The DRAFT STATE stays here: the
+  // render reads it (the attach row, the input box's row count) and `submit` /
+  // Backspace edit it — the same shape S4 gave `selection`. The refs other layers
+  // read (`probedTextRef`, `uploadCtrlRef`, `attachGenRef`) stay here too, so
+  // effect 1 below keeps its index and every use-site keeps its identifier.
+  const { attachMode, restoreChips, routeAttach, attachCommand, convertToChips, sendWithImages } =
+    useAttachments({
+      field,
+      attachRef,
+      setAttach,
+      attachGenRef,
+      probedTextRef,
+      uploadCtrlRef,
+      sessionRef,
+      runRef,
+      pushNotice,
+      restoreInput,
+      fileProbe,
+      home,
+      localCwd,
+    });
   routeAttachRef.current = routeAttach;
-  /**
-   * `/attach <path…>`: the explicit form (every failure a refusal). A relative
-   * path resolves against the LAPTOP's cwd, never the `cwd` prop (P15).
-   */ const attachCommand = useCallback(
-    (raw: string): void => {
-      const parsed = parseAttachCommand(raw, home !== undefined ? { home } : {});
-      if (parsed === null) {
-        pushNotice("_Usage: `/attach <path>` (a path may be dragged into the terminal)_");
-        return;
-      }
-      const paths = parsed.paths.map((path) => resolve(localCwd, path));
-      const gen = attachGenRef.current;
-      attachChainRef.current = attachChainRef.current.then(async () => {
-        const decision = await decideAttachment(
-          fileProbe,
-          { kind: "paths", paths },
-          { existing: draftRefs(attachRef.current), explicit: true },
-        );
-        if (gen !== attachGenRef.current) {
-          return;
-        }
-        const routed = routeDecision(attachRef.current, decision, attachMode());
-        setAttach(routed.draft);
-        if (routed.insert !== undefined) {
-          field.insert(routed.insert);
-        }
-        showNotices(routed.notices);
-      });
-    },
-    [attachMode, field, fileProbe, home, localCwd, pushNotice, setAttach, showNotices],
-  );
-  /** An unbracketed drop + Enter: the paths become chips and NOTHING is sent (decision 5). */
-  const convertToChips = useCallback(
-    (text: string): void => {
-      const candidate = attachmentCandidateText(text, home !== undefined ? { home } : {});
-      if (candidate.kind !== "paths") {
-        return;
-      }
-      const gen = attachGenRef.current;
-      attachChainRef.current = attachChainRef.current.then(async () => {
-        const decision = await decideAttachment(fileProbe, candidate, {
-          existing: draftRefs(attachRef.current),
-        });
-        if (gen !== attachGenRef.current) {
-          return;
-        }
-        const routed = routeDecision(attachRef.current, decision, attachMode());
-        setAttach(routed.draft);
-        showNotices(routed.notices);
-        // A typed drag whose bytes are NOT an image: the text goes back and says
-        // why, instead of a cleared field that sent nothing (review round 1,
-        // finding 1).
-        if (decision.kind === "text") {
-          // Recorded BEFORE the restore: the next Enter on this same text is a
-          // message, not another probe (round 2, R2-1).
-          probedTextRef.current = text;
-          restoreInput(text, NOT_AN_IMAGE_NOTICE);
-          return;
-        }
-        // Said only when something WAS attached: a refusal already spoke.
-        if (routed.draft.chips.length > attachRef.current.chips.length) {
-          pushNotice(
-            `_attached ${routed.draft.chips.length} image${routed.draft.chips.length === 1 ? "" : "s"} — type your message and press Enter_`,
-          );
-        }
-      });
-    },
-    [attachMode, fileProbe, home, pushNotice, restoreInput, setAttach, showNotices],
-  );
-  /**
-   * Send the prompt with the draft's chips: every chip goes through the
-   * SESSION's own `attachImage` (one upload at a time, progress on the chip
-   * row), then the prompt names the refs. A failure restores the text, keeps
-   * the chips and says why — Enter retries, and the store's put is idempotent.
-   */
-  const sendWithImages = useCallback(
-    (text: string, chips: readonly AttachedImage[]): void => {
-      const session = sessionRef.current;
-      const seam = session?.attachImage;
-      if (seam === undefined) {
-        restoreInput(text, "_images are off: this session does not take images_");
-        return;
-      }
-      const gen = attachGenRef.current;
-      const controller = new AbortController();
-      uploadCtrlRef.current = controller;
-      const upload = async (): Promise<void> => {
-        const refs: AttachmentRef[] = [];
-        for (const [index, chip] of chips.entries()) {
-          const name =
-            chip.ref.name !== undefined && chip.ref.name !== "" ? chip.ref.name : chip.ref.mimeType;
-          setAttach((draft) => uploadProgress(draft, index, chips.length, name, 0, chip.ref.size));
-          refs.push(
-            await seam.call(
-              session,
-              chip.bytes,
-              {
-                mimeType: chip.ref.mimeType,
-                ...(chip.ref.name !== undefined ? { name: chip.ref.name } : {}),
-              },
-              {
-                signal: controller.signal,
-                onProgress: (sent, size) =>
-                  setAttach((draft) =>
-                    uploadProgress(draft, index, chips.length, name, sent, size),
-                  ),
-              },
-            ),
-          );
-        }
-        if (gen !== attachGenRef.current) {
-          return;
-        }
-        // The upload is over: Esc must go back to stopping the TURN, not abort a
-        // finished controller (review round 1, finding 3).
-        if (uploadCtrlRef.current === controller) {
-          uploadCtrlRef.current = null;
-        }
-        setAttach((draft) => uploadDone({ ...draft, chips: [] }));
-        await runRef.current?.(text, { attachments: refs, images: chips });
-      };
-      upload().catch((error: unknown) => {
-        if (gen !== attachGenRef.current) {
-          return;
-        }
-        if (uploadCtrlRef.current === controller) {
-          uploadCtrlRef.current = null;
-        }
-        // The chips stay (bytes included): Enter uploads them again.
-        setAttach((draft) => uploadDone(draft));
-        restoreInput(text, attachErrorText(error));
-      });
-    },
-    [restoreInput, setAttach],
-  );
 
   /**
    * Watch `session` for my rows coming back (docs/feat/queued-broadcast.md):
@@ -2423,6 +1924,9 @@ export function App({
       armWake,
       subagentsTwoWay,
       setDock,
+      // The dock's own refs (S5): STABLE `useRef` objects, so naming them keeps
+      // the identity rule of Fable H2 ("deps name the fields") without a churn.
+      jobOutputRef,
     ],
   );
   useEffect(() => {
@@ -2696,7 +2200,9 @@ export function App({
       );
       abortRef.current?.abort();
     },
-    [detachOnQuit, exit, pushNotice, runQuit, setQuitConfirm],
+    // The dock's refs (S5) are STABLE `useRef` objects: naming them keeps the
+    // identity rule (Fable H2) and never re-creates this callback.
+    [detachOnQuit, exit, pushNotice, runQuit, setQuitConfirm, jobRowsRef, subagentsRef],
   );
 
   /**
@@ -2813,373 +2319,187 @@ export function App({
   }, [pushNotice, wakeIfPending]);
   runClearRef.current = runClear;
 
+  /**
+   * `/compact`'s machinery (docs/feat/app-decomposition.md M5): the
+   * compaction's own refs, its one settle, and the compaction-time queue it
+   * ends live HERE, not in a command file — its guards do (`commands/compact.ts`).
+   * It moves with S9a (the turn driver), which is why it is an App-level
+   * function and not a command's body.
+   */
+  const startCompaction = useCallback((): void => {
+    const session = sessionRef.current;
+    if (!session) {
+      return;
+    }
+    pushNotice("_Compacting the conversation…_");
+    setCompacting(true);
+    compactionOwnedRef.current = false;
+    // Whether THIS handler raised its own-compaction count: only then may
+    // its settle lower it again (an open that failed raised none).
+    let armed = false;
+    armed = true;
+    // Its one settle (success or failure) ends the compaction-time queue
+    // (D3c): sent as one prompt unless a send-now took it. A `/clear`
+    // meanwhile already took the rows (a new session: ignore it).
+    const settled = (result: CompactionResult) => {
+      if (sessionRef.current !== session) {
+        return;
+      }
+      if (!result.ok && armed && ownCompactionsRef.current > 0) {
+        ownCompactionsRef.current -= 1; // it replaced nothing: no history of mine to come
+      }
+      setCompacting(false);
+      const out = onCompactionSettled({
+        result,
+        rows: rowsRef.current,
+        sendNowOwns: compactionOwnedRef.current,
+        turnRunning: stateRef.current.running,
+      });
+      pushNotice(out.notice);
+      if (out.send !== null) {
+        setRows(() => []);
+        wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start
+        // As a fallback send: restored if another client's prompt won the slot.
+        void run(out.send, { fallback: true });
+        return;
+      }
+      if (out.restore !== null) {
+        setRows(() => []);
+        restoreInput(out.restore, "_your queued messages are back in the input_");
+      }
+      wakeIfPending(); // a wake deferred during the compaction
+    };
+    // The open a reset needs comes FIRST, as `/clear`'s does (review
+    // M2): a resumed session nothing has opened yet holds its chat only
+    // as this client's seed, and counting the compaction before the open
+    // left the count armed for a compaction that never happened. The
+    // latch (`compacting`) is up meanwhile, so nothing starts a turn.
+    void Promise.resolve(session.openForReset?.()).then(
+      () => {
+        if (sessionRef.current !== session) {
+          return;
+        }
+        // Its history (if it compacts) is mine: no "on another device" (C6).
+        ownCompactionsRef.current += 1;
+        armed = true;
+        void session.compact?.().then(
+          (r) => {
+            settled({ ok: true, before: r.before, after: r.after });
+            // The history shrank: the open figure is stale until a turn measures.
+            askContext(session);
+          },
+          (error: unknown) => settled({ ok: false, error }),
+        );
+      },
+      (error: unknown) => settled({ ok: false, error }),
+    );
+  }, [askContext, pushNotice, restoreInput, run, setCompacting, setRows, wakeIfPending]);
+
+  /**
+   * `/clear`'s machinery (docs/feat/app-decomposition.md M5): the step's own
+   * refusals, the latch, the stop-then-clear hand-off and the legacy
+   * close-and-replace. Its refs are App's and it moves with S8; the command
+   * file (`commands/clear.ts`) only calls it.
+   */
+  const requestClear = useCallback((): void => {
+    const step = clearCommandStep({
+      canClear: typeof sessionRef.current?.clear === "function",
+      running: stateRef.current.running,
+      ownTurn: foreignRef.current === null,
+      compacting: compactingRef.current,
+      clearing: clearingRef.current,
+    });
+    if (step === "legacy") {
+      // A session without `clear` (the in-process fallback): the old
+      // session ends (with its jobs) before the fresh one starts
+      // (decision D3).
+      sessionRef.current?.close?.();
+      swapSession(makeSession());
+    } else if (step === "busy") {
+      pushNotice("_A /clear is already running._");
+    } else if (step === "compacting") {
+      pushNotice("_Can't clear while a compaction is running._");
+    } else if (step === "stop_then_clear" && abortRef.current) {
+      // Stop the own turn like Esc; the clear runs when it has settled.
+      clearAfterTurnRef.current = true;
+      stoppedHereRef.current = true;
+      abortRef.current.abort();
+    } else {
+      // Another device's running turn: the daemon answers TurnInProgress.
+      runClearRef.current?.();
+    }
+  }, [makeSession, pushNotice, swapSession]);
+
+  /**
+   * The ONE way typed `/…` text becomes an effect: `dispatchCommand`
+   * (commands/dispatch.ts) holds the shared guards and looks the command up in
+   * the registry, and `commands/<name>.ts` holds each command's body
+   * (docs/feat/app-decomposition.md S2). App only builds the context — the
+   * ports below, one per capability, read through refs where the old code read
+   * a ref, so two keys with no render between them behave as before (plan H3).
+   */
   const handleCommand = useCallback(
     (raw: string, again = false): void => {
-      const resolved = resolveSlash(raw, skills());
-      if (resolved.kind === "skill") {
-        // A skill activation is a prompt (it starts a turn): recallable with
-        // ↑, and refused mid-turn — it is a round, not a steering message.
-        historyRef.current = pushHistory(historyRef.current, resolved.text);
-        histIndexRef.current = historyRef.current.length;
-        draftRef.current = "";
-        if (stateRef.current.running) {
-          pushNotice(
-            `_Can't run /${resolved.name} while a turn is running — stop it first (esc)._`,
-          );
-          return;
-        }
-        const refusedSkill = switchingRefusal(switchingRef.current, { kind: "prompt" });
-        if (refusedSkill) {
-          restoreInput(raw, refusedSkill);
-          return;
-        }
-        void run(resolved.text, { skill: resolved.name });
-        return;
-      }
-      const cmd = raw.split(/\s+/)[0];
-      const refused = cmd
-        ? switchingRefusal(switchingRef.current, { kind: "command", name: cmd })
-        : null;
-      if (refused) {
-        pushNotice(refused);
-        return;
-      }
-      // Guard turn-starting / session-swapping commands while a turn runs: they
-      // would corrupt the session (concurrent send) or cancel-handle state.
-      // `/clear` on a session that can `clear` is exempt: it resets in place
-      // (it stops an own turn first, and the daemon refuses another device's);
-      // only the legacy close-and-replace would swap the session under a turn.
-      const clearsInPlace = cmd === "/clear" && typeof sessionRef.current?.clear === "function";
-      if (cmd && isSessionMutating(cmd) && stateRef.current.running && !clearsInPlace) {
-        pushNotice(`_Can't run ${cmd} while a turn is running — stop it first (esc)._`);
-        return;
-      }
-      switch (cmd) {
-        case "/exit":
-        case "/quit":
-          requestQuit(false);
-          return;
-        case "/help":
-          // The skills part is asked fresh (docs/feat/skills-hot-reload.md).
-          void skillsSync.settle().then(() => pushNotice(helpText(skills())));
-          return;
-        case "/clear": {
-          const step = clearCommandStep({
-            canClear: typeof sessionRef.current?.clear === "function",
-            running: stateRef.current.running,
-            ownTurn: foreignRef.current === null,
-            compacting: compactingRef.current,
-            clearing: clearingRef.current,
-          });
-          if (step === "legacy") {
-            // A session without `clear` (the in-process fallback): the old
-            // session ends (with its jobs) before the fresh one starts
-            // (decision D3).
-            sessionRef.current?.close?.();
-            swapSession(makeSession());
-          } else if (step === "busy") {
-            pushNotice("_A /clear is already running._");
-          } else if (step === "compacting") {
-            pushNotice("_Can't clear while a compaction is running._");
-          } else if (step === "stop_then_clear" && abortRef.current) {
-            // Stop the own turn like Esc; the clear runs when it has settled.
-            clearAfterTurnRef.current = true;
-            stoppedHereRef.current = true;
-            abortRef.current.abort();
-          } else {
-            // Another device's running turn: the daemon answers TurnInProgress.
-            runClearRef.current?.();
-          }
-          return;
-        }
-        case "/close":
-          // End this session (every device sees it closed) and quit; the
-          // runtime's exit path delivers the close before the socket goes.
-          sessionRef.current?.close?.();
-          exit();
-          return;
-        case "/sessions": {
-          if (!sessions) {
-            pushNotice("_Sessions aren't available on this runtime._");
-            return;
-          }
-          // No "current" captured here: it is read live when rendered and used (R3-1).
-          openPanel(
-            sessionsPanel(Date.now()),
-            () => sessions.list().then((view) => sessionsPanel(Date.now(), view)),
-            sessionsListError,
-          );
-          return;
-        }
-        case "/compact": {
-          const session = sessionRef.current;
-          if (!session?.compact) {
-            pushNotice("_Compaction isn't available for this session._");
-            return;
-          }
-          if (stateRef.current.running) {
-            pushNotice("_Can't compact while a turn is running._");
-            return;
-          }
-          if (compactingRef.current) {
-            pushNotice("_A compaction is already running._");
-            return;
-          }
-          pushNotice("_Compacting the conversation…_");
-          setCompacting(true);
-          compactionOwnedRef.current = false;
-          // Whether THIS handler raised its own-compaction count: only then may
-          // its settle lower it again (an open that failed raised none).
-          let armed = false;
-          armed = true;
-          // Its one settle (success or failure) ends the compaction-time queue
-          // (D3c): sent as one prompt unless a send-now took it. A `/clear`
-          // meanwhile already took the rows (a new session: ignore it).
-          const settled = (result: CompactionResult) => {
-            if (sessionRef.current !== session) {
-              return;
-            }
-            if (!result.ok && armed && ownCompactionsRef.current > 0) {
-              ownCompactionsRef.current -= 1; // it replaced nothing: no history of mine to come
-            }
-            setCompacting(false);
-            const out = onCompactionSettled({
-              result,
-              rows: rowsRef.current,
-              sendNowOwns: compactionOwnedRef.current,
-              turnRunning: stateRef.current.running,
-            });
-            pushNotice(out.notice);
-            if (out.send !== null) {
-              setRows(() => []);
-              wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start
-              // As a fallback send: restored if another client's prompt won the slot.
-              void run(out.send, { fallback: true });
-              return;
-            }
-            if (out.restore !== null) {
-              setRows(() => []);
-              restoreInput(out.restore, "_your queued messages are back in the input_");
-            }
-            wakeIfPending(); // a wake deferred during the compaction
-          };
-          // The open a reset needs comes FIRST, as `/clear`'s does (review
-          // M2): a resumed session nothing has opened yet holds its chat only
-          // as this client's seed, and counting the compaction before the open
-          // left the count armed for a compaction that never happened. The
-          // latch (`compacting`) is up meanwhile, so nothing starts a turn.
-          void Promise.resolve(session.openForReset?.()).then(
-            () => {
-              if (sessionRef.current !== session) {
-                return;
-              }
-              // Its history (if it compacts) is mine: no "on another device" (C6).
-              ownCompactionsRef.current += 1;
-              armed = true;
-              void session.compact?.().then(
-                (r) => {
-                  settled({ ok: true, before: r.before, after: r.after });
-                  // The history shrank: the open figure is stale until a turn measures.
-                  askContext(session);
-                },
-                (error: unknown) => settled({ ok: false, error }),
-              );
-            },
-            (error: unknown) => settled({ ok: false, error }),
-          );
-          return;
-        }
-        case "/settings": {
-          // docs/feat/session-settings-apply.md: the host builds the lines.
-          const session = sessionRef.current;
-          const lines = (shown: readonly SettingsNoticeLine[]) => {
-            for (const { text, hint } of shown) {
-              stateRef.current = appendNotice(stateRef.current, text, hint ? { hint } : {});
-            }
-            setScrollOffset(0);
-            flushNow();
-          };
-          const step = settingsCommand(raw, {
-            running: stateRef.current.running,
-            compacting: compactingRef.current,
-            available: session?.settings !== undefined && session.updateSettings !== undefined,
-            syncing: session !== null && syncingRef.current === session,
-          });
-          if (step.kind === "notice") {
-            lines([{ text: step.text }]);
-          } else if (step.kind === "show") {
-            lines(session?.settings?.() ?? []);
-          } else if (session?.updateSettings) {
-            // During an outage it waits for the link: never nothing on screen.
-            syncingRef.current = session;
-            lines([{ text: SETTINGS_SYNCING }]);
-            const pending = stateRef.current.items.at(-1);
-            const settled = (outcome: readonly SettingsNoticeLine[]) => {
-              if (syncingRef.current === session) {
-                syncingRef.current = null;
-              }
-              // Moved to another session meanwhile: not that session's news
-              // (`/settings` on this one tells the truth when you are back), so
-              // the pending line just goes, where a swap kept the transcript.
-              const moved = sessionRef.current !== session;
-              if (pending !== undefined) {
-                stateRef.current = replaceWithNotices(
-                  stateRef.current,
-                  pending,
-                  moved ? [] : outcome,
-                );
-              }
-              flushNow();
-              if (!moved) {
-                setScrollOffset(0);
-                // The prompt or tools may have changed: the open figure is stale.
-                askContext(session);
-              }
-            };
-            void session
-              .updateSettings()
-              .then(settled, () => settled([{ text: "Could not sync the settings." }]));
-          }
-          return;
-        }
-        case "/rename": {
-          const session = sessionRef.current;
-          if (!session?.rename) {
-            pushNotice("_Renaming isn't available on this runtime._");
-            return;
-          }
-          const parsed = parseRename(raw);
-          if ("usage" in parsed) {
-            pushNotice(parsed.usage);
-            return;
-          }
-          void session.rename(parsed.title).then(
-            (text) => pushNotice(renamedNotice(text)),
-            (error: unknown) => pushNotice(renameFailedNotice(error)),
-          );
-          return;
-        }
-        case "/model":
-          pushNotice(`Model: \`${shownModel}\``);
-          return;
-        case "/mcp": {
-          if (!mcpStatus) {
-            pushNotice("_MCP status isn't available on this runtime._");
-            return;
-          }
-          openPanel(
-            mcpPanel(),
-            () => mcpStatus().then((servers) => mcpPanel(servers)),
-            mcpStatusError,
-          );
-          return;
-        }
-        case "/skills": {
-          // The session's skills read again (docs/feat/skills-hot-reload.md).
-          openPanel(
-            skillsPanel(),
-            () => skillsSync.refresh().then((list) => skillsPanel(list)),
-            skillsListError,
-          );
-          return;
-        }
-        case "/agents":
-          // The dock's list (owner Q16 (b)): the same toggle Ctrl+T runs, so the
-          // key and the command can never disagree.
-          toggleAgents();
-          return;
-        case "/tokens": {
-          const t = stateRef.current.sessionTokens;
-          pushNotice(
-            `Tokens — prompt ${t.prompt}, completion ${t.completion}, total ${t.prompt + t.completion}`,
-          );
-          return;
-        }
-        case "/retry": {
-          const last = lastUserRef.current ?? lastUserText(stateRef.current.items);
-          if (!last) {
-            pushNotice("_Nothing to retry yet._");
-            return;
-          }
-          const plan = retryPlan(last, skills());
-          // Read BEFORE `run`: the retry's own turn resets it (it names no images).
-          const hadImages = lastHadImagesRef.current;
-          if (plan.kind === "gone") {
-            pushNotice(`_Can't retry: ${plan.command} is no longer available._`);
-          } else if (plan.kind === "skill") {
-            void run(plan.text, { skill: plan.name });
-          } else {
-            void run(plan.text);
-          }
-          if (hadImages) {
-            // Text only, said out loud (decision 8): the refs of the last prompt
-            // are not kept — 5×15 MB per prompt is too much for a rare key.
-            pushNotice("_retry sends the text only: attach the image again with /attach_");
-          }
-          return;
-        }
-        case "/attach":
-          attachCommand(raw);
-          return;
-        case "/copy": {
-          const text = lastAssistantText(stateRef.current.items);
-          if (!text) {
-            pushNotice("_No assistant reply to copy._");
-            return;
-          }
-          void clipboard(text).then(
-            () => pushNotice("_Copied last reply to the clipboard._"),
-            () => pushNotice("_Clipboard unavailable._"),
-          );
-          return;
-        }
-        case "/save": {
-          const path = `${cwd}/tentacle-transcript-${Date.now()}.md`;
-          const md = transcriptToMarkdown(stateRef.current.items);
-          void saveFile(path, md).then(
-            () => pushNotice(`_Saved transcript to ${path}_`),
-            (e) => pushNotice(`_Save failed: ${String(e)}_`),
-          );
-          return;
-        }
-        default:
-          // Maybe a skill made since the list was last asked: ask once more,
-          // then resolve the text AGAIN, once (docs/feat/skills-hot-reload.md).
-          if (!again && skillsSync.stale()) {
-            void skillsSync.settle().then((same) => {
-              if (same) {
-                handleCommandRef.current?.(raw, true); // not on a session switched meanwhile
-              }
-            });
-            return;
-          }
-          pushNotice(`_Unknown command: ${cmd}. Try /help._`);
-      }
+      dispatchCommand(
+        {
+          pushNotice,
+          restoreInput,
+          historyRef,
+          histIndexRef,
+          draftRef,
+          sessionRef,
+          stateRef,
+          busyCompacting: () => compactingRef.current,
+          syncingRef,
+          switchingRef,
+          lastUserRef,
+          lastHadImagesRef,
+          skills,
+          skillsSync,
+          run,
+          requestQuit,
+          startCompaction,
+          requestClear,
+          reResolve: (line: string) => handleCommandRef.current?.(line, true),
+          exit,
+          sessions,
+          openPanel,
+          mcpStatus,
+          toggleAgents,
+          attachCommand,
+          clipboard,
+          saveFile,
+          cwd,
+          shownModel,
+          flushNow,
+          setScrollOffset,
+          askContext,
+        },
+        raw,
+        again,
+      );
     },
     [
-      makeSession,
-      swapSession,
+      askContext,
+      attachCommand,
       clipboard,
-      openPanel,
       cwd,
       exit,
-      mcpStatus,
-      sessions,
-      skillsSync,
-      askContext,
       flushNow,
-      shownModel,
+      mcpStatus,
+      openPanel,
       pushNotice,
+      requestClear,
       requestQuit,
       restoreInput,
       run,
       saveFile,
-      setCompacting,
-      setRows,
+      sessions,
+      shownModel,
       skills,
+      skillsSync,
+      startCompaction,
       toggleAgents,
-      wakeIfPending,
-      attachCommand,
     ],
   );
   handleCommandRef.current = handleCommand;
@@ -3436,357 +2756,195 @@ export function App({
     return () => clearPasteTimeout();
   }, [clearPasteTimeout]);
 
-  useInput((char, key) => {
-    // Shift+Tab toggles auto-accept in any state (idle, running, or with a
-    // prompt showing). Checked first so it never reaches the palette's Tab.
-    if (key.tab && key.shift) {
-      permission.toggleAutoApprove();
-      return;
-    }
-    // `/quit`'s confirmation: every other key answers it, before the chord and
-    // the permission dialog, so its `y` never approves an ask opened meanwhile.
-    // Only a plain `y` closes (`quitConfirmKey`); Ctrl+C is "No" — it dismisses,
-    // as before 6a-2 (owner 2026-11-09, a), so the `(y/N)` text stays true and
-    // a user must press `y` to lose children.
-    if (quitConfirmRef.current !== null) {
-      // Read the facts BEFORE clearing: who the dialog spoke for decides whether
-      // `y` closes others' session, and Ctrl+C's dismiss drops the dialog.
-      const facts = quitConfirmRef.current;
-      setQuitConfirm(null);
-      if (quitConfirmKey(char, key.ctrl || key.meta) === "yes") {
-        // `closeForAll` is only for a dialog that SAID "close the session for
-        // all": it skips attach-run's "someone registered meanwhile" re-check.
-        if (facts.others > 0) {
-          runQuit?.closeForAll();
-        }
-        requestQuit(true);
+  /**
+   * Delete a `/sessions` row, then refresh the panel — but only if it is still
+   * THE SAME panel: the generation the key landed in is compared at every async
+   * step (`sessionsRefreshApplies`), so a request answering after the panel
+   * closed (or another opened) is dropped instead of landing on screen. Moved out
+   * of the key handler verbatim by S3; the decisions are still
+   * `sessions-panel.ts`'s.
+   */
+  const sessionsDelete = useCallback(
+    (id: string, startedGen: number): void => {
+      if (!sessions) {
         return;
       }
-      // Ctrl+C here is "No" (owner 2026-11-09, a): it dismisses, as before
-      // 6a-2. The loss is irreversible and the dialog exists to catch exactly
-      // that reflex, so only `y` loses children; the dialog said `(y/N)`, and
-      // this keeps it true. Never a trap: the next Ctrl+C asks again.
-      return;
-    }
-    // The `Ctrl+X Ctrl+S` chord (send the queued messages now): before the
-    // permission dialog, so it works while one is up (D3). A key that breaks
-    // the chord goes on below unchanged — EXCEPT while the LIST has the keys
-    // (the dropdown focused, not the pinned typing sub-state): there `ctrl+x` is
-    // the dock's stop (arm, then confirm, docs/fix/dock-list-type-through.md),
-    // so the chord must not consume it. With the dropdown PINNED the keys are the
-    // input's, so the chord keeps `ctrl+x` (Review round 1, M1).
-    if (dockClaimsCtrlX(dockRef.current)) {
-      chordRef.current = idleChord;
-    } else {
-      const chord = stepChord(chordRef.current, char, key, Date.now());
-      chordRef.current = chord.state;
-      if (chord.action === "consumed") {
-        return;
-      }
-      if (chord.action === "sendNow") {
-        sendNow();
-        return;
-      }
-    }
-    // While the permission dialog is up, keys drive it (nothing else). Every
-    // decision is `stepPermissionKey`'s (docs/feat/permission-reply.md); this
-    // executes it.
-    if (permission.pending) {
-      const mode = permission.readMode();
-      // The open reply field takes a bracketed paste (sanitized, clipped) —
-      // never the hidden main field, never read as y/n keys.
-      if (mode.mode === "reply") {
-        const pasteStep = stepPaste(pasteBufRef.current, char);
-        if (pasteStep.consumed) {
-          pasteBufRef.current = pasteStep.buffer;
-          if (pasteStep.buffer !== null) {
-            armPasteTimeout();
-          } else {
-            clearPasteTimeout();
-          }
-          if (pasteStep.text !== undefined) {
-            const clean = sanitizePasted(pasteStep.text);
-            if (clean) {
-              insertIntoReply(clean);
-            }
-          }
-          return;
-        }
-      }
-      const { state, action } = stepPermissionKey(mode, char, key, {
-        choices: permission.choices,
-        selected: permission.selected,
-        maxChars: replyMax,
-      });
-      if (state !== mode) {
-        permission.setMode(state);
-      }
-      switch (action.kind) {
-        case "stop":
-          // "Stop everything", not "I refuse this command": no deny goes out
-          // (over RPC it would race the cancel and show a false "denied" on every
-          // device); the turn's cancel settles the request — whoever started the
-          // turn (a foreign one too, owner Q2). With no turn shown here to cancel
-          // the dialog stays: dismissing it would orphan the request (suspended,
-          // unseen) until the TUI quits. A reply draft goes back to the input.
-          if (abortRef.current) {
-            permission.answer(DISMISSED);
-            stoppedHereRef.current = true;
-            abortRef.current.abort();
-          }
-          break;
-        case "select":
-          permission.setSelected(action.index);
-          break;
-        case "answer":
-          permission.answer(action.response);
-          break;
-        case "pasteClipboard":
-          void paste().then(
-            (text) => {
-              const clean = sanitizePasted(text);
-              if (clean) {
-                insertIntoReply(clean);
-              }
+      const applies = (): boolean =>
+        sessionsRefreshApplies({
+          startedGen,
+          gen: panelGenRef.current,
+          open: panelRef.current?.kind === "sessions",
+          switching: switchingRef.current,
+        });
+      void sessions.remove(id).then(
+        () => {
+          if (!applies()) return;
+          void sessions.list().then(
+            (view) => {
+              if (!applies()) return;
+              setPanel((p) =>
+                p?.kind === "sessions"
+                  ? {
+                      ...p,
+                      data: view,
+                      now: Date.now(),
+                      state: refreshedSessions(p.state, view),
+                    }
+                  : p,
+              );
             },
-            () => pushNotice("_Clipboard unavailable._"),
+            (e: unknown) => {
+              // The panel closed meanwhile: its refresh no longer matters (R4-1).
+              if (applies()) pushNotice(sessionsListError(e));
+            },
           );
-          break;
-        default:
-          break;
-      }
-      return;
-    }
-    if (key.ctrl && char === "c") {
-      // One decision in `ctrlCQuitStep` (docs/feat/subagent-background-ui.md): an
-      // idle Ctrl+C with background sub-agents running asks before losing them.
-      const agents = backgroundCount(subagentsRef.current);
-      const others = runQuit?.othersOnSession() ?? 0;
-      const jobs = detachOnQuit ? 0 : (jobRowsRef.current?.length ?? 0);
-      const step = ctrlCQuitStep({
-        running: stateRef.current.running,
-        exitPending: exitPendingRef.current,
-        detaches: detachOnQuit,
-        others,
-        agents,
-        jobs,
-      });
-      if (step === "confirm") {
-        setQuitConfirm({ others: 0, agents, jobs, names: backgroundNames(subagentsRef.current) });
-        return;
-      }
-      // No abort handle (the turn is already settling) → nothing to stop: quit.
-      if (step === "exit" || !abortRef.current) {
-        exit();
-      } else {
+        },
+        (e: unknown) => pushNotice(deleteFailedNotice(e)),
+      );
+    },
+    [sessions, pushNotice],
+  );
+
+  // --- the key router's executor port (S3) ---------------------------------
+  // The ONE place a routing decision becomes a call into the App. Every field is
+  // an existing stable callback (the App's own `useCallback`s) or a decision
+  // another pure module still owns — so this object needs no `useMemo`, and its
+  // fields' identities are exactly the ones the App already has (Fable H2).
+  const keyHost: KeyHost = {
+    toggleAutoApprove: permission.toggleAutoApprove,
+    setQuitConfirm,
+    requestQuit,
+    closeForAll: () => runQuit?.closeForAll(),
+    setChord: (next) => {
+      chordRef.current = next;
+    },
+    sendNow: () => {
+      sendNow();
+    },
+    setPasteBuffer: (next) => {
+      pasteBufRef.current = next;
+    },
+    armPasteTimeout,
+    clearPasteTimeout,
+    insertReply: (text) => insertIntoReply(text),
+    setReplyMode: permission.setMode,
+    permissionSelect: permission.setSelected,
+    permissionAnswer: permission.answer,
+    permissionStop: () => {
+      // "Stop everything", not "I refuse this command": no deny goes out (over RPC
+      // it would race the cancel and show a false "denied" on every device); the
+      // turn's cancel settles the request. With no turn shown here to cancel the
+      // dialog stays — dismissing it would orphan the request (suspended, unseen)
+      // until the TUI quits. A reply draft goes back to the input.
+      if (abortRef.current) {
+        permission.answer(DISMISSED);
         stoppedHereRef.current = true;
         abortRef.current.abort();
       }
-      return;
-    }
-    // Bracketed paste: capture pasted text (markers stripped) before the
-    // escape-abort below, since a paste's leading ESC can look like Escape. Runs
-    // whether idle or mid-turn, so text can be pasted into a queued task too.
-    const pasteStep = stepPaste(pasteBufRef.current, char);
-    if (pasteStep.consumed) {
-      pasteBufRef.current = pasteStep.buffer;
-      // Still inside a paste → arm the recovery timer; finished → disarm it.
-      if (pasteStep.buffer !== null) {
-        armPasteTimeout();
-      } else {
-        clearPasteTimeout();
-      }
-      if (pasteStep.text !== undefined) {
-        const clean = sanitizePasted(pasteStep.text);
-        if (clean && !panel) {
-          // A paste of image paths becomes chips; prose is inserted as before
-          // (docs/feat/attachments-tui.md D8).
-          routeAttachRef.current(clean);
-        }
-      }
-      return;
-    }
-    // The list panel: its keys first (so Esc closes it rather than stopping
-    // a running turn). Mouse reports fall through to the dispatch below; any
-    // other key is swallowed there — no line editing behind the panel.
-    const sessionsAction = panel?.kind === "sessions" ? sessionsKey(char, key) : "none";
-    if (panel?.kind === "sessions" && sessionsAction === "none" && panel.state.armed !== null) {
-      // Any other key disarms a pending delete (then falls through, like the tree panels).
-      setPanel((p) => (p?.kind === "sessions" ? { ...p, state: { ...p.state, armed: null } } : p));
-    }
-    if (panel?.kind === "sessions" && sessionsAction !== "none") {
-      // `/sessions`: every decision is `sessions-panel.ts`'s; this executes it.
-      const action = sessionsAction;
-      const entry = sessionsAt(panel.data, panel.state);
-      // The session being viewed, read NOW — the one source (Review R3-1).
-      const current = sessionRef.current?.sessionId ?? null;
-      if (action === "close") {
-        closePanel();
-      } else if (action === "up" || action === "down") {
-        setPanel((p) => (p ? applyPanel(p, action, columns) : p));
-      } else if (action === "choose" && entry) {
-        const busy = stateRef.current.running || compactingRef.current;
-        const choice = sessionsChoose(entry, current, busy, switchingRef.current);
-        if (choice.kind === "refused") {
-          pushNotice(choice.text);
-        } else {
-          closePanel();
-          if (choice.kind === "switch") {
-            switchTo(choice.id, choice.reopen);
+    },
+    pasteReply: () => {
+      // Ctrl+V in the reply field: read the clipboard and insert it there.
+      void paste().then(
+        (text) => {
+          const clean = sanitizePasted(text);
+          if (clean) {
+            insertIntoReply(clean);
           }
-        }
-      } else if (action === "delete" && entry && sessions) {
-        const step = sessionsDelete(panel.state, entry, current);
-        setPanel((p) => (p?.kind === "sessions" ? { ...p, state: step.state } : p));
-        if (step.kind === "refused") {
-          pushNotice(step.text);
-        } else if (step.kind === "delete") {
-          // The refresh updates only THIS panel, if still open (never re-opens one).
-          const startedGen = panelGenRef.current;
-          const applies = (): boolean =>
-            sessionsRefreshApplies({
-              startedGen,
-              gen: panelGenRef.current,
-              open: panelRef.current?.kind === "sessions",
-              switching: switchingRef.current,
-            });
-          void sessions.remove(step.id).then(
-            () => {
-              if (!applies()) return;
-              void sessions.list().then(
-                (view) => {
-                  if (!applies()) return;
-                  setPanel((p) =>
-                    p?.kind === "sessions"
-                      ? {
-                          ...p,
-                          data: view,
-                          now: Date.now(),
-                          state: refreshedSessions(p.state, view),
-                        }
-                      : p,
-                  );
-                },
-                (e: unknown) => {
-                  // The panel closed meanwhile: its refresh no longer matters (R4-1).
-                  if (applies()) pushNotice(sessionsListError(e));
-                },
-              );
-            },
-            (e: unknown) => pushNotice(deleteFailedNotice(e)),
-          );
-        }
-      }
-      return;
-    }
-    if (panel && panel.kind !== "sessions") {
-      const action = treeKey(char, key);
-      if (action === "close") {
-        closePanel();
-        return;
-      }
-      if (action !== "none") {
-        setPanel((p) => (p ? applyPanel(p, action, columns) : p));
-        return;
-      }
-    }
-    // The dock (docs/feat/subagent-panel.md) BEFORE anything that could read a
-    // key as something else: Esc in `list`/`open` closes the dock and must never
-    // reach "Esc stops a running turn" below. `dockKey` decides; we execute.
-    // A `ctrl+x` that the DOCK owns (its stop's arm/confirm) was already kept out
-    // of the send-now chord above, so it reaches `dockKey` as an ordinary key.
-    if (panel === null) {
-      const step = dockKey(dockRef.current, char, key, {
-        ids: dockIds(),
-        // Both kinds open: a child onto its drawer, a JOB onto its output tail.
-        openable: (id: string) => id.startsWith("sa-") || id.startsWith("bg-"),
-        // The LIVE field, never a stashed `drafts` copy: typing goes straight to
-        // `field`, so `drafts` is empty on the first open/close (Review H1).
-        draft: field.value,
-      });
-      // The STATE is applied for every verdict, `pass` included: a printable key
-      // on the pill both types into the input AND returns the focus to it (owner
-      // P3 (a)). Applying it only for a non-`pass` verdict left the pill focused,
-      // so the next Enter opened the dropdown and the message never went out
-      // (Review round 3, H1).
-      if (step.state !== dockRef.current) {
-        setDock(step.state);
-      }
-      if (step.effect.kind !== "pass") {
-        if (step.effect.kind === "stop") {
-          // Routed by the id's kind, never by which list the row came from: a
-          // job's `x`+`y` goes to `session/job_kill` (the daemon's own registry).
-          if (dockKindOf(step.effect.id) === "job") {
-            killJob(step.effect.id);
-          } else {
-            killChild(step.effect.id);
-          }
-        } else if (step.effect.kind === "open" || step.effect.kind === "close") {
-          field.set(step.effect.draftIn);
-        }
-        return;
-      }
-      // Ctrl+T from the INPUT (owner Q16 (b)): the same toggle `/agents` runs.
-      if (key.ctrl && char === "t") {
-        toggleAgents();
-        return;
-      }
-    }
-    // Esc aborts an upload in flight (docs/feat/attachments-tui.md: nothing is
-    // left half-sent); the chips stay and the failure path says "upload cancelled".
-    if (key.escape && uploadCtrlRef.current !== null) {
+        },
+        () => pushNotice("_Clipboard unavailable._"),
+      );
+    },
+    exit,
+    stopTurn: () => {
+      stoppedHereRef.current = true;
+      abortRef.current?.abort();
+    },
+    routeAttach: (text) => routeAttachRef.current(text),
+    fieldSet: (text) => field.set(text),
+    fieldReset: () => field.reset(),
+    cancelUpload: () => {
       const ctrl = uploadCtrlRef.current;
       uploadCtrlRef.current = null;
       setAttach((draft) => uploadDone(draft)); // the row goes now, not at the catch
-      ctrl.abort();
+      ctrl?.abort();
+    },
+    closePanel,
+    panelApply: (action) => setPanel((p) => (p ? applyPanel(p, action, columns) : p)),
+    setSessionsState: (state) => setPanel((p) => (p?.kind === "sessions" ? { ...p, state } : p)),
+    switchTo,
+    sessionsDelete,
+    killJob,
+    killChild,
+    setDock,
+    toggleAgents,
+    toggleExpandAll: () => setExpandAll((v) => !v),
+    moveCommandSel: (step) =>
+      setCommandIndex((i) => {
+        const n = paletteCommands.length;
+        return step === -1 ? (Math.min(i, n - 1) - 1 + n) % n : (Math.min(i, n - 1) + 1) % n;
+      }),
+    runCommand: (name) => handleCommand(name),
+    pushNotice,
+  };
+
+  useInput((char, key) => {
+    // ── the key router (S3 — docs/feat/app-decomposition.md) ────────────────
+    // ONE `useInput` for the whole App: Ink calls EVERY active listener for one
+    // chunk (`ink/build/hooks/use-input.js:89` — `handleData` returns nothing
+    // anyone consumes, so there is no stop-propagation), which is why precedence
+    // can only be ONE ordered decision inside one handler. `routeKey` walks the
+    // 13 pure layers of `keys/layers.ts` in precedence order, collecting every
+    // passing layer's effects and stopping at the first `consumed`;
+    // `executeEffects` then applies them through the narrow port below. The
+    // SNAPSHOT is built here, at the event, so a chunk's decision reads the frame
+    // it landed on — and every field keeps the source it had inline (live refs
+    // are getters, render values are values: the table in `keys/snapshot.ts`).
+    const routed = routeKey(
+      {
+        char,
+        key,
+        quitConfirm: () => quitConfirmRef.current,
+        dock: () => dockRef.current,
+        chord: () => chordRef.current,
+        running: () => stateRef.current.running,
+        compacting: () => compactingRef.current,
+        pasteBuffer: () => pasteBufRef.current,
+        replyMaxChars: replyMax,
+        dockIds,
+        othersOnSession: () => runQuit?.othersOnSession() ?? 0,
+        sessionId: () => sessionRef.current?.sessionId ?? null,
+        switching: () => switchingRef.current,
+        panelGen: () => panelGenRef.current,
+        abortable: () => abortRef.current !== null,
+        uploadInFlight: () => uploadCtrlRef.current !== null,
+        exitPending: () => exitPendingRef.current,
+        subagents: () => subagentsRef.current ?? [],
+        jobRows: () => jobRowsRef.current ?? [],
+        panel,
+        paletteOpen,
+        paletteNames: paletteCommands.map((c) => c.name),
+        commandSel,
+        fieldValue: field.value,
+        permission: {
+          pending: permission.pending,
+          choices: permission.choices,
+          selected: permission.selected,
+          mode: () => permission.readMode(),
+        },
+        sessions,
+        detachOnQuit,
+      },
+      PURE_LAYERS,
+    );
+    executeEffects(routed.effects, keyHost);
+    if (routed.verdict === "consumed") {
       return;
     }
-    if (key.escape && stateRef.current.running && abortRef.current) {
-      stoppedHereRef.current = true;
-      abortRef.current.abort();
-      return;
-    }
-    if (key.ctrl && char === "o") {
-      setExpandAll((v) => !v);
-      return;
-    }
-    // Slash-command palette: when open, arrows move the selection, Tab completes
-    // the name, Enter runs the highlighted command, Esc dismisses it. These take
-    // priority over scrolling/line-editing so the menu is drivable.
-    if (paletteOpen) {
-      const n = paletteCommands.length;
-      if (key.upArrow) {
-        setCommandIndex((i) => (Math.min(i, n - 1) - 1 + n) % n);
-        return;
-      }
-      if (key.downArrow) {
-        setCommandIndex((i) => (Math.min(i, n - 1) + 1) % n);
-        return;
-      }
-      if (key.tab) {
-        const name = paletteCommands[commandSel]?.name;
-        if (name) {
-          field.set(name);
-        }
-        return;
-      }
-      if (key.return) {
-        const name = paletteCommands[commandSel]?.name;
-        if (name) {
-          field.reset();
-          handleCommand(name);
-        }
-        return;
-      }
-      if (key.escape) {
-        field.reset();
-        return;
-      }
-    }
-    // The MOUSE layer (S4). Its chunk state machine and its per-report dispatch
-    // are pure (`mouse-stream.ts`); the hook owns their state and executes the
-    // effects. The render SNAPSHOT is built HERE, at the moment of the event, so
-    // every report of a coalesced chunk reads the frame it landed on.
+    // The MOUSE layer (14th, S4): the ONE layer that is not pure data. Its chunk
+    // state machine and per-report dispatch ARE pure (`mouse-stream.ts`); the
+    // hook holds their state and applies its effects as it decides. It therefore
+    // runs here — after the key path's effects, exactly where the inline handler
+    // had its mouse block — and only when nothing above consumed the chunk.
     const mouseStep = mouse.handleChunk(char, key, {
       listView,
       panelOpen: panel !== null,

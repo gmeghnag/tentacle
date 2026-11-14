@@ -379,6 +379,38 @@ describe("startPodRuntime", () => {
     expect(lines.join("")).toContain("box still running · tentacle attach box");
   });
 
+  // Fix round 1, finding 1 (docs/feat/images-off-reason.md): `run`/`attach`
+  // exec a pod daemon WITH `--model-proxy` (`podDaemonCommand`), so that daemon
+  // runs THIS laptop's model from THIS laptop's config — the reason must name
+  // our model and point at our config, never at the pod's (where our key does
+  // not exist and `tentacle config set` would change nothing).
+  //
+  // Mutation: drop `modelScope: "laptop"`/`model` for the pod runtimes in
+  // `engine-runtime.ts` → the reason says "the daemon's model … the daemon's
+  // config" and this goes red.
+  test("images off on a --model-proxy pod: the reason is about THIS laptop's config", async () => {
+    const model = new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
+    const kube = new FakeCluster(model);
+    const runtime = await startPodRuntime(baseConfig("/pod/work"), {
+      kube,
+      namespace: "dev",
+      image: "repo/img:tag",
+      permissions: new PermissionBroker(),
+      saver: new SessionSaver(new LogSessionStore(join(dir, "images-off")), () => {}),
+      resume: null,
+      log: () => {},
+    });
+    const mode = runtime.createSession().imageInput();
+    expect(mode.kind).toBe("off");
+    if (mode.kind === "off") {
+      expect(mode.reason).toContain("qwen3");
+      expect(mode.reason).toContain("your config");
+      expect(mode.reason).not.toContain("the daemon's config");
+    }
+    runtime.dispose();
+    await new Promise((r) => setTimeout(r, 10));
+  });
+
   test("creates + readies a pod, runs a turn over exec, deletes on dispose", async () => {
     const model = new ScriptedProvider([
       [{ type: "text", delta: "hi from the pod" }, { type: "done" }],

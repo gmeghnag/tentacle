@@ -6,7 +6,12 @@
  */
 import type { z } from "zod";
 import { AttachmentPutParamsSchema, AttachmentPutResultSchema } from "./attachment-upload.ts";
-import { SessionTtlParamsSchema, SessionTtlResultSchema } from "./daemon.ts";
+import {
+  DaemonDiscoverParamsSchema,
+  DaemonDiscoverySchema,
+  SessionTtlParamsSchema,
+  SessionTtlResultSchema,
+} from "./daemon.ts";
 import { DevicePairParamsSchema, DevicePairResultSchema } from "./device.ts";
 import { HooksTrustParamsSchema, HooksTrustResultSchema } from "./hooks.ts";
 import { McpStatusParamsSchema, McpStatusResultSchema } from "./mcp.ts";
@@ -115,6 +120,12 @@ export const Method = {
   /** A session's skills, read again from disk (docs/feat/skills-hot-reload.md). */
   SessionSkills: "session/skills",
   SessionTtl: "daemon/session_ttl",
+  /**
+   * Which other `serve` daemons run on this computer, and their addresses
+   * (docs/feat/sibling-discovery.md). ALSO subscribes this connection to
+   * `daemon/discovery`; an older daemon answers `MethodNotFound`.
+   */
+  DaemonDiscover: "daemon/discover",
   /** Daemon → client: may this session run the project's hooks? */
   HooksTrust: "hooks/trust",
   /**
@@ -141,6 +152,12 @@ export const Notification = {
   Cancel: "session/cancel",
   Progress: "$/progress",
   CancelRequest: "$/cancelRequest",
+  /**
+   * Daemon → client: the sibling snapshot changed. Sent ONLY to a connection
+   * that called `daemon/discover` — an unsolicited one is an unknown method to
+   * an older client (its `onError`), so it would not be additive.
+   */
+  DaemonDiscovery: "daemon/discovery",
 } as const;
 export type NotificationName = (typeof Notification)[keyof typeof Notification];
 
@@ -197,6 +214,10 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.McpStatus]: { params: McpStatusParamsSchema, result: McpStatusResultSchema },
   [Method.SessionSkills]: { params: SessionSkillsParamsSchema, result: SessionSkillsResultSchema },
   [Method.SessionTtl]: { params: SessionTtlParamsSchema, result: SessionTtlResultSchema },
+  [Method.DaemonDiscover]: {
+    params: DaemonDiscoverParamsSchema,
+    result: DaemonDiscoverySchema,
+  },
   [Method.HooksTrust]: { params: HooksTrustParamsSchema, result: HooksTrustResultSchema },
   [Method.Watch]: { params: WatchParamsSchema, result: WatchResultSchema },
   [Method.WatchNext]: { params: WatchNextParamsSchema, result: WatchNextResultSchema },
@@ -214,6 +235,7 @@ export const NotificationSchemas: Readonly<Record<NotificationName, z.ZodTypeAny
   [Notification.Cancel]: CancelParamsSchema,
   [Notification.Progress]: ProgressParamsSchema,
   [Notification.CancelRequest]: CancelRequestParamsSchema,
+  [Notification.DaemonDiscovery]: DaemonDiscoverySchema,
 };
 
 export function isMethodName(value: string): value is MethodName {

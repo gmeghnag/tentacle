@@ -3,12 +3,23 @@
  * last-message lookup, help text). Side effects (clipboard, file writes, session
  * reset) live in the App; everything here is pure and testable.
  *
+ * The built-ins' NAMES and DESCRIPTIONS are not listed here any more: they live
+ * in each command's own `commands/<name>.ts` and are derived back into
+ * `SLASH_COMMANDS` by `commands/registry.ts` (docs/feat/app-decomposition.md
+ * S2), so the words the palette shows and the code that runs them cannot
+ * disagree. This module stays the vocabulary's PUBLIC surface: everything that
+ * imports `SLASH_COMMANDS` keeps importing it from here.
+ *
  * Skills join the vocabulary as `/name` (docs/feat/skills-slash.md): the
  * daemon's catalog arrives over RPC, and `resolveSlash` is the ONE place that
  * decides whether typed text activates a skill — by an exact match of its
  * first token, never by parsing the rest.
  */
+import { BUILT_IN_NAMES, SLASH_COMMANDS } from "./commands/registry.ts";
 import type { DisplayItem } from "./state.ts";
+
+/** The vocabulary, derived from the registry (`commands/registry.ts`). */
+export { SLASH_COMMANDS };
 
 export interface SlashCommand {
   readonly name: string;
@@ -23,34 +34,19 @@ export interface SlashSkill {
   readonly description: string;
 }
 
-export const SLASH_COMMANDS: readonly SlashCommand[] = [
-  { name: "/help", description: "show this help" },
-  { name: "/clear", description: "clear the transcript and start a fresh session" },
-  { name: "/compact", description: "summarise the conversation to free up context" },
-  { name: "/rename", description: "rename this session (the title every device shows)" },
-  { name: "/sessions", description: "list this daemon's sessions and switch" },
-  { name: "/close", description: "end this session and quit" },
-  { name: "/model", description: "show the active model" },
-  { name: "/retry", description: "re-send the last prompt" },
-  { name: "/attach", description: "attach an image (or drag its file into the terminal)" },
-  { name: "/copy", description: "copy the last assistant reply to the clipboard" },
-  { name: "/save", description: "save the transcript to a Markdown file" },
-  { name: "/tokens", description: "show token usage for the session" },
-  { name: "/mcp", description: "MCP servers: reachability and their tools" },
-  { name: "/skills", description: "every skill found: who can use it, and any problems" },
-  {
-    name: "/agents",
-    description: "background sub-agents and jobs: select, open, stop (ctrl+t)",
-  },
-  {
-    name: "/settings",
-    description: "the session's settings vs this terminal's (/settings sync to use yours)",
-  },
-  { name: "/exit", description: "quit (also /quit)" },
-];
-
-/** Names the built-ins own (`/quit` is `/exit`'s alias): a skill can never take one. */
-const BUILTIN_NAMES: ReadonlySet<string> = new Set([...SLASH_COMMANDS.map((c) => c.name), "/quit"]);
+/**
+ * Names the built-ins own (`/quit` is `/exit`'s alias): a skill can never take
+ * one. Asked through `builtinNames()` rather than copied into a const at load
+ * time: `commands.ts` and `commands/registry.ts` import each other, and reading
+ * a registry const during THIS module's initialization is a TDZ error whenever
+ * the registry happens to load first (proven in S2's Execution). Lazy, either
+ * order works and the answer is the same.
+ */
+let builtinNames: ReadonlySet<string> | null = null;
+function builtins(): ReadonlySet<string> {
+  builtinNames ??= BUILT_IN_NAMES;
+  return builtinNames;
+}
 
 /**
  * One display line: control characters and runs of whitespace become one
@@ -83,7 +79,7 @@ export function slashCatalog(skills: readonly SlashSkill[]): SlashCatalog {
   const shadowed: string[] = [];
   for (const skill of skills) {
     const command = `/${skill.name}`;
-    if (BUILTIN_NAMES.has(command)) {
+    if (builtins().has(command)) {
       shadowed.push(skill.name);
     } else if (!skillNames.has(skill.name)) {
       skillNames.add(skill.name);
@@ -108,7 +104,7 @@ export type SlashResolution =
  */
 export function resolveSlash(text: string, skills: readonly SlashSkill[]): SlashResolution {
   const command = text.split(/\s/, 1)[0] ?? text;
-  if (BUILTIN_NAMES.has(command)) {
+  if (builtins().has(command)) {
     return { kind: "builtin", command };
   }
   const name = command.slice(1);

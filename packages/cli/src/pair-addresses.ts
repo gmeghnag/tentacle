@@ -1,3 +1,4 @@
+import { networkInterfaces } from "node:os";
 import type { DaemonRecord } from "@tentacle/daemon";
 /**
  * The addresses `tentacle pair` puts in the QR (docs/feat/device-pairing.md 9d,
@@ -40,6 +41,26 @@ export interface InterfaceEntry {
 
 /** `os.networkInterfaces()`, flat (Node's is a map of lists). */
 export type Interfaces = () => readonly InterfaceEntry[];
+
+/**
+ * This machine's addresses, flat — Node's `os.networkInterfaces()` is a map of
+ * lists. `pairAddresses` needs them whenever a `serve` binds a WILDCARD
+ * (`0.0.0.0`), which is the documented way to be reachable (REACHABLE_HINT); a
+ * caller that defaulted to `[]` would refuse exactly the `serve` it recommends.
+ * Only the rule's two fields are kept, so nothing else about the machine leaks.
+ *
+ * The DEFAULT for both readers of the rule — `pair`'s QR and the daemon's
+ * sibling announcement — so the two cannot disagree.
+ */
+export function machineInterfaces(): readonly InterfaceEntry[] {
+  const flat: InterfaceEntry[] = [];
+  for (const entries of Object.values(networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      flat.push({ address: entry.address, family: entry.family, internal: entry.internal });
+    }
+  }
+  return flat;
+}
 
 /** Every bind that means "every interface". */
 const WILDCARD = new Set(["0.0.0.0", "::", "[::]", "*"]);

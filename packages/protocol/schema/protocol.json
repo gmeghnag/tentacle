@@ -466,6 +466,29 @@
       "type": "object",
       "x-event-class": "display"
     },
+    "DaemonDiscoverParams": {
+      "additionalProperties": true,
+      "properties": {},
+      "type": "object"
+    },
+    "DaemonDiscovery": {
+      "additionalProperties": true,
+      "properties": {
+        "daemons": {
+          "items": {
+            "$ref": "#/$defs/DiscoveredDaemon"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "rev": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["daemons", "rev"],
+      "type": "object"
+    },
     "DeleteParams": {
       "additionalProperties": true,
       "properties": {
@@ -543,6 +566,37 @@
         }
       },
       "required": ["computer", "deviceId"],
+      "type": "object"
+    },
+    "DiscoveredDaemon": {
+      "additionalProperties": true,
+      "properties": {
+        "addresses": {
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "pattern": "^wss?:\\/\\/[^\\s?#]+\\/e2e(\\?[^\\s#]*)?(#\\S*)?$",
+            "type": "string"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
+        "cwd": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "self": {
+          "const": true,
+          "type": "boolean"
+        },
+        "startedAt": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["addresses", "cwd", "startedAt"],
       "type": "object"
     },
     "DsmlLeakUpdate": {
@@ -4311,6 +4365,14 @@
         "$ref": "#/$defs/AttachmentPutResult"
       }
     },
+    "daemon/discover": {
+      "params": {
+        "$ref": "#/$defs/DaemonDiscoverParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DaemonDiscovery"
+      }
+    },
     "daemon/session_ttl": {
       "params": {
         "$ref": "#/$defs/SessionTtlParams"
@@ -4585,6 +4647,11 @@
     "$/progress": {
       "params": {
         "$ref": "#/$defs/ProgressParams"
+      }
+    },
+    "daemon/discovery": {
+      "params": {
+        "$ref": "#/$defs/DaemonDiscovery"
       }
     },
     "session/cancel": {
