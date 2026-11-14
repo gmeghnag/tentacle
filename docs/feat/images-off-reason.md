@@ -360,3 +360,64 @@ branch is labelled as such, and nothing was silently dropped.
 
 **Verdict:** holds. Contained blast, S size, standard in-context review per
 AGENTS §10 — a fresh-context pass is not required for `contained`/`S`.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-14 — fresh-context adversarial pass (different model family from the executor)*
+
+**Verdict: REQUEST-CHANGES.**
+
+**Gate (re-run here).** `bun test packages/client/test/image-input.test.ts`
+16 pass / 0 fail; `bun test packages/client packages/cli/test/local-runtime.test.ts
+packages/tui` 2518 pass / 0 fail; `bun run lint` clean (1064 files, = baseline);
+`bun run typecheck` clean. Full suite not re-run (Execution reports 8283/3 skip/0).
+
+**Findings.**
+
+1. **MEDIUM — the fix recreates the bug class for a pod without `--model-proxy`.**
+   `packages/cli/src/local-runtime.ts:853` passes `modelName: deps.model` (the
+   LAPTOP's model) unconditionally, and `remote-client.ts:1678` falls back to it
+   whenever the daemon reports no `agentInfo.model`. A pod daemon never reports
+   one (`serve.ts:669` sets `identity` but no `modelInfo`), and without
+   `--model-proxy` it runs its OWN model and decides `images` from its OWN config
+   (`serve.ts:656-663`, `daemonImagePolicy` → `store`/absent). Scenario: laptop
+   `model: claude-…`, pod config a text-only local model → the notice reads
+   `claude-… is configured without images — … (tentacle config set model.images
+   true)`: wrong model name, and the command, run on the laptop, changes nothing.
+   That is again confident, wrong, actionable advice — the defect this task exists
+   to remove. Executor's Review noted the wrong name and waved it off; the wrong
+   *place* of the fix is the real harm. Fix: pass `modelName` only when the daemon
+   runs the laptop's model (worker / `--model-proxy`), else say "the pod's model …
+   in the pod's config". Same shape, milder, for `connect` (the command runs on the
+   laptop, the key lives on the `serve` host) — at least say "the daemon's config".
+2. **MEDIUM — the `RemoteClient`/`local-runtime` wiring is untested (§9 vacuity).**
+   Mutations, each run against client + cli `local-runtime` + tui suites:
+   (a) `remote-client.ts:1678` `model = undefined` and (b) `:1689` protocol forced
+   to `1` (every daemon "predates images" — the inverse bug) → **2518 pass / 0
+   fail** both. Only the pure table is pinned; the handshake capture
+   (`remote-client.ts:2321-2328`), the `modelName` fallback and its
+   `createLocalRuntime` plumbing could regress silently. Needs a `RemoteClient`
+   test over `createChannelPair` (the Context repro is exactly that test).
+
+**Mutation (pure module).** Discriminator `protocol !== undefined &&` →
+`=== undefined ||` → T3 red (15/1); reverted, 16/0, `git status` clean.
+
+**Premises.** `connection.ts:499` equality check TRUE; `connection.ts:528-536`
+capability absent iff `host.images` unset TRUE; `serve.ts:305` `modelInfo` TRUE;
+"worker/pod daemon reports no model … whose model is the laptop's" — **FALSE for a
+non-proxy pod** (finding 1). `tentacle config set model.images true` parses
+(`config-args.ts:165-188`) TRUE.
+
+**Attacks tried.** (1) Non-proxy pod path → finding 1. (2) Wiring mutation →
+finding 2. (3) Hostile name: C0/C1 stripped, bounded ≤ 220 — holds (bidi/zero-width
+chars pass through; nit, not blocking). (4) String `protocolVersion` → guarded by
+`typeof`, holds. (5) Unknown protocol before handshake → never "update", holds (T3).
+
+**Nits (not blocking).** `MAX_REASON_MODEL_CHARS` is exported but unused by
+`imagesOffReason` (room is ~90); the comment promises an ellipsis that is never
+added; `.slice` can split a surrogate pair.
+
+**Executor behaviour.** Clean repro-first, red-first, logic kept in the pure
+module; drift honestly logged. But its self-review was same-context and missed
+that its own "pod reports no model ⇒ laptop's model" premise is false without
+`--model-proxy`, and tested only the pure layer.
