@@ -29,4 +29,5 @@ export * from "./mcp.ts";
 export * from "./skills.ts";
 export * from "./hooks.ts";
 export * from "./daemon.ts";
+export * from "./watch.ts";
 export * from "./methods.ts";

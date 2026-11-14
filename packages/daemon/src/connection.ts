@@ -63,8 +63,14 @@ import {
   type SnapshotResult,
   type SubagentMessageParams,
   type SubagentMessageResult,
+  type UnwatchParams,
+  type UnwatchResult,
   type UpdateSettingsParams,
   WAKE_TURN_PREFIX,
+  type WatchNextParams,
+  type WatchNextResult,
+  type WatchParams,
+  type WatchResult,
   type WireChatRequest,
   isWakeTurnId,
 } from "@tentacle/protocol";
@@ -136,11 +142,24 @@ interface Attached {
   readonly attachment: Attachment;
 }
 
+/**
+ * One session this connection WATCHES (docs/feat/logs-cmd.md sub-task 2): a
+ * read-only follower. It is deliberately NOT in `attached` — no attachment
+ * exists, so it cannot become a model link, answer an ask or count in
+ * `session/list`'s `attached`.
+ */
+interface Watched {
+  readonly hosted: HostedSession;
+  readonly watchId: string;
+}
+
 export class Connection {
   private readonly peer: RpcPeer;
   private readonly host: SessionHost;
   private readonly principal: ConnectionPrincipal;
   private readonly attached = new Map<string, Attached>();
+  /** This connection's watchers, by `watchId`; released when it goes away. */
+  private readonly watches = new Map<string, Watched>();
   /** The `daemon/discovery` subscription of THIS connection (at most one, F13). */
   private discoveryUnsubscribe: (() => void) | undefined;
   private readonly servesModel: boolean;
@@ -178,6 +197,12 @@ export class Connection {
       this.release(entry);
     }
     this.attached.clear();
+    // A watch leaves no state on the session (nothing was attached); releasing
+    // it stops the queue's timer and ends a held poll. Never a session change.
+    for (const watch of this.watches.values()) {
+      watch.hosted.unwatch(watch.watchId);
+    }
+    this.watches.clear();
     // The ONE teardown (P3): the poller stops at zero subscribers, so nothing
     // is left running for a connection that is gone (F11).
     this.discoveryUnsubscribe?.();
@@ -310,9 +335,11 @@ export class Connection {
       case Method.Snapshot:
         return this.snapshot(params as SnapshotParams);
       // Synchronous, served from the derived log: no lock, no await (AGENTS §7).
+      // Also allowed for a session this connection only WATCHES (a `logs -f`
+      // --tail cold read, sub-task 2): reading the committed log needs no open.
       case Method.Log: {
         const { sessionId, after, maxChars } = params as LogParams;
-        return this.lookup(sessionId).logRead(after, maxChars);
+        return this.readable(sessionId).logRead(after, maxChars);
       }
       case Method.Enqueue:
         return this.enqueue(params as EnqueueParams);
@@ -369,6 +396,16 @@ export class Connection {
       // Daemon-wide: reads/sets the reaper's TTL, attaches this connection to nothing.
       case Method.SessionTtl:
         return this.host.sessionTtl(params as SessionTtlParams);
+      // A read-only follower (docs/feat/logs-cmd.md sub-task 2). `watch` and
+      // `unwatch` are synchronous and attach nothing; `watch_next` HOLDS its
+      // request — which blocks no other handler, because the peer dispatches
+      // every inbound request concurrently (AGENTS §7).
+      case Method.Watch:
+        return this.watchSession(params as WatchParams);
+      case Method.WatchNext:
+        return this.watchNext(params as WatchNextParams);
+      case Method.Unwatch:
+        return this.unwatch(params as UnwatchParams);
       // Daemon-wide: this computer's live siblings and their addresses. It also
       // SUBSCRIBES this connection to `daemon/discovery` — the notification is
       // never sent unsolicited (an unknown one reaches an older client's
@@ -603,6 +640,88 @@ export class Connection {
     throw new RpcError(
       DomainErrorCode.UnknownSession,
       `unknown session: ${sessionId} (not open on this connection)`,
+    );
+  }
+
+  /**
+   * `session/watch`: a read-only follower. A session must be LIVE (a `serve`
+   * daemon's archived one is `UnknownSession`, never revived by a watch), and
+   * this connection needs no `open` — a follower attaches nothing.
+   */
+  private watchSession(params: WatchParams): WatchResult {
+    const hosted = this.host.get(params.sessionId);
+    if (hosted === undefined) {
+      throw new RpcError(
+        DomainErrorCode.UnknownSession,
+        `unknown or archived session: ${params.sessionId} (a watch never revives a session)`,
+      );
+    }
+    const result = hosted.watch(params.only);
+    this.dropStaleWatches();
+    this.watches.set(result.watchId, { hosted, watchId: result.watchId });
+    return result;
+  }
+
+  // Held until the watcher has something (or the hold times out): concurrent
+  // with every other request here, never under a lock (AGENTS §7).
+  private watchNext(params: WatchNextParams): Promise<WatchNextResult> {
+    const watch = this.watches.get(params.watchId);
+    if (watch === undefined) {
+      throw new RpcError(
+        DomainErrorCode.UnknownWatch,
+        `unknown watch: ${params.watchId} (not on this connection)`,
+      );
+    }
+    return watch.hosted.watchNext(params.watchId, params.timeoutMs);
+  }
+
+  // Idempotent: an id this connection does not hold is a no-op success.
+  private unwatch(params: UnwatchParams): UnwatchResult {
+    const watch = this.watches.get(params.watchId);
+    if (watch !== undefined) {
+      this.watches.delete(params.watchId);
+      watch.hosted.unwatch(params.watchId);
+    }
+    return {};
+  }
+
+  /** Forget every watcher whose session is no longer the live one under its id (a close, then a recreate). */
+  private dropStaleWatches(): void {
+    for (const [watchId, watch] of this.watches) {
+      // The map key is a WATCH id; the identity check is per SESSION id.
+      if (this.host.get(watch.hosted.id) !== watch.hosted) {
+        watch.hosted.unwatch(watchId);
+        this.watches.delete(watchId);
+      }
+    }
+  }
+
+  /** The ids of the sessions this connection watches (a copy; read-only, for tests/diagnostics). */
+  get watchedSessionIds(): readonly string[] {
+    return [...new Set([...this.watches.values()].map((watch) => watch.hosted.id))];
+  }
+
+  /**
+   * A session this connection may READ the committed log of: one it opened
+   * (`lookup`), or one it only watches — the `logs --tail` cold read a follower
+   * does, which must not force an `open` (an open would attach and count). The
+   * identity check is `lookup`'s: a session closed and recreated under the same
+   * id is not the one this connection reads.
+   */
+  private readable(sessionId: string): HostedSession {
+    const entry = this.attached.get(sessionId);
+    if (entry && this.host.get(sessionId) === entry.hosted) {
+      return entry.hosted;
+    }
+    const watched = [...this.watches.values()].find((watch) => watch.hosted.id === sessionId);
+    if (watched !== undefined && this.host.get(sessionId) === watched.hosted) {
+      return watched.hosted;
+    }
+    this.dropStale();
+    this.dropStaleWatches();
+    throw new RpcError(
+      DomainErrorCode.UnknownSession,
+      `unknown session: ${sessionId} (not open or watched on this connection)`,
     );
   }
 

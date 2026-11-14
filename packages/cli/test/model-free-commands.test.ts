@@ -118,6 +118,15 @@ describe("a model-free command never runs an apiKeyCommand", () => {
     expect(result.err).not.toContain("config error");
     expect(result.code).toBe(0);
   });
+
+  test("logs reads the session files with no key command either", async () => {
+    // Mutation: classify `logs` as a model mode (`USES_MODEL.logs: true`) → a
+    // user with a failing `apiKeyCommand` cannot read a log to find out why.
+    await writeConfig(MAIN_FAILS);
+    const result = await run(["logs"]);
+    expect(result.err).not.toContain("config error");
+    expect(result.err).toContain("no session in");
+  });
 });
 
 describe("a command that calls a model keeps the strict load", () => {
@@ -155,6 +164,8 @@ describe("modeUsesModel classifies every mode", () => {
     rm: false,
     hooks: false,
     package: false,
+    // `logs` reads session log files: no daemon, no model, no session.
+    logs: false,
     serve: true,
     run: true,
     attach: true,
@@ -181,10 +192,13 @@ describe("modeUsesModel classifies every mode", () => {
     expect(cliMode(["rm", "x"])).toBe("rm");
     expect(cliMode(["hooks", "trust", "--list"])).toBe("hooks");
     expect(cliMode(["package", "list"])).toBe("package");
+    expect(cliMode(["logs"])).toBe("logs");
+    expect(cliMode(["logs", "--tail", "5"])).toBe("logs");
     expect(cliMode(["hello"])).toBe("prompt");
     expect(cliMode(["--plain"])).toBe("plain");
     expect(cliMode([])).toBe("empty");
     expect(modeUsesModel(cliMode(["hello"]))).toBe(true);
     expect(modeUsesModel(cliMode(["ps"]))).toBe(false);
+    expect(modeUsesModel(cliMode(["logs"]))).toBe(false);
   });
 });
