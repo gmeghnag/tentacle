@@ -705,6 +705,141 @@ full e2e run for the other flows (flow 07's `hideKeyboard` is still valid).
 (1377 files) · `bun test` 9946 pass, 4 skip (all opt-in: k8s, docker ×2,
 slow socket), 0 fail.
 
+### Slices 1–2 — tokens + primitives, Computers + Pair
+
+*— claude-opus-5-5, 2026-11-14*
+
+**Load-bearing check, re-run first (holds).** `ComputersScreen.tsx:1-18`,
+`PairScreen.tsx:1-15` and `scanner.tsx:1-15` are still dumb renderers over
+`computer-rows.ts` / `pairing-flow.ts` / `camera-access.ts` + `scan-session.ts`;
+the restyle changed no view-model, and every existing test stayed green
+unchanged (`bun test apps/mobile`: 935 pass after both slices).
+
+**As built, in order.**
+1. `src/theme.ts` — `Palette` grows to the mockups' table (`bg page card sheet
+   fill code codeOnSheet label sec sep sepChat sepSheet accent accentFill
+   onAccent tint green orange red warnBg warnText glass glassBorder
+   shadowOpacity camera cameraAccent kw com add* del* dash switchOff`); the 7 old
+   names are aliases built FROM the new tokens (`withAliases`), so unrestyled
+   screens already show the new values. Plus `typography`, `radius`, `size`,
+   `space`, `MONO`, `DENSE_FONT_SCALE`.
+2. `test/theme.test.ts` (66) — WCAG ≥ 4.5 for `label/sec/accent` on
+   `bg/card/page/fill/sheet/code`, both modes, plus accent-on-tint,
+   onAccent-on-accentFill, status/warn/diff/syntax pairs; aliases equal their
+   tokens; `code ≠ fill` (B4 stays fixed once bubbles move to `fill`).
+3. `src/ui/` — `Icon`, `GlassButton`, `ScreenHeader`, `GroupedCard`, `Row`,
+   `SectionHeader`, `StatusDot`, `Pill`, `Banner`, `EmptyState`, `Sheet`, and
+   two not in the plan's list: `PillButton` (the Sheet's 50 pt buttons, also
+   needed by Pair now and Lock later) and `ActionSheet` (Owner Q5's menu).
+4. `src/computer-status.ts` (+ `test/computer-status.test.ts`, 10) —
+   `computerStatus(row)` → `{tone, text, detail?, pairAgain}`, `menuActions(row)`,
+   `sasGroups(sas)`.
+5. `ComputersScreen.tsx` — large title + glass Settings (`open-settings`) and
+   accent "+" (`computers-add`); per computer a 20/25 header (device icon,
+   `StatusDot`, short status) with a "…" (`computer-menu-<id>`), a 26 pt card with
+   the project row (`computer-<id>`, dashed/dimmed tile when not ok, the honest
+   reason under it keeping `computer-state-<id>-<state>`), an inline "Pair again"
+   row for attention states (`computer-pair-again-<id>`); the bottom "Pair a
+   computer" card (`computers-pair-card`) + hint; errors as `Banner`
+   (`computers-error`). Long-press or "…" opens the in-app `ActionSheet`
+   (`computer-menu-pair-again-<id>`, `computer-remove-<id>`), which turns into the
+   Remove confirmation in place (`computer-remove-confirm/yes/cancel-<id>`).
+6. `PairScreen.tsx` + `scanner.tsx` — large-title intake: a hero card (Scan as
+   the primary pill, `pair-scan`), camera problems as a `Banner`
+   (`pair-camera-<card>`, `pair-camera-settings`), "Or paste the line it prints"
+   card (`pair-paste-input`, `pair-paste-submit`). The live camera covers the
+   screen (`pair-scanner`) with the viewfinder (240 pt, accent corners — drawn in
+   `scanner.tsx`) and a dark glass Cancel (`pair-scan-close`). review /
+   connecting / compare / done / failed render in a bottom `Sheet`; compare shows
+   the SAS in two mono 40/48 `fill` boxes, a waiting row and "Codes don't match"
+   (`pair-cancel`). Every testID kept; the scanner block keeps the exact
+   `scanner === undefined || view.stage !== "intake"` gate the wiring test pins.
+7. `App.tsx` — `Computers` and `Pair` get `headerShown: false` (Pair's back is
+   the screen's glass Cancel, `pair-back`, only when the stack can go back);
+   `ComputersRoute` holds the menu state next to `removing`.
+8. `e2e/flows/16-remove-computer.yaml` — taps `computer-menu-<id>` before
+   `computer-remove-<id>` (Owner Q5: "the tests are updated to open the menu
+   first"). Flow 15 unchanged (Pair again stays visible on the row).
+9. `changelog.d/mobile-ui-polish.changed.md`.
+
+**Red before green (pasted).** `computer-status` against a stub reproducing
+today's screen (Pair again only when `row.action === "pair-again"`, status text =
+the long reason, SAS one string):
+```
+(fail) a computer that answered is Online, green, with no detail line
+(fail) an unreachable one is Offline (ring) … Expected: "Offline"  Received: "dial failed"
+(fail) revoked: needs attention … Expected: "attention"  Received: "offline"
+(fail) maybe-reset / broken: … Expected: "attention"  Received: "offline"
+(fail) every state has a non-empty short status word … Expected: not ""
+(fail) menuActions … every row can be paired again or removed
+(fail) sasGroups > six digits split in two groups of three
+(fail) sasGroups > an already-grouped code is regrouped the same way
+ 1 pass  9 fail
+```
+The contrast test is new coverage of new values; its non-vacuity is the plan's
+mutation below.
+
+**Mutations (each run, then reverted from a scratch copy; suite green after):**
+| Mutation | Caught by |
+|---|---|
+| light `sec` → `#AEAEB2` (the plan's named one) | 6 `sec on … ≥ 4.5:1` (light) |
+| `computerStatus.pairAgain` → `row.action === "pair-again"` (today's rule) | "revoked: … offers Pair again inline" |
+| `sasGroups` splits 2/4 | both 6-digit `sasGroups` cases |
+| PairScreen scanner gate without `view.stage !== "intake"` | `scan-session-wiring` "mounts it ONLY at the intake" |
+
+**Drift from Implementation (and why).**
+- **Native add-ons NOT installed (BLOCKED, Slice 1 `package.json` step).**
+  `expo-symbols`, `expo-haptics`, `expo-clipboard`, `expo-blur` need a registry
+  fetch (`npm view` / `bun add` were refused: this session cannot approve network
+  commands) and a dev-client rebuild. So `Icon` draws the chrome glyphs (chevrons,
+  plus, xmark, ellipsis, checkmark, arrow up, stop) from views and the rest from
+  system-font glyphs, behind the one `IconName` = SF Symbol name API — swapping in
+  `<SymbolView>` is a change to `Icon.tsx` alone. `GlassButton` uses the
+  translucent `glass` colours (the owner's named fallback for blur-off). **To
+  finish:** `cd apps/mobile && bunx expo install expo-symbols expo-haptics
+  expo-clipboard expo-blur`, then wire `SymbolView` in `Icon.tsx` and `BlurView`
+  in `GlassButton.tsx`, and rebuild the dev client.
+- **`type` → `typography`.** `import { type, … }` reads as a type-only import
+  modifier to humans and some tooling (Babel/Metro); same table, other name.
+- **Mono family = `Menlo`.** No simulator screenshot was possible to test
+  `ui-monospace`; RN on iOS does not resolve that CSS alias, and Menlo is what
+  the app already used.
+- **`computerStatus` returns `detail` and `pairAgain` too, plus `menuActions`.**
+  The short word ("Online") replaces the long reason in the header, so the reason
+  needs its own field (it keeps the `computer-state-*` testID); the inline-Pair-
+  again and menu decisions belong in the pure module, not the component (§7).
+- **A `revoked` row now shows "Pair again" inline.** Before, the screen offered
+  it only for `action === "pair-again"`, so a revoked row had only Remove — while
+  `computer-rows.ts:12-16` says every such state offers Pair again and flow 15
+  asserts `computer-pair-again-<id>` on a revoked row (by reading, that flow could
+  not have passed; not run). `computerStatus.pairAgain` = every attention state.
+- **Menu and confirmation are an in-app `ActionSheet`, not `ActionSheetIOS` /
+  `Alert`** — same reason as the existing in-app confirmation (no testIDs for
+  XCUITest under the new architecture); it is drawn as an iOS action sheet. One
+  `Modal` stays mounted while the menu becomes the confirmation (no present-
+  while-dismissing). The menu offers Pair again for every computer (a re-pair
+  keeps the id, Q7).
+- **Remove's wording** is a title "Remove '<name>'?" plus a body without
+  backticks (they showed literally).
+- **No "Code found" chip, "seen 2 h ago", "direct/relay" or trailing "1
+  running"/"Idle" pill** — the row has none of those facts (no invented data);
+  the device-name field stays on the review sheet (it is entered before
+  connecting; the mockup's single sheet merges two stages the flow keeps apart).
+- **`may-still-ask`** is now part of the failure banner's body (the
+  `pair-may-still-ask` testID moves to that text; no flow asserts it).
+
+**NOT verified (simulator).** No screenshots under
+`/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/slice-1/` / `slice-2/` and no
+e2e run (`xcrun simctl` / `bun run e2e:mobile` need approvals this session cannot
+give), so the visual gate (Fable review vs the mockups, light + dark) is still
+open, as are flows 15/16 and the pairing flows on the new layout. To verify:
+`E2E_ONLY_FLOWS=15-revoked,16-remove-computer,12-pair-declined,13-pair-expired,20-camera-close
+bun run e2e:mobile --ios 18`, then the screenshot pass.
+
+**Gate:** `bun run typecheck` clean · `bun run lint` 0 errors/0 warnings
+(1393 files) · `bun test` 10022 pass, 4 skip (opt-in), 0 fail. No schema change
+(no `protocol.json` regen, no `protocol.d/` note).
+
 ## Review
 
 ### Slice 0 — adversarial review (fresh context)

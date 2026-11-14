@@ -484,6 +484,7 @@ function PairRoute({
   linkText,
   onDone,
   onCancel,
+  onBack,
 }: {
   readonly palette: Palette;
   readonly againId?: string;
@@ -492,6 +493,8 @@ function PairRoute({
   readonly linkText?: string;
   readonly onDone: (computerId: string) => void;
   readonly onCancel: () => void;
+  /** Leave the screen (the header's Cancel) — absent when Pair is the root. */
+  readonly onBack?: () => void;
 }): JSX.Element {
   const [state, setState] = useState<PairingState>(initialState);
   const abort = useRef<AbortController | null>(null);
@@ -616,6 +619,7 @@ function PairRoute({
       onConfirm={confirm}
       onCancel={cancel}
       onFailureAction={failureAction}
+      {...(onBack === undefined ? {} : { onBack })}
       {...(againId === undefined ? {} : { againId })}
       {...(againName === undefined ? {} : { againName })}
       camera={camera.view}
@@ -689,8 +693,10 @@ function ComputersRoute({
 }): JSX.Element {
   const [rows, setRows] = useState<readonly ComputerRow[]>([]);
   const [error, setError] = useState<string | undefined>(undefined);
-  /** The computer whose Remove confirmation is showing (an in-app card, never `Alert`). */
+  /** The computer whose Remove confirmation is showing (an in-app sheet, never `Alert`). */
   const [removing, setRemoving] = useState<ComputerRow | undefined>(undefined);
+  /** The computer whose menu (long-press / "…", Owner Q5) is showing. */
+  const [menu, setMenu] = useState<ComputerRow | undefined>(undefined);
 
   useFocusEffect(
     useCallback(() => {
@@ -723,10 +729,20 @@ function ComputersRoute({
       error={error}
       onOpen={onOpen}
       onAdd={onAdd}
-      onPairAgain={onPairAgain}
-      onRemove={setRemoving}
+      onPairAgain={(row) => {
+        setMenu(undefined);
+        onPairAgain(row);
+      }}
+      onMenu={setMenu}
+      onMenuClosed={() => setMenu(undefined)}
+      {...(menu === undefined ? {} : { menu })}
+      onRemove={(row) => {
+        // The menu turns into the confirmation (one sheet: `ComputersScreen`).
+        setMenu(undefined);
+        setRemoving(row);
+      }}
       onRemoveCancelled={() => setRemoving(undefined)}
-      removing={removing}
+      {...(removing === undefined ? {} : { removing })}
       onOpenSettings={onOpenSettings}
       onRemoveConfirmed={(row) => {
         setRemoving(undefined);
@@ -1213,19 +1229,14 @@ function AppShell(): JSX.Element {
         >
           <Stack.Screen
             name="Pair"
-            options={({ navigation }) => ({
-              title: "tentacle",
-              headerLeft: () =>
-                navigation.canGoBack() ? (
-                  <Pressable testID="pair-back" onPress={() => navigation.goBack()}>
-                    <Text style={{ color: palette.accent }}>Back</Text>
-                  </Pressable>
-                ) : null,
-            })}
+            // The screen draws its own header (glass Cancel, `pair-back`): the
+            // mockups' chrome is not the iOS 18 nav bar (mobile-ui-polish Design 4).
+            options={{ title: "Pair a computer", headerShown: false }}
           >
             {({ navigation, route }) => (
               <PairRoute
                 palette={palette}
+                {...(navigation.canGoBack() ? { onBack: () => navigation.goBack() } : {})}
                 {...(route.params?.again === undefined ? {} : { againId: route.params.again })}
                 {...(route.params?.againName === undefined
                   ? {}
@@ -1254,7 +1265,7 @@ function AppShell(): JSX.Element {
               />
             )}
           </Stack.Screen>
-          <Stack.Screen name="Computers" options={{ title: "Computers" }}>
+          <Stack.Screen name="Computers" options={{ title: "Computers", headerShown: false }}>
             {({ navigation }) => (
               <ComputersRoute
                 palette={palette}
