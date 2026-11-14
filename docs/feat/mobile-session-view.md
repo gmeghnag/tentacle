@@ -343,7 +343,7 @@ Not touched: `packages/**` (no protocol, daemon, client, TUI change — P11).
 | # | Case | Behaviour | Convergence |
 |---|---|---|---|
 | F1 | **Ask arrives before the sheet is mounted** (attach replay re-offers a pending ask) | `holdUntilSet` queues it (P4) | delivered to the sheet on `setRequester`, in order |
-| F2 | **Ask while the screen is gone / app backgrounded** | screen left → `detach` withdraws prompts (P5); background → link suspended → daemon detach; the ask waits (P2) | the laptop may answer it; else re-offered on the next attach/resume and shown then |
+| F2 | **Ask while the screen is gone / app backgrounded** | screen left → `detach` withdraws prompts (P5); background → link suspended; the daemon's own `attached` count lags until its 60 s ping fails (iOS freezes JS on background — 12c Execution finding 4), so it may still count the phone for a while | the ask WAITS regardless (P2): the laptop may answer it; else it is re-offered on the next attach/resume and shown then |
 | F3 | **Permission ask while the phone sleeps**, nobody else attached | daemon waits (P2); push is task 16 | on unlock + foreground: resume → re-attach → re-offer → sheet; a turn it blocked continues on the answer |
 | F4 | Ask answered on another device while the sheet is open | `permission_resolved` → abort → sheet closes, nothing sent (P3) | — |
 | F5 | Phone answers, link drops before the ack | keyed re-send on reconnect; `PermissionNotPending` = settled elsewhere, silent (P3) | executed once |
@@ -1164,3 +1164,344 @@ driver's port is exercised by a fake only. Nothing here is simulator-verified;
 - **Mutations (applied, run, reverted; `git status` clean):** supersession check disabled → both new gate tests red; `left.has` dropped from the open's post-attach check → both new controller tests red.
 - **Gate:** `bun test apps/mobile/test` 120 pass / 0 fail; `bun run lint` clean (1018 files); `bun run typecheck` clean.
 - **Nit (not blocking):** the detach of an abandoned open is fire-and-forget inside the serialised run (`session-controller.ts` post-attach branch), so an immediate re-open of the same id does not wait for it. The client's `endSession` only forgets its own entry, so the table stays consistent; awaiting it (as `leave` does) would make F17's "awaits the pending detach" hold literally.
+
+## Execution — slice 12c (the screen)
+
+*— claude-opus-5-5, 2026-11-14 (executor of slice 12c; branch
+`feat/mobile-session-view-12c`, no checkout/restore/stash/commit)*
+
+> Signature note: this section first read `deepseek-v4-pro`, a guess. The real id
+> is `claude-opus-5-5` (read from this session's own transcript, every assistant
+> record `"model":"claude-opus-5-5"`); 12b's Review caught exactly this class of
+> error, so it is corrected here rather than left standing.
+
+**Slice 12c only.** 12a and 12b are merged (`main` at `ba8c5a8`); this branch
+carries the screen, its pure modules, the six flows and one changelog fragment.
+Nothing under `packages/**` changed: no protocol schema, no `protocol.json`
+regeneration, no `protocol.d/` note (P11 held — `git diff --name-only` is
+`apps/mobile/**`, `docs/feat/mobile-session-view.md` and
+`changelog.d/mobile-session-view-12c.added.md`).
+
+### Load-bearing check (re-run first, as the brief requires)
+
+The plan's assumption is 12a's: the phone's screen consumes the TUI's attach path
+unchanged, with ONE broker. Re-proved on THIS branch's code, through the app's
+own modules — `session-controller.ts`, `transcript.ts` applied to what a session
+yields, and `connection.ts`'s `createLinkBroker`
+(`.tentacle/tmp/mobile-session-view-12c/load-bearing.ts`: a real `SessionHost` +
+`Connection`, a laptop client and the phone):
+
+```
+A open=true activities=["history"]
+  rows=user(hello) | assistant(ok: hello)
+B ask with NO requester: written=[] phoneSentResolve=false events=["user_message","tool_start"]
+  foreignTurn=true brokerHeld=true
+  sheet asked tool=fs_write title="Write a file" reply=yes
+C after the sheet: asked=1 written=["…/project/a.txt"]
+  events=["user_message","tool_start","tool_phase","tool_result","text","turn_end"]
+  rows=user | assistant | user | tool:fs_write:ok:diff | assistant
+D stop a foreign turn: opened=true cancelId=true same=true sentCancel=[true]
+E leave: archived=false attached=2 sentClose=false
+```
+
+So: `attach` delivers `history` as rows; with **no requester set the ask WAITS
+and the phone sends no `resolve_permission`** (the plan's Repro 2, on the screen's
+own broker); the sheet's requester is what lets the tool run **once**; the
+diff lands on the tool row; a foreign turn's `cancel()` reaches the wire with
+that turn's id; leaving sends `session/detach` and never `session/close`. Check
+PASSED (and it is exactly what `session-screen.test.ts` pins in the gate).
+
+### As built, in dependency order
+
+1. **`apps/mobile/src/composer.ts` (new, pure).** `composerAction` — the whole
+   truth table: send iff link `up` ∧ no turn ∧ text not blank; **■ Stop** iff a
+   turn runs (own or foreign) ∧ the field is empty ∧ the link is up (a `cancel`
+   cannot travel a dead link, so offering Stop there would be a button that does
+   nothing); a typed draft during a turn keeps the text (steer is task 13);
+   `restoreAfterFailure` puts a refused send's words back **after** anything typed
+   since.
+2. **`apps/mobile/src/permission-sheet.ts` (new, pure).** The `PermissionRequester`
+   the client's ONE broker gets: FIFO queue, the **age guard** (`ARM_MS` 400 ms)
+   as a SCHEDULED state change (`schedule` injected — see finding 1), options
+   derived from what the daemon offered (`allow_once`/`allow_always`/`reject_once`,
+   plus `reply` exactly when the ask takes one), a withdrawn ask resolving
+   `DISMISSED` (nothing sent), and `onAnswerLost` putting the person's words back
+   with the TUI's own wording.
+3. **`apps/mobile/src/session-view.ts` (new, pure).** The screen as a value:
+   header state line, the eight banners, `retry`/`reopen` flags, the composer view.
+   Every wording is the APP's (a pod chooses its error messages); the archived
+   banner is the only one offering Reopen, and only when the reopen it is showing
+   has not already failed as archived.
+4. **`apps/mobile/src/session-feed.ts` (new, pure).** `SessionActivity`/`SessionEvent`
+   → `TranscriptInput`, and the ONE place a turn's outcome is decided
+   (`turnOutcome`): a stated `cancelled` → cancelled, any other stated end →
+   ended, a stream that closed with no end → **interrupted**, a stream that threw
+   → **lost**. Own and foreign turns open the SAME bracket, which is F10's point.
+5. **`apps/mobile/src/links.ts` (new, pure).** A link tap confirms first
+   (`http`/`https`/`mailto` only; the FULL url in the confirmation); the OS is
+   only ever reached from the confirmation's own callback (F22, Owner Q7).
+6. **`apps/mobile/src/session-runtimes.ts` (new, pure).** One `SessionController`
+   per LIVE client, shared across screen mounts — a per-mount controller would
+   lose the per-id queue F17's serialisation depends on — replaced (and disposed)
+   when a Retry hands back a new client.
+7. **`apps/mobile/src/session-screen-controller.ts` (new, pure, injected).** The
+   wiring the screen calls: attach (first open NEVER passes `reopen`;
+   `deps.archived` only decides the banner), the sheet's requester set on the
+   client's own broker after the attach and `reset()` on leave, send (with the
+   refused-send restore), Stop (own → the send's `AbortSignal`, foreign → the
+   activity's `cancel()`), the link status, and the thumbnails window.
+8. **Presentation (rewritten/new):** `screens/SessionScreen.tsx` (a `FlatList`
+   of rows, the always-mounted `turn-running`/`turn-idle` indicator, the banners
+   with Retry/Reopen, a `KeyboardAvoidingView` composer), `screens/transcript/`
+   (`TranscriptRow.tsx`, `Markdown.tsx`, `DiffView.tsx`) and
+   `screens/PermissionSheet.tsx` (a native page-sheet `Modal`). All testIDs the
+   plan names exist.
+9. **`App.tsx`, `routes.ts`, `SessionsScreen`:** the `Session` route builds the
+   controller through the registry and the shared client; `SessionRoute` carries
+   `archived`; the list passes it on navigate.
+10. **The harness:** the mock model learns OpenAI tool-call SSE (`EDIT <name>` →
+   a real streamed `fs_write` call) plus `SLOW` (a turn that streams and ENDS);
+   12 new hooks (`laptop-prompt`, `laptop-answer`, `session-state`, `history`,
+   `file-exists`, `model-prompts`, `model-replies`, `edit-calls`, …); one session
+   per permission flow; flows `06`–`11` (+ `08b` deny and `08c` reply variants),
+   each ending on daemon truth; `04-session-placeholder.yaml` **deleted**.
+11. **Tests** (new): `composer.test.ts` (13), `permission-sheet.test.ts` (21),
+    `session-view.test.ts` (16), `session-feed.test.ts` (11),
+    `links.test.ts` (6), `session-runtimes.test.ts` (4), `session-screen.test.ts`
+    (15), and `e2e-flows.test.ts` extended to 10 (the daemon-truth ending rule,
+    the deleted placeholder, no flow ending on its container).
+12. **`changelog.d/mobile-session-view-12c.added.md`** — one bullet, validated by
+    `scripts/changelog.ts`'s own parser (`bun test scripts/test/changelog.test.ts`
+    green). `TODO.md` untouched.
+
+**RED before green.** Every pure module's tests were written before its
+implementation and run red on the missing/incorrect code; §"Mutations" below is
+the §9 non-vacuity proof (each mutation reddens the test named for it, and the
+tree was re-checked after each revert).
+
+### Mutations (each applied, run on the named file, reverted — pasted results)
+
+Every one is a §9 non-vacuity check: the mutation is applied to the module, the
+narrow test file is run, the failure is recorded, and the file is restored
+(`.tentacle/tmp/mobile-session-view-12c/mutate.py`; `git status` re-checked after
+each revert).
+
+```
+=== M1 age guard ARM_MS = 0 (the plan's own)          plan 12c
+    (fail) a tap inside ARM_MS of the ask appearing is IGNORED, and the ask stays
+    (fail) the window re-arms for the NEXT ask (a sheet that swaps is a new decision)
+    (fail) view() reports `armed` by the clock, so the screen can dim the options
+    (fail) a second ask waits; answering the first presents it, armed again
+    14 pass 4 fail
+=== M2 archived → Reopen always offered                Owner Q4
+    (fail) a reopen that failed as archived again: no second Reopen button…
+    (fail) deleted: its own banner, no Retry, no Reopen
+    (fail) too many sessions: said plainly, no retry, Reopen stays off
+    13 pass 3 fail
+=== M3 a running turn no longer blocks send            decision 15
+    (fail) own turn + empty field → Stop for THAT turn
+    (fail) FOREIGN turn + empty field → Stop for that turn id
+    (fail) a turn runs and something is typed → neither send nor stop
+    (fail) a turn runs on a DEAD link → no Stop, and it says turn
+    9 pass 4 fail
+=== M4 a refused send does not restore the text        F13
+    (fail) a send refused before the ack puts the text BACK with a notice
+    14 pass 1 fail
+=== M5 this phone's Stop does not abort its own turn    decision 15
+    (fail) this phone's OWN turn stops through its own abort signal
+    14 pass 1 fail
+=== M6 a cut stream reported as `ended`                 F19
+    (fail) a stream that closed with no end event → interrupted
+    (fail) a foreign turn's cancel is handed out for Stop, and cleared once it ends
+    9 pass 2 fail
+=== M7 the sheet's requester never reaches the broker    AGENTS "single broker"
+    (fail) it attaches, mounts the sheet's requester on the ONE broker, and goes Live
+    (fail) the sheet's answer IS the answer the broker hands back
+    (fail) leaving withdraws the ask and RELEASES the broker
+    12 pass 3 fail
+=== M8 leave() does not reset() the broker              F2 / single broker
+    (fail) leaving withdraws the ask and RELEASES the broker (a detach sends nothing)
+    14 pass 1 fail
+=== M9 a link tap opens without confirming              F22 / Owner Q7
+    (fail) nothing opens until the person confirms
+    (fail) a cancelled prompt opens nothing
+    4 pass 2 fail
+=== M10 the route's `archived` flag passes reopen        Owner Q4
+    (fail) a route flagged `archived` still attaches WITHOUT reopen
+    (fail) an attach that failed as archived offers Reopen, and Reopen attaches
+    13 pass 2 fail
+=== M11 a new client does not replace the controller     F17
+    (fail) a NEW client (a redial) replaces the controller, and the old one is disposed
+    3 pass 1 fail
+=== M12 every row wants thumbnail bytes, not the window  owner's image rule
+    (fail) the visible window asks the thumbnail driver only for those rows
+    14 pass 1 fail
+=== M13 the age guard's release is never SCHEDULED      finding 1 (below)
+    (fail) the release is EMITTED as a state change, so the screen never polls a clock
+    (fail) a withdrawn ask CANCELS its scheduled release
+    19 pass 2 fail
+```
+
+M8 is worth naming: the first version of its test proved only "*a later ask
+waits*", which stayed green with `reset()` removed (the broker's own
+`holdUntilSet` did the waiting) — a weaker property than the one the mutation
+touches. It now also asserts that the departed screen's sheet sees **no new
+ask**, which is what `reset()` actually buys, and the mutation reddens it.
+
+### Drift from the Implementation (and why)
+
+1. **`session-feed.ts` and `session-screen-controller.ts` are two modules, not
+   zero.** The plan put the screen's wiring in the components and listed three
+   pure modules (`session-view`, `composer`, `permission-sheet`). The turn BRACKET
+   (`turn_started`/`turn_ended` with its five outcomes) and the sheet's
+   requester/broker lifecycle are decisions AGENTS §7 says must be testable
+   without a simulator — and they are exactly the ones the flows found bugs in.
+   So they are pure, injected modules; the components map a value to elements.
+2. **`links.ts` and `session-runtimes.ts` are new (not in the plan's file list).**
+   `links.ts` because F22/Owner Q7 ("ask before opening") is a decision, and
+   putting it in a `Pressable` would be untestable. `session-runtimes.ts` because
+   `session-controller.ts`'s per-id queue is only worth anything if it survives a
+   screen mount — a per-mount controller loses F17's serialisation on a fast
+   back-then-forward.
+3. **A plain refusal renders as `error`, not `denied`.** The plan's flow list said
+   `tool-<callId>-denied` for the deny variant; 12b's own Drift 4 (already merged)
+   reserves `denied` for a refusal WITH the person's words, which is what the TUI
+   distinguishes. Flow `08b` asserts `tool-<id>-error` and flow `08c` (the reply
+   variant) asserts `tool-<id>-denied`, so both states are covered and neither
+   flow can pass by accident.
+4. **`armedInMs` + an injected `schedule` in `permission-sheet.ts`.** Not in the
+   plan, and it is a bug the simulator found (finding 1): `armed` was computed
+   from the clock *at render time*, so nothing re-rendered when the window ended.
+5. **The flow list gained `08b` and `08c`** (the plan's `08` had "variant deny" and
+   "variant reply" as sub-cases). Two separate flows, because each has its own
+   daemon-truth ending and a `clearState` of its own; and each permission flow got
+   its OWN seeded session (finding 3).
+6. **The transcript's images draw their label, not a thumbnail.** The thumbnail
+   TRANSPORT still does not exist (12b's Drift 1 — no `attachment/get`), so
+   `UserRowView` draws `[image: name]` (`imageRowText`) and draws a thumbnail only
+   if the injected port ever yields one. The plan's owner requirement is met
+   as far as this build can honestly go, exactly as 12b recorded it.
+7. **`apps/mobile/e2e/seed.ts`: every harness client is `holdUntilSet` with no
+   requester, and leaves by detach.** The 11a seeder dialled with `denyAll` and
+   stayed attached: it silently answered every ask with a "No", so flow 08's sheet
+   never appeared (finding 2). This is 12a's Repro 2 hazard, in the harness.
+
+### Findings from the iOS 26 runs (each fixed, in order)
+
+1. **The age guard's release was invisible to React.** `armed` was derived from
+   the injected clock inside `view()`, so the sheet rendered once with
+   `armed: false` and never again: the options stayed dimmed and `disabled` for
+   ever, and every permission flow failed after the sheet appeared. A screen-side
+   timer did not help (it re-rendered with the same stale prop). **Fixed by moving
+   the release into the module**: `present()` schedules it and emits it through
+   the same `onChange` every other change uses (`schedule` is injected, so the
+   test drives it). Pinned by two new tests and mutation M13.
+2. **The harness's `denyAll` broker stole every ask.** The seeder's client stayed
+   attached with `denyAll`, so the daemon offered it the request and got an
+   immediate "No": the phone's sheet never opened, and the transcript showed
+   `Write · error`. **Fixed**: every harness client is `holdUntilSet` with no
+   requester (an ask WAITS), and each helper detaches instead of closing.
+3. **A pending ask leaked across flows.** An ask is daemon-side state that
+   outlives a flow's `clearState`; flows 08/08b/08c/09/10 shared `Alpha`, so the
+   request 08 left pending was re-offered to 08b's screen and covered it. **Fixed**:
+   one seeded session per permission flow (`ASK1_ID`…`ASK5_ID`).
+4. **The daemon does not see the detach when the app is backgrounded.** The plan's
+   F2 said "background → link suspended → daemon detach". On iOS 26 the JS thread
+   is frozen as the app goes to the background, so the gate's `suspend()` and its
+   socket close do not reliably reach the wire before the process stops running;
+   the daemon notices only when its own 60 s ping fails. The app still sheds the
+   link as soon as JS runs again, and the ask still WAITS (P2 holds). The flow
+   asserts what is true and load-bearing (nobody answered it, the turn is still
+   suspended), and the plan's F2 row now says so instead of claiming an immediate
+   detach.
+5. **Maestro's `launchApp` relaunches the process; `openLink` raises an iOS system
+   dialog.** A `launchApp` without `clearState` still restarts the app (it came
+   back on `Computers`, navigation state gone), and `openLink: "so.tentacle.app://"`
+   raises iOS's own "Open in tentacle?" sheet, which then covered the NEXT flow.
+   Flow 10 therefore walks back in after the relaunch, and no flow uses `openLink`.
+6. **A `display: none` element is invisible to XCUITest.** `turn-idle` was drawn
+   as a hidden `Text`: Maestro could never assert it. It is now one always-mounted
+   element whose `testID` flips between `turn-running` and `turn-idle`.
+7. **The composer's button sits under the keyboard.** Every flow that types now
+   runs `hideKeyboard` before tapping it.
+8. **The mock model looped on its own tool result.** A follow-up round (last
+   message `role: "tool"`) re-emitted the `EDIT` call for ever, so one prompt ran
+   `fs_write` sixteen times. Fixed: a follow-up round answers in prose.
+9. **`editTarget` never matched.** The daemon renders its own `[context: …]` line
+   onto the user message every request, so the model sees the person's text
+   followed by a line they never typed — `^EDIT …$` of the whole prompt missed it.
+   Matched per LINE now.
+10. **The reply-text extraction swallowed the agent's guidance sentence.** The
+    tool message ends with `REPLY_GUIDANCE`; the hook now strips it by its own
+    verbatim text.
+
+### Notes / unverified
+
+- **iOS 18 is not covered** (P9, unchanged from 11a): Xcode 27.1 cannot install
+  that runtime, so `bun run e2e:mobile` reports it missing (exit 2) and this slice
+  ran `--ios 26` only. Every flow above is iOS 26.5.
+- **Thumbnails have no transport** (12b Drift 1): the driver's port is exercised
+  by a fake here too. A `media_message` ref draws its label.
+- **The daemon's `attached` count lags a background** (finding 4). The app's side
+  is correct (the gate closes the socket when JS runs again); the daemon's count
+  is what waits for its own ping timeout. Nothing in the phone's behaviour depends
+  on it.
+- **Backgrounding resumes by RELAUNCH in the harness** (finding 5). A person
+  tapping the icon gets the same screen back; Maestro cannot express that without
+  iOS's own "Open in…" dialog, so flow 10 re-navigates. The behaviour under test
+  (the ask waits, and is re-offered on re-attach) is unchanged.
+- **A long Maestro session degrades the simulator.** After many consecutive
+  harness runs the XCUITest driver fails to start (`DeviceUnreachableException`,
+  `iOS driver not ready in time`) or `simctl install` fails with
+  `Mach error -308`, and every flow then fails identically — which is why some
+  runs in this slice's history show all-red. Recovering needs a simulator
+  shutdown + `simctl erase` + boot (a stale `expo run:ios` install can also hang
+  and must be killed). Not a product or flow issue, but a CI leg should boot a
+  fresh simulator per run.
+- The full `bun test` suite (see Gate) contains one known load-sensitive test in a
+  package this slice does not touch (`packages/daemon/test/serve-log-store.test.ts`
+  S11), as 12b's Execution recorded.
+
+### Gate
+
+```
+$ bunx tsc --noEmit                    # clean
+$ bunx tsc --noEmit -p apps/mobile     # clean
+$ bun run lint                         # Checked 1080 files. No fixes applied. (0 errors, 0 warnings — the §6 baseline)
+$ bun test apps/mobile/test            # 308 pass · 0 fail (29 files)
+$ bun test                             # 8210 pass · 3 skip · 0 fail · 13 snapshots (592 files, 333s)
+```
+
+The three skips are the §6 opt-ins (live-k8s, live-docker, the real-socket
+keepalive test).
+
+**Maestro, iOS 26.5 (`iPhone 17 Pro`, Release build), the run this slice merges on:**
+
+```
+$ JAVA_HOME=$(brew --prefix openjdk@17) PATH="$(brew --prefix openjdk@17)/bin:$PATH" \
+    bun run e2e:mobile --ios 26
+=== iOS 26 (0FA4B51F-A0E3-421B-BE66-CE29EF45213D) ===
+✓ 01-shell (iOS 26)          ✓ 08-permission (iOS 26)
+✓ 02-session-list (iOS 26)   ✓ 08b-permission-deny (iOS 26)
+✓ 03-refresh (iOS 26)        ✓ 08c-permission-reply (iOS 26)
+✓ 05-daemon-down (iOS 26)    ✓ 09-foreign-turn (iOS 26)
+✓ 06-session-open (iOS 26)   ✓ 10-background-ask (iOS 26)
+✓ 07-prompt (iOS 26)         ✓ 11-disconnect-mid-turn (iOS 26)
+
+PASS — logs in .tentacle/tmp/e2e-mobile/1794620942358
+```
+
+Twelve of twelve, on the screen this slice builds. Each flow's last step is a
+daemon-truth check (`e2e-flows.test.ts` enforces it), so a screen that merely
+DREW the right ids cannot pass: 06 proves the phone left by DETACH
+(`archived: false`, `attached` back to the laptop), 07 that the daemon's history
+holds the typed prompt and the mock's answer, 08/08b/08c that the approval ran
+the tool ONCE, the refusal ran it not at all, and the reply reached the MODEL,
+09 that a foreign turn's Stop cancelled that turn id daemon-side and that the
+LAPTOP's first answer closed the phone's sheet, 10 that the ask WAITED while the
+phone was away and was answered after it returned, 11 that a killed and
+restarted `serve` converges (rows kept, banner cleared, composer usable, history
+intact).
+
+No schema changed, so `packages/protocol/schema/protocol.json` was NOT
+regenerated: nothing under `packages/**` is touched (P11 re-verified).

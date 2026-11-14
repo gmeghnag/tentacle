@@ -5,13 +5,15 @@
  * `session-list*.ts`, `link-registry.ts`, `foreground-gate.ts`); this file maps
  * them to React.
  *
- * The session screen is still 11a's placeholder: 12a builds the LINK (one held
- * broker, detach-not-close, the foreground gate) and 12c the screen itself.
+ * The session screen (12c) builds its own controller per computer — one
+ * `SessionController` per LIVE client, so the per-id open/leave queue survives a
+ * screen mount (`session-runtimes.ts`) — and hands it to a dumb screen.
  */
 import { NavigationContainer, useFocusEffect } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
+import type { RemoteClient } from "@tentacle/client";
 import { type JSX, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AppState, useColorScheme } from "react-native";
+import { ActivityIndicator, AppState, StyleSheet, Text, View, useColorScheme } from "react-native";
 import { type ComputerRow, computerRows, probeComputer } from "./src/computer-rows.ts";
 import { ComputerConfigError, type ComputerRecord, devComputerSource } from "./src/computers.ts";
 import { type ComputerLink, openComputer } from "./src/connection.ts";
@@ -22,8 +24,15 @@ import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
 import { PairScreen } from "./src/screens/PairScreen.tsx";
 import { SessionScreen } from "./src/screens/SessionScreen.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
+import { createSessionController } from "./src/session-controller.ts";
 import { createSessionListController, viewModel } from "./src/session-list-controller.ts";
 import { type SessionListState, type SessionRow, initialSessionList } from "./src/session-list.ts";
+import { createSessionRuntimes } from "./src/session-runtimes.ts";
+import {
+  type SendableHandle,
+  type SessionScreenController,
+  createSessionScreen,
+} from "./src/session-screen-controller.ts";
 import { type Palette, paletteFor } from "./src/theme.ts";
 
 const Stack = createNativeStackNavigator<RootStackParams>();
@@ -40,6 +49,23 @@ const RECORDS = new Map<string, ComputerRecord>();
 
 /** Every link currently open: what the `AppState` effect suspends and resumes. */
 const LIVE_LINKS = new Set<ComputerLink>();
+
+/**
+ * One session controller per LIVE client, shared by every screen mount
+ * (`session-runtimes.ts`: a per-mount controller would lose the per-id queue
+ * that F17's serialisation depends on).
+ */
+const RUNTIMES = createSessionRuntimes<RemoteClient, SendableHandle>({
+  // The client IS the seam: an attach never creates a session, and `reopen` is
+  // the person's Reopen button's flag (Owner Q4).
+  build: (client) =>
+    createSessionController<SendableHandle>({
+      newSession: (sessionId, options) =>
+        client.newSession(undefined, sessionId, undefined, {
+          attach: options.reopen === true ? { reopen: true } : {},
+        }) as SendableHandle,
+    }),
+});
 
 /** One live client per computer, closed when the app unmounts (AGENTS §7). */
 const LINKS = createLinkRegistry<ComputerLink>({
@@ -238,6 +264,89 @@ function SessionsRoute({
   );
 }
 
+/**
+ * One session screen for one computer's session: dial (through the SAME registry
+ * the list uses), build this client's controller (shared per client, so a fast
+ * back-then-forward keeps one per-id queue — F17), and hand it to the dumb
+ * screen. A dial that fails shows its own honest line: the attach never starts.
+ */
+function SessionRoute({
+  palette,
+  computerId,
+  sessionId,
+  title,
+  archived,
+}: {
+  readonly palette: Palette;
+  readonly computerId: string;
+  readonly sessionId: string;
+  readonly title: string;
+  readonly archived: boolean;
+}): JSX.Element {
+  const [controller, setController] = useState<SessionScreenController | null>(null);
+  const [error, setError] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    let live = true;
+    let created: SessionScreenController | null = null;
+    let unsubscribe: (() => void) | null = null;
+    void (async () => {
+      let link: ComputerLink;
+      try {
+        link = await LINKS.get(computerId);
+      } catch (caught) {
+        if (live) {
+          setError(errorText(caught));
+        }
+        return;
+      }
+      if (!live) {
+        return;
+      }
+      created = createSessionScreen({
+        sessionId,
+        archived,
+        title,
+        project: RECORDS.get(computerId)?.name ?? "",
+        controller: RUNTIMES.controller(link.client),
+        broker: link.permissions,
+        now: () => Date.now(),
+      });
+      // The link's own status: the banner's `reconnecting` (F8/F9).
+      unsubscribe = link.onStatus((status) => created?.link(status.state === "up"));
+      setController(created);
+    })();
+    return () => {
+      live = false;
+      unsubscribe?.();
+      created?.dispose();
+    };
+  }, [computerId, sessionId, archived, title]);
+
+  if (controller === null) {
+    // Dialling the computer: the screen's own id is present, so a flow (and a
+    // person) sees the session screen's frame while the socket comes up.
+    return (
+      <View
+        testID="session-view"
+        style={[styles.connecting, { backgroundColor: palette.groupedBackground }]}
+      >
+        {error === undefined ? (
+          <ActivityIndicator color={palette.accent} />
+        ) : (
+          <Text
+            testID="session-connect-error"
+            style={[styles.connectingText, { color: palette.danger }]}
+          >
+            {error}
+          </Text>
+        )}
+      </View>
+    );
+  }
+  return <SessionScreen palette={palette} controller={controller} />;
+}
+
 export default function App(): JSX.Element {
   const palette = paletteFor(useColorScheme());
   const [computers, setComputers] = useState<readonly ComputerRecord[] | null>(null);
@@ -327,6 +436,10 @@ export default function App(): JSX.Element {
                   computerId: route.params.computerId,
                   sessionId: row.sessionId,
                   title: row.title,
+                  // From the Archived section: the screen shows the archived
+                  // banner and a Reopen button, and taps open WITHOUT reopening
+                  // (Owner Q4: browsing never revives a session).
+                  archived: row.archived,
                 })
               }
             />
@@ -334,11 +447,12 @@ export default function App(): JSX.Element {
         </Stack.Screen>
         <Stack.Screen name="Session" options={({ route }) => ({ title: route.params.title })}>
           {({ route }) => (
-            <SessionScreen
+            <SessionRoute
               palette={palette}
+              computerId={route.params.computerId}
+              sessionId={route.params.sessionId}
               title={route.params.title}
-              project={RECORDS.get(route.params.computerId)?.name ?? ""}
-              state=""
+              archived={route.params.archived}
             />
           )}
         </Stack.Screen>
@@ -346,3 +460,8 @@ export default function App(): JSX.Element {
     </NavigationContainer>
   );
 }
+
+const styles = StyleSheet.create({
+  connecting: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
+  connectingText: { fontSize: 14, textAlign: "center" },
+});

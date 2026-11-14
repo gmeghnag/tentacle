@@ -197,7 +197,7 @@ async function main(): Promise<number> {
     const child = Bun.spawn(
       [
         process.execPath,
-        "packages/cli/src/main.ts",
+        join(REPO, "packages", "cli", "src", "main.ts"),
         "serve",
         "--port",
         `${daemonPort}`,
@@ -205,7 +205,10 @@ async function main(): Promise<number> {
         "e2e-token",
       ],
       {
-        cwd: REPO,
+        // The daemon's cwd IS its session cwd (each session's tools are confined
+        // to it), so it is the run's scratch dir — `project/<file>` (the mock
+        // model's `EDIT` prompts) lands there and never in the repo.
+        cwd: runDir,
         env: {
           ...process.env,
           TENTACLE_CONFIG_DIR: join(runDir, "config"),
@@ -230,14 +233,19 @@ async function main(): Promise<number> {
     );
 
     // Seed the sessions the flows assert on, through the client stack.
-    const { addDelta, seedSessions } = await import("./seed.ts");
+    const { addDelta, seedSessions, laptopLink, sessionStateOf, historyOf, fileExists } =
+      await import("./seed.ts");
+    const endpoint = { url: `ws://127.0.0.1:${daemonPort}/`, token: "e2e-token" };
     const seeded = await seedSessions({
-      url: `ws://127.0.0.1:${daemonPort}/`,
-      token: "e2e-token",
+      ...endpoint,
+      cwd: runDir,
       holdStarted: () => mock.held(),
     });
+    // The LAPTOP's own client for the flows' mid-run turns and answers: it stays
+    // attached, so `attached` counts it (12c flows 09/10).
+    const laptop = await laptopLink(endpoint);
     console.log(
-      `seeded alpha=${seeded.alphaId} bravo=${seeded.bravoId} charlie=${seeded.charlieId}`,
+      `seeded alpha=${seeded.alphaId} bravo=${seeded.bravoId} charlie=${seeded.charlieId} asks=${seeded.askIds.join(",")}`,
     );
     await writeFile(join(runDir, "seeded.json"), JSON.stringify(seeded, null, 2));
 
@@ -245,7 +253,7 @@ async function main(): Promise<number> {
     // and restart the daemon on the same port).
     const hooks = startHooks({
       actions: {
-        addDelta: () => addDelta({ url: `ws://127.0.0.1:${daemonPort}/`, token: "e2e-token" }),
+        addDelta: () => addDelta(endpoint),
         stopServe: async () => {
           serving.kill();
           await serving.exited;
@@ -255,6 +263,14 @@ async function main(): Promise<number> {
           serving = startServe();
           await waitForPort(daemonPort);
         },
+        laptopPrompt: (session, prompt, answer) => laptop.prompt(session, prompt, answer),
+        laptopAnswer: (session, answer) => laptop.answer(session, answer),
+        sessionState: (session) => sessionStateOf(endpoint, session),
+        history: (session) => historyOf(endpoint, session),
+        fileExists: (file) => fileExists({ cwd: runDir }, file),
+        modelPrompts: () => mock.prompts,
+        modelReplies: () => mock.replies,
+        editCalls: () => mock.calls,
       },
     });
     await hooks.ready;
@@ -275,13 +291,7 @@ async function main(): Promise<number> {
         console.error(`build/install failed for iOS ${major} (exit ${buildCode})`);
         return buildCode;
       }
-      for (const flow of [
-        "01-shell",
-        "02-session-list",
-        "03-refresh",
-        "04-session-placeholder",
-        "05-daemon-down",
-      ]) {
+      for (const flow of FLOWS) {
         const outDir = join(runDir, `ios${major}`, flow);
         await mkdir(outDir, { recursive: true });
         const code = await spawnFlow(
@@ -376,6 +386,27 @@ async function buildAndInstall(
   return code;
 }
 
+/**
+ * Every flow, in order (docs/feat/mobile-session-view.md 12c supersedes 11a's
+ * `04-session-placeholder`: the placeholder is gone, so its flow is deleted and
+ * `06-session-open` asserts the real screen). Each one starts with
+ * `clearState: true`, so their order carries no state.
+ */
+export const FLOWS: readonly string[] = [
+  "01-shell",
+  "02-session-list",
+  "03-refresh",
+  "05-daemon-down",
+  "06-session-open",
+  "07-prompt",
+  "08-permission",
+  "08b-permission-deny",
+  "08c-permission-reply",
+  "09-foreign-turn",
+  "10-background-ask",
+  "11-disconnect-mid-turn",
+];
+
 /** Maestro's `-e K=V` flags, from a map (its `${VAR}` substitution reads these). */
 export function envFlags(values: Record<string, string>): string[] {
   return Object.entries(values).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
@@ -387,7 +418,12 @@ async function spawnFlow(
   device: string,
   outDir: string,
   runDir: string,
-  seeded: { readonly alphaId: string; readonly bravoId: string; readonly charlieId: string },
+  seeded: {
+    readonly alphaId: string;
+    readonly bravoId: string;
+    readonly charlieId: string;
+    readonly askIds: readonly string[];
+  },
   hooks: string,
 ): Promise<number> {
   const child = Bun.spawn(
@@ -402,6 +438,14 @@ async function spawnFlow(
         ALPHA_ID: seeded.alphaId,
         BRAVO_ID: seeded.bravoId,
         CHARLIE_ID: seeded.charlieId,
+        // One session per permission flow: an ask is daemon-side state that
+        // outlives a flow's `clearState`, so a shared session would leak a
+        // pending sheet into the next flow (found by the iOS 26 run).
+        ASK1_ID: seeded.askIds[0] ?? "",
+        ASK2_ID: seeded.askIds[1] ?? "",
+        ASK3_ID: seeded.askIds[2] ?? "",
+        ASK4_ID: seeded.askIds[3] ?? "",
+        ASK5_ID: seeded.askIds[4] ?? "",
         MAESTRO_HOOKS: hooks,
       }),
       flow,

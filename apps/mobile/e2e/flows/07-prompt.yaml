@@ -1,0 +1,42 @@
+appId: so.tentacle.app
+---
+# 07 (docs/feat/mobile-session-view.md 12c): a prompt typed on the phone runs a
+# turn on the daemon and streams back. Three observables, none of them the
+# screen's word alone: the running indicator (`turn-running` → `turn-idle`), the
+# assistant's row, and the daemon's own history through a hook.
+- launchApp:
+    clearState: true
+- tapOn:
+    id: "computer-dev"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${ALPHA_ID}"
+- assertVisible:
+    id: "session-view"
+- assertVisible:
+    id: "turn-idle"
+- tapOn:
+    id: "composer-input"
+- inputText: "SLOW flow seven prompt"
+# The keyboard covers the composer's button: dismiss it, so the tap lands
+# on the button and not on a key (found by the first iOS 26 run).
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+# The turn runs: the indicator replaces the idle marker (it flips back below).
+- assertVisible:
+    id: "turn-running"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+# The turn was DRAWN, not just stored: an empty transcript shows
+# `transcript-empty`, so its absence after a turn is the screen's own evidence.
+# (A row's `row-<key>` id is a per-session counter — the turn bracket allocates
+# one too — so it is not a stable name for a flow to assert; the daemon's history
+# below is what proves the content.)
+- assertNotVisible:
+    id: "transcript-empty"
+- runScript:
+    file: "07-history.js"

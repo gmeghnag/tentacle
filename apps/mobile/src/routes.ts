@@ -19,6 +19,12 @@ export interface SessionRoute {
   readonly computerId: string;
   readonly sessionId: string;
   readonly title: string;
+  /**
+   * The session was in the list's Archived section. It is opened with the
+   * `archived` banner and a Reopen button, and only that button sends
+   * `open{reopen}` (Owner Q4: browsing the list never revives a session).
+   */
+  readonly archived: boolean;
 }
 
 /** The stack's route table (`@react-navigation/native-stack` params). */
