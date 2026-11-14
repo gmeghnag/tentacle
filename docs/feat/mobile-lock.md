@@ -493,3 +493,76 @@ all three are the guards' own rules, applied to the new flows).
    Release build of the app on the simulator (a ~15 min build) and the flows need
    the harness's daemon, pairing and seed. The flows and hooks typecheck and
    satisfy `e2e-flows.test.ts`'s rules, but they have not been executed.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; **same model as the plan's author** — shared blind spots possible; the executor was DeepSeek)
+
+**Verdict: REQUEST-CHANGES**
+
+### Findings
+
+1. **MEDIUM — every Settings change re-locks the app and asks Face ID again.**
+   `apps/mobile/src/app-lock.ts:164` (`onLoaded`: `next.locked ? next : beginEpisode(next)`)
+   + `apps/mobile/src/screens/LockGate.tsx:97-101` (re-dispatches `loaded` on every
+   `setting` prop change) + `apps/mobile/App.tsx` `selectDelay` / the `authResult`
+   handler (`setLockSetting(...)` after each write). Repro
+   (`.tentacle/tmp/mobile-lock/relock.ts`, reducer driven exactly as the wiring does):
+   ```
+   unlocked, setSetting immediately → loaded immediately → {"cover":"lock","prompt":true,"locked":true}
+   setSetting 1h → prompted → authResult success → loaded 1h → {"cover":"lock","prompt":true,"locked":true}
+   ```
+   Stronger delay: the app locks under the person's finger. Weakening: two Face IDs,
+   and cancelling the second leaves the app locked right after a successful auth.
+   Not fail-open, but the Settings screen is broken as UX and flow 20 (select
+   `immediately`, then `pressKey: home`) will hit an unexpected lock+prompt
+   (the flows were never run). No test covers `loaded` arriving on an unlocked
+   state. Fix direction: `loaded` is a launch-time event — apply it only while
+   `setting === "loading"`, or stop feeding later setting changes through it
+   (the reducer already got `setSetting`); add the red test.
+2. **MEDIUM — daemon text reaches the export unredacted (F16 not met; its test was weakened).**
+   `apps/mobile/src/connection.ts:285` logs `error.message` and `:142-150` the ws
+   close `reason` as `detail`; `redact()` (`app-log.ts:93-99`) removes only URLs,
+   bearer/params and ≥20-char runs, so a path, title or prompt fragment in a
+   daemon/JSON-RPC error survives up to 160 chars. The plan (Tests, `app-log.test.ts`)
+   requires `CANARY-PROMPT`/`CANARY-TITLE` to be absent from the export;
+   `test/app-log.test.ts:110-115` instead asserts only that the TAIL (`COMPUTER`)
+   was truncated away — the prompt and title canaries are present and the test
+   passes. Execution does not list this as drift. Either log a closed error code /
+   class instead of the message (D7's "fields limited to numbers, booleans and short
+   enums"), or record the decision to accept bounded daemon text as an explicit
+   drift with the owner's OK — and make the test state the true property.
+
+### Gate (re-run here)
+
+- `bun test apps/mobile/test` — **639 pass, 0 fail** (51 files).
+- `bun run lint` — clean (1237 files). `bun run typecheck` — clean.
+- Full `bun test` not re-run (only the mobile app is touched).
+
+### Mutation
+
+`app-lock.ts:202` — dropped the `now < lastSeenActive` clause → **F8 test RED**
+(1 fail / 25 pass); reverted, `git status --porcelain` empty.
+
+### Attacks tried
+
+- Fail-open at cold start: initial view before `launch` is `cover:lock`
+  (setting `loading`) — holds. `LockGate` at the same root position in both
+  `App` returns, so no remount / state loss — holds.
+- Late `background`+`active` (F7), clock back (F8), threshold (F9), F5 no-reprompt
+  loop via `prompted` ack — hold in the reducer (device heartbeat still unverified,
+  as Execution says).
+- Weakening without auth: `selectDelay` reads `pendingSetting` after dispatch and
+  writes nothing — holds; a failed auth clears `pendingSetting` — holds.
+- `authenticate`/`capability` throwing → `fail` / `ok` (fail-closed) — holds.
+- Setting store: unknown `v`/garbage/read error → `5m`, writes refused — holds
+  (LOW: a transient Keychain read error blocks every write for the session).
+- Log drain dedups by `entry.t >` — LOW: entries sharing the last drained
+  millisecond are skipped from the file.
+
+### What holds / executor behaviour
+
+The reducer, store and redaction-of-secrets (URL query, bearer, keys) are sound and
+honestly tested; Step 0 results and unverified items are reported candidly
+(backup exclusion, Maestro not run). The executor missed the interaction between
+`loaded` and later setting changes, and silently narrowed the plan's canary test.
