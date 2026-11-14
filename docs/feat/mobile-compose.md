@@ -1719,3 +1719,15 @@ is still drift 1.
 **Executor:** candid about the red device gate and about drifts 1–8. It missed drift 3 above and the unthrowable `prompt` seam.
 
 *— claude-opus-5-5, 2026-11-14* (fresh context; a different model family from the executor, deepseek)
+
+### Round 2
+
+**Verdict: PASS** (code). The Maestro device gate is unchanged: still NOT green per the executor (13d stays PARTIAL until it is).
+
+- **F1 (HIGH, refused send loses text): fixed.** `foldStream` now rethrows after folding the outcome (`session-feed.ts`), and `promptWithRefs` throws when nothing streamed. `sendNowHere` hands the error to `driver.settle`, then restores the field on `restore`/`draft`. My round-1 repro (`rev/f7.test.ts`) passes in both modes. **Mutation:** dropping the `throw failure` in `promptWithRefs` turns "a REFUSED send gives the words back through the REAL seam" red. The foreign-turn caller `.catch`es the rejection, so there is no unhandled rejection.
+- **F2 (MEDIUM, Send-now dup): fixed.** Only `restoredByRefusal` ids (the ids not in the daemon's `held`, `hosted-session.ts:2156`) come back; held rows stay mine. **Mutation:** restoring every id turns "gives back ONLY the texts the daemon does not hold" red.
+- **F3 (MEDIUM, no persistence before first attempt): fixed.** Text sends and steers are now `driver.enqueue` (on disk) → `claim` (`sending` + `busy`) → act with the item's key → `settle`. **Mutation:** making `claim` drop the item from disk turns 8 tests red, including all three F3 tests. A first mutation (`discard` before the prompt) stayed green, because `discard` is a no-op on a claimed (`busy`) item. That is by design: an in-flight item cannot be discarded.
+- **Regressions looked for, none at MEDIUM+:** `ownTurn` callers (both `.catch`); the 12c `send` path unchanged; a `run` racing `claim` (`busy` makes the second one a no-op). LOW (not blocking): if the screen re-attaches between `claim` and the act, `sendNowHere` returns early with the item left `busy`/`sending`, so it is stuck until the next relaunch, where `decide` recovers it. It is never lost or duplicated.
+- **Gate:** `bun test apps/mobile/test/` 601 pass / 0 fail; `bun run lint` 1201 files clean; `bun run typecheck` clean. All mutations reverted; `git status` was clean before this note.
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; a different model family from the executor)
