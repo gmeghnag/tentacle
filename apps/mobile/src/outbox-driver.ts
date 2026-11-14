@@ -132,6 +132,28 @@ export interface OutboxDriver {
   steerNow(item: OutboxItem, session: OutboxSession): Promise<void>;
   /** The sheet's Discard: gone, with its photo copies. */
   discard(itemId: string): Promise<void>;
+  /**
+   * Take an item as IN FLIGHT for an act the CALLER performs: `sending` on disk
+   * at once, and reserved against a concurrent `run` (its `busy` guard). This is
+   * what keeps F3 true for the compose half's two ONLINE acts, whose turn must
+   * stream into the screen's own transcript (the folding prompt lives there, and
+   * a driver `run` would hold this session's queue for the turn's length — a
+   * steer typed during it would wait for the turn it steers).
+   *
+   * The key is already the item's (`createItem` minted both) and already on disk,
+   * so a kill here is exactly F3's case: a relaunch's `run` decides it.
+   * Answers the item as it stands — or null when it is already gone (a sheet
+   * Discard that landed first), in which case the caller must NOT act.
+   */
+  claim(itemId: string): Promise<OutboxItem | null>;
+  /**
+   * `claim`'s act settled. No error: the daemon accepted it under the item's key,
+   * so the item is finished (gone, its photo copies with it). An error: 13b's own
+   * `refusalOf` mapping, applied to the item on disk exactly as a run would — so a
+   * refused online send and a refused offline item have ONE behaviour, and the
+   * caller only words the outcome (`restore`/`draft`: the field's again).
+   */
+  settle(itemId: string, error?: unknown): Promise<Refusal | "sent">;
   /** The sheet's Edit (or a gone session): the item is gone from disk, its text is the field's. */
   backToDraft(itemId: string): Promise<OutboxItem | null>;
 }
@@ -214,7 +236,7 @@ export function createOutboxDriver(
         const turnId = sending.steerTurnId;
         if (turnId === null) {
           // A steer with no turn is not sendable: a person settles it.
-          await settle(sending, { kind: "decide", why: "no-turn" });
+          await settleDecision(sending, { kind: "decide", why: "no-turn" });
           return;
         }
         await session.steer(sending.text, sending.enqueueId, turnId);
@@ -239,7 +261,7 @@ export function createOutboxDriver(
     }
   };
 
-  const settle = async (
+  const settleDecision = async (
     item: OutboxItem,
     decision: Extract<Decision, { kind: "decide" }>,
   ): Promise<void> => {
@@ -258,7 +280,7 @@ export function createOutboxDriver(
         // `not_uploaded`: the daemon evicted the partial. ONE re-upload, then
         // refuse visibly (F18) — retrying again would loop.
         if (item.reuploaded === true || item.photos.every((photo) => photo.ref === undefined)) {
-          await settle(item, { kind: "decide", why: "refused" });
+          await settleDecision(item, { kind: "decide", why: "refused" });
           return;
         }
         await save(replace(deps.persistence.items(), withState(reuploaded(item), "waiting")));
@@ -277,7 +299,7 @@ export function createOutboxDriver(
       default: {
         // `decide`/`reupload`/… — only a person settles it.
         const why = refusal.kind === "decide" ? refusal.why : "refused";
-        await settle(item, { kind: "decide", why });
+        await settleDecision(item, { kind: "decide", why });
       }
     }
   };
@@ -316,7 +338,7 @@ export function createOutboxDriver(
           await perform(session, item);
           return;
         case "decide":
-          await settle(item, decision);
+          await settleDecision(item, decision);
           return;
         case "draft":
           await removeAndHand(item, decision.why);
@@ -418,7 +440,7 @@ export function createOutboxDriver(
         }
         const turnId = facts.runningTurnId;
         if (turnId === null) {
-          await settle(current, { kind: "decide", why: "no-turn" });
+          await settleDecision(current, { kind: "decide", why: "no-turn" });
           return;
         }
         // `asSteer` keeps the id when this item is ALREADY bound to this turn:
@@ -452,6 +474,53 @@ export function createOutboxDriver(
         taken = current;
       });
       return taken;
+    },
+    async claim(itemId) {
+      // Not `exclusive`: that holds the session's tail for as long as `body`
+      // runs, and this body is the CALLER's act — a whole turn for a prompt. A
+      // steer typed during that turn must not wait for it (the same reason
+      // `perform` is only ever reached from a run or a sheet act, never held).
+      // `busy` is what reserves the id against a concurrent run instead.
+      const item = itemOf(itemId);
+      if (item === undefined || busy.has(itemId)) {
+        return null;
+      }
+      busy.add(itemId);
+      const sending = withState(item, "sending");
+      await save(replace(deps.persistence.items(), sending));
+      // Re-read: a write that did not land is still the memory's item (the
+      // store's own contract), and a Discard that landed first must win.
+      return itemOf(itemId) === undefined ? null : sending;
+    },
+    async settle(itemId, error) {
+      const item = itemOf(itemId);
+      busy.delete(itemId);
+      if (item === undefined) {
+        return "sent";
+      }
+      if (error === undefined) {
+        // Accepted: the daemon's ledger owns the key now (F3).
+        if (!(await deps.persistence.finish(itemId))) {
+          deps.onNotice?.({ kind: "not-saved" });
+        }
+        return "sent";
+      }
+      const refusal = refusalOf(error, item.kind);
+      switch (refusal.kind) {
+        case "restore":
+        case "draft":
+          // The item is done with: its text is the CALLER's to hand back (it holds
+          // the field), so `onDraft` is not fired here — a second write of the same
+          // text would land after whatever the person typed meanwhile.
+          if (!(await deps.persistence.finish(itemId))) {
+            deps.onNotice?.({ kind: "not-saved" });
+          }
+          return refusal;
+        default:
+          // `offline` / `reupload` / `decide`: the same durable answers a run gives.
+          await refuse(item, refusal);
+          return refusal;
+      }
     },
   };
 }

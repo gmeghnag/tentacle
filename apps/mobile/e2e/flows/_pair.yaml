@@ -23,6 +23,11 @@ appId: so.tentacle.app
 - launchApp:
     clearState: true
 - clearKeychain
+# docs/feat/mobile-lock.md: the shipped default LOCKS AT COLD START (Owner Q1),
+# so the lock comes first here — `_unlock` asserts it and gets past it with a
+# scripted Face ID match (Step 0). Every flow that pairs therefore runs the real
+# lock; there is no test-only branch in the app.
+- runFlow: _unlock.yaml
 # A fresh install has nothing paired: the app opens on the pairing screen. A WAIT,
 # not an assert: the first launch reads the store before it routes, and on a
 # freshly erased simulator that start is slow (a plain `assertVisible` failed

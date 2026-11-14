@@ -1,0 +1,52 @@
+appId: so.tentacle.app
+---
+# 16 (docs/feat/mobile-compose.md 13d): the OFFLINE OUTBOX. The daemon is stopped, the
+# phone composes anyway (Send later), the app is killed and relaunched — the row is
+# still there — and when the daemon comes back the item goes out EXACTLY ONCE.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${OUTBOX_ID}"
+- assertVisible:
+    id: "session-view"
+- runScript:
+    file: "16-stop-serve.js"
+- extendedWaitUntil:
+    visible:
+      id: "banner-reconnecting"
+    timeout: 30000
+- tapOn:
+    id: "composer-input"
+- inputText: "OUTBOX sixteen"
+- hideKeyboard
+- tapOn:
+    id: "composer-send-later"
+- extendedWaitUntil:
+    visible:
+      id: "waiting-network"
+    timeout: 20000
+# A kill must not lose it: the item's keys are on disk before the first attempt.
+- stopApp
+- launchApp
+# The relaunch starts LOCKED (docs/feat/mobile-lock.md Owner Q1); the Keychain
+# record made by `_pair` survives, so the offline item is reachable again.
+- runFlow: _unlock.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- tapOn:
+    id: "session-${OUTBOX_ID}"
+- extendedWaitUntil:
+    visible:
+      id: "waiting-network"
+    timeout: 30000
+- runScript:
+    file: "16-start-serve.js"
+- extendedWaitUntil:
+    notVisible:
+      id: "waiting-network"
+    timeout: 40000
+- runScript:
+    file: "16-once.js"

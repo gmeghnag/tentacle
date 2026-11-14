@@ -40,6 +40,8 @@ export interface ComputersScreenProps {
   readonly removing?: ComputerRow;
   /** "Pair again" for a `revoked` / `maybe-reset` / `broken` row. */
   readonly onPairAgain: (row: ComputerRow) => void;
+  /** Open Settings (docs/feat/mobile-lock.md D6). */
+  readonly onOpenSettings: () => void;
 }
 
 export function ComputersScreen({
@@ -53,6 +55,7 @@ export function ComputersScreen({
   onRemoveCancelled,
   removing,
   onPairAgain,
+  onOpenSettings,
 }: ComputersScreenProps): JSX.Element {
   return (
     <ScrollView
@@ -60,6 +63,14 @@ export function ComputersScreen({
       style={{ backgroundColor: palette.groupedBackground }}
       contentContainerStyle={styles.content}
     >
+      <Pressable
+        testID="open-settings"
+        accessibilityRole="button"
+        onPress={onOpenSettings}
+        style={[styles.addButton, { backgroundColor: palette.card }]}
+      >
+        <Text style={[styles.addText, { color: palette.accent }]}>Settings</Text>
+      </Pressable>
       <Pressable
         testID="computers-add"
         accessibilityRole="button"

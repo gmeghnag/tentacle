@@ -33,3 +33,11 @@ describe("the Pair route's params (11b.1)", () => {
     expect(again?.again).toBe("0123456789abcdef");
   });
 });
+
+describe("the Settings route (docs/feat/mobile-lock.md D6)", () => {
+  test("it takes no params", () => {
+    // The type is the contract: `Settings` is `undefined`, like `Computers`.
+    const params: RootStackParams["Settings"] = undefined;
+    expect(params).toBeUndefined();
+  });
+});

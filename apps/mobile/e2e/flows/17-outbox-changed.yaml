@@ -1,0 +1,48 @@
+appId: so.tentacle.app
+---
+# 17 (docs/feat/mobile-compose.md 13d): an offline item whose conversation CHANGED under
+# it (the laptop ran a turn meanwhile). `decide` must not auto-send: the person gets
+# the decision sheet, and its Send reuses the ORIGINAL key, so the text goes out once.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${CHANGED_ID}"
+- assertVisible:
+    id: "session-view"
+- runScript:
+    file: "17-stop-serve.js"
+- extendedWaitUntil:
+    visible:
+      id: "banner-reconnecting"
+    timeout: 30000
+- tapOn:
+    id: "composer-input"
+- inputText: "CHANGED seventeen"
+- hideKeyboard
+- tapOn:
+    id: "composer-send-later"
+- extendedWaitUntil:
+    visible:
+      id: "waiting-network"
+    timeout: 20000
+# The laptop composes into the SAME session while the phone is offline (the turn is
+# recorded daemon-side and replayed on the phone's re-attach), so the basis changes.
+- runScript:
+    file: "17-start-serve.js"
+- runScript:
+    file: "17-laptop-prompt.js"
+- extendedWaitUntil:
+    visible:
+      id: "outbox-decision"
+    timeout: 40000
+- tapOn:
+    id: "outbox-send"
+- extendedWaitUntil:
+    notVisible:
+      id: "outbox-decision"
+    timeout: 20000
+- runScript:
+    file: "17-once.js"

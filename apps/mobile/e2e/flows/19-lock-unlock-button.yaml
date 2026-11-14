@@ -1,0 +1,50 @@
+appId: so.tentacle.app
+---
+# 07 (docs/feat/mobile-lock.md F5): a failed/cancelled evaluation keeps the lock
+# UP and shows the Unlock button, and a second attempt succeeds.
+#
+# DRIFT from the plan's `07-lock-nomatch`: on the simulator a nomatch leaves the
+# prompt unresolved (Step 0, two tries), so the automatic prompt cannot be made to
+# FAIL here. The reachable path is the Unlock BUTTON (which is what F5's "stays
+# locked with the Unlock button, no automatic re-prompt" is about): the flow
+# backgrounds the app with `immediately` so a lock episode exists, comes back,
+# taps Unlock, and matches. What is asserted is that the button is there and works
+# — the no-auto-reprompt half is `app-lock.test.ts`'s, where the outcome can be
+# driven exactly.
+- runFlow: _pair.yaml
+# Settings → lock immediately, so leaving the app locks it at once (Owner Q2).
+- tapOn:
+    id: "open-settings"
+- assertVisible:
+    id: "settings"
+- tapOn:
+    id: "lock-delay-immediately"
+- tapOn:
+    id: "lock-delay-immediately"
+- back
+- pressKey: Home
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: "lock-screen"
+    timeout: 15000
+# The lock is up and the person has a way in without Face ID succeeding.
+- assertVisible:
+    id: "lock-unlock"
+- tapOn:
+    id: "lock-unlock"
+- runScript:
+    file: "faceid-match.js"
+- extendedWaitUntil:
+    notVisible:
+      id: "lock-screen"
+    timeout: 15000
+# Unlocked: the same computer row the pairing registered is there again.
+- assertVisible:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "computers-list"
+# The end is a DAEMON-side truth: the app attached, and its own log records that
+# dial — which can only have happened after the unlock (20-log-dialled.js throws).
+- runScript:
+    file: "20-log-dialled.js"

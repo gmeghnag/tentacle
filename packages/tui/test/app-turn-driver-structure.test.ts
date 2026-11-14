@@ -139,7 +139,7 @@ describe("S9a: the turn driver leaves App.tsx", () => {
 
   // H1: no hook owns an effect here, so an effect's index cannot shift.
   test("App still declares its 20 effects, and the hook declares none", () => {
-    expect(countOf(readSrc("App.tsx"), "\n  useEffect(")).toBe(20);
+    expect(countOf(readSrc("App.tsx"), "\n  useEffect(")).toBe(22);
     // A real use, not the word: the hook's header explains WHY there is none.
     const hook = readSrc("useTurnDriver.ts");
     expect(hook).not.toMatch(/^\s*useEffect(\(|<)/m);

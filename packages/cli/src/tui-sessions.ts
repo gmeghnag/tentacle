@@ -20,6 +20,12 @@ export interface TuiSessions {
   readonly saver: SessionSaver;
   /** The session to resume, or null for a fresh one. */
   readonly resume: SessionRecord | null;
+  /**
+   * The laptop store this run's saver writes to, exposed for its READER (a hop
+   * seeds the target from `load(uid)`, docs/feat/session-hop.md D1 step 4b). The
+   * writer stays the saver: nothing else opens it for writing.
+   */
+  readonly store: LogSessionStore;
 }
 
 /** The `startTui` options this plumbing owns — spread into every call. */
@@ -93,7 +99,7 @@ export async function openTuiSessions(
   }
   const saver = new SessionSaver(store, (text) => notices.notify(text));
   if (!resume.wanted) {
-    return { notices, saver, resume: null };
+    return { notices, saver, resume: null, store };
   }
   const choosing = resume.uid === undefined && resume.latest !== true;
   if (choosing && !pick) {
@@ -148,7 +154,7 @@ export async function openTuiSessions(
   for (const text of resolved.notices) {
     notices.notify(text);
   }
-  return { notices, saver, resume: resolved.record };
+  return { notices, saver, resume: resolved.record, store };
 }
 
 /**

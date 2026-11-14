@@ -65,6 +65,8 @@ export interface CommandContext {
   readonly startCompaction: () => void;
   /** `/clear`'s machinery: an App-level driver (it owns the clear refs, plan M5). */
   readonly requestClear: () => void;
+  /** `/move`'s machinery: an App-level driver (it owns the hop's turn-boundary refs). */
+  readonly requestHop: (raw: string) => void;
   /** Resolve `raw` once more, after the skill list was asked again. */
   readonly reResolve: (raw: string) => void;
   /** Quit the TUI (Ink's `useApp().exit`). */
