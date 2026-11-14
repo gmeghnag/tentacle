@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { type SessionRecord, projectKey } from "@tentacle/agent";
-import { LogSessionStore } from "@tentacle/daemon";
+import { LogSessionStore, type LogWrite } from "@tentacle/daemon";
 import { DELETE_CONTAINER_SUBCOMMAND } from "@tentacle/docker";
 import { DELETE_POD_SUBCOMMAND } from "@tentacle/k8s";
 import { type EngineHost, WorkloadNotFoundError } from "../src/engine-host.ts";
@@ -24,7 +24,8 @@ import {
   runDirFor,
   writeOwner,
 } from "../src/run-state.ts";
-import { saveFixture } from "./session-fixture.ts";
+import type { SessionSaver } from "../src/session-saver.ts";
+import { recordWrite, saveFixture } from "./session-fixture.ts";
 import { simulateSilentTerminal } from "./silent-terminal.ts";
 
 /** Piped stdin and stdout, whatever terminal runs the suite (CliIO.terminal). */
@@ -1095,15 +1096,18 @@ describe("cli main: --engine", () => {
             (deps as { recordKept?: (n: string) => unknown }).recordKept?.("box");
             seen.logPath = deps.daemonLogPath?.("box");
             for (const id of over.saves ?? []) {
-              (deps as unknown as { saver: { save: (r: unknown) => void } }).saver.save({
-                id,
-                cwd: process.cwd(),
-                model: "m",
-                createdAt: 1,
-                updatedAt: 1,
-                title: id,
-                messages: [{ role: "user", content: "hi" }],
-              });
+              const saver = (deps as unknown as { saver: SessionSaver }).saver;
+              saver.write(
+                recordWrite({
+                  id,
+                  cwd: process.cwd(),
+                  model: "m",
+                  createdAt: 1,
+                  updatedAt: 1,
+                  title: id,
+                  messages: [{ role: "user", content: "hi" }],
+                }),
+              );
             }
             for (const line of over.info ?? []) {
               (deps.info ?? deps.log)(line);
@@ -1483,7 +1487,7 @@ describe("cli main: --engine", () => {
         tuiModel?: string;
         resumeMessages?: unknown;
         resume?: { id: string; messages: unknown[] } | null;
-        saver?: { save: (record: unknown) => void };
+        saver?: { write: (update: LogWrite) => void };
         notices: string[];
       } = { quit: 0, notices: [] };
       const runtime = {
@@ -1512,7 +1516,7 @@ describe("cli main: --engine", () => {
           sessionId?: string;
           shared?: true;
           resume?: { id: string; messages: unknown[] } | null;
-          saver?: { save: (record: unknown) => void };
+          saver?: { write: (update: LogWrite) => void };
         },
       ) => {
         seen.config = config;
@@ -2259,7 +2263,7 @@ describe("cli main: --engine", () => {
         await index({ sessionId: A }, [record(A, folder)]);
         await withEnv(unreachable, async () => {
           const r = await attached(["attach", "box"], true, true);
-          r.seen.saver?.save(record(B, folder));
+          r.seen.saver?.write(recordWrite(record(B, folder)));
           const entries = readKept(keptIndexDir(join(dir, "config"))).entries;
           expect(entries.map((e) => e.entry.sessionId)).toEqual([B]);
         });

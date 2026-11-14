@@ -179,13 +179,25 @@ something. No capability is lost by removing it.
 **Slice B (S) — the snapshot writer goes (only the in-process path wrote it).**
 `SessionSaver.save` (`session-saver.ts:120-123`) is called only by
 `main.ts:2180`; it is the only caller of `LogSessionStore.saveSnapshot`
-(`session-log-store.ts:340-348`), whose queue kind `"snapshot"` and
-`snapshotInc` field (`:180`) exist for nothing else. Delete those (and the
+(`session-log-store.ts:346`), whose queue kind `"snapshot"` and
+`snapshotInc` field (`:181`) exist for nothing else. Delete those (and the
 `saveSnapshot` member of `SaveTarget`, `session-saver.ts:20`). **Keep**
 `segmentFromMessages` (`session-log-file.ts:496`) — asides use it — and **every
 reader**: a file already holding a laptop-minted segment must still load (no
 format change, no `schemaVersion` change). Deletion only; the persistence
 invariant's rules apply unchanged to the remaining writers.
+
+> **Drift (found while executing, 2026-11-14):** "deletion only" is **not**
+> true of the TEST tree. `saveSnapshot` is also the laptop
+> **fixture's** writer (`cli/test/session-fixture.ts:12`) — the way ~28 test
+> sites put a `<uid>.jsonl` on disk — and `SessionSaver.save` has ~30 test
+> call sites. So slice B is deletion **plus a migration** of both to the
+> existing cold-write seam, `forkWrite` + `store.write` (`session-fork.ts:29`,
+> already the `/clear` fork's writer), which produces a byte-equivalent log
+> (verified: identical lines, `inc` prefix `laptop-` vs `fork-`; `load()`
+> equal, containment/aside rule kept). `session-fixture.ts` gains
+> `recordWrite(record)` and `saveFixture` keeps its signature, so most call
+> sites changed one word (`saver.save(r)` → `saver.write(recordWrite(r))`).
 
 No protocol change (no `protocol.d/` note); no on-disk format change.
 
@@ -301,7 +313,220 @@ binary once (`-i`, one prompt, quit) — the worker boots, no error line.
 
 ## Execution
 
-*—*
+*— claude-sonnet-4-5-20250929 (executor), 2026-11-14*
+
+### Load-bearing check, re-run first
+
+PASSED, on this branch (`ee227272` + the approved plan):
+
+- `rg 'inProcessAgents|inProcessSessions' packages/*/src` → only `wiring.ts:713`
+  (the definition), `session-jobs.ts` (its own defs) and `main.ts:2165/2175`
+  (the one caller block). No other production caller. ✓
+- one-shot (`main.ts:2211-2255`) and `--plain` (`:2046-2054`) build their own
+  agent with `buildAgent`/`connectConfiguredMcp`; neither touches
+  `inProcessAgents`/`inProcessSessions`. ✓
+- `hop-targets.ts:148` treated `runtime === null` as
+  `{kind:"failed", notice:"…could not start"}` — a failure, not a fallback. ✓
+- `package.json:9` `"bun": ">=1.4.3"`; `scripts/build.ts` lists the worker as a
+  second entrypoint. ✓
+
+Repro (`.tentacle/tmp/remove-in-process/repro.ts`, verbatim output):
+
+```
+["-i","--in-process"] tui ok bools=interactive,in-process
+["-i","--no-worker"] tui ok bools=interactive,no-worker
+["--in-process"] tui ok bools=in-process
+```
+
+Both opt-outs parsed before the change; both are refused now
+(`.tentacle/tmp/remove-in-process/cli.ts`):
+
+```
+["--in-process"] -> exit 1 | [error] unknown option --in-process
+["-i","--no-worker"] -> exit 1 | [error] unknown option --no-worker
+```
+
+### As built, in the Implementation's order
+
+**Slice A**
+1. `local-runtime.ts` — added `WorkerStartError` (`phase: "spawn"|"handshake"`,
+   `reason`), `workerStartFailureText(error, logPath)` (pure, React-free,
+   `untrustedText`-sanitised), a local `reasonOf`; `startWorkerRuntime` now
+   returns `Promise<LocalRuntime>`, takes `{spawn?, handshakeMs?}` (defaults:
+   the unchanged URL-form `new Worker`, `8000`), **throws** on both phases, and
+   its `error` listener rejects a racing `failed` promise so a load failure
+   settles at once. The two `[worker] … using in-process` lines and the
+   "falls back to in-process" doc comment are gone.
+2. `hop-targets.ts` — the `null` branch is gone; the `catch` names the reason
+   (`not moved: the local agent could not start (<reason>)`, sanitised) and any
+   other throw keeps `errorText`'s line. Added the `spawnWorker?` test seam to
+   `HopTargetDeps` (production passes nothing).
+3. `flags.ts` — both bools, `[--in-process]` in `USAGE.tui`, and the comment
+   mention dropped.
+4. `main.ts` — HELP line dropped; `startWorkerRuntime` in a `try`, and on any
+   throw `logDaemonError` + `workerStartFailureText` to `err`, drain the saver
+   (as `runSessionTui`'s finally does), `return 1`; the whole in-process block
+   deleted; `inProcessSessions`, `inProcessAgents`, `McpStatusTracker`,
+   `connectMcpServers`, `recordFromSnapshot` imports dropped (`tsc` confirmed;
+   `longToolNameWarnings` stays, one-shot uses it at `:2175`).
+5. `wiring.ts` — `inProcessAgents` deleted (with its now-unused
+   `PermissionBroker`/`HooksTrustParamsSchema`/`AskHooksTrust` uses); the five
+   "in-process" comments reworded to what the remaining code does.
+6. `session-jobs.ts` deleted after `rg` re-check (no non-test user but
+   `main.ts:2175`).
+7. Tests + `changelog.d/remove-in-process.removed.md`.
+8. Docs: `docs/extensions.md` (the runtime table row, both 64-char-warning
+   notes), `docs/container-config-sources.md` (the in-process MCP cite).
+   `README.md`/`AGENTS.md` left alone: their "in-process worker" IS the worker.
+
+**Slice A, the `main.ts` edit** was a whitespace-sensitive delete: the
+in-process block's removal left the surviving worker block one indent deeper
+and a bare `{ … }` block behind. Dedented the block in place (one `awk` pass
+over the exact line range) rather than re-indenting by hand, and `tsc` + Biome
+confirmed the result.
+
+**Slice B** — as the plan's corrected text says, this was **not** deletion-only.
+`LogSessionStore.saveSnapshot`, its `"snapshot"` op, `snapshotLocked` and the
+`snapshotInc` writer field are deleted, and `SaveTarget`/`SessionSaver` lost
+`saveSnapshot`/`save` — but ~48 test call sites used them, so the migration the
+plan now records was needed:
+- `cli/test/session-fixture.ts` gained `recordWrite(record)` (a `LogWrite` from
+  a record via the existing `forkWrite`); `saveFixture` keeps its signature and
+  now writes through `store.write(recordWrite(record))`.
+- every `saver.save(r)` → `saver.write(recordWrite(r))`, and fake store targets
+  lost their `saveSnapshot` member (two needed its timing moved onto `write`:
+  the late-fail and the hung row).
+- Deleted with the feature: `session-log-store.test.ts` W14 and L3,
+  `session-jobs.test.ts` (whole file — its code no longer exists).
+
+### Drift from the Implementation (and why)
+
+1. **Slice B's "deletion only" was wrong** (the one step where the plan
+   contradicted the code, §8). `saveSnapshot` is also the laptop test
+   **fixture's** writer, so deletion needed a migration to the existing
+   `forkWrite` + `write` seam. Fixed the doc's Slice B first (its own
+   paragraph states the drift and the evidence), then executed it. Equivalence
+   was checked, not assumed: the same record written by `saveSnapshot` and by
+   `forkWrite`+`write` produces the **same lines**, `load()` returns the same
+   messages/title, and the containment/aside rule still fires (aside produced
+   for a diverging copy) — `.tentacle/tmp/remove-in-process/sliceB.ts` and
+   `contain.ts`.
+2. **`wiring.test.ts`'s two in-process rows could not survive as rewritten.**
+   The single-broker row and the trust row tested `inProcessAgents` itself; the
+   plan mapped both to "covered on the worker path". The trust question's
+   supplier (`askHooksTrust`) existed only in `inProcessAgents`, and the wire
+   schema check has its own pure home (`projectHooksWireProblem`,
+   `hooks-trust.ts:262`, tested in `hooks-trust.test.ts`), so the row was
+   deleted rather than restated — see the mapping below.
+3. **`spawnWorker?` added to `HopTargetDeps`** for T6: the plan said "inject via
+   the new `spawn` seam through `HopTargetDeps`, or the test's existing fake",
+   and there was no such seam, so the seam was added (production unaffected).
+4. A doc-comment in `session-saver.ts` and several test comments still said
+   "the in-process path"; reworded where they described code that changed.
+
+### Deleted tests, each mapped
+
+| Deleted | Covered by / why it is gone |
+|---|---|
+| `session-jobs.test.ts` (whole file) | Its code (`session-jobs.ts`) no longer exists: jobs daemon-side are `facade.jobs` over RPC (`hop-runtime`), tested in `hop-feed.test.ts`/`hop-turn.test.ts` |
+| `skills-hot-reload.test.ts` T8 (in-process block) | The worker/`SessionHost` blocks in the same file stay and cover the hot-reload property on the only remaining path |
+| `session-titles.test.ts` L2 ("in-process fallback") | The same property — a resumed record's *chosen* title carried into the save unchanged — is covered on the worker path at `:165-173` (`persistingController` seeded `{source:"user", text:"Kept"}`, save carries it) |
+| `wiring.test.ts:51-76` (in-process single broker) | **Replaced, not just dropped**: the local path's broker identity had no other pin, so a grep-guard row now asserts `main`'s TUI block constructs ONE `PermissionBroker` and hands the same identifier to `startWorkerRuntime` and `startTui` (mutated to prove it, M6 below). The old row's per-session `build()` halves tested `inProcessAgents`' own code, which no longer exists |
+| `wiring.test.ts:657` (in-process hooks gate) | On RPC the peer validates `HooksTrustParamsSchema` (`hooks-trust.ts:262`), and the pure check is tested in `hooks-trust.test.ts` |
+| `move-session-wiring.test.ts:66-67` | Dropped only the `inProcessAgents` half; the other three builds still assert no `move_session` |
+| `session-log-store.test.ts` W14, L3 | They exercised `saveSnapshot` only; the containment rule they shared is still pinned by the migrated `tui-sessions.test.ts` Q6 row (mutation below) |
+
+### Tests, and red-before-green
+
+Added, in `worker.test.ts` (T1–T4), `args.test.ts` (T5), and
+`session-hop-targets.test.ts` (T6). **Red first, on the pre-change code**, via
+the mutations below (per §9 each test must fail when the behaviour is removed):
+T1/T2/T3, T5 and T6 were each shown red, and T2's early-reject separately.
+
+Tests that could not be red on the original tree: **T4** (the formatter did not
+exist, so it failed on an import, which proves nothing — its non-vacuity comes
+from the mutation of its two asserted properties, the phase name and the
+`in-process`-free text) and **T7** (the real-worker row already existed and
+passes unchanged, which is exactly what it asserts).
+
+### Mutations (non-vacuity, §9) — results pasted
+
+**M1 — reintroduce the fallback** (`startWorkerRuntime`'s two `catch` blocks
+`return null as never`):
+
+```
+(fail) T1 a spawn failure rejects with WorkerStartError{spawn}, never resolves null
+(fail) T2 a worker that fails to LOAD rejects at once with its own message
+(fail) T3 a worker that never answers times out as WorkerStartError{handshake}
+ 4 pass
+ 3 fail
+```
+
+**M2 — restore the two bools** in `flags.ts:175`:
+
+```
+(fail) the removed --in-process / --no-worker are unknown options now
+ 20 pass
+ 1 fail
+```
+
+**M3 — drop the worker `error` listener's early reject** (`failHandshake?.()`
+removed; the fallback stays gone):
+
+```
+(fail) T2 a worker that fails to LOAD rejects at once with its own message   [5001.50ms]
+ 6 pass
+ 1 fail
+```
+
+**M4 — drop the reason from the hop's notice** (the plan's `null`-branch text):
+
+```
+(fail) T6 a failed local build names the reason, and the session stays put
+ 24 pass
+ 1 fail
+```
+
+**M5 — skip the store's containment aside** (`settleLast`'s `asideRaw`
+disabled) to prove the migrated `write` path keeps the rule W14 tested:
+
+```
+(fail) another writer's shorter copy never drops the longer history silently: it goes aside first, the TUI is told
+ 18 pass
+ 1 fail
+```
+
+**M6 — a SECOND broker for the TUI** (`startTui`'s `permissions:` becomes its
+own `new PermissionBroker()`), the silent-decoupling class AGENTS §7 warns
+about:
+
+```
+(fail) the local TUI's single broker (AGENTS §7), pinned where it is built > grep-guard: `main` hands ONE `permissions` to the worker runtime AND to `startTui`
+ 38 pass
+ 1 fail
+```
+
+All six reverted; `rg MUTATION` over `packages/*/src` and `packages/*/test`
+shows only pre-existing comment text, and `git diff` shows no residue.
+
+### Verification
+
+- `bun run check` (typecheck → lint → test) **green**:
+  `9940 pass, 4 skip, 0 fail` — the 4 skips are the pre-existing opt-ins
+  (`TENTACLE_K8S_SERVER`, `TENTACLE_DOCKER_TESTS`, `TENTACLE_SLOW_TESTS`, and
+  `ws-server`'s), not failures. Lint clean against the §6 baseline.
+- Real worker still boots, and says nothing about a fallback
+  (`.tentacle/tmp/remove-in-process/boot.ts`): `worker booted: true`,
+  `fallback lines: []`.
+- No protocol/schema change, so no `protocol.d/` note and no
+  `protocol.json` regeneration.
+
+**Not verified:** `bun run build` of the compiled binary and a live `-i` session
+inside it (the plan's manual step) — not run here; the source-path spawn is
+covered by `worker.test.ts` and the boot probe above, and the compiled-binary
+resolution is unchanged (the URL form is untouched, only wrapped in the seam).
+To verify: `bun run build` then run the binary with `-i`, one prompt, quit.
+
 
 ## Review
 

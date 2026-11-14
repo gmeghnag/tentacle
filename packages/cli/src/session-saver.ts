@@ -13,11 +13,10 @@ import type { LogMeta, LogSessionStore, LogWrite } from "@tentacle/daemon";
 
 /**
  * All the saver needs from a store (the laptop's `LogSessionStore`): `write`
- * (one `session/log` read) and `saveSnapshot` (a whole history, the
- * in-process path), each promise settling with the write, and `remove`;
+ * (one `session/log` read), its promise settling with the write, and `remove`;
  * `saveAside` when the store can keep a diverged copy.
  */
-export type SaveTarget = Pick<LogSessionStore, "write" | "saveSnapshot" | "remove"> &
+export type SaveTarget = Pick<LogSessionStore, "write" | "remove"> &
   Partial<Pick<LogSessionStore, "saveAside" | "fork" | "putBlob" | "readBlob" | "blobIndex">>;
 
 /** A uid's last save outcome: fine, or failing with the latest error. */
@@ -115,11 +114,6 @@ export class SessionSaver {
     );
     this.pending.set(settled, sourceId);
     void settled.finally(() => this.pending.delete(settled));
-  }
-
-  /** Save a whole history (the in-process path, no daemon log); reported like `write`. */
-  save(record: SessionRecord): void {
-    this.track(record.id, () => this.target.saveSnapshot(record));
   }
 
   private track(id: string, start: () => Promise<void>): void {

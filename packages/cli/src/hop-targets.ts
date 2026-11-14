@@ -32,7 +32,7 @@ import type { HopRuntimeDeps, HopShared } from "./hop-runtime.ts";
 import { removeVerifiedKept } from "./kept-cmd.ts";
 import { forgetKept, keptDir, recordKept } from "./kept-index.ts";
 import { KEPT_SCHEMA_VERSION, type KeptEntry, keptMetadata } from "./kept.ts";
-import { type LocalRuntime, startWorkerRuntime } from "./local-runtime.ts";
+import { type LocalRuntime, WorkerStartError, startWorkerRuntime } from "./local-runtime.ts";
 import { type HopBuild, type HopBuilt, errorText } from "./session-hop.ts";
 import type { StreamTerm } from "./streams.ts";
 import { untrustedText } from "./untrusted-text.ts";
@@ -90,6 +90,12 @@ export interface HopTargetDeps {
    * and D7(a) then reads as "no run" — which is why `main.ts` always passes it.
    */
   readonly detachedRun?: (workload: HopWorkload) => boolean;
+  /**
+   * Test seam: how the local target constructs its worker (production leaves it
+   * out — `startWorkerRuntime`'s URL form). A hop's failure path is otherwise
+   * untestable without a broken worker.
+   */
+  readonly spawnWorker?: () => Worker;
 }
 
 /**
@@ -141,19 +147,29 @@ async function workerTarget(deps: HopTargetDeps, _sessionId: string): Promise<Ho
     const runtime = await startWorkerRuntime(
       config,
       { permissions: shared.permissions, saver: shared.saver, resume: null },
-      // The worker's own lines (MCP errors, a fallback) are the hop's notices: a
-      // raw write here would corrupt Ink's frame (AGENTS §7).
+      // The worker's own lines (MCP errors) are the hop's notices: a raw write
+      // here would corrupt Ink's frame (AGENTS §7).
       (line) => deps.notify(untrustedText(line)),
+      // `startWorkerRuntime` THROWS when the worker cannot start (no in-process
+      // fallback, AGENTS §7): the catch below is the only failure path, and the
+      // session stays where it was.
+      deps.spawnWorker ? { spawn: deps.spawnWorker } : {},
     );
-    if (runtime === null) {
-      return { kind: "failed", notice: "not moved: the local agent could not start" };
-    }
     return {
       kind: "built",
       built: builtOf(runtime, { kind: "local" }, { preexisting: false, daemonInPod: false }),
     };
   } catch (error) {
-    return { kind: "failed", notice: `not moved: ${errorText(error, "the local agent failed")}` };
+    // The reason is the worker's own (a module path, a loader error): one line,
+    // no control characters, before it reaches the TUI.
+    const reason = error instanceof WorkerStartError ? untrustedText(error.reason) : null;
+    return {
+      kind: "failed",
+      notice:
+        reason === null
+          ? `not moved: ${errorText(error, "the local agent failed")}`
+          : `not moved: the local agent could not start (${reason})`,
+    };
   }
 }
 

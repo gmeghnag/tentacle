@@ -16,7 +16,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
-import { buildAgent, inProcessAgents } from "../src/wiring.ts";
+import { buildAgent } from "../src/wiring.ts";
 
 let dir: string;
 let config: TentacleConfig;
@@ -60,12 +60,9 @@ describe("H5/M5: `move_session` is registered only where a hop can be asked abou
     expect(JSON.stringify(definition)).toContain("workload");
   });
 
-  test("a build that does not set it NEVER offers it — `serve`, in-process, one-shot, a child", () => {
+  test("a build that does not set it NEVER offers it — `serve`, one-shot, a child", () => {
     // Mutation: register it unconditionally → this row fails for all three.
     expect(offered(buildAgent(config).tools)).not.toContain("move_session");
-    // The in-process fallback builds with no `moveSession` either.
-    const { build } = inProcessAgents(config);
-    expect(offered(build().tools)).not.toContain("move_session");
   });
 
   test("`sessionHop.tool` off turns it off even where the flag is set (decision 6)", async () => {

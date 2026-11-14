@@ -13,7 +13,7 @@ import {
   readSessionRecord,
   runSessionTui,
 } from "../src/tui-sessions.ts";
-import { saveFixture } from "./session-fixture.ts";
+import { recordWrite, saveFixture } from "./session-fixture.ts";
 
 let dir: string;
 beforeAll(async () => {
@@ -312,7 +312,7 @@ describe("runSessionTui", () => {
         log.push(`start resume=${options.resumeMessages?.map((m) => m.content).join("|")}`);
         expect(options.notices).toBe(sessions.notices);
         // A save that fails while the TUI is up (an invalid uid is rejected by the store).
-        sessions.saver.save({ ...rec("r", 2), id: "../bad" });
+        sessions.saver.write(recordWrite({ ...rec("r", 2), id: "../bad" }));
       },
       teardown: () => {
         log.push("teardown");
@@ -338,7 +338,7 @@ describe("runSessionTui", () => {
     const out: string[] = [];
     const run = runSessionTui(sessions, {
       start: async () => {
-        sessions.saver.save({ ...rec("x", 1), id: "../nope" });
+        sessions.saver.write(recordWrite({ ...rec("x", 1), id: "../nope" }));
       },
       teardown: () => {
         throw new Error("dispose blew up");
@@ -359,7 +359,7 @@ describe("runSessionTui", () => {
     let tornDown = false;
     const run = runSessionTui(sessions, {
       start: async () => {
-        sessions.saver.save(rec("kept", 5));
+        sessions.saver.write(recordWrite(rec("kept", 5)));
         throw new Error("ink crashed");
       },
       teardown: () => {
@@ -378,9 +378,8 @@ describe("runSessionTui", () => {
     const notices = new NoticeHub();
     const sessions = {
       notices,
-      saver: new SessionSaver(
-        { write: async () => {}, saveSnapshot: () => Bun.sleep(50), remove: async () => {} },
-        (t) => notices.notify(t),
+      saver: new SessionSaver({ write: () => Bun.sleep(50), remove: async () => {} }, (t) =>
+        notices.notify(t),
       ),
       resume: null,
       // The store is only a READER's seam for a hop (D1 step 4b): this rig's
@@ -389,7 +388,7 @@ describe("runSessionTui", () => {
     const out: string[] = [];
     await runSessionTui(sessions, {
       start: async () => {
-        sessions.saver.save(rec("s", 1));
+        sessions.saver.write(recordWrite(rec("s", 1)));
       },
       teardown: () => {},
       write: (line) => out.push(line),
@@ -401,8 +400,8 @@ describe("runSessionTui", () => {
 
 describe("a stale save (docs/fix/detach-live.md Q6 → docs/feat/session-log-laptop-store.md)", () => {
   test("another writer's shorter copy never drops the longer history silently: it goes aside first, the TUI is told", async () => {
-    // Two writers (two TUIs' stores) of one session, the whole-history path.
-    // Mutation: skip the containment check in `saveSnapshot` → no aside, no notice.
+    // Two writers (two TUIs' stores) of one session, both saving a whole history.
+    // Mutation: skip the containment check in the store's `write` → no aside, no notice.
     const uid = "99999999-9999-4999-8999-999999999999";
     const root = join(dir, "q6");
     const first = opened(await openTuiSessions({ root, cwd: "/w" }, { wanted: false }, () => {}));
@@ -416,9 +415,9 @@ describe("a stale save (docs/fix/detach-live.md Q6 → docs/feat/session-log-lap
         { role: "assistant", content: "b" },
       ],
     };
-    first.saver.save(long);
+    first.saver.write(recordWrite(long));
     await first.saver.drain();
-    second.saver.save({ ...long, messages: long.messages.slice(0, 1) });
+    second.saver.write(recordWrite({ ...long, messages: long.messages.slice(0, 1) }));
     expect(await second.saver.drain()).toEqual([]);
     const text = seen.join("\n");
     expect(text).toMatch(/saved aside in .*\.aside/);

@@ -14,7 +14,6 @@ const update = {
 function target(fork: SaveTarget["fork"]): SaveTarget {
   return {
     write: async () => {},
-    saveSnapshot: async () => {},
     remove: async () => {},
     ...(fork ? { fork } : {}),
   };
