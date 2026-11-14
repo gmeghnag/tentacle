@@ -166,6 +166,13 @@ export class Connection {
   private initialized = false;
   /** The update types the client declared at `initialize`; undefined = the v10 base set. */
   private updateTypes: readonly string[] | undefined;
+  /**
+   * This connection's client declared `hop` (D8/D9): it can ask its owner about a
+   * `move_session` proposal. Read once at `initialize`; a session this connection
+   * CREATES is offered the tool only then, so a pod daemon serving a `run`/`attach`
+   * TUI never lets the model propose a move nobody is asked about.
+   */
+  private hop = false;
 
   constructor(
     channel: DuplexChannel,
@@ -590,6 +597,10 @@ export class Connection {
     if (params.clientCapabilities.updates) {
       this.updateTypes = params.clientCapabilities.updates;
     }
+    // D8/D9: this client can put a `move_session` proposal to its owner, so a
+    // session IT creates may be offered the tool. Per connection (a pod daemon
+    // serves a `run`, an `attach` and a hop target alike), and absent = no hop.
+    this.hop = params.clientCapabilities.hop === true;
     return {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: {
@@ -746,6 +757,7 @@ export class Connection {
     const attachment: Attachment = {
       send: (update) => this.peer.notify(Notification.SessionUpdate, update),
       ...(this.updateTypes ? { updates: this.updateTypes } : {}),
+      ...(this.hop ? { hop: true } : {}),
       ...(this.servesModel ? { model: this } : {}),
     };
     const { hosted, created, resync, epoch } = this.host.open(params, attachment, prepared);

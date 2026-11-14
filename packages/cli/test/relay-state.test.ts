@@ -390,21 +390,32 @@ describe("ownUseOf: our own uid and the others, from ONE read (hop D1 4(a))", ()
     // Mutation: read `own` from a second `session/list` → the two can disagree.
     expect(
       ownUseOf({ sessions: [row(ME, { running: true, jobs: 2 }), row("a", { attached: 1 })] }, ME),
-    ).toEqual({ own: { running: true, jobs: 2 }, others: 1 });
+    ).toEqual({ own: { running: true, jobs: 2, attached: 0 }, others: 1 });
+  });
+
+  test("own ATTACHED to by someone: the fact is carried, never dropped (hop D7c)", () => {
+    // The H6 review's finding 2. Our own uid on a hop container's resident, idle,
+    // but a plain `tentacle attach` TUI has joined it: `attached` is the ONLY
+    // field that says so — `running`/`jobs` are both quiet. Mutation: keep only
+    // `running`/`jobs` here → the hop reads the copy as idle and CLOSES it under
+    // that TUI ("the workload's current client is never disturbed").
+    expect(ownUseOf({ sessions: [row(ME, { attached: 2 })] }, ME)).toEqual({
+      own: { running: false, jobs: 0, attached: 2 },
+      others: 0,
+    });
   });
 
   test("own absent is `null` own (not a doubt): the uid is simply not live there", () => {
     expect(ownUseOf({ sessions: [row("a")] }, ME)).toEqual({ own: null, others: 0 });
     expect(ownUseOf({ sessions: [] }, ME)).toEqual({ own: null, others: 0 });
   });
-
   test("a list that cannot be trusted whole is no answer at all", () => {
     expect(ownUseOf({ sessions: [row(ME)], cursor: "next" }, ME)).toBeNull();
   });
 
   test("a session whose client left is nobody, as `residentUseOf` has it", () => {
     expect(ownUseOf({ sessions: [row(ME), row("gone")] }, ME)).toEqual({
-      own: { running: false, jobs: 0 },
+      own: { running: false, jobs: 0, attached: 0 },
       others: 0,
     });
   });

@@ -199,6 +199,24 @@ export type HopStep =
   | { readonly kind: "notice"; readonly text: string };
 
 /**
+ * The turn boundary (D4), as ONE rule (docs/feat/app-decomposition.md S11):
+ * **a hop may start only at a TRUE idle** — this TUI's own turn over AND the
+ * daemon's queue empty, because the messages already queued run before anything
+ * else does.
+ *
+ * It is a named function because two paths ask it: `hopStep` decides what a TYPED
+ * `/move` does right now, and `hopIfQueued` re-checks it at the first idle before
+ * starting the hop that waited. Written out twice (the pre-S11 shape), the two
+ * copies are exactly how the typed path and the queued path drift into
+ * disagreeing — one starting a hop mid-turn, or one leaving it queued forever.
+ * `queued` is a COUNT compared to zero: a truthiness test would read a count as a
+ * flag, which is the same bug in a different disguise.
+ */
+export function hopReady(input: { readonly running: boolean; readonly queued: number }): boolean {
+  return !input.running && input.queued <= 0;
+}
+
+/**
  * `/move …` → what to do now. `available`: this TUI got a `hop` feed (D8: only a
  * local worker or a hop target; `run`/`attach`/`connect` say so).
  */
@@ -230,10 +248,11 @@ export function hopStep(input: {
         return { kind: "notice", text: "a move is already queued" };
       }
       // A turn in flight ends first, and the messages the daemon already queued
-      // run before it: the hop takes the first idle nobody is using (D4).
-      return input.running || input.queued > 0
-        ? { kind: "queue", spec: input.parse.spec }
-        : { kind: "start", spec: input.parse.spec };
+      // run before it: the hop takes the first idle nobody is using (D4). The
+      // rule is `hopReady` — the SAME one `hopIfQueued` re-checks at that idle.
+      return hopReady({ running: input.running, queued: input.queued })
+        ? { kind: "start", spec: input.parse.spec }
+        : { kind: "queue", spec: input.parse.spec };
   }
 }
 

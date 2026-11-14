@@ -44,11 +44,17 @@ const COMPOSE_FLOWS = [
   "18-photos",
 ] as const;
 
-/** The flows 11b.1 owns: they pair through their own steps, not the shared prefix. */
+/**
+ * The flows that end BEFORE a computer is paired: they pair through their own
+ * steps rather than the shared prefix, and so have no `computer-<id>` to name.
+ * 11b.1's three refusal/expiry/paste cases, and 11b.2's deep link (F-P17: the
+ * link must stop at the review, so nothing is ever stored by it), and R6's relay-only flow.
+ */
 const PAIRING_FLOWS = [
   "12-pair-declined",
   "13-pair-expired",
   "14-pair-bad-text",
+  "19-deep-link",
   // R6's relay-only flow (docs/feat/mobile-relay.md): it opens its own window
   // (`pair-start-relay-only.js`, over a `--no-relay` record) rather than the
   // shared `_pair` prefix — it must, or the QR it proves would carry a direct

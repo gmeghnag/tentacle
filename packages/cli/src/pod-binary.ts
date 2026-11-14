@@ -126,16 +126,31 @@ export function classifyImage(p: ParsedProbe): PodProbe {
   return { arch: p.arch, status: p.musl ? "musl" : "no-glibc" };
 }
 
+/** An engine's `Architecture` (`GET /info`, a k8s node's) → our arch; `null` for anything else. */
+export function engineArchOf(raw: unknown): PodArch | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const a = raw.trim().toLowerCase();
+  if (a === "x86_64" || a === "amd64") return "x64";
+  if (a === "aarch64" || a === "arm64") return "arm64";
+  return null;
+}
+
 /**
  * Probe the pod's architecture AND libc with ONE `sh -c` exec (it replaces the
- * old `uname -m`, so no extra round-trip). Never throws: a failed exec →
- * `probe-failed` (x64 fallback; a wrong arch is still caught by `--version`).
+ * old `uname -m`, so no extra round-trip). Never throws. When the probe gives
+ * no arch (`probe-failed`: the exec failed; `unknown`: it printed nothing
+ * usable), the ENGINE's own arch is used (`engineArch`), and only when that
+ * cannot tell either, x64 — a wrong arch is still caught by `--version`
+ * (docs/fix/session-hop-live.md D3).
  */
 export async function probePod(
-  host: Pick<EngineHost, "runExec">,
+  host: Pick<EngineHost, "runExec" | "engineArch">,
   name: string,
   container?: string,
 ): Promise<PodProbe> {
+  let probe: PodProbe = { arch: "x64", status: "probe-failed" };
   try {
     const res = await host.runExec({
       name,
@@ -143,12 +158,16 @@ export async function probePod(
       command: ["sh", "-c", PROBE_SCRIPT],
     });
     if (res.exitCode === 0) {
-      return classifyImage(parseProbe(res.stdout));
+      probe = classifyImage(parseProbe(res.stdout));
     }
   } catch {
     // probe failed (no sh, exec error, timeout) → fall through.
   }
-  return { arch: "x64", status: "probe-failed" };
+  if (probe.status !== "probe-failed" && probe.status !== "unknown") {
+    return probe;
+  }
+  const engine = await (host.engineArch?.() ?? Promise.resolve(null)).catch(() => null);
+  return engine === null ? probe : { ...probe, arch: engine };
 }
 
 export interface PodBinaryDeps {

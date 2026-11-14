@@ -11,10 +11,12 @@ import {
   JOB_EMPTY_LINE,
   JOB_REFRESH_MS,
   JOB_TAIL_SHOWN,
+  exitOutcome,
   jobDrawerTail,
   jobElapsedSeconds,
   jobEndView,
   jobOutcome,
+  jobOutputEntry,
   jobTailWindow,
   refreshDue,
 } from "../src/job-drawer.ts";
@@ -161,6 +163,121 @@ describe("jobOutcome + jobEndView: the drawer's outcome (owner B, fix round 1)",
     expect(jobEndView({ end: { kind: "finished" }, seconds: 5 })).toEqual({
       text: "✓ exited · 5s",
       ok: true,
+    });
+  });
+});
+
+/**
+ * S13 (`feat/app-decomp-13-pure-residue`): the two decisions the App used to
+ * write inline in its `jobs.onExit` handler and in its two output reads.
+ */
+describe("exitOutcome: a child's own verdict, or the job's record", () => {
+  const AT = 250_000;
+
+  test("a sub-agent's clean finish is `finished`; any other stop reason is `stopped`", () => {
+    expect(
+      exitOutcome(
+        { id: "sa-1", status: "exited", exitCode: 0, agent: { stopReason: "end_turn" } },
+        false,
+        AT,
+      ),
+    ).toEqual({ kind: "finished" });
+    expect(
+      exitOutcome(
+        { id: "sa-1", status: "exited", exitCode: 0, agent: { stopReason: "max" } },
+        false,
+        AT,
+      ),
+    ).toEqual({ kind: "stopped" });
+  });
+
+  test("a child's record never consults the shell job's code (it has none)", () => {
+    // The `agent` block wins outright: a `finished` child with a non-zero code
+    // (impossible on the wire, cheap to pin) still says `finished`.
+    expect(
+      exitOutcome(
+        { id: "sa-9", status: "exited", exitCode: 2, agent: { stopReason: "end_turn" } },
+        true,
+        AT,
+      ),
+    ).toEqual({ kind: "finished" });
+  });
+
+  test("a shell job's exit is the record's: the code, and the dock's own stop", () => {
+    expect(exitOutcome({ id: "bg-1", status: "exited", exitCode: 0 }, false, AT)).toEqual({
+      kind: "exited",
+      exitCode: 0,
+      endedAt: AT,
+    });
+    expect(exitOutcome({ id: "bg-1", status: "exited", exitCode: 3 }, false, AT)).toEqual({
+      kind: "exited",
+      exitCode: 3,
+      endedAt: AT,
+    });
+    // A signal death (no code) is killed, and a stop the dock asked for is
+    // `stopped` even though the wire says `killed`.
+    expect(exitOutcome({ id: "bg-1", status: "exited", exitCode: null }, false, AT)).toEqual({
+      kind: "killed",
+      endedAt: AT,
+    });
+    expect(exitOutcome({ id: "bg-1", status: "killed", exitCode: null }, true, AT)).toEqual({
+      kind: "stopped",
+      endedAt: AT,
+    });
+  });
+
+  test("a SHELL job's ended instant is the caller's ONE stamp, carried unchanged", () => {
+    expect(exitOutcome({ id: "bg-1", status: "exited", exitCode: 0 }, false, 1000)).toMatchObject({
+      endedAt: 1000,
+    });
+  });
+
+  test("a CHILD's outcome carries no instant: it is frozen by `kind` alone (as before)", () => {
+    // Not a gap: `{kind: "finished"}` is what the drawer freezes on, and it never
+    // measured a duration. Pinned so a later "fix" cannot silently start one.
+    const child = exitOutcome(
+      { id: "sa-1", status: "exited", exitCode: 0, agent: { stopReason: "end_turn" } },
+      false,
+      1000,
+    );
+    expect("endedAt" in child).toBe(false);
+  });
+});
+
+describe("jobOutputEntry: one read's cache entry (the record the App built twice)", () => {
+  test("a refusal is NOTHING to cache (null), never an empty tail", () => {
+    expect(jobOutputEntry({ found: false })).toBeNull();
+  });
+
+  test("a found read with no output caches an EMPTY tail, not a null one", () => {
+    expect(jobOutputEntry({ found: true })).toEqual({ output: [] });
+  });
+
+  test("the fields it has are copied; the ones it lacks stay ABSENT", () => {
+    const running = jobOutputEntry({ found: true, output: ["a", "b"] });
+    expect(running).toEqual({ output: ["a", "b"] });
+    // `truncated`/`exitCode` absent, not `undefined`: the drawer distinguishes
+    // "nothing dropped" from "dropped some", and "still running" from "code 0".
+    expect(running !== null && "truncated" in running).toBe(false);
+    expect(running !== null && "exitCode" in running).toBe(false);
+
+    expect(jobOutputEntry({ found: true, output: ["x"], truncated: true, exitCode: 0 })).toEqual({
+      output: ["x"],
+      truncated: true,
+      exitCode: 0,
+    });
+    // A `false`/`0` is a real answer and must survive (truthiness would drop both).
+    expect(jobOutputEntry({ found: true, truncated: false, exitCode: 0 })).toEqual({
+      output: [],
+      truncated: false,
+      exitCode: 0,
+    });
+  });
+
+  test("the exit code rides the final read", () => {
+    expect(jobOutputEntry({ found: true, output: ["bye"], exitCode: 7 })).toEqual({
+      output: ["bye"],
+      exitCode: 7,
     });
   });
 });

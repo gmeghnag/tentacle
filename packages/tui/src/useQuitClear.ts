@@ -10,7 +10,8 @@
  *
  * That is the §7 split, and it is why this hook holds NO state of its own: every
  * ref these three bodies touch is ALSO written or read by a driver this slice
- * does not own (Fable H1 — the 20 effects stay in `App`, in today's order):
+ * does not own (Fable H1 — the 22 effects stay in `App`, in today's order: the
+ * original 20 plus session-hop's 2):
  *
  * - `exitPendingRef` — read by the turn's settle (`App`'s `streamTurn`: a quit
  *   asked for mid-turn exits there) and by the key snapshot (S3);

@@ -149,6 +149,8 @@ export interface TentacleConfig {
   readonly contextAwareness: ResolvedConfig["contextAwareness"];
   /** The model's `context_reset` tool and its cap (on a pod: its own env and file, else the laptop's, carried). */
   readonly contextReset: ResolvedConfig["contextReset"];
+  /** Whether the agent is offered `move_session` (docs/feat/session-hop.md D9). */
+  readonly sessionHop: ResolvedConfig["sessionHop"];
   readonly maxTokens?: number;
   /**
    * `model.maxImageBytes`: raw bytes one image may have on this model's wire
@@ -862,6 +864,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     contextWindow: resolved.contextWindow,
     contextAwareness: resolved.contextAwareness,
     contextReset: resolved.contextReset,
+    sessionHop: resolved.sessionHop,
     ...(resolved.maxTokens !== undefined ? { maxTokens: resolved.maxTokens } : {}),
     ...(resolved.maxImageBytes !== undefined ? { maxImageBytes: resolved.maxImageBytes } : {}),
     ...(resolved.images !== undefined ? { images: resolved.images } : {}),

@@ -424,6 +424,15 @@ export interface RemoteClientOptions {
    */
   readonly sessionSettings?: SessionSettings;
   /**
+   * This client can put a session's `move_session` PROPOSAL to its owner, so the
+   * daemon should offer the tool (docs/feat/session-hop.md D8/D9). Declared in
+   * `initialize` as `clientCapabilities.hop`, PER CLIENT: a pod daemon serves
+   * `run`, `attach` and a hop target alike, and only a hop-capable TUI has the
+   * feed + broker prompt a proposal needs. Absent → the tool is never offered,
+   * and the model cannot propose a move nobody would be asked about.
+   */
+  readonly hop?: true;
+  /**
    * SHA-256 (hex) for the `session/log` checkpoints `readBack` verifies.
    * Absent → `Bun.CryptoHasher` when running on Bun; elsewhere (mobile, which
    * never reads back) `readBack` refuses. Injected: this package stays node-free.
@@ -770,6 +779,8 @@ export class RemoteClient {
   private readonly waiters = new Set<() => boolean>();
   /** Closes / deletes / detaches in flight (settled, never rejecting): what `drain` awaits. */
   private readonly ending = new Set<Promise<void>>();
+  /** Session id → how many of this client's own ends of it are in flight (`closingByMe`). */
+  private readonly ownCloses = new Map<string, number>();
   /** Served model calls in flight (`modelIdle`). */
   private modelCalls = 0;
   private readonly modelIdleWaiters = new Set<() => void>();
@@ -804,6 +815,8 @@ export class RemoteClient {
   private readonly daemonKind: DaemonKind;
   /** The daemon wakes on its own (`serve`, trusted): `RemoteSession.autoAcceptsTurn` reads it. */
   private readonly daemonWakes: boolean;
+  /** This client can put a `move_session` proposal to its owner (declared in `initialize`). */
+  private readonly hop: boolean;
   /** Sessions with a `hooks/trust` prompt in flight (at most one each). */
   private readonly trustAsking = new Set<string>();
   /** Hashes `session/log` checkpoints (`readBack`); absent → `readBack` refuses. */
@@ -862,6 +875,7 @@ export class RemoteClient {
     }
     this.daemonKind = options.daemonKind ?? "serve";
     this.daemonWakes = options.daemonWakes === true;
+    this.hop = options.hop === true;
     if (options.titleModelProvider) {
       this.titleModelProvider = options.titleModelProvider;
     }
@@ -1537,6 +1551,8 @@ export class RemoteClient {
       return Promise.resolve(false);
     }
     const params = ifLast ? { sessionId, ifLast } : { sessionId };
+    // In flight until the daemon answers — its `session_closed` precedes the answer.
+    this.ownCloses.set(sessionId, (this.ownCloses.get(sessionId) ?? 0) + 1);
     const ending = this.call(this.peer, method, params).then(
       (result) => {
         forget();
@@ -1563,8 +1579,23 @@ export class RemoteClient {
       () => {},
     );
     this.ending.add(tracked);
-    void tracked.then(() => this.ending.delete(tracked));
+    void tracked.then(() => {
+      this.ending.delete(tracked);
+      const left = (this.ownCloses.get(sessionId) ?? 1) - 1;
+      if (left > 0) this.ownCloses.set(sessionId, left);
+      else this.ownCloses.delete(sessionId);
+    });
     return ending;
+  }
+
+  /**
+   * True while THIS client's own close / delete / detach of `sessionId` is in
+   * flight (`closeSession`, `deleteSession`, `closeSessions` — a runtime's
+   * `dispose`/quit). The `session_closed` it causes is no news from another
+   * device (docs/fix/session-hop-live.md F1).
+   */
+  closingByMe(sessionId: string): boolean {
+    return this.ownCloses.has(sessionId);
   }
 
   /**
@@ -2434,7 +2465,15 @@ export class RemoteClient {
       protocolVersion: PROTOCOL_VERSION,
       // Every update type this build understands: the daemon emits a
       // BLOCKING type only to a client that lists it (protocol 10).
-      clientCapabilities: { streaming: true, updates: [...KNOWN_UPDATE_TYPES] },
+      clientCapabilities: {
+        streaming: true,
+        updates: [...KNOWN_UPDATE_TYPES],
+        // This client can put a `move_session` proposal to its owner (a `/move`
+        // feed + the one broker prompt): the daemon offers the tool only then
+        // (docs/feat/session-hop.md D8/D9, H5 review finding 1). Absent → never
+        // offered, which is what a `run`/`attach` TUI (no `hop` prop) needs.
+        ...(this.hop ? { hop: true } : {}),
+      },
       ...(this.clientInfo ? { clientInfo: this.clientInfo } : {}),
     }).then(
       (raw) => {

@@ -63,6 +63,7 @@ import {
   builtinTools,
   createAgentControlTool,
   createContextResetTool,
+  createMoveSessionTool,
   createSkillActivator,
   createSkillTool,
   createTaskTool,
@@ -383,6 +384,23 @@ export interface BuildAgentOptions {
    * with no policy at all).
    */
   readonly attachments?: AttachmentSource;
+  /**
+   * Offer this agent `move_session` (docs/feat/session-hop.md D9): the model may
+   * PROPOSE moving its session, and nothing more — the laptop asks the owner at
+   * the turn's end. Set by the runtimes that own a hoppable session (the local
+   * worker, the pod daemon) and never by another kind of build (`serve`,
+   * in-process, one-shot, a child agent: a proposal nobody would ask about).
+   *
+   * It is a flag of its own because `BuildAgentOptions` has no daemon KIND
+   * (review M5), and this site is shared by every kind of build: a boolean is
+   * what keeps the rule "only these two kinds" readable at each call site.
+   *
+   * A POD daemon sets it only from `AgentContext.hop` — the fact that the client
+   * which created the session declared it can put the proposal to its owner
+   * (H5 review finding 1): one pod serves `run`, `attach` and a hop target alike,
+   * and only the last has a `/move` feed to ask through.
+   */
+  readonly moveSession?: true;
 }
 
 /** `agent_task`'s model list over the tunnel: the laptop's selectable names, with their text. */
@@ -622,6 +640,14 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     : undefined;
   if (contextReset) {
     tools.register(createContextResetTool());
+  }
+  // Session hop (docs/feat/session-hop.md D9): the model's ONE way to ask for
+  // its session to move. It has no daemon-side effect at all — the laptop watches
+  // the turn's events and asks the owner at its end — so `serve`, in-process,
+  // one-shot and child-agent builds pass no `moveSession` and never offer it
+  // (nobody would ask, and a pod's own claim must never be enough).
+  if (options.moveSession === true && config.sessionHop.tool) {
+    tools.register(createMoveSessionTool());
   }
 
   const agent = new Agent({

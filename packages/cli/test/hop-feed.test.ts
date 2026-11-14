@@ -18,6 +18,7 @@ const ON_CONTAINER: HopPlace = { kind: "workload", engine: "docker", name: "box"
 const MOVED: HopOutcome = {
   kind: "moved",
   built: { runtime: {}, place: { kind: "local" }, daemonInPod: false, preexisting: false } as never,
+  controller: {} as never,
   notice: "moved to local",
 };
 
@@ -97,6 +98,29 @@ describe("D5 the feed hands the leave the SPEC's own keep (finding 1)", () => {
     });
     await r.feed.start(BACK_RM, "uid-1").done;
     expect(r.notices).toEqual(["docker:box not ours: left alone"]);
+  });
+
+  test("session-hop-live D2: the outcome's note rides `done`, the controller is the outcome's, and no outcome text is notified", async () => {
+    // Mutation: drop `note` from the feed's `done` → the note is lost (the App's
+    // one moved line can no longer say it); notify `outcome.notice` → duplicated.
+    const controller = { sessionId: "uid-1" } as never;
+    const r = rig({
+      outcome: {
+        ...MOVED,
+        controller,
+        notice: "moved to local — the old session did not close",
+        note: "the old session did not close",
+      },
+    });
+    const done = await r.feed.start(BACK_PLAIN, "uid-1").done;
+    expect("moved" in done && done.moved).toBe(controller);
+    expect("moved" in done ? done.note : undefined).toBe("the old session did not close");
+    expect(r.notices).toEqual([]);
+    const failed = rig({ outcome: { kind: "failed", notice: "not moved: nope" } });
+    expect(await failed.feed.start(BACK_PLAIN, "uid-1").done).toEqual({
+      failed: "not moved: nope",
+    });
+    expect(failed.notices).toEqual([]);
   });
 
   test("`done` never rejects: a facade that throws is one `not moved:` line", async () => {

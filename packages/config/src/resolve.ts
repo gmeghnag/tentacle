@@ -23,6 +23,7 @@ import {
   DEFAULT_MODEL,
   DEFAULT_PROVIDER,
   DEFAULT_REDACT_SECRETS,
+  DEFAULT_SESSION_HOP_TOOL,
   DEFAULT_SUBAGENTS_ENABLED,
   DEFAULT_SUBAGENTS_TWO_WAY,
   DEFAULT_SUBAGENT_EXECUTION,
@@ -61,6 +62,16 @@ export interface ContextResetConfig {
   readonly maxPerMessage: number;
 }
 
+/**
+ * `sessionHop`, resolved: whether the agent is offered `move_session`
+ * (docs/feat/session-hop.md D9). The tool only PROPOSES a move — the owner is
+ * asked in the laptop's own TUI at the turn's end, so this is a laptop setting
+ * (never a permission: no daemon-side effect exists to gate).
+ */
+export interface SessionHopConfig {
+  readonly tool: boolean;
+}
+
 /** How the API key will be obtained. */
 export type ApiKeySource = "env" | "file" | "command" | "none";
 
@@ -79,6 +90,8 @@ export interface ResolvedConfig {
   readonly contextAwareness: ContextAwarenessConfig;
   /** The model's `context_reset` tool and its anti-loop cap (docs/feat/context-reset.md). */
   readonly contextReset: ContextResetConfig;
+  /** The agent's `move_session` proposal tool (docs/feat/session-hop.md D9). */
+  readonly sessionHop: SessionHopConfig;
   /** Max output tokens per response; unset → the provider's own default. */
   readonly maxTokens?: number;
   /**
@@ -195,6 +208,7 @@ export interface ResolvedConfig {
     readonly contextAwarenessStepPercent: Source;
     readonly contextResetEnabled: Source;
     readonly contextResetMaxPerMessage: Source;
+    readonly sessionHopTool: Source;
     readonly maxInlineOutputChars: Source;
     readonly toolOutputRetentionDays: Source;
     readonly redactSecrets: Source;
@@ -493,6 +507,14 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     fileConfig.contextReset?.maxPerMessage,
     DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE,
   );
+  // Laptop-side (D9): it decides whether the agent is OFFERED `move_session`.
+  // A pod reads its own value — the tool only proposes, and the owner's answer
+  // still comes from the laptop's prompt.
+  const sessionHopTool = pick(
+    parseBool(env.TENTACLE_SESSION_HOP_TOOL),
+    fileConfig.sessionHop?.tool,
+    DEFAULT_SESSION_HOP_TOOL,
+  );
   const maxInlineOutputChars = pick(
     parseNonNegativeInt(env.TENTACLE_MAX_OUTPUT_CHARS),
     fileConfig.tools?.maxInlineOutputChars,
@@ -596,6 +618,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       enabled: contextResetEnabled.value,
       maxPerMessage: contextResetMaxPerMessage.value,
     },
+    sessionHop: { tool: sessionHopTool.value },
     ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
     ...(maxImageBytes !== undefined ? { maxImageBytes } : {}),
     ...(images !== undefined ? { images } : {}),
@@ -659,6 +682,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       contextAwarenessStepPercent: contextAwarenessStepPercent.source,
       contextResetEnabled: contextResetEnabled.source,
       contextResetMaxPerMessage: contextResetMaxPerMessage.source,
+      sessionHopTool: sessionHopTool.source,
       maxInlineOutputChars: maxInlineOutputChars.source,
       toolOutputRetentionDays: toolOutputRetentionDays.source,
       redactSecrets: redactSecrets.source,

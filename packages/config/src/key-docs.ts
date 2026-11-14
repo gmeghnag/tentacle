@@ -29,6 +29,7 @@ import {
   DEFAULT_MODEL,
   DEFAULT_PROVIDER,
   DEFAULT_REDACT_SECRETS,
+  DEFAULT_SESSION_HOP_TOOL,
   DEFAULT_SUBAGENTS_ENABLED,
   DEFAULT_SUBAGENTS_TWO_WAY,
   DEFAULT_SUBAGENT_EXECUTION,
@@ -728,6 +729,28 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     env: "TENTACLE_CONTEXT_RESET_MAX",
     sample: "2",
     example: "-1",
+  },
+  sessionHop: {
+    summary: "The agent may PROPOSE moving this session to another target.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "sessionHop.tool": {
+    summary:
+      "Offer the agent `move_session`: it may propose moving this session to another target.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => DEFAULT_SESSION_HOP_TOOL,
+    resolved: (c) => c.sessionHop.tool,
+    sourceKey: "sessionHopTool",
+    env: "TENTACLE_SESSION_HOP_TOOL",
+    sample: "off",
+    details:
+      "It only PROPOSES: the tool has no daemon-side effect, and nothing moves until you say yes to the laptop's own prompt (asked when the turn ends, never answered by auto-accept, never remembered). Offered only where a hop exists — the local worker and a pod daemon — and never to a sub-agent.",
+    example: "false",
   },
   autoWake: {
     summary: "Start a continuation turn when a background job exits while idle.",

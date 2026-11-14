@@ -14,7 +14,11 @@
  * `SessionController` per LIVE client, so the per-id open/leave queue survives a
  * screen mount (`session-runtimes.ts`) — and hands it to a dumb screen.
  */
-import { NavigationContainer, useFocusEffect } from "@react-navigation/native";
+import {
+  NavigationContainer,
+  useFocusEffect,
+  useNavigationContainerRef,
+} from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { type RemoteClient, type RemoteSession, webSocketChannelFactory } from "@tentacle/client";
 import { type AttachmentRef, encodeBase64Url, parsePairingPayload } from "@tentacle/protocol";
@@ -25,6 +29,7 @@ import { type JSX, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import {
   ActivityIndicator,
   AppState,
+  Linking,
   Platform,
   Pressable,
   StyleSheet,
@@ -53,6 +58,7 @@ import {
   computerSource,
 } from "./src/computers.ts";
 import { type ComputerLink, openComputer } from "./src/connection.ts";
+import { pairingTextFromUrl } from "./src/deep-link.ts";
 import { createDraftScheduler } from "./src/drafts.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
@@ -73,8 +79,10 @@ import {
   reduce,
   runPairing,
 } from "./src/pairing-flow.ts";
+import { handlePairingText, takePendingLink } from "./src/pending-link.ts";
 import { pickFromLibrary, takePhoto } from "./src/photo-source.ts";
 import { type RootStackParams, initialRoute } from "./src/routes.ts";
+import { QrScanner, usePairingCamera } from "./src/scanner.tsx";
 import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
 import { LockGate } from "./src/screens/LockGate.tsx";
 import { PairScreen } from "./src/screens/PairScreen.tsx";
@@ -472,12 +480,15 @@ function PairRoute({
   palette,
   againId,
   againName,
+  linkText,
   onDone,
   onCancel,
 }: {
   readonly palette: Palette;
   readonly againId?: string;
   readonly againName?: string;
+  /** The text an incoming `tentacle://pair?…` link carried (11b.2, F-P17). */
+  readonly linkText?: string;
   readonly onDone: (computerId: string) => void;
   readonly onCancel: () => void;
 }): JSX.Element {
@@ -489,6 +500,13 @@ function PairRoute({
     setState((current) => reduce(current, action));
   }, []);
 
+  // 11b.2: the camera's state and actions are the pure view-model's; this hook
+  // only performs the step it names (`ask` → request, `open` → mount), and the
+  // live session's lifetime is `scan-session.ts`'s — it is TOLD the stage, so a
+  // paste after a Scan tap cannot leave the camera running (fix round 1 f1).
+  const stage = state.name;
+  const camera = usePairingCamera((text) => dispatch({ type: "text", text }), stage);
+
   // A pairing that never finishes must not leave a socket: an unmount cancels
   // it exactly as the button does (F-P9's copy is the failed card's job).
   useEffect(() => {
@@ -497,18 +515,46 @@ function PairRoute({
     };
   }, []);
 
-  const submit = useCallback(() => {
-    // The review asks the store whether this computer is already known (Owner
-    // Q7) — a READ only, and a store failure is not a reason to refuse pairing.
-    void (async () => {
-      const parsed = parsePairingPayload(state.name === "intake" ? state.text : "");
-      const existing =
-        parsed.ok && parsed.payload !== undefined
-          ? await findExisting(encodeBase64Url(parsed.payload.key))
-          : undefined;
-      dispatch({ type: "submit", ...(existing === undefined ? {} : { existing }) });
-    })();
-  }, [state, dispatch]);
+  // `camera.stop` is stable (one `dispatch`), so it does not re-create `submit`
+  // on every render the way the `camera` object itself would.
+  const stopCamera = camera.stop;
+  const submit = useCallback(
+    (text?: string) => {
+      // A paste ends any live preview, whatever it parses to (finding 1: a submit
+      // that fails keeps the stage at `intake`, so the stage rule cannot see it).
+      stopCamera();
+      // The review asks the store whether this computer is already known (Owner
+      // Q7) — a READ only, and a store failure is not a reason to refuse pairing.
+      void (async () => {
+        const candidate = text ?? (state.name === "intake" ? state.text : "");
+        const parsed = parsePairingPayload(candidate);
+        const existing =
+          parsed.ok && parsed.payload !== undefined
+            ? await findExisting(encodeBase64Url(parsed.payload.key))
+            : undefined;
+        dispatch({ type: "submit", ...(existing === undefined ? {} : { existing }) });
+      })();
+    },
+    [state, dispatch, stopCamera],
+  );
+
+  // A `tentacle://pair?…` link enters the SAME intake as a paste (11b.2, Owner
+  // Q6) and stops at `review`: this only PARSES the text (the reducer's `submit`
+  // dials nothing), so a link opened by a web page or another app can never pair
+  // the phone by itself (F-P17).
+  //
+  // `handledLink` makes it ONCE per link text: `submit` changes identity with
+  // every state change, so without it a later `failed` state would re-submit the
+  // link's payload and bounce the person back to the review card.
+  const handledLink = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (linkText === undefined || handledLink.current === linkText) {
+      return;
+    }
+    handledLink.current = linkText;
+    dispatch({ type: "text", text: linkText });
+    submit(linkText);
+  }, [linkText, dispatch, submit]);
 
   const confirm = useCallback(() => {
     if (running.current) {
@@ -564,13 +610,36 @@ function PairRoute({
       palette={palette}
       view={pairingView(state)}
       onText={(text) => dispatch({ type: "text", text })}
-      onSubmit={submit}
+      onSubmit={() => submit()}
       onDeviceName={(name) => dispatch({ type: "device-name", name })}
       onConfirm={confirm}
       onCancel={cancel}
       onFailureAction={failureAction}
       {...(againId === undefined ? {} : { againId })}
       {...(againName === undefined ? {} : { againName })}
+      camera={camera.view}
+      onScan={camera.onScan}
+      onScanClose={camera.stop}
+      onOpenSettings={() => {
+        // The card's own action: `Linking.openSettings()` is this app's page, so
+        // the person lands on the camera toggle (F-P15).
+        void Linking.openSettings();
+      }}
+      {...(camera.scanning
+        ? {
+            scanner: (
+              <QrScanner
+                palette={palette}
+                onScanned={(text) => {
+                  // One path: a scan is a paste (11b.2 Design 6).
+                  dispatch({ type: "text", text });
+                  submit(text);
+                }}
+                onMountError={camera.onMountError}
+              />
+            ),
+          }
+        : {})}
     />
   );
 }
@@ -843,6 +912,9 @@ export default function App(): JSX.Element {
   const palette = paletteFor(useColorScheme());
   const [computers, setComputers] = useState<readonly ComputerEntry[] | null>(null);
   const [storeError, setStoreError] = useState<string | undefined>(undefined);
+  // The navigation ref exists only to route an incoming link: a `Linking` event
+  // arrives outside the navigator's tree (11b.2, Owner Q6).
+  const navigationRef = useNavigationContainerRef<RootStackParams>();
   // The lock's setting, read once at launch (D3). `loading` until the Keychain
   // answers: the lock screen covers the first frame in the meantime (F10).
   const [lockSetting, setLockSetting] = useState<LockDelay | "loading">("loading");
@@ -883,6 +955,59 @@ export default function App(): JSX.Element {
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  // 11b.2 (Owner Q6, F-P17): a `tentacle://pair?…` link — from the iOS Camera
+  // app's QR scan, or another app — routes to `Pair` with the link's TEXT. The
+  // text then enters the SAME intake as a paste and stops at `review`, so the
+  // link can never pair the phone by itself (the dial is the person's tap).
+  // `pairingTextFromUrl` is the only gate: another scheme or host is ignored.
+  //
+  // The navigator may not exist yet: `App` returns a spinner until the store is
+  // read, so a COLD start from a link resolves `getInitialURL()` BEFORE
+  // `NavigationContainer` is mounted and `navigate` would be a silent no-op
+  // (`pending-link.ts`, found by flow `19-deep-link`). `pendingLink` parks it.
+  const [pendingLink, setPendingLink] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    const openLinkText = (url: string | null | undefined): void => {
+      const text = pairingTextFromUrl(url);
+      if (!live || text === undefined) {
+        return;
+      }
+      const decision = handlePairingText(text, navigationRef.isReady());
+      if (decision.action === "hold") {
+        setPendingLink(decision.text);
+      } else if (decision.action === "route") {
+        navigationRef.navigate("Pair", { linkText: decision.text });
+      }
+    };
+    // A COLD start from a link (the Camera app launches us): the URL is not an
+    // event, it is `getInitialURL()`. A WARM one arrives as an event.
+    void Linking.getInitialURL().then(openLinkText);
+    const subscription = Linking.addEventListener("url", (event) => openLinkText(event.url));
+    return () => {
+      live = false;
+      subscription.remove();
+    };
+  }, [navigationRef]);
+
+  // The parked link is replayed once the navigator IS ready, and only once (the
+  // state is cleared as it is taken, so a re-render cannot re-submit it). Two
+  // triggers, one decision: the container's `onReady` (the mount that makes the
+  // ref usable — the cold-start case) and this effect re-running when
+  // `pendingLink` appears (a link that arrived before the mount but was parked
+  // after `onReady` already fired).
+  const replayPendingLink = useCallback(() => {
+    const text = takePendingLink(pendingLink, navigationRef.isReady());
+    if (text === undefined) {
+      return;
+    }
+    setPendingLink(undefined);
+    navigationRef.navigate("Pair", { linkText: text });
+  }, [pendingLink, navigationRef]);
+  useEffect(() => {
+    replayPendingLink();
+  }, [replayPendingLink]);
 
   // The app's unmount closes every live client: no socket, no listener left.
   useEffect(() => {
@@ -1059,7 +1184,7 @@ export default function App(): JSX.Element {
 
   return (
     <LockGate {...lockGateDeps} palette={palette}>
-      <NavigationContainer>
+      <NavigationContainer ref={navigationRef} onReady={replayPendingLink}>
         <Stack.Navigator
           initialRouteName={initialRoute(computers)}
           screenOptions={{
@@ -1092,6 +1217,9 @@ export default function App(): JSX.Element {
                 {...(route.params?.againName === undefined
                   ? {}
                   : { againName: route.params.againName })}
+                {...(route.params?.linkText === undefined
+                  ? {}
+                  : { linkText: route.params.linkText })}
                 onCancel={() => {
                   if (navigation.canGoBack()) {
                     navigation.goBack();

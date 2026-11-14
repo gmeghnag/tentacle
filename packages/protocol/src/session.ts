@@ -144,6 +144,15 @@ export const ClientCapabilitiesSchema = z.object({
     )
     .max(256)
     .optional(),
+  /**
+   * This client can put a session's `move_session` PROPOSAL to its owner: it has
+   * a `/move` feed and a broker prompt to raise (docs/feat/session-hop.md D8/D9).
+   * A daemon offers the tool only to a session whose creating client says so, so a
+   * `run`/`attach` TUI — which has no `hop` prop — never reaches a model that
+   * proposes a move nobody is asked about. Absent = no hop, the safe direction,
+   * and an older daemon simply drops it.
+   */
+  hop: z.boolean().optional(),
 });
 export type ClientCapabilities = z.infer<typeof ClientCapabilitiesSchema>;
 

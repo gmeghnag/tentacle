@@ -8,6 +8,7 @@ import {
 } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
+import { ARM_MS } from "../src/permission-reply.ts";
 import { SEND_NOW_HINT } from "../src/send-now.ts";
 import type { SessionEvent } from "../src/state.ts";
 import { queuedRow } from "./queued-row.ts";
@@ -267,6 +268,8 @@ describe("Ctrl+X Ctrl+S — send the queued messages now", () => {
     expect(log.sendNows).toHaveLength(1);
     expect(answered.response).toBeUndefined();
     expect(lastFrame() ?? "").toContain("Run a shell command");
+    // Past the arming window (docs/fix/quit-enter-ask.md): `y` is an approval.
+    await delay(ARM_MS + 100);
     stdin.write("y");
     await delay(30);
     expect(answered.response).toEqual({ allowed: true, scope: "once" });

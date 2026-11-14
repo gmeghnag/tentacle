@@ -78,3 +78,44 @@ export function anchorOnGrowth(
   }
   return clampOffset(offset + (newTotal - prevTotal), newTotal, height);
 }
+
+/** The inputs of the App's rows-changed anchor rule (`anchorOffset`). */
+export interface AnchorOffsetInput {
+  /** The total the previous run saw (`prevRowsRef.current`). */
+  readonly prevTotal: number;
+  /** The total this render has. */
+  readonly total: number;
+  /**
+   * The offset THIS RENDER saw — the guard's input. Kept apart from the offset
+   * the returned updater receives on purpose (App's H3 freshness rule): the
+   * effect's guard reads the render value, the updater's arithmetic reads the
+   * commit value, and the two disagree exactly inside one batched tick (a scroll
+   * key and a row growth with no render between them).
+   */
+  readonly rendered: number;
+  /** A text selection is in progress (`selectionRef.current !== null`). */
+  readonly selecting: boolean;
+  readonly viewport: number;
+}
+
+/**
+ * The rows-changed anchor rule: rows grew from `prevTotal` to `total` and the
+ * reader is anchored — scrolled up (`rendered > 0`), OR selecting text, so the
+ * content being selected (e.g. during a running turn) does not scroll out from
+ * under them. Then the offset grows by the new rows so the lines being read stay
+ * put.
+ *
+ * Returns the state UPDATER to hand `setScrollOffset`, or `null` for "leave the
+ * offset alone" — which is not the same as "return it unchanged": while nothing
+ * anchors the reader the App must not touch the offset at all (no queue entry),
+ * exactly as before. The updater reads the offset at COMMIT time, so a scroll
+ * key batched in the same tick still counts.
+ */
+export function anchorOffset(input: AnchorOffsetInput): ((offset: number) => number) | null {
+  const { prevTotal, total, rendered, selecting, viewport } = input;
+  if (total <= prevTotal || (rendered <= 0 && !selecting)) {
+    return null;
+  }
+  const grow = total - prevTotal;
+  return (offset) => clampOffset(offset + grow, total, viewport);
+}

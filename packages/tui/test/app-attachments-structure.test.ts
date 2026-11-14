@@ -7,7 +7,8 @@
  *   - the DECISIONS and their EXECUTOR leave `App.tsx` (no `decideAttachment`,
  *     `routeDecision`, `attachmentCandidateText`, `parseAttachCommand`,
  *     `withChips`, `uploadProgress`, `looksLikeCommand`, `NO_IMAGE_SEAM` there);
- *   - the unmount effect does NOT move: it is effect 1 of 20, in today's order,
+ *   - the unmount effect does NOT move: it is effect 1 of 22 (the original 20 +
+ *     session-hop's 2), in today's order,
  *     and it still aborts the upload and bumps the generation the hook reads;
  *   - the frozen identifiers survive, so no use-site had to change;
  *   - exactly ONE `useAttachments` call — two would be two executors over one draft.
@@ -148,7 +149,7 @@ describe("S6: the attach decisions and their executor leave App.tsx", () => {
 describe("S6: the unmount effect stays in App, at its index, doing its job", () => {
   // M5: the effect's body gutted (the generation bump dropped) — a decision that
   // lands after an unmount then sets state on a dead component.
-  test("the attachments' unmount effect is STILL effect 1 of 20 and still aborts + bumps", () => {
+  test("the attachments' unmount effect is STILL effect 1 of 22 and still aborts + bumps", () => {
     const app = readSrc("App.tsx");
     expect(countOf(app, "\n  useEffect(")).toBe(22);
     const first = effectBody(app, 0);

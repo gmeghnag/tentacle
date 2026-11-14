@@ -52,6 +52,9 @@ export const DEFAULT_CONTEXT_AWARENESS = true;
 export const DEFAULT_CONTEXT_STEP_PERCENT = 1;
 /** The model may renew its own context with `context_reset` (docs/feat/context-reset-refresh.md). */
 export const DEFAULT_CONTEXT_RESET_ENABLED = true;
+
+/** `sessionHop.tool`: the agent may PROPOSE moving its session (docs/feat/session-hop.md D9). */
+export const DEFAULT_SESSION_HOP_TOOL = true;
 /** Resets allowed per user message; `-1` = unlimited. */
 export const DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE = -1;
 /** Max characters of a tool result kept inline before it is spilled to a file. */
@@ -180,6 +183,11 @@ export const DEFAULT_CONFIG_JSONC = `{
   // turn so the agent reacts to it (reads output, continues). On by default;
   // set false to require a manual prompt instead.
   // "autoWake": ${DEFAULT_AUTO_WAKE},
+
+  // Session hop: may the agent PROPOSE moving this session to another target
+  // (another container, or back to this machine) with the \`move_session\` tool?
+  // It only proposes: you are asked, in this terminal, when the turn ends.
+  // "sessionHop": { "tool": ${DEFAULT_SESSION_HOP_TOOL} },
 
   // Default engine of \`tentacle run\` / \`tentacle attach\`: "kubernetes" (a pod),
   // "docker" or "podman" (a container). --engine and TENTACLE_ENGINE win.

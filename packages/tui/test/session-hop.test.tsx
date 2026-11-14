@@ -429,6 +429,53 @@ describe("H3 the App: the transcript rows keep their position across a hop", () 
     app.unmount();
   });
 
+  test("session-hop-live D2: a failure with markdown in an engine's text shows it literally, exactly once", async () => {
+    // Mutation: drop `noticeText` at the failure call site → `/_ping` loses its `_`.
+    const log = { sends: [] as string[] };
+    const text = "not moved: Docker API GET /_ping failed";
+    const hop = fakeHop({ fail: text });
+    const app = render(
+      <App
+        createSession={() => session([], log)}
+        model="m"
+        cwd="/tmp/work"
+        hop={hop.feed}
+        columns={80}
+      />,
+    );
+    await delay(40);
+    await type(app.stdin, "/move local", 120);
+    const frame = strip(app.lastFrame());
+    expect(frame.split(text).length - 1).toBe(1);
+    app.unmount();
+  });
+
+  test("session-hop-live D2: a moved hop is ONE moved line, carrying the note", async () => {
+    const log = { sends: [] as string[] };
+    const hop = fakeHop();
+    const app = render(
+      <App
+        createSession={() => session([], log)}
+        model="m"
+        cwd="/tmp/work"
+        hop={hop.feed}
+        columns={80}
+      />,
+    );
+    await delay(40);
+    await type(app.stdin, "/move container", 60);
+    hop.settle({
+      moved: session([], log),
+      view: { place: { kind: "workload", engine: "docker", name: "box" }, daemonInPod: true },
+      note: "the old session did not close",
+    });
+    await delay(120);
+    const frame = strip(app.lastFrame());
+    expect(frame.split("Moved to docker:box").length - 1).toBe(1);
+    expect(frame).toContain("the old session did not close");
+    app.unmount();
+  });
+
   test("on failure the badge and the transcript are unchanged, one notice appears", async () => {
     const log = { sends: [] as string[] };
     const hop = fakeHop({ fail: "not moved: the container could not start" });

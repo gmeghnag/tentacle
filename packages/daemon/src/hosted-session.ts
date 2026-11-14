@@ -196,6 +196,12 @@ export interface Attachment {
    */
   readonly updates?: readonly string[];
   /**
+   * Its client declared `hop` (D8/D9): it can put a `move_session` proposal to its
+   * owner. Read from the attachment that CREATED the session, so the tool is
+   * offered to exactly the sessions whose client has a prompt to raise.
+   */
+  readonly hop?: true;
+  /**
    * Its connection, when that connection serves the model (the pod
    * reverse-tunnel): the session's model calls may go through it (`modelLink`).
    */
@@ -451,6 +457,12 @@ export class HostedSession {
   imagesPolicy: ImagePolicy | undefined;
   /** The session's approvals (the factory's), handed to the next agent on a settings sync. */
   grants: SessionGrants | undefined;
+  /**
+   * The client that CREATED this session declared `hop` (D8/D9): it can put a
+   * `move_session` proposal to its owner, so this session's agent may be offered
+   * the tool — and a settings sync must keep that (`updateSettings` reads it).
+   */
+  hop = false;
   private readonly session: Session;
   /** The factory's broker: its requester is this session's (installed once, below). */
   private readonly permissions: PermissionBroker;

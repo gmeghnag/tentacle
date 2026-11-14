@@ -237,6 +237,8 @@ export class RemoteSession implements SessionStreamListener {
   } | null = null;
   /** The session ended daemon-side (`session_closed`): a later send is refused clearly. */
   private remoteClosed = false;
+  /** …and it was THIS client's own runtime-level close (`RemoteClient.closingByMe`). */
+  private closedByMe = false;
   /**
    * The calls of the running turn the daemon said START (`tool_call_phase`
    * `running`, docs/feat/parallel-tools.md), recorded at receipt in `output`
@@ -1165,7 +1167,7 @@ export class RemoteSession implements SessionStreamListener {
     if (this.remoteClosed) {
       throw new RpcError(
         DomainErrorCode.UnknownSession,
-        "this session was closed on another device",
+        this.closedByMe ? "this session was closed" : "this session was closed on another device",
       );
     }
   }
@@ -1632,9 +1634,11 @@ export class RemoteSession implements SessionStreamListener {
   private onClosed(reason: EndReason): void {
     this.remoteClosed = true;
     this.streaming = null;
+    // This client's own runtime-level close (`closeSessions`: a hop's `dispose`, quit).
+    this.closedByMe = this.id !== null && this.client.closingByMe(this.id);
     this.failAll(new RpcError(DomainErrorCode.UnknownSession, "the session was closed"));
-    if (!this.closed) {
-      // Not after my own `close` (`/clear`): that is no news to this device.
+    if (!this.closed && !this.closedByMe) {
+      // Not after my own `close` (`/clear`) nor this client's: that is no news to this device.
       this.raise({ kind: "closed", reason });
     }
   }

@@ -2,6 +2,7 @@
   "expo": {
     "name": "tentacle",
     "slug": "tentacle",
+    "scheme": "tentacle",
     "ios": {
       "bundleIdentifier": "so.tentacle.app",
       "supportsTablet": true,
@@ -9,8 +10,7 @@
         "NSLocalNetworkUsageDescription": "tentacle connects to your computers on the local network",
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
-        },
-        "NSCameraUsageDescription": "take a photo to send with your message"
+        }
       }
     },
     "plugins": [
@@ -18,7 +18,9 @@
         "expo-build-properties",
         {
           "ios": {
-            "deploymentTarget": "18.0"
+            "deploymentTarget": "18.0",
+            "usePrecompiledModules": false,
+            "buildReactNativeFromSource": true
           }
         }
       ],
@@ -26,8 +28,16 @@
         "expo-image-picker",
         {
           "photosPermission": "choose a photo to send with your message",
-          "cameraPermission": "take a photo to send with your message",
+          "cameraPermission": "tentacle uses the camera to scan the pairing code shown by `tentacle pair`, and to take a photo you send with a message",
           "microphonePermission": false
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "tentacle uses the camera to scan the pairing code shown by `tentacle pair`, and to take a photo you send with a message",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
         }
       ],
       "expo-secure-store",

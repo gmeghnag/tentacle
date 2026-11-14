@@ -267,11 +267,21 @@ export interface ResidentUse {
 /**
  * Our OWN uid on a daemon, and who else is there (`session/list`, read BEFORE
  * any open: docs/feat/session-hop.md D1 step 4(a)/D7b). `own`: that session is
- * live there — `null` when it is not — with its own running/jobs. One struct
- * because it is ONE read: `ResidentUse` has no "own present" field.
+ * live there — `null` when it is not — with its own running/jobs and how many
+ * clients are ATTACHED to it. One struct because it is ONE read: `ResidentUse`
+ * has no "own present" field.
+ *
+ * `attached` is carried because `running`/`jobs` alone cannot tell a copy
+ * nobody uses from one another client is sitting in (H6 review fix round 1,
+ * finding 2): a plain `tentacle attach` TUI on the same resident shows as
+ * `running: false, jobs: 0, attached: 1`.
  */
 export interface OwnUse {
-  readonly own: { readonly running: boolean; readonly jobs: number } | null;
+  readonly own: {
+    readonly running: boolean;
+    readonly jobs: number;
+    readonly attached: number;
+  } | null;
   readonly others: number;
 }
 
@@ -290,7 +300,10 @@ export function ownUseOf(
   }
   const own = list.sessions.find((session) => session.sessionId === id);
   return {
-    own: own === undefined ? null : { running: own.running, jobs: own.jobs ?? 0 },
+    own:
+      own === undefined
+        ? null
+        : { running: own.running, jobs: own.jobs ?? 0, attached: own.attached },
     others: use.others,
   };
 }
