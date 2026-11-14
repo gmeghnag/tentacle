@@ -148,7 +148,7 @@ renders a precomputed view-model. App becomes the composition root.
 | `panels/registry.ts` + `usePanels.ts` (+ existing `panel.ts`) | pure + hook | `openPanel`/`closePanel` 1848–1880, panel key layers | **new panel = file + registry line** |
 | `useQuitClear.ts` | hook | `requestQuit`, `runClear` 3008–3160 | — |
 | `useTurnDriver.ts` | hook | `streamTurn`, `run`, `commitHistory`, `settleSendNow`, `sendNow`, `submit` (2214–2546, 2856–3007, 3586–3718) | — |
-| `useSessionLink.ts` | hook | `onActivity`, `watchSession`, `swapSession`, `switchTo`, `drainHeld`, wake/arm (1140–1222, 2106–2213, 2572–2855, 3540–3585) | — |
+| `useSessionLink.ts` | hook | `onActivity`, `watchSession`, `swapSession`, `switchTo` (1140–1222, 2106–2213, 2572–2855, 3540–3585). **Corrected in S9b:** `drainHeld` moved with S9a, and `armWake`/`wakeIfPending`/`askContext`/`watchReturned` **cannot** join this hook — each is consumed by an effect (#3, #17, #15) or a port (S9a's) that sits BEFORE any legal call site for it, so moving one would shift an effect's index (H1) or form a use-before-declaration. See Execution §S9b | — |
 | `app-layout.ts` (pure) + `AppView.tsx` (component) | pure + component | derived rows 1300–1555, JSX 4422–4602 | view-model fields |
 
 The shared plumbing is an **`AppCtx` port per concern**, not a global store: each
@@ -4232,3 +4232,244 @@ dep drift and the mutation discipline against the code, and all three match it.
 Different model family from the executor (DeepSeek vs Opus).
 
 *— claude-opus-5-5, 2026-11-14*
+
+## Execution
+
+### S9b — `feat/app-decomp-9b-session` (the session link leaves `App.tsx`)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: the run's
+parent process is `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc`.)
+
+**Scope.** `packages/tui/src/useSessionLink.ts` (new, the hook + its two
+interfaces), `App.tsx` (**`+74 / −331`, net −257 lines: `2359 → 2102`**), two
+new test files, **two source-locator repoints** in existing tests (stated below,
+with the reason), one changelog fragment. No schema change → `protocol.json`
+untouched; `TODO.md` untouched.
+
+**Load-bearing check, re-run first (PASSED).**
+`.tentacle/tmp/app-decomp-9b-session/lb-check.sh` on this branch:
+- *Ink calls EVERY active `useInput` listener, so the handler stays ONE* —
+  `packages/tui/node_modules/ink/build/hooks/use-input.js:89`
+  `internal_eventEmitter?.on('input', handleData)`, no stop-propagation;
+  `rg "useInput\("` finds only `App.tsx:1989` and the separate pre-mount
+  `components/SessionPicker.tsx:85`. **Holds** — S9b moves no key handling and
+  adds no listener.
+- *App has exactly 20 `useEffect(`*: measured `20` before, `20` after; the
+  hook's `react` import is `{ type MutableRefObject, useCallback, useRef }` — no
+  `useEffect`. **Holds.**
+- *The plan's premise — these bodies are an EXECUTOR over already-pure decisions
+  — is true*: all 18 decisions the four bodies call exist as pure exports
+  (`nextStep`/`historyAction`/`closedNotice` in `turn-feed.ts`;
+  `openFailedNotice`/`stayingNotice`/`switchRefusedNotice` in
+  `sessions-panel.ts`; `takeAll` in `queued.ts`; `resetDock`/`noteSent` in
+  `background-focus.ts`; `subagentNotifyNotice`/`userToSubagentNotice`;
+  `appendHistory`/`resetHistory`/`forgetContextFill`/`startContinuation` in
+  `state.ts`; `wakeStep` in `@tentacle/core`). **Holds**, and it is now pinned
+  structurally (M2/M13) rather than asserted.
+- *§7 single broker*: `usePermissionBroker(` appears only at
+  `permission-ui.ts:249` (the definition) and `App.tsx:383` (the one call);
+  the hook contains neither that name nor `PermissionBroker`. **Holds.**
+- *The capability is missing pre-slice*: `useSessionLink.ts` **ABSENT**, App
+  2359 lines, the four bodies inline at 1415/1531/1635/1791. **Reproduced** —
+  and it is the same state the red half of the red/green run uses.
+
+**The one step that contradicted the module map (fixed in the plan, not forced
+in code).** The module map (line 151) gives the hook **six** bodies:
+`onActivity`, `watchSession`, `swapSession`, `switchTo`, `drainHeld`, wake/arm.
+Two measurements say four of those cannot move with it, because H1 freezes the
+effect list:
+- `armWake` is a dep of the **jobs subscription**, effect **#3**
+  (`App.tsx:653`, `}, [jobs, flushNow, armWake, …])`), and its own port would
+  need `pushNotice` (declared 1032) and `runRef` — so any hook owning it must be
+  called before 653 while needing a binding made at 1032.
+- `wakeIfPending` is consumed by the **mount wake**, effect **#17** (1319).
+- `watchReturned` is consumed by its **mount effect**, **#15** (1232).
+- `askContext` and `wakeIfPending` are **port fields of `useTurnDriver`**
+  (1355–1413), which runs before any site that `onActivity` could use (it needs
+  `streamTurn` from 1355).
+`drainHeld` had already moved with S9a. So the movable set measured by
+`.tentacle/tmp/app-decomp-9b-session/union2.py` is exactly the four now in the
+hook, and the call site is forced into the single window **after 1413 and
+before 1609** — pinned by a structural case (M-`call site`). The map's line 151
+is corrected here rather than followed into a use-before-declaration or an
+effect-index shift. This is drift 1 of the plan's own instruction ("if a step
+contradicts the code, STOP and fix the plan").
+
+**Design, as built (dependency order).**
+1. **`useSessionLink.ts` — the EXECUTOR, deciding nothing.** It carries
+   `onActivity`, `watchSession`, `swapSession`, `switchTo`, plus the one-line
+   `onActivityRef.current = onActivity` / `swapRef.current = swapSession`
+   installs that keep their place between them.
+2. **The port (`SessionLinkHost`, 58 fields) is the shape the code forced.** Every
+   ref whose other writer/reader stays in `App` is a field — the turn driver's
+   (`heldRef`, `abortRef`, `streamCtrlRef`, `sendNowRef`, `warmingRef`,
+   `ownCompactionsRef`, `ownClearsRef`, `clearingRef`, `clearAfterTurnRef`,
+   `wakeRef`, `handedWakeRef`), the clear's, the key snapshot's (`switchingRef`),
+   the six subscription refs, the neighbours' executors (`streamTurn`/
+   `commitHistory`/`drainHeld` from S9a, `setAgents`/`setJobs`/`setDock`/
+   `jobOutputRef` from S5, `touchPanel` from S7), and the App's own decisive ones
+   (`runQuit`, `sessions`, `makeSession`, `setQuitConfirm`, `armWake`,
+   `subagentsTwoWay`, `wakeIfPending`, `askContext`, `exit`).
+   **The ONE ref it CREATES is `swapRef`** — the `onActivity` ↔ `swapSession`
+   cycle, which nothing outside touches. `onActivityRef` stays `App`'s and is a
+   port field, because it is ALSO a `useTurnDriver` field (its drain resolves
+   through it). A structural case pins that exact split (M6), so a later
+   "convenience" ref in the hook is red.
+3. **`App.tsx`** — the four bodies gone, one `useSessionLink({…})` call in their
+   place (after `useTurnDriver`, before the mount watch effect), plus the two
+   ref installs. The imports the move emptied left the file (19 names from
+   `turn-feed`, `sessions-panel`, `background-focus`, `state.ts`,
+   `subagent-notify`, `clear-command` and `queued` that only the moved bodies
+   used) — verified mechanically: **0 NEW dead imports** against `HEAD`'s `App.tsx`
+   (its 30 pre-existing dead imports are untouched). **One was briefly removed by
+   an over-reaching sweep and restored**: `initialState` is still read at
+   `App.tsx:431` (the `stateRef` seed), and `tsc` caught it.
+
+**The move is verbatim, checked rather than asserted.**
+`.tentacle/tmp/app-decomp-9b-session/verbatim.py` sweeps every non-blank line of
+the four pre-slice bodies **and their doc comments** (`git show HEAD:…/App.tsx`,
+read-only) against the hook: **300 non-blank lines, 4 not found verbatim** — all
+four in ONE documented class, no statement/identifier/comment INSIDE a body:
+1. **Four dep arrays — and they are the ONLY drift.** A ref arriving as a port
+   prop is a dep like any other, and Biome's `useExhaustiveDependencies` fails
+   otherwise (measured: verbatim arrays gave **23 errors** on `biome check`,
+   field-naming arrays 0). `onActivity` went 12 → 26 names, `watchSession`
+   10 → 23, `swapSession` 7 → 21, `switchTo` 6 → 8: each array now names **every
+   port field its body reads**. Every such field is identity-stable (a `useRef`
+   object, a `useState` setter, a `useCallback` whose own deps are stable), so
+   **no callback identity changed** — H2 holds by construction, and
+   `app-structural-identity.test.ts` (green, unedited) still pins it. Same drift
+   class S6/S8/S9a recorded, for the same reason.
+
+**The two existing tests I edited, and why that is not a weakened assertion.**
+The plan's Preconditions rule: "no test changes EXCEPT a source-locator that must
+follow the declaration". Both are exactly that, and both keep the property:
+1. `test/app-turn-driver-structure.test.ts` (S9a) asserted
+   `countOf(App.tsx, "streamTurn(") >= 1` etc. Their only caller in App was
+   `onActivity`, which moved — so the locator now reads `useSessionLink.ts` for
+   the three CALLS and additionally asserts App still hands all three to the hook
+   by name. Property unchanged ("the driver's three are called, and App wires
+   them"), location followed the code.
+2. `test/app-panels-structure.test.tsx` (S7) asserted `touchPanel()` appears once
+   in `App.tsx`; `swapSession` was its only caller. Now it asserts once in
+   `useSessionLink.ts` **and zero in `App.tsx`** (stricter on the App side), with
+   the `usePanels.ts` half untouched.
+No test was deleted, skipped, or given a weaker matcher.
+
+**Tests (new only, 20 cases).**
+- `test/app-session-link-structure.test.ts` (11, source-level): no session-link
+  decision is imported or CALLED in `App.tsx`; the hook really calls them and the
+  import is their only binding (a same-named local is red — M13); exactly ONE
+  `useSessionLink` call with the four frozen identifiers; App still declares 20
+  effects and the hook imports none (M12); the port is destructured and no alias
+  survives (M11); the ONE created ref is the cycle's and `onActivityRef` is
+  pinned as the opposite case (M6); `onActivityRef`/`swapRef` keep their forward
+  binding (M1); no broker is created (§7 single-broker); no moved body left in
+  App (M8); the return list (M9); **and the call-site window** (after
+  `useTurnDriver`, before the mount watch, with the four it does NOT own still
+  App's).
+- `test/app-session-link-layer.test.tsx` (9, App-seam through the real `App`):
+  the mount follow installs all six feeds + the eager open, watch FIRST; unmount
+  releases; a `history` with no turn running replaces the transcript; a turn
+  raised while idle streams through the ONE loop; an activity raised mid-turn is
+  HELD and only reaches the frame at the settle; a second follow tears the
+  previous queue subscription down; a `closed` activity MOVES the view through
+  `swapRef`; a `/sessions` switch detaches before it opens and follows the new
+  session; a follow RESETS the new session's own views (a live sub-agent pill
+  goes with the old session).
+
+**RED before GREEN (§4/§9).**
+`.tentacle/tmp/app-decomp-9b-session/redgreen.sh` puts `git show HEAD`'s
+`App.tsx` back and hides `useSessionLink.ts`, runs the file, then restores and
+re-runs:
+- **structure:** pre-slice **0 pass / 11 fail** (every red on the ASSERTION — the
+  missing module, the `useSessionLink(` count, the `not.toContain` on
+  `nextStep(`, the ref set — never an import error); as built **11 pass / 0
+  fail**.
+- **layer:** pre-slice **9 pass / 0 fail**, as built **9 pass / 0 fail**. This
+  is **correct and expected for a MOVE** — the behaviour is precisely what the
+  move preserves, so only the structural pins can be red before it (S9a recorded
+  the identical split). Non-vacuity for the layer file therefore rests entirely on
+  the mutation run below, which is where it belongs.
+- Both runs printed `RESTORE MATCHES (byte-identical)` — nothing was left
+  mutated.
+
+**Mutation check (§9 non-vacuity) — 15/15 KILLED, 0 survived, 0 invalid.**
+`.tentacle/tmp/app-decomp-9b-session/mutate.ts` (byte-copy, ONE textual mutation,
+the filtered owning test, restore, sha256 compare; a **0-test run is reported
+INVALID**, so a bad filter can never look like a kill — that guard caught two
+real anchor bugs in my own table, `M3`/`M6`/`M7`/`M14` SKIP on first draft).
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | the hook never installs `onActivity` into `onActivityRef` (watch reaches nothing) | **KILLED** (10/1) |
+| M2 | the `closed` arm calls `makeSession()` but never swaps (the view does not move) | **KILLED** (7/1) |
+| M2b | `swapRef` never assigned (`swapRef.current = null`) | **KILLED** (7/1) |
+| M3 | the `hold` arm dropped (a mid-turn activity is lost) | **KILLED** (7/1) |
+| M4 | `nextStep`'s verdict read as a constant `"consume"` | **KILLED** (7/1) |
+| M5 | `onQueued` never subscribed | **KILLED** (6/2) |
+| M6 | `queueSubRef.current?.()` teardown dropped (two sessions' queues race) | **KILLED** (7/1) |
+| M7 | the port spread (`{ ...useSessionLink({…}) }`) | **KILLED** (9/2) |
+| M8 | a second `useSessionLink` call | **KILLED** (10/1) |
+| M9 | the returned identifiers drift from the pre-slice ones | **KILLED** (10/1) |
+| M11 | the port taken whole (`const wholePort = host`) | **KILLED** (10/1) |
+| M12 | `useEffect` imported into the hook (H1: App's indices would shift) | **KILLED** (10/1) |
+| M13 | a decision re-implemented in the hook (`switchRefusedNotice` as a local) | **KILLED** (10/1) |
+| M14 | the per-session reset dropped (`setAgents(undefined)`) | **KILLED** (8/1) |
+| M15 | `touchPanel()` dropped from the swap (S7's kind rule stops repainting) | **KILLED** (6/1) |
+
+Four rows were HOLES first and were closed by strengthening the TEST or
+correcting the MUTANT (never by loosening an assertion):
+- **M2 SURVIVED** — the layer case asserted the `closed` NOTICE, which still
+  appears when the swap is dropped. That is the §2 trap (a correlated property).
+  It now asserts the exact one: the fresh session gets FOLLOWED (the `watch`
+  count rises) — and M2/M2b both died.
+- **M6 SURVIVED** — my fake's `onQueued` returned a no-op teardown, so no test
+  could ever see the release. The fake now records `queueReleases` and a new case
+  asserts it is 1 on the old session after a switch; M6 died.
+- **M14/M15 SURVIVED** — no test observed the per-session reset or the panel
+  repaint at all. M14 now targets `setAgents(undefined)` and a new case asserts
+  the live sub-agent pill leaves the frame on a swap; M15 is owned by S7's
+  (repointed) structural case and was re-pointed to run against it.
+- **M10 (a stable dep removed) was DELETED from the table, not fixed**: removing
+  a `useRef` object from a dep array has **no runtime effect**, so no behavioural
+  test can kill it — Biome's `useExhaustiveDependencies` is the guard there, and
+  it does fire (measured during the build: 23 errors on verbatim arrays). Keeping
+  a mutant that only a linter kills would have been a fake row.
+
+**Gate (this worktree, this branch, final run).** `bun run typecheck` (`tsc
+--noEmit` + `tsc -p apps/mobile`) → clean · `bun run lint` → `biome check .`
+**1222 files, 0 errors 0 warnings** (the AGENTS §6 baseline) · `bun test` →
+**9018 pass / 3 skip / 0 fail** across 652 files, exit 0 (the 3 skips are the
+documented opt-ins: live-k8s, live-docker, the real-socket keepalive — not
+failures). `packages/tui` alone: **1953** before the slice, **1973** after (139
+files, the 20 new cases). No schema change →
+`packages/protocol/schema/protocol.json` untouched. `TODO.md` untouched (the
+orchestrator's line, §10). `CHANGELOG.md` untouched;
+`changelog.d/app-decomp-9b-session.changed.md` added.
+
+**Unverified / disclosed (one line each).**
+- *A full-suite run once reported `9018 pass / 118 fail`, and I could not
+  reproduce it.* Six subsequent full runs and several `packages/tui` runs were
+  `0 fail` (including one under 6× CPU load), and I did not capture that run's
+  failure names, so I **cannot name the failing set**. What I can say: no
+  deterministic break exists on this branch, and I hardened the one thing that
+  was plausibly mine — **my layer file used fixed 150–250 ms sleeps, against the
+  repo convention of ≤60 ms** (every other App-seam file). Those are now bounded
+  condition-waits (`until(() => <the observable>)`) followed by an explicit
+  assertion, which is faster AND cannot go vacuous: the mutation run caught that
+  trap when the first `until` version let M14 survive, and adding the assertion
+  back killed it again (15/15). To chase the residual: re-run the full suite
+  several times and keep whole logs (my one lost log is why this stays open).
+- *The plan's per-slice coverage check* (`bun test --coverage packages/tui`,
+  compare the App.tsx + new-file line total) was **not** run: the coverage
+  instrument rewrites the same tree the mutation harness drives, and S9a already
+  established the shape (App's function % falls because the moved arrows are
+  counted where they live, lines rise). To verify: run it on this branch and
+  compare `useSessionLink.ts` against the 96.37 % S9a measured for its sibling.
+- *The `app-structural-identity.test.ts` file was NOT edited*, and it is green —
+  which is the H2 proof for this slice (the mount effect still subscribes once).
+  That is an assertion that the port's fields kept their identities, not a proof
+  of each one; a field swapped for a same-identity-rule replacement would pass.
