@@ -2026,3 +2026,46 @@ packages/cli/test/session-hop.docker.test.ts` → `1 pass, 0 fail`). No protocol
 changed, so `packages/protocol/schema/protocol.json` was not regenerated.
 
 *— claude-sonnet-4-5-20250929, 2026-11-14*
+
+## Review — H6 + H7
+
+**Verdict: REQUEST-CHANGES** (2 MEDIUM, no HIGH). Scope: `git diff main...HEAD`, slices H6/H7 only.
+
+**Findings**
+
+1. **MEDIUM: the dispose on a D7(b) refusal is not tested** (`packages/cli/src/hop-targets.ts:418`). The row at
+   `packages/cli/test/session-hop-targets.test.ts:761` is titled "the runtime disposed", but it never checks that.
+   Mutation: delete `await bounded(runtime.dispose(), …)` → `23 pass, 0 fail`. Failure scenario: every refused
+   `/move attach` leaks a live `RemoteClient` and its exec stream into a workload that is "not ours", and no test catches it.
+   Fix: assert the dispose (the exec channel is closed, or a dispose spy).
+2. **MEDIUM: D7(c) closes our own idle copy even when another client is attached to it.** The path:
+   `session-hop.ts:277,288` → `ownUidVerdict` (`hop-plan.ts:168`) → `ownUseOf` (`relay-state.ts:292-295`). `ownUseOf` keeps only
+   `running`/`jobs` and drops `attached`. Scenario: this is the H5 round-3 residual, confirmed by the executor. A plain
+   `tentacle attach` TUI has joined the session on a hop container's resident. The origin TUI then runs `/move attach` to
+   that container again. The copy is idle, so `session/close` is sent under the attached TUI. That breaks the changelog's
+   "the workload's current client is never disturbed" and D7's "not ours to share". Fix: an own copy with `attached > 0`
+   should be `busy` (refuse), plus a row for that case.
+
+**Gate:** touched files (`session-hop-targets`, `detached-run-of`, `hop-leave`, `session-hop.docker`): 47 pass,
+1 skip (the opt-in live row), 0 fail. `bun run lint`: 1251 files, clean. `bun run typecheck`: 0. I did not re-run the full
+suite. I did not run the live docker row here (opt-in, needs an engine).
+
+**Attacks tried**
+- Dropped the D7(b) dispose → no test failed (finding 1).
+- Own uid live, idle, with another client attached → closed (finding 2, read from the code; no row covers it).
+- Ordering: D7(a) runs before `deps.host`, and D7(b) runs after the handshake and before any `session/open`. Both hold:
+  the runtime opens lazily, and the frame-level rows check it.
+- Hop out with `keep:false` on a workload joined by attach: the delete is gated on the index entry's `hop:true`
+  (`hop-leave.ts:102`) and matched by location key. Holds.
+- `detachedRun` asked with no `at` (the strict side): refuses a same-name run at another place. Acceptable, as documented.
+- `residentUse` is not bounded in time (`hop-targets.ts:414`): a hung pod hangs the hop. Same as the existing
+  `closeOrRefuseOwn` read, so not raised.
+
+**Process:** the plan asked for a SEPARATE pure-move commit for `detachedRunOf` (M8). It landed in the same commit
+`ca16037a`. Not blocking. The Execution section is signed `claude-sonnet-4-5-20250929`, but the commit says "deepseek".
+Fix the signature so it names the model that actually ran.
+
+**Executor behaviour:** careful and honest. The live test found a real mount bug, and the residual was investigated and
+reported as debt. One mutation claim was overstated (finding 1's test title).
+
+*— claude-opus-5-5, 2026-11-14* (fresh context, not the executor's model family)
