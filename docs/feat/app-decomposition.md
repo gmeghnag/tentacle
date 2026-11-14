@@ -5854,6 +5854,13 @@ queue).
 *— claude-opus-5-5, 2026-11-14 (executor, `feat/app-decomp-12-line-keys`, cut
 from `main` @ `f5a5c76c`)*
 
+> **Attribution disputed (Fix round 1, Review finding 2):** the commit that
+> landed this Execution, `703a2d14`, is titled `feat(app-decomp-12-line-keys):
+> exec (deepseek)`, which contradicts the `claude-opus-5-5` signature above.
+> Nothing in the tree settles which model ran it. **Orchestrator: confirm the
+> model and correct this signature.** Until then, treat this run as a
+> weak-model × load-bearing execution (AGENTS §10).
+
 Scope is the follow-up table's row 2 and nothing else: the line-editing tail +
 `historyStep` + the `downEntersList` dispatch + the chip-Backspace rule → a pure
 `keys/line-layer.ts` run through `executeEffects`; `paletteStep` with an
@@ -5949,7 +5956,7 @@ inline tail (`:1695-1835`). The mouse layer applies its own restored-`[` carry
    was written because the task prompt asks for one and every sibling slice
    has one; it ends "No user-visible behaviour changes." (AGENTS §10 says
    internal work adds none — the S14 review flagged that; the orchestrator
-   decides whether to keep it.)
+   decides whether to keep it.) *[Deleted in Fix round 1.]*
 5. **AGENTS.md §7 not edited.** Its "(… the `App.tsx` key handler is known debt
    to extract.)" is now stale; editing the rules file is outside this slice's
    file set, so it is left for the orchestrator (one parenthetical).
@@ -6000,6 +6007,46 @@ diff, so `protocol.json` was not regenerated and no `protocol.d/` note is due.
 unchanged and pinned. Left for the orchestrator: `permissionStop`/`cancelUpload`
 (outside the row), the stale parenthetical in AGENTS §7, and keep or drop
 the fragment.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-14 (fix-round executor, `feat/app-decomp-12-line-keys` @ `6da26be8`)*
+
+Review round 1 had two MEDIUMs and no HIGH. No code changed in this round.
+
+1. **MEDIUM 1 (changelog fragment for internal work): FIXED.** Deleted
+   `changelog.d/app-decomp-12-line-keys.changed.md`. The review offered a
+   `fixed` fragment for the `paletteStep` NaN as the other option. It does not
+   apply, because the NaN could never happen in the TUI:
+   `paletteOpen = paletteCommands.length > 0` (`app-layout.ts:168`), and
+   `moveCommandSel` is emitted only while `paletteOpen` (`layer-dock.ts:102-110`).
+   So `paletteStep` is never called with `n === 0`. Also,
+   `useEffect(() => setCommandIndex(0), [field.value])` (`App.tsx:707`) resets
+   the index on every edit. The `n === 0` case is defensive purity and not a
+   user-visible fix. No test or script names the fragment (a grep for
+   `app-decomp-12` outside `docs/` finds nothing).
+2. **MEDIUM 2 (executor signature may be wrong): PARTIAL.** Nothing in the
+   tree or git metadata settles which model ran `703a2d14`: the author is the
+   human owner, and the title says `deepseek`. I did not guess. I added an
+   "Attribution disputed" note under the S12 Execution signature, which names
+   the conflict and asks the orchestrator to confirm. Until then the run is to
+   be treated as weak-model × load-bearing. Only the orchestrator can close
+   this finding.
+
+**Red/green:** does not apply. Neither fix touches code, so there is no
+property for a regression test to pin.
+
+**Mutation (non-vacuity of the NaN claim):** FM1 changed `commands.ts:168`
+from `return 0;` to `return Number.NaN;`. Running `palette-step`, `app.test`,
+`app-keys-precedence` and `keys-app-seam` gave 145 pass / 1 fail. Only the
+unit pin `paletteStep > an empty list never yields NaN` failed, and no App
+behaviour test noticed. That fits the branch being unreachable from the TUI.
+Reverted with the inverse `sed`; `git status` showed only the two intended
+changes.
+
+**Gate (final tree):** `bunx tsc --noEmit` → OK · `bun run lint` → Checked 1362
+files, no fixes · `bun test` → 9843 pass / 4 skip (opt-in) / 0 fail, 9847
+tests across 714 files.
 
 ## Review
 
