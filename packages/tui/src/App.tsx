@@ -5,7 +5,6 @@ import {
   DISMISSED,
   type WakeModel,
   initialWake,
-  wakeDue,
   wakeStep,
 } from "@tentacle/core";
 import { useApp, useInput, useStdout } from "ink";
@@ -41,13 +40,13 @@ import { HOP_QUEUED_NOTICE, type HopSpec, hopStep, parseHopCommand } from "./hop
 import { hopFailureText, hopMovedNotice, hopPlaceText, hopStatusRow } from "./hop-status.ts";
 import { startIdleWarm } from "./idle-warm.ts";
 import { resolveLineInput } from "./input-actions.ts";
-import { JOB_TAIL_SHOWN, jobOutcome, refreshDue } from "./job-drawer.ts";
+import { JOB_TAIL_SHOWN, exitOutcome, jobOutputEntry, refreshDue } from "./job-drawer.ts";
 import { type KeyHost, executeEffects } from "./keys/execute.ts";
 import { PURE_LAYERS } from "./keys/layers.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
 import { type OpenPanel, panelClick } from "./panel.ts";
-import { sanitizePasted } from "./paste.ts";
+import { pasteTarget, sanitizePasted } from "./paste.ts";
 import { insertReply, orphanNotice } from "./permission-reply.ts";
 import {
   type AutoAcceptFeed,
@@ -62,13 +61,14 @@ import { usePanels } from "./usePanels.ts";
 import { useQuitClear } from "./useQuitClear.ts";
 import { useSessionLink } from "./useSessionLink.ts";
 import { type HopTurnPort, useTurnDriver } from "./useTurnDriver.ts";
+import { tryWake } from "./wake-gate.ts";
 
 export type { AutoAcceptFeed };
 
 import { type DaemonQueue, type QueuedRows, handBackRows, shownRows } from "./queued.ts";
 import { type RenderOptions, layoutTranscript, sliceLaid, warmRowsChunk } from "./render-lines.ts";
 import { runChunked } from "./run-chunked.ts";
-import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
+import { anchorOffset, applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
 import type { Selection } from "./selection.ts";
 import { withRestored } from "./send-now.ts";
 import { SkillsSync } from "./skills-sync.ts";
@@ -587,15 +587,16 @@ export function App({
       wakeIfPendingRef.current?.();
       return;
     }
-    const gate = {
+    // The GATE and the step are `tryWake`'s (S13): `idle` is the negation of the
+    // live `running` ref, `blocked` is the `/clear` latch — derived in ONE place,
+    // so this path and `wakeIfPending` cannot disagree about either (review H2).
+    const attempt = tryWake(wakeRef.current, {
       enabled: autoWakeOnJobExit,
-      idle: !stateRef.current.running,
-      // A `/clear` in flight: its history has not been applied yet, a turn
-      // now would be wiped by it (review H2). `wakeIfPending` runs again then.
-      blocked: clearingRef.current,
-    };
-    if (wakeDue(wakeRef.current, gate)) {
-      wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" });
+      running: stateRef.current.running,
+      clearing: clearingRef.current,
+    });
+    wakeRef.current = attempt.model;
+    if (attempt.wake) {
       runRef.current?.("", { continuation: true });
     }
   }, [autoWakeOnJobExit]);
@@ -608,25 +609,11 @@ export function App({
       return;
     }
     return jobs.onExit((job) => {
-      // A sub-agent's exit carries its own stop reason (`end_turn` = a clean
-      // finish): the dock's frozen drawer says which (docs/feat/subagent-panel.md).
-      const outcome: DockOutcome =
-        job.agent !== undefined
-          ? job.agent.stopReason === "end_turn"
-            ? { kind: "finished" }
-            : { kind: "stopped" }
-          : // A SHELL JOB (docs/feat/shell-jobs-panel.md, owner B): the drawer's
-            // outcome comes from THIS record — the code the daemon reported, and
-            // whether the stop was the dock's own (`dockStoppedRef`).
-            jobOutcome({
-              status: job.status,
-              exitCode: job.exitCode,
-              byDock: dockStoppedRef.current.has(job.id),
-              // Fix round 2: the ONE instant the run ended, stamped ONCE here (this
-              // handler runs once per exit) — the drawer's duration is the job's
-              // total run time, so a frozen drawer must not keep measuring to `now`.
-              endedAt: Date.now(),
-            });
+      // The outcome's RULE is `exitOutcome`'s (S13): a child's own stop reason, or
+      // the shell job's record. `endedAt` is stamped ONCE here — this handler runs
+      // once per exit, and the drawer's duration is the job's total run time, so a
+      // frozen drawer must not keep measuring to `now` (fix round 2).
+      const outcome: DockOutcome = exitOutcome(job, dockStoppedRef.current.has(job.id), Date.now());
       dockOutcomeRef.current[job.id] = outcome;
       // An open drawer may already have frozen on the `stopped` fallback (its row
       // left before this record arrived — review 3): the record is the truth, so
@@ -856,9 +843,18 @@ export function App({
   useEffect(() => {
     const prev = prevRowsRef.current;
     if (prev !== total) {
-      const selecting = selectionRef.current !== null;
-      if (total > prev && (scrollOffset > 0 || selecting)) {
-        setScrollOffset((o) => clampOffset(o + (total - prev), total, viewport));
+      // The RULE is `anchorOffset`'s (S13). The guard reads THIS render's offset
+      // and the updater's arithmetic reads the commit value, as before: the two
+      // disagree inside one batched tick, and that window is the point (H3).
+      const updater = anchorOffset({
+        prevTotal: prev,
+        total,
+        rendered: scrollOffset,
+        selecting: selectionRef.current !== null,
+        viewport,
+      });
+      if (updater !== null) {
+        setScrollOffset(updater);
       }
       prevRowsRef.current = total;
     }
@@ -928,17 +924,13 @@ export function App({
       jobReadAtRef.current = { id: jobTargetId, at: Date.now() };
       void read(jobTargetId, { lines: JOB_TAIL_SHOWN, maxChars: 8192 }).then(
         (result) => {
-          if (cancelled || result.found !== true) {
+          // ONE rule for a read's cache entry (S13): the polling read and the
+          // final on-exit read below are the same record, built once.
+          const entry = jobOutputEntry(result);
+          if (cancelled || entry === null) {
             return;
           }
-          jobOutputRef.current = {
-            ...jobOutputRef.current,
-            [jobTargetId]: {
-              output: result.output ?? [],
-              ...(result.truncated !== undefined ? { truncated: result.truncated } : {}),
-              ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
-            },
-          };
+          jobOutputRef.current = { ...jobOutputRef.current, [jobTargetId]: entry };
           setJobOutputGen((n) => n + 1);
         },
         () => {
@@ -981,17 +973,11 @@ export function App({
     let cancelled = false;
     void read(jobTargetId, { lines: JOB_TAIL_SHOWN, maxChars: 8192 }).then(
       (result) => {
-        if (cancelled || result.found !== true) {
+        const entry = jobOutputEntry(result);
+        if (cancelled || entry === null) {
           return;
         }
-        jobOutputRef.current = {
-          ...jobOutputRef.current,
-          [jobTargetId]: {
-            output: result.output ?? [],
-            ...(result.truncated !== undefined ? { truncated: result.truncated } : {}),
-            ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
-          },
-        };
+        jobOutputRef.current = { ...jobOutputRef.current, [jobTargetId]: entry };
         setJobOutputGen((n) => n + 1);
       },
       () => {},
@@ -1082,16 +1068,15 @@ export function App({
       return;
     }
     setTimeout(() => {
-      // A turn running by now keeps it pending: that turn's end asks again.
-      const gate = {
+      // A turn running by now keeps it pending: that turn's end asks again. The
+      // same `tryWake` as the live path (S13) — one gate, one step.
+      const attempt = tryWake(wakeRef.current, {
         enabled: autoWakeOnJobExit,
-        idle: !stateRef.current.running,
-        // A `/clear` in flight (review H2): its history is applied first, and
-        // `wakeIfPending` is asked again from there (or from a refused clear).
-        blocked: clearingRef.current,
-      };
-      if (wakeDue(wakeRef.current, gate)) {
-        wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" });
+        running: stateRef.current.running,
+        clearing: clearingRef.current,
+      });
+      wakeRef.current = attempt.model;
+      if (attempt.wake) {
         runRef.current?.("", { continuation: true });
       }
     }, 0);
@@ -1624,13 +1609,21 @@ export function App({
       pasteBufRef.current = null;
       if (buf) {
         const clean = sanitizePasted(buf);
-        // An open reply field takes it, never the hidden main field.
-        if (clean && !insertIntoReply(clean) && !panelRef.current) {
+        // WHERE it lands is `pasteTarget`'s rule (S13): an open reply field takes
+        // it, never the hidden main field; a panel swallows it; else an attachment.
+        const target = pasteTarget({
+          clean,
+          replyOpen: readReplyMode().mode === "reply",
+          panelOpen: panelRef.current !== null,
+        });
+        if (target === "reply") {
+          insertIntoReply(clean);
+        } else if (target === "attach") {
           routeAttachRef.current(clean);
         }
       }
     }, PASTE_TIMEOUT_MS);
-  }, [clearPasteTimeout, insertIntoReply]);
+  }, [clearPasteTimeout, insertIntoReply, readReplyMode]);
   useEffect(() => {
     return () => clearPasteTimeout();
   }, [clearPasteTimeout]);
@@ -1857,7 +1850,13 @@ export function App({
         void paste().then(
           (text) => {
             const clean = flattenPasted(text);
-            if (clean && !panelRef.current) {
+            // `pasteTarget`'s rule again (S13), with no reply to consider: this
+            // path is the MAIN input's Ctrl+V — the dialog layer already turned a
+            // reply-field Ctrl+V into `pasteReply`, so only the panel can veto it.
+            if (
+              pasteTarget({ clean, replyOpen: false, panelOpen: panelRef.current !== null }) ===
+              "attach"
+            ) {
               routeAttachRef.current(clean);
             }
           },
