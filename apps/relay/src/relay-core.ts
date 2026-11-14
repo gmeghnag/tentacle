@@ -25,11 +25,13 @@ import {
   RELAY_STREAM_EXPIRY_MS,
   RELAY_STREAM_HOLD_MS,
   RELAY_STREAM_TEXT_LENGTH,
+  type RelayFeature,
   type RelayToDaemonFrame,
   decodeBase64Url,
   encodeBase64Url,
 } from "@tentacle/protocol";
 import { relayIdOf } from "@tentacle/transport/relay-id";
+import { APNS_MAX_PAYLOAD_BYTES } from "./apns.ts";
 
 /**
  * The relay's abuse limits. Defaults from the design; a flag overrides one
@@ -52,6 +54,18 @@ export const RELAY_LIMITS = {
   hellosPerMinutePerIp: 10,
   /** Per-IP bookkeeping entries remembered. */
   maxTrackedIps: 4_096,
+  /** Device-token push windows remembered, relay-wide (bounded, as the IPs are). */
+  maxTrackedPushTokens: 4_096,
+  /** Per-id push windows remembered (bounded, as the IPs are). */
+  maxTrackedPushIds: 4_096,
+  /** `push` frames per minute, per registered relay id (docs/feat/mobile-push.md F10). */
+  pushesPerMinutePerId: 120,
+  /**
+   * `push` frames per minute, per DEVICE token, RELAY-WIDE: the one a third party
+   * could spray, so the bound cannot be multiplied by registering more ids nor
+   * laundered by reconnecting one (F10).
+   */
+  pushesPerMinutePerToken: 30,
 } as const;
 
 export type RelayLimits = { -readonly [K in keyof typeof RELAY_LIMITS]: number };
@@ -82,6 +96,12 @@ export interface RelayCoreOptions {
   readonly mintToken?: () => string;
   /** Overrides for the abuse limits (a flag, or a test shortening a window). */
   readonly limits?: Partial<RelayLimits>;
+  /**
+   * What this build announces in `ready.features`. `[]` unless the relay was
+   * started with a readable APNs key (docs/feat/mobile-push.md C1): a daemon must
+   * never send `push` to a relay that cannot deliver it.
+   */
+  readonly features?: readonly RelayFeature[];
 }
 
 /** What `hello` concluded, plus the frames/ closes it requires. */
@@ -104,8 +124,44 @@ export type DialDecision =
   | { readonly ok: true; readonly state: "held"; readonly effects: readonly RelayEffect[] }
   | { readonly ok: false; readonly reason: RelayRefusal; readonly effects: readonly RelayEffect[] };
 
-/** What `/v1/accept` concluded. */
-export type AcceptDecision =
+/**
+ * What a daemon's `push` frame is allowed to become.
+ *
+ * `accept` hands the request to `server.ts`, which delivers it through the APNs
+ * client and answers `push-result` itself: the core decides WHO may push and how
+ * often, never how a push is sent (that is `apns-client.ts`).
+ */
+export type PushDecision =
+  | {
+      readonly ok: true;
+      /** The request to deliver; the caller answers `{t:"push-result", n, …}`. */
+      readonly request: RelayPushRequest;
+    }
+  | {
+      readonly ok: false;
+      /** Read as `status` on the `push-result`: `rejected`, or `throttled` at a cap. */
+      readonly status: "rejected" | "throttled" | "unavailable";
+      readonly reason: string;
+      readonly effects: readonly RelayEffect[];
+    };
+
+/** One delivered request's inputs, already validated by the frame's schema. */
+export interface RelayPushRequest {
+  /** The control socket that asked: the ONLY socket the answer is sent to. */
+  readonly socket: string;
+  readonly n: number;
+  readonly token: string;
+  readonly env: "sandbox" | "production";
+  readonly collapse: string;
+  readonly ttl: number;
+  readonly payload: unknown;
+}
+
+interface PushWindow {
+  readonly id: Window;
+}
+
+/** What `/v1/accept` concluded. */ export type AcceptDecision =
   | {
       readonly ok: true;
       readonly token: string;
@@ -189,16 +245,29 @@ export class RelayCore {
   private readonly now: () => number;
   private readonly mintToken: () => string;
   private readonly limits: RelayLimits;
+  private readonly features: readonly RelayFeature[];
   private readonly daemons = new Map<string, Daemon>();
   private readonly streams = new Map<string, Stream>();
   private readonly holds = new Map<string, Hold>();
   private readonly ips = new Map<string, IpState>();
+  /**
+   * Push bookkeeping: the RELAY-WIDE per-token windows (F10). One entry per device
+   * token, whatever id pushed to it — the bound a third party would try to mul-
+   * tiply by registering ids or by reconnecting one.
+   */
+  private readonly pushTokens = new Map<string, Window>();
+  /**
+   * Per-id push windows, keyed by id and NOT by socket: a reconnect of the same id
+   * resumes its minute instead of laundering it.
+   */
+  private readonly pushes = new Map<string, PushWindow>();
 
   constructor(options: RelayCoreOptions = {}) {
     this.now = options.now ?? (() => Date.now());
     this.mintToken =
       options.mintToken ?? (() => encodeBase64Url(crypto.getRandomValues(new Uint8Array(16))));
     this.limits = { ...RELAY_LIMITS, ...options.limits };
+    this.features = options.features ?? [];
   }
 
   /** Daemons registered right now. */
@@ -299,10 +368,11 @@ export class RelayCore {
       {
         kind: "send",
         target: input.socket,
-        // `features` is present from the start (task 16's amendment): this build
-        // announces none, so `push` stays an unknown-but-tolerated name until
-        // R7 deploys a relay that has it.
-        frame: { t: "ready", v: RELAY_PROTOCOL_VERSION, id, features: [] },
+        // `features` is present from the start (task 16's amendment): a relay
+        // announces `"push"` only when it holds a readable APNs key, and a daemon
+        // sends a `push` frame only to one that did (C1 — an R2 relay would close
+        // the control socket on it).
+        frame: { t: "ready", v: RELAY_PROTOCOL_VERSION, id, features: [...this.features] },
       },
     ];
     if (existing !== undefined && existing.socket !== input.socket) {
@@ -391,7 +461,112 @@ export class RelayCore {
     return { ok: true, token: stream.token, id: stream.id, phone: stream.phone };
   }
 
-  /** The daemon's control socket closed: unregister it (its streams live on, F2). */
+  /**
+   * A daemon's `push` frame: may this id push now, to this token, at all
+   * (docs/feat/mobile-push.md Design 4's abuse limits and F10)?
+   *
+   * Refused unless the socket has completed `hello` — only a REGISTERED id may
+   * push, exactly as only one may receive streams, so a stranger's socket can
+   * never become a spamming gateway. The answer to a refusal is a `push-result`
+   * (`throttled` / `rejected`), never a close: one over-eager daemon must not
+   * lose its reachability, and the other pushes in flight on it.
+   *
+   * Both windows are fixed one-minute ones, like the dial limiter: a caller can
+   * see up to 2× a limit across a boundary, which for `30/min` is 60 pushes to
+   * one token, not a hole (F10 accepts that bound). The per-token window is the
+   * RELAY-WIDE one (`this.pushTokens`): F10 bounds what one device can be sprayed
+   * with, so registering a second id or reconnecting must not buy a second budget.
+   */
+  push(input: {
+    socket: string;
+    n: number;
+    token: string;
+    env: "sandbox" | "production";
+    collapse: string;
+    ttl: number;
+    payload: unknown;
+    /** The request body's size, so the 4096-byte bound is checked on the RELAY. */
+    payloadBytes: number;
+  }): PushDecision {
+    const at = this.now();
+    const id = this.idOfControl(input.socket);
+    const refuse = (
+      status: "rejected" | "throttled" | "unavailable",
+      reason: string,
+      close = false,
+    ): PushDecision => ({
+      ok: false,
+      status,
+      reason,
+      effects: close
+        ? [
+            this.pushResult(input.socket, { n: input.n, status, reason }),
+            { kind: "close", target: input.socket, code: 1008 },
+          ]
+        : [this.pushResult(input.socket, { n: input.n, status, reason })],
+    });
+    if (id === undefined) {
+      // A `push` before `hello`: the frame schema cannot know this, and the
+      // socket is not a daemon yet. It is named and closed — the same answer
+      // any pre-registration misuse gets (`accept` on the wrong socket).
+      return refuse("rejected", "unregistered", true);
+    }
+    if (!this.features.includes("push")) {
+      // Unreachable through a correct daemon (it sends only to a relay that
+      // announced `push`), so it is a bug or a hand-written frame.
+      return refuse("rejected", "no-push");
+    }
+    if (input.payloadBytes > APNS_MAX_PAYLOAD_BYTES) {
+      return refuse("rejected", "payload");
+    }
+    const tokenWindow = this.tokenWindow(input.token, at);
+    if (
+      usedInWindow(this.pushWindow(id, at).id, at) >= this.limits.pushesPerMinutePerId ||
+      usedInWindow(tokenWindow, at) >= this.limits.pushesPerMinutePerToken
+    ) {
+      // Never silent: the daemon gets a status it audits (`push-capped`).
+      return refuse("throttled", "capped");
+    }
+    chargeWindow(this.pushWindow(id, at).id, at);
+    chargeWindow(tokenWindow, at);
+    return {
+      ok: true,
+      request: {
+        socket: input.socket,
+        n: input.n,
+        token: input.token,
+        env: input.env,
+        collapse: input.collapse,
+        ttl: input.ttl,
+        payload: input.payload,
+      },
+    };
+  }
+
+  /** The `push-result` frame for one request (`n` echoes the daemon's counter). */
+  pushResult(
+    socket: string,
+    input: { n: number; status: string; reason?: string | undefined },
+  ): RelayEffect {
+    return {
+      kind: "send",
+      target: socket,
+      frame: {
+        t: "push-result",
+        n: input.n,
+        status: input.status,
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+      },
+    };
+  }
+
+  /**
+   * A daemon's control socket closed: unregister it (its streams live on, F2).
+   *
+   * Its push windows are KEPT (F10): a reconnect of the same id continues the
+   * minute it was in — otherwise a daemon could launder both caps by bouncing its
+   * control socket.
+   */
   controlClosed(socket: string): void {
     for (const [id, daemon] of this.daemons) {
       if (daemon.socket === socket) {
@@ -537,6 +712,52 @@ export class RelayCore {
       }
     }
     return state;
+  }
+
+  /**
+   * One id's push window, kept across its reconnects. Bounded, like the tracked
+   * IPs: past `maxTrackedPushIds` the oldest entry is forgotten and that id
+   * simply starts a fresh window — a fairness reset that bypasses nothing,
+   * because the relay-wide per-token window still bounds what one device can be
+   * sprayed with (and `registeredIds` already caps how many ids exist).
+   */
+  private pushWindow(id: string, at: number): PushWindow {
+    const existing = this.pushes.get(id);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const window: PushWindow = { id: { count: 0, since: at } };
+    this.pushes.set(id, window);
+    if (this.pushes.size > this.limits.maxTrackedPushIds) {
+      const oldest = this.pushes.keys().next();
+      if (!oldest.done) {
+        this.pushes.delete(oldest.value);
+      }
+    }
+    return window;
+  }
+
+  /**
+   * The RELAY-WIDE per-token window (F10): one device token has one budget, no
+   * matter how many ids push to it or how often an id reconnects. Bounded, like
+   * the tracked IPs: past `maxTrackedPushTokens` the stalest token is forgotten,
+   * and it simply starts a fresh window — a fairness reset that bypasses nothing,
+   * because the per-id limit still bounds each daemon's total.
+   */
+  private tokenWindow(token: string, at: number): Window {
+    const existing = this.pushTokens.get(token);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const fresh: Window = { count: 0, since: at };
+    this.pushTokens.set(token, fresh);
+    if (this.pushTokens.size > this.limits.maxTrackedPushTokens) {
+      const oldest = this.pushTokens.keys().next();
+      if (!oldest.done) {
+        this.pushTokens.delete(oldest.value);
+      }
+    }
+    return fresh;
   }
 
   private error(socket: string, code: string): RelayEffect {
