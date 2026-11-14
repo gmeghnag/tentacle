@@ -739,3 +739,26 @@ then the 5 discovery-related files 59 pass.
 
 **Not verified here:** nothing on the native/mobile side (no code touched
 there); the fix is inside the pure-ish driver and its own fake-timer tests.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-14* (fresh context; the same model family as the earlier review rounds, while the executor is DeepSeek per the commit trailers)
+
+**Verdict: PASS.**
+
+Scope: `git diff HEAD~1` (`3e2e35c`, only `cli/src/discovery.ts` and its test). `bun run typecheck` and `bun run lint` are clean. 49 tests pass, 0 fail (cli discovery, serve-discovery, client discovery). Every scratch repro from rounds 1 and 2 now behaves correctly:
+- A: the LAN and tailnet addresses are announced.
+- B: no phantom on a cold subscribe.
+- C: rev 2 is delivered after the reconnect.
+- D: the first snapshot after an overnight sleep is `["/p/a"]`, with no phantom.
+
+**Finding 5 is fixed.** `slept` is now `sleptAt`, a timestamp set by the late beat. It is honoured only while `at - sleptAt <= staleAfterMs`, and the poll clears it. Mutations (each reverted, `git status` clean):
+- never expire the sleep → 1 fail ("a sleep long past EXPIRES…", Repro D);
+- never honour the sleep → 1 fail ("a daemon that SLEPT with no subscriber… (F3)").
+
+So both sides of the window are pinned.
+
+**Regression check:**
+- A client subscribed across a sleep is still covered by the poll gap (`gap > staleAfterMs`).
+- A first subscribe more than 30 s after waking comes after every sibling's next beat (10 s), so freshness is correct, and the hysteresis absorbs a sibling that beats late.
+- No other source file changed.
