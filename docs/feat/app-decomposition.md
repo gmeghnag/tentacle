@@ -2901,7 +2901,9 @@ change (so `protocol.json` was not regenerated), no other slice touched,
 2. **`App.tsx`** — the six bodies gone, one `useAttachments({…})` call in their
    place plus `routeAttachRef.current = routeAttach` (the ref itself stays: it is
    read ABOVE the hook, by the paste layer). Imports dropped to what `App` still
-   uses. −221/+24, `3730 → 3533` lines.
+   uses. −221/+24, `3730 → 3533` lines. *(Fix round 1: that `App.tsx` line
+   still carried a copy of the chain — it is now `3532`, and the copy is gone;
+   see Fix round 1, finding 1.)*
 
 **What did NOT move, and why (stated, not discovered late).**
 - **The draft STATE** (`attach`, `attachRef`, `setAttach`): the render reads it
@@ -3038,3 +3040,71 @@ deps now naming the ref fields (identity-stable `useRef`s → no identity change
 ref and so over-claimed the move.
 
 *— claude-opus-5-5, 2026-11-14* (different model family from the executor.)
+
+### Fix round 1 — `feat/app-decomp-6-attach` (S6 review finding 1)
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-14* (real id: the run's
+parent process is `/Users/gmeghnag/bin/tentacle --profile deepseek`, whose
+`model.model` is `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` in
+`~/.config/tentacle/config.jsonc:29`.)
+
+Scope: the review's ONE finding (MEDIUM). Nothing else touched.
+
+**Finding 1 (MEDIUM) — dead duplicate serialization chain in `App.tsx`: FIXED.**
+
+- **Reproduced first** (before any edit): `rg -n attachChainRef
+  packages/tui/src/App.tsx` → `App.tsx:459` only, i.e. ONE occurrence: the
+  declaration, so zero readers, while `useAttachments.ts:122` creates the chain
+  the three decisions actually join (`:174`, `:208`, `:246`). The Execution's
+  "it owns `attachChainRef` (… had to leave with the bodies)" was false on the
+  App side: copied, not moved, exactly as the review said.
+- **Red before green** — new structural case in
+  `packages/tui/test/app-attachments-structure.test.ts:115`
+  (`the serialization chain lives in the hook ONLY, never duplicated in
+  App.tsx`). On the unmodified tree: **FAILS** `{"chains": 1}` vs expected `0`
+  (4 pass / 1 fail, 34 expect() calls) — an assertion red, not a compile error.
+  It also pins the positive side (so it cannot go green by deleting the chain
+  everywhere): the hook declares the chain exactly once and joins it **3** times,
+  and App keeps exactly ONE each of the two refs it legitimately holds as port
+  fields (`attachGenRef`, `attachRef`).
+- **Fix** — `packages/tui/src/App.tsx:453-460`: the `attachChainRef` declaration
+  deleted, and the comment above the draft state rewritten: it named a
+  non-existent `attachSeqRef` and described a chain App no longer owns; it now
+  points the reader at `useAttachments.ts` and says in words that a second one
+  must not live here (the comment deliberately does not spell the identifier —
+  the new test counts it, and a comment mention would make the guard lie).
+  `App.tsx` 3533 → 3532 lines. No behaviour change: the deleted ref had no
+  reader, and the hook's own chain is untouched.
+
+**Mutation checks (§9 non-vacuity), both byte-verified, both reverted.**
+Scripts in `.tentacle/tmp/app-decomp-6-attach/` (`fix1-mutate.sh`,
+`fix1-mutate2.sh`; copy → one textual mutation → filtered `bun test` → restore →
+`shasum -a 256` compare).
+
+| # | Mutation | Result |
+|---|---|---|
+| F1-M1 | the duplicate chain put BACK in `App.tsx` (same identifier, zero readers) — the review's exact scenario | **KILLED** — new case fails at `App.tsx:117` (`chains: 1` vs `0`); 4 pass / 1 fail; restore `MATCHES` (`7e38ab03…` both sides), then 5 pass / 0 fail |
+| F1-M2 | one of the hook's three join sites replaced by `void Promise.resolve().then(…)` (that decision de-serialized) | **KILLED twice** — new case fails (`join sites left: 2`) AND the layer test's *"two pastes of the same path in one tick ship ONE chip"* fails; restore `MATCHES` |
+
+F1-M2 is what proves the new case's *hook* half is not vacuous: it is the same
+property M2 killed, now guarded from the source side too.
+
+**Same-class sweep** (not a finding, cheap): every `const … = useRef` in
+`App.tsx` checked for readers across `App.tsx` + `useAttachments.ts` → no other
+orphan (`ORPHAN:` printed nothing). So finding 1 was the only instance of the
+"copied, not moved" class in this slice.
+
+**Gate (this worktree, this branch).** `bunx tsc --noEmit` **clean** ·
+`bun run lint` → `biome check .` **1115 files, 0 errors 0 warnings** (the §6
+baseline) · `bun test` → **8524 pass / 3 skip / 0 fail** across 612 files (the 3
+skips are the documented opt-ins: live-k8s, live-docker, the real-socket
+keepalive; 8523 → 8524 is the one new structural case). The touched set alone:
+`app-attachments-structure` + `app-attachments-layer` + `attach-app` +
+`app-structural-identity` → **39 pass / 0 fail**. No `packages/protocol` change, so
+`protocol.json` not regenerated; no changelog fragment change (the fix is not
+user-visible — it removes a dead binding).
+
+**Unverified.** The finding's *future* failure scenario (a later slice joining
+the App-side chain) is unobservable today by construction; it is guarded
+statically by the new source-level case, which is the review's own requested
+pin, not by a runtime test.

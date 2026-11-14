@@ -107,6 +107,29 @@ describe("S6: the attach decisions and their executor leave App.tsx", () => {
     );
   });
 
+  // Review round 1, finding 1: the one-decision-at-a-time chain was COPIED, not
+  // moved — App kept a zero-reader `attachChainRef` beside the hook's. A second
+  // chain with the same name type-checks and lints clean, so a later slice that
+  // joins it runs its paste CONCURRENTLY with the hook's, and `existing` misses
+  // the first paste's chips — the exact bug the chain exists to prevent.
+  test("the serialization chain lives in the hook ONLY, never duplicated in App.tsx", () => {
+    const app = readSrc("App.tsx");
+    expect({ where: "App.tsx", chains: countOf(app, "attachChainRef") }).toEqual({
+      where: "App.tsx",
+      chains: 0,
+    });
+    const hook = readSrc("useAttachments.ts");
+    expect(countOf(hook, "const attachChainRef = useRef<Promise<void>>(Promise.resolve());")).toBe(
+      1,
+    );
+    // Non-vacuity: it is the chain the decisions actually JOIN, not a dead ref of
+    // its own (M2: drop the chaining → the layer test's serialization case fails).
+    expect(countOf(hook, "attachChainRef.current = attachChainRef.current.then(")).toBe(3);
+    // …and the refs App legitimately keeps as port fields stay exactly one each.
+    expect(countOf(app, "const attachGenRef = useRef(0);")).toBe(1);
+    expect(countOf(app, "const attachRef = useRef<AttachDraft>(EMPTY_DRAFT);")).toBe(1);
+  });
+
   // H2 (2): a dep array naming the whole port makes `useExhaustiveDependencies`
   // blind to the fields, and the hook's callbacks lose their identity rules.
   test("the hook's dependency arrays name FIELDS, never the port object", () => {

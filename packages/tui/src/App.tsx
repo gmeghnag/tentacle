@@ -446,9 +446,10 @@ export function App({
   const draftRef = useRef("");
   // The input's image chips + the upload in flight (docs/feat/attachments-tui.md
   // D6). The REF is the truth an async handler reads; the state renders and
-  // feeds `inputBoxRows`. `attachSeqRef` keeps one decision in flight at a time
-  // (two pastes are serialized, so `existing` is always the current chips), and
-  // `attachGenRef` drops a late result after an unmount.
+  // feeds `inputBoxRows`. The one-decision-at-a-time chain (two pastes are
+  // serialized, so `existing` is always the current chips) lives with the
+  // executor, in `useAttachments.ts` — never a second one here; `attachGenRef`
+  // stays, and drops a late result after an unmount.
   const [attach, setAttachState] = useState<AttachDraft>(EMPTY_DRAFT);
   const attachRef = useRef<AttachDraft>(EMPTY_DRAFT);
   const setAttach = useCallback((next: AttachDraft | ((prev: AttachDraft) => AttachDraft)) => {
@@ -456,7 +457,6 @@ export function App({
     attachRef.current = value;
     setAttachState(value);
   }, []);
-  const attachChainRef = useRef<Promise<void>>(Promise.resolve());
   const attachGenRef = useRef(0);
   // The text a `convert` already probed and put back with `NOT_AN_IMAGE_NOTICE`:
   // the next Enter on that same text sends it as a message instead of probing
