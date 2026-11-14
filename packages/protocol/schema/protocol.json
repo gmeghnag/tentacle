@@ -3898,6 +3898,23 @@
       "required": ["type"],
       "type": "object"
     },
+    "UnwatchParams": {
+      "additionalProperties": true,
+      "properties": {
+        "watchId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["watchId"],
+      "type": "object"
+    },
+    "UnwatchResult": {
+      "additionalProperties": true,
+      "properties": {},
+      "type": "object"
+    },
     "UpdateSettingsParams": {
       "additionalProperties": true,
       "properties": {
@@ -3964,6 +3981,113 @@
         }
       },
       "required": ["client", "daemon", "update"],
+      "type": "object"
+    },
+    "WatchCategory": {
+      "enum": [
+        "ask",
+        "turn",
+        "error",
+        "text",
+        "thought",
+        "tool",
+        "subagent",
+        "job",
+        "history",
+        "notice"
+      ],
+      "type": "string"
+    },
+    "WatchEndReason": {
+      "enum": ["closed", "overflow", "evicted"],
+      "type": "string"
+    },
+    "WatchNextParams": {
+      "additionalProperties": true,
+      "properties": {
+        "timeoutMs": {
+          "maximum": 60000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "watchId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["watchId"],
+      "type": "object"
+    },
+    "WatchNextResult": {
+      "additionalProperties": true,
+      "properties": {
+        "ended": {
+          "$ref": "#/$defs/WatchEndReason"
+        },
+        "lost": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updates": {
+          "items": {
+            "$ref": "#/$defs/SessionUpdateParams"
+          },
+          "type": "array"
+        }
+      },
+      "required": ["lost", "updates"],
+      "type": "object"
+    },
+    "WatchParams": {
+      "additionalProperties": true,
+      "properties": {
+        "only": {
+          "items": {
+            "$ref": "#/$defs/WatchCategory"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["sessionId"],
+      "type": "object"
+    },
+    "WatchResult": {
+      "additionalProperties": true,
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/WatchState"
+        },
+        "watchId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["state", "watchId"],
+      "type": "object"
+    },
+    "WatchState": {
+      "additionalProperties": true,
+      "properties": {
+        "pending": {
+          "items": {
+            "$ref": "#/$defs/PermissionRequestUpdate"
+          },
+          "type": "array"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        }
+      },
+      "required": ["pending", "running"],
       "type": "object"
     },
     "WireChatMessage": {
@@ -4175,6 +4299,7 @@
     "TurnInProgress": -32004,
     "Unauthorized": -32001,
     "UnknownSession": -32003,
+    "UnknownWatch": -32018,
     "VersionMismatch": -32002
   },
   "methods": {
@@ -4418,12 +4543,36 @@
         "$ref": "#/$defs/SubagentMessageResult"
       }
     },
+    "session/unwatch": {
+      "params": {
+        "$ref": "#/$defs/UnwatchParams"
+      },
+      "result": {
+        "$ref": "#/$defs/UnwatchResult"
+      }
+    },
     "session/update_settings": {
       "params": {
         "$ref": "#/$defs/UpdateSettingsParams"
       },
       "result": {
         "$ref": "#/$defs/UpdateSettingsResult"
+      }
+    },
+    "session/watch": {
+      "params": {
+        "$ref": "#/$defs/WatchParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WatchResult"
+      }
+    },
+    "session/watch_next": {
+      "params": {
+        "$ref": "#/$defs/WatchNextParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WatchNextResult"
       }
     }
   },

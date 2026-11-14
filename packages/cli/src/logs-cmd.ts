@@ -20,13 +20,28 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { isValidSessionId, projectKey } from "@tentacle/agent";
 import {
+  type ConnectOptions,
+  type TlsOptions,
+  UNKNOWN_WATCH_HINT,
+  closeWatch,
+  openWatch,
+  pollWatch,
+  webSocketChannelFactory,
+} from "@tentacle/client";
+import {
   LogSessionStore,
   type ParsedLogFile,
   entriesThrough,
   parseLogFile,
   parseSidecar,
 } from "@tentacle/daemon";
-import type { KnownLogEntry } from "@tentacle/protocol";
+import {
+  type KnownLogEntry,
+  KnownLogEntrySchema,
+  PROTOCOL_VERSION,
+  type WatchCategory,
+} from "@tentacle/protocol";
+import { type DuplexChannel, RpcPeer } from "@tentacle/transport";
 import { readKept } from "./kept-index.ts";
 import {
   LOG_FOLLOW_INTERVAL_MS,
@@ -40,9 +55,11 @@ import {
   jsonLine,
   summarize,
   takeLast,
+  updateEvents,
 } from "./log-events.ts";
 import { relayLogPath, runDirFor } from "./run-state.ts";
 import { untrustedText } from "./untrusted-text.ts";
+import { CLIENT_INFO } from "./version.ts";
 
 export interface LogsOptions {
   /** A full session uid; absent = the newest session of this project. */
@@ -52,6 +69,14 @@ export interface LogsOptions {
   readonly json: boolean;
   readonly summary: boolean;
   readonly follow: boolean;
+  /**
+   * `--connect <url>`: follow a `serve` daemon's session LIVE (`session/watch`)
+   * instead of the file. Needs `follow`: a one-shot read of a remote session is
+   * `logs --tail` on that host's store, not a dial.
+   */
+  readonly connect?: string;
+  readonly token?: string;
+  readonly tls?: TlsOptions;
 }
 
 export interface LogsDeps {
@@ -67,6 +92,11 @@ export interface LogsDeps {
   readonly sleep?: (ms: number) => Promise<void>;
   /** `-f` stops when aborted (Ctrl+C). */
   readonly signal?: AbortSignal;
+  /**
+   * Test seam: the daemon dial for `--connect` (`webSocketChannelFactory` in a
+   * real run). A test hands it a channel pair and never opens a socket.
+   */
+  readonly dial?: (url: string, options: ConnectOptions) => () => Promise<DuplexChannel>;
 }
 
 /** One readable log: where it is and what it holds. */
@@ -383,8 +413,310 @@ async function follow(
   }
 }
 
+/**
+ * `-f` over a daemon (docs/feat/logs-cmd.md sub-task 2): a READ-ONLY watch
+ * (`session/watch`), polled one batch at a time, printed in the same vocabulary
+ * as the file half. What it can show the file half cannot: streaming text, the
+ * asks (and their answers), and a turn that ends with an error.
+ *
+ * Whatever happens, it leaves the daemon as it found it: `unwatch` on the way
+ * out (Ctrl+C, a close, an error), no session open, no turn touched. An exit
+ * code says what a script must know: 0 the session ended or the user stopped,
+ * 1 the watch is gone / the daemon is too old / the transport failed, 2 the
+ * queue overflowed so badly the daemon ended the watch.
+ */
+async function followDaemon(
+  deps: LogsDeps,
+  uid: string,
+  opts: LogsOptions,
+  url: string,
+): Promise<number> {
+  const dial = deps.dial ?? webSocketChannelFactory;
+  let channel: DuplexChannel;
+  try {
+    channel = await dial(url, {
+      ...(opts.token !== undefined ? { token: opts.token } : {}),
+      ...(opts.tls !== undefined ? { tls: opts.tls } : {}),
+    })();
+  } catch (error) {
+    deps.err(`[logs] cannot reach ${url}: ${untrustedText(errorText(error))}\n`);
+    return 1;
+  }
+  const peer = new RpcPeer(channel, {
+    onNotification: () => {},
+    onRequest: async (method) => {
+      // A daemon asks a CLIENT for the model and for hook trust; a follower
+      // serves neither (it never attaches, so nothing should reach here).
+      throw new Error(`logs does not serve ${method}`);
+    },
+  });
+  let watching: string | undefined;
+  const stop = (): void => {
+    peer.close();
+  };
+  try {
+    await peer.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { streaming: true },
+      clientInfo: CLIENT_INFO,
+    });
+    const opened = await openWatch(peer, uid, opts.only as readonly WatchCategory[] | undefined);
+    watching = opened.watchId;
+    deps.err(`[logs] watching ${uid} on ${url} (live: asks, streaming text, turn ends)\n`);
+    // The state the watch began at: a running turn, and every ask already
+    // pending — printed BEFORE anything else, so an ask raised just before the
+    // follower arrived is never missed (owner Q3's whole point).
+    const now = (): number => Date.now();
+    for (const ask of opened.state.pending) {
+      printEvents(deps, updateEvents(ask, uid, now()), opts.json);
+    }
+    if (opened.state.running) {
+      deps.err(
+        `[logs] a turn is running${opened.state.turnId !== undefined ? ` (${untrustedText(opened.state.turnId)})` : ""}\n`,
+      );
+    }
+    return await pollLoop(deps, peer, opened.watchId, uid, opts);
+  } catch (error) {
+    const refusal = refusalOf(error);
+    if (refusal !== undefined) {
+      deps.err(`[logs] ${refusal}\n`);
+      return 1;
+    }
+    deps.err(`[logs] ${untrustedText(errorText(error))}\n`);
+    return 1;
+  } finally {
+    if (watching !== undefined) {
+      // Release the watcher whatever ended the loop (a Ctrl+C included): the
+      // daemon's queue and its timer go away now, not at some reaper.
+      await closeWatch(peer, watching).catch(() => undefined);
+    }
+    stop();
+  }
+}
+
+/** The poll loop: one `watch_next` at a time until the watch ends or the user stops it. */
+async function pollLoop(
+  deps: LogsDeps,
+  peer: RpcPeer,
+  watchId: string,
+  uid: string,
+  opts: LogsOptions,
+): Promise<number> {
+  const stopped = (): boolean => deps.signal?.aborted === true;
+  for (;;) {
+    if (stopped()) {
+      return 0; // Ctrl+C is a normal way to stop following
+    }
+    let poll: Awaited<ReturnType<typeof pollWatch>>;
+    try {
+      poll = await pollWatch(peer, watchId, {
+        ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+      });
+    } catch (error) {
+      // Ctrl+C while a batch was held: the peer aborts the request (a
+      // `$/cancelRequest` to the daemon, a local cancel here). A normal stop.
+      if (stopped()) {
+        return 0;
+      }
+      throw error;
+    }
+    if (poll.lost > 0) {
+      // Never silent (owner Q3): the queue dropped this many before it could be
+      // read, so the follower says so and goes on.
+      printEvents(
+        deps,
+        [{ v: 1, ts: Date.now(), session: uid, type: "lost", count: poll.lost }],
+        opts.json,
+      );
+    }
+    const events = poll.updates.flatMap((update) => updateEvents(update, uid, Date.now()));
+    printEvents(deps, filterEvents(events, opts.only), opts.json);
+    for (const kind of poll.unknown) {
+      deps.err(
+        `[logs] ${kind.mandatory ? "unsupported (mandatory)" : "unsupported"} update ${untrustedText(kind.type)}\n`,
+      );
+      if (kind.mandatory) {
+        // A mandatory kind this build cannot act on means the daemon is newer:
+        // say so and stop, rather than show a stream with a hole in it.
+        deps.err("[logs] this daemon is newer than this tentacle; update the laptop\n");
+        return 1;
+      }
+    }
+    if (poll.ended !== undefined) {
+      return endOfWatch(deps, poll.ended, uid, opts);
+    }
+  }
+}
+
+/** The last word of a watch: why it stopped, and the exit code a script reads. */
+function endOfWatch(
+  deps: LogsDeps,
+  ended: "closed" | "overflow" | "evicted",
+  uid: string,
+  opts: LogsOptions,
+): number {
+  if (ended === "closed") {
+    // The session ended: `closed` already rode the batch (its own line), so this
+    // is the prose a person needs and a normal stop (exit 0).
+    deps.err(`[logs] session ${uid} closed\n`);
+    return 0;
+  }
+  if (ended === "overflow") {
+    deps.err(
+      "[logs] the watch overflowed (even asks and turn ends could not be queued): the stream is incomplete\n",
+    );
+    return 2;
+  }
+  deps.err(`[logs] the watch was evicted (${MAX_WATCHERS_TEXT})\n`);
+  return 1;
+}
+
+/** Why a watcher stops when too many are open on one session (the daemon's cap). */
+const MAX_WATCHERS_TEXT = "too many watchers on this session";
+
+/** A daemon refusal the CLI can word exactly, or `undefined` (a transport error). */
+function refusalOf(error: unknown): string | undefined {
+  const code = (error as { code?: number }).code;
+  const message = errorText(error);
+  if (code === -32601) {
+    return "this daemon is too old for `logs -f` (no session/watch): use `logs --tail`";
+  }
+  if (code === -32003) {
+    return `${message} — nothing live to follow; \`logs --tail\` reads a serve host's stored log`;
+  }
+  if (code === -32018) {
+    return `${message} — ${UNKNOWN_WATCH_HINT}`;
+  }
+  return undefined;
+}
+
+/** An error's message, never a stack (a daemon's prose is untrusted text too). */
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * `--tail` over `--connect`: read the daemon's committed log through
+ * `session/log`, which a WATCHING connection may call without an `open` (so
+ * `--tail` never attaches). Starts the same read-only watch, pages the log,
+ * prints the same events as the file half, and releases the watch.
+ */
+async function readDaemon(
+  deps: LogsDeps,
+  uid: string,
+  opts: LogsOptions,
+  url: string,
+): Promise<number> {
+  const dial = deps.dial ?? webSocketChannelFactory;
+  let channel: DuplexChannel;
+  try {
+    channel = await dial(url, {
+      ...(opts.token !== undefined ? { token: opts.token } : {}),
+      ...(opts.tls !== undefined ? { tls: opts.tls } : {}),
+    })();
+  } catch (error) {
+    deps.err(`[logs] cannot reach ${url}: ${untrustedText(errorText(error))}\n`);
+    return 1;
+  }
+  const peer = new RpcPeer(channel, {
+    onNotification: () => {},
+    onRequest: async (method) => {
+      throw new Error(`logs does not serve ${method}`);
+    },
+  });
+  let watching: string | undefined;
+  try {
+    await peer.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { streaming: true },
+      clientInfo: CLIENT_INFO,
+    });
+    // A watch is how this connection earns the right to `session/log` (the
+    // daemon's rule): it attaches nothing, so `--tail` stays read-only.
+    const opened = await openWatch(peer, uid, opts.only as readonly WatchCategory[] | undefined);
+    watching = opened.watchId;
+    const entries = await readLog(peer, uid);
+    deps.err(`[logs] ${uid} on ${url} (the daemon's committed log)\n`);
+    printEvents(deps, eventsOfRead({ entries }, uid, opts.only, opts.tail), opts.json);
+    return 0;
+  } catch (error) {
+    const refusal = refusalOf(error);
+    deps.err(`[logs] ${refusal ?? untrustedText(errorText(error))}\n`);
+    return 1;
+  } finally {
+    if (watching !== undefined) {
+      await closeWatch(peer, watching).catch(() => undefined);
+    }
+    peer.close();
+  }
+}
+
+/** How many pages of `session/log` a `--tail` read follows before it stops (a bound, not a limit). */
+const LOG_PAGES_MAX = 200;
+
+/** Every entry of a session's committed log, page by page (the current segment). */
+async function readLog(peer: RpcPeer, uid: string): Promise<readonly KnownLogEntry[]> {
+  const entries: KnownLogEntry[] = [];
+  let after: { seq: number; id: string } | undefined;
+  for (let page = 0; page < LOG_PAGES_MAX; page++) {
+    const result = (await peer.request("session/log", {
+      sessionId: uid,
+      ...(after !== undefined ? { after } : {}),
+    })) as {
+      entries: { seq: number; id: string; type: string }[];
+      more: boolean;
+      rebased?: boolean;
+    };
+    if (result.rebased === true) {
+      // The daemon restarted its log (`after` is gone): this page starts at its
+      // `base`, so what it returned replaces what we hold.
+      entries.length = 0;
+    }
+    for (const raw of result.entries) {
+      const parsed = KnownLogEntrySchema.safeParse(raw);
+      if (parsed.success) {
+        entries.push(parsed.data);
+      }
+      // A kind this build does not know is dropped, never half-applied (the
+      // same rule the client's log reader follows).
+    }
+    const last = result.entries.at(-1);
+    if (!result.more || last === undefined) {
+      break;
+    }
+    after = { seq: last.seq, id: last.id };
+  }
+  return entries;
+}
+
 /** `tentacle logs [<uid>] [--tail N] [--only …] [--json] [--summary] [-f]`. */
 export async function logsCommand(opts: LogsOptions, deps: LogsDeps): Promise<number> {
+  // `--connect`: the daemon side (sub-task 2). It needs a uid — a remote
+  // `newest` would be another project's newest, a guess — and never touches this
+  // laptop's stores.
+  if (opts.connect !== undefined) {
+    if (opts.uid === undefined) {
+      deps.err(
+        `[logs] --connect needs a session id: \`logs -f <uid> --connect ${opts.connect}\` (\`ps\` on that host lists them)\n`,
+      );
+      return 1;
+    }
+    if (!isValidSessionId(opts.uid)) {
+      deps.err(`[error] ${JSON.stringify(opts.uid)} is not a valid session id\n`);
+      return 1;
+    }
+    if (opts.summary) {
+      // A summary is a FILE's facts (its path, its project, its kept segments):
+      // a remote read has none of them, so say what to run instead.
+      deps.err(
+        "[logs] --summary reads a session's log file on THIS laptop; for a serve session, run it on that host\n",
+      );
+      return 1;
+    }
+    return opts.follow
+      ? followDaemon(deps, opts.uid, opts, opts.connect)
+      : readDaemon(deps, opts.uid, opts, opts.connect);
+  }
   const found = await resolve(deps, opts.uid);
   if (!found.ok) {
     deps.err(found.message);

@@ -214,9 +214,17 @@ export const ARGS = {
   // `tentacle logs [<uid>] [--tail N] [--only …] [--json] [--summary] [-f]`
   // (docs/feat/logs-cmd.md). `-f` is `--follow`'s alias, as in `tail -f`; the
   // uid is the only word, so a second one is refused here, not guessed at.
+  // `--connect` (sub-task 2) takes `connect`'s own token/TLS flags, so a
+  // `logs -f --connect` reaches a `serve` daemon exactly the way `connect` does
+  // — one token resolution, one TLS trust, no second dialect.
   logs: {
-    values: { tail: {}, only: {} },
-    bools: { json: {}, summary: {}, follow: { short: "f" } },
+    values: { tail: {}, only: {}, connect: {}, ...TOKEN, "ca-cert": {} },
+    bools: {
+      json: {},
+      summary: {},
+      follow: { short: "f" },
+      "insecure-skip-tls-verify": {},
+    },
     positional: { min: 0, max: 1 },
   },
 } as const satisfies Record<string, ArgSpec>;
@@ -799,6 +807,6 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   update: "tentacle update [--check] [--version vX.Y.Z]",
   pair: "tentacle pair [--address ws(s)://host:port/e2e]... [--name <name>]",
   devices: "tentacle devices | revoke <name|id-prefix> | reset [--yes]",
-  logs: "tentacle logs [<uid>] [--tail N] [--only ask,error,tool] [--json] [--summary] [-f|--follow]",
+  logs: "tentacle logs [<uid>] [--tail N] [--only ask,error,tool] [--json] [--summary] [-f|--follow] [--connect ws(s)://host:port [--token T] [--ca-cert FILE|--insecure-skip-tls-verify]]",
   tui: "tentacle [-i] [--resume [uid]|--continue] [--in-process] [--model <id>] [--profile <name>]",
 };

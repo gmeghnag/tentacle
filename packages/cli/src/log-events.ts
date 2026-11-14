@@ -18,7 +18,7 @@
  * `JSON.stringify` leaves raw). Tool arguments are a display SUMMARY: one line
  * by construction (`oneLine`), as the design says.
  */
-import type { KnownLogEntry, WireChatMessage } from "@tentacle/protocol";
+import type { KnownLogEntry, SessionUpdate, WireChatMessage } from "@tentacle/protocol";
 import { oneLine } from "@tentacle/tui";
 import { untrustedText } from "./untrusted-text.ts";
 
@@ -53,7 +53,7 @@ export const LOG_CATEGORIES = [
 ] as const;
 export type LogCategory = (typeof LOG_CATEGORIES)[number];
 
-/** Every event type this build emits (the live-only ones arrive in sub-task 2). */
+/** Every event type this build emits: the entry half, then the live-only ones (`-f`). */
 export type LogEventType =
   | "segment"
   | "turn_start"
@@ -66,7 +66,16 @@ export type LogEventType =
   | "title"
   | "subagent_start"
   | "subagent_end"
-  | "notice";
+  | "notice"
+  // Live only (`-f` over the daemon's watcher, sub-task 2): streamed text and
+  // reasoning, the asks, and the follower's own facts (what it lost, why the
+  // stream stopped). A log file never produces these.
+  | "text"
+  | "thought"
+  | "ask"
+  | "ask_resolved"
+  | "lost"
+  | "closed";
 
 /** What every event carries: the shape's version, the daemon's clock, the session, the type. */
 interface EventBase {
@@ -82,14 +91,34 @@ export type LogEvent = EventBase &
     | {
         readonly type: "segment";
         readonly reason: string;
-        readonly inc: string;
-        readonly count: number;
+        /** The incarnation a log file's `base` names; absent for a live barrier. */
+        readonly inc?: string;
+        /** The messages the file's `base` carried; absent for a live barrier. */
+        readonly count?: number;
         readonly turn?: string;
       }
     | { readonly type: "turn_start"; readonly turnId: string }
-    | { readonly type: "turn_end"; readonly turnId: string; readonly stopReason: string }
+    | {
+        readonly type: "turn_end";
+        readonly turnId: string;
+        readonly stopReason: string;
+        /** The turn's error, when it ended with one (live only: a log entry has no message). */
+        readonly error?: string;
+      }
     | { readonly type: "user"; readonly text: string; readonly chars: number }
     | { readonly type: "assistant"; readonly text: string; readonly chars: number }
+    | { readonly type: "text"; readonly text: string; readonly chars: number }
+    | { readonly type: "thought"; readonly text: string; readonly chars: number }
+    | {
+        readonly type: "ask";
+        readonly requestId: string;
+        readonly tool: string;
+        readonly title: string;
+        readonly options: readonly string[];
+      }
+    | { readonly type: "ask_resolved"; readonly requestId: string; readonly outcome: string }
+    | { readonly type: "lost"; readonly count: number }
+    | { readonly type: "closed"; readonly reason: string }
     | {
         readonly type: "tool_call";
         readonly callId: string;
@@ -293,6 +322,192 @@ export function eventsOf(entries: readonly KnownLogEntry[], session: string): Lo
   return out;
 }
 
+/**
+ * The events ONE live UPDATE becomes (sub-task 2's half of the ONE vocabulary,
+ * `-f` over the daemon's watcher). `ts` is THIS client's clock: a live update
+ * carries the daemon's `seq`, not a time, and the arrival time is what a
+ * follower's line needs. `[]` for an update that is not a line of its own (a
+ * plan, a usage meter, a queue state: a follower watching a stream does not
+ * want one line each) — they are folded into nothing, and `--only notice` does
+ * not resurrect them (their content is in the turn's own lines).
+ */
+export function updateEvents(update: SessionUpdate, session: string, ts: number): LogEvent[] {
+  const base = { v: LOG_EVENT_VERSION, ts, session } as const;
+  switch (update.type) {
+    case "turn_start":
+      return [{ ...base, type: "turn_start", turnId: update.turnId }];
+    case "turn_end":
+      return [
+        {
+          ...base,
+          type: "turn_end",
+          turnId: update.turnId,
+          stopReason: update.stopReason,
+          ...(update.error !== undefined ? { error: update.error.message } : {}),
+        },
+      ];
+    case "agent_message_chunk": {
+      const text = chunkText(update.content);
+      return text === ""
+        ? []
+        : [{ ...base, type: "text", text: cap(text, LOG_TEXT_MAX), chars: text.length }];
+    }
+    case "agent_thought_chunk": {
+      const text = chunkText(update.content);
+      return text === ""
+        ? []
+        : [{ ...base, type: "thought", text: cap(text, LOG_TEXT_MAX), chars: text.length }];
+    }
+    case "permission_request":
+      return [
+        {
+          ...base,
+          type: "ask",
+          requestId: update.requestId,
+          tool: update.tool,
+          title: update.title,
+          options: update.options.map((option) => option.name),
+        },
+      ];
+    case "permission_resolved":
+      return [
+        {
+          ...base,
+          type: "ask_resolved",
+          requestId: update.requestId,
+          outcome:
+            update.outcome.outcome === "selected"
+              ? `selected ${update.outcome.optionId}`
+              : "cancelled",
+        },
+      ];
+    case "tool_call":
+      return [
+        {
+          ...base,
+          type: "tool_call",
+          callId: update.toolCallId,
+          name: update.title,
+          args: argsSummary(JSON.stringify(update.rawInput ?? {})),
+        },
+      ];
+    case "tool_call_update": {
+      const text = (update.content ?? [])
+        .map((block) => chunkText(block))
+        .filter((part) => part !== "")
+        .join("\n");
+      return [
+        {
+          ...base,
+          type: "tool_result",
+          callId: update.toolCallId,
+          chars: text.length,
+          head: text.slice(0, LOG_HEAD_MAX),
+        },
+      ];
+    }
+    case "tool_call_phase":
+      return update.phase === "running"
+        ? [{ ...base, type: "call_started", callId: update.toolCallId }]
+        : [];
+    case "tool_progress":
+      return progressEvent(update, base);
+    case "session_title":
+      return [{ ...base, type: "title", text: update.title, source: update.source }];
+    case "history_replaced":
+      // A live barrier: the follower says the history was replaced, no count.
+      return [{ ...base, type: "segment", reason: update.reason }];
+    case "session_closed":
+      return [{ ...base, type: "closed", reason: update.reason }];
+    case "background_exit":
+      return [
+        {
+          ...base,
+          type: "notice",
+          text: `job ${update.jobId} ${update.status}${update.exitCode !== null ? ` (exit ${update.exitCode})` : ""}`,
+        },
+      ];
+    case "subagent_notify":
+      return [{ ...base, type: "notice", text: `subagent ${update.agentId}: ${update.text}` }];
+    case "subagent_message":
+      return [{ ...base, type: "notice", text: `to subagent ${update.agentId}: ${update.text}` }];
+    case "context_note":
+    case "dsml_leak":
+      return [{ ...base, type: "notice", text: update.text }];
+    case "truncated_reply":
+      return [
+        {
+          ...base,
+          type: "notice",
+          text:
+            update.reason === "length"
+              ? `reply cut (output limit)${update.retrying === true ? "; re-asking" : ""}`
+              : "reply cut (no stop reason)",
+        },
+      ];
+    case "empty_turn":
+      return [{ ...base, type: "notice", text: "the turn produced nothing" }];
+    case "history_repaired":
+      return [
+        {
+          ...base,
+          type: "notice",
+          text: `history repaired (${update.invalidArguments} invalid args, ${update.unansweredCalls} unanswered calls)`,
+        },
+      ];
+    // Folded, never a line of their own: the full lists (subagents, jobs), the
+    // queue, the settings report, the plan, the usage meter. Each is state a
+    // follower's line-per-event vocabulary has no question for, and their facts
+    // arrive in the turn's own events (`--summary` reads a FILE, not a stream).
+    default:
+      return [];
+  }
+}
+
+/** The text of a content block (an image or a resource is named, never dumped). */
+function chunkText(block: {
+  readonly type: string;
+  readonly text?: string;
+  readonly uri?: string;
+}): string {
+  if (block.type === "text") {
+    return block.text ?? "";
+  }
+  return block.type === "image" ? "[image]" : `[resource ${block.uri ?? ""}]`;
+}
+
+/** A tool's live label (`subagent_start`/`subagent_end`/`subagent_tool`): one line each. */
+function progressEvent(
+  update: Extract<SessionUpdate, { type: "tool_progress" }>,
+  base: { readonly v: typeof LOG_EVENT_VERSION; readonly ts: number; readonly session: string },
+): LogEvent[] {
+  switch (update.kind) {
+    case "subagent_start":
+      return [
+        {
+          ...base,
+          type: "subagent_start",
+          agentId: update.toolCallId,
+          agentType: update.agentType ?? "",
+          description: update.description ?? "",
+        },
+      ];
+    case "subagent_end":
+      return [
+        {
+          ...base,
+          type: "subagent_end",
+          agentId: update.toolCallId,
+          stopReason: update.stopReason ?? "",
+        },
+      ];
+    default:
+      return update.label === undefined
+        ? []
+        : [{ ...base, type: "notice", text: `${update.kind}: ${update.label}` }];
+  }
+}
+
 /** The categories an event belongs to (`--only`); `error` also covers a failed turn's end. */
 export function categoriesOf(event: LogEvent): readonly LogCategory[] {
   switch (event.type) {
@@ -300,9 +515,20 @@ export function categoriesOf(event: LogEvent): readonly LogCategory[] {
       return ["turn"];
     case "turn_end":
       return event.stopReason === "error" ? ["turn", "error"] : ["turn"];
+    case "closed":
+      // The stream stopped: that IS the error a follower waits for (the same
+      // rule as the daemon's `session_closed` -> `error`), and it ends the turn
+      // that was running, so both words reach it.
+      return ["error"];
     case "user":
     case "assistant":
+    case "text":
       return ["text"];
+    case "thought":
+      return ["thought"];
+    case "ask":
+    case "ask_resolved":
+      return ["ask"];
     case "tool_call":
     case "tool_result":
     case "call_started":
@@ -312,6 +538,10 @@ export function categoriesOf(event: LogEvent): readonly LogCategory[] {
       return ["subagent"];
     case "segment":
       return ["history"];
+    // A drop notice is the follower's own fact about the stream: it belongs to
+    // every filter (silently losing it is the bug owner Q3 forbids).
+    case "lost":
+      return [...LOG_CATEGORIES];
     case "title":
     case "notice":
       return ["notice"];
@@ -377,11 +607,27 @@ export function formatEvent(event: LogEvent): string {
   const at = formatTime(event.ts);
   switch (event.type) {
     case "segment":
-      return `${at} · segment ${event.reason} (${event.count} messages)`;
+      return `${at} · segment ${event.reason} (${event.count ?? 0} messages)`;
     case "turn_start":
       return `${at} · turn start ${event.turnId}`;
     case "turn_end":
-      return `${at} · turn end ${event.turnId} — ${event.stopReason}`;
+      return `${at} · turn end ${event.turnId} — ${event.stopReason}${
+        event.error !== undefined ? `: ${untrustedText(event.error)}` : ""
+      }`;
+    case "text":
+      return `${at} · ${untrustedText(event.text)}`;
+    case "thought":
+      return `${at} · thought: ${untrustedText(event.text)}`;
+    case "ask":
+      return `${at} · ask ${event.requestId}: ${untrustedText(event.tool)} ${untrustedText(event.title)} [${event.options
+        .map((option) => untrustedText(option))
+        .join(", ")}]`;
+    case "ask_resolved":
+      return `${at} · ask ${event.requestId} ${untrustedText(event.outcome)}`;
+    case "lost":
+      return `${at} · lost ${event.count} event(s) (the daemon's queue overflowed; nothing else is missing)`;
+    case "closed":
+      return `${at} · closed (${untrustedText(event.reason)})`;
     case "user":
       return `${at} · you: ${untrustedText(event.text)}`;
     case "assistant":

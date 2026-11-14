@@ -1,6 +1,6 @@
 # feat/logs-cmd — `tentacle logs`: read and follow a session without shell redirects
 
-> **Status:** implementation approved (owner 2026-11-14); `logs-tail` executed — see *Execution — logs-tail*; `logs-watch` and `logs-follow-detached` pending
+> **Status:** implementation approved (owner 2026-11-14); `logs-tail` and `logs-watch` executed — see *Execution — logs-tail* / *Execution — logs-watch*; `logs-follow-detached` pending
 > **Branch:** `feat/logs-cmd` (umbrella; each sub-task below gets its own `feat/<slug>` branch + doc when it starts, AGENTS §10)
 > **Size:** L → split into 3 (`logs-tail` M · `logs-watch` M–L · `logs-follow-detached` M) · **Blast:** load-bearing (sub-task 2 touches the daemon fan-out, §7 "don't serialize the peer"; sub-task 3 the pod trust boundary) · **Suited:** sub-task 1 a weaker model + standard Review; sub-tasks 2–3 a strong model + mandatory fresh-context Review
 > **Changelog:** one fragment per sub-task: `changelog.d/logs-tail.added.md`, `changelog.d/logs-watch.added.md`, `changelog.d/logs-follow-detached.added.md`
@@ -473,3 +473,152 @@ files     src/parse.ts
 
 **Gate line.** `tsc --noEmit` OK · `bun run lint` OK (0/0) · `bun test` 8309
 pass / 3 opt-in skips / 0 fail.
+
+### Execution — logs-watch
+
+*— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017, 2026-11-15*
+
+**Repro (red, before any edit).** `.tentacle/tmp/logs-cmd/repro-watch.ts` on the
+branch as it stood:
+
+```
+$ bun .tentacle/tmp/logs-cmd/repro-watch.ts
+parse logs --connect: {"ok":false,"error":"unknown option --connect"}
+Method.Watch: undefined | Method.WatchNext: undefined | Method.Unwatch: undefined
+WATCH_CATEGORIES: undefined
+UnknownWatch code: undefined
+HostedSession.watch: undefined
+```
+
+**As built, in order** (the Implementation's dependency order).
+
+1. `packages/protocol/src/watch.ts` (new): `WATCH_CATEGORIES`,
+   `watchCategoriesOf` (the ONE update→category map), `watchAccepts`,
+   `WatchState`, the three methods' params/results, `MAX_WATCHERS_PER_SESSION`
+   (8), `WATCH_POLL_TIMEOUT_MS` (25 s) + a 60 s max. `methods.ts`: the three
+   names and their schema-table entries. `index.ts`: the export.
+   `jsonrpc.ts`: `DomainErrorCode.UnknownWatch = -32018`.
+   `schema/protocol.json` regenerated with `bun run schema:export` (+149 lines,
+   `x-protocol-version` unchanged — new methods are free, AGENTS §7).
+2. `packages/daemon/src/watch-queue.ts` (new, pure): `WatchQueue` — byte AND
+   count bound, drop-oldest-droppable, exact `lost` count, adjacent-chunk
+   merging (a NEW update, never a mutation of the emitter's), `dueAt` (the
+   coalescing window), `end` (first reason wins, queue kept for the last batch).
+3. `packages/daemon/src/watchers.ts` (new): `SessionWatchers` — the watcher set
+   (never `attachments`), `offer` from `emit` (per-watcher try/catch, idle drop,
+   filter before the queue), `next` (the held poll, one in flight), `close`,
+   `endAll`, injected clock+timers.
+4. `HostedSession`: a `watchers` field built with the session's own `now`;
+   `emit` offers each update to the watchers AFTER the attachment loop;
+   `watch(only)` / `watchNext` / `unwatch`; `close` ends them all after
+   `session_closed`. `PendingAsk` now keeps its streamed `update`, which is what
+   `state.pending` repeats.
+5. `Connection`: a `watches` map (released on close), the three handlers,
+   `session/log` served through a new `readable()` (an opened session OR a
+   watched one, identity-checked like `lookup`), `dropStaleWatches`.
+6. `packages/client/src/watch.ts` (new): `openWatch` / `pollWatch` (parses every
+   update with the EXISTING schema, surfaces `lost`/`ended` and unknown kinds) /
+   `closeWatch` / `UNKNOWN_WATCH_HINT`; exported from `index.ts`.
+7. CLI: `log-events.ts` gains the update half of the ONE vocabulary
+   (`updateEvents`), the live event types (`text`, `thought`, `ask`,
+   `ask_resolved`, `lost`, `closed`), their categories and their rendering;
+   `logs-cmd.ts` gains `--connect` (`followDaemon`: the poll loop, `unwatch` in
+   `finally`, exit 0/1/2) and `readDaemon` (`--tail` over `session/log`);
+   `flags.ts` gives `logs` the `connect` token/TLS flags; `main.ts` resolves
+   them and passes a `logsDial` seam.
+8. `README.md` (the live paragraph + the new usage line),
+   `changelog.d/logs-watch.added.md`.
+
+**Drift from the Implementation, and why.**
+
+1. *`WATCH_COALESCE_MS` (250 ms) lives with the queue, not imported from
+   `hosted-session.ts`*: `hosted-session` imports `watchers`, so importing
+   `SUBAGENTS_COALESCE_MS` back would be a cycle. Same value, pinned by a test.
+2. *The merge produces a NEW update instead of concatenating in place.* The
+   in-place version mutates the object the replay ring and every other
+   attachment hold: the stream would grow under them. A test pins that the
+   emitter's object is untouched.
+3. *`updateEvents` folds the state-only updates (plan, usage, queue, settings,
+   `subagents`/`jobs` lists, steer) into NO line*, where the plan listed
+   `notice` as "the rest". They arrive many times per turn (a usage tick per
+   round) and each carries state a line-per-event follower has no question for;
+   every fact a follower needs is in the turn's own events. Named because it is
+   a judgement about the vocabulary, not a reading of the plan.
+4. *`ended: "evicted"` exits 1, not 0*: an eviction is not the session ending,
+   so a script must see it. Only `closed` is a normal stop (0); `overflow` is 2
+   (owner Q3's "said, exit non-zero").
+5. *A `lost` event belongs to EVERY `--only` filter* (its category list is all
+   of them): dropping the "N lost" notice because the user filtered to `ask` is
+   exactly the silent drop owner Q3 forbids.
+6. *`--connect` requires a uid, and refuses `--summary`.* A remote "newest"
+   would be another project's newest on that host — a guess; and a summary is a
+   FILE's facts (path, project, kept segments) that a remote read has not got.
+   Both refuse with the command to run instead (exit 1).
+7. *The watcher's hold sleeps to the next interesting instant* (the coalescing
+   window's end or the deadline) rather than one timer per window: a push wakes
+   it early and the loop recomputes. Same observable behaviour, one timer.
+8. *An ended watcher is forgotten once its last batch is delivered, and `open`
+   prunes already-ended ones.* Without this the 8-watcher cap could never free a
+   slot (found by the cap test hanging), and a client could park 8 unread ended
+   queues per session.
+9. *`--tail --connect` starts a watch first, then reads `session/log`*: that is
+   how the connection earns the read without an `open` (sub-task 1's
+   precondition), so `--tail` attaches nothing. A test asserts `attachedCount`
+   is unchanged.
+
+**Deliberately not done.** No auto-reconnect (v1, as the plan's failure table
+says: a dropped connection exits 1 with the transport error). No `-f` for a
+`run --detach` pod daemon (sub-task 3). `daemon.log`/`relay.log` are still not
+merged (owner Q6). The file-follow fallback (owner Q4) is untouched and still
+what `-f` does without `--connect`.
+
+**Tests (red before green).** New: `packages/daemon/test/watch-queue.test.ts`
+(15, pure), `packages/daemon/test/watch-hosted.test.ts` (12, the load-bearing
+block first), `packages/daemon/test/watch-connection.test.ts` (8),
+`packages/cli/test/logs-watch.test.ts` (14). Plus the protocol fixture set for
+the three methods (`packages/protocol/test/json-schema.test.ts`) and the
+category-drift pin (`LOG_CATEGORIES` must equal `WATCH_CATEGORIES`).
+
+The load-bearing test, as the plan specified it: a watcher that never polls
+while a turn streams 10 000 chunks — `prompt` returns at once, the turn finishes
+promptly, the attached client's frame list is IDENTICAL to the same run without
+the watcher, and the next poll returns ONE coalesced `agent_message_chunk` of
+10 000 characters (`lost: 0`: merging, not dropping, absorbed the storm).
+
+**Mutation checks — RUN, not asserted.** Each mutation was applied to the
+source, the named test files run, the source restored (17 mutations, two
+rounds; the second round re-expressed five that the first could not write in
+`sed`). Pasted: mutation → failing tests → the test that went red.
+
+```
+M1  queue's COUNT cap ignored (items.length > MAX → false)      → 2 fail · an ask or a turn's end is NEVER dropped
+M2  queue's BYTE cap ignored                                    → 1 fail · holds at most WATCH_QUEUE_MAX_BYTES
+M3  drop ANY entry when full (findIndex → 0)                    → 1 fail · an ask or a turn's end is NEVER dropped
+M4  never merge adjacent chunks                                 → 1 fail · adjacent text chunks merge into ONE
+M5  the filter always accepts (accepts → true)                  → 4 fail · a failed turn's end is `turn` AND `error`
+M6  watch() adds to `attachments`                               → 1 fail · a watcher is NOT an attachment
+M7  close() does not endAll                                     → 2 fail · a failed turn's end is… / a closing session
+M8  two concurrent watch_next allowed                           → 2 fail · a second concurrent watch_next is InvalidParams
+M9  a watcher's throw escapes `offer`                           → 1 fail · a throwing watcher is DROPPED, never the turn
+M10 session/log via lookup only (a watch does not count)        → 1 fail · session/log is readable for a WATCHED session
+M11 an unknown watch id resolves instead of UnknownWatch        → 1 fail · unwatch is idempotent and releases the watcher
+M12 text mode prints the raw text (no untrustedText)            → 1 fail · text mode sanitises a pod's escapes
+M13 `lost` gets one category instead of all                     → 1 fail · a lost count belongs to every --only
+M14 a failed turn_end is only `turn`                            → 1 fail · a failed turn's end is `turn` AND `error`
+M15 session_closed is `notice`, not `error`                     → 1 fail · a closed session is an `error` event
+M16 Ctrl+C exits 1 instead of 0                                 → 1 fail · a Ctrl+C stops the follow with exit 0
+M17 MethodNotFound not worded as "too old"                      → 1 fail · a daemon too old for session/watch says so
+M18 --tail --connect reads without a watch first                → 1 fail · --tail reads the log without attaching
+```
+
+The two that first passed (M9, M11) were TEST weaknesses, not code wins: the
+throw test stubbed the whole `offer` instead of one watcher's queue (so it
+could not see a sibling lose the stream), and the unknown-id test stopped at
+`unwatch`, which is deliberately idempotent. Both tests were rewritten to pin
+the real property (a broken watcher is dropped while its sibling keeps
+streaming; an unwatched/released id is `UnknownWatch` on the next poll) and were
+then RED on their mutation — the loop §9 warns about, caught by mutating.
+
+**Gate line.** `bunx tsc --noEmit` OK · `bun run lint` OK (1076 files, 0
+errors/0 warnings — the §6 baseline) · `bun test` 8358 pass / 3 opt-in skips /
+0 fail (8309 + the 49 new tests of this sub-task).

@@ -20,11 +20,12 @@ import { createInterface } from "node:readline";
  * in F4. Until then, point the CLI at a trusted model and workspace.
  */
 import { BUILTIN_AGENT_TYPES, Session, mergeAgentTypes, recordFromSnapshot } from "@tentacle/agent";
-import { webSocketChannelFactory } from "@tentacle/client";
+import { type ConnectOptions, type TlsOptions, webSocketChannelFactory } from "@tentacle/client";
 import { type ChatMessage, PermissionBroker } from "@tentacle/core";
 import { DELETE_CONTAINER_SUBCOMMAND, deleteContainerFromEnv } from "@tentacle/docker";
 import { DELETE_POD_SUBCOMMAND, deletePodFromEnv, readKubeconfig } from "@tentacle/k8s";
 import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
+import type { DuplexChannel } from "@tentacle/transport";
 import { type AutoAcceptFeed, type SessionController, pickSession, startTui } from "@tentacle/tui";
 import { attachFailureNotice, unflushedExitsNotice } from "./attach-notice.ts";
 import { type AttachPlan, plainResumeUid, planAttach } from "./attach-plan.ts";
@@ -532,6 +533,8 @@ export interface CliIO {
   logsSleep?: (ms: number) => Promise<void>;
   /** Test seam: `logs -f` stops when this aborts (Ctrl+C in a real run). */
   logsSignal?: AbortSignal;
+  /** Test seam: `logs --connect`'s dial (a test hands it a channel pair, never a socket). */
+  logsDial?: (url: string, options: ConnectOptions) => () => Promise<DuplexChannel>;
 }
 
 /**
@@ -931,6 +934,19 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       return 1;
     }
     const uid = parsed.positional[0];
+    const connect = parsed.flags.get("connect");
+    let token: string | undefined;
+    let tls: TlsOptions | undefined;
+    try {
+      token = connect !== undefined ? await resolveToken(parsed.flags) : undefined;
+      tls =
+        connect !== undefined ? await resolveTls(connect, parsed.flags, parsed.bools) : undefined;
+    } catch (error) {
+      err(
+        `[error] ${untrustedText(error instanceof Error ? error.message : String(error))}\nusage: ${USAGE.logs}\n`,
+      );
+      return 1;
+    }
     return logsCommand(
       {
         ...(uid !== undefined ? { uid } : {}),
@@ -939,6 +955,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         json: parsed.bools.has("json"),
         summary: parsed.bools.has("summary"),
         follow: parsed.bools.has("follow"),
+        ...(connect !== undefined ? { connect } : {}),
+        ...(token !== undefined ? { token } : {}),
+        ...(tls !== undefined ? { tls } : {}),
       },
       {
         configDir: config.configDir,
@@ -947,6 +966,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         err,
         ...(io.logsSignal !== undefined ? { signal: io.logsSignal } : {}),
         ...(io.logsSleep !== undefined ? { sleep: io.logsSleep } : {}),
+        ...(io.logsDial !== undefined ? { dial: io.logsDial } : {}),
       },
     );
   }

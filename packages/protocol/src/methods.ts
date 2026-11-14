@@ -66,6 +66,14 @@ import {
 } from "./session.ts";
 import { SessionSkillsParamsSchema, SessionSkillsResultSchema } from "./skills.ts";
 import { SessionUpdateParamsSchema } from "./updates.ts";
+import {
+  UnwatchParamsSchema,
+  UnwatchResultSchema,
+  WatchNextParamsSchema,
+  WatchNextResultSchema,
+  WatchParamsSchema,
+  WatchResultSchema,
+} from "./watch.ts";
 
 /** Request methods (expect a response). */
 export const Method = {
@@ -109,6 +117,14 @@ export const Method = {
   SessionTtl: "daemon/session_ttl",
   /** Daemon → client: may this session run the project's hooks? */
   HooksTrust: "hooks/trust",
+  /**
+   * A READ-ONLY follower of a live session, for `tentacle logs -f`
+   * (docs/feat/logs-cmd.md, sub-task 2): needs no `open`, attaches nothing.
+   */
+  Watch: "session/watch",
+  /** The next batch of a watch (long-polled; one in flight per watch). */
+  WatchNext: "session/watch_next",
+  Unwatch: "session/unwatch",
   /** Client → daemon: one chunk of an image's bytes into the session's store (docs/feat/attachments-upload.md). */
   AttachmentPut: "attachment/put",
   /**
@@ -182,6 +198,9 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.SessionSkills]: { params: SessionSkillsParamsSchema, result: SessionSkillsResultSchema },
   [Method.SessionTtl]: { params: SessionTtlParamsSchema, result: SessionTtlResultSchema },
   [Method.HooksTrust]: { params: HooksTrustParamsSchema, result: HooksTrustResultSchema },
+  [Method.Watch]: { params: WatchParamsSchema, result: WatchResultSchema },
+  [Method.WatchNext]: { params: WatchNextParamsSchema, result: WatchNextResultSchema },
+  [Method.Unwatch]: { params: UnwatchParamsSchema, result: UnwatchResultSchema },
   [Method.AttachmentPut]: {
     params: AttachmentPutParamsSchema,
     result: AttachmentPutResultSchema,

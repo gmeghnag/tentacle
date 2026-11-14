@@ -335,6 +335,55 @@ const FIXTURES: Record<string, Json[]> = {
     { idleTtlMs: "never", persisted: false },
     { idleTtlMs: 86400000, persisted: false },
   ],
+  // A READ-ONLY follower (docs/feat/logs-cmd.md sub-task 2): start, poll, stop.
+  "methods/session~1watch/params": [
+    { sessionId: "s" },
+    { sessionId: "s", only: ["ask", "error", "turn"] },
+  ],
+  "methods/session~1watch/result": [
+    {
+      watchId: "w1",
+      state: {
+        running: true,
+        turnId: "t1",
+        pending: [
+          {
+            type: "permission_request",
+            requestId: "r1",
+            toolCallId: "c1",
+            tool: "shell",
+            title: "run a command",
+            options: [{ optionId: "o1", name: "Allow once", kind: "allow_once" }],
+          },
+        ],
+      },
+    },
+    { watchId: "w1", state: { running: false, pending: [] } },
+  ],
+  "methods/session~1watch_next/params": [
+    { watchId: "w1" },
+    { watchId: "w1", timeoutMs: 25000 },
+    { watchId: "w1", timeoutMs: 0 },
+  ],
+  "methods/session~1watch_next/result": [
+    { updates: [], lost: 0 },
+    {
+      updates: [
+        {
+          sessionId: "s",
+          seq: 1,
+          mandatory: true,
+          update: { type: "turn_end", turnId: "t1", stopReason: "end_turn" },
+        },
+      ],
+      lost: 3,
+      ended: "closed",
+    },
+    { updates: [], lost: 0, ended: "evicted" },
+    { updates: [], lost: 0, ended: "overflow" },
+  ],
+  "methods/session~1unwatch/params": [{ watchId: "w1" }],
+  "methods/session~1unwatch/result": [{}],
   "methods/session~1context/params": [
     {},
     { sessionId: "s" },

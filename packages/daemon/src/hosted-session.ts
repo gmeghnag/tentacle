@@ -107,7 +107,11 @@ import {
   type TurnEnd,
   type TurnError,
   WAKE_TURN_PREFIX,
+  type WatchCategory,
+  type WatchNextResult,
+  type WatchResult,
   clientSupportsUpdate,
+  watchAccepts,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import { AttachmentStore, UploadBudget } from "./attachment-store.ts";
@@ -156,6 +160,7 @@ import {
 } from "./session-title.ts";
 import { SettledAnswers } from "./settled-answers.ts";
 import { sameRows, subagentRows } from "./subagents-view.ts";
+import { SessionWatchers } from "./watchers.ts";
 
 /**
  * How long a burst of a child's progress waits for one frame: at most four
@@ -199,6 +204,8 @@ export interface Attachment {
 
 /** A permission request waiting for its first answer (keyed by its nonce). */
 interface PendingAsk {
+  /** The request as it was streamed: what a fresh watcher's `state.pending` repeats. */
+  readonly update: PermissionRequestUpdate;
   readonly offered: ReadonlySet<string>;
   /**
    * The options a reply may come with (the `reject_*` kinds), when the ask
@@ -523,6 +530,12 @@ export class HostedSession {
   private readonly createdAt: number;
   private seq = 0;
   private readonly ring: SessionRing<KnownSessionUpdateParams>;
+  /**
+   * This session's read-only followers (`tentacle logs -f`, docs/feat/logs-cmd.md):
+   * NEVER an `Attachment` — not in `attachments`, never a model link, never
+   * counted by `attached`, never offered an ask to answer (see `watchers.ts`).
+   */
+  private readonly watchers: SessionWatchers;
   /** Seq of the barrier that opened the current epoch (0 for the first). */
   private epochStart = 0;
   private cut: Cut;
@@ -656,6 +669,7 @@ export class HostedSession {
     this.agentJobs = AgentJobLedger.fromHistory(session.messages);
     this.errorPolicy = errorPolicy;
     this.ring = new SessionRing(ringBytes);
+    this.watchers = new SessionWatchers(now);
     const resume = restored?.resume;
     // A fresh epoch per incarnation (decision D1): a `since` from a previous
     // session under the same id never matches. The seed (resume) is covered.
@@ -961,6 +975,7 @@ export class HostedSession {
     return new Promise((resolve) => {
       const onAbort = (): void => this.settle(requestId, { outcome: "cancelled" });
       this.asks.set(requestId, {
+        update,
         offered: new Set(update.options.map((o) => o.optionId)),
         replyable: new Set(
           update.reply
@@ -1866,6 +1881,45 @@ export class HostedSession {
     return this.log.read(after, maxChars, this.logSha256);
   }
 
+  /**
+   * `session/watch` (docs/feat/logs-cmd.md sub-task 2): start a READ-ONLY
+   * follower. Attaches nothing, opens nothing, revives nothing — an id that is
+   * not live is refused by the caller's lookup. The state it answers is the
+   * turn running now and every ask already pending, FILTERED by `only`, so a
+   * follower that arrives mid-turn never misses the ask it waits for.
+   */
+  watch(only?: readonly WatchCategory[]): WatchResult {
+    const pending = [...this.asks.values()]
+      .map((ask) => ask.update)
+      .filter((update) => watchAccepts(only, update));
+    const watchId = this.watchers.open(only);
+    return {
+      watchId,
+      state: {
+        running: this.running,
+        ...(this.activeTurnId !== null ? { turnId: this.activeTurnId } : {}),
+        pending,
+      },
+    };
+  }
+
+  /**
+   * `session/watch_next`: one batch, held until something arrives or the hold
+   * times out (no lock, no await chain on the peer — AGENTS §7).
+   */
+  watchNext(watchId: string, timeoutMs?: number): Promise<WatchNextResult> {
+    return this.watchers.next(watchId, timeoutMs).then((batch) => ({
+      updates: batch.updates,
+      lost: batch.lost,
+      ...(batch.ended !== undefined ? { ended: batch.ended } : {}),
+    }));
+  }
+
+  /** `session/unwatch`, idempotent. */
+  unwatch(watchId: string): void {
+    this.watchers.close(watchId);
+  }
+
   /** D1 (tests): the log's replay equals the committed prefix, after every derivation. */
   private verifyLog(): void {
     if (this.logVerify === undefined) {
@@ -1902,6 +1956,10 @@ export class HostedSession {
         this.reportTurnError(error);
       }
     }
+    // The watchers AFTER the attachment loop, and synchronous (each one is an
+    // O(1) enqueue, never an await): a follower can neither reorder nor delay a
+    // client's stream, and a watcher's bug is dropped by `offer` itself.
+    this.watchers.offer(params);
   }
 
   /**
@@ -2976,6 +3034,9 @@ export class HostedSession {
       this.subagentsKick = null;
     }
     this.attachments.clear();
+    // A watcher is a follower, not a client: its last batch says the session
+    // ended (after `session_closed`, which it just received above).
+    this.watchers.endAll("closed");
     // The single END of a live session covers close, archive, the reaper, the
     // detached cap and delete (P4): the upload reservations go back here.
     this.uploads.dispose();

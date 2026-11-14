@@ -278,12 +278,19 @@ reports the turns and the last outcome. It is read-only: no lock, no write, and
 a corrupt log is refused with the parser's reason and the path, never
 half-shown. For a `serve` session it stops at the entry the daemon's state file
 marks, so a crash's uncommitted tail is not shown. `-f` follows the FILE
-(committed events only — a live ask or streaming text needs a daemon; following
-one is a later task), resuming by entry id and saying so when the log is
-rewritten.
+(committed events only), resuming by entry id and saying so when the log is
+rewritten. A session a `serve` daemon owns is followed LIVE instead:
+`tentacle logs -f <uid> --connect <url>` (the `connect` token/TLS flags) starts a
+read-only watch on that daemon and prints streaming text, asks and their
+answers, and the turn's end — `--only ask,error,turn` narrows the stream, and a
+queue that overflows says how many events it lost. The follower is never a
+client of the session: it takes no model call, answers no ask, and never shows
+up in `ps`. Ctrl+C stops it cleanly. `--tail --connect` reads that daemon's
+committed log the same way, without opening anything.
 
 ```sh
 tentacle logs [<uid>] [--tail N] [--only <categories>] [--json] [--summary] [-f]
+tentacle logs -f <uid> --connect ws://host:port [--token T|--token-command CMD] [--ca-cert FILE]
 ```
 
 **Engines.** `--engine kubernetes|docker|podman` picks where it runs; the
