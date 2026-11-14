@@ -607,4 +607,204 @@ Execution starts after task 15 (mobile-relay) is merged. *— claude-opus-5-5
 
 ## Execution
 
+### P0 — blocking probes (all four PASS; scratch only in `.tentacle/tmp/mobile-push/`)
+
+**Load-bearing check, re-run first.** Every `hosted-session.ts` citation the
+Implementation's "Load-bearing assumption" rests on still resolves, and the
+line numbers moved only slightly. **An ask becomes visible at exactly one
+mechanism, `registerAsk` → emit:** the ordinary path marks `ask.shown = true` and
+emits inside `persisted().then()` (`:933-935`), the background re-offer path marks
+it then emits directly (`:1044-1047`), and both are after the ask is durable and
+still pending. **Its end is one emit:** `settle` (`:1148`) looks up, deletes,
+emits `permission_resolved` for a *shown* ask (`:1162`) and wakes the gate in a
+`finally` — a valid answer and the turn's abort (`registerAsk`'s `onAbort`,
+`:988`) both go through it, first-wins. **The fallback counts only attachments:**
+`blockingUnsupported` returns `undefined` when `this.attachments.size === 0`
+(`:1084`), so `recheckAsks` (`:1100`) — called from `attach` (`:1581`) and
+`detach` (`:1604`) — cancels a pending ask only when an attached client *cannot*
+show it; with no attachment the ask simply waits. **The emit path is synchronous
+and already has a non-attachment observer slot:** `emit` (`:1960`) fans out to a
+**copy** of `attachments` and then calls `this.watchers.offer(params)` (`:1974`);
+`finishTurn` (`:2517`) sets state before the emit and reports a throwing sink
+(`reportTurnError`, `:2502`), which is the no-await steering window the hook must
+live in. **So the check passes:** a plain callback inserted after
+`watchers.offer` is outside `attachments` (it cannot enter the ask fallback, the
+reaper, `session/list` or the model link — `watchers.ts:5-11` records exactly
+this reason), is synchronous, and cannot reorder a client's stream. The plan's
+central assumption holds; P1 proceeds and no plan edit is needed. (The doc's
+citations were off by ~15 lines — `emit` at `:1948` is really `:1960`,
+`finishTurn`'s range `:2500-2545` really starts at `:2517` — the same code, so
+this is drift in the numbers, not in the plan.) Nothing else in P0/P1 depends on
+task 15.
+
+**(a) HPKE Auth single-shot on `@noble/*` reproduces RFC 9180 A.2.3 — PASS.**
+`.tentacle/tmp/mobile-push/probe-a-hpke.ts` re-derives the whole suite from the
+RFC algorithm text (`LabeledExtract`/`LabeledExpand` with the **KEM** suite id in
+`ExtractAndExpand`, AuthEncap's `DH(skE,pkR) ‖ DH(skS,pkR)`, the Auth key
+schedule). Output:
+
+```
+PASS enc (=pkEm): f7674cc8cd7baa5872d1f33dbaffe3314239f6197ddf5ded1746760bfc847e0e
+PASS pkSm (=x25519.getPublicKey(skSm)): f0f4f9e96c54aeed3f323de8534fffd7e0577e4ce269896716bcb95643c8712b
+PASS shared_secret: d2d67828c8bc9fa661cf15a31b3ebf1febe0cafef7abfaaca580aaf6d471e3eb
+PASS secret: 3022dfc0a81d6e09a2e6daeeb605bb1ebb9ac49535540d9a4c6560064a6c6da8
+PASS key: b071fd1136680600eb447a845a967d35e9db20749cdf9ce098bcc4deef4b1356
+PASS base_nonce: d20577dff16d7cea2c4bf780
+PASS ct seq0: ab1a13c9d4f01a87ec3440dbd756e2677bd2ecf9df0ce7ed73869b98e00c09be111cb9fdf077347aeb88e61bdf
+PASS shared_secret (receiver): d2d67828c8bc9fa661cf15a31b3ebf1febe0cafef7abfaaca580aaf6d471e3eb
+PASS wrong sender key -> different shared secret
+```
+
+The probe also matched A.2.3's published `key_schedule_context`
+(`probe-a2-kdf.ts`, PASS), which isolates the KDF from the KEM. Two bugs in my
+*probe* were found and fixed by these vectors before any repo code existed
+(noble's `hmac(hash, key, message)` argument order; the KEM's `"KEM"` suite-id
+separator; Auth mode's two-part `dh`) — evidence the vectors do the work.
+
+**(b) Bun `node:http2` TLS + ALPN `h2` to `api.sandbox.push.apple.com` — PASS.**
+`probe-b-apns-h2.ts`, a bogus bearer JWT, no secret:
+
+```
+alpn: h2
+status: 403 apns-id: 1B4A49C7-306F-6EAA-7E6C-42FF68D41D01
+body: {"reason":"InvalidProviderToken"}
+reason: InvalidProviderToken
+PASS 403 InvalidProviderToken
+```
+
+So TLS, ALPN `h2`, the `POST /3/device/<token>` path, the APNs headers and the
+`{"reason":…}` error framing all work from Bun — the exact 403 the plan predicted.
+
+**(c) WebCrypto ES256 JWT from a generated P-256 PKCS#8 key — PASS.**
+`probe-c-es256-jwt.ts`:
+
+```
+pkcs8 bytes: 138 import ok: true
+signature length: 64 PASS 64-byte r||s (raw)
+PASS verifies
+PASS tampered input rejected
+header: {"alg":"ES256","kid":"ABC123DEFG"} claims: {"iss":"TEAM123456","iat":1794685683}
+PASS header/claims shape
+```
+
+Bun's `crypto.subtle.sign` returns the raw 64-byte `r‖s` APNs wants (not DER), and
+a PKCS#8 `.p8` read off disk imports directly — so `--apns-key-file` needs no
+conversion (P4).
+
+**(d) `expo-notifications` for Expo SDK 58 + CryptoKit HPKE — PASS.** The app is
+on `expo@58.0.17`; `expo-notifications` is dist-tagged `sdk-56: 56.0.26`,
+`next: 58.1.4`, `latest: 58.1.9` and has **never** appeared in
+`apps/mobile/package.json`. Its `plugin/build/withNotificationsIOS.js:54-56` sets
+`config.modResults['aps-environment'] = mode` (mode defaults to `development`,
+so P9 must pass the right mode per build); its
+`src/getDevicePushTokenAsync.ts` returns `{type: Platform.OS, data}` where `data`
+is `PushTokenManager.getDevicePushTokenAsync()`'s string, and iOS's
+`ios/ExpoNotifications/Notifications/NotificationsAppDelegateSubscriber.swift:30-32`
+hex-encodes the raw token (`data.map { String(format: "%02hhx", $0) }.joined()`) —
+so `data` **is** the raw lowercase-hex APNs token, matching P2's `hex` schema,
+with no Expo push service (decision 19). CryptoKit `HPKE` is `iOS 17.0+` (Apple's
+own doc JSON: `introducedAt: 17.0`), so the app's iOS-18 minimum is covered and
+`HPKE.Recipient(…authenticatedBy:)` is available to task 17's NSE.
+
+The Context's repro re-ran unchanged: `rg -l 'apns|push_register|devicePushToken|expo-notifications' packages apps/mobile` → **no files**, i.e. the capability is
+still absent.
+
+### P1 — push crypto (DONE)
+
+**Files.** `packages/transport/src/push-seal.ts` (new); `packages/transport/package.json`
+(`"./push": "./src/push-seal.ts"`, beside `./noise` and `./relay-id`);
+`packages/transport/test/push-seal.test.ts` (new, 24 tests);
+`packages/transport/test/vectors/push-v1.json` (new);
+`packages/transport/test/vectors/README.md` (a section for it).
+
+**As built.** The module follows Design 2 exactly: `sealPush(plaintext, senderStatic,
+recipientPub, rng)` / `openPush(sealed, recipientStatic, senderPub)`, `info =
+"tentacle-push/1"`, `aad` = the key id, `u16` length prefix + zero padding to
+512/1024/2048, and `pushKeyId(computerPub) = b64url(SHA-256("tentacle-push-kid/1" ‖
+pk))[0..12]`. Pure and synchronous, randomness injected — the same shape as
+`noise.ts`, which is why a vector can fix the ephemeral and compare bytes.
+
+**Drift from the Implementation (one, deliberate, and additive).** The generic
+HPKE Auth primitive is exported as `hpkeAuthSeal` / `hpkeAuthOpen` beside the
+protocol-level `sealPush` / `openPush`. Reason: RFC 9180 A.2.3 addresses the bare
+HPKE layer — it has its own `info` (`"Ode on a Grecian Urn"`), its own `aad`
+(`"Count-0"`) and no tentacle padding — so driving it through `sealPush` would
+mean widening `sealPush`'s signature for a test's benefit. The two thin wrappers
+are then the only code that knows `PUSH_INFO`, the key-id `aad` and the padding,
+so the RFC vectors and the envelope vectors each test exactly one layer. The
+Design's public surface (`sealPush` / `openPush`) is unchanged.
+
+**Two small additions the tests needed.** `PUSH_AEAD_TAG_BYTES = 16` (the sealed
+`c` is the bucket **plus** the Poly1305 tag, i.e. 528/1040/2064 bytes — the
+Implementation says "padded to 512/1024/2048", which is the *plaintext* padding;
+the test asserts the exact wire sizes) and `maxPushPlaintextBytes()` (2046), so
+the "worst case fits" bound P2 needs is a named function, not an expression in an
+error string. `pushPaddedLength` and `publicKeyOf` are exported too.
+
+**Vectors are independently generated.** `vectors/push-v1.json`'s `hpke` block is
+RFC 9180 A.2.3 transcribed from `rfc-editor.org/rfc/rfc9180.txt`; its `tentacle`
+block was produced by a **Python** HPKE Auth implementation written from the RFC
+(`cryptography`: X25519 + HKDF-SHA256 + ChaCha20-Poly1305), which reproduces A.2.3
+first and then emits our envelopes over fixed keys and a fixed ephemeral —
+4 cases: empty, a 303-byte `ask`, a 197-byte `turn_done` (both 512), and a
+2046-byte max (2048). The TS code never generated its own expectations.
+
+**Red before green.** Every test was written against the module as it grew; the
+two that the code initially failed are the ones the plan named — the byte-exact
+envelopes (my `PUSH_PAD_BUCKETS`/tag assumption and a hex-vs-text helper mistake
+were caught by the *vectors*, not by reading the code) and the "opens with the
+pinned computer key" round-trip. The mutation table below is the non-vacuity
+evidence (AGENTS §9), run with `.tentacle/tmp/mobile-push/mutations-p1.sh` plus
+three follow-ups; each mutation is a one-line edit to `push-seal.ts`, restored
+from a scratch backup (**never** git), then the file was diffed against the
+backup to prove it came back identically.
+
+| # | Mutation (one line) | Result | Tests that failed |
+|---|---|---|---|
+| 1 | `ExtractAndExpand` uses `HPKE_SUITE_ID` instead of `KEM_SUITE_ID` | RED | 5: A.2.3 enc/ct + all 4 envelope vectors |
+| 2 | Auth → Base: drop `DH(skS,pkR)` from the sender's KEM `dh` | RED | 9 (A.2.3 secret, all envelopes, round-trips) |
+| 3 | Base mode in **full** (drop `pkS` from `kem_context` too, seal+open) | RED | 6, **including "a relay's own key cannot open or forge"** — this mutation is why that test exists |
+| 4 | `sealPush`'s `aad` → empty (key id no longer binds) | RED | 7 (all envelope bytes + round-trips) |
+| 5 | `PUSH_INFO` → `"tentacle-push/2"` | RED | 5 (the constants test + all 4 envelopes) |
+| 6 | `openPush` skips the key-id check | RED | 1: "an envelope naming another computer is refused" |
+| 7 | padding bucket boundary `+1` | RED | 3 (boundary test, max-2048 vector) |
+| 8 | `unpad` returns one byte short | RED | 6 (incl. "trailing zero bytes survive") |
+
+Mutation 3 exposed a real weakness in my own test: the first version of the
+forgery test passed under Base mode, because its throw came from the *key-id*
+mismatch rather than from sender authentication. It now seals a forged envelope
+with the relay's key over the exact `info`/`aad`/padding and asserts it does not
+open — and it is RED under mutation 3, which is the property Design 2 relies on
+("a relay or Apple cannot forge one").
+
+**Failure modes covered by this slice.** F6 (a relay's key cannot open or forge —
+mutation 3), F7's "replayed ask is inert" is P7's, F26's "an oversized plaintext
+is impossible" (thrown, plus the 2046-byte envelope vector), a flipped ciphertext
+byte → `bad-tag`, a flipped key id/`aad` → no open, an envelope naming another
+computer → refused before decryption, a low-order recipient key → refused, a
+wrong-size key → thrown. F12 (key rotation) is by construction: a re-registration
+replaces the recipient key and old ciphertexts simply fail to open (placeholder).
+
+**Gate (run in `.tentacle/worktrees/mobile-push`, this branch).**
+`bunx tsc --noEmit` → clean; `bun run typecheck` (all three projects, incl.
+`apps/mobile` + `apps/relay`) → clean; `bun run lint` → `Checked 1370 files … No
+fixes applied` (baseline: clean, 0 errors, 0 warnings); `bun test` → **9903 pass,
+4 skip, 0 fail** (9907 tests / 716 files). The 4 skips are the documented opt-in
+ones (`TENTACLE_K8S_SERVER`, `TENTACLE_DOCKER_TESTS`, `TENTACLE_SLOW_TESTS`) —
+this slice adds no skip. One full-suite run reported `1 fail` in
+`packages/exec/test/confinement.test.ts` ("F2: a hard link …"); it is unrelated to
+this slice (no touched file is imported there), it passed on the runs before and
+after, it passes 3/3 when run alone (`46 pass 0 fail`), and the suite's next full
+run was clean — a pre-existing flake in the confinement suite, recorded here
+rather than claimed away. No schema changed, so `packages/protocol/schema/protocol.json`
+is untouched. Changelog: one fragment, `changelog.d/mobile-push.added.md`;
+`CHANGELOG.md` and `TODO.md` untouched.
+
+**Not done, by instruction:** P2–P10 and D2a/D2 are untouched (P2's protocol
+schemas, P3's relay frames, P4's APNs client, P5–P9, P10's runbook). No
+`PROTOCOL_VERSION` change and no `protocol.d/` note — P1 adds no wire surface.
+
+*— claude-opus-5-5 (executor), 2026-11-14*
+
 ## Review
+
