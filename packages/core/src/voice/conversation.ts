@@ -289,10 +289,18 @@ function langOf(model: ConversationModel): SpeechLang {
  * reply chunk (review round 1, finding 3).
  */
 function systemSpeak(
-  model: ConversationModel,
+  speech: SpeechOutput,
   text: string,
-): { readonly command: ConversationCommand; readonly seq: number } {
-  return { command: { cmd: "speak", text, seq: model.speech.seq }, seq: model.speech.seq + 1 };
+): { readonly command: ConversationCommand; readonly speech: SpeechOutput } {
+  const seq = speech.seq;
+  return {
+    command: { cmd: "speak", text, seq },
+    // The line JOINS `inFlight`: the edge will report it with `spoken{seq}` like
+    // any chunk, and an untracked seq makes that report clear nothing — the mode
+    // then falls back to `listening` over the audio it is still playing
+    // (review round 2, finding 2).
+    speech: { ...speech, seq: seq + 1, inFlight: [...speech.inFlight, seq] },
+  };
 }
 
 /**
@@ -409,9 +417,9 @@ export function conversationReducer(
       const ours = turn === null || speaksTurn(model, turn);
       if (!ours) return { model: asked, commands: [{ cmd: "hush" }] };
       const line = askSpeech({ tool: event.ask.tool, title: event.ask.title }, langOf(model));
-      const spoken = systemSpeak(model, line);
+      const spoken = systemSpeak(asked.speech, line);
       return {
-        model: { ...asked, speech: { ...asked.speech, seq: spoken.seq } },
+        model: { ...asked, speech: spoken.speech },
         commands: [{ cmd: "hush" }, spoken.command],
       };
     }
@@ -443,14 +451,15 @@ export function conversationReducer(
       // overwrite the reason it is paused (finding 1).
       if (model.linkDown) return { model, commands: [] };
       if (!isOn(model)) return { model: { ...model, linkDown: true }, commands: [] };
-      const spoken = systemSpeak(model, "Connection lost.");
+      const hushed = emptySpeech(model.speech.seq, model.maxSpokenChars);
+      const spoken = systemSpeak(hushed, "Connection lost.");
       return {
         model: {
           ...model,
           linkDown: true,
           state: "paused",
           pausedBy: "link",
-          speech: { ...emptySpeech(model.speech.seq), seq: spoken.seq },
+          speech: spoken.speech,
         },
         commands: [{ cmd: "hush" }, { cmd: "notice", text: "connection lost" }, spoken.command],
       };
@@ -471,9 +480,9 @@ export function conversationReducer(
         speech: emptySpeech(model.speech.seq, model.maxSpokenChars),
       };
       if (!resumes) return { model: resumed, commands: [] };
-      const spoken = systemSpeak(model, "Reconnected.");
+      const spoken = systemSpeak(resumed.speech, "Reconnected.");
       return {
-        model: { ...resumed, speech: { ...resumed.speech, seq: spoken.seq } },
+        model: { ...resumed, speech: spoken.speech },
         commands: [spoken.command, { cmd: "listen" }],
       };
     }
@@ -485,15 +494,24 @@ export function conversationReducer(
       // P-F10: a resume refused from the background. Off stays off (nothing to
       // resume), and a mode already paused keeps its own reason (finding 1).
       if (!isOn(model)) return { model, commands: [] };
-      const spoken = systemSpeak(model, "Open tentacle to resume.");
+      // P-F10: the refusal drops the LIVE pipeline (a reply may still be
+      // streaming in, and nothing of it may be spoken over "open tentacle to
+      // resume") — the line the person is told is what stays in flight
+      // (review round 2, finding 1: `L`).
+      const hushed = emptySpeech(model.speech.seq, model.maxSpokenChars);
+      const spoken = systemSpeak(hushed, "Open tentacle to resume.");
       return {
         model: {
           ...model,
           state: "paused",
           pausedBy: "user",
-          speech: { ...model.speech, seq: spoken.seq },
+          speech: spoken.speech,
         },
-        commands: [{ cmd: "notice", text: "open tentacle to resume" }, spoken.command],
+        commands: [
+          { cmd: "hush" },
+          { cmd: "notice", text: "open tentacle to resume" },
+          spoken.command,
+        ],
       };
     }
 
@@ -658,13 +676,16 @@ function bargeIn(
     // ONCE. The guard is the flag itself: without it every later empty barge-in
     // re-emits the notice and the "Echo detected" speech, which is itself echo,
     // so the loop F1 exists to break would continue (finding 2).
-    const spoken = systemSpeak(model, "Echo detected. Barge-in is off.");
+    // The hush follows, so the pipeline is dropped as at every other hush — and
+    // the line itself is tracked, like every `speak` (review round 2, finding 2).
+    const hushed = emptySpeech(model.speech.seq, model.maxSpokenChars);
+    const spoken = systemSpeak(hushed, "Echo detected. Barge-in is off.");
     return {
       model: {
         ...model,
         bargeIns: next,
         bargeIn: false,
-        speech: { ...emptySpeech(model.speech.seq), seq: spoken.seq },
+        speech: spoken.speech,
         state: stateAfterCapture(model),
       },
       commands: [
@@ -703,7 +724,10 @@ function textDelta(
 } {
   // F14: a turn this client neither started nor steered is shown, never spoken.
   if (!speaksTurn(model, turnId)) return { model, commands: [] };
-  if (model.ask !== null || model.linkDown || model.state === "off") return { model, commands: [] };
+  // An OFF or PAUSED mode produces no audio (review round 2, finding 1): the
+  // turn keeps streaming daemon-side through a call, a lock-screen pause or a
+  // refused resume, and none of it may be spoken (P-F1, F4's spirit).
+  if (model.ask !== null || model.linkDown || !isOn(model)) return { model, commands: [] };
 
   // `seq` is the MODE's counter, so it is carried over when the pipeline resets.
   const pipeline =
@@ -786,12 +810,12 @@ function toolCall(
     },
   );
   if (narration.line === null) return { model, commands: [] };
-  const spoken = systemSpeak(model, narration.line);
+  const spoken = systemSpeak(model.speech, narration.line);
   return {
     model: {
       ...model,
       narratedAtMs: narration.state.lastAtMs,
-      speech: { ...model.speech, seq: spoken.seq },
+      speech: spoken.speech,
     },
     commands: [spoken.command],
   };
@@ -808,7 +832,9 @@ function turnEnded(
   const spoke = speaksTurn(model, turnId);
   const commands: ConversationCommand[] = [];
   let pipeline = { ...model.speech, maxSpokenChars: model.maxSpokenChars };
-  if (spoke && pipeline.turnId === turnId) {
+  // A paused/off mode speaks nothing: its turn's tail is on screen, and the
+  // pipeline is dropped rather than flushed (review round 2, finding 1).
+  if (spoke && pipeline.turnId === turnId && isOn(model)) {
     const speakable = speakableFilter.flush(pipeline.speakable);
     const chunked = chunkFilter.step(pipeline.chunks, speakable.text);
     const flushed = chunkFilter.flush(chunked.state);
@@ -819,27 +845,37 @@ function turnEnded(
       chunks: flushed.state,
     });
     commands.push(...spoken.commands);
-    pipeline = spoken.state;
+    // The tail is AUDIO the edge now plays: its seqs join `inFlight`, or the
+    // `spoken{seq}` that reports them clears nothing and the mode returns to
+    // `listening` over them (review round 2, finding 2: `M`).
+    pipeline = {
+      ...spoken.state,
+      inFlight: [...pipeline.inFlight, ...spoken.commands.map((c) => c.seq)],
+    };
   }
   // F5: past the cap, say ONCE where the rest is — it is already on screen.
-  if (pipeline.capped && !pipeline.restNoticed) {
-    const spoken = systemSpeak({ ...model, speech: pipeline }, REST_ON_SCREEN);
+  if (pipeline.capped && !pipeline.restNoticed && isOn(model)) {
+    const spoken = systemSpeak(pipeline, REST_ON_SCREEN);
     commands.push(spoken.command);
-    pipeline = { ...pipeline, seq: spoken.seq, restNoticed: true };
+    pipeline = { ...spoken.speech, restNoticed: true };
   }
+  const inFlight = pipeline.inFlight;
   return {
     model: {
       ...model,
       turnId: null,
       ownTurnId: model.ownTurnId === turnId ? null : model.ownTurnId,
       steeredTurns: model.steeredTurns.filter((t) => t !== turnId),
-      // A new turn's pipeline: `seq` and F5's "announced" flag are the MODE's.
-      speech: emptySpeech(pipeline.seq, model.maxSpokenChars),
+      // A new turn's pipeline: `seq` is the MODE's, and so is `inFlight` — a
+      // tail flushed here outlives the turn that produced it.
+      speech: { ...emptySpeech(pipeline.seq, model.maxSpokenChars), inFlight },
       narratedAtMs: null,
       state:
-        model.state === "speaking" && commands.length === 0
-          ? stateAfterCapture(model)
-          : model.state,
+        isOn(model) && inFlight.length > 0
+          ? "speaking"
+          : model.state === "speaking" && commands.length === 0
+            ? stateAfterCapture(model)
+            : model.state,
     },
     commands,
   };
@@ -935,14 +971,15 @@ function recognitionFailed(
   // P-F9, off-path included: a recogniser that never started cannot stop, so a
   // burst while `off` (or already `paused`) changes nothing the person sees.
   if (!isOn(model)) return { model: { ...model, failures: burst }, commands: [] };
-  const spoken = systemSpeak(model, "Speech recognition stopped.");
+  const hushed = emptySpeech(model.speech.seq, model.maxSpokenChars);
+  const spoken = systemSpeak(hushed, "Speech recognition stopped.");
   return {
     model: {
       ...model,
       failures: burst,
       state: "paused",
       pausedBy: "recognition",
-      speech: { ...emptySpeech(model.speech.seq, model.maxSpokenChars), seq: spoken.seq },
+      speech: spoken.speech,
     },
     commands: [{ cmd: "notice", text: "speech recognition stopped" }, spoken.command],
   };

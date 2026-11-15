@@ -764,6 +764,111 @@ Finding 5: `tui/src/voice-endpoint.ts` is now a thin adapter over the core fold.
 
 **Executor behaviour:** every fix is targeted, and each has its own named test. The fix for finding 1 was applied to the events I listed, not to the property behind them ("a paused or off mode produces no audio"), so `textDelta` was missed. That miss was mine first: round 1 did not name it either.
 
+### Fix round 2 — the review's findings 1–2 · *— claude-sonnet-4-5-20250929 (tentacle), 2026-11-15*
+
+**Scope.** Round 2's HIGH (finding 1) and MEDIUM (finding 2), both in
+`packages/core/src/voice/conversation.ts`. No other file, no protocol/wire/
+on-disk change (no `protocol.d/` note, `PROTOCOL_VERSION` untouched, no
+changelog fragment: internal reducer behaviour, invisible to the user).
+
+**Reproduced first (before any edit).** The reviewer's own script, re-run on
+this branch (`.tentacle/tmp/voice-conversation/review/r2.ts`): J and K emitted
+`speak` seq 0/1 per delta and the tail at turn end while `paused`; L spoke the
+tail after `resumeFailed`; M left `listening` on `spoken{0}` while the tail
+(seq 1) was still playing.
+
+**Red before green.** New file
+`packages/core/test/voice/conversation-fix2.test.ts` (11 tests, one `describe`
+per finding). First run on the unmodified reducer: **7 fail / 0 pass**
+(`round2/red.txt`), every failure on the assertion of the property, not on an
+import:
+
+```
+(fail) fix 1 … J: a phone-call pause silences the reply that keeps streaming
+(fail) fix 1 … K: a lock-screen (Now Playing) pause silences it too
+(fail) fix 1 … L: after resumeFailed, the tail is not spoken at turn end (P-F10)
+(fail) fix 1 … a pause does not poison the NEXT turn: resuming speaks again
+(fail) fix 2 … M: the tail flushed at turn end stays in flight
+(fail) fix 2 … N: a system line stays in flight across a late report of hushed audio
+(fail) fix 2 … the ask line and the narration line are tracked the same way
+```
+
+Two tests were added after the first mutation pass (L2, L3) because two
+mutations initially survived — see the table below.
+
+**As built, per finding.**
+
+1. **HIGH — the reply is spoken while the mode is paused (P-F1, F4's spirit).**
+   The gate is now the PROPERTY, not the list of events round 1 fixed:
+   - `textDelta` (`:727`) refuses on `!isOn(model)` instead of `state === "off"`,
+     so a call, a lock-screen pause and a refused resume all silence a streaming
+     reply;
+   - `turnEnded` (`:822`) flushes its tail only `&& isOn(model)`, so the end of a
+     paused turn emits nothing (the text is on screen; F5's "rest" line is gated
+     the same way);
+   - `resumeFailed` (`:493`) drops the LIVE pipeline (`emptySpeech(seq)`) and now
+     sends `hush` before its line, so nothing of the interrupted reply is spoken
+     over "Open tentacle to resume" and no tail can be flushed later.
+   `toolCall` already checked `paused`; it, `interrupted`, `thermal`,
+   `recognitionFailed` and `bargein` were left as round 1 built them.
+2. **MEDIUM — the residual of round-1 finding 3.** `systemSpeak` (`:291`) now
+   takes the `SpeechOutput` it speaks from and returns the advanced one with its
+   seq APPENDED to `inFlight`; every system-line site (ask, link down, link up,
+   resume-failed, echo, narration, "rest is on screen", recognition) stores that
+   whole pipeline instead of only `seq`. `turnEnded` appends the flushed tail's
+   seqs to `inFlight`, carries them across the per-turn pipeline reset, and keeps
+   the state `speaking` while any is in flight. So `spoken{seq}` always names a
+   tracked seq, and the mode cannot return to `listening` over its own audio.
+
+**Drift from the Implementation:** none in the exam question's sense — but two
+changes beyond the letter of the review: (a) `resumeFailed` now emits `hush`
+(previously `notice` + `speak` only), because dropping the pipeline while the
+edge kept playing the hushed chunk left `spoken{0}` clearing nothing; (b) the
+echo trip (`bargeIn`, `:676`) now builds its line from a hushed pipeline too, so
+the hushed chunk is not left in `inFlight` and the reset keeps the model's
+`maxSpokenChars`. Both are finding 2's property applied to the other `hush`
+sites, not new behaviour.
+
+**Mutations (`.tentacle/tmp/voice-conversation/round2/mut.ts`; the original
+bytes are written back after each, and the harness ends with
+`restored byte-identical: true`).** Each turns
+`packages/core/test/voice/conversation-fix2.test.ts` red:
+
+| Mutation | Result |
+|---|---|
+| `textDelta` guarded on `off` only (the round-2 bug) | 4 fail |
+| `turnEnded` flushes the tail whatever the state | 1 fail (L3) |
+| `resumeFailed` keeps the live pipeline (no reset) | 1 fail (L2) |
+| `systemSpeak` does not append its seq to `inFlight` | 3 fail |
+| `turnEnded` does not append the flushed tail to `inFlight` | 1 fail (M) |
+| the in-flight tail does not keep the state `speaking` | 1 fail (M2) |
+
+**Honest note on the first pass** (`round2/mut.txt`): mutations 2 and 3 came
+back GREEN at first — the two pause guards overlapped, so each masked the other
+and a *removal* of one changed no reachable behaviour. Rather than claim them,
+two tests were added that isolate each guard (L2 pins the pipeline reset; L3
+pins the state check on `turnEnded` with a directly constructed paused model,
+since every pause path in the reducer today also resets the pipeline). Both
+mutations then fail. Re-run: `round2/mut2.txt`.
+
+**Gate (this branch, on the FINAL tree).**
+
+- `bunx tsc --noEmit` → clean (exit 0, no output).
+- `bun run lint` → `Checked 1597 files in 444ms. No fixes applied.` (0 errors,
+  0 warnings — the §6 clean baseline; two files more than round 2's 1596 area
+  because of the new test file).
+- `bun test` → **11456 pass, 5 skip, 0 fail** across 824 files (421 s). The 5
+  skips are the documented opt-in ones (`skipIf` on live k8s ×3, live docker ×2;
+  the slow keepalive is in these too) — no new skip, none of mine. Narrow runs:
+  `packages/core/test/voice packages/tui/test/voice` → 280 pass, 0 fail.
+- No protocol file touched, `CHANGELOG.md` untouched, no changelog fragment
+  (the reducer's internal bookkeeping is not user-visible beyond what the
+  existing `changelog.d/voice-conversation.added.md` bullet already describes).
+
+**Residual, stated rather than hidden.** `speaking{seq}` still trusts the edge's
+report: if an edge raises it for a seq the mode never spoke, the state follows.
+That is round 1's contract (the edge owns playback), unchanged here.
+
 #### Owner answers (2026-11-15, batch 1)
 
 - Q1 order: **yes** — spike now, code after V1 (`feat/voice-dictation`) and `feat/mobile-voice` merge; a language with no on-device recognizer has no voice mode, never cloud.
