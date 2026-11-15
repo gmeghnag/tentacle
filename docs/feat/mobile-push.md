@@ -2685,6 +2685,51 @@ shape-checked before it is sent. The access group is passed on get, set and dele
 drift (D1–D8) and about a mutation that first looked like a survivor. But the
 toggle's lifecycle (persistence, and unregister when there is no link) was
 tested only on the phone side, so findings 1 and 2 got through.
+
+### Round 2 — Verdict: REQUEST-CHANGES
+
+*— claude-opus-5-5, 2026-11-15* (fresh context, reviewing `git diff HEAD~1`)
+
+**Gate.** `bun test apps/mobile/test packages/client/test/push-register.test.ts`
+→ 913 pass / 0 fail. `bun run lint` → 1399 files, clean. `bun run typecheck` → exit 0.
+
+**Round-1 findings, each mutated (all reverted; `git status` clean).**
+- H1 (off survives a relaunch): **fixed**. Mutation: drop `toggle.write` → 1 RED.
+- H2 (off with no link): **fixed only against the fake store; still broken in
+  the app** (see finding R2-1). Mutation: skip `keepDebt` → 4 RED, but all four
+  run on the fake store.
+- H3 (back on registers now): **fixed**. Mutation: drop `syncOnce` → 2 RED.
+- H4 (old daemon locks the switch): **fixed**. Mutation: AND in `view.switchable` → 1 RED.
+
+**New findings.**
+
+1. **HIGH: the real Keychain store drops the `off` debt, so H2 is still broken
+   in the app.** `push-registration.ts` writes `{hash:"", registeredAt, off:true}`.
+   But `computer-store.ts` `pushRegistrationOf` (unchanged in this round)
+   rebuilds the record as `{hash, registeredAt}` only, so `off` is lost on every
+   `get`. Then `syncOnce`'s `last?.off === true` never fires, the plan returns
+   `skip disabled`, and the daemon keeps pushing to this phone. The type gap is
+   why this passes: `PushMemoryStore.setPush`'s value type has no `off`, so TS
+   accepts the extra field and the reader quietly drops it. Every H2 test uses a
+   fake memory that stores the object verbatim. Repro (real
+   `createComputerStore` + real `createPushToggleStore`,
+   `.tentacle/tmp/mobile-push/p9-review2.test.ts`): sync → off with no link →
+   the stored push reads back `{"hash":"","registeredAt":…}` → relaunch + sync
+   sends no `unregister`. Fix: teach `pushRegistrationOf` / `PushRegistrationRecord`
+   about `off`, and add a test with the real store.
+2. **MEDIUM: the manager ignores `PushToggleRead.writable`.**
+   `push-manager.ts` `ready()` drops `writable`, and `rememberEnabled` always
+   writes. So a newer build's (unknown-version) or unreadable record gets
+   overwritten. `push-toggle-store.ts`'s header promises "an unknown `v` is never
+   overwritten". Either keep the value in memory only when `writable` is false,
+   or remove the promise.
+
+**Attacks that found nothing.** `ready()` is awaited before every
+manager operation, so a toggle can't race the hydration. `toggleSink` with no
+link leaves a toggle-on as `unknown`, not `failed`. An older daemon's
+`MethodNotFound` on unregister settles the debt without looping. No §7 seam is
+touched: the client methods are unchanged, and the peer is still not serialized.
+
 ## Execution
 
 ### Fix round 1
