@@ -7,7 +7,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { WebSocketLike } from "../src/exec-channel.ts";
-import { rawExec } from "../src/exec-raw.ts";
+import { ExecRefusedError, rawExec } from "../src/exec-raw.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -20,6 +20,9 @@ function frame(channel: number, payload: Uint8Array | string): Uint8Array {
   return out;
 }
 
+/** The event shape this fake delivers (`message`/`reason` are what Bun adds). */
+type FakeWSEvent = { data: unknown; message?: string; code?: number; reason?: string };
+
 /** An in-memory WebSocket, driven deterministically (CONNECTING until `open()`). */
 class FakeWS implements WebSocketLike {
   binaryType = "";
@@ -27,7 +30,7 @@ class FakeWS implements WebSocketLike {
   readyState = 0; // CONNECTING
   pings = 0;
   closes = 0;
-  private readonly listeners = new Map<string, Array<(ev: { data: unknown }) => void>>();
+  private readonly listeners = new Map<string, Array<(ev: FakeWSEvent) => void>>();
 
   send(data: Uint8Array): void {
     if (this.readyState !== 1) {
@@ -46,12 +49,12 @@ class FakeWS implements WebSocketLike {
     this.readyState = 3;
     this.emit("close", { data: null });
   }
-  addEventListener(type: string, handler: (ev: { data: unknown }) => void): void {
+  addEventListener(type: string, handler: (ev: FakeWSEvent) => void): void {
     const arr = this.listeners.get(type) ?? [];
     arr.push(handler);
     this.listeners.set(type, arr);
   }
-  private emit(type: string, ev: { data: unknown }): void {
+  private emit(type: string, ev: FakeWSEvent): void {
     for (const h of this.listeners.get(type) ?? []) {
       h(ev);
     }
@@ -68,6 +71,18 @@ class FakeWS implements WebSocketLike {
   }
   pong(): void {
     this.emit("pong", { data: null });
+  }
+  /** A refused upgrade, as Bun reports it: `error` with only a message. */
+  fail(message: string): void {
+    this.emit("error", { data: null, message });
+  }
+  /** The close that follows the `error`, before any `open` (Bun's real sequence). */
+  closeBeforeOpen(reason: string): void {
+    if (this.readyState === 3) {
+      return;
+    }
+    this.readyState = 3;
+    this.emit("close", { data: null, code: 1002, reason });
   }
 }
 
@@ -211,6 +226,49 @@ describe("k8s rawExec", () => {
     rawExec(ws, sink.handlers);
     ws.receive(frame(3, JSON.stringify({ status: "Success" })));
     expect(sink.ends).toEqual([{ exitCode: 0 }]);
+  });
+
+  // docs/fix/workload-shell-live.md D3. A refused UPGRADE is what a
+  // multi-container exec with no `container` (or an RBAC/SCC denial) looks like
+  // over Bun's WebSocket: `error` then `close`, both before `open`, carrying only
+  // a generic message — the HTTP status and the k8s Status body are dropped by
+  // Bun itself (repro B). The constant "exec channel errored" threw even that
+  // message away, and left the model with nothing to act on.
+  test("an error BEFORE open is a refusal, and it keeps the event's own message", () => {
+    const ws = new FakeWS();
+    const sink = collect();
+    rawExec(ws, sink.handlers);
+    ws.fail("Expected 101 status code");
+
+    expect(sink.ends).toHaveLength(1);
+    const error = sink.ends[0]?.error;
+    expect(error).toBeInstanceOf(ExecRefusedError);
+    expect(error?.message).toContain("Expected 101 status code");
+    expect(error?.message).not.toBe("exec channel errored");
+  });
+
+  test("a close BEFORE open is a refusal too (Bun's other half of the same failure)", () => {
+    const ws = new FakeWS();
+    const sink = collect();
+    rawExec(ws, sink.handlers);
+    ws.closeBeforeOpen("Expected 101 status code");
+
+    expect(sink.ends).toHaveLength(1);
+    expect(sink.ends[0]?.error).toBeInstanceOf(ExecRefusedError);
+    expect(sink.ends[0]?.error?.message).toContain("Expected 101 status code");
+  });
+
+  test("an error AFTER open keeps the stream-error meaning, but appends what the event said", () => {
+    const ws = new FakeWS();
+    ws.open();
+    const sink = collect();
+    rawExec(ws, sink.handlers);
+    ws.fail("keepalive timeout");
+
+    expect(sink.ends).toHaveLength(1);
+    expect(sink.ends[0]?.error).not.toBeInstanceOf(ExecRefusedError);
+    expect(sink.ends[0]?.error?.message).toContain("exec channel errored");
+    expect(sink.ends[0]?.error?.message).toContain("keepalive timeout");
   });
 
   test("a close with no status ends once with exitCode null and an error", () => {

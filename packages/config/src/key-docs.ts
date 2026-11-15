@@ -41,6 +41,7 @@ import {
   DEFAULT_TOOL_EXECUTION,
   DEFAULT_TOOL_MAX_PARALLEL,
   DEFAULT_TOOL_OUTPUT_RETENTION_DAYS,
+  DEFAULT_WORKLOAD_SHELL_TOOL,
   defaultWritableDirs,
 } from "./defaults.ts";
 import type { ResolvedConfig } from "./resolve.ts";
@@ -750,6 +751,28 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     sample: "on",
     details:
       "OFF unless you turn it on: with it off the only way to move is a `/move` you type. It only PROPOSES — the tool has no daemon-side effect, and nothing moves until the laptop's own prompt is answered (asked when the turn ends, never remembered). With `autoAccept` on, a model-proposed move is answered like any other tool, logged allow-once — EXCEPT a move toward local proposed from a pod or container, which always asks. Offered only where a hop exists — the local worker and a pod daemon — and never to a sub-agent.",
+    example: "true",
+  },
+  workloadShell: {
+    summary: "The agent may open a stateful `sh` on another workload (`workload_shell`).",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "workloadShell.tool": {
+    summary:
+      "Offer the agent `workload_shell`: a stateful, non-interactive `sh` on a pod or container.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => DEFAULT_WORKLOAD_SHELL_TOOL,
+    resolved: (c) => c.workloadShell.tool,
+    sourceKey: "workloadShellTool",
+    env: "TENTACLE_WORKLOAD_SHELL_TOOL",
+    sample: "on",
+    details:
+      "It dials with YOUR kubeconfig / docker endpoint and runs commands on another workload, so it is OFF unless you turn it on. You are still asked before the first command on each target (and with `always` for the rest of the session). Offered only where tentacle runs on your own host — the local worker and `serve` — never to a pod daemon, which already has its own shell inside its workload.",
     example: "true",
   },
   autoWake: {

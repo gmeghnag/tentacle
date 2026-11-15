@@ -40,6 +40,11 @@ import {
   parseKubeconfig,
 } from "@tentacle/k8s";
 import type { HopNamespace } from "@tentacle/tui";
+// Re-exported so a caller that already loads THIS module lazily (the
+// `workload_shell` backend) can tell a refused exec upgrade apart without a
+// static `@tentacle/k8s` import of its own — that import is what dragged the
+// cleanup graph into the worker bundle (see `workload-shell-backend.ts`).
+export { ExecRefusedError } from "@tentacle/k8s";
 import { type DockerClientLike, dockerEngineHost } from "./engine-docker.ts";
 import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { type PodCluster, kubeEngineHost } from "./engine-k8s.ts";

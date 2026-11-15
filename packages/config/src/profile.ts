@@ -72,6 +72,7 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
     contextAwareness,
     contextReset,
     sessionHop,
+    workloadShell,
     mcpServers,
     mount,
     detach,
@@ -120,6 +121,9 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
   }
   if (sessionHop) {
     config.sessionHop = { ...base.sessionHop, ...sessionHop };
+  }
+  if (workloadShell) {
+    config.workloadShell = { ...base.workloadShell, ...workloadShell };
   }
   if (tools) {
     config.tools = { ...base.tools, ...tools };

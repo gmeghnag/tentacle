@@ -60,6 +60,16 @@ export const DEFAULT_CONTEXT_RESET_ENABLED = true;
  * a `/move` you type. Opt in with `sessionHop.tool: true`.
  */
 export const DEFAULT_SESSION_HOP_TOOL = false;
+/**
+ * `workloadShell.tool`: offer the agent `workload_shell` — a stateful `sh` on
+ * ANOTHER workload, reached with the laptop's own engine credentials
+ * (docs/fix/workload-shell-live.md, owner decision 1).
+ *
+ * **Default: off.** `move_session` only PROPOSES (nothing happens without the
+ * owner's answer); `workload_shell` runs commands elsewhere at once, so it is
+ * opt-in rather than opt-out.
+ */
+export const DEFAULT_WORKLOAD_SHELL_TOOL = false;
 /** Resets allowed per user message; `-1` = unlimited. */
 export const DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE = -1;
 /** Max characters of a tool result kept inline before it is spilled to a file. */
@@ -193,6 +203,11 @@ export const DEFAULT_CONFIG_JSONC = `{
   // (another container, or back to this machine) with the \`move_session\` tool?
   // It only proposes: you are asked, in this terminal, when the turn ends.
   // "sessionHop": { "tool": ${DEFAULT_SESSION_HOP_TOOL} },
+
+  // Workload shell: may the agent open a stateful \`sh\` on ANOTHER workload
+  // (a pod or container) with \`workload_shell\`? It dials with YOUR kubeconfig /
+  // docker endpoint, so it is off unless you turn it on.
+  // "workloadShell": { "tool": ${DEFAULT_WORKLOAD_SHELL_TOOL} },
 
   // Default engine of \`tentacle run\` / \`tentacle attach\`: "kubernetes" (a pod),
   // "docker" or "podman" (a container). --engine and TENTACLE_ENGINE win.

@@ -60,6 +60,18 @@ export const WORKLOAD_PART_MAX = 253;
  */
 export const workloadTargetGrammar = { part: WORKLOAD_PART, max: WORKLOAD_PART_MAX } as const;
 
+/**
+ * `container`/`namespace` are Kubernetes-only, enforced at parse for EVERY tool
+ * that takes a workload (docs/fix/workload-shell-live.md D4). Exported as the
+ * predicate so `workload_shell` reuses it rather than copying the rule.
+ */
+export const engineOnlyFields = (w: {
+  readonly engine: string;
+  readonly container?: string;
+  readonly namespace?: string;
+}): boolean =>
+  w.engine === "kubernetes" || (w.container === undefined && w.namespace === undefined);
+
 const workloadSchema = z
   .object({
     engine: z.enum(["kubernetes", "docker", "podman"]),

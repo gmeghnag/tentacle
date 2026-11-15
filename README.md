@@ -445,6 +445,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `tools.tabulateJson` | `TENTACLE_TABULATE_JSON` | false | Render a JSON array-of-objects result as a compact table. |
 | `tools.writableDirs` | `TENTACLE_WRITABLE_DIRS` (`:`-separated; empty = `[]`) | the system temp dir (`$TMPDIR`) and `/tmp` | Where `fs_write`/`fs_edit`/`fs_multi_edit` may write besides the project. |
 | `tui.theme` | — | "auto" | The palette: `auto` probes the terminal, `dark`/`light` force one; never carried to a pod. |
+| `workloadShell.tool` | `TENTACLE_WORKLOAD_SHELL_TOOL` | false | Offer the agent `workload_shell`: a stateful, non-interactive `sh` on a pod or container. |
 <!-- config-keys:end -->
 
 **`--model <id>` and `--profile <name>`** are flags of the commands that start a

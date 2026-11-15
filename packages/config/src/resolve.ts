@@ -36,6 +36,7 @@ import {
   DEFAULT_TOOL_EXECUTION,
   DEFAULT_TOOL_MAX_PARALLEL,
   DEFAULT_TOOL_OUTPUT_RETENTION_DAYS,
+  DEFAULT_WORKLOAD_SHELL_TOOL,
   defaultWritableDirs,
 } from "./defaults.ts";
 import { type ResolvedModel, resolveModelEntry } from "./models.ts";
@@ -72,6 +73,20 @@ export interface SessionHopConfig {
   readonly tool: boolean;
 }
 
+/**
+ * `workloadShell`, resolved: whether the agent is offered `workload_shell` — a
+ * stateful, non-interactive `sh` on ANOTHER workload, dialled with the laptop's
+ * own kubeconfig / docker endpoint (docs/fix/workload-shell-live.md, owner
+ * decision 1).
+ *
+ * **Off by default**, unlike `move_session`: that tool only proposes, while this
+ * one runs commands on another workload as soon as the permission answer is yes.
+ * A pod daemon never offers it at all (AGENTS §7, "a pod is not trusted").
+ */
+export interface WorkloadShellConfig {
+  readonly tool: boolean;
+}
+
 /** How the API key will be obtained. */
 export type ApiKeySource = "env" | "file" | "command" | "none";
 
@@ -92,6 +107,8 @@ export interface ResolvedConfig {
   readonly contextReset: ContextResetConfig;
   /** The agent's `move_session` proposal tool (docs/feat/session-hop.md D9). */
   readonly sessionHop: SessionHopConfig;
+  /** The agent's `workload_shell` tool (docs/fix/workload-shell-live.md, owner decision 1). */
+  readonly workloadShell: WorkloadShellConfig;
   /** Max output tokens per response; unset → the provider's own default. */
   readonly maxTokens?: number;
   /**
@@ -219,6 +236,7 @@ export interface ResolvedConfig {
     readonly contextResetEnabled: Source;
     readonly contextResetMaxPerMessage: Source;
     readonly sessionHopTool: Source;
+    readonly workloadShellTool: Source;
     readonly maxInlineOutputChars: Source;
     readonly toolOutputRetentionDays: Source;
     readonly redactSecrets: Source;
@@ -526,6 +544,13 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     fileConfig.sessionHop?.tool,
     DEFAULT_SESSION_HOP_TOOL,
   );
+  // Also laptop-side (owner decision 1): the tool dials with THIS host's engine
+  // credentials, so the host decides — and by default it does not offer it.
+  const workloadShellTool = pick(
+    parseBool(env.TENTACLE_WORKLOAD_SHELL_TOOL),
+    fileConfig.workloadShell?.tool,
+    DEFAULT_WORKLOAD_SHELL_TOOL,
+  );
   const maxInlineOutputChars = pick(
     parseNonNegativeInt(env.TENTACLE_MAX_OUTPUT_CHARS),
     fileConfig.tools?.maxInlineOutputChars,
@@ -630,6 +655,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       maxPerMessage: contextResetMaxPerMessage.value,
     },
     sessionHop: { tool: sessionHopTool.value },
+    workloadShell: { tool: workloadShellTool.value },
     ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
     ...(maxImageBytes !== undefined ? { maxImageBytes } : {}),
     ...(images !== undefined ? { images } : {}),
@@ -695,6 +721,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       contextResetEnabled: contextResetEnabled.source,
       contextResetMaxPerMessage: contextResetMaxPerMessage.source,
       sessionHopTool: sessionHopTool.source,
+      workloadShellTool: workloadShellTool.source,
       maxInlineOutputChars: maxInlineOutputChars.source,
       toolOutputRetentionDays: toolOutputRetentionDays.source,
       redactSecrets: redactSecrets.source,

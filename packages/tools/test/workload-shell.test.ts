@@ -10,15 +10,18 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { ToolContext } from "@tentacle/core";
+import { zodToJsonSchema } from "zod-to-json-schema";
 import { READY_PREFIX, bootstrapLine, killTreeScript } from "../src/workload-shell-frame.ts";
 import {
   MAX_OPEN_SHELLS,
+  WORKLOAD_SHELL_DESCRIPTION,
   WORKLOAD_SHELL_TOOL_NAME,
   type WorkloadShellBackend,
   WorkloadShells,
   type WorkloadTarget,
   createWorkloadShellTool,
   targetKey,
+  workloadShellSchema,
 } from "../src/workload-shell.ts";
 
 const enc = new TextEncoder();
@@ -195,10 +198,11 @@ class FakeBackend implements WorkloadShellBackend {
   /** When set, `prime` awaits it — the window a session end can land in. */
   primeGate: Promise<void> | undefined;
 
-  async prime(): Promise<void> {
+  async prime(): Promise<undefined> {
     if (this.primeGate !== undefined) {
       await this.primeGate;
     }
+    return undefined;
   }
 
   open(target: WorkloadTarget): FakeExec {
@@ -508,6 +512,57 @@ describe("failure modes", () => {
   });
 });
 
+describe("a reopen restores the working directory (owner decision 4)", () => {
+  test("the `cd` persists in the SHELL, and the result says so", async () => {
+    const { tool, backend } = setup();
+    const first = run(tool, { target, command: "cd /etc" });
+    await tick();
+    await first;
+
+    // Kill the shell's stream: the next run reopens it.
+    const exec = backend.execs[0] as FakeExec;
+    exec.dropOnCommand = () => new Error("link lost");
+    const dying = run(tool, { target, command: "sleep 100" });
+    await tick(12);
+    await dying;
+    expect(backend.execs).toHaveLength(1);
+
+    // `FakeExec` starts every new shell in its own cwd: a restore is observable.
+    const reopened = run(tool, { target, command: "pwd" });
+    await tick(12);
+    const result = await reopened;
+
+    expect(backend.execs).toHaveLength(2);
+    // Mutation: drop `restoreCwd` from the reopen → no notice, and the new shell
+    // answers `/home/app` instead of `/etc`.
+    expect(result.content).toContain("returned to /etc");
+    expect(result.content).toContain("environment variables were not replayed");
+    expect(result.content).toContain("cwd=/etc");
+  });
+
+  test("env vars are NOT replayed, and the notice says so (they may hold secrets)", async () => {
+    const { tool, backend } = setup();
+    const first = run(tool, { target, command: "export TOKEN=hunter2" });
+    await tick();
+    await first;
+
+    // Kill the shell, so the next run genuinely reopens it.
+    const exec = backend.execs[0] as FakeExec;
+    exec.end();
+    const reopened = run(tool, { target, command: "true" });
+    await tick(12);
+    const result = await reopened;
+
+    expect(backend.execs).toHaveLength(2);
+    // The sentence is the contract: a model must not assume `export`s survived,
+    // and the tool must not have replayed them (it only ever re-sends a `cd`).
+    expect(result.content).toContain("environment variables were not replayed");
+    // Nothing but a `cd` is ever written back into a fresh shell.
+    const reopenedExec = backend.execs[1] as FakeExec;
+    expect(reopenedExec.commands.filter((c) => c.includes("export"))).toEqual([]);
+  });
+});
+
 describe("dispose", () => {
   test("an open still priming when the session ends leaves NO live shell (D4)", async () => {
     const { tool, shells, backend } = setup();
@@ -687,5 +742,174 @@ describe("what the plan's §4 pin requires", () => {
     // interpolation of anything the daemon knows can slip in (§4 pin).
     expect(exec.raw[0]).toBe(bootstrapLine("").replace(/\n$/, ""));
     expect(exec.raw[0]).not.toContain("TENTACLE_");
+  });
+});
+
+// docs/fix/workload-shell-live.md, owner decision 3: the owner saw a FRESH
+// shell's FIRST command come back as `guard-3a6ec321…-end` instead of
+// `etcd-guard-3a6ec321…-end`. What is PROVEN here is the mechanism these rows
+// cover — the ready handshake dropped the bytes that rode the same read as the
+// marker, and its tail cut disagreed with the ready parser about where the
+// marker ended. What is NOT proven is that this was the owner's live cause:
+// with a real `sh` the command line goes out after `await readyDone`, so a
+// real shell cannot print `hostname` before it receives `hostname`.
+describe("the first command on a fresh shell keeps its head (owner decision 3)", () => {
+  test("a banner that rides the ready read is the first command's output, not lost", async () => {
+    const backend = new FakeBackend();
+    backend.openImpl = (exec) => {
+      const original = exec.stdout.bind(exec);
+      exec.stdout = (text: string): void => {
+        if (text.startsWith(READY_PREFIX)) {
+          // The ready marker, then the pod's own first line in the same write.
+          original(`${text}banner line\n`);
+          return;
+        }
+        original(text);
+      };
+    };
+    const shells = new WorkloadShells(backend, { readyTimeoutMs: 2_000, killGraceMs: 60 });
+    const tool = createWorkloadShellTool(shells);
+
+    const promise = run(tool, { target, command: "hostname" });
+    await tick();
+    const result = await promise;
+
+    // Mutation: drop the bytes after the ready marker → the banner is gone.
+    expect(result.content).toContain("banner line");
+    expect(result.content).toContain("hostname");
+    await shells.dispose();
+  });
+
+  test("a HEAD split across the ready read is rejoined (the `guard-…-end` shape)", async () => {
+    const HOST = "etcd-guard-3a6ec32139722234d98bed4f29e301189cef109a-end";
+    const backend = new FakeBackend();
+    backend.openImpl = (exec) => {
+      const original = exec.stdout.bind(exec);
+      let answered = false;
+      exec.stdout = (text: string): void => {
+        if (!answered && text.startsWith(READY_PREFIX)) {
+          answered = true;
+          // The ready marker's TAIL and the head of what follows, in one write:
+          // the very split that produced `guard-…-end`.
+          original(`${READY_PREFIX}4242_/home/app__TNT__E\n${HOST.slice(0, 5)}`);
+          return;
+        }
+        original(text);
+      };
+      exec.behaviour = () => ({ out: HOST.slice(5) });
+    };
+    const shells = new WorkloadShells(backend, { readyTimeoutMs: 2_000, killGraceMs: 60 });
+    const tool = createWorkloadShellTool(shells);
+
+    const promise = run(tool, { target, command: "hostname" });
+    await tick();
+    const result = await promise;
+
+    // The whole hostname, unbroken: neither the head lost nor the delimiter
+    // leaked into it (owner decision 3's own assertion).
+    expect(result.content).toContain(HOST);
+    expect(result.content).not.toContain("__TNT_");
+    await shells.dispose();
+  });
+
+  test("a pod line that contains the READY end sequence does not put the delimiter in the body", async () => {
+    // Found in fix round 2: `parseReady` scans from the ready PREFIX, but the
+    // tail cut used to scan from byte 0. A pod that prints `__TNT__E` BEFORE
+    // the marker (an odd startup banner, a logging wrapper — and a pod is not
+    // trusted, AGENTS §7) made the two disagree, so the cut landed on the banner's
+    // sequence and handed the READY MARKER itself — delimiter and all — to the
+    // first command's parser as its output. This is the only reachable way the
+    // delimiter gets into a body, and it respects the write order (the banner
+    // is written before the marker, the command line after `execute` arms).
+    const backend = new FakeBackend();
+    backend.openImpl = (exec) => {
+      const original = exec.stdout.bind(exec);
+      exec.stdout = (text: string): void => {
+        if (text.startsWith(READY_PREFIX)) {
+          original(`container says __TNT__E hello\n${text}`);
+          return;
+        }
+        original(text);
+      };
+      exec.behaviour = () => ({ out: "hostname-output" });
+    };
+    const shells = new WorkloadShells(backend, { readyTimeoutMs: 2_000, killGraceMs: 60 });
+    const tool = createWorkloadShellTool(shells);
+
+    const promise = run(tool, { target, command: "hostname" });
+    await tick();
+    const result = await promise;
+
+    // The banner is data, so it may be echoed — but never our framing, and
+    // never the ready marker we generated ourselves.
+    expect(result.content).toContain("hostname-output");
+    expect(result.content).not.toContain("__TNT_");
+    expect(result.content).not.toContain("__TNT__R_");
+    await shells.dispose();
+  });
+
+  test("a command's output never carries the framing delimiter", async () => {
+    const backend = new FakeBackend();
+    backend.openImpl = (exec) => {
+      exec.behaviour = () => ({ out: "plain output" });
+    };
+    const shells = new WorkloadShells(backend, { readyTimeoutMs: 2_000, killGraceMs: 60 });
+    const tool = createWorkloadShellTool(shells);
+
+    const promise = run(tool, { target, command: "echo plain" });
+    await tick();
+    const result = await promise;
+
+    expect(result.content).toContain("plain output");
+    expect(result.content).not.toContain("__TNT_");
+    await shells.dispose();
+  });
+});
+
+// docs/fix/workload-shell-live.md D4: the model was never TOLD about
+// `container` — its doc was a JSDoc comment, which never reaches the JSON
+// Schema (`definitions()` converts the Zod schema), so a model that hit the
+// multi-container refusal had no field to reach for.
+describe("what the model is offered (D4)", () => {
+  const json = zodToJsonSchema(workloadShellSchema, { target: "openApi3" }) as {
+    properties: {
+      target: {
+        properties: Record<string, { description?: string; type?: string }>;
+        allOf?: unknown;
+      };
+    };
+  };
+
+  test("target.container carries a description naming the default-container annotation", () => {
+    const container = json.properties.target.properties.container;
+    expect(container?.description).toBeDefined();
+    expect(container?.description).toContain("default-container");
+    expect(container?.description).toContain("Kubernetes only");
+    expect(json.properties.target.properties.namespace?.description).toContain("Kubernetes only");
+  });
+
+  test("the refine does not wrap the target in an allOf/effects schema (registry.ts converts it)", () => {
+    // `registry.definitions()` hands this straight to the model: a wrapper would
+    // hide `properties` entirely.
+    expect(json.properties.target.allOf).toBeUndefined();
+    expect(json.properties.target.properties.name?.type).toBe("string");
+  });
+
+  test("the tool description mentions target.container", () => {
+    expect(WORKLOAD_SHELL_DESCRIPTION).toContain("target.container");
+  });
+
+  test("docker/podman with a container (or a namespace) is refused at parse, as move_session does", async () => {
+    const { tool, backend } = setup();
+    for (const rejected of [
+      { engine: "docker", name: "box", container: "x" },
+      { engine: "podman", name: "box", container: "x" },
+      { engine: "docker", name: "box", namespace: "ns" },
+    ]) {
+      const result = await run(tool, { target: rejected, command: "true" });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("only a kubernetes workload");
+    }
+    expect(backend.execs).toHaveLength(0); // nothing was opened
   });
 });

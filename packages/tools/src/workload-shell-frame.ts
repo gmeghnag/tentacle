@@ -120,7 +120,7 @@ function indexOfBytes(haystack: Uint8Array, needle: Uint8Array, from = 0): numbe
   return -1;
 }
 
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
+export function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(a.length + b.length);
   out.set(a, 0);
   out.set(b, a.length);
@@ -135,6 +135,43 @@ export interface ReadySeen {
 }
 
 const decoder = new TextDecoder();
+
+/**
+ * The bytes that followed the ready marker in `bytes`, or `null` when the ready
+ * marker is not (yet, or wholly) there.
+ *
+ * They are NOT garbage: the pod's first output — a profile's echo, an
+ * entrypoint's banner — can arrive in the same read as the ready marker, because
+ * nothing forces the kubelet to flush the two separately. Discarding the tail
+ * therefore loses whatever the shell said at startup, and (because the tail is
+ * handed to the FIRST command's scanner) can also cut the head off that
+ * command's own output if the pod coalesces the two further downstream.
+ *
+ * It cuts from OUR marker, not from byte 0: a pod that prints `__TNT__E` before
+ * the marker would otherwise move the cut, and the ready marker itself would be
+ * handed to the first command as output (fix round 2).
+ *
+ * Byte-exact on purpose: re-encoding the decoded text would mangle a multi-byte
+ * character the decoder happened to hold across a chunk boundary.
+ */
+export function bytesAfterReady(bytes: Uint8Array): Uint8Array<ArrayBuffer> | null {
+  // Find OUR marker first, then its end from there — exactly as `parseReady`
+  // does. Scanning from byte 0 would find any `__TNT__E` the pod printed
+  // BEFORE the marker (an odd startup banner, a logging wrapper, or a hostile
+  // pod — a pod is not trusted, AGENTS §7) and cut there instead, handing the
+  // ready marker itself to the first command's parser as output (fix round 2).
+  const start = indexOfBytes(bytes, readyBegin());
+  if (start === -1) {
+    return null;
+  }
+  const end = indexOfBytes(bytes, readyEnd(), start);
+  if (end === -1) {
+    return null;
+  }
+  // The bootstrap's `printf` ends its marker with `\n`, so the bytes after the
+  // marker begin with that newline — the one OUR printf added, not the pod's.
+  return stripLeadingNewline(bytes.subarray(end + readyEnd().length));
+}
 
 /**
  * Parse the ready marker out of `text` (`__TNT__R_<pid>_<cwd>__TNT__E`). `pid`
@@ -352,11 +389,11 @@ export function formatBody(head: string, tail: string, dropped: number): string 
 }
 
 /** Remove exactly ONE leading `\n` (the one our `printf` adds), not the command's own. */
-export function stripLeadingNewline(bytes: Uint8Array): Uint8Array {
+export function stripLeadingNewline(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   if (bytes.length > 0 && bytes[0] === 0x0a) {
-    return bytes.subarray(1);
+    return bytes.subarray(1).slice();
   }
-  return bytes;
+  return bytes.slice();
 }
 
 /** Split output into lines, keeping blank ones (the Ink `Text` rule is a render concern). */
@@ -448,21 +485,31 @@ export interface ResultTextInput {
   readonly dropped: number;
   /** `[shell stderr]` diagnostics, when the shell itself said something. */
   readonly shellStderr?: string;
+  /**
+   * Informational lines (`[opened sh in …]`) printed after the header. They do
+   * NOT count toward `isError`: an informative open line must not turn a
+   * successful `hostname` into an error (docs/fix/workload-shell-live.md D1).
+   */
+  readonly info?: readonly string[];
   readonly notices: readonly WorkloadShellNotice[];
 }
 
 /**
  * The model-facing result: a header (`exit=` first, the `shellTool` convention),
- * the body, then one line per notice.
+ * then any `info` lines, the body, then one line per notice.
  *
  * It is an ERROR when the exit code is non-zero OR any notice applies: a notice
  * always means the shell's state (cwd/env) is gone or the outcome is unknown, and
  * a model that reads "exit=0" alone would trust a state that no longer exists.
+ * `info` is excluded from that rule: it only says where the shell opened.
  */
 export function resultText(input: ResultTextInput): { content: string; isError: boolean } {
   const seconds =
     input.seconds < 10 ? input.seconds.toFixed(1) : Math.round(input.seconds).toString();
   const lines = [`exit=${input.exitCode} · cwd=${input.cwd} · ${input.target} · ${seconds}s`];
+  for (const line of input.info ?? []) {
+    lines.push(line);
+  }
   if (input.body !== "") {
     lines.push(input.body);
   }
