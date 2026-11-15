@@ -498,7 +498,51 @@ Every mutation was reverted and the file re-run green. The new modules are featu
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-15* (fresh context. Execution is signed by the same model, but commit `2dca65b3` says "exec (deepseek)", so see finding 2.)
+
+**Verdict: REQUEST-CHANGES**
+
+**Gate (re-run).**
+- `bun test apps/mobile/test`: 1146 pass, 0 fail.
+- `bun run lint`: 1457 files, clean.
+- `bun run typecheck` (root, mobile, relay): clean.
+- The full `bun test` was not re-run; the diff touches only `apps/mobile`.
+
+**Findings.**
+
+1. **HIGH: a cancel during a pending native start leaves the mic running, with no UI.**
+   - TS half (`dictation.ts`):
+     - `preparing{starting}` + `tap`, `send`, background, `ttsStarting` or `dispose` goes to idle and emits `cancel` (`:415-428`).
+     - A late `started` that arrives in idle is dropped with no effect (`:320-332`).
+     - Repro `.tentacle/tmp/mobile-voice/race.ts` prints `idle+started → idle []`.
+   - Swift half:
+     - `AnalyzerEngine.start` awaits four times (`:96-109`), then calls `startAudio` without checking `finished` (`:110`).
+     - A `cancel` that lands during those awaits runs `finish` → `engineEnded`. That sets `SpeechCore.engine = nil` (`SpeechCore.swift:191`), so no later stop or cancel can reach the engine.
+     - The audio tap then feeds an analyzer that nothing cancels. `consume` keeps `self` alive while the results stream is open (`:108,113`).
+     - `RecognizerEngine.begin` has the same missing `finished` check (`RecognizerEngine.swift:52`). It also has a window where the cancel's main-queue hop runs before `engine = next` (`SpeechCore.swift:176`).
+   - Result: the mic stays live and transcribes into a reducer that ignores it. Nothing auto-stops it, because the ticker runs only while listening.
+   - Fix:
+     - re-check `finished` after every await in both engines' start;
+     - have the reducer answer a `started` that arrives in idle or failed with `cancel`;
+     - preferably, tag dictation events with an id, as drift 1 already does for speech;
+     - add a regression test for "late `started` → cancel".
+   - Untested on device, like all native code here.
+2. **MEDIUM (process, §10): who executed is unclear.** Execution is signed `claude-opus-5-5`, but the exec commit says deepseek. §10 uses the signature to track model drift, and this L task needed a strong executor. Fix the signature so it is true.
+
+**Mutation (non-vacuity).** Dropped `&& rec.onDevice` in `speech-engine.ts:60`. Result: 3 fail (`speech-engine` F1 ×2, `dictation` F1 ×1). Restored from a scratch copy; `git status` is clean.
+
+**Attacks tried.**
+- F1 never-cloud: holds in TS (mutation above) and in Swift (`RecognizerEngine.swift:41,79` guard plus `requiresOnDeviceRecognition`).
+- F13 dispose: the listener is removed first (`voice-controller.ts:317`). Holds.
+- F11 speak during dictation:
+  - the order on the main queue is stop, then speak (`setCategory(.playback)` while the input tap is still running for one hop);
+  - no deterministic defect found statically; needs a device.
+- F4 deactivation: `deactivateIfIdle` runs from `didFinish` and depends on `synthesizer.isSpeaking` being false inside that callback. Unverified: if it is still true there, other audio stays ducked. Check on device.
+- Start/cancel race: finding 1.
+
+**What holds.** The pure modules follow §7 (logic out of components). No protocol, persistence or daemon change. The plist keys were checked through `expo config` introspect.
+
+**Executor behaviour.** Honest about what is unverified (Step 0, Maestro, the Expo glue). Missed the dictation-side counterpart of its own speech-`id` drift fix.
 
 ## Notes / debt (for Review)
 
