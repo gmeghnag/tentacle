@@ -62,7 +62,30 @@ export type HookName =
    * Flip the simulator to `?name=light|dark` (mobile-ui-polish slice 6): flow 24
    * shoots every screen in both appearances in one walk.
    */
-  | "appearance";
+  | "appearance"
+  /**
+   * docs/feat/mobile-notifications.md N8: seal one `PushMessage` of the flow's
+   * choosing to the simulator's push key and place it (`simctl push`), so a flow
+   * can exercise an ask it can reply to — or a forged one — on cue.
+   * `?kind=ask|ask_resolved|turn_done|turn_failed&forged=1&reply=1&hostile-aps=1`.
+   */
+  | "seal-push"
+  /**
+   * docs/feat/mobile-notifications.md N8 (Owner Q7): inject a notification
+   * RESPONSE into the app's dispatcher (a dev-build-only hook — Maestro cannot
+   * long-press a system banner). `?action=approve|deny|reply|open&text=…&forged=1`
+   * acts on the LAST `seal-push` the flow placed; the app then runs the real
+   * path (Face ID prompt included).
+   */
+  | "notify-respond"
+  /**
+   * docs/feat/mobile-notifications.md N8: the asks the daemon has PENDING on a
+   * session (`?session=…`), read from the harness's own client. A notification
+   * flow names one of these so its injected action answers the daemon's real ask.
+   */
+  | "pending-ask"
+  /** docs/feat/mobile-notifications.md N8: the payload the last `seal-push` placed. */
+  | "notify-payload";
 
 /** The hooks that take a query parameter (`?session=…&prompt=…`). */
 export interface HookQuery {
@@ -76,6 +99,18 @@ export interface HookQuery {
   readonly ttlMs?: string;
   /** `pair-revoke`'s device name (what `tentacle devices revoke` matches). */
   readonly name?: string;
+  /** `seal-push`: which plaintext to seal (`ask` by default). */
+  readonly kind?: string;
+  /** `seal-push`/`notify-respond`: seal with a NON-pinned sender key (F4/F5). */
+  readonly forged?: string;
+  /** `seal-push`: an ask that offers a reply (the reply flow). */
+  readonly reply?: string;
+  /** `seal-push`: a rewritten outer `aps` (F5). */
+  readonly "hostile-aps"?: string;
+  /** `notify-respond`: the action to inject (`approve`/`deny`/`reply`/`open`). */
+  readonly action?: string;
+  /** `seal-push`: the REAL pending ask's `requestId`. */
+  readonly request?: string;
 }
 
 export interface Hooks {
@@ -195,6 +230,35 @@ export interface HookActions {
   }>;
   /** Set THIS simulator's appearance (`simctl ui <udid> appearance …`). */
   readonly appearance: (name: Appearance) => Promise<void>;
+  /**
+   * Seal one plaintext to the paired device's push key and place it
+   * (docs/feat/mobile-notifications.md N8). Returns the payload it placed.
+   */
+  readonly sealPush: (options: {
+    readonly kind: string;
+    readonly forged?: boolean;
+    readonly reply?: boolean;
+    readonly hostileAps?: boolean;
+    /** The REAL session the plaintext names (so an injected action answers it). */
+    readonly session?: string;
+    /** The REAL pending ask's `requestId` (from `laptop.pendingAsks`). */
+    readonly request?: string;
+  }) => Promise<{ readonly payload: { readonly aps: unknown; readonly tp: unknown } }>;
+  /**
+   * Inject a notification response for the last placed push (N8, Owner Q7). The
+   * app runs the real dispatcher: Face ID, the answer, the fallback.
+   */
+  /** What the last `seal-push` placed, so a flow can end on the real payload. */
+  readonly notifyPayload: () => Promise<{
+    readonly payload: { readonly aps: unknown; readonly tp: unknown };
+  }>;
+  /** The real pending asks on a session, oldest first (a flow names one). */
+  readonly pendingAsk: (sessionId: string) => Promise<readonly string[]>;
+  readonly notifyRespond: (options: {
+    readonly action: string;
+    readonly text?: string;
+    readonly forged?: boolean;
+  }) => Promise<{ readonly accepted: boolean }>;
 }
 
 /** The simulator appearances the `appearance` hook sets. */
@@ -241,6 +305,14 @@ export function hookFor(path: string): HookName | undefined {
     case "push-payload":
       return name;
     case "push-place":
+      return name;
+    case "seal-push":
+      return name;
+    case "notify-respond":
+      return name;
+    case "pending-ask":
+      return name;
+    case "notify-payload":
       return name;
     default:
       return undefined;
@@ -417,6 +489,47 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
           }
           case "push-place": {
             return Response.json({ ok: true, hook, ...(await deps.actions.pushPlace()) });
+          }
+          case "seal-push": {
+            const payload = await deps.actions.sealPush({
+              kind: query.kind ?? "ask",
+              ...(query.session !== undefined ? { session: query.session } : {}),
+              ...(query.request !== undefined ? { request: query.request } : {}),
+              ...(query.forged !== undefined ? { forged: query.forged !== "0" } : {}),
+              ...(query.reply !== undefined ? { reply: query.reply !== "0" } : {}),
+              ...(query["hostile-aps"] !== undefined
+                ? { hostileAps: query["hostile-aps"] !== "0" }
+                : {}),
+            });
+            return Response.json({ ok: true, hook, ...payload });
+          }
+          case "notify-payload":
+            return Response.json({ ok: true, hook, ...(await deps.actions.notifyPayload()) });
+          case "pending-ask": {
+            const session = query.session;
+            if (session === undefined) {
+              return Response.json({ ok: false, error: "session is required" }, { status: 400 });
+            }
+            return Response.json({
+              ok: true,
+              hook,
+              requests: await deps.actions.pendingAsk(session),
+            });
+          }
+          case "notify-respond": {
+            const action = query.action;
+            if (action === undefined) {
+              return Response.json(
+                { ok: false, error: "action is required (approve|deny|reply|open)" },
+                { status: 400 },
+              );
+            }
+            const result = await deps.actions.notifyRespond({
+              action,
+              ...(query.text !== undefined ? { text: query.text } : {}),
+              ...(query.forged !== undefined ? { forged: query.forged !== "0" } : {}),
+            });
+            return Response.json({ ok: true, hook, ...result });
           }
           case "appearance": {
             const name = appearanceOf(query.name);

@@ -25,7 +25,14 @@
     "formatter": { "quoteStyle": "double", "trailingCommas": "all", "semicolons": "always" }
   },
   "files": {
-    "ignore": ["node_modules", "dist", "**/*.tsbuildinfo", "coverage", "stubs"]
+    "ignore": [
+      "node_modules",
+      "dist",
+      "**/*.tsbuildinfo",
+      "coverage",
+      "stubs",
+      "apps/mobile/native-tests/PushCoreTests/.build"
+    ]
   },
   "overrides": [
     {

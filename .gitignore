@@ -31,3 +31,5 @@ coverage/
 apps/mobile/ios/
 apps/mobile/android/
 apps/mobile/.expo/
+# SwiftPM's build products for the NSE's test package (docs/feat/mobile-notifications.md N5)
+apps/mobile/native-tests/PushCoreTests/.build/

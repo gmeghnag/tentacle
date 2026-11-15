@@ -185,6 +185,13 @@ export interface LaptopLink {
   ): Promise<{ turnId: string }>;
   /** Answer the pending ask if this peer was offered one (the first answer wins). */
   answer(sessionId: string, answer: LaptopAnswer): Promise<void>;
+  /**
+   * The asks the daemon has pending on a session, by `requestId` — what a
+   * notification flow must name so the action it injects answers THAT ask
+   * (docs/feat/mobile-notifications.md N8). Read from this peer's own router
+   * after it attached (the replayed `permission_request` is what put them there).
+   */
+  pendingAsks(sessionId: string): readonly string[];
   /** Steer the RUNNING turn of `sessionId` (13d's flow 15: another device's row). */
   enqueue(sessionId: string, text: string): Promise<{ id: string }>;
   /** Stop the running turn (`session/cancel{turnId}`): 13d's flow 14. */
@@ -251,6 +258,9 @@ export async function laptopLink(deps: {
 
   return {
     client,
+    pendingAsks(sessionId) {
+      return client.pendingPermissionsOf(sessionId);
+    },
     async prompt(sessionId, prompt, answer) {
       const session = await handle(sessionId);
       const turnId = crypto.randomUUID();

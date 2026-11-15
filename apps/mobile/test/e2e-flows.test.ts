@@ -535,3 +535,85 @@ describe("P10's push flow (docs/feat/mobile-push.md)", () => {
     expect(body).toMatch(/does \*\*NOT\*\* prove/i);
   });
 });
+
+describe("N8's notification flows (docs/feat/mobile-notifications.md)", () => {
+  // The flows' whole value is three things: what is placed is a REALLY sealed
+  // payload (so the app's decrypt path is what runs), what is injected goes
+  // through the app's real dispatcher, and the last step reads the DAEMON — never
+  // a screen. A flow that hand-wrote a payload or asserted a banner would read as
+  // coverage of work it never touched.
+  const NOTIFY_FLOWS = [
+    "22-notify-render",
+    "22-notify-approve",
+    "22-notify-deny",
+    "22-notify-reply",
+    "22-notify-forged",
+  ] as const;
+
+  test("every one is run, and every file it names exists", () => {
+    for (const flow of NOTIFY_FLOWS) {
+      expect(FLOWS).toContain(flow);
+      for (const file of scripts(flow)) {
+        expect(() => scriptBody(file)).not.toThrow();
+      }
+    }
+  });
+
+  test("each answer flow names the daemon's REAL pending ask, never a synthetic one", () => {
+    // Mutation: seal a made-up `requestId` → the answer gets PermissionNotPending
+    // and the "daemon truth: answered" step could never pass. So the sealing step
+    // must READ the daemon first.
+    for (const flow of [
+      "22-notify-approve",
+      "22-notify-deny",
+      "22-notify-reply",
+      "22-notify-forged",
+    ]) {
+      const files = scripts(flow);
+      const seal = files.find((f) => f.startsWith("22-notify-seal"));
+      expect(seal).toBeDefined();
+      const body = scriptBody(seal ?? "");
+      expect(body).toContain("pending-ask?session=");
+      expect(body).toContain("&request=");
+    }
+  });
+
+  test("the answer flows end on DAEMON truth, and the negative one expects PENDING", () => {
+    // A flow asserting "nothing happened" by looking at a screen passes on a
+    // stale frame; the forged case MUST read the daemon's pending list.
+    const forged = readFileSync(join(FLOWS_DIR, "22-notify-forged.yaml"), "utf8");
+    expect(forged).toContain('MAESTRO_NOTIFY_EXPECT: "pending"');
+    for (const flow of ["22-notify-approve", "22-notify-deny", "22-notify-reply"]) {
+      const body = readFileSync(join(FLOWS_DIR, `${flow}.yaml`), "utf8");
+      expect(body).toContain('MAESTRO_NOTIFY_EXPECT: "answered"');
+      const files = scripts(flow);
+      // The reply flow's last step is its own model assertion; the others end on
+      // the daemon's pending list. Both are DAEMON truth, never a screen.
+      const last = files[files.length - 1] ?? "";
+      expect(last === "22-notify-assert.js" || last === "22-notify-reply-assert.js").toBe(true);
+    }
+  });
+
+  test("the flows say what a simulator CANNOT prove (the NSE needs a device build)", () => {
+    // D3a is an owner step: until it exists there is no extension in the app, so
+    // no flow may claim to have exercised it.
+    for (const flow of NOTIFY_FLOWS) {
+      const body = readFileSync(join(FLOWS_DIR, `${flow}.yaml`), "utf8");
+      expect(body).toMatch(/CANNOT|placeholder|device build/);
+    }
+  });
+
+  test("no flow CONSTRUCTS a payload (it is sealed by the harness, from the real keys)", () => {
+    // Reading a placed payload back is fine (that is the assertion); BUILDING one
+    // in a script is not — a hand-written `aps`/`tp` would prove nothing about
+    // the app's decrypt path. So: no object literal with `tp:`/`aps:` keys, and
+    // every script goes through a hook.
+    for (const flow of NOTIFY_FLOWS) {
+      for (const file of scripts(flow)) {
+        const body = scriptBody(file);
+        expect(body).not.toMatch(/\b(aps|tp)\s*:\s*\{/);
+        expect(body).toMatch(/MAESTRO_HOOKS/);
+      }
+    }
+  });
+});

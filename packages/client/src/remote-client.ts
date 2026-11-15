@@ -29,6 +29,7 @@ import {
   countTokensBounded,
   formatBytes,
 } from "@tentacle/core";
+import type { PermissionResponse } from "@tentacle/core";
 import {
   ATTACHMENT_CHUNK_BYTES,
   type AgentCapabilities,
@@ -119,8 +120,17 @@ import {
   stopped,
 } from "./link-machine.ts";
 import { gateExitText } from "./mapping.ts";
-import { answerLostCause, normalizePermissionReply } from "./permission-map.ts";
-import { PermissionRouter, type RouterAction } from "./permission-router.ts";
+import {
+  answerLostCause,
+  normalizePermissionReply,
+  notificationAnswerOutcome,
+} from "./permission-map.ts";
+import {
+  type NotificationAnswerOutcome,
+  PermissionRouter,
+  type PermissionSendAction,
+  type RouterAction,
+} from "./permission-router.ts";
 import { RemoteSession } from "./remote-session.ts";
 import { type LogOutcome, type LogState, applyLogRead } from "./session-log-reader.ts";
 import { SessionLostError } from "./session-lost.ts";
@@ -1711,6 +1721,74 @@ export class RemoteClient {
     return [...this.sessions.values()]
       .filter((entry) => entry.everLive && !entry.closing)
       .map((entry) => entry.id);
+  }
+
+  /**
+   * The permission asks this client is holding for a session — the one prompted
+   * and any queued behind it, oldest first (a read of the router; display and
+   * routing only, since `answerById` re-validates). The notification path names
+   * an ask with it before sealing an answer about it (mobile-notifications N8).
+   */
+  pendingPermissionsOf(sessionId: string): readonly string[] {
+    return this.router.heldIds(sessionId);
+  }
+
+  /**
+   * Is this session attached (live) on THIS client right now? What the
+   * notification path asks before attaching, so it never attaches (or
+   * detaches) a session a screen is already showing (docs/feat/mobile-notifications.md
+   * Design 4/F19).
+   */
+  isAttached(sessionId: string): boolean {
+    const entry = this.sessions.get(sessionId);
+    return entry?.everLive === true && !entry.closing && entry.attach === undefined;
+  }
+
+  /**
+   * Answer a permission request BY ID, for a decision made outside the prompt —
+   * a notification's Approve / Deny / Reply (docs/feat/mobile-notifications.md
+   * Design 5). Same keyed `session/resolve_permission` as the sheet, same
+   * error mapping, no broker requester and no new frame: the router's
+   * `answerById` settles a held ask whether or not it is the one on screen.
+   *
+   * Says what became of it, so the phone can be truthful (an outcome the person
+   * sees, never a silent drop): `sent`, `not-pending` (another answer won, the
+   * ask is gone, or it was already answered here), `unoffered`, `unreplyable`,
+   * `session-lost` (may have arrived) or `failed` (not delivered — a later
+   * replay offers the ask again).
+   */
+  async answerPermission(
+    sessionId: string,
+    requestId: string,
+    response: PermissionResponse,
+  ): Promise<NotificationAnswerOutcome> {
+    const actions = this.router.answerById(sessionId, requestId, response);
+    // Only the prompt withdrawal is executed here: the `send` is awaited below,
+    // so its outcome (not a fire-and-forget) is what the person is told.
+    this.runPermissionActions(actions.filter((a) => a.kind === "abort"));
+    const send = actions.find((a): a is PermissionSendAction => a.kind === "send");
+    if (actions.some((a) => a.kind === "unoffered")) {
+      return "unoffered";
+    }
+    if (actions.some((a) => a.kind === "unreplyable")) {
+      return "unreplyable";
+    }
+    if (!send) {
+      return "not-pending";
+    }
+    try {
+      await this.sendAnswer(send);
+      return "sent";
+    } catch (error) {
+      const outcome = notificationAnswerOutcome(error);
+      if (outcome === "not-pending") {
+        // Answered elsewhere (or gone): expected, not an error, nothing to undo.
+        return outcome;
+      }
+      // Not delivered (or maybe not): a later replay must offer it again.
+      this.router.answerFailed(sessionId, requestId);
+      return outcome;
+    }
   }
 
   /**
@@ -3834,6 +3912,24 @@ export class RemoteClient {
   }
 
   /**
+   * Write one permission answer: the keyed `session/resolve_permission` the
+   * sheet and a notification's action BOTH send (one wire shape, one place).
+   */
+  private sendAnswer(send: PermissionSendAction): Promise<unknown> {
+    return this.sessionCall(
+      send.sessionId,
+      Method.ResolvePermission,
+      {
+        sessionId: send.sessionId,
+        requestId: send.requestId,
+        optionId: send.optionId,
+        ...(send.message !== undefined ? { message: send.message } : {}),
+      },
+      "keyed",
+    );
+  }
+
+  /**
    * Execute the router's decisions: a prompt goes to the broker with an abort
    * handle (its answer comes back to the router), an abort withdraws it, a
    * send answers the daemon. A losing answer (`PermissionNotPending`) is
@@ -3907,17 +4003,7 @@ export class RemoteClient {
         // with a recreated session, is not an error. The daemon takes a re-send
         // of the answer that already settled it (after a drop) as a success.
         const lost = action.message !== undefined ? onLost : undefined;
-        this.sessionCall(
-          sessionId,
-          Method.ResolvePermission,
-          {
-            sessionId,
-            requestId,
-            optionId: action.optionId,
-            ...(action.message !== undefined ? { message: action.message } : {}),
-          },
-          "keyed",
-        )
+        this.sendAnswer(action)
           .then(() => undefined)
           .catch((error: unknown) => {
             // The decision stays silent; only the person's words come back.

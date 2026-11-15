@@ -21,7 +21,8 @@
     "docs:config": "bun scripts/config-docs.ts",
     "e2e:mobile": "bun apps/mobile/e2e/run.ts",
     "compile": "bun run scripts/build.ts",
-    "release": "bun run scripts/release.ts"
+    "release": "bun run scripts/release.ts",
+    "test:swift": "cd apps/mobile/native-tests/PushCoreTests && swift test"
   },
   "dependencies": {
     "react-devtools-core": "file:./stubs/react-devtools-core"

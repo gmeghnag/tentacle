@@ -58,7 +58,8 @@
           "mode": "development",
           "enableBackgroundRemoteNotifications": false
         }
-      ]
+      ],
+      "@bacons/apple-targets"
     ],
     "icon": "./assets/icon.png"
   }
