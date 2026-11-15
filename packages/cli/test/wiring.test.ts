@@ -620,8 +620,14 @@ describe("the local TUI's single broker (AGENTS §7), pinned where it is built",
     const block = main.slice(main.indexOf("const sessions = await openSessions(topFlags"));
     const tui = block.slice(0, block.indexOf("// A one-shot prompt"));
     expect(tui.match(/new PermissionBroker\(/g) ?? []).toHaveLength(1);
-    // The SAME identifier reaches both the runtime and the TUI.
-    expect(tui).toContain("startWorkerRuntime(config, { permissions, saver");
+    // The SAME identifier reaches both the runtime and the TUI. (The call goes
+    // through the `startWorkerRuntime` test seam — `io.startWorkerRuntime ?? …` —
+    // so the assertion names the argument object, not the callee text; the seam
+    // defaults to the real `startWorkerRuntime`.)
+    expect(tui).toMatch(
+      /\(io\.startWorkerRuntime \?\? startWorkerRuntime\)\(\s*config,\s*\{ permissions, saver/,
+    );
+    expect(tui).not.toContain("new PermissionBroker(), saver");
     expect(tui).toMatch(/startTui\(null, \{\n\s*model: config\.model,\n[\s\S]*?\n\s*permissions,/);
   });
 });

@@ -14,6 +14,7 @@ import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
 import type { BackgroundAgentRow } from "../src/background-view.ts";
 import { autoAcceptTest } from "../src/permission-ui.ts";
+import { inertSession } from "./session-stub.ts";
 
 /** A row of the background list as the tests drive it. */
 type DockRow = BackgroundAgentRow;
@@ -29,6 +30,7 @@ const ONCE: PermissionResponse = { allowed: true, scope: "once" };
  */
 function wakingSession(opts: { readonly autoAcceptsTurn?: boolean } = {}): SessionController {
   const ctrl: SessionController = {
+    ...inertSession(),
     async *send() {
       yield { type: "turn_end", reason: "end_turn" };
     },
@@ -142,6 +144,7 @@ describe("T10: the drawer's `✓ read` follows the daemon's row", () => {
     const rowListeners = new Set<(rows: readonly DockRow[]) => void>();
     const messageListeners = new Set<(m: { agentId: string; text: string; n?: number }) => void>();
     const ctrl = {
+      ...inertSession(),
       async *send() {
         yield { type: "turn_end", reason: "end_turn" };
       },

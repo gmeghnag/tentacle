@@ -21,6 +21,7 @@ import type { PermissionRequest, PermissionResponse } from "@tentacle/core";
 import { PermissionBroker } from "@tentacle/core";
 import { App, type SessionController } from "@tentacle/tui";
 import { render } from "ink-testing-library";
+import { inertSession } from "../../tui/test/session-stub.ts";
 import { createHopFeed } from "../src/hop-feed.ts";
 import type { HopOutcome } from "../src/session-hop.ts";
 
@@ -55,6 +56,7 @@ const MOVED: HopOutcome = {
  */
 function proposingSession(log: { sends: string[] }): SessionController {
   return {
+    ...inertSession(),
     async *send(prompt) {
       log.sends.push(prompt);
       yield {

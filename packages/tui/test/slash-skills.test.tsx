@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
 import { PALETTE_MAX_ROWS } from "../src/commands.ts";
+import { inertSession } from "./session-stub.ts";
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const UP = "\u001B[A";
@@ -28,6 +29,7 @@ function recordingSession(
   catalog: () => readonly Skill[] = () => SKILLS,
 ): () => SessionController {
   return () => ({
+    ...inertSession(),
     skills: async () => ({ slash: catalog(), skills: [], problems: [], moreProblems: 0 }),
     async *send(prompt, signal, opts) {
       sent.push({ prompt, skill: opts?.skill });
@@ -228,6 +230,7 @@ function gatedSession(sent: Sent[]): { create: () => SessionController; release:
   });
   return {
     create: () => ({
+      ...inertSession(),
       skills: async () => {
         if (asks++ === 0) {
           return answer([alpha]);

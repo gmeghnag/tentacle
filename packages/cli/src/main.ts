@@ -509,6 +509,14 @@ export interface CliIO {
   /** Test seam: the TUI of an `attach` to a detached run (pins the single broker). */
   startTui?: typeof startTui;
   /**
+   * Test seam: the local TUI's worker runtime. Default: `startWorkerRuntime`.
+   * The ONE contract a test needs it for is the failure path: a worker that
+   * cannot start must be an error line + exit 1 with NO Ink (docs/feat/
+   * remove-in-process.md F1/F2, the task's Goal) — injectable, or the only way to
+   * reach it is to break Bun.
+   */
+  startWorkerRuntime?: typeof startWorkerRuntime;
+  /**
    * Test seam: which of stdin / stdout are a terminal. Default: the process's own
    * `isTTY` (resolved once, at the top of `main`). A test that omits this seam DOES
    * read the runner's terminal: pass it (`{ stdin: false, stdout: false }`) to be hermetic.
@@ -2070,7 +2078,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
     let runtime: LocalRuntime;
     try {
-      runtime = await startWorkerRuntime(config, { permissions, saver, resume: resumeRecord }, err);
+      runtime = await (io.startWorkerRuntime ?? startWorkerRuntime)(
+        config,
+        { permissions, saver, resume: resumeRecord },
+        err,
+      );
     } catch (error) {
       // Pre-mount (P2), so stderr is still ours. Nothing was written: the
       // session lock is taken per write, and `openSessions` only loads (P1).

@@ -15,6 +15,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { App, type SessionController } from "../src/App.tsx";
 import type { DockJobRow } from "../src/background-list.ts";
 import { renderAt } from "./real-term.tsx";
+import { inertSession } from "./session-stub.ts";
 import { BACKGROUND_ROW, type DockTestRow } from "./subagent-row.ts";
 
 const DOWN = "\u001B[B";
@@ -67,6 +68,7 @@ function fake(opts: {
   const prompts: string[] = [];
   let aborts = 0;
   const session = {
+    ...inertSession(),
     async *send(text: string) {
       prompts.push(text);
       yield { type: "text", delta: "ok" };

@@ -19,6 +19,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type AppProps, type SessionController } from "../src/App.tsx";
 import type { DockJobRow } from "../src/background-list.ts";
+import { inertSession } from "./session-stub.ts";
 import { BACKGROUND_ROW, type DockTestRow } from "./subagent-row.ts";
 
 const ENTER = "\r";
@@ -32,6 +33,7 @@ function fake(opts: { agents?: readonly DockTestRow[]; jobs?: readonly DockJobRo
 } {
   const prompts: string[] = [];
   const session = {
+    ...inertSession(),
     async *send(prompt: string) {
       prompts.push(prompt);
       yield { type: "text", delta: `reply to ${prompt}` };

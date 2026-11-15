@@ -29,6 +29,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type RunQuit, type SessionController } from "../src/App.tsx";
 import type { SessionActivity } from "../src/turn-feed.ts";
+import { inertSession } from "./session-stub.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const strip = (s: string | undefined) =>
@@ -44,15 +45,15 @@ interface Log {
 
 /**
  * A session whose turn HANGS until aborted (`hang*` prompts) or answers at once.
- * `withClear: false` is the in-process fallback (`/clear`'s legacy path).
  */
-function rig(opts: { holdTurn?: boolean; withClear?: boolean; clearHangs?: boolean } = {}) {
+function rig(opts: { holdTurn?: boolean; clearHangs?: boolean } = {}) {
   const log: Log = { clears: [], closes: [], creates: 0 };
   let listener: ((a: SessionActivity) => void) | null = null;
   // `exit()` unmounts Ink's tree, which runs the notices effect's cleanup: the
   // only in-harness proof that the TUI really left (run-quit.test.tsx's probe).
   let gone = false;
   const ctrl = {
+    ...inertSession(),
     async *send(prompt: string, signal?: AbortSignal) {
       yield { type: "text", delta: `reply to ${prompt}` };
       if (opts.holdTurn) {
@@ -75,15 +76,13 @@ function rig(opts: { holdTurn?: boolean; withClear?: boolean; clearHangs?: boole
     },
     ownsTurn: () => true,
   } as unknown as SessionController;
-  if (opts.withClear !== false) {
-    ctrl.clear = () => {
-      log.clears.push("clear");
-      if (opts.clearHangs) {
-        return new Promise(() => {});
-      }
-      return Promise.resolve({ before: 3, after: 1 });
-    };
-  }
+  ctrl.clear = () => {
+    log.clears.push("clear");
+    if (opts.clearHangs) {
+      return new Promise(() => {});
+    }
+    return Promise.resolve({ before: 3, after: 1 });
+  };
   const app = render(
     <App
       createSession={() => {
@@ -157,7 +156,7 @@ describe("S8: /quit executes through the hook (live refs, the same decision)", (
     s.app.unmount();
     const withRun = render(
       <App
-        createSession={() => ({}) as unknown as SessionController}
+        createSession={() => inertSession() as unknown as SessionController}
         permissions={new PermissionBroker()}
         model="m"
         cwd="/tmp/work"
@@ -216,15 +215,17 @@ describe("S8: /clear executes through the hook (its step, its refs)", () => {
     r.app.unmount();
   });
 
-  test("legacy: a session with no `clear` closes and swaps — the hook's `makeSession`/`swapSession` wiring", async () => {
-    // Mutation: the `legacy` branch reaching for `runClear` instead of the
-    // legacy swap → nothing closes, the old session keeps serving.
-    const r = rig({ withClear: false });
+  test("legacy is gone: `/clear` resets in place — nothing closes, no second session", async () => {
+    // docs/feat/remove-in-process.md: `clear` is required, so `/clear` has ONE
+    // path. Mutation: restore the `canClear === false` close-and-replace arm →
+    // `closes` gets "close" and `creates` reaches 2.
+    const r = rig();
     await delay(40);
     await type(r.app.stdin, "/clear");
     await delay(80);
-    expect(r.log.closes).toEqual(["close"]);
-    expect(r.log.creates).toBe(2);
+    expect(r.log.clears).toEqual(["clear"]);
+    expect(r.log.closes).toEqual([]);
+    expect(r.log.creates).toBe(1);
     r.app.unmount();
   });
 });

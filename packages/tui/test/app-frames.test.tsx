@@ -10,6 +10,7 @@ import { render } from "ink-testing-library";
 import { App, type AppProps, type SessionController, type SessionDirectory } from "../src/App.tsx";
 import type { FileProbe } from "../src/attach-files.ts";
 import type { DockJobRow } from "../src/background-list.ts";
+import { inertSession } from "./session-stub.ts";
 import { BACKGROUND_ROW, type DockTestRow } from "./subagent-row.ts";
 
 const ENTER = "\r";
@@ -61,6 +62,7 @@ function fake(
   opts: { agents?: readonly DockTestRow[]; jobs?: readonly DockJobRow[] } = {},
 ): SessionController {
   return {
+    ...inertSession(),
     async *send(prompt: string, signal?: AbortSignal) {
       yield { type: "text", delta: `reply to ${prompt}` };
       if (prompt.startsWith("hang")) {

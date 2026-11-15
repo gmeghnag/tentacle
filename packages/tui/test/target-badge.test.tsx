@@ -7,6 +7,8 @@ import { StatusBar } from "../src/components/StatusBar.tsx";
 import type { ContextOpen } from "../src/status-view.ts";
 import type { TargetBadge } from "../src/target-view.ts";
 import { tokens } from "../src/theme.ts";
+import type { SessionActivity } from "../src/turn-feed.ts";
+import { inertSession } from "./session-stub.ts";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -14,6 +16,7 @@ const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 function session(context?: () => Promise<ContextOpen>): () => SessionController {
   return () => ({
+    ...inertSession(),
     async *send() {},
     ...(context ? { context } : {}),
   });
@@ -341,13 +344,23 @@ describe("round 2 (LOW 5/6): stale answers and /compact", () => {
     await delay(80);
   };
 
-  test("a late answer for a session the view has LEFT (/clear) is dropped", async () => {
+  test("a late answer for a session the view has LEFT (a swap) is dropped", async () => {
+    // docs/feat/remove-in-process.md: `/clear` resets in place, so the view only
+    // LEAVES a session on a swap — the `closed` activity, here.
     let release: ((v: ContextOpen) => void) | undefined;
+    const listener: { current: ((a: SessionActivity) => void) | null } = { current: null };
     let n = 0;
     const createSession = (): SessionController => {
       n += 1;
       if (n === 1) {
         return {
+          ...inertSession(),
+          watch(l) {
+            listener.current = l;
+            return () => {
+              listener.current = null;
+            };
+          },
           async *send() {},
           context: () =>
             new Promise<ContextOpen>((resolve) => {
@@ -355,14 +368,19 @@ describe("round 2 (LOW 5/6): stale answers and /compact", () => {
             }),
         };
       }
-      return { async *send() {}, context: async () => ({ used: 64000, exact: true }) };
+      return {
+        ...inertSession(),
+        async *send() {},
+        context: async () => ({ used: 64000, exact: true }),
+      };
     };
     const app = render(
       <App createSession={createSession} model="m" cwd="/w" contextWindow={128000} />,
     );
     try {
       await delay(60);
-      await type(app, "/clear");
+      listener.current?.({ kind: "closed", reason: "deleted" } as SessionActivity);
+      await delay(120);
       expect(stripAnsi(app.lastFrame() ?? "")).toContain("50% (64k/128k)");
       release?.({ used: 1000, exact: true }); // the OLD session answers late
       await delay(60);
@@ -377,6 +395,7 @@ describe("round 2 (LOW 5/6): stale answers and /compact", () => {
   test("/compact asks the context again: the figure follows the shrunk history", async () => {
     let asked = 0;
     const session: SessionController = {
+      ...inertSession(),
       async *send() {},
       async compact() {
         return { before: 10, after: 2 };

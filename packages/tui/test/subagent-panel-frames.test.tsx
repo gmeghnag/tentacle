@@ -13,6 +13,7 @@ import { App, type SessionController } from "../src/App.tsx";
 import { ARM_MS } from "../src/permission-reply.ts";
 import { resetThemeForTest, setThemeMode } from "../src/theme.ts";
 import { renderAt } from "./real-term.tsx";
+import { inertSession } from "./session-stub.ts";
 import { BACKGROUND_ROW, type DockTestRow } from "./subagent-row.ts";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
@@ -66,6 +67,7 @@ function fake(steps: {
   const prompts: string[] = [];
   let aborts = 0;
   const session = {
+    ...inertSession(),
     async *send(text: string) {
       prompts.push(text);
       // A REAL AgentEvent stream: a turn that answers at once, and — with

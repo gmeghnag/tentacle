@@ -17,7 +17,7 @@
  *   asked for mid-turn exits there) and by the key snapshot (S3);
  * - `clearingRef` / `ownClearsRef` — written by the `watch` activity effect (a
  *   `history{clear}` releases the latch and zeroes the own count) and by
- *   `swapSession`;
+ *   `swapSession` (a session-link swap);
  * - `clearAfterTurnRef` — written here, taken by the turn's settle;
  * - `runClearRef` — the forward reference the turn's settle calls (stop-then-
  *   clear), assigned by `App` right after this hook returns;
@@ -60,12 +60,6 @@ export interface RunQuit {
   closedElsewhere(reason: "closed" | "deleted" | "gone"): void;
 }
 
-/** `swapSession`, as this hook needs it (`App`'s own signature, unchanged). */
-export type QuitSwap = (
-  next: SessionController,
-  opts?: { readonly keepTranscript?: boolean; readonly onOpened?: (ok: boolean) => void },
-) => void;
-
 /**
  * The narrow port the quit and the clear execute through: the App's own state,
  * setters, refs and callbacks. A port FIELD keeps its current identity rule
@@ -74,7 +68,7 @@ export type QuitSwap = (
  * the fields and name them in deps, never `host`.
  */
 export interface QuitClearHost {
-  /** The live session (a clear's reset, a legacy close) and the display state. */
+  /** The live session (a clear's reset, a swap's target) and the display state. */
   readonly sessionRef: MutableRefObject<SessionController | null>;
   readonly stateRef: MutableRefObject<DisplayState>;
   /** What Esc/Ctrl+C aborts: the streamed turn's controller. */
@@ -104,9 +98,6 @@ export interface QuitClearHost {
   readonly runQuit: RunQuit | undefined;
   /** `connect`: quitting only detaches, so a job or a turn is not lost. */
   readonly detachOnQuit: boolean;
-  /** A session without `clear`: the legacy close-and-replace needs a fresh one. */
-  readonly makeSession: () => SessionController;
-  readonly swapSession: QuitSwap;
   readonly pushNotice: (text: string) => void;
   readonly wakeIfPending: () => void;
   /** Quit the TUI (Ink's `useApp().exit`). */
@@ -142,8 +133,6 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
     setQuitConfirm,
     runQuit,
     detachOnQuit,
-    makeSession,
-    swapSession,
     pushNotice,
     wakeIfPending,
     exit,
@@ -217,7 +206,7 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
    */
   const runClear = useCallback((): void => {
     const session = sessionRef.current;
-    if (!session?.clear) {
+    if (!session) {
       return;
     }
     // Called ON the session: under `connect` this is the `RemoteSession` CLASS
@@ -324,24 +313,17 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
 
   /**
    * `/clear`'s step (docs/feat/app-decomposition.md M5): the refusals, the
-   * latch, the stop-then-clear hand-off and the legacy close-and-replace. The
-   * decision is `clearCommandStep`'s; this only carries it out.
+   * latch and the stop-then-clear hand-off. The decision is
+   * `clearCommandStep`'s; this only carries it out.
    */
   const requestClear = useCallback((): void => {
     const step = clearCommandStep({
-      canClear: typeof sessionRef.current?.clear === "function",
       running: stateRef.current.running,
       ownTurn: foreignRef.current === null,
       compacting: compactingRef.current,
       clearing: clearingRef.current,
     });
-    if (step === "legacy") {
-      // A session without `clear` (the in-process fallback): the old
-      // session ends (with its jobs) before the fresh one starts
-      // (decision D3).
-      sessionRef.current?.close?.();
-      swapSession(makeSession());
-    } else if (step === "busy") {
+    if (step === "busy") {
       pushNotice("_A /clear is already running._");
     } else if (step === "compacting") {
       pushNotice("_Can't clear while a compaction is running._");
@@ -360,13 +342,10 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
     clearingRef,
     compactingRef,
     foreignRef,
-    makeSession,
     pushNotice,
     runClearRef,
-    sessionRef,
     stateRef,
     stoppedHereRef,
-    swapSession,
   ]);
 
   return { requestQuit, runClear, requestClear };

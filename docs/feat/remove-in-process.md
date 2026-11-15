@@ -557,3 +557,180 @@ Executor behaviour: careful on slices A and B. It recorded slice B's drift hones
 
 Same model family as the orchestrator/plan author (Opus), fresh context only; the executor was a different model.
 *— claude-opus-5-5, 2026-11-15*
+
+### Fix round 1
+
+*— claude-sonnet-4-5-20250929, 2026-11-15*
+
+All three Review findings addressed. Owner decision 2 (the TUI slice) is now
+executed; the Goal has a `main` test; the compiled binary is verified.
+
+#### Finding 1 (HIGH) — owner decision 2: the TUI fallbacks, executed
+
+Root cause of the drift: the decision asked for the members to be **required**,
+and their "absent" branches removed. That is only honest if the one session that
+had none — the local agent session App builds from its `agent` prop — is made to
+answer them too. So the change is two-sided:
+
+1. **`SessionController` (`tui/src/app-types.ts:58-121`)**: `attachImage`,
+   `imageInput`, `clear` and `sendNow` are **required** (`?` dropped). Their doc
+   comments no longer describe an "in-process fallback".
+2. **`tui/src/local-session.ts` (new, pure)**: `localSession(agent)` — the
+   adapter `App` builds when given `agent` — satisfies them honestly instead of
+   silently: `imageInput()` returns `{kind:"off", reason:"a local session cannot
+   take images"}` (the old behaviour, now an ANSWER rather than a missing
+   member), `attachImage` rejects (unreachable while `imageInput()` is off),
+   `clear()` is `clearConversation()` (an in-place reset — what a local session
+   has), and `sendNow()` rejects with `-32601` `MethodNotFound`, so the TUI takes
+   the *daemon-has-no-send-now* fallback the old absent-member branch gave, as a
+   typed answer. `App.tsx:524-534` calls it.
+3. **The branches are gone:**
+   - `clear-command.ts` — the `"legacy"` step and its `canClear` input deleted
+     (`:12-33`); `useQuitClear.ts` `requestClear` no longer has the
+     close-and-replace arm, and the hook's port dropped `makeSession`/
+     `swapSession`/`QuitSwap` (nothing used them any more).
+   - `commands/dispatch.ts:61-64` — the mid-turn `/clear` exemption is
+     unconditional (`cmd !== "/clear"`) instead of keying off `typeof clear`.
+   - `useAttachments.ts:125` — the mode is the session's answer, period; the
+     never-reachable `attachImage === undefined → NO_IMAGE_SEAM` ternary (both
+     arms identical) is gone. `sendWithImages` bounds on a null session only.
+   - `send-now.ts` — `planSendNow` lost `canSendNow`; `fallbackNotice`/
+     `compactionWaitNotice` lost their `who: "daemon" | "session"` parameter (the
+     `"session"` case was the removed one). `useTurnDriver.ts` follows.
+   - `useDock.ts:410` no longer points at `--in-process` (a flag that does not
+     exist); `permission-ui.ts:13` no longer says "in-process".
+4. **Test controllers** (owner decision: "update the TUI test controllers to
+   provide the members"): `tui/test/session-stub.ts` (new) exports
+   `inertSession()` — the four members as explicit no-ops — and ~62 doubles in
+   27 test files now spread it. Two codemods did the mechanical part, driven by
+   **`tsc`'s own error list**, not a regex:
+   `.tentacle/tmp/remove-in-process/codemod-stub.mjs` (annotated literals),
+   `codemod-casts.mjs` (the `… as unknown as SessionController` doubles, which
+   typecheck silently and fail only at RUN time — they were found by the tests).
+
+**Tests that asserted the removed behaviour were repointed, not deleted**, since
+each property still matters on the surviving path:
+
+| Test | Was | Now |
+|---|---|---|
+| `clear.test.tsx` T19d | no `clear` → close + new session | `/clear` resets in place: no close, no second session, `clears` 1 |
+| `clear.test.tsx` T19f | legacy path refused mid-turn | `/clear` exempt mid-turn on ONE path: cleared, never refused |
+| `app-quit-clear-layer.test.tsx` "legacy" | close + swap wiring | same, asserted gone |
+| `app.test.tsx` "closes BEFORE building" | close 1, create 2 | create 1 and nothing closed |
+| `commands-registry.test.ts` exempt row | exempt only when `clear` exists | exempt unconditionally (the mid-turn refused set is `/close`, `/retry`) |
+| `app-commands.test.tsx` mid-turn smoke | `/clear` refused | `/clear` never refused; new row pins it |
+| `connect-sessions.test.tsx` QN1 | `/clear` closes + news on `connect` | `/clear` resets in place, never detaches, same session serves |
+| `send-now-app.test.tsx` T-C5b | controller with no `sendNow` | daemon `MethodNotFound` (the only fallback left) |
+| T-C5c / T-C5d / T-D11 / T-D12 | "a `/clear`'s new session" | the SAME per-session latch/wake properties, on a REAL swap — a `{kind:"closed"}` activity reaching `useSessionLink.ts:522-540`, which is what resets them now that `/clear` swaps nothing |
+| `target-badge.test.tsx`, `app.test.tsx` F4 | "the view has LEFT (/clear)" | "LEFT (a swap)", same late-answer property |
+
+#### Finding 2 (MEDIUM) — the Goal is now tested at `main`
+
+New seam `CliIO.startWorkerRuntime` (`packages/cli/src/main.ts:510-519`, used at
+`:2075`; default the real function), so the error path is reachable without
+breaking Bun. New test `main.test.ts` (`describe "the local TUI's worker start…"`):
+inject a `startWorkerRuntime` that throws `WorkerStartError("handshake", …)` →
+asserts **exit 1**, that the injected `startTui` was **never reached** (no Ink),
+and the text names the phase, the reason, `Bun >= 1.4.3`, `tentacle update`, and
+never says `in-process`. Red first (M1 below).
+
+#### Finding 3 (MEDIUM) — the compiled binary, verified
+
+`bun run compile` on this tree (`0.6.0+17fb756ab5e8`) and a live `-i` session in
+`dist/tentacle`, on a pty: 5 `Tentacle ready` frames, a typed prompt echoed, the
+model error rendered by the TUI (the turn really ran), **0** `in-process` lines.
+So F2's class — a compiled binary that lost its worker — is now loud, and this
+binary is not in it. The script's own output (SGR stripped, blank lines
+dropped):
+
+```
+rc=124                     # timeout killed the pty harness: the TUI never exits on its own
+ready frames: 5
+in-process lines: 0
+worker failure lines: 0
+--- the typed prompt reached the App and its turn ran (dead endpoint → the
+    model error the TUI renders):
+❯ hello
+  /quit
+ctx ~9% (~12k/128k)
+… to connect. Is the computer able to access the url?   # the model-connection error row
+```
+
+Script: `.tentacle/tmp/remove-in-process/bin/final.sh`.
+
+#### Mutations (non-vacuity, §9) — each reverted, `rg MUTATION` clean
+
+**M1 (finding 2) — `return 1` → `return 0`** in the worker-start catch
+(`main.ts:2079`), the mutation the Review reported as surviving:
+
+```
+Expected: 1
+Received: 0
+(fail) the local TUI's worker start … a worker that cannot start: exit 1, the reason on stderr, and Ink is never mounted
+ 0 pass
+ 1 fail
+```
+
+**M2 (finding 1, `/clear`) — the `legacy` branch restored** in `clear-command.ts`:
+
+```
+(fail) /clear … T19f a `/clear` is exempt mid-turn (it stops the turn first), never refused
+(fail) /clear … T19e an own running turn is stopped first; the clear runs when it has ended
+(fail) /clear with a wake pending … T19g / T19i
+(fail) S0 command smoke … /clear while a turn runs → never refused
+(fail) S2 dispatchCommand … /clear is exempt mid-turn
+ 48 pass
+ 6 fail
+```
+
+**M3 (finding 1, images) — `attachMode` returns the constant `NO_IMAGE_SEAM`**
+(the deleted "no seam → off" branch, made total):
+
+```
+(fail) T8b / T8c / T8e / T8f / T8g / T8h (×2) / T8i …
+```
+
+**M4 (finding 1, send-now latches) — the per-session reset removed** from
+`swapSession` (`useSessionLink.ts:530-531`) — proves the two REPOINTED tests
+really pin it:
+
+```
+(fail) T-C5c: the fallback notice is once per SESSION — the session after a swap says it again
+(fail) T-C5d: the MethodNotFound latch is per session — the session after a swap asks the daemon again
+ 40 pass
+ 2 fail
+```
+
+**M5 (finding 1, the deferred wake) — the wake reset removed** from the same
+place — proves repointed T-D12 still holds:
+
+```
+(fail) T-D12 (review F5): a wake deferred during our compaction does not survive a SWAP into a new session
+ 41 pass
+ 1 fail
+```
+
+**M6 (the single-broker guard, re-checked after its text changed)** — a SECOND
+`new PermissionBroker` for the worker runtime:
+
+```
+(fail) the local TUI's single broker (AGENTS §7), pinned where it is built > grep-guard
+ 0 pass
+ 1 fail
+```
+
+#### Verification
+
+- `bunx tsc --noEmit` clean; `bun run lint` clean (1377 files, 0 errors /
+  0 warnings — the §6 baseline).
+- `bun test`: **9939 pass, 4 skip, 0 fail** (the 4 are the pre-existing opt-ins:
+  live-k8s, live-docker, the real-socket keepalive, `ws-server`'s).
+- Compiled binary: see finding 3.
+
+**Drift from this round's plan:** none in substance. Two things worth naming:
+(a) `App`'s `agent` prop was KEPT (it is production-dead — both callers pass
+`null` + `createSession` — but removing it would rewrite 55 test mounts for no
+behavioural gain; `localSession` is where its compatibility now lives);
+(b) the mid-turn refused set is now two commands, so that test's derived-expectation
+line asserts two plus "`/clear` is still in `SESSION_MUTATING`", rather than
+three.
