@@ -604,6 +604,10 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       // Two-way (docs/feat/agent-message-two-way.md): the ONLY switch — with it
       // off, no runner gets a `notify`, so no child is offered `agent_notify`.
       ...(config.subagentsTwoWay ? { notify: (id, text) => agentJobs.notify(id, text) } : {}),
+      // A child follows this session's capability switches LIVE
+      // (docs/feat/session-capabilities.md): read at each child round, so
+      // `agent` (built below) is always set by the time a child runs.
+      capabilities: () => agent.capabilities(),
     });
     if (published) {
       // Said here because only the pod knows its own types (the laptop cannot).

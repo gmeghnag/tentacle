@@ -295,6 +295,12 @@ Dependency order: protocol → agent → daemon → client → cli → tui → m
   skill guard), `packages/agent/src/subagent.ts` (live parent state),
   `packages/agent/src/compact.ts` (`carryOverSkills` filter),
   `packages/agent/test/agent-capabilities.test.ts` (new).
+  *As built:* also `packages/agent/src/session.ts` (the `/compact` call site of
+  `carryOverSkills` passes the disabled set) and `packages/cli/src/wiring.ts`
+  (the sub-agent runner gets `capabilities: () => agent.capabilities()` — the
+  runner is built before the agent, so the live source is a closure). The
+  step-limit final request (`agent.ts` "final") sends the stored history,
+  system message included, so its catalog is projected too.
 - **S3a** (M · load-bearing · strong model): `packages/protocol/src/session.ts`
   (request/result, `OpenParams`/`OpenResult` field), `updates.ts` (update +
   `UPDATE_CLASS` display), `skills.ts` (`disabled?`), `methods.ts`;
@@ -745,3 +751,230 @@ ran it knows.
 - **Regression attacks:** names are scanned only after the LAST header, so an AGENTS.md block is never read. A description cannot forge a `<name>` tag (it is escaped). Hiding a skill cannot uncover a 101st one (the composed set is already capped). All three hold.
 - **Gate:** the two touched test files pass, 30 pass / 0 fail. `bun run lint` is clean (1657 files). `bun run typecheck` is clean.
 - **Note:** the doc diff also removes one mockup bullet (T1), outside S1's code. Confirm it was intentional.
+
+## Execution — S2
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Slice S2 only** (the agent loop: projection, execution guard, sub-agents,
+carry-over). No protocol, daemon, client, persistence or UI change; S3a–S5
+untouched.
+
+### Load-bearing check (re-run first)
+
+Passed, with one correction to S1's note. `rg "definitions\(\)|ChatRequest = \{|modelView\("`
+in `packages/agent/src` (before any edit):
+
+- The round: `definitions()` `agent.ts:1274` + `modelView(messages)` `:1279`,
+  inside the loop head — rebuilt every round. `contextUsage`: `:1758`/`:1764`.
+- The step-limit final request (`:1599`/`:1611`): no `tools`, **but it does
+  send the system prompt** — its messages are `modelView(messages)`, history[0]
+  included. S1's Execution said "no `systemPrompt`"; that is wrong. It now goes
+  through the same system projection.
+- Compaction (`compact.ts:118`, `:160`): its own `COMPACT_SYSTEM`, `tools: []`,
+  and the transcript drops the system message (`m.role === "system" ? []`). No
+  bypass.
+- A sub-agent: its own `Agent` (`subagent.ts:422`), whose registry copies the
+  parent's tools (MCP and `skill` included). Its prompt is `type.prompt` (no
+  catalog), so only its tool list needs the projection — through a live
+  capabilities source.
+- `refreshUserSkills` (`:907`) and the reset (`:2394`) call `definitions()` to
+  read the model's offered set, not to build a request. Unchanged.
+
+### Repro
+
+Behavioural, the Context's shape — `.tentacle/tmp/session-capabilities/s2-repro.ts`:
+real `startDaemon`, the stdio fixture `packages/cli/test/fixtures/mcp-stdio-server.ts`
+as server `echo`, a recorder `createProvider`, one prompt:
+
+```ts
+const config = { ...base, mcpServers: { echo: { type: "stdio" as const, command: process.execPath, args: [fixture] } } };
+const handle = await startDaemon(config, { host: "127.0.0.1", port: 0, devices: false, discovery: false,
+  relay: { noRelay: true }, onNotice: () => {}, createProvider: () => model });
+// … wait for mcp/status to settle, newSession().send("hi")
+console.log("tools:", JSON.stringify((requests.at(-1)?.tools ?? []).map((t) => t.name)));
+console.log("capability methods:", JSON.stringify(Object.values(Method).filter((m) => /capabilit/.test(m))));
+```
+
+```
+tools: ["fs_read","fs_write","fs_edit","fs_multi_edit","shell","shell_output","shell_kill","agent_task","agent_control","context_reset","mcp__echo__echo"]
+capability methods: []
+```
+
+`mcp__echo__echo` reaches the model, and no session RPC can remove it. I ran it
+on the S2 tree. S2 adds no wire (that is S3a), so this daemon-level observable
+is the same before and after S2. S2's own before/after is the red → green run
+below.
+
+### As built, in order
+
+1. **API surface first, no behaviour** (so the tests go red on assertions, not
+   on compile errors):
+   - `AgentConfig.capabilities?: SessionCapabilities | (() => SessionCapabilities)`
+     (`agent.ts:592`). A value is the initial state. A function is a live source.
+   - `Agent.capabilities()` / `setCapabilities(state)` (`:922`, `:932`).
+   - `SubagentDeps.capabilities?: () => SessionCapabilities` (`subagent.ts:338`),
+     passed to the child (`:434`).
+   - `carryOverSkills(…, disabled = [])` (`compact.ts`).
+2. **The test file** `packages/agent/test/agent-capabilities.test.ts` (11
+   tests). Red output below.
+3. **Projection** (`agent.ts:937-975`):
+   - `serverOf` reads the registry's `mcpServer` tag.
+   - `projectedTools(caps)` = `projectTools(definitions(), serverOf, caps)`.
+   - `projectedHistory(messages, caps)` replaces only history[0]'s content with
+     `projectSystem(…)`. It returns a copy, so the stored array is never touched.
+     Every other message keeps its identity, so a context anchor still matches.
+   - `catalogSkills` (`:799`) holds the descriptions the catalog is re-rendered
+     from. It is set from the listing's `model: true` entries in the
+     constructor and in `installSkills`, which are the moments the prompt and
+     the `skill` enum are composed. It is not set at a user rescan.
+     `catalogOf` (`:3029`) maps them to `SkillInfo`; only name and description
+     reach the renderer.
+4. **Round snapshot** (`:1372`): `const caps = this.capabilities()` is read
+   ONCE per round. The tools, `noteContextUsage` and the view come from it, and
+   it rides `RoundHooks.capabilities` into `runToolCalls` (`:1650`).
+5. **Execution guard**:
+   - `authorizeCall` (`:2879`) checks `hiddenCallRefusal(call, caps)` before the
+     gate. A hidden server's tool gives `"<tool> is turned off for this session"`.
+     `skill{name}` of a disabled skill gives `skill "<name>" is turned off for
+     this session`. Either way `isError`, no prompt, never run.
+   - Both call sites pass the snapshot: a call alone `:2036`, a group `:2172`.
+   - A resumed round (`:1109`) passes none, on purpose: its calls were issued
+     when they were visible (F2).
+6. **Final request** (`:1700`) and **`contextUsage`** (`:1861-1882`, both the
+   exact count and the estimate) use the same projection.
+   `noteContextUsage` estimates over the projected history.
+7. **Carry-over**:
+   - `carryOverSkills` drops disabled names from both `kept` and `dropped`
+     (`compact.ts:233`). A dropped name is told to the model as "loadable
+     again", so it must not name a hidden skill either.
+   - The callers pass the disabled set: the reset `agent.ts:2489`, `/compact`
+     `session.ts:346`.
+8. **Wiring**: `cli/src/wiring.ts:610` gives the runner
+   `capabilities: () => agent.capabilities()`.
+
+### Drift from the Implementation (and why)
+
+- **Two files not in the Files list**: `session.ts` (the `/compact` call site;
+  the plan named only `compact.ts`, but the filter needs the caller's state) and
+  `cli/src/wiring.ts` (the only production `createSubagentRunner`, built before
+  the agent). Both are recorded in Files *As built*.
+- **The final request is projected**: S1's load-bearing note had wrongly
+  cleared it (above).
+- **The `skill` guard is generic**: it lives in `authorizeCall`, keyed on
+  `call.name === SKILL_TOOL_NAME`, not inside the `skill` tool. The tool stays
+  pure, and the round's snapshot is only known to the loop. The user's `/name`
+  goes through `runUserSkill`, which never reaches `authorizeCall`, so F15
+  holds by construction (pinned by a test).
+- **Catalog descriptions come from the listing captured at compose time**,
+  not from `this.listing`, which a user rescan replaces. This closes the drift
+  the S1 Review flagged from the agent's side too.
+
+### F3 — providers and history calls to a tool no longer offered
+
+`.tentacle/tmp/session-capabilities/s2-f3-shape.ts` runs both REAL providers
+with an injected `fetch` (nothing leaves the machine). The history holds a
+`mcp__echo__echo` call and its result:
+
+```
+anthropic projected (echo hidden): tools=["fs_read"] history-call-kept=true
+anthropic final (no tools, today): tools=[] history-call-kept=true
+openai projected (echo hidden): tools=["fs_read"] history-call-kept=true
+openai final (no tools, today): tools=[] history-call-kept=true
+```
+
+The projected shape is the history's calls plus a smaller `tools`. Production
+already sends a strictly harder shape on every step-limit final request:
+history calls with no `tools` at all (`agent.ts` final request). Neither
+provider rewrites history by `tools`. **Unverified:** live acceptance by the
+real endpoints, which I did not call (no key, and it is an external call).
+To verify: one `anthropic` and one `openai` request of the "projected" shape
+against the real API. If one returns 400, F3's fallback applies (project past
+calls to hidden tools in `modelView`). I did not improvise it.
+
+### Red before green (§9)
+
+All tests were written against the stub surface (step 1), and they failed on
+assertions:
+
+```
+$ bun test packages/agent/test/agent-capabilities.test.ts
+(fail) … F1/F2: a mid-stream toggle leaves the in-flight request and its calls alone; the NEXT request is projected
+(fail) … skill{name} of a disabled skill is answered 'turned off', never read
+(fail) … F11: everything off → no `skill` tool, no catalog, built-ins only
+(fail) … F13: an MCP server's tools registered AFTER the toggle are hidden by their tag
+(fail) … the step-limit final request's system prompt is projected too
+(fail) sub-agents follow the parent's live switches > a child's request lacks the hidden server's tools
+(fail) contextUsage counts what is really sent > the exact count is asked for the projected request
+(fail) contextUsage counts what is really sent > the estimate is smaller with things hidden
+(fail) F12: … > the restart request is projected and holds no k8s body
+(fail) F12: … > carryOverSkills drops a disabled skill from both kept and dropped
+ 1 pass
+ 10 fail
+```
+
+The one pass is F15 (the user's `/name` of a disabled skill runs). It is a
+regression guard: it already held, and it must keep holding. After the
+implementation: **11 pass / 0 fail**.
+
+### Mutation checks (§9)
+
+The runner is `.tentacle/tmp/session-capabilities/s2-mut.ts`. Each mutation is
+one string replacement, then the S2 test file runs, then the original is
+written back. Afterwards `cmp` against `.tentacle/tmp/session-capabilities/s2bak/`
+showed agent.ts, compact.ts and subagent.ts byte-identical.
+
+| # | Mutation | Result |
+|---|----------|--------|
+| M1 | the guard reads the LIVE state instead of the round's snapshot (the plan's "snapshot read after the call") | **RED** 9/2 — F1/F2 (the in-flight call `c1` is refused) + the sub-agent case |
+| M2 | round tools unprojected (`definitions()`) | **RED** 6/5 |
+| M3 | round system message unprojected | **RED** 8/3 — F1/F2, F11, F12 |
+| M4 | step-limit final request unprojected | **RED** 10/1 |
+| M5 | execution guard disabled | **RED** 9/2 — F3 echo call executed; `skill{k8s}` read |
+| M6 | `carryOverSkills` filter removed | **RED** 9/2 — F12 restart holds `BODY:k8s`; unit |
+| M7 | child not given the capabilities source | **RED** 10/1 |
+| M8 | `contextUsage` counts the unprojected history | **RED** 10/1 |
+| M9 | child given a one-time copy `deps.capabilities()` instead of the live source | first **survived** (the test toggled before spawn) → test tightened to toggle during the child's first stream → **RED** 10/1 |
+
+### Failure modes covered by S2
+
+- **F1**: in-flight request unchanged.
+- **F2**: a call visible in its round's snapshot runs.
+- **F3**: a hidden call is refused and never executed (the fixture log stays
+  `["one"]`). The provider half is above.
+- **F11**: everything off.
+- **F12**: reset projection plus no carried body. `/compact` uses the same
+  `carryOverSkills` path, unit-pinned.
+- **F13**: tools registered after the toggle are hidden by tag.
+- **F15**: the user's own `/name` runs.
+- **Not S2's**: F4–F10 and F14 (wire, persistence, pods: S3a/S3b).
+
+### Notes / debt
+
+- **The daemon does not carry the state yet.** S3a must call `setCapabilities`
+  on the session's agent. It must also re-apply it when `update_settings`
+  rebuilds the agent: `buildAgent` makes a fresh `Agent` with everything on.
+- **`/compact`'s summary transcript still includes a disabled skill's body**,
+  in summarised form. Only verbatim carry-over is filtered, which is what the
+  Design names. A follow-up could leave such bodies out of `renderMessage`.
+
+### Gate
+
+- `bunx tsc --noEmit` → clean.
+- `bun run lint` → `Checked 1658 files in 536ms. No fixes applied.` That is 0
+  errors and 0 warnings, the §6 baseline.
+- `bun test` → **11934 pass, 5 skip, 0 fail**, `84926 expect() calls`,
+  `Ran 11939 tests across 857 files. [437.67s]`.
+  - 11934 = the post-fix-1 11923 plus the 11 new tests.
+  - The 5 skips are the pre-existing opt-in guards.
+  - This run started only after the last mutation pass had restored the
+    sources (`cmp` clean). An earlier run overlapped a mutation pass, so I
+    discarded it.
+- Narrow: `bun test packages/agent/test/agent-capabilities.test.ts` → 11 pass /
+  0 fail.
+- No schema changed, so `protocol.json` was not regenerated. No `protocol.d/`
+  note.
+- The changelog fragment `changelog.d/session-capabilities.added.md` already
+  exists, its text matching the doc's metadata line, so S2 added none.
+
+**S2: DONE.** S3a/S3b/S4/S5: not started (out of scope).
