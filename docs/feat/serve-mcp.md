@@ -257,7 +257,171 @@ Iterate with `bun test packages/cli/test/serve-mcp.test.ts` (and `mcp-hub.test.t
 
 ## Execution
 
-*(empty: awaiting approval of Implementation)*
+*(as built — S1, S2, S3, S4)*
+
+*— deepseek-v3.2 (executor), 2026-11-15*
+
+**Load-bearing check (run first, as the brief demands).** The plan's Repro was
+re-run on `feat/serve-mcp` BEFORE any edit:
+`.tentacle/tmp/serve-mcp/repro.ts` printed `configured: [ "echo" ]` /
+`serve mcp/status: []`. The assumption was then verified against the source:
+`session-host.ts:476,1214,1287` pass `this.opts.defaultCwd` (never a client cwd),
+`serve.ts:489` sets `defaultCwd: config.cwd`, `main.ts:916` sets
+`cwd: process.cwd()`, and `transport.ts:32` spawns with `cwd: spec.cwd` (else the
+process cwd: the project). It holds, and T9 now pins it.
+
+### S1 — `packages/cli/src/mcp-hub.ts` (DONE)
+
+New pure module: `createMcpHub(servers, { connect?, onErrors?, onClash?, onStderr?,
+onRestart? })` → `{ start, onBuilt, status, ready, dispose }`, plus `capStderr`.
+It holds the worker's `pending` set + register/clash + `McpStatusTracker` +
+settle/fail, and adds dispose-before-settle (a connection that arrives after the
+dispose is closed at settle) and an idempotent dispose. `worker.ts` now wires it
+(`hub.start()`, `onBuilt: (wired) => hub.onBuilt(wired.tools)`,
+`mcpStatus: () => hub.status()`, `toolsReady: () => hub.ready()`); `onErrors`
+keeps the `mcp-errors` object post. No behaviour change on the worker
+(`worker.test.ts` unchanged and green).
+
+Tests: `packages/cli/test/mcp-hub.test.ts` (T1, T2, T3, T4, T4b, per-server
+error forwarding, `connecting` before settle, `capStderr`). Red first: the module
+did not exist.
+
+### S2 — the hub in `serve` (DONE)
+
+- `startDaemon`: builds the hub from `config.mcpServers`, routing `onErrors`,
+  `onClash`, `onStderr: capStderr(...)` and `onRestart` to `onNotice`; registers a
+  synchronous `process.on("exit", dispose)` handler, removed in `release` and in
+  the `catch`.
+- `reloadedHost(..., mcpHub, push?)`: the host gains `mcpStatus: () => hub.status()`
+  and `toolsReady: () => hub.ready()`.
+- `createServeAgent(..., mcpHub?)`: `mcpHub?.onBuilt(wired.tools)` on every build
+  (new, restored, context probe, settings rebuild) — the worker's shape.
+- `listen(..., afterListen?, hooksTrustPrecheck?)`: `afterListen()` runs once the
+  listener exists, so `hub.start()` spawns nothing for a start that failed;
+  `release` disposes the hub first, the `catch` also disposes it.
+
+Fixture `packages/cli/test/fixtures/mcp-stdio-server.ts` gained opt-in env knobs
+(`MCP_PID_FILE`, `MCP_CALL_LOG`, `MCP_STDERR_LINES`, `MCP_INIT_DELAY_MS`,
+`MCP_EXIT_AFTER_INIT`, `MCP_EXIT_AFTER_TOOLS`, `MCP_EXIT_AFTER_TOOLS_ONCE`,
+`MCP_CRASH_ON_CALL_ONCE`) and a `tools/call` answer for `echo` that appends the
+call plus the child's env KEYS to `MCP_CALL_LOG`.
+
+Tests: `packages/cli/test/serve-mcp.test.ts` T5, T5b, T6 (the security proof),
+T7, T8, T9, T10, T11, T12 — each shown red by its mutation, below.
+
+### S3 — supervised servers (DONE, per owner Q1=b)
+
+The plan's seam did not exist: a connection exposed neither its client nor a
+close signal, so a supervisor could neither see a crash nor keep tools alive
+across a respawn. Three minimal seams were added where they belong instead of
+copying the connect path:
+
+- `McpClient.onClose(listener)` (`client.ts`): fires from `handleClose`, one
+  shot; a listener added after the close is answered at once.
+- `McpConnection.client()` / `McpConnection.onClose(listener)` (`connect.ts`):
+  the client it was built on, and the one-shot transport-close signal (a
+  `close()` and the transport's own close count once).
+- `ConnectOptions.toolClient` (`connect.ts`): the client the adapted TOOLS are
+  built against, so the supervisor passes a routing proxy that forwards to
+  whatever client is current — the tool objects survive a respawn. It is the only
+  way to keep `mcpToolToTool` unchanged (one adapter, two hosts).
+
+`packages/mcp/src/supervisor.ts` (new): `respawnDelay` (1 s doubling, capped at
+60 s), `shouldRespawn` (budget + dispose) — both pure and clock-injected — and
+`superviseServer(name, spec, deps)`: adopt, crash on the transport close (count,
+schedule), respawn, fail per attempt, give up after `RESPAWN_MAX_ATTEMPTS`, reset
+after `RESPAWN_HEALTHY_MS` up. `connectMcpServers` supervises by default
+(`supervise: false` keeps a plain connect for in-memory transports) and its
+`dispose` closes the supervisors first. `status.ts` maps a pending respawn to
+`state: "connecting"` + `error: "restarting (attempt n)"` — the existing enum, so
+no protocol change.
+
+Tests: `packages/mcp/test/supervisor.test.ts` (delay/budget; T12a–T12e: the same
+tool object across a respawn, give-up after five failures, dispose cancels a
+pending respawn, a healthy stretch resets the budget), and the end-to-end T12.
+
+### S4 — project-hooks trust (DONE, per owner Q2=a)
+
+- `packages/cli/src/serve-hooks-trust.ts` (new): `hooksTrustPrecheck` (pure) and
+  `serveHooksTrustPrecheck(configDir)` over the read-only `fileTrustStore`.
+- `Connection` / `WsServerOptions` / `AcceptDeviceDeps` gain
+  `hooksTrustPrecheck?: (request: Pick<HooksTrustParams, "folder" | "hash">) =>
+  boolean`. `Connection.askHooksTrust` checks it FIRST and returns `true` without
+  asking — the host's own decision, read-only, never granting.
+- `startDaemon` passes `serveHooksTrustPrecheck(config.configDir)` to `listen`.
+- `apps/mobile/src/hooks-trust.ts` (new): `phoneHooksTrust(broker)` raises the
+  `hooks_trust` ask on the phone's link broker (a person; auto-accept never
+  answers a `hooks_trust` — `permission.ts:295`), `storeBacked: false`, and a
+  dismissed prompt is not a trust. Wired into the phone's `RemoteClient` options
+  in `apps/mobile/src/connection.ts` (per link, because it needs the broker; not
+  in `APP_CLIENT_OPTIONS`, which carries only broker-free bits).
+
+Tests: `packages/cli/test/serve-hooks-trust.test.ts` (precheck cases; T13a
+trusted-in-host → never asked; T13b untrusted → asked, hook runs, nothing stored;
+T13c untrusted → the hook does not run; T13d trusted in the host's store → the
+hook runs in a turn with no ask) and `apps/mobile/test/hooks-trust.test.ts` (the
+ask, a deny, a dismissed prompt, the detail).
+
+### Drift from the Implementation, and why
+
+1. **S3 needed three seams the plan did not name.** The plan said "wrap each
+   server in a supervisor that owns the current `McpClient`" as if a connection
+   exposed one. It did not. `client()`, `onClose()` and `ConnectOptions.toolClient`
+   are that seam, at the smallest place. The alternative — rebuilding tools on
+   every respawn and re-registering them into live registries — is the second
+   session path §7 forbids.
+2. **`ConnectOptions.supervise` was added.** `connect.test.ts` and
+   `http-transport.test.ts` drive `connectMcpServers` with in-memory transports;
+   supervising those would test the fake. One option, default on; the tests that
+   want the real thing use the default.
+3. **S4's precheck takes `Pick<HooksTrustParams, "folder" | "hash">`**, not the
+   whole request: that is what `Connection` holds there (the agent's
+   `ProjectHooksTrustRequest` has `readonly string[]` for `files`), and the
+   precheck needs only these two.
+4. **The "no silent decline" notice needed no new code.** A refused trust is
+   already logged by the runner (`agent/src/hooks.ts:496`, `project hooks of
+   <folder> not run this session (<why>)`), and `serve.ts` routes `buildAgent`'s
+   `log` to `options.onError` → the serve process's stderr (`main.ts:1146`).
+5. **Two changelog fragments, not one.** `scripts/changelog.ts:125` allows one
+   bullet per file: `serve-mcp.added.md` (MCP) and `serve-hooks-trust.fixed.md`
+   (hooks), which is what the plan itself named.
+
+### Mutations run (each turned the named test red, then was reverted)
+
+| Mutation | Red |
+|---|---|
+| S1: drop the `pending` flush at settle | T1, T2, and T9 (the restored session) |
+| S1: remove the `onClash` report | T2 |
+| S1: drop dispose-before-settle (`if (disposed) closeAll()`) | T4 |
+| S2: remove `mcpHub.dispose()` from `release` | T7, T8 |
+| S2: `mcpStatus: () => Promise.resolve([])` | T5, T5b |
+| S2: drop `mcpHub?.onBuilt(wired.tools)` in `createServeAgent` | T6, T9 |
+| S2: `permission: "none"` in `tool-adapter.ts:79` | T6 (the deny case wrote the call log) |
+| S1/S2: uncap `capStderr` | T10 (both files) |
+| S2: unscrub the child env (`transport.ts:31`) | T11 |
+| S3: no supervisor (`supervise` always false) | T12 (end to end) |
+| S3: `toolClient` not passed (tools keep the dead client) | T12a, T12 |
+| S4: the precheck answers `"trusted"` for any hash | the pure precheck test, T13b, T13c |
+| S4: `startDaemon` passes no precheck | T13d |
+
+### Gate
+
+`bun run typecheck` clean · `bun run lint` clean (1506 files, 0 errors/0
+warnings, the §6 baseline) · `bun test`: **10841 pass, 0 fail, 5 skip**
+(the three opt-in skips — live-k8s, live-docker, the slow keepalive — plus the
+two pre-existing ones), 10846 tests / 785 files. One earlier full run showed
+`packages/daemon/test/session-log-store.test.ts` T4 failing on its
+`Bun.sleep(60)` timing wait; that file is untouched by this branch, the test
+passed three times in isolation and in both later full runs, so it is a
+pre-existing flake, not this task's. No schema changed, so
+`packages/protocol/schema/protocol.json` was NOT regenerated and no `protocol.d/`
+note is needed: S1–S4 add no wire shape (`mcp/status` already exists; S3 reuses
+its `connecting` state).
+
+**Unverified.** The phone's `hooks_trust` sheet RENDERING is pinned by unit tests
+of the resolver only; how RN draws the ask is out of this repo's test reach (the
+sheet is unchanged and already routes `hooks_trust` to a person). Verify by
+running the app against a `serve` whose project is untrusted.
 
 ## Review
 

@@ -125,6 +125,7 @@ export class McpClient {
   private readonly probeTimeoutMs: number;
   private negotiatedEra: McpEra | undefined;
   private negotiatedVersion: string | undefined;
+  private readonly closeListeners = new Set<(reason?: string) => void>();
 
   constructor(
     private readonly transport: McpTransport,
@@ -349,6 +350,19 @@ export class McpClient {
     return this.reason;
   }
 
+  /**
+   * Subscribe to the close (a server crash, or `close()`). One shot: a listener
+   * added after it is called at once, so a supervisor never misses a death that
+   * happened while it was attaching (docs/feat/serve-mcp.md S3).
+   */
+  onClose(listener: (reason?: string) => void): void {
+    if (this.closed) {
+      listener(this.reason);
+      return;
+    }
+    this.closeListeners.add(listener);
+  }
+
   close(): void {
     this.transport.close();
     this.handleClose();
@@ -505,5 +519,9 @@ export class McpClient {
       pending.reject(error);
     }
     this.pending.clear();
+    for (const listener of this.closeListeners) {
+      listener(reason);
+    }
+    this.closeListeners.clear();
   }
 }

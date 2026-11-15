@@ -9,6 +9,7 @@
 import type { Tool } from "@tentacle/core";
 import { McpClient, McpHandshakeClosedError } from "./client.ts";
 import { createStreamableHttpTransport } from "./http-transport.ts";
+import { type SupervisedServer, type SupervisorDeps, superviseServer } from "./supervisor.ts";
 import { mcpToolToTool } from "./tool-adapter.ts";
 import { type StdioTransportOptions, createStdioTransport } from "./transport.ts";
 import type { McpServerSpec, McpServers, McpTransport } from "./types.ts";
@@ -25,6 +26,17 @@ export interface McpConnection {
   closeReason?(): string | undefined;
   /** MCP `ping`: resolves if the server answers within `timeoutMs`. */
   ping(timeoutMs: number): Promise<void>;
+  /**
+   * The client calls route through. A supervisor (docs/feat/serve-mcp.md S3)
+   * rebuilds `tools` once against a routing client and swaps what THIS returns
+   * on a respawn, so live sessions keep working across it.
+   */
+  client(): McpClient;
+  /**
+   * Called when the transport closes (a server crash), so a supervisor can
+   * count it and respawn. `close()` also fires it, exactly once.
+   */
+  onClose(listener: (reason?: string) => void): void;
 }
 
 export interface ConnectMcpResult {
@@ -64,6 +76,20 @@ export interface ConnectOptions {
   readonly probeTimeoutMs?: number;
   /** Receives a server's stderr lines (server name + line); omitted → dropped. */
   readonly onStderr?: (server: string, line: string) => void;
+  /**
+   * Where the tools' `tools/call`s go. Default: the client this connect opened.
+   * A supervisor passes a routing client, so the tool objects it builds stay
+   * valid across a respawn (docs/feat/serve-mcp.md S3).
+   */
+  readonly toolClient?: Pick<McpClient, "callTool">;
+  /**
+   * Supervise each server (default true, docs/feat/serve-mcp.md S3): a server
+   * that crashes respawns with backoff and its tools stay usable. `false` for a
+   * caller that wants one connect and no respawn (a test's fake transport).
+   */
+  readonly supervise?: boolean;
+  /** Each restart attempt, its failure and the give-up (one line each). */
+  readonly onRestart?: (line: string) => void;
 }
 
 /** The transport a spec names: Streamable HTTP for `type: "http"`, else stdio. */
@@ -117,7 +143,25 @@ export async function connectServer(
   }
   try {
     const defs = await withTimeout(client.listTools(), timeout, `MCP server "${name}" tools/list`);
-    const tools = defs.map((def) => mcpToolToTool(name, client, def, spec.readOnlyTools));
+    const tools = defs.map((def) =>
+      mcpToolToTool(name, (options.toolClient ?? client) as McpClient, def, spec.readOnlyTools),
+    );
+    // One shot: a `close()` and the transport's own close must count once, and a
+    // listener that arrives after the close is answered at once (a supervisor
+    // attaching to a server that already died).
+    const closeListeners = new Set<(reason?: string) => void>();
+    let notified = false;
+    const fireClose = (reason?: string): void => {
+      if (notified) {
+        return;
+      }
+      notified = true;
+      for (const listener of closeListeners) {
+        listener(reason);
+      }
+      closeListeners.clear();
+    };
+    client.onClose(fireClose);
     return {
       name,
       tools,
@@ -126,6 +170,14 @@ export async function connectServer(
       isOpen: () => !client.isClosed,
       closeReason: () => client.closeReason,
       ping: (ms) => client.ping(ms),
+      client: () => client,
+      onClose: (listener) => {
+        if (notified || client.isClosed) {
+          listener(client.closeReason);
+          return;
+        }
+        closeListeners.add(listener);
+      },
     };
   } catch (error) {
     client.close();
@@ -133,25 +185,45 @@ export async function connectServer(
   }
 }
 
+/** Connected servers, each supervised for a crash (see `supervisor.ts`). */
+export interface SupervisedConnectResult extends ConnectMcpResult {
+  /** The supervisors, so `dispose` cancels a pending respawn too. */
+  readonly servers?: readonly SupervisedServer[];
+}
+
 /** Connect every configured server, isolating per-server failures. */
 export async function connectMcpServers(
   servers: McpServers,
   options: ConnectOptions = {},
-): Promise<ConnectMcpResult> {
+): Promise<SupervisedConnectResult> {
   const connections: McpConnection[] = [];
+  /** Wrappers that report `/mcp` through a supervisor's state (see `status.ts`). */
+  const supervised: SupervisedServer[] = [];
   const errors: Record<string, string> = {};
 
   const results = await Promise.allSettled(
     Object.entries(servers).map(async ([name, spec]) => {
-      const connection = await connectServer(name, spec, options);
-      return connection;
+      // `supervise: false` keeps the plain connect (a test's fake transport).
+      if (options.supervise === false) {
+        return { connection: await connectServer(name, spec, options) };
+      }
+      const { ready, server } = superviseServer(name, spec, {
+        // The transport factory, stderr routing and timeouts all ride along.
+        connectOptions: options,
+        ...(options.onRestart ? { onRestart: options.onRestart } : {}),
+      });
+      const connection = await ready;
+      return { connection, server };
     }),
   );
   const names = Object.keys(servers);
   results.forEach((result, i) => {
     const name = names[i] ?? "unknown";
     if (result.status === "fulfilled") {
-      connections.push(result.value);
+      connections.push(result.value.connection);
+      if ("server" in result.value && result.value.server) {
+        supervised.push(result.value.server);
+      }
     } else {
       errors[name] = result.reason instanceof Error ? result.reason.message : String(result.reason);
     }
@@ -162,7 +234,11 @@ export async function connectMcpServers(
     connections,
     tools,
     errors,
+    ...(supervised.length > 0 ? { servers: supervised } : {}),
     dispose(): void {
+      for (const server of supervised) {
+        server.close();
+      }
       for (const connection of connections) {
         connection.close();
       }

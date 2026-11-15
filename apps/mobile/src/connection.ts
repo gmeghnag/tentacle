@@ -34,6 +34,7 @@ import { type AppLog, type AppLogField, createAppLog, errorShape } from "./app-l
 import type { StoredComputer } from "./computers.ts";
 import { createForegroundGate } from "./foreground-gate.ts";
 import { sha256Hex } from "./hash.ts";
+import { phoneHooksTrust } from "./hooks-trust.ts";
 import { type LinkDiagnoser, createLinkDiagnoser } from "./link-diagnosis.ts";
 import type { RNWebSocketCtor } from "./rn-websocket.ts";
 import { rnWebSocketCtor } from "./rn-websocket.ts";
@@ -319,6 +320,13 @@ export async function openComputer(
   const broker = createLinkBroker();
   const client = new RemoteClient(channel, broker, undefined, {
     ...APP_CLIENT_OPTIONS,
+    // Project hooks (docs/feat/serve-mcp.md S4): a phone turn in a project with
+    // hooks must be able to run them. The ask goes through THIS link's broker to
+    // a person, never auto-accepted, and nothing is stored here — the folder is
+    // on the computer (`serve-hooks-trust.ts` checks its own trust file first).
+    // It is per link because it needs the broker, so it is not in
+    // `APP_CLIENT_OPTIONS` (which carries only broker-free bits).
+    hooksTrust: phoneHooksTrust(broker),
     // This phone's own label, so the daemon can stamp an ask's `askedOn` and an
     // `auto_accept` update's `by` with it (docs/feat/session-auto-accept.md
     // D7). The name this phone PAIRED under — what the computer lists it as, so

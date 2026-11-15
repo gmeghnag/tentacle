@@ -20,6 +20,7 @@
  * pairing window does (F16), and a socket that closed between the confirm and
  * the build leaves no orphan `Connection` (F22).
  */
+import type { HooksTrustParams } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import { type AuthorizeVerdict, noiseResponder, systemRandom } from "@tentacle/transport/noise";
 import { Connection, type ConnectionPrincipal } from "./connection.ts";
@@ -49,6 +50,11 @@ export interface AcceptDeviceDeps {
   /** One line per handshake outcome, for the operator. */
   readonly onAudit?: (line: string) => void;
   readonly maxFrameBytes?: number;
+  /**
+   * The host's own project-hooks answer, before the prompting client is asked
+   * (docs/feat/serve-mcp.md S4): a phone turn asks the HOST's trust first.
+   */
+  readonly hooksTrustPrecheck?: (request: Pick<HooksTrustParams, "folder" | "hash">) => boolean;
   /** How often a pairing-only connection re-checks its window (`PAIRING_CHECK_MS`). */
   readonly pairingCheckMs?: number;
   /**
@@ -181,6 +187,7 @@ export function acceptDevice(channel: DuplexChannel, deps: AcceptDeviceDeps): De
       const connection = new Connection(secure, deps.sessionHost, deps.onError, {
         maxFrameBytes: deps.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES,
         principal,
+        ...(deps.hooksTrustPrecheck ? { hooksTrustPrecheck: deps.hooksTrustPrecheck } : {}),
       });
       // ONE handle for this connection: the authority holds it for a revoke,
       // and every teardown path unregisters this same object, so a revoke's

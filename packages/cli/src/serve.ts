@@ -55,8 +55,10 @@ import { applyCarried } from "./carried-settings.ts";
 import { type DiscoveryDriver, startDiscovery } from "./discovery.ts";
 import type { ServeLimits } from "./flags.ts";
 import { daemonImagePolicy } from "./image-policy.ts";
+import { type McpHub, capStderr, createMcpHub } from "./mcp-hub.ts";
 import type { ProviderFactory } from "./model-provider.ts";
 import { readRelaySecret } from "./relay-secret.ts";
+import { serveHooksTrustPrecheck } from "./serve-hooks-trust.ts";
 import { type RelayOptions, relayChoice } from "./serve-relay.ts";
 import { APP_VERSION } from "./version.ts";
 import {
@@ -194,8 +196,10 @@ export function createServeAgent(
   options: Pick<ServeOptions, "onError" | "onNotice" | "createProvider">,
   skillScan: SkillScan,
   ctx: { readonly cwd: string; readonly attachments?: AttachmentSource },
+  /** The daemon-wide MCP set: its tools join every registry this builds (S2). */
+  mcpHub?: Pick<McpHub, "onBuilt">,
 ): WiredAgent {
-  return buildAgent(
+  const wired = buildAgent(
     { ...config, cwd: ctx.cwd },
     // Hook failures: the daemon's error sink, like a turn error.
     {
@@ -213,6 +217,10 @@ export function createServeAgent(
       workloadShell: { backend: new LaptopWorkloadShellBackend() },
     },
   );
+  // The MCP tools join THIS registry too — now, or at settle through the hub's
+  // `pending` set, so a session built during the handshake still gets them.
+  mcpHub?.onBuilt(wired.tools);
+  return wired;
 }
 
 /**
@@ -367,6 +375,32 @@ export async function startDaemon(
   }
   const lock = acquireStoreLock(dir);
   let persister: SessionPersister | undefined;
+  // The daemon-wide MCP connection set (docs/feat/serve-mcp.md S2): ONE set per
+  // daemon, because a `serve` hosts exactly one project — so one set per
+  // project. Errors, name clashes and a server's stderr become startup-fact
+  // notices (this process has no Ink, so its stderr is safe to write to).
+  // Never inherited: a chatty server cannot scribble over `connect`'s TUI.
+  const mcpHub = createMcpHub(config.mcpServers, {
+    ...(options.onNotice
+      ? {
+          onErrors: (errors) => {
+            for (const [name, message] of Object.entries(errors)) {
+              options.onNotice?.(`mcp server "${name}" failed to connect: ${message}`);
+            }
+          },
+          onClash: (line) => options.onNotice?.(line),
+          onStderr: capStderr((line) => options.onNotice?.(line)),
+          // A server that crashes on a daemon that runs for days comes back by
+          // itself (docs/feat/serve-mcp.md S3); each attempt is one notice line.
+          onRestart: (line) => options.onNotice?.(line),
+        }
+      : {}),
+  });
+  // A second Ctrl+C (`process.exit(130)`, docs/feat/serve-mcp.md) must not leave
+  // server processes behind. Synchronous by design, and removed in `stop()` so
+  // tests that start many daemons in one process do not leak listeners.
+  const exitDispose = (): void => mcpHub.dispose();
+  process.on("exit", exitDispose);
   try {
     // The laptop's log format (docs/feat/session-log-serve-store.md): `<uid>.jsonl`
     // + the daemon's state file. `keepSuperseded` from THIS host's config.
@@ -402,6 +436,7 @@ export async function startDaemon(
       ttl,
       sameProject,
       tombstones,
+      mcpHub,
       push?.hostOptions,
     );
     return listen(
@@ -409,6 +444,10 @@ export async function startDaemon(
       options,
       ttl,
       async () => {
+        // Before anything else: a closed daemon's sessions must not call into a
+        // server process this process is about to lose (S2, T7).
+        mcpHub.dispose();
+        process.off("exit", exitDispose);
         push?.notifier.stop();
         await persister?.stop();
         devices?.stop();
@@ -418,8 +457,15 @@ export async function startDaemon(
       config.cwd,
       relay.kind === "on" ? { url: relay.url, storeDir: dir } : undefined,
       push,
+      // The connect starts only once the listener exists: a start that fails
+      // spawns nothing (docs/feat/serve-mcp.md, "Per daemon, eager").
+      () => mcpHub.start(),
+      // Project hooks for every connection this daemon opens (S4).
+      serveHooksTrustPrecheck(config.configDir),
     );
   } catch (error) {
+    mcpHub.dispose();
+    process.off("exit", exitDispose);
     devices?.stop();
     await persister?.stop();
     lock.release();
@@ -477,6 +523,8 @@ async function reloadedHost(
   sessionTtl: SessionTtlControl,
   sameProject: (cwd: string) => boolean,
   tombstones: TombstoneFile,
+  /** The daemon-wide MCP set: every session's tools, and `/mcp`'s answer. */
+  mcpHub: McpHub,
   /** The push wiring (docs/feat/mobile-push.md P8), when this daemon has it. */
   push?: SessionHostOptions["push"],
 ): Promise<SessionHost> {
@@ -493,8 +541,15 @@ async function reloadedHost(
     maxDetachedSessions: options.maxDetachedSessions ?? DEFAULT_MAX_DETACHED_SESSIONS,
     ...(options.onAudit ? { onAudit: options.onAudit } : {}),
     // Each session gets its own agent, confined to the daemon's cwd.
-    createAgent: (cwd, ctx) => createServeAgent(config, options, skillScan, { ...ctx, cwd }),
+    createAgent: (cwd, ctx) =>
+      createServeAgent(config, options, skillScan, { ...ctx, cwd }, mcpHub),
     newSessionSkills: () => skillScan.newSession(),
+    // `/mcp` (`mcp/status`): the connection set is daemon-wide, so this is the
+    // right answer for every session on it (docs/feat/serve-mcp.md S2).
+    mcpStatus: () => mcpHub.status(),
+    // A fresh session's context count lacks the MCP tools until they connect:
+    // shown as an estimate (`~`) till then, exactly as on the worker.
+    toolsReady: () => mcpHub.ready(),
     // A remote client gets an opaque turn error; the real one is logged here.
     ...(options.onError ? { onTurnError: options.onError } : {}),
     // ITS host is the user's own machine (AGENTS §7 — the only daemon that
@@ -642,6 +697,16 @@ function listen(
   relay?: { readonly url: string; readonly storeDir: string },
   /** The push wiring (docs/feat/mobile-push.md P8), when this daemon has it. */
   push?: ServePush,
+  /**
+   * Run once the listener is up (the MCP connect, docs/feat/serve-mcp.md): a
+   * start that fails inside `startWsServer` spawns no server process.
+   */
+  afterListen?: () => void,
+  /**
+   * This host's own project-hooks answer (S4): its trust file decides before any
+   * client is asked, so a phone turn in a folder trusted HERE runs the hooks.
+   */
+  hooksTrustPrecheck?: (params: { readonly folder: string; readonly hash: string }) => boolean,
 ): ServeHandle {
   const server = startWsServer({
     host: options.host,
@@ -653,6 +718,7 @@ function listen(
     ...(options.onAudit ? { onAudit: options.onAudit } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
     ...(devices ? { devices: { authority: devices } } : {}),
+    ...(hooksTrustPrecheck ? { hooksTrustPrecheck } : {}),
   });
   // The host exists now, and it must exist before the relay link does (the link
   // dials only while the authority wants reachability, and the notifier reads
@@ -810,6 +876,9 @@ function listen(
     },
   });
   let stopping: Promise<void> | undefined;
+  // The listener is up and every sink is bound: NOW the background work a caller
+  // deferred for that reason can start (the MCP connect, docs/feat/serve-mcp.md).
+  afterListen?.();
   return {
     url: server.url,
     port: server.port,
