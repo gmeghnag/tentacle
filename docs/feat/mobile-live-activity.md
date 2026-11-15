@@ -1633,3 +1633,67 @@ test passes the attached set in by hand). I reverted it, and
 started. Its Execution section is signed `claude-sonnet-4-5`, but the commit
 says "exec (deepseek)", so §10's attribution is unclear again. The reviewer and
 the plan author are the same model family.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES.** All four round-1 findings are fixed, and each fix
+is pinned by a test: I mutated each one and the test failed. But one fix (R4)
+brought in a new bug, and another (R3) goes against the approved plan's F17.
+Both are reproduced in `.tentacle/tmp/mobile-live-activity/review/repro2.ts`.
+
+**Gate.** `bun run lint`: 1627 files, clean. `bun run typecheck`: clean. The
+notifier, rules, serve-live-activity and push-hook tests: 70 pass, 0 fail.
+After every mutation was reverted, `git status --porcelain` was empty.
+
+**Round-1 findings: verified.** Round 1's `repro.ts` now gives no start for an
+attached device on a timer tick, and 2 starts for a late registration. Each
+fix was then mutated:
+
+| fix | mutation | result |
+|---|---|---|
+| R1 | rules: drop the attached check in `startFor` | 2 fail |
+| R1 | notifier: never call `setAttached` | 3 fail |
+| R2 | host: no `registrationChanged()` call (`session-host.ts:669`) | 1 fail |
+| R2 | notifier: no refresh in `tick` | 1 fail (an R3 test; the hook path still refreshes) |
+| R4 | `neverDelivered = false` | 4 fail |
+| R3 | `gone` not fed to the rules | 1 fail |
+
+**New findings**
+1. **MEDIUM: a start that is still in flight is sent a second time**
+   (`live-activity-notifier.ts:316-322`). A slot is marked `confirmed` only
+   when the sink answers `sent`. So any command for that slot sent before that
+   answer arrives also goes out as a `start`. Examples: an ask during the start's
+   round trip, an update while the start is held for a reconnecting link, or
+   `resendAll` on `ready` while the held start is being flushed. Repro: a slow
+   sink, then the start, then an ask gives `["start/aa", "start/aa"]`: two pushes
+   to start the same slot. iOS creates two activities. Only one of them gets the
+   update token, and the other stays on the lock screen until it goes stale or
+   hits the 8 h cap. Both count toward iOS's limit of about 5. Fix idea: track
+   "in flight" next to "confirmed", and send no second start until the first
+   one has resolved.
+2. **MEDIUM: a dismissed activity comes back whenever the app is not running**
+   (`:392-417`). A `gone` on an update token is fed to the rules as
+   `reason: "ended"`, so the turn is free to start again. Repro: start, then
+   the update token goes `gone`, then the next tick gives
+   `["start/aa", "update/upd", "start/aa"]`. That is the same turn, started
+   again. The person swipes the activity away on the lock screen, and it comes
+   back on the next tick, again and again, because nothing limits how many
+   times this can happen. The approved plan's F17 says the opposite (doc:354:
+   "or APNs `gone` on the next update → never restarted for that turn"). F18
+   allows "ONE continuation", but the code puts no limit on it. The executor
+   picked F18 over F17 without asking the owner. Fix idea: either treat `gone`
+   as `dismissed` (follow the plan), or allow at most one restart per turn and
+   take the F17/F18 choice to the owner.
+
+**Attacks that found nothing:** the attached set is reset at `session_closed`
+(bounded). `deadStartTokens` and `confirmed` are pruned. `registrationChanged`
+is wrapped in try/catch and runs no I/O inside the hook. The hook stays
+synchronous: the refresh in `onPushEvent` is a synchronous store read. That is
+O(devices) per event, not O(1), and acceptable at this scale.
+
+**Executor.** It did every fix asked for, with red-first tests and its own
+mutation table, and wrote down the R3 choice instead of hiding it. But a plan
+deviation that touches the person's gesture needed the owner's decision, not a
+note.
