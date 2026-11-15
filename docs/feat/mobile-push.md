@@ -2626,3 +2626,62 @@ entitlement, but only a device build proves the OS accepts the pair.
 **Branch note.** Worked on `feat/mobile-push` (this worktree) and never
 committed, per the task prompt's "never git commit" rule; `git status` lists the
 14 modified and 12 new files. The orchestrator decides where they land.
+
+## Review
+
+### P9 — Verdict: REQUEST-CHANGES
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; a different model family from the
+executor, so this is not a same-family review)
+
+**Gate (touched files only, as asked).** `bun test apps/mobile/test
+packages/client/test/push-register.test.ts` → 895 pass / 0 fail. `bun run lint`
+→ 1397 files, clean. `bun run typecheck` → exit 0. I did not re-run the full suite.
+
+**Findings.**
+
+1. **HIGH: turning notifications off does not last past a relaunch.**
+   `push-registration.ts:252` (`deps.initial ?? initialPushState()`) and
+   `push-manager.ts:206` (no `initial` passed). `enabled` exists only in memory,
+   and the off path clears the stored fingerprint (`push-registration.ts:352`).
+   So after a relaunch the registrar starts with `enabled: true` and `last:
+   undefined`, and the next link-up registers again. Repro
+   (`.tentacle/tmp/mobile-push/p9-review.test.ts`, H1): sync → off → new manager
+   on the same store → sync gives `["register","unregister","register"]`. The
+   phone gets buzzed again even though the person turned it off.
+2. **HIGH: turning notifications off while a computer is not connected never
+   unregisters it.** `linkPushSink.unregister` (`push-manager.ts:79-81`) does
+   nothing when `CLIENTS.get(id)` is undefined. `CLIENTS` only holds computers
+   with a live link (`App.tsx:429-436`), so in practice this is every computer
+   except the one on screen. Any error is also swallowed (`push-registration.ts:351`).
+   Every later sync then stops at `skip disabled` (`push-registration.ts:134`),
+   so the daemon keeps its registration and keeps sending pushes. The header
+   comment ("the daemon keeps the file until the next connect") describes a
+   follow-up unregister that does not exist. Repro H2: no `unregister` is ever
+   sent. The test "off with no link still forgets the fingerprint" pins the
+   phone-side half and misses this.
+3. **MEDIUM: turning notifications back on registers nothing until the next
+   reconnect.** `setEnabled(true)` (`push-registration.ts:327-337`) only sets
+   `unknown`, and `App.tsx` `onToggleNotifications` never calls `sync`. With the
+   link already up, the row says "Not checked yet" for as long as the session
+   lasts, and no pushes arrive. The module header (line 24) says "turning it back
+   on registers at once". Repro M: the second `register` is missing.
+4. **MEDIUM: one old daemon locks the whole phone's toggle.** `viewForAll` ranks
+   `daemon-too-old` worst (`push-manager.ts:242`), and `notificationsView` then
+   sets `switchable: false` (`push-manager.ts:110-117`). Settings has only one
+   row, so the person cannot turn off pushes from the other computers that are
+   `on`.
+
+**Mutation (mine).** I removed the fingerprint clear on toggle-off
+(`push-registration.ts:352`): 4 tests went RED. I reverted it, and `git status`
+is clean. The executor's M1–M6 table matches the code I read.
+
+**Attacks that found nothing.** The client methods reuse `call` on the one peer
+(§7 one session path, no new lock, so the peer is not serialized). A re-pair
+drops `push` in `add()`. `isDaemonTooOld` matches `-32601` exactly. The token is
+shape-checked before it is sent. The access group is passed on get, set and delete.
+
+**How the executor behaved.** The execution notes are thorough and honest about
+drift (D1–D8) and about a mutation that first looked like a survivor. But the
+toggle's lifecycle (persistence, and unregister when there is no link) was
+tested only on the phone side, so findings 1 and 2 got through.
