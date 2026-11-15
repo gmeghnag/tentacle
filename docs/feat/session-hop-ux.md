@@ -883,3 +883,23 @@ rows about the CLIENT CAPABILITY would both have passed for the wrong reason. It
 `beforeAll` now sets `TENTACLE_SESSION_HOP_TOOL=true` (with an assertion in the
 negative row that the setting really is on), which keeps the row about the
 capability and the OD8 tests about the default.
+
+### Round 2
+
+**Verdict: REQUEST-CHANGES** (3 of 4 fixed; finding 4 is only partly fixed)
+
+Gate: `bun run typecheck` clean · `bun run lint` clean (1383 files). The touched test files (cli hop/move-session/session-hop, tui hop-wake/session-hop/use-hop, config) give 564 pass / 0 fail. Every mutation was reverted, and `git status` is clean afterwards.
+
+| R1 finding | Fix | Mutation → result |
+|---|---|---|
+| 1 HIGH OD8 | `DEFAULT_SESSION_HOP_TOOL = false`, key-docs rewritten, README regenerated | default → `true` ⇒ 3 fails (2 OD8 rows + the README sync test). FIXED |
+| 2 MED wake not idle | `hopWakeStep({ready})` gets its value from `hopReady(boundary(…))` in both `after()` and `wakeSettled` | ignore `ready` ⇒ 4 fails (pure table, running turn, queued row, declined-busy). FIXED |
+| 3 MED lost line | `restoreLine` (feed) + `hopLine` on the own opts; the catch restores when `!streamed` | drop the restore ⇒ "failed wake's line rides the NEXT typed prompt" fails. FIXED |
+| 4 MED OD3 trace / ns label | typed `/move`: the label is `ns/pod` and the trace is on the row and the outcome; the miss has `(from <source>)` | see below. PARTIAL |
+
+Remaining finding:
+1. **MEDIUM — on a pinned proposal the trace shows `explicit`, and a 404 shows no provenance.** This is the owner's scenario: the model omits `namespace` and auto-accept is ON. `pinNamespace` writes the resolved namespace into the spec. Then `hopEngineHost` (`main.ts:1236`) calls `kubeNamespace(where)` with that namespace, so the source becomes `explicit`. Repro `.tentacle/tmp/session-hop-ux/r2/pin.ts`, with the kubeconfig's context namespace set to `openshift-etcd`: `pin (turn end): context openshift-etcd` / `build trace: explicit openshift-etcd`. So the row and the outcome say `from explicit`. On a miss, `attachMissNotice` (`hop-targets.ts:~505`) skips `(from …)` whenever `workload.namespace` is set, and a pinned spec always has it. So the real provenance (context/env/default) appears nowhere unless a prompt is shown. Fix: carry the pin's `KubeNamespace` into the build (for example on `HopHostWhere`) instead of re-resolving it.
+
+Regressions checked, none found: auto-accept/broker paths are unchanged by this diff. `restoreLine` keeps a newer pending fact rather than overwriting it, and `/clear` clears `taken`. `hopReady` is read at settle time, so a held line still rides the next real prompt.
+
+*— claude-opus-5-5, 2026-11-15*
