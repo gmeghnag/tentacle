@@ -8,9 +8,18 @@
  * or unchanged is a no-op, a long title is refused) and what a failure says.
  */
 import type { JSX } from "react";
-import { Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import type { RenameState } from "../session-rename.ts";
-import { type Palette, radius, space, typography } from "../theme.ts";
+import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../theme.ts";
 
 export interface RenameSheetProps {
   readonly palette: Palette;
@@ -30,7 +39,13 @@ export function RenameSheet({
 }: RenameSheetProps): JSX.Element {
   return (
     <Modal visible={state !== null} transparent animationType="fade" onRequestClose={onCancel}>
-      <View style={styles.root}>
+      {/* A Modal is its own native window: the screen's KeyboardAvoidingView does
+          not reach it, so the card is centred in the space ABOVE the keyboard
+          only by this one (docs/fix/mobile-chat-glitches.md, bug 1). */}
+      <KeyboardAvoidingView
+        style={styles.root}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
         <Pressable
           accessibilityLabel="Dismiss"
           style={[StyleSheet.absoluteFill, { backgroundColor: palette.scrim }]}
@@ -40,7 +55,10 @@ export function RenameSheet({
           testID="session-rename-sheet"
           style={[styles.card, { backgroundColor: palette.sheet }]}
         >
-          <Text style={[typography.title3, styles.center, { color: palette.label }]}>
+          <Text
+            maxFontSizeMultiplier={DENSE_FONT_SCALE}
+            style={[typography.title3, styles.center, { color: palette.label }]}
+          >
             Rename session
           </Text>
           <TextInput
@@ -105,14 +123,22 @@ export function RenameSheet({
             </Pressable>
           </View>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1, alignItems: "center", justifyContent: "center", padding: space.inset + 8 },
-  card: { width: "100%", maxWidth: 340, borderRadius: radius.card, overflow: "hidden", gap: 12 },
+  // `paddingTop`: the iOS alert's title inset — the title sat flush on the edge.
+  card: {
+    width: "100%",
+    maxWidth: 340,
+    borderRadius: radius.card,
+    overflow: "hidden",
+    gap: 12,
+    paddingTop: 20,
+  },
   center: { textAlign: "center" },
   field: { marginHorizontal: 16, marginTop: 4, borderRadius: radius.tile, padding: 12 },
   buttons: { flexDirection: "row", borderTopWidth: StyleSheet.hairlineWidth, marginTop: 4 },

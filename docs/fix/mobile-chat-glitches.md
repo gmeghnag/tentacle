@@ -707,7 +707,206 @@ Still no protocol, wire or persisted-format change.
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-15*
+
+**Load-bearing check (re-run first): HOLDS.** `hosted-session.ts:2254-2257`
+answers a known `turnId` from the ledger. `remote-session.ts` `sendPrompt`'s ack
+branch sets `turn.acked` and is the only place the ack is visible. `send`'s opts
+had no hook for it, and an own turn pushes no event at `turn_start`
+(`onUpdate`; it pushes only for `sendNow`/`reset`).
+
+**Slices, in plan order. Each test was red on its assertion before the fix,
+unless noted.**
+
+1. **Bug 2, client.** `packages/client/src/remote-session.ts`:
+   - `send`/`runTurn` take `opts.onAccepted`.
+   - `ActiveTurn.onAccepted` is called once in the ack branch, before `finish`
+     for an `ended` ack, then cleared, so a re-send's ack does not call it again.
+
+   New `packages/client/test/prompt-accepted.test.ts` (raw `RpcPeer` daemon):
+   - "once, after the answer, before any event": red;
+   - "`ended` retry ack": red;
+   - "never on a refusal": green on both. It guards the fix and is not a red test.
+2. **Bug 2, feed.** `session-feed.ts` `ownTurn(…, accepted?)` draws the prompt
+   at acceptance. A `closed` flag stops a late ack from drawing after the end.
+   Tests in `session-feed.test.ts`:
+   - "accepted with no event yet → row": red;
+   - "reset replay after acceptance → once": red;
+   - "refusal → no row" and "late ack draws nothing": guards.
+3. **Bug 2, the two ports.** New pure helper `untilAccepted` in
+   `outbox-session.ts`. Both `promptWithRefs` (`session-screen-controller.ts`)
+   and `outboxSessionOf(...).prompt` use it:
+   - it resolves at `onAccepted` or at the first event;
+   - it rejects with the stream's error if neither came first;
+   - it rejects with `SessionNotOpenError("link")` on an unanswered end.
+
+   `ownControl` is cleared only when the fold ends, and only if it is still this
+   turn's. Doc comments changed in `compose-controller.ts` and `outbox-driver.ts`;
+   no logic change there. Tests:
+   - `session-screen-compose.test.ts` "no outbox row / no stored item / ONE copy
+     while the accepted turn runs": red (the repro's `sending` row);
+   - "stream ENDS unanswered → item `waiting`": red;
+   - new real-daemon test in `outbox-link.test.ts`: the port resolves while the
+     `hold` turn is held, and the daemon has one user message;
+   - existing "SENDS the field's text" and "REFUSED send gives the words back":
+     still green.
+4. **Bug 3.** `follow.ts`:
+   - `endOffset`, `endTarget` (null while a size is 0);
+   - `contentGrew(state, size)` returns `scrollTo`;
+   - new `viewportChanged`.
+
+   `SessionScreen.tsx`:
+   - keeps a `size` ref, updated by `onContentSizeChange(_w, h)`, the FlatList's
+     new `onLayout` and `onScroll`;
+   - performs `scrollToOffset`; `scrollToEnd(` is gone.
+
+   Tests:
+   - `follow.test.ts`: the existing cases moved to the new signature, plus the
+     plan's cases (416, clamp 0, unknown size, viewport changes);
+   - assertion-red shown on the old module from scratch:
+     ```
+     old contentGrew → {"state":{"following":true,"unseen":false},"scrollToEnd":true}
+     Expected: 416
+     Received: undefined
+     ```
+   - source pins in the new `session-screen-follow-wiring.test.ts`. Their
+     regexes were run against `git show HEAD:` copies of the files: 3/3 fail.
+5. **Bug 1.** `RenameSheet.tsx`:
+   - a `KeyboardAvoidingView` (`padding` on iOS) inside the `Modal`;
+   - `card.paddingTop: 20`;
+   - the title gets `maxFontSizeMultiplier={DENSE_FONT_SCALE}`.
+
+   Its pins were red before the edit.
+6. **Items 5/6.** `session-screen-controller.ts`:
+   - `SessionScreenState.sends`;
+   - `press()` now wraps the old body (`act()`) and counts when the field was
+     non-blank before and `""` after. Every send path clears it in the same
+     synchronous step (F4). Dictation goes through `press`/`pressReturn` too
+     (`SessionScreen.tsx` voice `send`).
+
+   `SessionScreen.tsx`:
+   - an effect on `[state.sends]` calls `Keyboard.dismiss()` when `> 0`;
+   - `<Composer fieldKey={state.sends}>`.
+
+   `Composer.tsx`:
+   - `fieldKey` prop and `key={fieldKey}` on `composer-input`;
+   - no `TextInput` ref exists there, so a remount loses nothing.
+
+   Tests in `session-screen-compose.test.ts`:
+   - 8 cases: Send, Return, queued steer, Send later, blank Return, Stop,
+     double tap, refused send;
+   - all 8 were red (`undefined`);
+   - the source pins were red.
+
+   `voice-wiring.test.ts` stays green.
+7. **Item 9a.** `session-info-controller.ts`:
+   - `pull` reports a plain failure (`kind: "error"`; not offline or
+     MethodNotFound) through the new `InfoPort.onPullError(section, errorShape(error))`;
+   - `errorShape` comes from `app-log.ts`: the class plus the numeric code,
+     never the message.
+
+   `App.tsx` `infoWiring` logs it:
+   ```
+   warn client-error source=session-info section=<s> error=<class> code=<n>
+   ```
+   The view is unchanged (Q4). Tests: the RpcError canary (`-32050`, the message
+   absent), `TimeoutError`, and offline/MethodNotFound not reported. Red: nothing
+   was reported.
+8. **Item 10.**
+   - `transcript-rows.ts`: `ToolRow.sub: SubProgress`.
+   - `transcript.ts`: the four `subagent_*` cases, using the TUI's rules through
+     `updateTool`, with `SUB_ACTIVITY_CAP = 3` and `SUB_LABEL_MAX = 120`.
+   - `tool-summary.ts`: `subAgentLine` with the Q2 wording. `toolMeta` stops the
+     spinner when `sub.done`.
+   - `TranscriptRow.tsx`: one footnote line `tool-<id>-progress` under the row.
+
+   Tests:
+   - `transcript.test.ts`: the repro as an assertion, end, moved, unknown id
+     (same object), flood (last 3), label cap. 4 of them red: the repro, end,
+     moved, flood. The label-cap test had passed vacuously, so it now also
+     asserts one activity.
+   - `transcript-parity.test.ts`: TUI parity, with the same counts as
+     `applySessionEvent`.
+   - `tool-summary.test.ts`: assertion-red, via a stub `subAgentLine` that
+     returned `null`.
+   - Ask visibility: `permission-sheet-auto-accept.test.ts`. A child `shell` ask
+     in the parent's turn is shown with its agent label when auto-accept is off,
+     and gets `allow_once` when it is on. **It was green on the first run**, as
+     the plan expects: no second item-10 bug.
+9. `changelog.d/mobile-chat-glitches.fixed.md`: one bullet. No `protocol.d/`
+   note: the wire, the schema and `protocol.json` are untouched.
+
+**Mutations (each run, then reverted):**
+
+| Mutation | Result |
+|---|---|
+| `promptWithRefs` returns `run.accepted.then(() => run.done)` (await the fold again) | compose "ONE copy while the turn runs" RED |
+| `untilAccepted` resolves on an unanswered end | compose "item WAITING" RED |
+| port returns `.done` instead of `.accepted` | outbox-link "resolves at the ACK" RED (`"hung"`) |
+| `sends` counted in `setDraft` (typing) instead of `press` | "blank Return → unchanged" RED |
+| `sends` counted on every press | "Stop → unchanged" + "two presses → +1" RED |
+| 9a reports `error.message` | canary + timeout cases RED |
+| `subagent_tool` → `return state` | repro, flood, label cap, parity RED |
+
+**Drift from the Implementation (and why):**
+- **`SUB_ACTIVITY_CAP`.** The plan says "last 3, like the TUI's
+  `SUB_ACTIVITY_CAP`", but the TUI's cap is **50** (`tui/src/state.ts:275`). The
+  phone keeps the plan's 3, because it draws only the latest activity. Its own
+  constant documents this.
+- **The plan's item-10 repro.** It expected `toolUses === 2` after **three**
+  `subagent_tool` events, so the correct value is 3. It also used `tool_call`
+  and a nested `usage`. The real shapes are `tool_start` and flat
+  `promptTokens`/`completionTokens` (`client/src/mapping.ts:158-165`). The tests
+  use the real shapes.
+- **Acceptance fallback.** "Accepted" is the ack OR the stream's first event,
+  in the caller as well as the feed. The plan kept the first-event fallback for
+  the feed only. Without it, a `turn_end` consumed a few microtask hops before
+  the ack's `.then` would read as "unanswered". That would be harmless (the
+  reconnect asks the daemon, which says `sent`), but it would be spurious. It
+  also keeps today's rule for a failure after events: never give the words back.
+- **One shared helper.** `untilAccepted` (`outbox-session.ts`) serves both
+  ports, so the contract lives in one place and is not written twice.
+- **9a.**
+  - `data.reason` is **not** logged: it is daemon text, and the app log admits
+    none (F16, `app-log.ts` header). The numeric code already tells the layers
+    apart.
+  - All four sections report a plain failure, not only Context, because they
+    share the same `pull`.
+  - The log uses the existing kind `client-error`, since `AppLogKind` is a
+    closed set with no free text.
+- **Item 10 placement.**
+  - The progress line is rendered in `TranscriptRow.tsx` `ToolRowView` (it
+    already owns the lines under a row: reply, diff, output), not in
+    `ToolRow.tsx`.
+  - The ask-visibility test is in `permission-sheet-auto-accept.test.ts`, which
+    has the auto-accept harness. The sheet keys on `turnId` and never sees a
+    `toolCallId`.
+- **`sends`.** It is counted once, in `press()` (before/after the field), not at
+  each clear site. The rule is the same, from one place.
+- **Plan's 5/6 mutation note.** "blank Return/Stop go red" is not what happens.
+  The `setDraft` mutation reddens blank Return only (the Stop test types
+  nothing). Stop and the double tap redden under the "count every press"
+  mutation, so both are covered.
+- **Extra test:** the `outbox-link.test.ts` real-daemon test, which pins F3 end
+  to end through the real `RemoteSession` ack.
+
+**Unverified:**
+- **Device evidence: not run.** The plan's probe needs
+  `.tentacle/tmp/mobile-chat-glitches/probe-steps.yaml`, which is **not in the
+  scratch dir** (it was not kept). The flow 24 run also needs the simulator.
+  Still to check: the 16-pt landing (bug 3), the rename inset/keyboard (bug 1),
+  the composer height and keyboard (5/6) and the Agent card line (10). Check
+  them on the simulator or the owner's iPhone.
+- `App.tsx`'s `onPullError` → `APP_LOG` line is covered by typecheck only. The
+  controller half is tested.
+- 9b (the actual fix for "Couldn't load") waits for the owner's exported log
+  line, as planned.
+
+**Gate (2026-11-15, bun 1.4.3):**
+- `bun run typecheck` (root + `apps/mobile` + `apps/relay`): clean.
+- `bun run lint`: 0 errors, 0 warnings (1608 files).
+- `bun test`: **11530 pass, 5 skip, 0 fail** (11535 tests, 828 files). The 5
+  skips are all opt-in tests: k8s live ×2, docker live ×2, slow socket.
 
 ## Review
 

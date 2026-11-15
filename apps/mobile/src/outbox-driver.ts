@@ -56,7 +56,12 @@ export interface OutboxSession {
     bytes: Uint8Array,
     meta: { readonly mimeType: string; readonly name?: string },
   ): Promise<AttachmentRef>;
-  /** One prompt, with the key it carries. */
+  /**
+   * One prompt, with the key it carries. Resolves at the daemon's ACK (it holds
+   * the key: F3), NOT at the turn's end — the turn keeps streaming elsewhere
+   * (`untilAccepted`, docs/fix/mobile-chat-glitches.md bug 2). Rejects with a
+   * refusal before the ack, or `SessionNotOpenError("link")` when unanswered.
+   */
   prompt(text: string, turnId: string, attachments: readonly AttachmentRef[]): Promise<void>;
   /** One steer, with the key it carries, bound to the turn it was typed during. */
   steer(text: string, id: string, turnId: string): Promise<void>;

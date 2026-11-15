@@ -59,7 +59,19 @@ interface FakeSession extends SendableHandle {
   readonly queueListener: (state: QueueState) => void;
 }
 
-function harness(options: { readonly refuseSend?: unknown } = {}) {
+function harness(
+  options: {
+    readonly refuseSend?: unknown;
+    /** The daemon ACKS, then the turn runs (a model thinking) until `release()`. */
+    readonly acceptThenHold?: boolean;
+    /** The stream ends with no ack and no error (a link cut mid-request). */
+    readonly endSilently?: boolean;
+  } = {},
+) {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
   const states: SessionScreenState[] = [];
   const brokers: PermissionBroker[] = [];
   const store = createOutboxStore(memoryFs(), outboxPaths("file:///o", "c1"), () => 1);
@@ -156,7 +168,11 @@ function harness(options: { readonly refuseSend?: unknown } = {}) {
               session.activity = null;
             };
           },
-          async *send(prompt: string) {
+          async *send(
+            prompt: string,
+            _signal?: AbortSignal,
+            opts?: { readonly onAccepted?: () => void },
+          ) {
             // The screen's OWN stream: the compose half hands its turn here, so the
             // events must fold into the transcript (13d's flow 07).
             session.sent.push(prompt);
@@ -164,6 +180,18 @@ function harness(options: { readonly refuseSend?: unknown } = {}) {
               // A refusal before any event (`TurnInProgress`): the real seam throws
               // here, and `foldStream` is what used to swallow it.
               throw options.refuseSend;
+            }
+            if (options.endSilently) {
+              return;
+            }
+            if (options.acceptThenHold) {
+              // The real client: the ack (`onAccepted`) can come long before the
+              // turn's first event — a 27B model still thinking (bug 2).
+              opts?.onAccepted?.();
+              await gate;
+              yield { type: "text", delta: "thinking…" } as never;
+              yield { type: "turn_end", reason: "end_turn" } as never;
+              return;
             }
             yield { type: "user_message", text: prompt } as never;
             yield { type: "text", delta: "echo" } as never;
@@ -188,7 +216,7 @@ function harness(options: { readonly refuseSend?: unknown } = {}) {
       },
     });
   };
-  return { screen, states, session, store, handle, composeDriver: () => built };
+  return { screen, states, session, store, handle, composeDriver: () => built, release };
 }
 
 async function settle(): Promise<void> {
@@ -442,5 +470,152 @@ describe("Return and double submits (B2)", () => {
     await settle();
     expect(h.session.sent).toEqual([]);
     expect(screen.state().draft).toBe("   ");
+  });
+});
+
+describe("the outbox row leaves at the daemon's ACK, not at the turn's end (docs/fix/mobile-chat-glitches.md, bug 2)", () => {
+  test("while the accepted turn runs: no outbox row, no stored item, ONE copy of the text on screen", async () => {
+    // The owner's "Sending…" bubble that stayed for the whole turn: the item was
+    // settled when `promptWithRefs` returned, i.e. at the turn's END.
+    // Mutation: `promptWithRefs` awaits the fold again → red (the row is back).
+    const h = harness({ acceptThenHold: true });
+    const screen = h.screen();
+    await screen.open();
+    screen.setDraft("Scrivi qualcosa");
+    screen.press();
+    for (let i = 0; i < 5; i += 1) {
+      await settle();
+    }
+    const view = screen.state().view;
+    expect(h.session.sent).toEqual(["Scrivi qualcosa"]);
+    expect(view.outbox).toEqual([]);
+    expect(h.store.data.items).toEqual([]);
+    expect(JSON.stringify(view).split("Scrivi qualcosa").length - 1).toBe(1);
+    // The turn still runs (Stop is offered) — only the send is done.
+    expect(view.composer.button).not.toBe("send");
+    h.release();
+    for (let i = 0; i < 5; i += 1) {
+      await settle();
+    }
+    expect(JSON.stringify(screen.state().view).split("Scrivi qualcosa").length - 1).toBe(1);
+  });
+
+  test("a stream that ENDS with no ack and no error keeps the item WAITING with its key (never a silent drop)", async () => {
+    const h = harness({ endSilently: true });
+    const screen = h.screen();
+    await screen.open();
+    screen.setDraft("cut mid-request");
+    screen.press();
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+    expect(h.session.sent).toEqual(["cut mid-request"]);
+    expect(h.store.data.items.map((i) => ({ text: i.text, state: i.state }))).toEqual([
+      { text: "cut mid-request", state: "waiting" },
+    ]);
+  });
+});
+
+describe("`sends`: a press that CLEARED the field (items 5/6: keyboard down, field remounted)", () => {
+  // Mutation: count in `setDraft` (i.e. typing) instead → the blank-Return and
+  // Stop cases go red; count every press → the double-tap case goes red.
+  const settled = async (): Promise<void> => {
+    for (let i = 0; i < 10; i += 1) {
+      await settle();
+    }
+  };
+
+  test("Send with text → +1", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    expect(screen.state().sends).toBe(0);
+    screen.setDraft("hello");
+    screen.press();
+    await settled();
+    expect(screen.state().sends).toBe(1);
+  });
+
+  test("Return with text → +1", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    screen.setDraft("hello");
+    screen.pressReturn();
+    await settled();
+    expect(screen.state().sends).toBe(1);
+  });
+
+  test("a queued steer (a turn runs) → +1", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    h.session.turn("t");
+    screen.setDraft("steer me");
+    expect(screen.state().view.composer.button).toBe("queue");
+    screen.press();
+    await settled();
+    expect(h.session.steers.map((s) => s.text)).toEqual(["steer me"]);
+    expect(screen.state().sends).toBe(1);
+  });
+
+  test("Send later (the link is down) → +1", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    screen.link(false);
+    screen.setDraft("later");
+    expect(screen.state().view.composer.button).toBe("send-later");
+    screen.press();
+    await settled();
+    expect(screen.state().sends).toBe(1);
+  });
+
+  test("typing, then Return on a blank field → unchanged", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    screen.setDraft("typed");
+    screen.setDraft("   ");
+    screen.pressReturn();
+    await settled();
+    expect(screen.state().sends).toBe(0);
+  });
+
+  test("Stop → unchanged", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    h.session.turn("t");
+    expect(screen.state().view.composer.button).toBe("stop");
+    screen.press();
+    await settled();
+    expect(h.session.cancels).toBe(1);
+    expect(screen.state().sends).toBe(0);
+  });
+
+  test("two presses in one frame → +1 (the second finds the field empty, F4)", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    screen.setDraft("once");
+    screen.press();
+    screen.press();
+    await settled();
+    expect(h.session.sent).toEqual(["once"]);
+    expect(screen.state().sends).toBe(1);
+  });
+
+  test("a REFUSED send → +1, with the words back in the field", async () => {
+    const h = harness({ refuseSend: new RpcError(DomainErrorCode.TurnInProgress, "busy") });
+    const screen = h.screen();
+    await screen.open();
+    screen.setDraft("my words");
+    screen.press();
+    for (let i = 0; i < 20; i += 1) {
+      await settle();
+    }
+    expect(screen.state().draft).toBe("my words");
+    expect(screen.state().sends).toBe(1);
   });
 });

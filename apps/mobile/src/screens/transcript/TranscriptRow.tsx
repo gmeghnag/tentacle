@@ -18,7 +18,7 @@ import { diffView } from "../../diff-view.ts";
 import { type Parsed, parse } from "../../markdown.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
 import { type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
-import { toolMeta, toolSummary } from "../../tool-summary.ts";
+import { subAgentLine, toolMeta, toolSummary } from "../../tool-summary.ts";
 import { type Row, imageRowText } from "../../transcript-rows.ts";
 import { Icon } from "../../ui/Icon.tsx";
 import { ToolRow } from "../../ui/ToolRow.tsx";
@@ -179,6 +179,7 @@ function ToolRowView({ row, palette }: RowProps): JSX.Element {
   const hidden = Math.max(0, lines.length - OUTPUT_PREVIEW_LINES);
   const shown = all ? lines : lines.slice(0, OUTPUT_PREVIEW_LINES);
   const view = tool.diff === undefined ? null : diffView(tool.diff);
+  const progress = subAgentLine(tool.sub);
   return (
     <Shell row={tool}>
       <View style={styles.tool}>
@@ -196,6 +197,18 @@ function ToolRowView({ row, palette }: RowProps): JSX.Element {
           }}
           labelTestID={`tool-${tool.id}-${tool.status}`}
         />
+        {progress === null ? null : (
+          // Item 10: a foreground sub-agent's latest activity, so a long child
+          // does not look like a hang.
+          <Text
+            testID={`tool-${tool.id}-progress`}
+            numberOfLines={1}
+            maxFontSizeMultiplier={DENSE_FONT_SCALE}
+            style={[typography.footnote, { color: palette.sec }]}
+          >
+            {progress}
+          </Text>
+        )}
         {tool.denialReply !== undefined ? (
           <Text
             testID={`tool-${tool.id}-reply`}

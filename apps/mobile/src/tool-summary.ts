@@ -9,7 +9,7 @@
  * pinned to the TUI's by `test/tool-summary.test.ts`'s parity cases.
  */
 import { stripAnsi } from "./ansi.ts";
-import type { ToolRow } from "./transcript-rows.ts";
+import type { SubProgress, ToolRow } from "./transcript-rows.ts";
 
 export interface ToolSummary {
   /** The display label (`toolLabel`, already on the row). */
@@ -112,8 +112,10 @@ function elapsed(ms: number): string {
   return `${Math.floor(seconds / 60)} min ${seconds % 60} s`;
 }
 
-export function toolMeta(row: Pick<ToolRow, "status" | "durationMs" | "diff">): ToolMeta {
-  const tone = TONE[row.status];
+export function toolMeta(row: Pick<ToolRow, "status" | "durationMs" | "diff" | "sub">): ToolMeta {
+  // A sub-agent that finished stops the spinner, even before its call's own
+  // result lands (item 10).
+  const tone = row.status === "running" && row.sub?.done === true ? "ok" : TONE[row.status];
   if (row.diff !== undefined) {
     return { tone, trailing: `+${row.diff.added} −${row.diff.removed}` };
   }
@@ -121,6 +123,29 @@ export function toolMeta(row: Pick<ToolRow, "status" | "durationMs" | "diff">): 
     return { tone, trailing: "denied" };
   }
   return { tone, trailing: row.durationMs === undefined ? "" : elapsed(row.durationMs) };
+}
+
+/**
+ * The Agent card's progress line (docs/fix/mobile-chat-glitches.md item 10,
+ * Owner Q2 — the TUI's head, tokens left out on the phone):
+ * running `<last activity> · <N> tool uses`, done `Done · <N> tool uses`,
+ * moved `Moved to background · sa-N`. `null`: no sub-agent on this row.
+ */
+export function subAgentLine(sub: SubProgress | undefined): string | null {
+  if (sub === undefined) {
+    return null;
+  }
+  if (sub.done && sub.stopReason === "background") {
+    return sub.movedTo === undefined
+      ? "Moved to background"
+      : `Moved to background · ${sub.movedTo}`;
+  }
+  const uses = `${sub.toolUses} tool ${sub.toolUses === 1 ? "use" : "uses"}`;
+  if (sub.done) {
+    return `Done · ${uses}`;
+  }
+  const last = sub.activities.at(-1);
+  return last === undefined ? uses : `${last} · ${uses}`;
 }
 
 export function toolSummary(row: Pick<ToolRow, "name" | "label" | "args" | "output">): ToolSummary {

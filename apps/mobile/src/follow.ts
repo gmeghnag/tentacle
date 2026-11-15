@@ -4,7 +4,8 @@
  * up, it stays where they are and a "Jump to latest" pill is offered.
  *
  * Pure and React-free (AGENTS §7): `SessionScreen.tsx` feeds it the list's
- * scroll metrics and content-size changes, and only performs `scrollToEnd`.
+ * scroll metrics, content-size and layout changes, and only performs the
+ * `scrollToOffset` a step names.
  */
 
 /** How close to the end still counts as "at the bottom" (a finger's slack). */
@@ -48,15 +49,45 @@ export function scrolled(state: Follow, m: ScrollMetrics, byPerson: boolean): Fo
   return state;
 }
 
-/** The content grew (a delta, a row): scroll to the end, or mark it unseen. */
-export function contentGrew(state: Follow): {
+/** The list's size: the NATIVE content height (it includes the container padding) and its viewport. */
+export type ListSize = Pick<ScrollMetrics, "content" | "viewport">;
+
+/** One follow step: the next state, and the offset to scroll to (null: stay). */
+export interface FollowStep {
   readonly state: Follow;
-  readonly scrollToEnd: boolean;
-} {
+  readonly scrollTo: number | null;
+}
+
+/**
+ * The TRUE end: the native content height minus the viewport, clamped at 0.
+ * Not RN's `scrollToEnd`, whose target is the last CELL's end (estimated until
+ * measured) and leaves out the container's bottom padding — a constant 16 pt
+ * short (docs/fix/mobile-chat-glitches.md, bug 3).
+ */
+export function endOffset(m: ListSize): number {
+  return Math.max(0, m.content - m.viewport);
+}
+
+/** The end to scroll to, or null while either size is still unknown (0 before the first layout). */
+export function endTarget(m: ListSize): number | null {
+  return m.content > 0 && m.viewport > 0 ? endOffset(m) : null;
+}
+
+/** The content grew (a delta, a row): scroll to the end, or mark it unseen. */
+export function contentGrew(state: Follow, m: ListSize): FollowStep {
   if (state.following) {
-    return { state, scrollToEnd: true };
+    return { state, scrollTo: endTarget(m) };
   }
-  return { state: state.unseen ? state : { following: false, unseen: true }, scrollToEnd: false };
+  return { state: state.unseen ? state : { following: false, unseen: true }, scrollTo: null };
+}
+
+/**
+ * The list's VIEWPORT changed (a header bar, a notice or the composer grew): the
+ * end moved with no content change. Following → scroll to the new end; not
+ * following → stay, and nothing is "unseen" (no content arrived).
+ */
+export function viewportChanged(state: Follow, m: ListSize): FollowStep {
+  return { state, scrollTo: state.following ? endTarget(m) : null };
 }
 
 /** The pill's tap: back to the end, following again. */

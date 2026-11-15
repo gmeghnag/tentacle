@@ -243,3 +243,72 @@ describe("owner B4: this phone's OWN prompt is a user row", () => {
     expect(h.states().rows.filter((r) => r.kind === "user")).toHaveLength(1);
   });
 });
+
+describe("the own prompt is drawn at the daemon's ACK (docs/fix/mobile-chat-glitches.md, bug 2)", () => {
+  const userTexts = (state: State): readonly string[] =>
+    state.rows.flatMap((r) => (r.kind === "user" ? [(r as { text: string }).text] : []));
+
+  /** A stream that yields nothing until `release`, then `events`. */
+  function held(events: readonly SessionEvent[]) {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    async function* stream(): AsyncIterable<SessionEvent> {
+      await gate;
+      yield* events;
+    }
+    return { stream: stream(), release };
+  }
+
+  test("accepted while the stream has yielded nothing → the user row is already there", async () => {
+    const h = harness();
+    const s = held([{ type: "turn_end", reason: "end_turn" }] as SessionEvent[]);
+    const done = h.feed.ownTurn("t1", s.stream, { text: "Scrivi qualcosa" }, Promise.resolve());
+    await settle();
+    expect(userTexts(h.states())).toEqual(["Scrivi qualcosa"]);
+    s.release();
+    await done;
+    expect(userTexts(h.states())).toEqual(["Scrivi qualcosa"]);
+  });
+
+  test("no acceptance, then a refusal → no user row", async () => {
+    const h = harness();
+    const refusal = new Error("turn in progress");
+    const broken: AsyncIterable<SessionEvent> = {
+      [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(refusal) }),
+    };
+    const never = new Promise<void>(() => {});
+    await expect(h.feed.ownTurn("t1", broken, { text: "hello" }, never)).rejects.toBe(refusal);
+    await settle();
+    expect(userTexts(h.states())).toEqual([]);
+  });
+
+  test("a reset replay AFTER acceptance → exactly one user row", async () => {
+    const h = harness();
+    const s = held([
+      { type: "history_reset", messages: HISTORY },
+      { type: "user_message", text: "same" },
+      { type: "turn_end", reason: "end_turn" },
+    ] as SessionEvent[]);
+    const done = h.feed.ownTurn("t1", s.stream, { text: "same" }, Promise.resolve());
+    await settle();
+    expect(userTexts(h.states())).toEqual(["same"]);
+    s.release();
+    await done;
+    // The reset replaced the rows with HISTORY ("Alpha"), then the replay once.
+    expect(userTexts(h.states())).toEqual(["Alpha", "same"]);
+  });
+
+  test("an acceptance that lands after the stream already ended draws nothing late", async () => {
+    const h = harness();
+    let accept: () => void = () => {};
+    const accepted = new Promise<void>((r) => {
+      accept = r;
+    });
+    await h.feed.ownTurn("t1", gen([] as SessionEvent[]), { text: "late" }, accepted);
+    accept();
+    await settle();
+    expect(userTexts(h.states())).toEqual([]);
+  });
+});
