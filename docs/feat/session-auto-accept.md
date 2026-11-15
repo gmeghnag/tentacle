@@ -686,3 +686,27 @@ source guard (the exact class of failure: a `node:` specifier in the phone's
 import graph), not by `expo export`. To verify for real: `cd apps/mobile && bunx
 expo export --platform ios` (needs the native toolchain), which is what the guard
 stands in for in CI.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; reviewed `git diff HEAD~1`, commit `347bf2d3`)
+
+**Verdict: REQUEST-CHANGES (doc only — every code finding is fixed).**
+
+**Gate:** `bun run typecheck` clean; `bun run lint` clean (1444 files); the 9 touched test files: 104 pass / 0 fail. I did not re-run the full `bun test`.
+
+**Round-1 findings, each verified by mutation (then reverted; `git status` clean):**
+
+| # | Re-check | Result |
+|---|---|---|
+| F1 HIGH | `switch-off.ts` re-run: `on B: feed false \| B link false`. Mutation: `sync` without `force` | 3 red (link + 2 feed tests) — **fixed** |
+| F2 HIGH | Mutation: put `node:os` back in `remote-client.ts` | `node-builtins-guard` red — **fixed** (proven by a source scan, not by an `expo export`) |
+| F3 MEDIUM | Mutation: drop the `auto_accept` gate; then, separately, the `noteAutoAccept` gate | the pod-claim test fails on each — **fixed** |
+| F4 MEDIUM | Mutation: own-turn test back to `undefined` in `permission-sheet.ts` | "an ask with NO turn id always reaches a person" red — **fixed** |
+| F5 MEDIUM | see 1 below | **not fixed** |
+
+**Findings:**
+
+1. **MEDIUM (process, AGENTS §10): the signature still does not match the commit.** "Fix round 1" is signed `claude-opus-5-5, 2026-11-16`, but its commit `347bf2d3` says `review round 1 (deepseek)`. The same section claims F5 is fixed ("signed by the model that actually did the work"). One of the two records is wrong. Fix: sign the section with the model that executed it.
+
+**Regressions checked on the diff, none found:** forcing the first snapshot fires once, a re-attach that changes nothing stays silent, and a snapshot is never announced as another device's flip. `hostLabel` reaches the wire only with the trust bit (the test fails without that check). The phone's `clientInfo` matches the schema regex. An older paired-computer record without `thisDeviceName` still loads. Nit, below MEDIUM: the phone's `clientInfo.version: "0"` would show as `tentacle-app 0` in a version-mismatch message (`daemon/src/version-mismatch.ts:73`).
