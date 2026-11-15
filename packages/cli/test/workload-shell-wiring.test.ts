@@ -19,25 +19,35 @@ import { buildAgent } from "../src/wiring.ts";
 
 let dir: string;
 let config: TentacleConfig;
+/** A config with `workloadShell.tool` ON: the opt-in (owner decision 1). */
+let enabled: TentacleConfig;
 const saved: Record<string, string | undefined> = {};
+const ENV = "TENTACLE_WORKLOAD_SHELL_TOOL";
+
+/** A computed delete (AGENTS §6: `noDelete` is hand-fixed, not disabled). */
+const unsetEnv = (key: string): void => {
+  const env = process.env as Record<string, string | undefined>;
+  delete env[key];
+};
 
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), "harness-workload-shell-"));
-  saved.TENTACLE_CONFIG_DIR = process.env.TENTACLE_CONFIG_DIR;
+  for (const key of ["TENTACLE_CONFIG_DIR", ENV]) saved[key] = process.env[key];
   process.env.TENTACLE_CONFIG_DIR = join(dir, "config"); // never the user's config
+  unsetEnv(ENV); // the DEFAULT is what `config` holds
   config = await loadConfig({ cwd: dir });
+  process.env[ENV] = "true";
+  enabled = await loadConfig({ cwd: dir });
+  unsetEnv(ENV);
 });
 
 afterAll(async () => {
-  // A computed delete (AGENTS §6: `noDelete` is hand-fixed). Assigning
+  // Computed deletes (AGENTS §6: `noDelete` is hand-fixed). Assigning
   // `undefined` would set the STRING "undefined", which is how a stray
   // `./undefined/` config dir got created once.
-  const env = process.env as Record<string, string | undefined>;
-  if (saved.TENTACLE_CONFIG_DIR === undefined) {
-    const key = "TENTACLE_CONFIG_DIR";
-    delete env[key];
-  } else {
-    env.TENTACLE_CONFIG_DIR = saved.TENTACLE_CONFIG_DIR;
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) unsetEnv(key);
+    else process.env[key] = value;
   }
   await rm(dir, { recursive: true, force: true });
 });
@@ -60,8 +70,8 @@ const backend: WorkloadShellBackend = {
 };
 
 describe("D3/eval risk 6: `workload_shell` is offered only on the user's own host", () => {
-  test("a build that passes a backend offers it, with a usable schema", () => {
-    const wired = buildAgent(config, { workloadShell: { backend } });
+  test("a build that passes a backend and enables the setting offers it, with a usable schema", () => {
+    const wired = buildAgent(enabled, { workloadShell: { backend } });
     expect(offered(wired.tools)).toContain("workload_shell");
     const definition = wired.tools.definitions().find((d) => d.name === "workload_shell");
     const schema = JSON.stringify(definition);
@@ -72,22 +82,34 @@ describe("D3/eval risk 6: `workload_shell` is offered only on the user's own hos
     expect(definition?.description).toContain("move_session");
   });
 
+  test("`workloadShell.tool` is OFF by default, so a backend alone offers NOTHING", () => {
+    // Owner decision 1. Mutation: register on the backend alone (the pre-fix
+    // wiring) → this row fails, because the tool really is offered.
+    expect(config.workloadShell.tool).toBe(false);
+    const wired = buildAgent(config, { workloadShell: { backend } });
+    expect(offered(wired.tools)).not.toContain("workload_shell");
+    // Nothing to dispose either: the registry is built only when it is offered.
+    expect(wired.workloadShells).toBeUndefined();
+  });
+
   test("a build with NO backend never offers it — which is every pod daemon", () => {
     // Mutation: register it unconditionally → this row fails.
+    expect(offered(buildAgent(enabled).tools)).not.toContain("workload_shell");
     expect(offered(buildAgent(config).tools)).not.toContain("workload_shell");
   });
 
   test("the registry travels with the build, so the session can dispose it", () => {
-    const wired = buildAgent(config, { workloadShell: { backend } });
+    const wired = buildAgent(enabled, { workloadShell: { backend } });
     expect(wired.workloadShells).toBeDefined();
     expect(typeof wired.workloadShells?.dispose).toBe("function");
     // And a build without the tool has nothing to dispose.
-    expect(buildAgent(config).workloadShells).toBeUndefined();
+    expect(buildAgent(enabled).workloadShells).toBeUndefined();
+    expect(buildAgent(config, { workloadShell: { backend } }).workloadShells).toBeUndefined();
   });
 
   test("offering it does not disturb the tools every build already had", () => {
-    const withTool = offered(buildAgent(config, { workloadShell: { backend } }).tools);
-    const without = offered(buildAgent(config).tools);
+    const withTool = offered(buildAgent(enabled, { workloadShell: { backend } }).tools);
+    const without = offered(buildAgent(enabled).tools);
     expect(withTool.length).toBe(without.length + 1);
     expect(new Set(without).size).toBe(without.length);
   });

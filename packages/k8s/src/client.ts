@@ -51,6 +51,12 @@ export interface KubeClientOptions {
   readonly fetch?: typeof fetch;
   /** Injectable WebSocket factory, for tests. Defaults to the global `WebSocket`. */
   readonly makeWebSocket?: (url: string, protocols: string[]) => WebSocketLike;
+  /**
+   * How long `execRefusal` waits for the apiserver's reason before giving up
+   * (default below; a test seam). It runs on a failure path, so it must never
+   * hang the error report (review round 1, MEDIUM 3).
+   */
+  readonly refusalTimeoutMs?: number;
 }
 
 export interface WaitForReadyOptions {
@@ -61,6 +67,9 @@ export interface WaitForReadyOptions {
   /** Abort the wait (also aborts the in-flight poll). */
   readonly signal?: AbortSignal;
 }
+
+/** `execRefusal`'s deadline: enough for a healthy apiserver, never a hang. */
+export const REFUSAL_TIMEOUT_MS = 5_000;
 
 /** Resolve after `ms`, or reject if `signal` aborts first. */
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -88,6 +97,8 @@ export class KubeClient {
   private readonly tls?: PodTls;
   private readonly doFetch: typeof fetch;
   private readonly makeWebSocket: (url: string, protocols: string[]) => WebSocketLike;
+  /** How long `execRefusal` waits before giving up on the apiserver's reason. */
+  private readonly refusalTimeoutMs: number;
 
   constructor(options: KubeClientOptions) {
     this.server = options.server.replace(/\/+$/, "");
@@ -96,6 +107,7 @@ export class KubeClient {
       this.token = options.token;
     }
     this.doFetch = options.fetch ?? fetch;
+    this.refusalTimeoutMs = options.refusalTimeoutMs ?? REFUSAL_TIMEOUT_MS;
     this.tls = options.tls;
     this.makeWebSocket =
       options.makeWebSocket ??
@@ -265,10 +277,23 @@ export class KubeClient {
   async execRefusal(target: ExecTarget): Promise<string | undefined> {
     const url = buildExecUrl(this.server, this.namespace, target).replace(/^ws/, "http");
     let res: Response;
+    // BOUNDED. This runs on the FAILURE path, where something is already wrong
+    // (an apiserver or a proxy that accepts the POST and never answers), and
+    // `explain` awaits it with nothing else to race against — an unbounded
+    // fetch would hang the tool's error report forever (review round 1, MEDIUM 3).
+    const timeoutMs = this.refusalTimeoutMs;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      res = await this.doFetch(url, { method: "POST", headers: this.headers() });
+      res = await this.doFetch(url, {
+        method: "POST",
+        headers: this.headers(),
+        signal: controller.signal,
+      });
     } catch {
-      return undefined; // the cluster became unreachable: nothing to report
+      return undefined; // unreachable, or timed out: nothing to report
+    } finally {
+      clearTimeout(timer);
     }
     if (res.ok) {
       return undefined;

@@ -125,8 +125,17 @@ class FakeCluster implements PodCluster {
   /** The reason `execRefusal` reports (undefined → it has none). */
   refusal: string | undefined;
   refusalAsked: ExecTarget[] = [];
+  /** When set, `getPod` returns THIS instead of the canned pod (a replaced pod). */
+  podSpecOverride: (() => Pod) | undefined;
 
   private pod(): Pod {
+    if (this.podSpecOverride !== undefined) {
+      return this.podSpecOverride();
+    }
+    return this.canned();
+  }
+
+  private canned(): Pod {
     return {
       metadata: { name: POD, ...(this.annotations ? { annotations: this.annotations } : {}) },
       spec: { containers: CONTAINERS.map((name) => ({ name })) },
@@ -346,6 +355,60 @@ describe("workload_shell on a multi-container pod", () => {
     expect(result.isError).toBe(true);
     expect(result.content).toContain("Succeeded");
     expect(cluster.execTargets).toHaveLength(0);
+    await shells.dispose();
+  });
+
+  test("a REOPEN re-reads the pod: the container set and the phase are never cached", async () => {
+    // Review round 1, MEDIUM 2: `prime`'s cache made every reopen skip the
+    // `GET pod`, so a replaced pod kept a stale container and a terminated one
+    // skipped the `stopped` refusal. Mutation: restore the cache hit in `prime`
+    // → the second row below reads the FIRST pod's container and does not refuse.
+    const cluster = new FakeCluster();
+    const { shells, run, backend } = harness(cluster);
+
+    const first = await run({ action: "run", target: TARGET, command: "true" });
+    expect(first.isError).toBe(false);
+    expect(cluster.execTargets[0]?.container).toBe("etcdctl");
+    // The shell is gone (as a replace/terminate would leave it): kill the stream.
+    await shells.close(TARGET);
+
+    // The pod was REPLACED: its first container is now different.
+    const replaced = new FakeCluster();
+    const swapped = [...CONTAINERS].reverse();
+    cluster.podSpecOverride = () =>
+      ({
+        metadata: { name: POD },
+        spec: { containers: swapped.map((name) => ({ name })) },
+        status: { phase: "Running", conditions: [{ type: "Ready", status: "True" }] },
+      }) satisfies Pod;
+
+    const second = await run({ action: "run", target: TARGET, command: "true" });
+    expect(second.isError).toBe(false);
+    // A FRESH read picked the new first container, not the cached one.
+    expect(cluster.execTargets[1]?.container).toBe("etcd-rev");
+    expect(replaced.execTargets).toHaveLength(0);
+    void backend;
+    await shells.dispose();
+  });
+
+  test("a pod that is stopped by the reopen is REFUSED, not exec'd into", async () => {
+    // The same MEDIUM 2, second half: `stopped` is skipped entirely when the
+    // container comes from the cache.
+    const cluster = new FakeCluster();
+    const { shells, run } = harness(cluster);
+
+    const first = await run({ action: "run", target: TARGET, command: "true" });
+    expect(first.isError).toBe(false);
+    await shells.close(TARGET);
+
+    cluster.phase = "Succeeded"; // the pod finished / was terminated meanwhile
+    const before = cluster.execTargets.length;
+    const second = await run({ action: "run", target: TARGET, command: "true" });
+
+    expect(second.isError).toBe(true);
+    expect(second.content).toContain("Succeeded");
+    // Nothing new was exec'd: the refusal happened BEFORE any open.
+    expect(cluster.execTargets).toHaveLength(before);
     await shells.dispose();
   });
 });

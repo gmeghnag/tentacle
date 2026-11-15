@@ -41,6 +41,7 @@ import {
   DEFAULT_TOOL_EXECUTION,
   DEFAULT_TOOL_MAX_PARALLEL,
   DEFAULT_TOOL_OUTPUT_RETENTION_DAYS,
+  DEFAULT_WORKLOAD_SHELL_TOOL,
   defaultWritableDirs,
 } from "./defaults.ts";
 import type { ResolvedConfig } from "./resolve.ts";
@@ -751,6 +752,28 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     details:
       "It only PROPOSES: the tool has no daemon-side effect, and nothing moves until you say yes to the laptop's own prompt (asked when the turn ends, never answered by auto-accept, never remembered). Offered only where a hop exists — the local worker and a pod daemon — and never to a sub-agent.",
     example: "false",
+  },
+  workloadShell: {
+    summary: "The agent may open a stateful `sh` on another workload (`workload_shell`).",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "workloadShell.tool": {
+    summary:
+      "Offer the agent `workload_shell`: a stateful, non-interactive `sh` on a pod or container.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => DEFAULT_WORKLOAD_SHELL_TOOL,
+    resolved: (c) => c.workloadShell.tool,
+    sourceKey: "workloadShellTool",
+    env: "TENTACLE_WORKLOAD_SHELL_TOOL",
+    sample: "on",
+    details:
+      "It dials with YOUR kubeconfig / docker endpoint and runs commands on another workload, so it is OFF unless you turn it on. You are still asked before the first command on each target (and with `always` for the rest of the session). Offered only where tentacle runs on your own host — the local worker and `serve` — never to a pod daemon, which already has its own shell inside its workload.",
+    example: "true",
   },
   autoWake: {
     summary: "Start a continuation turn when a background job exits while idle.",

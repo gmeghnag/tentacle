@@ -376,6 +376,18 @@ const settingsShape = {
     .strict()
     .optional(),
   /**
+   * Workload shell (docs/fix/workload-shell-live.md, owner decision 1): the
+   * agent may open a stateful `sh` on ANOTHER workload with `workload_shell`.
+   * Default: DISABLED — it reaches the user's kubeconfig / docker endpoint.
+   */
+  workloadShell: z
+    .object({
+      /** Default: disabled. */
+      tool: z.boolean().optional(),
+    })
+    .strict()
+    .optional(),
+  /**
    * Auto-wake: when a background job exits while the agent is idle, start a
    * continuation turn so it reacts without a user prompt. Default: enabled.
    */

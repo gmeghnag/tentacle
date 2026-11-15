@@ -282,5 +282,38 @@ describe("KubeClient", () => {
       });
       await expect(c.execRefusal({ pod: "p", command: ["sh"] })).resolves.toBeUndefined();
     });
+
+    test("a fetch that never ANSWERS is given up on (bounded, never hangs explain)", async () => {
+      // Review round 1, MEDIUM 3: an apiserver or proxy that accepts the POST and
+      // never replies used to hang `explain` forever. Mutation: drop the
+      // AbortController → this test times out instead of resolving.
+      let aborted = false;
+      const c = new KubeClient({
+        server: "https://k.example:6443",
+        namespace: NS,
+        token: "t",
+        refusalTimeoutMs: 20,
+        fetch: ((_url: string, init?: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              aborted = true;
+              reject(new DOMException("aborted", "AbortError"));
+            });
+          })) as unknown as typeof fetch,
+      });
+
+      const started = Date.now();
+      await expect(c.execRefusal({ pod: "p", command: ["sh"] })).resolves.toBeUndefined();
+      expect(aborted).toBe(true);
+      // It gave up on its OWN deadline, not the test runner's.
+      expect(Date.now() - started).toBeLessThan(2_000);
+    });
+
+    test("the request carries an abort signal even when the apiserver is healthy", async () => {
+      const { client: c, seen } = refusalClient(() => Response.json(FORBIDDEN, { status: 403 }));
+      await c.execRefusal({ pod: "p", command: ["sh"] });
+      const sent = seen[0] as { init: RequestInit | undefined };
+      expect(sent.init?.signal).toBeDefined();
+    });
   });
 });

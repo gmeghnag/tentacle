@@ -1,0 +1,1 @@
+- **A fresh shell no longer truncates its first command's output.** The first command after a shell opens could lose its head — `hostname` on `etcd-guard-…` came back as `guard-…` — because the bytes that arrived in the same read as the shell's readiness marker were discarded. Those bytes are now kept and handed to the command that follows.

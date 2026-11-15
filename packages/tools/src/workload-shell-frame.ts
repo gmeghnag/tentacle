@@ -120,7 +120,7 @@ function indexOfBytes(haystack: Uint8Array, needle: Uint8Array, from = 0): numbe
   return -1;
 }
 
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
+export function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(a.length + b.length);
   out.set(a, 0);
   out.set(b, a.length);
@@ -135,6 +135,31 @@ export interface ReadySeen {
 }
 
 const decoder = new TextDecoder();
+
+/**
+ * The bytes that followed the ready marker in `bytes`, or `null` when the ready
+ * marker is not (yet, or wholly) there.
+ *
+ * They are NOT garbage: the pod's first output — a profile's echo, a container
+ * entrypoint's banner, and on a busy image the beginning of the FIRST command's
+ * output — arrives in the same read as the ready marker, because nothing forces
+ * the kubelet to flush the two separately. Discarding the tail therefore cuts
+ * the head off whatever the shell says next, which is exactly the owner's live
+ * `hostname` returning `guard-3a6ec32…-end` instead of the whole hostname
+ * (docs/fix/workload-shell-live.md, owner decision 3).
+ *
+ * Byte-exact on purpose: re-encoding the decoded text would mangle a multi-byte
+ * character the decoder happened to hold across a chunk boundary.
+ */
+export function bytesAfterReady(bytes: Uint8Array): Uint8Array<ArrayBuffer> | null {
+  const end = indexOfBytes(bytes, readyEnd());
+  if (end === -1) {
+    return null;
+  }
+  // The bootstrap's `printf` ends its marker with `\n`, so the bytes after the
+  // marker begin with that newline — the one OUR printf added, not the pod's.
+  return stripLeadingNewline(bytes.subarray(end + readyEnd().length));
+}
 
 /**
  * Parse the ready marker out of `text` (`__TNT__R_<pid>_<cwd>__TNT__E`). `pid`
@@ -352,11 +377,11 @@ export function formatBody(head: string, tail: string, dropped: number): string 
 }
 
 /** Remove exactly ONE leading `\n` (the one our `printf` adds), not the command's own. */
-export function stripLeadingNewline(bytes: Uint8Array): Uint8Array {
+export function stripLeadingNewline(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   if (bytes.length > 0 && bytes[0] === 0x0a) {
-    return bytes.subarray(1);
+    return bytes.subarray(1).slice();
   }
-  return bytes;
+  return bytes.slice();
 }
 
 /** Split output into lines, keeping blank ones (the Ink `Text` rule is a render concern). */

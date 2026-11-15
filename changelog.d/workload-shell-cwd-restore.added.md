@@ -1,0 +1,1 @@
+- **A reopened shell returns to the working directory it was in.** When a dead shell is reopened (an idle close, a dropped link, an `exit`), the tool `cd`s back to the last known directory and says so. Environment variables are not replayed — they may hold secrets — and every reopen notice now states that.

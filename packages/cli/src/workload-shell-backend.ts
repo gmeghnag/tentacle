@@ -72,8 +72,16 @@ export class LaptopWorkloadShellBackend implements WorkloadShellBackend {
    * The container `prime` resolved for a target key — kept so `explain` can ask
    * the apiserver about the SAME container the exec was refused on
    * (docs/fix/workload-shell-live.md D1/D3).
+   *
+   * **Not a resolve cache.** It is consulted only for `explain`'s re-ask, never
+   * to skip the `GET pod`: the plan's failure modes depend on `prime`
+   * re-resolving on every reopen ("pod replaced → next run: shell ended →
+   * reopen → `prime` resolves again", "pod terminated → `stopped` →
+   * `RefusalError`"). A cached answer would keep a stale container for the rest
+   * of the session and skip the `stopped` refusal entirely (review round 1,
+   * MEDIUM 2).
    */
-  private readonly containers = new Map<string, string>();
+  private readonly resolvedContainers = new Map<string, string>();
 
   constructor(private readonly options: WorkloadShellBackendOptions = {}) {}
 
@@ -91,24 +99,26 @@ export class LaptopWorkloadShellBackend implements WorkloadShellBackend {
     if (target.engine !== "kubernetes") {
       return undefined; // a container IS the workload: nothing to pick
     }
-    const key = cacheKey(target);
-    const cached = this.containers.get(key);
-    if (cached !== undefined) {
-      return { container: cached };
-    }
+    // ALWAYS re-read the pod: the container set and the annotation can change
+    // between one shell's death and the next run's reopen, and a pod that is now
+    // `stopped` must be refused rather than skipped (review round 1, MEDIUM 2).
     const state = await pinned.host.inspect(target.name, {
       ...(target.container !== undefined ? { container: target.container } : {}),
       pick: "kubectl-exec",
     });
     if (state.kind === "stopped") {
+      this.resolvedContainers.delete(cacheKey(target));
       throw new RefusalError(state.detail);
     }
     const container = state.container;
     if (container === undefined) {
+      this.resolvedContainers.delete(cacheKey(target));
       return undefined; // a named container, or a pod read with nothing to list
     }
-    this.containers.set(key, container);
-    return { container, ...(noteFor(state) !== undefined ? { note: noteFor(state) } : {}) };
+    // Kept for `explain`'s re-ask only (never to skip the read above).
+    this.resolvedContainers.set(cacheKey(target), container);
+    const note = noteFor(state);
+    return { container, ...(note !== undefined ? { note } : {}) };
   }
 
   /** The pinned host for `target`, resolving it on first use (per session). */
@@ -229,7 +239,7 @@ export class LaptopWorkloadShellBackend implements WorkloadShellBackend {
       causeOf(original) instanceof (await loadEngineSelect()).ExecRefusedError &&
       pinned.host.execRefusal !== undefined
     ) {
-      const container = target.container ?? this.containers.get(cacheKey(target));
+      const container = target.container ?? this.resolvedContainers.get(cacheKey(target));
       const reason = await pinned.host
         .execRefusal({
           name: target.name,

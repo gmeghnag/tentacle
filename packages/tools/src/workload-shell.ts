@@ -23,7 +23,10 @@ import {
   CaptureWindow,
   type FrameParser,
   bootstrapLine,
+  bytesAfterReady,
   commandLine,
+  concat,
+  escapeSingleQuoted,
   killTreeScript,
   makeNonce,
   parseReady,
@@ -162,14 +165,20 @@ const systemTimers: ShellTimers = {
 /** The notices the plan names (D2), so a caller cannot invent a seventh. */
 export const NOTICES = {
   shellExited: "[shell exited (exit/exec/set -e) — next run opens a new shell]",
-  newShell: "[new shell — the previous one was closed (idle/drop/restart); cwd/env reset]",
-  lost: "[connection lost — outcome unknown; shell gone, cwd/env reset]",
+  newShell:
+    "[new shell — the previous one was closed (idle/drop/restart); environment variables were not replayed]",
+  lost: "[connection lost — outcome unknown; shell gone; env reset]",
   killedSurvived: (seconds: number) =>
     `[killed after ${seconds}s: the command's processes were stopped; the shell (cwd/env) survived]`,
-  killedRestarted: (seconds: number) =>
-    `[killed after ${seconds}s; shell restarted — cwd/env reset]`,
+  killedRestarted: (seconds: number) => `[killed after ${seconds}s; shell restarted — env reset]`,
   noSh: (target: string) =>
     `no /bin/sh in ${target} (distroless image?). workload_shell needs a POSIX sh; run the binary directly with a one-shot \`kubectl exec … -- <cmd>\` via shell, or use an ephemeral debug container`,
+  /** The reopen restored the last cwd (owner decision 4). */
+  cwdRestored: (cwd: string) =>
+    `[new shell — returned to ${cwd}; environment variables were not replayed]`,
+  /** The reopen tried, and the old cwd no longer exists. */
+  cwdGone: (cwd: string) =>
+    `[new shell — ${cwd} no longer exists; starting from the image's own cwd; environment variables were not replayed]`,
 } as const;
 
 /** One open shell and what the registry knows about it. */
@@ -195,6 +204,13 @@ interface Shell {
   cleanExit: boolean;
   /** Bytes the shell wrote on channel 2 during the CURRENT command (diagnostics). */
   stderr: string;
+  /**
+   * Bytes that arrived AFTER the ready marker but before the first command's own
+   * parser existed — the pod's first output, and sometimes the head of that
+   * command's output. They are fed to the first parser instead of being dropped
+   * (docs/fix/workload-shell-live.md, owner decision 3).
+   */
+  pendingBytes: Uint8Array;
   /** Notified when the stream ends, so a waiting run stops at once. */
   onEnd?: () => void;
   /** Notified when the current command's sentinel arrives. */
@@ -229,6 +245,11 @@ export class WorkloadShellRefused extends Error {
   override readonly name = "WorkloadShellRefused";
 }
 
+/** Append `bytes` to a pending buffer (the ready window's hold). */
+function pendingAfter(pending: Uint8Array, bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  return concat(pending, bytes);
+}
+
 /** `kubernetes dev/api-0[c]` | `docker box` — the model-facing name of a workload. */
 export function describeTarget(target: WorkloadTarget): string {
   if (target.engine === "kubernetes") {
@@ -254,6 +275,13 @@ export class WorkloadShells {
   private readonly killGraceMs: number;
   /** `[new shell …]` owed to the next run of a target closed by idle/drop. */
   private readonly owedNotice = new Set<string>();
+  /**
+   * The cwd each target's LAST shell was in, kept across the shell's death so a
+   * reopen can `cd` back to it (docs/fix/workload-shell-live.md, owner decision
+   * 4). Environment variables are deliberately NOT replayed: they may hold
+   * secrets, and a fresh shell's own profile is the honest starting point.
+   */
+  private readonly lastCwd = new Map<string, string>();
   /** Opens still resolving: they hold a cap slot before they enter the map. */
   private pendingOpens = 0;
   private disposed = false;
@@ -311,6 +339,8 @@ export class WorkloadShells {
     const key = targetKey(target);
     const notices: string[] = [];
     let info: string[] = [];
+    /** True when this run OPENED the shell (so the cwd restore applies). */
+    let fresh = false;
     let shell = this.shells.get(key);
 
     if (shell === undefined) {
@@ -321,6 +351,7 @@ export class WorkloadShells {
         throw new WorkloadShellRefused(this.capMessage());
       }
       shell = await this.open(target);
+      fresh = true;
       if (this.owedNotice.delete(key)) {
         notices.push(NOTICES.newShell);
       }
@@ -333,8 +364,21 @@ export class WorkloadShells {
       // and SAY the state is gone rather than pretend it survived.
       this.forget(key);
       shell = await this.open(target);
+      fresh = true;
       notices.push(NOTICES.newShell);
       info = await this.openInfo(shell);
+    }
+    // A FRESH shell (either arm above, and never a reused one) is put back where
+    // the last one was, and the result says so. It runs AFTER the open line, so
+    // a `cd` failure cannot hide the line that names the container, and BEFORE
+    // the command, so the command itself sees the restored directory (owner
+    // decision 4). Environment variables are deliberately not replayed: they may
+    // hold secrets.
+    if (fresh) {
+      const restored = await this.restoreCwd(shell, key);
+      if (restored !== undefined) {
+        notices.push(restored);
+      }
     }
     this.armIdle(key);
 
@@ -385,6 +429,14 @@ export class WorkloadShells {
     shell.exec.setOnStderr((bytes) => {
       shell.stderr += new TextDecoder().decode(bytes, { stream: true });
     });
+    // Bytes the pod wrote between the ready marker and this parser (the shell's
+    // first line) go through the SAME scanner, ahead of the command's own — the
+    // command line is written below, so they really are its first output.
+    const pending = shell.pendingBytes;
+    shell.pendingBytes = new Uint8Array(0);
+    if (pending.length > 0) {
+      parser.push(pending);
+    }
 
     // Await the sentinel, the deadline, the abort, or the stream's end.
     const why = await new Promise<"done" | "timeout" | "abort" | "lost">((resolve) => {
@@ -439,6 +491,18 @@ export class WorkloadShells {
 
     const code = done?.code ?? (why === "lost" ? 1 : 0);
     const cwd = done?.cwd ?? shell.cwd;
+    // The shell's own `$PWD` is the truth for the NEXT run too: without this,
+    // `shell.cwd` stays at the value the open produced, and every later run (and
+    // the reopen's restore) would use a stale directory.
+    if (done !== undefined) {
+      shell.cwd = done.cwd;
+    }
+    // Remember where the shell ended up, so a reopen can `cd` back (owner
+    // decision 4). Recorded on EVERY run, not only a clean one: a shell that
+    // dies mid-command was still in this directory when it did.
+    if (cwd !== "") {
+      this.lastCwd.set(shell.key, cwd);
+    }
     const outcome: RunOutcome = {
       exitCode: code,
       cwd,
@@ -605,11 +669,14 @@ export class WorkloadShells {
       ended: false,
       cleanExit: false,
       stderr: "",
+      pendingBytes: new Uint8Array(0),
     };
     this.shells.set(key, shell);
 
     let ready: { pid: number; cwd: string } | undefined;
     let readyText = "";
+    /** The same bytes as `readyText`, BEFORE decoding: the tail must be cut byte-exactly. */
+    let readyBytes = new Uint8Array(0);
     const readyDone = new Promise<void>((resolve, reject) => {
       let settled = false;
       const deadline = this.timers.setTimeout(() => {
@@ -626,16 +693,30 @@ export class WorkloadShells {
 
       exec.setOnStdout((bytes) => {
         if (settled) {
+          // A window with NO parser installed yet (the caller wires one for the
+          // first command a moment later): hold these instead of dropping them,
+          // or the head of that command's output is lost (owner decision 3).
+          shell.pendingBytes = pendingAfter(shell.pendingBytes, bytes);
           return;
         }
         readyText += new TextDecoder().decode(bytes, { stream: true });
+        // The ready marker's own end can straddle two reads, so the tail is cut
+        // from the ACCUMULATED bytes, never from the latest chunk alone.
+        readyBytes = concat(readyBytes, bytes);
         const seen = parseReady(readyText);
-        if (seen !== null) {
-          settled = true;
-          this.timers.clearTimeout(deadline);
-          ready = { pid: seen.pid, cwd: seen.cwd };
-          resolve();
+        if (seen === null) {
+          return;
         }
+        // Whatever rode the SAME read as the ready marker is not garbage: the
+        // pod's own first line, and often the head of the first command's
+        // output. Keep it for that command's parser (owner decision 3) —
+        // dropping it here is what cut `etcd-guard-…` down to `guard-…`.
+        const after = bytesAfterReady(readyBytes);
+        shell.pendingBytes = after ?? new Uint8Array(0);
+        settled = true;
+        this.timers.clearTimeout(deadline);
+        ready = { pid: seen.pid, cwd: seen.cwd };
+        resolve();
       });
       exec.setOnEnd((end) => {
         shell.ended = true;
@@ -704,6 +785,39 @@ export class WorkloadShells {
     try {
       shell.exec.close();
     } catch {}
+  }
+
+  /**
+   * Put a reopened shell back where the dead one was (owner decision 4). The
+   * cwd is the ONE piece of state worth restoring, and it is restored by
+   * running `cd` IN the shell (a one-shot would `cd` a different process and
+   * change nothing). Never throws; returns the notice, or `undefined` when
+   * there was nothing to restore.
+   *
+   * Env vars are NOT replayed on purpose: they may hold secrets, and the fresh
+   * shell's own profile is the honest baseline. The notice says so.
+   */
+  private async restoreCwd(shell: Shell, key: string): Promise<string | undefined> {
+    const cwd = this.lastCwd.get(key);
+    if (cwd === undefined || cwd === "" || cwd === shell.cwd) {
+      return undefined; // nothing to restore: it is already there
+    }
+    // Framed through the shell itself, so the `cd` really persists (a one-shot
+    // would `cd` another process and change nothing). No redirection: a missing
+    // directory then fails loudly, which is what the notice reports.
+    const outcome = await this.execute(
+      shell,
+      `cd ${escapeSingleQuoted(cwd)}`,
+      { timeoutMs: ONE_SHOT_TIMEOUT_MS, signal: AbortSignal.timeout(ONE_SHOT_TIMEOUT_MS) },
+      [],
+      [],
+    ).catch(() => undefined);
+    // The shell reports its own `$PWD`: believe THAT, not the path we asked for
+    // (the directory may be gone, or a symlink may have moved it).
+    if (outcome === undefined || outcome.cwd !== cwd) {
+      return NOTICES.cwdGone(cwd);
+    }
+    return NOTICES.cwdRestored(cwd);
   }
 
   /** Drop a shell from the registry and its idle timer (the stream itself is closed by the caller). */
@@ -823,7 +937,7 @@ The shell opens on first use and stays open for this session, so \`cd\`, \`expor
 
 Good for a few related checks in one workload: inspect config, follow a path, curl a local endpoint, read logs on disk. For a single one-off command, \`shell\` with \`kubectl exec\` / \`docker exec\` works just as well. For long work *inside* the workload (editing, building, running tests, using its tools), propose \`move_session\` instead.
 
-Commands get no terminal and no stdin. Avoid editors, pagers and prompts; use \`-y\`/\`--yes\`, \`--no-pager\`, \`| cat\`. Don't start background processes with \`&\`: they can outlive the shell. Output is capped. Each command has a timeout (default ${DEFAULT_TIMEOUT_S} s, max ${MAX_TIMEOUT_S} s); on timeout its processes are stopped, and if the shell itself had to restart, the result says so (cwd/env reset). For a multi-container pod, set \`target.container\`. When omitted, the default container is used and named in the result. Use \`action: "close"\` when you are done with a workload.`;
+Commands get no terminal and no stdin. Avoid editors, pagers and prompts; use \`-y\`/\`--yes\`, \`--no-pager\`, \`| cat\`. Don't start background processes with \`&\`: they can outlive the shell. Output is capped. Each command has a timeout (default ${DEFAULT_TIMEOUT_S} s, max ${MAX_TIMEOUT_S} s); on timeout its processes are stopped, and if the shell itself had to restart, the result says so (environment reset; the working directory is restored on a reopen, environment variables are not). For a multi-container pod, set \`target.container\`. When omitted, the default container is used and named in the result. Use \`action: "close"\` when you are done with a workload.`;
 
 export function createWorkloadShellTool(shells: WorkloadShells): Tool<WorkloadShellInput> {
   return {

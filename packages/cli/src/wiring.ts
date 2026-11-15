@@ -673,10 +673,11 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // `sh` reached through the LAPTOP's engine credentials. Offered only when the
   // caller passes a backend — the local worker and `serve`; never a pod daemon
   // (its own `shell` is already in its workload, and it may not hold cluster
-  // credentials: AGENTS §7). The registry is session-owned and disposed beside
-  // `jobs`.
+  // credentials: AGENTS §7) — AND the host's owner has switched it on
+  // (`workloadShell.tool`, off by default: docs/fix/workload-shell-live.md,
+  // owner decision 1). The registry is session-owned and disposed beside `jobs`.
   const workloadShells =
-    options.workloadShell !== undefined
+    options.workloadShell !== undefined && config.workloadShell.tool
       ? new WorkloadShells(options.workloadShell.backend)
       : undefined;
   if (workloadShells !== undefined) {

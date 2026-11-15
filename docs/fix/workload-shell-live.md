@@ -3,7 +3,7 @@
 > **Status:** implementation (awaiting approval)
 > **Branch:** `fix/workload-shell-live`
 > **Size:** M · **Blast:** cross-module · **Suited:** executor assigned by the owner; standard Review that also re-runs the session-hop `attach` rows (`engine-runtime.test.ts`, `engine-k8s.test.ts`), because `EngineHost.inspect` is shared with `attach`
-> **Changelog:** `changelog.d/workload-shell-live.fixed.md`
+> **Changelog:** `changelog.d/workload-shell-live.fixed.md` + three fragments from fix round 1 (`workload-shell-default-off.added.md`, `workload-shell-first-output.fixed.md`, `workload-shell-cwd-restore.added.md`)
 
 ## Context
 
@@ -410,7 +410,7 @@ outputs above.
 
 ## Execution
 
-*— claude-sonnet-4-5, 2026-11-15*
+*— claude-sonnet-4-5, 2026-11-15* (mis-signed: the commit `4ca4db90` says `(deepseek)`; see Review round 1, MEDIUM 4 — corrected below)
 
 **Load-bearing check re-run first — it holds.** `prime` is awaited before `open`
 (`packages/tools/src/workload-shell.ts:587`, now `openReserved`'s first await, and
@@ -612,3 +612,133 @@ load), and the final full-suite run is green.
 4. **Restore the working directory on reconnect** (orchestrator, low risk): when a dead shell is reopened, `cd` back to the last known cwd and say so in the result; environment variables are NOT replayed (they may hold secrets).
 
 *— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-15*
+
+Round 1's Review raised four findings. All four are addressed, and each fix
+carries a regression test shown **red** under a mutation of the fix (AGENTS §9),
+pasted below under **Mutations**.
+
+**1 (HIGH) — the three binding owner decisions were not implemented.** Done.
+
+- **Decision 1, `workloadShell.tool`, DISABLED by default.** Wired exactly like
+  `sessionHop.tool`: `defaults.ts` (`DEFAULT_WORKLOAD_SHELL_TOOL = false`),
+  `schema.ts` (a `.strict()` `workloadShell.tool`), `resolve.ts`
+  (`WorkloadShellConfig` + `TENTACLE_WORKLOAD_SHELL_TOOL` + provenance
+  `workloadShellTool`), `load.ts`, `profile.ts`, `key-docs.ts` (a section + a
+  leaf, so `tentacle config list` shows it), and the README's generated table
+  (`bun run docs:config`). The **gate** is at `wiring.ts:678`: the tool and its
+  registry are built only when a backend is passed **and**
+  `config.workloadShell.tool` is on. `serve.ts`/`worker.ts` are unchanged — they
+  still pass the backend; the setting decides.
+  - *Drift from the plan's Files list*: six config files + README, because
+    `key-docs`'s T1 (every schema path documented, both directions) and T4 (the
+    README table is the registry's) make a schema key without them a gate failure.
+    Not optional plumbing.
+- **Decision 3, the sentinel/head leak.** Reproduced first, on the branch — and
+  it is **not** a parser bug. The pure scanner (`CaptureWindow`) survives *every*
+  2- and 3-chunk split of a command's stream, and a real `sh` driven through the
+  real `rawExec` at chunk sizes 1/2/5/7/41/42/100/4096 is byte-correct
+  (`.tentacle/tmp/workload-shell-live/{fuzz,real,tool-real,ws-real}.ts`). The leak
+  is in the **ready handshake**: `openReserved`'s ready handler returned as soon
+  as it parsed the marker and **discarded every byte after it in the same read**.
+  On a fresh shell that read carries the pod's first output — a profile's echo, an
+  entrypoint's banner, and often the head of the *first command's* output.
+  Reproduced with the owner's own string (`head-loss.ts`): a ready read ending
+  `…__TNT__E\n` + `etcd-` returned
+  **`guard-3a6ec32139722234d98bed4f29e301189cef109a-end`** — byte for byte the
+  owner's live bug.
+  - *Fix*: new pure `bytesAfterReady(bytes)` (`workload-shell-frame.ts`) cuts the
+    tail byte-exactly from the ACCUMULATED bytes (the marker's own end can straddle
+    two reads) and strips the one `\n` our own `printf` adds; `Shell.pendingBytes`
+    holds it, bytes arriving in the window *after* ready but *before* the first
+    parser exists accumulate there too instead of being dropped, and `execute`
+    feeds them through that command's scanner before the command line goes out.
+  - Three new rows in `packages/tools/test/workload-shell.test.ts` ("the first
+    command on a fresh shell keeps its head"): the banner survives, the split head
+    is rejoined whole, and no result ever contains `__TNT_`.
+  - `echo.ts` (a shell that echoes stdin, `set -v`) shows the delimiter CAN reach
+    the body — because the shell echoed our own input line. That is the shell's
+    doing and is correct-by-design: the body is DATA, never re-parsed as a marker.
+- **Decision 4, restore the cwd on reconnect.** `WorkloadShells` records each
+  shell's own `$PWD` after every run (`lastCwd`), and a **fresh** shell gets a
+  framed `cd <last>` through the shell itself (a one-shot would `cd` another
+  process and change nothing) before the run's own command. The notice reads
+  `[new shell — returned to <cwd>; environment variables were not replayed]`, or
+  `… <cwd> no longer exists; starting from the image's own cwd; …` when the
+  directory is gone — believed from the shell's reported `$PWD`, not from the path
+  we asked for. **Env vars are never replayed** (they may hold secrets) and every
+  reopen notice now says so; the stale `cwd/env reset` wording elsewhere (`lost`,
+  `killedRestarted`, the tool description) is corrected to match reality.
+  - Found while building it: `shell.cwd` was **never updated** after a run, so
+    every later run (and the restore) used the value the *open* produced. Fixed in
+    `execute` (`if (done !== undefined) shell.cwd = done.cwd`), pinned by mutation
+    4b.
+
+**2 (MEDIUM) — `prime`'s container cache never invalidated.** The cache is gone as
+a *resolve* cache: `prime` now **always** re-reads the pod. The map survives only
+as `resolvedContainers`, consulted by `explain`'s re-ask and **never** to skip the
+`GET pod`; it is cleared on `stopped` and on a read with no container. Two new rows
+in `packages/cli/test/workload-shell-backend.test.ts` pin the plan's own
+failure-mode table: a **replaced** pod is re-resolved (new first container), and a
+pod that became `Succeeded` between runs is **refused with nothing exec'd**.
+
+**3 (MEDIUM) — `execRefusal` had no timeout.** It now runs under an
+`AbortController` with `REFUSAL_TIMEOUT_MS` (5 s, injectable as
+`refusalTimeoutMs`), cleared in a `finally`. It still never throws: a timeout
+returns `undefined`, which is D3's honest fallback sentence. Two new rows in
+`packages/k8s/test/client.test.ts`.
+
+**4 (MEDIUM, process) — the Execution signature.** The old signature claimed
+`claude-sonnet-4-5` while the commit said `(deepseek)`; it is now marked
+mis-signed, and this section carries the model that actually wrote it.
+
+**Mutations (each shown red, then reverted; the tree restored to the fixed state
+each time):**
+
+| # | mutation | result |
+|---|---|---|
+| 1 | drop `&& config.workloadShell.tool` from `wiring.ts` | **2 red**: "OFF by default, so a backend alone offers NOTHING", "the registry travels with the build" |
+| 2a | delete the `pendingBytes` carry into `parser.push` | **2 red**: both head-loss rows (banner lost, split head lost) |
+| 3 | restore the `prime` cache hit | **2 red**: "a REOPEN re-reads the pod", "a pod that is stopped by the reopen is REFUSED" |
+| 4a | `restoreCwd` → `undefined` on reopen | **1 red**: "the `cd` persists in the SHELL" |
+| 4b | drop `shell.cwd = done.cwd` in `execute` | **1 red**: "the `cd` persists in the SHELL" |
+| 4c | `newShell` notice back to `env reset` | **1 red**: "env vars are NOT replayed, and the notice says so" |
+| 5 | drop `signal` from `execRefusal`'s fetch | **the whole file HANGS** (killed at 120 s) — the failure mode itself; restored, 12/12 green |
+
+**Gate:** `bunx tsc --noEmit` clean (also `-p apps/mobile`, `-p apps/relay`);
+`bun run lint` clean (`Checked 1433 files`, 0 errors/warnings — the §6 baseline);
+`bun test` **10362 pass, 5 skip, 0 fail** (742 files), the skips being the three
+documented opt-ins plus the live-k8s/docker rows.
+
+**Changelog fragments.** Round 1's user-visible changes are three ADDITIONAL
+fragments, not one bullet in the existing file: `scripts/test/changelog-guard.ts`
+enforces one bullet per file (it caught a four-bullet file here, red, then green
+after the split). The four are the original multi-container fix, the default-off
+setting (`.added`), the first-output truncation (`.fixed`), and the cwd restore
+(`.added`).
+
+**Not verified here:** the live-k8s row (no cluster in this environment), so D3's
+one apiserver fact — a plain `POST …/exec` returns the `a container name must be
+specified …` `Status` — is still unproven live; same command as before
+(`NODE_EXTRA_CA_CERTS=… TENTACLE_K8S_SERVER=… TENTACLE_K8S_TOKEN=… bun test
+packages/cli/test/workload-shell-live.k8s.test.ts`). Also unverified live: the
+head-loss fix against a real multi-container pod whose image prints at startup —
+the fake repro is byte-exact on the owner's symptom, but a live pod is what would
+confirm the read coalescing happens there too.
+
+**Per finding:**
+
+| finding | verdict |
+|---|---|
+| 1 (HIGH) — owner decisions 1, 3, 4 unimplemented | **FIXED** (all three; decisions 1/3/4 built + pinned, mutations 1, 2a, 4a/4b/4c red) |
+| 2 (MEDIUM) — `prime`'s container cache never invalidates | **FIXED** (always re-reads; map kept for `explain` only; mutation 3 red twice) |
+| 3 (MEDIUM) — `execRefusal` has no timeout | **FIXED** (5 s `AbortController`; mutation 5 hangs the file, so the guard is real) |
+| 4 (MEDIUM, process) — wrong Execution signature | **FIXED** (old signature marked mis-signed; this section signed `claude-opus-5-5`) |
+
+**Gate (final):** `bunx tsc --noEmit` clean (also `-p apps/mobile`, `-p apps/relay`);
+`bun run lint` clean (`Checked 1433 files`); `bun test` **10362 pass, 5 skip, 0 fail**.
+
+

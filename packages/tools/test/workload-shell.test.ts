@@ -512,6 +512,57 @@ describe("failure modes", () => {
   });
 });
 
+describe("a reopen restores the working directory (owner decision 4)", () => {
+  test("the `cd` persists in the SHELL, and the result says so", async () => {
+    const { tool, backend } = setup();
+    const first = run(tool, { target, command: "cd /etc" });
+    await tick();
+    await first;
+
+    // Kill the shell's stream: the next run reopens it.
+    const exec = backend.execs[0] as FakeExec;
+    exec.dropOnCommand = () => new Error("link lost");
+    const dying = run(tool, { target, command: "sleep 100" });
+    await tick(12);
+    await dying;
+    expect(backend.execs).toHaveLength(1);
+
+    // `FakeExec` starts every new shell in its own cwd: a restore is observable.
+    const reopened = run(tool, { target, command: "pwd" });
+    await tick(12);
+    const result = await reopened;
+
+    expect(backend.execs).toHaveLength(2);
+    // Mutation: drop `restoreCwd` from the reopen → no notice, and the new shell
+    // answers `/home/app` instead of `/etc`.
+    expect(result.content).toContain("returned to /etc");
+    expect(result.content).toContain("environment variables were not replayed");
+    expect(result.content).toContain("cwd=/etc");
+  });
+
+  test("env vars are NOT replayed, and the notice says so (they may hold secrets)", async () => {
+    const { tool, backend } = setup();
+    const first = run(tool, { target, command: "export TOKEN=hunter2" });
+    await tick();
+    await first;
+
+    // Kill the shell, so the next run genuinely reopens it.
+    const exec = backend.execs[0] as FakeExec;
+    exec.end();
+    const reopened = run(tool, { target, command: "true" });
+    await tick(12);
+    const result = await reopened;
+
+    expect(backend.execs).toHaveLength(2);
+    // The sentence is the contract: a model must not assume `export`s survived,
+    // and the tool must not have replayed them (it only ever re-sends a `cd`).
+    expect(result.content).toContain("environment variables were not replayed");
+    // Nothing but a `cd` is ever written back into a fresh shell.
+    const reopenedExec = backend.execs[1] as FakeExec;
+    expect(reopenedExec.commands.filter((c) => c.includes("export"))).toEqual([]);
+  });
+});
+
 describe("dispose", () => {
   test("an open still priming when the session ends leaves NO live shell (D4)", async () => {
     const { tool, shells, backend } = setup();
@@ -691,6 +742,89 @@ describe("what the plan's §4 pin requires", () => {
     // interpolation of anything the daemon knows can slip in (§4 pin).
     expect(exec.raw[0]).toBe(bootstrapLine("").replace(/\n$/, ""));
     expect(exec.raw[0]).not.toContain("TENTACLE_");
+  });
+});
+
+// docs/fix/workload-shell-live.md, owner decision 3: the owner's live failure
+// was a FRESH shell whose FIRST command came back truncated — `hostname` gave
+// `guard-3a6ec321…-end` instead of `etcd-guard-3a6ec321…-end`. The cause is the
+// ready handshake: the pod's first bytes (a profile's echo, the entrypoint's
+// banner, and sometimes the head of that command's own output) arrive in the
+// SAME read as the ready marker, and the ready handler used to drop them.
+describe("the first command on a fresh shell keeps its head (owner decision 3)", () => {
+  test("a banner that rides the ready read is the first command's output, not lost", async () => {
+    const backend = new FakeBackend();
+    backend.openImpl = (exec) => {
+      const original = exec.stdout.bind(exec);
+      exec.stdout = (text: string): void => {
+        if (text.startsWith(READY_PREFIX)) {
+          // The ready marker, then the pod's own first line in the same write.
+          original(`${text}banner line\n`);
+          return;
+        }
+        original(text);
+      };
+    };
+    const shells = new WorkloadShells(backend, { readyTimeoutMs: 2_000, killGraceMs: 60 });
+    const tool = createWorkloadShellTool(shells);
+
+    const promise = run(tool, { target, command: "hostname" });
+    await tick();
+    const result = await promise;
+
+    // Mutation: drop the bytes after the ready marker → the banner is gone.
+    expect(result.content).toContain("banner line");
+    expect(result.content).toContain("hostname");
+    await shells.dispose();
+  });
+
+  test("a HEAD split across the ready read is rejoined, exactly as the owner's `hostname`", async () => {
+    const HOST = "etcd-guard-3a6ec32139722234d98bed4f29e301189cef109a-end";
+    const backend = new FakeBackend();
+    backend.openImpl = (exec) => {
+      const original = exec.stdout.bind(exec);
+      let answered = false;
+      exec.stdout = (text: string): void => {
+        if (!answered && text.startsWith(READY_PREFIX)) {
+          answered = true;
+          // The ready marker's TAIL and the head of what follows, in one write:
+          // the very split that produced `guard-…-end`.
+          original(`${READY_PREFIX}4242_/home/app__TNT__E\n${HOST.slice(0, 5)}`);
+          return;
+        }
+        original(text);
+      };
+      exec.behaviour = () => ({ out: HOST.slice(5) });
+    };
+    const shells = new WorkloadShells(backend, { readyTimeoutMs: 2_000, killGraceMs: 60 });
+    const tool = createWorkloadShellTool(shells);
+
+    const promise = run(tool, { target, command: "hostname" });
+    await tick();
+    const result = await promise;
+
+    // The whole hostname, unbroken: neither the head lost nor the delimiter
+    // leaked into it (owner decision 3's own assertion).
+    expect(result.content).toContain(HOST);
+    expect(result.content).not.toContain("__TNT_");
+    await shells.dispose();
+  });
+
+  test("a command's output never carries the framing delimiter", async () => {
+    const backend = new FakeBackend();
+    backend.openImpl = (exec) => {
+      exec.behaviour = () => ({ out: "plain output" });
+    };
+    const shells = new WorkloadShells(backend, { readyTimeoutMs: 2_000, killGraceMs: 60 });
+    const tool = createWorkloadShellTool(shells);
+
+    const promise = run(tool, { target, command: "echo plain" });
+    await tick();
+    const result = await promise;
+
+    expect(result.content).toContain("plain output");
+    expect(result.content).not.toContain("__TNT_");
+    await shells.dispose();
   });
 });
 
