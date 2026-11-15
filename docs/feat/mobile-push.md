@@ -1811,3 +1811,36 @@ test there is a `push-hook.test.ts` case: attach a phone, lock it (detach), let
 the grace expire → a push to that device.
 
 *— claude-opus-5-5, 2026-11-15*
+
+## Review
+
+### Round 2 — P5 + P6 (scope `git diff HEAD~1`, commit `9715fe08`)
+
+**Verdict: PASS.** Both round-1 findings are fixed, and a mutation catches each fix.
+
+- **Finding 1 (detach invisible) — FIXED.** A new `attachment` event
+  (`push-rules.ts:103-113`, handled `:419-429`) updates `state.attached` for a
+  tracked session, so the exclusion uses the set at the deadline. Mutation:
+  the handler skips the update → **RED** 2 ("a device DETACHED during the grace is
+  pushed to (F17)", "a device ATTACHED during the grace is not pushed to").
+- **Finding 2 (fold banner replaced early) — FIXED.** `bannerAnswered`
+  (`:327-338`, used `:462`) sends `ask_resolved` only when the LAST ask under a
+  shared collapse id settles. Mutation: bypass the guard → **RED** 2 ("settling
+  ONE of a fold does not claim the banner is answered", the fold test).
+- Restored by Edit; `cmp` against a scratch backup is identical; `git status` is clean.
+- **Regressions.** An `attachment` for an untracked session creates no state,
+  so there is no ghost deadline. The next `ask` event carries `attached`
+  anyway, so nothing is lost. `session_closed` and the caps are unchanged.
+  A survivor of a fold keeps the primary's collapse id, so its own settle
+  replaces the right banner.
+- **Gate.** Narrow files: 78 pass / 0 fail. `bun run lint` 1381 files 0/0.
+  `bun run typecheck` (all three tsc) exit 0. I did not re-run the full suite.
+- **Residual (LOW, not blocking).** After the fold's primary is answered, the
+  banner still names that answered ask. Approving it hits `PermissionNotPending`
+  (F7), so it has no effect, and the survivor shows on app open (F1). Wiring the
+  `attachment` event from `HostedSession` is P7's, and P7 must test it, as
+  the executor notes.
+
+Same model family as the executor's earlier slices (fresh context only).
+
+*— claude-opus-5-5, 2026-11-15*
