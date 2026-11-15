@@ -140,7 +140,9 @@ export interface ComposeDeps {
    * One prompt, streamed into the SCREEN's transcript as this phone's own turn
    * (12c's fold). The compose half never drains a prompt itself: a drained stream
    * shows nothing, so `turn-running` never flips and the answers vanish (the first
-   * iOS 26 run's failure of flow 07).
+   * iOS 26 run's failure of flow 07). Resolves at the daemon's ACK, while the
+   * turn keeps folding — so the item settles when the daemon has its key, not
+   * when the turn ends (docs/fix/mobile-chat-glitches.md, bug 2).
    */
   readonly prompt: (text: string, turnId: string, refs: readonly AttachmentRef[]) => Promise<void>;
   /** Something the screen draws changed. */
@@ -394,8 +396,8 @@ export function createCompose(deps: ComposeDeps): Compose {
    * synchronous step"). A kill (or a dropped frame) before the daemon has it
    * therefore loses nothing: a relaunch's `run` finds it `sending` and `decide`s
    * it. The act goes through `deps.prompt` (the SCREEN's folding prompt), never a
-   * driver `run`: the turn has to stream into this transcript, and a run would
-   * hold this session's queue for the turn's whole length.
+   * driver `run`: the turn has to stream into this transcript. `deps.prompt`
+   * resolves at the daemon's ack, so the item is settled then (bug 2).
    */
   const sendNowHere = async (text: string, item: OutboxItem): Promise<void> => {
     if (deps.handle() === null) {

@@ -173,7 +173,7 @@ public struct RenderPeer: Equatable {
 /// `apps/mobile/src/push-render.ts`; the age guard is the extension's own
 /// (`PushDedupe.swift`), and the version check is here so both implementations
 /// refuse a future plaintext identically.
-public func render(_ message: PushMessage, peer: RenderPeer) -> Rendered {
+public func renderMessage(_ message: PushMessage, peer: RenderPeer) -> Rendered {
     guard message.v == pushRenderVersion else {
         return placeholderRendered()
     }

@@ -179,6 +179,17 @@ export interface RunningRelayLink {
   push(delivery: RelayPushDelivery): Promise<RelayPushStatus>;
   /** What this link can do about push right now (the `push_register` result's input). */
   pushStatus(): "relay-off" | "relay-no-push" | "on";
+  /**
+   * Deliver one Live Activity push (docs/feat/mobile-live-activity.md L8), with
+   * the SAME contract as {@link push}: refused without a frame when the relay
+   * announced no `"liveactivity"`, held briefly while the link reconnects, never
+   * rejects.
+   */
+  liveActivity(delivery: RelayLiveActivityDelivery): Promise<RelayPushStatus>;
+  /** What this link can do about Live Activities right now (the register result's input). */
+  liveActivityStatus(): "relay-no-la" | "on";
+  /** Register the callback run on every `ready` that carries `"liveactivity"` (F3's resend). */
+  bindLiveActivityReady(callback: () => void): void;
   /** Stop: control and every accept leg closed, timers cleared. Idempotent. */
   stop(): void;
 }
@@ -191,6 +202,21 @@ export interface RelayPushDelivery {
   readonly ttl: number;
   /** `{tp: <envelope>}` — the sealed envelope, and nothing else. */
   readonly payload: { readonly tp: unknown };
+}
+
+/** One activity this link hands the relay: the `la` block is L3's, already validated. */
+export interface RelayLiveActivityDelivery {
+  readonly token: string;
+  readonly env: "sandbox" | "production";
+  readonly priority: 5 | 10;
+  readonly la: {
+    readonly event: "start" | "update" | "end";
+    readonly timestamp: number;
+    readonly staleDate?: number | undefined;
+    readonly dismissalDate?: number | undefined;
+    readonly contentState?: { readonly v: 1; readonly e: string; readonly c: string } | undefined;
+    readonly attributes?: { readonly v: 1; readonly k: string; readonly slot: string } | undefined;
+  };
 }
 
 /** What a push resolved to: the relay's own status vocabulary (P2's `PUSH_DELIVERY_STATUSES`). */
@@ -249,14 +275,23 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
     number,
     { resolve: (status: RelayPushStatus) => void; handle: unknown }
   >();
-  /** Pushes waiting for the link to be ready again (F2's short hold): `push`, plus a wait timer. */
+  /**
+   * Frames waiting for the link to be ready again (F2's short hold): a push or an
+   * activity, plus a wait timer. Keyed by a SEND function rather than a frame
+   * object, so `flushHeldPushes` does not have to know which kind it is
+   * re-sending — the two share the `n` correlation and the answer vocabulary.
+   */
   const heldPushes: {
-    frame: RelayPushDelivery;
+    send: (resolve: (status: RelayPushStatus) => void) => void;
     resolve: (status: RelayPushStatus) => void;
     handle: unknown;
   }[] = [];
   /** One notice per start about a relay that cannot push (F4: never one per push). */
   let pushNoFeatureNoticed = false;
+  /** The same, for a relay without Live Activity support (F4). */
+  let laNoFeatureNoticed = false;
+  /** Called once per `ready` that carried `"liveactivity"`: the notifier resends its live states (F3). */
+  let onLaReady: (() => void) | undefined;
 
   /** A bad URL cannot fix itself: refuse loudly once and never dial (R5a validates too). */
   if (!isRelayUrl(base)) {
@@ -279,8 +314,16 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
    * socket went away between the check and this call (a `dropControl` in the
    * same tick): `unavailable`, never a throw.
    */
-  const sendPush = (
-    delivery: RelayPushDelivery,
+  /**
+   * Send ONE frame that expects a `push-result` (a push, or an activity: the
+   * relay answers both with the same vocabulary, and the `n` correlation is the
+   * same mechanism). The caller has already checked the `features` gate, so no
+   * frame can reach a relay that did not announce its name (C1). `host ===
+   * undefined` here means the socket went away between the check and this call
+   * (a `dropControl` in the same tick): `unavailable`, never a throw.
+   */
+  const sendFrameOf = (
+    frameOf: (n: number) => unknown,
     resolve: (status: RelayPushStatus) => void,
   ): void => {
     const host = readyControl;
@@ -298,17 +341,7 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
     }, options.pushTimeoutMs ?? DEFAULT_PUSH_TIMEOUT_MS);
     pendingPushes.set(n, { resolve, handle });
     try {
-      host.socket.send(
-        JSON.stringify({
-          t: "push",
-          n,
-          token: delivery.token,
-          env: delivery.env,
-          collapse: delivery.collapse,
-          ttl: delivery.ttl,
-          payload: delivery.payload,
-        }),
-      );
+      host.socket.send(JSON.stringify(frameOf(n)));
     } catch (error) {
       // A send that throws closed the socket underneath us: the frame is lost.
       if (pendingPushes.delete(n)) {
@@ -319,13 +352,50 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
     }
   };
 
-  /** Hold a push for a reconnecting link (F2), dropping it after `pushHoldMs` with one line. */
-  const holdPush = (
+  /** One banner push: the `push` frame P3 defines. */
+  const sendPush = (
     delivery: RelayPushDelivery,
     resolve: (status: RelayPushStatus) => void,
   ): void => {
+    sendFrameOf(
+      (n) => ({
+        t: "push",
+        n,
+        token: delivery.token,
+        env: delivery.env,
+        collapse: delivery.collapse,
+        ttl: delivery.ttl,
+        payload: delivery.payload,
+      }),
+      resolve,
+    );
+  };
+
+  /** One Live Activity push: the `liveactivity` frame (docs/feat/mobile-live-activity.md L4/L8). */
+  const sendLiveActivity = (
+    delivery: RelayLiveActivityDelivery,
+    resolve: (status: RelayPushStatus) => void,
+  ): void => {
+    sendFrameOf(
+      (n) => ({
+        t: "liveactivity",
+        n,
+        token: delivery.token,
+        env: delivery.env,
+        priority: delivery.priority,
+        la: delivery.la,
+      }),
+      resolve,
+    );
+  };
+
+  /** Hold a push for a reconnecting link (F2), dropping it after `pushHoldMs` with one line. */
+  const holdPush = (
+    send: (resolve: (status: RelayPushStatus) => void) => void,
+    resolve: (status: RelayPushStatus) => void,
+  ): void => {
     const entry = {
-      frame: delivery,
+      send,
       resolve,
       handle: timers.setTimeout(() => {
         const at = heldPushes.indexOf(entry);
@@ -362,7 +432,7 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
     for (const entry of heldPushes.splice(0)) {
       timers.clearTimeout(entry.handle);
       if (pushable) {
-        sendPush(entry.frame, entry.resolve);
+        entry.send(entry.resolve);
         continue;
       }
       entry.resolve("unavailable");
@@ -515,6 +585,16 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
         if (!features.includes("push") && !pushNoFeatureNoticed) {
           pushNoFeatureNoticed = true;
           audit("relay-no-push");
+        }
+        if (!features.includes("liveactivity") && !laNoFeatureNoticed) {
+          laNoFeatureNoticed = true;
+          audit("relay-no-la");
+        }
+        if (features.includes("liveactivity")) {
+          // F3: an activity state kept while the link was down is resent NOW,
+          // once per live slot — convergence by state, never by replaying the
+          // events the link missed.
+          onLaReady?.();
         }
         audit(`relay-ready ${id.slice(0, 8)}`);
         startLiveness(host);
@@ -761,8 +841,39 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
           resolve("unavailable");
           return;
         }
-        holdPush(delivery, resolve);
+        holdPush((next) => sendPush(delivery, next), resolve);
       });
+    },
+    liveActivity(delivery) {
+      return new Promise<RelayPushStatus>((resolve) => {
+        if (stopped) {
+          resolve("unavailable");
+          return;
+        }
+        if (readyControl !== undefined) {
+          if (features.includes("liveactivity")) {
+            sendLiveActivity(delivery, resolve);
+            return;
+          }
+          // Registered, and this relay cannot carry an activity: the answer is
+          // known now, and the `relay-no-la` notice already said why once per
+          // start (F4 never repeats itself per push).
+          resolve("unavailable");
+          return;
+        }
+        holdPush((next) => sendLiveActivity(delivery, next), resolve);
+      });
+    },
+    bindLiveActivityReady(callback) {
+      onLaReady = callback;
+    },
+    liveActivityStatus() {
+      // `relay-off` is the CALLER's word (it knows whether the relay is enabled);
+      // this link only says whether a registered relay announced the feature.
+      if (readyControl !== undefined && features.includes("liveactivity")) {
+        return "on";
+      }
+      return "relay-no-la";
     },
     pushStatus() {
       // `relay-off` is the CALLER's word for "the relay is disabled" (it knows);

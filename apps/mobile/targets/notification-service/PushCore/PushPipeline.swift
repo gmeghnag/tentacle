@@ -52,7 +52,7 @@ public enum PushPipeline {
                     .adding(id: message.id, at: message.at, now: now)
                     .serialized()
             )
-            return PushCore.render(message, peer: RenderPeer(computerName: peer.name))
+            return renderMessage(message, peer: RenderPeer(computerName: peer.name))
         }
         return nil
     }

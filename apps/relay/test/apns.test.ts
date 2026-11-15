@@ -4,6 +4,8 @@ import {
   APNS_APS_TEMPLATE,
   APNS_DEFAULT_ORIGINS,
   APNS_JWT_REUSE_MS,
+  APNS_LA_ALERT,
+  APNS_LA_MAX_AHEAD_SECONDS,
   APNS_MAX_PAYLOAD_BYTES,
   APNS_TIMEOUT_OUTCOME,
   apnsOutcomeOf,
@@ -13,6 +15,8 @@ import {
   clipApnsReason,
   createApnsJwtSource,
   decodeApnsKeyPem,
+  liveActivityPayloadOf,
+  liveActivityRequestOf,
   readApnsKeySource,
 } from "../src/apns.ts";
 
@@ -408,5 +412,166 @@ describe("the key: reading it, and refusing to half-configure push", () => {
     expect(
       decodeApnsKeyPem("-----BEGIN PRIVATE KEY-----\n!!!\n-----END PRIVATE KEY-----").kind,
     ).toBe("error");
+  });
+});
+
+// --- Live Activity template (docs/feat/mobile-live-activity.md Design 5, L4) --
+/**
+ * The LA half of `apns.ts`: an ActivityKit push is a DIFFERENT request from a
+ * banner push, and every difference is a rule this suite pins.
+ *
+ *  - `apns-push-type: liveactivity` and `apns-topic` = bundle id +
+ *    `.push-type.liveactivity` (Apple's own suffix; a wrong one is a 400).
+ *  - `aps` is built from a fixed template: `event`, `timestamp`, `content-state`
+ *    and the optional dates. A daemon cannot supply `aps` at all.
+ *  - `attributes-type` is a FIXED string ("TentacleActivityAttributes"): it must
+ *    match the widget's Swift type name, so a daemon-supplied one would break the
+ *    build on the phone, not just the payload.
+ *  - the dates are BOUNDED (≤ now + 12 h): otherwise a daemon — or a bug — could
+ *    make an activity outlive iOS's 8 h cap by asking for it.
+ *  - a `start` carries the alert L0(d) showed is required (a push-to-start with
+ *    no alert is refused by APNs); an `update`/`end` carries none.
+ */
+describe("Live Activities — the ActivityKit template", () => {
+  const laState = { v: 1 as const, e: "B".repeat(43), c: "C".repeat(704) };
+  const attributes = { v: 1 as const, k: "A".repeat(12), slot: "00112233445566778899aabb" };
+  const NOW = 1_700_000_000_000;
+
+  test("the topic gets Apple's liveactivity suffix; the type is fixed", () => {
+    const request = liveActivityRequestOf({
+      token: "d".repeat(64),
+      topic: CONFIG.topic,
+      jwt: "j",
+      priority: 10,
+      now: NOW,
+      la: { event: "update", timestamp: NOW / 1000, contentState: laState },
+    });
+    expect(request.headers["apns-push-type"]).toBe("liveactivity");
+    expect(request.headers["apns-topic"]).toBe(`${CONFIG.topic}.push-type.liveactivity`);
+    // Priority is the daemon's (5|10), not a constant like a banner's.
+    expect(request.headers["apns-priority"]).toBe("10");
+    expect(
+      liveActivityRequestOf({
+        token: "d".repeat(64),
+        topic: CONFIG.topic,
+        jwt: "j",
+        priority: 5,
+        now: NOW,
+        la: { event: "update", timestamp: NOW / 1000, contentState: laState },
+      }).headers["apns-priority"],
+    ).toBe("5");
+    // No banner keys at all: an activity is not a notification.
+    expect(request.headers["apns-collapse-id"]).toBeUndefined();
+    expect(request.headers["apns-expiration"]).toBeUndefined();
+  });
+
+  test("the body is the fixed template plus the sealed state, and nothing a daemon chose", () => {
+    const body = JSON.parse(
+      liveActivityPayloadOf(
+        {
+          event: "update",
+          timestamp: 1_700_000_001,
+          staleDate: 1_700_000_900,
+          contentState: laState,
+        },
+        NOW,
+      ),
+    );
+    expect(body.aps.event).toBe("update");
+    expect(body.aps.timestamp).toBe(1_700_000_001);
+    expect(body.aps["stale-date"]).toBe(1_700_000_900);
+    expect(body.aps["content-state"]).toEqual(laState);
+    // No alert on an update, and no `tp` (that is a banner push's key).
+    expect(body.aps.alert).toBeUndefined();
+    expect(body.tp).toBeUndefined();
+    expect(Object.keys(body.aps).sort()).toEqual([
+      "content-state",
+      "event",
+      "stale-date",
+      "timestamp",
+    ]);
+  });
+
+  test("`start` carries attributes AND the fixed alert; `end` carries a dismissal date", () => {
+    const start = JSON.parse(
+      liveActivityPayloadOf(
+        { event: "start", timestamp: 1, contentState: laState, attributes },
+        NOW,
+      ),
+    );
+    expect(start.aps["attributes-type"]).toBe("TentacleActivityAttributes");
+    expect(start.aps.attributes).toEqual(attributes);
+    // L0(d): a push-to-start with no alert is refused by APNs.
+    expect(start.aps.alert).toEqual(APNS_LA_ALERT);
+
+    const end = JSON.parse(
+      liveActivityPayloadOf({ event: "end", timestamp: 2, dismissalDate: 1_700_000_300 }, NOW),
+    );
+    expect(end.aps["dismissal-date"]).toBe(1_700_000_300);
+    expect(end.aps["content-state"]).toBeUndefined();
+    expect(end.aps["attributes-type"]).toBeUndefined();
+    expect(end.aps.alert).toBeUndefined();
+  });
+
+  test("the alert is the relay's constant, never anything the daemon sent", () => {
+    // Exactly the banner rule (F9's boundary): the only text iOS shows without
+    // opening the seal is this template's.
+    const body = JSON.parse(
+      liveActivityPayloadOf(
+        { event: "start", timestamp: 1, contentState: laState, attributes } as never,
+        NOW,
+      ),
+    );
+    expect(JSON.stringify(body)).not.toContain("rm -rf");
+    expect(body.aps.alert.title).toBe("tentacle");
+  });
+
+  test("dates beyond now + 12 h are REFUSED (an activity cannot be made to outlive the cap)", () => {
+    const tooFar = Math.floor(NOW / 1000) + APNS_LA_MAX_AHEAD_SECONDS + 1;
+    expect(() =>
+      liveActivityPayloadOf(
+        { event: "update", timestamp: 1, staleDate: tooFar, contentState: laState },
+        NOW,
+      ),
+    ).toThrow();
+    expect(() =>
+      liveActivityPayloadOf({ event: "end", timestamp: 1, dismissalDate: tooFar }, NOW),
+    ).toThrow();
+    // At the bound it is accepted (a boundary, not an off-by-one).
+    const atBound = Math.floor(NOW / 1000) + APNS_LA_MAX_AHEAD_SECONDS;
+    expect(() =>
+      liveActivityPayloadOf(
+        { event: "update", timestamp: 1, staleDate: atBound, contentState: laState },
+        NOW,
+      ),
+    ).not.toThrow();
+  });
+
+  test("the largest legal state + attributes still fits Apple's 4096 bytes", () => {
+    const biggest = { v: 1 as const, e: "B".repeat(43), c: "C".repeat(1387) };
+    const bytes = new TextEncoder().encode(
+      liveActivityPayloadOf(
+        { event: "start", timestamp: 1, contentState: biggest, attributes },
+        Date.now(),
+      ),
+    ).length;
+    expect(bytes).toBeLessThanOrEqual(APNS_MAX_PAYLOAD_BYTES);
+    // Non-vacuity: the small state measures strictly smaller.
+    const small = new TextEncoder().encode(
+      liveActivityPayloadOf(
+        { event: "start", timestamp: 1, contentState: laState, attributes },
+        Date.now(),
+      ),
+    ).length;
+    expect(small).toBeLessThan(bytes);
+  });
+
+  test("an activity payload that is not a known event is refused, not sent", () => {
+    expect(() =>
+      liveActivityPayloadOf(
+        { event: "wake" as never, timestamp: 1, contentState: laState },
+        Date.now(),
+      ),
+    ).toThrow();
   });
 });

@@ -93,6 +93,9 @@ function toWireRequest(request: ChatRequest): WireChatRequest {
       : {}),
     ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
     ...(request.maxTokens !== undefined ? { maxTokens: request.maxTokens } : {}),
+    // A voice turn's reasoning-off wish rides to the laptop that owns the model
+    // (C3): the pod runs the loop, so it cannot decide this about itself.
+    ...(request.reasoning !== undefined ? { reasoning: request.reasoning } : {}),
   };
 }
 

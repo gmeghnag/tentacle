@@ -26,10 +26,20 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pairDevice } from "@tentacle/client/pairing";
 import { loadConfig } from "@tentacle/config";
-import { type DaemonRecord, addDevice, readDaemonRecords } from "@tentacle/daemon";
+import {
+  type DaemonRecord,
+  addDevice,
+  openPairing,
+  readClaim,
+  readDaemonRecords,
+  readIdentity,
+  writePairingDecision,
+} from "@tentacle/daemon";
 import { DEFAULT_RELAY_URL } from "@tentacle/protocol";
-import { publicKeyOf } from "@tentacle/transport/noise";
+import type { DuplexChannel } from "@tentacle/transport";
+import { publicKeyOf, systemRandom } from "@tentacle/transport/noise";
 import { relayIdOf } from "@tentacle/transport/relay-id";
 import { startRelay } from "../../../apps/relay/src/server.ts";
 import { relaySecretPath } from "../src/relay-secret.ts";
@@ -43,6 +53,7 @@ const relays: { stop(): void }[] = [];
 afterEach(async () => {
   for (const h of handles.splice(0)) await h.stop();
   for (const r of relays.splice(0)) r.stop();
+  for (const l of hangListeners.splice(0)) l.stop(true);
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
@@ -201,6 +212,58 @@ function pairPhone(configDir: string): void {
     now: 2_000,
   });
   if (!added.ok) throw new Error(added.reason);
+}
+
+/**
+ * A DIRECT address as a phone off the LAN sees it: a TCP listener that accepts
+ * and never answers the upgrade, so the dial's promise never settles (what
+ * `ws://192.168.x.y:4000/e2e` does on 4G, minus the SYN timeout).
+ */
+const hangListeners: { stop(force?: boolean): void }[] = [];
+function hang(): string {
+  const listener = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: { data() {}, open() {} },
+  });
+  hangListeners.push(listener);
+  return `ws://127.0.0.1:${listener.port}/e2e`;
+}
+
+/** A real WebSocket dial, like the app's (iOS sends an `Origin`). */
+function dial(url: string): () => Promise<DuplexChannel> {
+  return () =>
+    new Promise((resolve, reject) => {
+      const ws = new WebSocket(url, { headers: { Origin: "http://192.168.1.8:4001" } } as never);
+      let onMessage: ((d: string) => void) | undefined;
+      let onClose: (() => void) | undefined;
+      let opened = false;
+      ws.addEventListener("message", (e) => onMessage?.(String(e.data)));
+      ws.addEventListener("close", (e) => {
+        onClose?.();
+        if (!opened) reject(new Error(`closed ${e.code}`));
+      });
+      ws.addEventListener("open", () => {
+        opened = true;
+        resolve({
+          send: (d) => ws.send(d),
+          close: () => ws.close(),
+          setOnMessage: (h) => {
+            onMessage = h;
+          },
+          setOnClose: (h) => {
+            onClose = h;
+          },
+        });
+      });
+      ws.addEventListener("error", () => reject(new Error("error")));
+    });
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+async function until(check: () => boolean, ms = 3_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!check() && Date.now() < deadline) await sleep(10);
 }
 
 describe("serve: the relay identity is created once and reused", () => {
@@ -389,6 +452,77 @@ describe("serve: a pod-like daemon never dials and never writes relay.json (F20)
     expect(recordOf(where.configDir)).toBeUndefined();
     expect(relay.registeredCount()).toBe(0);
   });
+});
+
+describe("serve: pairing from off the LAN reaches the relay (docs/fix/relay-pairing.md)", () => {
+  test("pairDevice with a dead direct address FIRST still pairs over the relay", async () => {
+    // The live 4G report, end to end: the QR is "direct first, relay last", the
+    // direct addresses hang (a LAN/Tailscale address a phone off the network
+    // cannot reach), and `pairDevice` used to dial them strictly in order with no
+    // deadline — so the relay was never tried and the phone sat on
+    // "Connecting…". Mutation: revert `pairDevice` to the `for` loop → this
+    // times out with no compare and no `pairing-open`.
+    const where = rig();
+    const relay = localRelay();
+    // A pairing window on the daemon's OWN store (what `tentacle pair` opens).
+    const code = "K7M2QX9AB3";
+    const opened = openPairing(where.configDir, {
+      code,
+      now: Date.now(),
+      ttlMs: 600_000,
+      pid: process.pid,
+    });
+    if (!opened.ok) throw new Error(opened.reason);
+    const started = await serve(where, { relay: { flagUrl: relay.url } });
+    const relayAddress = started.handle.relay?.address ?? "";
+    expect(relayAddress).toContain("/d/");
+    await waitFor(() => started.handle.relay?.isConnected() === true, "the registration");
+
+    const identity = readIdentity(where.configDir);
+    if (!identity.ok) throw new Error(identity.reason);
+    // Two dead direct addresses, exactly like the phone's QR on 4G.
+    const dead = hang();
+    const dead2 = hang();
+    const compares: string[] = [];
+    const deviceKey = new Uint8Array(32).fill(11);
+    // The human answers `y` once the claim is on disk.
+    const answering = (async () => {
+      await until(() => readClaim(where.configDir, opened.session.sid) !== undefined);
+      const claim = readClaim(where.configDir, opened.session.sid);
+      if (claim === undefined) throw new Error("no claim");
+      const added = addDevice(where.configDir, {
+        publicKey: claim.publicKey,
+        name: claim.name,
+        now: Date.now(),
+      });
+      if (!added.ok) throw new Error(added.reason);
+      writePairingDecision(where.configDir, opened.session.sid, true);
+    })();
+    const result = await pairDevice({
+      payload: {
+        v: 1,
+        key: identity.identity.publicKey,
+        computer: identity.identity.name,
+        code,
+        addresses: [dead, dead2, relayAddress],
+      },
+      deviceKey,
+      name: "iPhone",
+      dial,
+      random: systemRandom,
+      onCompare: (sas) => {
+        compares.push(sas);
+      },
+      race: { staggerMs: 20 },
+    });
+    await answering;
+    expect(result.deviceId).toMatch(/^[0-9a-f]{16}$/);
+    // The code was really compared over the relay: the daemon opened a PAIRING
+    // connection there, not a device one.
+    expect(compares).toHaveLength(1);
+    await waitFor(() => started.audit.includes("pairing-open"), "the relay pairing-open");
+    expect(started.audit.filter((line) => line === "pairing-open")).toHaveLength(1);
+  }, 15_000);
 });
 
 describe("serve: a relay.json this build cannot use turns the relay OFF, loudly", () => {

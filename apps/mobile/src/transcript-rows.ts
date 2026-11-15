@@ -63,6 +63,24 @@ export interface ToolRow {
   readonly hook?: ToolResult["hook"];
   readonly spill?: ToolResult["spill"];
   readonly denialReply?: string;
+  /** A sub-agent's live progress, on its `agent_task` row (item 10). */
+  readonly sub?: SubProgress;
+}
+
+/**
+ * A foreground sub-agent's progress (the TUI's `SubAgentProgress`, minus what the
+ * phone does not draw): without it a minutes-long child looks like a hang
+ * (docs/fix/mobile-chat-glitches.md, item 10).
+ */
+export interface SubProgress {
+  /** The latest activities (capped: the phone shows the last one). */
+  readonly activities: readonly string[];
+  readonly toolUses: number;
+  readonly tokens: number;
+  readonly done: boolean;
+  readonly stopReason?: string;
+  /** The child moved to the background: its agent id. */
+  readonly movedTo?: string;
 }
 
 export interface NoticeRow {

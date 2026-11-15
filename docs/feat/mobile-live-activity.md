@@ -63,14 +63,29 @@ deploy, which is the owner's step **D4** (planned in L12's runbook delta, never
 done by an executor). Apple console steps are **D4a**. No executor touches the
 server (142.132.169.22 / `relay.tentacle.so`), Apple's console, DNS or Caddy.
 
-**Repro (2026-11-14): the capability is missing.** On this branch (= `main` @
-`88f5a8f`), a search for
+**Repro (2026-11-14): the capability is missing.** On the base this branch was
+cut from (`88f5a8f9`), a search for
 `ActivityKit|LiveActivit|live_activity|liveactivity|NSSupportsLiveActivities|pushToStart`
 in `{packages,apps}/**/*.{ts,tsx,json,swift,js}` → **No files found**.
 `apps/mobile/app.json` has no `NSSupportsLiveActivities`, no extension target,
 no `apps/mobile/targets` / `apps/mobile/modules`. The executor re-runs the
 search on `main` after task 17 merged: then the push/NSE pieces exist, still no
 Live Activity.
+
+> **Branch state (corrected in fix round 1, 2026-11-15; re-measured in rounds 2
+> and 3, 2026-11-16).** `88f5a8f9` is this branch's **cut point**, not current
+> `main`. Current `main` is `da1958f0` and this branch is **316 commits behind** it,
+> so none of the push stack the plan builds on exists here yet — `main` has
+> moved during every fix round (`b44766f8` at 305 → `b9b2d4fb` at 315 → `da1958f0`
+> at 316); the merge stays conflict-free at the later base (`git merge-tree
+> --write-tree main HEAD` → exit 0). The probe is in
+> `.tentacle/tmp/mobile-live-activity/precondition-probe.txt`. The plan's
+> `file:line` citations were verified **correct at `88f5a8f9`** (23/23) and
+> re-mapped to `main`: task 16's push hook shifts every cited line in
+> `hosted-session.ts` by +2 … +235
+> (`.tentacle/tmp/mobile-live-activity/cite-map.txt`). **L0–L12 must not run on
+> this branch as it stands** — the base has to carry `main` first (the
+> orchestrator's `git merge-tree` is clean: no conflicts).
 
 ## Implementation
 
@@ -104,7 +119,8 @@ Proof (daemon, by source):
   `session_title.title` (`:301-305`), `session_closed` (`:290-293`).
 - **The observer must not be an attachment.** `recheckAsks` denies a pending
   ask when no attached client can show it (`hosted-session.ts:1088-1097`,
-  called at `:1569`, `:1592`); `Attachment` (`:191-203`) feeds that set.
+  called at `:1569`, `:1592`); `Attachment` (`hosted-session.ts:191-203` — the
+  file matters: the drift table below now carries it) feeds that set.
   Task 16 keeps the hook out of it; this task only widens its kind filter.
 - **The daemon holds the sender key** (`device-authority.ts:146` `staticKey()`,
   `:151` `identity()`), as for push.
@@ -485,4 +501,1370 @@ claude-opus-5-5 (orchestrator), 2026-11-14*
 
 ## Execution
 
+*— claude-sonnet-4-5-20250929 (executor), 2026-11-15*
+
+Branch `feat/mobile-live-activity` at `6b31bacb` (9 commits ahead of `daemon…`, 0 behind
+`main` at the time of the load-bearing check; `main` has moved since — the merge stays
+the orchestrator's step). Scratch: `.tentacle/tmp/mobile-live-activity/`
+(`load-bearing-check.txt`, `slice-log.txt`, the generators and their backups).
+
+### Load-bearing check: PASS
+
+Re-ran the Context's Repro and BOTH halves of the Implementation's load-bearing
+assumption, before any edit. Full output in `.tentacle/tmp/mobile-live-activity/load-bearing-check.txt`.
+
+- **Capability absent (Repro holds).** `rg 'ActivityKit|LiveActivit|live_activity|
+  liveactivity|NSSupportsLiveActivities|pushToStart' packages apps --glob
+  *.{ts,tsx,json,swift,js}` → no files, on the branch tip. Nothing pre-existed.
+- **Daemon half, by source** (re-verified at the tip, not at the doc's `88f5a8f9`):
+  one fan-out point `emit` (`hosted-session.ts:2087-2103`), the push observer LAST
+  (`:2104-2114`, filter `:2117-2125`), `pushAttached` (`:2139-2148`), `recheckAsks`
+  (`:1217`, called `:1704`, `:1731`), `turn_start` (`:2284`, `:2483`), `eventToUpdate`
+  (`:2693`), `finishTurn` (`:2740`), `session_title` (`:2962`), `staticKey`/`identity`
+  (`device-authority.ts:146,151`). The hook is not an `Attachment` — so widening it
+  cannot make the daemon believe a client is watching. **HOLDS.**
+- **Phone half, L0(a) — the blocking probe: PASS.** A TS seal (`info = "tentacle-la/1"`,
+  `aad = kid ‖ slot`, 512-byte padded plaintext) opened in Swift with CryptoKit
+  `HPKE.Recipient(…authenticatedBy:)` and task 17's ciphersuite, on this machine
+  (`swift test`, 4/4): the positive opens byte-exactly; wrong slot aad, wrong sender
+  and a flipped byte are all REFUSED. So an E2E Live Activity through ActivityKit is
+  possible, and Owner Q1's fallback is not needed.
+  - **Found and fixed in the probe itself:** the first Python vector generator was
+    wrong (AuthEncap's second DH is `DH(skS, pkR)`, not `DH(skE, pkS)`). It now
+    SELF-VALIDATES against RFC 9180 Appendix A.2.3 (`enc`/`ss`/`key`/`nonce`/`ct`) and
+    refuses to emit any bytes if they disagree — so no bad vector could reach the tree.
+- **L0(b), syntactic: PASS.** `xcrun simctl push booted so.tentacle.app` with a
+  `liveactivity` payload (`event`/`timestamp`/`content-state`/`attributes-type`/
+  `attributes` + `alert`) is accepted. Rendered-activity proof needs the widget built
+  (L10's views, below) and the L12 flows.
+- **L0(c)–(g)** are device/owner-assisted (sandbox APNs, locked-phone redaction, intent
+  cold start, APNs 410). They do not block L1/L2/L5/L6/L9, and nothing below assumes
+  their outcome.
+
+### Per-slice result
+
+| slice | state | evidence |
+|---|---|---|
+| **L0** | DONE (a, b) · owner-assisted (c–g) | above |
+| **L1** | **DONE** | `push-seal.test.ts` 36 pass; `vectors/la-v1.json` (independent, RFC-self-validated) |
+| **L2** | **DONE** | `live-activity.test.ts` 18 pass; `protocol.json` regenerated |
+| **L3** | **DONE** | `relay.test.ts` 48 pass |
+| **L4** | **DONE** | `apns.test.ts` + `server-push.test.ts` (apps/relay 246 pass) |
+| **L5** | **DONE** | `live-store.test.ts` 14, `devices-cmd.test.ts` 34 |
+| **L6** | **DONE** | `live-activity-rules.test.ts` 24 pass |
+| **L7** | **DONE** | `live-activity-notifier.test.ts` 12, `push-hook.test.ts` 16 |
+| **L8** | **DONE** | `relay-link-push.test.ts` 16, `serve-live-activity.test.ts` 3, `live-activity-config.test.ts` 4 |
+| **L9** | **DONE** | `la-render.test.ts` 12; `fixtures/la-render-v1.json` (9 cases) |
+| **L10** | **PARTIAL (see below)** | `swift test` 15 pass (4 new); `app-config.test.ts` 11 |
+| **L11** | **PARTIAL (see below)** | action 8, registration 6, reconcile 8 |
+| **L12** | NOT STARTED | E2E/Maestro, runbook delta, real-device checklist |
+
+### L10 and L11 are PARTIAL, and exactly what is missing
+
+**Both keep their pure logic complete and test-pinned; what is missing is the layer
+that needs an Xcode build or a simulator**, which `bun run check` and `swift test`
+cannot reach. This is stated plainly rather than claimed as done.
+
+- **L10 done:** `app.json` `NSSupportsLiveActivities` (with `…FrequentUpdates`
+  deliberately ABSENT — Owner Q4's cadence fits the normal budget, and claiming it is
+  an Apple review flag); `targets/live-activity/expo-target.config.js` (`type:
+  "widget"`, `.LiveActivity`, 18.0, the SHARED keychain group only);
+  `targets/live-activity/LACore/{TentacleActivityAttributes,LACore}.swift`
+  (the shared attributes/ContentState types, `openActivityState` over task 17's
+  `PushCore` ciphersuite, and `renderActivity` — the Swift twin of `la-render.ts`),
+  compiled into the SAME SwiftPM package through a second symlink so there is one
+  implementation. The Swift tests read BOTH vector files.
+- **L10 missing:** the SwiftUI VIEWS (lock screen, the three Dynamic Island
+  presentations), the `LiveActivityIntent`s, and `modules/live-activity` (the Expo
+  module). These need `expo prebuild` + an Xcode build on a simulator/device — i.e.
+  L12's `e2e:mobile` harness and D5. The view-model they would draw IS specified and
+  pinned, so what remains is presentation.
+- **L11 done:** the three pure modules — `live-activity-action.ts` (the security one:
+  a tap carries only `{action, activityId}`, and `requestId`/options come from
+  RE-OPENING the current state, then task 17's coordinator, Face ID for Approve),
+  `live-activity-registration.ts`, `live-activity-reconcile.ts`.
+- **L11 missing:** `live-activity-expo.ts` (the native adapter), the Settings row and
+  the `App.tsx`/`index.ts` wiring — all of which call the L10 module that does not
+  exist yet. Writing them against a module that cannot be built would be untested
+  code claiming a feature.
+
+### Drift from the Implementation (each deliberate, each with its reason)
+
+1. **`devices/live/<id>.json` does not hold the push key.** The seal's recipient is
+   task 16's per-device X25519 push key, which lives in `devices/push/<id>.json`. So
+   `LaRegistrationsSource.pushKeyOf` reads the BANNER record for the key: ONE key per
+   device, so the widget opens both channels with one Keychain item. A device with Live
+   Activities but no banner registration has no key and is dropped with an audit line,
+   never silently.
+2. **The relay gained a `features` option** (`apps/relay/src/server.ts`). The plan
+   assumed no seam existed to present "a relay that announces only `push`". This is a
+   deploy knob for the two-step rollout (push now, Live Activities at D4a), not a test
+   hook — I drafted `core.setFeaturesForTest` first and discarded it.
+3. **One observer, fanned out.** `reloadedHost` builds ONE `SessionPushObserver` that
+   feeds the push notifier and the activity notifier, and hands the same instance to
+   both options. `HostedSession` therefore still sees exactly one observer and
+   `offerPush` stays O(1)/synchronous (AGENTS §7, the steering no-wait window).
+4. **The LA `aps` body is bounded in `apns.ts`, not in the frame.** `liveActivityPayloadOf`
+   refuses a `start` without attributes or content-state and a date past
+   `now + 12 h` (the relay's backstop over iOS's 8 h cap), so a daemon bug becomes a
+   `rejected` result instead of an Apple 400 with no explanation.
+5. **`LA_MAX_LIVE_PER_DEVICE` is per device, not per (device, session)** — the cap iOS
+   actually imposes. Eviction takes the oldest `done`; with nothing finished the start
+   is skipped with a `la-capped` note (never silent).
+6. **The LA budget is HOURLY.** Writing the test for it found the code using
+   `push`'s MINUTE window — 60× too many pushes. `chargeHourWindow`/`usedInHourWindow`
+   now exist beside the minute pair; the test stops 5 minutes in and requires the cap
+   to still hold, which a minute window fails.
+7. **`encodeBase64Url` lives in `protocol/pairing.ts`**, not a `base64.ts` — the probes
+   found this, not the plan.
+
+### Tests written (all red-first, all mutation-checked)
+
+25 mutations were run and reverted; each is named in its test's comment. Two of them
+survived their first run and forced a NEW test, which is the point of running them:
+
+- **M5** (LA budget gate off) survived the "worst case at the caps" input, because that
+  input already fits. A second test with an input that genuinely OVERFLOWS was added —
+  and it immediately found a real bug: clipping for the byte budget alone could leave a
+  field over its OWN schema cap (a 200-emoji title fits 1022 bytes but not `title`'s
+  120-byte line). `clipToCaps` is now the ladder's step 0.
+- **M14** (record-version guard off) survived because the fixture failed for a second
+  reason: the fixture now carries a record valid in EVERY field but `v`.
+- **M22** (rollover reusing the slot) was unobservable because the test's slot source
+  was a constant. The fixture now COUNTS slots (`issued` 1 → 2).
+- **M26/M28** (the relay feature gate; the `ready` resend) each needed a new test:
+  "NOTHING reaches Apple" and the wiring EXTRACTED to `bindLiveActivityResend` so a
+  test can call it rather than re-implement it.
+- **M40** (the `kind !== "asking"` check) survived because the `ask === undefined`
+  clause covered the same fixture: a new test uses a `done` state that still carries a
+  stale `ask`.
+- **M4** (the kid guard) survived until a mislabelled-envelope test was added.
+
+Tests that had to CHANGE because the surface genuinely changed (not to make red
+green): `push-hook.test.ts`'s watched-set list and its positional `updates()[1]` lookup
+(the hook now sees three more kinds — the assertion is by TYPE now); `relay.test.ts`'s
+`features == ["push"]`; `devices-cmd.test.ts`'s `toEndWith("on")` (a second column).
+
+### Gate (run on the branch, 2026-11-15)
+
+`bun run check` — **green**:
+- `tsc --noEmit`, `tsc -p apps/mobile`, `tsc -p apps/relay`: clean.
+- `biome check .` — 1627 files, no fixes applied, 0 errors, 0 warnings (matches the
+  baseline in AGENTS §6).
+- `bun test` — **11632 pass, 5 skip, 0 fail** (11637 across 836 files, 427 s). The
+  skips are the three documented opt-ins (live-k8s, live-docker, the real-socket
+  keepalive) plus two that were already skipping on the base; no non-opt-in skip was
+  added.
+- `bun run test:swift` — 15 pass, 0 failures (11 pre-existing + 4 new LA tests).
+
+Two failures the first full run caught, both fixed and re-run:
+1. **`push.enabled: false` stopped answering `MethodNotFound`.** My fan-out always
+   supplied a `push` host option, so the RPC answered instead of being absent. Fixed at
+   the seam: `SessionHost` takes the push observer when it has one and the activity
+   observer otherwise, and `serve` passes each option only when its own wiring exists.
+2. **`liveActivity` had no key-docs entries**, so `key-docs.test.ts` (4 tests) and the
+   README config table failed. Both keys are now documented and `bun run docs:config`
+   regenerated the table.
+
+`bun run e2e:mobile` was **not** run, and cannot be on this pass: it needs the native
+build that L10's SwiftUI views and Expo module are part of (see L10's PARTIAL note).
+It belongs to L12/D5.
+
+### What is left (and who does it)
+
+- **L10's views + Expo module, L11's adapter/Settings/wiring** — an Xcode build on a
+  simulator or device; L12's `e2e:mobile` harness is where they land.
+- **L12** — Maestro flows, the `seal-activity` hook, the runbook delta, the
+  real-iPhone checklist.
+- **D4a** (Apple console: widget App ID, keychain group, profiles) and **D4** (relay
+  deploy) and **D5** (real device) are the owner's, as the plan says.
+- **`protocol.d/`** was NOT needed: no wire break. The new methods are additive, the
+  schemas are strip schemas, and the `liveactivity` frame is a new `t` gated by a new
+  feature name — an older daemon answers `MethodNotFound`, which is F22's path.
+
+
+
+### Blocked at the load-bearing check — no slice executed
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: STOP, per the executor brief ("First re-run its load-bearing check;
+if it fails STOP") and AGENTS §0.** The plan's own precondition is not met on
+this branch, so L0(a) and every daemon slice would be checked against code that
+does not exist here. Nothing was implemented, nothing mutated.
+
+**What the re-run says.** Probe output:
+`.tentacle/tmp/mobile-live-activity/precondition-probe.txt`.
+
+1. **The branch does not contain task 16 or task 17.** `feat/mobile-live-activity`
+   is cut at `88f5a8f9` — the exact commit the Context calls out as the branch's
+   base — and carries exactly one change over it: this doc (`git diff --stat
+   88f5a8f9 HEAD` → `docs/feat/mobile-live-activity.md | 488 +++++`, nothing
+   else). `main` is at `b44766f8` ("Merge branch 'feat/mobile-notifications'",
+   i.e. task 17 merged) and the branch is **305 commits behind it**.
+2. **Every file the Implementation builds on is absent here and present on
+   `main`:**
+
+   | file (plan slice) | on branch | on `main` |
+   |---|---|---|
+   | `packages/transport/src/push-seal.ts` (L1: "beside `sealPush`") | **missing** | yes |
+   | `packages/daemon/src/push-notifier.ts` (L7: "beside `PushNotifier`") | **missing** | yes |
+   | `packages/daemon/src/push-rules.ts`, `push-store.ts` (task 16) | **missing** | yes |
+   | `packages/daemon/src/relay-link.ts` (L8) | **missing** | yes |
+   | `packages/protocol/src/relay.ts` (L3: the `push` frame) | **missing** | yes |
+   | `apps/mobile/targets/notification-service` (task 17's NSE) | **missing** | yes |
+   | `apps/mobile/native-tests/PushCoreTests` (L10 extends it) | **missing** | yes |
+
+   Also absent on the branch: `onPushEvent` / `PushHookEvent` / `PushNotifier`
+   (no match in `packages/daemon/src`), the `push` / `push-result` relay frames,
+   and `apps/mobile/modules`.
+3. **The load-bearing assumption cannot be checked against the cited code.**
+   It rests on "task 16's `onPushEvent` sits right there" in
+   `hosted-session.ts:1948-1963`. That hook does not exist on this branch: the
+   cited range is `emit()` and `finishTurn` is at `:2505`, and `ask.shown`
+   does sit at `:921` / `:1032` — but `grep -c onPushEvent
+   packages/daemon/src/hosted-session.ts` → **0**. The line numbers happen to
+   match while the hook the assumption rests on is simply not there, which is
+   the dangerous case: a check that reads "citations line up ⇒ plan verified"
+   would have passed. So the daemon half of the load-bearing assumption is
+   unverifiable on this branch, not merely off by a few lines.
+4. **Two more preconditions fail outright.** `apps/mobile/src/secure-kv.ts`
+   exists but `gate.hold(ms)` does not: on the branch `hold()` takes no budget
+   (`foreground-gate.ts:68`), and task 17 is what gives it one (Preconditions
+   cite it as `gate.hold(ms)`). Task 17's answer coordinator
+   (`answerById` / `RemoteClient.answerPermission`) is likewise absent, so
+   L11's action path has nothing to hand to.
+5. **The capability repro is still true** (the Context's search over
+   `{packages,apps}/**/*.{ts,tsx,json,swift,js}` → no files), but for the wrong
+   reason: this branch predates the push stack the feature is supposed to sit
+   on. A feat repro that passes because its foundation is missing is not
+   evidence of the gap the plan is about.
+
+**Environment, since it bounds what L0 could ever do here.** Xcode 27.1
+(27A9275) is installed, but only the **iOS 26.5** simulator runtime is — the
+iOS 18 simulator the Tests section requires ("iOS 18 and 26 simulators") is not
+present. L0(a)–(g) and every subsequent device/`simctl` step also need the D4a
+Apple-console work (widget App ID, keychain sharing group) first. The repo gate
+itself runs on this branch (`bunx tsc --noEmit` → exit 0), so the branch is
+coherent — it is the prerequisites that are missing, not a broken tree.
+
+**Drift from the Implementation: none — the Implementation is unreachable, not
+wrong.** One thing *is* now wrong in the doc and should be fixed by whoever
+re-issues the task, not silently by me: the Context's "Resume on `main` @
+`88f5a8f`" instruction reads as if 88f5a8f were current `main`; current `main`
+is `b44766f8` and the branch was never re-based or re-created after task 17
+merged. Per AGENTS §10 this doc rides the code branch, so a re-cut of the branch
+also has to carry this doc across (or the branch needs `main` merged **into**
+it before L0 — the substantive re-base is the one thing I ran out of standing
+to do here).
+
+**The one decision needed.** How to get task 16 + task 17's code under this
+branch, then who re-issues. Any of these unblocks L0 onward; all of them are the
+orchestrator's call, not an executor's:
+
+- (a) **Re-cut the branch off current `main`** (`b44766f8`) and re-apply this
+  doc — cleanest, and what "Starts only after task 17 is merged (Owner Q9)"
+  assumes; the plan's `file:line` citations then apply as written.
+- (b) `git merge main` into this branch (305 commits; I am forbidden from
+  `checkout`/`restore`/`stash`/`commit`, and a conflict-resolving merge of 305
+  commits is not an executor's unilateral call).
+- (c) Execute L0's probes only (scratch, no code) if the owner wants the
+  device questions answered while the branch question is settled — but (a) must
+  still happen before L1, and L0(b)'s iOS 18 half needs that runtime installed.
+
+Until then: **L0–L12 all PARTIAL (0 of 13 slices), 0 mutations run.** The gate
+was run anyway so the claim is measured, not assumed — `bunx tsc --noEmit`
+exit 0 · `bun run lint` "Checked 1292 files … No fixes applied", 0 errors
+(baseline-clean, AGENTS §6) · `bun test` **9317 pass, 3 skip, 0 fail** (9320
+tests / 670 files, 373 s; the 3 skips are the three opt-in ones). This is the
+branch's pre-existing state and says nothing about the feature — it is reported
+so a later round can tell "green because untouched" from "green after work". No
+changelog fragment was written, because there is no user-visible change to
+announce; no `protocol.d/` note, because no schema changed; `protocol.json` was
+not regenerated, because nothing it is derived from moved.
+
+### Citation re-check — plan correct at its own base, re-mapped to `main`
+
+*— claude-opus-5-5, 2026-11-15* (fix round 1, Review finding 1)
+
+Review round 1 asked for the plan's `file:line` citations to be re-checked
+against the base the branch would actually run on. Evidence:
+`.tentacle/tmp/mobile-live-activity/cite-check.ts` → `cite-map.txt`. It reads
+`git show <rev>:<file>` only (never the worktree, index or refs) and asserts two
+independent things per claim: the symbol really is at the plan's line **on
+`88f5a8f9`** (was the plan right when written?), and where that same symbol sits
+**on `b44766f8`** (what L0 must actually read).
+
+**Result: 23/23 citations were correct at `88f5a8f9`; 17 of them shifted on
+`main`.** So the plan was not wrong — it was written against the pre-task-16
+tree. Task 16's push hook (`emit` → `offerPush`) added ~139 lines above the
+fan-out point and ~235 above the turn machinery, which is why the old numbers
+point at unrelated code on `main` (the dangerous "line numbers line up" case the
+previous Execution flagged).
+
+Files: `hs` = `packages/daemon/src/hosted-session.ts` · `upd` =
+`packages/protocol/src/updates.ts`. The file column is load-bearing: a line
+number without its file is not a citation (see the round-2 note under the
+table).
+
+| claim | file | plan line | on main | shift | correct at base? |
+|---|---|---|---|---|---|
+| emit fan-out | `hs` | `1948` | `2087` | +139 | yes |
+| watchers.offer | `hs` | `1962` | `2101` | +139 | yes |
+| turn_start (a) | `hs` | `2081` | `2284` | +203 | yes |
+| turn_start (b) | `hs` | `2280` | `2483` | +203 | yes |
+| eventToUpdate then emit | `hs` | `2458` | `2693` | +235 | yes |
+| ask.shown (a) | `hs` | `921` | `1028` | +107 | yes |
+| ask.shown (b) | `hs` | `1032` | `1141` | +109 | yes |
+| settle() | `hs` | `1136` | `1265` | +129 | yes |
+| finishTurn() | `hs` | `2505` | `2740` | +235 | yes |
+| finishTurn call (a) | `hs` | `2397` | `2632` | +235 | yes |
+| finishTurn call (b) | `hs` | `2468` | `2703` | +235 | yes |
+| finishTurn call (c) | `hs` | `2479` | `2714` | +235 | yes |
+| finishTurn call (d) | `hs` | `3013` | `3248` | +235 | yes |
+| recheckAsks def | `hs` | `1088` | `1217` | +129 | yes |
+| recheckAsks caller (a) | `hs` | `1569` | `1704` | +135 | yes |
+| recheckAsks caller (b) | `hs` | `1592` | `1731` | +139 | yes |
+| Attachment interface | `hs` | `191` | `193` | +2 | yes |
+| no own decision (comment) | `hs` | `30` | `30` | same | yes |
+| tool_call.title+status | `upd` | `45` | `45` | same | yes |
+| turn_start.turnId | `upd` | `242` | `242` | same | yes |
+| turn_end.stopReason+error | `upd` | `257` | `257` | same | yes |
+| session_closed | `upd` | `290` | `290` | same | yes |
+| session_title.title | `upd` | `301` | `301` | same | yes |
+
+**Five** of the six `same` rows are in `packages/protocol/src/updates.ts`, which
+task 16 did not touch; the sixth, `no own decision`, is a comment in `hs`
+(fix round 2 — the earlier wording said "six … are in `updates.ts`", which was
+off by one). **For L0 onward: read the `on main` column, not the prose numbers** —
+the Implementation's inline citations stay as written (they are true of the plan's
+base) and this table is the translation. One genuinely wrong citation in the old
+text is corrected here: the `finishTurn` *end* was cited as a single line
+(`:2505`) but that is the **definition**; the four **call sites** are
+`:2397`, `:2468`, `:2479`, `:3013` (→ `:2632`, `:2703`, `:2714`, `:3248`).
+
+**Not verified here:** anything the citations resolve to but the plan reasons
+*about* — e.g. that an activity can never race a decision. That is L7's test, not
+a line-number check.
+
+**The table above is not the whole citation set (fix round 3, Review round 3).**
+It carries the 23 citations of the *daemon emit / protocol-shape* proof, and its
+remedy sentence — "read the `on main` column, not the prose numbers" — only
+works for a citation that HAS a row. Ten more `file:line`s in the Preconditions,
+Design and Failure-modes prose had none, so an L0 executor following those read a
+cut-point number on `main`: **five** of them land on unrelated code there
+(measured, `.tentacle/tmp/mobile-live-activity/r3-count.txt`: `conn:178`, the
+`conn` method gate, `hs` `resolvePermission`, the gate's `suspend()`, and the
+Keychain const) — exactly the trap this section exists to stop. Measured and
+tabulated below, so **every citation the doc makes that is not in the table
+above carries its `on main` line here too.** Same rule: for L0 onward read the
+`on main` column.
+
+Aliases as above, plus `conn` = `packages/daemon/src/connection.ts`, `fg` =
+`apps/mobile/src/foreground-gate.ts`, `kv` = `apps/mobile/src/secure-kv.ts`,
+`da` = `packages/daemon/src/device-authority.ts`.
+
+| claim | file | plan line | on main | shift | correct at base? |
+|---|---|---|---|---|---|
+| device principal field + kind | `conn` | `122-131` | `128-157` | +6 | yes |
+| principal defaulted per connection | `conn` | `178` | `225` | +47 | yes |
+| device / pairing method gate | `conn` | `301-311` | `349-359` | +48 | yes |
+| resolvePermission (F8) | `hs` | `1098-1129` | `1227-1258` | +129 | yes |
+| gate header comment | `fg` | `1-34` | `1-34` | same | yes |
+| gate `suspend()` | `fg` | `111-120` | `143-152` | +32 | yes |
+| Keychain accessible const | `kv` | `17` | `20` | +3 | yes |
+| one link per computer | `lk` | `1-12` | `1-12` | same | yes |
+| staticKey / identity | `da` | `146`, `151` | `146`, `151` | same | yes |
+| no own decision (comment block) | `hs` | `20-31` | `20-31` | same | yes |
+
+`lk` = `apps/mobile/src/link-registry.ts`. Two of these are worth naming because
+a spot-check of the number alone would have passed: `conn:178` on `main` is
+`readonly hosted: HostedSession;` (not the principal assignment), and
+`fg:111-120` on `main` is the tail of a hold's release plus the top of `dial()`
+— `suspend()` itself moved to `:143`. Neither is reachable by reading the first
+table. One number is also slightly wrong *at the cut point*: the prose's
+`connection.ts:302` is the `if (method === Method.DevicePair)` block's first
+statement, the `if` itself being `:301` (→ `:349` on `main`). Both numbers are
+in the row above so the shift stays checkable either way.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Scope: the two MEDIUM findings of Review round 1. No code, no slice (L0–L12
+remain 0 of 13).** The blocking condition the earlier round reported is
+unchanged and re-verified here; what this round fixes is what it could fix
+without standing to merge 305 commits — the doc's false base claim and its
+unpinned citations, plus the attribution the review flagged.
+
+**Re-verified first (the blocking premise still holds):** `git rev-list --count
+HEAD..main` → **305**; `main` = `b44766f8`. `push-seal.ts`,
+`push-notifier.ts`, `relay-link.ts`, `protocol/relay.ts` — all absent here,
+present on `main`. `grep -c onPushEvent packages/daemon/src/hosted-session.ts` →
+**0** here, **4** on `main` (`:397`, `:419`, `:2127`, `:2162`). So L0 would still
+be checked against code that is not on this branch. **New evidence for the
+orchestrator:** `git merge-tree --write-tree main HEAD` → exit 0, one tree
+(`7e9449be…`), **no conflicts** — bringing `main` in is mechanical, not a
+305-commit conflict-resolution job. Doing the merge is a commit, which an
+executor may not make, so it stays the orchestrator's step (option (a)/(b) of
+the earlier round — now known to be conflict-free in both shapes).
+
+**Finding 1 (MEDIUM) — FIXED. Two parts.**
+
+*(a) The false base claim.* `## Context`'s Repro said "On this branch (= `main`
+@ `88f5a8f`)" — false, and the source of the whole confusion: `88f5a8f9` is the
+**cut point**, while current `main` is `b44766f8`, 305 commits ahead. The Repro
+now says "the base this branch was cut from (`88f5a8f9`)", and a call-out under
+it states the real gap, the probe file, and that L0–L12 must not run on this
+branch as it stands.
+
+*(b) The citations.* The review asked to re-check the plan's line numbers
+against the base. Done mechanically, not by eye:
+`.tentacle/tmp/mobile-live-activity/cite-check.ts` (reads `git show <rev>:<file>`
+only — never the worktree, index or refs) asserts, per claim, that the symbol is
+really at the plan's line on `88f5a8f9` **and** finds the same symbol on
+`b44766f8`. Output `cite-map.txt`, pasted into the new **Citation re-check**
+section above.
+
+**Result: 23/23 citations were correct at `88f5a8f9`; 17 shifted on `main`**
+(task 16's push hook sits above the fan-out point: +139 at `emit`, +235 at the
+turn machinery; the six unchanged rows are in `protocol/updates.ts`, untouched
+by task 16). So the plan was **not wrong** — it was written against the
+pre-task-16 tree, which is exactly the distinction the review needed. The drift
+table is now the translation for L0 onward. One genuine error was found and
+corrected: the plan cited `finishTurn`'s end as `:2505`, which is the
+**definition**; the four call sites are `:2397`, `:2468`, `:2479`, `:3013`.
+
+**Finding 2 (MEDIUM) — FIXED as an honest record; the prior signature is not
+rewritten.** The review is right that it cannot be true: the earlier Execution
+is signed `claude-opus-5-5` inside commit `b5622d6a`, whose subject is
+`feat(mobile-live-activity): exec (deepseek)`. I looked for the deciding evidence
+before concluding — the prior executor's transcript is not in
+`~/.claude/projects` (70 project dirs searched for its own distinctive strings:
+no match), and the session store does not attribute that section; the Commit
+trailer is just the human owner (`Gabriel Meghnagi`), and `git` alone cannot say
+which model wrote a line. **So the truth is: the section's author is
+undetermined, and neither the title nor that signature is evidence.** Per §10 the
+signature's job is to make drift by model visible; forging it in either direction
+would destroy exactly that. I therefore left the earlier section byte-for-byte as
+the reviewer found it and record the conflict here instead: **treat that
+section's signature as unreliable, and its subject-line "deepseek" as unproven.**
+This round's own signature is real — it is the model id in this session's
+transcript (`claude-opus-5-5`), read from
+`~/.claude/projects/-Users-gmeghnag-tentacle/…jsonl`, not assumed.
+
+**Red before green (AGENTS §9).** Verifier:
+`.tentacle/tmp/mobile-live-activity/doc-guard.test.ts` — 6 assertions over the
+doc, whitespace-normalised so a wrapped sentence still matches.
+
+- **RED on the pre-fix doc** (`guard-RED.txt`): `1/6 passed`, exit 1 —
+  F1a, F1c, F1d, F2a, F2b all fail on the real assertions. (F1b passed
+  legitimately: the old text already mentioned `b44766f8`/305 in its Execution.)
+- **GREEN after** the edits: `6/6 passed`, exit 0 (`guard-GREEN.txt`).
+
+**Mutations (§9 non-vacuity — each re-broke the doc, observed the test fail,
+restored):**
+
+| # | mutation | expected | observed |
+|---|---|---|---|
+| M1 | restore the stale `(= `main` @ `88f5a8f`)` wording in the Repro | F1a red | **F1a FAIL** (5/6) |
+| M2 | rename the drift table's headers (`on main`/`shift` → `moved?`) | F1c red | **F1c FAIL** (3/6) |
+| M3 | soften the Result line to "the citations are approximate" | F1d red | **F1d FAIL** (3/6) |
+| M4 | forge this round's sign-off to `deepseek-v4` | F2a red | **F2a FAIL** (5/6) |
+| M5 | delete the Finding-2 attribution paragraph | F2b red | **F2b FAIL** (5/6) |
+
+**Four of the five mutations first PASSED — each assertion was rewritten to
+stop being vacuous.** That is the §2 trap ("proving a weaker correlated
+property") caught mechanically, and it is the most useful thing this round
+produced:
+
+| # | why it passed while the claim was deleted | fix |
+|---|---|---|
+| M3′ | F1d matched `/23\/23/` anywhere; the table header *"correct at base?"* satisfied its second branch | anchor on `**Result: 23/23 citations were correct at `88f5a8f9`` |
+| M4′ | F2a matched `*— claude-opus-5-5…*` anywhere in the section, so a sub-section's signature covered a forged sign-off | take the section's **first** signature, assert the id equals `claude-opus-5-5` |
+| M5′ | F2b matched `/deepseek/i`, which recurs in the mutation table itself | assert the substance: "undetermined" + "treat that section's signature as unreliable" |
+| M2′ | the "drift map" regex was satisfied by a header rename | anchor on the exact `\| claim \| plan line \| on main \| shift \|` header |
+
+F1a also needed scoping: an unscoped check tripped on this very section, which
+*quotes* the old wording to explain the fix — quoting is not the bug — so it now
+reads only the Context/Repro region (before `## Implementation`).
+
+**Drift from the Implementation: none — the Implementation did not run.** The
+one doc-level change beyond the findings: the `finishTurn` call-site correction
+above, which is a citation fact, not a design change.
+
+**Still PARTIAL, and why.** L0–L12: **0 of 13**. The precondition (task 16 + 17
+under this branch) is still unmet, exactly as the previous round reported; no
+slice can be executed or mutation-tested until the base carries `main`. Not
+verified here: any runtime behaviour of the plan — there is no code to observe.
+Environment note carried forward: only the iOS 26.5 simulator runtime is
+installed, so the Tests section's "iOS 18 and iOS 26" requirement still needs the
+iOS 18 runtime (plus D4a's Apple-console work) before L0 can pass.
+
+**Gate (measured, this round — final run on the finished tree):** `bunx tsc
+--noEmit` → exit 0 · `bun run lint` → "Checked 1292 files. No fixes applied", 0
+errors/warnings (baseline-clean, AGENTS §6) · `bun test` → **9317 pass, 3 skip, 0
+fail**, 9320 tests / 670 files, 370 s
+(the 3 skips are the three opt-in ones). This is a doc+scratch round, so green
+here means "the doc edits changed no code path", not "the feature works". No
+changelog fragment (no user-visible change), no `protocol.d/` note (no schema
+change), `protocol.json` untouched.
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Scope: Review round 2's two findings, plus one record defect this round found
+and fixed. No code, no slice (L0–L12 remain 0 of 13).** The signature is real:
+read from this session's transcript
+(`~/.claude/projects/-Users-gmeghnag-tentacle/d3ca19a6-….jsonl` — 460 assistant
+records, every one `"model":"claude-opus-5-5"`), not assumed.
+
+**Re-verified first (the blocking premise still holds).** `git rev-list --count
+HEAD..main` → **315**; `main` = **b9b2d4fb**. `push-seal.ts`,
+`push-notifier.ts`, `relay-link.ts` absent here, present on `main`;
+`grep -c onPushEvent packages/daemon/src/hosted-session.ts` → **0** here. The
+branch is still cut before tasks 16/17, so no slice can run. `main` moved
+**during** this round (`b44766f8`/305 → `b9b2d4fb`/315), which is why both
+verifiers first went red on the doc's now-stale base claim — that is the guards
+working, and the figures above are the final measurement. **New — what round 2
+could not do:** `git merge-tree --write-tree main HEAD` → exit 0, **no
+conflicts**, re-confirmed at the later base. It writes no ref and no index, so it
+is inside an executor's standing; the merge itself is a commit and is not.
+
+**Finding 1 (the branch/base) — FIXED to the limit of an executor's standing;
+the merge itself is STILL OPEN and remains the orchestrator's.** Round 2 asked
+the orchestrator to confirm the merge is conflict-free before merging; that is
+now **confirmed** above, with the tree hash recorded. What I cannot do is perform
+it (`git merge` = a commit, and this round is forbidden
+`checkout`/`restore`/`stash`/`commit`), so the root cause stays open by design,
+not by omission. Nothing here pretends the branch is usable.
+
+**New defect found this round, MEDIUM — the drift table had no file column, so
+two of its rows cited a line in the wrong file. FIXED.**
+
+Round 1 added the drift table to stop "line numbers line up while pointing at
+unrelated code". It then reproduced that trap itself: the table recorded *which
+line*, never *which file*. Eighteen rows are `hosted-session.ts`, five are
+`updates.ts`, and a reader following `| Attachment interface | 191 | 193 |` has
+no way to know it means `hosted-session.ts:191-203` — the Implementation prose at
+`:119` says so, but the adjacent rows are `updates.ts`, so the natural read is
+`updates.ts:193`. Measured, that line is `});`. The interface is at
+`hosted-session.ts:191` on the base and `:193` on `main` (task 17's `hop` field
+is what moves it), so the *number* was right and the *citation* was not — the
+worse kind of wrong, because it survives a spot-check of the number.
+
+Fixed by adding the missing `file` column (aliases defined above the table) and
+one sentence on why that column is load-bearing. Second, smaller correction: the
+prose said "the six `same` rows are in `packages/protocol/src/updates.ts`", but
+only **five** are — the sixth, `no own decision`, is a comment in
+`hosted-session.ts:30` (`the daemon makes no decision of its own`). Both are
+prose/table errors; no design change.
+
+**What was re-verified, mechanically.** Round 2 spot-checked rows by eye and said
+so. This round checks **every row against the commits**:
+`.tentacle/tmp/mobile-live-activity/r2-cite-verify.ts` reads `git show
+<rev>:<file>` only (never the worktree, index or refs) and asserts per row: the
+row names a file (A1) · the `on main` line in that file at `main` really is the
+claimed symbol (A2) · the `plan line` in that file at `88f5a8f9` really is that
+symbol (A3) · `on main − plan line` equals the `shift` cell (A4). The verifier
+supplies the symbols; **the numbers come from the doc**, so the two are checked
+against each other rather than against themselves.
+
+**Result: 23/23 rows hold on all four assertions** (71 row-level checks) plus 2
+doc-level checks = **73/73** (`r2-cite-GREEN.txt`). Round 1's arithmetic and round
+2's spot-check were both right: the table's *numbers* were never the problem —
+the missing *file* was.
+
+**Red before green (AGENTS §9).**
+
+- **RED on the pre-fix doc** (`r2-cite-RED.txt`): **0/25** — A1 and all 23 A2s
+  fail on the real assertion ("row names no file"); A1b fails with the trap
+  measured: `updates.ts:193 = "});"`.
+- **GREEN after**: **73/73**, exit 0 (`r2-cite-GREEN.txt`).
+
+**Mutations (§9 non-vacuity — each re-broke the doc, observed the named test
+fail, restored from `doc-r2-good.md`):**
+
+| # | mutation | expected | observed |
+|---|---|---|---|
+| M1 | drop the `file` column (header + every row) | A1 red | **A1 + A1b + 23×A2 FAIL** (0/25) |
+| M2 | `Attachment` row back to `upd` — the real defect | A1b, A2, A3 red | **3 FAIL** (68/73): A1b; `@ updates.ts:193 on main (found "});")`; `@ updates.ts:191 at 88f5a8f9 (found "unansweredCalls…")` |
+| M3 | `emit` `on main` `2087`→`2088` | A2, A4 red | **2 FAIL** (69/73): A2 (`found "const params = toUpdateParams…"`), A4 (`doc=+139 real=+140`) |
+| M4 | revert the "Five" correction to "Six" | D1 red | **D1 FAIL** (72/73): `table: 6 same, 5 upd, 1 hs` |
+| M5b | base claim `305`→`304` (at the then-current base `b44766f8`) | D2 red | **D2 FAIL** (72/73) |
+| M5b′ | base claim `315`→`314` (re-run at the final base `b9b2d4fb`) | D2 red | **D2 FAIL** (72/73) |
+| M6 | drop the `file` column vs round 1's guard | F1c red | **F1c FAIL** |
+
+**A vacuous assertion of mine was caught by mutation, not by reading.** D2 first
+asserted the flat text `includes("305 commits behind")`; **M5 (inserting a hedge
+right after the claim) still passed 73/73**. Fixed to parse the sentence's actual
+number and compare it with `git rev-list --count HEAD..main`, which M5b then
+failed correctly. Reported rather than hidden: **M5c (appending a clause after a
+correct claim) still passes**, and that is not vacuity — the claim stays true and
+no assertion should fail on a true claim.
+
+**One regression I introduced, and fixed.** Round 1's `doc-guard.test.ts` F1c
+pinned the exact old header `| claim | plan line | on main | shift |`, so adding
+the `file` column turned a passing test red (5/6). I did not delete the test: F1c
+now asserts the **stronger** header including `file`, and M6 proves it still bites
+(drop the column → F1c FAIL). Guard now **6/6**.
+
+**Drift from the Implementation: none — the Implementation still did not run.**
+Both doc edits are record corrections (a citation's file, a miscount); neither
+touches the design, the slices or any precondition.
+
+**Still PARTIAL, and why.** L0–L12: **0 of 13**. Precondition unchanged — the
+branch does not carry `main`; the merge is conflict-free but is a commit, which
+this round may not make. Not verified here: any runtime behaviour of the plan (no
+code exists to observe), and the iOS 18 simulator runtime is still absent (only
+26.5 installed), which L0(b) needs alongside D4a's Apple-console work.
+
+**Gate (measured, final run on the finished tree):** `bunx tsc --noEmit` → exit
+0 · `bun run lint` → "Checked 1292 files in 371ms. No fixes applied", 0
+errors/warnings (baseline-clean, AGENTS §6) · `bun test` → **9317 pass, 3 skip, 0
+fail**, 9320 tests / 670 files, 368 s (the 3 skips are the three opt-in ones),
+re-run on the finished tree after the last doc edit.
+Doc+scratch only: `git status --short` → `M docs/feat/mobile-live-activity.md`,
+nothing else, so green means "the doc edits changed no code path", not "the
+feature works". No changelog fragment (no user-visible change), no `protocol.d/`
+note (no schema change), `protocol.json` untouched.
+
+**Scratch location, honestly.** AGENTS §6 names
+`<repo root>/.tentacle/tmp/<slug>/`, but this session's write scope is the branch
+worktree, so the evidence sits in
+`.tentacle/worktrees/mobile-live-activity/.tentacle/tmp/mobile-live-activity/`
+(where round 1 also put it). Both are gitignored; nothing is lost, and a reviewer
+must look there.
+
+### Fix round 3
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Scope: Review round 3 carried no numbered finding; the round it names is
+blocked on the orchestrator, not on the doc. So this round re-ran what round 3
+could not, and audited the citation set it left unexamined.** No code, no slice
+(L0–L12 remain **0 of 13**). Signature evidence, not assumption: this session's
+`~/.claude/settings.json` pins `"model": "opus"` with
+`modelSettings: {"claude-opus-5-5": …}`, and every recent transcript record in
+`~/.claude/projects/` reports `"model":"claude-opus-5-5"` (e.g. 105/105 records
+in the mobile-notifications transcript). Signed from that, not copied from
+round 2.
+
+**Review round 3's own items, re-verified (it explicitly could not run two of
+them).**
+- `r2-cite-verify.ts` → **73/73, exit 0** (round 3 skipped it: "needed approvals
+  I don't have"). Its D2 reads `main` live, so the doc's base claim is re-proved
+  each run.
+- `git merge-tree --write-tree main HEAD` → **exit 0, one tree, no conflicts**
+  (round 3 also skipped this). It first read `be10394c…` at `b9b2d4fb`, then
+  `a28a8b04b70bee284894d27ff9ecc3430e08aa6f` when `main` moved mid-round — clean
+  at both. Still no ref, index or worktree write, so it is inside an executor's
+  standing; the merge is a commit and is not.
+- Round 1's `doc-guard.test.ts` → **6/6**, including its mutation-tested F1c.
+- **Base moved during this round** (`b9b2d4fb`/315 → `da1958f0`/316). Both
+  base-claim guards went red the moment it did (`doc-guard` F1b,
+  `r2-cite-verify` D2) — that is the guards working, as in round 2. The doc's
+  live base claim is now re-measured to `da1958f0`/316; the round-2 mutation log
+  and Review round 3's text keep their own numbers, because a historical record
+  that is renumbered stops being a record. One self-inflicted snag worth
+  recording: my first rewrite of that sentence wrapped `> it` onto the next
+  line, so the flattened text read `behind** > it` and the guard's anchored
+  regex still failed — a *true* claim, still red, because the shape it asserts
+  was broken. Fixed by keeping the clause on one line; both guards then green.
+  That is the round-2 vacuity lesson from the other side: a guard strict enough
+  to catch a wrong number is also strict about the sentence around it.
+
+**Blocking premise re-measured, still true.** `git grep -lEi
+"ActivityKit|LiveActivit|NSSupportsLiveActivities|pushToStart"` finds **nothing**
+on `main` and **nothing** on `HEAD` — the capability is still missing, so the
+Repro still reproduces and L0 still cannot start here. `push-seal.ts` and
+`relay-link.ts` are in `packages/transport/src/` and `packages/daemon/src/` on
+`main` (`git ls-tree -r main`: `push-seal.ts`, `push-notifier.ts`,
+`relay-link.ts`; there is no `packages/relay` — the 16-package list has
+`transport` and `daemon`); `onPushEvent` still counts **0** here, **3** on
+`main`.
+
+**New defect found this round, MEDIUM — the drift table's remedy did not reach
+ten of the doc's citations, and five of those point at unrelated code on
+`main`. FIXED.**
+
+Fix round 1 built the drift table so "line numbers line up while pointing at
+unrelated code" could not happen; fix round 2 added the missing `file` column
+and stated the remedy: *"for L0 onward read the `on main` column, not the prose
+numbers."* That remedy is only usable for a citation that HAS a row. The table
+carries the **23** citations of the daemon-emit / protocol-shape proof. The
+Preconditions, Design and Failure-modes prose cites **ten more** `file:line`s
+(`conn:122-131`, `:178`, `:301-311`; `hs:1098-1129`, `:20-31`; `fg:1-34`,
+`:111-120`; `kv:17`; `lk:1-12`; `da:146`/`:151`) and **none had a row**. Read on
+`main`, five of them land on unrelated code — measured, not eyeballed
+(`.tentacle/tmp/mobile-live-activity/r3-count.txt`, 5 of 10):
+
+| the doc said | on `main` that line is |
+|---|---|
+| `connection.ts:178` (principal defaulted) | `readonly hosted: HostedSession;` |
+| `connection.ts:302-311` (device/pairing gate) | `handlers: {` |
+| `hosted-session.ts:1098-1129` (`resolvePermission`, F8) | `outcome,` |
+| `foreground-gate.ts:111-120` (`suspend()`) | `release = null;` |
+| `secure-kv.ts:17` (`KEYCHAIN_ACCESSIBLE`) | `import type { PushKeyStore } …` |
+
+This is the same class the table exists to stop, and it survived two rounds
+because both rounds verified the table's rows rather than the citation *set* —
+the table's completeness was assumed, never asserted. Fixed by adding a second
+table (under the first, in the same citation re-check section) carrying those
+ten citations with `plan line` / `on main` / `shift` / `correct at base?`, and a
+routing sentence that says every citation not in the first table carries its
+`on main` line in the second. Alias map extended (`conn`, `fg`, `kv`, `da`,
+`lk`) so a line number still cannot be read without its file.
+
+**Red before green (AGENTS §9).** `.tentacle/tmp/mobile-live-activity/r3-verify.ts`
+parses the second table **out of the doc** (the doc's own numbers are what is
+under test) and checks each row against `git show <rev>:<file>` only. Per row:
+A1 the alias resolves · A2 the row's symbols sit inside the `on main` range on
+`main` · A3 they sit inside the `plan line` range at `88f5a8f9` · A4 the `shift`
+cell equals `on main − plan line`. Plus D1 the routing sentence exists, D2 the
+table is in the right section.
+- **RED on the pre-fix doc** (`git show HEAD:docs/…` into scratch — the worktree
+  was never checked out or restored): **0/13**, failing on `row present` / D1 /
+  D2, i.e. on the real assertions, not on an import error (`r3-prefix.md`).
+- **GREEN after**: **43/43, exit 0** (`r3-GREEN.txt`).
+
+An early version of this verifier asserted the needle at the range's *endpoints*
+and went 33/43 on a *correct* doc — the doc legitimately cites ranges
+(`conn:122-131`) whose interior, not whose last line, holds the symbol. Fixed to
+range-containment before the run counted. Reported because it is the same
+vacuous-vs-strict error round 2 caught in itself.
+
+**Mutations (§9 non-vacuity — each breaks a scratch copy, observes the named
+assertion fail, discards it; the real doc is never touched, so a crash cannot
+dirty the tree). Log: `r3-mut.txt`.**
+
+| # | mutation | expected | observed |
+|---|---|---|---|
+| M1 | drop the whole second table — the defect this round fixes | D0 + all A0 red | **13 FAIL** (0/13) |
+| M2 | `conn:178` row claims the cut-point number on `main` too (`178`→`178`, `same`) — the real trap | A2 red | **A2 FAIL** (42/43): `found "readonly hosted: HostedSession;"` |
+| M3 | shift cell `+47`→`+46`, both line cells left correct | A4 red | **A4 FAIL** (42/43): `doc=+46 real=+47` |
+| M4 | `fg` `suspend()` back to `111-120`/`same` — second instance of the real defect | A2 red | **A2 FAIL** (42/43): `found "release = null;"` |
+| M5 | alias `kv`→`zz` | A1 red | **A1 FAIL** (39/40): `alias "zz"` |
+| M6 | drop the routing sentence ("table above is complete") | D1 red | **D1 FAIL** (42/43) |
+| M7 | `hs` `20-31` → `1-12` on main | A2 + A4 red | **2 FAIL** (41/43): `found "import { createHash …"`, `doc=same real=-19` |
+
+M6's first `sed` rewrote nothing (a wrapped line the pattern missed) and the
+harness printed `!! M6: sed changed nothing` — reported rather than counted as a
+pass; re-run with `perl -0pi` it fails D1 correctly. A mutation that does not
+change the file is not evidence.
+
+**No regression in the earlier guards.** All three run together on the finished
+tree: `r3-verify.ts` **43/43** · round 1's `doc-guard.test.ts` **6/6** ·
+round 2's `r2-cite-verify.ts` **73/73**. The 23-row table, its `file` column and
+the `Five`-vs-`Six` correction are untouched.
+
+**Drift from the Implementation: none — the Implementation still did not run.**
+The added text is a citation translation and a routing sentence; it changes no
+design, no slice and no precondition. The one substantive side-finding (the
+`packages/relay/` → `packages/transport/`+`packages/daemon/` path correction) is
+recorded above as a measurement, not applied to the Implementation prose, which
+cites `packages/transport/push` correctly for the crypto.
+
+**Still PARTIAL, and why.** L0–L12: **0 of 13**. The precondition is unchanged —
+the branch does not carry `main`, the merge is conflict-free (`a28a8b04` at
+`da1958f0`/316) but is a commit, which this round may not make. Not verified here: any runtime
+behaviour of the plan (no code exists to observe), and the iOS 18 simulator
+runtime is still absent (only 26.5 installed), which L0(b) needs alongside
+D4a's Apple-console work.
+
+**Gate (measured on the finished tree):** `bunx tsc --noEmit` → **exit 0** ·
+`bun run lint` → "Checked 1292 files in 446ms. No fixes applied", 0
+errors/warnings (baseline-clean, AGENTS §6) · `bun test` → **9317 pass, 3 skip,
+0 fail**, 9320 tests / 670 files, 364.16 s — the 3 skips are the three opt-in
+ones (`TENTACLE_K8S_SERVER`, `TENTACLE_DOCKER_TESTS=1`, `TENTACLE_SLOW_TESTS=1`),
+so this is the AGENTS §6 baseline exactly. Doc+scratch only: `git status
+--short` → `M docs/feat/mobile-live-activity.md`, nothing else, so green means
+"the doc edits changed no code path", not "the feature works". No changelog
+fragment (no user-visible change), no `protocol.d/` note (no schema change),
+`protocol.json` untouched.
+
 ## Review
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES. Nothing to approve: no code was built. The
+executor was right to stop.**
+
+`git diff main...HEAD` is this doc alone (+99 lines of Execution). None of the
+L0–L12 slices exist, so there were no §7 invariants, failure modes or new tests
+to attack, and no mutation to run.
+
+**Premise check (were the executor's blocking claims true?):**
+
+| claim | result |
+|---|---|
+| branch is 305 commits behind `main` | TRUE (`git rev-list --count HEAD..main` → 305) |
+| only this doc differs from `88f5a8f9` | TRUE (`git diff --stat 88f5a8f9 HEAD` → this doc only) |
+| `push-notifier.ts`, `push-seal.ts`, `relay-link.ts` missing here, present on `main` | TRUE (Glob finds none here; `git cat-file -t main:<path>` → blob for each) |
+| `onPushEvent` absent from `hosted-session.ts` | TRUE (0 matches) |
+| `gate.hold()` takes no budget | TRUE (`apps/mobile/src/foreground-gate.ts:68` `function hold(): Promise<void>`) |
+
+**Gate:** `bun run lint` passes: 1292 files checked, nothing to fix.
+`bun run typecheck` passes. `bun test` was not re-run: no code changed, and the
+executor's run (9317 pass, 3 opt-in skips, 0 fail) describes the base this
+branch already has.
+
+**Findings:**
+1. **MEDIUM — the branch can't carry this feature.** It is cut before tasks 16
+   and 17 (doc:4, :67 still say "resume on `main` @ `88f5a8f`"). The
+   orchestrator must re-cut it from current `main` (`b44766f8`) and carry this
+   doc across (option (a)), then re-check the line numbers the plan cites
+   (e.g. `hosted-session.ts:1948-1963`) against that base before L0.
+2. **MEDIUM — who wrote the Execution section is unclear.** Commit `b5622d6a`
+   is titled "exec (deepseek)", but the section is signed `claude-opus-5-5`.
+   §10 needs an honest signature so drift by model can be tracked. Whoever
+   re-issues the task must fix one or the other.
+
+**Attacks tried:** (1) checked whether the "blocked" claim was just a misread
+line number. It is not: the line numbers match, but the hook is missing. (2)
+looked for any code change slipped in beside the doc: none. (3) checked whether
+the stop hid a change that broke the gate: lint and typecheck are clean.
+
+**Executor behaviour:** correct and disciplined. It applied the brief's
+load-bearing STOP instead of building on code that isn't there. It wrote no
+code, ran the gate so the result was measured, and escalated with one specific
+decision for the orchestrator.
+
+**Same model family?** The section is signed by the same model family as this
+reviewer, so blind spots may be shared. For this doc-only round that risk is
+low.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES. The executor fixed everything it could; the
+remaining fix needs the orchestrator.** `git diff HEAD~1` changes only this
+doc. The branch is still 305 commits behind `main`, and L0–L12 are still
+0 of 13.
+
+- **Finding 1(a), the false base claim — FIXED.** The Repro now names
+  `88f5a8f9` as where the branch was cut, and a new note under it says how far
+  behind `main` the branch is. Mutation M1 (put the stale "= `main` @
+  `88f5a8f`" wording back): `doc-guard.test.ts` F1a FAILS (5/6). Reverted; the
+  tree is clean.
+- **Finding 1(b), the line numbers — VERIFIED independently.** I dumped
+  `git show main:packages/daemon/src/hosted-session.ts` myself. On `main`:
+  `ask.shown` is at :1028/:1141, `recheckAsks` at :1217 (called at
+  :1704/:1731), `watchers.offer` at :2101, the `finishTurn` calls at
+  :2632/:2703/:2714/:3248 and its definition at :2740. On the branch base:
+  :921/:1032, :1088, :1569/:1592, :1962, :2397/:2468/:2479/:3013 and :2505.
+  Every row I checked matches the table, and so does the `finishTurn`
+  definition-vs-call-sites correction.
+- **Finding 1, the root cause — STILL OPEN, orchestrator's action.** Fixing the
+  base needs a merge or a re-cut, which is a commit and outside an executor's
+  standing. I could not re-run the executor's claim that
+  `git merge-tree main HEAD` is clean: running it needed an approval I don't
+  have. The orchestrator should confirm it before merging.
+- **Finding 2, who wrote Execution — FIXED honestly.** The doc now says the
+  author is undetermined and the earlier signature is unreliable. Nothing was
+  forged and the earlier section was not rewritten.
+- **Regressions:** none. Only Markdown changed. `bun run lint` checked 1292
+  files with nothing to fix, and `bun run typecheck` passes.
+- **Minor (no effect on the verdict):** the executor's evidence files are in
+  the worktree's `.tentacle/tmp/`, not the repo root's that AGENTS §6 names.
+  Both are gitignored, so nothing is lost.
+
+**To clear:** the orchestrator merges `main` into this branch or re-cuts it
+from `main`. Then the real Execution, L0 onward, needs its own review.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES. The doc is correct now, but the blocker belongs to
+the orchestrator and is still open.** `git diff HEAD~1` changes only this doc,
+and none of my earlier Review text was altered. The branch is now 315 commits
+behind `main` (`b9b2d4fb`; `main` moved since round 2), and L0–L12 are still
+0 of 13.
+
+- **The new base figures are correct.** I measured them myself:
+  `git rev-parse --short main` → `b9b2d4fb`, and
+  `git rev-list --count HEAD..main` → 315.
+- **The new file column is correct and needed.** I checked the Attachment row
+  myself: on `main`, `updates.ts:193` is `});`, while
+  `hosted-session.ts:193` is `export interface Attachment {`. On this branch
+  the interface is at `hosted-session.ts:191`, and the `no own decision` comment
+  is at `hosted-session.ts:30`. So "five of the six `same` rows are in
+  `updates.ts`" is right.
+- **Mutation:** removing the `file` column from the table header makes
+  `doc-guard.test.ts` F1c FAIL (5/6). I reverted it: the tree is clean and the
+  guard is back to 6/6.
+- **Not re-run by me:** `r2-cite-verify.ts` (its 73/73 checks) and
+  `git merge-tree` (its "no conflicts" claim). Both needed approvals I don't
+  have. The rows I checked by hand all agree. The orchestrator should still
+  confirm the merge is clean when doing it.
+- **Regressions:** none. Only Markdown changed. `bun run lint` checked 1292
+  files with nothing to fix, and `bun run typecheck` passes. The scratch location
+  is now stated in the doc, which settles my round-2 minor note.
+- **Still open (orchestrator's action):** merge `main` into this branch, or
+  re-cut it from `main`. Until then there is no feature to approve, and further
+  rounds of doc-only fixes cannot change this verdict.
+
+### Round 4
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES. The blocker is unchanged and belongs to the
+orchestrator: the branch is now 316 commits behind `main` (`da1958f0`). The
+doc itself is correct.** `git diff HEAD~1` changes only this doc, and my Review
+text is unchanged. L0–L12 are still 0 of 13.
+
+- **The new second table is correct.** The executor found ten more line
+  references in the doc's prose that had no `main` equivalent. I spot-checked
+  five against the current `main` (`git show main:<file>`) and against this
+  branch:
+  - principal default: `connection.ts:178` here → `:225` on `main`
+  - `DevicePair` check: `connection.ts:301` → `:349`
+  - `resolvePermission`: `hosted-session.ts:1110` → `:1239`, inside the cited
+    1098-1129 → 1227-1258 ranges
+  - `suspend()`: `foreground-gate.ts:111` → `:143`
+  - `KEYCHAIN_ACCESSIBLE`: `secure-kv.ts:17` → `:20`
+
+  All five match the table. On current `main` the round-2 rows also still hold
+  (`watchers.offer` :2101, `finishTurn` :2740), so `main` moving to `da1958f0`
+  shifted none of them.
+- **The base figure was updated correctly.** Mutation: changing the doc's "316
+  behind" to "315" makes `doc-guard` F1b FAIL (5/6), because F1b compares it
+  with the live `git rev-list` count. I reverted it: the tree is clean and the
+  guard is back to 6/6.
+- **Not re-run by me:** `r3-verify.ts` (43/43) and its M1–M7 mutations,
+  `r2-cite-verify.ts` (73/73) and `git merge-tree`. Running each needed an
+  approval I don't have. My hand checks above cover the rows those checks are
+  about.
+- **Regressions:** none. Only Markdown changed. `bun run lint` checked 1292
+  files with nothing to fix, and `bun run typecheck` passes.
+- **Process note:** this is the third doc-only round since the blocker was
+  identified. Each round is accurate, but `main` keeps moving and the count goes
+  stale each time. Merging or re-cutting is the only step that ends the loop
+  (AGENTS §0, "escalate, don't spin").
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Scope: the four numbered findings of the code Review (`de134ba5`), HIGH/HIGH/
+MEDIUM/MEDIUM. No slice was reopened and no plan line was changed.** All four
+were reproduced against the REAL `createLiveActivityNotifier` before any edit;
+the repro is pasted below with its before/after output.
+
+**Repro** (`.tentacle/tmp/mobile-live-activity/fix1/repro.ts`, run from the repo
+root, importing the branch's `packages/daemon/src/live-activity-notifier.ts` and
+`packages/transport/src/push-seal.ts` directly). Output, before → after:
+
+```
+F1a attached phone: after attachment event=0, after tick=1  →  0 / 0
+F1b attached phone on an ASK:                        1      →  0
+F2  starts after a late registration:                0      →  1
+F3  deliveries after gone=1, +10min=2               →  1 / 1
+F4a first delivery: event=start                     →  start
+F4b resend after a dropped start: event=update      →  start
+```
+
+**Root causes, one sentence each, and the fix**
+
+1. **HIGH — R1, the start rule ignored the attached set.** The set existed only
+   as `tick`'s ARGUMENT: `live-activity-rules.ts` kept no per-session state, the
+   shell's own timer (`live-activity-notifier.ts`) passed `new Set()`, and
+   `permission_request` called `startFor` with no attached check at all.
+   *Fix:* the attached set is now STANDING state in the rules
+   (`setAttached(sessionId, set)`, `attachedBySession`, dropped with
+   `session_closed`), `LaEvent`'s `tick` no longer carries a set at all, and the
+   check moved INSIDE `startFor` so no caller can forget it
+   (`live-activity-rules.ts:255`, `:311`, `:395`, `:652`, `:711`, `:781`). The
+   notifier records the set on the `attachment` hook event and asks for a tick
+   (`live-activity-notifier.ts:553-554`), and its own timer passes nothing
+   (`:514`). One tick now reads EVERY session's own set.
+2. **HIGH — R2, registrations were read once.** `registrationsLoaded` was set on
+   the first event and never cleared, and `registerLiveActivity`
+   (`session-host.ts`) did not notify the notifier although its comment said it
+   did. *Fix:* that flag is gone; `refreshRegistrations()` runs at EVERY
+   decision — the timer's tick and every hook event
+   (`live-activity-notifier.ts:509`, `:634`) — and a new
+   `LiveActivityNotifier.registrationChanged()` re-reads and re-decides at once,
+   called by `registerLiveActivity` (`session-host.ts:669`, optional on
+   `LiveActivityOptions.notifier` at `:377` so a stub need not implement it). The
+   comment at `:223` is now true, and the store read is one directory scan on a
+   path that runs at most once per minute.
+3. **MEDIUM — R3, an APNs `gone` never reached the rules.** Only the file was
+   compare-and-deleted, so the rules counted the slot live for ever: the
+   10-minute heartbeat kept going to a dead token, and F17/F18 had nowhere to
+   start. *Fix:* on `gone` the notifier now (a) marks a refused push-to-START
+   token dead (`deadStartTokens`, pruned when the record's token changes, and
+   filtered out of the candidate set — R3/F13), and (b) feeds the rules
+   `{type:"ended", reason:"ended"}` for the slot, then re-decides in the same
+   microtask (`live-activity-notifier.ts:387-421`, `:250-270`). `reason` is
+   `ended`, not `dismissed`: `gone` is the SYSTEM's ending, so F18's one
+   continuation start still applies; a person's dismissal is the app's own
+   `device/live_activity_ended`, unchanged (F17).
+4. **MEDIUM — R4, F3 did not converge for a dropped start.** The rules counted a
+   slot as live although the sink answered `unavailable`, so `resendAll` sent
+   `event:"update"` to a push-to-START token — which creates nothing.
+   *Fix:* a per-slot `confirmed` set, added only when the sink answers `sent`
+   (pruned with the slot, cleared by `reportEnded`/`stop`). A push for an
+   unconfirmed slot is a `start` at priority 10, whatever the rules called it;
+   an `end` for one is DROPPED (nothing on the phone to dismiss) with an audit
+   line (`live-activity-notifier.ts:306-322`, `:355-364`).
+
+**Tests (all written RED first, on the unfixed code, then green)**
+- `packages/daemon/test/live-activity-rules.test.ts`: the REMEMBERED set, an ask
+  while attached, and the per-session isolation (`s1` attached → only `s2`
+  starts). The three `tick` call sites that used to pass a set now use
+  `setAttached`, so the rules' own table reads in the new vocabulary.
+- `packages/daemon/test/live-activity-notifier.test.ts`: **13** new tests — R1 ×3
+  (timer, ask, and per-session through the real notifier, asserting the OPENED
+  content's `turnId`), R2 ×3 (late registration, switch back on, and the
+  `registerLiveActivity` → `registrationChanged` call over a real `Connection`),
+  R3 ×2 (no heartbeat to a dead token; a `gone` on an update → exactly one
+  continuation start, to the start token), R4 ×5 (dropped start resent as a
+  start; end-for-unconfirmed-slot dropped; re-sent start at priority 10; no
+  update before a token). The helper gained `status`/`registered`/`read` seams.
+  The per-session test failed twice more while I wrote it (a shared slot, then a
+  weak assertion) before it proved the right property.
+
+**Mutations (§9 non-vacuity, each applied to the finished code, run, reverted;
+`git status` clean afterwards)**
+
+| id | mutation | result |
+|---|---|---|
+| M1 | `setAttached` made a no-op (the old argument-only behaviour) | 7 fail: both rules attached tests, the REMEMBERED test, the per-session test, and **all three** notifier R1 tests |
+| M2 | `refreshRegistrations` returns early after the first call (the old flag) | 3 fail: both R2 tests + R3's dead-token test |
+| M3a | `gone` never fed to the rules | 1 fail: R3 continuation |
+| M3b | `gone` fed as `reason:"dismissed"` (F17 instead of F18) | 1 fail: R3 continuation |
+| M3c | M3a **and** the dead-token filter off | 2 fail: both R3 tests |
+| M4 | `neverDelivered` ignored (`event = command.kind`) | 3 fail: all three R4 tests that reach it |
+| M5 | `registerLiveActivity` does not call `registrationChanged` | 1 fail: the RPC-level R2 test |
+
+This is the mutation the review itself ran (its own `:444` → `new Set()`) and
+the one it reported as invisible (31/31 green): under M1 the same property is
+now caught at three levels — rules, shell, and the per-session isolation.
+
+**Drift from the Implementation.** None in Design. Two additions the plan did
+not spell out, both forced by a finding: `LiveActivityRules.setAttached` (the
+plan assumed `tick`'s argument was enough) and
+`LiveActivityNotifier.registrationChanged` (the plan assumed the comment was
+enough). `session-host.ts`'s `LiveActivityOptions.notifier` gained the second,
+optional. No protocol, persistence, wire or `changelog.d` change: this is a fix
+round on an unreleased feature, and `mobile-live-activity.added.md` already
+exists.
+
+**Gate (measured on the finished tree):** `bunx tsc --noEmit` → **exit 0** ·
+`bun run lint` → "Checked 1627 files in 490ms. No fixes applied" (0 errors, 0
+warnings — the §6 baseline) · `bun test` → **11645 pass, 5 skip, 0 fail**
+(11650 tests / 836 files, 422 s). The 5 skips are opt-in or root-only:
+`TENTACLE_K8S_SERVER` ×2, `TENTACLE_DOCKER_TESTS=1` ×2, `TENTACLE_SLOW_TESTS=1`
+×1, plus `packages/exec`'s `skipIf(isRoot)` set which does not run as non-root
+here — i.e. the documented baseline, no new skip.
+
+**Not verified by me:** the Swift/Maestro/device checks (L0, L10–L12) are
+unchanged by this round and still open per the Execution above.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES.** This is the first review of the code (`de134ba5`).
+The earlier rounds reviewed only the doc. The crypto, protocol, relay, store and
+pure rules look sound. But the daemon wiring that feeds the rules (L7, which is
+load-bearing) breaks the start rule's attached-device condition and never
+reloads registrations. A scratch repro (`.tentacle/tmp/mobile-live-activity/review/repro.ts`,
+real `createLiveActivityNotifier`) showed both.
+
+**Gate (narrow + static).** `bun run lint`: 1627 files, clean. `bun run typecheck`:
+clean. The 26 touched test files: 538 pass, 0 fail. I did not re-run the full
+`bun test`.
+
+**Findings**
+1. **HIGH: the start rule ignores whether a device is attached**
+   (`packages/daemon/src/live-activity-notifier.ts:419`, `:444`;
+   `live-activity-rules.ts:553`). The rules store no attached set. The timer's
+   `tick` passes `new Set()`. An `attachment` event from session X applies X's
+   attached devices to every session's turns. `permission_request` calls
+   `startFor` with no attached check at all. Repro: device D is attached to S;
+   after 21 s the timer ticks and D gets `["start"]`. An ask while D is attached
+   also gives `["start"]`. This violates the start rule and F16: the phone that
+   is open on the session still gets a lock-screen activity.
+2. **HIGH: registrations are read once, then never again**
+   (`live-activity-notifier.ts:202`, `:520`). `registrationsLoaded` is never
+   reset, and `registerLiveActivity` (`session-host.ts:655`) does not notify the
+   notifier, even though its comment says it does. Repro: an event fires before
+   the phone registers, the phone then registers, and the turn passes 21 s:
+   0 deliveries. In practice, a phone that registers after `serve`'s first
+   session event never gets an activity until the daemon restarts. Turning the
+   switch back on is also never seen. The comment at `:223` ("read … at every
+   decision") is false.
+3. **MEDIUM: an APNs `gone` is not passed to the rules**
+   (`live-activity-notifier.ts:328-337`). Only the registration file is
+   compare-and-deleted. The rules never receive an `ended` event, so F17 (gone →
+   never restarted) and F18 (gone → one continuation start) are not built. After
+   the person dismisses an activity, heartbeats keep going to the dead token
+   every 10 min until the turn ends.
+4. **MEDIUM: F3 does not converge for a start that was dropped**
+   (`live-activity-notifier.ts:583-611`). The rules count the slot as live even
+   when the sink answered `unavailable`. `resendAll` then sends `event: "update"`
+   to the push-to-start token (`:272`). No activity ever appears for that turn on
+   that phone. The same thing happens to every update sent before an update
+   token is reported.
+
+**Mutation (§9).** I changed the `attachment` translation (`:444`) to pass
+`new Set()`. `live-activity-notifier`, `serve-live-activity` and `push-hook`
+still pass, 31/31. So no test checks finding 1 through the notifier (the rules
+test passes the attached set in by hand). I reverted it, and
+`git status --porcelain` is empty.
+
+**Attacks tried**
+- Device-method gate: `token`/`pairing` principals are refused
+  (`connection.ts:512-546`). Holds.
+- The hook stays synchronous: there is still ONE observer (the fan-out in
+  `serve.ts`), and the I/O runs in `queueMicrotask`. Holds.
+- `push.enabled:false` still answers `MethodNotFound`: the option is passed only
+  when its wiring exists. Holds.
+- The three findings above.
+- Minor (no effect on the verdict): `setLiveActivityToken` and `endLiveActivity`
+  do not check that the slot belongs to the calling device (`void deviceId`).
+
+**Executor.** It reported honestly that L10, L11 and L12 are PARTIAL or not
+started. Its Execution section is signed `claude-sonnet-4-5`, but the commit
+says "exec (deepseek)", so §10's attribution is unclear again. The reviewer and
+the plan author are the same model family.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES.** All four round-1 findings are fixed, and each fix
+is pinned by a test: I mutated each one and the test failed. But one fix (R4)
+brought in a new bug, and another (R3) goes against the approved plan's F17.
+Both are reproduced in `.tentacle/tmp/mobile-live-activity/review/repro2.ts`.
+
+**Gate.** `bun run lint`: 1627 files, clean. `bun run typecheck`: clean. The
+notifier, rules, serve-live-activity and push-hook tests: 70 pass, 0 fail.
+After every mutation was reverted, `git status --porcelain` was empty.
+
+**Round-1 findings: verified.** Round 1's `repro.ts` now gives no start for an
+attached device on a timer tick, and 2 starts for a late registration. Each
+fix was then mutated:
+
+| fix | mutation | result |
+|---|---|---|
+| R1 | rules: drop the attached check in `startFor` | 2 fail |
+| R1 | notifier: never call `setAttached` | 3 fail |
+| R2 | host: no `registrationChanged()` call (`session-host.ts:669`) | 1 fail |
+| R2 | notifier: no refresh in `tick` | 1 fail (an R3 test; the hook path still refreshes) |
+| R4 | `neverDelivered = false` | 4 fail |
+| R3 | `gone` not fed to the rules | 1 fail |
+
+**New findings**
+1. **MEDIUM: a start that is still in flight is sent a second time**
+   (`live-activity-notifier.ts:316-322`). A slot is marked `confirmed` only
+   when the sink answers `sent`. So any command for that slot sent before that
+   answer arrives also goes out as a `start`. Examples: an ask during the start's
+   round trip, an update while the start is held for a reconnecting link, or
+   `resendAll` on `ready` while the held start is being flushed. Repro: a slow
+   sink, then the start, then an ask gives `["start/aa", "start/aa"]`: two pushes
+   to start the same slot. iOS creates two activities. Only one of them gets the
+   update token, and the other stays on the lock screen until it goes stale or
+   hits the 8 h cap. Both count toward iOS's limit of about 5. Fix idea: track
+   "in flight" next to "confirmed", and send no second start until the first
+   one has resolved.
+2. **MEDIUM: a dismissed activity comes back whenever the app is not running**
+   (`:392-417`). A `gone` on an update token is fed to the rules as
+   `reason: "ended"`, so the turn is free to start again. Repro: start, then
+   the update token goes `gone`, then the next tick gives
+   `["start/aa", "update/upd", "start/aa"]`. That is the same turn, started
+   again. The person swipes the activity away on the lock screen, and it comes
+   back on the next tick, again and again, because nothing limits how many
+   times this can happen. The approved plan's F17 says the opposite (doc:354:
+   "or APNs `gone` on the next update → never restarted for that turn"). F18
+   allows "ONE continuation", but the code puts no limit on it. The executor
+   picked F18 over F17 without asking the owner. Fix idea: either treat `gone`
+   as `dismissed` (follow the plan), or allow at most one restart per turn and
+   take the F17/F18 choice to the owner.
+
+**Attacks that found nothing:** the attached set is reset at `session_closed`
+(bounded). `deadStartTokens` and `confirmed` are pruned. `registrationChanged`
+is wrapped in try/catch and runs no I/O inside the hook. The hook stays
+synchronous: the refresh in `onPushEvent` is a synchronous store read. That is
+O(devices) per event, not O(1), and acceptable at this scale.
+
+**Executor.** It did every fix asked for, with red-first tests and its own
+mutation table, and wrote down the R3 choice instead of hiding it. But a plan
+deviation that touches the person's gesture needed the owner's decision, not a
+note.
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-15*
+
+*(Execution of fix round 2, answering `Review › Round 2` above — appended in the
+doc's own order: plan-era Execution → Reviews, then code-era Fix round 1 →
+Review → this.)*
+
+**Scope: the two MEDIUM findings of Review round 2 (`654355f7`). Both were
+reproduced against the REAL `createLiveActivityNotifier` before any edit.**
+
+**Repro** (`.tentacle/tmp/mobile-live-activity/review/repro2.ts`, written by the
+reviewer, run unchanged against the branch). Output, before → after:
+
+```
+X in-flight start + ask: [ "start/aa", "start/aa" ]   →  [ "start/aa", "update/aa" ]
+Y after gone:            [ "start/aa", "update/upd", "start/aa" ]
+                                                      →  [ "start/aa", "update/upd" ]
+```
+
+**Root causes, one sentence each, and the fix**
+
+1. **MEDIUM — R5, a start in flight was sent again.**
+   `confirmed` (R4) is added only when the sink ANSWERS `sent`, so every command
+   for a slot decided during the round trip also met `neverDelivered` and was
+   converted to a `start` too: two pushes, two activity objects, one update
+   token, the other stale on the lock screen and both counting toward iOS's ~5.
+   *Fix:* `inFlight` (a slot whose START is out and unanswered) and
+   `pendingStarts` (the ONE command held for it) — a command for an in-flight
+   slot is held, not sent, and replayed when that start resolves `sent`
+   (`live-activity-notifier.ts:235-244`, `:346-350`, `:412-416`, `:436-455`). The
+   flags are cleared on the answer (sent, rejected, thrown) so R4's convergence
+   still works, pruned with the slot, and cleared by `stop()`.
+2. **MEDIUM — R6, a dismissed activity came back for ever.** A `gone` on an
+   update token was fed to the rules as `reason:"ended"`, which leaves the turn
+   startable: the person swiped the activity away and the next tick put it back,
+   with nothing bounding the number of times. This contradicted the approved
+   plan's F17 (doc:354), and fix round 1 chose F18 instead of asking the owner.
+   *Fix:* the `gone` is fed as `reason:"dismissed"` — the plan's rule, restored
+   (`:465-491`). F18's continuation is untouched: it is the ROLLOVER path (a
+   `gone` on the 7 h 45 min end push, `kind:"end"`), which this branch does not
+   reach.
+
+**Two second-order bugs the R6 fix itself would have introduced**, found by
+asking "who else does a dismissal touch?" and each fixed with its own red-first
+test:
+- **The dismissal was per TURN, not per (turn, device)**
+  (`live-activity-rules.ts:686-693`, `:735`). One phone's swipe silenced the
+  person's other phone for the rest of the turn. Now keyed by device too.
+- **A `gone` on the push-to-START token is not a dismissal**
+  (`live-activity-notifier.ts:482-490`). Nothing was ever created on that phone
+  (the token rotated, the app was reinstalled — F13), so no gesture happened;
+  reading it as one muted the turn for the phone that just reinstalled. It is
+  `ended` there (`deadStartTokens` already mutes the device until it
+  re-registers), `dismissed` only on the activity's own update token.
+
+**The one place this drifts from round 2's "fix idea", deliberately.** The
+review suggested "at most one restart per turn" as the F18-preserving option.
+I did **not** implement it: the plan's F17/F18 split is
+*dismissal-never-restarted* vs *system-end-one-continuation*, and "one restart"
+is neither — it would restart a dismissal once, which the owner-approved F17
+forbids. The F17/F18 ambiguity the reviewer flagged was itself resolved by the
+plan (doc:354), so this is not a new owner decision; it is the plan being
+followed. If the owner wants a bounded continuation for a `gone` the app never
+reported (F14/F15's force-quit case), that needs an explicit decision and a way
+to tell that `gone` from a swipe — the phone does not send us one.
+
+**Tests (RED first on the unfixed code, then green)**
+- `packages/daemon/test/live-activity-notifier.test.ts`: the helper's sink seam
+  gained a per-test `sink` override (the only way to hold a delivery in flight
+  and answer it later) and its `read` seam a variable token. **7** new tests: R5
+  ×5 (an ask, a `resendAll`, and a timer heartbeat each during the round trip;
+  the flush landing as an `update`; a held ask not resurrected after its turn
+  ended) and R6 ×2 (a `gone` on an update never restarts; a `gone` on a START
+  token mutes the device but leaves the turn startable). The old
+  `R3 … allows ONE continuation` test was rewritten to assert the plan's rule
+  (a `gone` on an update never restarts), since it had encoded the deviation.
+- `packages/daemon/test/live-activity-rules.test.ts`: **1** new test — one
+  phone's dismissal does not silence another phone for the same turn.
+- Red evidence, before any source edit: `4 fail` — the ask, `resendAll` and
+  heartbeat R5 tests (`Expected 0 / Received 1` extra delivery) and R6
+  (`Received 51` deliveries where 0 were expected). The other four were written
+  against their own mutation (M5d/M5e/M6d/M6e below) and are red under it: the
+  fifth R5 test (the resync-after-`unavailable` guard) was green from the start
+  and is the non-vacuity control for "in flight must not outlive its answer".
+
+**Mutations (§9, each applied to the finished code, run, reverted)**
+
+| id | mutation | result |
+|---|---|---|
+| M5a | no in-flight hold at all (`if (false && inFlight…`) | 4 fail: all four R5 hold tests |
+| M5b | the held command is never flushed (`if (false)`) | 2 fail: the flush-to-`update` test, the ask-after-end test |
+| M5c | `inFlight` never cleared when the sink answers | 10 fail: 3 R4/R3 regressions + 3 R5 + the two F3 tests + owner Q8's — proves the guard does not kill R4's convergence |
+| M5d | the held slot keeps the FIRST command instead of the latest | 1 fail: the ask-after-end test |
+| M6a | `gone` fed as `reason:"ended"` (the round-2 bug) | 2 fail: both F17 tests |
+| M6b | `gone` never fed to the rules (round 1's R3) | 2 fail: same two — round 1's fix stays pinned |
+| M6c | the rules ignore a dismissal | 3 fail: the rules' own dismissal test + both F17 tests |
+| M6d | the dismissal keyed by turn only (not (turn, device)) | 2 fail: the rules' dismissal test + the second-phone test |
+| M6e | every `gone` read as a dismissal (incl. a START token's) | 1 fail: the F13 reinstall test |
+| probe | `held.kind !== "start"` removed | **0 fail** ⇒ unreachable, so it is documented as an invariant, not kept as a guess |
+
+`git status --porcelain` shows only the intended files: the two sources, the two
+tests, and this doc.
+
+**Gate (measured on the finished tree):** `bunx tsc --noEmit` → exit 0 ·
+`bun run typecheck` (all three projects) → exit 0 · `bun run lint` → "Checked
+1627 files in 492ms. No fixes applied" (0 errors, 0 warnings, the §6 baseline) ·
+`bun test` → **11655 pass, 5 skip, 0 fail** (11660 tests / 836 files, 422 s).
+The 5 skips are the documented baseline set (the two `TENTACLE_K8S_SERVER`, the
+two `TENTACLE_DOCKER_TESTS=1`, the one `TENTACLE_SLOW_TESTS=1`), no new skip.
+The narrow files after the last edit: notifier + rules **59 pass, 0 fail**; the
+five Live-Activity-touching files **105 pass, 0 fail**.
+
+**Repro after the fix** (the reviewer's own `repro2.ts`, unmodified):
+`X in-flight start + ask: [ "start/aa", "update/aa" ]` and
+`Y after gone: [ "start/aa", "update/upd" ]` — one creation, and no restart.
+Round 1's `repro.ts` still gives none for an attached device and 2 for a late
+registration, so none of round 1's fixes regressed.
+
+**Not verified by me:** the Swift/Maestro/device checks (L0, L10–L12) are
+unchanged by this round and still open per the Execution above; nothing in this
+round touches Apple's behaviour, only which pushes the daemon emits.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: PASS** for the daemon-side L1–L9 and the pure L11 modules that this
+review covers. As Execution says, L10–L12 (SwiftUI views, the Expo module, the
+adapter and wiring, Maestro, the real device) are still partial or not started,
+and the owner has to accept that scope before merge.
+
+**Gate.** `bun run lint`: 1627 files, clean. `bun run typecheck`: clean. The
+notifier, rules, serve-live-activity and push-hook tests: 78 pass, 0 fail.
+After all mutations were reverted, `git status --porcelain` was empty.
+
+**Round-2 findings: both fixed.** Re-running `repro2.ts`:
+- **R5, in-flight start:** `["start/aa", "update/aa"]`. Only one start goes
+  out, and the ask held during the round trip follows it as an update.
+- **R6, dismissal:** `["start/aa", "update/upd"]`. After `gone` on the update
+  token, the turn does not start again.
+
+| fix | mutation | result |
+|---|---|---|
+| R5 | no in-flight hold (`inFlight.has(...) && false`) | 4 fail |
+| R5 | the held intent is never replayed | 2 fail |
+| R6 | `gone` on the update token treated as `ended` | 2 fail |
+| R6 | rules ignore the per-device dismissal key | 4 fail |
+
+**Regressions checked, none found:**
+- A start that resolves to anything other than `sent` clears `inFlight` and
+  drops the held intent. The next resync then rebuilds it as a start (R4 still
+  holds).
+- A sink that throws clears both sets.
+- `inFlight` and `pendingStarts` are pruned with the rules' live slots and
+  cleared on `stop`.
+- A held `end` is replayed once the start lands, so the activity is not left
+  orphaned until the 8 h cap.
+- The hook stays synchronous: all the new work is in `deliverOne`, after the
+  microtask.
+
+**Nit (not blocking):** since `gone` on an update token now means `dismissed`,
+an activity that iOS itself ended (F18, clock skew before the 7 h 45 rollover)
+gets no continuation. That is the side effect of choosing F17. It is rare,
+because the rollover fires 15 minutes before iOS's 8 h cap. It should be
+written down in the doc's F18 row.
+
+**Executor.** It fixed both findings with red-first tests. Keying dismissals by
+device as well is a correct improvement it found on its own. This round brought
+no plan drift.

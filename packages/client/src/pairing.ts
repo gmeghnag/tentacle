@@ -2,8 +2,9 @@
  * `pairDevice` — the app's side of pairing (docs/feat/device-pairing.md 9c,
  * Design "Client helper").
  *
- * ONE dial per address in payload order, the Noise initiator over it, a peer,
- * `initialize`, `device/pair`, close. That is a one-shot RPC, NOT a session: it
+ * A STAGGERED race over the payload's addresses (the first socket to OPEN runs
+ * the exchange), the Noise initiator over it, a peer, `initialize`,
+ * `device/pair`, close. That is a one-shot RPC, NOT a session: it
  * never touches `RemoteClient`, so no second session path exists (§7). The
  * app's pairing screen (task 11b) calls it and, when it succeeds, re-dials the
  * SAME address as a device — a connection's privilege is fixed at its
@@ -32,7 +33,7 @@ import {
 } from "@tentacle/protocol";
 import { type DuplexChannel, RpcError, RpcPeer } from "@tentacle/transport";
 import { type Random, pairingSas, publicKeyOf } from "@tentacle/transport/noise";
-import { ChannelError } from "./link-machine.ts";
+import { type FirstAnsweringOptions, firstAnswering, isTerminalDialError } from "./address-dial.ts";
 import { channelErrorFromNoise, secureChannelFactory } from "./secure-channel.ts";
 /** A `device/pair` refusal, with the reason the daemon gave (never text-matched). */
 export class PairingRefused extends Error {
@@ -92,6 +93,12 @@ export interface PairDeviceOptions {
    * `RpcPeer` rejects every pending request when the channel closes.
    */
   readonly requestTimeoutMs?: number;
+  /**
+   * The race's own seams (`staggerMs`, `openDeadlineMs`, the timer). A TEST
+   * knob only: the app passes nothing, so `STAGGER_MS` and
+   * {@link PAIRING_OPEN_DEADLINE_MS} are the behaviour.
+   */
+  readonly race?: FirstAnsweringOptions;
 }
 
 /** Every `PairingRefused` reason, for the app's copy (a switch that must stay exhaustive). */
@@ -119,38 +126,56 @@ export function pairingRefusedFrom(error: unknown): PairingRefused | undefined {
 }
 
 /**
- * Pair this device. Tries each address in the payload's order and stops at the
- * first that COMPLETES the exchange (a wrong code is a real answer — `used` from
- * one daemon means the claim exists for the whole computer, so a second address
- * cannot help and the error is returned as-is).
+ * How long pairing's race may go without ANY socket opening before it reports
+ * `unreachable` (same scale as the link's own dial deadline). It bounds the
+ * OPEN only: the winner's `device/pair` still waits on a human (F3).
+ */
+export const PAIRING_OPEN_DEADLINE_MS = 15_000;
+
+/**
+ * Pair this device: a STAGGERED RACE over the payload's addresses (docs/fix/
+ * relay-pairing.md), and the first socket to OPEN runs the exchange.
+ *
+ * Why a race and not the sequence it used to be: the list is "direct first,
+ * relay last" (`pair-addresses.ts`), and on a phone that is off the LAN a
+ * `ws://192.168.x.y/e2e` hangs in TCP connect with NO deadline — so the relay,
+ * the one address that could answer, was never dialled at all and pairing sat
+ * on "Connecting…" (the live 4G report). The same rule the paired link already
+ * uses (`address-dial.ts`, R6) now decides pairing too.
+ *
+ * A refusal (`PairingRefused`) STOPS the race like `unauthorized` does: it is
+ * the daemon's answer about the whole computer (one key, one claim on every
+ * address), so a second address could only repeat it — and a `too_many_attempts`
+ * must not be spent twice.
  */
 export async function pairDevice(options: PairDeviceOptions): Promise<PairDeviceResult> {
-  const failures: unknown[] = [];
-  for (const address of options.payload.addresses) {
-    try {
-      return await pairAt(address, options);
-    } catch (error) {
-      // A refusal is the DAEMON's answer, not an unreachable address: the
-      // claim it reports is per computer, so retrying another address would
-      // only repeat it — and a `too_many_attempts` must not be spent again.
-      if (error instanceof PairingRefused) {
-        throw error;
-      }
-      failures.push(error);
-    }
-  }
-  // Nothing answered: surface the LAST failure (the most recent attempt's
-  // reason — a TLS error on one address, a wrong pinned key on another).
-  throw failures.length === 1
-    ? failures[0]
-    : new ChannelError(
-        "unreachable",
-        `no pairing address answered (${options.payload.addresses.length} tried)`,
-      );
+  return firstAnswering(
+    options.payload.addresses,
+    {
+      // The raw channel wins or loses the race; the handshake runs on the
+      // winner alone (`confirm`), never on a loser.
+      open: (address) => options.dial(address)(),
+      abandon: (channel) => channel.close(),
+      confirm: (channel) => pairOn(channel, options),
+    },
+    { lastGood: undefined },
+    {
+      isTerminal: (error) => error instanceof PairingRefused || isTerminalDialError(error),
+      openDeadlineMs: PAIRING_OPEN_DEADLINE_MS,
+      ...options.race,
+    },
+  );
 }
 
-async function pairAt(address: string, options: PairDeviceOptions): Promise<PairDeviceResult> {
-  const factory = secureChannelFactory(options.dial(address), {
+/**
+ * The exchange, on ONE already-open channel: the Noise initiator over it, a
+ * peer, `initialize`, `onCompare`, `device/pair`, close.
+ */
+async function pairOn(
+  channel: DuplexChannel,
+  options: PairDeviceOptions,
+): Promise<PairDeviceResult> {
+  const factory = secureChannelFactory(async () => channel, {
     staticKey: options.deviceKey,
     remoteStatic: options.payload.key,
     random: options.random,

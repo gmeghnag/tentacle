@@ -16,6 +16,7 @@
         "com.apple.developer.usernotifications.time-sensitive": true
       },
       "infoPlist": {
+        "NSSupportsLiveActivities": true,
         "NSLocalNetworkUsageDescription": "tentacle connects to your computers on the local network",
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true

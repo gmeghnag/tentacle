@@ -26,6 +26,7 @@ import {
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
+  type LayoutChangeEvent,
   Linking,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -39,7 +40,18 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { chatStatus } from "../chat-header.ts";
 import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
-import { type Follow, contentGrew, initialFollow, jumpPill, jumped, scrolled } from "../follow.ts";
+import {
+  type Follow,
+  type FollowStep,
+  type ListSize,
+  contentGrew,
+  endTarget,
+  initialFollow,
+  jumpPill,
+  jumped,
+  scrolled,
+  viewportChanged,
+} from "../follow.ts";
 import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
 import { linkPrompt } from "../links.ts";
@@ -222,21 +234,34 @@ export function SessionScreen({
     },
   ).current;
 
-  // B5: follow the stream. `follow.ts` decides; the screen only reports the
-  // scroll metrics (a DRAG is the person's) and performs `scrollToEnd`.
+  // B5: follow the stream. `follow.ts` decides (and names the offset: the TRUE
+  // end, padding included — bug 3); the screen only reports the list's native
+  // sizes and scroll metrics (a DRAG is the person's) and performs the scroll.
   const list = useRef<FlatList<Row>>(null);
   const followRef = useRef<Follow>(initialFollow);
   const [follow, setFollow] = useState<Follow>(initialFollow);
   const dragging = useRef(false);
+  /** The list's native content height and viewport (0 until measured). */
+  const size = useRef<ListSize>({ content: 0, viewport: 0 });
   const setFollowState = useCallback((next: Follow) => {
     if (next !== followRef.current) {
       followRef.current = next;
       setFollow(next);
     }
   }, []);
+  const perform = useCallback(
+    (step: FollowStep) => {
+      setFollowState(step.state);
+      if (step.scrollTo !== null) {
+        list.current?.scrollToOffset({ offset: step.scrollTo, animated: true });
+      }
+    },
+    [setFollowState],
+  );
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+      size.current = { content: contentSize.height, viewport: layoutMeasurement.height };
       setFollowState(
         scrolled(
           followRef.current,
@@ -251,17 +276,23 @@ export function SessionScreen({
     },
     [setFollowState],
   );
-  const onContentSize = useCallback(() => {
-    const step = contentGrew(followRef.current);
-    setFollowState(step.state);
-    if (step.scrollToEnd) {
-      list.current?.scrollToEnd({ animated: true });
-    }
-  }, [setFollowState]);
+  const onContentSize = useCallback(
+    (_width: number, height: number) => {
+      size.current = { ...size.current, content: height };
+      perform(contentGrew(followRef.current, size.current));
+    },
+    [perform],
+  );
+  const onListLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      size.current = { ...size.current, viewport: event.nativeEvent.layout.height };
+      perform(viewportChanged(followRef.current, size.current));
+    },
+    [perform],
+  );
   const onJump = useCallback(() => {
-    setFollowState(jumped());
-    list.current?.scrollToEnd({ animated: true });
-  }, [setFollowState]);
+    perform({ state: jumped(), scrollTo: endTarget(size.current) });
+  }, [perform]);
 
   // B1(b): `KeyboardAvoidingView` measures its frame relative to its PARENT. The
   // screen now starts at the window top (no native header), so this offset is
@@ -285,6 +316,15 @@ export function SessionScreen({
     };
   }, []);
   const bottomPadding = composerBottomPadding({ insetBottom: insets.bottom, keyboard });
+  // Items 5/6 (docs/fix/mobile-chat-glitches.md): a press that SENT the field
+  // (`state.sends`, counted by the controller) puts the keyboard down — the
+  // reply gets the screen — and remounts the field (`fieldKey` below). 0 is
+  // the mount: nothing was sent yet.
+  useEffect(() => {
+    if (state.sends > 0) {
+      Keyboard.dismiss();
+    }
+  }, [state.sends]);
 
   const banner = state.view.banner;
   const rows = state.view.rows;
@@ -468,6 +508,7 @@ export function SessionScreen({
               dragging.current = false;
             }}
             onContentSizeChange={onContentSize}
+            onLayout={onListLayout}
             ListEmptyComponent={
               <View testID="transcript-empty">
                 {state.status.phase === "open" ? (
@@ -570,6 +611,7 @@ export function SessionScreen({
         )}
         <Composer
           palette={palette}
+          fieldKey={state.sends}
           draft={state.draft}
           editable={state.view.editable}
           placeholder={

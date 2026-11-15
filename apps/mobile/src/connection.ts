@@ -19,8 +19,11 @@
  */
 import {
   type ChannelFactoryDeps,
+  type DialFailure,
+  type DialMemory,
   RemoteClient,
   type WebSocketCtor,
+  firstAnswering,
   webSocketChannelFactory,
 } from "@tentacle/client";
 import type { LinkStatus } from "@tentacle/client";
@@ -29,7 +32,6 @@ import { PermissionBroker } from "@tentacle/core";
 import { type InitializeResult, decodeBase64Url } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import type { Random } from "@tentacle/transport/noise";
-import { type DialFailure, type DialMemory, firstAnswering } from "./address-dial.ts";
 import { type AppLog, type AppLogField, createAppLog, errorShape } from "./app-log.ts";
 import type { StoredComputer } from "./computers.ts";
 import { createForegroundGate } from "./foreground-gate.ts";
