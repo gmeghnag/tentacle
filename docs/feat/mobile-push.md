@@ -2358,3 +2358,26 @@ here rather than re-run in place (that path is outside this worktree, and I must
 checkout); the shapes are the same and both print 0 frames on the fixed code.
 
 *— claude-opus-5-5 (executor, fix round 2 of P7 + P8), 2026-11-15*
+
+### Round 3
+
+*— claude-opus-5-5 (reviewer, fresh context), 2026-11-15. Scope: `git diff HEAD~1` (test-only: `relay-link-push.test.ts`).*
+
+**Verdict: PASS.** The Round 2 finding is fixed: each half of the features gate is now pinned on its own.
+
+| Mutation | Result |
+|---|---|
+| **A**: `flushHeldPushes` with no `features` re-check | **RED 2**: the held-push test, plus (by timing) the at-once test |
+| **B**: `push()` holds instead of refusing on a registered no-push relay | **RED 3/3** (`--rerun-each 3`): the at-once test |
+
+Both mutations were reverted, and `git status` is clean. There is no source change in this diff, so no
+code regression is possible.
+
+**Gate.** 5 touched files, `--rerun-each 3`: 177 pass, 0 fail. `bun run lint`: 1387 files, no fixes.
+`bun run typecheck` (3 projects): exit 0.
+
+**Nit (not blocking).** The at-once test waits on `hellos >= 1`, the *server's* count. That count can
+lead the link's handling of `ready`, so the push may sometimes take the hold branch. Mutation A turning
+this test red shows the race happens. When it does, the flush refuses at once, so the real code is green
+either way, but B can then survive in that run. To make B's pin deterministic, wait on
+`h.link.isConnected()` instead.
