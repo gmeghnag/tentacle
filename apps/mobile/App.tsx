@@ -387,6 +387,10 @@ function infoWiring(
     },
     onLink: (listener: (status: "up" | "down") => void) =>
       link.onStatus((status) => listener(status.state === "up" ? "up" : "down")),
+    // Item 9a (docs/fix/mobile-chat-glitches.md): a "Couldn't load" section names
+    // its failing layer in Settings → Export logs — class + code, never text.
+    onPullError: (section, failure) =>
+      APP_LOG.log("warn", "client-error", { source: "session-info", section, ...failure }),
   });
 }
 

@@ -18,6 +18,7 @@ import { historyRows, restartPromptOf } from "./transcript-history.ts";
 import {
   type ImageRef,
   type Row,
+  type SubProgress,
   type ToolRow,
   type ToolStatus,
   type TurnRow,
@@ -30,6 +31,7 @@ export type {
   NoticeRow,
   ReasoningRow,
   Row,
+  SubProgress,
   ToolRow,
   ToolStatus,
   TurnRow,
@@ -411,11 +413,47 @@ function applyAgentEvent(state: State, event: StreamEvent): State {
       // The model renewed its context mid-turn: the old transcript stays, the
       // new history follows it.
       return appendHistory(state, event.messages);
+    // A foreground sub-agent's progress, on its `agent_task` row — the TUI's
+    // rules (`packages/tui/src/state.ts`). Dropping these made a long, legitimate
+    // child look like a hang (docs/fix/mobile-chat-glitches.md, item 10). An
+    // unknown call id is a no-op (`updateTool`).
+    case "subagent_start":
+      return updateTool(state, event.id, (row) => ({ ...row, sub: EMPTY_SUB }));
+    case "subagent_usage":
+      return updateTool(state, event.id, (row) => {
+        const prev = row.sub ?? EMPTY_SUB;
+        return {
+          ...row,
+          sub: { ...prev, tokens: prev.tokens + event.promptTokens + event.completionTokens },
+        };
+      });
+    case "subagent_tool":
+      return updateTool(state, event.id, (row) => {
+        const prev = row.sub ?? EMPTY_SUB;
+        return {
+          ...row,
+          sub: {
+            ...prev,
+            activities: [...prev.activities, subLabel(event.label)].slice(-SUB_ACTIVITY_CAP),
+            toolUses: prev.toolUses + 1,
+          },
+        };
+      });
+    case "subagent_end":
+      return updateTool(state, event.id, (row) => ({
+        ...row,
+        sub: {
+          ...(row.sub ?? EMPTY_SUB),
+          toolUses: event.toolUses,
+          done: true,
+          stopReason: event.stopReason,
+          ...(event.agentId !== undefined ? { movedTo: event.agentId } : {}),
+        },
+      }));
     default:
-      // Sub-agent progress, background exits, `turn_end`: the phone has no nested
-      // panel and no job dock in this slice (12c's screen and later tasks decide
-      // those) — and none of them is a silent drop, since each is either a
-      // counter or (for `turn_end`) the turn bracket's job.
+      // Background exits, `turn_end`: the phone has no job dock in this slice
+      // (later tasks decide it) — and neither is a silent drop, since each is
+      // either a counter or (for `turn_end`) the turn bracket's job.
       return state;
   }
 }
@@ -440,6 +478,20 @@ function noticeSeenThisTurn(state: State, text: string): boolean {
 
 function pushTool(state: State, make: (key: string) => ToolRow): State {
   return push(state, make);
+}
+
+/**
+ * How many sub-agent activities a row keeps. The phone draws only the latest
+ * (the TUI's panel lists more: its cap is 50), so 3 bounds a long child's row.
+ */
+export const SUB_ACTIVITY_CAP = 3;
+/** A sub-agent label's longest (the client already strips and bounds it: belt and braces). */
+export const SUB_LABEL_MAX = 120;
+
+const EMPTY_SUB: SubProgress = { activities: [], toolUses: 0, tokens: 0, done: false };
+
+function subLabel(label: string): string {
+  return label.length > SUB_LABEL_MAX ? `${label.slice(0, SUB_LABEL_MAX - 1)}…` : label;
 }
 
 /** A result lands on its call's row (a result with no call opens one: never dropped). */

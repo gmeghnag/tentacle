@@ -947,3 +947,27 @@ describe("owner B4: a send from the phone's composer, over the APP's compose han
     laptop.close();
   }, 20000);
 });
+
+describe("the port's prompt is done at the daemon's ACK (docs/fix/mobile-chat-glitches.md, bug 2)", () => {
+  test("resolves while the accepted turn still runs, and the daemon ran it ONCE (mutation: drain to the end → hung → red)", async () => {
+    const d = daemon();
+    const laptop = await dial(d);
+    const sid = await seeded(laptop);
+    const app = await dial(d);
+    const session = app.client.newSession(undefined, sid, undefined, { attach: {} });
+    await session.open();
+    const port = outboxSessionOf(session, app.client, () => null);
+    const outcome = await Promise.race([
+      port.prompt("hold me", crypto.randomUUID(), []).then(() => "accepted"),
+      sleep(2000).then(() => "hung"),
+    ]);
+    expect(outcome).toBe("accepted");
+    // The turn is still running on the daemon: the model is held at its gate.
+    expect(d.model.held).toBe(1);
+    d.model.open();
+    await until(async () => (await userTexts(d, sid)).includes("hold me"));
+    expect(await userTexts(d, sid)).toEqual(["hi", "hold me"]);
+    app.close();
+    laptop.close();
+  }, 20000);
+});

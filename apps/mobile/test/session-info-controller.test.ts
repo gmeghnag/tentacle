@@ -430,3 +430,56 @@ describe("the sheet's facts", () => {
     expect(unsubscribed).toBe(1);
   });
 });
+
+describe("a failed pull is REPORTED as its class, never its text (docs/fix/mobile-chat-glitches.md, item 9a)", () => {
+  const CANARY = "secret /Users/x/project prompt";
+  /** The port with a `context()` that rejects with `error`, and what it reported. */
+  function failing(error: unknown) {
+    const reports: { section: string; failure: unknown }[] = [];
+    const base = port().port;
+    const p: InfoPort = {
+      ...base,
+      session: () => ({
+        skills: () => Promise.resolve(emptySkills),
+        context: () => Promise.reject(error),
+        autoAccept: undefined,
+      }),
+      onPullError: (section, failure) => reports.push({ section, failure }),
+    };
+    return { port: p, reports };
+  }
+  const contextRow = (state: SessionInfoState) =>
+    JSON.stringify(state.view).includes('"title":"Context","value":"Couldn\'t load"');
+
+  test("an RpcError: its class and numeric code, and NOT the message (a canary)", async () => {
+    const { port: p, reports } = failing(new RpcError(-32050, CANARY));
+    const info = createSessionInfo(p);
+    await info.open();
+    expect(reports).toEqual([{ section: "context", failure: { error: "RpcError", code: -32050 } }]);
+    expect(JSON.stringify(reports)).not.toContain("secret");
+    expect(JSON.stringify(reports)).not.toContain("/Users/x");
+    // The view is unchanged (Owner Q4: keep the wording until 9b).
+    expect(contextRow(info.state())).toBe(true);
+  });
+
+  test("a timeout: its class", async () => {
+    const timeout = Object.assign(new Error(CANARY), { name: "TimeoutError" });
+    const { port: p, reports } = failing(timeout);
+    const info = createSessionInfo(p);
+    await info.open();
+    expect(reports).toEqual([{ section: "context", failure: { error: "TimeoutError" } }]);
+    expect(contextRow(info.state())).toBe(true);
+  });
+
+  test("offline and MethodNotFound are not failures to report (they have their own words)", async () => {
+    for (const error of [
+      new Error("not connected to the daemon"),
+      new RpcError(JsonRpcErrorCode.MethodNotFound, "no such method"),
+    ]) {
+      const { port: p, reports } = failing(error);
+      const info = createSessionInfo(p);
+      await info.open();
+      expect(reports).toEqual([]);
+    }
+  });
+});

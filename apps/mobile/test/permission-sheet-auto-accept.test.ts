@@ -156,3 +156,38 @@ describe("the phone's shared auto-accept", () => {
     expect(session.sent).toEqual([true]);
   });
 });
+
+describe("a FOREGROUND sub-agent's ask on the phone (docs/fix/mobile-chat-glitches.md, item 10)", () => {
+  // The child's `shell` ask is attributed to the PARENT's `agent_task` call and
+  // raised in the parent's turn (the router names it: `update.turnId ?? turnId`).
+  // The sheet keys on that turn — it never sees the call id — so the ask is
+  // shown (or auto-accepted) like any of this phone's own.
+  const childAsk = ask({ tool: "shell", title: "Run a shell command", detail: "sleep 10" });
+  const agent = { type: "general", description: "Task lungo in background" };
+  const own = (turnId: string) => turnId === "t-own";
+
+  test("auto-accept OFF → SHOWN, with the sub-agent's label", async () => {
+    const session = link(true, false);
+    const sheet = createPermissionSheet({
+      now: () => 1000,
+      autoAccept: () => session.link,
+      autoAcceptsTurn: own,
+    });
+    void sheet.requester(childAsk, { turnId: "t-own", agent });
+    await Promise.resolve();
+    expect(sheet.asking).toBe(true);
+    expect(sheet.view()).toMatchObject({ kind: "asking", agent });
+  });
+
+  test("shared auto-accept ON → auto-accepted (allow_once), never left waiting", async () => {
+    const session = link(true, true);
+    const sheet = createPermissionSheet({
+      now: () => 1000,
+      autoAccept: () => session.link,
+      autoAcceptsTurn: own,
+    });
+    const answer = sheet.requester(childAsk, { turnId: "t-own", agent });
+    expect(await answer).toEqual({ allowed: true, scope: "once" });
+    expect(sheet.asking).toBe(false);
+  });
+});

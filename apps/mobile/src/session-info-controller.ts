@@ -18,6 +18,7 @@ import type {
 } from "@tentacle/protocol";
 import { JsonRpcErrorCode } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
+import { type ErrorShape, errorShape } from "./app-log.ts";
 import {
   type DaemonInfo,
   type InfoFacts,
@@ -63,7 +64,18 @@ export interface InfoPort {
   session(): InfoSession | null;
   /** The link's own status feed (the app's `onStatus`); absent: nothing to follow. */
   onLink?(listener: (status: "up" | "down") => void): () => void;
+  /**
+   * A pull FAILED (its section says "Couldn't load"): its error CLASS and numeric
+   * code (`errorShape`), never its message — the app log is exportable (F16).
+   * Without it the failure was discarded and could not be diagnosed
+   * (docs/fix/mobile-chat-glitches.md, item 9a). Not called for offline or
+   * MethodNotFound: those have their own words.
+   */
+  onPullError?(section: InfoSection, failure: ErrorShape): void;
 }
+
+/** Which pull a failure came from. */
+export type InfoSection = "mcp" | "entry" | "skills" | "context";
 
 export interface SessionInfoState {
   readonly view: SessionInfoView;
@@ -129,12 +141,22 @@ function settle<T>(error: unknown): Pull<T> {
   }
   return { state: "error", kind: "error" };
 }
-/** Fold a promise into a `Pull`, never throwing (each section settles alone). */
-async function pull<T>(work: () => Promise<T>): Promise<Pull<T>> {
+/**
+ * Fold a promise into a `Pull`, never throwing (each section settles alone). A
+ * plain failure is reported as its safe shape (`onPullError`, item 9a).
+ */
+async function pull<T>(
+  work: () => Promise<T>,
+  report: (failure: ErrorShape) => void,
+): Promise<Pull<T>> {
   try {
     return { state: "ready", value: await work() };
   } catch (error) {
-    return settle<T>(error);
+    const outcome = settle<T>(error);
+    if (outcome.state === "error" && outcome.kind === "error") {
+      report(errorShape(error));
+    }
+    return outcome;
   }
 }
 
@@ -247,20 +269,25 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
     });
 
     await Promise.all([
-      pull(async () => ({ servers: await port.mcpStatus() })).then(paintMcp),
+      pull(async () => ({ servers: await port.mcpStatus() }), reportFor("mcp")).then(paintMcp),
       pull(async () => {
         const page = await port.sessionList();
         return page.sessions.find((row) => row.sessionId === port.sessionId) ?? null;
-      }).then(paintEntry),
+      }, reportFor("entry")).then(paintEntry),
       (handle === null
         ? Promise.resolve(notOpen<SessionSkillsResult>())
-        : pull(() => handle.skills())
+        : pull(() => handle.skills(), reportFor("skills"))
       ).then(paintSkills),
       (handle === null
         ? Promise.resolve(notOpen<SessionContextResult>())
-        : pull(() => handle.context())
+        : pull(() => handle.context(), reportFor("context"))
       ).then(paintContext),
     ]);
+  }
+
+  /** A section's failure, reported to the port (item 9a). */
+  function reportFor(section: InfoSection): (failure: ErrorShape) => void {
+    return (failure) => port.onPullError?.(section, failure);
   }
 
   return {
@@ -304,7 +331,7 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
         return;
       }
       const mine = generation;
-      const value = await pull(() => handle.context());
+      const value = await pull(() => handle.context(), reportFor("context"));
       if (mine !== generation) {
         return;
       }
