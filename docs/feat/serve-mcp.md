@@ -262,3 +262,10 @@ Iterate with `bun test packages/cli/test/serve-mcp.test.ts` (and `mcp-hub.test.t
 ## Review
 
 *(empty)*
+
+#### Owner decisions (2026-11-15 11:10)
+
+1. **(b)** crashed MCP servers respawn with backoff (1 s→60 s, give up after 5), stable tools, on both hosts — as recommended.
+2. **(a)** project hooks in phone turns: the serve host's own hooks-trust first; otherwise the phone asks once per session, never stored — as recommended.
+3. **Out of scope**: per-session model choice is a TODO entry (`feat/per-session-model`), not part of this task.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
