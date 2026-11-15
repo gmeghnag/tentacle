@@ -572,7 +572,7 @@ The fix tags every attempt with an id, taking the reviewer's preferred option, w
 
 ### Fix round 2
 
-*— claude-opus-5-5, 2026-11-15*
+*— executor recorded as **deepseek** by its commit `b29760c1` ("fix(mobile-voice): review round 2 (deepseek)"), 2026-11-15. This line first read `claude-opus-5-5`, which conflicts with that commit (Review round 3). The exact DeepSeek model id is not recorded in the repo; the orchestrator must confirm it. Corrected in Fix round 3.*
 
 **NEW HIGH (remount regression): FIXED.**
 - Root cause: attempt ids were counted per controller (one per `SessionScreen` mount), but `SpeechCore.swift`'s `cancelledThrough` / `newestStart` live for the whole process, so the next screen's first ids were refused as `cancelled`.
@@ -597,6 +597,19 @@ The fix tags every attempt with an id, taking the reviewer's preferred option, w
 - `bun run typecheck` (root, mobile, relay): clean.
 - `bun run lint`: `Checked 1457 files … No fixes applied`.
 - `bun test`: **10494 pass, 4 skip, 0 fail** (10498 tests). The skips are the same as before.
+
+### Fix round 3
+
+*— claude-opus-5-5, 2026-11-15 (this is my own model id; if this round's commit is labelled anything else, the label is wrong)*
+
+**Round 1, finding 2 / Round 3 (signature, MEDIUM): FIXED as far as the repo allows.** The "Fix round 2" signature now says what its commit `b29760c1` records (deepseek) and that it first read `claude-opus-5-5`. This is the same correction as for "Fix round 1". Doc only; no code changed.
+- Open for the orchestrator: three sections (Execution, Fix round 1, Fix round 2) were each signed `claude-opus-5-5` by their writer, while the commits say "(deepseek)". Either the writer mis-signed, or the commit label is wrong. Only the orchestrator, who spawned them, knows which. The exact DeepSeek id is still not recorded.
+- No red/green and no mutation this round: no code or test changed, and Round 3 found no code defect.
+
+**Gate.**
+- `bunx tsc --noEmit`: clean.
+- `bun run lint`: `Checked 1457 files … No fixes applied`.
+- `bun test`: **10494 pass, 4 skip, 0 fail** (10498 tests). The skips are the same opt-in skips as before.
 
 ## Review
 
