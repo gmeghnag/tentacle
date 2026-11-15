@@ -733,3 +733,15 @@ is signed `claude-sonnet-4-5-20250929` but commit `3f8f2d0d` says
 overwrite another model's signature. **Open for the orchestrator**: the S1
 Execution signature and the commit message disagree, and only the agent that
 ran it knows.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; scope: `git diff HEAD~1`, commit `176e2df9`)
+
+**Verdict: APPROVE.**
+
+- **Finding 1 (MEDIUM): fixed.** `projectSystem` now re-renders only the names the composed catalog holds (`capabilities.ts:183-191`, `:222-225`). The round-1 repro `r1.ts` now prints `catalog offers c (not in skill enum): false`. Mutation: removing the composed-names gate → `a stale offered cannot advertise…` RED. Comparing raw names instead of escaped ones → `a name the renderer escapes…` RED. Reverted, and `git status` was clean.
+- **LOW: accepted.** The one-byte loss is documented and pinned by a test (`identity "ID\n"` → `"ID"`), as the Design specifies.
+- **Regression attacks:** names are scanned only after the LAST header, so an AGENTS.md block is never read. A description cannot forge a `<name>` tag (it is escaped). Hiding a skill cannot uncover a 101st one (the composed set is already capped). All three hold.
+- **Gate:** the two touched test files pass, 30 pass / 0 fail. `bun run lint` is clean (1657 files). `bun run typecheck` is clean.
+- **Note:** the doc diff also removes one mockup bullet (T1), outside S1's code. Confirm it was intentional.
