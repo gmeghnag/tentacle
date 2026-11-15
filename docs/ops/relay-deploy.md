@@ -156,19 +156,36 @@ import /etc/caddy/relay.tentacle.so.caddy
 ```
 
 Validate before reloading — a syntax error in a reload takes the whole site down,
-not only the new name:
+not only the new name. **Caddy runs in a podman container on this host** (host
+network, `/etc/caddy` bind-mounted), so there is no `caddy` binary and no caddy
+systemd unit: every Caddy command below goes through the container.
 
 ```sh
-caddy validate --config /etc/caddy/Caddyfile
-systemctl reload caddy
-journalctl -u caddy -n 30 --no-pager     # the certificate for relay.tentacle.so
+podman exec caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+podman exec caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+journalctl -u podman -n 30 --no-pager      # or: podman logs --since 5m caddy
 ```
 
 Verify TLS and the health route from OUTSIDE the host (any machine):
 
 ```sh
-curl -sS -i https://relay.tentacle.so/healthz    # 200 {"ok":true,"v":1}, a valid cert
+curl -sSI https://relay.tentacle.so/healthz    # 200, HSTS, no `Server:` header
 ```
+
+The site block also 404s every path that is not one of the relay's four routes
+(`/healthz`, `/v1/daemon`, `/v1/accept`, `/d/<22-char id>/e2e`), so a path probe
+never reaches the process — check it from outside too:
+
+```sh
+curl -sS -o /dev/null -w '%{http_code}\n' https://relay.tentacle.so/        # 404
+curl -sS -o /dev/null -w '%{http_code}\n' https://relay.tentacle.so/.env    # 404
+```
+
+`--trust-proxy` is what makes the relay's per-IP limits per CLIENT: the site
+block replaces `X-Forwarded-For` with `{remote_host}`, and the relay reads that
+header **only from a loopback peer** and takes the right-most untrusted hop
+(`apps/relay/src/client-ip.ts`). Removing either half brings back the single
+shared bucket — the unit flag and `header_up` are a pair.
 
 `stream_close_delay 5m` in the site block is load-bearing: without it, every
 `caddy reload` closes every live relay socket at once, i.e. every phone session on
@@ -204,14 +221,24 @@ and `journalctl -u relay.service` showing the stream's `dial-open` / `accept` li
 — never a payload (the relay sees ciphertext only).
 
 Log lines you should see, and what they mean (`apps/relay/src/server.ts`):
-`ready <id>` — a daemon registered · `dial-open <id> <stream>` — a phone dialled a
-known id · `accept <stream> <id>` — the daemon took the stream, so the splice is
-live · `dial-held <id>` — the daemon was not registered yet and the phone is being
-held (5 s) · `dial-refused <reason> <id>` — a limit or a full slot; the phone leg
-is then closed `4429`, and a phone whose id is unknown at the hold's expiry is
-closed `4404` (step 8's table). Every line carries an 8-character id or token
-PREFIX only: a full token, a payload or a secret in the journal is a bug, not a
-log level.
+`ready <id>` — a daemon registered · `dial-open <id>` — a phone dialled a known id
+· `accept <id>` — the daemon took the stream, so the splice is live · `dial-held
+<id>` — the daemon was not registered yet and the phone is being held (5 s) ·
+`dial-refused <reason> <id>` — a per-client limit or a full slot; the phone leg is
+then closed `4429`, and a phone whose id is unknown at the hold's expiry is
+closed `4404` (step 8's table) · `pending-refused` — a control/accept socket past
+the per-client pre-auth cap, closed `4429` · `log-suppressed <kind> <n>` — a
+refusal flood: the n lines past 20-per-10 s-of-that-kind were dropped, and this is
+their count.
+
+Every line carries an 8-character **id** prefix only — a stream token is not
+logged at all, no IP address is ever logged, and a full token, a payload or a
+secret in the journal is a bug, not a log level. Verify it after a session:
+
+```sh
+journalctl -u relay.service --since "15 min ago" | grep -E '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'
+# must print nothing
+```
 
 If the phone cannot reach it, the app's diagnosis names the relay as a path; a
 `4404` in the journal means the daemon was not registered (step 3's status, then
@@ -266,10 +293,12 @@ systemctl start relay.service
 (Keep a copy as `tentacle-relay.previous` before the first `mv` in step 6.)
 
 To take the public name down entirely, remove the `import` line from
-`/etc/caddy/Caddyfile`, `caddy validate`, then `systemctl reload caddy`. Do this
-AFTER stopping the unit, never before — the reload drops live streams within the
-5-minute grace (§4), and a name pointing at nothing is a worse error message than
-a stopped unit.
+`/etc/caddy/Caddyfile`, run `podman exec caddy caddy validate --config
+/etc/caddy/Caddyfile --adapter caddyfile`, then `podman exec caddy caddy reload
+--config /etc/caddy/Caddyfile --adapter caddyfile`. Do this AFTER stopping the
+unit, never before — the reload drops live streams within the 5-minute grace
+(§4), and a name pointing at nothing is a worse error message than a stopped
+unit.
 
 ## 8. Diagnose
 
@@ -284,8 +313,11 @@ ss -lntp | grep 4100                          # loopback only, as it must be
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `curl` to the name: connection refused / timeout | DNS not propagated, or Caddy not reloaded | `dig +short`, `caddy validate`, `journalctl -u caddy` |
-| Certificate error for the name | ACME failed while DNS was wrong | fix DNS, `systemctl reload caddy`, check `journalctl -u caddy` again |
+| `curl` to the name: connection refused / timeout | DNS not propagated, or Caddy not reloaded | `dig +short`, `podman exec caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`, `podman logs caddy` |
+| Certificate error for the name | ACME failed while DNS was wrong | fix DNS, `podman exec caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`, check `podman logs caddy` again |
+| A phone is refused `4429` while the relay is idle | its public address already holds the per-CLIENT limit (16 sockets / 30 dials per min / 32 ids) — a carrier NAT or campus network puts many phones behind one address | read the `dial-refused` / `pending-refused` lines; raise `--max-streams-per-ip` / `--max-dials-per-minute` / `--max-ids-per-ip` in the unit (§9) |
+| The journal shows `log-suppressed <kind> <n>` | a refusal flood: the n lines past the 20-per-10 s-per-kind bound were not written | expected under attack; the count is the summary. The first 20 of every kind are always there |
+| Every client looks like `127.0.0.1` again | `--trust-proxy` missing from the unit, or `header_up X-Forwarded-For` missing from the site block | both are a pair (§4); `systemctl show relay.service -p ExecStart` |
 | `curl` to loopback: refused | the unit is not running | `systemctl status`, step 3 |
 | Unit `failed`, "start-limit-hit" | crash loop; the bound is doing its job | read the journal, fix the cause, `systemctl reset-failed relay.service` |
 | Phone says unreachable, journal shows `4404` | daemon not registered (not running, or its control socket was replaced) | `tentacle devices`, restart `serve` |
@@ -295,23 +327,38 @@ ss -lntp | grep 4100                          # loopback only, as it must be
 
 ## 9. Known limitations (state these, do not discover them later)
 
-- **Per-IP limits key on the direct peer, which behind Caddy is always
-  `127.0.0.1`.** `apps/relay/src/server.ts` uses Bun's `requestIP`, and the proxy
-  hop is the peer, so `--max-dials-per-minute` / `--max-streams-per-ip` /
-  `--max-hellos-per-minute` are ONE shared bucket in this deployment rather than
-  per-phone — at the per-client defaults the 16-concurrent-streams default would
-  cap the whole world at 16 phones. **This artefact resolves it by shipping the
-  three flags at fleet sizes in `ExecStart`** (6000 dials/min, 2000 sockets,
-  600 hellos/min — each pinned above its per-client default by
-  `apps/relay/test/deploy.test.ts`), so the unit is safe as installed and the
-  owner has nothing to decide before the first deploy. Two consequences worth
-  knowing: a flood is bounded by `MemoryMax=512M` rather than by these numbers,
-  and the numbers are a SINGLE bucket — one client can still consume a large
-  share. The real fix is the relay reading `X-Forwarded-For` behind a
-  trusted-local flag (a code change, its own task); when it lands, drop these
-  flags back to the `relay-core.ts` defaults, or the per-client limits become
-  meaningless. The per-id (64 streams) and global (10 000 ids) limits are
-  unaffected either way.
+- **Per-IP limits are per CLIENT now, and that has a NAT consequence.**
+  `--trust-proxy` plus the site block's `header_up X-Forwarded-For {remote_host}`
+  make `apps/relay/src/client-ip.ts` the source of the limiter key: the header is
+  read ONLY from a loopback peer and the right-most untrusted hop is taken, so an
+  outside client cannot spoof it. An IPv6 client is collapsed to its `/64`
+  (`limiterKeyOf`) — one phone's IPv6 prefix is one bucket, not 2^64 of them. The
+  defaults therefore apply **per public address**: 16 concurrent phone sockets,
+  30 dials/min, 10 registrations/min, 32 registered ids. Two residual facts:
+  - A **carrier CGNAT or campus NAT** puts many unrelated phones behind ONE
+    address, and they share that bucket. A phone refused `4429` redials, then
+    falls back to its direct paths; the journal shows `dial-refused`, and every
+    limit is still a flag (`--max-streams-per-ip`, `--max-dials-per-minute`,
+    `--max-ids-per-ip`, …) so it can be raised without a rebuild.
+  - Any process **on this host** (including a host-network container) can dial
+    `127.0.0.1:4100` and forge the header. That bypasses the per-IP limits for
+    local processes only, which can already exhaust loopback — accepted, and the
+    reason the flag is off unless the unit asks for it.
+  The per-id (64 streams) and global (10 000 ids) limits are unaffected either
+  way. The old fleet sizes (6000 dials/min, 2000 sockets, 600 hellos/min) are
+  GONE from `ExecStart` on purpose: with real keys they would hand every client
+  the fleet's budget, i.e. no limit at all.
+- **A refusal flood is summarised, not silently dropped.** Each kind of log line
+  is capped at 20 per 10 s (`apps/relay/src/log-limit.ts`); the rest are counted
+  and reported as one `log-suppressed <kind> <n>` line the next time the window
+  ends. journald's own rate limit is why: it drops lines without choosing between
+  them, `ready` ones included. The first 20 lines of every kind in every window
+  always pass, so the start of an incident is always in the journal.
+- **`MemoryMax=512M` is still the backstop, but it is no longer the only bound.**
+  `maxPayloadLength` (96 KiB) makes Bun refuse an oversized frame before it
+  allocates it, and pre-auth sockets are capped per client (`pendingPerIp`, 128)
+  and closed at 10 s (`RELAY_PREAUTH_MS`). A flood now costs refused lines, not
+  the relay's memory.
 - **A Caddy reload drops live streams within 5 minutes.** `stream_close_delay 5m`
   in the site block delays the forced close of every WebSocket when Caddy's config
   is unloaded; it does not cancel it. Because the relay pings every leg, neither a
