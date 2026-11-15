@@ -684,6 +684,400 @@ re-arms it from the setting. (c) F5's cap counts characters of what is
 actually spoken, so the model's `maxSpokenChars` is a ceiling over the reply,
 not a per-chunk limit.
 
+### Spike C1 (Mac) — unattended part
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Setup.** MacBook Pro (Apple Silicon), macOS 27.2, Swift 6.4. Built-in speakers and built-in mic; nobody in the room (the household ambient was not controlled). All code is scratch in `.tentacle/tmp/voice-conversation/c1/`: `c1probe.swift` (one voice-processing `AVAudioEngine`; `AVSpeechSynthesizer.write` buffers → one `AVAudioPlayerNode` per language → main mixer → the VP output, so the TTS is the AEC reference), `analyze.py`, `keyprobe/`, `sinkprobe.swift`, `owner-run.sh`. Every timestamp is the host clock (`mach_absolute_time`), shared across processes. Raw logs are in `c1/out/*.jsonl`.
+- **TCC:** mic permission was already granted (`authorizationStatus` = 3). It was not a blocker.
+- **The output was MUTED** (volume 12.5 %). The brief asks for playback through the speakers, so each run cleared the mute and left the volume at the owner's 12.5 %. **The final re-mute did not happen.** Permissions changed when the run resumed after the account limit, and every command then needed an approval nobody was there to give. The Mac is now **unmuted at 12.5 %**, and nothing is playing. To restore: `swift .tentacle/tmp/voice-conversation/c1/mute.swift 1`.
+- **Consequence of 12.5 %:** the TTS echo at the raw mic (VP off) peaks at only ≈ −48 dBFS (floor −67). The TTS peaks at 0.78–0.99 full scale, so a digital make-up gain would clip, and none was applied. All echo numbers below are for a *quiet* speaker. The owner's run uses their real volume.
+- **Voices:** the system default per language is `com.apple.voice.compact.it-IT.Alice` and `…en-US.Samantha` (compact, 22.05 kHz Float32).
+- **Capture finding (new; it matters for C1b):** with VP on, `installTap` delivers **fixed 4410-frame blocks (100 ms)**, with delivery delay p50 8.6 / p95 14.7 ms, and it ignores `bufferSize`. **`AVAudioSinkNode` on the same input delivers 511–513-frame blocks (11.6 ms)**, delay p50 2.1–2.7 / p95 2.5–4.4 ms (`sinkprobe.swift`). A 100 ms tap alone makes stop < 100 ms impossible, so C1b must capture with a sink node: copy channel 0 on the IO thread, then detect and `hush` on a serial queue. `AVAudioIONode.presentationLatency` reads 0.02 ms with VP on and is useless for latency budgets.
+
+**(1) TTS in the engine: first audio.** 30 warm runs per cell, VP on, alternating order. Sentences:
+- short: "Fatto, i test passano." / "Done, the tests pass.";
+- long: 25 words, "Ho controllato il parser e il typecheck: …".
+
+*Acoustic* = a second process (plain engine, VP off) listening on the mic; the onset is the first 10 ms window > its 300 ms floor + 10 dB.
+
+| ms, p50 / p95 | synth first buffer | first non-silent sample scheduled | acoustic first audio |
+|---|---|---|---|
+| it short | 11 / 15 | 26 / 31 | 192 / 202 (n=27) |
+| it long | 22 / 26 | 25 / 29 | 114 / 291 (n=24) |
+| en short | 14 / 19 | 15 / 20 | 108 / 227 (n=28) |
+| en long | 24 / 33 | 29 / 38 | 132 / 1173 (n=28) |
+
+- **Cold** (first utterance of a voice in the process): first buffer it 196 ms, en 335 ms. **C1b must warm each voice at helper start** with one silent `write`.
+- Sentence length barely matters: `write` streams its buffers.
+- The acoustic p95s, and 13 of 120 missed onsets, come from soft first syllables at 12.5 % volume against a +10 dB detector. **Read the p50s.**
+- The ≈ 90–165 ms gap between "scheduled" and "acoustic" is the output path: VP IO, speaker, the listener's own input path and detector margin. It is the same path that delays an audible stop (below).
+- **Verdict:** the system voice is effectively free (≤ 38 ms p95 synth, ≈ 110–190 ms to sound). It is not a factor in the 1.2 s / 2.0 s targets.
+
+**(2) False barge-in, built-in speakers, nobody talking.** The assistant spoke 14 realistic it/en replies in a loop.
+- Gate: post-AEC level, 10 ms windows; a trigger is level ≥ threshold for ≥ `minms`, while speaking, with 1 s debounce. The thresholds were swept offline on the same trace.
+- Result columns are "lowest threshold with zero false barge-ins".
+
+| VP config | speech analysed | residual while speaking: p50 / p99.9 / max | silence: p50 / max | 10 ms | 30 ms | 60 ms | 100 ms | 150 ms |
+|---|---|---|---|---|---|---|---|---|
+| AGC **on** (V1 helper today) | 6.3 min | −69.2 / −40.7 / −35.1 dBFS | −77.9 / −39.3 | −34 | −36 | −40 | −42 | −46 |
+| AGC **off** | 5.2 min | −79.1 / −47.3 / −40.6 dBFS | −86.7 / −63.2 | −40 | −44 | **−48** | −50 | — |
+
+- **The V1 placeholder would false-trigger constantly.** Its gate is −45 dBFS on 100 ms tap buffers, which gives **44.5 false barge-ins / 5 min** (AGC on, same trace); −40 gives 1.6 / 5 min, and −35 gives 0.
+- **AGC off lowers the echo residual by ≈ 7 dB and the floor by ≈ 9 dB**, so it allows an 8 dB lower gate.
+- Each "zero" sits *at* the edge of 5–6 min of data, with no measured margin. Treat it as the floor, not the setting.
+
+**(3) Stop latency with a simulated user.** A second process (`afplay`) played 10 "user" interruptions in other system voices (Rocko/Eddy/Grandpa it, Daniel/Reed/Eddy en, `out/users/`), 1.5–3.5 s into each reply.
+
+| run | gate | detected | false | onset → decision p50 | decision → `player.stop()` returned p50 | onset → stopped (engine) p50 |
+|---|---|---|---|---|---|---|
+| AGC on, user ×1 | −40 / 60 ms | 1 / 7 | 0 | 65 ms | 15 ms | 80 ms |
+| AGC on, user ×4 | −40 / 60 ms | 1 / 6 | 1 | 74 ms | 35 ms | 108 ms |
+| AGC off, user ×4 | −48 / 60 ms | **0 / 32** | 0 | — | — | — |
+| AGC off, user ×4, TTS −12 dB | −48 / 60 ms | 3 / 23 | 0 | 87 ms | 11 ms | 159 ms |
+
+- **This is not a valid stop-latency measurement.** The "user" comes out of the same speaker at the same level as the assistant: raw-mic peaks −46…−50 dBFS vs the TTS echo at −48, so SNR ≈ 0 dB before AEC. With no assistant speaking, VP's AGC compresses it to −39…−49 dBFS whatever its loudness (×1 and ×4 measured the same). During double-talk its peaks reach only −52…−43 dBFS, against an echo residual of −57…−45 in the 1.5 s before. That is ≈ 3 dB of separation, and a 60 ms level gate cannot use it.
+- A person at 50 cm is much louder than a 12.5 % laptop speaker, so this is a worst case, not the real one.
+- **What it does establish:** a *level* gate cannot hear a talker who is as loud as the assistant. The engine-side budget is ≈ `minms` + 12 ms block + 3 ms delivery to decide, plus 11–35 ms for `player.stop()` to return. On top of that comes the output path, ≈ 90 ms or more by (1).
+- So with a level gate and a 60 ms hold, the audible stop is likely ≈ **170–250 ms** on built-in speakers, and **≤ 100 ms p50 is unlikely there**. Only the owner's real-voice run (below) settles it.
+
+**(4) Kokoro in Swift: feasibility.** It could not be built here: `git clone` needed an approval nobody was there to give. The facts below come from the projects' own pages.
+
+| path | license (code / weights / G2P) | Italian | streaming | notes |
+|---|---|---|---|---|
+| `soniqo/speech-swift` `KokoroTTS` (CoreML) | Apache-2.0 / Apache-2.0 (hexgrad/Kokoro-82M, CoreML conversion) / Apache-2.0, "no GPL" (own claim) | voices `if_sara`, `im_nicola`; a rule-based `LatinPhonemizer.swift` (Italian quality unverified) | not documented | macOS 15+, ≈ 170 MB (≈ 80 MB INT8) |
+| `FluidInference/FluidAudio` (CoreML) | Apache-2.0 / Apache-2.0 / **eSpeak-NG, GPL-3.0** | via eSpeak | **no** ("generates all frames at once") | **excluded: GPL** |
+| `mlalma/kokoro-ios` (MLX Swift) | MIT / Apache-2.0 / MisakiSwift (English); eSpeak commented out | **no** | — | excluded for it-IT |
+
+- First-audio reference (V0, Kokoro ONNX on CPU, short clause): it 290 ms, en 237 ms p50, non-streaming. The system voice takes 11–14 ms to its first buffer.
+- **Verdict:** not in v1 (consistent with Owner Q5). The only license-clean Italian path is speech-swift, and its Italian G2P is unproven. Revisit as a Mac opt-in only after an owner listening test of `im_nicola`/`if_sara` through that phonemizer. To try it: `git clone https://github.com/soniqo/speech-swift && cd speech-swift && make build`.
+
+**(5) Ctrl+R twice: key delivery.** The probe drives a real pty (`keyprobe/drive.py`) into an Ink 5.0.1 app that uses the TUI's raw path: `useInput` plus `isVoiceKey` from `packages/tui/src/keys/layer-voice.ts`.
+- Terminal.app, iTerm2 (default) and Ghostty in legacy keyboard mode all send Ctrl+R as one `0x12` byte per press. The probe reproduces exactly that. The real terminal apps were not driven.
+
+| case | events seen |
+|---|---|
+| two presses, gap 1 / 5 / 20 / 50 / 80 / 120 / 200 / 300 / 450 / 600 ms | **2** each (measured gaps 0.2 … 611 ms) |
+| two presses, loop busy 150 ms *after* the first | 2 |
+| both bytes in **one** read (one write, or loop busy 200 ms *before* the first press with a gap of 20 or 80 ms) | **1**: Ink parses `\x12\x12` as a *single* `ctrl+r`, indistinguishable from one press |
+| loop busy 200 ms before, gap 250 ms | 2 |
+| iTerm2 opt-in "Report modifiers using CSI u" (`ESC[114;5u`) | 0 voice-key events, even for a *single* press (`char="[114;5u"`, `ctrl=false`); this already affects V1's Ctrl+R |
+
+- **Verdict:** the double press is distinguishable whenever the TUI's event loop is not blocked for longer than the gap. A coalesced chunk silently turns into one press.
+- **C4 should:**
+  1. count `0x12` bytes in the raw chunk before Ink collapses it. Ink's `keypress.sequence` is lost, so this needs an stdin `data` pre-listener or a parse of the raw chunk.
+  2. use a ≈ 400 ms window, and defer the single-press (dictation) action until the window closes, or make the second press "upgrade" an already started dictation.
+  3. optionally accept `ESC[114;5u` as `ctrl+r`.
+
+**Mac full/half-duplex recommendation.**
+- **Built-in speakers: half-duplex by default.** The mic is gated while the assistant speaks; Esc stops speech.
+  - The zero-false gate sits exactly on the echo-residual tail, with no margin.
+  - VP's AGC compresses near speech into the same range.
+  - The 100 ms tap and the output path push the audible stop above 100 ms.
+  - Full-duplex on speakers becomes the default only if `owner-run.sh` shows, at the owner's real volume, all of: 0 false barge-ins in the soak, ≥ 90 % real-voice detection, and onset → stopped (engine) ≤ 60 ms p50, which leaves ≈ 90 ms for the output path.
+- **AirPods (in and out): expected full-duplex.** The echo path is acoustically separated; the owner verifies.
+- **Mac mic + AirPods output: expected full-duplex.** There is no speaker echo; the owner verifies.
+- **C1b changes regardless of the outcome:**
+  - capture with `AVAudioSinkNode`, not `installTap`;
+  - VP AGC **off** (`isVoiceProcessingAGCEnabled = false`);
+  - the barge-in gate is **Silero VAD on the post-AEC signal**, not the −45 dBFS placeholder, with the level gate ≥ −48 dBFS / 60 ms as a pre-filter (the raised-threshold fallback of `realtime-media.md:540-541`);
+  - warm each voice at start.
+
+**For the owner (≈ 10 min):** `cd .tentacle/tmp/voice-conversation/c1 && sh owner-run.sh`. The script prompts per route and prints the numbers.
+1. Volume at your normal level, not muted. Close music and calls.
+2. **Route 1 — built-in speakers + mic:** interrupt the assistant 8 times in your normal voice, with short sentences.
+3. **Route 2 — AirPods in your ears (input and output):** stay silent 3 min, then 8 interruptions.
+4. **Route 3 — AirPods output + "MacBook Pro Microphone" input** (System Settings › Sound): stay silent 3 min, then 8 interruptions.
+5. Paste the three blocks (or say "done": the logs are in `c1/out/owner-*.jsonl`), then re-mute if you want (`swift mute.swift 1`).
+
+**Not done, and why:**
+- the real-voice stop latency and the AirPods routes (they need a human);
+- Silero on the post-AEC audio (the WAV dump was dropped when capture moved to the sink node, then permissions closed);
+- the Kokoro build (`git clone` approval);
+- a stop run at the AGC-on gate with louder injection (permissions closed).
+
+### C3 — voice-turn profile (§4) · *— Claude, 2026-11-15 (Anthropic model id not exposed to this session; executor: tentacle)*
+
+**Scope.** Slice C3 only: §4's per-turn voice profile, on both ends of the wire
+and at the provider. Nothing of C1/C1b/C4/C5 (Mac helper, TUI) or P1–P4
+(the phone) was touched, and no other slice's behaviour changed.
+
+**Load-bearing check (run FIRST, per the brief).** §4's assumption: "the agent
+loop builds one turn's `ChatRequest` in one place, so (a)/(b) need no history
+change." Re-run on this branch (`.tentacle/tmp/voice-conversation/c3/load-bearing.txt`):
+every `ChatRequest` construction site is `agent.ts:1281` (a turn's rounds),
+`agent.ts:1607` (that same turn's exhausted-budget report), and
+`compact.ts:118,160` (compaction, not a turn). Every `config.model.stream(`
+call site is `agent.ts:1301,1619`. **PASSES** — and the builder at 1281 is fed
+by `modelView(messages)`, already a COPY of the history, which is exactly what
+F10 needs: the profile is added to that copy and the history is never touched.
+
+**As built, in dependency order.**
+
+1. **Protocol** (`packages/protocol/src/session.ts`, `model.ts`):
+   `VoiceTurnSchema = { reasoning: "off" | "keep" }`, `voice?:` on
+   `PromptParamsSchema` and `EnqueueParamsSchema`, and
+   `reasoning?: "off"` on `WireChatRequestSchema`. All three stay strip schemas
+   (re-checked: no `.strict()`, and the regenerated JSON schema shows
+   `additionalProperties: true`), so **no `protocol.d/` note and no
+   `PROTOCOL_VERSION` edit** — an older daemon drops `voice` (a normal turn),
+   an older pod never sends `reasoning`.
+2. **Core** (`packages/core/src/model.ts`): `VoiceReasoning`, `VoiceTurn`, and
+   `ChatRequest.reasoning?: "off"`. The pure rule lives in the new
+   `packages/core/src/voice/turn-profile.ts` — `voiceReasoning` (the window:
+   `off` until the turn's FIRST tool call) and `withSpokenLine` (the line goes
+   after the leading system prompt, is never added twice, and never mutates its
+   input).
+3. **Agent loop** (`packages/agent/src/agent.ts`): `RunOptions.voice` +
+   `RunOptions.voiceMark`, a per-turn `voice`/`toolCalled` pair in
+   `runMessages`, `voiceRequest()` applied at the one round builder (`:1281`)
+   and the forced report (`:1607` — the line only: that call exists because the
+   turn spent its rounds on tool calls, so the reasoning window is closed),
+   and `toolCalled = true` at the round's first tool call.
+4. **Session** (`packages/agent/src/session.ts`): `SendOptions.voice`,
+   `enqueue(text, voice?)`, and the mark queue (`voiceMarks`/`pendingVoice`,
+   drained in step with the steer texts by `drainSteering`, read once per round
+   by `takeVoice`). A voice steer re-marks the REST of its turn and REOPENS the
+   reasoning window at that round, as §4 says. `resume` drains through the same
+   helper (a resumed turn's own profile is not restored: nothing transient is
+   stored — the first drift below).
+5. **Daemon** (`packages/daemon/src/{connection,hosted-session}.ts`): both
+   handlers pass `params.voice` through to `HostedSession.prompt/enqueue` and on
+   to `Session.send/enqueue`. Nothing else in the daemon learned about voice —
+   no persistence path sees it, by construction.
+6. **Providers** (`packages/providers/src/openai-provider.ts`): for
+   `reasoning: "off"`, `reasoning_effort: "none"` + `chat_template_kwargs:
+   { enable_thinking: false }`, both built in ONE place (`buildPayload`); a 400
+   → exactly one retry without them, latched per provider instance (F9).
+   Anthropic is unchanged.
+7. **Tunnel + client** (`packages/daemon/src/proxy-model.ts`,
+   `packages/client/src/{remote-client,remote-session}.ts`): `toWireRequest`
+   copies `reasoning` (the pod runs the loop but the laptop owns the model);
+   `RemoteClient.prompt/enqueue` take an optional `voice` and spread it ONLY
+   when given; `RemoteSession.send/enqueue` carry it, and the turn stores it
+   for keyed re-sends after a drop.
+
+**Drift from the Implementation (and why).**
+
+- **§4 says the profile rides the turn; a RESTARTED turn has none.** `resume`
+  deliberately does not reconstruct it: the daemon stores nothing
+  (`Preconditions`), so a turn cut by a `serve` restart resumes as an ordinary
+  turn unless a voice steer re-marks it. Recorded here rather than papered over;
+  it is the honest consequence of the no-persistence rule, and the alternative
+  (persisting the profile) would violate F10.
+- **The line is a `system` message placed after the leading system prompt**,
+  not "appended". Same bytes every round of the turn, so the provider's prompt
+  cache still holds the turn's prefix; the plan did not pin the position.
+- **`voiceRestart` was dropped** from the loop's state: `restarted` is acted on
+  where it is read (reopen the window), so a second flag was dead weight.
+
+**Tests (T6–T8), all red-first by mutation (`.tentacle/tmp/voice-conversation/c3/mutations.txt`).**
+
+- `packages/protocol/test/voice-turn.test.ts` — both fields parse, both values
+  survive, and an ordinary payload still parses.
+- `packages/core/test/voice/turn-profile.test.ts` — the pure rule: the window
+  closes at the first tool call, `keep` never emits, the line's position, the
+  no-mutation and no-duplicate properties.
+- `packages/daemon/test/voice-turn.test.ts` — the loop: `off` before the first
+  tool call with the line on both rounds and `reasoning` gone after it; `keep`
+  → line, no field; an ordinary turn → neither; a voice `enqueue` marks the rest
+  of the turn. Plus two WIRE tests over a real `Connection` frame.
+- `packages/cli/test/voice-turn-f10.test.ts` — **F10 on real files**: a real
+  `startDaemon`, a real `<configDir>/daemon/…/<uid>.jsonl` store and a real
+  `session/log`, neither carrying the line while the user's words are there.
+- `packages/daemon/test/voice-turn-tunnel.test.ts` — `reasoning` survives
+  both hops of the pod tunnel (`toWireRequest` and the loop that sets it).
+- `packages/client/test/voice-turn-client.test.ts` — `prompt`/`enqueue` put
+  `voice` on the FRAME only when asked, and an ordinary frame is byte-for-byte
+  what it was.
+- `packages/providers/test/reasoning-off.test.ts` — the OpenAI payload with and
+  without the switches, one retry on a 400 then remembered, no retry on a 500,
+  and Anthropic byte-identical.
+
+**Mutation results (each reverted; suite green after every revert).**
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `voiceReasoning` ignores `toolCalled` | 3 red (loop T6, F10, unit) |
+| M2 | push the line onto the LOOP's `messages` | 2 red on the real `serve` store + `session/log` |
+| M3 | ignore `keep`, always emit `off` | 2 red |
+| M4 | drop `params.voice` in `Connection.prompt` | 1 red |
+| M5 | drop `reasoning` in `toWireRequest` | 2 red |
+
+M2 is worth one line: a first attempt appended to `view.messages` and stayed
+**green — correctly**, because that is `modelView`'s copy, not the history. The
+mutation only means anything at the history array, and there it is caught by
+both the in-memory snapshot and the on-disk store.
+
+**Gate.** `bunx tsc --noEmit` (plus `apps/mobile` and `apps/relay`) clean; `bun
+run lint` clean (1634 files, 0 findings, matching the §6 baseline); `bun test`
+**11714 pass, 5 skip, 0 fail** (845 files, 424 s) — the 5 skips are the
+documented opt-in ones (§6 lint/test baseline). `packages/protocol/schema/protocol.json`
+regenerated (`bun run schema:export`): +21 lines, the new `VoiceTurn` def and
+the three field additions.
+
+One flake seen and cleared, reported honestly: `packages/agent/test/resume.test.ts`
+S1 failed once with `durationMs: 0` vs `1`. It is **pre-existing and unrelated**
+— it fails identically with this slice's changes to `Session.resume` reverted,
+and passed in the full run above; it is a wall-clock assertion in a test this
+slice did not touch.
+
+**Changelog.** `changelog.d/voice-turn-profile.changed.md`, its own file: the
+guard requires one bullet per fragment, and C2's
+`changelog.d/voice-conversation.changed.md` stays byte-identical to HEAD.
+
+**Unverified.** The provider's exact wire strings (`reasoning_effort: "none"`,
+`chat_template_kwargs.enable_thinking`) are what the plan names; no live
+OpenAI-compatible or llama.cpp endpoint was called from this slice. The F9
+fallback is proven only against injected `fetch` (a scripted 400), so a real
+endpoint that rejects them differently (a 422, or a 200 that ignores them) is
+untested — verify by pointing a voice turn at a thinking-enabled llama.cpp and
+reading the request body it logs.
+
+### C3 second pass — concurrent-worker audit + independent verification · *— deepseek-v4-flash (tentacle CLI, `--profile deepseek`), 2026-11-15*
+
+**Why this section exists.** A second executor was spawned for `feat/voice-conversation`
+C3 while a first one was already running it **in the same worktree**
+(`.tentacle/worktrees/voice-conversation`). `ps` at 21:48 showed both
+(`tentacle --profile deepseek`, PIDs 45102 started 21:05 and 46122 at 21:09) with
+this exact prompt. So this worktree's C3 state was produced by **two writers
+interleaving**: the section above (`### C3 — voice-turn profile`) is the other
+worker's, written at 21:44, and it is accurate about the tree it saw. This
+section records what a second pair of eyes re-ran independently, and the drift
+between the two passes.
+
+**What I re-verified from scratch (not trusting the section above).**
+
+- **Load-bearing check, re-run first** (`.tentacle/tmp/voice-conversation/c3-load-bearing.txt`):
+  the ONE turn-round `ChatRequest` builder is `packages/agent/src/agent.ts:1217`
+  (1281 after this pass's edits), with the forced final report at `:1536` and
+  `compact.ts:118,160` (compaction, not a turn); every `config.model.stream(`
+  call site is those two loop sites plus `compact.ts:71`. `rg '.strict()'` in
+  `packages/protocol/src` matches **comments only** (0 schemas), so adding
+  optional fields needs no `protocol.d/` note. **PASSED** — the slice proceeded.
+- **Independently written tests, all red-first:**
+  - `packages/protocol/test/voice-turn.test.ts` — both fields on `prompt`/`enqueue`,
+    both values, absence stays absent, an unknown reasoning value is refused
+    (never coerced), `WireChatRequest.reasoning` round-trips.
+  - `packages/core/test/voice/turn-profile.test.ts` — the window closes at the
+    first tool call; `keep` never emits; the line's position after the leading
+    system prompt; added once; **the input history is never mutated**.
+  - `packages/daemon/test/voice-turn.test.ts` — `off` → field + line before the
+    tool call and no field after (line stays); `keep` → line, no field; a typed
+    turn → neither; a voice `enqueue` re-marks the rest of the turn and reopens
+    the window; **plus two WIRE tests** over a real `Connection` proving
+    `session/prompt{voice}` and `session/enqueue{voice}` are not stripped.
+  - `packages/daemon/test/voice-turn-tunnel.test.ts` — `toWireRequest` carries
+    `reasoning`; an ordinary turn sends no such key; the pod's own loop sets it
+    only for a voice turn.
+  - `packages/client/test/voice-turn-client.test.ts` — the FRAME carries `voice`
+    only when the caller asks (the daemon parses strip schemas, so a forgotten
+    field would be silent).
+  - `packages/providers/test/reasoning-off.test.ts` — both switches present with
+    `off`, absent otherwise; a 400 costs exactly one retry **and is remembered**;
+    a 400 on the plain body too is the turn's real failure (no loop); a 500 is
+    never retried (that is the retry layer's); Anthropic byte-identical.
+  - `packages/cli/test/voice-turn-f10.test.ts` — **F10 over real files**: a real
+    `startDaemon`, its real `<configDir>/daemon/…/<uid>.jsonl` and its
+    `session/log`, neither carrying the transient line while the user's words are
+    present (so a "nothing was written" pass cannot fool it).
+
+**Mutations I ran (real files, byte-exact restore, never `git checkout`).**
+Script `.tentacle/tmp/voice-conversation/mutations-c3.ts`.
+
+```
+MUTATION T6 daemon drops params.voice (Connection.prompt): RED (1 fail)
+MUTATION T6 ignore `keep` (agent always emits reasoning off): RED (3 fail)
+MUTATION T6 never close the window at the first tool call: RED (1 fail)
+MUTATION F10 the line into the HISTORY instead of the request: RED (2 fail)
+MUTATION T7 toWireRequest drops reasoning (pod half): RED (2 fail)
+MUTATION T7 client drops voice in prompt: RED (1 fail)
+MUTATION T7 client drops voice in enqueue: RED (1 fail)
+MUTATION T8 provider omits the reasoning switches: RED (4 fail)
+MUTATION T8 F9 no retry on a 400: RED (4 fail)
+MUTATION T8 F9 not remembered (retries every turn): RED (1 fail)
+----
+ALL MUTATIONS RED (every target test is non-vacuous)
+```
+
+(The block was re-run on the FINAL tree, after the round-1 fixes below — two sites
+had moved with the reformatting and with the success-latch, so they were
+re-anchored, not skipped.)
+
+**A plan target that had to be replaced, and why** (AGENTS §8: fix the plan, do
+not force the code). **T7's "spread `voice` unconditionally" is unobservable:**
+`{voice: undefined}` and `{}` serialise to the SAME frame, because JSON drops
+`undefined` members, so that mutation proved **GREEN/vacuous** on its first run.
+Replaced with the two properties that are real and both go red — *drop `voice` in
+`prompt`* and *drop `voice` in `enqueue`*. The plan's §Tests bullet names the
+unobservable form and should be corrected. The other pass hit the same class
+from the other side (its M2: appending to `view.messages` stays green because
+that is already `modelView`'s copy, not the history). Same lesson: **mutate the
+history array, not the request's copy.**
+
+**Gate, re-run on the combined tree by this pass (and again on the final tree,
+after the two round-1 fixes).** `bunx tsc --noEmit` clean (exit 0); `bun run lint`
+clean (`biome check .`, 1634 files, 0 findings, matching the AGENTS §6 baseline);
+`bun test` **11722 pass, 5 skip, 0 fail** across 845 files — the 5 skips are
+exactly the opt-in baselines (2 docker, 2 k8s, `ws-server` `skipIf(!SLOW)`), no
+new skip and no new failure. The C3 tests alone: **187 pass, 0 fail** over 17
+files. `bun run schema:export` regenerated
+`packages/protocol/schema/protocol.json` (+21 lines, the `VoiceTurn` def and
+three field additions); idempotent, so `json-schema.test.ts` shows no drift.
+
+**Changelog: two fragments exist, one too many (an orchestrator call).**
+`changelog.d/voice-conversation.changed.md` is the plan's whole-task fragment
+(C2's pass). This slice is user-visible too, and the other worker added
+`changelog.d/voice-turn-profile.changed.md` for it. This task's prompt asked for
+`changelog.d/voice-conversation.<category>.md`, which the tree already has, so I
+added **no third** and deleted nothing (the other worker's documents the same
+slice from its pass). Keep exactly one at merge.
+
+**Unverified / open.**
+
+- The provider's exact wire strings (`reasoning_effort:"none"`,
+  `chat_template_kwargs.enable_thinking:false`) never reached a live
+  OpenAI-compatible or llama.cpp endpoint: F9 is proven only against injected
+  `fetch`. Verify by pointing one voice turn at a thinking-enabled llama.cpp and
+  reading the body it logs (a server rejecting them as 422, or
+  accepting-and-ignoring them, is untested).
+- A voice turn cut by a `serve` restart resumes as an ordinary turn: nothing
+  transient is persisted, which is F10, and persisting it would break F10.
+  Recorded, not fixed.
+- This slice says nothing about the TUI/phone wiring that CONSUMES the profile
+  (reading the edge's setting and passing `voice` at send time): that is C4/P3.
+
+**Concurrency caveat, stated plainly.** Three executors shared this worktree, so
+"DONE" below means *the tree as verified by this pass*. A concurrent writer
+changing these files afterwards would invalidate it. That is a process problem
+(one worktree per executor), not a code problem — escalated, not solved here.
+
+**Two genuine C3 defects found and fixed AFTER this pass first verified the tree**
+(by the round-1 worker; I re-verified both and re-ran every mutation on the
+final code, which is why the numbers above are the post-fix ones):
+
+1. **The forced final report never consumed a voice mark**
+   (`packages/agent/src/agent.ts`, the `max_iterations` report). That request is
+   built BY HAND (no tools, no `reasoning`), so a voice steer drained into it
+   answered a listening person with no spoken-style line. Fixed with `markVoice()`
+   before the report; regression test in `packages/daemon/test/voice-turn.test.ts`
+   ("the max_iterations final report still speaks"), which asserts the mark is
+   consumed, the line present, and the history still clean.
+2. **F9's "remembered" latched on the WRONG signal.** It set
+   `reasoningSwitchesRefused = true` on ANY 400, including a 400 for an unrelated
+   cause (context over the limit, a refused tool schema, an oversized image) —
+   after which every later voice turn of a long-lived daemon silently reasoned.
+   Fixed to latch only when the switch-free retry SUCCEEDS
+   (`this.reasoningSwitchesRefused = res.ok`), and the rejected body is released
+   (`discardBody`). The "a 400 on the plain body too" test covers it.
+
+Both are in the tree and covered by the 187 C3 tests / the final full suite below.
+
+**Per-slice status: C3 DONE**, with (i) the plan's T7 client mutation replaced
+because the stated form is unobservable and (ii) the process caveat above. No
+PARTIAL on behaviour: every field, every rule of §4, F9 and F10 is implemented
+and pinned by a test that was shown red.
+
 ## Review
 
 ### C2 review · *— claude-opus-5-5, 2026-11-15*
@@ -1025,6 +1419,84 @@ way — and a `hush` the edge honours reports nothing further by design. The
 residual is the same round-1 contract as above: the edge owns playback.
 (Round 3's non-blocking notes O and P were left untouched, as the review said
 they do not block.)
+
+### C3 review · *— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM; no HIGH). Scope: C3 only, `git diff main...HEAD`.
+The executors were deepseek-v4-flash plus an unnamed tentacle executor. This
+reviewer is a different family for the deepseek pass; the other's model is unknown.
+
+**Finding 1 (MEDIUM): the F9 latch fires on ANY 400, including ones unrelated to the switches.**
+At `packages/providers/src/openai-provider.ts:224-227`, `reasoningSwitchesRefused = true`
+is set before the retry's result is known. Failure scenario: a voice turn's
+request gets a 400 for another reason: context over the server's limit, an
+image too large, or a tool schema the server refuses. Many OpenAI-compatible
+servers return 400 for all of these, and this repo has no overflow handling of
+its own (`rg "status === 400"` finds only this site). The retry also gets a 400,
+so the turn fails as it would have anyway. But the latch is now permanent for
+the provider instance, which is the life of a `serve` daemon. From then on every
+voice turn silently reasons, against the owner's switch. That is a loud failure
+turned into a silent wrong state. Fix: latch only when the retry without the
+switches succeeds (`res.ok`). Test: a 400 on both bodies, then the next voice
+turn still sends the switches. **Non-vacuity gap:** the mutation "latch only if
+the retry is ok" stays GREEN on `reasoning-off.test.ts` (11 pass), so no test
+pins this behaviour either way.
+
+**Gate (re-run).** The 7 C3 test files pass: 28 pass, 0 fail. `bun run lint`
+checks 1634 files with 0 findings. `bun run typecheck` is clean. I did not
+re-run the full `bun test`: both executor passes report 0 fail.
+
+**Mutations (each reverted; `git status` clean afterwards).**
+- M-A: a voice steer no longer reopens the window (`agent.ts` `mark.restarted`
+  becomes a no-op). Result: RED, 1 fail in `voice-turn.test.ts`.
+- M-B: the F9 latch is set only on a successful retry. Result: GREEN. This is
+  the gap in Finding 1.
+
+**Attacks tried that found nothing at MEDIUM or above.**
+1. F10: is the line reachable by persistence? It is added only to `modelView`'s
+   copy (`agent.ts:1280`) and to the final report's array. `notifyModelRequest`
+   hands it to user hooks only, and a hook persists nothing of tentacle's. Holds.
+2. Steer/mark desync: every `steering` mutation now drains `voiceMarks` in step
+   (`session.ts:180-181,290-291,307-308`). The hosted resume path
+   (`hosted-session.ts:920`) re-enqueues without a mark. That matches the
+   documented drift "a restarted turn has no profile".
+3. Model-on-laptop and pod trust: the laptop passes `reasoning` through by cast
+   (`remote-client.ts:3727`), and the schema limits it to the literal `"off"`.
+   The worst a hostile pod can do is a no-reasoning request. No new effect on
+   the laptop.
+4. Forward compatibility: all three fields are optional on strip schemas, so no
+   `protocol.d` note is needed. That is correct.
+
+**LOW (not blocking).** A voice steer drained right before the `max_iterations`
+final report (`agent.ts:1590`) is not consumed by `markVoice`. On a non-voice
+turn, that report therefore lacks the spoken line. The first 400 response body
+is never read or cancelled.
+
+### C3 review, round 2 · *— claude-opus-5-5, 2026-11-15*
+
+**Verdict: PASS (APPROVE)**: no HIGH or MEDIUM. Scope: C3, `git diff main...HEAD`,
+focused on commit `879be7ea` (the round-1 fixes). The reviewer is the same model as
+round 1, in a fresh context, and a different family from the deepseek executor.
+
+- **Finding 1 (F9 latch) is fixed.** `openai-provider.ts:232` is now
+  `reasoningSwitchesRefused = res.ok`, set after the switch-free retry. The
+  rejected body is cancelled (`discardBody`, `:228`).
+- **The LOW is fixed.** `markVoice()` is called before the hand-built
+  `max_iterations` report (`agent.ts:1597`). The spoken line rides only on
+  `finalMessages`, never on `messages`, so F10 holds.
+- **Gate.** The 7 C3 test files: 31 pass, 0 fail. `bun run lint`: 1634 files, 0
+  findings. `bun run typecheck`: clean. Full `bun test` was not re-run here.
+- **Mutations** (each reverted from a scratch copy; `git status` clean afterwards):
+  - Latch back to `true`: RED, 1 fail (`reasoning-off.test.ts`).
+  - Drop `discardBody`: RED, 1 fail.
+  - Drop only the report's `markVoice()`: RED, 1 fail (`voice-turn.test.ts`).
+- **Attacks that found nothing.**
+  - A retry that answers 5xx leaves the latch false, so the next turn tries the
+    switches again. Correct.
+  - The latch is written only when `wantOff` was true, so it can never be reset
+    from a state that was already latched.
+  - Every `steering` mutation still drains `voiceMarks` in step
+    (`session.ts:180-181,290-291,307-308`).
 
 #### Owner answers (2026-11-15, batch 1)
 

@@ -41,10 +41,14 @@ import {
   type ToolProgressEvent,
   type ToolResult,
   type Usage,
+  type VoiceReasoning,
+  type VoiceTurn,
   allowAll,
   answerOutstandingCalls,
   countTokensBounded,
   subagentReportNote,
+  voiceReasoning,
+  withSpokenLine,
 } from "@tentacle/core";
 import {
   CONTEXT_RESET_TOOL_NAME,
@@ -175,6 +179,29 @@ export interface RunOptions {
    * nothing to persist.
    */
   readonly beforeResumedCall?: BeforeResumedCall;
+  /**
+   * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3):
+   * `off` reasons for no more than the rounds before the turn's first tool
+   * call. Present at all ⇒ every round also carries the transient spoken-style
+   * system line — on the REQUEST only, never in the history (F10).
+   */
+  readonly voice?: VoiceTurn;
+  /**
+   * The voice profile in force, CONSUMED per round (synchronous, never awaited):
+   * a voice steer accepted mid-turn lands here, so the rounds after it carry
+   * its own `reasoning`, and `restarted` reopens the reasoning-off window at
+   * that round (§4: "an enqueued voice steer marks the rest of its turn as a
+   * voice turn"). `undefined` → the turn's own `voice` alone applies. The
+   * caller owns the queue, so the caller owns the mark (`Session.takeVoice`).
+   */
+  readonly voiceMark?: () => VoiceMark | undefined;
+}
+
+/** What a voice turn asks of one round: see `@tentacle/core`'s `voiceReasoning`. */
+export interface VoiceMark {
+  readonly reasoning: "off" | "keep";
+  /** A voice steer landed since the last round: the reasoning-off window reopens here. */
+  readonly restarted: boolean;
 }
 
 /** `RunOptions.beforeRun`: resolves whether the group's in-flight set is durable. */
@@ -1184,6 +1211,42 @@ export class Agent {
      * text is kept, owner Q1a), so the honest end is silence on that count.
      */
     let turnSaidSomething = false;
+    /**
+     * This turn's voice profile (docs/feat/voice-conversation.md §4, C3):
+     * `null` = not a voice turn, so no line and no `reasoning`. A voice steer
+     * accepted later re-marks the rest of the turn (`voiceMark`), with its own
+     * `reasoning` and a REOPENED reasoning-off window — the loop owns that
+     * window, because only it knows whether a tool call has run.
+     */
+    let voice: VoiceReasoning | null = opts.voice?.reasoning ?? null;
+    /** A tool call has run in this turn: the reasoning-off window is closed. */
+    let toolCalled = false;
+    const markVoice = (): void => {
+      const mark = opts.voiceMark?.();
+      if (mark === undefined) {
+        return;
+      }
+      voice = mark.reasoning;
+      // A voice steer REOPENS the window at this round: the person just spoke
+      // again, so its answer is wanted now, whatever ran before it.
+      if (mark.restarted) {
+        toolCalled = false;
+      }
+    };
+    /** The voice fields of the request about to be built (never in the history). */
+    const voiceRequest = (
+      messages: ChatMessage[],
+    ): { readonly messages: ChatMessage[]; readonly reasoning?: "off" } => {
+      markVoice();
+      if (voice === null) {
+        return { messages };
+      }
+      const reasoning = voiceReasoning({ reasoning: voice, toolCalled });
+      return {
+        messages: withSpokenLine(messages),
+        ...(reasoning !== undefined ? { reasoning } : {}),
+      };
+    };
     for (let iteration = 0; iteration - budgetFrom < maxIterations && !overBudget(); iteration++) {
       if (signal?.aborted) {
         this.notifyTurnEnd(sessionId, "cancelled");
@@ -1214,12 +1277,14 @@ export class Agent {
       // (enabled or not), so every request repeats the same bytes for a
       // message an earlier one sent — the provider's prompt cache holds.
       const view = modelView(messages);
+      const voiceTurn = voiceRequest(view.messages);
       const request: ChatRequest = {
-        messages: view.messages,
+        messages: voiceTurn.messages,
         tools,
         ...(this.config.temperature !== undefined ? { temperature: this.config.temperature } : {}),
         ...(signal ? { signal } : {}),
         ...(this.config.attachments ? { attachments: this.config.attachments } : {}),
+        ...(voiceTurn.reasoning !== undefined ? { reasoning: voiceTurn.reasoning } : {}),
       };
       if (view.repairs !== null) {
         yield { type: "history_repaired", ...view.repairs };
@@ -1357,6 +1422,12 @@ export class Agent {
       // Any real progress (text or a tool call) resets the stall counter.
       if (toolCalls.length > 0 || text.trim() !== "") {
         emptyRounds = 0;
+      }
+      // §4 (a): a voice turn's "answer fast" window closes at its FIRST tool
+      // call — the model asked for real work, so the rounds after it reason as
+      // configured, for the rest of the turn.
+      if (toolCalls.length > 0) {
+        toolCalled = true;
       }
       if (text.trim() !== "") {
         turnSaidSomething = true;
@@ -1520,13 +1591,17 @@ export class Agent {
         messages.push({ role: "user", content: text });
         yield { type: "steer", text };
       }
+      // That drain may have carried a voice steer, so this report is part of a
+      // voice turn: consume the mark here too. This is the ONE request the loop
+      // builds by hand, and skipping it answered a spoken person unspeakably.
+      markVoice();
       try {
         const view = modelView(messages);
         if (view.repairs !== null) {
           yield { type: "history_repaired", ...view.repairs };
         }
         const finalMessages: ChatMessage[] = [
-          ...view.messages,
+          ...(voice === null ? view.messages : withSpokenLine(view.messages)),
           {
             role: "user",
             content: nudge,
@@ -1540,6 +1615,9 @@ export class Agent {
             : {}),
           ...(signal ? { signal } : {}),
           ...(this.config.attachments ? { attachments: this.config.attachments } : {}),
+          // No `reasoning`: this call exists because the turn SPENT its rounds on
+          // tool calls, so a voice turn's reasoning-off window is closed — only
+          // the spoken line still applies to it.
         };
         this.notifyModelRequest(sessionId, "final", finalRequest);
         for await (const event of this.config.model.stream(finalRequest)) {

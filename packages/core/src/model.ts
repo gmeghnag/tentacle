@@ -136,6 +136,14 @@ export type StreamEvent =
   | { readonly type: "tool_call"; readonly toolCall: ToolCall }
   | { readonly type: "done"; readonly usage?: Usage; readonly stopReason?: ModelStopReason };
 
+/**
+ * The voice-turn profile of one request (docs/feat/voice-conversation.md §4,
+ * C3). `off`: reason for no more than this turn's rounds BEFORE its first tool
+ * call (a spoken reply is wanted now, not a long think); `keep`: reason as
+ * configured. Both are a VOICE turn, which always gets the spoken-style line.
+ */
+export type VoiceReasoning = "off" | "keep";
+
 export interface ChatRequest {
   readonly messages: readonly ChatMessage[];
   readonly tools?: readonly ToolDefinition[];
@@ -148,6 +156,11 @@ export interface ChatRequest {
    * and the laptop's request carries whatever the laptop itself is allowed to read.
    */
   readonly attachments?: AttachmentSource;
+  /**
+   * `"off"`: do not reason on this request (a voice turn, C3). A provider that
+   * cannot honour it ignores it — never an error, never a failed turn.
+   */
+  readonly reasoning?: "off";
 }
 
 /**

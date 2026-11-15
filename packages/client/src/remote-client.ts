@@ -86,6 +86,7 @@ import {
   type SnapshotResult,
   type SubagentRow,
   type UpdateSettingsResult,
+  type VoiceTurn,
   type WireStreamEvent,
   text,
 } from "@tentacle/protocol";
@@ -2401,10 +2402,12 @@ export class RemoteClient {
 
   /**
    * Start a turn; resolves with the daemon's ack (the turn ends in the stream).
-   * Re-sent after a drop (with the same params, `skill` included). `onSent`
-   * fires when the frame is first written to a channel: until then no daemon
-   * can have run it. `skill`: the user's `/name` activation (structured — the
-   * daemon never parses `prompt`).
+   * Re-sent after a drop (with the same params, `skill` and `voice` included).
+   * `onSent` fires when the frame is first written to a channel: until then no
+   * daemon can have run it. `skill`: the user's `/name` activation (structured —
+   * the daemon never parses `prompt`). `voice`: this turn came from voice mode
+   * (docs/feat/voice-conversation.md §4, C3) — sent ONLY when the caller asks,
+   * so an ordinary turn's frame is byte-for-byte what it was.
    */
   prompt(
     sessionId: string,
@@ -2413,6 +2416,7 @@ export class RemoteClient {
     onSent?: () => void,
     skill?: string,
     attachments?: readonly AttachmentRef[],
+    voice?: VoiceTurn,
   ): Promise<PromptResult> {
     // An image-only prompt is `[attachment, …]` with no text block at all: a
     // `{type:"text",text:""}` would read as an empty prompt daemon-side.
@@ -2426,7 +2430,13 @@ export class RemoteClient {
     return this.sessionCall(
       sessionId,
       Method.Prompt,
-      { sessionId, turnId, content, ...(skill !== undefined ? { skill } : {}) },
+      {
+        sessionId,
+        turnId,
+        content,
+        ...(skill !== undefined ? { skill } : {}),
+        ...(voice !== undefined ? { voice } : {}),
+      },
       "keyed",
       onSent,
     ).then((result) => result as PromptResult);
@@ -2477,12 +2487,19 @@ export class RemoteClient {
   /**
    * Queue a user message for the running turn `turnId` (steering, mid-turn
    * only). `id` is the idempotency key: resending it is a no-op success.
+   * `voice`: a voice-mode steer (C3), sent only when the caller asks.
    */
-  enqueue(sessionId: string, id: string, turnId: string, text: string): Promise<void> {
+  enqueue(
+    sessionId: string,
+    id: string,
+    turnId: string,
+    text: string,
+    voice?: VoiceTurn,
+  ): Promise<void> {
     return this.sessionCall(
       sessionId,
       Method.Enqueue,
-      { sessionId, id, turnId, text },
+      { sessionId, id, turnId, text, ...(voice !== undefined ? { voice } : {}) },
       "keyed",
     ).then(() => undefined);
   }

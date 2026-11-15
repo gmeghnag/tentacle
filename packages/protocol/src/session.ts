@@ -315,6 +315,24 @@ export function isWakeTurnId(id: string): boolean {
   return id.startsWith(WAKE_TURN_PREFIX);
 }
 
+/**
+ * The voice-turn profile (docs/feat/voice-conversation.md §4, C3): the edge
+ * that SENT this turn is a person who is listening, not reading.
+ *
+ * `reasoning` is that edge's OWN "reasoning off for spoken replies" setting,
+ * read at send time, so a phone and a TUI on the same session each send their
+ * own. The daemon keeps no switch of its own and stores nothing: the profile
+ * rides the request and is never written to the history or to disk.
+ *
+ * Present = a voice turn (it always gets the transient spoken-style line, see
+ * `@tentacle/core`'s `VOICE_SPOKEN_LINE`); `reasoning` decides the model's
+ * reasoning for the rounds before the turn's first tool call. Additive and
+ * optional — an older daemon drops it (a normal turn), an older client never
+ * sends it (AGENTS §7: forward-compatible, no `protocol.d` note).
+ */
+export const VoiceTurnSchema = z.object({ reasoning: z.enum(["off", "keep"]) });
+export type VoiceTurn = z.infer<typeof VoiceTurnSchema>;
+
 export const PromptParamsSchema = z.object({
   sessionId: SessionIdSchema,
   turnId: TurnIdSchema,
@@ -326,6 +344,8 @@ export const PromptParamsSchema = z.object({
    * parses the text. One the daemon cannot activate → `InvalidParams`.
    */
   skill: SkillNameSchema.optional(),
+  /** This turn came from voice mode (see `VoiceTurnSchema`). */
+  voice: VoiceTurnSchema.optional(),
 });
 export type PromptParams = z.infer<typeof PromptParamsSchema>;
 
@@ -1140,6 +1160,12 @@ export const EnqueueParamsSchema = z.object({
   id: z.string().min(1).max(128),
   turnId: TurnIdSchema,
   text: z.string().min(1),
+  /**
+   * A voice-mode steer (see `VoiceTurnSchema`): it marks the REST of its turn a
+   * voice turn, with the steer's own `reasoning` — the reasoning-off window
+   * restarts at this steer's round.
+   */
+  voice: VoiceTurnSchema.optional(),
 });
 export type EnqueueParams = z.infer<typeof EnqueueParamsSchema>;
 

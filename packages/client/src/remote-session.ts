@@ -25,6 +25,7 @@ import {
   type SubagentRow,
   type TurnEnd,
   type UpdateSettingsResult,
+  type VoiceTurn,
   isWakeTurnId,
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
@@ -69,6 +70,13 @@ interface ActiveTurn {
    * whose images vanished would be a different turn.
    */
   readonly attachments?: readonly AttachmentRef[];
+  /**
+   * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3).
+   * Stored on the TURN for the same reason as `attachments`: every keyed
+   * re-send after a drop carries it under the same `turnId`. Never on a foreign
+   * turn — a turn this session did not send has no profile here.
+   */
+  readonly voice?: VoiceTurn;
   readonly queue: AsyncQueue<SessionEvent>;
   /** Tool names by call id (a `tool_call_update` omits it). */
   readonly toolNames: Map<string, string>;
@@ -1028,7 +1036,7 @@ export class RemoteSession implements SessionStreamListener {
    * a no-op (resolved) before any send. `id`: the caller's key for this text
    * (a later `sendNow` cites it); a fresh one when omitted.
    */
-  enqueue(text: string, id?: string): Promise<void> {
+  enqueue(text: string, id?: string, voice?: VoiceTurn): Promise<void> {
     // The turn the daemon runs (a foreign one: any device can steer it); an
     // own turn not started yet keeps its own id.
     const turnId = this.streaming ?? this.turnId;
@@ -1041,10 +1049,10 @@ export class RemoteSession implements SessionStreamListener {
       this.mine.set(key, text);
     }
     if (this.id) {
-      return this.client.enqueue(this.id, key, turnId, text);
+      return this.client.enqueue(this.id, key, turnId, text, voice);
     }
     if (this.opening) {
-      return this.opening.then((id) => this.client.enqueue(id, key, turnId, text));
+      return this.opening.then((id) => this.client.enqueue(id, key, turnId, text, voice));
     }
     return Promise.resolve();
   }
@@ -1067,6 +1075,12 @@ export class RemoteSession implements SessionStreamListener {
       readonly skill?: string;
       readonly turnId?: string;
       readonly attachments?: readonly AttachmentRef[];
+      /**
+       * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3):
+       * the edge's own reasoning setting, read at send time. Absent → an
+       * ordinary turn, whose frame carries no `voice` at all.
+       */
+      readonly voice?: VoiceTurn;
       readonly onAccepted?: () => void;
     } = {},
   ): AsyncGenerator<SessionEvent> {
@@ -1256,6 +1270,12 @@ export class RemoteSession implements SessionStreamListener {
     opts: {
       readonly skill?: string;
       readonly attachments?: readonly AttachmentRef[];
+      /**
+       * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3):
+       * the edge's own reasoning setting, read at send time. Absent → an
+       * ordinary turn, whose frame carries no `voice` at all.
+       */
+      readonly voice?: VoiceTurn;
       readonly onAccepted?: () => void;
     } = {},
   ): AsyncGenerator<SessionEvent> {
@@ -1289,6 +1309,7 @@ export class RemoteSession implements SessionStreamListener {
       ...(opts.attachments !== undefined && opts.attachments.length > 0
         ? { attachments: opts.attachments }
         : {}),
+      ...(opts.voice !== undefined ? { voice: opts.voice } : {}),
       queue: new AsyncQueue<SessionEvent>(),
       toolNames: new Map(),
       shownTools: new Set(),
@@ -1331,7 +1352,15 @@ export class RemoteSession implements SessionStreamListener {
     };
     const request = turn.sendNow
       ? this.client.sendNow(id, turn.turnId, turn.sendNow.interrupt, turn.sendNow.messages, sent)
-      : this.client.prompt(id, turn.turnId, turn.prompt, sent, turn.skill, turn.attachments);
+      : this.client.prompt(
+          id,
+          turn.turnId,
+          turn.prompt,
+          sent,
+          turn.skill,
+          turn.attachments,
+          turn.voice,
+        );
     request.then(
       // A plain ack: the stream ends the turn. `ended` (a retried turn that
       // already finished — also while this client was away) ends it from the

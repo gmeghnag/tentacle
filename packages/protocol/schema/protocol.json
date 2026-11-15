@@ -955,6 +955,9 @@
         },
         "turnId": {
           "$ref": "#/$defs/TurnId"
+        },
+        "voice": {
+          "$ref": "#/$defs/VoiceTurn"
         }
       },
       "required": ["id", "sessionId", "text", "turnId"],
@@ -2759,6 +2762,9 @@
         },
         "turnId": {
           "$ref": "#/$defs/TurnId"
+        },
+        "voice": {
+          "$ref": "#/$defs/VoiceTurn"
         }
       },
       "required": ["content", "sessionId", "turnId"],
@@ -4986,6 +4992,17 @@
       "required": ["client", "daemon", "update"],
       "type": "object"
     },
+    "VoiceTurn": {
+      "additionalProperties": true,
+      "properties": {
+        "reasoning": {
+          "enum": ["off", "keep"],
+          "type": "string"
+        }
+      },
+      "required": ["reasoning"],
+      "type": "object"
+    },
     "WatchCategory": {
       "enum": [
         "ask",
@@ -5131,6 +5148,10 @@
             "$ref": "#/$defs/WireChatMessage"
           },
           "type": "array"
+        },
+        "reasoning": {
+          "const": "off",
+          "type": "string"
         },
         "temperature": {
           "type": "number"

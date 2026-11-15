@@ -107,6 +107,7 @@ import {
   type SubagentRow,
   type TurnEnd,
   type TurnError,
+  type VoiceTurn,
   WAKE_TURN_PREFIX,
   type WatchCategory,
   type WatchNextResult,
@@ -2263,6 +2264,7 @@ export class HostedSession {
     content: readonly PromptContentBlock[],
     skill?: string,
     askHooksTrust?: AskHooksTrust,
+    voice?: VoiceTurn,
   ): PromptResult {
     // The key first: a retry is answered even while a turn runs, or after it ended.
     const known = this.turns.get(turnId);
@@ -2316,6 +2318,7 @@ export class HostedSession {
         ...(skill !== undefined ? { skill } : {}),
         ...(refs.length > 0 ? { attachments: refs } : {}),
         ...(askHooksTrust !== undefined ? { askHooksTrust } : {}),
+        ...(voice !== undefined ? { voice } : {}),
         beforeRun: this.beforeRunFn,
       }),
       controller,
@@ -3004,7 +3007,7 @@ export class HostedSession {
    * retry of an accepted id is a no-op success even after its turn ended (never
    * `NoTurnRunning`, never injected twice). A rejected attempt is not recorded.
    */
-  enqueue(id: string, turnId: string, text: string): void {
+  enqueue(id: string, turnId: string, text: string, voice?: VoiceTurn): void {
     if (this.enqueued.has(id)) {
       return;
     }
@@ -3027,7 +3030,7 @@ export class HostedSession {
       throw new RpcError(DomainErrorCode.NoTurnRunning, "no turn is running");
     }
     this.enqueued.add(id);
-    this.session.enqueue(text);
+    this.session.enqueue(text, voice);
     this.queue.push({ id, text });
     // A person wrote while a foreground child runs: it moves to the background
     // NOW, in this synchronous stretch, so the call it holds is answered in

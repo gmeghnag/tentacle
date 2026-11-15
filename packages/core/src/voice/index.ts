@@ -11,3 +11,4 @@ export * from "./narration.ts";
 export * from "./ask-speech.ts";
 export * from "./endpoint.ts";
 export * from "./conversation.ts";
+export * from "./turn-profile.ts";

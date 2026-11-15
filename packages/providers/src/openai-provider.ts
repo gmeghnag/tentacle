@@ -112,6 +112,12 @@ export class OpenAIProvider implements ModelProvider {
   readonly id: string;
   private readonly config: OpenAIProviderConfig;
   private readonly doFetch: typeof fetch;
+  /**
+   * This endpoint refused the "do not reason" switches (F9,
+   * docs/feat/voice-conversation.md §4): remembered for the process, so ONE 400
+   * per provider teaches us and no later voice turn pays for it again.
+   */
+  private reasoningSwitchesRefused = false;
 
   constructor(config: OpenAIProviderConfig) {
     this.config = config;
@@ -181,29 +187,50 @@ export class OpenAIProvider implements ModelProvider {
       : { images: new Map(), vision, inlined, maxImageBytes };
   }
 
-  async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (this.config.apiKey) {
-      headers.authorization = `Bearer ${this.config.apiKey}`;
-    }
-
+  /**
+   * POST one chat-completions request: the ONE site that turns a `ChatRequest`
+   * into a body, so the reasoning switches (C3) cannot be added on one path and
+   * forgotten on another.
+   */
+  private post(
+    headers: Record<string, string>,
+    request: ChatRequest,
+    images: ImageBuildOptions,
+    reasoningOff: boolean,
+  ): Promise<Response> {
     const init: RequestInit = {
       method: "POST",
       headers,
       body: JSON.stringify(
-        buildPayload(
-          this.config.model,
-          request,
-          this.config.maxTokens,
-          await this.imageOptions(request),
-        ),
+        buildPayload(this.config.model, request, this.config.maxTokens, images, reasoningOff),
       ),
     };
     if (request.signal) {
       init.signal = request.signal;
     }
+    return this.doFetch(`${this.config.baseURL}/chat/completions`, init);
+  }
 
-    const res = await this.doFetch(`${this.config.baseURL}/chat/completions`, init);
+  async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.config.apiKey) {
+      headers.authorization = `Bearer ${this.config.apiKey}`;
+    }
+    const images = await this.imageOptions(request);
+    // `reasoning: "off"` (a voice turn, C3): the switches first, unless this
+    // endpoint already refused them.
+    const wantOff = request.reasoning === "off" && !this.reasoningSwitchesRefused;
+    let res = await this.post(headers, request, images, wantOff);
+    if (wantOff && res.status === 400) {
+      // F9: one retry WITHOUT them — never a failed turn. Remembered only if
+      // the retry SUCCEEDS: a 400 for another cause (context over the limit,
+      // a refused tool schema, an oversized image) fails both bodies and says
+      // nothing about the switches, so latching there would silently reason
+      // on every later voice turn of a long-lived daemon.
+      await discardBody(res);
+      res = await this.post(headers, request, images, false);
+      this.reasoningSwitchesRefused = res.ok;
+    }
     if (!res.ok || !res.body) {
       throw new ModelRequestError(
         res.status,
@@ -324,6 +351,7 @@ function buildPayload(
   req: ChatRequest,
   defaultMaxTokens?: number,
   options: ImageBuildOptions = NO_IMAGES,
+  reasoningOff = false,
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     model,
@@ -336,6 +364,13 @@ function buildPayload(
   }
   if (req.temperature !== undefined) {
     payload.temperature = req.temperature;
+  }
+  // A voice turn asking for no reasoning (docs/feat/voice-conversation.md §4):
+  // the two portable switches an OpenAI-compatible server understands. A server
+  // that knows neither answers 400 and `stream` retries without them once (F9).
+  if (reasoningOff) {
+    payload.reasoning_effort = "none";
+    payload.chat_template_kwargs = { enable_thinking: false };
   }
   const maxTokens = req.maxTokens ?? defaultMaxTokens;
   if (maxTokens !== undefined) {
@@ -399,6 +434,15 @@ function parseChunk(data: string): WireChunk | null {
     return JSON.parse(data) as WireChunk;
   } catch {
     return null;
+  }
+}
+
+/** Free a rejected response's body: nobody reads it, and it must not leak. */
+async function discardBody(res: Response): Promise<void> {
+  try {
+    await res.body?.cancel();
+  } catch {
+    // already consumed, or no body: nothing to release
   }
 }
 
