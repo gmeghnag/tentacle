@@ -1,13 +1,13 @@
 # feat/voice-conversation — Hands-free voice conversation on the Mac and the iPhone (realtime-voice V2, both edges)
 
-> **Status:** implementation (plan written, NOT approved — see Owner questions)
+> **Status:** implementation (plan revised for owner answers Q1–Q7; NOT approved — Q8 open, see Owner questions)
 > **Branch:** `feat/voice-conversation`
-> **Size:** L as a whole. It is one task doc because the owner asked for one, and it is **ten slices, each S or M**, executed and reviewed slice by slice (table in *Slices*). Order: shared pure core → Mac edge ∥ phone edge → live. No slice is XL. · **Blast:** load-bearing. C3 adds a per-turn field to `session/prompt` / `session/enqueue` and to `model/stream`'s request, and touches the agent loop's model call. The other slices are contained or cross-module (per slice below). · **Suited:** owner assigns, per slice. L + load-bearing ⇒ a **mandatory fresh-context Review**. It must red-team: §6.1 (who speaks an ask, F6/F7), "never write raw to the terminal" (F12), C3's on-disk rule (nothing transient persisted, F10), and the phone's single owner of `AVAudioSession` (P-F1…P-F6).
-> **Changelog:** `changelog.d/voice-conversation.added.md`: "- **Hands-free voice conversation on the Mac and the iPhone.** Turn on voice mode, talk to tentacle, hear the reply, and speak over it to interrupt. Recognition and speech run on the device; only text reaches the session, and no audio is saved."
+> **Size:** L as a whole. It is one task doc because the owner asked for one, and it is **eleven slices, each S or M**, executed and reviewed slice by slice (table in *Slices*). Order: shared pure core → Mac edge ∥ phone edge → live. No slice is XL. · **Blast:** load-bearing. C3 adds a per-turn field to `session/prompt` / `session/enqueue` and to `model/stream`'s request, and touches the agent loop's model call. P2b puts the app in the background with the mic on. The other slices are contained or cross-module (per slice below). · **Suited:** owner assigns, per slice. L + load-bearing ⇒ a **mandatory fresh-context Review**. It must red-team: §6.1 (who speaks an ask, F6/F7), "never write raw to the terminal" (F12), C3's on-disk rule (nothing transient persisted, F10), the phone's single owner of `AVAudioSession`, and background compliance (P-F1…P-F12, App Review 2.5.4).
+> **Changelog:** `changelog.d/voice-conversation.added.md`: "- **Hands-free voice conversation on the Mac and the iPhone.** Turn on voice mode, talk to tentacle, hear the reply, and speak over it to interrupt. On the iPhone it keeps going with the app in the background or the screen locked. Recognition and speech run on the device; only text reaches the session, and no audio is saved. Turning reasoning off for spoken replies is a setting on both."
 
 ## Context
 
-*— claude-opus-5-5, 2026-11-15 (rev 2, 2026-11-15: phone edge added — owner: "anche con supporto mobile"; Mac/phone parity is an owner rule)*
+*— claude-opus-5-5, 2026-11-15 (rev 2, 2026-11-15: phone edge added — owner: "anche con supporto mobile"; Mac/phone parity is an owner rule. Rev 3, 2026-11-15: owner answers Q1–Q7 applied — reasoning-off is a user setting on both edges (Q2); iPhone background + locked screen is in v1, "background subito" (Q6))*
 
 **Why.** This is phase **V2** of the approved realtime-voice architecture (`docs/eval/realtime-media.md` §9 row `:507`; owner answers `:998-1010`). V2 is candidate **B** (`:301-319`): an edge cascade where the session answers directly. The user speaks, an end-of-turn detector closes the utterance, the transcript goes to the session as an ordinary prompt, and the reply comes back as on-device speech. Speaking over the reply stops it (barge-in).
 
@@ -32,7 +32,16 @@ This plan cites V1's **approved design** and mobile-voice's **branch code** (`fe
 
 - **Q4, asks:** the answering device's own ask text, through a deterministic template, spoken by local TTS and shown on screen. Never through a model. Answered only by a key/tap bound to that ask. **No voice approval.**
 - **Q5, reasoning:** off or minimal for every spoken reply. Delegated real work keeps the session's setting, and its progress is narrated by templates.
-- **Q6, topology:** Mac voice runs in a local terminal only (Swift helper); over SSH it is off with a notice. The phone is the voice edge for remote sessions. Only text goes over the E2E channel. "Background/lock-screen audio to be verified by E10."
+- **Q6, topology:** Mac voice runs in a local terminal only (Swift helper); over SSH it is off with a notice. The phone is the voice edge for remote sessions. Only text goes over the E2E channel. The eval said "background/lock-screen audio to be verified by E10". **Superseded by this task's owner answer Q6 (batch 2): background + locked screen are IN v1.** E11 tunes the design; it cannot cancel it.
+- **This task's own owner answers (end of doc, batches 1–2):**
+  - Q1: code after V1 + mobile-voice merge; never a cloud recogniser.
+  - Q2: reasoning-off is a **user setting** on both edges (Mac config + an iPhone Settings row), not hard-wired.
+  - Q3: auto-send in conversation mode only.
+  - Q4: barge-in = stop speech + steer, never cancel.
+  - Q5: system voice on both edges, Kokoro Mac opt-in.
+  - Q6: background now.
+  - Q7: only the originating edge speaks.
+  - Q8 (activation UI) is open, with mockups.
 - **Q8, persistence:** the verbatim transcript is the user message, and audio is never kept. `via: "voice"` was approved as optional, but V1 left it out (`voice-dictation.md:17`), and mobile-voice deferred it (`mobile-voice.md`@branch P8). **V2 keeps it out**: it can be added later as a non-critical field, nothing to decide now.
 - **TTS:** Kokoro was the eval default on the laptop (`:912`); the phone uses the system voice (mobile-voice owner brief). V2 asks for parity (Owner Q5).
 
@@ -68,15 +77,16 @@ This plan cites V1's **approved design** and mobile-voice's **branch code** (`fe
 | **Continuous listening** | push-to-talk: a tap starts a dictation; 20 s of silence stops it (`src/dictation.ts:21`); 10 min cap (`:23`) | a `listen` mode that stays on across utterances and segments each one |
 | **Endpointing / auto-send** | none. A send happens only on a press or Return (`dictation.ts:116,139`, `after: "send"` `:331-332`) | the shared endpoint fold (§3) fed by phone signals, plus auto-send |
 | **Voice processing (AEC) + barge-in** | dictation sets `.playAndRecord`, mode **`.default`** (`SpeechCore.swift:182-184`), with no voice processing. Speaking switches to `.playback/.spokenAudio` (`:243`). The two exclude each other: `speak` stops the engine (`:238`), `startDictation` stops speech (`:167`). **Half-duplex by construction.** | one session config for the whole mode (`.playAndRecord`, voice processing on the input node), TTS rendered **into the same engine** (so AEC has the reference), barge-in |
-| **Interruptions** | `.began` only: abort + stop speaking (`SpeechCore.swift:304-309`). `.ended` is ignored. | pause on began; on ended, **no** automatic mic resume (P-F1) |
+| **Interruptions** | `.began` only: abort + stop speaking (`SpeechCore.swift:304-309`). `.ended` is ignored. | the policy per interruption source (§5b): pause on began; resume on ended only when iOS says `shouldResume` and the source was not a phone call (P-F1) |
 | **Route changes** | `.oldDeviceUnavailable` only, which aborts (`:311-316`) | re-configure on any route change (AirPods in/out, HFP), keep the mode alive |
-| **Foreground vs background/lock** | no `UIBackgroundModes` in `app.json` (`grep -i audio` finds only the mic permission string, `:32,39`). `AppState` background stops dictation (mobile-voice F6). | decided by E11 + Owner Q6. v1 default: foreground only, screen kept awake while the mode is on |
+| **Background / locked screen** | no `UIBackgroundModes` in `app.json` (`grep -i audio` finds only the mic permission string, `:32,39`). `AppState` background stops dictation (mobile-voice F6). The session is deactivated when idle (`SpeechCore.swift:299-302`). | **in v1 (owner Q6)**: the `audio` background mode, one session active for the whole mode, recognition kept alive across segments in the background, a lock-screen indication, and compliance with App Review 2.5.4 (§5b) |
+| **Lock-screen indication** | none (the Live Activity task is approved but not started: `docs/feat/mobile-live-activity.md` on `main`, status "APPROVED", starts after `feat/mobile-notifications`) | Now Playing + remote commands now; a `voice` state in that task's Live Activity when it lands (§5b) |
 | **Speakable text** | an AST walk over the phone's own markdown parser: `speakable(parsed, lang)` (`src/speakable.ts:132`), with `clean` (`:56`) and `splitLong` (`:96`, `MAX_UTTERANCE` 600 `:23`) | streaming: the reply arrives as deltas. The core chunker (§3) consumes text on both edges. `clean`/`splitLong` are lifted into core; the AST walk stays for the read-aloud button. |
 | CarPlay, AirPods-specific gestures | none | **not required** (owner): out of scope |
 
 ## Implementation
 
-*— claude-opus-5-5, 2026-11-15 (rev 2, 2026-11-15: phone edge, shared reducer and endpoint fold moved to core, slices re-sized)*
+*— claude-opus-5-5, 2026-11-15 (rev 2, 2026-11-15: phone edge, shared reducer and endpoint fold moved to core, slices re-sized. Rev 3, 2026-11-15: §4 reasoning-off becomes a per-edge user setting carried per turn; §5 split into §5a (engine) and §5b (background, locked screen, interruptions, lock-screen indication, battery, App Review 2.5.4); E11 is a tuning input; P2 split into P2a/P2b; failure modes and tests updated)*
 
 ### Load-bearing assumptions (one per edge; each is a spike's exit criterion)
 
@@ -85,7 +95,7 @@ This plan cites V1's **approved design** and mobile-voice's **branch code** (`fe
 **Phone (P1).** On the owner's iPhone 12 Pro, iOS 18.3.1, three things must hold:
 1. `SFSpeechRecognizer` runs **on device** for it-IT and en-US.
 2. With voice processing on the engine's input and `AVSpeechSynthesizer.write(_:toBufferCallback:)` buffers played through **that engine's** player node, speech from the **loudspeaker** does not trigger the recogniser's or the level gate's speech detection. Same pass numbers as the Mac.
-3. The audio session survives what the mode must survive (Owner Q6).
+3. ~~The audio session survives what the mode must survive~~. **Rev 3:** background is in v1 by owner decision, so this is no longer a pass/fail gate. E11 measures *how* the session behaves (which interruptions resume by themselves, whether recording can restart from the background, battery per hour). It tunes §5b's policies within the convergent states P-F1…P-F12. It cannot remove background from the slice.
 
 **Why TTS must play inside the engine on both edges.** A separate synthesiser output (`say`, or `AVSpeechSynthesizer.speak` as mobile-voice does at `SpeechCore.swift:265`) is not the canceller's reference signal, so AEC cannot remove it.
 
@@ -113,12 +123,12 @@ This plan cites V1's **approved design** and mobile-voice's **branch code** (`fe
 
 | While | Mac | Phone | Effect |
 |---|---|---|---|
-| off | `/voice` or `voice.conversationKey` | a **waveform** button in the composer, next to the mic (render only, `Icon.tsx` gains `waveform`, already planned by mobile-voice) | mode on: listening continuously. Mac strip `◉ voice · listening`; phone capsule "Listening". |
-| listening | user speaks, the fold says `stop` | same | transcribe → **auto-send** (Owner Q3): `prompt{voice:true}` if idle, `enqueue{voice:true}` if a turn runs |
+| off | the activation in **Owner Q8** (open; mockups) | the activation in **Owner Q8** (open; mockups) | mode on: listening continuously, with the indicator chosen in Q8 |
+| listening | user speaks, the fold says `stop` | same | transcribe → **auto-send** (Owner Q3): `prompt{voice:{reasoning}}` if idle, `enqueue{voice:{reasoning}}` if a turn runs (`reasoning` from the edge's own setting, §4) |
 | speaking | user speaks (barge-in) | same | playback stops at once, edge-local; the utterance is sent as above. **The turn is not cancelled** (Owner Q4). |
 | speaking | Esc | tap the capsule | stop speech. A second Esc / the stop button aborts the turn, as today. |
 | ask pending | user speaks | same | **not sent**: the text goes to the field with "answer the approval first" (F6) |
-| any | toggle again, or 10 min with no speech | same, or the screen leaves the session | mode off: mic released, indicator off |
+| any | toggle again, or 10 min with no speech | same, or the Now Playing / Live Activity stop control. **Leaving the session screen, backgrounding the app or locking the screen does NOT end it** (Q6). | mode off: mic released, indicator off |
 
 - **Mac:** V1's Ctrl+R dictation is a no-op while the mode is on (a single owner of the mic).
 - **Phone:** the mic (push-to-talk) button is hidden while the mode is on, for the same reason.
@@ -144,13 +154,18 @@ This plan cites V1's **approved design** and mobile-voice's **branch code** (`fe
 | `conversation.ts` | **the conversation reducer**, moved here from the TUI (rev 1 had it in `packages/tui`) so both edges share one loop. States `off · listening · capturing · transcribing · speaking · askPending · paused`. Inputs: intents, edge audio events (normalised: `utter`, `final{text,lang}`, `bargein`, `speaking/spoken`, `interrupted`, `resumable`, `route`), turn events, ask pending/cleared, link up/down. Outputs: `prompt`, `enqueue`, `fieldInsert`, `notice`, `speak`, `hush`, `listen`, `unlisten`. **It speaks only turns this client started or steered in voice mode** (F14). |
 | `voice-lang.ts` | spoken language = the last utterance's detected/selected language, else the setting, else `en` |
 
-**4. Voice-turn profile (C3; Owner Q2) — the same for Mac- and phone-originated turns.**
+**4. Voice-turn profile (C3; Owner Q2 answered: a user-settable switch on both edges) — the same for Mac- and phone-originated turns.**
 
-- **The fields:** `PromptParams.voice?: true` and `EnqueueParams.voice?: true` (additive). An enqueued voice steer marks the rest of its turn as a voice turn.
-- **The client API:** `RemoteClient.prompt/enqueue` take the flag (`packages/client/src/remote-session.ts:1025-1041,1320`).
-- **The phone carries it** on its outbox item (`apps/mobile/src/outbox.ts:83-94` → `outbox-driver.ts:250`) and on `compose-handle.ts:42`.
+- **The switch is per edge, owned by the person, and carried per turn.**
+  - **Mac:** config `voice.reasoningOff: boolean`, default `true`, also listed in the TUI's `/settings`.
+  - **iPhone:** a Settings row "Reasoning off for spoken replies", default on, stored in `voice-settings-store.ts` (the mobile-voice store) next to the speaking rate.
+  - Each edge reads its own value **at send time** and puts it on the turn.
+  - The daemon stores nothing and has no switch of its own. So a phone talking to `serve` on the Mac (laptop-as-host), or to a `serve` elsewhere, gets exactly what the phone's row says, and a TUI on the same session keeps its own. No settings sync, no new RPC.
+- **The fields:** `PromptParams.voice?: { reasoning: "off" | "keep" }` and `EnqueueParams.voice?` (the same shape, additive). Present = a voice turn, which always gets the spoken-style line (b). `reasoning` decides (a). An enqueued voice steer marks the rest of its turn as a voice turn, with the steer's `reasoning`.
+- **The client API:** `RemoteClient.prompt/enqueue` take the option (`packages/client/src/remote-session.ts:1025-1041,1320`).
+- **The phone carries it** on its outbox item (`apps/mobile/src/outbox.ts:83-94` → `outbox-driver.ts:250`) and on `compose-handle.ts:42`. A retried outbox item keeps the value chosen at compose time.
 - **Daemon side, for a voice turn** (any daemon: the worker, a pod, `serve` — including `serve` on the laptop that the phone reaches):
-  - (a) `ChatRequest.reasoning = "off"` on that turn's rounds **until its first tool call**; after it, the configured reasoning (Q5's split, a deterministic rule);
+  - (a) when `reasoning: "off"`: `ChatRequest.reasoning = "off"` on that turn's rounds **until its first tool call**; after it, the configured reasoning (Q5's split, a deterministic rule). With `"keep"`, the configured reasoning throughout;
   - (b) one **transient** system line on those rounds only: "The user is listening, not reading: short spoken sentences, a short first sentence, no code blocks unless asked." It is **never** in the history, `session/log`, `<uid>.jsonl` or the `serve` daemon's store (AGENTS §7).
 - `WireChatRequestSchema.reasoning?: "off"`, for pods (`run`/`attach`) whose model call comes back to the laptop's provider. The phone never needs it, because `serve` holds the provider.
 - **Providers:**
@@ -158,27 +173,63 @@ This plan cites V1's **approved design** and mobile-voice's **branch code** (`fe
   - **Anthropic:** a no-op.
 - **The C3 assumption to prove first:** the agent loop builds one turn's `ChatRequest` in one place, so (a)/(b) need no history change. If not, STOP and fix this plan.
 
-**5. Phone edge: native module additions (`apps/mobile/modules/tentacle-speech/ios/`, on mobile-voice's module).**
+**5a. Phone edge: the engine (`apps/mobile/modules/tentacle-speech/ios/`, on mobile-voice's module).**
 
-- **The session for the whole mode:** `.playAndRecord`, mode `.voiceChat` (or `.default` + `inputNode.setVoiceProcessingEnabled(true)` — P1 picks the one that cancels better). Options `.defaultToSpeaker` and `.allowBluetoothHFP`, plus `.allowBluetoothA2DP` if P1 shows HFP-free output with the phone mic. **No category switch** between listening and speaking, unlike `SpeechCore.swift:182-184` vs `:243`.
 - **`ConversationEngine.swift`:**
-  - one `AVAudioEngine`, kept running while the mode is on;
-  - the input tap feeds a level meter (RMS → speech yes/no, with a raised threshold while playing) and the `SFSpeechRecognizer` request, reusing `RecognizerEngine`'s on-device guard (`:41`, `:81`) and its 50 s rollover (`:74`);
-  - an utterance = a new recognition segment, opened at speech onset and closed by the core fold's `stop` (sent down as `endUtterance`);
+  - one `AVAudioEngine`, kept running for the whole mode, in the foreground and the background alike;
+  - the input tap feeds a level meter (RMS → speech yes/no, with a raised threshold while playing) and a **500 ms pre-roll ring buffer**;
+  - **at speech onset** a new `SFSpeechAudioBufferRecognitionRequest` opens, is fed the pre-roll and then live buffers, and closes at the core fold's `stop` (sent down as `endUtterance`) or at the 50 s rollover (`RecognizerEngine.swift:74`). It reuses the on-device guard (`:41`, `:81`). **Between utterances no recognition task runs** (battery, and fewer long-lived tasks for iOS to kill in the background);
   - TTS = `AVSpeechSynthesizer.write` → `AVAudioPlayerNode` on the same engine;
-  - barge-in = N speech windows while playing → stop the player node, emit `bargein`.
+  - barge-in = N speech windows while playing → stop the player node, emit `bargein`;
   - iOS 26 devices may use `SpeechAnalyzer` the same way. It is not required: the owner's phone is 18.3.1.
-- **Events to TS** (`speech-native.ts` gains them): `utter`, `level{speech}`, `textGrew`, `final{text, lang}`, `speaking/spoken{seq}`, `bargein`, `interrupted{began|ended, shouldResume}`, `route{reason, output}`, `error{code}`.
-- **Interruptions:** `.began` → stop the engine and the player, emit `interrupted{began}`. `.ended` → emit `interrupted{ended, shouldResume}` and **do not** restart the mic by itself (P-F1).
-- **Route changes:** any reason → rebuild the engine on the new route (input/output format) and keep the mode on, with a notice. A failure → mode off + notice.
-- **Background/lock (Owner Q6, gated by E11):**
-  - v1 default **foreground-only**: `AppState` `background` → mode `paused` (mic released). The screen is kept awake while the mode is on (an idle-timer toggle in the module; no new dependency).
-  - If the owner chooses background: `UIBackgroundModes: ["audio"]` written by `app.plugin.js` (the same single-writer rule mobile-voice uses for plist keys), and the engine kept running when the app is backgrounded or the screen locks. The orange mic indicator stays visible (an iOS rule).
-- **Mobile-voice coexistence:** the read-aloud button and push-to-talk dictation keep their current code path. The `SpeechCore` arbiter gains the rule "conversation mode owns the session": starting it stops both, and they are disabled while it is on.
+- **Events to TS** (`speech-native.ts` gains them): `utter`, `level{speech}`, `textGrew`, `final{text, lang}`, `speaking/spoken{seq}`, `bargein`, `interrupted{began|ended, source, shouldResume}`, `route{reason, output}`, `resumeFailed{code}`, `mediaReset`, `thermal{state}`, `remote{command}`, `error{code}`.
+- **Mobile-voice coexistence:** the read-aloud button and push-to-talk dictation keep their current code path. The `SpeechCore` arbiter gains the rule "conversation mode owns the session": starting it stops both, and they are disabled while it is on. Its idle deactivation (`SpeechCore.swift:299-302`) is skipped while the mode is on.
+
+**5b. Phone edge: background, locked screen, interruptions (owner Q6: in v1).**
+
+*Facts this section rests on* (Apple documentation and long-standing platform behaviour, cited by name; **not yet observed on the owner's phone**, so E11 records each one):
+- (i) With `UIBackgroundModes` containing `audio`, an app whose audio session is active and whose engine is recording or playing keeps running in the background and on the locked screen. The system shows the microphone indicator while it records.
+- (ii) An app generally cannot **start** recording from the background after it was suspended. Resuming from the background after an interruption ends is allowed for apps with the audio mode, but for recording iOS may refuse it (`AVAudioSession.ErrorCode.cannotStartRecording` / `insufficientPriority`).
+- (iii) `SFSpeechRecognizer` on device has no documented per-request duration limit. The historical ~1 min limit applied to server recognition. Long tasks can still end with an error, hence the 50 s rollover already in mobile-voice.
+- (iv) A phone call, Siri or another app's non-mixable audio interrupts the session (`interruptionNotification`). A media-services reset (`mediaServicesWereResetNotification`) invalidates every audio object.
+
+*Design:*
+
+| Concern | Decision |
+|---|---|
+| **Background mode** | `UIBackgroundModes: ["audio"]` written by `app.plugin.js` (the single plist writer, the same rule mobile-voice uses for its plist keys; the `Info.plist` grep after prebuild is pasted into Execution). |
+| **Purpose strings** | `NSMicrophoneUsageDescription` is reworded once, with the plugin and `app.json` agreeing: "tentacle uses the microphone while you dictate, and while voice mode is on, also with the screen locked. Audio stays on this iPhone." `NSSpeechRecognitionUsageDescription` gets the same "on this iPhone" wording. |
+| **Session category, mode, options** | `.playAndRecord`, mode `.voiceChat` (voice processing; P1 may pick `.default` + `setVoiceProcessingEnabled(true)` if that cancels better), options `[.defaultToSpeaker, .allowBluetoothHFP, .duckOthers]`. **Not** `.mixWithOthers`: a mixable session cannot be the Now Playing app, and ducking keeps the reply audible over music. E11 may add `.allowBluetoothA2DP` (phone mic + A2DP output) if it measures better. |
+| **Session lifetime** | `setActive(true)` when the mode turns on, in the foreground (fact ii). **Kept active for the whole mode**, including between utterances and while the reply is generated, so the app is never suspended mid-mode. `setActive(false, .notifyOthersOnDeactivation)` only when the mode turns off. No silent-audio keep-alive is ever played: the live recording is what keeps the app running (2.5.4, below). |
+| **Recognition in the background** | Per-utterance requests (§5a), 50 s rollover. **Restart policy:** a task that ends with an error opens a new request on the next speech onset. 5 failures in 60 s → `paused` with "speech recognition stopped", plus the lock-screen state. `mediaReset` → rebuild engine, recogniser and synthesiser once; a second reset within 60 s → `paused`. |
+| **Interruptions, by source** | began → engine and player stop, mode `paused{source}`. ended: **phone call / FaceTime** (detected via `CXCallObserver`: a call was active during the interruption) → stay `paused`, never reopen the mic after a call by itself. **Siri, alarms, another app's audio** with `shouldResume` → resume listening. If the resume fails (fact ii) → `paused` with "tap to resume". No `shouldResume` → `paused`. |
+| **Route changes** | any reason → rebuild the engine on the new route and keep the mode. `oldDeviceUnavailable` while speaking → stop speech (iOS convention), keep listening on the built-in mic. A rebuild failure in the background → `paused`. |
+| **Lock-screen indication** | (1) The system mic indicator (always, fact i). (2) **Now Playing** (`MPNowPlayingInfoCenter`): title "tentacle · voice", subtitle the session title, and the state ("Listening", "Thinking", "Speaking", "Paused — tap to resume"). `MPRemoteCommandCenter`: `togglePlayPause` and `pause` = pause/resume the mode (also the AirPods stem press), `stop` = mode off. (3) **Live Activity:** the in-flight `feat/mobile-live-activity` (approved, not started) is the one widget. V2 does **not** build a second one. When that task has landed, P2b adds a `voice` field (`listening \| thinking \| speaking \| paused`) to its `ContentState`, updated **locally** by the running app (`Activity.update` from the app process, no push needed while the app runs), with the same stop/resume intents. If it has not landed when P2b runs, Now Playing alone ships, and the hook is recorded in that task's doc. |
+| **Resume from the lock screen** | A remote command or Live Activity intent → `remote{resume}` → the reducer asks native to restart. If iOS refuses recording from the background (fact ii) → the state reads "Open tentacle to resume". The intent then opens the app (`openAppWhenRun`); the resume runs in the foreground. E11 records which path the owner's phone allows. Either way it converges. |
+| **Battery & heat** | No recognition between utterances; the meter runs on the tap that the engine already delivers. **Idle off**: 10 min with no speech → mode off (F15), the same in the background. `ProcessInfo.thermalState` `.serious` → notice; `.critical` → `paused`. Low Power Mode → one notice, no change. E11 measures battery % per 30 min (foreground and locked) and pastes it; the README states it. |
+| **The link in the background** | The app keeps running, so the relay WebSocket and the outbox keep working, and replies stream and are spoken with the screen locked. When the mode is `paused` in the background, the app may be suspended. The link then drops, and the existing reconnect + resync applies on resume (F4). |
+| **Asks with the screen locked** | Spoken by the §6.1 template as usual. The answer needs a tap: the existing permission sheet after unlock, or the Live Activity's Approve/Deny once that task lands (its own Face ID gate). Never by voice. |
+
+*App Review guideline 2.5.4 — how the design stays compliant.* 2.5.4 allows background services only for their intended purposes, and audio is one of them. The `audio` mode is documented for apps that play **or record** audible content in the background. The design keeps to that:
+1. The background audio is always a **live, user-started voice conversation**: mic capture and spoken replies, never silence or a keep-alive trick.
+2. It runs only while the person has turned voice mode on, with the system mic indicator plus Now Playing (and later the Live Activity) visible on the lock screen.
+3. It turns itself off after 10 min with no speech.
+4. No background networking happens outside an active voice mode: the session link stays up only as a consequence of the active audio session.
+5. The purpose strings say "also with the screen locked".
+6. The App Review notes (a release-time item, recorded in the README) explain the feature in one paragraph with steps to try it.
+
+**Residual risk:** a reviewer may still question continuous background recording. The fallback is a review response citing the above, not a design change. The app is pre-public, so this matters at the first App Store submission, not for TestFlight/dev builds.
 
 **6. Phone edge: wiring (TS).**
-- `apps/mobile/src/conversation-controller.ts`: like `voice-controller.ts` (`createVoiceController`, `:86`), one per mounted session screen. It feeds the core reducer from native events + the session's turn events + the permission sheet's pending ask + link status, and executes effects: `prompt`/`enqueue` through the outbox/compose handle with `voice:true`, and `speak`/`hush` to native.
-- Render only: `SessionScreen.tsx` (controller lifetime), `Composer.tsx` (waveform button), the existing capsule (states), `SettingsScreen.tsx` (voice-mode section: barge-in on/off, speaking rate already exists).
+- `apps/mobile/src/conversation-controller.ts`: **app-scoped**, not per screen (the mode outlives the session screen and the foreground, Q6). It feeds the core reducer from:
+  - native events;
+  - the session's turn events (the session the mode was started on; that session stays subscribed while the mode is on);
+  - the permission sheet's pending ask;
+  - link status;
+  - `AppState`, which is informational only and no longer pauses.
+
+  It executes effects: `prompt`/`enqueue` through the outbox/compose handle with `voice:{reasoning}` taken from the Settings row, `speak`/`hush` to native, and Now Playing / Live Activity state.
+- Render only: `SessionScreen.tsx` (shows the mode when on its session; a banner on other screens), `Composer.tsx` (the Q8 activation), the existing capsule (states), `SettingsScreen.tsx` (voice-mode section: **reasoning off for spoken replies** (default on), barge-in on/off, auto-off after 10 min, and the existing speaking rate).
 
 ### Files (dependency order)
 
@@ -192,10 +243,11 @@ This plan cites V1's **approved design** and mobile-voice's **branch code** (`fe
    - the `ProxyModelProvider` wire mapping;
    - `packages/client/src/remote-session.ts`.
 3. **C1 — Mac helper v2:** `native/voice-mac/Sources/TentacleVoice/{Listen,Tts,BargeIn,Earcon}.swift`, protocol v2, `trace` with TTS playback; Swift tests (`voice:test`, outside `bun run check`).
-4. **C4 — TUI:** `packages/config/src/schema.ts` (`voice.conversationKey`, `tts`, `ttsVoice`, `ttsRate`, `bargeIn`, `bargeInThreshold`, `earcon`, `conversationIdleMinutes`); `packages/tui/src/{voice-protocol,voice-view,useVoice}.ts` (adapter to the core reducer), `keys/layer-voice.ts`, `commands` (`/voice`), `components/VoiceStrip.tsx`.
-5. **P2 — phone native:** `apps/mobile/modules/tentacle-speech/ios/ConversationEngine.swift`, `SpeechCore.swift` (arbiter + session config + interruption/route), `TentacleSpeechModule.swift` (functions/events), `app.plugin.js` (only if Q6 = background); `src/speech-native.ts`, `src/speech-native-expo.ts`.
-6. **P3 — phone wiring:** `apps/mobile/src/conversation-controller.ts`; `src/outbox.ts` + `outbox-driver.ts` + `compose-handle.ts` (`voice`); `screens/SessionScreen.tsx`, `ui/Composer.tsx`, `ui/Icon.tsx`, `screens/SettingsScreen.tsx`, `voice-settings-store.ts`; tests in `apps/mobile/test/`.
-7. **C5/P4:** `changelog.d/voice-conversation.added.md`; README "Voice conversation" (Mac + iPhone); `modules/tentacle-speech/README.md` real-device checklist.
+4. **C4 — TUI:** `packages/config/src/schema.ts` (`voice.reasoningOff` (default true), `voice.conversationKey`, `tts`, `ttsVoice`, `ttsRate`, `bargeIn`, `bargeInThreshold`, `earcon`, `conversationIdleMinutes`); `packages/tui/src/{voice-protocol,voice-view,useVoice}.ts` (adapter to the core reducer), `keys/layer-voice.ts`, `commands` (`/voice`), `components/VoiceStrip.tsx`.
+5. **P2a — phone engine:** `apps/mobile/modules/tentacle-speech/ios/ConversationEngine.swift` (engine, pre-roll, per-utterance requests, TTS in engine, barge-in), `SpeechCore.swift` (arbiter, mode session), `TentacleSpeechModule.swift` (functions/events); `src/speech-native.ts`, `src/speech-native-expo.ts`.
+6. **P2b — phone background:** `ios/BackgroundAudio.swift` (session lifetime, the interruption policy with `CXCallObserver`, route rebuild, media reset, thermal), `ios/NowPlaying.swift` (`MPNowPlayingInfoCenter` + `MPRemoteCommandCenter`), `app.plugin.js` (`UIBackgroundModes: audio`, purpose strings), `app.json` (the same purpose strings, agreeing); the Live Activity `voice` field only if `feat/mobile-live-activity` has landed (else a note in that doc).
+7. **P3 — phone wiring:** `apps/mobile/src/conversation-controller.ts` (app-scoped); `src/outbox.ts` + `outbox-driver.ts` + `compose-handle.ts` (`voice:{reasoning}`); `screens/SessionScreen.tsx`, `ui/Composer.tsx`, `ui/Icon.tsx`, `screens/SettingsScreen.tsx`, `voice-settings-store.ts` (`reasoningOff`, `bargeIn`); tests in `apps/mobile/test/`.
+8. **C5/P4:** `changelog.d/voice-conversation.added.md`; README "Voice conversation" (Mac + iPhone, battery figure, background behaviour, App Review notes paragraph); `modules/tentacle-speech/README.md` real-device checklist.
 
 ### Failure modes
 
@@ -223,29 +275,34 @@ This plan cites V1's **approved design** and mobile-voice's **branch code** (`fe
 
 | # | Failure | Design / convergence |
 |---|---|---|
-| P-F1 | **Phone call / Siri / another app takes the audio** | `interrupted{began}` → engine and player stopped, mode `paused` with "voice paused (call)". On `ended`, the mic is **not** restarted by itself (a call may end in a pocket): a tap resumes. Nothing in flight is lost (the turn continues daemon-side; its text is on screen). |
-| P-F2 | **Route change: AirPods/Bluetooth in or out, HFP switch** | The engine is rebuilt on the new route (the formats change with HFP), with the same mode and a notice "audio: AirPods". If AirPods are pulled out mid-speech, speech stops (an iOS convention) and listening continues on the built-in mic. A rebuild failure → mode off + notice. E8 measures barge-in on each route. |
-| P-F3 | **App backgrounded** | Foreground-only (default): mode `paused`, mic released, and a return shows "tap to resume" (never a silent auto-resume). Background (if Q6): the engine keeps running under `UIBackgroundModes: audio`. If iOS still suspends it (E11), the reducer gets `interrupted` and converges as P-F1. |
-| P-F4 | **Screen lock** | Foreground-only: the screen is kept awake while the mode is on; a manual lock = backgrounded (P-F3). Background mode: per E11's result. |
-| P-F5 | **Relay drop mid-reply** | F4. The relay sees only ciphertext of text frames; no audio exists to resend. |
+| P-F1 | **Phone call / FaceTime** (foreground or locked) | `interrupted{began}` → engine and player stop, mode `paused{call}`, Now Playing "Paused — call". On `ended`, the mic is **never** reopened by itself after a call (it may end in a pocket); a tap (app, Now Playing, Live Activity) resumes. The turn continues daemon-side, and its text is on screen. |
+| P-F1b | **Siri / alarm / another app's audio** | began → `paused{other}`. ended with `shouldResume` → resume listening. If the resume fails in the background (fact ii) → `paused` "tap to resume". Another app that keeps playing (no ended) → stays paused until a tap. |
+| P-F2 | **Route change: AirPods/Bluetooth in or out, HFP switch** (also while locked) | The engine is rebuilt on the new route (the formats change with HFP), with the same mode and a notice "audio: AirPods". AirPods pulled out mid-speech → speech stops (an iOS convention), listening continues on the built-in mic. A rebuild failure → `paused` (background) or mode off + notice (foreground). E8 measures barge-in on each route. |
+| P-F3 | **App backgrounded** | The mode keeps running (Q6): the session stays active, the engine records, replies are spoken. Indication: the mic indicator + Now Playing. If iOS suspends the app anyway (E11 finds a case) → on return, the controller sees a dead engine and converges to `paused` "tap to resume" (never silently off, never a silent auto-restart). |
+| P-F4 | **Screen locked** | Same as P-F3. The lock screen shows Now Playing (and later the Live Activity voice state), with pause/resume/stop. Asks need an unlock or the Live Activity buttons, never a voice "yes" (F6). |
+| P-F5 | **Relay drop mid-reply** (incl. while locked) | F4: hush, "connection lost", `paused` for sends; the existing reconnect runs in the background because the app is running; on reconnect, "reconnected". The relay sees only ciphertext of text frames; no audio exists to resend. |
+| P-F9 | **Recognition task dies in the background** | Restart on the next onset; 5 failures in 60 s → `paused` "speech recognition stopped" on the lock screen. `mediaReset` → one rebuild; a second within 60 s → `paused`. |
+| P-F10 | **Resume refused from the background** (fact ii) | `resumeFailed` → the state reads "Open tentacle to resume"; the intent opens the app and resumes in the foreground. |
+| P-F11 | **Battery / heat** | Idle off after 10 min with no speech (also locked); thermal `.serious` → notice, `.critical` → `paused`; E11's battery figure in the README. |
+| P-F12 | **Mode left on while the person forgets it** (privacy) | The mic indicator and Now Playing are always visible; idle off (P-F11); the mode never starts from the background or by itself after a call. |
 | P-F6 | **On-device recognition missing** (Step 0 (a) false for a language) | `unavailable` card (mobile-voice F1 wording). **Never a network recogniser** (the TS and Swift refusals of mobile-voice are reused). Voice mode for that language is disabled; the other language may still work. |
 | P-F7 | **Push-to-talk / read-aloud collide with the mode** | The arbiter: the mode owns the session; the mic and speaker buttons are disabled while it is on. |
-| P-F8 | **Screen unmount mid-mode** | The controller's `dispose` emits `unlisten` + `hush` first, then removes its listener (the mobile-voice pattern, `voice-controller.ts:7`). |
+| P-F8 | **Screen unmount mid-mode / app terminated** | Unmount does **not** end the mode (the controller is app-scoped). App termination (swipe-away, a crash) ends the process and so the capture. On the next launch the mode is off (it is never restored by itself). Disposing the controller (sign-out, pairing removed) emits `unlisten` + `hush` first, then removes its listener (the mobile-voice pattern, `voice-controller.ts:7`). |
 
 ### Spikes (owner-assisted; results pasted into Execution with device, OS, date)
 
 **C1 — Mac (gates C4):** E6 live per `realtime-media.md:791-800`. Built-in speakers, AirPods, and Mac mic + AirPods output: false barge-ins over 5 min of the assistant speaking, stop latency p50/p95 (log timestamps), system-voice first audio. Plus Kokoro-in-Swift feasibility and license.
 
-**P1 — iPhone 12 Pro, iOS 18.3.1 (gates P2 and P3).** Scratch only (`.tentacle/tmp/voice-conversation/`), a dev build with a throwaway screen; nothing lands in the tree.
+**P1 — iPhone 12 Pro, iOS 18.3.1 (E10/E8/E7 gate P2a and P3; E11 only tunes P2b).** Scratch only (`.tentacle/tmp/voice-conversation/`), a dev build with a throwaway screen; nothing lands in the tree.
 
 | # | Spike | Measures | Pass |
 |---|---|---|---|
 | **E10** | **On-device STT and TTS.** `supportsOnDeviceRecognition` for it-IT and en-US (mobile-voice Step 0 (a)); 20 owner utterances per language (comma pauses, technical words: "typecheck", "parser", "branch"), read live; 5 min continuous across the 50 s rollover. `AVSpeechSynthesizer.write` first buffer for a ≤ 4-word chunk, it/en. | on-device yes/no per language; first partial and final latency after end of speech (p50/p95); WER per language; rollover gaps/duplicates; TTS first-buffer p50 | on-device for both; final ≤ 500 ms p50 after end of speech; WER it ≤ 0.10, en ≤ 0.07 (owner's ear also decides); no rollover loss; TTS first buffer ≤ 300 ms |
 | **E8** (re-scoped) | **AEC + barge-in on the loudspeaker.** The eval's E8 (`react-native-webrtc`) belongs to candidate C/V5 and is not needed for B, so the slot is reused. Voice processing on, TTS through the engine; the assistant speaks for 5 min with nobody talking; then 10 barge-ins; repeat on AirPods and on wired/none. The speech-detection source (level gate vs recogniser activity) and the floor are also pinned here. | false barge-ins / 5 min; stop latency p50/p95 (log timestamps); the comma-pause lengths in the owner's speech | < 1 / 5 min; stop < 100 ms p50; floor ≥ 2× the longest comma pause |
 | **E7** | **Relay round trip on cellular.** Phone → relay → `serve` small-frame RTT on 4G/5G and Wi-Fi; end of speech → first spoken word with `serve` on the owner's Mac (laptop-as-host) and the local Qwen / DeepSeek; reply-stream continuity across a forced network switch (Wi-Fi → cellular). | RTT p50/p95; e2e first word p50/p95; stall/resync behaviour | RTT p50 < 150 ms; e2e p50 ≤ Mac target + 300 ms |
-| **E11** | **Audio session survival.** Mode on, then: an incoming call (ends, declined); Siri; Music started by another app; AirPods in/out; app backgrounded 30 s and 5 min; screen locked 30 s and 5 min. Run once without and once with `UIBackgroundModes: audio`. | for each: engine alive?, mic indicator, what iOS reports (`interruption` / `mediaServicesWereReset`), recovery path | a defined, convergent state for every row (P-F1…P-F4); background viability is a fact for Owner Q6 |
+| **E11** (rev 3: **tuning input, not a gate**) | **Background and locked-screen behaviour**, with `UIBackgroundModes: audio` and the §5b session. Mode on, app backgrounded and screen locked, for 30 s, 5 min and 30 min, with a reply spoken while locked. Then, while locked: an incoming call (answered, declined); Siri; Music started from Control Center; an alarm; AirPods in/out; a relay drop (Wi-Fi off). Then a remote-command resume while locked, after each. | per row: engine alive?, recognition alive across rollovers?, mic indicator, Now Playing shown?, what iOS reports (`interruption` source + `shouldResume`, `mediaServicesWereReset`, `cannotStartRecording`), whether a background resume works or needs the app opened; battery % per 30 min (foreground, locked); thermal state | **No pass/fail on background itself.** The results set §5b's tunables: the options (A2DP), which sources auto-resume, the resume path (in place vs open the app), the restart thresholds, and the idle-off minutes. Every row must land in a defined state of P-F1…P-F12; a row that does not is a design bug to fix in P2b, not a reason to drop background. |
 
-**Decision after P1 (with the owner):** full- vs half-duplex on the phone; level gate vs recogniser activity for speech detection; the phone floor; foreground-only vs background (Q6). If E10 fails on-device for a language, Q1's fallback applies.
+**Decisions after P1 (with the owner):** full- vs half-duplex on the phone; level gate vs recogniser activity for speech detection; the phone floor; §5b's tunables from E11. If E10 fails on-device for a language, Q1's fallback applies. Background stays in scope regardless (Q6).
 
 ### Tests
 
@@ -260,9 +317,10 @@ Red first (§9); each is shown failing on a stub, then green, and the named muta
   - `autoStop:false` never stops.
   - *Mutations:* floor 200 → red; drop the `textGrew` rule → the phone traces go red.
 - **T6 C3, daemon:**
-  - a voice prompt → the first request has `reasoning:"off"` + the transient line, and after the first tool call, neither;
+  - a voice prompt with `reasoning:"off"` → the first request has `reasoning:"off"` + the transient line, and after the first tool call, neither;
+  - a voice prompt with `reasoning:"keep"` → the transient line but **no** `reasoning` field (the switch is honoured; mutation: ignore `keep` → red);
   - a non-voice turn has neither;
-  - a voice `enqueue` marks the turn;
+  - a voice `enqueue` marks the turn, with its own `reasoning`;
   - **F10:** the laptop `<uid>.jsonl`, `session/log` and a `serve` store (`startDaemon` with a temp config dir) contain no transient line.
   - *Mutation:* append the line to history → red.
 - **T7 C3, wire/client:**
@@ -277,21 +335,24 @@ Red first (§9); each is shown failing on a stub, then green, and the named muta
   - ask pending → no send;
   - an ask while speaking → `hush` + speak the ask;
   - link down → hush + "connection lost" + `paused`; up → listening, with no re-speak;
-  - `interrupted{ended, shouldResume:true}` → stays `paused` (P-F1);
+  - `interrupted{ended, source:"call", shouldResume:true}` → stays `paused` (P-F1); `source:"other", shouldResume:true` → `listen` (P-F1b); `resumeFailed` → `paused` "open tentacle to resume" (P-F10);
+  - `remote{pause|resume|stop}` → paused / listen / off; 5 recognition failures in 60 s → `paused` (P-F9); thermal critical → `paused`;
   - a foreign turn (not started here) → no `speak` (F14);
   - echo rule (F1); idle timeout.
-  - *Mutations:* send while pending → red; speak foreign turns → red; auto-resume on `ended` → red.
-- **T10 TUI** (`ink-testing-library`, fake spawner): `/voice` → `listen`; `utter`/`final` → a prompt with `voice:true`; deltas → ordered `speak`; Esc while speaking → `hush`, no abort; Esc otherwise → abort. **`route.test.ts`**: Esc precedence; the toggle behind a dialog → pass.
+  - *Mutations:* send while pending → red; speak foreign turns → red; auto-resume after a call → red.
+- **T10 TUI** (`ink-testing-library`, fake spawner): `/voice` → `listen`; `utter`/`final` → a prompt with `voice:{reasoning:"off"}` (and `"keep"` with `voice.reasoningOff:false`); deltas → ordered `speak`; Esc while speaking → `hush`, no abort; Esc otherwise → abort. **`route.test.ts`**: Esc precedence; the toggle behind a dialog → pass.
 - **T11 phone controller** (`bun test`, fake native port, the mobile-voice `voice-controller.test.ts` pattern):
-  - waveform → `listen`; native `final` → an outbox item with `voice:true`; a steer → `compose-handle` enqueue with `voice:true`;
-  - `AppState background` → `unlisten` + `paused` (foreground-only);
+  - activation → `listen`; native `final` → an outbox item with `voice:{reasoning:"off"}`; with the Settings row off → `voice:{reasoning:"keep"}`; a steer → `compose-handle` enqueue with the same;
+  - **`AppState background` → no `unlisten`, mode still `listening`** (Q6); unmounting the session screen → mode still on (app-scoped);
+  - Now Playing state updates on each reducer state; remote commands map to intents;
   - `dispose` → `unlisten` + `hush` before the listener is removed;
   - the arbiter disables the mic/speaker buttons.
-  - *Mutation:* forget `voice` on the outbox item → red.
+  - *Mutations:* forget `voice` on the outbox item → red; pause on background → red; ignore the Settings row → red.
 - **T12 phone outbox:** an item with `voice` survives a store reload (`outbox-store.ts`), and an old item without it loads.
+- **T13 phone config:** after `expo prebuild`, a test (the mobile-voice guard-test pattern) asserts that `Info.plist` has `UIBackgroundModes` ⊇ `audio` and the reworded purpose strings, and that `app.json` and `app.plugin.js` agree. *Mutation:* drop `audio` from the plugin → red.
 - **Swift:**
   - Mac (`voice:test`): protocol v2; `hush` stops within one buffer; `trace` with TTS + speech → `bargein`; TTS only → none.
-  - Phone: a unit-testable `BargeInGate` (windows → decision) and the route/interruption mapping as pure Swift functions, tested in the module's test target if mobile-voice set one up. Otherwise they are covered by P4's checklist, and that is stated in Execution.
+  - Phone: a unit-testable `BargeInGate` (windows → decision), the interruption policy (`source × shouldResume × callActive → action`) and the route/restart mapping as pure Swift functions, tested in the module's test target if mobile-voice set one up. Otherwise they are covered by P4's checklist, and that is stated in Execution.
 - **Maestro:** the waveform button appears, toggles state, and is hidden when on-device recognition is unavailable (no audio assertions; Maestro cannot speak).
 
 ### Slices
@@ -299,17 +360,18 @@ Red first (§9); each is shown failing on a stub, then green, and the named muta
 | Slice | Size · Blast | Suited | What | Gate / exit |
 |---|---|---|---|---|
 | **C2 shared core** | M · contained | owner assigns; standard review | §3 modules; T1–T5, T9 | `bun test packages/core/test/voice` green; mutations logged |
-| **C3 voice-turn profile** | M · **load-bearing** | owner assigns; **fresh-context review** (§7 persistence, forward-compat, model-on-laptop) | §4; T6–T8 | `bun run check` green |
+| **C3 voice-turn profile** | M · **load-bearing** | owner assigns; **fresh-context review** (§7 persistence, forward-compat, model-on-laptop) | §4 (incl. the per-turn `reasoning` switch); T6–T8 | `bun run check` green |
 | **C1 Mac spike** | S · contained (scratch) | owner at the Mac | E6 live, TTS-in-engine, Kokoro feasibility | numbers in Execution; Mac full/half-duplex decided |
 | **C1b Mac helper v2** | M · contained | owner assigns | §2; Swift tests | `voice:test` green; `trace` matches C1 |
 | **C4 Mac TUI wiring** | M · cross-module | owner assigns; standard review | config, adapter, layer, `/voice`, strip; T10 | `bun run check` green |
-| **P1 phone spike** | S · contained (scratch) | owner with the iPhone 12 Pro | E10, E8, E7, E11 | numbers in Execution; phone decisions taken (above). **Gates P2/P3.** |
-| **P2 phone native** | M · cross-module (the app-wide `AVAudioSession`) | owner assigns; **fresh-context review** of the audio session owner (P-F1…P-F8) | §5; Swift pure-function tests | builds on iOS 18/26 simulators; E8/E11 behaviour reproduced on the phone |
-| **P3 phone wiring** | M · cross-module | owner assigns; standard review | §6; T11, T12, Maestro | `bun run check` + `bun run e2e:mobile` (18 and 26) green |
+| **P1 phone spike** | S · contained (scratch) | owner with the iPhone 12 Pro | E10, E8, E7, E11 | numbers in Execution; phone decisions taken (above). **E10/E8/E7 gate P2a/P3; E11 only tunes P2b.** |
+| **P2a phone engine** | M · cross-module (the app-wide `AVAudioSession`) | owner assigns; **fresh-context review** of the audio session owner | §5a; `BargeInGate` Swift tests | builds on iOS 18/26 simulators; E8 behaviour reproduced on the phone (foreground) |
+| **P2b phone background** | M · **load-bearing** (the app runs with the mic on and the screen locked; App Review 2.5.4; purpose strings) | owner assigns; **fresh-context review** red-teaming P-F1…P-F12 and the 2.5.4 list | §5b; interruption-policy Swift tests; T13 | E11's rows reproduced on the phone, each landing in its defined state |
+| **P3 phone wiring** | M · cross-module | owner assigns; standard review | §6 (app-scoped controller, Settings rows incl. reasoning off); T11, T12, Maestro | `bun run check` + `bun run e2e:mobile` (18 and 26) green |
 | **C5 Mac live** | S · contained | owner at the Mac | L1–L9 below | every item ticked |
 | **P4 phone live** | S · contained | owner with the iPhone | PL1–PL10 below | every item ticked |
 
-**Order:** C2 → C3 → (C1 → C1b → C4 → C5) ∥ (P1 → P2 → P3 → P4). The two spikes may run as soon as the plan is approved, even before V1/mobile-voice merge (scratch only). Code slices wait for their base (Owner Q1).
+**Order:** C2 → C3 → (C1 → C1b → C4 → C5) ∥ (P1 → P2a → P2b → P3 → P4). The two spikes may run as soon as the plan is approved, even before V1/mobile-voice merge (scratch only). Code slices wait for their base (Owner Q1).
 
 **Latency targets** (end of user speech → first audible word; re-taken in the spikes):
 
@@ -336,9 +398,10 @@ Red first (§9); each is shown failing on a stub, then green, and the named muta
 - **PL1** ten it/en turns to `serve` on the Mac over Wi-Fi, then five over cellular;
 - **PL2** five barge-ins on the loudspeaker, then on AirPods;
 - **PL3** 5 min of the assistant speaking with no false barge-in;
-- **PL4** an incoming call mid-reply: paused, and no auto-resume after it;
-- **PL5** AirPods in and out mid-mode;
-- **PL6** background and lock behave per Q6;
+- **PL4** an incoming call mid-reply, screen locked: paused, and no auto-resume after it; resume from Now Playing;
+- **PL5** AirPods in and out mid-mode, screen locked;
+- **PL6** app backgrounded, then screen locked for 10 min: three turns spoken and answered while locked, Now Playing shows the state, the mic indicator is on; the idle-off fires after 10 min of silence;
+- **PL6b** the iPhone Settings row "reasoning off" switched off → a voice turn reasons (visible in the transcript's reasoning row); switched on → it does not;
 - **PL7** Wi-Fi → cellular mid-reply: "connection lost" → "reconnected", text complete on screen;
 - **PL8** an ask spoken, a "yes" ignored, a tap answers;
 - **PL9** phone and Mac both in voice mode on one session: only the originating device speaks each reply;
@@ -346,14 +409,21 @@ Red first (§9); each is shown failing on a stub, then green, and the named muta
 
 ### Owner questions
 
-1. **Order and fallback.** V2's code slices start only after `feat/voice-dictation` and `feat/mobile-voice` are merged; both spikes (Mac C1, phone P1) may run right after approval. If the iPhone has no on-device recognition for a language (E10), that language gets no phone voice mode (never a cloud recogniser). *Recommendation: yes to both.*
-2. **Reasoning off for spoken replies (new plumbing, slice C3).** A per-turn `voice` flag, sent by both edges; reasoning off until the turn's first tool call; a short "speak, don't write" note that is never saved. It is additive, with no protocol bump, and the same for the TUI and for phone prompts to `serve` (including `serve` on your Mac). *Recommendation: yes, with a mandatory fresh-context review.*
-3. **Send automatically when you stop talking (conversation mode only, both edges).** Push-to-talk dictation keeps never auto-sending. *Recommendation: yes*, with a comma-safe pause measured on your own voice in each spike.
-4. **What talking over a reply does.** *Recommendation: it stops the speech only; what you say goes to the running turn as a steer, and nothing is cancelled.* Esc / the stop button stops speech; a second press aborts, as today.
-5. **Reply voice: the system voice on both Mac and iPhone** (parity, no download, plays inside the audio engine so echo cancellation works). Kokoro becomes a Mac option only if the spike shows a working Swift path with a clean license. *Recommendation: yes.*
-6. **iPhone background and lock screen.** *Recommendation: v1 is foreground-only, with the screen kept awake while voice mode is on;* background/lock-screen audio (`UIBackgroundModes: audio`, a visible mic indicator) only if E11 proves it survives calls, locks and route changes and you want it.
-7. **Phone and Mac in voice mode on the same session.** *Recommendation: only the device that started or voice-steered a turn speaks its reply;* the other shows it silently, and an approval can be answered on whichever device shows it.
-8. **How to turn the mode on.** *Recommendation: Mac — `/voice` plus a rebindable key (Ctrl+G if the spike shows it free); iPhone — a waveform button next to the mic.* On both, it stays on until toggled off, 10 min of silence, or (phone) leaving the session screen.
+*Rev 3 — claude-opus-5-5, 2026-11-15. Q1–Q7 are answered (answers at the end of this doc), and the plan above applies them. Only Q8 is open.*
+
+1. ~~Order and fallback~~ — **answered (batch 1):** code after V1 + mobile-voice merge; spikes now; never cloud.
+2. ~~Reasoning off for spoken replies~~ — **answered (batch 1):** a user setting on both edges (Mac `voice.reasoningOff`, iPhone Settings row), carried per turn (§4).
+3. ~~Auto-send~~ — **answered (batch 1):** conversation mode only.
+4. ~~Barge-in~~ — **answered (batch 2):** stop speech + steer, never cancel.
+5. ~~Reply voice~~ — **answered (batch 2):** system voice on both edges; Kokoro a Mac opt-in if proven.
+6. ~~iPhone background / lock~~ — **answered (batch 2), against the recommendation:** in v1 ("background subito"); §5b, P2b.
+7. ~~Two edges on one session~~ — **answered (batch 2):** only the originating edge speaks.
+8. **How to turn the mode on, and how it shows (OPEN — decide from the mockups** at `.tentacle/tmp/voice-conversation/mockups/index.html`, gitignored scratch):
+   - **Mac A:** `/voice` + Ctrl+G; a status-line chip (`◉ voice · listening`) on the right of the last line; the input row stays a text field.
+   - **Mac B:** `/voice` + **Ctrl+R pressed twice** (one voice key: once = dictation, twice = conversation); the input row itself becomes the voice bar (state, meter, hints) while the mode is on.
+   - **iPhone A:** a separate round **voice-mode button** between the field and Send; the capsule above the composer shows the state.
+   - **iPhone B:** **the Send button becomes the voice-mode button when the field is empty** (no new button; typing turns it back into Send); the state shows in a full-width voice bar in place of the composer.
+   - *Recommendation:* **Mac B** (no new key to learn, and the state sits where the eyes already are; Ctrl+G stays free) and **iPhone B** (the familiar pattern of voice assistants; no crowding of a 390-pt composer that already holds photo + field + mic + send).
 
 ## Execution
 
