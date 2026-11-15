@@ -607,3 +607,15 @@ No schema changed, so `protocol.json` was not regenerated.
 **S1: DONE.** S2–S5: not started (out of scope for this execution).
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; scope: slice S1 only, `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM).
+
+1. **MEDIUM — `projectSystem` re-renders the catalog from a caller-supplied `offered`, not from the set the prompt was composed with** (`packages/agent/src/capabilities.ts:176-198`). Byte-equality holds only when `offered` equals the compose-time set, and nothing enforces or tests that. The obvious S2 source, `this.listing`, follows the disk after a user rescan while the model's `skill` enum and catalog stay fixed until a reset (`agent.ts:883-911`). Repro (`.tentacle/tmp/session-capabilities/r1.ts`): prompt composed with `[a,b]`, `offered=[a,b,c]`, disable `a` → `catalog offers c (not in skill enum): true`. Turning one skill off would silently advertise a skill the `skill` tool rejects. Fix in S1: limit the re-render to the names in the `skill` def's enum (or take those names as the input), and add a test where `offered` ⊋ the composed set.
+- LOW (not blocking): the drift in the everything-hidden case (`head` is trimEnd'ed) also loses bytes when there is no AGENTS.md if the identity (PROMPT.md) ends in a newline, so the "no AGENTS.md → byte-equal" test holds only for an untrimmed identity.
+
+**Gate (touched files):** `capabilities.test.ts` + `tool-adapter.test.ts` 27 pass / 0 fail; `bun run lint` clean (1657 files); `bun run typecheck` clean. I did not re-run the full suite.
+**Mutations (copied back from a scratch backup; `git status` clean afterwards):** skill enum left unfiltered → 2 red; `projectTools` hidden ≡ false → 1 red. The executor's M1–M5 are plausible but I did not re-run them.
+**Attacks tried:** is the catalog truly LAST (nothing appended after compose; `agent.ts:926` sends the prompt as-is) → holds; the skill def's shape (the test goes through the real `ToolRegistry`/zod path) → holds; tag vs name-parse for `a__b` → holds (the tag is set in `tool-adapter.ts:81`); §7 invariants: pure module, no protocol, persistence or pod surface in S1 → none touched; a stale `offered` → finding 1.
+**Executor:** honest drift notes, flagged the trimEnd question itself. The doc is signed `claude-sonnet-4-5-20250929` but commit `3f8f2d0d` says "exec (deepseek)": reconcile the signature.
