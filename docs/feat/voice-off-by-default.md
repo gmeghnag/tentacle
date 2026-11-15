@@ -149,3 +149,30 @@ wire change).
   pins them to each other; a future reword can drift one.
 
 ## Review
+
+*— claude-opus-5-5 (fresh-context adversarial reviewer), 2026-11-15*
+
+**Verdict: APPROVE** (no HIGH/MEDIUM findings; nits below).
+
+**Gate (re-run here):** the touched tests (`voice-session`, `voice-app`, `voice-cmd`,
+`connect-voice`, `key-docs`, `readme-config-table`) → 124 pass / 0 fail;
+`bun run lint` → 1655 files, clean; `bun run typecheck` → clean. The full `bun test`
+was NOT re-run in this review (the executor reports 11917 pass / 5 opt-in skip).
+
+**Premises:** load-bearing assumption TRUE — every path merges `VOICE_DEFAULTS`:
+`cli/main.ts:959,1411,2268`, `connect.ts:159,164`, `App.tsx:217`, `useVoice.ts:83`.
+`resolve.ts:716` passes `fileConfig.voice` through unchanged (no per-profile voice
+merge that could drop `enabled`). The reducer has ONE spawn site (`voice-session.ts:322`).
+
+**Mutations (all reverted; `git status` clean afterwards):**
+- `voiceInit` guard → `false`: 1 RED (reducer "toggle with the default config"). The App tests stay green (the hook's availability still refuses).
+- `useVoice` passes `enabled: true`: App tests all GREEN — the new guard masks it (defence in depth working).
+- Both together: 2 RED in `voice-app` (the existing "enabled: false disables the mic" test and the new "NO config" test).
+
+**Attacks tried:** (1) a path that skips the merge → none found; (2) `voice` block present without `enabled` → OFF, pinned at the merge and at the file read (`connect-voice`); (3) a second spawn path (prewarm/auto-start) that skips the reducer → none, one `spawn` command only; (4) `voice status` on non-darwin → returns before the new line, as before; with the helper missing it prints the switch line, then the build hint: fine; (5) mobile/relay voice → out of scope (terminal-only), not touched.
+
+**Nits (LOW, not blocking):**
+1. `voice-app.test.tsx` comment on the "NO config" test says "dropping `enabled` from the hook's availability → red". That is FALSE on its own: the `voiceInit` guard masks it (shown above). Reword it, or name the guard as the second layer.
+2. Executor's drift (the `voiceInit` guard) is justified and stays in the pure module (§7); the plan should be updated to say so in Implementation, not only in Execution.
+
+**Executor behaviour:** stayed in scope, red-first claims match what I see, mutation table is accurate except the comment in nit 1. The executor did not record its own model id, so whether it shares a model family with this reviewer (Opus) is unknown. Blast is contained, so a fresh context is enough here.
