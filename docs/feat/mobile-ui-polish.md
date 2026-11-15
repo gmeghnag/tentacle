@@ -1599,3 +1599,9 @@ Agents writing their own Maestro flows got stuck on the lock screen: the repo's 
 **Unverified:** every restyle in these slices is unseen on a device (`_unlock` failed on iOS 26; no screenshots). The visual gate remains merge-blocking, as the Execution says. The executor stopped after the same `_unlock` failure appeared twice and reported it honestly (good). This reviewer is the same model family as the Execution's signature, so shared blind spots are possible.
 
 *— claude-opus-5-5, 2026-11-15*
+
+
+#### Owner request (2026-11-15 02:35): test photo ATTACHMENTS end to end — part of the final check of slices 5+6
+
+Send a photo from the app (simulator: a Photos sample image via the composer's image button / the 13c photo input) to a session on a local `tentacle serve` that runs the **DEFAULT profile — the local qwen3.8 model, which has vision** (NOT `--profile deepseek`: DeepSeek has no vision and the daemon answers "images are off"). Screenshot the composer with the attached thumbnail, the sent user row with the image, and the model's reply describing it (light + dark), into the final screenshot folder. If anything in the attachment path fails (picker, downscale, upload, the row, the model never seeing the image), it is a bug of this task: reproduce, fix with a red-first test, re-shoot.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
