@@ -293,6 +293,39 @@ describe("the Beta switches going OFF stop what they were running (docs/feat/mob
     expect(s.port.calls.at(-1)).toBe("stopSpeaking");
   });
 
+  test("Dictation off while an on-device model downloads: never starts behind the hidden mic", async () => {
+    // Review round 1, finding 1, end to end: `preparing{downloading}` is the slow
+    // state (a model download), and the switch can go off during it.
+    const s = setup({ dictation: true });
+    s.port.caps = {
+      os: 26,
+      analyzer: { transcriber: true, dictation: true, assets: { "en-US": "supported" } },
+      recognizer: { "en-US": { supported: true, onDevice: true } },
+      permissions: CAPS.permissions,
+    };
+    let finishInstall: () => void = () => {};
+    s.port.installAsset = (engine, locale) => {
+      s.port.calls.push(`installAsset:${engine}:${locale}`);
+      return new Promise<void>((r) => {
+        finishInstall = r;
+      });
+    };
+    s.voice.tapMic();
+    await flush();
+    await flush();
+    expect(s.voice.state().dictation).toMatchObject({ kind: "preparing", phase: "downloading" });
+    s.voice.settingsChanged({ ...DEFAULT_VOICE_SETTINGS, dictation: true }, DEFAULT_VOICE_SETTINGS);
+    expect(s.voice.state().dictation.kind).toBe("idle");
+    expect(s.port.calls).toContain("cancel:1");
+    // The download finishing late must not start a recognizer nobody can see.
+    finishInstall();
+    await flush();
+    await flush();
+    expect(s.voice.state().dictation.kind).toBe("idle");
+    expect(s.port.calls.filter((c) => c.startsWith("start:"))).toEqual([]);
+    expect(s.timers.length).toBe(0);
+  });
+
   test("a change that turns nothing off leaves a running dictation alone", async () => {
     const s = setup({ dictation: true });
     await listening(s);

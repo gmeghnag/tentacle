@@ -261,3 +261,64 @@ nothing in `Composer.tsx:120`), so the gates are pure-function changes, as the p
 **Not done vs the plan (no code impact):** `TODO.md` still lacks the `fix/mobile-dictation-quality` entry. The executor left it to the orchestrator; it can go direct to `main` (§10 carve-out).
 
 **Executor behaviour:** disciplined. It ran the load-bearing check first and reported it failing honestly, recorded its drift with reasons, and listed 12 mutations. Its blind spot: it mutation-tested `stopRequested` only in the `active` state.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Findings handled:** 1 (MEDIUM). HIGH: none open. No production code changed — the
+Review found the reducer *correct* and only its `asking`/`preparing` coverage
+missing, so this round is tests-only (63 lines added, 0 removed, in two existing
+test files).
+
+**1. MEDIUM — `stopRequested` in `asking` / `preparing` was untested → FIXED.**
+
+- `apps/mobile/test/dictation.test.ts:522` — new `describe("stopRequested in every
+  pending state (switch turned OFF)")`, 5 tests:
+  - a fixture self-check that the three starting states are really `asking`,
+    `preparing{starting}` (OS 18 path) and `preparing{downloading}` (OS 26 with an
+    uninstalled asset);
+  - `asking` → idle, **no effects** (nothing native started, nothing to cancel);
+  - `preparing{starting}` → idle + `cancel{attempt:1}`;
+  - `preparing{downloading}` → idle + `cancel{attempt:1}`;
+  - the consequence the Review named: a `started` for that attempt arriving *after*
+    the switch went off leaves the state `idle` and answers `cancel{attempt:1}`, so
+    it can never reach `listening` behind a hidden mic.
+- `apps/mobile/test/voice-controller.test.ts:296` — one end-to-end controller test
+  for the actual scenario: OS 26, `installAsset` left pending (a real download), the
+  switch goes OFF → `idle` + `cancel:1`; the download then finishing late must not
+  produce any `start:` call and must leave no timer running. This covers the seam
+  the reducer test cannot: `settingsChanged → stopRequested` (already covered for
+  `listening` at `:268`) now also for `preparing`, through the real controller.
+
+**Red before green.** The new tests were added *before* touching anything else; on
+the unmodified reducer they were green, because the code is correct. So the
+"red" here is by **mutation** (AGENTS §9), reproducing exactly the Review's R2/R3
+and then two more:
+
+| # | Mutation (`apps/mobile/src/dictation.ts`) | RED |
+|---|---|---|
+| F1-R2 | `case "stopRequested"` removed from `preparing` (`:511`) — the Review's surviving R2 | 3 RED: "in preparing{starting}…", "in preparing{downloading}…", "a `started` arriving after the switch went off…" (`39 pass / 3 fail`) |
+| F1-R3 | `case "stopRequested"` removed from `asking` (`:447`) — the Review's surviving R3 | 1 RED: "in asking → idle, nothing native was started to cancel" (`41 pass / 1 fail`) |
+| F1-M1 | `preparing`'s `stopRequested` effects `[{cancel}]` → `[]` (state kept correct) | 4 RED, incl. the two new `preparing` ones — proves the **cancel effect** assertion is not vacuous, not just the `kind` one (`38 pass / 4 fail`) |
+| F1-M2 | `case "stopRequested"` removed from `preparing`, run against `voice-controller.test.ts` only | 1 RED: `Expected: "idle" / Received: "preparing"` — the controller test is not a duplicate of the reducer test |
+
+Each mutation was reverted immediately; `git diff` after the round touches only the
+two test files (no `src/` change survives), verified with `git diff --stat`.
+
+**Drift from the Implementation:** none. The design and the code are unchanged.
+
+**Gate (final tree, all four clean):**
+`bunx tsc --noEmit` → 0 · `bunx tsc -p apps/mobile` → 0 · `bunx tsc -p apps/relay`
+→ 0 · `bun run lint` → `Checked 1661 files … No fixes applied` (AGENTS §6 clean
+baseline; one `biome check --write` pass was needed for formatting of the new
+tests only) · `bun test` → **12016 pass, 5 skip, 0 fail** (859 files, ~445 s). The
+12010 → 12016 delta is exactly my 6 new tests; the 5 skips are the documented
+opt-in gates. The `packages/exec/test/confinement.test.ts` flake the previous
+Execution noted did not appear.
+
+**Not verified:** nothing behavioural — the fix is test coverage, and each new
+assertion was shown red under a mutation. Not re-done: no device/simulator run
+(still true of the task as a whole, unchanged by this round). Review's attack (f)
+(SessionScreen's subscribe-in-an-effect window on a cold-start deep link) stayed
+below MEDIUM and was left alone, as the Review ranked it.
