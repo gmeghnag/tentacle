@@ -385,3 +385,8 @@ In dependency order. Everything is in `apps/mobile/`; nothing outside it except 
 - **Background and lock-screen audio** (`UIBackgroundModes: audio`) are deferred to V4 / E10 (eval Q6), because they change the App Store review surface.
 - **Kokoro on the phone** is not in scope. The system voice is the owner's choice for the phone.
 - **Android:** the module is iOS-only. On Android the mic and speaker buttons are `hidden` (the app is iOS-first).
+
+#### Orchestrator decisions (owner night delegation 2026-11-15)
+
+Every owner question: the recommendation.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
