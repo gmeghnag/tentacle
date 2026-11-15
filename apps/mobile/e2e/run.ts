@@ -104,7 +104,47 @@ async function simctlDevices(): Promise<string> {
  * daemon refuses every photo `images_off` and flow 18 can never pass.
  */
 export function harnessConfigText(): string {
-  return `${JSON.stringify({ model: { images: true } }, null, 2)}\n`;
+  return `${JSON.stringify(
+    {
+      model: { images: true },
+      // docs/feat/mobile-session-info.md flow 25: one working stdio server and one
+      // that cannot start, so Session info has a `connected` row with tools AND a
+      // `failed` row with an error. MCP connects OFF the start path, so this costs
+      // the other flows nothing (F12: measured at flow 01).
+      mcpServers: {
+        demo: {
+          command: "bun",
+          args: [
+            join(REPO, "packages", "mcp", "test", "fixtures", "strict-legacy-stdio-server.ts"),
+          ],
+        },
+        broken: { command: "/nonexistent-tentacle-e2e" },
+      },
+    },
+    null,
+    2,
+  )}\n`;
+}
+
+/** The user-scope skill flow 25 asserts on (`<configDir>/skills` is a scan root). */
+export const HARNESS_SKILL_NAME = "e2e-demo";
+
+/** Write the skill the Session info flow lists (name + one line). */
+export async function writeHarnessSkill(configDir: string): Promise<void> {
+  const dir = join(configDir, "skills", HARNESS_SKILL_NAME);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "SKILL.md"),
+    [
+      "---",
+      `name: ${HARNESS_SKILL_NAME}`,
+      "description: A demo skill the Session info flow lists",
+      "---",
+      "",
+      "Do the demo.",
+      "",
+    ].join("\n"),
+  );
 }
 
 /** Maestro needs a JDK; the owner's is keg-only, so the run supplies it. */
@@ -271,6 +311,8 @@ async function main(): Promise<number> {
   // Images ON before the first start (flow 18): serve keeps an existing file.
   await mkdir(join(runDir, "config"), { recursive: true });
   await writeFile(join(runDir, "config", "config.jsonc"), harnessConfigText());
+  // Session info's skill row (flow 25): a user-scope skill in the harness config dir.
+  await writeHarnessSkill(join(runDir, "config"));
   let serving = startServe();
 
   try {
@@ -694,6 +736,9 @@ export const FLOWS: readonly string[] = [
   // docs/feat/mobile-ui-polish.md Slice 6: the screenshot walk (light/dark pairs
   // for the visual review), on a session of its own.
   "24-ui-shots",
+  // docs/feat/mobile-session-info.md: the "…" menu's Session info sheet — the
+  // model, the context, the MCP servers and the skills, on a session of its own.
+  "25-session-info",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`
   // behind in the Keychain, which `clearKeychain` in `_pair` resets anyway).
@@ -750,6 +795,7 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "18-photos": "PHOTO_ID",
   "23-composer-keyboard": "KEYBOARD_ID",
   "24-ui-shots": "SHOTS_ID",
+  "25-session-info": "INFO_ID",
 };
 
 /** Run one flow on one simulator with Maestro, returning its exit code. */

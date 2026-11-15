@@ -20,6 +20,7 @@ import {
 } from "./composer.ts";
 import type { OutboxItem } from "./outbox.ts";
 import type { SessionOpenFailure } from "./session-controller.ts";
+import { headerContext, shortModel } from "./session-info.ts";
 import type { Row, TurnRow } from "./transcript-rows.ts";
 
 /**
@@ -76,6 +77,18 @@ export interface SessionViewInput {
    * never makes the first attach pass `reopen`.
    */
   readonly archived: boolean;
+  /**
+   * The header's model and context bar (Owner 2/4): the daemon's handshake facts
+   * and THIS session's measured fill. Absent → the header shows the status word
+   * only (an older daemon, or a build without the info port).
+   */
+  readonly header?: {
+    readonly model: string | undefined;
+    /** The last measured fill, else the daemon's count at open. */
+    readonly measured: number | null;
+    readonly open: { readonly used: number; readonly exact: boolean } | null;
+    readonly window: number | undefined;
+  };
   /** The queue rows above the input (13a's `shownRows`): mine and other devices'. */
   readonly queued?: readonly ShownRow[];
   /** Other devices' returned rows, each with an explicit Take (D3, F11). */
@@ -142,8 +155,7 @@ export interface ComposerView {
   /** The button's face: Send, Queue (steer), Send later, Stop, or a disabled Send. */
   readonly button: "send" | "queue" | "send-later" | "stop" | "disabled";
   /** Why the button does nothing (the screen dims it); null when it does something. */
-  readonly blockedBy: ComposerBlocker | null;
-  /** A turn runs: the indicator under the transcript (`turn-running` / `turn-idle`). */
+  readonly blockedBy: ComposerBlocker | null /** A turn runs: the indicator under the transcript (`turn-running` / `turn-idle`). */;
   readonly running: boolean;
   /** Whether **Send now** is offered beside the queue (D1's secondary button). */
   readonly sendNow: boolean;
@@ -154,6 +166,17 @@ export interface ComposerView {
 export interface SessionView {
   readonly title: string;
   readonly project: string;
+  /**
+   * The header's subtitle runs (docs/feat/mobile-session-info.md Owner decision
+   * 2): the status word FIRST, then the model — shortened, and dropped entirely
+   * when the daemon reports none (the header then looks exactly as before).
+   */
+  readonly headerModel: string | null;
+  /**
+   * The header's thin context bar (Owner decision 4): a FILL only, no text. `null`
+   * → no bar is drawn (nothing measured yet, or no window to divide by).
+   */
+  readonly headerContext: { readonly percent: number; readonly approx: boolean } | null;
   /** The header's state line: `Loading…`, `Live`, `Reconnecting…`, or the end. */
   readonly state: string;
   readonly banner: Banner | null;
@@ -232,9 +255,17 @@ function endedBanner(reason: EndReason): Banner {
  */
 export function sessionView(input: SessionViewInput): SessionView {
   const composer = composerOf(input);
+  const measured = input.header?.measured ?? null;
+  const bar = headerContext({
+    measured,
+    open: input.header?.open ?? null,
+    window: input.header?.window,
+  });
   const base = {
     title: input.title,
     project: input.project,
+    headerModel: shortModel(input.header?.model),
+    headerContext: bar.percent === null ? null : { percent: bar.percent, approx: bar.approx },
     rows: input.rows,
     turn: input.turn,
     composer,

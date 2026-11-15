@@ -896,6 +896,14 @@ export class RemoteClient {
    * images-off-reason.md): a daemon of our own protocol is never "old".
    */
   private daemonImages: { readonly protocol?: number; readonly model?: string } = {};
+  /**
+   * The last handshake's whole `agentInfo` — the daemon's own build, model and
+   * the window that model counts against — kept for a client that must SHOW them
+   * (the phone's Session info). Re-read on every handshake, like
+   * `daemonImages`: a `serve` restarted with another model is right after the
+   * reconnect, not just after the first pair.
+   */
+  private daemonHandshake: InitializeResult["agentInfo"] | undefined;
 
   constructor(
     channel: DuplexChannel,
@@ -962,6 +970,30 @@ export class RemoteClient {
    * re-sent after a drop: it is a fresh probe, the user just asks again. An
    * older daemon rejects with `MethodNotFound`. Schema-validated by the peer.
    */
+  /**
+   * What the daemon said about ITSELF at the last handshake (`agentInfo`): its
+   * build, the model that runs the turns and the window that model counts
+   * against. `undefined` before the first handshake, or from an older daemon /
+   * a pod, which report nothing. Display only — never an id, a URL or a key.
+   */
+  daemonInfo():
+    | {
+        readonly version?: string;
+        readonly model?: string;
+        readonly contextWindow?: number;
+      }
+    | undefined {
+    const info = this.daemonHandshake;
+    if (info === undefined) {
+      return undefined;
+    }
+    return {
+      version: info.version,
+      ...(info.model === undefined ? {} : { model: info.model }),
+      ...(info.contextWindow === undefined ? {} : { contextWindow: info.contextWindow }),
+    };
+  }
+
   mcpStatus(): Promise<readonly McpServerStatus[]> {
     if (!this.up && this.channelFactory) {
       return Promise.reject(new Error("not connected to the daemon"));
@@ -2568,6 +2600,7 @@ export class RemoteClient {
         // Re-read on EVERY handshake: a replaced pod binary may take images
         // differently now, and the client must follow the daemon it has.
         this.capabilities = result.agentCapabilities;
+        this.daemonHandshake = result.agentInfo;
         this.daemonImages = {
           ...(typeof result.protocolVersion === "number"
             ? { protocol: result.protocolVersion }

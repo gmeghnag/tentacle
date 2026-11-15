@@ -98,6 +98,8 @@ export interface HookActions {
     readonly attached: number;
     readonly running: boolean;
     readonly archived: boolean;
+    /** The daemon's title now (flow 25: the phone's rename reached the computer). */
+    readonly title: string;
   } | null>;
   /** Every message of the session, oldest first, with the refs each one names. */
   readonly history: (sessionId: string) => Promise<{

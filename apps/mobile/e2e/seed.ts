@@ -343,14 +343,19 @@ export async function laptopLink(deps: {
 export async function sessionStateOf(
   deps: { readonly url: string; readonly token: string },
   sessionId: string,
-): Promise<{ attached: number; running: boolean; archived: boolean } | null> {
+): Promise<{ attached: number; running: boolean; archived: boolean; title: string } | null> {
   const live = await attach(deps);
   try {
     const page = await live.sessionList({ limit: 50 });
     const entry = page.sessions.find((session) => session.sessionId === sessionId);
     return entry === undefined
       ? null
-      : { attached: entry.attached, running: entry.running, archived: entry.archived };
+      : {
+          attached: entry.attached,
+          running: entry.running,
+          archived: entry.archived,
+          title: entry.title,
+        };
   } finally {
     await live.drain().catch(() => {});
     live.close();

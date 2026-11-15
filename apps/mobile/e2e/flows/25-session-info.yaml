@@ -1,0 +1,79 @@
+appId: so.tentacle.app
+---
+# 25 (docs/feat/mobile-session-info.md): the "…" menu's Session info sheet. It
+# opens ALWAYS (a read, not an action on the computer), pulls four facts over the
+# one client stack, and shows them: the daemon's model, the session's context,
+# the computer's MCP servers (one connected with tools, one failed) and the
+# skills (`/e2e-demo`).
+#
+# Assertions are by testID only (plan P9: RN's new architecture exposes no text),
+# and the flow ENDS on daemon truth: `25-session-info.js` reads the rename the
+# sheet's title tap performed through `session/list`. A screen claim alone could
+# pass while nothing reached the computer.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- tapOn:
+    id: "session-${INFO_ID}"
+- assertVisible:
+    id: "session-view"
+# The header already knows the daemon's model and shows its context bar (Owner
+# decisions 2 and 4), before the sheet is asked for anything.
+- assertVisible:
+    id: "session-header-model"
+- assertVisible:
+    id: "session-header-context"
+# The "…" menu: Session info is its FIRST action, present on a session with
+# nothing to copy.
+- tapOn:
+    id: "session-menu"
+- assertVisible:
+    id: "session-menu-info"
+- tapOn:
+    id: "session-menu-info"
+- assertVisible:
+    id: "session-info-sheet"
+- assertVisible:
+    id: "session-info-model-Model"
+- assertVisible:
+    id: "session-info-model-Context"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "25-session-info-top"
+# The four sections' own facts: the working server with its tools, the failing
+# one with its state word, and the user-scope skill.
+- assertVisible:
+    id: "session-info-mcp-demo"
+- assertVisible:
+    id: "session-info-mcp-broken"
+- assertVisible:
+    id: "session-info-skills-/e2e-demo"
+- scrollUntilVisible:
+    element:
+      id: "session-info-skills-/e2e-demo"
+    direction: DOWN
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "25-session-info-skills"
+# Owner decision 5: tapping the TITLE renames the session, through the existing
+# `session/rename`. The flow types a name the daemon will store VERBATIM, then
+# renames it back, so a re-run starts from the same title.
+- tapOn:
+    id: "session-info-close"
+- tapOn:
+    id: "session-title-tap"
+- assertVisible:
+    id: "session-rename-input"
+- tapOn:
+    id: "session-rename-input"
+- inputText: "Renamed by flow 25"
+- tapOn:
+    id: "session-rename-save"
+- waitForAnimationToEnd
+# The daemon truth: `session/list` carries the new title (the last step below).
+- runScript:
+    file: "25-session-info.js"
