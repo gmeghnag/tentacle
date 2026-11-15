@@ -6,5 +6,7 @@
   new fill. Sheets lose their heavy 38 pt corners for 14 pt, cards go square for
   the new banded lists, the chat header drops 56 → 50 pt, and `Icon` now accepts
   the `thin`/`light` SF Symbol weights plus the hamburger and gear glyphs the
-  restyle needs. Tokens only: no screen's layout or behaviour changes in this
-  slice.
+  restyle needs. This slice changes tokens and the icon seam only — no screen code
+  was rewired — but the corners, the chat header height and the dark ramp are
+  visible at once: grouped cards and sheets take their new radii, the rename
+  dialog keeps its 26 pt alert corners, and behaviour is unchanged.

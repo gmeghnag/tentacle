@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   type Palette,
@@ -207,6 +207,35 @@ describe("S1 · E2 geometry (square bands, a thin sheet, a shorter header)", () 
   test("`radius.card` is 0 (square bands) and `radius.sheet` is 14", () => {
     expect(radius.card).toBe(0);
     expect(radius.sheet).toBe(14);
+  });
+
+  test("`radius.dialog` keeps the alert-style dialog rounded (review round 1)", () => {
+    // E2 squares the BAND surfaces; the rename dialog is not one — it is a
+    // centred alert floating over a scrim (RenameSheet.tsx, maxWidth 340), and
+    // iOS alerts keep a ~14 pt corner. Squaring it was an accident of it sharing
+    // `radius.card` with GroupedCard, so it gets its own token.
+    expect(radius.dialog).toBeGreaterThanOrEqual(14);
+    expect(radius.dialog).toBeLessThanOrEqual(26);
+  });
+
+  test("`radius.card` is read only by the band primitives (it is 0 now)", () => {
+    // Scanned from source: it is 0, so any other surface reaching for it is
+    // silently sharpened — which is exactly how the rename dialog got squared
+    // before review round 1. S4 replaces `GroupedCard` with `BandSection`; both
+    // are band primitives, so the allowlist covers either.
+    const users = readdirSync(join(import.meta.dir, "..", "src"), {
+      recursive: true,
+      encoding: "utf8",
+    })
+      .filter((file) => file.endsWith(".tsx"))
+      .filter((file) =>
+        readFileSync(join(import.meta.dir, "..", "src", file), "utf8").includes("radius.card"),
+      );
+    for (const file of users) {
+      expect(file).toMatch(/(GroupedCard|BandSection)\.tsx$/);
+    }
+    // Non-vacuity: the scan really does see a consumer today.
+    expect(users.length).toBeGreaterThan(0);
   });
 
   test("the new spacing and row tokens exist", () => {

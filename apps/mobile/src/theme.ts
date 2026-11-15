@@ -220,6 +220,12 @@ export const DENSE_FONT_SCALE = 1.4;
 export const radius = {
   /** E2: bands are square (docs/feat/mobile-chrome.md Design 1 keeps the token). */
   card: 0,
+  /**
+   * The centred alert-style dialog (`RenameSheet`), NOT a band: it floats over a
+   * scrim at maxWidth 340, so squaring it was an accident of sharing `radius.card`
+   * with the bands. Kept at its pre-restyle 26 pt (review round 1).
+   */
+  dialog: 26,
   /** A sheet's top corners: 38 → 14 (Design 1; the mockups' `14px 14px 0 0`). */
   sheet: 14,
   bubble: 20,
