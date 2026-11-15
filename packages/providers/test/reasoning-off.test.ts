@@ -104,6 +104,60 @@ describe("T8 the OpenAI-compatible payload carries the reasoning switches", () =
     expect(fake.bodies).toHaveLength(2);
   });
 
+  test("F9 the latch is set only when the retry SUCCEEDS (a 400 for another reason proves nothing)", async () => {
+    // A 400 whose cause is NOT the switches (context over the server's limit, a
+    // refused tool schema, an oversized image): the plain retry fails the same
+    // way, so the endpoint never said it dislikes the switches. Latching here
+    // would make every later voice turn of a `serve` daemon silently reason.
+    const fake = endpoint(400);
+    const provider = new OpenAIProvider({
+      baseURL: "http://x/v1",
+      model: "m",
+      fetch: fake.fetchImpl,
+    });
+    await expect(drain(provider, voiceOff)).rejects.toMatchObject({ status: 400 });
+    expect(fake.bodies).toHaveLength(2);
+    // The NEXT voice turn still tries the switches first: nothing was learned.
+    await expect(drain(provider, voiceOff)).rejects.toMatchObject({ status: 400 });
+    expect(fake.bodies).toHaveLength(4);
+    expect(fake.bodies[2]?.reasoning_effort).toBe("none");
+    expect(fake.bodies[2]?.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(fake.bodies[3]?.reasoning_effort).toBeUndefined();
+  });
+
+  test("F9 the rejected first answer's body is released (LOW, round 1)", async () => {
+    // The switch-carrying body is refused and its body is never read: it must be
+    // cancelled, or the connection's stream is left holding the socket (the
+    // retry opens a second one on the same endpoint). Observes the stream's own
+    // `cancel`, so it is red if the discard is dropped.
+    let cancelled = 0;
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = (async (_url: unknown, init?: { body?: unknown }) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push(body);
+      if (body.reasoning_effort !== undefined) {
+        return new Response(
+          new ReadableStream({
+            start(c) {
+              c.enqueue(new TextEncoder().encode("unknown field: reasoning_effort"));
+              // never closed: only a cancel releases it
+            },
+            cancel() {
+              cancelled += 1;
+            },
+          }),
+          { status: 400 },
+        );
+      }
+      return new Response(SSE, { headers: { "content-type": "text/event-stream" } });
+    }) as unknown as typeof fetch;
+    const provider = new OpenAIProvider({ baseURL: "http://x/v1", model: "m", fetch: fetchImpl });
+
+    await drain(provider, voiceOff);
+    expect(bodies).toHaveLength(2);
+    expect(cancelled).toBe(1);
+  });
+
   test("a non-400 answer is never retried (a 500 belongs to the retry layer)", async () => {
     const fake = endpoint(500);
     const provider = new OpenAIProvider({

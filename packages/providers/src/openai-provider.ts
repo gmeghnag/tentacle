@@ -222,9 +222,14 @@ export class OpenAIProvider implements ModelProvider {
     const wantOff = request.reasoning === "off" && !this.reasoningSwitchesRefused;
     let res = await this.post(headers, request, images, wantOff);
     if (wantOff && res.status === 400) {
-      // F9: one retry WITHOUT them, and remembered — never a failed turn.
-      this.reasoningSwitchesRefused = true;
+      // F9: one retry WITHOUT them — never a failed turn. Remembered only if
+      // the retry SUCCEEDS: a 400 for another cause (context over the limit,
+      // a refused tool schema, an oversized image) fails both bodies and says
+      // nothing about the switches, so latching there would silently reason
+      // on every later voice turn of a long-lived daemon.
+      await discardBody(res);
       res = await this.post(headers, request, images, false);
+      this.reasoningSwitchesRefused = res.ok;
     }
     if (!res.ok || !res.body) {
       throw new ModelRequestError(
@@ -429,6 +434,15 @@ function parseChunk(data: string): WireChunk | null {
     return JSON.parse(data) as WireChunk;
   } catch {
     return null;
+  }
+}
+
+/** Free a rejected response's body: nobody reads it, and it must not leak. */
+async function discardBody(res: Response): Promise<void> {
+  try {
+    await res.body?.cancel();
+  } catch {
+    // already consumed, or no body: nothing to release
   }
 }
 

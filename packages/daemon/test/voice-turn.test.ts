@@ -240,3 +240,41 @@ describe("T6 over the wire: the fields reach the daemon from a real client frame
     peer.close();
   });
 });
+
+describe("T6 the max_iterations final report still speaks (round-1 LOW)", () => {
+  test("a voice steer drained right before the report makes the report a voice turn", async () => {
+    // The last allowed round calls a tool, so the loop spends its cap and builds
+    // the final report's request BY HAND (it cannot go through `voiceRequest`:
+    // it offers no tools and carries no `reasoning`). A voice steer that landed
+    // during that last round is drained into the report's messages — and until
+    // now the report never consumed the voice mark, so it answered unspeakably
+    // and with no spoken-style line. Fix: the report consumes the mark.
+    const model = new Recording([call("c1", "look"), say("the report")]);
+    const host = new SessionHost({
+      defaultCwd: "/tmp/voice-turn-cap",
+      createAgent: () => ({
+        agent: new Agent({
+          model,
+          tools: new ToolRegistry().register(freeTool),
+          env,
+          requestPermission: (req, options) => new PermissionBroker().request(req, options),
+          maxIterations: 1,
+        }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+    const { hosted } = host.open({ create: true }, { send: () => {} });
+    // A TYPED turn: no voice profile of its own, so only the steer can mark it.
+    hosted.prompt("T5", [{ type: "text", text: "go" }]);
+    await until(() => model.calls.length >= 1);
+    hosted.enqueue("e1", "T5", "and also", { reasoning: "keep" });
+    await until(() => model.calls.length >= 2);
+
+    const report = model.calls[1];
+    // Its steer's text is there (the drain), so the mark must be too.
+    expect(report?.messages.some((m) => m.role === "user" && m.content === "and also")).toBe(true);
+    expect(hasLine(report)).toBe(true);
+    // Still never in the history (F10).
+    expect(historyHasLine(hosted.snapshotPage().messages)).toBe(false);
+  });
+});

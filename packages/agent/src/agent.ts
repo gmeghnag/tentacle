@@ -1591,6 +1591,10 @@ export class Agent {
         messages.push({ role: "user", content: text });
         yield { type: "steer", text };
       }
+      // That drain may have carried a voice steer, so this report is part of a
+      // voice turn: consume the mark here too. This is the ONE request the loop
+      // builds by hand, and skipping it answered a spoken person unspeakably.
+      markVoice();
       try {
         const view = modelView(messages);
         if (view.repairs !== null) {

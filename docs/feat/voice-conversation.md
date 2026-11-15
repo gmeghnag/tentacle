@@ -993,12 +993,16 @@ MUTATION F10 the line into the HISTORY instead of the request: RED (2 fail)
 MUTATION T7 toWireRequest drops reasoning (pod half): RED (2 fail)
 MUTATION T7 client drops voice in prompt: RED (1 fail)
 MUTATION T7 client drops voice in enqueue: RED (1 fail)
-MUTATION T8 provider omits the reasoning switches: RED (2 fail)
-MUTATION T8 F9 no retry on a 400: RED (2 fail)
+MUTATION T8 provider omits the reasoning switches: RED (4 fail)
+MUTATION T8 F9 no retry on a 400: RED (4 fail)
 MUTATION T8 F9 not remembered (retries every turn): RED (1 fail)
 ----
 ALL MUTATIONS RED (every target test is non-vacuous)
 ```
+
+(The block was re-run on the FINAL tree, after the round-1 fixes below — two sites
+had moved with the reformatting and with the success-latch, so they were
+re-anchored, not skipped.)
 
 **A plan target that had to be replaced, and why** (AGENTS §8: fix the plan, do
 not force the code). **T7's "spread `voice` unconditionally" is unobservable:**
@@ -1011,12 +1015,13 @@ from the other side (its M2: appending to `view.messages` stays green because
 that is already `modelView`'s copy, not the history). Same lesson: **mutate the
 history array, not the request's copy.**
 
-**Gate, re-run on the combined tree by this pass.** `bunx tsc --noEmit` clean
-(exit 0); `bun run lint` clean (`biome check .`, 1634 files, 0 findings, matching
-the AGENTS §6 baseline); `bun test` **11715 pass, 5 skip, 0 fail** across 846
-files — the 5 skips are exactly the opt-in baselines (2 docker, 2 k8s,
-`ws-server` `skipIf(!SLOW)`), no new skip and no new failure. The C3 tests alone:
-**28 pass, 0 fail** over 7 files. `bun run schema:export` regenerated
+**Gate, re-run on the combined tree by this pass (and again on the final tree,
+after the two round-1 fixes).** `bunx tsc --noEmit` clean (exit 0); `bun run lint`
+clean (`biome check .`, 1634 files, 0 findings, matching the AGENTS §6 baseline);
+`bun test` **11722 pass, 5 skip, 0 fail** across 845 files — the 5 skips are
+exactly the opt-in baselines (2 docker, 2 k8s, `ws-server` `skipIf(!SLOW)`), no
+new skip and no new failure. The C3 tests alone: **187 pass, 0 fail** over 17
+files. `bun run schema:export` regenerated
 `packages/protocol/schema/protocol.json` (+21 lines, the `VoiceTurn` def and
 three field additions); idempotent, so `json-schema.test.ts` shows no drift.
 
@@ -1043,14 +1048,35 @@ slice from its pass). Keep exactly one at merge.
   (reading the edge's setting and passing `voice` at send time): that is C4/P3.
 
 **Concurrency caveat, stated plainly.** Three executors shared this worktree, so
-"DONE" below means *the tree as verified at 21:50 by this pass*. A concurrent
-writer changing these files afterwards would invalidate it. That is a process
-problem (one worktree per executor), not a code problem — escalated, not solved
-here.
+"DONE" below means *the tree as verified by this pass*. A concurrent writer
+changing these files afterwards would invalidate it. That is a process problem
+(one worktree per executor), not a code problem — escalated, not solved here.
 
-**Per-slice status: C3 DONE** (as verified above), PARTIAL against two of its own
-plan details: (i) T7's stated client mutation replaced with a real one, and (ii)
-the concurrency caveat — the tree is only as trustworthy as the last writer.
+**Two genuine C3 defects found and fixed AFTER this pass first verified the tree**
+(by the round-1 worker; I re-verified both and re-ran every mutation on the
+final code, which is why the numbers above are the post-fix ones):
+
+1. **The forced final report never consumed a voice mark**
+   (`packages/agent/src/agent.ts`, the `max_iterations` report). That request is
+   built BY HAND (no tools, no `reasoning`), so a voice steer drained into it
+   answered a listening person with no spoken-style line. Fixed with `markVoice()`
+   before the report; regression test in `packages/daemon/test/voice-turn.test.ts`
+   ("the max_iterations final report still speaks"), which asserts the mark is
+   consumed, the line present, and the history still clean.
+2. **F9's "remembered" latched on the WRONG signal.** It set
+   `reasoningSwitchesRefused = true` on ANY 400, including a 400 for an unrelated
+   cause (context over the limit, a refused tool schema, an oversized image) —
+   after which every later voice turn of a long-lived daemon silently reasoned.
+   Fixed to latch only when the switch-free retry SUCCEEDS
+   (`this.reasoningSwitchesRefused = res.ok`), and the rejected body is released
+   (`discardBody`). The "a 400 on the plain body too" test covers it.
+
+Both are in the tree and covered by the 187 C3 tests / the final full suite below.
+
+**Per-slice status: C3 DONE**, with (i) the plan's T7 client mutation replaced
+because the stated form is unobservable and (ii) the process caveat above. No
+PARTIAL on behaviour: every field, every rule of §4, F9 and F10 is implemented
+and pinned by a test that was shown red.
 
 ## Review
 
