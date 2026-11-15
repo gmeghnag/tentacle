@@ -1482,6 +1482,43 @@ clean · `bun run lint` 1425 files, 0 issues.
 
 *— claude-opus-5-5, 2026-11-15*
 
+### Slice 7 — owner feedback #3 + B7 (STOPPED: no work left to plan; B8 verified only by unit test)
+
+**Load-bearing check (holds):** `CodeBlock.tsx`, `Markdown.tsx` and
+`SessionScreen.tsx` still render values that pure modules compute
+(`code-block.ts`, `highlight.ts`, `session-menu.ts`).
+
+**Contradiction, so I stopped here.** The doc has no Slice 7 plan.
+Owner feedback #3 and B7 were already built in "Slices 5–6" (above):
+`highlight.ts:208` decodes `&#x27;`, `CodeBlock.tsx` has the header and Copy
+button, `code-block.ts` has `inlineCodeLook`, `theme.ts:170` sets
+`MONO = "ui-monospace"`, and `session-menu.ts` backs the "…" menu. The owner
+approved those screens on 2026-11-15 10:35. There was nothing left to build and
+no flow list to screenshot, so I made **no code change and wrote no changelog
+fragment**: `mobile-ui-polish.changed.md` and `.fixed.md` already cover this.
+
+**Re-verified on this branch (64431d79):** `code-block`, `session-menu`,
+`ui-shots-seed` and `compose-controller` tests: 55 pass, 0 fail.
+Mutations (`.tentacle/tmp/mobile-ui-polish/s7/mut.ts`; each file restored and
+byte-checked; `git status` clean afterwards):
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `unescapeHtml` drops `&#x27;` (B7) | 2 fail (`code-block` + `ui-shots-seed`) |
+| M2 | `pickFromLibrary(pickRoom(chips))` (B8 reverted) | 1 fail (`compose-controller` B8) |
+
+**Not done: the owner's qwen3.8 (vision) photo test.** It needs a real
+`tentacle serve` on the user's DEFAULT profile, driven from the simulator. The
+sandbox refused even a read of the user's tentacle config. No plan step stages
+a real model in the e2e harness either: the harness uses `mock-model.ts`. B8 is
+proven by the red-first unit test and flow 18 (mock model, `saw 2 images`), NOT
+against qwen3.8. **Decision needed:** approve running a real `serve` (default
+profile) alongside the simulator, or let the owner run the test on device.
+
+**Gate:** not re-run in full. This slice changed only this doc, and the
+narrow tests above are green.
+
+*— claude-opus-5-5, 2026-11-15*
+
 ## Review
 
 ### Slice 0 — adversarial review (fresh context)
@@ -1710,3 +1747,11 @@ Attaching a photo shows "a message carries at most 5 photos" (refused) — the o
 #### Owner visual approval (2026-11-15 10:35)
 
 The owner reviewed the 25 simulator screenshots of slices 5+6 (light/dark) and approved them ("vanno bene"), overriding the Fable gate verdict REVISE (round 2). Merged by the orchestrator on that approval.
+
+
+#### Owner bugs B9 + B10 (2026-11-15 11:03, real iPhone, build b97ff97b) — part of Slice 7
+
+Screenshot: `/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/owner-shots/photo-row-1103.png`. The photo DID reach the daemon and the model (serve log: `media_message` with `IMG_4854.jpg`, Qwen3.8 described it correctly), but the app shows it wrong:
+- **B9 (ordering, HIGH):** the user's message with the photo ("Cosa vedi?") is rendered BELOW the assistant's reply to it — the transcript puts the `media_message` row after the reply (ordering by kind/arrival instead of the log order/seq?). Prove with a red-first test on the transcript projection (a `media_message` followed by the reply must render in log order) and fix.
+- **B10 (thumbnail):** the photo shows as a grey placeholder "[image: IMG_4854.jpg]" instead of the picture. Show the real thumbnail: the phone's own just-sent photo from the outbox/local cache at once, and for history/other devices fetch it from the daemon by attachment id (the existing attachment read path; size-capped, cached), with a loading and an error state; tap opens it full screen.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
