@@ -35,6 +35,7 @@
     "react-native-screens": "4.30.1"
   },
   "devDependencies": {
+    "@bacons/apple-targets": "5.0.0",
     "@tentacle/agent": "workspace:*",
     "@tentacle/daemon": "workspace:*",
     "@tentacle/tools": "workspace:*",

@@ -111,6 +111,13 @@ export interface ComputerLink {
   readonly address: () => string;
   /** Holds the redial and drops the live socket while the app is in the background (iOS suspends JS). */
   suspend(): void;
+  /**
+   * Let ONE dial through while the app is suspended, for up to `ms`
+   * (docs/feat/mobile-notifications.md Design 4: a notification's Deny/Reply).
+   * The SAME gate the app's own suspend/resume drives — never a second one, or a
+   * background answer would dial around the gate that exists to bound it.
+   */
+  hold(ms: number): () => void;
   /** The app is active again: let the client redial (its own re-attach does the rest). */
   resume(): void;
   /**
@@ -360,6 +367,7 @@ export async function openComputer(
       address: () => current,
       suspend: () => gate.suspend(),
       resume: () => gate.resume(),
+      hold: (ms: number) => gate.hold(ms),
       // DETACH, never close (12a.2; see `leaveComputer`).
       close: () => leaveComputer(client),
     };

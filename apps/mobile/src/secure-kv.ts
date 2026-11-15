@@ -12,6 +12,8 @@
 import * as SecureStore from "expo-secure-store";
 import type { ComputerStore } from "./computer-store.ts";
 import { type SecureKV, createComputerStore } from "./computer-store.ts";
+import { directoryStore } from "./push-directory-expo.ts";
+import type { DirectoryStore } from "./push-directory.ts";
 import type { PushKeyStore } from "./push-key.ts";
 
 /** The accessibility class every write carries (Owner Q3). */
@@ -58,3 +60,19 @@ export const KEYCHAIN_STORE: ComputerStore = createComputerStore({
   kv: keychainKV,
   keychainAccessible: KEYCHAIN_ACCESSIBLE,
 });
+
+/**
+ * The push NOTIFICATION items (`tentacle.push.directory`, `tentacle.push.seen`),
+ * in the same shared access group as `pushKeychain` — task 17's Notification
+ * Service Extension reads them while the app is not running
+ * (docs/feat/mobile-notifications.md Design 6).
+ *
+ * It is defined HERE, next to `pushKeychain`, for the same reason: this file is
+ * the app's one Keychain adapter, so the access group and the accessibility
+ * class have a single place to be right (`pairing-guards.test.ts` pins that no
+ * second file imports `expo-secure-store`).
+ */
+export const NOTIFICATION_DIRECTORY_STORE: DirectoryStore = directoryStore(
+  pushKeychain,
+  KEYCHAIN_ACCESSIBLE,
+);

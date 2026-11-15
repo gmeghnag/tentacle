@@ -23,7 +23,8 @@
     "compile": "bun run scripts/build.ts",
     "voice:build": "bun run scripts/voice-build.ts",
     "voice:test": "swift test --package-path native/voice-mac",
-    "release": "bun run scripts/release.ts"
+    "release": "bun run scripts/release.ts",
+    "test:swift": "cd apps/mobile/native-tests/PushCoreTests && swift test"
   },
   "dependencies": {
     "react-devtools-core": "file:./stubs/react-devtools-core"

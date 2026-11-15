@@ -52,9 +52,33 @@ export interface ForegroundGate {
   resume(): void;
   /** Whether dials are held now (the screen's banner does not read this; tests do). */
   readonly isSuspended: boolean;
+  /**
+   * Hold the socket open for up to `ms`, from a BACKGROUND task that needs one
+   * dial (docs/feat/mobile-notifications.md Design 4 / N6: a notification's
+   * Deny or Reply answers while iOS has the app suspended).
+   *
+   * It does exactly one thing `suspend()` would undo: it keeps a dial from being
+   * parked, and keeps the socket it produced from being closed, until the
+   * returned release is called or `ms` elapses. Returns the release: idempotent,
+   * and safe to call from a `finally`.
+   *
+   * Bounded by the caller's own iOS budget (Design 4 step 2: `budgetMs`, ≤ 25 s)
+   * — this gate never holds a socket for a person who has walked away.
+   */
+  hold(ms: number): () => void;
 }
 
-export function createForegroundGate(inner: () => Promise<DuplexChannel>): ForegroundGate {
+export function createForegroundGate(
+  inner: () => Promise<DuplexChannel>,
+  /** Injected so a test drives the hold's expiry without waiting (`setTimeout`). */
+  clock: {
+    setTimeout: (fn: () => void, ms: number) => unknown;
+    clearTimeout: (handle: unknown) => void;
+  } = {
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  },
+): ForegroundGate {
   let suspended = false;
   /** The channel handed out last: `suspend()` closes it (the client's drop). */
   let current: DuplexChannel | null = null;
@@ -63,6 +87,14 @@ export function createForegroundGate(inner: () => Promise<DuplexChannel>): Foreg
   let held: Promise<void> = Promise.resolve();
   /** The newest dial's generation: an older, still-parked dial is abandoned. */
   let generation = 0;
+  /**
+   * How many background tasks are holding the socket open right now, and the
+   * timer that ends each (docs/feat/mobile-notifications.md Design 4). While it
+   * is above zero a dial is NOT parked and a freshly dialled channel is KEPT: an
+   * answer is on its way out.
+   */
+  let holds = 0;
+  const holdTimers = new Set<unknown>();
 
   /** The promise every dial waits on while suspended (one shared hold). */
   function hold(): Promise<void> {
@@ -86,7 +118,7 @@ export function createForegroundGate(inner: () => Promise<DuplexChannel>): Foreg
       const mine = ++generation;
       const abandoned = (): boolean => mine !== generation;
       for (;;) {
-        if (suspended) {
+        if (suspended && holds === 0) {
           await hold();
         }
         if (abandoned()) {
@@ -99,7 +131,7 @@ export function createForegroundGate(inner: () => Promise<DuplexChannel>): Foreg
           channel.close();
           throw superseded();
         }
-        if (!suspended) {
+        if (!suspended || holds > 0) {
           current = channel;
           return channel;
         }
@@ -127,6 +159,30 @@ export function createForegroundGate(inner: () => Promise<DuplexChannel>): Foreg
     },
     get isSuspended(): boolean {
       return suspended;
+    },
+    hold(ms: number): () => void {
+      holds += 1;
+      // A dip in the middle of the hold: `resume` hands a parked dial back
+      // (there is none: while suspended a dial waits for `resume`), so the only
+      // thing to do is to NOT park the dial this hold exists for.
+      if (suspended) {
+        releaseHold();
+      }
+      let released = false;
+      const finish = (): void => {
+        if (released) {
+          return;
+        }
+        released = true;
+        holds = Math.max(0, holds - 1);
+        if (ownsTimer !== undefined) {
+          holdTimers.delete(ownsTimer);
+          clock.clearTimeout(ownsTimer);
+        }
+      };
+      const ownsTimer = clock.setTimeout(finish, ms);
+      holdTimers.add(ownsTimer);
+      return finish;
     },
   };
 }

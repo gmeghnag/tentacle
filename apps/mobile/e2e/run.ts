@@ -25,6 +25,7 @@ import { $, type Subprocess } from "bun";
 import { createApnsClient } from "../../relay/src/apns-client.ts";
 import type { ApnsJwtSource } from "../../relay/src/apns.ts";
 import { startHooks } from "./hooks.ts";
+import { payloadFor, sealPushMessage } from "./notify-steps.ts";
 import { createPairingHooks } from "./pairing.ts";
 import {
   type IosMajor,
@@ -254,6 +255,20 @@ async function main(): Promise<number> {
   );
   if (missing.length > 0) {
     console.error(missingText(missing));
+    return 2;
+  }
+
+  // The Notification Service Extension's Swift logic, against the SAME vectors
+  // the TypeScript side is pinned by (docs/feat/mobile-notifications.md N5,
+  // decision 20). Run here, before any build: it takes seconds and it is the only
+  // gate that exercises the extension's crypto (`swift test`, macOS only).
+  const swiftTests = Bun.spawnSync(["bun", "run", "test:swift"], {
+    cwd: REPO,
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  if (swiftTests.exitCode !== 0) {
+    console.error("e2e:mobile: `bun run test:swift` failed (the NSE's PushCore suite)");
     return 2;
   }
 
@@ -504,6 +519,61 @@ async function main(): Promise<number> {
           ]);
         },
         logFile: () => appLogFile(currentDevice.udid),
+        // The REAL pending asks: a notification flow names one, so the action it
+        // injects answers the daemon's own request (not a synthetic one).
+        pendingAsk: async (session) => laptop.pendingAsks(session),
+        notifyPayload: async () => {
+          if (lastSealed === undefined) {
+            throw new Error("no `seal-push` has been placed yet");
+          }
+          return { payload: lastSealed.userInfo as { aps: unknown; tp: unknown } };
+        },
+        // docs/feat/mobile-notifications.md N8: seal a plaintext the FLOW chose to
+        // the device's push key (which this harness generated and kept, so it can
+        // seal for real) and place it. A forged one uses another sender key.
+        sealPush: async (options) => {
+          const keys = await notifyKeys();
+          const message = notifyMessageOf(options.kind, options.reply === true, {
+            ...(options.session !== undefined ? { sessionId: options.session } : {}),
+            ...(options.request !== undefined ? { requestId: options.request } : {}),
+          });
+          const sealed = sealPushMessage(
+            message,
+            options.forged === true ? keys.forgedComputerSk : keys.computerSk,
+            keys.devicePushPk,
+            (length) => crypto.getRandomValues(new Uint8Array(length)),
+          );
+          const payload = payloadFor(
+            sealed,
+            options.hostileAps === true
+              ? {
+                  category: "tentacle.ask",
+                  alert: { title: "tentacle", body: "rm -rf / — approve?" },
+                }
+              : {},
+          );
+          await placeOnSimulator(currentDevice.udid, payload, () => {});
+          lastSealed = { message, userInfo: payload as unknown as Record<string, unknown> };
+          return { payload };
+        },
+        // Owner Q7: inject the response Maestro cannot long-press. The APP runs
+        // the real dispatcher (Face ID prompt included) — this only says which
+        // action was "tapped" on the last placed notification.
+        notifyRespond: async (options) => {
+          if (lastSealed === undefined) {
+            throw new Error("notify-respond: no `seal-push` has been placed yet");
+          }
+          const actionId = notifyActionIdOf(options.action);
+          if (actionId === undefined) {
+            throw new Error(`notify-respond: unknown action ${options.action}`);
+          }
+          await injectNotificationResponse(currentDevice.udid, {
+            actionId,
+            userInfo: lastSealed.userInfo,
+            ...(options.text !== undefined ? { userText: options.text } : {}),
+          });
+          return { accepted: true };
+        },
         // Flow 24's light/dark pairs: `simctl ui`, not `simctl spawn` (it is a
         // simulator setting, not a process inside it).
         appearance: async (name) => {
@@ -830,6 +900,150 @@ function harnessPushSteps(deps: {
   });
 }
 
+/** The key material the notification flows generated this run (see `notifyKeys`). */
+let notifyKeysCache: NotifyKeys | undefined;
+
+/** The last plaintext `seal-push` placed: what `notify-respond` answers. */
+let lastSealed: { message: unknown; userInfo: unknown } | undefined;
+
+/**
+ * Generate (once per run) the key material `seal-push` seals with: the computer's
+ * static key and the device's push key. The device's PUBLIC half is what the
+ * harness registers with the daemon, so a push the daemon sends goes to a key
+ * this harness can actually seal for — the same real chain production has.
+ */
+async function notifyKeys(): Promise<NotifyKeys> {
+  if (notifyKeysCache !== undefined) {
+    return notifyKeysCache;
+  }
+  const deviceSk = crypto.getRandomValues(new Uint8Array(32));
+  notifyKeysCache = {
+    computerSk: crypto.getRandomValues(new Uint8Array(32)),
+    forgedComputerSk: crypto.getRandomValues(new Uint8Array(32)),
+    devicePushPk: publicKeyOf(deviceSk),
+    devicePushPkText: encodeBase64Url(publicKeyOf(deviceSk)),
+  };
+  return notifyKeysCache;
+}
+
+/**
+ * The notification-flow fixtures (`docs/feat/mobile-notifications.md` N8): the
+ * key material the harness generates ONCE per run, the plaintexts the flows
+ * seal, and the action ids they inject.
+ *
+ * It exists so `seal-push` seals to a REAL device push key (the harness's own,
+ * registered with the daemon) and `notify-respond` names a real action id — the
+ * two things a flow would otherwise fake, and prove nothing about.
+ */
+interface NotifyKeys {
+  /** The COMPUTER's static key (what a genuine push authenticates with). */
+  readonly computerSk: Uint8Array;
+  /** A different sender: what a hostile relay could produce (F4). */
+  readonly forgedComputerSk: Uint8Array;
+  /** The device's push key pair, as a string for `device/push_register`. */
+  readonly devicePushPk: Uint8Array;
+  readonly devicePushPkText: string;
+}
+
+const notifyMessageOf = (
+  kind: string,
+  reply: boolean,
+  /** The REAL ids a flow names, so an injected action answers the daemon's own ask. */
+  real: { readonly sessionId?: string; readonly requestId?: string },
+): {
+  v: 1;
+  id: string;
+  at: number;
+  kind: "ask" | "ask_resolved" | "turn_done" | "turn_failed";
+  computer: string;
+  cwd: string;
+  sessionId: string;
+  title: string;
+  ask?: {
+    requestId: string;
+    tool: string;
+    title: string;
+    preview: string;
+    options: { optionId: string; name: string; kind: "allow_once" | "reject_once" }[];
+    reply?: { maxChars: number };
+  };
+} => {
+  const at = Date.now();
+  const hex = (): string => Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("hex");
+  const ask = {
+    requestId: real.requestId ?? `flow-${hex().slice(0, 8)}`,
+    tool: "shell",
+    title: "Run a shell command",
+    preview: "rm -rf build",
+    options: [
+      { optionId: "allow_once", name: "Allow once", kind: "allow_once" as const },
+      { optionId: "reject_once", name: "Deny", kind: "reject_once" as const },
+    ],
+    ...(reply ? { reply: { maxChars: 1000 } } : {}),
+  };
+  const base = {
+    v: 1 as const,
+    id: hex(),
+    at,
+    computer: "flow-computer",
+    cwd: "/home/dev/tentacle",
+    sessionId: real.sessionId ?? "flow-session",
+    title: "Fix the failing test",
+  };
+  if (kind === "ask_resolved") {
+    return { ...base, kind: "ask_resolved" };
+  }
+  if (kind === "turn_done") {
+    return { ...base, kind: "turn_done" };
+  }
+  if (kind === "turn_failed") {
+    return { ...base, kind: "turn_failed" };
+  }
+  return { ...base, kind: "ask", ask };
+};
+
+/** The action id a `notify-respond` name maps to (the categories' own ids). */
+const notifyActionIdOf = (name: string): string | undefined => {
+  switch (name) {
+    case "approve":
+      return "tentacle.approve";
+    case "deny":
+      return "tentacle.deny";
+    case "reply":
+      return "tentacle.reply";
+    case "open":
+      return "tentacle.open";
+    default:
+      return undefined;
+  }
+};
+
+/**
+ * Hand a response to the app (Owner Q7). The app polls for it in a DEV build only
+ * (`apps/mobile/src/notification-dev-inject.ts` + the `index.ts` hook): a file in
+ * the app's container that the app reads on a short interval. There is no
+ * production path to this, and nothing in the app's decision chain trusts it —
+ * the injected response goes through the SAME dispatcher a real tap does.
+ */
+async function injectNotificationResponse(
+  udid: string,
+  response: { actionId: string; userInfo: unknown; userText?: string },
+): Promise<void> {
+  // The app's data container (`simctl get_app_container` is NOT a `spawn`
+  // subcommand, so it is read directly).
+  const child = Bun.spawnSync(
+    ["xcrun", "simctl", "get_app_container", udid, "so.tentacle.app", "data"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const container = child.stdout.toString().trim();
+  if (child.exitCode !== 0 || container === "") {
+    throw new Error("notify-respond: the app is not installed on the simulator");
+  }
+  const dir = join(container, "Library", "Caches");
+  await mkdir(dir, { recursive: true });
+  await Bun.write(join(dir, "notify-respond.json"), JSON.stringify(response));
+}
+
 /**
  * Write one device's push registration through the DAEMON'S OWN STORE.
  *
@@ -994,6 +1208,14 @@ export const FLOWS: readonly string[] = [
   // visible to another flow (each gets its own session, and every other flow
   // clears state), but a red here must not colour the flows above it.
   "push-placeholder",
+  // docs/feat/mobile-notifications.md N8: the notification path. Each leaves a
+  // session of its own (they share `ASK1_ID`'s seed but the ask is raised by the
+  // flow itself), and each ends on DAEMON truth.
+  "22-notify-render",
+  "22-notify-approve",
+  "22-notify-deny",
+  "22-notify-reply",
+  "22-notify-forged",
 ];
 
 /**

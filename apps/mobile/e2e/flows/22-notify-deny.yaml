@@ -1,0 +1,51 @@
+appId: so.tentacle.app
+---
+# `22-notify-deny` (docs/feat/mobile-notifications.md N8): Deny works WITHOUT any
+# authentication — the plan's decision 8 (a lock-screen Deny grants nothing) — and
+# it is a BACKGROUND action: no Face ID, and the app is not brought forward.
+#
+#
+# WHAT THIS CANNOT PROVE: the action button on the SYSTEM banner and the NSE that
+# would draw it — both need a device build (owner step D3a), so the response is
+# injected (Owner Q7) and the extension's own logic is pinned by
+# `bun run test:swift` over the shared vectors instead.
+# The assertion that matters is the negative one this flow CAN make on the
+# simulator: no Face ID sheet appears (`faceid-enroll.js` is deliberately NOT run,
+# so a prompt would hang the flow's next step), and the daemon's ask is gone.
+- runFlow: _pair.yaml
+- assertVisible:
+    id: "computers-list"
+- tapOn:
+    id: "computer-${output.computerId}"
+- extendedWaitUntil:
+    visible:
+      id: "sessions-list"
+    timeout: 30000
+- tapOn:
+    id: "session-${ASK1_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "EDIT a.txt"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- runScript:
+    file: "22-notify-seal-ask.js"
+- runScript:
+    file: "22-notify-respond.js"
+    env:
+      MAESTRO_NOTIFY_ACTION: "deny"
+# No Face ID was raised: the sheet the approve flow waits for never appears, and
+# the app never left the foreground (a background action keeps it there).
+- assertNotVisible: "Unlock tentacle"
+# DAEMON truth: the ask was refused, so it is gone.
+- runScript:
+    file: "22-notify-assert.js"
+    env:
+      MAESTRO_NOTIFY_EXPECT: "answered"

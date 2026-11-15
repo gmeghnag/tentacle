@@ -1,0 +1,52 @@
+appId: so.tentacle.app
+---
+# `22-notify-reply` (docs/feat/mobile-notifications.md N8): Reply sends the
+# person's words with a refusal, and the MODEL gets them — the plan's F21 case
+# (clamped, and never a bare No) plus the reply seam task 13 built.
+#
+#
+# WHAT THIS CANNOT PROVE: the action button on the SYSTEM banner and the NSE that
+# would draw it — both need a device build (owner step D3a), so the response is
+# injected (Owner Q7) and the extension's own logic is pinned by
+# `bun run test:swift` over the shared vectors instead.
+# The proof is the mock model's own prompt list: the daemon puts a denial's reply
+# into the model's next round (`denialReply`, docs/feat/permission-reply.md), so
+# "the words reached the model" is daemon truth, not a screen.
+- runFlow: _pair.yaml
+- assertVisible:
+    id: "computers-list"
+- tapOn:
+    id: "computer-${output.computerId}"
+- extendedWaitUntil:
+    visible:
+      id: "sessions-list"
+    timeout: 30000
+- tapOn:
+    id: "session-${ASK1_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "EDIT a.txt"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- runScript:
+    file: "22-notify-seal-ask.js"
+- runScript:
+    file: "22-notify-respond.js"
+    env:
+      MAESTRO_NOTIFY_ACTION: "reply"
+      MAESTRO_NOTIFY_TEXT: "REPLY use bun instead"
+# DAEMON truth: the ask is settled...
+- runScript:
+    file: "22-notify-assert.js"
+    env:
+      MAESTRO_NOTIFY_EXPECT: "answered"
+# ...and the person's words reached the model's next round.
+- runScript:
+    file: "22-notify-reply-assert.js"

@@ -67,6 +67,7 @@ import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
 import { authenticate, biometry, capability } from "./src/lock-auth.ts";
 import { LOCK_SETTING_STORE } from "./src/lock-settings-expo.ts";
+import { MemoryAnswers } from "./src/notification-dispatch.ts";
 import { createDraftStore } from "./src/outbox-drafts.ts";
 import { createOutboxDriver } from "./src/outbox-driver.ts";
 import { createExpoOutboxFs, outboxRoot } from "./src/outbox-fs-expo.ts";
@@ -83,6 +84,7 @@ import {
 } from "./src/pairing-flow.ts";
 import { handlePairingText, takePendingLink } from "./src/pending-link.ts";
 import { pickFromLibrary, takePhoto } from "./src/photo-source.ts";
+import { rewritePushDirectory } from "./src/push-directory-expo.ts";
 import { readAsked, readPermission, readPushFacts, requestPermission } from "./src/push-expo.ts";
 import { createPushManager } from "./src/push-manager.ts";
 import type { PushPermission } from "./src/push-registration.ts";
@@ -95,7 +97,13 @@ import { PairScreen } from "./src/screens/PairScreen.tsx";
 import { SessionScreen } from "./src/screens/SessionScreen.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
 import { SettingsScreen } from "./src/screens/SettingsScreen.tsx";
-import { KEYCHAIN_ACCESSIBLE, KEYCHAIN_STORE, keychainKV } from "./src/secure-kv.ts";
+import {
+  KEYCHAIN_ACCESSIBLE,
+  KEYCHAIN_STORE,
+  NOTIFICATION_DIRECTORY_STORE,
+  keychainKV,
+  pushKeychain,
+} from "./src/secure-kv.ts";
 import { createSessionController } from "./src/session-controller.ts";
 import type { InfoPort } from "./src/session-info-controller.ts";
 import { createSessionListController, viewModel } from "./src/session-list-controller.ts";
@@ -161,6 +169,15 @@ function diagnoserFor(id: string): ReturnType<typeof createLinkDiagnoser> {
   DIAGNOSES.set(id, created);
   return created;
 }
+
+/**
+ * The asks this app has already TRIED to answer (docs/feat/mobile-notifications.md
+ * Design 3 step 3): a duplicate tap is refused here instead of sending twice.
+ * Process-lifetime on purpose — the daemon's first-wins is the durable net (a
+ * stale banner then gets `not-pending` → "Already answered", F18), so nothing
+ * needs to survive a launch.
+ */
+const PUSH_ANSWERS = new MemoryAnswers();
 
 /** Every link currently open: what the `AppState` effect suspends and resumes. */
 const LIVE_LINKS = new Set<ComputerLink>();
@@ -450,6 +467,16 @@ const MEMORY: ComputerMemory<ComputerLink> = {
   links: LINKS,
   diagnoses: DIAGNOSES,
   records: RECORDS,
+  // The extension's copy of the paired computers and their pinned keys follows
+  // every store change (docs/feat/mobile-notifications.md Design 6 / N4).
+  pushDirectory: () =>
+    rewritePushDirectory({
+      store: KEYCHAIN_STORE,
+      directory: NOTIFICATION_DIRECTORY_STORE,
+      keys: pushKeychain,
+      keychainAccessible: KEYCHAIN_ACCESSIBLE,
+      random: getRandomBytes,
+    }),
 };
 
 /** The phone's randomness for the Noise handshake (`expo-crypto`: Hermes has no WebCrypto). */
@@ -1177,6 +1204,112 @@ function AppShell(): JSX.Element {
     });
     return () => subscription.remove();
   }, []);
+
+  // The notification path (docs/feat/mobile-notifications.md Design 7 / N7):
+  // register the categories, listen for a response (an action or a plain tap) and
+  // drain the one that LAUNCHED the app. Everything it decides lives in pure
+  // modules (`notification-*.ts`); this is the binding of the app's own objects.
+  useEffect(() => {
+    let started: { stop(): void } | undefined;
+    let stopped = false;
+    let devInjectTicker: ReturnType<typeof setInterval> | undefined;
+    void (async () => {
+      const { readAnswerMaterial } = await import("./src/push-directory-expo.ts");
+      const { startNotifications } = await import("./src/notification-wiring.ts");
+      const material = async () => readAnswerMaterial(NOTIFICATION_DIRECTORY_STORE);
+      const wiring = {
+        link: async (computerId: string) => {
+          const link = await LINKS.get(computerId);
+          return { client: link.client, hold: link.hold };
+        },
+        computers: async () => (await material()).peers,
+        pushKeys: async () => (await material()).pushKeys,
+        answered: PUSH_ANSWERS,
+        authenticate,
+        // One Face ID success also clears the app lock (Owner Q2): the SAME
+        // reducer the Lock screen drives, so there is one lock, not two.
+        unlockApp: () => lock.current?.dispatch({ type: "authResult", result: "success" }),
+        inForeground: () => AppState.currentState === "active",
+        computerName: (computerId: string) => RECORDS.get(computerId)?.name ?? "your computer",
+        navigate: (route: unknown) => {
+          if (route === "computers") {
+            navigationRef.navigate("Computers");
+            return;
+          }
+          const to = route as {
+            computerId: string;
+            sessionId: string;
+            title: string;
+            archived: boolean;
+          };
+          if (!navigationRef.isReady()) {
+            return;
+          }
+          navigationRef.navigate("Session", to);
+        },
+        refuse: (why: string) => {
+          // One line, never the notification's text (decision 19 / task 14).
+          APP_LOG.log("warn", "notify", { line: `refused ${why}` });
+        },
+        log: (line: string) => APP_LOG.log("info", "notify", { line }),
+        notice: (notice: { kind: string; text: string }) => {
+          APP_LOG.log("info", "notify", { line: `notice ${notice.kind}` });
+        },
+      };
+      const handle = await startNotifications(wiring);
+      if (stopped) {
+        handle.stop();
+        return;
+      }
+      started = handle;
+      // The E2E harness's `notify-respond` hook (Owner Q7), DEV BUILDS ONLY: a
+      // response it writes into the app's container is fed to the SAME
+      // dispatcher a real tap uses, so a forged one is refused like any other.
+      if (__DEV__) {
+        const { NOTIFY_RESPONSE_NAME, takeInjectedResponse } = await import(
+          "./src/notification-dev-inject.ts"
+        );
+        const { File, Paths } = await import("expo-file-system");
+        // `Paths.cache` IS the app's `Library/Caches` (the directory the harness
+        // writes into), so the join is the file-system module's, not string work.
+        const responseFile = new File(Paths.cache, NOTIFY_RESPONSE_NAME);
+        const io = {
+          read: (path: string): string | undefined => {
+            try {
+              const file = new File(path);
+              return file.exists ? file.textSync() : undefined;
+            } catch {
+              return undefined;
+            }
+          },
+          remove: (path: string): void => {
+            try {
+              const file = new File(path);
+              if (file.exists) file.delete();
+            } catch {
+              // Already gone: the response was consumed.
+            }
+          },
+        };
+        devInjectTicker = setInterval(() => {
+          const injected = takeInjectedResponse(responseFile.uri, io);
+          if (injected) {
+            void handle.handle(injected).catch(() => undefined);
+          }
+        }, 500);
+      }
+    })().catch((error: unknown) => {
+      APP_LOG.log("error", "notify", { line: `start failed: ${errorText(error)}` });
+    });
+    return () => {
+      stopped = true;
+      if (devInjectTicker !== undefined) {
+        clearInterval(devInjectTicker);
+        devInjectTicker = undefined;
+      }
+      started?.stop();
+    };
+  }, [navigationRef]);
 
   // The lock's ONE instance, created lazily on this render (a `useRef` initial
   // value would run on every render — `createAppLock` is cheap but its state is
