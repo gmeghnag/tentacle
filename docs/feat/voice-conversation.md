@@ -1394,6 +1394,58 @@ residual is the same round-1 contract as above: the edge owns playback.
 (Round 3's non-blocking notes O and P were left untouched, as the review said
 they do not block.)
 
+### C3 review · *— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM; no HIGH). Scope: C3 only, `git diff main...HEAD`.
+The executors were deepseek-v4-flash plus an unnamed tentacle executor. This
+reviewer is a different family for the deepseek pass; the other's model is unknown.
+
+**Finding 1 (MEDIUM): the F9 latch fires on ANY 400, including ones unrelated to the switches.**
+At `packages/providers/src/openai-provider.ts:224-227`, `reasoningSwitchesRefused = true`
+is set before the retry's result is known. Failure scenario: a voice turn's
+request gets a 400 for another reason: context over the server's limit, an
+image too large, or a tool schema the server refuses. Many OpenAI-compatible
+servers return 400 for all of these, and this repo has no overflow handling of
+its own (`rg "status === 400"` finds only this site). The retry also gets a 400,
+so the turn fails as it would have anyway. But the latch is now permanent for
+the provider instance, which is the life of a `serve` daemon. From then on every
+voice turn silently reasons, against the owner's switch. That is a loud failure
+turned into a silent wrong state. Fix: latch only when the retry without the
+switches succeeds (`res.ok`). Test: a 400 on both bodies, then the next voice
+turn still sends the switches. **Non-vacuity gap:** the mutation "latch only if
+the retry is ok" stays GREEN on `reasoning-off.test.ts` (11 pass), so no test
+pins this behaviour either way.
+
+**Gate (re-run).** The 7 C3 test files pass: 28 pass, 0 fail. `bun run lint`
+checks 1634 files with 0 findings. `bun run typecheck` is clean. I did not
+re-run the full `bun test`: both executor passes report 0 fail.
+
+**Mutations (each reverted; `git status` clean afterwards).**
+- M-A: a voice steer no longer reopens the window (`agent.ts` `mark.restarted`
+  becomes a no-op). Result: RED, 1 fail in `voice-turn.test.ts`.
+- M-B: the F9 latch is set only on a successful retry. Result: GREEN. This is
+  the gap in Finding 1.
+
+**Attacks tried that found nothing at MEDIUM or above.**
+1. F10: is the line reachable by persistence? It is added only to `modelView`'s
+   copy (`agent.ts:1280`) and to the final report's array. `notifyModelRequest`
+   hands it to user hooks only, and a hook persists nothing of tentacle's. Holds.
+2. Steer/mark desync: every `steering` mutation now drains `voiceMarks` in step
+   (`session.ts:180-181,290-291,307-308`). The hosted resume path
+   (`hosted-session.ts:920`) re-enqueues without a mark. That matches the
+   documented drift "a restarted turn has no profile".
+3. Model-on-laptop and pod trust: the laptop passes `reasoning` through by cast
+   (`remote-client.ts:3727`), and the schema limits it to the literal `"off"`.
+   The worst a hostile pod can do is a no-reasoning request. No new effect on
+   the laptop.
+4. Forward compatibility: all three fields are optional on strip schemas, so no
+   `protocol.d` note is needed. That is correct.
+
+**LOW (not blocking).** A voice steer drained right before the `max_iterations`
+final report (`agent.ts:1590`) is not consumed by `markVoice`. On a non-voice
+turn, that report therefore lacks the spoken line. The first 400 response body
+is never read or cancelled.
+
 #### Owner answers (2026-11-15, batch 1)
 
 - Q1 order: **yes** — spike now, code after V1 (`feat/voice-dictation`) and `feat/mobile-voice` merge; a language with no on-device recognizer has no voice mode, never cloud.
