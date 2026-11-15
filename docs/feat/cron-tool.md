@@ -667,3 +667,53 @@ No schema change, so `packages/protocol/schema/protocol.json` is untouched; no
 **S1: DONE.** S2–S6 not started (per the slice instruction).
 
 ## Review
+
+### S1 — REQUEST-CHANGES
+
+*— claude-opus-5-5, 2026-11-16* (fresh context; **same model as the S1 executor**,
+so the two passes share blind spots.)
+
+**Findings**
+1. **HIGH: the fire order is the table order, not "the older `nextAt` fires" (D3).**
+   `packages/core/src/schedule.ts:336-346` fires the first overdue job in creation
+   order. Repro (`.tentacle/tmp/cron-tool/order.ts`): sc-1 `every 1h`, sc-2 `every 5m`,
+   check at +90m → fires **sc-1**, but sc-2's `nextAt` is the older one. The test
+   `schedule.test.ts:240` passes only because there the older job is also first in
+   the table, so it can't catch this (it passes on both orderings).
+2. **HIGH: starvation follows from 1.** sc-1 `every 1m` (each fired turn takes about 2m)
+   plus sc-2 `every 10m`: over 30 checks sc-1 fires every time and **sc-2 fires 0
+   times** (same repro). Every idle check finds the first job already overdue again,
+   so any job created after a short-interval one never fires. That breaks "one
+   turn each" and the coalesce failure mode. Fix: pick the overdue job with the
+   minimum `nextAt` (ties go by table order). Add a test where the table order and
+   the `nextAt` order differ, plus a starvation test.
+3. **MEDIUM (a hazard handed to S3): `scheduleCheckDelayMs` returns 0 whenever a job
+   is overdue** (`schedule.ts:415-418`). While the session is busy a job stays
+   overdue, so re-arming from this value every check spins `setTimeout(0)`. And
+   `scheduleStep` advances any due job, so calling it while busy (for example just
+   to sweep expiry) loses the slot. The function or its docstring must say "call
+   only when idle; while busy do not arm the timer, `kickWake` re-checks", and the
+   S3 tests should pin it.
+
+**Gate (touched scope):** `bun test packages/core/test/schedule.test.ts` → 31 pass / 0
+fail; `bun run lint` → clean (1660 files); `bun run typecheck` → 0. Full suite not
+re-run: S1 is a new leaf module.
+
+**Mutation (my own):** `slotAfter` → `now + interval` (drift instead of the grid) →
+1 fail (`catch-up ONCE…`). Restored from a backup, and `git status` is clean. The
+executor's M1–M8 table holds as described, but for finding 1 the ordering test is
+vacuous.
+
+**Premises:** the cited `hosted-session`/`connection`/`session.ts` lines are not used by
+S1 (pure module), so they are not re-verified here. They are S3's to prove.
+
+**Attacks tried:** ordering with table order ≠ `nextAt` order → **bug (1)**; starvation
+→ **bug (2)**; `at` edge cases: `+0100` accepted, `10:61` refused, `24:00Z` accepted
+as the next midnight (low, not counted), Feb 30 with an offset rolls over and is
+refused only because it lands in the past (low); back-jump clamp on a fresh job (not
+clamped, correct); expiry on an overdue `every` (removed, not fired, correct).
+
+**What holds:** advance-before-fire, catch-up once, the clamp, the expiry, failure stop
+3, cancel neither counts nor resets, the 10-job cap, the immutable table, no `!`
+assertions, no I/O. **Executor:** red first and mutations recorded, drift declared
+honestly. It missed that its ordering test cannot fail.
