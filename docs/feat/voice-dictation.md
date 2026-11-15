@@ -525,7 +525,43 @@ Biome's ignore list gained `native/voice-mac/.build` (SwiftPM products) and
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-15* (fresh context; a different model family from the executor, deepseek-v4. The plan's author was also Opus 5.5.)
+
+**Verdict: REQUEST-CHANGES.** Scope: `git diff main...HEAD`. Gate run here: touched tests 207 pass / 0 fail across 13 files; `bun run lint` clean; `bun run typecheck` green. Repros are in `.tentacle/tmp/voice-dictation/review/` (`dup.ts`, `race.ts`, `yes.ts`). The tree was byte-identical after the mutation (`git status` empty).
+
+**HIGH**
+
+1. **The transcript duplicates the field** (`packages/tui/src/App.tsx:795`). `field.insert(joinDictation(field.value, text))` inserts the whole field plus the transcript at the cursor. Field `hello`, dictation `world` → `hellohello world` (`dup.ts`, real App, fake helper). T7 misses it: it types `r` first and only asserts `toContain` (`voice-app.test.tsx:128`).
+2. **Every dictation has id 1, so the stale-message guard never works** (`voice-session.ts:245-259`, `:414`). `idle()` resets `id` to `null`, so `begin` always produces `1`, and the guard is skipped while `id === null`. Two traces from `race.ts`:
+   - **(A)** Ctrl+R → stop → Esc during transcribing → Ctrl+R. The cancelled dictation's `final` is **inserted**, which breaks Esc = discard. The TUI then goes idle while the helper starts capturing for the new `start`: the mic is on behind an idle TUI.
+   - **(B)** Esc while `starting`. The in-flight `listening` line arrives afterwards and moves the TUI to `listening` with `id: null`, although the helper has already stopped. The next Enter is eaten and comes back as a `bad_request` notice.
+3. **F4, F5 and auto-stop are not wired at all.**
+   - `useVoice.ts` dispatches no `elapsed` or `clock` event and has no timer (no `final` timeout, no 10-min idle exit).
+   - The helper's loop never emits `vad` or `level` (`main.swift:166-273`), and `voice-endpoint.ts` has no production caller.
+   - Effects: `maxSeconds` never stops a forgotten dictation (the mic stays on and the buffer grows). A hung `stop` stays `transcribing` forever. `voice.autoStop` and `autoStopSilenceMs` are dead settings. The strip's elapsed time and meter stay at zero.
+   - M5's "F5 cap insert" is green only on an event that nothing produces.
+4. **The local `tentacle` TUI ignores the voice config.** `voice` is passed only by `runEngineTui` (`cli/src/main.ts:1404`, i.e. run/attach). The local TUI's `startTui` (`main.ts:2246`) and `connect` (`connect.ts:241`) never pass it, so they get `VOICE_DEFAULTS`. `voice.enabled: false` does not disable the mic, and `key`, `language` and `engine` are ignored on the main path.
+
+**MEDIUM**
+
+5. **F10 is pinned on the spec, not on the real spawn.** `defaultSpawner` (`useVoice.ts:63-69`) hardcodes the stdio and ignores `spec.stdio` and `spec.logPath`. stderr is piped and never drained, and `helper.log` is never written, yet notices point the user to it.
+   - Mutation `useVoice.ts:67` `stderr: "inherit"` → `voice-spawn.test.ts` and `voice-app.test.tsx` stay **GREEN**, so T8 is vacuous for the real path.
+6. **T7 depends on the host.** App never passes `platform`/`env` to `useVoice` (`App.tsx:792`). Under SSH (`dup.ts ssh`: no `start` is sent) or on Linux CI, `voice-app.test.tsx` fails.
+7. **`tentacle voice setup --yes` drops `--yes`.** `parseArgs` puts it in `bools`, and `voiceCommand` only reads `positional` (`main.ts:953`, `voice-cmd.ts:96`). `yes.ts` shows the helper args `["setup"]`. T10 bypasses the parser.
+8. **More dead settings and a broken lookup.**
+   - `main.swift:209` hardcodes `voiceProcessing: true` and `preferredInput: "default"`, so `voice.input` and `voice.voiceProcessing` do nothing (the plan says no dead setting).
+   - `useVoice.ts:139-144` spawns `candidates[0]` without checking it exists, so the `<configDir>/voice/bin` fallback is never reached. App also passes no `configDir`, so the log path becomes `/voice/helper.log`.
+9. **An exit can orphan the next child** (static, narrow). `useVoice.ts:225-227` sets `childRef` to null on every exit. If a protocol-error `kill` (`voice-session.ts:381`) is followed by a retry within the 500 ms grace, the old child's exit nulls the NEW child's ref. That child then holds the mic, untracked, until the TUI exits.
+
+**Attacks that found nothing:**
+- F7 order: `voice` sits before `escUpload`/`escAbort` in `LAYER_ORDER`, and idle Esc passes through.
+- Enter never submits: `VoiceCommand` has no `submit`.
+- The `.strict()` schema and its `min(300)` floor.
+- No `protocol` or persistence file is touched.
+
+**Still open (Execution says so too):** S2 mic capture under-captures audio, and none of L1–L10 was run.
+
+**Executor:** honest about the open capture bug and its own two vacuous tests. But the mutation table (M5, M7) and "T1–T10 red→green" overstate coverage of paths that production never drives.
 
 ## Appendix — `sweep.py` (S1 runs it; written 2026-11-15, not yet run)
 
