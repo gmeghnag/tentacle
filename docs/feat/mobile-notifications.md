@@ -908,3 +908,31 @@ toolchain path found here; both attempts are recorded above).
 **What holds.** Protocol unchanged (no `protocol.d/` note needed). The keyed `session/resolve_permission` is shared through `sendAnswer`. The router keeps an unsent ask held. The answered-set and the in-flight join work. The fallback is scheduled before the dial.
 
 **Executor behaviour.** Thorough and honest about what was not verified (e2e, N0(b/d/e/f), D3). But every app-side seam was tested only against fakes, which hid #1. #3 was satisfied by bending the test to the shipped config instead of fixing the config as C1 asked. The Execution section is signed `claude-sonnet-4-5`, while the commit says `exec (deepseek)`: one of them is wrong.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-15* (fresh-context review of `e0d76d30`, `git diff HEAD~1`)
+
+**Verdict: PASS.** All five round-1 findings are fixed, and each fix is pinned by a test that goes red under mutation. No HIGH/MEDIUM regressions.
+
+**Gate.** The 9 touched test files: **139 pass / 0 fail**. `bun run lint`: clean (1546 files). `bun run typecheck`: clean.
+
+**Per finding (mutation → red test; all reverted, `git status` clean):**
+
+| # | Fix | Mutation | Red test |
+|---|---|---|---|
+| 1 | `BACKGROUND_LISTENER`; `AnswerClient.attachSession` typed as `SessionStreamListener` | `{} as never` | notification-answer "a background answer over a REAL RemoteClient" |
+| 2 | `answerPermission` runs every non-`send` action | back to `=== "abort"` | remote-client-answer "(b2) … next ask be PROMPTED" |
+| 3 | separate `…so.tentacle.app.push` group, listed 2nd in the app; the extension is entitled to it ONLY | add the app group to the extension | app-config "SHARED group only" |
+| 4 | runtime groups are TEAMID-prefixed (`push-access-group.ts`); the NSE queries with `accessGroup: nil` | n/a (pinned by app-config "derives it from the ONE team id"/"names NO access group") | — |
+| 5 | Face ID text `approvePrompt(decision.tool)` (tool from the authenticated plaintext, clipped) | back to `decision.do` | notification-answer "NAMES the tool" + "ALWAYS" |
+
+**Regressions checked:**
+- The push key moves to the new group, so an existing install generates a fresh key. This converges: the registrar re-registers on a regenerated key (`push-manager.ts:15-17`).
+- The extension can no longer see the app's own group: it holds only `.push` plus its own application-identifier.
+
+**LOW (no change requested):**
+- `expo-target.config.js` says the Swift reads `TentaclePushAccessGroup` from `Info.plist`; it does not (it uses `nil`). Stale comment.
+- `answerPermission` now also emits `onError` for `unoffered`/`unreplyable`, on top of the returned outcome.
+
+**Unverified (must hold before merge):** the TEAMID-prefixed group (`8L24B2DUU2`) has not been exercised on a simulator or a device (N0(f)). Run `e2e:mobile` for task 16's push flows and `22-notify-*` before merging. If the simulator signing does not expand `$(AppIdentifierPrefix)` to that team, push-key writes fail with `errSecMissingEntitlement`.
