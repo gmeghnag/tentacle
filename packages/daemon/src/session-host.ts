@@ -911,6 +911,11 @@ export class SessionHost {
     // Only a session this open CREATES takes the seed (`autoAccept`, exactly like
     // `settings`): a `/clear` fork and a hop target carry the value this way.
     host.autoAccept = params.autoAccept === true;
+    // The switches too (docs/feat/session-capabilities.md): a resume from the
+    // laptop's copy, a `/clear` fork and a hop target carry them this way.
+    if (params.capabilities !== undefined) {
+      host.seedCapabilities(params.capabilities);
+    }
     const { epoch } = host.attach(attachment);
     return { hosted: host, created: true, resync: false, epoch };
   }

@@ -309,6 +309,10 @@ Dependency order: protocol → agent → daemon → client → cli → tui → m
   `remote-session.ts`, `mapping.ts`, `session-reducer.ts`; tests next to the
   `set_auto_accept` ones; `protocol.json` regenerated at merge
   (`bun run protocol:bump`).
+  *As built:* also `packages/daemon/src/session-host.ts` (the create seed) and
+  `daemon/src/mapping.ts` (wire copy + `disabled` mark); `session-reducer.ts`
+  unchanged (kind-agnostic); the client's create seed is left to S3b's carry
+  sites; `protocol.json` regenerated on the branch (`bun run schema:export`).
 - **S3b** (M · load-bearing · strong model): `packages/protocol/src/session-log.ts`
   (entry, `LOG_ENTRY_CRITICAL: false`), `packages/daemon/src/session-log.ts`
   (emit on change and after each `base`), `packages/daemon/src/persisted-session.ts`
@@ -1095,3 +1099,175 @@ It is not HIGH or MEDIUM.
 - Restore after the mutations: `cmp` identical, `git status` clean.
 
 **Regressions on the diff:** none. The two tests are added, no existing assertion changed, and they use the existing harness and fakes.
+
+## Execution — S3a
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Slice S3a only**: the wire (protocol), the daemon handler and the client
+half. Not touched: persistence (S3b), the `OpenParams.capabilities` carry
+sites on the laptop (S3b), and the UI (S4/S5).
+
+### Load-bearing check (re-run first)
+
+It passed, before any edit. S3a stands on the `set_auto_accept` shape: a
+synchronous apply plus a synchronous fan-out, with no lock on the peer.
+
+- **Concurrent dispatch.** `transport/peer.ts:322` dispatches each request with
+  `void this.handleRequest(…)`, with no per-connection mutex.
+- **Synchronous fan-out.** `HostedSession.emit` (`hosted-session.ts:2096`)
+  pushes to the ring and sends to every attachment in one synchronous loop.
+  So two sets applied synchronously are emitted in one total order (F4).
+- **The agent is reachable.** It is `session.currentAgent()`
+  (`agent/src/session.ts:139`). `Agent.setCapabilities` is synchronous
+  (`agent.ts:932`). A settings sync swaps the agent with
+  `Session.replaceAgent` in `swapAgent`, with a fresh `Agent` that has
+  everything on. So the daemon must hold the state itself and re-apply it
+  there (S2's debt note).
+
+### As built, in order (protocol → daemon → client)
+
+1. **Protocol** (additive):
+   - `session.ts`: `CapabilityNameSchema` (`line(128)`, exported because the
+     JSON-Schema export needs a named `$def` for a reused schema),
+     `SessionCapabilitiesSchema` (two arrays, each `.max(MAX_DISABLED_CAPABILITIES = 256)`),
+     `OpenParams.capabilities?`, `OpenResult.capabilities?`, and
+     `SetCapabilityParams`/`SetCapabilityResult`.
+   - `updates.ts`: `CapabilitiesUpdateSchema {type:"capabilities", capabilities, by?}`,
+     a union member, and `UPDATE_CLASS.capabilities = "display"`.
+   - `skills.ts`: `SkillListEntry.disabled?: true`.
+   - `methods.ts`: `Method.SetCapability = "session/set_capability"` plus its
+     `RequestSchemas` entry.
+   - `protocol.json` regenerated with `bun run schema:export` (+99 lines).
+2. **Daemon**:
+   - `HostedSession` (`hosted-session.ts`) holds `caps` (`:574`).
+     `capabilities()` (`:2623`) is the snapshot. `seedCapabilities` (`:2632`)
+     normalizes a client seed (sorted, de-duplicated) and applies it with no
+     emit.
+   - `setCapability(op, by)` (`:2653`): `assertKnown`, then
+     `applyCapabilityOp`. On a change it checks the cap (`InvalidParams`, the
+     state untouched), then sets `caps`, calls
+     `agent.setCapabilities(next)`, and emits `capabilities` with `by`.
+     Idempotent: the same object comes back, so there is no emit.
+   - `swapAgent` re-applies the state to the fresh agent (`:2585`).
+   - `skills()` marks the disabled skills through
+     `toSessionSkills(listing, caps.disabledSkills)`.
+   - `mapping.ts`: `toWireCapabilities`. `toSkillList` and `toSessionSkills`
+     take `disabledSkills` (default `[]`).
+   - `connection.ts`: the `Method.SetCapability` case (`:399`) uses the same
+     `by` label as auto-accept. `OpenResult.capabilities` is always present
+     (`:920`), read in the same synchronous segment as the attach.
+   - `session-host.ts:917`: seeds a session this open CREATES, exactly like
+     `autoAccept`.
+3. **Client**:
+   - `RemoteClient`: `SessionStreamListener` gets `capabilitiesSnapshot?` and
+     `capabilitiesChanged?`. `applyOpenResult` calls `noteCapabilities`
+     (`:3154`). The update dispatch handles `"capabilities"` (`:3579`).
+     `setSessionCapability` (`:3190`) rejects with no call when the session is
+     not open.
+   - `RemoteSession`: `capabilities()` (`:350`) is `undefined` when unknown
+     or unsupported. `onCapabilities` (`:360`) subscribes.
+     `setCapability` (`:377`) resolves with the daemon's answer, but the
+     held state comes ONLY from the echo. A late answer must never undo
+     another client's later change (F4). `MethodNotFound` clears the state
+     and notifies `undefined`, so a surface hides its toggles (F7).
+   - `client/mapping.ts`: `capabilities` returns `null` in `updateToEvent`.
+     It is not a turn event, and its listener is in `RemoteClient`, like
+     `auto_accept`.
+
+### Drift from the Implementation (and why)
+
+- **`session-reducer.ts` is unchanged.** It orders updates by `seq` and is
+  kind-agnostic, except for the turn markers. A display update needs nothing
+  there.
+- **No trust gate on the client.** Unlike `auto_accept` (`sharedAutoAccept`),
+  a pod's `capabilities` snapshot and updates are taken as display. The Design
+  says nothing is gated laptop-side (§7: it only removes what the pod's own
+  model sees). `setSessionCapability` is allowed to a pod too.
+- **Two daemon files not in the Files list.** `session-host.ts` holds the
+  create seed. `mapping.ts` holds the wire copy and the `disabled` mark.
+- **The client half of `OpenParams.capabilities` is NOT wired.** There is no
+  `seed…OnCreate` in `RemoteClient`. It is the carry (resume, `/clear` fork,
+  hop), which the plan puts in S3b ("open{capabilities} on resume/fork/hop").
+  S3a delivers the daemon side that honours it, and a test pins it.
+- **`locked?` is not added.** S4 owns that check. `model: false` with no
+  `modelAfterReset` already reads "never offered" in today's listing. If S4
+  finds that is not enough, it is one optional field.
+- **No `persist()` in `setCapability`.** The record is the log entry (S3b), not
+  the sidecar. Until S3b, a `serve` restart reloads a session with everything
+  on (F6 as written for S3b).
+
+### Red before green (§9) — honest note
+
+I wrote the implementation before the tests in this slice, so no run on the
+pre-change code exists. Red is shown instead by **mutation of every target**:
+each of the 13 mutations below turns at least one test red on its
+assertion, not on a compile error. The protocol tests can only go red at
+typecheck: dropping the `UPDATE_CLASS` entry is a TS error, because it is a
+`Record` over the union.
+
+### Mutation checks (§9)
+
+The runner is `.tentacle/tmp/session-capabilities/s3a-mut.ts`. Each mutation is
+one string replacement, then the 3 S3a test files run, then the original is
+written back. Afterwards `cmp` against `.tentacle/tmp/session-capabilities/s3abak/`
+printed `ALL-IDENTICAL` for all 6 sources.
+
+```
+== M1 no emit in setCapability: RED 15/4
+== M2 agent not told in setCapability: RED 18/1   (next request still offers mcp__echo__echo)
+== M3 swapAgent does not re-apply: RED 18/1       (settings sync)
+== M4 create seed dropped: RED 18/1
+== M5 OpenResult without snapshot: RED 16/3
+== M6 no cap check: RED 18/1                      (F10)
+== M7 skills() ignores the switches: RED 18/1
+== M8 whole-state op (forgets the rest): RED 16/3 (F4 concurrent deltas)
+== M9 emit on every set (not idempotent): RED 18/1
+== M10 mapping drops `disabled`: RED 17/2
+== M11 client ignores the open snapshot: RED 17/2
+== M12 client ignores the update: RED 18/1
+== M13 MethodNotFound does not clear: RED 18/1    (F7)
+RESTORED
+```
+
+### Tests added
+
+- `packages/daemon/test/session-capabilities.test.ts` (9 tests): two
+  clients with `by`, and the next request lacks the tool, re-enable lossless ·
+  F4 concurrent different items · idempotent · F5 snapshot on create/attach ·
+  create seed normalized and ignored on attach · settings sync keeps the
+  switches · F10 cap and long name · `session/skills` `disabled` ·
+  UnknownSession.
+- `packages/client/test/session-capabilities.test.ts` (4 tests):
+  snapshot, then A → B with `by`, own echo, re-attach snapshot · F7
+  `MethodNotFound` clears · an older `OpenResult` leaves `undefined` · a set
+  before open rejects.
+- `packages/protocol/test/capabilities.test.ts` (7 tests). Fixtures in
+  `json-schema.test.ts` (the zod ⇔ Ajv agreement and the drift gate).
+  `skills-list.test.ts` (+1).
+
+### Failure modes covered by S3a
+
+F4, F5, F7 (the client half; the surface is S4/S5), F8 (display class), and F10
+(the cap; an unknown name is stored). F14: the pod path is the same handler,
+and the client takes it as display. Not S3a: F6, F9, F12's re-emit (S3b);
+F1–F3, F11, F13, F15 (S2).
+
+### Gate
+
+- `bunx tsc --noEmit` → clean.
+- `bun run lint` → `Checked 1662 files … No fixes applied.` (the §6 baseline,
+  0 errors / 0 warnings).
+- `bun test` → **12011 pass, 5 skip, 0 fail** (12016 tests, 861 files, 447s).
+  The 5 skips are the opt-in guards. The first full run had **1 fail**:
+  `daemon/test/mapping.test.ts` "covers every known type". That is an existing
+  samples list that must name every `UPDATE_CLASS` kind, and it had no
+  `capabilities` sample. I added one (test-only). The re-run above is clean.
+- `protocol.json` regenerated (`bun run schema:export`); the drift gate passes.
+  No `protocol.d/` note: the method, the display update and the optional
+  fields are additive (§7).
+- Changelog: `changelog.d/session-capabilities.added.md` already exists (one
+  fragment for the whole feature, text matching the doc's metadata line). I
+  added no second fragment.
+
+**S3a: DONE.** S3b, S4, S5: not started (out of scope).

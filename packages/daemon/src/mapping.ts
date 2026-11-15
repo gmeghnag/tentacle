@@ -3,7 +3,12 @@
  * `SessionUpdate` vocabulary (and the turn's `StopReason`). Kept pure and
  * table-ish so it can be unit-tested without sockets or an agent.
  */
-import type { AgentEvent, AgentStopReason, SkillListing } from "@tentacle/agent";
+import type {
+  AgentEvent,
+  AgentStopReason,
+  SessionCapabilities,
+  SkillListing,
+} from "@tentacle/agent";
 import type { ToolResult } from "@tentacle/core";
 import {
   type AttachmentRef,
@@ -16,6 +21,7 @@ import {
   MAX_SKILL_LIST,
   MAX_SKILL_PROBLEMS,
   type PromptContentBlock,
+  type SessionCapabilitiesWire,
   type SessionSkillsResult,
   type SessionUpdate,
   type SkillListEntry,
@@ -74,7 +80,11 @@ export function wireLine(text: string, max: number): string {
  * empty one dropped; past `MAX_SKILL_LIST` skills one problem says how many
  * were left out; past `MAX_SKILL_PROBLEMS` problems the rest are counted.
  */
-export function toSkillList(listing: SkillListing): Omit<SessionSkillsResult, "slash"> {
+export function toSkillList(
+  listing: SkillListing,
+  disabledSkills: readonly string[] = [],
+): Omit<SessionSkillsResult, "slash"> {
+  const off = new Set(disabledSkills);
   const skills: SkillListEntry[] = [];
   for (const s of listing.skills.slice(0, MAX_SKILL_LIST)) {
     const name = wireLine(s.name, 256);
@@ -88,6 +98,7 @@ export function toSkillList(listing: SkillListing): Omit<SessionSkillsResult, "s
         user: s.user,
         model: s.model,
         ...(s.modelAfterReset === true ? { modelAfterReset: true } : {}),
+        ...(off.has(s.name) ? { disabled: true as const } : {}),
         location,
       });
     }
@@ -107,11 +118,19 @@ export function toSkillList(listing: SkillListing): Omit<SessionSkillsResult, "s
  * (`toSkillList`), both from the ONE listing the session's activator was
  * built with — so the list and what `session/prompt{skill}` accepts agree.
  */
-export function toSessionSkills(listing: SkillListing): SessionSkillsResult {
+export function toSessionSkills(
+  listing: SkillListing,
+  disabledSkills: readonly string[] = [],
+): SessionSkillsResult {
   return {
     slash: toSkillCatalog(listing.skills.filter((s) => s.user)),
-    ...toSkillList(listing),
+    ...toSkillList(listing, disabledSkills),
   };
+}
+
+/** A session's switches as the wire carries them (fresh arrays: the state stays immutable). */
+export function toWireCapabilities(state: SessionCapabilities): SessionCapabilitiesWire {
+  return { disabledMcp: [...state.disabledMcp], disabledSkills: [...state.disabledSkills] };
 }
 
 /** Flatten a prompt's content blocks to the plain-text the agent loop consumes. */

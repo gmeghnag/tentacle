@@ -33,6 +33,19 @@ describe("toSkillList (always schema-valid, whatever discovery said)", () => {
     expect(valid(out)).toBe(true);
   });
 
+  test("a skill turned off for the session is marked `disabled: true`, the others are not (session-capabilities)", () => {
+    // Mutation: drop the `disabled` spread in `toSkillList` → no mark.
+    const out = toSessionSkills(
+      { skills: [entry({ name: "k8s" }), entry({ name: "dama" })], problems: [] },
+      ["k8s", "gone"],
+    );
+    expect(out.skills.map((s) => [s.name, s.disabled])).toEqual([
+      ["k8s", true],
+      ["dama", undefined],
+    ]);
+    expect(SessionSkillsResultSchema.safeParse(out).success).toBe(true);
+  });
+
   test("strings become one line, cut to the caps; an entry left empty is dropped", () => {
     const out = toSkillList({
       skills: [
