@@ -28,6 +28,7 @@ import { normalizePermissionReply } from "@tentacle/client";
 import type { PermissionResponse } from "@tentacle/core";
 import type { PushMessage } from "@tentacle/protocol";
 import { PushEnvelopeSchema, PushMessageSchema, decodeBase64Url } from "@tentacle/protocol";
+import { PUSH_TOOL_MAX, clipPushText } from "@tentacle/protocol";
 import { type SealedPush, openPush } from "@tentacle/transport/push";
 import type { SessionRoute } from "./routes.ts";
 
@@ -77,6 +78,12 @@ export interface AnswerDecision {
   readonly computerId: string;
   readonly sessionId: string;
   readonly requestId: string;
+  /**
+   * The tool the ask is about, from the SAME plaintext (never `userInfo.tn`).
+   * The Face ID sheet names it ("Approve shell?"), so the person is told what
+   * they are approving (Design 4 step 1; fix round 1, finding #5).
+   */
+  readonly tool: string;
   readonly response: PermissionResponse;
 }
 
@@ -223,6 +230,9 @@ export function decideAction(deps: DecideDeps): ActionDecision {
     computerId: computer.id,
     sessionId: message.sessionId,
     requestId: ask.requestId,
+    // The tool's own name from the plaintext, clipped like every other display
+    // string: it lands in the Face ID sheet's sentence.
+    tool: clipPushText(ask.tool, PUSH_TOOL_MAX),
   } as const;
 
   if (deps.actionId === "tentacle.approve") {

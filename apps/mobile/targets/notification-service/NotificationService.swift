@@ -18,8 +18,6 @@
 import UserNotifications
 
 final class NotificationService: UNNotificationServiceExtension {
-    /// The access group the app and this extension are both entitled to (plan C1).
-    private static let accessGroup = "so.tentacle.app"
     /// `expo-secure-store`'s service name for a no-auth generic password
     /// (`SecureStoreModule.swift`): the extension reads the items the app wrote.
     private static let keychainService = "so.tentacle.app:no-auth"
@@ -36,7 +34,14 @@ final class NotificationService: UNNotificationServiceExtension {
         let original = request.content.mutableCopy() as? UNMutableNotificationContent
             ?? UNMutableNotificationContent()
         self.original = original
-        let keychain = SharedKeychain(service: Self.keychainService, accessGroup: Self.accessGroup)
+        // No access group: this target is entitled to the shared
+        // `...so.tentacle.app.push` group and its own app ID, and a query
+        // WITHOUT a group "matches any of your app's groups" (Apple, *Sharing
+        // access to keychain items*). It is never entitled to the app's own
+        // group, so the Noise device key is out of reach (plan C1); and naming
+        // a group here would need the build-time TEAMID prefix, which a Swift
+        // literal cannot get right without a second source of truth.
+        let keychain = SharedKeychain(service: Self.keychainService, accessGroup: nil)
         let rendered = PushPipeline.render(
             userInfo: original.userInfo,
             now: Int(Date().timeIntervalSince1970 * 1000),

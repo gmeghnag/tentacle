@@ -6,9 +6,13 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "bundleIdentifier": "so.tentacle.app",
+      "appleTeamId": "8L24B2DUU2",
       "supportsTablet": true,
       "entitlements": {
-        "keychain-access-groups": ["$(AppIdentifierPrefix)so.tentacle.app"],
+        "keychain-access-groups": [
+          "$(AppIdentifierPrefix)so.tentacle.app",
+          "$(AppIdentifierPrefix)so.tentacle.app.push"
+        ],
         "com.apple.developer.usernotifications.time-sensitive": true
       },
       "infoPlist": {

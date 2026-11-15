@@ -166,6 +166,8 @@ describe("the plaintext is the authority, never userInfo.tn (Design 3)", () => {
       computerId: "computer-1",
       sessionId: "the-real-session",
       requestId: "req-1",
+      // The tool too: it is what the Face ID sheet names (fix round 1, #5).
+      tool: "shell",
       response: { allowed: false },
     });
   });
@@ -201,6 +203,7 @@ describe("Approve is allow_once only (decision 8)", () => {
       computerId: "computer-1",
       sessionId: "sess-1",
       requestId: "req-1",
+      tool: "shell",
       response: { allowed: true, scope: "once" },
     });
   });

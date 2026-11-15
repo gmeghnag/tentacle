@@ -739,6 +739,131 @@ see "Not verified" below.
   `push-v1.json` opening with the pinned key and every render vector of
   `push-render-v1.json` matching. Run: `bun run test:swift`.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-15* (a FRESH executor session — the model id above
+is the one this run actually used, read from this session's own transcript
+rather than assumed; it happens to match Review round 1's model, but the context
+is new. The earlier `claude-sonnet-4-5` signature on the Execution section above
+is the previous executor's and is left as it was.)
+
+All five findings fixed. Red-before-green for each, and each fix carries a
+mutation that was run and reverted (§9 non-vacuity). No `git checkout/restore/
+stash/commit` was used; every revert was `cp` from a backup under
+`.tentacle/tmp/mobile-notifications/`.
+
+**#1 HIGH — a background answer crashed inside the client (FIXED).**
+- Repro first: `.tentacle/tmp/mobile-notifications/fix1-attach.ts` (a real
+  `SessionHost` + `Connection` + `RemoteClient`) → `TypeError: entry.listener?.
+  output is not a function` at `remote-client.ts:3398`, outcome `unreachable`,
+  and a second `TypeError` on `linkClosed` at close.
+- Cause: `notification-answer.ts` attached with `{}`, and `AnswerClient` typed
+  the listener `unknown`, so neither TypeScript nor the fake clients could see
+  the contract. `RemoteClient.deliver` calls `output`, and `stop()` calls
+  `linkClosed`; `recovered` on a re-open.
+- Fix: `AnswerClient.attachSession` now takes the client's OWN
+  `SessionStreamListener`, and the run passes a module constant
+  `BACKGROUND_LISTENER` with all three methods
+  (`apps/mobile/src/notification-answer.ts` — the interface at :34, the
+  constant at :134-138, used at :207). `SessionStreamListener` is
+  re-exported from `@tentacle/client`, so the app names the real type.
+- Red test: `apps/mobile/test/notification-answer.test.ts`, "a background answer
+  over a REAL RemoteClient" — the first test in this file that does NOT use a
+  fake client (which is exactly how #1 survived).
+- Mutations, run and reverted: (a) attach with `{}` →
+  `TypeError …output is not a function`, test red; (b) drop `linkClosed` from
+  `BACKGROUND_LISTENER` → the test still passes at runtime (that method is only
+  called on `close()`), but `tsc -p apps/mobile` fails with
+  `TS2741: Property 'linkClosed' is missing`. Recorded honestly: the runtime
+  test pins `output`, the TYPE pins all three.
+
+**#2 HIGH — answering the current ask left the next queued ask unprompted
+(FIXED).**
+- Repro: `.tentacle/tmp/mobile-notifications/fix2-next.ts` showed the ROUTER is
+  correct (`answerById(A)` → `[abort:A, send:A, prompt:B]`), so the drop was in
+  the client: `RemoteClient.answerPermission` ran
+  `actions.filter((a) => a.kind === "abort")` and threw away the `prompt` that
+  `next()` returns for the ask that just became `current`.
+- Fix: run every action except the `send` (`remote-client.ts:1772`); the
+  `send` stays awaited below, so the person's outcome is unchanged.
+- Red test: `packages/client/test/remote-client-answer.test.ts` "(b2)", using the
+  fake daemon (it can push two asks; a real turn cannot — `a turn is already
+  running`). Asserts `asked === ["cmd-r1", "cmd-r2"]` after answering r1.
+- Mutation: restore the abort-only filter → `["cmd-r1"]`, test red.
+
+**#3 HIGH — plan C1 was not implemented, so the NSE could read the Noise device
+key (FIXED).**
+- The shipped config listed ONE group (`...so.tentacle.app`) for both the app and
+  the extension, so "the shared group" WAS the app's own group: `deviceKey`
+  (written with no group) landed there and the extension was entitled to it.
+- Fix: a SEPARATE shared group `$(AppIdentifierPrefix)so.tentacle.app.push`,
+  listed SECOND in the app (`apps/mobile/app.json:12-15`) where the app's own
+  group stays first (a group-less write, i.e. `deviceKey`, lands there), and the
+  extension entitled to that one group ONLY
+  (`targets/notification-service/expo-target.config.js:35`).
+- Red tests: `apps/mobile/test/app-config.test.ts` — "a DIFFERENT group, listed
+  second" and "the extension is entitled to the SHARED group only". The old
+  `slice(1)`-and-fallback assertion is gone (with one group it was vacuous: the
+  swap it named could not be expressed), and the old "the extension is entitled
+  to the SAME group, and only that one" test — which pinned the violating shape —
+  is inverted into the two above.
+- Mutations: (a) back to one group in `app.json` → both C1 tests red; (b) the
+  extension entitled to `...so.tentacle.app` → "shared group only" red.
+
+**#4 MEDIUM — the access-group string had no Team ID prefix (FIXED).**
+- Established from Apple's own *Sharing access to keychain items among a
+  collection of apps* (fetched, quoted in the code): "If you try to use an access
+  group to which your app doesn't belong, the operation fails and returns
+  `errSecMissingEntitlement`", and "If you don't specify an access group in the
+  query, the search matches any of your app's groups."
+- Fix: new pure `apps/mobile/src/push-access-group.ts` owns the ONE `TEAM_ID`
+  (`8L24B2DUU2`, read from the signing identity; `app.json`'s `ios.appleTeamId`
+  names the same) and derives both runtime strings. `push-key.ts` and
+  `push-directory-expo.ts` now pass `PUSH_ACCESS_GROUP` =
+  `<TEAMID>.so.tentacle.app.push`. The extension names NO group at all
+  (`NotificationService.swift`): its queries then match its own groups, which is
+  the shared push group — and it cannot be the device key's group, because it is
+  not entitled to it. That is also what removes the build-time `$(...)` problem
+  from a Swift literal.
+- Red tests: the `app-config.test.ts` "RUNTIME group string is TEAMID-prefixed"
+  block (both halves), plus the updated `push-key`/`push-directory` assertions.
+- Mutations: (a) `accessGroupFor` returns the bare group → red; (b) the Swift
+  passes `"so.tentacle.app.push"` → red.
+- **Not verified on a device.** N0(f) is still deferred, and two empirical
+  attempts failed here: `simctl spawn` refuses a keychain-entitled binary
+  ("Security policy issue") and a minimal ad-hoc-signed `.app` was refused by
+  `SBMainWorkspace`; an ad-hoc macOS copy of the probe was killed by the OS. So
+  the *contract* is cited from Apple rather than observed. Verify with
+  `simctl`/device once D3a's profiles exist — that is the remaining N0(f).
+
+**#5 MEDIUM — the Face ID prompt read "Approve approve?" (FIXED).**
+- `answerDecision` called `approvePrompt(decision.do)` (the action kind), not the
+  tool. Design 4 step 1 specifies `"Approve <tool>?"`.
+- Fix: `AnswerDecision` gained `tool`, taken from the SAME verified plaintext
+  (`notification-action.ts:235`, clipped with `clipPushText`/`PUSH_TOOL_MAX`)
+  and used at `notification-answer.ts:160`.
+- Red test: "the system sheet NAMES the tool being approved" — red with
+  `auth Approve approve?`. Mutation: `approvePrompt(decision.do)` → red.
+
+**Gate (this worktree, uncommitted).** `bunx tsc --noEmit` → exit 0.
+`bunx tsc -p apps/mobile --noEmit` → exit 0. `bunx tsc -p apps/relay --noEmit` →
+exit 0. `bun run lint` → `Checked 1546 files … No fixes applied.` (0 errors,
+0 warnings — the §6 baseline). `bun test` (full) → **11037 pass, 5 skip, 0 fail**,
+11042 tests / 798 files, 420 s — the 5 skips are the pre-existing opt-ins
+(live-docker ×2, live-k8s ×2, the slow keepalive), none of them mine.
+`bun run test:swift` → 11 pass / 0 fail.
+
+**No dependency change.** `expo-constants` was briefly added to `apps/mobile`
+while working out where a Team ID could come from at runtime, then reverted in
+full (`apps/mobile/package.json` and `bun.lock` are byte-identical to the branch
+head): the shipped fix is a constant plus `app.json`, not a new dependency, and
+nothing on the branch imports it.
+
+**Not verified (unchanged from above, plus one).** Everything in "Not verified"
+still stands. New: the #4 runtime group string is proven against Apple's
+documented contract and pinned by tests, not observed on a device (N0(f) — no
+toolchain path found here; both attempts are recorded above).
+
 
 ## Review
 

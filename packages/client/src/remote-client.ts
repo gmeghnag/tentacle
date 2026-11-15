@@ -1763,9 +1763,13 @@ export class RemoteClient {
     response: PermissionResponse,
   ): Promise<NotificationAnswerOutcome> {
     const actions = this.router.answerById(sessionId, requestId, response);
-    // Only the prompt withdrawal is executed here: the `send` is awaited below,
-    // so its outcome (not a fire-and-forget) is what the person is told.
-    this.runPermissionActions(actions.filter((a) => a.kind === "abort"));
+    // Everything EXCEPT the send runs here — the `abort` for the answered
+    // prompt AND the `prompt` that `next()` returns for the ask that becomes
+    // current. Dropping the latter leaves the next ask held-but-unprompted: the
+    // sheet never shows it and every later ask queues behind it (fix round 1,
+    // finding #2). The `send` is awaited below instead, so its outcome (not a
+    // fire-and-forget) is what the person is told.
+    this.runPermissionActions(actions.filter((a) => a.kind !== "send"));
     const send = actions.find((a): a is PermissionSendAction => a.kind === "send");
     if (actions.some((a) => a.kind === "unoffered")) {
       return "unoffered";

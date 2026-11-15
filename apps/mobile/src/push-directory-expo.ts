@@ -19,6 +19,7 @@
 import { decodeBase64Url } from "@tentacle/protocol";
 import { pushKeyId } from "@tentacle/transport/push";
 import type { ComputerEntry, ComputerStore, PairedComputer } from "./computer-store.ts";
+import { PUSH_ACCESS_GROUP } from "./push-access-group.ts";
 import {
   type DirectoryKey,
   type DirectoryStore,
@@ -29,8 +30,8 @@ import {
 import { ensurePushKeypair } from "./push-key.ts";
 import type { PushKeyStore, PushKeypair } from "./push-key.ts";
 
-/** The shared group of the notification items: the app's own bundle-id group (plan C1). */
-export const PUSH_DIRECTORY_ACCESS_GROUP = "so.tentacle.app";
+/** The shared group of the notification items: the SEPARATE `...push` group, TEAMID-prefixed. */
+export const PUSH_DIRECTORY_ACCESS_GROUP = PUSH_ACCESS_GROUP;
 
 /**
  * A `DirectoryStore` over a shared-group Keychain. Pure: the Keychain surface and

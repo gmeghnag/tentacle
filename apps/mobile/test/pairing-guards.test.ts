@@ -107,8 +107,12 @@ describe("the push entitlements and plugin are in app.json (P9: a plist entry is
   test("the shared keychain access group and the Time Sensitive entitlement are declared", () => {
     const entitlements = config.expo?.ios?.entitlements ?? {};
     // Task 17's extension must read the push key while the app is not running.
+    // TWO groups, the app's own FIRST (plan C1, fix round 1 #3): the separate
+    // `...push` group is the only one the extension may hold, so an item with no
+    // group (`deviceKey`) can never land in it.
     expect(entitlements["keychain-access-groups"]).toEqual([
       "$(AppIdentifierPrefix)so.tentacle.app",
+      "$(AppIdentifierPrefix)so.tentacle.app.push",
     ]);
     // Owner Q4: an `ask` is Time Sensitive, which the extension raises after
     // decrypting; the entitlement is what allows that at all.

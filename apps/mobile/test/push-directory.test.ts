@@ -8,7 +8,9 @@
 import { describe, expect, test } from "bun:test";
 import { encodeBase64Url } from "@tentacle/protocol";
 import { pushKeyId } from "@tentacle/transport/push";
+import { TEAM_ID } from "../src/push-access-group.ts";
 import { directoryStore, rewritePushDirectory } from "../src/push-directory-expo.ts";
+import { PUSH_DIRECTORY_ACCESS_GROUP } from "../src/push-directory-expo.ts";
 import {
   type DirectoryKey,
   type DirectoryPeer,
@@ -267,8 +269,10 @@ describe("rewritePushDirectory (the adapter)", () => {
     expect(written.v).toBe(1);
     expect(written.peers.map((p: { computerId: string }) => p.computerId)).toEqual(["c0", "c2"]);
     expect(written.keys).toEqual([{ priv: b64(61), pub: b64(62), createdAt: NOW }]);
-    // Every access was against the shared group, never the app's own item group.
-    expect(new Set(chain.groups)).toEqual(new Set(["so.tentacle.app"]));
+    // Every access was against the SHARED push group (TEAMID-prefixed, fix
+    // round 1 #4), never the app's own group where `deviceKey` lives.
+    expect(new Set(chain.groups)).toEqual(new Set([PUSH_DIRECTORY_ACCESS_GROUP]));
+    expect(PUSH_DIRECTORY_ACCESS_GROUP).not.toBe(`${TEAM_ID}.so.tentacle.app`);
   });
 
   test("a re-pair REPLACES the peer (new pinned key, same computer id)", async () => {

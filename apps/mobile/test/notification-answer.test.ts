@@ -4,7 +4,18 @@
  * injected, so the whole background/foreground sequence runs without a phone.
  */
 import { describe, expect, test } from "bun:test";
-import type { NotificationAnswerOutcome } from "@tentacle/client";
+import { Agent } from "@tentacle/agent";
+import { type NotificationAnswerOutcome, RemoteClient } from "@tentacle/client";
+import {
+  type ExecutionEnvironment,
+  type ModelProvider,
+  PermissionBroker,
+  type PermissionResponse,
+} from "@tentacle/core";
+import { Connection, SessionHost } from "@tentacle/daemon";
+import { PROTOCOL_VERSION } from "@tentacle/protocol";
+import { ToolRegistry, shellTool } from "@tentacle/tools";
+import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import type { AuthResult } from "../src/app-lock.ts";
 import {
   ANSWER_BUDGET_MAX_MS,
@@ -23,6 +34,7 @@ const DECISION = {
   computerId: "c1",
   sessionId: "s1",
   requestId: "req-1",
+  tool: "shell",
   response: { allowed: false },
 };
 const APPROVE = {
@@ -30,6 +42,7 @@ const APPROVE = {
   computerId: "c1",
   sessionId: "s1",
   requestId: "req-1",
+  tool: "shell",
   response: { allowed: true as const, scope: "once" as const },
 };
 
@@ -112,8 +125,19 @@ describe("Approve asks Face ID ALWAYS (decision 14)", () => {
     // approve a command with no person in the loop.
     const r = rig({ inForeground: () => true });
     return answerDecision(APPROVE, r.deps).then(() => {
-      expect(r.calls).toContain(`auth ${approvePrompt("approve")}`);
+      expect(r.calls).toContain(`auth ${approvePrompt("shell")}`);
     });
+  });
+
+  test("the system sheet NAMES the tool being approved (fix round 1, finding #5)", async () => {
+    // Design 4 step 1: `authenticate("Approve <tool>?")`. Mutation: pass the
+    // action kind (`approvePrompt(decision.do)`) → the sheet reads "Approve
+    // approve?" and the person authenticates without being told what for.
+    const r = rig({ inForeground: () => true });
+    await answerDecision(APPROVE, r.deps);
+    const prompt = r.calls.find((c) => c.startsWith("auth ")) ?? "";
+    expect(prompt).toBe("auth Approve shell?");
+    expect(prompt).not.toContain("approve?");
   });
 
   test("a cancel sends NOTHING and lands on the session's sheet", async () => {
@@ -185,6 +209,7 @@ describe("the fallback is scheduled BEFORE the dial (F13)", () => {
         computerId: "c1",
         sessionId: "s1",
         requestId: "req-1",
+        tool: "shell",
         response: { allowed: false, message: "use bun" },
       },
       r.deps,
@@ -309,6 +334,7 @@ describe("logs carry ids and outcomes, never text (F23)", () => {
         computerId: "c1",
         sessionId: "s1",
         requestId: "req-1234567",
+        tool: "shell",
         response: { allowed: false, message: "SECRET-REPLY-TEXT" },
       },
       r.deps,
@@ -317,6 +343,125 @@ describe("logs carry ids and outcomes, never text (F23)", () => {
     expect(all).not.toContain("SECRET-REPLY-TEXT");
     expect(all).not.toContain("rm -rf");
     expect(all).toContain("req-1234"); // 8 chars of the id, so a line is traceable
+  });
+});
+
+describe("a background answer over a REAL RemoteClient (fix round 1, finding #1)", () => {
+  /**
+   * The fake client above cannot fail the way the real one does: `deliver` calls
+   * `entry.listener?.output(out)` on the session's consumer, so a listener that
+   * is `{}` — or any object without the three methods — throws a TypeError on
+   * the REPLAY's first frame and the answer degrades to `unreachable`. So this
+   * rig is the real stack: a real daemon (`SessionHost` + `Connection`), a real
+   * `RemoteClient` on its own in-memory link, and the answer path attaching a
+   * session the phone's screen is NOT on.
+   */
+  async function realRig() {
+    const env = {
+      id: "rec",
+      async exec() {
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      },
+      async readFile() {
+        return "";
+      },
+      async writeFile() {},
+    } as unknown as ExecutionEnvironment;
+    const host = new SessionHost({
+      defaultCwd: "/tmp/notification-answer-real",
+      createAgent: () => {
+        const permissions = new PermissionBroker();
+        return {
+          agent: new Agent({
+            model: {
+              id: "scripted",
+              async *stream() {
+                yield {
+                  type: "tool_call",
+                  toolCall: {
+                    id: "c1",
+                    name: "shell",
+                    arguments: JSON.stringify({ command: "rm -rf build" }),
+                  },
+                };
+                yield { type: "done" };
+              },
+            } as ModelProvider,
+            tools: new ToolRegistry().register(shellTool),
+            env,
+            requestPermission: (req, options) => permissions.request(req, options),
+          }),
+          permissions,
+        };
+      },
+    });
+    const [dch, cch] = createChannelPair();
+    new Connection(dch, host);
+    const peer = new RpcPeer(cch, {});
+    await peer.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { streaming: true },
+    });
+    await peer.request("session/open", { sessionId: "S", create: true });
+    await peer.request("session/prompt", {
+      sessionId: "S",
+      turnId: "t1",
+      content: [{ type: "text", text: "go" }],
+    });
+    for (let i = 0; i < 400; i++) {
+      await Promise.resolve();
+    }
+    const [dch2, cch2] = createChannelPair();
+    new Connection(dch2, host);
+    const errors: Error[] = [];
+    const client = new RemoteClient(
+      cch2,
+      new PermissionBroker(
+        (_req, opts) =>
+          new Promise<PermissionResponse>((resolve) => {
+            opts?.signal?.addEventListener(
+              "abort",
+              () => resolve({ allowed: false, dismissed: true }),
+              { once: true },
+            );
+          }),
+      ),
+      undefined,
+      { onError: (e) => errors.push(e) },
+    );
+    await client.initialize();
+    return {
+      client,
+      errors,
+      close: () => {
+        peer.close();
+        client.close();
+      },
+    };
+  }
+
+  test("attaching a session the screen is not on does not throw inside the client", async () => {
+    // Mutation: pass `{}` as the attach listener (or drop any of the three
+    // methods from `backgroundListener()`) → `deliver` throws
+    // "entry.listener?.output is not a function", the run is `unreachable`, and
+    // the person's Deny is never sent.
+    const r = await realRig();
+    const logs: string[] = [];
+    const answerer = new NotificationAnswerer({
+      links: { get: async () => ({ client: r.client, hold: () => () => {} }) },
+      authenticate: async () => "success" as AuthResult,
+      scheduleFallback: () => () => {},
+      inForeground: () => true,
+      computerName: () => "MacBook",
+      log: (line) => logs.push(line),
+    });
+    // The ask's id is unknown to this client (it never saw the push): the answer
+    // is `not-pending`, but only AFTER the attach succeeded. Before the fix the
+    // attach throws and the outcome is `unreachable`.
+    const outcome = await answerer.run({ ...DECISION, sessionId: "S" });
+    expect(outcome).toEqual({ kind: "not-pending" });
+    expect(r.errors).toEqual([]);
+    r.close();
   });
 });
 

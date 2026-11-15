@@ -17,7 +17,7 @@
  *     ask stays pending daemon-side for the sheet.
  *  6. In-flight join per `requestId` (F18) lives in `NotificationAnswerer`.
  */
-import type { NotificationAnswerOutcome } from "@tentacle/client";
+import type { NotificationAnswerOutcome, SessionStreamListener } from "@tentacle/client";
 import type { AuthResult } from "./app-lock.ts";
 import type { ActionDecision } from "./notification-action.ts";
 import type { SessionRoute } from "./routes.ts";
@@ -25,7 +25,13 @@ import type { SessionRoute } from "./routes.ts";
 /** The answer path's client surface (a `RemoteClient`, injected). */
 export interface AnswerClient {
   isAttached(sessionId: string): boolean;
-  attachSession(sessionId: string, listener: unknown): Promise<string>;
+  /**
+   * Typed as the client's OWN listener contract, not `unknown`: `deliver` calls
+   * `listener?.output(out)` on the REPLAY's first frame, so an object missing
+   * the three methods throws a TypeError inside the client and the answer
+   * degrades to `unreachable` (fix round 1, finding #1 — the fake clients hid it).
+   */
+  attachSession(sessionId: string, listener: SessionStreamListener): Promise<string>;
   detachSession(sessionId: string): Promise<void>;
   answerPermission(
     sessionId: string,
@@ -118,6 +124,19 @@ function short(id: string): string {
   return id.slice(0, 8);
 }
 
+/**
+ * The listener an answer's OWN attach passes. The answer path renders nothing:
+ * it attaches only so the router holds the session's pending ask, and every
+ * frame the replay delivers is none of its business. But the client calls three
+ * methods on it (`output` for each frame, `recovered` after a re-open,
+ * `linkClosed` at the end), so this has to BE a listener, not a stand-in.
+ */
+export const BACKGROUND_LISTENER: SessionStreamListener = {
+  output() {},
+  recovered() {},
+  linkClosed() {},
+};
+
 /** The action kinds that send something (`open`/`refuse` never reach here). */
 export type AnswerAction = Extract<ActionDecision, { do: "approve" | "deny" | "reply" }>;
 
@@ -138,7 +157,7 @@ export async function answerDecision(
   // 1. Approve ALWAYS asks (decision 14), whether or not the app is unlocked:
   //    mutation — skip when unlocked — a lock-screen tap would approve a command.
   if (kind === "approve") {
-    const auth = await deps.authenticate(approvePrompt(decision.do));
+    const auth = await deps.authenticate(approvePrompt(decision.tool));
     if (auth !== "success") {
       deps.log?.(`notify auth ${short(requestId)} ${auth}`);
       // Nothing is sent; the person lands on the session whose sheet still holds
@@ -185,7 +204,7 @@ export async function answerDecision(
       outcome = "unreachable";
     } else {
       if (!link.client.isAttached(sessionId)) {
-        await link.client.attachSession(sessionId, {});
+        await link.client.attachSession(sessionId, BACKGROUND_LISTENER);
         attached = true;
       }
       const answer = await link.client.answerPermission(sessionId, requestId, response);

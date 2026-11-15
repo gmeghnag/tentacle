@@ -198,6 +198,8 @@ async function fakeDaemon(
   const [daemonCh, clientCh] = createChannelPair();
   const resolves: unknown[] = [];
   const frames: string[] = [];
+  /** Every prompt the broker actually ASKED about, in order (a held ask is not one). */
+  const asked: string[] = [];
   // Record what the CLIENT writes: "zero frames" is one of the assertions.
   const recording = {
     send: (data: string) => {
@@ -232,18 +234,18 @@ async function fakeDaemon(
     // A HOLDING requester: the rig is a phone whose screen is elsewhere, so the
     // ask must stay pending for the answer under test (the default broker would
     // auto-approve it, proving nothing).
-    new PermissionBroker(
-      (_req, opts) =>
-        new Promise((resolve) => {
-          opts?.signal?.addEventListener(
-            "abort",
-            () => resolve({ allowed: false, dismissed: true }),
-            {
-              once: true,
-            },
-          );
-        }),
-    ),
+    new PermissionBroker((req, opts) => {
+      asked.push(req.detail ?? req.title);
+      return new Promise((resolve) => {
+        opts?.signal?.addEventListener(
+          "abort",
+          () => resolve({ allowed: false, dismissed: true }),
+          {
+            once: true,
+          },
+        );
+      });
+    }),
     undefined,
     { onError: () => {} },
   );
@@ -268,7 +270,7 @@ async function fakeDaemon(
     options,
     ...opts,
   });
-  return { client, resolves, frames, push, ask, close: () => client.close() };
+  return { client, resolves, frames, asked, push, ask, close: () => client.close() };
 }
 
 const answerFrames = (frames: readonly string[]): unknown[] =>
@@ -360,6 +362,29 @@ describe("(c) answering the CURRENT ask by id withdraws the open prompt", () => 
     expect(r.execs).toEqual(["rm -rf build"]);
     expect(r.resolved()).toHaveLength(1);
     r.close();
+  });
+});
+
+describe("(b2) answering the CURRENT ask lets the queue's next ask be PROMPTED", () => {
+  test("a second ask for the session is shown, not left current-and-unprompted", async () => {
+    // Fix round 1, finding #2. `answerById` returns `[abort, send, ...next()]`,
+    // and `next()` makes the queued ask `current` while returning its `prompt`.
+    // Running only the `abort` actions drops that `prompt`, so B becomes current
+    // with nobody asking: the sheet never shows it, and it stays answerable only
+    // by the id the notification happened to carry.
+    // Mutation: execute the `abort` actions only (as the code did) → `asked`
+    // stays ["cmd-r1"].
+    const f = await fakeDaemon();
+    await f.push(f.ask("r1"));
+    await f.push(f.ask("r2"));
+    expect(f.asked).toEqual(["cmd-r1"]);
+    expect(await f.client.answerPermission("s1", "r1", { allowed: true, scope: "once" })).toBe(
+      "sent",
+    );
+    await flush();
+    // r2 is the router's CURRENT ask now, so the broker must be asking it.
+    expect(f.asked).toEqual(["cmd-r1", "cmd-r2"]);
+    f.close();
   });
 });
 
