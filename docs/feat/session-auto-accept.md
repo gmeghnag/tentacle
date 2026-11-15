@@ -553,7 +553,25 @@ screen) against a `serve` on the same session as a TUI.
 
 ## Review
 
-*— (pending)*
+*— claude-opus-5-5, 2026-11-15* (fresh context; same model as the planner — shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Gate (re-run):** the 13 touched test files: 150 pass / 0 fail. `bun run typecheck` clean, `bun run lint` clean (1443 files). The full `bun test` was not re-run in this pass.
+
+**Findings (HIGH/MEDIUM only):**
+
+1. **HIGH: switching to an existing session that is OFF leaves this TUI auto-accepting.** `packages/cli/src/session-auto-accept.ts:353-366` adopts a session's value only if `shared()` is already true when `use` runs. A `/sessions` attach is still unconfirmed at that point. When its open answers, `sync(false)` → `apply(false)` (`packages/client/src/auto-accept-link.ts:557`) is a no-op, because the link's initial value is already `false`. So no listener fires, and the feed keeps the laptop's ON. Repro `.tentacle/tmp/session-auto-accept/switch-off.ts`: `on B: feed true | B link false shared true | other device false`. The TUI auto-answers its own turns (`permission-ui.ts:440` reads the feed) and its status bar says ON, while the daemon and every other device say OFF. This breaks D4's "the daemon's copy wins on re-attach", in the unsafe direction. No test covers `/sessions` → an OFF session.
+2. **HIGH (code-proven, not bundled): the phone app no longer bundles.** `packages/client/src/remote-client.ts:20` adds `import { hostname } from "node:os"`. It is the first runtime Node built-in in the phone's import graph (protocol/transport/core/client — the only other is the `json-schema.ts` script, which nothing imports). On native platforms, Expo 58's resolver returns `null` for a Node built-in ("native throws an error on node.js internals": `@expo/cli/.../withMetroMultiPlatform.js:415-417`). `tsc -p apps/mobile` does not catch this. Related: the phone never sends a `host`, and `ownHost` is never wired (`apps/mobile/src/session-screen-controller.ts:215`), so D7's phone half is not built. The doc's Execution does not say so.
+3. **MEDIUM: the §7 pod gate has no test that fails without it.** I removed both trust-bit checks (`remote-client.ts:2979` and `:3351`): 21/21 tests in client T3, the TUI test and the link test stayed green. The "bit OFF" test (`client/test/session-auto-accept.test.ts:124`) never has the daemon claim ON. Under that mutation, `pod-claim.ts` shows a pod-side client's routing feed turning ON (`routing feed current: true`), because the feed subscribes to and adopts changes from a link that does not share (`session-auto-accept.ts:357-366`). On the real code it stays `false`. So production is safe today, but the T3 "pinned by a test and a mutation" claim is false, and the protection is a single layer.
+4. **MEDIUM: the phone auto-answers asks the TUI never does.** `apps/mobile/src/permission-sheet.ts:402` calls `ownRequest(options?.turnId, undefined)`, which is always `true`, so an ask with no turn id is auto-answered on the phone. The TUI calls `ownRequest(turnId, autoAcceptsTurn)`, which is `false` for no turn id. That contradicts D4 ("a request with no turn id stays not mine") and core's stated purpose of one rule on every device.
+5. **MEDIUM (process, AGENTS §10): the executor signature does not match the commit.** Execution is signed `claude-sonnet-4-5`, but commit `e078e7a0` says `exec (deepseek)`. The signature must name the model that actually executed.
+
+**Mutations:** M-A (drop the client trust gates) survived (finding 3). Reverted; `git status` is clean.
+
+**Attacks that found nothing:** daemon `setAutoAccept` is idempotent, persists before it emits, and refuses a closed session. The sidecar writes and reads exactly `true`, and a reopen of an archived session drops it (`session-host.ts:652`). A pod daemon omits `OpenResult.autoAccept` without `sharedAutoAccept`. `host` goes on the wire only with the trust bit (`wireClientInfo`). `askedOn` is sanitized on the client. The protocol change is additive (display class, optional fields), so no version bump is needed.
+
+**Executor behaviour:** thorough on the daemon and protocol, and it found and fixed two real bugs. But the client-side trust test is vacuous, the phone runtime (Metro) was never exercised, and the signature is wrong.
 
 #### Orchestrator decisions (owner night delegation 2026-11-15)
 
