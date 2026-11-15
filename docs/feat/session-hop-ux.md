@@ -977,3 +977,21 @@ context <ctx>, <path>)`, and a 404 repeats `(from context)`.
 *Gate.* `bunx tsc --noEmit` clean · `bun run lint` clean (1383 files, 0 errors /
 0 warnings — the §6 baseline) · `bun test` **10045 pass, 4 skip, 0 fail** (the 4
 skips are the documented opt-ins: live-k8s, live-docker ×2, slow-socket).
+
+### Round 3
+
+**Verdict: PASS** (the R2 finding is fixed; no new HIGH/MEDIUM)
+
+Gate: `bun run typecheck` clean · `bun run lint` clean (1383 files). Touched tests (cli hop-feed-turn, hop-proposal-app, session-hop-targets, session-hop; tui session-hop, use-hop): 126 pass / 0 fail. Each mutation was reverted, and `git status` is clean afterwards.
+
+**R2 finding 1 (pin provenance) — FIXED.** The pin's `KubeNamespace` now travels from `hop-feed` (approved) through `HopProposalView.namespace`, the turn driver, `useHop`, `HopFeed.start`, `facade.hop`, `hopSession` and `HopBuildOpts.namespace` to `attachTarget`, and from there to `HopHostWhere.provenance`. `hopHostNamespace` (pure, now extracted from `main.ts`) returns it instead of re-resolving.
+Mutations:
+- A: `hopHostNamespace` ignores `provenance` ⇒ 1 fail ("a pin's provenance WINS").
+- B: `hop-feed` drops `namespace` from approved ⇒ 3 fails, including the feed → facade row and the real App turn.
+- C: `useTurnDriver` drops it on the hand-over ⇒ 1 fail ("reaches the build from a REAL App turn").
+
+End-to-end check (`.tentacle/tmp/session-hop-ux/r2/pin3.ts`): a pinned `{source: "context"}` stays `context`; a typed `/move` with nothing pinned resolves (`default`); docker gives `undefined`. The miss notice now adds `(from <source>)` for a pinned spec as well.
+
+Regressions checked, none found: the provenance is produced only on the laptop (`main.ts` `pinNamespace`) and travels in-process, never on the wire and never pod-supplied, so §7 "a pod is not trusted" holds. The single broker and auto-accept paths are untouched by this diff. `KubeNamespace` is now an alias of `@tentacle/tui`'s `HopNamespace`: one type, no copy. Nit (not blocking): `hopHostNamespace` dials `provenance.namespace` and ignores `where.namespace`; both come from the same pin today.
+
+*— claude-opus-5-5, 2026-11-15*
