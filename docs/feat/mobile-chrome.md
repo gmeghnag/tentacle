@@ -983,3 +983,203 @@ the diff.
 **Nit (not blocking):** nothing checks that RenameSheet uses `radius.dialog`
 specifically (pointing it at, say, `radius.tile` would still pass). Screenshots
 are still owed, as in round 1.
+
+## Execution (slice S2 — header, A1)
+
+*— claude-opus-5-5, 2026-11-16 · slice S2 only*
+
+**Scope: S2 (Header, A1) only.** S3–S10 untouched: no `BandSection`, `Row`,
+`Sheet`, `drawer-*`, `activity*`, `floating-button` or `SessionScreen` drawer work.
+No protocol, daemon, client or wire change — no schema changed, so
+`packages/protocol/schema/protocol.json` was **not** regenerated (confirmed:
+`git status` names only `apps/mobile` sources, two test files, the doc and the
+changelog fragment). `TODO.md` untouched. The left button is still "back", as
+the slice's own `done when` says (it becomes the drawer in S6).
+
+### Load-bearing check, re-run first (it held)
+
+S2's slice-level assumption is Design 2's: **the ring can be drawn from plain
+`View`s, so the header restyle needs no `react-native-svg` and no native
+rebuild.** Evidence on the branch tip before any edit
+(`.tentacle/tmp/mobile-chrome/s2-repro-before.log`, script pasted below):
+
+```
+== S2's new modules:
+  MISSING src/ui/HeaderIcon.tsx
+  MISSING src/ui/ContextRing.tsx
+== ringArcs / ringLabel in src:
+  (none if blank)
+== the header still draws glass circles:
+  GlassButton call sites in screens:       13
+== the compact header has no hairline:
+  (none)
+== the context is a flat 2pt bar, not a ring:
+739:  contextBar: { width: 64, height: 2, borderRadius: 1, overflow: "hidden" },
+== react-native-svg (the dependency the ring must NOT need):
+0
+```
+
+So the capability was genuinely absent, and `react-native-svg` is genuinely not a
+dependency (`package.json`). The plan's cited preconditions were re-checked
+against the code, not trusted:
+
+- **Thin glyphs** — `Icon.tsx:64` now carries `"thin" | "light"` (S1 landed), and
+  `SymbolWeight` carries both (`expo-symbols/build/SymbolModule.types.d.ts:81`).
+- **The compact header has the slots** — `ScreenHeader`'s `compact` variant takes
+  `left`/`right`/`subtitle`/`onTitlePress`, and it is used by exactly ONE screen
+  (`grep 'variant="compact"'` → `SessionScreen.tsx:377`), so the hairline and the
+  side-cluster change cannot touch a list screen.
+- **The context fraction exists** — `session-view.ts:180`
+  `headerContext: { percent, approx } | null`, fed by `session-info.ts:261`. The
+  ring reads that same number; the screen's own `null` guard is preserved.
+- **No gesture/svg dependency needed** — `react-native-svg` absent from
+  `package.json`; the ring is `View`s, as Design 2 requires.
+
+### Drift from the Implementation (3, each reconciled here)
+
+1. **`ringHalfRotation` was not in the plan's Files list, and it is not
+   optional.** Design 2 says the ring is "two clipped half-rings rotated by the
+   fraction — plain `View`s", and asks only for `ringArcs(percent) →
+   { rightDeg, leftDeg, tone }`. That is not enough to pin the geometry: the two
+   *absolute* rotation bases (the window each half is empty at) are the actual
+   look, and leaving them as constants inside `ContextRing.tsx` would put the one
+   part that can be wrong — and that no screenshot can catch on this machine —
+   in an unimportable `.tsx`. So the pure module gained
+   `ringHalfRotation(arcs) → { right, left }` and `ringLabel(percent)`, both
+   tested in `chat-header.test.ts`. This follows §7 (computation you'd want to
+   test → pure module), it does not change the design's shape, and it spends the
+   plan's own Design-2 sentence rather than inventing a new one.
+2. **My first rotation bases were wrong, and the model caught it — not the
+   code review.** The first write used `right = 135 + rightDeg`, `left = 315 +
+   leftDeg`. Sampling all 36 000 half-degrees of the circle for the two windows
+   (`.tentacle/tmp/mobile-chrome/s2-ring-geometry.ts`, output below) showed that
+   mapping sweeping *backwards* — 0% painted the whole ring and 100% painted
+   nothing. The correct bases are `right = 315`, `left = 135`, which are exact at
+   every sample. This is exactly the class of error the plan warned about
+   ("deriving rendering behaviour by armchair reasoning"), so it was decided by a
+   measurement, and the corrected constants are pinned by a test.
+   ```
+   candidate A (135/315):  0% → 360deg painted, 100% → 0deg   WRONG
+   candidate B (315/135):  0% → 0, 25% → 90, 50% → 180, 75% → 270, 100% → 360  OK
+   ```
+3. **`ScreenHeader`'s side column went `width` → `minWidth`.** A1 puts TWO
+   targets ("…" and the ring) in the right cluster; at a fixed `width: 96` with
+   `gap: 10` the second 44 pt button overflowed the column and would have been
+   squeezed by `paddingHorizontal`. `minWidth: 96` keeps the title centred on an
+   ordinary header and lets the ring cluster take its 98 pt. Behaviour identical
+   on every screen that has one button or none.
+
+One more, small: `HeaderIcon` gained `onLongPress` and `disabled` props while it
+was being written (neither is used by S2's call sites). They are the two
+affordances a header button has and S6's hamburger/drawer work needs them; a
+prop with no caller is dead weight, but removing and re-adding them across
+slices is worse. Recorded so the reviewer can rule on it.
+
+### As-built, in order
+
+1. **Tests first (red).** `chat-header.test.ts` gained the `ringArcs` block (0,
+   49/50/51 split, 100, >100 clamp, NaN/negative, the 80 tone flip, `ringLabel`)
+   and the `ringHalfRotation` block; new `test/header-wiring.test.ts` pins the
+   wiring (bare `HeaderIcon`, default `light`/22, no `BlurView`/`shadow.glass`/
+   `borderRadius` in it, no screen keeps a glass circle except over-camera, the
+   five screens use `HeaderIcon`, the chat header draws the ring *guarded by a
+   real reading*, the ring imports no svg, the compact hairline exists and the
+   large variant has none).
+   **Red on the property, not on compile:** 1 error
+   (`SyntaxError: Export named 'ringArcs' not found` — the module genuinely had
+   no such export) then, with the export added, **5 failing assertions** with
+   readable diffs (`offenders: ["PairScreen.tsx","SessionScreen.tsx",…]`,
+   `has: false` for `SessionScreen.tsx`, `not.toMatch(/contextBar:/)`), i.e. they
+   were measuring the look, not the parse.
+2. **`src/chat-header.ts`** — `RingTone`, `RingArcs`, `ringArcs` (`:66`),
+   `ringLabel` (`:77`), `RingHalfRotation`, `ringHalfRotation` (`:107`).
+3. **`src/ui/HeaderIcon.tsx`** (new) — a 44 pt bare `Pressable` + `Icon`,
+   default `light` at 22, pressed 0.5, disabled 0.35, `label` for Pair's `Cancel`,
+   `tone="accent"` for Computers' "+". No blur, no border, no shadow, no radius.
+4. **`src/ui/ContextRing.tsx`** (new) — a 20 pt track (`sep`) + two clipped
+   half-planes, each a full-size box whose `borderTop`/`borderLeft` arc is
+   rotated by `ringHalfRotation`, the box offset half a ring inside its window so
+   its centre stays the ring's. 44 pt tap target, `accessibilityLabel` from
+   `ringLabel` (F11), tap → Session info.
+5. **`src/ui/ScreenHeader.tsx`** — compact variant closes with one
+   `hairlineWidth` line in `palette.sepChat` (large variant untouched); side
+   column `minWidth: 96` + `alignItems: "center"`.
+6. **The screens** — `SessionScreen` (`:384` back, `:398` ring, `:405` "…"),
+   `SessionsScreen`, `SettingsScreen`, `ComputersScreen` (both buttons),
+   `PairScreen` (`:175` `Cancel`) all swap their header `GlassButton`s for
+   `HeaderIcon`. `GlassButton` therefore has exactly ONE live call site,
+   `PairScreen.tsx:440` — the over-camera `Cancel`, which Design 2 keeps. (The
+   plan also reserves `GlassButton` for the FAB, but no FAB exists yet, so there
+   is no second site; the ring's `ContextRing` deliberately does not use it.)
+   `SessionScreen`'s flat 2 pt `contextBar` and its style entry are gone; the ring
+   carries `testID="session-header-context"`, so flow 25's assertion still holds
+   (and it now taps Session info).
+7. **`changelog.d/mobile-chrome.changed.md`** — the S1 bullet extended to cover
+   the header (one bullet, one file, `parseFragments` OK). The plan's Files item
+   12 says this one fragment spans S1–S6, so S2 extends it rather than adding a
+   second `changed` fragment (a second file would be a real filename collision).
+   `CHANGELOG.md` and `[Unreleased]` untouched.
+
+### Mutation checks (§9 — each applied, run, reverted; script and full output in `.tentacle/tmp/mobile-chrome/s2-mutations.{sh,out}`)
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | ring half-mark split 50 → 40 (the sweep overdraws) | 3 fail |
+| 2 | orange threshold 80 → 90 | 1 fail |
+| 3 | drop the `Number.isFinite` guard (broken transform) | 1 fail |
+| 4 | swap the two rotation bases (the wrong mapping, drift 2) | 1 fail |
+| 5 | put a `BlurView` back in `HeaderIcon` (a glass circle again) | 1 fail |
+| 6 | default weight `light` → `semibold` (the old thick glyphs) | 1 fail |
+| 7 | compact header hairline `hairlineWidth` → 0 | 1 fail |
+| 8 | the ring drawn unconditionally (no reading guard) | 1 fail |
+| 9 | `ContextRing` ignores `ringHalfRotation` (magic constants) | 1 fail |
+
+**Mutation 8 found a real vacuity, and it was fixed.** The first version of that
+assertion was `expect(SESSION_SCREEN).toMatch(/<ContextRing\b/)`, which is blind
+to whether the ring is *guarded* — mutation 8 (`headerContext === null ? null :`
+→ `true ? null :`) passed it, so the test proved nothing. Rewritten to locate the
+guard and assert the `<ContextRing` + `percent={state.view.headerContext.percent}`
+inside it (plus "no old bar"), after which mutation 8 fails as it should. Every
+row above is from the run *after* that fix; the baseline before each mutation and
+the green re-run after each revert were both `20 pass / 0 fail`, and `git diff`
+after the script names only the intended files.
+
+### Gate
+
+- `bunx tsc --noEmit` (root) — **clean**.
+- `bunx tsc -p apps/mobile --noEmit` — **clean**. (First run reported
+  `packages/agent/src/capabilities.ts(20,8): Cannot find module '@tentacle/config'`
+  — a stale `node_modules` in this worktree, not my code: the same error appears
+  on an untouched worktree, and `bun install --frozen-lockfile` in this one
+  cleared it. Nothing in `packages/` is modified.)
+- `bunx tsc -p apps/relay --noEmit` — **clean**.
+- `bun run lint` — **`Checked 1661 files. No fixes applied.`** (0 errors, 0
+  warnings; AGENTS §6 baseline is clean). The first run flagged 8
+  format/`organizeImports` errors in my own files only; `biome check --write` on
+  exactly those 11 files fixed them.
+- `bun test` (full suite) — **11978 pass, 5 skip, 0 fail** across 858 files. The 5
+  skips are the documented opt-in ones (live-k8s ×2, live-docker ×2, the
+  real-socket slow test); no non-opt-in skip.
+- `packages/protocol/schema/protocol.json` — **not regenerated**: no schema
+  changed (no `packages/protocol` file in the diff).
+
+### Not done in this slice (and why)
+
+- **The `done when`'s "flow 24 shots" are NOT captured.** The e2e build is still
+  blocked by the pre-existing `PushCore` error S1 recorded
+  (`apps/mobile/targets/live-activity/LACore/LACore.swift:23` imports `PushCore`;
+  `expo-target.config.js` declares no Swift package, and `git diff` shows I did
+  not touch `targets/`). Per AGENTS §0 this is the second slice hitting the same
+  wall, so it is not retried here: **the ring's pixels are unverified on a device
+  / simulator**. What IS verified: the geometry (numerically, and by test), the
+  sizes, the colours read from tokens, and that no screen still draws a glass
+  header circle. The visual pass is owed to Review or an e2e-capable machine, and
+  the honest state is "geometry and wiring proven, pixels not yet seen".
+- **The ring's rotation is a clockwise sweep from 12 o'clock** by construction of
+  the two windows; whether the owner prefers the remaining fraction in `sep` to
+  read as "used" vs "free" is a mockup detail I did not invent an answer to — the
+  mockup (`index.html:221` `ring(p, pct)`) draws the *used* fraction in accent
+  over a `sep` track, and that is what this paints.
+- **`Icon`'s `thin` weight is unused by S2.** A1's header glyphs are `light`; the
+  union carries `thin` from S1 for the drawer's future glyphs. No call site uses
+  it, so nothing pins it beyond S1's union test — stated rather than implied.

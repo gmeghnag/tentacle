@@ -64,8 +64,9 @@ import type { Row } from "../transcript-rows.ts";
 import { ActionSheet } from "../ui/ActionSheet.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { Composer } from "../ui/Composer.tsx";
+import { ContextRing } from "../ui/ContextRing.tsx";
 import { EmptyState } from "../ui/EmptyState.tsx";
-import { GlassButton } from "../ui/GlassButton.tsx";
+import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon, type IconName } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
@@ -380,7 +381,7 @@ export function SessionScreen({
           titleTestID="session-title"
           left={
             onBack === undefined ? undefined : (
-              <GlassButton
+              <HeaderIcon
                 palette={palette}
                 testID="session-back"
                 icon="chevron.left"
@@ -390,13 +391,25 @@ export function SessionScreen({
             )
           }
           right={
-            <GlassButton
-              palette={palette}
-              testID="session-menu"
-              icon="ellipsis"
-              accessibilityLabel="Session menu"
-              onPress={() => setMenuOpen(true)}
-            />
+            <>
+              {/* A1: the context fraction as a small ring next to "…", tap →
+                  Session info (Design 2). Absent when nothing measured one. */}
+              {state.view.headerContext === null ? null : (
+                <ContextRing
+                  palette={palette}
+                  percent={state.view.headerContext.percent}
+                  onPress={() => setInfoOpen(true)}
+                  testID="session-header-context"
+                />
+              )}
+              <HeaderIcon
+                palette={palette}
+                testID="session-menu"
+                icon="ellipsis"
+                accessibilityLabel="Session menu"
+                onPress={() => setMenuOpen(true)}
+              />
+            </>
           }
           subtitle={
             <View testID="session-header-status" style={styles.headerLines}>
@@ -420,24 +433,6 @@ export function SessionScreen({
                   </Text>
                 )}
               </View>
-              {/* Owner decision 4: a thin bar ONLY, live from the measured
-                  fill — no percentage text in the header. */}
-              {state.view.headerContext === null ? null : (
-                <View
-                  testID="session-header-context"
-                  style={[styles.contextBar, { backgroundColor: palette.sep }]}
-                >
-                  <View
-                    style={{
-                      width: `${state.view.headerContext.percent}%`,
-                      height: "100%",
-                      borderRadius: 1,
-                      backgroundColor:
-                        state.view.headerContext.percent >= 80 ? palette.orange : palette.accent,
-                    }}
-                  />
-                </View>
-              )}
             </View>
           }
         />
@@ -736,7 +731,6 @@ const styles = StyleSheet.create({
   status: { flexDirection: "row", alignItems: "center", gap: 5 },
   headerLines: { alignItems: "center", gap: 4 },
   headerModel: { flexShrink: 1 },
-  contextBar: { width: 64, height: 2, borderRadius: 1, overflow: "hidden" },
   jump: {
     position: "absolute",
     alignSelf: "center",
