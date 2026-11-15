@@ -29,6 +29,15 @@ const screens = readdirSync(join(APP, "src", "screens")).filter((f) => f.endsWit
 /** Every screen source, by name (the header buttons live in these). */
 const screenSource = (file: string) => read("src", "screens", file);
 
+/** The `<ContextRing …/>` element exactly as the chat header writes it. */
+function ringCallSite(): string {
+  const start = SESSION_SCREEN.indexOf("<ContextRing");
+  expect(start).toBeGreaterThan(-1);
+  const end = SESSION_SCREEN.indexOf("/>", start);
+  expect(end).toBeGreaterThan(start);
+  return SESSION_SCREEN.slice(start, end);
+}
+
 describe("S2 · one thin header button for the whole app (A1)", () => {
   test("`HeaderIcon` is a bare glyph: a 44 pt pressable, no blur, no shadow, no fill", () => {
     expect(HEADER_ICON).toMatch(/<Pressable\b/);
@@ -107,6 +116,28 @@ describe("S2 · the context ring (A1 + F11)", () => {
   test("the ring is tappable to Session info and says its reading (F11)", () => {
     expect(RING).toMatch(/onPress\?: \(\) => void/);
     expect(RING).toMatch(/accessibilityLabel=\{label\}/);
+  });
+
+  test("the chat header PASSES the tap through, opening Session info (F11)", () => {
+    // Declaring `onPress?` is not the feature: an unwired ring falls into the
+    // `onPress === undefined` branch and renders as a non-interactive
+    // progressbar, losing Design 2 / F11's tap target without a type error.
+    const call = ringCallSite();
+    expect(call).toMatch(/onPress=\{/);
+    expect(call).toMatch(/setInfoOpen\(true\)/);
+  });
+
+  test("the arc stays the `borderTop`+`borderLeft` half the rotation bases assume", () => {
+    // `ringHalfRotation`'s 315/135 bases place a `borderTop`+`borderLeft` arc —
+    // centred at 10:30 — so each half starts empty at 0% and sweeps exactly its
+    // own degrees. Swap a side (top+right is centred at 1:30) and neither half
+    // starts empty: the ring shows a phantom 90° at 0% and a wrong sweep
+    // everywhere. The bases are tested in chat-header.test.ts; this is the other
+    // half of that coupling, which lives in the component.
+    expect(RING).toMatch(/borderTopColor: tone/);
+    expect(RING).toMatch(/borderLeftColor: tone/);
+    expect(RING).not.toMatch(/borderRightColor/);
+    expect(RING).not.toMatch(/borderBottomColor/);
   });
 });
 

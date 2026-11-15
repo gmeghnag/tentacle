@@ -1184,6 +1184,101 @@ after the script names only the intended files.
   union carries `thin` from S1 for the drawer's future glyphs. No call site uses
   it, so nothing pins it beyond S1's union test — stated rather than implied.
 
+### Fix round 1 (slice S2)
+
+*— claude-opus-5-5, 2026-11-16 · slice S2 · fixes Review round 1 (S2)*
+
+**Findings addressed:** both MEDIUM, no HIGH raised. Tests only — no product code
+changed, which is the correct shape for both: neither finding was a bug in the
+shipped code, each was a coupling no assertion held. Scope stayed S2; `git diff`
+names one file (`apps/mobile/test/header-wiring.test.ts`, +31 lines).
+
+**Reproduced first (before any edit).** Both mutations applied to the untouched
+tree, the slice's two test files run:
+`.tentacle/tmp/mobile-chrome/f1-repro.sh` → `20 pass / 0 fail` for **both**. So
+both gaps were real, and neither "test" was red on the property it claimed.
+Script and output: `.tentacle/tmp/mobile-chrome/f1-repro.{sh,out}`.
+
+**1. MEDIUM — the ring's tap wiring was not pinned. FIXED.**
+Root cause: `header-wiring.test.ts` asserted only that `ContextRing.tsx`
+*declares* `onPress?: () => void` (a property of the component), never that the
+chat header *passes* one — and the component's own `onPress === undefined` branch
+silently renders a `progressbar` instead of a `button`, so dropping the prop at
+`SessionScreen.tsx:401` costs no type error and no test.
+- `test/header-wiring.test.ts:121-128` — new test: take the `<ContextRing …/>`
+  element the header writes and assert `onPress={` **and** `setInfoOpen(true)`
+  inside it. Asserting the *value*, not just the prop's presence, so wiring the
+  tap to the wrong setter also fails.
+- `test/header-wiring.test.ts:33-39` — `ringCallSite()` helper: slices from
+  `<ContextRing` to the following `/>` and asserts both boundaries exist, so the
+  test cannot pass by slicing an empty string (the classic source-scan vacuity).
+
+**2. MEDIUM — the arc's border sides were not pinned. FIXED.**
+Root cause: `ringHalfRotation`'s bases (315/135) are only correct for a
+`borderTop`+`borderLeft` arc (centred at 10:30). That coupling has two halves; the
+pure half is tested in `chat-header.test.ts`, the component half had no assertion,
+so `borderLeftColor → borderRightColor` moved the arc's centre to 1:30 with every
+test green — a phantom 90° at 0% and a wrong sweep everywhere.
+- `test/header-wiring.test.ts:130-142` — assert the arc reads `borderTopColor:
+  tone` **and** `borderLeftColor: tone`, and that neither `borderRightColor` nor
+  `borderBottomColor` appears in the file. The negative halves are what catch a
+  future side swap, not just a missing side. Comment names the coupling to the
+  bases so the next editor sees why the sides are not a free choice.
+
+**Drift from the Implementation: none.** Both fixes are test-only, so the Design
+sections still describe the code as built.
+
+**Red before green (§9), on the assertion, not on an import/compile error** —
+`.tentacle/tmp/mobile-chrome/fix1-red.{sh,out}`, new tests against the mutated
+buggy code, each applied → run → reverted (`RESTORED-OK`):
+
+| Mutation (buggy code) | Result |
+|---|---|
+| `<ContextRing>` loses `onPress={(…)}` | **21 pass / 1 fail** — `Expected substring or pattern: /onPress=\{/`, `Received: "<ContextRing\n palette={palette}\n …"` |
+| `borderLeftColor` → `borderRightColor` | **21 pass / 1 fail** — `Expected substring or pattern: /borderLeftColor: tone/` |
+| `borderTopColor` → `borderBottomColor` | **21 pass / 1 fail** — `Expected substring or pattern: /borderTopColor: tone/` |
+
+Green after: **22 pass / 0 fail** (65 `expect()` calls).
+
+**Mutation checks on the fixed tree** — `.tentacle/tmp/mobile-chrome/fix1-mutations.{sh,out}`,
+baseline `22 pass / 0 fail` before, every revert verified by `diff` (`REVERT-OK`):
+
+| # | Mutation | Result |
+|---|---|---|
+| A | `onPress={() => setInfoOpen(true)}` → `setInfoOpen(false)` (right prop, wrong target) | 1 fail — the passes-the-tap test |
+| B | drop `onPress=` from the call site (the finding's own) | 1 fail — the same test |
+| C | `borderLeftColor` → `borderRightColor` (the finding's own) | 1 fail — the arc test |
+| D | the arc redrawn as one full circle (`borderColor: tone`) | 1 fail — the arc test |
+| E | the whole `<ContextRing …/>` deleted (non-vacuity of the call-site slice) | 2 fails — the "draws `ContextRing`" guard test **and** the new tap test (`ringCallSite`'s own `indexOf` assertions), so it cannot pass on `""` |
+
+A and D are the ones that matter beyond the two findings: A proves the test pins
+the *destination* of the tap, not the presence of a prop; D proves the arc test
+pins the half-arc shape, not merely "a colour is set somewhere".
+
+**Fix round 2's nit (round-2 review of *S1*) carries over, still open and still
+non-blocking for S1:** nothing asserts that `RenameSheet` uses `radius.dialog`
+specifically. Named here so it is not mistaken for new debt from this round —
+this round added no `theme` assertions.
+
+**Still unverified (unchanged, third slice to hit it):** the pixels. The e2e iOS
+build is still blocked by the pre-existing `PushCore` resolution error
+(`targets/live-activity/LACore/LACore.swift:23`), `targets/` untouched by this
+branch, so flow 24's shots were not captured and the ring has never been seen on
+glass. Per AGENTS §0 this is not retried a third time. To verify: run
+`bun run e2e:mobile --ios 26 --only 24-ui-shots` on an e2e-capable machine and
+open the chat header in both appearances — 0%, ~34%, ~85% (orange) are the cases
+the geometry test names.
+
+**Gate (after the last edit, in this tree):**
+`bunx tsc --noEmit` — clean (`TSC-ROOT-OK`); `bunx tsc -p apps/mobile --noEmit` —
+clean; `bunx tsc -p apps/relay --noEmit` — clean. `bun run lint` — `Checked 1661
+files in 456ms. No fixes applied.` (0 errors, 0 warnings; AGENTS §6 baseline is
+clean). `bun test` (full suite) — **11980 pass, 5 skip, 0 fail** across 858 files
+(13 snapshots, 85024 `expect()` calls, 420 s); the 5 skips are the documented
+opt-in ones (live-k8s ×2, live-docker ×2, the real-socket slow test), no
+non-opt-in skip and no flake this run. The count is +2 against the previous
+slice's 11978, which is exactly the two new tests.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-16 · slice S2 only, fresh context. The Execution
