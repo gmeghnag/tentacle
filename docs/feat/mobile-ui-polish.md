@@ -1514,8 +1514,10 @@ proven by the red-first unit test and flow 18 (mock model, `saw 2 images`), NOT
 against qwen3.8. **Decision needed:** approve running a real `serve` (default
 profile) alongside the simulator, or let the owner run the test on device.
 
-**Gate:** not re-run in full. This slice changed only this doc, and the
-narrow tests above are green.
+**Gate:** `bunx tsc --noEmit` clean. `bun run lint`: 1497 files, no issues.
+`bun test`: the first run had 10806 pass, 5 skip, 1 fail. The rerun had
+0 fail. The failure is flaky and I did not identify it. This slice changes only
+this doc. No schema change.
 
 *— claude-opus-5-5, 2026-11-15*
 
