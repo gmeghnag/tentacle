@@ -1706,3 +1706,7 @@ Attaching a photo shows "a message carries at most 5 photos" (refused) — the o
 *— claude-opus-5-5 (orchestrator), 2026-11-15*
 
 **B8 precise repro (owner, 02:45):** tap "Add photo" → "Photo library" → the error "a message carries at most 5 photos" appears IMMEDIATELY: the photo library never opens, no photo was selected, the composer had 0 photos. So the refusal is computed BEFORE/INSTEAD OF presenting the picker (e.g. a room of 0 from a wrong count, a selectionLimit of 0 making the picker refuse, a permission/launch failure mapped to "refused", or the picker result for a non-opened library treated as over-cap). Start from the tap handler for "Photo library" (photo-source.ts / photo-input.ts / compose-controller.ts pickRoom) on iOS 18.3.1.
+
+#### Owner visual approval (2026-11-15 10:35)
+
+The owner reviewed the 25 simulator screenshots of slices 5+6 (light/dark) and approved them ("vanno bene"), overriding the Fable gate verdict REVISE (round 2). Merged by the orchestrator on that approval.
