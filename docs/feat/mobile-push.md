@@ -2381,3 +2381,248 @@ lead the link's handling of `ready`, so the push may sometimes take the hold bra
 this test red shows the race happens. When it does, the flush refuses at once, so the real code is green
 either way, but B can then survive in that run. To make B's pin deterministic, wait on
 `h.link.isConnected()` instead.
+## Execution
+
+### P9 (app: registration, push key, permission, Settings row) — DONE
+
+*— claude-sonnet-4-5 (the model id this environment reports for me), 2026-11-15*
+
+**Load-bearing check, re-run first: PASS.**
+`.tentacle/tmp/mobile-push/p9-load-bearing.ts` (gitignored scratch in THIS
+worktree — the write guard refuses the repo root), 21 checks, `LOAD-BEARING:
+PASS`. P9's own assumption is *"the app can send `device/push_register` over the
+ONE `RemoteClient` stack, its per-computer memory can live in the computer's
+existing Keychain record, and the push key can be shared with task 17's
+extension without a second Keychain seam"*. What the check proved, and the one
+item that had to be FIXED before any code:
+
+```
+PASS apps/mobile/package.json has NO expo-notifications
+PASS apps/mobile/app.json has NO expo-notifications plugin
+PASS apps/mobile/app.json has NO aps-environment entitlement
+PASS RemoteClient has NO device/push_register method today
+PASS RemoteClient's request helper `call` is PRIVATE (a new method is required)
+PASS protocol has DevicePushRegisterParamsSchema
+PASS protocol has the four register statuses
+FAIL apps/mobile/package.json has NO @noble/curves (plan said 'already a dependency')
+     — the app has @noble/hashes only
+PASS @tentacle/transport/push publicKeyOf(32 bytes) → a 32-byte X25519 public key
+PASS computer-store's storedComputerOf validates field by field (drops unknown keys)
+PASS a field written but not validated is DROPPED by store.get — ["id","name",
+     "computerKey","addresses","deviceName","pairedAt","deviceKey"]
+PASS runPairing resolves { ok: true, computerId } after the record is stored
+PASS App.tsx's Pair route has the onDone(computerId) hook
+PASS SecureKV.set takes keychainAccessible only (no access group)
+PASS expo-secure-store DOES support an accessGroup option
+PASS secure-kv names AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY
+PASS SettingsScreen has NO notifications row today
+PASS expo-notifications is NOT installed in apps/mobile
+PASS expo-notifications 58.1.9 is the SDK-58 line
+```
+
+Three findings, all reconciled as DRIFT below, none of them a stopping
+condition on its own: (1) the plan's Preconditions say `@noble/curves` is
+"already a dependency" of the app — it is **not**, but `@tentacle/transport/push`
+(an existing workspace dependency) exports `publicKeyOf`, which is the same
+X25519 the daemon seals with, so the push key needs no new dependency at all;
+(2) `RemoteClient.call` is private, so a client **method** is unavoidable (the
+slice's file list does not name `packages/client`); (3) the computer store's
+reader rebuilds the record field by field, so a "last registered" field must be
+taught to BOTH sides or it is silently dropped — proved with the real store, not
+by reading it (the `pushHash` line above).
+
+**Files.** `apps/mobile/src/push-registration.ts` (new: the pure decisions +
+the one runner), `push-key.ts` (new), `push-expo.ts` (new: the ONE
+`expo-notifications` import), `push-manager.ts` (new: the wiring seam, so
+`App.tsx`'s side is testable at all), `computer-store.ts` (`setPush` +
+`StoredComputer.push`), `secure-kv.ts` (`pushKeychain`, the shared-group
+adapter), `screens/SettingsScreen.tsx` (the row), `pairing-flow.ts`
+(`onPaired`), `App.tsx` (the manager, the link-up sync, the pairing hook, the
+Settings row), `package.json` + `app.json` + `bun.lock` (dependency, plugin,
+entitlements), and — a slice-external but load-bearing addition —
+`packages/client/src/remote-client.ts` (`pushRegister` / `pushUnregister`).
+Tests: `apps/mobile/test/push-registration.test.ts` (25),
+`push-manager.test.ts` (15), `push-key.test.ts` (7),
+`push-expo-rules.test.ts` (6), `push-wiring-guards.test.ts` (9),
+`computer-store.test.ts` (+5), `pairing-flow.test.ts` (+2),
+`pairing-e2e.test.ts` (+1, against a real daemon), `pairing-guards.test.ts` (+2,
+the plist entries), `packages/client/test/push-register.test.ts` (5).
+Changelog: `changelog.d/mobile-push-app.added.md`.
+
+**As built, in dependency order.**
+
+1. **Client seam.** `RemoteClient.pushRegister(params)` /
+   `pushUnregister()` — thin `this.call(this.peer, Method.DevicePushRegister, …)`
+   wrappers, modelled exactly on `mcpStatus` / `sessionTtl` (including their
+   `!this.up && this.channelFactory` guard). No new transport, no second session
+   path (§7), and the peer's own schemas validate both ends. RED first: all 5
+   tests failed on `client.pushRegister is not a function`, then green.
+2. **Store memory.** `StoredComputer.push` + `ComputerStore.setPush(id, value)`.
+   `setPush` rewrites the whole item (SecureStore has no partial write), refuses
+   an id the index does not list (never resurrects an orphan), and leaves an
+   unreadable item alone. A malformed `push` field is DROPPED, not a
+   `StoreUnreadable`: a stale fingerprint costs one re-registration, whereas
+   rejecting the record would cost the person a re-pair. **`add()` deliberately
+   writes no `push`**: a re-pair keeps the id but replaces the device key, so the
+   daemon knows this phone under a new device id with no registration — keeping
+   the fingerprint would mute the phone forever. Pinned by a test ("a RE-PAIR
+   forgets the fingerprint").
+3. **`push-registration.ts`.** `pushFactsHash` (length-prefixed `(token, env,
+   key)`), `planPushRegistration` (disabled → daemon-too-old → no-permission →
+   no-token → same → register), `phaseOfStatus`, `isDaemonTooOld` (the exact
+   `-32601`, never a message match), `pushPhaseText`,
+   `shouldAskNotificationPermission`, and `createPushRegistrar` (one serialised
+   attempt at a time; the fingerprint is written only for an `on` status;
+   `MethodNotFound` sets `daemon-too-old` and later syncs send nothing).
+4. **`push-key.ts`.** One X25519 pair per phone, generated on first use and
+   never rotated; `PUSH_KEY_ITEM = "tentacle.push-key"` (never
+   `tentacle.computer.*`, i.e. not the Noise device key); every read, write and
+   delete carries the **shared access group**, because `kSecAttrAccessGroup` is
+   part of an item's KEY on iOS. `PUSH_KEY_ACCESS_GROUP = "so.tentacle.app"`
+   is asserted against `app.json`'s `keychain-access-groups`.
+5. **`push-expo.ts`.** `getDevicePushTokenAsync` only (decision 19), the token
+   lowercased and re-checked against the wire's `^[0-9a-f]{64,200}$` before it
+   is ever sent, `pushEnvironmentOf(NODE_ENV)` (`sandbox` for a dev build,
+   `production` for a release), `readPermission`/`requestPermission`/
+   `readAsked`, and `readPushFacts`.
+6. **`push-manager.ts`.** A registrar per computer; `sync` (on link-up),
+   `setEnabledForAll` (Settings is ONE screen for the phone), `viewForAll` (the
+   most informative status among the computers wins, because a computer that
+   cannot deliver is the reason nothing arrives), `paired` (the once-only
+   prompt), `forget`. A VIEW never creates a registrar — it reads.
+7. **Settings row.** A `Switch` + a detail line, `testID`s
+   `notifications-toggle` / `notifications-detail`, disabled exactly when
+   flipping it would be a lie (nothing paired; no iOS permission; a daemon too
+   old). The component renders strings it is given; every branch of the copy is
+   `pushPhaseText`.
+8. **App wiring.** One module-level `PUSH` manager; the link-status watcher
+   (rebuilt per computer, `[computerId]`) calls `PUSH.sync` on `up` with
+   `CLIENTS.get(computerId)`; Pair's `onDone` calls `PUSH.paired(computerId,
+   true)` (not awaited); the Settings route passes `notifications={…}` and
+   `PUSH.setEnabledForAll`; a re-pair and a Remove both `PUSH.forget(id)`.
+9. **`app.json`.** The `expo-notifications` plugin (`mode: "development"` for a
+   dev build), `keychain-access-groups` and
+   `com.apple.developer.usernotifications.time-sensitive`. Confirmed with
+   `bunx expo config --type introspect`, not assumed:
+
+```
+entitlements: {
+  'keychain-access-groups': [ '$(AppIdentifierPrefix)so.tentacle.app' ],
+  'com.apple.developer.usernotifications.time-sensitive': true,
+  'aps-environment': 'development'
+}
+```
+
+**Drift from the Implementation (and why).**
+
+- **D1 — `packages/client/src/remote-client.ts` is a new file in the slice.**
+  The plan's P9 row lists only app files, but `RemoteClient.call` is private and
+  the app has no other way to send the two methods. The alternative (a second
+  `RpcPeer` in the app) would be exactly the second session path §7 forbids.
+- **D2 — `apps/mobile/src/push-manager.ts` is new (the plan named 3 new
+  modules, this is a 4th).** `App.tsx` imports React Native, which Bun cannot
+  parse, so any wiring left there is untestable. The manager is the seam: it
+  makes "the link-up registers", "the row is read-only" and "the toggle reaches
+  every computer" actual unit tests.
+- **D3 — the push key's Keychain surface lives in `secure-kv.ts`, not
+  `push-expo.ts`.** `pairing-guards.test.ts` pins that exactly one adapter file
+  imports `expo-secure-store` (a second file is a second place a security option
+  can be dropped). `push-expo.ts` therefore imports `pushKeychain` from
+  `secure-kv.ts` and adds no third importer.
+- **D4 — no `@noble/curves` dependency was added.** The plan's Preconditions
+  said the app already had it; it does not. It was not needed: the X25519 public
+  key comes from `@tentacle/transport/push`'s `publicKeyOf`, the same function
+  the daemon seals with, so the phone's declared public key cannot disagree with
+  what the daemon derives.
+- **D5 — the Settings row is ONE row for the phone, not one per computer.** The
+  plan says "Settings gets a Notifications row … next to task 14's lock
+  settings", and Settings is one global screen. The toggle therefore reaches
+  every paired computer (`setEnabledForAll`), and the detail line is the most
+  informative status among them. A per-computer row would have needed a new
+  Settings sub-screen, which the slice does not ask for.
+- **D6 — the permission prompt is fired from `App.tsx`'s `onDone`, and
+  `pairing-flow.ts` only gained an `onPaired` hook.** The plan says "pairing
+  success hook in `apps/mobile/src/pairing-flow.ts`". The ORDER decision (after
+  the record is stored, after `done`, never awaited, never a reason to fail a
+  pairing) is in `pairing-flow.ts` and pinned by two tests (one from a real
+  daemon: the record is already readable when the hook runs). The ACT (an OS
+  prompt) is `App.tsx`'s, because `pairing-flow.ts` must stay native-free — its
+  own guard test asserts it imports neither `react-native` nor `expo-camera`.
+- **D7 — `PushFacts` is re-read on every sync, and the environment comes from
+  `process.env.NODE_ENV`.** The plan says the env follows the build but does not
+  name the source; Metro inlines `NODE_ENV`, and the plugin's `mode` is the same
+  fact at build time, so the two are provably the same decision.
+- **D8 — a REFUSED status is not remembered.** The plan says "register when
+  `(token, env, pushKeyPublic)` differs from what was last registered"; writing
+  the fingerprint for `relay-no-push` would mean a relay that later gets its
+  APNs key is never retried. Only an `on` is remembered (F3/F4).
+
+**Mutations — the plan's P9 targets, all six RED on the assertion**
+(`sh .tentacle/tmp/mobile-push/p9-mut.sh`, one in-place edit per row, then the
+file restored and `cmp`-verified; the last two were re-pointed after the
+formatter moved the anchor — see the note below).
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| M1 | `planPushRegistration` never returns `same` | **RED 7** — incl. "the SAME fingerprint → skip `same`", "two syncs send ONE register", "concurrent syncs do not double-register", "a registration stored by an EARLIER app run is honoured" |
+| M2 | `isDaemonTooOld` always `false` | **RED 2** — "MethodNotFound → `daemon too old`, and later syncs send NOTHING", "the exact code, not a message match" |
+| M3 | `ensurePushKeypair` reads WITHOUT the shared group | **RED 3** — "a second call returns the SAME key", "every call carries the SHARED access group", "the default group is the bundle id" |
+| M4 | App's link-up handler never registers | **RED 1** — "the link-up handler syncs that computer" |
+| M5 | the runner remembers a REFUSED status too | **RED 1** — "a REFUSED status is not remembered, so the next connect asks again" |
+| M6 | `viewForAll` takes the FIRST computer's state | **RED 1** — "a computer that cannot deliver OUTRANKS one that can" |
+
+Two more, outside the script (each restored with `cmp`):
+
+| # | Mutation | Result |
+|---|---|---|
+| H1 | `onPaired` fires BEFORE the Keychain write (`pairing-e2e.test.ts`, real daemon) | **RED 1** — `paired` ran with the record still `missing` |
+| J1 | the `expo-notifications` plugin removed from `app.json` | **RED 1** — "the expo-notifications plugin is registered, and it writes `aps-environment`" |
+
+**A mutation that first SURVIVED, and what it means (honest note).** M5's first
+run applied cleanly, `bun test` reported 56 pass / 0 fail — a true survivor
+would mean the "do not remember a refusal" property is unpinned. It was not: the
+first script's `str.replace` anchor still carried the pre-`biome --write` text
+(`await deps.memory.write(...)` on one line), so the edit never landed and the
+"survivor" was the unmutated file. Re-pointed at the formatted text, it is RED
+on exactly the one test that names it (shown above). The same class of mistake
+is why M6 was also re-verified after formatting; every row above was re-run
+against the file as it now stands.
+
+**Acceptance checks the plan names, run.**
+`push-registration`: "registers once per (token, env, key) per computer" ✔
+(2 tests + M1), "a token change → re-register" ✔, "`MethodNotFound` → `daemon
+too old` with no retry loop" ✔ (+M2), "toggle-off → unregister" ✔ (also asserts
+the fingerprint is cleared, and that off-with-no-link still clears it), "the
+permission prompt only after the first pairing success (pure decision)" ✔
+(`shouldAskNotificationPermission` + the manager's once-only test). The F11/F12
+rotation cases are their own tests, and F16's copy is asserted through
+`pushPhaseText`.
+
+**Gate (this worktree, `feat/mobile-push`, uncommitted — see the branch note).**
+`bunx tsc --noEmit` → exit 0; `bunx tsc -p apps/mobile --noEmit` → exit 0;
+`bunx tsc -p apps/relay --noEmit` → exit 0. `bun run lint` → `Checked 1397
+files … No fixes applied.` (0 errors, 0 warnings — the §6 baseline).
+`bun test` (full) → **10197 pass, 4 skip, 0 fail**, 10201 tests / 733 files,
+407.65 s (`EXIT=0`). The four skips are the documented opt-ins (live-k8s,
+live-docker, the real-socket keepalive) plus `session-hop.docker.test.ts`'s,
+which is pre-existing on `main` and untouched here. No schema change:
+`packages/protocol/schema/protocol.json` is untouched — P2 already exported both
+methods and P9 adds nothing to the wire, so no `protocol.d/` note and no
+`PROTOCOL_VERSION` move.
+
+**Unverified (one line each, and how to check).** (a) A real device build:
+`aps-environment`, the shared keychain group and the extension's read of
+`tentacle.push-key` can only be proved by an Xcode build with the owner's
+profiles (**D2a**), which no executor may do — P10's Maestro flow plus the
+real-iPhone checklist. (b) That `getDevicePushTokenAsync`'s `data` is the raw
+lowercase-hex token in THIS SDK build: P0(d) read it out of the package's own
+Swift (`data.map { String(format: "%02hhx", $0) }`), and `readPushFacts`
+re-checks the SHAPE and reports "no token" rather than send a bad one, but the
+value itself needs a device. (c) `pushKeychain`'s `accessGroup` is accepted by
+`expo-secure-store` at runtime: its Swift (`SecureStoreModule.swift:201-203`)
+writes `kSecAttrAccessGroup`, and `bunx expo config --type introspect` shows the
+entitlement, but only a device build proves the OS accepts the pair.
+
+**Branch note.** Worked on `feat/mobile-push` (this worktree) and never
+committed, per the task prompt's "never git commit" rule; `git status` lists the
+14 modified and 12 new files. The orchestrator decides where they land.

@@ -37,6 +37,8 @@ import {
   type ClientInfo,
   type CompactResult,
   type DaemonDiscovery,
+  type DevicePushRegisterParams,
+  type DevicePushRegisterResult,
   DomainErrorCode,
   type HistoryCut,
   type HooksTrustParams,
@@ -956,6 +958,38 @@ export class RemoteClient {
       Method.SessionSkills,
       sessionId !== undefined ? { sessionId } : this.carried,
     ).then((result) => result as SessionSkillsResult);
+  }
+
+  /**
+   * Register this phone for push (`device/push_register`, docs/feat/mobile-push.md
+   * Design 7): the raw APNs token, the environment the build is signed for, and
+   * this phone's per-device push key. Resolves the daemon's status, so Settings
+   * can say WHY notifications will not arrive (`off` / `relay-off` /
+   * `relay-no-push`). Not re-sent after a drop (a fresh registration is the
+   * caller's call: it re-registers on every connect anyway). An older daemon
+   * rejects with `MethodNotFound` — the caller shows "daemon too old" and never
+   * loops on it. Schema-validated by the peer.
+   */
+  pushRegister(params: DevicePushRegisterParams): Promise<DevicePushRegisterResult> {
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(this.peer, Method.DevicePushRegister, params).then(
+      (result) => result as DevicePushRegisterResult,
+    );
+  }
+
+  /**
+   * Stop every notification from this computer to this phone
+   * (`device/push_unregister`): the daemon deletes THIS device's registration,
+   * so a later ask reaches no banner here. Not re-sent after a drop (the phone
+   * unregisters again on the next toggle, or on the next connect's own check).
+   */
+  pushUnregister(): Promise<void> {
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(this.peer, Method.DevicePushUnregister, {}).then(() => {});
   }
 
   /**
