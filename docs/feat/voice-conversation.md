@@ -425,6 +425,13 @@ Red first (§9); each is shown failing on a stub, then green, and the named muta
    - **iPhone B:** **the Send button becomes the voice-mode button when the field is empty** (no new button; typing turns it back into Send); the state shows in a full-width voice bar in place of the composer.
    - *Recommendation:* **Mac B** (no new key to learn, and the state sits where the eyes already are; Ctrl+G stays free) and **iPhone B** (the familiar pattern of voice assistants; no crowding of a 390-pt composer that already holds photo + field + mic + send).
 
+#### Owner answers (2026-11-15, batch 4 — on the mockups redrawn in the mobile-chrome look)
+
+- Q8 Mac: **B** confirmed (`/voice` or Ctrl+R twice; the input row becomes the voice bar).
+- Q8 iPhone: **A** (changed from B) — a separate voice button between the field and Send, with a status capsule (listening / thinking / speaking / paused).
+- Settings › Voice: **E2 bands** (same as the mobile-chrome grouped screens).
+- Lock screen while voice mode runs in the background: **approved as mocked** ("molto bene, mi piace").
+
 ## Execution
 
 ### C2 — shared core (§3 modules) · *— deepseek-v4.1-flash (tentacle), 2026-11-15*
