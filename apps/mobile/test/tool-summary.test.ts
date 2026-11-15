@@ -14,7 +14,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { toolMeta, toolSummary } from "../src/tool-summary.ts";
+import { subAgentLine, toolMeta, toolSummary } from "../src/tool-summary.ts";
 import { type State, type ToolRow, apply, initialState } from "../src/transcript.ts";
 
 type TuiToolTitle = (tool: {
@@ -143,5 +143,44 @@ describe("toolMeta: the row's status icon tone and trailing text (Slice 3 ToolRo
   test("denied says so; nothing known says nothing (no invented exit code)", () => {
     expect(toolMeta({ status: "denied" }).trailing).toBe("denied");
     expect(toolMeta({ status: "running" }).trailing).toBe("");
+  });
+});
+
+describe("the Agent card's progress line (docs/fix/mobile-chat-glitches.md item 10, Owner Q2: TUI parity)", () => {
+  const base = { activities: [], toolUses: 0, tokens: 0, done: false } as const;
+
+  test("running: `<last activity> · <N> tool uses` (tokens hidden)", () => {
+    expect(
+      subAgentLine({
+        ...base,
+        activities: ["agent_notify", "shell: sleep 10"],
+        toolUses: 3,
+        tokens: 940,
+      }),
+    ).toBe("shell: sleep 10 · 3 tool uses");
+    expect(subAgentLine({ ...base, activities: ["Read a.ts"], toolUses: 1 })).toBe(
+      "Read a.ts · 1 tool use",
+    );
+    expect(subAgentLine(base)).toBe("0 tool uses");
+  });
+
+  test("done: `Done · <N> tool uses`; moved: `Moved to background · sa-N`", () => {
+    expect(subAgentLine({ ...base, toolUses: 2, done: true, stopReason: "end_turn" })).toBe(
+      "Done · 2 tool uses",
+    );
+    expect(
+      subAgentLine({ ...base, toolUses: 1, done: true, stopReason: "background", movedTo: "sa-3" }),
+    ).toBe("Moved to background · sa-3");
+  });
+
+  test("no sub-agent → no line", () => {
+    expect(subAgentLine(undefined)).toBeNull();
+  });
+
+  test("the spinner stops at `done` (the call's own result may come a moment later)", () => {
+    expect(toolMeta({ status: "running", sub: { ...base, done: false } }).tone).toBe("running");
+    expect(toolMeta({ status: "running", sub: { ...base, done: true } }).tone).toBe("ok");
+    // A failed call still says so.
+    expect(toolMeta({ status: "error", sub: { ...base, done: true } }).tone).toBe("error");
   });
 });

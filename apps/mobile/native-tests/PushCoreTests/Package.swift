@@ -16,9 +16,13 @@ let package = Package(
     platforms: [.macOS(.v14)],
     targets: [
         .target(name: "PushCore"),
+        // Task 18's widget logic, in the same package for the same reason: it is
+        // UIKit-free, so `swift test` runs it on macOS against the SAME vectors
+        // the TypeScript spec asserts (one spec, two implementations).
+        .target(name: "LACore", dependencies: ["PushCore"]),
         .testTarget(
             name: "PushCoreTests",
-            dependencies: ["PushCore"],
+            dependencies: ["PushCore", "LACore"],
             path: "Tests/PushCoreTests"
         ),
     ]

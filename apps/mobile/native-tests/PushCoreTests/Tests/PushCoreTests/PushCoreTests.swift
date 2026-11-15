@@ -1,4 +1,6 @@
 import Foundation
+import LACore
+import PushCore
 import XCTest
 @testable import PushCore
 
@@ -32,6 +34,10 @@ final class PushCoreTests: XCTestCase {
             shared = repoRoot.appendingPathComponent("packages/transport/test/vectors/push-v1.json")
         case "push-render-v1":
             shared = repoRoot.appendingPathComponent("apps/mobile/test/fixtures/push-render-v1.json")
+        case "la-v1":
+            shared = repoRoot.appendingPathComponent("packages/transport/test/vectors/la-v1.json")
+        case "la-render-v1":
+            shared = repoRoot.appendingPathComponent("apps/mobile/test/fixtures/la-render-v1.json")
         default:
             throw XCTSkip("no shared vector file named \(name)")
         }
@@ -164,7 +170,7 @@ final class PushCoreTests: XCTestCase {
             let peerJSON = try XCTUnwrap(testCase["peer"] as? [String: Any])
             let peer = RenderPeer(computerName: try XCTUnwrap(peerJSON["computerName"] as? String))
             let expected = try XCTUnwrap(testCase["expected"] as? [String: Any], name)
-            let rendered = render(message, peer: peer)
+            let rendered = renderMessage(message, peer: peer)
             XCTAssertEqual(rendered.title, expected["title"] as? String, "\(name).title")
             XCTAssertEqual(rendered.subtitle, expected["subtitle"] as? String, "\(name).subtitle")
             XCTAssertEqual(rendered.body, expected["body"] as? String, "\(name).body")
@@ -361,5 +367,126 @@ final class PushCoreTests: XCTestCase {
         }
         let data = try JSONSerialization.data(withJSONObject: ["v": 1, "peers": peers, "keys": keys])
         return String(decoding: data, as: UTF8.self)
+    }
+
+    // MARK: - Live Activities (task 18, L10)
+
+    /// Every `la-v1` vector opens with the device key, under the ACTIVITY's own
+    /// slot — and NOT under another slot (F7).
+    ///
+    /// Mutation: drop the slot from the aad → the positive still passes and the
+    /// negative stops throwing, so the F7 test is the one that catches it.
+    func testEveryActivityVectorOpensUnderItsOwnSlot() throws {
+        let vectors = try vectorJSON("la-v1")
+        let computer = try XCTUnwrap(vectors["computer"] as? [String: Any])
+        let device = try XCTUnwrap(vectors["device"] as? [String: Any])
+        let kid = try XCTUnwrap(vectors["kid"] as? String)
+        let slot = try XCTUnwrap(vectors["slot"] as? String)
+        let senderPublicKey = bytes(hex: try XCTUnwrap(computer["pk"] as? String))
+        let recipientSecret = bytes(hex: try XCTUnwrap(device["sk"] as? String))
+        let cases = try XCTUnwrap(vectors["vectors"] as? [String: [String: Any]])
+        for (name, vector) in cases {
+            // The vectors carry HEX (as `push-v1` does); the wire carries base64url,
+            // so the vector is re-encoded here — the field's own encoding is
+            // asserted by `la-render`/`push-seal.test.ts`, and what this test is
+            // about is that the CRYPTO opens.
+            let state = TentacleActivityContentState(
+                e: base64UrlEncode(bytes(hex: try XCTUnwrap(vector["enc"] as? String))),
+                c: base64UrlEncode(bytes(hex: try XCTUnwrap(vector["ct"] as? String)))
+            )
+            let attributes = TentacleActivityAttributes(k: kid, slot: slot)
+            let plaintext = try openActivityState(
+                contentState: state, attributes: attributes,
+                recipientPrivateKey: recipientSecret, senderPublicKey: senderPublicKey
+            )
+            // The padded framing: `PushCore.unpad` is the same rule the daemon uses.
+            let body = try XCTUnwrap(unpad(plaintext))
+            let expected = try XCTUnwrap(vector["plaintext_json"] as? String)
+            XCTAssertEqual(String(decoding: body, as: UTF8.self), expected, "vector \(name)")
+        }
+    }
+
+    /// F7: the same bytes inside ANOTHER activity do not open.
+    func testAnActivityStateCannotBeMovedToAnotherSlot() throws {
+        let vectors = try vectorJSON("la-v1")
+        let computer = try XCTUnwrap(vectors["computer"] as? [String: Any])
+        let device = try XCTUnwrap(vectors["device"] as? [String: Any])
+        let vector = try XCTUnwrap((vectors["vectors"] as? [String: [String: Any]])?["running-512"])
+        let state = TentacleActivityContentState(
+            e: base64UrlEncode(bytes(hex: try XCTUnwrap(vector["enc"] as? String))),
+            c: base64UrlEncode(bytes(hex: try XCTUnwrap(vector["ct"] as? String)))
+        )
+        let moved = TentacleActivityAttributes(
+            k: try XCTUnwrap(vectors["kid"] as? String), slot: "ffeeddccbbaa998877665544"
+        )
+        XCTAssertThrowsError(try openActivityState(
+            contentState: state, attributes: moved,
+            recipientPrivateKey: bytes(hex: try XCTUnwrap(device["sk"] as? String)),
+            senderPublicKey: bytes(hex: try XCTUnwrap(computer["pk"] as? String))
+        ))
+    }
+
+    /// A forged or unpinned sender is refused (Auth mode checks the static key).
+    func testAnActivityFromAnotherComputerDoesNotOpen() throws {
+        let vectors = try vectorJSON("la-v1")
+        let device = try XCTUnwrap(vectors["device"] as? [String: Any])
+        let vector = try XCTUnwrap((vectors["vectors"] as? [String: [String: Any]])?["running-512"])
+        let state = TentacleActivityContentState(
+            e: base64UrlEncode(bytes(hex: try XCTUnwrap(vector["enc"] as? String))),
+            c: base64UrlEncode(bytes(hex: try XCTUnwrap(vector["ct"] as? String)))
+        )
+        // Any other 32-byte key: the kid check refuses it first.
+        let other = Data(repeating: 0x42, count: 32)
+        XCTAssertThrowsError(try openActivityState(
+            contentState: state,
+            attributes: TentacleActivityAttributes(k: "tzHqlSe8ME5A", slot: "00112233445566778899aabb"),
+            recipientPrivateKey: bytes(hex: try XCTUnwrap(device["sk"] as? String)),
+            senderPublicKey: other
+        ))
+    }
+
+    /// The render spec: EVERY `la-render-v1` vector's expected view-model is what
+    /// `LACore.renderActivity` produces — the same file `la-render.test.ts` asserts,
+    /// so the two implementations cannot drift (decision 20).
+    ///
+    /// Mutation: map `allow_always` to Approve → the `asking-allow-always` vector's
+    /// buttons differ and this fails.
+    func testEveryRenderVectorMatchesTheSwiftSpec() throws {
+        let vectors = try vectorJSON("la-render-v1")
+        let cases = try XCTUnwrap(vectors["cases"] as? [[String: Any]])
+        XCTAssertGreaterThanOrEqual(cases.count, 9)
+        for entry in cases {
+            let name = try XCTUnwrap(entry["name"] as? String)
+            let content = try XCTUnwrap(entry["content"] as? [String: Any])
+            let expected = try XCTUnwrap(entry["expect"] as? [String: Any])
+            let json = try JSONSerialization.data(withJSONObject: content)
+            let view = renderActivity(json: json)
+
+            XCTAssertEqual(view.placeholder, expected["placeholder"] as? Bool, "placeholder: \(name)")
+            XCTAssertEqual(view.text, expected["text"] as? String, "text: \(name)")
+            XCTAssertEqual(view.slot, expected["slot"] as? String, "slot: \(name)")
+            XCTAssertEqual(view.project, expected["project"] as? String, "project: \(name)")
+            XCTAssertEqual(view.phase, expected["phase"] as? String, "phase: \(name)")
+            XCTAssertEqual(view.tool, expected["tool"] as? String, "tool: \(name)")
+            XCTAssertEqual(view.title, expected["title"] as? String, "title: \(name)")
+            XCTAssertEqual(view.preview, expected["preview"] as? String, "preview: \(name)")
+            XCTAssertEqual(view.error, expected["error"] as? String, "error: \(name)")
+            XCTAssertEqual(
+                view.privateFields, expected["privateFields"] as? [String], "privateFields: \(name)"
+            )
+            let buttonEntries: [[String: String]] = (expected["buttons"] as? [[String: String]]) ?? []
+            var expectedButtons: [LaButton] = []
+            for entry in buttonEntries {
+                if let action = entry["action"], let optionId = entry["optionId"] {
+                    expectedButtons.append(LaButton(action: action, optionId: optionId))
+                }
+            }
+            XCTAssertEqual(view.buttons, expectedButtons, "buttons: \(name)")
+            if let startedAt = expected["startedAt"] as? NSNumber {
+                XCTAssertEqual(view.startedAt, startedAt.int64Value, "startedAt: \(name)")
+            } else {
+                XCTAssertNil(view.startedAt, "startedAt: \(name)")
+            }
+        }
     }
 }

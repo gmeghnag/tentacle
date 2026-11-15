@@ -14,6 +14,14 @@ import {
 } from "./daemon.ts";
 import { DevicePairParamsSchema, DevicePairResultSchema } from "./device.ts";
 import { HooksTrustParamsSchema, HooksTrustResultSchema } from "./hooks.ts";
+import {
+  DeviceLiveActivityEndedParamsSchema,
+  DeviceLiveActivityEndedResultSchema,
+  DeviceLiveActivityRegisterParamsSchema,
+  DeviceLiveActivityRegisterResultSchema,
+  DeviceLiveActivityTokenParamsSchema,
+  DeviceLiveActivityTokenResultSchema,
+} from "./live-activity.ts";
 import { McpStatusParamsSchema, McpStatusResultSchema } from "./mcp.ts";
 import {
   CancelRequestParamsSchema,
@@ -162,6 +170,25 @@ export const Method = {
   DevicePushRegister: "device/push_register",
   /** Withdraw that registration (the app's Notifications toggle off). */
   DevicePushUnregister: "device/push_unregister",
+  /**
+   * A paired device registers where to START Live Activities: its APNs
+   * push-to-start token, its environment and whether the person wants them
+   * (docs/feat/mobile-live-activity.md Design 4). Device principal only; the
+   * result says why an activity will or will not appear (`on`, `off`,
+   * `relay-off`, `relay-no-la`, `unsupported`).
+   */
+  DeviceLiveActivityRegister: "device/live_activity_register",
+  /**
+   * One activity's UPDATE token, keyed on the daemon-chosen `slot`. A slot this
+   * daemon never issued is `known:false`, never an error (F25) — the slot table
+   * is in memory only (Owner Q8).
+   */
+  DeviceLiveActivityToken: "device/live_activity_token",
+  /**
+   * The app reports an activity's end (`dismissed` / `ended` / `stale`) so it is
+   * never restarted for that turn, and so the daemon can forget the slot (F17).
+   */
+  DeviceLiveActivityEnded: "device/live_activity_ended",
 } as const;
 export type MethodName = (typeof Method)[keyof typeof Method];
 
@@ -257,6 +284,18 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.DevicePushUnregister]: {
     params: DevicePushUnregisterParamsSchema,
     result: DevicePushUnregisterResultSchema,
+  },
+  [Method.DeviceLiveActivityRegister]: {
+    params: DeviceLiveActivityRegisterParamsSchema,
+    result: DeviceLiveActivityRegisterResultSchema,
+  },
+  [Method.DeviceLiveActivityToken]: {
+    params: DeviceLiveActivityTokenParamsSchema,
+    result: DeviceLiveActivityTokenResultSchema,
+  },
+  [Method.DeviceLiveActivityEnded]: {
+    params: DeviceLiveActivityEndedParamsSchema,
+    result: DeviceLiveActivityEndedResultSchema,
   },
 };
 

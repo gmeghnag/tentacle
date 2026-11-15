@@ -28,6 +28,7 @@ import {
   returnKeyAction,
 } from "./composer.ts";
 import type { OutboxDriver } from "./outbox-driver.ts";
+import { untilAccepted } from "./outbox-session.ts";
 import type { OutboxStore } from "./outbox-store.ts";
 import type { OutboxItem } from "./outbox.ts";
 import {
@@ -67,7 +68,12 @@ export interface SendableHandle extends SessionHandle {
   send(
     prompt: string,
     signal?: AbortSignal,
-    opts?: { readonly turnId?: string; readonly attachments?: readonly AttachmentRef[] },
+    opts?: {
+      readonly turnId?: string;
+      readonly attachments?: readonly AttachmentRef[];
+      /** The daemon's ack (`RemoteSession.send`): it holds the turn's key. */
+      readonly onAccepted?: () => void;
+    },
   ): AsyncIterable<SessionEvent>;
   /**
    * The session's own-vs-foreign turn test (`RemoteSession.autoAcceptsTurn`, the
@@ -123,6 +129,13 @@ export interface SessionScreenState {
   readonly info: SessionInfoState | null;
   /** Whether the rename field is open (Owner decision 5: tap the title). */
   readonly renaming: RenameState | null;
+  /**
+   * How many presses SENT the field: a Send, Return, queued steer or Send later
+   * that cleared a non-empty field (never Stop, a blank Return, or a second tap
+   * that found it empty, F4). The screen dismisses the keyboard and remounts the
+   * field on each change (docs/fix/mobile-chat-glitches.md, items 5/6).
+   */
+  readonly sends: number;
 }
 
 /**
@@ -284,6 +297,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   let attaching = false;
   let transcript: State = initialState;
   let draft = "";
+  /** Presses that sent the field (`SessionScreenState.sends`). */
+  let sends = 0;
   let notice: string | null = null;
   let thumbnails: ThumbnailState = initialThumbnails;
   let handle: SendableHandle | null = null;
@@ -562,6 +577,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       compose: composeView().bar,
       info: info === null ? null : info.state(),
       renaming,
+      sends,
     };
   }
 
@@ -724,52 +740,61 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
    * phone's OWN turn — 12c's fold, not a drained stream: the compose half hands its
    * turn here (`compose-controller.ts`'s `prompt`), and `turn-running`/the answers
    * appear because this is where the events are applied.
+   *
+   * RESOLVES AT THE DAEMON'S ACK (`untilAccepted`), while the turn keeps folding:
+   * the caller settles the outbox item then, not at the turn's end (bug 2 of
+   * docs/fix/mobile-chat-glitches.md — a "Sending…" row for the whole turn).
+   * Rejects with the refusal before the ack (a foreign turn, a busy door, a dead
+   * link), so the caller gives the person's words back (F7); or with
+   * `SessionNotOpenError("link")` if the stream ended unanswered (the item waits
+   * with its key). Once accepted, a loss is the transcript's to say: restoring
+   * the text would send the same words twice.
    */
-  async function promptWithRefs(
+  function promptWithRefs(
     text: string,
     turnId: string,
     refs: readonly AttachmentRef[],
   ): Promise<void> {
     const session = handle;
     if (session === null) {
-      return;
+      return Promise.resolve();
     }
     const control = new AbortController();
     ownControl = control;
     notice = null;
     emit();
-    let streamed = false;
-    let failure: unknown;
-    const events = (async function* guarded(): AsyncIterable<SessionEvent> {
-      try {
-        for await (const event of session.send(text, control.signal, {
-          turnId,
-          attachments: refs,
-        })) {
-          streamed = true;
-          yield event;
-        }
-      } catch (error) {
-        failure = error;
-        throw error;
+    const run = untilAccepted(
+      (onAccepted) => session.send(text, control.signal, { turnId, attachments: refs, onAccepted }),
+      // Folded as LOST by the feed on a throw; what the CALLER does about it is
+      // `accepted`'s rejection.
+      (events, accepted) => feed.ownTurn(turnId, events, { text, attachments: refs }, accepted),
+    );
+    void run.done.then(() => {
+      if (ownControl === control) {
+        ownControl = null;
       }
-    })();
-    await feed.ownTurn(turnId, events, { text, attachments: refs }).catch(() => {
-      // Folded as LOST by the feed; what the CALLER does about it is decided below.
+      emit();
     });
-    ownControl = null;
-    emit();
-    // Nothing streamed: the daemon refused this prompt before its ack (a foreign
-    // turn, a busy door, a dead link), so the caller must give the person's words
-    // back — this is the seam 12c's `send` reads and the compose half relies on
-    // (F7). Once a turn DID stream, its loss is the transcript's to say: restoring
-    // the text would send the same words twice.
-    if (failure !== undefined && !streamed) {
-      throw failure;
+    return run.accepted;
+  }
+
+  /**
+   * A press, counted in `sends` when it SENT the field. Every send path clears
+   * the field in the same synchronous step that reads it (F4: `compose.press`,
+   * 12c's `send`), so "non-empty before, empty after" is exactly "this press
+   * sent it" — Stop and a blank Return leave the field as it was, and a second
+   * tap in the same frame finds it already empty.
+   */
+  function press(): void {
+    const before = draft;
+    act();
+    if (before.trim() !== "" && draft === "") {
+      sends += 1;
+      emit();
     }
   }
 
-  function press(): void {
+  function act(): void {
     const action = view().composer.action;
     if (action.kind === "send") {
       // With the compose half wired, the ONE tap decides between the wire (no

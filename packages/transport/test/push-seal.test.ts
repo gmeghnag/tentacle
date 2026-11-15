@@ -31,24 +31,33 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  LA_INFO,
+  LA_PAD_BUCKETS,
+  LE_LENGTH_BYTES,
   PUSH_AEAD_TAG_BYTES,
   PUSH_INFO,
   PUSH_KID_PREFIX,
   PUSH_PAD_BUCKETS,
   type PushRng,
   PushSealError,
+  activityPaddedLength,
   hpkeAuthOpen,
   hpkeAuthSeal,
+  openActivity,
   openPush,
   publicKeyOf,
   pushKeyId,
   pushPaddedLength,
+  sealActivity,
   sealPush,
 } from "../src/push-seal.ts";
+import vectorsLa from "./vectors/la-v1.json";
 import vectors from "./vectors/push-v1.json";
 
 const bytes = (hex: string): Uint8Array => Uint8Array.from(Buffer.from(hex, "hex"));
 const hex = (b: Uint8Array): string => Buffer.from(b).toString("hex");
+/** The same, under a name the Live Activity block can use without shadowing `bytes`. */
+const hexOf = hex;
 const utf8 = (text: string): Uint8Array => new TextEncoder().encode(text);
 const b64url = (text: string): Uint8Array => Uint8Array.from(Buffer.from(text, "base64url"));
 
@@ -451,6 +460,208 @@ describe("wrong-size keys are caller bugs and are thrown", () => {
     const lowOrder = new Uint8Array(32);
     expect(() =>
       sealPush(utf8("x"), bytes(t.computer.sk), lowOrder, fixedRng(bytes(t.ephemeral.sk))),
+    ).toThrow(PushSealError);
+  });
+});
+
+/**
+ * Live Activity content-state (docs/feat/mobile-live-activity.md Design 2, L1).
+ *
+ * Task 16's HPKE Auth suite and keys (sender = the computer's static key,
+ * recipient = the device push key) with **domain separation** and a **binding to
+ * the activity slot**:
+ *  - `info` = "tentacle-la/1", so a push notification's envelope can never be
+ *    replayed as an activity's (and vice versa);
+ *  - `aad` = `kid ‖ slot`, so a state sealed for activity A fails to open inside
+ *    activity B — a relay cannot move one session's state into another's
+ *    activity (F7).
+ *
+ * The oracle is `vectors/la-v1.json`, produced by an INDEPENDENT Python
+ * implementation (cryptography: X25519 + HKDF-SHA256 + ChaCha20-Poly1305), not
+ * by the code under test. Task 18's widget `LACore` reads the same file (L10).
+ *
+ * Mutations this suite names (each was run; AGENTS §9):
+ *  - drop `slot` from the `aad` → the wrong-slot test stops throwing;
+ *  - use `PUSH_INFO` instead of `LA_INFO` → both "not a push" tests fail;
+ *  - add 2048 to the ladder → the bucket test fails;
+ *  - skip the key-id check in `openActivity` → the "another computer" test
+ *    stops throwing.
+ */
+describe("Live Activity content-state (sealActivity / openActivity)", () => {
+  const la = vectorsLa;
+  const laBytes = (h: string): Uint8Array => Uint8Array.from(Buffer.from(h, "hex"));
+  /** A vector's plaintext is the JSON TEXT, not hex (the padding is applied by `sealActivity`). */
+  const laPadded = (json: string): Uint8Array => new TextEncoder().encode(json);
+  const laComputerSk = laBytes(la.computer.sk);
+  const laDeviceSk = laBytes(la.device.sk);
+  const laEphemeralSk = laBytes(la.ephemeral.sk);
+
+  test("the vector file is an independent oracle, on the SAME kid as pushes", () => {
+    expect(la.info).toBe("tentacle-la/1");
+    expect(la.kid).toBe(pushKeyId(laBytes(la.computer.pk)));
+    expect(la.kid_prefix).toBe(PUSH_KID_PREFIX);
+    expect(laBytes(la.computer.pk)).toEqual(publicKeyOf(laComputerSk));
+    expect(laBytes(la.device.pk)).toEqual(publicKeyOf(laDeviceSk));
+    // The Python half's own arithmetic: aad is the kid ‖ slot it sealed under.
+    const v = la.vectors["running-512"];
+    expect(v.aad).toBe(Buffer.from(`${la.kid}${la.slot}`, "utf8").toString("hex"));
+    expect(v.info).toBe(la.info);
+    expect(LA_INFO).not.toBe(PUSH_INFO);
+  });
+
+  for (const [name, v] of Object.entries(la.vectors)) {
+    test(`${name}: enc/ct match the oracle byte for byte, and it opens back`, () => {
+      const sealed = sealActivity(
+        new TextEncoder().encode(v.plaintext_json),
+        laComputerSk,
+        laBytes(la.device.pk),
+        la.slot,
+        fixedRng(laEphemeralSk),
+      );
+      expect(hexOf(sealed.enc)).toBe(v.enc);
+      expect(hexOf(sealed.ciphertext)).toBe(v.ct);
+      expect(sealed.keyId).toBe(la.kid);
+
+      const opened = openActivity(sealed, laDeviceSk, laBytes(la.computer.pk), la.slot);
+      expect(new TextDecoder().decode(opened)).toBe(v.plaintext_json);
+    });
+  }
+
+  test("the plaintext buckets are the wire's: 512 and 1024, never 2048", () => {
+    expect(LA_PAD_BUCKETS).toEqual([512, 1024]);
+    expect(activityPaddedLength(0)).toBe(512);
+    expect(activityPaddedLength(510)).toBe(512);
+    expect(activityPaddedLength(511)).toBe(1024);
+    // 1022 is the largest plaintext that fits (1024 − the u16 prefix).
+    expect(activityPaddedLength(1022)).toBe(1024);
+    expect(activityPaddedLength(1023)).toBeUndefined();
+    expect(() =>
+      sealActivity(
+        new Uint8Array(1024),
+        laComputerSk,
+        laBytes(la.device.pk),
+        la.slot,
+        fixedRng(laEphemeralSk),
+      ),
+    ).toThrow(PushSealError);
+  });
+
+  test("the worst-case content at every cap fits 1024 (with the clear fields inside 4 KB)", () => {
+    // `asking-worst-1024` IS the worst case: every field at its cap, 4-byte chars.
+    const v = la.vectors["asking-worst-1024"];
+    expect(v.bucket).toBe(1024);
+    expect(v.plaintext_json.length).toBeLessThanOrEqual(1022);
+    // The APNs payload on the wire: the clear ContentState + the attributes +
+    // Apple's own envelope, all inside APNs's 4096-byte limit.
+    const wire = {
+      aps: {
+        timestamp: 1731000000,
+        event: "update",
+        "content-state": {
+          v: 1,
+          e: Buffer.from(v.enc, "hex").toString("base64url"),
+          c: Buffer.from(v.ct, "hex").toString("base64url"),
+        },
+        "stale-date": 1731000900,
+        "dismissal-date": 1731001200,
+      },
+    };
+    expect(Buffer.byteLength(JSON.stringify(wire))).toBeLessThanOrEqual(4096);
+  });
+
+  test("F7: a state moved into another activity does not open (the aad binds the slot)", () => {
+    const v = la.vectors["running-512"];
+    const sealed = sealActivity(
+      laPadded(v.plaintext_json),
+      laComputerSk,
+      laBytes(la.device.pk),
+      la.slot,
+      fixedRng(laEphemeralSk),
+    );
+    let kind: string | undefined;
+    try {
+      openActivity(sealed, laDeviceSk, laBytes(la.computer.pk), "ffeeddccbbaa998877665544");
+    } catch (error) {
+      kind = (error as PushSealError).kind;
+    }
+    // No half-open state: the AEAD tag fails, so nothing is returned and no
+    // content leaks before the mismatch is noticed.
+    expect(kind).toBe("bad-tag");
+  });
+
+  test("domain separation: a push does not open as an activity, nor an activity as a push", () => {
+    const v = la.vectors["running-512"];
+    const push = sealPush(
+      laPadded(v.plaintext_json),
+      laComputerSk,
+      laBytes(la.device.pk),
+      fixedRng(laEphemeralSk),
+    );
+    // Same keys, same kid, same plaintext — only `info` and the `aad` differ.
+    expect(push.keyId).toBe(la.kid);
+    expect(() => openActivity(push, laDeviceSk, laBytes(la.computer.pk), la.slot)).toThrow(
+      PushSealError,
+    );
+
+    const sealed = sealActivity(
+      laPadded(v.plaintext_json),
+      laComputerSk,
+      laBytes(la.device.pk),
+      la.slot,
+      fixedRng(laEphemeralSk),
+    );
+    expect(() => openPush(sealed, laDeviceSk, laBytes(la.computer.pk))).toThrow(PushSealError);
+  });
+
+  test("F6: a forged state does not open — the sender's static key is authenticated", () => {
+    const v = la.vectors["running-512"];
+    const sealed = sealActivity(
+      laPadded(v.plaintext_json),
+      laComputerSk,
+      laBytes(la.device.pk),
+      la.slot,
+      fixedRng(laEphemeralSk),
+    );
+    // Any other 32-byte static key: AuthDecap's DH(skR, pkS) differs, so the AEAD fails.
+    expect(() => openActivity(sealed, laDeviceSk, publicKeyOf(laDeviceSk), la.slot)).toThrow(
+      PushSealError,
+    );
+    // The key id check comes FIRST, so a foreign kid is refused before decryption.
+    expect(sealed.keyId).toBe(pushKeyId(publicKeyOf(laComputerSk)));
+  });
+
+  test("the kid guard is the FIRST line: a mislabelled envelope is refused before decryption", () => {
+    // The ciphertext itself is valid for the pinned computer, so the AEAD alone
+    // would happily open it. Only the key id says which computer to try — so
+    // without this guard a relay could re-label an envelope at no cost. (This is
+    // the test the M4 mutation of `openActivity` fails: delete the kid check and
+    // the content opens instead of throwing `bad-key`.)
+    const v = la.vectors["running-512"];
+    const sealed = sealActivity(
+      laPadded(v.plaintext_json),
+      laComputerSk,
+      laBytes(la.device.pk),
+      la.slot,
+      fixedRng(laEphemeralSk),
+    );
+    const mislabelled = { ...sealed, keyId: "AAAAAAAAAAAA" };
+    let kind: string | undefined;
+    try {
+      openActivity(mislabelled, laDeviceSk, laBytes(la.computer.pk), la.slot);
+    } catch (error) {
+      kind = (error as PushSealError).kind;
+    }
+    expect(kind).toBe("bad-key");
+    expect(sealed.keyId).not.toBe("AAAAAAAAAAAA");
+  });
+
+  test("a short or malformed key is a caller bug, not a silent pass", () => {
+    const rng = fixedRng(laEphemeralSk);
+    expect(() =>
+      sealActivity(new Uint8Array(8), new Uint8Array(31), laBytes(la.device.pk), la.slot, rng),
+    ).toThrow(PushSealError);
+    expect(() =>
+      sealActivity(new Uint8Array(8), laComputerSk, new Uint8Array(31), la.slot, rng),
     ).toThrow(PushSealError);
   });
 });

@@ -25,6 +25,7 @@ import {
   type SubagentRow,
   type TurnEnd,
   type UpdateSettingsResult,
+  type VoiceTurn,
   isWakeTurnId,
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
@@ -69,6 +70,13 @@ interface ActiveTurn {
    * whose images vanished would be a different turn.
    */
   readonly attachments?: readonly AttachmentRef[];
+  /**
+   * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3).
+   * Stored on the TURN for the same reason as `attachments`: every keyed
+   * re-send after a drop carries it under the same `turnId`. Never on a foreign
+   * turn — a turn this session did not send has no profile here.
+   */
+  readonly voice?: VoiceTurn;
   readonly queue: AsyncQueue<SessionEvent>;
   /** Tool names by call id (a `tool_call_update` omits it). */
   readonly toolNames: Map<string, string>;
@@ -79,6 +87,12 @@ interface ActiveTurn {
   ended: boolean;
   /** The daemon acknowledged `prompt{turnId}`. */
   acked: boolean;
+  /**
+   * The caller's `send` `opts.onAccepted`: called once, at the first ack
+   * (the daemon holds the turn's key), then cleared — a re-sent prompt's
+   * second ack does not call it again. Never called on a refusal.
+   */
+  onAccepted?: (() => void) | undefined;
   /** `prompt{turnId}` was written to a channel: a daemon may have run it. */
   sent: boolean;
   /** The user cancelled; re-sent on the prompt's ack (a cancel can beat the prompt, or be lost). */
@@ -1022,7 +1036,7 @@ export class RemoteSession implements SessionStreamListener {
    * a no-op (resolved) before any send. `id`: the caller's key for this text
    * (a later `sendNow` cites it); a fresh one when omitted.
    */
-  enqueue(text: string, id?: string): Promise<void> {
+  enqueue(text: string, id?: string, voice?: VoiceTurn): Promise<void> {
     // The turn the daemon runs (a foreign one: any device can steer it); an
     // own turn not started yet keeps its own id.
     const turnId = this.streaming ?? this.turnId;
@@ -1035,10 +1049,10 @@ export class RemoteSession implements SessionStreamListener {
       this.mine.set(key, text);
     }
     if (this.id) {
-      return this.client.enqueue(this.id, key, turnId, text);
+      return this.client.enqueue(this.id, key, turnId, text, voice);
     }
     if (this.opening) {
-      return this.opening.then((id) => this.client.enqueue(id, key, turnId, text));
+      return this.opening.then((id) => this.client.enqueue(id, key, turnId, text, voice));
     }
     return Promise.resolve();
   }
@@ -1048,6 +1062,11 @@ export class RemoteSession implements SessionStreamListener {
    * `opts.turnId`: the turn's id, minted by the caller (a detached run's relay
    * records it so the TUIs that take the run over own its turn,
    * docs/fix/detach-live.md B2); else a fresh one.
+   * `opts.onAccepted`: called once when the daemon ACKS the prompt (it holds
+   * the turn under its key: a retry is answered from its ledger, never run
+   * twice), also for a retry of a turn that already ended; never on a
+   * refusal. The ack can come long before the turn's first event
+   * (docs/fix/mobile-chat-glitches.md, bug 2).
    */
   async *send(
     prompt: string,
@@ -1056,6 +1075,13 @@ export class RemoteSession implements SessionStreamListener {
       readonly skill?: string;
       readonly turnId?: string;
       readonly attachments?: readonly AttachmentRef[];
+      /**
+       * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3):
+       * the edge's own reasoning setting, read at send time. Absent → an
+       * ordinary turn, whose frame carries no `voice` at all.
+       */
+      readonly voice?: VoiceTurn;
+      readonly onAccepted?: () => void;
     } = {},
   ): AsyncGenerator<SessionEvent> {
     // Known before the first `await`, so a steer typed while the session is
@@ -1244,6 +1270,13 @@ export class RemoteSession implements SessionStreamListener {
     opts: {
       readonly skill?: string;
       readonly attachments?: readonly AttachmentRef[];
+      /**
+       * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3):
+       * the edge's own reasoning setting, read at send time. Absent → an
+       * ordinary turn, whose frame carries no `voice` at all.
+       */
+      readonly voice?: VoiceTurn;
+      readonly onAccepted?: () => void;
     } = {},
   ): AsyncGenerator<SessionEvent> {
     if (this.closed) {
@@ -1276,12 +1309,14 @@ export class RemoteSession implements SessionStreamListener {
       ...(opts.attachments !== undefined && opts.attachments.length > 0
         ? { attachments: opts.attachments }
         : {}),
+      ...(opts.voice !== undefined ? { voice: opts.voice } : {}),
       queue: new AsyncQueue<SessionEvent>(),
       toolNames: new Map(),
       shownTools: new Set(),
       reset: false,
       ended: false,
       acked: false,
+      onAccepted: opts.onAccepted,
       sent: false,
       abortWanted: false,
       started: false,
@@ -1317,13 +1352,26 @@ export class RemoteSession implements SessionStreamListener {
     };
     const request = turn.sendNow
       ? this.client.sendNow(id, turn.turnId, turn.sendNow.interrupt, turn.sendNow.messages, sent)
-      : this.client.prompt(id, turn.turnId, turn.prompt, sent, turn.skill, turn.attachments);
+      : this.client.prompt(
+          id,
+          turn.turnId,
+          turn.prompt,
+          sent,
+          turn.skill,
+          turn.attachments,
+          turn.voice,
+        );
     request.then(
       // A plain ack: the stream ends the turn. `ended` (a retried turn that
       // already finished — also while this client was away) ends it from the
       // ack; a no-op if the stream did.
       (ack) => {
         turn.acked = true;
+        // Before `finish` (an `ended` ack): the caller learns "the daemon has
+        // it" before the turn's end. Once only: a re-send's ack is the same key.
+        const onAccepted = turn.onAccepted;
+        turn.onAccepted = undefined;
+        onAccepted?.();
         if (ack.ended) {
           this.finish(turn, ack.ended);
         } else if (turn.abortWanted) {

@@ -236,9 +236,7 @@ export function pushKeyId(computerPublicKey: Uint8Array): string {
 
 /** The padded length for a plaintext of `length` bytes, or `undefined` when it cannot fit. */
 export function pushPaddedLength(length: number): number | undefined {
-  const needed = length + PUSH_LENGTH_BYTES;
-  for (const bucket of PUSH_PAD_BUCKETS) if (needed <= bucket) return bucket;
-  return undefined;
+  return paddedLengthFor(length, PUSH_PAD_BUCKETS);
 }
 
 /** The largest plaintext this protocol can seal: the last bucket minus the length prefix (2046). */
@@ -252,12 +250,12 @@ export function maxPushPlaintextBytes(): number {
  * ignores the rest — no "strip trailing zeros" guesswork (a plaintext may end in
  * a zero byte).
  */
-function pad(plaintext: Uint8Array): Uint8Array {
-  const bucket = pushPaddedLength(plaintext.length);
+function padTo(plaintext: Uint8Array, buckets: readonly number[]): Uint8Array {
+  const bucket = paddedLengthFor(plaintext.length, buckets);
   if (bucket === undefined) {
     throw new PushSealError(
       "too-large",
-      `a push plaintext must be at most ${maxPushPlaintextBytes()} bytes`,
+      `a plaintext must be at most ${(buckets[buckets.length - 1] ?? 2048) - PUSH_LENGTH_BYTES} bytes`,
     );
   }
   const out = new Uint8Array(bucket);
@@ -266,12 +264,12 @@ function pad(plaintext: Uint8Array): Uint8Array {
   return out;
 }
 
-/** The reverse of {@link pad}: the declared length, then a tail that must be all zeros. */
-function unpad(padded: Uint8Array): Uint8Array {
+/** The reverse of {@link padTo}: the declared length, then a tail that must be all zeros. */
+function unpadFrom(padded: Uint8Array, buckets: readonly number[]): Uint8Array {
   let bucket: number | undefined;
-  for (const candidate of PUSH_PAD_BUCKETS) if (candidate === padded.length) bucket = candidate;
+  for (const candidate of buckets) if (candidate === padded.length) bucket = candidate;
   if (bucket === undefined) {
-    throw new PushSealError("bad-padding", "a sealed push must be exactly one bucket long");
+    throw new PushSealError("bad-padding", "a sealed payload must be exactly one bucket long");
   }
   if (padded.length < PUSH_LENGTH_BYTES) throw new PushSealError("bad-padding", "no length prefix");
   const length = ((padded[0] ?? 0) << 8) | (padded[1] ?? 0);
@@ -282,6 +280,21 @@ function unpad(padded: Uint8Array): Uint8Array {
     if (padded[i] !== 0) throw new PushSealError("bad-padding", "non-zero padding");
   }
   return padded.slice(PUSH_LENGTH_BYTES, PUSH_LENGTH_BYTES + length);
+}
+
+/** The padded length for a plaintext of `length` bytes in `buckets`, or `undefined` when it cannot fit. */
+function paddedLengthFor(length: number, buckets: readonly number[]): number | undefined {
+  const needed = length + PUSH_LENGTH_BYTES;
+  for (const bucket of buckets) if (needed <= bucket) return bucket;
+  return undefined;
+}
+
+function pad(plaintext: Uint8Array): Uint8Array {
+  return padTo(plaintext, PUSH_PAD_BUCKETS);
+}
+
+function unpad(padded: Uint8Array): Uint8Array {
+  return unpadFrom(padded, PUSH_PAD_BUCKETS);
 }
 
 /**
@@ -386,4 +399,105 @@ export function openPush(
     senderPublicKey: senderPub,
   });
   return unpad(padded);
+}
+
+// ---------------------------------------------------------------------------
+// Live Activity content-state (docs/feat/mobile-live-activity.md Design 2, L1)
+// ---------------------------------------------------------------------------
+
+/**
+ * The HPKE `info` of a Live Activity content-state. A DIFFERENT domain separator
+ * from {@link PUSH_INFO} on purpose: the two protocols share keys and suite, so
+ * `info` is what stops one being replayed as the other (an activity state opened
+ * as a notification, or a notification's envelope rendered as a state). The
+ * widget's `LACore` and the vectors pin it.
+ */
+export const LA_INFO = "tentacle-la/1";
+
+/**
+ * The plaintext buckets of a content-state. TIGHTER than a push's (which reach
+ * 2048): the worst-case `ActivityContent` at every clip cap is 1020 bytes
+ * including the length prefix, so 1024 is the whole ladder and the visible size
+ * says only "short" or "at the caps" (Design 1, Owner Q2).
+ */
+export const LA_PAD_BUCKETS = [512, 1024] as const;
+
+/** `u16` big-endian length prefix bytes — shared with pushes, hence the alias. */
+export const LE_LENGTH_BYTES = PUSH_LENGTH_BYTES;
+
+/** The padded length of an `ActivityContent` plaintext, or `undefined` when it cannot fit. */
+export function activityPaddedLength(length: number): number | undefined {
+  return paddedLengthFor(length, LA_PAD_BUCKETS);
+}
+
+/** The largest `ActivityContent` plaintext this protocol can seal (1022 bytes). */
+export function maxActivityPlaintextBytes(): number {
+  return (LA_PAD_BUCKETS[LA_PAD_BUCKETS.length - 1] ?? 1024) - LE_LENGTH_BYTES;
+}
+
+/**
+ * The AEAD `aad` of a content-state: `kid ‖ slot`. Binding the ACTIVITY's own
+ * slot is what makes a state un-movable: the widget passes its own
+ * `attributes.slot`, so a hostile relay that re-addresses one session's state to
+ * another activity gets a tag failure instead of content (F7). The kid stays
+ * the prefix so the same id still names which computer to try.
+ */
+function activityAad(keyId: string, slot: string): Uint8Array {
+  return encoder.encode(`${keyId}${slot}`);
+}
+
+/**
+ * Seal one `ActivityContent` plaintext (already JSON) for one device and one
+ * activity slot. `senderStatic` is the COMPUTER's static key (as for a push) and
+ * `recipientPub` the device's push key: same keys, different `info` and `aad`.
+ */
+export function sealActivity(
+  plaintext: Uint8Array,
+  senderStatic: Uint8Array,
+  recipientPub: Uint8Array,
+  slot: string,
+  rng: PushRng,
+): SealedPush {
+  const padded = padTo(plaintext, LA_PAD_BUCKETS);
+  const keyId = pushKeyId(publicKeyOf(senderStatic));
+  const sealed = hpkeAuthSeal({
+    plaintext: padded,
+    aad: activityAad(keyId, slot),
+    info: encoder.encode(LA_INFO),
+    senderStatic,
+    recipientPublicKey: recipientPub,
+    rng,
+  });
+  return { keyId, enc: sealed.enc, ciphertext: sealed.ciphertext };
+}
+
+/**
+ * Open a content-state as the widget does. `slot` is the ACTIVITY's own slot
+ * (from its clear `attributes`), and `senderPub` the computer's static public key
+ * pinned at pairing: with the wrong one — or the wrong slot — the AEAD fails, so
+ * the view falls back to the placeholder and no content leaks.
+ */
+export function openActivity(
+  sealed: SealedPush,
+  recipientStatic: Uint8Array,
+  senderPub: Uint8Array,
+  slot: string,
+): Uint8Array {
+  need(recipientStatic, KEY_BYTES, "the recipient static key");
+  need(senderPub, KEY_BYTES, "the sender public key");
+  if (sealed.keyId !== pushKeyId(senderPub)) {
+    throw new PushSealError("bad-key", "the envelope names another computer's key");
+  }
+  // The ACTIVITY's own slot is the aad's second half, so a state sealed for
+  // activity A cannot be rendered inside activity B (F7).
+  return unpadFrom(
+    hpkeAuthOpen({
+      sealed,
+      aad: activityAad(sealed.keyId, slot),
+      info: encoder.encode(LA_INFO),
+      recipientStatic,
+      senderPublicKey: senderPub,
+    }),
+    LA_PAD_BUCKETS,
+  );
 }

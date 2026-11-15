@@ -107,6 +107,7 @@ import {
   type SubagentRow,
   type TurnEnd,
   type TurnError,
+  type VoiceTurn,
   WAKE_TURN_PREFIX,
   type WatchCategory,
   type WatchNextResult,
@@ -382,7 +383,15 @@ export type PushWatchedUpdate =
   | UpdateOf<"permission_request">
   | UpdateOf<"permission_resolved">
   | UpdateOf<"turn_end">
-  | UpdateOf<"session_closed">;
+  | UpdateOf<"session_closed">
+  // Task 18's Live Activity needs three more (docs/feat/mobile-live-activity.md
+  // L7): a turn's start (the elapsed timer's origin and the 20 s threshold), each
+  // tool call (the current tool), and the title. Still display-class kinds only:
+  // a `tool_call_update` (high frequency, and its result rides `tool_call`) is
+  // deliberately NOT watched.
+  | UpdateOf<"turn_start">
+  | UpdateOf<"tool_call">
+  | UpdateOf<"session_title">;
 
 /**
  * What a push observer is told, when (`PushEvent` in `push-rules.ts` is the
@@ -2119,7 +2128,13 @@ export class HostedSession {
       update.type !== "permission_request" &&
       update.type !== "permission_resolved" &&
       update.type !== "turn_end" &&
-      update.type !== "session_closed"
+      update.type !== "session_closed" &&
+      // Task 18 (L7): the Live Activity's three extra kinds. Widening this filter
+      // is the WHOLE daemon change this task makes here — the observer stays out
+      // of `attachments`, stays synchronous, and is still never awaited.
+      update.type !== "turn_start" &&
+      update.type !== "tool_call" &&
+      update.type !== "session_title"
     ) {
       return;
     }
@@ -2249,6 +2264,7 @@ export class HostedSession {
     content: readonly PromptContentBlock[],
     skill?: string,
     askHooksTrust?: AskHooksTrust,
+    voice?: VoiceTurn,
   ): PromptResult {
     // The key first: a retry is answered even while a turn runs, or after it ended.
     const known = this.turns.get(turnId);
@@ -2302,6 +2318,7 @@ export class HostedSession {
         ...(skill !== undefined ? { skill } : {}),
         ...(refs.length > 0 ? { attachments: refs } : {}),
         ...(askHooksTrust !== undefined ? { askHooksTrust } : {}),
+        ...(voice !== undefined ? { voice } : {}),
         beforeRun: this.beforeRunFn,
       }),
       controller,
@@ -2990,7 +3007,7 @@ export class HostedSession {
    * retry of an accepted id is a no-op success even after its turn ended (never
    * `NoTurnRunning`, never injected twice). A rejected attempt is not recorded.
    */
-  enqueue(id: string, turnId: string, text: string): void {
+  enqueue(id: string, turnId: string, text: string, voice?: VoiceTurn): void {
     if (this.enqueued.has(id)) {
       return;
     }
@@ -3013,7 +3030,7 @@ export class HostedSession {
       throw new RpcError(DomainErrorCode.NoTurnRunning, "no turn is running");
     }
     this.enqueued.add(id);
-    this.session.enqueue(text);
+    this.session.enqueue(text, voice);
     this.queue.push({ id, text });
     // A person wrote while a foreground child runs: it moves to the background
     // NOW, in this synchronous stretch, so the call it holds is answered in

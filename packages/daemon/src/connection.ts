@@ -24,6 +24,12 @@ import {
   type DeleteResult,
   type DetachParams,
   type DetachResult,
+  type DeviceLiveActivityEndedParams,
+  type DeviceLiveActivityEndedResult,
+  type DeviceLiveActivityRegisterParams,
+  type DeviceLiveActivityRegisterResult,
+  type DeviceLiveActivityTokenParams,
+  type DeviceLiveActivityTokenResult,
   type DevicePairParams,
   type DevicePairResult,
   type DevicePushRegisterParams,
@@ -498,6 +504,47 @@ export class Connection {
         this.host.unregisterPush(this.principal.id);
         return {} satisfies DevicePushUnregisterResult;
       }
+      // Live Activities (docs/feat/mobile-live-activity.md Design 4, L7): the SAME
+      // device-principal rule as push, for the same reason — a `token`/`pairing`
+      // connection is refused above, so a pod-facing plain client can never place
+      // a token that lights up a lock screen. All three are synchronous and hold
+      // no lock (AGENTS §7 "don't serialize the RPC peer").
+      case Method.DeviceLiveActivityRegister: {
+        if (this.principal.kind !== "device") {
+          throw new RpcError(
+            DomainErrorCode.Unauthorized,
+            "only a paired device may register for live activities",
+          );
+        }
+        return this.host.registerLiveActivity(
+          this.principal.id,
+          params as DeviceLiveActivityRegisterParams,
+        ) satisfies DeviceLiveActivityRegisterResult;
+      }
+      case Method.DeviceLiveActivityToken: {
+        if (this.principal.kind !== "device") {
+          throw new RpcError(
+            DomainErrorCode.Unauthorized,
+            "only a paired device may report an activity token",
+          );
+        }
+        return this.host.setLiveActivityToken(
+          this.principal.id,
+          params as DeviceLiveActivityTokenParams,
+        ) satisfies DeviceLiveActivityTokenResult;
+      }
+      case Method.DeviceLiveActivityEnded: {
+        if (this.principal.kind !== "device") {
+          throw new RpcError(
+            DomainErrorCode.Unauthorized,
+            "only a paired device may report an activity ended",
+          );
+        }
+        return this.host.endLiveActivity(
+          this.principal.id,
+          params as DeviceLiveActivityEndedParams,
+        ) satisfies DeviceLiveActivityEndedResult;
+      }
       default:
         throw new RpcError(DomainErrorCode.NotInitialized, `unexpected method: ${method}`);
     }
@@ -574,7 +621,7 @@ export class Connection {
   // write does not fail the ack — the steer is queued; the daemon log has it.
   private async enqueue(params: EnqueueParams): Promise<EnqueueResult> {
     const hosted = this.lookup(params.sessionId);
-    hosted.enqueue(params.id, params.turnId, params.text);
+    hosted.enqueue(params.id, params.turnId, params.text, params.voice);
     await hosted.persisted();
     return {};
   }
@@ -928,7 +975,13 @@ export class Connection {
     // with a human behind this turn (docs/feat/hooks-project-trust.md). The
     // laptop decides; a rejection (an old laptop's `MethodNotFound`, a drop)
     // is "declined" in the runner.
-    return hosted.prompt(params.turnId, params.content, params.skill, this.askHooksTrust);
+    return hosted.prompt(
+      params.turnId,
+      params.content,
+      params.skill,
+      this.askHooksTrust,
+      params.voice,
+    );
   }
 
   // Acks at once, like `prompt`: the cancel and the new turn happen daemon-side

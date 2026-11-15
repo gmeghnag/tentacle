@@ -18,7 +18,7 @@
  *     build expands `$(AppIdentifierPrefix)` (fix round 1, finding #4).
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 
 const appJson = JSON.parse(readFileSync(new URL("../app.json", import.meta.url), "utf8")) as {
   expo: {
@@ -138,5 +138,81 @@ describe("the Notification Service Extension target (N5)", () => {
     // generate an app with no extension, and every push shows the relay's text.
     const plugins = JSON.stringify(appJson.expo.plugins);
     expect(plugins).toContain("@bacons/apple-targets");
+  });
+});
+
+// --- Live Activities: the widget target and the plist keys (L10) ------------
+/**
+ * The native half of Live Activities, as far as a HEADLESS gate can check it
+ * (docs/feat/mobile-live-activity.md Design 6, L10): the keys iOS reads, the
+ * extension target's existence and bundle id, and the one invariant that must
+ * survive the new group — the app's OWN keychain group stays FIRST (so a
+ * group-less write of the Noise device key still never lands where an extension
+ * can read it).
+ *
+ * The SwiftUI views and the Expo module cannot be tested here (they need a
+ * simulator/device build): `bun run test:swift` runs `LACore`'s logic, and the
+ * real-device checklist (D5) covers the rendering.
+ */
+describe("Live Activities: the app's declaration and the widget target (L10)", () => {
+  test("NSSupportsLiveActivities is on, and the FrequentPushes variant is not", () => {
+    // Mutation: drop the key → iOS never starts an activity, and every push is
+    // silently ignored with no error anywhere (the feature is simply absent).
+    const infoPlist = (appJson.expo.ios as { infoPlist?: Record<string, unknown> }).infoPlist ?? {};
+    expect(infoPlist.NSSupportsLiveActivities).toBe(true);
+    // `FrequentPushes` raises the system's update budget; the plan's cadence
+    // (Owner Q4) fits the normal one, and claiming it without need is a review
+    // flag at Apple's side, so it must stay ABSENT until L0/L12 proves it needed.
+    expect(infoPlist.NSSupportsLiveActivitiesFrequentUpdates).toBeUndefined();
+  });
+
+  test("the widget extension target is declared, with its own bundle id", () => {
+    const config = require("../targets/live-activity/expo-target.config.js")({
+      ios: { bundleIdentifier: "so.tentacle.app" },
+    }) as {
+      type: string;
+      bundleIdentifier: string;
+      deploymentTarget: string;
+      entitlements: Record<string, string[]>;
+    };
+    // A widget is a `widget` target (Apple's extension point), not a second
+    // notification service: the type is what `@bacons/apple-targets` generates
+    // the Info.plist's NSExtension from.
+    expect(config.type).toBe("widget");
+    expect(config.bundleIdentifier).toBe(".LiveActivity");
+    // iOS 18 is the floor (the app's own): push-to-start needs 17.2, interactive
+    // buttons 17, so every supported phone has them.
+    expect(config.deploymentTarget).toBe("18.0");
+    // The widget needs the SHARED group only: it opens a content-state and reads
+    // the pinned computers, never the device's Noise key.
+    expect(config.entitlements["keychain-access-groups"]).toEqual([
+      "$(AppIdentifierPrefix)so.tentacle.app.push",
+    ]);
+  });
+
+  test("the app's OWN keychain group is still FIRST, with the widget added", () => {
+    // The invariant of task 17's fix round 1 finding #3, re-pinned because task 18
+    // adds a THIRD entry to this list: the order is what keeps a group-less
+    // `tentacle.computer.*` write out of an extension's reach.
+    expect(groups[0]).toBe("$(AppIdentifierPrefix)so.tentacle.app");
+    expect(groups).toContain("$(AppIdentifierPrefix)so.tentacle.app.push");
+    // No per-target group was invented: two groups, in that order.
+    expect(groups).toHaveLength(2);
+  });
+});
+
+describe("PushCore sources compile inside the extension, not only in SwiftPM", () => {
+  // The same files build twice: as the SwiftPM module `PushCore`
+  // (native-tests/PushCoreTests) and as part of the extension's OWN module. A
+  // `PushCore.` qualifier resolves only in the first, so `swift test` passed
+  // while the device archive failed ("cannot find 'PushCore' in scope").
+  test("no source qualifies a name with the SwiftPM module name", () => {
+    const dir = new URL("../targets/notification-service/PushCore/", import.meta.url);
+    const offenders = readdirSync(dir)
+      .filter((f) => f.endsWith(".swift"))
+      .filter((f) =>
+        /\bPushCore\.\w/.test(readFileSync(new URL(f, dir), "utf8").replace(/\/\/.*$/gm, "")),
+      );
+    expect(offenders).toEqual([]);
   });
 });

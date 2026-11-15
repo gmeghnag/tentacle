@@ -195,4 +195,40 @@ describe("the app's fold agrees with the TUI's on shared fixtures", () => {
       tuiImageRowText({ mimeType: "image/png" }),
     );
   });
+
+  test("a sub-agent's progress: the same counts as the TUI's fold (item 10)", () => {
+    // `packages/tui/test/state.test.ts`'s sequence, plus usage and a background move.
+    const events = [
+      { type: "tool_start", id: "t1", name: "agent_task", arguments: '{"description":"d"}' },
+      { type: "subagent_start", id: "t1", agentType: "explore", description: "find it" },
+      { type: "subagent_tool", id: "t1", label: "Read a.ts" },
+      { type: "subagent_usage", id: "t1", promptTokens: 900, completionTokens: 40 },
+      { type: "subagent_tool", id: "t1", label: "Read b.ts" },
+      { type: "subagent_end", id: "t1", toolUses: 2, stopReason: "background", agentId: "sa-1" },
+    ];
+    let app = initialState;
+    let tui = tuiInitial;
+    for (const event of events) {
+      app = apply(app, event as never);
+      tui = applySessionEvent(tui, event as never, 1);
+    }
+    const appSub = app.rows.flatMap((r) => (r.kind === "tool" && r.sub ? [r.sub] : []))[0];
+    const tuiSub = tui.items.flatMap((i) => (i.kind === "tool" && i.sub ? [i.sub] : []))[0];
+    expect(appSub).toBeDefined();
+    expect({
+      toolUses: appSub?.toolUses,
+      tokens: appSub?.tokens,
+      done: appSub?.done,
+      stopReason: appSub?.stopReason,
+      movedTo: appSub?.movedTo,
+      last: appSub?.activities.at(-1),
+    }).toEqual({
+      toolUses: tuiSub?.toolUses,
+      tokens: tuiSub?.tokens,
+      done: tuiSub?.done,
+      stopReason: tuiSub?.stopReason,
+      movedTo: tuiSub?.movedTo,
+      last: tuiSub?.activities.at(-1),
+    });
+  });
 });
