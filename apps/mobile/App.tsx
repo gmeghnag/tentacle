@@ -105,6 +105,7 @@ import {
   pushKeychain,
 } from "./src/secure-kv.ts";
 import { createSessionController } from "./src/session-controller.ts";
+import type { InfoPort } from "./src/session-info-controller.ts";
 import { createSessionListController, viewModel } from "./src/session-list-controller.ts";
 import { type SessionListState, type SessionRow, initialSessionList } from "./src/session-list.ts";
 import { createSessionRuntimes } from "./src/session-runtimes.ts";
@@ -344,6 +345,47 @@ function composeWiring(computerId: string, sessionId: string, link: ComputerLink
     },
     mint: () => crypto.randomUUID(),
   };
+}
+
+/**
+ * Session info's port (docs/feat/mobile-session-info.md slice 4): every pull is a
+ * method the ONE client stack already has — `link.client.mcpStatus()` /
+ * `sessionList()`, the handshake's `daemonInfo()`, and the OPEN handle's own
+ * `skills()` / `context()` / `autoAccept`. No frame is built here (AGENTS §7).
+ */
+function infoWiring(
+  computerId: string,
+  sessionId: string,
+  title: string,
+  link: ComputerLink,
+): (handle: () => SendableHandle | null) => InfoPort {
+  return (handle) => ({
+    // Re-read every time the sheet opens: a `serve` restarted with another model
+    // must not show the model the app handshook at pair time (F7).
+    daemon: () => link.client.daemonInfo(),
+    computerName: () => RECORDS.get(computerId)?.name ?? "",
+    title: () => title,
+    phase: () => (handle() === null ? "failed" : "open"),
+    sessionId,
+    mcpStatus: () => link.client.mcpStatus(),
+    sessionList: () => link.client.sessionList({ limit: 200 }),
+    // The handle is the screen's OWN attach (`RemoteSession`, cast): a second
+    // handle of this id would steal its stream (the compose half's B4 rule).
+    session: () => {
+      const live = handle();
+      if (live === null) {
+        return null;
+      }
+      const remote = live as unknown as RemoteSession;
+      return {
+        skills: () => remote.skills(),
+        context: () => remote.context(),
+        ...(live.autoAccept === undefined ? {} : { autoAccept: live.autoAccept }),
+      };
+    },
+    onLink: (listener: (status: "up" | "down") => void) =>
+      link.onStatus((status) => listener(status.state === "up" ? "up" : "down")),
+  });
 }
 
 /** 13c's picked photos, as the compose half's own shape (their bytes read once). */
@@ -919,6 +961,9 @@ function SessionRoute({
         // drafts shared for the app's lifetime), and the session's own client
         // methods — no frame built here (AGENTS §7 "one session path").
         compose: composeWiring(computerId, sessionId, link),
+        // Session info (docs/feat/mobile-session-info.md): the sheet's pulls, over
+        // the same client and the screen's own handle.
+        info: infoWiring(computerId, sessionId, title, link),
       });
       // The link's own status: the banner's `reconnecting` (F8/F9).
       unsubscribe = link.onStatus((status) => created?.link(status.state === "up"));

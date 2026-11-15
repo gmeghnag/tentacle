@@ -45,6 +45,7 @@ import {
 } from "./commands.ts";
 import { permissionPromptRows } from "./components/PermissionPrompt.tsx";
 import { QUIT_CONFIRM_ROWS } from "./components/QuitConfirm.tsx";
+import { VOICE_STRIP_ROWS } from "./components/VoiceStrip.tsx";
 import { inputRowCount } from "./input-view.ts";
 import type { LinkIndicator } from "./link-status.ts";
 import type { OpenPanel } from "./panel.ts";
@@ -62,6 +63,7 @@ import type { DisplayState } from "./state.ts";
 import { type ContextOpen, contextShown, pillView, statusTokens } from "./status-view.ts";
 import type { TargetBadge } from "./target-view.ts";
 import { panelHeight, panelMaxBody } from "./tree-panel.ts";
+import type { VoiceStripView } from "./voice-view.ts";
 
 /** Rows reserved below the transcript viewport: a blank spacer, the input/thinking
  * line, the status bar, plus one slack row so the frame never overflows the
@@ -121,6 +123,13 @@ export interface FrameInput {
   readonly daemonQueue: DaemonQueue | undefined;
   readonly loading: { readonly done: number; readonly total: number } | null;
   readonly compacting: boolean;
+  /**
+   * The dictation strip's view-model (`voice-view.ts`), or null when it draws
+   * nothing. Its rows are INSIDE the input box and counted HERE, once, so the
+   * frame's height never changes while a dictation runs (P8, same rule as the
+   * attach row above it).
+   */
+  readonly voiceStrip?: VoiceStripView | null;
 }
 
 /**
@@ -156,6 +165,7 @@ export function frameLayout(input: FrameInput) {
     daemonQueue,
     loading,
     compacting,
+    voiceStrip,
   } = input;
 
   const tokensShown = statusTokens(st);
@@ -180,7 +190,11 @@ export function frameLayout(input: FrameInput) {
   // INSIDE the input box and is counted HERE, once — so the viewport shrinks by
   // one and the frame's height never changes (P8).
   const attachRow = attachRowView(attach, Math.max(1, columns - 2));
-  const inputBoxRows = inputContentLines + 2 + attachRowRows(attach, Math.max(1, columns - 2));
+  // The dictation strip is the same kind of row: inside the input box, counted
+  // once here, zero rows when it paints nothing.
+  const voiceRows = voiceStrip === null || voiceStrip === undefined ? 0 : VOICE_STRIP_ROWS;
+  const inputBoxRows =
+    inputContentLines + 2 + attachRowRows(attach, Math.max(1, columns - 2)) + voiceRows;
   const listView = panel ? panelView(panel, columns, panelMaxBody(termRows), sessionId) : null;
   // Rows above the input/panel while a turn runs: the thinking line + the
   // queued-message lines (each one row: `wrap="truncate-end"`) + the send-now
@@ -338,6 +352,8 @@ export function frameLayout(input: FrameInput) {
     paletteRows,
     inputContentLines,
     attachRow,
+    voiceStrip,
+    voiceRows,
     inputBoxRows,
     listView,
     shown,

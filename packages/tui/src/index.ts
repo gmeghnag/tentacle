@@ -65,6 +65,13 @@ export type { RunQuit } from "./useQuitClear.ts";
 export { autoAcceptTest, autoApproves, ownRequest } from "./permission-ui.ts";
 export type { SessionsEntry, SessionsView } from "./sessions-panel.ts";
 export { startTui, type TuiOptions } from "./run.tsx";
+// Voice dictation (docs/feat/voice-dictation.md): the pure modules plus the two
+// the CLI's `tentacle voice` needs (the helper lookup and the settings type).
+export * from "./voice-protocol.ts";
+export * from "./voice-endpoint.ts";
+export * from "./voice-session.ts";
+export * from "./voice-view.ts";
+export { helperPathCandidates } from "./voice-spawn.ts";
 export type { ThemeSetting } from "./theme.ts";
 export type { TargetBadge } from "./target-view.ts";
 export type { ContextOpen } from "./status-view.ts";

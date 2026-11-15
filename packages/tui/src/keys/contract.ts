@@ -64,6 +64,7 @@ export type KeyLayerName =
   | "permission"
   | "ctrlC"
   | "paste"
+  | "voice"
   | "sessions"
   | "tree"
   | "dock"

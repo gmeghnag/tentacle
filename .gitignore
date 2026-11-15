@@ -3,6 +3,8 @@ node_modules/
 
 # Build output
 dist/
+# SwiftPM's build products (the voice helper; `bun run voice:build`).
+native/voice-mac/.build/
 *.tsbuildinfo
 
 # Test / coverage

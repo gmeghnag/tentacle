@@ -31,7 +31,8 @@
       "**/*.tsbuildinfo",
       "coverage",
       "stubs",
-      "apps/mobile/native-tests/PushCoreTests/.build"
+      "apps/mobile/native-tests/PushCoreTests/.build",
+      "native/voice-mac/.build"
     ]
   },
   "overrides": [
