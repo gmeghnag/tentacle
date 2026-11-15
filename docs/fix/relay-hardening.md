@@ -721,7 +721,33 @@ because the deploy host has no `AAAA` record today.
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-15* (fresh context; same model family as the plan's author, a different one from the executor)
+
+**Verdict: APPROVE-WITH-NITS.** No HIGH or MEDIUM findings. Scope: `git diff main...HEAD` only.
+
+**Gate (re-run):** `bun test apps/relay`: 212 pass, 0 fail (9 files). `bun run lint`: clean. `bun run typecheck` (it includes `tsc -p apps/relay`): clean. I did not re-run the full `bun test`. The executor reports 10381 pass / 4 opt-in skips.
+
+**End-to-end:** I re-ran the Context's `probe.ts` against the branch. P3 now closes `1006` with **no** `frame-oversize` line, so Bun refuses the frame before JS sees it (H1 fixed). P1 still shows 100/100 at 5 s. That is expected: the deadline is 10 s, and the server tests drive it with `now` + `sweep()`. P2 still shows `127.0.0.1` because the probe does not pass `trustProxy`. The T2 server tests cover it with the flag on.
+
+**Mutations (mine, reverted, tree clean afterwards):**
+- A: `hello` does not settle its pending slot. 2 tests go RED (core + server "registered socket is NOT swept"). Without this settle, every daemon would be killed at 10 s, so the property is pinned.
+- C: an accept leg with no token releases nothing on close (`server.ts:461`). It **survives**. This is a test gap, not a bug: the sweep frees the slot within `RELAY_PREAUTH_MS`.
+- The server's `flush` wiring is pinned by `server.test.ts:671-677`.
+
+**Attacks tried:**
+1. XFF spoofing. The header is read only from a loopback peer, the walk goes right to left, and a malformed hop stops the walk instead of skipping it. Caddy replaces the header with `{remote_host}`. Holds.
+2. Double decrement or leak of `registered`/`pending` in four cases: refused at open (its close finds nothing in `pending`), replaced daemon, refused `hello`, second `hello` with a different secret (already refused at `relay-core.ts:430`). Holds.
+3. Pre-`ready` ping guard vs the real daemon, which pings only after `ready`, at most every 25 s against a limit of 30/min. Holds.
+4. The `/64` key fits `open.ip` `max(64)`, so no protocol note is needed. Holds.
+5. Caddy regex vs `relayRoute`: pinned path by path. Caddy's path cleaning (`/v1//daemon`) can still reach the relay, which 404s it itself. Holds.
+
+**Nits (LOW, no change required to merge):**
+- Mutation C gap above.
+- The comment at `server.ts:558-559` still cites `^[A-Za-z]{1,64}$`, but the code uses the wider class (drift 2).
+- I3 weighs more now. `IpState` entries are never pruned when idle, only evicted oldest-first. Past 4096 distinct clients, ordinary churn resets the long-lived `registered` counts of the oldest IPs, and a later `releaseRegistered` can undercount. The doc already records this as debt; it should be revisited before any `AAAA` record is published.
+- The Execution signature says `claude-sonnet-4-5`, but commit `4a13f606` says "exec (deepseek)". One of the two is wrong, and AGENTS §10 wants honest model attribution.
+
+**Executor behaviour:** disciplined. Each drift is recorded with its reason, the mutation table is real (A-type mutations reproduce), and the unverified part (`caddy validate` on the host, D2–D5) is stated honestly.
 
 #### Orchestrator decisions (owner night delegation 2026-11-15)
 
