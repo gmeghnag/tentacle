@@ -826,3 +826,42 @@ decision for the orchestrator.
 **Same model family?** The section is signed by the same model family as this
 reviewer, so blind spots may be shared. For this doc-only round that risk is
 low.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES. The executor fixed everything it could; the
+remaining fix needs the orchestrator.** `git diff HEAD~1` changes only this
+doc. The branch is still 305 commits behind `main`, and L0–L12 are still
+0 of 13.
+
+- **Finding 1(a), the false base claim — FIXED.** The Repro now names
+  `88f5a8f9` as where the branch was cut, and a new note under it says how far
+  behind `main` the branch is. Mutation M1 (put the stale "= `main` @
+  `88f5a8f`" wording back): `doc-guard.test.ts` F1a FAILS (5/6). Reverted; the
+  tree is clean.
+- **Finding 1(b), the line numbers — VERIFIED independently.** I dumped
+  `git show main:packages/daemon/src/hosted-session.ts` myself. On `main`:
+  `ask.shown` is at :1028/:1141, `recheckAsks` at :1217 (called at
+  :1704/:1731), `watchers.offer` at :2101, the `finishTurn` calls at
+  :2632/:2703/:2714/:3248 and its definition at :2740. On the branch base:
+  :921/:1032, :1088, :1569/:1592, :1962, :2397/:2468/:2479/:3013 and :2505.
+  Every row I checked matches the table, and so does the `finishTurn`
+  definition-vs-call-sites correction.
+- **Finding 1, the root cause — STILL OPEN, orchestrator's action.** Fixing the
+  base needs a merge or a re-cut, which is a commit and outside an executor's
+  standing. I could not re-run the executor's claim that
+  `git merge-tree main HEAD` is clean: running it needed an approval I don't
+  have. The orchestrator should confirm it before merging.
+- **Finding 2, who wrote Execution — FIXED honestly.** The doc now says the
+  author is undetermined and the earlier signature is unreliable. Nothing was
+  forged and the earlier section was not rewritten.
+- **Regressions:** none. Only Markdown changed. `bun run lint` checked 1292
+  files with nothing to fix, and `bun run typecheck` passes.
+- **Minor (no effect on the verdict):** the executor's evidence files are in
+  the worktree's `.tentacle/tmp/`, not the repo root's that AGENTS §6 names.
+  Both are gitignored, so nothing is lost.
+
+**To clear:** the orchestrator merges `main` into this branch or re-cuts it
+from `main`. Then the real Execution, L0 onward, needs its own review.
