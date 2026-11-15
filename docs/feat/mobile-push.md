@@ -2089,3 +2089,59 @@ and mutation script lives in this worktree's gitignored
 `.tentacle/tmp/mobile-push/` (`p78-load-bearing.ts`, `p8-e2e-probe.ts`,
 `p7-mut.sh`, `p7n-mut.sh`, `p8-mut.sh`, and their `*-bak/` backups) rather than
 the repo root's `.tentacle/tmp/mobile-push/`.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-15 (fresh context; scope: P7 + P8, `git diff main...HEAD`)*
+
+**Verdict: REQUEST-CHANGES.**
+
+1. **HIGH: the C1/F4 `features` gate can be bypassed through the hold queue** (`packages/daemon/src/relay-link.ts:721-729` + `:348-353` + `:502`).
+   `push()` does not refuse when the relay has no `"push"`: it **holds** the frame (`holdPush`).
+   `flushHeldPushes()` runs on EVERY `ready`, and `sendPush` no longer checks `features` (the inner
+   check was deleted in Execution). So: if a relay without push drops the control socket and re-registers
+   within `pushHoldMs` (60 s), the held `push` frame goes onto the wire, and an R2 relay closes the
+   control socket on it (`control-unexpected`). That is the exact loss of reachability C1 exists to
+   prevent, and it happens again on every push. Repro `.tentacle/tmp/mobile-push/review-flush.test.ts`:
+   a fake relay sends `ready` with no `features` and closes once after 150 ms. Result: `hellos 2`,
+   **1 push frame seen** (expected 0). The existing gate test passes only because `holdMs: 50` drops the
+   frame before any reconnect. Also, a stable no-push relay answers every push with
+   `push-dropped link-down` after 60 s, which is the wrong audit word, and each device waits that long
+   in turn. The doc's "refused WITHOUT a frame" is false.
+   Fix: when `readyControl !== undefined && !features.includes("push")`, refuse at once. Also re-check
+   `features` in `flushHeldPushes` (resolve `unavailable` instead of sending). Add a reconnect test.
+2. **MEDIUM: from the 2nd device on, the message is built with no ask content** (`packages/daemon/src/push-notifier.ts:337-343`, `:288-290`, `:209-232`).
+   `deliver` awaits each device's sink in turn. Only device 1's `buildMessage` runs before `after()`
+   deletes the ask (`asks.delete`). With ≥2 registered phones, every `ask_resolved` reaches phone 2+
+   with `tool:""`, `title:""`, `options:[]`. An `ask` push suffers the same fate if the settle lands
+   while device 1's sink is in flight (up to 10 s, or a 60 s hold). Fix: build all messages before the
+   first await (or snapshot the ask per command).
+3. **MEDIUM: `turnErrors` is never pruned** (`push-notifier.ts:186`, `:410`). It gets one entry per
+   `turn_end` of every session, for the whole life of `serve`, and only `stop()` clears it. That is
+   unbounded growth in the long-lived daemon. Delete the entry once its command is built, or when the
+   rules drop the turn.
+
+**Gate (touched files only, as scoped).** 5 test files: 53 pass, 0 fail. `bun run lint`: 1387 files,
+no fixes (matches the baseline). `bun run typecheck` (all three projects): exit 0. I did not re-run the full suite.
+
+**Mutation (mine).** I removed `offerPushAttachment()` from `attach` (`hosted-session.ts`). 3 tests went
+RED in `push-hook.test.ts`. I reverted it, and `git status` is clean.
+
+**Attacks tried.** (a) Features gate across a reconnect: **finding 1**. (b) Multi-device fan-out
+against the ask's lifetime: **finding 2**. (c) Is the observer counted in `attachments.size`
+(recheckAsks/reaper)? No: it is a separate field (holds). (d) Can a token principal register for push?
+No: the gate is on `principal.kind === "device"` (`connection.ts:436`/`:448`), and `deviceId` comes
+only from the principal (holds). (e) Pod daemon: `push` is absent unless `serve` builds it
+(`session-host.ts` build, `serve.ts` `buildPush`) (holds). (f) Steering window: the hook is sync, and
+I/O is deferred by `queueMicrotask` (holds; mutation-pinned by the executor). (g) Peer serialization:
+register/unregister are synchronous, with no lock (holds).
+
+**Nits (not blocking).** `session-host.ts`: `/** What \`open\` did … */ export interface OpenOutcome`
+is on one line. `serve.ts`: a comment is fused onto the `createSkillScan` line. `relay-link.ts:267`:
+a duplicated stale JSDoc above `sendPush`.
+
+**Executor behaviour.** Thorough and honest: it recorded its surviving mutations and its vacuous drafts,
+and it found and fixed a real defect (relay-leg `release` not closing the `Connection`). But deleting
+`sendPush`'s inner gate "because unreachable" was wrong: it was reachable via `flushHeldPushes`, so the
+surviving mutation was a signal about a missing test, not about redundant code. Same model family as
+the executor (Claude): shared blind spots are possible.
