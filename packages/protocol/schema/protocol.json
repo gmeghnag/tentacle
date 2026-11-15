@@ -195,6 +195,26 @@
       "minItems": 1,
       "type": "array"
     },
+    "AutoAcceptUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "by": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "on": {
+          "type": "boolean"
+        },
+        "type": {
+          "const": "auto_accept",
+          "type": "string"
+        }
+      },
+      "required": ["on", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
     "BackgroundExit": {
       "additionalProperties": true,
       "properties": {
@@ -370,6 +390,11 @@
     "ClientInfo": {
       "additionalProperties": true,
       "properties": {
+        "host": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
         "name": {
           "pattern": "^[a-z][a-z0-9-]{0,31}$",
           "type": "string"
@@ -2118,6 +2143,9 @@
     "OpenParams": {
       "additionalProperties": true,
       "properties": {
+        "autoAccept": {
+          "type": "boolean"
+        },
         "create": {
           "type": "boolean"
         },
@@ -2167,6 +2195,9 @@
     "OpenResult": {
       "additionalProperties": true,
       "properties": {
+        "autoAccept": {
+          "type": "boolean"
+        },
         "created": {
           "type": "boolean"
         },
@@ -2304,6 +2335,12 @@
           },
           "required": ["description", "type"],
           "type": "object"
+        },
+        "askedOn": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "explanation": {
           "type": "string"
@@ -3775,6 +3812,7 @@
           "agent_message_chunk": "#/$defs/AgentMessageChunk",
           "agent_thought_chunk": "#/$defs/AgentThoughtChunk",
           "agent_usage": "#/$defs/AgentUsage",
+          "auto_accept": "#/$defs/AutoAcceptUpdate",
           "background_exit": "#/$defs/BackgroundExit",
           "context_note": "#/$defs/ContextNote",
           "dsml_leak": "#/$defs/DsmlLeakUpdate",
@@ -3887,6 +3925,9 @@
         },
         {
           "$ref": "#/$defs/SessionSettingsUpdate"
+        },
+        {
+          "$ref": "#/$defs/AutoAcceptUpdate"
         }
       ]
     },
@@ -3920,6 +3961,29 @@
         }
       },
       "required": ["seq", "sessionId", "update"],
+      "type": "object"
+    },
+    "SetAutoAcceptParams": {
+      "additionalProperties": true,
+      "properties": {
+        "on": {
+          "type": "boolean"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["on", "sessionId"],
+      "type": "object"
+    },
+    "SetAutoAcceptResult": {
+      "additionalProperties": true,
+      "properties": {
+        "on": {
+          "type": "boolean"
+        }
+      },
+      "required": ["on"],
       "type": "object"
     },
     "SkillListEntry": {
@@ -5168,6 +5232,14 @@
       },
       "result": {
         "$ref": "#/$defs/PromptResult"
+      }
+    },
+    "session/set_auto_accept": {
+      "params": {
+        "$ref": "#/$defs/SetAutoAcceptParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SetAutoAcceptResult"
       }
     },
     "session/skills": {

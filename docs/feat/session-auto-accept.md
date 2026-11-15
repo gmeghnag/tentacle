@@ -1,6 +1,6 @@
 # feat/session-auto-accept — Auto-accept is the session's, shared by every client
 
-> **Status:** implementation (plan written, **not approved** — owner questions open)
+> **Status:** executed (six slices, all gates green — awaiting Review)
 > **Branch:** `feat/session-auto-accept`
 > **Size:** L as a whole → six slices, each S or M (table in Design) · **Blast:** load-bearing (it changes what the single broker's requester auto-answers, adds a session field to the trusted `serve` sidecar, and adds a protocol method + update; AGENTS §7 "single broker", "a pod is not trusted", persistence, protocol) · **Suited:** slices 1, 6 may go to any executor with standard Review; slices 2–5 a strong executor, and **mandatory fresh-context Review** of the whole branch red-teaming §7 (single broker, pod not trusted, persistence). The owner assigns executors.
 > **Changelog:** `changelog.d/session-auto-accept.changed.md` — `- **Auto-accept is per session, on every device.** Shift+Tab in a terminal or the switch on the phone's approval sheet turns auto-accept on or off for the whole session; every terminal and phone attached to it follows at once, and a \`serve\` session keeps it across a daemon restart. Approvals it gives are one-time only; a pod session (\`run\`/\`attach\`) keeps it on the laptop as before.`
@@ -422,7 +422,134 @@ clean (AGENTS §6).
 
 ## Execution
 
-*— (pending)*
+*— claude-sonnet-4-5, 2026-11-15*
+
+**Load-bearing check (re-run first, per the brief): HOLDS.** Every cited site was
+read on this branch before the first edit: the decision point is the requester
+(`permission-ui.ts:59-61` `autoApproves`, `:447-449`; `relay-policy.ts:62-72`;
+`apps/mobile/src/permission-sheet.ts` + `connection.ts:191-192` `holdUntilSet`),
+`toPermissionRequest` still rebuilds an ask from an allowlist
+(`permission-router.ts:76-86`), and trust is a laptop-side fail-closed
+construction bit — `daemonWakes` (`remote-client.ts:402-410`, set only at
+`connect.ts:188`). The call sites that build a client are the four the plan
+names. So a bit of the same kind is a sound gate.
+
+**Repro (before any edit).** `rg -n -i "autoaccept|auto_accept|permission_mode"
+packages/protocol/src` → only the five `docs/fix/autoaccept-wake-turns.md`
+comments; `rg -n -i "autoaccept|auto_accept|auto-accept" apps/mobile/src` → no
+matches (exit 1). The capability is genuinely absent, as the Context says.
+
+### As built, by slice
+
+1. **Protocol** (`session.ts`, `methods.ts`, `updates.ts`, `permission.ts`):
+   `session/set_auto_accept` (`{sessionId,on}` → `{on}`), `OpenParams.autoAccept`,
+   `OpenResult.autoAccept`, the `auto_accept` update (`{on, by?}`) classed
+   `display`, `ClientInfo.host`, `permission_request.askedOn`.
+   `protocol.json` regenerated with `bun run schema:export` (never by hand).
+   `packages/protocol/test/auto-accept.test.ts`; fixtures added to
+   `json-schema.test.ts` (its "every method has a fixture" test is a hard gate).
+2. **Daemon** (`hosted-session.ts`, `session-host.ts`, `connection.ts`,
+   `persisted-session.ts`, `daemon-state-file.ts`, `session-persister.ts`):
+   `HostedSession.autoAccept` + `setAutoAccept(on, by)` (emit only on a change,
+   then persist); `SessionHostOptions.sharedAutoAccept` gates the `OpenResult`
+   field; `OpenParams.autoAccept` seeds a CREATED session only; the sidecar
+   carries `autoAccept: true` only when on (exactly `true` parses back, anything
+   else is off); `restore` keeps it, a `reopen` of an archived session drops it.
+   `worker.ts` and `serve.ts` declare `sharedAutoAccept: true`.
+   Tests: `session-auto-accept.test.ts` (T2), `session-auto-accept-persist.test.ts`
+   (sidecar round-trip, damaged value, reopen→off, no-persister host),
+   `session-auto-accept-asked-on.test.ts` (T6, daemon half).
+3. **Client** (`core/permission.ts`, `client/auto-accept-link.ts` new,
+   `remote-client.ts`, `remote-session.ts`, `mapping.ts`, `permission-router.ts`):
+   `RemoteClientOptions.sharedAutoAccept` (TRUST bit, default off, never keyed on
+   `daemonKind`); the pure `AutoAcceptHandle` (`auto-accept-link.ts` — local-first
+   `set`, in-order `receive`, `pendingSet` across a drop, `sync` adopts the
+   snapshot only when nothing of ours is pending); `RemoteSession.autoAccept` and
+   `autoAcceptsTurn` widening to every turn of the session **only** when
+   `shared()`; `autoApproves`/`ownRequest` MOVED to `@tentacle/core` and
+   re-exported by `@tentacle/tui`, so the phone and a terminal share one rule.
+   Tests: `client/test/session-auto-accept.test.ts` (T3),
+   `client/test/auto-accept-link.test.ts` (the pure rules).
+4. **CLI + TUI**: new `packages/cli/src/session-auto-accept.ts` (the ROUTING feed
+   — binds to a session's link when it shares, else keeps this laptop's value;
+   `autoAcceptOf`/`seedAutoAcceptOf` are the structural seams); wired for the
+   worker/hop path (`main.ts`) and `connect` (`connect.ts`), with `use` on every
+   session create/switch and `seedAutoAcceptOnCreate` carrying the value into a
+   `/clear` fork. TUI: `AutoAcceptSharedFeed.remote()`, one transit notice
+   naming the device, the help line says `(whole session)`.
+   Tests: `cli/test/session-auto-accept.test.ts`, `tui/test/session-auto-accept.test.tsx` (T4).
+5. **App**: `permission-sheet.ts` owns the decision (`eligible` → `autoApproves`
+   over the session's link, answered `allow_once`, never `asking`), a pure
+   `alsoAsked`, `PermissionSheet.tsx` renders the switch and the
+   `auto-accepted · <tool>` line; `APP_CLIENT_OPTIONS.sharedAutoAccept: true`.
+   Tests: `apps/mobile/test/permission-sheet-auto-accept.test.ts` (T5),
+   `apps/mobile/test/permission-also-asked.test.ts` (T6, phone half).
+6. **`changelog.d/session-auto-accept.changed.md`** — one `changed` bullet.
+
+### Drift from the Implementation (and why)
+
+- **D7's "askedOn drops the phone's own label" moved to `@tentacle/core`**
+  (`otherDevicesAsked`), not into `permission-sheet.ts`: the same rule is what a
+  terminal would need, and it is a pure function with its own test. The sheet
+  passes `deps.ownHost()`.
+- **ClientInfo.host is added in `RemoteClient.wireClientInfo`**, at the
+  handshake, not threaded through every `CLIENT_INFO` constant — one gate
+  (`sharedAutoAccept`) in one place, so a pod client structurally cannot send it.
+- **`askedOn` skips attachments that did not declare `permission_request`**: a
+  client too old to show an ask takes the v10 fallback and is never asked, so
+  naming it as a sibling would be a lie. This is stricter than the plan's
+  wording and is pinned by a test.
+- **The TUI's transit notice lives inside the existing host-notices effect**,
+  not in a new one: `App.tsx`'s effect count is pinned by six structural tests
+  (`use-dock`, `app-quit-clear-structure`, the `S5`–`S14` family). Folding it in
+  keeps the count at 22 and the notice still fires. `AutoAcceptSharedFeed.remote()`
+  was added for the same reason correctness needed it (below).
+- **One real bug the plan did not foresee, found by the repo's own real stack**
+  (`connect-functest-a`): (a) a TUI's OWN Shift+Tab came back through the feed
+  and was announced as "from another device" — now gated by `remote()`; (b) a
+  flip pressed BEFORE the session's first open answered was overwritten by that
+  open's snapshot (the TUI went on deciding OFF, so a shell ask parked the turn).
+  Both fixed in `auto-accept-link.ts` (`pendingSet` when unconfirmed) and the
+  TUI, each with a regression test shown red on the buggy code.
+- **The accessor naming**: `RemoteSession.autoAccept` is the LINK (what a view
+  reads); the handle is `autoAcceptHandle` (client-only). `local-runtime.ts`
+  re-exposes the link on `PersistingController`, so the routing feed binds to the
+  controller it already receives.
+
+### Mutation checks (each run, then restored)
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | drop the `emit` in `setAutoAccept` | 4/7 of T2 red |
+| M2 | drop the `persist()` | 2/5 persist tests red |
+| M3 | pass `record.autoAccept` through at the reopen site | P4 (reopen → off) red |
+| M4 | drop `unbind()` in the routing feed's `use` | "switching sessions re-binds" red |
+| M5 | widen `autoAcceptsTurn` unconditionally | T3 pod-widening red |
+| M6 | default the client's trust bit to on | T3 bit-off + widening red |
+| M7 | drop `pendingSet` in `sync` | "offline OFF never undone" red |
+| M8 | drop the transit notice's `appendNotice` | 2 T4 tests red |
+| M9 | let `autoApproves` answer every kind | T4 `hooks_trust` red |
+| M10 | ignore the link in the sheet's requester | 3 T5 tests red |
+| M11 | drop `ownHost` from `otherDevicesAsked` | 2 T6 (phone) red |
+| M12 | drop the `clientSupportsUpdate` guard in `askedOn` | T6 "older client" red |
+| M13 | drop `remote()` from the notice gate | the own-Shift+Tab regression test red |
+| M14 | drop `pendingSet` when unconfirmed | the pre-confirmation regression test red |
+
+(The sheet's arm window made two T5 cases hang until the clock was advanced a
+full `ARM_MS` — a test bug, fixed, not a code change.)
+
+### Gate
+
+`bunx tsc --noEmit`, `bunx tsc -p apps/mobile`, `bunx tsc -p apps/relay` and
+`bun run lint` are all clean (0 errors, 0 warnings — the §6 baseline).
+`bun run schema:export` regenerated `protocol.json`; `json-schema.test.ts` is
+green. Full `bun test` is green except the three opt-in skips (k8s, docker, the
+real-socket keepalive), as §6's baseline describes.
+
+**Unverified:** the phone's `Switch` and the `perm-also-asked` note are rendered
+by React Native components, so only their pure module (`permission-sheet.ts`) is
+covered here — no simulator run. To verify: `apps/mobile` flows 08 (`perm-sheet`
+screen) against a `serve` on the same session as a TUI.
 
 ## Review
 

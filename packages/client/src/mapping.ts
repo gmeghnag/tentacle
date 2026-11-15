@@ -350,6 +350,7 @@ export function updateToEvent(
     case "subagent_notify":
     case "subagent_message":
     case "session_settings":
+    case "auto_accept":
     case "plan":
     case "turn_start":
     case "turn_end":

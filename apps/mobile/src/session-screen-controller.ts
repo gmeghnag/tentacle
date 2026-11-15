@@ -215,6 +215,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       ? createPermissionSheet({
           now: deps.now,
           onChange: () => emit(),
+          // The session's shared auto-accept (docs/feat/session-auto-accept.md
+          // D6): read through a function, because the handle (and its link) only
+          // exists after the attach — the sheet is built first.
+          autoAccept: () => handle?.autoAccept,
           // The age guard's release is a clock event: it re-renders through the
           // same `onChange` every other change uses (never a screen-side timer).
           schedule: (fn, ms) => {

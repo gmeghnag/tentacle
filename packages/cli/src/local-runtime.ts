@@ -316,6 +316,10 @@ export interface PersistingController extends SessionController {
   seal(): void;
   /** `RemoteSession.sessionId`. */
   readonly sessionId: string | null;
+  /** `RemoteSession.autoAccept`: the session's shared switch (a feed binds to it). */
+  readonly autoAccept: RemoteSession["autoAccept"];
+  /** `RemoteClient.seedAutoAcceptOnCreate`: the value the NEXT created session starts with. */
+  seedAutoAccept(on: boolean): void;
   /** `RemoteSession.watch`; a foreign turn is saved at its end, a `history` at once. */
   watch: RemoteSession["watch"];
   /** `RemoteSession.open` (the eager attach of an `attach` session; else a no-op). */
@@ -776,6 +780,14 @@ export function persistingController(
     get sessionId() {
       return inner.sessionId;
     },
+    get autoAccept() {
+      return inner.autoAccept;
+    },
+    // The open that CREATES a session carries it (`OpenParams.autoAccept`): a
+    // `/clear` fork and a hop target start with the switch the person has now.
+    seedAutoAccept(on: boolean) {
+      inner.seedAutoAccept(on);
+    },
     ...(carried
       ? {
           settings: () =>
@@ -854,6 +866,14 @@ export interface LocalRuntimeDeps {
   /** `container` for `run`/`attach`: picks the advice for a daemon too old to give its own. */
   readonly daemonKind?: DaemonKind;
   /**
+   * This daemon SHARES the session's auto-accept with every client
+   * (docs/feat/session-auto-accept.md D4): a TRUST bit, so it fails closed.
+   * Set by the worker path alone (`startWorkerRuntime`, where the daemon is this
+   * laptop's own code) and by `connect`; a pod `run`/`attach` NEVER says it, so
+   * nothing a pod claims can turn auto-accept on.
+   */
+  readonly sharedAutoAccept?: boolean;
+  /**
    * This client can put a `move_session` proposal to its owner (docs/feat/session-hop.md
    * D8/D9): declared in `initialize` as `clientCapabilities.hop`, so a POD daemon
    * offers the tool to the sessions it creates. Set by a hop target's own runtime
@@ -922,6 +942,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     hooksTrust,
     clientInfo: CLIENT_INFO,
     ...(deps.daemonKind ? { daemonKind: deps.daemonKind } : {}),
+    ...(deps.sharedAutoAccept ? { sharedAutoAccept: true } : {}),
     ...(deps.hop ? { hop: true as const } : {}),
     ...(deps.titleModelProvider ? { titleModelProvider: deps.titleModelProvider } : {}),
     ...(deps.namedModels ? { namedModels: deps.namedModels } : {}),
@@ -1390,6 +1411,9 @@ export async function startWorkerRuntime(
         // images-off-reason.md).
         modelScope: "laptop" as const,
         resume: deps.resume,
+        // The daemon here is THIS laptop's own code, so the session's
+        // auto-accept is shared by every TUI on it (docs/feat/session-auto-accept.md D1).
+        sharedAutoAccept: true,
         hooksTrustStore: fileTrustStore(config.configDir, (message) => {
           logDaemonError(config.configDir, new Error(message));
         }),

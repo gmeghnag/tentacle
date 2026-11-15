@@ -48,7 +48,15 @@ import { rnWebSocketCtor } from "./rn-websocket.ts";
  * so a second construction site cannot quietly forget it (AGENTS §7: one
  * session path, one set of options).
  */
-export const APP_CLIENT_OPTIONS = { sha256Bytes: sha256Hex } as const;
+export const APP_CLIENT_OPTIONS = {
+  sha256Bytes: sha256Hex,
+  // The phone reaches a `serve` on the user's own host and nothing else
+  // (docs/feat/mobile-relay.md: "Only a `serve` on the user's host has a device
+  // route"), so the session's auto-accept is SHARED with it — the same TRUST
+  // bit a `connect` TUI sets (docs/feat/session-auto-accept.md D4/D6). A pod is
+  // never reachable from here, and the bit fails closed anyway.
+  sharedAutoAccept: true,
+} as const;
 
 export interface OpenComputerDeps {
   /** React Native's global `WebSocket` (injected: this module imports no RN). */

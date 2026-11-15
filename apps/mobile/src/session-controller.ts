@@ -17,7 +17,7 @@
  *   decided by error CLASS/CODE — never by message text, which a pod daemon
  *   chooses (AGENTS §7 "a pod is not trusted").
  */
-import { AttachTimeoutError, type SessionActivity } from "@tentacle/client";
+import { AttachTimeoutError, type AutoAcceptLink, type SessionActivity } from "@tentacle/client";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 
 /** Why an open failed, as the screen's banner names it (plan F14–F16, F24 later). */
@@ -45,6 +45,13 @@ export interface SessionHandle {
   open(): Promise<void>;
   detach(): Promise<void>;
   watch(listener: (activity: SessionActivity) => void): () => void;
+  /**
+   * The session's shared auto-accept (docs/feat/session-auto-accept.md D6):
+   * `RemoteSession.autoAccept`, so the sheet's switch IS the session's and a
+   * flip on another device arrives here. Absent on a handle that has none (a
+   * fake, or an older client): the sheet then has no switch at all.
+   */
+  readonly autoAccept?: AutoAcceptLink;
 }
 
 export interface OpenOptions {

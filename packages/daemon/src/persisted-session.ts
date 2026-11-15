@@ -90,6 +90,11 @@ export interface DaemonSessionState {
   readonly returned?: readonly ReturnedEntry[];
   /** The installed head's index in `messages` (absent = none in the history now). */
   readonly head?: number;
+  /**
+   * The session's auto-accept, written only when ON (docs/feat/session-auto-accept.md
+   * D3): absent = off, so an older build's file and this one read the same.
+   */
+  readonly autoAccept?: boolean;
   /** The session log's part (absent: none — e.g. `archive`'s capture after the close, which reuses the one before). */
   readonly log?: DaemonLogCapture;
 }
@@ -125,6 +130,12 @@ export interface DaemonSessionRecord extends SessionRecord {
    * there has nothing to answer), cut short or not. Absent: none.
    */
   readonly head?: number;
+  /**
+   * The session's auto-accept at its last write. Absent = off. A `serve`
+   * restart KEEPS it; an ARCHIVED session reopens with it OFF (owner Q3),
+   * which `SessionHost.restore` decides by not handing it to a reopen.
+   */
+  readonly autoAccept?: boolean;
   /** The log's projection at `logHead` (`messages` = its first `k` messages + the overlay). */
   readonly logged: readonly ChatMessage[];
   /** The log entry this record pairs with: a reload continues the session's log lineage from it. */

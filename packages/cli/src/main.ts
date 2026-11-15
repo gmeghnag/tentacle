@@ -141,6 +141,7 @@ import {
 import { localAutoAccept, styleInfo } from "./run-ui.ts";
 import { serveModelNotice } from "./serve-model-notice.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
+import { autoAcceptOf, routingAutoAccept, seedAutoAcceptOf } from "./session-auto-accept.ts";
 import { inProcessSessions } from "./session-jobs.ts";
 import { NOT_A_TERMINAL, dimIf, termOf } from "./streams.ts";
 import { startTerminal } from "./terminal.ts";
@@ -2130,6 +2131,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         const offTarget = facade.onTarget((view) => {
           place.current = view.place;
         });
+        // The session's auto-accept, shared by every device on it (docs/feat/
+        // session-auto-accept.md D5): a routing feed, because a hop moves the
+        // TUI to another runtime whose session has its own link. A pod target
+        // is a pod daemon, so its link never shares — the value is carried in
+        // memory, exactly as before this feature.
+        const autoAcceptFeed = routingAutoAccept();
+        const created = facade.createSession;
+        /** The controller the TUI is on now: what a `/clear` seeds the next session from. */
+        let lastController: ReturnType<typeof created> | null = null;
         await runSessionTui(sessions, {
           start: (sessionOptions) =>
             startTui(null, {
@@ -2141,7 +2151,22 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
               jobs: facade.jobs,
               autoWakeOnJobExit: config.autoWake,
               subagentsTwoWay: config.subagentsTwoWay,
-              createSession: facade.createSession,
+              autoAccept: autoAcceptFeed,
+              autoAcceptShared: autoAcceptFeed,
+              createSession: () => {
+                // A session this call CREATES (a `/clear` fork, a hop target)
+                // starts with the switch the person has now: the open carries it
+                // as `OpenParams.autoAccept` (D5), read by the SAME client.
+                seedAutoAcceptOf(lastController, autoAcceptFeed.current());
+                const controller = created();
+                // The session this TUI is on now: the feed adopts its value and
+                // listens for another device's flips. A controller built by an
+                // in-process facade has no shared link, and the feed then keeps
+                // this laptop's value — the local behaviour, unchanged.
+                autoAcceptFeed.use(autoAcceptOf(controller));
+                lastController = controller;
+                return controller;
+              },
               link: facade.link,
               mcpStatus: facade.mcpStatus,
               hop: hopView.hop,

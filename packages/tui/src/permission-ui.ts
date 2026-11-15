@@ -17,6 +17,8 @@ import {
   type PermissionBroker,
   type PermissionRequest,
   type PermissionResponse,
+  autoApproves,
+  ownRequest,
 } from "@tentacle/core";
 import {
   type Dispatch,
@@ -44,41 +46,14 @@ export interface PermissionChoice {
   readonly reply?: true;
 }
 
-/**
- * Whether auto-accept (Shift+Tab) may answer `req`. Never a project-hooks
- * trust request (docs/feat/hooks-project-trust.md): trusting a repo's code is
- * a human decision, not a tool call to wave through. Never a session-hop
- * request either (docs/feat/session-hop.md D9/H2): a move is the owner's
- * decision, and its whole point is that no standing approval carries across it.
- * Never a request of a
- * turn that is not `own` — another device's turn (owner Q3,
- * docs/feat/tui-foreign-turns.md C5), or, on a trusted `serve` daemon, one of
- * the session's own wake turns, which `autoAcceptsTurn` accepts
- * (docs/fix/autoaccept-wake-turns.md).
+/*
+ * `autoApproves` and `ownRequest` moved to `@tentacle/core` (docs/feat/
+ * session-auto-accept.md D4): the phone's permission sheet decides with the
+ * SAME rule and cannot import the TUI (React 19 vs 18, AGENTS §6). Re-exported
+ * here so every existing importer — the App, the detached run's
+ * `relay-policy.ts` — keeps working unchanged.
  */
-export function autoApproves(req: PermissionRequest, own = true): boolean {
-  return own && req.kind !== "hooks_trust" && req.kind !== "session_hop";
-}
-
-/**
- * Is a request of MY turn? `owns`: the session's own-vs-foreign test, absent
- * when no session decides (a local one: every request is mine). Under a
- * session that decides, a request with no turn is not known to be mine.
- *
- * Feed it the WIDEST test the session offers — `autoAcceptTest` picks
- * `autoAcceptsTurn` (own turns AND, on a trusted `serve`, the session's own
- * wake turns) over `ownsTurn` when both exist
- * (docs/fix/autoaccept-wake-turns.md A5).
- */
-export function ownRequest(
-  turnId: string | undefined,
-  owns: ((turnId: string) => boolean) | undefined,
-): boolean {
-  if (!owns) {
-    return true;
-  }
-  return turnId !== undefined && owns(turnId);
-}
+export { autoApproves, ownRequest };
 
 /**
  * The own-vs-foreign test the session offers, or `undefined` when it decides
@@ -290,6 +265,24 @@ export interface AutoAcceptFeed {
   set(on: boolean): void;
   /** Another TUI flipped it; returns the unsubscribe. */
   onChange(listener: (on: boolean) => void): () => void;
+}
+
+/**
+ * A feed that can also report flips from ANOTHER DEVICE
+ * (docs/feat/session-auto-accept.md D5): the routing feed binds to a shared
+ * session's link, so a contrast between what this TUI last showed and what the
+ * daemon says came from somewhere else. `lastBy()` names it when the daemon
+ * did (display only: untrusted text, so a surface must sanitize it).
+ */
+export interface AutoAcceptSharedFeed extends AutoAcceptFeed {
+  /** Who made the last change, when the daemon named one. */
+  lastBy(): string | undefined;
+  /**
+   * Was the last change another DEVICE's? Only one of those earns a transcript
+   * notice: the person who pressed Shift+Tab here saw the status bar change, and
+   * reporting their own flip back to them as news would be noise.
+   */
+  remote(): boolean;
 }
 
 /**

@@ -59,6 +59,7 @@ import {
   type SessionSkillsParams,
   type SessionSkillsResult,
   type SessionTtlParams,
+  type SetAutoAcceptParams,
   type SnapshotParams,
   type SnapshotResult,
   type SubagentMessageParams,
@@ -173,6 +174,18 @@ export class Connection {
    * TUI never lets the model propose a move nobody is asked about.
    */
   private hop = false;
+  /**
+   * The label `auto_accept` carries as `by`: this connection's declared host
+   * (slice 6) or else its `clientInfo.name`, read once at `initialize` — never
+   * client-chosen per call, so the text a client shows is the daemon's own
+   * reading of who set the switch (display only, untrusted).
+   */
+  private autoAcceptBy: string | undefined;
+  /**
+   * This connection's declared device name (`ClientInfo.host`), stamped into
+   * every ask's `askedOn` (docs/feat/session-auto-accept.md D7). Display only.
+   */
+  private clientHost: string | undefined;
 
   constructor(
     channel: DuplexChannel,
@@ -338,6 +351,12 @@ export class Connection {
       case Method.UpdateSettings: {
         const { sessionId, id, settings } = params as UpdateSettingsParams;
         return this.host.updateSettings(this.lookup(sessionId), id, settings);
+      }
+      // Synchronous, holds no lock (AGENTS §7): it never awaits a turn, and the
+      // fan-out is synchronous, so two sets keep one total order (P2).
+      case Method.SetAutoAccept: {
+        const { sessionId, on } = params as SetAutoAcceptParams;
+        return this.lookup(sessionId).setAutoAccept(on, this.autoAcceptBy);
       }
       case Method.Snapshot:
         return this.snapshot(params as SnapshotParams);
@@ -601,6 +620,12 @@ export class Connection {
     // session IT creates may be offered the tool. Per connection (a pod daemon
     // serves a `run`, an `attach` and a hop target alike), and absent = no hop.
     this.hop = params.clientCapabilities.hop === true;
+    // The label an `auto_accept` update carries: this connection's declared
+    // device name (`clientInfo.host`, which only a TRUSTED daemon is ever given
+    // one for), else its `clientInfo.name`. Picked ONCE, here, so a later frame
+    // cannot claim another device's name.
+    this.autoAcceptBy = params.clientInfo?.host ?? params.clientInfo?.name;
+    this.clientHost = params.clientInfo?.host;
     return {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: {
@@ -759,6 +784,7 @@ export class Connection {
       ...(this.updateTypes ? { updates: this.updateTypes } : {}),
       ...(this.hop ? { hop: true } : {}),
       ...(this.servesModel ? { model: this } : {}),
+      ...(this.clientHost !== undefined ? { host: this.clientHost } : {}),
     };
     const { hosted, created, resync, epoch } = this.host.open(params, attachment, prepared);
     this.attached.set(hosted.id, { hosted, attachment });
@@ -768,6 +794,9 @@ export class Connection {
       created,
       resync,
       ...(hosted.settingsReport ? { settings: hosted.settingsReport } : {}),
+      // Present iff THIS daemon shares auto-accept (docs/feat/session-auto-accept.md
+      // D2): a pod omits it, so no laptop client reads or sets it there.
+      ...(this.host.sharedAutoAccept ? { autoAccept: hosted.autoAccept } : {}),
       // Read in this same synchronous segment as the replay: omitted when 0.
       ...(hosted.unflushedExits > 0 ? { unflushedExits: hosted.unflushedExits } : {}),
     };
