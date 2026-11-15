@@ -356,3 +356,23 @@ The STOP itself is right. Its premises check out against the source:
 - Is the B9-b layer right? No: finding 2.
 
 **How the executor behaved:** it stopped on time and did not force the code to fit a wrong plan. It mis-signed its own section.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-15* (fresh-context reviewer, same model family as the orchestrator) — reviewed `git diff HEAD~1` (`ab96fba2`).
+
+**Verdict: APPROVE**, with one action for the orchestrator before merge (R1 below).
+
+- **Finding 3 (B9-a): FIXED, checked by mutation.** The outbox port is now the screen's own handle: `screenSessionPortOf` (`apps/mobile/src/outbox-session.ts:103`), wired in `apps/mobile/App.tsx:261` and through `composeHandle` (`session-screen-controller.ts`, set at attach and cleared on `leave`/`dispose`). `RemoteClient.register` is untouched. Mutation A (test port wired back to a second `newSession`, the old `outboxOf` shape): both B9 tests turn red (`Received: -1`, `Received length: 0`). Mutation B (production code: `composeHandle = null` instead of `wired`): both tests red. After reverting each one, `git status` is clean and the tests pass.
+- **Finding 2 (B9-b): resolved correctly.** No fix was written, because no daemon-backed repro shows the duplicate, so the lossy fix in the fold layer is avoided. Caveat (not blocking): by the executor's own account the reset in the B9-b test arrives with `turn: null`, which is the early branch. So the test never reaches the `turn.reset` re-delivery path at `remote-session.ts:1766`. It guards against a duplicated row, but its title ("a mid-turn resync") claims more than it shows. That branch is still unproven either way.
+- **Finding 1 (signature): NOT resolved, and now repeated. R1, MEDIUM, `docs/fix/mobile-photo-row.md` "Fix round 1".** The section is signed `claude-opus-5-5` and says "not DeepSeek", but its commit `ab96fba2` is titled `review round 1 (deepseek)`. The round-1 Execution signature is also unchanged. Only the orchestrator knows which model ran each round, so the orchestrator must correct both signatures (or the commit attribution) before merge (AGENTS §10).
+- **Regressions checked:**
+  - `outboxOf().driver` has only one caller, `App.tsx:300`, per screen, so no background path lost its own port.
+  - A send made before the attach finishes makes the port return null, so the item stays `waiting` (13b's `decide`).
+  - A re-attach updates `composeHandle` again.
+- **Gate:**
+  - `bun test apps/mobile`: 1189 pass, 0 fail.
+  - `outbox-link.test.ts`: 13 pass.
+  - `bun run typecheck`: exit 0.
+  - `bun run lint`: 1497 files clean.
+  - I did not re-run the full `bun test`; the executor reports 10809 pass, 5 skip.
