@@ -829,6 +829,39 @@ Gate: `bun run typecheck` green; `bun run lint` clean (1518 files); `bun test pa
 
 **What holds:** H1, H2, H4, M6, M7, M8 and M9 are fixed, and each is pinned by a test shown red under mutation.
 
+### Round 3
+
+*— claude-opus-5-5, 2026-11-15* (scope: `git diff HEAD~1` = `2ec27be2`)
+
+**Verdict: PASS** for the scope reviewed (the TS side and the round-2 findings). This verdict does not cover:
+- the open S2 mic under-capture;
+- the unrun live checklist L1–L10;
+- `bun run voice:test`, not run in this session (it needed an approval). The Swift side is unchanged in this diff, but the round-2 Swift edits have never been built by a reviewer.
+
+Gate: `bun run typecheck` green; `bun run lint` clean (1518 files); `bun test packages/{tui,cli,config}/test` 5314 pass / 2 skip / 0 fail. After every mutation the tree was byte-identical (`git status` empty).
+
+| Round-2 finding | Fix | Mutation | Result |
+|---|---|---|---|
+| NEW-1: a 3 s pause stops a dictation with auto-stop off | `voice-endpoint.ts:129`: the `autoStop` gate now comes before the hard stop | disable the gate | **RED** (4 fail). The `r2.ts` (1) repro now never sends `stop` with the default config. |
+| NEW-2: no `<configDir>/voice/` | `openVoiceLog`: `mkdir`, then 1 MiB rotation, then open | skip the `mkdir` | **RED** (2) |
+| | | skip the rotation | **RED** (1) |
+| | `spawnFailed` event: the strip goes back to idle | the reducer keeps `starting` | **RED** (1) |
+| | — | `r2.ts` (2) with a fresh config dir | `voice/helper.log` created; real `Bun.spawn` ran |
+| M5: the spawn options are never pinned | `makeDefaultSpawner` (`voice-spawn.ts`) + `bunSpawnOptions` | `stderr: "inherit"` in `bunSpawnOptions:135` | **RED** (4) |
+| | | `{...options, stderr: "inherit"}` in the production `Bun.spawn` call (`useVoice.ts:76`) | **RED** (1). This mutation survived two rounds and is now caught. |
+
+**Regressions looked for, none found:**
+- `spawnFailed` is dispatched from inside `runCommands`, so it re-enters the reducer. The outer `setModel` runs before it, and the queued `send` is a no-op because there is no child.
+- The test that replaces `Bun.spawn` restores it in a `finally` (`voice-spawn.test.ts:273`).
+
+**Still open (from before; not this round's scope):**
+- The S2 capture bug.
+- L1–L10 with the owner.
+- The `connect` voice pin is a source-text match.
+- The helper's VAD is a level-based placeholder (−45 dBFS), which only matters with auto-stop on.
+
+**Executor:** each fix is targeted and comes with a test shown red under its mutation. This round, no fix introduced a regression.
+
 ## Appendix — `sweep.py` (S1 runs it; written 2026-11-15, not yet run)
 
 Run with the V0 venv: `.tentacle/tmp/eval-realtime-media/v0/env/venv/bin/python .tentacle/tmp/voice-dictation/sweep.py`. It replays Silero probabilities once per file, then sweeps the silence floor {200…800 ms} × Smart Turn threshold {none, 0.5…0.95} × hard stop {none, 2 s}. It reports, per cell, the truncated utterances, the files that never stopped, and the endpoint wait p50/p95, plus the longest internal pause per utterance (the comma pause).
