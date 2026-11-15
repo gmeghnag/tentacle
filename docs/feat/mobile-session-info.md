@@ -341,3 +341,12 @@ Red first (stub returning empty view → fail), then green; mutation proof per �
 ## Review
 
 *— (reviewer), (date)*
+
+#### Owner decisions (2026-11-15 12:20, chosen on the mockups `.tentacle/tmp/mobile-ui/session-info-mockups.html`)
+
+1. **Model name only** — no `agentInfo.provider` field, no profile.
+2. **Model under the title** (`● Idle · <model>`). When the model id has slashes (e.g. `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017`) show only the part after the LAST `/` (`DeepSeek-V4.1-Flash-1017`); the full id stays in the Session info sheet. Pure helper + unit test.
+3. **Auto-accept: a real switch** in Session info, bound to the session's shared auto-accept (feat/session-auto-accept), gating on the laptop.
+4. **Context: also in the header** — a thin bar ONLY (no "8% contesto" text) under the title line, live from `agent_usage`; the exact numbers stay in the sheet.
+5. **NEW: tap the title to rename the session** — an inline edit / iOS alert with a text field, saved through the existing rename path (the TUI's `/rename`, `session/rename` or the title entry — find it with file:line), visible on every client; empty or unchanged = no-op; error state.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
