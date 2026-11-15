@@ -1,6 +1,6 @@
 # fix/mobile-chat-glitches — mobile chat glitches (items 1, 2, 3, 5, 6, 9, 10)
 
-> **Status:** implementation — **NOT approved** (Owner questions open, see the end of Implementation)
+> **Status:** implementation APPROVED by the owner (2026-11-15)
 > **Branch:** `fix/mobile-chat-glitches`
 > **Type:** fix · **Size:** L (revision 2; was M) · **Blast:** cross-module · **Suited:** a strong model executes. The bug-2 slice touches `@tentacle/client` and the outbox's F3 durability contract. Review is **mandatory fresh-context** (sub-agent or `/code-review`), red-teaming F3 ("an item leaves disk only once the daemon has its key").
 > **Changelog:** `changelog.d/mobile-chat-glitches.fixed.md`
@@ -694,6 +694,16 @@ Still no protocol, wire or persisted-format change.
 - **Q4 — item 9's error wording.** Keep `Couldn't load` until 9b, or show the
   class (e.g. `Couldn't load · timed out`)?
   **Recommendation: keep it now.** Decide with 9b once the cause is known.
+
+#### Owner answers (2026-11-15)
+
+- Q1: **keep "Sending…"**.
+- Q2: **TUI parity** for the Agent card line (running `<last activity> · <N> tool uses`, done `Done · <N> tool uses`, moved `Moved to background · sa-N`, no tokens).
+- Q3: **every send dismisses the keyboard except Stop** (Send, Return, queued steer, Send later).
+- Q4: not asked — the recommendation stands by default (no visible change): keep `Couldn't load` until 9b decides with data.
+- Blocker: `fix/push-extension-build` merge approved by the owner (iOS build on main).
+
+**Implementation APPROVED by the owner (2026-11-15).**
 
 ## Execution
 
