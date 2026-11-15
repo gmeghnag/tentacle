@@ -134,7 +134,7 @@ const styles = StyleSheet.create({
   card: {
     width: "100%",
     maxWidth: 340,
-    borderRadius: radius.card,
+    borderRadius: radius.dialog,
     overflow: "hidden",
     gap: 12,
     paddingTop: 20,

@@ -5,6 +5,9 @@
  * picks a palette by `useColorScheme`; every primitive takes it as a prop.
  * (The pre-restyle alias names — `groupedBackground`, `secondaryLabel`, … — were
  * removed in Slice 6: every screen now reads the tokens.)
+ *
+ * The dark ramp, `drawer`, the E2 `band`/`bandOnSheet` surfaces and the radii are
+ * docs/feat/mobile-chrome.md (S1, Owner Q-B/E2).
  */
 
 export interface Palette {
@@ -14,6 +17,18 @@ export interface Palette {
   readonly page: string;
   readonly card: string;
   readonly sheet: string;
+  /**
+   * The sessions drawer's panel, one step BELOW `page` so the drawer reads as a
+   * layer with no shadow (docs/feat/mobile-chrome.md Design 3).
+   */
+  readonly drawer: string;
+  /**
+   * The E2 section band: ONE full-width surface per section, always one step
+   * above the ground it sits on (docs/feat/mobile-chrome.md Design 4).
+   */
+  readonly band: string;
+  /** The band inside a sheet, whose own ground becomes `page` (Design 4). */
+  readonly bandOnSheet: string;
   /** Secondary fill: user bubble, neutral button, text field. */
   readonly fill: string;
   /** Code block / inline code background (on a page or card). */
@@ -70,6 +85,9 @@ const light: Palette = {
   page: "#FFFFFF",
   card: "#FFFFFF",
   sheet: "#FFFFFF",
+  drawer: "#F7F7F8",
+  band: "#FFFFFF",
+  bandOnSheet: "#FFFFFF",
   fill: "#EFEFF4",
   code: "#F2F2F7",
   codeOnSheet: "#F2F2F7",
@@ -106,31 +124,36 @@ const light: Palette = {
 };
 
 const dark: Palette = {
-  bg: "#000000",
-  page: "#000000",
-  card: "#1C1C1E",
-  sheet: "#1C1C1E",
-  fill: "#2C2C2E",
-  code: "#1C1C1E",
-  codeOnSheet: "#2C2C2E",
-  label: "#FFFFFF",
-  sec: "#AEAEB2",
-  sep: "#38383A",
-  sepChat: "#38383A",
-  sepSheet: "#48484A",
+  bg: "#1F1F1E",
+  page: "#1F1F1E",
+  card: "#2A2A28",
+  sheet: "#2A2A28",
+  drawer: "#1A1A19",
+  band: "#2A2A28",
+  bandOnSheet: "#2A2A28",
+  fill: "#33332F",
+  code: "#2A2A28",
+  codeOnSheet: "#33332F",
+  label: "#F2F1EC",
+  sec: "#A3A19B",
+  sep: "#3A3936",
+  sepChat: "#33322F",
+  sepSheet: "#403F3B",
   accent: "#22D3EE",
   accentFill: "#06B6D4",
   onAccent: "#00191F",
   tint: "#0B2E36",
   green: "#30D158",
   orange: "#FF9F0A",
-  red: "#FF6961",
+  // `#FF6961` measures 4.4977:1 on B1's `fill` (#33332F) — under the 4.5 floor
+  // F9 pins — so the red is lifted to #FF6D65 (4.61:1 on `fill`, 5.23 on `card`).
+  red: "#FF6D65",
   warnBg: "#3A2A0C",
   warnText: "#FFD08A",
-  glass: "rgba(44,44,46,0.82)",
-  glassBorder: "rgba(255,255,255,0.12)",
-  shadowOpacity: 0.5,
-  scrim: "rgba(0,0,0,0.6)",
+  glass: "rgba(42,42,40,0.86)",
+  glassBorder: "rgba(255,255,255,0.07)",
+  shadowOpacity: 0.35,
+  scrim: "rgba(0,0,0,0.45)",
   camera: "#000000",
   cameraAccent: "#22D3EE",
   kw: "#FF7AB2",
@@ -142,7 +165,7 @@ const dark: Palette = {
   delStrong: "#64222B",
   delText: "#FFA3A8",
   dash: "#636366",
-  switchOff: "#39393D",
+  switchOff: "#45443F",
 };
 
 /** The palette for a scheme; an unknown/null scheme is the light one. */
@@ -195,8 +218,16 @@ export const typography = {
 export const DENSE_FONT_SCALE = 1.4;
 
 export const radius = {
-  card: 26,
-  sheet: 38,
+  /** E2: bands are square (docs/feat/mobile-chrome.md Design 1 keeps the token). */
+  card: 0,
+  /**
+   * The centred alert-style dialog (`RenameSheet`), NOT a band: it floats over a
+   * scrim at maxWidth 340, so squaring it was an accident of sharing `radius.card`
+   * with the bands. Kept at its pre-restyle 26 pt (review round 1).
+   */
+  dialog: 26,
+  /** A sheet's top corners: 38 → 14 (Design 1; the mockups' `14px 14px 0 0`). */
+  sheet: 14,
   bubble: 20,
   tile: 14,
   banner: 18,
@@ -213,6 +244,8 @@ export const size = {
   fab: 56,
   rowProject: 60,
   rowSession: 64,
+  /** An E2 row in a band (Settings, Session info, Computers). */
+  rowList: 50,
   rowAction: 52,
   rowSetting: 44,
   bigButton: 50,
@@ -220,7 +253,8 @@ export const size = {
   iconTile: 32,
   iconTileLarge: 44,
   headerList: 52,
-  headerChat: 56,
+  /** The chat header: 56 → 50 (A1's thin row). `headerList` is untouched. */
+  headerChat: 50,
   grabberWidth: 36,
   grabberHeight: 5,
   viewfinder: 240,
@@ -239,6 +273,10 @@ export const space = {
   cardInner: 16,
   sectionComputers: 28,
   sectionSessions: 22,
+  /** The E2 band's horizontal inset: label and row content align on it. */
+  rowX: 20,
+  /** Above a section's small uppercase label (Design 4: 22 pt). */
+  sectionTop: 22,
   transcript: 14,
   /** Separator inset after a 32 pt icon tile (16 + 32 + 12). */
   separatorAfterTile: 60,
