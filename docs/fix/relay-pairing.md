@@ -576,4 +576,73 @@ are LAN/Tailscale on 4G and expect the compare code within ~2 s.
 
 ## Review
 
-*(empty — filled by the reviewer)*
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: APPROVE** — no HIGH or MEDIUM findings. (This review was a fresh context
+on the same model family as the plan's author, Opus; the executor was a different
+model, deepseek.)
+
+**Gate (re-run, scoped):** the touched test files
+(`packages/client/test/{address-dial,pairing}.test.ts`,
+`apps/mobile/test/pairing-flow.test.ts`, `packages/cli/test/serve-relay.test.ts`):
+82 pass, 0 fail. `bun run lint`: clean. `bun run typecheck` (root + mobile +
+relay): clean. I did not re-run the full suite; the executor's 11315/5 skip/0 fail
+is unverified by me.
+
+**Mutations (§9).** Each mutation was applied, the test run, and the file restored;
+afterwards all three files were `cmp`-identical to backups and `git status` was clean.
+- M1 `pairDevice` made effectively sequential (`staggerMs: 1e9`): 4 fail (the
+  serve-relay e2e test plus 3 of the pairing race tests). Red.
+- M2 dropped the `PairingRefused` arm of `isTerminal`: "refusal NOT retried"
+  fails. Red.
+- M3 Cancel keeps a single in-flight channel (`opened.clear()` before add): the
+  "Cancel closes EVERY channel" test fails (hangs → `"hung"`). Red.
+- M4 open deadline not cancelled when a socket opens: "an open BEFORE the
+  deadline cancels it" fails. Red.
+
+**Premises checked:** `firstAnswering` falls through on a winner's failed
+handshake (`address-dial.ts:173-180`, TRUE). The open deadline is per round, is
+cancelled on the first open and in `finish`, and any socket that opens late is
+abandoned (TRUE). The Noise handshake has its own 10 s deadline
+(`noise-channel.ts:37,324`), so a winner that opens and then says nothing cannot
+hold the race forever (TRUE). The app stores the whole `payload.addresses`, not a
+winning address, so it does not depend on which address won (`pairing-flow.ts:500`,
+TRUE).
+
+**Attacks tried:**
+1. *Cancel while every address is still hanging (the 4G case).* `opened` is empty,
+   so nothing is closed. The UI moves on at once (`App.tsx` `cancel`). A relay that
+   opens later is closed by the aborted check before any handshake, so no claim
+   reaches the daemon. That closed winner's `confirm` then fails within the 10 s
+   Noise timeout, and the race ends after a few more dials, each closed on open.
+   Nothing leaks on the daemon side. Holds.
+2. *A mute middlebox wins the race* (the WebSocket upgrade succeeds, Noise gets no
+   answer). Because the open deadline is cancelled when the socket opens, only the
+   Noise 10 s timeout bounds it; after that the race falls through to the next
+   addresses, and the relay is last. Holds, at a cost of up to 10 s.
+3. *Error-surface change.* Before, several failing addresses collapsed into one
+   `unreachable`. Now the last error is surfaced unchanged, and `unauthorized` is
+   terminal. `describePairingError` maps every `ChannelError` other than
+   `unauthorized` to "unreachable", and `unauthorized` to "expired", which is more
+   accurate than the old collapsed copy. No unhandled kind. Holds.
+4. *A loser that is never told it closed.* `abandon` closes the raw socket, but
+   no `setOnClose` was ever attached through `tracked`, so the loser stays in
+   `opened` until the run ends. A later Cancel closes it again inside the
+   `try/catch`. Harmless (no finding).
+5. *§7.* Pairing is still a one-shot RPC with no `RemoteClient` (one session
+   path). `address-dial.ts` stays pure and React-free. No protocol, persistence,
+   pod or terminal path is touched, so neither a `protocol.d` note nor a schema
+   regeneration is needed. Holds.
+
+**Nits (not blocking):**
+- A non-terminal failure after `onCompare` (for example the channel dropping
+  during `device/pair`) still moves on to the next address and shows a second
+  compare code. This is pre-existing behaviour of the old `for` loop.
+- Sockets still hanging when the deadline fires are not closed: their `open`
+  never resolves, so the OS keeps them until its TCP timeout.
+- `serve-relay.test.ts` re-implements a small WebSocket `dial` helper instead of
+  reusing an existing one.
+
+**Executor behaviour:** the executor stayed inside the plan's scope. The drift is
+documented, the mutations named in the tests really go red, and the doc's
+failure-mode table matches the code.
