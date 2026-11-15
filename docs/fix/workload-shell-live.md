@@ -570,7 +570,38 @@ load), and the final full-suite run is green.
 
 ## Review
 
-*— (pending)*
+*— claude-opus-5-5, 2026-11-15* (fresh context; same model family as the planner, different from the executor)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Findings (HIGH/MEDIUM only):**
+
+1. **HIGH: the binding owner decisions 1, 3 and 4 are not implemented.** The doc says they are "part of THIS fix", but `git diff main...HEAD` has none of them:
+   - (1) There is no `workloadShell.tool` config gate. `packages/cli/src/serve.ts:205` and `packages/cli/src/worker.ts:69` still wire the tool on unconditionally, and nothing under `packages/config/src` matches `workloadShell`.
+   - (3) There is no sentinel-leak repro or fix: `workload-shell-frame.ts` only gains `info`.
+   - (4) There is no cwd restore on reopen (`workload-shell.ts` `run`, the `shell.ended` branch).
+   - Execution never mentions any of the three. The owner's "first `hostname` returns `guard-…-end`" bug is still live.
+2. **MEDIUM: `packages/cli/src/workload-shell-backend.ts:95-98`: `prime`'s container cache never invalidates.** This contradicts the plan's failure-mode rows "pod replaced → next run: shell ended → reopen → `prime` resolves again" and "pod terminated → `stopped` → `RefusalError`".
+   - After the first resolve, every reopen returns the cached container without the `GET pod`. So when the pod is terminated, the `stopped` refusal is skipped and the reopen goes to a doomed exec (a D3 message at best).
+   - When a pod is recreated with a different container set or annotation, the stale container sticks for the whole session. `close` does not clear it either.
+   - No test pins it. Mutation: disabling the cache hit left `workload-shell-backend.test.ts` at 10/10 green.
+3. **MEDIUM: `packages/k8s/src/client.ts` `execRefusal` has no timeout or signal.** `explain` (`workload-shell.ts:875,915`) awaits it with no deadline. The plan's row "`execRefusal` … times out → honest fallback" is therefore not built: an apiserver or proxy that accepts the POST and never answers hangs the tool's error path.
+4. **MEDIUM (process, §10): the Execution signature reads `claude-sonnet-4-5`, but the commit `4ca4db90` says `(deepseek)`.** The signature must name the model that actually executed.
+
+**Gate (touched files only, as asked):** 8 files, 198 pass / 1 skip (the live-k8s opt-in) / 0 fail. `bun run lint` is clean (1433 files). `bun run typecheck` is clean. The live-k8s row was not run, because no cluster is available, so D3's "plain POST returns the container Status" is still unproven live.
+
+**Mutations (all reverted; `git status` clean afterwards):**
+- Dropping `{ cause }` in `openReserved` turns (e) and (f) red, as it should.
+- Disabling the `prime` cache keeps everything green (finding 2).
+
+**What holds:**
+- `attach` is unchanged: `containers`/`how` are gated to `pick: "kubectl-exec"`, and the `engine-runtime`/`engine-k8s` attach rows are green and unmodified.
+- `rawExec` has `workload_shell` as its only caller, so turning the pre-open close into `ExecRefusedError` does not starve `execError`'s regex on any other path.
+- `targetKey` stays on the target as the model wrote it, so no grant widens.
+- `ExecRefusedError` is reached via the lazy `engine-select`, which keeps `@tentacle/k8s` out of the worker graph.
+- The refine reuses `engineOnlyFields`.
+
+**Executor behaviour:** the code delivered for D1–D4 is careful, and it is honest about the drift it introduced. It silently skipped the three binding owner decisions and mis-signed the section.
 
 
 #### Owner decisions added after the plan (2026-11-15 02:00–02:06) — binding, part of THIS fix
