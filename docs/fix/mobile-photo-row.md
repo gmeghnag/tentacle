@@ -226,3 +226,31 @@ calls are `{type:"history_reset", messages:[photoMessage, reply]}` followed by
 `{type:"user_message", text:"Cosa vedi?", attachments: …}`.
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; same model family as the orchestrator)
+
+**Verdict: REQUEST-CHANGES** (on the doc. No code was changed, so nothing to merge: `git diff main...HEAD` is this file only.)
+
+The STOP itself is right. Its premises check out against the source:
+
+| Premise | Result |
+|---|---|
+| The only attachment method is `attachment/put` (`protocol/src/methods.ts:150,248-250`) | TRUE |
+| No `thumbnails` dep in `App.tsx`; the controller falls back to `fetch: async () => null` (`session-screen-controller.ts:266`) | TRUE (the file is `apps/mobile/App.tsx`, not `src/App.tsx`) |
+| The outbox port opens a second `newSession(…,{attach})` of the same id (`apps/mobile/App.tsx:261-263`) | TRUE |
+| `register` replaces the listener with the newest one (`remote-client.ts:2801`), reached through `attachSession` → `register` (`:1219`) | TRUE (checked by reading the code; I could not run the probe because script runs need approval) |
+| The fold pushes `user_message` after `withHistory` (`transcript.ts:187-195`, `:249-251`) | TRUE |
+
+**Findings**
+1. **MEDIUM: the Execution signature does not match the model.** Execution is signed `claude-opus-5-5`. The commit `f4012b45` says "exec (deepseek)", and the metadata says "DeepSeek executes". AGENTS §10 requires the signature to name the real model, because that record is how drift gets spotted. Fix the signature, or explain the mismatch.
+2. **MEDIUM: B9-b blames the wrong layer, and its proposed fix loses data.** `RemoteSession` already knows at the reset that the running turn's prompt is in the snapshot (`remote-session.ts:1557`, "its prompt is in the snapshot"). Yet `:1766` pushes the replayed `user_message` whenever `turn.reset` is set. So the duplicate starts in the client, not in the fold. The suggested fold fix ("replace the last matching user row") cannot tell a replay from a real repeated identical prompt, so it would silently drop a legitimate row. The fix also edits `packages/client`, so it is no longer *contained*. And it is still unproven that the daemon re-delivers `turn_start` after a mid-turn reset at all (Execution says so itself). B9-b must not go into the rewritten Implementation until a daemon-backed repro shows it happens.
+3. **MEDIUM: B9-a's alternative fix is out of scope.** "Stop `newSession` from stealing an existing listener" changes `RemoteClient.register` semantics for every runtime (the §7 "one session path" seam). That is *load-bearing*, not *contained*. The rewritten Implementation should name only the contained option: build the outbox port over the screen's own handle, like `compose-handle.ts:10-13` already does.
+
+**Gate:** `bun run lint` passed (1497 files, clean). `bun run typecheck` passed. No test files are touched. I did no mutation testing because there are no new tests.
+
+**Attacks tried:**
+- Is the attachment read path really absent? Yes: only `attachment/put` exists.
+- Is the listener theft real? Yes, confirmed in the code (`attachSession` → `register`).
+- Is the B9-b layer right? No: finding 2.
+
+**How the executor behaved:** it stopped on time and did not force the code to fit a wrong plan. It mis-signed its own section.
