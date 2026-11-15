@@ -1,4 +1,3 @@
-import { mkdirSync, writeFileSync } from "node:fs";
 /**
  * `bun run e2e:mobile` (docs/feat/mobile-app-shell.md steps 1-9; the `/e2e` dial
  * is docs/feat/mobile-pairing-screen.md 11b.1): the harness every later mobile
@@ -19,6 +18,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
 import { PermissionBroker } from "@tentacle/core";
+import { writePushRegistration as daemonWritePushRegistration } from "@tentacle/daemon";
 import { encodeBase64Url } from "@tentacle/protocol";
 import { publicKeyOf } from "@tentacle/transport/noise";
 import { $, type Subprocess } from "bun";
@@ -743,19 +743,36 @@ function harnessPushSteps(deps: {
   });
 }
 
-/** Write one device's push registration, in the store's own on-disk form. */
+/**
+ * Write one device's push registration through the DAEMON'S OWN STORE.
+ *
+ * Not a hand-built `{v: 1, …, at}`: review round 1 (finding 2) found this writer
+ * keeping a second copy of a persisted format, so a change to
+ * `packages/daemon/src/push-store.ts` (a renamed field, a new version, a
+ * different timestamp key) would leave the flow failing with the misleading
+ * "the relay must announce push" error instead of the real one. The store also
+ * validates the record through the wire's own schema, which is the property the
+ * flow depends on and cannot check for itself.
+ */
 function writePushRegistration(
   configDir: string,
   deviceId: string,
   value: { readonly token: string; readonly env: "sandbox" | "production"; readonly key: string },
 ): void {
-  const dir = join(configDir, "devices", "push");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(
-    join(dir, `${deviceId}.json`),
-    JSON.stringify({ v: 1, ...value, at: Date.now() }, null, 2),
-    { mode: 0o600 },
-  );
+  const written = daemonWritePushRegistration(configDir, {
+    deviceId,
+    token: value.token,
+    env: value.env,
+    key: value.key,
+    registeredAt: Date.now(),
+  });
+  if (!written.ok) {
+    // Surfaced, never swallowed: a record the daemon's own store refuses is a
+    // flow that would otherwise fail later with the wrong message.
+    throw new Error(
+      `cannot register the harness's push device (${written.path}): ${written.reason}`,
+    );
+  }
 }
 
 /**

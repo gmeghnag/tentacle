@@ -222,10 +222,22 @@ export function parseRelayArgs(
       if (typeof taken === "string") {
         return { ok: false, error: taken };
       }
-      if (taken.value.trim().length === 0) {
-        return { ok: false, error: `${arg} needs a value` };
+      // A BLANK value means "not set", not a refusal. Deployed through systemd an
+      // unset variable is an EMPTY ARGUMENT, never an absent one: `${VAR}` as a
+      // word is always exactly one argument, whose value is "" when the variable
+      // is unknown (systemd.service(5)). Refusing it would make a drop-in
+      // installed a moment before its `EnvironmentFile` — or a rollback that
+      // deletes one file — a `Restart=always` crash loop, i.e. every phone off
+      // the relay because Apple's key is not where it was. So a blank value is
+      // dropped, exactly as an unset variable would be; what remains is a partial
+      // set, which `apnsSetupOf` reports with one `push off:` line while the
+      // relay keeps serving (F4).
+      //
+      // A MISSING value (`--apns-key-id` with nothing after it) is still a
+      // refusal: that is an operator's typo, indistinguishable from a mistake.
+      if (taken.value.trim().length > 0) {
+        apns[apnsName] = taken.value;
       }
-      apns[apnsName] = taken.value;
       i = taken.next;
       continue;
     }

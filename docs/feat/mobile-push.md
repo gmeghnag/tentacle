@@ -3268,3 +3268,181 @@ new files. The orchestrator decides where they land.
 **Executor behaviour:** thorough and candid about the drift (D1–D6) and the surviving mutations. But it never tested its central deploy claim ("optional", push off) against the parser it had cited.
 
 *— claude-opus-5-5, 2026-11-15 (fresh context; a different family from the deepseek executor of earlier rounds, but P10's executor did not report its model)*
+
+### Fix round 1
+
+*— claude-sonnet-4-5 (the model id this environment reports for me; the executor
+of this round, not the author of P10), 2026-11-16*
+
+Scope: the two findings of *Review — P10* (1 HIGH, 1 MEDIUM). Both reproduced on
+the reviewed code before any edit; both fixed red-before-green, both
+mutation-checked (§9). Scratch is the gitignored
+`<this worktree>/.tentacle/tmp/mobile-push/review-p10/` (the shared
+`/Users/gmeghnag/tentacle/.tentacle/tmp/…` is outside the writable worktree):
+`f1-repro.ts`, `f2-strength.ts`, `f1-mut.sh`, `f1-m2m3.sh`, `f2-mut.sh`, each
+logging to a file rather than a pipe.
+
+**Repro before the fix.**
+
+*F1* — `f1-repro.ts` expands the SHIPPED `ExecStart` by systemd's own rule (`${VAR}`
+standing as a word is exactly ONE argument, and an unknown variable is the empty
+string — systemd.service(5)) and feeds it to `parseRelayArgs`:
+
+```
+argv (expanded) : [… "--apns-key-file","/apns-key","--apns-key-id","","--apns-team-id","","--apns-topic","so.tentacle.app"]
+parsed          : {"ok":false,"error":"--apns-key-id needs a value"}
+VERDICT: the unit exits 1 on boot (main.ts would process.exit(1))
+```
+
+With `Restart=always` that is a crash loop on any host without
+`/etc/tentacle-relay/apns.conf`, i.e. every phone off the relay. The
+`LoadCredential=` half is a second, independent start failure (243/CREDENTIALS)
+that no shipped test could reach.
+
+*F2* — `f2-strength.ts`, the REAL `readPushRegistrations` over (a) the bytes
+`apps/mobile/e2e/run.ts`'s hand-built writer produced and (b) the store's own
+writer:
+
+```
+OLD writer → devices the daemon will push to: 0
+           ↳ skipped: [{… "reason":"unsupported record (unknown version or invalid field)"}]
+STORE writer → devices the daemon will push to: 1
+```
+
+So the finding was worse than "a second writer for a persisted format": the
+harness wrote `at` where the store reads `registeredAt`, so the record was
+REFUSED and the daemon had nobody to push to. `push-placeholder` could not have
+delivered a push even with its banner assertion unblocked — and the failure would
+have surfaced as the reviewer's "the relay must announce push", the wrong cause.
+
+**F1 (HIGH) — the base unit always boots; the wiring is a drop-in, and a blank
+value is push off.** Root cause in two layers, both fixed:
+- `apps/relay/deploy/relay.service:55-56` — the four `--apns-*` flags,
+  `EnvironmentFile=` and `LoadCredential=` are GONE from the base unit and live in
+  the new `apps/relay/deploy/relay.service.d/apns.conf`, installed by the runbook
+  only together with the `.p8`. This is the only shape that survives
+  `LoadCredential=`'s absolute path (systemd fails the unit's start when the file
+  is missing), and a drop-in can be removed in the same step as the key. The
+  drop-in restates the whole `ExecStart` (an empty `ExecStart=` resets the list,
+  so the three fleet limits moved with it); `deploy.test.ts` pins it as
+  byte-for-byte the base argv plus exactly the four push flags, so they cannot
+  drift.
+- `apps/relay/src/main.ts:225-240` — `parseRelayArgs` treats a BLANK `--apns-*`
+  value as "not set" (dropped, exactly as an unset variable would be) instead of
+  refusing it, so a HALF-installed drop-in and any future variable-expanding unit
+  still boot; what remains is a partial set, which `apnsSetupOf` already reports
+  with one `push off:` line while the relay serves. A MISSING argument is still a
+  refusal (an operator's typo).
+
+Deliberate drift: the review offered "drop-in **or** empty values = push off". I
+did both — the drop-in alone leaves the binary refusing a shape any forgotten
+`EnvironmentFile` produces, and the binary alone cannot fix `LoadCredential=`'s
+start failure, which is the half that bricks the unit.
+
+`docs/ops/relay-deploy.md` follows the move and gains the rollback the review
+showed missing: §6.1 installs the drop-in beside the key, §6.3 adds "Reverting
+push entirely", which removes the drop-in **and** the key in one `rm` (a drop-in
+left behind names a file that no longer exists ⇒ 243/CREDENTIALS ⇒ crash loop),
+and §6 plus the file list say where the wiring went.
+
+**F2 (MEDIUM) — the harness reuses the daemon's store.**
+`apps/mobile/e2e/run.ts:746-775`: `writePushRegistration` calls the imported
+`writePushRegistration` from `@tentacle/daemon` instead of hand-building the
+record, and THROWS on a refusal so the failure names the real cause. The two
+`node:fs` imports that existed only for the hand-built write are gone.
+
+**Tests (red before green, §9).**
+- `apps/relay/test/deploy.test.ts` — the `P10 relay.service …` describe became
+  *"push is a DROP-IN, so the base unit always boots"* (5 file tests → 10): the
+  base unit parses with every variable expanded to empty; it carries no
+  `--apns-*`/`LoadCredential`/`EnvironmentFile`; the drop-in's credential is an
+  absolute path; the binary is told the PATH only; all four flags are ones
+  `main.ts` parses; a HALF-installed drop-in still boots with push off; the
+  drop-in's argv is the base unit's plus exactly four flag pairs; and the runbook
+  names the drop-in and reverts it with the key. A new `expandExec()` helper
+  (`:82-97`) implements systemd's expansion rule, so the guard tests the rule that
+  broke the unit instead of scanning for `${` by eye.
+- `apps/relay/test/main.test.ts` — +2: a blank `--apns-*` value (empty and
+  whitespace) is push off, not a refusal; one blank value leaves the other three
+  real (the partial-set shape). The MISSING-value refusal test is kept verbatim.
+- `apps/mobile/test/e2e-flows.test.ts` — the existing "it registers the phone's
+  device in the daemon's own store" guard was WEAKENED BY ITS OWN NAME (it
+  asserted the string `"devices", "push"`, i.e. it pinned the hand-built writer as
+  the contract). It now asserts the store import and the throw, and asserts the
+  format is NOT reproduced (no `JSON.stringify({ v: 1`, no `"devices", "push"`,
+  no `at: Date.now()`).
+
+The ten reds, each on its own assertion, before the fix:
+
+```
+(fail) … > the shipped base unit parses with every environment variable EMPTY       F1 parse refusal
+(fail) … > the base unit carries no push wiring at all (that is the drop-in's job)  F1
+(fail) … > the drop-in declares the credential, from an absolute path               ENOENT relay.service.d/apns.conf
+(fail) … > the binary is told the credential's PATH, never its content              ENOENT
+(fail) … > every --apns-* value is config the drop-in carries, and main.ts parses it ENOENT
+(fail) … > a HALF-installed drop-in still boots: empty values are push off          ENOENT
+(fail) … > the drop-in's ExecStart is the base unit's, plus exactly the four flags  ENOENT
+(fail) parseRelayArgs > an --apns-* value that is EMPTY or blank is push off        Expected: true  Received: false
+(fail) parseRelayArgs > one blank value leaves the OTHER three real                 Expected: true  Received: false
+(fail) P10's push flow > it registers the phone's device in the daemon's own store  F2
+```
+
+**Mutations (§9 — each breaks ONE half; the named test went RED, then every file
+restored and `diff -q`-checked).**
+
+```
+M1     push wiring + LoadCredential back in the BASE unit       3 fail  base parses / no-wiring / drop-in==base
+M2     base unit expands ${TENTACLE_RELAY_APNS_KEY_ID} again     3 fail  same three (the review's exact line)
+M2+M3  ALSO refuse a blank --apns-* value (the reviewed pair)    1 fail  THE decisive one
+M3     parseRelayArgs refuses a blank --apns-* value again       3 fail  half-installed drop-in + both blank tests
+M4     drop-in omits the base unit's three limit flags           1 fail  drop-in==base
+M5     runbook stops reverting the drop-in with the key          1 fail  the rollback guard
+M-F2   hand-build the record again (the reviewed writer)         1 fail  the store-reuse guard
+```
+
+M2 alone is NOT decisive, stated rather than hidden: with the binary lenient, a
+unit that expands an unset variable now parses, so only the `${`-free shape
+assertion reds. The property "the shipped unit starts" is killed by M2+M3
+together — the reviewed pair — where the base-unit test reds on exactly the
+reviewer's error, from its own `throw`:
+
+```
+error: the base relay.service does not start without Apple's key, which is F4 broken: --apns-key-id needs a value
+(fail) … > the shipped base unit parses with every environment variable EMPTY
+RESTORED CLEAN
+```
+
+Scripts `f1-mut.sh`, `f1-m2m3.sh`, `f2-mut.sh` log to files, never pipes (fix
+round 2's SIGPIPE note), and each ends with a restore check; every run printed
+`CLEAN` for all four files. One inline probe of mine DID leave a mutation in
+`relay.service` (I reused a backup path that did not exist yet); `git status` and
+`grep -- '--apns-'` caught it one command later, and the backup restored it
+(`RESTORED`, `diff -q`-verified). Recorded because that is the class of mistake
+that yields a false green.
+
+**Changelog.** `changelog.d/mobile-push-push-optional-deploy.fixed.md` (one
+bullet) — the deploy artefact is user-visible and its failure mode was "every
+phone loses the relay". No `protocol.d/` note and no `PROTOCOL_VERSION` move: no
+wire change, `packages/protocol/schema/protocol.json` untouched.
+
+**Gate (this worktree, `feat/mobile-push`, uncommitted — per the task prompt).**
+`bunx tsc --noEmit` → 0 · `bunx tsc -p apps/mobile` → 0 ·
+`bunx tsc -p apps/relay` → 0 · `bun run lint` → `Checked 1406 files in 448ms. No
+fixes applied.` (0 errors, 0 warnings — the §6 baseline; two formatting fixes
+auto-applied first) · `bun test` → **10265 pass, 4 skip, 0 fail** (10269 tests /
+737 files, 390 s). The four skips are the documented opt-ins (live-k8s,
+live-docker, the real-socket keepalive, `session-hop.docker`), none in a touched
+file. This round adds 7 tests: `deploy.test.ts` 22 → 27 and `main.test.ts` 18 → 20
+(`grep -c 'test('`, HEAD vs the tree), and rewrites one guard in
+`e2e-flows.test.ts`. HEAD's suite was 10262 tests, this tree's is 10269 — the
+same 7 — and the only other change is that one guard's assertions, not a new
+test.
+
+**Unverified (one line each, and how to check).**
+(a) `systemd-analyze verify` on both files and a real boot with the key missing —
+needs the host; the runbook runs the first, and `deploy.test.ts` pins everything
+about the files that is readable without it.
+(b) `push-placeholder`'s banner assertion — still BLOCKED by this machine's
+simulator (`_unlock` fails on a pre-existing flow too, unchanged from P10), so
+F2's fix makes the flow capable of delivering a push but its banner remains
+unobserved.

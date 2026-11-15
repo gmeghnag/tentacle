@@ -14,7 +14,8 @@ explicitly authorised by them), and each can be checked before the next.
 - Host: the site's box `142.132.169.22` (decision 9)
 - Public name: `relay.tentacle.so`, TLS terminated by Caddy
 - Bind: `127.0.0.1:4100` (loopback only — the relay never listens publicly)
-- Files here: `apps/relay/deploy/{build.ts,relay.service,Caddyfile.relay}`
+- Files here: `apps/relay/deploy/{build.ts,relay.service,Caddyfile.relay}` and
+  `apps/relay/deploy/relay.service.d/apns.conf` (APNs push only, §6)
 
 ---
 
@@ -224,7 +225,9 @@ Push is **optional and off by default**: with no key the relay logs one
 `push off: no --apns-key-file (ready announces no features)` line at start and
 serves exactly as before, and every daemon sees no `"push"` in `ready.features`
 (docs/feat/mobile-push.md F4). Reachability must never depend on Apple's key, so
-this step can be skipped, deferred or reverted without touching anything else.
+this step can be skipped, deferred or reverted without touching anything else:
+the base `relay.service` contains no push wiring at all, and everything below is
+one drop-in installed together with the key (§6.1).
 
 The relay is stateless but **no longer secretless**: this one file is the only
 secret on the host (decision 18 — it never enters the repo, a flag's value, or
@@ -260,20 +263,45 @@ the relay user has no readable copy of the key at all. systemd reads the file
 (root), copies it into a read-only per-unit directory, and the binary is given
 that copy's path.
 
-The unit carries the whole wiring already —
+The wiring is a **drop-in**, installed in this same step —
+`apps/relay/deploy/relay.service.d/apns.conf`, which carries
 `LoadCredential=apns-key:/etc/tentacle-relay/apns-key.p8` plus the four flags
 (`--apns-key-file ${CREDENTIALS_DIRECTORY}/apns-key`, `--apns-key-id` and
 `--apns-team-id` from `EnvironmentFile=-/etc/tentacle-relay/apns.conf`, and
-`--apns-topic so.tentacle.app`) — so nothing in the unit has to be edited to
-install a key. The bundle id is the one flag with a literal value, because it is
-public (it is in the app's own `Info.plist`) and must never be daemon-supplied.
+`--apns-topic so.tentacle.app`):
+
+```sh
+install -d -o root -g root -m 0755 /etc/systemd/system/relay.service.d
+install -o root -g root -m 0644 relay.service.d/apns.conf \
+    /etc/systemd/system/relay.service.d/apns.conf
+systemctl daemon-reload
+systemd-analyze verify /etc/systemd/system/relay.service   # no output = clean
+systemctl restart relay.service
+```
+
+**Why a drop-in and not the unit** (review round 1): `LoadCredential=` with an
+absolute path makes the unit *unable to start* when the key is absent — systemd
+fails the start (243/CREDENTIALS) rather than skipping the credential — and an
+unset `${VAR}` expands to an EMPTY ARGUMENT, which the relay used to refuse. In
+the base unit the first would be a `Restart=always` crash loop, i.e. every phone
+off the relay because Apple's key was not installed yet — the opposite of what §6
+promises. So `relay.service` carries no push wiring at all and always starts with
+push off; this drop-in is installed only alongside the key, and removing it (with
+the two files above it) is the whole rollback. The relay is now lenient about a
+blank `--apns-*` value, so the second failure mode is survivable too — but the
+first is not ours to soften, which is why the wiring does not belong in the unit.
+
+The bundle id is the one flag with a literal value, because it is public (it is
+in the app's own `Info.plist`) and must never be daemon-supplied.
 The same four values are available as `TENTACLE_RELAY_APNS_*` environment
 variables, which is what the `EnvironmentFile` uses for the two IDs.
 
-`apps/relay/test/deploy.test.ts` pins all of it: the credential's absolute path,
-the `0400` mode in this runbook, the four flags being ones `main.ts` parses, and
-that all four are present (a partial set makes `readApnsKeySource` refuse and
-push stays off).
+`apps/relay/test/deploy.test.ts` pins all of it: the base unit parses with every
+variable expanded to empty and carries no `--apns-*`/`LoadCredential`/
+`EnvironmentFile` at all, the drop-in's credential path is absolute, the
+**`0400` mode** is in this runbook, the four flags are ones `main.ts` parses, and
+the drop-in's command line is the base unit's plus exactly those four flags (a
+partial set makes `readApnsKeySource` refuse and push stays off).
 
 ### 6.2 Install the unit and restart
 
@@ -314,6 +342,25 @@ that Apple answers `InvalidProviderToken`; the relay maps that to `rejected` and
 the daemon audits `push-not-sent`, so the symptom is **silence plus audit lines**,
 never a crash. Rolling back is step 1 in reverse: put the old key file back and
 point `apns.conf` at its ID.
+
+**Reverting push entirely** — the case review round 1 found broken, because it
+must never cost the phones the relay:
+
+```sh
+# as root on 142.132.169.22
+rm -f /etc/systemd/system/relay.service.d/apns.conf \
+      /etc/tentacle-relay/apns-key.p8 /etc/tentacle-relay/apns.conf
+rmdir /etc/systemd/system/relay.service.d 2>/dev/null || true
+systemctl daemon-reload
+systemctl restart relay.service
+journalctl -u relay.service -n 5 --no-pager     # expect the `push off:` line
+```
+
+The drop-in goes in the SAME `rm` as the key on purpose: with the drop-in left
+behind, `LoadCredential=` names a file that no longer exists and systemd refuses
+to start the unit (243/CREDENTIALS) — a crash loop, not a rollback. With the key
+gone but the drop-in present, the relay is also fine (a blank `--apns-*` value is
+push off, not a refusal), but do not rely on that: remove both.
 
 ### 6.4 Smoke test a real push
 

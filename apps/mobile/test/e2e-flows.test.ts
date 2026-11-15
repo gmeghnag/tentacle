@@ -489,10 +489,29 @@ describe("P10's push flow (docs/feat/mobile-push.md)", () => {
 
   test("it registers the phone's device in the daemon's own store, not the app", () => {
     // A simulator has no APNs token, so the APP cannot register itself. The
-    // harness writes the same per-device file `device/push_register` writes.
+    // harness registers the paired device through the DAEMON'S OWN STORE.
+    //
+    // Review round 1, finding 2: it used to hand-build `{v:1,…,at}` under
+    // `devices/push/`, which is a SECOND writer for a persisted format — a change
+    // to `push-store.ts` would leave the flow failing with the misleading "the
+    // relay must announce push" error. So the assertion is now on the import that
+    // makes the reuse true, and against the hand-built record coming back.
     const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
-    expect(runner).toContain('"devices", "push"');
-    expect(runner).toMatch(/writePushRegistration/);
+    expect(runner).toMatch(
+      /import \{\s*writePushRegistration as daemonWritePushRegistration\s*\} from "@tentacle\/daemon"/,
+    );
+    // The single writer, called once and checked: a refused record is thrown, not
+    // swallowed (a silent failure here would surface as the wrong error later).
+    expect(runner).toContain("daemonWritePushRegistration(configDir, {");
+    expect(runner).toContain("if (!written.ok)");
+    // And the format itself is NOT reproduced here any more — no version literal,
+    // no `at:` timestamp key, no hand-built path. That is the whole finding. The
+    // comment above the writer explains the old shape, so this looks for the
+    // STATEMENTS (`JSON.stringify({ v: 1` → a record built here) rather than any
+    // mention of them.
+    expect(runner).not.toMatch(/JSON\.stringify\(\{\s*v:\s*1/);
+    expect(runner).not.toContain('"devices", "push"');
+    expect(runner).not.toMatch(/\bat: Date\.now\(\)/);
   });
 
   test("the hooks it reads are the ones the harness serves", () => {
