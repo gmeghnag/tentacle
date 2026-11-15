@@ -603,6 +603,37 @@ load), and the final full-suite run is green.
 
 **Executor behaviour:** the code delivered for D1–D4 is careful, and it is honest about the drift it introduced. It silently skipped the three binding owner decisions and mis-signed the section.
 
+### Round 2
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; it reviews `git diff HEAD~1` = `f2a9538e`)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Round-1 findings, re-checked:**
+- **F2 (`prime` cache): FIXED.** Re-adding a cache hit in `prime` turns the "REOPEN re-reads the pod" and "stopped by the reopen is REFUSED" rows red.
+- **F3 (`execRefusal` timeout): FIXED.** It now uses an `AbortController` with a 5 s timeout, cleared in a `finally`. Two new client rows cover it, and they pass.
+- **F1, decision 1 (default off): FIXED.** Dropping `&& config.workloadShell.tool` (`wiring.ts:680`) turns 2 wiring rows red. The config plumbing matches `sessionHop.tool`.
+- **F1, decision 4 (cwd restore): built, and its tests pass.**
+- **F1, decision 3 (sentinel leak): NOT fixed. Its root cause is asserted, not shown (HIGH, below).**
+- **F4 (signing): NOT fixed (MEDIUM, below).**
+
+**Findings:**
+
+1. **HIGH: the decision-3 repro is causally impossible, so the owner's bug is still undiagnosed.** "Fix round 1" claims the first command's output (`etcd-`) arrived in the same read as the ready marker. But `openReserved` writes the bootstrap (`workload-shell.ts:743`) and `await readyDone` (`:745`) before `execute` ever writes the command line (`:469`). A real `sh` cannot print `hostname`'s output before it has received `hostname`.
+   - `head-loss.ts` produces the owner's string only because its fake injects command output into the ready read.
+   - The owner's text `guard-<40 hex>-end` does not have the shape of our markers either (`__TNT__<nonce>_B_…__TNT__<nonce>_E`). So "byte for byte the owner's live bug" is constructed, not reproduced.
+   - The `pendingBytes` carry is harmless: it keeps a post-ready banner. But it cannot explain or fix the reported symptom, and the doc and changelog (`workload-shell-first-output.fixed.md`) claim it does.
+   - Needed: either a repro that respects the write order (or a live capture on an `etcd-guard` pod), or an honest "cause unknown, not fixed" in the doc with the fixed changelog fragment withdrawn.
+2. **MEDIUM (process, §10): the signing is still inconsistent.** The new "Fix round 1" section is signed `claude-opus-5-5`, but its commit `f2a9538e` says `(deepseek)`. That is exactly the mismatch finding 4 was about, and the doc's per-finding table marks it FIXED.
+
+**Gate:** the touched files plus `packages/config` give 497 pass / 0 fail (31 files). `bun run lint` is clean (1433 files). `bun run typecheck` is clean.
+
+**Mutations:** 2 shown red (the wiring gate; the `prime` cache). Both were reverted, and `git status` is clean. The other mutations claimed in "Fix round 1" were not re-run here.
+
+**Not a finding (noted):**
+- On a reopen, the restore's `cd` run consumes `pendingBytes`, so any kept banner is dropped silently there.
+- `restoreCwd` uses its own `AbortSignal.timeout`, so a user abort waits up to the one-shot timeout.
+
 
 #### Owner decisions added after the plan (2026-11-15 02:00–02:06) — binding, part of THIS fix
 
