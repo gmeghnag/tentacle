@@ -1,6 +1,6 @@
 # fix/relay-pairing — Pairing never reaches the relay when a direct address hangs
 
-> **Status:** implementation
+> **Status:** implementation APPROVED (owner request "fixa" 2026-11-15; no owner decisions open)
 > **Branch:** `fix/relay-pairing`
 > **Type:** fix · **Size:** M · **Blast:** cross-module · **Suited:** any executor (owner assigns); standard Review, red-teaming the race's cancel/terminal/deadline paths (no §7 invariant, protocol, persistence or terminal path is touched)
 > **Changelog:** `changelog.d/relay-pairing.fixed.md` — `- **Pairing from a phone off the computer's network works.** The app races the pairing QR's addresses like it already races a paired computer's, so a dead LAN or Tailscale address no longer leaves pairing on "Connecting…" before the relay is ever tried.`
