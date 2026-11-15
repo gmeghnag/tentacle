@@ -286,9 +286,14 @@ describe("the `features` gate (C1: an older relay must never see a `push`)", () 
     // (F2). `ready` then flushes it — so a relay that re-registers WITHOUT
     // `"push"` used to get the frame anyway, and an older relay closes the
     // control socket on it (`control-unexpected`): the exact loss of
-    // reachability C1 exists to prevent, on every push. Mutation: flush without
-    // re-reading `features` → the no-push relay sees a `push` frame, and this
-    // fails on `frames`.
+    // reachability C1 exists to prevent, on every push.
+    //
+    // The push must be decided BEFORE the link registers, because that is the
+    // ONLY shape that reaches `flushHeldPushes` (Review round 2, finding 1): a
+    // push against an already-registered no-push relay is refused by `push()`
+    // itself and never enters the hold queue, so pushing after `isConnected()`
+    // left this test green under the very mutation it names (A: flush without
+    // re-reading `features`).
     let hellos = 0;
     const frames: string[] = [];
     const server = Bun.serve({
@@ -315,7 +320,8 @@ describe("the `features` gate (C1: an older relay must never see a `push`)", () 
     });
     cleanups.push(() => server.stop(true));
     const h = harness({ url: `ws://127.0.0.1:${server.port}`, holdMs: 3_000 });
-    await waitFor(() => h.link.isConnected(), "the link to register");
+    // BEFORE the first `ready`: the link is CONNECTING, so the frame is held
+    // (this is the hold queue mutation A unguards). The hold outlives the blip.
     const pending = h.link.push(delivery("a".repeat(64)));
     // The reconnect lands (a second `hello`), and the hold's deadline is still
     // ahead: whatever happens to the frame happens through `flushHeldPushes`.
@@ -327,6 +333,48 @@ describe("the `features` gate (C1: an older relay must never see a `push`)", () 
     expect(h.link.isConnected()).toBe(true);
     const race = await Promise.race([pending, Bun.sleep(1_000).then(() => "still-held" as const)]);
     expect(race).toBe("unavailable");
+  });
+
+  test("a registered no-push relay refuses a push AT ONCE, never by holding it out", async () => {
+    // The other half of the gate (Review round 2, finding 1; mutation B: `push()`
+    // holds instead of refusing). A hold here would resolve only when
+    // `pushHoldMs` expires, as `push-dropped link-down` — the wrong audit word,
+    // and every device waits out the whole hold. The 30 s hold makes that
+    // unmistakable: the answer must arrive long before it.
+    let hellos = 0;
+    const frames: string[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req, srv) {
+        if (srv.upgrade(req)) return undefined;
+        return new Response("no", { status: 400 });
+      },
+      websocket: {
+        message(ws, raw) {
+          const frame = JSON.parse(String(raw)) as { t?: string };
+          if (frame.t === "hello") {
+            hellos++;
+            ws.send(JSON.stringify({ t: "ready", v: RELAY_PROTOCOL_VERSION, id: ID }));
+            return;
+          }
+          if (frame.t === "push") frames.push(String(raw));
+        },
+      },
+    });
+    cleanups.push(() => server.stop(true));
+    const h = harness({ url: `ws://127.0.0.1:${server.port}`, holdMs: 30_000 });
+    await waitFor(() => hellos >= 1, "the link to register");
+    const started = Date.now();
+    const race = await Promise.race([
+      h.link.push(delivery("a".repeat(64))),
+      Bun.sleep(2_000).then(() => "waited-out" as const),
+    ]);
+    expect(race).toBe("unavailable");
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(frames).toEqual([]);
+    // And it is NOT the drop's own word: nothing timed out.
+    expect(h.audit).not.toContain("push-dropped link-down");
   });
 });
 

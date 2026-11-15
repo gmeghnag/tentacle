@@ -2273,3 +2273,88 @@ ask) is unchanged and still P7's to test.
 
 **Gate.** 5 touched files: 58 pass, 0 fail. `bun run lint`: 1387 files, no fixes. `bun run typecheck`
 (3 projects): exit 0. All four mutations were reverted, and `git status` is clean.
+
+### Fix round 2
+
+Scope: the ONE finding of *Round 2* (P7 + P8) — **MEDIUM, test non-vacuity (§9)**. Its two
+"regression check: none found" paragraphs needed nothing. No production code changed this round;
+the finding was that a test could not fail. Scratch (gitignored, inside this worktree):
+`.tentacle/tmp/mobile-push/fixr2-probe-flush.test.ts`, `fixr2-relay-link.bak`.
+
+**Repro before the fix (the finding, confirmed).** The reviewer's probe was written against the
+repo-root worktree, so I re-derived it here as `fixr2-probe-flush.test.ts`: two shapes against a
+no-push relay (`ready` with no `features`, one close after the first `hello`):
+
+```
+A  push BEFORE the first ready (held, flushed on hello #2)   frames 0  status unavailable
+B  push while REGISTERED on the no-push relay                frames 0  status unavailable
+```
+
+On the real code both are correct (0 frames). So I mutated the `flushHeldPushes` gate
+(`relay-link.ts:353`, `pushable = true`) — mutation **A**, the exact one the test's own comment
+named — and ran the file as it stood:
+
+```
+mutant A + relay-link-push.test.ts (as reviewed)   11 pass, 0 fail
+mutant A + the same two shapes, probe               A: frames 1  → RED  (B: frames 0, pass)
+```
+
+That is the finding exactly: the reviewed test is green under the mutation it says it pins,
+because its push was decided while the link was ALREADY registered. `push()` refuses that case at
+once (`:744-752`), so no frame ever enters the hold queue and `flushHeldPushes` is never on the
+path. Only a push decided while CONNECTING reaches it.
+
+**The fix (test only) — `packages/daemon/test/relay-link-push.test.ts`.**
+
+- *"a HELD push is refused, not flushed, when the reconnect announces no `push`"* (`:283-330`): the
+  push now happens **before** the first `ready` — the harness is constructed with `holdMs: 3_000`
+  and `push()` is called immediately, with no `waitFor(isConnected)` — so the frame is genuinely
+  held and then meets the second `ready` through `flushHeldPushes`. Same relay, same assertions
+  (`frames` empty before the promise, `isConnected`, `unavailable`); only the moment of the push
+  moved. The comment now records WHY the timing is load-bearing (it is what round 2 found).
+- **New** *"a registered no-push relay refuses a push AT ONCE, never by holding it out"*
+  (`:332-373`): the other half of the gate, which nothing pinned. `holdMs: 30_000`, a race against
+  2 s. A hold would answer only at the 30 s deadline as `push-dropped link-down`; the real code
+  answers `unavailable` at once. It also asserts elapsed `< 2_000` and that the drop's audit line
+  never appears, so "refused" cannot be satisfied by "held and then dropped" — the wrong audit
+  word and the per-device wait the Design names.
+
+**Mutations (each applied in place, run, then restored and `cmp`-verified).**
+
+```
+A  flushHeldPushes: `pushable = true`  (no `features` re-check)
+   12 tests → 11 pass, 1 fail
+   (fail) the `features` gate … > a HELD push is refused, not flushed, when the reconnect
+          announces no `push` [831.99ms]
+   RED on: expect(frames).toEqual([]) — received
+     ["{\"t\":\"push\",\"n\":1,\"token\":\"aaaa…\",\"env\":\"sandbox\",…}"]      RESTORED-OK
+
+B  push(): the registered-no-push branch calls holdPush instead of resolving
+   12 tests → 11 pass, 1 fail
+   (fail) … > a registered no-push relay refuses a push AT ONCE, never by holding it out [2015ms]
+   RED on: expect(race).toBe("unavailable") — received "waited-out"                RESTORED-OK
+```
+
+Both are red on the ASSERTION, not on a timeout or a compile error: A on the frame that must not
+exist, B on the status (the 2 s race is what turns a hold into `"waited-out"`). Each mutation kills
+exactly the test meant for it and leaves the other green — the two gates are now pinned
+independently, which is what the finding required ("each gate is pinned only by the other one's
+presence").
+
+**Regression check on the fix itself.** The held-push test asserts `isConnected()` after the
+reconnect and `unavailable` before its 3 s hold expires, so it still fails if the frame is dropped
+without settling the caller (the `push-dropped link-down` path) instead of refused. The new
+at-once test's 30 s hold means the reviewed `holdMs: 50` gate test above it is untouched: it pins
+the *quiet* no-push case (no repeat of `relay-no-push`, F4), which still passes.
+
+**Gate (this worktree, whole package set).** `bunx tsc --noEmit` exit 0. `bun run lint`: 1387
+files, no fixes (the §6 baseline, 0/0). `bun test` (full): **10120 pass, 4 skip, 0 fail** — one more
+pass than fix round 1's 10119, from the new test; the 4 skips are the same opt-in ones (live k8s,
+live docker, the real-socket keepalive). `git status`: only
+`packages/daemon/test/relay-link-push.test.ts` modified.
+
+**Unverified (one line).** The reviewer's `review-flush.test.ts` at the repo root was re-derived
+here rather than re-run in place (that path is outside this worktree, and I must not touch the main
+checkout); the shapes are the same and both print 0 frames on the fixed code.
+
+*— claude-opus-5-5 (executor, fix round 2 of P7 + P8), 2026-11-15*
