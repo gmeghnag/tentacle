@@ -707,7 +707,133 @@ APPROVED by the owner (2026-11-15).**
 
 ## Execution
 
-*(empty — Implementation APPROVED by the owner on 2026-11-15; S1 starts once `fix/mobile-chat-glitches` has merged)*
+*— claude-opus-5-5, 2026-11-15 · slice S1 only*
+
+**Scope: S1 (Tokens & palette) only.** S2–S10 untouched. No protocol, daemon,
+client or wire change; `packages/protocol/schema/protocol.json` therefore did
+not need regenerating (no schema changed — verified by `git status` naming only
+`apps/mobile` files, the test file and the changelog fragment).
+
+### Preconditions re-checked against the code (all held)
+
+- **Tokens are the single source** — `Palette` at `theme.ts:14`, `paletteFor`
+  `:169`; the only palette in the app (`App.tsx:1044`; `grep` for
+  `lightPalette|darkPalette|paletteFor` outside `theme.ts` finds nothing else).
+  Two hard-coded colour sites exist but neither is a *palette*: the
+  over-camera chrome (`scanner.tsx:233-234`) and `GlassButton`'s `onDark` branch
+  (`GlassButton.tsx:44,60,78`) — both intentional, both unchanged by S1. The
+  claim "no per-screen colours exist to chase" holds.
+- **Thin glyphs available** — `expo-symbols`' `SymbolWeight` carries
+  `thin|light` (`node_modules/expo-symbols/build/SymbolModule.types.d.ts:81`),
+  so only `Icon.tsx`'s own union blocked them. `line.3.horizontal`, `gearshape`,
+  `chevron.down` all exist in `sf-symbols-typescript@2.2.0` (grepped: 8/19/15
+  hits), so `IconName` still typechecks against `SFSymbol`.
+- **`size.headerList` is load-bearing elsewhere** — `header-collapse.ts:16`
+  derives `COLLAPSE_AT` from it, so S1 changes `headerChat` only (56 → 50) and
+  leaves `headerList` at 52. Pinned by a test.
+
+### Drift from the Implementation (2, both reconciled in code + here)
+
+1. **`dark.red` had to move.** Design 1 says "accent and semantic colours
+   unchanged … re-checked on the new ground". Measured: `#FF6961` on B1's `fill`
+   (`#33332F`) is **4.4977:1** — under F9's 4.5 floor by 0.002, and `red` is drawn
+   on `fill` at 3 real sites (`PermissionSheet.tsx:50` `{bg: palette.fill, fg:
+   palette.red}`, `Row.tsx:63`, `PillButton.tsx:53`). So "unchanged" and F9 could
+   not both hold. Took the minimal lift that clears the floor:
+   `red: #FF6D65` (**4.6077** on `fill`, 5.223 on `card`, 5.992 on `bg`). This is
+   recorded as a test so it cannot drift back. Everything else in the ramp is
+   exactly B1 as written.
+2. **`test/icon-weights.test.ts` was not in Tests.** `Icon.tsx` is `.tsx`, which
+   Bun cannot import (React Native's sources are Flow), so the weight union is
+   only pinnable from source — the existing `icon-glass-wiring.test.ts` pattern.
+   Added as a new file rather than folded into that one (different concern).
+
+One self-correction worth recording: my first draft of the "band is never its own
+ground" test compared `band`/`bandOnSheet` against `sheet`. That is the wrong
+property — a *banded* sheet's ground becomes `bg` (mockup `index.html:390`:
+`sheet: … : p.page`, `band: … : p.card`), so the correct assertion is against
+`bg` plus a luminance step. Fixed before green; the mutation check below proves
+the corrected assertion still bites.
+
+### As-built, in order
+
+1. **Tests first (red).** `theme.test.ts` extended — `band`/`bandOnSheet`/
+   `drawer` added to the 4.5:1 text-pair matrix, plus a new S1 section (B1 hexes,
+   "never pure black", surface-step ordering, the `red` near-miss, band-vs-ground
+   in both palettes, band text floors, `radius.card`/`sheet`, `space.rowX`/
+   `sectionTop`, `size.rowList`, `headerChat` 50 + `headerList` 52). New
+   `test/icon-weights.test.ts` (weight union, default weight, the three glyph
+   names, no duplicate union members). **Red on the property, not on compile:**
+   34 failing assertions, e.g. `Expected: 0 / Received: 26` (`radius.card`) and
+   `Expected: 20 / Received: undefined` (`space.rowX`) — no import error, no
+   type error, so the tests were measuring the behaviour.
+2. **`src/theme.ts`.** B1 dark ramp; `drawer` `#1A1A19` (light `#F7F7F8`);
+   `band`/`bandOnSheet` (`#2A2A28` dark, `#FFFFFF` light); `radius.card` 0,
+   `radius.sheet` 14; `space.rowX` 20, `space.sectionTop` 22; `size.rowList` 50,
+   `size.headerChat` 50. The `red` lift carries its own comment with the measured
+   ratio.
+3. **`src/ui/Icon.tsx`.** `weight` union gains `thin`/`light` (kept `regular`/
+   `semibold`/`bold`; default unchanged at `semibold`, so no call site moves);
+   `line.3.horizontal` and `gearshape` added (`chevron.down` was already there,
+   so adding it would have duplicated a union member — the new test pins that).
+4. **`changelog.d/mobile-chrome.changed.md`** — one bullet, parsed by
+   `scripts/changelog.ts` `parseFragments` (`OK: ["changed/mobile-chrome"]`).
+   `CHANGELOG.md` untouched, `TODO.md` untouched.
+
+No S2–S10 file was opened for edit: `chat-header.ts`, `HeaderIcon.tsx`,
+`ContextRing.tsx`, `ScreenHeader.tsx`, `BandSection.tsx`, `Row.tsx`, `drawer-*`
+and the screens are all still as `main` left them. S1 changes **tokens and the
+icon seam only** — the "soft dark everywhere"/banded-LOOK comes from tokens, but
+no screen was rewired, so S2's `HeaderIcon` and S3's `BandSection` remain the
+slices that spend these tokens.
+
+### Mutation checks (§9 — each applied, run, reverted)
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | `dark.red` back to `#FF6961` | 2 fail: `theme contrast (dark) > red on fill ≥ 4.5:1`, `S1 · B1's ground left the semantic colours readable` |
+| 2 | `dark.band` = `#1F1F1E` (== its ground) | 2 fail: `dark: a band on the page…`, `a band is never its own ground…` |
+| 3 | `radius.card` back to 26 | 1 fail: `radius.card is 0 (square bands) and radius.sheet is 14` |
+| 4 | drop `"light"` from `Icon`'s weight union | 1 fail: `the weight union carries light and thin` |
+| 5 | `size.headerChat` back to 56 | 1 fail: `the chat header is 50 pt, the list header untouched (A1)` |
+
+After each revert the file was re-run green, so the reverts are real (no mutation
+left in the tree — confirmed by `git diff` at the end naming only the intended
+three files plus the two new ones).
+
+### Gate
+
+- `bunx tsc --noEmit` — **clean** (root, exit 0).
+- `bunx tsc -p apps/mobile --noEmit` — **clean**.
+- `bun run lint` — **`Checked 1656 files. No fixes applied.`** (0 errors, 0
+  warnings; baseline per AGENTS §6 is clean, so no new issues).
+- `bun test` — **11939 pass, 0 fail, 5 skip**. The 5 skips are exactly the
+  documented opt-in ones (live-k8s ×2, live-docker ×2, the real-socket slow test);
+  no non-opt-in skip, so nothing of mine is hidden behind a skip.
+
+### Not done in this slice (and why)
+
+- **The `done when`'s screenshots ("soft dark everywhere") are NOT captured.**
+  Attempted `bun run e2e:mobile --ios 26 --only 24-ui-shots`: preflight passed
+  (Java 17 present, `--ios 26` narrows the runtime requirement), the mock model,
+  relay, `serve` and the seed all came up, and it failed at
+  `build/install failed for iOS 26 (exit 1)` with
+  `LACore.swift:23: error: Unable to resolve module dependency: 'PushCore'`.
+  **That is pre-existing and unrelated to S1**: `git show HEAD:…/LACore.swift`
+  already has `import PushCore` while
+  `HEAD:…/expo-target.config.js` declares no Swift package, and my diff is
+  TypeScript-only (`git diff --name-only` → `theme.ts`, `Icon.tsx`,
+  `theme.test.ts`). Per AGENTS §0 I stopped after two attempts in that category
+  rather than keep rebuilding. The visual pass therefore stays with S1's Review
+  (or an e2e-capable machine); it is unverified here, and the honest state is
+  "tokens proven by unit tests, pixels not yet seen".
+- **`bun run check`'s exact sequence** was run as its three pieces above
+  (`tsc --noEmit` → `lint` → `bun test`), all green; the chained script would
+  only re-run them.
+- One stray artifact from the failed run was removed
+  (`apps/mobile/targets/live-activity/Info.plist`, generated by `expo prebuild`
+  and NOT gitignored — only `ios/`, `android/`, `.expo/` are). Working tree holds
+  only the intended changes.
 
 ## Review
 

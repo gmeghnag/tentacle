@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type Palette, darkPalette, lightPalette, shadow } from "../src/theme.ts";
+import {
+  type Palette,
+  darkPalette,
+  lightPalette,
+  radius,
+  shadow,
+  size,
+  space,
+} from "../src/theme.ts";
 
 /**
  * The readability gate for the phone's tokens (docs/feat/mobile-ui-polish.md
@@ -40,7 +48,7 @@ type Key = keyof Palette;
 /** [text, surface] pairs that must read at 4.5:1. */
 const TEXT_PAIRS: readonly (readonly [Key, Key])[] = [
   ...(["label", "sec", "accent"] as const).flatMap((text) =>
-    (["bg", "card", "page", "fill", "sheet", "code"] as const).map(
+    (["bg", "card", "page", "fill", "sheet", "code", "band", "bandOnSheet", "drawer"] as const).map(
       (surface) => [text, surface] as const,
     ),
   ),
@@ -58,6 +66,9 @@ const TEXT_PAIRS: readonly (readonly [Key, Key])[] = [
   ["kw", "code"],
   ["com", "code"],
   ["label", "codeOnSheet"],
+  // The E2 band surface (S1): a row's label and value sit on it, not on `card`.
+  ["label", "band"],
+  ["sec", "band"],
 ];
 
 for (const [mode, palette] of [
@@ -94,6 +105,121 @@ describe("theme tokens (aliases removed in Slice 6)", () => {
     for (const palette of [lightPalette, darkPalette]) {
       expect(palette.code).not.toBe(palette.fill);
     }
+  });
+});
+
+/**
+ * S1 of docs/feat/mobile-chrome.md — the B1 "warm graphite" dark ramp, the new
+ * `drawer`/`band` surfaces, the E2 radii and the thinner header row. The hexes
+ * are pinned so a later token tweak cannot quietly undo the owner's choice
+ * (Owner Q-B) or land on a worse ground than the one F9 measured.
+ */
+describe("S1 · the dark ramp is B1 (Owner Q-B)", () => {
+  const B1 = {
+    bg: "#1F1F1E",
+    page: "#1F1F1E",
+    card: "#2A2A28",
+    sheet: "#2A2A28",
+    fill: "#33332F",
+    code: "#2A2A28",
+    codeOnSheet: "#33332F",
+    label: "#F2F1EC",
+    sec: "#A3A19B",
+    sep: "#3A3936",
+    sepChat: "#33322F",
+    sepSheet: "#403F3B",
+    glass: "rgba(42,42,40,0.86)",
+    glassBorder: "rgba(255,255,255,0.07)",
+    scrim: "rgba(0,0,0,0.45)",
+    switchOff: "#45443F",
+    drawer: "#1A1A19",
+  } as const satisfies Partial<Palette>;
+
+  test("every B1 token is the approved value", () => {
+    const got = Object.fromEntries(
+      Object.keys(B1).map((k) => [k, darkPalette[k as keyof typeof B1]]),
+    );
+    expect(got).toEqual(B1);
+  });
+
+  test("the dark page is soft graphite, never pure black (the restyle's whole point)", () => {
+    expect(darkPalette.page).not.toBe("#000000");
+    expect(darkPalette.bg).toBe("#1F1F1E");
+    expect(darkPalette.shadowOpacity).toBe(0.35);
+  });
+
+  test("the surfaces step up from the page in the approved order", () => {
+    // A screen reads as layers only if page < card = sheet <= fill, in luminance.
+    const page = luminance(hexToRgb(darkPalette.page));
+    const card = luminance(hexToRgb(darkPalette.card));
+    const fill = luminance(hexToRgb(darkPalette.fill));
+    expect(card).toBeGreaterThan(page);
+    expect(fill).toBeGreaterThanOrEqual(card);
+    // The drawer sits one step BELOW the page, so the panel reads without a shadow.
+    expect(luminance(hexToRgb(darkPalette.drawer))).toBeLessThan(page);
+  });
+
+  test("B1's ground left the semantic colours readable (the 4.4977 near-miss)", () => {
+    // `#FF6961` on B1's `fill` measured 4.4977:1 — under F9's floor by 0.002, so
+    // the dark `red` was lightened. Pinned here so it cannot drift back.
+    expect(contrast(darkPalette.red, darkPalette.fill)).toBeGreaterThanOrEqual(4.5);
+    expect(darkPalette.red).not.toBe("#FF6961");
+  });
+});
+
+describe("S1 · `band` is one step above what it sits on (E2)", () => {
+  test("dark: a band on the page, and a band on a sheet", () => {
+    expect(darkPalette.band).toBe("#2A2A28");
+    expect(darkPalette.bandOnSheet).toBe("#2A2A28");
+    // The sheet's own ground becomes the page, so the band still reads above it.
+    expect(contrast(darkPalette.band, darkPalette.page)).toBeGreaterThan(1);
+    expect(contrast(darkPalette.bandOnSheet, darkPalette.page)).toBeGreaterThan(1);
+  });
+
+  test("light: a white band on the grouped ground, on the page and in a sheet", () => {
+    expect(lightPalette.band).toBe("#FFFFFF");
+    expect(lightPalette.bandOnSheet).toBe("#FFFFFF");
+    expect(lightPalette.band).not.toBe(lightPalette.bg);
+    expect(lightPalette.drawer).toBe("#F7F7F8");
+  });
+
+  test("a band is never its own ground in either palette (it would be invisible)", () => {
+    // A band's ground is the grouped screen's `bg`: dark #1F1F1E, light #F2F2F7.
+    // A BANDED SHEET's bg is that same ground — its ground is no longer `sheet`
+    // — so both band tokens are measured against `bg`, not against `sheet`.
+    for (const palette of [lightPalette, darkPalette]) {
+      for (const band of [palette.band, palette.bandOnSheet]) {
+        expect(band).not.toBe(palette.bg);
+        expect(luminance(hexToRgb(band))).toBeGreaterThan(luminance(hexToRgb(palette.bg)));
+      }
+    }
+  });
+
+  test("the band's own text floors: label ≥ 4.5:1, sec ≥ 4.5:1", () => {
+    for (const palette of [lightPalette, darkPalette]) {
+      expect(contrast(palette.label, palette.band)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(palette.sec, palette.band)).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+});
+
+describe("S1 · E2 geometry (square bands, a thin sheet, a shorter header)", () => {
+  test("`radius.card` is 0 (square bands) and `radius.sheet` is 14", () => {
+    expect(radius.card).toBe(0);
+    expect(radius.sheet).toBe(14);
+  });
+
+  test("the new spacing and row tokens exist", () => {
+    expect(space.rowX).toBe(20);
+    expect(space.sectionTop).toBe(22);
+    expect(size.rowList).toBe(50);
+  });
+
+  test("the chat header is 50 pt, the list header untouched (A1)", () => {
+    expect(size.headerChat).toBe(50);
+    // `header-collapse.ts` derives a list screen's collapse offset from this one;
+    // changing it would move that threshold, which S1 does not own.
+    expect(size.headerList).toBe(52);
   });
 });
 
