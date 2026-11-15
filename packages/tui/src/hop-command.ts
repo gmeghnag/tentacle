@@ -2,8 +2,11 @@
  * `/move` (docs/feat/session-hop.md, slice H1): the pure grammar of the command
  * that moves a live session to another target. Parsing only — nothing is built,
  * dialled or asked here; the plan that decides whether this spec may run at all
- * is `cli/src/hop-plan.ts`.
+ * is `cli/src/hop-plan.ts`. The ONE label a workload prints (`workloadText`,
+ * docs/feat/session-hop-ux OD1) lives here too, beside the grammar that parses it,
+ * so every other module prints a workload the same way.
  */
+import { oneLine } from "./commands.ts";
 
 /** The engines a hop can join (the same union as `TargetBadge`'s). */
 export type HopEngine = "kubernetes" | "docker" | "podman";
@@ -14,6 +17,30 @@ export interface HopWorkload {
   readonly name: string;
   /** k8s only: the container in the pod. */
   readonly container?: string;
+  /**
+   * k8s only: the namespace the pod lives in (OD1). Absent until it is resolved:
+   * a typed `/move` fills it at the build, a PROPOSAL at the turn's end
+   * (`pinNamespace`), so what the owner was shown is what is dialled.
+   */
+  readonly namespace?: string;
+}
+
+/**
+ * OD3: WHERE a k8s namespace came from, so a hop can say why it dialled that one
+ * (`namespace <ns> (from <source>; context <c>, <path>)`) even where no prompt is
+ * shown — under auto-accept, and for a miss. The SAME shape as the cli's
+ * `KubeNamespace` (which aliases it): it must ride the hop's own plumbing
+ * (`HopProposalView` → `HopFeed.start`), because a build that RE-resolves it
+ * would report `explicit` — its input is the value the pin wrote into the spec
+ * (fix round 2, finding 1).
+ */
+export interface HopNamespace {
+  readonly namespace: string;
+  readonly source: "explicit" | "env" | "context" | "default" | "server";
+  /** The kubeconfig consulted, when one was (never with an `explicit`/`env` answer). */
+  readonly kubeconfig?: string;
+  /** The context consulted, when one was. */
+  readonly context?: string;
 }
 
 /**
@@ -35,12 +62,25 @@ export type HopParse =
   | { readonly kind: "error"; readonly text: string };
 
 export const HOP_USAGE =
-  "Usage: /move local [--keep|--rm] · /move container [<image>] [--keep|--rm] · /move attach <engine>:<name>[/<container>] [--keep|--rm] · /move cancel";
+  "Usage: /move local [--keep|--rm] · /move container [<image>] [--keep|--rm] · /move attach <engine>:<name>[/<container>] [--keep|--rm] (kubernetes: kubernetes:<namespace>/<pod>[/<container>]) · /move cancel";
 
 export const HOP_ENGINES: readonly HopEngine[] = ["docker", "podman", "kubernetes"];
 
 /** The longest name any engine takes (a k8s pod's DNS-1123 limit). */
 export const HOP_WORKLOAD_PART_MAX = 253;
+
+/**
+ * A k8s NAMESPACE is a DNS-1123 label: lowercase alphanumerics and `-`, at most
+ * 63 characters (OD1). Stricter than a workload part on purpose — it also keeps a
+ * namespace from ever reading as a container, so the two `/part`s cannot be
+ * confused in the printed `ns/pod[/container]` form.
+ */
+export const HOP_NAMESPACE_MAX = 63;
+const HOP_NAMESPACE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+
+export function hopNamespaceOk(namespace: string): boolean {
+  return namespace.length <= HOP_NAMESPACE_MAX && HOP_NAMESPACE.test(namespace);
+}
 
 /**
  * What one part of a workload may contain: the union of what the engines accept
@@ -52,7 +92,14 @@ export const HOP_WORKLOAD_PART_MAX = 253;
 const HOP_WORKLOAD_PART = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** What was wrong with a proposed workload, as the one fact the caller words. */
-export type HopWorkloadProblem = "engine" | "name" | "container" | "containerName" | "chars";
+export type HopWorkloadProblem =
+  | "engine"
+  | "name"
+  | "container"
+  | "containerName"
+  | "chars"
+  | "namespace"
+  | "namespaceChars";
 
 export type HopWorkloadCheck =
   | { readonly kind: "ok"; readonly workload: HopWorkload }
@@ -62,14 +109,23 @@ export type HopWorkloadCheck =
  * The ONE workload validator, shared by the typed `/move attach` grammar and the
  * proposed `move_session` tool (D9) — so the two paths cannot accept different
  * things: docker/podman have no container part, k8s at most one, every part is
- * named and charset-clean. Pure; each caller words its own error line.
+ * named and charset-clean, and a namespace (OD1) is a k8s one alone and DNS-1123.
+ * Pure; each caller words its own error line.
  */
-export function hopWorkload(engine: string, name: string, container?: string): HopWorkloadCheck {
+export function hopWorkload(
+  engine: string,
+  name: string,
+  container?: string,
+  namespace?: string,
+): HopWorkloadCheck {
   if (!HOP_ENGINES.includes(engine as HopEngine)) {
     return { kind: "bad", problem: "engine" };
   }
   if (name === "") {
     return { kind: "bad", problem: "name" };
+  }
+  if (namespace !== undefined && engine !== "kubernetes") {
+    return { kind: "bad", problem: "namespace" };
   }
   if (container !== undefined && engine !== "kubernetes") {
     return { kind: "bad", problem: "container" };
@@ -77,23 +133,35 @@ export function hopWorkload(engine: string, name: string, container?: string): H
   if (container === "") {
     return { kind: "bad", problem: "containerName" };
   }
+  if (namespace !== undefined && !hopNamespaceOk(namespace)) {
+    return { kind: "bad", problem: "namespaceChars" };
+  }
   for (const part of container === undefined ? [name] : [name, container]) {
     if (part.length > HOP_WORKLOAD_PART_MAX || !HOP_WORKLOAD_PART.test(part)) {
       return { kind: "bad", problem: "chars" };
     }
   }
+  if (engine !== "kubernetes") {
+    return { kind: "ok", workload: { engine: engine as HopEngine, name } };
+  }
   return {
     kind: "ok",
-    workload:
-      container === undefined
-        ? { engine: engine as HopEngine, name }
-        : { engine: "kubernetes", name, container },
+    workload: {
+      engine: "kubernetes",
+      name,
+      ...(namespace === undefined ? {} : { namespace }),
+      ...(container === undefined ? {} : { container }),
+    },
   };
 }
 
 /** What a workload part may hold, for a line about a name that does not. */
 export const HOP_NAME_USAGE =
   "a workload name may hold only letters, digits, '.', '_' and '-' (no ':' or '/')";
+
+/** What a namespace may hold (DNS-1123), for a line about one that may not. */
+export const HOP_NAMESPACE_USAGE =
+  "a namespace is lowercase letters, digits and '-' (at most 63, starting and ending with a letter or digit)";
 
 /** The one line an `attach` with no readable `<engine>:<name>` gets. */
 export const HOP_ATTACH_USAGE =
@@ -260,21 +328,42 @@ export function hopStep(input: {
 export const HOP_QUEUED_NOTICE =
   "_Move queued: it starts when the turn ends and the queued messages have run._";
 
-/** `<engine>:<name>[/<container>]` → the workload, or the line explaining what was wrong. */
+/**
+ * `<engine>:<name>[/<container>]` → the workload, or the line explaining what was
+ * wrong. For kubernetes the `/part`s follow OD1's 1/2/3 rule: one = the pod (the
+ * namespace comes from the OD2 default at the build), two = `<namespace>/<pod>`,
+ * three = `<namespace>/<pod>/<container>`. A container can therefore be named only
+ * WITH a namespace — `kubernetes:p/c` means namespace `p`, pod `c` (accepted,
+ * pre-public: the owner's decision, not an accident of parsing).
+ */
 function parseWorkload(word: string): HopWorkload | string {
   const colon = word.indexOf(":");
   const engine = colon <= 0 ? "" : word.slice(0, colon);
   const parts = colon <= 0 ? [""] : word.slice(colon + 1).split("/");
-  // A third `/part` is not a workload in ANY engine: name the rule it broke.
-  if (parts.length > 2) {
-    if (engine === "kubernetes") {
-      return "one /container at most: /move attach kubernetes:<pod>/<container>";
+  if (engine !== "kubernetes") {
+    // docker/podman: exactly one part. A second is the existing "no container"
+    // line — the old grammar's answer, unchanged (nothing may teach it though).
+    if (parts.length > 1) {
+      return HOP_ENGINES.includes(engine as HopEngine)
+        ? `${engine} has no container part — only kubernetes: names one: /move attach ${engine}:<name>`
+        : HOP_ATTACH_USAGE;
     }
-    return HOP_ENGINES.includes(engine as HopEngine)
-      ? `${engine} has no container part — only kubernetes: names one: /move attach ${engine}:<name>`
-      : HOP_ATTACH_USAGE;
+    const plain = hopWorkload(engine, parts[0] ?? "");
+    return typeof plain === "string" ? plain : checkedOrLine(plain, engine);
   }
-  const checked = hopWorkload(engine, parts[0] ?? "", parts[1]);
+  if (parts.length > 3) {
+    // Four or more `/part`s are not a workload in any reading: the usage line.
+    return HOP_USAGE;
+  }
+  const [first = "", second, third] = parts;
+  const namespace = third === undefined ? (second === undefined ? undefined : first) : first;
+  const name = third === undefined ? (second ?? first) : second;
+  const container = third;
+  return checkedOrLine(hopWorkload("kubernetes", name ?? "", container, namespace), engine);
+}
+
+/** A checked workload, or the ONE line its problem gets (shared by both engines). */
+function checkedOrLine(checked: HopWorkloadCheck, engine: string): HopWorkload | string {
   if (checked.kind === "ok") {
     return checked.workload;
   }
@@ -283,13 +372,39 @@ function parseWorkload(word: string): HopWorkload | string {
       return HOP_ATTACH_USAGE;
     case "container":
       return `${engine} has no container part — only kubernetes: names one: /move attach ${engine}:<name>`;
+    case "namespace":
+      return `${engine} has no namespace — only kubernetes: names one: /move attach ${engine}:<name>`;
+    case "namespaceChars":
+      return HOP_NAMESPACE_USAGE;
     case "containerName":
-      return "a name is needed for the container: /move attach kubernetes:<pod>/<container>";
+      return "a name is needed for the container: /move attach kubernetes:<namespace>/<pod>/<container>";
     case "chars":
       return HOP_NAME_USAGE;
     case "name":
       return engine === "kubernetes"
-        ? "a name is needed: /move attach kubernetes:<pod>[/<container>]"
+        ? `a name is needed: /move attach ${HOP_K8S_FORM}`
         : "a name is needed: /move attach <engine>:<name>";
   }
+}
+
+/** The one k8s shape every message teaches (OD1). */
+export const HOP_K8S_FORM = "kubernetes:<namespace>/<pod>[/<container>]";
+
+/**
+ * ONE label for a workload (OD1): the prompt, the live row, the moved/failed
+ * notice, the wake-up line and the badge all print it, so they cannot disagree —
+ * and a k8s pod is never printed as `kubernetes:<pod>/<container>`, which now
+ * READS as `ns/pod`. Names may be pod-supplied (AGENTS §7), so they go through
+ * `oneLine` (control and bidi bytes removed) like every other untrusted text.
+ */
+export function workloadText(workload: HopWorkload): string {
+  const name = oneLine(workload.name);
+  const container = workload.container === undefined ? "" : `/${oneLine(workload.container)}`;
+  // The namespace is the laptop's own resolution (DNS-1123-checked), never a
+  // free-form pod text: it is printed as it is.
+  const namespace =
+    workload.engine === "kubernetes" && workload.namespace !== undefined
+      ? `${workload.namespace}/`
+      : "";
+  return `${workload.engine}:${namespace}${name}${container}`;
 }

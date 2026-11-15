@@ -36,15 +36,23 @@
  * `useSessionLink` does for `swapRef`, and what App itself did inline before.
  */
 import { type MutableRefObject, useCallback, useRef, useState } from "react";
-import type { HopFeed, SessionController } from "./app-types.ts";
+import type { HopFeed, HopPlaceView, SessionController } from "./app-types.ts";
 import {
   HOP_QUEUED_NOTICE,
+  type HopNamespace,
   type HopSpec,
   hopReady,
   hopStep,
   parseHopCommand,
 } from "./hop-command.ts";
 import { hopFailureText, hopMovedNotice, hopPlaceText, noticeText } from "./hop-status.ts";
+import {
+  HOP_WAKE_CHAIN_MAX,
+  HOP_WAKE_PAUSED_NOTICE,
+  HOP_WAKE_ROW,
+  type HopOrigin,
+  hopWakeStep,
+} from "./hop-wake.ts";
 import type { PermissionController } from "./permission-ui.ts";
 import type { DaemonQueue, QueuedRows } from "./queued.ts";
 import { shownRows } from "./queued.ts";
@@ -79,8 +87,23 @@ export interface HopHost {
    * App declares it above this hook, and this hook assigns it.
    */
   readonly startHopRef: MutableRefObject<
-    ((spec: HopSpec, opts?: { gateAnswered?: true }) => void) | null
+    | ((
+        spec: HopSpec,
+        opts?: { gateAnswered?: true; autoAccepted?: true; namespace?: HopNamespace },
+      ) => void)
+    | null
   >;
+  /**
+   * OD6: the ONE way a turn starts without typing (`run`, the driver's), used to
+   * wake the model after a hop. Absent (a host with no driver, a test) ⇒ no wake.
+   */
+  readonly sendWake?: (text: string) => void;
+  /**
+   * OD6: assigned here for `hopTurnPort.wake` — a MODEL's proposal that ended with
+   * no spec to build (refused, or unaskable) still continues the session. A ref,
+   * because the port is declared ABOVE this hook.
+   */
+  readonly wakeAfterHopRef: MutableRefObject<((outcome: "declined" | "failed") => void) | null>;
   /** The host's feed; ABSENT where a hop is not offered at all (D8). */
   readonly hop: HopFeed | undefined;
   readonly permission: PermissionController;
@@ -102,6 +125,14 @@ export interface HopLayer {
   readonly hopIfQueuedRef: MutableRefObject<(() => void) | null>;
   /** `/move …`: the grammar, the boundary, then start it or leave it queued. */
   readonly requestHop: (raw: string) => void;
+  /**
+   * OD6: the next hop starts from a MODEL's proposal (set by `hopTurnPort.approved`
+   * just before it calls `startHopRef`). A ref, because `startHop`'s identity must
+   * not change under the port that holds it.
+   */
+  readonly hopOriginRef: MutableRefObject<HopOrigin>;
+  /** OD6: a real user prompt breaks the wake chain (`HOP_WAKE_CHAIN_MAX`). */
+  readonly noteUserPrompt: () => void;
 }
 
 export function useHop(host: HopHost): HopLayer {
@@ -118,6 +149,8 @@ export function useHop(host: HopHost): HopLayer {
     swapSession,
     pushNotice,
     flushNow,
+    sendWake,
+    wakeAfterHopRef,
   } = host;
 
   // The hop running NOW (its phase row is state, the handle is a ref so a queued
@@ -129,6 +162,20 @@ export function useHop(host: HopHost): HopLayer {
   const hopQueuedRef = useRef<HopSpec | null>(null);
   /** The queued-hop driver, read from App's idle effect (a ref: no dependency cycle). */
   const hopIfQueuedRef = useRef<(() => void) | null>(null);
+  /**
+   * OD6: the origin of the hop being STARTED. `startHopRef` is the one entry point
+   * every path goes through, so the origin is set by the caller just before it
+   * (a proposal: `hopTurnPort.approved`; a queued `/move`: `hopIfQueued`; an idle
+   * one: `requestHop`) and read by `startHop`. A ref, because `startHop`'s
+   * identity must not change with it (the port holds it).
+   */
+  const hopOriginRef = useRef<HopOrigin>("idle");
+  /**
+   * OD6: how many wake turns have run since the user last typed. A real prompt
+   * resets it (`noteUserPrompt`, called by the driver's own send path), so the
+   * cap counts CONSECUTIVE self-continues, not all of a session's moves.
+   */
+  const wakeChainRef = useRef(0);
 
   /**
    * Start one hop (docs/feat/session-hop.md D3/D4), and be the ONLY place the
@@ -139,10 +186,22 @@ export function useHop(host: HopHost): HopLayer {
    * host's (`HopFeed`): the App never builds a runtime.
    */
   const startHop = useCallback(
-    (spec: HopSpec, opts?: { gateAnswered?: true }): void => {
+    (
+      spec: HopSpec,
+      opts?: { gateAnswered?: true; autoAccepted?: true; namespace?: HopNamespace },
+    ): void => {
       if (!hop) {
         return;
       }
+      // OD6: where this hop came from decides whether the session continues by
+      // itself after it (`hopWakeStep`, pure). A model's proposal or a `/move`
+      // typed mid-task wakes; a `/move` typed at rest does not. Read from the ref
+      // its caller just set, and consumed: the next hop starts from `idle` unless
+      // somebody says otherwise.
+      const origin: HopOrigin = hopOriginRef.current;
+      hopOriginRef.current = "idle";
+      // OD4: did auto-accept answer the prompt that produced this spec?
+      const autoApproved = opts?.autoAccepted === true ? { autoAccepted: true as const } : null;
       const run = hop.start(spec, sessionRef.current?.sessionId ?? null, opts);
       hopRef.current = run;
       setHopRun({ target: hop.label(spec), phase: null });
@@ -160,37 +219,94 @@ export function useHop(host: HopHost): HopLayer {
         setHopRun(null);
         flushNow();
       };
+      /**
+       * OD6: whether THIS settled hop continues the session by itself, and the
+       * one notice that says what happened. `wake` sends ONE real prompt (the
+       * driver prepends the laptop's wake line, so the model learns where it is);
+       * `hold` leaves that line for the user's next prompt (`takeLine` consumes
+       * it there — never lost, never doubled). The chain cap is `hopWakeStep`'s.
+       */
+      const after = (
+        outcome: "moved" | "failed",
+        where?: HopPlaceView,
+        note?: string,
+        autoAccepted = false,
+      ): void => {
+        const step = hopWakeStep({
+          origin,
+          outcome,
+          chain: wakeChainRef.current,
+          // Never two turns at once (review round 1, MEDIUM 2): a job wake fired
+          // by `wakeIfPending`, or a foreign turn `drainHeld` started, owns the
+          // slot by now — the line then waits for the next real prompt.
+          ready: hopReady(boundary(stateRef, rowsRef, daemonQueueRef)),
+        });
+        const continues = step === "wake" && sendWake !== undefined;
+        if (continues) {
+          wakeChainRef.current += 1;
+        }
+        if (where !== undefined) {
+          pushNotice(
+            hopMovedNotice(
+              hopPlaceText(where),
+              permission.autoApprove,
+              note,
+              continues,
+              autoAccepted,
+            ),
+          );
+        }
+        if (continues) {
+          sendWake?.(HOP_WAKE_ROW);
+          return;
+        }
+        if (step === "hold" && wakeChainRef.current >= HOP_WAKE_CHAIN_MAX) {
+          // The chain stopped one move short: say so ONCE, then start over — the
+          // line still rides the user's next prompt, so nothing is lost.
+          wakeChainRef.current = 0;
+          pushNotice(`_${HOP_WAKE_PAUSED_NOTICE}_`);
+        }
+      };
       void run.done.then(
         (outcome) => {
           if ("moved" in outcome) {
-            // D9: a hop never inherits an approval — auto-accept goes off with
-            // the move, said in the same notice (the feed, or this TUI's own).
-            // `clearAutoApprove`, never `autoAccept.set`: the feed's `set` only
-            // publishes the flip for the OTHER terminals, so this one's state
-            // (and its status bar) would still say "auto-accept on" while the
-            // notice claims otherwise.
-            const wasOn = permission.autoApprove;
-            if (wasOn) {
-              permission.clearAutoApprove();
-            }
+            // OD5 (reversing D9): auto-accept SURVIVES a move — the owner's
+            // decision — so nothing is cleared here. Session "always" approvals
+            // are still re-asked: they live daemon-side, and the daemon changed.
             swapSession(outcome.moved, { keepTranscript: true });
             settle();
-            pushNotice(hopMovedNotice(hopPlaceText(outcome.view.place), wasOn, outcome.note));
+            // OD4's logged allow-once: the answer came from auto-accept, so the
+            // record says no prompt was shown.
+            after("moved", outcome.view.place, outcome.note, autoApproved?.autoAccepted === true);
             return;
           }
           // A failed hop changes nothing: same session, same badge, same rows.
           settle();
           pushNotice(`_${noticeText(outcome.failed)}_`);
+          after("failed");
         },
         (error: unknown) => {
           // `HopRun.done` never rejects by contract; a host that does anyway is
           // still one notice, and the latch must not stay up.
           settle();
           pushNotice(`_${noticeText(hopFailureText(error))}_`);
+          after("failed");
         },
       );
     },
-    [flushNow, hop, permission, pushNotice, sessionRef, swapSession, switchingRef],
+    [
+      daemonQueueRef,
+      flushNow,
+      hop,
+      permission,
+      pushNotice,
+      rowsRef,
+      sendWake,
+      sessionRef,
+      stateRef,
+      swapSession,
+      switchingRef,
+    ],
   );
   startHopRef.current = startHop;
 
@@ -226,6 +342,7 @@ export function useHop(host: HopHost): HopLayer {
         pushNotice(HOP_QUEUED_NOTICE);
         return;
       }
+      hopOriginRef.current = "idle";
       startHopRef.current?.(step.spec);
     },
     [daemonQueueRef, hop, pushNotice, rowsRef, startHopRef, stateRef],
@@ -245,11 +362,42 @@ export function useHop(host: HopHost): HopLayer {
     }
     hopQueuedRef.current = null;
     setHopQueued(null);
+    hopOriginRef.current = "queued";
     startHopRef.current?.(spec);
   }, [daemonQueueRef, hopQueued, rowsRef, startHopRef, stateRef]);
   hopIfQueuedRef.current = hopIfQueued;
 
-  return { hopRun, hopQueued, hopIfQueuedRef, requestHop };
+  const noteUserPrompt = useCallback((): void => {
+    wakeChainRef.current = 0;
+  }, []);
+
+  /**
+   * OD6: a proposal settled with nothing to build. The model is woken to read the
+   * line (`hopWakeStep` decides — the origin is a proposal by definition here), or
+   * the line waits for the user's next prompt. Set on the ref App's port reads.
+   */
+  const wakeSettled = useCallback(
+    (outcome: "declined" | "failed"): void => {
+      const step = hopWakeStep({
+        origin: "proposal",
+        outcome,
+        chain: wakeChainRef.current,
+        // Same rule as `after()`: the settle is asynchronous (the ask can wait on
+        // a human), so by now a job wake or a drained foreign turn may own the
+        // slot — the line is then carried by the next real prompt.
+        ready: hopReady(boundary(stateRef, rowsRef, daemonQueueRef)),
+      });
+      if (step !== "wake" || sendWake === undefined) {
+        return;
+      }
+      wakeChainRef.current += 1;
+      sendWake(HOP_WAKE_ROW);
+    },
+    [daemonQueueRef, rowsRef, sendWake, stateRef],
+  );
+  wakeAfterHopRef.current = wakeSettled;
+
+  return { hopRun, hopQueued, hopIfQueuedRef, requestHop, hopOriginRef, noteUserPrompt };
 }
 
 /**

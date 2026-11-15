@@ -50,9 +50,52 @@ afterAll(async () => {
 const offered = (tools: { definitions(): readonly { name: string }[] }): string[] =>
   tools.definitions().map((definition) => definition.name);
 
+/**
+ * The config as one value of `TENTACLE_SESSION_HOP_TOOL` resolves it (the env is
+ * the seam: `dir` holds no config file). `undefined` = the env unset, i.e. the
+ * built-in default.
+ */
+async function configWithHopTool(value: string | undefined): Promise<TentacleConfig> {
+  if (value !== undefined) {
+    process.env.TENTACLE_SESSION_HOP_TOOL = value;
+  }
+  try {
+    return await loadConfig({ cwd: dir });
+  } finally {
+    unsetEnv(HOP_ENV);
+  }
+}
+
+/**
+ * OD8 (owner 2026-11-15): the tool is DISABLED by default — `sessionHop.tool` is
+ * the opt-in, not an opt-out. The failure this closes is a model proposing moves
+ * nobody asked for on a fresh install.
+ */
+describe("OD8: `move_session` is off by DEFAULT, and `sessionHop.tool: true` turns it on", () => {
+  test("the built-in default is off", async () => {
+    // RED on the pre-OD8 code (`DEFAULT_SESSION_HOP_TOOL = true`): the resolved
+    // field is `true`, and the model is offered the tool with no opt-in at all.
+    // Mutation: restore the default to `true` → this row fails.
+    const fresh = await configWithHopTool(undefined);
+    expect(fresh.sessionHop.tool).toBe(false);
+  });
+
+  test("a default config does NOT offer it to the model", async () => {
+    // Mutation: drop `&& config.sessionHop.tool` from `wiring.ts` → offered.
+    const fresh = await configWithHopTool(undefined);
+    expect(offered(buildAgent(fresh, { moveSession: true }).tools)).not.toContain("move_session");
+  });
+
+  test("`sessionHop.tool: true` offers it (the opt-in really works)", async () => {
+    const on = await configWithHopTool("true");
+    expect(on.sessionHop.tool).toBe(true);
+    expect(offered(buildAgent(on, { moveSession: true }).tools)).toContain("move_session");
+  });
+});
+
 describe("H5/M5: `move_session` is registered only where a hop can be asked about", () => {
-  test("a build that sets `moveSession` offers it, with its schema", () => {
-    const wired = buildAgent(config, { moveSession: true });
+  test("a build that sets `moveSession` offers it, with its schema", async () => {
+    const wired = buildAgent(await configWithHopTool("true"), { moveSession: true });
     expect(offered(wired.tools)).toContain("move_session");
     const definition = wired.tools.definitions().find((d) => d.name === "move_session");
     // The model needs the arguments to fill in, or the tool is unusable.
@@ -79,13 +122,14 @@ describe("H5/M5: `move_session` is registered only where a hop can be asked abou
     }
   });
 
-  test("a child agent is never offered it, even from a parent that has it", () => {
+  test("a child agent is never offered it, even from a parent that has it", async () => {
     // A child's tools are the parent's, filtered to its type's allow-list plus the
     // "never a child" list (`subagent.ts`). The parent registry really holds
     // `move_session` here, which is what makes the filter's job non-vacuous; the
     // child-side rows (`packages/agent/test/subagent-move-session.test.ts`) prove
-    // the filter drops it for a `general` child.
-    const wired = buildAgent(config, { moveSession: true });
+    // the filter drops it for a `general` child. (OD8: the setting must be ON, or
+    // the registry has nothing for the filter to drop and the row proves nothing.)
+    const wired = buildAgent(await configWithHopTool("true"), { moveSession: true });
     expect(wired.tools.get("move_session")).toBeDefined();
   });
 });

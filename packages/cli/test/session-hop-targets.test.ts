@@ -45,9 +45,16 @@ import type {
   WorkloadFacts,
   WorkloadState,
 } from "../src/engine-host.ts";
+import { WorkloadNotFoundError } from "../src/engine-host.ts";
 import type { EngineRuntime } from "../src/engine-runtime.ts";
+import type { KubeNamespace } from "../src/engine-select.ts";
 import { type HopLeaveDeps, createHopLeave } from "../src/hop-leave.ts";
-import { type HopEngineHost, createHopTargets, hopBuilder } from "../src/hop-targets.ts";
+import {
+  type HopEngineHost,
+  createHopTargets,
+  hopBuilder,
+  hopHostNamespace,
+} from "../src/hop-targets.ts";
 import { readKept, recordKept } from "../src/kept-index.ts";
 import { KEPT_LABEL, KEPT_SCHEMA_VERSION } from "../src/kept.ts";
 import { type LocalRuntime, createLocalRuntime } from "../src/local-runtime.ts";
@@ -1059,6 +1066,285 @@ describe("H6 an attach leaves a user-owned workload alone, even with `keep: fals
     expect(log.calls.filter((c) => c.startsWith("remove"))).toEqual([]);
     expect(readKept(join(dir, "config", "kept")).entries).toHaveLength(1);
     await built.built.runtime.dispose();
+  });
+});
+
+describe("OD1 a hop dials the namespace it was TOLD, and a miss names the hop's own grammar", () => {
+  /** A host fake that records WHAT it was built for (the `where` a build passes). */
+  function whereRig(error?: Error, resolved?: KubeNamespace) {
+    const host = fakeHost({ calls: [], ...(error === undefined ? {} : {}) });
+    const asked: Array<{ engine: string; where: unknown }> = [];
+    const statuses: string[] = [];
+    const pair = sharedPair();
+    host.inspect = async () => {
+      throw error ?? new Error("unused");
+    };
+    const build = createHopTargets({
+      config: config(dir),
+      shared: pair,
+      status: (line) => statuses.push(line),
+      notify: () => {},
+      host: (engine, where) => {
+        asked.push({ engine, where });
+        // The namespace the host REALLY resolved (a `buildEngineHost`'s answer),
+        // with its provenance: what a build must report and dial.
+        return {
+          host,
+          locators: resolved === undefined ? {} : { namespace: resolved.namespace },
+          ...(resolved === undefined ? {} : { namespace: resolved }),
+        };
+      },
+    });
+    return { build, asked, statuses };
+  }
+
+  test("an attach passes the workload's namespace to the host builder", async () => {
+    // Mutation: `deps.host(workload.engine)` → the recorded `where` is `{}`, and the
+    // build dials today's kubeconfig instead of what the owner approved.
+    const { build, asked } = whereRig();
+    await build(
+      {
+        target: "attach",
+        workload: { engine: "kubernetes", namespace: "ns-A", name: "web-0" },
+        keep: true,
+      },
+      "uid-1",
+    );
+    expect(asked[0]).toEqual({ engine: "kubernetes", where: { namespace: "ns-A" } });
+  });
+
+  test("a docker attach names no namespace (nothing to override)", async () => {
+    const { build, asked } = whereRig();
+    await build({ target: "attach", workload: { engine: "docker", name: "box" }, keep: true }, "u");
+    expect(asked[0]).toEqual({ engine: "docker", where: {} });
+  });
+
+  test("a k8s 404 says the hop's own fix, never `--namespace` (a hop has no such flag)", async () => {
+    const log: FakeHostLog = { calls: [] };
+    const r = rig(log, { mount: false });
+    r.host.inspect = async () => {
+      throw new WorkloadNotFoundError(
+        `pod "etcd-0" not found in namespace "default" — check the name (kubectl get pods -n default) or pass --namespace <ns>; use \`run\` to create one`,
+        "pod",
+        "in namespace default",
+      );
+    };
+    const built = await r.build(
+      {
+        target: "attach",
+        workload: { engine: "kubernetes", namespace: "openshift-etcd", name: "etcd-0" },
+        keep: true,
+      },
+      "uid-1",
+    );
+    // The engine's `WorkloadNotFoundError` is replaced by the hop's wording: the
+    // attach's own error path is what runs (a `built` here would be a vacuous pass).
+    expect(built.kind).toBe("failed");
+    if (built.kind !== "failed") {
+      throw new Error("expected the attach to fail");
+    }
+    expect(built.notice).toContain("no pod");
+    expect(built.notice).toContain("openshift-etcd");
+    expect(built.notice).toContain("/move attach kubernetes:<namespace>/etcd-0");
+    expect(built.notice).not.toContain("--namespace");
+  });
+
+  test("the PROVENANCE rides the live row and the miss (design 7: `(from <source>)`)", async () => {
+    // OD3's trace must be visible where there is NO prompt at all: an auto-accepted
+    // proposal shows none, and a typed `/move` never does. Design 1 puts it on the
+    // hop's first phase (the live row) and design 7 repeats it in a miss.
+    // RED before the fix: neither carried `(from …)`, so the owner's live test could
+    // not answer "why THAT namespace" at all.
+    // Mutation: drop `namespaceTrace` from the status line → the row has no `from`.
+    const resolved = {
+      namespace: "ns-ctx",
+      source: "context" as const,
+      kubeconfig: "/home/me/.kube/config",
+      context: "ctx-1",
+    };
+    const r = whereRig(
+      new WorkloadNotFoundError(
+        `pod "web-0" not found in namespace "ns-ctx"`,
+        "pod",
+        "in namespace ns-ctx",
+      ),
+      resolved,
+    );
+    const built = await r.build(
+      { target: "attach", workload: { engine: "kubernetes", name: "web-0" }, keep: true },
+      "uid-1",
+    );
+    if (built.kind !== "failed") {
+      throw new Error("expected the attach to fail");
+    }
+    // The live row said WHY before it dialled…
+    expect(r.statuses.join("\n")).toContain("namespace ns-ctx (from context; context ctx-1");
+    expect(r.statuses.join("\n")).toContain("/home/me/.kube/config");
+    // …and the miss repeats it, so the transcript answers the question too.
+    expect(built.notice).toContain("(from context");
+  });
+
+  test("hopHostNamespace: a pin's provenance WINS over re-resolving (fix round 2)", () => {
+    // `main.hopEngineHost`'s one decision, extracted so it can be tested (it was
+    // untestable inside the dispatcher, and a mutation there survived every row).
+    // The trap: `kubeNamespace({namespace})` always answers `explicit`, so
+    // re-resolving a pinned value silently rewrites the provenance.
+    // Mutation: `return resolve(where ?? {})` always → the first row fails.
+    const pin = {
+      namespace: "openshift-etcd",
+      source: "context" as const,
+      kubeconfig: "/k",
+      context: "ctx-1",
+    };
+    let resolved = 0;
+    const resolve = (): KubeNamespace => {
+      resolved += 1;
+      return { namespace: pin.namespace, source: "explicit" as const };
+    };
+    // A pin is used as it is — the kubeconfig is not read at all.
+    expect(
+      hopHostNamespace("kubernetes", { namespace: pin.namespace, provenance: pin }, resolve),
+    ).toEqual(pin);
+    expect(resolved).toBe(0);
+    // Nothing pinned (a typed `/move`): resolve, exactly as `run`/`attach` do.
+    expect(hopHostNamespace("kubernetes", {}, resolve)).toEqual({
+      namespace: pin.namespace,
+      source: "explicit",
+    });
+    expect(resolved).toBe(1);
+    // Not k8s: no namespace at all, and nothing is resolved.
+    expect(hopHostNamespace("docker", {})).toBeUndefined();
+  });
+
+  test("a PINNED proposal keeps the pin's provenance — never `explicit` (fix round 2)", async () => {
+    // The owner's scenario: the model omits `namespace`, auto-accept is ON, so no
+    // prompt is shown. `pinNamespace` resolved `openshift-etcd` from the kubeconfig
+    // CONTEXT and wrote it into the spec; the build used to re-resolve that value
+    // and report `explicit` — so the row, the outcome and the miss all named the
+    // model's omission as if the owner had typed a namespace (the trace said
+    // `from explicit`, and the miss said no `(from …)` at all, because the spec has
+    // a namespace). RED before the fix: both lines say `explicit`.
+    // Mutation: drop the `opts.namespace` step in `dialledProvenance` → the host's
+    // own answer (`resolved` below) is used, i.e. `explicit` again.
+    const pinned = {
+      namespace: "openshift-etcd",
+      source: "context" as const,
+      kubeconfig: "/home/me/.kube/config",
+      context: "ctx-1",
+    };
+    const host = fakeHost({ calls: [] });
+    const asked: unknown[] = [];
+    const statuses: string[] = [];
+    host.inspect = async () => {
+      throw new WorkloadNotFoundError(
+        `pod "etcd-0" not found in namespace "openshift-etcd"`,
+        "pod",
+        "in namespace openshift-etcd",
+      );
+    };
+    const build = createHopTargets({
+      config: config(dir),
+      shared: sharedPair(),
+      status: (line) => statuses.push(line),
+      notify: () => {},
+      // The host is built from the PINNED value, so its own answer is `explicit`
+      // (this is the mechanical trap: `kubeNamespace({namespace})` always is).
+      host: (engine, where) => {
+        asked.push(where);
+        return {
+          host,
+          locators: {},
+          namespace: { namespace: "openshift-etcd", source: "explicit" as const },
+        };
+      },
+    });
+    const built = await build(
+      {
+        target: "attach",
+        workload: { engine: "kubernetes", namespace: "openshift-etcd", name: "etcd-0" },
+        keep: true,
+      },
+      "uid-1",
+      { namespace: pinned },
+    );
+    if (built.kind !== "failed") {
+      throw new Error("expected the attach to fail");
+    }
+    // The build was TOLD the provenance (one fact, from the pin)…
+    expect(asked[0]).toEqual({
+      namespace: "openshift-etcd",
+      provenance: pinned,
+    });
+    // …so the live row names the real source of the namespace.
+    expect(statuses.join("\n")).toContain(
+      "namespace openshift-etcd (from context; context ctx-1, /home/me/.kube/config)",
+    );
+    expect(statuses.join("\n")).not.toContain("from explicit");
+    // …and so does the miss (it used to say nothing at all).
+    expect(built.notice).toContain("(from context)");
+    expect(built.notice).not.toContain("(from explicit)");
+  });
+
+  test("a TYPED `/move attach kubernetes:<pod>` names the namespace the host dialled (OD1)", async () => {
+    // The reviewer's third case: the parse cannot know the namespace (OD2 decides
+    // it), so the spec carries none and the built place used to be labelled
+    // `kubernetes:web-0` — a name that now READS as `ns/pod` and is simply wrong.
+    // RED before the fix: the place (and so the badge, the moved line and the wake
+    // line) had no namespace at all. Mutation: drop the `target.namespace` step →
+    // `built.built.place.namespace` is undefined again.
+    const resolved = {
+      namespace: "ns-ctx",
+      source: "context" as const,
+      kubeconfig: "/home/me/.kube/config",
+      context: "ctx-1",
+    };
+    const host = fakeHost({ calls: [] });
+    const pair = sharedPair();
+    const build = createHopTargets({
+      config: config(dir),
+      shared: pair,
+      status: () => {},
+      notify: () => {},
+      host: () => ({ host, locators: {}, namespace: resolved }),
+    });
+    const built = await build(
+      { target: "attach", workload: { engine: "kubernetes", name: "web-0" }, keep: true },
+      "uid-1",
+    );
+    if (built.kind !== "built") {
+      throw new Error(`expected a build, got ${built.notice}`);
+    }
+    expect(built.built.place).toEqual({
+      kind: "workload",
+      engine: "kubernetes",
+      name: "web-0",
+      namespace: "ns-ctx",
+    });
+    await built.built.runtime.dispose();
+  });
+});
+
+describe("slice 2: a hop paints ONE live line, never a phase per notice", () => {
+  test("an injecting attach: zero notices, and the phases reached `status`", async () => {
+    // The defect (Repro 2): with `logTerm.tty:false` every phase, every 10% of the
+    // transfer and the resolver's path became its own notice — ~13 of them. With
+    // `liveLine` the engine takes its interactive contract instead.
+    // Mutation: `liveLine: undefined` (the old `logTerm: HOP_TERM`) → notices ≥ 10.
+    const log: FakeHostLog = { calls: [] };
+    const r = rig(log, { mount: false });
+    const built = await r.build(
+      { target: "attach", workload: { engine: "docker", name: "mine" }, keep: true },
+      "uid-1",
+    );
+    expect(built.kind).toBe("built");
+    // One summary at most in the transcript: nothing a clean attach says is a notice.
+    expect(r.notices.filter((n) => /attaching|injecting|transfer|verifying/.test(n))).toEqual([]);
+    // The row DID see them: the line is updated in place, not dropped.
+    expect(r.statuses.join("\n")).toContain("attaching");
+    expect(r.statuses.some((s) => s.includes("[container]"))).toBe(true);
+    if (built.kind === "built") {
+      await built.built.runtime.dispose();
+    }
   });
 });
 

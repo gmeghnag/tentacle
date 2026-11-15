@@ -509,7 +509,8 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   );
   // Laptop-side (D9): it decides whether the agent is OFFERED `move_session`.
   // A pod reads its own value — the tool only proposes, and the owner's answer
-  // still comes from the laptop's prompt.
+  // still comes from the laptop's prompt. OFF by default (session-hop-ux OD8):
+  // the setting is the opt-in.
   const sessionHopTool = pick(
     parseBool(env.TENTACLE_SESSION_HOP_TOOL),
     fileConfig.sessionHop?.tool,

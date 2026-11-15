@@ -21,20 +21,29 @@
 import type { PermissionBroker } from "@tentacle/core";
 import type { EngineEndpoint } from "@tentacle/docker";
 import type { HopSpec, HopWorkload } from "@tentacle/tui";
+import { workloadText } from "@tentacle/tui";
 import type { TentacleConfig } from "./config.ts";
+import { WorkloadNotFoundError } from "./engine-host.ts";
 import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { attachEngineRuntime, startEngineRuntime } from "./engine-runtime.ts";
-import { engineNoun, laptopWorkspaceInput } from "./engine-select.ts";
+import {
+  type KubeNamespace,
+  engineNoun,
+  kubeNamespace,
+  laptopWorkspaceInput,
+} from "./engine-select.ts";
+import { type HopLiveLine, createHopLiveLine } from "./hop-live-line.ts";
 import { type AttachVerdict, attachVerdict } from "./hop-plan.ts";
 import type { HopPlace } from "./hop-plan.ts";
 import type { HopPromptEngine, HopPromptFacts } from "./hop-proposal.ts";
+import { namespaceTrace } from "./hop-proposal.ts";
 import type { HopRuntimeDeps, HopShared } from "./hop-runtime.ts";
+import type { HopFolderFate } from "./hop-turn.ts";
 import { removeVerifiedKept } from "./kept-cmd.ts";
 import { forgetKept, keptDir, recordKept } from "./kept-index.ts";
 import { KEPT_SCHEMA_VERSION, type KeptEntry, keptMetadata } from "./kept.ts";
 import { type LocalRuntime, startWorkerRuntime } from "./local-runtime.ts";
 import { type HopBuild, type HopBuilt, errorText } from "./session-hop.ts";
-import type { StreamTerm } from "./streams.ts";
 import { untrustedText } from "./untrusted-text.ts";
 import { mountGate, planWorkspace } from "./workspace-mount.ts";
 
@@ -42,11 +51,15 @@ import { mountGate, planWorkspace } from "./workspace-mount.ts";
 export const HOP_ROLLBACK_TIMEOUT_MS = 3_000;
 
 /**
- * Never a terminal (D6/P8): the engine's spinner and its per-phase lines are
- * switched OFF at the source, so provisioning cannot write a raw byte while Ink
- * owns the screen. What it would have printed goes to the hop's sinks instead.
+ * Never a terminal (D6/P8), but ONE line (docs/feat/session-hop-ux slice 2): the
+ * engine is handed a `liveLine` instead of `logTerm.tty`, so provisioning paints
+ * the hop's own status row — one text updated in place — and never writes a raw
+ * byte while Ink owns the screen. Its `log`/`info` keep only what is really a
+ * notice (a warning, an error, the dispose's `quitReport`).
  */
-const HOP_TERM: StreamTerm = { tty: false, colour: false, columns: () => undefined };
+function hopLiveLine(deps: HopTargetDeps): HopLiveLine {
+  return createHopLiveLine({ emit: (text) => deps.status(text) });
+}
 
 /** The engine-facing half a factory needs from a host (`buildEngineHost`'s result). */
 export interface HopEngineHost {
@@ -65,6 +78,14 @@ export interface HopEngineHost {
     readonly namespace?: string;
     readonly insecureTcp?: boolean;
   };
+  /**
+   * k8s only: the namespace this host really dialled, WITH its provenance (OD3).
+   * A build reports it so the live row and a miss can say why, and so a place
+   * knows the namespace it is IN — which the spec of a typed `/move attach
+   * kubernetes:<pod>` cannot (`kubeNamespace` decides it, OD2). Absent: not k8s,
+   * or a test's fake (which then simply shows no provenance).
+   */
+  readonly namespace?: KubeNamespace;
 }
 
 /** What a factory may not invent: the config, the sinks, the shared pair, the host. */
@@ -77,7 +98,7 @@ export interface HopTargetDeps {
   /** One notice (a warning, a kept line); never the terminal (D6). */
   readonly notify: (text: string) => void;
   /** The engine host for `engine`, built by the caller (a test injects a fake). */
-  readonly host: (engine: EngineKind) => HopEngineHost;
+  readonly host: (engine: EngineKind, where?: HopHostWhere) => HopEngineHost;
   /** The image `/move container` uses when none was named (`run`'s own default). */
   readonly defaultImage?: () => string | undefined;
   /** Whether a mount may be planned at all (a test turns it off; `run --no-mount`). */
@@ -92,6 +113,45 @@ export interface HopTargetDeps {
   readonly detachedRun?: (workload: HopWorkload) => boolean;
 }
 
+/** What a build NAMES about the place it dials, so the host is built WHERE it was shown (OD1). */
+export interface HopHostWhere {
+  /** k8s only: the namespace a `pinNamespace`/typed `/move` resolved and the owner saw. */
+  readonly namespace?: string;
+  /**
+   * OD3: the PROVENANCE of `namespace` when a `pinNamespace` resolved it — the
+   * host is built from THIS rather than by re-resolving, which would answer
+   * `explicit` and present OD2's decision as the owner's own namespace (fix
+   * round 2, finding 1). Absent: nothing pinned it, so the host resolves it.
+   */
+  readonly provenance?: KubeNamespace;
+}
+
+/**
+ * OD3: the namespace to pin into a hop's engine host, with its provenance — the
+ * ONE decision `main.hopEngineHost` makes (extracted so it is testable at all;
+ * `main` is dispatch, not logic).
+ *
+ * A namespace a `pinNamespace` already resolved MUST NOT be re-resolved here:
+ * `kubeNamespace({ namespace })` answers `explicit` for any value handed to it, so
+ * re-resolving the pinned value turns OD2's decision into "the owner typed this",
+ * and a miss then has no `(from …)` to show (fix round 2, finding 1). The pin's
+ * own `KubeNamespace` therefore wins outright; only a hop that pinned nothing
+ * resolves, exactly as `run`/`attach` do.
+ */
+export function hopHostNamespace(
+  engine: EngineKind,
+  where: HopHostWhere | undefined,
+  resolve: (options: HopHostWhere) => KubeNamespace = kubeNamespace,
+): KubeNamespace | undefined {
+  if (engine !== "kubernetes") {
+    return undefined;
+  }
+  if (where?.provenance !== undefined) {
+    return where.provenance;
+  }
+  return resolve(where ?? {});
+}
+
 /**
  * What a build may be TOLD, not what it may invent (D9/M6: ONE prompt). When the
  * owner's approval of a PROPOSAL already carried the mount gate's warning
@@ -101,6 +161,15 @@ export interface HopTargetDeps {
 export interface HopBuildOpts {
   /** The owner approved a prompt that already showed this gate's warning. */
   readonly gateAnswered?: true;
+  /**
+   * OD3: k8s only — the PROVENANCE (source/context/kubeconfig) of the namespace
+   * this spec was pinned with. The spec's own `workload.namespace` is the VALUE
+   * to dial (OD1); this is only how it is said. Without it the build would have
+   * to re-resolve, and `kubeNamespace({namespace})` always answers `explicit` —
+   * the trace would then name the pin as if the owner had typed it (fix round 2,
+   * finding 1).
+   */
+  readonly namespace?: KubeNamespace;
 }
 
 /**
@@ -108,8 +177,9 @@ export interface HopBuildOpts {
  * ONE place the hop's `opts` is carried from the owner's answer to the factory
  * (H5 review round 2, finding 1). Written here, not as a lambda at the call
  * site, because this forwarding is INVISIBLE to the compiler — a lambda with
- * fewer parameters type-checks and then silently drops `gateAnswered`, which
- * costs the owner a second prompt for a gate they already answered.
+ * fewer parameters type-checks and then silently drops `gateAnswered` (or the
+ * pin's `namespace`, fix round 2 finding 1), which costs the owner a second
+ * prompt for a gate they already answered, or a trace that lies.
  */
 export function hopBuilder(deps: Omit<HopTargetDeps, "shared">): HopRuntimeDeps["build"] {
   return (spec, shared, sessionId, opts) =>
@@ -127,7 +197,7 @@ export function createHopTargets(deps: HopTargetDeps) {
       return workerTarget(deps, sessionId);
     }
     if (spec.target === "attach") {
-      return attachTarget(deps, spec.workload, sessionId);
+      return attachTarget(deps, spec.workload, sessionId, opts);
     }
     return containerTarget(deps, spec.image, sessionId, opts);
   };
@@ -299,7 +369,7 @@ async function containerTarget(
       hop: true,
       // Everything the engine says goes to the hop's sinks: no spinner, no raw
       // line while Ink owns the terminal (§7, P8, D6).
-      logTerm: HOP_TERM,
+      liveLine: hopLiveLine(deps),
       log: (line) => deps.notify(untrustedText(line)),
       // DRIFT from D6's wording ("log/info → the hop status feed"): `info` goes to
       // the NOTICE sink. `quitReport` — the ONE line a faulted run must not lose
@@ -328,6 +398,9 @@ async function containerTarget(
     kind: "built",
     built: {
       ...built,
+      // OD6: the plan BUILT it, so this is the authoritative answer — a mount
+      // planned and used is `shared`, `none`/`refuse`-free `none` is not.
+      folder: plan.kind === "mount" ? "shared" : "not shared",
       rollback: async () => {
         await bounded(runtime?.dispose(), HOP_ROLLBACK_TIMEOUT_MS);
         // Only what THIS hop created, and only through the verified delete (D5).
@@ -363,6 +436,7 @@ async function attachTarget(
   deps: HopTargetDeps,
   workload: HopWorkload,
   sessionId: string,
+  opts: HopBuildOpts = {},
 ): Promise<HopBuild> {
   const { config } = deps;
   // D7(a) BEFORE any dial (nothing is inspected, nothing injected into a
@@ -377,11 +451,36 @@ async function attachTarget(
   }
   let target: HopEngineHost;
   try {
-    target = deps.host(workload.engine);
+    // OD1: dial the namespace that was SHOWN, never a fresh resolution — a
+    // kubeconfig that changed since the prompt approved a place cannot move it.
+    // OD3: and when a PIN resolved it, hand its provenance over too, so the host
+    // reports where it came from instead of re-resolving the pinned value (which
+    // answers `explicit` — fix round 2, finding 1).
+    target = deps.host(workload.engine, {
+      ...(workload.namespace === undefined ? {} : { namespace: workload.namespace }),
+      ...(opts.namespace === undefined ? {} : { provenance: opts.namespace }),
+    });
   } catch (error) {
     return { kind: "failed", notice: `not moved: ${errorText(error, "no engine")}` };
   }
-  deps.status(`moving to ${workloadLabel(workload)} — attaching`);
+  // OD1/OD3: the workload the host REALLY dialled. A typed `/move attach
+  // kubernetes:<pod>` cannot name its namespace (OD2 decides it), so without this
+  // the row, the badge, the moved line and the miss would all print
+  // `kubernetes:<pod>` — a name that now READS as `ns/pod`, and a trace nobody
+  // sees under auto-accept (no prompt is shown then).
+  const provenance = dialledProvenance(workload, target, opts);
+  const dialled = dialledWorkload(workload, provenance);
+  // OD3 (fix round 2, finding 1): WHERE that namespace came from. A pinned
+  // proposal arrives with the pin's own provenance; re-resolving the value the
+  // pin wrote would say `explicit`, i.e. name the model's omission as if the
+  // owner had typed a namespace.
+  // Design 1/OD3: the FIRST phase carries the provenance, so a live test answers
+  // "why that namespace" from the row it is watching.
+  deps.status(
+    provenance === undefined
+      ? `moving to ${workloadText(dialled)} — attaching`
+      : `moving to ${workloadText(dialled)} — attaching (${namespaceTrace(provenance)})`,
+  );
   let runtime: LocalRuntime | undefined;
   try {
     runtime = await attachEngineRuntime(config, {
@@ -394,7 +493,7 @@ async function attachTarget(
       sessionId,
       // The same declarative as a new container: this client can ask its owner.
       hop: true,
-      logTerm: HOP_TERM,
+      liveLine: hopLiveLine(deps),
       log: (line) => deps.notify(untrustedText(line)),
       // The same rule as the container: `info` is the NOTICE sink (D6's spirit,
       // see `containerTarget`'s note — `quitReport` rides it at dispose time).
@@ -405,7 +504,7 @@ async function attachTarget(
     // A user-owned workload is never deleted, and nothing was created here.
     return {
       kind: "failed",
-      notice: `not moved: ${errorText(error, "the workload could not be joined")}`,
+      notice: attachMissNotice(workload, provenance, error),
     };
   }
   // D7(b): the handshake is done and NOTHING is open yet (a runtime opens its
@@ -420,17 +519,24 @@ async function attachTarget(
   }
   return {
     kind: "built",
-    built: builtOf(
-      runtime,
-      {
-        kind: "workload",
-        engine: workload.engine,
-        name: workload.name,
-        ...(workload.container === undefined ? {} : { container: workload.container }),
-      },
-      // An existing daemon may already hold our uid: D1 step 4(a) applies.
-      { preexisting: true, daemonInPod: true },
-    ),
+    built: {
+      ...builtOf(
+        runtime,
+        {
+          kind: "workload",
+          engine: workload.engine,
+          name: workload.name,
+          ...(dialled.namespace === undefined ? {} : { namespace: dialled.namespace }),
+          ...(workload.container === undefined ? {} : { container: workload.container }),
+        },
+        // An existing daemon may already hold our uid: D1 step 4(a) applies.
+        { preexisting: true, daemonInPod: true },
+      ),
+      // OD3: the provenance the outcome line states. Under auto-accept NO prompt
+      // is shown and a typed `/move` never asks, so the recorded line is the only
+      // place a live test can read WHY this namespace was dialled.
+      ...(provenance === undefined ? {} : { trace: namespaceTrace(provenance) }),
+    },
   };
 }
 
@@ -439,6 +545,74 @@ function d7Refusal(verdict: AttachVerdict): HopBuild | null {
   return verdict.kind === "refuse"
     ? { kind: "failed", notice: `not moved: ${verdict.text}` }
     : null;
+}
+
+/**
+ * What an attach that could not join says (docs/feat/session-hop-ux design 7). A
+ * k8s 404 keeps the engine's diagnosis but replaces its CLI advice, which is a
+ * DEAD END in a hop (`pass --namespace <ns>` — a hop has no such flag): the hop's
+ * own grammar is the fix, `kubernetes:<namespace>/<pod>`, and the namespace is
+ * named so a wrong default is obvious. Everything else keeps its own message.
+ */
+function attachMissNotice(
+  workload: HopWorkload,
+  provenance: KubeNamespace | undefined,
+  error: unknown,
+): string {
+  if (workload.engine === "kubernetes" && error instanceof WorkloadNotFoundError) {
+    const namespace = workload.namespace ?? provenance?.namespace ?? "default";
+    // Design 7: the miss repeats OD3's provenance (`(from <source>)`), so the
+    // transcript explains a wrong default even when nothing was prompted for —
+    // and it says it for a PINNED spec too (fix round 2, finding 1: the pin used
+    // to arrive as `explicit`, which read as the owner's own choice).
+    const from = provenance === undefined ? "" : ` (from ${namespaceSource(provenance)})`;
+    return `not moved: no pod "${untrustedText(workload.name)}" in namespace "${untrustedText(namespace)}"${from} — name its namespace: /move attach kubernetes:<namespace>/${untrustedText(workload.name)}`;
+  }
+  return `not moved: ${errorText(error, "the workload could not be joined")}`;
+}
+
+/**
+ * OD3: the PROVENANCE of the namespace an attach dials, or `undefined` when there
+ * is nothing honest to say (not k8s, or a host that resolved none).
+ *
+ * The build does NOT re-resolve it: the spec of a pinned proposal already carries
+ * the value, and `kubeNamespace({ namespace })` answers `explicit` for it — the
+ * trace would then present OD2's decision as the owner's own namespace, and a
+ * miss would show no `(from …)` at all (fix round 2, finding 1). So the pin's own
+ * `KubeNamespace` rides `opts.namespace` (a proposal, `session-hop` → this build)
+ * and the host's own answer covers a typed `/move`. A workload that NAMED its
+ * namespace is `explicit` by definition — that one the host may say.
+ */
+function dialledProvenance(
+  workload: HopWorkload,
+  target: HopEngineHost,
+  opts: HopBuildOpts,
+): KubeNamespace | undefined {
+  if (workload.engine !== "kubernetes") {
+    return undefined;
+  }
+  return opts.namespace ?? target.namespace;
+}
+
+/**
+ * The workload as the host REALLY dialled it (OD1/OD3): the spec's own namespace
+ * when it named one (a pinned proposal, or a typed `ns/pod`), else the one the
+ * host's resolution reports. A `kubernetes:<pod>` typed `/move` therefore gets the
+ * namespace OD2 decided, so its label is `kubernetes:<ns>/<pod>`.
+ */
+function dialledWorkload(
+  workload: HopWorkload,
+  provenance: KubeNamespace | undefined,
+): HopWorkload {
+  const namespace = workload.namespace ?? provenance?.namespace;
+  return namespace === undefined || workload.engine !== "kubernetes"
+    ? workload
+    : { ...workload, namespace };
+}
+
+/** OD3's short form for a miss: WHICH fact decided the namespace. */
+function namespaceSource(namespace: KubeNamespace): string {
+  return namespace.source;
 }
 
 /**
@@ -540,6 +714,10 @@ function builtOf(
   return {
     runtime,
     place,
+    // OD6: whether the laptop's folder is visible there — `local` is the laptop,
+    // a pod/attached workload was not mounted for, and a CONTAINER hop carries
+    // its own answer from the plan it built with.
+    folder: folderFate(place),
     daemonInPod: facts.daemonInPod,
     preexisting: facts.preexisting,
     rollback: async () => {
@@ -548,11 +726,19 @@ function builtOf(
   };
 }
 
-/** `docker:box` / `kubernetes:web-0/app` — the workload as the status row says it. */
+/**
+ * The default folder fate of a place, from the place alone: `local` is the
+ * laptop's own folder, and a workload (a pod, or an attached container nobody
+ * mounted for) is `not shared`. A container hop overrides this from its OWN plan
+ * (`containerTarget`), because only the build knows whether it mounted.
+ */
+function folderFate(place: HopBuilt["place"]): HopFolderFate {
+  return place.kind === "local" ? "local" : "not shared";
+}
+
+/** `docker:box` / `kubernetes:<ns>/web-0/app` — the ONE label (OD1, `workloadText`). */
 function workloadLabel(workload: HopWorkload): string {
-  const name = untrustedText(workload.name);
-  const container = workload.container === undefined ? "" : `/${untrustedText(workload.container)}`;
-  return `${workload.engine}:${name}${container}`;
+  return workloadText(workload);
 }
 
 /** `promise` inside a bound: a hung dispose must not freeze a hop (D1 step 2). */
