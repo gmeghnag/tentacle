@@ -222,6 +222,8 @@ export interface TentacleConfig {
   readonly tui?: ResolvedConfig["tui"];
   /** The laptop's session-log settings (file or profile); absent = defaults (`keepSuperseded` false). */
   readonly sessions?: ResolvedConfig["sessions"];
+  /** Voice dictation (file or profile); absent = the defaults in `voice-session.ts`. */
+  readonly voice?: ResolvedConfig["voice"];
   /** The mobile relay's settings (file or profile); absent = enabled, `DEFAULT_RELAY_URL`. */
   readonly relay?: ResolvedConfig["relay"];
   /** Push notifications (file or profile); absent = enabled, a 30 s grace. */

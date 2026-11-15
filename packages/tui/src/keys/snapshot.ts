@@ -52,6 +52,7 @@ import type { QuitConfirmFacts } from "../commands.ts";
 import type { OpenPanel } from "../panel.ts";
 import type { ReplyMode } from "../permission-reply.ts";
 import type { PermissionChoice } from "../permission-ui.ts";
+import type { VoicePhase } from "../voice-session.ts";
 
 /** The permission dialog, as the router reads it (render values + a live mode). */
 export interface KeyPermission {
@@ -109,4 +110,11 @@ export interface KeySnapshot {
   /** Absent when the runtime has no session directory (`/sessions` unavailable). */
   readonly sessions: SessionDirectory | undefined;
   readonly detachOnQuit: boolean;
+  /**
+   * The dictation's phase, read live (an event between two chunks can move it):
+   * what the voice layer decides Esc/Enter/the key from (F6/F7).
+   */
+  voice(): VoicePhase;
+  /** The configured voice key (`voice.key`), a render value. */
+  voiceKey(): string;
 }

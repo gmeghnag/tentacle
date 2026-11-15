@@ -22,7 +22,14 @@ import { PermissionBroker } from "@tentacle/core";
 import { MAX_SESSION_LIST } from "@tentacle/protocol";
 import type { InitializeResult } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
-import { type SessionPick, type ThemeSetting, oneLine, startTui } from "@tentacle/tui";
+import {
+  type SessionPick,
+  type ThemeSetting,
+  VOICE_DEFAULTS,
+  type VoiceConfig,
+  oneLine,
+  startTui,
+} from "@tentacle/tui";
 import {
   type ConnectResumeRequest,
   type ListOutcome,
@@ -129,6 +136,37 @@ export async function connectTheme(
   }
 }
 
+/**
+ * `connect`'s voice settings (docs/feat/voice-dictation.md, Review round 1 HIGH
+ * 4). `connect` reads no model config, so — exactly like the palette — the voice
+ * settings come from the config FILE, and a broken file must never block a
+ * connection: those settings fall back to `VOICE_DEFAULTS` silently (the palette
+ * call right beside this one already WARNED about the file).
+ */
+export async function connectVoice(
+  options: ConnectOptions,
+): Promise<{ readonly config: VoiceConfig; readonly configDir?: string }> {
+  try {
+    const file = await readFileConfig({
+      ...(options.configDir !== undefined
+        ? {
+            configDir: options.configDir,
+            env: { ...process.env, TENTACLE_CONFIG_DIR: options.configDir },
+          }
+        : {}),
+    });
+    return {
+      config: { ...VOICE_DEFAULTS, ...(file.voice ?? {}) },
+      ...(options.configDir !== undefined ? { configDir: options.configDir } : {}),
+    };
+  } catch {
+    return {
+      config: VOICE_DEFAULTS,
+      ...(options.configDir !== undefined ? { configDir: options.configDir } : {}),
+    };
+  }
+}
+
 /** Injectable for tests; production uses the real socket and TUI. */
 export interface ConnectDeps {
   /** A channel factory for the daemon at `url` (rejects with a `ChannelError`). */
@@ -151,6 +189,9 @@ export async function connectTui(
   // The palette FIRST: it needs no daemon (a local file), Ink has not mounted, and
   // a broken config must warn before anything else can fail for another reason.
   const theme = await connectTheme(options, write);
+  // Voice dictation on the laptop the person is sitting at (Review HIGH 4): a
+  // LAPTOP-ONLY input setting read from the same file the palette comes from.
+  const voice = await connectVoice(options);
   // RPC path: hold a daemon's request until the TUI's prompt is mounted.
   const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
   const dial = deps.dial(options.url, {
@@ -245,6 +286,11 @@ export async function connectTui(
       ...(served.label !== undefined ? { modelLabel: served.label } : {}),
       ...(served.contextWindow !== undefined ? { contextWindow: served.contextWindow } : {}),
       cwd: options.url,
+      // The laptop's own `voice.*` (Review round 1, HIGH 4): without this the
+      // `connect` TUI got `VOICE_DEFAULTS`, so `voice.enabled: false` and the
+      // key/language/engine settings were ignored on this path.
+      voice: voice.config,
+      ...(voice.configDir === undefined ? {} : { voiceConfigDir: voice.configDir }),
       permissions,
       // The resumed session first (already attached), then fresh lazy ones (a `/clear`).
       createSession: () => {

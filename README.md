@@ -445,6 +445,17 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `tools.tabulateJson` | `TENTACLE_TABULATE_JSON` | false | Render a JSON array-of-objects result as a compact table. |
 | `tools.writableDirs` | `TENTACLE_WRITABLE_DIRS` (`:`-separated; empty = `[]`) | the system temp dir (`$TMPDIR`) and `/tmp` | Where `fs_write`/`fs_edit`/`fs_multi_edit` may write besides the project. |
 | `tui.theme` | — | "auto" | The palette: `auto` probes the terminal, `dark`/`light` force one; never carried to a pod. |
+| `voice.autoStop` | — | false | Finish the dictation on a pause instead of on the key. |
+| `voice.autoStopSilenceMs` | — | 500 | The pause that ends a dictation when `voice.autoStop` is on. |
+| `voice.enabled` | — | true | Whether Ctrl+R dictates at all. |
+| `voice.engine` | — | "apple" | Which on-device recogniser transcribes the dictation. |
+| `voice.helperPath` | — | — | The voice helper binary, when it is not next to `tentacle`. |
+| `voice.input` | — | "default" | Which microphone the dictation captures from. |
+| `voice.key` | — | "ctrl+r" | The key that starts and finishes a dictation. |
+| `voice.language` | — | "auto" | The spoken language. |
+| `voice.maxSeconds` | — | 300 | The hard cap on one dictation. |
+| `voice.modelsDir` | — | — | Where the Parakeet models live. |
+| `voice.voiceProcessing` | — | true | Apple's voice processing (echo cancellation, noise suppression, gain) on the capture. |
 | `workloadShell.tool` | `TENTACLE_WORKLOAD_SHELL_TOOL` | false | Offer the agent `workload_shell`: a stateful, non-interactive `sh` on a pod or container. |
 <!-- config-keys:end -->
 
@@ -661,6 +672,34 @@ hooks.json              { "hooks": [ … ] }  (the same entries as `hooks`)     
 - **Permissions:** shell commands need approval; "always" approvals are scoped to a command prefix.
 - **MCP servers**, **sub-agents** (`agent_task`, custom types in `<configDir>/agents/*.md`) and **Agent Skills** (`SKILL.md` in `.agents/skills/`, `<configDir>/skills/` or `~/.agents/skills/`; `/skill-name` in the TUI). See [`docs/architecture/skills.md`](./docs/architecture/skills.md).
 - **TUI:** diffs, mouse scroll and selection, slash commands, `/compact`, saved sessions; `/help` lists the rest.
+- **Voice dictation (macOS):** press **Ctrl+R** in the TUI, speak, press it again — the text lands in the input field for you to edit and send. Speech is recognised on the Mac (Apple's built-in on-device recogniser by default), so no audio leaves the machine or is written to disk; nothing is sent until you press Enter. Esc throws the dictation away without touching a running turn. See [Voice dictation](#voice-dictation) below.
+
+### Voice dictation
+
+Local TUI on a Mac, with a real microphone. Not available over SSH or in a
+container — Ctrl+R then says so instead of capturing the wrong machine.
+
+| While dictating | Key | Effect |
+|---|---|---|
+| idle | **Ctrl+R** | start listening |
+| listening | **Ctrl+R** or **Enter** | transcribe and insert. Enter here never sends |
+| listening or transcribing | **Esc** | discard; a running agent turn is untouched |
+
+```sh
+bun run voice:build          # builds native/voice-mac → dist/tentacle-voice
+tentacle voice status        # recogniser, installed languages, mic permission
+tentacle voice setup         # install Apple's speech asset for a missing language
+```
+
+The first Ctrl+R makes macOS ask for the microphone, naming your terminal app;
+denying it is reported (`Microphone blocked for …`, with the System Settings
+path), never a silent no-op. Settings live under `voice` in the config file:
+`key` (rebindable), `language` (`auto` follows the Mac's language, or force
+`it`/`en`), `autoStop` (off by default — you end the dictation with the key, so
+a pause after a comma can never cut you off), `maxSeconds`, and `input`
+(`builtin` avoids the AirPods call-profile downgrade). `bun run voice:test` runs
+the helper's own tests; it is a separate step because the gate must stay green on
+Linux CI.
 
 ## Development
 

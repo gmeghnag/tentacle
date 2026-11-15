@@ -23,6 +23,8 @@ import type { SubagentNotifyView } from "./subagent-notify.ts";
 import type { TargetBadge } from "./target-view.ts";
 import type { SessionActivity } from "./turn-feed.ts";
 import type { RunQuit } from "./useQuitClear.ts";
+import type { VoiceConfig } from "./voice-session.ts";
+import type { VoiceSpawner } from "./voice-spawn.ts";
 
 /**
  * `RunQuit` left this file with S8: it is declared next to `useQuitClear`, the
@@ -440,6 +442,33 @@ export interface AppProps {
    * else reads it, and no production caller passes it.
    */
   readonly jobRefreshMs?: number;
+  /**
+   * Voice dictation settings (docs/feat/voice-dictation.md). Absent: the defaults
+   * in `voice-session.ts` (`VOICE_DEFAULTS`) — enabled, Ctrl+R, `auto` language,
+   * no auto-stop. A LOCAL input device: never carried to a pod, and the helper is
+   * only ever spawned when `voiceAvailability` says this is a local Mac terminal.
+   */
+  readonly voice?: VoiceConfig;
+  /**
+   * Where the helper's log and `<configDir>/voice/bin` live. The CLI passes the
+   * real config dir (Review round 1, MEDIUM 8: absent, the log path was
+   * `/voice/helper.log`). Absent in a test/host-less mount: no log file is opened.
+   */
+  readonly voiceConfigDir?: string;
+  /**
+   * TEST ONLY: the voice helper spawner. The real one is `Bun.spawn`; a test
+   * passes a fake so no child process (and no microphone) exists in `bun test`.
+   */
+  readonly voiceSpawner?: VoiceSpawner;
+  /**
+   * TEST ONLY: the platform/env `voiceAvailability` reads. Default: this
+   * process's. A test passes `{ platform: "darwin", env: {} }` so it does not
+   * fail on a Linux runner or over SSH (Review round 1, MEDIUM 6).
+   */
+  readonly voiceHost?: {
+    readonly platform: string;
+    readonly env: Readonly<Record<string, string | undefined>>;
+  };
   /**
    * Auto-wake: when a background job exits while idle, start a continuation turn
    * so the agent reacts to it without a user prompt. Default: true.

@@ -228,6 +228,10 @@ export const ARGS = {
   // sub-command and its subject, so a permissions-shifted value is refused here
   // rather than guessed at in `devices-cmd.ts`.
   devices: { bools: { yes: { short: "y" } }, positional: { min: 0, max: 2 } },
+  // `tentacle voice setup [--yes] | status` (docs/feat/voice-dictation.md §6).
+  // The verb is the only word (plus `--yes` for setup), so a stray one is refused
+  // here rather than guessed at.
+  voice: { bools: { yes: { short: "y" } }, positional: { min: 1, max: 2 } },
   // `tentacle logs [<uid>] [--tail N] [--only …] [--json] [--summary] [-f]`
   // (docs/feat/logs-cmd.md). `-f` is `--follow`'s alias, as in `tail -f`; the
   // uid is the only word, so a second one is refused here, not guessed at.
@@ -751,6 +755,7 @@ export type CliMode =
   | "update"
   | "pair"
   | "devices"
+  | "voice"
   | "logs"
   | "plain"
   | "tui"
@@ -786,6 +791,8 @@ const USES_MODEL: Readonly<Record<CliMode, boolean>> = {
   devices: false,
   // `logs` reads the session log files: no daemon, no model, no session.
   logs: false,
+  // `voice` runs the local helper only: no daemon, no model, no session.
+  voice: false,
   // Everything that builds an agent or proxies to a model.
   serve: true,
   run: true,
@@ -827,6 +834,7 @@ export function cliMode(args: readonly string[]): CliMode {
     first === "update" ||
     first === "pair" ||
     first === "devices" ||
+    first === "voice" ||
     first === "logs"
   ) {
     return first;
@@ -859,6 +867,7 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   update: "tentacle update [--check] [--version vX.Y.Z]",
   pair: "tentacle pair [--address ws(s)://host:port/e2e]... [--name <name>]",
   devices: "tentacle devices | revoke <name|id-prefix> | reset [--yes]",
+  voice: "tentacle voice setup [--yes] | status",
   logs: "tentacle logs [<uid>|<run-name>] [--tail N] [--only ask,error,tool] [--json] [--summary] [-f|--follow] [--connect ws(s)://host:port [--token T] [--ca-cert FILE|--insecure-skip-tls-verify]]",
   tui: "tentacle [-i] [--resume [uid]|--continue] [--model <id>] [--profile <name>]",
 };
