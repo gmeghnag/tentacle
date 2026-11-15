@@ -8,7 +8,6 @@
  * handshake is sent on it. The timer is injected, so no test waits 750 ms.
  */
 import { describe, expect, test } from "bun:test";
-import { ChannelError } from "@tentacle/client";
 import {
   type DialMemory,
   type DialSteps,
@@ -17,6 +16,7 @@ import {
   firstAnswering,
   isTerminalDialError,
 } from "../src/address-dial.ts";
+import { ChannelError } from "../src/link-machine.ts";
 
 const A = "ws://a.local:4001/e2e";
 const B = "ws://b.local:4001/e2e";
@@ -45,6 +45,14 @@ function manualTimer() {
     fire() {
       for (const entry of due.splice(0)) {
         if (!entry.cancelled) {
+          entry.fn();
+        }
+      }
+    },
+    /** Fire only the timers armed for `ms` (the deadline, not the stagger). */
+    fireFor(ms: number) {
+      for (const entry of due.splice(0)) {
+        if (!entry.cancelled && entry.ms === ms) {
           entry.fn();
         }
       }
@@ -384,5 +392,117 @@ describe("firstAnswering: the staggered race (R6)", () => {
     expect(isTerminalDialError(new ChannelError("rejected", "x"))).toBe(false);
     expect(isTerminalDialError(new ChannelError("gone", "x"))).toBe(false);
     expect(isTerminalDialError(new Error("x"))).toBe(false);
+  });
+});
+
+describe("firstAnswering: the caller's own terminal rule (pairing)", () => {
+  test("isTerminal stops the loop on the caller's error, and rethrows it unchanged", async () => {
+    // Pairing's rule: a refusal is the DAEMON's answer about the whole computer
+    // (a spent or wrong code), so no other address may be tried — exactly like
+    // `unauthorized`. Mutation: ignore `options.isTerminal` → B is dialled and
+    // this asserts the addresses actually started.
+    class Refused extends Error {}
+    const refused = new Refused("invalid code");
+    const clock = manualTimer();
+    const h = harness();
+    const answering = firstAnswering([A, B, C], h.steps, memory(), {
+      timer: clock.timer,
+      isTerminal: (error) => error instanceof Refused || isTerminalDialError(error),
+    });
+    await settle();
+    h.open(0, "raw-A");
+    await settle();
+    h.confirmFail(0, refused);
+    const caught = await answering.catch((error: unknown) => error);
+    expect(caught).toBe(refused);
+    expect(h.started).toEqual([A]);
+  });
+
+  test("the default rule still stops on `unauthorized` only (a custom rule does not weaken it)", async () => {
+    const clock = manualTimer();
+    const h = harness();
+    const answering = firstAnswering([A, B], h.steps, memory(), {
+      timer: clock.timer,
+      isTerminal: (error) => error instanceof ChannelError && error.kind === "gone",
+    });
+    await settle();
+    h.open(0, "raw-A");
+    await settle();
+    // `unauthorized` is NOT terminal under this rule: the next address is tried.
+    h.confirmFail(0, new ChannelError("unauthorized", "x"));
+    await settle();
+    clock.fire();
+    await settle();
+    expect(h.started).toEqual([A, B]);
+    h.open(1, "raw-B");
+    await settle();
+    h.confirm(1, "answer-B");
+    await expect(answering).resolves.toBe("answer-B");
+  });
+});
+
+describe("firstAnswering: the open deadline (pairing's 15 s)", () => {
+  test("no socket opened within the deadline → failed `unreachable`, at: undefined (mutation: drop the deadline branch → this test hangs)", async () => {
+    const clock = manualTimer();
+    const h = harness();
+    const answering = firstAnswering([A, B], h.steps, memory(), {
+      timer: clock.timer,
+      openDeadlineMs: 15_000,
+    });
+    await settle();
+    // A's open is still pending, and the stagger for B was never fired.
+    clock.fireFor(15_000);
+    const caught = await answering.catch((error: unknown) => error);
+    expect(caught).toBeInstanceOf(ChannelError);
+    expect((caught as ChannelError).kind).toBe("unreachable");
+    // `at: undefined` means nothing is left to try: the loop does NOT resume,
+    // and no address starts after the deadline either.
+    expect(h.started).toEqual([A]);
+    clock.fire();
+    await settle();
+    expect(h.started).toEqual([A]);
+  });
+
+  test("a socket that opens AFTER the deadline is abandoned, not confirmed", async () => {
+    const clock = manualTimer();
+    const h = harness();
+    const answering = firstAnswering([A], h.steps, memory(), {
+      timer: clock.timer,
+      openDeadlineMs: 15_000,
+    });
+    await settle();
+    clock.fireFor(15_000);
+    const caught = await answering.catch((error: unknown) => error);
+    expect((caught as ChannelError).kind).toBe("unreachable");
+    h.open(0, "late");
+    await settle();
+    expect(h.abandoned).toEqual(["late"]);
+    expect(h.confirmCount()).toBe(0);
+  });
+
+  test("an open BEFORE the deadline cancels it: the winner's handshake has no deadline", async () => {
+    // The property F3 needs: `device/pair` may wait on a human for minutes, so
+    // the deadline must not survive the race being decided.
+    const clock = manualTimer();
+    const h = harness();
+    const answering = firstAnswering([A], h.steps, memory(), {
+      timer: clock.timer,
+      openDeadlineMs: 15_000,
+    });
+    await settle();
+    h.open(0, "raw-A");
+    await settle();
+    expect(clock.armed()).toBe(0); // the deadline timer was cancelled
+    h.confirm(0, "answer-A");
+    await expect(answering).resolves.toBe("answer-A");
+  });
+
+  test("no deadline by default (a link's own dial deadline covers the caller)", async () => {
+    const clock = manualTimer();
+    const h = harness();
+    void firstAnswering([A, B], h.steps, memory(), { timer: clock.timer });
+    await settle();
+    // Only the stagger is armed — a 15 s entry here would be a second deadline.
+    expect(clock.delays().filter((ms) => ms !== STAGGER_MS)).toEqual([]);
   });
 });

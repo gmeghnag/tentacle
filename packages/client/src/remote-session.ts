@@ -79,6 +79,12 @@ interface ActiveTurn {
   ended: boolean;
   /** The daemon acknowledged `prompt{turnId}`. */
   acked: boolean;
+  /**
+   * The caller's `send` `opts.onAccepted`: called once, at the first ack
+   * (the daemon holds the turn's key), then cleared — a re-sent prompt's
+   * second ack does not call it again. Never called on a refusal.
+   */
+  onAccepted?: (() => void) | undefined;
   /** `prompt{turnId}` was written to a channel: a daemon may have run it. */
   sent: boolean;
   /** The user cancelled; re-sent on the prompt's ack (a cancel can beat the prompt, or be lost). */
@@ -1048,6 +1054,11 @@ export class RemoteSession implements SessionStreamListener {
    * `opts.turnId`: the turn's id, minted by the caller (a detached run's relay
    * records it so the TUIs that take the run over own its turn,
    * docs/fix/detach-live.md B2); else a fresh one.
+   * `opts.onAccepted`: called once when the daemon ACKS the prompt (it holds
+   * the turn under its key: a retry is answered from its ledger, never run
+   * twice), also for a retry of a turn that already ended; never on a
+   * refusal. The ack can come long before the turn's first event
+   * (docs/fix/mobile-chat-glitches.md, bug 2).
    */
   async *send(
     prompt: string,
@@ -1056,6 +1067,7 @@ export class RemoteSession implements SessionStreamListener {
       readonly skill?: string;
       readonly turnId?: string;
       readonly attachments?: readonly AttachmentRef[];
+      readonly onAccepted?: () => void;
     } = {},
   ): AsyncGenerator<SessionEvent> {
     // Known before the first `await`, so a steer typed while the session is
@@ -1244,6 +1256,7 @@ export class RemoteSession implements SessionStreamListener {
     opts: {
       readonly skill?: string;
       readonly attachments?: readonly AttachmentRef[];
+      readonly onAccepted?: () => void;
     } = {},
   ): AsyncGenerator<SessionEvent> {
     if (this.closed) {
@@ -1282,6 +1295,7 @@ export class RemoteSession implements SessionStreamListener {
       reset: false,
       ended: false,
       acked: false,
+      onAccepted: opts.onAccepted,
       sent: false,
       abortWanted: false,
       started: false,
@@ -1324,6 +1338,11 @@ export class RemoteSession implements SessionStreamListener {
       // ack; a no-op if the stream did.
       (ack) => {
         turn.acked = true;
+        // Before `finish` (an `ended` ack): the caller learns "the daemon has
+        // it" before the turn's end. Once only: a re-send's ack is the same key.
+        const onAccepted = turn.onAccepted;
+        turn.onAccepted = undefined;
+        onAccepted?.();
         if (ack.ended) {
           this.finish(turn, ack.ended);
         } else if (turn.abortWanted) {

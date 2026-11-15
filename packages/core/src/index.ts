@@ -25,3 +25,4 @@ export * from "./token-counter.ts";
 export * from "./tool-labels.ts";
 export * from "./hooks.ts";
 export * from "./image-sniff.ts";
+export * from "./voice/index.ts";

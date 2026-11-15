@@ -82,9 +82,11 @@ export interface SessionFeedDeps {
 /**
  * This phone's own prompt (owner B4). The client never re-delivers the
  * sender's prompt ("our own prompt is already on screen", `remote-session.ts`),
- * so the feed draws it — at the stream's FIRST event, i.e. once the daemon took
- * it: a refusal before the ack gives the words back to the field and leaves no
- * row. A stream whose first event IS that prompt (a reset replay) is not doubled.
+ * so the feed draws it once the daemon took it: at its ACK (`accepted`), else at
+ * the stream's FIRST event — the ack can come long before the first event (a
+ * model still thinking: docs/fix/mobile-chat-glitches.md, bug 2). A refusal
+ * before the ack gives the words back to the field and leaves no row. A stream
+ * whose first event IS that prompt (a reset replay) is not doubled.
  */
 export interface OwnPrompt {
   readonly text: string;
@@ -96,8 +98,14 @@ export interface SessionFeed {
   activity(activity: SessionActivity): void;
   /** Open an OWN bracket, feed `events`, and close the bracket with its outcome.
    * Rejects with the stream's error once its LOST outcome is folded: a caller
-   * that owns the turn must see a refusal (12c F13 / 13d F7). */
-  ownTurn(turnId: string, events: AsyncIterable<SessionEvent>, prompt?: OwnPrompt): Promise<void>;
+   * that owns the turn must see a refusal (12c F13 / 13d F7). `accepted`
+   * resolves at the daemon's ack: the prompt is drawn then (once). */
+  ownTurn(
+    turnId: string,
+    events: AsyncIterable<SessionEvent>,
+    prompt?: OwnPrompt,
+    accepted?: Promise<void>,
+  ): Promise<void>;
   /** A stream this feed already folded ended (`link` drops flush nothing: events are immediate). */
   link(up: boolean): void;
 }
@@ -116,9 +124,10 @@ function foldStream(
   own: boolean,
   stream: AsyncIterable<SessionEvent>,
   prompt?: OwnPrompt,
+  accepted?: Promise<void>,
 ): Promise<void> {
   deps.put(apply(deps.state(), { type: "turn_started", turnId, own }));
-  /** The own prompt, drawn once at the first event (null once drawn or skipped). */
+  /** The own prompt, drawn once at the ack or the first event (null once drawn or skipped). */
   let pending: OwnPrompt | null =
     prompt !== undefined && (prompt.text !== "" || (prompt.attachments?.length ?? 0) > 0)
       ? prompt
@@ -142,7 +151,15 @@ function foldStream(
       } as TranscriptInput),
     );
   };
+  /** The bracket closed: a late ack draws nothing after the turn's end. */
+  let closed = false;
+  void accepted?.then(() => {
+    if (!closed) {
+      drawPrompt(null);
+    }
+  });
   const finish = (facts: TurnEndFacts): void => {
+    closed = true;
     deps.put(apply(deps.state(), { type: "turn_ended", outcome: turnOutcome(facts) }));
     if (!own) {
       deps.setForeign(null);
@@ -211,7 +228,8 @@ export function createSessionFeed(deps: SessionFeedDeps): SessionFeed {
         }
       }
     },
-    ownTurn: (turnId, events, prompt) => foldStream(deps, turnId, true, events, prompt),
+    ownTurn: (turnId, events, prompt, accepted) =>
+      foldStream(deps, turnId, true, events, prompt, accepted),
     link(up) {
       deps.put(apply(deps.state(), { type: "link", status: up ? "up" : "down" }));
     },

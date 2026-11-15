@@ -18,7 +18,7 @@
  *     build expands `$(AppIdentifierPrefix)` (fix round 1, finding #4).
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 
 const appJson = JSON.parse(readFileSync(new URL("../app.json", import.meta.url), "utf8")) as {
   expo: {
@@ -198,5 +198,21 @@ describe("Live Activities: the app's declaration and the widget target (L10)", (
     expect(groups).toContain("$(AppIdentifierPrefix)so.tentacle.app.push");
     // No per-target group was invented: two groups, in that order.
     expect(groups).toHaveLength(2);
+  });
+});
+
+describe("PushCore sources compile inside the extension, not only in SwiftPM", () => {
+  // The same files build twice: as the SwiftPM module `PushCore`
+  // (native-tests/PushCoreTests) and as part of the extension's OWN module. A
+  // `PushCore.` qualifier resolves only in the first, so `swift test` passed
+  // while the device archive failed ("cannot find 'PushCore' in scope").
+  test("no source qualifies a name with the SwiftPM module name", () => {
+    const dir = new URL("../targets/notification-service/PushCore/", import.meta.url);
+    const offenders = readdirSync(dir)
+      .filter((f) => f.endsWith(".swift"))
+      .filter((f) =>
+        /\bPushCore\.\w/.test(readFileSync(new URL(f, dir), "utf8").replace(/\/\/.*$/gm, "")),
+      );
+    expect(offenders).toEqual([]);
   });
 });

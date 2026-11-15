@@ -364,3 +364,81 @@ test("the daemon's explanations become notices, never silence", () => {
   const nudge = fold([{ type: "context_note", text: "keep going", reason: "continue" }]);
   expect(nudge.rows).toHaveLength(0);
 });
+
+describe("a foreground sub-agent's progress lands on its Agent row (docs/fix/mobile-chat-glitches.md, item 10)", () => {
+  // The owner's "stuck on Running": every `subagent_*` event fell into the fold's
+  // `default` and changed nothing, so a minutes-long legitimate wait looked like
+  // a hang. Mutation: route the four kinds back to `default` → red.
+  const start = { type: "tool_start", id: "call-1", name: "agent_task", arguments: "{}" } as const;
+  const sub = (s: State) => (s.rows.find((r) => r.kind === "tool") as ToolRow | undefined)?.sub;
+
+  test("the repro, made an assertion: tools counted, the latest activity, tokens", () => {
+    const s = fold([
+      { type: "turn_started", turnId: "t1", own: true },
+      start,
+      {
+        type: "subagent_start",
+        id: "call-1",
+        agentType: "general",
+        description: "Task lungo in background",
+      },
+      { type: "subagent_tool", id: "call-1", label: "shell: sleep 10" },
+      { type: "subagent_usage", id: "call-1", promptTokens: 900, completionTokens: 40 },
+      { type: "subagent_tool", id: "call-1", label: "agent_notify" },
+      { type: "subagent_tool", id: "call-1", label: "shell: sleep 10" },
+    ]);
+    expect(sub(s)?.toolUses).toBe(3);
+    expect(sub(s)?.activities.at(-1)).toBe("shell: sleep 10");
+    expect(sub(s)?.tokens).toBe(940);
+    expect(sub(s)?.done).toBe(false);
+  });
+
+  test("`subagent_end` → done, with the child's own tool count and stop reason", () => {
+    const s = fold([
+      start,
+      { type: "subagent_tool", id: "call-1", label: "Read a.ts" },
+      { type: "subagent_end", id: "call-1", toolUses: 2, stopReason: "end_turn" },
+    ]);
+    expect(sub(s)).toMatchObject({ done: true, toolUses: 2, stopReason: "end_turn" });
+    expect(sub(s)?.movedTo).toBeUndefined();
+  });
+
+  test("a child MOVED to the background → done + movedTo", () => {
+    const s = fold([
+      start,
+      {
+        type: "subagent_end",
+        id: "call-1",
+        toolUses: 1,
+        stopReason: "background",
+        agentId: "sa-3",
+      },
+    ]);
+    expect(sub(s)).toMatchObject({ done: true, stopReason: "background", movedTo: "sa-3" });
+  });
+
+  test("progress for a call id the fold never saw → the state is identical", () => {
+    const before = fold([start]);
+    const after = apply(before, { type: "subagent_tool", id: "other", label: "x" });
+    expect(after).toBe(before);
+  });
+
+  test("a flood of activities keeps only the last 3; the count keeps growing", () => {
+    const s = fold([
+      start,
+      ...Array.from({ length: 10 }, (_, i) => ({
+        type: "subagent_tool" as const,
+        id: "call-1",
+        label: `step ${i + 1}`,
+      })),
+    ]);
+    expect(sub(s)?.activities).toEqual(["step 8", "step 9", "step 10"]);
+    expect(sub(s)?.toolUses).toBe(10);
+  });
+
+  test("an over-long label is capped by the fold too", () => {
+    const s = fold([start, { type: "subagent_tool", id: "call-1", label: "x".repeat(1000) }]);
+    expect(sub(s)?.activities).toHaveLength(1);
+    expect((sub(s)?.activities[0] ?? "").length).toBeLessThanOrEqual(120);
+  });
+});

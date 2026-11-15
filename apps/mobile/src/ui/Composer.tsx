@@ -33,6 +33,12 @@ export interface ComposerProps {
   readonly onMic: () => void;
   /** The mic level 0..1 while listening (the waveform's opacity). */
   readonly level: number;
+  /**
+   * The field's `key`: a new value REMOUNTS it, so an emptied multiline field
+   * measures its height from scratch instead of keeping the sent text's
+   * (docs/fix/mobile-chat-glitches.md, item 6).
+   */
+  readonly fieldKey: number;
 }
 
 const LABEL: Readonly<Record<ComposerButton, string>> = {
@@ -65,6 +71,7 @@ export function Composer({
   mic,
   onMic,
   level,
+  fieldKey,
 }: ComposerProps): JSX.Element {
   const stop = button === "stop";
   const disabled = button === "disabled";
@@ -94,6 +101,7 @@ export function Composer({
           <Icon name="photo" color={editable ? palette.accent : palette.sec} size={20} />
         </Pressable>
         <TextInput
+          key={fieldKey}
           testID="composer-input"
           style={[typography.body, styles.input, { color: palette.label }]}
           value={draft}

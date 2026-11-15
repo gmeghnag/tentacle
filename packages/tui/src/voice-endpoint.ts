@@ -1,30 +1,40 @@
 /**
- * Auto-stop endpointing, as a PURE fold over the helper's `vad`/`turnp` lines
- * (docs/feat/voice-dictation.md §4). No clocks, no React, no I/O: every input
- * carries its own duration in AUDIO time, so the same trace always yields the
- * same verdict and the comma regression is testable in `bun test`.
+ * Auto-stop endpointing for V1's DICTATION (`feat/voice-dictation` §4), as a
+ * THIN ADAPTER over the ONE edge-neutral fold in `@tentacle/core`
+ * (`core/src/voice/endpoint.ts`).
  *
- * Why it lives here and not in Swift: this is where the repo's gate runs, this is
- * where the comma regression lives (`voice-endpoint.test.ts` T3), and V2's
- * hands-free loop and a later phone app reuse it unchanged.
+ * History: this file used to hold its own copy of the fold. V2's C2 moved the
+ * fold to core (`docs/feat/voice-conversation.md` §3) so the Mac's conversation
+ * mode and the phone share it, which left TWO implementations of the same rule —
+ * review round 1's finding 5. There is now one: this module keeps V1's
+ * dictation-flavoured INPUT shape (a Silero probability per window plus the
+ * per-call options `voice-session.ts` already passes) and translates it, so the
+ * V1 regression suite (`test/voice-endpoint.test.ts`) still pins the comma rule
+ * — end to end, against the shared fold.
  *
- * The one finding it encodes (V0 `:718-735`, re-measured in this task's S1): a
- * pause after a comma is 96–224 ms and Smart Turn rates the cut half as complete
- * as a whole sentence (0.86–0.98 vs 0.977–0.987). **A threshold cannot separate
- * them; only a silence FLOOR above the comma pause can.** With dictation's
- * manual stop this fold is an optional convenience, so the floor defaults high
- * (500 ms, over the longest measured comma pause of 224 ms).
+ * The one finding the shared fold encodes (V0 `:718-735`, re-measured in V1's
+ * S1): a pause after a comma is 96–224 ms and Smart Turn rates the cut half as
+ * complete as a whole sentence (0.86–0.98 vs 0.977–0.987). **A threshold cannot
+ * separate them; only a silence FLOOR above the comma pause can.** With
+ * dictation's manual stop this fold is an optional convenience, so the floor
+ * defaults high (500 ms, over the longest measured comma pause of 224 ms).
  */
+import {
+  type EndpointAction,
+  type EndpointState,
+  foldEndpoint as coreFoldEndpoint,
+} from "@tentacle/core";
 
-/** The shipped defaults. `autoStopSilenceMs` is the measured comma-safe floor. */
+export type { EndpointAction, EndpointState } from "@tentacle/core";
+
+/** V1's dictation settings. `autoStopSilenceMs` is the measured comma-safe floor. */
 export const ENDPOINT_DEFAULTS = {
   /** Off: the user ends the dictation with the key, so a pause can never cut it. */
   autoStop: false,
   /**
    * 500 ms: above the longest comma pause measured on the V0 set (224 ms) with
    * one 32 ms window of margin, and comfortably above the 300 ms minimum the
-   * config refuses to go under. The plan's provisional 1000 ms was safe but
-   * doubled the wait for no measured benefit.
+   * config refuses to go under.
    */
   autoStopSilenceMs: 500,
   /** Smart Turn's own cut-off: a segment it rates this complete ends the turn. */
@@ -38,28 +48,6 @@ export const ENDPOINT_DEFAULTS = {
    */
   hardStopMs: 3000,
 } as const;
-
-/** The fold's state: what has been heard so far. */
-export interface EndpointState {
-  /** Still no speech-positive window: the candidate has not begun. */
-  readonly speaking: boolean;
-  /** Silence accumulated since the last speech, in ms. */
-  readonly silentMs: number;
-  /** Total silence since the last speech, for the hard stop (never reset by a candidate). */
-  readonly unbrokenSilentMs: number;
-  /** A candidate was raised and its Smart Turn answer is still awaited. */
-  readonly awaitingTurnp: boolean;
-  /** The verdict already taken (a fold is one dictation; `stop` is terminal). */
-  readonly stopped: boolean;
-}
-
-/** What the App does next: nothing, ask Smart Turn, or finish the dictation. */
-export type EndpointAction = "none" | "askTurn" | "stop";
-
-export interface EndpointStep {
-  readonly state: EndpointState;
-  readonly action: EndpointAction;
-}
 
 /** One input to the fold: a VAD window (with its duration) or a Smart Turn answer. */
 export type EndpointInput =
@@ -77,69 +65,53 @@ export type EndpointInput =
     }
   | { readonly kind: "turnp"; readonly p: number; readonly threshold: number };
 
+export interface EndpointStep {
+  readonly state: EndpointState;
+  readonly action: EndpointAction;
+}
+
 /** Above this Silero probability a window counts as speech (V0's `vad.thresh`). */
 const SPEECH_P = 0.5;
 
-function initState(): EndpointState {
-  return {
-    speaking: false,
-    silentMs: 0,
-    unbrokenSilentMs: 0,
-    awaitingTurnp: false,
-    stopped: false,
-  };
+/**
+ * Dictation always consults Smart Turn (`turnModel: true`): the phone's
+ * "no new text" rule is the conversation mode's, not the dictation key's.
+ */
+function configOf(input: EndpointInput) {
+  return input.kind === "turnp"
+    ? {
+        autoStop: true,
+        floorMs: 0,
+        threshold: input.threshold,
+        hardStopMs: Number.POSITIVE_INFINITY,
+        turnModel: true,
+      }
+    : {
+        autoStop: input.autoStop,
+        floorMs: input.floorMs,
+        threshold: input.threshold,
+        hardStopMs: input.hardStopMs ?? Number.POSITIVE_INFINITY,
+        turnModel: true,
+      };
 }
 
 function step(state: EndpointState, input: EndpointInput): EndpointStep {
-  if (state.stopped) return { state, action: "none" };
-
-  if (input.kind === "turnp") {
-    if (!state.awaitingTurnp) return { state, action: "none" };
-    const answered: EndpointState = { ...state, awaitingTurnp: false };
-    return input.p >= input.threshold
-      ? { state: { ...answered, stopped: true }, action: "stop" }
-      : { state: answered, action: "none" };
-  }
-
-  if (input.p >= SPEECH_P) {
-    // Speech: the candidate continues and every silence counter restarts.
-    return {
-      state: {
-        speaking: true,
-        silentMs: 0,
-        unbrokenSilentMs: 0,
-        awaitingTurnp: false,
-        stopped: false,
-      },
-      action: "none",
-    };
-  }
-
-  if (!state.speaking) return { state, action: "none" };
-
-  const silentMs = state.silentMs + input.ms;
-  const unbrokenSilentMs = state.unbrokenSilentMs + input.ms;
-  const heard: EndpointState = { ...state, silentMs, unbrokenSilentMs };
-
-  // Auto-stop off: NOTHING on silence ends the dictation — not the floor, and
-  // not the hard stop either (Review round 2, NEW-1: the fold read the hard stop
-  // first, so the default config cut a dictation after a 3 s pause). A forgotten
-  // one is ended by `voice.maxSeconds` instead (F5), which is audio time and
-  // needs no silence verdict at all.
-  if (!input.autoStop) return { state: heard, action: "none" };
-
-  // With auto-stop ON, the hard stop comes first: a forgotten dictation must end
-  // even when the floor is unreachable.
-  if (input.hardStopMs !== undefined && unbrokenSilentMs >= input.hardStopMs) {
-    return { state: { ...heard, stopped: true }, action: "stop" };
-  }
-  if (silentMs < input.floorMs) return { state: heard, action: "none" };
-  if (state.awaitingTurnp) return { state: heard, action: "none" };
-
-  // The floor is reached: ask Smart Turn whether the turn actually ended. Its
-  // answer arrives as the next input, so the silence keeps accumulating until it
-  // does (a "not finished" verdict resumes after the next speech).
-  return { state: { ...heard, awaitingTurnp: true }, action: "askTurn" };
+  const config = configOf(input);
+  const coreInput =
+    input.kind === "turnp"
+      ? ({ kind: "turnp", p: input.p } as const)
+      : ({
+          kind: "window",
+          ms: input.ms,
+          speech: input.p >= SPEECH_P,
+          // The phone's text rule does not apply to a dictation (turnModel true).
+          textGrew: false,
+        } as const);
+  return coreFoldEndpoint.step(state, coreInput, config);
 }
 
-export const foldEndpoint = { init: initState, step };
+/** V1's fold, unchanged in behaviour, delegating to the shared one in core. */
+export const foldEndpoint = {
+  init: (): EndpointState => coreFoldEndpoint.init(),
+  step,
+};
