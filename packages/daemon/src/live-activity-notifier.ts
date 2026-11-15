@@ -226,6 +226,23 @@ export function createLiveActivityNotifier(
    */
   const confirmed = new Set<string>();
   /**
+   * `slots whose START is out and unanswered` (fix round 2, R5). `confirmed`
+   * only flips when the sink ANSWERS, so without this every command for the slot
+   * that is decided while the first push is in its round trip was converted to a
+   * `start` too (R4's rule): two pushes, two activity objects, one update token.
+   * A slot in flight is not started again; its intent waits in `pendingStarts`.
+   */
+  const inFlight = new Set<string>();
+  /**
+   * `slot → the last command dropped because its start was in flight` (R5). Sent
+   * once that start resolves, so an ask raised during the round trip still lands
+   * (bounded: ONE per slot, replaced by the next).
+   */
+  const pendingStarts = new Map<
+    string,
+    LaCommand & { readonly kind: "start" | "update" | "end" }
+  >();
+  /**
    * `sessionId → the turn id it is on`. `tool_call` carries none, and the rules
    * need one to tell two turns apart; one entry per session (replaced by its next
    * `turn_start`), so this is bounded by the sessions a `serve` holds.
@@ -314,6 +331,23 @@ export function createLiveActivityNotifier(
      * to dismiss, and a start would create an activity for a turn already over.
      */
     const neverDelivered = !confirmed.has(command.slot);
+    /**
+     * R5 (fix round 2): the slot's START is out and unanswered. Anything decided
+     * for it in that window is HELD, not sent: a second `start` would create a
+     * SECOND activity object on the phone (iOS hands the update token to one and
+     * leaves the other on the lock screen, counting against its ~5 limit), and an
+     * `end` decided here would be dropped by the never-started rule below and
+     * then never sent at all — leaving an activity nobody ends until its 8 h cap.
+     * The held command is replayed once the start resolves `sent`, when the
+     * activity exists and the same intent is an ordinary update or end. One slot
+     * holds ONE command: a later decision (the turn's `end`, a newer ask) simply
+     * replaces it, so nothing stale is ever flushed.
+     */
+    if (inFlight.has(command.slot)) {
+      pendingStarts.set(command.slot, command);
+      audit(`la-held in-flight ${id8(command.deviceId)}`);
+      return;
+    }
     if (command.kind === "end" && neverDelivered) {
       updateTokens.delete(command.slot);
       audit(`la-dropped never-started ${id8(command.deviceId)}`);
@@ -370,18 +404,51 @@ export function createLiveActivityNotifier(
       dismissalDate: event === "end" && command.kind === "end" ? command.dismissAt : undefined,
     };
     deliveries.push(delivery);
+    // R5: this push goes to the push-to-START token and asks iOS to CREATE the
+    // activity (whether the rules asked for a start or R4 converted an update
+    // into one), so nothing else may create it while it is unanswered. A push
+    // with an update token has an activity to address, so it can never be a
+    // second creation.
+    const startsActivity = event === "start" && updateToken === undefined;
+    if (startsActivity) {
+      inFlight.add(command.slot);
+    }
     let status: string;
     try {
       status = await options.sink(delivery);
     } catch {
+      if (startsActivity) {
+        inFlight.delete(command.slot);
+        pendingStarts.delete(command.slot);
+      }
       audit(`la-dropped sink ${id8(command.deviceId)}`);
       return;
+    }
+    if (startsActivity) {
+      inFlight.delete(command.slot);
+      if (status !== "sent") {
+        // The activity was never created, so an intent held for it is stale: the
+        // rules' next decision rebuilds it from the CURRENT state (R4's resync).
+        pendingStarts.delete(command.slot);
+      }
     }
     if (status === "sent") {
       // The phone took it: from now on this slot exists there, so its next push
       // is an `update` (R4's whole point).
       confirmed.add(command.slot);
       audit(`la-sent ${event} ${id8(command.deviceId)}`);
+      // R5: the intent held while this start was in its round trip (an ask, a
+      // heartbeat, a resync) is due now — as an update, since the activity exists.
+      const held = pendingStarts.get(command.slot);
+      if (held !== undefined) {
+        pendingStarts.delete(command.slot);
+        // A held command is never a `start`: the rules only start a slot they
+        // have no live state for, and this slot's state went live when the start
+        // above was decided — so what waits here is an update or an end.
+        if (held !== command && held.kind !== "start") {
+          void deliverOne(held, held.content, computer);
+        }
+      }
       return;
     }
     if (status === "gone") {
@@ -408,11 +475,19 @@ export function createLiveActivityNotifier(
             type: "ended",
             sessionId: command.sessionId,
             slot: command.slot,
-            // A `gone` on an UPDATE/START is the SYSTEM's ending, not the
-            // person's gesture: the phone never told us which, and restarting a
-            // turn the system cut is right (F18) while restarting a dismissed one
-            // is not (F17). The app's own `_ended` is what reports a dismissal.
-            reason: "ended",
+            // Fix round 2, R6 (F17): a `gone` on the ACTIVITY's own token means
+            // the activity is no longer on the phone, and the only thing that
+            // removes one while the app is not running is the person's own swipe.
+            // Treating it as the system's ending made the turn startable again,
+            // so the activity came back on the next tick — for ever. The plan's
+            // F17 is the owner-approved rule: never restarted for that turn.
+            //
+            // A `gone` on the push-to-START token is NOT that: nothing was ever
+            // created on that phone (F13: the token rotated or the app was
+            // reinstalled), so no gesture happened and the turn stays startable
+            // — `deadStartTokens` already mutes the device until it re-registers,
+            // and a reinstalled phone should see the turn it missed.
+            reason: updateToken === undefined ? "ended" : "dismissed",
           }),
         );
       }
@@ -531,6 +606,13 @@ export function createLiveActivityNotifier(
     for (const slot of [...confirmed]) {
       if (!live.has(slot)) {
         confirmed.delete(slot);
+      }
+    }
+    // R5's two sets follow the same rule (bounded state, never a leak).
+    for (const slot of [...inFlight]) {
+      if (!live.has(slot)) {
+        inFlight.delete(slot);
+        pendingStarts.delete(slot);
       }
     }
   };
@@ -702,6 +784,8 @@ export function createLiveActivityNotifier(
       }
       updateTokens.clear();
       confirmed.clear();
+      inFlight.clear();
+      pendingStarts.clear();
       deadStartTokens.clear();
       turnIds.clear();
     },

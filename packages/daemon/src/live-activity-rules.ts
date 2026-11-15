@@ -684,8 +684,10 @@ export function createLiveActivityRules(options: LiveActivityRulesOptions): Live
           }
           activities.delete(keyOf(state.sessionId, state.deviceId));
           if (event.reason === "dismissed") {
-            // The person's gesture: never restart it for THIS turn (F17).
-            dismissedTurns.add(`${state.sessionId}\u0000${state.turnId}`);
+            // The person's gesture on THAT phone: never restart it for this turn
+            // (F17). Keyed by device too (fix round 2): one phone's swipe must
+            // not silence the person's other phone for the rest of the turn.
+            dismissedTurns.add(`${state.sessionId}\u0000${state.turnId}\u0000${state.deviceId}`);
           }
         }
         return [];
@@ -730,7 +732,7 @@ export function createLiveActivityRules(options: LiveActivityRulesOptions): Live
           if (running < startAfterMs && running >= 0) {
             continue;
           }
-          if (dismissedTurns.has(`${turn.sessionId}\u0000${turn.turnId}`)) {
+          if (dismissedTurns.has(`${turn.sessionId}\u0000${turn.turnId}\u0000${deviceId}`)) {
             continue;
           }
           if (liveDevices.has(deviceId)) {

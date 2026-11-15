@@ -90,6 +90,11 @@ function notifier(
     enabled?: boolean;
     /** What the sink answers (`sent` unless a test says otherwise). */
     status?: string | (() => string);
+    /**
+     * A test's own sink, taking the WHOLE control of the answer (it overrides
+     * `status`): the only way to hold a delivery in flight and answer it later.
+     */
+    sink?: (delivery: LaDelivery) => Promise<string>;
     /** The device ids the store reports as registered, read fresh each call. */
     registered?: () => string[];
     /** The registration record, or `undefined` for "this device has none". */
@@ -137,6 +142,9 @@ function notifier(
         : undefined,
     sink: async (delivery) => {
       deliveries.push(delivery);
+      if (options.sink !== undefined) {
+        return options.sink(delivery);
+      }
       if (options.throwOnSink === true) {
         throw new Error("sink exploded");
       }
@@ -511,10 +519,11 @@ describe("R3: an APNs `gone` is passed to the rules", () => {
     expect(deliveries).toHaveLength(afterStart);
   });
 
-  test("a `gone` on an UPDATE is treated as the system's end and allows ONE continuation", async () => {
-    // F18: iOS ended the activity first (clock skew / the 8 h cap). The activity
-    // is gone, but the START token is still alive, so the next deadline starts
-    // ONE continuation — not zero, and not a storm.
+  test("a `gone` on an UPDATE is a DISMISSAL and never restarts the turn (F17, R6)", async () => {
+    // Plan F17 (doc:354): "APNs `gone` on the next update → never restarted for
+    // that turn". Fix round 2 took the owner-approved rule instead of reading
+    // `gone` as the system's ending (which restarted the turn for ever, once per
+    // tick, each time the person swiped the activity away).
     let gone = false;
     const { instance, deliveries, advance } = notifier({
       status: () => (gone ? "gone" : "sent"),
@@ -527,22 +536,20 @@ describe("R3: an APNs `gone` is passed to the rules", () => {
     expect(deliveries.map((d) => d.event)).toEqual(["start"]);
     expect(instance.setUpdateToken(SLOT, "b".repeat(64), DEVICE)).toBe(true);
     deliveries.length = 0;
-    // iOS ended it behind our back: the heartbeat to the UPDATE token is `gone`.
+    // The heartbeat to the UPDATE token is `gone`: the activity is not there.
     gone = true;
     advance(10 * 60_000 + 1);
     instance.tickForTest();
     await flush();
     expect(deliveries.map((d) => d.event)).toEqual(["update"]);
     expect(deliveries[0]?.token).toBe("b".repeat(64));
-    // The system ended it: exactly one continuation start on the next deadline,
-    // because `ended` (not `dismissed`) leaves the turn startable (F18).
+    // A dismissal is the person's gesture: NO continuation, ever, for this turn.
     deliveries.length = 0;
     gone = false;
+    advance(10 * 60_000 + 1);
     instance.tickForTest();
     await flush();
-    expect(deliveries.map((d) => d.event)).toEqual(["start"]);
-    // To the push-to-START token: the dead update token is gone for good.
-    expect(deliveries[0]?.token).toBe("a".repeat(64));
+    expect(deliveries).toEqual([]);
   });
 });
 
@@ -620,6 +627,200 @@ describe("R4: F3 converges for a start the sink dropped", () => {
     await flush();
     // Every delivery for this slot in the whole exchange was a `start`.
     expect(deliveries.every((d) => d.event === "start")).toBe(true);
+  });
+});
+
+describe("R5: a start still in flight is not sent a second time", () => {
+  test("an ask during the start's round trip does not start the slot again", async () => {
+    // Fix round 2 (review round 2, finding 1). A slot was `confirmed` only once
+    // the sink answered `sent`, so EVERY command for it sent before that answer
+    // also went out as a `start`: two pushes start two activity objects, iOS
+    // gives one of them the update token, and the other sits on the lock screen
+    // (both count toward the ~5 limit).
+    let release: (status: string) => void = () => {};
+    const held = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    const { instance, deliveries, advance } = notifier({ sink: () => held });
+    instance.onPushEvent(SESSION, turnStart(), { clients: 0, devices: [] });
+    advance(1);
+    instance.tickForTest();
+    await flush();
+    // The start is out, and its answer has NOT arrived.
+    expect(deliveries.map((d) => d.event)).toEqual(["start"]);
+    // An ask arrives while it is in flight: the activity is already being
+    // created, so this must not become a SECOND start.
+    instance.onPushEvent(SESSION, ask(), { clients: 0, devices: [] });
+    await flush();
+    expect(deliveries.map((d) => d.event)).toEqual(["start"]);
+    // It is not LOST either: once the first start resolves `sent`, the intent
+    // held for the slot is sent — as an update, because the activity now exists.
+    // (Mutating the flush away leaves the ask unanswered on the phone: the
+    // person sees "running" while a permission waits.)
+    release("sent");
+    await flush();
+    const events = deliveries.map((d) => d.event);
+    expect(events).toEqual(["start", "update"]);
+    expect(events.filter((event) => event === "start")).toHaveLength(1);
+  });
+
+  test("`resendAll` while the start is held does not start it again", async () => {
+    let release: (status: string) => void = () => {};
+    const held = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    const { instance, deliveries, advance } = notifier({ sink: () => held });
+    instance.onPushEvent(SESSION, turnStart(), { clients: 0, devices: [] });
+    advance(1);
+    instance.tickForTest();
+    await flush();
+    expect(deliveries.map((d) => d.event)).toEqual(["start"]);
+    // The link came up mid-start (`ready`): the slot's current state is re-sent,
+    // but the activity it would update does not exist YET.
+    instance.resendAll();
+    await flush();
+    expect(deliveries.map((d) => d.event)).toEqual(["start"]);
+    release("sent");
+    await flush();
+  });
+
+  test("a start held while the link is down is not started twice by the timer", async () => {
+    // The heartbeat deadline can arrive before the start's answer does: the
+    // rules still hold a live state (the start was accepted by them), so the
+    // tick must not turn it into another start.
+    let release: (status: string) => void = () => {};
+    const held = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    const { instance, deliveries, advance } = notifier({ sink: () => held });
+    instance.onPushEvent(SESSION, turnStart(), { clients: 0, devices: [] });
+    advance(1);
+    instance.tickForTest();
+    await flush();
+    expect(deliveries.map((d) => d.event)).toEqual(["start"]);
+    advance(10 * 60_000 + 1);
+    instance.tickForTest();
+    await flush();
+    expect(deliveries.map((d) => d.event)).toEqual(["start"]);
+    release("sent");
+    await flush();
+  });
+
+  test("a start answered `unavailable` is in flight no longer: the resync starts it", async () => {
+    // The other side of R5: "in flight" must not survive a resolved answer, or
+    // R4's convergence (a dropped start resent as a start) would be dead.
+    let answer = "unavailable";
+    const { instance, deliveries, advance } = notifier({ status: () => answer });
+    instance.onPushEvent(SESSION, turnStart(), { clients: 0, devices: [] });
+    advance(1);
+    instance.tickForTest();
+    await flush();
+    expect(deliveries.map((d) => d.event)).toEqual(["start"]);
+    answer = "sent";
+    instance.resendAll();
+    await flush();
+    expect(deliveries.map((d) => d.event)).toEqual(["start", "start"]);
+  });
+
+  test("a held ask is NOT flushed after its turn has ended", async () => {
+    // The flush must never resurrect a state the turn has moved past: the ask
+    // was raised during the start's round trip, and the turn ended inside the
+    // same window. Sending "asking" now would show a permission that no longer
+    // waits, on a turn that is over.
+    let release: (status: string) => void = () => {};
+    const held = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    const { instance, deliveries, advance } = notifier({ sink: () => held });
+    instance.onPushEvent(SESSION, turnStart(), { clients: 0, devices: [] });
+    advance(1);
+    instance.tickForTest();
+    await flush();
+    expect(deliveries.map((d) => d.event)).toEqual(["start"]);
+    // An ask raised, then resolved and the turn ended: all while the start is
+    // still unanswered, so every one of them is held behind the in-flight start.
+    instance.onPushEvent(SESSION, ask(), { clients: 0, devices: [] });
+    await flush();
+    instance.onPushEvent(
+      SESSION,
+      update({ type: "turn_end", turnId: "t1", stopReason: "end_turn" }),
+      { clients: 0, devices: [] },
+    );
+    await flush();
+    expect(deliveries.map((d) => d.event)).toEqual(["start"]);
+    release("sent");
+    await flush();
+    // Only the END reaches the phone: the slot is confirmed now, so the turn's
+    // end is a real end (the held "asking" is gone).
+    expect(deliveries.map((d) => d.event)).toEqual(["start", "end"]);
+  });
+});
+
+describe("R6: a `gone` is a dismissal, and a restart is bounded (F17/F18)", () => {
+  test("a `gone` on the START token is a dead token, not a dismissal (F13)", async () => {
+    // The other side of R6: nothing was ever created on that phone (the token
+    // rotated, or the app was reinstalled), so no gesture happened. The device is
+    // muted until it re-registers — but the TURN must stay startable, or a
+    // reinstalled phone would never see it.
+    let startToken = "a".repeat(64);
+    const { instance, deliveries, advance } = notifier({
+      status: () => "gone",
+      read: () => ({
+        deviceId: DEVICE,
+        startToken,
+        env: "sandbox",
+        enabled: true,
+        registeredAt: 1,
+      }),
+    });
+    instance.onPushEvent(SESSION, turnStart(), { clients: 0, devices: [] });
+    advance(1);
+    instance.tickForTest();
+    await flush();
+    expect(deliveries.map((d) => `${d.event}/${d.token.slice(0, 1)}`)).toEqual(["start/a"]);
+    // The phone re-registers with a FRESH token (a reinstall): it is a candidate
+    // again, and the turn it missed must still start on it.
+    startToken = "c".repeat(64);
+    deliveries.length = 0;
+    advance(1);
+    instance.registrationChanged();
+    instance.tickForTest();
+    await flush();
+    // Mutation: read every `gone` as a dismissal → nothing here, and the turn is
+    // lost on the phone that just reinstalled.
+    expect(deliveries.map((d) => `${d.event}/${d.token.slice(0, 1)}`)).toEqual(["start/c"]);
+  });
+
+  test("a `gone` on an UPDATE never restarts the turn (F17)", async () => {
+    // Fix round 2 (review round 2, finding 2). A `gone` on an update token used
+    // to be fed to the rules as `reason:"ended"`, so the turn stayed startable:
+    // the person swiped the activity away on the lock screen and the next tick
+    // put it back, for ever. The approved plan's F17 says the opposite.
+    let gone = false;
+    const { instance, deliveries, advance } = notifier({
+      status: () => (gone ? "gone" : "sent"),
+    });
+    instance.onPushEvent(SESSION, turnStart(), { clients: 0, devices: [] });
+    advance(1);
+    instance.tickForTest();
+    await flush();
+    expect(deliveries.map((d) => d.event)).toEqual(["start"]);
+    expect(instance.setUpdateToken(SLOT, "b".repeat(64), DEVICE)).toBe(true);
+    deliveries.length = 0;
+    gone = true;
+    advance(10 * 60_000 + 1);
+    instance.tickForTest();
+    await flush();
+    expect(deliveries.map((d) => d.event)).toEqual(["update"]);
+    deliveries.length = 0;
+    // The person is done with it: no continuation, however many deadlines pass.
+    gone = false;
+    for (let round = 0; round < 3; round++) {
+      advance(10 * 60_000 + 1);
+      instance.tickForTest();
+      await flush();
+    }
+    expect(deliveries).toEqual([]);
   });
 });
 

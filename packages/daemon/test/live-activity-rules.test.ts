@@ -513,6 +513,31 @@ describe("dismissed: never restarted for that turn", () => {
     expect(feed(instance, { type: "tick" }).filter((c) => c.kind === "start")).toHaveLength(1);
   });
 
+  test("one phone's dismissal does not silence the person's other phone", () => {
+    // Fix round 2, R6's second order: a dismissal is a gesture on ONE lock
+    // screen. Keyed by turn alone, the first phone's swipe stopped every other
+    // phone from ever starting for that turn.
+    const { instance, advance } = rules({ startAfterSeconds: 0 });
+    feed(instance, turnStart());
+    advance(1);
+    const starts = feed(instance, { type: "tick" }).filter((c) => c.kind === "start");
+    const slot = starts[0]?.kind === "start" ? starts[0].slot : "";
+    const deviceId = starts[0]?.kind === "start" ? starts[0].deviceId : "";
+    feed(instance, { type: "ended", sessionId: SESSION, slot, reason: "dismissed" });
+    // A SECOND registered device, which never had an activity.
+    instance.setRegistrations(
+      new Map([
+        [deviceId, { enabled: true }],
+        ["other", { enabled: true }],
+      ]),
+    );
+    advance(60_000);
+    const again = feed(instance, { type: "tick" }).filter((c) => c.kind === "start");
+    // Mutation: key the dismissal by turn only → this is 0, and the other phone
+    // never hears about the turn at all.
+    expect(again.map((c) => (c.kind === "start" ? c.deviceId : ""))).toEqual(["other"]);
+  });
+
   test("a system end (`ended` / `stale`) does not block the next start either", () => {
     const { instance, advance } = rules({ startAfterSeconds: 0 });
     feed(instance, turnStart());

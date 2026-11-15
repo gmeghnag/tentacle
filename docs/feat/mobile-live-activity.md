@@ -1697,3 +1697,126 @@ O(devices) per event, not O(1), and acceptable at this scale.
 mutation table, and wrote down the R3 choice instead of hiding it. But a plan
 deviation that touches the person's gesture needed the owner's decision, not a
 note.
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-15*
+
+*(Execution of fix round 2, answering `Review › Round 2` above — appended in the
+doc's own order: plan-era Execution → Reviews, then code-era Fix round 1 →
+Review → this.)*
+
+**Scope: the two MEDIUM findings of Review round 2 (`654355f7`). Both were
+reproduced against the REAL `createLiveActivityNotifier` before any edit.**
+
+**Repro** (`.tentacle/tmp/mobile-live-activity/review/repro2.ts`, written by the
+reviewer, run unchanged against the branch). Output, before → after:
+
+```
+X in-flight start + ask: [ "start/aa", "start/aa" ]   →  [ "start/aa", "update/aa" ]
+Y after gone:            [ "start/aa", "update/upd", "start/aa" ]
+                                                      →  [ "start/aa", "update/upd" ]
+```
+
+**Root causes, one sentence each, and the fix**
+
+1. **MEDIUM — R5, a start in flight was sent again.**
+   `confirmed` (R4) is added only when the sink ANSWERS `sent`, so every command
+   for a slot decided during the round trip also met `neverDelivered` and was
+   converted to a `start` too: two pushes, two activity objects, one update
+   token, the other stale on the lock screen and both counting toward iOS's ~5.
+   *Fix:* `inFlight` (a slot whose START is out and unanswered) and
+   `pendingStarts` (the ONE command held for it) — a command for an in-flight
+   slot is held, not sent, and replayed when that start resolves `sent`
+   (`live-activity-notifier.ts:235-244`, `:346-350`, `:412-416`, `:436-455`). The
+   flags are cleared on the answer (sent, rejected, thrown) so R4's convergence
+   still works, pruned with the slot, and cleared by `stop()`.
+2. **MEDIUM — R6, a dismissed activity came back for ever.** A `gone` on an
+   update token was fed to the rules as `reason:"ended"`, which leaves the turn
+   startable: the person swiped the activity away and the next tick put it back,
+   with nothing bounding the number of times. This contradicted the approved
+   plan's F17 (doc:354), and fix round 1 chose F18 instead of asking the owner.
+   *Fix:* the `gone` is fed as `reason:"dismissed"` — the plan's rule, restored
+   (`:465-491`). F18's continuation is untouched: it is the ROLLOVER path (a
+   `gone` on the 7 h 45 min end push, `kind:"end"`), which this branch does not
+   reach.
+
+**Two second-order bugs the R6 fix itself would have introduced**, found by
+asking "who else does a dismissal touch?" and each fixed with its own red-first
+test:
+- **The dismissal was per TURN, not per (turn, device)**
+  (`live-activity-rules.ts:686-693`, `:735`). One phone's swipe silenced the
+  person's other phone for the rest of the turn. Now keyed by device too.
+- **A `gone` on the push-to-START token is not a dismissal**
+  (`live-activity-notifier.ts:482-490`). Nothing was ever created on that phone
+  (the token rotated, the app was reinstalled — F13), so no gesture happened;
+  reading it as one muted the turn for the phone that just reinstalled. It is
+  `ended` there (`deadStartTokens` already mutes the device until it
+  re-registers), `dismissed` only on the activity's own update token.
+
+**The one place this drifts from round 2's "fix idea", deliberately.** The
+review suggested "at most one restart per turn" as the F18-preserving option.
+I did **not** implement it: the plan's F17/F18 split is
+*dismissal-never-restarted* vs *system-end-one-continuation*, and "one restart"
+is neither — it would restart a dismissal once, which the owner-approved F17
+forbids. The F17/F18 ambiguity the reviewer flagged was itself resolved by the
+plan (doc:354), so this is not a new owner decision; it is the plan being
+followed. If the owner wants a bounded continuation for a `gone` the app never
+reported (F14/F15's force-quit case), that needs an explicit decision and a way
+to tell that `gone` from a swipe — the phone does not send us one.
+
+**Tests (RED first on the unfixed code, then green)**
+- `packages/daemon/test/live-activity-notifier.test.ts`: the helper's sink seam
+  gained a per-test `sink` override (the only way to hold a delivery in flight
+  and answer it later) and its `read` seam a variable token. **7** new tests: R5
+  ×5 (an ask, a `resendAll`, and a timer heartbeat each during the round trip;
+  the flush landing as an `update`; a held ask not resurrected after its turn
+  ended) and R6 ×2 (a `gone` on an update never restarts; a `gone` on a START
+  token mutes the device but leaves the turn startable). The old
+  `R3 … allows ONE continuation` test was rewritten to assert the plan's rule
+  (a `gone` on an update never restarts), since it had encoded the deviation.
+- `packages/daemon/test/live-activity-rules.test.ts`: **1** new test — one
+  phone's dismissal does not silence another phone for the same turn.
+- Red evidence, before any source edit: `4 fail` — the ask, `resendAll` and
+  heartbeat R5 tests (`Expected 0 / Received 1` extra delivery) and R6
+  (`Received 51` deliveries where 0 were expected). The other four were written
+  against their own mutation (M5d/M5e/M6d/M6e below) and are red under it: the
+  fifth R5 test (the resync-after-`unavailable` guard) was green from the start
+  and is the non-vacuity control for "in flight must not outlive its answer".
+
+**Mutations (§9, each applied to the finished code, run, reverted)**
+
+| id | mutation | result |
+|---|---|---|
+| M5a | no in-flight hold at all (`if (false && inFlight…`) | 4 fail: all four R5 hold tests |
+| M5b | the held command is never flushed (`if (false)`) | 2 fail: the flush-to-`update` test, the ask-after-end test |
+| M5c | `inFlight` never cleared when the sink answers | 10 fail: 3 R4/R3 regressions + 3 R5 + the two F3 tests + owner Q8's — proves the guard does not kill R4's convergence |
+| M5d | the held slot keeps the FIRST command instead of the latest | 1 fail: the ask-after-end test |
+| M6a | `gone` fed as `reason:"ended"` (the round-2 bug) | 2 fail: both F17 tests |
+| M6b | `gone` never fed to the rules (round 1's R3) | 2 fail: same two — round 1's fix stays pinned |
+| M6c | the rules ignore a dismissal | 3 fail: the rules' own dismissal test + both F17 tests |
+| M6d | the dismissal keyed by turn only (not (turn, device)) | 2 fail: the rules' dismissal test + the second-phone test |
+| M6e | every `gone` read as a dismissal (incl. a START token's) | 1 fail: the F13 reinstall test |
+| probe | `held.kind !== "start"` removed | **0 fail** ⇒ unreachable, so it is documented as an invariant, not kept as a guess |
+
+`git status --porcelain` shows only the intended files: the two sources, the two
+tests, and this doc.
+
+**Gate (measured on the finished tree):** `bunx tsc --noEmit` → exit 0 ·
+`bun run typecheck` (all three projects) → exit 0 · `bun run lint` → "Checked
+1627 files in 492ms. No fixes applied" (0 errors, 0 warnings, the §6 baseline) ·
+`bun test` → **11655 pass, 5 skip, 0 fail** (11660 tests / 836 files, 422 s).
+The 5 skips are the documented baseline set (the two `TENTACLE_K8S_SERVER`, the
+two `TENTACLE_DOCKER_TESTS=1`, the one `TENTACLE_SLOW_TESTS=1`), no new skip.
+The narrow files after the last edit: notifier + rules **59 pass, 0 fail**; the
+five Live-Activity-touching files **105 pass, 0 fail**.
+
+**Repro after the fix** (the reviewer's own `repro2.ts`, unmodified):
+`X in-flight start + ask: [ "start/aa", "update/aa" ]` and
+`Y after gone: [ "start/aa", "update/upd" ]` — one creation, and no restart.
+Round 1's `repro.ts` still gives none for an attached device and 2 for a late
+registration, so none of round 1's fixes regressed.
+
+**Not verified by me:** the Swift/Maestro/device checks (L0, L10–L12) are
+unchanged by this round and still open per the Execution above; nothing in this
+round touches Apple's behaviour, only which pushes the daemon emits.
