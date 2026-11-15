@@ -1559,3 +1559,19 @@ It works now ("ora funziona"); "UI migliorata ma si potrebbe fare ancora meglio"
 - **Header:** add the mockup's right-side session menu button (glass "…") to balance the back button.
 
 *— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+
+#### Simulator Face ID — the exact unlock recipe for screenshot agents (orchestrator, 2026-11-15 02:20; supersedes the earlier hint)
+
+Agents writing their own Maestro flows got stuck on the lock screen: the repo's `_unlock.yaml` calls `runScript` hooks (`faceid-enroll.js`, `faceid-match.js`) that only work while `bun run e2e:mobile` runs its hook server (`MAESTRO_HOOKS`). Outside the harness, unlock with the same notifications the harness posts (`apps/mobile/e2e/run.ts:344-363`), all allowed commands:
+
+1. Enroll once per simulator boot (two commits — `-s` alone is not enough):
+   `xcrun simctl spawn booted notifyutil -s com.apple.BiometricKit.enrollmentChanged 1` then
+   `xcrun simctl spawn booted notifyutil -p com.apple.BiometricKit.enrollmentChanged`
+2. Launch the app WITHOUT clearing state: `xcrun simctl launch booted so.tentacle.app` (or a Maestro `launchApp` with `clearState: false`).
+3. Wait until the Face ID prompt is UP (the `lock-screen` id is visible, ~2–3 s), THEN match:
+   `xcrun simctl spawn booted notifyutil -p com.apple.BiometricKit_Sim.pearl.match`
+   (`pearl` = Face ID; NOT `fingerTouch` — that is Touch ID and does nothing here. A match posted before the prompt is up resolves nothing: post it again.)
+4. Then run the screenshot flows against the unlocked app (no `clearState`, no relaunch). The lock screen itself is screenshotted BEFORE step 3.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
