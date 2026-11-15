@@ -449,7 +449,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `tui.theme` | — | "auto" | The palette: `auto` probes the terminal, `dark`/`light` force one; never carried to a pod. |
 | `voice.autoStop` | — | false | Finish the dictation on a pause instead of on the key. |
 | `voice.autoStopSilenceMs` | — | 500 | The pause that ends a dictation when `voice.autoStop` is on. |
-| `voice.enabled` | — | true | Whether Ctrl+R dictates at all. |
+| `voice.enabled` | — | false | Whether the terminal's voice features (Ctrl+R dictation; conversation mode later) are on. Off by default. |
 | `voice.engine` | — | "apple" | Which on-device recogniser transcribes the dictation. |
 | `voice.helperPath` | — | — | The voice helper binary, when it is not next to `tentacle`. |
 | `voice.input` | — | "default" | Which microphone the dictation captures from. |
@@ -674,12 +674,14 @@ hooks.json              { "hooks": [ … ] }  (the same entries as `hooks`)     
 - **Permissions:** shell commands need approval; "always" approvals are scoped to a command prefix.
 - **MCP servers**, **sub-agents** (`agent_task`, custom types in `<configDir>/agents/*.md`) and **Agent Skills** (`SKILL.md` in `.agents/skills/`, `<configDir>/skills/` or `~/.agents/skills/`; `/skill-name` in the TUI). See [`docs/architecture/skills.md`](./docs/architecture/skills.md).
 - **TUI:** diffs, mouse scroll and selection, slash commands, `/compact`, saved sessions; `/help` lists the rest.
-- **Voice dictation (macOS):** press **Ctrl+R** in the TUI, speak, press it again — the text lands in the input field for you to edit and send. Speech is recognised on the Mac (Apple's built-in on-device recogniser by default), so no audio leaves the machine or is written to disk; nothing is sent until you press Enter. Esc throws the dictation away without touching a running turn. See [Voice dictation](#voice-dictation) below.
+- **Voice dictation (macOS, off by default):** turn it on with `voice.enabled: true` in the config, then press **Ctrl+R** in the TUI, speak, press it again — the text lands in the input field for you to edit and send. Speech is recognised on the Mac (Apple's built-in on-device recogniser by default), so no audio leaves the machine or is written to disk; nothing is sent until you press Enter. Esc throws the dictation away without touching a running turn. See [Voice dictation](#voice-dictation) below.
 
 ### Voice dictation
 
-Local TUI on a Mac, with a real microphone. Not available over SSH or in a
-container — Ctrl+R then says so instead of capturing the wrong machine.
+Local TUI on a Mac, with a real microphone. **Off by default:** set
+`voice.enabled: true` in the config file to turn it on (while off, Ctrl+R says
+so instead of opening the mic). Not available over SSH or in a container —
+Ctrl+R then says so instead of capturing the wrong machine.
 
 | While dictating | Key | Effect |
 |---|---|---|
@@ -698,8 +700,10 @@ denying it is reported (`Microphone blocked for …`, with the System Settings
 path), never a silent no-op. Settings live under `voice` in the config file:
 `key` (rebindable), `language` (`auto` follows the Mac's language, or force
 `it`/`en`), `autoStop` (off by default — you end the dictation with the key, so
-a pause after a comma can never cut you off), `maxSeconds`, and `input`
-(`builtin` avoids the AirPods call-profile downgrade). `bun run voice:test` runs
+a pause after a comma can never cut you off), `maxSeconds`, `input`
+(`builtin` avoids the AirPods call-profile downgrade) and `enabled` (off by
+default). `tentacle voice status` prints whether voice is enabled and how to
+turn it on. `bun run voice:test` runs
 the helper's own tests; it is a separate step because the gate must stay green on
 Linux CI.
 

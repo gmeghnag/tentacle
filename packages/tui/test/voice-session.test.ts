@@ -10,12 +10,22 @@ import {
   type VoiceModel,
   dictationInsertion,
   joinDictation,
+  unavailableNotice,
   voiceAvailability,
   voiceInit,
   voiceStep,
 } from "../src/voice-session.ts";
 
-const cfg = (over: Partial<VoiceConfig> = {}): VoiceConfig => ({ ...VOICE_DEFAULTS, ...over });
+/**
+ * The config the dictation tests drive. `enabled: true` is EXPLICIT, not the
+ * default (feat/voice-off-by-default): voice ships OFF, so every test that
+ * exercises a dictation opts in here rather than relying on the default.
+ */
+const cfg = (over: Partial<VoiceConfig> = {}): VoiceConfig => ({
+  ...VOICE_DEFAULTS,
+  enabled: true,
+  ...over,
+});
 
 /** Drive the reducer through a list of events, collecting every command. */
 function drive(
@@ -268,6 +278,72 @@ describe("T2: helper errors become notices named for what the user must do", () 
       helper({ t: "error", code: "future_thing", message: "who knows" }),
     ]);
     expect(r.notices.join(" ")).toContain("who knows");
+  });
+});
+
+/**
+ * feat/voice-off-by-default: terminal voice is OFF unless the config turns it on.
+ * These three pin the switch itself — the default, its consequence, and the
+ * notice that tells the user how to turn it back on.
+ */
+describe("voice-off-by-default: the shipped default is OFF", () => {
+  test("VOICE_DEFAULTS.enabled is false (the ONE place the default lives)", () => {
+    // Mutation: `enabled: true` in VOICE_DEFAULTS → red.
+    expect(VOICE_DEFAULTS.enabled).toBe(false);
+  });
+
+  test("with no config at all, voice is unavailable with reason `disabled`", () => {
+    // The effective config every TUI path builds for `voice: {}` is the defaults.
+    const a = voiceAvailability({
+      platform: "darwin",
+      env: {},
+      enabled: VOICE_DEFAULTS.enabled,
+    });
+    expect(a.available).toBe(false);
+    if (!a.available) expect(a.reason).toBe("disabled");
+  });
+
+  test("a toggle with the default config is the notice, never a spawn", () => {
+    // Mutation: any spawn on the disabled path → red (the mic would open).
+    // Driven with `VOICE_DEFAULTS` itself: the rest of this file opts IN via
+    // `cfg()`, so this is the one place the shipped default is exercised.
+    const r = drive([key("toggle")], VOICE_DEFAULTS);
+    expect(r.commands.filter((c) => c.kind === "spawn")).toEqual([]);
+    expect(r.commands.filter((c) => c.kind === "send")).toEqual([]);
+    expect(r.model.phase).toBe("idle");
+    expect(r.notices.join(" ")).toContain('"enabled": true');
+  });
+
+  test("the disabled notice says how to turn voice on", () => {
+    // The owner's ask: off by default, "accendibile da config" — the notice is
+    // the only place a user learns that. Mutation: the old "(config: voice.enabled
+    // false)" wording alone → red, it names the key but not the value.
+    const notice = unavailableNotice("disabled");
+    expect(notice).toContain("voice");
+    expect(notice).toContain('"enabled": true');
+    expect(notice).toContain("config");
+  });
+
+  test("a `voice` block WITHOUT `enabled` is OFF — present is not on", () => {
+    // The failure mode the flip introduces: `voice: { "key": "ctrl+k" }` must not
+    // mean "voice on, rebound". The merge leaves `enabled` to `VOICE_DEFAULTS`.
+    // Mutation: defaulting `enabled` from the block's presence → red.
+    const merged = { ...VOICE_DEFAULTS, ...({ key: "ctrl+k" } as Partial<VoiceConfig>) };
+    expect(merged.enabled).toBe(false);
+    expect(merged.key).toBe("ctrl+k");
+  });
+
+  test("a `voice` block with `enabled: true` is on, and nothing else changes", () => {
+    const merged = { ...VOICE_DEFAULTS, ...({ enabled: true } as Partial<VoiceConfig>) };
+    expect(merged.enabled).toBe(true);
+    const r = drive([key("toggle")], merged);
+    expect(r.model.phase).toBe("starting");
+  });
+
+  test("`enabled: true` behaves exactly as before (opt-in, not a regression)", () => {
+    const r = drive([key("toggle")], cfg({ enabled: true }));
+    expect(r.model.phase).toBe("starting");
+    expect(r.commands.map((c) => c.kind)).toContain("spawn");
   });
 });
 

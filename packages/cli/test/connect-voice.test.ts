@@ -49,4 +49,22 @@ describe("Fix 4 (HIGH 4): connect reads the laptop's voice settings", () => {
       expect(voice.config).toEqual(VOICE_DEFAULTS);
     });
   });
+
+  test("a `voice` block without `enabled` is OFF (default, not 'present means on')", async () => {
+    // feat/voice-off-by-default: the file may tune `key`/`language` and still
+    // leave voice off. Mutation: `enabled: file.voice !== undefined` in
+    // `connectVoice` → red.
+    await withConfig('{ "voice": { "key": "ctrl+k" } }', async (configDir) => {
+      const voice = await connectVoice({ url: "ws://127.0.0.1:9", configDir });
+      expect(voice.config.enabled).toBe(false);
+      expect(voice.config.key).toBe("ctrl+k");
+    });
+  });
+
+  test("`enabled: true` in the file turns it on (the opt-in survives the merge)", async () => {
+    await withConfig('{ "voice": { "enabled": true } }', async (configDir) => {
+      const voice = await connectVoice({ url: "ws://127.0.0.1:9", configDir });
+      expect(voice.config.enabled).toBe(true);
+    });
+  });
 });

@@ -115,6 +115,41 @@ describe("T10 (F3): a missing helper says how to build it", () => {
   });
 });
 
+describe("feat/voice-off-by-default: `status` reports the switch, and how to flip it", () => {
+  test("off: the status output names the opt-in (default: no voice block at all)", async () => {
+    // Mutation: drop the status line from `voiceCommand` → red. A user runs
+    // `status` precisely when voice is NOT working, so it is the place that must
+    // say the switch exists.
+    const d = deps();
+    expect(
+      await voiceCommand(["status"], {
+        ...d.base,
+        config: { ...VOICE_DEFAULTS, helperPath: "/h" },
+      }),
+    ).toBe(0);
+    const printed = d.out.join("");
+    expect(printed).toContain("disabled");
+    expect(printed).toContain('"enabled": true');
+  });
+
+  test("on: it says enabled, and still runs the helper's own status", async () => {
+    const d = deps();
+    await voiceCommand(["status"], {
+      ...d.base,
+      config: { ...VOICE_DEFAULTS, enabled: true, helperPath: "/h" },
+    });
+    expect(d.out.join("")).toContain("enabled");
+    expect(d.runs).toHaveLength(1);
+    expect(d.runs[0]?.args[0]).toBe("status");
+  });
+
+  test("`setup` prints no voice-status line (it is not a status command)", async () => {
+    const d = deps();
+    await voiceCommand(["setup"], d.base);
+    expect(d.out.join("")).not.toContain('"enabled": true');
+  });
+});
+
 describe("T10: another platform is refused honestly", () => {
   test("linux: a plain message, not a crash and not a silent success", async () => {
     const d = deps({ platform: "linux" });

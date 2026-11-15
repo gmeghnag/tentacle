@@ -93,6 +93,16 @@ export async function voiceCommand(
     configDir: deps.configDir,
     config: deps.config,
   });
+  // The switch itself, before the helper's own report: voice ships OFF
+  // (feat/voice-off-by-default), so `status` — the command a user runs when it
+  // is not working — is where they learn the key to turn it on.
+  if (verb === "status") {
+    deps.out(
+      deps.config.enabled
+        ? "voice: enabled\n"
+        : 'voice: disabled — set "voice": { "enabled": true } in the config\n',
+    );
+  }
   const exists = deps.exists ?? existsSync;
   const helper = candidates.find((path) => exists(path));
   if (helper === undefined) {

@@ -115,6 +115,7 @@ This plan cites V1's **approved design** and mobile-voice's **branch code** (`fe
   - Phone: the permission sheet's request from `serve` (a trusted daemon on the user's host).
   - Never a daemon-side string read for speech on the Mac in `run`/`attach` (§7 "a pod is not trusted").
 - **Shared code lives in `@tentacle/core`.** `apps/mobile` and `packages/tui` both depend on it (`apps/mobile/package.json:11`, `packages/tui/package.json:12`), and it is React-, Ink- and RN-free.
+- **Voice ships OFF by default** (`feat/voice-off-by-default`, owner-approved 2026-11-15). Conversation mode is a *voice feature*, so it hangs off the same switch and inherits it: `voice.enabled: false` (the default) means the hands-free mode is not reachable at all, and `voice.enabled: true` is what turns both edges' voice features on. Conversation mode does not add a second master switch; its own settings (`voice.reasoningOff` etc.) are read only once voice is enabled. Any V2 slice that adds a TUI/phone entry point must therefore check `VOICE_DEFAULTS.enabled`-resolved config first, and its disabled notice must say how to enable voice (the same text as `unavailableNotice("disabled")`).
 - **[V1 design] change of placement:** V1 puts `voice-endpoint.ts` in `packages/tui` (`voice-dictation.md:211`). V2 needs it on the phone, so V2's C2 **moves it to `packages/core/src/voice/endpoint.ts`** behind an edge-neutral input (below). If V1 has not been executed yet when this plan is approved, V1's executor should put it in core directly (a one-line note to V1's Execution).
 
 ### Design

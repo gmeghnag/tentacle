@@ -97,9 +97,16 @@ function fakeHelper() {
   };
 }
 
+/**
+ * Voice ON, explicitly (feat/voice-off-by-default): the feature ships OFF, so
+ * every test that actually dictates opts in here instead of relying on the
+ * default. A test that wants the shipped default passes `VOICE_DEFAULTS`.
+ */
+const ON: VoiceConfig = { ...VOICE_DEFAULTS, enabled: true };
+
 function renderApp(
   voice: ReturnType<typeof fakeHelper>,
-  config: VoiceConfig = VOICE_DEFAULTS,
+  config: VoiceConfig = ON,
   extra: { voiceHost?: { platform: string; env: Record<string, string | undefined> } } = {},
 ) {
   const provider = new SilentProvider();
@@ -171,7 +178,7 @@ describe("T7: Ctrl+R dictates, and the transcript lands in the field", () => {
   test("over SSH no helper is spawned and the notice says why (the host is read, not assumed)", async () => {
     // Review round 1, MEDIUM 6: T7 used to depend on the RUNNER's env.
     const helper = fakeHelper();
-    const { stdin, frames, unmount } = renderApp(helper, VOICE_DEFAULTS, {
+    const { stdin, frames, unmount } = renderApp(helper, ON, {
       voiceHost: { platform: "darwin", env: { SSH_TTY: "/dev/ttys001" } },
     });
     await delay(40);
@@ -192,7 +199,23 @@ describe("T7: Ctrl+R dictates, and the transcript lands in the field", () => {
     stdin.write("\u0012");
     await delay(80);
     expect(helper.specs).toEqual([]);
-    expect(frames.join("\n")).toContain("voice dictation is off");
+    expect(frames.join("\n")).toContain("off — set");
+    unmount();
+  });
+
+  test("with NO config, Ctrl+R is a notice that says how to turn voice on — no spawn", async () => {
+    // feat/voice-off-by-default, end to end through the App: the shipped default
+    // is what a user gets with no `voice` block at all. Mutation: `enabled: true`
+    // in VOICE_DEFAULTS, or dropping `enabled` from the hook's availability → red
+    // (the helper is spawned, i.e. the mic opens without being asked for).
+    const helper = fakeHelper();
+    const { stdin, frames, unmount } = renderApp(helper, VOICE_DEFAULTS);
+    await delay(40);
+    stdin.write("\u0012");
+    await delay(80);
+    expect(helper.specs).toEqual([]);
+    const all = frames.join("\n");
+    expect(all).toContain('set "voice": { "enabled": true }');
     unmount();
   });
 
@@ -247,7 +270,7 @@ describe("Fix round 2 (NEW-2): a spawn that fails leaves the TUI idle, with the 
           agent={agent}
           model="qwen3"
           cwd="/tmp/work"
-          voice={{ ...VOICE_DEFAULTS, helperPath: `${dir}/nope/tentacle-voice` }}
+          voice={{ ...ON, helperPath: `${dir}/nope/tentacle-voice` }}
           voiceConfigDir={dir}
           // The spawner fails the way a real one does when the log cannot be
           // opened: `spawnVoiceHelper` propagates it.
@@ -311,7 +334,7 @@ describe("Fix 8 (MEDIUM 8): the helper is spawned from a path that exists, with 
           agent={agent}
           model="qwen3"
           cwd="/tmp/work"
-          voice={{ ...VOICE_DEFAULTS, input: "builtin", voiceProcessing: false }}
+          voice={{ ...ON, input: "builtin", voiceProcessing: false }}
           voiceSpawner={helper.spawner}
           voiceConfigDir={dir}
           voiceHost={{ platform: "darwin", env: {} }}
@@ -385,7 +408,7 @@ describe("Fix 9 (MEDIUM 9): a killed child's late exit never orphans its success
         agent={agent}
         model="qwen3"
         cwd="/tmp/work"
-        voice={VOICE_DEFAULTS}
+        voice={ON}
         voiceSpawner={spawner}
         voiceHost={{ platform: "darwin", env: {} }}
       />,

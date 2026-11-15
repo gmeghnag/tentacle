@@ -444,7 +444,7 @@ export interface AppProps {
   readonly jobRefreshMs?: number;
   /**
    * Voice dictation settings (docs/feat/voice-dictation.md). Absent: the defaults
-   * in `voice-session.ts` (`VOICE_DEFAULTS`) — enabled, Ctrl+R, `auto` language,
+   * in `voice-session.ts` (`VOICE_DEFAULTS`) — OFF, Ctrl+R, `auto` language,
    * no auto-stop. A LOCAL input device: never carried to a pod, and the helper is
    * only ever spawned when `voiceAvailability` says this is a local Mac terminal.
    */
