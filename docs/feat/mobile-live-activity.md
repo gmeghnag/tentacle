@@ -72,13 +72,13 @@ no `apps/mobile/targets` / `apps/mobile/modules`. The executor re-runs the
 search on `main` after task 17 merged: then the push/NSE pieces exist, still no
 Live Activity.
 
-> **Branch state (corrected in fix round 1, 2026-11-15; re-measured in round 2,
-> 2026-11-16).** `88f5a8f9` is this branch's **cut point**, not current `main`.
-> Current `main` is `b9b2d4fb` and this branch is **315 commits behind** it, so
-> none of the push stack the plan builds on exists here yet — `main` moved during
-> round 2 (`b44766f8` at 305 behind → `b9b2d4fb` at 315); the merge stays
-> conflict-free at the later base (`git merge-tree --write-tree main HEAD` → exit
-> 0). The probe is in
+> **Branch state (corrected in fix round 1, 2026-11-15; re-measured in rounds 2
+> and 3, 2026-11-16).** `88f5a8f9` is this branch's **cut point**, not current
+> `main`. Current `main` is `da1958f0` and this branch is **316 commits behind** it,
+> so none of the push stack the plan builds on exists here yet — `main` has
+> moved during every fix round (`b44766f8` at 305 → `b9b2d4fb` at 315 → `da1958f0`
+> at 316); the merge stays conflict-free at the later base (`git merge-tree
+> --write-tree main HEAD` → exit 0). The probe is in
 > `.tentacle/tmp/mobile-live-activity/precondition-probe.txt`. The plan's
 > `file:line` citations were verified **correct at `88f5a8f9`** (23/23) and
 > re-mapped to `main`: task 16's push hook shifts every cited line in
@@ -664,6 +664,46 @@ text is corrected here: the `finishTurn` *end* was cited as a single line
 *about* — e.g. that an activity can never race a decision. That is L7's test, not
 a line-number check.
 
+**The table above is not the whole citation set (fix round 3, Review round 3).**
+It carries the 23 citations of the *daemon emit / protocol-shape* proof, and its
+remedy sentence — "read the `on main` column, not the prose numbers" — only
+works for a citation that HAS a row. Ten more `file:line`s in the Preconditions,
+Design and Failure-modes prose had none, so an L0 executor following those read a
+cut-point number on `main`: **five** of them land on unrelated code there
+(measured, `.tentacle/tmp/mobile-live-activity/r3-count.txt`: `conn:178`, the
+`conn` method gate, `hs` `resolvePermission`, the gate's `suspend()`, and the
+Keychain const) — exactly the trap this section exists to stop. Measured and
+tabulated below, so **every citation the doc makes that is not in the table
+above carries its `on main` line here too.** Same rule: for L0 onward read the
+`on main` column.
+
+Aliases as above, plus `conn` = `packages/daemon/src/connection.ts`, `fg` =
+`apps/mobile/src/foreground-gate.ts`, `kv` = `apps/mobile/src/secure-kv.ts`,
+`da` = `packages/daemon/src/device-authority.ts`.
+
+| claim | file | plan line | on main | shift | correct at base? |
+|---|---|---|---|---|---|
+| device principal field + kind | `conn` | `122-131` | `128-157` | +6 | yes |
+| principal defaulted per connection | `conn` | `178` | `225` | +47 | yes |
+| device / pairing method gate | `conn` | `301-311` | `349-359` | +48 | yes |
+| resolvePermission (F8) | `hs` | `1098-1129` | `1227-1258` | +129 | yes |
+| gate header comment | `fg` | `1-34` | `1-34` | same | yes |
+| gate `suspend()` | `fg` | `111-120` | `143-152` | +32 | yes |
+| Keychain accessible const | `kv` | `17` | `20` | +3 | yes |
+| one link per computer | `lk` | `1-12` | `1-12` | same | yes |
+| staticKey / identity | `da` | `146`, `151` | `146`, `151` | same | yes |
+| no own decision (comment block) | `hs` | `20-31` | `20-31` | same | yes |
+
+`lk` = `apps/mobile/src/link-registry.ts`. Two of these are worth naming because
+a spot-check of the number alone would have passed: `conn:178` on `main` is
+`readonly hosted: HostedSession;` (not the principal assignment), and
+`fg:111-120` on `main` is the tail of a hold's release plus the top of `dial()`
+— `suspend()` itself moved to `:143`. Neither is reachable by reading the first
+table. One number is also slightly wrong *at the cut point*: the prose's
+`connection.ts:302` is the `if (method === Method.DevicePair)` block's first
+statement, the `if` itself being `:301` (→ `:349` on `main`). Both numbers are
+in the row above so the shift stays checkable either way.
+
 ### Fix round 1
 
 *— claude-opus-5-5, 2026-11-15*
@@ -913,6 +953,153 @@ worktree, so the evidence sits in
 `.tentacle/worktrees/mobile-live-activity/.tentacle/tmp/mobile-live-activity/`
 (where round 1 also put it). Both are gitignored; nothing is lost, and a reviewer
 must look there.
+
+### Fix round 3
+
+*— claude-opus-5-5, 2026-11-16*
+
+**Scope: Review round 3 carried no numbered finding; the round it names is
+blocked on the orchestrator, not on the doc. So this round re-ran what round 3
+could not, and audited the citation set it left unexamined.** No code, no slice
+(L0–L12 remain **0 of 13**). Signature evidence, not assumption: this session's
+`~/.claude/settings.json` pins `"model": "opus"` with
+`modelSettings: {"claude-opus-5-5": …}`, and every recent transcript record in
+`~/.claude/projects/` reports `"model":"claude-opus-5-5"` (e.g. 105/105 records
+in the mobile-notifications transcript). Signed from that, not copied from
+round 2.
+
+**Review round 3's own items, re-verified (it explicitly could not run two of
+them).**
+- `r2-cite-verify.ts` → **73/73, exit 0** (round 3 skipped it: "needed approvals
+  I don't have"). Its D2 reads `main` live, so the doc's base claim is re-proved
+  each run.
+- `git merge-tree --write-tree main HEAD` → **exit 0, one tree, no conflicts**
+  (round 3 also skipped this). It first read `be10394c…` at `b9b2d4fb`, then
+  `a28a8b04b70bee284894d27ff9ecc3430e08aa6f` when `main` moved mid-round — clean
+  at both. Still no ref, index or worktree write, so it is inside an executor's
+  standing; the merge is a commit and is not.
+- Round 1's `doc-guard.test.ts` → **6/6**, including its mutation-tested F1c.
+- **Base moved during this round** (`b9b2d4fb`/315 → `da1958f0`/316). Both
+  base-claim guards went red the moment it did (`doc-guard` F1b,
+  `r2-cite-verify` D2) — that is the guards working, as in round 2. The doc's
+  live base claim is now re-measured to `da1958f0`/316; the round-2 mutation log
+  and Review round 3's text keep their own numbers, because a historical record
+  that is renumbered stops being a record. One self-inflicted snag worth
+  recording: my first rewrite of that sentence wrapped `> it` onto the next
+  line, so the flattened text read `behind** > it` and the guard's anchored
+  regex still failed — a *true* claim, still red, because the shape it asserts
+  was broken. Fixed by keeping the clause on one line; both guards then green.
+  That is the round-2 vacuity lesson from the other side: a guard strict enough
+  to catch a wrong number is also strict about the sentence around it.
+
+**Blocking premise re-measured, still true.** `git grep -lEi
+"ActivityKit|LiveActivit|NSSupportsLiveActivities|pushToStart"` finds **nothing**
+on `main` and **nothing** on `HEAD` — the capability is still missing, so the
+Repro still reproduces and L0 still cannot start here. `push-seal.ts` and
+`relay-link.ts` are in `packages/transport/src/` and `packages/daemon/src/` on
+`main` (`git ls-tree -r main`: `push-seal.ts`, `push-notifier.ts`,
+`relay-link.ts`; there is no `packages/relay` — the 16-package list has
+`transport` and `daemon`); `onPushEvent` still counts **0** here, **3** on
+`main`.
+
+**New defect found this round, MEDIUM — the drift table's remedy did not reach
+ten of the doc's citations, and five of those point at unrelated code on
+`main`. FIXED.**
+
+Fix round 1 built the drift table so "line numbers line up while pointing at
+unrelated code" could not happen; fix round 2 added the missing `file` column
+and stated the remedy: *"for L0 onward read the `on main` column, not the prose
+numbers."* That remedy is only usable for a citation that HAS a row. The table
+carries the **23** citations of the daemon-emit / protocol-shape proof. The
+Preconditions, Design and Failure-modes prose cites **ten more** `file:line`s
+(`conn:122-131`, `:178`, `:301-311`; `hs:1098-1129`, `:20-31`; `fg:1-34`,
+`:111-120`; `kv:17`; `lk:1-12`; `da:146`/`:151`) and **none had a row**. Read on
+`main`, five of them land on unrelated code — measured, not eyeballed
+(`.tentacle/tmp/mobile-live-activity/r3-count.txt`, 5 of 10):
+
+| the doc said | on `main` that line is |
+|---|---|
+| `connection.ts:178` (principal defaulted) | `readonly hosted: HostedSession;` |
+| `connection.ts:302-311` (device/pairing gate) | `handlers: {` |
+| `hosted-session.ts:1098-1129` (`resolvePermission`, F8) | `outcome,` |
+| `foreground-gate.ts:111-120` (`suspend()`) | `release = null;` |
+| `secure-kv.ts:17` (`KEYCHAIN_ACCESSIBLE`) | `import type { PushKeyStore } …` |
+
+This is the same class the table exists to stop, and it survived two rounds
+because both rounds verified the table's rows rather than the citation *set* —
+the table's completeness was assumed, never asserted. Fixed by adding a second
+table (under the first, in the same citation re-check section) carrying those
+ten citations with `plan line` / `on main` / `shift` / `correct at base?`, and a
+routing sentence that says every citation not in the first table carries its
+`on main` line in the second. Alias map extended (`conn`, `fg`, `kv`, `da`,
+`lk`) so a line number still cannot be read without its file.
+
+**Red before green (AGENTS §9).** `.tentacle/tmp/mobile-live-activity/r3-verify.ts`
+parses the second table **out of the doc** (the doc's own numbers are what is
+under test) and checks each row against `git show <rev>:<file>` only. Per row:
+A1 the alias resolves · A2 the row's symbols sit inside the `on main` range on
+`main` · A3 they sit inside the `plan line` range at `88f5a8f9` · A4 the `shift`
+cell equals `on main − plan line`. Plus D1 the routing sentence exists, D2 the
+table is in the right section.
+- **RED on the pre-fix doc** (`git show HEAD:docs/…` into scratch — the worktree
+  was never checked out or restored): **0/13**, failing on `row present` / D1 /
+  D2, i.e. on the real assertions, not on an import error (`r3-prefix.md`).
+- **GREEN after**: **43/43, exit 0** (`r3-GREEN.txt`).
+
+An early version of this verifier asserted the needle at the range's *endpoints*
+and went 33/43 on a *correct* doc — the doc legitimately cites ranges
+(`conn:122-131`) whose interior, not whose last line, holds the symbol. Fixed to
+range-containment before the run counted. Reported because it is the same
+vacuous-vs-strict error round 2 caught in itself.
+
+**Mutations (§9 non-vacuity — each breaks a scratch copy, observes the named
+assertion fail, discards it; the real doc is never touched, so a crash cannot
+dirty the tree). Log: `r3-mut.txt`.**
+
+| # | mutation | expected | observed |
+|---|---|---|---|
+| M1 | drop the whole second table — the defect this round fixes | D0 + all A0 red | **13 FAIL** (0/13) |
+| M2 | `conn:178` row claims the cut-point number on `main` too (`178`→`178`, `same`) — the real trap | A2 red | **A2 FAIL** (42/43): `found "readonly hosted: HostedSession;"` |
+| M3 | shift cell `+47`→`+46`, both line cells left correct | A4 red | **A4 FAIL** (42/43): `doc=+46 real=+47` |
+| M4 | `fg` `suspend()` back to `111-120`/`same` — second instance of the real defect | A2 red | **A2 FAIL** (42/43): `found "release = null;"` |
+| M5 | alias `kv`→`zz` | A1 red | **A1 FAIL** (39/40): `alias "zz"` |
+| M6 | drop the routing sentence ("table above is complete") | D1 red | **D1 FAIL** (42/43) |
+| M7 | `hs` `20-31` → `1-12` on main | A2 + A4 red | **2 FAIL** (41/43): `found "import { createHash …"`, `doc=same real=-19` |
+
+M6's first `sed` rewrote nothing (a wrapped line the pattern missed) and the
+harness printed `!! M6: sed changed nothing` — reported rather than counted as a
+pass; re-run with `perl -0pi` it fails D1 correctly. A mutation that does not
+change the file is not evidence.
+
+**No regression in the earlier guards.** All three run together on the finished
+tree: `r3-verify.ts` **43/43** · round 1's `doc-guard.test.ts` **6/6** ·
+round 2's `r2-cite-verify.ts` **73/73**. The 23-row table, its `file` column and
+the `Five`-vs-`Six` correction are untouched.
+
+**Drift from the Implementation: none — the Implementation still did not run.**
+The added text is a citation translation and a routing sentence; it changes no
+design, no slice and no precondition. The one substantive side-finding (the
+`packages/relay/` → `packages/transport/`+`packages/daemon/` path correction) is
+recorded above as a measurement, not applied to the Implementation prose, which
+cites `packages/transport/push` correctly for the crypto.
+
+**Still PARTIAL, and why.** L0–L12: **0 of 13**. The precondition is unchanged —
+the branch does not carry `main`, the merge is conflict-free (`a28a8b04` at
+`da1958f0`/316) but is a commit, which this round may not make. Not verified here: any runtime
+behaviour of the plan (no code exists to observe), and the iOS 18 simulator
+runtime is still absent (only 26.5 installed), which L0(b) needs alongside
+D4a's Apple-console work.
+
+**Gate (measured on the finished tree):** `bunx tsc --noEmit` → **exit 0** ·
+`bun run lint` → "Checked 1292 files in 446ms. No fixes applied", 0
+errors/warnings (baseline-clean, AGENTS §6) · `bun test` → **9317 pass, 3 skip,
+0 fail**, 9320 tests / 670 files, 364.16 s — the 3 skips are the three opt-in
+ones (`TENTACLE_K8S_SERVER`, `TENTACLE_DOCKER_TESTS=1`, `TENTACLE_SLOW_TESTS=1`),
+so this is the AGENTS §6 baseline exactly. Doc+scratch only: `git status
+--short` → `M docs/feat/mobile-live-activity.md`, nothing else, so green means
+"the doc edits changed no code path", not "the feature works". No changelog
+fragment (no user-visible change), no `protocol.d/` note (no schema change),
+`protocol.json` untouched.
 
 ## Review
 
