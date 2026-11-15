@@ -847,3 +847,21 @@ version-mismatch message) is left open — it is below the severity this round w
 scoped to, and it belongs with the phone handshake. The `expo export` verification
 of F2 in round 1 remains unrun (it needs the native toolchain; the source guard
 stands in for it in CI).
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; reviewed `git diff HEAD~1`, commit `ce85bf4e`)
+
+**Verdict: PASS.**
+
+**Gate:** `bun run typecheck` clean; `bun run lint` clean (1445 files); `scripts/test/session-auto-accept-signatures.test.ts` and `task-doc-signatures.test.ts` pass (8 pass / 0 fail). This diff touches only this doc and adds one test; no product code changed.
+
+**Round-2 finding 1 (signature record): fixed.**
+- `## Execution` and `### Fix round 1` are now signed with the full model id `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` instead of the family name `deepseek`, with date 2026-11-15.
+- The explanation, that the commit subject is hard-coded by `night-task.sh` and the run log is the real record, agrees with the prior art in `docs/feat/app-decomposition.md:1145-1150`.
+- I cannot check `night-task.sh` or the run log myself: both are outside the repo.
+- **Mutation:** I put the old wrong signature back (`claude-opus-5-5, 2026-11-16`) on `### Fix round 1`. The new test failed ("each names its author's real id"). Reverted; `git status` is clean.
+
+**Regressions:** none. My Round 1 and Round 2 sections are unchanged.
+
+**Note (below MEDIUM):** `### Fix round 2` was executed by `claude-opus-5-5`, the same model as this reviewer. For this round that is acceptable, because it changes only a doc and a doc-scoped test.
