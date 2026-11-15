@@ -275,4 +275,8 @@ would use to show motion in one image — build it once, in a pure module.
 
 ## Review
 
-*(pending the owner's verdict)*
+**Owner verdict (2026-11-15 11:20): GO for AUDIO only — NO video for now.**
+1 (a) edge-derived only · 2 (a) delimited `<file …>` block + media chip · 3 **no video in v1** · 4 (a) audio ≤ 60 min, transcript ≤ 64 KiB · 5 (a) the original never leaves the device (phone copy deleted after send) · 6 (a) transcript previewable + editable before send · 7 (a) native audio and cloud STT later, opt-in.
+Order: after `feat/mobile-voice` (phone STT) and `feat/voice-dictation` (Mac helper), since audio reuses their recognisers; to be promoted to `feat/attachments-audio` then.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
+
