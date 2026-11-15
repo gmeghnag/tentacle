@@ -13,7 +13,7 @@ import type { BackgroundAgentRow } from "./background-view.ts";
 import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
-import type { AutoAcceptFeed } from "./permission-ui.ts";
+import type { AutoAcceptFeed, AutoAcceptSharedFeed } from "./permission-ui.ts";
 import type { DaemonQueue, QueuedMessage, ReturnedCause } from "./queued.ts";
 import type { SessionsView } from "./sessions-panel.ts";
 import type { SessionSkillsView } from "./skills-sync.ts";
@@ -506,6 +506,13 @@ export interface AppProps {
   readonly runQuit?: RunQuit;
   /** A detached run's TUI: auto-accept is its session's, shared by its TUIs (B3). */
   readonly autoAccept?: AutoAcceptFeed;
+  /**
+   * The session's auto-accept is SHARED with other devices (docs/feat/
+   * session-auto-accept.md D5): a flip this TUI did not make adds one
+   * transcript notice naming its device. The routing feed, when it routes to a
+   * shared session; absent for a pod's or a detached run's laptop-only feed.
+   */
+  readonly autoAcceptShared?: AutoAcceptSharedFeed;
   /**
    * `/move` (docs/feat/session-hop.md D3): this session may move to another
    * target. Absent → `/move` says it is not available here (D8).

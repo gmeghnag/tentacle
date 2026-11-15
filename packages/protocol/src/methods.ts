@@ -68,6 +68,8 @@ import {
   SessionContextResultSchema,
   SessionListParamsSchema,
   SessionListResultSchema,
+  SetAutoAcceptParamsSchema,
+  SetAutoAcceptResultSchema,
   SnapshotParamsSchema,
   SnapshotResultSchema,
   SubagentMessageParamsSchema,
@@ -99,6 +101,8 @@ export const Method = {
   Clear: "session/clear",
   /** Apply a laptop's settings to a live session, between turns (docs/feat/session-settings-apply.md). */
   UpdateSettings: "session/update_settings",
+  /** The session's auto-accept, on or off, for every client (docs/feat/session-auto-accept.md). */
+  SetAutoAccept: "session/set_auto_accept",
   Snapshot: "session/snapshot",
   /** The session's committed history as a typed event log, after a position (docs/feat/session-log.md). */
   Log: "session/log",
@@ -194,6 +198,10 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.UpdateSettings]: {
     params: UpdateSettingsParamsSchema,
     result: UpdateSettingsResultSchema,
+  },
+  [Method.SetAutoAccept]: {
+    params: SetAutoAcceptParamsSchema,
+    result: SetAutoAcceptResultSchema,
   },
   [Method.Snapshot]: { params: SnapshotParamsSchema, result: SnapshotResultSchema },
   [Method.Log]: { params: LogParamsSchema, result: LogResultSchema },

@@ -504,6 +504,9 @@ async function reloadedHost(
     exposeTurnErrors: true,
     persister,
     sessionTtl,
+    // Its host is the user's own machine, so the session's auto-accept is SHARED
+    // with every device attached (docs/feat/session-auto-accept.md D1).
+    sharedAutoAccept: true,
     identity: { tentacle: APP_VERSION, kind: "serve" },
     modelInfo: { name: config.model, contextWindow: config.contextWindow },
     // ITS OWN model, told to a client for DISPLAY only (a `connect` TUI's ctx

@@ -145,6 +145,8 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1compact/result": [{ before: 10, after: 2 }],
   "methods/session~1clear/params": [{ sessionId: "s" }],
   "methods/session~1clear/result": [{ before: 10, after: 1 }],
+  "methods/session~1set_auto_accept/params": [{ sessionId: "s", on: true }],
+  "methods/session~1set_auto_accept/result": [{ on: true }, { on: false }],
   "methods/session~1update_settings/params": [
     { sessionId: "s", id: "a1", settings: { maxIterations: 3, toolExecution: "parallel" } },
   ],
@@ -523,6 +525,8 @@ const FIXTURES: Record<string, Json[]> = {
       settings: { carried: { maxIterations: 3 }, overridden: {} },
       id: "a1",
     }),
+    update({ type: "auto_accept", on: true }),
+    update({ type: "auto_accept", on: false, by: "laptop" }),
     update({ type: "queued", entries: [], returned: [] }),
     update({
       type: "queued",

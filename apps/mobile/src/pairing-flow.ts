@@ -435,6 +435,10 @@ export async function runPairing(options: RunPairingOptions): Promise<PairingOut
       computerKey: encodeBase64Url(payload.key),
       addresses: payload.addresses,
       deviceName,
+      // This phone's OWN label, as the computer will list it (`device/pair`'s
+      // `name`): the one string that matches on both ends, for an ask's "also
+      // asked on" and a flip's `by` (docs/feat/session-auto-accept.md D7).
+      thisDeviceName: deviceName,
       pairedAt: now(),
     };
     try {

@@ -101,6 +101,9 @@ export function workerSessionHost(
   return new SessionHost({
     defaultCwd: config.cwd,
     onSessionDeleted: (id) => void toolOutputStore().removeSession(id),
+    // The laptop's own code in this process: the session's auto-accept is
+    // shared with every TUI on it (docs/feat/session-auto-accept.md D1).
+    sharedAutoAccept: true,
     // The client's own build: no skew possible, named for completeness.
     identity: { tentacle: deps.version, kind: "worker" },
     newSessionSkills: () => skillScan.newSession(),

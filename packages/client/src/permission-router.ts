@@ -39,6 +39,13 @@ export type RouterAction =
         /** A BACKGROUND child's `sa-N`. */
         readonly id?: string;
       };
+      /**
+       * The other devices this ask was raised to, by their declared labels
+       * (`ClientInfo.host`, docs/feat/session-auto-accept.md D7). Display only,
+       * bounded and sanitized here (a pod could forge one), and still each
+       * surface's OWN label: `otherDevicesAsked` drops it.
+       */
+      readonly askedOn?: readonly string[];
     }
   | { readonly kind: "abort"; readonly sessionId: string; readonly requestId: string }
   | {
@@ -270,6 +277,13 @@ export class PermissionRouter {
                   ? { id: progressText(entry.update.agent.id) }
                   : {}),
               },
+            }
+          : {}),
+        ...(entry.update.askedOn !== undefined && entry.update.askedOn.length > 0
+          ? {
+              askedOn: entry.update.askedOn
+                .map((label) => progressText(label))
+                .filter((l) => l !== ""),
             }
           : {}),
       },

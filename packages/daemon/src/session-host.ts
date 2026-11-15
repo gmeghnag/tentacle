@@ -244,6 +244,15 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    */
   readonly persister?: SessionPersister;
   /**
+   * This daemon SHARES the session's auto-accept (`session/set_auto_accept`,
+   * `OpenResult.autoAccept`; docs/feat/session-auto-accept.md D1/D3): the
+   * worker and a trusted `serve` say yes. Absent (a pod daemon) → every open
+   * omits `autoAccept`, so no laptop client reads or sets it there: a pod can
+   * neither turn auto-accept on nor report it (AGENTS §7, "a pod is not
+   * trusted").
+   */
+  readonly sharedAutoAccept?: boolean;
+  /**
    * `serve` only: this computer's live sibling daemons and their addresses
    * (`daemon/discover`, docs/feat/sibling-discovery.md). Absent (a pod daemon,
    * the worker) → `MethodNotFound`: a pod learns nothing about the laptop's
@@ -413,6 +422,14 @@ export class SessionHost {
    */
   get images(): ImagePolicy | undefined {
     return this.opts.images;
+  }
+  /**
+   * Whether this daemon SHARES the session's auto-accept (docs/feat/session-auto-accept.md
+   * D1): the worker and a trusted `serve`. A pod daemon never says it, so
+   * `session/open` omits `autoAccept` and no laptop client reads or sets it there.
+   */
+  get sharedAutoAccept(): boolean {
+    return this.opts.sharedAutoAccept === true;
   }
   private readonly sessions = new Map<string, HostedSession>();
   /** ARCHIVED sessions (a persisting host only). An id is in ONE of the two maps, never both. */
@@ -712,7 +729,12 @@ export class SessionHost {
       // One step: out of the archive, live, attached (the restart path, mid-life).
       this.archived.delete(entry.id);
       // A rename (or a reclaim) of the archived session wins over the record it was read from.
-      const hosted = this.restore(withoutReclaimed(record, entry.reclaimed), entry.renamed);
+      // A reopen of an ARCHIVED session starts auto-accept OFF (owner Q3): an old
+      // switch must not silently come back on, so the record's value is dropped here.
+      const hosted = this.restore(
+        { ...withoutReclaimed(record, entry.reclaimed), autoAccept: undefined },
+        entry.renamed,
+      );
       const { resync, epoch } = hosted.attach(attachment, params.since);
       return { hosted, created: false, resync, epoch };
     }
@@ -740,6 +762,9 @@ export class SessionHost {
       attachment.hop === true ? (true as const) : undefined,
     );
     this.sessions.set(id, host);
+    // Only a session this open CREATES takes the seed (`autoAccept`, exactly like
+    // `settings`): a `/clear` fork and a hop target carry the value this way.
+    host.autoAccept = params.autoAccept === true;
     const { epoch } = host.attach(attachment);
     return { hosted: host, created: true, resync: false, epoch };
   }
@@ -1035,6 +1060,8 @@ export class SessionHost {
       returned: reconciled.returned,
       ...(record.head !== undefined ? { head: record.head } : {}),
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
+      // A restart KEEPS the session's auto-accept (owner Q3).
+      ...(record.autoAccept === true ? { autoAccept: true } : {}),
       // Paired: the log continues the lineage the files hold (§5); else a new one.
       ...(record.paired ? { log: { head: record.logHead, logged: record.logged } } : {}),
     });

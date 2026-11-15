@@ -30,7 +30,7 @@ import {
 } from "./blink.ts";
 import { idleChord } from "./chord.ts";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
-import { type QuitConfirmFacts, paletteStep } from "./commands.ts";
+import { type QuitConfirmFacts, oneLine, paletteStep } from "./commands.ts";
 import { dispatchCommand } from "./commands/dispatch.ts";
 import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
 import type { HopNamespace, HopSpec } from "./hop-command.ts";
@@ -49,6 +49,7 @@ import { pasteTarget, sanitizePasted } from "./paste.ts";
 import { insertReply, orphanNotice } from "./permission-reply.ts";
 import {
   type AutoAcceptFeed,
+  type AutoAcceptSharedFeed,
   type DraftBack,
   autoAcceptTest,
   usePermissionBroker,
@@ -63,7 +64,7 @@ import { useSessionLink } from "./useSessionLink.ts";
 import { type HopTurnPort, useTurnDriver } from "./useTurnDriver.ts";
 import { tryWake } from "./wake-gate.ts";
 
-export type { AutoAcceptFeed };
+export type { AutoAcceptFeed, AutoAcceptSharedFeed };
 
 import { type DaemonQueue, type QueuedRows, handBackRows } from "./queued.ts";
 import { type RenderOptions, layoutTranscript, sliceLaid, warmRowsChunk } from "./render-lines.ts";
@@ -205,6 +206,7 @@ export function App({
   sessions,
   runQuit,
   autoAccept,
+  autoAcceptShared,
   hop,
   targetFeed,
   columns: fixedColumns,
@@ -658,11 +660,41 @@ export function App({
   }, [jobs, flushNow, armWake, setDock, dockFinishedRef, dockOutcomeRef, dockStoppedRef]);
 
   // --- host notices ----------------------------------------------------------
+  // ONE effect for everything that appends a notice from outside a turn: the
+  // host feed, and (below) the session's auto-accept when another DEVICE flips
+  // it (docs/feat/session-auto-accept.md D5). App keeps exactly its pinned
+  // effect count (the structural tests), so a second notice source joins this
+  // one rather than adding an effect.
+  const autoAcceptSeenRef = useRef<boolean | null>(null);
   useEffect(() => {
-    if (!notices) {
-      return;
+    const announceAutoAccept = (on: boolean): void => {
+      const was = autoAcceptSeenRef.current;
+      autoAcceptSeenRef.current = on;
+      if (was === null || was === on) {
+        // `null` at a mount: the state a TUI starts in is never "news".
+        return;
+      }
+      if (!(autoAcceptShared?.remote() ?? false)) {
+        // THIS TUI's own flip (or its echo): no notice — the status bar says it.
+        return;
+      }
+      // The setter's label is daemon-supplied text: sanitized, never rendered raw.
+      const by = autoAcceptShared?.lastBy();
+      const who = by === undefined ? "another device" : oneLine(by);
+      stateRef.current = appendNotice(
+        stateRef.current,
+        `auto-accept turned ${on ? "on" : "off"} from ${who}`,
+      );
+      setScrollOffset(0);
+      flushNow();
+    };
+    let offAutoAccept: (() => void) | undefined;
+    if (autoAcceptShared) {
+      // The value it starts in is never news; only a LATER flip is.
+      announceAutoAccept(autoAcceptShared.current());
+      offAutoAccept = autoAcceptShared.onChange(announceAutoAccept);
     }
-    return notices.onNotice((text, hint) => {
+    const offNotices = notices?.onNotice((text, hint) => {
       // `host`: an attach's notice outlives the history that follows it (A6).
       stateRef.current = appendNotice(stateRef.current, text, {
         host: true,
@@ -671,7 +703,11 @@ export function App({
       setScrollOffset(0);
       flushNow();
     });
-  }, [notices, flushNow]);
+    return () => {
+      offAutoAccept?.();
+      offNotices?.();
+    };
+  }, [notices, autoAcceptShared, flushNow]);
 
   // --- a link stop's full reason (the StatusBar row truncates it) -------------
   useEffect(() => {

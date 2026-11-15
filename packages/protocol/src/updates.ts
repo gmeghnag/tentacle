@@ -319,6 +319,26 @@ export const QueuedUpdateSchema = z.object({
 });
 
 /**
+ * The session's auto-accept changed (`session/set_auto_accept`,
+ * docs/feat/session-auto-accept.md D2): every attached client follows, so the
+ * switch is the session's, not one terminal's. Sent only on a CHANGE (a set to
+ * the current value emits nothing), to every attachment, in one total order
+ * (P2), own echoes included — so all clients converge on the daemon's last
+ * emitted value. Display only: an older client shows it as `unsupported` once
+ * and keeps deciding with its own local auto-accept and its own turns only —
+ * it never answers more than before. `by` is the setter's label, filled by the
+ * daemon from that connection's `initialize` (its declared host, else its
+ * `clientInfo.name`), never client-chosen per call; display only, untrusted
+ * text, so a surface must pass it through `untrustedText`.
+ */
+export const AutoAcceptUpdateSchema = z.object({
+  type: z.literal("auto_accept"),
+  on: z.boolean(),
+  /** Who set it: a short label, absent when the daemon knew no name → "another device". */
+  by: z.string().min(1).max(64).optional(),
+});
+
+/**
  * The session's settings changed (`session/update_settings`,
  * docs/feat/session-settings-apply.md): its report now, and the applier's
  * request `id`, so that client knows its own and every other one can tell its
@@ -426,6 +446,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   SubagentNotifySchema,
   SubagentMessageUpdateSchema,
   SessionSettingsUpdateSchema,
+  AutoAcceptUpdateSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
 
@@ -488,6 +509,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   subagent_message: "display",
   // A notice; the report also rides every OpenResult (nothing hangs).
   session_settings: "display",
+  // A switch's new value; the snapshot also rides every OpenResult (nothing hangs).
+  auto_accept: "display",
 };
 
 /** Every update type this build knows — what a client declares at `initialize`. */
