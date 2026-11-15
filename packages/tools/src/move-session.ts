@@ -47,6 +47,18 @@ export const WORKLOAD_PART_MAX = 253;
  */
 export const workloadTargetGrammar = { part: WORKLOAD_PART, max: WORKLOAD_PART_MAX } as const;
 
+/**
+ * `container`/`namespace` are Kubernetes-only, enforced at parse for EVERY tool
+ * that takes a workload (docs/fix/workload-shell-live.md D4). Exported as the
+ * predicate so `workload_shell` reuses it rather than copying the rule.
+ */
+export const engineOnlyFields = (w: {
+  readonly engine: string;
+  readonly container?: string;
+  readonly namespace?: string;
+}): boolean =>
+  w.engine === "kubernetes" || (w.container === undefined && w.namespace === undefined);
+
 const workloadSchema = z
   .object({
     engine: z.enum(["kubernetes", "docker", "podman"]),
@@ -54,10 +66,7 @@ const workloadSchema = z
     /** k8s only: the container in the pod (docker/podman have none). */
     container: z.string().min(1).max(WORKLOAD_PART_MAX).regex(WORKLOAD_PART).optional(),
   })
-  .refine((w) => w.container === undefined || w.engine === "kubernetes", {
-    message: "only a kubernetes workload names a container",
-  });
-
+  .refine(engineOnlyFields, { message: "only a kubernetes workload names a container" });
 /**
  * The tool's input, as the model is offered it: exactly the `HopSpec` the typed
  * `/move` produces, so a proposed move and a typed one are the same thing

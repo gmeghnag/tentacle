@@ -10,15 +10,18 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { ToolContext } from "@tentacle/core";
+import { zodToJsonSchema } from "zod-to-json-schema";
 import { READY_PREFIX, bootstrapLine, killTreeScript } from "../src/workload-shell-frame.ts";
 import {
   MAX_OPEN_SHELLS,
+  WORKLOAD_SHELL_DESCRIPTION,
   WORKLOAD_SHELL_TOOL_NAME,
   type WorkloadShellBackend,
   WorkloadShells,
   type WorkloadTarget,
   createWorkloadShellTool,
   targetKey,
+  workloadShellSchema,
 } from "../src/workload-shell.ts";
 
 const enc = new TextEncoder();
@@ -195,10 +198,11 @@ class FakeBackend implements WorkloadShellBackend {
   /** When set, `prime` awaits it — the window a session end can land in. */
   primeGate: Promise<void> | undefined;
 
-  async prime(): Promise<void> {
+  async prime(): Promise<undefined> {
     if (this.primeGate !== undefined) {
       await this.primeGate;
     }
+    return undefined;
   }
 
   open(target: WorkloadTarget): FakeExec {
@@ -687,5 +691,53 @@ describe("what the plan's §4 pin requires", () => {
     // interpolation of anything the daemon knows can slip in (§4 pin).
     expect(exec.raw[0]).toBe(bootstrapLine("").replace(/\n$/, ""));
     expect(exec.raw[0]).not.toContain("TENTACLE_");
+  });
+});
+
+// docs/fix/workload-shell-live.md D4: the model was never TOLD about
+// `container` — its doc was a JSDoc comment, which never reaches the JSON
+// Schema (`definitions()` converts the Zod schema), so a model that hit the
+// multi-container refusal had no field to reach for.
+describe("what the model is offered (D4)", () => {
+  const json = zodToJsonSchema(workloadShellSchema, { target: "openApi3" }) as {
+    properties: {
+      target: {
+        properties: Record<string, { description?: string; type?: string }>;
+        allOf?: unknown;
+      };
+    };
+  };
+
+  test("target.container carries a description naming the default-container annotation", () => {
+    const container = json.properties.target.properties.container;
+    expect(container?.description).toBeDefined();
+    expect(container?.description).toContain("default-container");
+    expect(container?.description).toContain("Kubernetes only");
+    expect(json.properties.target.properties.namespace?.description).toContain("Kubernetes only");
+  });
+
+  test("the refine does not wrap the target in an allOf/effects schema (registry.ts converts it)", () => {
+    // `registry.definitions()` hands this straight to the model: a wrapper would
+    // hide `properties` entirely.
+    expect(json.properties.target.allOf).toBeUndefined();
+    expect(json.properties.target.properties.name?.type).toBe("string");
+  });
+
+  test("the tool description mentions target.container", () => {
+    expect(WORKLOAD_SHELL_DESCRIPTION).toContain("target.container");
+  });
+
+  test("docker/podman with a container (or a namespace) is refused at parse, as move_session does", async () => {
+    const { tool, backend } = setup();
+    for (const rejected of [
+      { engine: "docker", name: "box", container: "x" },
+      { engine: "podman", name: "box", container: "x" },
+      { engine: "docker", name: "box", namespace: "ns" },
+    ]) {
+      const result = await run(tool, { target: rejected, command: "true" });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("only a kubernetes workload");
+    }
+    expect(backend.execs).toHaveLength(0); // nothing was opened
   });
 });

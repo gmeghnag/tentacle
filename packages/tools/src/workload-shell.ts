@@ -18,7 +18,7 @@
  */
 import type { Tool, ToolContext, ToolResult } from "@tentacle/core";
 import { z } from "zod";
-import { WORKLOAD_PART, WORKLOAD_PART_MAX } from "./move-session.ts";
+import { WORKLOAD_PART, WORKLOAD_PART_MAX, engineOnlyFields } from "./move-session.ts";
 import {
   CaptureWindow,
   type FrameParser,
@@ -85,6 +85,25 @@ export interface WorkloadRawExec {
   close(): void;
 }
 
+/**
+ * What `prime` resolved for a target, when it resolved something beyond the
+ * engine itself (docs/fix/workload-shell-live.md D1).
+ *
+ * `container`: the container the exec must go to. On a multi-container pod the
+ * apiserver refuses an exec that does not name one — and it refuses it as an
+ * upgrade failure whose reason Bun's WebSocket cannot deliver — so it is picked
+ * here, laptop-side, with kubectl's own rule (the pod's `default-container`
+ * annotation, else the first container), from the pod read `prime` already does.
+ *
+ * `note`: why that container, for the first result's open line, e.g.
+ * `first of 5, no default-container annotation; others: …; set target.container
+ * to choose`. Absent when nothing was inferred (a named container, or one).
+ */
+export interface PrimedTarget {
+  readonly container?: string;
+  readonly note?: string;
+}
+
 /** What the registry needs from the laptop's engine layer (injected: no `cli` dependency). */
 export interface WorkloadShellBackend {
   /**
@@ -92,8 +111,17 @@ export interface WorkloadShellBackend {
    * half). `open`/`oneShot` stay synchronous — the registry writes its bootstrap
    * line the moment a shell is opened — so the async work lives here, and the
    * registry awaits it first. Optional: a backend with nothing to resolve.
+   *
+   * It may also resolve WHICH container the exec goes to, returning a
+   * `PrimedTarget`; the registry then opens that (`execTarget`), keeping
+   * `targetKey` on the target as the model wrote it.
    */
-  prime?(target: WorkloadTarget): Promise<void>;
+  prime?(target: WorkloadTarget): Promise<PrimedTarget | undefined>;
+  /**
+   * The engine's own description of where the target lives, for the open line
+   * (`context "kind-dev", namespace etcd`). Optional: a backend with no engines.
+   */
+  where?(target: WorkloadTarget): Promise<string>;
   /** Open a long-lived raw exec of a POSIX `sh` in the target. */
   open(target: WorkloadTarget): WorkloadRawExec;
   /** Run one bounded command in the SAME workload+container (a kill, an EOF nudge). */
@@ -147,8 +175,17 @@ export const NOTICES = {
 /** One open shell and what the registry knows about it. */
 interface Shell {
   readonly target: WorkloadTarget;
+  /**
+   * What the exec actually goes to: `target`, plus the container `prime`
+   * resolved. `open` and the kill one-shot ride THIS; `key` never does, so an
+   * "always" on the target as the model wrote it can never widen to another
+   * container (docs/fix/workload-shell-live.md D1).
+   */
+  readonly execTarget: WorkloadTarget;
   readonly key: string;
   readonly exec: WorkloadRawExec;
+  /** The open line's explanatory tail (`first of 5, no default-container annotation; others: …`). */
+  readonly openNote?: string;
   /** The shell's pid (from its ready marker) — the kill script's target. */
   pid: number;
   cwd: string;
@@ -174,6 +211,17 @@ export interface RunOutcome {
   readonly shellStderr?: string;
   /** When the run began, so the caller can report its duration. */
   readonly startedAt: number;
+  /**
+   * What the exec went to (`kubernetes ns/pod[container]`), so the result names
+   * the container actually used rather than the target as written.
+   */
+  readonly target: string;
+  /**
+   * Informational lines for the opening run of a shell (where it opened, which
+   * container, why, and the others). They are NOT notices: an informative open
+   * line must not turn a successful `hostname` into an error.
+   */
+  readonly info: readonly string[];
 }
 
 /** A refusal the model can act on (the cap, a bad target) — not an engine failure. */
@@ -262,6 +310,7 @@ export class WorkloadShells {
     this.refuseIfDisposed();
     const key = targetKey(target);
     const notices: string[] = [];
+    let info: string[] = [];
     let shell = this.shells.get(key);
 
     if (shell === undefined) {
@@ -275,16 +324,41 @@ export class WorkloadShells {
       if (this.owedNotice.delete(key)) {
         notices.push(NOTICES.newShell);
       }
+      // The opening run says WHERE it opened and, on a k8s pod, WHICH container
+      // and why: this is plan D2's missing first-result line, and it is where a
+      // defaulted container gets named (docs/fix/workload-shell-live.md D1).
+      info = await this.openInfo(shell);
     } else if (shell.ended) {
       // The stream died (a drop, an `exit`, a kill that took the shell): reopen
       // and SAY the state is gone rather than pretend it survived.
       this.forget(key);
       shell = await this.open(target);
       notices.push(NOTICES.newShell);
+      info = await this.openInfo(shell);
     }
     this.armIdle(key);
 
-    return this.execute(shell, command, options, notices);
+    return this.execute(shell, command, options, notices, info);
+  }
+
+  /**
+   * The open line's text, from ONE place: `where()` (the engine's own
+   * description of the target) plus the note `prime` resolved. Never throws — a
+   * cosmetic line must not fail a run that is otherwise fine.
+   */
+  private async openInfo(shell: Shell): Promise<string[]> {
+    let where = "";
+    if (this.backend.where !== undefined) {
+      try {
+        where = await this.backend.where(shell.target);
+      } catch {
+        where = ""; // the engine layer is already primed; this line is decoration only
+      }
+    }
+    const inside = describeTarget(shell.execTarget);
+    const place = where === "" ? inside : `${inside} (${where})`;
+    const why = shell.openNote === undefined ? "" : ` — ${shell.openNote}`;
+    return [`[opened sh in ${place}${why}]`];
   }
 
   /** One framed command against an open shell, with the timeout ladder. */
@@ -293,6 +367,7 @@ export class WorkloadShells {
     command: string,
     options: { readonly timeoutMs: number; readonly signal: AbortSignal },
     notices: string[],
+    info: readonly string[] = [],
   ): Promise<RunOutcome> {
     const startedAt = this.timers.now();
     const nonce = makeNonce();
@@ -372,6 +447,8 @@ export class WorkloadShells {
       notices,
       ...(shell.stderr !== "" ? { shellStderr: shell.stderr.trim() } : {}),
       startedAt,
+      target: describeTarget(shell.execTarget),
+      info,
     };
     if (why === "abort") {
       // The caller cancelled the turn: it reports the abort, with the ladder's notices.
@@ -442,8 +519,10 @@ export class WorkloadShells {
   private oneShot(shell: Shell, script: string): Promise<void> {
     // Best effort by design: a failed kill is logged by the caller's notice path,
     // and the stream is closed anyway, which gives sh EOF (D4).
+    // `execTarget`, not `target`: on a multi-container pod the one-shot has to
+    // name the container the shell was opened in, or it hits the same refusal.
     return this.backend
-      .oneShot(shell.target, script, ONE_SHOT_TIMEOUT_MS)
+      .oneShot(shell.execTarget, script, ONE_SHOT_TIMEOUT_MS)
       .then(() => undefined)
       .catch(() => undefined);
   }
@@ -502,17 +581,25 @@ export class WorkloadShells {
   private async openReserved(target: WorkloadTarget): Promise<Shell> {
     const key = targetKey(target);
     // Resolve the engine first: `open`/`oneShot` are synchronous by contract.
-    if (this.backend.prime !== undefined) {
-      await this.backend.prime(target);
-    }
-    // `prime` awaited (a dial, a kubeconfig read): the session may have ended
-    // while it ran, and a shell opened now is one nothing can ever close.
+    // `prime` also resolves WHICH container to exec into on a k8s pod (D1): the
+    // exec must name one, or the apiserver refuses the upgrade and Bun cannot
+    // even report why.
+    const primed = this.backend.prime === undefined ? undefined : await this.backend.prime(target);
+    const resolved = primed ?? undefined;
+    // `prime` awaited (a dial, a kubeconfig read, one `GET pod`): the session may
+    // have ended while it ran, and a shell opened now is one nothing can ever close.
     this.refuseIfDisposed();
-    const exec = this.backend.open(target);
+    // The container lives on the EXEC target only: `key` stays the target as the
+    // model wrote it, so an "always" can never widen to another container.
+    const execTarget: WorkloadTarget =
+      resolved?.container === undefined ? target : { ...target, container: resolved.container };
+    const exec = this.backend.open(execTarget);
     const shell: Shell = {
       target,
+      execTarget,
       key,
       exec,
+      ...(resolved?.note !== undefined ? { openNote: resolved.note } : {}),
       pid: 0,
       cwd: "",
       ended: false,
@@ -560,7 +647,15 @@ export class WorkloadShells {
         settled = true;
         this.timers.clearTimeout(deadline);
         const why = end.error?.message ?? end.message ?? "the exec stream ended";
-        reject(new Error(`could not start a shell in ${describeTarget(target)}: ${why}`));
+        // The CAUSE goes with the message: `explain` needs the original error's
+        // type to know a refused upgrade from a dropped stream
+        // (docs/fix/workload-shell-live.md D3).
+        reject(
+          new Error(
+            `could not start a shell in ${describeTarget(execTarget)}: ${why}`,
+            end.error === undefined ? undefined : { cause: end.error },
+          ),
+        );
       });
     });
 
@@ -684,14 +779,33 @@ export class WorkloadShellAborted extends Error {
  */
 export const workloadShellSchema = z.object({
   action: z.enum(["run", "close"]),
-  target: z.object({
-    engine: z.enum(["kubernetes", "docker", "podman"]),
-    name: z.string().min(1).max(WORKLOAD_PART_MAX).regex(WORKLOAD_PART),
-    /** k8s only: the container in the pod. */
-    container: z.string().min(1).max(WORKLOAD_PART_MAX).regex(WORKLOAD_PART).optional(),
-    /** k8s only: the namespace (`default` when omitted). */
-    namespace: z.string().min(1).max(WORKLOAD_PART_MAX).regex(WORKLOAD_PART).optional(),
-  }),
+  target: z
+    .object({
+      engine: z.enum(["kubernetes", "docker", "podman"]),
+      name: z.string().min(1).max(WORKLOAD_PART_MAX).regex(WORKLOAD_PART),
+      container: z
+        .string()
+        .min(1)
+        .max(WORKLOAD_PART_MAX)
+        .regex(WORKLOAD_PART)
+        .optional()
+        .describe(
+          "Kubernetes only: the container in the pod. Omit it to use the pod's `kubectl.kubernetes.io/default-container` annotation, else its first container (like kubectl). The first result names the container used and the others.",
+        ),
+      namespace: z
+        .string()
+        .min(1)
+        .max(WORKLOAD_PART_MAX)
+        .regex(WORKLOAD_PART)
+        .optional()
+        .describe("Kubernetes only. Default: `default`."),
+    })
+    // The same Kubernetes-only rule `move_session` enforces, reused (D4). A
+    // docker/podman target with a `container` is refused at parse, instead of
+    // reaching the engine's CLI-flag wording (`--container`) meant for `run`.
+    .refine(engineOnlyFields, {
+      message: "only a kubernetes workload names a container or a namespace",
+    }),
   /** The command to run (`run` only). 64 KiB, no NUL (the frame is a shell line). */
   command: z
     .string()
@@ -709,7 +823,7 @@ The shell opens on first use and stays open for this session, so \`cd\`, \`expor
 
 Good for a few related checks in one workload: inspect config, follow a path, curl a local endpoint, read logs on disk. For a single one-off command, \`shell\` with \`kubectl exec\` / \`docker exec\` works just as well. For long work *inside* the workload (editing, building, running tests, using its tools), propose \`move_session\` instead.
 
-Commands get no terminal and no stdin. Avoid editors, pagers and prompts; use \`-y\`/\`--yes\`, \`--no-pager\`, \`| cat\`. Don't start background processes with \`&\`: they can outlive the shell. Output is capped. Each command has a timeout (default ${DEFAULT_TIMEOUT_S} s, max ${MAX_TIMEOUT_S} s); on timeout its processes are stopped, and if the shell itself had to restart, the result says so (cwd/env reset). Use \`action: "close"\` when you are done with a workload.`;
+Commands get no terminal and no stdin. Avoid editors, pagers and prompts; use \`-y\`/\`--yes\`, \`--no-pager\`, \`| cat\`. Don't start background processes with \`&\`: they can outlive the shell. Output is capped. Each command has a timeout (default ${DEFAULT_TIMEOUT_S} s, max ${MAX_TIMEOUT_S} s); on timeout its processes are stopped, and if the shell itself had to restart, the result says so (cwd/env reset). For a multi-container pod, set \`target.container\`. When omitted, the default container is used and named in the result. Use \`action: "close"\` when you are done with a workload.`;
 
 export function createWorkloadShellTool(shells: WorkloadShells): Tool<WorkloadShellInput> {
   return {
@@ -775,12 +889,15 @@ export function createWorkloadShellTool(shells: WorkloadShells): Tool<WorkloadSh
         const text = resultText({
           exitCode: outcome.exitCode,
           cwd: outcome.cwd,
-          target: describeTarget(data.target),
+          // The header names what the exec ACTUALLY went to (`…/pod[etcd]`),
+          // not the target as the model wrote it.
+          target: outcome.target,
           seconds: Math.max(0, (Date.now() - startedAt) / 1000),
           body: outcome.body,
           dropped: outcome.dropped,
           ...(outcome.shellStderr !== undefined ? { shellStderr: outcome.shellStderr } : {}),
           notices: outcome.notices,
+          info: outcome.info,
         });
         return text.isError
           ? { content: text.content, isError: true }

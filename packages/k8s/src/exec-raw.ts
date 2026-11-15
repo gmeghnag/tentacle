@@ -44,6 +44,30 @@ export interface RawExecEnd {
   readonly error?: Error;
 }
 
+/**
+ * The exec WebSocket died **before it opened** — the apiserver refused the
+ * upgrade (a wrong or missing `container` on a multi-container pod, an RBAC
+ * denial on `pods/exec`, an SCC denial). Bun gives neither the HTTP status nor
+ * the body here (proven live: only `error` "Expected 101 status code", then
+ * `close 1002`), so this error carries what the socket DID say; the caller asks
+ * the apiserver for the real reason over plain HTTP
+ * (`KubeClient.execRefusal`, docs/fix/workload-shell-live.md D3).
+ */
+export class ExecRefusedError extends Error {
+  override readonly name = "ExecRefusedError";
+}
+
+/** The message a WebSocket `error`/`close` event carries, when it carries one. */
+function eventMessage(event: unknown): string | undefined {
+  const shape = event as { message?: unknown; reason?: unknown } | null | undefined;
+  for (const candidate of [shape?.message, shape?.reason]) {
+    if (typeof candidate === "string" && candidate !== "") {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 export interface RawExecHandlers {
   onStdout?(bytes: Uint8Array): void;
   onStderr?(bytes: Uint8Array): void;
@@ -261,26 +285,49 @@ export function rawExec(ws: WebSocketLike, handlers: RawExecHandlers = {}): RawE
     pongSeen = true;
     inbound = true;
   });
-  ws.addEventListener("close", () => {
+  ws.addEventListener("close", (event) => {
     if (closed) {
       return;
     }
     closed = true;
     stopHeartbeat();
     queue.length = 0;
+    // Before `open`: the apiserver REFUSED the upgrade (no 101), so the socket
+    // never carried a stream — a refusal with the event's own message kept.
     settle({
       exitCode: null,
-      error: new Error("exec channel closed before the command reported a status"),
+      error: opened
+        ? new Error("exec channel closed before the command reported a status")
+        : new ExecRefusedError(
+            `the API server refused the exec (${eventMessage(event) ?? "no reason given by the WebSocket"})`,
+          ),
     });
   });
-  ws.addEventListener("error", () => {
+  ws.addEventListener("error", (event) => {
     if (closed) {
       return;
     }
     closed = true;
     stopHeartbeat();
     queue.length = 0;
-    settle({ exitCode: null, error: new Error("exec channel errored") });
+    const said = eventMessage(event);
+    if (!opened) {
+      settle({
+        exitCode: null,
+        error: new ExecRefusedError(
+          `the API server refused the exec (${said ?? "no reason given by the WebSocket"})`,
+        ),
+      });
+      return;
+    }
+    // After open the stream really did fail; say what it said, when it said
+    // anything — never the bare constant alone if more is known.
+    settle({
+      exitCode: null,
+      error: new Error(
+        said === undefined ? "exec channel errored" : `exec channel errored (${said})`,
+      ),
+    });
   });
   if (opened) {
     startHeartbeat(); // already OPEN: no `open` event will come

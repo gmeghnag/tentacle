@@ -22,6 +22,7 @@ import {
 } from "@tentacle/k8s";
 import type { DuplexChannel } from "@tentacle/transport";
 import {
+  type ContainerHow,
   type EngineExecTarget,
   type EngineHost,
   RefusalError,
@@ -40,6 +41,12 @@ export interface PodCluster {
   openExec(target: ExecTarget, options?: ExecChannelOptions): DuplexChannel;
   /** A long-lived raw-byte exec (docs/feat/workload-shell.md D1). */
   openRawExec(target: ExecTarget): RawExec;
+  /**
+   * Optional: why the apiserver refused an exec upgrade, asked over plain HTTP
+   * (docs/fix/workload-shell-live.md D3). Absent on a fake/cluster that cannot
+   * answer — the caller then prints its honest fallback.
+   */
+  execRefusal?(target: ExecTarget): Promise<string | undefined>;
   runExec(target: ExecTarget, input?: Uint8Array, options?: RunExecOptions): Promise<RunExecResult>;
 }
 
@@ -131,6 +138,66 @@ export function podDialError(
 /** The annotation `kubectl exec` / `logs` read to pick a container of a multi-container pod. */
 const DEFAULT_CONTAINER_ANNOTATION = "kubectl.kubernetes.io/default-container";
 
+/**
+ * WHICH container an exec goes to, decided laptop-side from one pod read — one
+ * pure rule, used by `inspect` for both callers
+ * (docs/fix/workload-shell-live.md D2). Returns the container and which clause
+ * chose it, or a `RefusalError` (nothing is exec'd into).
+ *
+ * `mode` is the whole point of the split:
+ * - **`attach`** (the default): the annotation, else a refusal naming the pod's
+ *   containers. `attach` INSTALLS the daemon in that container, so a silent
+ *   guess there costs more than a refusal.
+ * - **`kubectl-exec`**: kubectl's own rule — the annotation (when it names a
+ *   real container), else `spec.containers[0]`. This is what makes
+ *   `workload_shell` work on a multi-container pod where the bare exec used to
+ *   be refused by the apiserver with a message the model never saw.
+ *
+ * An explicitly named container always wins; in `kubectl-exec` mode a name the
+ * pod does not have is refused here, with the list, rather than being left to
+ * fail as an unexplained refused upgrade.
+ */
+export function pickExecContainer(
+  names: readonly string[],
+  annotation: string | undefined,
+  requested: string | undefined,
+  mode: "attach" | "kubectl-exec",
+  podName: string,
+): { readonly container: string; readonly how: ContainerHow } | RefusalError | undefined {
+  if (requested !== undefined) {
+    if (mode === "kubectl-exec" && !names.includes(requested)) {
+      return new RefusalError(
+        `container "${requested}" is not valid for pod ${podName}, choose one of: [${names.join(" ")}] · set target.container`,
+      );
+    }
+    return { container: requested, how: "named" };
+  }
+  if (names.length === 0) {
+    // A pod with no listed containers (a fake or a mid-creation pod): nothing to
+    // pick, and nothing to refuse either — the exec behaves exactly as it did
+    // before this rule existed, and D3 explains whatever the apiserver says.
+    return undefined;
+  }
+  if (annotation !== undefined && names.includes(annotation)) {
+    return { container: annotation, how: "annotation" };
+  }
+  if (names.length === 1) {
+    const only = names[0];
+    if (only !== undefined) {
+      return { container: only, how: "only" };
+    }
+  }
+  if (mode === "kubectl-exec") {
+    const first = names[0];
+    if (first !== undefined) {
+      return { container: first, how: "first" };
+    }
+  }
+  return new RefusalError(
+    `a container name must be specified for pod ${podName}, choose one of: [${names.join(" ")}] · pass --container <c>`,
+  );
+}
+
 const podTarget = (t: EngineExecTarget): ExecTarget => ({
   pod: t.name,
   container: t.container,
@@ -197,38 +264,57 @@ export function kubeEngineHost(kube: PodCluster, namespace: string): EngineHost 
         };
       }
       // kubectl's rule, decided HERE from the pod read — not guessed after an
-      // exec dies: no `--container` and more than one `spec.containers` → the
-      // API cannot pick one. Same wording as `kubectl exec`.
-      // With several containers, kubectl first honours the pod's
+      // exec dies. With several containers, kubectl first honours the pod's
       // `default-container` annotation (silently) when it names a container of
-      // `spec.containers`; only then does it refuse.
-      let resolved: { container?: string } = {};
+      // `spec.containers`; `attach` then refuses (it installs the daemon
+      // there), while `pick: "kubectl-exec"` falls back to the FIRST container
+      // as `kubectl exec` does (docs/fix/workload-shell-live.md D2).
       const names = podContainerNames(pod);
-      if (options?.container === undefined) {
-        if (names.length > 1) {
-          const preferred = pod.metadata?.annotations?.[DEFAULT_CONTAINER_ANNOTATION];
-          if (preferred !== undefined && names.includes(preferred)) {
-            resolved = { container: preferred };
-          } else {
-            throw new RefusalError(
-              `a container name must be specified for pod ${name}, choose one of: [${names.join(" ")}] · pass --container <c>`,
-            );
-          }
-        }
+      const requested = options?.container;
+      const pick = options?.pick === "kubectl-exec" ? "kubectl-exec" : "attach";
+      const chosen = pickExecContainer(
+        names,
+        pod.metadata?.annotations?.[DEFAULT_CONTAINER_ANNOTATION],
+        requested,
+        pick,
+        name,
+      );
+      if (chosen instanceof RefusalError) {
+        throw chosen;
       }
-      // Told to the caller for the badge (`kubernetes:<pod>/<container>`, always):
-      // the named container, the annotation's, or the pod's only one. Resolved
-      // laptop-side from the pod read; the exec target is unchanged.
-      const inUse =
-        options?.container ?? resolved.container ?? (names.length === 1 ? names[0] : undefined);
+      // Told to the caller for the badge (`kubernetes:<pod>/<container>`, always)
+      // and for the open line of `workload_shell` (which container, why, and
+      // which others exist). Resolved laptop-side from the pod read; the exec
+      // target carries `container` only when a rule actually chose one.
+      //
+      // `containers`/`how` are reported ONLY to `pick: "kubectl-exec"`: the
+      // `attach` preflight's state stays byte-identical to before this change
+      // (docs/fix/workload-shell-live.md Preconditions), and only
+      // `workload_shell`'s open line needs them.
+      const extra =
+        chosen === undefined
+          ? {}
+          : pick === "kubectl-exec"
+            ? {
+                ...(names.length > 0 ? { containers: names } : {}),
+                how: chosen.how,
+                ...(chosen.how === "named" ? {} : { container: chosen.container }),
+              }
+            : // `attach`, unchanged: `container` only when the ANNOTATION chose it
+              // (an explicit `--container` or the pod's only one already shows in
+              // `inUse`, and the exec target is built by the caller).
+              chosen.how === "annotation"
+              ? { container: chosen.container }
+              : {};
+      const inUse = chosen?.container;
       const badge = inUse === undefined ? {} : { inUse };
       return podIsReady(pod)
-        ? { kind: "ready", ...badge, ...resolved }
+        ? { kind: "ready", ...badge, ...extra }
         : {
             kind: "starting",
             detail: `pod "${name}" is ${phase ?? "pending"}`,
             ...badge,
-            ...resolved,
+            ...extra,
           };
     },
     async describe(name) {
@@ -279,6 +365,20 @@ export function kubeEngineHost(kube: PodCluster, namespace: string): EngineHost 
     },
     execError(error, target) {
       return containerExecError(error, target.name, target.container, namespace);
+    },
+    async execRefusal(target) {
+      if (kube.execRefusal === undefined) {
+        return undefined;
+      }
+      try {
+        return await kube.execRefusal({
+          pod: target.name,
+          ...(target.container !== undefined ? { container: target.container } : {}),
+          command: ["sh"],
+        });
+      } catch {
+        return undefined; // never throws to the caller: a reason is a bonus
+      }
     },
   };
 }

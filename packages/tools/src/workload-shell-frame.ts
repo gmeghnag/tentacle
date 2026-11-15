@@ -448,21 +448,31 @@ export interface ResultTextInput {
   readonly dropped: number;
   /** `[shell stderr]` diagnostics, when the shell itself said something. */
   readonly shellStderr?: string;
+  /**
+   * Informational lines (`[opened sh in …]`) printed after the header. They do
+   * NOT count toward `isError`: an informative open line must not turn a
+   * successful `hostname` into an error (docs/fix/workload-shell-live.md D1).
+   */
+  readonly info?: readonly string[];
   readonly notices: readonly WorkloadShellNotice[];
 }
 
 /**
  * The model-facing result: a header (`exit=` first, the `shellTool` convention),
- * the body, then one line per notice.
+ * then any `info` lines, the body, then one line per notice.
  *
  * It is an ERROR when the exit code is non-zero OR any notice applies: a notice
  * always means the shell's state (cwd/env) is gone or the outcome is unknown, and
  * a model that reads "exit=0" alone would trust a state that no longer exists.
+ * `info` is excluded from that rule: it only says where the shell opened.
  */
 export function resultText(input: ResultTextInput): { content: string; isError: boolean } {
   const seconds =
     input.seconds < 10 ? input.seconds.toFixed(1) : Math.round(input.seconds).toString();
   const lines = [`exit=${input.exitCode} · cwd=${input.cwd} · ${input.target} · ${seconds}s`];
+  for (const line of input.info ?? []) {
+    lines.push(line);
+  }
   if (input.body !== "") {
     lines.push(input.body);
   }

@@ -131,12 +131,22 @@ export class WorkloadRemovedError extends Error {
   override readonly name = "WorkloadRemovedError";
 }
 
+/**
+ * How a `container` was resolved for a k8s workload (`pickExecContainer`):
+ * `named` — the caller named it; `annotation` — the pod's
+ * `kubectl.kubernetes.io/default-container`; `first` — kubectl-exec's fallback
+ * to `spec.containers[0]`; `only` — the pod has exactly one container.
+ */
+export type ContainerHow = "named" | "annotation" | "first" | "only";
+
 /** The `attach` preflight's view of an existing workload. */
 export type WorkloadState =
   /**
    * `workspace`: the laptop folder a tentacle-made container mounts (its label).
    * `container`: k8s only — the container to exec into when the user named none
    * and the pod has several (its `default-container` annotation, as kubectl does).
+   * `containers`: k8s only — every container of the pod, so a result can name the
+   * ones it did NOT choose; `how`: which rule chose `container`.
    */
   | {
       readonly kind: "ready";
@@ -144,6 +154,8 @@ export type WorkloadState =
       readonly container?: string;
       /** k8s: the container the TUI runs in, for the badge (`kubernetes:<pod>/<container>`). */
       readonly inUse?: string;
+      readonly containers?: readonly string[];
+      readonly how?: ContainerHow;
     }
   /** Pulling / restarting: worth a bounded wait. */
   | {
@@ -152,6 +164,8 @@ export type WorkloadState =
       readonly workspace?: string;
       readonly container?: string;
       readonly inUse?: string;
+      readonly containers?: readonly string[];
+      readonly how?: ContainerHow;
     }
   /** Terminal / not runnable: refuse with `detail` (attach never starts it). */
   | { readonly kind: "stopped"; readonly detail: string };
@@ -172,8 +186,15 @@ export interface EngineHost {
    * The `attach` preflight (a missing workload throws an actionable error).
    * `container`: the `--container` the user passed, if any — k8s refuses a
    * multi-container pod when none was named (`RefusalError`, before any exec).
+   * `pick`: which container-selection rule to use for a k8s pod. Unset =
+   * `attach`'s (annotation, else refuse); `"kubectl-exec"` = what
+   * `kubectl exec`/`oc rsh` do — annotation, else the first container
+   * (docs/fix/workload-shell-live.md D2).
    */
-  inspect(name: string, options?: { readonly container?: string }): Promise<WorkloadState>;
+  inspect(
+    name: string,
+    options?: { readonly container?: string; readonly pick?: "kubectl-exec" },
+  ): Promise<WorkloadState>;
   /**
    * `ps` / `rm` (slice E): the workload's state and labels — `null` when the
    * engine says it does not exist (404); any other failure throws.
@@ -197,6 +218,15 @@ export interface EngineHost {
   ): Promise<EngineRunExecResult>;
   /** Translate an exec failure (a wrong container, a stopped one) into an actionable error. */
   execError(error: unknown, target: { readonly name: string; readonly container?: string }): Error;
+  /**
+   * Ask the engine WHY it refused an exec, out of band (docs/fix/workload-shell-live.md
+   * D3): Bun's WebSocket drops a refused upgrade's status and body, so k8s
+   * re-asks the same URL over plain HTTP. `undefined` when it has no reason.
+   * Optional: an engine whose failures are already readable does not implement it.
+   */
+  execRefusal?(target: { readonly name: string; readonly container?: string }): Promise<
+    string | undefined
+  >;
   /**
    * The engine's own CPU arch (docker/podman `GET /info` → `Architecture`):
    * what `probePod` falls back to when the in-workload probe gave no answer,

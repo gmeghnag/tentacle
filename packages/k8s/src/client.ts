@@ -244,6 +244,67 @@ export class KubeClient {
     const ws = this.makeWebSocket(url, execSubprotocols(this.token));
     return rawExec(ws, handlers);
   }
+
+  /**
+   * Ask the apiserver WHY it refused an exec upgrade, over plain HTTP
+   * (docs/fix/workload-shell-live.md D3).
+   *
+   * Bun's WebSocket drops both the HTTP status and the body of a refused upgrade
+   * (only `error "Expected 101 status code"` + `close 1002` reach us), so the
+   * only way to read the real reason is to re-ask. The apiserver checks
+   * authentication, authorization (RBAC, SCC admission) and the target
+   * `container` BEFORE it demands the upgrade, so a non-2xx answer here carries
+   * the same `Status` the upgrade was refused with. The same URL, the same auth,
+   * no upgrade — and no process ever runs.
+   *
+   * Never throws; `undefined` means "no reason available": 2xx (nothing to
+   * explain), the generic `Upgrade request required` (the URL was ACCEPTABLE, so
+   * the refusal was something else), a body that is not a k8s `Status`, or a
+   * network failure.
+   */
+  async execRefusal(target: ExecTarget): Promise<string | undefined> {
+    const url = buildExecUrl(this.server, this.namespace, target).replace(/^ws/, "http");
+    let res: Response;
+    try {
+      res = await this.doFetch(url, { method: "POST", headers: this.headers() });
+    } catch {
+      return undefined; // the cluster became unreachable: nothing to report
+    }
+    if (res.ok) {
+      return undefined;
+    }
+    const body = await safeText(res);
+    const message = statusMessage(body);
+    if (message === undefined) {
+      return undefined;
+    }
+    // `Upgrade request required` is the apiserver SAYING the request was fine
+    // apart from the missing upgrade: it explains nothing about our failure.
+    if (/upgrade request required/i.test(message)) {
+      return undefined;
+    }
+    return message;
+  }
+}
+
+/** A k8s `Status` body's `message`, when the body is one. */
+function statusMessage(body: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  const shape = parsed as { kind?: unknown; status?: unknown; message?: unknown } | null;
+  if (shape === null || typeof shape !== "object" || typeof shape.message !== "string") {
+    return undefined;
+  }
+  // A `Status` names itself (`kind: "Status"`) or at least carries `status`;
+  // anything else (an HTML error page, a proxy's JSON) is not ours to read.
+  if (shape.kind !== "Status" && typeof shape.status !== "string") {
+    return undefined;
+  }
+  return shape.message === "" ? undefined : shape.message;
 }
 
 async function safeText(res: Response): Promise<string> {

@@ -410,7 +410,163 @@ outputs above.
 
 ## Execution
 
-*— (pending)*
+*— claude-sonnet-4-5, 2026-11-15*
+
+**Load-bearing check re-run first — it holds.** `prime` is awaited before `open`
+(`packages/tools/src/workload-shell.ts:587`, now `openReserved`'s first await, and
+`:596` is the `open`); `kubeEngineHost.inspect` already reads the pod and applies
+the annotation rule (`packages/cli/src/engine-k8s.ts:275`, the `pickExecContainer`
+call it now makes); `buildExecUrl` puts `container=` on the URL
+(`packages/k8s/src/exec-channel.ts:257-259`). **Repro A re-run on the
+branch, unchanged from the plan's text:** the error was byte-identical to the
+owner's, the exec target had no `container`, and `target.container` reached the
+model as `{"type":"string",…}` with no description.
+
+**D4's executor check (the plan asked for it):** a `.refine()` on the `target`
+object does **not** wrap the model-facing JSON Schema. `zodToJsonSchema(…, {target:
+"openapi3"})` still emits `target.properties` (with `description`s) and no
+`allOf`/effects wrapper, so the refine stayed on the schema and no drift was
+needed. Pinned by a test (`workload-shell.test.ts` › "the refine does not wrap
+the target in an allOf/effects schema").
+
+**As built, in dependency order:**
+
+1. `packages/k8s/src/exec-raw.ts` — new exported `ExecRefusedError`; an
+   `error`/`close` **before** `open` now settles with it, its message carrying
+   the event's own (`"the API server refused the exec (Expected 101 status code)"`).
+   After `open`, an `error` keeps its old meaning but appends what the event said.
+   An `eventMessage(event)` helper reads `message`, then `reason`.
+2. `packages/k8s/src/client.ts` — `KubeClient.execRefusal(target)`: the same exec
+   URL with `ws→http`, a plain `POST` through `doFetch` (inheriting the TLS +
+   bearer header), returning `Status.message` for a non-2xx; `undefined` for 2xx,
+   `Upgrade request required`, a non-`Status` body, or a network error. Never
+   throws.
+3. `packages/cli/src/engine-host.ts` — `inspect`'s options gain `pick?:
+   "kubectl-exec"`; `WorkloadState` `ready`/`starting` gain `containers?` and
+   `how?` (new exported `ContainerHow`); new optional `execRefusal?(target)`.
+4. `packages/cli/src/engine-k8s.ts` — new pure exported `pickExecContainer(names,
+   annotation, requested, mode, podName)`; `inspect` uses it; `PodCluster` gains
+   optional `execRefusal?`; the host implements `execRefusal` (catching to
+   `undefined`).
+5. `packages/cli/src/workload-shell-backend.ts` — `prime` returns
+   `PrimedTarget`, doing the `GET pod` once per target key and caching the
+   container for `explain`; a `stopped` pod throws `RefusalError`; new `where`
+   delegate; `explain` gained the `ExecRefusedError` branch (after `dialVerdict`)
+   with the two sentences; `causeOf` walks up to 4 `cause` links to find the type.
+6. `packages/tools/src/workload-shell.ts` — `PrimedTarget`, `prime`'s new return
+   type, `WorkloadShellBackend.where?`, `Shell.execTarget`/`openNote`, `open` and
+   the one-shot on `execTarget`, `key` unchanged, `RunOutcome.target`/`info`, the
+   open line (`openInfo`), the widen `cause` on the failed-open error, the schema
+   `.describe()`s + refine, and the description sentence.
+7. `packages/tools/src/workload-shell-frame.ts` — `ResultTextInput.info`, printed
+   after the header and **excluded** from `isError`.
+8. `packages/tools/src/move-session.ts` — the predicate exported as
+   `engineOnlyFields`, reused by both schemas (not copied).
+9. `packages/k8s/src/exec-channel.ts` — one line: `WebSocketLike`'s `"close"`
+   handler now receives its event (Bun carries the reason there; the old `() =>
+   void` signature hid it).
+10. `packages/cli/src/engine-select.ts` — re-exports `ExecRefusedError`, so the
+    backend can name the type without a static `@tentacle/k8s` import (see
+    Drift; this one is a regression avoided, not a nicety).
+11. `changelog.d/workload-shell-live.fixed.md`.
+
+
+**Drift from the Implementation, and why:**
+
+- **`pickExecContainer` takes a 5th argument, `podName`, and returns
+  `undefined`** when the pod lists no containers at all. The plan's signature had
+  no pod name, but the refusal text needs it (`container "x" is not valid for pod
+  p`); the `undefined` arm exists because a pod read with an empty
+  `spec.containers` (a fake, a mid-creation pod) must keep behaving exactly as it
+  did before this rule, not start refusing. Both covered by tests.
+- **`containers`/`how` are reported to `pick: "kubectl-exec"` only.** The
+  plan put them on `WorkloadState` unconditionally; attaching them to `attach`'s
+  state changed its returned object and broke the exact-equality `attach` rows
+  (`engine-k8s.test.ts`, and the session-hop row in `engine-runtime.test.ts`) —
+  i.e. it violated the plan's own Precondition that `attach`'s behaviour is
+  unchanged. Only `workload_shell` needs them, so they ride the new option.
+- **Tests 1 and the live row live in `packages/cli/test/`** (not
+  `packages/tools/test/` as the plan's Tests 1 implied by its content): the row
+  drives the real `LaptopWorkloadShellBackend`, which is a `cli` package module.
+  Files: `workload-shell-backend.test.ts` (new, repro A as a test) and
+  `workload-shell-live.k8s.test.ts` (new, opt-in `TENTACLE_K8S_SERVER`).
+- **No docker opt-in row was added.** The plan lists one ("an exec into a
+  stopped container gives a readable error"); it is unrelated to D1–D4 (docker's
+  exec failures already come back over HTTP with their message) and needs a live
+  docker daemon. Recorded here as deliberately left, not silently skipped.
+- **`ExecRefusedError` reaches the backend through the LAZY `engine-select`
+  module, not a static `@tentacle/k8s` import.** Not in the plan's Files list,
+  but a static import was an active regression: `worker.ts` and `serve.ts` import
+  this backend STATICALLY, and the file's own header documents that this is
+  exactly what pulled `@tentacle/k8s`'s cleanup graph (`Bun.spawn` + exit
+  handlers) into the WORKER's bundle and made its RPC peer stop answering —
+  "no error, no message, just silence". `engine-select.ts` now re-exports
+  `ExecRefusedError`, and `explain` gets it from the already-lazy
+  `loadEngineSelect()`. Measured (`.tentacle/tmp/workload-shell-live/graph.ts`,
+  `require.cache` after importing `worker.ts`): **239 modules added, no cleanup
+  module**; restoring the static import → **322 added, including
+  `packages/k8s/src/pod-cleanup.ts`** (mutation, then reverted), so the check is
+  non-vacuous. `packages/k8s` is still not a dependency of `@tentacle/cli`.
+
+**The open line, as it actually renders** (`.tentacle/tmp/workload-shell-live/eyeball.ts`,
+annotation `default-container: etcd`, 5 containers):
+
+```
+exit=0 · cwd=/home/app · kubernetes openshift-etcd/p[etcd] · 0.1s
+[opened sh in kubernetes openshift-etcd/p[etcd] (namespace openshift-etcd) — container etcd — the pod's default-container annotation; others: etcdctl, etcd-metrics, etcd-readyz, etcd-rev; set target.container to choose]
+```
+
+The second run of the same target prints the header only — one open line per
+shell, `isError: false` for `exit=0`.
+
+**Mutations (each shown red, then reverted; backups diffed empty afterwards):**
+
+| mutation | result |
+|---|---|
+| D1: `open(target)` instead of `open(execTarget)` | 3 red: 1a, 1b, 1g |
+| D1: `oneShot(shell.target, …)` instead of `execTarget` | red: 1d — **only after 1d was rewritten** (see below) |
+| D3: `explain` skips the `execRefusal` branch | red: 1e, 1f |
+| D1: `info` counted in `isError` | red: 1a, 1g |
+| D2: default mode falls back to `names[0]` | red: 5 chrome rows, incl. the session-hop `attach` row in `engine-runtime.test.ts` and the two existing `inspect` annotation rows |
+
+**A weak test found by mutation, and fixed.** The first version of 1d called
+`backend.oneShot(execTarget, …)` directly, so it proved nothing about the
+registry's kill path: mutating `oneShot` to use `shell.target` left it **green**.
+It was rewritten to drive a real TIMEOUT (a command the fake never answers, with
+`killGraceMs: 20`) and assert the one-shot's container — which is red under the
+mutation, as the table shows. This was the only test that needed it; the others
+were red on their first mutation run.
+
+**Red before green**, per row (each was run against the pre-change code path):
+D3's three `exec-raw` rows and `client.test.ts`'s `execRefusal` rows failed on
+the assertion (the old constant "exec channel errored", no `execRefusal` method);
+`pickExecContainer` failed by absent export (a brand-new pure function — its
+red-on-property is mutation D2, above); the backend rows failed with the owner's
+exact symptom (`container: undefined`, "exec channel errored", 8 of 10 red).
+
+**Gate:** `bunx tsc --noEmit` clean (also `-p apps/mobile`, `-p apps/relay`);
+`bun run lint` clean (`Checked 1433 files`, 0 errors/warnings, matching the §6
+baseline); `bun test` **10352 pass, 0 fail**, with the three opt-in skips the
+baseline names plus the new live-k8s row (skipped without
+`TENTACLE_K8S_SERVER`). `packages/protocol/schema/protocol.json` was not
+regenerated: no schema, no wire, no persisted format changed, so there is nothing
+to regenerate (`git status packages/protocol` is empty).
+
+**Not verified here:** the live-k8s row itself (no cluster in this environment —
+kind was down when the plan was written and is still down). It is the row that
+must pass before Review signs off, because D3's one unproven apiserver fact (a
+plain `POST …/exec` with no upgrade returns the `a container name must be
+specified …` `Status`) can only be settled against a real apiserver. To verify:
+`NODE_EXTRA_CA_CERTS=… TENTACLE_K8S_SERVER=… TENTACLE_K8S_TOKEN=… bun test
+packages/cli/test/workload-shell-live.k8s.test.ts`.
+
+**Two full-suite flakes seen, neither from this change.** One run failed
+`startAttachRuntime … attaches without re-injecting` (38 ms) and another
+`logs -f <run-name> …` — each passed alone, `--rerun-each 20` on the first, and
+3× `bun test packages/cli` all-pass. This is the documented
+`docs/fix/engine-runtime-stderr-flake.md` class (a timing flake under full-suite
+load), and the final full-suite run is green.
+
 
 ## Review
 
