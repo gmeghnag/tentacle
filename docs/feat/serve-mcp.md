@@ -498,6 +498,17 @@ files, 0 errors / 0 warnings) · `bun test` **10844 pass, 5 skip, 0 fail**
 
 *— claude-opus-5-5, 2026-11-15* (same model family as the plan's author; only the context is fresh)
 
+### Round 2
+
+**Verdict: PASS** (reviewed `git diff HEAD~1`, c83b552c)
+
+- **Finding 1 (relay path): fixed.** `serve.ts` passes `hooksTrustPrecheck` to `startRelayLink`, and `relay-link.ts:693` threads it into `acceptDevice`. *Mutation:* removed that line in `relay-link.ts`. T13e and T13f went red (2 fail). Reverted.
+- **Finding 2 (host `never`): fixed.** The precheck now answers three ways: `trusted`, `declined` or `ask`. A `never` entry is `declined` for any hash (`serve-hooks-trust.ts`), and `Connection.askHooksTrust` resolves `false` without asking the client. This matches the TUI's `trustPrecheck`. *Mutation:* `never` mapped to `"ask"`. The pure `never` test and T13f went red (2 fail). Reverted.
+- **Tests are not vacuous:** T13e and T13f use a real local relay plus a Noise-paired phone, and they wait for `turn_end` before asserting.
+- **Regressions:** `serve-hooks-trust.test.ts` plus all of `packages/daemon/test`: 1170 pass, 0 fail, 1 skip (opt-in). `bun run typecheck` is clean. `bun run lint`: 1506 files, clean. `git status` was clean after both mutations. The worker, pod and `serve --stdio` connections still get no precheck, which is correct.
+
+*— claude-opus-5-5, 2026-11-15*
+
 #### Owner decisions (2026-11-15 11:10)
 
 1. **(b)** crashed MCP servers respawn with backoff (1 s→60 s, give up after 5), stable tools, on both hosts — as recommended.
