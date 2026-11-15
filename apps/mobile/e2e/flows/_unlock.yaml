@@ -36,7 +36,7 @@ appId: so.tentacle.app
           visible:
             id: "app-content"
           timeout: 2500
-        optional: true
+          optional: true
 - assertVisible:
     id: "app-content"
 - assertNotVisible:
