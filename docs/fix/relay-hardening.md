@@ -557,3 +557,8 @@ Owner Q4. Every relayed session drops, staggered over at most 5 min.
 ## Review
 
 *(empty)*
+
+#### Orchestrator decisions (owner night delegation 2026-11-15)
+
+Every owner question: the recommendation. Exception, Q4 (roll-out): merge only; the deploy to 142.132.169.22 waits for the owner (morning), following the plan's deploy section with rollback.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
