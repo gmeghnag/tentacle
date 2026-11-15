@@ -806,6 +806,39 @@ Finding 5: `tui/src/voice-endpoint.ts` is now a thin adapter over the core fold.
 
 **Executor behaviour:** the fixes are targeted and each has a named, non-vacuous test. This time the "paused/off → no audio" rule was applied as a property (`isOn` in `textDelta`, `turnEnded` and the F5 line), not event by event.
 
+### Round 4 · *— claude-opus-5-5, 2026-11-15*
+
+**Verdict: PASS** for C2, with one constraint carried to the edge slices (below).
+
+**Gate:**
+- `bun test packages/core/test/voice packages/tui/test/voice`: 284 pass, 0 fail.
+- `bun run lint`: clean (1598 files).
+- `bun run typecheck`: clean.
+
+**Round-3 finding fixed.** Repro N (`review/r4.ts`):
+- `turnStarted` keeps `inFlight = [0,1,2]`.
+- The state stays `speaking` through `spoken{0}` and `spoken{1}`.
+- It returns to `listening` only at `spoken{2}`.
+
+**Mutations** (`review/mut4.ts`; the original bytes are restored and `git status` is clean):
+- `turnStarted` drops `inFlight`: tests go red (2 fail).
+- The `textDelta` reset drops `inFlight`: tests go red (1 fail).
+
+**Constraint for C1/C4/P2a (not a C2 defect).** Since this round, `inFlight` lives for the whole mode. So a `speak{seq}` that never gets its `spoken{seq}` now keeps the mode in `speaking` across turns, until the next hush or toggle. Before, the next `turnStarted` cleared it.
+- Repro Q: seq 0 is never reported, and two turns later the state is still `speaking`.
+- While stuck, `utter` is ignored (`canListen`), so `lastSpeechAtMs` is not refreshed. F15's idle-off can then turn the mode off while the person is talking.
+- Narration also stays muted.
+- F8 ("a failed chunk is skipped") and the helper's `error{tts_failed}` carry no seq, and the reducer has no failure input.
+- **Edge contract:** every `speak{seq}` must end in exactly one `spoken{seq}`, including a failed or skipped chunk (or `tts_failed` carries the seq and the edge maps it to `spoken`).
+- C1, C4 and P2a must pin this with a test. The C2 reducer needs no change for it.
+
+**Still open, not blocking:** (O) `askPending` displays as `speaking`; (P) `turnEnded` overwrites `capturing`. Both are cosmetic state issues, and sends stay correct.
+
+**Overall:**
+- Across four rounds, every HIGH and MEDIUM is fixed.
+- Each fix is pinned by a test, and a mutation shows the test fails without it.
+- The reducer now refuses audio while off or paused as a property of its state, rather than one event at a time.
+
 ### Fix round 2 — the review's findings 1–2 · *— claude-sonnet-4-5-20250929 (tentacle), 2026-11-15*
 
 **Scope.** Round 2's HIGH (finding 1) and MEDIUM (finding 2), both in
