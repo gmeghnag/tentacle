@@ -206,6 +206,8 @@ export class WorkloadShells {
   private readonly killGraceMs: number;
   /** `[new shell …]` owed to the next run of a target closed by idle/drop. */
   private readonly owedNotice = new Set<string>();
+  /** Opens still resolving: they hold a cap slot before they enter the map. */
+  private pendingOpens = 0;
   private disposed = false;
 
   constructor(
@@ -257,18 +259,17 @@ export class WorkloadShells {
     command: string,
     options: { readonly timeoutMs: number; readonly signal: AbortSignal },
   ): Promise<RunOutcome> {
-    if (this.disposed) {
-      throw new WorkloadShellRefused("this session's shells are already disposed");
-    }
+    this.refuseIfDisposed();
     const key = targetKey(target);
     const notices: string[] = [];
     let shell = this.shells.get(key);
 
     if (shell === undefined) {
-      if (this.shells.size >= MAX_OPEN_SHELLS) {
-        throw new WorkloadShellRefused(
-          `workload_shell already holds ${MAX_OPEN_SHELLS} shells (${this.openTargets().join(", ")}). Close one with \`action: "close"\` before opening another.`,
-        );
+      // The cap must count opens STILL RESOLVING: `open` enters the map only
+      // after its awaits, so a size check alone lets N parallel first-runs
+      // (distinct targets → distinct lanes) all pass it.
+      if (this.shells.size + this.pendingOpens >= MAX_OPEN_SHELLS) {
+        throw new WorkloadShellRefused(this.capMessage());
       }
       shell = await this.open(target);
       if (this.owedNotice.delete(key)) {
@@ -461,16 +462,52 @@ export class WorkloadShells {
     try {
       shell.exec.close(); // k8s: the kubelet closes stdin; docker: `end()` is EOF
     } catch {}
-    await this.oneShot(shell, killTreeScript(shell.pid, "KILL", options));
+    // A shell that never reported its pid has no killable tree: `kill -KILL 0`
+    // is not "pid 0" but "MY WHOLE PROCESS GROUP", so an unready shell is ended
+    // by the EOF above and nothing else. (The pid comes from the ready marker.)
+    if (shell.pid > 0) {
+      await this.oneShot(shell, killTreeScript(shell.pid, "KILL", options));
+    }
+  }
+
+  /** The cap refusal's sentence: what is open, plus how many opens are in flight. */
+  private capMessage(): string {
+    const what = this.openTargets();
+    if (this.pendingOpens > 0) {
+      what.push(`${this.pendingOpens} opening`);
+    }
+    return `workload_shell already holds ${MAX_OPEN_SHELLS} shells (${what.join(", ")}). Close one with \`action: "close"\` before opening another.`;
+  }
+
+  private refuseIfDisposed(): void {
+    if (this.disposed) {
+      throw new WorkloadShellRefused("this session's shells are already disposed");
+    }
+  }
+
+  /**
+   * Open `target`'s shell. The cap SLOT is reserved before the first await and
+   * released when the open settles, so parallel first-runs cannot over-shoot it.
+   */
+  private async open(target: WorkloadTarget): Promise<Shell> {
+    this.pendingOpens += 1;
+    try {
+      return await this.openReserved(target);
+    } finally {
+      this.pendingOpens -= 1;
+    }
   }
 
   /** Open `target`'s shell and wait for its ready marker. */
-  private async open(target: WorkloadTarget): Promise<Shell> {
+  private async openReserved(target: WorkloadTarget): Promise<Shell> {
     const key = targetKey(target);
     // Resolve the engine first: `open`/`oneShot` are synchronous by contract.
     if (this.backend.prime !== undefined) {
       await this.backend.prime(target);
     }
+    // `prime` awaited (a dial, a kubeconfig read): the session may have ended
+    // while it ran, and a shell opened now is one nothing can ever close.
+    this.refuseIfDisposed();
     const exec = this.backend.open(target);
     const shell: Shell = {
       target,
@@ -531,7 +568,12 @@ export class WorkloadShells {
     try {
       await readyDone;
     } catch (error) {
+      // A failed open OWNS what it opened: drop the entry AND close the stream,
+      // or the exec (and a slow `sh` behind it) outlives the registry, where
+      // neither `dispose` nor the idle close can reach it.
       this.forget(key);
+      this.abandon(shell);
+      this.refuseIfDisposed();
       throw error;
     }
     const seen = ready as { pid: number; cwd: string } | undefined;
@@ -539,7 +581,34 @@ export class WorkloadShells {
       shell.pid = seen.pid;
       shell.cwd = seen.cwd;
     }
+    // The ready marker was an await point too: a `dispose` that landed in it
+    // closed this stream already (the shell was in the map by then), so refusing
+    // here is what turns a would-be silent 60 s wait on a closed exec into an
+    // honest "the session is over".
+    if (this.disposed) {
+      this.forget(key);
+      await this.closeShell(shell, { includeSelf: true });
+      this.refuseIfDisposed();
+    }
     return shell;
+  }
+
+  /**
+   * Drop an exec that never became a shell: EOF first, which a live `sh` reads as
+   * `exit`, then the stream's own close. Its pid is unknown (that is exactly what
+   * the failed ready marker costs us), so there is no tree to name — the EOF is
+   * what ends it. Never awaited: a failed open must not wait on the teardown of a
+   * shell that never came up.
+   */
+  private abandon(shell: Shell): void {
+    try {
+      shell.exec.write(new TextEncoder().encode("exit\n"));
+    } catch {
+      // the stream may already be gone
+    }
+    try {
+      shell.exec.close();
+    } catch {}
   }
 
   /** Drop a shell from the registry and its idle timer (the stream itself is closed by the caller). */

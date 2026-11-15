@@ -1244,6 +1244,128 @@ No `protocol.d/` note: no schema, method or update kind changed.
   `oc exec`, and the description warns against it.
 
 
+### Fix round 1
+
+*— claude-sonnet-4-5, 2026-11-15* (executor of the review round 1 findings)
+
+All three findings are MEDIUM; no HIGH was raised. Every fix is red-first (§9),
+mutation-checked, and confined to `packages/tools/src/workload-shell.ts` + its
+test file.
+
+**F1 (MEDIUM) — an open still resolving when the session ends left a live shell.**
+Root cause: `run` checked `disposed` only at entry, so an `open` awaiting `prime`
+(or the ready marker) went on to `backend.open`, wrote into a disposed registry
+and returned. Two re-checks, one per await boundary, plus a rethrow on the
+failure path:
+
+- `refuseIfDisposed()` after `await prime` (`workload-shell.ts:510`) — before
+  `backend.open`, so no exec is created at all.
+- the same after `await readyDone` (`:588-592`) — the shell is in the map by
+  then, so it is `forget`+`closeShell(includeSelf)`d and then refused. This
+  branch is reachable only when the backend's `close()` does not synchronously
+  fire `onEnd` (real for k8s: the kubelet answers late); without it the run
+  silently waited out its 60 s timeout on a closed exec.
+- the `readyDone` catch also re-checks (`:575-576`) so a failed open during a session
+  end reports the refusal, not `explain()`. `refuseIfDisposed` is one method so
+  the three sites cannot drift.
+
+Review's own repro (`.tentacle/tmp/workload-shell/review-dispose-race.ts`), same
+file, before → after:
+
+```
+before: { outcome: "hi", opened: 1, closed: false, sizeAfterDispose: 1 }
+after:  { outcome: "threw WorkloadShellRefused: this session's shells are already disposed",
+          opened: 0, closed: false, sizeAfterDispose: 0 }
+```
+
+**F2 (MEDIUM) — a failed open never closed its exec.** The ready-timeout and
+bad-ready paths called `forget(key)` and rethrew; the exec stream (and a slow
+`sh` behind it) stayed live outside the registry, unreachable by `dispose` or
+the idle close. New `abandon(shell)` (`:603-617`): `exit\n` (a live `sh` reads it
+as EOF → `exit`), then `exec.close()`. Called from the `readyDone` catch
+(`:575`). It deliberately does NOT kill a tree: the pid comes from the ready
+marker, which is exactly what failed.
+
+While here, one adjacent wart the second dispose test exposed: `closeShell` fired
+`killTreeScript(shell.pid, "KILL")` unconditionally, so an unready shell produced
+`__tnt_target=0` — and in `sh`, `kill -KILL 0` is not pid 0 but *the caller's
+whole process group*. Guarded at `:463-469` (only when `shell.pid > 0`); such a
+shell is ended by the EOF above, which is all it can be.
+
+**F3 (MEDIUM) — the cap of 4 was bypassable by parallel opens.** The check used
+`shells.size`, and `open` enters the map only after its awaits; distinct targets
+run on distinct concurrency lanes, so N parallel first-runs all passed. New
+`pendingOpens` counter (`:210`), reserved in `open` before its first await and
+released in `finally` (`:492-500`, with the body renamed `openReserved`); the
+check is now `size + pendingOpens >= MAX` (`:271`), and the refusal lists
+in-flight opens too (`capMessage()`, `:474-480`).
+
+Repro (`.tentacle/tmp/workload-shell/cap-repro.ts`: five parallel first-runs of
+distinct targets against a gated backend), same file, before → after:
+
+```
+before: { results: ["ran","ran","ran","ran","ran"], opened: 5, size: 0 }
+after:  { results: ["ran","ran","ran","ran","refused: … already holds 4 shells (4 opening)…"],
+          opened: 4, size: 0 }
+```
+
+**Tests added** (`packages/tools/test/workload-shell.test.ts`: 5 new tests, plus
+four fake knobs — `primeGate`, `readyGate`, `muteBootstrap`, `closeWithoutEnd`),
+each RED on the pre-fix source before the fix:
+
+| test | red on |
+| --- | --- |
+| `dispose > an open still priming when the session ends leaves NO live shell` | F1 (post-prime) |
+| `dispose > an open that turns ready AFTER the session end is closed, not run` | F1 (post-ready) |
+| `dispose > an open whose ready is cut by the session end leaves nothing live behind` | F2 (pid-0 guard) |
+| `failure modes > a shell that never becomes ready closes its exec…` | F2 (abandon) |
+| `the cap > refuses the 5th CONCURRENT open, not just the 5th open shell` | F3 |
+
+Red evidence (`bun test packages/tools/test/workload-shell.test.ts` on the
+pre-fix source):
+
+```
+(fail) the cap > refuses the 5th CONCURRENT open…          Expected length: 1, Received length: 0
+(fail) failure modes > a shell that never becomes ready…   expect(exec.closed).toBe(true) → false
+(fail) dispose > an open still priming when…               expect(result.isError).toBe(true) → false
+(fail) dispose > an open whose ready is cut…               pid-0 guard assertion → false
+(fail) dispose > an open that turns ready AFTER…           5 s hang, then the refusal assertion → false
+```
+
+**Mutations (each reverted; source back to the fixed file, byte-identical — every
+one killed exactly its own test and nothing else):**
+
+- `− this.refuseIfDisposed()` after `prime` → *an open still priming …* red (1).
+- `− this.abandon(shell)` in the catch → *a shell that never becomes ready …* red (1).
+- `− if (shell.pid > 0)` in `closeShell` → *an open whose ready is cut …* red (1).
+- `− the post-ready disposed block` → *an open that turns ready AFTER …* red (1).
+- `size + pendingOpens` → `size` in the cap check → *the 5th CONCURRENT open* red (1).
+- `− the pendingOpens reserve/release in open()` → the same test red (1).
+
+**Drift from the plan:** none — the review's three fixes are as it asked, plus
+the pid-0 guard, which is a latent defect in the same close path that the F2 fix
+made visible (a `kill` naming a wildcard process group is worse than the leak it
+was meant to clean up). No protocol, persistence or §7 change: the fix sits
+inside the registry that already owns the shells' lifecycle.
+
+**Left open:** `dispose` still cannot reclaim a shell whose `open` is between
+`backend.open` and `shells.set` (nothing holds it yet). Closing that window needs
+a try/catch around `backend.open` itself, and it is only reachable when that call
+throws — in which case nothing was created.
+
+**Gate (this round, on this branch):**
+
+```
+bunx tsc --noEmit   → clean
+bun run lint        → Checked 1391 files. No fixes applied. (0 errors — baseline §6)
+bun test            → 10062 pass · 4 skip · 0 fail · 727 files (395 s)
+```
+
+The 4 skips are the documented opt-in rows of §6 (live-k8s, live-docker, the
+real-socket keepalive) — not failures. Untouched by this round: no protocol,
+persistence, permission or broker change; the diff is the registry's open/close
+lifecycle plus its tests.
+
 ## Review — owner verdict
 
 *Owner: GO / NO-GO / GO-with-changes, date, and any decision on approval scoping.*

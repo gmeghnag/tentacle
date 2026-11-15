@@ -54,6 +54,16 @@ class FakeExec {
   hangProbe = false;
   /** When set, the stream dies as soon as a command line arrives (a link drop). */
   dropOnCommand: ((make: (e: unknown) => Error) => Error) | undefined;
+  /** When set, the ready marker is withheld until it resolves (an open still priming). */
+  readyGate: Promise<void> | undefined;
+  /** When true, the bootstrap line is never answered (a slow or garbled shell). */
+  muteBootstrap = false;
+  /**
+   * When true, `close()` does NOT end the stream — a real backend's close is not
+   * always synchronous with its `end` callback, and the window it opens is the
+   * one a session end can land in.
+   */
+  closeWithoutEnd = false;
   private buffer = "";
   lastCode = 0;
 
@@ -91,7 +101,15 @@ class FakeExec {
     this.written.push(line);
     if (line.startsWith("printf '__TNT_")) {
       this.bootstraps.push(line);
-      this.stdout(`${READY_PREFIX}4242_${this.cwd}__TNT__E\n`);
+      if (this.muteBootstrap) {
+        return; // never ready: the ready timeout's job
+      }
+      const ready = `${READY_PREFIX}4242_${this.cwd}__TNT__E\n`;
+      if (this.readyGate !== undefined) {
+        void this.readyGate.then(() => this.stdout(ready));
+        return;
+      }
+      this.stdout(ready);
       return;
     }
     // Every framed command line ends with a `printf` that reports $? and $PWD.
@@ -152,7 +170,9 @@ class FakeExec {
       return;
     }
     this.closed = true;
-    this.end();
+    if (!this.closeWithoutEnd) {
+      this.end();
+    }
   }
 }
 
@@ -171,6 +191,15 @@ class FakeBackend implements WorkloadShellBackend {
         script: string,
       ) => Promise<{ exitCode: number | null; stdout: string; stderr: string }>)
     | undefined;
+
+  /** When set, `prime` awaits it — the window a session end can land in. */
+  primeGate: Promise<void> | undefined;
+
+  async prime(): Promise<void> {
+    if (this.primeGate !== undefined) {
+      await this.primeGate;
+    }
+  }
 
   open(target: WorkloadTarget): FakeExec {
     if (this.openError !== undefined) {
@@ -213,12 +242,12 @@ async function tick(rounds = 6): Promise<void> {
   }
 }
 
-function setup(options: { idleCloseMs?: number } = {}) {
+function setup(options: { idleCloseMs?: number; readyTimeoutMs?: number } = {}) {
   const backend = new FakeBackend();
   const shells = new WorkloadShells(backend, {
     // The default idle close is 15 min; a test that wants it sooner sets it here.
     idleCloseMs: options.idleCloseMs ?? 15 * 60_000,
-    readyTimeoutMs: 2_000,
+    readyTimeoutMs: options.readyTimeoutMs ?? 2_000,
     killGraceMs: 60,
   });
   const tool = createWorkloadShellTool(shells);
@@ -360,6 +389,33 @@ describe("close", () => {
 });
 
 describe("the cap", () => {
+  test(`refuses the ${MAX_OPEN_SHELLS + 1}th CONCURRENT open, not just the ${MAX_OPEN_SHELLS + 1}th open shell`, async () => {
+    const { tool, shells, backend } = setup();
+    // Distinct targets → distinct concurrency lanes: they all start at once, and
+    // all pass a size check taken before the first await.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    backend.primeGate = gate;
+    const promises = Array.from({ length: MAX_OPEN_SHELLS + 1 }, (_, i) =>
+      tool.execute(
+        { action: "run", target: { engine: "docker", name: `box${i}` }, command: "true" } as never,
+        context(),
+      ),
+    );
+    await tick();
+    release();
+    const results = await Promise.all(promises);
+    await tick();
+
+    const refused = results.filter((r) => r.isError && r.content.includes("already holds"));
+    expect(refused).toHaveLength(1);
+    // The cap held: exactly MAX_OPEN_SHELLS execs were opened, not one more.
+    expect(backend.execs).toHaveLength(MAX_OPEN_SHELLS);
+    expect(shells.size).toBe(MAX_OPEN_SHELLS);
+  });
+
   test(`refuses the ${MAX_OPEN_SHELLS + 1}th workload with the open list, never evicting`, async () => {
     const { tool } = setup();
     for (let i = 0; i < MAX_OPEN_SHELLS; i++) {
@@ -382,6 +438,26 @@ describe("the cap", () => {
 });
 
 describe("failure modes", () => {
+  test("a shell that never becomes ready closes its exec and kills what it can (D4)", async () => {
+    const { tool, shells, backend } = setup({ readyTimeoutMs: 20 });
+    backend.openImpl = (exec) => {
+      exec.muteBootstrap = true; // a slow or garbled bootstrap: no ready marker
+    };
+    const result = await run(tool, { target, command: "true" });
+    await tick();
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("did not become ready");
+    const exec = backend.execs[0] as FakeExec;
+    // The exec is closed even though the shell never got a pid: no live stream
+    // is left outside the registry, where nothing could ever reach it.
+    expect(exec.closed).toBe(true);
+    expect(exec.written).toContain("exit");
+    expect(shells.size).toBe(0);
+    // No pid was ever parsed, so there is nothing to kill (and no bogus pid 0).
+    expect(backend.oneShots).toHaveLength(0);
+  });
+
   test("a shell that dies before the ready marker reports explain()'s text and registers nothing", async () => {
     const { tool, backend } = setup();
     backend.openError = new Error('pod "api-0" not found in namespace "dev"');
@@ -433,6 +509,75 @@ describe("failure modes", () => {
 });
 
 describe("dispose", () => {
+  test("an open still priming when the session ends leaves NO live shell (D4)", async () => {
+    const { tool, shells, backend } = setup();
+    // The session ends while the backend is still resolving the engine.
+    let release: () => void = () => {};
+    backend.primeGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const promise = tool.execute({ action: "run", target, command: "echo hi" } as never, context());
+    await tick();
+    await shells.dispose();
+    release();
+    const result = await promise;
+
+    expect(result.isError).toBe(true);
+    // Nothing was even opened, so there is nothing to leave behind.
+    expect(backend.execs).toHaveLength(0);
+    expect(shells.size).toBe(0);
+  });
+
+  test("an open whose ready is cut by the session end leaves nothing live behind (D4)", async () => {
+    const { tool, shells, backend } = setup();
+    // The exec is opened, but its ready marker arrives only after the session end.
+    let release: () => void = () => {};
+    backend.openImpl = (exec) => {
+      exec.readyGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    };
+    const promise = tool.execute({ action: "run", target, command: "echo hi" } as never, context());
+    await tick();
+    expect(backend.execs).toHaveLength(1); // the exec exists already
+    await shells.dispose(); // …and the session ends before it is ready
+    release();
+    const result = await promise;
+    await tick();
+
+    expect(result.isError).toBe(true);
+    const exec = backend.execs[0] as FakeExec;
+    expect(exec.closed).toBe(true); // the stream it opened was closed
+    expect(shells.size).toBe(0); // …and nothing stayed in the registry
+    // No pid was ever parsed, so nothing pretends to kill a tree either: an
+    // unready shell must never produce a `kill` naming the target pid 0 (in
+    // `sh`, `kill -KILL 0` signals the caller's WHOLE process group instead).
+    expect(backend.oneShots.every((s) => !s.script.includes("__tnt_target=0"))).toBe(true);
+  });
+
+  test("an open that turns ready AFTER the session end is closed, not run", async () => {
+    const { tool, shells, backend } = setup();
+    // The stream survives dispose's close (a backend's close is not always
+    // synchronous with its `end`), so the open reaches its own ready await…
+    let release: () => void = () => {};
+    backend.openImpl = (exec) => {
+      exec.closeWithoutEnd = true;
+      exec.readyGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    };
+    const promise = tool.execute({ action: "run", target, command: "echo hi" } as never, context());
+    await tick();
+    await shells.dispose(); // …the session ends in it…
+    release(); // …and the ready marker arrives afterwards.
+    const result = await promise;
+
+    // …and the open refuses instead of running a command on a dead session.
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("already disposed");
+    expect(shells.size).toBe(0);
+  });
+
   test("closes every stream and issues the kill one-shot for each", async () => {
     const { tool, shells, backend } = setup();
     for (const name of ["a", "b"]) {
