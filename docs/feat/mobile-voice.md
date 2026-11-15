@@ -618,6 +618,44 @@ The fix tags every attempt with an id, taking the reviewer's preferred option, w
 
 **Executor behaviour.** Honest about what is unverified (Step 0, Maestro, the Expo glue). Missed the dictation-side counterpart of its own speech-`id` drift fix.
 
+### Round 2
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; reviewed `git diff HEAD~1`, commit `86691927`)
+
+**Verdict: REQUEST-CHANGES**
+
+**Gate.**
+- `bun test apps/mobile/test`: 1159 pass, 0 fail.
+- `bun run lint`: 1457 files, clean.
+- `bun run typecheck` (root, mobile, relay): clean.
+
+**Round 1, finding 1 (start/cancel race): fixed in TS; the Swift half reads correctly.**
+- Mutation: replaced the `cancel` effect for a stray `started` in `dictation.ts` `stale()` with no effect. Result: 6 fail (`dictation` ×5, `voice-controller` ×1).
+- Restored from a scratch copy; `git status` is clean.
+- Swift: `finished` is now checked inside the main hop before the mic opens (`AnalyzerEngine.swift` start, `RecognizerEngine.swift:53`), and `SpeechCore` cancels an engine that was superseded or cancelled after its `start()` returned. Unverified on device (module README item 13).
+
+**Round 1, finding 2 (signature): only partly fixed.** The Execution signature now says deepseek. But the new "Fix round 1" sub-section is signed `claude-opus-5-5`, while its commit `86691927` says "(deepseek)": the same mismatch again.
+
+**NEW: HIGH (regression from the fix). Dictation stops working on every session screen after the first.**
+- The cause:
+  - `attempts` starts at 0 in each voice controller (`voice-controller.ts:93`), and there is one controller per `SessionScreen` mount (`SessionScreen.tsx:128`);
+  - `SpeechCore` is one object for the whole process (the native module), and its `cancelledThrough` / `newestStart` are never reset (`SpeechCore.swift:58-59`);
+  - `startDictation` refuses any `attempt <= max(cancelledThrough, newestStart)`.
+- Failure: open a session, dictate once (attempt 1), leave (dispose cancels attempt 1), then open any session. Its first tap sends attempt 1 again, the start is refused with `cancelled`, and the mic shows the start-failed card. This repeats until that screen has made more taps than every earlier screen together.
+- Repro `.tentacle/tmp/mobile-voice/remount.ts` (it models the Swift guards):
+  ```
+  screen 1, first tap: listening
+  screen 2, first tap: failed
+  ```
+- No test covers it, because the fake port does not model the native counters.
+- Fix: make the attempt id unique for the whole process, for example a module-level counter in `speech-native-expo.ts` or in the port, or a counter seeded from the clock. Add a test with two controllers on one port.
+
+**Attacks tried.**
+- Mutation of the stale-`started` cancel: caught (above).
+- Two controllers sharing one port: regression found (above).
+- A stale `ended` or `startFailed` for another attempt is ignored (`stale()`). Holds.
+- A cancel never reaches a newer engine (`attempt >= newestStart`). Holds by reading.
+
 ## Notes / debt (for Review)
 
 *— claude-opus-5-5, 2026-11-15*
