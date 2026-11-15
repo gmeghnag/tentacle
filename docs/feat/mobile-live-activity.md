@@ -1003,3 +1003,36 @@ doc. The branch is still 305 commits behind `main`, and L0–L12 are still
 
 **To clear:** the orchestrator merges `main` into this branch or re-cuts it
 from `main`. Then the real Execution, L0 onward, needs its own review.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES. The doc is correct now, but the blocker belongs to
+the orchestrator and is still open.** `git diff HEAD~1` changes only this doc,
+and none of my earlier Review text was altered. The branch is now 315 commits
+behind `main` (`b9b2d4fb`; `main` moved since round 2), and L0–L12 are still
+0 of 13.
+
+- **The new base figures are correct.** I measured them myself:
+  `git rev-parse --short main` → `b9b2d4fb`, and
+  `git rev-list --count HEAD..main` → 315.
+- **The new file column is correct and needed.** I checked the Attachment row
+  myself: on `main`, `updates.ts:193` is `});`, while
+  `hosted-session.ts:193` is `export interface Attachment {`. On this branch
+  the interface is at `hosted-session.ts:191`, and the `no own decision` comment
+  is at `hosted-session.ts:30`. So "five of the six `same` rows are in
+  `updates.ts`" is right.
+- **Mutation:** removing the `file` column from the table header makes
+  `doc-guard.test.ts` F1c FAIL (5/6). I reverted it: the tree is clean and the
+  guard is back to 6/6.
+- **Not re-run by me:** `r2-cite-verify.ts` (its 73/73 checks) and
+  `git merge-tree` (its "no conflicts" claim). Both needed approvals I don't
+  have. The rows I checked by hand all agree. The orchestrator should still
+  confirm the merge is clean when doing it.
+- **Regressions:** none. Only Markdown changed. `bun run lint` checked 1292
+  files with nothing to fix, and `bun run typecheck` passes. The scratch location
+  is now stated in the doc, which settles my round-2 minor note.
+- **Still open (orchestrator's action):** merge `main` into this branch, or
+  re-cut it from `main`. Until then there is no feature to approve, and further
+  rounds of doc-only fixes cannot change this verdict.
