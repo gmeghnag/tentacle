@@ -473,7 +473,43 @@ schema change): no `protocol:bump` and no `protocol.d/` note.
 
 ## Review
 
-*— (reviewer), (date)*
+*— claude-opus-5-5, 2026-11-15* (fresh context; a different model family from the DeepSeek executor)
+
+**Verdict: REQUEST-CHANGES** — two MEDIUM findings, both proven by a scratch run.
+
+1. **MEDIUM — the info controller's emits reach nobody; the screen never repaints when a pull lands.**
+   `createSessionInfo` paints each section through its own `emit()` (`session-info-controller.ts:178-183,217-226`),
+   but no one subscribes to it (`session-screen-controller.ts` only calls `info.state()` inside its own `emit`, which
+   runs after `await info.open()`/`refresh()` at `:818-829`; `void info.loadContext()` at `:629` has no follow-up emit).
+   Effects: (a) the header bar (Owner decision 4) stays absent after attach on an idle session until some unrelated
+   event emits; (b) F3 is false end-to-end: with an MCP probe pending, skills/context have landed in the controller but the
+   sheet still shows `loading` for every section until MCP settles; (c) the link-`up` auto-refresh (F1, `:271-278`) and
+   an auto-accept flip from another device (F11) repaint nothing. Scratch `.tentacle/tmp/mobile-session-info/repaint.test.ts`
+   (screen `onChange`): after the attach-time context resolves, 0 emits, last emitted `headerContext: null` while
+   `state()` says 42 %; with MCP never resolving, last emitted skills phase `loading` while `state()` says `empty`.
+   The screen tests miss it because they read `screen.state()` (a pull), never the emitted states.
+2. **MEDIUM — the header bar shows the DROPPED chat's fill after a `/clear` / replace.** The fold forgets
+   `lastTurnTokens` on a replace (`transcript.ts:273-277`), so `headerContext` falls back to `open`
+   (`session-info.ts:266`) = the attach-time `session/context` figure, which is never re-asked (`loadContext`'s only call
+   site is the attach, `session-screen-controller.ts:629`). The TUI forgets AND re-asks (`useSessionLink.ts:350-353`,
+   compaction `useTurnDriver.ts:1163`) — this is docs/fix/connect-functest-batch.md item E reintroduced on the phone.
+   Scratch `clear-bar.ts`: after a `clear` with open = 120k / 200k → bar `{ percent: 60 }` on an empty session.
+
+LOW (not blocking): `submitRename` with no handle says "too old to rename" (`session-screen-controller.ts:467-474`) for a
+not-attached session; the sheet subtitle keeps the route title after a rename (`App.tsx:333,350` captures `title`);
+`MAX_TITLE_LENGTH = 200` is documented as the daemon's cap but `MAX_SESSION_TITLE = 256` (`protocol/session.ts:459`);
+`daemonInfo()` was inserted under `mcpStatus`'s JSDoc (`remote-client.ts:966-996`); a doc comment got folded into a
+type line (`session-view.ts:158`).
+
+**Gate (touched files):** 11 files / 144 pass, 0 fail (incl. transcript-parity, e2e-flows, session-screen-compose);
+`bun run typecheck` clean; `bun run lint` 1510 files, 0 issues. Full `bun test` not re-run here.
+**Mutation:** removing the generation check in `paint` → 2 F5 tests fail; reverted, `git status` clean.
+**§7:** one session path holds (port = `link.client` + the screen's own handle; no frame built); no protocol/persistence
+change; auto-accept goes through the shared link, laptop gating untouched; F4 phase gate holds.
+**Attacks with no finding:** the `history_reset` rewrite is equivalent to `withHistory` (reason `null`); F4 never calls
+`skills`/`context` without a handle; `daemonInfo()` re-read per handshake (F7).
+**Executor:** honest drift notes (decisions 2/4/5, F11 correction), real mutation table; but the "per-section painting"
+claim was proven only at the controller, never through the screen that renders it. The e2e flow is unexecuted (as declared).
 
 #### Owner decisions (2026-11-15 12:20, chosen on the mockups `.tentacle/tmp/mobile-ui/session-info-mockups.html`)
 
