@@ -3248,3 +3248,23 @@ runs it, `deploy.test.ts` can only pin the syntax it can read.
 **Branch note.** Worked on `feat/mobile-push` (this worktree) and never committed,
 per the task prompt's "never git commit"; `git status` lists the 9 modified and 10
 new files. The orchestrator decides where they land.
+
+## Review
+
+### P10 — REQUEST-CHANGES
+
+**Gate (re-run):** touched files 74 pass / 0 fail (`push-steps`, `push-envelope`, `e2e-flows`, `deploy`, `push-grace-flag`); `bun run lint` clean (1406 files); `bun run typecheck` exit 0. I did not re-run the full suite.
+
+**Findings**
+1. **HIGH — the unit does not boot without a key; it should come up with push off (F4 is broken).** `apps/relay/deploy/relay.service:51-53` passes `--apns-key-id ${TENTACLE_RELAY_APNS_KEY_ID}` and `--apns-team-id ${…}`, with the source file `EnvironmentFile=-` optional. With `${VAR}` as its own word, systemd always passes exactly ONE argument, so an unset var becomes an empty argument. `parseRelayArgs` (`apps/relay/src/main.ts:225-226`) rejects that as `--apns-key-id needs a value`, and the process then does `process.exit(1)` (`main.ts:305-307`). Reproduced by `.tentacle/tmp/mobile-push/review-p10/argv.ts` → `{"ok":false,"error":"--apns-key-id needs a value"}`. On top of that, `LoadCredential=apns-key:/etc/tentacle-relay/apns-key.p8` (`relay.service:76`) uses an absolute path, and systemd refuses to start the unit when that file is missing (243/CREDENTIALS; not checked on a host). **Scenario:** a routine relay redeploy installs this unit before D2 → `Restart=always` crash-loops → every phone loses the relay. The unit comment (`relay.service:70-73`) and runbook §6 ("can be skipped, deferred or reverted without touching anything else", "nothing in the unit has to be edited") both claim the opposite. Rollback by removing the key bricks it the same way. No test pins "boots without a key", so `deploy.test.ts` cannot catch it. Fix direction: keep the wiring out of the base unit (a drop-in `relay.service.d/apns.conf` the runbook installs with the key), or make the relay treat empty `--apns-*` values as push off. Add a test that the shipped ExecStart, with the env vars expanded to empty, still parses.
+2. **MEDIUM — the harness keeps a second writer for a persisted format.** `apps/mobile/e2e/run.ts` `writePushRegistration` hand-builds `{v:1,…}` at `devices/push/<id>.json` instead of importing `writePushRegistration`/`pushPathOf` from `packages/daemon/src/push-store.ts:213`. **Scenario:** a schema change to the store leaves the flow failing with the misleading "relay must announce push" error. It should reuse the module.
+
+**Mutation (§9):** `push-steps.ts` `apnsCount() > before` → `>=` → RED 1 ("an EARLIER push is not mistaken…"). Reverted; `git status` is clean.
+
+**Attacks tried:** systemd empty-arg expansion against the parser (finding 1); a missing credential file (finding 1, from the docs); a stale-payload mutation (killed); the secret in argv/journal (holds: the credential path only, `push on` logs the key id only); the `--push-grace` fix (holds: present in `ARGS.serve`, pinned by `push-grace-flag.test.ts`); the §7 single-session path (holds: the harness drives the real daemon/relay, with no parallel loop).
+
+**What holds:** the pure `push-steps`/`push-envelope` split, the identity and throw-on-no-push tests, and the honest reporting of the BLOCKED simulator run (the banner has still never been observed).
+
+**Executor behaviour:** thorough and candid about the drift (D1–D6) and the surviving mutations. But it never tested its central deploy claim ("optional", push off) against the parser it had cited.
+
+*— claude-opus-5-5, 2026-11-15 (fresh context; a different family from the deepseek executor of earlier rounds, but P10's executor did not report its model)*
