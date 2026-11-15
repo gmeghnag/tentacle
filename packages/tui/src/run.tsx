@@ -73,6 +73,11 @@ export interface TuiOptions {
    * own defaults (`VOICE_DEFAULTS`) — enabled, Ctrl+R, no auto-stop.
    */
   readonly voice?: VoiceConfig;
+  /**
+   * Where the helper's log and `<configDir>/voice/bin` live. The CLI passes its
+   * config dir; absent, no log is opened and only the binary's sibling is tried.
+   */
+  readonly voiceConfigDir?: string;
   /** A detached run's TUI (`attach <name>`): `/quit` closes the session for all. */
   readonly runQuit?: RunQuit;
   /** The session's auto-accept feed: a detached run's shared file, or the routing feed (docs/feat/session-auto-accept.md D5). */
@@ -188,6 +193,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         {...(options.detachOnQuit ? { detachOnQuit: true } : {})}
         {...(options.sessions ? { sessions: options.sessions } : {})}
         {...(options.voice ? { voice: options.voice } : {})}
+        {...(options.voiceConfigDir ? { voiceConfigDir: options.voiceConfigDir } : {})}
         {...(options.runQuit ? { runQuit: options.runQuit } : {})}
         {...(options.autoAccept ? { autoAccept: options.autoAccept } : {})}
         {...(options.autoAcceptShared ? { autoAcceptShared: options.autoAcceptShared } : {})}

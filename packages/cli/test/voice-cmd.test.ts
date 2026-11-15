@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { VOICE_DEFAULTS } from "@tentacle/tui";
+import { ARGS, parseArgs } from "../src/flags.ts";
 import { VOICE_USAGE, voiceCommand } from "../src/voice-cmd.ts";
 
 /**
@@ -120,5 +121,54 @@ describe("T10: another platform is refused honestly", () => {
     expect(await voiceCommand(["setup"], d.base)).toBe(1);
     expect(d.err.join("")).toContain("macOS");
     expect(d.runs).toEqual([]);
+  });
+});
+
+/**
+ * Fix round 1 (Review MEDIUM 7): `ARGS.voice` declares `--yes` a BOOL, so the
+ * parser takes it out of `positional` — reading only positionals silently
+ * dropped it and `setup` prompted anyway.
+ */
+describe("Fix 2 (MEDIUM 7): `setup --yes` is not lost in the parser", () => {
+  test("the parser's bool arrives as `yes` and reaches the helper", async () => {
+    // Mutation: revert to reading `rest.includes("--yes")` only → red.
+    const parsed = parseArgs(["setup", "--yes"], ARGS.voice);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.positional).toEqual(["setup"]);
+    expect(parsed.bools.has("yes")).toBe(true);
+    const d = deps();
+    await voiceCommand(parsed.positional, {
+      ...d.base,
+      ...(parsed.bools.has("yes") ? { yes: true } : {}),
+    });
+    expect(d.runs[0]?.args).toContain("--yes");
+  });
+
+  test("without `--yes` the helper is NOT told to skip the confirmation", async () => {
+    const parsed = parseArgs(["setup"], ARGS.voice);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const d = deps();
+    await voiceCommand(parsed.positional, d.base);
+    expect(d.runs[0]?.args).not.toContain("--yes");
+  });
+});
+
+/**
+ * Fix round 1 (MEDIUM 7), the LAST link: `main` is the only place that can turn
+ * the parser's `bools` into the dependency, and `voiceCommand` is reached with
+ * `parsed.positional` alone — so a hand-driven call cannot see it. Pinned as
+ * text, like `wiring.test.ts`'s single-broker guard (there is no seam that sees
+ * the deps object from `main`, and adding one for a bool is ceremony).
+ */
+describe("Fix 2 (MEDIUM 7), pinned at the call site", () => {
+  test("`main` hands the parser's `--yes` to `voiceCommand`", async () => {
+    // Mutation: delete this line → `tentacle voice setup --yes` prompts anyway.
+    const main = await Bun.file(`${import.meta.dir}/../src/main.ts`).text();
+    const block = main.slice(main.indexOf('if (mode === "voice") {'));
+    const call = block.slice(0, block.indexOf("});") + 3);
+    expect(call).toContain("runHelper: runHelperInherited,");
+    expect(call).toMatch(/\.\.\.\(parsed\.bools\.has\("yes"\) \? \{ yes: true \} : \{\}\),/);
   });
 });

@@ -36,6 +36,8 @@ public final class Capture {
     private var native: [Float] = []
     private var nativeRate: Double = 44100
     private var threadDbfs: Double = -160
+    /// One tap buffer's worth of audio time, with the level it measured.
+    private var windows: [(ms: Int, dbfs: Double)] = []
 
     /// The audio thread and its engine, created lazily and reused across takes
     /// (an engine per dictation re-pays the start-up cost, and re-installing a
@@ -52,6 +54,19 @@ public final class Capture {
         lock.lock()
         defer { lock.unlock() }
         return threadDbfs
+    }
+
+    ///
+    /// The tap buffers captured since the last call, each with its duration in
+    /// AUDIO time. This is what the protocol loop turns into `vad` lines, so the
+    /// TUI's elapsed clock and `voice.maxSeconds` cap count HEARD audio rather
+    /// than wall time (Review round 1, HIGH 3: nothing emitted them).
+    public func drainWindows() -> [(ms: Int, dbfs: Double)] {
+        lock.lock()
+        defer { lock.unlock() }
+        let out = windows
+        windows = []
+        return out
     }
 
     /// The input device's name, for `listening{device}`.
@@ -97,6 +112,7 @@ public final class Capture {
         guard engine.isRunning else { throw HelperError.noInput }
         lock.lock()
         native = []
+        windows = []
         lock.unlock()
     }
 
@@ -187,6 +203,10 @@ public final class Capture {
         lock.lock()
         threadDbfs = dbfs
         native.append(contentsOf: UnsafeBufferPointer(start: channel, count: count))
+        // The window's duration is AUDIO time, from the count and the rate: the
+        // same units the V0 endpointing used, so a stalled pipe cannot stretch
+        // the cap's clock.
+        windows.append((ms: Int((Double(count) / nativeRate * 1000).rounded()), dbfs: dbfs))
         lock.unlock()
     }
 

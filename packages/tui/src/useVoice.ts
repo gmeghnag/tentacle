@@ -11,6 +11,7 @@
  * an idle TUI holds no process and no mic (F13). A helper's stderr is piped to a
  * file, never to the terminal (F10).
  */
+import { closeSync, existsSync, openSync, writeSync } from "node:fs";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { HelperCommand, HelperMessage } from "./voice-protocol.ts";
 import {
@@ -24,8 +25,11 @@ import {
   voiceStep,
 } from "./voice-session.ts";
 import {
+  type StreamDisposition,
   type VoiceChild,
+  type VoiceSpawnSpec,
   type VoiceSpawner,
+  bunSpawnOptions,
   endChild,
   helperPathCandidates,
   sendCommand,
@@ -61,17 +65,25 @@ export interface VoiceHandle {
 }
 
 const defaultSpawner: VoiceSpawner = (spec) => {
-  const proc = Bun.spawn([...spec.cmd], {
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, ...spec.env },
-  });
+  // The log FILE, first: the helper's stderr goes there, never to the frame
+  // (AGENTS §7, F10), and `append` keeps an earlier dictation's lines.
+  const log = spec.logPath === "" ? null : openSync(spec.logPath, "a");
+  const options = bunSpawnOptions(spec, log);
+  const proc = bunSpawnProc(spec.cmd, options, log);
+  // Piped and DRAINED: a full stderr pipe would block the helper.
+  if (proc.stderr !== undefined) drainTo(proc.stderr, log);
   return {
     stdin: proc.stdin,
     stdout: proc.stdout,
-    stderr: proc.stderr,
-    exited: proc.exited,
+    stderr: proc.stderr ?? null,
+    exited: proc.exited.finally(() => {
+      if (log === null) return;
+      try {
+        closeSync(log);
+      } catch {
+        // already closed
+      }
+    }),
     kill: (signal) => {
       try {
         proc.kill(signal as NodeJS.Signals | undefined);
@@ -81,6 +93,68 @@ const defaultSpawner: VoiceSpawner = (spec) => {
     },
   };
 };
+
+/**
+ * The one irreducible `Bun.spawn` call, in the two shapes Bun's own types allow
+ * (an fd for stderr, or a pipe when there is no config dir to log into). Both
+ * consume `bunSpawnOptions`' answer for stdin/stdout/env, so an `"inherit"`
+ * could not slip in here unnoticed — which is what made T8 vacuous before.
+ */
+function bunSpawnProc(
+  cmd: readonly string[],
+  options: ReturnType<typeof bunSpawnOptions>,
+  logFd: number | null,
+): SpawnedProc {
+  const proc =
+    logFd === null
+      ? Bun.spawn([...cmd], {
+          stdin: "pipe",
+          stdout: "pipe",
+          stderr: "pipe",
+          env: options.env,
+        })
+      : Bun.spawn([...cmd], {
+          stdin: "pipe",
+          stdout: "pipe",
+          stderr: logFd,
+          env: options.env,
+        });
+  return proc as unknown as SpawnedProc;
+}
+
+/** What this module needs from a spawned process (Bun's shape, narrowed). */
+interface SpawnedProc {
+  readonly stdin: { write(chunk: string | Uint8Array): unknown; end(): unknown } | null;
+  readonly stdout: ReadableStream<Uint8Array>;
+  readonly stderr: ReadableStream<Uint8Array> | undefined;
+  readonly exited: Promise<number>;
+  kill(signal?: number | NodeJS.Signals): void;
+}
+
+/** Copy a child's stderr into the log file (or drain it), until it closes. */
+function drainTo(stream: ReadableStream<Uint8Array>, fd: number | null): void {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  void (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        // No fd to write to (a host-less mount): the child must still not block.
+        if (fd === null) continue;
+        try {
+          writeSync(fd, decoder.decode(value, { stream: true }));
+        } catch {
+          return;
+        }
+      }
+    } catch {
+      // The child died mid-line: the exit event is the one that reports it.
+    } finally {
+      reader.releaseLock?.();
+    }
+  })();
+}
 
 /**
  * Attach the hook. It keeps the reducer's model in a ref (the event loop is
@@ -136,23 +210,33 @@ export function useVoice(options: UseVoiceOptions): VoiceHandle {
         // spawn
         if (childRef.current !== null) continue;
         const configDir = options.configDir ?? "";
+        // The FIRST candidate that EXISTS (Review round 1, MEDIUM 8): spawning
+        // `candidates[0]` blindly meant the `<configDir>/voice/bin` fallback
+        // was never reached, so a helper installed there never ran.
+        const candidates = helperPathCandidates({
+          execPath: options.execPath ?? process.execPath,
+          configDir,
+          config: config,
+        });
         const helperPath =
-          helperPathCandidates({
-            execPath: options.execPath ?? process.execPath,
-            configDir,
-            config: config,
-          })[0] ?? "tentacle-voice";
-        const args =
-          config.engine === "parakeet" && config.modelsDir !== undefined
+          candidates.find((path) => existsSync(path)) ?? candidates[0] ?? "tentacle-voice";
+        const args = [
+          ...(config.engine === "parakeet" && config.modelsDir !== undefined
             ? ["--models-dir", config.modelsDir]
-            : [];
+            : []),
+          // `voice.input` / `voice.voiceProcessing` are the helper's own flags
+          // (Review round 1, MEDIUM 8: they were hardcoded there, so both
+          // settings did nothing).
+          ...(config.input === "builtin" ? ["--input", "builtin"] : []),
+          ...(config.voiceProcessing ? [] : ["--no-voice-processing"]),
+        ];
         let child: VoiceChild;
         try {
           child = spawnVoiceHelper({
             spawner: options.spawner ?? defaultSpawner,
             helperPath,
             args,
-            logPath: `${configDir}/voice/helper.log`,
+            logPath: configDir === "" ? "" : `${configDir}/voice/helper.log`,
             env: { TENTACLE_VOICE_ENGINE: config.engine },
           });
         } catch {
@@ -223,7 +307,10 @@ export function useVoice(options: UseVoiceOptions): VoiceHandle {
         }
       })();
       void child.exited.then((code) => {
-        childRef.current = null;
+        // Only OUR child may clear the ref (Review round 1, MEDIUM 9): a killed
+        // child's exit lands after a retry's spawn, and nulling the ref blindly
+        // orphaned the NEW child, which then held the mic untracked.
+        if (childRef.current === child) childRef.current = null;
         dispatch({ kind: "exit", code, signal: null, stderrTail: "" });
       });
     },
@@ -241,6 +328,16 @@ export function useVoice(options: UseVoiceOptions): VoiceHandle {
     },
     [],
   );
+
+  // The wall clock the reducer's two timers read (`clock`): a hung `stop` and a
+  // ten-minute idle child (Review round 1, HIGH 3). One interval, only while a
+  // dictation is live or a child is held, so an idle TUI wakes for nothing.
+  const ticking = model.phase !== "idle" || model.childAlive;
+  useEffect(() => {
+    if (!ticking) return;
+    const timer = setInterval(() => dispatch({ kind: "clock", now: Date.now() }), 1000);
+    return () => clearInterval(timer);
+  }, [ticking, dispatch]);
 
   const toggle = useCallback(() => dispatch({ kind: "key", key: "toggle" }), [dispatch]);
   const finish = useCallback(() => dispatch({ kind: "key", key: "finish" }), [dispatch]);

@@ -13,6 +13,28 @@ import Foundation
 
 // MARK: - the protocol loop
 
+/// The capture settings the TUI's `voice.*` names (Review round 1, MEDIUM 8:
+/// both were hardcoded, so `voice.input` and `voice.voiceProcessing` were dead).
+struct CaptureOptions {
+    var input: String = "default"
+    var voiceProcessing: Bool = true
+    /// Parsed once from argv, in `main`, before the protocol loop starts.
+    static var current = CaptureOptions()
+}
+
+/// The speech probability a window's level implies.
+///
+/// A PLACEHOLDER for Silero (S2's open finding: the ONNX model is not wired
+/// yet). It is not a stand-in on the TUI side: every consumer (`voice-endpoint`,
+/// the `maxSeconds` cap, the elapsed clock) reads it the way it will read the
+/// real one, so wiring Silero changes this function and nothing else. The
+/// threshold is −45 dBFS: below it a window is silence, which is what makes the
+/// hard stop (a forgotten dictation) fire on a quiet room.
+func windowSpeechProbability(_ dbfs: Double) -> Double {
+    if dbfs < -45 { return 0.02 }
+    if dbfs > -30 { return 0.98 }
+    return 0.5
+}
 /// One live dictation: the buffer id, and what has been captured for it.
 struct Session {
     var id: Int
@@ -173,11 +195,34 @@ func runProtocolSync() -> Int32 {
     // awaited before the next line is read, so two dictations never interleave.
     let audioQueue = DispatchQueue(label: "tentacle-voice.audio")
     var captured: [Float] = []
+    // What the ENGINE reports per tap window: `vad` (audio time + level) and the
+    // 10 Hz `level` for the meter. Both are pumped from the loop below — before
+    // this, the helper emitted neither, so the strip's clock, its meter, the
+    // `voice.maxSeconds` cap and the auto-stop fold all read zero (Review
+    // round 1, HIGH 3).
+    var levelClock = 0.0
+    let op = CaptureOptions.current
 
-    write(.ready(engine: Transcriber.engineName(), device: Capture.currentInputName(preferred: "default")))
+    write(.ready(engine: Transcriber.engineName(), device: Capture.currentInputName(preferred: op.input)))
 
     let source = LineSource()
     poll: while true {
+        // Pump the audio the tap has produced since the last pass, BEFORE waiting
+        // for a line: the TUI's clock must advance even while nobody types.
+        for window in capture.drainWindows() {
+            guard let live = session else { continue }
+            audioMs += window.ms
+            // Silero is not wired yet (S2's open finding), so the speech
+            // probability is the level's own crude mapping: quiet windows read as
+            // silence, which is what the hard stop needs. A real Silero pass
+            // replaces this one line and nothing else.
+            write(.vad(id: live.id, ms: audioMs, p: windowSpeechProbability(window.dbfs)))
+            levelClock += Double(window.ms)
+            if levelClock >= 100 {
+                levelClock = 0
+                write(.level(id: live.id, dbfs: window.dbfs))
+            }
+        }
         guard let batch = source.drain() else { break poll }  // EOF: the TUI is gone.
         if batch.isEmpty {
             // The tap needs the MAIN thread genuinely parked, not merely
@@ -206,7 +251,7 @@ func runProtocolSync() -> Int32 {
                         continue
                     }
                     do {
-                        try capture.start(voiceProcessing: true, preferredInput: "default")
+                        try capture.start(voiceProcessing: op.voiceProcessing, preferredInput: op.input)
                     } catch {
                         fail(.noInput, id: id)
                         continue
@@ -218,9 +263,11 @@ func runProtocolSync() -> Int32 {
 
                 case let .turn(id):
                     // Auto-stop only: the endpointing decision is the TUI's pure
-                    // fold (`voice-endpoint.ts`), so the helper just reports the
-                    // level it already has. Nothing to answer here yet.
-                    write(.turnp(id: id, p: 0))
+                    // fold (`voice-endpoint.ts`), so the helper reports the level
+                    // it already has. `turnp` carries the LAST window's reading —
+                    // a real Silero/Smart Turn pass replaces this one number.
+                    guard let live = session, live.id == id else { continue }
+                    write(.turnp(id: live.id, p: windowSpeechProbability(capture.lastDbfs)))
 
                 case let .stop(id):
                     guard let live = session, live.id == id else {
@@ -426,6 +473,16 @@ struct TentacleVoice {
         if let index = args.firstIndex(of: "--engine"), index + 1 < args.count {
             engine = args[index + 1]
             args.removeSubrange(index...(index + 1))
+        }
+        // `--input default|builtin` and `--no-voice-processing` (the TUI's
+        // `voice.input` / `voice.voiceProcessing`, Review round 1 MEDIUM 8).
+        if let index = args.firstIndex(of: "--input"), index + 1 < args.count {
+            CaptureOptions.current.input = args[index + 1]
+            args.removeSubrange(index...(index + 1))
+        }
+        if args.contains("--no-voice-processing") {
+            CaptureOptions.current.voiceProcessing = false
+            args.removeAll { $0 == "--no-voice-processing" }
         }
         // `--lang auto|it|en`: what `trace` transcribes as (`voice.language`).
         var language = Language.auto

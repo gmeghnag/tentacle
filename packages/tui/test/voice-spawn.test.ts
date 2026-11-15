@@ -3,9 +3,11 @@ import { VOICE_DEFAULTS } from "../src/voice-session.ts";
 import {
   type VoiceSpawnSpec,
   type VoiceSpawner,
+  bunSpawnOptions,
   helperPathCandidates,
   spawnVoiceHelper,
   splitLines,
+  voiceSpawnSpec,
 } from "../src/voice-spawn.ts";
 
 /**
@@ -120,5 +122,44 @@ describe("F3: where the helper is looked for", () => {
       config: { ...VOICE_DEFAULTS },
     });
     expect(paths[0]).toBe("/Users/me/bin/tentacle-voice");
+  });
+});
+
+/**
+ * Fix round 1 (Review MEDIUM 5): T8 used to pin the SPEC, which the production
+ * spawner never read — its mutation (`stderr: "inherit"`) stayed green. These
+ * pin the `Bun.spawn` options the real path actually builds.
+ */
+describe("Fix 5 (MEDIUM 5): the REAL spawn options never inherit the terminal", () => {
+  const spec = voiceSpawnSpec({ helperPath: "/x/tentacle-voice", logPath: "/c/voice/helper.log" });
+
+  test("with a log fd, stderr is that fd — never a stream, never `inherit`", () => {
+    // Mutation: `stderr: "inherit"` in `bunSpawnOptions` → red.
+    const options = bunSpawnOptions(spec, 42);
+    expect(options.stdin).toBe("pipe");
+    expect(options.stdout).toBe("pipe");
+    expect(options.stderr).toBe(42);
+  });
+
+  test("with no config dir there is no fd: still a pipe, never `inherit`", () => {
+    // Mutation: `stderr: "inherit"` when there is no log → red.
+    const options = bunSpawnOptions({ ...spec, logPath: "" }, null);
+    expect(options.stderr).toBe("pipe");
+    for (const value of [options.stdin, options.stdout, options.stderr]) {
+      expect(value).not.toBe("inherit");
+    }
+  });
+
+  test("the spec's own streams are all pipes, so a disposition cannot be smuggled", () => {
+    expect(spec.stdio).toEqual({ stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  });
+
+  test("the child's env still carries the engine choice", () => {
+    const withEnv = voiceSpawnSpec({
+      helperPath: "/x",
+      logPath: "/c/l.log",
+      env: { TENTACLE_VOICE_ENGINE: "parakeet" },
+    });
+    expect(bunSpawnOptions(withEnv, 7).env.TENTACLE_VOICE_ENGINE).toBe("parakeet");
   });
 });

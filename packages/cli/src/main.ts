@@ -957,6 +957,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       out,
       err,
       runHelper: runHelperInherited,
+      // `--yes` is a BOOL in `ARGS.voice`, so the parser took it off the
+      // positionals; it must still reach the helper or `setup --yes` prompts
+      // (Review round 1, MEDIUM 7).
+      ...(parsed.bools.has("yes") ? { yes: true } : {}),
     });
   }
 
@@ -1402,6 +1406,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             // Voice dictation (`voice.*`): a LAPTOP-ONLY input setting. The TUI
             // itself decides whether this terminal can use it at all (F11).
             voice: { ...VOICE_DEFAULTS, ...(config.voice ?? {}) },
+            voiceConfigDir: config.configDir,
             cwd: config.cwd,
             contextWindow: config.contextWindow,
             // The status bar's badge: from this laptop's engine host, never the pod.
@@ -2243,7 +2248,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     let lastController: ReturnType<typeof created> | null = null;
     await runSessionTui(sessions, {
       start: (sessionOptions) =>
-        startTui(null, {
+        (io.startTui ?? startTui)(null, {
           model: config.model,
           theme: config.tui?.theme ?? "auto",
           cwd: config.cwd,
@@ -2254,6 +2259,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           subagentsTwoWay: config.subagentsTwoWay,
           autoAccept: autoAcceptFeed,
           autoAcceptShared: autoAcceptFeed,
+          // Voice dictation (`voice.*`): the LOCAL TUI honours the same settings
+          // `run`/`attach` do (Review round 1, HIGH 4: it used to get the
+          // defaults, so `voice.enabled: false` did nothing on this path).
+          voice: { ...VOICE_DEFAULTS, ...(config.voice ?? {}) },
+          voiceConfigDir: config.configDir,
           createSession: () => {
             // A session this call CREATES (a `/clear` fork, a hop target)
             // starts with the switch the person has now: the open carries it

@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { HelperMessage } from "../src/voice-protocol.ts";
 import {
+  IDLE_EXIT_MS,
+  TRANSCRIBE_TIMEOUT_MS,
   VOICE_DEFAULTS,
   type VoiceCommand,
   type VoiceConfig,
   type VoiceEvent,
   type VoiceModel,
+  dictationInsertion,
+  joinDictation,
   voiceAvailability,
   voiceInit,
   voiceStep,
@@ -319,5 +323,194 @@ describe("T2: an unavailable TUI never spawns and never opens the mic", () => {
     model = voiceStep(model, key("toggle")).model;
     const second = voiceStep(model, key("toggle"));
     expect(second.commands.filter((c) => c.kind === "notice")).toEqual([]);
+  });
+});
+
+/**
+ * Fix round 1 (Review HIGH 1/2/3). Each test names the mutation it kills.
+ */
+describe("Fix 1 (HIGH 1): the transcript APPENDS to the field, never repeats it", () => {
+  test("dictationInsertion appends only what is new, one separating space", () => {
+    // Mutation: `return joinDictation(before, text)` → "hellohello world".
+    expect(dictationInsertion("hello", "world")).toBe(" world");
+    expect(dictationInsertion("hello ", "world")).toBe("world");
+    expect(dictationInsertion("", "world")).toBe("world");
+    expect(dictationInsertion("line\n", "world")).toBe("world");
+    expect(dictationInsertion("hello", "  spaced  ")).toBe(" spaced");
+    expect(dictationInsertion("hello", "   ")).toBe("");
+  });
+
+  test("applying it to a field reproduces joinDictation exactly (one source of truth)", () => {
+    for (const field of ["", "hello", "hello ", "a\n"]) {
+      for (const text of ["world", " world ", "", "  "]) {
+        expect(field + dictationInsertion(field, text)).toBe(joinDictation(field, text));
+      }
+    }
+  });
+});
+
+describe("Fix 2 (HIGH 2): a stale helper line is never applied", () => {
+  test("every dictation gets a FRESH id (the counter never resets)", () => {
+    // Mutation: `const id = (model.id ?? 0) + 1` → every dictation is id 1.
+    const r = drive([
+      key("toggle"),
+      helper(ready),
+      key("cancel"),
+      key("toggle"),
+      helper(ready),
+      key("cancel"),
+      key("toggle"),
+    ]);
+    const starts = r.commands
+      .filter((c) => c.kind === "send")
+      .map((c) => (c as { command: { t: string; id?: number } }).command)
+      .filter((c) => c.t === "start")
+      .map((c) => c.id);
+    expect(starts).toEqual([1, 2, 3]);
+  });
+
+  test("the trace from the review: a cancelled dictation's late `final` is NOT inserted", () => {
+    // race.ts (A): Ctrl+R, stop, Esc, Ctrl+R, then the old final lands.
+    const r = drive([
+      key("toggle"),
+      helper(ready),
+      helper({ t: "listening", id: 1, device: "mic" }),
+      key("toggle"), // stop -> transcribing
+      key("cancel"), // Esc: discard
+      key("toggle"), // a new dictation, id 2
+      helper({ t: "final", id: 1, text: "SECRET DISCARDED TEXT" }),
+    ]);
+    expect(r.commands.filter((c) => c.kind === "insert")).toEqual([]);
+    // The new dictation is untouched: it is still starting.
+    expect(r.model.phase).toBe("starting");
+    expect(r.model.id).toBe(2);
+  });
+
+  test("the trace from the review: a stale `listening` after Esc never revives the TUI", () => {
+    // race.ts (B): Esc while starting; the in-flight listening line arrives after.
+    const r = drive([
+      key("toggle"),
+      key("cancel"),
+      helper({ t: "listening", id: 1, device: "mic" }),
+    ]);
+    expect(r.model.phase).toBe("idle");
+  });
+
+  test("an idle model holds no id at all, so no id can match it", () => {
+    const r = drive([key("toggle"), key("cancel")]);
+    expect(r.model.id).toBeNull();
+    expect(r.model.issued).toBe(1);
+  });
+});
+
+describe("Fix 3 (HIGH 3): the helper's vad/turnp/clock drive the cap, auto-stop and the timers", () => {
+  const T0 = 1_000_000;
+  const at = (base: number, key_: "toggle" | "finish" | "cancel"): VoiceEvent => ({
+    kind: "key",
+    key: key_,
+    now: base,
+  });
+
+  test("`vad` advances the audio clock, so maxSeconds can actually stop it", () => {
+    // Mutation: ignore `vad` → the elapsed readout and the cap stay at zero.
+    const r = drive([
+      at(T0, "toggle"),
+      helper(ready),
+      helper({ t: "listening", id: 1, device: "mic" }),
+      helper({ t: "vad", id: 1, ms: 2000, p: 0.9 }),
+    ]);
+    expect(r.model.audioMs).toBe(2000);
+    const capped = drive([
+      at(T0, "toggle"),
+      helper(ready),
+      helper({ t: "listening", id: 1, device: "mic" }),
+      helper({ t: "vad", id: 1, ms: VOICE_DEFAULTS.maxSeconds * 1000, p: 0.9 }),
+    ]);
+    expect(capped.commands).toContainEqual({ kind: "send", command: { t: "stop", id: 1 } });
+    expect(capped.notices.join(" ")).toContain("5:00");
+  });
+
+  test("auto-stop OFF: silence never ends the dictation (the default)", () => {
+    // Mutation: read `ENDPOINT_DEFAULTS.autoStop` instead of the config → red.
+    const events: VoiceEvent[] = [
+      at(T0, "toggle"),
+      helper(ready),
+      helper({ t: "listening", id: 1, device: "mic" }),
+      helper({ t: "vad", id: 1, ms: 100, p: 0.9 }),
+    ];
+    // 20 silence windows with auto-stop off, under the 3 s hard stop.
+    for (let i = 0; i < 20; i++) {
+      events.push(helper({ t: "vad", id: 1, ms: 2000 + (i + 1) * 32, p: 0.01 }));
+    }
+    const r = drive(events);
+    expect(r.model.phase).toBe("listening");
+    expect(r.commands.filter((c) => c.kind === "send")).toEqual([
+      { kind: "send", command: { t: "start", id: 1, lang: "auto" } },
+    ]);
+  });
+
+  test("auto-stop ON: a pause past the floor asks Smart Turn, and its verdict stops it", () => {
+    // Mutation: drop the fold → the settings `voice.autoStop` and
+    // `voice.autoStopSilenceMs` are dead (the review's finding).
+    const config = cfg({ autoStop: true, autoStopSilenceMs: 300 });
+    const r = drive(
+      [
+        at(T0, "toggle"),
+        helper(ready),
+        helper({ t: "listening", id: 1, device: "mic" }),
+        helper({ t: "vad", id: 1, ms: 100, p: 0.9 }), // speech
+        helper({ t: "vad", id: 1, ms: 400, p: 0.01 }), // 368 ms of silence
+        helper({ t: "turnp", id: 1, p: 0.95 }),
+      ],
+      config,
+    );
+    expect(r.commands).toContainEqual({ kind: "send", command: { t: "turn", id: 1 } });
+    expect(r.commands).toContainEqual({ kind: "send", command: { t: "stop", id: 1 } });
+    expect(r.model.phase).toBe("transcribing");
+  });
+
+  test("auto-stop ON: a comma pause under the floor is NOT a stop (the comma regression)", () => {
+    const config = cfg({ autoStop: true, autoStopSilenceMs: 500 });
+    const r = drive(
+      [
+        at(T0, "toggle"),
+        helper(ready),
+        helper({ t: "listening", id: 1, device: "mic" }),
+        helper({ t: "vad", id: 1, ms: 1600, p: 0.95 }),
+        helper({ t: "vad", id: 1, ms: 1824, p: 0.02 }), // a 224 ms comma pause
+        helper({ t: "vad", id: 1, ms: 2000, p: 0.95 }), // speech resumes
+      ],
+      config,
+    );
+    expect(r.commands.filter((c) => c.kind === "send")).toEqual([
+      { kind: "send", command: { t: "start", id: 1, lang: "auto" } },
+    ]);
+    expect(r.model.phase).toBe("listening");
+  });
+
+  test("a hung `stop` does not freeze the phase: the clock says so and frees the child", () => {
+    // Mutation: no transcribingAt → the TUI stays `transcribing` for ever.
+    const r = drive([
+      at(T0, "toggle"),
+      helper(ready),
+      helper({ t: "listening", id: 1, device: "mic" }),
+      at(T0 + 500, "finish"),
+      { kind: "clock", now: T0 + 500 + TRANSCRIBE_TIMEOUT_MS },
+    ]);
+    expect(r.model.phase).toBe("idle");
+    expect(r.commands).toContainEqual({ kind: "kill" });
+    expect(r.notices.join(" ")).toContain("did not answer in time");
+  });
+
+  test("an idle child is ended after ten minutes (F13: no mic held)", () => {
+    const r = drive([
+      at(T0, "toggle"),
+      { kind: "helper", message: ready, now: T0 },
+      { kind: "helper", message: { t: "listening", id: 1, device: "mic" }, now: T0 },
+      { kind: "helper", message: { t: "final", id: 1, text: "done" }, now: T0 },
+      { kind: "clock", now: T0 + IDLE_EXIT_MS },
+    ]);
+    expect(r.commands).toContainEqual({ kind: "kill" });
+    expect(r.model.childAlive).toBe(false);
   });
 });

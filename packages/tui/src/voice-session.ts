@@ -1,3 +1,4 @@
+import { sanitizePasted } from "./paste.ts";
 /**
  * The dictation lifecycle, as a PURE reducer (docs/feat/voice-dictation.md §5).
  *
@@ -12,7 +13,7 @@
  * the vocabulary, so no path through this reducer can send a message. The
  * transcript is field text, and the user sends it like anything they typed.
  */
-import { sanitizePasted } from "./paste.ts";
+import { ENDPOINT_DEFAULTS, type EndpointState, foldEndpoint } from "./voice-endpoint.ts";
 
 /** The voice settings, after defaults (`VOICE_DEFAULTS`), as the reducer reads them. */
 export interface VoiceConfig {
@@ -61,10 +62,22 @@ export interface VoiceModel {
   readonly phase: VoicePhase;
   /** The buffer id in flight (the helper numbers dictations); null when idle. */
   readonly id: number | null;
+  /** The highest id ever ISSUED, and it never resets (Review round 1, HIGH 2). */
+  readonly issued: number;
   /** Audio time captured so far, for the elapsed readout and the cap. */
   readonly audioMs: number;
   /** The live input level, dBFS, for the meter (null: no reading yet). */
   readonly dbfs: number | null;
+  /** The auto-stop fold's state for the dictation in flight (Review HIGH 3). */
+  readonly endpoint: EndpointState;
+  /** When this dictation's audio clock started (wall ms; `null` before the first tick). */
+  readonly startedAt: number | null;
+  /** When the `stop` went out (wall ms): the hung-transcription guard's start. */
+  readonly transcribingAt: number | null;
+  /** A child exists (we spawned it and have not killed it): the idle-exit timer's subject. */
+  readonly childAlive: boolean;
+  /** Wall ms of the last dictation activity, for the 10-minute idle exit. */
+  readonly lastActivityAt: number;
   /** The preview text, dimmed and never inserted. */
   readonly partial: string;
   /** The detected/settled language, for the strip's `[it]` tag. */
@@ -96,10 +109,12 @@ export type VoiceCommand =
 
 /** Everything that can move the model. */
 export type VoiceEvent =
-  | { readonly kind: "key"; readonly key: "toggle" | "finish" | "cancel" }
+  | { readonly kind: "key"; readonly key: "toggle" | "finish" | "cancel"; readonly now?: number }
   /** A parsed helper message. */
   | {
       readonly kind: "helper";
+      /** Wall ms (a test injects it; production reads `Date.now()`). */
+      readonly now?: number;
       readonly message:
         | {
             readonly t: "ready";
@@ -138,7 +153,7 @@ export type VoiceEvent =
   | { readonly kind: "protocolError"; readonly code: string; readonly message: string }
   /** The dictation's audio clock advanced (`useVoice` times it from `vad`). */
   | { readonly kind: "elapsed"; readonly audioMs: number }
-  /** Wall clock, for the three-crashes-in-60-s rule. */
+  /** Wall clock, for the three-crashes-in-60-s rule and the two timers. */
   | { readonly kind: "clock"; readonly now: number };
 
 export interface VoiceStep {
@@ -150,6 +165,15 @@ export interface VoiceStep {
 const CRASH_WINDOW_MS = 60_000;
 /** The cap that switches voice off after repeated crashes (F4). */
 const CRASH_LIMIT = 3;
+/**
+ * After `stop`, how long a `transcribing` TUI waits for the `final` before it
+ * says so and goes idle (Review HIGH 3: a hung helper must not freeze the phase
+ * forever). Generous: a cold CoreML compile plus a 5-minute take measured well
+ * under it.
+ */
+export const TRANSCRIBE_TIMEOUT_MS = 20_000;
+/** No dictation for this long ends the child, so an idle TUI holds no mic (F13). */
+export const IDLE_EXIT_MS = 10 * 60_000;
 
 /**
  * Can voice work in this process at all? A local terminal on the Mac, with the
@@ -182,8 +206,14 @@ export function voiceInit(
     config,
     phase: "idle",
     id: null,
+    issued: 0,
     audioMs: 0,
     dbfs: null,
+    endpoint: foldEndpoint.init(),
+    startedAt: null,
+    transcribingAt: null,
+    childAlive: false,
+    lastActivityAt: 0,
     partial: "",
     lang: null,
     device: null,
@@ -231,15 +261,25 @@ export function cleanTranscript(text: string): string {
 }
 
 /**
- * Join a transcript onto the text already in the field at the cursor, with ONE
- * separating space — never two, never none where words would run together, and
- * nothing at all for blank text or for an empty field.
+ * Join a transcript onto the text already in the field, with ONE separating
+ * space — never two, never none where words would run together, and nothing at
+ * all for blank text or for an empty field.
  */
 export function joinDictation(field: string, text: string): string {
+  return field + dictationInsertion(field, text);
+}
+
+/**
+ * What a transcript actually APPENDS to the field, given the text before the
+ * cursor (Review round 1, HIGH 1). This — not `joinDictation` — is what goes to
+ * `field.insert`: `joinDictation` returns the WHOLE field, so inserting it put
+ * the field in twice (`hello` + `world` → `hellohello world`).
+ */
+export function dictationInsertion(before: string, text: string): string {
   const clean = cleanTranscript(text);
-  if (clean === "") return field;
-  if (field === "") return clean;
-  return field.endsWith(" ") || field.endsWith("\n") ? `${field}${clean}` : `${field} ${clean}`;
+  if (clean === "") return "";
+  if (before === "") return clean;
+  return before.endsWith(" ") || before.endsWith("\n") ? clean : ` ${clean}`;
 }
 
 function idle(model: VoiceModel): VoiceModel {
@@ -251,12 +291,17 @@ function idle(model: VoiceModel): VoiceModel {
     dbfs: null,
     partial: "",
     lang: null,
+    endpoint: foldEndpoint.init(),
+    startedAt: null,
+    transcribingAt: null,
   };
 }
 
 /** Start a dictation: spawn lazily, then send `start`. */
-function begin(model: VoiceModel, commands: VoiceCommand[]): VoiceModel {
-  const id = (model.id ?? 0) + 1;
+function begin(model: VoiceModel, commands: VoiceCommand[], now: number | null): VoiceModel {
+  // The id is monotonic across the whole TUI session (`issued`), never a
+  // function of the nullable live id (Review round 1, HIGH 2).
+  const id = model.issued + 1;
   commands.push({ kind: "spawn" });
   commands.push({
     kind: "send",
@@ -266,10 +311,44 @@ function begin(model: VoiceModel, commands: VoiceCommand[]): VoiceModel {
     ...model,
     phase: "starting",
     id,
+    issued: id,
     audioMs: 0,
     dbfs: null,
     partial: "",
+    endpoint: foldEndpoint.init(),
+    startedAt: now,
+    transcribingAt: null,
+    childAlive: true,
+    lastActivityAt: now ?? model.lastActivityAt,
     lang: model.config.language === "auto" ? null : model.config.language,
+  };
+}
+
+/** The `voice.maxSeconds` notice (F5), pushed after the `stop` it explains. */
+function capped(model: VoiceModel, commands: VoiceCommand[]): VoiceModel {
+  const mins = Math.floor(model.config.maxSeconds / 60);
+  const secs = model.config.maxSeconds % 60;
+  commands.push({
+    kind: "notice",
+    text: `stopped at ${String(mins)}:${String(secs).padStart(2, "0")} (voice.maxSeconds)`,
+  });
+  return model;
+}
+
+/** `stop` went out: transcribe, and start the hung-transcription clock. */
+function toTranscribing(
+  model: VoiceModel,
+  commands: VoiceCommand[],
+  now: number | null,
+): VoiceModel {
+  commands.push({ kind: "send", command: { t: "stop", id: model.id } });
+  return {
+    ...model,
+    phase: "transcribing",
+    partial: "",
+    dbfs: null,
+    transcribingAt: now,
+    lastActivityAt: now ?? model.lastActivityAt,
   };
 }
 
@@ -293,6 +372,14 @@ function exitNotice(code: number | null, stderrTail: string): string {
  */
 export function voiceStep(model: VoiceModel, event: VoiceEvent): VoiceStep {
   const commands: VoiceCommand[] = [];
+  // The wall clock: injected by a test through the event carrying it, else read
+  // once — the two timers and the crash window are its only users.
+  const now =
+    event.kind === "clock"
+      ? event.now
+      : event.kind === "key" || event.kind === "helper"
+        ? (event.now ?? Date.now())
+        : Date.now();
 
   // `off` is terminal: nothing reopens it in this TUI session.
   if (model.phase === "off") return { model, commands: [] };
@@ -308,13 +395,9 @@ export function voiceStep(model: VoiceModel, event: VoiceEvent): VoiceStep {
     }
 
     if (event.key === "toggle") {
-      if (model.phase === "idle") return { model: begin(model, commands), commands };
+      if (model.phase === "idle") return { model: begin(model, commands, now), commands };
       if (model.phase === "starting" || model.phase === "listening") {
-        commands.push({ kind: "send", command: { t: "stop", id: model.id } });
-        return {
-          model: { ...model, phase: "transcribing", partial: "", dbfs: null },
-          commands,
-        };
+        return { model: toTranscribing(model, commands, now), commands };
       }
       // Already transcribing: a toggle is not a second finish.
       return { model, commands: [] };
@@ -329,11 +412,7 @@ export function voiceStep(model: VoiceModel, event: VoiceEvent): VoiceStep {
         return { model, commands };
       }
       if (model.phase === "listening") {
-        commands.push({ kind: "send", command: { t: "stop", id: model.id } });
-        return {
-          model: { ...model, phase: "transcribing", partial: "", dbfs: null },
-          commands,
-        };
+        return { model: toTranscribing(model, commands, now), commands };
       }
       return { model, commands: [] };
     }
@@ -345,18 +424,36 @@ export function voiceStep(model: VoiceModel, event: VoiceEvent): VoiceStep {
       model.phase === "transcribing"
     ) {
       commands.push({ kind: "send", command: { t: "cancel", id: model.id } });
-      return { model: idle(model), commands };
+      return { model: { ...idle(model), lastActivityAt: now }, commands };
     }
     return { model, commands: [] };
   }
 
   if (event.kind === "clock") {
-    // Only the crash window cares about wall time.
-    if (model.crashes.length === 0) return { model, commands: [] };
-    const crashes = model.crashes.filter((at) => event.now - at <= CRASH_WINDOW_MS);
-    return crashes.length === model.crashes.length
-      ? { model, commands: [] }
-      : { model: { ...model, crashes }, commands };
+    // The two timers, plus the crash window's expiry.
+    const expired = model.crashes.filter((at) => now - at <= CRASH_WINDOW_MS);
+    const next: VoiceModel =
+      expired.length === model.crashes.length ? model : { ...model, crashes: expired };
+    if (
+      next.phase === "transcribing" &&
+      next.transcribingAt !== null &&
+      now - next.transcribingAt >= TRANSCRIBE_TIMEOUT_MS
+    ) {
+      // A hung `stop` must not freeze the phase for ever (Review HIGH 3): say so,
+      // drop the dictation, and give the next one a fresh child.
+      commands.push({ kind: "kill" });
+      commands.push({
+        kind: "notice",
+        text: "the voice helper did not answer in time — this dictation was lost",
+      });
+      return { model: { ...idle(next), childAlive: false, lastActivityAt: now }, commands };
+    }
+    if (next.childAlive && next.phase === "idle" && now - next.lastActivityAt >= IDLE_EXIT_MS) {
+      // An idle TUI holds no mic and no child for ten minutes (F13).
+      commands.push({ kind: "kill" });
+      return { model: { ...next, childAlive: false }, commands };
+    }
+    return { model: next, commands };
   }
 
   if (event.kind === "elapsed") {
@@ -367,26 +464,22 @@ export function voiceStep(model: VoiceModel, event: VoiceEvent): VoiceStep {
     if (audioMs < capMs) return { model: next, commands };
     // F5: the cap finishes the dictation, and the text IS inserted when it
     // arrives. Never dropped.
-    commands.push({ kind: "send", command: { t: "stop", id: model.id } });
-    const mins = Math.floor(model.config.maxSeconds / 60);
-    const secs = model.config.maxSeconds % 60;
-    commands.push({
-      kind: "notice",
-      text: `stopped at ${String(mins)}:${String(secs).padStart(2, "0")} (voice.maxSeconds)`,
-    });
-    return { model: { ...next, phase: "transcribing", partial: "" }, commands };
+    const stopped = toTranscribing(next, commands, now);
+    return { model: capped(stopped, commands), commands };
   }
 
   if (event.kind === "protocolError") {
     commands.push({ kind: "kill" });
     commands.push({ kind: "notice", text: `voice helper: ${event.message}` });
-    return { model: { ...idle(model), ready: false }, commands };
+    return { model: { ...idle(model), ready: false, childAlive: false }, commands };
   }
 
   if (event.kind === "exit") {
+    // The child is gone whatever the phase: the spawn latch frees (MEDIUM 9).
     const wasRunning = model.phase !== "idle";
-    if (!wasRunning) return { model: { ...model, ready: false }, commands };
-    const now = Date.now();
+    if (!wasRunning) {
+      return { model: { ...model, ready: false, childAlive: false }, commands };
+    }
     const crashes = noteCrash(model, now).crashes;
     if (crashes.length >= CRASH_LIMIT) {
       commands.push({
@@ -394,12 +487,12 @@ export function voiceStep(model: VoiceModel, event: VoiceEvent): VoiceStep {
         text: "voice helper keeps stopping — voice is switched off for this session",
       });
       return {
-        model: { ...idle(model), ready: false, crashes, phase: "off" },
+        model: { ...idle(model), ready: false, crashes, phase: "off", childAlive: false },
         commands,
       };
     }
     commands.push({ kind: "notice", text: exitNotice(event.code, event.stderrTail) });
-    return { model: { ...idle(model), ready: false, crashes }, commands };
+    return { model: { ...idle(model), ready: false, crashes, childAlive: false }, commands };
   }
 
   // --- the helper's messages
@@ -409,15 +502,25 @@ export function voiceStep(model: VoiceModel, event: VoiceEvent): VoiceStep {
     return { model: { ...model, ready: true, device: message.device }, commands };
   }
 
-  // Every message after the handshake carries the buffer id; a stale one (an
-  // earlier dictation's late line) is ignored rather than applied.
-  if (message.t !== "error" && model.id !== null && "id" in message && message.id !== model.id) {
+  // Every message after the handshake carries the buffer id; a line belonging to
+  // a dictation we no longer hold (a cancelled one's late `final`, a stale
+  // `listening` after Esc) is IGNORED rather than applied (Review round 1,
+  // HIGH 2). The comparison is against the live id — and an idle model holds
+  // none, so "no id at all" is stale too, never a wildcard.
+  if (message.t !== "error" && "id" in message && message.id !== model.id) {
+    return { model, commands: [] };
+  }
+  if (message.t === "error" && message.id !== undefined && message.id !== model.id) {
     return { model, commands: [] };
   }
 
+  // Past the guard, a line that is not the handshake's belongs to the live
+  // dictation: from here on it is activity for the idle-exit timer.
+  const live: VoiceModel = { ...model, lastActivityAt: now };
+
   if (message.t === "listening") {
     return {
-      model: { ...model, phase: "listening", device: message.device },
+      model: { ...live, phase: "listening", device: message.device },
       commands,
     };
   }
@@ -426,24 +529,55 @@ export function voiceStep(model: VoiceModel, event: VoiceEvent): VoiceStep {
     if (model.phase !== "listening" && model.phase !== "starting") return { model, commands: [] };
     // Audio time: the helper counts the windows it saw, so a stalled pipe or a
     // slow frame can never make the cap fire early or late.
-    return { model: { ...model, audioMs: Math.max(model.audioMs, message.ms) }, commands };
+    const audioMs = Math.max(model.audioMs, message.ms);
+    // The auto-stop fold reads `voice.autoStop` / `voice.autoStopSilenceMs` HERE
+    // (Review round 1, HIGH 3): before this, both settings were dead.
+    const step = foldEndpoint.step(live.endpoint, {
+      kind: "window",
+      ms: Math.max(0, audioMs - model.audioMs),
+      p: message.p,
+      autoStop: model.config.autoStop,
+      floorMs: model.config.autoStopSilenceMs,
+      threshold: ENDPOINT_DEFAULTS.threshold,
+      hardStopMs: ENDPOINT_DEFAULTS.hardStopMs,
+    });
+    const next: VoiceModel = { ...live, audioMs, endpoint: step.state };
+    if (step.action === "stop") {
+      // The pause said the sentence is over: finish, and the final is inserted
+      // exactly as a key finish would be.
+      return { model: toTranscribing(next, commands, now), commands };
+    }
+    // The cap (F5) is audio time, so it is read from the very tick that moves
+    // the clock — `useVoice` dispatches no separate timer for it.
+    if (audioMs >= model.config.maxSeconds * 1000) {
+      return { model: capped(toTranscribing(next, commands, now), commands), commands };
+    }
+    if (step.action === "askTurn") {
+      commands.push({ kind: "send", command: { t: "turn", id: model.id } });
+    }
+    return { model: next, commands };
   }
 
   if (message.t === "turnp") {
-    // Only the auto-stop fold cares (and only when it is on); the reducer just
-    // carries the reading so a future hands-free loop reads it from one place.
     if (model.phase !== "listening") return { model, commands: [] };
-    return { model, commands: [] };
+    const step = foldEndpoint.step(live.endpoint, {
+      kind: "turnp",
+      p: message.p,
+      threshold: ENDPOINT_DEFAULTS.threshold,
+    });
+    const next: VoiceModel = { ...live, endpoint: step.state };
+    if (step.action === "stop") return { model: toTranscribing(next, commands, now), commands };
+    return { model: next, commands };
   }
 
   if (message.t === "level") {
     if (model.phase !== "listening" && model.phase !== "starting") return { model, commands: [] };
-    return { model: { ...model, dbfs: message.dbfs }, commands };
+    return { model: { ...live, dbfs: message.dbfs }, commands };
   }
 
   if (message.t === "partial") {
     if (model.phase !== "listening" && model.phase !== "starting") return { model, commands: [] };
-    return { model: { ...model, partial: cleanTranscript(message.text) }, commands };
+    return { model: { ...live, partial: cleanTranscript(message.text) }, commands };
   }
 
   if (message.t === "final") {
@@ -461,12 +595,12 @@ export function voiceStep(model: VoiceModel, event: VoiceEvent): VoiceStep {
       commands.push({ kind: "insert", text });
     }
     return {
-      model: { ...idle(model), lang: message.lang ?? model.lang },
+      model: { ...idle(live), lang: message.lang ?? model.lang },
       commands,
     };
   }
 
   // error
   commands.push({ kind: "notice", text: errorNotice(message.code, message.message, model.config) });
-  return { model: idle(model), commands };
+  return { model: idle(live), commands };
 }

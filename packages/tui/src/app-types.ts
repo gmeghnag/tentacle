@@ -450,10 +450,25 @@ export interface AppProps {
    */
   readonly voice?: VoiceConfig;
   /**
+   * Where the helper's log and `<configDir>/voice/bin` live. The CLI passes the
+   * real config dir (Review round 1, MEDIUM 8: absent, the log path was
+   * `/voice/helper.log`). Absent in a test/host-less mount: no log file is opened.
+   */
+  readonly voiceConfigDir?: string;
+  /**
    * TEST ONLY: the voice helper spawner. The real one is `Bun.spawn`; a test
    * passes a fake so no child process (and no microphone) exists in `bun test`.
    */
   readonly voiceSpawner?: VoiceSpawner;
+  /**
+   * TEST ONLY: the platform/env `voiceAvailability` reads. Default: this
+   * process's. A test passes `{ platform: "darwin", env: {} }` so it does not
+   * fail on a Linux runner or over SSH (Review round 1, MEDIUM 6).
+   */
+  readonly voiceHost?: {
+    readonly platform: string;
+    readonly env: Readonly<Record<string, string | undefined>>;
+  };
   /**
    * Auto-wake: when a background job exits while idle, start a continuation turn
    * so the agent reacts to it without a user prompt. Default: true.

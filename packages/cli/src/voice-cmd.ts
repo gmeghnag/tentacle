@@ -29,6 +29,12 @@ export interface VoiceCmdDeps {
   readonly exists?: (path: string) => boolean;
   /** Is this a Mac at all? Voice is a macOS feature. */
   readonly platform?: string;
+  /**
+   * `--yes` as the PARSER saw it. `ARGS.voice` declares it a bool, so it never
+   * reaches `positional`; without this the flag was silently dropped and
+   * `setup` prompted anyway (Review round 1, MEDIUM 7).
+   */
+  readonly yes?: boolean;
 }
 
 /** The usage line, so `main` and the tests agree on one string. */
@@ -72,6 +78,9 @@ export async function voiceCommand(
     deps.err(`[error] unexpected argument ${JSON.stringify(bad)}\nusage: ${VOICE_USAGE}\n`);
     return 1;
   }
+  // The confirmation, from EITHER the parser's bools or a literal word: `main`
+  // passes `--yes` through `bools`, a direct caller may still type it.
+  const yes = deps.yes === true || rest.includes("--yes") || rest.includes("-y");
 
   if ((deps.platform ?? process.platform) !== "darwin") {
     // Not an error: the setting exists, the platform cannot honour it.
@@ -95,7 +104,7 @@ export async function voiceCommand(
     verb === "setup"
       ? [
           "setup",
-          ...(rest.includes("--yes") || rest.includes("-y") ? ["--yes"] : []),
+          ...(yes ? ["--yes"] : []),
           ...(deps.config.modelsDir === undefined ? [] : ["--models-dir", deps.config.modelsDir]),
         ]
       : [

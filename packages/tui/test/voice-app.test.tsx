@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { Agent } from "@tentacle/agent";
 import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
@@ -94,11 +96,24 @@ function fakeHelper() {
   };
 }
 
-function renderApp(voice: ReturnType<typeof fakeHelper>, config: VoiceConfig = VOICE_DEFAULTS) {
+function renderApp(
+  voice: ReturnType<typeof fakeHelper>,
+  config: VoiceConfig = VOICE_DEFAULTS,
+  extra: { voiceHost?: { platform: string; env: Record<string, string | undefined> } } = {},
+) {
   const provider = new SilentProvider();
   const agent = new Agent({ model: provider, tools: new ToolRegistry(), env: noopEnv });
   const rendered = render(
-    <App agent={agent} model="qwen3" cwd="/tmp/work" voice={config} voiceSpawner={voice.spawner} />,
+    <App
+      agent={agent}
+      model="qwen3"
+      cwd="/tmp/work"
+      voice={config}
+      voiceSpawner={voice.spawner}
+      // The host the availability check reads, PINNED: without it this suite
+      // fails over SSH and on Linux CI (Review round 1, MEDIUM 6).
+      voiceHost={extra.voiceHost ?? { platform: "darwin", env: {} }}
+    />,
   );
   return { ...rendered, provider };
 }
@@ -131,6 +146,55 @@ describe("T7: Ctrl+R dictates, and the transcript lands in the field", () => {
     unmount();
   });
 
+  test("the transcript APPENDS: text already in the field is never repeated", async () => {
+    // Review round 1, HIGH 1 (dup.ts): field `hello`, dictation `world` →
+    // `hellohello world`, because `field.insert` got the WHOLE joined field back.
+    // Mutation: `insert: (t) => field.insert(joinDictation(field.value, t))` → red.
+    const helper = fakeHelper();
+    const { stdin, frames, unmount } = renderApp(helper);
+    await delay(40);
+    stdin.write("hello");
+    await delay(60);
+    stdin.write("\u0012");
+    await delay(80);
+    helper.say({ t: "listening", id: 1, device: "fake" });
+    await delay(60);
+    helper.say({ t: "final", id: 1, text: "world" });
+    await delay(120);
+    const last = frames.at(-1) ?? "";
+    expect(last).toContain("hello world");
+    expect(last).not.toContain("hellohello");
+    unmount();
+  });
+
+  test("over SSH no helper is spawned and the notice says why (the host is read, not assumed)", async () => {
+    // Review round 1, MEDIUM 6: T7 used to depend on the RUNNER's env.
+    const helper = fakeHelper();
+    const { stdin, frames, unmount } = renderApp(helper, VOICE_DEFAULTS, {
+      voiceHost: { platform: "darwin", env: { SSH_TTY: "/dev/ttys001" } },
+    });
+    await delay(40);
+    stdin.write("\u0012");
+    await delay(80);
+    expect(helper.specs).toEqual([]);
+    expect(frames.join("\n")).toContain("off over SSH");
+    unmount();
+  });
+
+  test("`voice.enabled: false` really disables the mic (the config reaches the hook)", async () => {
+    const helper = fakeHelper();
+    const { stdin, frames, unmount } = renderApp(helper, {
+      ...VOICE_DEFAULTS,
+      enabled: false,
+    });
+    await delay(40);
+    stdin.write("\u0012");
+    await delay(80);
+    expect(helper.specs).toEqual([]);
+    expect(frames.join("\n")).toContain("voice dictation is off");
+    unmount();
+  });
+
   test("nothing is sent: the turn never starts from a dictation", async () => {
     const helper = fakeHelper();
     const { stdin, provider, unmount } = renderApp(helper);
@@ -158,5 +222,128 @@ describe("T7: Ctrl+R dictates, and the transcript lands in the field", () => {
     unmount();
     await delay(120);
     expect(helper.wasEnded()).toBe(true);
+  });
+});
+
+/**
+ * Fix round 1 (MEDIUM 8): the spawn used `candidates[0]` blindly, so the
+ * `<configDir>/voice/bin` fallback was never reached, and `voice.input` /
+ * `voice.voiceProcessing` were hardcoded in the helper, so both settings were
+ * dead. Driven through the App so the REAL argument list is what is asserted.
+ */
+describe("Fix 8 (MEDIUM 8): the helper is spawned from a path that exists, with the settings as flags", () => {
+  test("a helper that only exists in <configDir>/voice/bin is the one spawned", async () => {
+    const helper = fakeHelper();
+    const provider = new SilentProvider();
+    const agent = new Agent({ model: provider, tools: new ToolRegistry(), env: noopEnv });
+    const dir = `${tmpdir()}/tentacle-voice-fix1-${String(Date.now())}`;
+    const bin = `${dir}/voice/bin`;
+    mkdirSync(bin, { recursive: true });
+    const path = `${bin}/tentacle-voice`;
+    writeFileSync(path, "#!/bin/sh\n", { mode: 0o755 });
+    try {
+      const { stdin, unmount } = render(
+        <App
+          agent={agent}
+          model="qwen3"
+          cwd="/tmp/work"
+          voice={{ ...VOICE_DEFAULTS, input: "builtin", voiceProcessing: false }}
+          voiceSpawner={helper.spawner}
+          voiceConfigDir={dir}
+          voiceHost={{ platform: "darwin", env: {} }}
+        />,
+      );
+      await delay(40);
+      stdin.write("\u0012");
+      await delay(80);
+      expect(helper.specs).toHaveLength(1);
+      // Mutation: `candidates[0]` → the sibling path, which does not exist.
+      expect(helper.specs[0]?.cmd[0]).toBe(path);
+      // Mutation: drop the arg building → both settings are dead again.
+      expect(helper.specs[0]?.cmd).toContain("--input");
+      expect(helper.specs[0]?.cmd).toContain("builtin");
+      expect(helper.specs[0]?.cmd).toContain("--no-voice-processing");
+      // The log lands under the config dir, not at `/voice/helper.log`.
+      expect(helper.specs[0]?.logPath).toBe(`${dir}/voice/helper.log`);
+      unmount();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * Fix round 1 (MEDIUM 9). `childRef` was nulled on EVERY exit, so a killed
+ * child's late exit nulled the NEW child's ref: that child then held the mic,
+ * untracked, until the TUI exited (nothing ended it).
+ */
+describe("Fix 9 (MEDIUM 9): a killed child's late exit never orphans its successor", () => {
+  test("unmount still ends the SECOND child after the first one's exit lands", async () => {
+    const specs: VoiceSpawnSpec[] = [];
+    const ended: number[] = [];
+    // One line sink per child, bound when its stream is created.
+    const sinks: ((line: string) => void)[] = [];
+    const resolveExit: (() => void)[] = [];
+    const spawner = (spec: VoiceSpawnSpec): VoiceChild => {
+      specs.push(spec);
+      const index = specs.length - 1;
+      return {
+        stdin: {
+          write: () => {},
+          // A real child's exit is OBSERVED later (the 500 ms grace, then
+          // SIGTERM): the test resolves it by hand, at the moment the race the
+          // review describes actually happens.
+          end: () => {
+            ended.push(index + 1);
+          },
+        },
+        stdout: new ReadableStream<Uint8Array>({
+          start(controller) {
+            sinks[index] = (line: string) => controller.enqueue(new TextEncoder().encode(line));
+          },
+        }),
+        stderr: null,
+        exited: new Promise<number>((resolve) => {
+          resolveExit[index] = () => resolve(0);
+        }),
+        kill: () => {
+          ended.push(index + 1);
+        },
+      };
+    };
+    const agent = new Agent({
+      model: new SilentProvider(),
+      tools: new ToolRegistry(),
+      env: noopEnv,
+    });
+    const { stdin, unmount } = render(
+      <App
+        agent={agent}
+        model="qwen3"
+        cwd="/tmp/work"
+        voice={VOICE_DEFAULTS}
+        voiceSpawner={spawner}
+        voiceHost={{ platform: "darwin", env: {} }}
+      />,
+    );
+    await delay(40);
+    // Dictation 1, then a protocol error kills it (the `kill` command).
+    stdin.write("\u0012");
+    await delay(60);
+    sinks[0]?.('{"not":"a message"}\n');
+    await delay(80);
+    // The next dictation spawns child 2 while child 1's exit is still pending.
+    stdin.write("\u0012");
+    await delay(60);
+    expect(specs).toHaveLength(2);
+    // NOW child 1's exit lands: with an unconditional `childRef.current = null`
+    // it clears child 2's ref, and child 2 is never ended again.
+    resolveExit[0]?.();
+    await delay(60);
+    // Now unmount: child 2 must be ended. Mutation: unconditional
+    // `childRef.current = null` on exit → child 2 is untracked and never ended.
+    unmount();
+    await delay(150);
+    expect(ended).toContain(2);
   });
 });

@@ -628,7 +628,11 @@ describe("the local TUI's single broker (AGENTS §7), pinned where it is built",
       /\(io\.startWorkerRuntime \?\? startWorkerRuntime\)\(\s*config,\s*\{ permissions, saver/,
     );
     expect(tui).not.toContain("new PermissionBroker(), saver");
-    expect(tui).toMatch(/startTui\(null, \{\n\s*model: config\.model,\n[\s\S]*?\n\s*permissions,/);
+    // The callee is the `startTui` seam (`io.startTui ?? startTui`), so the
+    // assertion names the argument object: `model:` … `permissions,`.
+    expect(tui).toMatch(
+      /startTui\)\(null, \{\n\s*model: config\.model,\n[\s\S]*?\n\s*permissions,/,
+    );
   });
 });
 
@@ -1106,5 +1110,48 @@ describe("tools.writableDirs wiring (docs/feat/write-tmpdir.md)", () => {
       await rm(project, { recursive: true, force: true });
       await rm(elsewhere, { recursive: true, force: true });
     }
+  });
+});
+
+describe("Fix round 1 (HIGH 4): `voice.*` reaches EVERY TUI the CLI starts", () => {
+  /**
+   * The review's finding: only `runEngineTui` passed `voice`, so the local TUI
+   * and `connect` silently fell back to `VOICE_DEFAULTS` — `voice.enabled: false`
+   * did not disable the mic, and `key`/`language`/`engine` were ignored on the
+   * main path.
+   *
+   * Pinned as TEXT for the two `main` call sites (there is no seam that sees the
+   * options object before Ink; `wiring.test.ts`'s broker guard is the same
+   * shape), and BEHAVIOURALLY for `connect` (`connect-voice.test.ts`).
+   */
+  async function mainText(): Promise<string> {
+    return await Bun.file(`${import.meta.dir}/../src/main.ts`).text();
+  }
+
+  test("the local TUI's `startTui` gets the settings and the config dir", async () => {
+    // Mutation: delete the two lines → the local TUI gets `VOICE_DEFAULTS`.
+    const main = await mainText();
+    // SCOPED to the local block (both paths call through the same
+    // `(io.startTui ?? startTui)` seam, so an unscoped regex would match the
+    // `run`/`attach` call above it and prove nothing).
+    const start = main.indexOf("const sessions = await openSessions(topFlags");
+    const local = main.slice(start, main.indexOf("// A one-shot prompt", start));
+    expect(local).toMatch(
+      /startTui\)\(null, \{\n\s*model: config\.model,\n[\s\S]{0,1600}?voice: \{ \.\.\.VOICE_DEFAULTS, \.\.\.\(config\.voice \?\? \{\}\) \},\n\s*voiceConfigDir: config\.configDir,/,
+    );
+  });
+
+  test("`run`/`attach`'s TUI gets them too (it did before; keep it that way)", async () => {
+    const main = await mainText();
+    expect(
+      main.match(/voice: \{ \.\.\.VOICE_DEFAULTS, \.\.\.\(config\.voice \?\? \{\}\) \}/g) ?? [],
+    ).toHaveLength(2);
+  });
+
+  test("`connect` passes its file-read settings to `startTui`", async () => {
+    const connect = await Bun.file(`${import.meta.dir}/../src/connect.ts`).text();
+    // Mutation: drop these two lines → `connect` gets `VOICE_DEFAULTS`.
+    expect(connect).toMatch(/voice: voice\.config,/);
+    expect(connect).toMatch(/voiceConfigDir: voice\.configDir/);
   });
 });

@@ -69,6 +69,10 @@ export function helperPathCandidates(input: {
  * Build the spawn spec. Every stream is a pipe except stderr, which is the log
  * FILE the caller opens: the helper must never be able to write into the
  * alternate screen (AGENTS §7, F10).
+ *
+ * `logPath` is `""` when the caller could not name a config dir (a host-less
+ * mount): then no log file exists, and the helper's stderr is DRAINED to nothing
+ * rather than dropped — a full pipe would block the child.
  */
 export function voiceSpawnSpec(input: {
   readonly helperPath: string;
@@ -78,6 +82,8 @@ export function voiceSpawnSpec(input: {
 }): VoiceSpawnSpec {
   return {
     cmd: [input.helperPath, ...(input.args ?? [])],
+    // The helper's OWN streams: stdin/stdout speak the protocol, stderr is the
+    // log file. `"inherit"` appears in NO position — a test pins that.
     stdio: { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
     logPath: input.logPath,
     env: { ...(input.env ?? {}) },
@@ -100,6 +106,34 @@ export function spawnVoiceHelper(input: {
       ...(input.env === undefined ? {} : { env: input.env }),
     }),
   );
+}
+
+/**
+ * The `Bun.spawn` options the REAL spawner uses, derived from the spec.
+ *
+ * Extracted (Review round 1, MEDIUM 5) because the spawner used to hardcode
+ * `stderr: "pipe"`/`stdin: "pipe"` beside the spec: T8 pinned the spec, which
+ * nothing on the production path read, so its mutation stayed green. Now the
+ * production spawner consumes THIS, and a test pins it directly.
+ * `stderr` is the log FILE (an fd), so the helper can never paint the
+ * alt-screen (AGENTS §7); when the caller named no config dir there is no file
+ * and the stream is still a pipe, drained by the caller.
+ */
+export function bunSpawnOptions(
+  spec: VoiceSpawnSpec,
+  logFd: number | null,
+): {
+  stdin: StreamDisposition;
+  stdout: StreamDisposition;
+  stderr: StreamDisposition;
+  env: Record<string, string | undefined>;
+} {
+  return {
+    stdin: spec.stdio.stdin,
+    stdout: spec.stdio.stdout,
+    stderr: logFd ?? spec.stdio.stderr,
+    env: { ...process.env, ...spec.env },
+  };
 }
 
 /** Split a stdout chunk into complete lines, keeping the unfinished tail. */

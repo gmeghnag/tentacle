@@ -110,3 +110,35 @@ final class LanguageTests: XCTestCase {
         XCTAssertTrue(["it_IT", "en_US"].contains(auto))
     }
 }
+
+/// Fix round 1 (Review HIGH 3): the helper emitted neither `vad` nor `level`, so
+/// the strip's clock/meter, `voice.maxSeconds` and the auto-stop fold all read
+/// zero. The mapping from a window's level to the probability the TUI folds is
+/// the one decision that lives on the Swift side, so it is pinned here.
+final class WindowTests: XCTestCase {
+    func testAQuietWindowReadsAsSilence() {
+        // Mutation: drop the floor → a quiet room never ends a forgotten
+        // dictation (the hard stop is fed by this number).
+        XCTAssertLessThan(windowSpeechProbability(-74), 0.5)
+        XCTAssertLessThan(windowSpeechProbability(-46), 0.5)
+    }
+
+    func testSpeechReadsAsSpeech() {
+        XCTAssertGreaterThan(windowSpeechProbability(-20), 0.5)
+        XCTAssertGreaterThan(windowSpeechProbability(-29), 0.5)
+    }
+
+    func testTheBoundaryIsMonotonic() {
+        // Louder is never less speech-like.
+        let steps = [-80.0, -50, -45, -40, -30, -20, 0]
+        let probs = steps.map(windowSpeechProbability)
+        XCTAssertEqual(probs, probs.sorted())
+    }
+
+    func testTheCaptureOptionsDefaultToWhatTheConfigSchemaDefaultsAre() {
+        // `voice.input: default`, `voice.voiceProcessing: true` (VOICE_DEFAULTS).
+        let options = CaptureOptions()
+        XCTAssertEqual(options.input, "default")
+        XCTAssertTrue(options.voiceProcessing)
+    }
+}

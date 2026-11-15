@@ -63,7 +63,7 @@ import { useQuitClear } from "./useQuitClear.ts";
 import { useSessionLink } from "./useSessionLink.ts";
 import { type HopTurnPort, useTurnDriver } from "./useTurnDriver.ts";
 import { useVoice } from "./useVoice.ts";
-import { VOICE_DEFAULTS, joinDictation } from "./voice-session.ts";
+import { VOICE_DEFAULTS, dictationInsertion } from "./voice-session.ts";
 import { voiceStripView } from "./voice-view.ts";
 import { tryWake } from "./wake-gate.ts";
 
@@ -215,7 +215,9 @@ export function App({
   columns: fixedColumns,
   jobRefreshMs,
   voice: voiceConfig = VOICE_DEFAULTS,
+  voiceConfigDir,
   voiceSpawner,
+  voiceHost,
 }: AppProps): ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -792,8 +794,16 @@ export function App({
   // uses (`pushNoticeRef`, set at its definition).
   const voice = useVoice({
     config: voiceConfig,
-    insert: (text: string) => field.insert(joinDictation(field.value, text)),
+    // The transcript is INSERTED at the cursor, so what goes to `field.insert` is
+    // the appended part only (Review round 1, HIGH 1: passing the WHOLE joined
+    // field duplicated everything already typed).
+    insert: (text: string) => field.insert(dictationInsertion(field.value, text)),
     notice: (text: string) => pushNoticeRef.current(text),
+    // The world the availability check reads. Passed explicitly so a test pins it
+    // instead of inheriting the host's (Review MEDIUM 6: T7 failed over SSH).
+    platform: voiceHost?.platform ?? process.platform,
+    env: voiceHost?.env ?? process.env,
+    ...(voiceConfigDir === undefined ? {} : { configDir: voiceConfigDir }),
     ...(voiceSpawner === undefined ? {} : { spawner: voiceSpawner }),
   });
   // The phase the key layer reads (`voice()`), as a ref so a key mid-dictation
