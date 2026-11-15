@@ -69,7 +69,11 @@ export function PillButton({
         opacity: pressed && !disabled ? 0.7 : 1,
       })}
     >
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+      {/* Disabled = `fill` + `sec` at reduced strength (visual review 1, P1): at
+          full strength a grey label on `fill` read as a live neutral button. */}
+      <View
+        style={{ flexDirection: "row", alignItems: "center", gap: 8, opacity: disabled ? 0.5 : 1 }}
+      >
         {busy ? <ActivityIndicator color={fg} /> : null}
         {icon === undefined || busy ? null : <Icon name={icon} color={fg} size={18} />}
         <Text maxFontSizeMultiplier={DENSE_FONT_SCALE} style={[typography.headline, { color: fg }]}>

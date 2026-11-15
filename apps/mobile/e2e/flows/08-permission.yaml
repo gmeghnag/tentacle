@@ -39,6 +39,10 @@ appId: so.tentacle.app
     id: "perm-reject_once"
 - assertVisible:
     id: "perm-reply"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "08-approval"
 - tapOn:
     id: "perm-allow_once"
 - extendedWaitUntil:
@@ -53,5 +57,9 @@ appId: so.tentacle.app
     id: "tool-${output.callId}-ok"
 - assertVisible:
     id: "diff-${output.callId}"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "08-diff"
 - runScript:
     file: "08-file.js"

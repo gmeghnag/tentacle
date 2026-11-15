@@ -11,6 +11,7 @@
  *   wire for flow 08/09/10 to answer from the phone or the laptop;
  * - `SLOW …` streams a few seconds and then ENDS (the running indicator is
  *   observable, and `turn-idle` follows);
+ * - `SHOWCASE …` answers with `SHOWCASE_MD` (the screenshot flow's markdown);
  * - anything else answers in five chunks, fast.
  *
  * The tool call is streamed the way a real server streams one (a `tool_calls`
@@ -54,6 +55,26 @@ function frame(delta: object, finish?: string): string {
 }
 
 const DELTAS = ["Hello", " from", " the", " mock", " model."];
+
+/**
+ * `SHOWCASE …` (docs/feat/mobile-ui-polish.md Slice 6, flow `24-ui-shots`): one
+ * answer with every markdown shape the Conversation mockup draws — inline code
+ * short (a chip) and long (a run), a fenced block whose quotes, `<`, `>` and `&`
+ * must show as themselves (owner B7), a table and a list — so one screenshot
+ * shows them all. Streamed in a few chunks, split at line ends.
+ */
+export const SHOWCASE_MD = [
+  "The quit path calls `closeSessions()`, which sends `session/close` for every open session.\n",
+  "\nRun it with `python3 dirscanner.py [path] [-n N] [--hidden]` to see the totals:\n",
+  "\n```python\n",
+  "def human(n):\n",
+  "    return f\"{n:,} B\" if n < 1024 else f'{n / 1024:.1f} KB'\n",
+  "\n",
+  "print(f\"{'EXT':<12}{'FILES':>8}\")  # a < b && c > d\n",
+  "```\n",
+  "\n| Ext | Files | Size |\n|---|---|---|\n| .ts | 412 | 1.9 MB |\n| .md | 38 | 210 KB |\n",
+  "\n- Quitting now only **detaches**\n- The turn keeps running on the daemon\n",
+];
 
 /** Chunk spacing of a `SLOW` stream (ms): long enough for a UI flow to observe it. */
 export const SLOW_MS = 900;
@@ -284,7 +305,12 @@ function stream(
       // 13d's flow 18: the images reached the MODEL (not just the daemon's store),
       // so the answer says how many. `[context: …]` lines are the daemon's own.
       const images = lastUserImages(body);
-      const deltas = images === 0 ? DELTAS : [`saw ${images} image${images === 1 ? "" : "s"}`];
+      const deltas =
+        images > 0
+          ? [`saw ${images} image${images === 1 ? "" : "s"}`]
+          : prompt.includes("SHOWCASE")
+            ? SHOWCASE_MD
+            : DELTAS;
       for (const delta of deltas) {
         send(frame({ content: delta }));
         await Bun.sleep(

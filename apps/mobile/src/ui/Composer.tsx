@@ -10,7 +10,7 @@
  */
 import type { JSX } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import { type Palette, size, typography } from "../theme.ts";
+import { type Palette, shadow, size, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
 
 export type ComposerButton = "send" | "queue" | "send-later" | "stop" | "disabled";
@@ -103,7 +103,7 @@ export function Composer({
           the field is NOT empty (a hand-back, a Take, an Edit). */}
         {draft === "" ? null : (
           <Text testID="composer-filled" style={styles.hidden}>
-            {""}
+            {" "}
           </Text>
         )}
       </View>
@@ -153,9 +153,7 @@ const styles = StyleSheet.create({
     borderRadius: size.composer / 2,
     borderWidth: StyleSheet.hairlineWidth * 2,
     paddingHorizontal: 6,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 6 },
-    shadowRadius: 20,
+    ...shadow.glass,
   },
   photo: {
     width: 36,
@@ -174,5 +172,15 @@ const styles = StyleSheet.create({
   stopSquare: { width: 15, height: 15, borderRadius: 3 },
   // `composer-filled` is an OBSERVABLE, not decoration: zero-size keeps the row
   // where it was (P9's contract needs the id only).
-  hidden: { width: 0, height: 0, fontSize: 0 },
+  // 1×1 and absolute, not 0×0: iOS 26 drops an empty-frame element from the
+  // accessibility tree (slice 6 walk: `turn-idle`, same style, vanished).
+  hidden: {
+    position: "absolute",
+    left: 0,
+    bottom: 0,
+    width: 1,
+    height: 1,
+    fontSize: 1,
+    color: "transparent",
+  },
 });

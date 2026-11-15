@@ -22,6 +22,10 @@ appId: so.tentacle.app
     id: "pair-paste-submit"
 - assertVisible:
     id: "pair-error-invalid-payload"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "14-pair-bad-paste"
 # Nothing was dialled: `pair` never saw a claim.
 - runScript:
     file: "pair-claimed.js"

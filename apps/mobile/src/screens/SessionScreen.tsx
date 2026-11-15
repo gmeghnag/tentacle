@@ -15,8 +15,9 @@
  * `tool-<callId>-<status>`, `diff-<callId>`, `turn-running`, `turn-idle`,
  * `composer-input`, `composer-send`, `composer-stop`, `banner-<kind>`,
  * `perm-sheet`, `perm-<optionId>`, `perm-reply-input`, `reopen`, `session-back`,
- * `jump-latest`.
+ * `jump-latest`, `session-menu`, `session-menu-sheet`, `session-menu-copy-last|copy-all`.
  */
+import * as Clipboard from "expo-clipboard";
 import { type ComponentRef, type JSX, useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
@@ -34,12 +35,17 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { chatStatus } from "../chat-header.ts";
+import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
 import { type Follow, contentGrew, initialFollow, jumpPill, jumped, scrolled } from "../follow.ts";
+import { pressHaptic, turnEndHaptic } from "../haptic-rules.ts";
+import { playHaptic } from "../haptics.ts";
 import { linkPrompt } from "../links.ts";
+import { sessionMenu } from "../session-menu.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
 import { DENSE_FONT_SCALE, type Palette, typography } from "../theme.ts";
 import type { Row } from "../transcript-rows.ts";
+import { ActionSheet } from "../ui/ActionSheet.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { Composer } from "../ui/Composer.tsx";
 import { EmptyState } from "../ui/EmptyState.tsx";
@@ -47,6 +53,7 @@ import { GlassButton } from "../ui/GlassButton.tsx";
 import { Icon, type IconName } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
+import { animateNextLayout } from "../ui/animate.ts";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
@@ -91,7 +98,16 @@ export function SessionScreen({
   // Unmount: `leave()` DETACHES — the session keeps running for every device
   // (decision 4, F18) — and only then release the requester and the listeners.
   useEffect(() => {
-    const unsubscribe = controller.subscribe(setState);
+    // A queue/outbox row arriving, leaving or changing state eases in (Slice 6);
+    // a streamed token alone never animates (`composeRowsMoved`).
+    let shown = controller.state().compose;
+    const unsubscribe = controller.subscribe((next) => {
+      if (composeRowsMoved(shown, next.compose)) {
+        animateNextLayout();
+      }
+      shown = next.compose;
+      setState(next);
+    });
     void controller.open();
     return () => {
       unsubscribe();
@@ -201,6 +217,15 @@ export function SessionScreen({
     running: state.view.composer.running,
     closed: state.transcript.closed,
   });
+  // A turn that ends (own or another device's) taps the hand once (Owner Q4).
+  const wasRunning = useRef(state.view.composer.running);
+  useEffect(() => {
+    playHaptic(turnEndHaptic(wasRunning.current, state.view.composer.running));
+    wasRunning.current = state.view.composer.running;
+  }, [state.view.composer.running]);
+  // The header's "…" menu (owner feedback #3): phone-local copy actions only.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menu = menuOpen ? sessionMenu(rows) : [];
   // The decision sheet's own state (which item the person tapped, and why).
   const [deciding, setDeciding] = useState<string | null>(null);
   const decision =
@@ -231,6 +256,15 @@ export function SessionScreen({
                 onPress={onBack}
               />
             )
+          }
+          right={
+            <GlassButton
+              palette={palette}
+              testID="session-menu"
+              icon="ellipsis"
+              accessibilityLabel="Session menu"
+              onPress={() => setMenuOpen(true)}
+            />
           }
           subtitle={
             <View style={styles.status} accessibilityLabel={status.text}>
@@ -388,10 +422,12 @@ export function SessionScreen({
           // Acting from the composer is looking at the end: follow again (B5).
           onReturn={() => {
             setFollowState(jumped());
+            playHaptic(pressHaptic(state.view.composer.action, "return"));
             controller.pressReturn();
           }}
           onPress={() => {
             setFollowState(jumped());
+            playHaptic(pressHaptic(state.view.composer.action, "button"));
             controller.press();
           }}
           onPhoto={() =>
@@ -423,6 +459,25 @@ export function SessionScreen({
           onEdit={() => void controller.outbox("edit", deciding ?? "")}
           onClose={() => setDeciding(null)}
         />
+        <ActionSheet
+          palette={palette}
+          visible={menuOpen}
+          testID="session-menu-sheet"
+          cancelTestID="session-menu-cancel"
+          message={menu.length === 0 ? "Nothing to copy yet" : undefined}
+          actions={menu.map((action) => ({
+            label: action.label,
+            testID: `session-menu-${action.id}`,
+            onPress: () => {
+              setMenuOpen(false);
+              void Clipboard.setStringAsync(action.text).then(
+                () => playHaptic("success"),
+                () => undefined,
+              );
+            },
+          }))}
+          onCancel={() => setMenuOpen(false)}
+        />
       </KeyboardAvoidingView>
     </View>
   );
@@ -449,6 +504,16 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
   },
   notice: { paddingHorizontal: 16, paddingBottom: 6 },
-  // The turn observable: on screen (XCUITest sees it), takes no room.
-  observable: { width: 0, height: 0, fontSize: 0 },
+  // The turn observable: on screen (XCUITest sees it), takes no room. 1×1 and
+  // absolute, not 0×0: iOS 26 drops an empty-frame element from the
+  // accessibility tree, so `turn-idle` vanished (slice 6 walk, flows 23/24).
+  observable: {
+    position: "absolute",
+    left: 0,
+    bottom: 0,
+    width: 1,
+    height: 1,
+    fontSize: 1,
+    color: "transparent",
+  },
 });

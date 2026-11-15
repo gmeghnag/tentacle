@@ -34,6 +34,7 @@ import {
   chipRefused,
   chipRemoved,
   chipUploaded,
+  counted,
   pickRoom,
   takeChips,
 } from "./compose-chips.ts";
@@ -743,11 +744,14 @@ export function createCompose(deps: ComposeDeps): Compose {
         await reclaim(plan.reclaim);
       }
     },
+    // B8: the adapters take what is ALREADY attached (`taken`) and derive the
+    // picker's limit from it; passing the room (5 on an empty composer) made
+    // the limit 0 and refused before the library opened.
     async pickLibrary() {
-      await applyPicks(await deps.photos.pickFromLibrary(pickRoom(chips)));
+      await applyPicks(await deps.photos.pickFromLibrary(counted(chips)));
     },
     async pickCamera() {
-      await applyPicks(await deps.photos.takePhoto(pickRoom(chips)));
+      await applyPicks(await deps.photos.takePhoto(counted(chips)));
     },
     async removeChip(key) {
       chips = chipRemoved(chips, key);

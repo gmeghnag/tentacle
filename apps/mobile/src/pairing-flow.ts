@@ -240,6 +240,11 @@ export function reduce(state: PairingState, action: PairingAction): PairingState
         return state;
       }
       const text = textOf(state);
+      // An empty field has nothing to submit: its "Continue" is drawn disabled
+      // (P1), so a tap on it must not turn into a "not a pairing line" error.
+      if (text.trim() === "") {
+        return state;
+      }
       const parsed = parsePairingPayload(text);
       if (!parsed.ok) {
         return { name: "intake", text, failure: payloadFailure(parsed.reason) };
@@ -326,9 +331,30 @@ export interface PairingView {
   readonly computerName?: string;
   /** The text field's value (always shown at `intake`). */
   readonly text: string;
+  /** How the paste field's "Continue" reads for `text` (`pasteSubmit`). */
+  readonly submit: PasteSubmit;
+}
+
+/**
+ * The paste field's "Continue" (visual review 1, P1): `empty` — nothing to
+ * submit, drawn disabled and inert; `unparsed` — text that is not a pairing
+ * line, still pressable so the person learns WHY (the payload failure), but not
+ * drawn as the ready action; `ready` — a line that parses, the tinted action.
+ */
+export type PasteSubmit = "empty" | "unparsed" | "ready";
+
+export function pasteSubmit(text: string): PasteSubmit {
+  if (text.trim() === "") {
+    return "empty";
+  }
+  return parsePairingPayload(text).ok ? "ready" : "unparsed";
 }
 
 export function pairingView(state: PairingState): PairingView {
+  return { ...stageView(state), submit: pasteSubmit(textOf(state)) };
+}
+
+function stageView(state: PairingState): Omit<PairingView, "submit"> {
   switch (state.name) {
     case "intake":
       return {

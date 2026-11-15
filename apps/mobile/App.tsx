@@ -1299,7 +1299,7 @@ function AppShell(): JSX.Element {
   if (computers === null) {
     return (
       <LockGate {...lockGateDeps} palette={palette}>
-        <View style={[styles.connecting, { backgroundColor: palette.groupedBackground }]}>
+        <View style={[styles.connecting, { backgroundColor: palette.bg }]}>
           <ActivityIndicator color={palette.accent} />
         </View>
       </LockGate>
@@ -1319,7 +1319,7 @@ function AppShell(): JSX.Element {
             // by flow 02: the project row's bounds were under the large title).
             // An opaque header lays the screen out below it.
             headerTransparent: false,
-            contentStyle: { backgroundColor: palette.groupedBackground },
+            contentStyle: { backgroundColor: palette.bg },
           }}
         >
           <Stack.Screen
@@ -1404,10 +1404,11 @@ function AppShell(): JSX.Element {
               />
             )}
           </Stack.Screen>
-          <Stack.Screen name="Settings" options={{ title: "Settings" }}>
-            {() => (
+          <Stack.Screen name="Settings" options={{ title: "Settings", headerShown: false }}>
+            {({ navigation }) => (
               <SettingsScreen
                 palette={palette}
+                {...(navigation.canGoBack() ? { onBack: () => navigation.goBack() } : {})}
                 setting={lockSetting}
                 {...(lockView.notice === undefined ? {} : { notice: lockView.notice })}
                 {...(pendingLock === undefined ? {} : { pending: pendingLock })}
@@ -1480,7 +1481,7 @@ function AppShell(): JSX.Element {
         </Stack.Navigator>
         {storeError === undefined ? null : (
           <View style={[styles.storeError, { backgroundColor: palette.card }]}>
-            <Text testID="store-error" style={{ color: palette.danger }}>
+            <Text testID="store-error" style={{ color: palette.red }}>
               {storeError}
             </Text>
           </View>

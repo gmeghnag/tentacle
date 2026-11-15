@@ -8,7 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { codeBlockView } from "../src/code-block.ts";
+import { INLINE_CHIP_MAX, codeBlockView, inlineCodeLook, trailingFade } from "../src/code-block.ts";
 
 const text = (line: { readonly spans: readonly { readonly text: string }[] }): string =>
   line.spans.map((span) => span.text).join("");
@@ -50,6 +50,38 @@ describe("codeBlockView (B6)", () => {
     const view = codeBlockView("a\na\na", null);
     expect(new Set(view.lines.map((line) => line.key)).size).toBe(3);
   });
+
+  // Owner B7 (2026-11-15): `&#x27;` shown raw inside a highlighted block.
+  test("quotes, <, > and & show as themselves, highlighted or not (B7)", () => {
+    const code = `print('a < b' if x > 1 and y & z else "q") # &amp; stays`;
+    for (const lang of ["python", "bash", "ts", "json", null]) {
+      expect(codeBlockView(code, lang).lines.map(text)).toEqual([code]);
+    }
+  });
+});
+
+// Owner feedback #3: inline code was a full-line-high strip with a ragged edge
+// when it wrapped. A short span is a padded rounded chip (one unbreakable box,
+// so it must fit a line); a long one wraps like text, mono, with no strip.
+describe("inlineCodeLook (feedback #3)", () => {
+  test("a short identifier or path is a chip", () => {
+    expect(inlineCodeLook("closeSessions()")).toBe("chip");
+    expect(inlineCodeLook("session/close")).toBe("chip");
+    expect(inlineCodeLook("x".repeat(INLINE_CHIP_MAX))).toBe("chip");
+  });
+
+  test("a long span wraps as a run (a chip cannot break across lines)", () => {
+    expect(inlineCodeLook("python3 dirscanner.py [path] [-n N] [--hidden]")).toBe("run");
+    expect(inlineCodeLook("x".repeat(INLINE_CHIP_MAX + 1))).toBe("run");
+  });
+
+  test("a span with a newline is a run", () => {
+    expect(inlineCodeLook("a\nb")).toBe("run");
+  });
+
+  test("the chip limit fits the narrowest line it can land on (≈ 32 chars of 14 pt mono)", () => {
+    expect(INLINE_CHIP_MAX).toBeLessThanOrEqual(32);
+  });
 });
 
 describe("CodeBlock.tsx wiring (B6)", () => {
@@ -72,5 +104,25 @@ describe("CodeBlock.tsx wiring (B6)", () => {
   test("Markdown routes every fenced block through CodeBlock", () => {
     expect(markdown).toMatch(/<CodeBlock\b/);
     expect(markdown).not.toContain("highlight(");
+  });
+});
+
+describe("trailingFade (visual review N11: a cut line gave no cue that it scrolls)", () => {
+  test("shown while content runs past the right edge", () => {
+    expect(trailingFade({ content: 600, viewport: 300, offset: 0 })).toBe(true);
+    expect(trailingFade({ content: 600, viewport: 300, offset: 200 })).toBe(true);
+  });
+  test("hidden when everything fits, and once scrolled to the end", () => {
+    expect(trailingFade({ content: 280, viewport: 300, offset: 0 })).toBe(false);
+    expect(trailingFade({ content: 600, viewport: 300, offset: 300 })).toBe(false);
+    // Sub-point rounding at the end does not leave it on.
+    expect(trailingFade({ content: 600.4, viewport: 300, offset: 300 })).toBe(false);
+  });
+  test("hidden before the first layout (no widths yet)", () => {
+    expect(trailingFade({ content: 0, viewport: 0, offset: 0 })).toBe(false);
+  });
+  test("CodeBlock draws the fade from this rule", () => {
+    const source = readFileSync(join(import.meta.dir, "../src/ui/CodeBlock.tsx"), "utf8");
+    expect(source).toMatch(/trailingFade\(widths\) \? <TrailingFade/);
   });
 });

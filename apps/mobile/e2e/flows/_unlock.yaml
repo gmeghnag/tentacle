@@ -8,20 +8,36 @@ appId: so.tentacle.app
 # Step 0: `notifyutil …pearl.match` makes the pending `authenticateAsync` resolve
 # success on the simulator, so no tap on the system sheet is needed.
 #
-# The two assertions are the point of the subflow: the lock screen is UP and the
-# content behind it is NOT REACHABLE (F14: `computers-list` is hidden from the
-# accessibility tree, so Maestro cannot see it either).
+# iOS 26 (visual review 1, F1): the system Face ID sheet COVERS the app, so while
+# it is up Maestro sees neither `lock-screen` nor the content — asserting
+# `lock-screen` visible first hangs, and asserting it NOT visible afterwards
+# passes vacuously. So the subflow keys on the one POSITIVE signal of an unlocked
+# app instead: `LockGate`'s wrapper reads `app-content` only once the cover is
+# down (it reads `locked-content`, hidden from the accessibility tree, before).
+#
+# The content is NOT REACHABLE while locked (F14): `computers-list` is hidden
+# whether the system sheet is up or not.
 - runScript:
     file: "faceid-enroll.js"
-- extendedWaitUntil:
-    visible:
-      id: "lock-screen"
-    timeout: 15000
 - assertNotVisible:
     id: "computers-list"
-- runScript:
-    file: "faceid-match.js"
-- extendedWaitUntil:
-    notVisible:
-      id: "lock-screen"
-    timeout: 15000
+# A match posted before the prompt is up resolves nothing (the orchestrator's
+# recipe, step 3), and the prompt may come up late: post it again until the app
+# is in, a bounded number of times.
+- repeat:
+    times: 8
+    while:
+      notVisible:
+        id: "app-content"
+    commands:
+      - runScript:
+          file: "faceid-match.js"
+      - extendedWaitUntil:
+          visible:
+            id: "app-content"
+          timeout: 2500
+          optional: true
+- assertVisible:
+    id: "app-content"
+- assertNotVisible:
+    id: "lock-screen"

@@ -15,7 +15,8 @@
  */
 import type { JSX } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import type { ChipView, ComposeNotice } from "../../session-view.ts";
+import { outboxCaption, outboxRowLook } from "../../outbox-look.ts";
+import type { ChipView, ComposeNotice, OutboxRowView } from "../../session-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, size, typography } from "../../theme.ts";
 import { Icon } from "../../ui/Icon.tsx";
 
@@ -28,12 +29,7 @@ export interface BarView {
     readonly mine: boolean;
   }[];
   readonly returnedOthers: readonly { readonly id: string; readonly text: string }[];
-  readonly outbox: readonly {
-    readonly itemId: string;
-    readonly text: string;
-    readonly state: string;
-    readonly decide: boolean;
-  }[];
+  readonly outbox: readonly OutboxRowView[];
   readonly chips: readonly ChipView[];
 }
 
@@ -176,6 +172,7 @@ export function Chips({
     <ScrollView
       horizontal
       testID="composer-chips"
+      style={styles.chipRow}
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={styles.chips}
     >
@@ -227,30 +224,70 @@ export function OutboxRows({
   if (rows.length === 0) {
     return null;
   }
+  const caption = outboxCaption(rows);
   return (
-    <View testID="composer-outbox" style={styles.queue}>
-      {rows.map((row) => (
-        <Pressable
-          key={row.itemId}
-          testID={`outbox-row-${row.itemId}-${row.state}`}
-          accessibilityRole="button"
-          disabled={!row.decide}
-          onPress={() => onDecide(row.itemId)}
-          style={styles.takeRow}
-        >
-          <Text style={[styles.outboxRow, { color: palette.secondaryLabel }]} numberOfLines={2}>
-            {row.state === "waiting"
-              ? "◷ waiting for the network — "
-              : row.state === "sending"
-                ? "↑ sending — "
-                : row.state === "uploading"
-                  ? "⏳ uploading — "
-                  : "⚠ needs your answer — "}
-            {row.text}
+    <View testID="composer-outbox" style={styles.outbox} accessibilityLabel="Waiting to send">
+      {rows.map((row) => {
+        const look = outboxRowLook(row);
+        const border = look.cue === "attention" ? palette.orange : palette.dash;
+        return (
+          <View key={row.itemId} style={styles.outboxItem}>
+            <View style={styles.outboxLine}>
+              {look.options ? (
+                <Pressable
+                  testID={`outbox-options-${row.itemId}`}
+                  accessibilityRole="button"
+                  accessibilityLabel="Options for this waiting message"
+                  onPress={() => onDecide(row.itemId)}
+                  style={styles.outboxOptions}
+                >
+                  <Icon name="ellipsis" color={palette.sec} size={18} />
+                </Pressable>
+              ) : null}
+              <Pressable
+                testID={`outbox-row-${row.itemId}-${row.state}`}
+                accessibilityRole="button"
+                disabled={!row.decide}
+                onPress={() => onDecide(row.itemId)}
+                style={[styles.outboxBubble, { borderColor: border }]}
+              >
+                <Text style={[typography.bubble, { color: palette.label }]} numberOfLines={6}>
+                  {row.text}
+                </Text>
+              </Pressable>
+            </View>
+            {look.status === null ? null : (
+              <View style={styles.outboxStatus}>
+                {look.cue === "spinner" ? (
+                  <ActivityIndicator size="small" color={palette.sec} />
+                ) : look.cue === "attention" ? (
+                  <Icon name="exclamationmark.triangle" color={palette.orange} size={13} />
+                ) : null}
+                <Text
+                  style={[
+                    typography.footnote,
+                    { color: look.cue === "attention" ? palette.orange : palette.sec },
+                  ]}
+                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                >
+                  {look.status}
+                </Text>
+              </View>
+            )}
+          </View>
+        );
+      })}
+      {caption === null ? null : (
+        <View style={styles.outboxStatus}>
+          <Icon name="wifi.slash" color={palette.sec} size={13} />
+          <Text
+            style={[typography.footnote, { color: palette.sec }]}
+            maxFontSizeMultiplier={DENSE_FONT_SCALE}
+          >
+            {caption}
           </Text>
-          {row.decide ? <Text style={[styles.take, { color: palette.accent }]}>Decide</Text> : null}
-        </Pressable>
-      ))}
+        </View>
+      )}
     </View>
   );
 }
@@ -284,11 +321,29 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 6,
   },
-  // `OutboxRows` (Slice 5 restyles it): the pre-restyle layout, kept as is.
-  queue: { paddingHorizontal: 12, paddingBottom: 4, gap: 2 },
-  outboxRow: { fontSize: 12 },
-  takeRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  take: { fontSize: 12, fontWeight: "600" },
+  // `OutboxRows` (mockup `Offline`): right-aligned dashed bubbles, ≈ 77 % wide.
+  outbox: { paddingHorizontal: 16, paddingBottom: 8, gap: 8, alignItems: "flex-end" },
+  outboxItem: { alignItems: "flex-end", gap: 4, maxWidth: "85%" },
+  outboxLine: { flexDirection: "row", alignItems: "center", gap: 6 },
+  outboxOptions: {
+    width: size.touch,
+    height: size.touch,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  outboxBubble: {
+    flexShrink: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: radius.bubble,
+    borderWidth: 1.5,
+    borderStyle: "dashed",
+  },
+  outboxStatus: { flexDirection: "row", alignItems: "center", gap: 6, paddingRight: 4 },
+  // A ScrollView's base style GROWS (`flexGrow: 1`): in the screen's column the
+  // chip row took half the transcript's height (slice 6, flow 18). It is as
+  // tall as its chips.
+  chipRow: { flexGrow: 0 },
   chips: { paddingHorizontal: 12, paddingBottom: 6, gap: 6 },
   chip: {
     flexDirection: "row",

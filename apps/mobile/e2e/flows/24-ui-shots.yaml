@@ -1,0 +1,142 @@
+appId: so.tentacle.app
+---
+# 24 (docs/feat/mobile-ui-polish.md Slice 6): the screenshot walk. Every screen
+# the restyle touched, in the order a person meets them — Pair (empty, keyboard
+# up with the pasted line, the review sheet, the compare code), Computers,
+# Settings, Sessions, the Conversation with the mock model's `SHOWCASE` answer
+# (inline code chip + run, a code block with quotes/<>/& — owner B7 —, a table,
+# a list), and the header's "…" menu. Each screen is shot in light AND dark by
+# `_shot` (the `appearance` hook flips the simulator), so one run is the set.
+# It asserts each screen's own ids, so a screenshot of the wrong screen fails.
+#
+# The pairing is `_pair`'s steps inlined, with a shot at each stage: the Pair
+# screen is the first one a person sees, and the paste field above the keyboard
+# is itself a fix of this slice (the walk failed at `pair-review` while the
+# field sat under the keyboard).
+- runScript:
+    file: "appearance.js"
+    env:
+      NAME: "light"
+- runScript:
+    file: "pair-start.js"
+- launchApp:
+    clearState: true
+- clearKeychain
+- runFlow: _unlock.yaml
+- extendedWaitUntil:
+    visible:
+      id: "pair-paste-input"
+    timeout: 30000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "24-pair"
+- tapOn:
+    id: "pair-paste-input"
+- inputText: ${output.payload}
+# The fix under test: with the keyboard up and the line pasted (it wraps to
+# several lines), the field AND Continue are on screen, above the keyboard.
+- assertVisible:
+    id: "pair-paste-submit"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "24-pair-keyboard"
+- tapOn:
+    id: "pair-paste-submit"
+- assertVisible:
+    id: "pair-review"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "24-pair-review"
+- tapOn:
+    id: "pair-confirm"
+- runScript:
+    file: "pair-confirm.js"
+- assertVisible:
+    id: "pair-sas-${output.sas}"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "24-pair-compare"
+- runScript:
+    file: "pair-answer.js"
+- assertVisible:
+    id: "computers-list"
+- assertVisible:
+    id: "computer-${output.computerId}"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "24-computers"
+- tapOn:
+    id: "open-settings"
+- assertVisible:
+    id: "lock-delay-immediately"
+- assertVisible:
+    id: "export-logs"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "24-settings"
+- tapOn:
+    id: "settings-back"
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-search"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "24-sessions"
+# The search with no hit: its own designed state (visual review V5).
+- tapOn:
+    id: "sessions-search"
+- inputText: "nothing like this"
+- assertVisible:
+    id: "sessions-no-match"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "24-sessions-no-match"
+- eraseText: 30
+- hideKeyboard
+- tapOn:
+    id: "session-${SHOTS_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "SHOWCASE"
+- pressKey: Enter
+- extendedWaitUntil:
+    visible:
+      id: "code-2-copy"
+    timeout: 20000
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+- hideKeyboard
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "24-conversation"
+- tapOn:
+    id: "session-menu"
+- assertVisible:
+    id: "session-menu-copy-last"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "24-session-menu"
+- tapOn:
+    id: "session-menu-cancel"
+- assertNotVisible:
+    id: "session-menu-copy-last"
+# Leave the simulator light for whatever runs next.
+- runScript:
+    file: "appearance.js"
+    env:
+      NAME: "light"
