@@ -187,6 +187,20 @@ export interface ResolvedConfig {
   readonly tui?: { readonly theme?: "auto" | "dark" | "light" | undefined };
   /** The laptop's session-log settings (file or profile); absent = defaults (`keepSuperseded` false). */
   readonly sessions?: { readonly keepSuperseded?: boolean | undefined };
+  /** Voice dictation (file or profile); absent = enabled, Ctrl+R, `auto`, no auto-stop. */
+  readonly voice?: {
+    readonly enabled?: boolean | undefined;
+    readonly key?: string | undefined;
+    readonly language?: "auto" | "it" | "en" | undefined;
+    readonly engine?: "apple" | "parakeet" | undefined;
+    readonly autoStop?: boolean | undefined;
+    readonly autoStopSilenceMs?: number | undefined;
+    readonly maxSeconds?: number | undefined;
+    readonly input?: "default" | "builtin" | undefined;
+    readonly voiceProcessing?: boolean | undefined;
+    readonly modelsDir?: string | undefined;
+    readonly helperPath?: string | undefined;
+  };
   /**
    * The mobile relay (docs/feat/mobile-relay.md R5a): `enabled` (default true)
    * and `url` (`DEFAULT_RELAY_URL` when unset). Absent when the file omits the
@@ -689,6 +703,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     ...(fileConfig.detach !== undefined ? { detach: fileConfig.detach } : {}),
     ...(fileConfig.tui !== undefined ? { tui: fileConfig.tui } : {}),
     ...(fileConfig.sessions !== undefined ? { sessions: fileConfig.sessions } : {}),
+    ...(fileConfig.voice !== undefined ? { voice: fileConfig.voice } : {}),
     ...(fileConfig.relay !== undefined ? { relay: fileConfig.relay } : {}),
     ...(fileConfig.push !== undefined ? { push: fileConfig.push } : {}),
     ...(fileConfig.mount !== undefined ? { mount: fileConfig.mount } : {}),

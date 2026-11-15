@@ -435,6 +435,46 @@ const settingsShape = {
    */
   sessions: z.object({ keepSuperseded: z.boolean().optional() }).strict().optional(),
   /**
+   * The voice dictation helper (docs/feat/voice-dictation.md): push-to-talk in
+   * the LOCAL TUI on the Mac. Speech is recognised on this machine (the default
+   * engine is Apple's built-in on-device recogniser; `parakeet` is the opt-in
+   * alternative and needs a one-time `tentacle voice setup` download). LAPTOP-ONLY
+   * and input-only: never carried to a pod, and no audio ever leaves the Mac or
+   * is written to disk. Absent: enabled, Ctrl+R, `auto` language, auto-stop off.
+   */
+  voice: z
+    .object({
+      /** Off turns the key into a no-op notice; the helper is never spawned. */
+      enabled: z.boolean().optional(),
+      /** The toggle key, in the TUI's `ctrl+<letter>` spelling. */
+      key: z
+        .string()
+        .regex(/^ctrl\+[a-z]$/, "key must be `ctrl+<letter>`, e.g. ctrl+r")
+        .optional(),
+      /** `auto` lets the engine detect it; `it`/`en` force one. */
+      language: z.enum(["auto", "it", "en"]).optional(),
+      /** The on-device recogniser: Apple's is the default (no download). */
+      engine: z.enum(["apple", "parakeet"]).optional(),
+      /**
+       * Finish on a pause instead of on the key. Off by default: with the key
+       * the user ends the dictation, so a comma pause can never cut it (V0's
+       * 5/30 truncations). A floor below 300 ms is refused — that is inside the
+       * measured comma-pause range (docs/feat/voice-dictation.md Execution, S1).
+       */
+      autoStop: z.boolean().optional(),
+      autoStopSilenceMs: z.number().int().min(300).optional(),
+      /** A hard stop, so a forgotten dictation ends (its text IS inserted). */
+      maxSeconds: z.number().int().min(10).optional(),
+      /** `builtin` avoids the AirPods HFP downgrade of other audio. */
+      input: z.enum(["default", "builtin"]).optional(),
+      /** AEC/AGC on the capture tap; off is for measurement only. */
+      voiceProcessing: z.boolean().optional(),
+      modelsDir: z.string().optional(),
+      helperPath: z.string().optional(),
+    })
+    .strict()
+    .optional(),
+  /**
    * The mobile relay (docs/feat/mobile-relay.md R5a): `enabled` (default true)
    * lets a `serve` with paired devices dial OUT to the relay so a phone reaches
    * it from anywhere; `url` names the relay (`DEFAULT_RELAY_URL` when unset) and

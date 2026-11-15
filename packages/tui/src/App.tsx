@@ -62,6 +62,9 @@ import { usePanels } from "./usePanels.ts";
 import { useQuitClear } from "./useQuitClear.ts";
 import { useSessionLink } from "./useSessionLink.ts";
 import { type HopTurnPort, useTurnDriver } from "./useTurnDriver.ts";
+import { useVoice } from "./useVoice.ts";
+import { VOICE_DEFAULTS, joinDictation } from "./voice-session.ts";
+import { voiceStripView } from "./voice-view.ts";
 import { tryWake } from "./wake-gate.ts";
 
 export type { AutoAcceptFeed, AutoAcceptSharedFeed };
@@ -211,6 +214,8 @@ export function App({
   targetFeed,
   columns: fixedColumns,
   jobRefreshMs,
+  voice: voiceConfig = VOICE_DEFAULTS,
+  voiceSpawner,
 }: AppProps): ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -778,6 +783,24 @@ export function App({
   const dockNow = useDockClock(dock.focus.kind !== "input" || dockVisible());
   /** The transcript's state this frame paints (`stateRef` is the truth; this reads it). */
   const st = stateRef.current;
+  // Voice dictation (docs/feat/voice-dictation.md §5): the hook owns the helper
+  // child and drives the pure reducer; the App only gives it the two things it
+  // can do to the screen — insert text at the cursor, and say one thing. It is
+  // declared HERE, above `frameLayout`, because the strip's rows are part of the
+  // layout's row budget (`app-layout.ts` counts them once); `pushNotice` is
+  // declared below, so it travels as the ref every other late caller already
+  // uses (`pushNoticeRef`, set at its definition).
+  const voice = useVoice({
+    config: voiceConfig,
+    insert: (text: string) => field.insert(joinDictation(field.value, text)),
+    notice: (text: string) => pushNoticeRef.current(text),
+    ...(voiceSpawner === undefined ? {} : { spawner: voiceSpawner }),
+  });
+  // The phase the key layer reads (`voice()`), as a ref so a key mid-dictation
+  // sees the LIVE phase, not this render's.
+  const voicePhaseRef = useRef(voice.model.phase);
+  voicePhaseRef.current = voice.model.phase;
+
   const view = frameLayout({
     state: st,
     permission,
@@ -805,6 +828,8 @@ export function App({
     daemonQueue,
     loading,
     compacting,
+    // The strip's contents, computed by the pure view-model; `null` = no rows.
+    voiceStrip: voiceStripView(voice.model, { columns: size.columns }),
   });
   const frame = { ...view, st };
   // The rows App itself still reads (the key path's snapshot, the mouse layer's
@@ -1711,6 +1736,11 @@ export function App({
     },
     submit: (text) => submit(text),
     removeLastChip: () => setAttach((draft) => removeLastChip(draft)),
+    // Voice dictation (docs/feat/voice-dictation.md): the hook owns the child and
+    // the reducer; the layer only decided WHICH intent this chunk was.
+    voiceToggle: voice.toggle,
+    voiceFinish: voice.finish,
+    voiceCancel: voice.cancel,
   };
 
   useInput((char, key) => {
@@ -1760,6 +1790,9 @@ export function App({
         },
         sessions,
         detachOnQuit,
+        // Live reads: the phase can move between two chunks in one tick.
+        voice: () => voicePhaseRef.current,
+        voiceKey: () => voiceConfig.key,
       },
       PURE_LAYERS,
     );

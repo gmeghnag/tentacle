@@ -1,6 +1,6 @@
 # feat/voice-dictation — Dictation in the local TUI on the Mac (realtime-voice V1)
 
-> **Status:** implementation (plan written, NOT approved — see Owner questions)
+> **Status:** execution (S1 and S3 complete; S2's mic capture OPEN — see Execution and Review)
 > **Branch:** `feat/voice-dictation`
 > **Size:** L, split into four slices: S1 spike (S) · S2 helper (M) · S3 TUI integration (M) · S4 polish + live test (S) · **Blast:** cross-module (a new native helper binary, a new `voice` config key, one new key layer, a new `tentacle voice` subcommand). No protocol, daemon, persistence or relay change. · **Suited:** S1 by Opus with the owner at the Mac (it needs a real mic and ears); S2–S4 by DeepSeek. L ⇒ one **fresh-context Review** over S2+S3 (grouped, per the owner's fewer-reviews rule), and it must red-team the key-layer precedence (F7) and the never-write-raw-to-the-terminal rule (F10).
 > **Changelog:** `changelog.d/voice-dictation.added.md`: "- **Voice dictation on the Mac.** Press Ctrl+R in the TUI, speak, press it again: the text lands in the input field for you to edit and send. Speech is recognised on the Mac; no audio leaves it or is saved."
@@ -318,7 +318,210 @@ Red first (§9). Each test runs first against a stub or the old constant and is 
 
 ## Execution
 
-*(empty — the plan is not yet approved)*
+*— deepseek-v4 (executor), 2026-11-15*
+
+### Load-bearing check: PASSED (do not skip this one)
+
+`.tentacle/tmp/voice-dictation/micprobe.swift`, `swiftc -O`, run from a shell in
+Apple Terminal:
+
+```
+tap_format=9ch @ 44100.0Hz          <- voice-processing tap, matches V0 e6-smoke.log
+engine_running=true voice_processing=on
+authorizationStatus=3               <- authorized
+frames=30 mean_dbfs=-74.0 peak_dbfs=0.0
+VERDICT=REAL_SIGNAL                 <- -74 dBFS ambient, not digital silence
+```
+
+A plain unbundled CLI child captures the mic from inside the user's terminal.
+No app bundle needed; the design stands.
+
+### S1 (spike) — measured, and it changed three plan claims
+
+Recorded in full in `.tentacle/tmp/voice-dictation/S1-RESULTS.md`; the numbers
+that matter:
+
+**Apple `SpeechAnalyzer` (owner decision 3, the V1 default) — works from a bare CLI child,**
+measured on all 30 V0 WAVs (`apple-bench.jsonl`):
+
+| | Apple (measured here) | V0 Parakeet |
+|---|---|---|
+| corpus WER | **0.082** | 0.101 endpointed / 0.027 perfect-endpoint |
+| STT p50 / p95 | **79 ms / 99 ms** | 50 ms / 65 ms |
+
+Worst cases are technical English (`Refactor`→"We factor", `re-run`→"rear on")
+and a truncated V0 file (`e05`). So Apple is a viable default: better WER than
+V0's endpointed Parakeet, and 29 ms of extra p50 is invisible next to a manual
+stop.
+
+**The comma floor (the plan's provisional 1000 ms), swept with the Appendix's
+`sweep.py` over the 30 files** — largest internal pause per utterance: e08 224 ms,
+e04/e14/e15 192 ms, e03/e11/e12 160 ms, e06 96 ms.
+
+```
+min_sil  thr    | truncated  ids
+200      none   | 4          e04,e08,e14,e15   <- V0's constants
+200      0.95   | 2          e08,e15  (+9 never stop)
+300      none   | 0          -
+500      none   | 0          -   (margin over 224 ms)
+```
+
+- **A threshold cannot fix it** (200 ms + 0.95 still truncates e08/e15) — V0's
+  finding reproduced independently.
+- **Shipped floor: 500 ms** (`ENDPOINT_DEFAULTS.autoStopSilenceMs`), not the
+  plan's provisional 1000: 300 is the smallest that truncates nothing here, 500
+  has margin, and 1000 doubled the wait for no measured benefit. The schema
+  REFUSES anything under 300 (T9), which is the guard that keeps the V0 bug out.
+
+**Three plan claims did not survive S1 — all corrected in code:**
+
+1. **"Apple's recogniser needs no download" is false for a non-English
+   language.** `it_IT` is *supported* but *not installed* on this Mac by default;
+   the asset took 8.3 s to install on first use, and a supported-but-uninstalled
+   locale transcribes to an EMPTY string (silent). The helper checks
+   `SpeechTranscriber.installedLocales` and reports `models_missing` naming the
+   locale; `tentacle voice setup` installs it; `voice status` prints both lists.
+2. **"`auto` lets the engine detect the language" is false for Apple.** It has no
+   per-utterance language ID in this API: an Italian utterance on this English Mac
+   came back as "Fai pasar el dipicate de voidimi cosa restaurant." `auto`
+   therefore means "the Mac's own language", and `voice.language: it|en` forces
+   one (verified: `trace --lang it` → "Fai passare il tipet e poi dimmi cosa
+   resta rotto."). Documented in the key-docs entry and in `Transcribe.localeId`.
+3. **`SpeechAnalyzer` needs macOS 26, not 14.** `Package.swift` targets
+   `macOS("26.0")`; macOS 14 has no on-device recogniser of this kind.
+
+**Apple also ships its own VAD** (`SpeechDetector`, with a sensitivity level), so
+Silero ONNX + Smart Turn ONNX are NOT needed for the default engine — one fewer
+dependency, one fewer licence to verify. The endpointing fold stayed in TypeScript
+as the plan required (T3), which is where the comma regression lives and what V2
+will reuse.
+
+### S3 (TUI) — built, T1–T10 red→green
+
+| Slice | Files |
+|---|---|
+| config | `config/src/schema.ts` (`voice` object, `.strict()`, `autoStopSilenceMs` ≥ 300), `resolve.ts`, `load.ts`, `key-docs.ts` (11 leaves), README table regenerated with `bun run docs:config` |
+| protocol | `tui/src/voice-protocol.ts` — one JSON line each way, 64 KiB byte cap, `ready.v` handshake decided once, unknown fields dropped, every malformed input an error VALUE |
+| endpointing | `tui/src/voice-endpoint.ts` — pure audio-time fold, 500 ms floor, Smart Turn gate, hard stop |
+| reducer | `tui/src/voice-session.ts` — `idle→starting→listening→transcribing→idle` + `error`/`off`; commands are data (`spawn/send/insert/notice/kill`); `voiceAvailability`, `joinDictation`, `errorNotice` |
+| view | `tui/src/voice-view.ts` + `components/VoiceStrip.tsx` (blank row as `" "`, §6 gotcha; `dimProps()`, not a bare `dimColor`) |
+| layer | `keys/layer-voice.ts`, `layers.ts` (15 names / 14 pure), `contract.ts`, `snapshot.ts` (`voice()`, `voiceKey()`, both live getters), `effects.ts`, `execute.ts` |
+| hook | `tui/src/useVoice.ts` (React) + `tui/src/voice-spawn.ts` (process edge, injectable `VoiceSpawner`) |
+| wiring | `App.tsx` (hook above `frameLayout` so the strip's rows are in the row budget; 3 host effects; 2 snapshot fields), `AppView.tsx`, `app-layout.ts` (`voiceStrip`/`voiceRows` counted once, like the attach row), `app-types.ts`, `run.tsx` |
+| CLI | `cli/src/voice-cmd.ts`, `flags.ts` (`CliMode`/`ARGS`/`USAGE`/model table), `main.ts` (dispatch + HELP), `tui/src/index.ts` exports |
+| build | `native/voice-mac/` (SwiftPM, 4 sources + tests), `scripts/voice-build.ts`, `voice:build`/`voice:test` scripts |
+
+`useVoice.ts` was split into the hook + `voice-spawn.ts` (drift from the plan's
+one "hook" file): the process edge has no React in it and T8's spawn-option
+assertions are cleaner against a module that is not a component boundary.
+
+**Tests** (13 new files): T1 protocol, T2 reducer + T6 availability, T3 comma
+regression, T4 view, T5 layer/`LAYER_ORDER`, T7 App end-to-end with a fake
+helper, T8 spawn options, T9 config schema, T10 CLI dispatch, plus 13 Swift
+tests. `key-snapshot.ts` was extracted from `keys-route.test.ts` so two suites
+share one builder (Biome forbids exporting from a `*.test.ts`).
+
+### Mutations (each shown RED, then reverted)
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `voice-protocol.ts`: drop the `ready.v` check | **RED** (version handshake) |
+| M2 | `voice-endpoint.ts`: shipped floor 500 → 200 | **RED** ("shipped default ≥ comma-safe floor") |
+| M3 | `voice-endpoint.ts`: drop the Smart Turn threshold gate | **RED** (e08/e15 still cut at thr 0.95) |
+| M4 | `voice-session.ts`: Enter falls through while listening | **RED** ×2 |
+| M5 | `voice-session.ts`: no `insert` on `final` | **RED** ×5 (incl. the F5 cap insert) |
+| M6 | `keys/layers.ts`: move `voice` after `escAbort` | **RED** ×3 (incl. F7's Esc-vs-turn) |
+| M7 | `voice-spawn.ts`: `stderr: "inherit"` | **RED** ×2 (F10) |
+| M8 | `schema.ts`: drop `min(300)` on `autoStopSilenceMs` | **RED** ×2 |
+| M9 | `schema.ts`: drop `.strict()` on `voice` | **RED** (unknown key accepted) |
+
+Two of my own tests were **vacuous on the first pass** and were fixed before
+being counted: T3 read the floor back from the constant under test (M2 passed —
+now a literal `COMMA_SAFE_FLOOR_MS` plus a pinned V0-bug case), and T2's
+"no submit" assertion is now a `@ts-expect-error` compile-time pin because
+`VoiceCommand` has no `submit` member at all.
+
+### S2 (the Swift helper) — `trace`/`setup`/`status` DONE; the mic path is PARTIAL
+
+**Works and is verified:** `swift build -c release`; `bun run voice:test` (13
+tests green); `tentacle-voice status` (45 supported locales, 11 installed,
+microphone `granted`); `trace` transcribing V0 WAVs end to end —
+`--lang it` → "A che punto sei?", "Aspetta un attimo, ci penso."; `--lang en` →
+"Run the tie check and tell me what is still broken."; the protocol handshake and
+full `start`→`listening`→`stop`→`final`→EOF-exit cycle against the real
+microphone, with the helper exiting 0 on stdin EOF (F13).
+
+**Three real bugs found and fixed on the way** (each caught by running it, not by
+reading):
+
+1. `AnalyzerInput.init(buffer:)` **traps** (SIGTRAP) unless the buffer is the
+   analyzer's own `bestAvailableAudioFormat` — the first `trace` crashed. Fixed by
+   asking for the format and converting into it.
+2. Reusing one `SpeechTranscriber` across analyzers traps; a fresh one per
+   transcription.
+3. `AssetInventory.status(forModules:)` answers for locales RESERVED IN THIS
+   PROCESS, so a healthy Mac reported "not installed". Now
+   `SpeechTranscriber.installedLocales` is the check and `reserve` comes first in
+   `setup`.
+
+**OPEN — the mic path under-captures, and this is the one thing a live debugger
+must finish.** With the protocol fix in place (below), a requested 3 s window
+yields **300–1300 ms**, varying run to run. Every isolated probe delivers
+95–105 % on the same Mac:
+
+```
+taprate.swift        main thread, Thread.sleep            100 %
+taprate-async.swift  Task.detached, Task.sleep            100 %
+bgread.swift         bg queue + blocked stdin read         95 %
+restart.swift        engine restarted per take, x3         95 % each
+bgthread.swift       engine on a background thread         95 %
+audiothread3.swift   engine on a DEDICATED Thread + run loop,
+                     16 pool-saturating tasks              105 %
+pool2.swift          engine on a COOPERATIVE thread,
+                     8 CPU-bound pool tasks                  0 %   <- the bug
+```
+
+So one true, proven bug was found and fixed: **an engine created on a cooperative
+pool thread loses its tap entirely when the pool is busy** (0 frames of 88 200) —
+which is exactly the helper's situation, because its transcription and asset
+checks run on that pool. `Capture` now owns a dedicated `Thread` with a pumped
+run loop, and the protocol loop moved off `Task.detached` onto a dedicated queue
+with a `LineSource` background stdin reader (`main.swift`) — the blocking
+`availableData` on the main thread was itself measured at 0 frames
+(`blocked2.swift`).
+
+The residual under-capture is NOT explained by any probe. The Thread/run-loop
+variations tried (bounded `run(before:)`, `RunLoop.run()`, a keep-alive timer on
+`.default`+`.common`, `CFRunLoopWakeUp` hops to start/stop on the audio thread)
+each moved the number without fixing it. Per AGENTS §0 I stopped rather than keep
+mutating, and **escalate**: the next step is an `lldb` session — breakpoint in
+`Capture.consume`, watch the audio thread's state and the tap callback rate
+during a real dictation — which this non-interactive session cannot drive.
+Everything else in the helper is exercised and green; the capture depends on
+nothing that is still unproven except this.
+
+Consequence for the user-visible feature: the TUI side is complete and tested
+against a fake helper, and `trace` proves transcription quality, but **a real
+dictation currently loses roughly two thirds of its audio**, so live check L3
+(ten dictations, nothing cut) cannot pass yet. L1/L2 (the permission prompt) and
+L6 (mic dot off on quit) are reachable now; L3–L5, L7–L9 need the capture fix.
+
+### Live checklist (S4) — not run
+
+The owner is not in the loop in this session, so L1–L10 are **untouched**. L1/L2
+are what S1's load-bearing check proves is possible; L3 onwards wait on the
+capture fix.
+
+### Gate
+
+`bun run typecheck` green · `bun run lint` green (0 errors, 0 warnings — the
+baseline in AGENTS §6) · `bun test` **10927 pass, 0 fail, 5 skip** (the 5 are the
+documented opt-in gates: live-k8s ×2, live-docker ×2, real-socket keepalive, plus
+the root-only `test.skipIf(isRoot)` pair; `main` carries the same set).
+`bun run voice:test` 13/13. No protocol/schema change (`packages/protocol` is
+untouched, so no `protocol.d/` note and no `protocol.json` regeneration).
+Biome's ignore list gained `native/voice-mac/.build` (SwiftPM products) and
+`.gitignore` gained the same path.
 
 ## Review
 

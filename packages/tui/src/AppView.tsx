@@ -39,6 +39,7 @@ import { QueuedMessages } from "./components/QueuedMessages.tsx";
 import { QuitConfirm } from "./components/QuitConfirm.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
+import { VoiceStrip } from "./components/VoiceStrip.tsx";
 import { permissionAgentLine } from "./permission-ui.ts";
 import { rowTexts } from "./queued.ts";
 import { stripAnsi } from "./render-lines.ts";
@@ -89,6 +90,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
     scrolledUp,
     hiddenAbove,
     attachRow,
+    voiceStrip,
     onPillRange,
   } = model;
 
@@ -221,6 +223,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
                   borderRight={false}
                   flexDirection="column"
                 >
+                  <VoiceStrip view={voiceStrip ?? null} columns={columns} />
                   {attachRow === null ? null : (
                     // ONE row, above the input: the chips (`name size`, +N) or
                     // the upload in flight. Colours and the glyph only — the

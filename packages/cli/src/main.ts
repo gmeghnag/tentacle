@@ -31,6 +31,7 @@ import {
   type HopSpec,
   type HopWorkload,
   type SessionController,
+  VOICE_DEFAULTS,
   pickSession,
   startTui,
 } from "@tentacle/tui";
@@ -163,6 +164,7 @@ import {
 import { untrustedText } from "./untrusted-text.ts";
 import { runUpdate, spawnVersion } from "./update.ts";
 import { APP_BUILD, APP_RELEASE_VERSION, APP_VERSION } from "./version.ts";
+import { runHelperInherited, voiceCommand } from "./voice-cmd.ts";
 import { buildAgent, connectConfiguredMcp, loadUserAgentTypes } from "./wiring.ts";
 import {
   type WorkspacePlan,
@@ -334,6 +336,12 @@ Usage:
   tentacle devices reset [--yes]
                            new identity key and an empty registry: every phone
                            must pair again (the recovery from a leaked key)
+  tentacle voice status    the Mac's speech recogniser, the models, the
+                           microphone permission
+  tentacle voice setup [--yes]
+                           download the Parakeet model (only needed with
+                           voice.engine: parakeet); Apple's built-in
+                           recogniser needs no download
   tentacle <prompt...>     run a single task and exit
   tentacle -- <prompt...>  the same, for a prompt that starts with '-' or
                            with a subcommand word (tentacle -- explain how
@@ -936,6 +944,22 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     });
   }
 
+  // `tentacle voice setup|status` (docs/feat/voice-dictation.md §6): the local
+  // helper only — no model, no daemon, no session (`usesModel` is false, so no
+  // `apiKeyCommand` runs). Ink is not mounted here, so the helper keeps the
+  // terminal's stdio: that is exactly what lets macOS attribute the microphone
+  // prompt to the terminal the user is sitting in.
+  if (mode === "voice") {
+    return voiceCommand(parsed.positional, {
+      configDir: config.configDir,
+      execPath: process.execPath,
+      config: { ...VOICE_DEFAULTS, ...(config.voice ?? {}) },
+      out,
+      err,
+      runHelper: runHelperInherited,
+    });
+  }
+
   // `tentacle hooks trust --list | --revoke <folder>` (P3): no TUI, plain output.
   if (mode === "hooks") {
     const revoke = parsed.flags.get("revoke");
@@ -1375,6 +1399,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             model: config.model,
             // The palette (`tui.theme`): a LAPTOP-ONLY display setting.
             theme: config.tui?.theme ?? "auto",
+            // Voice dictation (`voice.*`): a LAPTOP-ONLY input setting. The TUI
+            // itself decides whether this terminal can use it at all (F11).
+            voice: { ...VOICE_DEFAULTS, ...(config.voice ?? {}) },
             cwd: config.cwd,
             contextWindow: config.contextWindow,
             // The status bar's badge: from this laptop's engine host, never the pod.

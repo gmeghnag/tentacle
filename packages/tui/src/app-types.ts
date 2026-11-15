@@ -23,6 +23,8 @@ import type { SubagentNotifyView } from "./subagent-notify.ts";
 import type { TargetBadge } from "./target-view.ts";
 import type { SessionActivity } from "./turn-feed.ts";
 import type { RunQuit } from "./useQuitClear.ts";
+import type { VoiceConfig } from "./voice-session.ts";
+import type { VoiceSpawner } from "./voice-spawn.ts";
 
 /**
  * `RunQuit` left this file with S8: it is declared next to `useQuitClear`, the
@@ -440,6 +442,18 @@ export interface AppProps {
    * else reads it, and no production caller passes it.
    */
   readonly jobRefreshMs?: number;
+  /**
+   * Voice dictation settings (docs/feat/voice-dictation.md). Absent: the defaults
+   * in `voice-session.ts` (`VOICE_DEFAULTS`) — enabled, Ctrl+R, `auto` language,
+   * no auto-stop. A LOCAL input device: never carried to a pod, and the helper is
+   * only ever spawned when `voiceAvailability` says this is a local Mac terminal.
+   */
+  readonly voice?: VoiceConfig;
+  /**
+   * TEST ONLY: the voice helper spawner. The real one is `Bun.spawn`; a test
+   * passes a fake so no child process (and no microphone) exists in `bun test`.
+   */
+  readonly voiceSpawner?: VoiceSpawner;
   /**
    * Auto-wake: when a background job exits while idle, start a continuation turn
    * so the agent reacts to it without a user prompt. Default: true.

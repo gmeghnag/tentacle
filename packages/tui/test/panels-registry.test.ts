@@ -106,6 +106,8 @@ function snap(over: Partial<KeySnapshot> = {}, char = "", key: Partial<Key> = {}
     },
     sessions: undefined,
     detachOnQuit: false,
+    voice: () => "idle",
+    voiceKey: () => "ctrl+r",
     ...over,
   } as KeySnapshot;
 }
