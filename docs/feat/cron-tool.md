@@ -1,6 +1,6 @@
 # feat/cron-tool — the agent schedules its own wake-ups (recurring or one-shot)
 
-> **Status:** implementation (plan written — awaiting owner answers; NOT approved)
+> **Status:** implementation — **Implementation APPROVED by the owner (2026-11-16)**, answers below (#### Owner answers)
 > **Branch:** `feat/cron-tool`
 > **Size:** L as a whole → slices S1–S6 below, each S or M · **Blast:** load-bearing (the daemon starts model turns on its own clock inside `HostedSession`'s one busy slot; it adds a field to the trusted `serve` sidecar, a protocol update + method, and a trust bit on the worker's client — AGENTS §7 persistence, single broker, a pod is not trusted, protocol) · **Suited:** S1, S5, S6 any executor + standard Review; S2–S4 a strong executor; **mandatory fresh-context Review** of the branch red-teaming the busy slot, the ask-with-nobody-attached rule, the sidecar version and the pod exclusion. The owner assigns executors.
 > **Changelog:** `changelog.d/cron-tool.added.md` — `- **The agent can schedule its own wake-ups.** Ask it to "check the build every 10 minutes" or "remind me at 17:00": it registers a scheduled wake (recurring or one-shot) that starts a turn with a short prompt when it is due. \`/schedule\` (and Session info on the iPhone) lists them and deletes one; on \`serve\` they survive a daemon restart, in a local session they last until you quit.`
@@ -559,6 +559,23 @@ Gate before done: `bun run check` (typecheck → lint, baseline clean → test; 
    panel; iPhone Session-info section + fired bubble; local quit warning.
    **Rec: B + all of M2/M3/M6/M7/M8.** S5/S6 start only after your choice
    on the mockups.
+
+
+#### Owner answers (2026-11-16 ~00:15, binding)
+
+*— recorded by claude-opus-5-5 (orchestrator), 2026-11-16*
+
+- **Q1 yes** — `schedule_create` (ask) + `schedule_control {list|delete}` (none), ids `sc-N`.
+- **Q2 `every` + `at` only.** Slice **S1b is dropped** (5-field `cron` is a later follow-up).
+- **Q3 yes** — creating asks (normal scopes; "always" allowed on `serve`/worker).
+- **Q4 yes** — `serve` + local worker only; pods excluded in v1.
+- **Q5 yes** — an armed schedule keeps a detached `serve` session live past the 24 h idle TTL, bounded by the 7-day expiry.
+- **Q6 yes** — min 1 m, ≤ 10 jobs/session, 7 d expiry, `at` ≤ 7 d, prompt ≤ 2000 chars, `schedules.*` config.
+- **Q7 CHANGED: KEEP them on `/clear`** ("tienili"), like background jobs: the schedules stay with the session that continues after `/clear`; the archived fork (the dropped chat) carries NONE (no duplicate firing). The `/clear` notice is not needed. **Executor of S3: update D-sections, failure modes and tests that assumed "drop" (search `/clear`) to this rule before coding.**
+- **Q8 yes** — `serve` sidecar, `DAEMON_STATE_VERSION = 3` only when present; no session-log entry type.
+- **Q9 B** — styled fired row from `turn_start.schedule` (degrades to A on reload), plus M2 dock rows/pill, M3 `/schedule` panel, M6 local quit warning, M7 iPhone Session-info section, M8 fired bubble. S5/S6 are unblocked.
+
+**Merge plan:** one branch, slices S1 → S2 → S3 → S4 → S5 → S6 each executed + reviewed on it; merged to `main` once, after S6 PASS.
 
 ## Execution
 
