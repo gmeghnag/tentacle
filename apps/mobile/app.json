@@ -47,6 +47,7 @@
           "faceIDPermission": "tentacle uses Face ID to unlock the app"
         }
       ]
-    ]
+    ],
+    "icon": "./assets/icon.png"
   }
 }
