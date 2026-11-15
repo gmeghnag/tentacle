@@ -18,9 +18,10 @@
  * alternative); the live camera covers the whole screen with its viewfinder and
  * a glass Cancel; review → connecting → compare → done is a bottom sheet.
  */
-import type { JSX, ReactNode } from "react";
+import { type ComponentRef, type JSX, type ReactNode, useCallback, useEffect, useRef } from "react";
 import {
   ActivityIndicator,
+  Keyboard,
   KeyboardAvoidingView,
   ScrollView,
   StyleSheet,
@@ -31,6 +32,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { CameraView } from "../camera-access.ts";
 import { sasGroups } from "../computer-status.ts";
+import { FIELD_REVEAL_IDLE, type FieldRevealEvent, revealStep } from "../field-reveal.ts";
 import type { PairingView } from "../pairing-flow.ts";
 import { type Palette, size as SIZE, radius, space, typography } from "../theme.ts";
 import { Banner } from "../ui/Banner.tsx";
@@ -92,6 +94,26 @@ export function PairScreen({
 }: PairScreenProps): JSX.Element {
   const insets = useSafeAreaInsets();
   const inSheet = view.stage !== "intake";
+  // Keep the paste field and Continue above the keyboard (`field-reveal.ts`):
+  // the avoiding view shrinks the screen, the list keeps its offset, so the
+  // field — the last card — would sit under the keyboard.
+  const list = useRef<ComponentRef<typeof ScrollView>>(null);
+  const reveal = useRef(FIELD_REVEAL_IDLE);
+  const feed = useCallback((event: FieldRevealEvent) => {
+    const step = revealStep(reveal.current, event);
+    reveal.current = step.state;
+    if (step.reveal) {
+      list.current?.scrollToEnd({ animated: true });
+    }
+  }, []);
+  useEffect(() => {
+    const shown = Keyboard.addListener("keyboardDidShow", () => feed("keyboard-shown"));
+    const hidden = Keyboard.addListener("keyboardDidHide", () => feed("keyboard-hidden"));
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, [feed]);
   const failure =
     view.failure === undefined ? null : (
       <Banner
@@ -128,6 +150,8 @@ export function PairScreen({
   return (
     <KeyboardAvoidingView behavior="padding" style={[styles.root, { backgroundColor: palette.bg }]}>
       <ScrollView
+        ref={list}
+        onContentSizeChange={() => feed("content-resized")}
         style={styles.root}
         contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
         keyboardShouldPersistTaps="handled"
@@ -224,6 +248,8 @@ export function PairScreen({
                     testID="pair-paste-input"
                     value={view.text}
                     onChangeText={onText}
+                    onFocus={() => feed("focus")}
+                    onBlur={() => feed("blur")}
                     placeholder="tentacle://pair?…"
                     placeholderTextColor={palette.sec}
                     autoCapitalize="none"

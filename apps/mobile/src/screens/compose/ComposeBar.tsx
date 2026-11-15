@@ -172,6 +172,7 @@ export function Chips({
     <ScrollView
       horizontal
       testID="composer-chips"
+      style={styles.chipRow}
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={styles.chips}
     >
@@ -339,6 +340,10 @@ const styles = StyleSheet.create({
     borderStyle: "dashed",
   },
   outboxStatus: { flexDirection: "row", alignItems: "center", gap: 6, paddingRight: 4 },
+  // A ScrollView's base style GROWS (`flexGrow: 1`): in the screen's column the
+  // chip row took half the transcript's height (slice 6, flow 18). It is as
+  // tall as its chips.
+  chipRow: { flexGrow: 0 },
   chips: { paddingHorizontal: 12, paddingBottom: 6, gap: 6 },
   chip: {
     flexDirection: "row",

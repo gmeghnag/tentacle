@@ -1422,6 +1422,66 @@ clean · `bun run lint` 1420 files, 0 issues.
 
 *— claude-opus-5-5, 2026-11-15*
 
+### Fix round — the slice 6 walk on iOS 26 (orchestrator's order)
+
+Each item red-first unless marked; then `bun run e2e:mobile --ios 26 --only
+24-ui-shots,23-composer-keyboard,18-photos` until green.
+
+1. **Harness `--only <flow,flow>`** (`e2e/run.ts` `parseArgs`/`selectedFlows`;
+   the flag wins over `E2E_ONLY_FLOWS`, which still works; names checked before
+   any build). Tests in `e2e-preflight.test.ts`. The first real run iterated the
+   CHARACTERS of a path: `main` already bound `flows` to the flows dir. Renamed
+   to `runFlows`, plus a guard test (one binding, looped over).
+2. **Pair: paste field and Continue under the keyboard** (the walk failed at
+   `pair-review`). The avoiding view shrank the screen but the list kept its
+   offset. New pure `src/field-reveal.ts` (focus/blur, `keyboardDidShow/Hide`,
+   content resize → reveal); `PairScreen` scrolls to the end on a reveal (the
+   paste card is last). Content resize matters: the pasted line wraps and pushes
+   Continue down again. Tests: `field-reveal.test.ts`. On device:
+   `02-pair-keyboard-*.png`, and flow 24 now asserts `pair-paste-submit`
+   visible with the keyboard up before it taps it.
+3. **Light + dark in one walk**: new `appearance` hook (`simctl ui <udid>
+   appearance light|dark`, `appearanceOf`), `flows/appearance.js`, and
+   `_shot.yaml` (light shot → dark → dark shot → light). Flow 24 inlines
+   `_pair`'s steps so the Pair stages are shot too. Tests: `e2e-appearance.test.ts`.
+4. **`turn-idle` missing on iOS 26** (flows 23, 24): the 0×0 `fontSize: 0`
+   observable was absent from the accessibility tree (hierarchy dump: neither
+   id). Now 1×1, absolute, transparent (`SessionScreen` `observable`, same for
+   `composer-filled` in `ui/Composer.tsx`, whose text was also `""`). *No unit
+   test (RN layout); proven only on device:* run 3 got past it, run 5 green.
+5. **B8 — "at most 5 photos" before the library opens** (owner, iOS 18.3.1).
+   `compose-controller.ts` passed `pickRoom(chips)` (the ROOM, 5 when empty) to
+   `pickFromLibrary(taken)` / `takePhoto(taken)`, so the limit was `5 - 5 = 0`
+   and the adapter refused before presenting the picker. Now `counted(chips)`.
+   Test: `compose-controller.test.ts` "B8: the picker is told how many photos
+   are TAKEN" (red: `library:5`). On device the picker now reads "Select up to
+   5 photos." and flow 18 passes.
+6. **Refused photo chips ~380 pt tall**: a `ScrollView`'s base style grows, so
+   the horizontal chip row split the free height with the transcript.
+   `ComposeBar` `chipRow: { flexGrow: 0 }`. Test: `compose-bar-layout.test.ts`
+   (source guard).
+7. **Flow/harness bugs (the flows were wrong, not the app):** flow 18 tapped
+   `Library` (button is "Photo Library"; Maestro matches the whole text), named
+   cells `PNG fixture` (iOS 26's PHPicker labels them "Photo, <date>, <time>"
+   → the two newest cells, this run's `addmedia` pair) and `Add` (iOS 26:
+   "Done"); the harness `serve` had images OFF (`model.images` has no env var;
+   OpenAI-shaped default is no vision) → `harnessConfigText()` written to its
+   `config.jsonc` before the first start, test in `e2e-preflight.test.ts`;
+   `23/07/22-*.js` compared model prompts verbatim, but context awareness
+   appends `\n\n[context: …]` → matched on the typed first line.
+
+**Result:** `✓ 24-ui-shots (iOS 26)` `✓ 23-composer-keyboard (iOS 26)`
+`✓ 18-photos (iOS 26)` — `PASS` (run 1794724072250). Screenshots (light and
+dark, every screen of the walk) in `.tentacle/tmp/mobile-ui/slice-6/01-…09-*`,
+plus `10/11-composer-keyboard-*` (flow 23, light only).
+**Not done here:** the owner's qwen3.8 (vision) photo test against a real
+`serve` (only the mock model's `saw 2 images` is proven); iOS 18 not run; 07
+and 22 not re-run after their script fix.
+**Gate:** `bun test apps/mobile` 1046 pass, 0 fail · `bunx tsc -p apps/mobile`
+clean · `bun run lint` 1425 files, 0 issues.
+
+*— claude-opus-5-5, 2026-11-15*
+
 ## Review
 
 ### Slice 0 — adversarial review (fresh context)

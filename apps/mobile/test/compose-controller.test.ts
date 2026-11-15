@@ -206,6 +206,8 @@ async function harness(
     },
   });
   const picks: PickedPhoto[] = [];
+  /** What each picker call was told is ALREADY attached (`taken`, not the room). */
+  const takenAsked: string[] = [];
   const acts: string[] = [];
   const compose = createCompose({
     computerId: "c1",
@@ -213,8 +215,14 @@ async function harness(
     store,
     driver,
     photos: {
-      pickFromLibrary: async () => picks,
-      takePhoto: async () => picks,
+      pickFromLibrary: async (taken) => {
+        takenAsked.push(`library:${taken}`);
+        return picks;
+      },
+      takePhoto: async (taken) => {
+        takenAsked.push(`camera:${taken}`);
+        return picks;
+      },
     },
     handle: () => handle,
     turnId: () => turn,
@@ -255,6 +263,7 @@ async function harness(
     store,
     fs,
     picks,
+    takenAsked,
     drafts,
     notices,
     field: () => field,
@@ -609,6 +618,21 @@ describe("the photo chips (D5, F13–F17)", () => {
     await h.compose.pickLibrary();
     expect(h.handle.acts).toEqual([]);
     expect(h.compose.view().chips[0]?.state).toBe("refused");
+  });
+
+  test("B8: the picker is told how many photos are TAKEN, not the room left", async () => {
+    // Owner B8: with 0 photos, "Photo library" answered "a message carries at
+    // most 5 photos" and the library never opened — the controller passed the
+    // room (5) where the adapter expects what is taken (so its limit was 0).
+    const h = await harness();
+    await h.compose.pickLibrary();
+    await h.compose.pickCamera();
+    expect(h.takenAsked).toEqual(["library:0", "camera:0"]);
+    h.picks.push(PICK, PICK);
+    await h.compose.pickLibrary();
+    h.picks.length = 0;
+    await h.compose.pickLibrary();
+    expect(h.takenAsked.at(-1)).toBe("library:2");
   });
 
   test("a removed chip is gone and the draft keeps only what may still go", async () => {

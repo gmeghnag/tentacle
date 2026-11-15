@@ -1,0 +1,18 @@
+appId: so.tentacle.app
+---
+# `_shot` (mobile-ui-polish slice 6): one screen, both appearances, in flow 24's
+# walk. Entered in light, it shoots `${SHOT}-light`, flips the simulator to dark
+# (the `appearance` hook), shoots `${SHOT}-dark`, and leaves it light again, so
+# the next screen starts from the same state.
+- takeScreenshot: ${SHOT}-light
+- runScript:
+    file: "appearance.js"
+    env:
+      NAME: "dark"
+- waitForAnimationToEnd
+- takeScreenshot: ${SHOT}-dark
+- runScript:
+    file: "appearance.js"
+    env:
+      NAME: "light"
+- waitForAnimationToEnd

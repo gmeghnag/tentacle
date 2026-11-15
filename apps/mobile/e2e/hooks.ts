@@ -46,7 +46,12 @@ export type HookName =
    * is true for every path — so the harness answers what the `pair` line actually
    * carried, and the flow throws unless the relay is its ONLY address.
    */
-  | "relay-qr";
+  | "relay-qr"
+  /**
+   * Flip the simulator to `?name=light|dark` (mobile-ui-polish slice 6): flow 24
+   * shoots every screen in both appearances in one walk.
+   */
+  | "appearance";
 
 /** The hooks that take a query parameter (`?session=…&prompt=…`). */
 export interface HookQuery {
@@ -158,6 +163,16 @@ export interface HookActions {
    * printed one yet, so a flow cannot read a stale run's line.
    */
   readonly relayQr: () => Promise<{ readonly payload: string }>;
+  /** Set THIS simulator's appearance (`simctl ui <udid> appearance …`). */
+  readonly appearance: (name: Appearance) => Promise<void>;
+}
+
+/** The simulator appearances the `appearance` hook sets. */
+export type Appearance = "light" | "dark";
+
+/** `light` / `dark`, or undefined for anything else (the hook then answers 400). */
+export function appearanceOf(value: string | undefined): Appearance | undefined {
+  return value === "light" || value === "dark" ? value : undefined;
 }
 
 /** What a laptop requester answers: `allow` (once) or `deny`. */
@@ -191,6 +206,7 @@ export function hookFor(path: string): HookName | undefined {
     case "faceid-nomatch":
     case "log-file":
     case "relay-qr":
+    case "appearance":
       return name;
     default:
       return undefined;
@@ -361,6 +377,17 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
             return Response.json({ ok: true, hook, text: await deps.actions.logFile() });
           case "relay-qr": {
             return Response.json({ ok: true, hook, ...(await deps.actions.relayQr()) });
+          }
+          case "appearance": {
+            const name = appearanceOf(query.name);
+            if (name === undefined) {
+              return Response.json(
+                { ok: false, error: "name must be light or dark" },
+                { status: 400 },
+              );
+            }
+            await deps.actions.appearance(name);
+            return Response.json({ ok: true, hook, name });
           }
         }
         return Response.json({ error: "unknown hook" }, { status: 404 });

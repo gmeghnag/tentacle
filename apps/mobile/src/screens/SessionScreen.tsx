@@ -504,6 +504,16 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
   },
   notice: { paddingHorizontal: 16, paddingBottom: 6 },
-  // The turn observable: on screen (XCUITest sees it), takes no room.
-  observable: { width: 0, height: 0, fontSize: 0 },
+  // The turn observable: on screen (XCUITest sees it), takes no room. 1×1 and
+  // absolute, not 0×0: iOS 26 drops an empty-frame element from the
+  // accessibility tree, so `turn-idle` vanished (slice 6 walk, flows 23/24).
+  observable: {
+    position: "absolute",
+    left: 0,
+    bottom: 0,
+    width: 1,
+    height: 1,
+    fontSize: 1,
+    color: "transparent",
+  },
 });

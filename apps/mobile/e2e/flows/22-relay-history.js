@@ -19,7 +19,9 @@ if (typeof history.assistant !== "string" || !history.assistant.includes("mock m
   throw new Error(`the daemon has no mock answer: ${JSON.stringify(history.assistant)}`);
 }
 const prompts = http.get(`http://${MAESTRO_HOOKS}/model-prompts`);
-if (!json(prompts.body).prompts.includes("relay only")) {
+// Matched on what was typed: context awareness appends "\n\n[context: …]".
+const asked = (p) => p === "relay only" || p.startsWith("relay only\n");
+if (!json(prompts.body).prompts.some(asked)) {
   throw new Error("the mock model was never asked the relay-only prompt");
 }
 output.relayHistory = JSON.stringify(history);
