@@ -705,6 +705,47 @@ Biome's ignore list gained `native/voice-mac/.build` (SwiftPM products) and
 
 **Executor:** honest about the open capture bug and its own two vacuous tests. But the mutation table (M5, M7) and "T1–T10 red→green" overstate coverage of paths that production never drives.
 
+### Round 2
+
+*— claude-opus-5-5, 2026-11-15* (scope: `git diff HEAD~1` = `eefe8cd1`)
+
+**Verdict: REQUEST-CHANGES.**
+
+Gate: `bun run typecheck` green; `bun run lint` clean (1518 files); `bun test packages/{tui,cli,config}/test` 5304 pass / 2 skip / 0 fail. `bun run voice:test` was **not run**: it needed an approval this session could not get, so the Swift changes are unverified. After every mutation the tree was byte-identical (`git status` empty). Repro: `.tentacle/tmp/voice-dictation/review/r2.ts`.
+
+**Round-1 findings, re-checked by mutation**
+
+| # | Fix | Mutation | Result |
+|---|---|---|---|
+| H1 | `dictationInsertion` (`App.tsx:800`) | insert `field.value + …` | **RED** (voice-app 1 fail) — fixed |
+| H2 | monotonic `issued` (`voice-session.ts:304`) | id from `model.id ?? 0` | **RED** ×2 — fixed |
+| H2 | stale guard with no wildcard (`:510`) | re-add `model.id !== null &&` | **RED** ×1 — fixed |
+| H3 | helper `vad`/`level`; cap, timeout and idle exit via `clock` | (reducer tests) | wired, but see NEW-1 |
+| H4 | local TUI (`main.ts:2265`) | pass `VOICE_DEFAULTS` | **RED** (wiring ×2) — fixed |
+| H4 | `connect` (`connect.ts:292`) | pass `VOICE_DEFAULTS` | RED, but only through a source-text match on `connect.ts`. `connect-voice.test.ts` stays green. Weak but acceptable. |
+| M5 | `bunSpawnOptions` | real `Bun.spawn` `stderr: "inherit"` (`useVoice.ts:113`) | **GREEN — still vacuous.** `bunSpawnProc` ignores `options.stdin/stdout/stderr` and hardcodes them, contrary to its own comment. The real behaviour (log fd, drained pipe) is correct. |
+| M6 | `voiceHost` injection | — | T7 now pins darwin and no SSH — fixed |
+| M7 | `--yes` via `bools` (`main.ts:963`) | `false` | **RED** — fixed |
+| M8 | `existsSync` candidate; `--input`, `--no-voice-processing` | — | voice-app test pins both — fixed (Swift side unbuilt here) |
+| M9 | ref guard (`useVoice.ts:313`) | clear the ref blindly | **RED** — fixed |
+
+**New findings in this diff**
+
+- **NEW-1 (HIGH): a 3 s pause now ends every dictation, with auto-stop OFF.**
+  - Where: the reducer always passes `hardStopMs: ENDPOINT_DEFAULTS.hardStopMs` (3000) to `foldEndpoint.step` (`voice-session.ts` `vad` branch). The fold checks the hard stop *before* `if (!input.autoStop)` (`voice-endpoint.ts:119-123`).
+  - The helper's placeholder VAD makes this worse: anything below −45 dBFS counts as silence (`main.swift` `windowSpeechProbability`), and the measured ambient is −74.
+  - Repro (`r2.ts` (1)): default config, speech, then quiet → `stop` sent at 3069 ms.
+  - Why it matters: it contradicts owner decision 2 ("no auto-stop by default; the user ends with the key") and the Context's structural claim that "a pause can never end it". A user who stops to think gets cut off.
+  - The cap needs no hard stop: `maxSeconds` already ends a forgotten dictation.
+- **NEW-2 (HIGH): voice fails on any machine where `<configDir>/voice/` does not exist.**
+  - Where: `defaultSpawner` does `openSync(<configDir>/voice/helper.log, "a")` with no `mkdir`. The CLI now always passes `voiceConfigDir`, so this path is always taken. Nothing creates the dir, and Apple's engine needs no `setup` that would.
+  - The ENOENT is caught as a spawn failure, so the notice is wrong ("voice helper not found (/bin/cat) — build it…"), and the reducer is never told: the strip stays `● starting`.
+  - Repro: `r2.ts` (2) with a fresh config dir.
+  - The 1 MiB log rotation in the plan is also absent.
+- **MEDIUM:** M5's mutation still survives (see the table).
+
+**What holds:** H1, H2, H4, M6, M7, M8 and M9 are fixed, and each is pinned by a test shown red under mutation.
+
 ## Appendix — `sweep.py` (S1 runs it; written 2026-11-15, not yet run)
 
 Run with the V0 venv: `.tentacle/tmp/eval-realtime-media/v0/env/venv/bin/python .tentacle/tmp/voice-dictation/sweep.py`. It replays Silero probabilities once per file, then sweeps the silence floor {200…800 ms} × Smart Turn threshold {none, 0.5…0.95} × hard stop {none, 2 s}. It reports, per cell, the truncated utterances, the files that never stopped, and the endpoint wait p50/p95, plus the longest internal pause per utterance (the comma pause).
