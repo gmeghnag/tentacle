@@ -773,3 +773,21 @@ baseline) · `bun test` full suite: results in Review. No schema changed, so
 
 8. **`move_session` is DISABLED by default** (owner 2026-11-15 00:30; reverses session-hop Q6 "default on"): the tool is not offered to the model unless the config enables it — `sessionHop.tool: true` (keep the existing key, flip the default; document it in the config reference and `tentacle config list`). `/move` typed by the user is unaffected. Tests: default config → tool absent from the model's tool list; `sessionHop.tool: true` → present.
 *— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+### Fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES**
+
+Gate (re-run): `bun run typecheck` clean · `bun run lint` clean (1383 files) · `bun test` 10027 pass / 4 skip / 0 fail (10031, 722 files; the 4th skip is environment-gated, not in this diff). Mutation: `hopAutoAcceptable` → always true ⇒ 2 fails (`hop-turn`, `hop-feed-turn`); reverted, tree clean. §7 single broker holds: `hopAuto` is set only by `hopPromptRequest`, origin is the laptop's `deps.place()`, `toPermissionRequest` allowlist unchanged, `auto` never on the wire.
+
+Findings:
+1. **HIGH — OD8 not implemented.** `packages/config/src/defaults.ts:56` still has `DEFAULT_SESSION_HOP_TOOL = true`. There is no default-off test, and the config docs were not updated. Also, `key-docs.ts:752` still says "never answered by auto-accept", which is now false: `config list` misstates a security property.
+2. **MEDIUM — the wake ignores idle.** `useHop.ts` `after()`/`wakeSettled` call `sendWake` directly, with no `hopReady` check, and `run()` (`useTurnDriver.ts:800-820`) has no running guard. Scenario: auto-accept OFF, a proposal's dialog is pending, and `wakeIfPending()` (`useTurnDriver.ts:~733`) starts a job continuation. The user declines, and `wakeSettled` starts a second concurrent own turn. The same happens with a foreign turn drained by `drainHeld`. This breaks the plan's failure-mode row "Wake when not idle ⇒ hold".
+3. **MEDIUM — a failed wake send loses the line.** `takeLine` consumes the moved/failed fact before `session.send`. On a send error nothing restores it, so the model never learns that the session moved. The plan's failure-mode row asked for a restore and a test; there is neither.
+4. **MEDIUM — the OD3 trace is invisible in the owner's scenario.** `namespaceTrace` is only in the prompt detail (`hop-proposal.ts:267`). Under auto-accept ON no prompt is shown, so it appears nowhere. A typed `/move` never shows it. `attachMissNotice` (`hop-targets.ts:~473`) omits `(from <source>)` (design 7). Also, a typed `/move attach kubernetes:<pod>` builds a place with no namespace (`hop-targets.ts:~450`), so its moved/wake label is `kubernetes:<pod>`, not `ns/pod` (design 5, OD1).
+
+Attacks tried with no finding: a forged `hopAuto`/`kind` from a daemon (allowlist intact); pod-supplied `cwd` in the user-role wake line (`untrustedText`, one line, capped); a pin that changes between the ask and the build (the build dials the pinned ns); duplicated `[move failed: [move failed:` brackets (fixed); a workload→local proposal under auto-accept (asked, mutation-proven).
+
+Executor: careful and well documented, and its mutation log is honest. But it missed the binding OD8 and marked two planned failure-mode tests as covered when they are not. This reviewer is the same model family as the plan's author (Opus); the executor was different.
+
+*— claude-opus-5-5, 2026-11-15*
