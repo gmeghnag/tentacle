@@ -3446,3 +3446,17 @@ about the files that is readable without it.
 simulator (`_unlock` fails on a pre-existing flow too, unchanged from P10), so
 F2's fix makes the flow capable of delivering a push but its banner remains
 unobserved.
+
+### Round 2 — REQUEST-CHANGES
+
+**Gate:** `deploy`/`main`/`e2e-flows` 76 pass / 0 fail; `bun run lint` clean (1406 files); `bun run typecheck` exit 0.
+
+**Round-1 findings**
+- **F1 (base unit doesn't boot without a key) — FIXED.** The push wiring has moved to `relay.service.d/apns.conf`, and `parseRelayArgs` now treats a blank `--apns-*` value as unset (`main.ts:225-240`). Mutation: putting the refusal back → RED 3 (deploy "HALF-installed drop-in", plus 2 in `main.test.ts`). Reverted; tree clean.
+- **F2 (the harness's second store writer) — FIXED.** `run.ts` now calls the daemon's `writePushRegistration`, and typecheck pins the shape. Not mutation-checkable: `run.ts` has no unit test, so only the E2E run would fail.
+
+**New findings**
+1. **HIGH — installing push now stops the relay from loading.** `apps/relay/deploy/relay.service.d/apns.conf:29` sets `ExecStart=/opt/…` without a preceding empty `ExecStart=` line. Its own comment (l.26-28) says that reset is needed, but the file doesn't do it. The base unit is `Type=simple` (`relay.service:28`), and systemd refuses a simple service that has two `ExecStart=` ("more than one ExecStart= setting, which is only allowed for Type=oneshot services. Refusing."). **Scenario:** D2 installs the drop-in per §6.1 → `daemon-reload` → `restart` fails → every phone is off the relay. `deploy.test.ts` "the drop-in's ExecStart is the base unit's…" reads the last value through `serviceKeys`, so it can't see a missing reset. Fix: add `ExecStart=` on its own line before the full one, and pin it in the test (the first `ExecStart` line in `[Service]` must be empty).
+2. **MEDIUM — the runbook contradicts itself on rollback** (`docs/ops/relay-deploy.md:362`). It says that "with the key gone but the drop-in present, the relay is also fine", but l.359-361 (and the drop-in's `LoadCredential`) say that case gives 243/CREDENTIALS. The blank-value leniency only covers a missing `apns.conf`, not a missing `.p8`. An operator who trusts l.362 gets a crash loop.
+
+*— claude-opus-5-5, 2026-11-15 (fresh context, round 2)*
