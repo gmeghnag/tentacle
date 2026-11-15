@@ -1631,3 +1631,67 @@ possible in the other direction.
 = 0, `HEAD..main` = 17), and I am told never to `checkout`/`commit`. So P5/P6 are
 **uncommitted working-tree edits on `feat/mobile-push`**, listed in `git status`;
 the orchestrator decides where they land.
+
+## Review
+
+### Review — P5 + P6 (fresh context, scope `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 1 MEDIUM; P5 clean).
+
+**Gate.** Narrow files (`push-rules`, `push-store`, `devices-cmd` tests): 73 pass / 0
+fail. `bun run lint`: 1381 files, 0/0. `bun run typecheck` (all three tsc): exit 0.
+Full suite not re-run (out of the requested scope).
+
+**Findings.**
+1. **HIGH — a detach is invisible to the rules, so F17 fails and the ask is never
+   pushed.** `push-rules.ts:210-213` excludes `state.attached`, which is updated only
+   by `ask` / `ask_settled` / `turn_end` events (`:186-200`, `:405`, `:415`); `tick`
+   carries no attachment and `PushEvent` (`:100-121`) has no attach/detach variant.
+   Execution's claim "the attachment set is read at the deadline" is false: it is
+   the set at the LAST event. Scenario (scratch `.tentacle/tmp/mobile-push/rev-p6.ts`):
+   phone attached when the ask arrives, user locks the phone at +5 s without
+   answering → at +30 s the phone is still "attached" → `push-empty`, the ask is
+   marked decided (`:244-246`) → `nextDeadlineAt()` = `undefined`, no push ever
+   (output: `push-empty`, later tick `[]`, next `undefined`). This is the core use
+   case and the plan's F17 ("backgrounded → pushes now reach it"). The test
+   `push-rules.test.ts:194` only covers attach (via a re-offered `ask`), never
+   detach. Fix shape: an `attachment` event (or `attached()` read fresh like
+   `registered()`), plus a red test for detach-during-grace.
+2. **MEDIUM — folded asks share the primary's collapse id, so answering ANY one
+   replaces the banner while others are still pending.** `push-rules.ts:268-273`
+   gives every folded ask `collapseId` = the primary's; `resolveAsk` (`:289-301`)
+   then sends `ask_resolved` under it on the first settle. Scenario (same script):
+   r1+r2 folded (`more: 1`), user approves r2 at the desk → `ask_resolved` with
+   r1's id → the phone shows "answered on another device" while r1 still blocks
+   the turn, and r1 is never re-pushed (`pushedTo` set). The test at
+   `push-rules.test.ts:293-298` encodes this (settles r1 first, asserts nothing
+   about it). Fix shape: `ask_resolved` only when the LAST ask sharing a collapse
+   id settles (or re-push the survivor under the same id).
+
+**Mutation (mine).** Dropped the exclusion filter in `candidates` (`:212`) → 4 tests
+RED (incl. "attached device is EXCLUDED"); restored by `cp` from a scratch backup,
+`cmp` identical, `git status` clean. Executor's P5/P6 mutation tables not re-run.
+
+**Attacks tried.** (a) detach during grace → finding 1. (b) settle one of a fold →
+finding 2. (c) P5: unknown `v` / malformed file left untouched, compare-and-delete
+keeps a newer token, `removeDevices` + `reset` clear `push/` — hold (read + tests).
+(d) Re-offer does not restart grace; `ask_resolved` uncapped; `cancelled` silent —
+hold. (e) P5 `reset` race with a daemon re-writing a file afterwards — deferred to
+P7's push-time authority filter (F14), acceptable for P5.
+
+**Holds.** P5 store (0600, tmp+rename, wire-schema validation, skip-never-rewrite),
+the `PUSH` column, P6 purity (no timers/fs), turn rule, caps. §7: no wire change,
+no pod path, nothing in `emit` yet (P7).
+
+**Executor behaviour.** Honest mutation tables and a self-reported vacuous first
+draft (M6). But one stated property (deadline-fresh attachment) was asserted without
+a test that could falsify it. Doc drift: the Branch note says "uncommitted", but
+P5/P6 are committed (`7fd2ae60`). Out of scope, noted for P2's owner:
+`pushCollapseIdOf` (`protocol/src/push.ts:293`) is a reversible base64 of
+`requestId\0sessionId` truncated to 64 chars, not a keyed hash, so it shows ids to
+the relay/Apple in clear.
+
+Same model family as the executor (Opus, fresh context only): shared blind spots
+may survive.
+
+*— claude-opus-5-5, 2026-11-15*
