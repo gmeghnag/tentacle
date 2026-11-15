@@ -1376,3 +1376,15 @@ Conversation with code/table/tool/diff, Compose with queue, Approval; light+dark
 **Executor behaviour:** stopped on the false auto-accept premise instead of building a fake one (good). Every gap that needs a simulator is listed as NOT verified. The commit is titled "exec (deepseek)" but the Execution section is signed claude-opus-5-5, so the attribution should be reconciled. This reviewer is the same model family as that signature: shared blind spots possible. Simulator/e2e (flows 02/07/08/12–15, B5/B6 on a device) remain unverified.
 
 *— claude-opus-5-5, 2026-11-15*
+
+#### Owner feedback #3 (2026-11-15 01:43, real iPhone, build c8b4dc3c)
+
+It works now ("ora funziona"); "UI migliorata ma si potrebbe fare ancora meglio". Screenshot: `/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/owner-shots/conversation-code-0143.jpeg`. Fix in slices 5+6 and check in the final visual gate:
+
+- **B7 (bug):** HTML entities shown raw inside code blocks: `&#x27;` instead of `'` (escaped twice or never unescaped). Red-first test with a code block containing quotes, <, > and &.
+- **Code blocks:** font too big (looks ~17pt; mockup 12.5px mono / 19px line height); the block runs to the right screen edge with no inset/radius on that side. Add the mockup header row (language/file name + copy button), consistent 16px side insets, rounded corners on both sides, a scroll indicator.
+- **Inline code** (e.g. `python3 dirscanner.py [path] [-n N] [--hidden]`): renders as a big separate highlighted strip that wraps with a ragged background. It must be inline mono ~14px with small padding + radius, wrapping like text.
+- **Typography/spacing:** body text and code feel oversized; follow the mockup scale (16/23 body, 13 secondary) and consistent paragraph spacing.
+- **Header:** add the mockup's right-side session menu button (glass "…") to balance the back button.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
