@@ -1076,3 +1076,22 @@ It is not HIGH or MEDIUM.
 **Nit, not blocking:** `estimateUsed` with a valid anchor reuses its `promptTokens` (`context-awareness.ts:111-113`). The estimate does not drop after a toggle until the next real request reports usage. The exact count path is right.
 
 **Executor behaviour:** it was disciplined. It corrected S1's wrong "no system prompt" note, mutation-tested nine properties and tightened M9 after it survived. It overstated one coverage claim (finding 2).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16* (fresh context, same model as before; scope `git diff HEAD~1`, test-only plus doc)
+
+**Verdict: APPROVE.** Both findings are closed. The diff changes no production code.
+
+1. **Finding 1 (`runGroup` guard): closed.** New test "a GROUPED round (read-only mode) still refuses the hidden server's call". I re-applied MB (drop `capabilities: hooks.capabilities` at `agent.ts:2172`), and that test goes **RED**. The test also checks that `g2` actually ran in the group (`tool_phase` for `g2`), so it truly goes through `runGroup`.
+   - Correction to my Round 1 example: the `skill` tool declares no `concurrency`, so `classOf` makes it `"exclusive"` (`round-plan.ts:28-29`, nothing in `tools/src/skill.ts`). It never joins a group.
+   - The real grouped case is a read-keyed MCP tool, which is what the new test uses.
+2. **Finding 2 (`/compact` call site): closed.** New test "/compact (Session.compact) carries no disabled skill's body". I re-applied ME (`[]` at `session.ts:346`), and that test goes **RED**. It also asserts that `BODY:damajs` is still carried, so the filter cannot pass by dropping everything.
+
+**Gate:**
+- `agent-capabilities` + `session` tests: 24 pass / 0 fail.
+- `bun run lint`: clean, 1658 files.
+- `bun run typecheck`: clean.
+- Restore after the mutations: `cmp` identical, `git status` clean.
+
+**Regressions on the diff:** none. The two tests are added, no existing assertion changed, and they use the existing harness and fakes.
