@@ -128,7 +128,7 @@ Expect `relay listening on ws://127.0.0.1:4100 (relay protocol v1)`.
 curl -sS http://127.0.0.1:4100/healthz     # → {"ok":true,"v":1}
 ```
 
-If it fails: `journalctl -u relay.service -b --no-pager` first, then step 8.
+If it fails: `journalctl -u relay.service -b --no-pager` first, then step 9.
 
 ## 4. Caddy and TLS
 
@@ -209,7 +209,7 @@ known id · `accept <stream> <id>` — the daemon took the stream, so the splice
 live · `dial-held <id>` — the daemon was not registered yet and the phone is being
 held (5 s) · `dial-refused <reason> <id>` — a limit or a full slot; the phone leg
 is then closed `4429`, and a phone whose id is unknown at the hold's expiry is
-closed `4404` (step 8's table). Every line carries an 8-character id or token
+closed `4404` (step 9's table). Every line carries an 8-character id or token
 PREFIX only: a full token, a payload or a secret in the journal is a bug, not a
 log level.
 
@@ -218,14 +218,129 @@ If the phone cannot reach it, the app's diagnosis names the relay as a path; a
 `tentacle devices`), and a `version` error means binary and daemon disagree
 on `RELAY_PROTOCOL_VERSION` (rebuild both from the same commit).
 
-## 6. Upgrade
+## 6. APNs push (the `.p8` secret)
+
+Push is **optional and off by default**: with no key the relay logs one
+`push off: no --apns-key-file (ready announces no features)` line at start and
+serves exactly as before, and every daemon sees no `"push"` in `ready.features`
+(docs/feat/mobile-push.md F4). Reachability must never depend on Apple's key, so
+this step can be skipped, deferred or reverted without touching anything else.
+
+The relay is stateless but **no longer secretless**: this one file is the only
+secret on the host (decision 18 — it never enters the repo, a flag's value, or
+the journal).
+
+### 6.1 Install the key
+
+The `.p8` comes from the Apple Developer console (Keys → an APNs Auth Key), and
+it downloads exactly once. Its **Key ID** (10 characters) and your **Team ID**
+are not secrets — they travel in the JWT header Apple already sees — but keep
+them out of the repo too.
+
+```sh
+# build machine → host
+scp AuthKey_ABC123DEFG.p8 root@142.132.169.22:/root/apns-key.p8
+```
+
+```sh
+# as root on 142.132.169.22
+install -d -o root -g root -m 0755 /etc/tentacle-relay
+install -o root -g root -m 0400 /root/apns-key.p8 /etc/tentacle-relay/apns-key.p8
+shred -u /root/apns-key.p8                     # no second copy
+cat > /etc/tentacle-relay/apns.conf <<'EOF'
+TENTACLE_RELAY_APNS_KEY_ID=ABC123DEFG
+TENTACLE_RELAY_APNS_TEAM_ID=TEAM123456
+EOF
+chown root:relay /etc/tentacle-relay/apns.conf
+chmod 0640 /etc/tentacle-relay/apns.conf
+```
+
+**Mode `0400`, owner `root`** is the point: `relay.service` runs as `relay`, so
+the relay user has no readable copy of the key at all. systemd reads the file
+(root), copies it into a read-only per-unit directory, and the binary is given
+that copy's path.
+
+The unit carries the whole wiring already —
+`LoadCredential=apns-key:/etc/tentacle-relay/apns-key.p8` plus the four flags
+(`--apns-key-file ${CREDENTIALS_DIRECTORY}/apns-key`, `--apns-key-id` and
+`--apns-team-id` from `EnvironmentFile=-/etc/tentacle-relay/apns.conf`, and
+`--apns-topic so.tentacle.app`) — so nothing in the unit has to be edited to
+install a key. The bundle id is the one flag with a literal value, because it is
+public (it is in the app's own `Info.plist`) and must never be daemon-supplied.
+The same four values are available as `TENTACLE_RELAY_APNS_*` environment
+variables, which is what the `EnvironmentFile` uses for the two IDs.
+
+`apps/relay/test/deploy.test.ts` pins all of it: the credential's absolute path,
+the `0400` mode in this runbook, the four flags being ones `main.ts` parses, and
+that all four are present (a partial set makes `readApnsKeySource` refuse and
+push stays off).
+
+### 6.2 Install the unit and restart
+
+```sh
+# as root on 142.132.169.22 — the file is apps/relay/deploy/relay.service
+install -o root -g root -m 0644 relay.service /etc/systemd/system/relay.service
+systemctl daemon-reload
+systemd-analyze verify /etc/systemd/system/relay.service   # no output = clean
+systemctl restart relay.service
+journalctl -u relay.service -n 5 --no-pager
+```
+
+Expect `push on: topic so.tentacle.app key ABC123DEFG` — the key id and topic,
+**never the key**. Anything else is diagnosed below.
+
+Confirm the daemon side too: on a laptop with a paired phone,
+`tentacle serve --relay wss://relay.tentacle.so` then ask the phone's Settings
+for the Notifications row — `on` means the daemon saw `"push"` in
+`ready.features` and its registrations will be delivered. `relay-no-push` means
+the relay started without a usable key: `journalctl -u relay.service | grep
+"push off"` names what is missing, and the `--apns-*` flags are always the
+suspect.
+
+### 6.3 Rotate the key
+
+Apple lets a team hold **two** APNs auth keys at once, so rotation needs no
+downtime and no reinstall of the app:
+
+1. In the console, create a NEW key and note its Key ID. Do **not** revoke the old
+   one yet.
+2. Install it exactly as 6.1 (`0400`, then edit `apns.conf`'s
+   `TENTACLE_RELAY_APNS_KEY_ID`), and `systemctl restart relay.service`.
+3. Confirm `push on: … key <NEWID>` and one real push arriving (6.4).
+4. Only now revoke the old key in the console.
+
+A key that is revoked while still in the unit fails every request with a `403`
+that Apple answers `InvalidProviderToken`; the relay maps that to `rejected` and
+the daemon audits `push-not-sent`, so the symptom is **silence plus audit lines**,
+never a crash. Rolling back is step 1 in reverse: put the old key file back and
+point `apns.conf` at its ID.
+
+### 6.4 Smoke test a real push
+
+The end-to-end proof needs an owner-approved dev build on a real iPhone (D2a: the
+Push Notifications capability and the profile). With a phone paired and `serve`
+connected to `wss://relay.tentacle.so`, start a turn that asks for permission
+(`rm -rf build` is enough) and **walk away**: the banner must arrive after the
+grace (`push.graceSeconds`, default 30 s, `serve --push-grace` to override).
+Answer at the desk instead and the phone stays silent. The journal shows the
+`push` frame's outcome (`sent`) and an 8-character token PREFIX — a full token,
+a payload or the key in the journal is a bug.
+
+**No Apple account and no device** is the simulator path, which proves the
+entitlements and the plugin wiring rather than APNs: `bun run e2e:mobile`'s
+`push-placeholder` flow pairs, grants notifications and hands
+`xcrun simctl push` a payload captured from the daemon's own sealing chain, then
+asserts the banner and the tap. It cannot deliver to Apple (a simulator issues no
+APNs token), and it does not pretend to.
+
+## 7. Upgrade
 
 ```sh
 # build machine
 bun apps/relay/deploy/build.ts
 scp dist/tentacle-relay root@142.132.169.22:/opt/tentacle-relay/tentacle-relay.new
 
-# host — keep the current binary as `.previous` first (step 7 rolls back to it)
+# host — keep the current binary as `.previous` first (step 8 rolls back to it)
 cd /opt/tentacle-relay
 cp -p tentacle-relay tentacle-relay.previous
 chown root:root tentacle-relay.new && chmod 0755 tentacle-relay.new
@@ -240,7 +355,7 @@ turn on a daemon continues and the phone re-attaches (F1/F2). Schedule it
 accordingly; it is a blip, not an outage. **No reload of Caddy is needed**, and it
 is not the way to upgrade the relay.
 
-## 7. Rollback
+## 8. Rollback
 
 Stop the unit — the fail-safe is that the relay is **optional** for every client:
 
@@ -263,7 +378,7 @@ install -o root -g root -m 0755 /opt/tentacle-relay/tentacle-relay.previous \
 systemctl start relay.service
 ```
 
-(Keep a copy as `tentacle-relay.previous` before the first `mv` in step 6.)
+(Keep a copy as `tentacle-relay.previous` before the first `mv` in this step.)
 
 To take the public name down entirely, remove the `import` line from
 `/etc/caddy/Caddyfile`, `caddy validate`, then `systemctl reload caddy`. Do this
@@ -271,7 +386,7 @@ AFTER stopping the unit, never before — the reload drops live streams within t
 5-minute grace (§4), and a name pointing at nothing is a worse error message than
 a stopped unit.
 
-## 8. Diagnose
+## 9. Diagnose
 
 ```sh
 systemctl status relay.service --no-pager     # state, restart count, last lines
@@ -289,11 +404,11 @@ ss -lntp | grep 4100                          # loopback only, as it must be
 | `curl` to loopback: refused | the unit is not running | `systemctl status`, step 3 |
 | Unit `failed`, "start-limit-hit" | crash loop; the bound is doing its job | read the journal, fix the cause, `systemctl reset-failed relay.service` |
 | Phone says unreachable, journal shows `4404` | daemon not registered (not running, or its control socket was replaced) | `tentacle devices`, restart `serve` |
-| Journal shows a `version` error | binary/daemon `RELAY_PROTOCOL_VERSION` skew | rebuild both from the same commit (step 6) |
+| Journal shows a `version` error | binary/daemon `RELAY_PROTOCOL_VERSION` skew | rebuild both from the same commit (step 7) |
 | Streams drop on a Caddy reload | expected: `stream_close_delay` only delays the cut by 5 min | none — the phones resync (F1/F2); see §4 |
 | Memory near `MemoryMax` | a flood, or many concurrent streams | the per-IP/per-id limits in `relay.service`; check `journalctl` for the refused lines |
 
-## 9. Known limitations (state these, do not discover them later)
+## 10. Known limitations (state these, do not discover them later)
 
 - **Per-IP limits key on the direct peer, which behind Caddy is always
   `127.0.0.1`.** `apps/relay/src/server.ts` uses Bun's `requestIP`, and the proxy
@@ -318,10 +433,18 @@ ss -lntp | grep 4100                          # loopback only, as it must be
   phone session nor a daemon control socket goes idle, so nothing ends on its own
   first. A reload is therefore a staggered drop over the grace window — F1/F2
   resync the phones that drop and F3's jitter re-registers the daemons, but a long
-  relayed turn will not survive it. Schedule reloads like restarts (§6).
-- **The relay holds no secret today**, but task 16 (APNs, `docs/feat/mobile-push.md`
-  P10) adds the `.p8` to this same host as a systemd credential — never a file
-  next to the binary, never a flag in argv.
+  relayed turn will not survive it. Schedule reloads like restarts (§7).
+- **The relay is no longer secretless.** It holds exactly one secret: the APNs
+  auth key (`.p8`), as a systemd credential with the file `0400` root-owned, so
+  the `relay` user cannot read it directly (`docs/feat/mobile-push.md` P10, §6
+  above). It is never a file next to the binary, never a flag's VALUE, never in
+  the journal, and never in the repo. Everything else about the host is
+  unchanged: no database, no session, no state.
+- **A relay without a key silently carries no push, by design.** No `push` in
+  `ready.features` means every daemon skips the frame, so nothing is lost and
+  nothing is retried: the ask stays pending on the daemon and the phone shows it
+  on open (F4). The app's Settings says `relay-no-push` rather than claiming
+  notifications work.
 - **The publish path is untested end to end until this runs.** Everything in
   `apps/relay` is covered by `bun test` against a real socket on
   `127.0.0.1:0`; what only a deploy proves is the public cert (ATS), a relayed

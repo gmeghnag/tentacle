@@ -388,6 +388,9 @@ Remote control:
                       [--relay <url> | --no-relay]
                       [--session-ttl 24h|never] [--session-admin-cap DUR] [--max-sessions 64]
                       [--max-detached-sessions 16] [--ws-idle-timeout 60s]
+                      [--push-grace 30]
+  --push-grace <seconds> is how long a permission request waits for a phone
+  before it is pushed to it (0 = at once; default push.graceSeconds, 30).
   With paired devices, serve dials OUT to the mobile relay (relay.tentacle.so by
   default, or relay.url / --relay <url>), so a phone reaches it from anywhere
   with no open port; --no-relay keeps it off. The relay sees only ciphertext.

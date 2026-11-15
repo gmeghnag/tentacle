@@ -107,6 +107,11 @@ export const ARGS = {
       "max-sessions": {},
       "max-detached-sessions": {},
       "ws-idle-timeout": {},
+      // `serve --push-grace <seconds>` (docs/feat/mobile-push.md Design 6): the
+      // push grace, 0 = at once. It belongs in THIS table or `parseArgs` refuses
+      // it as an unknown option before `parseServeLimits` can read it — the bug
+      // P10 found (the helper existed, was documented, and was unreachable).
+      "push-grace": {},
       // The pod's resident daemon socket (docs/feat/detached-runs.md S1); default in TMPDIR.
       socket: {},
       // `serve --relay <url>`: the mobile relay this daemon dials out to

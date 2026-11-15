@@ -194,10 +194,25 @@ describe("R7 relay.service — the unit starts the binary the runbook installs",
     }
   });
 
-  test("no secret on the command line (argv is world-readable in ps)", () => {
+  test("no secret MATERIAL on the command line (argv is world-readable in ps)", () => {
+    // NARROWED by P10 (docs/feat/mobile-push.md P10). The guard used to forbid
+    // the substring `apns`, which contradicts the only way `main.ts` can be told
+    // where the key is: `--apns-key-file`. What leaks a secret is the KEY, not
+    // the FLAG or the PATH — the path is `${CREDENTIALS_DIRECTORY}/apns-key`, a
+    // read-only copy systemd makes for this unit alone. So the assertion is now
+    // what it always meant: no key material, and no literal key path baked into
+    // the repository's unit.
     const unit = read(join(DEPLOY_DIR, "relay.service"));
     const { program, argv } = execStart(unit);
-    expect(`${program} ${argv.join(" ")}`).not.toMatch(/secret|token|apns|\.p8|credential/i);
+    const line = `${program} ${argv.join(" ")}`;
+    expect(line).not.toMatch(/BEGIN [A-Z ]*PRIVATE KEY/);
+    // A `.p8` PATH would make the deploy host's layout part of the repo, and a
+    // literal token/secret would be one. The credential path is none of these.
+    expect(line).not.toMatch(/\.p8\b/);
+    expect(line).not.toMatch(/secret|token=/i);
+    // The key's CONTENT can never appear: it is a path, and the file it names is
+    // 0400 root, so the relay user cannot even read it directly.
+    expect(line).not.toContain("apns-key-id=");
   });
 
   test("the sandbox and the restart policy the runbook promises are in the unit", () => {
@@ -316,5 +331,93 @@ describe("R7 docs/ops/relay-deploy.md — the runbook", () => {
     // the owner is told to schedule it (F1/F2 resync cover the drop).
     expect(text).toMatch(/staggered|grace/i);
     expect(text).toMatch(/5 min/);
+  });
+});
+
+describe("P10 relay.service — the APNs key arrives as a systemd credential", () => {
+  // docs/feat/mobile-push.md P10 / C2: the relay stops being secretless. The
+  // `.p8` is the ONE secret on that host, so the unit has to (a) receive it
+  // through systemd rather than a file the relay user could read directly, and
+  // (b) hand the binary only the read-only copy's PATH.
+  //
+  // What these tests CANNOT prove: that `systemd-analyze verify` accepts the
+  // unit, that the credential directory exists at boot, or that Apple accepts
+  // the token. Those are the runbook's checks on the host (§10), run by the
+  // owner at deploy time.
+  const unit = (): string => read(join(DEPLOY_DIR, "relay.service"));
+
+  test("it declares the credential, from an absolute path", () => {
+    // `LoadCredential=ID:PATH` with an ABSOLUTE path is the only form that names
+    // a file the operator installs (systemd.exec(5): an absolute path is opened
+    // and copied to a read-only per-unit directory; a bare ID would be looked up
+    // in a credstore this deploy does not use).
+    const declared = /^LoadCredential=([A-Za-z0-9_.-]+):(\/[^\s:]+)$/m.exec(unit());
+    if (declared === null) {
+      throw new Error(
+        "relay.service declares no `LoadCredential=<id>:</absolute/path>`: the .p8 would have to sit somewhere the relay user can read",
+      );
+    }
+    expect(declared[1]).toBe("apns-key");
+    expect(declared[2]?.startsWith("/")).toBe(true);
+  });
+
+  test("the binary is told the credential's PATH, never its content", () => {
+    const { program, argv } = execStart(unit());
+    const keyFileAt = argv.indexOf("--apns-key-file");
+    if (keyFileAt === -1) {
+      throw new Error(
+        "ExecStart passes no --apns-key-file: the relay starts with push off (F4), so P10's banner could never be produced in production",
+      );
+    }
+    // `${CREDENTIALS_DIRECTORY}` is expanded by systemd for the unit's own
+    // ExecStart (systemd.exec(5)), so the unit names no host path at all.
+    expect(argv[keyFileAt + 1]).toBe("${CREDENTIALS_DIRECTORY}/apns-key");
+    expect(program).toBe(`/opt/tentacle-relay/${RELAY_BINARY_NAME}`);
+  });
+
+  test("every --apns-* value is config the unit carries, and main.ts parses it", () => {
+    const parsed = parseRelayArgs(execStart(unit()).argv);
+    // A flag the binary refuses is an ExecStart that exits 1 on every boot — the
+    // failure this whole describe exists to make impossible.
+    if (!parsed.ok) {
+      throw new Error(`relay.service's ExecStart is not argv main.ts accepts: ${parsed.error}`);
+    }
+    // All four or none: `readApnsKeySource` refuses a partial set, so a unit that
+    // shipped three would announce no `push` feature and silently never deliver.
+    expect(parsed.args.apns.keyFile).toBe("${CREDENTIALS_DIRECTORY}/apns-key");
+    expect(parsed.args.apns.keyId).not.toBeUndefined();
+    expect(parsed.args.apns.teamId).not.toBeUndefined();
+    expect(parsed.args.apns.topic).toBe("so.tentacle.app");
+  });
+
+  test("the sandbox still lets the unit read its own credential directory", () => {
+    // `ProtectSystem=strict` makes the whole filesystem read-only, and the
+    // credential dir lives under /run/credentials (a tmpfs systemd mounts for the
+    // unit). It must stay readable — `ProtectSystem=strict` does not block reads,
+    // so the check is that nothing narrower (a `ReadOnlyPaths`/`InaccessiblePaths`
+    // covering /run) would make the key unreadable.
+    const keys = serviceKeys(unit());
+    expect(keys.get("Service/ProtectSystem")).toBe("strict");
+    expect(keys.get("Service/InaccessiblePaths")).toBeUndefined();
+    expect(keys.get("Service/ProtectHome")).toBe("yes");
+  });
+
+  test("the runbook documents the credential, its mode, the flags and rotation", () => {
+    const text = read(join(REPO_ROOT, "docs", "ops", "relay-deploy.md"));
+    // P10's half of R7:
+    //  - WHERE the key goes and with what mode (0400 root, unreadable by `relay`)
+    //  - the four flags, by name
+    //  - rotation, and rollback for a bad key
+    expect(text).toContain("LoadCredential");
+    expect(text).toMatch(/0400/);
+    expect(text).toContain("--apns-key-file");
+    expect(text).toContain("--apns-key-id");
+    expect(text).toContain("--apns-team-id");
+    expect(text).toContain("--apns-topic");
+    // A rotation section, and the `push off:` line an operator greps for.
+    expect(text).toMatch(/^##+ .*APNs/m);
+    expect(text).toContain("push off:");
+    // It must NOT claim the relay is secretless any more (task 15's text did).
+    expect(text).not.toMatch(/relay holds no secret today/i);
   });
 });

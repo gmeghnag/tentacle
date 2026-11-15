@@ -48,7 +48,32 @@ Group=relay
 # flag (a code change, its own task) these become per-client again and must drop
 # back to the per-client defaults of `relay-core.ts`.
 ExecStart=/opt/tentacle-relay/tentacle-relay --host 127.0.0.1 --port 4100 \
-    --max-dials-per-minute 6000 --max-streams-per-ip 2000 --max-hellos-per-minute 600
+    --max-dials-per-minute 6000 --max-streams-per-ip 2000 --max-hellos-per-minute 600 \
+    --apns-key-file ${CREDENTIALS_DIRECTORY}/apns-key \
+    --apns-key-id ${TENTACLE_RELAY_APNS_KEY_ID} \
+    --apns-team-id ${TENTACLE_RELAY_APNS_TEAM_ID} \
+    --apns-topic so.tentacle.app
+
+# THE ONE SECRET ON THIS HOST (docs/feat/mobile-push.md P10/C2): the APNs auth
+# key (`.p8`). It arrives as a systemd CREDENTIAL, so the relay user never has a
+# readable copy: systemd opens the 0400 root file, copies it into a read-only
+# per-unit directory, and ExecStart names only `${CREDENTIALS_DIRECTORY}/apns-key`
+# (systemd.exec(5)). The `.p8` itself is never in argv (world-readable in `ps`),
+# never in this unit, and never in the repo (decision 18).
+#
+# The path is a PLACEHOLDER-FREE absolute path the runbook installs; the key id
+# and team id are NOT secrets (they are in the JWT header Apple already sees) and
+# come from an operator file, so no Apple account detail lands in the repo:
+#   600 root:relay  /etc/tentacle-relay/apns.conf
+#     TENTACLE_RELAY_APNS_KEY_ID=ABC123DEFG
+#     TENTACLE_RELAY_APNS_TEAM_ID=TEAM123456
+# The leading `-` makes the file OPTIONAL: without it (or without the credential)
+# the values expand to empty, `readApnsKeySource` refuses the partial set, and the
+# relay logs one `push off: …` line and serves as before — reachability must never
+# depend on Apple's key being installed (docs/feat/mobile-push.md F4). The topic
+# is the bundle id, which is public (it is in the app's own Info.plist).
+EnvironmentFile=-/etc/tentacle-relay/apns.conf
+LoadCredential=apns-key:/etc/tentacle-relay/apns-key.p8
 
 Restart=always
 RestartSec=2s

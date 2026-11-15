@@ -3039,3 +3039,212 @@ protects a newer build's record). One addition beyond the letter of the finding:
 relaunch still needs a simulator/device (unchanged from fix round 1); everything
 here is a fake `SecureKV`, the same seam `lock-settings-store.ts` is tested
 through.
+
+### P10 (E2E + runbook) — DONE, with the flow's simulator run BLOCKED by the machine
+
+*— Claude Code 2.1.323 (the exact model id is not exposed in this environment — reported honestly rather than guessed), 2026-11-16*
+
+**Load-bearing check, re-run first: PASS (32 checks).**
+`.tentacle/tmp/mobile-push/p10-load-bearing.ts` (gitignored scratch in THIS
+worktree), `LOAD-BEARING: PASS`. P10's own assumption is *"the placeholder banner
+P10 must assert is producible with no Apple account and no physical device — the
+daemon's OWN sealed envelope, placed by `xcrun simctl push`, makes iOS draw a
+banner Maestro can see — and the relay host can hold the `.p8` without it entering
+argv or a world-readable file."* Its decisive sub-facts, each checked:
+
+```
+PASS no apps/mobile/e2e/flows/push-placeholder.yaml yet     (a feat starts missing)
+PASS FLOWS does not name push-placeholder yet
+PASS ready.features carries push ONLY when an apns client exists
+PASS serve-push.test.ts has a fake APNs / opens it with openPush
+PASS relay main.ts parses all four --apns-* flags + TENTACLE_RELAY_APNS_KEY_FILE
+PASS relay.service has no --apns-* flag and no LoadCredential yet
+PASS the TODAY argv guard fails on any --apns-* flag (P10 must narrow it)
+PASS LoadCredential=ID:/absolute/path parses (the form the unit will use)
+PASS app.json carries the time-sensitive entitlement / keychain group / plugin
+PASS e2e-flows: a new flow may not end on its container
+PASS the runbook PROMISES a systemd credential and names no flag yet
+```
+
+Two of them were stopping-conditions I had to resolve before any code:
+
+1. **The plan's two requirements CONTRADICT as written.** `deploy.test.ts`'s guard
+   was `not.toMatch(/secret|token|apns|\.p8|credential/i)` over the whole command
+   line — i.e. it forbids the substring `apns`. But `--apns-key-file` is the only
+   way `main.ts` learns where the key is, and the key must not be at a path baked
+   into the repo. **Resolution (narrowed, and the reason is in the test):** what
+   leaks a secret is the KEY, not the FLAG or its PATH — the path is
+   `${CREDENTIALS_DIRECTORY}/apns-key`, a read-only per-unit copy. The guard now
+   asserts no key material (`BEGIN … PRIVATE KEY`), no `.p8` path, no
+   `secret`/`token=`, which is what it always meant.
+2. **`systemd` gives the unit a credential, not a path the repo may hardcode** —
+   confirmed against `systemd.exec(5)` (saved at
+   `.tentacle/tmp/mobile-push/p10-systemd-exec.txt`, lines 2416-2491): `LoadCredential=ID:PATH`
+   takes an ABSOLUTE path and `ExecStart` may reference `${CREDENTIALS_DIRECTORY}/ID`.
+
+**Files.** `apps/relay/deploy/relay.service` (`LoadCredential`, the four
+`--apns-*` flags, `EnvironmentFile=-/etc/tentacle-relay/apns.conf`, a comment
+block saying why each piece is there), `docs/ops/relay-deploy.md` (a new **§6
+"APNs push (the `.p8` secret)"** — install / mode `0400` / flags / rotation /
+rollback / smoke test — and §7–§10 renumbered with their cross-references fixed),
+`apps/mobile/e2e/flows/push-placeholder.yaml` (new), `.../flows/push-place.js` +
+`push-assert.js` (new), `apps/mobile/e2e/push-steps.ts` (new, pure),
+`apps/mobile/e2e/push-envelope.ts` (new, pure), `apps/mobile/e2e/run.ts` (the fake
+APNs + the effects), `apps/mobile/e2e/hooks.ts` (`push-place` / `push-payload`),
+`apps/relay/test/deploy.test.ts` (+5 P10 cases, the narrowed guard),
+`apps/mobile/test/e2e-flows.test.ts` (+6 guards),
+`apps/mobile/test/push-steps.test.ts` (new, 6),
+`apps/mobile/test/push-envelope.test.ts` (new, 12), `packages/cli/test/push-grace-flag.test.ts`
+(new, 5), plus **the P8 defect fix** below.
+
+**A REAL P8 DEFECT FOUND, and it blocked P10 (fixed here, red before green).**
+`serve --push-grace` was documented in `ServeLimits`, validated by
+`parseServeLimits`, consumed by `serve.ts` — and **missing from `ARGS.serve`**, so
+`parseArgs` answered `unknown option --push-grace` before any of that ran. Nothing
+caught it because every test drove the `ServeOptions` FIELD instead of the command
+line a person types (and the E2E harness is exactly such a caller). Evidence, on
+the reviewed code, `.tentacle/tmp/mobile-push/p10-grace-repro.ts`:
+
+```
+parseArgs ok = false unknown option --push-grace
+ARGS.serve.values has push-grace = false
+  ws-idle-timeout: true   relay: true   session-ttl: true   push-grace: false
+```
+
+and the E2E run died with `[error] unknown option --push-grace` in
+`serve.err.log`. Fix: one line in `ARGS.serve.values` (`packages/cli/src/flags.ts`)
+plus the usage text in `main.ts`. New `packages/cli/test/push-grace-flag.test.ts`
+was RED first (2 fail: "the flag is one `serve` accepts", "it reaches
+`ServeLimits.pushGraceSeconds`"), green after.
+
+**As built, in the plan's order.**
+1. **The unit + runbook** (dependency-free). `LoadCredential=` an absolute path;
+   `ExecStart` names `${CREDENTIALS_DIRECTORY}/apns-key` and the other three
+   `--apns-*` values; `EnvironmentFile=-…` is OPTIONAL on purpose, so a host with
+   no key starts with `push off: …` and no `"push"` feature (F4) instead of
+   refusing to boot.
+2. **The harness.** A local h2c fake APNs (P8's own, from
+   `packages/cli/test/serve-push.test.ts`) so the relay announces `"push"`; the
+   `push-place` hook registers the paired device, raises one ask
+   (`--push-grace 0`), waits for the fake APNs, and hands those exact bytes to
+   `xcrun simctl push`.
+3. **The flow.** `_pair` → open the computer → Settings (the
+   `notifications-toggle` / `notifications-detail` row) → place → assert the
+   placeholder banner → tap it → `computers-list` → `push-assert.js`.
+
+**Drift from the Implementation, and why.**
+- **D1 — two new pure modules the slice's file list does not name**
+  (`apps/mobile/e2e/push-steps.ts`, `push-envelope.ts`). The slice lists the flow,
+  `run.ts`, the unit and the runbook. Putting the orchestration and the envelope
+  check inline in `run.ts` / the Maestro script made them untestable, and the
+  MUTATION CHECK PROVED IT: M6 and M7 both SURVIVED (§ below). AGENTS §7 says
+  computation belongs in a pure module; the harness is code too.
+- **D2 — the narrowed argv guard** (stopping-condition 1 above).
+- **D3 — the `push-grace` fix**, a P8 defect, outside the slice's file list but
+  the reason P10's flow could not run at all.
+- **D4 — the flow does NOT tap the notification permission alert.** The slice says
+  "pair → notifications allowed". `simctl privacy grant notifications` does not
+  exist (`Operation not permitted`; "notifications" is not one of its services —
+  transcripts in scratch) and the OS prompt is a one-shot per install, so a flow
+  dependent on it would assert the simulator's bookkeeping. What IS asserted is
+  the Settings row the app draws from its registrar's state (`pushPhaseText`),
+  which is the app's own claim about notifications. The permission itself is
+  P9's pure decision (tested) and the real-device checklist.
+- **D5 — the flow is `push-placeholder.yaml` (the plan's name), not a numbered
+  file.** Other flows carry numbers; the plan named this one, so the plan wins.
+- **D6 — the simulator cannot register itself, so the harness registers for it.**
+  Measured, not assumed: `expo-notifications`' `PushTokenModule.swift` calls
+  `UIApplication.shared.registerForRemoteNotifications()` and a simulator needs
+  `aps-environment` in a SIGNED profile (owner step D2a) to answer. The harness
+  writes the same per-device file `device/push_register` writes.
+
+**Red before green.** Every new assertion was RED on the reviewed code first:
+- `deploy.test.ts` — 4 fail (no `LoadCredential`, no `--apns-key-file`, missing
+  `--apns-topic`, runbook has no credential section).
+- `push-grace-flag.test.ts` — 2 fail (`unknown option --push-grace`).
+- the flow guards — 1 fail (`push-placeholder` not in `FLOWS`, so the flow would
+  never have run).
+- `push-steps.test.ts` / `push-envelope.test.ts` were written against the modules,
+  so their red baseline is the MUTATION table below (§9's non-vacuity by mutation).
+
+**Mutations — P10's targets** (`sh .tentacle/tmp/mobile-push/p10-mut.sh`, one
+in-place edit per row, restored from `p10mut-bak/`, log at `p10-mut.log`; a log
+FILE, never a pipe — the P9 fix round records what a SIGPIPE-truncated run cost).
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| M1 | drop `LoadCredential=` from `relay.service` | **RED 1** |
+| M2 | `ExecStart` uses a literal `/etc/…/key.p8` path | **RED 3** |
+| M3 | drop `--apns-topic` (three of four flags) | **RED 1** |
+| M4 | the runbook's `0400` → `0644` | **RED 1** |
+| M5 | `ARGS.serve` omits `push-grace` (the P8 bug) | **RED 2** |
+| M6a | the flow's script checks no padding bucket (`if (false)`) | **RED 1** |
+| M6b | the pure checker accepts any ciphertext length | **RED 1** |
+| M7 | the steps place a hand-written payload, not the daemon's | **RED 3** |
+
+Restore verified: all eight files `IDENTICAL` (`cmp`), final re-run **74 pass,
+0 fail**.
+
+**Two mutations SURVIVED first, and what that changed (honest note).** M6 and M7
+were first aimed at assertions that checked STRINGS — the script "contained
+`704`", `run.ts` "contained `startFakeApns`". Both survived, because neither could
+fail when the BEHAVIOUR changed. Rather than keep tests that prove nothing, the
+code moved: the envelope decision became `push-envelope.ts` (M6b now kills it, and
+a lockstep test holds the script to the module's own numbers), and the
+orchestration became `push-steps.ts` over injected effects (M7 now kills the
+literal-payload substitution, because "a push that never arrived THROWS" and "it
+places EXACTLY the object the APNs reported" are identity assertions).
+
+**The flow's simulator run: BLOCKED by this machine, not by the code.** Three runs
+of `bun run e2e:mobile`'s harness for `push-placeholder` fail at
+`_unlock.yaml`'s `assertCondition: id: lock-screen is visible` — i.e. inside the
+SHARED `_pair` prefix, before any step P10 adds. **An unmodified, pre-existing
+flow fails identically**: `E2E_ONLY_FLOWS=01-shell`, same simulator, same
+assertion, same 21 s. The cause is visible in the simulator's own log —
+`coreauthd` reports `Authentication failure` / `Invalidated by client` and the app
+draws its `no-passcode` lock notice, so the app does not lock at all. That is this
+simulator's Passcode/Face ID state, which no executor may reset (it would mean
+erasing the device and re-enrolling). So: **the flow is written, wired, syntax-
+checked (`maestro check-syntax` → OK), guarded by six unit tests, and its payload
+path is unit-tested end to end — but its banner assertion has NOT been observed
+green on a simulator.** Verify with
+`bun run e2e:mobile --ios 26` once the simulator locks again (or on a device with
+D2a); if it still fails at `_unlock` with `01-shell` failing too, the machine is
+still the cause, not this flow.
+
+**Acceptance checks the plan names, run.** "pair → notifications allowed": the
+pairing and the Settings row are asserted; the OS grant is not (D4). "`simctl
+push` with an envelope captured from P8's fake APNs": ✔ — the harness's fake APNs
+IS P8's, moved, and `push-steps.test.ts` pins that the placed payload is the
+received one. "placeholder banner shown, tap opens the app": written and
+syntax-checked, **not observed green** (above). "runbook additions (systemd
+`LoadCredential`, file 0400, flags, rotation, rollback)": ✔ all five, pinned by
+`deploy.test.ts`.
+
+**Gate (this worktree, `feat/mobile-push`, uncommitted — see the branch note).**
+`bunx tsc --noEmit` → exit 0 · `bunx tsc -p apps/mobile` → exit 0 ·
+`bunx tsc -p apps/relay` → exit 0 · `bun run lint` → `Checked 1406 files in 447ms.
+No fixes applied.` (0 errors, 0 warnings — the §6 baseline) · `bun test` →
+**10258 pass, 4 skip, 0 fail** (10262 tests / 737 files, 405 s). The four skips are
+the documented opt-ins (live-k8s, live-docker, the real-socket keepalive, and
+`session-hop.docker`), none in a file this slice touched. No schema change:
+`packages/protocol/schema/protocol.json` is untouched — P10 adds no wire at all
+(an E2E flow, a deploy unit, a runbook, and one CLI flag table entry), so no
+`protocol.d/` note and no `PROTOCOL_VERSION` move.
+
+**Changelog.** `changelog.d/mobile-push-e2e.added.md` (the flow + the credential)
+and `changelog.d/mobile-push-push-grace.fixed.md` (the P8 defect) — one bullet each
+(`docs/feat/changelog-fragments.md` is one bullet per file; the first attempt
+shipped two bullets in one file, which the slug/naming guard also rejected:
+`mobile-push.e2e` is not a legal slug).
+
+**Unverified (one line each, and how to check).**
+(a) The banner assertion, above — the machine cannot lock.
+(b) Real APNs: still D2a + D2, unchanged (a simulator has no token and
+`simctl push` bypasses Apple), `docs/ops/relay-deploy.md` §6.4.
+(c) `systemd-analyze verify` on the edited unit — needs the host; the runbook
+runs it, `deploy.test.ts` can only pin the syntax it can read.
+
+**Branch note.** Worked on `feat/mobile-push` (this worktree) and never committed,
+per the task prompt's "never git commit"; `git status` lists the 9 modified and 10
+new files. The orchestrator decides where they land.

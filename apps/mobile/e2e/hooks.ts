@@ -46,7 +46,18 @@ export type HookName =
    * is true for every path — so the harness answers what the `pair` line actually
    * carried, and the flow throws unless the relay is its ONLY address.
    */
-  | "relay-qr";
+  | "relay-qr"
+  /**
+   * docs/feat/mobile-push.md P10: hand the simulator the daemon's OWN sealed
+   * push, exactly as APNs would deliver it, so the banner the flow asserts is
+   * the real chain's output and not a hand-written payload.
+   */
+  | "push-payload"
+  /**
+   * docs/feat/mobile-push.md P10: register + push + place, in ONE step, so the
+   * flow does not have to orchestrate three hooks around a 30 s deadline.
+   */
+  | "push-place";
 
 /** The hooks that take a query parameter (`?session=…&prompt=…`). */
 export interface HookQuery {
@@ -114,8 +125,10 @@ export interface HookActions {
       readonly cause: string;
     }[];
   }>;
-  /** A LAPTOP steer into the session's RUNNING turn (flow 15's another-device row). */
-  readonly laptopEnqueue: (sessionId: string, text: string) => Promise<{ readonly id: string }>;
+  /** A LAPTOP steer into the session's RUNNING turn (flow 15's another-device row). */ readonly laptopEnqueue: (
+    sessionId: string,
+    text: string,
+  ) => Promise<{ readonly id: string }>;
   /** The LAPTOP stops the running turn (flow 14: my queued row comes back). */
   readonly laptopCancel: (sessionId: string) => Promise<void>;
   /** The LAPTOP detaches (flow 15: the writer goes away, its row stays returned). */
@@ -158,6 +171,23 @@ export interface HookActions {
    * printed one yet, so a flow cannot read a stale run's line.
    */
   readonly relayQr: () => Promise<{ readonly payload: string }>;
+  /**
+   * The LAST push the daemon sent through the relay, as the APNs payload its
+   * delivery would carry — plus the alarm's `deviceToken`. `undefined` = no
+   * push has been sent yet, which a flow must distinguish from an empty one.
+   */
+  readonly pushPayload: () => Promise<{
+    readonly payload: { readonly aps: unknown; readonly tp: unknown };
+    readonly token: string;
+  }>;
+  /**
+   * Register a push key for the paired device, make the daemon push once and
+   * place that envelope on the simulator (docs/feat/mobile-push.md P10).
+   */
+  readonly pushPlace: () => Promise<{
+    readonly payload: { readonly aps: unknown; readonly tp: unknown };
+    readonly token: string;
+  }>;
 }
 
 /** What a laptop requester answers: `allow` (once) or `deny`. */
@@ -191,6 +221,10 @@ export function hookFor(path: string): HookName | undefined {
     case "faceid-nomatch":
     case "log-file":
     case "relay-qr":
+      return name;
+    case "push-payload":
+      return name;
+    case "push-place":
       return name;
     default:
       return undefined;
@@ -361,6 +395,12 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
             return Response.json({ ok: true, hook, text: await deps.actions.logFile() });
           case "relay-qr": {
             return Response.json({ ok: true, hook, ...(await deps.actions.relayQr()) });
+          }
+          case "push-payload": {
+            return Response.json({ ok: true, hook, ...(await deps.actions.pushPayload()) });
+          }
+          case "push-place": {
+            return Response.json({ ok: true, hook, ...(await deps.actions.pushPlace()) });
           }
         }
         return Response.json({ error: "unknown hook" }, { status: 404 });
