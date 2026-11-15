@@ -1605,3 +1605,9 @@ Agents writing their own Maestro flows got stuck on the lock screen: the repo's 
 
 Send a photo from the app (simulator: a Photos sample image via the composer's image button / the 13c photo input) to a session on a local `tentacle serve` that runs the **DEFAULT profile — the local qwen3.8 model, which has vision** (NOT `--profile deepseek`: DeepSeek has no vision and the daemon answers "images are off"). Screenshot the composer with the attached thumbnail, the sent user row with the image, and the model's reply describing it (light + dark), into the final screenshot folder. If anything in the attachment path fails (picker, downscale, upload, the row, the model never seeing the image), it is a bug of this task: reproduce, fix with a red-first test, re-shoot.
 *— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+
+#### Owner bug B8 (2026-11-15 02:40, real iPhone 12 Pro, iOS 18.3.1, build c8b4dc3c)
+
+Attaching a photo shows "a message carries at most 5 photos" (refused) — the owner was attaching normally, well under 5. The message comes from `apps/mobile/src/compose-controller.ts:348` (`added.refused > 0`), with the caps in `compose-chips.ts:52/78`, `photo-input.ts:78`, `photo-source.ts:164` (`MAX_ATTACHMENTS_PER_MESSAGE = 5`, `packages/protocol/src/attachment.ts:29`). Suspects to PROVE with a red-first test: the refused count computed against the wrong list (e.g. picks counted twice, failed/old chips still counted, the picker's selection limit not set so iOS returns more than the room, or `pickRoom([])` vs the real chips). Fix it, then verify the full attachment path in the qwen3.8 (vision) test above.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
