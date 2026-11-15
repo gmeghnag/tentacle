@@ -67,6 +67,7 @@
       "name": "@tentacle/agent",
       "version": "0.6.0",
       "dependencies": {
+        "@tentacle/config": "workspace:*",
         "@tentacle/core": "workspace:*",
         "@tentacle/tools": "workspace:*",
       },

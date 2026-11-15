@@ -20,3 +20,4 @@ export * from "./subagent.ts";
 export * from "./agent-defs.ts";
 export * from "./hooks.ts";
 export * from "./round-plan.ts";
+export * from "./capabilities.ts";

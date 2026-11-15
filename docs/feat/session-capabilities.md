@@ -268,6 +268,11 @@ Dependency order: protocol → agent → daemon → client → cli → tui → m
   (new), `packages/agent/test/capabilities.test.ts` (new),
   `packages/core/src/tool.ts` (`mcpServer?`), `packages/mcp/src/tool-adapter.ts`
   (set it).
+  *As built:* `packages/agent/package.json` + `bun.lock` (agent gains a
+  `@tentacle/config` workspace dep — `projectSystem` re-renders through
+  `renderSkillsCatalog`, and agent had no config dep) and
+  `packages/agent/src/index.ts` (export the module). No cycle: `config` imports
+  no workspace package.
 - **S2** (M · load-bearing · strong model): `packages/agent/src/agent.ts`
   (state, setter, snapshot at `:1211`, `contextUsage` `:1680`, execution guard,
   skill guard), `packages/agent/src/subagent.ts` (live parent state),
@@ -470,5 +475,135 @@ dark body: dark frames: 23 / 23 missing: [] overflows: 0 undefined: false NaN: f
 ```
 
 ## Execution
+
+*— claude-sonnet-4-5-20250929, 2026-11-15*
+
+**Slice S1 only** (the pure projection module + the MCP server tag). S2/S3a/S3b/S4/S5 untouched.
+
+### Load-bearing check (re-run first, as instructed)
+
+Passed. Verified against the source, not the plan:
+
+- The per-round tool list is `this.config.tools.definitions()` at
+  `packages/agent/src/agent.ts:1274`, inside the loop head
+  (`for (let iteration = 0; …)` at `:1250`), so it is rebuilt every round.
+- The message view is `modelView(messages)` at `:1276`; `contextUsage` reads the
+  same two seams at `:1758`/`:1760`.
+- The other request builders do **not** bypass them: the step-limit final
+  request (`:1611`) has no `tools` and no `systemPrompt`; compaction
+  (`compact.ts:118`, `:160`) sends `tools: []`; the title request
+  (`daemon/src/session-title.ts:87`) sends `tools: []`. A sub-agent builds its
+  own `Agent` with `systemPrompt: type.prompt` (`subagent.ts:423`), so S2 must
+  thread the state there — noted, not done here.
+- `modelView` only projects the stored history (`context-awareness.ts:65-74`),
+  so "hidden" can be a per-round projection and the store is never mutated.
+
+### Repro (before any edit)
+
+`rg` for `set_capabilit|disabledSkills|disabledMcp|sessionCapabilities` across
+`packages/` → 0 occurrences (the Context's grep, re-run: matches).
+
+Behavioural repro `.tentacle/tmp/session-capabilities/s1-repro.ts` — a registry
+with `fs_read`, `mcp__a__b__echo` (server `a__b`) and `skill`, plus a composed
+prompt offering `k8s` + `damajs`:
+
+```
+exports matching capab|project|hidden: ["projectKey","projectVote"]
+definitions: ["fs_read","mcp__a__b__echo","skill"]
+catalog mentions k8s: true
+header occurrences: 1
+```
+
+`@tentacle/agent` exports no projection at all, and nothing removes
+`mcp__a__b__echo` or `k8s` from what the model is sent. The capability is
+missing.
+
+Re-running the same script after S1 (same three lines the doc asks to paste —
+only the exports line changes, which is the point):
+
+```
+exports matching capab|project|hidden: ["NO_CAPABILITIES","applyCapabilityOp","isHidden","isSkillHidden","projectKey","projectSystem","projectTools","projectVote"]
+definitions: ["fs_read","mcp__a__b__echo","skill"]
+catalog mentions k8s: true
+header occurrences: 1
+```
+
+### As built, in order
+
+1. **`packages/core/src/tool.ts`** — `Tool.mcpServer?: string`, documented as a
+   tag, never a parse.
+2. **`packages/mcp/src/tool-adapter.ts`** — `mcpServer: server`.
+3. **`packages/agent/src/capabilities.ts`** (new) — `SessionCapabilities`,
+   `NO_CAPABILITIES`, `CapabilityOp`, `applyCapabilityOp`, `projectTools`,
+   `projectSystem`, `isHidden`, `isSkillHidden`, plus the `ServerOf` lookup
+   type. `projectTools` consumes `ToolDefinition[]` (what `definitions()`
+   returns — the tag reaches it through the `ServerOf` lookup S2 builds from the
+   registry), and copies the `skill` def rather than mutating it.
+4. **`packages/agent/src/index.ts`** — re-export.
+5. **`packages/agent/test/capabilities.test.ts`** (new, 18 tests) and one new
+   case in `packages/mcp/test/tool-adapter.test.ts`.
+
+### Drift from the Implementation (and why)
+
+- **Two files the Files list omitted.** `capabilities.ts` must re-render the
+  catalog through the one renderer (`renderSkillsCatalog`, the Design's exact
+  requirement), which lives in `@tentacle/config` — and `@tentacle/agent` had no
+  config dependency. Added it to `packages/agent/package.json` (plus `bun.lock`)
+  and exported the module from `index.ts`. Checked for a cycle: `config` imports
+  no workspace package. Recorded in the doc's Files section.
+- **`projectSystem` with everything hidden and an AGENTS.md folded.** The
+  Design says the result is `withAgents.trimEnd()`; `composeSystemPrompt` with
+  no skill keeps the trailing newline a folded AGENTS.md block ends with. The
+  two differ by one byte. I implemented the Design (`trimEnd`'d) and pinned both
+  cases in the test — the no-AGENTS.md case is byte-identical, the AGENTS.md one
+  is `trimEnd`'d and asserted as such. Flagged for Review: if byte-identity is
+  what matters there, the Design sentence needs the newline back.
+- **`serverOf` is a lookup, not a read of the def.** The plan tags `Tool`, but
+  `projectTools` filters `ToolDefinition`s, which carry no tag. So `ServerOf` is
+  `(toolName) => string | undefined`, and S2 supplies it from the registry
+  (`tools.get(name)?.mcpServer`). This keeps the module free of a registry
+  dependency; not a behaviour change.
+
+### Red before green (§9)
+
+- `capabilities.test.ts` was written first against a non-existent module
+  (import error), then `capabilities.ts` was added so RED landed on
+  **assertions**, which is where it must be: every mutation below is a real
+  assertion failure, not a compile error.
+- `tool-adapter.test.ts`'s tag test was RED on the real code first:
+  `Expected: "a__b" / Received: undefined`.
+
+### Mutation checks (§9) — each reverted after
+
+| # | Mutation | Result |
+|---|----------|--------|
+| M1 | `isHidden` parses the server from the name (`toolName.split("__")[1]`) instead of the tag | **RED** — `projectTools > server a__b is not confused with a` + drops-by-tag: 2 fail |
+| M2 | `projectSystem` cuts at the FIRST `# Skills` (`indexOf`) instead of the last | **RED** — `AGENTS.md mentioning the header is still cut at the LAST one` |
+| M3 | `skill` kept with an empty enum (drop the empty guard) | **RED** — `drops the skill tool entirely when every skill is hidden` |
+| M4 | `applyCapabilityOp` always builds a fresh object (no identity on a no-op) | **RED** — `idempotent: the SAME object comes back when nothing changed` |
+| M5 | hand-rolled catalog bytes instead of `renderSkillsCatalog` | **RED** — `byte-equals a prompt composed without the hidden skills` + the LAST-header case: 2 fail |
+
+Also mutated M1 as a greedy regex (`/^mcp__(.+)__/`) first: it captured the
+whole server, so it was an *equivalent* mutant and stayed green — replaced with
+the split version above, which is the mutation the plan names.
+
+### Failure-mode tests covered by S1
+
+F10 (unknown name accepted — the set is names: `applyCapabilityOp` test), F11
+(everything disabled → `skill` dropped, catalog removed), F13's projection half
+(a server's tools tagged after the toggle are hidden by tag), F1's mechanism
+(the snapshot is read per round — the projection is pure, so S2 only has to call
+it at the loop head). F2/F3/F12/F14/F15 are S2's (agent loop) to prove.
+
+### Gate
+
+`bunx tsc --noEmit` → clean · `bun run lint` → `Checked 1657 files. No fixes
+applied.` (0 errors, 0 warnings) · `bun test` → **11920 pass, 5 skip, 0 fail**
+(all 5 skips are the pre-existing opt-in env guards: live-k8s ×2, live-docker,
+root-confinement, slow-ws — none in a file I touched). Changelog guards
+(`changelog.test.ts`, `changelog-guard.test.ts`, `release.test.ts`) → 57 pass.
+No schema changed, so `protocol.json` was not regenerated.
+
+**S1: DONE.** S2–S5: not started (out of scope for this execution).
 
 ## Review
