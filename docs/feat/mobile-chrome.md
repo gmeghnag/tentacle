@@ -837,4 +837,44 @@ three files plus the two new ones).
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-15 · slice S1 only (same model as the executor, fresh context: shared blind spots possible)*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM).
+
+1. **MEDIUM — `radius.card` 0 squares a non-band surface.**
+   `src/screens/RenameSheet.tsx:137` uses `radius.card` for the centred,
+   alert-style rename dialog (maxWidth 340, floating over a scrim). S1 turns it
+   into a sharp-cornered box. The plan's premise (Context l.37, Design 1 "E2:
+   square bands") only names `GroupedCard.tsx` as a consumer, and no later slice
+   touches RenameSheet's radius (S4 deletes only `GroupedCard`/`SectionHeader`),
+   so the dialog stays square for good. Fix: give the dialog its own token (keep
+   ~14–26 pt), or record the owner's OK, and pin it in `theme.test.ts`.
+   The changelog's "no screen's layout … changes" is also not quite true: the
+   chat header gets shorter and the inset cards/sheets get new corners (nit).
+
+**Gate (re-run):** `bun test theme.test.ts icon-weights.test.ts` 106 pass / 0
+fail; `bun run lint` clean (1656 files); `bun run typecheck` clean (root, mobile,
+relay). I did not re-run the full suite.
+
+**Premises:** `headerChat` is read only by `ScreenHeader` compact, used only by
+`SessionScreen.tsx:377` — TRUE (chat-only). `headerList` untouched — TRUE.
+`radius.sheet` only in `Sheet.tsx` — TRUE. `radius.card` only for cards — FALSE
+(finding 1).
+
+**Mutation (applied, run, reverted; `git status` clean afterwards):**
+`dark.bandOnSheet` = `bg`, and `dark.drawer` lifted above `page` → 4 fail. The
+executor's 5 mutations are consistent with how the tests are built.
+
+**Attacks tried:** (a) other consumers of each changed token → finding 1;
+(b) does `headerChat` move a list-screen collapse threshold → no;
+(c) does a band/drawer surface break the 4.5:1 floors → no, the matrix covers
+band/bandOnSheet/drawer in both palettes; (d) do the `IconName` additions
+typecheck against `SFSymbol` → yes. §7 invariants: none touched (tokens only;
+no protocol, persistence or terminal path).
+
+**Unverified:** the screenshots / visual check (the e2e build is blocked by the
+existing `PushCore` error). That is still owed before S1 counts as done.
+
+**Executor behaviour:** honest. It recorded its drift (the `red` lift, with
+measured ratios), followed red-before-green, and was candid about the missing
+screenshots. It missed one token consumer.
