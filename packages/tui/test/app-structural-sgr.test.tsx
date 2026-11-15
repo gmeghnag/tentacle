@@ -21,6 +21,7 @@ import { render } from "ink-testing-library";
 import { App, type AppProps, type SessionController } from "../src/App.tsx";
 import type { FileProbe } from "../src/attach-files.ts";
 import type { BackgroundAgentRow } from "../src/background-view.ts";
+import { inertSession } from "./session-stub.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const CTRL_T = "\x14";
@@ -54,6 +55,7 @@ const AGENT: BackgroundAgentRow = {
 
 function fake(opts: { agents?: readonly BackgroundAgentRow[] } = {}): SessionController {
   return {
+    ...inertSession(),
     async *send(prompt: string, signal?: AbortSignal) {
       yield { type: "text", delta: `reply to ${prompt}` };
       if (prompt.startsWith("hang")) {

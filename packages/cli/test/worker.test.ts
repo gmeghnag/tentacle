@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { PermissionBroker } from "@tentacle/core";
 import { LogSessionStore } from "@tentacle/daemon";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
-import { startWorkerRuntime } from "../src/local-runtime.ts";
+import { daemonErrorLogPath } from "../src/daemon-log.ts";
+import {
+  WorkerStartError,
+  startWorkerRuntime,
+  workerStartFailureText,
+} from "../src/local-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 
 // End-to-end over the REAL worker boundary: spawn the worker daemon, handshake,
@@ -156,5 +161,130 @@ describe("startWorkerRuntime (real worker spawn)", () => {
     } finally {
       await runtime.dispose();
     }
+  });
+});
+
+/**
+ * A fake worker endpoint: enough of `Worker` for `startWorkerRuntime` (a
+ * message port, an `error` event it can fire, and a `terminate` spy). It never
+ * answers the handshake unless the test says so.
+ */
+function fakeWorker(fire: "never" | "error" = "never") {
+  const target = new EventTarget();
+  const state = { terminated: false, posted: [] as unknown[] };
+  const worker = {
+    postMessage: (data: unknown) => {
+      state.posted.push(data);
+    },
+    addEventListener: (type: string, handler: (event: unknown) => void) =>
+      target.addEventListener(type, handler),
+    removeEventListener: (type: string, handler: (event: unknown) => void) =>
+      target.removeEventListener(type, handler),
+    terminate: () => {
+      state.terminated = true;
+    },
+  };
+  if (fire === "error") {
+    // A load failure (the compiled-binary `ModuleNotFound` class): Bun reports it
+    // as an `error` event on the Worker, never as a spawn throw.
+    queueMicrotask(() => {
+      const event = new Event("error");
+      Object.defineProperty(event, "message", {
+        value: "ModuleNotFound resolving /$bunfs/root/worker.ts",
+      });
+      target.dispatchEvent(event);
+    });
+  }
+  return { worker: worker as unknown as Worker, state };
+}
+
+function failureDeps() {
+  return {
+    permissions: new PermissionBroker(),
+    saver: new SessionSaver(new LogSessionStore(join(dir, "sessions-failure")), () => {}),
+    resume: null,
+  };
+}
+
+describe("startWorkerRuntime: a worker that cannot start is an ERROR, never a null fallback", () => {
+  // Mutation (AGENTS §9 non-vacuity): make `startWorkerRuntime` return `null`
+  // instead of throwing (the old `try { … } catch { return null }` shape) → T1,
+  // T2 and T3 all fail, because each asserts a rejection.
+  test("T1 a spawn failure rejects with WorkerStartError{spawn}, never resolves null", async () => {
+    const attempt = startWorkerRuntime(config, failureDeps(), () => {}, {
+      spawn: () => {
+        throw new Error("no worker here");
+      },
+    });
+    await expect(attempt).rejects.toBeInstanceOf(WorkerStartError);
+    const error = await attempt.catch((e: unknown) => e);
+    if (!(error instanceof WorkerStartError)) {
+      throw new Error("expected a WorkerStartError");
+    }
+    expect(error.phase).toBe("spawn");
+    expect(error.reason).toContain("no worker here");
+  });
+
+  test("T2 a worker that fails to LOAD rejects at once with its own message", async () => {
+    const fake = fakeWorker("error");
+    const started = Date.now();
+    const attempt = startWorkerRuntime(config, failureDeps(), () => {}, {
+      spawn: () => fake.worker,
+      handshakeMs: 5000,
+    });
+    const error = await attempt.catch((e: unknown) => e);
+    const elapsed = Date.now() - started;
+    if (!(error instanceof WorkerStartError)) {
+      throw new Error(`expected a WorkerStartError, got ${String(error)}`);
+    }
+    expect(error.phase).toBe("handshake");
+    expect(error.reason).toContain("ModuleNotFound resolving /$bunfs/root/worker.ts");
+    // The point of the early rejection: far sooner than the handshake timeout.
+    expect(elapsed).toBeLessThan(1000);
+    expect(fake.state.terminated).toBe(true);
+  });
+
+  test("T3 a worker that never answers times out as WorkerStartError{handshake}", async () => {
+    const fake = fakeWorker("never");
+    const error = await startWorkerRuntime(config, failureDeps(), () => {}, {
+      spawn: () => fake.worker,
+      handshakeMs: 50,
+    }).catch((e: unknown) => e);
+    if (!(error instanceof WorkerStartError)) {
+      throw new Error(`expected a WorkerStartError, got ${String(error)}`);
+    }
+    expect(error.phase).toBe("handshake");
+    expect(error.reason).toContain("worker handshake timed out after 50ms");
+    expect(fake.state.terminated).toBe(true);
+  });
+
+  test("T4 the text says what failed, what to do, and where the details are — for each phase", () => {
+    const logPath = daemonErrorLogPath(config.configDir);
+    const spawn = workerStartFailureText(
+      new WorkerStartError("spawn", "no Worker global"),
+      logPath,
+    );
+    expect(spawn).toContain("worker spawn: no Worker global");
+    expect(spawn).toContain("Bun >= 1.4.3");
+    expect(spawn).toContain("tentacle update");
+    expect(spawn).toContain(logPath);
+    const handshake = workerStartFailureText(
+      new WorkerStartError("handshake", "version mismatch"),
+      logPath,
+    );
+    expect(handshake).toContain("worker handshake: version mismatch");
+    // Nothing offers the removed path, not even to explain it.
+    expect(spawn).not.toContain("in-process");
+    expect(handshake).not.toContain("in-process");
+    // A hostile reason cannot paint on the terminal: escapes and line breaks are
+    // gone from it (`oneLine`; the `[2J` survives as inert literal text).
+    const hostile = workerStartFailureText(
+      new WorkerStartError("handshake", "a\x1b[2Jb\nc"),
+      logPath,
+    );
+    const reasonLine = hostile.split("\n")[0] ?? "";
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence is the point
+    expect(reasonLine).not.toMatch(/[\u001b\r]/);
+    expect(reasonLine).toContain("a [2Jb c");
   });
 });

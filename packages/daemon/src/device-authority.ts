@@ -202,6 +202,21 @@ export class DeviceAuthority {
     return this.snapshot.devices.size > 0 || this.hasWindow();
   }
 
+  /**
+   * Does the authority's snapshot list this device right now? The push-time
+   * check (docs/feat/mobile-push.md F14): a device a revoke removed is not
+   * pushed to, even if a daemon re-wrote its registration in a race. Read-only
+   * and side-effect free, like `authorize` (a fresh read, so a revoke counts
+   * at once).
+   */
+  knows(id: string): boolean {
+    if (this.stopped) {
+      return false;
+    }
+    this.refreshIfChanged();
+    return !this.snapshot.broken && this.snapshot.devices.has(id);
+  }
+
   /** Track a live connection so a revoke can close it. Returns the inverse of `unregister`. */
   register(id: string, close: DeviceClose): void {
     const set = this.live.get(id);

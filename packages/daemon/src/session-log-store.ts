@@ -177,8 +177,6 @@ interface WriterState {
   lastDiskHead?: string | undefined;
   /** The client head of the last read it wrote from. */
   lastFromHead?: LogCursor;
-  /** The laptop-minted incarnation of its snapshot saves (the in-process path). */
-  snapshotInc?: string;
   /** The copy `saveAside` last set aside (a fork's held copy): a replace need not set it aside again. */
   asided?: readonly ChatMessage[] | undefined;
   /** Forks of this session not durable yet: retried before its next write (`fork`). */
@@ -188,7 +186,6 @@ interface WriterState {
 type Op =
   | { readonly kind: "write"; readonly update: LogWrite }
   | { readonly kind: "fork"; readonly update: LogWrite }
-  | { readonly kind: "snapshot"; readonly record: SessionRecord }
   | { readonly kind: "state"; readonly data: string }
   | { readonly kind: "aside"; readonly reason: string }
   | { readonly kind: "dropState" }
@@ -334,17 +331,6 @@ export class LogSessionStore {
    */
   write(update: LogWrite): Promise<void> {
     return this.enqueue(update.id, { kind: "write", update });
-  }
-
-  /**
-   * Save a whole history with no daemon log (the in-process path): a REPLACE
-   * with a laptop-minted segment (`base{create}` + its messages + a chosen
-   * title), under the lock; `keepSuperseded` does not apply (it cannot tell a
-   * compaction from a rewrite). The containment rule still holds: another
-   * writer's content this copy does not contain goes aside first.
-   */
-  saveSnapshot(record: SessionRecord): Promise<void> {
-    return this.enqueue(record.id, { kind: "snapshot", record });
   }
 
   /**
@@ -541,8 +527,7 @@ export class LogSessionStore {
           if (op.update.sidecar !== undefined) {
             await this.writeStateLocked(id, op.update.sidecar);
           }
-        } else if (op.kind === "snapshot") await this.snapshotLocked(op.record);
-        else if (op.kind === "state") await this.writeStateLocked(id, op.data);
+        } else if (op.kind === "state") await this.writeStateLocked(id, op.data);
         else if (op.kind === "aside") await this.asideLocked(id, op.reason);
         else if (op.kind === "dropState") await rm(this.stateFile(id), { force: true });
         else if (op.kind === "forget") this.writers.delete(id);
@@ -910,57 +895,6 @@ export class LogSessionStore {
         : "the file held a history this copy does not contain",
     );
     return "";
-  }
-
-  private async snapshotLocked(record: SessionRecord): Promise<void> {
-    const id = record.id;
-    const state = this.writers.get(id) ?? { segment: [] };
-    state.snapshotInc ??= `laptop-${randomUUID()}`;
-    const titleState = recordTitleState(record);
-    const chosen: SessionTitle | undefined =
-      titleState.source === "auto"
-        ? undefined
-        : { text: titleState.text, source: titleState.source };
-    const segment = segmentFromMessages(record.messages, chosen, state.snapshotInc, Date.now());
-    state.segment = segment;
-    this.writers.set(id, state);
-    const path = this.file(id);
-    const meta: LogMeta = { cwd: record.cwd, model: record.model, createdAt: record.createdAt };
-    let text: string | null = null;
-    try {
-      text = await readFile(path, "utf8");
-    } catch {
-      text = null;
-    }
-    let headerMeta = meta;
-    let carried = "";
-    if (text !== null && text !== "") {
-      const parsed = parseLogFile(text, id);
-      if (!parsed.ok) {
-        await this.asideRaw(id, text, parsed.reason);
-      } else {
-        headerMeta = {
-          cwd: parsed.header.cwd,
-          model: parsed.header.model,
-          createdAt: parsed.header.createdAt,
-        };
-        // Segments kept earlier (keepSuperseded) survive this save.
-        carried = parsed.segments
-          .slice(0, -1)
-          .map((s) => text.slice(s.start, s.end))
-          .join("");
-        const last = currentSegment(parsed);
-        const mine = last.base.inc === state.snapshotInc; // this writer's own earlier save
-        if (last.unknown > 0 || (!mine && !isPrefix(last.messages, record.messages))) {
-          await this.asideRaw(
-            id,
-            headerLine(parsed.header) + text.slice(last.start, last.end),
-            "the file held a history this copy does not contain",
-          );
-        }
-      }
-    }
-    await this.writeWhole(path, headerLine({ id, ...headerMeta }) + carried + entryLines(segment));
   }
 
   private async removeLocked(id: string): Promise<void> {

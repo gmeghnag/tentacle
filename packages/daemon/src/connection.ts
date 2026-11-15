@@ -26,6 +26,10 @@ import {
   type DetachResult,
   type DevicePairParams,
   type DevicePairResult,
+  type DevicePushRegisterParams,
+  type DevicePushRegisterResult,
+  type DevicePushUnregisterParams,
+  type DevicePushUnregisterResult,
   type EnqueueParams,
   type EnqueueResult,
   type HooksTrustResult,
@@ -439,6 +443,37 @@ export class Connection {
       // then snapshot, nothing awaited (AGENTS §7).
       case Method.DaemonDiscover:
         return this.discover();
+      // Push registration (docs/feat/mobile-push.md Design 3, slice P7): a DEVICE's
+      // own business — the token and the push key are its, and the connection's
+      // principal is what names it. A `token` or `pairing` connection gets the
+      // usual refusal (the gate above), so a pod-facing plain client can never
+      // register a token this computer would push to.
+      //
+      // Both are synchronous (one atomic rename / one unlink) and hold no lock:
+      // a registration must never queue behind a long `session/prompt` (AGENTS §7
+      // "don't serialize the RPC peer").
+      case Method.DevicePushRegister: {
+        if (this.principal.kind !== "device") {
+          throw new RpcError(
+            DomainErrorCode.Unauthorized,
+            "only a paired device may register for push",
+          );
+        }
+        return this.host.registerPush(
+          this.principal.id,
+          params as DevicePushRegisterParams,
+        ) satisfies DevicePushRegisterResult;
+      }
+      case Method.DevicePushUnregister: {
+        if (this.principal.kind !== "device") {
+          throw new RpcError(
+            DomainErrorCode.Unauthorized,
+            "only a paired device may unregister for push",
+          );
+        }
+        this.host.unregisterPush(this.principal.id);
+        return {} satisfies DevicePushUnregisterResult;
+      }
       default:
         throw new RpcError(DomainErrorCode.NotInitialized, `unexpected method: ${method}`);
     }
@@ -785,6 +820,10 @@ export class Connection {
       ...(this.hop ? { hop: true } : {}),
       ...(this.servesModel ? { model: this } : {}),
       ...(this.clientHost !== undefined ? { host: this.clientHost } : {}),
+      // The socket's own principal names the device (never a frame's claim): the
+      // push rules exclude a device attached to this session — it is showing the
+      // sheet already (docs/feat/mobile-push.md Design 1).
+      ...(this.principal.kind === "device" ? { deviceId: this.principal.id } : {}),
     };
     const { hosted, created, resync, epoch } = this.host.open(params, attachment, prepared);
     this.attached.set(hosted.id, { hosted, attachment });

@@ -1877,6 +1877,66 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
     });
   });
 
+  // docs/feat/session-hop-ux slice 2: `liveLine` selects the ONE-line contract with
+  // no TTY — the hop's shape. Everything keyed on `status` then behaves as it does
+  // on a terminal: phases go to `set`, and `log`/`info` keep only real notices.
+  test("attach: with a `liveLine` the phases are ONE line and `log` stays empty", async () => {
+    // Mutation: `statusLineFor` ignoring `liveLine` (the old `logTerm: tty:false`)
+    // → the phases land in `logs`, one per line, which is the reported bug.
+    await release("attach-live", {}, async (config) => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      containerHas(kube, "tentacle 0.3.0\n");
+      const lines: string[] = [];
+      let finished = 0;
+      const logs: string[] = [];
+      const runtime = await startAttachRuntime(config, {
+        ...runDeps(kube, "attach-live"),
+        podName: "mypod",
+        logTerm: undefined,
+        log: (line) => logs.push(line),
+        liveLine: {
+          set: (text) => lines.push(text),
+          finish: () => {
+            finished += 1;
+          },
+        },
+      });
+      expect(lines.join("\n")).toContain("attaching to mypod");
+      expect(logs).toEqual([]);
+      // The interactive contract prints no success line ("the TUI opening IS the
+      // confirmation"); `finish()` is called on the success path.
+      expect(finished).toBeGreaterThan(0);
+      runtime.dispose();
+    });
+  });
+
+  test("attach: a 404 still `finish()`es the line (no row left up after a failure)", async () => {
+    await release("attach-live-404", {}, async (config) => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      kube.getPod = (name) => {
+        kube.calls.push(`get:${name}`);
+        return Promise.reject(
+          new KubeApiError(404, JSON.stringify({ message: 'pods "absent" not found' })),
+        );
+      };
+      let finished = 0;
+      await expect(
+        startAttachRuntime(config, {
+          ...runDeps(kube, "attach-live-404"),
+          podName: "absent",
+          logTerm: undefined,
+          liveLine: {
+            set: () => {},
+            finish: () => {
+              finished += 1;
+            },
+          },
+        }),
+      ).rejects.toThrow(/not found in namespace/);
+      expect(finished).toBeGreaterThan(0);
+    });
+  });
+
   for (const [label, had] of [
     ["older", "0.2.0"],
     ["newer", "0.4.0"],

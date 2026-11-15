@@ -17,7 +17,13 @@ import type { HopOutcome } from "../src/session-hop.ts";
 const ON_CONTAINER: HopPlace = { kind: "workload", engine: "docker", name: "box" };
 const MOVED: HopOutcome = {
   kind: "moved",
-  built: { runtime: {}, place: { kind: "local" }, daemonInPod: false, preexisting: false } as never,
+  built: {
+    runtime: {},
+    place: { kind: "local" },
+    folder: "local",
+    daemonInPod: false,
+    preexisting: false,
+  } as never,
   controller: {} as never,
   notice: "moved to local",
 };

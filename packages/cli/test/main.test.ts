@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { type SessionRecord, projectKey } from "@tentacle/agent";
-import { LogSessionStore } from "@tentacle/daemon";
+import { LogSessionStore, type LogWrite } from "@tentacle/daemon";
 import { DELETE_CONTAINER_SUBCOMMAND } from "@tentacle/docker";
 import { DELETE_POD_SUBCOMMAND } from "@tentacle/k8s";
 import { type EngineHost, WorkloadNotFoundError } from "../src/engine-host.ts";
@@ -13,6 +13,7 @@ import { provisionWorkload } from "../src/engine-runtime.ts";
 import { main } from "../src/index.ts";
 import { keptDir as keptIndexDir, readKept, recordKept } from "../src/kept-index.ts";
 import type { KeptEntry } from "../src/kept.ts";
+import { WorkerStartError } from "../src/local-runtime.ts";
 import {
   type OwnerRecord,
   RELAY_SUBCOMMAND,
@@ -24,7 +25,8 @@ import {
   runDirFor,
   writeOwner,
 } from "../src/run-state.ts";
-import { saveFixture } from "./session-fixture.ts";
+import type { SessionSaver } from "../src/session-saver.ts";
+import { recordWrite, saveFixture } from "./session-fixture.ts";
 import { simulateSilentTerminal } from "./silent-terminal.ts";
 
 /** Piped stdin and stdout, whatever terminal runs the suite (CliIO.terminal). */
@@ -1095,15 +1097,18 @@ describe("cli main: --engine", () => {
             (deps as { recordKept?: (n: string) => unknown }).recordKept?.("box");
             seen.logPath = deps.daemonLogPath?.("box");
             for (const id of over.saves ?? []) {
-              (deps as unknown as { saver: { save: (r: unknown) => void } }).saver.save({
-                id,
-                cwd: process.cwd(),
-                model: "m",
-                createdAt: 1,
-                updatedAt: 1,
-                title: id,
-                messages: [{ role: "user", content: "hi" }],
-              });
+              const saver = (deps as unknown as { saver: SessionSaver }).saver;
+              saver.write(
+                recordWrite({
+                  id,
+                  cwd: process.cwd(),
+                  model: "m",
+                  createdAt: 1,
+                  updatedAt: 1,
+                  title: id,
+                  messages: [{ role: "user", content: "hi" }],
+                }),
+              );
             }
             for (const line of over.info ?? []) {
               (deps.info ?? deps.log)(line);
@@ -1483,7 +1488,7 @@ describe("cli main: --engine", () => {
         tuiModel?: string;
         resumeMessages?: unknown;
         resume?: { id: string; messages: unknown[] } | null;
-        saver?: { save: (record: unknown) => void };
+        saver?: { write: (update: LogWrite) => void };
         notices: string[];
       } = { quit: 0, notices: [] };
       const runtime = {
@@ -1512,7 +1517,7 @@ describe("cli main: --engine", () => {
           sessionId?: string;
           shared?: true;
           resume?: { id: string; messages: unknown[] } | null;
-          saver?: { save: (record: unknown) => void };
+          saver?: { write: (update: LogWrite) => void };
         },
       ) => {
         seen.config = config;
@@ -2259,7 +2264,7 @@ describe("cli main: --engine", () => {
         await index({ sessionId: A }, [record(A, folder)]);
         await withEnv(unreachable, async () => {
           const r = await attached(["attach", "box"], true, true);
-          r.seen.saver?.save(record(B, folder));
+          r.seen.saver?.write(recordWrite(record(B, folder)));
           const entries = readKept(keptIndexDir(join(dir, "config"))).entries;
           expect(entries.map((e) => e.entry.sessionId)).toEqual([B]);
         });
@@ -2857,5 +2862,42 @@ describe("cli main: terminal's production default (fix/cli-main-terminal-seam F2
     const r = await withTty({ stdin: false, stdout: false }, () => runNoSeam([]));
     expect(r.code).toBe(1);
     expect(r.err).toContain("tentacle — run an agent task");
+  });
+});
+
+describe("the local TUI's worker start: a failure is an error line + exit 1, never a degraded TUI", () => {
+  // docs/feat/remove-in-process.md: the task's GOAL, and its F1/F2 failure modes.
+  // Before the change a worker that could not start fell through to the
+  // in-process path; with that path gone, the only honest outcome is a clear
+  // error said PRE-mount and a non-zero exit.
+  const failing = async (): Promise<never> => {
+    throw new WorkerStartError("handshake", "worker handshake timed out after 8000ms");
+  };
+
+  test("a worker that cannot start: exit 1, the reason on stderr, and Ink is never mounted", async () => {
+    // Mutation: `return 1;` → `return 0;` in the catch (or dropping the catch, so
+    // the throw escapes) → this fails on the code, not on the text.
+    const err: string[] = [];
+    let tuiStarted = false;
+    const code = await main(["bun", "cli", "-i"], {
+      err: (t) => err.push(t),
+      out: (t) => strayStdout.push(t),
+      terminal: { stdin: true, stdout: true },
+      startWorkerRuntime: failing as never,
+      startTui: (async () => {
+        tuiStarted = true;
+      }) as never,
+    });
+    expect(code).toBe(1);
+    // Ink never mounted: the TUI seam was not reached.
+    expect(tuiStarted).toBe(false);
+    const said = err.join("");
+    // What failed, and what to do about it (the worker's own message kept).
+    expect(said).toContain("handshake");
+    expect(said).toContain("worker handshake timed out after 8000ms");
+    expect(said).toContain("Bun >= 1.4.3");
+    expect(said).toContain("tentacle update");
+    // Never the old degraded mode's wording.
+    expect(said).not.toContain("in-process");
   });
 });

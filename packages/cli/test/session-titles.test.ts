@@ -22,7 +22,6 @@ import { Connection, LogSessionStore, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime, persistingController } from "../src/local-runtime.ts";
-import { inProcessSessions } from "../src/session-jobs.ts";
 import { resolveResume } from "../src/session-resume.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 import { saveFixture } from "./session-fixture.ts";
@@ -197,44 +196,6 @@ describe("laptop store titles", () => {
     await ctl.flushed();
     expect(reads).toBe(1);
     expect(saved).toEqual([{ source: "model", text: "Named" }]);
-  });
-});
-
-describe("in-process fallback (no daemon)", () => {
-  test("L2 its saves carry the resumed record's chosen title through unchanged", async () => {
-    const saved: unknown[] = [];
-    const { createSession } = inProcessSessions({
-      build: () => ({
-        agent: new Agent({ model: new Replies(["ok"]), tools: new ToolRegistry(), env }),
-        jobs: {
-          start: () => {
-            throw new Error("unused");
-          },
-          read: () => undefined,
-          kill: () => false,
-          list: () => [],
-          dispose: () => {},
-          onStart: () => () => {},
-          onExit: () => () => {},
-        },
-        tools: new ToolRegistry(),
-      }),
-      mcpTools: [],
-      resume: {
-        id: "u1",
-        cwd: "/w",
-        model: "m",
-        createdAt: 1,
-        updatedAt: 2,
-        title: { text: "Renamed elsewhere", source: "user" },
-        messages: [{ role: "user", content: "first" }],
-      },
-      persist: (snapshot, _createdAt, title?: unknown) =>
-        saved.push(recordFromSnapshot(snapshot, { cwd: "/w", model: "m", title } as never).title),
-    });
-    await drain(createSession().send("more"));
-    expect(saved.length).toBeGreaterThan(0);
-    expect(saved.at(-1)).toEqual({ text: "Renamed elsewhere", source: "user" });
   });
 });
 

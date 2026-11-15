@@ -23,20 +23,25 @@ export * from "./link-status.ts";
 export {
   HOP_ATTACH_USAGE,
   HOP_ENGINES,
+  HOP_K8S_FORM,
   HOP_NAME_USAGE,
+  HOP_NAMESPACE_USAGE,
   HOP_QUEUED_NOTICE,
   HOP_USAGE,
   HOP_WORKLOAD_PART_MAX,
   type HopEngine,
+  type HopNamespace,
   type HopParse,
   type HopSpec,
   type HopStep,
   type HopWorkload,
   type HopWorkloadCheck,
   type HopWorkloadProblem,
+  hopNamespaceOk,
   hopStep,
   hopWorkload,
   parseHopCommand,
+  workloadText,
 } from "./hop-command.ts";
 export { hopStatusRow } from "./hop-status.ts";
 /** The one place the hop line joins a prompt (review M7): exported so a test pins it. */

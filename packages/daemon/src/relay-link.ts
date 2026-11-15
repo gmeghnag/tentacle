@@ -27,7 +27,9 @@ import {
   RelayToDaemonFrameSchema,
   encodeBase64Url,
   isInboundFrameTooLarge,
+  isPushDeliveryStatus,
   isRelayUrl,
+  knownRelayFeatures,
 } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import { relayIdOf } from "@tentacle/transport/relay-id";
@@ -107,6 +109,14 @@ export interface RelayLinkOptions {
   readonly liveness?: { readonly pingMs?: number; readonly pongMs?: number };
   readonly maxFrameBytes?: number;
   readonly onError?: (error: Error) => void;
+  /**
+   * How long a push waits for a reconnecting link before it is dropped
+   * (docs/feat/mobile-push.md F2: "holds the frame ≤ 60 s, then drops it").
+   * A test shortens it.
+   */
+  readonly pushHoldMs?: number;
+  /** How long one push waits for its `push-result` (a lost answer must not leak a pending entry). */
+  readonly pushTimeoutMs?: number;
 }
 
 /** The timers the link needs, injectable so a test never waits on a real 60 s cap. */
@@ -130,6 +140,11 @@ const systemTimers: RelayLinkTimers = {
   clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
 };
 
+/** How long a push waits for a reconnecting link before it is dropped (F2: "≤ 60 s, then drops it"). */
+export const DEFAULT_PUSH_HOLD_MS = 60_000;
+/** How long one push waits for its `push-result` (docs/feat/mobile-push.md Design 4: 10 s). */
+export const DEFAULT_PUSH_TIMEOUT_MS = 10_000;
+
 export interface RunningRelayLink {
   /** The id our secret derives (the relay confirms it; the address is built from it). */
   readonly id: string;
@@ -139,9 +154,39 @@ export interface RunningRelayLink {
   isConnected(): boolean;
   /** Open sockets: control (0/1) + one per live stream. */
   openStreams(): number;
+  /**
+   * Deliver one push through the relay (docs/feat/mobile-push.md Design 5,
+   * slice P8), resolving with the `push-result` status.
+   *
+   * Refused — WITHOUT a frame on the wire — when the relay announced no
+   * `"push"` in `ready.features` (`relay-no-push`) or the link is off entirely
+   * (`relay-off`): an older relay closes the control socket on an unknown frame
+   * (C1), so sending one is what would cost reachability, not skipping it.
+   *
+   * While the link is CONNECTING the frame is held briefly (up to
+   * `holdMs`), so a push decided during a reconnect still lands; past that it
+   * is dropped (`unavailable`) with one audit line, which is F2's "the ask
+   * stays pending, the phone learns on open". Never rejects.
+   */
+  push(delivery: RelayPushDelivery): Promise<RelayPushStatus>;
+  /** What this link can do about push right now (the `push_register` result's input). */
+  pushStatus(): "relay-off" | "relay-no-push" | "on";
   /** Stop: control and every accept leg closed, timers cleared. Idempotent. */
   stop(): void;
 }
+
+/** One push this link hands the relay: everything but the `n` correlation, which the link owns. */
+export interface RelayPushDelivery {
+  readonly token: string;
+  readonly env: "sandbox" | "production";
+  readonly collapse: string;
+  readonly ttl: number;
+  /** `{tp: <envelope>}` — the sealed envelope, and nothing else. */
+  readonly payload: { readonly tp: unknown };
+}
+
+/** What a push resolved to: the relay's own status vocabulary (P2's `PUSH_DELIVERY_STATUSES`). */
+export type RelayPushStatus = "sent" | "gone" | "rejected" | "throttled" | "unavailable";
 
 /**
  * Start the link. It dials only while `authority.wantsReachability()` says
@@ -176,6 +221,34 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
   let liveness: RelayLiveness | undefined;
   /** Reasons whose one-off notice already went out (never repeated). */
   let noticed = new Set<RelayDownReason>();
+  /**
+   * Push (P8): whether THIS relay announced `"push"` in its `ready`, the
+   * per-socket correlation counter, and the frames awaiting their
+   * `push-result`. Cleared on every control teardown — a `push-result` for a
+   * counter the relay never saw can never arrive, and a pending promise must
+   * settle rather than leak.
+   */
+  let features: readonly string[] = [];
+  /**
+   * The control socket that completed `ready` (and is therefore the ONE a `push`
+   * may go on), or undefined. `dial` keeps its own per-socket `ready` flag; this
+   * is the same fact at link scope, because the counter and the pending answers
+   * belong to it (`push-result`s are `n`-correlated per socket).
+   */
+  let readyControl: RelaySocketHost | undefined;
+  let pushSeq = 0;
+  const pendingPushes = new Map<
+    number,
+    { resolve: (status: RelayPushStatus) => void; handle: unknown }
+  >();
+  /** Pushes waiting for the link to be ready again (F2's short hold): `push`, plus a wait timer. */
+  const heldPushes: {
+    frame: RelayPushDelivery;
+    resolve: (status: RelayPushStatus) => void;
+    handle: unknown;
+  }[] = [];
+  /** One notice per start about a relay that cannot push (F4: never one per push). */
+  let pushNoFeatureNoticed = false;
 
   /** A bad URL cannot fix itself: refuse loudly once and never dial (R5a validates too). */
   if (!isRelayUrl(base)) {
@@ -191,11 +264,113 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
     liveness = undefined;
   };
 
+  /**
+   * Send one push frame NOW. Its callers — `push()` and `flushHeldPushes()` —
+   * have each checked the `features` gate first, so no frame can reach a relay
+   * that did not announce `"push"` (C1). `host === undefined` here means the
+   * socket went away between the check and this call (a `dropControl` in the
+   * same tick): `unavailable`, never a throw.
+   */
+  const sendPush = (
+    delivery: RelayPushDelivery,
+    resolve: (status: RelayPushStatus) => void,
+  ): void => {
+    const host = readyControl;
+    if (host === undefined || control !== host) {
+      resolve("unavailable");
+      return;
+    }
+    const n = ++pushSeq;
+    // A lost answer must not leak a pending entry (or hang a caller): the entry
+    // resolves `unavailable` on its own deadline.
+    const handle = timers.setTimeout(() => {
+      if (pendingPushes.delete(n)) {
+        resolve("unavailable");
+      }
+    }, options.pushTimeoutMs ?? DEFAULT_PUSH_TIMEOUT_MS);
+    pendingPushes.set(n, { resolve, handle });
+    try {
+      host.socket.send(
+        JSON.stringify({
+          t: "push",
+          n,
+          token: delivery.token,
+          env: delivery.env,
+          collapse: delivery.collapse,
+          ttl: delivery.ttl,
+          payload: delivery.payload,
+        }),
+      );
+    } catch (error) {
+      // A send that throws closed the socket underneath us: the frame is lost.
+      if (pendingPushes.delete(n)) {
+        timers.clearTimeout(handle);
+        resolve("unavailable");
+      }
+      options.onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+
+  /** Hold a push for a reconnecting link (F2), dropping it after `pushHoldMs` with one line. */
+  const holdPush = (
+    delivery: RelayPushDelivery,
+    resolve: (status: RelayPushStatus) => void,
+  ): void => {
+    const entry = {
+      frame: delivery,
+      resolve,
+      handle: timers.setTimeout(() => {
+        const at = heldPushes.indexOf(entry);
+        if (at >= 0) heldPushes.splice(at, 1);
+        audit("push-dropped link-down");
+        resolve("unavailable");
+      }, options.pushHoldMs ?? DEFAULT_PUSH_HOLD_MS),
+    };
+    heldPushes.push(entry);
+  };
+
+  /** Settle everything waiting on the control socket: a new registration may reuse the counters. */
+  const dropPendingPushes = (): void => {
+    for (const [, entry] of pendingPushes) {
+      timers.clearTimeout(entry.handle);
+      entry.resolve("unavailable");
+    }
+    pendingPushes.clear();
+    // Held frames survive a control blip: the hold's whole point is that a push
+    // decided during a reconnect still lands (F2). They keep their own timer.
+  };
+
+  /**
+   * The link is ready again: flush what was held (in order, the oldest first).
+   *
+   * A hold survives the reconnect it was waiting for, so this is the ONE place a
+   * frame could otherwise reach a relay that announced no `"push"` — the same
+   * relay answered `ready` without it (C1/F4). Re-checking `features` HERE is
+   * what makes the gate hold across a reconnect: a held push that cannot be sent
+   * is refused, never put on the wire.
+   */
+  const flushHeldPushes = (): void => {
+    const pushable = readyControl !== undefined && features.includes("push");
+    for (const entry of heldPushes.splice(0)) {
+      timers.clearTimeout(entry.handle);
+      if (pushable) {
+        sendPush(entry.frame, entry.resolve);
+        continue;
+      }
+      entry.resolve("unavailable");
+    }
+  };
+
   /** Tear the control socket down WITHOUT scheduling anything (a caller decides). */
   const dropControl = (): void => {
     const current = control;
     control = undefined;
     connected = false;
+    // A socket that is gone has seen neither these counters nor these frames:
+    // settle them now, so no caller waits on an answer nothing can send.
+    dropPendingPushes();
+    readyControl = undefined;
+    features = [];
     endLiveness();
     current?.socket.close();
   };
@@ -323,8 +498,20 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
         // reset firing (F7's fallback, R4 review 1).
         attempt = 0;
         noticed = new Set();
+        // The relay's OWN statement of what it carries (P3/C1): a `push` frame
+        // may only be sent to a relay that says `"push"`, or an older one closes
+        // the control socket on the unknown frame and costs every phone its
+        // reachability (F4).
+        features = knownRelayFeatures(frame.features);
+        readyControl = host;
+        if (!features.includes("push") && !pushNoFeatureNoticed) {
+          pushNoFeatureNoticed = true;
+          audit("relay-no-push");
+        }
         audit(`relay-ready ${id.slice(0, 8)}`);
         startLiveness(host);
+        // A push decided during the reconnect lands now (F2's short hold).
+        flushHeldPushes();
         return;
       }
       if (frame.t === "error") {
@@ -342,6 +529,21 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
       }
       if (frame.t === "pong") {
         liveness?.pongReceived();
+        return;
+      }
+      if (frame.t === "push-result") {
+        // The relay's answer to one `push` (P3: out of order, `n`-correlated).
+        // An unknown `n` is a stray (a restart, a lying relay): ignored, because
+        // acting on it would settle a request it does not answer.
+        const entry = pendingPushes.get(frame.n);
+        if (entry === undefined) {
+          return;
+        }
+        pendingPushes.delete(frame.n);
+        timers.clearTimeout(entry.handle);
+        // A status this build does not know (a newer relay) is `unavailable`,
+        // never a close: the daemon does not answer the relay's QUESTION here.
+        entry.resolve(isPushDeliveryStatus(frame.status) ? frame.status : "unavailable");
         return;
       }
       if (frame.t === "open") {
@@ -518,6 +720,49 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
     address,
     isConnected: () => connected,
     openStreams: () => legs.size,
+    /**
+     * One push through the control socket (P8).
+     *
+     * Refused WITHOUT a frame when the relay announced no `"push"`: an older
+     * relay closes the control socket on an unknown frame (C1), so sending one
+     * is what would cost reachability, never the push. A relay that IS
+     * registered and lacks `"push"` is refused AT ONCE, never held: holding it
+     * would hand the frame to the next `ready` (which is how a re-registered
+     * no-push relay used to get one), and it would make every device wait out
+     * the whole hold for a `push-dropped link-down` that names the wrong cause.
+     * While the link is CONNECTING the frame is held (F2), which is what makes
+     * a push decided during a reconnect land instead of being dropped on the
+     * floor. Never rejects: a push is best-effort, and the ask stays pending
+     * (F1).
+     */
+    push(delivery) {
+      return new Promise<RelayPushStatus>((resolve) => {
+        if (stopped) {
+          resolve("unavailable");
+          return;
+        }
+        if (readyControl !== undefined) {
+          if (features.includes("push")) {
+            sendPush(delivery, resolve);
+            return;
+          }
+          // Registered, and not push-capable: the answer is known now, and it
+          // is `unavailable` with no frame (the `relay-no-push` notice already
+          // said why once per start: F4 never repeats itself per push).
+          resolve("unavailable");
+          return;
+        }
+        holdPush(delivery, resolve);
+      });
+    },
+    pushStatus() {
+      // `relay-off` is the CALLER's word for "the relay is disabled" (it knows);
+      // this link only ever says whether a registered relay carries push.
+      if (readyControl !== undefined && features.includes("push")) {
+        return "on";
+      }
+      return "relay-no-push";
+    },
     stop() {
       if (stopped) {
         return;
@@ -529,6 +774,11 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
       }
       dropControl();
       dropStreams();
+      // A held push has no link left to land on: settle it now, never a dangling promise.
+      for (const entry of heldPushes.splice(0)) {
+        timers.clearTimeout(entry.handle);
+        entry.resolve("unavailable");
+      }
       endLiveness();
     },
   };

@@ -4983,6 +4983,7 @@
     "PairingRefused": -32017,
     "ParseError": -32700,
     "PermissionNotPending": -32013,
+    "PushStoreFailed": -32019,
     "SessionArchived": -32014,
     "SessionDeleted": -32015,
     "StaleCursor": -32011,

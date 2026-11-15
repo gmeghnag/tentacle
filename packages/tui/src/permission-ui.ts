@@ -10,7 +10,8 @@
  * A prompt can end without a person's choice: its request is withdrawn (the
  * signal aborts — answered on another device, or its turn cancelled) or the
  * TUI unmounts. Both resolve `DISMISSED`: over RPC nothing is sent (the request
- * stays pending for another client); in-process the gate reads it as a refusal.
+ * stays pending for another client); on the worker's own broker the gate reads
+ * it as a refusal.
  */
 import {
   DISMISSED,
@@ -437,8 +438,17 @@ export function usePermissionBroker(
       }
       const own = ownRequest(options?.turnId, ownsTurnRef.current?.());
       // Auto-accept mode: grant without prompting (not remembered — scope once).
+      // A HOP answer also carries `auto: true`, saying no human was asked, so the
+      // outcome line can say `(auto-accepted)` (docs/feat/session-hop-ux OD4) —
+      // and ONLY a hop: every other tool's answer keeps its long-standing shape
+      // (the tests, and the runtimes, compare it whole). Process-internal either
+      // way: the router sends only `optionId`/`message`.
       if (autoApproveRef.current && autoApproves(req, own)) {
-        return Promise.resolve({ allowed: true, scope: "once" });
+        return Promise.resolve({
+          allowed: true,
+          scope: "once",
+          ...(req.kind === "session_hop" ? { auto: true as const } : {}),
+        });
       }
       return new Promise<PermissionResponse>((resolve) => {
         const onAbort = (): void => {

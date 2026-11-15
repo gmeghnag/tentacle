@@ -3,6 +3,7 @@ import { PermissionBroker, type PermissionRequest, type PermissionResponse } fro
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
 import { ARM_MS } from "../src/permission-reply.ts";
+import { inertSession } from "./session-stub.ts";
 
 // docs/fix/quit-enter-ask.md: the ARMING WINDOW in the real App. The trap is not
 // `/quit` alone — a permission dialog that appears while the person is typing
@@ -19,6 +20,7 @@ const INSIDE = 30;
 const AFTER = ARM_MS + 150;
 
 const session = (): SessionController => ({
+  ...inertSession(),
   async *send(prompt) {
     yield { type: "text", delta: `reply to ${prompt}` };
     yield { type: "turn_end", reason: "end_turn" };

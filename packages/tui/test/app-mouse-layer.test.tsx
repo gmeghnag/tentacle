@@ -16,6 +16,7 @@ import { describe, expect, test } from "bun:test";
 import { PermissionBroker } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type AppProps, type SessionController } from "../src/App.tsx";
+import { inertSession } from "./session-stub.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
@@ -27,6 +28,7 @@ const release = (x: number, y: number): string => `\u001B[<0;${x};${y}m`;
 
 function fake(): SessionController {
   return {
+    ...inertSession(),
     async *send() {
       yield { type: "turn_end", reason: "end_turn" };
     },
@@ -45,6 +47,7 @@ function fake(): SessionController {
 /** A turn with ONE tool call whose header row carries a long, wrapped command. */
 function toolCallSession(): SessionController {
   return {
+    ...inertSession(),
     async *send() {
       yield {
         type: "tool_start" as const,

@@ -176,6 +176,16 @@ export interface ResolvedConfig {
    * section — `serve` applies the defaults, and refuses an unusable `url`.
    */
   readonly relay?: { readonly enabled?: boolean | undefined; readonly url?: string | undefined };
+  /**
+   * Push notifications (docs/feat/mobile-push.md Design 6): `enabled` (default
+   * true) and `graceSeconds` (default 30, range 0–3600 — `serve` applies both,
+   * as it does the relay's, so a value nobody reads never refuses a start).
+   * Absent when the file omits the section.
+   */
+  readonly push?: {
+    readonly enabled?: boolean | undefined;
+    readonly graceSeconds?: number | undefined;
+  };
   /** User hooks (file-only, no env form); empty when unset. */
   readonly hooks: readonly HookSpecConfig[];
   /** MCP servers to connect to (from the config file), keyed by name. */
@@ -509,7 +519,8 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   );
   // Laptop-side (D9): it decides whether the agent is OFFERED `move_session`.
   // A pod reads its own value — the tool only proposes, and the owner's answer
-  // still comes from the laptop's prompt.
+  // still comes from the laptop's prompt. OFF by default (session-hop-ux OD8):
+  // the setting is the opt-in.
   const sessionHopTool = pick(
     parseBool(env.TENTACLE_SESSION_HOP_TOOL),
     fileConfig.sessionHop?.tool,
@@ -653,6 +664,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     ...(fileConfig.tui !== undefined ? { tui: fileConfig.tui } : {}),
     ...(fileConfig.sessions !== undefined ? { sessions: fileConfig.sessions } : {}),
     ...(fileConfig.relay !== undefined ? { relay: fileConfig.relay } : {}),
+    ...(fileConfig.push !== undefined ? { push: fileConfig.push } : {}),
     ...(fileConfig.mount !== undefined ? { mount: fileConfig.mount } : {}),
     hooks: fileConfig.hooks ?? [],
     // MCP servers are file-only (no env form); empty when unset.

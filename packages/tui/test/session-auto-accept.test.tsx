@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { PermissionBroker, type PermissionResponse } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
+import { inertSession } from "./session-stub.ts";
 
 // docs/feat/session-auto-accept.md T4: auto-accept is the SESSION's. Two TUIs on
 // one session follow each other's flips, an auto-answer is always `allow_once`,
@@ -14,6 +15,7 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** A session that answers prompts at once and watches nothing. */
 function controller(): SessionController {
   return {
+    ...inertSession(),
     async *send(prompt) {
       yield { type: "text", delta: `reply to ${prompt}` };
       yield { type: "turn_end", reason: "end_turn" };

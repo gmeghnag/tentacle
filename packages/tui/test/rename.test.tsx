@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { render } from "ink-testing-library";
 import { App } from "../src/App.tsx";
 import * as commands from "../src/commands.ts";
+import { inertSession } from "./session-stub.ts";
 
 // `/rename` (docs/feat/session-titles.md): a protocol method the daemon
 // answers with the stored title; the TUI only parses and shows the answer.
@@ -37,6 +38,7 @@ describe("App /rename", () => {
   test("T2 shows the title the controller (the daemon) returned", async () => {
     const asked: string[] = [];
     const createSession = () => ({
+      ...inertSession(),
       async *send() {},
       async rename(title: string) {
         asked.push(title);
@@ -55,7 +57,7 @@ describe("App /rename", () => {
 
   test("T2 no rename on this runtime → says so; a refusal → the reason; no title → usage", async () => {
     const { stdin, lastFrame, unmount } = render(
-      <App createSession={() => ({ async *send() {} })} model="m" cwd="/w" />,
+      <App createSession={() => ({ ...inertSession(), async *send() {} })} model="m" cwd="/w" />,
     );
     await delay(30);
     await type(stdin, "/rename x");
@@ -65,6 +67,7 @@ describe("App /rename", () => {
     const failing = render(
       <App
         createSession={() => ({
+          ...inertSession(),
           async *send() {},
           rename: () => Promise.reject(new Error("nothing to rename yet — send a first message")),
         })}
@@ -89,6 +92,7 @@ describe("App /rename", () => {
     });
     const renamed: string[] = [];
     const createSession = () => ({
+      ...inertSession(),
       // biome-ignore lint/correctness/useYield: a turn that runs until released, yielding nothing
       async *send() {
         await gate;

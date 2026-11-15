@@ -71,6 +71,7 @@ import {
   syncedLines,
   updateFailureLine,
 } from "./settings-view.ts";
+import { untrustedText } from "./untrusted-text.ts";
 import { APP_VERSION, CLIENT_INFO } from "./version.ts";
 import type { WorkerBootstrap } from "./worker-bootstrap.ts";
 
@@ -1353,21 +1354,69 @@ function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<
   });
 }
 
+/** The message of a thrown value, whatever it is (a worker can throw anything). */
+function reasonOf(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message === "" ? "unknown error" : message;
+}
+
 /**
- * Spawn the worker daemon and build a persisting runtime against it. Returns
- * null (after logging) on any failure — the caller falls back to in-process, so
- * a worker problem never breaks the TUI.
+ * Why the local worker never came up. `phase` says how far it got: `spawn` (the
+ * `Worker` could not even be constructed) or `handshake` (it started but never
+ * answered `initialize`, failed to load, or answered with an error).
+ */
+export class WorkerStartError extends Error {
+  readonly phase: "spawn" | "handshake";
+  readonly reason: string;
+
+  constructor(phase: "spawn" | "handshake", reason: string) {
+    super(reason);
+    this.name = "WorkerStartError";
+    this.phase = phase;
+    this.reason = reason;
+  }
+}
+
+/**
+ * The one thing a user sees when the local agent cannot start: what failed, why
+ * there is no fallback, and the two things to check. Written pre-mount only
+ * (`err` on stderr), so it never fights Ink for the terminal. The worker's own
+ * message is untrusted-ish text (a module path, a loader error): one line, no
+ * control characters.
+ */
+export function workerStartFailureText(error: unknown, logPath: string): string {
+  const phase = error instanceof WorkerStartError ? error.phase : "start";
+  const reason = error instanceof WorkerStartError ? error.reason : String(error);
+  return [
+    `[error] the local agent could not start (worker ${phase}: ${untrustedText(reason)})`,
+    "  tentacle runs its agent in a worker thread and has no fallback.",
+    "  Check: Bun >= 1.4.3 (`bun --version`), or reinstall the binary (`tentacle update`).",
+    `  Details: ${logPath}`,
+  ].join("\n");
+}
+
+/**
+ * Spawn the worker daemon and build a persisting runtime against it. Throws a
+ * `WorkerStartError` on any failure — there is no in-process fallback (AGENTS §7
+ * "TUI always over RPC — one session path"), so a worker problem is an error the
+ * caller reports, never a silently degraded TUI.
  */
 export async function startWorkerRuntime(
   config: TentacleConfig,
   deps: { permissions: PermissionBroker; saver: SessionSaver; resume: SessionRecord | null },
   log: (line: string) => void,
-): Promise<LocalRuntime | null> {
+  opts: {
+    /** Test seam: how the worker is constructed (default: the URL form below). */
+    readonly spawn?: () => Worker;
+    readonly handshakeMs?: number;
+  } = {},
+): Promise<LocalRuntime> {
   let worker: Worker;
-  // A spawn failure (e.g. a worker missing from a compiled binary) would
-  // otherwise surface only as the 8s handshake timeout; capture it so the
-  // fallback message says what actually happened.
+  // A load failure (e.g. a worker missing from a compiled binary) arrives as an
+  // `error` event, not as a spawn throw; captured, it both rejects the handshake
+  // at once (instead of after the timeout) and says what actually happened.
   let workerError: string | null = null;
+  let failHandshake: ((error: Error) => void) | null = null;
   try {
     // `new Worker` specifier resolution differs by form AND environment:
     //  - this URL form resolves relative to THIS module from source, and — on
@@ -1378,15 +1427,19 @@ export async function startWorkerRuntime(
     //    there but resolves against the CWD from source (breaking `bun test`).
     // The URL form + Bun >= 1.4 is the only combo that works in both — see the
     // TODO entry "Compiled binary drops the worker daemon".
-    worker = new Worker(new URL("./worker.ts", import.meta.url).href, { type: "module" });
+    worker =
+      opts.spawn?.() ??
+      new Worker(new URL("./worker.ts", import.meta.url).href, { type: "module" });
     worker.addEventListener("error", (event) => {
       workerError = String((event as ErrorEvent).message);
+      // Fail NOW: a worker that cannot load its own module never answers the
+      // handshake, so without this the user waits out the whole timeout.
+      failHandshake?.(new Error(workerError));
     });
     // Object bootstrap (structured-cloned); the worker takes its version from it.
     worker.postMessage({ config, version: APP_VERSION } satisfies WorkerBootstrap);
   } catch (error) {
-    log(`[worker] could not start (${String(error)}); using in-process\n`);
-    return null;
+    throw new WorkerStartError("spawn", reasonOf(error));
   }
   // Object messages (never string RPC frames) from the worker: forwarded job
   // process groups (the main thread owns the exit net that kills them), and MCP
@@ -1403,39 +1456,48 @@ export async function startWorkerRuntime(
     }
   });
   const channel = messagePortChannel(worker as unknown as MessageEndpoint);
+  // Rejected by the worker's `error` listener above, so the race settles the
+  // moment a load failure is reported rather than at the timeout.
+  const failed = new Promise<never>((_resolve, reject) => {
+    failHandshake = reject;
+  });
+  // Nobody may be listening yet (or any more): never an unhandled rejection.
+  failed.catch(() => {});
   try {
     return await withTimeout(
-      createLocalRuntime({
-        channel,
-        disposeTransport: () => worker.terminate(),
-        permissions: deps.permissions,
-        saver: deps.saver,
-        cwd: config.cwd,
-        model: config.model,
-        // The worker runs THIS laptop's model in-process: an images-off reason
-        // names our model and points at our config (docs/feat/
-        // images-off-reason.md).
-        modelScope: "laptop" as const,
-        resume: deps.resume,
-        // The daemon here is THIS laptop's own code, so the session's
-        // auto-accept is shared by every TUI on it (docs/feat/session-auto-accept.md D1).
-        sharedAutoAccept: true,
-        hooksTrustStore: fileTrustStore(config.configDir, (message) => {
-          logDaemonError(config.configDir, new Error(message));
+      Promise.race([
+        createLocalRuntime({
+          channel,
+          disposeTransport: () => worker.terminate(),
+          permissions: deps.permissions,
+          saver: deps.saver,
+          cwd: config.cwd,
+          model: config.model,
+          // The worker runs THIS laptop's model in-process: an images-off reason
+          // names our model and points at our config (docs/feat/
+          // images-off-reason.md).
+          modelScope: "laptop" as const,
+          resume: deps.resume,
+          // The daemon here is THIS laptop's own code, so the session's
+          // auto-accept is shared by every TUI on it (docs/feat/session-auto-accept.md D1).
+          sharedAutoAccept: true,
+          hooksTrustStore: fileTrustStore(config.configDir, (message) => {
+            logDaemonError(config.configDir, new Error(message));
+          }),
+          // Laptop-side peer errors (a malformed daemon frame with no turn to
+          // fail) go to the same file log as the worker's own errors — never a
+          // raw terminal write while Ink owns it (AGENTS §7).
+          onPeerError: (error) => {
+            logDaemonError(config.configDir, error);
+          },
         }),
-        // Laptop-side peer errors (a malformed daemon frame with no turn to
-        // fail) go to the same file log as the worker's own errors — never a
-        // raw terminal write while Ink owns it (AGENTS §7).
-        onPeerError: (error) => {
-          logDaemonError(config.configDir, error);
-        },
-      }),
-      8000,
+        failed,
+      ]),
+      opts.handshakeMs ?? 8000,
       "worker handshake",
     );
   } catch (error) {
-    log(`[worker] handshake failed (${workerError ?? String(error)}); using in-process\n`);
     worker.terminate();
-    return null;
+    throw new WorkerStartError("handshake", workerError ?? reasonOf(error));
   }
 }
