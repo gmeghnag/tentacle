@@ -41,13 +41,14 @@ function caddyDirectives(text: string): string {
 
 const read = (path: string): string => readFileSync(path, "utf8");
 
-/** The `[Service]` section's `key=value` pairs, last one winning (systemd's rule). */
-function serviceKeys(unit: string): Map<string, string> {
-  const keys = new Map<string, string>();
-  let section = "";
-  // systemd joins a line ending in `\` with the next one. `ExecStart` is the
-  // place an operator WILL use it (an override with more flags), and reading
-  // that wrong would report a flag mismatch that is not there.
+/**
+ * The unit's logical lines: comments dropped, `\`-continuations joined
+ * (systemd.service(5)). Shared by the readers below so none of them can drift
+ * on how a continued `ExecStart` is read — the place an operator WILL use it
+ * (an override with more flags), and reading that wrong would report a flag
+ * mismatch that is not there.
+ */
+function unitLines(unit: string): string[] {
   const joined: string[] = [];
   let pending = "";
   for (const raw of unit.split("\n")) {
@@ -64,7 +65,14 @@ function serviceKeys(unit: string): Map<string, string> {
   if (pending !== "") {
     joined.push(pending);
   }
-  for (const raw of joined) {
+  return joined;
+}
+
+/** The `[Service]` section's `key=value` pairs, last one winning (systemd's rule). */
+function serviceKeys(unit: string): Map<string, string> {
+  const keys = new Map<string, string>();
+  let section = "";
+  for (const raw of unitLines(unit)) {
     const line = raw.trim();
     if (line === "") {
       continue;
@@ -88,10 +96,67 @@ function execArgs(value: string): string[] {
   return value.split(/\s+/).filter((t) => t !== "");
 }
 
+/**
+ * systemd's OWN expansion rule for `ExecStart` (systemd.service(5)): `${VAR}` is
+ * replaced by the variable's value "always resulting in exactly a single
+ * argument", and "Variables whose value is not known at expansion time are
+ * treated as empty strings". So an unset `${VAR}` standing as its own word is a
+ * real, EMPTY argument — not an omitted one. That is the rule P10's review broke
+ * the unit with, so the guard applies it rather than trusting the eye.
+ */
+function expandExec(value: string, env: Record<string, string | undefined>): string[] {
+  return execArgs(value).map((token) =>
+    token.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_whole, name: string) => env[name] ?? ""),
+  );
+}
+
 /** `/opt/tentacle-relay/tentacle-relay --host … --port …` → `{ program, argv }`. */
 function execStart(unit: string): { program: string; argv: string[] } {
   const tokens = execArgs(serviceKeys(unit).get("Service/ExecStart") ?? "");
   return { program: tokens[0] ?? "", argv: tokens.slice(1) };
+}
+
+/** The `ExecStart` value exactly as systemd sees it, `${VAR}`s still unexpanded. */
+function rawExecStart(unit: string): string {
+  return serviceKeys(unit).get("Service/ExecStart") ?? "";
+}
+
+/**
+ * systemd's rule for REPEATED `ExecStart=` assignments, in file order: an empty
+ * value clears the list and a non-empty one appends to it, and a non-`oneshot`
+ * service may end up with at most ONE entry or systemd refuses the whole unit
+ * ("more than one ExecStart= setting, which is only allowed for Type=oneshot
+ * services. Refusing." — systemd.service(5)).
+ *
+ * `serviceKeys` cannot answer this: it is last-wins, so a drop-in that REPLACES
+ * the base unit's command line and one that ADDS a second one read identically.
+ * That gap is exactly review round 2's finding 1, so it gets its own reader.
+ */
+function execStarts(unit: string): string[] {
+  const live: string[] = [];
+  let section = "";
+  for (const raw of unitLines(unit)) {
+    const line = raw.trim();
+    if (line.startsWith("[") && line.endsWith("]")) {
+      section = line.slice(1, -1);
+      continue;
+    }
+    if (section !== "Service" || !line.startsWith("ExecStart=")) {
+      continue;
+    }
+    const value = line.slice("ExecStart=".length);
+    if (value.trim() === "") {
+      live.length = 0;
+      continue;
+    }
+    live.push(value);
+  }
+  return live;
+}
+
+/** The `Type=` systemd will see — a later section/assignment wins, as in systemd. */
+function unitType(unit: string): string {
+  return serviceKeys(unit).get("Service/Type") ?? "simple";
 }
 
 describe("R7 relay.service — the unit starts the binary the runbook installs", () => {
@@ -187,10 +252,25 @@ describe("R7 relay.service — the unit starts the binary the runbook installs",
     expect(caddyDirectives(caddy)).not.toContain("--max-streams-per-ip");
   });
 
-  test("no secret on the command line (argv is world-readable in ps)", () => {
+  test("no secret MATERIAL on the command line (argv is world-readable in ps)", () => {
+    // NARROWED by P10 (docs/feat/mobile-push.md P10). The guard used to forbid
+    // the substring `apns`, which contradicts the only way `main.ts` can be told
+    // where the key is: `--apns-key-file`. What leaks a secret is the KEY, not
+    // the FLAG or the PATH — the path is `${CREDENTIALS_DIRECTORY}/apns-key`, a
+    // read-only copy systemd makes for this unit alone. So the assertion is now
+    // what it always meant: no key material, and no literal key path baked into
+    // the repository's unit.
     const unit = read(join(DEPLOY_DIR, "relay.service"));
     const { program, argv } = execStart(unit);
-    expect(`${program} ${argv.join(" ")}`).not.toMatch(/secret|token|apns|\.p8|credential/i);
+    const line = `${program} ${argv.join(" ")}`;
+    expect(line).not.toMatch(/BEGIN [A-Z ]*PRIVATE KEY/);
+    // A `.p8` PATH would make the deploy host's layout part of the repo, and a
+    // literal token/secret would be one. The credential path is none of these.
+    expect(line).not.toMatch(/\.p8\b/);
+    expect(line).not.toMatch(/secret|token=/i);
+    // The key's CONTENT can never appear: it is a path, and the file it names is
+    // 0400 root, so the relay user cannot even read it directly.
+    expect(line).not.toContain("apns-key-id=");
   });
 
   test("the sandbox and the restart policy the runbook promises are in the unit", () => {
@@ -396,5 +476,254 @@ describe("R7 docs/ops/relay-deploy.md — the runbook", () => {
     // the owner is told to schedule it (F1/F2 resync cover the drop).
     expect(text).toMatch(/staggered|grace/i);
     expect(text).toMatch(/5 min/);
+  });
+});
+
+describe("P10 relay.service — push is a DROP-IN, so the base unit always boots", () => {
+  // docs/feat/mobile-push.md P10 / C2: the relay stops being secretless. The
+  // `.p8` is the ONE secret on that host, so the unit has to (a) receive it
+  // through systemd rather than a file the relay user could read directly, and
+  // (b) hand the binary only the read-only copy's PATH.
+  //
+  // Review round 1, finding 1 (HIGH): it must ALSO be true that the ordinary
+  // relay — installed before Apple's key exists (D2), or with the key removed
+  // for a rollback — still starts, because `Restart=always` turns an ExecStart
+  // the binary refuses into a crash loop that takes every phone off the relay.
+  // So the wiring lives in `relay.service.d/apns.conf`, installed only WITH the
+  // key; the base unit carries none of it and boots with push off (F4).
+  //
+  // What these tests CANNOT prove: that `systemd-analyze verify` accepts the
+  // files, that the credential directory exists at boot, or that Apple accepts
+  // the token. Those are the runbook's checks on the host (§10), run by the
+  // owner at deploy time. The expansion rule below IS pinned, though, because
+  // it is the rule that broke the unit.
+  const unit = (): string => read(join(DEPLOY_DIR, "relay.service"));
+  const dropIn = (): string => read(join(DEPLOY_DIR, "relay.service.d", "apns.conf"));
+
+  test("the shipped base unit parses with every environment variable EMPTY", () => {
+    // systemd's rule (systemd.service(5)): an unknown `${VAR}` is "treated as
+    // empty", and `${VAR}` standing as its own word is always exactly ONE
+    // argument — so the review's finding was an EMPTY argument reaching
+    // `parseRelayArgs`, which refused it and exited 1 on every boot.
+    //
+    // The assertion is the PARSE, not a scan for `${`: a unit that expanded a
+    // variable would be red here for the reason the owner cares about (a relay
+    // that does not start), and the `\$\{`-free shape is pinned separately below.
+    const expanded = expandExec(rawExecStart(unit()), {});
+    const parsed = parseRelayArgs(expanded.slice(1));
+    if (!parsed.ok) {
+      throw new Error(
+        `the base relay.service does not start without Apple's key, which is F4 broken: ${parsed.error}`,
+      );
+    }
+    expect(parsed.args.apns).toEqual({});
+    expect(expanded.slice(1)).toEqual(execStart(unit()).argv);
+  });
+
+  test("the base unit carries no push wiring at all (that is the drop-in's job)", () => {
+    // All three would make the base unit depend on a file that may not exist:
+    // the four flags (empty args), the `EnvironmentFile` (needs apns.conf) and
+    // `LoadCredential` with an ABSOLUTE path (systemd refuses to start the unit
+    // when that file is missing — 243/CREDENTIALS). "Optional, and off by
+    // default" is only true if the base unit names none of them. The variable
+    // scan belongs HERE, next to the wiring it is about.
+    const text = unit();
+    const keys = serviceKeys(text);
+    expect(rawExecStart(text)).not.toMatch(/\$\{/);
+    expect(rawExecStart(text)).not.toMatch(/--apns-/);
+    expect(keys.has("Service/LoadCredential")).toBe(false);
+    expect(keys.has("Service/EnvironmentFile")).toBe(false);
+  });
+
+  test("the drop-in declares the credential, from an absolute path", () => {
+    // `LoadCredential=ID:PATH` with an ABSOLUTE path is the only form that names
+    // a file the operator installs (systemd.exec(5): an absolute path is opened
+    // and copied to a read-only per-unit directory; a bare ID would be looked up
+    // in a credstore this deploy does not use). A missing file here fails the
+    // DROP-IN's unit start — which is correct: it is installed only with the key.
+    const declared = /^LoadCredential=([A-Za-z0-9_.-]+):(\/[^\s:]+)$/m.exec(dropIn());
+    if (declared === null) {
+      throw new Error(
+        "the drop-in declares no `LoadCredential=<id>:</absolute/path>`: the .p8 would have to sit somewhere the relay user can read",
+      );
+    }
+    expect(declared[1]).toBe("apns-key");
+    expect(declared[2]?.startsWith("/")).toBe(true);
+  });
+
+  test("the binary is told the credential's PATH, never its content", () => {
+    const { program, argv } = execStart(dropIn());
+    const keyFileAt = argv.indexOf("--apns-key-file");
+    if (keyFileAt === -1) {
+      throw new Error(
+        "the drop-in passes no --apns-key-file: the relay starts with push off (F4), so P10's banner could never be produced in production",
+      );
+    }
+    // `${CREDENTIALS_DIRECTORY}` is expanded by systemd for the unit's own
+    // ExecStart (systemd.exec(5)), so the unit names no host path at all.
+    expect(argv[keyFileAt + 1]).toBe("${CREDENTIALS_DIRECTORY}/apns-key");
+    expect(program).toBe(`/opt/tentacle-relay/${RELAY_BINARY_NAME}`);
+  });
+
+  test("every --apns-* value is config the drop-in carries, and main.ts parses it", () => {
+    const parsed = parseRelayArgs(execStart(dropIn()).argv);
+    // A flag the binary refuses is an ExecStart that exits 1 on every boot — the
+    // failure this whole describe exists to make impossible.
+    if (!parsed.ok) {
+      throw new Error(`the drop-in's ExecStart is not argv main.ts accepts: ${parsed.error}`);
+    }
+    // All four or none: `readApnsKeySource` refuses a partial set, so a drop-in
+    // that shipped three would announce no `push` feature and never deliver.
+    expect(parsed.args.apns.keyFile).toBe("${CREDENTIALS_DIRECTORY}/apns-key");
+    expect(parsed.args.apns.keyId).not.toBeUndefined();
+    expect(parsed.args.apns.teamId).not.toBeUndefined();
+    expect(parsed.args.apns.topic).toBe("so.tentacle.app");
+  });
+
+  test("a HALF-installed drop-in still boots: empty values are push off", () => {
+    // The failure mode one level down from the review's finding, and the reason
+    // the binary was fixed too: the drop-in installed while `apns.conf` is
+    // missing hands the relay two EMPTY arguments. Refusing them would be a
+    // crash loop again, this time from an artefact the runbook said was safe to
+    // roll back. `parseRelayArgs` drops a blank `--apns-*` value instead (the
+    // *missing argument* case is still a refusal), so what is left is a partial
+    // set, which `apnsSetupOf` turns into one `push off:` line and a serving
+    // relay.
+    const expanded = expandExec(rawExecStart(dropIn()), {
+      CREDENTIALS_DIRECTORY: "/run/credentials/relay.service",
+    });
+    const parsed = parseRelayArgs(expanded.slice(1));
+    if (!parsed.ok) {
+      throw new Error(
+        `a drop-in without apns.conf must still boot (push off), not crash-loop: ${parsed.error}`,
+      );
+    }
+    expect(parsed.args.apns.keyId).toBeUndefined();
+    expect(parsed.args.apns.teamId).toBeUndefined();
+    // Two of the four are real, so this is the partial set — not "no key at all".
+    expect(parsed.args.apns.keyFile).toBe("/run/credentials/relay.service/apns-key");
+    expect(parsed.args.apns.topic).toBe("so.tentacle.app");
+  });
+
+  test("the drop-in's ExecStart is the base unit's, plus exactly the four flags", () => {
+    // A drop-in has to REPEAT the whole command line (`ExecStart=` empty resets
+    // the list, systemd.service(5)), so the limits move with it and could drift
+    // apart from the base unit. Strip the four `--apns-*` pairs and the two must
+    // be identical — otherwise installing push silently re-sizes the fleet's
+    // limits back to the per-client defaults.
+    const base = execStart(unit());
+    const withPush = execStart(dropIn());
+    const stripped: string[] = [];
+    for (let i = 0; i < withPush.argv.length; i += 1) {
+      const token = withPush.argv[i] ?? "";
+      if (token.startsWith("--apns-")) {
+        i += 1;
+        continue;
+      }
+      stripped.push(token);
+    }
+    expect(withPush.program).toBe(base.program);
+    expect(stripped).toEqual(base.argv);
+    // Positive control: the eight tokens really were there to strip.
+    expect(withPush.argv.length - base.argv.length).toBe(8);
+  });
+
+  test("the drop-in RESETS ExecStart before restating it, so the unit still starts", () => {
+    // Review round 2, finding 1 (HIGH): a drop-in does not replace the base
+    // unit's `ExecStart=`, it is APPENDED to it. `Type=simple` (relay.service:28)
+    // allows exactly one entry, so a drop-in holding only the full line hands
+    // systemd TWO and it refuses the unit ("more than one ExecStart= setting,
+    // which is only allowed for Type=oneshot services. Refusing.") — the install
+    // in §6.1 would take every phone off the relay. The empty `ExecStart=` on its
+    // own line is the documented way to clear the inherited list first.
+    //
+    // Read as systemd reads it: base unit first, the drop-in's assignments on
+    // top, in file order. `serviceKeys` cannot see this (last-wins), which is how
+    // the reviewed tree passed "the drop-in's ExecStart is the base unit's…".
+    expect(unitType(unit())).toBe("simple");
+    const dropInLines = execStarts(dropIn());
+    // The reset is IN the drop-in: its first `ExecStart=` assignment is empty.
+    const firstExec = dropIn()
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .find((line) => line.trimStart().startsWith("ExecStart="));
+    expect(firstExec?.trim()).toBe("ExecStart=");
+    // …and the overlay therefore ends with exactly one live command line.
+    const overlay = execStarts(`${unit()}\n${dropIn()}`);
+    if (overlay.length !== 1) {
+      throw new Error(
+        `installing the drop-in leaves ${overlay.length} ExecStart= assignments on a Type=simple unit: systemd refuses it, so push-ON would cost every phone the relay`,
+      );
+    }
+    expect(dropInLines.length).toBe(1);
+    expect(dropInLines[0]?.trim().startsWith("/opt/tentacle-relay/")).toBe(true);
+  });
+
+  test("the sandbox still lets the unit read its own credential directory", () => {
+    // `ProtectSystem=strict` makes the whole filesystem read-only, and the
+    // credential dir lives under /run/credentials (a tmpfs systemd mounts for the
+    // unit). It must stay readable — `ProtectSystem=strict` does not block reads,
+    // so the check is that nothing narrower (a `ReadOnlyPaths`/`InaccessiblePaths`
+    // covering /run) would make the key unreadable.
+    const keys = serviceKeys(unit());
+    expect(keys.get("Service/ProtectSystem")).toBe("strict");
+    expect(keys.get("Service/InaccessiblePaths")).toBeUndefined();
+    expect(keys.get("Service/ProtectHome")).toBe("yes");
+  });
+
+  test("the runbook documents the credential, its mode, the flags and rotation", () => {
+    const text = read(join(REPO_ROOT, "docs", "ops", "relay-deploy.md"));
+    // P10's half of R7:
+    //  - WHERE the key goes and with what mode (0400 root, unreadable by `relay`)
+    //  - the four flags, by name
+    //  - rotation, and rollback for a bad key
+    expect(text).toContain("LoadCredential");
+    expect(text).toMatch(/0400/);
+    expect(text).toContain("--apns-key-file");
+    expect(text).toContain("--apns-key-id");
+    expect(text).toContain("--apns-team-id");
+    expect(text).toContain("--apns-topic");
+    // A rotation section, and the `push off:` line an operator greps for.
+    expect(text).toMatch(/^##+ .*APNs/m);
+    expect(text).toContain("push off:");
+    // It must NOT claim the relay is secretless any more (task 15's text did).
+    expect(text).not.toMatch(/relay holds no secret today/i);
+  });
+
+  test("the runbook names the drop-in, and reverts it together with the key", () => {
+    // Review round 1, finding 1's DOC half: the unit's wiring moved, so the
+    // operator must be told where it went — and, above all, that removing the
+    // key means removing the drop-in in the SAME step. A rollback that deletes
+    // `/etc/tentacle-relay/apns-key.p8` and leaves `LoadCredential=` behind is
+    // the crash loop the fix exists for, and only this text stands between an
+    // operator and it.
+    const text = read(join(REPO_ROOT, "docs", "ops", "relay-deploy.md"));
+    expect(text).toContain("relay.service.d/apns.conf");
+    // The rollback block removes both, from one command.
+    const revert =
+      /rm -f \/etc\/systemd\/system\/relay\.service\.d\/apns\.conf[\s\S]{0,200}apns-key\.p8/;
+    expect(text).toMatch(revert);
+    // And it says WHY, naming the exit code an operator would otherwise meet.
+    expect(text).toContain("243");
+    // The old claim ("nothing in the unit has to be edited") is no longer the
+    // whole story: the drop-in is an installed artefact, not an edit.
+    expect(text).toMatch(/drop-in/i);
+  });
+
+  test("the runbook gives the KEY-LESS drop-in one fate: 243/CREDENTIALS, not 'fine'", () => {
+    // Review round 2, finding 2 (MEDIUM): §6.3 said a drop-in left behind with
+    // the key gone costs 243/CREDENTIALS (l.359-361) and then told the operator
+    // that same case "is also fine" (l.362-364). The blank-value leniency that
+    // sentence leaned on covers a MISSING `apns.conf` — the two IDs — and never
+    // a missing `.p8`, which is `LoadCredential=`, i.e. a start failure before
+    // the binary runs at all. An operator who trusts it removes the key, keeps
+    // the drop-in, and meets a crash loop. One fate, stated once.
+    const text = read(join(REPO_ROOT, "docs", "ops", "relay-deploy.md"));
+    expect(text).not.toMatch(/with the key\s+gone but the drop-in present,[^.]*?\bfine\b/is);
+    // The true statement is still there, in the words an operator greps for.
+    expect(text).toMatch(/drop-in left\s+behind[\s\S]{0,200}243\/CREDENTIALS/);
+    // …and it names the two settings that make it fatal, so the reason is
+    // checkable rather than a bare "do not do this".
+    expect(text).toMatch(/LoadCredential/);
   });
 });

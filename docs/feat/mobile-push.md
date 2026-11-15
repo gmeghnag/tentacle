@@ -3039,3 +3039,574 @@ protects a newer build's record). One addition beyond the letter of the finding:
 relaunch still needs a simulator/device (unchanged from fix round 1); everything
 here is a fake `SecureKV`, the same seam `lock-settings-store.ts` is tested
 through.
+
+### P10 (E2E + runbook) — DONE, with the flow's simulator run BLOCKED by the machine
+
+*— Claude Code 2.1.323 (the exact model id is not exposed in this environment — reported honestly rather than guessed), 2026-11-16*
+
+**Load-bearing check, re-run first: PASS (32 checks).**
+`.tentacle/tmp/mobile-push/p10-load-bearing.ts` (gitignored scratch in THIS
+worktree), `LOAD-BEARING: PASS`. P10's own assumption is *"the placeholder banner
+P10 must assert is producible with no Apple account and no physical device — the
+daemon's OWN sealed envelope, placed by `xcrun simctl push`, makes iOS draw a
+banner Maestro can see — and the relay host can hold the `.p8` without it entering
+argv or a world-readable file."* Its decisive sub-facts, each checked:
+
+```
+PASS no apps/mobile/e2e/flows/push-placeholder.yaml yet     (a feat starts missing)
+PASS FLOWS does not name push-placeholder yet
+PASS ready.features carries push ONLY when an apns client exists
+PASS serve-push.test.ts has a fake APNs / opens it with openPush
+PASS relay main.ts parses all four --apns-* flags + TENTACLE_RELAY_APNS_KEY_FILE
+PASS relay.service has no --apns-* flag and no LoadCredential yet
+PASS the TODAY argv guard fails on any --apns-* flag (P10 must narrow it)
+PASS LoadCredential=ID:/absolute/path parses (the form the unit will use)
+PASS app.json carries the time-sensitive entitlement / keychain group / plugin
+PASS e2e-flows: a new flow may not end on its container
+PASS the runbook PROMISES a systemd credential and names no flag yet
+```
+
+Two of them were stopping-conditions I had to resolve before any code:
+
+1. **The plan's two requirements CONTRADICT as written.** `deploy.test.ts`'s guard
+   was `not.toMatch(/secret|token|apns|\.p8|credential/i)` over the whole command
+   line — i.e. it forbids the substring `apns`. But `--apns-key-file` is the only
+   way `main.ts` learns where the key is, and the key must not be at a path baked
+   into the repo. **Resolution (narrowed, and the reason is in the test):** what
+   leaks a secret is the KEY, not the FLAG or its PATH — the path is
+   `${CREDENTIALS_DIRECTORY}/apns-key`, a read-only per-unit copy. The guard now
+   asserts no key material (`BEGIN … PRIVATE KEY`), no `.p8` path, no
+   `secret`/`token=`, which is what it always meant.
+2. **`systemd` gives the unit a credential, not a path the repo may hardcode** —
+   confirmed against `systemd.exec(5)` (saved at
+   `.tentacle/tmp/mobile-push/p10-systemd-exec.txt`, lines 2416-2491): `LoadCredential=ID:PATH`
+   takes an ABSOLUTE path and `ExecStart` may reference `${CREDENTIALS_DIRECTORY}/ID`.
+
+**Files.** `apps/relay/deploy/relay.service` (`LoadCredential`, the four
+`--apns-*` flags, `EnvironmentFile=-/etc/tentacle-relay/apns.conf`, a comment
+block saying why each piece is there), `docs/ops/relay-deploy.md` (a new **§6
+"APNs push (the `.p8` secret)"** — install / mode `0400` / flags / rotation /
+rollback / smoke test — and §7–§10 renumbered with their cross-references fixed),
+`apps/mobile/e2e/flows/push-placeholder.yaml` (new), `.../flows/push-place.js` +
+`push-assert.js` (new), `apps/mobile/e2e/push-steps.ts` (new, pure),
+`apps/mobile/e2e/push-envelope.ts` (new, pure), `apps/mobile/e2e/run.ts` (the fake
+APNs + the effects), `apps/mobile/e2e/hooks.ts` (`push-place` / `push-payload`),
+`apps/relay/test/deploy.test.ts` (+5 P10 cases, the narrowed guard),
+`apps/mobile/test/e2e-flows.test.ts` (+6 guards),
+`apps/mobile/test/push-steps.test.ts` (new, 6),
+`apps/mobile/test/push-envelope.test.ts` (new, 12), `packages/cli/test/push-grace-flag.test.ts`
+(new, 5), plus **the P8 defect fix** below.
+
+**A REAL P8 DEFECT FOUND, and it blocked P10 (fixed here, red before green).**
+`serve --push-grace` was documented in `ServeLimits`, validated by
+`parseServeLimits`, consumed by `serve.ts` — and **missing from `ARGS.serve`**, so
+`parseArgs` answered `unknown option --push-grace` before any of that ran. Nothing
+caught it because every test drove the `ServeOptions` FIELD instead of the command
+line a person types (and the E2E harness is exactly such a caller). Evidence, on
+the reviewed code, `.tentacle/tmp/mobile-push/p10-grace-repro.ts`:
+
+```
+parseArgs ok = false unknown option --push-grace
+ARGS.serve.values has push-grace = false
+  ws-idle-timeout: true   relay: true   session-ttl: true   push-grace: false
+```
+
+and the E2E run died with `[error] unknown option --push-grace` in
+`serve.err.log`. Fix: one line in `ARGS.serve.values` (`packages/cli/src/flags.ts`)
+plus the usage text in `main.ts`. New `packages/cli/test/push-grace-flag.test.ts`
+was RED first (2 fail: "the flag is one `serve` accepts", "it reaches
+`ServeLimits.pushGraceSeconds`"), green after.
+
+**As built, in the plan's order.**
+1. **The unit + runbook** (dependency-free). `LoadCredential=` an absolute path;
+   `ExecStart` names `${CREDENTIALS_DIRECTORY}/apns-key` and the other three
+   `--apns-*` values; `EnvironmentFile=-…` is OPTIONAL on purpose, so a host with
+   no key starts with `push off: …` and no `"push"` feature (F4) instead of
+   refusing to boot.
+2. **The harness.** A local h2c fake APNs (P8's own, from
+   `packages/cli/test/serve-push.test.ts`) so the relay announces `"push"`; the
+   `push-place` hook registers the paired device, raises one ask
+   (`--push-grace 0`), waits for the fake APNs, and hands those exact bytes to
+   `xcrun simctl push`.
+3. **The flow.** `_pair` → open the computer → Settings (the
+   `notifications-toggle` / `notifications-detail` row) → place → assert the
+   placeholder banner → tap it → `computers-list` → `push-assert.js`.
+
+**Drift from the Implementation, and why.**
+- **D1 — two new pure modules the slice's file list does not name**
+  (`apps/mobile/e2e/push-steps.ts`, `push-envelope.ts`). The slice lists the flow,
+  `run.ts`, the unit and the runbook. Putting the orchestration and the envelope
+  check inline in `run.ts` / the Maestro script made them untestable, and the
+  MUTATION CHECK PROVED IT: M6 and M7 both SURVIVED (§ below). AGENTS §7 says
+  computation belongs in a pure module; the harness is code too.
+- **D2 — the narrowed argv guard** (stopping-condition 1 above).
+- **D3 — the `push-grace` fix**, a P8 defect, outside the slice's file list but
+  the reason P10's flow could not run at all.
+- **D4 — the flow does NOT tap the notification permission alert.** The slice says
+  "pair → notifications allowed". `simctl privacy grant notifications` does not
+  exist (`Operation not permitted`; "notifications" is not one of its services —
+  transcripts in scratch) and the OS prompt is a one-shot per install, so a flow
+  dependent on it would assert the simulator's bookkeeping. What IS asserted is
+  the Settings row the app draws from its registrar's state (`pushPhaseText`),
+  which is the app's own claim about notifications. The permission itself is
+  P9's pure decision (tested) and the real-device checklist.
+- **D5 — the flow is `push-placeholder.yaml` (the plan's name), not a numbered
+  file.** Other flows carry numbers; the plan named this one, so the plan wins.
+- **D6 — the simulator cannot register itself, so the harness registers for it.**
+  Measured, not assumed: `expo-notifications`' `PushTokenModule.swift` calls
+  `UIApplication.shared.registerForRemoteNotifications()` and a simulator needs
+  `aps-environment` in a SIGNED profile (owner step D2a) to answer. The harness
+  writes the same per-device file `device/push_register` writes.
+
+**Red before green.** Every new assertion was RED on the reviewed code first:
+- `deploy.test.ts` — 4 fail (no `LoadCredential`, no `--apns-key-file`, missing
+  `--apns-topic`, runbook has no credential section).
+- `push-grace-flag.test.ts` — 2 fail (`unknown option --push-grace`).
+- the flow guards — 1 fail (`push-placeholder` not in `FLOWS`, so the flow would
+  never have run).
+- `push-steps.test.ts` / `push-envelope.test.ts` were written against the modules,
+  so their red baseline is the MUTATION table below (§9's non-vacuity by mutation).
+
+**Mutations — P10's targets** (`sh .tentacle/tmp/mobile-push/p10-mut.sh`, one
+in-place edit per row, restored from `p10mut-bak/`, log at `p10-mut.log`; a log
+FILE, never a pipe — the P9 fix round records what a SIGPIPE-truncated run cost).
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| M1 | drop `LoadCredential=` from `relay.service` | **RED 1** |
+| M2 | `ExecStart` uses a literal `/etc/…/key.p8` path | **RED 3** |
+| M3 | drop `--apns-topic` (three of four flags) | **RED 1** |
+| M4 | the runbook's `0400` → `0644` | **RED 1** |
+| M5 | `ARGS.serve` omits `push-grace` (the P8 bug) | **RED 2** |
+| M6a | the flow's script checks no padding bucket (`if (false)`) | **RED 1** |
+| M6b | the pure checker accepts any ciphertext length | **RED 1** |
+| M7 | the steps place a hand-written payload, not the daemon's | **RED 3** |
+
+Restore verified: all eight files `IDENTICAL` (`cmp`), final re-run **74 pass,
+0 fail**.
+
+**Two mutations SURVIVED first, and what that changed (honest note).** M6 and M7
+were first aimed at assertions that checked STRINGS — the script "contained
+`704`", `run.ts` "contained `startFakeApns`". Both survived, because neither could
+fail when the BEHAVIOUR changed. Rather than keep tests that prove nothing, the
+code moved: the envelope decision became `push-envelope.ts` (M6b now kills it, and
+a lockstep test holds the script to the module's own numbers), and the
+orchestration became `push-steps.ts` over injected effects (M7 now kills the
+literal-payload substitution, because "a push that never arrived THROWS" and "it
+places EXACTLY the object the APNs reported" are identity assertions).
+
+**The flow's simulator run: BLOCKED by this machine, not by the code.** Three runs
+of `bun run e2e:mobile`'s harness for `push-placeholder` fail at
+`_unlock.yaml`'s `assertCondition: id: lock-screen is visible` — i.e. inside the
+SHARED `_pair` prefix, before any step P10 adds. **An unmodified, pre-existing
+flow fails identically**: `E2E_ONLY_FLOWS=01-shell`, same simulator, same
+assertion, same 21 s. The cause is visible in the simulator's own log —
+`coreauthd` reports `Authentication failure` / `Invalidated by client` and the app
+draws its `no-passcode` lock notice, so the app does not lock at all. That is this
+simulator's Passcode/Face ID state, which no executor may reset (it would mean
+erasing the device and re-enrolling). So: **the flow is written, wired, syntax-
+checked (`maestro check-syntax` → OK), guarded by six unit tests, and its payload
+path is unit-tested end to end — but its banner assertion has NOT been observed
+green on a simulator.** Verify with
+`bun run e2e:mobile --ios 26` once the simulator locks again (or on a device with
+D2a); if it still fails at `_unlock` with `01-shell` failing too, the machine is
+still the cause, not this flow.
+
+**Acceptance checks the plan names, run.** "pair → notifications allowed": the
+pairing and the Settings row are asserted; the OS grant is not (D4). "`simctl
+push` with an envelope captured from P8's fake APNs": ✔ — the harness's fake APNs
+IS P8's, moved, and `push-steps.test.ts` pins that the placed payload is the
+received one. "placeholder banner shown, tap opens the app": written and
+syntax-checked, **not observed green** (above). "runbook additions (systemd
+`LoadCredential`, file 0400, flags, rotation, rollback)": ✔ all five, pinned by
+`deploy.test.ts`.
+
+**Gate (this worktree, `feat/mobile-push`, uncommitted — see the branch note).**
+`bunx tsc --noEmit` → exit 0 · `bunx tsc -p apps/mobile` → exit 0 ·
+`bunx tsc -p apps/relay` → exit 0 · `bun run lint` → `Checked 1406 files in 447ms.
+No fixes applied.` (0 errors, 0 warnings — the §6 baseline) · `bun test` →
+**10258 pass, 4 skip, 0 fail** (10262 tests / 737 files, 405 s). The four skips are
+the documented opt-ins (live-k8s, live-docker, the real-socket keepalive, and
+`session-hop.docker`), none in a file this slice touched. No schema change:
+`packages/protocol/schema/protocol.json` is untouched — P10 adds no wire at all
+(an E2E flow, a deploy unit, a runbook, and one CLI flag table entry), so no
+`protocol.d/` note and no `PROTOCOL_VERSION` move.
+
+**Changelog.** `changelog.d/mobile-push-e2e.added.md` (the flow + the credential)
+and `changelog.d/mobile-push-push-grace.fixed.md` (the P8 defect) — one bullet each
+(`docs/feat/changelog-fragments.md` is one bullet per file; the first attempt
+shipped two bullets in one file, which the slug/naming guard also rejected:
+`mobile-push.e2e` is not a legal slug).
+
+**Unverified (one line each, and how to check).**
+(a) The banner assertion, above — the machine cannot lock.
+(b) Real APNs: still D2a + D2, unchanged (a simulator has no token and
+`simctl push` bypasses Apple), `docs/ops/relay-deploy.md` §6.4.
+(c) `systemd-analyze verify` on the edited unit — needs the host; the runbook
+runs it, `deploy.test.ts` can only pin the syntax it can read.
+
+**Branch note.** Worked on `feat/mobile-push` (this worktree) and never committed,
+per the task prompt's "never git commit"; `git status` lists the 9 modified and 10
+new files. The orchestrator decides where they land.
+
+## Review
+
+### P10 — REQUEST-CHANGES
+
+**Gate (re-run):** touched files 74 pass / 0 fail (`push-steps`, `push-envelope`, `e2e-flows`, `deploy`, `push-grace-flag`); `bun run lint` clean (1406 files); `bun run typecheck` exit 0. I did not re-run the full suite.
+
+**Findings**
+1. **HIGH — the unit does not boot without a key; it should come up with push off (F4 is broken).** `apps/relay/deploy/relay.service:51-53` passes `--apns-key-id ${TENTACLE_RELAY_APNS_KEY_ID}` and `--apns-team-id ${…}`, with the source file `EnvironmentFile=-` optional. With `${VAR}` as its own word, systemd always passes exactly ONE argument, so an unset var becomes an empty argument. `parseRelayArgs` (`apps/relay/src/main.ts:225-226`) rejects that as `--apns-key-id needs a value`, and the process then does `process.exit(1)` (`main.ts:305-307`). Reproduced by `.tentacle/tmp/mobile-push/review-p10/argv.ts` → `{"ok":false,"error":"--apns-key-id needs a value"}`. On top of that, `LoadCredential=apns-key:/etc/tentacle-relay/apns-key.p8` (`relay.service:76`) uses an absolute path, and systemd refuses to start the unit when that file is missing (243/CREDENTIALS; not checked on a host). **Scenario:** a routine relay redeploy installs this unit before D2 → `Restart=always` crash-loops → every phone loses the relay. The unit comment (`relay.service:70-73`) and runbook §6 ("can be skipped, deferred or reverted without touching anything else", "nothing in the unit has to be edited") both claim the opposite. Rollback by removing the key bricks it the same way. No test pins "boots without a key", so `deploy.test.ts` cannot catch it. Fix direction: keep the wiring out of the base unit (a drop-in `relay.service.d/apns.conf` the runbook installs with the key), or make the relay treat empty `--apns-*` values as push off. Add a test that the shipped ExecStart, with the env vars expanded to empty, still parses.
+2. **MEDIUM — the harness keeps a second writer for a persisted format.** `apps/mobile/e2e/run.ts` `writePushRegistration` hand-builds `{v:1,…}` at `devices/push/<id>.json` instead of importing `writePushRegistration`/`pushPathOf` from `packages/daemon/src/push-store.ts:213`. **Scenario:** a schema change to the store leaves the flow failing with the misleading "relay must announce push" error. It should reuse the module.
+
+**Mutation (§9):** `push-steps.ts` `apnsCount() > before` → `>=` → RED 1 ("an EARLIER push is not mistaken…"). Reverted; `git status` is clean.
+
+**Attacks tried:** systemd empty-arg expansion against the parser (finding 1); a missing credential file (finding 1, from the docs); a stale-payload mutation (killed); the secret in argv/journal (holds: the credential path only, `push on` logs the key id only); the `--push-grace` fix (holds: present in `ARGS.serve`, pinned by `push-grace-flag.test.ts`); the §7 single-session path (holds: the harness drives the real daemon/relay, with no parallel loop).
+
+**What holds:** the pure `push-steps`/`push-envelope` split, the identity and throw-on-no-push tests, and the honest reporting of the BLOCKED simulator run (the banner has still never been observed).
+
+**Executor behaviour:** thorough and candid about the drift (D1–D6) and the surviving mutations. But it never tested its central deploy claim ("optional", push off) against the parser it had cited.
+
+*— claude-opus-5-5, 2026-11-15 (fresh context; a different family from the deepseek executor of earlier rounds, but P10's executor did not report its model)*
+
+### Fix round 1
+
+*— claude-sonnet-4-5 (the model id this environment reports for me; the executor
+of this round, not the author of P10), 2026-11-16*
+
+Scope: the two findings of *Review — P10* (1 HIGH, 1 MEDIUM). Both reproduced on
+the reviewed code before any edit; both fixed red-before-green, both
+mutation-checked (§9). Scratch is the gitignored
+`<this worktree>/.tentacle/tmp/mobile-push/review-p10/` (the shared
+`/Users/gmeghnag/tentacle/.tentacle/tmp/…` is outside the writable worktree):
+`f1-repro.ts`, `f2-strength.ts`, `f1-mut.sh`, `f1-m2m3.sh`, `f2-mut.sh`, each
+logging to a file rather than a pipe.
+
+**Repro before the fix.**
+
+*F1* — `f1-repro.ts` expands the SHIPPED `ExecStart` by systemd's own rule (`${VAR}`
+standing as a word is exactly ONE argument, and an unknown variable is the empty
+string — systemd.service(5)) and feeds it to `parseRelayArgs`:
+
+```
+argv (expanded) : [… "--apns-key-file","/apns-key","--apns-key-id","","--apns-team-id","","--apns-topic","so.tentacle.app"]
+parsed          : {"ok":false,"error":"--apns-key-id needs a value"}
+VERDICT: the unit exits 1 on boot (main.ts would process.exit(1))
+```
+
+With `Restart=always` that is a crash loop on any host without
+`/etc/tentacle-relay/apns.conf`, i.e. every phone off the relay. The
+`LoadCredential=` half is a second, independent start failure (243/CREDENTIALS)
+that no shipped test could reach.
+
+*F2* — `f2-strength.ts`, the REAL `readPushRegistrations` over (a) the bytes
+`apps/mobile/e2e/run.ts`'s hand-built writer produced and (b) the store's own
+writer:
+
+```
+OLD writer → devices the daemon will push to: 0
+           ↳ skipped: [{… "reason":"unsupported record (unknown version or invalid field)"}]
+STORE writer → devices the daemon will push to: 1
+```
+
+So the finding was worse than "a second writer for a persisted format": the
+harness wrote `at` where the store reads `registeredAt`, so the record was
+REFUSED and the daemon had nobody to push to. `push-placeholder` could not have
+delivered a push even with its banner assertion unblocked — and the failure would
+have surfaced as the reviewer's "the relay must announce push", the wrong cause.
+
+**F1 (HIGH) — the base unit always boots; the wiring is a drop-in, and a blank
+value is push off.** Root cause in two layers, both fixed:
+- `apps/relay/deploy/relay.service:55-56` — the four `--apns-*` flags,
+  `EnvironmentFile=` and `LoadCredential=` are GONE from the base unit and live in
+  the new `apps/relay/deploy/relay.service.d/apns.conf`, installed by the runbook
+  only together with the `.p8`. This is the only shape that survives
+  `LoadCredential=`'s absolute path (systemd fails the unit's start when the file
+  is missing), and a drop-in can be removed in the same step as the key. The
+  drop-in restates the whole `ExecStart` (an empty `ExecStart=` resets the list,
+  so the three fleet limits moved with it); `deploy.test.ts` pins it as
+  byte-for-byte the base argv plus exactly the four push flags, so they cannot
+  drift.
+- `apps/relay/src/main.ts:225-240` — `parseRelayArgs` treats a BLANK `--apns-*`
+  value as "not set" (dropped, exactly as an unset variable would be) instead of
+  refusing it, so a HALF-installed drop-in and any future variable-expanding unit
+  still boot; what remains is a partial set, which `apnsSetupOf` already reports
+  with one `push off:` line while the relay serves. A MISSING argument is still a
+  refusal (an operator's typo).
+
+Deliberate drift: the review offered "drop-in **or** empty values = push off". I
+did both — the drop-in alone leaves the binary refusing a shape any forgotten
+`EnvironmentFile` produces, and the binary alone cannot fix `LoadCredential=`'s
+start failure, which is the half that bricks the unit.
+
+`docs/ops/relay-deploy.md` follows the move and gains the rollback the review
+showed missing: §6.1 installs the drop-in beside the key, §6.3 adds "Reverting
+push entirely", which removes the drop-in **and** the key in one `rm` (a drop-in
+left behind names a file that no longer exists ⇒ 243/CREDENTIALS ⇒ crash loop),
+and §6 plus the file list say where the wiring went.
+
+**F2 (MEDIUM) — the harness reuses the daemon's store.**
+`apps/mobile/e2e/run.ts:746-775`: `writePushRegistration` calls the imported
+`writePushRegistration` from `@tentacle/daemon` instead of hand-building the
+record, and THROWS on a refusal so the failure names the real cause. The two
+`node:fs` imports that existed only for the hand-built write are gone.
+
+**Tests (red before green, §9).**
+- `apps/relay/test/deploy.test.ts` — the `P10 relay.service …` describe became
+  *"push is a DROP-IN, so the base unit always boots"* (5 file tests → 10): the
+  base unit parses with every variable expanded to empty; it carries no
+  `--apns-*`/`LoadCredential`/`EnvironmentFile`; the drop-in's credential is an
+  absolute path; the binary is told the PATH only; all four flags are ones
+  `main.ts` parses; a HALF-installed drop-in still boots with push off; the
+  drop-in's argv is the base unit's plus exactly four flag pairs; and the runbook
+  names the drop-in and reverts it with the key. A new `expandExec()` helper
+  (`:82-97`) implements systemd's expansion rule, so the guard tests the rule that
+  broke the unit instead of scanning for `${` by eye.
+- `apps/relay/test/main.test.ts` — +2: a blank `--apns-*` value (empty and
+  whitespace) is push off, not a refusal; one blank value leaves the other three
+  real (the partial-set shape). The MISSING-value refusal test is kept verbatim.
+- `apps/mobile/test/e2e-flows.test.ts` — the existing "it registers the phone's
+  device in the daemon's own store" guard was WEAKENED BY ITS OWN NAME (it
+  asserted the string `"devices", "push"`, i.e. it pinned the hand-built writer as
+  the contract). It now asserts the store import and the throw, and asserts the
+  format is NOT reproduced (no `JSON.stringify({ v: 1`, no `"devices", "push"`,
+  no `at: Date.now()`).
+
+The ten reds, each on its own assertion, before the fix:
+
+```
+(fail) … > the shipped base unit parses with every environment variable EMPTY       F1 parse refusal
+(fail) … > the base unit carries no push wiring at all (that is the drop-in's job)  F1
+(fail) … > the drop-in declares the credential, from an absolute path               ENOENT relay.service.d/apns.conf
+(fail) … > the binary is told the credential's PATH, never its content              ENOENT
+(fail) … > every --apns-* value is config the drop-in carries, and main.ts parses it ENOENT
+(fail) … > a HALF-installed drop-in still boots: empty values are push off          ENOENT
+(fail) … > the drop-in's ExecStart is the base unit's, plus exactly the four flags  ENOENT
+(fail) parseRelayArgs > an --apns-* value that is EMPTY or blank is push off        Expected: true  Received: false
+(fail) parseRelayArgs > one blank value leaves the OTHER three real                 Expected: true  Received: false
+(fail) P10's push flow > it registers the phone's device in the daemon's own store  F2
+```
+
+**Mutations (§9 — each breaks ONE half; the named test went RED, then every file
+restored and `diff -q`-checked).**
+
+```
+M1     push wiring + LoadCredential back in the BASE unit       3 fail  base parses / no-wiring / drop-in==base
+M2     base unit expands ${TENTACLE_RELAY_APNS_KEY_ID} again     3 fail  same three (the review's exact line)
+M2+M3  ALSO refuse a blank --apns-* value (the reviewed pair)    1 fail  THE decisive one
+M3     parseRelayArgs refuses a blank --apns-* value again       3 fail  half-installed drop-in + both blank tests
+M4     drop-in omits the base unit's three limit flags           1 fail  drop-in==base
+M5     runbook stops reverting the drop-in with the key          1 fail  the rollback guard
+M-F2   hand-build the record again (the reviewed writer)         1 fail  the store-reuse guard
+```
+
+M2 alone is NOT decisive, stated rather than hidden: with the binary lenient, a
+unit that expands an unset variable now parses, so only the `${`-free shape
+assertion reds. The property "the shipped unit starts" is killed by M2+M3
+together — the reviewed pair — where the base-unit test reds on exactly the
+reviewer's error, from its own `throw`:
+
+```
+error: the base relay.service does not start without Apple's key, which is F4 broken: --apns-key-id needs a value
+(fail) … > the shipped base unit parses with every environment variable EMPTY
+RESTORED CLEAN
+```
+
+Scripts `f1-mut.sh`, `f1-m2m3.sh`, `f2-mut.sh` log to files, never pipes (fix
+round 2's SIGPIPE note), and each ends with a restore check; every run printed
+`CLEAN` for all four files. One inline probe of mine DID leave a mutation in
+`relay.service` (I reused a backup path that did not exist yet); `git status` and
+`grep -- '--apns-'` caught it one command later, and the backup restored it
+(`RESTORED`, `diff -q`-verified). Recorded because that is the class of mistake
+that yields a false green.
+
+**Changelog.** `changelog.d/mobile-push-push-optional-deploy.fixed.md` (one
+bullet) — the deploy artefact is user-visible and its failure mode was "every
+phone loses the relay". No `protocol.d/` note and no `PROTOCOL_VERSION` move: no
+wire change, `packages/protocol/schema/protocol.json` untouched.
+
+**Gate (this worktree, `feat/mobile-push`, uncommitted — per the task prompt).**
+`bunx tsc --noEmit` → 0 · `bunx tsc -p apps/mobile` → 0 ·
+`bunx tsc -p apps/relay` → 0 · `bun run lint` → `Checked 1406 files in 448ms. No
+fixes applied.` (0 errors, 0 warnings — the §6 baseline; two formatting fixes
+auto-applied first) · `bun test` → **10265 pass, 4 skip, 0 fail** (10269 tests /
+737 files, 390 s). The four skips are the documented opt-ins (live-k8s,
+live-docker, the real-socket keepalive, `session-hop.docker`), none in a touched
+file. This round adds 7 tests: `deploy.test.ts` 22 → 27 and `main.test.ts` 18 → 20
+(`grep -c 'test('`, HEAD vs the tree), and rewrites one guard in
+`e2e-flows.test.ts`. HEAD's suite was 10262 tests, this tree's is 10269 — the
+same 7 — and the only other change is that one guard's assertions, not a new
+test.
+
+**Unverified (one line each, and how to check).**
+(a) `systemd-analyze verify` on both files and a real boot with the key missing —
+needs the host; the runbook runs the first, and `deploy.test.ts` pins everything
+about the files that is readable without it.
+(b) `push-placeholder`'s banner assertion — still BLOCKED by this machine's
+simulator (`_unlock` fails on a pre-existing flow too, unchanged from P10), so
+F2's fix makes the flow capable of delivering a push but its banner remains
+unobserved.
+
+### Round 2 — REQUEST-CHANGES
+
+**Gate:** `deploy`/`main`/`e2e-flows` 76 pass / 0 fail; `bun run lint` clean (1406 files); `bun run typecheck` exit 0.
+
+**Round-1 findings**
+- **F1 (base unit doesn't boot without a key) — FIXED.** The push wiring has moved to `relay.service.d/apns.conf`, and `parseRelayArgs` now treats a blank `--apns-*` value as unset (`main.ts:225-240`). Mutation: putting the refusal back → RED 3 (deploy "HALF-installed drop-in", plus 2 in `main.test.ts`). Reverted; tree clean.
+- **F2 (the harness's second store writer) — FIXED.** `run.ts` now calls the daemon's `writePushRegistration`, and typecheck pins the shape. Not mutation-checkable: `run.ts` has no unit test, so only the E2E run would fail.
+
+**New findings**
+1. **HIGH — installing push now stops the relay from loading.** `apps/relay/deploy/relay.service.d/apns.conf:29` sets `ExecStart=/opt/…` without a preceding empty `ExecStart=` line. Its own comment (l.26-28) says that reset is needed, but the file doesn't do it. The base unit is `Type=simple` (`relay.service:28`), and systemd refuses a simple service that has two `ExecStart=` ("more than one ExecStart= setting, which is only allowed for Type=oneshot services. Refusing."). **Scenario:** D2 installs the drop-in per §6.1 → `daemon-reload` → `restart` fails → every phone is off the relay. `deploy.test.ts` "the drop-in's ExecStart is the base unit's…" reads the last value through `serviceKeys`, so it can't see a missing reset. Fix: add `ExecStart=` on its own line before the full one, and pin it in the test (the first `ExecStart` line in `[Service]` must be empty).
+2. **MEDIUM — the runbook contradicts itself on rollback** (`docs/ops/relay-deploy.md:362`). It says that "with the key gone but the drop-in present, the relay is also fine", but l.359-361 (and the drop-in's `LoadCredential`) say that case gives 243/CREDENTIALS. The blank-value leniency only covers a missing `apns.conf`, not a missing `.p8`. An operator who trusts l.362 gets a crash loop.
+
+*— claude-opus-5-5, 2026-11-15 (fresh context, round 2)*
+
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-16 (the executor of this round; not the author of the
+review above, though the same model id — this environment reports
+`claude-opus-5-5` for the session, per `~/.claude/settings.json` and the
+session's own transcript)*
+
+Scope: both findings of *Round 2 — REQUEST-CHANGES* (1 HIGH, 1 MEDIUM), each
+reproduced on the reviewed tree before any edit, fixed red-before-green, and
+mutation-checked (§9). Scratch is this worktree's gitignored
+`.tentacle/tmp/mobile-push/fix2/` — the shared
+`/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-push/` is outside the writable
+worktree (the tool sandbox refuses it; same constraint fix round 1 hit),
+and every script logs to a FILE, never a pipe.
+
+**Repro before the fix.** Two probes, each re-implementing the rule the finding
+is about rather than scanning the file by eye.
+
+*F1* — `f1-repro.ts` overlays the two SHIPPED files the way systemd does (base
+unit first, drop-in's assignments on top, in file order), applies systemd's own
+`ExecStart=` semantics, and reports what `systemctl restart` would do after
+§6.1's install:
+
+```
+Type                : simple
+ExecStart(s) live   : 2
+  [0] /opt/tentacle-relay/tentacle-relay --host 127.0.0.1 --port 4100     --…
+  [1] /opt/tentacle-relay/tentacle-relay --host 127.0.0.1 --port 4100     --…
+VERDICT: systemd REFUSES the unit — 'more than one ExecStart= setting, which is
+only allowed for Type=oneshot services. Refusing.' → restart fails with the
+drop-in installed ⇒ every phone off the relay (F4 broken)
+```
+
+*F2* — `f2-repro.ts` reads the shipped runbook as an operator would:
+
+```
+• With the key gone but the drop-in present, the relay is also fine (a blank
+  `--apns-*` value is push off, not a refusal), but do not rely on that: remove both.
+claims the key-less drop-in is FINE : true
+VERDICT: CONTRADICTION — the same paragraph says 243/CREDENTIALS and 'also fine'
+```
+
+**F1 (HIGH) — the drop-in clears the inherited `ExecStart` before restating it.**
+`apps/relay/deploy/relay.service.d/apns.conf:34` is now an EMPTY `ExecStart=`
+(the bare assignment, after the comment that explains it) immediately before the
+restated command line at `:38`,
+with the comment saying why: a drop-in is appended to the base unit's command
+line, and `Type=simple` allows exactly one. Probe after the fix: `ExecStart(s)
+live : 1` → "the overlay is accepted".
+
+The test gap the review named is closed by a READER, not a string scan.
+`serviceKeys` is last-wins, so "the drop-in replaced the command line" and "the
+drop-in added a second one" read identically to it — which is exactly how the
+reviewed tree passed. So `deploy.test.ts` gains `execStarts()` (`:129-158`),
+which collects `ExecStart=` assignments in FILE ORDER, honouring the empty-value
+reset, plus `unitType()` (`:152-154`); both read through a new shared
+`unitLines()` (`:45-63`) extracted from `serviceKeys` so the three readers cannot
+drift on how
+a `\`-continued line is joined. The new test (`:551-583`) asserts the drop-in's
+first `ExecStart=` assignment is empty, and that the OVERLAY of the two real
+files ends with exactly one live command line — i.e. it tests systemd's rule,
+not the file's shape. `Type` is asserted `simple`, so the guard cannot go quiet
+if someone changes it.
+
+**F2 (MEDIUM) — the runbook gives a key-less drop-in one fate.**
+`docs/ops/relay-deploy.md:359-366` now says that 243/CREDENTIALS "is the only
+outcome of a key-less drop-in", names what the blank-value leniency does and does
+not cover (a missing `apns.conf` — the two IDs — never a missing `.p8`, because
+`LoadCredential=` fails the start before the binary is exec'd), and closes with
+"there is no 'key gone but drop-in present is fine' case". The contradictory
+sentence is gone, not qualified. Pinned by a new test (`:633-648`) that asserts
+the "also fine" claim is ABSENT (regex over the wrap), that the true statement is
+still there inside the same 200-char window an operator reads, and that
+`LoadCredential` is named so the reason is checkable.
+
+**Reds (red before green, §9 — each on its own assertion, not an import).**
+
+```
+(fail) … > the drop-in RESETS ExecStart before restating it, so the unit still starts
+       Expected: "ExecStart="
+       Received: "ExecStart=/opt/tentacle-relay/tentacle-relay --host 127.0.0.1 --port 4100 \"
+(fail) … > the runbook gives the KEY-LESS drop-in one fate: 243/CREDENTIALS, not 'fine'
+       Expected substring or pattern: not /with the key\s+gone but the drop-in present,[^.]*?\bfine\b/is
+ 27 pass · 2 fail   (the 27 include every pre-existing P10/R7 guard, unchanged)
+```
+
+**Mutations (§9 — each breaks ONE half; `diff -q`-verified restores, and every
+script asserts its mutation APPLIED before running the suite).**
+
+```
+M1  the empty `ExecStart=` reset deleted again (the review's exact bug)   1 fail  the reset test
+M2  the reset present but placed AFTER the command block                  5 fail  reset test + 4 ExecStart readers
+M3  the runbook's "also fine" sentence restored                          1 fail  the one-fate test
+M4  Type=simple → Type=oneshot (many ExecStarts become legal)             1 fail  the reset test
+```
+
+Two honest notes on the mutations, because both first attempts were VACUOUS
+greens and that is the failure mode §9 exists for:
+- **M3 first run: "29 pass, 0 fail"** — the `python3` anchor spanned a line
+  wrap, raised `AssertionError: anchor missing`, and so mutated nothing. Redone
+  by slicing on the real sentence boundaries; it then printed the replaced
+  length and the test red. A `0 fail` from an unapplied mutation is not a
+  result.
+- **M2 first two runs: "29 pass, 0 fail"** — run 1's `awk` broke the `\`-continued
+  block, and run 2 moved the reset past a COMMENT line, which systemd skips, so
+  neither changed what systemd sees. The third (`mutate3.sh`) moves it past the
+  whole continued command and ASSERTS `reset[0] > first_cmd` before testing:
+  `M2 applied: command line at 36, reset now at 42 (after it)` → 5 fail.
+  M1 and M4 were decisive first time and are kept as they ran.
+
+**Changelog.** `changelog.d/mobile-push-push-optional-deploy.fixed.md` — the
+existing fragment (same artefact, same user-visible surface) gained the
+drop-in-is-a-legal-override clause and the one-fate rollback clause, rather than
+a second fragment for one deploy change. `[Unreleased]` untouched. No
+`protocol.d/` note, no `PROTOCOL_VERSION` move, `packages/protocol/schema/`…
+untouched: no wire change.
+
+**Gate (this worktree, `feat/mobile-push`, uncommitted — per the task prompt;
+nothing checked out, restored, stashed or committed).**
+`bunx tsc --noEmit` → 0 · `bunx tsc -p apps/mobile --noEmit` → 0 ·
+`bunx tsc -p apps/relay --noEmit` → 0 · `bun run lint` → `Checked 1406 files in
+448ms. No fixes applied.` (0 errors, 0 warnings — the §6 baseline after one
+auto-fixable `useTemplate` in my own new test, hand-fixed) · `bun test` →
+**10267 pass, 4 skip, 0 fail** (10271 tests / 737 files, 393 s). The four skips
+are the documented opt-ins (live-k8s, live-docker, the real-socket keepalive,
+`session-hop.docker`), none in a touched file. This round adds 2 tests
+(`deploy.test.ts` 27 → 29, plus the three reader helpers) and edits no other
+suite.
+
+**Unverified (one line each, and how to check).**
+(a) A real `systemctl daemon-reload` + `restart` with the drop-in installed —
+needs the host; `systemd-analyze verify` is the runbook's own step (§6.1) and the
+ordered-reader test pins the rule that broke it.
+(b) `push-placeholder`'s banner assertion — still BLOCKED by this machine's
+simulator (`_unlock` fails on a pre-existing flow too, unchanged since P10).
+
+**Per finding:** F1 HIGH **FIXED** · F2 MEDIUM **FIXED**.
+
+### Round 3 — PASS
+
+**Gate:** `deploy`/`main`/`e2e-flows` 78 pass / 0 fail; `bun run lint` clean (1406 files); `bun run typecheck` exit 0.
+
+- **R2-F1 (drop-in with no `ExecStart=` reset) — FIXED.** `relay.service.d/apns.conf` now has an empty `ExecStart=` before the restated command line. The new `execStarts` reader applies systemd's in-order clear/append rule to base + drop-in and requires exactly one live entry on a `Type=simple` unit. Mutation: deleting the reset line → RED 1 ("the drop-in RESETS ExecStart…"). Restored.
+- **R2-F2 (runbook said key gone + drop-in present was fine) — FIXED.** `docs/ops/relay-deploy.md:359-367` now gives that case a single outcome, 243/CREDENTIALS. Mutation: putting the "…is also fine" sentence back → RED 1. Restored; `git status` is clean.
+- **Regressions:** none found. `serviceKeys` is still last-wins, so the "base argv plus exactly four flags" test still reads the full line. Splitting out `unitLines` keeps the `\`-continuation guard green.
+- **Still open, outside code review:** the simulator banner has never been observed (the machine can't lock), and `systemd-analyze verify` on the host is the owner's check at D2.
+
+*— claude-opus-5-5, 2026-11-15 (fresh context, round 3)*
