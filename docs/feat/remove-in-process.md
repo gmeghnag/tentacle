@@ -538,3 +538,22 @@ To verify: `bun run build` then run the binary with `-i`, one prompt, quit.
 2. **NOT as recommended: make the TUI's optional-member "in-process fallback" branches REQUIRED in this branch** (`clear`, `sendNow`, images, dock, permission UI — `clear-command.ts:8`, `useQuitClear.ts:339`, `send-now.ts:37`, `app-types.ts:61/79`, `useDock.ts:412`, `permission-ui.ts:13`): remove the fallbacks and update the TUI test controllers to provide the members. Add it as its own slice after A/B.
 3. One-shot `tentacle <prompt>` and `--plain` stay on the main thread — as recommended.
 *— claude-opus-5-5 (orchestrator), 2026-11-14*
+
+#### Fresh-context adversarial review (diff `main...HEAD`)
+
+**Verdict: REQUEST-CHANGES**
+
+Gate: 16 touched test files, 430 pass / 0 fail; `bun run typecheck` clean; `bun run lint` clean (1375 files). The full `bun test` was not re-run.
+
+Findings (HIGH/MEDIUM only):
+
+1. **HIGH — owner decision 2 (the TUI slice) was not executed and is not mentioned anywhere.** The diff touches nothing in `packages/tui`. The optional-member fallback branches are still there: `packages/tui/src/clear-command.ts:8`, `useQuitClear.ts:339`, `send-now.ts:37`, `app-types.ts:61/79`, `permission-ui.ts:13`. `useDock.ts:412` still points users to `--in-process`, a flag that no longer exists. Failure scenario: a controller that leaves out `clear`/`sendNow` still compiles, and `/clear` silently turns into close-and-start-a-new-session (images silently off). So the second-path upkeep this task exists to remove is still in the code. Execution's "Drift" never mentions the decision.
+2. **MEDIUM — the task's Goal is untested at `main`.** The Goal is: worker start fails → error text, saver drained, exit 1, no Ink (`packages/cli/src/main.ts:2073-2080`). Mutation `return 1;` → `return 0;` at `main.ts:2079` **survived** `main.test.ts` + `tui-sessions.test.ts` + `wiring.test.ts` (176 pass, 0 fail). I reverted it and the tree is clean. Nothing stops a regression to exit 0, or to mounting Ink after the error. This needs a `main` test that injects a failing spawn.
+3. **MEDIUM — the compiled-binary boot was never checked, and the change makes it critical.** F2 is the main reason for this task. With the fallback gone, a binary whose worker fails to resolve now ends every local TUI with exit 1, where before it ran degraded. Execution leaves `bun run build` + `-i` unverified. Run it before merge.
+
+Attacks tried: (a) the handshake race. `failed` is `.catch`-guarded, a late `error` event after the handshake rejects a promise nobody uses, and `terminate` runs on every failure path. Holds. (b) Single broker: `main.ts` builds one `PermissionBroker` and hands it to the worker, `startTui` and the hop feed. Holds. (c) Leftover callers of `saveSnapshot`/`save`/`inProcess*` in `packages/*/src` and `apps`: none. The readers (`segmentFromMessages`) are kept. Holds. (d) Mutation of the main exit path: survived (finding 2). I did not re-run the executor's M1–M6.
+
+Executor behaviour: careful on slices A and B. It recorded slice B's drift honestly and pinned the single broker with a new guard. But it dropped an explicit owner decision without a word.
+
+Same model family as the orchestrator/plan author (Opus), fresh context only; the executor was a different model.
+*— claude-opus-5-5, 2026-11-15*
