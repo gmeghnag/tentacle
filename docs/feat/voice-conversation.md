@@ -1580,6 +1580,27 @@ round 1, in a fresh context, and a different family from the deepseek executor.
   - Every `steering` mutation still drains `voiceMarks` in step
     (`session.ts:180-181,290-291,307-308`).
 
+### Round 2 · *— claude-opus-5-5, 2026-11-15*
+
+**Verdict: PASS (C3).** This is an independent re-run. The section above was
+written by another review context running concurrently, and this one agrees with
+it. `HEAD~1..HEAD` (`e83c679e`) is doc-only, so the fixes were verified as they
+stand in the tree, from `879be7ea`.
+
+- **MEDIUM (F9 latch): FIXED.** The latch is now `res.ok`
+  (`openai-provider.ts:232`). Mutation: put back the latch-before-retry code.
+  Result: RED.
+- **LOW (final report did not consume the mark): FIXED.** `markVoice()` runs at
+  `agent.ts:1596`. Mutation: remove it. Result: RED.
+- **LOW (first 400 body): FIXED.** `discardBody` is in place. Mutation: remove
+  it. Result: RED.
+- **Regressions:** none. The latch changes only inside the `wantOff` branch. The
+  report's `markVoice` affects only the line, because that request carries no
+  `reasoning`.
+- **Gate:** the C3 files plus `packages/providers/test` give 185 pass, 0 fail.
+  `bun run lint` checks 1655 files with 0 findings. `bun run typecheck` is
+  clean. All mutations were reverted and `git status` is clean.
+
 #### Owner answers (2026-11-15, batch 1)
 
 - Q1 order: **yes** — spike now, code after V1 (`feat/voice-dictation`) and `feat/mobile-voice` merge; a language with no on-device recognizer has no voice mode, never cloud.
