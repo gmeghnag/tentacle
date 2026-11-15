@@ -1355,3 +1355,24 @@ Conversation with code/table/tool/diff, Compose with queue, Approval; light+dark
 - **B5:** the view does not follow the streaming text: the user has to scroll down by hand. Auto-scroll to the bottom while new content arrives, unless the user has scrolled up (then show a "jump to latest" pill).
 - **B6:** code blocks must NOT wrap: keep each line intact and scroll the block horizontally (monospace, horizontal ScrollView), as in the Conversation mockup.
 *— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+## Review — Slices 3–4 (fresh context)
+
+**Verdict: APPROVE (code); no HIGH/MEDIUM finding.** Scope: `git diff main...HEAD` (c9d70aca), Slices 3–4 + B4–B6 only.
+
+**Gate (re-run):** `bun run typecheck` clean (root + mobile + relay) · `bun run lint` 1408 files, 0 issues · touched tests (9 files) 120 pass / 0 fail. Full `bun test` not re-run here.
+
+**Attacks tried:**
+1. *B4 give-back ⇒ double send?* `createdOrGiveBack` (`compose-controller.ts:433`) returns the words if `driver.enqueue` throws; a duplicate would need the item to be in the store as well. `enqueue` (`outbox-driver.ts:406-414`) → `save` → `store.setItems` → `write` (`outbox-store.ts:302`) → `persist`, which catches and returns `false` (`:290-299`): the store never throws, so only `basis()`/`createItem` can throw, and both run before an item exists. Holds. (The doc's "the store write throws" is not a real path; harmless.)
+2. *Own row drawn AND words given back?* The row is drawn at the first streamed event (`session-feed.ts` `drawPrompt`); words come back only when `!streamed` (`session-screen-controller.ts:520-536`). These two cannot both happen. Holds.
+3. *Second handle / §7 one session path:* `composeHandleOf` uses the screen's own `RemoteSession`; `handle()` is gated on `phase === "open" && handle !== null` (`session-screen-controller.ts:278`); no frame is built in the app. Holds.
+4. *B5 stale closure / throttle:* `followRef` + `dragging` refs, `scrollEventThrottle={32}` (`SessionScreen.tsx:134-170, 292-306`). Holds (not checked on a device).
+5. *Approval sheet:* `sheet.answer(optionId)` is unchanged, the guard is a real `disabled`, unknown ids are drawn neutral. Single broker untouched. Holds.
+
+**Mutations (mine; restored from `.tentacle/tmp/mobile-ui-polish/rev34/`, `git status` clean):** dedupe of a re-delivered prompt removed → 3 fail (`session-feed` "not doubled", `session-screen` own/foreign identical rows, send folds); `contentGrew` always scrolls → `follow` "scrolls UP … pill shows" fails. The executor's M1–M8 were not re-run.
+
+**LOW (not gating):** `contentGrew` treats any size change as growth. While scrolled up, a shrink (collapsing a tool output) shows "New messages". While following, expanding a row jumps to the end.
+
+**Executor behaviour:** stopped on the false auto-accept premise instead of building a fake one (good). Every gap that needs a simulator is listed as NOT verified. The commit is titled "exec (deepseek)" but the Execution section is signed claude-opus-5-5, so the attribution should be reconciled. This reviewer is the same model family as that signature: shared blind spots possible. Simulator/e2e (flows 02/07/08/12–15, B5/B6 on a device) remain unverified.
+
+*— claude-opus-5-5, 2026-11-15*
