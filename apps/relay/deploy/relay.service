@@ -45,7 +45,7 @@ Group=relay
 # of `relay-core.ts` apply: 30 dials/min, 16 concurrent phone sockets and 10
 # registrations/min per address, plus 32 registered ids per address
 # (`--max-ids-per-ip`). The owner can raise any of them for a large carrier NAT
-# without a rebuild — the flags are all still there (runbook §9).
+# without a rebuild — the flags are all still there (runbook §10).
 ExecStart=/opt/tentacle-relay/tentacle-relay --host 127.0.0.1 --port 4100 --trust-proxy
 
 # PUSH IS NOT WIRED HERE (docs/feat/mobile-push.md P10, review round 1 finding 1).

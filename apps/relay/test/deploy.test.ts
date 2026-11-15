@@ -426,7 +426,7 @@ describe("R7 docs/ops/relay-deploy.md — the runbook", () => {
     expect(text).not.toMatch(/^systemctl reload caddy$/m);
   });
 
-  test("§9 no longer presents the ONE shared bucket as the current state (H3)", () => {
+  test("§10 no longer presents the ONE shared bucket as the current state (H3)", () => {
     // It was true, and the unit compensated with fleet sizes. Both are gone: the
     // limits are per client now, so a runbook still saying otherwise sends an
     // operator to raise a flag they no longer need.
@@ -450,7 +450,7 @@ describe("R7 docs/ops/relay-deploy.md — the runbook", () => {
   });
 
   test("it says a reload with live streams behind it is not harmless", () => {
-    // §7's rollback said a reload behind a live relay "is harmless". With
+    // The rollback (now §8) said a reload behind a live relay "is harmless". With
     // `stream_close_delay` the harm is merely deferred 5 minutes.
     expect(runbook()).not.toMatch(/reload with a live relay behind it is\s+harmless/i);
   });
@@ -468,7 +468,7 @@ describe("R7 docs/ops/relay-deploy.md — the runbook", () => {
 
   test("it does not promise a Caddy reload is a no-op for live sessions", () => {
     // The same false claim the site block made, in the two places an operator
-    // acts on it: §4 ("load-bearing") and §9 ("what only a deploy proves").
+    // acts on it: §4 ("load-bearing") and §10 ("what only a deploy proves").
     const text = runbook();
     expect(text).not.toMatch(/reload not cutting live streams/i);
     expect(text).not.toMatch(/before the delay can ever fire/i);
@@ -607,10 +607,10 @@ describe("P10 relay.service — push is a DROP-IN, so the base unit always boots
 
   test("the drop-in's ExecStart is the base unit's, plus exactly the four flags", () => {
     // A drop-in has to REPEAT the whole command line (`ExecStart=` empty resets
-    // the list, systemd.service(5)), so the limits move with it and could drift
-    // apart from the base unit. Strip the four `--apns-*` pairs and the two must
-    // be identical — otherwise installing push silently re-sizes the fleet's
-    // limits back to the per-client defaults.
+    // the list, systemd.service(5)), so every base flag moves with it and could
+    // drift apart from the base unit. Strip the four `--apns-*` pairs and the two
+    // must be identical — otherwise installing push silently drops (say)
+    // `--trust-proxy` and every client shares one per-IP bucket again.
     const base = execStart(unit());
     const withPush = execStart(dropIn());
     const stripped: string[] = [];
