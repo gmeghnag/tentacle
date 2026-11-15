@@ -839,6 +839,10 @@ function SessionRoute({
         archived,
         title,
         project: RECORDS.get(computerId)?.name ?? "",
+        // This phone's own label, for an ask's "also asked on" note never naming
+        // the device it is shown on (docs/feat/session-auto-accept.md D7): the
+        // name this phone paired under. Absent on a record an older build wrote.
+        phoneName: () => RECORDS.get(computerId)?.thisDeviceName,
         controller: RUNTIMES.controller(link.client),
         broker: link.permissions,
         now: () => Date.now(),

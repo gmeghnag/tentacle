@@ -35,16 +35,30 @@ describe("hopShownCwd (D4)", () => {
 });
 
 describe("hopMovedNotice", () => {
-  test("no note: the plain moved line", () => {
+  test("no note: the moved line, and the mode it is in (OD5: it survives)", () => {
+    // docs/feat/session-hop-ux OD5/OD6: the notice states the mode (it is NOT
+    // turned off any more) and whether the session continues by itself.
     expect(hopMovedNotice("docker:box", false)).toBe(
-      "_Moved to docker:box — send a message to continue._",
+      "_Moved to docker:box — send a message to continue (auto-accept off)._",
+    );
+    expect(hopMovedNotice("docker:box", true)).toBe(
+      "_Moved to docker:box — send a message to continue (auto-accept on)._",
     );
   });
 
   test("a note rides the same line, escaped", () => {
     expect(hopMovedNotice("docker:box", true, "the old session did not close")).toBe(
-      "_Moved to docker:box — the old session did not close — auto-accept is off; send a message to continue._",
+      "_Moved to docker:box — the old session did not close — send a message to continue (auto-accept on)._",
     );
     expect(hopMovedNotice("local", false, "kept: tentacle rm my_box")).toContain("my\\_box");
+  });
+
+  test("a wake says `continuing`, and an auto-accepted move says so (OD4/OD6)", () => {
+    expect(hopMovedNotice("docker:box", true, undefined, true)).toBe(
+      "_Moved to docker:box — continuing (auto-accept on)._",
+    );
+    expect(hopMovedNotice("docker:box", false, undefined, false, true)).toBe(
+      "_Moved to docker:box (auto-accepted) — send a message to continue (auto-accept off)._",
+    );
   });
 });

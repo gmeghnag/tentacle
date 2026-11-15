@@ -11,6 +11,7 @@ import {
   engineFlagProblem,
   hostOptionsFor,
   keptLocation,
+  kubeNamespace,
   setupFailureLine,
 } from "../src/engine-select.ts";
 
@@ -76,6 +77,113 @@ describe("attachCommand / setupFailureLine", () => {
     expect(setupFailureLine("podman", new Error("no Podman socket found"))).toBe(
       "[container] failed: no Podman socket found\n",
     );
+  });
+});
+
+// feat/session-hop-ux OD2: ONE namespace rule for `run`, `attach` and every hop —
+// explicit > TENTACLE_POD_NAMESPACE > (server ? default : the context's) — and its
+// provenance, so a live test can answer "why that namespace".
+describe("kubeNamespace", () => {
+  const kc = (ns?: string) => `apiVersion: v1
+current-context: c
+contexts:
+- name: c
+  context: {cluster: k, user: u${ns ? `, namespace: ${ns}` : ""}}
+clusters:
+- name: k
+  cluster: {server: "https://127.0.0.1:1"}
+users:
+- name: u
+  user: {token: t}
+`;
+  const io = (env: Record<string, string | undefined>, file: string | undefined): EngineHostIO => ({
+    env,
+    platform: "linux",
+    uid: 1000,
+    tmpdir: "/tmp",
+    homeDir: "/home/u",
+    readFile: (path) => (path === "/home/u/.kube/config" ? file : undefined),
+    exists: () => false,
+    listDir: () => [],
+    kubeClient: () => ({}) as PodCluster,
+    dockerClient: () => ({}) as DockerClientLike,
+  });
+
+  test("explicit > env > server ⇒ default > context > default, with its source", () => {
+    // Mutation: drop the env step ⇒ the `env` row resolves to the context's ns.
+    expect(
+      kubeNamespace({ namespace: "n1" }, io({ TENTACLE_POD_NAMESPACE: "n2" }, kc("n3"))),
+    ).toEqual({ namespace: "n1", source: "explicit" });
+    expect(kubeNamespace({}, io({ TENTACLE_POD_NAMESPACE: "n2" }, kc("n3")))).toEqual({
+      namespace: "n2",
+      source: "env",
+    });
+    expect(
+      kubeNamespace(
+        {},
+        io({ TENTACLE_K8S_SERVER: "https://x", TENTACLE_POD_NAMESPACE: "n2" }, kc("n3")),
+      ).namespace,
+    ).toBe("n2");
+    expect(kubeNamespace({}, io({ TENTACLE_K8S_SERVER: "https://x" }, kc("n3")))).toEqual({
+      namespace: "default",
+      source: "server",
+    });
+    expect(kubeNamespace({}, io({}, kc("n3")))).toEqual({
+      namespace: "n3",
+      source: "context",
+      kubeconfig: "/home/u/.kube/config",
+      context: "c",
+    });
+    expect(kubeNamespace({}, io({}, kc()))).toEqual({
+      namespace: "default",
+      source: "default",
+      kubeconfig: "/home/u/.kube/config",
+      context: "c",
+    });
+  });
+
+  test("no current-context (absent, unreadable or none requested) is an error, not a guess", () => {
+    expect(() => kubeNamespace({}, io({}, undefined))).toThrow(/no current-context/);
+    expect(() => kubeNamespace({}, io({}, "not: [a kubeconfig"))).toThrow(/Flow sequence/);
+    expect(() => kubeNamespace({}, io({}, "apiVersion: v1\n"))).toThrow(/no current-context/);
+    // An explicit namespace needs no kubeconfig at all.
+    expect(kubeNamespace({ namespace: "n1" }, io({}, undefined)).namespace).toBe("n1");
+  });
+
+  test("a named context is the one consulted (a kept entry's re-dial)", () => {
+    const named = `apiVersion: v1
+current-context: c
+contexts:
+- name: c
+  context: {cluster: k, user: u, namespace: fromcurrent}
+- name: other
+  context: {cluster: k, user: u, namespace: fromother}
+clusters:
+- name: k
+  cluster: {server: "https://127.0.0.1:1"}
+users:
+- name: u
+  user: {token: t}
+`;
+    expect(kubeNamespace({ kubeContext: "other" }, io({}, named))).toMatchObject({
+      namespace: "fromother",
+      source: "context",
+      context: "other",
+    });
+  });
+
+  test("buildEngineHost resolves through it: the env reaches a hop's `{}` options", () => {
+    // The hop's own call (`hopEngineHost`, `buildEngineHost(engine, {})`) must see
+    // TENTACLE_POD_NAMESPACE — the CLI's own `engineHost` used to be its only reader.
+    // (`TENTACLE_K8S_SERVER` here, so the auth path needs no kubeconfig file: what
+    // this asserts is the NAMESPACE the env decided, which is the hop's gap.)
+    const env = io(
+      { TENTACLE_K8S_SERVER: "https://k:6443", TENTACLE_POD_NAMESPACE: "openshift-etcd" },
+      kc(),
+    );
+    const built = buildEngineHost("kubernetes", {}, env);
+    expect(built.namespace).toBe("openshift-etcd");
+    expect(built.host.where).toBe("namespace openshift-etcd");
   });
 });
 

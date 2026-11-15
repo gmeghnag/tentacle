@@ -10,6 +10,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type AppProps, type SessionController } from "../src/App.tsx";
 import { SLASH_COMMANDS, isSessionMutating } from "../src/commands.ts";
+import { inertSession } from "./session-stub.ts";
 import { BACKGROUND_ROW, type DockTestRow } from "./subagent-row.ts";
 
 const ENTER = "\r";
@@ -28,6 +29,7 @@ function fake(
   const prompts: string[] = [];
   let closes = 0;
   const session = {
+    ...inertSession(),
     async *send(prompt: string, signal?: AbortSignal) {
       prompts.push(prompt);
       if (prompt.startsWith("hang")) {
@@ -359,15 +361,20 @@ describe("S0 command smoke: every built-in command answers", () => {
  */
 const MID_TURN_REFUSED = SLASH_COMMANDS.map((c) => c.name).filter(isSessionMutating);
 
+/** `/clear` is mutating but EXEMPT mid-turn: it resets in place (stop-then-clear). */
+const EXEMPT_MID_TURN = ["/clear"];
+
 describe("S0 command smoke: the session-mutating commands are refused mid-turn", () => {
-  test("the derived mid-turn set is exactly these three (a new member is a decision, not a silent gap)", () => {
-    expect(MID_TURN_REFUSED).toEqual(["/clear", "/close", "/retry"]);
+  test("the derived mid-turn set is exactly these two (a new member is a decision, not a silent gap)", () => {
+    expect(MID_TURN_REFUSED.filter((c) => !EXEMPT_MID_TURN.includes(c))).toEqual([
+      "/close",
+      "/retry",
+    ]);
+    expect(MID_TURN_REFUSED).toContain("/clear");
   });
 
-  for (const cmd of MID_TURN_REFUSED) {
+  for (const cmd of MID_TURN_REFUSED.filter((c) => !EXEMPT_MID_TURN.includes(c))) {
     test(`${cmd} while a turn runs → the refusal, nothing else`, async () => {
-      // No `clear` on this session: `/clear` is the legacy close-and-replace,
-      // which must wait (only an in-place clear is exempt).
       const f = fake();
       const t = await mount(f);
       await t.line("hang");
@@ -380,6 +387,20 @@ describe("S0 command smoke: the session-mutating commands are refused mid-turn",
       t.app.unmount();
     });
   }
+
+  test("/clear while a turn runs → never refused: it stops the turn, then clears", async () => {
+    // docs/feat/remove-in-process.md: `/clear` is one path (an in-place reset), so
+    // the mid-turn exemption is unconditional. Mutation: drop it in `dispatch` →
+    // the refusal appears and the clear never runs.
+    const f = fake({ extra: { clear: () => Promise.resolve({ before: 4, after: 2 }) } });
+    const t = await mount(f);
+    await t.line("hang");
+    await t.line("/clear");
+    await delay(120);
+    expect(t.frame()).not.toContain("Can't run /clear while a turn is running");
+    expect(f.prompts).toEqual(["hang"]);
+    t.app.unmount();
+  });
 
   test("/compact while a turn runs → its own refusal, compact is never called", async () => {
     // `/compact` guards itself (it is NOT in SESSION_MUTATING: the message is

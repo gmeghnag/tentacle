@@ -4,6 +4,7 @@ import { render } from "ink";
 import {
   App,
   type AutoAcceptFeed,
+  type AutoAcceptSharedFeed,
   type HopFeed,
   type NoticeFeed,
   type RunQuit,
@@ -68,8 +69,15 @@ export interface TuiOptions {
   readonly sessions?: SessionDirectory;
   /** A detached run's TUI (`attach <name>`): `/quit` closes the session for all. */
   readonly runQuit?: RunQuit;
-  /** A detached run's TUI: its session's shared auto-accept. */
+  /** The session's auto-accept feed: a detached run's shared file, or the routing feed (docs/feat/session-auto-accept.md D5). */
   readonly autoAccept?: AutoAcceptFeed;
+  /**
+   * The session's shared auto-accept, when the feed routes to one (the worker,
+   * `connect`): a flip from ANOTHER device adds one transcript notice naming
+   * it (docs/feat/session-auto-accept.md D5). Absent → the feed has no remote
+   * flips to report.
+   */
+  readonly autoAcceptShared?: AutoAcceptSharedFeed;
   /** `/move` (docs/feat/session-hop.md D3): present only on a hop-capable origin (D8). */
   readonly hop?: HopFeed;
   /** Where the session is, live (the badge and `daemonInPod` follow a hop). */
@@ -175,6 +183,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         {...(options.sessions ? { sessions: options.sessions } : {})}
         {...(options.runQuit ? { runQuit: options.runQuit } : {})}
         {...(options.autoAccept ? { autoAccept: options.autoAccept } : {})}
+        {...(options.autoAcceptShared ? { autoAcceptShared: options.autoAcceptShared } : {})}
         {...(options.hop ? { hop: options.hop } : {})}
         {...(options.targetFeed ? { targetFeed: options.targetFeed } : {})}
         {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}

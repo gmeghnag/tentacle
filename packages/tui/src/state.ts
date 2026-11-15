@@ -18,6 +18,7 @@ import type {
 } from "@tentacle/core";
 import { describeEmptyTurn, describeRepairs, describeTruncation } from "@tentacle/core";
 import { imageRowText } from "./attach-draft.ts";
+import { HOP_WAKE_ROW } from "./hop-wake.ts";
 import { messagesToItems } from "./resume.ts";
 import { nextToolStatus } from "./tool-phase-view.ts";
 
@@ -344,6 +345,19 @@ export function startContinuation(state: DisplayState, now: number): DisplayStat
     reasoningStartedAt: null,
     turnStartedAt: now,
     lastStopReason: null,
+  };
+}
+
+/**
+ * Begin a HOP'S OWN WAKE turn (docs/feat/session-hop-ux OD6): running, with a dim
+ * `↻ continuing after the move` row instead of a user bubble. A REAL prompt all
+ * the same — unlike `startContinuation` it carries the hop's line, and it is saved
+ * as conversation — so this only decides what the frame shows at the start.
+ */
+export function startHopWake(state: DisplayState, now: number): DisplayState {
+  return {
+    ...startContinuation(state, now),
+    items: append(state.items, { kind: "notice", text: HOP_WAKE_ROW }),
   };
 }
 

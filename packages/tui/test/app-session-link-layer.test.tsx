@@ -31,6 +31,7 @@ import type { BackgroundAgentRow } from "../src/background-view.ts";
 import type { DaemonQueue } from "../src/queued.ts";
 import type { SessionEvent } from "../src/state.ts";
 import type { SessionActivity } from "../src/turn-feed.ts";
+import { inertSession } from "./session-stub.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const strip = (s: string | undefined) =>
@@ -113,6 +114,7 @@ function fake() {
       };
     };
   const ctrl = {
+    ...inertSession(),
     async *send(prompt: string, signal?: AbortSignal) {
       log.sends.push(prompt);
       if (prompt === "hold") {

@@ -87,6 +87,13 @@ export interface DaemonSidecar {
   readonly turn?: PersistedTurn;
   readonly archivedAt?: number;
   readonly head?: number;
+  /**
+   * The session's auto-accept, present ONLY when on (docs/feat/session-auto-accept.md
+   * D3): absent = off, so a file this build writes without it stays readable by
+   * an older one, and a damaged or unknown value never yields ON (the same
+   * fail-closed rule as the laptop's shared-auto-accept file).
+   */
+  readonly autoAccept?: boolean;
 }
 
 /** The length of the prefix `a` and `b` share BY REFERENCE (messages are immutable values). */
@@ -119,6 +126,7 @@ export function sidecarOf(record: DaemonSessionRecord): DaemonSidecar {
     ...(record.turn ? { turn: record.turn } : {}),
     ...(record.archivedAt !== undefined ? { archivedAt: record.archivedAt } : {}),
     ...(record.head !== undefined ? { head: record.head } : {}),
+    ...(record.autoAccept === true ? { autoAccept: true } : {}),
   };
 }
 
@@ -367,6 +375,10 @@ export function parseSidecar(text: string, id: string): Result<DaemonSidecar> {
       ...(value.turn !== undefined ? { turn: value.turn as unknown as PersistedTurn } : {}),
       ...(value.archivedAt !== undefined ? { archivedAt: value.archivedAt } : {}),
       ...(value.head !== undefined ? { head: value.head as number } : {}),
+      // Exactly `true` is on; anything else is off (a damaged file never turns
+      // auto-accept ON). Never a refusal: the conversation is intact, and the
+      // value is one switch nobody depends on to be preserved.
+      ...(value.autoAccept === true ? { autoAccept: true } : {}),
     },
   };
 }
@@ -461,6 +473,7 @@ export function rebuild(
       ...(sidecar.turn ? { turn: sidecar.turn } : {}),
       ...(sidecar.archivedAt !== undefined ? { archivedAt: sidecar.archivedAt } : {}),
       ...(head !== undefined ? { head } : {}),
+      ...(sidecar.autoAccept === true ? { autoAccept: true } : {}),
       logged,
       logHead: sidecar.logHead,
       paired: through !== null,

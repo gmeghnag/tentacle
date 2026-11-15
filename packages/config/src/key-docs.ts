@@ -739,7 +739,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
   },
   "sessionHop.tool": {
     summary:
-      "Offer the agent `move_session`: it may propose moving this session to another target.",
+      "Offer the agent `move_session` (OFF by default): it may propose moving this session to another target.",
     kind: "leaf",
     type: "boolean",
     scope: "both",
@@ -748,10 +748,10 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     resolved: (c) => c.sessionHop.tool,
     sourceKey: "sessionHopTool",
     env: "TENTACLE_SESSION_HOP_TOOL",
-    sample: "off",
+    sample: "on",
     details:
-      "It only PROPOSES: the tool has no daemon-side effect, and nothing moves until you say yes to the laptop's own prompt (asked when the turn ends, never answered by auto-accept, never remembered). Offered only where a hop exists — the local worker and a pod daemon — and never to a sub-agent.",
-    example: "false",
+      "OFF unless you turn it on: with it off the only way to move is a `/move` you type. It only PROPOSES — the tool has no daemon-side effect, and nothing moves until the laptop's own prompt is answered (asked when the turn ends, never remembered). With `autoAccept` on, a model-proposed move is answered like any other tool, logged allow-once — EXCEPT a move toward local proposed from a pod or container, which always asks. Offered only where a hop exists — the local worker and a pod daemon — and never to a sub-agent.",
+    example: "true",
   },
   workloadShell: {
     summary: "The agent may open a stateful `sh` on another workload (`workload_shell`).",
@@ -898,6 +898,35 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     details:
       "`wss://`, or `ws://` to a loopback host only (dev and tests) — the daemon's relay secret travels on the socket, so anything else refuses to start with the reason. The hosted relay is the default: a self-hosted one (`apps/relay`) is named here or with `serve --relay <url>`.",
     example: '"wss://relay.example"',
+  },
+  push: {
+    summary: "Push notifications for the paired phones, through the mobile relay.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "push.enabled": {
+    summary: "Whether this `serve` pushes notifications to its paired phones.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    // `serve` applies the default, as it does the relay's (`relayChoice`).
+    defaultText: "`true`",
+    details:
+      "On, a `serve` with paired phones notifies them through the mobile relay: a permission request nobody answers within `push.graceSeconds` (Time Sensitive), and a turn that ends while no client is attached. The content is sealed end-to-end to each phone, so Apple and the relay carry an opaque blob. Off, no registration is accepted and `device/push_register` answers `off`. It needs the relay: `--no-relay` / `relay.enabled: false` mean no push either (`relay-off`). A LAPTOP-ONLY setting: never carried to a pod.",
+    example: "false",
+  },
+  "push.graceSeconds": {
+    summary: "How long an unanswered permission request waits before a phone is pushed.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    defaultText: "`30`",
+    details:
+      "0 pushes at once; the maximum is 3600 (one hour). At the desk you answer and the phone stays silent: the timer is cancelled the moment the ask settles. Expressed as whole seconds; `serve --push-grace <seconds>` beats this key. Read by the pure rules module, so it is table-tested (`docs/feat/mobile-push.md` Design 1).",
+    example: "60",
   },
   mount: {
     summary: "What a docker/podman run hides from the container's workspace mount.",

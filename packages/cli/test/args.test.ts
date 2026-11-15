@@ -57,6 +57,34 @@ describe("parseArgs: run/attach accept -n/--namespace anywhere", () => {
 });
 
 describe("parseArgs: nothing is silently ignored", () => {
+  test("the removed --in-process / --no-worker are unknown options now", () => {
+    // docs/feat/remove-in-process.md T5. There is ONE local session path (the
+    // worker over RPC, AGENTS §7), so both opt-outs are gone. Mutation: put
+    // either bool back in `ARGS.tui` → the flag parses and this row fails.
+    expect(error(["-i", "--in-process"], ARGS.tui)).toBe("unknown option --in-process");
+    expect(error(["--no-worker"], ARGS.tui)).toBe("unknown option --no-worker");
+    // Pre-public: no "was removed" shim, just the parser's own refusal.
+    expect(error(["--in-process"], ARGS.tui)).toBe("unknown option --in-process");
+  });
+
+  test("neither the help nor the usage line offers a way off the worker", async () => {
+    // `tentacle` with no args and no TTY prints HELP (the one-shot path, exit 1).
+    const out: string[] = [];
+    const code = await main(["bun", "tentacle"], {
+      err: (t) => out.push(t),
+      out: () => {},
+      terminal: { stdin: false, stdout: false },
+    });
+    expect(code).toBe(1);
+    const help = out.join("");
+    expect(help).toContain("tentacle --plain");
+    expect(help).not.toContain("in-process");
+    expect(help).not.toContain("--no-worker");
+    const { USAGE } = await import("../src/flags.ts");
+    expect(USAGE.tui).not.toContain("in-process");
+    expect(USAGE.tui).not.toContain("no-worker");
+  });
+
   test("an unknown long or short option is an error naming it", () => {
     // Mutation: store unknown flags (the old parseFlags) → the typo is ignored.
     expect(error(["--image", "x", "--namspace", "dev"], ARGS.run)).toBe(

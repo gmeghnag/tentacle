@@ -72,7 +72,7 @@ working folder).
 
 | How you run tentacle | Where the agent loop runs | Which hooks apply |
 |---|---|---|
-| `tentacle` (TUI, default) | A local worker thread on your machine (or the in-process fallback) | Your config + packages + trusted project hooks |
+| `tentacle` (TUI, default) | A local worker thread on your machine | Your config + packages + trusted project hooks |
 | `tentacle --plain`, one-shot `tentacle "prompt"` | The tentacle process itself | Your config + packages. **Project hooks never run** (nobody can be asked) |
 | `tentacle serve` (+ `connect`) | The daemon host | The **daemon's** config + packages, and project hooks if the connecting client trusts them |
 | `tentacle run` / `attach` (pod) | The daemon **inside the pod** | The **pod's own** config, plus the pod workspace's project hooks if you trust them. Your laptop's hooks and packages do **not** run there |
@@ -829,9 +829,9 @@ replaces the base map.
   top-level `.git` is excluded from the count).
 - **Names:** `^[a-z0-9][a-z0-9-]{0,31}$` for packages and their servers.
 - **Tool-name length:** some providers reject tool names over 64 characters.
-  tentacle warns about such MCP tools only in one-shot mode and in the
-  `--in-process` / fallback TUI. `--plain` connects no MCP servers, so it
-  never warns.
+  tentacle warns about such MCP tools only in one-shot mode; the TUI's worker
+  connects MCP daemon-side, where the warning is not raised. `--plain` connects
+  no MCP servers, so it never warns.
 - **When changes apply:** at the next session start.
 - **Not in pods (v1):** packages are **not** loaded in `run` / `attach`
   sessions. The pod uses its own config, and tentacle prints
@@ -1266,8 +1266,7 @@ These are recorded as debt or out of scope in the task docs
 - **Packages are not loaded in pods (v1).** Sources are a path or git only.
   npm is "later" (D11).
 - **The 64-character tool-name warning** for MCP tools is shown only in
-  one-shot mode and the `--in-process` / fallback TUI, not in the default
-  (worker) TUI.
+  one-shot mode, which is the only place the laptop connects MCP servers itself.
 - **`--plain` and one-shot approve every prompt**, so a hook `ask` has no
   effect there. Project hooks never run there.
 - **Unverified on a live cluster:** hook stdin and the project-trust flow in a

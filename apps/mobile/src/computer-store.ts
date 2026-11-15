@@ -47,6 +47,15 @@ export interface PairedComputer {
   readonly addresses: readonly string[];
   /** The name this phone gave the computer ("revoke <deviceName>" names it). */
   readonly deviceName: string;
+  /**
+   * The name this PHONE paired under — what the computer lists it as, and so the
+   * only label that matches on both ends (`ClientInfo.host`, docs/feat/
+   * session-auto-accept.md D7: an ask's "also asked on" and a flip's `by`).
+   * OPTIONAL because a record an older build wrote has none, and a record must
+   * stay readable across an update (F-K3): absent → this phone sends no label,
+   * and only the sibling name on an ask is lost.
+   */
+  readonly thisDeviceName?: string;
   readonly pairedAt: number;
 }
 
@@ -146,12 +155,16 @@ function storedComputerOf(id: string, item: unknown): StoredComputer | undefined
   ) {
     return undefined;
   }
+  // Present only from the build that started naming this phone: a record an
+  // older one wrote has none and still loads (F-K3).
+  const thisDeviceName = record.thisDeviceName;
   return {
     id: record.id,
     name: record.name,
     computerKey: record.computerKey,
     addresses: record.addresses as readonly string[],
     deviceName: record.deviceName,
+    ...(typeof thisDeviceName === "string" ? { thisDeviceName } : {}),
     pairedAt: record.pairedAt,
     deviceKey: record.deviceKey,
   };
@@ -165,6 +178,7 @@ function publicOf(computer: StoredComputer): PairedComputer {
     computerKey: computer.computerKey,
     addresses: computer.addresses,
     deviceName: computer.deviceName,
+    ...(computer.thisDeviceName === undefined ? {} : { thisDeviceName: computer.thisDeviceName }),
     pairedAt: computer.pairedAt,
   };
 }
@@ -256,6 +270,12 @@ export function createComputerStore(deps: ComputerStoreDeps): ComputerStore {
           computerKey: computer.computerKey,
           addresses: computer.addresses,
           deviceName: computer.deviceName,
+          // This phone's own label (docs/feat/session-auto-accept.md D7), kept
+          // only when pairing named one: an older record has none, and absent
+          // stays absent (never an invented `""`).
+          ...(computer.thisDeviceName === undefined
+            ? {}
+            : { thisDeviceName: computer.thisDeviceName }),
           pairedAt: computer.pairedAt,
           deviceKey,
         };

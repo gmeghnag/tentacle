@@ -14,6 +14,7 @@ import type { LoadResult } from "@tentacle/agent";
 import type { JobController, PermissionBroker } from "@tentacle/core";
 import type { McpServerStatus } from "@tentacle/protocol";
 import type { HopSpec, LinkStatusView, SessionController, TargetBadge } from "@tentacle/tui";
+import type { KubeNamespace } from "./engine-select.ts";
 import { type HopPlace, placeText } from "./hop-plan.ts";
 import type { LocalRuntime } from "./local-runtime.ts";
 import { type HopBuild, type HopBuilt, type HopOutcome, hopSession } from "./session-hop.ts";
@@ -50,7 +51,7 @@ export interface HopRuntimeDeps {
     spec: HopSpec,
     shared: HopShared,
     sessionId: string,
-    opts: { readonly gateAnswered?: true },
+    opts: { readonly gateAnswered?: true; readonly namespace?: KubeNamespace },
   ) => Promise<HopBuild>;
   /** The laptop's record of a uid (`LogSessionStore.load`): the seed (D1 step 3/4b). */
   readonly load: (uid: string) => Promise<LoadResult>;
@@ -84,7 +85,7 @@ export interface HopRuntime {
   hop(
     spec: HopSpec,
     sessionId: string | null,
-    opts?: { readonly gateAnswered?: true },
+    opts?: { readonly gateAnswered?: true; readonly namespace?: KubeNamespace },
   ): Promise<HopOutcome>;
   /** Dispose the current runtime: after the TUI has unmounted. */
   dispose(): Promise<void>;
@@ -193,7 +194,12 @@ export function createHopRuntime(deps: HopRuntimeDeps): HopRuntime {
       const old = current;
       const outcome = await hopSession(
         old,
-        { spec, sessionId, ...(opts?.gateAnswered ? { gateAnswered: true as const } : {}) },
+        {
+          spec,
+          sessionId,
+          ...(opts?.gateAnswered ? { gateAnswered: true as const } : {}),
+          ...(opts?.namespace === undefined ? {} : { namespace: opts.namespace }),
+        },
         {
           build: (target, id, buildOpts) => deps.build(target, deps.shared, id, buildOpts),
           load: deps.load,

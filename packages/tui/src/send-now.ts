@@ -33,32 +33,34 @@ export type SendNowPlan =
  * What the chord does. `none`: no queued row (D2), no turn nor compaction of
  * ours, or a send-now still pending. `atomic`: `session/send_now`, against
  * the running turn or this TUI's own `/compact` (docs/feat/send-now-d.md).
- * `fallback`: stop the turn, then send the texts as a prompt — the
- * controller has no `sendNow` (the in-process session) or the daemon
- * answered `MethodNotFound` once. `wait`: the same during a compaction —
+ * `fallback`: stop the turn, then send the texts as a prompt — the daemon
+ * answered `MethodNotFound` once (an older daemon; `latchedUnsupported`).
+ * `wait`: the same during a compaction —
  * the TUI has no way to cancel it, so the rows go when it ends (D3c).
+ *
+ * There is no `canSendNow` input: every `SessionController` has `sendNow`
+ * (docs/feat/remove-in-process.md), so a missing member is not a cause.
  */
 export function planSendNow(input: {
   readonly hasQueued: boolean;
   readonly running: boolean;
   readonly compacting: boolean;
   readonly pending: boolean;
-  readonly canSendNow: boolean;
   readonly latchedUnsupported: boolean;
 }): SendNowPlan {
   if (!input.hasQueued || input.pending || !(input.running || input.compacting)) {
     return { kind: "none" };
   }
-  const atomic = input.canSendNow && !input.latchedUnsupported;
+  const atomic = !input.latchedUnsupported;
   if (input.running) {
     return atomic ? { kind: "atomic", target: "turn" } : { kind: "fallback" };
   }
   return atomic ? { kind: "atomic", target: "compaction" } : { kind: "wait" };
 }
 
-/** The notice when the chord cannot cancel a compaction (`wait`); `who` cannot. */
-export function compactionWaitNotice(who: "daemon" | "session"): string {
-  return `_this ${who} can't cancel a compaction to send now — your queued messages go out when it ends_`;
+/** The notice when the chord cannot cancel a compaction (`wait`). */
+export function compactionWaitNotice(): string {
+  return "_this daemon can't cancel a compaction to send now — your queued messages go out when it ends_";
 }
 
 /**
@@ -267,6 +269,6 @@ export const withRestored = (draft: string, text: string): string =>
   draft === "" ? text : `${draft}\n\n${text}`;
 
 /** The one-time notice of the fallback; `who` cannot send-now atomically. */
-export function fallbackNotice(who: "daemon" | "session"): string {
-  return `_this ${who} can't send-now atomically — stopping the turn, then sending_`;
+export function fallbackNotice(): string {
+  return "_this daemon can't send-now atomically — stopping the turn, then sending_";
 }

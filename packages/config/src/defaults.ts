@@ -53,8 +53,13 @@ export const DEFAULT_CONTEXT_STEP_PERCENT = 1;
 /** The model may renew its own context with `context_reset` (docs/feat/context-reset-refresh.md). */
 export const DEFAULT_CONTEXT_RESET_ENABLED = true;
 
-/** `sessionHop.tool`: the agent may PROPOSE moving its session (docs/feat/session-hop.md D9). */
-export const DEFAULT_SESSION_HOP_TOOL = true;
+/**
+ * `sessionHop.tool`: the agent may PROPOSE moving its session (docs/feat/session-hop.md
+ * D9). OFF by default (session-hop-ux OD8, owner 2026-11-15, reversing that doc's
+ * "default on"): a fresh install never offers the tool, and the only way to move is
+ * a `/move` you type. Opt in with `sessionHop.tool: true`.
+ */
+export const DEFAULT_SESSION_HOP_TOOL = false;
 /**
  * `workloadShell.tool`: offer the agent `workload_shell` — a stateful `sh` on
  * ANOTHER workload, reached with the laptop's own engine credentials
@@ -234,6 +239,14 @@ export const DEFAULT_CONFIG_JSONC = `{
   // instance. "url" must be wss:// — or ws:// to a loopback host (dev/tests),
   // because the daemon's relay secret travels on that socket.
   // "relay": { "enabled": true, "url": "wss://relay.tentacle.so" },
+
+  // Push notifications (docs/feat/mobile-push.md): a \`serve\` pushes to its paired
+  // phones when a permission request has waited \`graceSeconds\` unanswered (0 = at
+  // once, max 3600) or a turn ends while nobody is watching. Apple and the relay
+  // carry only an opaque, sealed blob. "enabled": false turns it off; it needs
+  // the relay, so \`--no-relay\` means no push either. \`serve --push-grace <s>\`
+  // overrides graceSeconds.
+  // "push": { "enabled": true, "graceSeconds": 30 },
 
   // \`tentacle run --engine docker|podman\` mounts the current folder into the
   // container; these paths (dirs or files, "~/…" or absolute) are hidden when

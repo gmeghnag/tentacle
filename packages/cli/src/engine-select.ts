@@ -34,9 +34,12 @@ import {
 import {
   KubeClient,
   type KubeClientOptions,
+  contextNamespace,
   currentKubeContext,
   loadKubeClientOptions,
+  parseKubeconfig,
 } from "@tentacle/k8s";
+import type { HopNamespace } from "@tentacle/tui";
 // Re-exported so a caller that already loads THIS module lazily (the
 // `workload_shell` backend) can tell a refused exec upgrade apart without a
 // static `@tentacle/k8s` import of its own — that import is what dragged the
@@ -491,6 +494,76 @@ function nodeCaseFs(): CaseFs {
 }
 
 /**
+ * Where a k8s namespace came from: the one fact a hop's live row and prompt
+ * repeat, so a live test can answer "why THAT namespace" from the transcript
+ * (docs/feat/session-hop-ux design 1, OD3).
+ */
+/**
+ * THE namespace rule's answer, with its provenance (OD3). The shape lives in
+ * `@tentacle/tui` (`HopNamespace`) because it rides the hop's TUI-facing
+ * plumbing too (`HopProposalView` → `HopFeed.start` → the build); this is the
+ * same type under the cli's own name, never a second copy.
+ */
+export type KubeNamespace = HopNamespace;
+
+/** The kubeconfig path `@tentacle/k8s` would read (KUBECONFIG's first entry, else `~/.kube/config`). */
+function kubeconfigPath(env: EngineHostIO["env"], homeDir: string): string {
+  const fromEnv = env.KUBECONFIG;
+  return fromEnv !== undefined && fromEnv.length > 0
+    ? (fromEnv.split(":")[0] as string)
+    : join(homeDir, ".kube", "config");
+}
+
+/**
+ * THE namespace rule for kubernetes (docs/feat/session-hop-ux OD2): explicit >
+ * `TENTACLE_POD_NAMESPACE` > (`TENTACLE_K8S_SERVER` ? `"default"` : the context's,
+ * else `"default"`). One function, so `run`, `attach` and every hop agree — the
+ * hop's `buildEngineHost(engine, {})` used to ignore the env entirely, which is
+ * the difference the OpenShift live test could not see.
+ *
+ * `"server"` answers `"default"` because a server override has no kubeconfig
+ * context to take a namespace from (the existing behaviour, named). Resolved per
+ * call: nothing is cached (the kubeconfig is re-read, as `loadKubeClientOptions`
+ * always does), so `oc project` between two hops is visible — and the trace says
+ * which fact decided it, which is what makes that visible in the transcript.
+ */
+export function kubeNamespace(
+  options: Pick<EngineHostOptions, "namespace" | "kubeContext" | "server">,
+  io: EngineHostIO = defaultEngineHostIO(),
+): KubeNamespace {
+  const { namespace, kubeContext } = options;
+  if (namespace !== undefined && namespace !== "") {
+    return { namespace, source: "explicit" };
+  }
+  const env = io.env.TENTACLE_POD_NAMESPACE;
+  if (env !== undefined && env !== "") {
+    return { namespace: env, source: "env" };
+  }
+  const server =
+    options.server ?? (kubeContext === undefined ? io.env.TENTACLE_K8S_SERVER : undefined);
+  if (server !== undefined) {
+    return { namespace: "default", source: "server" };
+  }
+  const path = kubeconfigPath(io.env, io.homeDir);
+  const text = io.readFile(path);
+  if (text === undefined) {
+    // The message `contextNamespace` itself throws, plus the path: a hop and
+    // `run` must say the same thing about a kubeconfig nobody can read, and the
+    // path is the fact a live test needs (failure mode 1).
+    throw new Error(
+      `kubeconfig has no current-context and none was requested — no kubeconfig at ${path}`,
+    );
+  }
+  const named = contextNamespace(parseKubeconfig(text), kubeContext);
+  return {
+    namespace: named.namespace,
+    source: named.source,
+    kubeconfig: path,
+    context: named.context,
+  };
+}
+
+/**
  * Build the `EngineHost` for `kind`, or throw (the caller prints
  * `setupFailureLine`). kubernetes: kubeconfig (current context), or
  * `TENTACLE_K8S_SERVER`/`_TOKEN` as an explicit override. docker: the docker
@@ -502,16 +575,19 @@ export function buildEngineHost(
   io: EngineHostIO = defaultEngineHostIO(),
 ): BuiltEngineHost {
   if (kind === "kubernetes") {
-    const { namespace, kubeContext } = options;
+    const { kubeContext } = options;
     // A kept entry's server wins over today's env: it re-dials where it was made.
     const server =
       options.server ?? (kubeContext === undefined ? io.env.TENTACLE_K8S_SERVER : undefined);
+    // THE rule (OD2), applied before anything is dialled: `options.namespace`
+    // already holds a kept entry's place, so the env never overrides THAT.
+    const namespace = kubeNamespace(options, io).namespace;
     let auth: KubeClientOptions;
     if (server) {
       const token = io.env.TENTACLE_K8S_TOKEN;
       auth = {
         server,
-        namespace: namespace ?? "default",
+        namespace,
         ...(token ? { token } : {}),
       } as KubeClientOptions;
     } else {

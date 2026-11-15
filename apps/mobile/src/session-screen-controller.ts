@@ -56,6 +56,25 @@ export interface SendableHandle extends SessionHandle {
     signal?: AbortSignal,
     opts?: { readonly turnId?: string; readonly attachments?: readonly AttachmentRef[] },
   ): AsyncIterable<SessionEvent>;
+  /**
+   * The session's own-vs-foreign turn test (`RemoteSession.autoAcceptsTurn`, the
+   * WIDEST the session offers — own turns, and on a trusted `serve` its own wake
+   * turns). Absent on a handle that decides nothing: see `autoAcceptsTurnOf`.
+   */
+  readonly autoAcceptsTurn?: (turnId: string) => boolean;
+}
+
+/**
+ * A handle's own-turn test, when it has one. The screen hands it to the sheet
+ * LIVE (the handle only exists after the attach), so a handle without one keeps
+ * the sheet's stricter rule: a NAMED turn is the app's, an ask with no turn id
+ * never is (`permission-sheet.ts`; docs/feat/session-auto-accept.md D4).
+ */
+export function autoAcceptsTurnOf(
+  handle: SendableHandle | null,
+): ((turnId: string) => boolean) | undefined {
+  const test = handle?.autoAcceptsTurn;
+  return typeof test === "function" ? (turnId: string) => test.call(handle, turnId) : undefined;
 }
 
 export interface SessionScreenState {
@@ -125,6 +144,12 @@ export interface SessionScreenDeps {
   /** Injectable for tests: the sheet's clock/arm window and the thumbnail port. */
   readonly sheet?: (deps: { readonly now: () => number }) => PermissionSheet;
   readonly thumbnails?: ThumbnailSource;
+  /**
+   * This phone's own device name (the one it paired under), for ask's "also
+   * asked on" note never naming the device it is shown on
+   * (docs/feat/session-auto-accept.md D7). Absent → nothing is dropped.
+   */
+  readonly phoneName?: () => string | undefined;
   /** Told whenever the state changes (a React setState in the screen). */
   readonly onChange?: (state: SessionScreenState) => void;
   /** The compose half (13d). Absent: a screen with no queue and no photos (12c's tests). */
@@ -215,6 +240,19 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       ? createPermissionSheet({
           now: deps.now,
           onChange: () => emit(),
+          // The session's shared auto-accept (docs/feat/session-auto-accept.md
+          // D6): read through a function, because the handle (and its link) only
+          // exists after the attach — the sheet is built first.
+          autoAccept: () => handle?.autoAccept,
+          // The own-turn test that goes with it (the same one a terminal feeds
+          // `autoApproves`), read LIVE: the handle does not exist yet, so this
+          // must not be snapshotted here (`undefined` would silently mean "only
+          // a named turn"). A handle that offers none keeps that stricter rule.
+          autoAcceptsTurn: (turnId: string) => autoAcceptsTurnOf(handle)?.(turnId) === true,
+          // This phone's own label, so an ask's "also asked on" never names the
+          // device it is shown on (D7). The name the person gave this phone at
+          // pairing — the same one the computer lists it under.
+          ownHost: () => deps.phoneName?.(),
           // The age guard's release is a clock event: it re-renders through the
           // same `onChange` every other change uses (never a screen-side timer).
           schedule: (fn, ms) => {

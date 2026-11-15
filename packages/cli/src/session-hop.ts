@@ -17,7 +17,9 @@
  */
 import type { LoadResult, SessionRecord } from "@tentacle/agent";
 import type { HopSpec } from "@tentacle/tui";
+import type { KubeNamespace } from "./engine-select.ts";
 import { type HopPlace, ownUidVerdict, placeText } from "./hop-plan.ts";
+import type { HopFolderFate } from "./hop-turn.ts";
 import type { LocalRuntime, PersistingController } from "./local-runtime.ts";
 
 /** How long the commit lets the old runtime close before it gives up (D1 step 5). */
@@ -33,6 +35,14 @@ export interface HopBuilt {
   readonly runtime: LocalRuntime;
   /** The badge's facts after the hop (`local` has no badge: D3). */
   readonly place: HopPlace;
+  /**
+   * Whether the laptop's folder is visible in the new place (docs/feat/session-hop-ux
+   * OD6): `shared` (a container built WITH the mount), `not shared` (a pod, or an
+   * existing workload nobody mounted for), `local` (it IS the laptop's). The one
+   * fact the wake-up message could not otherwise state, since it comes from the
+   * container build's plan (`plan.kind === "mount"`), which is not on `HopPlace`.
+   */
+  readonly folder: HopFolderFate;
   /** The daemon runs in a pod: spilled output is "saved in the pod". */
   readonly daemonInPod: boolean;
   /**
@@ -47,6 +57,13 @@ export interface HopBuilt {
    * one notice, not a second failure of the hop.
    */
   readonly rollback: () => Promise<void>;
+  /**
+   * OD3: the k8s namespace's PROVENANCE (`namespace ns (from context; …)`) when
+   * the build resolved one. It rides the outcome line because under auto-accept
+   * NO prompt is shown and a typed `/move` never asks — the transcript is then
+   * the only place the owner can read why that namespace was dialled.
+   */
+  readonly trace?: string;
 }
 
 export type HopBuild =
@@ -67,6 +84,13 @@ export interface HopRequest {
    * (H5 review finding 2). A typed `/move` never sets it.
    */
   readonly gateAnswered?: true;
+  /**
+   * OD3: the PROVENANCE of the namespace the spec was PINNED with (a proposal's
+   * turn-end resolution). It rides the request so the build states WHY, instead
+   * of re-resolving the value the pin already wrote — a re-resolution always
+   * answers `explicit`, which hid the real source (fix round 2, finding 1).
+   */
+  readonly namespace?: KubeNamespace;
 }
 
 export interface HopDeps {
@@ -79,7 +103,7 @@ export interface HopDeps {
   readonly build: (
     spec: HopSpec,
     sessionId: string,
-    opts: { readonly gateAnswered?: true },
+    opts: { readonly gateAnswered?: true; readonly namespace?: KubeNamespace },
   ) => Promise<HopBuild>;
   /** The laptop record of a uid — the seed (`LogSessionStore.load`). */
   readonly load: (uid: string) => Promise<LoadResult>;
@@ -163,6 +187,7 @@ export async function hopSession(
   deps.status?.(`moving to ${targetText(spec)} — preparing the target`);
   const built = await deps.build(spec, sessionId, {
     ...(request.gateAnswered === true ? { gateAnswered: true as const } : {}),
+    ...(request.namespace === undefined ? {} : { namespace: request.namespace }),
   });
   if (built.kind === "failed") {
     return { kind: "failed", notice: built.notice };
@@ -275,7 +300,11 @@ export async function hopSession(
     notes.push(errorText(error, "the old place could not be tidied"));
   }
   const notice = [`moved to ${placeText(target.place)}`, ...notes].join(" — ");
-  const note = notes.join(" — ");
+  // OD3: the provenance rides the outcome too (a hop shows no prompt when
+  // auto-accept answered it, and a typed `/move` never shows one at all), so a
+  // live test reads "why that namespace" from the line it already keeps.
+  const trace = target.trace === undefined ? [] : [target.trace];
+  const note = [...notes, ...trace].join(" — ");
   return { kind: "moved", built: target, controller, notice, ...(note === "" ? {} : { note }) };
 }
 

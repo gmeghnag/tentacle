@@ -58,11 +58,10 @@ export function dispatchCommand(ctx: Ctx, raw: string, again = false): void {
   }
   // Guard turn-starting / session-swapping commands while a turn runs: they
   // would corrupt the session (concurrent send) or cancel-handle state.
-  // `/clear` on a session that can `clear` is exempt: it resets in place (it
-  // stops an own turn first, and the daemon refuses another device's); only the
-  // legacy close-and-replace would swap the session under a turn.
-  const clearsInPlace = cmd === "/clear" && typeof ctx.sessionRef.current?.clear === "function";
-  if (cmd && isSessionMutating(cmd) && ctx.stateRef.current.running && !clearsInPlace) {
+  // `/clear` is exempt: it resets in place (it stops an own turn first, and the
+  // daemon refuses another device's). No branch on a session that cannot: every
+  // `SessionController` has `clear` (docs/feat/remove-in-process.md).
+  if (cmd && isSessionMutating(cmd) && ctx.stateRef.current.running && cmd !== "/clear") {
     ctx.pushNotice(`_Can't run ${cmd} while a turn is running — stop it first (esc)._`);
     return;
   }

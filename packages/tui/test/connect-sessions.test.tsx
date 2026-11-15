@@ -4,6 +4,7 @@ import { App, type SessionController, type SessionDirectory } from "../src/App.t
 import type { SessionsView } from "../src/sessions-panel.ts";
 import type { SessionEvent } from "../src/state.ts";
 import type { SessionActivity } from "../src/turn-feed.ts";
+import { inertSession } from "./session-stub.ts";
 
 // docs/feat/connect-sessions.md, TUI side: quit detaches on `connect`,
 // `/sessions` switches through ONE swap path, `/close` ends and quits, `/clear`
@@ -39,6 +40,7 @@ function fake(
     journal.push(`${name}.${what}`);
   };
   const ctrl: SessionController = {
+    ...inertSession(),
     sessionId: name,
     async *send(prompt, signal) {
       note(`send:${prompt}`);
@@ -54,6 +56,10 @@ function fake(
     },
     close() {
       note("close");
+    },
+    clear() {
+      note("clear");
+      return Promise.resolve({ before: 2, after: 0 });
     },
     detach() {
       note("detach");
@@ -343,33 +349,25 @@ describe("/close and /clear", () => {
     app.unmount();
   });
 
-  test("(g) QN1: /clear on connect still closes (close + new), never detaches; refused while another device's turn runs", async () => {
+  test("(g) QN1: /clear on connect RESETS in place — no close, no second session, never a detach", async () => {
+    // docs/feat/remove-in-process.md: `/clear` is ONE path (`session/clear`) for
+    // every session, `connect`'s included; the close + new-session branch existed
+    // only for a session that had no `clear`. Mutation: restore that branch →
+    // `A.close` and a fresh `send` on N.
     const journal: string[] = [];
     const a = fake("A", journal);
     const n = fake("N", journal);
-    const { app } = await mount([a, n], { detachOnQuit: true });
-    let wake: () => void = () => {};
-    const events: AsyncIterable<SessionEvent> = {
-      async *[Symbol.asyncIterator]() {
-        yield { type: "user_message", text: "theirs" } as SessionEvent;
-        await new Promise<void>((r) => {
-          wake = r;
-        });
-        yield { type: "turn_end", reason: "end_turn" } as SessionEvent;
-      },
-    };
-    a.raise({ kind: "turn", turnId: "F", events, cancel: () => {} } as SessionActivity);
+    const mounted = await mount([a, n], { detachOnQuit: true });
+    const { app } = mounted;
     await delay(40);
     await type(app.stdin, "/clear");
-    expect(app.lastFrame() ?? "").toContain("Can't run /clear while a turn is running");
+    expect(a.log).toContain("clear");
     expect(a.log).not.toContain("close");
-    wake();
-    await delay(40);
-    await type(app.stdin, "/clear");
-    expect(a.log).toContain("close");
     expect(a.log).not.toContain("detach");
+    // The SAME session keeps serving: nothing swapped to the second fake.
     await type(app.stdin, "fresh");
-    expect(n.log).toContain("send:fresh");
+    expect(a.log).toContain("send:fresh");
+    expect(n.log).toEqual([]);
     app.unmount();
   });
 });

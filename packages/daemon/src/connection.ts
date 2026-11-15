@@ -26,6 +26,10 @@ import {
   type DetachResult,
   type DevicePairParams,
   type DevicePairResult,
+  type DevicePushRegisterParams,
+  type DevicePushRegisterResult,
+  type DevicePushUnregisterParams,
+  type DevicePushUnregisterResult,
   type EnqueueParams,
   type EnqueueResult,
   type HooksTrustResult,
@@ -59,6 +63,7 @@ import {
   type SessionSkillsParams,
   type SessionSkillsResult,
   type SessionTtlParams,
+  type SetAutoAcceptParams,
   type SnapshotParams,
   type SnapshotResult,
   type SubagentMessageParams,
@@ -173,6 +178,18 @@ export class Connection {
    * TUI never lets the model propose a move nobody is asked about.
    */
   private hop = false;
+  /**
+   * The label `auto_accept` carries as `by`: this connection's declared host
+   * (slice 6) or else its `clientInfo.name`, read once at `initialize` — never
+   * client-chosen per call, so the text a client shows is the daemon's own
+   * reading of who set the switch (display only, untrusted).
+   */
+  private autoAcceptBy: string | undefined;
+  /**
+   * This connection's declared device name (`ClientInfo.host`), stamped into
+   * every ask's `askedOn` (docs/feat/session-auto-accept.md D7). Display only.
+   */
+  private clientHost: string | undefined;
 
   constructor(
     channel: DuplexChannel,
@@ -339,6 +356,12 @@ export class Connection {
         const { sessionId, id, settings } = params as UpdateSettingsParams;
         return this.host.updateSettings(this.lookup(sessionId), id, settings);
       }
+      // Synchronous, holds no lock (AGENTS §7): it never awaits a turn, and the
+      // fan-out is synchronous, so two sets keep one total order (P2).
+      case Method.SetAutoAccept: {
+        const { sessionId, on } = params as SetAutoAcceptParams;
+        return this.lookup(sessionId).setAutoAccept(on, this.autoAcceptBy);
+      }
       case Method.Snapshot:
         return this.snapshot(params as SnapshotParams);
       // Synchronous, served from the derived log: no lock, no await (AGENTS §7).
@@ -420,6 +443,37 @@ export class Connection {
       // then snapshot, nothing awaited (AGENTS §7).
       case Method.DaemonDiscover:
         return this.discover();
+      // Push registration (docs/feat/mobile-push.md Design 3, slice P7): a DEVICE's
+      // own business — the token and the push key are its, and the connection's
+      // principal is what names it. A `token` or `pairing` connection gets the
+      // usual refusal (the gate above), so a pod-facing plain client can never
+      // register a token this computer would push to.
+      //
+      // Both are synchronous (one atomic rename / one unlink) and hold no lock:
+      // a registration must never queue behind a long `session/prompt` (AGENTS §7
+      // "don't serialize the RPC peer").
+      case Method.DevicePushRegister: {
+        if (this.principal.kind !== "device") {
+          throw new RpcError(
+            DomainErrorCode.Unauthorized,
+            "only a paired device may register for push",
+          );
+        }
+        return this.host.registerPush(
+          this.principal.id,
+          params as DevicePushRegisterParams,
+        ) satisfies DevicePushRegisterResult;
+      }
+      case Method.DevicePushUnregister: {
+        if (this.principal.kind !== "device") {
+          throw new RpcError(
+            DomainErrorCode.Unauthorized,
+            "only a paired device may unregister for push",
+          );
+        }
+        this.host.unregisterPush(this.principal.id);
+        return {} satisfies DevicePushUnregisterResult;
+      }
       default:
         throw new RpcError(DomainErrorCode.NotInitialized, `unexpected method: ${method}`);
     }
@@ -601,6 +655,12 @@ export class Connection {
     // session IT creates may be offered the tool. Per connection (a pod daemon
     // serves a `run`, an `attach` and a hop target alike), and absent = no hop.
     this.hop = params.clientCapabilities.hop === true;
+    // The label an `auto_accept` update carries: this connection's declared
+    // device name (`clientInfo.host`, which only a TRUSTED daemon is ever given
+    // one for), else its `clientInfo.name`. Picked ONCE, here, so a later frame
+    // cannot claim another device's name.
+    this.autoAcceptBy = params.clientInfo?.host ?? params.clientInfo?.name;
+    this.clientHost = params.clientInfo?.host;
     return {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: {
@@ -759,6 +819,11 @@ export class Connection {
       ...(this.updateTypes ? { updates: this.updateTypes } : {}),
       ...(this.hop ? { hop: true } : {}),
       ...(this.servesModel ? { model: this } : {}),
+      ...(this.clientHost !== undefined ? { host: this.clientHost } : {}),
+      // The socket's own principal names the device (never a frame's claim): the
+      // push rules exclude a device attached to this session — it is showing the
+      // sheet already (docs/feat/mobile-push.md Design 1).
+      ...(this.principal.kind === "device" ? { deviceId: this.principal.id } : {}),
     };
     const { hosted, created, resync, epoch } = this.host.open(params, attachment, prepared);
     this.attached.set(hosted.id, { hosted, attachment });
@@ -768,6 +833,9 @@ export class Connection {
       created,
       resync,
       ...(hosted.settingsReport ? { settings: hosted.settingsReport } : {}),
+      // Present iff THIS daemon shares auto-accept (docs/feat/session-auto-accept.md
+      // D2): a pod omits it, so no laptop client reads or sets it there.
+      ...(this.host.sharedAutoAccept ? { autoAccept: hosted.autoAccept } : {}),
       // Read in this same synchronous segment as the replay: omitted when 0.
       ...(hosted.unflushedExits > 0 ? { unflushedExits: hosted.unflushedExits } : {}),
     };

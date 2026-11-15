@@ -224,6 +224,8 @@ export interface TentacleConfig {
   readonly sessions?: ResolvedConfig["sessions"];
   /** The mobile relay's settings (file or profile); absent = enabled, `DEFAULT_RELAY_URL`. */
   readonly relay?: ResolvedConfig["relay"];
+  /** Push notifications (file or profile); absent = enabled, a 30 s grace. */
+  readonly push?: ResolvedConfig["push"];
   /**
    * The configured `apiKeyCommand` (the command, never its output): the CLI
    * hides the key FILE it reads from a workspace mount.
@@ -902,6 +904,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     ...(resolved.tui !== undefined ? { tui: resolved.tui } : {}),
     ...(resolved.sessions !== undefined ? { sessions: resolved.sessions } : {}),
     ...(resolved.relay !== undefined ? { relay: resolved.relay } : {}),
+    ...(resolved.push !== undefined ? { push: resolved.push } : {}),
     ...(resolved.apiKeyCommand !== undefined ? { apiKeyCommand: resolved.apiKeyCommand } : {}),
     hooks: contributed.hooks,
     mcpServers: contributed.mcpServers,
