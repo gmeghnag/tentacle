@@ -425,3 +425,11 @@ for r in rows:
 ```
 
 </details>
+
+#### Owner decisions (2026-11-15 11:15)
+
+1. **Ctrl+R** starts, Ctrl+R or Enter finishes (Enter never sends), Esc discards, rebindable — as recommended.
+2. **No auto-stop by default** (the user ends with the key); auto-stop stays an option — as recommended.
+3. **NOT as recommended: Apple's built-in on-device recogniser is the DEFAULT engine** (no download; language from settings/auto where Apple allows), with a **switch to Parakeet** (config, e.g. `voice.engine: apple|parakeet`). Measure Apple's latency/WER with the V0 harness and record it next to Parakeet's; the comma-safe endpointing applies to both.
+4. **`tentacle voice setup`** downloads Parakeet only when the user switches to it (size, confirm, progress, offline afterwards); with Apple as default, no download is needed to start — as recommended for Parakeet.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
