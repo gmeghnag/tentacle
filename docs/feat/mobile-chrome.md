@@ -1,9 +1,9 @@
-# feat/mobile-chrome — iPhone chrome restyle: thin header, soft dark palette, sessions drawer, minimal rows
+# feat/mobile-chrome — iPhone chrome restyle: thin header, soft dark palette, sessions drawer, minimal rows, activity sheet
 
-> **Status:** implementation (awaiting the owner's picks on the mockups, Owner questions A–E)
+> **Status:** implementation (awaiting the owner's picks on the mockups, Owner questions A–F)
 > **Branch:** `feat/mobile-chrome`
-> **Size:** L — split into 6 slices, each S/M · **Blast:** cross-module (every screen reads the changed tokens/primitives, the Session screen's navigation changes; no protocol, persistence or §7 invariant moved) · **Suited:** slices 1–2 and 5 any model (tokens/primitives, pinned by pure tests); slices 3–4 (drawer projection + navigation + New session) a strong model; mandatory fresh-context Review + a visual review of Maestro screenshots against the chosen mockups
-> **Changelog:** `changelog.d/mobile-chrome.changed.md` — one bullet (header, dark palette, sessions drawer, flat lists)
+> **Size:** L — split into 8 slices, each S/M · **Blast:** cross-module (every screen reads the changed tokens/primitives, the Session screen's navigation changes, the phone starts consuming the existing `subagents`/`jobs` updates; no protocol, persistence or §7 invariant moved) · **Suited:** slices 1–2 and 7 any model (tokens/primitives, pinned by pure tests); slices 3–4 (drawer projection + navigation + New session) and 5–6 (activity projection, message/stop) a strong model; mandatory fresh-context Review + a visual review of Maestro screenshots against the chosen mockups
+> **Changelog:** `changelog.d/mobile-chrome.changed.md` — one bullet (header, dark palette, sessions drawer, flat lists); `changelog.d/mobile-activity.added.md` — one bullet (sub-agents on the iPhone: Activity sheet, live steps, message, stop)
 
 ## Context
 
@@ -43,6 +43,25 @@ in parallel, and are **not** planned here):
   values that never truncate the label, generous vertical rhythm, fewer
   containers.
 
+- **(11) Sub-agents on the iPhone** (`subagent-stuck.png`, owner 16:42–16:50):
+  today a sub-agent is a teal tool block ("Agent · Task lungo in background")
+  and nothing else — once it runs in the background it cannot be found,
+  followed, messaged or stopped from the phone. The phone's reducer drops
+  every sub-agent frame on purpose (`apps/mobile/src/transcript.ts:414-419`:
+  "the phone has no nested panel and no job dock in this slice").
+  Requirement (16:45): the entry point is **one tap from the session screen**
+  (a header control with the live count, or a bottom handle) — not inside
+  Session info — and it is ONE **"activity" surface** that will also host
+  background shell **jobs** and **cron** jobs: sub-agents now, the others
+  later, same sheet, grouped by kind, running first. Plus (16:50, "idea
+  folle"): a **draggable floating button** with the count that snaps to an
+  edge, as variant F2 next to the header badge F1, with honest pros/cons and
+  an interactive mockup. The owner's vocabulary and decisions are
+  `docs/eval/subagent-live.md` (`sa-N`, type `explore`/`general`,
+  background, report, 5 recent steps — Q17; one background list for
+  sub-agents AND shell jobs — Q15; a finished item leaves the TUI list at
+  once — `docs/feat/subagent-panel.md:362,381` P5).
+
 Constraints: owner rule — style choices are decided on **mockups** before any
 code; take only proportions/weight/feel from the reference app, never its
 branding, glyphs or wordmark; tokens stay the single source (`theme.ts:1-8`);
@@ -53,7 +72,11 @@ light/dark toggle, iPhone 12 Pro 390×844 frames, the app's real tokens):
 (A) header — today vs A1/A2; (B) dark palette — today vs B1/B2/B3 on the real
 session screen; (C) drawer — C1 (computer at top) vs C2 (computer at
 bottom-left) + C2 with the computer menu open; (D) the recommended combination
-in light and dark; (E) Session info today vs E1/E2 + Settings in E1.
+in light and dark; (E) Session info today vs E1/E2 + Settings in E1;
+(F) activity — F1 header badge, F2 draggable floating button (interactive:
+drag, edge snap, tap opens the sheet), the Activity sheet (sub-agents live,
+shell jobs + scheduled greyed), a sub-agent's detail running (live steps,
+your messages with "read", Message + Stop) and finished (report).
 
 **Repro (that the capability is missing), 2026-11-15, on `main` @ `b9b2d4fb`:**
 `apps/mobile/package.json` has no drawer dependency (`@react-navigation/native`
