@@ -634,6 +634,30 @@ load), and the final full-suite run is green.
 - On a reopen, the restore's `cd` run consumes `pendingBytes`, so any kept banner is dropped silently there.
 - `restoreCwd` uses its own `AbortSignal.timeout`, so a user abort waits up to the one-shot timeout.
 
+### Round 3
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; it reviews `git diff HEAD~1` = `8599f2a8`)
+
+**Verdict: PASS on the code.** Merge stays owner-gated on the two open items below.
+
+**Round-2 findings, re-checked:**
+- **R2-1 (HIGH, the decision-3 overclaim): RESOLVED as a report.**
+  - The causal claim is withdrawn everywhere: in the doc, in the comments in `workload-shell.ts` and `workload-shell-frame.ts`, in the test comment, and in `changelog.d/workload-shell-first-output.fixed.md`, which no longer mentions `hostname` or `etcd-guard`.
+  - The owner's live symptom is now recorded as **cause unknown, not fixed**. This is the correct escalation under AGENTS §0.
+  - The new handshake fix is real. `bytesAfterReady` now scans for the end sequence from the ready prefix, as `parseReady` already did, so a `__TNT__E` printed by the pod before the marker can no longer hand our own ready marker to the first command.
+  - Mutation: scanning from byte 0 again turned 2 rows red (the integration row and the pure row). Reverted; `git status` clean.
+- **R2-2 (MEDIUM, signing): documented, not resolvable from the tree.** The "Fix round 2" section is again signed `claude-opus-5-5` while commit `8599f2a8` says `(deepseek)`. The doc now records the mismatch openly instead of claiming it is fixed. Only the owner can settle which model wrote it.
+
+**Regression check of the diff:**
+- The diff touches only `bytesAfterReady`, comments, tests and one changelog fragment, and the logic change is one bounded scan.
+- An edge case, not a finding: a pod that forges a whole fake ready marker before ours is taken as ready by both parsers alike. That stays inside "a pod is not trusted": the result is data, and it widens no laptop effect.
+
+**Gate:** `packages/tools` plus the two `workload-shell` cli files give 369 pass / 0 fail (19 files). `bun run lint` is clean (1433 files). `bun run typecheck` is clean.
+
+**Open, for the owner (not code findings):**
+1. **The live-k8s row has never run.** Implementation Tests 7 says it "must pass live before Review signs off", so this PASS does not cover D3's apiserver fact (the plain `POST …/exec` Status).
+2. **Owner decision 3's live `hostname` truncation is unexplained.** A live capture on `etcd-guard-…` is needed.
+
 
 #### Owner decisions added after the plan (2026-11-15 02:00–02:06) — binding, part of THIS fix
 
