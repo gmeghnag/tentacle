@@ -8,28 +8,88 @@
  * the sheet's looks.
  */
 import { describe, expect, test } from "bun:test";
-import type { SessionEvent } from "@tentacle/client";
+import type { AutoAcceptLink, SessionActivity, SessionEvent } from "@tentacle/client";
 import { PermissionBroker } from "@tentacle/core";
-import type { McpServerStatus, QueueState, SessionListResult } from "@tentacle/protocol";
+import type {
+  McpServerStatus,
+  QueueState,
+  SessionContextResult,
+  SessionListResult,
+  SessionSkillsResult,
+} from "@tentacle/protocol";
 import { JsonRpcErrorCode } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import { createSessionController } from "../src/session-controller.ts";
-import type { InfoPort } from "../src/session-info-controller.ts";
-import { type SendableHandle, createSessionScreen } from "../src/session-screen-controller.ts";
+import type { InfoPort, InfoSession } from "../src/session-info-controller.ts";
+import {
+  type SendableHandle,
+  type SessionScreenState,
+  createSessionScreen,
+} from "../src/session-screen-controller.ts";
+
+/** The session's shared auto-accept, as the screen's own switch reads it. */
+function fakeAutoAccept(on = false) {
+  let value = on;
+  const listeners = new Set<(on: boolean) => void>();
+  const link: AutoAcceptLink = {
+    current: () => value,
+    set: (next: boolean) => {
+      value = next;
+      for (const listener of listeners) {
+        listener(next);
+      }
+      return Promise.resolve({ on: next });
+    },
+    onChange: (listener) => {
+      const one = (next: boolean) => listener(next, "update");
+      listeners.add(one);
+      return () => {
+        listeners.delete(one);
+      };
+    },
+    shared: () => true,
+    lastBy: () => undefined,
+  };
+  return {
+    link,
+    /** Another device's flip: the daemon's `auto_accept` update. */
+    flip(next: boolean) {
+      value = next;
+      for (const listener of listeners) {
+        listener(next);
+      }
+    },
+    watchers: () => listeners.size,
+  };
+}
 
 function harness(
   options: {
     readonly rename?: (title: string) => Promise<string>;
-    readonly skills?: () => Promise<never>;
-    readonly context?: () => Promise<never>;
+    readonly skills?: () => Promise<SessionSkillsResult>;
+    readonly context?: () => Promise<SessionContextResult>;
+    /** Absent: a handle that offers no shared switch (no `autoAccept`). */
+    readonly autoAccept?: ReturnType<typeof fakeAutoAccept>;
+    readonly mcp?: () => Promise<readonly McpServerStatus[]>;
   } = {},
 ) {
   const calls = { skills: 0, context: 0, mcp: 0, list: 0 };
   const renamed: string[] = [];
+  /** Every state the SCREEN emitted (`onChange`) — what a re-render would see. */
+  const emitted: SessionScreenState[] = [];
+  /** The screen's own `watch` listener (a turn, a history replace from the daemon). */
+  let watcher: ((activity: SessionActivity) => void) | null = null;
+  /** The port's link feed (F1's `up`): what the app's `onStatus` would call. */
+  const linkListeners: ((status: "up" | "down") => void)[] = [];
   const handle: SendableHandle = {
     open: () => Promise.resolve(),
     detach: () => Promise.resolve(),
-    watch: () => () => {},
+    watch: (fn) => {
+      watcher = fn;
+      return () => {
+        watcher = null;
+      };
+    },
     async *send(): AsyncIterable<SessionEvent> {
       yield { type: "turn_end", reason: "end_turn" } as never;
     },
@@ -48,14 +108,16 @@ function harness(
       renamed.push(title);
       return options.rename?.(title) ?? Promise.resolve(title);
     },
+    ...(options.autoAccept === undefined ? {} : { autoAccept: options.autoAccept.link }),
   };
   // The screen's handle, shaped as the port's `InfoSession` (a real `RemoteSession`
   // answers all three; a fake here need not be complete).
-  const session = {
+  const session: InfoSession = {
     skills: () =>
       handle.skills?.() ??
       Promise.resolve({ slash: [], skills: [], problems: [], moreProblems: 0 }),
     context: () => handle.context?.() ?? Promise.resolve({ used: 0, exact: true }),
+    ...(options.autoAccept === undefined ? {} : { autoAccept: options.autoAccept.link }),
   };
   const port: InfoPort = {
     daemon: () => ({ version: "1.4.0", model: "claude-sonnet-4-5", contextWindow: 200_000 }),
@@ -65,7 +127,7 @@ function harness(
     sessionId: "s1",
     mcpStatus: () => {
       calls.mcp += 1;
-      return Promise.resolve([] as readonly McpServerStatus[]);
+      return options.mcp?.() ?? Promise.resolve([] as readonly McpServerStatus[]);
     },
     sessionList: () => {
       calls.list += 1;
@@ -85,6 +147,15 @@ function harness(
       } as SessionListResult);
     },
     session: () => session,
+    onLink: (listener) => {
+      linkListeners.push(listener);
+      return () => {
+        const at = linkListeners.indexOf(listener);
+        if (at >= 0) {
+          linkListeners.splice(at, 1);
+        }
+      };
+    },
   };
   const screen = () =>
     createSessionScreen({
@@ -98,8 +169,22 @@ function harness(
       broker: new PermissionBroker(undefined, { holdUntilSet: true }),
       now: () => 1,
       info: () => port,
+      onChange: (next) => emitted.push(next),
     });
-  return { screen, calls, renamed, handle };
+  return {
+    screen,
+    calls,
+    renamed,
+    handle,
+    emitted,
+    port,
+    emitActivity: (activity: SessionActivity) => watcher?.(activity),
+    link: (status: "up" | "down") => {
+      for (const listener of [...linkListeners]) {
+        listener(status);
+      }
+    },
+  };
 }
 
 const settle = async (): Promise<void> => {
@@ -249,5 +334,161 @@ describe("renaming from the title (Owner decision 5)", () => {
     screen.setRenameText("Both a name");
     await screen.submitRename();
     expect(screen.state().renaming?.error).toContain("too old");
+  });
+
+  test("a rename made here reaches the SHEET's subtitle too (Review round 1, LOW)", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    await screen.openInfo();
+    await settle();
+    expect(screen.state().info?.view.subtitle).toBe("Alpha");
+    screen.beginRename();
+    screen.setRenameText("A better name");
+    await screen.submitRename();
+    // The sheet's subtitle is bound to the screen's LIVE title, not to the
+    // route's copy captured when the screen was built.
+    expect(screen.state().info?.view.subtitle).toBe("A better name");
+  });
+
+  test("a rename asked with NO handle says that, never 'too old' (Review round 1, LOW)", async () => {
+    const h = harness();
+    const screen = h.screen();
+    // No `open()`: the attach never answered, so there is no handle at all.
+    screen.beginRename();
+    screen.setRenameText("A better name");
+    await screen.submitRename();
+    const error = screen.state().renaming?.error ?? "";
+    expect(error).not.toContain("too old");
+    expect(error).toContain("Not connected");
+  });
+});
+
+/** The LAST state the screen emitted: what the mounted component would render. */
+const lastEmitted = (emitted: readonly SessionScreenState[]): SessionScreenState => {
+  const last = emitted.at(-1);
+  if (last === undefined) {
+    throw new Error("the screen emitted nothing");
+  }
+  return last;
+};
+
+describe("a pull that lands REPAINTS the screen (Review round 1, MEDIUM 1)", () => {
+  test("the attach-time context pull reaches the emitted state (the header's bar)", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    // `state()` is a PULL; a mounted component only ever sees the EMITTED state,
+    // so the bar is real only if the pull that filled it emitted (nothing else
+    // changes on an idle session, so no later event would repaint it).
+    expect(screen.state().view.headerContext).toEqual({ percent: 42, approx: false });
+    expect(lastEmitted(h.emitted).view.headerContext).toEqual({ percent: 42, approx: false });
+  });
+
+  test("skills/context landing while the MCP probe is still pending repaint the sheet", async () => {
+    let resolveMcp: (servers: readonly McpServerStatus[]) => void = () => undefined;
+    const h = harness({
+      mcp: () =>
+        new Promise<readonly McpServerStatus[]>((ok) => {
+          resolveMcp = ok;
+        }),
+    });
+    const screen = h.screen();
+    await screen.open();
+    void screen.openInfo();
+    await settle();
+    // The MCP probe is still waiting an unresponsive server (F3).
+    expect(h.calls.mcp).toBe(1);
+    const emitted = lastEmitted(h.emitted).info;
+    expect(emitted?.view.sections.find((s) => s.id === "mcp")?.phase).toBe("loading");
+    // ...yet what the person sees must already say what DID land: a screen that
+    // only reads `state()` on its own emits shows `loading` for every section
+    // until MCP settles (F3 is false end to end).
+    expect(emitted?.view.sections.find((s) => s.id === "skills")?.phase).toBe("empty");
+    expect(emitted?.view.sections.find((s) => s.id === "model")?.rows[1]?.value).toContain("42 %");
+    resolveMcp([]);
+  });
+
+  test("the link coming back up repaints the sheet from the auto-refresh (F1)", async () => {
+    let down = true;
+    const h = harness({
+      mcp: () =>
+        down
+          ? Promise.reject(new Error("not connected to the daemon"))
+          : Promise.resolve([] as readonly McpServerStatus[]),
+    });
+    const screen = h.screen();
+    await screen.open();
+    await screen.openInfo();
+    await settle();
+    expect(lastEmitted(h.emitted).info?.view.banner?.kind).toBe("offline");
+    down = false;
+    h.link("up");
+    await settle();
+    // The refresh's answer reached the person, not only `state()`.
+    expect(lastEmitted(h.emitted).info?.view.banner).toBeUndefined();
+    expect(lastEmitted(h.emitted).info?.view.sections.find((s) => s.id === "mcp")?.phase).toBe(
+      "empty",
+    );
+  });
+  test("an auto-accept flip from another device repaints the switch (F11)", async () => {
+    const auto = fakeAutoAccept(false);
+    const h = harness({ autoAccept: auto });
+    const screen = h.screen();
+    await screen.open();
+    await screen.openInfo();
+    await settle();
+    expect(screen.autoAcceptOn()).toBe(false);
+    const before = h.emitted.length;
+    auto.flip(true);
+    // The VALUE is the link's (`autoAcceptOn()` is read at render), so what a
+    // flip needs is a REPAINT: with no listener on the link the sheet kept the
+    // switch drawn one way until some unrelated event emitted (F11).
+    expect(h.emitted.length).toBeGreaterThan(before);
+    expect(screen.autoAcceptOn()).toBe(true);
+    expect(lastEmitted(h.emitted).info?.view.autoAccept).toBe(true);
+  });
+});
+
+describe("a REPLACED history re-asks the context (Review round 1, MEDIUM 2)", () => {
+  test("the header's bar keeps repainting after the sheet was opened and closed", async () => {
+    let used = 120_000;
+    const h = harness({
+      context: () => Promise.resolve({ used, exact: true } satisfies SessionContextResult),
+    });
+    const screen = h.screen();
+    await screen.open();
+    await screen.openInfo();
+    screen.closeInfo();
+    used = 3_000;
+    h.emitActivity({ kind: "history", messages: [], reason: "clear" });
+    await settle();
+    // Closing the SHEET stops the pulls (F5) — never the HEADER's feed, which is
+    // on screen the whole time (Owner decision 4). A `close()` that dropped the
+    // controller's listeners would freeze the bar at the old figure for the rest
+    // of the screen's life.
+    expect(screen.state().view.headerContext).toEqual({ percent: 2, approx: false });
+    expect(lastEmitted(h.emitted).view.headerContext).toEqual({ percent: 2, approx: false });
+  });
+  test("after a /clear the header's bar follows the emptied session, not the dropped chat", async () => {
+    let used = 120_000;
+    const h = harness({
+      context: () => Promise.resolve({ used, exact: true } satisfies SessionContextResult),
+    });
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    // 120k of 200k: the attach's figure.
+    expect(screen.state().view.headerContext).toEqual({ percent: 60, approx: false });
+    // The session is cleared on another device: the chat those 120k described is
+    // gone, and the daemon now counts an empty one.
+    used = 3_000;
+    h.emitActivity({ kind: "history", messages: [], reason: "clear" });
+    await settle();
+    // The TUI forgets the measured fill AND re-asks (`useSessionLink:350-353`);
+    // forgetting alone leaves the attach-time figure on the bar for ever.
+    expect(screen.state().view.headerContext).toEqual({ percent: 2, approx: false });
+    expect(lastEmitted(h.emitted).view.headerContext).toEqual({ percent: 2, approx: false });
   });
 });

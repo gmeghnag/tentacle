@@ -155,7 +155,8 @@ export interface ComposerView {
   /** The button's face: Send, Queue (steer), Send later, Stop, or a disabled Send. */
   readonly button: "send" | "queue" | "send-later" | "stop" | "disabled";
   /** Why the button does nothing (the screen dims it); null when it does something. */
-  readonly blockedBy: ComposerBlocker | null /** A turn runs: the indicator under the transcript (`turn-running` / `turn-idle`). */;
+  readonly blockedBy: ComposerBlocker | null;
+  /** A turn runs: the indicator under the transcript (`turn-running` / `turn-idle`). */
   readonly running: boolean;
   /** Whether **Send now** is offered beside the queue (D1's secondary button). */
   readonly sendNow: boolean;

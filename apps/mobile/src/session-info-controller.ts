@@ -82,6 +82,13 @@ export interface SessionInfoState {
 
 export interface SessionInfoController {
   state(): SessionInfoState;
+  /**
+   * Every change the controller PAINTS, so a screen re-renders when a pull lands
+   * (Review round 1, MEDIUM 1): a section's own answer, the link's `up`
+   * refresh, a replaced history's fresh count, and another device's auto-accept
+   * flip all arrive here. The controller also feeds the HEADER's bar, so its
+   * `close()` keeps the listeners — the screen unsubscribes on `dispose`.
+   */
   subscribe(listener: (state: SessionInfoState) => void): () => void;
   /** Start (or restart) every pull. Resolves when all four have settled. */
   open(): Promise<void>;
@@ -94,7 +101,7 @@ export interface SessionInfoController {
    * until the next turn, and a sheet never opened would never fill it.
    */
   loadContext(): Promise<void>;
-  /** Drop every in-flight answer and unsubscribe (the sheet closed, F5). */
+  /** Drop every in-flight answer and stop following the link (F5). */
   close(): void;
   /** The switch's value now (the LINK's, so a flip elsewhere is already here). */
   autoAcceptOn(): boolean;
@@ -145,6 +152,8 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
    */
   let generation = 0;
   let unlink: (() => void) | null = null;
+  /** The session's shared auto-accept feed, while the sheet is open (F11). */
+  let unSwitch: (() => void) | null = null;
   const listeners = new Set<(state: SessionInfoState) => void>();
 
   function facts(): InfoFacts {
@@ -266,6 +275,11 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
       generation += 1;
       autoAcceptError = null;
       unlink?.();
+      // A flip from ANOTHER device is a value this switch shows and never learns
+      // by itself: the link needs a listener, or the sheet repaints it only when
+      // some unrelated event happens to emit (F11; Review round 1, MEDIUM 1).
+      unSwitch?.();
+      unSwitch = port.session()?.autoAccept?.onChange(() => emit()) ?? null;
       // ONE refresh per link `up`, never one per section (F1).
       unlink =
         port.onLink?.((status) => {
@@ -301,7 +315,12 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
       generation += 1;
       unlink?.();
       unlink = null;
-      listeners.clear();
+      unSwitch?.();
+      unSwitch = null;
+      // The LISTENERS stay: the same controller feeds the HEADER's bar, which is
+      // on screen with the sheet closed (Owner decision 4), and a pull that lands
+      // after the close must still repaint it (Review round 1, MEDIUM 1). The
+      // screen drops its own subscription on `dispose`.
     },
     autoAcceptOn() {
       return port.session()?.autoAccept?.current() ?? false;

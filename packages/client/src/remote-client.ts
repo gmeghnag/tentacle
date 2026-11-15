@@ -966,11 +966,6 @@ export class RemoteClient {
   }
 
   /**
-   * The daemon's MCP servers and whether each is reachable now (`/mcp`). Not
-   * re-sent after a drop: it is a fresh probe, the user just asks again. An
-   * older daemon rejects with `MethodNotFound`. Schema-validated by the peer.
-   */
-  /**
    * What the daemon said about ITSELF at the last handshake (`agentInfo`): its
    * build, the model that runs the turns and the window that model counts
    * against. `undefined` before the first handshake, or from an older daemon /
@@ -994,6 +989,11 @@ export class RemoteClient {
     };
   }
 
+  /**
+   * The daemon's MCP servers and whether each is reachable now (`/mcp`). Not
+   * re-sent after a drop: it is a fresh probe, the user just asks again. An
+   * older daemon rejects with `MethodNotFound`. Schema-validated by the peer.
+   */
   mcpStatus(): Promise<readonly McpServerStatus[]> {
     if (!this.up && this.channelFactory) {
       return Promise.reject(new Error("not connected to the daemon"));

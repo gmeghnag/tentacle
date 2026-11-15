@@ -9,7 +9,7 @@
  * Pure and React-free (AGENTS §7): the three decisions — is this a no-op, is it
  * unusable, what does a failure say — live here, so the sheet only draws them.
  */
-import { JsonRpcErrorCode } from "@tentacle/protocol";
+import { JsonRpcErrorCode, MAX_SESSION_TITLE } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 
 /** The rename field's own state: what is typed, whether it is saving, and why not. */
@@ -28,8 +28,13 @@ export type RenamePlan =
   /** Send this (already one line). */
   | { readonly kind: "send"; readonly title: string };
 
-/** The daemon's own cap (`MAX_SESSION_TITLE`, `session.ts`), said here as a count. */
-export const MAX_TITLE_LENGTH = 200;
+/**
+ * The daemon's own cap (`MAX_SESSION_TITLE`, `session.ts:459`), IMPORTED rather
+ * than restated: a local 200 silently refused a title the daemon would have
+ * accepted, and any future move of the daemon's number drifted the two apart
+ * (Review round 1, LOW).
+ */
+export const MAX_TITLE_LENGTH = MAX_SESSION_TITLE;
 
 /**
  * Decide what the field means. **Empty or unchanged is a no-op** (Owner decision

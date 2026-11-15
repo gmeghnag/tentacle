@@ -519,3 +519,128 @@ claim was proven only at the controller, never through the screen that renders i
 4. **Context: also in the header** — a thin bar ONLY (no "8% contesto" text) under the title line, live from `agent_usage`; the exact numbers stay in the sheet.
 5. **NEW: tap the title to rename the session** — an inline edit / iOS alert with a text field, saved through the existing rename path (the TUI's `/rename`, `session/rename` or the title entry — find it with file:line), visible on every client; empty or unchanged = no-op; error state.
 *— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+### Fix round 1
+
+*— claude-opus-5-5 (executor), 2026-11-15*
+
+Both MEDIUM findings were real, and both were fixed at the LAYER the reviewer
+named. All five LOWs are fixed too — two sat in the same controller as MEDIUM 1,
+so leaving them would have meant touching the same lines twice.
+
+**MEDIUM 1 — the info controller's emits reached nobody. FIXED.**
+Root cause, one sentence: `createSessionInfo` painted each section by calling its
+own `emit()` (`session-info-controller.ts:178-183,217-226`), but nothing
+subscribed, so the screen only ever re-rendered on some *other* event — and an
+idle session has none.
+
+- `session-screen-controller.ts:450` — the screen now subscribes:
+  `unwatchInfo = info.subscribe(() => emit())`, unwound in `dispose()` (`:984`).
+  That is the missing edge: every pull that lands, the link's `up` refresh, a
+  replaced history's fresh count and an auto-accept flip now repaint.
+- `session-info-controller.ts:316-325` — `close()` no longer
+  `listeners.clear()`s. The sheet closing stops the *pulls* (F5) but the same
+  controller feeds the **HEADER's bar**, which is on screen either way (Owner
+  decision 4); clearing the listeners froze the bar for the rest of the screen's
+  life. The screen drops its own subscription on `dispose`.
+- `session-info-controller.ts:278-282` — an **auto-accept flip from another
+  device** (F11, finding 1c) had no listener at all: `open()` now takes
+  `port.session()?.autoAccept?.onChange(() => emit())` and `close()` releases it.
+
+**MEDIUM 2 — the header's bar kept the DROPPED chat's fill after a `/clear`. FIXED.**
+Root cause, one sentence: the fold forgot `lastTurnTokens` on a replace
+(`transcript.ts:273-277`) so `headerContext` fell back to `openContext` — the
+attach-time `session/context` figure, which nothing re-asked.
+
+- `session-feed.ts:70-79,161-165,191-198` — the feed gained `onHistoryReplaced`,
+  called on a `history` activity whose reason REPLACED what was shown (`null`,
+  `clear`) and on a mid-turn `history_reset` (`:161-165`). `context_reset`
+  appends and `compact` keeps the transcript, so neither fires it — the same
+  line the TUI draws (`useSessionLink.ts:350-353`).
+- `session-screen-controller.ts:355-368` — the screen's answer to it is the
+  TUI's: `info.loadContext()`, i.e. ask the daemon for the count of what it
+  holds NOW. The rule stays in the pure fold; the request is the caller's.
+
+**LOWs fixed (all five — two of them in the same controller as MEDIUM 1):**
+- `session-rename.ts:31-37` — `MAX_TITLE_LENGTH` is now `MAX_SESSION_TITLE`
+  **imported** from `@tentacle/protocol`, not a restated `200`: the local 200
+  silently refused a title the daemon (256) accepts, and any future move of the
+  daemon's number would have drifted the two apart.
+- `session-screen-controller.ts:886` — `submitRename` with **no handle**
+  (the attach never answered) said "too old to rename sessions", which is a lie
+  about the computer's build; it now says "Not connected to that session." The
+  `MethodNotFound` sentence is kept for a handle that HAS no `rename`.
+- `session-screen-controller.ts:435-443` — the sheet's subtitle was bound to the
+  port's `title()`, i.e. the ROUTE's copy captured when the screen was built, so
+  it kept the old name after a rename; the port is now spread with
+  `title: () => shownTitle` (the screen's live title).
+- Two doc-comment folds (both from the review's LOW list):
+  `session-view.ts:158` (a doc comment swallowed into `blockedBy`'s type line
+  — the comment now sits on its own line) and `remote-client.ts:968`
+  (`daemonInfo()` inserted under `mcpStatus`'s JSDoc — the JSDoc is now on
+  `daemonInfo`, and `mcpStatus` has its own back at `:993-998`).
+
+**Left unfixed:** nothing from the review's list — both MEDIUMs and all five
+LOWs are fixed above. The e2e/screenshot step remains unexecuted (declared in
+the *Not verified* line).
+
+**Order of work (as built).** Proven RED first — `session-screen-info.test.ts`'s
+new `describe` blocks, driving the SCREEN's `emitted` states ("Review round 1,
+MEDIUM 1" / "MEDIUM 2"). Then MEDIUM 1's two edges (the screen's subscription,
+`close()`'s listeners), then MEDIUM 2 (the fold's hook + the screen's re-ask),
+each mutated. Then the five LOWs. Then MEDIUM 1's third edge (finding 1c, the
+auto-accept listener) — heard only while re-reading finding 1 against the code,
+after the LOWs; it carries its own test and mutation (row 4) like the rest.
+
+**Tests: RED first, on the property, then GREEN (§9).** All in
+`apps/mobile/test/session-screen-info.test.ts`, driving the **screen**
+(`onChange` / `emitted`), never the controller directly — the review's central
+criticism was that the existing tests read `state()`, a pull:
+
+| test | red on the buggy code because |
+|---|---|
+| `the attach-time context pull reaches the emitted state` | last emitted `headerContext: null` while `state()` said 42 % |
+| `skills/context landing while the MCP probe is still pending repaint the sheet` | emitted skills phase `loading`, `state()` `empty` |
+| `the link coming back up repaints the sheet from the auto-refresh (F1)` | emitted banner still `offline` after the refresh landed |
+| `an auto-accept flip from another device repaints the switch (F11)` | 0 emits on `flip(true)` |
+| `the header's bar keeps repainting after the sheet was opened and closed` | `close()` cleared the listeners ⇒ bar frozen at 60 % |
+| `after a /clear the header's bar follows the emptied session` | bar stayed `{percent: 60}` on an empty session |
+
+The 6th was **red on the assertion of the property** (`percent: 60` received,
+`2` expected), not on a compile error — it needed the feed's new hook AND the
+screen's answer to it, and each was mutated separately (rows 2 and 5 below).
+
+**Mutations (§9 non-vacuity — each applied, run, reverted; `git status` clean
+after each):**
+
+| # | mutation | result |
+|---|---|---|
+| 1 | `const unwatchInfo = () => {}` (no subscription) | 3 fail: the three MEDIUM-1 emit tests (`…attaches`, `…pending`, `the link coming back up`); the F11 one still passed (it needs mutation 4) |
+| 2 | `onHistoryReplaced: () => {}` in the screen (no re-ask) | 1 fail: `after a /clear the header's bar…` (`percent: 60`, expected 2) |
+| 3 | `listeners.clear()` restored in `close()` | 1 fail: `the header's bar keeps repainting after the sheet was opened and closed` |
+| 4 | `unSwitch = null` (never listen to the auto-accept link) | 1 fail: `an auto-accept flip from another device repaints the switch` |
+| 5 | the feed's `if (activity.reason === null \|\| "clear")` hook deleted | 2 fail: both MEDIUM-2 tests |
+| 6 | `createSessionInfo(infoPort)` (port title, not `shownTitle`) | 1 fail: `a rename made here reaches the SHEET's subtitle too` |
+| 7 | the `session === null` branch merged back into the "too old" one | 1 fail: `a rename asked with NO handle says that, never 'too old'` |
+
+**Gate (this branch, after the fixes).** `bunx tsc --noEmit` clean ·
+`bunx tsc -p apps/mobile` clean · `bunx tsc -p apps/relay` clean ·
+`bun run lint` (biome, **1510 files, 0 errors, 0 warnings** — the §6 baseline
+holds) · `bun test` **10912 pass, 0 fail, 5 skip** (420 s, 10917 tests / 787
+files). The 5 skips are the documented opt-ins — 2 live-k8s
+(`packages/k8s`, `packages/cli/workload-shell-live.k8s`), 2 live-docker
+(`packages/docker`, `packages/cli/session-hop.docker`) and the real-socket
+keepalive (`packages/daemon/ws-server`, `TENTACLE_SLOW_TESTS`) — the SAME 5 the
+pre-fix tree had (10904 pass/0 fail/5 skip), so no test was newly skipped to
+make this green.
+
+**Design note (AGENTS §7).** Nothing moved across a §7 invariant: no protocol or
+persistence change, no second session path (the port is still `link.client` +
+the screen's own handle), the auto-accept listener is the SAME shared
+`AutoAcceptLink` (one broker, laptop gating untouched), and the new rule
+(*a replaced history invalidates the context figure*) lives in the pure fold,
+not in a component.
+
+**Not verified (one line).** The iOS e2e flow and the screenshots are still
+unexecuted here (no simulator/Release build); verify with
+`bun run e2e:mobile --ios 26 --only 25-session-info,06-session-open`.

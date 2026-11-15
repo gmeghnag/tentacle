@@ -354,6 +354,16 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       foreign = turn;
       emit();
     },
+    // A REPLACED history (a `/clear`, a resync) forgets the measured fill in the
+    // fold, and the daemon has to be asked to count what the session holds now:
+    // the attach-time `openContext` figure described the chat that was just
+    // dropped, and `headerContext` falls back to it (Review round 1, MEDIUM 2;
+    // the TUI's `forgetContextFill` + `askContext`).
+    onHistoryReplaced: () => {
+      if (info !== null) {
+        void info.loadContext().catch(() => {});
+      }
+    },
   });
 
   /**
@@ -423,7 +433,21 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
    * and STATEFUL (its generation counter), so exactly one lives per screen and
    * `open()`/`close()` are what restart it.
    */
-  const info = infoPort === null ? null : createSessionInfo(infoPort);
+  /**
+   * One controller per screen. `title` is OVERRIDDEN with this screen's own
+   * `shownTitle`: the port's copy is the route's, captured when the screen was
+   * built, so the sheet's subtitle kept the old name after a rename this phone
+   * (or another) made (Review round 1, LOW).
+   */
+  const info =
+    infoPort === null ? null : createSessionInfo({ ...infoPort, title: () => shownTitle });
+  /**
+   * The info controller's OWN emits (Review round 1, MEDIUM 1): every pull that
+   * lands, the link's `up` refresh and another device's auto-accept flip repaint
+   * this screen. Without it the header's bar and the sheet's sections only moved
+   * on some UNRELATED event — and on an idle session there is none.
+   */
+  const unwatchInfo = info === null ? () => {} : info.subscribe(() => emit());
 
   /** The daemon's model as the header shows it (`undefined`: report nothing). */
   function modelOf(): string | undefined {
@@ -859,11 +883,17 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         emit();
         return;
       }
-      if (session?.rename === undefined) {
+      if (session === null || session.rename === undefined) {
+        // No handle: the attach never answered (`not-attached` phase). Blaming the
+        // computer's build would be a lie — nothing was even asked (Review round
+        // 1, LOW).
         renaming = {
           ...field,
           saving: false,
-          error: "This computer's tentacle is too old to rename sessions.",
+          error:
+            session === null
+              ? "Not connected to that session."
+              : "This computer's tentacle is too old to rename sessions.",
         };
         emit();
         return;
@@ -951,6 +981,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     dispose() {
       disposed = true;
       listeners.clear();
+      unwatchInfo();
       unmount.abort();
       compose?.stop();
       info?.close();
