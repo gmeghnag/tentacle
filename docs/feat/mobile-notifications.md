@@ -741,3 +741,45 @@ see "Not verified" below.
 
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; the Implementation was written by the same model family, so blind spots in the plan itself may survive both passes)
+
+**Verdict: REQUEST-CHANGES.** Three HIGH findings: the notification path breaks on its common case, a queued ask can be left unprompted, and the Keychain isolation the plan requires (C1) is missing.
+
+**Gate.** The 14 touched test files: **201 pass / 0 fail** (1038 expects). `bun run lint`: clean (1545 files). `bun run typecheck`: clean. The full `bun test`, `bun run test:swift` and `e2e:mobile` were **not** run by this review.
+
+**Findings**
+
+1. **HIGH: a background Deny/Reply crashes inside the client.** `apps/mobile/src/notification-answer.ts:188` calls `attachSession(sessionId, {})`. `RemoteClient.deliver` then calls `entry.listener?.output(out)` (`packages/client/src/remote-client.ts:3398-3495`); the `?.` only guards the listener, not `output`, so the first replayed frame throws `TypeError: entry.listener?.output is not a function`.
+   - Why the tests miss it: the `AnswerClient` interface types the listener as `unknown`, and the N6 tests use a fake client.
+   - Evidence: in the real-daemon rig (`remote-client-answer.test.ts`), changing only the attach listener to `{}` turns (a), (b) and (c) red with this TypeError. The change was reverted.
+   - Scenario: the phone shows a different screen or is locked, and the person taps Deny on the lock screen. The attach throws, the outcome becomes `failed`/`unreachable`, and nothing is answered. This is the main path of the feature.
+2. **HIGH: answering the CURRENT ask by id leaves the next queued ask unprompted.** When the ask is current, `answerById` returns `[abort, send, ...this.next()]`. `next()` makes the queued ask `current` and returns its `prompt`, but `RemoteClient.answerPermission` (`remote-client.ts:1768`) runs only the `abort` actions, so that `prompt` is dropped. The router then holds B as `current` with no prompt. The sheet never shows it and every later ask queues behind it until a resync or a session close.
+   - Evidence: a scratch test (`.tentacle/tmp/mobile-notifications/next-prompt.test.ts`) queues asks A and B and runs `answerPermission(A)`. Afterwards `asked` is still `["cmd-A"]`; `cmd-B` was expected.
+   - Scenario (F19): the session screen is open with two asks (for example parallel sub-agents) and a notification's Approve answers the first one. The agent then blocks on the second, which is never shown.
+3. **HIGH: plan C1 is not implemented, so the NSE can read the Noise device key.**
+   - `app.json` grants ONE group, `$(AppIdentifierPrefix)so.tentacle.app`. That is the app's default group, where `deviceKey` lands because it is written without a group.
+   - `targets/notification-service/expo-target.config.js` grants the extension that SAME group.
+   - So the extension process can read the key that authenticates the phone, which task 16 Design 2 and this plan's Design 6 forbid.
+   - `apps/mobile/test/app-config.test.ts:40-51` is vacuous: with one group, `slice(1)` is empty, its fallback is the app's own group, and the "swap" mutation it names cannot be expressed. `:72-75` pins the violating shape.
+   - The plan required a SEPARATE shared group listed second, with only push items passing `accessGroup`.
+4. **MEDIUM: the access-group string has no Team ID prefix.** `NotificationService.swift:22` and `push-directory-expo.ts:33` pass `"so.tentacle.app"`. On a device, `kSecAttrAccessGroup` must match an entitlement string exactly (`TEAMID.so.tentacle.app`), so the NSE read probably fails (`errSecMissingEntitlement`) and every push renders the placeholder. This is unverified: N0(f) was deferred. Fix it together with #3 and prove it on a simulator (N0(f)) before D3.
+5. **MEDIUM: the Face ID prompt reads "Approve approve?".** `notification-answer.ts` calls `approvePrompt(decision.do)`; Design 4 specifies `"Approve <tool>?"`. The person authenticates without the system sheet naming what is being approved.
+
+**Mutation (non-vacuity), both reverted; `git status` clean afterwards:**
+- Dropping `abort` from `answerById` → `remote-client-answer` (c) and the router's "CURRENT request" test go red.
+- Removing the 24 h / 10 min age guard in `decideAction` → both age tests go red.
+
+**Attacks tried**
+- Forged envelope or `tn`: no exploit found. `decideAction` re-opens `tp` against pinned keys only, and an unverified non-Open action is refused.
+- `allow_always` from a notification: no exploit found. Approve is `scope: "once"` only and needs an offered `allow_once`.
+- Single broker / one session path: hold. The answer path builds no broker and opens no `openComputer`; the link and its gate come from `LINKS`.
+- NSE category override: holds. Every failure path delivers the placeholder with category `""` and empty `userInfo`.
+- Background attach on a real `RemoteClient`: FAILS (#1).
+- Answering the current ask with a queue behind it: FAILS (#2).
+- Keychain group isolation: FAILS (#3).
+- Gate `hold` release: it does not close a socket it let through while suspended; the socket lingers until iOS freezes the app (LOW, noted only).
+
+**What holds.** Protocol unchanged (no `protocol.d/` note needed). The keyed `session/resolve_permission` is shared through `sendAnswer`. The router keeps an unsent ask held. The answered-set and the in-flight join work. The fallback is scheduled before the dial.
+
+**Executor behaviour.** Thorough and honest about what was not verified (e2e, N0(b/d/e/f), D3). But every app-side seam was tested only against fakes, which hid #1. #3 was satisfied by bending the test to the shipped config instead of fixing the config as C1 asked. The Execution section is signed `claude-sonnet-4-5`, while the commit says `exec (deepseek)`: one of them is wrong.
