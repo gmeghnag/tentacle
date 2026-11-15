@@ -59,6 +59,7 @@ import {
   sweepToolOutput,
   toolOutputStore,
 } from "./wiring.ts";
+import { LaptopWorkloadShellBackend } from "./workload-shell-backend.ts";
 
 /**
  * The host takes its `SessionTtlControl` at construction, before `listen`
@@ -198,6 +199,10 @@ export function createServeAgent(
       // The session's store, so the provider can read a ref's bytes
       // (docs/feat/attachments-prompt.md D4). Absent when images are off.
       ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
+      // `workload_shell` (docs/feat/workload-shell.md D3): a `serve` daemon runs
+      // on the user's own host, so it holds the credentials the tool dials with.
+      // `tunnelledAgent` (the pod daemon) never passes this.
+      workloadShell: { backend: new LaptopWorkloadShellBackend() },
     },
   );
 }

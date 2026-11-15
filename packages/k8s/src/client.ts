@@ -17,6 +17,7 @@ import {
   execChannel,
   execSubprotocols,
 } from "./exec-channel.ts";
+import { type RawExec, type RawExecHandlers, rawExec } from "./exec-raw.ts";
 import { type RunExecOptions, type RunExecResult, runExecOverWebSocket } from "./exec-run.ts";
 import { type PodTls, spawnPodDelete } from "./pod-cleanup.ts";
 import { type Pod, TERMINAL_PHASES, podIsReady } from "./types.ts";
@@ -228,6 +229,20 @@ export class KubeClient {
       input,
       options,
     );
+  }
+
+  /**
+   * Open a **raw byte** exec to `target` for a long-lived, non-interactive
+   * process (a `sh` that `workload_shell` drives): stdout/stderr as bytes, stdin
+   * written raw. Unlike `openExec` (JSON-line RPC frames) there is no framing
+   * beyond the channel byte; unlike `runExec` the stream stays open and its end
+   * is a callback, not a resolved promise
+   * (docs/feat/workload-shell.md D1).
+   */
+  openRawExec(target: ExecTarget, handlers: RawExecHandlers = {}): RawExec {
+    const url = buildExecUrl(this.server, this.namespace, target);
+    const ws = this.makeWebSocket(url, execSubprotocols(this.token));
+    return rawExec(ws, handlers);
   }
 }
 

@@ -11,6 +11,7 @@ import {
   type ExecTarget,
   KubeApiError,
   type Pod,
+  type RawExec,
   type RunExecOptions,
   type RunExecResult,
   TERMINAL_PHASES,
@@ -37,6 +38,8 @@ export interface PodCluster {
   /** Best-effort, non-blocking delete that survives `process.exit` (Ctrl+C). */
   deletePodBestEffort(name: string): void;
   openExec(target: ExecTarget, options?: ExecChannelOptions): DuplexChannel;
+  /** A long-lived raw-byte exec (docs/feat/workload-shell.md D1). */
+  openRawExec(target: ExecTarget): RawExec;
   runExec(target: ExecTarget, input?: Uint8Array, options?: RunExecOptions): Promise<RunExecResult>;
 }
 
@@ -267,6 +270,9 @@ export function kubeEngineHost(kube: PodCluster, namespace: string): EngineHost 
     },
     openExec(target, options) {
       return kube.openExec(podTarget(target), options);
+    },
+    openRawExec(target) {
+      return kube.openRawExec(podTarget(target));
     },
     runExec(target, input, options) {
       return kube.runExec(podTarget(target), input, options);

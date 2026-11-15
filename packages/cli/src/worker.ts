@@ -35,6 +35,7 @@ import {
   workerSessionBuild,
 } from "./wiring.ts";
 import type { WorkerBootstrap } from "./worker-bootstrap.ts";
+import { LaptopWorkloadShellBackend } from "./workload-shell-backend.ts";
 
 /**
  * The worker's per-session wiring, exported so a test can drive it with an
@@ -62,6 +63,10 @@ export function workerAgentFactory(
       // the two kinds that offers the model `move_session`, and the laptop's TUI
       // is right here to ask its owner about a proposal.
       moveSession: true,
+      // `workload_shell` (docs/feat/workload-shell.md D3): the worker IS the
+      // user's own host, so it holds the kubeconfig / docker endpoint the tool
+      // dials. A pod daemon never passes this.
+      workloadShell: { backend: new LaptopWorkloadShellBackend() },
     },
   );
 }

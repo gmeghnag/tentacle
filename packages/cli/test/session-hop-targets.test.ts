@@ -39,6 +39,7 @@ import type {
   EngineExecChannelOptions,
   EngineExecTarget,
   EngineHost,
+  EngineRawExec,
   EngineRunExecOptions,
   EngineRunExecResult,
   WorkloadFacts,
@@ -233,6 +234,9 @@ function fakeHost(log: FakeHostLog): EngineHost {
       connection = new Connection(daemonCh, host);
       const watched = log.closes === undefined ? clientCh : watchedChannel(clientCh, log.closes);
       return log.frames === undefined ? watched : recordingChannel(watched, log.frames);
+    },
+    openRawExec(_target: EngineExecTarget): EngineRawExec {
+      throw new Error("openRawExec is not used in this test");
     },
     async runExec(
       target: EngineExecTarget,

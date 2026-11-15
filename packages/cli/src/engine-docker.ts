@@ -55,6 +55,7 @@ export type DockerClientLike = Pick<
   | "removeContainer"
   | "waitForRunning"
   | "openExec"
+  | "openRawExec"
   | "runExec"
   | "info"
 >;
@@ -364,6 +365,16 @@ export function dockerEngineHost(options: DockerEngineHostOptions): EngineHost {
         },
         opts?.onStderr ? { onStderr: opts.onStderr } : {},
       );
+    },
+    openRawExec(target) {
+      noSubContainer(target.container);
+      const defaults = execDefaults.get(target.name);
+      return client.openRawExec({
+        container: target.name,
+        command: target.command,
+        ...(defaults?.workingDir ? { workingDir: defaults.workingDir } : {}),
+        ...(defaults?.user ? { user: defaults.user } : {}),
+      });
     },
     async runExec(target, input, opts) {
       noSubContainer(target.container);
