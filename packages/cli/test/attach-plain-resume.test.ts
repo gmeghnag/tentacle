@@ -18,6 +18,7 @@ import {
 } from "../src/kept-index.ts";
 import { type KeptEntry, parseKeptEntry } from "../src/kept.ts";
 import { SessionSaver } from "../src/session-saver.ts";
+import { recordWrite } from "./session-fixture.ts";
 
 const A = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";
@@ -90,9 +91,8 @@ describe("SessionSaver.observe", () => {
     const saved: string[] = [];
     const saver = new SessionSaver(
       {
-        write: async () => {},
-        saveSnapshot: async (r) => {
-          saved.push(r.id);
+        write: async (update) => {
+          saved.push(update.id);
         },
         remove: async () => {},
       },
@@ -102,8 +102,8 @@ describe("SessionSaver.observe", () => {
     saver.observe(() => {
       throw new Error("listener bug");
     });
-    saver.save(rec("one"));
-    saver.save(rec("two"));
+    saver.write(recordWrite(rec("one")));
+    saver.write(recordWrite(rec("two")));
     expect(await saver.drain()).toEqual([]);
     expect(seen).toEqual(["one", "two"]);
     expect(saved).toEqual(["one", "two"]);
@@ -111,13 +111,10 @@ describe("SessionSaver.observe", () => {
 
   test("a removed session is not observed (never written back)", async () => {
     const seen: string[] = [];
-    const saver = new SessionSaver(
-      { write: async () => {}, saveSnapshot: async () => {}, remove: async () => {} },
-      () => {},
-    );
+    const saver = new SessionSaver({ write: async () => {}, remove: async () => {} }, () => {});
     saver.observe((r) => seen.push(r.id));
     saver.remove("gone");
-    saver.save(rec("gone"));
+    saver.write(recordWrite(rec("gone")));
     await saver.drain();
     expect(seen).toEqual([]);
   });

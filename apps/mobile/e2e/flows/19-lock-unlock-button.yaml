@@ -31,6 +31,12 @@ appId: so.tentacle.app
 # The lock is up and the person has a way in without Face ID succeeding.
 - assertVisible:
     id: "lock-unlock"
+# No system Face ID sheet over it here (a resume does not auto-prompt after the
+# episode), so this is the unobstructed Lock screen (visual review V5).
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "19-lock"
 - tapOn:
     id: "lock-unlock"
 - runScript:

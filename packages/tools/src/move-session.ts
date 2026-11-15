@@ -5,10 +5,13 @@
  * It has **no effect at all**, and that is the design, not a shortcut. The tool
  * validates its own arguments and answers one sentence; the laptop watches its
  * OWN turn's events (`cli/src/hop-proposal.ts`), and at the turn's end asks the
- * owner through the single broker — a `session_hop` prompt that auto-accept never
- * answers and nothing remembers. So a daemon — a pod especially, which is not
- * trusted (AGENTS §7) — cannot move anything by calling it, or by forging the
- * call: all a forged call can do is raise a prompt the owner reads and may refuse.
+ * owner through the single broker — a `session_hop` prompt that auto-accept
+ * answers ONLY for a move it may answer (`hopAutoAcceptable`: anything but a move
+ * toward local proposed from a workload) and that nothing remembers. So a daemon —
+ * a pod especially, which is not trusted (AGENTS §7) — cannot move anything by
+ * calling it, or by forging the call: all a forged call can do is raise a prompt
+ * the owner reads and may refuse (or, under auto-accept, one the LAPTOP's own rule
+ * answers — decided from facts only the laptop holds, never from the arguments).
  *
  * The permission level is therefore `"none"`: there is no daemon-side effect to
  * authorize, and an `ask` here would put the same question in front of the owner
@@ -36,10 +39,38 @@ export const MOVE_SESSION_REASON_MAX = 500;
  * re-checks every argument through `hopWorkload` before anything is built, so
  * the two cannot disagree about what is accepted (the stricter one refuses first).
  */
-const WORKLOAD_PART = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+export const WORKLOAD_PART = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * A k8s NAMESPACE (OD1): a DNS-1123 label — lowercase alphanumerics and `-`, at
+ * most 63, starting and ending alphanumeric. Mirrored from `@tentacle/tui`'s
+ * `HOP_NAMESPACE` (`hop-command.ts`, with the same reason `WORKLOAD_PART` is
+ * duplicated: `@tentacle/tools` may not depend on the TUI, and `hopSpecOf`
+ * re-checks every argument through `hopWorkload` before anything is built).
+ */
+const NAMESPACE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+const NAMESPACE_MAX = 63;
 
 /** The same 253-byte ceiling a k8s DNS-1123 name has (`HOP_WORKLOAD_PART_MAX`). */
-const WORKLOAD_PART_MAX = 253;
+export const WORKLOAD_PART_MAX = 253;
+
+/**
+ * The workload grammar, exported so `workload_shell` accepts EXACTLY the same
+ * names as `move_session` — ONE spelling for both tools, never two that drift.
+ */
+export const workloadTargetGrammar = { part: WORKLOAD_PART, max: WORKLOAD_PART_MAX } as const;
+
+/**
+ * `container`/`namespace` are Kubernetes-only, enforced at parse for EVERY tool
+ * that takes a workload (docs/fix/workload-shell-live.md D4). Exported as the
+ * predicate so `workload_shell` reuses it rather than copying the rule.
+ */
+export const engineOnlyFields = (w: {
+  readonly engine: string;
+  readonly container?: string;
+  readonly namespace?: string;
+}): boolean =>
+  w.engine === "kubernetes" || (w.container === undefined && w.namespace === undefined);
 
 const workloadSchema = z
   .object({
@@ -47,9 +78,23 @@ const workloadSchema = z
     name: z.string().min(1).max(WORKLOAD_PART_MAX).regex(WORKLOAD_PART),
     /** k8s only: the container in the pod (docker/podman have none). */
     container: z.string().min(1).max(WORKLOAD_PART_MAX).regex(WORKLOAD_PART).optional(),
+    /**
+     * k8s only: the pod's namespace (OD1). Unset → the OD2 default rule, resolved
+     * on the laptop at the turn's end and SHOWN before the move is applied, so a
+     * model that omits it never gets a silent guess.
+     */
+    namespace: z
+      .string()
+      .max(NAMESPACE_MAX, `a namespace is at most ${NAMESPACE_MAX} characters`)
+      .regex(NAMESPACE, "a namespace is lowercase letters, digits and '-' only")
+      .describe("kubernetes only: the pod's namespace; omit to use your context's")
+      .optional(),
   })
   .refine((w) => w.container === undefined || w.engine === "kubernetes", {
     message: "only a kubernetes workload names a container",
+  })
+  .refine((w) => w.namespace === undefined || w.engine === "kubernetes", {
+    message: "only a kubernetes workload names a namespace",
   });
 
 /**
@@ -91,7 +136,7 @@ export type MoveSessionInput = z.infer<typeof moveSessionSchema>;
  * question about a session that is not where it thinks.
  */
 export const MOVE_SESSION_PROPOSED =
-  "Proposed; the user will be asked when this turn ends. Do not assume the move happened: nothing moves until they say yes, and this session stays where it is until then.";
+  "Proposed; it is applied when this turn ends (no prompt if auto-accept is on). Do not assume the move happened: a message at the start of the next turn tells you the result.";
 
 /**
  * The line the laptop prepends to the NEXT prompt after the owner refused a
@@ -102,11 +147,7 @@ export const MOVE_SESSION_PROPOSED =
 export const MOVE_SESSION_DECLINED_HINT =
   "[move declined] the user refused to move this session; do not propose the same move again unless something changed";
 
-export const MOVE_SESSION_DESCRIPTION = `Propose moving this session to another target: "container" (a new docker/podman container running an image, with your working folder mounted read-write), "attach" (an EXISTING workload, by engine and name), or "local" (back to the user's own machine).
-
-This tool only PROPOSES. It builds nothing and moves nothing, and it returns at once — the user is asked in their own terminal when this turn ends, and nothing moves until they say yes. Do not assume the move happened, and do not ask again in the same turn: there is one prompt per turn, and the answer arrives in your NEXT prompt (a refused move begins with \`${MOVE_SESSION_DECLINED_HINT.split("]")[0]}]\`). Use it when the work genuinely needs the other place — a tool or dependency that only the workload has, or a build that must run on the user's machine — never to tidy up or to escape a failure you could fix here.
-
-After a move, background jobs, MCP servers and session-scoped approvals are reset, and auto-accept is turned off; say so when you tell the user what changed. Put the image in \`image\` (target "container") or the workload in \`workload\` (target "attach"), and set \`keep: false\` only if the workload this session is LEAVING should be deleted (the default keeps it).`;
+export const MOVE_SESSION_DESCRIPTION = `Propose moving this session to another place; it is applied when this turn ends. Use it for multi-step work that needs a workload's tools or files; a one-off check can stay a single kubectl/oc exec. Targets: "attach" an existing workload (kubernetes: namespace, pod, optional container; docker/podman: name), "container" (a new container with your folder mounted), "local" (the user's machine). Do not assume the move happened: a message in the new place tells you where you are. The user confirms it unless auto-accept is on; background jobs and MCP servers are reset.`;
 
 export function createMoveSessionTool(): Tool<MoveSessionInput> {
   return {

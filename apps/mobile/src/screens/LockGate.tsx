@@ -17,8 +17,12 @@
 import type { JSX } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, Modal, Pressable, StyleSheet, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { AppLock, AppLockEvent, LockDelay, LockView } from "../app-lock.ts";
-import type { Palette } from "../theme.ts";
+import { type Biometry, type LockScreenView, lockScreenView } from "../lock-screen.ts";
+import { type Palette, size, typography } from "../theme.ts";
+import { Banner } from "../ui/Banner.tsx";
+import { Icon } from "../ui/Icon.tsx";
 
 /** The heartbeat period: 1 s, as D1's `tick` expects. */
 export const HEARTBEAT_MS = 1000;
@@ -39,6 +43,11 @@ export interface LockGateDeps {
   >;
   /** What this device can do (F2). Injected for the same reason. */
   readonly capability: () => Promise<"unknown" | "ok" | "none">;
+  /**
+   * The enrolled sensor, for the button's label only (never a lock decision).
+   * Optional: absent, the button reads a plain "Unlock".
+   */
+  readonly biometry?: () => Promise<Biometry>;
   /** The setting once the Keychain read lands (`"loading"` until then: F10). */
   readonly setting: LockDelay | "loading";
   /** Where the lock's own events go (D7's ring). */
@@ -61,6 +70,7 @@ export function LockGate({
   lock: instance,
   authenticate,
   capability,
+  biometry,
   setting,
   onEvent,
 }: LockGateProps): JSX.Element {
@@ -151,6 +161,23 @@ export function LockGate({
       });
   }, [dispatch, authenticate]);
 
+  // The label's sensor, read once; a failure (`lock-auth.ts`) or no reader is a plain "Unlock".
+  const [sensor, setSensor] = useState<Biometry>("unknown");
+  useEffect(() => {
+    if (biometry === undefined) {
+      return;
+    }
+    let live = true;
+    void biometry().then((value) => {
+      if (live) {
+        setSensor(value);
+      }
+    });
+    return () => {
+      live = false;
+    };
+  }, [biometry]);
+
   const locked = view.cover === "lock";
 
   return (
@@ -176,29 +203,12 @@ export function LockGate({
         // Android's hardware back does nothing here.
         onRequestClose={() => {}}
       >
-        <View style={[styles.lock, { backgroundColor: palette.groupedBackground }]}>
-          <Text testID="lock-screen" style={[styles.hidden, { color: palette.label }]}>
-            tentacle is locked
-          </Text>
-          <Text style={[styles.sub, { color: palette.secondaryLabel }]}>
-            Unlock to see your sessions
-          </Text>
-          {view.notice === "no-passcode" ? (
-            <Text testID="lock-notice" style={[styles.sub, { color: palette.secondaryLabel }]}>
-              This iPhone has no passcode, so tentacle cannot lock. Add one in Settings → Face ID &
-              Passcode.
-            </Text>
-          ) : (
-            <Pressable
-              testID="lock-unlock"
-              accessibilityRole="button"
-              onPress={unlockPressed}
-              style={[styles.button, { backgroundColor: palette.accent }]}
-            >
-              <Text style={[styles.buttonText, { color: palette.onAccent }]}>Unlock</Text>
-            </Pressable>
-          )}
-        </View>
+        <LockScreen
+          palette={palette}
+          view={lockScreenView(setting, sensor)}
+          notice={view.notice}
+          onUnlock={unlockPressed}
+        />
       </Modal>
     </View>
   );
@@ -206,9 +216,123 @@ export function LockGate({
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  lock: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
-  hidden: { fontSize: 22, fontWeight: "600", marginBottom: 8 },
-  sub: { fontSize: 14, textAlign: "center", marginBottom: 24 },
-  button: { borderRadius: 12, paddingHorizontal: 28, paddingVertical: 12 },
-  buttonText: { fontSize: 16, fontWeight: "600" },
+});
+
+/** The cover itself (mockup `Lock`). Render only: the copy comes from `lock-screen.ts`. */
+function LockScreen({
+  palette,
+  view,
+  notice,
+  onUnlock,
+}: {
+  readonly palette: Palette;
+  readonly view: LockScreenView;
+  readonly notice: LockView["notice"];
+  readonly onUnlock: () => void;
+}): JSX.Element {
+  const insets = useSafeAreaInsets();
+  return (
+    <View
+      style={{
+        flex: 1,
+        backgroundColor: palette.bg,
+        paddingTop: insets.top,
+        paddingBottom: Math.max(insets.bottom, 16) + 32,
+      }}
+    >
+      <View style={lockStyles.hero}>
+        <View style={[lockStyles.mark, { backgroundColor: palette.accentFill }]}>
+          <Icon name="lock.shield.fill" color={palette.onAccent} size={46} />
+        </View>
+        <View style={lockStyles.heading}>
+          <Text
+            testID="lock-screen"
+            accessibilityRole="header"
+            style={[typography.lockTitle, lockStyles.center, { color: palette.label }]}
+          >
+            {view.title}
+          </Text>
+          <Text style={[typography.callout, lockStyles.subtitle, { color: palette.sec }]}>
+            {view.subtitle}
+          </Text>
+        </View>
+      </View>
+      <View style={lockStyles.actions}>
+        {notice === "no-passcode" ? (
+          <Banner
+            palette={palette}
+            flush
+            testID="lock-notice"
+            title="tentacle cannot lock"
+            body="This iPhone has no passcode. Add one in Settings → Face ID & Passcode."
+          />
+        ) : (
+          <>
+            <Pressable
+              testID="lock-unlock"
+              accessibilityRole="button"
+              accessibilityLabel={view.unlockLabel}
+              onPress={onUnlock}
+              style={({ pressed }) => [
+                lockStyles.unlock,
+                { backgroundColor: palette.accentFill, opacity: pressed ? 0.8 : 1 },
+              ]}
+            >
+              <Icon name={view.unlockIcon} color={palette.onAccent} size={22} />
+              <Text style={[typography.headline, { color: palette.onAccent }]}>
+                {view.unlockLabel}
+              </Text>
+            </Pressable>
+            {view.showPasscode ? (
+              <Pressable
+                testID="lock-passcode"
+                accessibilityRole="button"
+                onPress={onUnlock}
+                style={lockStyles.passcode}
+              >
+                <Text style={[typography.body, { color: palette.accent }]}>Use Passcode</Text>
+              </Pressable>
+            ) : null}
+          </>
+        )}
+        {view.footnote === null ? null : (
+          <Text style={[typography.footnote, lockStyles.footnote, { color: palette.sec }]}>
+            {view.footnote}
+          </Text>
+        )}
+      </View>
+    </View>
+  );
+}
+
+const lockStyles = StyleSheet.create({
+  hero: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 20,
+    paddingHorizontal: 40,
+  },
+  mark: {
+    width: 96,
+    height: 96,
+    borderRadius: 22,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  heading: { gap: 6 },
+  center: { textAlign: "center" },
+  subtitle: { fontSize: 16, lineHeight: 22, textAlign: "center" },
+  actions: { alignItems: "center", gap: 10, paddingHorizontal: 24 },
+  unlock: {
+    alignSelf: "stretch",
+    height: size.lockButton,
+    borderRadius: size.lockButton / 2,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+  },
+  passcode: { height: size.touch, paddingHorizontal: 16, justifyContent: "center" },
+  footnote: { marginTop: 6, textAlign: "center" },
 });

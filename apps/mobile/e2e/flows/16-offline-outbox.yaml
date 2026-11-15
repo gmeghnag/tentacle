@@ -18,6 +18,10 @@ appId: so.tentacle.app
     visible:
       id: "banner-reconnecting"
     timeout: 30000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "16-offline"
 - tapOn:
     id: "composer-input"
 - inputText: "OUTBOX sixteen"
@@ -28,6 +32,10 @@ appId: so.tentacle.app
     visible:
       id: "waiting-network"
     timeout: 20000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "16-outbox"
 # A kill must not lose it: the item's keys are on disk before the first attempt.
 - stopApp
 - launchApp

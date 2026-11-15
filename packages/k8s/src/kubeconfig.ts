@@ -93,19 +93,48 @@ function pem(data: string | undefined, file: string | undefined): PemSource | un
   return undefined;
 }
 
+/** The named (or current) context, and the namespace rule applied to it ONCE. */
+export interface ContextNamespace {
+  readonly namespace: string;
+  /** Which fact decided it: the context's own `namespace`, else the `"default"`. */
+  readonly source: "context" | "default";
+  /** The context's name (the `current-context` when none was requested). */
+  readonly context: string;
+}
+
+/**
+ * Which namespace a context names, and why (docs/feat/session-hop-ux OD2): the
+ * ONE copy of "the context's namespace, else `default`". `resolveContext` applies
+ * it to the connection, and the CLI's `kubeNamespace` (`engine-select.ts`) adds
+ * the explicit / env / server steps on top of it — so `run`, `attach` and a hop
+ * cannot resolve a different namespace for the same kubeconfig.
+ *
+ * Throws the same two clear errors `resolveContext` does (no current-context, no
+ * such context): a namespace resolved out of a kubeconfig nobody can read is a
+ * guess, and a guess is what the live test could not diagnose.
+ */
+export function contextNamespace(config: Kubeconfig, contextName?: string): ContextNamespace {
+  const name = contextName ?? config["current-context"];
+  if (!name) {
+    throw new Error("kubeconfig has no current-context and none was requested");
+  }
+  const context = config.contexts?.find((c) => c.name === name)?.context;
+  if (!context) {
+    throw new Error(`kubeconfig has no context "${name}"`);
+  }
+  return context.namespace === undefined
+    ? { namespace: "default", source: "default", context: name }
+    : { namespace: context.namespace, source: "context", context: name };
+}
+
 /**
  * Reduce a kubeconfig to a single context's connection. Throws a clear error if
  * the context / cluster / user is missing or the server URL is absent.
  */
 export function resolveContext(config: Kubeconfig, options: ResolveOptions = {}): ResolvedContext {
-  const contextName = options.context ?? config["current-context"];
-  if (!contextName) {
-    throw new Error("kubeconfig has no current-context and none was requested");
-  }
-  const context = config.contexts?.find((c) => c.name === contextName)?.context;
-  if (!context) {
-    throw new Error(`kubeconfig has no context "${contextName}"`);
-  }
+  const named = contextNamespace(config, options.context);
+  const contextName = named.context;
+  const context = config.contexts?.find((c) => c.name === contextName)?.context ?? {};
   const cluster = config.clusters?.find((c) => c.name === context.cluster)?.cluster;
   if (!cluster?.server) {
     throw new Error(`kubeconfig cluster "${context.cluster ?? "?"}" has no server`);
@@ -120,7 +149,7 @@ export function resolveContext(config: Kubeconfig, options: ResolveOptions = {})
 
   const resolved: ResolvedContext = {
     server: cluster.server.replace(/\/+$/, ""),
-    namespace: options.namespace ?? context.namespace ?? "default",
+    namespace: options.namespace ?? named.namespace,
     insecureSkipTlsVerify: cluster["insecure-skip-tls-verify"] === true,
   };
   const ca = pem(cluster["certificate-authority-data"], cluster["certificate-authority"]);

@@ -24,7 +24,6 @@ import { daemonErrorLogPath } from "../src/daemon-log.ts";
 import {
   buildAgent,
   buildSessionSkills,
-  inProcessAgents,
   loadUserAgentTypes,
   readSkillBody,
 } from "../src/wiring.ts";
@@ -48,33 +47,7 @@ afterAll(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-describe("inProcessAgents (single-broker invariant, AGENTS §7)", () => {
-  test("every per-session agent — before and after /clear — asks the ONE broker the TUI prompts on", async () => {
-    // Mutation: `build: () => buildAgent(config)` (a broker per agent, which
-    // auto-approves by default) → the TUI's requester is never reached.
-    const { permissions, build } = inProcessAgents(config);
-    const asked: string[] = [];
-    permissions.setRequester(async (req) => {
-      asked.push(req.title);
-      return { allowed: false };
-    });
-    const first = build();
-    const second = build(); // the session after /clear
-    expect(first.permissions).toBe(permissions);
-    expect(second.permissions).toBe(permissions);
-    expect(first.jobs).not.toBe(second.jobs); // one BackgroundJobs per session (D3)
-    for (const wired of [first, second]) {
-      const answer = await wired.permissions.request({
-        tool: "shell",
-        level: "ask",
-        title: "run ls",
-        input: {},
-      });
-      expect(answer.allowed).toBe(false);
-    }
-    expect(asked).toEqual(["run ls", "run ls"]);
-  });
-
+describe("buildAgent permissions (AGENTS §7, single broker)", () => {
   test("the main agent and its sub-agents forward the ask's call attribution to the broker", async () => {
     // docs/feat/permission-call-attribution.md T10. Mutation: put back
     // `(req) => permissions.request(req)` in either factory → red.
@@ -630,45 +603,32 @@ describe("project hooks wiring (docs/feat/hooks-project-trust.md)", () => {
     );
     expect(pod.hooks?.projectTrustRequest()?.canAllow).toBe(false);
   });
+});
 
-  test("in-process: hooks the wire schema rejects are declined, never asked, and logged (fix/in-process-hooks-trust-schema)", async () => {
-    const overLimit = {
-      ...projectHooks,
-      hooks: [{ event: "turn_start" as const, command: `echo ${"x".repeat(5000)}` }],
-    };
-    const { permissions, build } = inProcessAgents({ ...config, projectHooks: overLimit });
-    let asked = 0;
-    permissions.setRequester(async () => {
-      asked++;
-      return { allowed: true, scope: "once" };
-    });
-    const { hooks, askHooksTrust } = agentConfig(build());
-    expect(hooks).toBeDefined();
-    if (hooks) {
-      await hooks.resolveProjectTrust("s1", askHooksTrust);
-      expect(hooks.hasAny("turn_start")).toBe(false);
-      expect(hooks.needsProjectTrust()).toBe(false); // declined for the session
-    }
-    expect(asked).toBe(0);
-    const log = await readFile(daemonErrorLogPath(config.configDir), "utf8").catch(() => "");
-    expect(log).toContain("hooks.0.command");
-  });
-
-  test("in-process: the trust question goes to the ONE broker the TUI prompts on", async () => {
-    const { permissions, build } = inProcessAgents({ ...config, projectHooks });
-    const kinds: (string | undefined)[] = [];
-    permissions.setRequester(async (req) => {
-      kinds.push(req.kind);
-      return { allowed: true, scope: "once" };
-    });
-    const ask = agentConfig(build()).askHooksTrust;
-    const request = agentConfig(build()).hooks?.projectTrustRequest();
-    expect(ask).toBeDefined();
-    expect(request).toBeDefined();
-    if (ask && request) {
-      expect(await ask({ ...request, sessionId: "s1" })).toBe(true);
-    }
-    expect(kinds).toEqual(["hooks_trust"]);
+describe("the local TUI's single broker (AGENTS §7), pinned where it is built", () => {
+  test("grep-guard: `main` hands ONE `permissions` to the worker runtime AND to `startTui`", async () => {
+    // The `inProcessAgents` row this file used to hold was the only pin on the
+    // LOCAL path's broker identity; with that builder gone (docs/feat/
+    // remove-in-process.md) the invariant lives entirely at the call site, where
+    // TypeScript cannot see a second `new PermissionBroker()`. So pin the text:
+    // one construction site in the TUI block, its broker passed to the runtime
+    // and then to `startTui`.
+    // Mutation: `startTui(null, { permissions: new PermissionBroker(), … })` →
+    // the daemon-side default `allowAll` approves everything and the TUI's
+    // prompt is never reached.
+    const main = await Bun.file(`${import.meta.dir}/../src/main.ts`).text();
+    const block = main.slice(main.indexOf("const sessions = await openSessions(topFlags"));
+    const tui = block.slice(0, block.indexOf("// A one-shot prompt"));
+    expect(tui.match(/new PermissionBroker\(/g) ?? []).toHaveLength(1);
+    // The SAME identifier reaches both the runtime and the TUI. (The call goes
+    // through the `startWorkerRuntime` test seam — `io.startWorkerRuntime ?? …` —
+    // so the assertion names the argument object, not the callee text; the seam
+    // defaults to the real `startWorkerRuntime`.)
+    expect(tui).toMatch(
+      /\(io\.startWorkerRuntime \?\? startWorkerRuntime\)\(\s*config,\s*\{ permissions, saver/,
+    );
+    expect(tui).not.toContain("new PermissionBroker(), saver");
+    expect(tui).toMatch(/startTui\(null, \{\n\s*model: config\.model,\n[\s\S]*?\n\s*permissions,/);
   });
 });
 

@@ -28,6 +28,7 @@ import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import type { DuplexChannel } from "@tentacle/transport";
 import {
   type AutoAcceptFeed,
+  type HopSpec,
   type HopWorkload,
   type SessionController,
   pickSession,
@@ -50,6 +51,7 @@ import {
   withRunModel,
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
+import { logDaemonError } from "./daemon-log.ts";
 import { detachedRunOf } from "./detached-run-of.ts";
 import { devicesCommand, resetCommand, revokeCommand } from "./devices-cmd.ts";
 import { type EngineHost, type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
@@ -67,6 +69,7 @@ import {
   engineNoun,
   hostOptionsFor,
   keptLocation,
+  kubeNamespace,
   laptopWorkspaceInput,
   resolveRm,
   setupFailureLine,
@@ -100,8 +103,15 @@ import { fileTrustStore, hooksTrustCommand, projectHooksWireProblem } from "./ho
 import { createHopFeed } from "./hop-feed.ts";
 import { createHopLeave } from "./hop-leave.ts";
 import type { HopPlace } from "./hop-plan.ts";
+import type { HopNamespacePin } from "./hop-proposal.ts";
 import { createHopRuntime } from "./hop-runtime.ts";
-import { type HopEngineHost, hopBuilder, hopPromptFacts } from "./hop-targets.ts";
+import {
+  type HopEngineHost,
+  type HopHostWhere,
+  hopBuilder,
+  hopHostNamespace,
+  hopPromptFacts,
+} from "./hop-targets.ts";
 import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
 import {
   forgetKept,
@@ -119,7 +129,7 @@ import {
   keptMetadata,
   placeText,
 } from "./kept.ts";
-import { startWorkerRuntime } from "./local-runtime.ts";
+import { type LocalRuntime, startWorkerRuntime, workerStartFailureText } from "./local-runtime.ts";
 import { LOG_TAIL_DEFAULT, parseOnly } from "./log-events.ts";
 import { logsCommand } from "./logs-cmd.ts";
 import { packagesCommand, spawnGit } from "./packages-cmd.ts";
@@ -141,7 +151,7 @@ import {
 import { localAutoAccept, styleInfo } from "./run-ui.ts";
 import { serveModelNotice } from "./serve-model-notice.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
-import { inProcessSessions } from "./session-jobs.ts";
+import { autoAcceptOf, routingAutoAccept, seedAutoAcceptOf } from "./session-auto-accept.ts";
 import { NOT_A_TERMINAL, dimIf, termOf } from "./streams.ts";
 import { startTerminal } from "./terminal.ts";
 import {
@@ -153,7 +163,7 @@ import {
 import { untrustedText } from "./untrusted-text.ts";
 import { runUpdate, spawnVersion } from "./update.ts";
 import { APP_BUILD, APP_RELEASE_VERSION, APP_VERSION } from "./version.ts";
-import { buildAgent, connectConfiguredMcp, inProcessAgents, loadUserAgentTypes } from "./wiring.ts";
+import { buildAgent, connectConfiguredMcp, loadUserAgentTypes } from "./wiring.ts";
 import {
   type WorkspacePlan,
   hideList,
@@ -264,7 +274,6 @@ Usage:
   tentacle --plain         plain line-based REPL (for pipes / no TTY)
   tentacle --resume [uid]  resume a saved session of this folder (pick one if no uid)
   tentacle --continue      resume this folder's most recent session
-  tentacle -i --in-process run the agent on the render thread (opt out of the worker)
   tentacle run --image <ref> [--engine kubernetes|docker|podman] [--rm[=true|false]] [--no-mount] [--confirm-mount] [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]|--continue] [--name <n>] [--auto-accept[=true|false]] ["<prompt>" | --prompt <text>]
                                 run the agent inside a new Kubernetes pod or Docker/Podman
                                 container (sandbox), local TUI (--name is its name; random
@@ -512,6 +521,14 @@ export interface CliIO {
   attachPlainRuntime?: typeof attachEngineRuntime;
   /** Test seam: the TUI of an `attach` to a detached run (pins the single broker). */
   startTui?: typeof startTui;
+  /**
+   * Test seam: the local TUI's worker runtime. Default: `startWorkerRuntime`.
+   * The ONE contract a test needs it for is the failure path: a worker that
+   * cannot start must be an error line + exit 1 with NO Ink (docs/feat/
+   * remove-in-process.md F1/F2, the task's Goal) — injectable, or the only way to
+   * reach it is to break Bun.
+   */
+  startWorkerRuntime?: typeof startWorkerRuntime;
   /**
    * Test seam: which of stdin / stdout are a terminal. Default: the process's own
    * `isTTY` (resolved once, at the top of `main`). A test that omits this seam DOES
@@ -1200,8 +1217,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const context = flags.get("context");
     try {
       return buildEngineHost(kind, {
-        ...(kind === "kubernetes"
-          ? { namespace: flags.get("namespace") ?? process.env.TENTACLE_POD_NAMESPACE }
+        // OD2: the env step (`TENTACLE_POD_NAMESPACE`) moved INTO
+        // `buildEngineHost` (`kubeNamespace`), so a hop's `buildEngineHost(engine, {})`
+        // resolves exactly what `run`/`attach` do — one rule, one place.
+        ...(kind === "kubernetes" && flags.get("namespace") !== undefined
+          ? { namespace: flags.get("namespace") }
           : {}),
         ...(context !== undefined ? { context } : {}),
         allowInsecureTcp: bools.has("insecure-docker-tcp"),
@@ -1221,13 +1241,58 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
    * (`buildEngineHost`, no flag overrides — a hop has no `--engine`), with the
    * locators its kept entry records (D5).
    */
-  const hopEngineHost = (engine: EngineKind): HopEngineHost => {
-    const built = buildEngineHost(engine, {});
+  const hopEngineHost = (engine: EngineKind, where?: HopHostWhere): HopEngineHost => {
+    // OD3: resolve ONCE here, with its provenance, and pin that namespace into the
+    // builder — so the trace the row/miss report and the place that is dialled
+    // cannot come from two different reads of a kubeconfig. The choice itself is
+    // `hopHostNamespace` (pure, tested): a namespace a PIN already resolved must
+    // not be re-resolved, which would answer `explicit` and present OD2's decision
+    // as the owner's own namespace (fix round 2, finding 1).
+    const namespace = hopHostNamespace(engine, where);
+    const built = buildEngineHost(
+      engine,
+      namespace === undefined ? {} : { namespace: namespace.namespace },
+    );
     return {
       host: built.host,
       ...(built.endpoint === undefined ? {} : { endpoint: built.endpoint }),
       locators: keptLocation(engine, built, { context: undefined, insecureTcp: false }),
+      ...(namespace === undefined ? {} : { namespace }),
     };
+  };
+
+  /**
+   * OD1/OD3: a PROPOSAL's k8s namespace, resolved at the turn's end so the owner is
+   * asked about the place that will really be dialled (and shown WHY it is that
+   * one). An explicit `namespace` on the workload is what the model named; every
+   * other fact (`TENTACLE_POD_NAMESPACE`, the context) is the laptop's. A
+   * resolution that THROWS is the model's news, not a crash: nothing is asked.
+   */
+  const pinNamespace = (spec: HopSpec): HopNamespacePin => {
+    if (spec.target !== "attach" || spec.workload.engine !== "kubernetes") {
+      return { kind: "pinned", spec };
+    }
+    try {
+      const namespace = kubeNamespace(
+        spec.workload.namespace === undefined ? {} : { namespace: spec.workload.namespace },
+      );
+      return {
+        kind: "pinned",
+        spec: {
+          target: "attach",
+          workload: { ...spec.workload, namespace: namespace.namespace },
+          keep: spec.keep,
+        },
+        namespace,
+      };
+    } catch (error) {
+      // The REASON only: `hopWakeLine` wraps it in `[move failed: …]` when the
+      // line is rendered (`hop-turn.ts`), so the brackets are never doubled.
+      return {
+        kind: "failed",
+        line: error instanceof Error ? error.message : String(error),
+      };
+    }
   };
 
   /**
@@ -2065,131 +2130,93 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     const { saver, resume: resumeRecord } = sessions;
 
-    // By default the agent runs in a worker thread, off the render thread, so
-    // tool execution never janks the UI (MCP tools and live background-job exits
-    // work over the RPC boundary too). Opt out with `--in-process` (or
-    // `--no-worker`); any worker failure also falls back to in-process.
-    const useWorker = !topBools.has("in-process") && !topBools.has("no-worker");
-    if (useWorker) {
-      // RPC path: hold a daemon's request until the TUI's prompt is mounted.
-      const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
-      const runtime = await startWorkerRuntime(
+    // The agent runs in a worker thread, off the render thread, so tool
+    // execution never janks the UI (MCP tools and live background-job exits work
+    // over the RPC boundary too). There is no in-process path and no fallback
+    // (AGENTS §7 "TUI always over RPC — one session path"): a worker that cannot
+    // start is an error said here, pre-mount, and an exit 1.
+    // RPC path: hold a daemon's request until the TUI's prompt is mounted.
+    const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
+    let runtime: LocalRuntime;
+    try {
+      runtime = await (io.startWorkerRuntime ?? startWorkerRuntime)(
         config,
         { permissions, saver, resume: resumeRecord },
         err,
       );
-      if (runtime) {
-        // `/move` (docs/feat/session-hop.md H4): the worker TUI is the ONE
-        // hop-capable origin in v1 (D8). The facade keeps ONE stable identity for
-        // every member `startTui` asks for, and the SAME broker and saver go to
-        // every runtime a hop builds (AGENTS §7, P2); `hop-feed.ts` bridges it to
-        // the TUI's two props (D3).
-        const place: { current: HopPlace } = { current: { kind: "local" } };
-        // The facade's `status` sink is fixed at build time; the feed's per-run
-        // listener set is not. One mutable indirection, set right below.
-        let hopStatus: (line: string | null) => void = () => {};
-        const facade = createHopRuntime({
-          initial: runtime,
-          startup: { place: { kind: "local" }, daemonInPod: false },
-          shared: { permissions, saver },
-          // `hopBuilder` (not a lambda): it is the ONE place the facade's
-          // `opts` — the owner's approval already answered the mount gate —
-          // reaches the factory. Dropping it is invisible to the compiler (H5
-          // review round 2, finding 1), and true here before that fix.
-          build: hopBuilder({
-            config,
-            // D6: the engine's lines go to the hop's sinks — never a raw write
-            // while Ink owns the terminal (AGENTS §7, P8).
-            status: (line) => hopStatus(line),
-            notify: (text) => sessions.notices.notify(text),
-            host: (engine) => hopEngineHost(engine),
-            defaultImage: () => process.env.TENTACLE_POD_IMAGE,
-            // D7(a): a workload a laptop detached run owns is not a hop's to join.
-            detachedRun: (workload) => hopDetachedRun(workload),
-          }),
-          load: (uid) => sessions.store.load(uid),
-          status: (line) => hopStatus(line),
-          // No `notify`: the TUI owns the hop's outcome line (docs/fix/session-hop-live.md D2).
-        });
-        const hopView = createHopFeed({
-          facade,
-          place: () => place.current,
-          notify: (text) => sessions.notices.notify(text),
-          // D5: the ONE place that decides a leave, through the verified delete.
-          leave: (before, keep) => hopLeave(before, keep),
-          // D9/H5: a proposed move is asked on the SAME broker the TUI installs its
-          // prompt on (AGENTS §7, single broker) — a second one would silently
-          // auto-approve it daemon-side. The prompt's facts come from the plan the
-          // target would use, so the owner reads the real image and mount.
-          permissions,
-          promptFacts: (spec) =>
-            hopPromptFacts(
-              { config, host: (engine) => hopEngineHost(engine) },
-              spec,
-              place.current,
-            ),
-        });
-        hopStatus = hopView.status;
-        const offTarget = facade.onTarget((view) => {
-          place.current = view.place;
-        });
-        await runSessionTui(sessions, {
-          start: (sessionOptions) =>
-            startTui(null, {
-              model: config.model,
-              theme: config.tui?.theme ?? "auto",
-              cwd: config.cwd,
-              contextWindow: config.contextWindow,
-              permissions,
-              jobs: facade.jobs,
-              autoWakeOnJobExit: config.autoWake,
-              subagentsTwoWay: config.subagentsTwoWay,
-              createSession: facade.createSession,
-              link: facade.link,
-              mcpStatus: facade.mcpStatus,
-              hop: hopView.hop,
-              targetFeed: hopView.targetFeed,
-              ...sessionOptions,
-            }),
-          teardown: async () => {
-            offTarget();
-            await facade.dispose();
-          },
-          write: err,
-        });
-        return 0;
-      }
-      // worker unavailable → fall through to the in-process path below
+    } catch (error) {
+      // Pre-mount (P2), so stderr is still ours. Nothing was written: the
+      // session lock is taken per write, and `openSessions` only loads (P1).
+      err(`${workerStartFailureText(error, logDaemonError(config.configDir, error))}\n`);
+      await saver.drain({ onSlow: (ids) => err(`[session] still saving ${ids.join(", ")}…\n`) });
+      return 1;
     }
-
-    // One agent per session (one `BackgroundJobs` each, so `/clear` ends the
-    // old session's jobs, as on every RPC runtime — decision D3), all on ONE
-    // broker: the one the TUI installs its prompt on (AGENTS §7).
-    const { permissions, build } = inProcessAgents(config);
-    const mcp = await connectMcpServers(config.mcpServers);
-    for (const [name, message] of Object.entries(mcp.errors)) {
-      err(`[mcp] server "${name}" failed to connect: ${message}\n`);
-    }
-    for (const line of longToolNameWarnings(mcp.tools.map((t) => t.name))) {
-      err(`[mcp] ${line}\n`);
-    }
-    const mcpTracker = new McpStatusTracker(Object.keys(config.mcpServers));
-    mcpTracker.settle(mcp);
-    const { createSession, jobs } = inProcessSessions({
-      build,
-      mcpTools: mcp.tools,
-      resume: resumeRecord,
-      persist: (snapshot, createdAt, title) =>
-        saver.save(
-          recordFromSnapshot(snapshot, {
-            cwd: config.cwd,
-            model: config.model,
-            title,
-            ...(createdAt !== undefined ? { createdAt } : {}),
-          }),
-        ),
+    // `/move` (docs/feat/session-hop.md H4): the worker TUI is the ONE
+    // hop-capable origin in v1 (D8). The facade keeps ONE stable identity for
+    // every member `startTui` asks for, and the SAME broker and saver go to
+    // every runtime a hop builds (AGENTS §7, P2); `hop-feed.ts` bridges it to
+    // the TUI's two props (D3).
+    const place: { current: HopPlace } = { current: { kind: "local" } };
+    // The facade's `status` sink is fixed at build time; the feed's per-run
+    // listener set is not. One mutable indirection, set right below.
+    let hopStatus: (line: string | null) => void = () => {};
+    const facade = createHopRuntime({
+      initial: runtime,
+      startup: { place: { kind: "local" }, daemonInPod: false },
+      shared: { permissions, saver },
+      // `hopBuilder` (not a lambda): it is the ONE place the facade's
+      // `opts` — the owner's approval already answered the mount gate —
+      // reaches the factory. Dropping it is invisible to the compiler (H5
+      // review round 2, finding 1), and true here before that fix.
+      build: hopBuilder({
+        config,
+        // D6: the engine's lines go to the hop's sinks — never a raw write
+        // while Ink owns the terminal (AGENTS §7, P8).
+        status: (line) => hopStatus(line),
+        notify: (text) => sessions.notices.notify(text),
+        // OD1/OD2: the namespace the build dials is the one the owner SAW — a
+        // typed `/move`'s build resolves it once here, a proposal's at its
+        // turn's end (`pinNamespace`) — never a fresh read at build time.
+        host: (engine, where) => hopEngineHost(engine, where),
+        defaultImage: () => process.env.TENTACLE_POD_IMAGE,
+        // D7(a): a workload a laptop detached run owns is not a hop's to join.
+        detachedRun: (workload) => hopDetachedRun(workload),
+      }),
+      load: (uid) => sessions.store.load(uid),
+      status: (line) => hopStatus(line),
+      // No `notify`: the TUI owns the hop's outcome line (docs/fix/session-hop-live.md D2).
     });
-
+    const hopView = createHopFeed({
+      facade,
+      place: () => place.current,
+      notify: (text) => sessions.notices.notify(text),
+      // D5: the ONE place that decides a leave, through the verified delete.
+      leave: (before, keep) => hopLeave(before, keep),
+      // D9/H5: a proposed move is asked on the SAME broker the TUI installs its
+      // prompt on (AGENTS §7, single broker) — a second one would silently
+      // auto-approve it daemon-side. The prompt's facts come from the plan the
+      // target would use, so the owner reads the real image and mount.
+      permissions,
+      // OD1/OD3: a PROPOSAL's namespace is resolved at the turn's end and
+      // written into the spec the owner is shown (and the build dials), with
+      // its provenance — so the prompt answers "why that namespace" itself.
+      pinNamespace,
+      promptFacts: (spec) =>
+        hopPromptFacts({ config, host: (engine) => hopEngineHost(engine) }, spec, place.current),
+    });
+    hopStatus = hopView.status;
+    const offTarget = facade.onTarget((view) => {
+      place.current = view.place;
+    });
+    // The session's auto-accept, shared by every device on it (docs/feat/
+    // session-auto-accept.md D5): a routing feed, because a hop moves the TUI
+    // to another runtime whose session has its own link. A pod target is a pod
+    // daemon, so its link never shares — the value is carried in memory, which
+    // is how auto-accept survives a hop (docs/feat/session-hop-ux).
+    const autoAcceptFeed = routingAutoAccept();
+    const created = facade.createSession;
+    /** The controller the TUI is on now: what a `/clear` seeds the next session from. */
+    let lastController: ReturnType<typeof created> | null = null;
     await runSessionTui(sessions, {
       start: (sessionOptions) =>
         startTui(null, {
@@ -2198,14 +2225,34 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           cwd: config.cwd,
           contextWindow: config.contextWindow,
           permissions,
-          jobs,
+          jobs: facade.jobs,
           autoWakeOnJobExit: config.autoWake,
           subagentsTwoWay: config.subagentsTwoWay,
-          createSession,
-          mcpStatus: () => mcpTracker.probe(),
+          autoAccept: autoAcceptFeed,
+          autoAcceptShared: autoAcceptFeed,
+          createSession: () => {
+            // A session this call CREATES (a `/clear` fork, a hop target)
+            // starts with the switch the person has now: the open carries it
+            // as `OpenParams.autoAccept` (D5), read by the SAME client.
+            seedAutoAcceptOf(lastController, autoAcceptFeed.current());
+            const controller = created();
+            // The session this TUI is on now: the feed adopts its value and
+            // listens for another device's flips. A controller with no shared
+            // link (a pod target) leaves the feed on this laptop's value.
+            autoAcceptFeed.use(autoAcceptOf(controller));
+            lastController = controller;
+            return controller;
+          },
+          link: facade.link,
+          mcpStatus: facade.mcpStatus,
+          hop: hopView.hop,
+          targetFeed: hopView.targetFeed,
           ...sessionOptions,
         }),
-      teardown: () => mcp.dispose(),
+      teardown: async () => {
+        offTarget();
+        await facade.dispose();
+      },
       write: err,
     });
     return 0;

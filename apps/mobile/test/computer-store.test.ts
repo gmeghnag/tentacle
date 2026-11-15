@@ -130,6 +130,33 @@ describe("the Keychain computer store", () => {
     }
   });
 
+  test("a record an older build wrote (no thisDeviceName) still loads, and sends no label", async () => {
+    // docs/feat/session-auto-accept.md D7 (Review round 1, HIGH 2): the label a
+    // pairing now records is OPTIONAL, so an update never makes an existing
+    // paired computer unreadable (F-K3 — the newer app must find it intact).
+    // Mutation: require the field → the whole computer reads `broken`.
+    const kv = fakeKV();
+    const store = createComputerStore({ kv, keychainAccessible: THIS_DEVICE_ONLY });
+    await store.add(computer("old"), "priv-old");
+    // Rewrite the item as the build BEFORE the label would have written it.
+    const key = [...kv.items.keys()].find((k) => k !== "index" && k.includes("old"));
+    if (key === undefined) throw new Error("no item written");
+    const stored = JSON.parse(kv.items.get(key) ?? "{}") as Record<string, unknown>;
+    const { thisDeviceName: _dropped, ...withoutLabel } = stored;
+    kv.items.set(key, JSON.stringify(withoutLabel));
+    const entries = await store.list();
+    expect(entries.map((entry) => entry.state)).toEqual(["paired"]);
+    const loaded = entries[0];
+    if (loaded?.state !== "paired") throw new Error("not paired");
+    expect(loaded.computer.thisDeviceName).toBeUndefined();
+    // And a record that HAS one gives it back (the phone's `ClientInfo.host`).
+    await store.add(computer("new", { thisDeviceName: "Gabriel's iPhone" }), "priv-new");
+    const after = await store.list();
+    const fresh = after.find((entry) => entry.state === "paired" && entry.computer.id === "new");
+    if (fresh?.state !== "paired") throw new Error("not paired");
+    expect(fresh.computer.thisDeviceName).toBe("Gabriel's iPhone");
+  });
+
   test("add writes the ITEM before the index: a crash on the index leaves it unlisted (mutation: swap → red)", async () => {
     const kv = fakeKV();
     const s = store(kv);

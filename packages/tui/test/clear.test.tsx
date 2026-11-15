@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
 import type { SessionActivity } from "../src/turn-feed.ts";
+import { inertSession } from "./session-stub.ts";
 
 // docs/feat/clear-keeps-jobs.md — T19: `/clear` in the App. The daemon resets the
 // conversation in place; the TUI keeps its session (no `close`, no new one) and
@@ -22,13 +23,13 @@ function rig(
   opts: {
     clear?: () => Promise<{ before: number; after: number }>;
     holdTurn?: boolean;
-    withClear?: boolean;
     resetOnSend?: boolean;
   } = {},
 ) {
   const log = { clears: 0, closes: 0, creates: 0, aborted: 0 };
   let listener: ((a: SessionActivity) => void) | null = null;
   const ctrl: SessionController = {
+    ...inertSession(),
     async *send(prompt, signal) {
       if (opts.resetOnSend) {
         // The cleared history reaches an own turn as its snapshot (in-turn).
@@ -57,12 +58,10 @@ function rig(
       log.closes += 1;
     },
   };
-  if (opts.withClear !== false) {
-    ctrl.clear = () => {
-      log.clears += 1;
-      return opts.clear ? opts.clear() : Promise.resolve({ before: 4, after: 2 });
-    };
-  }
+  ctrl.clear = () => {
+    log.clears += 1;
+    return opts.clear ? opts.clear() : Promise.resolve({ before: 4, after: 2 });
+  };
   const raise = (a: SessionActivity) => listener?.(a);
   const app = render(
     <App
@@ -183,26 +182,34 @@ describe("/clear (docs/feat/clear-keeps-jobs.md)", () => {
     r.app.unmount();
   });
 
-  test("T19d a session without `clear` takes the legacy path (close, then a new session)", async () => {
-    const r = rig({ withClear: false });
+  test("T19d `/clear` always resets in place: it closes nothing and builds no second session", async () => {
+    // docs/feat/remove-in-process.md: the legacy close-and-replace existed for a
+    // session with no `clear` (the in-process fallback). `clear` is required now,
+    // so `/clear` is ONE path — `session/clear` — and this pins that no second
+    // path creeps back in. Mutation: restore the `canClear === false` branch →
+    // `creates` becomes 2.
+    const r = rig();
     await delay(30);
     await type(r.app.stdin, "/clear");
-    expect(r.log.closes).toBe(1);
-    expect(r.log.creates).toBe(2);
+    expect(r.log.closes).toBe(0);
+    expect(r.log.creates).toBe(1);
+    expect(r.log.clears).toBe(1);
     r.app.unmount();
   });
 
-  test("T19f the legacy path is still refused mid-turn (it would swap the session under the turn)", async () => {
-    // Mutation: exempt `/clear` from the mid-turn guard for every session.
-    const r = rig({ withClear: false, holdTurn: true });
+  test("T19f a `/clear` is exempt mid-turn (it stops the turn first), never refused", async () => {
+    // Mutation: drop the `cmd !== "/clear"` exemption in `dispatch` → the refusal
+    // below appears and the clear never runs.
+    const r = rig({ holdTurn: true });
     await delay(30);
     r.app.stdin.write("hello");
     await delay(20);
     r.app.stdin.write("\r");
     await delay(60);
     await type(r.app.stdin, "/clear");
-    expect(strip(r.app.lastFrame())).toContain("Can't run /clear while a turn is running");
-    expect(r.log.closes).toBe(0);
+    await delay(120);
+    expect(strip(r.app.lastFrame())).not.toContain("Can't run /clear while a turn is running");
+    expect(r.log.clears).toBe(1);
     expect(r.log.creates).toBe(1);
     r.app.unmount();
   });
@@ -246,6 +253,7 @@ function wakeRig(opts: { holdHistoryMs?: number; clearRejects?: boolean } = {}) 
     get: () => undefined,
   };
   const ctrl: SessionController = {
+    ...inertSession(),
     async *send(_prompt, signal) {
       sends += 1;
       const n = sends;

@@ -13,6 +13,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { App, type SessionController } from "../src/App.tsx";
 import type { DockJobRow } from "../src/background-list.ts";
 import { renderAt } from "./real-term.tsx";
+import { inertSession } from "./session-stub.ts";
 import { BACKGROUND_ROW, type DockTestRow } from "./subagent-row.ts";
 
 const DOWN = "\u001B[B";
@@ -69,6 +70,7 @@ function fake(opts: {
   const prompts: string[] = [];
 
   const session = {
+    ...inertSession(),
     async *send(text: string) {
       prompts.push(text);
       yield { type: "text", delta: "ok" };
@@ -285,6 +287,7 @@ describe("F3: Enter on the job row opens its drawer (190 and 80 columns)", () =>
     const { session, jobs } = fake({ jobs: [SHELL_ROW] });
     // A session that reads fine but has written nothing yet.
     const quiet = {
+      ...inertSession(),
       ...session,
       jobOutput: (jobId: string) => Promise.resolve({ found: true, jobId, output: [] }),
     } as unknown as SessionController;

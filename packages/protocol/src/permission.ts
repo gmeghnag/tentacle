@@ -91,6 +91,16 @@ export const PermissionRequestUpdateSchema = z.object({
    * Absent: no reply (an older daemon) — the client does not offer one.
    */
   reply: z.object({ maxChars: z.number().int().min(1) }).optional(),
+  /**
+   * The `ClientInfo.host` labels of the attachments that had this ask raised to
+   * them (docs/feat/session-auto-accept.md D7): the SAME list for every
+   * recipient, so a device can say "also asked on <computer>" for each sibling
+   * and stop pretending it alone was asked. Display only, and no `.max()` per
+   * entry for the same reason as `agent`: this update is blocking, so a bad
+   * label must never make it unparseable — a surface bounds and sanitizes what
+   * it shows. Absent (an older daemon, or no attachment named a host) → nothing.
+   */
+  askedOn: z.array(z.string()).optional(),
 });
 export type PermissionRequestUpdate = z.infer<typeof PermissionRequestUpdateSchema>;
 

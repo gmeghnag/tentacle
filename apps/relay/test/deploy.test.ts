@@ -9,12 +9,10 @@ import {
 } from "../deploy/build.ts";
 import { parseRelayArgs } from "../src/main.ts";
 import { RELAY_LIMITS } from "../src/relay-core.ts";
-import {
-  DEFAULT_RELAY_HOST,
-  DEFAULT_RELAY_PORT,
-  type RELAY_LIMIT_FLAGS,
-  relayRoute,
-} from "../src/server.ts";
+import { DEFAULT_RELAY_HOST, DEFAULT_RELAY_PORT, relayRoute } from "../src/server.ts";
+
+/** A well-formed (frozen 22 base64url chars) relay id, for the route tables. */
+const ID = "fgkrQr2vTa2JTEe75Kl66v";
 
 /**
  * R7's drift guard (docs/feat/mobile-relay.md): the deploy artefacts are inert
@@ -32,6 +30,14 @@ import {
 const RELAY_DIR = join(import.meta.dir, "..");
 const DEPLOY_DIR = join(RELAY_DIR, "deploy");
 const REPO_ROOT = join(RELAY_DIR, "..", "..");
+
+/** A Caddyfile without its comments: the directives, which is what Caddy reads. */
+function caddyDirectives(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n");
+}
 
 const read = (path: string): string => readFileSync(path, "utf8");
 
@@ -157,35 +163,32 @@ describe("R7 relay.service — the unit starts the binary the runbook installs",
   test("a continued ExecStart is read as ONE value (the reader's own guard)", () => {
     // `serviceKeys` is the test's own parser: if it silently dropped a `\`-joined
     // line, a live unit with an override would report a flag mismatch that is not
-    // there — a false RED on a correct artefact is as bad as a false GREEN.
-    // The continued line carries a NON-default port on purpose: with the default
-    // there, a dropped continuation would read as "no --port" and pass by falling
-    // back to the same value (this test's first draft did exactly that).
-    const real = read(join(DEPLOY_DIR, "relay.service"));
-    // Anchored on the newline so it hits the LIVE line, never a commented-out
-    // example above it (this test's second draft replaced the comment, and went
-    // red on a correct unit). The live line is now the FIRST line of a two-line,
-    // `\`-continued ExecStart, so the anchor is its `--port 4100 \` tail.
-    const continued = real.replace(
-      "\nExecStart=/opt/tentacle-relay/tentacle-relay --host 127.0.0.1 --port 4100 \\",
-      "\nExecStart=/opt/tentacle-relay/tentacle-relay --host 127.0.0.1 \\\n    --port 4321 \\",
-    );
-    expect(continued).toContain("--host 127.0.0.1 \\\n    --port 4321 \\\n");
-    // The real unit's OWN continuation carries the three limit flags: a reader
-    // that dropped it would lose every one of them, which is exactly the false
-    // green this guard exists for (and the assertion the limit test stands on).
-    expect(serviceKeys(real).get("Service/ExecStart") ?? "").toContain(
-      "--max-hellos-per-minute 600",
-    );
-    // The live ExecStart is unique and uncommented: a second one would be an
-    // override systemd silently prefers, and a commented example is not it.
-    const live = real.split("\n").filter((line) => line.startsWith("ExecStart="));
-    expect(live.length).toBe(1);
+    // there — a false RED on a correct artefact is as bad as a false GREEN. The
+    // fixture is SYNTHETIC on purpose: the live ExecStart is now one line (it
+    // carries `--trust-proxy` and no limit override), so binding this guard to
+    // the live text would test the unit, not the reader.
+    const continued = [
+      "[Service]",
+      "ExecStart=/opt/tentacle-relay/tentacle-relay --host 127.0.0.1 \\",
+      "    --port 4321 \\",
+      "    --trust-proxy",
+    ].join("\n");
+    // The continued line carries a NON-default port: with the default there, a
+    // dropped continuation would read as "no --port" and pass by falling back to
+    // the same value (this test's first draft did exactly that).
+    expect(serviceKeys(continued).get("Service/ExecStart") ?? "").toContain("--trust-proxy");
     const parsed = parseRelayArgs(execStart(continued).argv);
     expect(parsed.ok).toBe(true);
     if (parsed.ok) {
       expect(parsed.args.port).toBe(4321);
+      expect(parsed.args.trustProxy).toBe(true);
     }
+    // And the LIVE unit has exactly one uncommented ExecStart: a second one would
+    // be an override systemd silently prefers, and a commented example is not it.
+    const live = read(join(DEPLOY_DIR, "relay.service"))
+      .split("\n")
+      .filter((line) => line.startsWith("ExecStart="));
+    expect(live).toHaveLength(1);
   });
 
   test("ExecStart's program is /opt/tentacle-relay/<binary>, as the runbook names it", () => {
@@ -207,56 +210,46 @@ describe("R7 relay.service — the unit starts the binary the runbook installs",
     expect(parsed.args.help).toBe(false);
   });
 
-  test("the live ExecStart sizes the three PER-IP limits for ONE shared key", () => {
-    // Behind Caddy (`deploy/Caddyfile.relay`) the relay's peer is always
-    // 127.0.0.1 — `server.ts` keys its limiter on Bun's `requestIP`, the DIRECT
-    // peer — so all three PER-IP limits collapse into ONE bucket for the whole
-    // world. Shipped at their per-client defaults the unit would cap every phone
-    // on the relay at 16 sockets and every daemon on the planet at 10
-    // `hello`s/min (a 200-daemon re-registration after a restart refused for
-    // ~20 minutes, and one client able to lock out every phone). A shared bucket
-    // is sized for the fleet, so its value must exceed one client's default.
+  test("the live ExecStart requests --trust-proxy and overrides NO per-IP limit", () => {
+    // The unit used to carry FLEET sizes for the three per-IP limits because
+    // every client collapsed into one 127.0.0.1 bucket. `--trust-proxy` is what
+    // makes the key the real client (H3), so those overrides must be GONE: left
+    // behind they would hand every client 6000 dials/min and 2000 sockets — the
+    // per-client limits would stop existing. Red before this change (no flag, and
+    // all three overrides present).
     const unit = read(join(DEPLOY_DIR, "relay.service"));
     const parsed = parseRelayArgs(execStart(unit).argv);
     if (!parsed.ok) {
       throw new Error(`relay.service's ExecStart is not argv main.ts accepts: ${parsed.error}`);
     }
-    const perClientDefault: Record<string, number> = {
-      "max-dials-per-minute": RELAY_LIMITS.dialsPerMinutePerIp,
-      "max-streams-per-ip": RELAY_LIMITS.concurrentPerIp,
-      "max-hellos-per-minute": RELAY_LIMITS.hellosPerMinutePerIp,
-    };
-    for (const [flag, perClient] of Object.entries(perClientDefault)) {
-      const value = parsed.args.limits[flag as (typeof RELAY_LIMIT_FLAGS)[number]];
-      // `undefined` is the bug this test exists for: the flag was omitted from
-      // the live ExecStart and the per-client default applied silently. Stated
-      // so a red names the flag rather than only "0 > 30".
-      if (value === undefined) {
-        throw new Error(
-          `ExecStart does not pass --${flag}: behind Caddy it falls back to the per-client default of ${perClient}, i.e. one global limit`,
-        );
-      }
-      expect(value).toBeGreaterThan(perClient);
+    expect(parsed.args.trustProxy).toBe(true);
+    // No per-IP limit is overridden: the core's per-client defaults apply.
+    for (const flag of [
+      "max-dials-per-minute",
+      "max-streams-per-ip",
+      "max-hellos-per-minute",
+      "max-ids-per-ip",
+      "--max-ids",
+    ]) {
+      const name = flag.replace(/^--/, "");
+      expect(parsed.args.limits).not.toHaveProperty(name);
     }
+    // And the values that DO apply are the per-client defaults, not fleet sizes.
+    expect(RELAY_LIMITS.dialsPerMinutePerIp).toBe(30);
+    expect(RELAY_LIMITS.concurrentPerIp).toBe(16);
+    expect(RELAY_LIMITS.hellosPerMinutePerIp).toBe(10);
   });
 
-  test("the Caddyfile's account of the limits is true of the unit", () => {
-    // The site block's comment says `relay.service` carries the one-shared-key
-    // sizes instead. That sentence was false (the values were a commented-out
-    // example), which is the half of the finding a reader is misled by: an
-    // operator reading the site block concluded the deploy was safe.
+  test("the Caddyfile explains --trust-proxy instead of the old one-shared-key sizes", () => {
+    // The site block used to say the unit carries fleet sizes BECAUSE XFF is not
+    // read. Both halves are now false, and a comment that says so is what an
+    // operator acts on: it must name the flag and the header it reads.
     const caddy = read(join(DEPLOY_DIR, "Caddyfile.relay"));
-    expect(caddy).toContain("relay.service");
-    const argv = execStart(read(join(DEPLOY_DIR, "relay.service"))).argv;
-    for (const flag of [
-      "--max-dials-per-minute",
-      "--max-streams-per-ip",
-      "--max-hellos-per-minute",
-    ]) {
-      // Named in the site block AND live in the unit: neither alone is the claim.
-      expect(caddy).toContain(flag.slice(2));
-      expect(argv).toContain(flag);
-    }
+    expect(caddy).toContain("--trust-proxy");
+    expect(caddy).toContain("X-Forwarded-For");
+    expect(caddy).not.toMatch(/Nor does the relay read X-Forwarded-For/i);
+    // The old fleet sizes must not linger as advice anywhere in the site block.
+    expect(caddyDirectives(caddy)).not.toContain("--max-streams-per-ip");
   });
 
   test("no secret MATERIAL on the command line (argv is world-readable in ps)", () => {
@@ -317,16 +310,70 @@ describe("R7 Caddyfile.relay — TLS in front, the port the unit binds behind", 
     expect(caddy).toContain(`reverse_proxy ${DEFAULT_RELAY_HOST}:${DEFAULT_RELAY_PORT}`);
   });
 
+  test("metadata hygiene: HSTS, no Server banner, and XFF replaced (L1, L2, H3)", () => {
+    const caddy = read(join(DEPLOY_DIR, "Caddyfile.relay"));
+    const directives = caddyDirectives(caddy);
+    expect(directives).toMatch(/Strict-Transport-Security "max-age=31536000"/);
+    // No includeSubDomains / preload: this box serves one name, and the owner
+    // must stay able to move it.
+    expect(directives).not.toContain("includeSubDomains");
+    expect(directives).not.toContain("preload");
+    // `-Server` (a deferred removal, so the upstream cannot re-add it).
+    expect(directives).toMatch(/^\s*-Server\s*$/m);
+    // The header the relay reads is the one Caddy is told to send.
+    expect(directives).toContain("header_up X-Forwarded-For {remote_host}");
+    expect(directives).toContain("stream_close_delay 5m");
+  });
+
+  test("the Caddy route regex matches EXACTLY what `relayRoute` serves", () => {
+    // Caddy 404s unknown paths before the proxy (L2), so its regex is a second
+    // routing table — and a drift from `server.ts`'s would either expose a path
+    // the relay never meant to serve or 404 a route the app dials. The phone
+    // shape is frozen (an installed app dials it), which makes this the pin.
+    const caddy = read(join(DEPLOY_DIR, "Caddyfile.relay"));
+    const match = /path_regexp (\S+)$/m.exec(caddy);
+    if (match?.[1] === undefined) {
+      throw new Error("Caddyfile.relay has no `path_regexp` route guard");
+    }
+    const regex = new RegExp(match[1]);
+    const paths = [
+      "/healthz",
+      "/v1/daemon",
+      "/v1/accept",
+      `/d/${ID}/e2e`,
+      "/",
+      "/.env",
+      "/d/x/e2e",
+      `/d/${ID}/e2e/x`,
+      `/d/${ID.slice(0, 21)}/e2e`,
+      "/v1/daemon/",
+      "/v1/daemon/x",
+      "/healthz/x",
+      "/v1/accept/",
+      "/D/AAAAAAAAAAAAAAAAAAAAAA/e2e",
+    ];
+    for (const path of paths) {
+      expect({ path, matched: regex.test(path) }).toEqual({
+        path,
+        matched: relayRoute(path).kind !== "notfound",
+      });
+    }
+    // Mutation guard: the four real routes are routable (a regex that matched
+    // nothing would satisfy "⇔ notfound" only if relayRoute agreed, so state it).
+    for (const path of ["/healthz", "/v1/daemon", "/v1/accept", `/d/${ID}/e2e`]) {
+      expect(regex.test(path)).toBe(true);
+    }
+  });
+
   test("a Caddy reload drops live streams after a 5m GRACE — and nothing says otherwise", () => {
     // Without the delay a config reload closes every live relay socket at once,
     // i.e. every phone session, which the daemon then has to see re-established
     // (F1/F2). WITH it the cut is only DELAYED: the relay sends pings
-    // (`relaySocketOptions` sets `sendPings: true`, `server.ts:121-124`), so a
-    // live phone session and every daemon control socket never idle out — Caddy
-    // force-closes them 5 minutes after the reload. The first draft of the site
-    // block read "5m > the relay's 60 s idle timeout, so a stream ends on its own
-    // before the delay can ever fire": false, and the runbook and this test
-    // repeated it.
+    // (`relaySocketOptions` sets `sendPings: true`, `server.ts`), so a live phone
+    // session and every daemon control socket never idle out — Caddy force-closes
+    // them 5 minutes after the reload. The first draft of the site block read
+    // "5m > the relay's 60 s idle timeout, so a stream ends on its own before the
+    // delay can ever fire": false, and the runbook and this test repeated it.
     const caddy = read(join(DEPLOY_DIR, "Caddyfile.relay"));
     expect(caddy).toContain("stream_close_delay 5m");
     expect(caddy).not.toMatch(/before the delay can ever fire/i);
@@ -367,6 +414,39 @@ describe("R7 docs/ops/relay-deploy.md — the runbook", () => {
   test("its smoke test is the route the relay actually serves", () => {
     expect(relayRoute("/healthz")).toEqual({ kind: "health" });
     expect(runbook()).toContain("/healthz");
+  });
+
+  test("the Caddy steps are the PODMAN ones this host actually runs (L3)", () => {
+    // The runbook said `systemctl reload caddy` / `caddy validate`, but Caddy
+    // runs in a podman container with a bind-mounted /etc/caddy on this host: an
+    // operator following it would find no caddy unit and no `caddy` binary.
+    const text = runbook();
+    expect(text).toContain("podman exec caddy caddy reload");
+    expect(text).toContain("podman exec caddy caddy validate");
+    expect(text).not.toMatch(/^systemctl reload caddy$/m);
+  });
+
+  test("§9 no longer presents the ONE shared bucket as the current state (H3)", () => {
+    // It was true, and the unit compensated with fleet sizes. Both are gone: the
+    // limits are per client now, so a runbook still saying otherwise sends an
+    // operator to raise a flag they no longer need.
+    const text = runbook();
+    expect(text).not.toMatch(/are ONE shared bucket/i);
+    expect(text).toContain("--trust-proxy");
+    // The residual the design accepts, stated where an operator looks: a local
+    // process can forge the header, and a carrier NAT shares one bucket.
+    expect(text).toMatch(/local|loopback/i);
+    expect(text).toMatch(/NAT/i);
+  });
+
+  test("§5 lists the log lines the relay actually writes, prefixes only", () => {
+    const text = runbook();
+    for (const line of ["ready", "dial-open", "accept", "dial-refused", "pending-refused"]) {
+      expect(text).toContain(line);
+    }
+    // The stream token is no longer logged at all (L1): a runbook that still
+    // promises it would be describing a line that never appears.
+    expect(text).not.toMatch(/dial-open <id> <stream>/);
   });
 
   test("it says a reload with live streams behind it is not harmless", () => {

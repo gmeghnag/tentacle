@@ -14,15 +14,14 @@ import {
 import { Connection, LogSessionStore, SessionHost } from "@tentacle/daemon";
 import { createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime } from "../src/local-runtime.ts";
-import { inProcessSessions } from "../src/session-jobs.ts";
 import { SessionSaver } from "../src/session-saver.ts";
-import { buildAgent, createSkillScan, inProcessAgents } from "../src/wiring.ts";
+import { buildAgent, createSkillScan } from "../src/wiring.ts";
 
 // docs/feat/skills-hot-reload.md, end to end over real files and real
 // objects (the `buildAgent` a daemon uses, `SessionHost` + `Connection`, the
-// laptop's `RemoteClient` runtime; and the in-process path): a skill written
-// after the start is in the user's `/name` list and activatable at once, while
-// the model's own set (the `skill` enum, the system prompt) does not change.
+// laptop's `RemoteClient` runtime): a skill written after the start is in the
+// user's `/name` list and activatable at once, while the model's own set (the
+// `skill` enum, the system prompt) does not change.
 
 let dir: string;
 let savedHome: string | undefined;
@@ -144,29 +143,5 @@ describe("skills follow the disk (T4: real files, daemon + client)", () => {
     expect(offeredSkillNames(last?.tools ?? [])).toEqual(["alpha"]);
     expect(last?.messages.some((m) => m.content.includes("gamma instructions"))).toBe(true);
     await runtime.dispose();
-  });
-});
-
-describe("the in-process path (T8)", () => {
-  test("the in-process controller's skills() sees a skill written after the start", async () => {
-    const config = await startConfig();
-    const { build } = inProcessAgents(config);
-    const { createSession } = inProcessSessions({
-      build,
-      mcpTools: [],
-      resume: null,
-      persist: () => {},
-    });
-    const controller = createSession();
-    expect((await controller.skills?.())?.slash.map((s) => s.name)).toEqual(["alpha"]);
-    await writeSkill("beta");
-    const view = await controller.skills?.();
-    expect(view?.slash.map((s) => s.name)).toEqual(["alpha", "beta"]);
-    expect(view?.skills.find((s) => s.name === "beta")?.modelAfterReset).toBe(true);
-    // A session created after the scan starts from it too (the shared scan).
-    const next = createSession();
-    expect((await next.skills?.())?.slash.map((s) => s.name)).toEqual(["alpha", "beta"]);
-    controller.close?.();
-    next.close?.();
   });
 });

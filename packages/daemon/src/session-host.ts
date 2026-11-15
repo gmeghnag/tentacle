@@ -130,6 +130,17 @@ export interface AgentReuse {
   /** The background sub-agent runtime (docs/feat/subagent-background.md). */
   readonly agentJobs?: AgentJobs;
   readonly grants?: SessionGrants;
+  /**
+   * The session's shells (docs/feat/workload-shell.md D4): carried across a
+   * rebuild next to `jobs`, so a settings sync does not silently drop the open
+   * shells (and their remote state) on the floor.
+   */
+  readonly workloadShells?: WorkloadShellsLike;
+}
+
+/** The teardown half of `@tentacle/tools`' `WorkloadShells` (no daemon-side import). */
+export interface WorkloadShellsLike {
+  dispose(): Promise<void>;
 }
 
 export type AgentFactory = (
@@ -145,6 +156,12 @@ export type AgentFactory = (
    * (ids, markers, exits, the ask) and disposes it at close.
    */
   agentJobs?: AgentJobs;
+  /**
+   * Optional: the session's shells (docs/feat/workload-shell.md D4). The hosted
+   * session disposes them at close, and hands them to the next agent on a
+   * rebuild.
+   */
+  workloadShells?: WorkloadShellsLike;
   /**
    * Optional: the provider that names the session after its first exchange
    * (docs/feat/session-titles.md). On a pod daemon it is the model proxy, so
@@ -226,6 +243,15 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * forgets the session.
    */
   readonly persister?: SessionPersister;
+  /**
+   * This daemon SHARES the session's auto-accept (`session/set_auto_accept`,
+   * `OpenResult.autoAccept`; docs/feat/session-auto-accept.md D1/D3): the
+   * worker and a trusted `serve` say yes. Absent (a pod daemon) → every open
+   * omits `autoAccept`, so no laptop client reads or sets it there: a pod can
+   * neither turn auto-accept on nor report it (AGENTS §7, "a pod is not
+   * trusted").
+   */
+  readonly sharedAutoAccept?: boolean;
   /**
    * `serve` only: this computer's live sibling daemons and their addresses
    * (`daemon/discover`, docs/feat/sibling-discovery.md). Absent (a pod daemon,
@@ -397,6 +423,14 @@ export class SessionHost {
   get images(): ImagePolicy | undefined {
     return this.opts.images;
   }
+  /**
+   * Whether this daemon SHARES the session's auto-accept (docs/feat/session-auto-accept.md
+   * D1): the worker and a trusted `serve`. A pod daemon never says it, so
+   * `session/open` omits `autoAccept` and no laptop client reads or sets it there.
+   */
+  get sharedAutoAccept(): boolean {
+    return this.opts.sharedAutoAccept === true;
+  }
   private readonly sessions = new Map<string, HostedSession>();
   /** ARCHIVED sessions (a persisting host only). An id is in ONE of the two maps, never both. */
   private readonly archived = new Map<string, ArchivedEntry>();
@@ -439,7 +473,7 @@ export class SessionHost {
     seed?: readonly ChatMessage[],
     settings?: SessionSettings,
   ): Promise<SessionContextResult> {
-    const { agent, jobs, agentJobs } = this.opts.createAgent(this.opts.defaultCwd, {
+    const { agent, jobs, agentJobs, workloadShells } = this.opts.createAgent(this.opts.defaultCwd, {
       modelLink: () => link,
       ...(settings ? { settings } : {}),
     });
@@ -457,6 +491,8 @@ export class SessionHost {
     } finally {
       jobs?.dispose();
       agentJobs?.dispose();
+      // The probe's shells are not the session's (docs/feat/workload-shell.md D4).
+      await workloadShells?.dispose();
     }
   }
 
@@ -693,7 +729,12 @@ export class SessionHost {
       // One step: out of the archive, live, attached (the restart path, mid-life).
       this.archived.delete(entry.id);
       // A rename (or a reclaim) of the archived session wins over the record it was read from.
-      const hosted = this.restore(withoutReclaimed(record, entry.reclaimed), entry.renamed);
+      // A reopen of an ARCHIVED session starts auto-accept OFF (owner Q3): an old
+      // switch must not silently come back on, so the record's value is dropped here.
+      const hosted = this.restore(
+        { ...withoutReclaimed(record, entry.reclaimed), autoAccept: undefined },
+        entry.renamed,
+      );
       const { resync, epoch } = hosted.attach(attachment, params.since);
       return { hosted, created: false, resync, epoch };
     }
@@ -721,6 +762,9 @@ export class SessionHost {
       attachment.hop === true ? (true as const) : undefined,
     );
     this.sessions.set(id, host);
+    // Only a session this open CREATES takes the seed (`autoAccept`, exactly like
+    // `settings`): a `/clear` fork and a hop target carry the value this way.
+    host.autoAccept = params.autoAccept === true;
     const { epoch } = host.attach(attachment);
     return { hosted: host, created: true, resync: false, epoch };
   }
@@ -1016,6 +1060,8 @@ export class SessionHost {
       returned: reconciled.returned,
       ...(record.head !== undefined ? { head: record.head } : {}),
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
+      // A restart KEEPS the session's auto-accept (owner Q3).
+      ...(record.autoAccept === true ? { autoAccept: true } : {}),
       // Paired: the log continues the lineage the files hold (§5); else a new one.
       ...(record.paired ? { log: { head: record.logHead, logged: record.logged } } : {}),
     });
@@ -1156,16 +1202,24 @@ export class SessionHost {
     // (docs/feat/attachments-durable.md D2); every other host: memory only.
     const disk = this.opts.persister?.blobs(id);
     const uploads = new AttachmentStore(this.uploadBudget, disk ? { disk } : {});
-    const { agent, permissions, jobs, agentJobs, titleModel, settingsReport, grants } =
-      this.opts.createAgent(this.opts.defaultCwd, {
-        modelLink: () => bound.hosted?.modelLink() ?? null,
-        ...(settings ? { settings } : {}),
-        ...(this.opts.images?.source === "store" ? { attachments: uploads } : {}),
-        // D8/D9: the client that CREATED this session can ask its owner about a
-        // `move_session` proposal, so this factory may offer the tool. Unset →
-        // never offered (a `run`/`attach` TUI has no `/move` feed).
-        ...(hop ? { hop: true as const } : {}),
-      });
+    const {
+      agent,
+      permissions,
+      jobs,
+      agentJobs,
+      titleModel,
+      settingsReport,
+      grants,
+      workloadShells,
+    } = this.opts.createAgent(this.opts.defaultCwd, {
+      modelLink: () => bound.hosted?.modelLink() ?? null,
+      ...(settings ? { settings } : {}),
+      ...(this.opts.images?.source === "store" ? { attachments: uploads } : {}),
+      // D8/D9: the client that CREATED this session can ask its owner about a
+      // `move_session` proposal, so this factory may offer the tool. Unset →
+      // never offered (a `run`/`attach` TUI has no `/move` feed).
+      ...(hop ? { hop: true as const } : {}),
+    });
     // core `ChatMessage` is structurally the wire schema.
     const session = new Session(agent, id, messages && messages.length > 0 ? { messages } : {});
     const { exposeTurnErrors, onTurnError } = this.opts;
@@ -1204,6 +1258,7 @@ export class SessionHost {
     hosted.settingsReport = settingsReport;
     hosted.imagesPolicy = this.opts.images;
     hosted.grants = grants;
+    hosted.workloadShells = workloadShells;
     hosted.hop = hop === true;
     // The push observer (docs/feat/mobile-push.md P7): `serve` with push on
     // only. A pod daemon and the worker pass no `push`, so nothing observes
@@ -1243,7 +1298,8 @@ export class SessionHost {
     const foreign =
       next.permissions !== reuse.permissions ||
       next.jobs !== reuse.jobs ||
-      next.agentJobs !== reuse.agentJobs;
+      next.agentJobs !== reuse.agentJobs ||
+      next.workloadShells !== reuse.workloadShells;
     if (!next.settingsReport || foreign) {
       // It leaves the session's jobs; jobs of its own (a factory that ignored
       // `reuse`) go with it.
@@ -1253,6 +1309,12 @@ export class SessionHost {
       }
       if (next.agentJobs && next.agentJobs !== reuse.agentJobs) {
         next.agentJobs.dispose();
+      }
+      // A rebuilt agent that is discarded leaves the SESSION's shells alone: they
+      // are not the agent's, and the next agent takes them over (D4). Only a
+      // factory that IGNORED `reuse` and built its own is closed here.
+      if (next.workloadShells && next.workloadShells !== reuse.workloadShells) {
+        void next.workloadShells.dispose();
       }
       if (!next.settingsReport) {
         return { applied: false };

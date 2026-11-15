@@ -80,6 +80,7 @@ import {
   type SessionTitle,
   type SessionTtlResult,
   type SessionUpdateParams,
+  type SetAutoAcceptResult,
   type Sha256,
   type SnapshotResult,
   type SubagentRow,
@@ -238,6 +239,15 @@ export interface SessionStreamListener {
    * it is told so, never recreated from its own copy (docs/fix/detach-live.md R7).
    */
   readonly shared?: boolean;
+  /**
+   * The session's auto-accept: the daemon's snapshot on every open/re-attach
+   * (`OpenResult.autoAccept`), and every change from any client (the
+   * `auto_accept` update). Absent from an older daemon → never called, and the
+   * session keeps a local-only value (docs/feat/session-auto-accept.md D4).
+   */
+  autoAcceptSnapshot?(snapshot: boolean): void;
+  /** An `auto_accept` update: its value and the setter's label (display only, untrusted). */
+  autoAcceptChanged?(on: boolean, by?: string): void;
 }
 
 /** Exits kept for a first `onBackgroundExit` subscriber (the count in the open result still says more are owed). */
@@ -410,6 +420,31 @@ export interface RemoteClientOptions {
    * worker, pod `run`/`attach` and the relay never say it.
    */
   readonly daemonWakes?: boolean;
+  /**
+   * This daemon SHARES the session's auto-accept (`session/set_auto_accept`,
+   * `OpenResult.autoAccept`, the `auto_accept` update; docs/feat/session-auto-accept.md
+   * D4). Defaults to OFF, and must: this is a TRUST bit (AGENTS §7) of the same
+   * kind as `daemonWakes`, so it fails closed — never keyed on `daemonKind`,
+   * which defaults to `"serve"`. Set only by a client that can name its daemon
+   * as trusted: the worker (`local-runtime.ts`), `connect`, and the phone (it
+   * reaches only a `serve`). NEVER by a pod `run`/`attach` client or the relay:
+   * with the bit off the client never sends the method, ignores
+   * `OpenResult.autoAccept` and drops every `auto_accept` update, so a pod can
+   * neither turn auto-accept on nor report it.
+   */
+  readonly sharedAutoAccept?: boolean;
+  /**
+   * This machine's name, sent as `ClientInfo.host` when this client shares the
+   * session's auto-accept (docs/feat/session-auto-accept.md D7): the daemon
+   * echoes it as an ask's `askedOn` and an `auto_accept` update's `by`. A SEAM,
+   * not `os.hostname()` read here: this module is in the PHONE's import graph
+   * (`apps/mobile` → `@tentacle/client`), where a Node built-in does not
+   * resolve at all (Expo/Metro answers `null` for a `node:` specifier, so the
+   * bundle fails to build — Review round 1, HIGH 2). The CLI passes
+   * `os.hostname`; the phone passes its device name; a caller that names none
+   * sends no `host`, and only "also asked on" loses a label.
+   */
+  readonly hostLabel?: () => string | undefined;
   /**
    * Serves the daemon's TITLE calls on the model tunnel (`purpose: "title"`):
    * `model.titleModel`, else the main model. Absent → this laptop's
@@ -800,6 +835,13 @@ export class RemoteClient {
   private readonly refusalsLogged = new Set<string>();
   /** `{ settings }`, or nothing: spread into each frame that may create a session. */
   private readonly carried: { readonly settings?: SessionSettings };
+  /**
+   * The value a session this client CREATES should start with
+   * (`OpenParams.autoAccept`, docs/feat/session-auto-accept.md D2): the TUI's
+   * current switch, carried into a `/clear` fork, a new session and a hop
+   * target. Read at each open and cleared by it — a re-attach never seeds.
+   */
+  private seedAutoAccept: boolean | undefined;
   private readonly settingsListeners = new Set<(notice: SessionSettingsNotice) => void>();
   private readonly settingsChangeListeners = new Set<(change: SessionSettingsChange) => void>();
   /**
@@ -817,6 +859,10 @@ export class RemoteClient {
   private readonly daemonKind: DaemonKind;
   /** The daemon wakes on its own (`serve`, trusted): `RemoteSession.autoAcceptsTurn` reads it. */
   private readonly daemonWakes: boolean;
+  /** This daemon shares the session's auto-accept (`RemoteClientOptions.sharedAutoAccept`). */
+  readonly sharedAutoAccept: boolean;
+  /** This machine's name (`RemoteClientOptions.hostLabel`): `ClientInfo.host` when sharing. */
+  private readonly hostLabel?: () => string | undefined;
   /** This client can put a `move_session` proposal to its owner (declared in `initialize`). */
   private readonly hop: boolean;
   /** Sessions with a `hooks/trust` prompt in flight (at most one each). */
@@ -877,6 +923,10 @@ export class RemoteClient {
     }
     this.daemonKind = options.daemonKind ?? "serve";
     this.daemonWakes = options.daemonWakes === true;
+    this.sharedAutoAccept = options.sharedAutoAccept === true;
+    this.hostLabel = options.hostLabel;
+    // The handle is built in `RemoteSession`, not here: the listener API above
+    // is the wire half (`autoAccept(snapshot)`), and a session owns its value.
     this.hop = options.hop === true;
     if (options.titleModelProvider) {
       this.titleModelProvider = options.titleModelProvider;
@@ -1499,6 +1549,9 @@ export class RemoteClient {
       ...(seed.length > 0 ? { messages: seed } : {}),
       ...(title ? { title } : {}),
       ...this.carried,
+      // The switch the person has now: a `/clear` fork and a new session start
+      // with it (docs/feat/session-auto-accept.md D5).
+      ...this.takeSeedAutoAccept(),
     };
     if (sessionId === undefined) {
       const gen = this.gen;
@@ -2508,7 +2561,7 @@ export class RemoteClient {
         // offered, which is what a `run`/`attach` TUI (no `hop` prop) needs.
         ...(this.hop ? { hop: true } : {}),
       },
-      ...(this.clientInfo ? { clientInfo: this.clientInfo } : {}),
+      ...(this.clientInfo ? { clientInfo: this.wireClientInfo(this.clientInfo) } : {}),
     }).then(
       (raw) => {
         const result = raw as InitializeResult;
@@ -2885,6 +2938,7 @@ export class RemoteClient {
                 ...this.logBaseOf(entry),
                 ...(entry.title ? { title: entry.title } : {}),
                 ...this.carried,
+                ...this.takeSeedAutoAccept(),
               },
       );
     } catch (error) {
@@ -2953,6 +3007,7 @@ export class RemoteClient {
     this.noteAttachProgress(entry, 1);
     entry.unflushedExits = result.unflushedExits ?? 0;
     this.noteSettings(entry, result);
+    this.noteAutoAccept(entry, result);
     this.step(entry, {
       kind: "open_result",
       created: result.created,
@@ -2960,6 +3015,83 @@ export class RemoteClient {
       epoch: result.epoch,
       now: this.clock.now(),
     });
+  }
+
+  /**
+   * The open's auto-accept snapshot (`OpenResult.autoAccept`): present ⇔ the
+   * daemon SHARES it, so a listener told everything else is told this too — and
+   * a snapshot that is absent is never reported (an older daemon: the client
+   * keeps its local feed, and the switch is not shared).
+   */
+  private noteAutoAccept(entry: SessionEntry, result: OpenResult): void {
+    if (result.autoAccept === undefined || !this.sharedAutoAccept) {
+      return;
+    }
+    entry.listener?.autoAcceptSnapshot?.(result.autoAccept);
+  }
+
+  /**
+   * The initial auto-accept for the NEXT session this client creates
+   * (`OpenParams.autoAccept`): a `/clear` fork, a new session, a hop target —
+   * the same places `createSession` runs. Ignored by a daemon on an attach, and
+   * by a daemon that does not share it.
+   */
+  seedAutoAcceptOnCreate(on: boolean): void {
+    this.seedAutoAccept = on;
+  }
+
+  /** The `autoAccept` an open-creating frame carries, consumed once. */
+  private takeSeedAutoAccept(): { readonly autoAccept?: boolean } {
+    const on = this.seedAutoAccept;
+    this.seedAutoAccept = undefined;
+    return on === undefined ? {} : { autoAccept: on };
+  }
+
+  /**
+   * `clientInfo` as it goes on the wire: this laptop's hostname added ONLY when
+   * this client shares the session's auto-accept (a trusted daemon — the
+   * worker, `connect`, the phone), never to a pod, which has no use for the
+   * laptop's name (docs/feat/session-auto-accept.md D7, AGENTS §7). The daemon
+   * stamps it into an ask's `askedOn` and an `auto_accept` update's `by`.
+   * Display only; failing to read a hostname is not an error.
+   */
+  private wireClientInfo(info: ClientInfo): ClientInfo {
+    if (!this.sharedAutoAccept) {
+      return info;
+    }
+    const host = this.hostName();
+    return host === undefined ? info : { ...info, host };
+  }
+
+  /**
+   * This machine's name, bounded to the wire field's 64 characters; undefined
+   * when unknown. Read through the injected `hostLabel` seam (never `os` here:
+   * this module is in the phone's bundle — Review round 1, HIGH 2).
+   */
+  private hostName(): string | undefined {
+    try {
+      const name = this.hostLabel?.();
+      return name === undefined || name === "" ? undefined : name.slice(0, 64);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * `session/set_auto_accept` (docs/feat/session-auto-accept.md D4): the
+   * session's auto-accept, for every client of it. Only a client whose TRUST
+   * bit is on ever calls this — a pod can neither set nor read it. Answers the
+   * daemon's value after applying; an older daemon is `MethodNotFound`, which
+   * the caller reports as "not shared".
+   */
+  setSessionAutoAccept(session: RemoteSession, on: boolean): Promise<{ on: boolean }> {
+    const sessionId = session.sessionId;
+    if (sessionId === null || !this.sharedAutoAccept) {
+      return Promise.reject(new Error("this client does not share the session's auto-accept"));
+    }
+    return this.call(this.peer, Method.SetAutoAccept, { sessionId, on }).then(
+      (result) => result as SetAutoAcceptResult,
+    );
   }
 
   /** The daemon's report of this open, to whoever listens. */
@@ -3009,6 +3141,7 @@ export class RemoteClient {
         ...(entry.title ? { title: entry.title } : {}),
         // Nothing was persisted: the laptop that recreates it decides.
         ...this.carried,
+        ...this.takeSeedAutoAccept(),
       })) as OpenResult;
     } catch (error) {
       // Deleted between the reconnect and this recreate (another device).
@@ -3264,6 +3397,13 @@ export class RemoteClient {
       } else if (update.type === "session_settings") {
         // Not turn-scoped: another client's sync is told while idle too.
         this.settingsChanged(entry, update.settings, update.id);
+      } else if (update.type === "auto_accept") {
+        // Not turn-scoped, and DROPPED with the trust bit off (a pod's claim):
+        // a client that does not share keeps its own local auto-accept.
+        if (this.sharedAutoAccept) {
+          entry.listener?.autoAcceptSnapshot?.(update.on);
+          entry.listener?.autoAcceptChanged?.(update.on, update.by);
+        }
       }
       // Closed daemon-side (by any client): nothing left to close at exit,
       // nothing left to answer.

@@ -60,6 +60,7 @@ import {
   SKILL_TOOL_NAME,
   type SkillBodyReader,
   ToolRegistry,
+  WorkloadShells,
   builtinTools,
   createAgentControlTool,
   createContextResetTool,
@@ -67,6 +68,7 @@ import {
   createSkillActivator,
   createSkillTool,
   createTaskTool,
+  createWorkloadShellTool,
   subagentExtraTools,
 } from "@tentacle/tools";
 import { logDaemonError } from "./daemon-log.ts";
@@ -263,10 +265,15 @@ export interface WiredAgent {
   readonly grants: SessionGrants;
   /** The provider a daemon asks for the session's title (`AgentFactory.titleModel`); absent with `autoTitle` off. */
   readonly titleModel?: ModelProvider;
+  /**
+   * The session's shells (docs/feat/workload-shell.md D4): present only when
+   * this build offered `workload_shell`, and disposed next to `jobs`.
+   */
+  readonly workloadShells?: { dispose(): Promise<void> };
 }
 
 /**
- * What the in-process worker hands `SessionHost` for one session. ONE function,
+ * What the worker hands `SessionHost` for one session. ONE function,
  * so a field cannot be forgotten at the call site: dropping `grants` made
  * `/clear` keep the session's approvals on the default local runtime
  * (docs/feat/clear-keeps-jobs.md, review H1). `tools` stays with the caller
@@ -337,7 +344,7 @@ export interface BuildAgentOptions {
   readonly titleModelOverride?: ModelProvider;
   /**
    * Reuse this broker instead of a fresh one: several agents behind ONE
-   * frontend (one in-process agent per session) must share the broker the TUI
+   * frontend (one agent per session) must share the broker the TUI
    * installs its prompt on — two brokers silently decouple (AGENTS §7).
    */
   readonly permissions?: PermissionBroker;
@@ -361,8 +368,9 @@ export interface BuildAgentOptions {
    */
   readonly notice?: (line: string) => void;
   /**
-   * Asks whether to run the project's hooks when a turn brings no asker (the
-   * in-process TUI, which has no RPC). Absent → project hooks are declined.
+   * Asks whether to run the project's hooks when a turn brings no RPC peer to
+   * ask (a build driven directly, not through `SessionHost`). Absent → project
+   * hooks are declined.
    */
   readonly askHooksTrust?: AskHooksTrust;
   /**
@@ -389,7 +397,7 @@ export interface BuildAgentOptions {
    * PROPOSE moving its session, and nothing more — the laptop asks the owner at
    * the turn's end. Set by the runtimes that own a hoppable session (the local
    * worker, the pod daemon) and never by another kind of build (`serve`,
-   * in-process, one-shot, a child agent: a proposal nobody would ask about).
+   * one-shot, a child agent: a proposal nobody would ask about).
    *
    * It is a flag of its own because `BuildAgentOptions` has no daemon KIND
    * (review M5), and this site is shared by every kind of build: a boolean is
@@ -401,6 +409,19 @@ export interface BuildAgentOptions {
    * and only the last has a `/move` feed to ask through.
    */
   readonly moveSession?: true;
+  /**
+   * Offer this agent `workload_shell` (docs/feat/workload-shell.md D3): a
+   * stateful, non-interactive `sh` on a workload, opened through this backend.
+   *
+   * Set ONLY where the daemon runs on the user's own host — the local worker and
+   * `serve` — because it reads the user's kubeconfig / docker endpoint there. A
+   * POD daemon never sets it: its own `shell` already IS in its workload, and
+   * reaching other workloads would need cluster credentials inside the pod
+   * (AGENTS §7, "a pod is not trusted").
+   */
+  readonly workloadShell?:
+    | { readonly backend: import("@tentacle/tools").WorkloadShellBackend }
+    | undefined;
 }
 
 /** `agent_task`'s model list over the tunnel: the laptop's selectable names, with their text. */
@@ -643,11 +664,25 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   }
   // Session hop (docs/feat/session-hop.md D9): the model's ONE way to ask for
   // its session to move. It has no daemon-side effect at all — the laptop watches
-  // the turn's events and asks the owner at its end — so `serve`, in-process,
-  // one-shot and child-agent builds pass no `moveSession` and never offer it
+  // the turn's events and asks the owner at its end — so `serve`, one-shot and
+  // child-agent builds pass no `moveSession` and never offer it
   // (nobody would ask, and a pod's own claim must never be enough).
   if (options.moveSession === true && config.sessionHop.tool) {
     tools.register(createMoveSessionTool());
+  }
+  // `workload_shell` (docs/feat/workload-shell.md D3): a stateful, non-interactive
+  // `sh` reached through the LAPTOP's engine credentials. Offered only when the
+  // caller passes a backend — the local worker and `serve`; never a pod daemon
+  // (its own `shell` is already in its workload, and it may not hold cluster
+  // credentials: AGENTS §7) — AND the host's owner has switched it on
+  // (`workloadShell.tool`, off by default: docs/fix/workload-shell-live.md,
+  // owner decision 1). The registry is session-owned and disposed beside `jobs`.
+  const workloadShells =
+    options.workloadShell !== undefined && config.workloadShell.tool
+      ? new WorkloadShells(options.workloadShell.backend)
+      : undefined;
+  if (workloadShells !== undefined) {
+    tools.register(createWorkloadShellTool(workloadShells));
   }
 
   const agent = new Agent({
@@ -701,50 +736,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     tools,
     grants,
     ...(titleModel ? { titleModel } : {}),
-  };
-}
-
-/**
- * The in-process TUI's agents: one per session (so a session's background
- * jobs end with it, decision D3), all on ONE broker — the one the TUI installs
- * its prompt on. A per-agent broker would silently auto-approve (AGENTS §7,
- * single-broker invariant), so the broker and the factory come as a pair.
- */
-export function inProcessAgents(config: TentacleConfig): {
-  readonly permissions: PermissionBroker;
-  readonly build: () => WiredAgent;
-} {
-  const permissions = new PermissionBroker();
-  // No RPC here: the agent asks the laptop's resolver directly — on the SAME
-  // broker, with the laptop's store (the in-process fallback is local, D4).
-  const resolve = createHooksTrustResolver({
-    broker: permissions,
-    interactive: true,
-    store: fileTrustStore(config.configDir),
-  });
-  // The same gate as the wire: on RPC the peer validates `hooks/trust` against
-  // `HooksTrustParamsSchema` before the laptop sees it. Here nothing does, so
-  // check it the same way — hooks over the limits, or with control / bidi
-  // characters, are never offered: the throw makes the runner decline and log.
-  const askHooksTrust: AskHooksTrust = async ({ sessionId, ...request }, signal) => {
-    const parsed = HooksTrustParamsSchema.safeParse({ sessionId, ...request });
-    if (!parsed.success) {
-      const issue = parsed.error.issues[0];
-      const where = issue && issue.path.length > 0 ? `${issue.path.join(".")}: ` : "";
-      throw new Error(`invalid hooks/trust request (${where}${issue?.message ?? "invalid"})`);
-    }
-    return (await resolve(parsed.data, signal)).trusted;
-  };
-  // Hook lines (failures, a declined trust) go to the daemon error log, as in
-  // the worker — never the terminal Ink owns (AGENTS §7).
-  const log = (line: string): void => {
-    logDaemonError(config.configDir, line);
-  };
-  // One scan for every session, as a daemon's (docs/feat/skills-hot-reload.md).
-  const skillScan = createSkillScan(config);
-  return {
-    permissions,
-    build: () => buildAgent(config, { permissions, askHooksTrust, log, skillScan }),
+    ...(workloadShells !== undefined ? { workloadShells } : {}),
   };
 }
 

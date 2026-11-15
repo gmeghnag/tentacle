@@ -245,18 +245,11 @@ describe("S2 dispatchCommand: the guards around a command", () => {
     expect(h.rec.notices.join("")).not.toContain("while a turn is running");
   });
 
-  test("/clear is exempt mid-turn only when the session can `clear` in place", () => {
-    // No `clear` seam: the legacy close-and-replace would swap the session under
-    // a live turn, so it waits.
-    const legacy = fakeCtx({ running: true });
-    dispatchCommand(legacy.ctx, "/clear");
-    expect(legacy.rec.notices).toEqual([
-      "_Can't run /clear while a turn is running — stop it first (esc)._",
-    ]);
-    expect(legacy.rec.ran).toEqual([]);
-    // With the seam it IS dispatched: its own step decides (stop-then-clear).
+  test("/clear is exempt mid-turn: it resets in place (stop-then-clear), never refused", () => {
+    // docs/feat/remove-in-process.md: `clear` is required on every controller, so
+    // there is no branch left to decide on. Mutation: drop the `/clear` exemption
+    // in `dispatch` → the refusal below appears and `/clear` never dispatches.
     const inPlace = fakeCtx({ running: true });
-    (inPlace.ctx.sessionRef as Live<unknown>).current = { clear: () => Promise.resolve() };
     dispatchCommand(inPlace.ctx, "/clear");
     expect(inPlace.rec.ran).toEqual(["clear"]);
     expect(inPlace.rec.notices).toEqual([]);

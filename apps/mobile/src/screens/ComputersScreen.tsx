@@ -1,25 +1,43 @@
 /**
  * `Computers` — the computers this app knows, each with its single project row
  * (docs/feat/mobile-app-shell.md: one `serve` = one project in 11a; sibling
- * discovery is task 10). A dumb renderer: the labels come from
- * `projectLabel`/the record, the list from the source.
+ * discovery is task 10). A dumb renderer (AGENTS §7): the row facts come from
+ * `computer-rows.ts`, what is said about them and what the menu offers from
+ * `computer-status.ts`.
  *
- * 11b.1 adds the "+" header button (pair another computer), each row's Remove
- * (`computer-remove-<id>`, Owner Q5: local only, and the confirmation names the
- * `tentacle devices revoke` to run on the computer) and the three row states a
- * paired computer can be in (`computer-state-<id>-<state>`), each offering Pair
- * again.
+ * The look is the approved `Main` mockup (docs/feat/mobile-ui-polish.md, Slice 2):
+ * a large title with two glass buttons (Settings, "+" to pair another computer),
+ * per computer a bold header with a status dot and a 26 pt card holding its
+ * project row, and the "Pair a computer" card with its hint at the bottom.
  *
- * The confirmation is an in-app card, NOT `Alert.alert` (drift from the plan's
- * "native confirmation"): RN's new architecture exposes no alert text or button
- * to XCUITest, so a flow could never prove that Remove does what its wording
- * says — and every value a flow must check is a testID (plan P9,
- * `mobile-app-shell.md`).
+ * Pair again / Remove live in a menu (Owner Q5): a long-press on the project row
+ * or the "…" next to the computer's name. A computer that cannot work without a
+ * new pairing (`revoked` / `maybe-reset` / `broken`) ALSO shows "Pair again" in
+ * its card, where the person is already looking (`computer-pair-again-<id>`).
+ *
+ * The menu and Remove's confirmation are an in-app action sheet, NOT
+ * `ActionSheetIOS`/`Alert`: RN's new architecture exposes no native alert text or
+ * button to XCUITest, so a flow could never prove that Remove does what its
+ * wording says — every value a flow must check is a testID (plan P9). The one
+ * sheet stays mounted while the menu turns into the confirmation, so iOS never
+ * presents one modal while dismissing another.
  */
 import type { JSX } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { ComputerRow } from "../computer-rows.ts";
-import type { Palette } from "../theme.ts";
+import { computerStatus, menuActions } from "../computer-status.ts";
+import { DENSE_FONT_SCALE, type Palette, size as SIZE, space, typography } from "../theme.ts";
+import { ActionSheet, type SheetAction } from "../ui/ActionSheet.tsx";
+import { Banner } from "../ui/Banner.tsx";
+import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
+import { GlassButton } from "../ui/GlassButton.tsx";
+import { GroupedCard } from "../ui/GroupedCard.tsx";
+import { Icon } from "../ui/Icon.tsx";
+import { InlineMono } from "../ui/InlineMono.tsx";
+import { Row } from "../ui/Row.tsx";
+import { ScreenHeader } from "../ui/ScreenHeader.tsx";
+import { StatusDot } from "../ui/StatusDot.tsx";
 
 export type { ComputerRow };
 
@@ -28,8 +46,14 @@ export interface ComputersScreenProps {
   readonly rows: readonly ComputerRow[];
   readonly error?: string;
   readonly onOpen: (row: ComputerRow) => void;
-  /** Pair ANOTHER computer (the header "+"). */
+  /** Pair ANOTHER computer (the header "+" and the bottom card). */
   readonly onAdd: () => void;
+  /** Open a computer's menu (long-press, or its "…"). */
+  readonly onMenu: (row: ComputerRow) => void;
+  /** Whose menu is showing, if any. */
+  readonly menu?: ComputerRow;
+  /** The menu was dismissed without a choice. */
+  readonly onMenuClosed: () => void;
   /** Ask to remove a computer from this phone (the screen shows its confirmation). */
   readonly onRemove: (row: ComputerRow) => void;
   /** The person confirmed Remove for this computer. */
@@ -38,7 +62,7 @@ export interface ComputersScreenProps {
   readonly onRemoveCancelled: () => void;
   /** Which computer's confirmation is showing, if any. */
   readonly removing?: ComputerRow;
-  /** "Pair again" for a `revoked` / `maybe-reset` / `broken` row. */
+  /** "Pair again" (the menu, or the card of a row that needs it). */
   readonly onPairAgain: (row: ComputerRow) => void;
   /** Open Settings (docs/feat/mobile-lock.md D6). */
   readonly onOpenSettings: () => void;
@@ -50,6 +74,9 @@ export function ComputersScreen({
   error,
   onOpen,
   onAdd,
+  onMenu,
+  menu,
+  onMenuClosed,
   onRemove,
   onRemoveConfirmed,
   onRemoveCancelled,
@@ -57,135 +84,282 @@ export function ComputersScreen({
   onPairAgain,
   onOpenSettings,
 }: ComputersScreenProps): JSX.Element {
+  const insets = useSafeAreaInsets();
+  const compact = useCompactTitle();
   return (
-    <ScrollView
-      testID="computers-list"
-      style={{ backgroundColor: palette.groupedBackground }}
-      contentContainerStyle={styles.content}
-    >
-      <Pressable
-        testID="open-settings"
-        accessibilityRole="button"
-        onPress={onOpenSettings}
-        style={[styles.addButton, { backgroundColor: palette.card }]}
+    <View style={[styles.root, { backgroundColor: palette.bg }]}>
+      <ScrollView
+        testID="computers-list"
+        style={{ backgroundColor: palette.bg }}
+        contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
+        onScroll={compact.onScroll}
+        scrollEventThrottle={compact.scrollEventThrottle}
       >
-        <Text style={[styles.addText, { color: palette.accent }]}>Settings</Text>
-      </Pressable>
-      <Pressable
-        testID="computers-add"
-        accessibilityRole="button"
-        onPress={onAdd}
-        style={[styles.addButton, { backgroundColor: palette.card }]}
-      >
-        <Text style={[styles.addText, { color: palette.accent }]}>Pair a computer</Text>
-      </Pressable>
-      {rows.map((row) => (
-        <View key={row.id} style={[styles.card, { backgroundColor: palette.card }]}>
-          <Text style={[styles.computer, { color: palette.secondaryLabel }]}>{row.name}</Text>
-          <Pressable
-            testID={`computer-${row.id}`}
-            accessibilityRole="button"
-            onPress={() => onOpen(row)}
-            style={styles.projectRow}
-          >
-            <Text style={[styles.project, { color: palette.label }]}>{row.project}</Text>
-            <Text
-              testID={row.state === "ok" ? undefined : `computer-state-${row.id}-${row.state}`}
-              style={[styles.status, { color: palette.secondaryLabel }]}
-            >
-              {row.status === "" ? " " : row.status}
-            </Text>
-          </Pressable>
-          <View style={styles.actions}>
-            {row.action === "pair-again" ? (
-              <Pressable
-                testID={`computer-pair-again-${row.id}`}
-                accessibilityRole="button"
-                onPress={() => onPairAgain(row)}
-                style={styles.action}
-              >
-                <Text style={[styles.actionText, { color: palette.accent }]}>Pair again</Text>
-              </Pressable>
-            ) : null}
-            <Pressable
-              testID={`computer-remove-${row.id}`}
-              accessibilityRole="button"
-              onPress={() => onRemove(row)}
-              style={styles.action}
-            >
-              <Text style={[styles.actionText, { color: palette.danger }]}>Remove</Text>
-            </Pressable>
+        <ScreenHeader
+          palette={palette}
+          title="Computers"
+          right={
+            <>
+              <GlassButton
+                testID="open-settings"
+                palette={palette}
+                icon="slider.horizontal.3"
+                accessibilityLabel="Settings"
+                onPress={onOpenSettings}
+              />
+              <GlassButton
+                testID="computers-add"
+                palette={palette}
+                icon="plus"
+                tone="accent"
+                accessibilityLabel="Pair a computer"
+                onPress={onAdd}
+              />
+            </>
+          }
+        />
+        {error === undefined ? null : (
+          <View style={styles.section}>
+            <Banner
+              palette={palette}
+              tone="error"
+              title="Can’t show your computers"
+              body={error}
+              bodyTestID="computers-error"
+            />
           </View>
-        </View>
-      ))}
-      {removing === undefined ? null : (
-        <View
-          testID={`computer-remove-confirm-${removing.id}`}
-          style={[styles.card, { backgroundColor: palette.card }]}
-        >
-          <Text style={[styles.status, { color: palette.label }]}>{removeMessage(removing)}</Text>
-          <View style={styles.actions}>
-            <Pressable
-              testID={`computer-remove-cancel-${removing.id}`}
-              accessibilityRole="button"
-              onPress={onRemoveCancelled}
-              style={styles.action}
-            >
-              <Text style={[styles.actionText, { color: palette.accent }]}>Cancel</Text>
-            </Pressable>
-            <Pressable
-              testID={`computer-remove-yes-${removing.id}`}
-              accessibilityRole="button"
-              onPress={() => onRemoveConfirmed(removing)}
-              style={styles.action}
-            >
-              <Text style={[styles.actionText, { color: palette.danger }]}>Remove</Text>
-            </Pressable>
-          </View>
-        </View>
-      )}
-      {error === undefined ? null : (
-        <View style={[styles.card, { backgroundColor: palette.card }]}>
-          <Text testID="computers-error" style={[styles.status, { color: palette.danger }]}>
-            {error}
+        )}
+        {rows.map((row) => (
+          <ComputerSection
+            key={row.id}
+            palette={palette}
+            row={row}
+            onOpen={onOpen}
+            onMenu={onMenu}
+            onPairAgain={onPairAgain}
+          />
+        ))}
+        <View style={styles.section}>
+          <GroupedCard palette={palette}>
+            <Row
+              testID="computers-pair-card"
+              palette={palette}
+              first
+              icon="qrcode.viewfinder"
+              tone="accent"
+              title="Pair a computer"
+              titleWeight="600"
+              minHeight={SIZE.rowAction}
+              onPress={onAdd}
+            />
+          </GroupedCard>
+          <Text style={[typography.footnote, styles.hint, { color: palette.sec }]}>
+            Run{" "}
+            <InlineMono palette={palette} size={typography.footnote.fontSize}>
+              tentacle pair
+            </InlineMono>{" "}
+            on the computer. Its projects show up here as soon as{" "}
+            <InlineMono palette={palette} size={typography.footnote.fontSize}>
+              tentacle serve
+            </InlineMono>{" "}
+            runs in them.
           </Text>
         </View>
-      )}
-    </ScrollView>
+      </ScrollView>
+      <CompactBar palette={palette} title="Computers" shown={compact.shown} />
+      <ActionSheet
+        palette={palette}
+        visible={removing !== undefined || menu !== undefined}
+        {...sheetContent({ menu, removing, onPairAgain, onRemove, onRemoveConfirmed })}
+        onCancel={removing === undefined ? onMenuClosed : onRemoveCancelled}
+        {...(removing === undefined
+          ? menu === undefined
+            ? {}
+            : { cancelTestID: `computer-menu-cancel-${menu.id}` }
+          : { cancelTestID: `computer-remove-cancel-${removing.id}` })}
+      />
+    </View>
   );
 }
 
+function ComputerSection({
+  palette,
+  row,
+  onOpen,
+  onMenu,
+  onPairAgain,
+}: {
+  readonly palette: Palette;
+  readonly row: ComputerRow;
+  readonly onOpen: (row: ComputerRow) => void;
+  readonly onMenu: (row: ComputerRow) => void;
+  readonly onPairAgain: (row: ComputerRow) => void;
+}): JSX.Element {
+  const status = computerStatus(row);
+  const statusColor =
+    status.tone === "online"
+      ? palette.green
+      : status.tone === "attention"
+        ? palette.orange
+        : palette.sec;
+  return (
+    <View style={styles.section}>
+      <View style={styles.computerHeader}>
+        <Icon name="laptopcomputer" color={palette.label} size={22} />
+        <View style={styles.computerText}>
+          <Text
+            accessibilityRole="header"
+            numberOfLines={1}
+            maxFontSizeMultiplier={DENSE_FONT_SCALE}
+            style={[typography.title3, { color: palette.label }]}
+          >
+            {row.name}
+          </Text>
+          <View style={styles.statusLine}>
+            <StatusDot palette={palette} tone={status.tone} size={7} />
+            <Text
+              maxFontSizeMultiplier={DENSE_FONT_SCALE}
+              style={[typography.footnote, { color: statusColor, fontWeight: "500" }]}
+            >
+              {status.text}
+            </Text>
+          </View>
+        </View>
+        <Pressable
+          testID={`computer-menu-${row.id}`}
+          accessibilityRole="button"
+          accessibilityLabel={`More for ${row.name}`}
+          onPress={() => onMenu(row)}
+          hitSlop={6}
+          style={styles.more}
+        >
+          <Icon name="ellipsis" color={palette.accent} size={22} />
+        </Pressable>
+      </View>
+      <GroupedCard palette={palette}>
+        <Row
+          testID={`computer-${row.id}`}
+          palette={palette}
+          first
+          icon="folder"
+          iconDashed={row.state !== "ok"}
+          dimmed={row.state !== "ok"}
+          title={row.project}
+          chevron
+          onPress={() => onOpen(row)}
+          onLongPress={() => onMenu(row)}
+          accessibilityHint="Opens its sessions. Long-press for more."
+        >
+          {status.detail === undefined ? null : (
+            <Text
+              testID={row.state === "ok" ? undefined : `computer-state-${row.id}-${row.state}`}
+              numberOfLines={3}
+              style={[typography.footnote, { color: palette.sec }]}
+            >
+              {status.detail}
+            </Text>
+          )}
+        </Row>
+        {status.pairAgain ? (
+          <Row
+            testID={`computer-pair-again-${row.id}`}
+            palette={palette}
+            icon="arrow.clockwise"
+            tone="accent"
+            title="Pair again"
+            minHeight={SIZE.rowAction}
+            onPress={() => onPairAgain(row)}
+          />
+        ) : null}
+      </GroupedCard>
+    </View>
+  );
+}
+
+/** The one sheet's content: Remove's confirmation if it is up, else the menu. */
+function sheetContent({
+  menu,
+  removing,
+  onPairAgain,
+  onRemove,
+  onRemoveConfirmed,
+}: {
+  readonly menu: ComputerRow | undefined;
+  readonly removing: ComputerRow | undefined;
+  readonly onPairAgain: (row: ComputerRow) => void;
+  readonly onRemove: (row: ComputerRow) => void;
+  readonly onRemoveConfirmed: (row: ComputerRow) => void;
+}): { title?: string; message?: string; actions: readonly SheetAction[]; testID?: string } {
+  if (removing !== undefined) {
+    return {
+      testID: `computer-remove-confirm-${removing.id}`,
+      title: `Remove '${removing.name}'?`,
+      message: removeMessage(removing),
+      actions: [
+        {
+          label: "Remove",
+          destructive: true,
+          testID: `computer-remove-yes-${removing.id}`,
+          onPress: () => onRemoveConfirmed(removing),
+        },
+      ],
+    };
+  }
+  if (menu === undefined) {
+    return { actions: [] };
+  }
+  return {
+    testID: `computer-menu-sheet-${menu.id}`,
+    title: menu.name,
+    actions: menuActions(menu).map((action) =>
+      action.kind === "remove"
+        ? {
+            label: action.label,
+            destructive: action.destructive,
+            testID: `computer-remove-${menu.id}`,
+            onPress: () => onRemove(menu),
+          }
+        : {
+            label: action.label,
+            destructive: action.destructive,
+            testID: `computer-menu-pair-again-${menu.id}`,
+            onPress: () => onPairAgain(menu),
+          },
+    ),
+  };
+}
+
 /**
- * What Remove's confirmation says (Owner Q5: nothing is revoked from the phone,
- * and the person is told exactly what to run on the computer). A `broken` row
- * has no usable key, so its wording says that instead of naming a device.
+ * What Remove's confirmation says under its title "Remove '<name>'?" (Owner Q5:
+ * nothing is revoked from the phone, and the person is told exactly what to run on
+ * the computer). A `broken` row has no usable key, so its wording says that
+ * instead of naming a device.
  */
 export function removeMessage(row: ComputerRow): string {
   if (row.state === "broken") {
-    return `Remove '${row.name}' from this phone? Its saved key is damaged, so it is only forgetting a broken entry.`;
+    return "Its saved key is damaged, so this only forgets a broken entry on this phone.";
   }
-  return `Remove '${row.name}' from this phone. To also revoke it on the computer, run \`tentacle devices revoke <name>\` there.`;
+  return "This forgets it on this phone only. To also revoke it on the computer, run “tentacle devices revoke <name>” there.";
 }
 
-/** Base padding of the list (the safe-area inset is added on top). */
-const CONTENT_PADDING = 16;
-
 const styles = StyleSheet.create({
-  content: { padding: CONTENT_PADDING, gap: 16 },
-  card: { borderRadius: 12, overflow: "hidden" },
-  computer: { fontSize: 13, paddingHorizontal: 16, paddingTop: 12, textTransform: "uppercase" },
-  projectRow: { flexDirection: "row", alignItems: "center", gap: 8, padding: 16 },
-  project: { flex: 1, fontSize: 17 },
-  status: { fontSize: 13 },
-  addButton: { borderRadius: 12, padding: 16, alignItems: "center" },
-  addText: { fontSize: 17, fontWeight: "600" },
-  actions: {
+  root: { flex: 1 },
+  section: { marginTop: space.sectionComputers },
+  computerHeader: {
     flexDirection: "row",
-    justifyContent: "flex-end",
-    gap: 16,
-    paddingHorizontal: 16,
-    paddingBottom: 12,
+    alignItems: "center",
+    gap: 10,
+    paddingLeft: space.inset + 4,
+    paddingRight: space.inset - 4,
+    paddingBottom: 10,
   },
-  action: { paddingVertical: 4 },
-  actionText: { fontSize: 15 },
+  computerText: { flex: 1, gap: 2 },
+  statusLine: { flexDirection: "row", alignItems: "center", gap: 6 },
+  more: {
+    width: SIZE.touch,
+    height: SIZE.touch,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  hint: { paddingHorizontal: space.inset + space.cardInner, paddingTop: 8 },
 });

@@ -101,6 +101,7 @@ import {
   type SessionSkillsResult,
   type SessionTitle,
   type SessionUpdate,
+  type SetAutoAcceptResult,
   type Sha256,
   type SnapshotResult,
   type SubagentRow,
@@ -142,7 +143,7 @@ import type { PushAttached } from "./push-rules.ts";
 import { EMPTY_QUEUE, leftovers, queueView, returnCause, sameState } from "./queue-view.ts";
 import { SessionRing } from "./ring.ts";
 import { forkableMessages } from "./session-fork.ts";
-import type { ImagePolicy } from "./session-host.ts";
+import type { ImagePolicy, WorkloadShellsLike } from "./session-host.ts";
 import type { SessionSummary } from "./session-list.ts";
 import { type LogBase, SessionLog, replayFromBase } from "./session-log.ts";
 import type { SessionPersister } from "./session-persister.ts";
@@ -207,6 +208,12 @@ export interface Attachment {
    * reverse-tunnel): the session's model calls may go through it (`modelLink`).
    */
   readonly model?: ModelLink;
+  /**
+   * Its client's declared device label (`ClientInfo.host`, docs/feat/
+   * session-auto-accept.md D7): stamped into each ask's `askedOn`, so a sibling
+   * asks one list. Display only; an absent label simply omits that attachment.
+   */
+  readonly host?: string;
   /**
    * The device this client is, when the connection authenticated one
    * (`ConnectionPrincipal.kind === "device"`). Set by `Connection` from its own
@@ -302,6 +309,12 @@ export interface RestoredSessionState {
   readonly enqueueIds: readonly string[];
   /** A turn suspended on a permission at the restart: it runs again (re-asked). */
   readonly resume?: ResumedTurn;
+  /**
+   * The session's auto-accept at the restart (`DaemonSessionRecord.autoAccept`):
+   * a restart KEEPS it (owner Q3 — the same live session, and with owner Q1
+   * nothing is answered until a device attaches). Absent → off.
+   */
+  readonly autoAccept?: boolean;
   /**
    * The record's installed head (`DaemonSessionRecord.head`: its index in the
    * reloaded history): the summary again, cut short or not. Absent: none.
@@ -517,11 +530,27 @@ export class HostedSession {
   /** The session's approvals (the factory's), handed to the next agent on a settings sync. */
   grants: SessionGrants | undefined;
   /**
+   * The session's shells (docs/feat/workload-shell.md D4), when this build
+   * offered `workload_shell`. Disposed at the session's END, beside `jobs` —
+   * this is the "no leftovers" site: the remote shell and its children go, and
+   * nothing is left in the workload.
+   */
+  workloadShells: WorkloadShellsLike | undefined = undefined;
+  /**
    * The client that CREATED this session declared `hop` (D8/D9): it can put a
    * `move_session` proposal to its owner, so this session's agent may be offered
    * the tool — and a settings sync must keep that (`updateSettings` reads it).
    */
   hop = false;
+  /**
+   * The session's auto-accept (docs/feat/session-auto-accept.md D3): the state
+   * every attached client follows, so the switch is the SESSION's and a
+   * terminal's Shift+Tab or the phone's sheet switch changes it for everyone.
+   * The daemon HOLDS and broadcasts it; it never answers an ask with it (owner
+   * Q1: each attached device decides, through its own broker's requester).
+   * Off at creation unless `session/open{autoAccept}` seeded it.
+   */
+  autoAccept = false;
   private readonly session: Session;
   /** The factory's broker: its requester is this session's (installed once, below). */
   private readonly permissions: PermissionBroker;
@@ -749,6 +778,7 @@ export class HostedSession {
     this.ring = new SessionRing(ringBytes);
     this.watchers = new SessionWatchers(now);
     const resume = restored?.resume;
+    this.autoAccept = restored?.autoAccept === true;
     // A fresh epoch per incarnation (decision D1): a `since` from a previous
     // session under the same id never matches. The seed (resume) is covered.
     // A resumed turn is running AT the cut: its prompt is already in the
@@ -960,12 +990,11 @@ export class HostedSession {
     }
     const requestId = crypto.randomUUID();
     const toolCallId = options?.toolCallId || undefined;
-    const update = toPermissionRequestUpdate(
-      requestId,
-      toolCallId ?? "pending",
-      req,
-      options?.agent,
-    );
+    const asked = this.askedOn();
+    const update = {
+      ...toPermissionRequestUpdate(requestId, toolCallId ?? "pending", req, options?.agent),
+      ...(asked !== undefined ? { askedOn: asked } : {}),
+    };
     // The asking call's group head (a call alone: itself), kept with the entry:
     // a reload resumes from it and never recomputes the group.
     const groupStart = toolCallId !== undefined ? options?.groupStart || undefined : undefined;
@@ -1100,9 +1129,11 @@ export class HostedSession {
     }
     const requestId = crypto.randomUUID();
     const spawnTurn = this.spawnTurns.get(agentId);
+    const asked = this.askedOn();
     const update: PermissionRequestUpdate = {
       ...toPermissionRequestUpdate(requestId, options.toolCallId || "pending", req, options.agent),
       ...(spawnTurn !== undefined ? { turnId: spawnTurn } : {}),
+      ...(asked !== undefined ? { askedOn: asked } : {}),
     };
     const decided = this.registerAsk(requestId, update, null, signal, update);
     const ask = this.asks.get(requestId);
@@ -1156,6 +1187,26 @@ export class HostedSession {
       }
     }
     return `client does not support ${type}; update tentacle`;
+  }
+
+  /**
+   * The device labels an ask is raised to (docs/feat/session-auto-accept.md D7):
+   * the `ClientInfo.host` of every attachment whose client declared it can show
+   * an ask. The SAME list goes to every recipient (it rides the replay ring
+   * unchanged, P2), so a device can say what else is being asked. Undefined when
+   * nobody named a host — an older client, or a pod-side one, which never sends
+   * one.
+   */
+  private askedOn(): string[] | undefined {
+    const labels: string[] = [];
+    for (const attachment of this.attachments) {
+      if (attachment.host === undefined) continue;
+      // Only a client that can actually be shown this ask is a sibling it would
+      // be raised to; an older one takes the fallback and is never asked.
+      if (!clientSupportsUpdate(attachment.updates, "permission_request")) continue;
+      if (!labels.includes(attachment.host)) labels.push(attachment.host);
+    }
+    return labels.length === 0 ? undefined : labels;
   }
 
   /**
@@ -1358,6 +1409,7 @@ export class HostedSession {
       title: this.title,
       returned: this.returned.map((r) => ({ ...r })),
       ...(head >= 0 ? { head } : {}),
+      autoAccept: this.autoAccept,
       ...(withLog ? { log: this.logCapture(after) } : {}),
       // From the mirror (= the agent's queue in every stretch, the module's
       // load-bearing assumption), so texts and ids never disagree.
@@ -2468,12 +2520,14 @@ export class HostedSession {
     readonly jobs?: JobController;
     readonly agentJobs?: AgentJobs;
     readonly grants?: SessionGrants;
+    readonly workloadShells?: WorkloadShellsLike;
   } {
     return {
       permissions: this.permissions,
       ...(this.jobs ? { jobs: this.jobs } : {}),
       ...(this.agentRuntime ? { agentJobs: this.agentRuntime } : {}),
       ...(this.grants ? { grants: this.grants } : {}),
+      ...(this.workloadShells ? { workloadShells: this.workloadShells } : {}),
     };
   }
 
@@ -2509,6 +2563,36 @@ export class HostedSession {
     // is decided AGAINST it (`subagentRows`, Review round 3 M2): the list is
     // republished now, not at the child's next progress event.
     this.publishSubagents();
+  }
+
+  /**
+   * `session/set_auto_accept` (docs/feat/session-auto-accept.md D3): apply the
+   * session's auto-accept, tell every attachment if it CHANGED, and persist it
+   * (`serve` only — the sidecar). Idempotent by value: a re-sent set after a
+   * drop returns without an emit, so two clients' retries cannot flap the
+   * others. Synchronous, holds no lock (AGENTS §7): it never awaits a turn, and
+   * `emit` fans out synchronously (P2), so two sets are applied and emitted in
+   * one total order and every client converges on the last value.
+   */
+  setAutoAccept(on: boolean, by?: string): SetAutoAcceptResult {
+    this.assertKnown();
+    if (this.autoAccept !== on) {
+      this.autoAccept = on;
+      this.persist();
+      this.emit({ type: "auto_accept", on, ...(by ? { by } : {}) });
+    }
+    return { on: this.autoAccept };
+  }
+
+  /**
+   * A session that ended takes no new state: a set on it is refused rather than
+   * silently applied to nothing (its `lookup` already dropped it, so this is the
+   * belt to that brace).
+   */
+  private assertKnown(): void {
+    if (this.closed) {
+      throw new RpcError(DomainErrorCode.UnknownSession, `session ${this.id} is closed`);
+    }
   }
 
   /**
@@ -3194,6 +3278,9 @@ export class HostedSession {
     this.unsubscribeExit?.();
     this.unsubscribeStart?.();
     this.jobs?.dispose();
+    // The session is ENDing: close every shell (EOF + kill tree), best effort and
+    // bounded, so nothing is left running in the workload (D4).
+    void this.workloadShells?.dispose();
     // Children abort (their signal settles a pending ask); no `end`, no exit
     // frame: at a reopen the `bg` without an `end` gives the lost note.
     this.unsubscribeAgentExit?.();

@@ -1,5 +1,9 @@
 /** The harness preflight parser (docs/feat/mobile-app-shell.md "Tests"). */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+// The daemon's own config schema (the mobile app does not depend on the package).
+import { FileConfigSchema } from "../../../packages/config/src/schema.ts";
 import {
   type PreflightInput,
   availableIosMajors,
@@ -7,7 +11,7 @@ import {
   parseRuntimes,
   preflight,
 } from "../e2e/preflight.ts";
-import { firstDevice, parseArgs } from "../e2e/run.ts";
+import { FLOWS, firstDevice, harnessConfigText, parseArgs, selectedFlows } from "../e2e/run.ts";
 
 /** Today's machine: Maestro + Xcode + CocoaPods present, only the iOS 26 runtime. */
 const TODAY = JSON.stringify({
@@ -146,6 +150,60 @@ describe("parseArgs (--ios)", () => {
     expect(parseArgs(["--ios", "18"])).toEqual({ only: 18 });
     expect(() => parseArgs(["--ios", "17"])).toThrow();
     expect(() => parseArgs(["--ios"])).toThrow();
+  });
+});
+
+describe("parseArgs (--only)", () => {
+  test("--only names the flows; it composes with --ios in either order", () => {
+    expect(parseArgs(["--only", "24-ui-shots,18-photos"])).toEqual({
+      flows: "24-ui-shots,18-photos",
+    });
+    expect(parseArgs(["--ios", "26", "--only", "18-photos"])).toEqual({
+      only: 26,
+      flows: "18-photos",
+    });
+    expect(parseArgs(["--only", "18-photos", "--ios", "18"])).toEqual({
+      only: 18,
+      flows: "18-photos",
+    });
+  });
+
+  test("--only with no value, or with another flag as its value, throws", () => {
+    expect(() => parseArgs(["--only"])).toThrow("--only needs");
+    expect(() => parseArgs(["--only", "--ios", "26"])).toThrow("--only needs");
+  });
+
+  test("main loops over the SELECTED flow names (a shadowing string iterated its chars)", () => {
+    const run = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    const named = /const (\w+) = selectedFlows\(args\.flows\);/.exec(run)?.[1];
+    expect(named).toBeDefined();
+    expect(run).toContain(`for (const flow of ${named})`);
+    // Exactly one binding of that name in the file: no inner scope shadows it.
+    expect(run.split(`const ${named} =`).length).toBe(2);
+  });
+
+  test("the flag wins over E2E_ONLY_FLOWS; the env still works alone", () => {
+    expect(selectedFlows("18-photos", "24-ui-shots")).toEqual(["18-photos"]);
+    expect(selectedFlows(undefined, "24-ui-shots")).toEqual(["24-ui-shots"]);
+    expect(selectedFlows(undefined, undefined)).toEqual(FLOWS);
+    expect(() => selectedFlows("no-such-flow", undefined)).toThrow("no-such-flow");
+  });
+});
+
+describe("harnessConfigText (the serve's config.jsonc)", () => {
+  test("images are ON: the mock model is OpenAI-shaped, whose default is no vision", () => {
+    // Without it the daemon refuses every photo (`images_off`) and flow 18's
+    // chips end `refused` (slice 6 walk, iOS 26).
+    const parsed = FileConfigSchema.safeParse(JSON.parse(harnessConfigText()));
+    expect(parsed.success).toBe(true);
+    expect(parsed.success ? parsed.data.model?.images : undefined).toBe(true);
+  });
+
+  test("main writes it into the serve's config dir BEFORE serve starts", () => {
+    const run = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    const written = run.indexOf("harnessConfigText()");
+    expect(written).toBeGreaterThan(-1);
+    expect(written).toBeLessThan(run.indexOf("let serving = startServe();"));
   });
 });
 

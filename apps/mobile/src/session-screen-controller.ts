@@ -25,6 +25,7 @@ import {
   FAILED_NOTICE,
   REFUSED_NOTICE,
   restoreAfterFailure,
+  returnKeyAction,
 } from "./composer.ts";
 import type { OutboxDriver } from "./outbox-driver.ts";
 import type { OutboxStore } from "./outbox-store.ts";
@@ -55,6 +56,25 @@ export interface SendableHandle extends SessionHandle {
     signal?: AbortSignal,
     opts?: { readonly turnId?: string; readonly attachments?: readonly AttachmentRef[] },
   ): AsyncIterable<SessionEvent>;
+  /**
+   * The session's own-vs-foreign turn test (`RemoteSession.autoAcceptsTurn`, the
+   * WIDEST the session offers — own turns, and on a trusted `serve` its own wake
+   * turns). Absent on a handle that decides nothing: see `autoAcceptsTurnOf`.
+   */
+  readonly autoAcceptsTurn?: (turnId: string) => boolean;
+}
+
+/**
+ * A handle's own-turn test, when it has one. The screen hands it to the sheet
+ * LIVE (the handle only exists after the attach), so a handle without one keeps
+ * the sheet's stricter rule: a NAMED turn is the app's, an ask with no turn id
+ * never is (`permission-sheet.ts`; docs/feat/session-auto-accept.md D4).
+ */
+export function autoAcceptsTurnOf(
+  handle: SendableHandle | null,
+): ((turnId: string) => boolean) | undefined {
+  const test = handle?.autoAcceptsTurn;
+  return typeof test === "function" ? (turnId: string) => test.call(handle, turnId) : undefined;
 }
 
 export interface SessionScreenState {
@@ -94,8 +114,12 @@ export interface ComposeWiring {
     readonly onDraft: (item: OutboxItem, why: "archived" | "deleted" | "gone" | "busy") => void;
   }) => OutboxDriver;
   readonly photos: PhotoPort;
-  /** The chat handle's compose side, once the attach answered. */
-  readonly handle: () => ComposeHandle | null;
+  /**
+   * The chat handle's compose side, once the attach answered — built over THIS
+   * screen's own attach handle (owner B4: a port without it could not read the
+   * session's facts, so every send died silently after clearing the field).
+   */
+  readonly handle: (session: SendableHandle) => ComposeHandle | null;
   /** Write the draft (13b's store: the text and the chip copies that outlive the screen). */
   readonly draft: (text: string, photos: readonly string[]) => void;
   readonly mint: () => string;
@@ -120,6 +144,12 @@ export interface SessionScreenDeps {
   /** Injectable for tests: the sheet's clock/arm window and the thumbnail port. */
   readonly sheet?: (deps: { readonly now: () => number }) => PermissionSheet;
   readonly thumbnails?: ThumbnailSource;
+  /**
+   * This phone's own device name (the one it paired under), for ask's "also
+   * asked on" note never naming the device it is shown on
+   * (docs/feat/session-auto-accept.md D7). Absent → nothing is dropped.
+   */
+  readonly phoneName?: () => string | undefined;
   /** Told whenever the state changes (a React setState in the screen). */
   readonly onChange?: (state: SessionScreenState) => void;
   /** The compose half (13d). Absent: a screen with no queue and no photos (12c's tests). */
@@ -139,6 +169,11 @@ export interface SessionScreenController {
   setDraft(text: string): void;
   /** A tap on the composer's one button. */
   press(): void;
+  /**
+   * The keyboard's Return (B2): `press` only when `returnKeyAction` allows it on
+   * the CURRENT action — never a Stop, never a no-op clear.
+   */
+  pressReturn(): void;
   /** The link went up/down (the client's `onLinkStatus`): the banner's `reconnecting`. */
   link(up: boolean): void;
   /** The person's tap on a link: the sheet's confirmation is the screen's job. */
@@ -205,6 +240,19 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       ? createPermissionSheet({
           now: deps.now,
           onChange: () => emit(),
+          // The session's shared auto-accept (docs/feat/session-auto-accept.md
+          // D6): read through a function, because the handle (and its link) only
+          // exists after the attach — the sheet is built first.
+          autoAccept: () => handle?.autoAccept,
+          // The own-turn test that goes with it (the same one a terminal feeds
+          // `autoApproves`), read LIVE: the handle does not exist yet, so this
+          // must not be snapshotted here (`undefined` would silently mean "only
+          // a named turn"). A handle that offers none keeps that stricter rule.
+          autoAcceptsTurn: (turnId: string) => autoAcceptsTurnOf(handle)?.(turnId) === true,
+          // This phone's own label, so an ask's "also asked on" never names the
+          // device it is shown on (D7). The name the person gave this phone at
+          // pairing — the same one the computer lists it under.
+          ownHost: () => deps.phoneName?.(),
           // The age guard's release is a clock event: it re-renders through the
           // same `onChange` every other change uses (never a screen-side timer).
           schedule: (fn, ms) => {
@@ -265,7 +313,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           photos: deps.compose.photos,
           // The handle exists only once the attach answered: a compose act on a
           // half-built screen must never build a frame (AGENTS §7).
-          handle: () => (status.phase === "open" ? (deps.compose?.handle() ?? null) : null),
+          handle: () =>
+            status.phase === "open" && handle !== null
+              ? (deps.compose?.handle(handle) ?? null)
+              : null,
           turnId: () => (foreign !== null ? foreign.turnId : (transcript.turn?.turnId ?? null)),
           stopTurn: (turnId, own) => {
             if (own) {
@@ -463,7 +514,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     // The compose half follows the queue from here (13d): its store is loaded
     // once, and a `queued` broadcast is applied by `compose-state.ts`.
     if (compose !== null) {
-      const wired = deps.compose?.handle() ?? null;
+      const wired = deps.compose?.handle(result.session) ?? null;
       if (wired !== null) {
         void compose.start(wired);
         // The outbox may have items from a killed app: `up` + re-sync is when
@@ -499,7 +550,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         throw error;
       }
     })();
-    await feed.ownTurn(turnId, events).catch(() => {
+    await feed.ownTurn(turnId, events, { text }).catch(() => {
       // The stream threw: the feed folded it as LOST (F8/F19), and `failure` below
       // is what decides whether the person's words come back (F13).
     });
@@ -558,7 +609,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         throw error;
       }
     })();
-    await feed.ownTurn(turnId, events).catch(() => {
+    await feed.ownTurn(turnId, events, { text, attachments: refs }).catch(() => {
       // Folded as LOST by the feed; what the CALLER does about it is decided below.
     });
     ownControl = null;
@@ -628,6 +679,13 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       emit();
     },
     press,
+    pressReturn() {
+      // The gate reads the action NOW, as `press` does: a second Return before
+      // the screen re-rendered must not see a stale `send` and then Stop.
+      if (returnKeyAction(view().composer.action) !== null) {
+        press();
+      }
+    },
     link(up) {
       feed.link(up);
     },

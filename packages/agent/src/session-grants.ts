@@ -11,6 +11,9 @@
 import type { PermissionRequest, Tool } from "@tentacle/core";
 import { commandCoveredByPrefixes } from "./shell-prefix.ts";
 
+/** `workload_shell`'s tool name (the grants store must key on it by name, not by import). */
+const WORKLOAD_SHELL = "workload_shell";
+
 /** `serial`'s answer when `signal` aborted before `fn` could run. */
 export const ABORTED: unique symbol = Symbol("aborted");
 
@@ -20,11 +23,44 @@ function commandOf(input: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+/**
+ * The identity of a `workload_shell` target: engine, namespace, name, container.
+ *
+ * It MUST agree with `@tentacle/tools`' `targetKey`, which the shell registry uses
+ * — one spelling or an "always" could cover a different shell than the one it was
+ * granted for. They are duplicated rather than imported because `@tentacle/agent`
+ * may not depend on `@tentacle/tools` (the tools package depends on core, and the
+ * agent wires the tools); a test in each package pins the same string, and the
+ * field order below is the contract.
+ */
+export function workloadTargetKey(input: unknown): string | undefined {
+  const target =
+    input && typeof input === "object"
+      ? (input as { target?: Record<string, unknown> }).target
+      : undefined;
+  if (target === undefined || target === null || typeof target !== "object") {
+    return undefined;
+  }
+  const engine = target.engine;
+  const name = target.name;
+  if (typeof engine !== "string" || typeof name !== "string") {
+    return undefined;
+  }
+  const ns = typeof target.namespace === "string" ? target.namespace : "";
+  const container = typeof target.container === "string" ? target.container : "";
+  return [engine, ns, name, container].join("|");
+}
+
 export class SessionGrants {
   /** Non-shell tools approved for the whole session. */
   private readonly grantedTools = new Set<string>();
   /** Approved shell command prefixes (e.g. `git commit`). */
   private readonly shellPrefixes: string[] = [];
+  /**
+   * `workload_shell` rules, keyed by the WORKLOAD they were granted on (D6):
+   * a prefix approved in a dev container must never cover a prod pod.
+   */
+  private readonly workloadPrefixes = new Map<string, string[]>();
   private busy = false;
   private readonly waiters: (() => void)[] = [];
 
@@ -33,6 +69,20 @@ export class SessionGrants {
     if (tool.name === "shell") {
       const command = commandOf(input);
       return command !== undefined && commandCoveredByPrefixes(command, this.shellPrefixes);
+    }
+    if (tool.name === WORKLOAD_SHELL) {
+      // Closing OUR OWN shell has no effect beyond the tool, so it never asks —
+      // and the rule lives here so a `run` still does.
+      if ((input as { action?: unknown } | null)?.action === "close") {
+        return true;
+      }
+      const key = workloadTargetKey(input);
+      const command = commandOf(input);
+      if (key === undefined || command === undefined) {
+        return false;
+      }
+      const prefixes = this.workloadPrefixes.get(key);
+      return prefixes !== undefined && commandCoveredByPrefixes(command, prefixes);
     }
     return this.grantedTools.has(tool.name);
   }
@@ -44,6 +94,7 @@ export class SessionGrants {
   clear(): void {
     this.grantedTools.clear();
     this.shellPrefixes.length = 0;
+    this.workloadPrefixes.clear();
   }
 
   /** Persist a session-scoped approval as the narrowest applicable rule. */
@@ -52,6 +103,22 @@ export class SessionGrants {
       if (!this.shellPrefixes.includes(request.suggestion.prefix)) {
         this.shellPrefixes.push(request.suggestion.prefix);
       }
+      return;
+    }
+    if (tool.name === WORKLOAD_SHELL) {
+      // NEVER falls through to `grantedTools`: one "always" for this tool would
+      // otherwise approve EVERY command on EVERY workload (the bleed D6 forbids).
+      // With no derivable prefix there is no rule to store — and no wider one.
+      const key = workloadTargetKey(request.input);
+      const prefix = request.suggestion?.prefix;
+      if (key === undefined || prefix === undefined) {
+        return;
+      }
+      const prefixes = this.workloadPrefixes.get(key) ?? [];
+      if (!prefixes.includes(prefix)) {
+        prefixes.push(prefix);
+      }
+      this.workloadPrefixes.set(key, prefixes);
       return;
     }
     this.grantedTools.add(tool.name);

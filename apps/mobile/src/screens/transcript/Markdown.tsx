@@ -11,10 +11,12 @@
  *   parse, and raw HTML is shown as its own text — never executed.
  */
 import type { JSX } from "react";
-import { StyleSheet, Text, View } from "react-native";
-import { highlight } from "../../highlight.ts";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { inlineCodeLook } from "../../code-block.ts";
 import { type MdBlock, type MdInline, type Parsed, flatten } from "../../markdown.ts";
-import type { Palette } from "../../theme.ts";
+import { columnAlign } from "../../table-layout.ts";
+import { MONO, type Palette, radius, typography } from "../../theme.ts";
+import { CodeBlock } from "../../ui/CodeBlock.tsx";
 
 /** Sizes a heading's depth renders at (a phone has no `h1`–`h6`). */
 const HEADING_SIZE: Readonly<Record<number, number>> = { 1: 22, 2: 20, 3: 18, 4: 17 };
@@ -24,11 +26,19 @@ export interface MarkdownProps {
   readonly palette: Palette;
   /** A link tap, by its full href: the SCREEN confirms it (never opened here). */
   readonly onLink: (href: string) => void;
+  /**
+   * The fill behind code (inline and blocks): it must differ from the surface
+   * the text sits on (B4 — `card` inside the `card`-coloured user bubble was
+   * invisible). Default `code`, which differs from both `page` and the
+   * `fill` user bubble (`theme.test.ts` pins `code ≠ fill`).
+   */
+  readonly codeBackground?: string;
 }
 
 interface Ctx {
   readonly palette: Palette;
   readonly onLink: (href: string) => void;
+  readonly codeBackground: string;
 }
 
 function inline(items: readonly MdInline[], ctx: Ctx, key: string): JSX.Element[] {
@@ -38,8 +48,21 @@ function inline(items: readonly MdInline[], ctx: Ctx, key: string): JSX.Element[
       case "text":
         return <Text key={id}>{item.text}</Text>;
       case "code":
-        return (
-          <Text key={id} style={[styles.inlineCode, { backgroundColor: ctx.palette.card }]}>
+        // Owner feedback #3: a nested Text's background fills the whole line
+        // height (a strip, ragged when it wraps) and takes no padding or radius.
+        // A short span is an inline VIEW (a padded rounded chip); a long one
+        // wraps like text, mono, with no strip (`inlineCodeLook`).
+        return inlineCodeLook(item.text) === "chip" ? (
+          <View
+            key={id}
+            style={[styles.chip, { backgroundColor: ctx.codeBackground }]}
+            accessible
+            accessibilityLabel={item.text}
+          >
+            <Text style={[styles.chipText, { color: ctx.palette.label }]}>{item.text}</Text>
+          </View>
+        ) : (
+          <Text key={id} style={styles.inlineRun}>
             {item.text}
           </Text>
         );
@@ -78,52 +101,65 @@ function inline(items: readonly MdInline[], ctx: Ctx, key: string): JSX.Element[
   });
 }
 
+/** A fenced block: lines never wrap, the block scrolls sideways (B6, `CodeBlock`). */
 function codeBlock(
   block: Extract<MdBlock, { kind: "code" }>,
   ctx: Ctx,
   index: number,
 ): JSX.Element {
-  const highlighted = highlight(block.text, block.lang);
   return (
-    <View
+    <CodeBlock
       key={`code-${index}`}
       testID={`code-${index}`}
-      style={[styles.codeBlock, { backgroundColor: ctx.palette.card }]}
-    >
-      {/* One Text per span, on one line each: highlight.js preserves newlines in
-          its spans, so the block reads exactly as written. */}
-      <Text style={[styles.code, { color: ctx.palette.label }]}>
-        {highlighted.spans.map((span) => (
-          // A span's offset within the block is its identity: the spans are the
-          // same list until the text changes, and the block re-renders then.
-          <Text
-            key={`s${span.scope}-${span.text.length}-${span.text.charCodeAt(0)}`}
-            style={scopeColor(span.scope, ctx.palette)}
-          >
-            {span.text}
-          </Text>
-        ))}
-      </Text>
-    </View>
+      text={block.text}
+      lang={block.lang}
+      palette={ctx.palette}
+      background={ctx.codeBackground}
+    />
   );
 }
 
-/** The few `hljs-*` scopes the palette colours; anything else stays the text colour. */
-function scopeColor(scope: string, palette: Palette): { readonly color: string } | undefined {
-  switch (scope) {
-    case "keyword":
-    case "built_in":
-      return { color: palette.accent };
-    case "comment":
-    case "quote":
-      return { color: palette.secondaryLabel };
-    case "string":
-      return { color: palette.running };
-    case "number":
-      return { color: palette.danger };
-    default:
-      return undefined;
-  }
+/**
+ * A table as a real grid (mockup `Conversation`), column by column so every cell
+ * of a row lines up without measuring: cells are one line each. The columns
+ * share the bordered box's full width, so the row lines run edge to edge
+ * (visual review V4); a table wider than the screen scrolls inside the border.
+ * Numeric columns are right-aligned (`table-layout.ts`).
+ */
+function tableGrid(block: Extract<MdBlock, { kind: "table" }>, ctx: Ctx, id: string): JSX.Element {
+  const align = columnAlign(block);
+  return (
+    <ScrollView
+      key={id}
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={[styles.table, { borderColor: ctx.palette.sep }]}
+      contentContainerStyle={styles.tableContent}
+    >
+      {align.map((textAlign, column) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: a column's place is its identity
+        <View key={`${id}-c${column}`} style={styles.column}>
+          {[block.header, ...block.rows].map((row, at) => (
+            <Text
+              // A cell's place in the grid IS its identity (rows are never reordered).
+              // biome-ignore lint/suspicious/noArrayIndexKey: positional grid cell
+              key={`${id}-c${column}-r${at}`}
+              numberOfLines={1}
+              style={[
+                styles.cell,
+                at === 0 ? styles.headerCell : undefined,
+                at === 0 ? undefined : { borderTopColor: ctx.palette.sep },
+                at === 0 ? undefined : styles.bodyCell,
+                { color: ctx.palette.label, textAlign },
+              ]}
+            >
+              {row[column] ?? ""}
+            </Text>
+          ))}
+        </View>
+      ))}
+    </ScrollView>
+  );
 }
 
 /** A list item's text, for its key (content, never a position). */
@@ -150,7 +186,10 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
     switch (block.kind) {
       case "paragraph":
         return (
-          <Text key={id} style={styles.paragraph}>
+          // An explicit colour (B4): RN's default text colour is black, so in dark
+          // mode an answer was black on black. List bodies and quotes are
+          // paragraphs too, and inline runs inherit it.
+          <Text key={id} style={[styles.paragraph, { color: ctx.palette.label }]}>
             {inline(block.children, ctx, id)}
           </Text>
         );
@@ -170,10 +209,10 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
       case "code":
         return codeBlock(block, ctx, index);
       case "rule":
-        return <View key={id} style={[styles.rule, { backgroundColor: ctx.palette.separator }]} />;
+        return <View key={id} style={[styles.rule, { backgroundColor: ctx.palette.sep }]} />;
       case "quote":
         return (
-          <View key={id} style={[styles.quote, { borderLeftColor: ctx.palette.separator }]}>
+          <View key={id} style={[styles.quote, { borderLeftColor: ctx.palette.sep }]}>
             {blocks(block.children, ctx, id)}
           </View>
         );
@@ -186,7 +225,7 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
               const itemKey = `${id}-${itemText(item)}`;
               return (
                 <View key={itemKey} style={styles.listItem}>
-                  <Text style={[styles.bullet, { color: ctx.palette.secondaryLabel }]}>
+                  <Text style={[styles.bullet, { color: ctx.palette.sec }]}>
                     {block.ordered ? `${(block.start ?? 1) + at}.` : "•"}
                   </Text>
                   <View style={styles.listBody}>{blocks(item, ctx, itemKey)}</View>
@@ -196,26 +235,11 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
           </View>
         );
       case "table":
-        // Flattened, as `markdown.ts` documents: a phone has no column grid.
-        return (
-          <View key={id} style={styles.table}>
-            {[block.header, ...block.rows].map((row, at) => (
-              <Text
-                key={`${id}-${row.join("|")}`}
-                style={[
-                  styles.code,
-                  { color: at === 0 ? ctx.palette.label : ctx.palette.secondaryLabel },
-                ]}
-              >
-                {row.join("  ·  ")}
-              </Text>
-            ))}
-          </View>
-        );
+        return tableGrid(block, ctx, id);
       case "literal":
         // Raw markup: the model's own text, shown as data and never parsed.
         return (
-          <Text key={id} style={[styles.code, { color: ctx.palette.secondaryLabel }]}>
+          <Text key={id} style={[styles.code, { color: ctx.palette.sec }]}>
             {block.text}
           </Text>
         );
@@ -229,34 +253,50 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
  * Render a parsed row. A text over `PARSE_MAX_CHARS` arrives `chunked`: it is
  * shown as plain text with what was held back (plan F21).
  */
-export function Markdown({ parsed, palette, onLink }: MarkdownProps): JSX.Element {
-  const ctx: Ctx = { palette, onLink };
+export function Markdown({ parsed, palette, onLink, codeBackground }: MarkdownProps): JSX.Element {
+  const ctx: Ctx = { palette, onLink, codeBackground: codeBackground ?? palette.code };
   if (parsed.kind === "chunked") {
     return (
       <View testID="md-chunked">
         <Text style={[styles.paragraph, { color: palette.label }]}>{parsed.shown}</Text>
-        <Text testID="md-hidden" style={[styles.paragraph, { color: palette.secondaryLabel }]}>
+        <Text testID="md-hidden" style={[styles.paragraph, { color: palette.sec }]}>
           {`[+${parsed.hidden} more characters]`}
         </Text>
       </View>
     );
   }
-  return <View>{blocks(parsed.blocks, ctx, "md")}</View>;
+  // The mockup's paragraph rhythm: 10 pt between blocks.
+  return <View style={styles.blocks}>{blocks(parsed.blocks, ctx, "md")}</View>;
 }
 
 const styles = StyleSheet.create({
-  paragraph: { fontSize: 15, lineHeight: 21 },
+  paragraph: { ...typography.transcript },
   bold: { fontWeight: "600" },
   italic: { fontStyle: "italic" },
   strike: { textDecorationLine: "line-through" },
-  inlineCode: { fontFamily: "Menlo", fontSize: 13 },
-  code: { fontFamily: "Menlo", fontSize: 13, lineHeight: 19 },
-  codeBlock: { borderRadius: 8, padding: 8 },
+  // The mockup's `padding: 1px 5px; border-radius: 5px`. An inline view sits ON
+  // the baseline; the shift puts its text's baseline back on the line's.
+  chip: {
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: radius.inlineCode,
+    transform: [{ translateY: 4 }],
+  },
+  chipText: { fontFamily: MONO, fontSize: 14, lineHeight: 18 },
+  inlineRun: { fontFamily: MONO, fontSize: 14 },
+  blocks: { gap: 10 },
+  code: { ...typography.monoCode },
   rule: { height: StyleSheet.hairlineWidth, marginVertical: 8 },
-  quote: { borderLeftWidth: 3, paddingLeft: 8, gap: 6 },
-  list: { gap: 4 },
-  listItem: { flexDirection: "row", gap: 6 },
-  bullet: { fontSize: 15, lineHeight: 21, minWidth: 16, textAlign: "right" },
-  listBody: { flex: 1, gap: 4 },
-  table: { paddingVertical: 4, gap: 2 },
+  quote: { borderLeftWidth: 3, paddingLeft: 12, gap: 8 },
+  list: { gap: 6 },
+  listItem: { flexDirection: "row", gap: 8 },
+  bullet: { ...typography.transcript, minWidth: 18, textAlign: "right" },
+  listBody: { flex: 1, gap: 6 },
+  table: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.tile },
+  // At least the box's width; the columns split what is left over.
+  tableContent: { flexGrow: 1 },
+  column: { minWidth: 72, flexGrow: 1 },
+  cell: { ...typography.subhead, paddingHorizontal: 12, paddingVertical: 8 },
+  headerCell: { fontWeight: "600" },
+  bodyCell: { borderTopWidth: StyleSheet.hairlineWidth },
 });

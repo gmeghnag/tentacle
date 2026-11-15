@@ -22,7 +22,10 @@ Runtimes required: an **iOS 18.x** and an **iOS 26.x** simulator.
 ```sh
 bun run e2e:mobile          # every required simulator (18 + 26)
 bun run e2e:mobile --ios 26 # just one
+bun run e2e:mobile --ios 26 --only 24-ui-shots,18-photos # just these flows
 ```
+
+`--only` is the same as `E2E_ONLY_FLOWS=…` (the flag wins when both are set).
 
 ## What it does
 

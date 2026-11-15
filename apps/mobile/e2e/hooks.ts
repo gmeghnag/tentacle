@@ -57,7 +57,12 @@ export type HookName =
    * docs/feat/mobile-push.md P10: register + push + place, in ONE step, so the
    * flow does not have to orchestrate three hooks around a 30 s deadline.
    */
-  | "push-place";
+  | "push-place"
+  /**
+   * Flip the simulator to `?name=light|dark` (mobile-ui-polish slice 6): flow 24
+   * shoots every screen in both appearances in one walk.
+   */
+  | "appearance";
 
 /** The hooks that take a query parameter (`?session=…&prompt=…`). */
 export interface HookQuery {
@@ -188,6 +193,16 @@ export interface HookActions {
     readonly payload: { readonly aps: unknown; readonly tp: unknown };
     readonly token: string;
   }>;
+  /** Set THIS simulator's appearance (`simctl ui <udid> appearance …`). */
+  readonly appearance: (name: Appearance) => Promise<void>;
+}
+
+/** The simulator appearances the `appearance` hook sets. */
+export type Appearance = "light" | "dark";
+
+/** `light` / `dark`, or undefined for anything else (the hook then answers 400). */
+export function appearanceOf(value: string | undefined): Appearance | undefined {
+  return value === "light" || value === "dark" ? value : undefined;
 }
 
 /** What a laptop requester answers: `allow` (once) or `deny`. */
@@ -221,6 +236,7 @@ export function hookFor(path: string): HookName | undefined {
     case "faceid-nomatch":
     case "log-file":
     case "relay-qr":
+    case "appearance":
       return name;
     case "push-payload":
       return name;
@@ -401,6 +417,17 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
           }
           case "push-place": {
             return Response.json({ ok: true, hook, ...(await deps.actions.pushPlace()) });
+          }
+          case "appearance": {
+            const name = appearanceOf(query.name);
+            if (name === undefined) {
+              return Response.json(
+                { ok: false, error: "name must be light or dark" },
+                { status: 400 },
+              );
+            }
+            await deps.actions.appearance(name);
+            return Response.json({ ok: true, hook, name });
           }
         }
         return Response.json({ error: "unknown hook" }, { status: 404 });

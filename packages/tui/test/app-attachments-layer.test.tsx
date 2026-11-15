@@ -26,6 +26,7 @@ import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
 import type { FileProbe, ProbedFile } from "../src/attach-files.ts";
 import type { SessionEvent } from "../src/state.ts";
+import { inertSession } from "./session-stub.ts";
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const PASTE_START = "\u001b[200~";
@@ -56,6 +57,7 @@ function probeOf(files: Record<string, Uint8Array>): FileProbe & { reads: string
 /** A session whose turns end at once; `mode` may change between calls (see test 3). */
 function fakeSession(opts: { mode?: () => "upload" | "off" }): SessionController {
   return {
+    ...inertSession(),
     send() {
       return (async function* (): AsyncIterable<SessionEvent> {
         yield { type: "text", delta: "ok" };
@@ -136,6 +138,7 @@ describe("S6: a result that lands after the unmount is dropped", () => {
     let release: (() => void) | undefined;
     let sent = 0;
     const session: SessionController = {
+      ...inertSession(),
       send() {
         sent += 1;
         return (async function* (): AsyncIterable<SessionEvent> {

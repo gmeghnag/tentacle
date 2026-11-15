@@ -43,11 +43,29 @@ type Child = Subprocess<"ignore", "inherit", "inherit">;
 /** Every child the run started, killed in `finally`. */
 const children = new Set<Child>();
 
-/** `--ios 18|26` picks one simulator; default is every required major (Owner Q3). */
-export function parseArgs(argv: readonly string[]): { readonly only?: IosMajor } {
+/**
+ * `--ios 18|26` picks one simulator; default is every required major (Owner Q3).
+ * `--only a,b` narrows the flows, like `E2E_ONLY_FLOWS` (the flag wins); it exists
+ * because some shells refuse an env-prefixed command. Names are checked by
+ * `selectedFlows`.
+ */
+export function parseArgs(argv: readonly string[]): {
+  readonly only?: IosMajor;
+  readonly flows?: string;
+} {
+  const flowsAt = argv.indexOf("--only");
+  let flows: string | undefined;
+  if (flowsAt !== -1) {
+    const value = argv[flowsAt + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error("--only needs a value (comma-separated flow names)");
+    }
+    flows = value;
+  }
+  const withFlows = flows === undefined ? {} : { flows };
   const at = argv.indexOf("--ios");
   if (at === -1) {
-    return {};
+    return withFlows;
   }
   const value = argv[at + 1];
   if (value === undefined) {
@@ -57,7 +75,7 @@ export function parseArgs(argv: readonly string[]): { readonly only?: IosMajor }
   if (!REQUIRED_IOS_MAJORS.includes(major as IosMajor)) {
     throw new Error(`--ios must be 18 or 26 (got ${JSON.stringify(value)})`);
   }
-  return { only: major as IosMajor };
+  return { only: major as IosMajor, ...withFlows };
 }
 
 /**
@@ -86,6 +104,15 @@ async function simctlRuntimes(): Promise<string> {
 async function simctlDevices(): Promise<string> {
   const result = await $`xcrun simctl list -j devices`.quiet().nothrow();
   return result.exitCode === 0 ? result.stdout.toString() : "";
+}
+
+/**
+ * The harness `serve`'s `config.jsonc`. `model.images` has no env var and an
+ * OpenAI-shaped endpoint (the mock) defaults to no vision, so without this the
+ * daemon refuses every photo `images_off` and flow 18 can never pass.
+ */
+export function harnessConfigText(): string {
+  return `${JSON.stringify({ model: { images: true } }, null, 2)}\n`;
 }
 
 /** Maestro needs a JDK; the owner's is keg-only, so the run supplies it. */
@@ -162,6 +189,8 @@ export async function waitForPort(port: number, timeoutMs = 20_000): Promise<voi
 
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
+  // Checked before any build, so a typo fails in a second, not after one.
+  const runFlows = selectedFlows(args.flows);
   const [xcode, cocoapods, maestro, runtimesJson, devicesJson] = await Promise.all([
     versionOf("xcodebuild", "-version"),
     versionOf("pod", "--version"),
@@ -274,6 +303,9 @@ async function main(): Promise<number> {
     children.add(child);
     return child;
   };
+  // Images ON before the first start (flow 18): serve keeps an existing file.
+  await mkdir(join(runDir, "config"), { recursive: true });
+  await writeFile(join(runDir, "config", "config.jsonc"), harnessConfigText());
   let serving = startServe();
 
   try {
@@ -430,6 +462,18 @@ async function main(): Promise<number> {
           ]);
         },
         logFile: () => appLogFile(currentDevice.udid),
+        // Flow 24's light/dark pairs: `simctl ui`, not `simctl spawn` (it is a
+        // simulator setting, not a process inside it).
+        appearance: async (name) => {
+          const child = Bun.spawn(
+            ["xcrun", "simctl", "ui", currentDevice.udid, "appearance", name],
+            { stdout: "pipe", stderr: "pipe" },
+          );
+          if ((await child.exited) !== 0) {
+            const err = await new Response(child.stderr).text();
+            throw new Error(`simctl ui appearance ${name} failed: ${err.trim()}`);
+          }
+        },
       },
     });
     await hooks.ready;
@@ -459,7 +503,7 @@ async function main(): Promise<number> {
         console.error(`build/install failed for iOS ${major} (exit ${buildCode})`);
         return buildCode;
       }
-      for (const flow of selectedFlows()) {
+      for (const flow of runFlows) {
         // Each flow gets its own pairing scope. "One window at a time" (F-H3) is
         // a rule INSIDE a flow: a flow that failed between `pair-start` and its
         // answer leaves a window open, and the next flow's `pair-start` would be
@@ -617,7 +661,8 @@ async function buildAndInstall(device: string, runDir: string, major: IosMajor):
 
 /**
  * Seed the simulator's photo library with the flow 18 fixtures (`PNG fixture`,
- * `JPEG fixture` — the NAMES are what PHPicker shows, so a flow can tap them). The
+ * `JPEG fixture`; iOS 26's PHPicker shows "Photo, <date>, <time>" instead, so flow
+ * 18 taps the two newest cells — this pair). The
  * fixtures are generated per run under the harness's scratch dir: never real
  * photos, and nothing under `/tmp` (AGENTS §6).
  */
@@ -879,6 +924,12 @@ export const FLOWS: readonly string[] = [
   "16-offline-outbox",
   "17-outbox-changed",
   "18-photos",
+  // docs/feat/mobile-ui-polish.md Slice 0: the composer above the keyboard (B1)
+  // and Return sends (B2), on a session of its own.
+  "23-composer-keyboard",
+  // docs/feat/mobile-ui-polish.md Slice 6: the screenshot walk (light/dark pairs
+  // for the visual review), on a session of its own.
+  "24-ui-shots",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`
   // behind in the Keychain, which `clearKeychain` in `_pair` resets anyway).
@@ -901,15 +952,16 @@ export const FLOWS: readonly string[] = [
 ];
 
 /**
- * The flows this run drives. `E2E_ONLY_FLOWS` (comma-separated names) narrows them:
- * a long run degrades the simulator (every flow starts its own XCTest driver), so a
- * single flow is how one is debugged or re-proved in a bounded window. Empty or
- * absent: every flow, which is the gate.
+ * The flows this run drives. `--only` or `E2E_ONLY_FLOWS` (comma-separated names;
+ * the flag wins) narrows them: a long run degrades the simulator (every flow starts
+ * its own XCTest driver), so a single flow is how one is debugged or re-proved in a
+ * bounded window. Empty or absent: every flow, which is the gate.
  */
 export function selectedFlows(
-  only: string | undefined = process.env.E2E_ONLY_FLOWS,
+  flag: string | undefined,
+  env: string | undefined = process.env.E2E_ONLY_FLOWS,
 ): readonly string[] {
-  const wanted = (only ?? "")
+  const wanted = (flag ?? env ?? "")
     .split(",")
     .map((name) => name.trim())
     .filter((name) => name !== "");
@@ -918,7 +970,7 @@ export function selectedFlows(
   }
   for (const name of wanted) {
     if (!FLOWS.includes(name)) {
-      throw new Error(`E2E_ONLY_FLOWS names an unknown flow: ${name}`);
+      throw new Error(`--only / E2E_ONLY_FLOWS names an unknown flow: ${name}`);
     }
   }
   return wanted;
@@ -939,6 +991,8 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "16-offline-outbox": "OUTBOX_ID",
   "17-outbox-changed": "CHANGED_ID",
   "18-photos": "PHOTO_ID",
+  "23-composer-keyboard": "KEYBOARD_ID",
+  "24-ui-shots": "SHOTS_ID",
 };
 
 /** Run one flow on one simulator with Maestro, returning its exit code. */

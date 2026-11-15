@@ -1,5 +1,4 @@
 import { homedir } from "node:os";
-import { Session } from "@tentacle/agent";
 import {
   type AttachmentRef,
   DISMISSED,
@@ -31,11 +30,12 @@ import {
 } from "./blink.ts";
 import { idleChord } from "./chord.ts";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
-import { type QuitConfirmFacts, paletteStep } from "./commands.ts";
+import { type QuitConfirmFacts, oneLine, paletteStep } from "./commands.ts";
 import { dispatchCommand } from "./commands/dispatch.ts";
 import { useDockClock, useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
-import type { HopSpec } from "./hop-command.ts";
+import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import { hopShownCwd, hopStatusRow } from "./hop-status.ts";
+import { HOP_WAKE_TEXT } from "./hop-wake.ts";
 import { startIdleWarm } from "./idle-warm.ts";
 import { JOB_TAIL_SHOWN, exitOutcome, jobOutputEntry, refreshDue } from "./job-drawer.ts";
 import { type KeyHost, executeEffects } from "./keys/execute.ts";
@@ -43,11 +43,13 @@ import { PURE_LAYERS } from "./keys/layers.ts";
 import { resolveLineEffects } from "./keys/line-layer.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
+import { localSession } from "./local-session.ts";
 import { type OpenPanel, panelClick } from "./panel.ts";
 import { pasteTarget, sanitizePasted } from "./paste.ts";
 import { insertReply, orphanNotice } from "./permission-reply.ts";
 import {
   type AutoAcceptFeed,
+  type AutoAcceptSharedFeed,
   type DraftBack,
   autoAcceptTest,
   usePermissionBroker,
@@ -62,7 +64,7 @@ import { useSessionLink } from "./useSessionLink.ts";
 import { type HopTurnPort, useTurnDriver } from "./useTurnDriver.ts";
 import { tryWake } from "./wake-gate.ts";
 
-export type { AutoAcceptFeed };
+export type { AutoAcceptFeed, AutoAcceptSharedFeed };
 
 import { type DaemonQueue, type QueuedRows, handBackRows } from "./queued.ts";
 import { type RenderOptions, layoutTranscript, sliceLaid, warmRowsChunk } from "./render-lines.ts";
@@ -204,6 +206,7 @@ export function App({
   sessions,
   runQuit,
   autoAccept,
+  autoAcceptShared,
   hop,
   targetFeed,
   columns: fixedColumns,
@@ -410,9 +413,16 @@ export function App({
   // below. Two things stay here, because App declares them ABOVE that hook: the
   // forward ref an approved proposal starts through (assigned by the hook), and
   // the live place (`targetFeed`), so the badge and `daemonInPod` follow a move.
-  const startHopRef = useRef<((spec: HopSpec, opts?: { gateAnswered?: true }) => void) | null>(
-    null,
-  );
+  const startHopRef = useRef<
+    | ((
+        spec: HopSpec,
+        opts?: { gateAnswered?: true; autoAccepted?: true; namespace?: HopNamespace },
+      ) => void)
+    | null
+  >(null);
+  // OD6: the same late binding for a proposal that ended with nothing to build
+  // (`useHop` assigns it; the port above reads it).
+  const wakeAfterHopRef = useRef<((outcome: "declined" | "failed") => void) | null>(null);
   /**
    * The host's view of this TUI's own turns (docs/feat/session-hop.md D9, slice
    * H5): it folds each event (`hop.turn`), asks the owner at the turn's end
@@ -425,10 +435,27 @@ export function App({
   const hopTurnPort: HopTurnPort = {
     event: (event, own) => hop?.turn?.(event, own),
     end: async (own) => (await hop?.turnEnd?.(own)) ?? { kind: "none" },
-    takeLine: () => hop?.takeLine?.() ?? null,
+    // OD6: the line is rendered from the TUI's LIVE auto-accept mode, so a moved
+    // line never states a stale `on|off`.
+    takeLine: (ctx) => hop?.takeLine?.(ctx) ?? null,
+    // The prompt that consumed it never ran (its send failed): hand it back, so
+    // the next real prompt carries it (OD6's failure mode).
+    restoreLine: () => hop?.restoreLine?.(),
     // An approved proposal is an approved `/move`: the ONE place the view moves
-    // starts it (D3), through the ref so no dependency cycle is created.
-    approved: (spec, opts) => startHopRef.current?.(spec, opts),
+    // starts it (D3), through the ref so no dependency cycle is created. OD6: the
+    // origin is a MODEL's proposal, which is what lets the session wake afterwards.
+    approved: (spec, opts) => {
+      hopOriginRef.current = "proposal";
+      startHopRef.current?.(spec, opts);
+    },
+    // OD6: a fact about the OLD session must not ride the new one's first prompt.
+    clearPending: () => hop?.clearPending?.(),
+    // OD6: one user word restarts the consecutive-wake count.
+    onUserPrompt: () => noteUserPrompt(),
+    // OD6: a proposal that ended without a spec to build (refused, or unaskable)
+    // wakes the model to read the line — when the rule allows it (the App's own
+    // `hopWake` firing below is the ONE send path).
+    wake: (outcome) => wakeAfterHopRef.current?.(outcome),
   };
   const [targetView, setTargetView] = useState<HopTargetView | null>(() =>
     targetFeed ? targetFeed.current() : null,
@@ -517,6 +544,8 @@ export function App({
           skill?: string;
           attachments?: readonly AttachmentRef[];
           images?: readonly AttachedImage[];
+          /** OD6: a hop's own wake — the pending hop line, and the dim continuing row. */
+          hopWake?: boolean;
         },
       ) => void)
     | null
@@ -529,7 +558,7 @@ export function App({
     if (!agent) {
       throw new Error("App requires either `agent` or `createSession`");
     }
-    return new Session(agent);
+    return localSession(agent);
   }, [createSession, agent]);
   if (sessionRef.current === null) {
     sessionRef.current = makeSession();
@@ -631,11 +660,41 @@ export function App({
   }, [jobs, flushNow, armWake, setDock, dockFinishedRef, dockOutcomeRef, dockStoppedRef]);
 
   // --- host notices ----------------------------------------------------------
+  // ONE effect for everything that appends a notice from outside a turn: the
+  // host feed, and (below) the session's auto-accept when another DEVICE flips
+  // it (docs/feat/session-auto-accept.md D5). App keeps exactly its pinned
+  // effect count (the structural tests), so a second notice source joins this
+  // one rather than adding an effect.
+  const autoAcceptSeenRef = useRef<boolean | null>(null);
   useEffect(() => {
-    if (!notices) {
-      return;
+    const announceAutoAccept = (on: boolean): void => {
+      const was = autoAcceptSeenRef.current;
+      autoAcceptSeenRef.current = on;
+      if (was === null || was === on) {
+        // `null` at a mount: the state a TUI starts in is never "news".
+        return;
+      }
+      if (!(autoAcceptShared?.remote() ?? false)) {
+        // THIS TUI's own flip (or its echo): no notice — the status bar says it.
+        return;
+      }
+      // The setter's label is daemon-supplied text: sanitized, never rendered raw.
+      const by = autoAcceptShared?.lastBy();
+      const who = by === undefined ? "another device" : oneLine(by);
+      stateRef.current = appendNotice(
+        stateRef.current,
+        `auto-accept turned ${on ? "on" : "off"} from ${who}`,
+      );
+      setScrollOffset(0);
+      flushNow();
+    };
+    let offAutoAccept: (() => void) | undefined;
+    if (autoAcceptShared) {
+      // The value it starts in is never news; only a LATER flip is.
+      announceAutoAccept(autoAcceptShared.current());
+      offAutoAccept = autoAcceptShared.onChange(announceAutoAccept);
     }
-    return notices.onNotice((text, hint) => {
+    const offNotices = notices?.onNotice((text, hint) => {
       // `host`: an attach's notice outlives the history that follows it (A6).
       stateRef.current = appendNotice(stateRef.current, text, {
         host: true,
@@ -644,7 +703,11 @@ export function App({
       setScrollOffset(0);
       flushNow();
     });
-  }, [notices, flushNow]);
+    return () => {
+      offAutoAccept?.();
+      offNotices?.();
+    };
+  }, [notices, autoAcceptShared, flushNow]);
 
   // --- a link stop's full reason (the StatusBar row truncates it) -------------
   useEffect(() => {
@@ -1329,11 +1392,12 @@ export function App({
     setQuitConfirm,
     runQuit,
     detachOnQuit,
-    makeSession,
-    swapSession,
     pushNotice,
     wakeIfPending,
     exit,
+    // OD6: a `/clear` drops the pending hop fact with the conversation it belonged
+    // to (`hop?.clearPending`, a ref read at call time — no dep cycle).
+    clearHopPending: () => hopTurnPort.clearPending?.(),
   });
   runClearRef.current = runClear;
 
@@ -1349,7 +1413,7 @@ export function App({
   // (`hopQueued`, `st.running`, `shown.length`) — that is the whole mechanism
   // (D4), and moving it into the hook would make its trigger a callback's
   // identity instead of the render that made the session idle.
-  const { hopRun, hopQueued, hopIfQueuedRef, requestHop } = useHop({
+  const { hopRun, hopQueued, hopIfQueuedRef, requestHop, hopOriginRef, noteUserPrompt } = useHop({
     sessionRef,
     stateRef,
     rowsRef,
@@ -1361,6 +1425,12 @@ export function App({
     swapSession,
     pushNotice,
     flushNow,
+    // OD6: the ONE way a turn starts without typing (the driver's `run`), so a
+    // settled hop can continue the session by itself. `runRef` (not `run`) because
+    // `useHop` is declared ABOVE the driver that assigns it. The driver prepends the
+    // laptop's wake line and paints its own dim row (`hopWake`).
+    sendWake: () => runRef.current?.(HOP_WAKE_TEXT, { hopWake: true }),
+    wakeAfterHopRef,
   });
   // A `/move` that waited for a boundary (D4) starts at the first TRUE idle: the
   // own turn over, the daemon's queue empty. This ONE effect is the whole

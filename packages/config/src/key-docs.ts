@@ -41,6 +41,7 @@ import {
   DEFAULT_TOOL_EXECUTION,
   DEFAULT_TOOL_MAX_PARALLEL,
   DEFAULT_TOOL_OUTPUT_RETENTION_DAYS,
+  DEFAULT_WORKLOAD_SHELL_TOOL,
   defaultWritableDirs,
 } from "./defaults.ts";
 import type { ResolvedConfig } from "./resolve.ts";
@@ -738,7 +739,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
   },
   "sessionHop.tool": {
     summary:
-      "Offer the agent `move_session`: it may propose moving this session to another target.",
+      "Offer the agent `move_session` (OFF by default): it may propose moving this session to another target.",
     kind: "leaf",
     type: "boolean",
     scope: "both",
@@ -747,10 +748,32 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     resolved: (c) => c.sessionHop.tool,
     sourceKey: "sessionHopTool",
     env: "TENTACLE_SESSION_HOP_TOOL",
-    sample: "off",
+    sample: "on",
     details:
-      "It only PROPOSES: the tool has no daemon-side effect, and nothing moves until you say yes to the laptop's own prompt (asked when the turn ends, never answered by auto-accept, never remembered). Offered only where a hop exists — the local worker and a pod daemon — and never to a sub-agent.",
-    example: "false",
+      "OFF unless you turn it on: with it off the only way to move is a `/move` you type. It only PROPOSES — the tool has no daemon-side effect, and nothing moves until the laptop's own prompt is answered (asked when the turn ends, never remembered). With `autoAccept` on, a model-proposed move is answered like any other tool, logged allow-once — EXCEPT a move toward local proposed from a pod or container, which always asks. Offered only where a hop exists — the local worker and a pod daemon — and never to a sub-agent.",
+    example: "true",
+  },
+  workloadShell: {
+    summary: "The agent may open a stateful `sh` on another workload (`workload_shell`).",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "workloadShell.tool": {
+    summary:
+      "Offer the agent `workload_shell`: a stateful, non-interactive `sh` on a pod or container.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => DEFAULT_WORKLOAD_SHELL_TOOL,
+    resolved: (c) => c.workloadShell.tool,
+    sourceKey: "workloadShellTool",
+    env: "TENTACLE_WORKLOAD_SHELL_TOOL",
+    sample: "on",
+    details:
+      "It dials with YOUR kubeconfig / docker endpoint and runs commands on another workload, so it is OFF unless you turn it on. You are still asked before the first command on each target (and with `always` for the rest of the session). Offered only where tentacle runs on your own host — the local worker and `serve` — never to a pod daemon, which already has its own shell inside its workload.",
+    example: "true",
   },
   autoWake: {
     summary: "Start a continuation turn when a background job exits while idle.",

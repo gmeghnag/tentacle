@@ -3,6 +3,7 @@
     "name": "tentacle",
     "slug": "tentacle",
     "scheme": "tentacle",
+    "userInterfaceStyle": "automatic",
     "ios": {
       "bundleIdentifier": "so.tentacle.app",
       "supportsTablet": true,
@@ -58,6 +59,7 @@
           "enableBackgroundRemoteNotifications": false
         }
       ]
-    ]
+    ],
+    "icon": "./assets/icon.png"
   }
 }
