@@ -377,6 +377,18 @@ Red before green for every slice. Mutation-check each property (§9).
    session start)? **Rec later**, a follow-up task, once per-session toggles
    prove useful.
 
+#### Owner answers (2026-11-15)
+
+1. A toggle applies from the **next model call**, even mid-turn.
+2. Log entry `capabilities`: **non-critical** (owner decides critical entries — decided: not critical; no PROTOCOL_VERSION bump for it).
+3. **Disabled-set**: new servers/skills start enabled.
+4. The user's own `/name` of a disabled skill: **allowed**.
+5. `/clear` fork and hop **keep** the switches; a brand-new session starts with everything on.
+6. **Panel only** — no typed `/mcp off …` / `/skills off …` commands, on the Mac or the phone (overrides the recommendation).
+7. Named presets: **later**, a follow-up task.
+
+UI (TUI panel + iPhone Session info toggles): mockups first, in the approved mobile-chrome look, before the UI slices.
+
 ## Execution
 
 ## Review
