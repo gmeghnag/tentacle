@@ -1332,3 +1332,28 @@ were reverted, and `git status --porcelain` is empty.
 **Executor behaviour:** in scope (S3–S10 untouched), honest about the unseen
 pixels, and the geometry is pinned in the pure module as §7 asks. But two
 mutations on the slice's own load-bearing couplings were not tried.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-16 · checks `git diff HEAD~1` (00e3a67d), which is
+test + doc only and changes no source.*
+
+**Verdict: APPROVE.** Both round-1 findings are closed, and I found no new HIGH
+or MEDIUM issue.
+
+- **Finding 1 (ring tap):** closed. I re-ran it with a mutation: dropping
+  `onPress` from the `<ContextRing>` call site now FAILS the new test, "PASSES
+  the tap through". I also pointed the tap at `setMenuOpen(true)`, the wrong
+  target, and that FAILS too. Two possible holes do not apply. `ringCallSite`
+  slices from `<ContextRing` to the first `/>`. That marker cannot be cut early
+  by `=>`. The slice can never be empty, because it is guarded by `expect`s on
+  both indices.
+- **Finding 2 (arc border sides):** closed. Re-running `borderLeftColor` →
+  `borderRightColor` now FAILS the test "the arc stays the
+  `borderTop`+`borderLeft` half".
+- **Regressions:** the diff touches no source code. The two touched test files
+  give 22 pass / 0 fail. `bun run lint` is clean and `bun run typecheck` is green.
+  I reverted every mutation, and `git status --porcelain` is empty.
+- **Still open:** the S2 pixels are unseen (flow 24 needs a simulator), which is
+  the executor's own stated debt. These are source-scan tests, which is the
+  repo's accepted pattern for `.tsx` that Bun cannot import.
