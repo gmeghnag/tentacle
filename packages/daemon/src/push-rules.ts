@@ -19,7 +19,9 @@
  *  - **Exclusion.** A device currently ATTACHED to that session is not pushed to:
  *    it is showing the sheet. Only a registered device (P5 has a file) that is
  *    also in the authority snapshot (the caller passes what it may push to) is a
- *    candidate at all.
+ *    candidate at all. "Currently" means at the DEADLINE, so attach and detach
+ *    are events of their own (`attachment`): a phone locked mid-grace is pushed
+ *    to, a phone picked up mid-grace is not (F17).
  *  - **Replacement.** An ask answered before its grace ends is silent — the
  *    phone never buzzes for something already handled at the desk. An ask
  *    answered AFTER a push sends `ask_resolved` with the SAME collapse id, to
@@ -98,6 +100,17 @@ export interface PushNote {
 
 /** The inputs: session events, plus the explicit `tick` that stands in for the clock. */
 export type PushEvent =
+  | {
+      /**
+       * A client attached or detached (the foreground gate opening or closing).
+       * It carries no ask and pushes nothing: it exists so the exclusion is read
+       * from the attachment set at the DEADLINE, not at the last ask event. A
+       * phone locked mid-grace detaches, and must then be pushed to (F17).
+       */
+      readonly type: "attachment";
+      readonly sessionId: string;
+      readonly attached: PushAttached;
+    }
   | {
       readonly type: "ask";
       readonly sessionId: string;
@@ -301,6 +314,29 @@ export function createPushRules(options: PushRulesOptions): PushRules {
     };
   };
 
+  /**
+   * Whether a banner is now fully answered. A FOLD puts several asks under one
+   * collapse id, so APNs shows ONE banner for them; the id and the "answered on
+   * another device" text are claims about that banner, and are only true once
+   * its LAST ask settles. Settling an earlier one must therefore stay silent —
+   * the survivor still blocks the turn, and its banner must stay actionable.
+   * (A survivor pushed later goes out under its OWN id, so the grouping is by
+   * id, not by session: `ask.collapseId` is undefined for a never-pushed ask,
+   * which cannot be sharing a banner with a pushed one.)
+   */
+  const bannerAnswered = (state: SessionState, ask: TrackedAsk): boolean => {
+    const collapseId = ask.collapseId;
+    if (collapseId === undefined) {
+      return true;
+    }
+    for (const other of state.asks.values()) {
+      if (other.collapseId === collapseId) {
+        return false;
+      }
+    }
+    return true;
+  };
+
   const turnCommand = (
     event: Extract<PushEvent, { type: "turn_end" }>,
     at: number,
@@ -380,6 +416,17 @@ export function createPushRules(options: PushRulesOptions): PushRules {
         sessions.delete(event.sessionId);
         return NONE;
       }
+      if (event.type === "attachment") {
+        // Only sessions the rules track have an attachment that can matter: a
+        // detach of a session with no ask has no deadline to wake. Not creating
+        // state here is what keeps a stray attach from leaving a ghost timer
+        // (`nextDeadlineAt` walks every tracked session).
+        const state = sessions.get(event.sessionId);
+        if (state !== undefined) {
+          state.attached = event.attached;
+        }
+        return NONE;
+      }
       if (event.type === "ask") {
         const state = stateOf(event.sessionId, event.attached);
         if (state.asks.has(event.requestId)) {
@@ -409,6 +456,12 @@ export function createPushRules(options: PushRulesOptions): PushRules {
         }
         state.asks.delete(event.requestId);
         const at = now();
+        // A sibling under the same banner still pending: the banner is not
+        // answered, so nothing is replaced (finding 2). The survivor's own
+        // settle replaces it then.
+        if (!bannerAnswered(state, ask)) {
+          return NONE;
+        }
         const command = resolveAsk(event.sessionId, ask, at);
         return command === undefined ? NONE : { commands: [command], notes: [] };
       }

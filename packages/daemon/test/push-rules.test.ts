@@ -199,6 +199,55 @@ describe("who is pushed to", () => {
     h.clock.advance(30_000);
     expect(h.tick()[0]?.devices).toEqual([BOB]);
   });
+
+  // Review P5+P6 finding 1 (HIGH), F17: the phone is attached when the ask
+  // arrives and the user locks it without answering. The foreground gate closes
+  // the socket, so the device detaches — and a detach is not an `ask`, so the
+  // rules only learn about it from its own event. Mutation: drop the
+  // `attachment` arm (state.attached only moves on `ask`/`ask_settled`) → the
+  // phone stays "attached" at the deadline, the grace ends `push-empty`, the ask
+  // is marked decided and no push ever comes.
+  test("a device DETACHED during the grace is pushed to (F17: locking the phone)", () => {
+    const h = harness([ALICE]);
+    h.send(ask("s1", "r1", { clients: 1, devices: [ALICE] }));
+    h.clock.advance(5_000);
+    // The phone locks: the socket closes, the device is no longer attached.
+    // It says ONE thing — the attachment changed — and pushes nothing: anything
+    // else here (a `turn_done`, say) would be a buzz about an event that did not
+    // happen. Mutation: drop the `attachment` arm so the event falls through to
+    // the turn path → this arrays a `turn_done`.
+    expect(h.send({ type: "attachment", sessionId: "s1", attached: NOBODY })).toEqual([]);
+    h.clock.advance(25_000);
+    const pushed = h.tick();
+    expect(pushed.map((c) => c.kind)).toEqual(["ask"]);
+    expect(pushed[0]?.devices).toEqual([ALICE]);
+  });
+
+  test("a device ATTACHED during the grace is not pushed to (the inverse)", () => {
+    const h = harness([ALICE]);
+    h.send(ask("s1", "r1"));
+    h.clock.advance(5_000);
+    expect(
+      h.send({ type: "attachment", sessionId: "s1", attached: { clients: 1, devices: [ALICE] } }),
+    ).toEqual([]);
+    h.clock.advance(25_000);
+    const result = h.rules.apply({ type: "tick" });
+    expect(result.commands).toEqual([]);
+    expect(result.notes.map((n) => n.code)).toEqual(["push-empty"]);
+  });
+
+  test("an `attachment` for a session the rules do not track is dropped", () => {
+    const h = harness([ALICE]);
+    expect(
+      h.send({
+        type: "attachment",
+        sessionId: "nobody",
+        attached: { clients: 1, devices: [ALICE] },
+      }),
+    ).toEqual([]);
+    expect(h.rules.nextDeadlineAt()).toBeUndefined();
+    expect(h.rules.trackedAsks("nobody")).toBe(0);
+  });
 });
 
 describe("replacement (ask_resolved)", () => {
@@ -290,14 +339,84 @@ describe("re-offers", () => {
     expect(pushed[0]?.requestId).toBe("r1");
     expect(pushed[0]?.more).toBe(1);
     expect(h.rules.trackedAsks("s1")).toBe(2);
-    // Both banners are the same banner: one settle replaces it, the other's does not re-push.
-    h.send({ type: "ask_settled", sessionId: "s1", requestId: "r1", attached: NOBODY });
+    // Both banners are the same banner: the FIRST settle is silent (a sibling
+    // still blocks the turn), and the LAST one replaces it.
+    expect(
+      h.send({ type: "ask_settled", sessionId: "s1", requestId: "r1", attached: NOBODY }),
+    ).toEqual([]);
     expect(
       h
         .send({ type: "ask_settled", sessionId: "s1", requestId: "r2", attached: NOBODY })
         .map((c) => c.kind),
     ).toEqual(["ask_resolved"]);
     expect(h.rules.trackedAsks("s1")).toBe(0);
+  });
+
+  // Review P5+P6 finding 2 (MEDIUM): folded asks share the primary's collapse
+  // id, so the FIRST settle used to fire `ask_resolved` — the phone reads
+  // "answered on another device" while a sibling still blocks the turn, and the
+  // survivor is never re-pushed (`pushedTo` is set). Mutation: resolve on any
+  // settle (`ask_resolved` from `ask.collapseId`) → the first assertion below
+  // sees an `ask_resolved` and goes RED.
+  test("settling ONE of a fold does not claim the banner is answered (finding 2)", () => {
+    const h = harness([ALICE]);
+    h.send(ask("s1", "r1"));
+    h.clock.advance(1_000);
+    h.send(ask("s1", "r2"));
+    h.clock.advance(30_000);
+    const pushed = h.tick()[0];
+    if (pushed === undefined) throw new Error("expected the folded ask push");
+    expect(pushed.requestId).toBe("r1");
+    expect(pushed.more).toBe(1);
+    // The user answers r2 at the desk; r1 still blocks the turn, so the banner
+    // must stay actionable.
+    expect(
+      h.send({ type: "ask_settled", sessionId: "s1", requestId: "r2", attached: NOBODY }),
+    ).toEqual([]);
+    expect(h.rules.trackedAsks("s1")).toBe(1);
+    // The LAST ask of that banner settles: now, and only now, it is replaced.
+    const resolved = h.send({
+      type: "ask_settled",
+      sessionId: "s1",
+      requestId: "r1",
+      attached: NOBODY,
+    });
+    expect(resolved.map((c) => c.kind)).toEqual(["ask_resolved"]);
+    expect(resolved[0]?.collapseId).toBe(pushed.collapseId);
+    expect(resolved[0]?.requestId).toBe("r1");
+    expect(h.rules.trackedAsks("s1")).toBe(0);
+  });
+
+  test("a survivor later pushed on its own keeps its OWN banner (finding 2)", () => {
+    // r1 is pushed alone, then r2 folds into a second, later push of this
+    // session (outside the ask window). The two banners are distinct, so
+    // settling r2 must not retract r1's.
+    const h = harness([ALICE], { askWindowMs: 10_000 });
+    h.send(ask("s1", "r1"));
+    h.clock.advance(30_000);
+    const first = h.tick()[0];
+    if (first === undefined) throw new Error("expected the first ask push");
+    h.send(ask("s1", "r2"));
+    h.clock.advance(30_000);
+    const second = h.tick()[0];
+    if (second === undefined) throw new Error("expected the second ask push");
+    expect(second.collapseId).not.toBe(first.collapseId);
+    // Settling r2 replaces only r2's banner…
+    const resolvedSecond = h.send({
+      type: "ask_settled",
+      sessionId: "s1",
+      requestId: "r2",
+      attached: NOBODY,
+    });
+    expect(resolvedSecond.map((c) => c.collapseId)).toEqual([second.collapseId]);
+    // …and r1's is still un-answered, still replaceable under its own id.
+    const resolvedFirst = h.send({
+      type: "ask_settled",
+      sessionId: "s1",
+      requestId: "r1",
+      attached: NOBODY,
+    });
+    expect(resolvedFirst.map((c) => c.collapseId)).toEqual([first.collapseId]);
   });
 });
 

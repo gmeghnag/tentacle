@@ -343,6 +343,12 @@ suite DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20-Poly1305, single-shot:
   synchronous, wrapped in `try/catch` (a bug is reported, never thrown into the
   turn), and never awaited. `Attachment.deviceId?` is set by `Connection` from
   its principal. Absent option = today's behaviour exactly.
+  **It is also called on attach and detach** (from `attach` / `detach`, next to
+  `removeAttachment`, `hosted-session.ts:1538` / `:1602`) and the notifier feeds
+  that in as `PushEvent {type:"attachment"}`. The exclusion is read at the
+  DEADLINE, so without this event a phone locked mid-grace still looks attached
+  and the ask is never pushed (F17, fix round 1). The event carries no ask and
+  pushes nothing itself.
 - **`PushNotifier`** (one per `serve`, given through `SessionHostOptions` like
   the persister; absent elsewhere). It feeds the hook into `push-rules`, owns
   the timers (an injected `setTimeout` for tests), and builds a `PushMessage`.
@@ -445,9 +451,9 @@ merges, if the owner wants overlap (one branch at a time still holds: they ride
 | F14 | **Device revoked** | `removeDevices` deletes `push/<id>.json`. The push-time authority check also filters it within ≤ 1 s, even if a daemon re-wrote the file in a race (register on a socket that revoke is closing). |
 | F15 | **APNs key rotation on the relay** (owner revokes/replaces `.p8`) | Runbook: install the new key, restart. In-flight requests fail `rejected`/`unavailable`. The daemon audits and drops (F2 path). JWT refresh every 40 min, and a forced refresh on `ExpiredProviderToken`. |
 | F16 | **Version skew** | Old daemon + new app: `MethodNotFound` → Settings says "update tentacle on <computer>". New daemon + old app: never registers → no push. New daemon + old relay: F4. NSE older than the daemon's `v`/`kind`: placeholder (task 17). No `PROTOCOL_VERSION` move (additive). Unknown `push/<id>.json` `v`: that device is not pushed, the file is untouched, one audit line. |
-| F17 | **App backgrounded** | The foreground gate closes the socket → detach → the device is no longer "attached". Pushes now reach it. Correct by construction: "attached" = foreground on that session. |
+| F17 | **App backgrounded** | The foreground gate closes the socket → detach. The daemon reports attach/detach to the rules as their own event (`PushEvent{type:"attachment"}`), so "attached" is read at the DEADLINE and a phone locked mid-grace is pushed to (fix round 1 finding 1; a detach carried no event before, and the ask ended `push-empty` and never pushed). |
 | F18 | **App killed** | The OS closes the socket (or the relay ping does). Same as F17. APNs delivery does not need the app running. The NSE runs on its own (task 17). |
-| F19 | **Ask answered exactly at grace expiry** | `settle` and the timer callback both run on the event loop. Whichever runs first wins. If the timer ran first and pushed, the settle sends `ask_resolved` with the same collapse id, which replaces the banner. Never a stale actionable banner left behind. |
+| F19 | **Ask answered exactly at grace expiry** | `settle` and the timer callback both run on the event loop. Whichever runs first wins. If the timer ran first and pushed, the settle sends `ask_resolved` with the same collapse id, which replaces the banner — but only when it is the LAST ask under that banner (fix round 1 finding 2): a fold puts several asks under one id, and resolving on the first settle told the phone "answered on another device" while a sibling still blocked the turn. So: never a stale actionable banner left behind, and never a false "answered". |
 | F20 | **Many asks / a loop** | Folding plus caps (Design 1). At most one push per session per 10 s per device, with "+N more". `push-capped` is audited. |
 | F21 | **Daemon restart with an ask pending** | Timers are not persisted. The reload re-asks (a new `requestId`, `docs/feat/suspended-turn-resume.md`), which starts a fresh grace and may push again. Accepted: a new ask is a new notification. |
 | F22 | **Two daemons on one computer** | Each pushes only its own sessions' events, through its own relay link. Registrations are shared through `push/` (one file per device). |
@@ -1693,5 +1699,115 @@ the relay/Apple in clear.
 
 Same model family as the executor (Opus, fresh context only): shared blind spots
 may survive.
+
+*— claude-opus-5-5, 2026-11-15*
+
+## Execution
+
+### Fix round 1
+
+Scope: the two findings of *Review — P5 + P6*. Both reproduced first, both fixed
+red-before-green, both mutation-checked. Scratch: `.tentacle/tmp/mobile-push/fix1r-probe.ts`,
+`fix1r-fallback.ts`, `fix1r-mut.sh`, `fix1r-full.log`.
+
+**Repro on the buggy code** (`bun run .tentacle/tmp/mobile-push/fix1r-probe.ts`):
+
+```
+F1 at 30s: ["ask"] notes: [] next: undefined     # ← after the fix
+F2 push: [{"kind":"ask","id":"r1","more":1}]
+F2 settle r2 first: [] tracked: 1                # ← after the fix
+```
+
+Before the fix the same script printed `F1 at 30s: [] notes: ["push-empty"] next:
+undefined` (the phone stayed "attached", the ask was marked decided, no push ever —
+the Review's exact output) and `F2 settle r2 first: [{"kind":"ask_resolved","id":"r2"}]
+tracked: 1` (a `ask_resolved` claiming a banner whose r1 still blocked the turn).
+
+**F1 (HIGH) — a detach is now an event (`push-rules.ts:100-112`, `:419-429`).**
+Root cause: `state.attached` moved only on `ask`/`ask_settled`/`turn_end`, so the
+exclusion was read at the *last event*, not at the deadline, and a phone locked
+mid-grace still counted as attached (F17 inverts).
+- New `PushEvent` variant `{type:"attachment", sessionId, attached}`; a new arm
+  records `state.attached` and returns `NONE` — it carries no ask and pushes
+  nothing.
+- It deliberately does **not** create state (`sessions.get`, not `stateOf`): a
+  detach of a session with no ask has no deadline to wake, and `nextDeadlineAt`
+  walks every tracked session, so creating state would leave a ghost timer.
+- Consequence for P7 (a **drift from the Implementation**, recorded here so the
+  plan stays the truth): the hook must now also fire on attach/detach —
+  `hosted-session.ts:1538` / `:1602` — not only from `emit`. Without that the
+  rules never learn about a detach and F17 regresses. I updated Design §5
+  (*Hook*) and the F17 row to say so; I did **not** wire it (that is P7's file set
+  and P7's slice), so the seam is spec'd, not built.
+
+**F2 (MEDIUM) — `ask_resolved` only when the banner is fully answered
+(`push-rules.ts:317-338`, `:460-468`).** Root cause: every ask of a fold took the
+primary's `collapseId`, and `resolveAsk` fired on the first settle, so the phone
+was told "answered on another device" while a sibling still blocked the turn (and
+the survivor, already in `pushedTo`, was never re-pushed). Fix: `bannerAnswered`
+skips the replacement while any still-tracked ask of that session shares the
+collapse id; the rest of `resolveAsk` is unchanged, so `ask_resolved` stays
+uncapped (F19) and a solo ask resolves exactly as before. Grouping is by **id**,
+not by session — a survivor pushed on its own later goes out under its own id,
+and its settle replaces only its own banner (pinned by
+"a survivor later pushed on its own keeps its OWN banner").
+
+**Tests (`packages/daemon/test/push-rules.test.ts`).** Five added/changed, each
+RED on the buggy code before the fix:
+- `a device DETACHED during the grace is pushed to (F17: locking the phone)` —
+  RED on the assertion `expect(...) .toEqual(["ask"])`, and now also asserts the
+  attachment event itself emits nothing (see the honesty note below).
+- `a device ATTACHED during the grace is not pushed to (the inverse)`.
+- `an attachment for a session the rules do not track is dropped`.
+- `settling ONE of a fold does not claim the banner is answered (finding 2)`.
+- `a survivor later pushed on its own keeps its OWN banner (finding 2)`.
+- The pre-existing fold test had encoded the bug (`settle r1 → nothing`, `settle
+  r2 → ask_resolved`) and was rewritten to the property: the FIRST settle is
+  silent, the LAST replaces the banner.
+
+**Honesty note (a vacuity I caught, §9).** My first draft of the two detach tests
+was **green on the buggy code** and proved nothing: an untyped `{type:"attachment"}`
+fell through `apply`'s final arm to `stateOf(event.sessionId, attached)` *plus*
+`turnCommand`, so it updated the attachment set by accident **and** pushed a bogus
+`turn_done` (pasted from `.tentacle/tmp/mobile-push/fix1r-fallback.ts`:
+`attachment event emitted: [{"kind":"turn_done",…}]`). The fix was to assert the
+event's own contract — it emits **nothing** — which is what mutation M2 below
+bites on. Without that assertion the finding-1 tests would have been theatre.
+
+**Mutations** (`sh .tentacle/tmp/mobile-push/fix1r-mut.sh`; source restored by
+`cp` from a scratch backup, `cmp` identical, `git status` back to the three
+intended files):
+
+| # | mutation | result |
+|---|---|---|
+| M1 | the `attachment` arm no longer records the set | **RED 2** — the detach test + the attach inverse |
+| M2 | the `attachment` arm falls through to `turnCommand` (the old unknown-event path) | **RED 1** — the detach test (`turn_done` emitted) |
+| M3 | resolve on ANY settle (drop `bannerAnswered`) | **RED 2** — the fold test + "settling ONE of a fold…" |
+| M4 | *over-correction:* `bannerAnswered` always `false` | **RED 6** — every replacement test (a stale banner would stay) |
+
+M4 is the control that the finding-2 fix did not simply stop resolving: it proves
+the *last* settle still replaces the banner.
+
+**Gate (this worktree, this branch, uncommitted).**
+`bunx tsc --noEmit` → **exit 0**. `bun run lint` → `Checked 1381 files in 446ms.
+No fixes applied.` (0/0, matches the §6 baseline; Biome reformatted two of my new
+test lines, applied with `biome check --write`). `bun test` → **10061 pass, 4
+skip, 0 fail**, 10065 tests / 722 files, 395 s (`.tentacle/tmp/mobile-push/fix1r-full.log`).
+Three of the four skips are the documented opt-ins (live-k8s, live-docker, the
+real-socket keepalive); the fourth is
+`packages/cli/test/session-hop.docker.test.ts:248` (`test.skipIf(!ENABLED)`), also
+an opt-in and pre-existing on `main` — not a new skip, and this diff does not
+touch that file.
+
+**Also updated.** `changelog.d/mobile-push-rules.added.md` (the bullet now states
+the deadline-fresh exclusion and the last-ask rule — no new fragment, the existing
+P5/P6 entry is still the right one); Design §5 *Hook*; failure-mode rows F17 and
+F19. No wire change, so no `protocol.d/` note.
+
+**Unverified.** P7 has not been wired, so the new `attachment` event is exercised
+only through the rules' own unit tests: the hook calling it on attach/detach
+(and the resulting F17 in a real `serve`) is verified when P7 lands. The cheap
+test there is a `push-hook.test.ts` case: attach a phone, lock it (detach), let
+the grace expire → a push to that device.
 
 *— claude-opus-5-5, 2026-11-15*
