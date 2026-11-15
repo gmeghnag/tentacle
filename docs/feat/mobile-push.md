@@ -1429,3 +1429,205 @@ skips are the documented opt-ins and this round adds none). No wire change, so n
 **Gate.** `bun test apps/relay` → 157 pass, 0 fail. `bun run lint` → clean (1377 files). `bun run typecheck` → exit 0. Full `bun test` not re-run.
 
 *— claude-opus-5-5, 2026-11-15* (different model family from the executor, DeepSeek)
+
+## Execution
+
+### P5 (push registration store) — DONE
+
+*— claude-opus-5-5 (executor, P5 + P6), 2026-11-24*
+
+**Load-bearing check, re-run first: PASS.** `.tentacle/tmp/mobile-push/p56-load-bearing.ts`
+(scratch, in this worktree) — 25 checks, all PASS:
+
+```
+PASS emit() — hosted-session.ts:1960
+PASS watchers.offer AFTER the attachment fan-out — :1963 < :1974
+PASS blockingUnsupported: no attachment ⇒ undefined
+PASS recheckAsks() — :1100
+PASS finishTurn emits turn_end
+PASS Attachment interface — :191
+PASS push-store.ts absent (P5 adds it)
+PASS push-rules.ts absent (P6 adds it)
+PASS protocol exports pushCollapseIdOf | PushMessageSchema | DevicePushRegisterParamsSchema
+     | PushEnvironmentSchema | DEFAULT_PUSH_GRACE_SECONDS | PUSH_GRACE_MAX_SECONDS
+     | PUSH_COLLAPSE_ID_MAX | fitPushMessage
+PASS collapseId is header-safe ≤64 (20B) and keyed
+PASS device-store exports deviceDir | removeDevices | readSeen | SEEN_DIR | DEVICE_DIR
+PASS writeAtomic is NOT exported (push-store needs its own writer)
+PASS a malformed register payload is refused | a well-formed one parses
+PASS DEFAULT_PUSH_GRACE_SECONDS = 30
+
+LOAD-BEARING: PASS
+```
+
+Every `hosted-session.ts` citation still resolves at the line P2/P3 recorded, and
+both slices' capability is absent (neither module exists). What the plan did not
+say, and the probe found: `device-store.ts`'s atomic writer is **private**, so
+`push-store.ts` carries its own (`writeAtomic`, tmp + `rename`) — a two-line
+duplication rather than exporting a store-internal helper for one caller.
+
+**Files (P5's list, nothing else).** `packages/daemon/src/push-store.ts` (new);
+`packages/daemon/src/device-store.ts` (`PUSH_DIR` +2 lines in `removeDevices`);
+`packages/daemon/src/index.ts` (one export line); `packages/cli/src/devices-cmd.ts`
+(the `PUSH` column + `clearPushRegistrations` in `reset`);
+`packages/daemon/test/push-store.test.ts` (new, 15 tests);
+`packages/cli/test/devices-cmd.test.ts` (+5 tests);
+`changelog.d/mobile-push-rules.added.md` (new, one bullet for P5+P6).
+
+**As built.** `<configDir>/devices/push/<id>.json` = `{v:1, token, env, key,
+registeredAt}`, 0600, tmp + rename, validated through **P2's own
+`DevicePushRegisterParamsSchema`** (one definition of a good token/env/key, so a
+hand-edited file cannot smuggle in what the RPC refuses). `readPushRegistrations`
+returns a map plus the `skipped` list; an unknown `v`, malformed JSON or a bad
+field yields a skip and **the bytes are never touched**. `deletePushRegistration`
+is compare-and-delete (`deleted` / `absent` / `kept-newer-token` / `unreadable`).
+`PUSH_DIR` sits in `device-store.ts` with `SEEN_DIR`, so `removeDevices` drops
+`push/<id>.json` without importing the store that writes it. `reset` calls
+`clearPushRegistrations` **after** `removeDevices`, and that is the case the test
+pins: a registration whose device is no longer in the registry is reachable by
+neither `removeDevices` nor anything else but a directory-wide clear.
+
+**Drift from the Implementation, and why.**
+1. **`clearPushRegistrations` is an addition beyond "+2 lines in `removeDevices`".**
+   The plan has `devices reset` "empty `push/`" but no function for it, and
+   `reset` runs `removeDevices` over the registry it just read — which cannot see a
+   file a hand-revoked device left. The clear is directory-wide and idempotent.
+2. **`renderDevices`'s `push` is a `ReadonlyMap<string, PushRegistration>`, not a
+   `Set<string>`.** A set would have been enough for `on`/`off` today, but the
+   column exists to answer "will this phone be notified?" and the environment/age
+   is the obvious next question; a map is the same call at every site and does not
+   need a second signature then. It is **optional with a default**, so the three
+   pre-existing `renderDevices` test calls are unchanged.
+3. **The `PUSH` column is last, after `LAST SEEN`**, so the existing "the widest
+   name sets the column" and `toStartWith("NAME")` assertions keep their meaning.
+
+**Red before green.** `bun test packages/daemon/test/push-store.test.ts` before the
+module existed fails at the module boundary (not property-bearing, §9). The
+property-bearing red is the CLI half, which compiles against the new store and
+fails on the assertion: `expected "iPhone  aaaa…  1970-01-01  never" to end with
+"off"` and `Expected to contain: "PUSH"` — 27 pass, **3 fail**. Non-vacuity is the
+mutation table below.
+
+**Mutations (`sh .tentacle/tmp/mobile-push/p5-mut.sh` — one edit at a time, run
+against both narrow files, restored from `.tentacle/tmp/mobile-push/p5-mut-backup/`,
+never git; the script ends with `diff -q` against the backups and a green re-run):**
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| M1 | compare-and-delete's token compare dropped (unconditional delete) | **RED** "KEEPS a newer token" |
+| M2 | any record version accepted (`value.v !== v` → `false`) | **RED** "an unknown `v` is SKIPPED, and its bytes are untouched" |
+| M3 | an unknown record is `rm`'d instead of left alone | **RED** 3 (both "bytes untouched" tests + "not deleted out from under a human") |
+| M4 | `removeDevices` no longer drops `push/<id>.json` | **RED** 2 |
+| M5 | the record is written 0644 | **RED** "round-trips, 0600" |
+| M6 | `reset` no longer clears `push/` | **RED** (first draft **SURVIVED** — see below) |
+| M7 | the column prints `on` unconditionally | **RED** 2 |
+| M8 | an unreadable record counts as registered (fail open) | **RED** 4 |
+| M9 | the store skips the wire's own schema | **RED** "a malformed one writes NOTHING" |
+
+**M6 first SURVIVED, and that is the useful result.** The reset test only covered
+a *paired* device, whose file `removeDevices` already removes — so the test proved
+the wrong function. Strengthened it with a **second registration whose device is
+not in the registry** (a hand-revoked one), which only a directory-wide clear
+reaches; M6 now goes RED on exactly that test. Recorded rather than quietly fixed,
+per §9.
+
+### P6 (push rules) — DONE
+
+*— claude-opus-5-5 (executor), 2026-11-24*
+
+**Files (P6's list).** `packages/daemon/src/push-rules.ts` (new, pure);
+`packages/daemon/test/push-rules.test.ts` (new, 28 tests); plus the export line in
+`packages/daemon/src/index.ts` (shared with P5's diff).
+
+**As built.** `createPushRules({now, registered, graceMs?, askWindowMs?,
+maxPerMinute?})` returns `{apply, nextDeadlineAt, trackedAsks}`. It takes
+**events plus the explicit `tick`** — it owns no timer and no clock, and
+`nextDeadlineAt()` tells the shell (P7) when to call `tick`, so the one real timer
+lives in one place. `apply` returns `{commands, notes}`: `PushCommand` (kind,
+sessionId, sorted devices, collapseId, requestId/turnId/more, at) and `PushNote`
+(`push-folded` / `push-capped` / `push-empty`) — a refusal is a note, so the caller
+maps it to an audit line and nothing is ever silent (F20).
+
+Rules as implemented: the grace (`graceMs`, default P2's
+`DEFAULT_PUSH_GRACE_SECONDS`); exclusion of the devices attached **at the
+deadline**, read fresh, from `registered()` (which P7 feeds from P5's store
+filtered by the authority snapshot); a re-offer of the same `requestId` never
+restarts the timer; `ask_resolved` under the **same** collapse id to exactly the
+devices told (and **never** capped); the turn rule (`turn_done` / `turn_failed`
+only with `clients === 0`, `cancelled` never); `session_closed` drops the
+session's state; one `ask` push per session per 10 s with the extras counted as
+`more`; a rolling-60-minute cap of 60.
+
+**Drift from the Implementation, and why.**
+1. **Time-driven work is an explicit `tick` event, not a `deadline` callback.**
+   The plan says the rules own "the timers (an injected `setTimeout` for tests)".
+   Inverting it (rules say WHEN, shell owns the ONE timer) removes the seam a test
+   would have to fake, and it makes `grace 0` and the window/cap boundaries run
+   through the *same* path as any other tick instead of a second code path.
+2. **The folding is one banner per session, not one per device.** The design's
+   "1 `ask` push per session per 10 s **per device**" is implemented as a
+   per-session window, and the reason is the `more` count: "+N more waiting" is a
+   fact about the session's pending asks, so it is one number for the banner. A
+   per-device window would need one count per device while the phone shows one
+   banner, and could not reduce the banner rate below the session's.
+3. **`push-empty` is an addition to the design's note vocabulary.** The design
+   lists `push-folded` and `push-capped`; "the grace ended and every registered
+   device is attached to this session" is a third, and it must be said for the same
+   reason (a silent drop is a bug). The asks are then marked decided, so they are
+   not retried forever and a later settle stays silent.
+4. **The ask is marked pushed even when zero devices were told**, with an empty
+   set — which is what makes the "every device attached" case terminate, and makes
+   its `ask_resolved` a no-op rather than a banner for a push nobody got.
+
+**Red before green.** The property-bearing red is the CLI/daemon pair above plus
+the module-boundary failure (`Cannot find module '../src/push-rules.ts'`, 0 pass /
+1 error), which §9 says is not property evidence; the mutation table is.
+
+**Mutations (`sh .tentacle/tmp/mobile-push/p6-mut.sh` + `p6-mut2.sh`, same
+pattern: one edit, narrow file, restore from `p6-mut-backup/`, never git):**
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| M1 | the grace is ignored (`deadlineAt: at`) | **RED** 3 grace tests |
+| M2 | attached devices are not excluded | **RED** 3 |
+| M3 | `ask_resolved` gets a fresh collapse id | **RED** 2 (incl. F19 both-ways) |
+| M4 | a re-offer restarts the grace | **RED** "the same requestId does NOT restart the timer" |
+| M5 | the turn rule ignores `attached.clients` | **RED** "a TUI at the desk silences it" |
+| M6 | `cancelled` pushes | **RED** "`error` → `turn_failed`; `cancelled` → nothing" |
+| M7 | the per-session ask window is not enforced | **RED** "at most ONE ask push per session per window" |
+| M8 | the storm cap is not enforced (turn path) | **RED** 2 (N/N+1 + the rolling minute) |
+| M9 | `session_closed` keeps its timers | **RED** 2 |
+| M10 | an already-pushed ask is pushed again on every tick | **RED** "at most ONE ask push per session" |
+| M11 | *control:* `ask_resolved` becomes capped | **RED** "an `ask_resolved` is NEVER capped" |
+| M12 | folding loses its `more` count | **RED** the fold test |
+
+Two of the tests were **wrong on their first draft, and the code was right**:
+`more` counts asks already DUE (so a 29 s+1 s pair folds as `more: 1` only once
+both graces ended, not before), and a device attached at the ask but *not* at the
+deadline is pushed to (the attachment set is read at the deadline). Both were
+rewritten to state the property they meant, and the rewritten ones are what the
+table above bites on.
+
+**Gate (this worktree, this branch, uncommitted — see the note below).**
+`bunx tsc --noEmit` → exit 0. `bunx tsc -p apps/mobile` and `-p apps/relay` →
+exit 0. `bun run lint` → `Checked 1381 files in 523ms. No fixes applied.` (0/0,
+baseline clean). `bun test` → **10055 pass, 4 skip, 1 fail**, 10060 tests / 722
+files, 393 s. The one fail is `packages/daemon/test/serve-log-store.test.ts`'s
+"S11 — a real SIGKILL at random points" (`expect(loads).toBeGreaterThan(100)` saw
+`0`) — the documented load-flaky test (`docs/feat/images-off-reason.md:553-555`,
+`docs/fix/reask-budget-and-compact-length.md:420`), in a file this diff does not
+touch; alone it is **22 pass / 0 fail**. No wire change, so no `protocol.d/` note,
+no `PROTOCOL_VERSION` move and `protocol.json` untouched (`git status` has no
+`protocol.json`) — no `schema:export` needed.
+
+**Unverified.** P7's use of `nextDeadlineAt`/`tick` from a real `setTimeout`, and
+the audit mapping of `PushNote.code` → a line, are P7's (the shell does not exist
+yet). The one assumption to re-check there: a `tick` arriving slightly LATE must
+still push (the rules compare `deadlineAt <= at`, so it does) — no drift is
+possible in the other direction.
+
+**Branch note.** The task prompt says "branch here", but this worktree is on
+`feat/mobile-push`, already merged into `main` (`git rev-list --count main..HEAD`
+= 0, `HEAD..main` = 17), and I am told never to `checkout`/`commit`. So P5/P6 are
+**uncommitted working-tree edits on `feat/mobile-push`**, listed in `git status`;
+the orchestrator decides where they land.
