@@ -432,13 +432,25 @@ export async function runPairing(options: RunPairingOptions): Promise<PairingOut
   // A fresh key per pairing: removing a computer destroys exactly its key, and
   // two computers cannot correlate this phone by it (Owner Q2).
   const keypair = generateStaticKeypair(random);
-  /** The raw channel of the attempt in flight: Cancel closes exactly this one. */
-  let inFlight: DuplexChannel | undefined;
+  /**
+   * Every raw channel this run has OPENED and not yet seen closed: Cancel
+   * closes ALL of them.
+   *
+   * A race hands out more than one channel (the pairing dial is the staggered
+   * race of `@tentacle/client`, docs/fix/relay-pairing.md), and the LAST one to
+   * open can be a loser the race already abandoned while the WINNER is
+   * mid-exchange — so remembering a single "channel in flight" closes the wrong
+   * socket and leaves the exchange's own open: the computer keeps a pairing
+   * connection after Cancel. A `Set` makes the cancel independent of order.
+   */
+  const opened = new Set<DuplexChannel>();
   const onAbort = (): void => {
-    try {
-      inFlight?.close();
-    } catch {
-      // already closed: `pairDevice` rejects on its own
+    for (const channel of opened) {
+      try {
+        channel.close();
+      } catch {
+        // already closed: `pairDevice` rejects on its own
+      }
     }
   };
   options.signal?.addEventListener("abort", onAbort, { once: true });
@@ -446,11 +458,25 @@ export async function runPairing(options: RunPairingOptions): Promise<PairingOut
     const one = options.dial(address);
     return async (): Promise<DuplexChannel> => {
       const channel = await one();
-      inFlight = channel;
+      opened.add(channel);
+      // A closed channel leaves the set, so a long dial cannot grow it and a
+      // later cancel cannot close a socket the exchange already hung up. The
+      // handshake REPLACES a channel's single `onClose`, so the removal is
+      // attached to a thin wrapper that forwards every call unchanged.
+      const tracked: DuplexChannel = {
+        send: (data) => channel.send(data),
+        close: () => channel.close(),
+        setOnMessage: (handler) => channel.setOnMessage(handler),
+        setOnClose: (handler) =>
+          channel.setOnClose(() => {
+            opened.delete(channel);
+            handler();
+          }),
+      };
       if (options.signal?.aborted === true) {
-        channel.close();
+        tracked.close();
       }
-      return channel;
+      return tracked;
     };
   };
   try {

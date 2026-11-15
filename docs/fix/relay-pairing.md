@@ -403,7 +403,176 @@ LAN/Tailscale → compare code within ~2 s, `y` on the Mac pairs.
 
 ## Execution
 
-*(empty — filled by the executor)*
+*— claude-sonnet-4-5, 2026-11-15*
+
+### Load-bearing check (re-run first, on `fix/relay-pairing` at 6d7f5839)
+
+`.tentacle/tmp/relay-pairing/repro.ts` re-run in all three modes — the plan's
+assumption HOLDS:
+
+```
+# A — relay is the only address (bun repro.ts 0 4000): the relay path works
+   34ms phone  compare 732586 (initialize answered)
+# B — the QR's real shape, 2 dead direct addresses then the relay (2 8000): THE BUG
+   17ms phone  dial ws://127.0.0.1:51369/e2e?dead=0
+ 8017ms phone  STUCK: no pairing result after 8000ms      (the relay is never dialled)
+# C — the same addresses through the app's existing R6 race (2 4000 race): THE FIX SHAPE
+  773ms phone  open ...?dead=1 / 1524ms phone  open .../d/…
+ 1537ms phone  compare 253404 (initialize answered)
+```
+
+So `pairDevice` really does block on address 0 with no deadline, and
+`firstAnswering` really does reach the relay. Proceeded.
+
+### As built, in order
+
+1. **Move the race into the client package.** `git mv`-equivalent move of
+   `apps/mobile/src/address-dial.ts` → `packages/client/src/address-dial.ts` and
+   its test → `packages/client/test/address-dial.test.ts`; the one import changed
+   from `@tentacle/client` to `./link-machine.ts` (relative), the test's to
+   `../src/link-machine.ts`. Exported from `packages/client/src/index.ts:7`;
+   `apps/mobile/src/connection.ts:25-32` now takes `firstAnswering` / `DialMemory`
+   / `DialFailure` from `@tentacle/client` (its own relative import deleted).
+   `openComputer` untouched otherwise. 16 existing cases pass, unchanged.
+2. **Two new options on `FirstAnsweringOptions`** (`address-dial.ts:92-...`):
+   `isTerminal?: (error) => boolean` (default `isTerminalDialError`) and
+   `openDeadlineMs?: number` (default: none). The deadline is armed before the
+   first `open`, cancelled the moment a socket wins, and finishes the round
+   `failed` with `ChannelError("unreachable", "no address opened within N ms")`
+   and `at: undefined` (nothing left to try) — a socket that opens later takes
+   the existing `settled`-or-`winner` branch and is `abandon`ed. Tests first
+   (red: `clock.fireFor` did not exist and the deadline was not implemented),
+   then green; mutations pasted below.
+3. **`pairDevice` races** (`packages/client/src/pairing.ts:130-...`): the `for`
+   loop is gone; `firstAnswering(payload.addresses, {open, abandon, confirm},
+   {lastGood: undefined}, {isTerminal: (e) => e instanceof PairingRefused ||
+   isTerminalDialError(e), openDeadlineMs: PAIRING_OPEN_DEADLINE_MS,
+   ...options.race})`. `pairAt(address, options)` became `pairOn(channel,
+   options)`: identical body, `secureChannelFactory(async () => channel, …)` in
+   place of `secureChannelFactory(options.dial(address), …)`, so the exchange is
+   unchanged (`initialize` keeps its 30 s, `device/pair` still has NO deadline,
+   the `finally { peer.close() }` is kept). `PAIRING_OPEN_DEADLINE_MS = 15_000` is
+   exported; `PairDeviceOptions.race?: FirstAnsweringOptions` is the test seam.
+   The old "no pairing address answered (N tried)" wrapper is gone — the race
+   rethrows the last failure unchanged, which is more specific (the plan allowed
+   this: no test pinned the wording). The module header was updated (it still said
+   "ONE dial per address in payload order").
+4. **Cancel closes every opened channel** (`apps/mobile/src/pairing-flow.ts`):
+   `inFlight: DuplexChannel` → `const opened = new Set<DuplexChannel>()`, `onAbort`
+   closes all of them, and `dial` returns a thin `tracked` wrapper whose
+   `setOnClose` removes the channel from the set before forwarding — necessary
+   because the Noise handshake REPLACES a channel's single `onClose`, so removing
+   the entry from a handler that the handshake then overwrites would never run
+   (the first attempt did exactly that and the test stayed red). The
+   already-aborted check on arrival is kept.
+5. **Tests** — all new cases were RED on the pre-change code first (pasted
+   below), then green:
+   - `packages/client/test/pairing.test.ts` (+4): hanging-first-address pairs over
+     the next one; every-address-hanging → `unreachable` within the deadline; a
+     refusal on the winner is not retried (exactly one `pairing-refused` audit
+     line); a loser that opens late never handshakes (no `pairing-open` /
+     `device-open` on that daemon). A `hang()` helper (a `Bun.listen` TCP socket
+     that never answers the upgrade) models the 4G direct address.
+   - `packages/client/test/address-dial.test.ts` (+6): `isTerminal` override stops
+     the loop and is additive (default still `unauthorized`); deadline fires →
+     `unreachable` with nothing left to try; a late open is `abandon`ed, not
+     confirmed; an open before the deadline cancels it (so a winner's handshake has
+     no deadline — F3); no deadline by default.
+   - `packages/cli/test/serve-relay.test.ts` (+1): the bug's real shape end to end
+     — real `serve` + real relay + a live pairing window, `pairDevice` over
+     `[dead, dead, relay]` → the compare code arrives over the relay and the
+     daemon audits exactly one `pairing-open`.
+   - `apps/mobile/test/pairing-flow.test.ts` (+2): Cancel ENDS the run with the
+     race's shape (the last channel opened is the loser, the winner is
+     mid-handshake; with one `inFlight` the run never settles — asserted as
+     `not "hung"`); a channel opening after the abort is closed at once (kept).
+
+### Red-before-green evidence
+
+Pre-change: the four pairing race cases were run before `pairDevice` was changed
+(they hung, exactly as run B does), and the `address-dial` deadline cases before
+the deadline existed; the mutation rows below re-establish the same red states
+from the finished code.
+
+```
+# the four pairing race cases on the OLD sequential loop (same 4 lines today)
+(fail) a HANGING first address does not keep pairing from the next one  [3008ms]
+(fail) every address hanging fails `unreachable` within the open deadline [5002ms]
+(fail) a refusal on the winner is NOT retried on another address        [5001ms]
+(fail) a loser that opens after the winner is closed BEFORE any handshake [3013ms]
+# the CLI end-to-end case, same revert
+(fail) pairDevice with a dead direct address FIRST still pairs over the relay [3036ms]
+# Cancel, with the single `inFlight`
+error: expect(received).not.toBe(expected)   Expected: not "hung"
+(fail) Cancel closes EVERY channel the race opened, winner included     [2503ms]
+```
+
+### Mutations (§9 non-vacuity, pasted)
+
+| Mutation | Result |
+|---|---|
+| `pairDevice` back to the `for` loop over `payload.addresses` | **red 4/4** pairing race cases + **red** the CLI end-to-end case |
+| `if (openDeadlineMs !== undefined)` → `… && false` (no deadline branch) | **red 3**: both `address-dial` deadline cases + pairing's "every address hanging" |
+| `isTerminal: (e) => isTerminalDialError(e)` (drop the `PairingRefused` arm) | **red 1**: "a refusal on the winner is NOT retried" (the code was claimed twice) |
+| Cancel closes only the LAST opened channel (`[...opened].at(-1)`) | **red 1**: Cancel never settles (the winner's socket stays open) |
+
+All mutations reverted; the focused files were re-run green after each revert.
+
+### Drift from the Implementation
+
+- **`openComputer` gets no `openDeadlineMs`** — as planned; the option is absent
+  there, so its behaviour is byte-for-byte unchanged (its 16 tests pass unedited).
+- **The Cancel tracking wrapper**: the plan said "track a `Set<DuplexChannel>` of
+  opened channels (removed on their close)". A direct `channel.setOnClose(… delete)`
+  does not work, because `noiseInitiator` replaces that handler during the
+  handshake (`noise-channel.ts:361`), so the removal never ran and the fix did
+  nothing for the one channel that matters (the winner). Implemented as a
+  pass-through `DuplexChannel` wrapper that wraps `setOnClose` instead; same
+  behaviour, and the same one-object-per-dial guarantee the plan wanted.
+- **The refusal test needed a dead address first** to be red on the old code: with
+  two live addresses in list order the old loop already refused once and stopped,
+  so the case proved nothing. Inserting a `hang()` first makes the sequential code
+  hang (red) while the property asserted is still `isTerminal`'s (exactly one
+  claim). No test was weakened; one was made able to fail.
+- **The "loser never handshakes" assertion** is `no pairing-open` / no
+  `device-open` on the losing daemon, not "the audit is empty": a raced loser's
+  socket DOES reach that daemon and closes pre-handshake, which the daemon audits
+  as `connection-close` + `e2e-violation closed` (the plan's own failure-mode
+  table predicts exactly this). The property the plan names — no daemon-side
+  pairing state, no slot spent — is what is asserted.
+- No protocol schema, persisted format, daemon or relay code was touched, so
+  `packages/protocol/schema/protocol.json` needed no regeneration (verified: no
+  diff under `packages/protocol`).
+
+### Gate
+
+```
+bunx tsc --noEmit                      clean
+bunx tsc -p apps/mobile --noEmit       clean
+bunx tsc -p apps/relay --noEmit        clean
+bun run lint                           clean (0 errors, 0 warnings)
+bun test                               11315 pass, 5 skip, 0 fail (815 files, 424 s)
+```
+
+The 5 skips are the pre-existing opt-ins (live k8s ×2, live docker ×2,
+`TENTACLE_SLOW_TESTS`' real-socket keepalive ×1) — not new, not failures.
+
+Post-fix repro (run B's exact command, `.tentacle/tmp/relay-pairing/`):
+
+```
+   17ms phone  dial ws://127.0.0.1:59454/e2e?dead=0
+  767ms phone  dial ws://127.0.0.1:59454/e2e?dead=1
+ 1519ms phone  dial ws://127.0.0.1:59452/d/…
+ 1521ms relay  dial-open / 1532ms daemon relay-open / 1541ms daemon pairing-open
+ 1542ms phone  compare 115373 (initialize answered)
+```
+
+Changelog: `changelog.d/relay-pairing.fixed.md` (one bullet). `CHANGELOG.md`
+untouched. No `protocol.d/` note (nothing on the wire changed).
+
+Unverified here: the real-phone check (owner) — scan a QR whose first addresses
+are LAN/Tailscale on 4G and expect the compare code within ~2 s.
+
 
 ## Review
 
