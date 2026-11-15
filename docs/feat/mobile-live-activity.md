@@ -1223,3 +1223,41 @@ behind `main` (`b9b2d4fb`; `main` moved since round 2), and L0–L12 are still
 - **Still open (orchestrator's action):** merge `main` into this branch, or
   re-cut it from `main`. Until then there is no feature to approve, and further
   rounds of doc-only fixes cannot change this verdict.
+
+### Round 4
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Verdict: REQUEST-CHANGES. The blocker is unchanged and belongs to the
+orchestrator: the branch is now 316 commits behind `main` (`da1958f0`). The
+doc itself is correct.** `git diff HEAD~1` changes only this doc, and my Review
+text is unchanged. L0–L12 are still 0 of 13.
+
+- **The new second table is correct.** The executor found ten more line
+  references in the doc's prose that had no `main` equivalent. I spot-checked
+  five against the current `main` (`git show main:<file>`) and against this
+  branch:
+  - principal default: `connection.ts:178` here → `:225` on `main`
+  - `DevicePair` check: `connection.ts:301` → `:349`
+  - `resolvePermission`: `hosted-session.ts:1110` → `:1239`, inside the cited
+    1098-1129 → 1227-1258 ranges
+  - `suspend()`: `foreground-gate.ts:111` → `:143`
+  - `KEYCHAIN_ACCESSIBLE`: `secure-kv.ts:17` → `:20`
+
+  All five match the table. On current `main` the round-2 rows also still hold
+  (`watchers.offer` :2101, `finishTurn` :2740), so `main` moving to `da1958f0`
+  shifted none of them.
+- **The base figure was updated correctly.** Mutation: changing the doc's "316
+  behind" to "315" makes `doc-guard` F1b FAIL (5/6), because F1b compares it
+  with the live `git rev-list` count. I reverted it: the tree is clean and the
+  guard is back to 6/6.
+- **Not re-run by me:** `r3-verify.ts` (43/43) and its M1–M7 mutations,
+  `r2-cite-verify.ts` (73/73) and `git merge-tree`. Running each needed an
+  approval I don't have. My hand checks above cover the rows those checks are
+  about.
+- **Regressions:** none. Only Markdown changed. `bun run lint` checked 1292
+  files with nothing to fix, and `bun run typecheck` passes.
+- **Process note:** this is the third doc-only round since the blocker was
+  identified. Each round is accurate, but `main` keeps moving and the count goes
+  stale each time. Merging or re-cutting is the only step that ends the loop
+  (AGENTS §0, "escalate, don't spin").
