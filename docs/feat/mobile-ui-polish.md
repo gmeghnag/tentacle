@@ -1575,3 +1575,27 @@ Agents writing their own Maestro flows got stuck on the lock screen: the repo's 
 4. Then run the screenshot flows against the unlocked app (no `clearState`, no relaunch). The lock screen itself is screenshotted BEFORE step 3.
 
 *— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+## Review — Slices 5–6 (fresh context)
+
+**Verdict: PASS (code); no HIGH/MEDIUM finding.** Scope: `git diff main...HEAD` (17b79078), Slices 5–6 + B7 only.
+
+**Gate (re-run):** `bun run typecheck` clean (root, mobile, relay). `bun run lint`: 1419 files, 0 issues. Touched tests (outbox-look, haptic-rules, compose-motion, session-menu, code-block, theme, ui-shots-seed): 104 pass, 0 fail. Full `bun test` was not re-run here.
+
+**Attacks tried:**
+1. *§7 logic in components:* checked the outbox glyph chain (now `outbox-look.ts`), the haptic choice (`haptic-rules.ts`), the animate decision (`compose-motion.ts`) and the menu text (`session-menu.ts`). All four are pure and tested. What is left in components is presentation: the Copy "copied" timer, and the subscribe wrapper that calls `animateNextLayout`. Holds.
+2. *B7 ordering:* `unescapeHtml` (`highlight.ts:203-209`) decodes `&#x27;` before `&amp;`. A source `&#x27;` that highlight.js escapes to `&amp;#x27;` therefore comes back literal, not as `'`. Holds.
+3. *Settings back / disabled export:* `export-logs` without `onPress` is a `Row` with `disabled` and keeps its testID (`Row.tsx:73-79`). Flow 21 is unaffected. `settings-back` is wired only when `canGoBack()`. Holds.
+4. *Outbox testIDs:* `outbox-row-<id>-<state>` stays on the tap target, still `disabled={!decide}`. Every decision-sheet testID is kept. The `pageSheet` swipe-down goes through `onRequestClose`, so `deciding` is cleared. Holds (not checked on a device).
+5. *Haptic on Return for Stop:* goes through `returnKeyAction` → null. Holds.
+
+**Mutations (mine; `.tentacle/tmp/mobile-ui-polish/rev56/mut.ts`, each restore byte-checked, `git status` clean):** caption on `sending` instead of `waiting` → 1 fail. `turnEndHaptic` without `wasRunning` → 1 fail. Menu dropping user rows → 2 fail. `compose-motion` ignoring `sendNow` → 1 fail. `unescapeHtml` without `&amp;` → 1 fail. The executor's M1–M7 were not re-run.
+
+**LOW (not gating):**
+- `turnEndHaptic` plays *success* for every turn end, including `error` and `interrupted` (`transcript.ts:213-219`; `haptic-rules.ts:33`). This matches the plan's wording, but a failed turn "feels" successful.
+- The press haptic reads the rendered `state.view.composer.action` (`SessionScreen.tsx:425,430`), while the controller acts on the current one. In a one-frame race the feel can differ from the act. The act itself is unaffected.
+- `animateNextLayout` in the subscribe callback animates the whole next commit, transcript growth included, whenever a compose row moves. This may fight follow-scroll (B5). Unverified on a device.
+
+**Unverified:** every restyle in these slices is unseen on a device (`_unlock` failed on iOS 26; no screenshots). The visual gate remains merge-blocking, as the Execution says. The executor stopped after the same `_unlock` failure appeared twice and reported it honestly (good). This reviewer is the same model family as the Execution's signature, so shared blind spots are possible.
+
+*— claude-opus-5-5, 2026-11-15*
