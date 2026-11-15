@@ -19,6 +19,10 @@ const DAY = 86_400_000;
 const NOW = Date.parse("2026-11-16T09:00:00Z");
 const iso = (ms: number): string => new Date(ms).toISOString();
 
+/** Every existing call site is an idle check (the session can start a fired turn). */
+const idleCheck = (table: readonly ScheduledJob[], now: number) =>
+  scheduleStep(table, now, { idle: true });
+
 /** One job through the real create path — a hand-built literal would not prove parsing. */
 function created(
   request: { every?: string; at?: string; prompt?: string },
@@ -207,7 +211,7 @@ describe("scheduleCreate", () => {
 describe("scheduleStep", () => {
   test("nothing due: no fire, the table is unchanged", () => {
     const job = created({ every: "10m" });
-    const step = scheduleStep([job], NOW + MINUTE);
+    const step = idleCheck([job], NOW + MINUTE);
     expect(step.due).toBeNull();
     expect(step.table).toEqual([job]);
     expect(step.expired).toEqual([]);
@@ -215,13 +219,13 @@ describe("scheduleStep", () => {
 
   test("due: fires++ and the next slot moves past now, before it fires (at-most-once)", () => {
     const job = created({ every: "10m" });
-    const step = scheduleStep([job], NOW + 10 * MINUTE);
+    const step = idleCheck([job], NOW + 10 * MINUTE);
     expect(step.due?.fires).toBe(1);
     expect(step.due?.nextAt).toBe(NOW + 20 * MINUTE);
     expect(step.table.length).toBe(1);
     expect(step.table[0]?.nextAt).toBe(NOW + 20 * MINUTE);
     // The same instant cannot fire it twice: the record already moved on.
-    expect(scheduleStep(step.table, NOW + 10 * MINUTE).due).toBeNull();
+    expect(idleCheck(step.table, NOW + 10 * MINUTE).due).toBeNull();
   });
 
   test("catch-up ONCE across N missed slots, then the schedule resumes from now", () => {
@@ -229,35 +233,77 @@ describe("scheduleStep", () => {
     // Down/spinning for three slots and a bit: one fire, and nextAt is the
     // first slot strictly after `now` — the missed slots are NOT replayed.
     const now = NOW + 3 * 10 * MINUTE + 1;
-    const step = scheduleStep([job], now);
+    const step = idleCheck([job], now);
     expect(step.due?.fires).toBe(1);
     expect(step.table[0]?.nextAt).toBe(NOW + 4 * 10 * MINUTE);
-    expect(scheduleStep(step.table, now).due).toBeNull();
+    expect(idleCheck(step.table, now).due).toBeNull();
     // One more interval later it is an ordinary fire again.
-    expect(scheduleStep(step.table, NOW + 4 * 10 * MINUTE).due?.fires).toBe(2);
+    expect(idleCheck(step.table, NOW + 4 * 10 * MINUTE).due?.fires).toBe(2);
   });
 
   test("two due together: the older nextAt fires, one turn each (never merged)", () => {
     const older = created({ every: "10m" }, { id: "sc-1" });
     const newer = created({ every: "15m" }, { id: "sc-2" });
     const now = NOW + 30 * MINUTE;
-    const first = scheduleStep([older, newer], now);
+    const first = idleCheck([older, newer], now);
     expect(first.due?.id).toBe("sc-1");
-    const second = scheduleStep(first.table, now);
+    const second = idleCheck(first.table, now);
     expect(second.due?.id).toBe("sc-2");
-    expect(scheduleStep(second.table, now).due).toBeNull();
+    expect(idleCheck(second.table, now).due).toBeNull();
+  });
+
+  test("two due together: the OLDER nextAt fires even when it is not first in the table", () => {
+    // Table order (creation order) and nextAt order disagree on purpose: sc-1
+    // repeats hourly, so sc-2's slot (created later) comes due first.
+    const hourly = created({ every: "1h" }, { id: "sc-1" });
+    const fast = created({ every: "5m" }, { id: "sc-2", now: NOW + 3 * MINUTE });
+    expect(hourly.nextAt).toBe(NOW + 60 * MINUTE);
+    expect(fast.nextAt).toBe(NOW + 8 * MINUTE);
+    const step = idleCheck([hourly, fast], NOW + 90 * MINUTE);
+    expect(step.due?.id).toBe("sc-2");
+  });
+
+  test("a short-interval job does not starve a later, longer one (one turn each)", () => {
+    // The starvation shape: sc-1 is due again by the time every turn ends, so a
+    // table-order pick would fire sc-1 on every idle check and never sc-2.
+    const ticker = created({ every: "1m" }, { id: "sc-1" });
+    const reminder = created({ every: "10m" }, { id: "sc-2" });
+    let table: readonly ScheduledJob[] = [ticker, reminder];
+    const fires: Record<string, number> = {};
+    let idle = NOW;
+    for (let check = 0; check < 30; check++) {
+      idle += 2 * MINUTE; // a fired turn takes about two minutes
+      const step = idleCheck(table, idle);
+      if (step.due !== null) fires[step.due.id] = (fires[step.due.id] ?? 0) + 1;
+      table = step.table;
+    }
+    expect(fires["sc-2"]).toBeGreaterThan(0);
+    expect(fires["sc-1"]).toBeGreaterThan(0);
+  });
+
+  test("a busy check sweeps expiry but fires nothing and loses no slot", () => {
+    // While a turn holds the slot the daemon must not advance the model: doing
+    // so would silently burn the job's slot (D3: a due job STAYS due).
+    const gone = created({ every: "10m" }, { id: "sc-1", now: NOW - 8 * DAY });
+    const live = created({ every: "10m" }, { id: "sc-2" });
+    const busy = scheduleStep([gone, live], NOW + 25 * MINUTE, { idle: false });
+    expect(busy.due).toBeNull();
+    expect(busy.expired.map((job) => job.id)).toEqual(["sc-1"]);
+    expect(busy.table).toEqual([live]);
+    // And the slot is still there for the next idle check.
+    expect(idleCheck(busy.table, NOW + 25 * MINUTE).due?.id).toBe("sc-2");
   });
 
   test("the table keeps its creation order (the wire row order)", () => {
     const first = created({ every: "10m" }, { id: "sc-1" });
     const second = created({ every: "20m" }, { id: "sc-2" });
-    const step = scheduleStep([first, second], NOW + 10 * MINUTE);
+    const step = idleCheck([first, second], NOW + 10 * MINUTE);
     expect(step.table.map((job) => job.id)).toEqual(["sc-1", "sc-2"]);
   });
 
   test("a one-shot fires once and leaves the table", () => {
     const job = created({ at: iso(NOW + 60 * MINUTE) });
-    const step = scheduleStep([job], NOW + 60 * MINUTE);
+    const step = idleCheck([job], NOW + 60 * MINUTE);
     expect(step.due?.fires).toBe(1);
     expect(step.due?.kind).toBe("at");
     expect(step.table).toEqual([]);
@@ -265,14 +311,14 @@ describe("scheduleStep", () => {
 
   test("a one-shot overdue while we were down still fires once (within its grace)", () => {
     const job = created({ at: iso(NOW + 60 * MINUTE) });
-    const step = scheduleStep([job], NOW + 60 * MINUTE + 3 * DAY);
+    const step = idleCheck([job], NOW + 60 * MINUTE + 3 * DAY);
     expect(step.due?.id).toBe("sc-1");
     expect(step.table).toEqual([]);
   });
 
   test("a recurring job past its 7-day expiry is removed, not fired", () => {
     const job = created({ every: "10m" });
-    const step = scheduleStep([job], NOW + 7 * DAY + 1);
+    const step = idleCheck([job], NOW + 7 * DAY + 1);
     expect(step.due).toBeNull();
     expect(step.table).toEqual([]);
     expect(step.expired.map((j) => j.id)).toEqual(["sc-1"]);
@@ -280,7 +326,7 @@ describe("scheduleStep", () => {
 
   test("a one-shot past its grace is removed without firing", () => {
     const job = created({ at: iso(NOW + 60 * MINUTE) });
-    const step = scheduleStep([job], NOW + 60 * MINUTE + 7 * DAY);
+    const step = idleCheck([job], NOW + 60 * MINUTE + 7 * DAY);
     expect(step.due).toBeNull();
     expect(step.expired.map((j) => j.id)).toEqual(["sc-1"]);
   });
@@ -290,16 +336,16 @@ describe("scheduleStep", () => {
     // The clock now reads BEFORE the creation, so nextAt is far more than one
     // interval away — unclamped, the wake would stall for hours.
     const now = NOW - 6 * 60 * MINUTE;
-    const step = scheduleStep([job], now);
+    const step = idleCheck([job], now);
     expect(step.due).toBeNull();
     expect(step.table[0]?.nextAt).toBe(now + 10 * MINUTE);
     // And it fires at that clamped slot, once.
-    expect(scheduleStep(step.table, now + 10 * MINUTE).due?.fires).toBe(1);
+    expect(idleCheck(step.table, now + 10 * MINUTE).due?.fires).toBe(1);
   });
 
   test("a forward jump is an ordinary catch-up, not a stall", () => {
     const job = created({ every: "10m" });
-    const step = scheduleStep([job], NOW + 5 * DAY);
+    const step = idleCheck([job], NOW + 5 * DAY);
     expect(step.due?.fires).toBe(1);
     expect(step.table[0]?.nextAt).toBe(NOW + 5 * DAY + 10 * MINUTE);
   });
@@ -356,7 +402,7 @@ describe("scheduleDelete", () => {
 describe("schedulePromptText (the fired turn's user message, D3)", () => {
   test("the prefix names the job, its spec and the fire ordinal", () => {
     const job = created({ every: "10m" });
-    const fired = scheduleStep([job], NOW + 10 * MINUTE).due;
+    const fired = idleCheck([job], NOW + 10 * MINUTE).due;
     expect(fired === null ? null : schedulePromptText(fired)).toBe(
       "[scheduled sc-1 · every 10m · fire 1] check CI on PR #412",
     );
@@ -373,10 +419,18 @@ describe("the timer's inputs (the daemon owns the one setTimeout)", () => {
 
   test("the check delay is capped at 60 s so a sleep or clock jump is noticed", () => {
     const job = created({ every: "2h" });
-    expect(scheduleCheckDelayMs([job], NOW)).toBe(SCHEDULE_CHECK_INTERVAL_MS);
-    expect(scheduleCheckDelayMs([job], NOW + 119 * MINUTE)).toBe(MINUTE);
-    // Overdue: check now, never a negative timeout.
-    expect(scheduleCheckDelayMs([job], NOW + 5 * 60 * MINUTE)).toBe(0);
-    expect(scheduleCheckDelayMs([], NOW)).toBeNull();
+    // Overdue (an idle check is due now) and busy alike: check now, never a
+    // negative timeout — nor a `setTimeout(0)` spin on every check while a turn
+    // holds the slot (see the "busy" tests).
+    expect(scheduleCheckDelayMs([job], NOW, { idle: true })).toBe(SCHEDULE_CHECK_INTERVAL_MS);
+    expect(scheduleCheckDelayMs([job], NOW + 119 * MINUTE, { idle: true })).toBe(MINUTE);
+    expect(scheduleCheckDelayMs([job], NOW + 5 * 60 * MINUTE, { idle: true })).toBe(0);
+    expect(scheduleCheckDelayMs([job], NOW + 5 * 60 * MINUTE, { idle: false })).toBe(
+      SCHEDULE_CHECK_INTERVAL_MS,
+    );
+    // Busy and nothing due: the same 60 s ceiling, so the idle check is noticed.
+    expect(scheduleCheckDelayMs([job], NOW, { idle: false })).toBe(SCHEDULE_CHECK_INTERVAL_MS);
+    expect(scheduleCheckDelayMs([], NOW, { idle: true })).toBeNull();
+    expect(scheduleCheckDelayMs([], NOW, { idle: false })).toBeNull();
   });
 });

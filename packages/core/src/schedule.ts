@@ -316,37 +316,69 @@ export interface ScheduleStep {
 }
 
 /**
- * One check of the table against `now`. Pure: it advances the model, and the
- * caller fires what it names (advance BEFORE firing — at-most-once).
+ * Whether the session can start a fired turn right now. A BUSY check still
+ * sweeps expiry, but it must never fire: it leaves every slot untouched, so a
+ * job due while a turn runs stays due for the next idle check (D3 "busy →
+ * coalesce"). Do not skip the check while busy — the timer's inputs say how to
+ * re-arm instead (`scheduleCheckDelayMs`).
  */
-export function scheduleStep(table: readonly ScheduledJob[], now: number): ScheduleStep {
+export interface ScheduleStepOptions {
+  readonly idle: boolean;
+}
+
+/**
+ * One check of the table against `now`. Pure: it advances the model, and the
+ * caller fires what it names (advance BEFORE firing — at-most-once). The
+ * idle/busy flag is REQUIRED, not defaulted, on purpose: a caller that forgets
+ * it would either spin the timer on a due job or silently burn a slot. Pass
+ * `{ idle: false }` while a turn or a compaction holds the slot: expiry is
+ * swept, nothing fires, and no slot is lost.
+ */
+export function scheduleStep(
+  table: readonly ScheduledJob[],
+  now: number,
+  options: ScheduleStepOptions,
+): ScheduleStep {
   const kept: ScheduledJob[] = [];
   const expired: ScheduledJob[] = [];
-  let due: ScheduledJob | null = null;
+  // Expiry and the back-jump clamp first, in table order (the row order the
+  // wire publishes is creation order, not the fire order).
   for (const job of table) {
     if (now >= job.expiresAt) {
       expired.push(job);
       continue;
     }
     // The clock went backwards: unclamped, a 10m job would stall for hours.
-    const clamped =
+    kept.push(
       job.kind === "every" && job.nextAt - now > (job.intervalMs ?? 0)
         ? { ...job, nextAt: now + (job.intervalMs ?? 0) }
-        : job;
-    if (due !== null || clamped.nextAt > now) {
-      kept.push(clamped);
-      continue;
-    }
-    const fired: ScheduledJob = { ...clamped, fires: clamped.fires + 1 };
-    if (job.kind === "at") {
-      // A one-shot leaves the table the moment it fires; nothing to re-arm.
-      due = fired;
-      continue;
-    }
-    due = { ...fired, nextAt: slotAfter(fired, now) };
-    kept.push(due);
+        : job,
+    );
   }
-  return { due, table: kept, expired };
+  // Then the ONE job to fire: the overdue job with the smallest `nextAt` (ties
+  // go to table order). Picking the first overdue row instead would let a
+  // short-interval job starve every longer one created after it.
+  if (!options.idle) return { due: null, table: kept, expired };
+  let picked = -1;
+  for (let index = 0; index < kept.length; index++) {
+    const job = kept[index];
+    if (job === undefined || job.nextAt > now) continue;
+    const best = picked < 0 ? undefined : kept[picked];
+    if (best === undefined || job.nextAt < best.nextAt) picked = index;
+  }
+  const chosen = picked < 0 ? undefined : kept[picked];
+  if (chosen === undefined) return { due: null, table: kept, expired };
+  const fired: ScheduledJob = { ...chosen, fires: chosen.fires + 1 };
+  if (chosen.kind === "at") {
+    // A one-shot leaves the table the moment it fires; nothing to re-arm.
+    return { due: fired, table: kept.filter((job) => job !== chosen), expired };
+  }
+  const advanced: ScheduledJob = { ...fired, nextAt: slotAfter(fired, now) };
+  return {
+    due: advanced,
+    table: kept.map((job) => (job === chosen ? advanced : job)),
+    expired,
+  };
 }
 
 /** How a fired turn ended, as far as the job's failure budget cares (`cancelled` = the user's Esc). */
@@ -411,9 +443,21 @@ export function nextDueAt(table: readonly ScheduledJob[]): number | null {
 /**
  * How long the daemon's ONE timer should wait: to the next slot, capped at
  * `SCHEDULE_CHECK_INTERVAL_MS`, floored at 0 (overdue = check now).
+ *
+ * The idle/busy flag is REQUIRED, not defaulted: forgetting it is exactly the
+ * spin below. While the session is BUSY (`{ idle: false }`) an overdue job
+ * cannot fire, so the answer is a full check interval — never 0, which would
+ * spin `setTimeout(0)` on every check for as long as the turn runs. The timer is
+ * re-armed at the turn's end anyway (`kickWake`), so a slow poll while busy is
+ * all that is needed.
  */
-export function scheduleCheckDelayMs(table: readonly ScheduledJob[], now: number): number | null {
+export function scheduleCheckDelayMs(
+  table: readonly ScheduledJob[],
+  now: number,
+  options: ScheduleStepOptions,
+): number | null {
   const next = nextDueAt(table);
   if (next === null) return null;
+  if (!options.idle) return SCHEDULE_CHECK_INTERVAL_MS;
   return Math.min(Math.max(next - now, 0), SCHEDULE_CHECK_INTERVAL_MS);
 }

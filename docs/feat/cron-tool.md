@@ -229,7 +229,11 @@ epoch ms from the host's injected `now()` (`session-host.ts:1327`).
 - **Ticking:** `HostedSession` arms ONE `setTimeout` to `min(nextAt_min - now, 60 s)`.
   It is re-armed at every check, so a sleep, a clock jump or a long delay is
   noticed within 60 s, and the timer never meets the 2³¹-ms `setTimeout` limit.
-  Each check calls the pure `scheduleStep(table, now)` → `{ due: Job | null, table' }`.
+  Each check calls the pure `scheduleStep(table, now, { idle })` → `{ due: Job |
+  null, table' }`. The `idle` flag is REQUIRED (`ScheduleStepOptions`, round 1):
+  a busy check sweeps expiry but fires nothing and loses no slot, and
+  `scheduleCheckDelayMs(table, now, { idle: false })` answers a full check
+  interval instead of 0, so a turn holding the slot cannot spin `setTimeout(0)`.
 - **Only when idle:** the gate reuses `wakeDue({pending: due !== null}, {enabled,
   idle: !running, blocked: closed || archived})` (`auto-wake.ts:35`). A fire
   does NOT honour `lastEndBad`: a user's Esc on some turn must not silence a
@@ -717,3 +721,97 @@ clamped, correct); expiry on an overdue `every` (removed, not fired, correct).
 3, cancel neither counts nor resets, the 10-job cap, the immutable table, no `!`
 assertions, no I/O. **Executor:** red first and mutations recorded, drift declared
 honestly. It missed that its ordering test cannot fail.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-16* (fixing the S1 review above; same model id as the
+reviewer, so a fresh-context review of this round is still owed.)
+
+**Findings addressed: all three (2 HIGH + 1 MEDIUM).**
+
+**Repro before the fix** (`.tentacle/tmp/cron-tool/order.ts`, on this branch @
+`4b2e6b2d`) → `3 finding(s) reproduce`:
+```
+nextAt sc-1/sc-2: 3600000 480000 (minutes)
+FAIL the older nextAt fires: got "sc-1" want "sc-2"
+fires over 30 idle checks: {"sc-1":30}
+FAIL both jobs fire: got [30,false] want [true,true]
+FAIL an overdue job does not ask for a 0 ms spin: got 0 want null
+```
+Same script after the fix → `REPRO NOT PRESENT` (`sc-2` fires first; 30 idle
+checks give `{"sc-1":25,"sc-2":5}`; the busy delay is 60000).
+
+**Root cause, one sentence each:**
+1+2. `scheduleStep` took the FIRST overdue row in table (= creation) order, so
+the fire order was the row order, not D3's "the older `nextAt` fires" — which
+also let a short-interval job re-arm before every check and starve every job
+created after it (`schedule.ts:336-346`).
+3. `scheduleCheckDelayMs` floored at 0 for an overdue job with no notion of a
+busy session, so re-arming from it while a turn held the slot spun
+`setTimeout(0)`; and `scheduleStep` advanced a due row even when busy, burning
+the slot.
+
+**As built**
+- `packages/core/src/schedule.ts:318-330` — new exported
+  `ScheduleStepOptions { idle: boolean }`, docstring naming both hazards.
+- `:335-390` — `scheduleStep(table, now, options)` split in two passes: expiry +
+  back-jump clamp first (table order preserved, so the wire row order is still
+  creation order), then ONE pick = the overdue job with the **smallest `nextAt`**
+  (ties to table order), then the existing advance-before-fire on that one row.
+  `{ idle: false }` returns after the first pass: `due: null`, nothing advanced.
+- `:443-460` — `scheduleCheckDelayMs(table, now, options)`: `{ idle: false }` →
+  `SCHEDULE_CHECK_INTERVAL_MS` (60 s), never 0; docstring says the timer is
+  re-armed by `kickWake` at the turn's end, so a slow poll is all a busy session
+  needs.
+- **`options` is REQUIRED on both, deliberately not defaulted.** A default of
+  `{ idle: true }` would reinstate exactly this finding at any call site that
+  forgets it (spin or a silently burnt slot); a compile error is the correct
+  outcome. This makes the flag a compile-time contract for S3.
+
+**Drift from Implementation:** none in the rules; D3's fire-order and
+busy-coalesce text is unchanged and now actually implemented. The
+Implementation's D3 tick paragraph was updated in place to name the required
+`{ idle }` flag (it described `scheduleStep(table, now)` with no busy mode, which
+is what let finding 3 through).
+
+**Red first** (per §9; every new/changed test shown failing on the pre-fix code):
+- ordering test `the OLDER nextAt fires even when it is not first in the table`
+  → `(fail)`, got `"sc-1"`.
+- starvation test `a short-interval job does not starve a later, longer one` →
+  `(fail)`, `sc-2` fired 0 times in 30 checks.
+- `a busy check sweeps expiry but fires nothing and loses no slot` → `(fail)` on
+  `expect(busy.due).toBeNull()` (it fired).
+- `the check delay is capped at 60 s…` → `(fail)` on
+  `expect(…, { idle: false }).toBe(SCHEDULE_CHECK_INTERVAL_MS)`, got `0`.
+Then 34 pass / 0 fail. Note the reviewer was right that the OLD ordering test
+(`two due together…`) is vacuous for the ordering bug — it is kept as the
+coalesce test, and the two new tests are the ones that discriminate.
+
+**Mutation checks** (each applied to `schedule.ts`, this test file re-run, source
+restored from `.tentacle/tmp/cron-tool/schedule.r1.bak`, `diff -q` clean after
+every one):
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | pick the first overdue row (`if (best === undefined)`) — the old bug | 2 fail: `…OLDER nextAt… not first in the table`, `…does not starve…` |
+| M2 | pick the LATEST `nextAt` instead of the earliest | 2 fail: same two |
+| M3 | drop the busy early-return in `scheduleStep` | 1 fail: `a busy check sweeps expiry…` |
+| M4 | drop the busy branch in `scheduleCheckDelayMs` | 1 fail: `the check delay is capped at 60 s…` |
+| M5 | fire without advancing `nextAt` | 5 fail incl. the at-most-once and catch-up tests |
+
+M1/M2 are the pair that proves the test pins the *ordering property* itself, not
+merely "some job fired": a mutant that reverses the order also goes red.
+
+**Gate**: `bunx tsc --noEmit` → 0; `bun run lint` (`biome check .`, 1660 files)
+→ clean, no fixes; `bun test` → **12011 pass, 5 skip, 0 fail** (858 files, 445 s)
+— exactly S1's 12008 plus the 3 new tests — and the same 5 pre-existing opt-in
+skips (`TENTACLE_K8S_SERVER` ×2, `TENTACLE_DOCKER_TESTS` ×2, `TENTACLE_SLOW_TESTS`
+×1): no new skip, none in `core`.
+No schema/wire change, so no `protocol.d/` note and no `PROTOCOL_VERSION` edit; no
+new `changelog.d/` fragment (the existing `cron-tool.added.md` still covers S1);
+`CHANGELOG.md` untouched.
+
+**Not done / for the next round:** this is a self-review-free zone — the reviewer
+of round 1 shares this model id, so a fresh-context adversarial pass on round 1
+is still owed (especially: whether "smallest `nextAt`" starves an `at` job against
+a fast `every` job, and whether S3 honours the required flag at every call site).
