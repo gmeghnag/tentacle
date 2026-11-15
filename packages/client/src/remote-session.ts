@@ -28,6 +28,11 @@ import {
   isWakeTurnId,
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
+import {
+  type AutoAcceptHandle,
+  type AutoAcceptLink,
+  createAutoAcceptHandle,
+} from "./auto-accept-link.ts";
 import { type ReturnedRow, handBack, restoredByRefusal, stayingRows } from "./hand-back.ts";
 import type { ImageInput } from "./image-input.ts";
 import { turnRecovery } from "./link-machine.ts";
@@ -183,6 +188,21 @@ export class RemoteSession implements SessionStreamListener {
    * `RemoteClientOptions.daemonWakes`; FALSE everywhere but `connect`.
    */
   private readonly daemonWakes: boolean;
+  /**
+   * The session's shared auto-accept (docs/feat/session-auto-accept.md D4):
+   * present only when this client's TRUST bit is on (`sharedAutoAccept`, the
+   * worker / `connect` / the phone) AND the daemon said it shares it. A pod
+   * client never gets a shared link, so whatever a pod claims changes nothing:
+   * it keeps a local, in-memory value (AGENTS §7, "a pod is not trusted").
+   */
+  readonly autoAcceptHandle: AutoAcceptHandle;
+  /**
+   * The session's auto-accept as a consumer sees it (a TUI's feed, the phone's
+   * sheet): `current()`, `set()`, `onChange()`, `shared()` — never `receive`.
+   */
+  get autoAccept(): AutoAcceptLink {
+    return this.autoAcceptHandle.link;
+  }
   /** The memoized eager attach (`open`). */
   private attaching: Promise<void> | null = null;
   /** The memoized create-or-attach of a seeded session (`openSeeded`, or the first send). */
@@ -265,6 +285,45 @@ export class RemoteSession implements SessionStreamListener {
     this.attach = attach;
     this.closeIfLast = closeIfLast;
     this.daemonWakes = daemonWakes;
+    // Built here, with the client's bit: `sharedAutoAccept` is the TRUST bit
+    // (default off, fails closed), and the daemon's own answer arrives with the
+    // first open (`sync`), so nothing is read before then.
+    this.autoAcceptHandle = createAutoAcceptHandle({
+      shared: client.sharedAutoAccept,
+      initial: false,
+      send: (on) => client.setSessionAutoAccept(this, on),
+    });
+  }
+
+  /**
+   * The daemon's auto-accept, on every open/re-attach (the listener hook):
+   * adopted, unless a set of ours is still unacknowledged (then it wins and is
+   * re-sent — a person's OFF made offline is never undone by an older ON).
+   */
+  /**
+   * The value the NEXT session this client CREATES starts with
+   * (`OpenParams.autoAccept`, docs/feat/session-auto-accept.md D5): a `/clear`
+   * fork, a new session, a hop target. A no-op when the session is not shared.
+   */
+  seedAutoAccept(on: boolean): void {
+    if (this.autoAccept.shared()) {
+      this.client.seedAutoAcceptOnCreate(on);
+    }
+  }
+
+  /** `SessionStreamListener`: the daemon's snapshot on an open/re-attach. */
+  autoAcceptSnapshot(snapshot: boolean): void {
+    this.autoAcceptHandle.sync(snapshot);
+  }
+
+  /** An `auto_accept` update from any client (own echoes included). */
+  autoAcceptChanged(on: boolean, by?: string): void {
+    this.autoAcceptHandle.receive(on, by);
+  }
+
+  /** The link went away: a set still in flight is unacknowledged from here on. */
+  autoAcceptDropped(): void {
+    this.autoAcceptHandle.dropped();
   }
 
   /**
@@ -307,6 +366,12 @@ export class RemoteSession implements SessionStreamListener {
    * `serve` host this prefix identifies exactly the session's own wakes.
    */
   autoAcceptsTurn(turnId: string): boolean {
+    // The session's SHARED auto-accept widens this to every turn of the session
+    // (owner Q2, on a trusted daemon only: a pod keeps own-turn only, and its
+    // `shared()` is false by construction). `ownsTurn` stays own-only.
+    if (this.autoAccept.shared() && this.autoAccept.current()) {
+      return true;
+    }
     return this.ownsTurn(turnId) || (this.daemonWakes && isWakeTurnId(turnId));
   }
 
@@ -1649,6 +1714,8 @@ export class RemoteSession implements SessionStreamListener {
     if (!id) {
       return;
     }
+    // An auto-accept set the drop left unacknowledged goes out again.
+    this.autoAcceptHandle.recovered();
     // The old turn first: its ack can end it (and promote the send-now). A
     // settling old turn learns its real end the same way.
     for (const turn of [this.settling, this.active, this.next]) {
@@ -1665,6 +1732,7 @@ export class RemoteSession implements SessionStreamListener {
 
   /** The link is gone for good: the turn's outcome can never arrive. */
   linkClosed(error: Error): void {
+    this.autoAcceptHandle.dropped();
     this.failAll(error);
   }
 

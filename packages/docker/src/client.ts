@@ -12,6 +12,7 @@
 import type { DuplexChannel } from "@tentacle/transport";
 import type { Dialer } from "./byte-duplex.ts";
 import { type ExecConn, execChannel } from "./exec-channel.ts";
+import { type RawExec, type RawExecHandlers, rawExec } from "./exec-raw.ts";
 import { runExec } from "./exec-run.ts";
 import {
   type RequestOptions,
@@ -405,5 +406,14 @@ export class DockerClient {
     options?: RunExecOptions,
   ): Promise<RunExecResult> {
     return runExec(this.conn, target, input, options);
+  }
+
+  /**
+   * Open a **raw byte** exec (stdin raw, stdout/stderr as bytes) for a
+   * long-lived, non-interactive process — the docker twin of
+   * `KubeClient.openRawExec` (docs/feat/workload-shell.md D1).
+   */
+  openRawExec(target: DockerExecTarget, handlers: RawExecHandlers = {}): RawExec {
+    return rawExec(this.conn, target, handlers);
   }
 }

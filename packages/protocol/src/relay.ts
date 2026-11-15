@@ -29,6 +29,7 @@
  * `pairing.ts`), which is the whole point of the shape.
  */
 import { z } from "zod";
+import { PushEnvelopeSchema } from "./push.ts";
 
 /**
  * The control wire's own version. Bump it when a frame changes shape or
@@ -280,6 +281,90 @@ const replacedFrame = z.object({ t: z.literal("replaced") });
 const pongFrame = z.object({ t: z.literal("pong") });
 
 /**
+ * The `apns-collapse-id` header's limit, in BYTES (Apple refuses a longer one).
+ * The daemon builds these (`pushCollapseIdOf`, `push.ts`); the relay only checks
+ * the shape, because the value ends up in a request HEADER.
+ */
+export const RELAY_PUSH_COLLAPSE_MAX = 64;
+
+/** `apns-expiration`'s range, in seconds: `0` means "deliver now or drop", a day is Apple's maximum. */
+export const RELAY_PUSH_TTL_MIN_SECONDS = 0;
+export const RELAY_PUSH_TTL_MAX_SECONDS = 86_400;
+
+/**
+ * A device's raw APNs token as the daemon forwards it: lowercase hex, 64..200
+ * chars — the SAME rule as `device/push_register` (`push.ts`'s
+ * `DevicePushRegisterParamsSchema.token`). Duplicated on purpose: this frame is
+ * parsed by the RELAY, which must not load the RPC schemas, and `relay-push`'s
+ * test pins the two against a shared sample so they cannot drift silently.
+ */
+export const RelayPushTokenSchema = z.string().regex(/^[0-9a-f]{64,200}$/);
+
+/** A collapse id: header-safe base64url, bounded by BYTES. */
+export const RelayCollapseIdSchema = z
+  .string()
+  .regex(new RegExp(`^[A-Za-z0-9_-]{1,${RELAY_PUSH_COLLAPSE_MAX}}$`));
+
+/**
+ * daemon → relay: deliver one sealed push to one device (docs/feat/mobile-push.md
+ * Design 3). `n` is the daemon's per-socket counter; the relay answers with the
+ * same `n` in `push-result`, and responses may arrive OUT OF ORDER (several
+ * pushes are in flight at once), so nothing may assume a reply follows its
+ * request.
+ *
+ * `payload` is `{tp: <P2 envelope>}` — the SEALED envelope and nothing else. It
+ * is not `aps`: the relay builds that from its own fixed template (P4), so a
+ * daemon cannot put plaintext into a banner the OS shows without opening the
+ * seal (F9's boundary).
+ *
+ * This frame may only be sent to a relay that announced `"push"` in
+ * `ready.features`: an R2 relay closes the control socket on an unknown frame
+ * (C1), so sending one to an older relay would loop forever.
+ */
+const pushFrame = z.object({
+  t: z.literal("push"),
+  n: z.number().int().nonnegative(),
+  token: RelayPushTokenSchema,
+  env: z.enum(["sandbox", "production"]),
+  collapse: RelayCollapseIdSchema,
+  ttl: z.number().int().min(RELAY_PUSH_TTL_MIN_SECONDS).max(RELAY_PUSH_TTL_MAX_SECONDS),
+  payload: z.object({ tp: PushEnvelopeSchema }),
+});
+export type RelayPushFrame = z.infer<typeof pushFrame>;
+
+/** The schema alone, for a caller that validates a frame it is about to send. */
+export const RelayPushFrameSchema = pushFrame;
+
+/** `true` iff `frame` is a `push` — the gate a daemon applies before sending one. */
+export function isRelayPushFrame(frame: { t: string }): frame is RelayPushFrame {
+  return frame.t === "push";
+}
+
+/**
+ * relay → daemon: what became of a `push` — `sent`, `gone`, `rejected`,
+ * `throttled` or `unavailable` (the vocabulary P2 owns,
+ * `PUSH_DELIVERY_STATUSES`, which the daemon reads it through).
+ *
+ * `status` is a BOUNDED FREE string, not an enum, for the reason `error.code`
+ * is (R1 review finding 1): a closed enum makes a newer relay's new status a
+ * "malformed frame", which closes the whole control socket — one unknown word
+ * costs every push in flight, and the link's reachability with it. Parsing it
+ * loosely and refusing the VALUE (`isPushDeliveryStatus`) keeps a bad status
+ * one dropped push instead. `reason` is a bounded detail for the audit line,
+ * never matched on.
+ */
+const pushResultFrame = z.object({
+  t: z.literal("push-result"),
+  n: z.number().int().nonnegative(),
+  status: z.string().min(1).max(32),
+  reason: z.string().min(1).max(64).optional(),
+});
+export type RelayPushResultFrame = z.infer<typeof pushResultFrame>;
+
+/** The schema alone, for the relay that answers a `push`. */
+export const RelayPushResultFrameSchema = pushResultFrame;
+
+/**
  * A daemon's frames, on `/v1/daemon` and `/v1/accept`. Validated on both ends:
  * a malformed frame is a close, never a guess (F19).
  */
@@ -287,6 +372,7 @@ export const RelayDaemonFrameSchema = z.discriminatedUnion("t", [
   helloFrame,
   acceptFrame,
   pingFrame,
+  pushFrame,
 ]);
 export type RelayDaemonFrame = z.infer<typeof RelayDaemonFrameSchema>;
 
@@ -297,6 +383,7 @@ export const RelayToDaemonFrameSchema = z.discriminatedUnion("t", [
   openFrame,
   replacedFrame,
   pongFrame,
+  pushResultFrame,
 ]);
 export type RelayToDaemonFrame = z.infer<typeof RelayToDaemonFrameSchema>;
 
@@ -310,6 +397,8 @@ export const RelayControlFrameSchema = z.discriminatedUnion("t", [
   openFrame,
   replacedFrame,
   pongFrame,
+  pushFrame,
+  pushResultFrame,
 ]);
 export type RelayControlFrame = z.infer<typeof RelayControlFrameSchema>;
 

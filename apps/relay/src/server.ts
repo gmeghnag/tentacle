@@ -25,10 +25,15 @@ import {
   RELAY_CONTROL_LIMITS,
   RELAY_PROTOCOL_VERSION,
   RelayDaemonFrameSchema,
+  type RelayPushFrame,
   type RelayToDaemonFrame,
   isInboundFrameTooLarge,
   isRelayId,
 } from "@tentacle/protocol";
+import type { ApnsClient } from "./apns-client.ts";
+import { type ApnsJwtSource, apnsPayloadBytesOf } from "./apns.ts";
+import { clientIpOf, limiterKeyOf } from "./client-ip.ts";
+import { createLogLimiter } from "./log-limit.ts";
 import {
   RELAY_CLOSE_REFUSED,
   RelayCore,
@@ -57,6 +62,25 @@ export interface RelayServerOptions {
   readonly onLog?: (line: string) => void;
   readonly sweepMs?: number;
   readonly idleTimeoutSec?: number;
+  /**
+   * Read `X-Forwarded-For` from a LOOPBACK peer and key the limits on the real
+   * client (`client-ip.ts`, H3). Off by default: without it the relay behaves
+   * exactly as it did and the header is not read at all.
+   */
+  readonly trustProxy?: boolean;
+  /**
+   * The APNs delivery path, present only when the relay started with a readable
+   * APNs key (docs/feat/mobile-push.md Design 4, C1). Absent = the relay announces
+   * no `"push"` feature and refuses a `push` frame, so an unconfigured relay can
+   * never accept a push it would silently drop (F4).
+   */
+  readonly apns?:
+    | {
+        readonly client: ApnsClient;
+        readonly jwtSource: ApnsJwtSource;
+        readonly topic: string;
+      }
+    | undefined;
 }
 
 export interface RunningRelay {
@@ -116,18 +140,41 @@ export function relaySocketOptions(options: Pick<RelayServerOptions, "idleTimeou
   closeOnBackpressureLimit: true;
   idleTimeout: number;
   sendPings: true;
+  maxPayloadLength: number;
+  perMessageDeflate: false;
 } {
   return {
     backpressureLimit: RELAY_CONTROL_LIMITS.backpressureBytes,
     closeOnBackpressureLimit: true,
     idleTimeout: options.idleTimeoutSec ?? DEFAULT_RELAY_IDLE_TIMEOUT_SEC,
     sendPings: true,
+    // H1: WITHOUT this, Bun allocates a frame (16 MiB by default) BEFORE any
+    // handler runs, so every app-level size check below runs too late to save
+    // the memory — ~32 parallel 16 MiB frames reach `MemoryMax=512M`
+    // (`relay.service`) and the OOM kill drops every daemon and stream, with no
+    // authentication needed. 96 KiB is above the largest legitimate frame (a
+    // Noise frame of ~87.4 Ki ASCII chars), so nothing real is cut.
+    maxPayloadLength: RELAY_CONTROL_LIMITS.maxFrameChars,
+    // Pinned, not left to the default: a compression bomb is the one way a
+    // bounded payload can still expand, and nothing here compresses.
+    perMessageDeflate: false,
   };
 }
 
 /** The 8-character prefix a log line may carry (a token or id is never logged whole). */
 export function logPrefix(value: string): string {
   return value.slice(0, 8);
+}
+
+/**
+ * An APNs `reason`, bounded for the log (L1): Apple's real reasons are one short
+ * word (`BadDeviceToken`, `ExpiredProviderToken`, …), and the outcome's own
+ * reasons (`timeout`, …) have the same shape. Anything outside a 64-character
+ * `[A-Za-z0-9_.:-]` word is logged as `other` — a reason is remote input, and a
+ * log line must not be able to grow, or to carry a newline, at Apple's choice.
+ */
+export function loggableApnsReason(reason: string): string {
+  return /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/.test(reason) ? reason : "other";
 }
 
 type Role = "control" | "accept" | "phone";
@@ -166,11 +213,26 @@ interface Buffered {
 }
 
 export function startRelay(options: RelayServerOptions = {}): RunningRelay {
-  const log = options.onLog ?? (() => {});
+  // The limiter shares the relay's clock, so a test that drives time also
+  // drives the log window (and the real relay uses `Date.now` throughout).
+  const logLimiter = createLogLimiter(options.now === undefined ? {} : { now: options.now });
+  // Every event line goes through the limiter (M4): the first ones of each kind
+  // per window always pass, the rest are counted and reported by `flush` on the
+  // sweep tick. Without it a refusal flood fills the journal, and journald's own
+  // rate limit then drops lines without choosing — `ready` ones included.
+  const onLog = options.onLog ?? (() => {});
+  const log = (line: string): void => {
+    if (logLimiter.admit(line)) {
+      onLog(line);
+    }
+  };
   const core = new RelayCore({
     ...(options.now ? { now: options.now } : {}),
     ...(options.mintToken ? { mintToken: options.mintToken } : {}),
     ...(options.limits ? { limits: options.limits } : {}),
+    // `"push"` is announced only when the delivery path exists: a daemon sends a
+    // `push` frame only to a relay that said so (C1).
+    features: options.apns === undefined ? [] : ["push"],
   });
 
   let counter = 0;
@@ -283,7 +345,18 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
       }
       counter += 1;
       const key = `s${counter}`;
-      const ip = (srv as unknown as PeerAddressable).requestIP(req)?.address ?? "";
+      // H3: behind the loopback proxy the direct peer is always 127.0.0.1, so
+      // the per-IP limits collapsed into ONE bucket. `clientIpOf` takes the real
+      // client from `X-Forwarded-For` — only from a loopback peer, only when
+      // opted in, and only the right-most untrusted hop — and `limiterKeyOf`
+      // collapses an IPv6 client to its /64 (M3: 2^64 buckets was no limit).
+      const ip = limiterKeyOf(
+        clientIpOf({
+          peer: (srv as unknown as PeerAddressable).requestIP(req)?.address ?? "",
+          forwardedFor: req.headers.get("x-forwarded-for"),
+          trustProxy: options.trustProxy === true,
+        }),
+      );
       const role: Role =
         route.kind === "phone" ? "phone" : route.kind === "accept" ? "accept" : "control";
       const data: SocketData = {
@@ -301,6 +374,19 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
       ...relaySocketOptions(options),
       open(ws) {
         sockets.set(ws.data.key, ws as unknown as RelaySocket);
+        if (ws.data.role !== "phone") {
+          // H2: a `/v1/daemon` or `/v1/accept` socket is admitted here, before
+          // it has said anything, and settles when it does (`hello` / `accept`)
+          // or dies at `RELAY_PREAUTH_MS`. Past `pendingPerIp` it is refused —
+          // a stranger with a loop must not take the fd, nor a slot a real
+          // daemon could have used.
+          const admitted = core.admitPending({ socket: ws.data.key, ip: ws.data.ip });
+          if (!admitted.ok) {
+            log(`pending-refused ${logPrefix(ws.data.key)}`);
+            closeSocket(ws.data.key, RELAY_CLOSE_REFUSED);
+            return;
+          }
+        }
         if (ws.data.role === "phone") {
           const ip = ws.data.ip;
           const id = ws.data.id ?? "";
@@ -317,7 +403,10 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
           if (decision.state === "held") {
             log(`dial-held ${logPrefix(id)}`);
           } else {
-            log(`dial-open ${logPrefix(id)} ${logPrefix(decision.stream)}`);
+            // L1: the stream token's prefix is NOT logged. It correlates
+            // nothing once the 10 s expiry has passed, and it is a secret-shaped
+            // value in a long-lived log; the id prefix is what an operator needs.
+            log(`dial-open ${logPrefix(id)}`);
           }
           apply(decision.effects);
         }
@@ -367,6 +456,9 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
           core.phoneClosed(key);
         } else if (ws.data.token !== undefined) {
           core.streamClosed(ws.data.token);
+        } else {
+          // An accept leg that never carried a token: it was only pre-auth.
+          core.pendingClosed(key);
         }
       },
     },
@@ -389,7 +481,20 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
       return;
     }
     if (parsed.t === "ping") {
-      send(key, { t: "pong" });
+      const registered = core.idOfControl(key) !== undefined;
+      if (!registered) {
+        // M1: nothing but `hello` before `ready`. A pre-`ready` ping used to be
+        // answered, which let an unauthenticated socket accumulate pongs in its
+        // backpressure buffer and (with the pre-auth gap, H2) keep itself alive.
+        log(`control-unexpected ${logPrefix(key)} ping`);
+        closeSocket(key, 1008);
+        return;
+      }
+      apply(core.ping({ socket: key }));
+      return;
+    }
+    if (parsed.t === "push") {
+      onPush(ws, parsed);
       return;
     }
     if (parsed.t !== "hello") {
@@ -412,6 +517,61 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
     }
     log(`ready ${logPrefix(decision.id ?? "")}`);
     apply(decision.effects);
+  }
+
+  /**
+   * A daemon's `push`: the core decides whether this socket may push (it must be
+   * registered) and whether the caps allow it; this delivers it through the APNs
+   * client and answers `push-result` with the same `n`.
+   *
+   * The answer goes to the socket that asked, always — including after a
+   * delivery that outlived the socket (a send on a closed socket is dropped by
+   * `send`, which is why a late answer cannot resurrect it). Pushes run
+   * CONCURRENTLY: one slow APNs request must not delay the next, and several are
+   * in flight at once by design (`n` correlates them).
+   */
+  function onPush(ws: RelaySocket, frame: RelayPushFrame): void {
+    const key = ws.data.key;
+    let payloadBytes: number;
+    try {
+      // The body is built HERE so the 4096-byte bound is checked before the core
+      // records anything: an oversized push is refused, never truncated.
+      payloadBytes = apnsPayloadBytesOf(frame.payload);
+    } catch {
+      log(`push-rejected ${logPrefix(key)} payload`);
+      apply([core.pushResult(key, { n: frame.n, status: "rejected", reason: "payload" })]);
+      return;
+    }
+    const decision = core.push({ socket: key, ...frame, payloadBytes });
+    if (!decision.ok) {
+      log(`push-refused ${logPrefix(key)} ${decision.status} ${decision.reason}`);
+      apply(decision.effects);
+      return;
+    }
+    const apns = options.apns;
+    if (apns === undefined) {
+      // Unreachable (the core refuses a push without the feature), kept honest.
+      apply([core.pushResult(key, { n: frame.n, status: "unavailable", reason: "no-push" })]);
+      return;
+    }
+    void apns.client.send(decision.request).then((outcome) => {
+      // No key, no JWT and no payload in this line: the token is an 8-char prefix.
+      // The reason is Apple's own word, BOUNDED here (`^[A-Za-z]{1,64}$`) because
+      // a reason is remote input and the log is long-lived (L1): anything else
+      // is logged as `other`, never at its own length.
+      log(
+        `push ${logPrefix(decision.request.token)} ${outcome.status}${
+          outcome.reason === undefined ? "" : ` ${loggableApnsReason(outcome.reason)}`
+        }`,
+      );
+      apply([
+        core.pushResult(key, {
+          n: decision.request.n,
+          status: outcome.status,
+          ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+        }),
+      ]);
+    });
   }
 
   /** The accept leg's first frame is the token; after that the socket is raw. */
@@ -438,7 +598,8 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
     }
     const decision = core.accept({ socket: key, token: parsed.stream, v: parsed.v });
     if (!decision.ok) {
-      log(`accept-refused ${decision.reason} ${logPrefix(parsed.stream)}`);
+      // L1: `accept-refused` echoed a prefix the ATTACKER chose, on every guess.
+      log(`accept-refused ${decision.reason}`);
       if (decision.reason === "expired") {
         // The stream expired unaccepted: its phone is closed `4404` too, so the
         // app retries another address instead of waiting out its idle timeout.
@@ -451,12 +612,16 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
     if (socket !== undefined) {
       socket.data.token = decision.token;
     }
-    log(`accept ${logPrefix(decision.token)} ${logPrefix(decision.id)}`);
+    log(`accept ${logPrefix(decision.id)}`);
     join(key, decision.phone);
   }
 
   const timer = setInterval(() => {
     apply(core.sweep());
+    // What the log limiter hid is never silent: one line per kind, per window.
+    for (const line of logLimiter.flush()) {
+      log(line);
+    }
   }, options.sweepMs ?? DEFAULT_SWEEP_MS);
   // Never hold the process open for the tick alone.
   if (typeof timer === "object" && timer !== null && "unref" in timer) {
@@ -469,9 +634,13 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
     core,
     sweep() {
       apply(core.sweep());
+      for (const line of logLimiter.flush()) {
+        log(line);
+      }
     },
     stop() {
       clearInterval(timer);
+      options.apns?.client.close();
       server.stop(true);
     },
   };
@@ -495,7 +664,10 @@ export const RELAY_LIMIT_FLAGS = [
   "max-streams-per-ip",
   "max-streams-per-id",
   "max-ids",
+  "max-ids-per-ip",
   "max-hellos-per-minute",
+  "max-pushes-per-minute",
+  "max-pushes-per-token-per-minute",
 ] as const;
 
 export type RelayLimitFlag = (typeof RELAY_LIMIT_FLAGS)[number];
@@ -517,8 +689,17 @@ export function limitsFromFlags(
   if (flags["max-ids"] !== undefined) {
     limits.registeredIds = flags["max-ids"];
   }
+  if (flags["max-ids-per-ip"] !== undefined) {
+    limits.registeredPerIp = flags["max-ids-per-ip"];
+  }
   if (flags["max-hellos-per-minute"] !== undefined) {
     limits.hellosPerMinutePerIp = flags["max-hellos-per-minute"];
+  }
+  if (flags["max-pushes-per-minute"] !== undefined) {
+    limits.pushesPerMinutePerId = flags["max-pushes-per-minute"];
+  }
+  if (flags["max-pushes-per-token-per-minute"] !== undefined) {
+    limits.pushesPerMinutePerToken = flags["max-pushes-per-token-per-minute"];
   }
   return limits;
 }

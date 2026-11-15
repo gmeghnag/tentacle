@@ -276,6 +276,8 @@ async function pairThroughFlow(options: {
   readonly store: Pick<ComputerStore, "add">;
   readonly dispatch?: (action: unknown) => void;
   readonly signal?: AbortSignal;
+  /** P9: the first successful pairing's one extra step (the notification prompt). */
+  readonly onPaired?: (computerId: string) => void;
 }): Promise<{ readonly ok: boolean; readonly state: PairingState }> {
   if (options.state.name !== "review") {
     throw new Error(`not at review: ${options.state.name}`);
@@ -294,6 +296,7 @@ async function pairThroughFlow(options: {
       state = reduce(state, action);
       options.dispatch?.(action);
     },
+    ...(options.onPaired === undefined ? {} : { onPaired: options.onPaired }),
   });
   return { ok: outcome.ok, state };
 }
@@ -381,6 +384,39 @@ describe("pairing over /e2e, as the phone does it", () => {
     // has nothing left attached.
     await laptop.drain().catch(() => {});
     laptop.close();
+  }, 30_000);
+
+  test("the pairing-success hook fires ONCE, after `done`, with the stored computer's id (P9)", async () => {
+    const dir = computerConfigDir();
+    const { url } = serve(dir);
+    const pairing = await startPair({ dir, address: url });
+    const state = reviewed(pairing.text);
+    const memory = memoryKV();
+    const store = createComputerStore({ kv: memory.kv, keychainAccessible: 1 });
+    const order: string[] = [];
+    const paired: string[] = [];
+    const { ok } = await pairThroughFlow({
+      state,
+      store,
+      dispatch: (action) => order.push((action as { readonly type: string }).type),
+      onPaired: (computerId) => {
+        // The record must ALREADY be there: the prompt is the pairing's reward,
+        // never a step ahead of it (decision 10: "asked only when needed").
+        const listed = memory.items.get("tentacle.computers") ?? "";
+        paired.push(`${computerId}:${listed.includes(computerId) ? "stored" : "missing"}`);
+      },
+    });
+    expect(ok).toBe(true);
+    // Once, WITH the id the record was written under, and only once the record
+    // was there — a prompt before the write would ask about a computer the app
+    // cannot yet dial.
+    const stored = await store.list();
+    const id = stored[0]?.id ?? "";
+    expect(id).not.toBe("");
+    expect(paired).toEqual([`${id}:stored`]);
+    // After `done`: the screen has already moved on when the OS sheet appears.
+    expect(order.indexOf("done")).toBeLessThan(order.length);
+    expect(order.filter((step) => step === "done").length).toBe(1);
   }, 30_000);
 
   test("paired, but the Keychain write fails → `store`, and `done` is NEVER dispatched (F-P12; mutation: dispatch `done` first → red)", async () => {

@@ -130,6 +130,15 @@ export function acceptDevice(channel: DuplexChannel, deps: AcceptDeviceDeps): De
     if (built?.id !== undefined) {
       authority.unregister(built.id, built.handle);
     }
+    // The caller IS the connection's transport, and this is its one teardown
+    // (docs/feat/mobile-push.md P7/F17): the relay leg's socket close calls
+    // exactly this `release`, and the DIRECT route's socket close calls it via
+    // the ws-server. Without closing here, a phone that goes away on the relay
+    // path leaves its `Connection` open — its session keeps counting an
+    // attachment that is gone, so `recheckAsks` never re-decides and a phone
+    // locked mid-grace is never pushed to (F17 inverts). `Connection.close()`
+    // is idempotent and drops every attachment, which is what `detach` needs.
+    built?.connection.close();
   };
   noiseResponder(channel, {
     staticKey: identity,

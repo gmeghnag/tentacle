@@ -68,6 +68,13 @@ export const DomainErrorCode = {
    * polling for `WATCH_IDLE_DROP_MS`, docs/feat/logs-cmd.md sub-task 2).
    */
   UnknownWatch: -32018,
+  /**
+   * A `device/push_register` whose record could not be stored (a full disk, an
+   * unwritable `devices/`), docs/feat/mobile-push.md F25. The app reports
+   * "could not enable notifications" and retries on the next connect; nothing
+   * is half-written (the store writes through a temp file).
+   */
+  PushStoreFailed: -32019,
 } as const;
 
 /**

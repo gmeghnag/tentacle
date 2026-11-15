@@ -6,6 +6,7 @@ import { App, type SessionController } from "../src/App.tsx";
 import type { DaemonQueue } from "../src/queued.ts";
 import type { SessionEvent } from "../src/state.ts";
 import type { SessionActivity } from "../src/turn-feed.ts";
+import { inertSession } from "./session-stub.ts";
 
 // docs/feat/tui-foreign-turns.md step C: the App renders ANY turn of the
 // session through one loop. A fake controller raises the session's activity.
@@ -94,6 +95,7 @@ function sharedSession(
   let listener: ((a: SessionActivity) => void) | null = null;
   let queueListener: ((q: DaemonQueue) => void) | null = null;
   const ctrl: SessionController = {
+    ...inertSession(),
     async *send(prompt) {
       log.sends.push(prompt);
       if (prompt === "mine-lost") {

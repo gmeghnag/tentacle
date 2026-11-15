@@ -285,6 +285,8 @@ describe("toUpdateParams (the session/update frame)", () => {
     { type: "permission_resolved", requestId: "r", outcome: { outcome: "cancelled" } },
     { type: "session_title", title: "Fix login", source: "model" },
     { type: "session_settings", settings: { carried: {}, overridden: {} }, id: "a1" },
+    // docs/feat/session-auto-accept.md: the session's switch, every device.
+    { type: "auto_accept", on: true, by: "laptop" },
     { type: "tool_call_phase", toolCallId: "t", phase: "running" },
     {
       type: "queued",

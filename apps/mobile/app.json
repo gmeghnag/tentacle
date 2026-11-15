@@ -7,6 +7,10 @@
     "ios": {
       "bundleIdentifier": "so.tentacle.app",
       "supportsTablet": true,
+      "entitlements": {
+        "keychain-access-groups": ["$(AppIdentifierPrefix)so.tentacle.app"],
+        "com.apple.developer.usernotifications.time-sensitive": true
+      },
       "infoPlist": {
         "NSLocalNetworkUsageDescription": "tentacle connects to your computers on the local network",
         "NSAppTransportSecurity": {
@@ -47,7 +51,15 @@
         {
           "faceIDPermission": "tentacle uses Face ID to unlock the app"
         }
+      ],
+      [
+        "expo-notifications",
+        {
+          "mode": "development",
+          "enableBackgroundRemoteNotifications": false
+        }
       ]
-    ]
+    ],
+    "icon": "./assets/icon.png"
   }
 }

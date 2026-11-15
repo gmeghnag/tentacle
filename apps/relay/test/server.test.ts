@@ -7,7 +7,7 @@ import {
   encodeBase64Url,
 } from "@tentacle/protocol";
 import { relayIdOf } from "@tentacle/transport/relay-id";
-import { RELAY_CLOSE_REFUSED } from "../src/relay-core.ts";
+import { RELAY_CLOSE_REFUSED, RELAY_PREAUTH_MS } from "../src/relay-core.ts";
 import {
   type RunningRelay,
   limitsFromFlags,
@@ -60,9 +60,10 @@ interface TestSocket {
   close(): void;
 }
 
-function open(url: string, protocols?: string[]): Promise<TestSocket> {
+function open(url: string, headers?: Record<string, string>): Promise<TestSocket> {
   return new Promise((resolve, reject) => {
-    const ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
+    const ws =
+      headers === undefined ? new WebSocket(url) : new WebSocket(url, { headers } as never);
     const received: string[] = [];
     /** Frames nobody has awaited yet — the queue `next()` drains. */
     const pending: string[] = [];
@@ -189,6 +190,18 @@ describe("relaySocketOptions / limitsFromFlags", () => {
     expect(relaySocketOptions({ idleTimeoutSec: 5 }).idleTimeout).toBe(5);
   });
 
+  test("an oversized frame is refused by BUN, before it is allocated (H1)", () => {
+    // Without `maxPayloadLength` Bun keeps its 16 MiB default and every app-level
+    // check runs AFTER the string exists — ~32 parallel frames reach MemoryMax.
+    const options = relaySocketOptions({});
+    expect(options.maxPayloadLength).toBe(RELAY_CONTROL_LIMITS.maxFrameChars);
+    // Above the largest legitimate frame (a ~87.4 Ki-char Noise frame).
+    expect(options.maxPayloadLength).toBeGreaterThan(87 * 1024);
+    // Pinned, not left to Bun's default: compression is the one way a bounded
+    // payload can still expand (a zip bomb).
+    expect(options.perMessageDeflate).toBe(false);
+  });
+
   test("each limit flag maps onto exactly one limit", () => {
     expect(
       limitsFromFlags({
@@ -196,14 +209,16 @@ describe("relaySocketOptions / limitsFromFlags", () => {
         "max-streams-per-ip": 6,
         "max-streams-per-id": 7,
         "max-ids": 8,
-        "max-hellos-per-minute": 9,
+        "max-ids-per-ip": 9,
+        "max-hellos-per-minute": 10,
       }),
     ).toEqual({
       dialsPerMinutePerIp: 5,
       concurrentPerIp: 6,
       streamsPerId: 7,
       registeredIds: 8,
-      hellosPerMinutePerIp: 9,
+      registeredPerIp: 9,
+      hellosPerMinutePerIp: 10,
     });
     expect(limitsFromFlags({})).toEqual({});
   });
@@ -336,7 +351,7 @@ describe("startRelay — splice (R0(a) made a claim about the real service)", ()
     control.close();
   });
 
-  test("a 97 KiB frame closes BOTH legs (the plan's number: past the 96 Ki cap)", async () => {
+  test("a 97 KiB frame closes BOTH legs — now chosen by BUN, not by the app (H1)", async () => {
     const { server, lines } = relay();
     const control = await register(server.url);
     const phone = await open(`${server.url}/d/${ID}/e2e`);
@@ -347,9 +362,16 @@ describe("startRelay — splice (R0(a) made a claim about the real service)", ()
     expect(await daemon.next()).toBe("first");
 
     phone.send("y".repeat(97 * 1024));
-    expect((await phone.closed()).code).toBe(RELAY_CLOSE_UNREGISTERED);
-    expect((await daemon.closed()).code).toBe(RELAY_CLOSE_UNREGISTERED);
-    expect(lines.some((line) => line.startsWith("frame-oversize"))).toBe(true);
+    // The close CODE is Bun's now (1009/1006), not the app's 4404: `maxPayloadLength`
+    // refuses the frame before any handler runs, which is the whole point (the
+    // allocation never happens). The app never saw it, so no `frame-oversize`
+    // line either. The phone app ignores relay close codes and redials, so this
+    // changes nothing for a client — and the leg is still closed.
+    const close = await phone.closed();
+    expect(close.code).not.toBe(RELAY_CLOSE_UNREGISTERED);
+    expect([1006, 1009]).toContain(close.code);
+    expect((await daemon.closed()).code).toBeDefined();
+    expect(lines.some((line) => line.startsWith("frame-oversize"))).toBe(false);
     control.close();
   });
 
@@ -507,6 +529,179 @@ describe("startRelay — phone dial, hold and pre-accept buffering", () => {
     expect(openFrame.stream).toMatch(/^[A-Za-z0-9_-]{22}$/);
     phone.close();
     control.close();
+  });
+});
+
+describe("startRelay — the REAL client IP behind the proxy (H3)", () => {
+  test("trustProxy: the dial's XFF becomes open.ip (red before: always 127.0.0.1)", async () => {
+    const { server } = relay({ trustProxy: true });
+    const control = await register(server.url);
+    const phone = await open(`${server.url}/d/${ID}/e2e`, { "x-forwarded-for": "203.0.113.7" });
+    const openFrame = JSON.parse(await control.next()) as { t: string; ip: string };
+    expect(openFrame.t).toBe("open");
+    expect(openFrame.ip).toBe("203.0.113.7");
+    phone.close();
+    control.close();
+  });
+
+  test("without trustProxy the header is IGNORED (the deploy's behaviour, unchanged)", async () => {
+    const { server } = relay();
+    const control = await register(server.url);
+    const phone = await open(`${server.url}/d/${ID}/e2e`, { "x-forwarded-for": "203.0.113.7" });
+    const openFrame = JSON.parse(await control.next()) as { ip: string };
+    expect(openFrame.ip).toBe("127.0.0.1");
+    phone.close();
+    control.close();
+  });
+
+  test("two XFF values are two buckets: the per-IP cap applies per CLIENT (H3)", async () => {
+    // `concurrentPerIp: 1` with real keys: two different clients are both
+    // admitted, and a second dial from the first is refused. Before the change
+    // (one shared 127.0.0.1 bucket) the second client was refused instead.
+    const { server } = relay({ trustProxy: true, limits: { concurrentPerIp: 1 } });
+    const first = await open(`${server.url}/d/${ID}/e2e`, { "x-forwarded-for": "203.0.113.7" });
+    const other = await open(`${server.url}/d/${ID}/e2e`, { "x-forwarded-for": "198.51.100.4" });
+    expect(server.core.heldCount).toBe(2);
+    const again = await open(`${server.url}/d/${ID}/e2e`, { "x-forwarded-for": "203.0.113.7" });
+    expect((await again.closed()).code).toBe(RELAY_CLOSE_REFUSED);
+    first.close();
+    other.close();
+  });
+});
+
+describe("startRelay — pre-auth socket cap and deadline (H2)", () => {
+  test("a silent /v1/daemon and /v1/accept socket are closed 1008 at the deadline", async () => {
+    // Repro P1: 100 silent pre-auth sockets were STILL OPEN after 5 s with a 2 s
+    // idle timeout — `sendPings: true` means a client that answers pings is
+    // never idle. Each holds an fd and up to the 16 MiB backpressure buffer.
+    let at = 1_000;
+    const { server } = relay({ now: () => at });
+    const control = await open(`${server.url}/v1/daemon`);
+    const accept = await open(`${server.url}/v1/accept`);
+    await waitFor(() => server.core.pendingCount === 2, "both sockets to be admitted");
+    // Not yet: the first frame is due within one RTT, 10 s is generous.
+    at += RELAY_PREAUTH_MS - 1;
+    server.sweep();
+    expect(control.ws.readyState).not.toBe(WebSocket.CLOSED);
+    at += 1;
+    server.sweep();
+    expect((await control.closed()).code).toBe(1008);
+    expect((await accept.closed()).code).toBe(1008);
+    // The slots are back: nothing lingers per IP.
+    expect(server.core.pendingCount).toBe(0);
+  });
+
+  test("a socket that said hello is NOT swept (a registered daemon lives forever)", async () => {
+    let at = 1_000;
+    const { server } = relay({ now: () => at });
+    const control = await register(server.url);
+    await waitFor(() => server.core.pendingCount === 0, "the pre-auth slot to be settled");
+    at += RELAY_PREAUTH_MS * 10;
+    server.sweep();
+    control.send({ t: "ping" });
+    expect(JSON.parse(await control.next())).toEqual({ t: "pong" });
+    control.close();
+  });
+
+  test("past pendingPerIp a pre-auth socket is refused 4429", async () => {
+    const { server, lines } = relay({ limits: { pendingPerIp: 2 } });
+    const one = await open(`${server.url}/v1/daemon`);
+    const two = await open(`${server.url}/v1/daemon`);
+    await waitFor(() => server.core.pendingCount === 2, "both sockets to be admitted");
+    const three = await open(`${server.url}/v1/daemon`);
+    expect((await three.closed()).code).toBe(RELAY_CLOSE_REFUSED);
+    expect(lines.some((line) => line.startsWith("pending-refused"))).toBe(true);
+    // One authenticates, so its slot is free again for a new socket.
+    one.send({ t: "hello", v: 1, secret: SECRET });
+    expect((JSON.parse(await one.next()) as { t: string }).t).toBe("ready");
+    const four = await open(`${server.url}/v1/daemon`);
+    await waitFor(() => server.core.pendingCount === 2, "the new socket to be admitted");
+    two.close();
+    four.close();
+    one.close();
+  });
+});
+
+describe("startRelay — ping is bounded and only after ready (M1)", () => {
+  test("a ping BEFORE hello closes the socket (it used to be answered pong)", async () => {
+    const { server, lines } = relay();
+    const control = await open(`${server.url}/v1/daemon`);
+    control.send({ t: "ping" });
+    expect((await control.closed()).code).toBe(1008);
+    expect(control.received).toEqual([]);
+    expect(lines.some((line) => line.startsWith("control-unexpected"))).toBe(true);
+  });
+
+  test("past pingsPerMinute the socket is closed, not throttled silently", async () => {
+    const { server } = relay({ limits: { pingsPerMinute: 2 } });
+    const control = await register(server.url);
+    for (let i = 0; i < 2; i++) {
+      control.send({ t: "ping" });
+      expect(JSON.parse(await control.next())).toEqual({ t: "pong" });
+    }
+    control.send({ t: "ping" });
+    expect((await control.closed()).code).toBe(1008);
+  });
+});
+
+describe("startRelay — the log is bounded per kind, and never carries an address (M4, L1)", () => {
+  test("40 refused dials give at most 20 lines plus one honest summary", async () => {
+    let at = 1_000;
+    const { server, lines } = relay({
+      now: () => at,
+      trustProxy: true,
+      limits: { concurrentPerIp: 1, dialsPerMinutePerIp: 999 },
+    });
+    const held = await open(`${server.url}/d/${ID}/e2e`, { "x-forwarded-for": "203.0.113.7" });
+    await waitFor(() => server.core.heldCount === 1, "the first dial to be held");
+
+    // 40 refused dials from the same client (the same XFF, so the same bucket).
+    const refused: Promise<TestSocket>[] = [];
+    for (let i = 0; i < 40; i++) {
+      refused.push(open(`${server.url}/d/${ID}/e2e`, { "x-forwarded-for": "203.0.113.7" }));
+    }
+    for (const socket of await Promise.all(refused)) {
+      await socket.closed();
+    }
+    await waitFor(
+      () => lines.filter((line) => line.startsWith("dial-refused")).length >= 20,
+      "the limiter to admit its first 20 lines",
+    );
+    expect(lines.filter((line) => line.startsWith("dial-refused")).length).toBe(20);
+    expect(lines.some((line) => line.startsWith("log-suppressed"))).toBe(false);
+    // The window ends: ONE summary line reports exactly what it hid.
+    at += 10_000;
+    server.sweep();
+    const summary = lines.filter((line) => line.startsWith("log-suppressed dial-refused"));
+    expect(summary).toHaveLength(1);
+    expect(summary[0]).toMatch(/^log-suppressed dial-refused \d+$/);
+    held.close();
+  });
+
+  test("no captured line ever contains an address, a full id or a full token", async () => {
+    const { server, lines } = relay({ trustProxy: true });
+    const control = await register(server.url);
+    const phone = await open(`${server.url}/d/${ID}/e2e`, { "x-forwarded-for": "203.0.113.7" });
+    const openFrame = JSON.parse(await control.next()) as { stream: string };
+    const daemon = await open(`${server.url}/v1/accept`);
+    daemon.send({ t: "accept", v: 1, stream: openFrame.stream });
+    phone.send("A-THING-NOBODY-LOGS");
+    await daemon.next();
+    phone.close();
+    daemon.close();
+    control.close();
+    await Bun.sleep(20);
+
+    const joined = lines.join("\n");
+    // L1: no address reaches the journal (it is metadata, and it is the one
+    // thing a user could not otherwise be shown to have been identified by).
+    expect(joined).not.toMatch(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/);
+    expect(joined.includes("203.0.113.7")).toBe(false);
+    // A full 22-char id or token is never logged: only an 8-char prefix.
+    expect(joined).not.toMatch(/[A-Za-z0-9_-]{22}/);
+    expect(joined.includes(openFrame.stream)).toBe(false);
+    // And the id prefix IS there, so an operator can answer "is mine connected?".
+    expect(joined.includes(logPrefix(ID))).toBe(true);
   });
 });
 

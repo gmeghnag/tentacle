@@ -125,6 +125,7 @@ async function setup(opts: { racer?: (facade: HopRuntime) => void; targetCwd?: s
             id,
           ),
           place: { kind: "workload", engine: "docker", name: "box" },
+          folder: "not shared",
           daemonInPod: true,
           preexisting: false,
           rollback: async () => {},

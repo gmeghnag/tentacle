@@ -34,7 +34,7 @@ import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime, persistingController } from "../src/local-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
-import { saveFixture } from "./session-fixture.ts";
+import { recordWrite, saveFixture } from "./session-fixture.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -866,7 +866,6 @@ describe("createLocalRuntime (local over RPC)", () => {
     const saver = new SessionSaver(
       {
         write: pending,
-        saveSnapshot: pending,
         remove: async () => {},
       } as unknown as ConstructorParameters<typeof SessionSaver>[0],
       () => {},
@@ -879,7 +878,7 @@ describe("createLocalRuntime (local over RPC)", () => {
     await saver.drain();
     expect(saver.clean()).toBe(false);
     fail = false;
-    saver.save({ id: "s" } as unknown as Parameters<SessionSaver["save"]>[0]);
+    saver.write({ id: "s" } as unknown as Parameters<SessionSaver["write"]>[0]);
     release();
     await saver.drain();
     expect(saver.clean()).toBe(true);
@@ -1180,7 +1179,6 @@ describe("N clients of one session (detached-handover)", () => {
         opts.fullDisk
           ? {
               write: () => Promise.reject(new Error("ENOSPC")),
-              saveSnapshot: () => Promise.reject(new Error("ENOSPC")),
               remove: () => Promise.resolve(),
             }
           : store,
@@ -2329,15 +2327,17 @@ describe("per-round save inside a turn", () => {
     const saver = new SessionSaver(store, () => {});
     const ctl = persistingController(inner, (messages) => {
       persisted.push(messages);
-      saver.save({
-        id: "u1",
-        cwd: "/",
-        model: "m",
-        createdAt: 1,
-        updatedAt: 1,
-        title: "t",
-        messages: [...messages],
-      });
+      saver.write(
+        recordWrite({
+          id: "u1",
+          cwd: "/",
+          model: "m",
+          createdAt: 1,
+          updatedAt: 1,
+          title: "t",
+          messages: [...messages],
+        }),
+      );
     });
     const turn = drain(ctl.send("go"));
     const raw = [user("go"), asst("", ["c1"]), tool("c1")];

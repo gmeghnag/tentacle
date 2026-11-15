@@ -83,6 +83,10 @@ import {
 } from "./src/pairing-flow.ts";
 import { handlePairingText, takePendingLink } from "./src/pending-link.ts";
 import { pickFromLibrary, takePhoto } from "./src/photo-source.ts";
+import { readAsked, readPermission, readPushFacts, requestPermission } from "./src/push-expo.ts";
+import { createPushManager } from "./src/push-manager.ts";
+import type { PushPermission } from "./src/push-registration.ts";
+import { createPushToggleStore } from "./src/push-toggle-store.ts";
 import { type RootStackParams, initialRoute } from "./src/routes.ts";
 import { QrScanner, usePairingCamera } from "./src/scanner.tsx";
 import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
@@ -91,7 +95,7 @@ import { PairScreen } from "./src/screens/PairScreen.tsx";
 import { SessionScreen } from "./src/screens/SessionScreen.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
 import { SettingsScreen } from "./src/screens/SettingsScreen.tsx";
-import { KEYCHAIN_STORE } from "./src/secure-kv.ts";
+import { KEYCHAIN_ACCESSIBLE, KEYCHAIN_STORE, keychainKV } from "./src/secure-kv.ts";
 import { createSessionController } from "./src/session-controller.ts";
 import { createSessionListController, viewModel } from "./src/session-list-controller.ts";
 import { type SessionListState, type SessionRow, initialSessionList } from "./src/session-list.ts";
@@ -114,6 +118,33 @@ const SOURCE: ComputerSource = computerSource(KEYCHAIN_STORE);
 
 /** What a computer is, by id (filled when the source is read). */
 const RECORDS = new Map<string, PairedComputer>();
+
+/**
+ * The app's ONE push wiring (docs/feat/mobile-push.md P9). It keeps a registrar
+ * per computer, and the fingerprint it decides from lives in that computer's
+ * Keychain record — so a relaunch, a reconnect storm or a remount registers
+ * nothing, while a rotated APNs token or a regenerated push key registers once.
+ */
+const PUSH = createPushManager({
+  store: KEYCHAIN_STORE,
+  // The ONE Keychain adapter (`secure-kv.ts`), so the push switch adds no second
+  // place an accessibility class can be dropped (`pairing-guards.test.ts` pins
+  // that there are two importers of `expo-secure-store`, and no third).
+  toggle: createPushToggleStore({ kv: keychainKV, keychainAccessible: KEYCHAIN_ACCESSIBLE }),
+  platform: {
+    permission: readPermission,
+    request: requestPermission,
+    asked: readAsked,
+    facts: readPushFacts,
+  },
+  // A registrar's state moved (a registration landed, a refusal, "daemon too
+  // old"): the Settings row re-renders. `App` installs this on mount, so the
+  // manager itself stays React-free and testable.
+  onChange: () => pushChanged?.(),
+});
+
+/** The app's re-render hook for the push row (installed by `App`, tests pass none). */
+let pushChanged: (() => void) | undefined;
 
 /**
  * ONE diagnosis per computer, kept ACROSS mounts: "three failed attempts in a
@@ -725,8 +756,19 @@ function SessionsRoute({
     undefined,
   );
   const watcher = useMemo(
-    () => createLinkStatusWatcher<ComputerLink>((up) => controllerRef.current?.link(up)),
-    [],
+    () =>
+      createLinkStatusWatcher<ComputerLink>((up) => {
+        controllerRef.current?.link(up);
+        // P9: a link coming UP is the ONE moment a phone registers for push
+        // (docs/feat/mobile-push.md Design 7) — over the same authenticated
+        // channel as everything else. The registrar decides from `(token, env,
+        // pushKey)` + the stored fingerprint, so a reconnect storm or a daemon
+        // restart sends nothing at all.
+        if (up) {
+          void PUSH.sync(computerId, () => CLIENTS.get(computerId));
+        }
+      }),
+    [computerId],
   );
   // The controller is created once per computer; the watcher reaches the current
   // one through the ref, so it is never re-created (a re-created watcher would
@@ -839,6 +881,10 @@ function SessionRoute({
         archived,
         title,
         project: RECORDS.get(computerId)?.name ?? "",
+        // This phone's own label, for an ask's "also asked on" note never naming
+        // the device it is shown on (docs/feat/session-auto-accept.md D7): the
+        // name this phone paired under. Absent on a record an older build wrote.
+        phoneName: () => RECORDS.get(computerId)?.thisDeviceName,
         controller: RUNTIMES.controller(link.client),
         broker: link.permissions,
         now: () => Date.now(),
@@ -926,6 +972,53 @@ function AppShell(): JSX.Element {
   // The lock's setting, read once at launch (D3). `loading` until the Keychain
   // answers: the lock screen covers the first frame in the meantime (F10).
   const [lockSetting, setLockSetting] = useState<LockDelay | "loading">("loading");
+  /**
+   * P9: the Notifications row's inputs. `permission` is re-read when Settings is
+   * shown (a person may have changed it in iOS's own Settings and come back),
+   * and `pushEpoch` forces the row to re-render when a registrar's state moves.
+   */
+  // `undetermined` until the first read lands: the row then says "Not checked
+  // yet", which is the truth, rather than showing a spinner over a toggle.
+  const [pushPermission, setPushPermission] = useState<PushPermission>("undetermined");
+  const [pushEpoch, setPushEpoch] = useState(0);
+  /**
+   * H1: the phone-wide switch is read from the Keychain before the row is trusted.
+   * `false` until the read lands, and Settings renders the row only then — a first
+   * frame that said "on" to a person who turned notifications off would be a
+   * claim this app has no evidence for (and the same frame is what a relaunch
+   * shows).
+   */
+  const [pushReady, setPushReady] = useState(false);
+  //
+  // ONE refresh: re-read the OS permission (a person may have changed it in iOS's
+  // own Settings and come back) and re-render the row. Bumping the epoch is not
+  // an argument to the render, it is what makes React look at the manager's plain
+  // values again — a registrar's state is not React state.
+  const refreshPush = useCallback(() => {
+    setPushEpoch((epoch) => epoch + 1);
+    void readPermission().then((permission) => {
+      setPushPermission(permission);
+    });
+  }, []);
+  useEffect(() => {
+    refreshPush();
+  }, [refreshPush]);
+  // The stored switch, once: `PUSH.ready()` is the same read every manager method
+  // awaits, so this cannot race a registration. After it lands the row renders.
+  useEffect(() => {
+    void PUSH.ready().then(() => {
+      setPushReady(true);
+    });
+  }, []);
+  // The manager's own signal (a registration landed, a refusal, "daemon too
+  // old"): one re-render of the Settings row, and nothing else. Installed here
+  // and cleared on unmount, so a hot reload cannot leave two.
+  useEffect(() => {
+    pushChanged = refreshPush;
+    return () => {
+      pushChanged = undefined;
+    };
+  }, [refreshPush]);
   /** The setting asked for that is weaker than the current one (Owner Q6). */
   const [pendingLock, setPendingLock] = useState<LockDelay | undefined>(undefined);
   const [settingsError, setSettingsError] = useState<string | undefined>(undefined);
@@ -1178,6 +1271,28 @@ function AppShell(): JSX.Element {
     return () => clearInterval(id);
   }, []);
 
+  // P9: the paired computers, as the Notifications row needs them (an id and a
+  // name each — a broken entry has no name, so its id stands in, as everywhere).
+  const pairedComputers = useMemo(
+    () =>
+      (computers ?? []).map((entry) =>
+        entry.state === "paired"
+          ? { id: entry.id, name: entry.computer.name }
+          : { id: entry.id, name: entry.name },
+      ),
+    [computers],
+  );
+  // `pushEpoch` is not an argument but IS the trigger: a registrar's state is a
+  // plain value the manager keeps, so bumping the epoch (a registration landed, a
+  // refusal) is what re-renders this row with the new state. Cheap to recompute.
+  const notificationsRow = PUSH.viewForAll(pairedComputers, pushPermission);
+  void pushEpoch;
+  /**
+   * H1: no row until the stored switch has been read. `notifications={undefined}`
+   * is the state Settings already handles ("nothing to show"); the alternative is
+   * a first frame that says "on" to someone who turned it off.
+   */
+  const notificationsForSettings = pushReady ? notificationsRow : undefined;
   // The lock wraps EVERYTHING (D5/D8): a loading spinner or a store error must
   // not be the one thing visible above the lock. `LockGate` covers the first
   // frame before the setting is known (F10).
@@ -1230,6 +1345,11 @@ function AppShell(): JSX.Element {
                   }
                 }}
                 onDone={(computerId) => {
+                  // The FIRST successful pairing's one extra step (P9, decision
+                  // 10): the notification prompt, with its explainer, once. It is
+                  // fired here rather than in `runPairing` so it cannot delay the
+                  // screen, and it is not awaited: the OS sheet is the person's.
+                  void PUSH.paired(computerId, true);
                   // A re-pair keeps the id (Q7) and replaces the device key, so
                   // the live link (sealed over the OLD key, likely `stopped` and
                   // `revoked`) and its diagnosis are no longer about this record.
@@ -1238,6 +1358,11 @@ function AppShell(): JSX.Element {
                   // (fix round 1 finding 1). The forget happens BEFORE the
                   // reload, which is what re-dials the computer.
                   void withForgottenRecord(MEMORY, computerId, async () => {
+                    // P9: the push registrar's state is about the OLD device key
+                    // too (a re-pair is a new device id on the daemon, with no
+                    // registration), and the store's `add` has already dropped
+                    // the fingerprint — so the next connect registers afresh.
+                    PUSH.forget(computerId);
                     await reload();
                     navigation.reset({ index: 0, routes: [{ name: "Computers" }] });
                   });
@@ -1264,6 +1389,9 @@ function AppShell(): JSX.Element {
                   // forgotten must not outlive the record (detach only, never
                   // `session/close`).
                   const left = await withForgottenRecord(MEMORY, row.id, async () => {
+                    // P9: a removed computer keeps no push state either — its
+                    // registration is gone from the daemon with it.
+                    PUSH.forget(row.id);
                     await SOURCE.remove(row.id);
                     return reload();
                   });
@@ -1289,6 +1417,22 @@ function AppShell(): JSX.Element {
                 onSelectDelay={selectDelay}
                 onExportLogs={exportLogs}
                 canExport={!exporting}
+                // P9: ONE row for the phone, over every paired computer. A
+                // computer that cannot deliver outranks one that can — it is the
+                // reason nothing arrives — and the toggle reaches all of them.
+                notifications={notificationsForSettings}
+                onToggleNotifications={(enabled) => {
+                  // Turning it back ON registers with the computers that are
+                  // connected NOW, not at some later reconnect (review round 1,
+                  // H3): the registrar syncs as part of `setEnabled`, so the row's
+                  // detail line becomes the daemon's real answer instead of
+                  // "Not checked yet" for the rest of the session.
+                  void PUSH.setEnabledForAll(
+                    pairedComputers,
+                    enabled,
+                    (id) => () => CLIENTS.get(id),
+                  ).then(refreshPush);
+                }}
               />
             )}
           </Stack.Screen>

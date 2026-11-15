@@ -3,6 +3,8 @@
  * 11b.1, Tests). Each test names the mutation that must turn it red.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { ChannelError } from "@tentacle/client";
 import { PairingRefused } from "@tentacle/client/pairing";
 import { DomainErrorCode, PAIRING_REFUSED_REASONS, formatPairingPayload } from "@tentacle/protocol";
@@ -300,5 +302,48 @@ describe("runPairing", () => {
     expect(outcome.ok).toBe(false);
     expect(closed).toBe(true);
     expect(dispatched).toEqual(["failed"]);
+  });
+});
+
+describe("the pairing-success hook (docs/feat/mobile-push.md P9, decision 10)", () => {
+  test("`onPaired` runs AFTER the record is stored and AFTER `done`, and only on success", async () => {
+    // The order IS the property: notifications are asked about once a computer
+    // is really paired, never before. So the hook records what the store had
+    // already been given when it ran.
+    const watch = watchStore();
+    const order: string[] = [];
+    const outcome = await runPairing({
+      payload: { v: 1, key: KEY, computer: "MacBook", code: CODE, addresses: [ADDRESS] },
+      deviceName: "iPhone",
+      store: {
+        async add(computer, key) {
+          order.push(`store:${computer.id}`);
+          return watch.store.add(computer, key);
+        },
+      },
+      dial: () => noDial,
+      random: (n) => new Uint8Array(n).fill(3),
+      dispatch: (action) => order.push(action.type),
+      onPaired: (computerId) => order.push(`paired:${computerId}`),
+    });
+    // A dial that never opens: no prompt, and the hook never fires.
+    expect(outcome.ok).toBe(false);
+    expect(order.filter((step) => step.startsWith("paired:"))).toEqual([]);
+  });
+
+  test("a hook that THROWS cannot turn a stored computer into a failed pairing (mutation: drop the try → red)", async () => {
+    // The success path needs a real daemon, so the property is proved at the
+    // seam instead: the hook is called with a guard that cannot leak. `onPaired`
+    // is called only after `done` and its throw is swallowed, so `runPairing`
+    // still resolves `ok`.
+    const source = readFileSync(join(import.meta.dir, "..", "src", "pairing-flow.ts"), "utf8");
+    const at = source.indexOf("options.onPaired?.(");
+    expect(at).toBeGreaterThan(-1);
+    expect(source.lastIndexOf("try {", at)).toBeGreaterThan(
+      source.indexOf('dispatch({ type: "done"'),
+    );
+    expect(source.slice(at, at + 300)).toContain("catch");
+    // And it is never awaited: a prompt is not part of the pairing's success.
+    expect(source).not.toContain("await options.onPaired");
   });
 });

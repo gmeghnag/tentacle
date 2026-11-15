@@ -677,8 +677,13 @@ describe("connect: the reconnecting client (docs/feat/client-reattach-frontends.
       'protocol version mismatch: client 10, daemon 9 — the daemon runs an older tentacle (it does not report its version): update the daemon: run "tentacle update" on that host and restart "tentacle serve"',
     );
     expect(mounted).toBe(false);
+    // `connect` reaches a trusted `serve`, so it declares its device name too
+    // (docs/feat/session-auto-accept.md D7): the daemon stamps it into an ask's
+    // `askedOn` and an `auto_accept` update's `by`.
     expect(seen).toEqual([
-      expect.objectContaining({ clientInfo: { name: "tentacle", version: APP_VERSION } }),
+      expect.objectContaining({
+        clientInfo: expect.objectContaining({ name: "tentacle", version: APP_VERSION }),
+      }),
     ]);
   });
 

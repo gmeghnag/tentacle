@@ -115,6 +115,21 @@ class ClassSession {
   /** The dock's live job list; a test replaces it (optional on the controller). */
   onJobs?: SessionController["onJobs"];
 
+  /** `SessionController`'s remaining required members: this test drives `/clear`
+   * only, and the class must satisfy the interface so an UNBOUND call is what
+   * fails, not the type. */
+  imageInput(): { readonly kind: "off"; readonly reason: string } {
+    return { kind: "off", reason: "this test drives no images" };
+  }
+
+  attachImage(): Promise<never> {
+    return Promise.reject(new Error("this test drives no images"));
+  }
+
+  sendNow(): Promise<never> {
+    return Promise.reject(new Error("this test drives no send-now"));
+  }
+
   close(): void {
     this.id = null;
   }

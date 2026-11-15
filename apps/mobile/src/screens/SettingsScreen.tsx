@@ -10,7 +10,7 @@
  * architecture shows XCUITest no text).
  */
 import type { JSX } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import type { LockDelay, LockNotice } from "../app-lock.ts";
 import { DENSE_FONT_SCALE, type Palette, size, space, typography } from "../theme.ts";
 import { Banner } from "../ui/Banner.tsx";
@@ -29,6 +29,16 @@ export const DELAY_ROWS: readonly { readonly value: LockDelay; readonly label: s
   { value: "1h", label: "After 1 hour" },
   { value: "never", label: "Never" },
 ];
+
+/** What the Notifications row shows: precomputed by `push-registration.ts`. */
+export interface NotificationsRow {
+  /** The person's toggle. */
+  readonly enabled: boolean;
+  /** Why it is or is not on, for the sub-line (never a bare "off"). */
+  readonly detail: string;
+  /** False when nothing can be done from here (`daemon too old`, no permission). */
+  readonly switchable: boolean;
+}
 
 export interface SettingsScreenProps {
   readonly palette: Palette;
@@ -52,6 +62,14 @@ export interface SettingsScreenProps {
   readonly canExport: boolean;
   /** Present only when the stack can go back. */
   readonly onBack?: () => void;
+  /**
+   * The Notifications row (docs/feat/mobile-push.md P9, Owner Q7): on/off plus the
+   * reason, next to the lock settings. ONE row for the phone (the toggle reaches
+   * every paired computer), so it is always present — with nothing paired it says
+   * what to do about it, and its switch is disabled.
+   */
+  readonly notifications?: NotificationsRow;
+  readonly onToggleNotifications?: (enabled: boolean) => void;
 }
 
 export function SettingsScreen({
@@ -65,6 +83,8 @@ export function SettingsScreen({
   onExportLogs,
   canExport,
   onBack,
+  notifications,
+  onToggleNotifications,
 }: SettingsScreenProps): JSX.Element {
   const compact = useCompactTitle();
   return (
@@ -148,6 +168,41 @@ export function SettingsScreen({
                 body={error}
               />
             )}
+          </View>
+          <View style={styles.section}>
+            <SectionHeader palette={palette} title="Notifications" />
+            <GroupedCard palette={palette}>
+              {/* P9: ONE row for the phone. With nothing paired the switch is
+                  disabled and the detail says what to do about it. */}
+              <Row
+                palette={palette}
+                first
+                minHeight={size.rowSetting}
+                title="Notifications"
+                dimmed={notifications === undefined}
+                trailing={
+                  <Switch
+                    testID="notifications-toggle"
+                    accessibilityLabel="Notifications"
+                    value={notifications?.enabled === true}
+                    disabled={notifications === undefined || !notifications.switchable}
+                    trackColor={{ false: palette.fill, true: palette.green }}
+                    onValueChange={(enabled) => onToggleNotifications?.(enabled)}
+                  />
+                }
+              >
+                <Text
+                  testID="notifications-detail"
+                  numberOfLines={3}
+                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                  style={[typography.footnote, { color: palette.sec }]}
+                >
+                  {notifications === undefined
+                    ? "Pair a computer first to get notified when it needs you"
+                    : notifications.detail}
+                </Text>
+              </Row>
+            </GroupedCard>
           </View>
           <View style={styles.section}>
             <SectionHeader palette={palette} title="Diagnostics" />

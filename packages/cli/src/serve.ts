@@ -7,6 +7,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { EMPTY_SKILL_LISTING, projectKey } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
+import { DEFAULT_PUSH_GRACE_SECONDS } from "@tentacle/config";
 import type { AttachmentSource } from "@tentacle/core";
 import {
   type AgentReuse,
@@ -20,18 +21,25 @@ import {
   LogSessionStore,
   type ModelLink,
   ProxyModelProvider,
+  type PushNotifier,
+  type PushRegistrationsSource,
   type ReapPolicy,
   type Reapable,
   type RunningRelayLink,
   SessionHost,
+  type SessionHostOptions,
   SessionPersister,
   type SessionTtlControl,
   TombstoneFile,
   acquireStoreLock,
   bunRelayDialer,
+  createPushNotifier,
+  deletePushRegistration,
   isLoopbackHost,
   loadOrCreateIdentity,
   readIdentity,
+  readPushRegistration,
+  readPushRegistrations,
   removeDaemonRecord,
   startReaper,
   startRelayLink,
@@ -59,6 +67,7 @@ import {
   sweepToolOutput,
   toolOutputStore,
 } from "./wiring.ts";
+import { LaptopWorkloadShellBackend } from "./workload-shell-backend.ts";
 
 /**
  * The host takes its `SessionTtlControl` at construction, before `listen`
@@ -198,8 +207,131 @@ export function createServeAgent(
       // The session's store, so the provider can read a ref's bytes
       // (docs/feat/attachments-prompt.md D4). Absent when images are off.
       ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
+      // `workload_shell` (docs/feat/workload-shell.md D3): a `serve` daemon runs
+      // on the user's own host, so it holds the credentials the tool dials with.
+      // `tunnelledAgent` (the pod daemon) never passes this.
+      workloadShell: { backend: new LaptopWorkloadShellBackend() },
     },
   );
+}
+
+/**
+ * The whole push wiring for a `serve` (docs/feat/mobile-push.md P8), or
+ * `undefined` when this daemon must not push at all.
+ *
+ * Three things have to be true, and each is a different reason the app is told
+ * about through `device/push_register`'s `push` status (Design 6):
+ *
+ *  - `push.enabled` (default true). Off → no notifier, no registration accepted
+ *    (`off`).
+ *  - the relay is on (`--no-relay` / `relay.enabled: false` mean NO contact with
+ *    the relay, so no push either, Owner Q2) → `relay-off`.
+ *  - the relay carries push (`ready.features`, P4) → otherwise `relay-no-push`.
+ *
+ * The SINK is the relay link, which `listen` starts later: a handle this
+ * returns is filled in there, so the notifier never has to know the order.
+ */
+interface ServePush {
+  readonly hostOptions: SessionHostOptions["push"];
+  readonly notifier: PushNotifier;
+  /** Called by `listen` once the link exists (or not, when the relay is off). */
+  bindLink(link: RunningRelayLink | undefined): void;
+  /** Called by `listen` once the host exists: the title/cwd a message needs. */
+  bindHost(host: SessionHost): void;
+}
+
+function buildPush(
+  config: TentacleConfig,
+  options: ServeOptions,
+  devices: DeviceAuthority,
+): ServePush | undefined {
+  const settings = config.push;
+  if (settings?.enabled === false) {
+    return undefined;
+  }
+  const relayEnabled =
+    relayChoice({
+      flagUrl: options.relay?.flagUrl,
+      noRelay: options.relay?.noRelay,
+      config: options.relay?.config ?? config.relay,
+    }).kind === "on";
+  // The precedence the config documents: flag › file › default (30).
+  const graceSeconds =
+    options.pushGraceSeconds ?? settings?.graceSeconds ?? DEFAULT_PUSH_GRACE_SECONDS;
+  // P5's store helpers take the CONFIG DIR and build `devices/push/` themselves
+  // (`pushDir(configDir)`); the authority's own `configDir` is that same root.
+  const pushDirOf = devices.configDir;
+  let link: RunningRelayLink | undefined;
+  let host: SessionHost | undefined;
+  /** The registrations (P5's store), filtered by the authority's snapshot at push time. */
+  const registrations: PushRegistrationsSource = {
+    registered: () => {
+      const usable = readPushRegistrations(pushDirOf).registrations;
+      // The authority's own snapshot is the push-time check (F14): a revoke that
+      // landed but whose file survived is still not pushed to.
+      return [...usable.keys()].filter((id) => devices.knows(id));
+    },
+    read: (deviceId) => {
+      const read = readPushRegistration(pushDirOf, deviceId);
+      return read.ok ? read.registration : undefined;
+    },
+    forget: (deviceId, token) => {
+      deletePushRegistration(pushDirOf, deviceId, token);
+    },
+  };
+  const notifier = createPushNotifier({
+    now: Date.now,
+    registrations,
+    describe: (sessionId) => {
+      // The title and project as `session/list` shows them, read at push time:
+      // a title generated since the ask is the one the phone should show.
+      const live = host?.get(sessionId);
+      return live === undefined
+        ? undefined
+        : { title: live.summary(config.cwd).title, cwd: config.cwd };
+    },
+    computer: () => {
+      const identity = devices.identity();
+      return identity === undefined
+        ? undefined
+        : { privateKey: identity.privateKey, name: identity.name };
+    },
+    sink: (delivery) =>
+      link === undefined
+        ? Promise.resolve("unavailable")
+        : link.push({
+            token: delivery.token,
+            env: delivery.env,
+            collapse: delivery.collapse,
+            ttl: delivery.ttl,
+            payload: delivery.payload,
+          }),
+    onAudit: (line) => options.onAudit?.(line),
+    graceMs: graceSeconds * 1_000,
+  });
+  return {
+    hostOptions: {
+      observer: notifier,
+      storeDir: pushDirOf,
+      graceSeconds,
+      // `off` is not in this union on purpose: a daemon with `push.enabled:
+      // false` has no option at all (above), so the RPC answers `MethodNotFound`
+      // there and this only ever reports the three reachable verdicts.
+      status: () =>
+        !relayEnabled || link === undefined
+          ? "relay-off"
+          : link.pushStatus() === "on"
+            ? "on"
+            : "relay-no-push",
+    },
+    notifier,
+    bindLink(next) {
+      link = next;
+    },
+    bindHost(next) {
+      host = next;
+    },
+  };
 }
 
 /**
@@ -257,6 +389,11 @@ export async function startDaemon(
       tombstones,
     });
     const ttl = new BoundSessionTtl();
+    // Push (docs/feat/mobile-push.md P8): built BEFORE the host (every session
+    // needs the observer) but its SINK is the relay link, which `listen` starts
+    // afterwards — so the sink reads a handle `listen` fills in. `push.enabled`
+    // false, or no device route, means no notifier at all.
+    const push = devices ? buildPush(config, options, devices) : undefined;
     const sessionHost = await reloadedHost(
       config,
       options,
@@ -265,12 +402,14 @@ export async function startDaemon(
       ttl,
       sameProject,
       tombstones,
+      push?.hostOptions,
     );
     return listen(
       sessionHost,
       options,
       ttl,
       async () => {
+        push?.notifier.stop();
         await persister?.stop();
         devices?.stop();
         lock.release();
@@ -278,6 +417,7 @@ export async function startDaemon(
       devices,
       config.cwd,
       relay.kind === "on" ? { url: relay.url, storeDir: dir } : undefined,
+      push,
     );
   } catch (error) {
     devices?.stop();
@@ -337,11 +477,12 @@ async function reloadedHost(
   sessionTtl: SessionTtlControl,
   sameProject: (cwd: string) => boolean,
   tombstones: TombstoneFile,
+  /** The push wiring (docs/feat/mobile-push.md P8), when this daemon has it. */
+  push?: SessionHostOptions["push"],
 ): Promise<SessionHost> {
   // One skill scan for every session and for a session not created yet
   // (docs/feat/skills-hot-reload.md).
-  const skillScan = createSkillScan(config);
-  // The lock is held: this is THE daemon of the store. Silent, not awaited.
+  const skillScan = createSkillScan(config); // The lock is held: this is THE daemon of the store. Silent, not awaited.
   sweepToolOutput(config);
   const images = daemonImagePolicy(config);
   const sessionHost = new SessionHost({
@@ -363,6 +504,9 @@ async function reloadedHost(
     exposeTurnErrors: true,
     persister,
     sessionTtl,
+    // Its host is the user's own machine, so the session's auto-accept is SHARED
+    // with every device attached (docs/feat/session-auto-accept.md D1).
+    sharedAutoAccept: true,
     identity: { tentacle: APP_VERSION, kind: "serve" },
     modelInfo: { name: config.model, contextWindow: config.contextWindow },
     // ITS OWN model, told to a client for DISPLAY only (a `connect` TUI's ctx
@@ -379,6 +523,11 @@ async function reloadedHost(
     // This daemon runs its own config's model, so it holds the bytes
     // (docs/feat/attachments-prompt.md D4); `undefined` = no image input at all.
     ...(images ? { images } : {}),
+    // Push (docs/feat/mobile-push.md P8): the OBSERVER every session gets, the
+    // store its registrations live in, and what the RPC answers. Absent = no push
+    // (a pod daemon never reaches here, and `push.enabled: false` removes it
+    // before this call) — structurally, nothing to observe.
+    ...(push ? { push } : {}),
   });
   const notice = options.onNotice ?? (() => {});
   let restored = 0;
@@ -491,6 +640,8 @@ function listen(
    * to dial and the store whose `relay.json` holds this daemon's id. Absent = off.
    */
   relay?: { readonly url: string; readonly storeDir: string },
+  /** The push wiring (docs/feat/mobile-push.md P8), when this daemon has it. */
+  push?: ServePush,
 ): ServeHandle {
   const server = startWsServer({
     host: options.host,
@@ -503,6 +654,10 @@ function listen(
     ...(options.onError ? { onError: options.onError } : {}),
     ...(devices ? { devices: { authority: devices } } : {}),
   });
+  // The host exists now, and it must exist before the relay link does (the link
+  // dials only while the authority wants reachability, and the notifier reads
+  // titles through the host).
+  push?.bindHost(sessionHost);
   // The mobile relay's identity, BEFORE the record so the address can go in it:
   // `/d/<id>/e2e` is computed locally (`relayAddress`), so `pair` and the
   // announcement know it before any connection (Design §1). A store that cannot
@@ -564,6 +719,11 @@ function listen(
           ...(options.onError ? { onError: options.onError } : {}),
         })
       : undefined;
+  // The push notifier's sink IS this link (docs/feat/mobile-push.md P8): bound
+  // now, after the link exists, so a push decided at any later moment has a
+  // transport. With no link the sink answers `unavailable` and the register
+  // result says `relay-off` — the app's honest answer, never a silent drop.
+  push?.bindLink(relayLink);
   // Sibling discovery (docs/feat/sibling-discovery.md): ONE driver per process,
   // started with the listener (it needs the BOUND port) and stopped with it,
   // before the record is removed — a stopping daemon must not heartbeat a file

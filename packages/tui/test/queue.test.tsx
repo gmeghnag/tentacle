@@ -5,6 +5,7 @@ import { ToolRegistry } from "@tentacle/tools";
 import { render } from "ink-testing-library";
 import { App } from "../src/App.tsx";
 import { queuedRow } from "./queued-row.ts";
+import { inertSession } from "./session-stub.ts";
 
 const noopEnv: ExecutionEnvironment = {
   id: "noop",
@@ -120,6 +121,7 @@ describe("mid-turn steering reconciliation (RPC delivery failure)", () => {
    */
   function makeController(enqueueImpl: (text: string) => void | Promise<void>) {
     return {
+      ...inertSession(),
       async *send() {
         yield { type: "tool_start", id: "c1", name: "shell", arguments: "" } as const;
         await delay(5000); // hold the turn open so state.running stays true

@@ -23,6 +23,7 @@ import { PermissionBroker, type PermissionRequest } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
 import { ARM_MS } from "../src/permission-reply.ts";
+import { inertSession } from "./session-stub.ts";
 import type { DockTestRow } from "./subagent-row.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -66,6 +67,7 @@ function fake(opts: { agents?: readonly DockTestRow[] } = {}): Fake {
   const prompts: string[] = [];
   const stopped: string[] = [];
   const session = {
+    ...inertSession(),
     async *send(prompt: string, signal?: AbortSignal) {
       prompts.push(prompt);
       yield { type: "text", delta: "working" };

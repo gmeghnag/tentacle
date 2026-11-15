@@ -22,10 +22,12 @@ import {
   addDevice,
   deviceIdOf,
   loadOrCreateIdentity,
+  readPushRegistrations,
   readRegistry,
   readSeen,
   replaceIdentity,
   touchSeen,
+  writePushRegistration,
   writeRegistry,
 } from "@tentacle/daemon";
 import {
@@ -158,6 +160,111 @@ describe("devices", () => {
     expect(result.code).toBe(1);
     expect(result.err.join("")).toContain("registry.json");
     expect(readFileSync(join(configDir, "devices", "registry.json"), "utf8")).toBe("{ nope");
+  });
+});
+
+/**
+ * The push column (docs/feat/mobile-push.md Design 6, P5): `on` for a device
+ * whose registration is usable, `off` otherwise. Read from `devices/push/`, so
+ * it says what the DAEMON will do, not what the phone believes.
+ *
+ * Mutation: print `on` from the registry alone (drop the push read) → a phone
+ * that never registered notifications looks like one that did, which is exactly
+ * the support question this column answers.
+ */
+describe("the push column", () => {
+  const pushKey = (fill: number): string => Buffer.from(key(fill)).toString("base64url");
+
+  const register = (configDir: string, deviceId: string, token = "a".repeat(64)): void => {
+    const written = writePushRegistration(configDir, {
+      deviceId,
+      token,
+      env: "sandbox",
+      key: pushKey(1),
+      registeredAt: 5,
+    });
+    if (!written.ok) throw new Error(written.reason);
+  };
+
+  test("renders `off` for a device that never registered, and `on` for one that did", async () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone", "iPad"]);
+    const [iphone, ipad] = ["iPhone", "iPad"].map((name) => {
+      const registry = readRegistry(configDir);
+      return registry.ok ? registry.registry.devices.find((d) => d.name === name)?.id : undefined;
+    });
+    if (iphone === undefined || ipad === undefined) throw new Error("fixture");
+    register(configDir, iphone);
+    const lines = renderDevices(
+      (() => {
+        const registry = readRegistry(configDir);
+        return registry.ok ? registry.registry.devices : [];
+      })(),
+      new Map(),
+      Date.now(),
+      readPushRegistrations(configDir).registrations,
+    );
+    expect(lines[0]).toContain("PUSH");
+    const rowOf = (name: string) => lines.find((line) => line.startsWith(name)) ?? "";
+    expect(rowOf("iPhone")).toEndWith("on");
+    expect(rowOf("iPad")).toEndWith("off");
+  });
+
+  test("an unreadable registration reads `off`, never `on` (fail closed)", () => {
+    const configDir = newDir();
+    mkdirSync(join(configDir, "devices", "push"), { recursive: true });
+    writeFileSync(
+      join(configDir, "devices", "push", `${"a".repeat(16)}.json`),
+      JSON.stringify({ v: 9 }),
+    );
+    const lines = renderDevices(
+      [{ id: "a".repeat(16), name: "iPhone", publicKey: key(1), pairedAt: 0 }],
+      new Map(),
+      0,
+      readPushRegistrations(configDir).registrations,
+    );
+    expect(lines[1]).toEndWith("off");
+  });
+
+  test("`devices` prints the column for a real store", async () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone"]);
+    const id = deviceIdOf(key(1));
+    register(configDir, id);
+    const result = await run(configDir, devicesCommand);
+    expect(result.code).toBe(0);
+    expect(result.out.join("")).toContain("PUSH");
+    expect(result.out.join("").trimEnd().split("\n")[1]).toEndWith("on");
+  });
+});
+
+describe("reset and push registrations", () => {
+  test("`devices reset` empties `push/` too, including a file whose device is GONE (F13)", async () => {
+    const configDir = newDir();
+    pairDevices(configDir, ["iPhone"]);
+    const id = deviceIdOf(key(1));
+    const pushKey = (fill: number): string => Buffer.from(key(fill)).toString("base64url");
+    for (const [deviceId, token] of [
+      [id, "a".repeat(64)],
+      // A registration left behind by a device revoked by hand (no registry
+      // entry), so `removeDevices` cannot reach it: this is the file that only a
+      // directory-wide clear takes. Mutation: drop `clearPushRegistrations` from
+      // `reset` → this one survives the reset and a reset machine keeps a token.
+      ["9".repeat(16), "b".repeat(64)],
+    ] as const) {
+      const written = writePushRegistration(configDir, {
+        deviceId,
+        token,
+        env: "production",
+        key: pushKey(2),
+        registeredAt: 7,
+      });
+      if (!written.ok) throw new Error(written.reason);
+    }
+    expect(readPushRegistrations(configDir).registrations.size).toBe(2);
+    const result = await run(configDir, resetCommand, { yes: true });
+    expect(result.code).toBe(0);
+    expect(readPushRegistrations(configDir).registrations.size).toBe(0);
   });
 });
 

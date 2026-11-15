@@ -7,6 +7,7 @@ import {
 } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
+import { inertSession } from "./session-stub.ts";
 
 // docs/feat/permission-reply.md: "No, let's talk about it" in the real App —
 // frames via ink-testing-library (AGENTS §6). A session that tells own turns
@@ -17,6 +18,7 @@ const SHIFT_TAB = "\x1b[Z";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const session = (): SessionController => ({
+  ...inertSession(),
   async *send(prompt) {
     yield { type: "text", delta: `reply to ${prompt}` };
     yield { type: "turn_end", reason: "end_turn" };

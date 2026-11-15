@@ -10,6 +10,7 @@ import { describe, expect, test } from "bun:test";
 import { PermissionBroker } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type AppProps, type SessionController } from "../src/App.tsx";
+import { inertSession } from "./session-stub.ts";
 
 const ENTER = "\r";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -17,6 +18,7 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function fake(extra: Partial<SessionController> = {}) {
   const prompts: string[] = [];
   const session = {
+    ...inertSession(),
     async *send(prompt: string) {
       prompts.push(prompt);
       yield { type: "text", delta: `reply to ${prompt}` };

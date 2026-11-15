@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
+import { inertSession } from "./session-stub.ts";
 
 // `run "<prompt>"` (docs/feat/run-prompt.md): the App sends `initialPrompt` once,
 // through the same path as a typed message.
@@ -9,6 +10,7 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function fakeSession(fail = false) {
   const sends: string[] = [];
   const ctrl: SessionController = {
+    ...inertSession(),
     async *send(prompt) {
       sends.push(prompt);
       if (fail) {

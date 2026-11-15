@@ -208,4 +208,112 @@ describe("KubeClient", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("x86_64\n");
   });
+
+  // docs/fix/workload-shell-live.md D3: Bun's WebSocket drops a refused
+  // upgrade's status and body, so the reason is asked for a second time, over
+  // plain HTTP, on the SAME exec URL.
+  describe("execRefusal", () => {
+    /** A client whose HTTP fetch is scripted; `seen` records what it sent. */
+    function refusalClient(reply: () => Promise<Response> | Response) {
+      const seen: Array<{ url: string; init: RequestInit | undefined }> = [];
+      const c = new KubeClient({
+        server: "https://k.example:6443",
+        namespace: NS,
+        token: "secret-token",
+        fetch: ((url: string, init?: RequestInit) => {
+          seen.push({ url, init });
+          return Promise.resolve(reply());
+        }) as unknown as typeof fetch,
+      });
+      return { client: c, seen };
+    }
+
+    const FORBIDDEN = {
+      kind: "Status",
+      apiVersion: "v1",
+      status: "Failure",
+      message: 'pods "p" is forbidden: User "u" cannot create resource "pods/exec"',
+      reason: "Forbidden",
+      code: 403,
+    };
+
+    test("POSTs the same exec URL over http(s), with the container, command and bearer token", async () => {
+      const { client: c, seen } = refusalClient(() => Response.json(FORBIDDEN, { status: 403 }));
+      await c.execRefusal({ pod: "p", container: "etcd", command: ["sh"] });
+
+      expect(seen).toHaveLength(1);
+      const sent = seen[0] as { url: string; init: RequestInit | undefined };
+      expect(sent.init?.method).toBe("POST");
+      expect((sent.init?.headers as Record<string, string>).authorization).toBe(
+        "Bearer secret-token",
+      );
+      // http(s), never ws(s): this request does not upgrade.
+      expect(sent.url.startsWith("https://k.example:6443/api/v1/namespaces/")).toBe(true);
+      expect(sent.url).toContain("/pods/p/exec?");
+      expect(sent.url).toContain("container=etcd");
+      expect(sent.url).toContain("command=sh");
+    });
+
+    test("returns the message of a non-2xx Status (the apiserver's own words)", async () => {
+      const { client: c } = refusalClient(() => Response.json(FORBIDDEN, { status: 403 }));
+      expect(await c.execRefusal({ pod: "p", command: ["sh"] })).toBe(FORBIDDEN.message);
+    });
+
+    test("returns undefined for a 2xx, 'Upgrade request required', a non-Status body, or a dead fetch", async () => {
+      const cases: Array<() => Promise<Response> | Response> = [
+        () => new Response("", { status: 200 }),
+        () =>
+          Response.json(
+            { kind: "Status", status: "Failure", message: "Upgrade request required" },
+            { status: 400 },
+          ),
+        () => new Response("<html>bad gateway</html>", { status: 502 }),
+        () => Promise.reject(new Error("ECONNREFUSED")),
+      ];
+      for (const reply of cases) {
+        const { client: c } = refusalClient(reply);
+        expect(await c.execRefusal({ pod: "p", command: ["sh"] })).toBeUndefined();
+      }
+    });
+
+    test("never throws, whatever the fetch does", async () => {
+      const { client: c } = refusalClient(() => {
+        throw new Error("boom");
+      });
+      await expect(c.execRefusal({ pod: "p", command: ["sh"] })).resolves.toBeUndefined();
+    });
+
+    test("a fetch that never ANSWERS is given up on (bounded, never hangs explain)", async () => {
+      // Review round 1, MEDIUM 3: an apiserver or proxy that accepts the POST and
+      // never replies used to hang `explain` forever. Mutation: drop the
+      // AbortController → this test times out instead of resolving.
+      let aborted = false;
+      const c = new KubeClient({
+        server: "https://k.example:6443",
+        namespace: NS,
+        token: "t",
+        refusalTimeoutMs: 20,
+        fetch: ((_url: string, init?: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              aborted = true;
+              reject(new DOMException("aborted", "AbortError"));
+            });
+          })) as unknown as typeof fetch,
+      });
+
+      const started = Date.now();
+      await expect(c.execRefusal({ pod: "p", command: ["sh"] })).resolves.toBeUndefined();
+      expect(aborted).toBe(true);
+      // It gave up on its OWN deadline, not the test runner's.
+      expect(Date.now() - started).toBeLessThan(2_000);
+    });
+
+    test("the request carries an abort signal even when the apiserver is healthy", async () => {
+      const { client: c, seen } = refusalClient(() => Response.json(FORBIDDEN, { status: 403 }));
+      await c.execRefusal({ pod: "p", command: ["sh"] });
+      const sent = seen[0] as { init: RequestInit | undefined };
+      expect(sent.init?.signal).toBeDefined();
+    });
+  });
 });

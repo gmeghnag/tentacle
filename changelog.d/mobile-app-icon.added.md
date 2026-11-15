@@ -1,0 +1,1 @@
+- **The app has its icon.** The tentacle octopus from tentacle.so on a white background, on the iPhone home screen.

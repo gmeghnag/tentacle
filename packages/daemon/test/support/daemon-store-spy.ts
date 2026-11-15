@@ -109,6 +109,7 @@ export function filesOf(record: Fixture): SessionFiles {
     ...(record.turn ? { turn: record.turn } : {}),
     ...(record.archivedAt !== undefined ? { archivedAt: record.archivedAt } : {}),
     ...(record.head !== undefined ? { head: record.head } : {}),
+    ...(record.autoAccept === true ? { autoAccept: true } : {}),
   };
   return {
     log:
@@ -360,6 +361,7 @@ export class SpyDaemonStore implements DaemonStore {
       ...(s.turn ? { turn: s.turn } : {}),
       ...(s.archivedAt !== undefined ? { archivedAt: s.archivedAt } : {}),
       ...(s.head !== undefined ? { head: s.head } : {}),
+      ...(s.autoAccept === true ? { autoAccept: true } : {}),
       logged,
       logHead: s.logHead,
       paired: true,

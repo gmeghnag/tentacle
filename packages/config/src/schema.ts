@@ -8,6 +8,16 @@
 import { z } from "zod";
 import { modelRefIssues } from "./models.ts";
 
+/**
+ * The largest `push.graceSeconds` (one hour). The same NUMBER is
+ * `@tentacle/protocol`'s `PUSH_GRACE_MAX_SECONDS`, which this package cannot
+ * import (it depends on zod alone); `config/test/push-config.test.ts` pins the
+ * two against each other, so a drift is red rather than silent.
+ */
+export const PUSH_GRACE_MAX_SECONDS = 3_600;
+/** The default grace a `serve` applies when neither the file nor a flag sets one. */
+export const DEFAULT_PUSH_GRACE_SECONDS = 30;
+
 export const ModelConfigSchema = z
   .object({
     /**
@@ -376,6 +386,18 @@ const settingsShape = {
     .strict()
     .optional(),
   /**
+   * Workload shell (docs/fix/workload-shell-live.md, owner decision 1): the
+   * agent may open a stateful `sh` on ANOTHER workload with `workload_shell`.
+   * Default: DISABLED — it reaches the user's kubeconfig / docker endpoint.
+   */
+  workloadShell: z
+    .object({
+      /** Default: disabled. */
+      tool: z.boolean().optional(),
+    })
+    .strict()
+    .optional(),
+  /**
    * Auto-wake: when a background job exits while the agent is idle, start a
    * continuation turn so it reacts without a user prompt. Default: enabled.
    */
@@ -422,6 +444,25 @@ const settingsShape = {
    */
   relay: z
     .object({ enabled: z.boolean().optional(), url: z.string().optional() })
+    .strict()
+    .optional(),
+  /**
+   * Push notifications (docs/feat/mobile-push.md Design 6): `enabled` (default
+   * true) lets a `serve` push to its paired phones; `graceSeconds` (default 30,
+   * range 0–3600) is how long an unanswered permission request waits before a
+   * phone is buzzed. `serve --push-grace <seconds>` overrides the second. Push
+   * needs the relay link: `--no-relay` / `relay.enabled: false` mean no push at
+   * all. LAPTOP-ONLY: never carried to a pod (a pod daemon holds no token).
+   */
+  push: z
+    .object({
+      enabled: z.boolean().optional(),
+      // The bounds are `@tentacle/protocol`'s `PUSH_GRACE_MAX_SECONDS` (3600):
+      // this package depends on zod only, so the number is repeated here and the
+      // agreement is PINNED by a test (`config/test/push-config.test.ts`), not
+      // left to two files to drift.
+      graceSeconds: z.number().int().min(0).max(PUSH_GRACE_MAX_SECONDS).optional(),
+    })
     .strict()
     .optional(),
   /**

@@ -26,6 +26,12 @@ import {
   ProgressParamsSchema,
 } from "./model.ts";
 import { ResolvePermissionParamsSchema, ResolvePermissionResultSchema } from "./permission.ts";
+import {
+  DevicePushRegisterParamsSchema,
+  DevicePushRegisterResultSchema,
+  DevicePushUnregisterParamsSchema,
+  DevicePushUnregisterResultSchema,
+} from "./push.ts";
 import { LogParamsSchema, LogResultSchema } from "./session-log.ts";
 import {
   AgentKillParamsSchema,
@@ -62,6 +68,8 @@ import {
   SessionContextResultSchema,
   SessionListParamsSchema,
   SessionListResultSchema,
+  SetAutoAcceptParamsSchema,
+  SetAutoAcceptResultSchema,
   SnapshotParamsSchema,
   SnapshotResultSchema,
   SubagentMessageParamsSchema,
@@ -93,6 +101,8 @@ export const Method = {
   Clear: "session/clear",
   /** Apply a laptop's settings to a live session, between turns (docs/feat/session-settings-apply.md). */
   UpdateSettings: "session/update_settings",
+  /** The session's auto-accept, on or off, for every client (docs/feat/session-auto-accept.md). */
+  SetAutoAccept: "session/set_auto_accept",
   Snapshot: "session/snapshot",
   /** The session's committed history as a typed event log, after a position (docs/feat/session-log.md). */
   Log: "session/log",
@@ -143,6 +153,15 @@ export const Method = {
    * (docs/feat/device-pairing.md 9c). Reachable only on a pairing connection.
    */
   DevicePair: "device/pair",
+  /**
+   * A paired device registers where to be PUSHED: its raw APNs token, its
+   * environment and its per-device push key (docs/feat/mobile-push.md Design 3).
+   * Device principal only; an older daemon answers `MethodNotFound`, which the
+   * app shows as "update tentacle on <computer>".
+   */
+  DevicePushRegister: "device/push_register",
+  /** Withdraw that registration (the app's Notifications toggle off). */
+  DevicePushUnregister: "device/push_unregister",
 } as const;
 export type MethodName = (typeof Method)[keyof typeof Method];
 
@@ -179,6 +198,10 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.UpdateSettings]: {
     params: UpdateSettingsParamsSchema,
     result: UpdateSettingsResultSchema,
+  },
+  [Method.SetAutoAccept]: {
+    params: SetAutoAcceptParamsSchema,
+    result: SetAutoAcceptResultSchema,
   },
   [Method.Snapshot]: { params: SnapshotParamsSchema, result: SnapshotResultSchema },
   [Method.Log]: { params: LogParamsSchema, result: LogResultSchema },
@@ -227,6 +250,14 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     result: AttachmentPutResultSchema,
   },
   [Method.DevicePair]: { params: DevicePairParamsSchema, result: DevicePairResultSchema },
+  [Method.DevicePushRegister]: {
+    params: DevicePushRegisterParamsSchema,
+    result: DevicePushRegisterResultSchema,
+  },
+  [Method.DevicePushUnregister]: {
+    params: DevicePushUnregisterParamsSchema,
+    result: DevicePushUnregisterResultSchema,
+  },
 };
 
 /** params schema for every notification method. */

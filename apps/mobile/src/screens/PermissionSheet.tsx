@@ -13,7 +13,16 @@
  * `perm-returned-dismiss`.
  */
 import type { JSX } from "react";
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import {
   type OptionPill,
   type PermissionSheet,
@@ -109,6 +118,10 @@ export function PermissionSheetView({
   // options stayed dimmed and `disabled` for ever.
   const asking = state.kind === "asking" ? state : null;
   const returned = state.kind === "returned" ? state : null;
+  // The session's shared auto-accept (docs/feat/session-auto-accept.md D6). Its
+  // VALUE is read here and now: the controller re-emits on the link's own change
+  // (a flip from the laptop arrives that way), so no timer lives in the screen.
+  const link = sheet.autoAccept;
   return (
     <Modal
       visible={asking !== null || returned !== null}
@@ -149,6 +162,13 @@ export function PermissionSheetView({
                 {`Asked by ${asking.agent.type}: ${asking.agent.description}`}
               </Text>
             )}
+            {asking.alsoAsked.length === 0 ? null : (
+              <Text testID="perm-also-asked" style={[typography.footnote, { color: palette.sec }]}>
+                {asking.alsoAsked.length === 1
+                  ? `Also asked on ${asking.alsoAsked[0]} · the first answer wins`
+                  : `Also asked on ${asking.alsoAsked[0]} (+${asking.alsoAsked.length - 1}) · the first answer wins`}
+              </Text>
+            )}
             <View style={styles.options}>
               {asking.options.map((option) => {
                 const look = optionStyle(option.optionId);
@@ -168,6 +188,29 @@ export function PermissionSheetView({
                 );
               })}
             </View>
+            {link === null ? null : (
+              <View style={[styles.autoRow, { borderTopColor: palette.sepSheet }]}>
+                <View style={styles.flex}>
+                  <Text style={[typography.subhead, { color: palette.label }]}>Auto-accept</Text>
+                  <Text style={[typography.footnote, { color: palette.sec }]}>
+                    {link.shared()
+                      ? "This session, on every device"
+                      : "Not shared by this computer — update tentacle"}
+                  </Text>
+                </View>
+                <Switch
+                  testID="perm-auto-accept"
+                  accessibilityLabel="Auto-accept for this session, on every device"
+                  value={link.current()}
+                  disabled={!link.shared()}
+                  // The session's link: every device follows, and it is never a
+                  // stored approval (each ask is answered `allow_once`).
+                  onValueChange={(on) => {
+                    void link.set(on)?.catch(() => {});
+                  }}
+                />
+              </View>
+            )}
             {asking.replyText === "" && asking.request.reply === undefined ? null : (
               <TextInput
                 testID="perm-reply-input"
@@ -204,6 +247,11 @@ export function PermissionSheetView({
             )}
           </>
         )}
+        {sheet.autoAccepted === null ? null : (
+          <Text testID="perm-auto-accepted" style={[typography.footnote, { color: palette.sec }]}>
+            {sheet.autoAccepted}
+          </Text>
+        )}
         {returned === null ? null : (
           <>
             <Text testID="perm-returned" style={[typography.headline, { color: palette.red }]}>
@@ -237,6 +285,14 @@ export const SHEET_OPTION_IDS: readonly SheetOptionId[] = [
 ];
 
 const styles = StyleSheet.create({
+  autoRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: 12,
+    marginTop: 4,
+  },
   flex: { flex: 1 },
   center: { textAlign: "center" },
   sheet: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 40, gap: 16 },

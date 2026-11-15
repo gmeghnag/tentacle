@@ -65,6 +65,13 @@ export const REGISTRY_FILENAME = "registry.json";
 export const REGISTRY_LOCK_FILENAME = "registry.lock";
 export const SEEN_DIR = "seen";
 export const PAIRING_DIR = "pairing";
+/**
+ * `<configDir>/devices/push` — one file per device's push registration
+ * (docs/feat/mobile-push.md P5, written by `push-store.ts`). Declared HERE, with
+ * the rest of the layout, so `removeDevices` can drop a revoked device's file
+ * without importing the store that writes it (the dependency runs one way).
+ */
+export const PUSH_DIR = "push";
 /** `<configDir>/daemons` — one record per running `serve` (task 10 builds siblings on them). */
 export const DAEMONS_DIR = "daemons";
 /** A pairing window: five minutes, single use (F1, F6). */
@@ -633,8 +640,11 @@ export function removeDevices(configDir: string, ids: readonly string[]): Remove
     writeAtomic(path, serializeRegistry(registry));
     // `seen/<id>` goes with the entry: a revoked device must not leave a
     // "last seen" line behind that looks like a device (a re-pair re-creates it).
+    // Its push registration goes too (mobile-push F14): a revoked phone must not
+    // be pushed to, and the push-time authority check is the second half of that.
     for (const device of removed) {
       rmSync(join(dir, SEEN_DIR, device.id), { force: true });
+      rmSync(join(dir, PUSH_DIR, `${device.id}.json`), { force: true });
     }
     return { ok: true, removed, registry };
   } catch (error) {

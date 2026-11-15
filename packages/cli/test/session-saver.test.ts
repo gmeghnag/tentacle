@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { SessionRecord } from "@tentacle/agent";
 import { LogSessionStore } from "@tentacle/daemon";
 import { SessionSaver, nextSaveState } from "../src/session-saver.ts";
+import { recordWrite } from "./session-fixture.ts";
 
 let dir: string;
 beforeAll(async () => {
@@ -63,7 +64,7 @@ describe("nextSaveState", () => {
 
 describe("SessionSaver", () => {
   test("a failing store is reported once, recovers loudly, and never leaks an unhandled rejection", async () => {
-    // Mutation: make `save` a bare `void this.store.save(record)` → the spy fires.
+    // Mutation: make `write` a bare `void this.store.write(update)` → the spy fires.
     const unhandled: unknown[] = [];
     const onUnhandled = (reason: unknown): void => {
       unhandled.push(reason);
@@ -74,18 +75,18 @@ describe("SessionSaver", () => {
       const notices: string[] = [];
       const saver = new SessionSaver(store, (t) => notices.push(t));
       control.failing = new Error("EACCES: permission denied");
-      saver.save(rec("s1", 1));
+      saver.write(recordWrite(rec("s1", 1)));
       expect(await saver.drain()).toEqual([
         `[session] not saved: s1 — couldn't write ${join(dir, "flaky", "s1.jsonl")}: EACCES: permission denied (any file on disk is from an earlier save)\n`,
       ]);
-      saver.save(rec("s1", 2)); // still failing: silent
+      saver.write(recordWrite(rec("s1", 2))); // still failing: silent
       await saver.drain();
       expect(notices).toHaveLength(1);
       expect(notices[0]).toContain("Session s1 not saved — couldn't write");
       expect(notices[0]).toContain("s1.jsonl: EACCES: permission denied.");
 
       control.failing = null;
-      saver.save(rec("s1", 3));
+      saver.write(recordWrite(rec("s1", 3)));
       expect(await saver.drain()).toEqual([]);
       expect(notices[1]).toBe("Session s1 saved again.");
       const loaded = await store.load("s1");
@@ -103,10 +104,10 @@ describe("SessionSaver", () => {
     const notices: string[] = [];
     const saver = new SessionSaver(store, (t) => notices.push(t));
     control.failing = new Error("ENOSPC");
-    saver.save(rec("old", 1));
+    saver.write(recordWrite(rec("old", 1)));
     await saver.drain();
     control.failing = null;
-    saver.save(rec("new", 2));
+    saver.write(recordWrite(rec("new", 2)));
     const lines = await saver.drain();
     expect(notices).toHaveLength(1);
     expect(lines).toEqual([
@@ -117,7 +118,7 @@ describe("SessionSaver", () => {
   test("drain waits for a save submitted just before it (no sleep needed)", async () => {
     const { store } = flakyStore("drain");
     const saver = new SessionSaver(store, () => {});
-    saver.save(rec("d", 7));
+    saver.write(recordWrite(rec("d", 7)));
     await saver.drain();
     const loaded = await store.load("d");
     expect(loaded.status === "ok" ? loaded.record.messages : null).toEqual(rec("d", 7).messages);
@@ -128,13 +129,12 @@ describe("SessionSaver", () => {
     // write fails late. Mutation: return before waiting → no line.
     const saver = new SessionSaver(
       {
-        write: async () => {},
-        saveSnapshot: () => Bun.sleep(20).then(() => Promise.reject(new Error("late EIO"))),
+        write: () => Bun.sleep(20).then(() => Promise.reject(new Error("late EIO"))),
         remove: async () => {},
       },
       () => {},
     );
-    saver.save(rec("late", 1));
+    saver.write(recordWrite(rec("late", 1)));
     expect(await saver.drain()).toEqual([
       "[session] not saved: late — late EIO (any file on disk is from an earlier save)\n",
     ]);
@@ -143,13 +143,12 @@ describe("SessionSaver", () => {
   test("a hung save: drain says it is waiting, then gives up and reports it — never hangs", async () => {
     const saver = new SessionSaver(
       {
-        write: async () => {},
-        saveSnapshot: () => new Promise<void>(() => {}),
+        write: () => new Promise<void>(() => {}),
         remove: async () => {},
       },
       () => {},
     );
-    saver.save(rec("hung", 1));
+    saver.write(recordWrite(rec("hung", 1)));
     const slow: string[][] = [];
     const started = Date.now();
     const lines = await saver.drain({
@@ -165,11 +164,8 @@ describe("SessionSaver", () => {
   });
 
   test("a fast drain neither calls onSlow nor waits for the timeout", async () => {
-    const saver = new SessionSaver(
-      { write: async () => {}, saveSnapshot: async () => {}, remove: async () => {} },
-      () => {},
-    );
-    saver.save(rec("fast", 1));
+    const saver = new SessionSaver({ write: async () => {}, remove: async () => {} }, () => {});
+    saver.write(recordWrite(rec("fast", 1)));
     let slowCalls = 0;
     const started = Date.now();
     expect(await saver.drain({ timeoutMs: 5_000, slowMs: 50, onSlow: () => slowCalls++ })).toEqual(
@@ -186,7 +182,7 @@ describe("SessionSaver", () => {
       throw new Error("listener broke");
     });
     control.failing = new Error("EROFS");
-    saver.save(rec("b", 1));
+    saver.write(recordWrite(rec("b", 1)));
     expect(await saver.drain()).toHaveLength(1);
   });
 
@@ -203,7 +199,7 @@ describe("SessionSaver", () => {
     expect(await saver.drain()).toEqual([
       "[session] not saved: abcdef0123 — again (any file on disk is from an earlier save)\n",
     ]);
-    saver.save(rec("abcdef0123", 2));
+    saver.write(recordWrite(rec("abcdef0123", 2)));
     expect(await saver.drain()).toEqual([]);
     expect(notices.at(-1)).toBe("Session abcdef01 saved again.");
   });
@@ -214,12 +210,12 @@ describe("SessionSaver", () => {
     const { store, control } = flakyStore("removed");
     const notices: string[] = [];
     const saver = new SessionSaver(store, (t) => notices.push(t));
-    saver.save(rec("gone", 1));
+    saver.write(recordWrite(rec("gone", 1)));
     saver.remove("gone");
-    saver.save(rec("gone", 2)); // a turn's late save
+    saver.write(recordWrite(rec("gone", 2))); // a turn's late save
     expect(await saver.drain()).toEqual([]);
     expect((await store.load("gone")).status).toBe("absent");
-    saver.save(rec("late", 1));
+    saver.write(recordWrite(rec("late", 1)));
     saver.remove("late");
     control.failing = new Error("EIO"); // the save in flight fails after the remove
     saver.failed("late", "could not read the history back"); // the deleted session's read
@@ -229,7 +225,6 @@ describe("SessionSaver", () => {
     const broken = new SessionSaver(
       {
         write: async () => {},
-        saveSnapshot: async () => {},
         remove: () => Promise.reject(new Error("EACCES")),
       },
       (t) => notices.push(t),
@@ -281,7 +276,6 @@ describe("image blobs (docs/feat/attachments-durable.md T6)", () => {
     const saver = new SessionSaver(
       {
         write: async () => {},
-        saveSnapshot: async () => {},
         remove: async () => {},
         putBlob: async () => {
           throw new Error("ENOSPC");

@@ -85,6 +85,18 @@ describe("auto-accept answers only my own turns (C5, owner Q3)", () => {
     expect(autoApproves(tool, false)).toBe(false);
     expect(autoApproves({ ...tool, kind: "hooks_trust" }, true)).toBe(false);
   });
+
+  // docs/feat/session-hop-ux OD4: auto-accept answers a `session_hop` ONLY when the
+  // LAPTOP's own rule marked it (`hopAuto`, set from `hopAutoAcceptable` — never by
+  // a daemon, which cannot reach this field at all).
+  test("a session_hop is answered only when the laptop marked it hopAuto", () => {
+    const hop = { ...tool, kind: "session_hop" as const };
+    // Mutation: `return true` unconditionally → the first row flips.
+    expect(autoApproves(hop, true)).toBe(false);
+    expect(autoApproves({ ...hop, hopAuto: true }, true)).toBe(true);
+    // Still never a FOREIGN turn's move: `own` outranks the marker.
+    expect(autoApproves({ ...hop, hopAuto: true }, false)).toBe(false);
+  });
   test("ownRequest: no session decides → mine; under one, only a turn it owns (none → not mine)", () => {
     const owns = (id: string) => id === "own";
     expect(ownRequest(undefined, undefined)).toBe(true);
