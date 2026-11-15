@@ -32,11 +32,12 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { CameraView } from "../camera-access.ts";
 import { sasGroups } from "../computer-status.ts";
 import type { PairingView } from "../pairing-flow.ts";
-import { MONO, type Palette, size as SIZE, radius, space, typography } from "../theme.ts";
+import { type Palette, size as SIZE, radius, space, typography } from "../theme.ts";
 import { Banner } from "../ui/Banner.tsx";
 import { GlassButton } from "../ui/GlassButton.tsx";
 import { GroupedCard } from "../ui/GroupedCard.tsx";
 import { Icon } from "../ui/Icon.tsx";
+import { InlineMono } from "../ui/InlineMono.tsx";
 import { PillButton } from "../ui/PillButton.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { SectionHeader } from "../ui/SectionHeader.tsx";
@@ -160,8 +161,11 @@ export function PairScreen({
                     Scan the QR code
                   </Text>
                   <Text style={[typography.subhead, styles.center, { color: palette.sec }]}>
-                    Run <Text style={{ fontFamily: MONO }}>tentacle pair</Text> on the computer,
-                    then point this phone at the code it shows.
+                    Run{" "}
+                    <InlineMono palette={palette} size={typography.subhead.fontSize}>
+                      tentacle pair
+                    </InlineMono>{" "}
+                    on your computer and point the camera at the QR code.
                   </Text>
                   {againName === undefined ? null : (
                     <Text
@@ -235,7 +239,8 @@ export function PairScreen({
                   <PillButton
                     testID="pair-paste-submit"
                     palette={palette}
-                    kind="secondary"
+                    kind={view.submit === "ready" ? "secondary" : "neutral"}
+                    disabled={view.submit === "empty"}
                     label="Continue"
                     onPress={onSubmit}
                   />
@@ -415,7 +420,9 @@ const styles = StyleSheet.create({
   insetBlock: { paddingHorizontal: space.inset },
   center: { textAlign: "center" },
   stretch: { alignSelf: "stretch", marginTop: 6 },
-  hero: { alignItems: "center", gap: 8, padding: space.cardInner + 4 },
+  // ONE inner gutter for both intake cards (P3): the Scan button, the paste
+  // field and "Continue" share their left and right edges.
+  hero: { alignItems: "center", gap: 8, padding: space.cardInner },
   heroTile: {
     width: SIZE.iconTileLarge + 12,
     height: SIZE.iconTileLarge + 12,

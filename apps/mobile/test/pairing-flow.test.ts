@@ -72,6 +72,22 @@ const noDial = async (): Promise<DuplexChannel> => {
   throw new ChannelError("unreachable", "no route");
 };
 
+describe("the paste field's Continue (visual review 1, P1)", () => {
+  test("reads empty / unparsed / ready from the field (mutation: always ready → red)", () => {
+    const viewFor = (text: string) =>
+      pairingView(reduce(initialState(), { type: "text", text })).submit;
+    expect(pairingView(initialState()).submit).toBe("empty");
+    expect(viewFor("   \n")).toBe("empty");
+    expect(viewFor("tentacle://nope")).toBe("unparsed");
+    expect(viewFor(payloadText())).toBe("ready");
+  });
+
+  test("a tap on the empty field's disabled Continue changes nothing (mutation: parse '' → red)", () => {
+    const empty = reduce(initialState(), { type: "text", text: "  " });
+    expect(reduce(empty, { type: "submit" })).toBe(empty);
+  });
+});
+
 describe("the pairing reducer", () => {
   test("garbage text fails at intake and NEVER calls the runner (mutation: dial anyway → red)", async () => {
     let state: PairingState = reduce(initialState(), { type: "text", text: "tentacle://nope" });

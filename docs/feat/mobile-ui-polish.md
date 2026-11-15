@@ -1389,6 +1389,39 @@ device. To verify: fix `_unlock` on iOS 26, then `bun run e2e:mobile --ios 26`
 `bun test` 10108 pass, 4 skip (opt-in), 0 fail. No schema change (no
 `protocol.json` regen, no `protocol.d/` note).
 
+### Visual fix round 2 (slice 6, after `slice-6/visual-review-1.md`)
+
+- **F2 dark mode:** the generated `ios/tentacle/Info.plist` had
+  `UIUserInterfaceStyle = Light` (read, line 109–110) because `app.json` had no
+  `userInterfaceStyle`; added `"userInterfaceStyle": "automatic"`. Guard in
+  `theme.test.ts` (red on the old `app.json`, green now). Takes effect at the next
+  prebuild (the harness prebuilds every run).
+- **F1/F3 `_unlock` on iOS 26:** the system Face ID sheet hides the app, so the
+  old "assert `lock-screen` visible, match, assert it gone" hung on the first step
+  and would pass the last one vacuously. `_unlock.yaml` now keys on the positive
+  signal `app-content` (`LockGate`'s wrapper id once unlocked; `locked-content`,
+  hidden, before): it re-posts `pearl.match` up to 8× until `app-content` is
+  visible, then asserts `lock-screen` gone. `computers-list` is still asserted
+  hidden first. Flows 18–20 still assert `lock-screen` visible directly and will
+  hit the same sheet on iOS 26 — not changed here.
+- **P1:** `pairingView` carries `submit: "empty" | "unparsed" | "ready"`
+  (`pasteSubmit`, pure); Continue is disabled (`fill`, label at 0.5) when empty,
+  neutral when unparsed (still pressable so the payload error explains why), tinted
+  only when the line parses. `submit` on an empty field is now a no-op. Disabled
+  `PillButton`s draw their content at 0.5 everywhere. Tests red on the old module.
+- **P2:** new `ui/InlineMono.tsx` (label colour, 1 pt under the sentence), used on
+  Pair and on the Computers empty hint.
+- **P3:** both intake cards use `space.cardInner` (16).
+- **P4:** body copy is the mockup's sentence.
+- **P5 / all screenshots:** not taken — simulator commands need an approval this
+  run did not have. Still owed: F1's full set light + dark, Lock unobstructed (F3),
+  keyboard-up Pair (P5), iPad.
+
+**Gate:** `bun test apps/mobile` 1024 pass, 0 fail · `bunx tsc -p apps/mobile`
+clean · `bun run lint` 1420 files, 0 issues.
+
+*— claude-opus-5-5, 2026-11-15*
+
 ## Review
 
 ### Slice 0 — adversarial review (fresh context)

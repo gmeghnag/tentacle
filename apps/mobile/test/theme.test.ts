@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { type Palette, darkPalette, lightPalette } from "../src/theme.ts";
 
 /**
@@ -92,5 +94,17 @@ describe("theme tokens (aliases removed in Slice 6)", () => {
     for (const palette of [lightPalette, darkPalette]) {
       expect(palette.code).not.toBe(palette.fill);
     }
+  });
+});
+
+describe("the dark palette can be reached on a device", () => {
+  test("app.json lets iOS follow the system appearance (visual review 1, F2)", () => {
+    // Without `userInterfaceStyle`, Expo writes `UIUserInterfaceStyle = Light`
+    // into Info.plist, `useColorScheme()` then always answers `light`, and every
+    // dark token above is unreachable: the dark simulator shots came out light.
+    const config = JSON.parse(readFileSync(join(import.meta.dir, "..", "app.json"), "utf8")) as {
+      expo?: { userInterfaceStyle?: unknown };
+    };
+    expect(config.expo?.userInterfaceStyle).toBe("automatic");
   });
 });

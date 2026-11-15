@@ -27,12 +27,13 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { ComputerRow } from "../computer-rows.ts";
 import { computerStatus, menuActions } from "../computer-status.ts";
-import { DENSE_FONT_SCALE, MONO, type Palette, size as SIZE, space, typography } from "../theme.ts";
+import { DENSE_FONT_SCALE, type Palette, size as SIZE, space, typography } from "../theme.ts";
 import { ActionSheet, type SheetAction } from "../ui/ActionSheet.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { GlassButton } from "../ui/GlassButton.tsx";
 import { GroupedCard } from "../ui/GroupedCard.tsx";
 import { Icon } from "../ui/Icon.tsx";
+import { InlineMono } from "../ui/InlineMono.tsx";
 import { Row } from "../ui/Row.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
@@ -149,9 +150,15 @@ export function ComputersScreen({
             />
           </GroupedCard>
           <Text style={[typography.footnote, styles.hint, { color: palette.sec }]}>
-            Run <Text style={{ fontFamily: MONO }}>tentacle pair</Text> on the computer. Its
-            projects show up here as soon as{" "}
-            <Text style={{ fontFamily: MONO }}>tentacle serve</Text> runs in them.
+            Run{" "}
+            <InlineMono palette={palette} size={typography.footnote.fontSize}>
+              tentacle pair
+            </InlineMono>{" "}
+            on the computer. Its projects show up here as soon as{" "}
+            <InlineMono palette={palette} size={typography.footnote.fontSize}>
+              tentacle serve
+            </InlineMono>{" "}
+            runs in them.
           </Text>
         </View>
       </ScrollView>
