@@ -38,7 +38,9 @@ export interface VoiceConfig {
  * object is the only source of truth for what a user actually gets.
  */
 export const VOICE_DEFAULTS: VoiceConfig = {
-  enabled: true,
+  // OFF by default (feat/voice-off-by-default): a voice feature is an opt-in,
+  // `voice.enabled: true` turns Ctrl+R dictation back on.
+  enabled: false,
   key: "ctrl+r",
   language: "auto",
   engine: "apple",
@@ -204,6 +206,15 @@ export function voiceInit(
     available: true,
   },
 ): VoiceModel {
+  // A config that says `voice.enabled: false` is unavailable whatever the host
+  // says: the reducer holds the config, so "off" can never reach `spawn` even if
+  // a caller forgets to fold `enabled` into the availability it passes. It also
+  // keeps the notice honest — "off over SSH" would be a lie when voice is off.
+  const unavailable: VoiceUnavailableReason | null = !config.enabled
+    ? "disabled"
+    : availability.available
+      ? null
+      : (availability.reason ?? "disabled");
   return {
     config,
     phase: "idle",
@@ -221,14 +232,18 @@ export function voiceInit(
     device: null,
     ready: false,
     crashes: [],
-    unavailable: availability.available ? null : (availability.reason ?? "disabled"),
+    unavailable,
     saidUnavailable: false,
   };
 }
 
 /** How the strip and the notices word a reason. */
 export function unavailableNotice(reason: VoiceUnavailableReason): string {
-  if (reason === "disabled") return "voice dictation is off (config: voice.enabled false)";
+  // The disabled notice must say how to turn it back on: off is the DEFAULT now,
+  // so a bare "it is off" would leave a user with no way to discover the switch.
+  if (reason === "disabled") {
+    return 'voice is off — set "voice": { "enabled": true } in the config';
+  }
   if (reason === "platform") return "voice works in a local terminal on the Mac";
   return "voice works in a local terminal on the Mac (it is off over SSH)";
 }

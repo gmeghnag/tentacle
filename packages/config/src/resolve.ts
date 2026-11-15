@@ -187,7 +187,7 @@ export interface ResolvedConfig {
   readonly tui?: { readonly theme?: "auto" | "dark" | "light" | undefined };
   /** The laptop's session-log settings (file or profile); absent = defaults (`keepSuperseded` false). */
   readonly sessions?: { readonly keepSuperseded?: boolean | undefined };
-  /** Voice dictation (file or profile); absent = enabled, Ctrl+R, `auto`, no auto-stop. */
+  /** Voice dictation (file or profile); absent = OFF, Ctrl+R, `auto`, no auto-stop. */
   readonly voice?: {
     readonly enabled?: boolean | undefined;
     readonly key?: string | undefined;

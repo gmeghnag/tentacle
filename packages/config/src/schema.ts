@@ -449,11 +449,16 @@ const settingsShape = {
    * engine is Apple's built-in on-device recogniser; `parakeet` is the opt-in
    * alternative and needs a one-time `tentacle voice setup` download). LAPTOP-ONLY
    * and input-only: never carried to a pod, and no audio ever leaves the Mac or
-   * is written to disk. Absent: enabled, Ctrl+R, `auto` language, auto-stop off.
+   * is written to disk. Absent: OFF, Ctrl+R, `auto` language, auto-stop off —
+   * `voice: { "enabled": true }` turns the terminal's voice features on.
    */
   voice: z
     .object({
-      /** Off turns the key into a no-op notice; the helper is never spawned. */
+      /**
+       * Off by DEFAULT (feat/voice-off-by-default): `true` turns the terminal's
+       * voice features on. While off the key is a one-line notice and the helper
+       * is never spawned.
+       */
       enabled: z.boolean().optional(),
       /** The toggle key, in the TUI's `ctrl+<letter>` spelling. */
       key: z

@@ -353,6 +353,23 @@ describe("T2b: the defaults `resolveConfig` does not apply are exactly the CLI's
   });
 });
 
+describe("feat/voice-off-by-default: the documented default is OFF, and says how to turn it on", () => {
+  test("`voice.enabled` documents `false` — absent means OFF", () => {
+    // Mutation: `default: () => true` → red. The README's table row is generated
+    // from this, and T2b already pins that the TUI's `VOICE_DEFAULTS` owns the
+    // value, so the two must agree: a doc promising `true` describes a feature
+    // the user does not have.
+    expect(renderDefault(docOf("voice.enabled"))).toBe("false");
+  });
+
+  test("the entry's prose names the opt-in, not just the switch", () => {
+    const doc = docOf("voice.enabled");
+    const prose = `${doc.summary} ${doc.details ?? ""}`;
+    expect(prose).toContain('"enabled": true');
+    expect(prose).toContain("Off by default");
+  });
+});
+
 describe("T3: every documented env var really is read", () => {
   const withDefault = baseEntries().filter(
     ([, doc]) => doc.env !== undefined && doc.sourceKey !== undefined,
