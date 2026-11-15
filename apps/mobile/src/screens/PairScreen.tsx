@@ -40,6 +40,7 @@ import { Banner } from "../ui/Banner.tsx";
 import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
 import { GlassButton } from "../ui/GlassButton.tsx";
 import { GroupedCard } from "../ui/GroupedCard.tsx";
+import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { InlineMono } from "../ui/InlineMono.tsx";
 import { PillButton } from "../ui/PillButton.tsx";
@@ -172,7 +173,7 @@ export function PairScreen({
           title={title}
           left={
             onBack === undefined ? undefined : (
-              <GlassButton
+              <HeaderIcon
                 testID="pair-back"
                 palette={palette}
                 label="Cancel"
