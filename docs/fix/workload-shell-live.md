@@ -415,3 +415,13 @@ outputs above.
 ## Review
 
 *— (pending)*
+
+
+#### Owner decisions added after the plan (2026-11-15 02:00–02:06) — binding, part of THIS fix
+
+1. **`workload_shell` is DISABLED by default**: not offered to the model unless the config enables it, same shape as `move_session` (`sessionHop.tool: true`, docs/feat/session-hop-ux.md decision 8) — e.g. `workloadShell.tool: true`; documented in the config reference and `tentacle config list`. Tests: default → tool absent from the model's tool list; enabled → present.
+2. **Cause confirmed live**: on the 5-container pod every call without `target.container` fails; with `"container":"etcd"` it works (0.1–0.2 s). On a single-container pod it works without one.
+3. **New bug (sentinel leak)**: the FIRST command of a fresh shell on `etcd-guard-…` (`hostname`) returned `guard-3a6ec32139722234d98bed4f29e301189cef109a-end` instead of the hostname — the delimiter leaked into the output or the parser cut the real output. Reproduce with the fake exec, fix, and assert a command's output never contains the delimiter.
+4. **Restore the working directory on reconnect** (orchestrator, low risk): when a dead shell is reopened, `cd` back to the last known cwd and say so in the result; environment variables are NOT replayed (they may hold secrets).
+
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
