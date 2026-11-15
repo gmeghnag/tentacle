@@ -413,3 +413,65 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
     },
   };
 }
+
+/** The sheet's 50 pt pill kinds (mockup `Approval`; `PillButton`'s own names). */
+export type OptionPill = "primary" | "secondary" | "destructive" | "neutral";
+
+export interface OptionStyle {
+  readonly pill: OptionPill;
+  /** An SF Symbol beside the label, or none. */
+  readonly icon: "bubble.left" | null;
+}
+
+const OPTION_STYLE: Readonly<Record<string, OptionStyle>> = {
+  allow_once: { pill: "primary", icon: null },
+  allow_always: { pill: "secondary", icon: null },
+  reject_once: { pill: "destructive", icon: null },
+  reply: { pill: "neutral", icon: "bubble.left" },
+};
+
+/**
+ * How an answer LOOKS, by the option id the daemon sent (Slice 4): allow once is
+ * the filled primary, allow always the tinted one, deny destructive, reply
+ * neutral with a speech bubble. An id this build does not know is neutral — it
+ * is still shown, in the daemon's order, never dropped.
+ */
+export function optionStyle(optionId: string): OptionStyle {
+  return OPTION_STYLE[optionId] ?? { pill: "neutral", icon: null };
+}
+
+export interface LabelRun {
+  readonly text: string;
+  readonly code: boolean;
+}
+
+/**
+ * A label's `code` spans, so the sheet shows `bun test` in mono instead of with
+ * literal backticks (B3's class). Only PAIRED backticks open a run; an unpaired
+ * one stays text.
+ */
+export function labelRuns(label: string): readonly LabelRun[] {
+  const parts = label.split("`");
+  if (parts.length < 3) {
+    return [{ text: label, code: false }];
+  }
+  const runs: LabelRun[] = [];
+  const paired = parts.length % 2 === 1 ? parts.length : parts.length - 1;
+  for (let at = 0; at < paired; at += 1) {
+    const text = parts[at] ?? "";
+    if (text !== "") {
+      runs.push({ text, code: at % 2 === 1 });
+    }
+  }
+  if (paired < parts.length) {
+    // An odd backtick out: the rest is text, the backtick included.
+    const rest = `\`${parts.slice(paired).join("`")}`;
+    const last = runs.at(-1);
+    if (last !== undefined && !last.code) {
+      runs[runs.length - 1] = { text: last.text + rest, code: false };
+    } else {
+      runs.push({ text: rest, code: false });
+    }
+  }
+  return runs;
+}

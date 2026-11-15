@@ -12,6 +12,8 @@ import type { PermissionRequest, PermissionResponse } from "@tentacle/core";
 import {
   ARM_MS,
   createPermissionSheet,
+  labelRuns,
+  optionStyle,
   responseFor,
   returnedNotice,
   sheetOptions,
@@ -359,5 +361,46 @@ describe("one ask at a time, FIFO", () => {
       kind: "asking",
       agent: { type: "explore", description: "look around" },
     });
+  });
+});
+
+describe("optionStyle: each answer's pill (mockup `Approval`, Slice 4)", () => {
+  test("allow once is the primary pill, allow always the tinted one, deny destructive", () => {
+    expect(optionStyle("allow_once")).toEqual({ pill: "primary", icon: null });
+    expect(optionStyle("allow_always")).toEqual({ pill: "secondary", icon: null });
+    expect(optionStyle("reject_once")).toEqual({ pill: "destructive", icon: null });
+  });
+
+  test("reply is neutral with the speech-bubble icon", () => {
+    expect(optionStyle("reply")).toEqual({ pill: "neutral", icon: "bubble.left" });
+  });
+
+  test("an id this build does not know is drawn neutral — shown, never dropped", () => {
+    expect(optionStyle("allow_forever_v9")).toEqual({ pill: "neutral", icon: null });
+  });
+
+  test("every option sheetOptions can produce has a non-neutral or reply style", () => {
+    for (const option of sheetOptions(ask())) {
+      const style = optionStyle(option.optionId);
+      expect(style.pill !== "neutral" || style.icon !== null).toBe(true);
+    }
+  });
+});
+
+describe("labelRuns: a label's `code` spans (no literal backticks on screen, B3)", () => {
+  test("the suggested-rule label shows the prefix as code, without its backticks", () => {
+    expect(labelRuns("Allow `bun test` commands for this session")).toEqual([
+      { text: "Allow ", code: false },
+      { text: "bun test", code: true },
+      { text: " commands for this session", code: false },
+    ]);
+  });
+
+  test("a label without backticks is one plain run", () => {
+    expect(labelRuns("Allow once")).toEqual([{ text: "Allow once", code: false }]);
+  });
+
+  test("an unpaired backtick is kept as text (never a half-open code run)", () => {
+    expect(labelRuns("it`s fine")).toEqual([{ text: "it`s fine", code: false }]);
   });
 });

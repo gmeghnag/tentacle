@@ -171,6 +171,10 @@ export interface SessionRow {
   readonly subtitle: string;
   readonly badges: readonly string[];
   readonly archived: boolean;
+  /** A turn runs now (the Running section, `session-groups.ts`). */
+  readonly running: boolean;
+  /** Clients attached now (the row's meta line). */
+  readonly attached: number;
 }
 
 export interface SessionSections {
@@ -231,6 +235,8 @@ export function rows(entries: readonly SessionListEntry[], now: number): Session
       subtitle: relativeTime(entry.updatedAt, now),
       badges: badgesFor(entry),
       archived: entry.archived,
+      running: entry.running,
+      attached: entry.attached,
     };
     (entry.archived ? archived : active).push(row);
   }

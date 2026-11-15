@@ -568,6 +568,7 @@ fail; for `returnKeyAction`, map `stop` to press and see the test fail.
 1. Return **sends** (key labelled Send; queues while a turn runs; never stops a turn) — as recommended.
 2. Sessions: **search now**; "New session" and the "…" menu are a separate task — as recommended.
 3. **NOT as recommended: the permission sheet gets the "Auto-accept" switch and the "Also asked on <computer>" note NOW.** Wire the switch to the session's EXISTING shared auto-accept (the same flag the TUIs share and Shift+Tab flips; find its protocol method and cite it), visible state on every client; laptop-side gating unchanged (AGENTS §7: a phone toggle sets the policy the laptop enforces, never a lasting approval). If a protocol/daemon change is needed, name it and keep it minimal; a `protocol.d/` note if breaking.
+   > **Plan correction (executor, Slice 4, 2026-11-15) — this decision's premise does not hold; STOPPED, owner decision needed.** There is no shared auto-accept: it is each TUI's own local state (`packages/tui/src/permission-ui.ts:47-60`, `autoApproves(req, own)`; `StatusBar.tsx:110`), no protocol method or field carries it (`rg -i "autoaccept|auto_accept|permission_mode" packages/protocol/src` → only the wake-turn notes), and it deliberately never answers another device's turn (owner Q3, `docs/feat/tui-foreign-turns.md` C5). A phone switch would need a NEW session-level policy on the wire and on the daemon, i.e. its own `feat` with a security design (§7 "a pod is not trusted", single broker). The "Also asked on <computer>" note has no data on the phone either (an ask carries no list of the other clients asked). Neither was built.
 4. **SF Symbols + haptics + copy-on-code AND real iOS blur** (`expo-blur` for the glass buttons/bars/sheets, with the mockups' translucent colours as the fallback where blur is off, e.g. Reduce Transparency).
 5. Computers: long-press + iOS action sheet ("…" button too); Remove asks for confirmation — as recommended.
 
@@ -1032,6 +1033,191 @@ and it passed again after the revert.
 **Unverified:** none of this has been seen on screen yet (the same block as
 above). That includes the Lock screen in light, dark and on a small device.
 
+### Slices 3–4 — Sessions + Conversation, Diff + Compose + Approval (+ owner bugs B4–B6)
+
+*— claude-opus-5-5, 2026-11-15*
+
+**Load-bearing check, re-run first (holds, with one exception found).**
+`SessionsScreen.tsx`, `SessionScreen.tsx`, `TranscriptRow.tsx`, `Markdown.tsx`,
+`DiffView.tsx`, `ComposeBar.tsx`, `PermissionSheet.tsx` were still dumb renderers
+over `session-list.ts` / `session-view.ts` / `session-screen-controller.ts` /
+`permission-sheet.ts`, and every existing test stayed green through the restyle.
+The exception is not a screen: owner bug B4 was in the **wiring**
+(`App.tsx` `composeWiring`), see below.
+
+**B4 — a message sent from the phone did nothing. Root cause (two defects, both
+reproduced).** The send path is `Composer` → `controller.press()`
+(`session-screen-controller.ts` `press`) → `void compose.press(action)` →
+`compose-controller.ts` `press`, which clears the field (F4) and then awaits
+`basis()` → `handle.port.facts()` → `driver.enqueue` → `claim` → `deps.prompt`
+(the screen's `promptWithRefs` → `RemoteSession.send` → `session/prompt`).
+1. `App.tsx:333-341` (before) built `port` with
+   `outboxSessionOf({ get sessionId() {…} } as never, …)`, so `facts()` threw
+   `TypeError: session.snapshot is not a function` right after the field was
+   cleared, and the `void` call dropped the rejection: nothing sent, nothing
+   shown. (Also: `sessionHandle.current` was never assigned, so every
+   `withSession` would have opened a SECOND handle of the same id, which replaces
+   the client's stream listener and steals the screen's turn.)
+2. Once sent, the person's own prompt was never drawn: `RemoteSession` does not
+   re-deliver the sender's prompt (`remote-session.ts` "Our own prompt is already
+   on screen"), and `session-feed.ts` `foldStream` folded only the stream.
+   The fakes in `session-screen*.test.ts` yield a `user_message` themselves,
+   which is why no test saw it.
+
+Red, against a real in-process daemon with a laptop client attached
+(`outbox-link.test.ts` "owner B4", the app's own handle wired as `App.tsx` does):
+```
+TypeError: session.snapshot is not a function.
+      at facts (src/outbox-session.ts:75:39)
+      at basis (src/compose-controller.ts:370:51)
+      at press (src/compose-controller.ts:634:30)
+(fail) owner B4: a send from the phone's composer … [9.33ms]
+-- after fix 1 only --
+expect(userRows(screen)).toContain("hello from the phone")   Received: [ "hi" ]
+(fail) owner B4: … [3017.56ms]
+```
+Fix, in order:
+1. `src/compose-handle.ts` (new) — `composeHandleOf({sessionId, client,
+   session, mint})`, the `ComposeHandle` moved out of `App.tsx` (testable), built
+   over the SCREEN's own attach handle; `port: outboxSessionOf(session, …)`.
+   `ComposeWiring.handle` now takes that handle (`session-screen-controller.ts`
+   passes `result.session` / `handle`); `App.tsx` calls `composeHandleOf`, and the
+   dead `sessionHandle`/`withSession` are gone (no second handle is ever opened).
+2. `src/session-feed.ts` — `ownTurn(turnId, events, prompt?)`: the own prompt is
+   folded as a `user_message` at the stream's FIRST event (= the daemon took it;
+   a refusal before the ack leaves no row and gives the words back), not doubled
+   when that first event is the same `user_message` (a reset replay). Both
+   `send` and `promptWithRefs` pass it. Red: `test/session-feed.test.ts` +4
+   (2 fail before: "shows the prompt as a user row", "image-only prompt").
+3. `src/compose-controller.ts` — `createdOrGiveBack`: a failure while creating
+   the item for words already taken from the field (facts, store write) puts the
+   words back with "that message was not sent — it is back in the field" (send
+   and queue paths). Red: `session-screen-compose.test.ts` "owner B4: a send that
+   fails AFTER the field cleared…" — `Expected: "my words"  Received: ""`.
+Green: the real-daemon test proves `userTexts(daemon) == ["hi","hello from the
+phone"]`, the screen's rows contain the user row, and the field is empty.
+
+**B5 — autoscroll.** `src/follow.ts` (new, pure): `scrolled(state, metrics,
+byPerson)`, `contentGrew`, `jumped`, `jumpPill`; only a DRAG (or its momentum)
+stops following, reaching the bottom resumes it. `SessionScreen.tsx` feeds
+`onScroll`/drag events and `onContentSizeChange`, performs `scrollToEnd`, shows a
+glass "Jump to latest" / "New messages" pill (`jump-latest`), and a send/Return
+resumes following. Red (stub = today, never follows): `test/follow.test.ts` 6/8
+fail → 8/8 green.
+
+**B6 — code blocks wrap.** `src/code-block.ts` (new, pure): `codeBlockView` →
+per-line spans (a span across a newline is cut, scope kept; empty line = " ";
+label = fence language or `code`). `src/ui/CodeBlock.tsx`: 34 pt header + the
+lines in a horizontal `ScrollView`, one `Text` per line. `Markdown.tsx` routes
+every fenced block through it. Red (stub = one wrapping run): 6/6 fail; the
+wiring part of `test/code-block.test.ts` (source-level: horizontal ScrollView,
+`view.lines.map`, no `flexShrink`/`flexWrap`, Markdown uses `<CodeBlock`) failed
+with ENOENT until `CodeBlock.tsx` existed → 9/9 green.
+
+**Slice 3 as built.**
+- `src/session-groups.ts` (+ `test/session-groups.test.ts`, 7; red 7/7 on a
+  stub): Running / Idle / Archived, the search filter (owner decision 2), the
+  inline meta line. `SessionRow` gains `running` and `attached` (additive, from
+  the entry).
+- `SessionsScreen.tsx`: large title + glass back (`sessions-back`), search field
+  (`sessions-search`), sections as `SectionHeader` + `GroupedCard` + `Row`
+  (status dot, terminal icon, meta line, archived icon/dimmed), `Banner` for
+  stale/error (`sessions-stale`, `sessions-error`, `sessions-retry`),
+  `EmptyState` (mono `tentacle`, no backticks), "No matches". `section-active`
+  now wraps Running+Idle (flow 02 unchanged).
+- `src/tool-summary.ts` `toolMeta` (+4 tests, red 4/4 on a stub): tone + trailing
+  (`+3 −5` / `denied` / duration). No exit code — `ToolResult` has none
+  (`packages/core/src/tool.ts:48-70`), so none is invented.
+- `src/chat-header.ts` (+ `test/chat-header.test.ts`, 4): the header's status word.
+  New coverage written with the module (no stub red); non-vacuity by mutation M8.
+- `src/ui/ToolRow.tsx`, `src/ui/CodeBlock.tsx`, `src/ui/Composer.tsx` (new).
+- `TranscriptRow.tsx`: right-aligned `fill` bubble (77 %, radius 20, code on
+  `code`), full-width answer, reasoning collapsed ("Thinking", chevron), tool as
+  `ToolRow` with output opening below on `code` (`tool-<id>-output`), notices
+  centred. `Markdown.tsx`: 16/23 text, `CodeBlock`, tables as a real grid
+  (column-major, one-line cells, horizontal scroll).
+- `SessionScreen.tsx`: compact `ScreenHeader` (glass back `session-back`, title,
+  status dot + word), `page` background, `Banner` (kind → tone/icon table;
+  `banner-<kind>`, `banner-retry`, `reopen` kept), `EmptyState`, `Composer`, B5.
+  `turn-running`/`turn-idle` is now a zero-size observable (the
+  `composer-filled` pattern); the visible cue is the header's "Running".
+- `App.tsx`: `Sessions` and `Session` get `headerShown: false` (+ `onBack` when
+  the stack can go back); the dialling placeholder has the same header.
+
+**Slice 4 as built.**
+- `DiffView.tsx`: a header (path, green `+n`, red `−m`, chevron) always on
+  screen, carrying `diff-<callId>` (flow 08 asserts it without tapping); the
+  hunks open on tap (`diff-<callId>-toggle`): hunk heading on `code`, two 30 pt
+  gutters, sign column, `addBg`/`delBg` rows with `addText`/`delText`, horizontal
+  scroll. No word highlights (`diff-view.ts` yields none).
+- `ComposeBar.tsx`: notices as tinted rows with icons; the queue as a `fill`
+  card "Queued · the agent reads these at its next step", clock rows, Take, and
+  **Send now** as a 44 pt `accentFill` pill with `bolt.fill` (`composer-send-now`,
+  moved here from the composer); `composer-queue` stays on the rows only (flows
+  12–15 still wait for a real queued row). Chips: capsules with photo icon /
+  spinner / warning + ×. `OutboxRows` untouched (Slice 5).
+- `src/permission-sheet.ts` `optionStyle` + `labelRuns` (+7 tests, red 4 fail on
+  a stub): allow once primary, allow always tinted, deny destructive, reply
+  neutral + `bubble.left`, unknown id neutral (shown, never dropped); a label's
+  paired backticks become a mono run (no literal `` ` `` on screen).
+- `PermissionSheet.tsx`: native `pageSheet` kept; content scrolls
+  (`keyboardShouldPersistTaps`), grabber, 44 pt `tint` tile + title 22 bold, the
+  detail in a `codeOnSheet` box (mono 14), 50 pt answer pills with a REAL
+  `disabled` during the age guard (`PillButton` only dims, so the sheet draws its
+  own), reply field on `fill`, every testID kept.
+- `src/ui/Icon.tsx`: `arrow.down`, `photo`, `hand.raised`.
+- `changelog.d/mobile-ui-polish.fixed.md`: the existing bullet extended with
+  B4–B6 (one file, one bullet).
+
+**Mutations (each run, then restored from
+`/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui-polish/mut/`; `diff -rq` clean
+after):**
+| # | Mutation | Caught by |
+|---|---|---|
+| M1 | `compose-handle.ts` port back to `outboxSessionOf({ sessionId } as never, …)` | `outbox-link` "owner B4" (real daemon) |
+| M2 | `session-feed.ts` never draws the own prompt | "owner B4" (real daemon) + 2 `session-feed` cases |
+| M3 | `createdOrGiveBack` rethrows | `session-screen-compose` "owner B4: … gives the words back" (send) |
+| M3b | queue path calls the creator unguarded | same test, queue iteration (`Received: ""`) |
+| M4 | `follow.scrolled` lets the list's own scroll stop following | "the list's OWN scroll … never stops following" |
+| M5 | `codeBlockView` does not split on `\n` | 5 `code-block` cases |
+| M6 | unknown option id → `primary` | "an id this build does not know is drawn neutral" |
+| M7 | Running needs `attached > 0` | "active rows split into Running and Idle" |
+| M8 | `chatStatus`: link down does not win over running | "the link down wins over a running turn" |
+
+**Drift from Implementation (and why).**
+- **B4 needed a wiring + feed fix, not a restyle** (above). `ComposeWiring.handle`
+  changed signature (takes the screen's handle); internal to the app.
+- **Owner decision 3 (auto-accept switch, "Also asked on") — STOPPED.** The
+  premise (a shared, wire-level auto-accept) is false; the plan is corrected
+  inline under *Owner decisions*. Nothing built; needs an owner decision and its
+  own task.
+- **Not built, no data or no package:** the code block's Copy button and the
+  haptics (`expo-clipboard` / `expo-haptics` not installed; adding them needs a
+  native rebuild — same block as Slice 1); the Sessions subtitle
+  "MacBook Pro · ~/path" (the route has only the name); "Thought for 4 s" (a
+  reasoning row has no duration → "Thinking"); the running-tool row pinned above
+  the composer with its own Stop pill and elapsed time (no controller `stop()`
+  separate from `press()`, which queues when the field has text, and no ticking
+  clock in the view-model — the composer's Stop stays the way to stop).
+- **`OUTPUT_PREVIEW_LINES` 6 → 12**: the output now opens on tap in its own
+  panel, so the first view of it shows more.
+- **Diff collapsed by default**, with the testID on the always-visible header,
+  instead of "keep the newest expanded" (the plan's fallback): satisfies flow 08
+  without tapping.
+
+**NOT verified (simulator).** No e2e run or screenshot was attempted in this
+session (same block as earlier rounds: `bun run e2e:mobile` needs approval). In
+particular unseen on device: B4 on a real `serve` + TUI (the real-daemon unit
+test is the evidence), B5's follow/jump behaviour with real scroll events, B6's
+horizontal scroll, the zero-size `turn-running` observable for XCUITest (same
+pattern as `composer-filled`), flows 02/07/08/12–15 on the new layout. To verify:
+`bun run e2e:mobile --ios 26` then the screenshot recipe below (Sessions,
+Conversation with code/table/tool/diff, Compose with queue, Approval; light+dark).
+
+**Gate:** `bun run typecheck` clean (root + `apps/mobile` + `apps/relay`) ·
+`bun run lint` 1408 files, 0 issues · `bun test` 10079 pass, 4 skip (opt-in),
+0 fail. No schema change (no `protocol.json` regen, no `protocol.d/` note).
+
 ## Review
 
 ### Slice 0 — adversarial review (fresh context)
@@ -1162,3 +1348,31 @@ above). That includes the Lock screen in light, dark and on a small device.
 *— claude-opus-5-5, 2026-11-15* (fresh context; executor was a different model)
 
 **How to take the screenshots (orchestrator, 2026-11-15 — the sandbox allows exactly these):** build + install with `bun run e2e:mobile --ios 26` (no env prefix: `E2E_ONLY_FLOWS=…` is refused); then write small Maestro flows under `/Users/gmeghnag/tentacle/.tentacle/tmp/mobile-ui/flows/` that navigate to each screen and `takeScreenshot` into `.tentacle/tmp/mobile-ui/slice-<n>/`, run them with `maestro test <file>`, switch appearance with `xcrun simctl ui booted appearance dark|light`. Never a browser/Playwright, never files at the repo root.
+
+#### Owner bug report #2 (2026-11-15 ~01:15, real iPhone, build of 876a7cc7) — MUST be fixed in slices 3+4 (Conversation/Compose), each with a red-first test, and checked by the review
+
+- **B4 (HIGH):** a message sent from the phone does NOTHING: it does not appear in the conversation and the model does not receive it (session on a local `tentacle serve`, connected TUI on the laptop). Trace the send path (composer → client `session/prompt` or enqueue → daemon) end to end with file:line; prove the fix with a test that the daemon receives the prompt and the transcript shows the user row.
+- **B5:** the view does not follow the streaming text: the user has to scroll down by hand. Auto-scroll to the bottom while new content arrives, unless the user has scrolled up (then show a "jump to latest" pill).
+- **B6:** code blocks must NOT wrap: keep each line intact and scroll the block horizontally (monospace, horizontal ScrollView), as in the Conversation mockup.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
+
+## Review — Slices 3–4 (fresh context)
+
+**Verdict: APPROVE (code); no HIGH/MEDIUM finding.** Scope: `git diff main...HEAD` (c9d70aca), Slices 3–4 + B4–B6 only.
+
+**Gate (re-run):** `bun run typecheck` clean (root + mobile + relay) · `bun run lint` 1408 files, 0 issues · touched tests (9 files) 120 pass / 0 fail. Full `bun test` not re-run here.
+
+**Attacks tried:**
+1. *B4 give-back ⇒ double send?* `createdOrGiveBack` (`compose-controller.ts:433`) returns the words if `driver.enqueue` throws; a duplicate would need the item to be in the store as well. `enqueue` (`outbox-driver.ts:406-414`) → `save` → `store.setItems` → `write` (`outbox-store.ts:302`) → `persist`, which catches and returns `false` (`:290-299`): the store never throws, so only `basis()`/`createItem` can throw, and both run before an item exists. Holds. (The doc's "the store write throws" is not a real path; harmless.)
+2. *Own row drawn AND words given back?* The row is drawn at the first streamed event (`session-feed.ts` `drawPrompt`); words come back only when `!streamed` (`session-screen-controller.ts:520-536`). These two cannot both happen. Holds.
+3. *Second handle / §7 one session path:* `composeHandleOf` uses the screen's own `RemoteSession`; `handle()` is gated on `phase === "open" && handle !== null` (`session-screen-controller.ts:278`); no frame is built in the app. Holds.
+4. *B5 stale closure / throttle:* `followRef` + `dragging` refs, `scrollEventThrottle={32}` (`SessionScreen.tsx:134-170, 292-306`). Holds (not checked on a device).
+5. *Approval sheet:* `sheet.answer(optionId)` is unchanged, the guard is a real `disabled`, unknown ids are drawn neutral. Single broker untouched. Holds.
+
+**Mutations (mine; restored from `.tentacle/tmp/mobile-ui-polish/rev34/`, `git status` clean):** dedupe of a re-delivered prompt removed → 3 fail (`session-feed` "not doubled", `session-screen` own/foreign identical rows, send folds); `contentGrew` always scrolls → `follow` "scrolls UP … pill shows" fails. The executor's M1–M8 were not re-run.
+
+**LOW (not gating):** `contentGrew` treats any size change as growth. While scrolled up, a shrink (collapsing a tool output) shows "New messages". While following, expanding a row jumps to the end.
+
+**Executor behaviour:** stopped on the false auto-accept premise instead of building a fake one (good). Every gap that needs a simulator is listed as NOT verified. The commit is titled "exec (deepseek)" but the Execution section is signed claude-opus-5-5, so the attribution should be reconciled. This reviewer is the same model family as that signature: shared blind spots possible. Simulator/e2e (flows 02/07/08/12–15, B5/B6 on a device) remain unverified.
+
+*— claude-opus-5-5, 2026-11-15*

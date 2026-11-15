@@ -1,21 +1,101 @@
 /**
- * The permission sheet (docs/feat/mobile-session-view.md 12c): a native `Modal`
- * page sheet over the transcript, drawn from `permission-sheet.ts`'s state —
- * every decision (the age guard, the options, the reply, the returned words)
- * lives there (AGENTS §7).
+ * The permission sheet (mockup `Approval`, docs/feat/mobile-session-view.md
+ * 12c): a native `Modal` page sheet over the transcript — native presentation
+ * and swipe-to-dismiss kept — drawn from `permission-sheet.ts`'s state. Every
+ * decision (the age guard, the options, the reply, the returned words, each
+ * option's style and its label's code runs) lives there (AGENTS §7).
  *
  * While the age guard holds, the options are drawn dimmed AND `disabled`, so a
  * stray tap does nothing whether it reaches JS or is swallowed by the platform.
+ *
+ * testIDs (the flows' contract, unchanged): `perm-sheet`, `perm-<optionId>`,
+ * `perm-reply-input`, `perm-reply-send`, `perm-arming`, `perm-returned`,
+ * `perm-returned-dismiss`.
  */
 import type { JSX } from "react";
-import { Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import type { PermissionSheet, SheetOptionId, SheetState } from "../permission-sheet.ts";
-import type { Palette } from "../theme.ts";
+import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  type OptionPill,
+  type PermissionSheet,
+  type SheetOptionId,
+  type SheetState,
+  labelRuns,
+  optionStyle,
+} from "../permission-sheet.ts";
+import { DENSE_FONT_SCALE, MONO, type Palette, radius, size, typography } from "../theme.ts";
+import { Icon, type IconName } from "../ui/Icon.tsx";
 
 export interface PermissionSheetViewProps {
   readonly sheet: PermissionSheet;
   readonly state: SheetState;
   readonly palette: Palette;
+}
+
+function pillColors(pill: OptionPill, palette: Palette): { bg: string; fg: string } {
+  switch (pill) {
+    case "primary":
+      return { bg: palette.accentFill, fg: palette.onAccent };
+    case "secondary":
+      return { bg: palette.tint, fg: palette.accent };
+    case "destructive":
+      return { bg: palette.fill, fg: palette.red };
+    default:
+      return { bg: palette.fill, fg: palette.label };
+  }
+}
+
+/** One 50 pt answer pill. `disabled` is REAL (the age guard), not just a look. */
+function AnswerPill({
+  palette,
+  label,
+  pill,
+  icon,
+  disabled,
+  onPress,
+  testID,
+}: {
+  readonly palette: Palette;
+  readonly label: string;
+  readonly pill: OptionPill;
+  readonly icon: IconName | null;
+  readonly disabled: boolean;
+  readonly onPress: () => void;
+  readonly testID: string;
+}): JSX.Element {
+  const colors = pillColors(pill, palette);
+  return (
+    <Pressable
+      testID={testID}
+      accessibilityRole="button"
+      accessibilityLabel={label.replaceAll("`", "")}
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.pill,
+        { backgroundColor: colors.bg },
+        disabled ? styles.dimmed : undefined,
+        pressed ? { opacity: 0.7 } : undefined,
+      ]}
+    >
+      {icon === null ? null : <Icon name={icon} color={colors.fg} size={17} />}
+      <Text
+        maxFontSizeMultiplier={DENSE_FONT_SCALE}
+        style={[typography.headline, styles.pillLabel, { color: colors.fg }]}
+      >
+        {labelRuns(label).map((run, at) => (
+          <Text
+            // A run's position in its label is its identity.
+            // biome-ignore lint/suspicious/noArrayIndexKey: positional label runs
+            key={at}
+            style={run.code ? styles.code : undefined}
+          >
+            {run.text}
+          </Text>
+        ))}
+      </Text>
+    </Pressable>
+  );
 }
 
 export function PermissionSheetView({
@@ -37,103 +117,113 @@ export function PermissionSheetView({
       transparent={false}
       onRequestClose={() => sheet.dismiss()}
     >
-      <View testID="perm-sheet" style={[styles.sheet, { backgroundColor: palette.background }]}>
+      <ScrollView
+        testID="perm-sheet"
+        style={{ backgroundColor: palette.sheet }}
+        contentContainerStyle={styles.sheet}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={[styles.grabber, { backgroundColor: palette.sepSheet }]} />
         {asking === null ? null : (
           <>
-            <Text style={[styles.title, { color: palette.label }]}>{asking.request.title}</Text>
-            {asking.request.detail === undefined ? null : (
-              <Text style={[styles.detail, { color: palette.secondaryLabel }]}>
-                {asking.request.detail}
+            <View style={styles.head}>
+              <View style={[styles.tile, { backgroundColor: palette.tint }]}>
+                <Icon name="hand.raised" color={palette.accent} size={22} />
+              </View>
+              <Text
+                accessibilityRole="header"
+                style={[typography.title2, styles.flex, { color: palette.label }]}
+              >
+                {asking.request.title}
               </Text>
+            </View>
+            {asking.request.detail === undefined ? null : (
+              <View style={[styles.detailBox, { backgroundColor: palette.codeOnSheet }]}>
+                <Text style={[typography.monoInline, { color: palette.label }]}>
+                  {asking.request.detail}
+                </Text>
+              </View>
             )}
             {asking.agent === null ? null : (
-              <Text style={[styles.detail, { color: palette.secondaryLabel }]}>
-                {`asked by ${asking.agent.type}: ${asking.agent.description}`}
+              <Text style={[typography.subhead, { color: palette.sec }]}>
+                {`Asked by ${asking.agent.type}: ${asking.agent.description}`}
               </Text>
             )}
             <View style={styles.options}>
-              {asking.options.map((option) => (
-                <Pressable
-                  key={option.optionId}
-                  testID={`perm-${option.optionId}`}
-                  accessibilityRole="button"
-                  // The age guard's own decision, read at the tap (never a render
-                  // snapshot): `answer` ignores what is too early (P10).
-                  disabled={!asking.armed}
-                  onPress={() => sheet.answer(option.optionId)}
-                  style={[
-                    styles.option,
-                    { borderColor: palette.separator, backgroundColor: palette.card },
-                    option.kind === "deny" ? { borderColor: palette.danger } : undefined,
-                    asking.armed ? undefined : styles.dimmed,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.optionLabel,
-                      { color: option.kind === "deny" ? palette.danger : palette.label },
-                    ]}
-                  >
-                    {option.label}
-                  </Text>
-                </Pressable>
-              ))}
+              {asking.options.map((option) => {
+                const look = optionStyle(option.optionId);
+                return (
+                  <AnswerPill
+                    key={option.optionId}
+                    testID={`perm-${option.optionId}`}
+                    palette={palette}
+                    label={option.label}
+                    pill={look.pill}
+                    icon={look.icon}
+                    // The age guard's own decision, read at the tap (never a render
+                    // snapshot): `answer` ignores what is too early (P10).
+                    disabled={!asking.armed}
+                    onPress={() => sheet.answer(option.optionId)}
+                  />
+                );
+              })}
             </View>
             {asking.replyText === "" && asking.request.reply === undefined ? null : (
               <TextInput
                 testID="perm-reply-input"
-                style={[styles.reply, { color: palette.label, borderColor: palette.separator }]}
+                style={[
+                  typography.body,
+                  styles.reply,
+                  { color: palette.label, backgroundColor: palette.fill },
+                ]}
                 placeholder="Tell it what to do instead"
-                placeholderTextColor={palette.secondaryLabel}
+                placeholderTextColor={palette.sec}
                 value={asking.replyText}
                 onChangeText={(text) => sheet.setReplyText(text)}
                 multiline
               />
             )}
             {asking.request.reply === undefined ? null : (
-              <Pressable
+              <AnswerPill
                 testID="perm-reply-send"
-                accessibilityRole="button"
+                palette={palette}
+                label="Send reply"
+                pill="secondary"
+                icon={null}
                 disabled={!asking.armed}
                 onPress={() => sheet.sendReply()}
-                style={[
-                  styles.option,
-                  { borderColor: palette.accent, backgroundColor: palette.card },
-                  asking.armed ? undefined : styles.dimmed,
-                ]}
-              >
-                <Text style={[styles.optionLabel, { color: palette.accent }]}>Send</Text>
-              </Pressable>
+              />
             )}
             {asking.armed ? null : (
-              <Text testID="perm-arming" style={[styles.detail, { color: palette.secondaryLabel }]}>
-                hold on…
+              <Text
+                testID="perm-arming"
+                style={[typography.footnote, styles.center, { color: palette.sec }]}
+              >
+                Hold on…
               </Text>
             )}
           </>
         )}
         {returned === null ? null : (
           <>
-            <Text testID="perm-returned" style={[styles.detail, { color: palette.danger }]}>
+            <Text testID="perm-returned" style={[typography.headline, { color: palette.red }]}>
               {returned.notice}
             </Text>
-            <Text style={[styles.reply, { color: palette.label, borderColor: palette.separator }]}>
-              {returned.text}
-            </Text>
-            <Pressable
+            <View style={[styles.detailBox, { backgroundColor: palette.codeOnSheet }]}>
+              <Text style={[typography.body, { color: palette.label }]}>{returned.text}</Text>
+            </View>
+            <AnswerPill
               testID="perm-returned-dismiss"
-              accessibilityRole="button"
+              palette={palette}
+              label="OK"
+              pill="neutral"
+              icon={null}
+              disabled={false}
               onPress={() => sheet.clearReturned()}
-              style={[
-                styles.option,
-                { borderColor: palette.separator, backgroundColor: palette.card },
-              ]}
-            >
-              <Text style={[styles.optionLabel, { color: palette.label }]}>OK</Text>
-            </Pressable>
+            />
           </>
         )}
-      </View>
+      </ScrollView>
     </Modal>
   );
 }
@@ -147,18 +237,38 @@ export const SHEET_OPTION_IDS: readonly SheetOptionId[] = [
 ];
 
 const styles = StyleSheet.create({
-  sheet: { flex: 1, padding: 20, gap: 12 },
-  title: { fontSize: 20, fontWeight: "600" },
-  detail: { fontSize: 14 },
-  options: { gap: 8 },
-  option: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, padding: 14 },
-  optionLabel: { fontSize: 16 },
-  dimmed: { opacity: 0.4 },
-  reply: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 10,
-    padding: 12,
-    minHeight: 88,
-    fontSize: 15,
+  flex: { flex: 1 },
+  center: { textAlign: "center" },
+  sheet: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 40, gap: 16 },
+  grabber: {
+    alignSelf: "center",
+    width: size.grabberWidth,
+    height: size.grabberHeight,
+    borderRadius: size.grabberHeight / 2,
+    marginBottom: 4,
   },
+  head: { flexDirection: "row", alignItems: "center", gap: 12 },
+  tile: {
+    width: size.iconTileLarge,
+    height: size.iconTileLarge,
+    borderRadius: radius.iconTileLarge,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  detailBox: { borderRadius: radius.tile, padding: 14 },
+  options: { gap: 10 },
+  pill: {
+    minHeight: size.bigButton,
+    borderRadius: size.bigButton / 2,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  pillLabel: { textAlign: "center", flexShrink: 1 },
+  code: { fontFamily: MONO },
+  dimmed: { opacity: 0.4 },
+  reply: { borderRadius: radius.tile, padding: 14, minHeight: 96 },
 });
