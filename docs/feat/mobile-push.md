@@ -2730,6 +2730,33 @@ link leaves a toggle-on as `unknown`, not `failed`. An older daemon's
 `MethodNotFound` on unregister settles the debt without looping. No §7 seam is
 touched: the client methods are unchanged, and the peer is still not serialized.
 
+### Round 3 — Verdict: PASS
+
+*— claude-opus-5-5, 2026-11-15* (fresh context, reviewing `git diff HEAD~1`)
+
+**Gate.** `bun test apps/mobile/test packages/client/test/push-register.test.ts`
+→ 921 pass / 0 fail. `bun run lint` → 1399 files, clean. `bun run typecheck` → exit 0.
+
+**Round-2 findings, each mutated (all reverted; `git status` clean).**
+- R2-1 (the real store dropped the `off` debt): **fixed**. `pushRegistrationOf`
+  now copies `off` when it is `true`, and `PushMemoryStore.setPush` takes the
+  registrar's own `PushRegistration`, so the type gap is closed. Mutation: drop
+  `off` → 3 RED, including an end-to-end test with the real `createComputerStore`.
+  My own real-store repro (`.tentacle/tmp/mobile-push/p9-review2.test.ts`) now
+  passes: the stored value reads back `{…,"off":true}` and the relaunch sends
+  `unregister`.
+- R2-2 (`writable` ignored): **fixed**. `rememberEnabled` returns early when the
+  record is not writable, and `writable` starts `false` (fail-safe). Mutation:
+  remove the guard → 3 RED.
+
+**Regressions checked.** A fresh install (no item) → `writable: true`, so
+H1's persistence still holds (my round-1 repros all pass). `off` is copied only
+for the literal `true`. No §7 seam is touched.
+
+**Non-blocking note.** After a *transient* Keychain read error at launch, a
+toggle-off lasts only for that session (by design: unreadable ⇒ never
+overwritten). Low likelihood; worth a line in the debt notes.
+
 ## Execution
 
 ### Fix round 1
