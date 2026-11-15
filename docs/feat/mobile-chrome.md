@@ -540,6 +540,15 @@ Each question maps to one mockup row of
   over APIs that already exist (and fulfil TUI Q15, "one background list");
   cron stays greyed until its own task adds the protocol.
 
+#### Owner answers (2026-11-15, on the mockups)
+
+- Q-A header: **A1** (thin glyphs, no circles, context ring next to "…").
+- Q-B dark palette: **B1** warm graphite `#1F1F1E`.
+- Q-C drawer: **C1** — the computer is the drawer's TITLE at the top (tap → computers list); Settings + New session at the bottom (overrides the C2 recommendation).
+- Q-E grouped screens: **E2** — one full-width band per section, square corners, small uppercase section labels (overrides the E1 recommendation).
+- Q-F activity entry: **F1** header pill — **plus a setting to enable the floating draggable button (F2)** instead/in addition (off by default; Settings → Activity button: "Header" / "Floating"). Shell jobs: the recommendation (live in v1) stands unless the owner objects.
+- Q-D the combination is therefore **A1 + B1 + C1 + E2 + F1 (+ optional F2)**.
+
 ## Execution
 
 *(empty until the owner's picks and the approval of this plan)*
