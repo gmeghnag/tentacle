@@ -33,6 +33,7 @@ import {
 } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import { relayIdOf } from "@tentacle/transport/relay-id";
+import type { HooksTrustPrecheck } from "./connection.ts";
 import { acceptDevice } from "./device-accept.ts";
 import type { DeviceAuthority } from "./device-authority.ts";
 import type { HandshakeLimiter } from "./handshake-limit.ts";
@@ -99,6 +100,13 @@ export interface RelayLinkOptions {
   readonly limiter: HandshakeLimiter;
   /** Dial a URL: `bunDialer` in production, a fake in tests. */
   readonly dial: RelayDialer;
+  /**
+   * The host's own project-hooks answer (docs/feat/serve-mcp.md S4), threaded
+   * to every `Connection` this link's accept legs build — the relay is the
+   * usual remote path, so without it a phone over the relay is asked about a
+   * folder this machine already decided about (S4 review 1, finding 1).
+   */
+  readonly hooksTrustPrecheck?: HooksTrustPrecheck;
   /** Operator lines (`options.onAudit` on the server). Never payloads, never secrets. */
   readonly onAudit?: RelayLinkAudit;
   /** Injected time and randomness (tests own both; `Date.now`/`Math.random` otherwise). */
@@ -682,6 +690,7 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
         authority: options.authority,
         sessionHost: options.sessionHost,
         isClosed: () => closed,
+        ...(options.hooksTrustPrecheck ? { hooksTrustPrecheck: options.hooksTrustPrecheck } : {}),
         ...(options.onAudit ? { onAudit: options.onAudit } : {}),
         ...(options.onError ? { onError: options.onError } : {}),
         ...(options.maxFrameBytes !== undefined ? { maxFrameBytes: options.maxFrameBytes } : {}),

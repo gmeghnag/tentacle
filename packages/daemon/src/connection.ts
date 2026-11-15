@@ -32,6 +32,7 @@ import {
   type DevicePushUnregisterResult,
   type EnqueueParams,
   type EnqueueResult,
+  type HooksTrustParams,
   type HooksTrustResult,
   type InitializeParams,
   type InitializeResult,
@@ -125,7 +126,27 @@ export interface ConnectionOptions {
    * handler is per connection: the attempt cap belongs to the socket.
    */
   readonly principal?: ConnectionPrincipal;
+  /**
+   * The HOST's own answer for project hooks, checked BEFORE the prompting
+   * client is asked (docs/feat/serve-mcp.md S4): `trusted` = this folder and
+   * this hooks hash are already trusted on the machine the daemon runs on, so
+   * no client is bothered and no lasting approval is created from a remote's
+   * answer; `declined` = that machine's own explicit `never`, which is a
+   * decision about the FOLDER and is not overridable from a phone ("ask" is
+   * what the prompting client sees). Read-only: it answers early, it never
+   * grants (AGENTS §7, never let a pod-originated prompt create a lasting
+   * approval).
+   */
+  readonly hooksTrustPrecheck?: HooksTrustPrecheck;
 }
+
+/**
+ * A host's own project-hooks answer before any client is asked (S4):
+ * `trusted` / `declined` are the host's decisions, `ask` defers to the client.
+ */
+export type HooksTrustPrecheck = (
+  request: Pick<HooksTrustParams, "folder" | "hash">,
+) => "trusted" | "declined" | "ask";
 
 /**
  * A connection's authenticated role, decided once at the handshake — never
@@ -168,6 +189,8 @@ export class Connection {
   /** The `daemon/discovery` subscription of THIS connection (at most one, F13). */
   private discoveryUnsubscribe: (() => void) | undefined;
   private readonly servesModel: boolean;
+  /** The host's own project-hooks answer, before any client is asked (S4). */
+  private readonly hooksTrustPrecheck: HooksTrustPrecheck | undefined;
   private initialized = false;
   /** The update types the client declared at `initialize`; undefined = the v10 base set. */
   private updateTypes: readonly string[] | undefined;
@@ -200,6 +223,7 @@ export class Connection {
     this.host = host;
     this.servesModel = options.servesModel === true;
     this.principal = options.principal ?? { kind: "token" };
+    this.hooksTrustPrecheck = options.hooksTrustPrecheck;
     this.peer = new RpcPeer(channel, {
       onRequest: (method, params, context) => this.onRequest(method, params, context),
       onNotification: (method, params) => this.onNotification(method, params),
@@ -915,10 +939,23 @@ export class Connection {
     return hosted.sendNow(params.turnId, params.interrupt, params.messages, this.askHooksTrust);
   }
 
-  private readonly askHooksTrust: AskHooksTrust = (request, signal) =>
-    this.peer
+  private readonly askHooksTrust: AskHooksTrust = (request, signal) => {
+    // The host's own store first (a `serve` on the machine the folder lives on):
+    // already trusted there = no prompt, and nothing to store from a remote. A
+    // `declined` is that host's own "never" — a decision about the FOLDER, so a
+    // remote does not get to re-ask it (S4 review 1, finding 2).
+    const mine = this.hooksTrustPrecheck?.(request);
+    if (mine === "trusted") {
+      return Promise.resolve(true);
+    }
+    if (mine === "declined") {
+      return Promise.resolve(false);
+    }
+    // Otherwise the PROMPTING client decides (it has the human behind this turn).
+    return this.peer
       .request(Method.HooksTrust, request, signal ? { signal } : undefined)
       .then((result) => (result as HooksTrustResult).trusted === true);
+  };
 
   private onNotification(method: string, params: unknown): void {
     if (method === Notification.Cancel) {
