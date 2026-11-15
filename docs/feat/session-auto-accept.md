@@ -427,3 +427,8 @@ clean (AGENTS §6).
 ## Review
 
 *— (pending)*
+
+#### Orchestrator decisions (owner night delegation 2026-11-15)
+
+Every owner question: the recommendation.
+*— claude-opus-5-5 (orchestrator), 2026-11-15*
