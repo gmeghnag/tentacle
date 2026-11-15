@@ -498,7 +498,7 @@ Every mutation was reverted and the file re-run green. The new modules are featu
 
 ### Fix round 1
 
-*— claude-opus-5-5, 2026-11-15*
+*— executor recorded as **deepseek** by its commit `86691927` ("fix(mobile-voice): review round 1 (deepseek)"), 2026-11-15. This line first read `claude-opus-5-5`, which conflicts with that commit (Review round 2). The exact DeepSeek model id is not recorded in the repo; the orchestrator must confirm it. Corrected in Fix round 2.*
 
 **Finding 1 (HIGH, start/cancel race): FIXED in TS and Swift. The Swift runtime behaviour is unverified on a device.**
 
@@ -569,6 +569,34 @@ The fix tags every attempt with an id, taking the reviewer's preferred option, w
 - `bun run lint`: `Checked 1457 files … No fixes applied`.
 - `bun test`: **10493 pass, 4 skip, 0 fail**, the same skips as round 0.
 - The first full run reported **1 fail out of 10497**. Two reruns did not reproduce it, and I did not capture which test it was. The voice tests are deterministic and passed in every narrow run, so this was likely a timing-flaky test elsewhere. Unidentified.
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-15*
+
+**NEW HIGH (remount regression): FIXED.**
+- Root cause: attempt ids were counted per controller (one per `SessionScreen` mount), but `SpeechCore.swift`'s `cancelledThrough` / `newestStart` live for the whole process, so the next screen's first ids were refused as `cancelled`.
+- `apps/mobile/src/voice-controller.ts`: a module-level `nextAttemptId()` (process-wide, monotonic) replaces the per-controller `attempts`. New optional dep `nextAttempt?: () => number` (an id source, like `now`) defaults to it; `SessionScreen` does not pass it, so the app uses the process-wide one. Swift unchanged.
+- `apps/mobile/test/voice-controller.test.ts`:
+  - new "attempt ids across screens": a `NativeGuardPort` modelling the Swift guards (refuse `attempt <= max(cancelledThrough, newestStart)`, never reset), two controllers on it. Screen 1 dictates, is disposed, then screen 2 taps: it must reach `listening` with a higher id;
+  - `setup()` injects a per-setup counter, so the existing absolute assertions (`cancel:1`, `[1]`) stay deterministic whatever the test order.
+- **Red** (before the fix, on the assertion):
+  ```
+  error: expect(received).toBe(expected)
+  Expected: "listening"
+  Received: "failed"
+  (fail) attempt ids across screens … > a second session screen's first tap still starts dictation (process-unique ids)
+   11 pass / 1 fail
+  ```
+- **Green:** 12 pass, 0 fail.
+- **Mutation M5:** the default was put back to a per-controller counter (`let own = 0; deps.nextAttempt ?? (() => ++own)`). Result: 1 fail (the new test), 11 pass. Restored from `.tentacle/tmp/mobile-voice/r2/vc.ts`; then 12 pass.
+
+**MEDIUM (signature): FIXED as far as the repo allows.** The "Fix round 1" signature now says what its commit `86691927` records (deepseek) and that it first read `claude-opus-5-5`. The exact DeepSeek id is still not recorded anywhere, so the orchestrator must confirm it, as for the Execution line. This round is signed with its real model id.
+
+**Gate.**
+- `bun run typecheck` (root, mobile, relay): clean.
+- `bun run lint`: `Checked 1457 files … No fixes applied`.
+- `bun test`: **10494 pass, 4 skip, 0 fail** (10498 tests). The skips are the same as before.
 
 ## Review
 

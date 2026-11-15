@@ -89,7 +89,12 @@ function setup(settings: Partial<VoiceSettings> = {}) {
   const sends: SendVia[] = [];
   let clock = 0;
   const timers: (() => void)[] = [];
+  let attempt = 0; // per-setup ids keep the assertions below absolute
   const voice = createVoiceController({
+    nextAttempt: () => {
+      attempt += 1;
+      return attempt;
+    },
     port,
     now: () => clock,
     draft: () => draft,
@@ -266,5 +271,54 @@ describe("dispose (F13)", () => {
     await s.voice.tapSpeak({ key: "a", text: "hello there" });
     s.voice.dispose();
     expect(s.port.calls.at(-1)).toBe("stopSpeaking");
+  });
+});
+
+describe("attempt ids across screens (review r2: remount regression)", () => {
+  /** Models `SpeechCore.swift`: ONE per process, its guards never reset. */
+  class NativeGuardPort extends FakeSpeechPort {
+    cancelledThrough = 0;
+    newestStart = 0;
+    override startDictation = async (o: { engine: Engine; locale: string; attempt: number }) => {
+      this.startAttempts.push(o.attempt);
+      if (o.attempt <= this.cancelledThrough || o.attempt <= this.newestStart) {
+        throw Object.assign(new Error("cancelled"), { code: "cancelled" });
+      }
+      this.newestStart = o.attempt;
+    };
+    override cancelDictation = (attempt: number) => {
+      this.calls.push(`cancel:${attempt}`);
+      this.cancelledThrough = Math.max(this.cancelledThrough, attempt);
+    };
+  }
+
+  const screen = (port: SpeechPort) =>
+    createVoiceController({
+      port,
+      now: () => 0,
+      draft: () => "",
+      setDraft: () => {},
+      send: () => {},
+      settings: () => DEFAULT_VOICE_SETTINGS,
+      deviceLocales: () => ["en-US"],
+      every: () => ({ cancel: () => {} }),
+    });
+
+  test("a second session screen's first tap still starts dictation (process-unique ids)", async () => {
+    const port = new NativeGuardPort();
+    const first = screen(port);
+    first.tapMic();
+    await flush();
+    await flush();
+    expect(first.state().dictation.kind).toBe("listening");
+    first.dispose(); // leaves the screen: cancels its attempt natively
+    const second = screen(port);
+    second.tapMic();
+    await flush();
+    await flush();
+    expect(second.state().dictation.kind).toBe("listening");
+    const [a, b] = port.startAttempts;
+    expect(port.startAttempts.length).toBe(2);
+    expect(a !== undefined && b !== undefined && b > a).toBe(true);
   });
 });

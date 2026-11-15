@@ -56,6 +56,12 @@ export interface VoiceControllerDeps {
   readonly deviceLocales: () => readonly string[];
   /** A repeating timer (injected: tests drive it). */
   readonly every: (fn: () => void, ms: number) => { cancel(): void };
+  /**
+   * The dictation attempt id source (default `nextAttemptId`). It MUST be
+   * unique for the whole process, not per controller: the native module is
+   * one per process and refuses any id at or below one it has seen.
+   */
+  readonly nextAttempt?: () => number;
 }
 
 export interface VoiceController {
@@ -83,6 +89,17 @@ export interface VoiceController {
   dispose(): void;
 }
 
+/**
+ * Process-wide: `SpeechCore.swift` keeps `cancelledThrough` / `newestStart` for
+ * the app's lifetime, so a per-controller counter would restart at 1 on the
+ * next session screen and every start would be refused (review r2).
+ */
+let lastAttemptId = 0;
+export function nextAttemptId(): number {
+  lastAttemptId += 1;
+  return lastAttemptId;
+}
+
 export function createVoiceController(deps: VoiceControllerDeps): VoiceController {
   let state: VoiceState = { dictation: DICTATION_IDLE, readAloud: READ_ALOUD_IDLE, level: 0 };
   let app: AppStateName = "active";
@@ -90,7 +107,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
   let ticker: { cancel(): void } | undefined;
   let voices: Promise<readonly VoiceInfo[]> | undefined;
   /** A fresh id per mic tap (an id source, like `now`); the reducer matches events to it. */
-  let attempts = 0;
+  const nextAttempt = deps.nextAttempt ?? nextAttemptId;
   const listeners = new Set<(state: VoiceState) => void>();
 
   const emit = () => {
@@ -277,13 +294,12 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       return () => listeners.delete(listener);
     },
     tapMic() {
-      attempts += 1;
       dictate({
         type: "tap",
         draft: deps.draft(),
         locale: locale(),
         now: deps.now(),
-        attempt: attempts,
+        attempt: nextAttempt(),
       });
     },
     userEdit(text) {
