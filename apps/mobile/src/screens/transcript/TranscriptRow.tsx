@@ -34,6 +34,12 @@ export interface RowProps {
   readonly onLink: (href: string) => void;
   /** The loaded thumbnails (the driver's state): a ref with no bytes draws its label. */
   readonly thumbnails: ThumbnailState;
+  /**
+   * The read-aloud button under an assistant row (docs/feat/mobile-voice.md
+   * Design §5): `readAloudOffered` / `speakingRowKey` decide it; absent = none.
+   */
+  readonly speak?: "offered" | "speaking";
+  readonly onSpeak?: (row: { readonly key: string; readonly text: string }) => void;
 }
 
 function Shell({
@@ -103,11 +109,28 @@ function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
   );
 }
 
-function AssistantRowView({ row, palette, onLink }: RowProps): JSX.Element {
+function AssistantRowView({ row, palette, onLink, speak, onSpeak }: RowProps): JSX.Element {
   const assistant = row as Extract<Row, { kind: "assistant" }>;
+  const speaking = speak === "speaking";
   return (
     <Shell row={assistant}>
       <Markdown parsed={parsedOf(assistant.text)} palette={palette} onLink={onLink} />
+      {speak === undefined || onSpeak === undefined ? null : (
+        <Pressable
+          testID={speaking ? "assistant-speak-stop" : "assistant-speak"}
+          accessibilityRole="button"
+          accessibilityLabel={speaking ? "Stop reading" : "Read aloud"}
+          onPress={() => onSpeak({ key: assistant.key, text: assistant.text })}
+          hitSlop={8}
+          style={styles.speak}
+        >
+          <Icon
+            name={speaking ? "stop.circle" : "speaker.wave.2"}
+            color={speaking ? palette.accent : palette.sec}
+            size={16}
+          />
+        </Pressable>
+      )}
     </Shell>
   );
 }
@@ -238,6 +261,7 @@ export function TranscriptRow(props: RowProps): JSX.Element | null {
 
 const styles = StyleSheet.create({
   row: { paddingHorizontal: space.inset, paddingVertical: space.transcript / 2 },
+  speak: { alignSelf: "flex-start", paddingTop: 4, paddingRight: 8 },
   bubble: {
     alignSelf: "flex-end",
     maxWidth: "77%",

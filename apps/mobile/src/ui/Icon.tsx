@@ -42,7 +42,12 @@ export type IconName =
   | "arrow.down"
   | "photo"
   | "hand.raised"
-  | "trash";
+  | "trash"
+  | "mic"
+  | "mic.fill"
+  | "waveform"
+  | "speaker.wave.2"
+  | "stop.circle";
 
 export interface IconProps {
   readonly name: IconName;

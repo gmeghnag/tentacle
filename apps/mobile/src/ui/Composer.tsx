@@ -10,6 +10,7 @@
  */
 import type { JSX } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import type { MicButton } from "../dictation.ts";
 import { type Palette, size, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
 
@@ -27,6 +28,11 @@ export interface ComposerProps {
   readonly onPhoto: () => void;
   /** Below the bar: the home indicator when the keyboard is closed (B1). */
   readonly bottomPadding: number;
+  /** The dictation button (`micButtonOf`, docs/feat/mobile-voice.md Design §5). */
+  readonly mic: MicButton;
+  readonly onMic: () => void;
+  /** The mic level 0..1 while listening (the waveform's opacity). */
+  readonly level: number;
 }
 
 const LABEL: Readonly<Record<ComposerButton, string>> = {
@@ -56,10 +62,14 @@ export function Composer({
   onPress,
   onPhoto,
   bottomPadding,
+  mic,
+  onMic,
+  level,
 }: ComposerProps): JSX.Element {
   const stop = button === "stop";
   const disabled = button === "disabled";
   const actionBg = stop ? palette.label : disabled ? palette.fill : palette.accentFill;
+  const listening = mic === "listening";
   return (
     <View style={[styles.bar, { paddingBottom: bottomPadding }]}>
       <View
@@ -67,7 +77,7 @@ export function Composer({
           styles.capsule,
           {
             backgroundColor: palette.glass,
-            borderColor: palette.glassBorder,
+            borderColor: listening ? palette.accent : palette.glassBorder,
             shadowOpacity: palette.shadowOpacity,
           },
         ]}
@@ -99,6 +109,29 @@ export function Composer({
           onSubmitEditing={onReturn}
           accessibilityLabel="Message"
         />
+        {mic === "hidden" ? null : (
+          <Pressable
+            testID={listening ? "composer-mic-listening" : "composer-mic"}
+            accessibilityRole="button"
+            accessibilityLabel={listening ? "Stop dictation" : "Dictate"}
+            disabled={!editable}
+            onPress={onMic}
+            hitSlop={6}
+            style={styles.photo}
+          >
+            {listening ? (
+              <View style={{ opacity: 0.4 + 0.6 * level }}>
+                <Icon name="waveform" color={palette.accent} size={20} />
+              </View>
+            ) : (
+              <Icon
+                name="mic"
+                color={editable && mic === "idle" ? palette.accent : palette.sec}
+                size={20}
+              />
+            )}
+          </Pressable>
+        )}
         {/* Maestro cannot read the field's text (P9): this is how a flow proves
           the field is NOT empty (a hand-back, a Take, an Edit). */}
         {draft === "" ? null : (

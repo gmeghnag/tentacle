@@ -9,9 +9,12 @@
  * architecture shows XCUITest no text).
  */
 import type { JSX } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import type { LockDelay, LockNotice } from "../app-lock.ts";
+import type { SpeechRate } from "../read-aloud.ts";
+import type { LanguageSetting } from "../speech-locale.ts";
 import type { Palette } from "../theme.ts";
+import type { VoiceSettings } from "../voice-settings-store.ts";
 
 /** The rows, weakest lock last, with the copy the mockup uses. */
 export const DELAY_ROWS: readonly { readonly value: LockDelay; readonly label: string }[] = [
@@ -41,7 +44,24 @@ export interface SettingsScreenProps {
   readonly onExportLogs: () => void;
   /** False while an export is in flight (a double tap must not write twice). */
   readonly canExport: boolean;
+  /** The voice settings (docs/feat/mobile-voice.md Design §5); absent = no Voice card. */
+  readonly voice?: VoiceSettings;
+  /** A voice write that did not stick. */
+  readonly voiceError?: string;
+  readonly onVoice?: (next: VoiceSettings) => void;
 }
+
+export const LANGUAGE_ROWS: readonly { readonly value: LanguageSetting; readonly label: string }[] =
+  [
+    { value: "auto", label: "Auto" },
+    { value: "it-IT", label: "Italiano" },
+    { value: "en-US", label: "English" },
+  ];
+
+export const RATE_ROWS: readonly { readonly value: SpeechRate; readonly label: string }[] = [
+  { value: "normal", label: "Normal" },
+  { value: "fast", label: "Fast" },
+];
 
 export function SettingsScreen({
   palette,
@@ -53,7 +73,33 @@ export function SettingsScreen({
   onSelectDelay,
   onExportLogs,
   canExport,
+  voice,
+  voiceError,
+  onVoice,
 }: SettingsScreenProps): JSX.Element {
+  const choice = <T extends string>(
+    rows: readonly { readonly value: T; readonly label: string }[],
+    selected: T,
+    id: string,
+    pick: (value: T) => void,
+  ) =>
+    rows.map((row) => (
+      <View key={row.value}>
+        <View style={[styles.separator, { backgroundColor: palette.separator }]} />
+        <Pressable
+          testID={`${id}-${row.value}`}
+          accessibilityRole="button"
+          accessibilityState={{ selected: selected === row.value }}
+          onPress={() => pick(row.value)}
+          style={styles.row}
+        >
+          <Text style={[styles.rowLabel, { color: palette.label }]}>{row.label}</Text>
+          {selected === row.value ? (
+            <Text style={[styles.check, { color: palette.accent }]}>✓</Text>
+          ) : null}
+        </Pressable>
+      </View>
+    ));
   return (
     <ScrollView
       testID="settings"
@@ -99,6 +145,34 @@ export function SettingsScreen({
         <Text testID="settings-error" style={[styles.notice, { color: palette.danger }]}>
           {error}
         </Text>
+      )}
+      {voice === undefined || onVoice === undefined ? null : (
+        <>
+          <Text style={[styles.sectionHeader, { color: palette.secondaryLabel }]}>Voice</Text>
+          <View style={[styles.group, { backgroundColor: palette.card }]}>
+            <View style={styles.row}>
+              <Text style={[styles.rowLabel, { color: palette.label }]}>Read replies aloud</Text>
+              <Switch
+                testID="voice-read-aloud"
+                accessibilityLabel="Read replies aloud"
+                value={voice.readAloud}
+                onValueChange={(readAloud) => onVoice({ ...voice, readAloud })}
+              />
+            </View>
+            {choice(LANGUAGE_ROWS, voice.language, "voice-language", (language) =>
+              onVoice({ ...voice, language }),
+            )}
+            {choice(RATE_ROWS, voice.rate, "voice-rate", (rate) => onVoice({ ...voice, rate }))}
+          </View>
+          <Text style={[styles.footnote, { color: palette.secondaryLabel }]}>
+            Dictation and speech run on this iPhone. Audio never leaves it and is never saved.
+          </Text>
+          {voiceError === undefined ? null : (
+            <Text testID="voice-error" style={[styles.notice, { color: palette.danger }]}>
+              {voiceError}
+            </Text>
+          )}
+        </>
       )}
       <Text style={[styles.sectionHeader, { color: palette.secondaryLabel }]}>Diagnostics</Text>
       <View style={[styles.group, { backgroundColor: palette.card }]}>

@@ -370,7 +370,131 @@ In dependency order. Everything is in `apps/mobile/`; nothing outside it except 
 
 ## Execution
 
-*(empty: not started; Implementation awaits owner approval)*
+*— claude-opus-5-5, 2026-11-15*
+
+### Load-bearing check (re-run first)
+
+- **Header half: holds.** Re-grepped against the SDK on this machine, `iPhoneOS27.1.sdk`.
+  - `SFSpeechRecognitionRequest.h:63,65`: `requiresOnDeviceRecognition` is honoured only if `supportsOnDeviceRecognition` is true.
+  - `SFSpeechRecognizer.h:162,164`: with `supportsOnDeviceRecognition` false, the recognizer "requires a network".
+  - `addsPunctuation` is at `:72`.
+  - `Speech.swiftinterface`:
+    - `actor SpeechAnalyzer` `:228`; `class SpeechTranscriber` `:346`, with `.progressiveTranscription` `:353`, `.volatileResults` `:378` and `isAvailable` `:408`;
+    - `class DictationTranscriber` `:70`;
+    - `AssetInventory`: `maximumReservedLocales` / `reservedLocales` / `reserve` / `status` / `assetInstallationRequest` `:34-57`;
+    - `bestAvailableAudioFormat` `:254`.
+- **Step 0 (a)(b)(c): NOT RUN.** There is no device or simulator in this executor's reach.
+  - The real-device checklist is in `modules/tentacle-speech/README.md`.
+  - Until (a) is known, the iOS 18 phone path is unverified. The code still cannot go to the network: the TS refusal and the Swift refusal are both tested (see Mutations).
+
+### As built, in plan order
+
+**Slice 1: read-aloud (DONE, except the native run).**
+
+- `src/speakable.ts`, a walk of `Parsed`:
+  - a code block becomes "code block, N lines[, lang]" (it/en);
+  - a table is summarised, a link keeps its text, a bare URL is read as "link";
+  - emoji and box-drawing characters are stripped;
+  - utterances are split at 600 characters at a sentence boundary;
+  - a `chunked` row ends with "message truncated".
+- `src/speech-language.ts`: `detectLanguage`, with a margin of 2, and `pickVoice`.
+- `src/read-aloud.ts`: the reducer, plus `readAloudOffered`, `streamingRowKey`, `speechRequest`, `autoReadRow` and `spokenAsk`.
+- The native module is in `modules/tentacle-speech/`:
+  - `ios/SpeechCore.swift`: the session, permissions, capabilities, `AVSpeechSynthesizer`, the interruption and route observers, and haptics;
+  - `ios/TentacleSpeechModule.swift` (the Expo glue), `ios/TentacleSpeech.podspec`, `expo-module.config.json`;
+  - `src/speech-native.ts` (the port) and `src/speech-native-expo.ts`.
+- UI: `Icon.tsx` (+5 names), `TranscriptRow.tsx` (`assistant-speak` / `assistant-speak-stop`), `SessionScreen.tsx`.
+
+**Slice 2: dictation (DONE, except the native run).**
+
+- `ios/RecognizerEngine.swift` (iOS 18, on device only, 50 s rollover) and `ios/AnalyzerEngine.swift` (iOS 26).
+- `app.json`:
+  - the same dictation string goes into **both** `microphonePermission`s;
+  - the plugin `./modules/tentacle-speech/app.plugin.js` is registered and writes `NSSpeechRecognitionUsageDescription`.
+- `test/pairing-guards.test.ts` is rewritten (Design §6), plus a plugin test.
+- `src/speech-engine.ts`, `src/voice-permission.ts`, `src/speech-locale.ts`, `src/dictation.ts`.
+- `src/voice-controller.ts`.
+- `ui/Composer.tsx` gets the mic button: `composer-mic` / `composer-mic-listening`, an accent border while listening, and a level-driven waveform.
+- SessionScreen gets the `voice-card` / `voice-card-settings` Banner and the `voice-notice` line.
+
+**Slice 3: settings and polish (PARTIAL).**
+
+- Done:
+  - `src/voice-settings-store.ts` (store and holder) and `src/voice-settings-expo.ts`;
+  - the `SettingsScreen.tsx` Voice card: `voice-read-aloud`, `voice-language-*`, `voice-rate-*`, the footnote and `voice-error`, wired in `App.tsx`;
+  - auto-read and the spoken ask (in the controller, gated in `read-aloud.ts`);
+  - the module README with the checklist;
+  - `changelog.d/mobile-voice.added.md`.
+- **Not done: the Maestro flows 24, 25 and 26.**
+  - They need a dev build that contains the new native module (prebuild, pod install, xcodebuild) and a `simctl privacy` harness hook.
+  - Neither can be produced or verified here, and an unrun flow proves nothing (`e2e-flows.test.ts` rules).
+  - To verify: build the dev client, then add the three flows against the testIDs above.
+
+**F3 (plist).** `bunx expo config apps/mobile --type introspect --json`, which runs every plugin mod, produced:
+
+```
+"NSMicrophoneUsageDescription":"tentacle uses the microphone only while you dictate a message; audio stays on this iPhone"
+"NSSpeechRecognitionUsageDescription":"tentacle turns your speech into text on this iPhone, for the message you are writing"
+```
+
+(The camera, Face ID, local-network and photo keys are unchanged.)
+
+**Swift.** The three engine files typecheck with no errors and no warnings:
+
+```
+$ xcrun -sdk iphoneos swiftc -typecheck -swift-version 5 -target arm64-apple-ios18.0 SpeechCore.swift RecognizerEngine.swift AnalyzerEngine.swift
+TYPECHECK_OK
+```
+
+`TentacleSpeechModule.swift` imports ExpoModulesCore, so it was checked against the expo-modules-core 58 sources by reading only, not compiled. That covers `Exception(name:description:code:)`, `runOnQueue` (async only, so the sync commands hop with `DispatchQueue.main.async`) and `OnCreate`. **To verify:** run a dev-client build.
+
+### Red → green and mutations
+
+| Target | Mutation / red | Result |
+|---|---|---|
+| `pairing-guards` agreement test | written before the `app.json` change | RED: `Expected: "string"  Received: "boolean"`, then green |
+| same | `expo-image-picker` mic back to `false` | 1 fail (agreement test) |
+| `speakable` (the plan's target) | speak `block.text` for a code block | 4 fail (all "code block" tests) |
+| `speech-engine` F1 (the plan's target) | drop the `onDevice` check | 2 fail (both F1 tests) |
+| `read-aloud` | drop the `event.id` check | 1 fail ("late 'stopped' does not idle the new one") |
+| `read-aloud` spoken ask | add `detail` to the template | 1 fail ("never the detail or input") |
+| `dictation` | append volatile instead of replacing it | 1 fail |
+| `dictation` F11 | `stopSpeaking` after `start` | 6 fail |
+| `voice-controller` F13 | no `unsubscribePort()` in dispose | 1 fail |
+| `voice-wiring` (Swift F1) | `requiresOnDeviceRecognition = false` | 1 fail |
+
+Every mutation was reverted and the file re-run green. The new modules are features, not fixes, so for them "red" means the mutations above. Their tests could not be red on an assertion before the module existed.
+
+### Drift from the Implementation (and why)
+
+1. **`speak` and `speech` events carry an `id`.** Without it, switching rows lets the old speech's late `stopped` idle the new one.
+2. **`speak` carries `lang` / `language`.** AVSpeech needs a language when `pickVoice` returns `undefined` (F10).
+3. **The port gains `reserveLocale`, and `installAsset(engine, locale)`.** The reducer gains a `reserve` effect and a `reserved` event. F5's fallback needs a TS seam. Capabilities also report `dictationAssets`, because the two iOS 26 models have separate assets.
+4. **`probe` effect / `probed` event; `startFailed` in `asking`.** The capabilities read is a reducer effect, not controller logic, and a throw never leaves the state at `asking`.
+5. **`finalizing.then` became `finalizing.after`.** Biome's `noThenProperty` rule.
+6. **Send semantics:**
+   - an interruption or route change never sends, even mid-`finalizing{send}`;
+   - F9 ("no send") applies to a tap-stop;
+   - an explicit Send with no new speech still goes to `composerAction`, which decides.
+7. **Recognizer error 1110 ("no speech") ends as `stopped`, not `error`.** It is a quiet end and needs no failure card.
+8. **Swift is split into three engine files plus the glue**, so the engines typecheck without Expo. The podspec sits in `ios/` (the Expo local-module convention). There is no `modules/…/index.ts`: the adapter is `src/speech-native-expo.ts`, which uses `requireOptionalNativeModule`. On a build without the module the mic and speaker buttons are hidden.
+9. **New pure modules:**
+   - `voice-view.ts`: the SessionScreen projection plus `endedTurn`, so the screen holds no branching (§7);
+   - the settings holder;
+   - `voice-settings-expo.ts`, so `pairing-guards`' Keychain-importer list now has three wiring files, sorted.
+10. **Auto-read's own-turn gate** uses `TurnRow.own` (`transcript-rows.ts:87`). It was cheap, so it was kept.
+11. **`deviceLocales`** is `Intl…resolvedOptions().locale`, a single locale, because `expo-localization` is not a dependency.
+12. **The spoken ask caps the title at 80 characters.**
+13. **Not built:** Owner Q3's long-press one-shot language switch (debt), and the Maestro flows (above).
+14. **Side effect (Android, out of scope).** A string `microphonePermission` makes expo-image-picker add `android.permission.RECORD_AUDIO` (`withImagePicker.js:36-44`); `introspect` now lists it. The app is iOS-first and the module is iOS-only.
+15. **Unverified:** whether `SpeechAnalyzer` needs Speech authorization. Both permissions are requested anyway, as the plan says.
+
+### Gate
+
+`bun run typecheck` (root, `apps/mobile`, `apps/relay`) is clean. `bun run lint`: `Checked 1457 files … No fixes applied`, 0 errors. `bun test`: **10480 pass, 4 skip, 0 fail**.
+- 3 of the skips are the baseline opt-ins.
+- The 4th is the pre-existing docker opt-in `packages/cli/test/session-hop.docker.test.ts:248` (`TENTACLE_DOCKER_TESTS`). None are in `apps/mobile`.
+- No schema changed, so there is no `protocol.json` regeneration and no `protocol.d/` note.
 
 ## Review
 

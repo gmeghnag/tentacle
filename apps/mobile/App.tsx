@@ -106,6 +106,8 @@ import { createSwitcherCover } from "./src/switcher-cover.ts";
 import { type Palette, paletteFor } from "./src/theme.ts";
 import { GlassButton } from "./src/ui/GlassButton.tsx";
 import { ScreenHeader } from "./src/ui/ScreenHeader.tsx";
+import { VOICE_SETTINGS } from "./src/voice-settings-expo.ts";
+import type { VoiceSettings } from "./src/voice-settings-store.ts";
 
 const Stack = createNativeStackNavigator<RootStackParams>();
 
@@ -940,6 +942,20 @@ function AppShell(): JSX.Element {
     });
   }, []);
 
+  // Voice settings (docs/feat/mobile-voice.md Design §3): one in-memory copy,
+  // loaded once; a write that did not land leaves it unchanged and says so.
+  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(() => VOICE_SETTINGS.current());
+  const [voiceError, setVoiceError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const unsubscribe = VOICE_SETTINGS.subscribe(setVoiceSettings);
+    void VOICE_SETTINGS.load();
+    return unsubscribe;
+  }, []);
+  const selectVoice = useCallback((next: VoiceSettings) => {
+    setVoiceError(undefined);
+    VOICE_SETTINGS.set(next).catch(() => setVoiceError("That voice setting didn't save"));
+  }, []);
+
   // The switcher cover follows the setting (Owner Q2): on for everything but
   // `never`, and on while the setting is still loading (fail-closed).
   useEffect(() => {
@@ -1288,6 +1304,9 @@ function AppShell(): JSX.Element {
                 onSelectDelay={selectDelay}
                 onExportLogs={exportLogs}
                 canExport={!exporting}
+                voice={voiceSettings}
+                {...(voiceError === undefined ? {} : { voiceError })}
+                onVoice={selectVoice}
               />
             )}
           </Stack.Screen>
