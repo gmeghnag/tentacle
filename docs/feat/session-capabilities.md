@@ -978,3 +978,35 @@ showed agent.ts, compact.ts and subagent.ts byte-identical.
   exists, its text matching the doc's metadata line, so S2 added none.
 
 **S2: DONE.** S3a/S3b/S4/S5: not started (out of scope).
+
+## Review
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; same model as the S2 executor, so shared blind spots may survive. Scope: S2, `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES.** Both findings are test gaps on a guard path. The code is right; nothing pins two of its sites.
+
+1. **MEDIUM: the execution guard in `runGroup` is unpinned** (`packages/agent/src/agent.ts:2170-2172`). Mutation MB dropped `capabilities: hooks.capabilities` from the group `authorizeCall`, and all **11/11 tests stayed green**. That path is the production default: `DEFAULT_TOOL_EXECUTION = "read-only"` with `maxParallel 8` (`packages/config/src/defaults.ts:88-90`), so read-class calls in one round are grouped. Scenario: the model sends `skill{name:"k8s"}` (disabled) next to an `fs_read`. If someone drops that line later, the hidden skill's body loads with no red test. Fix: add a test with `toolExecution: {mode:"read-only", maxParallel:2}` and two calls in one round. One is hidden, and it must come back "turned off" and never run.
+2. **MEDIUM: the `/compact` call site of the carry-over filter is unpinned** (`packages/agent/src/session.ts:343-347`). Mutation ME passed `[]` instead of `disabledSkills`, and the S2 file plus `session.test.ts` stayed **22/22 green**. Execution says "`/compact` uses the same `carryOverSkills` path, unit-pinned", but only the function is pinned, not the caller. Scenario: a regression there carries a disabled skill's full body verbatim into the compacted history (F12). Fix: drive `Session.compact()` once with `k8s` active and disabled, and assert that `BODY:k8s` is not in the new history.
+
+**Gate (narrow, as scoped):**
+- `bun test` on `agent-capabilities` + `capabilities` + `compact`: 62 pass / 0 fail.
+- `bun run lint`: 1658 files, no fixes (baseline clean).
+- `bun run typecheck`: clean.
+- I did not re-run the full suite.
+
+**Mutations, each reverted with the Edit tool** (`cmp` against the backups is identical, `git status` clean):
+- MB: survived (finding 1).
+- MC (no snapshot on the single-call path): RED 9/2.
+- ME: survived (finding 2).
+- The executor's M1–M9 are not re-run.
+
+**Attacks tried:**
+- Another request builder that bypasses the projection: none. Grep `.stream(`/`definitions()`. The step-limit final request is projected. Compaction sends `tools: []` and no system message. The title request runs daemon-side with no tools.
+- Is the catalog drift after a user rescan closed? Yes: `catalogSkills` is set only in the constructor and `installSkills`.
+- Is the anchor identity broken by `projectedHistory`? No, only index 0 is copied.
+- Do sub-agents follow the parent live? Yes: the wiring passes the closure `agent.capabilities()`.
+- Does a resumed round skip the guard? Yes, on purpose (F2), and the plan agrees.
+
+**Nit, not blocking:** `estimateUsed` with a valid anchor reuses its `promptTokens` (`context-awareness.ts:111-113`). The estimate does not drop after a toggle until the next real request reports usage. The exact count path is right.
+
+**Executor behaviour:** it was disciplined. It corrected S1's wrong "no system prompt" note, mutation-tested nine properties and tightened M9 after it survived. It overstated one coverage claim (finding 2).
