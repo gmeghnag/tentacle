@@ -9,7 +9,7 @@
  * architecture shows XCUITest no text).
  */
 import type { JSX } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import type { LockDelay, LockNotice } from "../app-lock.ts";
 import type { Palette } from "../theme.ts";
 
@@ -20,6 +20,16 @@ export const DELAY_ROWS: readonly { readonly value: LockDelay; readonly label: s
   { value: "1h", label: "After 1 hour" },
   { value: "never", label: "Never" },
 ];
+
+/** What the Notifications row shows: precomputed by `push-registration.ts`. */
+export interface NotificationsRow {
+  /** The person's toggle. */
+  readonly enabled: boolean;
+  /** Why it is or is not on, for the sub-line (never a bare "off"). */
+  readonly detail: string;
+  /** False when nothing can be done from here (`daemon too old`, no permission). */
+  readonly switchable: boolean;
+}
 
 export interface SettingsScreenProps {
   readonly palette: Palette;
@@ -41,6 +51,14 @@ export interface SettingsScreenProps {
   readonly onExportLogs: () => void;
   /** False while an export is in flight (a double tap must not write twice). */
   readonly canExport: boolean;
+  /**
+   * The Notifications row (docs/feat/mobile-push.md P9, Owner Q7): on/off plus the
+   * reason, next to the lock settings. ONE row for the phone (the toggle reaches
+   * every paired computer), so it is always present — with nothing paired it says
+   * what to do about it, and its switch is disabled.
+   */
+  readonly notifications?: NotificationsRow;
+  readonly onToggleNotifications?: (enabled: boolean) => void;
 }
 
 export function SettingsScreen({
@@ -53,6 +71,8 @@ export function SettingsScreen({
   onSelectDelay,
   onExportLogs,
   canExport,
+  notifications,
+  onToggleNotifications,
 }: SettingsScreenProps): JSX.Element {
   return (
     <ScrollView
@@ -100,6 +120,28 @@ export function SettingsScreen({
           {error}
         </Text>
       )}
+      <Text style={[styles.sectionHeader, { color: palette.secondaryLabel }]}>Notifications</Text>
+      <View style={[styles.group, { backgroundColor: palette.card }]}>
+        <View style={styles.row}>
+          <View style={styles.rowText}>
+            <Text style={[styles.rowLabel, { color: palette.label }]}>Notifications</Text>
+            <Text
+              testID="notifications-detail"
+              style={[styles.detail, { color: palette.secondaryLabel }]}
+            >
+              {notifications === undefined
+                ? "Pair a computer to get notified when it needs you"
+                : notifications.detail}
+            </Text>
+          </View>
+          <Switch
+            testID="notifications-toggle"
+            value={notifications?.enabled === true}
+            disabled={notifications === undefined || !notifications.switchable}
+            onValueChange={(enabled) => onToggleNotifications?.(enabled)}
+          />
+        </View>
+      </View>
       <Text style={[styles.sectionHeader, { color: palette.secondaryLabel }]}>Diagnostics</Text>
       <View style={[styles.group, { backgroundColor: palette.card }]}>
         <Pressable
@@ -144,6 +186,8 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
   },
   rowLabel: { fontSize: 16 },
+  rowText: { flex: 1, paddingRight: 12 },
+  detail: { fontSize: 12, marginTop: 2 },
   check: { fontSize: 16, fontWeight: "600" },
   pending: { fontSize: 12, color: "#8E8E93" },
   separator: { height: StyleSheet.hairlineWidth, marginLeft: 16 },

@@ -272,3 +272,83 @@ describe("the Keychain computer store", () => {
     ]);
   });
 });
+
+describe("the push registration fingerprint (docs/feat/mobile-push.md P9)", () => {
+  test("setPush remembers it, and get() HANDS IT BACK (mutation: drop it from storedComputerOf → red)", async () => {
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.add(computer("a"), "priv-a");
+    await s.setPush("a", { hash: "64:aaa|7:sandbox|43:kkk", registeredAt: 1_700 });
+    const read = await s.get("a");
+    expect(read?.push).toEqual({ hash: "64:aaa|7:sandbox|43:kkk", registeredAt: 1_700 });
+    // The public half never carries it: a list row cannot leak a fingerprint.
+    const listed = await s.list();
+    expect(listed[0]?.state === "paired" && "push" in listed[0].computer).toBe(false);
+  });
+
+  test("setPush(undefined) forgets it and keeps every other field", async () => {
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.add(computer("a"), "priv-a");
+    await s.setPush("a", { hash: "h", registeredAt: 2 });
+    await s.setPush("a", undefined);
+    const read = await s.get("a");
+    expect(read?.push).toBeUndefined();
+    expect(read?.deviceKey).toBe("priv-a");
+    expect(read?.addresses).toEqual(["ws://127.0.0.1:4000/e2e"]);
+  });
+
+  test("setPush for an id the index does not list writes NOTHING (no orphan item)", async () => {
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.setPush("ghost", { hash: "h", registeredAt: 3 });
+    expect(kv.items.get(computerKeyOf("ghost"))).toBeUndefined();
+  });
+
+  test("a malformed stored fingerprint is DROPPED, and the computer still loads", async () => {
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.add(computer("a"), "priv-a");
+    const raw = JSON.parse(kv.items.get(computerKeyOf("a")) ?? "{}") as Record<string, unknown>;
+    kv.items.set(computerKeyOf("a"), JSON.stringify({ ...raw, push: { hash: 7 } }));
+    const read = await s.get("a");
+    expect(read?.push).toBeUndefined();
+    expect(read?.deviceKey).toBe("priv-a");
+  });
+
+  test("an `off` DEBT round-trips through the store (mutation: return only `{hash, registeredAt}` → red)", async () => {
+    // Review round 2, R2-1: the toggle-off while a computer is not connected
+    // stores `{hash:"", registeredAt, off:true}`, and this reader used to
+    // rebuild the record WITHOUT `off`, so the debt was invisible in the app and
+    // the daemon kept pushing to a phone whose owner said stop. The type gap is
+    // why TS was silent; this test is the contract that closes it.
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.add(computer("a"), "priv-a");
+    await s.setPush("a", { hash: "", registeredAt: 9, off: true });
+    expect((await s.get("a"))?.push).toEqual({ hash: "", registeredAt: 9, off: true });
+  });
+
+  test("an `off` that is not exactly `true` is not invented into a debt", async () => {
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.add(computer("a"), "priv-a");
+    const raw = JSON.parse(kv.items.get(computerKeyOf("a")) ?? "{}") as Record<string, unknown>;
+    kv.items.set(
+      computerKeyOf("a"),
+      JSON.stringify({ ...raw, push: { hash: "h", registeredAt: 1, off: "yes" } }),
+    );
+    // Readable, but not this build's debt: an unregister nobody asked for is a
+    // bug of its own, so the field is dropped rather than coerced.
+    expect((await s.get("a"))?.push).toEqual({ hash: "h", registeredAt: 1 });
+  });
+
+  test("a RE-PAIR forgets the fingerprint: the device id changed, so the old one means nothing", async () => {
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.add(computer("a"), "priv-old");
+    await s.setPush("a", { hash: "h", registeredAt: 4 });
+    await s.add(computer("a"), "priv-new");
+    expect((await s.get("a"))?.push).toBeUndefined();
+  });
+});

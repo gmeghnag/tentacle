@@ -2381,3 +2381,661 @@ lead the link's handling of `ready`, so the push may sometimes take the hold bra
 this test red shows the race happens. When it does, the flush refuses at once, so the real code is green
 either way, but B can then survive in that run. To make B's pin deterministic, wait on
 `h.link.isConnected()` instead.
+## Execution
+
+### P9 (app: registration, push key, permission, Settings row) — DONE
+
+*— claude-sonnet-4-5 (the model id this environment reports for me), 2026-11-15*
+
+**Load-bearing check, re-run first: PASS.**
+`.tentacle/tmp/mobile-push/p9-load-bearing.ts` (gitignored scratch in THIS
+worktree — the write guard refuses the repo root), 21 checks, `LOAD-BEARING:
+PASS`. P9's own assumption is *"the app can send `device/push_register` over the
+ONE `RemoteClient` stack, its per-computer memory can live in the computer's
+existing Keychain record, and the push key can be shared with task 17's
+extension without a second Keychain seam"*. What the check proved, and the one
+item that had to be FIXED before any code:
+
+```
+PASS apps/mobile/package.json has NO expo-notifications
+PASS apps/mobile/app.json has NO expo-notifications plugin
+PASS apps/mobile/app.json has NO aps-environment entitlement
+PASS RemoteClient has NO device/push_register method today
+PASS RemoteClient's request helper `call` is PRIVATE (a new method is required)
+PASS protocol has DevicePushRegisterParamsSchema
+PASS protocol has the four register statuses
+FAIL apps/mobile/package.json has NO @noble/curves (plan said 'already a dependency')
+     — the app has @noble/hashes only
+PASS @tentacle/transport/push publicKeyOf(32 bytes) → a 32-byte X25519 public key
+PASS computer-store's storedComputerOf validates field by field (drops unknown keys)
+PASS a field written but not validated is DROPPED by store.get — ["id","name",
+     "computerKey","addresses","deviceName","pairedAt","deviceKey"]
+PASS runPairing resolves { ok: true, computerId } after the record is stored
+PASS App.tsx's Pair route has the onDone(computerId) hook
+PASS SecureKV.set takes keychainAccessible only (no access group)
+PASS expo-secure-store DOES support an accessGroup option
+PASS secure-kv names AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY
+PASS SettingsScreen has NO notifications row today
+PASS expo-notifications is NOT installed in apps/mobile
+PASS expo-notifications 58.1.9 is the SDK-58 line
+```
+
+Three findings, all reconciled as DRIFT below, none of them a stopping
+condition on its own: (1) the plan's Preconditions say `@noble/curves` is
+"already a dependency" of the app — it is **not**, but `@tentacle/transport/push`
+(an existing workspace dependency) exports `publicKeyOf`, which is the same
+X25519 the daemon seals with, so the push key needs no new dependency at all;
+(2) `RemoteClient.call` is private, so a client **method** is unavoidable (the
+slice's file list does not name `packages/client`); (3) the computer store's
+reader rebuilds the record field by field, so a "last registered" field must be
+taught to BOTH sides or it is silently dropped — proved with the real store, not
+by reading it (the `pushHash` line above).
+
+**Files.** `apps/mobile/src/push-registration.ts` (new: the pure decisions +
+the one runner), `push-key.ts` (new), `push-expo.ts` (new: the ONE
+`expo-notifications` import), `push-manager.ts` (new: the wiring seam, so
+`App.tsx`'s side is testable at all), `computer-store.ts` (`setPush` +
+`StoredComputer.push`), `secure-kv.ts` (`pushKeychain`, the shared-group
+adapter), `screens/SettingsScreen.tsx` (the row), `pairing-flow.ts`
+(`onPaired`), `App.tsx` (the manager, the link-up sync, the pairing hook, the
+Settings row), `package.json` + `app.json` + `bun.lock` (dependency, plugin,
+entitlements), and — a slice-external but load-bearing addition —
+`packages/client/src/remote-client.ts` (`pushRegister` / `pushUnregister`).
+Tests: `apps/mobile/test/push-registration.test.ts` (25),
+`push-manager.test.ts` (15), `push-key.test.ts` (7),
+`push-expo-rules.test.ts` (6), `push-wiring-guards.test.ts` (9),
+`computer-store.test.ts` (+5), `pairing-flow.test.ts` (+2),
+`pairing-e2e.test.ts` (+1, against a real daemon), `pairing-guards.test.ts` (+2,
+the plist entries), `packages/client/test/push-register.test.ts` (5).
+Changelog: `changelog.d/mobile-push-app.added.md`.
+
+**As built, in dependency order.**
+
+1. **Client seam.** `RemoteClient.pushRegister(params)` /
+   `pushUnregister()` — thin `this.call(this.peer, Method.DevicePushRegister, …)`
+   wrappers, modelled exactly on `mcpStatus` / `sessionTtl` (including their
+   `!this.up && this.channelFactory` guard). No new transport, no second session
+   path (§7), and the peer's own schemas validate both ends. RED first: all 5
+   tests failed on `client.pushRegister is not a function`, then green.
+2. **Store memory.** `StoredComputer.push` + `ComputerStore.setPush(id, value)`.
+   `setPush` rewrites the whole item (SecureStore has no partial write), refuses
+   an id the index does not list (never resurrects an orphan), and leaves an
+   unreadable item alone. A malformed `push` field is DROPPED, not a
+   `StoreUnreadable`: a stale fingerprint costs one re-registration, whereas
+   rejecting the record would cost the person a re-pair. **`add()` deliberately
+   writes no `push`**: a re-pair keeps the id but replaces the device key, so the
+   daemon knows this phone under a new device id with no registration — keeping
+   the fingerprint would mute the phone forever. Pinned by a test ("a RE-PAIR
+   forgets the fingerprint").
+3. **`push-registration.ts`.** `pushFactsHash` (length-prefixed `(token, env,
+   key)`), `planPushRegistration` (disabled → daemon-too-old → no-permission →
+   no-token → same → register), `phaseOfStatus`, `isDaemonTooOld` (the exact
+   `-32601`, never a message match), `pushPhaseText`,
+   `shouldAskNotificationPermission`, and `createPushRegistrar` (one serialised
+   attempt at a time; the fingerprint is written only for an `on` status;
+   `MethodNotFound` sets `daemon-too-old` and later syncs send nothing).
+4. **`push-key.ts`.** One X25519 pair per phone, generated on first use and
+   never rotated; `PUSH_KEY_ITEM = "tentacle.push-key"` (never
+   `tentacle.computer.*`, i.e. not the Noise device key); every read, write and
+   delete carries the **shared access group**, because `kSecAttrAccessGroup` is
+   part of an item's KEY on iOS. `PUSH_KEY_ACCESS_GROUP = "so.tentacle.app"`
+   is asserted against `app.json`'s `keychain-access-groups`.
+5. **`push-expo.ts`.** `getDevicePushTokenAsync` only (decision 19), the token
+   lowercased and re-checked against the wire's `^[0-9a-f]{64,200}$` before it
+   is ever sent, `pushEnvironmentOf(NODE_ENV)` (`sandbox` for a dev build,
+   `production` for a release), `readPermission`/`requestPermission`/
+   `readAsked`, and `readPushFacts`.
+6. **`push-manager.ts`.** A registrar per computer; `sync` (on link-up),
+   `setEnabledForAll` (Settings is ONE screen for the phone), `viewForAll` (the
+   most informative status among the computers wins, because a computer that
+   cannot deliver is the reason nothing arrives), `paired` (the once-only
+   prompt), `forget`. A VIEW never creates a registrar — it reads.
+7. **Settings row.** A `Switch` + a detail line, `testID`s
+   `notifications-toggle` / `notifications-detail`, disabled exactly when
+   flipping it would be a lie (nothing paired; no iOS permission; a daemon too
+   old). The component renders strings it is given; every branch of the copy is
+   `pushPhaseText`.
+8. **App wiring.** One module-level `PUSH` manager; the link-status watcher
+   (rebuilt per computer, `[computerId]`) calls `PUSH.sync` on `up` with
+   `CLIENTS.get(computerId)`; Pair's `onDone` calls `PUSH.paired(computerId,
+   true)` (not awaited); the Settings route passes `notifications={…}` and
+   `PUSH.setEnabledForAll`; a re-pair and a Remove both `PUSH.forget(id)`.
+9. **`app.json`.** The `expo-notifications` plugin (`mode: "development"` for a
+   dev build), `keychain-access-groups` and
+   `com.apple.developer.usernotifications.time-sensitive`. Confirmed with
+   `bunx expo config --type introspect`, not assumed:
+
+```
+entitlements: {
+  'keychain-access-groups': [ '$(AppIdentifierPrefix)so.tentacle.app' ],
+  'com.apple.developer.usernotifications.time-sensitive': true,
+  'aps-environment': 'development'
+}
+```
+
+**Drift from the Implementation (and why).**
+
+- **D1 — `packages/client/src/remote-client.ts` is a new file in the slice.**
+  The plan's P9 row lists only app files, but `RemoteClient.call` is private and
+  the app has no other way to send the two methods. The alternative (a second
+  `RpcPeer` in the app) would be exactly the second session path §7 forbids.
+- **D2 — `apps/mobile/src/push-manager.ts` is new (the plan named 3 new
+  modules, this is a 4th).** `App.tsx` imports React Native, which Bun cannot
+  parse, so any wiring left there is untestable. The manager is the seam: it
+  makes "the link-up registers", "the row is read-only" and "the toggle reaches
+  every computer" actual unit tests.
+- **D3 — the push key's Keychain surface lives in `secure-kv.ts`, not
+  `push-expo.ts`.** `pairing-guards.test.ts` pins that exactly one adapter file
+  imports `expo-secure-store` (a second file is a second place a security option
+  can be dropped). `push-expo.ts` therefore imports `pushKeychain` from
+  `secure-kv.ts` and adds no third importer.
+- **D4 — no `@noble/curves` dependency was added.** The plan's Preconditions
+  said the app already had it; it does not. It was not needed: the X25519 public
+  key comes from `@tentacle/transport/push`'s `publicKeyOf`, the same function
+  the daemon seals with, so the phone's declared public key cannot disagree with
+  what the daemon derives.
+- **D5 — the Settings row is ONE row for the phone, not one per computer.** The
+  plan says "Settings gets a Notifications row … next to task 14's lock
+  settings", and Settings is one global screen. The toggle therefore reaches
+  every paired computer (`setEnabledForAll`), and the detail line is the most
+  informative status among them. A per-computer row would have needed a new
+  Settings sub-screen, which the slice does not ask for.
+- **D6 — the permission prompt is fired from `App.tsx`'s `onDone`, and
+  `pairing-flow.ts` only gained an `onPaired` hook.** The plan says "pairing
+  success hook in `apps/mobile/src/pairing-flow.ts`". The ORDER decision (after
+  the record is stored, after `done`, never awaited, never a reason to fail a
+  pairing) is in `pairing-flow.ts` and pinned by two tests (one from a real
+  daemon: the record is already readable when the hook runs). The ACT (an OS
+  prompt) is `App.tsx`'s, because `pairing-flow.ts` must stay native-free — its
+  own guard test asserts it imports neither `react-native` nor `expo-camera`.
+- **D7 — `PushFacts` is re-read on every sync, and the environment comes from
+  `process.env.NODE_ENV`.** The plan says the env follows the build but does not
+  name the source; Metro inlines `NODE_ENV`, and the plugin's `mode` is the same
+  fact at build time, so the two are provably the same decision.
+- **D8 — a REFUSED status is not remembered.** The plan says "register when
+  `(token, env, pushKeyPublic)` differs from what was last registered"; writing
+  the fingerprint for `relay-no-push` would mean a relay that later gets its
+  APNs key is never retried. Only an `on` is remembered (F3/F4).
+
+**Mutations — the plan's P9 targets, all six RED on the assertion**
+(`sh .tentacle/tmp/mobile-push/p9-mut.sh`, one in-place edit per row, then the
+file restored and `cmp`-verified; the last two were re-pointed after the
+formatter moved the anchor — see the note below).
+
+| # | Mutation (one line) | Result |
+|---|---|---|
+| M1 | `planPushRegistration` never returns `same` | **RED 7** — incl. "the SAME fingerprint → skip `same`", "two syncs send ONE register", "concurrent syncs do not double-register", "a registration stored by an EARLIER app run is honoured" |
+| M2 | `isDaemonTooOld` always `false` | **RED 2** — "MethodNotFound → `daemon too old`, and later syncs send NOTHING", "the exact code, not a message match" |
+| M3 | `ensurePushKeypair` reads WITHOUT the shared group | **RED 3** — "a second call returns the SAME key", "every call carries the SHARED access group", "the default group is the bundle id" |
+| M4 | App's link-up handler never registers | **RED 1** — "the link-up handler syncs that computer" |
+| M5 | the runner remembers a REFUSED status too | **RED 1** — "a REFUSED status is not remembered, so the next connect asks again" |
+| M6 | `viewForAll` takes the FIRST computer's state | **RED 1** — "a computer that cannot deliver OUTRANKS one that can" |
+
+Two more, outside the script (each restored with `cmp`):
+
+| # | Mutation | Result |
+|---|---|---|
+| H1 | `onPaired` fires BEFORE the Keychain write (`pairing-e2e.test.ts`, real daemon) | **RED 1** — `paired` ran with the record still `missing` |
+| J1 | the `expo-notifications` plugin removed from `app.json` | **RED 1** — "the expo-notifications plugin is registered, and it writes `aps-environment`" |
+
+**A mutation that first SURVIVED, and what it means (honest note).** M5's first
+run applied cleanly, `bun test` reported 56 pass / 0 fail — a true survivor
+would mean the "do not remember a refusal" property is unpinned. It was not: the
+first script's `str.replace` anchor still carried the pre-`biome --write` text
+(`await deps.memory.write(...)` on one line), so the edit never landed and the
+"survivor" was the unmutated file. Re-pointed at the formatted text, it is RED
+on exactly the one test that names it (shown above). The same class of mistake
+is why M6 was also re-verified after formatting; every row above was re-run
+against the file as it now stands.
+
+**Acceptance checks the plan names, run.**
+`push-registration`: "registers once per (token, env, key) per computer" ✔
+(2 tests + M1), "a token change → re-register" ✔, "`MethodNotFound` → `daemon
+too old` with no retry loop" ✔ (+M2), "toggle-off → unregister" ✔ (also asserts
+the fingerprint is cleared, and that off-with-no-link still clears it), "the
+permission prompt only after the first pairing success (pure decision)" ✔
+(`shouldAskNotificationPermission` + the manager's once-only test). The F11/F12
+rotation cases are their own tests, and F16's copy is asserted through
+`pushPhaseText`.
+
+**Gate (this worktree, `feat/mobile-push`, uncommitted — see the branch note).**
+`bunx tsc --noEmit` → exit 0; `bunx tsc -p apps/mobile --noEmit` → exit 0;
+`bunx tsc -p apps/relay --noEmit` → exit 0. `bun run lint` → `Checked 1397
+files … No fixes applied.` (0 errors, 0 warnings — the §6 baseline).
+`bun test` (full) → **10197 pass, 4 skip, 0 fail**, 10201 tests / 733 files,
+407.65 s (`EXIT=0`). The four skips are the documented opt-ins (live-k8s,
+live-docker, the real-socket keepalive) plus `session-hop.docker.test.ts`'s,
+which is pre-existing on `main` and untouched here. No schema change:
+`packages/protocol/schema/protocol.json` is untouched — P2 already exported both
+methods and P9 adds nothing to the wire, so no `protocol.d/` note and no
+`PROTOCOL_VERSION` move.
+
+**Unverified (one line each, and how to check).** (a) A real device build:
+`aps-environment`, the shared keychain group and the extension's read of
+`tentacle.push-key` can only be proved by an Xcode build with the owner's
+profiles (**D2a**), which no executor may do — P10's Maestro flow plus the
+real-iPhone checklist. (b) That `getDevicePushTokenAsync`'s `data` is the raw
+lowercase-hex token in THIS SDK build: P0(d) read it out of the package's own
+Swift (`data.map { String(format: "%02hhx", $0) }`), and `readPushFacts`
+re-checks the SHAPE and reports "no token" rather than send a bad one, but the
+value itself needs a device. (c) `pushKeychain`'s `accessGroup` is accepted by
+`expo-secure-store` at runtime: its Swift (`SecureStoreModule.swift:201-203`)
+writes `kSecAttrAccessGroup`, and `bunx expo config --type introspect` shows the
+entitlement, but only a device build proves the OS accepts the pair.
+
+**Branch note.** Worked on `feat/mobile-push` (this worktree) and never
+committed, per the task prompt's "never git commit" rule; `git status` lists the
+14 modified and 12 new files. The orchestrator decides where they land.
+
+## Review
+
+### P9 — Verdict: REQUEST-CHANGES
+
+*— claude-opus-5-5, 2026-11-15* (fresh context; a different model family from the
+executor, so this is not a same-family review)
+
+**Gate (touched files only, as asked).** `bun test apps/mobile/test
+packages/client/test/push-register.test.ts` → 895 pass / 0 fail. `bun run lint`
+→ 1397 files, clean. `bun run typecheck` → exit 0. I did not re-run the full suite.
+
+**Findings.**
+
+1. **HIGH: turning notifications off does not last past a relaunch.**
+   `push-registration.ts:252` (`deps.initial ?? initialPushState()`) and
+   `push-manager.ts:206` (no `initial` passed). `enabled` exists only in memory,
+   and the off path clears the stored fingerprint (`push-registration.ts:352`).
+   So after a relaunch the registrar starts with `enabled: true` and `last:
+   undefined`, and the next link-up registers again. Repro
+   (`.tentacle/tmp/mobile-push/p9-review.test.ts`, H1): sync → off → new manager
+   on the same store → sync gives `["register","unregister","register"]`. The
+   phone gets buzzed again even though the person turned it off.
+2. **HIGH: turning notifications off while a computer is not connected never
+   unregisters it.** `linkPushSink.unregister` (`push-manager.ts:79-81`) does
+   nothing when `CLIENTS.get(id)` is undefined. `CLIENTS` only holds computers
+   with a live link (`App.tsx:429-436`), so in practice this is every computer
+   except the one on screen. Any error is also swallowed (`push-registration.ts:351`).
+   Every later sync then stops at `skip disabled` (`push-registration.ts:134`),
+   so the daemon keeps its registration and keeps sending pushes. The header
+   comment ("the daemon keeps the file until the next connect") describes a
+   follow-up unregister that does not exist. Repro H2: no `unregister` is ever
+   sent. The test "off with no link still forgets the fingerprint" pins the
+   phone-side half and misses this.
+3. **MEDIUM: turning notifications back on registers nothing until the next
+   reconnect.** `setEnabled(true)` (`push-registration.ts:327-337`) only sets
+   `unknown`, and `App.tsx` `onToggleNotifications` never calls `sync`. With the
+   link already up, the row says "Not checked yet" for as long as the session
+   lasts, and no pushes arrive. The module header (line 24) says "turning it back
+   on registers at once". Repro M: the second `register` is missing.
+4. **MEDIUM: one old daemon locks the whole phone's toggle.** `viewForAll` ranks
+   `daemon-too-old` worst (`push-manager.ts:242`), and `notificationsView` then
+   sets `switchable: false` (`push-manager.ts:110-117`). Settings has only one
+   row, so the person cannot turn off pushes from the other computers that are
+   `on`.
+
+**Mutation (mine).** I removed the fingerprint clear on toggle-off
+(`push-registration.ts:352`): 4 tests went RED. I reverted it, and `git status`
+is clean. The executor's M1–M6 table matches the code I read.
+
+**Attacks that found nothing.** The client methods reuse `call` on the one peer
+(§7 one session path, no new lock, so the peer is not serialized). A re-pair
+drops `push` in `add()`. `isDaemonTooOld` matches `-32601` exactly. The token is
+shape-checked before it is sent. The access group is passed on get, set and delete.
+
+**How the executor behaved.** The execution notes are thorough and honest about
+drift (D1–D8) and about a mutation that first looked like a survivor. But the
+toggle's lifecycle (persistence, and unregister when there is no link) was
+tested only on the phone side, so findings 1 and 2 got through.
+
+### Round 2 — Verdict: REQUEST-CHANGES
+
+*— claude-opus-5-5, 2026-11-15* (fresh context, reviewing `git diff HEAD~1`)
+
+**Gate.** `bun test apps/mobile/test packages/client/test/push-register.test.ts`
+→ 913 pass / 0 fail. `bun run lint` → 1399 files, clean. `bun run typecheck` → exit 0.
+
+**Round-1 findings, each mutated (all reverted; `git status` clean).**
+- H1 (off survives a relaunch): **fixed**. Mutation: drop `toggle.write` → 1 RED.
+- H2 (off with no link): **fixed only against the fake store; still broken in
+  the app** (see finding R2-1). Mutation: skip `keepDebt` → 4 RED, but all four
+  run on the fake store.
+- H3 (back on registers now): **fixed**. Mutation: drop `syncOnce` → 2 RED.
+- H4 (old daemon locks the switch): **fixed**. Mutation: AND in `view.switchable` → 1 RED.
+
+**New findings.**
+
+1. **HIGH: the real Keychain store drops the `off` debt, so H2 is still broken
+   in the app.** `push-registration.ts` writes `{hash:"", registeredAt, off:true}`.
+   But `computer-store.ts` `pushRegistrationOf` (unchanged in this round)
+   rebuilds the record as `{hash, registeredAt}` only, so `off` is lost on every
+   `get`. Then `syncOnce`'s `last?.off === true` never fires, the plan returns
+   `skip disabled`, and the daemon keeps pushing to this phone. The type gap is
+   why this passes: `PushMemoryStore.setPush`'s value type has no `off`, so TS
+   accepts the extra field and the reader quietly drops it. Every H2 test uses a
+   fake memory that stores the object verbatim. Repro (real
+   `createComputerStore` + real `createPushToggleStore`,
+   `.tentacle/tmp/mobile-push/p9-review2.test.ts`): sync → off with no link →
+   the stored push reads back `{"hash":"","registeredAt":…}` → relaunch + sync
+   sends no `unregister`. Fix: teach `pushRegistrationOf` / `PushRegistrationRecord`
+   about `off`, and add a test with the real store.
+2. **MEDIUM: the manager ignores `PushToggleRead.writable`.**
+   `push-manager.ts` `ready()` drops `writable`, and `rememberEnabled` always
+   writes. So a newer build's (unknown-version) or unreadable record gets
+   overwritten. `push-toggle-store.ts`'s header promises "an unknown `v` is never
+   overwritten". Either keep the value in memory only when `writable` is false,
+   or remove the promise.
+
+**Attacks that found nothing.** `ready()` is awaited before every
+manager operation, so a toggle can't race the hydration. `toggleSink` with no
+link leaves a toggle-on as `unknown`, not `failed`. An older daemon's
+`MethodNotFound` on unregister settles the debt without looping. No §7 seam is
+touched: the client methods are unchanged, and the peer is still not serialized.
+
+### Round 3 — Verdict: PASS
+
+*— claude-opus-5-5, 2026-11-15* (fresh context, reviewing `git diff HEAD~1`)
+
+**Gate.** `bun test apps/mobile/test packages/client/test/push-register.test.ts`
+→ 921 pass / 0 fail. `bun run lint` → 1399 files, clean. `bun run typecheck` → exit 0.
+
+**Round-2 findings, each mutated (all reverted; `git status` clean).**
+- R2-1 (the real store dropped the `off` debt): **fixed**. `pushRegistrationOf`
+  now copies `off` when it is `true`, and `PushMemoryStore.setPush` takes the
+  registrar's own `PushRegistration`, so the type gap is closed. Mutation: drop
+  `off` → 3 RED, including an end-to-end test with the real `createComputerStore`.
+  My own real-store repro (`.tentacle/tmp/mobile-push/p9-review2.test.ts`) now
+  passes: the stored value reads back `{…,"off":true}` and the relaunch sends
+  `unregister`.
+- R2-2 (`writable` ignored): **fixed**. `rememberEnabled` returns early when the
+  record is not writable, and `writable` starts `false` (fail-safe). Mutation:
+  remove the guard → 3 RED.
+
+**Regressions checked.** A fresh install (no item) → `writable: true`, so
+H1's persistence still holds (my round-1 repros all pass). `off` is copied only
+for the literal `true`. No §7 seam is touched.
+
+**Non-blocking note.** After a *transient* Keychain read error at launch, a
+toggle-off lasts only for that session (by design: unreadable ⇒ never
+overwritten). Low likelihood; worth a line in the debt notes.
+
+## Execution
+
+### Fix round 1
+
+*— claude-opus-5-5 (the model id this environment reports for me), 2026-11-16*
+
+Scope: the four findings of *Review — P9* (2 HIGH, 2 MEDIUM). All four reproduced
+on the reviewed code before any edit; all four fixed red-before-green; every fix
+mutation-checked (§9), with one mutation (M2) first surviving and answered with a
+test rather than a shrug. Scratch (gitignored, inside THIS worktree — the write
+guard refuses the repo root, as P9's notes found):
+`.tentacle/tmp/mobile-push/fixr1b/` — `mut.sh`, `mut-store.sh`,
+`review-repro.test.ts`.
+
+**Repro before the fix (reviewer's `.tentacle/tmp/mobile-push/p9-review.test.ts`,
+repo root, on the reviewed code — 0 pass / 3 fail):**
+
+```
+(fail) H1: toggle OFF survives an app relaunch
+   Received: [ "register", "unregister", "register" ]
+(fail) H2: toggle OFF while computer not linked unregisters on next connect
+   Expected to contain: "unregister"   Received: [ "register" ]
+(fail) M: toggle back ON with link up registers without a reconnect
+   Expected: [ "register", "unregister", "register" ]   Received: [ "register", "unregister" ]
+```
+
+**After the fix**, the same three shapes (re-expressed in
+`fixr1b/review-repro.test.ts` with the one new REQUIRED dep, `toggle` — that
+requirement IS finding 1's fix) plus H4 pass: `4 pass, 0 fail`.
+
+**H1 (HIGH) — the switch is persisted, so off survives a relaunch.**
+Root cause: `enabled` lived only in a registrar's memory, and the off path cleared
+the stored fingerprint, so a new manager started `enabled: true, last: undefined`
+and re-registered on the next link-up.
+- New `src/push-toggle-store.ts`: ONE versioned Keychain record
+  (`{v:1, enabled}` under `tentacle.push-enabled`), with `lock-settings-store.ts`'s
+  three rules applied to the one item whose DEFAULT decides whether a phone buzzes
+  — absent/unreadable/unknown-version reads **on** (never a silent mute), an
+  unknown `v` is never overwritten, and a write error **rejects** so the caller
+  keeps the decision in memory for the session.
+- `push-manager.ts:195-256`: `deps.toggle` is REQUIRED (no caller can forget it);
+  `ready()` reads it once and every method awaits it (`enabled` is then
+  authoritative for the session); `initialState()` is what each registrar starts
+  from, so the start state is the *phone's* decision, not a hardcoded `true`;
+  `setEnabled`/`setEnabledForAll` call `rememberEnabled` (a failed write is not
+  re-read, exactly like the app-lock setting's preserved-record rule).
+- `App.tsx:979,994-999,1282,1414`: `PUSH.ready()` gates the row
+  (`notificationsForSettings` = `pushReady ? notificationsRow : undefined`), so
+  no first frame claims `on` to someone who turned it off.
+- Also fixed in passing: `viewForAll` reported `enabled` from
+  `states.some(…)`, so a stable "on" for a computer whose link never came up
+  (`initialPushState()`) — it now reports the phone's own decision.
+
+**H2 (HIGH) — an unregister that could not be sent is a DEBT, not a success.**
+Root cause: `linkPushSink.unregister` was `await link()?.pushUnregister()`, which
+*resolves* with no client, and the registrar swallowed every error
+(`.catch(() => {})`); the fingerprint was then cleared, so nothing later told the
+daemon and it kept pushing.
+- `push-manager.ts:82-92`: `unregister` THROWS when there is no client, like
+  `register` already did.
+- `push-registration.ts`: `PushRegistration.off?: true` is the debt record
+  (empty `hash`, so turning it back on still registers); `settleOff`
+  (:331-361) sends the unregister when a sink exists and writes the debt when it
+  does not or the call failed; `settleDebt` (:367-380) drains it on the next
+  connect and clears it **only** once the daemon really was told; `syncOnce`
+  (:382-401) drains the debt FIRST and then carries on, so a person who turned it
+  back on while the computer was away gets their registration in that same
+  connect. A `MethodNotFound` settles the debt (an older daemon never accepted a
+  registration — no loop, F16).
+- `push-manager.ts:261-268`: `toggleSink` passes `undefined` to a toggle when no
+  client is dialable, so a toggle-ON with no link stays `unknown` (not `failed`,
+  which would outrank a genuinely `on` computer in the one row) and a toggle-OFF
+  takes the debt path.
+
+**H3 (MEDIUM) — turning it back on registers at once.**
+`push-registration.ts:425-436`: `setEnabled(true, sink)` now runs `syncOnce(sink)`
+when a sink is present, so with the link already up the row gets the daemon's real
+answer in the same tap instead of "Not checked yet" for the rest of the session.
+With no link it still only records the decision (`unknown`) — nothing was read.
+
+**H4 (MEDIUM) — one old daemon no longer locks the phone's switch.**
+`push-manager.ts:335-345`: `viewForAll` computes `switchable` itself — only the
+OS's own refusal (`denied` / `unavailable`) disables the phone-wide row — instead
+of reusing `notificationsView`'s one-computer `daemon-too-old` rule, which applied
+to the single Settings row made the switch inoperable so the person could not turn
+notifications off for the computers that DO deliver. The detail line still names
+the computer to update, and `notificationsView` is unchanged for the per-computer
+caller (pinned by a positive control).
+
+**Tests (red before green, §9).** `test/push-manager.test.ts` gains
+`H1`/`H2`/`H3`/`H4` blocks (11 tests, plus a new `fakeToggle()` seam);
+`test/push-toggle-store.test.ts` is new (7 tests); two pre-existing tests in
+`test/push-registration.test.ts` pinned the OLD contract and were updated with
+their intent kept ("off with no link still forgets the fingerprint" → "…keeps a
+DEBT, and forgets the fingerprint"; "back on registers on the NEXT sync" → "at once
+with a live link, `unknown` with none"); `test/push-wiring-guards.test.ts` now
+pins the new prop name and the readiness gate.
+
+**Mutations (§9 — each breaks ONE fix; the named test went RED, restored after).**
+
+```
+M1  no toggle write (push-manager.ts:248)         1 fail  H1 "off is PERSISTED…"
+M1b registrar starts ON (…:240 initial)            2 fail  H1 both
+M1c stored value ignored (…:213)                   2 fail  H1 both
+M2  swallowed unregister (…:86 `await link()?.…`)  1 fail  H2 "a link that is GONE at drain time…"
+M2b debt not written (push-registration.ts:338)    4 fail  H2 ×3 + H3-adjacent
+M2c failed call not a debt (…:355)                 1 fail  H2 "a FAILED unregister is a debt too"
+M3  ON does not sync (…:431)                       1 fail  H3 "the ON toggle syncs with the live link"
+M4  one-computer switchable rule (push-manager:342) 1 fail H4 "the phone-wide row stays switchable"
+S1  unknown version overwritten (toggle-store)      2 fail  the record is left untouched
+S2  `off` does not round-trip                       1 fail  "off round-trips, so a relaunch sees it"
+S3  read error reads OFF                            1 fail  "a READ error reads ON"
+S4  write error swallowed                           1 fail  "the rejection reaches the caller"
+```
+
+**M2 first survived, and that is the interesting part.** Mutating
+`linkPushSink.unregister` back to `await link()?.pushUnregister()` left all 25
+manager tests GREEN, because `toggleSink` had already turned "no client" into
+`undefined` before `linkPushSink` was ever called — the manager path could not
+reach the throwing branch. But `sync`'s debt drain DOES call
+`linkPushSink(link)` directly, over a link that may be gone by then, so the hole
+was real: the debt would be cleared un-sent. I added *"a link that is GONE at
+drain time keeps the debt (it is not cleared un-sent)"*, and M2 now fails on it.
+(A mutation that survives is a missing test, not a proof of safety.)
+
+**Gate (this worktree, after the fixes).**
+
+```
+bunx tsc --noEmit                 exit 0
+bunx tsc -p apps/mobile --noEmit  exit 0
+bunx tsc -p apps/relay --noEmit   exit 0
+bun run lint                      Checked 1399 files — clean (0 errors, 0 warnings)
+bun test                          10215 pass, 4 skip, 0 fail  (734 files, 410 s)
+```
+
+The 4 skips are the pre-existing opt-ins (live k8s, live docker, live
+docker session-hop, the slow real-socket test) — none in a touched file.
+
+**Drift from the review's suggested shape.** (a) The switch lives in its OWN
+Keychain item (`tentacle.push-enabled`) rather than in each computer's record: it
+is the phone's decision (`setEnabledForAll`), and a re-pair replaces a computer's
+record wholesale (`computer-store.ts:305-309`), which would silently resurrect the
+switch. (b) It is built over `secure-kv.ts`'s exported `keychainKV` instead of a
+third adapter file, because `pairing-guards.test.ts` pins exactly two importers of
+`expo-secure-store`. (c) The debt record is a field on `PushRegistration`
+(`off: true`) rather than a separate key, so it rides the same per-computer
+read/write the registrar already owns — and `computer-store.ts` drops a malformed
+`push` field, so a debt written by a future build cannot cost a person a re-pair.
+
+**Unverified (one line).** The Keychain item's real durability across a device
+relaunch — `createPushToggleStore`'s underlying `SecureStore.setItemAsync` — needs
+ a simulator/device; everything above is a fake `SecureKV` (the same seam
+`lock-settings-store.ts` is tested through).
+
+### Fix round 2
+
+*— claude-opus-5-5 (the model id this environment reports for me), 2026-11-16*
+
+Scope: the two findings of *Review — Round 2* (1 HIGH, 1 MEDIUM). Both reproduced
+on the reviewed code before any edit, both fixed red-before-green, both
+mutation-checked (§9). Scratch (gitignored, inside THIS worktree):
+`.tentacle/tmp/mobile-push/fixr2/` — `mut.sh`, `mut.log`, `probe-toggle.ts`,
+`probe-store.ts`, and the two `.fixed.ts` backups the mutation script restores from.
+
+**Repro before the fix (the reviewer's `.tentacle/tmp/mobile-push/p9-review2.test.ts`,
+real `createComputerStore` + real `createPushToggleStore`, on the reviewed code):**
+
+```
+stored push: {"hash":"","registeredAt":1794730248318}      ← `off` is GONE
+error: expect(received).toEqual(expected)
+@@ -2,3 +2,2 @@
+    "register",
+-   "unregister",
+ 0 pass · 1 fail
+```
+
+The debt was written and read back without `off`, so `syncOnce`'s
+`last?.off === true` never fired and the next connect fell through to
+`skip disabled` — the daemon kept pushing to a phone whose owner had said stop.
+
+**R2-1 (HIGH) — the store round-trips the debt, and the type gap is closed.**
+Root cause: `computer-store.ts` `pushRegistrationOf` rebuilt the record as
+`{hash, registeredAt}` only, dropping `off` on every `get`; the narrower hand-
+written `setPush` value type in `push-manager.ts` let the writer name `off` while
+the reader did not, and TS said nothing.
+- `computer-store.ts:66-78`: `PushRegistrationRecord.off?: true` — the field is
+  now part of the persisted contract, documented as the debt record.
+- `computer-store.ts:196-211`: `pushRegistrationOf` copies `off` **only when it is
+  exactly `true`**. A dropped field (the bug) and a coerced one are both wrong: a
+  newer build's future meaning, or a hand-edited file, must not make the phone
+  send an unregister nobody asked for.
+- `push-manager.ts:37-48`: `PushMemoryStore.setPush`'s value type is the
+  registrar's own `PushRegistration`, not a narrower literal — the one type both
+  ends use, so this divergence cannot reappear silently.
+
+**R2-2 (MEDIUM) — a record this build cannot read is never written over.**
+Root cause: `ready()` dropped `PushToggleRead.writable`, and `rememberEnabled`
+always wrote, so `push-toggle-store.ts`'s promise ("an unknown `v` is never
+overwritten") was false the moment the manager wrote.
+- `push-manager.ts:205-215`: `writable` starts **`false`** — fail-safe, so a read
+  that throws (the port allows it, even though the store's own read never
+  rejects) cannot licence an overwrite.
+- `push-manager.ts:223-233`: `ready()` keeps `read.writable`.
+- `push-manager.ts:260-271`: `rememberEnabled` updates `enabled` in memory (the
+  session's decision, exactly the app-lock setting's preserved-record rule) and
+  returns WITHOUT writing when `writable` is false.
+
+**Tests (red before green, §9).** Both new blocks were run against the reviewed
+code first — 5 RED, each on its own assertion, not on an import or compile error:
+
+```
+(fail) … an `off` DEBT round-trips through the store        @@ "off": true missing
+(fail) R2-1 … off with no link → the NEXT manager unregisters  @@ "unregister" missing
+(fail) R2-1 … turning it back on then registers in that SAME connect  @@ "unregister" missing
+(fail) R2-2 … an UNWRITABLE record is not written over       Expected: 0  Received: 1
+(fail) R2-2 … the single-computer toggle honours it too      Expected: 0  Received: 1
+```
+
+- `test/computer-store.test.ts`: +2 tests (the debt round-trips; an `off` that is
+  not exactly `true` is not invented into one).
+- `test/push-manager.test.ts`: +5 tests in two new `describe` blocks (R2-1 over
+  the REAL store, both the "off stays off" and the "back on registers in the same
+  connect" shapes — the reviewer's point was that every earlier H2 test used a
+  fake memory that stored the object verbatim; R2-2 unwritable / readable /
+  single-computer / read-throws). `fakeToggle()` gained an `unwritable` argument
+  and a `writes()` counter; no existing call site changed behaviour.
+
+**Mutations (§9 — each breaks ONE fix; the named test went RED, restored after).**
+
+```
+M1   pushRegistrationOf drops `off` (computer-store.ts:210)   3 fail  R2-1 ×2 + the round-trip
+M1b  `off` coerced (`!== undefined`) instead of checked (:210) 1 fail  "not exactly `true` is not invented"
+M2   rememberEnabled ignores writable (push-manager.ts:266)    3 fail  R2-2 ×3
+M2b  `writable` starts true (…:215)                            1 fail  "a read that THROWS is not a licence"
+M2c  `writable` inverted (…:229)                               5 fail  H1 + R2-1 + R2-2 ×3
+```
+
+**A note on running mutations, because it nearly cost a false result.** The
+first scripted run piped `head -20` into the loop; SIGPIPE killed the script
+between applying M2c and restoring, leaving `writable = !read.writable` in the
+tree. Every subsequent probe then read that as the fix. `diff` against the
+`.fixed.ts` backups caught it, the tree was restored, and the script now writes a
+log file instead of being truncated. All figures above are from the
+log-file run, followed by `diff -q` on both files (`CLEAN`) before the gate.
+
+**Gate (this worktree, after the fixes; `git status` shows only the four edited
+files).**
+
+```
+bun run typecheck                 exit 0  (tsc --noEmit && -p apps/mobile && -p apps/relay)
+bun run lint                      1399 files — clean (0 errors, 0 warnings)
+bun test                          10223 pass, 4 skip, 0 fail  (734 files, 411 s)
+```
+
+The 4 skips are the pre-existing opt-ins (live k8s, live docker, live docker
+session-hop, the slow real-socket test) — none in a touched file. This round adds
+7 tests (2 in `computer-store.test.ts`, 5 in `push-manager.test.ts`) and removes
+none; the total moved 10215 → 10223 against the figure fix round 1 recorded, so
+the 8th is not mine to attribute — and it is not a new failure (0 fail either way).
+
+**One non-reproducing failure, recorded rather than hidden.** After the final
+`changelog.d/` edit, ONE full run reported `10222 pass, 4 skip, 1 fail` (same
+10227 total), and I had piped that run through `tail -5`, so the failing test's
+name was lost — my mistake, and the reason the scripted runs above now write log
+files. It did not reproduce: two further full `bun test` runs were
+`10223 pass, 0 fail`, and the whole mobile suite (`apps/mobile/test`, 916 tests,
+which contains every test this round touched) was 6/6 green when run alone. So it
+is a load-dependent timing flake somewhere outside the files this round changed,
+not a fix of mine — but I cannot name it, and that is the honest limit of this
+claim. Verify with repeated full runs if a name is wanted.
+
+**Drift from the review's suggested shape.** None substantive: the review offered
+"either keep the value in memory only when `writable` is false, or remove the
+promise", and the first was taken (the promise is the better contract — it is what
+protects a newer build's record). One addition beyond the letter of the finding:
+`writable` defaults to **false** rather than true, so the fail-safe holds even if
+`read()` rejects, which the fake-store seam in the tests makes reachable.
+
+**Unverified (one line).** The real Keychain item's durability across a device
+relaunch still needs a simulator/device (unchanged from fix round 1); everything
+here is a fake `SecureKV`, the same seam `lock-settings-store.ts` is tested
+through.
