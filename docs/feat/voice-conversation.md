@@ -427,7 +427,136 @@ Red first (§9); each is shown failing on a stub, then green, and the named muta
 
 ## Execution
 
-*(empty — the plan is not yet approved)*
+### C2 — shared core (§3 modules) · *— deepseek-v4.1-flash (tentacle), 2026-11-15*
+
+**Scope.** Slice C2 only. Nothing of C3 (protocol/daemon/provider), C1/C1b/C4/C5
+(Mac helper + TUI) or P1–P4 (phone) was touched.
+
+**Load-bearing check (run FIRST, per the brief).** C2's precondition is
+"shared code lives in `@tentacle/core`", which both edges depend on, React-/
+Ink-/RN-free. Re-run on this branch
+(`.tentacle/tmp/voice-conversation/c2-load-bearing.txt`): `rg 'from
+"(react|ink|react-native)' packages/core/src` → no match;
+`@tentacle/core` is a dependency of both `apps/mobile/package.json:11` and
+`packages/tui/package.json:12`; core's deps are `@tentacle/protocol` + `zod`
+only. **PASSED** — the slice proceeded.
+
+**Capability missing, shown before the code (feat repro).** `packages/core/src/voice/`
+did not exist (`ls` → no such file); `rg -n 'export (function|const|type|interface)
+(clean|splitLong|speakable|narration|chunker|askSpeech|voiceLang|conversation)'
+packages/core/src packages/protocol/src` → no match. V1's endpoint fold exists on
+`feat/voice-dictation` (`packages/tui/src/voice-endpoint.ts`, merged into `main`)
+and mobile-voice's `speakable.ts` on `feat/mobile-voice` only (both verified with
+`git ls-tree`).
+
+**As built, in the plan's dependency order.** All under
+`packages/core/src/voice/` (+ `export *` at `packages/core/src/index.ts:28`),
+tests under `packages/core/test/voice/` (7 files, 115 tests):
+
+| Module | What the plan asked for (verified against §3, not memory) |
+|---|---|
+| `voice-lang.ts:42` | utterance → setting → `en`; an unspoken tag is `null`, never a guess (P-F6). |
+| `speakable.ts:316` | `clean`/`splitLong` lifted from mobile-voice **verbatim** (same `MAX_UTTERANCE` 600, same sentence/space rules) + a streaming fold: fences → `(code on screen)`/`(codice a schermo)`, tables → placeholder, links → label, bare URL → `link`, control chars stripped. |
+| `chunker.ts:301` | ≤ `firstWords`(4) for the FIRST chunk, then sentence/clause ends, cap `maxChars`(200), `flush()`, never inside a word or a number, delta-split invariant. |
+| `narration.ts:113` | tool name only (labels localized), ≤ 1 line per 5 s, silent while a reply chunk is queued; unknown tool → "working"/"Sto lavorando". |
+| `ask-speech.ts:66` | verbatim when ≤ 120 chars **and** one line, else the screen template; always ends "answer on screen"; never a truncation; `explanation` accepted and ignored (F7). |
+| `endpoint.ts:172` | edge-neutral fold, per-edge defaults: Mac `turnModel:true` (asks Smart Turn), phone `turnModel:false` (the `textGrew` rule); floor 500 ms, hard stop 3 s, `autoStop:true` for conversation mode. |
+| `conversation.ts:762` | the reducer: 7 states, the normalised event vocabulary, and the 8 commands (`prompt`/`enqueue`/`fieldInsert`/`notice`/`speak`/`hush`/`listen`/`unlisten`) as DATA. |
+
+**Drift from the Implementation (and why).** Three, all inside C2's own files:
+
+1. **`ask-speech` is its own file, not a section of `narration.ts`** — the plan's
+   Files list names it separately (§3 row 5) and the two have different inputs;
+   no change to behaviour.
+2. **`speakable` exposes a streaming fold (`speakableFilter`) alongside the
+   one-shot `speakableText`.** §3 says `speakable.ts` is a markdown→text
+   transform, which is what `speakableText` is; but §3 also says the reply
+   arrives as deltas and that the CHUNKER consumes them. Both are needed: the
+   reducer runs `speakableFilter` first (so a fence's body is dropped before the
+   chunker ever sees it), then `chunkFilter`. A fence straddling a delta boundary
+   is the reason the fold exists, and T2 tests it at every split point.
+3. **`conversation.ts` also applies `narration`'s throttle** (it owns
+   `narratedAtMs` in its model, and `toolCall` events go through `narrate`), so
+   the throttle has ONE clock owner rather than two. `narration.ts` stays
+   independently testable (T3), exactly as the plan describes it.
+
+**The plan's step that the code contradicted, and how it was fixed.** The
+"mutations" line of T5 says "floor 200 → red". On the V1 fixtures that is
+**false**: the four comma pauses are 192/224/192/192 ms, so at a 32 ms window a
+200 ms floor never reaches them and the traces stay green
+(`runMac(..., {floorMs: 200})` → 0 cuts). The tests now pin the true
+reproduction instead: a 0 ms floor ("cut on silence", how V1 reproduced V0) cuts
+all four traces, and a floor of exactly 192 ms cuts e04 — both red-to-green
+properties, both in `endpoint.test.ts`. The 500 ms shipped floor's own guard
+(`>= COMMA_SAFE_FLOOR_MS`, read as a literal) is unchanged.
+
+**Mutations (plan targets; all applied to the real files, the test run, the
+original bytes written back — never `git checkout`).** Script + output:
+`.tentacle/tmp/voice-conversation/mutations.ts`.
+
+```
+MUTATION T1 chunker maxChars 200 -> 40: RED (2 fail) — test is non-vacuous
+MUTATION T2 speakable keeps fences (body into the placeholder slot): RED (3 fail)
+MUTATION T3 narration interpolates the arguments: RED (6 fail)
+MUTATION T4 ask-speech truncates instead of falling back: RED (2 fail)
+MUTATION T5 endpoint floor 500 -> 200 (both edges): RED (1 fail)
+MUTATION T5 endpoint drops the textGrew rule: RED (1 fail)
+MUTATION T9 send while an ask is pending: RED (1 fail)
+MUTATION T9 speak foreign turns: RED (1 fail)
+MUTATION T9 auto-resume after a phone call: RED (1 fail)
+----
+ALL MUTATIONS APPLIED AND RED (every target test is non-vacuous)
+```
+
+Two of these were **green on the first attempt** and the tests were sharpened,
+not the code: "speak foreign turns" needed the mutation to be
+`return turnId !== ""` (my first attempt only guarded a null id, which no test
+path reaches), and the T5 floor mutation had to become the reproduction above.
+The plan's T9 parity test was checked for non-vacuity by asserting that the
+scripted sequence really emits all six of `prompt`/`enqueue`/`speak`/`listen`/
+`unlisten`/`hush` — an all-empty pair would otherwise compare equal.
+
+**Failure modes covered by this slice** (§ *Failure modes*, the ones C2 owns):
+F1 (echo rule, >3 empty barge-ins/30 s → barge-in off + notice), F2 (comma floor
+on both edges, plus the V1 regression), F3 (a steer, never a second prompt), F4
+(hush + "connection lost" + `paused`; reconnect listens and re-speaks nothing),
+F6 (ask pending blocks every send, text → field), F7 (fence bodies, hrefs, tool
+arguments and ask explanations never reach speech), F14 (foreign turns are not
+spoken; a voice-steered one is), F15 (10-min idle off), P-F1 (`source:"call"`
+never auto-resumes), P-F1b (`other` + `shouldResume` → listen), P-F9 (5
+recognition failures in 60 s → paused), P-F10 (`resumeFailed` → "Open tentacle to
+resume"), P-F11 (thermal critical → paused, serious → notice).
+
+**Gate (run on this branch, in this order).**
+
+- `bunx tsc --noEmit` → clean (exit 0, no output).
+- `bun run lint` → `Checked 1595 files … No fixes applied.` (0 errors, 0
+  warnings — the §6 clean baseline, unchanged).
+- `bun test` → **11417 pass, 5 skip, 0 fail** across 822 files; the 5 skips are
+  the documented opt-in ones (live k8s ×2, live docker ×2, the slow keepalive),
+  no new skip. C2's own file: `bun test packages/core/test/voice` → 115 pass,
+  0 fail.
+- `packages/protocol/schema/protocol.json`: **not regenerated — no schema
+  changed.** C2 touches no protocol file (`git status --short packages/protocol`
+  is empty); `voice`/`reasoning` on the wire is C3's.
+- Changelog: `changelog.d/voice-conversation.changed.md` (one bullet; scoped to
+  the core, since nothing is user-visible until the edges are wired). The plan's
+  Files list gives C5/P4 the `voice-conversation.added.md` bullet — that stays
+  theirs, because the feature is not yet reachable from either edge.
+  `CHANGELOG.md` untouched; the fragment guard is green.
+- `TODO.md` not touched, per the brief.
+
+**Not done here, by design:** the mobile `speakable.ts` import swap (Files step
+1's second clause). `apps/mobile/src/speakable.ts` does not exist on this branch
+(`feat/mobile-voice` is unmerged), so there is nothing to re-point; it is a
+dependency-order item for whoever lands mobile-voice, recorded here rather than
+done blind. Verified: `ls apps/mobile/src/speakable.ts` → No such file.
+
+**Unverified (one line each, with how to check):** the phone/P1-pinned floor is
+still V1's 500 ms base — the spike E10/E8 must confirm it on the device
+(`ENDPOINT_EDGE_DEFAULTS.phone.floorMs`, `endpoint.ts`); and the reducer's
+`speak` ordering is only as good as the edge reporting `spoken{seq}`
+deterministically (C4/P3's job to wire, T10/T11 to prove).
 
 ## Review
 
