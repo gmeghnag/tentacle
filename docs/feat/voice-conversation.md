@@ -558,6 +558,132 @@ still V1's 500 ms base — the spike E10/E8 must confirm it on the device
 `speak` ordering is only as good as the edge reporting `spoken{seq}`
 deterministically (C4/P3's job to wire, T10/T11 to prove).
 
+### Fix round 1 — the review's findings 1–6 · *— deepseek-v4.1-flash (tentacle), 2026-11-15*
+
+**Scope.** The C2 review's five code findings (1, 2, 3, 4, 6) and the drift
+finding (5). No other slice touched; no protocol/wire/on-disk change, so no
+`protocol.d/` note and `PROTOCOL_VERSION` is untouched.
+
+**Reproduced first (before any edit).** The review's own script, re-run on this
+branch: `.tentacle/tmp/voice-conversation/review/r1.ts` → the same eight rows
+(A–H), identical commands. After the fixes the same script prints:
+
+```
+A link flap while OFF:      linkDown->off [] ; linkUp->off []
+B ask while OFF, cleared:   askPending->off [] ; askCleared->off []
+C call pause, link flap:    linkDown->paused [] ; linkUp->paused []
+D call pause, ask flap:     askPending->paused [] ; askCleared->paused []
+E 5 empty bargeins:         the trip emits notice+speak+bargeIn{false}; the 5th emits []
+F start{bargeIn:false}+toggle: bargeIn false (and `bargeIn{enabled:false}` sent)
+G narration seq 0 + reply:  narration seq 0, reply chunk seq 1 — no collision
+H ask on a foreign turn:    hush only, no speak
+```
+
+**Red before green.** New file `packages/core/test/voice/conversation-fix1.test.ts`
+(28 tests, one `describe` per finding). Its first run on the unmodified reducer:
+**20 fail / 7 pass**, every failure on the assertion of the property (no import
+or compile error). The failed set was exactly findings 1, 2, 3, 4 and 6; the
+7 that passed were the controls that must stay true (own-turn asks ARE spoken,
+short replies are not capped, the mode starts off, …).
+
+**As built, per finding.**
+
+1. **HIGH — the mic opens without the person.** `isOn()` (`conversation.ts:304`)
+   is now the one gate the app-scoped controller's unconditional events go
+   through: `linkDown` (`:440`) still TRACKS the link but reacts only when on;
+   `linkUp` (`:459`) resumes only when `pausedBy === "link"`; `askPending`
+   (`:393`) is still RECORDED while off (F6's send block must hold there too) but
+   keeps `state` as it was; `askCleared` (`:419`) returns to `listening` only
+   from an on state; `resumeFailed` (`:484`), `thermal` (`:506`),
+   `recognitionFailed` (`:941`) and `bargein` (`:335`) are no-ops unless on.
+   `interrupted{ended}` additionally requires `pausedBy === source`, so another
+   app's audio ending cannot undo a user/thermal/link pause. The pause REASON is
+   never overwritten by a non-pausing event.
+2. **MEDIUM — F1 does not converge.** `bargein` is a no-op when `model.bargeIn`
+   is false, so the notice and "Echo detected…" are emitted once per trip, not
+   per event. A new command `bargeIn{enabled}` tells the EDGE's own gate to stop
+   raising `bargein` (finding 2's "no command telling the edge"). `turnOn` now
+   re-arms from `bargeInSetting` (the person's §6 setting, carried by
+   `conversationStart({bargeIn:false})`), never from the live flag the echo rule
+   lowered, so a switch-on clears the trip and honours the setting.
+3. **MEDIUM — `seq` is ambiguous.** `SpeechOutput.seq` is now ONE monotonic
+   counter for the whole mode: `systemSpeak()` (`:291`) gives every system line
+   (link, ask, echo, resumeFailed, narration) the next seq, `textDelta` and
+   `turnEnded` continue it, and the pipeline reset carries it
+   (`emptySpeech(seq, …)`). Verified at the reducer boundary: the earlier
+   `spoken{seq}` test (G) now leaves the reply chunk in `inFlight`.
+4. **MEDIUM — F14 for asks.** `askPending` takes an optional `turnId`; when the
+   daemon does not name it, the turn the reducer already knows (`model.turnId`)
+   is the fallback. A foreign turn's ask is `hush` + recorded, never spoken —
+   while still blocking sends on both edges (it is answerable anywhere).
+5. **MEDIUM — the endpoint fold was not moved.** `packages/tui/src/voice-endpoint.ts`
+   is now a **thin adapter** (68 lines, V1's input shape unchanged) that
+   translates to `@tentacle/core`'s `foldEndpoint` and delegates; the duplicate
+   implementation is gone, so there is one fold and one place that decides a
+   cut. V1's own pin (`packages/tui/test/voice-endpoint.test.ts`, 18 tests,
+   comma floor read as a literal) stays green and now exercises the shared code
+   end to end; `voice-session.ts` needed no change.
+6. **MEDIUM — F5 was nowhere.** `CONVERSATION_DEFAULTS.maxSpokenChars` (1 200) +
+   per-edge `conversationStart({maxSpokenChars})`; `speakWithinBudget()`
+   (`:739`) caps what is SPOKEN per reply and `turnEnded` says "The rest is on
+   screen." once (`restNoticed`), then a new turn gets a fresh budget. Only
+   speech is capped — the display is the session transcript's.
+
+**Mutations — every fix has one, and each was applied to the real file, the
+narrow test run, the original bytes written back** (never `git checkout`:
+`.tentacle/tmp/voice-conversation/mutations-fix1.ts`):
+
+```
+RED F1: drop the off/paused gate everywhere (isOn -> true) — 7 fail / 21 pass
+RED F1: linkUp resumes from ANY pause (drop pausedBy==='link') — 3 fail / 25 pass
+RED F1: askCleared ignores off/paused — 2 fail / 26 pass
+RED F2: the reducer acts on bargein with barge-in off — 2 fail / 26 pass
+RED F2: turnOn forces bargeIn true (override the setting) — 1 fail / 27 pass
+RED F2: the edge is not told (drop the bargeIn command) — 1 fail / 27 pass
+RED F3: system lines go back to seq 0 — 3 fail / 25 pass
+RED F3: seq restarts at every turn end — 1 fail / 27 pass
+RED F4: speak a foreign turn's ask — 2 fail / 26 pass
+RED F6: no F5 cap (speak everything) — 2 fail / 26 pass
+RED F6: cap hit but 'the rest is on screen' is never said — 2 fail / 26 pass
+RED F5: the TUI fold ignores the core floor again — 6 fail / 12 pass
+```
+
+One mutation came back **GREEN on the first attempt** and is recorded honestly
+rather than claimed: *"the echo rule re-announces on every later empty
+barge-in"* (an `&& model.bargeIn` condition added to `bargeIn()`'s trip branch).
+That is not a weak test — the guard the review asked for lives in the reducer's
+`bargein` case, so making the *helper* unconditional changed no reachable
+behaviour. Mutating the real guard instead (drop `!model.bargeIn` from that case)
+does turn it red (`2 fail / 26 pass`, in the list above); the harness keeps the
+helper form only as the record of a mutation that proved nothing.
+
+**Gate (this branch, in this order, on the FINAL tree — re-run after the last
+source edit, the ask's `turnId` fallback).**
+
+- `bunx tsc --noEmit` → clean (exit 0, no output).
+- `bun run lint` → `Checked 1596 files … No fixes applied.` (0 errors, 0
+  warnings; the §6 clean baseline — one file more than the pre-fix 1595 because
+  of the new test file).
+- `bun test` → **11445 pass, 5 skip, 0 fail** across 823 files (427 s), run
+  twice (before and after the doc-only edits above; identical counts). The 5
+  skips are the documented opt-in ones (live k8s ×2, live docker ×2, slow
+  keepalive), no new skip. Narrow runs: `packages/core/test/voice` → 143 pass,
+  0 fail; `packages/tui/test/voice-endpoint.test.ts` → 18 pass, 0 fail.
+- No protocol file touched (`git status --short packages/protocol` empty), so
+  `protocol.json` needs no regeneration. `CHANGELOG.md` untouched; the existing
+  `changelog.d/voice-conversation.changed.md` bullet already covers the core
+  (this round changes no user-visible behaviour beyond what it described — F5's
+  cap is included there as "the conversation reducer" behaviour).
+
+**Honest notes on the shape.** (a) `linkDown` while `paused` records
+`linkDown: true` and says nothing; the `paused` reason is preserved, so an ask
+that clears or a link that returns cannot silently resume the mic. (b) A
+person's `toggle` off→on is the ONLY way barge-in comes back, as the review
+asked; `remote{playPause}` from `off` goes through `turnOn` too and so also
+re-arms it from the setting. (c) F5's cap counts characters of what is
+actually spoken, so the model's `maxSpokenChars` is a ceiling over the reply,
+not a per-chunk limit.
+
 ## Review
 
 ### C2 review · *— claude-opus-5-5, 2026-11-15*

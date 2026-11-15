@@ -41,7 +41,15 @@ export const CONVERSATION_DEFAULTS = {
   /** P-F9: 5 recognition failures in 60 s → paused. */
   failuresBurst: 5,
   failureWindowMs: 60_000,
+  /**
+   * F5: at most this many characters of ONE reply are spoken, then "the rest is
+   * on screen". A per-edge config value (both shipped edges use this default).
+   */
+  maxSpokenChars: 1200,
 } as const;
+
+/** F5's one line, said once per capped reply (it is already on screen). */
+const REST_ON_SCREEN = "The rest is on screen.";
 
 /** The mode's states (§3). */
 export type ConversationState =
@@ -61,8 +69,23 @@ export interface ConversationModel {
    * SEND time, so flipping it mid-conversation affects the next turn.
    */
   readonly reasoningOff: boolean;
-  /** F1: barge-in is on until the echo rule turns it off for this mode. */
+  /**
+   * F1's LIVE flag: barge-in is on until the echo rule turns it off for this
+   * mode, and a person's own switch-on re-arms it. Never `toggle`d back on from
+   * this flag — that is `bargeInSetting`'s job (review round 1, finding 2).
+   */
   readonly bargeIn: boolean;
+  /**
+   * The person's own setting (§6 Settings row, both edges): what every switch-on
+   * starts from, so `bargeIn: false` is never overridden by turning the mode on.
+   */
+  readonly bargeInSetting: boolean;
+  /**
+   * F5, per edge: characters of ONE reply that may be spoken before the mode
+   * says "the rest is on screen". Only what is HEARD is capped — the reply text
+   * on screen is the session transcript's and is never shortened here.
+   */
+  readonly maxSpokenChars: number;
   /** The spoken language: the last utterance's, then the setting, then `en`. */
   readonly lang: SpeechLang | null;
   /** The edge's configured language, for `spokenLang`'s fallback. */
@@ -97,12 +120,25 @@ export interface ConversationModel {
 export interface SpeechOutput {
   readonly speakable: ReturnType<typeof speakableFilter.init>;
   readonly chunks: ReturnType<typeof chunkFilter.init>;
-  /** The sequence number of the next spoken chunk (the edge echoes it back). */
+  /**
+   * The seq of the NEXT `speak` — ONE monotonic counter for the whole mode, not
+   * per turn and not per producer: reply chunks, narration and every system line
+   * take from it, because the edge reports `spoken{seq}` and two producers
+   * sharing a number would clear each other's playback (review round 1, finding
+   * 3). It survives a turn's end on purpose.
+   */
   readonly seq: number;
   /** Which turn's text is being spoken. */
   readonly turnId: string | null;
   /** Chunks spoken and not yet reported done: `speak` after these is ordered. */
   readonly inFlight: readonly number[];
+  /** F5: characters spoken for the current reply, and whether the cap was hit. */
+  readonly spokenChars: number;
+  readonly capped: boolean;
+  /** F5: "the rest is on screen" has been said for this reply (say it once). */
+  readonly restNoticed: boolean;
+  /** F5, per edge: the cap this reply is spoken under (the model's setting). */
+  readonly maxSpokenChars: number;
 }
 
 /** What the edge must DO. Data, never an effect. */
@@ -120,6 +156,12 @@ export type ConversationCommand =
   | { readonly cmd: "fieldInsert"; readonly text: string }
   | { readonly cmd: "notice"; readonly text: string }
   | { readonly cmd: "speak"; readonly text: string; readonly seq: number }
+  /**
+   * F1, finding 2: the edge's own barge-in gate follows the model's flag. Without
+   * this the controller acts on `bargein` the reducer has already ruled out, and
+   * its "echo detected" speech is itself echo — the loop F1 exists to break.
+   */
+  | { readonly cmd: "bargeIn"; readonly enabled: boolean }
   | { readonly cmd: "hush" }
   | { readonly cmd: "listen" }
   | { readonly cmd: "unlisten" };
@@ -148,6 +190,8 @@ export type ConversationEvent =
   | {
       readonly type: "askPending";
       readonly ask: { readonly tool: string; readonly title: string };
+      /** The turn it blocks. Absent → the daemon did not say, so it is spoken. */
+      readonly turnId?: string;
     }
   | { readonly type: "askCleared" }
   | { readonly type: "linkDown" }
@@ -170,12 +214,16 @@ export function conversationStart(
     readonly reasoningOff?: boolean;
     readonly bargeIn?: boolean;
     readonly lang?: string | null;
+    readonly maxSpokenChars?: number;
   } = {},
 ): ConversationModel {
+  const bargeIn = settings.bargeIn ?? true;
   return {
     state: "off",
     reasoningOff: settings.reasoningOff ?? true,
-    bargeIn: settings.bargeIn ?? true,
+    bargeIn,
+    bargeInSetting: bargeIn,
+    maxSpokenChars: settings.maxSpokenChars ?? CONVERSATION_DEFAULTS.maxSpokenChars,
     lang: null,
     langSetting: settings.lang ?? null,
     turnId: null,
@@ -187,19 +235,26 @@ export function conversationStart(
     bargeIns: [],
     failures: [],
     pausedBy: null,
-    speech: emptySpeech(),
+    speech: emptySpeech(0, settings.maxSpokenChars ?? CONVERSATION_DEFAULTS.maxSpokenChars),
     narratedAtMs: null,
   };
 }
 
-/** The empty speech pipeline. */
-function emptySpeech(): SpeechOutput {
+/** The empty speech pipeline. `seq` is the caller's: it is one counter per mode. */
+function emptySpeech(
+  seq = 0,
+  maxSpokenChars: number = CONVERSATION_DEFAULTS.maxSpokenChars,
+): SpeechOutput {
   return {
     speakable: speakableFilter.init("en"),
     chunks: chunkFilter.init(),
-    seq: 0,
+    seq,
     turnId: null,
     inFlight: [],
+    spokenChars: 0,
+    capped: false,
+    restNoticed: false,
+    maxSpokenChars,
   };
 }
 
@@ -226,6 +281,28 @@ function canSend(model: ConversationModel): boolean {
 /** The language a reply is spoken in, from the model. */
 function langOf(model: ConversationModel): SpeechLang {
   return spokenLang({ utterance: model.lang, setting: model.langSetting });
+}
+
+/**
+ * A SYSTEM line (link, ask, echo, resume-failed, narration): it takes the mode's
+ * next seq like everything else, so `spoken{seq}` can never confuse it with a
+ * reply chunk (review round 1, finding 3).
+ */
+function systemSpeak(
+  model: ConversationModel,
+  text: string,
+): { readonly command: ConversationCommand; readonly seq: number } {
+  return { command: { cmd: "speak", text, seq: model.speech.seq }, seq: model.speech.seq + 1 };
+}
+
+/**
+ * Is the mode on (neither `off` nor `paused`)? The edge's controller is
+ * app-scoped and feeds link, ask and interruption events unconditionally, so the
+ * cross-state entry points check this instead of trusting the edge to filter
+ * (review round 1, finding 1, P-F12).
+ */
+function isOn(model: ConversationModel): boolean {
+  return model.state !== "off" && model.state !== "paused";
 }
 
 /**
@@ -256,6 +333,10 @@ export function conversationReducer(
       return finalTranscript(model, event.text, event.lang ?? null);
 
     case "bargein":
+      // Owner Q4 + F1. With barge-in off — tripped by the echo rule or set off by
+      // the person — a raised `bargein` is a no-op: acting on it (hush, notice,
+      // speech) is what kept the echo loop alive (finding 2).
+      if (!model.bargeIn || !isOn(model)) return { model, commands: [] };
       return bargeIn(model, event.atMs ?? model.lastSpeechAtMs, event.transcriptEmpty === true);
 
     case "speaking":
@@ -290,7 +371,12 @@ export function conversationReducer(
           ...model,
           turnId: event.turnId,
           ownTurnId: event.own ? event.turnId : model.ownTurnId,
-          speech: { ...emptySpeech(), speakable: speakableFilter.init(langOf(model)) },
+          // A new turn resets the PIPELINE and F5's budget — but not `seq`, which
+          // is the edge's one counter for the whole mode (finding 3).
+          speech: {
+            ...emptySpeech(model.speech.seq),
+            speakable: speakableFilter.init(langOf(model)),
+          },
         },
         commands: [],
       };
@@ -305,78 +391,111 @@ export function conversationReducer(
       return turnEnded(model, event.turnId);
 
     case "askPending": {
-      // F6: the ask preempts speech (it is the thing that blocks the turn), and
-      // it is spoken from the ASKING DEVICE's own text, via the template.
+      // F6: the ask preempts speech (it is the thing that blocks the turn). It is
+      // recorded even while the mode is off — the send must block there too — but
+      // it is SAID only when the mode is on and the turn is ours (finding 4).
+      const asked: ConversationModel = {
+        ...model,
+        ask: event.ask,
+        // `paused` stays `paused` (with its own reason), `off` stays off: an ask
+        // must not become the new state after a call (finding 1, P-F1).
+        state: isOn(model) ? "askPending" : model.state,
+        speech: emptySpeech(model.speech.seq, model.maxSpokenChars),
+      };
+      if (!isOn(model)) return { model: asked, commands: [] };
+      // F14: the ask is spoken by the edge that originated the turn. The daemon
+      // may not name it, so the turn the reducer already knows is the fallback.
+      const turn = event.turnId ?? model.turnId;
+      const ours = turn === null || speaksTurn(model, turn);
+      if (!ours) return { model: asked, commands: [{ cmd: "hush" }] };
       const line = askSpeech({ tool: event.ask.tool, title: event.ask.title }, langOf(model));
+      const spoken = systemSpeak(model, line);
       return {
-        model: { ...model, ask: event.ask, state: "askPending", speech: emptySpeech() },
-        commands: [{ cmd: "hush" }, { cmd: "speak", text: line, seq: 0 }],
+        model: { ...asked, speech: { ...asked.speech, seq: spoken.seq } },
+        commands: [{ cmd: "hush" }, spoken.command],
       };
     }
 
     case "askCleared": {
       if (model.ask === null) return { model, commands: [] };
+      // Only a mode that was ON resumes; `off` stays off and a `paused` one keeps
+      // its pause and its reason, so an ask flap can never undo a call's pause nor
+      // open the mic (finding 1, P-F1).
+      if (!isOn(model)) {
+        return { model: { ...model, ask: null }, commands: [] };
+      }
       const resumed: ConversationModel = {
         ...model,
         ask: null,
-        speech: emptySpeech(),
-        state: model.state === "off" ? "off" : "listening",
+        speech: emptySpeech(model.speech.seq, model.maxSpokenChars),
+        state: "listening",
         pausedBy: null,
       };
       return {
         model: resumed,
-        commands: resumed.state === "listening" ? [{ cmd: "listen" }] : [],
+        commands: [{ cmd: "listen" }],
       };
     }
 
-    case "linkDown":
+    case "linkDown": {
+      // The link is TRACKED in every state, but only an ON mode reacts: a drop
+      // while `off` must not start recording, and one while `paused` must not
+      // overwrite the reason it is paused (finding 1).
       if (model.linkDown) return { model, commands: [] };
+      if (!isOn(model)) return { model: { ...model, linkDown: true }, commands: [] };
+      const spoken = systemSpeak(model, "Connection lost.");
       return {
         model: {
           ...model,
           linkDown: true,
           state: "paused",
           pausedBy: "link",
-          speech: emptySpeech(),
+          speech: { ...emptySpeech(model.speech.seq), seq: spoken.seq },
         },
-        commands: [
-          { cmd: "hush" },
-          { cmd: "notice", text: "connection lost" },
-          { cmd: "speak", text: "Connection lost.", seq: 0 },
-        ],
+        commands: [{ cmd: "hush" }, { cmd: "notice", text: "connection lost" }, spoken.command],
       };
+    }
 
     case "linkUp": {
       if (!model.linkDown) return { model, commands: [] };
       // F4: back to listening, and the missed remainder is NOT re-spoken (it is
-      // on screen after the existing resync).
+      // on screen after the existing resync). But only a mode that was paused BY
+      // THE LINK resumes: after a call or a user pause the mic stays shut
+      // (P-F1/P-F12, finding 1).
+      const resumes = model.pausedBy === "link";
       const resumed: ConversationModel = {
         ...model,
         linkDown: false,
-        state: model.state === "off" ? "off" : "listening",
-        pausedBy: null,
-        speech: emptySpeech(),
+        state: resumes ? "listening" : model.state,
+        pausedBy: resumes ? null : model.pausedBy,
+        speech: emptySpeech(model.speech.seq, model.maxSpokenChars),
       };
+      if (!resumes) return { model: resumed, commands: [] };
+      const spoken = systemSpeak(model, "Reconnected.");
       return {
-        model: resumed,
-        commands: [
-          { cmd: "speak", text: "Reconnected.", seq: 0 },
-          ...(resumed.state === "listening" ? ([{ cmd: "listen" }] as const) : []),
-        ],
+        model: { ...resumed, speech: { ...resumed.speech, seq: spoken.seq } },
+        commands: [spoken.command, { cmd: "listen" }],
       };
     }
 
     case "interrupted":
       return interrupted(model, event.phase, event.source, event.shouldResume);
 
-    case "resumeFailed":
+    case "resumeFailed": {
+      // P-F10: a resume refused from the background. Off stays off (nothing to
+      // resume), and a mode already paused keeps its own reason (finding 1).
+      if (!isOn(model)) return { model, commands: [] };
+      const spoken = systemSpeak(model, "Open tentacle to resume.");
       return {
-        model: { ...model, state: "paused", pausedBy: "user" },
-        commands: [
-          { cmd: "notice", text: "open tentacle to resume" },
-          { cmd: "speak", text: "Open tentacle to resume.", seq: 0 },
-        ],
+        model: {
+          ...model,
+          state: "paused",
+          pausedBy: "user",
+          speech: { ...model.speech, seq: spoken.seq },
+        },
+        commands: [{ cmd: "notice", text: "open tentacle to resume" }, spoken.command],
       };
+    }
 
     case "remote":
       return remote(model, event.command);
@@ -385,9 +504,17 @@ export function conversationReducer(
       return recognitionFailed(model, event.atMs);
 
     case "thermal":
+      // A reading only matters to a mode that is ON: `off` has no engine to
+      // throttle away, and a `paused` mode keeps its own reason (finding 1).
+      if (!isOn(model)) return { model, commands: [] };
       if (event.state === "critical") {
         return {
-          model: { ...model, state: "paused", pausedBy: "thermal", speech: emptySpeech() },
+          model: {
+            ...model,
+            state: "paused",
+            pausedBy: "thermal",
+            speech: emptySpeech(model.speech.seq),
+          },
           commands: [
             { cmd: "hush" },
             { cmd: "notice", text: "the phone is too hot, voice mode paused" },
@@ -416,10 +543,12 @@ function turnOn(model: ConversationModel): {
     ...model,
     state: model.linkDown ? "paused" : "listening",
     pausedBy: model.linkDown ? "link" : null,
-    bargeIn: true,
-    speech: emptySpeech(),
+    // A person's switch-on re-arms barge-in from THEIR setting, never from the
+    // live flag the echo rule lowered (finding 2).
+    bargeIn: model.bargeInSetting,
+    speech: emptySpeech(model.speech.seq),
   };
-  const commands: ConversationCommand[] = [];
+  const commands: ConversationCommand[] = [{ cmd: "bargeIn", enabled: on.bargeIn }];
   if (model.linkDown) {
     commands.push({ cmd: "notice", text: "no connection: voice mode is paused" });
   } else {
@@ -434,7 +563,13 @@ function turnOff(model: ConversationModel): {
   readonly commands: readonly ConversationCommand[];
 } {
   return {
-    model: { ...model, state: "off", ask: null, pausedBy: null, speech: emptySpeech() },
+    model: {
+      ...model,
+      state: "off",
+      ask: null,
+      pausedBy: null,
+      speech: emptySpeech(model.speech.seq),
+    },
     commands: [{ cmd: "hush" }, { cmd: "unlisten" }],
   };
 }
@@ -519,13 +654,17 @@ function bargeIn(
   const emptyCount = next.filter((b) => b.empty).length;
 
   if (emptyCount > CONVERSATION_DEFAULTS.echoBargeIns) {
-    // F1: the mode is hearing itself. Barge-in off for this mode, and say so.
+    // F1: the mode is hearing itself. Barge-in off for this mode, and say so —
+    // ONCE. The guard is the flag itself: without it every later empty barge-in
+    // re-emits the notice and the "Echo detected" speech, which is itself echo,
+    // so the loop F1 exists to break would continue (finding 2).
+    const spoken = systemSpeak(model, "Echo detected. Barge-in is off.");
     return {
       model: {
         ...model,
         bargeIns: next,
         bargeIn: false,
-        speech: emptySpeech(),
+        speech: { ...emptySpeech(model.speech.seq), seq: spoken.seq },
         state: stateAfterCapture(model),
       },
       commands: [
@@ -534,7 +673,9 @@ function bargeIn(
           cmd: "notice",
           text: "echo detected: barge-in is off, use Esc (or the stop control) to stop speech",
         },
-        { cmd: "speak", text: "Echo detected. Barge-in is off.", seq: 0 },
+        spoken.command,
+        // The edge's own gate follows the model, or it keeps raising `bargein`.
+        { cmd: "bargeIn", enabled: false },
       ],
     };
   }
@@ -543,7 +684,7 @@ function bargeIn(
     model: {
       ...model,
       bargeIns: next,
-      speech: emptySpeech(),
+      speech: emptySpeech(model.speech.seq),
       // The turn is NOT cancelled (owner Q4): the utterance that follows steers it.
       state: stateAfterCapture(model),
     },
@@ -564,28 +705,61 @@ function textDelta(
   if (!speaksTurn(model, turnId)) return { model, commands: [] };
   if (model.ask !== null || model.linkDown || model.state === "off") return { model, commands: [] };
 
-  const pipeline = model.speech.turnId === turnId ? model.speech : emptySpeech();
+  // `seq` is the MODE's counter, so it is carried over when the pipeline resets.
+  const pipeline =
+    model.speech.turnId === turnId
+      ? model.speech
+      : emptySpeech(model.speech.seq, model.maxSpokenChars);
   const speakable = speakableFilter.step(pipeline.speakable, text);
   const chunked = chunkFilter.step(pipeline.chunks, speakable.text);
-  let seq = pipeline.seq;
-  const commands: ConversationCommand[] = chunked.chunks.map((chunk) => ({
-    cmd: "speak" as const,
-    text: chunk,
-    seq: seq++,
-  }));
+  const spoken = speakWithinBudget(
+    { ...pipeline, maxSpokenChars: model.maxSpokenChars },
+    chunked.chunks,
+    { speakable: speakable.state, chunks: chunked.state },
+  );
+  const inFlight = [...pipeline.inFlight, ...spoken.commands.map((c) => c.seq)];
   return {
     model: {
       ...model,
-      speech: {
-        ...pipeline,
-        speakable: speakable.state,
-        chunks: chunked.state,
-        seq,
-        turnId,
-        inFlight: [...pipeline.inFlight, ...chunked.chunks.map((_c, i) => pipeline.seq + i)],
-      },
+      // F5: the tail of a capped reply is NOT spoken, but it is still CHEWED —
+      // the pipeline holds nothing back, and the text on screen is the session's
+      // transcript, never shortened here.
+      speech: { ...spoken.state, turnId, inFlight },
     },
+    commands: spoken.commands,
+  };
+}
+
+/**
+ * F5: the `speak` commands of ONE chunk batch, honouring `maxSpokenChars` for
+ * THIS reply. Past the cap the mode stops speaking and a single "the rest is on
+ * screen" line follows (the `capped` flag), so a long reply is not announced
+ * chunk after chunk.
+ */
+function speakWithinBudget(
+  pipeline: SpeechOutput,
+  chunks: readonly string[],
+  state: { readonly speakable: SpeechOutput["speakable"]; readonly chunks: SpeechOutput["chunks"] },
+): {
+  readonly commands: readonly Extract<ConversationCommand, { cmd: "speak" }>[];
+  readonly state: SpeechOutput;
+} {
+  const commands: Extract<ConversationCommand, { cmd: "speak" }>[] = [];
+  let seq = pipeline.seq;
+  let spokenChars = pipeline.spokenChars;
+  let capped = pipeline.capped;
+  for (const chunk of chunks) {
+    if (capped) break;
+    if (spokenChars + chunk.length > pipeline.maxSpokenChars) {
+      capped = true;
+      break;
+    }
+    commands.push({ cmd: "speak", text: chunk, seq: seq++ });
+    spokenChars += chunk.length;
+  }
+  return {
     commands,
+    state: { ...pipeline, ...state, seq, spokenChars, capped },
   };
 }
 
@@ -612,9 +786,14 @@ function toolCall(
     },
   );
   if (narration.line === null) return { model, commands: [] };
+  const spoken = systemSpeak(model, narration.line);
   return {
-    model: { ...model, narratedAtMs: narration.state.lastAtMs },
-    commands: [{ cmd: "speak", text: narration.line, seq: 0 }],
+    model: {
+      ...model,
+      narratedAtMs: narration.state.lastAtMs,
+      speech: { ...model.speech, seq: spoken.seq },
+    },
+    commands: [spoken.command],
   };
 }
 
@@ -628,17 +807,25 @@ function turnEnded(
 } {
   const spoke = speaksTurn(model, turnId);
   const commands: ConversationCommand[] = [];
-  let pipeline = model.speech;
+  let pipeline = { ...model.speech, maxSpokenChars: model.maxSpokenChars };
   if (spoke && pipeline.turnId === turnId) {
     const speakable = speakableFilter.flush(pipeline.speakable);
     const chunked = chunkFilter.step(pipeline.chunks, speakable.text);
     const flushed = chunkFilter.flush(chunked.state);
-    let seq = pipeline.seq;
-    for (const chunk of [...chunked.chunks, ...flushed.chunks]) {
-      if (chunk.trim() === "") continue;
-      commands.push({ cmd: "speak", text: chunk, seq: seq++ });
-    }
-    pipeline = { ...pipeline, seq };
+    const tail = [...chunked.chunks, ...flushed.chunks].filter((c) => c.trim() !== "");
+    // F5 applies to the flushed tail too: a reply can cross the cap at turn end.
+    const spoken = speakWithinBudget(pipeline, tail, {
+      speakable: speakable.state,
+      chunks: flushed.state,
+    });
+    commands.push(...spoken.commands);
+    pipeline = spoken.state;
+  }
+  // F5: past the cap, say ONCE where the rest is — it is already on screen.
+  if (pipeline.capped && !pipeline.restNoticed) {
+    const spoken = systemSpeak({ ...model, speech: pipeline }, REST_ON_SCREEN);
+    commands.push(spoken.command);
+    pipeline = { ...pipeline, seq: spoken.seq, restNoticed: true };
   }
   return {
     model: {
@@ -646,7 +833,8 @@ function turnEnded(
       turnId: null,
       ownTurnId: model.ownTurnId === turnId ? null : model.ownTurnId,
       steeredTurns: model.steeredTurns.filter((t) => t !== turnId),
-      speech: emptySpeech(),
+      // A new turn's pipeline: `seq` and F5's "announced" flag are the MODE's.
+      speech: emptySpeech(pipeline.seq, model.maxSpokenChars),
       narratedAtMs: null,
       state:
         model.state === "speaking" && commands.length === 0
@@ -668,9 +856,14 @@ function interrupted(
   readonly commands: readonly ConversationCommand[];
 } {
   if (phase === "began") {
-    if (model.state === "off") return { model, commands: [] };
+    if (!isOn(model)) return { model, commands: [] };
     return {
-      model: { ...model, state: "paused", pausedBy: source, speech: emptySpeech() },
+      model: {
+        ...model,
+        state: "paused",
+        pausedBy: source,
+        speech: emptySpeech(model.speech.seq, model.maxSpokenChars),
+      },
       commands: [
         { cmd: "hush" },
         { cmd: "notice", text: source === "call" ? "paused: a call is in progress" : "paused" },
@@ -681,6 +874,9 @@ function interrupted(
   if (source === "call") return { model, commands: [] };
   if (!shouldResume) return { model, commands: [] };
   if (model.state !== "paused") return { model, commands: [] };
+  // Only the interruption that CAUSED the pause may end it: another app's audio
+  // ending must not undo a user pause, a thermal pause or an ask (finding 1).
+  if (model.pausedBy !== source) return { model, commands: [] };
   if (model.linkDown) return { model, commands: [] };
   // P-F1b: another app's audio said it may resume: go back to listening.
   return { model: { ...model, state: "listening", pausedBy: null }, commands: [{ cmd: "listen" }] };
@@ -700,7 +896,12 @@ function remote(
     case "pause":
       if (model.state === "off" || model.state === "paused") return { model, commands: [] };
       return {
-        model: { ...model, state: "paused", pausedBy: "user", speech: emptySpeech() },
+        model: {
+          ...model,
+          state: "paused",
+          pausedBy: "user",
+          speech: emptySpeech(model.speech.seq, model.maxSpokenChars),
+        },
         commands: [{ cmd: "hush" }, { cmd: "notice", text: "paused" }],
       };
     case "playPause":
@@ -731,12 +932,19 @@ function recognitionFailed(
   if (burst.length < CONVERSATION_DEFAULTS.failuresBurst) {
     return { model: { ...model, failures: burst }, commands: [] };
   }
+  // P-F9, off-path included: a recogniser that never started cannot stop, so a
+  // burst while `off` (or already `paused`) changes nothing the person sees.
+  if (!isOn(model)) return { model: { ...model, failures: burst }, commands: [] };
+  const spoken = systemSpeak(model, "Speech recognition stopped.");
   return {
-    model: { ...model, failures: burst, state: "paused", pausedBy: "recognition" },
-    commands: [
-      { cmd: "notice", text: "speech recognition stopped" },
-      { cmd: "speak", text: "Speech recognition stopped.", seq: 0 },
-    ],
+    model: {
+      ...model,
+      failures: burst,
+      state: "paused",
+      pausedBy: "recognition",
+      speech: { ...emptySpeech(model.speech.seq, model.maxSpokenChars), seq: spoken.seq },
+    },
+    commands: [{ cmd: "notice", text: "speech recognition stopped" }, spoken.command],
   };
 }
 
@@ -752,7 +960,12 @@ function tick(
   const idleMs = atMs - model.lastSpeechAtMs;
   if (idleMs < CONVERSATION_DEFAULTS.idleOffMinutes * 60_000) return { model, commands: [] };
   return {
-    model: { ...model, state: "off", speech: emptySpeech(), pausedBy: null },
+    model: {
+      ...model,
+      state: "off",
+      speech: emptySpeech(model.speech.seq, model.maxSpokenChars),
+      pausedBy: null,
+    },
     commands: [
       { cmd: "notice", text: "voice mode turned off after 10 minutes of silence" },
       { cmd: "hush" },
