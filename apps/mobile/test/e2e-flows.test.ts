@@ -428,3 +428,110 @@ describe("R6's relay-only flow (docs/feat/mobile-relay.md)", () => {
     expect(pairing).toContain("relayOnly === true ? {} : { extraAddresses: [deps.address] }");
   });
 });
+
+describe("P10's push flow (docs/feat/mobile-push.md)", () => {
+  // The flow's WHOLE value is that what it places is the daemon's own sealed
+  // envelope, and that it says out loud what a simulator cannot prove. A flow
+  // that hand-wrote a payload, or that claimed to have exercised APNs, would be
+  // worse than none: it would read as coverage of Apple's path.
+  const PUSH_FLOW = "push-placeholder";
+  const body = readFileSync(join(FLOWS_DIR, `${PUSH_FLOW}.yaml`), "utf8");
+
+  test("it is run, and every file it names exists", () => {
+    expect(FLOWS).toContain(PUSH_FLOW);
+    for (const file of scripts(PUSH_FLOW)) {
+      expect(() => scriptBody(file)).not.toThrow();
+    }
+  });
+
+  test("its payload comes from the daemon, never from the flow", () => {
+    // The one hook that does the work, and the assertion that it produced a
+    // sealed envelope: `push-place` is the harness's register + push + place.
+    expect(scripts(PUSH_FLOW)).toContain("push-place.js");
+    const place = scriptBody("push-place.js");
+    expect(place).toContain("${MAESTRO_HOOKS}/push-place");
+    // A hand-written payload would need `aps` in the flow's own files: assert the
+    // alert text NEVER appears in a script (it may appear in the yaml as the
+    // banner's text to tap, which is the OS's own drawing).
+    for (const file of scripts(PUSH_FLOW)) {
+      expect(scriptBody(file)).not.toContain("mutable-content");
+      expect(scriptBody(file)).not.toMatch(/aps\s*:/);
+    }
+  });
+
+  test("it ends on DAEMON truth: the envelope's key id, enc and padding bucket", () => {
+    const files = scripts(PUSH_FLOW);
+    expect(files[files.length - 1]).toBe("push-assert.js");
+    const last = scriptBody("push-assert.js");
+    expect(last).toContain("http.get");
+    expect(last).toMatch(/throw new Error/);
+    // The three properties: a 12-char key id, a 43-char enc, and ONE OF THE THREE
+    // padded ciphertext lengths (Design 2's metadata claim). Asserting the numbers
+    // rather than `c.length > 0` is the difference between a real check and a
+    // vacuous one.
+    expect(last).toContain("!== 12");
+    expect(last).toContain("!== 43");
+    expect(last).toContain("704");
+    expect(last).toContain("2752");
+  });
+
+  test("the harness pushes through the REAL chain, on a local fake APNs", () => {
+    const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    // A local h2c APNs (never Apple), the relay pointed at it with the `origins`
+    // override, and `push` in `ready.features` because an `apns` client is passed.
+    expect(runner).toContain("startFakeApns");
+    expect(runner).toContain("origins: { sandbox: apns.origin, production: apns.origin }");
+    expect(runner).toContain("apns: {");
+    // The grace is 0 for the run, or the flow would sit out 30 s (and the ask
+    // would have to stay unanswered the whole time).
+    expect(runner).toContain('"--push-grace"');
+    // The payload is placed with `simctl push`, which is the ONLY way a simulator
+    // draws a banner — and it is what makes the flow unable to prove APNs.
+    expect(runner).toContain('"simctl", "push"');
+  });
+
+  test("it registers the phone's device in the daemon's own store, not the app", () => {
+    // A simulator has no APNs token, so the APP cannot register itself. The
+    // harness registers the paired device through the DAEMON'S OWN STORE.
+    //
+    // Review round 1, finding 2: it used to hand-build `{v:1,…,at}` under
+    // `devices/push/`, which is a SECOND writer for a persisted format — a change
+    // to `push-store.ts` would leave the flow failing with the misleading "the
+    // relay must announce push" error. So the assertion is now on the import that
+    // makes the reuse true, and against the hand-built record coming back.
+    const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    expect(runner).toMatch(
+      /import \{\s*writePushRegistration as daemonWritePushRegistration\s*\} from "@tentacle\/daemon"/,
+    );
+    // The single writer, called once and checked: a refused record is thrown, not
+    // swallowed (a silent failure here would surface as the wrong error later).
+    expect(runner).toContain("daemonWritePushRegistration(configDir, {");
+    expect(runner).toContain("if (!written.ok)");
+    // And the format itself is NOT reproduced here any more — no version literal,
+    // no `at:` timestamp key, no hand-built path. That is the whole finding. The
+    // comment above the writer explains the old shape, so this looks for the
+    // STATEMENTS (`JSON.stringify({ v: 1` → a record built here) rather than any
+    // mention of them.
+    expect(runner).not.toMatch(/JSON\.stringify\(\{\s*v:\s*1/);
+    expect(runner).not.toContain('"devices", "push"');
+    expect(runner).not.toMatch(/\bat: Date\.now\(\)/);
+  });
+
+  test("the hooks it reads are the ones the harness serves", () => {
+    const served = readFileSync(join(import.meta.dir, "..", "e2e", "hooks.ts"), "utf8");
+    for (const file of scripts(PUSH_FLOW)) {
+      for (const match of scriptBody(file).matchAll(/\$\{MAESTRO_HOOKS\}\/([a-z-]+)/g)) {
+        expect(served).toContain(`"${match[1]}"`);
+      }
+    }
+  });
+
+  test("the flow STATES what a simulator cannot prove (Apple's delivery)", () => {
+    // The honesty half. A green run of this flow proves the entitlement, the
+    // plugin wiring and the sealed payload — never APNs, which needs D2a + a
+    // device (docs/ops/relay-deploy.md §6.4).
+    expect(body).toMatch(/simctl push/);
+    expect(body).toMatch(/D2a/);
+    expect(body).toMatch(/does \*\*NOT\*\* prove/i);
+  });
+});

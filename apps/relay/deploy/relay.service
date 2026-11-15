@@ -3,8 +3,12 @@
 # NOT APPLIED by any executor: install this by hand, following
 # docs/ops/relay-deploy.md (slice D, owner-approved). It carries no secret; when
 # APNs push lands (task 16 / docs/feat/mobile-push.md P10) the `.p8` arrives as a
-# systemd credential, never as a file next to the binary or a flag in argv (argv
-# is world-readable in `ps`).
+# systemd credential in a DROP-IN (`deploy/relay.service.d/apns.conf`), never as a
+# file next to the binary or a flag in argv (argv is world-readable in `ps`).
+# Push is therefore absent from THIS file on purpose: the base unit has to start
+# on a host with no Apple key at all (F4, and review round 1's finding 1 — with
+# `Restart=always`, an ExecStart the binary refuses is a crash loop that takes
+# every phone off the relay).
 #
 # The relay speaks ws:// on loopback only: Caddy terminates TLS in front of it
 # (deploy/Caddyfile.relay) and the daemon dials wss://relay.tentacle.so.
@@ -41,8 +45,24 @@ Group=relay
 # of `relay-core.ts` apply: 30 dials/min, 16 concurrent phone sockets and 10
 # registrations/min per address, plus 32 registered ids per address
 # (`--max-ids-per-ip`). The owner can raise any of them for a large carrier NAT
-# without a rebuild — the flags are all still there (runbook §9).
+# without a rebuild — the flags are all still there (runbook §10).
 ExecStart=/opt/tentacle-relay/tentacle-relay --host 127.0.0.1 --port 4100 --trust-proxy
+
+# PUSH IS NOT WIRED HERE (docs/feat/mobile-push.md P10, review round 1 finding 1).
+# The four `--apns-*` flags, the `EnvironmentFile` and the `LoadCredential` live in
+# `relay.service.d/apns.conf`, which the runbook installs ONLY together with the
+# `.p8` (§6.1). Both of those settings make a unit UNABLE TO START on a host where
+# the key is not installed, which is not what "push is optional" may mean:
+#  - `LoadCredential=ID:/absolute/path` fails the unit's start when that file is
+#    missing (exit 243/CREDENTIALS) — it does not degrade to "no credential";
+#  - an unset `${VAR}` is expanded by systemd to an EMPTY ARGUMENT (systemd.service(5):
+#    "treated as empty strings", and a `${VAR}` word is always exactly one argument).
+# With `Restart=always` either one is a crash loop that takes every phone off the
+# relay because Apple's key was absent. `main.ts` now treats a blank `--apns-*`
+# value as "not set", so the second is survivable — but the first is not ours to
+# soften, so the wiring simply does not belong in this file.
+# The base unit therefore serves with push off — one `push off:` line, no `push` in
+# `ready.features` — which is exactly what F4 promises.
 
 Restart=always
 RestartSec=2s

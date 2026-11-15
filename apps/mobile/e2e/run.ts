@@ -14,9 +14,16 @@
  * Exit codes: 0 = every flow passed; 2 = a prerequisite is missing (named, with
  * its install command — never a silent skip); anything else = Maestro's own.
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
+import { PermissionBroker } from "@tentacle/core";
+import { writePushRegistration as daemonWritePushRegistration } from "@tentacle/daemon";
+import { encodeBase64Url } from "@tentacle/protocol";
+import { publicKeyOf } from "@tentacle/transport/noise";
 import { $, type Subprocess } from "bun";
+import { createApnsClient } from "../../relay/src/apns-client.ts";
+import type { ApnsJwtSource } from "../../relay/src/apns.ts";
 import { startHooks } from "./hooks.ts";
 import { createPairingHooks } from "./pairing.ts";
 import {
@@ -26,6 +33,7 @@ import {
   parseRuntimes,
   preflight,
 } from "./preflight.ts";
+import { type ApnsPayload, type PushSteps, createPushSteps } from "./push-steps.ts";
 
 const REPO = join(import.meta.dir, "..", "..", "..");
 const RUNS_DIR = join(REPO, ".tentacle", "tmp", "e2e-mobile");
@@ -227,9 +235,31 @@ async function main(): Promise<number> {
   // the deployable service — the harness imports it across apps, like the
   // daemon's own relay tests do (`packages/daemon/test/relay-link.test.ts`).
   const { startRelay } = await import("../../relay/src/server.ts");
-  const relay = startRelay({ host: "127.0.0.1", port: 0, onLog: () => {} });
+  // The LOCAL APNs (docs/feat/mobile-push.md P10). P8's own fake, moved here:
+  // an h2c server that records every request body. It is what makes the flow's
+  // payload REAL rather than hand-written — the bytes `xcrun simctl push` gets
+  // are the ones the daemon's sealing chain produced, through the relay, from a
+  // device registration the phone just made.
+  const apns = await startFakeApns();
+  const relay = startRelay({
+    host: "127.0.0.1",
+    port: 0,
+    onLog: () => {},
+    // With an APNs client the relay announces `features: ["push"]`, which is the
+    // ONLY thing that makes the daemon send a `push` frame (C1/F4). Without it
+    // every flow would still pass and push would never be exercised at all.
+    apns: {
+      client: createApnsClient({
+        topic: "so.tentacle.app",
+        jwtSource: apns.jwtSource,
+        origins: { sandbox: apns.origin, production: apns.origin },
+      }),
+      jwtSource: apns.jwtSource,
+      topic: "so.tentacle.app",
+    },
+  });
   const relayUrl = relay.url;
-  console.log(`relay on ${relayUrl}`);
+  console.log(`relay on ${relayUrl}, fake APNs on ${apns.origin}`);
 
   // The real `serve`, from source, on a private config dir and the mock model.
   // Spawned through a function because flow 05 stops it and starts it again on
@@ -249,6 +279,11 @@ async function main(): Promise<number> {
         // 22's whole subject is the relay path.
         "--relay",
         relayUrl,
+        // P10: an ask pushes IMMEDIATELY, so the push flow does not sit out the
+        // 30 s default. Every other flow is untouched by it: none registers a
+        // push key, and with no registration there is nothing to push to.
+        "--push-grace",
+        "0",
       ],
       {
         // The daemon's cwd IS its session cwd (each session's tools are confined
@@ -317,8 +352,17 @@ async function main(): Promise<number> {
     );
     await writeFile(join(runDir, "seeded.json"), JSON.stringify(seeded, null, 2));
 
-    // The hooks flow 03/05 call: change the world mid-run (add a session, stop
-    // and restart the daemon on the same port).
+    // docs/feat/mobile-push.md P10: register a push key for the paired device,
+    // make the daemon push one (an ask, `--push-grace 0`), and place the
+    // envelope it produced on the simulator.
+    const pushSteps = harnessPushSteps({
+      url: `ws://127.0.0.1:${daemonPort}/`,
+      configDir: join(runDir, "config"),
+      apns,
+      pairDeviceId: () => pairing.lastDeviceId(),
+      udid: () => currentDevice.udid,
+      log: (line) => console.log(line),
+    });
     // The app lock's hooks (docs/feat/mobile-lock.md Step 0): the flows drive
     // Face ID and read the app's OWN log file, so the assertions are about what
     // the app really wrote — not about what the harness believes it wrote.
@@ -373,6 +417,18 @@ async function main(): Promise<number> {
         // payload ACTUALLY carried. The phone can only show "1 address"; whether
         // that address is the relay is what the flow is about.
         relayQr: async () => ({ payload: pairing.lastPayload() }),
+        // docs/feat/mobile-push.md P10: the push the `push-placeholder` flow
+        // places. `pushSteps.push` (below) pushed it through the daemon's own
+        // chain and kept the payload, so the flow's last step reads what was
+        // ACTUALLY delivered instead of the flow's own assumption.
+        pushPayload: async () => {
+          const placed = pushSteps.last();
+          if (placed === undefined) {
+            throw new Error("no push has been placed yet (the flow places it first)");
+          }
+          return { payload: placed.payload, token: placed.token };
+        },
+        pushPlace: () => pushSteps.place(),
         faceIdEnroll: async () => {
           // Two commits, as Step 0 found: the `-s` alone only SETS the default;
           // the `-p` post is what makes `isEnrolledAsync()` flip to true.
@@ -486,6 +542,8 @@ async function main(): Promise<number> {
     }
     children.clear();
     mock.stop();
+    // The fake APNs is in THIS process too (an h2c server keeps the loop alive).
+    apns.stop();
     // The local relay is in THIS process, so it needs an explicit stop (a live
     // server keeps the event loop, and therefore the run, alive).
     relay.stop();
@@ -640,7 +698,185 @@ async function addMedia(device: string, runDir: string): Promise<number> {
   return result.exitCode;
 }
 
-/** A session handle resolved through the client's own session table (for a subscription). */
+/**
+ * The LOCAL APNs for the push flow (docs/feat/mobile-push.md P10; the fake is
+ * P8's, from `packages/cli/test/serve-push.test.ts`, moved into the harness so
+ * the payload the flow pushes is the one the daemon actually produced).
+ *
+ * Nothing here talks to Apple: it is an h2c server on 127.0.0.1, and the relay's
+ * `createApnsClient` is pointed at it with the `origins` override P4 added for
+ * exactly this. It answers `200` always, so a push always reads `sent`.
+ */
+async function startFakeApns(): Promise<{
+  readonly origin: string;
+  readonly jwtSource: ApnsJwtSource;
+  /** The single object `{aps, tp}` the last push carried, as APNs would send it. */
+  last(): ApnsPayload | undefined;
+  /** How many requests it has answered (a flow's "exactly one push" question). */
+  readonly count: () => number;
+  stop(): void;
+}> {
+  const http2 = await import("node:http2");
+  const seen: ApnsPayload[] = [];
+  const server = http2.createServer();
+  server.on("stream", (stream) => {
+    let body = "";
+    stream.on("data", (chunk: unknown) => {
+      body += String(chunk);
+    });
+    stream.on("end", () => {
+      try {
+        seen.push(JSON.parse(body) as ApnsPayload);
+      } catch {
+        // A body that is not JSON is not a push this harness can use; the flow's
+        // own assertion then fails loudly rather than pushing something odd.
+      }
+      stream.respond({ ":status": 200 });
+      stream.end("");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+  const port = (server.address() as { port: number }).port;
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    // The signature is never checked by the fake, so a constant is honest here.
+    jwtSource: {
+      jwt: () => Promise.resolve("header.claims.signature"),
+      invalidate: () => {},
+    },
+    last: () => (seen.length === 0 ? undefined : seen[seen.length - 1]),
+    count: () => seen.length,
+    stop: () => server.close(),
+  };
+}
+
+/**
+ * The harness's side of P10's push flow, wired to the REAL effects.
+ *
+ * The orchestration itself is `createPushSteps` (`./push-steps.ts`) — pure, and
+ * unit-tested, because the property the flow rests on ("the payload placed on the
+ * simulator came out of the daemon's chain") must be provable without a daemon, a
+ * relay or a simulator. Before that split, a mutation replacing the captured
+ * payload with a hand-written literal survived every guard (the task doc's M7).
+ *
+ * Everything below is the effectful half: the daemon's own push store, one ask,
+ * the local fake APNs above, and `xcrun simctl push`.
+ */
+function harnessPushSteps(deps: {
+  readonly url: string;
+  readonly configDir: string;
+  readonly apns: { last(): ApnsPayload | undefined; count(): number };
+  readonly pairDeviceId: () => string | undefined;
+  readonly udid: () => string;
+  readonly log: (line: string) => void;
+}): PushSteps {
+  return createPushSteps({
+    pairedDeviceId: deps.pairDeviceId,
+    // The phone's OWN push key: a fresh X25519 pair, exactly what `push-key.ts`
+    // generates on the device. Nothing in this flow opens it (task 17's extension
+    // would), so it is written and then unused — honestly: the envelope's SHAPE
+    // is what the flow asserts, and `push-envelope.ts` says so.
+    pushKey: () => encodeBase64Url(publicKeyOf(crypto.getRandomValues(new Uint8Array(32)))),
+    register: ({ deviceId, token, env, key }) => {
+      writePushRegistration(deps.configDir, deviceId, { token, env, key });
+    },
+    promptOnce: () => promptOnce(deps.url),
+    apnsCount: () => deps.apns.count(),
+    lastApnsPayload: () => deps.apns.last(),
+    place: (payload) => placeOnSimulator(deps.udid(), payload, deps.log),
+  });
+}
+
+/**
+ * Write one device's push registration through the DAEMON'S OWN STORE.
+ *
+ * Not a hand-built `{v: 1, …, at}`: review round 1 (finding 2) found this writer
+ * keeping a second copy of a persisted format, so a change to
+ * `packages/daemon/src/push-store.ts` (a renamed field, a new version, a
+ * different timestamp key) would leave the flow failing with the misleading
+ * "the relay must announce push" error instead of the real one. The store also
+ * validates the record through the wire's own schema, which is the property the
+ * flow depends on and cannot check for itself.
+ */
+function writePushRegistration(
+  configDir: string,
+  deviceId: string,
+  value: { readonly token: string; readonly env: "sandbox" | "production"; readonly key: string },
+): void {
+  const written = daemonWritePushRegistration(configDir, {
+    deviceId,
+    token: value.token,
+    env: value.env,
+    key: value.key,
+    registeredAt: Date.now(),
+  });
+  if (!written.ok) {
+    // Surfaced, never swallowed: a record the daemon's own store refuses is a
+    // flow that would otherwise fail later with the wrong message.
+    throw new Error(
+      `cannot register the harness's push device (${written.path}): ${written.reason}`,
+    );
+  }
+}
+
+/**
+ * Make the daemon raise one ask, which pops the local APNs at once (`--push-grace`
+ * is 0 for this run). `EDIT` is the mock model's tool-call prompt — the same one
+ * flows 08/08b/08c use, so nothing new is asked of the mock.
+ *
+ * The turn is NOT awaited to completion: it SUSPENDS on the ask by design, and
+ * waiting for it would mean answering it, which cancels the push (Design 1).
+ */
+async function promptOnce(url: string): Promise<void> {
+  const factory = webSocketChannelFactory(url, {});
+  const client = new RemoteClient(
+    await factory(),
+    new PermissionBroker(undefined, { holdUntilSet: true }),
+  );
+  await client.initialize();
+  const session = client.newSession(undefined, crypto.randomUUID());
+  // The session is live as soon as it exists; `send` returns its event iterator
+  // and the turn starts on the first pull. One pull is enough to reach the ask.
+  const events = session.send("EDIT p10-push.txt");
+  await events.next();
+}
+
+/**
+ * Hand the payload to the simulator, exactly as APNs would.
+ *
+ * The bundle id is an ARGUMENT, not a field added to the payload: `simctl push`
+ * accepts either, and the argument form keeps the bytes identical to what Apple
+ * would deliver — which is what makes the envelope in them meaningful.
+ */
+async function placeOnSimulator(
+  udid: string,
+  payload: ApnsPayload,
+  log: (line: string) => void,
+): Promise<void> {
+  if (udid === "") {
+    throw new Error("no simulator selected yet");
+  }
+  // The payload is written under the run's OWN scratch dir and removed after.
+  const file = join(RUNS_DIR, `push-payload-${Date.now()}.json`);
+  await mkdir(RUNS_DIR, { recursive: true });
+  await writeFile(file, JSON.stringify({ aps: payload.aps, tp: payload.tp }, null, 2));
+  try {
+    const child = Bun.spawn(["xcrun", "simctl", "push", udid, "so.tentacle.app", file], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const code = await child.exited;
+    const err = await new Response(child.stderr).text();
+    if (code !== 0) {
+      throw new Error(`simctl push failed (${code}): ${err.trim()}`);
+    }
+    log(`push placed on ${udid} from the daemon's own envelope`);
+  } finally {
+    await rm(file, { force: true });
+  }
+}
+
 /**
  * Every flow, in order (docs/feat/mobile-session-view.md 12c supersedes 11a's
  * `04-session-placeholder`; docs/feat/mobile-compose.md 13d adds `12`–`18`). Each
@@ -706,6 +942,13 @@ export const FLOWS: readonly string[] = [
   // (the harness restarts `serve` for its window), and a failure there must not
   // colour the flows whose daemon is the shared one.
   "22-relay-only",
+  // docs/feat/mobile-push.md P10: the push placeholder banner. LAST, because it
+  // is the only flow that leaves a PENDING ASK behind on its own session (an
+  // ask nobody answers, by design: answering it is what cancels the push), and
+  // it registers a push key so the daemon pushes to this simulator. Neither is
+  // visible to another flow (each gets its own session, and every other flow
+  // clears state), but a red here must not colour the flows above it.
+  "push-placeholder",
 ];
 
 /**
