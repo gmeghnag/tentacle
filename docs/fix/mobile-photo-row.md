@@ -225,6 +225,108 @@ in `.tentacle/tmp/mobile-photo-row/`) is the B9-b red case; its two `apply()`
 calls are `{type:"history_reset", messages:[photoMessage, reply]}` followed by
 `{type:"user_message", text:"Cosa vedi?", attachments: …}`.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-15* — addressed the three Review findings. Signing
+honestly this time: this round was executed by `claude-opus-5-5`, not DeepSeek
+(round 1's Execution below is signed `claude-opus-5-5` but its commit `f4012b45`
+and the doc metadata both say DeepSeek — finding 1 is about the original
+mis-signature, and I have left the original text as it stands rather than
+rewriting history; the signature on THIS section is the real model).
+
+**Finding 1 (signature) — the mismatch is real.** The metadata says "DeepSeek
+executes"; commit `f4012b45` is titled `exec (deepseek)`; the Execution section is
+signed `claude-opus-5-5`. I cannot know which model wrote the round-1 text, so I did
+not change that signature (guessing would be the same failure in the other
+direction). What is fixed is forward: this section names the model that wrote it.
+If the orchestrator knows round 1 was DeepSeek, the fix is to correct the section's
+signature to `deepseek (tentacle --profile deepseek)` — one line, no code.
+
+**Finding 2 (B9-b's layer, and whether it happens at all) — SAME-AS-REVIEW: no fix,
+and now with daemon-backed evidence, which is exactly what the review demanded
+before B9-b could join an Implementation.** The review's requirement was *"a
+daemon-backed repro shows it happens"*; it does not. I built three daemon-backed
+shapes (real `SessionHost` + `Connection` + `RemoteClient`, an own prompt, the link
+genuinely cut mid-turn, a ring small enough that the reconnect must resync from
+`session/snapshot`):
+
+| Shape | Result |
+|---|---|
+| echo model, cut mid-turn | `text, history_reset, turn_end` — no `user_message` after the reset |
+| gated model (`hold…`), cut while the turn runs, resync lands mid-turn | same: one `history_reset`, no re-delivery |
+| tool-round **committed** before the cut (so the cut names my own turn), then ring overflow | same: one `history_reset`, no re-delivery |
+
+Instrumented at the exact seam the review cites (`remote-session.ts`'s
+`onUpdate`): every reset arrived with `turn: null`, i.e. the **early** branch
+(`remote-session.ts:1544-1551`, `raise({kind:"history"})`), never the mid-turn
+branch that sets `turn.reset = true` (`:1555`). The replayed `turn_start`s the
+client saw were for a *later* prompt's own turn (a fresh turn, `reset === false`),
+so `:1766`'s condition never held. The literal duplicate therefore does not arise
+on this path, and the fold fix the review warned against is not written — the
+review was right that it would silently drop a legitimately repeated prompt.
+
+I pinned the property as a **regression test with teeth** rather than a narrative:
+`apps/mobile/test/outbox-link.test.ts` → *"owner B9-b: a mid-turn resync does not
+duplicate the prompt row"* drives the real daemon through the app's own screen, cuts
+the link while the turn runs, waits for the resync (`session/snapshot` observed in
+the phone's frames), releases the turn, and asserts **one** prompt row, above its
+reply. Non-vacuity by mutation — drawing the own prompt on every event instead of
+once (`session-feed.ts`'s `pending = null` removed):
+
+```
+Expected length: 1
+Received length: 2      # the duplicate row, exactly the review's shape
+```
+
+Once restored: 1 row, green. So if a future change reintroduces the duplication
+(on whatever layer it starts), this test fails.
+
+**Finding 3 (B9-a, contained fix only) — FIXED, the review's named option.** The
+outbox driver's port is now the **screen's own attach handle**
+(`ComposeHandle.port`), never a second `newSession` of the same id:
+
+- `apps/mobile/src/outbox-session.ts` — new `screenSessionPortOf(own, prompt)`:
+  `getSession` answers the screen's live port (null until it attached, so an item
+  stays `waiting` by 13b's `decide`, which is also the offline behaviour), with the
+  screen's *folding* `prompt` so the turn streams into the transcript (13d flow 07).
+- `apps/mobile/src/session-screen-controller.ts` — `ComposeWiring.driver` takes a
+  second argument, `own: () => OutboxSession | null`; the screen keeps
+  `composeHandle` (set once it attached, cleared on `leave`/`dispose`) and passes
+  `() => composeHandle?.port ?? null`.
+- `apps/mobile/App.tsx` — `outboxOf`'s driver now builds
+  `screenSessionPortOf(own, folding.prompt)`; the `client.newSession(…, {attach:{}})`
+  block is gone. `RemoteClient.register` is **untouched** (the review's
+  out-of-scope alternative is the one I did not take).
+
+Red before green: the new test *"owner B9: the photo's own row is drawn by the
+screen, above its reply"* sends a photo prompt from the screen and asserts the row
+is on screen with its image ref, above the reply. Mutating the port back to the
+pre-fix second handle:
+
+```
+Received: -1    # photo row absent: the screen never saw its own turn
+```
+
+with the daemon's history still `["hi", "Cosa vedi?"]` in the same run — the
+owner's exact symptom, and proof the assertion is on the screen's rows, not the
+daemon's. Restored: green.
+
+**Drift from the Implementation:** none to declare beyond the review's own
+corrections — B9-b was not implemented (no defect proven), and B10's
+history/other-device half still needs the owner's decision (the round-1 STOP
+stands).
+
+**Unverified, in one line:** that the owner's *specific* screenshot was B9-a rather
+than some third shape — my daemon-backed probe reproduces B9-a's mechanism exactly
+and no other shape produced a misordered row.
+
+**Gate:** `bunx tsc --noEmit` exit 0 · `bunx tsc -p apps/mobile --noEmit` exit 0 ·
+`bun run lint` → `Checked 1497 files. No fixes applied.` · `bun test` →
+**10809 pass, 5 skip, 0 fail** (the 5 are the documented opt-ins). The >=3 new
+tests are in `apps/mobile/test/outbox-link.test.ts`.
+
+
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-15* (fresh context; same model family as the orchestrator)

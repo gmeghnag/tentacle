@@ -68,9 +68,9 @@ import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
 import { authenticate, biometry, capability } from "./src/lock-auth.ts";
 import { LOCK_SETTING_STORE } from "./src/lock-settings-expo.ts";
 import { createDraftStore } from "./src/outbox-drafts.ts";
-import { createOutboxDriver } from "./src/outbox-driver.ts";
+import { type OutboxSession, createOutboxDriver } from "./src/outbox-driver.ts";
 import { createExpoOutboxFs, outboxRoot } from "./src/outbox-fs-expo.ts";
-import { outboxSessionOf } from "./src/outbox-session.ts";
+import { screenSessionPortOf } from "./src/outbox-session.ts";
 import { type OutboxStore, createOutboxStore, outboxPaths } from "./src/outbox-store.ts";
 import type { OutboxItem } from "./src/outbox.ts";
 import {
@@ -238,7 +238,10 @@ interface OutboxRuntime {
    * transcript: the outbox keeps the item and the key, and the turn it starts is
    * shown (13d's flow 07/18 — a drained stream shows nothing).
    */
-  readonly driver: (prompt: FoldingPrompt) => ReturnType<typeof createOutboxDriver>;
+  readonly driver: (
+    prompt: FoldingPrompt,
+    own: () => OutboxSession | null,
+  ) => ReturnType<typeof createOutboxDriver>;
   readonly drafts: ReturnType<typeof createDraftStore>;
 }
 const OUTBOXES = new Map<string, OutboxRuntime>();
@@ -249,26 +252,13 @@ function outboxOf(computerId: string): OutboxRuntime {
     return known;
   }
   const store = createOutboxStore(createExpoOutboxFs(), outboxPaths(outboxRoot(), computerId));
-  const driver = (folding: FoldingPrompt) =>
+  const driver = (folding: FoldingPrompt, own: () => OutboxSession | null) =>
     createOutboxDriver(
-      // The port is built per run from the client's own session, so a redial's new
-      // handle is picked up (never a stale one — 13b's contract).
-      async (sessionId) => {
-        const client = CLIENTS.get(computerId);
-        if (client === undefined) {
-          return null;
-        }
-        const session = client.newSession(undefined, sessionId, undefined, { attach: {} });
-        try {
-          await session.open();
-        } catch {
-          return null;
-        }
-        // No live-turn accessor here: `facts()` reads the session's own `busy`,
-        // and a steer is turn-bound by its `steerTurnId` (13b's contract).
-        const port = outboxSessionOf(session, client, () => null as string | null);
-        return { ...port, prompt: folding.prompt };
-      },
+      // The port is the SCREEN's own attach handle (`screenSessionPortOf`), so a
+      // photo send can never open a second handle of the same id — that would
+      // replace the client's stream listener and starve the very transcript the
+      // turn draws into (owner B9: the photo row below its reply).
+      screenSessionPortOf(own, folding.prompt),
       {
         persistence: {
           items: () => store.data.items,

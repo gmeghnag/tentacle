@@ -83,6 +83,34 @@ export function outboxSessionOf(
 }
 
 /**
+ * The driver's `getSession`, over the SCREEN's own handle — never a second
+ * `newSession` of the same id.
+ *
+ * A second handle of one id replaces the client's stream listener
+ * (`remote-client.ts`'s `register`: `if (listener) existing.listener = listener`),
+ * so the screen stops receiving that session's updates: the photo's own turn,
+ * and every later one, streams to the outbox's handle instead and the transcript
+ * freezes on stale rows. That is owner B9: the photo row then lands out of order
+ * (or never), while the daemon's history is correct. `compose-handle.ts` states
+ * the same rule for its own port.
+ *
+ * `own` is the screen's live port (`ComposeHandle.port`), null until it has
+ * attached — an item then stays `waiting` (13b's `decide`), exactly as for a
+ * link that is down. `prompt` is the screen's FOLDING one: the turn it starts
+ * must stream into the screen's transcript, not a drained stream (13d's flow
+ * 07/18).
+ */
+export function screenSessionPortOf(
+  own: () => OutboxSession | null,
+  prompt: OutboxSession["prompt"],
+): (sessionId: string) => Promise<OutboxSession | null> {
+  return async () => {
+    const port = own();
+    return port === null ? null : { ...port, prompt };
+  };
+}
+
+/**
  * The port for a session that could not be opened (archived, deleted, gone, or
  * no answer): its acts cannot run, but its FACTS carry the reason, so `decide`
  * puts the item back in the field (F20 — and never reopens it).

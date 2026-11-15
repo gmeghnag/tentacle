@@ -46,7 +46,11 @@ import {
   type OutboxSession,
   createOutboxDriver,
 } from "../src/outbox-driver.ts";
-import { outboxSessionOf, unavailableSessionPort } from "../src/outbox-session.ts";
+import {
+  outboxSessionOf,
+  screenSessionPortOf,
+  unavailableSessionPort,
+} from "../src/outbox-session.ts";
 import { type OutboxFs, createOutboxStore, outboxPaths } from "../src/outbox-store.ts";
 import type { ComposeInput, OutboxItem, SessionFacts } from "../src/outbox.ts";
 import { addOwnIds, pruneOwnIds } from "../src/outbox.ts";
@@ -72,6 +76,8 @@ interface Frame {
 interface App {
   readonly client: RemoteClient;
   readonly frames: Frame[];
+  /** Drop the current socket: the client reconnects (its `channelFactory`) and resyncs. */
+  cut(): void;
   close(): void;
 }
 
@@ -108,10 +114,11 @@ const env = {
 } as unknown as ExecutionEnvironment;
 
 /** An in-process `serve`-shaped daemon: it persists, so a closed session is ARCHIVED (kept). */
-function daemon() {
+function daemon(opts: { readonly ringBytes?: number } = {}) {
   const model = new Model();
   const host = new SessionHost({
     defaultCwd: CWD,
+    ...(opts.ringBytes === undefined ? {} : { ringBytes: opts.ringBytes }),
     persister: new SessionPersister({
       store: new SpyDaemonStore(),
       cwd: CWD,
@@ -141,6 +148,8 @@ const sha256Hex = (bytes: Uint8Array): string =>
 /** Dial the daemon: a real `RemoteClient` over an in-memory pair, every frame recorded. */
 async function dial(d: Daemon): Promise<App> {
   const frames: Frame[] = [];
+  /** The live socket's client end: what `cut()` closes (a real link loss). */
+  let live: DuplexChannel | null = null;
   const connect = (): DuplexChannel => {
     const [server, client] = createChannelPair();
     // An in-memory pair has no ws-server, so the harness closes the daemon's
@@ -157,7 +166,7 @@ async function dial(d: Daemon): Promise<App> {
         }),
     };
     connection = new Connection(serverEnd, d.host);
-    return {
+    const tapped: DuplexChannel = {
       send: (data) => {
         frames.push(JSON.parse(data) as Frame);
         client.send(data);
@@ -166,6 +175,8 @@ async function dial(d: Daemon): Promise<App> {
       setOnMessage: (handler) => client.setOnMessage(handler),
       setOnClose: (handler) => client.setOnClose(handler),
     };
+    live = tapped;
+    return tapped;
   };
   const remote = new Client(connect(), new PermissionBroker(), undefined, {
     channelFactory: async () => connect(),
@@ -176,6 +187,7 @@ async function dial(d: Daemon): Promise<App> {
   return {
     client: remote,
     frames,
+    cut: () => live?.close(),
     close: () => remote.close(),
   };
 }
@@ -876,8 +888,15 @@ function memoryFs(): OutboxFs {
  * `App.tsx`'s `composeWiring` wires it: the handle is the APP's own
  * `composeHandleOf`, given the screen's attach handle.
  */
-function screenOn(phone: App, sid: string) {
+function screenOn(phone: App, sid: string, over: { readonly photo?: boolean } = {}) {
   const store = createOutboxStore(memoryFs(), outboxPaths("file:///o", "phone"), () => 1);
+  const picked = {
+    kind: "ready" as const,
+    file: "file:///o/photos/a.jpg",
+    mimeType: "image/jpeg",
+    name: "a.jpg",
+    bytes: new Uint8Array([1, 2, 3]),
+  };
   return createSessionScreen({
     sessionId: sid,
     archived: false,
@@ -894,8 +913,8 @@ function screenOn(phone: App, sid: string) {
     compose: {
       computerId: "phone",
       store,
-      driver: (folding) =>
-        createOutboxDriver(async () => null, {
+      driver: (folding, own) =>
+        createOutboxDriver(screenSessionPortOf(own, folding.prompt), {
           persistence: {
             items: () => store.data.items,
             save: (items) => store.setItems(items),
@@ -905,7 +924,10 @@ function screenOn(phone: App, sid: string) {
           mint: () => crypto.randomUUID(),
           onDraft: folding.onDraft,
         }),
-      photos: { pickFromLibrary: async () => [], takePhoto: async () => [] },
+      photos: {
+        pickFromLibrary: async () => (over.photo === true ? [picked] : []),
+        takePhoto: async () => (over.photo === true ? [picked] : []),
+      },
       handle: (session) =>
         composeHandleOf({
           sessionId: sid,
@@ -941,6 +963,121 @@ describe("owner B4: a send from the phone's composer, over the APP's compose han
     await until(() => userRows(screen).includes("hello from the phone"));
     expect(userRows(screen)).toContain("hello from the phone");
     expect(screen.state().draft).toBe("");
+    await screen.leave();
+    screen.dispose();
+    phone.close();
+    laptop.close();
+  }, 20000);
+});
+
+/**
+ * Owner B9 (docs/fix/mobile-photo-row.md): a photo prompt's own turn must be
+ * drawn by the SCREEN, in log order — its row above the reply that answers it.
+ *
+ * The mechanism is a §7 "one session path" one: `RemoteClient.register` keeps ONE
+ * listener per session id and the newest wins
+ * (`remote-client.ts`: `if (listener) existing.listener = listener`). So a second
+ * `newSession` of the same id — which is what the outbox driver's port used to be
+ * (`App.tsx`'s `outboxOf`, `client.newSession(…, {attach:{}})`) — takes the stream
+ * away from the screen: the photo turn streams into the outbox's handle, the
+ * transcript never sees its `user_message`, and the reply (which it does see, on
+ * the next resync) is the only row left. The daemon's history is correct
+ * throughout, which is why the owner saw a correctly answered photo and a wrong
+ * screen.
+ *
+ * Mutation: wire the driver's port back to a second `newSession` (the pre-fix
+ * `outboxOf`) → the screen shows no photo row → red.
+ */
+describe("owner B9: the photo's own row is drawn by the screen, above its reply", () => {
+  test("a photo send streams into the screen's own transcript, in log order (mutation: a second handle → the photo turn is stolen, no photo row)", async () => {
+    const d = daemon();
+    const laptop = await dial(d);
+    const sid = await seeded(laptop);
+    const phone = await dial(d);
+    const screen = screenOn(phone, sid, { photo: true });
+    await screen.open();
+    await until(() => screen.state().status.phase === "open");
+    await screen.pickPhoto("library");
+    await until(() => screen.state().view.photos.some((chip) => chip.state === "ready"));
+    expect(screen.state().view.photos.length).toBe(1);
+    screen.setDraft("Cosa vedi?");
+    screen.press();
+    // The daemon has it, in order: the prompt, then the reply to it.
+    await until(async () => (await userTexts(d, sid)).includes("Cosa vedi?"));
+    expect(await userTexts(d, sid)).toEqual(["hi", "Cosa vedi?"]);
+    // And the PHONE draws it — the property the second handle destroyed.
+    await until(() => userRows(screen).includes("Cosa vedi?"));
+    const rows = screen.state().view.rows;
+    const photo = rows.findIndex((row) => row.kind === "user" && row.text === "Cosa vedi?");
+    expect(photo).toBeGreaterThanOrEqual(0);
+    // The reply comes AFTER it — the daemon's model echoes the prompt.
+    await until(() =>
+      screen
+        .state()
+        .view.rows.slice(photo + 1)
+        .some((row) => row.kind === "assistant" && row.text.includes("Cosa vedi?")),
+    );
+    const after = screen.state().view.rows.slice(photo + 1);
+    expect(after.some((row) => row.kind === "assistant" && row.text.includes("Cosa vedi?"))).toBe(
+      true,
+    );
+    // The image is on the row, as the ref the daemon holds (not a dropped one).
+    const shown = rows[photo] as { readonly images?: readonly { readonly name?: string }[] };
+    expect(shown.images?.[0]?.name).toBe("a.jpg");
+    await screen.leave();
+    screen.dispose();
+    phone.close();
+    laptop.close();
+  }, 20000);
+});
+
+/**
+ * Owner B9-b (docs/fix/mobile-photo-row.md, Review finding 2): does a mid-turn
+ * RESYNC duplicate the screen's own prompt row?
+ *
+ * The review's worry is that `remote-session.ts`'s reset re-delivery
+ * (`turn.reset = true`, then a replayed `turn_start` pushing `user_message`)
+ * makes the fold show the prompt twice: once from the snapshot, once from the
+ * replay. The fix it warns against ("replace the last matching user row" in
+ * `transcript.ts`) would silently swallow a legitimately repeated prompt, so the
+ * property has to be settled against a REAL daemon before any fix is written —
+ * that is what this test does, through the app's own screen, with the link
+ * genuinely cut mid-turn and a ring small enough that the reconnect cannot be
+ * replayed (`session/snapshot` is taken).
+ *
+ * Asserts the daemon-backed fact the doc needs: the screen shows the prompt ONCE,
+ * above its reply, across the resync.
+ */
+describe("owner B9-b: a mid-turn resync does not duplicate the prompt row", () => {
+  test("the link is cut mid-turn, the reconnect resyncs from a snapshot: one photo row, above the reply", async () => {
+    const d = daemon({ ringBytes: 1000 });
+    const laptop = await dial(d);
+    const sid = await seeded(laptop);
+    const phone = await dial(d);
+    const screen = screenOn(phone, sid, { photo: true });
+    await screen.open();
+    await until(() => screen.state().status.phase === "open");
+    await screen.pickPhoto("library");
+    await until(() => screen.state().view.photos.some((chip) => chip.state === "ready"));
+    // A HOLT prompt: the daemon's model gates on `hold…`, so the turn is still
+    // RUNNING when the link is cut — the resync then lands mid-turn, which is the
+    // only shape in which the re-delivery branch could fire at all.
+    screen.setDraft("hold Cosa vedi?");
+    screen.press();
+    await until(() => d.model.held === 1);
+    phone.cut();
+    // The client reconnects by itself and must resync (its ring lost the tail).
+    await until(() => methods(phone.frames).filter((m) => m === Method.Snapshot).length > 0);
+    // The turn was still running at the cut: the screen keeps following it.
+    expect(screen.state().view.turn).not.toBeNull();
+    d.model.open();
+    await until(() => userRows(screen).length === 2);
+    await sleep(100);
+    const rows = screen.state().view.rows;
+    const mine = rows.filter((row) => row.kind === "user" && row.text === "hold Cosa vedi?");
+    expect(mine).toHaveLength(1);
+    const photo = rows.findIndex((row) => row.kind === "user" && row.text === "hold Cosa vedi?");
+    expect(rows.slice(photo + 1).some((row) => row.kind === "assistant")).toBe(true);
     await screen.leave();
     screen.dispose();
     phone.close();

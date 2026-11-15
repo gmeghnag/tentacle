@@ -27,7 +27,7 @@ import {
   restoreAfterFailure,
   returnKeyAction,
 } from "./composer.ts";
-import type { OutboxDriver } from "./outbox-driver.ts";
+import type { OutboxDriver, OutboxSession } from "./outbox-driver.ts";
 import type { OutboxStore } from "./outbox-store.ts";
 import type { OutboxItem } from "./outbox.ts";
 import {
@@ -103,16 +103,25 @@ export interface ComposeWiring {
    * turn it starts folds into THIS transcript (a drained stream would show no turn
    * and no answer — 13d's flow 07/18). The app owns the store; the driver is per
    * screen, because the fold is.
+   *
+   * `own` is the second parameter's reason: the driver's port must be the SCREEN's
+   * own attach handle (`ComposeHandle.port`), never a second `newSession` of the
+   * same id — that would replace the client's stream listener and starve this
+   * transcript of the very turns it draws (owner B9, `compose-handle.ts:10-13`).
    */
-  readonly driver: (prompt: {
-    readonly prompt: (
-      text: string,
-      turnId: string,
-      refs: readonly AttachmentRef[],
-    ) => Promise<void>;
-    /** 13b's hand-back: an item whose text belongs in the field (F7/F20). */
-    readonly onDraft: (item: OutboxItem, why: "archived" | "deleted" | "gone" | "busy") => void;
-  }) => OutboxDriver;
+  readonly driver: (
+    prompt: {
+      readonly prompt: (
+        text: string,
+        turnId: string,
+        refs: readonly AttachmentRef[],
+      ) => Promise<void>;
+      /** 13b's hand-back: an item whose text belongs in the field (F7/F20). */
+      readonly onDraft: (item: OutboxItem, why: "archived" | "deleted" | "gone" | "busy") => void;
+    },
+    /** The screen's live port now, or null until it attached. */
+    own: () => OutboxSession | null,
+  ) => OutboxDriver;
   readonly photos: PhotoPort;
   /**
    * The chat handle's compose side, once the attach answered — built over THIS
@@ -227,6 +236,12 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   let notice: string | null = null;
   let thumbnails: ThumbnailState = initialThumbnails;
   let handle: SendableHandle | null = null;
+  /**
+   * The compose half's handle over `handle` — set once it attached, null after a
+   * leave/dispose. Its `port` is the outbox driver's only way to the daemon (owner
+   * B9: never a second `newSession` of this id).
+   */
+  let composeHandle: ComposeHandle | null = null;
   let foreign: ForeignTurn | null = null;
   /** This phone's own turn's abort (Stop, for `own: true`). */
   let ownControl: AbortController | null = null;
@@ -300,16 +315,21 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           // screen's folding one: 13b's driver keeps the item and the key, but the
           // turn it starts must stream into this transcript (a drained stream shows
           // nothing — 13d's flow 07/18). The app passes a factory, not a driver.
-          driver: deps.compose.driver({
-            prompt: (text, turnId, refs) => promptWithRefs(text, turnId, refs),
-            // 13b's own hand-back (F7/F20): the item is gone and its text is the
-            // field's again — APPENDED, never overwriting what the person typed.
-            onDraft: (item) => {
-              draft = restoreAfterFailure(draft, item.text);
-              deps.compose?.draft(draft, []);
-              emit();
+          driver: deps.compose.driver(
+            {
+              prompt: (text, turnId, refs) => promptWithRefs(text, turnId, refs),
+              // 13b's own hand-back (F7/F20): the item is gone and its text is the
+              // field's again — APPENDED, never overwriting what the person typed.
+              onDraft: (item) => {
+                draft = restoreAfterFailure(draft, item.text);
+                deps.compose?.draft(draft, []);
+                emit();
+              },
             },
-          }),
+            // The SCREEN's own port, once it attached (owner B9: a second handle
+            // of this id would steal the stream this transcript draws from).
+            () => composeHandle?.port ?? null,
+          ),
           photos: deps.compose.photos,
           // The handle exists only once the attach answered: a compose act on a
           // half-built screen must never build a frame (AGENTS §7).
@@ -515,6 +535,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     // once, and a `queued` broadcast is applied by `compose-state.ts`.
     if (compose !== null) {
       const wired = deps.compose?.handle(result.session) ?? null;
+      composeHandle = wired;
       if (wired !== null) {
         void compose.start(wired);
         // The outbox may have items from a killed app: `up` + re-sync is when
@@ -746,6 +767,9 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       // has one link, hence one broker, shared by every screen on it).
       releaseRequester();
       compose?.stop();
+      // The outbox's only way to the daemon went with the handle (a later run
+      // stays `waiting` until the next attach, 13b's `decide`).
+      composeHandle = null;
       await deps.controller.leave(deps.sessionId);
       emit();
     },
@@ -754,6 +778,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       listeners.clear();
       unmount.abort();
       compose?.stop();
+      composeHandle = null;
       // Idempotent and identity-scoped: a dispose that lands AFTER the next
       // screen mounted its requester withdraws nothing.
       releaseRequester();
