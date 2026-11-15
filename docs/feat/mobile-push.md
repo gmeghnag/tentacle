@@ -3599,3 +3599,14 @@ ordered-reader test pins the rule that broke it.
 simulator (`_unlock` fails on a pre-existing flow too, unchanged since P10).
 
 **Per finding:** F1 HIGH **FIXED** · F2 MEDIUM **FIXED**.
+
+### Round 3 — PASS
+
+**Gate:** `deploy`/`main`/`e2e-flows` 78 pass / 0 fail; `bun run lint` clean (1406 files); `bun run typecheck` exit 0.
+
+- **R2-F1 (drop-in with no `ExecStart=` reset) — FIXED.** `relay.service.d/apns.conf` now has an empty `ExecStart=` before the restated command line. The new `execStarts` reader applies systemd's in-order clear/append rule to base + drop-in and requires exactly one live entry on a `Type=simple` unit. Mutation: deleting the reset line → RED 1 ("the drop-in RESETS ExecStart…"). Restored.
+- **R2-F2 (runbook said key gone + drop-in present was fine) — FIXED.** `docs/ops/relay-deploy.md:359-367` now gives that case a single outcome, 243/CREDENTIALS. Mutation: putting the "…is also fine" sentence back → RED 1. Restored; `git status` is clean.
+- **Regressions:** none found. `serviceKeys` is still last-wins, so the "base argv plus exactly four flags" test still reads the full line. Splitting out `unitLines` keeps the `\`-continuation guard green.
+- **Still open, outside code review:** the simulator banner has never been observed (the machine can't lock), and `systemd-analyze verify` on the host is the owner's check at D2.
+
+*— claude-opus-5-5, 2026-11-15 (fresh context, round 3)*
