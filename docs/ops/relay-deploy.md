@@ -328,3 +328,7 @@ ss -lntp | grep 4100                          # loopback only, as it must be
   session surviving a Caddy reload for its 5-minute grace (§4), and an idle stream
   surviving 30 min of NAT/proxy timeouts (the relay pings every 25 s against a
   60 s idle timeout).
+
+## Deploy log
+
+- **2026-11-15 02:05 — first deploy (orchestrator, owner request).** Host 142.132.169.22 (Rocky Linux 9.8, x86_64). Binary sha256 `0d40597dafcf9f39c1c53cefc843b91c525dc19b57e67948ecea4bdf1e453799` at `/opt/tentacle-relay/tentacle-relay`; `relay.service` enabled (active, `relay listening on ws://127.0.0.1:4100`, push off). **Caddy runs in a podman container** (`caddy:2.8.4`, host network, `/etc/caddy` bind-mounted): validate/reload with `podman exec caddy caddy validate|reload --config /etc/caddy/Caddyfile --adapter caddyfile`, not `systemctl reload caddy`. `import /etc/caddy/relay.tentacle.so.caddy` appended to `/etc/caddy/Caddyfile` (backup `/root/Caddyfile.bak-20261115-010149`); certificate obtained; `https://relay.tentacle.so/healthz` → 200 `{"ok":true,"v":1}`; tentacle.so and gestionale.farci.to still 200.
